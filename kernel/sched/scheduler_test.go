@@ -55,3 +55,17 @@ func TestSchedulerRejectsInvalidAndExcessTasks(t *testing.T) {
 		t.Fatal("accepted task beyond fixed capacity")
 	}
 }
+
+func TestLifecycleTransitions(t *testing.T) {
+	var scheduler Scheduler
+	id, _ := scheduler.Add(Context{StackPointer: 0x1000})
+	if !scheduler.Block(id) || scheduler.Block(id) {
+		t.Fatal("invalid block transition handling")
+	}
+	if !scheduler.Wake(id) || scheduler.Wake(id) {
+		t.Fatal("invalid wake transition handling")
+	}
+	if !scheduler.Exit(id) || scheduler.Wake(id) || scheduler.Block(id) {
+		t.Fatal("dead task changed state")
+	}
+}

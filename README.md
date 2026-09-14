@@ -114,13 +114,20 @@ Milestone 0 and the first complete slice of Milestone 1 are implemented:
 - a bounded architecture-neutral Task and round-robin run-queue model;
 - timer-preempted x86_64 context switching across independent kernel stacks;
 - two live worker tasks and an idle task;
+- unmapped guard pages below every created kernel-task stack;
+- task blocking and explicit wakeup in the live IRQ scheduler;
 - a basic capability primitive that prevents rights escalation;
+- separate Process and Task models;
+- process-local typed handle tables with generation checking;
+- controlled, non-escalating capability transfer between handle tables;
+- distinct hardware page-table roots for separate processes;
+- an isolation test mapping different physical pages at one user address;
 - unit, integration, boot, and performance tests.
 
-Ring 3 isolation, the scheduler, processes, IPC, userspace services, VFS,
-RAMFS, and the shell are not implemented yet. The current ISO boots a real
-TinyGo kernel, leaves UEFI boot services, installs its own page tables, and
-exercises the physical allocator, but it is not yet a usable operating
+Ring 3 execution, IPC, userspace services, VFS, RAMFS, and the shell are not
+implemented yet. The current ISO boots a real TinyGo kernel, leaves UEFI boot
+services, installs its own page tables, runs preempted kernel tasks, and
+verifies process address-space isolation, but it is not yet a usable operating
 environment.
 
 ## Building and running
@@ -151,7 +158,7 @@ Boot: UEFI
 Security: capabilities (foundation)
 BOOT_SERVICES_EXITED
 Memory: 375 MiB usable
-Physical pages free: 96081
+Physical pages free: 96063
 PMM_OK
 NX_WX_OK
 VM_OK
@@ -159,10 +166,18 @@ EXCEPTION_OK
 GDT_OK
 IDT_OK
 TIMER_OK
+STACK_GUARDS_OK
+TASK_BLOCK_OK
+TASK_WAKE_OK
 TASK_A_OK
 TASK_B_OK
 IDLE_TASK_OK
 SCHEDULER_OK
+HANDLE_TABLE_OK
+PROCESS_MODEL_OK
+ADDRESS_SPACE_A_OK
+ADDRESS_SPACE_B_OK
+PROCESS_ISOLATION_OK
 Kernel initialized
 BOOT_OK
 ```
@@ -173,11 +188,11 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage turns the bootstrap scheduler into a lifecycle-managed kernel
-subsystem, adds guarded stacks and blocking/wakeup primitives, then introduces
-the Process model and the first isolated ring 3 process. IPC, capability
-transfer, shared memory, system services, and the shell will be built on top of
-that foundation rather than simulated with predetermined output.
+The next stage adds a TSS with a controlled RSP0 kernel stack, ring 3 code/data
+segments, user stack mappings, a validated user entry frame, and the first
+native process executing outside ring 0. IPC, shared memory, system services,
+and the shell will be built on top of that foundation rather than simulated
+with predetermined output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for
@@ -189,6 +204,8 @@ Further documentation:
 - [physical memory](docs/architecture/memory.md);
 - [interrupts](docs/architecture/interrupts.md);
 - [scheduler](docs/architecture/scheduler.md);
+- [processes](docs/architecture/processes.md);
+- [capabilities and handles](docs/architecture/capabilities.md);
 - [building and debugging](docs/development/building.md);
 - [roadmap](docs/development/roadmap.md);
 - [architecture decisions](docs/adr/).

@@ -9,6 +9,7 @@ import (
 
 const (
 	kernelStackPages = uint64(4)
+	stackGuardPages  = uint64(1)
 	contextWords     = 20
 	initialRFlags    = uint64(0x202)
 )
@@ -19,16 +20,20 @@ var taskEntryTable [3]uintptr
 // SetupBootstrapScheduler creates contexts for two demonstration tasks and one
 // idle task. The currently executing boot task becomes slot zero on the first
 // timer interrupt.
-func SetupBootstrapScheduler(allocator *pmm.Allocator) bool {
+func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
 	var contexts [3]uint64
 	for index := range contexts {
 		if taskEntryTable[index] == 0 {
 			return false
 		}
-		stackStart, ok := allocator.AllocateContiguous(kernelStackPages)
+		allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
 		if !ok {
 			return false
 		}
+		if !unmapGuardPage(pageTable, allocation) {
+			return false
+		}
+		stackStart := allocation + stackGuardPages*pmm.PageSize
 		contexts[index] = initialContext(stackStart, taskEntryTable[index])
 	}
 	installScheduler(contexts[0], contexts[1], contexts[2])
@@ -57,3 +62,12 @@ func initialContext(stackStart uint64, entry uintptr) uint64 {
 
 //export goos_scheduler_install
 func installScheduler(taskA uint64, taskB uint64, idle uint64)
+
+//export goos_block_current_task
+func BlockCurrentTask()
+
+//export goos_wake_task
+func WakeTask(index uint64) bool
+
+//export goos_invalidate_page
+func invalidatePage(address uint64)

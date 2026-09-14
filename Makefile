@@ -19,7 +19,7 @@ SOURCE_DATE_EPOCH ?= 0
 
 .DEFAULT_GOAL := all
 
-.PHONY: all kernel userspace initramfs iso run run-debug test test-unit test-integration test-boot test-performance lint fmt docs clean distclean toolchain-check help
+.PHONY: all kernel userspace initramfs iso run run-debug test test-unit test-integration test-security test-boot test-performance lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -66,13 +66,16 @@ run: iso
 run-debug: iso
 	$(QEMU) $(QEMU_FLAGS) -s -S -cdrom $(ISO)
 
-test: test-unit test-integration
+test: test-unit test-integration test-security
 
 test-unit:
 	$(BUILD_ENV) go test ./...
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
+
+test-security:
+	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/mm/vm
 
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -92,6 +95,8 @@ fmt:
 docs:
 	@test -f README.md
 	@test -f docs/architecture/overview.md
+	@test -f docs/architecture/processes.md
+	@test -f docs/architecture/capabilities.md
 	@test -f docs/development/building.md
 
 clean:
@@ -110,6 +115,7 @@ help:
 	  '  run             boot with QEMU and serial on this terminal' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test            run host unit and artifact integration tests' \
+	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-performance run microbenchmarks into build/reports' \
 	  '  lint/fmt/docs   quality checks' \

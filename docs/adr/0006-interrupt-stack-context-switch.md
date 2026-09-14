@@ -14,7 +14,9 @@ Use the IRQ0 stack frame as the x86_64 task context. Save every general-purpose
 register, store the resulting RSP in a bounded context table, select the next
 slot round-robin, load its RSP, restore registers, and return with `IRETQ`.
 Construct new-task stacks as synthetic long-mode interrupt frames containing
-RIP, CS, RFLAGS, RSP, and SS.
+RIP, CS, RFLAGS, RSP, and SS. Reserve an unmapped guard page below each task
+stack. Maintain an IRQ-visible runnable mask with atomic block and wake
+operations under disabled interrupts.
 
 ## Alternatives
 
@@ -26,8 +28,9 @@ an unsupported runtime implementation.
 
 ## Consequences
 
-Kernel tasks are genuinely preempted by hardware timer interrupts and execute
-on independent stacks. Selection remains a small assembly bootstrap path rather
-than the architecture-neutral Scheduler object. The next scheduler revision
-must define a stable assembly/Go dispatch ABI, guarded stacks, task lifecycle,
-and blocking semantics before this mechanism can support general kernel work.
+Kernel tasks are genuinely preempted by hardware timer interrupts, execute on
+independent guarded stacks, and can block and resume without losing context.
+Selection remains a small assembly bootstrap path rather than the
+architecture-neutral Scheduler object. The next scheduler revision must define
+a stable assembly/Go dispatch ABI, general wait queues, teardown, and stack
+reclamation before this mechanism can support arbitrary kernel work.

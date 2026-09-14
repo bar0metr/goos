@@ -14,6 +14,9 @@ test-boot` boots headlessly, waits at most 20 seconds for `BOOT_OK`, and writes
 the serial transcript to `build/logs/boot.log`.
 `make test-performance` writes the page-allocation benchmark to
 `build/reports/page-allocation.txt`.
+`make test-security` runs the capability, generation-safe handle, and virtual
+memory permission tests explicitly; these tests are also included by `make
+test`.
 
 Set `OVMF_CODE=/path/to/firmware.fd` if QEMU firmware is not installed under
 `/opt/local/share/qemu`. Set `SOURCE_DATE_EPOCH` to a fixed project release

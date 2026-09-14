@@ -64,6 +64,21 @@ goos_read_rsp:
     movq %rsp, %rax
     retq
 
+.global goos_probe_address_spaces
+goos_probe_address_spaces:
+    pushfq
+    cli
+    movq %rcx, %cr3
+    movzbq (%r9), %r10
+    movq %rdx, %cr3
+    movzbq (%r9), %r11
+    movq %r8, %cr3
+    movq %r11, %rax
+    shlq $8, %rax
+    orq %r10, %rax
+    popfq
+    retq
+
 .global goos_load_gdt
 goos_load_gdt:
     subq $16, %rsp
@@ -237,11 +252,16 @@ goos_irq_timer:
     movq goos_current_task(%rip), %rax
     leaq goos_task_contexts(%rip), %rdx
     movq %rsp, (%rdx,%rax,8)
+.timer_find_next:
     incq %rax
     cmpq goos_task_count(%rip), %rax
     jb .timer_select
     xorq %rax, %rax
 .timer_select:
+    btq %rax, goos_runnable_mask(%rip)
+    jc .timer_selected
+    jmp .timer_find_next
+.timer_selected:
     movq %rax, goos_current_task(%rip)
     movq (%rdx,%rax,8), %rsp
 .timer_eoi:
@@ -308,8 +328,39 @@ goos_scheduler_install:
     movq %r8, 24(%rax)
     movq $4, goos_task_count(%rip)
     movq $0, goos_current_task(%rip)
+    movq $0x0f, goos_runnable_mask(%rip)
     movb $1, goos_scheduler_enabled(%rip)
     sti
+    retq
+
+.global goos_block_current_task
+goos_block_current_task:
+    pushfq
+    cli
+    movq goos_current_task(%rip), %rcx
+    movq $1, %rax
+    shlq %cl, %rax
+    notq %rax
+    andq %rax, goos_runnable_mask(%rip)
+    popfq
+    retq
+
+.global goos_wake_task
+goos_wake_task:
+    xorq %rax, %rax
+    cmpq goos_task_count(%rip), %rcx
+    jae .wake_done
+    pushfq
+    cli
+    btsq %rcx, goos_runnable_mask(%rip)
+    popfq
+    movq $1, %rax
+.wake_done:
+    retq
+
+.global goos_invalidate_page
+goos_invalidate_page:
+    invlpg (%rcx)
     retq
 
 .section .data
@@ -322,6 +373,8 @@ goos_task_count:
     .quad 1
 goos_task_contexts:
     .quad 0, 0, 0, 0
+goos_runnable_mask:
+    .quad 1
 goos_scheduler_enabled:
     .byte 0
 

@@ -9,6 +9,8 @@ import (
 
 const entriesPerTable = 512
 
+const UserProbeAddress = uint64(0x40000000)
+
 type table [entriesPerTable]uint64
 
 // LoadedImage reads the fixed-address, non-relocatable PE image installed by
@@ -82,6 +84,108 @@ func BuildIdentity(allocator *pmm.Allocator, image Image) (uint64, bool) {
 		}
 	}
 	return rootAddress, true
+}
+
+// UnmapPage removes one aligned leaf from a kernel-owned bootstrap table.
+func UnmapPage(rootAddress uint64, address uint64) bool {
+	if rootAddress%PageSize != 0 || address%PageSize != 0 || address >= IdentityMapLimit {
+		return false
+	}
+	// SAFETY: rootAddress is the exclusively owned PML4 returned by
+	// BuildIdentity and remains identity-mapped for the bootstrap lifetime.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, address)
+	if entry == nil || *entry&entryPresent == 0 {
+		return false
+	}
+	*entry = 0
+	return true
+}
+
+// IsMapped reports whether a bootstrap leaf is present.
+func IsMapped(rootAddress uint64, address uint64) bool {
+	if rootAddress%PageSize != 0 || address >= IdentityMapLimit {
+		return false
+	}
+	// SAFETY: rootAddress follows the same BuildIdentity ownership invariant as
+	// UnmapPage. This function reads but never mutates the page-table hierarchy.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, address)
+	return entry != nil && *entry&entryPresent != 0
+}
+
+// CreateUserAddressSpace creates a new PML4 that shares supervisor-only kernel
+// mappings and owns a distinct user mapping at UserProbeAddress.
+func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64, userPhysical uint64) (uint64, bool) {
+	if kernelRootAddress%PageSize != 0 || userPhysical%PageSize != 0 || userPhysical >= IdentityMapLimit {
+		return 0, false
+	}
+	rootAddress, root, ok := allocateTable(allocator)
+	if !ok {
+		return 0, false
+	}
+	pdptAddress, pdpt, ok := allocateTable(allocator)
+	if !ok {
+		return 0, false
+	}
+	// SAFETY: kernelRootAddress is the live PML4 returned by BuildIdentity. Its
+	// first entry names the identity-mapped kernel PDPT.
+	kernelRoot := (*table)(unsafe.Pointer(uintptr(kernelRootAddress)))
+	kernelPDPTEntry := kernelRoot[0]
+	if kernelPDPTEntry&entryPresent == 0 {
+		return 0, false
+	}
+	// SAFETY: the present non-leaf entry was created by BuildIdentity and points
+	// to an identity-mapped page-table page.
+	kernelPDPT := (*table)(unsafe.Pointer(uintptr(kernelPDPTEntry & addressMask)))
+	for index := range pdpt {
+		pdpt[index] = kernelPDPT[index]
+	}
+	root[0] = pdptAddress | entryPresent | entryWritable | entryUser
+
+	pdAddress, pd, ok := allocateTable(allocator)
+	if !ok {
+		return 0, false
+	}
+	ptAddress, pt, ok := allocateTable(allocator)
+	if !ok {
+		return 0, false
+	}
+	pdpt[(UserProbeAddress>>30)&0x1ff] = pdAddress | entryPresent | entryWritable | entryUser
+	pd[(UserProbeAddress>>21)&0x1ff] = ptAddress | entryPresent | entryWritable | entryUser
+	entry, ok := pageEntry(userPhysical, Permissions{Writable: true, User: true})
+	if !ok {
+		return 0, false
+	}
+	pt[(UserProbeAddress>>12)&0x1ff] = entry
+	return rootAddress, true
+}
+
+// InitializePhysicalByte initializes an exclusively owned physical page before
+// it is exposed through a process mapping.
+func InitializePhysicalByte(address uint64, value byte) bool {
+	if address%PageSize != 0 || address >= IdentityMapLimit {
+		return false
+	}
+	// SAFETY: the caller passes a page freshly allocated from PMM while the
+	// bootstrap identity map is active. Writing one byte stays within that page.
+	*(*byte)(unsafe.Pointer(uintptr(address))) = value
+	return true
+}
+
+// Resolve returns the physical leaf backing a virtual address.
+func Resolve(rootAddress uint64, virtual uint64) (uint64, bool) {
+	if rootAddress%PageSize != 0 {
+		return 0, false
+	}
+	// SAFETY: rootAddress must name a PML4 created by this package; traversal
+	// validates every present entry before dereferencing the next table.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, virtual)
+	if entry == nil || *entry&entryPresent == 0 {
+		return 0, false
+	}
+	return *entry&addressMask | virtual&(PageSize-1), true
 }
 
 func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {

@@ -81,4 +81,32 @@ func (scheduler *Scheduler) SetState(id TaskID, state State) bool {
 	return false
 }
 
+func (scheduler *Scheduler) Block(id TaskID) bool {
+	return scheduler.transition(id, TaskBlocked, TaskRunnable, TaskRunning)
+}
+
+func (scheduler *Scheduler) Wake(id TaskID) bool {
+	return scheduler.transition(id, TaskRunnable, TaskBlocked)
+}
+
+func (scheduler *Scheduler) Exit(id TaskID) bool {
+	return scheduler.transition(id, TaskDead, TaskCreated, TaskRunnable, TaskRunning, TaskBlocked)
+}
+
+func (scheduler *Scheduler) transition(id TaskID, target State, allowed ...State) bool {
+	for index := 0; index < scheduler.count; index++ {
+		if scheduler.tasks[index].ID != id {
+			continue
+		}
+		for _, state := range allowed {
+			if scheduler.tasks[index].State == state {
+				scheduler.tasks[index].State = target
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
 func (scheduler *Scheduler) Count() int { return scheduler.count }

@@ -3,11 +3,15 @@
 package main
 
 import (
+	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
+	"goos/kernel/handle"
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
+	"goos/kernel/process"
+	"goos/kernel/sched"
 )
 
 var (
@@ -15,10 +19,20 @@ var (
 	pageAllocator pmm.Allocator
 	demoTaskA     uint64
 	demoTaskB     uint64
+	demoABlocked  uint64
+	demoAResumed  uint64
 )
 
 //export goos_demo_task_a
 func runDemoTaskA() {
+	for demoTaskA < 3 {
+		demoTaskA++
+		amd64.Halt()
+	}
+	demoABlocked = 1
+	amd64.BlockCurrentTask()
+	amd64.Halt()
+	demoAResumed = 1
 	for {
 		demoTaskA++
 		amd64.Halt()
@@ -29,6 +43,9 @@ func runDemoTaskA() {
 func runDemoTaskB() {
 	for {
 		demoTaskB++
+		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
+			amd64.WakeTask(1)
+		}
 		amd64.Halt()
 	}
 }
@@ -118,19 +135,79 @@ func main() {
 	}
 	console.WriteString("TIMER_OK\n")
 
-	if !amd64.SetupBootstrapScheduler(&pageAllocator) {
+	if !amd64.SetupBootstrapScheduler(&pageAllocator, pageTable) {
 		console.WriteString("PANIC: scheduler bootstrap failed\n")
 		for {
 			amd64.Halt()
 		}
 	}
-	for demoTaskA < 3 || demoTaskB < 3 {
+	for demoTaskA < 4 || demoTaskB < 6 || demoABlocked == 0 || demoAResumed == 0 {
 		amd64.Halt()
 	}
+	console.WriteString("STACK_GUARDS_OK\n")
+	console.WriteString("TASK_BLOCK_OK\n")
+	console.WriteString("TASK_WAKE_OK\n")
 	console.WriteString("TASK_A_OK\n")
 	console.WriteString("TASK_B_OK\n")
 	console.WriteString("IDLE_TASK_OK\n")
 	console.WriteString("SCHEDULER_OK\n")
+
+	physicalA, allocatedA := pageAllocator.Allocate()
+	physicalB, allocatedB := pageAllocator.Allocate()
+	if !allocatedA || !allocatedB ||
+		!vm.InitializePhysicalByte(physicalA, 0xa1) ||
+		!vm.InitializePhysicalByte(physicalB, 0xb2) {
+		console.WriteString("PANIC: process page allocation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	rootA, addressSpaceA := vm.CreateUserAddressSpace(&pageAllocator, pageTable, physicalA)
+	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable, physicalB)
+	resolvedA, resolvesA := vm.Resolve(rootA, vm.UserProbeAddress)
+	resolvedB, resolvesB := vm.Resolve(rootB, vm.UserProbeAddress)
+	if !addressSpaceA || !addressSpaceB || !resolvesA || !resolvesB || resolvedA != physicalA || resolvedB != physicalB {
+		console.WriteString("PANIC: process address-space construction failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	processA, validA := process.New(1, process.AddressSpace{Root: rootA})
+	processB, validB := process.New(2, process.AddressSpace{Root: rootB})
+	if !validA || !validB || !processA.AddTask(sched.TaskID(1)) || !processB.AddTask(sched.TaskID(2)) {
+		console.WriteString("PANIC: process model initialization failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	memoryHandle, inserted := processA.Handles().Insert(
+		handle.TypeMemory,
+		capability.New(physicalA, capability.Read|capability.Transfer),
+	)
+	transferred, didTransfer := processA.Handles().Transfer(
+		processB.Handles(), memoryHandle, handle.TypeMemory, capability.Read,
+	)
+	_, targetCanRead := processB.Handles().Lookup(transferred, handle.TypeMemory, capability.Read)
+	_, targetCanWrite := processB.Handles().Lookup(transferred, handle.TypeMemory, capability.Write)
+	if !inserted || !didTransfer || !targetCanRead || targetCanWrite {
+		console.WriteString("PANIC: process-local handle enforcement failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("HANDLE_TABLE_OK\n")
+	console.WriteString("PROCESS_MODEL_OK\n")
+
+	probe := amd64.ProbeAddressSpaces(rootA, rootB, pageTable, vm.UserProbeAddress)
+	if byte(probe) != 0xa1 || byte(probe>>8) != 0xb2 {
+		console.WriteString("PANIC: address-space isolation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("ADDRESS_SPACE_A_OK\n")
+	console.WriteString("ADDRESS_SPACE_B_OK\n")
+	console.WriteString("PROCESS_ISOLATION_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")
 

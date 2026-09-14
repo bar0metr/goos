@@ -18,12 +18,19 @@ the next slot, changes RSP, restores registers, acknowledges the PIC, and uses
 `IRETQ` to resume the selected task.
 
 New tasks receive four contiguous physical pages and a synthetic interrupt
-frame. The frame preserves Win64 entry alignment and home space required by the
-TinyGo-generated functions. The boot task is captured on the first preemption.
-Two worker tasks and one idle task run independently; boot resumes only after
-both workers have executed at least three times.
+frame. A fifth page immediately below each stack is removed from the active page
+table and invalidated with `INVLPG`. The frame preserves Win64 entry alignment
+and home space required by the TinyGo-generated functions. The boot task is
+captured on the first preemption. Two worker tasks and one idle task run
+independently.
+
+The IRQ selector maintains a runnable bit mask. A task can atomically remove
+itself from that mask and later be made runnable by another task. The live boot
+scenario blocks worker A, confirms that worker B continues running, lets B wake
+A explicitly, and requires A to resume from its saved context before reporting
+success.
 
 The current implementation is single-CPU and the IRQ stub owns run-queue
-synchronization by disabling nested maskable interrupts. Guard pages, arbitrary
-task creation, teardown, blocking, wakeup, priorities, per-CPU queues, and SMP
+synchronization by disabling nested maskable interrupts. Arbitrary dynamic task
+creation, stack reclamation, priorities, wait queues, per-CPU queues, and SMP
 are not implemented yet.

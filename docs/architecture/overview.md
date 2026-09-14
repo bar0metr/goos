@@ -11,6 +11,9 @@ and operations require capabilities carrying a rights mask. Derived
 capabilities may remove rights but never add them. IPC protocols will carry an
 explicit protocol identifier and version; Go structure layout is not an ABI.
 
-The current boot vertical slice is intentionally small. It enters through the
-TinyGo UEFI target, initializes COM1, writes machine-readable boot markers, and
-halts. It does not claim process isolation, scheduling, or userspace services.
+The current kernel leaves UEFI boot services, owns its physical allocator and
+page tables, installs descriptor and interrupt tables, receives timer IRQs, and
+preempts independent kernel tasks. It also constructs distinct process address
+spaces and verifies through hardware CR3 switches that the same user virtual
+address resolves to different physical pages. Ring 3 execution and userspace
+services are not implemented yet.

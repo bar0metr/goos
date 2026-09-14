@@ -108,3 +108,9 @@ func LoadPageTable(address uint64)
 //
 //export goos_read_rsp
 func StackPointer() uint64
+
+// ProbeAddressSpaces reads one virtual byte through each supplied CR3 and
+// returns A in bits 0..7 and B in bits 8..15.
+//
+//export goos_probe_address_spaces
+func ProbeAddressSpaces(rootA uint64, rootB uint64, kernelRoot uint64, address uint64) uint64
