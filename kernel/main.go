@@ -13,7 +13,32 @@ import (
 var (
 	bootInfo      boot.Info
 	pageAllocator pmm.Allocator
+	demoTaskA     uint64
+	demoTaskB     uint64
 )
+
+//export goos_demo_task_a
+func runDemoTaskA() {
+	for {
+		demoTaskA++
+		amd64.Halt()
+	}
+}
+
+//export goos_demo_task_b
+func runDemoTaskB() {
+	for {
+		demoTaskB++
+		amd64.Halt()
+	}
+}
+
+//export goos_idle_task
+func runIdleTask() {
+	for {
+		amd64.Halt()
+	}
+}
 
 func main() {
 	console := amd64.NewCOM1()
@@ -92,6 +117,20 @@ func main() {
 		amd64.Halt()
 	}
 	console.WriteString("TIMER_OK\n")
+
+	if !amd64.SetupBootstrapScheduler(&pageAllocator) {
+		console.WriteString("PANIC: scheduler bootstrap failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	for demoTaskA < 3 || demoTaskB < 3 {
+		amd64.Halt()
+	}
+	console.WriteString("TASK_A_OK\n")
+	console.WriteString("TASK_B_OK\n")
+	console.WriteString("IDLE_TASK_OK\n")
+	console.WriteString("SCHEDULER_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")
 

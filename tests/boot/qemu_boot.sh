@@ -22,6 +22,10 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'GDT_OK' "$log" 2>/dev/null && \
 		grep -q 'IDT_OK' "$log" 2>/dev/null && \
 		grep -q 'TIMER_OK' "$log" 2>/dev/null && \
+		grep -q 'TASK_A_OK' "$log" 2>/dev/null && \
+		grep -q 'TASK_B_OK' "$log" 2>/dev/null && \
+		grep -q 'IDLE_TASK_OK' "$log" 2>/dev/null && \
+		grep -q 'SCHEDULER_OK' "$log" 2>/dev/null && \
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true

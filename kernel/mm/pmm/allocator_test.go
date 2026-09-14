@@ -65,6 +65,27 @@ func TestUsableRegionIsClippedToManagedLimit(t *testing.T) {
 	}
 }
 
+func TestAllocateContiguous(t *testing.T) {
+	var allocator Allocator
+	allocator.Init([]boot.MemoryRegion{{
+		Start: lowMemoryPages * PageSize,
+		Pages: 8,
+		Kind:  boot.MemoryUsable,
+	}})
+	start, ok := allocator.AllocateContiguous(4)
+	if !ok || start != lowMemoryPages*PageSize {
+		t.Fatalf("contiguous allocation = %#x, %v", start, ok)
+	}
+	for page := uint64(0); page < 4; page++ {
+		if !allocator.Free(start + page*PageSize) {
+			t.Fatalf("allocated page %d was not owned", page)
+		}
+	}
+	if _, ok := allocator.AllocateContiguous(0); ok {
+		t.Fatal("accepted empty contiguous allocation")
+	}
+}
+
 func BenchmarkAllocateFree(b *testing.B) {
 	var allocator Allocator
 	allocator.Init([]boot.MemoryRegion{{

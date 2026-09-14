@@ -74,6 +74,31 @@ func (allocator *Allocator) Allocate() (uint64, bool) {
 	return 0, false
 }
 
+func (allocator *Allocator) AllocateContiguous(count uint64) (uint64, bool) {
+	if count == 0 || count > allocator.freePages || count > allocator.managedPage {
+		return 0, false
+	}
+	for start := lowMemoryPages; start+count <= allocator.managedPage; start++ {
+		available := true
+		for page := start; page < start+count; page++ {
+			if allocator.isUsed(page) {
+				available = false
+				start = page
+				break
+			}
+		}
+		if !available {
+			continue
+		}
+		for page := start; page < start+count; page++ {
+			allocator.markUsed(page)
+		}
+		allocator.next = start + count
+		return start * PageSize, true
+	}
+	return 0, false
+}
+
 func (allocator *Allocator) Free(address uint64) bool {
 	if address%PageSize != 0 {
 		return false

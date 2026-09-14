@@ -111,6 +111,9 @@ Milestone 0 and the first complete slice of Milestone 1 are implemented:
 - a live INT3 exception-path self-test;
 - a 100 Hz PIT bootstrap timer through a remapped legacy PIC;
 - hardware IRQ delivery with end-of-interrupt acknowledgement;
+- a bounded architecture-neutral Task and round-robin run-queue model;
+- timer-preempted x86_64 context switching across independent kernel stacks;
+- two live worker tasks and an idle task;
 - a basic capability primitive that prevents rights escalation;
 - unit, integration, boot, and performance tests.
 
@@ -156,6 +159,10 @@ EXCEPTION_OK
 GDT_OK
 IDT_OK
 TIMER_OK
+TASK_A_OK
+TASK_B_OK
+IDLE_TASK_OK
+SCHEDULER_OK
 Kernel initialized
 BOOT_OK
 ```
@@ -166,11 +173,11 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage introduces the Task model, saved CPU contexts, an idle task, and
-a timer-preempted round-robin scheduler. Separate Process and Task models and
-the first isolated userspace process follow that work. IPC, capability transfer,
-shared memory, system services, and the shell will be built on top of that
-foundation rather than simulated with predetermined output.
+The next stage turns the bootstrap scheduler into a lifecycle-managed kernel
+subsystem, adds guarded stacks and blocking/wakeup primitives, then introduces
+the Process model and the first isolated ring 3 process. IPC, capability
+transfer, shared memory, system services, and the shell will be built on top of
+that foundation rather than simulated with predetermined output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for
@@ -180,6 +187,8 @@ Further documentation:
 
 - [architecture overview](docs/architecture/overview.md);
 - [physical memory](docs/architecture/memory.md);
+- [interrupts](docs/architecture/interrupts.md);
+- [scheduler](docs/architecture/scheduler.md);
 - [building and debugging](docs/development/building.md);
 - [roadmap](docs/development/roadmap.md);
 - [architecture decisions](docs/adr/).

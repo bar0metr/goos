@@ -217,9 +217,50 @@ goos_interrupt_table:
 .global goos_irq_timer
 goos_irq_timer:
     pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
     incq goos_timer_ticks(%rip)
+    cmpb $0, goos_scheduler_enabled(%rip)
+    je .timer_eoi
+    movq goos_current_task(%rip), %rax
+    leaq goos_task_contexts(%rip), %rdx
+    movq %rsp, (%rdx,%rax,8)
+    incq %rax
+    cmpq goos_task_count(%rip), %rax
+    jb .timer_select
+    xorq %rax, %rax
+.timer_select:
+    movq %rax, goos_current_task(%rip)
+    movq (%rdx,%rax,8), %rsp
+.timer_eoi:
     movb $0x20, %al
     outb %al, $0x20
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rdx
+    popq %rcx
+    popq %rbx
     popq %rax
     iretq
 
@@ -258,7 +299,34 @@ goos_timer_ticks_read:
     movq goos_timer_ticks(%rip), %rax
     retq
 
+.global goos_scheduler_install
+goos_scheduler_install:
+    cli
+    leaq goos_task_contexts(%rip), %rax
+    movq %rcx, 8(%rax)
+    movq %rdx, 16(%rax)
+    movq %r8, 24(%rax)
+    movq $4, goos_task_count(%rip)
+    movq $0, goos_current_task(%rip)
+    movb $1, goos_scheduler_enabled(%rip)
+    sti
+    retq
+
 .section .data
 .align 8
 goos_timer_ticks:
     .quad 0
+goos_current_task:
+    .quad 0
+goos_task_count:
+    .quad 1
+goos_task_contexts:
+    .quad 0, 0, 0, 0
+goos_scheduler_enabled:
+    .byte 0
+
+.section .rdata
+.align 8
+.global goos_task_entry_table
+goos_task_entry_table:
+    .quad goos_demo_task_a, goos_demo_task_b, goos_idle_task

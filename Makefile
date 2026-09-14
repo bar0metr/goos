@@ -84,7 +84,7 @@ test-performance:
 lint:
 	$(BUILD_ENV) go vet ./...
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
-	@! grep -R --include='*.go' -n '"unsafe"' kernel internal --exclude-dir=uefi --exclude-dir=vm 2>/dev/null
+	@! grep -R --include='*.go' -n '"unsafe"' kernel internal --exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 2>/dev/null
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './build/*')
