@@ -16,6 +16,8 @@ elapsed=0
 while [ "$elapsed" -lt 20 ]; do
 	if grep -q 'BOOT_SERVICES_EXITED' "$log" 2>/dev/null && \
 		grep -q 'PMM_OK' "$log" 2>/dev/null && \
+		grep -q 'NX_WX_OK' "$log" 2>/dev/null && \
+		grep -q 'VM_OK' "$log" 2>/dev/null && \
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true

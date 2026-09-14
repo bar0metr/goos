@@ -7,6 +7,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/mm/pmm"
+	"goos/kernel/mm/vm"
 )
 
 var (
@@ -49,6 +50,32 @@ func main() {
 	console.WriteString("Physical pages free: ")
 	console.WriteUint(stats.FreePages)
 	console.WriteString("\nPMM_OK\n")
+
+	if !amd64.HasNX() {
+		console.WriteString("PANIC: CPU does not support NX\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	image, validImage := vm.LoadedImage()
+	stack := amd64.StackPointer()
+	if !validImage || stack < 1024*1024 || stack >= vm.IdentityMapLimit {
+		console.WriteString("PANIC: unsafe virtual-memory bootstrap state\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	pageTable, built := vm.BuildIdentity(&pageAllocator, image)
+	if !built {
+		console.WriteString("PANIC: page-table construction failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	amd64.EnableNXAndWriteProtect()
+	amd64.LoadPageTable(pageTable)
+	console.WriteString("NX_WX_OK\n")
+	console.WriteString("VM_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")
 

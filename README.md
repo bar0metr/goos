@@ -103,13 +103,17 @@ Milestone 0 and the first complete slice of Milestone 1 are implemented:
 - normalization of physical memory types;
 - a bitmap page allocator for the first GiB;
 - reservation of low memory and firmware-owned regions;
+- kernel-owned four-level x86_64 page tables;
+- enforced NX, supervisor write protection, and W^X mappings;
+- an unmapped low-memory guard region;
 - a basic capability primitive that prevents rights escalation;
 - unit, integration, boot, and performance tests.
 
-Virtual memory, ring 3 isolation, the scheduler, processes, IPC, userspace
-services, VFS, RAMFS, and the shell are not implemented yet. The current ISO
-boots a real TinyGo kernel and exercises the physical allocator, but it is not
-yet a usable operating environment.
+Ring 3 isolation, the scheduler, processes, IPC, userspace services, VFS,
+RAMFS, and the shell are not implemented yet. The current ISO boots a real
+TinyGo kernel, leaves UEFI boot services, installs its own page tables, and
+exercises the physical allocator, but it is not yet a usable operating
+environment.
 
 ## Building and running
 
@@ -141,6 +145,8 @@ BOOT_SERVICES_EXITED
 Memory: 375 MiB usable
 Physical pages free: 96081
 PMM_OK
+NX_WX_OK
+VM_OK
 Kernel initialized
 BOOT_OK
 ```
@@ -151,12 +157,12 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage covers kernel-owned page tables, NX, W^X, guard pages, the
-GDT/IDT, CPU exception handling, and a hardware timer. That foundation will be
-followed by a preemptive round-robin scheduler, separate Process and Task
-models, and the first isolated userspace process. IPC, capability transfer,
-shared memory, system services, and the shell will be built on top of that
-foundation rather than simulated with predetermined output.
+The next stage covers the GDT/IDT, CPU exception handling, and a hardware timer.
+That foundation will be followed by a preemptive round-robin scheduler,
+separate Process and Task models, and the first isolated userspace process. IPC,
+capability transfer, shared memory, system services, and the shell will be
+built on top of that foundation rather than simulated with predetermined
+output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for

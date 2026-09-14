@@ -87,3 +87,24 @@ func cpuPause()
 //
 //export goos_halt
 func Halt()
+
+// HasNX reports whether the CPU implements the execute-disable page-table bit.
+//
+//export goos_has_nx
+func HasNX() bool
+
+// EnableNXAndWriteProtect enables EFER.NXE and CR0.WP. After this call the CPU
+// enforces both non-executable mappings and supervisor read-only mappings.
+//
+//export goos_enable_nx_wp
+func EnableNXAndWriteProtect()
+
+// LoadPageTable installs the physical PML4 address in CR3.
+//
+//export goos_load_cr3
+func LoadPageTable(address uint64)
+
+// StackPointer returns the current stack pointer for bootstrap validation.
+//
+//export goos_read_rsp
+func StackPointer() uint64
