@@ -1,0 +1,4 @@
+{
+  "inherits": ["uefi-amd64"],
+  "ldflags": ["build/kernel/io.o"]
+}
