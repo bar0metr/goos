@@ -34,6 +34,10 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'ADDRESS_SPACE_A_OK' "$log" 2>/dev/null && \
 		grep -q 'ADDRESS_SPACE_B_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_ISOLATION_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_RX_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_STACK_NX_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_RING3_OK' "$log" 2>/dev/null && \
+		grep -q 'NATIVE_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true

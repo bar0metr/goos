@@ -119,7 +119,7 @@ func main() {
 	console.WriteString("NX_WX_OK\n")
 	console.WriteString("VM_OK\n")
 
-	if !amd64.InstallDescriptorTables() {
+	if !amd64.InstallDescriptorTables(&pageAllocator, pageTable) {
 		console.WriteString("PANIC: descriptor-table installation failed\n")
 		for {
 			amd64.Halt()
@@ -208,6 +208,28 @@ func main() {
 	console.WriteString("ADDRESS_SPACE_A_OK\n")
 	console.WriteString("ADDRESS_SPACE_B_OK\n")
 	console.WriteString("PROCESS_ISOLATION_OK\n")
+
+	userCodePhysical, codeAllocated := pageAllocator.Allocate()
+	userStackPhysical, stackAllocated := pageAllocator.Allocate()
+	userProgram := [...]byte{
+		0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1: native Exit operation.
+		0xcd, 0x80, // int 0x80: enter the GoOS kernel-call gate.
+		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
+	}
+	if !codeAllocated || !stackAllocated ||
+		!vm.InitializePhysical(userCodePhysical, userProgram[:]) ||
+		!vm.InitializePhysical(userStackPhysical, nil) ||
+		!vm.MapUserPage(rootA, vm.UserCodeAddress, userCodePhysical, vm.Permissions{User: true, Executable: true}) ||
+		!vm.MapUserPage(rootA, vm.UserStackAddress, userStackPhysical, vm.Permissions{User: true, Writable: true}) {
+		console.WriteString("PANIC: native user image setup failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("USER_RX_OK\n")
+	console.WriteString("USER_STACK_NX_OK\n")
+	amd64.EnterUser(rootA, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16, pageTable)
+	console.WriteString("NATIVE_PROCESS_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")
 

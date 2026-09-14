@@ -31,6 +31,11 @@ permissions. Executable sections are read-only; writable sections are NX. A PE
 section requesting write and execute simultaneously is rejected. EFER.NXE and
 CR0.WP are enabled before the kernel installs its PML4 through CR3.
 
-The one-GiB identity map is a bootstrap constraint, not the final process
-layout. Per-process address spaces, a higher-half kernel, guard pages, and ASLR
+Process roots clone the supervisor-only kernel PDPT path and allocate private
+user page-table levels. User leaves require the user bit at every parent, reject
+W+X, and are zeroed before exposure. The bootstrap native program uses a
+separate RX code page and RW+NX stack page.
+
+The one-GiB kernel identity map is a bootstrap constraint, not the final process
+layout. A higher-half kernel, complete guard regions, demand paging, and ASLR
 remain later work.

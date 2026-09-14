@@ -11,6 +11,11 @@ const entriesPerTable = 512
 
 const UserProbeAddress = uint64(0x40000000)
 
+const (
+	UserCodeAddress  = uint64(0x40002000)
+	UserStackAddress = uint64(0x40003000)
+)
+
 type table [entriesPerTable]uint64
 
 // LoadedImage reads the fixed-address, non-relocatable PE image installed by
@@ -161,6 +166,28 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64, 
 	return rootAddress, true
 }
 
+// MapUserPage adds a supervisor-authorized user leaf to an existing process
+// address space. Writable executable mappings are rejected by pageEntry.
+func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
+	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || physical%PageSize != 0 ||
+		virtual < IdentityMapLimit || virtual >= 2*IdentityMapLimit || !permissions.User {
+		return false
+	}
+	// SAFETY: rootAddress names a process PML4 created by
+	// CreateUserAddressSpace; all lower tables are identity-mapped metadata.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, virtual)
+	if entry == nil || *entry&entryPresent != 0 {
+		return false
+	}
+	value, ok := pageEntry(physical, permissions)
+	if !ok {
+		return false
+	}
+	*entry = value
+	return true
+}
+
 // InitializePhysicalByte initializes an exclusively owned physical page before
 // it is exposed through a process mapping.
 func InitializePhysicalByte(address uint64, value byte) bool {
@@ -168,8 +195,29 @@ func InitializePhysicalByte(address uint64, value byte) bool {
 		return false
 	}
 	// SAFETY: the caller passes a page freshly allocated from PMM while the
-	// bootstrap identity map is active. Writing one byte stays within that page.
-	*(*byte)(unsafe.Pointer(uintptr(address))) = value
+	// bootstrap identity map is active. The complete page is exclusively owned.
+	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
+	for index := range target {
+		target[index] = 0
+	}
+	target[0] = value
+	return true
+}
+
+// InitializePhysical copies a bounded payload into a freshly allocated page.
+func InitializePhysical(address uint64, data []byte) bool {
+	if address%PageSize != 0 || address >= IdentityMapLimit || len(data) > int(PageSize) {
+		return false
+	}
+	// SAFETY: the page is exclusively owned by the caller and identity-mapped;
+	// the length check confines every write to that page.
+	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
+	for index := range target {
+		target[index] = 0
+	}
+	for index := range data {
+		target[index] = data[index]
+	}
 	return true
 }
 

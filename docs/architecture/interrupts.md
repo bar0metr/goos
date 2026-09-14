@@ -27,3 +27,14 @@ emitting `TIMER_OK`.
 The PIC/PIT path is a deliberately small bootstrap mechanism for the current
 single-CPU QEMU target. Local APIC, IOAPIC, per-CPU timers, and calibrated time
 conversion are required before SMP and are not hidden behind the current API.
+
+## Ring transition state
+
+The GDT also contains ring 3 code and data descriptors plus a 64-bit TSS. RSP0
+points into a dedicated four-page kernel stack with an unmapped guard page. The
+task register is loaded only after the TSS descriptor and stack are complete.
+
+IDT vector `0x80` is a DPL 3 interrupt gate used by the bootstrap native call.
+On entry the CPU switches from the user stack to TSS.RSP0. The handler validates
+the saved user CS before restoring the suspended boot context. This gate is a
+temporary bring-up interface, not the versioned native kernel-call ABI.

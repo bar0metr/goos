@@ -21,3 +21,13 @@ func TestPageEntryRejectsUnalignedAddress(t *testing.T) {
 		t.Fatal("accepted unaligned physical address")
 	}
 }
+
+func TestUserPagePermissions(t *testing.T) {
+	entry, ok := pageEntry(0x5000, Permissions{User: true, Writable: true})
+	if !ok || entry&entryUser == 0 || entry&entryWritable == 0 || entry&entryNX == 0 {
+		t.Fatalf("invalid user data entry: %#x", entry)
+	}
+	if _, ok := pageEntry(0x5000, Permissions{User: true, Writable: true, Executable: true}); ok {
+		t.Fatal("accepted W+X user page")
+	}
+}

@@ -95,6 +95,8 @@ goos_load_gdt:
     pushq %rax
     lretq
 .gdt_loaded:
+    movw $0x28, %ax
+    ltr %ax
     retq
 
 .global goos_load_idt
@@ -227,6 +229,59 @@ goos_interrupt_table:
     .quad goos_exception_24, goos_exception_25, goos_exception_26, goos_exception_27
     .quad goos_exception_28, goos_exception_29, goos_exception_30, goos_exception_31
     .quad goos_irq_timer
+    .quad goos_user_call
+
+.section .text
+.global goos_enter_user
+goos_enter_user:
+    pushfq
+    cli
+    movq %rsp, goos_kernel_return_rsp(%rip)
+    movq %r9, goos_kernel_return_cr3(%rip)
+    movq %rcx, %cr3
+    movw $0x1b, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    pushq $0x1b
+    pushq %r8
+    pushq $0x2
+    pushq $0x23
+    pushq %rdx
+    iretq
+
+.global goos_user_call
+goos_user_call:
+    cmpq $0x23, 8(%rsp)
+    jne goos_exception_fatal
+    leaq user_ring3_message(%rip), %rsi
+.user_message_next:
+    movb (%rsi), %al
+    testb %al, %al
+    jz .user_exit
+    movb %al, %ah
+.user_message_wait:
+    movw $0x3fd, %dx
+    inb %dx, %al
+    testb $0x20, %al
+    jz .user_message_wait
+    movw $0x3f8, %dx
+    movb %ah, %al
+    outb %al, %dx
+    incq %rsi
+    jmp .user_message_next
+.user_exit:
+    movq goos_kernel_return_cr3(%rip), %rax
+    movq %rax, %cr3
+    movq goos_kernel_return_rsp(%rip), %rsp
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    popfq
+    retq
+
+.section .rdata
+user_ring3_message:
+    .asciz "USER_RING3_OK\r\n"
 
 .section .text
 .global goos_irq_timer
@@ -377,6 +432,11 @@ goos_runnable_mask:
     .quad 1
 goos_scheduler_enabled:
     .byte 0
+.align 8
+goos_kernel_return_rsp:
+    .quad 0
+goos_kernel_return_cr3:
+    .quad 0
 
 .section .rdata
 .align 8

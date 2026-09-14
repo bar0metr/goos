@@ -122,13 +122,18 @@ Milestone 0 and the first complete slice of Milestone 1 are implemented:
 - controlled, non-escalating capability transfer between handle tables;
 - distinct hardware page-table roots for separate processes;
 - an isolation test mapping different physical pages at one user address;
+- a 64-bit TSS with a dedicated guarded RSP0 kernel stack;
+- ring 3 code and data descriptors;
+- separate RX user code and RW+NX user stack mappings;
+- a DPL 3 native kernel-call gate;
+- the first native program executing at CPL 3;
 - unit, integration, boot, and performance tests.
 
-Ring 3 execution, IPC, userspace services, VFS, RAMFS, and the shell are not
-implemented yet. The current ISO boots a real TinyGo kernel, leaves UEFI boot
-services, installs its own page tables, runs preempted kernel tasks, and
-verifies process address-space isolation, but it is not yet a usable operating
-environment.
+General process loading, IPC, userspace services, VFS, RAMFS, and the shell are
+not implemented yet. The current ISO boots a real TinyGo kernel, leaves UEFI
+boot services, installs its own page tables, runs preempted kernel tasks,
+verifies process address-space isolation, and executes a minimal native program
+at CPL 3. It is not yet a usable operating environment.
 
 ## Building and running
 
@@ -178,6 +183,10 @@ PROCESS_MODEL_OK
 ADDRESS_SPACE_A_OK
 ADDRESS_SPACE_B_OK
 PROCESS_ISOLATION_OK
+USER_RX_OK
+USER_STACK_NX_OK
+USER_RING3_OK
+NATIVE_PROCESS_OK
 Kernel initialized
 BOOT_OK
 ```
@@ -188,11 +197,11 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage adds a TSS with a controlled RSP0 kernel stack, ring 3 code/data
-segments, user stack mappings, a validated user entry frame, and the first
-native process executing outside ring 0. IPC, shared memory, system services,
-and the shell will be built on top of that foundation rather than simulated
-with predetermined output.
+The next stage defines the native kernel-call ABI, validates user pointers,
+adds process-aware CR3 switching to the scheduler, and introduces a native
+userspace image loader. Typed IPC, shared memory, system services, and the shell
+will be built on top of that foundation rather than simulated with predetermined
+output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for
