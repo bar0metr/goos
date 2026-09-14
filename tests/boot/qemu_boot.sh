@@ -18,6 +18,10 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'PMM_OK' "$log" 2>/dev/null && \
 		grep -q 'NX_WX_OK' "$log" 2>/dev/null && \
 		grep -q 'VM_OK' "$log" 2>/dev/null && \
+		grep -q 'EXCEPTION_OK' "$log" 2>/dev/null && \
+		grep -q 'GDT_OK' "$log" 2>/dev/null && \
+		grep -q 'IDT_OK' "$log" 2>/dev/null && \
+		grep -q 'TIMER_OK' "$log" 2>/dev/null && \
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true

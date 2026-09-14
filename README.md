@@ -106,6 +106,11 @@ Milestone 0 and the first complete slice of Milestone 1 are implemented:
 - kernel-owned four-level x86_64 page tables;
 - enforced NX, supervisor write protection, and W^X mappings;
 - an unmapped low-memory guard region;
+- kernel-owned GDT and IDT tables;
+- gates for all architectural CPU exception vectors;
+- a live INT3 exception-path self-test;
+- a 100 Hz PIT bootstrap timer through a remapped legacy PIC;
+- hardware IRQ delivery with end-of-interrupt acknowledgement;
 - a basic capability primitive that prevents rights escalation;
 - unit, integration, boot, and performance tests.
 
@@ -147,6 +152,10 @@ Physical pages free: 96081
 PMM_OK
 NX_WX_OK
 VM_OK
+EXCEPTION_OK
+GDT_OK
+IDT_OK
+TIMER_OK
 Kernel initialized
 BOOT_OK
 ```
@@ -157,12 +166,11 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage covers the GDT/IDT, CPU exception handling, and a hardware timer.
-That foundation will be followed by a preemptive round-robin scheduler,
-separate Process and Task models, and the first isolated userspace process. IPC,
-capability transfer, shared memory, system services, and the shell will be
-built on top of that foundation rather than simulated with predetermined
-output.
+The next stage introduces the Task model, saved CPU contexts, an idle task, and
+a timer-preempted round-robin scheduler. Separate Process and Task models and
+the first isolated userspace process follow that work. IPC, capability transfer,
+shared memory, system services, and the shell will be built on top of that
+foundation rather than simulated with predetermined output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for

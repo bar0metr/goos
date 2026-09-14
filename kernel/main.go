@@ -76,6 +76,22 @@ func main() {
 	amd64.LoadPageTable(pageTable)
 	console.WriteString("NX_WX_OK\n")
 	console.WriteString("VM_OK\n")
+
+	if !amd64.InstallDescriptorTables() {
+		console.WriteString("PANIC: descriptor-table installation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	amd64.TriggerBreakpoint()
+	console.WriteString("GDT_OK\n")
+	console.WriteString("IDT_OK\n")
+
+	amd64.StartBootstrapTimer()
+	for amd64.TimerTicks() < 3 {
+		amd64.Halt()
+	}
+	console.WriteString("TIMER_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")
 
