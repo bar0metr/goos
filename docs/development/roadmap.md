@@ -1,8 +1,9 @@
 # Roadmap
 
-The implementation follows the specification milestones. The next milestone
-adds boot information capture, a physical page allocator, page tables with NX
-and W^X enforcement, an IDT, and a timer. Later milestones add timer-preempted
+The implementation follows the specification milestones. UEFI boot information,
+`ExitBootServices`, and the bootstrap physical page allocator are complete. The
+next slice adds page tables with NX and W^X enforcement, an IDT, exceptions,
+and a timer. Later milestones add timer-preempted
 tasks, isolated userspace processes, versioned IPC and capability transfer,
 then userspace TTY, RAMFS, VFS, init, and a native shell.
 

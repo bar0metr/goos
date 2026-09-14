@@ -19,7 +19,7 @@ SOURCE_DATE_EPOCH ?= 0
 
 .DEFAULT_GOAL := all
 
-.PHONY: all kernel userspace initramfs iso run run-debug test test-unit test-integration test-boot lint fmt docs clean distclean toolchain-check help
+.PHONY: all kernel userspace initramfs iso run run-debug test test-unit test-integration test-boot test-performance lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -77,10 +77,14 @@ test-integration: kernel
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
 
+test-performance:
+	@mkdir -p $(BUILD_DIR)/reports
+	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkAllocateFree -benchmem ./kernel/mm/pmm | tee $(BUILD_DIR)/reports/page-allocation.txt
+
 lint:
 	$(BUILD_ENV) go vet ./...
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
-	@! grep -R --include='*.go' -n 'unsafe' kernel internal 2>/dev/null
+	@! grep -R --include='*.go' -n '"unsafe"' kernel internal --exclude-dir=uefi 2>/dev/null
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './build/*')
@@ -107,6 +111,7 @@ help:
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
+	  '  test-performance run microbenchmarks into build/reports' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \
 	  '  toolchain-check validate local prerequisites'

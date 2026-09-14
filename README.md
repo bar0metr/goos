@@ -1,19 +1,121 @@
 # GoOS
 
-GoOS is an experimental x86_64 operating system whose primary implementation
-language is Go compiled with TinyGo. It is designed around a small privileged
-kernel, capability-based authorization, typed IPC, isolated processes, and
-userspace services.
+GoOS — экспериментальная 64-битная операционная система для `x86_64`, основная
+кодовая база которой написана на Go и компилируется TinyGo. Это не попытка
+переписать Linux на другом языке и не ещё одна POSIX-система с новым названием.
+Проект исследует, какой могла бы быть небольшая современная ОС, если строить её
+вокруг явных полномочий, изоляции компонентов, типизированного IPC и минимального
+привилегированного ядра.
 
-The repository currently implements Milestone 0: a deterministic TinyGo UEFI
-kernel artifact, bootable ISO, COM1 boot log, QEMU workflow, automated boot
-test, and the first host-tested capability primitive. Scheduler, memory
-management, process isolation, IPC, VFS, and shell are not implemented yet.
+## История проекта
 
-## Build and run
+История GoOS началась в 2011 году. Тогда это был личный исследовательский проект
+операционной системы на Free Pascal. Основной задачей было не получение готового
+продукта, а понимание того, как машина начинает исполнять собственный код, как
+устроены загрузка, память, прерывания и граница между ядром и программами.
 
-The supported development host is macOS. Required tools are Go, TinyGo, GNU
-Make, QEMU x86_64 with OVMF, `hdiutil`, `nm`, and `tar`.
+Позже проект был перенесён на C++. Работа шла в вялотекущем режиме: отдельные
+идеи проверялись, код переписывался, архитектура несколько раз пересматривалась.
+Это не была непрерывная разработка с релизным планом. Проект оставался личной
+лабораторией, к которой можно было возвращаться, когда появлялась новая идея или
+желание глубже разобраться в конкретной части системного программирования.
+
+С появлением Go возник новый вопрос: можно ли построить на нём не учебное ядро
+из нескольких файлов, а полноценную систему с ясной архитектурой, контролируемой
+сложностью и безопасными по умолчанию компонентами. Стандартный Go runtime не
+предназначен для работы без существующей ОС, но TinyGo постепенно сделал такой
+эксперимент практически возможным. Так прежний проект получил новую техническую
+основу и нынешнее направление.
+
+GoOS выросла из многолетнего интереса к устройству операционных систем и
+неудовлетворённости их историческим багажом. В Linux ценны открытость, широкая
+аппаратная поддержка, наблюдаемость и способность работать почти в любой среде.
+В macOS ценны цельность системы, предсказуемый пользовательский опыт и внимание
+к согласованности компонентов. Но вместе с преимуществами существующие системы
+несут архитектурные компромиссы, накопленные за десятилетия: чрезмерную ambient
+authority, слишком крупные доверенные компоненты, неясные границы
+ответственности, строковые интерфейсы там, где нужны типизированные протоколы,
+глобальное изменяемое состояние и совместимость, которая начинает диктовать
+устройство всей системы.
+
+Цель GoOS — не механически соединить Linux и macOS. Проект берёт полезные идеи,
+но не принимает их ограничения как неизбежные. Native API не обязан повторять
+Unix. `fork`, UID 0, универсальный `ioctl`, глобальный root и принцип «всё есть
+файл» не становятся фундаментом только потому, что они привычны. Совместимость
+с Linux должна существовать отдельным слоем и не определять внутреннюю модель
+системы.
+
+GoOS делается так, как автор видит технически цельную операционную систему:
+небольшой объём кода с максимальными привилегиями, процессы без неявной власти,
+capability-based доступ к ресурсам, сервисы и драйверы в userspace, стабильные
+версионированные IPC-протоколы и измеряемые fast paths для данных. Это авторский
+исследовательский проект, поэтому решения здесь не обязаны повторять отраслевой
+консенсус. Но каждое фундаментальное решение должно иметь проверяемое
+обоснование, ADR, тесты и понятные последствия.
+
+## Что строится
+
+Целевая архитектура — pragmatic microkernel/hybrid:
+
+```text
+Native applications             Linux ELF applications
+          |                               |
+          |                    Linux compatibility layer
+          +---------------+---------------+
+                          |
+                 capabilities + handles
+                          |
+                       typed IPC
+                          |
+        +-----------------+-----------------+
+        |                 |                 |
+       VFS              network           drivers
+        |                 |                 |
+        +-----------------+-----------------+
+                          |
+                minimal TinyGo kernel
+                          |
+                   UEFI / x86_64 / QEMU
+```
+
+Ядро отвечает только за механизмы, которым действительно нужны максимальные
+привилегии: CPU state, прерывания, физическую и виртуальную память, scheduler,
+процессы, IPC, handles, capabilities и таймеры. Файловые системы, TTY, хранение
+логов, конфигурация, сеть и сложные драйверы должны работать как изолированные
+userspace-сервисы.
+
+Ключевой принцип проекта:
+
+> Компрометация одного компонента по умолчанию не должна означать компрометацию
+> всей системы.
+
+## Текущее состояние
+
+Реализованы Milestone 0 и первый законченный этап Milestone 1:
+
+- TinyGo UEFI kernel для `x86_64`;
+- загрузочный El Torito ISO;
+- запуск в QEMU/OVMF;
+- serial console через COM1;
+- автоматический boot test с таймаутом;
+- получение UEFI memory map;
+- корректный `ExitBootServices`;
+- нормализация типов физической памяти;
+- bitmap page allocator для первого GiB;
+- резервирование low memory и firmware-owned областей;
+- базовый capability primitive с запретом повышения прав;
+- unit, integration, boot и performance tests.
+
+Виртуальная память, изоляция ring 3, scheduler, процессы, IPC, userspace-сервисы,
+VFS, RAMFS и shell ещё не реализованы. Текущий ISO загружает настоящее TinyGo
+ядро и проверяет allocator, но пока не является пользовательской операционной
+средой.
+
+## Сборка и запуск
+
+Основная среда разработки — macOS. Требуются Go, TinyGo, GNU Make,
+`qemu-system-x86_64` с OVMF, `hdiutil`, `nm` и `tar`. Сборка не устанавливает и
+не скачивает зависимости скрыто.
 
 ```sh
 make toolchain-check
@@ -23,7 +125,10 @@ make test-boot
 make run
 ```
 
-The ISO is written to `build/goos-x86_64.iso`. A successful headless boot emits:
+Итоговый образ создаётся в `build/goos-x86_64.iso`. Все промежуточные файлы и
+кеши остаются внутри `build/`.
+
+Успешная загрузка сейчас выглядит так:
 
 ```text
 GoOS 0.1-dev
@@ -32,25 +137,33 @@ TinyGo kernel
 CPU: x86_64
 Boot: UEFI
 Security: capabilities (foundation)
+BOOT_SERVICES_EXITED
+Memory: 375 MiB usable
+Physical pages free: 96081
+PMM_OK
 Kernel initialized
 BOOT_OK
 ```
 
-`make run-debug` starts QEMU paused with its GDB server on TCP port 1234.
+`make run` подключает COM1 к текущему терминалу. `make run-debug` запускает QEMU
+в остановленном состоянии с GDB server на TCP-порту 1234. `make
+test-performance` сохраняет результаты benchmarks в `build/reports/`.
 
-## Architecture
+## Направление разработки
 
-```text
-applications (future)
-        |
-userspace services (future)
-        |
-typed IPC + capabilities (foundation)
-        |
-minimal TinyGo kernel
-        |
-UEFI / x86_64 / QEMU
-```
+Ближайший этап — собственные page tables, NX, W^X, guard pages, GDT/IDT,
+обработка CPU exceptions и аппаратный timer. После этого появятся вытесняющий
+round-robin scheduler, разделение Process/Task и первый изолированный userspace
+процесс. IPC, передача capabilities, shared memory, системные сервисы и shell
+строятся поверх этой основы, а не имитируются заранее подготовленным выводом.
 
-See [architecture](docs/architecture/overview.md), [building](docs/development/building.md),
-and the [roadmap](docs/development/roadmap.md).
+Linux ABI является дальнейшим слоем совместимости. Он не блокирует первый
+самостоятельный релиз GoOS и не должен менять native security model ради POSIX.
+
+Подробности находятся в документации:
+
+- [архитектура](docs/architecture/overview.md);
+- [управление памятью](docs/architecture/memory.md);
+- [сборка и отладка](docs/development/building.md);
+- [roadmap](docs/development/roadmap.md);
+- [архитектурные решения](docs/adr/).

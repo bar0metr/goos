@@ -39,6 +39,36 @@ func (serial COM1) WriteString(value string) {
 	}
 }
 
+func (serial COM1) WriteUint(value uint64) {
+	var digits [20]byte
+	position := len(digits)
+	if value == 0 {
+		serial.WriteByte('0')
+		return
+	}
+	for value != 0 {
+		position--
+		digits[position] = byte(value%10) + '0'
+		value /= 10
+	}
+	for ; position < len(digits); position++ {
+		serial.WriteByte(digits[position])
+	}
+}
+
+func (serial COM1) WriteHex(value uint64) {
+	const digits = "0123456789abcdef"
+	serial.WriteString("0x")
+	started := false
+	for shift := 60; shift >= 0; shift -= 4 {
+		nibble := byte(value >> uint(shift) & 0xf)
+		if nibble != 0 || started || shift == 0 {
+			started = true
+			serial.WriteByte(digits[nibble])
+		}
+	}
+}
+
 // The following declarations enter the only privileged assembly in the
 // bootstrap. Ports are compile-time-selected by this package, and callers do
 // not receive raw memory or kernel pointers.
