@@ -8,6 +8,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/handle"
+	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
 	"goos/kernel/mm/pmm"
@@ -27,6 +28,9 @@ var (
 	kernelCallData  [kcall.MaxDebugWrite]byte
 	nativeImageData [512]byte
 	faultImageData  [256]byte
+	bootChannel     ipc.Channel
+	boundedChannel  ipc.Channel
+	ipcWireData     [ipc.WireMaxSize]byte
 )
 
 type nativeCallHandler struct {
@@ -243,6 +247,70 @@ func main() {
 	}
 	console.WriteString("HANDLE_TABLE_OK\n")
 	console.WriteString("PROCESS_MODEL_OK\n")
+
+	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(0xc001, capability.Read|capability.Write))
+	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(0xc001, capability.Read|capability.Write))
+	_, channelACanWrite := processA.Handles().Lookup(channelA, handle.TypeChannel, capability.Write)
+	_, channelBCanRead := processB.Handles().Lookup(channelB, handle.TypeChannel, capability.Read)
+	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
+	copy(request.Payload[:], []byte("ping"))
+	wireSize, wireEncoded := ipc.Encode(request, ipcWireData[:])
+	wireRequest, wireDecoded := ipc.Decode(ipcWireData[:wireSize])
+	bootChannel = ipc.NewChannel()
+	ipcStatus := bootChannel.Send(0, wireRequest, processA.Handles(), processB.Handles(), []ipc.Transfer{{
+		Handle: memoryHandle,
+		Type:   handle.TypeMemory,
+		Rights: capability.Read,
+	}})
+	receivedRequest, receivedStatus := bootChannel.Receive(1)
+	_, receivedMemoryReadable := processB.Handles().Lookup(receivedRequest.Handles[0], handle.TypeMemory, capability.Read)
+	reply := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindReply, Correlation: request.Correlation}
+	replyStatus := bootChannel.Send(1, reply, nil, nil, nil)
+	_, replyReceiveStatus := bootChannel.Receive(0)
+	if !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !wireEncoded || !wireDecoded ||
+		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
+		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
+		console.WriteString("PANIC: typed IPC request/reply failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("IPC_WIRE_OK\n")
+	console.WriteString("IPC_REQUEST_REPLY_OK\n")
+	console.WriteString("IPC_HANDLE_TRANSFER_OK\n")
+
+	boundedChannel = ipc.NewChannel()
+	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
+	for index := 0; index < ipc.QueueCapacity; index++ {
+		if boundedChannel.Send(0, notification, nil, nil, nil) != ipc.StatusOK {
+			console.WriteString("PANIC: IPC queue filled early\n")
+			for {
+				amd64.Halt()
+			}
+		}
+	}
+	if boundedChannel.Send(0, notification, nil, nil, nil) != ipc.StatusResourceExhausted || !boundedChannel.Close(0) {
+		console.WriteString("PANIC: IPC bounds or close failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	for index := 0; index < ipc.QueueCapacity; index++ {
+		if _, status := boundedChannel.Receive(1); status != ipc.StatusOK {
+			console.WriteString("PANIC: IPC queue drain failed\n")
+			for {
+				amd64.Halt()
+			}
+		}
+	}
+	if _, status := boundedChannel.Receive(1); status != ipc.StatusPeerDied {
+		console.WriteString("PANIC: IPC peer death missing\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("IPC_BOUNDED_OK\n")
+	console.WriteString("IPC_PEER_DEATH_OK\n")
 
 	probe := amd64.ProbeAddressSpaces(rootA, rootB, pageTable, vm.UserProbeAddress)
 	if byte(probe) != 0xa1 || byte(probe>>8) != 0xb2 {

@@ -133,6 +133,8 @@ implemented:
 - preemptively scheduled ring 3 tasks with process-specific CR3 roots;
 - task-local guarded RSP0 stacks and isolated userspace fault termination;
 - a versioned native image format and strictly validated segment loader;
+- bounded versioned IPC with request/reply, notifications, and correlations;
+- controlled IPC handle passing and peer-death reporting;
 - unit, integration, boot, and performance tests.
 
 Initramfs discovery, IPC, userspace services, VFS, RAMFS, and the shell are not
@@ -169,7 +171,7 @@ Boot: UEFI
 Security: capabilities (foundation)
 BOOT_SERVICES_EXITED
 Memory: 375 MiB usable
-Physical pages free: 96059
+Physical pages free: 96043
 PMM_OK
 NX_WX_OK
 VM_OK
@@ -186,6 +188,11 @@ IDLE_TASK_OK
 SCHEDULER_OK
 HANDLE_TABLE_OK
 PROCESS_MODEL_OK
+IPC_WIRE_OK
+IPC_REQUEST_REPLY_OK
+IPC_HANDLE_TRANSFER_OK
+IPC_BOUNDED_OK
+IPC_PEER_DEATH_OK
 ADDRESS_SPACE_A_OK
 ADDRESS_SPACE_B_OK
 PROCESS_ISOLATION_OK
@@ -212,9 +219,10 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage introduces versioned typed IPC, followed by shared memory.
-System services and the shell will be built on top of that foundation rather
-than simulated with predetermined output.
+The next stage introduces shared-memory objects for bulk IPC, followed by
+userspace IPC kernel calls and wait semantics. System services and the shell
+will be built on that foundation rather than simulated with predetermined
+output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for
@@ -228,6 +236,7 @@ Further documentation:
 - [scheduler](docs/architecture/scheduler.md);
 - [processes](docs/architecture/processes.md);
 - [native images](docs/architecture/native-images.md);
+- [typed IPC](docs/architecture/ipc.md);
 - [capabilities and handles](docs/architecture/capabilities.md);
 - [building and debugging](docs/development/building.md);
 - [roadmap](docs/development/roadmap.md);

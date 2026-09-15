@@ -63,6 +63,9 @@ func TestTransferCannotEscalateRights(t *testing.T) {
 
 func TestInvalidInsertAndFullTable(t *testing.T) {
 	var table Table
+	if table.Available() != MaxHandles {
+		t.Fatal("empty table capacity is incorrect")
+	}
 	if _, ok := table.Insert(TypeInvalid, capability.New(1, capability.Read)); ok {
 		t.Fatal("invalid type accepted")
 	}
@@ -73,5 +76,8 @@ func TestInvalidInsertAndFullTable(t *testing.T) {
 	}
 	if _, ok := table.Insert(TypeTask, capability.New(999, capability.Wait)); ok {
 		t.Fatal("table capacity exceeded")
+	}
+	if table.Available() != 0 {
+		t.Fatal("full table reports available slots")
 	}
 }

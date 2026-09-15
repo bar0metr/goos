@@ -30,6 +30,19 @@ type Table struct {
 	slots [MaxHandles]slot
 }
 
+func (table *Table) Available() int {
+	if table == nil {
+		return 0
+	}
+	available := 0
+	for index := range table.slots {
+		if !table.slots[index].open {
+			available++
+		}
+	}
+	return available
+}
+
 func (table *Table) Insert(typeID Type, cap capability.Capability) (ID, bool) {
 	if typeID == TypeInvalid || cap.Object() == 0 || cap.Rights() == 0 {
 		return 0, false

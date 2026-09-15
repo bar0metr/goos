@@ -31,6 +31,11 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'SCHEDULER_OK' "$log" 2>/dev/null && \
 		grep -q 'HANDLE_TABLE_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_MODEL_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_WIRE_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_REQUEST_REPLY_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_HANDLE_TRANSFER_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'ADDRESS_SPACE_A_OK' "$log" 2>/dev/null && \
 		grep -q 'ADDRESS_SPACE_B_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_ISOLATION_OK' "$log" 2>/dev/null && \
