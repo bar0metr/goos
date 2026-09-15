@@ -3,7 +3,8 @@
 The bootstrap IPC mechanism uses fixed-capacity bidirectional channels. Each
 endpoint has an inbound queue of 16 messages. Queue storage is part of the
 channel object, so sending cannot trigger heap allocation. A full queue returns
-`ResourceExhausted` instead of blocking or growing without a bound.
+`ResourceExhausted` instead of blocking or growing without a bound. Payloads
+larger than the inline limit use transferred shared-memory handles.
 
 Every message names a nonzero protocol ID and version. Request and reply
 messages carry a nonzero correlation ID; notifications carry none. A channel
@@ -26,6 +27,6 @@ source remains valid.
 Closing one endpoint prevents further sends. Its peer may drain already queued
 messages and then receives `PeerDied`. The mechanism is currently nonblocking
 and single-CPU: callers provide IRQ-level exclusion. Kernel-call operations,
-scheduler wait queues, timeout/cancellation, and shared-memory payloads remain
-future work. Userspace will access channels only through capability-checked
+scheduler wait queues, and timeout/cancellation remain future work. Userspace
+will access channels only through capability-checked
 handles, never through kernel object addresses.

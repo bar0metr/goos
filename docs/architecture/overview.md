@@ -19,5 +19,6 @@ roots and guarded kernel-entry stacks, and dispatches bounded native calls with
 validated user-memory copying. A versioned native loader validates and maps
 executable, data, and stack segments. A userspace CPU fault terminates only its
 task. Bounded typed IPC supports versioned request/reply, notifications,
-capability-derived handle passing, and peer-death reporting. Shared memory,
-userspace IPC bindings, and system services are not yet implemented.
+capability-derived handle passing, peer-death reporting, and shared pages for
+bulk data. Userspace IPC bindings, wait semantics, and system services are not
+yet implemented.

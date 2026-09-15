@@ -135,6 +135,7 @@ implemented:
 - a versioned native image format and strictly validated segment loader;
 - bounded versioned IPC with request/reply, notifications, and correlations;
 - controlled IPC handle passing and peer-death reporting;
+- capability-controlled NX shared-memory mappings for bulk IPC;
 - unit, integration, boot, and performance tests.
 
 Initramfs discovery, IPC, userspace services, VFS, RAMFS, and the shell are not
@@ -193,6 +194,9 @@ IPC_REQUEST_REPLY_OK
 IPC_HANDLE_TRANSFER_OK
 IPC_BOUNDED_OK
 IPC_PEER_DEATH_OK
+SHMEM_OBJECT_OK
+SHMEM_ZERO_COPY_OK
+SHMEM_RIGHTS_OK
 ADDRESS_SPACE_A_OK
 ADDRESS_SPACE_B_OK
 PROCESS_ISOLATION_OK
@@ -219,8 +223,8 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage introduces shared-memory objects for bulk IPC, followed by
-userspace IPC kernel calls and wait semantics. System services and the shell
+The next stage exposes IPC through native kernel calls and integrates blocking
+receive, wakeup, and timeouts with the scheduler. System services and the shell
 will be built on that foundation rather than simulated with predetermined
 output.
 

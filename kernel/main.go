@@ -15,6 +15,7 @@ import (
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
+	"goos/kernel/shmem"
 )
 
 var (
@@ -31,6 +32,7 @@ var (
 	bootChannel     ipc.Channel
 	boundedChannel  ipc.Channel
 	ipcWireData     [ipc.WireMaxSize]byte
+	sharedRegistry  shmem.Registry
 )
 
 type nativeCallHandler struct {
@@ -311,6 +313,38 @@ func main() {
 	}
 	console.WriteString("IPC_BOUNDED_OK\n")
 	console.WriteString("IPC_PEER_DEATH_OK\n")
+
+	sharedObject, sharedCreated := sharedRegistry.Create(&pageAllocator, 2)
+	sharedHandleA, sharedGranted := sharedObject.Grant(processA.Handles(), capability.Read|capability.Write|capability.Transfer)
+	sharedHandleB, sharedTransferred := processA.Handles().Transfer(processB.Handles(), sharedHandleA, handle.TypeMemory, capability.Read)
+	const sharedAddress = uint64(0x40010000)
+	sharedMappedA := sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress, 0, 2, true)
+	sharedMappedB := sharedObject.Map(processB.Handles(), sharedHandleB, rootB, sharedAddress, 0, 2, false)
+	sharedInitiallyZero := [8]byte{}
+	sharedZeroRead := vm.CopyIn(rootB, sharedAddress, sharedInitiallyZero[:])
+	sharedPayload := []byte("SHAREDOK")
+	sharedReadback := [8]byte{}
+	sharedWriteAddress := sharedAddress + vm.PageSize - 4
+	sharedWritten := vm.CopyOut(rootA, sharedWriteAddress, sharedPayload)
+	sharedRead := vm.CopyIn(rootB, sharedWriteAddress, sharedReadback[:])
+	sharedPhysicalA0, sharedResolvedA0 := vm.Resolve(rootA, sharedAddress)
+	sharedPhysicalB0, sharedResolvedB0 := vm.Resolve(rootB, sharedAddress)
+	sharedPhysicalA1, sharedResolvedA1 := vm.Resolve(rootA, sharedAddress+vm.PageSize)
+	sharedPhysicalB1, sharedResolvedB1 := vm.Resolve(rootB, sharedAddress+vm.PageSize)
+	if !sharedCreated || !sharedGranted || !sharedTransferred || !sharedMappedA || !sharedMappedB || !sharedZeroRead || sharedInitiallyZero != [8]byte{} ||
+		sharedObject.Map(processA.Handles(), memoryHandle, rootA, sharedAddress+4*vm.PageSize, 0, 1, false) ||
+		sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress+4*vm.PageSize, 2, 1, false) || !sharedWritten || !sharedRead ||
+		string(sharedReadback[:]) != "SHAREDOK" || vm.CopyOut(rootB, sharedAddress, []byte{1}) ||
+		!sharedResolvedA0 || !sharedResolvedB0 || !sharedResolvedA1 || !sharedResolvedB1 ||
+		sharedPhysicalA0 != sharedPhysicalB0 || sharedPhysicalA1 != sharedPhysicalB1 {
+		console.WriteString("PANIC: shared-memory isolation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("SHMEM_OBJECT_OK\n")
+	console.WriteString("SHMEM_ZERO_COPY_OK\n")
+	console.WriteString("SHMEM_RIGHTS_OK\n")
 
 	probe := amd64.ProbeAddressSpaces(rootA, rootB, pageTable, vm.UserProbeAddress)
 	if byte(probe) != 0xa1 || byte(probe>>8) != 0xb2 {

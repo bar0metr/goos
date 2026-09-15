@@ -10,9 +10,10 @@ native program, a typed native kernel-call dispatcher, validated bounded user-
 memory copying, process-aware CR3 scheduling, task-local RSP0 stacks, native
 Exit lifecycle, isolated user-fault termination, and a validated versioned
 native image loader, versioned typed IPC, bounded request/reply queues,
-correlation validation, handle passing, and peer-death reporting are complete.
-The next slice introduces shared memory, followed by IPC wait/timeout kernel
-calls, userspace TTY, RAMFS, VFS, init, and a native shell.
+correlation validation, handle passing, peer-death reporting, and capability-
+controlled shared-memory objects are complete. The next slice introduces IPC
+kernel calls with scheduler wait/timeout integration, followed by userspace TTY,
+RAMFS, VFS, init, and a native shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

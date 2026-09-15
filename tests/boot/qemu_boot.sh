@@ -36,6 +36,9 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'IPC_HANDLE_TRANSFER_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
+		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \
+		grep -q 'SHMEM_ZERO_COPY_OK' "$log" 2>/dev/null && \
+		grep -q 'SHMEM_RIGHTS_OK' "$log" 2>/dev/null && \
 		grep -q 'ADDRESS_SPACE_A_OK' "$log" 2>/dev/null && \
 		grep -q 'ADDRESS_SPACE_B_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_ISOLATION_OK' "$log" 2>/dev/null && \

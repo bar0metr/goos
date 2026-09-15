@@ -43,6 +43,24 @@ and leaf must be present and user-accessible; `CopyOut` additionally requires a
 writable leaf. The validated physical pages are accessed through the kernel
 identity map.
 
+## Shared memory
+
+Shared-memory objects own between one and 16 zeroed physical pages. A monotonic
+registry assigns their nonzero identities in a separate object namespace.
+Processes receive only local memory
+handles; mappings require Read authority and writable mappings additionally
+require Write. Transfer derives equal or narrower rights in the receiver.
+
+The mapper validates the complete object page range and all destination leaves
+before installing mappings. The same physical pages may appear in different
+process roots or at different virtual addresses. Every shared mapping is NX.
+Executable shared memory requires a future explicit write-then-seal design.
+
+The boot security test maps a two-page object writable in process A and read-
+only in process B. A payload crossing the page boundary is written through A,
+read through B, and verified to resolve to identical physical pages. A write
+through B is rejected.
+
 The one-GiB kernel identity map is a bootstrap constraint, not the final process
 layout. A higher-half kernel, complete guard regions, demand paging, and ASLR
 remain later work.
