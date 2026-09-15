@@ -29,10 +29,12 @@ var (
 	kernelCallData  [kcall.MaxDebugWrite]byte
 	nativeImageData [512]byte
 	faultImageData  [256]byte
-	bootChannel     ipc.Channel
 	boundedChannel  ipc.Channel
 	ipcWireData     [ipc.WireMaxSize]byte
 	sharedRegistry  shmem.Registry
+	channelRegistry ipc.Registry
+	bootProcessA    *process.Process
+	bootProcessB    *process.Process
 )
 
 type nativeCallHandler struct {
@@ -59,13 +61,75 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 	return kcall.StatusOK
 }
 
+func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (*ipc.Channel, uint8, *process.Process, *process.Process, kcall.Status) {
+	var owner, peer *process.Process
+	var side uint8
+	if bootProcessA != nil && handler.root == bootProcessA.AddressSpace().Root {
+		owner, peer, side = bootProcessA, bootProcessB, 0
+	} else if bootProcessB != nil && handler.root == bootProcessB.AddressSpace().Root {
+		owner, peer, side = bootProcessB, bootProcessA, 1
+	} else {
+		return nil, 0, nil, nil, kcall.StatusPermissionDenied
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, required)
+	if !ok {
+		return nil, 0, nil, nil, kcall.StatusPermissionDenied
+	}
+	endpoint, ok := channelRegistry.Lookup(cap.Object())
+	if !ok {
+		return nil, 0, nil, nil, kcall.StatusNotFound
+	}
+	return endpoint, side, owner, peer, kcall.StatusOK
+}
+
+func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length uint64) kcall.Status {
+	endpoint, side, owner, peer, status := handler.endpoint(channel, capability.Write)
+	if status != kcall.StatusOK {
+		return status
+	}
+	if length < ipc.WireHeaderSize || length > ipc.WireMaxSize {
+		return kcall.StatusInvalidArgument
+	}
+	data := ipcWireData[:int(length)]
+	if !vm.CopyIn(handler.root, address, data) {
+		return kcall.StatusInvalidArgument
+	}
+	message, ok := ipc.Decode(data)
+	if !ok || message.HandleCount != 0 {
+		return kcall.StatusCorruptData
+	}
+	return endpoint.Send(side, message, owner.Handles(), peer.Handles(), nil)
+}
+
+func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capacity uint64) kcall.Status {
+	endpoint, side, _, _, status := handler.endpoint(channel, capability.Read)
+	if status != kcall.StatusOK {
+		return status
+	}
+	if capacity < ipc.WireMaxSize {
+		return kcall.StatusInvalidArgument
+	}
+	message, status := endpoint.Receive(side)
+	if status != ipc.StatusOK {
+		return status
+	}
+	size, ok := ipc.Encode(message, ipcWireData[:])
+	if !ok || uint64(size) > capacity {
+		return kcall.StatusResourceExhausted
+	}
+	if !vm.CopyOut(handler.root, address, ipcWireData[:size]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
 // dispatchKernelCall is the architecture-neutral native-call boundary. The
 // packed return keeps the assembly bridge simple: action occupies the upper
 // half and the typed native status occupies the lower half.
 //
 //export goos_dispatch_kernel_call
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
-	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1}, nativeCallHandler{root: root})
+	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, nativeCallHandler{root: root})
 	return uint64(result.Action)<<32 | uint64(result.Status)
 }
 
@@ -226,6 +290,7 @@ func main() {
 	}
 	processA, validA := process.New(1, process.AddressSpace{Root: rootA})
 	processB, validB := process.New(2, process.AddressSpace{Root: rootB})
+	bootProcessA, bootProcessB = &processA, &processB
 	if !validA || !validB {
 		console.WriteString("PANIC: process model initialization failed\n")
 		for {
@@ -250,26 +315,26 @@ func main() {
 	console.WriteString("HANDLE_TABLE_OK\n")
 	console.WriteString("PROCESS_MODEL_OK\n")
 
-	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(0xc001, capability.Read|capability.Write))
-	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(0xc001, capability.Read|capability.Write))
+	registeredChannel, registeredChannelID, channelCreated := channelRegistry.Create()
+	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(registeredChannelID, capability.Read|capability.Write|capability.Wait))
+	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(registeredChannelID, capability.Read|capability.Write|capability.Wait))
 	_, channelACanWrite := processA.Handles().Lookup(channelA, handle.TypeChannel, capability.Write)
 	_, channelBCanRead := processB.Handles().Lookup(channelB, handle.TypeChannel, capability.Read)
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
 	wireSize, wireEncoded := ipc.Encode(request, ipcWireData[:])
 	wireRequest, wireDecoded := ipc.Decode(ipcWireData[:wireSize])
-	bootChannel = ipc.NewChannel()
-	ipcStatus := bootChannel.Send(0, wireRequest, processA.Handles(), processB.Handles(), []ipc.Transfer{{
+	ipcStatus := registeredChannel.Send(0, wireRequest, processA.Handles(), processB.Handles(), []ipc.Transfer{{
 		Handle: memoryHandle,
 		Type:   handle.TypeMemory,
 		Rights: capability.Read,
 	}})
-	receivedRequest, receivedStatus := bootChannel.Receive(1)
+	receivedRequest, receivedStatus := registeredChannel.Receive(1)
 	_, receivedMemoryReadable := processB.Handles().Lookup(receivedRequest.Handles[0], handle.TypeMemory, capability.Read)
 	reply := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindReply, Correlation: request.Correlation}
-	replyStatus := bootChannel.Send(1, reply, nil, nil, nil)
-	_, replyReceiveStatus := bootChannel.Receive(0)
-	if !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !wireEncoded || !wireDecoded ||
+	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
+	_, replyReceiveStatus := registeredChannel.Receive(0)
+	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
 		console.WriteString("PANIC: typed IPC request/reply failed\n")

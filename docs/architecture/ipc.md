@@ -25,8 +25,21 @@ all handles already derived for that message. Transfer is copy semantics; the
 source remains valid.
 
 Closing one endpoint prevents further sends. Its peer may drain already queued
-messages and then receives `PeerDied`. The mechanism is currently nonblocking
-and single-CPU: callers provide IRQ-level exclusion. Kernel-call operations,
-scheduler wait queues, and timeout/cancellation remain future work. Userspace
-will access channels only through capability-checked
-handles, never through kernel object addresses.
+messages and then receives `PeerDied`. The mechanism is single-CPU: callers
+provide IRQ-level exclusion. Userspace accesses channels only through
+capability-checked handles, never through kernel object addresses.
+
+# Native call boundary
+
+`IPCSend` and `IPCReceive` accept a process-local channel handle, a user virtual
+address, and a bounded wire-buffer size. The dispatcher validates the size,
+the handle table enforces endpoint rights, and `CopyIn`/`CopyOut` validate every
+mapped page before data crosses the privilege boundary. Native calls currently
+reject attached handles; in-kernel transfers retain the explicit type and
+rights contract described below.
+
+The fixed-capacity IPC wait set records a task, channel side, and absolute timer
+deadline. Registration plus scheduler blocking is transactional. Message
+arrival, endpoint closure, and deadline expiry produce distinct wake reasons.
+Connecting those primitives to the native interrupt-return path remains the
+next scheduler slice.

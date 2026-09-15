@@ -304,6 +304,8 @@ goos_user_call:
 	 movq 40(%rsp), %rcx
 	 movq 88(%rsp), %rdx
 	 movq 80(%rsp), %r8
+	 movq 56(%rsp), %r10
+	 movq %r10, goos_kernel_call_arg2(%rip)
 	 movq goos_current_task(%rip), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
@@ -565,6 +567,8 @@ goos_scheduler_enabled:
     .byte 0
 goos_tss_rsp0_address:
     .quad 0
+goos_kernel_call_arg2:
+    .quad 0
 
 .section .text
 .global goos_user_preemptions_read
@@ -575,6 +579,11 @@ goos_user_preemptions_read:
 .global goos_user_faults_read
 goos_user_faults_read:
     movq goos_user_faults(%rip), %rax
+    retq
+
+.global goos_kernel_call_arg2_read
+goos_kernel_call_arg2_read:
+    movq goos_kernel_call_arg2(%rip), %rax
     retq
 
 .section .rdata

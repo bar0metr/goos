@@ -98,5 +98,11 @@ func StartBootstrapTimer()
 //export goos_timer_ticks_read
 func TimerTicks() uint64
 
+// KernelCallArg2 returns the third native-call argument captured by the
+// interrupt entry path. The bootstrap kernel has one CPU.
+//
+//export goos_kernel_call_arg2_read
+func KernelCallArg2() uint64
+
 //export goos_set_tss_stack_address
 func setTSSStackAddress(address *byte)
