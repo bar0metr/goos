@@ -9,7 +9,7 @@ import (
 const (
 	MaxServices     = 16
 	MaxDependencies = 8
-	MaxCapabilities = 16
+	MaxCapabilities = 7
 	MaxEvents       = 32
 	MaxName         = 31
 	MaxExecutable   = 127
@@ -60,7 +60,7 @@ const (
 )
 
 type Capability struct {
-	Object uint64
+	Handle handle.ID
 	Type   handle.Type
 	Rights capability.Rights
 }
@@ -138,7 +138,7 @@ func (manager *Manager) Register(definition Definition) Status {
 	}
 	for _, grant := range definition.Capabilities {
 		const allRights = capability.Read | capability.Write | capability.Execute | capability.Transfer | capability.Wait
-		if grant.Object == 0 || grant.Type == handle.TypeInvalid || grant.Rights == 0 || grant.Rights&^allRights != 0 {
+		if grant.Handle == 0 || grant.Type == handle.TypeInvalid || grant.Rights == 0 || grant.Rights&^allRights != 0 {
 			return StatusInvalidArgument
 		}
 	}

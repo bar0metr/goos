@@ -27,9 +27,9 @@ bounded process pool, assigns fresh process identifiers, validates the selected
 native image, and creates its address space and initial task. A freestanding
 amd64 TinyGo runtime now executes the complete supervision policy loop in PID 1;
 the QEMU path exercises three crash/restart cycles and userspace rate limiting.
-The next slice serializes declared capability manifests into spawn requests and
-installs the authorized handles in new processes. The native shell follows that
-boundary correction.
+Declared capability manifests are serialized into launch requests and installed
+as non-escalating derived handles before a child Task is created. The next slice
+begins the native shell and its minimal process-facing console/session protocol.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

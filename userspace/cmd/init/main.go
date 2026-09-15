@@ -3,6 +3,8 @@
 package main
 
 import (
+	"goos/internal/capability"
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	supervisor "goos/userspace/init"
 	"runtime"
@@ -10,6 +12,7 @@ import (
 )
 
 const lifecycleHandle = uint64(0x0000000100000001)
+const serviceDeviceHandle = handle.ID(0x0000000100000002)
 
 var (
 	manager     supervisor.Manager
@@ -38,7 +41,8 @@ func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uin
 //export initMain
 func initMain() {
 	runtimeInitHeap()
-	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe", Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
+		Capabilities: []supervisor.Capability{{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 		manager.StartReady(0, bootstrapService) != 1 {
 		fatal("INIT_POLICY_SETUP_FAILED\n")
 	}
@@ -72,7 +76,7 @@ func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }
 
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	correlation++
-	request, ok := supervisor.LaunchRequest(1, bytesString(spec.Executable[:spec.ExecutableSize]), correlation)
+	request, ok := supervisor.LaunchRequest(1, bytesString(spec.Executable[:spec.ExecutableSize]), spec.Capabilities[:spec.CapabilityCount], correlation)
 	if !ok {
 		return 0, false
 	}

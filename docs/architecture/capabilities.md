@@ -16,7 +16,15 @@ that cannot exceed the source rights. Transfer does not revoke the source;
 move semantics will be defined by the IPC protocol rather than hidden inside
 the handle primitive.
 
+PID 1 service definitions identify source handles, expected object types, and
+the exact rights to derive. Lifecycle launch requests serialize at most seven
+such entries. The kernel resolves every source in PID 1's table with Transfer
+authority before process creation, rejects rights escalation, and rolls back
+all installed child handles if any derivation fails. Child handle slots follow
+manifest order in the initially empty process table.
+
 Host-side security tests cover wrong types, missing rights, stale identifiers,
 forged generations, unauthorized transfer, rights escalation, and capacity
-exhaustion. The boot path also transfers a read-only memory capability between
-two Process tables and verifies that write authority is absent.
+exhaustion. The boot path transfers a read-only memory capability between two
+Process tables and launches supervised processes with a derived device
+capability that omits PID 1's Transfer right.

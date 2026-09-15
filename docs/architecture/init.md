@@ -41,7 +41,9 @@ accepts only static x86-64 ELF load segments and wraps them in the validated
 GoOS native image envelope.
 
 The Manager, service table, exit handling, restart decisions, backoff, and rate
-limit now execute in PID 1. The kernel only delivers process deaths and performs
-authorized image loading and process creation. Capability manifests are policy
-data in the Manager but are not yet serialized into spawn requests or installed
-in the child handle table.
+limit execute in PID 1. The kernel only delivers process deaths and performs
+authorized image loading and process creation. Each launch request also carries
+the service's bounded capability manifest. Entries reference existing PID 1
+handles and request an exact derived rights mask; the kernel requires Transfer
+authority, prevents escalation, and installs the derived handles into the new
+process before its first Task is created.

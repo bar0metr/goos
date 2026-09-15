@@ -147,13 +147,14 @@ The native kernel and the first isolated services are implemented:
   restart into a fresh process address space;
 - a freestanding amd64 TinyGo userspace runtime and the bounded supervision
   policy loop executing inside PID 1;
+- capability manifests that derive PID 1 authority into newly spawned process
+  handle tables without rights escalation;
 - unit, integration, boot, and performance tests.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
-the policy loop and enforces bounded crash restart accounting. Capability
-manifest installation for spawned services and the shell are not implemented
-yet. The current ISO boots a real kernel, leaves UEFI
+the policy loop and enforces bounded crash restart accounting. Spawn capability
+installation is implemented; the shell is not. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.

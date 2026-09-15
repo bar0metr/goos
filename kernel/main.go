@@ -57,6 +57,7 @@ var (
 	supervisorExitDelivered uint64
 	serviceLaunchConfirmed  uint64
 	userspaceSupervisorOK   uint64
+	capabilityManifestOK    uint64
 	initSendObserved        uint64
 	initSendStatus          kcall.Status
 	initExitObserved        uint64
@@ -139,7 +140,13 @@ func consumeInitControl() {
 	if !valid || event.Operation != supervisor.LifecycleLaunch {
 		return
 	}
-	pid, launchStatus := spawnExecutable(event.ExecutablePath())
+	pid, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount])
+	if launchStatus != supervisor.LaunchOK {
+		console := amd64.NewCOM1()
+		console.WriteString("INIT_LAUNCH_ERROR: ")
+		console.WriteHex(uint64(launchStatus))
+		console.WriteString("\n")
+	}
 	reply, encoded := supervisor.LaunchResult(uint64(pid), launchStatus, message.Correlation)
 	if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
 		wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
@@ -159,9 +166,21 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path string) (process.ID, supervisor.LaunchStatus) {
+func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || spawnedProcessCount == uint8(len(spawnedProcesses)) || nextProcessID == 0 {
 		return 0, supervisor.LaunchResourceExhausted
+	}
+	if bootInitProcess == nil || len(grants) > supervisor.MaxCapabilities {
+		return 0, supervisor.LaunchCapabilityDenied
+	}
+	for _, grant := range grants {
+		source, allowed := bootInitProcess.Handles().Lookup(grant.Handle, grant.Type, capability.Transfer)
+		if !allowed {
+			return 0, supervisor.LaunchCapabilityDenied
+		}
+		if _, allowed = source.Derive(grant.Rights); !allowed {
+			return 0, supervisor.LaunchCapabilityDenied
+		}
 	}
 	image, found := initramfs.Find(bootuefi.Initramfs(&bootInfo), path[1:])
 	if !found {
@@ -178,7 +197,32 @@ func spawnExecutable(path string) (process.ID, supervisor.LaunchStatus) {
 	pid := nextProcessID
 	spawned := &spawnedProcesses[spawnedProcessCount]
 	*spawned, ok = process.New(pid, process.AddressSpace{Root: root})
-	if !ok || !processRegistry.Add(spawned) {
+	if !ok || spawned.Handles().Available() < len(grants) {
+		return 0, supervisor.LaunchProcessFailed
+	}
+	var installed [supervisor.MaxCapabilities]handle.ID
+	for index, grant := range grants {
+		installed[index], ok = bootInitProcess.Handles().Transfer(spawned.Handles(), grant.Handle, grant.Type, grant.Rights)
+		if !ok {
+			for rollback := 0; rollback < index; rollback++ {
+				spawned.Handles().Close(installed[rollback])
+			}
+			return 0, supervisor.LaunchCapabilityInstallFailed
+		}
+	}
+	for index, grant := range grants {
+		installedCapability, found := spawned.Handles().Lookup(installed[index], grant.Type, grant.Rights)
+		if !found || installedCapability.Rights() != grant.Rights {
+			for rollback := range grants {
+				spawned.Handles().Close(installed[rollback])
+			}
+			return 0, supervisor.LaunchCapabilityInstallFailed
+		}
+	}
+	if !processRegistry.Add(spawned) {
+		for index := range grants {
+			spawned.Handles().Close(installed[index])
+		}
 		return 0, supervisor.LaunchProcessFailed
 	}
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
@@ -187,6 +231,9 @@ func spawnExecutable(path string) (process.ID, supervisor.LaunchStatus) {
 	}
 	spawnedProcessCount++
 	nextProcessID++
+	if len(grants) != 0 {
+		capabilityManifestOK = 1
+	}
 	return pid, supervisor.LaunchOK
 }
 
@@ -594,6 +641,7 @@ func main() {
 	var lifecycleCreated bool
 	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
 	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleChannelID, capability.Read|capability.Write|capability.Wait))
+	serviceDeviceHandle, serviceDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Write|capability.Transfer))
 	lifecycleBound := endpointBindings.Bind(lifecycleChannelID, rootInit, 0, 1)
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
@@ -610,7 +658,8 @@ func main() {
 	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
 	_, replyReceiveStatus := registeredChannel.Receive(0)
 	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !channelsBound ||
-		!lifecycleCreated || !lifecycleInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) || !wireEncoded || !wireDecoded ||
+		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
 		console.WriteString("PANIC: typed IPC request/reply failed\n")
@@ -957,7 +1006,7 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || userspaceSupervisorOK == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
 		deliverProcessExits()
 		consumeInitControl()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
@@ -984,6 +1033,7 @@ func main() {
 	console.WriteString("SUPERVISOR_CRASH_EVENT_OK\n")
 	console.WriteString("LIFECYCLE_IPC_OK\n")
 	console.WriteString("INIT_EXECUTABLE_LOOKUP_OK\n")
+	console.WriteString("INIT_CAPABILITY_MANIFEST_OK\n")
 	console.WriteString("PID1_SERVICE_LAUNCH_OK\n")
 	if amd64.UserPreemptions() == 0 {
 		console.WriteString("PANIC: userspace task was not preempted\n")

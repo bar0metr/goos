@@ -55,6 +55,7 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'USERSPACE_SUPERVISOR_OK' "$log" 2>/dev/null && \
 		grep -q 'LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_EXECUTABLE_LOOKUP_OK' "$log" 2>/dev/null && \
+		grep -q 'INIT_CAPABILITY_MANIFEST_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \

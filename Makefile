@@ -140,6 +140,7 @@ docs:
 	@test -f docs/adr/0021-pid1-lifecycle-control-plane.md
 	@test -f docs/adr/0022-initramfs-executable-spawn.md
 	@test -f docs/adr/0023-freestanding-tinygo-pid1.md
+	@test -f docs/adr/0024-spawn-capability-manifests.md
 	@test -f docs/development/building.md
 
 clean:
