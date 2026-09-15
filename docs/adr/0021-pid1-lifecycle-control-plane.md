@@ -22,7 +22,6 @@ new Process and Task, and replies on the original correlation.
 
 Service restart is no longer initiated directly from the kernel polling loop:
 it requires an authorized PID 1 request and produces a correlated result.
-Endpoint storage is fixed at two endpoints for every bounded channel. The
-current launch backend supports the bootstrap crash-probe image; resolving
-arbitrary service executables and running the complete policy state machine in
-PID 1 remain subsequent work.
+Endpoint storage is fixed at two endpoints for every bounded channel. ADR 0022
+replaces the bootstrap-only launch backend with bounded executable lookup.
+Running the complete policy state machine in PID 1 remains subsequent work.

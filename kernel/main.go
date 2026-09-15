@@ -24,51 +24,50 @@ import (
 )
 
 var (
-	bootInfo                 boot.Info
-	pageAllocator            pmm.Allocator
-	demoTaskA                uint64
-	demoTaskB                uint64
-	demoABlocked             uint64
-	demoAResumed             uint64
-	userExited               uint64
-	kernelCallData           [kcall.MaxDebugWrite]byte
-	nativeImageData          [1024]byte
-	faultImageData           [1024]byte
-	boundedChannel           ipc.Channel
-	ipcWireData              [ipc.WireMaxSize]byte
-	sharedRegistry           shmem.Registry
-	channelRegistry          ipc.Registry
-	lifecycleChannel         *ipc.Channel
-	lifecycleChannelID       uint64
-	bootProcessA             *process.Process
-	bootProcessB             *process.Process
-	bootInitProcess          *process.Process
-	processRegistry          process.Registry
-	ipcWaitSet               ipc.WaitSet
-	ipcWakeResults           [ipc.MaxWaiters]ipc.WaitResult
-	ipcWaitStatus            [sched.MaxTasks]kcall.Status
-	bootRAMFS                ramfs.FileSystem
-	deviceRAMFS              ramfs.FileSystem
-	bootVFS                  vfs.Namespace
-	ramfsReadback            [16]byte
-	vfsReadback              [16]byte
-	bootSupervisor           supervisor.Manager
-	bootServicePID           uint64
-	initAnnounced            uint64
-	processExitDelivered     uint64
-	supervisorExitDelivered  uint64
-	lifecycleExitCode        uint64
-	serviceLaunchRequested   uint64
-	serviceLaunchConfirmed   uint64
-	serviceLaunchCorrelation uint64
-	initSendObserved         uint64
-	initSendStatus           kcall.Status
-	initExitObserved         uint64
-	initExitCode             uint64
-	faultImageSize           int
-	kernelPageTable          uint64
-	restartedProcess         process.Process
-	endpointBindings         ipc.EndpointTable
+	bootInfo                boot.Info
+	pageAllocator           pmm.Allocator
+	demoTaskA               uint64
+	demoTaskB               uint64
+	demoABlocked            uint64
+	demoAResumed            uint64
+	userExited              uint64
+	kernelCallData          [kcall.MaxDebugWrite]byte
+	nativeImageData         [1024]byte
+	faultImageData          [1024]byte
+	boundedChannel          ipc.Channel
+	ipcWireData             [ipc.WireMaxSize]byte
+	sharedRegistry          shmem.Registry
+	channelRegistry         ipc.Registry
+	lifecycleChannel        *ipc.Channel
+	lifecycleChannelID      uint64
+	bootProcessA            *process.Process
+	bootProcessB            *process.Process
+	bootInitProcess         *process.Process
+	processRegistry         process.Registry
+	ipcWaitSet              ipc.WaitSet
+	ipcWakeResults          [ipc.MaxWaiters]ipc.WaitResult
+	ipcWaitStatus           [sched.MaxTasks]kcall.Status
+	bootRAMFS               ramfs.FileSystem
+	deviceRAMFS             ramfs.FileSystem
+	bootVFS                 vfs.Namespace
+	ramfsReadback           [16]byte
+	vfsReadback             [16]byte
+	bootSupervisor          supervisor.Manager
+	bootServicePID          uint64
+	initAnnounced           uint64
+	processExitDelivered    uint64
+	supervisorExitDelivered uint64
+	serviceLaunchRequested  uint64
+	serviceLaunchConfirmed  uint64
+	initSendObserved        uint64
+	initSendStatus          kcall.Status
+	initExitObserved        uint64
+	initExitCode            uint64
+	kernelPageTable         uint64
+	spawnedProcesses        [process.MaxProcesses]process.Process
+	spawnedProcessCount     uint8
+	nextProcessID           process.ID = 4
+	endpointBindings        ipc.EndpointTable
 )
 
 func launchBootService(spec supervisor.LaunchSpec) (uint64, bool) {
@@ -126,8 +125,8 @@ func deliverProcessExits() {
 		if event.Process == 3 && lifecycleChannel != nil {
 			message, encoded := supervisor.ProcessExited(uint64(event.Process), event.Code)
 			if encoded && lifecycleChannel.Send(0, message, nil, nil, nil) == ipc.StatusOK {
-				lifecycleExitCode = event.Code
 				wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
+				supervisorExitDelivered = 1
 			}
 		}
 	}
@@ -142,37 +141,47 @@ func consumeInitControl() {
 		return
 	}
 	event, valid := supervisor.DecodeLifecycle(message)
-	if !valid || event.Operation != supervisor.LifecycleLaunch || event.Process != 3 {
+	if !valid || event.Operation != supervisor.LifecycleLaunch {
 		return
 	}
-	if bootSupervisor.Exit(3, lifecycleExitCode, amd64.TimerTicks()) == supervisor.StatusOK {
-		serviceLaunchRequested = 1
-		serviceLaunchCorrelation = message.Correlation
-		supervisorExitDelivered = 1
+	serviceLaunchRequested = 1
+	pid, launchStatus := spawnExecutable(event.ExecutablePath())
+	reply, encoded := supervisor.LaunchResult(uint64(pid), launchStatus, message.Correlation)
+	if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
+		wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
+		serviceLaunchConfirmed = 1
 	}
 }
 
-func launchRestartedService(supervisor.LaunchSpec) (uint64, bool) {
-	if faultImageSize == 0 || kernelPageTable == 0 {
-		return 0, false
+func spawnExecutable(path string) (process.ID, supervisor.LaunchStatus) {
+	if kernelPageTable == 0 || spawnedProcessCount == uint8(len(spawnedProcesses)) || nextProcessID == 0 {
+		return 0, supervisor.LaunchResourceExhausted
+	}
+	image, found := initramfs.Find(bootuefi.Initramfs(&bootInfo), path[1:])
+	if !found {
+		return 0, supervisor.LaunchNotFound
 	}
 	root, ok := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
 	if !ok {
-		return 0, false
+		return 0, supervisor.LaunchAddressSpaceFailed
 	}
-	loaded, ok := loader.LoadNative(&pageAllocator, root, faultImageData[:faultImageSize])
+	loaded, ok := loader.LoadNative(&pageAllocator, root, image)
 	if !ok {
-		return 0, false
+		return 0, supervisor.LaunchInvalidImage
 	}
-	restartedProcess, ok = process.New(4, process.AddressSpace{Root: root})
-	if !ok || !processRegistry.Add(&restartedProcess) {
-		return 0, false
+	pid := nextProcessID
+	spawned := &spawnedProcesses[spawnedProcessCount]
+	*spawned, ok = process.New(pid, process.AddressSpace{Root: root})
+	if !ok || !processRegistry.Add(spawned) {
+		return 0, supervisor.LaunchProcessFailed
 	}
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
-	if !ok || !processRegistry.BindTask(4, sched.TaskID(task)) {
-		return 0, false
+	if !ok || !processRegistry.BindTask(pid, sched.TaskID(task)) {
+		return 0, supervisor.LaunchTaskFailed
 	}
-	return 4, true
+	spawnedProcessCount++
+	nextProcessID++
+	return pid, supervisor.LaunchOK
 }
 
 func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
@@ -961,7 +970,6 @@ func main() {
 			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
 		},
 	})
-	faultImageSize = len(faultBytes)
 	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), "system/init")
 	if !initDiscovered {
 		console.WriteString("PANIC: init image not found in initramfs\n")
@@ -1009,13 +1017,6 @@ func main() {
 	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed == 0 {
 		deliverProcessExits()
 		consumeInitControl()
-		if serviceLaunchRequested != 0 && serviceLaunchConfirmed == 0 && bootSupervisor.StartReady(amd64.TimerTicks(), launchRestartedService) == 1 {
-			reply, encoded := supervisor.LaunchResult(4, 0, serviceLaunchCorrelation)
-			if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
-				wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
-				serviceLaunchConfirmed = 1
-			}
-		}
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")
 			console.WriteHex(uint64(initSendStatus))
@@ -1039,6 +1040,7 @@ func main() {
 	console.WriteString("PROCESS_EXIT_EVENT_OK\n")
 	console.WriteString("SUPERVISOR_CRASH_EVENT_OK\n")
 	console.WriteString("LIFECYCLE_IPC_OK\n")
+	console.WriteString("INIT_EXECUTABLE_LOOKUP_OK\n")
 	console.WriteString("PID1_SERVICE_LAUNCH_OK\n")
 	if amd64.UserPreemptions() == 0 {
 		console.WriteString("PANIC: userspace task was not preempted\n")

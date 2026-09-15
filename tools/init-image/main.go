@@ -20,7 +20,7 @@ func main() {
 	lifecycleMessage := []byte("INIT_LIFECYCLE_IPC_OK\n")
 	launchMessage := []byte("INIT_SERVICE_LAUNCH_OK\n")
 	startedMessage := []byte("INIT_SERVICE_STARTED_OK\n")
-	request, ok := supervisor.LaunchRequest(3, 1)
+	request, ok := supervisor.LaunchRequest(3, "/system/fault-probe", 1)
 	if !ok {
 		fmt.Fprintln(os.Stderr, "encode launch request failed")
 		os.Exit(1)

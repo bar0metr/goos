@@ -21,9 +21,13 @@ scoped VFS with mount routing, path resolution, open-file objects, caches, and
 its versioned IPC protocol are complete. The bounded init supervision policy
 core, UEFI initramfs discovery, ring-3 PID 1 launch, and task-to-process death
 notifications are also complete. PID 1 now receives lifecycle events and drives
-a real service restart through correlated, capability-protected IPC. The next
-slice adds general executable lookup/launch for declared services, then begins
-the native shell.
+a real service restart through correlated, capability-protected IPC. Launch
+requests carry a validated absolute executable path; the kernel uses a
+bounded process pool, assigns fresh process identifiers, validates the selected
+native image, and creates its address space and initial task. The next slice
+provides a freestanding amd64 userspace runtime and moves the complete
+supervision policy loop into the PID 1 image. The native shell follows that
+boundary correction.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

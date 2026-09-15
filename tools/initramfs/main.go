@@ -8,15 +8,19 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE OUTPUT")
+	if len(os.Args) != 4 {
+		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE SERVICE_IMAGE OUTPUT")
 		os.Exit(2)
 	}
 	image, err := os.ReadFile(os.Args[1])
 	if err != nil {
 		fail(err)
 	}
-	file, err := os.Create(os.Args[2])
+	service, err := os.ReadFile(os.Args[2])
+	if err != nil {
+		fail(err)
+	}
+	file, err := os.Create(os.Args[3])
 	if err != nil {
 		fail(err)
 	}
@@ -25,13 +29,18 @@ func main() {
 	headers := []tar.Header{
 		{Name: "system/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/init", Mode: 0o555, Size: int64(len(image)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/fault-probe", Mode: 0o555, Size: int64(len(service)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 	}
 	for index := range headers {
 		if err := writer.WriteHeader(&headers[index]); err != nil {
 			fail(err)
 		}
 		if headers[index].Typeflag == tar.TypeReg {
-			if _, err := writer.Write(image); err != nil {
+			payload := image
+			if headers[index].Name == "system/fault-probe" {
+				payload = service
+			}
+			if _, err := writer.Write(payload); err != nil {
 				fail(err)
 			}
 		}

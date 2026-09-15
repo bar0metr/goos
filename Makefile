@@ -9,6 +9,7 @@ EFI_BOOT := $(ISO_ROOT)/EFI/BOOT
 KERNEL := $(KERNEL_DIR)/goos.efi
 KERNEL_IO := $(KERNEL_DIR)/io.o
 INIT_IMAGE := $(BUILD_DIR)/userspace/init
+SERVICE_IMAGE := $(BUILD_DIR)/userspace/fault-probe
 EFI_IMAGE := $(BUILD_DIR)/iso/efi.img
 ISO_BOOT_IMAGE := $(ISO_ROOT)/efi.img
 ISO := $(BUILD_DIR)/goos-x86_64.iso
@@ -35,16 +36,20 @@ $(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE)
 
 $(INIT_IMAGE): tools/init-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/init-image $@
 
+$(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	@mkdir -p $(BUILD_DIR)/userspace
+	$(BUILD_ENV) go run ./tools/service-image $@
+
 initramfs: userspace
 	@mkdir -p $(BUILD_DIR)/initramfs/root/system
 	@cp $(INIT_IMAGE) $(BUILD_DIR)/initramfs/root/system/init
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
 
 $(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
@@ -124,6 +129,7 @@ docs:
 	@test -f docs/adr/0019-bounded-init-supervision.md
 	@test -f docs/adr/0020-uefi-initramfs-and-process-exit-events.md
 	@test -f docs/adr/0021-pid1-lifecycle-control-plane.md
+	@test -f docs/adr/0022-initramfs-executable-spawn.md
 	@test -f docs/development/building.md
 
 clean:

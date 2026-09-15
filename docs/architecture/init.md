@@ -28,6 +28,12 @@ then sends a typed lifecycle notification over a channel available only to PID
 1. Init blocks on that channel, issues a correlated launch request, waits for
 the result, and continues only after the replacement Process and Task exist.
 
-The current launch backend supports the bootstrap crash-probe image. General
-executable lookup through VFS and moving the complete policy state machine into
-the PID 1 image remain unfinished.
+Launch requests identify an executable by a normalized absolute path. The
+kernel resolves that path from the immutable boot archive, validates
+the native image, assigns a fresh process identifier from a bounded pool, and
+creates a new address space and initial task. Empty components and parent
+traversal are rejected.
+
+The full policy state machine is still linked into the bootstrap kernel test
+path. Moving it into PID 1 requires a freestanding amd64 userspace runtime; the
+current PID 1 image remains a deliberately minimal generated native program.
