@@ -300,23 +300,40 @@ goos_user_call:
 	 pushq %rdx
 	 pushq %rcx
 	 pushq %rax
-	 subq $40, %rsp
-	 movq 40(%rsp), %rcx
-	 movq 88(%rsp), %rdx
-	 movq 80(%rsp), %r8
-	 movq 56(%rsp), %r10
+	 subq $48, %rsp
+	 cmpq $5, 48(%rsp)
+	 je .user_call_wait
+	 movq 48(%rsp), %rcx
+	 movq 96(%rsp), %rdx
+	 movq 88(%rsp), %r8
+	 movq 64(%rsp), %r10
 	 movq %r10, goos_kernel_call_arg2(%rip)
 	 movq goos_current_task(%rip), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
 	 callq goos_dispatch_kernel_call
-	 movq $0, 40(%rsp)
-	 movl %eax, 40(%rsp)
-	 movq $0, 56(%rsp)
+	 jmp .user_call_result
+.user_call_wait:
+	 movq 96(%rsp), %rcx
+	 movq 88(%rsp), %rdx
+	 movq 64(%rsp), %r8
+	 movq goos_current_task(%rip), %rax
+	 leaq goos_task_roots(%rip), %r9
+	 movq (%r9,%rax,8), %r9
+	 orq %rax, %r9
+	 callq goos_dispatch_ipc_wait
+.user_call_result:
+	 movq $0, 48(%rsp)
+	 movl %eax, 48(%rsp)
 	 shrq $32, %rax
 	 testq %rax, %rax
-	 jnz .user_exit
-	 addq $40, %rsp
+	 jz .user_return
+	 cmpq $1, %rax
+	 je .user_exit
+	 jmp .user_block
+.user_return:
+	 movq $0, 64(%rsp)
+	 addq $48, %rsp
 	 popq %rax
 	 popq %rcx
 	 popq %rdx
@@ -333,8 +350,57 @@ goos_user_call:
 	 popq %r14
 	 popq %r15
 	 iretq
+.user_block:
+	 movq %rsp, %r10
+	 subq $160, %rsp
+	 movq 160(%r10), %rax
+	 movq %rax, 0(%rsp)
+	 movq 152(%r10), %rax
+	 movq %rax, 8(%rsp)
+	 movq 144(%r10), %rax
+	 movq %rax, 16(%rsp)
+	 movq 136(%r10), %rax
+	 movq %rax, 24(%rsp)
+	 movq 128(%r10), %rax
+	 movq %rax, 32(%rsp)
+	 movq 120(%r10), %rax
+	 movq %rax, 40(%rsp)
+	 movq 112(%r10), %rax
+	 movq %rax, 48(%rsp)
+	 movq 104(%r10), %rax
+	 movq %rax, 56(%rsp)
+	 movq 96(%r10), %rax
+	 movq %rax, 64(%rsp)
+	 movq 88(%r10), %rax
+	 movq %rax, 72(%rsp)
+	 movq 80(%r10), %rax
+	 movq %rax, 80(%rsp)
+	 movq 64(%r10), %rax
+	 movq %rax, 88(%rsp)
+	 movq 56(%r10), %rax
+	 movq %rax, 96(%rsp)
+	 movq 72(%r10), %rax
+	 movq %rax, 104(%rsp)
+	 movq $5, 112(%rsp)
+	 movq 168(%r10), %rax
+	 subq $2, %rax
+	 movq %rax, 120(%rsp)
+	 movq 176(%r10), %rax
+	 movq %rax, 128(%rsp)
+	 movq 184(%r10), %rax
+	 movq %rax, 136(%rsp)
+	 movq 192(%r10), %rax
+	 movq %rax, 144(%rsp)
+	 movq 200(%r10), %rax
+	 movq %rax, 152(%rsp)
+	 movq goos_current_task(%rip), %rcx
+	 leaq goos_task_contexts(%rip), %rdx
+	 movq %rsp, (%rdx,%rcx,8)
+	 btrq %rcx, goos_runnable_mask(%rip)
+	 movq %rcx, %rax
+	 jmp .user_exit_find_next
 .user_exit:
-    addq $40, %rsp
+    addq $48, %rsp
     movq goos_current_task(%rip), %rcx
     btrq %rcx, goos_runnable_mask(%rip)
     movq %rcx, %rax

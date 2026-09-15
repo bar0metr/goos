@@ -38,8 +38,15 @@ mapped page before data crosses the privilege boundary. Native calls currently
 reject attached handles; in-kernel transfers retain the explicit type and
 rights contract described below.
 
-The fixed-capacity IPC wait set records a task, channel side, and absolute timer
-deadline. Registration plus scheduler blocking is transactional. Message
-arrival, endpoint closure, and deadline expiry produce distinct wake reasons.
-Connecting those primitives to the native interrupt-return path remains the
-next scheduler slice.
+`IPCWaitReceive` takes a fixed 24-byte descriptor containing the destination
+buffer, its capacity, and a relative timeout in timer ticks. An empty channel
+registers the current task in the fixed-capacity wait set and returns the
+`Block` action to the interrupt bridge. The bridge converts the kernel-call
+frame into the canonical scheduler frame, rewinds RIP to retry the call, and
+switches to another runnable task. Message arrival and timer expiry wake the
+task. The retry either consumes the queued message or returns the stored typed
+timeout status.
+
+Calls from the interrupt bridge obey Win64's 16-byte stack alignment. This is
+explicit rather than dependent on the generated Go function's current stack
+frame size.

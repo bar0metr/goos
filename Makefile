@@ -106,6 +106,7 @@ docs:
 	@test -f docs/adr/0011-native-image-format.md
 	@test -f docs/adr/0012-versioned-typed-ipc.md
 	@test -f docs/adr/0013-shared-memory-objects.md
+	@test -f docs/adr/0015-restartable-ipc-waits.md
 	@test -f docs/development/building.md
 
 clean:

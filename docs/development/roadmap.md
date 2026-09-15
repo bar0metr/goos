@@ -12,10 +12,10 @@ Exit lifecycle, isolated user-fault termination, and a validated versioned
 native image loader, versioned typed IPC, bounded request/reply queues,
 correlation validation, handle passing, peer-death reporting, and capability-
 controlled shared-memory objects, capability-checked IPC kernel calls, bounded
-channel objects, and scheduler-integrated IPC wait/deadline bookkeeping are
-complete. The next slice connects blocking receive and timer expiry to the
-native interrupt-return path, then introduces the userspace TTY service,
-followed by RAMFS, VFS, init, and a native shell.
+channel objects, scheduler-integrated IPC wait/deadline bookkeeping, blocking
+native receive, restartable kernel-call frames, message wakeup, and timer-driven
+timeout wakeup are complete. The next slice introduces the userspace TTY
+service, followed by RAMFS, VFS, init, and a native shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

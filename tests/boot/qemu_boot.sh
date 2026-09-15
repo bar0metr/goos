@@ -49,6 +49,8 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'NATIVE_IMAGE_LOADER_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_COPYIN_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_DEBUG_WRITE_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_WAIT_TIMEOUT_OK' "$log" 2>/dev/null && \
+		grep -q 'IPC_WAIT_MESSAGE_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_EXIT_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_PREEMPT_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_CR3_SCHED_OK' "$log" 2>/dev/null && \

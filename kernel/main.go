@@ -27,14 +27,17 @@ var (
 	demoAResumed    uint64
 	userExited      uint64
 	kernelCallData  [kcall.MaxDebugWrite]byte
-	nativeImageData [512]byte
-	faultImageData  [256]byte
+	nativeImageData [1024]byte
+	faultImageData  [1024]byte
 	boundedChannel  ipc.Channel
 	ipcWireData     [ipc.WireMaxSize]byte
 	sharedRegistry  shmem.Registry
 	channelRegistry ipc.Registry
 	bootProcessA    *process.Process
 	bootProcessB    *process.Process
+	ipcWaitSet      ipc.WaitSet
+	ipcWakeResults  [ipc.MaxWaiters]ipc.WaitResult
+	ipcWaitStatus   [sched.MaxTasks]kcall.Status
 )
 
 type nativeCallHandler struct {
@@ -98,7 +101,86 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	if !ok || message.HandleCount != 0 {
 		return kcall.StatusCorruptData
 	}
-	return endpoint.Send(side, message, owner.Handles(), peer.Handles(), nil)
+	status = endpoint.Send(side, message, owner.Handles(), peer.Handles(), nil)
+	if status == ipc.StatusOK {
+		cap, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Write)
+		if found {
+			wakeIPCWaiters(cap.Object(), side^1, ipc.WaitMessage)
+		}
+	}
+	return status
+}
+
+func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, size uint64, task uint64) (kcall.Status, bool) {
+	if size != 24 || task >= sched.MaxTasks {
+		return kcall.StatusInvalidArgument, false
+	}
+	if ipcWaitStatus[task] != kcall.StatusOK {
+		status := ipcWaitStatus[task]
+		ipcWaitStatus[task] = kcall.StatusOK
+		return status, false
+	}
+	var data [24]byte
+	if !vm.CopyIn(handler.root, descriptor, data[:]) {
+		return kcall.StatusInvalidArgument, false
+	}
+	buffer := decodeUint64(data[0:8])
+	capacity := decodeUint64(data[8:16])
+	timeout := decodeUint64(data[16:24])
+	status := handler.IPCReceive(channel, buffer, capacity)
+	if status != kcall.StatusNotFound {
+		return status, false
+	}
+	if timeout == 0 {
+		return kcall.StatusTimeout, false
+	}
+	endpoint, side, owner, _, endpointStatus := handler.endpoint(channel, capability.Read|capability.Wait)
+	if endpointStatus != kcall.StatusOK || endpoint == nil {
+		return endpointStatus, false
+	}
+	cap, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Read|capability.Wait)
+	if !found {
+		return kcall.StatusPermissionDenied, false
+	}
+	now := amd64.TimerTicks()
+	deadline := now + timeout
+	if deadline < now || !ipcWaitSet.Add(sched.TaskID(task+1), cap.Object(), side, deadline) {
+		return kcall.StatusResourceExhausted, false
+	}
+	return kcall.StatusNotFound, true
+}
+
+func decodeUint64(data []byte) uint64 {
+	return uint64(data[0]) | uint64(data[1])<<8 | uint64(data[2])<<16 | uint64(data[3])<<24 |
+		uint64(data[4])<<32 | uint64(data[5])<<40 | uint64(data[6])<<48 | uint64(data[7])<<56
+}
+
+func putUint64(data []byte, value uint64) {
+	for index := 0; index < 8; index++ {
+		data[index] = byte(value >> uint(index*8))
+	}
+}
+
+func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
+	count := ipcWaitSet.Wake(channel, side, reason, ipcWakeResults[:])
+	for index := 0; index < count; index++ {
+		task := uint64(ipcWakeResults[index].Task - 1)
+		if reason == ipc.WaitPeerDied {
+			ipcWaitStatus[task] = kcall.StatusPeerDied
+		}
+		amd64.WakeTask(task)
+		ipcWakeResults[index] = ipc.WaitResult{}
+	}
+}
+
+func expireIPCWaiters() {
+	count := ipcWaitSet.Expire(amd64.TimerTicks(), ipcWakeResults[:])
+	for index := 0; index < count; index++ {
+		task := uint64(ipcWakeResults[index].Task - 1)
+		ipcWaitStatus[task] = kcall.StatusTimeout
+		amd64.WakeTask(task)
+		ipcWakeResults[index] = ipc.WaitResult{}
+	}
 }
 
 func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capacity uint64) kcall.Status {
@@ -133,6 +215,16 @@ func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) ui
 	return uint64(result.Action)<<32 | uint64(result.Status)
 }
 
+//export goos_dispatch_ipc_wait
+func dispatchIPCWait(channel uint64, descriptor uint64, size uint64, rootAndTask uint64) uint64 {
+	status, blocked := waitReceive(nativeCallHandler{root: rootAndTask &^ 0xfff}, channel, descriptor, size, rootAndTask&0xfff)
+	action := kcall.ActionReturn
+	if blocked {
+		action = kcall.ActionBlock
+	}
+	return uint64(action)<<32 | uint64(status)
+}
+
 //export goos_demo_task_a
 func runDemoTaskA() {
 	for demoTaskA < 3 {
@@ -153,6 +245,7 @@ func runDemoTaskA() {
 func runDemoTaskB() {
 	for {
 		demoTaskB++
+		expireIPCWaiters()
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
 			amd64.WakeTask(1)
 		}
@@ -342,6 +435,12 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	if channelA != handle.ID(0x0000000100000002) || channelB != handle.ID(0x0000000100000002) {
+		console.WriteString("PANIC: bootstrap channel handle layout changed\n")
+		for {
+			amd64.Halt()
+		}
+	}
 	console.WriteString("IPC_WIRE_OK\n")
 	console.WriteString("IPC_REQUEST_REPLY_OK\n")
 	console.WriteString("IPC_HANDLE_TRANSFER_OK\n")
@@ -438,7 +537,15 @@ func main() {
 		0xbe, 0x14, 0x00, 0x00, 0x00, // mov esi, 20.
 		0xcd, 0x80,
 		0x85, 0xc0, // test eax, eax.
-		0x74, 0x02, // je exit.
+		0x74, 0x02, // je IPC send.
+		0x0f, 0x0b,
+		0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax, 3: IPCSend.
+		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
+		0x48, 0xbe, 0x14, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+20.
+		0xba, 0x20, 0x00, 0x00, 0x00, // mov edx, WireHeaderSize.
+		0xcd, 0x80,
+		0x85, 0xc0,
+		0x74, 0x02,
 		0x0f, 0x0b,
 		0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1: Exit.
 		0x31, 0xff, // xor edi, edi: status 0.
@@ -446,14 +553,53 @@ func main() {
 		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
 	}
 	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
-	faultProgram := []byte{0x0f, 0x0b}
+	userData := [20 + ipc.WireHeaderSize]byte{}
+	copy(userData[:], userMessage)
+	userNotification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
+	userWireSize, userWireEncoded := ipc.Encode(userNotification, userData[len(userMessage):])
+	faultProgram := []byte{
+		0xb8, 0x05, 0x00, 0x00, 0x00,
+		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0xba, 0x18, 0x00, 0x00, 0x00,
+		0xcd, 0x80,
+		0x83, 0xf8, 0x06,
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0xb8, 0x02, 0x00, 0x00, 0x00,
+		0x48, 0xbf, 0x30, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0xbe, 0x14, 0x00, 0x00, 0x00,
+		0xcd, 0x80,
+		0xb8, 0x05, 0x00, 0x00, 0x00,
+		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x18, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0xba, 0x18, 0x00, 0x00, 0x00,
+		0xcd, 0x80,
+		0x85, 0xc0,
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0xb8, 0x02, 0x00, 0x00, 0x00,
+		0x48, 0xbf, 0x44, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0xbe, 0x14, 0x00, 0x00, 0x00,
+		0xcd, 0x80,
+		0x0f, 0x0b,
+	}
+	faultData := [88]byte{}
+	putUint64(faultData[0:8], vm.UserStackAddress)
+	putUint64(faultData[8:16], ipc.WireMaxSize)
+	putUint64(faultData[16:24], 5)
+	putUint64(faultData[24:32], vm.UserStackAddress)
+	putUint64(faultData[32:40], ipc.WireMaxSize)
+	putUint64(faultData[40:48], 1000)
+	copy(faultData[48:68], []byte("IPC_WAIT_TIMEOUT_OK\n"))
+	copy(faultData[68:88], []byte("IPC_WAIT_MESSAGE_OK\n"))
 	nativeBytes, nativeEncoded := loader.EncodeNative(nativeImageData[:], loader.ImageSource{
 		Entry:    vm.UserCodeAddress,
 		StackTop: vm.UserStackAddress + vm.PageSize - 16,
 		Segments: []loader.SegmentSource{
 			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(userProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: userProgram[:]},
 			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
-			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(userMessage)), Flags: loader.SegmentReadable, Data: userMessage},
+			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(userData)), Flags: loader.SegmentReadable, Data: userData[:]},
 		},
 	})
 	faultBytes, faultEncoded := loader.EncodeNative(faultImageData[:], loader.ImageSource{
@@ -462,11 +608,12 @@ func main() {
 		Segments: []loader.SegmentSource{
 			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(faultProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: faultProgram},
 			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
+			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
 		},
 	})
 	loadedA, loadedImageA := loader.LoadNative(&pageAllocator, rootA, nativeBytes)
 	loadedB, loadedImageB := loader.LoadNative(&pageAllocator, rootB, faultBytes)
-	if !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
+	if !userWireEncoded || userWireSize != ipc.WireHeaderSize || !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
 		console.WriteString("PANIC: native user image setup failed\n")
 		for {
 			amd64.Halt()

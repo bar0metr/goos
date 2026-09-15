@@ -9,6 +9,7 @@ const (
 	OperationDebugWrite
 	OperationIPCSend
 	OperationIPCReceive
+	OperationIPCWaitReceive
 )
 
 type Status uint64
@@ -32,6 +33,7 @@ type Action uint8
 const (
 	ActionReturn Action = iota
 	ActionExit
+	ActionBlock
 )
 
 type Request struct {
