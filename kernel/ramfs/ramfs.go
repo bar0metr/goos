@@ -40,6 +40,23 @@ type Entry struct {
 	Size uint8
 }
 
+// Name is the allocation-free representation used at filesystem boundaries.
+// Its fields are private so every value accepted by a backend is valid.
+type Name struct {
+	data [MaxName]byte
+	size uint8
+}
+
+func MakeName(value []byte) (Name, bool) {
+	var name Name
+	if !validName(value) {
+		return name, false
+	}
+	copy(name.data[:], value)
+	name.size = uint8(len(value))
+	return name, true
+}
+
 type node struct {
 	parent     NodeID
 	generation uint32
@@ -71,19 +88,49 @@ func (fs *FileSystem) Root() NodeID {
 }
 
 func (fs *FileSystem) Create(parent NodeID, name []byte) (NodeID, Status) {
-	return fs.create(parent, name, KindFile)
+	value, ok := MakeName(name)
+	if !ok {
+		return 0, StatusInvalidArgument
+	}
+	return fs.CreateName(parent, value)
 }
 
 func (fs *FileSystem) Mkdir(parent NodeID, name []byte) (NodeID, Status) {
-	return fs.create(parent, name, KindDirectory)
+	value, ok := MakeName(name)
+	if !ok {
+		return 0, StatusInvalidArgument
+	}
+	return fs.MkdirName(parent, value)
 }
 
 func (fs *FileSystem) Open(parent NodeID, name []byte) (NodeID, Status) {
-	if _, status := fs.directory(parent); status != StatusOK || !validName(name) {
-		if status != StatusOK {
-			return 0, status
-		}
+	value, ok := MakeName(name)
+	if !ok {
 		return 0, StatusInvalidArgument
+	}
+	return fs.OpenName(parent, value)
+}
+
+func (fs *FileSystem) CreateName(parent NodeID, name Name) (NodeID, Status) {
+	if !name.valid() {
+		return 0, StatusInvalidArgument
+	}
+	return fs.createName(parent, name, KindFile)
+}
+
+func (fs *FileSystem) MkdirName(parent NodeID, name Name) (NodeID, Status) {
+	if !name.valid() {
+		return 0, StatusInvalidArgument
+	}
+	return fs.createName(parent, name, KindDirectory)
+}
+
+func (fs *FileSystem) OpenName(parent NodeID, name Name) (NodeID, Status) {
+	if !name.valid() {
+		return 0, StatusInvalidArgument
+	}
+	if _, status := fs.directory(parent); status != StatusOK {
+		return 0, status
 	}
 	for index := range fs.nodes {
 		if fs.nodes[index].used && fs.nodes[index].parent == parent && sameName(&fs.nodes[index], name) {
@@ -178,6 +225,17 @@ func (fs *FileSystem) ReadDir(parent NodeID, cursor int) (Entry, int, Status) {
 }
 
 func (fs *FileSystem) Rename(id NodeID, parent NodeID, name []byte) Status {
+	value, ok := MakeName(name)
+	if !ok {
+		return StatusInvalidArgument
+	}
+	return fs.RenameName(id, parent, value)
+}
+
+func (fs *FileSystem) RenameName(id NodeID, parent NodeID, name Name) Status {
+	if !name.valid() {
+		return StatusInvalidArgument
+	}
 	entry, status := fs.lookup(id)
 	if status != StatusOK || id == fs.Root() {
 		if status != StatusOK {
@@ -185,13 +243,10 @@ func (fs *FileSystem) Rename(id NodeID, parent NodeID, name []byte) Status {
 		}
 		return StatusInvalidArgument
 	}
-	if _, status = fs.directory(parent); status != StatusOK || !validName(name) {
-		if status != StatusOK {
-			return status
-		}
-		return StatusInvalidArgument
+	if _, status = fs.directory(parent); status != StatusOK {
+		return status
 	}
-	if _, status = fs.Open(parent, name); status == StatusOK {
+	if _, status = fs.OpenName(parent, name); status == StatusOK {
 		return StatusAlreadyExists
 	}
 	if entry.kind == KindDirectory && fs.descendsFrom(parent, id) {
@@ -199,13 +254,24 @@ func (fs *FileSystem) Rename(id NodeID, parent NodeID, name []byte) Status {
 	}
 	entry.parent = parent
 	entry.name = [MaxName]byte{}
-	copy(entry.name[:], name)
-	entry.nameSize = uint8(len(name))
+	entry.name = name.data
+	entry.nameSize = name.size
 	return StatusOK
 }
 
 func (fs *FileSystem) Unlink(parent NodeID, name []byte) Status {
-	id, status := fs.Open(parent, name)
+	value, ok := MakeName(name)
+	if !ok {
+		return StatusInvalidArgument
+	}
+	return fs.UnlinkName(parent, value)
+}
+
+func (fs *FileSystem) UnlinkName(parent NodeID, name Name) Status {
+	if !name.valid() {
+		return StatusInvalidArgument
+	}
+	id, status := fs.OpenName(parent, name)
 	if status != StatusOK {
 		return status
 	}
@@ -225,17 +291,14 @@ func (fs *FileSystem) Unlink(parent NodeID, name []byte) Status {
 	return StatusOK
 }
 
-func (fs *FileSystem) create(parent NodeID, name []byte, kind Kind) (NodeID, Status) {
+func (fs *FileSystem) createName(parent NodeID, name Name, kind Kind) (NodeID, Status) {
 	if fs.Root() == 0 {
 		fs.Init()
 	}
-	if _, status := fs.directory(parent); status != StatusOK || !validName(name) {
-		if status != StatusOK {
-			return 0, status
-		}
-		return 0, StatusInvalidArgument
+	if _, status := fs.directory(parent); status != StatusOK {
+		return 0, status
 	}
-	if _, status := fs.Open(parent, name); status == StatusOK {
+	if _, status := fs.OpenName(parent, name); status == StatusOK {
 		return 0, StatusAlreadyExists
 	}
 	for index := 1; index < len(fs.nodes); index++ {
@@ -245,8 +308,7 @@ func (fs *FileSystem) create(parent NodeID, name []byte, kind Kind) (NodeID, Sta
 			if generation == 0 {
 				generation = 1
 			}
-			*entry = node{parent: parent, generation: generation, kind: kind, nameSize: uint8(len(name)), used: true}
-			copy(entry.name[:], name)
+			*entry = node{parent: parent, generation: generation, kind: kind, name: name.data, nameSize: name.size, used: true}
 			return fs.id(index), StatusOK
 		}
 	}
@@ -307,12 +369,16 @@ func validName(name []byte) bool {
 	return true
 }
 
-func sameName(entry *node, name []byte) bool {
-	if int(entry.nameSize) != len(name) {
+func (name Name) valid() bool {
+	return name.size != 0 && name.size <= MaxName
+}
+
+func sameName(entry *node, name Name) bool {
+	if entry.nameSize != name.size {
 		return false
 	}
-	for index, value := range name {
-		if entry.name[index] != value {
+	for index := 0; index < int(name.size); index++ {
+		if entry.name[index] != name.data[index] {
 			return false
 		}
 	}

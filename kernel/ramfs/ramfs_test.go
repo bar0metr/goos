@@ -93,6 +93,26 @@ func TestNodeCapacity(t *testing.T) {
 	}
 }
 
+func TestStructuredNameRejectsZeroValue(t *testing.T) {
+	fs := &FileSystem{}
+	root := fs.Init()
+	if _, status := fs.OpenName(root, Name{}); status != StatusInvalidArgument {
+		t.Fatalf("zero name accepted by OpenName: %d", status)
+	}
+	if _, status := fs.CreateName(root, Name{}); status != StatusInvalidArgument {
+		t.Fatalf("zero name accepted by CreateName: %d", status)
+	}
+	if _, status := fs.MkdirName(root, Name{}); status != StatusInvalidArgument {
+		t.Fatalf("zero name accepted by MkdirName: %d", status)
+	}
+	if status := fs.UnlinkName(root, Name{}); status != StatusInvalidArgument {
+		t.Fatalf("zero name accepted by UnlinkName: %d", status)
+	}
+	if status := fs.RenameName(root, root, Name{}); status != StatusInvalidArgument {
+		t.Fatalf("zero name accepted by RenameName: %d", status)
+	}
+}
+
 func BenchmarkMetadataCreateUnlink(b *testing.B) {
 	var fs FileSystem
 	root := fs.Init()

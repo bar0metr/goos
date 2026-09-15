@@ -31,16 +31,16 @@ const (
 type Handle uint64
 
 type Backend interface {
-	Open(parent ramfs.NodeID, name []byte) (ramfs.NodeID, ramfs.Status)
-	Create(parent ramfs.NodeID, name []byte) (ramfs.NodeID, ramfs.Status)
-	Mkdir(parent ramfs.NodeID, name []byte) (ramfs.NodeID, ramfs.Status)
+	OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status)
+	CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status)
+	MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status)
 	Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status)
 	Write(id ramfs.NodeID, offset uint64, data []byte) (int, ramfs.Status)
 	Truncate(id ramfs.NodeID, size uint64) ramfs.Status
 	Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status)
 	ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int, ramfs.Status)
-	Rename(id ramfs.NodeID, parent ramfs.NodeID, name []byte) ramfs.Status
-	Unlink(parent ramfs.NodeID, name []byte) ramfs.Status
+	RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+	UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
 type mount struct {
@@ -110,14 +110,18 @@ func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
 	}
 	mounted := &namespace.mounts[mountIndex]
 	node := mounted.root
-	for len(relative) != 0 {
-		name, rest := nextComponent(relative)
+	for relative < size {
+		component, rest := nextComponent(canonical[relative:size])
+		name, valid := ramfs.MakeName(component)
+		if !valid {
+			return 0, 0, StatusInvalidArgument
+		}
 		var backendStatus ramfs.Status
-		node, backendStatus = mounted.backend.Open(node, name)
+		node, backendStatus = mounted.backend.OpenName(node, name)
 		if backendStatus != ramfs.StatusOK {
 			return 0, 0, mapStatus(backendStatus)
 		}
-		relative = rest
+		relative = size - len(rest)
 	}
 	namespace.remember(canonical[:size], mountIndex, node)
 	return mountIndex, node, StatusOK
@@ -200,9 +204,9 @@ func (namespace *Namespace) Create(path []byte, directory bool) Status {
 		return status
 	}
 	if directory {
-		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.Mkdir(parent, name))
+		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.MkdirName(parent, name))
 	} else {
-		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.Create(parent, name))
+		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.CreateName(parent, name))
 	}
 	if status == StatusOK {
 		namespace.invalidate()
@@ -241,7 +245,7 @@ func (namespace *Namespace) Unlink(path []byte) Status {
 	if status != StatusOK {
 		return status
 	}
-	status = mapStatus(namespace.mounts[mountIndex].backend.Unlink(parent, name))
+	status = mapStatus(namespace.mounts[mountIndex].backend.UnlinkName(parent, name))
 	if status == StatusOK {
 		namespace.invalidate()
 	}
@@ -260,23 +264,26 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		}
 		return StatusInvalidArgument
 	}
-	status = mapStatus(namespace.mounts[sourceMount].backend.Rename(node, parent, name))
+	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
 	if status == StatusOK {
 		namespace.invalidate()
 	}
 	return status
 }
 
-func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, []byte, Status) {
+func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, ramfs.Name, Status) {
 	canonical, size, ok := canonicalPath(path)
 	if !ok || size == 1 {
-		return 0, 0, nil, StatusInvalidArgument
+		return 0, 0, ramfs.Name{}, StatusInvalidArgument
 	}
 	last := size - 1
 	for last > 0 && canonical[last] != '/' {
 		last--
 	}
-	name := canonical[last+1 : size]
+	name, ok := ramfs.MakeName(canonical[last+1 : size])
+	if !ok {
+		return 0, 0, ramfs.Name{}, StatusInvalidArgument
+	}
 	parentPath := canonical[:last]
 	if len(parentPath) == 0 {
 		parentPath = canonical[:1]
@@ -285,7 +292,7 @@ func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, []b
 	return mountIndex, parent, name, status
 }
 
-func (namespace *Namespace) selectMount(path []byte) (uint8, []byte, Status) {
+func (namespace *Namespace) selectMount(path []byte) (uint8, int, Status) {
 	selected := -1
 	selectedSize := -1
 	for index := range namespace.mounts {
@@ -296,11 +303,11 @@ func (namespace *Namespace) selectMount(path []byte) (uint8, []byte, Status) {
 		selected, selectedSize = index, int(entry.size)
 	}
 	if selected < 0 {
-		return 0, nil, StatusNotFound
+		return 0, 0, StatusNotFound
 	}
-	relative := path[selectedSize:]
-	for len(relative) != 0 && relative[0] == '/' {
-		relative = relative[1:]
+	relative := selectedSize
+	for relative < len(path) && path[relative] == '/' {
+		relative++
 	}
 	return uint8(selected), relative, StatusOK
 }

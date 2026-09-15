@@ -151,6 +151,20 @@ func BenchmarkUncachedResolve(b *testing.B) {
 	}
 }
 
+func TestResolveDoesNotAllocate(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	if namespace.Create([]byte("/zero-alloc"), false) != StatusOK {
+		t.Fatal("create failed")
+	}
+	if allocations := testing.AllocsPerRun(1000, func() {
+		if _, _, status := namespace.Resolve([]byte("//zero-alloc/./")); status != StatusOK {
+			t.Fatalf("resolve: %d", status)
+		}
+	}); allocations != 0 {
+		t.Fatalf("Resolve allocated: %v", allocations)
+	}
+}
+
 func TestProtocolRoundTripAndReservedFields(t *testing.T) {
 	message, ok := EncodeRequest(Request{Operation: OperationWrite, Rights: Write, Handle: 7, Offset: 4, Path: []byte("/tmp/x"), Data: []byte("data")}, 9)
 	if !ok {
