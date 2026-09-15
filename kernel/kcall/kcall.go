@@ -10,6 +10,7 @@ const (
 	OperationIPCSend
 	OperationIPCReceive
 	OperationIPCWaitReceive
+	OperationConsoleWrite
 )
 
 type Status uint64
@@ -54,6 +55,7 @@ type Handler interface {
 	DebugWrite(address uint64, length uint64) Status
 	IPCSend(channel uint64, address uint64, length uint64) Status
 	IPCReceive(channel uint64, address uint64, capacity uint64) Status
+	ConsoleWrite(device uint64, address uint64, length uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -78,6 +80,11 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.IPCReceive(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationConsoleWrite:
+		if request.Arg2 > MaxDebugWrite {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ConsoleWrite(request.Arg0, request.Arg1, request.Arg2)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

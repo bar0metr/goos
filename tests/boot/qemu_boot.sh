@@ -34,6 +34,7 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'IPC_WIRE_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_REQUEST_REPLY_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_HANDLE_TRANSFER_OK' "$log" 2>/dev/null && \
+		grep -q 'TTY_CAPABILITY_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \
@@ -51,6 +52,8 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'USER_DEBUG_WRITE_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_WAIT_TIMEOUT_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_WAIT_MESSAGE_OK' "$log" 2>/dev/null && \
+		grep -q 'TTY_SERVICE_OK' "$log" 2>/dev/null && \
+		grep -q 'TTY_RIGHTS_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_EXIT_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_PREEMPT_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_CR3_SCHED_OK' "$log" 2>/dev/null && \

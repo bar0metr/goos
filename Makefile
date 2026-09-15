@@ -101,12 +101,14 @@ docs:
 	@test -f docs/architecture/native-images.md
 	@test -f docs/architecture/capabilities.md
 	@test -f docs/architecture/ipc.md
+	@test -f docs/architecture/tty.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/adr/0011-native-image-format.md
 	@test -f docs/adr/0012-versioned-typed-ipc.md
 	@test -f docs/adr/0013-shared-memory-objects.md
 	@test -f docs/adr/0015-restartable-ipc-waits.md
+	@test -f docs/adr/0016-userspace-tty-service.md
 	@test -f docs/development/building.md
 
 clean:

@@ -16,6 +16,7 @@ import (
 	"goos/kernel/process"
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
+	"goos/kernel/tty"
 )
 
 var (
@@ -58,6 +59,25 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 		console.WriteString("USER_COPYIN_OK\n")
 		return kcall.StatusInvalidArgument
 	}
+	for _, value := range data {
+		console.WriteByte(value)
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
+	if bootProcessB == nil || handler.root != bootProcessB.AddressSpace().Root {
+		return kcall.StatusPermissionDenied
+	}
+	cap, ok := bootProcessB.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
+	if !ok || cap.Object() != 1 || length == 0 || length > kcall.MaxDebugWrite {
+		return kcall.StatusPermissionDenied
+	}
+	data := kernelCallData[:int(length)]
+	if !vm.CopyIn(handler.root, address, data) {
+		return kcall.StatusInvalidArgument
+	}
+	console := amd64.NewCOM1()
 	for _, value := range data {
 		console.WriteByte(value)
 	}
@@ -444,6 +464,15 @@ func main() {
 	console.WriteString("IPC_WIRE_OK\n")
 	console.WriteString("IPC_REQUEST_REPLY_OK\n")
 	console.WriteString("IPC_HANDLE_TRANSFER_OK\n")
+	consoleDeviceB, consoleGranted := processB.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Write))
+	_, consoleBCanWrite := processB.Handles().Lookup(consoleDeviceB, handle.TypeDevice, capability.Write)
+	if !consoleGranted || !consoleBCanWrite || consoleDeviceB != handle.ID(0x0000000100000004) {
+		console.WriteString("PANIC: TTY device capability setup failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("TTY_CAPABILITY_OK\n")
 
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
@@ -537,12 +566,20 @@ func main() {
 		0xbe, 0x14, 0x00, 0x00, 0x00, // mov esi, 20.
 		0xcd, 0x80,
 		0x85, 0xc0, // test eax, eax.
-		0x74, 0x02, // je IPC send.
+		0x74, 0x02, // je TTY rights check.
+		0x0f, 0x0b,
+		0xb8, 0x06, 0x00, 0x00, 0x00, // mov eax, 6: ConsoleWrite.
+		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // forged service handle.
+		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0xba, 0x01, 0x00, 0x00, 0x00,
+		0xcd, 0x80,
+		0x83, 0xf8, 0x02, // cmp eax, PermissionDenied.
+		0x74, 0x02,
 		0x0f, 0x0b,
 		0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax, 3: IPCSend.
 		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
 		0x48, 0xbe, 0x14, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+20.
-		0xba, 0x20, 0x00, 0x00, 0x00, // mov edx, WireHeaderSize.
+		0xba, 0x30, 0x00, 0x00, 0x00, // mov edx, TTY wire size.
 		0xcd, 0x80,
 		0x85, 0xc0,
 		0x74, 0x02,
@@ -553,9 +590,9 @@ func main() {
 		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
 	}
 	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
-	userData := [20 + ipc.WireHeaderSize]byte{}
+	userData := [20 + ipc.WireHeaderSize + 16]byte{}
 	copy(userData[:], userMessage)
-	userNotification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
+	userNotification, userTTYEncoded := tty.Message(tty.OperationWrite, 0, []byte("TTY_SERVICE_OK\n"))
 	userWireSize, userWireEncoded := ipc.Encode(userNotification, userData[len(userMessage):])
 	faultProgram := []byte{
 		0xb8, 0x05, 0x00, 0x00, 0x00,
@@ -574,6 +611,14 @@ func main() {
 		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
 		0x48, 0xbe, 0x18, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
 		0xba, 0x18, 0x00, 0x00, 0x00,
+		0xcd, 0x80,
+		0x85, 0xc0,
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0xb8, 0x06, 0x00, 0x00, 0x00,
+		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x21, 0x30, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0xba, 0x0f, 0x00, 0x00, 0x00,
 		0xcd, 0x80,
 		0x85, 0xc0,
 		0x74, 0x02,
@@ -613,7 +658,7 @@ func main() {
 	})
 	loadedA, loadedImageA := loader.LoadNative(&pageAllocator, rootA, nativeBytes)
 	loadedB, loadedImageB := loader.LoadNative(&pageAllocator, rootB, faultBytes)
-	if !userWireEncoded || userWireSize != ipc.WireHeaderSize || !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
+	if !userTTYEncoded || !userWireEncoded || userWireSize != ipc.WireHeaderSize+16 || !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
 		console.WriteString("PANIC: native user image setup failed\n")
 		for {
 			amd64.Halt()
@@ -653,6 +698,7 @@ func main() {
 	console.WriteString("USER_FAULT_ISOLATION_OK\n")
 	console.WriteString("USER_RING3_OK\n")
 	console.WriteString("NATIVE_PROCESS_OK\n")
+	console.WriteString("TTY_RIGHTS_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")
 

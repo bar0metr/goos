@@ -19,6 +19,11 @@ func (handler *testHandler) IPCReceive(channel uint64, address uint64, capacity 
 	return StatusOK
 }
 
+func (handler *testHandler) ConsoleWrite(device uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = device, address, length
+	return StatusOK
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -69,6 +74,14 @@ func TestDispatchIPC(t *testing.T) {
 	result = Dispatch(Request{Operation: OperationIPCReceive, Arg0: 10, Arg1: 0x3000, Arg2: 128}, handler)
 	if result.Status != StatusOK || handler.channel != 10 {
 		t.Fatalf("unexpected receive: %#v, handler: %#v", result, handler)
+	}
+}
+
+func TestDispatchConsoleWrite(t *testing.T) {
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationConsoleWrite, Arg0: 12, Arg1: 0x8000, Arg2: 15}, handler)
+	if result.Status != StatusOK || handler.channel != 12 || handler.address != 0x8000 || handler.length != 15 {
+		t.Fatalf("unexpected console write: %#v, handler: %#v", result, handler)
 	}
 }
 
