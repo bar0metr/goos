@@ -229,6 +229,11 @@ goos_exception_fatal:
 .terminate_user_fault:
     incq goos_user_faults(%rip)
     movq goos_current_task(%rip), %rcx
+    movq (%rsp), %rax
+    btsq $63, %rax
+    leaq goos_task_exit_codes(%rip), %rdx
+    movq %rax, (%rdx,%rcx,8)
+    btsq %rcx, goos_task_exit_pending(%rip)
     btrq %rcx, goos_runnable_mask(%rip)
     movq %rcx, %rax
 .user_fault_find_next:
@@ -402,6 +407,7 @@ goos_user_call:
 .user_exit:
     addq $48, %rsp
     movq goos_current_task(%rip), %rcx
+    btsq %rcx, goos_task_exit_pending(%rip)
     btrq %rcx, goos_runnable_mask(%rip)
     movq %rcx, %rax
 .user_exit_find_next:
@@ -604,6 +610,42 @@ goos_wake_task:
 .wake_done:
     retq
 
+.global goos_set_current_task_exit_code
+goos_set_current_task_exit_code:
+    movq goos_current_task(%rip), %rax
+    leaq goos_task_exit_codes(%rip), %rdx
+    movq %rcx, (%rdx,%rax,8)
+    retq
+
+.global goos_take_exited_task
+goos_take_exited_task:
+    pushfq
+    cli
+    xorq %rax, %rax
+    movq goos_task_exit_pending(%rip), %rdx
+    testq %rdx, %rdx
+    jz .take_exited_done
+    bsfq %rdx, %rcx
+    btrq %rcx, goos_task_exit_pending(%rip)
+    leaq 1(%rcx), %rax
+.take_exited_done:
+    popfq
+    retq
+
+.global goos_task_exit_code
+goos_task_exit_code:
+    xorq %rax, %rax
+    testq %rcx, %rcx
+    jz .task_exit_code_done
+    cmpq $64, %rcx
+    ja .task_exit_code_done
+    decq %rcx
+    leaq goos_task_exit_codes(%rip), %rdx
+    movq (%rdx,%rcx,8), %rax
+    movq $0, (%rdx,%rcx,8)
+.task_exit_code_done:
+    retq
+
 .global goos_invalidate_page
 goos_invalidate_page:
     invlpg (%rcx)
@@ -627,8 +669,12 @@ goos_task_roots:
     .zero 512
 goos_task_rsp0:
     .zero 512
+goos_task_exit_codes:
+    .zero 512
 goos_runnable_mask:
     .quad 1
+goos_task_exit_pending:
+    .quad 0
 goos_scheduler_enabled:
     .byte 0
 goos_tss_rsp0_address:

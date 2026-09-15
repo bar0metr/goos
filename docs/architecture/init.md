@@ -18,7 +18,12 @@ unbounded crash loop. Registration, starts, exits, dependency failures,
 scheduled restarts, and rate limiting enter a bounded diagnostic event ring.
 
 The policy core is in `userspace/init`; process creation is supplied through a
-narrow launcher callback. The current boot integration validates the policy
-core against synthetic process exits. Loading init from initramfs as PID 1 and
-wiring real process-death notifications remain required before the service
-milestone is complete.
+narrow launcher callback. UEFI loads a strict, bounded USTAR initramfs before
+firmware handoff. The kernel discovers `system/init`, validates its native image,
+creates a distinct address space and process ID 1, and schedules it at ring 3.
+
+Normal native exits and isolated CPU faults enter the same bounded task-exit
+path. The process registry emits a process event only after its final Task dies,
+then forwards the event to supervision policy. The bootstrap PID 1 currently
+announces itself and remains runnable. Lifecycle IPC and moving the complete
+supervisor loop out of the bootstrap kernel path remain unfinished.

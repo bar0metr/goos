@@ -9,14 +9,6 @@ import (
 
 const entriesPerTable = 512
 
-const UserProbeAddress = uint64(0x40000000)
-
-const (
-	UserCodeAddress  = uint64(0x40002000)
-	UserStackAddress = uint64(0x40003000)
-	UserDataAddress  = uint64(0x40004000)
-)
-
 type table [entriesPerTable]uint64
 
 // LoadedImage reads the fixed-address, non-relocatable PE image installed by

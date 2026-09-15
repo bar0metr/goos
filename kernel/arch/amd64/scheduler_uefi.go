@@ -112,5 +112,14 @@ func BlockCurrentTask()
 //export goos_wake_task
 func WakeTask(index uint64) bool
 
+//export goos_set_current_task_exit_code
+func SetCurrentTaskExitCode(code uint64)
+
+//export goos_take_exited_task
+func TakeExitedTask() uint64
+
+//export goos_task_exit_code
+func TaskExitCode(task uint64) uint64
+
 //export goos_invalidate_page
 func invalidatePage(address uint64)

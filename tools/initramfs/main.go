@@ -1,0 +1,50 @@
+package main
+
+import (
+	"archive/tar"
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	if len(os.Args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE OUTPUT")
+		os.Exit(2)
+	}
+	image, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		fail(err)
+	}
+	file, err := os.Create(os.Args[2])
+	if err != nil {
+		fail(err)
+	}
+	writer := tar.NewWriter(file)
+	epoch := time.Unix(0, 0)
+	headers := []tar.Header{
+		{Name: "system/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/init", Mode: 0o555, Size: int64(len(image)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+	}
+	for index := range headers {
+		if err := writer.WriteHeader(&headers[index]); err != nil {
+			fail(err)
+		}
+		if headers[index].Typeflag == tar.TypeReg {
+			if _, err := writer.Write(image); err != nil {
+				fail(err)
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		fail(err)
+	}
+	if err := file.Close(); err != nil {
+		fail(err)
+	}
+}
+
+func fail(err error) {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}

@@ -8,6 +8,7 @@ ISO_ROOT := $(BUILD_DIR)/iso/root
 EFI_BOOT := $(ISO_ROOT)/EFI/BOOT
 KERNEL := $(KERNEL_DIR)/goos.efi
 KERNEL_IO := $(KERNEL_DIR)/io.o
+INIT_IMAGE := $(BUILD_DIR)/userspace/init
 EFI_IMAGE := $(BUILD_DIR)/iso/efi.img
 ISO_BOOT_IMAGE := $(ISO_ROOT)/efi.img
 ISO := $(BUILD_DIR)/goos-x86_64.iso
@@ -34,17 +35,21 @@ $(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace:
-	@mkdir -p $(BUILD_DIR)/userspace/services
-	@printf '%s\n' 'userspace starts at Milestone 3; no placeholder binaries emitted'
+userspace: $(INIT_IMAGE)
+
+$(INIT_IMAGE): tools/init-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	@mkdir -p $(BUILD_DIR)/userspace
+	$(BUILD_ENV) go run ./tools/init-image $@
 
 initramfs: userspace
-	@mkdir -p $(BUILD_DIR)/initramfs/root
-	@tar -cf $(BUILD_DIR)/initramfs/initramfs.tar -C $(BUILD_DIR)/initramfs/root .
+	@mkdir -p $(BUILD_DIR)/initramfs/root/system
+	@cp $(INIT_IMAGE) $(BUILD_DIR)/initramfs/root/system/init
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
 
-$(EFI_IMAGE): $(KERNEL)
+$(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
 	@cp $(KERNEL) $(EFI_BOOT)/BOOTX64.EFI
+	@cp $(BUILD_DIR)/initramfs/initramfs.tar $(ISO_ROOT)/initramfs.tar
 	@rm -f $@ $@.cdr $(ISO_BOOT_IMAGE)
 	@hdiutil create -quiet -fs MS-DOS -format UDTO -size 8m -volname GOOS_EFI -srcfolder $(ISO_ROOT) $@
 	@mv $@.cdr $@
@@ -75,7 +80,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/init
+	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/init
 
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -117,6 +122,7 @@ docs:
 	@test -f docs/adr/0017-bounded-ramfs.md
 	@test -f docs/adr/0018-userspace-vfs.md
 	@test -f docs/adr/0019-bounded-init-supervision.md
+	@test -f docs/adr/0020-uefi-initramfs-and-process-exit-events.md
 	@test -f docs/development/building.md
 
 clean:

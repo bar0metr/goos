@@ -27,10 +27,12 @@ func (region MemoryRegion) End() uint64 {
 // Info is the immutable handoff from firmware-specific boot code to the
 // architecture-independent kernel.
 type Info struct {
-	Regions      [128]MemoryRegion
-	RegionCount  int
-	UsableBytes  uint64
-	FirmwareName string
+	Regions          [128]MemoryRegion
+	RegionCount      int
+	UsableBytes      uint64
+	FirmwareName     string
+	InitramfsAddress uint64
+	InitramfsSize    uint64
 }
 
 func (info *Info) AddRegion(region MemoryRegion) bool {

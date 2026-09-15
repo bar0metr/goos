@@ -8,6 +8,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/handle"
+	"goos/kernel/initramfs"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
@@ -23,32 +24,37 @@ import (
 )
 
 var (
-	bootInfo        boot.Info
-	pageAllocator   pmm.Allocator
-	demoTaskA       uint64
-	demoTaskB       uint64
-	demoABlocked    uint64
-	demoAResumed    uint64
-	userExited      uint64
-	kernelCallData  [kcall.MaxDebugWrite]byte
-	nativeImageData [1024]byte
-	faultImageData  [1024]byte
-	boundedChannel  ipc.Channel
-	ipcWireData     [ipc.WireMaxSize]byte
-	sharedRegistry  shmem.Registry
-	channelRegistry ipc.Registry
-	bootProcessA    *process.Process
-	bootProcessB    *process.Process
-	ipcWaitSet      ipc.WaitSet
-	ipcWakeResults  [ipc.MaxWaiters]ipc.WaitResult
-	ipcWaitStatus   [sched.MaxTasks]kcall.Status
-	bootRAMFS       ramfs.FileSystem
-	deviceRAMFS     ramfs.FileSystem
-	bootVFS         vfs.Namespace
-	ramfsReadback   [16]byte
-	vfsReadback     [16]byte
-	bootSupervisor  supervisor.Manager
-	bootServicePID  uint64
+	bootInfo                boot.Info
+	pageAllocator           pmm.Allocator
+	demoTaskA               uint64
+	demoTaskB               uint64
+	demoABlocked            uint64
+	demoAResumed            uint64
+	userExited              uint64
+	kernelCallData          [kcall.MaxDebugWrite]byte
+	nativeImageData         [1024]byte
+	faultImageData          [1024]byte
+	boundedChannel          ipc.Channel
+	ipcWireData             [ipc.WireMaxSize]byte
+	sharedRegistry          shmem.Registry
+	channelRegistry         ipc.Registry
+	bootProcessA            *process.Process
+	bootProcessB            *process.Process
+	bootInitProcess         *process.Process
+	processRegistry         process.Registry
+	ipcWaitSet              ipc.WaitSet
+	ipcWakeResults          [ipc.MaxWaiters]ipc.WaitResult
+	ipcWaitStatus           [sched.MaxTasks]kcall.Status
+	bootRAMFS               ramfs.FileSystem
+	deviceRAMFS             ramfs.FileSystem
+	bootVFS                 vfs.Namespace
+	ramfsReadback           [16]byte
+	vfsReadback             [16]byte
+	bootSupervisor          supervisor.Manager
+	bootServicePID          uint64
+	initAnnounced           uint64
+	processExitDelivered    uint64
+	supervisorExitDelivered uint64
 )
 
 func launchBootService(spec supervisor.LaunchSpec) (uint64, bool) {
@@ -64,7 +70,10 @@ type nativeCallHandler struct {
 }
 
 func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
-	userExited = 1
+	amd64.SetCurrentTaskExitCode(code)
+	if bootProcessA != nil && handler.root == bootProcessA.AddressSpace().Root {
+		userExited = 1
+	}
 	console := amd64.NewCOM1()
 	console.WriteString("USER_EXIT_OK\n")
 	return kcall.StatusOK
@@ -80,7 +89,26 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 	for _, value := range data {
 		console.WriteByte(value)
 	}
+	if bootInitProcess != nil && handler.root == bootInitProcess.AddressSpace().Root {
+		initAnnounced = 1
+	}
 	return kcall.StatusOK
+}
+
+func deliverProcessExits() {
+	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
+		if !processRegistry.ReportTaskExit(sched.TaskID(task), amd64.TaskExitCode(task)) {
+			continue
+		}
+		event, ok := processRegistry.NextExit()
+		if !ok {
+			continue
+		}
+		processExitDelivered = 1
+		if event.Process == 3 && bootSupervisor.Exit(uint64(event.Process), event.Code, amd64.TimerTicks()) == supervisor.StatusOK {
+			supervisorExitDelivered = 1
+		}
+	}
 }
 
 func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
@@ -307,7 +335,16 @@ func main() {
 	console.WriteString("Boot: UEFI\n")
 	console.WriteString("Security: capabilities (foundation)\n")
 
-	status := bootuefi.CaptureAndExit(&bootInfo)
+	status := bootuefi.LoadInitramfs(&bootInfo)
+	if status != 0 {
+		console.WriteString("PANIC: initramfs load failed: ")
+		console.WriteHex(uint64(status))
+		console.WriteString("\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	status = bootuefi.CaptureAndExit(&bootInfo)
 	if status != 0 {
 		console.WriteString("PANIC: UEFI handoff failed: ")
 		console.WriteHex(uint64(status))
@@ -403,6 +440,7 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	rootInit, addressSpaceInit := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
 	rootA, addressSpaceA := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
 	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
 	if addressSpaceA {
@@ -413,16 +451,18 @@ func main() {
 	}
 	resolvedA, resolvesA := vm.Resolve(rootA, vm.UserProbeAddress)
 	resolvedB, resolvesB := vm.Resolve(rootB, vm.UserProbeAddress)
-	if !addressSpaceA || !addressSpaceB || !resolvesA || !resolvesB || resolvedA != physicalA || resolvedB != physicalB {
+	if !addressSpaceInit || !addressSpaceA || !addressSpaceB || !resolvesA || !resolvesB || resolvedA != physicalA || resolvedB != physicalB {
 		console.WriteString("PANIC: process address-space construction failed\n")
 		for {
 			amd64.Halt()
 		}
 	}
-	processA, validA := process.New(1, process.AddressSpace{Root: rootA})
-	processB, validB := process.New(2, process.AddressSpace{Root: rootB})
+	initProcess, validInit := process.New(1, process.AddressSpace{Root: rootInit})
+	processA, validA := process.New(2, process.AddressSpace{Root: rootA})
+	processB, validB := process.New(3, process.AddressSpace{Root: rootB})
+	bootInitProcess = &initProcess
 	bootProcessA, bootProcessB = &processA, &processB
-	if !validA || !validB {
+	if !validInit || !validA || !validB || !processRegistry.Add(&initProcess) || !processRegistry.Add(&processA) || !processRegistry.Add(&processB) {
 		console.WriteString("PANIC: process model initialization failed\n")
 		for {
 			amd64.Halt()
@@ -641,6 +681,13 @@ func main() {
 	console.WriteString("SERVICE_DEPENDENCY_OK\n")
 	console.WriteString("SUPERVISOR_RESTART_OK\n")
 	console.WriteString("SUPERVISOR_RATE_LIMIT_OK\n")
+	if bootSupervisor.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe", Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+		bootSupervisor.StartReady(100, func(supervisor.LaunchSpec) (uint64, bool) { return uint64(processB.ID()), true }) != 1 {
+		console.WriteString("PANIC: supervised process registration failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
 
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
@@ -824,6 +871,20 @@ func main() {
 			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
 		},
 	})
+	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), "system/init")
+	if !initDiscovered {
+		console.WriteString("PANIC: init image not found in initramfs\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	loadedInit, loadedImageInit := loader.LoadNative(&pageAllocator, rootInit, initBytes)
+	if !loadedImageInit {
+		console.WriteString("PANIC: init native image rejected\n")
+		for {
+			amd64.Halt()
+		}
+	}
 	loadedA, loadedImageA := loader.LoadNative(&pageAllocator, rootA, nativeBytes)
 	loadedB, loadedImageB := loader.LoadNative(&pageAllocator, rootB, faultBytes)
 	if !userTTYEncoded || !userWireEncoded || userWireSize != ipc.WireHeaderSize+16 || !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
@@ -844,17 +905,24 @@ func main() {
 	console.WriteString("USER_COPYOUT_OK\n")
 	console.WriteString("KCALL_ABI_OK\n")
 	console.WriteString("NATIVE_IMAGE_LOADER_OK\n")
+	initTaskID, initTaskAdded := amd64.AddUserTask(&pageAllocator, rootInit, loadedInit.Entry, loadedInit.StackTop)
 	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, rootA, loadedA.Entry, loadedA.StackTop)
 	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, rootB, loadedB.Entry, loadedB.StackTop)
-	if !userTaskAdded || !faultTaskAdded || !processA.AddTask(sched.TaskID(userTaskID)) || !processB.AddTask(sched.TaskID(faultTaskID)) {
+	if !initTaskAdded || !userTaskAdded || !faultTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) ||
+		!processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) {
 		console.WriteString("PANIC: userspace task scheduling failed\n")
 		for {
 			amd64.Halt()
 		}
 	}
-	for userExited == 0 || amd64.UserFaults() == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 {
+		deliverProcessExits()
 		amd64.Halt()
 	}
+	console.WriteString("INITRAMFS_DISCOVERY_OK\n")
+	console.WriteString("PID1_INIT_OK\n")
+	console.WriteString("PROCESS_EXIT_EVENT_OK\n")
+	console.WriteString("SUPERVISOR_CRASH_EVENT_OK\n")
 	if amd64.UserPreemptions() == 0 {
 		console.WriteString("PANIC: userspace task was not preempted\n")
 		for {

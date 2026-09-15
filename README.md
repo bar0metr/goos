@@ -141,11 +141,13 @@ The native kernel and the first isolated services are implemented:
 - namespace-scoped VFS mounts, path resolution, open handles, and caches;
 - bounded init policy with dependencies, capability manifests, supervised
   restart policies, health states, and rate limiting;
+- deterministic USTAR initramfs discovery and a ring-3 native init as PID 1;
+- bounded task-to-process exit events for supervisor crash detection;
 - unit, integration, boot, and performance tests.
 
-The init policy core is implemented, but initramfs discovery, a real PID 1,
-process-death delivery, and the shell are not implemented yet. The current ISO
-boots a real kernel, leaves UEFI
+The init policy core, initramfs discovery, PID 1 launch, and kernel-side process
+death delivery are implemented. Lifecycle IPC into PID 1 and the shell are not
+implemented yet. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.
@@ -153,7 +155,7 @@ at CPL 3. It is not yet a usable operating environment.
 ## Building and running
 
 The primary development environment is macOS. The build requires Go, TinyGo,
-GNU Make, `qemu-system-x86_64` with OVMF, `hdiutil`, `nm`, and `tar`. It does not
+GNU Make, `qemu-system-x86_64` with OVMF, `hdiutil`, and `nm`. It does not
 silently install or download dependencies.
 
 ```sh
@@ -219,6 +221,11 @@ PROCESS_CR3_SCHED_OK
 USER_FAULT_ISOLATION_OK
 USER_RING3_OK
 NATIVE_PROCESS_OK
+INIT_PROCESS_OK
+INITRAMFS_DISCOVERY_OK
+PID1_INIT_OK
+PROCESS_EXIT_EVENT_OK
+SUPERVISOR_CRASH_EVENT_OK
 Kernel initialized
 BOOT_OK
 ```

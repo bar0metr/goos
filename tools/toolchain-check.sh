@@ -2,7 +2,7 @@
 set -eu
 
 missing=0
-for tool in go tinygo make qemu-system-x86_64 hdiutil nm tar; do
+for tool in go tinygo make qemu-system-x86_64 hdiutil nm; do
 	if command -v "$tool" >/dev/null 2>&1; then
 		printf '[ OK ] %s\n' "$tool"
 	else

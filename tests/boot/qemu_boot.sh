@@ -48,6 +48,11 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'SERVICE_DEPENDENCY_OK' "$log" 2>/dev/null && \
 		grep -q 'SUPERVISOR_RESTART_OK' "$log" 2>/dev/null && \
 		grep -q 'SUPERVISOR_RATE_LIMIT_OK' "$log" 2>/dev/null && \
+		grep -q 'INIT_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'INITRAMFS_DISCOVERY_OK' "$log" 2>/dev/null && \
+		grep -q 'PID1_INIT_OK' "$log" 2>/dev/null && \
+		grep -q 'PROCESS_EXIT_EVENT_OK' "$log" 2>/dev/null && \
+		grep -q 'SUPERVISOR_CRASH_EVENT_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \

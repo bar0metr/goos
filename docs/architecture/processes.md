@@ -6,8 +6,9 @@ identities. A Task is the schedulable CPU context. This avoids treating a
 process and a thread as interchangeable kernel objects.
 
 Process IDs and Task IDs reject zero. Each Process currently supports up to 32
-Tasks and rejects duplicate ownership. Dynamic process teardown and ID reuse
-are deferred until object lifetime and wait semantics are implemented.
+Tasks and rejects duplicate ownership. A bounded registry maps architecture
+Task exits back to their owning Process. It emits process death only when the
+last owned Task exits. Resource reclamation and ID reuse remain deferred.
 
 ## Address-space isolation
 
@@ -36,7 +37,9 @@ may select a kernel task or another process root. The native-call entry verifies
 the saved user CS and invokes the architecture-independent dispatcher. Exit
 marks the current slot non-runnable and immediately schedules its successor.
 
-Both bootstrap processes are loaded through the versioned native image loader.
+PID 1 is discovered in the UEFI-loaded initramfs and loaded into an independent
+address space. Both bootstrap test processes are also loaded through the
+versioned native image loader.
 The second deliberately raises an invalid-opcode exception; the kernel removes
 only that userspace task and continues. Kernel-originated exceptions remain
 fatal. Initramfs discovery, resource reclamation, wait semantics, and task-ID
