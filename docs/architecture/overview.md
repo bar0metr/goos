@@ -20,5 +20,6 @@ validated user-memory copying. A versioned native loader validates and maps
 executable, data, and stack segments. A userspace CPU fault terminates only its
 task. Bounded typed IPC supports versioned request/reply, notifications,
 capability-derived handle passing, peer-death reporting, and shared pages for
-bulk data. Userspace IPC bindings, wait semantics, and system services are not
-yet implemented.
+bulk data. Restartable IPC waits, the first service protocol cores, and bounded
+init supervision policy are implemented. Initramfs-backed PID 1 launch and
+process-death delivery are not.

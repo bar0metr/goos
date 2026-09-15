@@ -19,6 +19,7 @@ import (
 	"goos/kernel/shmem"
 	"goos/kernel/tty"
 	"goos/kernel/vfs"
+	supervisor "goos/userspace/init"
 )
 
 var (
@@ -46,7 +47,17 @@ var (
 	bootVFS         vfs.Namespace
 	ramfsReadback   [16]byte
 	vfsReadback     [16]byte
+	bootSupervisor  supervisor.Manager
+	bootServicePID  uint64
 )
+
+func launchBootService(spec supervisor.LaunchSpec) (uint64, bool) {
+	if spec.NameSize == 0 || spec.ExecutableSize == 0 {
+		return 0, false
+	}
+	bootServicePID++
+	return 100 + bootServicePID, true
+}
 
 type nativeCallHandler struct {
 	root uint64
@@ -574,6 +585,62 @@ func main() {
 	console.WriteString("VFS_PATH_OK\n")
 	console.WriteString("VFS_CACHE_OK\n")
 	console.WriteString("VFS_PROTOCOL_OK\n")
+
+	if bootSupervisor.Register(supervisor.Definition{Name: "ramfs", Executable: "/system/ramfs", Restart: supervisor.RestartAlways}) != supervisor.StatusOK ||
+		bootSupervisor.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs", Dependencies: []string{"ramfs"},
+			Capabilities: []supervisor.Capability{{Object: 1, Type: handle.TypeChannel, Rights: capability.Read | capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+		bootSupervisor.StartReady(0, launchBootService) != 2 {
+		console.WriteString("PANIC: init service configuration failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	ramfsService, ramfsFound := bootSupervisor.Snapshot("ramfs")
+	vfsService, vfsFound := bootSupervisor.Snapshot("vfs")
+	if !ramfsFound || !vfsFound || ramfsService.Health != supervisor.HealthHealthy || vfsService.Health != supervisor.HealthHealthy {
+		console.WriteString("PANIC: init dependency startup failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if bootSupervisor.Exit(ramfsService.PID, 1, 1) != supervisor.StatusOK {
+		console.WriteString("PANIC: supervisor crash detection failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	vfsService, _ = bootSupervisor.Snapshot("vfs")
+	if vfsService.Health != supervisor.HealthBlocked || bootSupervisor.StartReady(1+supervisor.RestartBackoff, launchBootService) != 1 {
+		console.WriteString("PANIC: supervisor dependency recovery failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	ramfsService, _ = bootSupervisor.Snapshot("ramfs")
+	for attempt := uint64(0); attempt < 3; attempt++ {
+		tick := uint64(20) + attempt*20
+		if bootSupervisor.Exit(ramfsService.PID, 1, tick) != supervisor.StatusOK {
+			console.WriteString("PANIC: supervisor restart accounting failed\n")
+			for {
+				amd64.Halt()
+			}
+		}
+		if attempt != 2 {
+			bootSupervisor.StartReady(tick+supervisor.RestartBackoff, launchBootService)
+			ramfsService, _ = bootSupervisor.Snapshot("ramfs")
+		}
+	}
+	ramfsService, _ = bootSupervisor.Snapshot("ramfs")
+	if ramfsService.State != supervisor.StateFailed || ramfsService.Restarts != supervisor.MaxRestarts {
+		console.WriteString("PANIC: supervisor restart rate limit failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("INIT_CONFIG_OK\n")
+	console.WriteString("SERVICE_DEPENDENCY_OK\n")
+	console.WriteString("SUPERVISOR_RESTART_OK\n")
+	console.WriteString("SUPERVISOR_RATE_LIMIT_OK\n")
 
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}

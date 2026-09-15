@@ -139,10 +139,13 @@ The native kernel and the first isolated services are implemented:
 - a capability-isolated userspace TTY protocol and serial service;
 - a bounded generation-safe RAMFS core and versioned service protocol;
 - namespace-scoped VFS mounts, path resolution, open handles, and caches;
+- bounded init policy with dependencies, capability manifests, supervised
+  restart policies, health states, and rate limiting;
 - unit, integration, boot, and performance tests.
 
-Initramfs discovery, init, and the shell are not implemented yet. The
-current ISO boots a real kernel, leaves UEFI
+The init policy core is implemented, but initramfs discovery, a real PID 1,
+process-death delivery, and the shell are not implemented yet. The current ISO
+boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.
@@ -241,6 +244,7 @@ Further documentation:
 - [processes](docs/architecture/processes.md);
 - [native images](docs/architecture/native-images.md);
 - [typed IPC](docs/architecture/ipc.md);
+- [init and service supervision](docs/architecture/init.md);
 - [capabilities and handles](docs/architecture/capabilities.md);
 - [building and debugging](docs/development/building.md);
 - [roadmap](docs/development/roadmap.md);

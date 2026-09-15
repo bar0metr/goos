@@ -18,8 +18,10 @@ timeout wakeup, a capability-isolated userspace TTY service, its versioned IPC
 protocol, bounded line editing, basic terminal-control operations, and a bounded
 generation-safe RAMFS with its versioned service protocol, and a namespace-
 scoped VFS with mount routing, path resolution, open-file objects, caches, and
-its versioned IPC protocol are complete. The next slice introduces init and
-service supervision, followed by a native shell.
+its versioned IPC protocol are complete. The bounded init supervision policy
+core is also complete. The next slice connects initramfs discovery, PID 1
+launch, and real process-death notifications before work begins on the native
+shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

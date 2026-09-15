@@ -75,7 +75,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs
+	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/init
 
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -106,6 +106,7 @@ docs:
 	@test -f docs/architecture/tty.md
 	@test -f docs/architecture/ramfs.md
 	@test -f docs/architecture/vfs.md
+	@test -f docs/architecture/init.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/adr/0011-native-image-format.md
@@ -115,6 +116,7 @@ docs:
 	@test -f docs/adr/0016-userspace-tty-service.md
 	@test -f docs/adr/0017-bounded-ramfs.md
 	@test -f docs/adr/0018-userspace-vfs.md
+	@test -f docs/adr/0019-bounded-init-supervision.md
 	@test -f docs/development/building.md
 
 clean:

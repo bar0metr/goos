@@ -44,6 +44,10 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'VFS_PATH_OK' "$log" 2>/dev/null && \
 		grep -q 'VFS_CACHE_OK' "$log" 2>/dev/null && \
 		grep -q 'VFS_PROTOCOL_OK' "$log" 2>/dev/null && \
+		grep -q 'INIT_CONFIG_OK' "$log" 2>/dev/null && \
+		grep -q 'SERVICE_DEPENDENCY_OK' "$log" 2>/dev/null && \
+		grep -q 'SUPERVISOR_RESTART_OK' "$log" 2>/dev/null && \
+		grep -q 'SUPERVISOR_RATE_LIMIT_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \

@@ -17,8 +17,9 @@ generation. Reads and writes advance only that open object's offset.
 The fixed resolver cache stores resolved file and directory nodes. Mount and
 metadata mutations invalidate it synchronously, preventing rename/unlink from
 leaving stale path aliases. Cached and uncached resolution have separate
-benchmarks; the current canonicalization path allocates one 256-byte temporary
-buffer per request.
+benchmarks. Path components cross the backend interface as fixed-size values,
+so canonicalization remains on the caller stack and both resolver paths allocate
+zero bytes per request.
 
 Protocol `GVF1` version 1 carries bounded path, handle, offset, size, rights, and
 inline data fields in typed IPC requests. Bulk file data will use shared memory.
