@@ -123,6 +123,7 @@ docs:
 	@test -f docs/adr/0018-userspace-vfs.md
 	@test -f docs/adr/0019-bounded-init-supervision.md
 	@test -f docs/adr/0020-uefi-initramfs-and-process-exit-events.md
+	@test -f docs/adr/0021-pid1-lifecycle-control-plane.md
 	@test -f docs/development/building.md
 
 clean:

@@ -53,6 +53,11 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'PID1_INIT_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_EXIT_EVENT_OK' "$log" 2>/dev/null && \
 		grep -q 'SUPERVISOR_CRASH_EVENT_OK' "$log" 2>/dev/null && \
+		grep -q 'INIT_LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
+		grep -q 'INIT_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
+		grep -q 'INIT_SERVICE_STARTED_OK' "$log" 2>/dev/null && \
+		grep -q 'LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
+		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \

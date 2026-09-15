@@ -20,8 +20,10 @@ generation-safe RAMFS with its versioned service protocol, and a namespace-
 scoped VFS with mount routing, path resolution, open-file objects, caches, and
 its versioned IPC protocol are complete. The bounded init supervision policy
 core, UEFI initramfs discovery, ring-3 PID 1 launch, and task-to-process death
-notifications are also complete. The next slice moves lifecycle event handling
-and service launch control through IPC into PID 1. The native shell follows.
+notifications are also complete. PID 1 now receives lifecycle events and drives
+a real service restart through correlated, capability-protected IPC. The next
+slice adds general executable lookup/launch for declared services, then begins
+the native shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

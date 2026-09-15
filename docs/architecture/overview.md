@@ -22,4 +22,6 @@ task. Bounded typed IPC supports versioned request/reply, notifications,
 capability-derived handle passing, peer-death reporting, and shared pages for
 bulk data. Restartable IPC waits, the first service protocol cores, bounded init
 supervision policy, UEFI initramfs discovery, ring-3 PID 1 launch, and bounded
-process-death delivery are implemented. Lifecycle IPC into PID 1 is not.
+process-death delivery are implemented. PID 1 receives lifecycle events over a
+capability-protected channel and controls a validated bootstrap service restart.
+General service executable resolution remains unfinished.

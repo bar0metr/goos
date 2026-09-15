@@ -153,3 +153,15 @@ func (registry *Registry) NextExit() (ExitEvent, bool) {
 	registry.exitCount--
 	return event, true
 }
+
+func (registry *Registry) ByRoot(root uint64) (*Process, bool) {
+	if root == 0 {
+		return nil, false
+	}
+	for index := 0; index < int(registry.count); index++ {
+		if registry.processes[index].AddressSpace().Root == root {
+			return registry.processes[index], true
+		}
+	}
+	return nil, false
+}

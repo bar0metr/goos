@@ -24,37 +24,51 @@ import (
 )
 
 var (
-	bootInfo                boot.Info
-	pageAllocator           pmm.Allocator
-	demoTaskA               uint64
-	demoTaskB               uint64
-	demoABlocked            uint64
-	demoAResumed            uint64
-	userExited              uint64
-	kernelCallData          [kcall.MaxDebugWrite]byte
-	nativeImageData         [1024]byte
-	faultImageData          [1024]byte
-	boundedChannel          ipc.Channel
-	ipcWireData             [ipc.WireMaxSize]byte
-	sharedRegistry          shmem.Registry
-	channelRegistry         ipc.Registry
-	bootProcessA            *process.Process
-	bootProcessB            *process.Process
-	bootInitProcess         *process.Process
-	processRegistry         process.Registry
-	ipcWaitSet              ipc.WaitSet
-	ipcWakeResults          [ipc.MaxWaiters]ipc.WaitResult
-	ipcWaitStatus           [sched.MaxTasks]kcall.Status
-	bootRAMFS               ramfs.FileSystem
-	deviceRAMFS             ramfs.FileSystem
-	bootVFS                 vfs.Namespace
-	ramfsReadback           [16]byte
-	vfsReadback             [16]byte
-	bootSupervisor          supervisor.Manager
-	bootServicePID          uint64
-	initAnnounced           uint64
-	processExitDelivered    uint64
-	supervisorExitDelivered uint64
+	bootInfo                 boot.Info
+	pageAllocator            pmm.Allocator
+	demoTaskA                uint64
+	demoTaskB                uint64
+	demoABlocked             uint64
+	demoAResumed             uint64
+	userExited               uint64
+	kernelCallData           [kcall.MaxDebugWrite]byte
+	nativeImageData          [1024]byte
+	faultImageData           [1024]byte
+	boundedChannel           ipc.Channel
+	ipcWireData              [ipc.WireMaxSize]byte
+	sharedRegistry           shmem.Registry
+	channelRegistry          ipc.Registry
+	lifecycleChannel         *ipc.Channel
+	lifecycleChannelID       uint64
+	bootProcessA             *process.Process
+	bootProcessB             *process.Process
+	bootInitProcess          *process.Process
+	processRegistry          process.Registry
+	ipcWaitSet               ipc.WaitSet
+	ipcWakeResults           [ipc.MaxWaiters]ipc.WaitResult
+	ipcWaitStatus            [sched.MaxTasks]kcall.Status
+	bootRAMFS                ramfs.FileSystem
+	deviceRAMFS              ramfs.FileSystem
+	bootVFS                  vfs.Namespace
+	ramfsReadback            [16]byte
+	vfsReadback              [16]byte
+	bootSupervisor           supervisor.Manager
+	bootServicePID           uint64
+	initAnnounced            uint64
+	processExitDelivered     uint64
+	supervisorExitDelivered  uint64
+	lifecycleExitCode        uint64
+	serviceLaunchRequested   uint64
+	serviceLaunchConfirmed   uint64
+	serviceLaunchCorrelation uint64
+	initSendObserved         uint64
+	initSendStatus           kcall.Status
+	initExitObserved         uint64
+	initExitCode             uint64
+	faultImageSize           int
+	kernelPageTable          uint64
+	restartedProcess         process.Process
+	endpointBindings         ipc.EndpointTable
 )
 
 func launchBootService(spec supervisor.LaunchSpec) (uint64, bool) {
@@ -105,10 +119,60 @@ func deliverProcessExits() {
 			continue
 		}
 		processExitDelivered = 1
-		if event.Process == 3 && bootSupervisor.Exit(uint64(event.Process), event.Code, amd64.TimerTicks()) == supervisor.StatusOK {
-			supervisorExitDelivered = 1
+		if event.Process == 1 {
+			initExitObserved = 1
+			initExitCode = event.Code
+		}
+		if event.Process == 3 && lifecycleChannel != nil {
+			message, encoded := supervisor.ProcessExited(uint64(event.Process), event.Code)
+			if encoded && lifecycleChannel.Send(0, message, nil, nil, nil) == ipc.StatusOK {
+				lifecycleExitCode = event.Code
+				wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
+			}
 		}
 	}
+}
+
+func consumeInitControl() {
+	if lifecycleChannel == nil || serviceLaunchRequested != 0 {
+		return
+	}
+	message, status := lifecycleChannel.Receive(0)
+	if status != ipc.StatusOK {
+		return
+	}
+	event, valid := supervisor.DecodeLifecycle(message)
+	if !valid || event.Operation != supervisor.LifecycleLaunch || event.Process != 3 {
+		return
+	}
+	if bootSupervisor.Exit(3, lifecycleExitCode, amd64.TimerTicks()) == supervisor.StatusOK {
+		serviceLaunchRequested = 1
+		serviceLaunchCorrelation = message.Correlation
+		supervisorExitDelivered = 1
+	}
+}
+
+func launchRestartedService(supervisor.LaunchSpec) (uint64, bool) {
+	if faultImageSize == 0 || kernelPageTable == 0 {
+		return 0, false
+	}
+	root, ok := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
+	if !ok {
+		return 0, false
+	}
+	loaded, ok := loader.LoadNative(&pageAllocator, root, faultImageData[:faultImageSize])
+	if !ok {
+		return 0, false
+	}
+	restartedProcess, ok = process.New(4, process.AddressSpace{Root: root})
+	if !ok || !processRegistry.Add(&restartedProcess) {
+		return 0, false
+	}
+	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
+	if !ok || !processRegistry.BindTask(4, sched.TaskID(task)) {
+		return 0, false
+	}
+	return 4, true
 }
 
 func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
@@ -131,13 +195,8 @@ func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, len
 }
 
 func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (*ipc.Channel, uint8, *process.Process, *process.Process, kcall.Status) {
-	var owner, peer *process.Process
-	var side uint8
-	if bootProcessA != nil && handler.root == bootProcessA.AddressSpace().Root {
-		owner, peer, side = bootProcessA, bootProcessB, 0
-	} else if bootProcessB != nil && handler.root == bootProcessB.AddressSpace().Root {
-		owner, peer, side = bootProcessB, bootProcessA, 1
-	} else {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
 		return nil, 0, nil, nil, kcall.StatusPermissionDenied
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, required)
@@ -148,33 +207,57 @@ func (handler nativeCallHandler) endpoint(channel uint64, required capability.Ri
 	if !ok {
 		return nil, 0, nil, nil, kcall.StatusNotFound
 	}
-	return endpoint, side, owner, peer, kcall.StatusOK
+	side, peerRoot, bound := endpointBindings.Lookup(cap.Object(), handler.root)
+	if bound {
+		var peer *process.Process
+		if peerRoot != 0 {
+			peer, _ = processRegistry.ByRoot(peerRoot)
+		}
+		return endpoint, side, owner, peer, kcall.StatusOK
+	}
+	return nil, 0, nil, nil, kcall.StatusPermissionDenied
 }
 
 func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length uint64) kcall.Status {
 	endpoint, side, owner, peer, status := handler.endpoint(channel, capability.Write)
 	if status != kcall.StatusOK {
+		handler.recordInitSend(status)
 		return status
 	}
 	if length < ipc.WireHeaderSize || length > ipc.WireMaxSize {
+		handler.recordInitSend(kcall.StatusInvalidArgument)
 		return kcall.StatusInvalidArgument
 	}
 	data := ipcWireData[:int(length)]
 	if !vm.CopyIn(handler.root, address, data) {
+		handler.recordInitSend(kcall.StatusInvalidArgument)
 		return kcall.StatusInvalidArgument
 	}
 	message, ok := ipc.Decode(data)
 	if !ok || message.HandleCount != 0 {
+		handler.recordInitSend(kcall.StatusCorruptData)
 		return kcall.StatusCorruptData
 	}
-	status = endpoint.Send(side, message, owner.Handles(), peer.Handles(), nil)
+	var peerHandles *handle.Table
+	if peer != nil {
+		peerHandles = peer.Handles()
+	}
+	status = endpoint.Send(side, message, owner.Handles(), peerHandles, nil)
 	if status == ipc.StatusOK {
 		cap, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Write)
 		if found {
 			wakeIPCWaiters(cap.Object(), side^1, ipc.WaitMessage)
 		}
 	}
+	handler.recordInitSend(status)
 	return status
+}
+
+func (handler nativeCallHandler) recordInitSend(status kcall.Status) {
+	if bootInitProcess != nil && handler.root == bootInitProcess.AddressSpace().Root {
+		initSendStatus = status
+		initSendObserved = 1
+	}
 }
 
 func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, size uint64, task uint64) (kcall.Status, bool) {
@@ -392,6 +475,7 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	kernelPageTable = pageTable
 	amd64.EnableNXAndWriteProtect()
 	amd64.LoadPageTable(pageTable)
 	console.WriteString("NX_WX_OK\n")
@@ -491,6 +575,11 @@ func main() {
 	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(registeredChannelID, capability.Read|capability.Write|capability.Wait))
 	_, channelACanWrite := processA.Handles().Lookup(channelA, handle.TypeChannel, capability.Write)
 	_, channelBCanRead := processB.Handles().Lookup(channelB, handle.TypeChannel, capability.Read)
+	channelsBound := endpointBindings.Bind(registeredChannelID, rootA, rootB, 0) && endpointBindings.Bind(registeredChannelID, rootB, rootA, 1)
+	var lifecycleCreated bool
+	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
+	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleChannelID, capability.Read|capability.Write|capability.Wait))
+	lifecycleBound := endpointBindings.Bind(lifecycleChannelID, rootInit, 0, 1)
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
 	wireSize, wireEncoded := ipc.Encode(request, ipcWireData[:])
@@ -505,7 +594,8 @@ func main() {
 	reply := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindReply, Correlation: request.Correlation}
 	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
 	_, replyReceiveStatus := registeredChannel.Receive(0)
-	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !wireEncoded || !wireDecoded ||
+	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !channelsBound ||
+		!lifecycleCreated || !lifecycleInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
 		console.WriteString("PANIC: typed IPC request/reply failed\n")
@@ -871,6 +961,7 @@ func main() {
 			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
 		},
 	})
+	faultImageSize = len(faultBytes)
 	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), "system/init")
 	if !initDiscovered {
 		console.WriteString("PANIC: init image not found in initramfs\n")
@@ -915,14 +1006,40 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed == 0 {
 		deliverProcessExits()
+		consumeInitControl()
+		if serviceLaunchRequested != 0 && serviceLaunchConfirmed == 0 && bootSupervisor.StartReady(amd64.TimerTicks(), launchRestartedService) == 1 {
+			reply, encoded := supervisor.LaunchResult(4, 0, serviceLaunchCorrelation)
+			if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
+				wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
+				serviceLaunchConfirmed = 1
+			}
+		}
+		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
+			console.WriteString("PANIC: init launch IPC failed: ")
+			console.WriteHex(uint64(initSendStatus))
+			console.WriteString("\n")
+			for {
+				amd64.Halt()
+			}
+		}
+		if initExitObserved != 0 {
+			console.WriteString("PANIC: init process exited: ")
+			console.WriteHex(initExitCode)
+			console.WriteString("\n")
+			for {
+				amd64.Halt()
+			}
+		}
 		amd64.Halt()
 	}
 	console.WriteString("INITRAMFS_DISCOVERY_OK\n")
 	console.WriteString("PID1_INIT_OK\n")
 	console.WriteString("PROCESS_EXIT_EVENT_OK\n")
 	console.WriteString("SUPERVISOR_CRASH_EVENT_OK\n")
+	console.WriteString("LIFECYCLE_IPC_OK\n")
+	console.WriteString("PID1_SERVICE_LAUNCH_OK\n")
 	if amd64.UserPreemptions() == 0 {
 		console.WriteString("PANIC: userspace task was not preempted\n")
 		for {

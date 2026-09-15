@@ -24,6 +24,10 @@ creates a distinct address space and process ID 1, and schedules it at ring 3.
 
 Normal native exits and isolated CPU faults enter the same bounded task-exit
 path. The process registry emits a process event only after its final Task dies,
-then forwards the event to supervision policy. The bootstrap PID 1 currently
-announces itself and remains runnable. Lifecycle IPC and moving the complete
-supervisor loop out of the bootstrap kernel path remain unfinished.
+then sends a typed lifecycle notification over a channel available only to PID
+1. Init blocks on that channel, issues a correlated launch request, waits for
+the result, and continues only after the replacement Process and Task exist.
+
+The current launch backend supports the bootstrap crash-probe image. General
+executable lookup through VFS and moving the complete policy state machine into
+the PID 1 image remain unfinished.

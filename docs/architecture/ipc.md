@@ -47,6 +47,14 @@ switches to another runnable task. Message arrival and timer expiry wake the
 task. The retry either consumes the queued message or returns the stored typed
 timeout status.
 
+## PID 1 lifecycle channel
+
+The `GINITLIF` version 1 protocol uses a dedicated channel capability installed
+only in PID 1. Process-exit notifications carry the PID and typed exit code.
+Launch requests and results are correlated, so each pending request is retired
+by exactly one reply. Endpoint routing is keyed by both channel object and
+process address-space root and has capacity for both sides of every channel.
+
 Calls from the interrupt bridge obey Win64's 16-byte stack alignment. This is
 explicit rather than dependent on the generated Go function's current stack
 frame size.

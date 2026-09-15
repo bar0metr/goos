@@ -143,11 +143,13 @@ The native kernel and the first isolated services are implemented:
   restart policies, health states, and rate limiting;
 - deterministic USTAR initramfs discovery and a ring-3 native init as PID 1;
 - bounded task-to-process exit events for supervisor crash detection;
+- capability-protected PID 1 lifecycle IPC and a real supervised service
+  restart into a fresh process address space;
 - unit, integration, boot, and performance tests.
 
 The init policy core, initramfs discovery, PID 1 launch, and kernel-side process
-death delivery are implemented. Lifecycle IPC into PID 1 and the shell are not
-implemented yet. The current ISO boots a real kernel, leaves UEFI
+death delivery and PID 1 lifecycle IPC are implemented. General service image
+resolution and the shell are not implemented yet. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.
@@ -222,10 +224,15 @@ USER_FAULT_ISOLATION_OK
 USER_RING3_OK
 NATIVE_PROCESS_OK
 INIT_PROCESS_OK
+INIT_LIFECYCLE_IPC_OK
+INIT_SERVICE_LAUNCH_OK
+INIT_SERVICE_STARTED_OK
 INITRAMFS_DISCOVERY_OK
 PID1_INIT_OK
 PROCESS_EXIT_EVENT_OK
 SUPERVISOR_CRASH_EVENT_OK
+LIFECYCLE_IPC_OK
+PID1_SERVICE_LAUNCH_OK
 Kernel initialized
 BOOT_OK
 ```
