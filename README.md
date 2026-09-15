@@ -132,10 +132,11 @@ implemented:
 - validated `CopyIn` and `CopyOut` across user page mappings;
 - preemptively scheduled ring 3 tasks with process-specific CR3 roots;
 - task-local guarded RSP0 stacks and isolated userspace fault termination;
+- a versioned native image format and strictly validated segment loader;
 - unit, integration, boot, and performance tests.
 
-General process loading, IPC, userspace services, VFS, RAMFS, and the shell are
-not implemented yet. The current ISO boots a real kernel, leaves UEFI
+Initramfs discovery, IPC, userspace services, VFS, RAMFS, and the shell are not
+implemented yet. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.
@@ -168,7 +169,7 @@ Boot: UEFI
 Security: capabilities (foundation)
 BOOT_SERVICES_EXITED
 Memory: 375 MiB usable
-Physical pages free: 96061
+Physical pages free: 96059
 PMM_OK
 NX_WX_OK
 VM_OK
@@ -192,6 +193,7 @@ USER_RX_OK
 USER_STACK_NX_OK
 USER_COPYOUT_OK
 KCALL_ABI_OK
+NATIVE_IMAGE_LOADER_OK
 USER_COPYIN_OK
 USER_DEBUG_WRITE_OK
 USER_EXIT_OK
@@ -210,9 +212,9 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage introduces a native userspace image loader. Typed IPC, shared
-memory, system services, and the shell will be built on top of that foundation
-rather than simulated with predetermined output.
+The next stage introduces versioned typed IPC, followed by shared memory.
+System services and the shell will be built on top of that foundation rather
+than simulated with predetermined output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for
@@ -225,6 +227,7 @@ Further documentation:
 - [interrupts](docs/architecture/interrupts.md);
 - [scheduler](docs/architecture/scheduler.md);
 - [processes](docs/architecture/processes.md);
+- [native images](docs/architecture/native-images.md);
 - [capabilities and handles](docs/architecture/capabilities.md);
 - [building and debugging](docs/development/building.md);
 - [roadmap](docs/development/roadmap.md);

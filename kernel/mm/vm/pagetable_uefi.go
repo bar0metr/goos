@@ -184,6 +184,20 @@ func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permission
 	return true
 }
 
+// CanMapUserPage reports whether the existing bootstrap page-table hierarchy
+// has an unused leaf for the requested user address. Loaders use this to reject
+// unsupported branches and conflicts before allocating or exposing pages.
+func CanMapUserPage(rootAddress uint64, virtual uint64) bool {
+	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || virtual < IdentityMapLimit || virtual >= UserAddressLimit {
+		return false
+	}
+	// SAFETY: rootAddress names a process PML4 created by this package; the
+	// function only inspects its owned, identity-mapped page-table hierarchy.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, virtual)
+	return entry != nil && *entry&entryPresent == 0
+}
+
 // CopyIn copies a bounded range from a process address space through the
 // kernel's physical identity map. Every page in the range must be explicitly
 // user-accessible; supervisor mappings are never accepted through this path.

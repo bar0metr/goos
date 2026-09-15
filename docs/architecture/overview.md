@@ -16,5 +16,6 @@ page tables, installs descriptor and interrupt tables, receives timer IRQs, and
 preempts independent kernel tasks. It constructs distinct process address
 spaces, preemptively schedules multiple ring 3 tasks with process-specific CR3
 roots and guarded kernel-entry stacks, and dispatches bounded native calls with
-validated user-memory copying. A userspace CPU fault terminates only its task.
-General program loading, IPC, and userspace services are not yet implemented.
+validated user-memory copying. A versioned native loader validates and maps
+executable, data, and stack segments. A userspace CPU fault terminates only its
+task. Initramfs discovery, IPC, and userspace services are not yet implemented.

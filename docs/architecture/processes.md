@@ -36,8 +36,8 @@ may select a kernel task or another process root. The native-call entry verifies
 the saved user CS and invokes the architecture-independent dispatcher. Exit
 marks the current slot non-runnable and immediately schedules its successor.
 
-The boot test also runs a second process that deliberately raises an invalid-
-opcode exception. The kernel removes only that userspace task and continues.
-Kernel-originated exceptions remain fatal. The program bytes are not loaded
-from an executable file; general loading, resource reclamation, wait semantics,
-and task-ID reuse remain future work.
+Both bootstrap processes are loaded through the versioned native image loader.
+The second deliberately raises an invalid-opcode exception; the kernel removes
+only that userspace task and continues. Kernel-originated exceptions remain
+fatal. Initramfs discovery, resource reclamation, wait semantics, and task-ID
+reuse remain future work.

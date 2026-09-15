@@ -9,6 +9,7 @@ import (
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/kernel/loader"
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
@@ -16,14 +17,16 @@ import (
 )
 
 var (
-	bootInfo       boot.Info
-	pageAllocator  pmm.Allocator
-	demoTaskA      uint64
-	demoTaskB      uint64
-	demoABlocked   uint64
-	demoAResumed   uint64
-	userExited     uint64
-	kernelCallData [kcall.MaxDebugWrite]byte
+	bootInfo        boot.Info
+	pageAllocator   pmm.Allocator
+	demoTaskA       uint64
+	demoTaskB       uint64
+	demoABlocked    uint64
+	demoAResumed    uint64
+	userExited      uint64
+	kernelCallData  [kcall.MaxDebugWrite]byte
+	nativeImageData [512]byte
+	faultImageData  [256]byte
 )
 
 type nativeCallHandler struct {
@@ -252,11 +255,6 @@ func main() {
 	console.WriteString("ADDRESS_SPACE_B_OK\n")
 	console.WriteString("PROCESS_ISOLATION_OK\n")
 
-	userCodePhysical, codeAllocated := pageAllocator.Allocate()
-	userStackPhysical, stackAllocated := pageAllocator.Allocate()
-	userDataPhysical, dataAllocated := pageAllocator.Allocate()
-	faultCodePhysical, faultCodeAllocated := pageAllocator.Allocate()
-	faultStackPhysical, faultStackAllocated := pageAllocator.Allocate()
 	userProgram := [...]byte{
 		0xb9, 0x00, 0x00, 0x00, 0x01, // mov ecx, 0x01000000: remain preemptible.
 		0xff, 0xc9, // dec ecx.
@@ -282,17 +280,26 @@ func main() {
 	}
 	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
 	faultProgram := []byte{0x0f, 0x0b}
-	if !codeAllocated || !stackAllocated || !dataAllocated || !faultCodeAllocated || !faultStackAllocated ||
-		!vm.InitializePhysical(userCodePhysical, userProgram[:]) ||
-		!vm.InitializePhysical(userStackPhysical, nil) ||
-		!vm.InitializePhysical(userDataPhysical, userMessage[:]) ||
-		!vm.InitializePhysical(faultCodePhysical, faultProgram) ||
-		!vm.InitializePhysical(faultStackPhysical, nil) ||
-		!vm.MapUserPage(rootA, vm.UserCodeAddress, userCodePhysical, vm.Permissions{User: true, Executable: true}) ||
-		!vm.MapUserPage(rootA, vm.UserStackAddress, userStackPhysical, vm.Permissions{User: true, Writable: true}) ||
-		!vm.MapUserPage(rootA, vm.UserDataAddress, userDataPhysical, vm.Permissions{User: true}) ||
-		!vm.MapUserPage(rootB, vm.UserCodeAddress, faultCodePhysical, vm.Permissions{User: true, Executable: true}) ||
-		!vm.MapUserPage(rootB, vm.UserStackAddress, faultStackPhysical, vm.Permissions{User: true, Writable: true}) {
+	nativeBytes, nativeEncoded := loader.EncodeNative(nativeImageData[:], loader.ImageSource{
+		Entry:    vm.UserCodeAddress,
+		StackTop: vm.UserStackAddress + vm.PageSize - 16,
+		Segments: []loader.SegmentSource{
+			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(userProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: userProgram[:]},
+			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
+			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(userMessage)), Flags: loader.SegmentReadable, Data: userMessage},
+		},
+	})
+	faultBytes, faultEncoded := loader.EncodeNative(faultImageData[:], loader.ImageSource{
+		Entry:    vm.UserCodeAddress,
+		StackTop: vm.UserStackAddress + vm.PageSize - 16,
+		Segments: []loader.SegmentSource{
+			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(faultProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: faultProgram},
+			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
+		},
+	})
+	loadedA, loadedImageA := loader.LoadNative(&pageAllocator, rootA, nativeBytes)
+	loadedB, loadedImageB := loader.LoadNative(&pageAllocator, rootB, faultBytes)
+	if !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
 		console.WriteString("PANIC: native user image setup failed\n")
 		for {
 			amd64.Halt()
@@ -309,8 +316,9 @@ func main() {
 	}
 	console.WriteString("USER_COPYOUT_OK\n")
 	console.WriteString("KCALL_ABI_OK\n")
-	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, rootA, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16)
-	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, rootB, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16)
+	console.WriteString("NATIVE_IMAGE_LOADER_OK\n")
+	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, rootA, loadedA.Entry, loadedA.StackTop)
+	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, rootB, loadedB.Entry, loadedB.StackTop)
 	if !userTaskAdded || !faultTaskAdded || !processA.AddTask(sched.TaskID(userTaskID)) || !processB.AddTask(sched.TaskID(faultTaskID)) {
 		console.WriteString("PANIC: userspace task scheduling failed\n")
 		for {

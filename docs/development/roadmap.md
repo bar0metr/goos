@@ -8,9 +8,9 @@ block/wake lifecycle, the Process model, typed generation-safe handles, and
 distinct process page-table roots, a guarded TSS/RSP0 path, the first CPL 3
 native program, a typed native kernel-call dispatcher, validated bounded user-
 memory copying, process-aware CR3 scheduling, task-local RSP0 stacks, native
-Exit lifecycle, and isolated user-fault termination are complete. The next
-slice introduces native program loading, followed by versioned IPC, userspace
-TTY, RAMFS, VFS, init, and a native shell.
+Exit lifecycle, isolated user-fault termination, and a validated versioned
+native image loader are complete. The next slice introduces versioned typed IPC,
+followed by shared memory, userspace TTY, RAMFS, VFS, init, and a native shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.
