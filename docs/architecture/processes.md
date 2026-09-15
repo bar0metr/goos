@@ -30,14 +30,14 @@ then copies a valid message through the native DebugWrite call, and finally
 requests Exit through interrupt vector `0x80`. Code is copied into a zeroed
 physical page before that page becomes executable, preserving W^X.
 
-The kernel loads the process CR3 and enters CPL 3 through a complete `IRETQ`
-frame. The native-call entry verifies the saved user CS, preserves the complete
-general-purpose register state, and invokes the architecture-independent
-dispatcher. Returning calls resume at ring 3; Exit restores the kernel CR3 and
-the suspended boot-task stack. Reaching `NATIVE_PROCESS_OK` proves that the
-complete call sequence executed.
+The scheduler loads the process CR3 and enters CPL 3 through a complete `IRETQ`
+frame. Timer IRQs save the user context on a task-local guarded RSP0 stack and
+may select a kernel task or another process root. The native-call entry verifies
+the saved user CS and invokes the architecture-independent dispatcher. Exit
+marks the current slot non-runnable and immediately schedules its successor.
 
-The native operation, argument, result, and typed-status contract is defined,
-but `INT 0x80` remains a bootstrap transport. This program is not loaded from an
-executable file. General process loading, process-aware scheduler CR3 changes,
-and process teardown remain future work.
+The boot test also runs a second process that deliberately raises an invalid-
+opcode exception. The kernel removes only that userspace task and continues.
+Kernel-originated exceptions remain fatal. The program bytes are not loaded
+from an executable file; general loading, resource reclamation, wait semantics,
+and task-ID reuse remain future work.

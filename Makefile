@@ -98,6 +98,7 @@ docs:
 	@test -f docs/architecture/processes.md
 	@test -f docs/architecture/capabilities.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
+	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/development/building.md
 
 clean:
@@ -112,7 +113,7 @@ help:
 	@printf '%s\n' \
 	  'GoOS build targets:' \
 	  '  all/iso          build the bootable x86_64 ISO' \
-	  '  kernel          build the TinyGo UEFI kernel' \
+	  '  kernel          build the UEFI kernel' \
 	  '  run             boot with QEMU and serial on this terminal' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test            run host unit and artifact integration tests' \

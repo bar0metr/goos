@@ -41,6 +41,9 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'USER_COPYIN_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_DEBUG_WRITE_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_EXIT_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_PREEMPT_OK' "$log" 2>/dev/null && \
+		grep -q 'PROCESS_CR3_SCHED_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_FAULT_ISOLATION_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_RING3_OK' "$log" 2>/dev/null && \
 		grep -q 'NATIVE_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then

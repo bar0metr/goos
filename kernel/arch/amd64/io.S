@@ -191,7 +191,22 @@ GOOS_FATAL_ERR   30
 GOOS_FATAL_NOERR 31
 
 goos_exception_fatal:
+    cmpq $0x23, 24(%rsp)
+    je .terminate_user_fault
     leaq fatal_exception_message(%rip), %rsi
+    cmpq $6, (%rsp)
+    jne .fatal_check_gp
+    leaq fatal_ud_message(%rip), %rsi
+    jmp .fatal_next
+.fatal_check_gp:
+    cmpq $13, (%rsp)
+    jne .fatal_check_pf
+    leaq fatal_gp_message(%rip), %rsi
+    jmp .fatal_next
+.fatal_check_pf:
+    cmpq $14, (%rsp)
+    jne .fatal_next
+    leaq fatal_pf_message(%rip), %rsi
 .fatal_next:
     movb (%rsi), %al
     testb %al, %al
@@ -211,11 +226,45 @@ goos_exception_fatal:
     hlt
     jmp .fatal_halt
 
+.terminate_user_fault:
+    incq goos_user_faults(%rip)
+    movq goos_current_task(%rip), %rcx
+    btrq %rcx, goos_runnable_mask(%rip)
+    movq %rcx, %rax
+.user_fault_find_next:
+    incq %rax
+    cmpq goos_task_count(%rip), %rax
+    jb .user_fault_select
+    xorq %rax, %rax
+.user_fault_select:
+    btq %rax, goos_runnable_mask(%rip)
+    jnc .user_fault_find_next
+    movq %rax, goos_current_task(%rip)
+    leaq goos_task_roots(%rip), %rdx
+    movq (%rdx,%rax,8), %r10
+    movq %r10, %cr3
+    leaq goos_task_rsp0(%rip), %rdx
+    movq (%rdx,%rax,8), %r10
+    testq %r10, %r10
+    jz .user_fault_restore
+    movq goos_tss_rsp0_address(%rip), %r11
+    movq %r10, (%r11)
+.user_fault_restore:
+    leaq goos_task_contexts(%rip), %rdx
+    movq (%rdx,%rax,8), %rsp
+    jmp .restore_context
+
 .section .rdata
 breakpoint_message:
     .asciz "EXCEPTION_OK\r\n"
 fatal_exception_message:
     .asciz "PANIC: CPU exception\r\n"
+fatal_ud_message:
+    .asciz "PANIC: invalid opcode\r\n"
+fatal_gp_message:
+    .asciz "PANIC: general protection fault\r\n"
+fatal_pf_message:
+    .asciz "PANIC: page fault\r\n"
 
 .align 8
 .global goos_interrupt_table
@@ -232,24 +281,6 @@ goos_interrupt_table:
     .quad goos_user_call
 
 .section .text
-.global goos_enter_user
-goos_enter_user:
-    pushfq
-    cli
-    movq %rsp, goos_kernel_return_rsp(%rip)
-    movq %r9, goos_kernel_return_cr3(%rip)
-	 movq %rcx, goos_current_user_cr3(%rip)
-    movq %rcx, %cr3
-    movw $0x1b, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    pushq $0x1b
-    pushq %r8
-    pushq $0x2
-    pushq $0x23
-    pushq %rdx
-    iretq
-
 .global goos_user_call
 goos_user_call:
     cmpq $0x23, 8(%rsp)
@@ -273,7 +304,9 @@ goos_user_call:
 	 movq 40(%rsp), %rcx
 	 movq 88(%rsp), %rdx
 	 movq 80(%rsp), %r8
-	 movq goos_current_user_cr3(%rip), %r9
+	 movq goos_current_task(%rip), %rax
+	 leaq goos_task_roots(%rip), %r9
+	 movq (%r9,%rax,8), %r9
 	 callq goos_dispatch_kernel_call
 	 movq $0, 40(%rsp)
 	 movl %eax, 40(%rsp)
@@ -299,14 +332,32 @@ goos_user_call:
 	 popq %r15
 	 iretq
 .user_exit:
-    movq goos_kernel_return_cr3(%rip), %rax
-    movq %rax, %cr3
-    movq goos_kernel_return_rsp(%rip), %rsp
-    movw $0x10, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    popfq
-    retq
+    addq $40, %rsp
+    movq goos_current_task(%rip), %rcx
+    btrq %rcx, goos_runnable_mask(%rip)
+    movq %rcx, %rax
+.user_exit_find_next:
+    incq %rax
+    cmpq goos_task_count(%rip), %rax
+    jb .user_exit_select
+    xorq %rax, %rax
+.user_exit_select:
+    btq %rax, goos_runnable_mask(%rip)
+    jnc .user_exit_find_next
+    movq %rax, goos_current_task(%rip)
+    leaq goos_task_roots(%rip), %rdx
+    movq (%rdx,%rax,8), %r10
+    movq %r10, %cr3
+    leaq goos_task_rsp0(%rip), %rdx
+    movq (%rdx,%rax,8), %r10
+    testq %r10, %r10
+    jz .user_exit_restore
+    movq goos_tss_rsp0_address(%rip), %r11
+    movq %r10, (%r11)
+.user_exit_restore:
+    leaq goos_task_contexts(%rip), %rdx
+    movq (%rdx,%rax,8), %rsp
+    jmp .restore_context
 
 .section .text
 .global goos_irq_timer
@@ -327,6 +378,10 @@ goos_irq_timer:
     pushq %r14
     pushq %r15
     incq goos_timer_ticks(%rip)
+    cmpq $0x23, 128(%rsp)
+    jne .timer_not_user
+    incq goos_user_preemptions(%rip)
+.timer_not_user:
     cmpb $0, goos_scheduler_enabled(%rip)
     je .timer_eoi
     movq goos_current_task(%rip), %rax
@@ -343,10 +398,21 @@ goos_irq_timer:
     jmp .timer_find_next
 .timer_selected:
     movq %rax, goos_current_task(%rip)
+    leaq goos_task_roots(%rip), %r10
+    movq (%r10,%rax,8), %r11
+    movq %r11, %cr3
+    leaq goos_task_rsp0(%rip), %r10
+    movq (%r10,%rax,8), %r11
+    testq %r11, %r11
+    jz .timer_load_context
+    movq goos_tss_rsp0_address(%rip), %r10
+    movq %r11, (%r10)
+.timer_load_context:
     movq (%rdx,%rax,8), %rsp
 .timer_eoi:
     movb $0x20, %al
     outb %al, $0x20
+.restore_context:
     popq %r15
     popq %r14
     popq %r13
@@ -406,11 +472,43 @@ goos_scheduler_install:
     movq %rcx, 8(%rax)
     movq %rdx, 16(%rax)
     movq %r8, 24(%rax)
+    leaq goos_task_roots(%rip), %rax
+    movq %r9, 0(%rax)
+    movq %r9, 8(%rax)
+    movq %r9, 16(%rax)
+    movq %r9, 24(%rax)
     movq $4, goos_task_count(%rip)
     movq $0, goos_current_task(%rip)
     movq $0x0f, goos_runnable_mask(%rip)
     movb $1, goos_scheduler_enabled(%rip)
     sti
+    retq
+
+.global goos_scheduler_install_user
+goos_scheduler_install_user:
+    xorq %rax, %rax
+    pushfq
+    cli
+    movq goos_task_count(%rip), %r10
+    cmpq $64, %r10
+    jae .install_user_done
+    leaq goos_task_contexts(%rip), %r11
+    movq %rcx, (%r11,%r10,8)
+    leaq goos_task_roots(%rip), %r11
+    movq %rdx, (%r11,%r10,8)
+    leaq goos_task_rsp0(%rip), %r11
+    movq %r8, (%r11,%r10,8)
+    btsq %r10, goos_runnable_mask(%rip)
+    incq %r10
+    movq %r10, goos_task_count(%rip)
+    movq %r10, %rax
+.install_user_done:
+    popfq
+    retq
+
+.global goos_set_tss_stack_address
+goos_set_tss_stack_address:
+    movq %rcx, goos_tss_rsp0_address(%rip)
     retq
 
 .global goos_block_current_task
@@ -447,23 +545,37 @@ goos_invalidate_page:
 .align 8
 goos_timer_ticks:
     .quad 0
+goos_user_preemptions:
+    .quad 0
+goos_user_faults:
+    .quad 0
 goos_current_task:
     .quad 0
 goos_task_count:
     .quad 1
 goos_task_contexts:
-    .quad 0, 0, 0, 0
+    .zero 512
+goos_task_roots:
+    .zero 512
+goos_task_rsp0:
+    .zero 512
 goos_runnable_mask:
     .quad 1
 goos_scheduler_enabled:
     .byte 0
-.align 8
-goos_kernel_return_rsp:
+goos_tss_rsp0_address:
     .quad 0
-goos_kernel_return_cr3:
-    .quad 0
-goos_current_user_cr3:
-	 .quad 0
+
+.section .text
+.global goos_user_preemptions_read
+goos_user_preemptions_read:
+    movq goos_user_preemptions(%rip), %rax
+    retq
+
+.global goos_user_faults_read
+goos_user_faults_read:
+    movq goos_user_faults(%rip), %rax
+    retq
 
 .section .rdata
 .align 8

@@ -1,36 +1,37 @@
 # Scheduler
 
-GoOS separates schedulable Tasks from future Processes. A Task owns execution
-state and a kernel stack. A Process will own an address space, capabilities,
-handles, metadata, and one or more Tasks.
+GoOS separates schedulable Tasks from Processes. A Task owns execution state
+and a kernel stack. A Process owns an address space, handles, metadata, and one
+or more Task identities. Userspace tasks record their owning process and CR3;
+kernel tasks use the kernel page-table root.
 
 The architecture-neutral bootstrap scheduler uses a fixed-capacity queue of 64
 tasks and explicit Created, Runnable, Running, Blocked, and Dead states. Its
-round-robin policy skips non-runnable tasks and wraps deterministically. The
-fixed capacity prevents allocator dependencies during early boot.
+round-robin policy skips non-runnable tasks and wraps deterministically.
 
 ## x86_64 context switch
 
 PIT IRQ0 is the preemption point. The entry stub saves all 15 general-purpose
-registers. The CPU-provided long-mode interrupt frame supplies RIP, CS, RFLAGS,
-RSP, and SS. The complete saved RSP becomes the task context. The stub selects
-the next slot, changes RSP, restores registers, acknowledges the PIC, and uses
-`IRETQ` to resume the selected task.
+registers. A privilege-changing interrupt frame also supplies user RSP and SS.
+The complete saved RSP becomes the task context. The stub selects the next slot,
+loads its CR3, updates TSS.RSP0 for userspace, restores registers, acknowledges
+the PIC, and uses `IRETQ` to resume the selected task.
 
-New tasks receive four contiguous physical pages and a synthetic interrupt
-frame. A fifth page immediately below each stack is removed from the active page
-table and invalidated with `INVLPG`. The frame preserves Win64 entry alignment
-and home space required by the TinyGo-generated functions. The boot task is
-captured on the first preemption. Two worker tasks and one idle task run
-independently.
+New kernel tasks receive four contiguous stack pages, a synthetic interrupt
+frame, and an unmapped guard page. The frame preserves Win64 entry alignment
+and home space required by compiler-generated functions. Userspace tasks receive
+the same guarded kernel stack plus a ring 3 frame naming their RX entry point
+and RW+NX user stack.
 
-The IRQ selector maintains a runnable bit mask. A task can atomically remove
-itself from that mask and later be made runnable by another task. The live boot
-scenario blocks worker A, confirms that worker B continues running, lets B wake
-A explicitly, and requires A to resume from its saved context before reporting
-success.
+The IRQ selector maintains a runnable bit mask. A task can block itself and be
+woken by another task. Native Exit removes the current user task from the mask
+and schedules its successor without returning through a global boot context.
 
-The current implementation is single-CPU and the IRQ stub owns run-queue
-synchronization by disabling nested maskable interrupts. Arbitrary dynamic task
-creation, stack reclamation, priorities, wait queues, per-CPU queues, and SMP
-are not implemented yet.
+The live userspace scenario schedules two processes with distinct CR3 roots.
+One remains in ring 3 long enough to be preempted, performs native calls, and
+exits. The other executes an invalid opcode; the exception path terminates only
+that task, after which kernel tasks and the boot sequence continue.
+
+The implementation is single-CPU, and IRQ-level synchronization disables nested
+maskable interrupts. Stack and address-space reclamation, wait semantics, slot
+reuse, priorities, per-CPU queues, and SMP are not implemented yet.

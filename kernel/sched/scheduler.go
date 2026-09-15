@@ -19,9 +19,11 @@ type Context struct {
 }
 
 type Task struct {
-	ID      TaskID
-	State   State
-	Context Context
+	ID           TaskID
+	ProcessID    uint64
+	AddressSpace uint64
+	State        State
+	Context      Context
 }
 
 // Scheduler is a bounded single-CPU round-robin run queue. IRQ-level locking
@@ -34,11 +36,20 @@ type Scheduler struct {
 }
 
 func (scheduler *Scheduler) Add(context Context) (TaskID, bool) {
+	return scheduler.AddOwned(context, 0, 0)
+}
+
+// AddOwned associates a userspace task with its process and address-space
+// root. Kernel tasks use zero for both ownership fields.
+func (scheduler *Scheduler) AddOwned(context Context, processID uint64, addressSpace uint64) (TaskID, bool) {
 	if context.StackPointer == 0 || scheduler.count == len(scheduler.tasks) {
 		return 0, false
 	}
+	if (processID == 0) != (addressSpace == 0) {
+		return 0, false
+	}
 	scheduler.nextID++
-	task := Task{ID: scheduler.nextID, State: TaskRunnable, Context: context}
+	task := Task{ID: scheduler.nextID, ProcessID: processID, AddressSpace: addressSpace, State: TaskRunnable, Context: context}
 	scheduler.tasks[scheduler.count] = task
 	scheduler.count++
 	return task.ID, true

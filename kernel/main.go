@@ -22,6 +22,7 @@ var (
 	demoTaskB      uint64
 	demoABlocked   uint64
 	demoAResumed   uint64
+	userExited     uint64
 	kernelCallData [kcall.MaxDebugWrite]byte
 )
 
@@ -30,6 +31,7 @@ type nativeCallHandler struct {
 }
 
 func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
+	userExited = 1
 	console := amd64.NewCOM1()
 	console.WriteString("USER_EXIT_OK\n")
 	return kcall.StatusOK
@@ -96,7 +98,7 @@ func main() {
 	console := amd64.NewCOM1()
 	console.Init()
 	console.WriteString("GoOS 0.1-dev\n")
-	console.WriteString("TinyGo kernel\n\n")
+	console.WriteString("Kernel\n\n")
 	console.WriteString("CPU: x86_64\n")
 	console.WriteString("Boot: UEFI\n")
 	console.WriteString("Security: capabilities (foundation)\n")
@@ -215,7 +217,7 @@ func main() {
 	}
 	processA, validA := process.New(1, process.AddressSpace{Root: rootA})
 	processB, validB := process.New(2, process.AddressSpace{Root: rootB})
-	if !validA || !validB || !processA.AddTask(sched.TaskID(1)) || !processB.AddTask(sched.TaskID(2)) {
+	if !validA || !validB {
 		console.WriteString("PANIC: process model initialization failed\n")
 		for {
 			amd64.Halt()
@@ -253,7 +255,12 @@ func main() {
 	userCodePhysical, codeAllocated := pageAllocator.Allocate()
 	userStackPhysical, stackAllocated := pageAllocator.Allocate()
 	userDataPhysical, dataAllocated := pageAllocator.Allocate()
+	faultCodePhysical, faultCodeAllocated := pageAllocator.Allocate()
+	faultStackPhysical, faultStackAllocated := pageAllocator.Allocate()
 	userProgram := [...]byte{
+		0xb9, 0x00, 0x00, 0x00, 0x01, // mov ecx, 0x01000000: remain preemptible.
+		0xff, 0xc9, // dec ecx.
+		0x75, 0xfc, // jnz dec ecx.
 		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: DebugWrite.
 		0x48, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rdi, 0: invalid pointer.
 		0xbe, 0x01, 0x00, 0x00, 0x00, // mov esi, 1.
@@ -274,13 +281,18 @@ func main() {
 		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
 	}
 	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
-	if !codeAllocated || !stackAllocated || !dataAllocated ||
+	faultProgram := []byte{0x0f, 0x0b}
+	if !codeAllocated || !stackAllocated || !dataAllocated || !faultCodeAllocated || !faultStackAllocated ||
 		!vm.InitializePhysical(userCodePhysical, userProgram[:]) ||
 		!vm.InitializePhysical(userStackPhysical, nil) ||
 		!vm.InitializePhysical(userDataPhysical, userMessage[:]) ||
+		!vm.InitializePhysical(faultCodePhysical, faultProgram) ||
+		!vm.InitializePhysical(faultStackPhysical, nil) ||
 		!vm.MapUserPage(rootA, vm.UserCodeAddress, userCodePhysical, vm.Permissions{User: true, Executable: true}) ||
 		!vm.MapUserPage(rootA, vm.UserStackAddress, userStackPhysical, vm.Permissions{User: true, Writable: true}) ||
-		!vm.MapUserPage(rootA, vm.UserDataAddress, userDataPhysical, vm.Permissions{User: true}) {
+		!vm.MapUserPage(rootA, vm.UserDataAddress, userDataPhysical, vm.Permissions{User: true}) ||
+		!vm.MapUserPage(rootB, vm.UserCodeAddress, faultCodePhysical, vm.Permissions{User: true, Executable: true}) ||
+		!vm.MapUserPage(rootB, vm.UserStackAddress, faultStackPhysical, vm.Permissions{User: true, Writable: true}) {
 		console.WriteString("PANIC: native user image setup failed\n")
 		for {
 			amd64.Halt()
@@ -297,7 +309,26 @@ func main() {
 	}
 	console.WriteString("USER_COPYOUT_OK\n")
 	console.WriteString("KCALL_ABI_OK\n")
-	amd64.EnterUser(rootA, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16, pageTable)
+	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, rootA, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16)
+	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, rootB, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16)
+	if !userTaskAdded || !faultTaskAdded || !processA.AddTask(sched.TaskID(userTaskID)) || !processB.AddTask(sched.TaskID(faultTaskID)) {
+		console.WriteString("PANIC: userspace task scheduling failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	for userExited == 0 || amd64.UserFaults() == 0 {
+		amd64.Halt()
+	}
+	if amd64.UserPreemptions() == 0 {
+		console.WriteString("PANIC: userspace task was not preempted\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("USER_PREEMPT_OK\n")
+	console.WriteString("PROCESS_CR3_SCHED_OK\n")
+	console.WriteString("USER_FAULT_ISOLATION_OK\n")
 	console.WriteString("USER_RING3_OK\n")
 	console.WriteString("NATIVE_PROCESS_OK\n")
 	console.WriteString("Kernel initialized\n")

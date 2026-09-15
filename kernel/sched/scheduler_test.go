@@ -69,3 +69,25 @@ func TestLifecycleTransitions(t *testing.T) {
 		t.Fatal("dead task changed state")
 	}
 }
+
+func TestSchedulerOwnsProcessAddressSpace(t *testing.T) {
+	var scheduler Scheduler
+	id, ok := scheduler.AddOwned(Context{StackPointer: 0x1000}, 7, 0x9000)
+	if !ok || id == 0 {
+		t.Fatal("failed to add process-owned task")
+	}
+	task, started := scheduler.Start()
+	if !started || task.ProcessID != 7 || task.AddressSpace != 0x9000 {
+		t.Fatalf("unexpected owned task: %#v", task)
+	}
+}
+
+func TestSchedulerRejectsPartialProcessOwnership(t *testing.T) {
+	var scheduler Scheduler
+	if _, ok := scheduler.AddOwned(Context{StackPointer: 0x1000}, 1, 0); ok {
+		t.Fatal("accepted process task without address space")
+	}
+	if _, ok := scheduler.AddOwned(Context{StackPointer: 0x1000}, 0, 0x9000); ok {
+		t.Fatal("accepted kernel task with process address space")
+	}
+}

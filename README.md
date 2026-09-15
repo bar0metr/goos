@@ -75,7 +75,7 @@ Native applications             Linux ELF applications
         |                 |                 |
         +-----------------+-----------------+
                           |
-                minimal TinyGo kernel
+                   minimal kernel
                           |
                    UEFI / x86_64 / QEMU
 ```
@@ -94,7 +94,7 @@ The project's central principle is:
 Milestones 0 through 2 and the first userspace slices of Milestone 3 are
 implemented:
 
-- a TinyGo UEFI kernel for `x86_64`;
+- a UEFI kernel for `x86_64`, implemented in Go and built with TinyGo;
 - a bootable El Torito ISO;
 - QEMU/OVMF support;
 - a COM1 serial console;
@@ -130,10 +130,12 @@ implemented:
 - the first native program executing at CPL 3;
 - a typed native kernel-call dispatcher with Exit and bounded DebugWrite;
 - validated `CopyIn` and `CopyOut` across user page mappings;
+- preemptively scheduled ring 3 tasks with process-specific CR3 roots;
+- task-local guarded RSP0 stacks and isolated userspace fault termination;
 - unit, integration, boot, and performance tests.
 
 General process loading, IPC, userspace services, VFS, RAMFS, and the shell are
-not implemented yet. The current ISO boots a real TinyGo kernel, leaves UEFI
+not implemented yet. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.
@@ -159,14 +161,14 @@ A successful boot currently produces:
 
 ```text
 GoOS 0.1-dev
-TinyGo kernel
+Kernel
 
 CPU: x86_64
 Boot: UEFI
 Security: capabilities (foundation)
 BOOT_SERVICES_EXITED
 Memory: 375 MiB usable
-Physical pages free: 96063
+Physical pages free: 96061
 PMM_OK
 NX_WX_OK
 VM_OK
@@ -193,6 +195,9 @@ KCALL_ABI_OK
 USER_COPYIN_OK
 USER_DEBUG_WRITE_OK
 USER_EXIT_OK
+USER_PREEMPT_OK
+PROCESS_CR3_SCHED_OK
+USER_FAULT_ISOLATION_OK
 USER_RING3_OK
 NATIVE_PROCESS_OK
 Kernel initialized
@@ -205,10 +210,9 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage adds process-aware CR3 switching to the scheduler and explicit
-userspace task lifecycle, then introduces a native userspace image loader.
-Typed IPC, shared memory, system services, and the shell will be built on top of
-that foundation rather than simulated with predetermined output.
+The next stage introduces a native userspace image loader. Typed IPC, shared
+memory, system services, and the shell will be built on top of that foundation
+rather than simulated with predetermined output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for

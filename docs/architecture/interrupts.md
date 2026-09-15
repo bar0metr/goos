@@ -13,8 +13,9 @@ stack shape remains unambiguous.
 Vector 3 currently writes a fixed serial diagnostic and returns with `IRETQ`.
 Boot executes a deliberate `INT3` and requires `EXCEPTION_OK`, `GDT_OK`, and
 `IDT_OK`. Other CPU exceptions stop the machine after a serial panic marker.
-User-fault recovery policy remains future work; non-breakpoint faults are still
-fatal during bootstrap.
+Non-breakpoint faults inspect the saved privilege level. Kernel faults remain
+fatal. A user fault removes only the current userspace task from the scheduler
+and resumes another runnable task.
 
 ## Bootstrap timer
 
@@ -38,5 +39,6 @@ IDT vector `0x80` is a DPL 3 interrupt gate used by the bootstrap native call.
 On entry the CPU switches from the user stack to TSS.RSP0. The handler validates
 the saved user CS, preserves all general-purpose registers, and invokes the
 architecture-independent dispatcher. Returning operations resume with `IRETQ`;
-Exit restores the suspended boot context. The gate is a temporary transport;
+Exit marks the task non-runnable and schedules its successor. The gate is a
+temporary transport;
 future `SYSCALL/SYSRET` support must preserve the same native call contract.

@@ -60,6 +60,7 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	}
 	rsp0 := allocation + (kernelStackPages+stackGuardPages)*pmm.PageSize - 64
 	putUint64(tss[4:12], rsp0)
+	setTSSStackAddress(&tss[4])
 	tss[102], tss[103] = byte(tssBytes), 0
 	// SAFETY: tss is static kernel storage with a stable address for the entire
 	// lifetime of the loaded task-register descriptor.
@@ -97,8 +98,5 @@ func StartBootstrapTimer()
 //export goos_timer_ticks_read
 func TimerTicks() uint64
 
-// EnterUser transfers to ring 3 under processRoot. A successful native Exit
-// kernel call restores kernelRoot and returns to the caller.
-//
-//export goos_enter_user
-func EnterUser(processRoot uint64, entry uint64, stack uint64, kernelRoot uint64)
+//export goos_set_tss_stack_address
+func setTSSStackAddress(address *byte)

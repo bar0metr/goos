@@ -14,7 +14,7 @@ explicit protocol identifier and version; Go structure layout is not an ABI.
 The current kernel leaves UEFI boot services, owns its physical allocator and
 page tables, installs descriptor and interrupt tables, receives timer IRQs, and
 preempts independent kernel tasks. It constructs distinct process address
-spaces, executes a bootstrap native program at ring 3, and dispatches bounded
-native kernel calls with validated user-memory copying. General program loading,
-process-aware userspace scheduling, IPC, and userspace services are not yet
-implemented.
+spaces, preemptively schedules multiple ring 3 tasks with process-specific CR3
+roots and guarded kernel-entry stacks, and dispatches bounded native calls with
+validated user-memory copying. A userspace CPU fault terminates only its task.
+General program loading, IPC, and userspace services are not yet implemented.
