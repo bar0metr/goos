@@ -138,9 +138,10 @@ The native kernel and the first isolated services are implemented:
 - restartable blocking IPC with message and timeout wakeups;
 - a capability-isolated userspace TTY protocol and serial service;
 - a bounded generation-safe RAMFS core and versioned service protocol;
+- namespace-scoped VFS mounts, path resolution, open handles, and caches;
 - unit, integration, boot, and performance tests.
 
-Initramfs discovery, VFS, init, and the shell are not implemented yet. The
+Initramfs discovery, init, and the shell are not implemented yet. The
 current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
@@ -225,8 +226,7 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage adds the userspace VFS service over the existing RAMFS protocol,
-followed by init and the native shell.
+The next stage adds init and service supervision, followed by the native shell.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for

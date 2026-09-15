@@ -16,8 +16,10 @@ channel objects, scheduler-integrated IPC wait/deadline bookkeeping, blocking
 native receive, restartable kernel-call frames, message wakeup, and timer-driven
 timeout wakeup, a capability-isolated userspace TTY service, its versioned IPC
 protocol, bounded line editing, basic terminal-control operations, and a bounded
-generation-safe RAMFS with its versioned service protocol are complete. The
-next slice introduces VFS, followed by init and a native shell.
+generation-safe RAMFS with its versioned service protocol, and a namespace-
+scoped VFS with mount routing, path resolution, open-file objects, caches, and
+its versioned IPC protocol are complete. The next slice introduces init and
+service supervision, followed by a native shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

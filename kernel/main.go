@@ -18,6 +18,7 @@ import (
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
 	"goos/kernel/tty"
+	"goos/kernel/vfs"
 )
 
 var (
@@ -41,7 +42,10 @@ var (
 	ipcWakeResults  [ipc.MaxWaiters]ipc.WaitResult
 	ipcWaitStatus   [sched.MaxTasks]kcall.Status
 	bootRAMFS       ramfs.FileSystem
+	deviceRAMFS     ramfs.FileSystem
+	bootVFS         vfs.Namespace
 	ramfsReadback   [16]byte
+	vfsReadback     [16]byte
 )
 
 type nativeCallHandler struct {
@@ -519,6 +523,57 @@ func main() {
 	console.WriteString("RAMFS_METADATA_OK\n")
 	console.WriteString("RAMFS_IO_OK\n")
 	console.WriteString("RAMFS_BOUNDS_OK\n")
+
+	deviceRoot := deviceRAMFS.Init()
+	if bootVFS.Mount([]byte("/"), &bootRAMFS, ramfsRoot) != vfs.StatusOK || bootVFS.Create([]byte("/tmp"), true) != vfs.StatusOK ||
+		bootVFS.Mount([]byte("/tmp/dev"), &deviceRAMFS, deviceRoot) != vfs.StatusOK || bootVFS.Create([]byte("/tmp/note"), false) != vfs.StatusOK ||
+		bootVFS.Create([]byte("/tmp/dev/console"), false) != vfs.StatusOK {
+		console.WriteString("PANIC: VFS namespace setup failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	vfsFile, vfsOpened := bootVFS.Open([]byte("//tmp/./note"), vfs.Read|vfs.Write)
+	vfsWritten, vfsWriteStatus := bootVFS.Write(vfsFile, []byte("VFS works"))
+	vfsSeekStatus := bootVFS.Seek(vfsFile, 0)
+	vfsRead, vfsReadStatus := bootVFS.Read(vfsFile, vfsReadback[:])
+	vfsStat, vfsStatStatus := bootVFS.Stat([]byte("/tmp/note"))
+	_, mountedConsole, mountedResolveStatus := bootVFS.Resolve([]byte("/tmp/dev/console"))
+	deviceConsole, deviceConsoleStatus := deviceRAMFS.Open(deviceRoot, []byte("console"))
+	vfsRequest, vfsRequestEncoded := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/tmp/note")}, 2)
+	vfsDecoded, vfsRequestDecoded := vfs.DecodeRequest(vfsRequest)
+	if vfsOpened != vfs.StatusOK || vfsWriteStatus != vfs.StatusOK || vfsWritten != 9 || vfsSeekStatus != vfs.StatusOK ||
+		vfsReadStatus != vfs.StatusOK || vfsRead != 9 || string(vfsReadback[:vfsRead]) != "VFS works" || vfsStatStatus != vfs.StatusOK || vfsStat.Size != 9 ||
+		mountedResolveStatus != vfs.StatusOK || deviceConsoleStatus != ramfs.StatusOK || mountedConsole != deviceConsole ||
+		!vfsRequestEncoded || !vfsRequestDecoded || vfsDecoded.Operation != vfs.OperationOpen || string(vfsDecoded.Path) != "/tmp/note" {
+		console.WriteString("PANIC: VFS operation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if bootVFS.Close(vfsFile) != vfs.StatusOK || bootVFS.Rename([]byte("/tmp/note"), []byte("/tmp/renamed")) != vfs.StatusOK {
+		console.WriteString("PANIC: VFS lifecycle failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if _, _, status := bootVFS.Resolve([]byte("/tmp/note")); status != vfs.StatusNotFound {
+		console.WriteString("PANIC: VFS stale path cache accepted\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if bootVFS.Unlink([]byte("/tmp/renamed")) != vfs.StatusOK {
+		console.WriteString("PANIC: VFS unlink failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("VFS_NAMESPACE_OK\n")
+	console.WriteString("VFS_MOUNT_OK\n")
+	console.WriteString("VFS_PATH_OK\n")
+	console.WriteString("VFS_CACHE_OK\n")
+	console.WriteString("VFS_PROTOCOL_OK\n")
 
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}

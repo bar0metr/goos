@@ -75,7 +75,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/ramfs ./kernel/shmem ./kernel/tty
+	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs
 
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -86,6 +86,7 @@ test-performance:
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkChannelPingPong -benchmem ./kernel/ipc | tee $(BUILD_DIR)/reports/ipc-ping-pong.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkSharedPagePayloadAccess -benchmem ./kernel/shmem | tee $(BUILD_DIR)/reports/shared-memory.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkMetadataCreateUnlink -benchmem ./kernel/ramfs | tee $(BUILD_DIR)/reports/ramfs-metadata.txt
+	@$(BUILD_ENV) go test -run '^$$' -bench 'Benchmark.*Resolve' -benchmem ./kernel/vfs | tee $(BUILD_DIR)/reports/vfs-resolve.txt
 
 lint:
 	$(BUILD_ENV) go vet ./...
@@ -104,6 +105,7 @@ docs:
 	@test -f docs/architecture/ipc.md
 	@test -f docs/architecture/tty.md
 	@test -f docs/architecture/ramfs.md
+	@test -f docs/architecture/vfs.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/adr/0011-native-image-format.md
@@ -112,6 +114,7 @@ docs:
 	@test -f docs/adr/0015-restartable-ipc-waits.md
 	@test -f docs/adr/0016-userspace-tty-service.md
 	@test -f docs/adr/0017-bounded-ramfs.md
+	@test -f docs/adr/0018-userspace-vfs.md
 	@test -f docs/development/building.md
 
 clean:
