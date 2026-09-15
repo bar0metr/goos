@@ -34,7 +34,14 @@ CR0.WP are enabled before the kernel installs its PML4 through CR3.
 Process roots clone the supervisor-only kernel PDPT path and allocate private
 user page-table levels. User leaves require the user bit at every parent, reject
 W+X, and are zeroed before exposure. The bootstrap native program uses a
-separate RX code page and RW+NX stack page.
+separate RX code page, read-only data page, and RW+NX stack page.
+
+Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
+`CopyOut` reject arithmetic wraparound and addresses outside the bootstrap user
+range, then validate every page crossed by the request. Every page-table level
+and leaf must be present and user-accessible; `CopyOut` additionally requires a
+writable leaf. The validated physical pages are accessed through the kernel
+identity map.
 
 The one-GiB kernel identity map is a bootstrap constraint, not the final process
 layout. A higher-half kernel, complete guard regions, demand paging, and ASLR

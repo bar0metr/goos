@@ -3,6 +3,7 @@ package vm
 const (
 	PageSize         = uint64(4096)
 	IdentityMapLimit = uint64(1 << 30)
+	UserAddressLimit = uint64(2 << 30)
 	KernelImageBase  = uint64(0x400000)
 
 	entryPresent  = uint64(1 << 0)
@@ -11,6 +12,16 @@ const (
 	entryNX       = uint64(1 << 63)
 	addressMask   = uint64(0x000ffffffffff000)
 )
+
+// ValidateUserRange rejects wraparound and confines native user pointers to
+// the portion of the bootstrap address layout reserved for userspace.
+func ValidateUserRange(address uint64, length uint64) bool {
+	if length == 0 {
+		return address >= IdentityMapLimit && address < UserAddressLimit
+	}
+	end := address + length
+	return address >= IdentityMapLimit && address < UserAddressLimit && end >= address && end <= UserAddressLimit
+}
 
 type Permissions struct {
 	Writable   bool

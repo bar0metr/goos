@@ -8,6 +8,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/handle"
+	"goos/kernel/kcall"
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
@@ -15,13 +16,47 @@ import (
 )
 
 var (
-	bootInfo      boot.Info
-	pageAllocator pmm.Allocator
-	demoTaskA     uint64
-	demoTaskB     uint64
-	demoABlocked  uint64
-	demoAResumed  uint64
+	bootInfo       boot.Info
+	pageAllocator  pmm.Allocator
+	demoTaskA      uint64
+	demoTaskB      uint64
+	demoABlocked   uint64
+	demoAResumed   uint64
+	kernelCallData [kcall.MaxDebugWrite]byte
 )
+
+type nativeCallHandler struct {
+	root uint64
+}
+
+func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
+	console := amd64.NewCOM1()
+	console.WriteString("USER_EXIT_OK\n")
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall.Status {
+	console := amd64.NewCOM1()
+	data := kernelCallData[:int(length)]
+	if !vm.CopyIn(handler.root, address, data) {
+		console.WriteString("USER_COPYIN_OK\n")
+		return kcall.StatusInvalidArgument
+	}
+	for _, value := range data {
+		console.WriteByte(value)
+	}
+	return kcall.StatusOK
+}
+
+// dispatchKernelCall is the architecture-neutral native-call boundary. The
+// packed return keeps the assembly bridge simple: action occupies the upper
+// half and the typed native status occupies the lower half.
+//
+//export goos_dispatch_kernel_call
+func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
+	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1}, nativeCallHandler{root: root})
+	return uint64(result.Action)<<32 | uint64(result.Status)
+}
 
 //export goos_demo_task_a
 func runDemoTaskA() {
@@ -162,8 +197,14 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	rootA, addressSpaceA := vm.CreateUserAddressSpace(&pageAllocator, pageTable, physicalA)
-	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable, physicalB)
+	rootA, addressSpaceA := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
+	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
+	if addressSpaceA {
+		addressSpaceA = vm.MapUserPage(rootA, vm.UserProbeAddress, physicalA, vm.Permissions{User: true, Writable: true})
+	}
+	if addressSpaceB {
+		addressSpaceB = vm.MapUserPage(rootB, vm.UserProbeAddress, physicalB, vm.Permissions{User: true, Writable: true})
+	}
 	resolvedA, resolvesA := vm.Resolve(rootA, vm.UserProbeAddress)
 	resolvedB, resolvesB := vm.Resolve(rootB, vm.UserProbeAddress)
 	if !addressSpaceA || !addressSpaceB || !resolvesA || !resolvesB || resolvedA != physicalA || resolvedB != physicalB {
@@ -211,16 +252,35 @@ func main() {
 
 	userCodePhysical, codeAllocated := pageAllocator.Allocate()
 	userStackPhysical, stackAllocated := pageAllocator.Allocate()
+	userDataPhysical, dataAllocated := pageAllocator.Allocate()
 	userProgram := [...]byte{
-		0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1: native Exit operation.
-		0xcd, 0x80, // int 0x80: enter the GoOS kernel-call gate.
+		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: DebugWrite.
+		0x48, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rdi, 0: invalid pointer.
+		0xbe, 0x01, 0x00, 0x00, 0x00, // mov esi, 1.
+		0xcd, 0x80,
+		0x83, 0xf8, 0x01, // cmp eax, InvalidArgument.
+		0x74, 0x02, // je valid write.
+		0x0f, 0x0b,
+		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: DebugWrite.
+		0x48, 0xbf, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rdi, UserDataAddress.
+		0xbe, 0x14, 0x00, 0x00, 0x00, // mov esi, 20.
+		0xcd, 0x80,
+		0x85, 0xc0, // test eax, eax.
+		0x74, 0x02, // je exit.
+		0x0f, 0x0b,
+		0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1: Exit.
+		0x31, 0xff, // xor edi, edi: status 0.
+		0xcd, 0x80,
 		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
 	}
-	if !codeAllocated || !stackAllocated ||
+	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
+	if !codeAllocated || !stackAllocated || !dataAllocated ||
 		!vm.InitializePhysical(userCodePhysical, userProgram[:]) ||
 		!vm.InitializePhysical(userStackPhysical, nil) ||
+		!vm.InitializePhysical(userDataPhysical, userMessage[:]) ||
 		!vm.MapUserPage(rootA, vm.UserCodeAddress, userCodePhysical, vm.Permissions{User: true, Executable: true}) ||
-		!vm.MapUserPage(rootA, vm.UserStackAddress, userStackPhysical, vm.Permissions{User: true, Writable: true}) {
+		!vm.MapUserPage(rootA, vm.UserStackAddress, userStackPhysical, vm.Permissions{User: true, Writable: true}) ||
+		!vm.MapUserPage(rootA, vm.UserDataAddress, userDataPhysical, vm.Permissions{User: true}) {
 		console.WriteString("PANIC: native user image setup failed\n")
 		for {
 			amd64.Halt()
@@ -228,7 +288,17 @@ func main() {
 	}
 	console.WriteString("USER_RX_OK\n")
 	console.WriteString("USER_STACK_NX_OK\n")
+	copyOutProbe := []byte{0x5a}
+	if vm.CopyOut(rootA, vm.UserDataAddress, copyOutProbe) || !vm.CopyOut(rootA, vm.UserStackAddress, copyOutProbe) {
+		console.WriteString("PANIC: user copyout validation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("USER_COPYOUT_OK\n")
+	console.WriteString("KCALL_ABI_OK\n")
 	amd64.EnterUser(rootA, vm.UserCodeAddress, vm.UserStackAddress+vm.PageSize-16, pageTable)
+	console.WriteString("USER_RING3_OK\n")
 	console.WriteString("NATIVE_PROCESS_OK\n")
 	console.WriteString("Kernel initialized\n")
 	console.WriteString("BOOT_OK\n")

@@ -24,17 +24,20 @@ requires both distinct values before emitting `PROCESS_ISOLATION_OK`.
 
 ## First ring 3 process
 
-The bootstrap native process owns a separate RX code page and RW+NX stack page.
-The code page contains a minimal architecture-level program that requests Exit
-through interrupt vector `0x80`. It is copied into a zeroed physical page before
-that page becomes executable, preserving W^X throughout the transition.
+The bootstrap native process owns separate RX code, read-only data, and RW+NX
+stack pages. Its architecture-level program first submits an invalid pointer,
+then copies a valid message through the native DebugWrite call, and finally
+requests Exit through interrupt vector `0x80`. Code is copied into a zeroed
+physical page before that page becomes executable, preserving W^X.
 
 The kernel loads the process CR3 and enters CPL 3 through a complete `IRETQ`
-frame. The native-call handler verifies that the saved CS is the expected user
-selector before reporting `USER_RING3_OK`. It then restores the kernel CR3 and
+frame. The native-call entry verifies the saved user CS, preserves the complete
+general-purpose register state, and invokes the architecture-independent
+dispatcher. Returning calls resume at ring 3; Exit restores the kernel CR3 and
 the suspended boot-task stack. Reaching `NATIVE_PROCESS_OK` proves that the
-round trip completed rather than merely printing a planned boot step.
+complete call sequence executed.
 
-This program is not loaded from an executable file and the `0x80` interface is
-not a stable ABI. General process loading, process-aware scheduler CR3 changes,
-copyin/copyout, and kernel-call dispatch remain future work.
+The native operation, argument, result, and typed-status contract is defined,
+but `INT 0x80` remains a bootstrap transport. This program is not loaded from an
+executable file. General process loading, process-aware scheduler CR3 changes,
+and process teardown remain future work.

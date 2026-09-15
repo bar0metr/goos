@@ -36,6 +36,11 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'PROCESS_ISOLATION_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_RX_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_STACK_NX_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_COPYOUT_OK' "$log" 2>/dev/null && \
+		grep -q 'KCALL_ABI_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_COPYIN_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_DEBUG_WRITE_OK' "$log" 2>/dev/null && \
+		grep -q 'USER_EXIT_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_RING3_OK' "$log" 2>/dev/null && \
 		grep -q 'NATIVE_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then

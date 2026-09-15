@@ -14,6 +14,7 @@ const UserProbeAddress = uint64(0x40000000)
 const (
 	UserCodeAddress  = uint64(0x40002000)
 	UserStackAddress = uint64(0x40003000)
+	UserDataAddress  = uint64(0x40004000)
 )
 
 type table [entriesPerTable]uint64
@@ -120,9 +121,9 @@ func IsMapped(rootAddress uint64, address uint64) bool {
 }
 
 // CreateUserAddressSpace creates a new PML4 that shares supervisor-only kernel
-// mappings and owns a distinct user mapping at UserProbeAddress.
-func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64, userPhysical uint64) (uint64, bool) {
-	if kernelRootAddress%PageSize != 0 || userPhysical%PageSize != 0 || userPhysical >= IdentityMapLimit {
+// mappings and has an empty, private bootstrap userspace region.
+func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64) (uint64, bool) {
+	if kernelRootAddress%PageSize != 0 {
 		return 0, false
 	}
 	rootAddress, root, ok := allocateTable(allocator)
@@ -152,17 +153,12 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64, 
 	if !ok {
 		return 0, false
 	}
-	ptAddress, pt, ok := allocateTable(allocator)
+	ptAddress, _, ok := allocateTable(allocator)
 	if !ok {
 		return 0, false
 	}
 	pdpt[(UserProbeAddress>>30)&0x1ff] = pdAddress | entryPresent | entryWritable | entryUser
 	pd[(UserProbeAddress>>21)&0x1ff] = ptAddress | entryPresent | entryWritable | entryUser
-	entry, ok := pageEntry(userPhysical, Permissions{Writable: true, User: true})
-	if !ok {
-		return 0, false
-	}
-	pt[(UserProbeAddress>>12)&0x1ff] = entry
 	return rootAddress, true
 }
 
@@ -170,11 +166,11 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64, 
 // address space. Writable executable mappings are rejected by pageEntry.
 func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
 	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || physical%PageSize != 0 ||
-		virtual < IdentityMapLimit || virtual >= 2*IdentityMapLimit || !permissions.User {
+		virtual < IdentityMapLimit || virtual >= UserAddressLimit || !permissions.User {
 		return false
 	}
-	// SAFETY: rootAddress names a process PML4 created by
-	// CreateUserAddressSpace; all lower tables are identity-mapped metadata.
+	// SAFETY: rootAddress names a process PML4 created by this package and its
+	// page-table pages remain owned and identity-mapped during bootstrap.
 	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
 	entry := leafEntry(root, virtual)
 	if entry == nil || *entry&entryPresent != 0 {
@@ -185,6 +181,64 @@ func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permission
 		return false
 	}
 	*entry = value
+	return true
+}
+
+// CopyIn copies a bounded range from a process address space through the
+// kernel's physical identity map. Every page in the range must be explicitly
+// user-accessible; supervisor mappings are never accepted through this path.
+func CopyIn(rootAddress uint64, address uint64, destination []byte) bool {
+	if !ValidateUserRange(address, uint64(len(destination))) || rootAddress%PageSize != 0 {
+		return false
+	}
+	for copied := uint64(0); copied < uint64(len(destination)); {
+		physical, _, ok := resolveUser(rootAddress, address+copied)
+		if !ok || physical >= IdentityMapLimit {
+			return false
+		}
+		pageRemaining := PageSize - physical&(PageSize-1)
+		remaining := uint64(len(destination)) - copied
+		if pageRemaining > remaining {
+			pageRemaining = remaining
+		}
+		// SAFETY: resolveUser validated every page-table level and returned a
+		// present user leaf. Bootstrap user pages come from PMM below the active
+		// identity-map limit, so this physical range is kernel-addressable.
+		source := (*[PageSize]byte)(unsafe.Pointer(uintptr(physical &^ (PageSize - 1))))
+		offset := physical & (PageSize - 1)
+		for index := uint64(0); index < pageRemaining; index++ {
+			destination[copied+index] = source[offset+index]
+		}
+		copied += pageRemaining
+	}
+	return true
+}
+
+// CopyOut copies a bounded range into user memory. In addition to the user
+// checks performed by CopyIn, every destination leaf must be writable.
+func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
+	if !ValidateUserRange(address, uint64(len(source))) || rootAddress%PageSize != 0 {
+		return false
+	}
+	for copied := uint64(0); copied < uint64(len(source)); {
+		physical, leaf, ok := resolveUser(rootAddress, address+copied)
+		if !ok || leaf&entryWritable == 0 || physical >= IdentityMapLimit {
+			return false
+		}
+		pageRemaining := PageSize - physical&(PageSize-1)
+		remaining := uint64(len(source)) - copied
+		if pageRemaining > remaining {
+			pageRemaining = remaining
+		}
+		// SAFETY: resolveUser validated a present user leaf and the writable bit.
+		// The backing PMM page is below the active physical identity-map limit.
+		target := (*[PageSize]byte)(unsafe.Pointer(uintptr(physical &^ (PageSize - 1))))
+		offset := physical & (PageSize - 1)
+		for index := uint64(0); index < pageRemaining; index++ {
+			target[offset+index] = source[copied+index]
+		}
+		copied += pageRemaining
+	}
 	return true
 }
 
@@ -234,6 +288,38 @@ func Resolve(rootAddress uint64, virtual uint64) (uint64, bool) {
 		return 0, false
 	}
 	return *entry&addressMask | virtual&(PageSize-1), true
+}
+
+func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {
+	if rootAddress%PageSize != 0 || !ValidateUserRange(virtual, 1) {
+		return 0, 0, false
+	}
+	// SAFETY: rootAddress names a process PML4 created by this package and its
+	// page-table pages remain owned and identity-mapped during bootstrap.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	pml4Entry := root[(virtual>>39)&0x1ff]
+	if pml4Entry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return 0, 0, false
+	}
+	// SAFETY: the present root entry was allocated by CreateUserAddressSpace.
+	pdpt := (*table)(unsafe.Pointer(uintptr(pml4Entry & addressMask)))
+	pdptEntry := pdpt[(virtual>>30)&0x1ff]
+	if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return 0, 0, false
+	}
+	// SAFETY: the present user PDPT entry names an owned page-table page.
+	pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+	pdEntry := pd[(virtual>>21)&0x1ff]
+	if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return 0, 0, false
+	}
+	// SAFETY: the present user directory entry names an owned page-table page.
+	pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
+	leaf := pt[(virtual>>12)&0x1ff]
+	if leaf&(entryPresent|entryUser) != entryPresent|entryUser {
+		return 0, 0, false
+	}
+	return leaf&addressMask | virtual&(PageSize-1), leaf, true
 }
 
 func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {

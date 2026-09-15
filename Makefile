@@ -75,7 +75,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/mm/vm
+	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/kcall ./kernel/mm/vm
 
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -97,6 +97,7 @@ docs:
 	@test -f docs/architecture/overview.md
 	@test -f docs/architecture/processes.md
 	@test -f docs/architecture/capabilities.md
+	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/development/building.md
 
 clean:

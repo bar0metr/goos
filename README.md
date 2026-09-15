@@ -91,7 +91,8 @@ The project's central principle is:
 
 ## Current status
 
-Milestone 0 and the first complete slice of Milestone 1 are implemented:
+Milestones 0 through 2 and the first userspace slices of Milestone 3 are
+implemented:
 
 - a TinyGo UEFI kernel for `x86_64`;
 - a bootable El Torito ISO;
@@ -127,6 +128,8 @@ Milestone 0 and the first complete slice of Milestone 1 are implemented:
 - separate RX user code and RW+NX user stack mappings;
 - a DPL 3 native kernel-call gate;
 - the first native program executing at CPL 3;
+- a typed native kernel-call dispatcher with Exit and bounded DebugWrite;
+- validated `CopyIn` and `CopyOut` across user page mappings;
 - unit, integration, boot, and performance tests.
 
 General process loading, IPC, userspace services, VFS, RAMFS, and the shell are
@@ -185,6 +188,11 @@ ADDRESS_SPACE_B_OK
 PROCESS_ISOLATION_OK
 USER_RX_OK
 USER_STACK_NX_OK
+USER_COPYOUT_OK
+KCALL_ABI_OK
+USER_COPYIN_OK
+USER_DEBUG_WRITE_OK
+USER_EXIT_OK
 USER_RING3_OK
 NATIVE_PROCESS_OK
 Kernel initialized
@@ -197,11 +205,10 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage defines the native kernel-call ABI, validates user pointers,
-adds process-aware CR3 switching to the scheduler, and introduces a native
-userspace image loader. Typed IPC, shared memory, system services, and the shell
-will be built on top of that foundation rather than simulated with predetermined
-output.
+The next stage adds process-aware CR3 switching to the scheduler and explicit
+userspace task lifecycle, then introduces a native userspace image loader.
+Typed IPC, shared memory, system services, and the shell will be built on top of
+that foundation rather than simulated with predetermined output.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for

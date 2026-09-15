@@ -1,9 +1,8 @@
 # Descriptor tables and CPU exceptions
 
 GoOS replaces the firmware GDT and IDT after installing its own page tables.
-The bootstrap GDT contains null, ring 0 code, and ring 0 data descriptors. TSS
-and ring 3 descriptors are intentionally deferred until userspace transition is
-implemented.
+The bootstrap GDT contains null, ring 0 and ring 3 code/data descriptors, and a
+64-bit TSS descriptor.
 
 The IDT contains 256 entries and installs gates for architectural exception
 vectors 0 through 31. The breakpoint gate uses DPL 3 so future userspace
@@ -14,7 +13,8 @@ stack shape remains unambiguous.
 Vector 3 currently writes a fixed serial diagnostic and returns with `IRETQ`.
 Boot executes a deliberate `INT3` and requires `EXCEPTION_OK`, `GDT_OK`, and
 `IDT_OK`. Other CPU exceptions stop the machine after a serial panic marker.
-Structured register frames and recovery policy will be added before userspace.
+User-fault recovery policy remains future work; non-breakpoint faults are still
+fatal during bootstrap.
 
 ## Bootstrap timer
 
@@ -36,5 +36,7 @@ task register is loaded only after the TSS descriptor and stack are complete.
 
 IDT vector `0x80` is a DPL 3 interrupt gate used by the bootstrap native call.
 On entry the CPU switches from the user stack to TSS.RSP0. The handler validates
-the saved user CS before restoring the suspended boot context. This gate is a
-temporary bring-up interface, not the versioned native kernel-call ABI.
+the saved user CS, preserves all general-purpose registers, and invokes the
+architecture-independent dispatcher. Returning operations resume with `IRETQ`;
+Exit restores the suspended boot context. The gate is a temporary transport;
+future `SYSCALL/SYSRET` support must preserve the same native call contract.

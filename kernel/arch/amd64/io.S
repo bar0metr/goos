@@ -238,6 +238,7 @@ goos_enter_user:
     cli
     movq %rsp, goos_kernel_return_rsp(%rip)
     movq %r9, goos_kernel_return_cr3(%rip)
+	 movq %rcx, goos_current_user_cr3(%rip)
     movq %rcx, %cr3
     movw $0x1b, %ax
     movw %ax, %ds
@@ -253,22 +254,50 @@ goos_enter_user:
 goos_user_call:
     cmpq $0x23, 8(%rsp)
     jne goos_exception_fatal
-    leaq user_ring3_message(%rip), %rsi
-.user_message_next:
-    movb (%rsi), %al
-    testb %al, %al
-    jz .user_exit
-    movb %al, %ah
-.user_message_wait:
-    movw $0x3fd, %dx
-    inb %dx, %al
-    testb $0x20, %al
-    jz .user_message_wait
-    movw $0x3f8, %dx
-    movb %ah, %al
-    outb %al, %dx
-    incq %rsi
-    jmp .user_message_next
+	 pushq %r15
+	 pushq %r14
+	 pushq %r13
+	 pushq %r12
+	 pushq %r11
+	 pushq %r10
+	 pushq %r9
+	 pushq %r8
+	 pushq %rdi
+	 pushq %rsi
+	 pushq %rbp
+	 pushq %rbx
+	 pushq %rdx
+	 pushq %rcx
+	 pushq %rax
+	 subq $40, %rsp
+	 movq 40(%rsp), %rcx
+	 movq 88(%rsp), %rdx
+	 movq 80(%rsp), %r8
+	 movq goos_current_user_cr3(%rip), %r9
+	 callq goos_dispatch_kernel_call
+	 movq $0, 40(%rsp)
+	 movl %eax, 40(%rsp)
+	 movq $0, 56(%rsp)
+	 shrq $32, %rax
+	 testq %rax, %rax
+	 jnz .user_exit
+	 addq $40, %rsp
+	 popq %rax
+	 popq %rcx
+	 popq %rdx
+	 popq %rbx
+	 popq %rbp
+	 popq %rsi
+	 popq %rdi
+	 popq %r8
+	 popq %r9
+	 popq %r10
+	 popq %r11
+	 popq %r12
+	 popq %r13
+	 popq %r14
+	 popq %r15
+	 iretq
 .user_exit:
     movq goos_kernel_return_cr3(%rip), %rax
     movq %rax, %cr3
@@ -278,10 +307,6 @@ goos_user_call:
     movw %ax, %es
     popfq
     retq
-
-.section .rdata
-user_ring3_message:
-    .asciz "USER_RING3_OK\r\n"
 
 .section .text
 .global goos_irq_timer
@@ -437,6 +462,8 @@ goos_kernel_return_rsp:
     .quad 0
 goos_kernel_return_cr3:
     .quad 0
+goos_current_user_cr3:
+	 .quad 0
 
 .section .rdata
 .align 8
