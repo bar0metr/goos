@@ -35,6 +35,10 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'IPC_REQUEST_REPLY_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_HANDLE_TRANSFER_OK' "$log" 2>/dev/null && \
 		grep -q 'TTY_CAPABILITY_OK' "$log" 2>/dev/null && \
+		grep -q 'RAMFS_PROTOCOL_OK' "$log" 2>/dev/null && \
+		grep -q 'RAMFS_METADATA_OK' "$log" 2>/dev/null && \
+		grep -q 'RAMFS_IO_OK' "$log" 2>/dev/null && \
+		grep -q 'RAMFS_BOUNDS_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \

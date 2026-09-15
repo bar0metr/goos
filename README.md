@@ -82,7 +82,7 @@ Native applications             Linux ELF applications
 
 The kernel owns only mechanisms that genuinely require maximum privilege: CPU
 state, interrupts, physical and virtual memory, scheduling, processes, IPC,
-handles, capabilities, and timers. Filesystems, TTY, log storage, configuration,
+handles, capabilities, and timers. Filesystem and TTY policy, log storage, configuration,
 networking, and complex drivers belong in isolated userspace services.
 
 The project's central principle is:
@@ -91,8 +91,7 @@ The project's central principle is:
 
 ## Current status
 
-Milestones 0 through 2 and the first userspace slices of Milestone 3 are
-implemented:
+The native kernel and the first isolated services are implemented:
 
 - a UEFI kernel for `x86_64`, implemented in Go and built with TinyGo;
 - a bootable El Torito ISO;
@@ -136,10 +135,13 @@ implemented:
 - bounded versioned IPC with request/reply, notifications, and correlations;
 - controlled IPC handle passing and peer-death reporting;
 - capability-controlled NX shared-memory mappings for bulk IPC;
+- restartable blocking IPC with message and timeout wakeups;
+- a capability-isolated userspace TTY protocol and serial service;
+- a bounded generation-safe RAMFS core and versioned service protocol;
 - unit, integration, boot, and performance tests.
 
-Initramfs discovery, IPC, userspace services, VFS, RAMFS, and the shell are not
-implemented yet. The current ISO boots a real kernel, leaves UEFI
+Initramfs discovery, VFS, init, and the shell are not implemented yet. The
+current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and executes a minimal native program
 at CPL 3. It is not yet a usable operating environment.
@@ -223,10 +225,8 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage exposes IPC through native kernel calls and integrates blocking
-receive, wakeup, and timeouts with the scheduler. System services and the shell
-will be built on that foundation rather than simulated with predetermined
-output.
+The next stage adds the userspace VFS service over the existing RAMFS protocol,
+followed by init and the native shell.
 
 The Linux ABI is a future compatibility layer. It does not block the first
 self-contained GoOS release and must not weaken the native security model for

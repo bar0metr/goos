@@ -14,6 +14,7 @@ import (
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
+	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
 	"goos/kernel/tty"
@@ -39,6 +40,8 @@ var (
 	ipcWaitSet      ipc.WaitSet
 	ipcWakeResults  [ipc.MaxWaiters]ipc.WaitResult
 	ipcWaitStatus   [sched.MaxTasks]kcall.Status
+	bootRAMFS       ramfs.FileSystem
+	ramfsReadback   [16]byte
 )
 
 type nativeCallHandler struct {
@@ -473,6 +476,49 @@ func main() {
 		}
 	}
 	console.WriteString("TTY_CAPABILITY_OK\n")
+
+	ramfsRoot := bootRAMFS.Init()
+	ramfsDirectory, ramfsDirectoryCreated := bootRAMFS.Mkdir(ramfsRoot, []byte("etc"))
+	ramfsFile, ramfsFileCreated := bootRAMFS.Create(ramfsDirectory, []byte("motd"))
+	ramfsWritten, ramfsWriteStatus := bootRAMFS.Write(ramfsFile, 0, []byte("GoOS RAMFS"))
+	ramfsRead, ramfsReadStatus := bootRAMFS.Read(ramfsFile, 0, ramfsReadback[:])
+	ramfsStat, ramfsStatStatus := bootRAMFS.Stat(ramfsFile)
+	ramfsEntry, _, ramfsReadDirStatus := bootRAMFS.ReadDir(ramfsDirectory, 0)
+	ramfsRenamed := bootRAMFS.Rename(ramfsFile, ramfsRoot, []byte("welcome"))
+	ramfsOpened, ramfsOpenStatus := bootRAMFS.Open(ramfsRoot, []byte("welcome"))
+	ramfsRequest, ramfsRequestEncoded := ramfs.EncodeRequest(ramfs.Request{Operation: ramfs.OperationOpen, Parent: ramfsRoot, Name: []byte("welcome")}, 1)
+	ramfsDecoded, ramfsRequestDecoded := ramfs.DecodeRequest(ramfsRequest)
+	if ramfsDirectoryCreated != ramfs.StatusOK || ramfsFileCreated != ramfs.StatusOK || ramfsWriteStatus != ramfs.StatusOK || ramfsWritten != 10 ||
+		ramfsReadStatus != ramfs.StatusOK || ramfsRead != 10 || string(ramfsReadback[:ramfsRead]) != "GoOS RAMFS" || ramfsStatStatus != ramfs.StatusOK || ramfsStat.Size != 10 ||
+		ramfsReadDirStatus != ramfs.StatusOK || string(ramfsEntry.Name[:ramfsEntry.Size]) != "motd" || ramfsRenamed != ramfs.StatusOK || ramfsOpenStatus != ramfs.StatusOK || ramfsOpened != ramfsFile ||
+		!ramfsRequestEncoded || !ramfsRequestDecoded || ramfsDecoded.Operation != ramfs.OperationOpen || ramfsDecoded.Parent != ramfsRoot || string(ramfsDecoded.Name) != "welcome" {
+		console.WriteString("PANIC: RAMFS operation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if bootRAMFS.Truncate(ramfsFile, 4) != ramfs.StatusOK || bootRAMFS.Unlink(ramfsRoot, []byte("welcome")) != ramfs.StatusOK {
+		console.WriteString("PANIC: RAMFS lifecycle failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if _, status := bootRAMFS.Stat(ramfsFile); status != ramfs.StatusNotFound {
+		console.WriteString("PANIC: RAMFS stale node accepted\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	if _, status := bootRAMFS.Create(ramfsRoot, []byte("bad/name")); status != ramfs.StatusInvalidArgument {
+		console.WriteString("PANIC: RAMFS invalid name accepted\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("RAMFS_PROTOCOL_OK\n")
+	console.WriteString("RAMFS_METADATA_OK\n")
+	console.WriteString("RAMFS_IO_OK\n")
+	console.WriteString("RAMFS_BOUNDS_OK\n")
 
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}

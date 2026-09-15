@@ -15,9 +15,9 @@ controlled shared-memory objects, capability-checked IPC kernel calls, bounded
 channel objects, scheduler-integrated IPC wait/deadline bookkeeping, blocking
 native receive, restartable kernel-call frames, message wakeup, and timer-driven
 timeout wakeup, a capability-isolated userspace TTY service, its versioned IPC
-protocol, bounded line editing, and basic terminal-control operations are
-complete. The next slice introduces RAMFS, followed by VFS, init, and a native
-shell.
+protocol, bounded line editing, basic terminal-control operations, and a bounded
+generation-safe RAMFS with its versioned service protocol are complete. The
+next slice introduces VFS, followed by init and a native shell.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.
