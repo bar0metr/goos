@@ -1,0 +1,31 @@
+{
+  "llvm-target": "x86_64-unknown-none-elf",
+  "cpu": "x86-64",
+  "features": "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87",
+  "build-tags": ["uefi", "baremetal", "linux", "amd64", "goos_userspace"],
+  "goos": "linux",
+  "goarch": "amd64",
+  "gc": "custom",
+  "scheduler": "none",
+  "linker": "ld.lld",
+  "libc": "picolibc",
+  "automatic-stack-size": false,
+  "default-stack-size": 4096,
+  "cflags": [
+    "-Werror",
+    "-fomit-frame-pointer",
+    "-fno-exceptions",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-ffreestanding",
+    "-mno-red-zone"
+  ],
+  "ldflags": [
+    "-m", "elf_x86_64",
+    "-T", "userspace/runtime/amd64.ld",
+    "--gc-sections",
+    "build/userspace/runtime.o"
+  ]
+}

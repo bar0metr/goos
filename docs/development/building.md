@@ -5,6 +5,11 @@ installing or downloading anything. `make iso` creates all generated files
 under `build/`, including `build/kernel/goos.efi` and
 `build/goos-x86_64.iso`.
 
+The userspace build compiles `userspace/cmd/init` with the dedicated
+`goos-userspace-amd64` TinyGo target, links a static ELF at the native userspace
+base, and converts its load segments to `build/userspace/init`. ELF is an
+intermediate build format only; the kernel accepts the GoOS native envelope.
+
 `make run` boots the ISO with 512 MiB in QEMU and attaches COM1 to the current
 terminal. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
 1234 before executing the first instruction.

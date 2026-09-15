@@ -7,6 +7,7 @@ const (
 	NativeHeaderSize  = uint16(32)
 	SegmentHeaderSize = uint64(32)
 	MaxSegments       = 8
+	MaxImagePages     = 128
 	SegmentReadable   = uint32(1 << 0)
 	SegmentWritable   = uint32(1 << 1)
 	SegmentExecutable = uint32(1 << 2)
@@ -30,8 +31,8 @@ type Image struct {
 }
 
 // ParseNative validates the versioned native image envelope. The bootstrap
-// loader deliberately supports one page per segment until VM can allocate
-// arbitrary user page-table branches and reclaim partial mappings.
+// loader bounds the total mapped image size so malformed inputs cannot force
+// unbounded physical allocation.
 func ParseNative(data []byte, pageSize uint64, userStart uint64, userEnd uint64) (Image, bool) {
 	var image Image
 	if len(data) < int(NativeHeaderSize) || pageSize == 0 || userStart >= userEnd {
@@ -65,18 +66,28 @@ func ParseNative(data []byte, pageSize uint64, userStart uint64, userEnd uint64)
 		}
 		end := segment.FileOffset + segment.FileSize
 		validFlags := segment.Flags&SegmentReadable != 0 && segment.Flags&^(SegmentReadable|SegmentWritable|SegmentExecutable) == 0
+		memoryEnd := segment.VirtualAddress + segment.MemorySize
 		if segment.VirtualAddress%pageSize != 0 || segment.VirtualAddress < userStart || segment.VirtualAddress >= userEnd ||
-			segment.MemorySize == 0 || segment.MemorySize > pageSize || segment.FileSize > segment.MemorySize ||
+			segment.MemorySize == 0 || segment.MemorySize > pageSize*MaxImagePages || memoryEnd < segment.VirtualAddress || memoryEnd > userEnd || segment.FileSize > segment.MemorySize ||
 			segment.FileOffset < segmentTableEnd || end < segment.FileOffset || end > uint64(len(data)) || !validFlags ||
 			segment.Flags&SegmentWritable != 0 && segment.Flags&SegmentExecutable != 0 || binary.LittleEndian.Uint64(header[24:]) != 0 {
 			return Image{}, false
 		}
 		for previous := 0; previous < index; previous++ {
-			if image.Segments[previous].VirtualAddress == segment.VirtualAddress {
+			previousSegment := image.Segments[previous]
+			previousEnd := previousSegment.VirtualAddress + previousSegment.MemorySize
+			if segment.VirtualAddress < previousEnd && previousSegment.VirtualAddress < memoryEnd {
 				return Image{}, false
 			}
 		}
 		image.Segments[index] = segment
+	}
+	totalPages := uint64(0)
+	for index := 0; index < count; index++ {
+		totalPages += (image.Segments[index].MemorySize + pageSize - 1) / pageSize
+		if totalPages > MaxImagePages {
+			return Image{}, false
+		}
 	}
 	image.SegmentCount = count
 	if !image.entryIsExecutable() || !image.stackIsWritable(pageSize) {

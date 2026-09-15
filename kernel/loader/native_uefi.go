@@ -21,29 +21,45 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 		return LoadedImage{}, false
 	}
 	for index := 0; index < image.SegmentCount; index++ {
-		if !vm.CanMapUserPage(root, image.Segments[index].VirtualAddress) {
-			return LoadedImage{}, false
-		}
-	}
-	var pages [MaxSegments]uint64
-	for index := 0; index < image.SegmentCount; index++ {
-		physical, allocated := allocator.Allocate()
-		if !allocated {
-			for rollback := 0; rollback < index; rollback++ {
-				allocator.Free(pages[rollback])
-			}
-			return LoadedImage{}, false
-		}
-		pages[index] = physical
 		segment := image.Segments[index]
-		payload := data[segment.FileOffset : segment.FileOffset+segment.FileSize]
-		if !vm.InitializePhysical(physical, payload) {
-			for rollback := 0; rollback <= index; rollback++ {
-				allocator.Free(pages[rollback])
+		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
+			if !vm.CanMapUserPage(root, segment.VirtualAddress+offset) {
+				return LoadedImage{}, false
 			}
-			return LoadedImage{}, false
 		}
 	}
+	var pages [MaxImagePages]uint64
+	pageCount := 0
+	for index := 0; index < image.SegmentCount; index++ {
+		segment := image.Segments[index]
+		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
+			physical, allocated := allocator.Allocate()
+			if !allocated {
+				for rollback := 0; rollback < pageCount; rollback++ {
+					allocator.Free(pages[rollback])
+				}
+				return LoadedImage{}, false
+			}
+			pages[pageCount] = physical
+			fileOffset := offset
+			fileEnd := fileOffset + vm.PageSize
+			if fileEnd > segment.FileSize {
+				fileEnd = segment.FileSize
+			}
+			var payload []byte
+			if fileOffset < segment.FileSize {
+				payload = data[segment.FileOffset+fileOffset : segment.FileOffset+fileEnd]
+			}
+			if !vm.InitializePhysical(physical, payload) {
+				for rollback := 0; rollback <= pageCount; rollback++ {
+					allocator.Free(pages[rollback])
+				}
+				return LoadedImage{}, false
+			}
+			pageCount++
+		}
+	}
+	pageIndex := 0
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
 		permissions := vm.Permissions{
@@ -51,8 +67,11 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 			Writable:   segment.Flags&SegmentWritable != 0,
 			Executable: segment.Flags&SegmentExecutable != 0,
 		}
-		if !vm.MapUserPage(root, segment.VirtualAddress, pages[index], permissions) {
-			return LoadedImage{}, false
+		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
+			if !vm.MapUserPage(root, segment.VirtualAddress+offset, pages[pageIndex], permissions) {
+				return LoadedImage{}, false
+			}
+			pageIndex++
 		}
 	}
 	return LoadedImage{Entry: image.Entry, StackTop: image.StackTop}, true

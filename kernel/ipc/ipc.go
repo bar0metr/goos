@@ -21,6 +21,7 @@ const (
 	StatusNotFound          = kcall.StatusNotFound
 	StatusAlreadyExists     = kcall.StatusAlreadyExists
 	StatusResourceExhausted = kcall.StatusResourceExhausted
+	StatusTimeout           = kcall.StatusTimeout
 	StatusPeerDied          = kcall.StatusPeerDied
 )
 

@@ -9,6 +9,8 @@ EFI_BOOT := $(ISO_ROOT)/EFI/BOOT
 KERNEL := $(KERNEL_DIR)/goos.efi
 KERNEL_IO := $(KERNEL_DIR)/io.o
 INIT_IMAGE := $(BUILD_DIR)/userspace/init
+INIT_ELF := $(BUILD_DIR)/userspace/init.elf
+INIT_RUNTIME := $(BUILD_DIR)/userspace/runtime.o
 SERVICE_IMAGE := $(BUILD_DIR)/userspace/fault-probe
 EFI_IMAGE := $(BUILD_DIR)/iso/efi.img
 ISO_BOOT_IMAGE := $(ISO_ROOT)/efi.img
@@ -38,9 +40,16 @@ $(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO)
 
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE)
 
-$(INIT_IMAGE): tools/init-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) go run ./tools/init-image $@
+	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
+
+$(INIT_ELF): $(shell find userspace/init userspace/cmd/init internal/capability kernel/handle kernel/ipc kernel/kcall -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(BUILD_DIR)/userspace
+	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
+
+$(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(BUILD_DIR)/userspace
@@ -130,6 +139,7 @@ docs:
 	@test -f docs/adr/0020-uefi-initramfs-and-process-exit-events.md
 	@test -f docs/adr/0021-pid1-lifecycle-control-plane.md
 	@test -f docs/adr/0022-initramfs-executable-spawn.md
+	@test -f docs/adr/0023-freestanding-tinygo-pid1.md
 	@test -f docs/development/building.md
 
 clean:

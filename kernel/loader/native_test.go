@@ -36,6 +36,46 @@ func TestParseNativeImage(t *testing.T) {
 	}
 }
 
+func TestParseNativeAcceptsMultiPageSegment(t *testing.T) {
+	storage := make([]byte, 9000)
+	data, ok := EncodeNative(storage, ImageSource{
+		Entry: 0x40002000, StackTop: 0x40007000,
+		Segments: []SegmentSource{
+			{VirtualAddress: 0x40002000, MemorySize: 5000, Flags: SegmentReadable | SegmentExecutable, Data: make([]byte, 4500)},
+			{VirtualAddress: 0x40006000, MemorySize: 4096, Flags: SegmentReadable | SegmentWritable},
+		},
+	})
+	if !ok {
+		t.Fatal("encode failed")
+	}
+	if _, ok := ParseNative(data, testPageSize, testUserStart, testUserEnd); !ok {
+		t.Fatal("multi-page segment rejected")
+	}
+}
+
+func TestParseNativeRejectsOverlappingAndOversizedSegments(t *testing.T) {
+	storage := make([]byte, 512)
+	overlapping, ok := EncodeNative(storage, ImageSource{
+		Entry: 0x40002000, StackTop: 0x40006000,
+		Segments: []SegmentSource{
+			{VirtualAddress: 0x40002000, MemorySize: 5000, Flags: SegmentReadable | SegmentExecutable, Data: []byte{0x90}},
+			{VirtualAddress: 0x40003000, MemorySize: 3 * 4096, Flags: SegmentReadable | SegmentWritable},
+		},
+	})
+	if !ok {
+		t.Fatal("encode failed")
+	}
+	if _, ok := ParseNative(overlapping, testPageSize, testUserStart, testUserEnd); ok {
+		t.Fatal("overlapping segments accepted")
+	}
+
+	oversized := append([]byte(nil), validNativeImage(t)...)
+	binary.LittleEndian.PutUint32(oversized[48:], uint32((MaxImagePages+1)*testPageSize))
+	if _, ok := ParseNative(oversized, testPageSize, testUserStart, testUserEnd); ok {
+		t.Fatal("oversized segment accepted")
+	}
+}
+
 func TestParseNativeRejectsMalformedImages(t *testing.T) {
 	tests := []struct {
 		name   string

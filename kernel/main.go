@@ -52,13 +52,11 @@ var (
 	bootVFS                 vfs.Namespace
 	ramfsReadback           [16]byte
 	vfsReadback             [16]byte
-	bootSupervisor          supervisor.Manager
-	bootServicePID          uint64
 	initAnnounced           uint64
 	processExitDelivered    uint64
 	supervisorExitDelivered uint64
-	serviceLaunchRequested  uint64
 	serviceLaunchConfirmed  uint64
+	userspaceSupervisorOK   uint64
 	initSendObserved        uint64
 	initSendStatus          kcall.Status
 	initExitObserved        uint64
@@ -69,14 +67,6 @@ var (
 	nextProcessID           process.ID = 4
 	endpointBindings        ipc.EndpointTable
 )
-
-func launchBootService(spec supervisor.LaunchSpec) (uint64, bool) {
-	if spec.NameSize == 0 || spec.ExecutableSize == 0 {
-		return 0, false
-	}
-	bootServicePID++
-	return 100 + bootServicePID, true
-}
 
 type nativeCallHandler struct {
 	root uint64
@@ -104,6 +94,9 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 	}
 	if bootInitProcess != nil && handler.root == bootInitProcess.AddressSpace().Root {
 		initAnnounced = 1
+		if equalBytes(data, "USERSPACE_SUPERVISOR_OK\n") {
+			userspaceSupervisorOK = 1
+		}
 	}
 	return kcall.StatusOK
 }
@@ -122,18 +115,20 @@ func deliverProcessExits() {
 			initExitObserved = 1
 			initExitCode = event.Code
 		}
-		if event.Process == 3 && lifecycleChannel != nil {
+		if event.Process != 1 && lifecycleChannel != nil {
 			message, encoded := supervisor.ProcessExited(uint64(event.Process), event.Code)
 			if encoded && lifecycleChannel.Send(0, message, nil, nil, nil) == ipc.StatusOK {
 				wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
-				supervisorExitDelivered = 1
+				if event.Process == 3 {
+					supervisorExitDelivered = 1
+				}
 			}
 		}
 	}
 }
 
 func consumeInitControl() {
-	if lifecycleChannel == nil || serviceLaunchRequested != 0 {
+	if lifecycleChannel == nil {
 		return
 	}
 	message, status := lifecycleChannel.Receive(0)
@@ -144,13 +139,24 @@ func consumeInitControl() {
 	if !valid || event.Operation != supervisor.LifecycleLaunch {
 		return
 	}
-	serviceLaunchRequested = 1
 	pid, launchStatus := spawnExecutable(event.ExecutablePath())
 	reply, encoded := supervisor.LaunchResult(uint64(pid), launchStatus, message.Correlation)
 	if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
 		wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
-		serviceLaunchConfirmed = 1
+		serviceLaunchConfirmed++
 	}
+}
+
+func equalBytes(value []byte, expected string) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range value {
+		if value[index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func spawnExecutable(path string) (process.ID, supervisor.LaunchStatus) {
@@ -725,69 +731,6 @@ func main() {
 	console.WriteString("VFS_CACHE_OK\n")
 	console.WriteString("VFS_PROTOCOL_OK\n")
 
-	if bootSupervisor.Register(supervisor.Definition{Name: "ramfs", Executable: "/system/ramfs", Restart: supervisor.RestartAlways}) != supervisor.StatusOK ||
-		bootSupervisor.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs", Dependencies: []string{"ramfs"},
-			Capabilities: []supervisor.Capability{{Object: 1, Type: handle.TypeChannel, Rights: capability.Read | capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
-		bootSupervisor.StartReady(0, launchBootService) != 2 {
-		console.WriteString("PANIC: init service configuration failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	ramfsService, ramfsFound := bootSupervisor.Snapshot("ramfs")
-	vfsService, vfsFound := bootSupervisor.Snapshot("vfs")
-	if !ramfsFound || !vfsFound || ramfsService.Health != supervisor.HealthHealthy || vfsService.Health != supervisor.HealthHealthy {
-		console.WriteString("PANIC: init dependency startup failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootSupervisor.Exit(ramfsService.PID, 1, 1) != supervisor.StatusOK {
-		console.WriteString("PANIC: supervisor crash detection failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	vfsService, _ = bootSupervisor.Snapshot("vfs")
-	if vfsService.Health != supervisor.HealthBlocked || bootSupervisor.StartReady(1+supervisor.RestartBackoff, launchBootService) != 1 {
-		console.WriteString("PANIC: supervisor dependency recovery failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	ramfsService, _ = bootSupervisor.Snapshot("ramfs")
-	for attempt := uint64(0); attempt < 3; attempt++ {
-		tick := uint64(20) + attempt*20
-		if bootSupervisor.Exit(ramfsService.PID, 1, tick) != supervisor.StatusOK {
-			console.WriteString("PANIC: supervisor restart accounting failed\n")
-			for {
-				amd64.Halt()
-			}
-		}
-		if attempt != 2 {
-			bootSupervisor.StartReady(tick+supervisor.RestartBackoff, launchBootService)
-			ramfsService, _ = bootSupervisor.Snapshot("ramfs")
-		}
-	}
-	ramfsService, _ = bootSupervisor.Snapshot("ramfs")
-	if ramfsService.State != supervisor.StateFailed || ramfsService.Restarts != supervisor.MaxRestarts {
-		console.WriteString("PANIC: supervisor restart rate limit failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("INIT_CONFIG_OK\n")
-	console.WriteString("SERVICE_DEPENDENCY_OK\n")
-	console.WriteString("SUPERVISOR_RESTART_OK\n")
-	console.WriteString("SUPERVISOR_RATE_LIMIT_OK\n")
-	if bootSupervisor.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe", Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
-		bootSupervisor.StartReady(100, func(supervisor.LaunchSpec) (uint64, bool) { return uint64(processB.ID()), true }) != 1 {
-		console.WriteString("PANIC: supervised process registration failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
 	for index := 0; index < ipc.QueueCapacity; index++ {
@@ -1014,7 +957,7 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || userspaceSupervisorOK == 0 {
 		deliverProcessExits()
 		consumeInitControl()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {

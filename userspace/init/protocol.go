@@ -96,12 +96,11 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		if service == 0 || size == 0 || size > MaxExecutablePath || int(message.PayloadSize) != 10+size {
 			return LifecycleEvent{}, false
 		}
-		executable := string(message.Payload[10 : 10+size])
-		if !validLaunchPath(executable) {
+		if !validLaunchPathBytes(message.Payload[10 : 10+size]) {
 			return LifecycleEvent{}, false
 		}
 		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, ExecutableSize: uint8(size)}
-		copy(event.Executable[:], executable)
+		copy(event.Executable[:], message.Payload[10:10+size])
 		return event, true
 	case LifecycleLaunchResult:
 		if message.Kind != ipc.KindReply || message.Correlation == 0 || message.PayloadSize != 17 {
@@ -139,4 +138,35 @@ func validLaunchPath(path string) bool {
 		}
 	}
 	return componentStart < len(path) && path[componentStart:] != "." && path[componentStart:] != ".."
+}
+
+func validLaunchPathBytes(path []byte) bool {
+	if len(path) < 2 || len(path) > MaxExecutablePath || path[0] != '/' {
+		return false
+	}
+	componentStart := 1
+	for index := 1; index < len(path); index++ {
+		if path[index] == 0 || path[index] == '/' && path[index-1] == '/' {
+			return false
+		}
+		if path[index] == '/' {
+			if equalComponent(path[componentStart:index], '.') || equalComponent(path[componentStart:index], '.', '.') {
+				return false
+			}
+			componentStart = index + 1
+		}
+	}
+	return componentStart < len(path) && !equalComponent(path[componentStart:], '.') && !equalComponent(path[componentStart:], '.', '.')
+}
+
+func equalComponent(value []byte, expected ...byte) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range value {
+		if value[index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }

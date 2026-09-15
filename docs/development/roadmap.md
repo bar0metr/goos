@@ -24,9 +24,11 @@ notifications are also complete. PID 1 now receives lifecycle events and drives
 a real service restart through correlated, capability-protected IPC. Launch
 requests carry a validated absolute executable path; the kernel uses a
 bounded process pool, assigns fresh process identifiers, validates the selected
-native image, and creates its address space and initial task. The next slice
-provides a freestanding amd64 userspace runtime and moves the complete
-supervision policy loop into the PID 1 image. The native shell follows that
+native image, and creates its address space and initial task. A freestanding
+amd64 TinyGo runtime now executes the complete supervision policy loop in PID 1;
+the QEMU path exercises three crash/restart cycles and userspace rate limiting.
+The next slice serializes declared capability manifests into spawn requests and
+installs the authorized handles in new processes. The native shell follows that
 boundary correction.
 
 Linux ELF compatibility begins only after the native security and process

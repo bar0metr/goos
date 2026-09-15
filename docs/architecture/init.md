@@ -34,6 +34,14 @@ the native image, assigns a fresh process identifier from a bounded pool, and
 creates a new address space and initial task. Empty components and parent
 traversal are rejected.
 
-The full policy state machine is still linked into the bootstrap kernel test
-path. Moving it into PID 1 requires a freestanding amd64 userspace runtime; the
-current PID 1 image remains a deliberately minimal generated native program.
+PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
+assembly entry supplies the native kernel-call ABI, while a fixed 16 KiB stack
+and 64 KiB bump-allocation arena bound runtime memory. The host-side converter
+accepts only static x86-64 ELF load segments and wraps them in the validated
+GoOS native image envelope.
+
+The Manager, service table, exit handling, restart decisions, backoff, and rate
+limit now execute in PID 1. The kernel only delivers process deaths and performs
+authorized image loading and process creation. Capability manifests are policy
+data in the Manager but are not yet serialized into spawn requests or installed
+in the child handle table.
