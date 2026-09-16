@@ -24,14 +24,15 @@ const execServerHandle = uint64(0x0000000100000007)
 const execClientHandle = handle.ID(0x0000000100000008)
 
 var (
-	manager             supervisor.Manager
-	wire                [ipc.WireMaxSize]byte
-	descriptor          = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	clock               uint64
-	correlation         uint64
-	heapPointer         uintptr
-	arenaBase           uintptr
-	supervisionComplete bool
+	manager              supervisor.Manager
+	wire                 [ipc.WireMaxSize]byte
+	descriptor           = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
+	clock                uint64
+	correlation          uint64
+	heapPointer          uintptr
+	arenaBase            uintptr
+	supervisionComplete  bool
+	processWaitAnnounced bool
 )
 
 //go:extern _heap_start
@@ -57,6 +58,9 @@ func channelCreate(address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname handleClose goos_handle_close
 func handleClose(id uint64) uint64
+
+//go:linkname processWait goos_process_wait
+func processWait(process uint64, result unsafe.Pointer, timeout uint64) uint64
 
 //export userspaceMain
 func userspaceMain() {
@@ -137,6 +141,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if !valid || event.Operation != supervisor.LifecycleLaunchResult || reply.Correlation != correlation || event.Code != uint64(supervisor.LaunchOK) {
 		return 0, false
 	}
+	if handleClose(uint64(event.ProcessHandle)) != 0 {
+		return 0, false
+	}
 	write("INIT_SERVICE_STARTED_OK\n")
 	return event.Process, true
 }
@@ -197,35 +204,35 @@ func pollExec() {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied))
 		return
 	}
-	pid, launchStatus := launchApplication(bytesString(path[:pathSize]), cwd[:cwdSize], arguments[:argumentSize])
+	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), cwd[:cwdSize], arguments[:argumentSize])
 	if launchStatus == supervisor.LaunchOK {
-		waitApplicationExit(pid)
+		waitApplicationExit(processHandle)
 	}
 	sendExecReply(message.Correlation, pid, uint64(launchStatus))
 }
 
-func launchApplication(path string, cwd, arguments []byte) (uint64, supervisor.LaunchStatus) {
+func launchApplication(path string, cwd, arguments []byte) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
 	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
-		return 0, supervisor.LaunchResourceExhausted
+		return 0, 0, supervisor.LaunchResourceExhausted
 	}
 	correlation++
 	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
 	if !ok || !sendMessage(vfsControlHandle, control) {
 		closePair(pair)
-		return 0, supervisor.LaunchCapabilityInstallFailed
+		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	controlReply, status := receive(vfsControlHandle, 1000)
 	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
 	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
 		handleClose(pair[0])
-		return 0, supervisor.LaunchCapabilityInstallFailed
+		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	var startupWire [startup.Size]byte
 	startupData, ok := startup.Encode(commandForPath(path), cwd, arguments, &startupWire)
 	if !ok {
 		handleClose(pair[0])
-		return 0, supervisor.LaunchInvalidImage
+		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	grants := []supervisor.Capability{
 		{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
@@ -235,29 +242,34 @@ func launchApplication(path string, cwd, arguments []byte) (uint64, supervisor.L
 	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
 	if !ok || !sendMessage(lifecycleHandle, request) {
 		handleClose(pair[0])
-		return 0, supervisor.LaunchInvalidImage
+		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	reply, status := receive(lifecycleHandle, 100000)
 	event, valid := supervisor.DecodeLifecycle(reply)
 	if status != ipc.StatusOK || !valid || event.Operation != supervisor.LifecycleLaunchResult || reply.Correlation != correlation {
-		return 0, supervisor.LaunchProcessFailed
+		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	if event.Code != uint64(supervisor.LaunchOK) {
 		handleClose(pair[0])
 	}
-	return event.Process, supervisor.LaunchStatus(event.Code)
+	return event.Process, event.ProcessHandle, supervisor.LaunchStatus(event.Code)
 }
 
-func waitApplicationExit(pid uint64) {
+func waitApplicationExit(processHandle handle.ID) {
+	var exitCode uint64
 	for {
-		message, status := receive(lifecycleHandle, 100000)
-		if status != ipc.StatusOK {
+		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), 100000)
+		if status == uint64(ipc.StatusTimeout) {
+			continue
+		}
+		if status != 0 || handleClose(uint64(processHandle)) != 0 {
 			fatal("INIT_EXEC_WAIT_FAILED\n")
 		}
-		event, valid := supervisor.DecodeLifecycle(message)
-		if valid && event.Operation == supervisor.LifecycleProcessExited && event.Process == pid {
-			return
+		if !processWaitAnnounced {
+			write("PROCESS_HANDLE_WAIT_OK\n")
+			processWaitAnnounced = true
 		}
+		return
 	}
 }
 

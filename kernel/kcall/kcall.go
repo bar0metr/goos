@@ -16,6 +16,7 @@ const (
 	OperationStartupRead
 	OperationChannelCreate
 	OperationHandleClose
+	OperationProcessWait
 )
 
 type Status uint64

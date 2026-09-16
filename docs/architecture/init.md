@@ -55,4 +55,5 @@ used for per-process VFS clients and prevents accumulation of temporary handles.
 Shell exec requests are restricted to `/system/bin/pwd`, `/system/bin/ls`, and
 `/system/bin/cat`. PID 1 creates a VFS channel pair, moves its server endpoint to
 VFS, supplies the client endpoint and console-write capability to the child,
-forwards bounded startup data, and replies only after process exit.
+forwards bounded startup data, waits through a capability-protected process
+handle, and replies only after process exit.

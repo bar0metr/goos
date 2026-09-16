@@ -47,18 +47,18 @@ func TestLifecycleProtocol(t *testing.T) {
 	if _, ok := LaunchRequest(3, "system/init", nil, 9); ok {
 		t.Fatal("relative executable accepted")
 	}
-	result, ok := LaunchResult(8, LaunchOK, 9)
+	result, ok := LaunchResult(8, handle.ID(0x100000001), LaunchOK, 9)
 	if !ok {
 		t.Fatal("result encode failed")
 	}
 	event, ok = DecodeLifecycle(result)
-	if !ok || event.Operation != LifecycleLaunchResult || event.Process != 8 || event.Code != 0 {
+	if !ok || event.Operation != LifecycleLaunchResult || event.Process != 8 || event.ProcessHandle != handle.ID(0x100000001) || event.Code != 0 {
 		t.Fatalf("launch result = %#v", event)
 	}
-	if _, ok := LaunchResult(0, LaunchNotFound, 9); !ok {
+	if _, ok := LaunchResult(0, 0, LaunchNotFound, 9); !ok {
 		t.Fatal("failed launch result rejected")
 	}
-	if _, ok := LaunchResult(0, LaunchOK, 9); ok {
+	if _, ok := LaunchResult(0, 0, LaunchOK, 9); ok {
 		t.Fatal("successful result without process accepted")
 	}
 	if _, ok := LaunchRequest(3, "/system/init", []Capability{{Handle: 1, Type: handle.TypeDevice}}, 9); ok {

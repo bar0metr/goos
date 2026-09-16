@@ -48,6 +48,9 @@ var (
 	ipcWaitSet              ipc.WaitSet
 	ipcWakeResults          [ipc.MaxWaiters]ipc.WaitResult
 	ipcWaitStatus           [sched.MaxTasks]kcall.Status
+	processWaitSet          process.WaitSet
+	processWakeResults      [process.MaxWaiters]process.WaitResult
+	processWaitStatus       [sched.MaxTasks]kcall.Status
 	bootRAMFS               ramfs.FileSystem
 	deviceRAMFS             ramfs.FileSystem
 	bootVFS                 vfs.Namespace
@@ -124,6 +127,7 @@ func deliverProcessExits() {
 		if waited, status := processRegistry.Wait(event.Process); status == process.WaitExited && waited == event {
 			processWaitConfirmed = 1
 		}
+		wakeProcessWaiters(event.Process)
 		if event.Process == 1 {
 			initExitObserved = 1
 			initExitCode = event.Code
@@ -182,14 +186,14 @@ func consumeInitControl() {
 	if !valid || event.Operation != supervisor.LifecycleLaunch {
 		return
 	}
-	pid, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], event.Startup[:event.StartupSize])
+	pid, processHandle, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], event.Startup[:event.StartupSize])
 	if launchStatus != supervisor.LaunchOK {
 		console := amd64.NewCOM1()
 		console.WriteString("INIT_LAUNCH_ERROR: ")
 		console.WriteHex(uint64(launchStatus))
 		console.WriteString("\n")
 	}
-	reply, encoded := supervisor.LaunchResult(uint64(pid), launchStatus, message.Correlation)
+	reply, encoded := supervisor.LaunchResult(uint64(pid), processHandle, launchStatus, message.Correlation)
 	if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
 		wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
 		serviceLaunchConfirmed++
@@ -208,33 +212,33 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path string, grants []supervisor.Capability, startup []byte) (process.ID, supervisor.LaunchStatus) {
+func spawnExecutable(path string, grants []supervisor.Capability, startup []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
-		return 0, supervisor.LaunchResourceExhausted
+		return 0, 0, supervisor.LaunchResourceExhausted
 	}
-	if bootInitProcess == nil || len(grants) > supervisor.MaxCapabilities {
-		return 0, supervisor.LaunchCapabilityDenied
+	if bootInitProcess == nil || bootInitProcess.Handles().Available() == 0 || len(grants) > supervisor.MaxCapabilities {
+		return 0, 0, supervisor.LaunchCapabilityDenied
 	}
 	for _, grant := range grants {
 		source, allowed := bootInitProcess.Handles().Lookup(grant.Handle, grant.Type, capability.Transfer)
 		if !allowed {
-			return 0, supervisor.LaunchCapabilityDenied
+			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 		if _, allowed = source.Derive(grant.Rights); !allowed {
-			return 0, supervisor.LaunchCapabilityDenied
+			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 	}
 	image, found := initramfs.Find(bootuefi.Initramfs(&bootInfo), path[1:])
 	if !found {
-		return 0, supervisor.LaunchNotFound
+		return 0, 0, supervisor.LaunchNotFound
 	}
 	root, ok := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
 	if !ok {
-		return 0, supervisor.LaunchAddressSpaceFailed
+		return 0, 0, supervisor.LaunchAddressSpaceFailed
 	}
 	loaded, ok := loader.LoadNative(&pageAllocator, root, image)
 	if !ok {
-		return 0, supervisor.LaunchInvalidImage
+		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	pid := nextProcessID
 	var spawned *process.Process
@@ -245,11 +249,11 @@ func spawnExecutable(path string, grants []supervisor.Capability, startup []byte
 		}
 	}
 	if spawned == nil {
-		return 0, supervisor.LaunchResourceExhausted
+		return 0, 0, supervisor.LaunchResourceExhausted
 	}
 	*spawned, ok = process.NewWithStartup(pid, process.AddressSpace{Root: root}, startup)
 	if !ok || spawned.Handles().Available() < len(grants) {
-		return 0, supervisor.LaunchProcessFailed
+		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	var installed [supervisor.MaxCapabilities]handle.ID
 	for index, grant := range grants {
@@ -258,7 +262,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startup []byte
 			for rollback := 0; rollback < index; rollback++ {
 				spawned.Handles().Close(installed[rollback])
 			}
-			return 0, supervisor.LaunchCapabilityInstallFailed
+			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
 	for index, grant := range grants {
@@ -267,18 +271,22 @@ func spawnExecutable(path string, grants []supervisor.Capability, startup []byte
 			for rollback := range grants {
 				spawned.Handles().Close(installed[rollback])
 			}
-			return 0, supervisor.LaunchCapabilityInstallFailed
+			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
 	if !processRegistry.Add(spawned) {
 		for index := range grants {
 			spawned.Handles().Close(installed[index])
 		}
-		return 0, supervisor.LaunchProcessFailed
+		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
 	if !ok || !processRegistry.BindTask(pid, sched.TaskID(task)) {
-		return 0, supervisor.LaunchTaskFailed
+		return 0, 0, supervisor.LaunchTaskFailed
+	}
+	processHandle, ok := bootInitProcess.Handles().Insert(handle.TypeProcess, capability.New(uint64(pid), capability.Wait))
+	if !ok {
+		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	nextProcessID++
 	if len(grants) != 0 {
@@ -289,7 +297,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startup []byte
 			bootInitProcess.Handles().Close(grant.Handle)
 		}
 	}
-	return pid, supervisor.LaunchOK
+	return pid, processHandle, supervisor.LaunchOK
 }
 
 func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
@@ -601,6 +609,85 @@ func expireIPCWaiters() {
 	}
 }
 
+func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress uint64, timeout uint64, task uint64) (kcall.Status, bool) {
+	if task >= sched.MaxTasks || !vm.ValidateUserRange(resultAddress, 8) {
+		return kcall.StatusInvalidArgument, false
+	}
+	taskID := sched.TaskID(amd64.TaskIDForSlot(task))
+	if _, _, valid := taskID.Parts(); !valid {
+		return kcall.StatusInvalidArgument, false
+	}
+	if processWaitStatus[task] != kcall.StatusOK {
+		status := processWaitStatus[task]
+		processWaitStatus[task] = kcall.StatusOK
+		return status, false
+	}
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied, false
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(processHandle), handle.TypeProcess, capability.Wait)
+	if !allowed {
+		return kcall.StatusPermissionDenied, false
+	}
+	pid := process.ID(authority.Object())
+	event, status := processRegistry.Wait(pid)
+	switch status {
+	case process.WaitExited:
+		var encoded [8]byte
+		putUint64(encoded[:], event.Code)
+		if !vm.CopyOut(handler.root, resultAddress, encoded[:]) {
+			return kcall.StatusInvalidArgument, false
+		}
+		return kcall.StatusOK, false
+	case process.WaitNotFound:
+		return kcall.StatusNotFound, false
+	}
+	if timeout == 0 {
+		return kcall.StatusTimeout, false
+	}
+	now := amd64.TimerTicks()
+	deadline := now + timeout
+	if deadline < now || !processWaitSet.Add(taskID, pid, deadline) {
+		return kcall.StatusResourceExhausted, false
+	}
+	return kcall.StatusNotFound, true
+}
+
+func wakeProcessWaiters(pid process.ID) {
+	count := processWaitSet.Wake(pid, processWakeResults[:])
+	for index := 0; index < count; index++ {
+		if !amd64.WakeTaskID(uint64(processWakeResults[index].Task)) {
+			console := amd64.NewCOM1()
+			console.WriteString("PANIC: stale process wake task\n")
+			for {
+				amd64.Halt()
+			}
+		}
+		processWakeResults[index] = process.WaitResult{}
+	}
+}
+
+func expireProcessWaiters() {
+	count := processWaitSet.Expire(amd64.TimerTicks(), processWakeResults[:])
+	for index := 0; index < count; index++ {
+		task, _, valid := processWakeResults[index].Task.Parts()
+		if !valid {
+			processWakeResults[index] = process.WaitResult{}
+			continue
+		}
+		processWaitStatus[task] = kcall.StatusTimeout
+		if !amd64.WakeTaskID(uint64(processWakeResults[index].Task)) {
+			console := amd64.NewCOM1()
+			console.WriteString("PANIC: stale process timeout task\n")
+			for {
+				amd64.Halt()
+			}
+		}
+		processWakeResults[index] = process.WaitResult{}
+	}
+}
+
 func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capacity uint64) kcall.Status {
 	endpoint, side, _, _, status := handler.endpoint(channel, capability.Read)
 	if status != kcall.StatusOK {
@@ -643,6 +730,16 @@ func dispatchIPCWait(channel uint64, descriptor uint64, size uint64, rootAndTask
 	return uint64(action)<<32 | uint64(status)
 }
 
+//export goos_dispatch_process_wait
+func dispatchProcessWait(processHandle uint64, resultAddress uint64, timeout uint64, rootAndTask uint64) uint64 {
+	status, blocked := waitProcess(nativeCallHandler{root: rootAndTask &^ 0xfff}, processHandle, resultAddress, timeout, rootAndTask&0xfff)
+	action := kcall.ActionReturn
+	if blocked {
+		action = kcall.ActionBlock
+	}
+	return uint64(action)<<32 | uint64(status)
+}
+
 //export goos_demo_task_a
 func runDemoTaskA() {
 	for demoTaskA < 3 {
@@ -664,6 +761,7 @@ func runDemoTaskB() {
 	for {
 		demoTaskB++
 		expireIPCWaiters()
+		expireProcessWaiters()
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
 			amd64.WakeTask(1)
 		}

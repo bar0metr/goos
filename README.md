@@ -157,6 +157,7 @@ The native kernel and the first isolated services are implemented:
 - unit, integration, boot, and performance tests.
 - reclamation of exited process address spaces and guarded kernel stacks.
 - generation-safe task-slot reuse and bounded process completion records.
+- capability-protected process handles and a blocking native wait call.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -247,6 +248,7 @@ PID1_INIT_OK
 PROCESS_EXIT_EVENT_OK
 PROCESS_RECLAIM_OK
 PROCESS_WAIT_OK
+PROCESS_HANDLE_WAIT_OK
 SUPERVISOR_CRASH_EVENT_OK
 LIFECYCLE_IPC_OK
 PID1_SERVICE_LAUNCH_OK

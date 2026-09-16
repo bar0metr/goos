@@ -9,7 +9,7 @@ import (
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(4)
+	LifecycleVersion    = uint16(5)
 	MaxExecutablePath   = 192
 	launchGrantSize     = 16
 )
@@ -39,6 +39,7 @@ const (
 type LifecycleEvent struct {
 	Operation       LifecycleOperation
 	Process         uint64
+	ProcessHandle   handle.ID
 	Code            uint64
 	Executable      [MaxExecutablePath]byte
 	ExecutableSize  uint8
@@ -93,14 +94,15 @@ func LaunchRequestWithStartup(service uint64, executable string, capabilities []
 	return message, true
 }
 
-func LaunchResult(process uint64, status LaunchStatus, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || process == 0 && status == LaunchOK || process != 0 && status != LaunchOK {
+func LaunchResult(process uint64, processHandle handle.ID, status LaunchStatus, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 || status == LaunchOK && (process == 0 || processHandle == 0) || status != LaunchOK && (process != 0 || processHandle != 0) {
 		return ipc.Message{}, false
 	}
-	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 17}
+	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 25}
 	message.Payload[0] = byte(LifecycleLaunchResult)
 	binary.LittleEndian.PutUint64(message.Payload[1:9], process)
-	binary.LittleEndian.PutUint64(message.Payload[9:17], uint64(status))
+	binary.LittleEndian.PutUint64(message.Payload[9:17], uint64(processHandle))
+	binary.LittleEndian.PutUint64(message.Payload[17:25], uint64(status))
 	return message, true
 }
 
@@ -151,15 +153,16 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		}
 		return event, true
 	case LifecycleLaunchResult:
-		if message.Kind != ipc.KindReply || message.Correlation == 0 || message.PayloadSize != 17 {
+		if message.Kind != ipc.KindReply || message.Correlation == 0 || message.PayloadSize != 25 {
 			return LifecycleEvent{}, false
 		}
 		process := binary.LittleEndian.Uint64(message.Payload[1:9])
-		status := LaunchStatus(binary.LittleEndian.Uint64(message.Payload[9:17]))
-		if status > LaunchCapabilityInstallFailed || process == 0 && status == LaunchOK || process != 0 && status != LaunchOK {
+		processHandle := handle.ID(binary.LittleEndian.Uint64(message.Payload[9:17]))
+		status := LaunchStatus(binary.LittleEndian.Uint64(message.Payload[17:25]))
+		if status > LaunchCapabilityInstallFailed || status == LaunchOK && (process == 0 || processHandle == 0) || status != LaunchOK && (process != 0 || processHandle != 0) {
 			return LifecycleEvent{}, false
 		}
-		return LifecycleEvent{Operation: LifecycleLaunchResult, Process: process, Code: uint64(status)}, true
+		return LifecycleEvent{Operation: LifecycleLaunchResult, Process: process, ProcessHandle: processHandle, Code: uint64(status)}, true
 	default:
 		return LifecycleEvent{}, false
 	}

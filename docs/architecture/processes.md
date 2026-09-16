@@ -49,3 +49,9 @@ fatal. Initramfs discovery and bounded resource reclamation are complete.
 The registry retains a bounded completion record after lifecycle delivery and
 resource teardown, allowing waiters to distinguish running, exited, and unknown
 processes without retaining reclaimed objects.
+
+Successful launches install a typed process handle in PID 1 with only `Wait`
+authority. Native `ProcessWait` validates that handle, blocks on a bounded wait
+set, supports timer deadlines, and copies the exit code to validated user
+memory. PID 1 uses this path for shell-launched applications and closes the
+handle after completion.

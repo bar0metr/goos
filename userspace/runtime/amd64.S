@@ -88,6 +88,14 @@ goos_handle_close:
     ret
 .size goos_handle_close, .-goos_handle_close
 
+.global goos_process_wait
+.type goos_process_wait,@function
+goos_process_wait:
+    movl $12, %eax
+    int $0x80
+    ret
+.size goos_process_wait, .-goos_process_wait
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

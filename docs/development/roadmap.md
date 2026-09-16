@@ -43,8 +43,9 @@ filesystem builtin because it mutates shell state. Exited processes now reclaim
 private image pages, process-owned page-table hierarchies, and guarded kernel
 stacks without freeing shared-memory backing. Task slots now use generation-safe
 identities, and bounded process completion records provide race-free wait state
-after lifecycle delivery. The next process slice introduces process handles and
-a native wait kernel call.
+after lifecycle delivery. Launch now returns a capability-protected process
+handle, and PID 1 uses the restartable native wait call for application exit.
+The next shell slice adds general executable lookup.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.
