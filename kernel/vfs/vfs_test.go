@@ -179,3 +179,20 @@ func TestProtocolRoundTripAndReservedFields(t *testing.T) {
 		t.Fatal("nonzero reserved field accepted")
 	}
 }
+
+func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
+	message, ok := EncodeReply(Reply{Operation: OperationReadDir, Status: StatusOK, Kind: ramfs.KindFile,
+		Handle: 7, Size: 4, Cursor: 3, Name: []byte("motd"), Data: []byte("data")}, 11)
+	if !ok {
+		t.Fatal("reply encode failed")
+	}
+	reply, ok := DecodeReply(message)
+	if !ok || reply.Operation != OperationReadDir || reply.Kind != ramfs.KindFile || reply.Handle != 7 ||
+		reply.Size != 4 || reply.Cursor != 3 || string(reply.Name) != "motd" || string(reply.Data) != "data" {
+		t.Fatalf("unexpected reply: %#v", reply)
+	}
+	message.Payload[28] = 1
+	if _, ok := DecodeReply(message); ok {
+		t.Fatal("nonzero reply reserved field accepted")
+	}
+}

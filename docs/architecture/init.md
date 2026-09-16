@@ -19,7 +19,8 @@ scheduled restarts, and rate limiting enter a bounded diagnostic event ring.
 
 The policy core is in `userspace/init`; process creation is supplied through a
 narrow launcher callback. UEFI loads a strict, bounded USTAR initramfs before
-firmware handoff. The kernel discovers `system/init`, validates its native image,
+firmware handoff. The bootstrap reservation is capped at 1 MiB. The kernel
+discovers `system/init`, validates its native image,
 creates a distinct address space and process ID 1, and schedules it at ring 3.
 
 Normal native exits and isolated CPU faults enter the same bounded task-exit
@@ -47,3 +48,7 @@ the service's bounded capability manifest. Entries reference existing PID 1
 handles and request an exact derived rights mask; the kernel requires Transfer
 authority, prevents escalation, and installs the derived handles into the new
 process before its first Task is created.
+Channel grants may additionally select one explicit endpoint side. The kernel
+binds that side to the child address-space root and links it to an already
+launched peer. PID 1 uses this mechanism to start VFS before the dependent shell
+without granting either child transfer authority.

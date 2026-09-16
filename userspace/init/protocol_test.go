@@ -64,6 +64,18 @@ func TestLifecycleProtocol(t *testing.T) {
 	if _, ok := LaunchRequest(3, "/system/init", []Capability{{Handle: 1, Type: handle.TypeDevice}}, 9); ok {
 		t.Fatal("capability without rights accepted")
 	}
+	endpointGrant := []Capability{{Handle: 3, Type: handle.TypeChannel, Rights: capability.Read | capability.Write, Endpoint: 2}}
+	endpointLaunch, ok := LaunchRequest(4, "/system/vfs", endpointGrant, 10)
+	if !ok {
+		t.Fatal("endpoint grant encode failed")
+	}
+	endpointEvent, ok := DecodeLifecycle(endpointLaunch)
+	if !ok || endpointEvent.Capabilities[0] != endpointGrant[0] {
+		t.Fatalf("endpoint grant = %#v", endpointEvent)
+	}
+	if _, ok := LaunchRequest(4, "/system/vfs", []Capability{{Handle: 3, Type: handle.TypeDevice, Rights: capability.Write, Endpoint: 1}}, 10); ok {
+		t.Fatal("endpoint metadata accepted for non-channel capability")
+	}
 	tooMany := make([]Capability, MaxCapabilities+1)
 	for index := range tooMany {
 		tooMany[index] = Capability{Handle: handle.ID(index + 1), Type: handle.TypeDevice, Rights: capability.Write}

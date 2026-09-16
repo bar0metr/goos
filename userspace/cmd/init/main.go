@@ -13,6 +13,7 @@ import (
 
 const lifecycleHandle = uint64(0x0000000100000001)
 const serviceDeviceHandle = handle.ID(0x0000000100000002)
+const vfsChannelHandle = handle.ID(0x0000000100000003)
 
 var (
 	manager             supervisor.Manager
@@ -65,9 +66,17 @@ func userspaceMain() {
 		manager.StartReady(clock+supervisor.RestartBackoff, launchService)
 		snapshot, found := manager.Snapshot("fault-probe")
 		if found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
-			if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell",
-				Capabilities: []supervisor.Capability{{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write}}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 1 {
+			if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
+				Capabilities: []supervisor.Capability{
+					{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+					{Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Endpoint: 2},
+				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
+					Capabilities: []supervisor.Capability{
+						{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+						{Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Endpoint: 1},
+					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 2 {
 				fatal("SHELL_LAUNCH_FAILED\n")
 			}
 			supervisionComplete = true

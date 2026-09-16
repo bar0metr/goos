@@ -27,7 +27,10 @@ source remains valid.
 Closing one endpoint prevents further sends. Its peer may drain already queued
 messages and then receives `PeerDied`. The mechanism is single-CPU: callers
 provide IRQ-level exclusion. Userspace accesses channels only through
-capability-checked handles, never through kernel object addresses.
+capability-checked handles, never through kernel object addresses. Service
+launch manifests distinguish the two endpoints of a shared channel. Endpoint
+bindings remain scoped by channel object and process address-space root;
+binding the second side links both peers.
 
 # Native call boundary
 

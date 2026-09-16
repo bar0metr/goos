@@ -16,6 +16,26 @@ func TestEndpointBindingsAreScopedByObjectAndProcess(t *testing.T) {
 	}
 }
 
+func TestProcessEndpointsLinkAndUnbind(t *testing.T) {
+	var table EndpointTable
+	if !table.BindProcess(9, 100, 2) || !table.BindProcess(9, 200, 1) {
+		t.Fatal("failed to bind process endpoints")
+	}
+	if side, peer, ok := table.Lookup(9, 100); !ok || side != 1 || peer != 200 {
+		t.Fatalf("server endpoint = %d, %d, %v", side, peer, ok)
+	}
+	if side, peer, ok := table.Lookup(9, 200); !ok || side != 0 || peer != 100 {
+		t.Fatalf("client endpoint = %d, %d, %v", side, peer, ok)
+	}
+	table.Unbind(9, 200)
+	if _, _, ok := table.Lookup(9, 200); ok {
+		t.Fatal("unbound endpoint remains visible")
+	}
+	if _, peer, ok := table.Lookup(9, 100); !ok || peer != 0 {
+		t.Fatal("peer link was not cleared")
+	}
+}
+
 func TestEndpointTableHoldsBothSidesOfEveryChannel(t *testing.T) {
 	var table EndpointTable
 	for index := uint64(1); index <= MaxChannels; index++ {

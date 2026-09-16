@@ -60,9 +60,10 @@ const (
 )
 
 type Capability struct {
-	Handle handle.ID
-	Type   handle.Type
-	Rights capability.Rights
+	Handle   handle.ID
+	Type     handle.Type
+	Rights   capability.Rights
+	Endpoint uint8
 }
 
 type Definition struct {
@@ -139,6 +140,9 @@ func (manager *Manager) Register(definition Definition) Status {
 	for _, grant := range definition.Capabilities {
 		const allRights = capability.Read | capability.Write | capability.Execute | capability.Transfer | capability.Wait
 		if grant.Handle == 0 || grant.Type == handle.TypeInvalid || grant.Rights == 0 || grant.Rights&^allRights != 0 {
+			return StatusInvalidArgument
+		}
+		if grant.Type == handle.TypeChannel && grant.Endpoint > 2 || grant.Type != handle.TypeChannel && grant.Endpoint != 0 {
 			return StatusInvalidArgument
 		}
 	}

@@ -5,7 +5,8 @@ installing or downloading anything. `make iso` creates all generated files
 under `build/`, including `build/kernel/goos.efi` and
 `build/goos-x86_64.iso`.
 
-The userspace build compiles `userspace/cmd/init` with the dedicated
+The userspace build compiles `userspace/cmd/init`, `userspace/cmd/vfs`, and
+`userspace/cmd/shell` with the dedicated
 `goos-userspace-amd64` TinyGo target, links a static ELF at the native userspace
 base, and converts its load segments to `build/userspace/init`. ELF is an
 intermediate build format only; the kernel accepts the GoOS native envelope.

@@ -31,8 +31,11 @@ Declared capability manifests are serialized into launch requests and installed
 as non-escalating derived handles before a child Task is created. PID 1 now
 launches a native interactive shell with capability-checked serial input/output,
 bounded line editing, and the `help`, `echo`, `clear`, and `uptime` built-ins.
-The next slice connects shell commands to the userspace VFS boundary, beginning
-with `pwd`, `ls`, `cd`, and `cat`.
+The shell is now connected to a supervised userspace VFS service through an
+explicit pair of channel endpoints. It maintains a bounded working directory
+and implements `pwd`, `ls`, `cd`, and `cat` over correlated `GVF1` requests.
+The next shell slice adds native executable launch without introducing ambient
+filesystem or process authority.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

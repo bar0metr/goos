@@ -15,13 +15,23 @@ rm -f "$log"
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
+	 sleep 1
+	 printf 'pwd\n'
+	 sleep 1
+	 printf 'ls /\n'
+	 sleep 1
+	 printf 'cd /system\n'
+	 sleep 1
+	 printf 'pwd\n'
+	 sleep 1
+	 printf 'cat motd\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
 elapsed=0
-while [ "$elapsed" -lt 20 ]; do
+while [ "$elapsed" -lt 45 ]; do
 	if grep -q 'BOOT_SERVICES_EXITED' "$log" 2>/dev/null && \
 		grep -q 'PMM_OK' "$log" 2>/dev/null && \
 		grep -q 'NX_WX_OK' "$log" 2>/dev/null && \
@@ -65,12 +75,19 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'INIT_EXECUTABLE_LOOKUP_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_CAPABILITY_MANIFEST_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
+		grep -q 'VFS_SERVICE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_VFS_CONNECTED_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \
 		grep -q 'hello' "$log" 2>/dev/null && \
 		grep -q 'SHELL_ECHO_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_UPTIME_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_PWD_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_LS_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_CD_OK' "$log" 2>/dev/null && \
+		grep -q 'Welcome to GoOS' "$log" 2>/dev/null && \
+		grep -q 'SHELL_CAT_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \

@@ -9,6 +9,10 @@ const (
 	CommandEcho
 	CommandClear
 	CommandUptime
+	CommandPwd
+	CommandLs
+	CommandCd
+	CommandCat
 	CommandUnknown
 )
 
@@ -26,6 +30,18 @@ func Parse(line []byte) (Command, []byte) {
 		return CommandClear, nil
 	case equal(line, "uptime"):
 		return CommandUptime, nil
+	case equal(line, "pwd"):
+		return CommandPwd, nil
+	case equal(line, "ls"):
+		return CommandLs, nil
+	case hasPrefix(line, "ls ") && len(line) > 3:
+		return CommandLs, line[3:]
+	case equal(line, "cd"):
+		return CommandCd, nil
+	case hasPrefix(line, "cd ") && len(line) > 3:
+		return CommandCd, line[3:]
+	case hasPrefix(line, "cat ") && len(line) > 4:
+		return CommandCat, line[4:]
 	default:
 		return CommandUnknown, nil
 	}

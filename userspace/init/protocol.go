@@ -9,7 +9,7 @@ import (
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(2)
+	LifecycleVersion    = uint16(3)
 	MaxExecutablePath   = 192
 	launchGrantSize     = 16
 )
@@ -77,6 +77,7 @@ func LaunchRequest(service uint64, executable string, capabilities []Capability,
 		binary.LittleEndian.PutUint64(message.Payload[offset:], uint64(grant.Handle))
 		binary.LittleEndian.PutUint16(message.Payload[offset+8:], uint16(grant.Type))
 		binary.LittleEndian.PutUint32(message.Payload[offset+10:], uint32(grant.Rights))
+		message.Payload[offset+14] = grant.Endpoint
 		offset += launchGrantSize
 	}
 	return message, true
@@ -125,11 +126,12 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		offset := 11 + size
 		for index := 0; index < capabilityCount; index++ {
 			grant := Capability{
-				Handle: handle.ID(binary.LittleEndian.Uint64(message.Payload[offset:])),
-				Type:   handle.Type(binary.LittleEndian.Uint16(message.Payload[offset+8:])),
-				Rights: capability.Rights(binary.LittleEndian.Uint32(message.Payload[offset+10:])),
+				Handle:   handle.ID(binary.LittleEndian.Uint64(message.Payload[offset:])),
+				Type:     handle.Type(binary.LittleEndian.Uint16(message.Payload[offset+8:])),
+				Rights:   capability.Rights(binary.LittleEndian.Uint32(message.Payload[offset+10:])),
+				Endpoint: message.Payload[offset+14],
 			}
-			if binary.LittleEndian.Uint16(message.Payload[offset+14:]) != 0 || !validCapability(grant) {
+			if message.Payload[offset+15] != 0 || !validCapability(grant) {
 				return LifecycleEvent{}, false
 			}
 			event.Capabilities[index] = grant
@@ -142,7 +144,7 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		}
 		process := binary.LittleEndian.Uint64(message.Payload[1:9])
 		status := LaunchStatus(binary.LittleEndian.Uint64(message.Payload[9:17]))
-		if status > LaunchTaskFailed || process == 0 && status == LaunchOK || process != 0 && status != LaunchOK {
+		if status > LaunchCapabilityInstallFailed || process == 0 && status == LaunchOK || process != 0 && status != LaunchOK {
 			return LifecycleEvent{}, false
 		}
 		return LifecycleEvent{Operation: LifecycleLaunchResult, Process: process, Code: uint64(status)}, true
@@ -153,7 +155,8 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 
 func validCapability(grant Capability) bool {
 	const allRights = capability.Read | capability.Write | capability.Execute | capability.Transfer | capability.Wait
-	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeIRQ && grant.Rights != 0 && grant.Rights&^allRights == 0
+	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeIRQ && grant.Rights != 0 && grant.Rights&^allRights == 0 &&
+		(grant.Type == handle.TypeChannel && grant.Endpoint <= 2 || grant.Type != handle.TypeChannel && grant.Endpoint == 0)
 }
 
 func (event LifecycleEvent) ExecutablePath() string {

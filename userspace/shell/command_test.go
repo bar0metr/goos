@@ -14,6 +14,12 @@ func TestParse(t *testing.T) {
 		{"echo hello world", CommandEcho, "hello world"},
 		{"clear", CommandClear, ""},
 		{"uptime", CommandUptime, ""},
+		{"pwd", CommandPwd, ""},
+		{"ls", CommandLs, ""},
+		{"ls /system", CommandLs, "/system"},
+		{"cd ..", CommandCd, ".."},
+		{"cat motd", CommandCat, "motd"},
+		{"cat", CommandUnknown, ""},
 		{"unknown", CommandUnknown, ""},
 		{"help now", CommandUnknown, ""},
 	}

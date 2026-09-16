@@ -40,6 +40,7 @@ var (
 	channelRegistry         ipc.Registry
 	lifecycleChannel        *ipc.Channel
 	lifecycleChannelID      uint64
+	vfsChannelID            uint64
 	bootProcessA            *process.Process
 	bootProcessB            *process.Process
 	bootInitProcess         *process.Process
@@ -205,6 +206,8 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 		return 0, supervisor.LaunchProcessFailed
 	}
 	var installed [supervisor.MaxCapabilities]handle.ID
+	var boundObjects [supervisor.MaxCapabilities]uint64
+	boundCount := 0
 	for index, grant := range grants {
 		installed[index], ok = bootInitProcess.Handles().Transfer(spawned.Handles(), grant.Handle, grant.Type, grant.Rights)
 		if !ok {
@@ -223,7 +226,27 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 			return 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
+	for index, grant := range grants {
+		if grant.Endpoint == 0 {
+			continue
+		}
+		channelCapability, found := spawned.Handles().Lookup(installed[index], handle.TypeChannel, grant.Rights)
+		if !found || !endpointBindings.BindProcess(channelCapability.Object(), root, grant.Endpoint) {
+			for rollback := 0; rollback < boundCount; rollback++ {
+				endpointBindings.Unbind(boundObjects[rollback], root)
+			}
+			for rollback := range grants {
+				spawned.Handles().Close(installed[rollback])
+			}
+			return 0, supervisor.LaunchCapabilityInstallFailed
+		}
+		boundObjects[boundCount] = channelCapability.Object()
+		boundCount++
+	}
 	if !processRegistry.Add(spawned) {
+		for rollback := 0; rollback < boundCount; rollback++ {
+			endpointBindings.Unbind(boundObjects[rollback], root)
+		}
 		for index := range grants {
 			spawned.Handles().Close(installed[index])
 		}
@@ -231,6 +254,9 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 	}
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
 	if !ok || !processRegistry.BindTask(pid, sched.TaskID(task)) {
+		for rollback := 0; rollback < boundCount; rollback++ {
+			endpointBindings.Unbind(boundObjects[rollback], root)
+		}
 		return 0, supervisor.LaunchTaskFailed
 	}
 	spawnedProcessCount++
@@ -678,6 +704,8 @@ func main() {
 	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
 	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleChannelID, capability.Read|capability.Write|capability.Wait))
 	serviceDeviceHandle, serviceDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Read|capability.Write|capability.Transfer))
+	_, vfsChannelID, vfsChannelCreated := channelRegistry.Create()
+	vfsChannelHandle, vfsChannelInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsChannelID, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	lifecycleBound := endpointBindings.Bind(lifecycleChannelID, rootInit, 0, 1)
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
@@ -694,8 +722,8 @@ func main() {
 	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
 	_, replyReceiveStatus := registeredChannel.Receive(0)
 	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !channelsBound ||
-		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || !wireEncoded || !wireDecoded ||
+		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
 		console.WriteString("PANIC: typed IPC request/reply failed\n")
