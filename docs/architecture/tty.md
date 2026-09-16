@@ -20,3 +20,13 @@ request. The service waits through the scheduler, receives the wire message into
 its writable stack, and writes only the operation data through its serial
 capability. The serial markers prove both the IPC wake path and service-owned
 device access.
+
+The native shell currently uses the smaller console-session kernel ABI rather
+than the bootstrap TTY channel. A device handle with `Read|Write` authority
+permits single-byte nonblocking input and bounded output; processes without the
+handle are rejected. Monotonic timer reads are exposed separately and carry no
+device authority. `DebugWrite` remains restricted to PID 1 and the legacy ABI
+probe, so the shell cannot bypass its manifest.
+
+Consolidating this session ABI behind a persistent userspace TTY server is the
+next terminal-architecture step.

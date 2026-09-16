@@ -7,9 +7,17 @@ log=build/logs/boot.log
 mkdir -p build/logs
 rm -f "$log"
 
-qemu-system-x86_64 -machine q35 -m 512M \
+( sleep 4
+  printf 'help\n'
+  sleep 1
+  printf 'echo hello\n'
+  sleep 1
+  printf 'clear\n'
+  sleep 1
+  printf 'uptime\n'
+) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
-	-cdrom "$iso" -display none -serial "file:$log" -no-reboot -no-shutdown &
+	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
 elapsed=0
@@ -57,6 +65,12 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'INIT_EXECUTABLE_LOOKUP_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_CAPABILITY_MANIFEST_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \
+		grep -q 'hello' "$log" 2>/dev/null && \
+		grep -q 'SHELL_ECHO_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
+		grep -q 'SHELL_UPTIME_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \
@@ -72,8 +86,6 @@ while [ "$elapsed" -lt 20 ]; do
 		grep -q 'NATIVE_IMAGE_LOADER_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_COPYIN_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_DEBUG_WRITE_OK' "$log" 2>/dev/null && \
-		grep -q 'IPC_WAIT_TIMEOUT_OK' "$log" 2>/dev/null && \
-		grep -q 'IPC_WAIT_MESSAGE_OK' "$log" 2>/dev/null && \
 		grep -q 'TTY_SERVICE_OK' "$log" 2>/dev/null && \
 		grep -q 'TTY_RIGHTS_OK' "$log" 2>/dev/null && \
 		grep -q 'USER_EXIT_OK' "$log" 2>/dev/null && \

@@ -28,8 +28,11 @@ native image, and creates its address space and initial task. A freestanding
 amd64 TinyGo runtime now executes the complete supervision policy loop in PID 1;
 the QEMU path exercises three crash/restart cycles and userspace rate limiting.
 Declared capability manifests are serialized into launch requests and installed
-as non-escalating derived handles before a child Task is created. The next slice
-begins the native shell and its minimal process-facing console/session protocol.
+as non-escalating derived handles before a child Task is created. PID 1 now
+launches a native interactive shell with capability-checked serial input/output,
+bounded line editing, and the `help`, `echo`, `clear`, and `uptime` built-ins.
+The next slice connects shell commands to the userspace VFS boundary, beginning
+with `pwd`, `ls`, `cd`, and `cat`.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

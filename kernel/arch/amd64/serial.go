@@ -6,6 +6,7 @@ const (
 	com1Base       = uint16(0x3f8)
 	lineStatusPort = com1Base + 5
 	transmitReady  = byte(0x20)
+	receiveReady   = byte(0x01)
 )
 
 // COM1 is the first legacy UART. QEMU exposes it as the serial console.
@@ -28,6 +29,13 @@ func (COM1) WriteByte(value byte) {
 		cpuPause()
 	}
 	outb(com1Base, value)
+}
+
+func (COM1) TryReadByte() (byte, bool) {
+	if inb(lineStatusPort)&receiveReady == 0 {
+		return 0, false
+	}
+	return inb(com1Base), true
 }
 
 func (serial COM1) WriteString(value string) {

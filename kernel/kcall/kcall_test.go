@@ -7,6 +7,7 @@ type testHandler struct {
 	address  uint64
 	length   uint64
 	channel  uint64
+	called   bool
 }
 
 func (handler *testHandler) IPCSend(channel uint64, address uint64, length uint64) Status {
@@ -21,6 +22,16 @@ func (handler *testHandler) IPCReceive(channel uint64, address uint64, capacity 
 
 func (handler *testHandler) ConsoleWrite(device uint64, address uint64, length uint64) Status {
 	handler.channel, handler.address, handler.length = device, address, length
+	return StatusOK
+}
+
+func (handler *testHandler) ConsoleRead(device uint64, address uint64, length uint64) Status {
+	handler.called = true
+	return StatusOK
+}
+
+func (handler *testHandler) ClockRead(address uint64, length uint64) Status {
+	handler.called = true
 	return StatusOK
 }
 
@@ -82,6 +93,20 @@ func TestDispatchConsoleWrite(t *testing.T) {
 	result := Dispatch(Request{Operation: OperationConsoleWrite, Arg0: 12, Arg1: 0x8000, Arg2: 15}, handler)
 	if result.Status != StatusOK || handler.channel != 12 || handler.address != 0x8000 || handler.length != 15 {
 		t.Fatalf("unexpected console write: %#v, handler: %#v", result, handler)
+	}
+}
+
+func TestDispatchConsoleReadAndClock(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationConsoleRead, Arg0: 1, Arg1: 0x8000, Arg2: 1}, handler); result.Status != StatusOK || !handler.called {
+		t.Fatalf("console read = %#v", result)
+	}
+	handler.called = false
+	if result := Dispatch(Request{Operation: OperationClockRead, Arg0: 0x9000, Arg1: 8}, handler); result.Status != StatusOK || !handler.called {
+		t.Fatalf("clock read = %#v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationConsoleRead, Arg2: 2}, handler); result.Status != StatusInvalidArgument {
+		t.Fatalf("oversized console read = %#v", result)
 	}
 }
 

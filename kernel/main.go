@@ -85,6 +85,10 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 
 func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall.Status {
 	console := amd64.NewCOM1()
+	if (bootProcessA == nil || handler.root != bootProcessA.AddressSpace().Root) &&
+		(bootInitProcess == nil || handler.root != bootInitProcess.AddressSpace().Root) {
+		return kcall.StatusPermissionDenied
+	}
 	data := kernelCallData[:int(length)]
 	if !vm.CopyIn(handler.root, address, data) {
 		console.WriteString("USER_COPYIN_OK\n")
@@ -238,10 +242,11 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 }
 
 func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
-	if bootProcessB == nil || handler.root != bootProcessB.AddressSpace().Root {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
 		return kcall.StatusPermissionDenied
 	}
-	cap, ok := bootProcessB.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
+	cap, ok := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
 	if !ok || cap.Object() != 1 || length == 0 || length > kcall.MaxDebugWrite {
 		return kcall.StatusPermissionDenied
 	}
@@ -252,6 +257,37 @@ func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, len
 	console := amd64.NewCOM1()
 	for _, value := range data {
 		console.WriteByte(value)
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) ConsoleRead(device uint64, address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || length != 1 {
+		return kcall.StatusPermissionDenied
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Read)
+	if !ok || cap.Object() != 1 {
+		return kcall.StatusPermissionDenied
+	}
+	value, ready := amd64.NewCOM1().TryReadByte()
+	if !ready {
+		return kcall.StatusNotFound
+	}
+	if !vm.CopyOut(handler.root, address, []byte{value}) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.Status {
+	if length != 8 {
+		return kcall.StatusInvalidArgument
+	}
+	var encoded [8]byte
+	putUint64(encoded[:], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }
@@ -641,7 +677,7 @@ func main() {
 	var lifecycleCreated bool
 	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
 	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleChannelID, capability.Read|capability.Write|capability.Wait))
-	serviceDeviceHandle, serviceDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Write|capability.Transfer))
+	serviceDeviceHandle, serviceDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Read|capability.Write|capability.Transfer))
 	lifecycleBound := endpointBindings.Bind(lifecycleChannelID, rootInit, 0, 1)
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))

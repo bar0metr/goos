@@ -15,12 +15,13 @@ const lifecycleHandle = uint64(0x0000000100000001)
 const serviceDeviceHandle = handle.ID(0x0000000100000002)
 
 var (
-	manager     supervisor.Manager
-	wire        [ipc.WireMaxSize]byte
-	descriptor  = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	clock       uint64
-	correlation uint64
-	heapPointer uintptr
+	manager             supervisor.Manager
+	wire                [ipc.WireMaxSize]byte
+	descriptor          = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
+	clock               uint64
+	correlation         uint64
+	heapPointer         uintptr
+	supervisionComplete bool
 )
 
 //go:extern _heap_start
@@ -38,8 +39,8 @@ func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname ipcWaitReceive goos_ipc_wait_receive
 func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
 
-//export initMain
-func initMain() {
+//export userspaceMain
+func userspaceMain() {
 	runtimeInitHeap()
 	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
 		Capabilities: []supervisor.Capability{{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
@@ -63,11 +64,14 @@ func initMain() {
 		}
 		manager.StartReady(clock+supervisor.RestartBackoff, launchService)
 		snapshot, found := manager.Snapshot("fault-probe")
-		if found && snapshot.State == supervisor.StateFailed {
-			write("USERSPACE_SUPERVISOR_OK\n")
-			for {
-				ipcWaitReceive(lifecycleHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+		if found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
+			if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell",
+				Capabilities: []supervisor.Capability{{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write}}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 1 {
+				fatal("SHELL_LAUNCH_FAILED\n")
 			}
+			supervisionComplete = true
+			write("USERSPACE_SUPERVISOR_OK\n")
 		}
 	}
 }

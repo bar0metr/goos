@@ -3,7 +3,7 @@
 .type _start,@function
 _start:
     andq $-16, %rsp
-    call initMain
+    call userspaceMain
     ud2
 .size _start, .-_start
 
@@ -31,5 +31,29 @@ goos_ipc_wait_receive:
     int $0x80
     ret
 .size goos_ipc_wait_receive, .-goos_ipc_wait_receive
+
+.global goos_console_write
+.type goos_console_write,@function
+goos_console_write:
+    movl $6, %eax
+    int $0x80
+    ret
+.size goos_console_write, .-goos_console_write
+
+.global goos_console_read
+.type goos_console_read,@function
+goos_console_read:
+    movl $7, %eax
+    int $0x80
+    ret
+.size goos_console_read, .-goos_console_read
+
+.global goos_clock_read
+.type goos_clock_read,@function
+goos_clock_read:
+    movl $8, %eax
+    int $0x80
+    ret
+.size goos_clock_read, .-goos_clock_read
 
 .section .note.GNU-stack,"",@progbits

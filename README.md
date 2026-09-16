@@ -149,15 +149,19 @@ The native kernel and the first isolated services are implemented:
   policy loop executing inside PID 1;
 - capability manifests that derive PID 1 authority into newly spawned process
   handle tables without rights escalation;
+- a supervised native shell with bounded line editing and `help`, `echo`,
+  `clear`, and `uptime` commands;
 - unit, integration, boot, and performance tests.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
 the policy loop and enforces bounded crash restart accounting. Spawn capability
-installation is implemented; the shell is not. The current ISO boots a real kernel, leaves UEFI
+installation and a basic interactive shell are implemented. The shell does not
+yet expose filesystem commands or pipelines. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
-verifies process address-space isolation, and executes a minimal native program
-at CPL 3. It is not yet a usable operating environment.
+verifies process address-space isolation, and runs supervised native programs
+at CPL 3. It is now interactively usable for the built-in shell commands, but
+is not yet a general application environment.
 
 ## Building and running
 
