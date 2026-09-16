@@ -45,7 +45,10 @@ stacks without freeing shared-memory backing. Task slots now use generation-safe
 identities, and bounded process completion records provide race-free wait state
 after lifecycle delivery. Launch now returns a capability-protected process
 handle, and PID 1 uses the restartable native wait call for application exit.
-The next shell slice adds general executable lookup.
+The shell now resolves simple command names beneath `/system/bin`; PID 1 loads
+any valid image found there with bounded startup data, an isolated VFS session,
+and the minimal application capability manifest. The next shell slice adds
+quoting, pipelines, and I/O redirection.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

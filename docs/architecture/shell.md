@@ -14,15 +14,16 @@ ANSI terminal control, while `uptime` reads the kernel's monotonic 100 Hz tick
 counter. The shell owns a fixed 192-byte working-directory buffer matching the
 inline `GVF1` path limit and resolves
 relative paths without heap allocation. `cd` commits a new directory only after
-VFS `Stat` confirms it. `pwd`, `ls`, and `cat` are external native executables
-under `/system/bin`; shell sends their executable path, raw argument, and current
-directory to PID 1 and waits for process completion. Unknown commands return a
-bounded diagnostic and the prompt remains active.
+VFS `Stat` confirms it. Other command names are resolved beneath the fixed
+`/system/bin/` search root; shell sends the executable path, raw bounded
+argument tail, and current directory to PID 1 and waits through a process
+handle. PID 1 independently validates the system path and executable image.
 The shell similarly restores its post-startup arena mark after every completed
 command, so repeated IPC commands cannot exhaust the non-freeing TinyGo heap.
 
 The QEMU boot test writes real commands to serial stdin and requires the shell's
 responses in serial output. The shell receives non-transferable VFS and exec
 endpoints and cannot delegate them. Every external utility receives a fresh VFS
-session instead of sharing the shell reply queue. Pipes, job control, and a
-persistent userspace TTY server remain future work.
+session instead of sharing the shell reply queue. Fast exit notifications that
+arrive before a launch reply are retained in a bounded PID 1 queue. Quoting,
+pipelines, job control, and a persistent userspace TTY server remain future work.

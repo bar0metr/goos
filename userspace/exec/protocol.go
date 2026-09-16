@@ -11,7 +11,43 @@ const (
 	Version    = uint16(1)
 	MaxPath    = 192
 	replySize  = 16
+	SearchRoot = "/system/bin/"
 )
+
+func ResolveExecutable(command []byte, target *[MaxPath]byte) ([]byte, bool) {
+	if target == nil || len(command) == 0 || len(SearchRoot)+len(command) > len(target) {
+		return nil, false
+	}
+	if len(command) == 1 && command[0] == '.' || len(command) == 2 && command[0] == '.' && command[1] == '.' {
+		return nil, false
+	}
+	for _, value := range command {
+		if value == 0 || value == '/' || value == ' ' {
+			return nil, false
+		}
+	}
+	copy(target[:], SearchRoot)
+	copy(target[len(SearchRoot):], command)
+	return target[:len(SearchRoot)+len(command)], true
+}
+
+func CommandFromSystemPath(path []byte) ([]byte, bool) {
+	if len(path) <= len(SearchRoot) {
+		return nil, false
+	}
+	for index := range SearchRoot {
+		if path[index] != SearchRoot[index] {
+			return nil, false
+		}
+	}
+	command := path[len(SearchRoot):]
+	var target [MaxPath]byte
+	resolved, ok := ResolveExecutable(command, &target)
+	if !ok || len(resolved) != len(path) {
+		return nil, false
+	}
+	return command, true
+}
 
 type Request struct{ Path, CWD, Arguments []byte }
 type Reply struct {

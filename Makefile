@@ -174,6 +174,7 @@ docs:
 	@test -f docs/adr/0027-native-coreutils-exec.md
 	@test -f docs/adr/0028-generation-safe-task-ids-and-process-wait.md
 	@test -f docs/adr/0029-process-handles-and-native-wait.md
+	@test -f docs/adr/0030-bounded-system-path-native-exec.md
 	@test -f docs/development/building.md
 
 clean:

@@ -158,13 +158,15 @@ The native kernel and the first isolated services are implemented:
 - reclamation of exited process address spaces and guarded kernel stacks.
 - generation-safe task-slot reuse and bounded process completion records.
 - capability-protected process handles and a blocking native wait call.
+- bounded `/system/bin` executable lookup with per-process VFS sessions.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
 the policy loop and enforces bounded crash restart accounting. Spawn capability
 installation, a userspace VFS service, an interactive filesystem-aware shell,
-and capability-bounded native utility launch are implemented. The shell does
-not yet expose pipelines or general executable lookup. The current ISO boots a real kernel, leaves UEFI
+and capability-bounded native utility launch are implemented. The shell resolves
+general native executables beneath `/system/bin`, but does not yet expose
+quoting, pipelines, or redirection. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but

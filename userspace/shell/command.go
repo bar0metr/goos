@@ -47,6 +47,24 @@ func Parse(line []byte) (Command, []byte) {
 	}
 }
 
+// SplitInvocation returns one bounded command token and its unparsed argument
+// tail. Quoting and pipelines belong to later shell grammar iterations.
+func SplitInvocation(line []byte) ([]byte, []byte) {
+	start := 0
+	for start < len(line) && line[start] == ' ' {
+		start++
+	}
+	end := start
+	for end < len(line) && line[end] != ' ' {
+		end++
+	}
+	arguments := end
+	for arguments < len(line) && line[arguments] == ' ' {
+		arguments++
+	}
+	return line[start:end], line[arguments:]
+}
+
 func equal(value []byte, expected string) bool {
 	if len(value) != len(expected) {
 		return false

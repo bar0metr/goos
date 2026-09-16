@@ -30,3 +30,10 @@ func TestParse(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitInvocation(t *testing.T) {
+	command, arguments := SplitInvocation([]byte("  args   alpha beta"))
+	if string(command) != "args" || string(arguments) != "alpha beta" {
+		t.Fatalf("invocation = %q, %q", command, arguments)
+	}
+}

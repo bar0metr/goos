@@ -20,17 +20,18 @@ const vfsHandle = uint64(0x0000000100000002)
 const execHandle = uint64(0x0000000100000003)
 
 var (
-	editor      tty.LineEditor
-	inputByte   byte
-	clockValue  uint64
-	heapPointer uintptr
-	arenaBase   uintptr
-	wire        [ipc.WireMaxSize]byte
-	descriptor  = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	correlation uint64
-	cwd         = [shellcmd.MaxPath]byte{'/'}
-	cwdSize     = 1
-	pathBuffer  [shellcmd.MaxPath]byte
+	editor           tty.LineEditor
+	inputByte        byte
+	clockValue       uint64
+	heapPointer      uintptr
+	arenaBase        uintptr
+	wire             [ipc.WireMaxSize]byte
+	descriptor       = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
+	correlation      uint64
+	cwd              = [shellcmd.MaxPath]byte{'/'}
+	cwdSize          = 1
+	pathBuffer       [shellcmd.MaxPath]byte
+	executableBuffer [execproto.MaxPath]byte
 )
 
 //go:extern _heap_start
@@ -100,7 +101,7 @@ func execute(line []byte) {
 	command, arguments := shellcmd.Parse(line)
 	switch command {
 	case shellcmd.CommandHelp:
-		write("commands: help echo clear uptime pwd ls cd cat\nSHELL_HELP_OK\n")
+		write("builtins: help echo clear uptime cd\nexecutables: /system/bin\nSHELL_HELP_OK\n")
 	case shellcmd.CommandEcho:
 		writeBytes(arguments)
 		write("\nSHELL_ECHO_OK\n")
@@ -116,23 +117,29 @@ func execute(line []byte) {
 		writeUint(clockValue)
 		write(" ticks\nSHELL_UPTIME_OK\n")
 	case shellcmd.CommandPwd:
-		executeExternal("/system/bin/pwd", nil)
+		executeExternal([]byte("pwd"), nil)
 	case shellcmd.CommandLs:
-		executeExternal("/system/bin/ls", arguments)
+		executeExternal([]byte("ls"), arguments)
 	case shellcmd.CommandCd:
 		executeCd(arguments)
 	case shellcmd.CommandCat:
-		executeExternal("/system/bin/cat", arguments)
+		executeExternal([]byte("cat"), arguments)
 	case shellcmd.CommandEmpty:
 		return
 	default:
-		write("unknown command\n")
+		name, args := shellcmd.SplitInvocation(line)
+		executeExternal(name, args)
 	}
 }
 
-func executeExternal(executable string, arguments []byte) {
+func executeExternal(command []byte, arguments []byte) {
+	executable, ok := execproto.ResolveExecutable(command, &executableBuffer)
+	if !ok {
+		write("exec: invalid command\n")
+		return
+	}
 	correlation++
-	request, ok := execproto.EncodeRequest(execproto.Request{Path: []byte(executable), CWD: cwd[:cwdSize], Arguments: arguments}, correlation)
+	request, ok := execproto.EncodeRequest(execproto.Request{Path: executable, CWD: cwd[:cwdSize], Arguments: arguments}, correlation)
 	if !ok {
 		write("exec: invalid request\n")
 		return

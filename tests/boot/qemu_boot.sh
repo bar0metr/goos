@@ -12,6 +12,8 @@ rm -f "$log"
   sleep 1
   printf 'echo hello\n'
   sleep 1
+	 printf 'args alpha beta\n'
+	 sleep 1
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
@@ -98,6 +100,8 @@ while [ "$elapsed" -lt 90 ]; do
 		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \
 		grep -q 'hello' "$log" 2>/dev/null && \
 		grep -q 'SHELL_ECHO_OK' "$log" 2>/dev/null && \
+		grep -q 'alpha beta' "$log" 2>/dev/null && \
+		grep -q 'ARGS_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_UPTIME_OK' "$log" 2>/dev/null && \
 		grep -q 'PWD_PROCESS_OK' "$log" 2>/dev/null && \

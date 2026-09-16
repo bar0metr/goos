@@ -31,3 +31,23 @@ func TestProtocolRejectsInvalidPathsAndResults(t *testing.T) {
 		t.Fatal("accepted empty successful result")
 	}
 }
+
+func TestResolveExecutableUsesBoundedSystemPath(t *testing.T) {
+	var target [MaxPath]byte
+	path, ok := ResolveExecutable([]byte("args"), &target)
+	if !ok || string(path) != "/system/bin/args" {
+		t.Fatalf("resolved path = %q", path)
+	}
+	command, ok := CommandFromSystemPath(path)
+	if !ok || string(command) != "args" {
+		t.Fatalf("system command = %q", command)
+	}
+	if _, ok := CommandFromSystemPath([]byte("/tmp/args")); ok {
+		t.Fatal("accepted executable outside system search root")
+	}
+	for _, command := range [][]byte{nil, []byte("../init"), []byte("nested/tool"), []byte("bad name")} {
+		if _, ok := ResolveExecutable(command, &target); ok {
+			t.Fatalf("accepted command %q", command)
+		}
+	}
+}

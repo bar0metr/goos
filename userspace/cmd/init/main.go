@@ -33,6 +33,9 @@ var (
 	arenaBase            uintptr
 	supervisionComplete  bool
 	processWaitAnnounced bool
+	lifecyclePending     [16]ipc.Message
+	lifecycleHead        uint8
+	lifecycleCount       uint8
 )
 
 //go:extern _heap_start
@@ -80,7 +83,7 @@ func userspaceMain() {
 		if supervisionComplete {
 			timeout = 1
 		}
-		message, status := receive(lifecycleHandle, timeout)
+		message, status := receiveLifecycle(timeout)
 		if status == ipc.StatusTimeout {
 			continue
 		}
@@ -133,12 +136,8 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		return 0, false
 	}
 	write("INIT_SERVICE_LAUNCH_OK\n")
-	reply, status := receive(lifecycleHandle, 100000)
-	if status != ipc.StatusOK {
-		return 0, false
-	}
-	event, valid := supervisor.DecodeLifecycle(reply)
-	if !valid || event.Operation != supervisor.LifecycleLaunchResult || reply.Correlation != correlation || event.Code != uint64(supervisor.LaunchOK) {
+	event, status := receiveLaunchResult(correlation)
+	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) {
 		return 0, false
 	}
 	if handleClose(uint64(event.ProcessHandle)) != 0 {
@@ -146,6 +145,36 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	write("INIT_SERVICE_STARTED_OK\n")
 	return event.Process, true
+}
+
+func receiveLifecycle(timeout uint64) (ipc.Message, ipc.Status) {
+	if lifecycleCount != 0 {
+		message := lifecyclePending[lifecycleHead]
+		lifecyclePending[lifecycleHead] = ipc.Message{}
+		lifecycleHead = (lifecycleHead + 1) % uint8(len(lifecyclePending))
+		lifecycleCount--
+		return message, ipc.StatusOK
+	}
+	return receive(lifecycleHandle, timeout)
+}
+
+func receiveLaunchResult(expectedCorrelation uint64) (supervisor.LifecycleEvent, ipc.Status) {
+	for {
+		message, status := receive(lifecycleHandle, 100000)
+		if status != ipc.StatusOK {
+			return supervisor.LifecycleEvent{}, status
+		}
+		event, valid := supervisor.DecodeLifecycle(message)
+		if valid && event.Operation == supervisor.LifecycleLaunchResult && message.Correlation == expectedCorrelation {
+			return event, ipc.StatusOK
+		}
+		if !valid || event.Operation != supervisor.LifecycleProcessExited || lifecycleCount == uint8(len(lifecyclePending)) {
+			return supervisor.LifecycleEvent{}, ipc.StatusInvalidArgument
+		}
+		tail := (int(lifecycleHead) + int(lifecycleCount)) % len(lifecyclePending)
+		lifecyclePending[tail] = message
+		lifecycleCount++
+	}
 }
 
 func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
@@ -200,18 +229,19 @@ func pollExec() {
 	cwdSize := copy(cwd[:], request.CWD)
 	var arguments [128]byte
 	argumentSize := copy(arguments[:], request.Arguments)
-	if !allowedExecutable(path[:pathSize]) {
+	command, allowed := execproto.CommandFromSystemPath(path[:pathSize])
+	if !allowed {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied))
 		return
 	}
-	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), cwd[:cwdSize], arguments[:argumentSize])
+	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), command, cwd[:cwdSize], arguments[:argumentSize])
 	if launchStatus == supervisor.LaunchOK {
 		waitApplicationExit(processHandle)
 	}
 	sendExecReply(message.Correlation, pid, uint64(launchStatus))
 }
 
-func launchApplication(path string, cwd, arguments []byte) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchApplication(path string, command, cwd, arguments []byte) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
 	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
@@ -229,7 +259,7 @@ func launchApplication(path string, cwd, arguments []byte) (uint64, handle.ID, s
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	var startupWire [startup.Size]byte
-	startupData, ok := startup.Encode(commandForPath(path), cwd, arguments, &startupWire)
+	startupData, ok := startup.Encode(command, cwd, arguments, &startupWire)
 	if !ok {
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
@@ -244,9 +274,8 @@ func launchApplication(path string, cwd, arguments []byte) (uint64, handle.ID, s
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
-	reply, status := receive(lifecycleHandle, 100000)
-	event, valid := supervisor.DecodeLifecycle(reply)
-	if status != ipc.StatusOK || !valid || event.Operation != supervisor.LifecycleLaunchResult || reply.Correlation != correlation {
+	event, status := receiveLaunchResult(correlation)
+	if status != ipc.StatusOK {
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	if event.Code != uint64(supervisor.LaunchOK) {
@@ -292,35 +321,6 @@ func closePair(pair [2]uint64) {
 	if pair[1] != 0 {
 		handleClose(pair[1])
 	}
-}
-
-func allowedExecutable(path []byte) bool {
-	return equalBytes(path, "/system/bin/pwd") || equalBytes(path, "/system/bin/ls") || equalBytes(path, "/system/bin/cat")
-}
-
-func commandForPath(path string) byte {
-	if path == "/system/bin/pwd" {
-		return 1
-	}
-	if path == "/system/bin/ls" {
-		return 2
-	}
-	if path == "/system/bin/cat" {
-		return 3
-	}
-	return 0
-}
-
-func equalBytes(value []byte, expected string) bool {
-	if len(value) != len(expected) {
-		return false
-	}
-	for index := range value {
-		if value[index] != expected[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func bytesString(value []byte) string {

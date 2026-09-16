@@ -12,13 +12,6 @@ import (
 	"unsafe"
 )
 
-type Kind uint8
-
-const (
-	Pwd Kind = iota + 1
-	Ls
-	Cat
-)
 const consoleHandle = uint64(0x0000000100000001)
 const vfsHandle = uint64(0x0000000100000002)
 
@@ -62,18 +55,33 @@ func Run() {
 	if !ok {
 		finish(1, "invalid startup data\n")
 	}
-	switch Kind(data.Command) {
-	case Pwd:
+	switch {
+	case equal(data.Command, "pwd"):
 		writeBytes(data.CWD)
 		write("\nPWD_PROCESS_OK\n")
-	case Ls:
+	case equal(data.Command, "ls"):
 		runLs(data)
-	case Cat:
+	case equal(data.Command, "cat"):
 		runCat(data)
+	case equal(data.Command, "args"):
+		writeBytes(data.Arguments)
+		write("\nARGS_PROCESS_OK\n")
 	default:
 		finish(1, "invalid utility\n")
 	}
 	finish(0, "")
+}
+
+func equal(value []byte, expected string) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range value {
+		if value[index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func runLs(data startup.Data) {
