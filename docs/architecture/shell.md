@@ -17,6 +17,8 @@ inline `GVF1` path limit and resolves
 relative paths without heap allocation. `cd` commits a new directory only after
 VFS `Stat` confirms it, while `ls` and `cat` use bounded `ReadDir` and `Read`
 replies. Unknown commands return a bounded diagnostic and the prompt remains active.
+The shell similarly restores its post-startup arena mark after every completed
+command, so repeated IPC commands cannot exhaust the non-freeing TinyGo heap.
 
 The QEMU boot test writes real commands to serial stdin and requires the shell's
 responses in serial output. The shell receives one non-transferable VFS client

@@ -19,6 +19,7 @@ var (
 	wire        [ipc.WireMaxSize]byte
 	descriptor  = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	heapPointer uintptr
+	arenaBase   uintptr
 )
 
 //go:extern _heap_start
@@ -42,8 +43,10 @@ func userspaceMain() {
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
+	arenaBase = heapPointer
 	write("VFS_SERVICE_OK\n")
 	for {
+		heapPointer = arenaBase
 		message, ok := receive()
 		if !ok {
 			fatal("VFS_RECEIVE_FAILED\n")

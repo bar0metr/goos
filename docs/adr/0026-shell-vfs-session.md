@@ -17,6 +17,12 @@ buffer, and implements `pwd`, `ls`, `cd`, and `cat` through correlated VFS IPC.
 The service owns a private RAMFS-backed namespace containing `/system/motd` and
 `/tmp`.
 
+Both freestanding programs treat their bump heap as a scoped arena: VFS resets
+temporary allocations at each request boundary and the shell resets them after
+each command. Persistent state is initialized before the corresponding arena
+mark. This preserves bounded memory under an unbounded command session despite
+the runtime's no-op `free` implementation.
+
 ## Consequences
 
 Filesystem policy and namespace state execute outside the kernel. Endpoint

@@ -31,3 +31,6 @@ healthy. The service owns its RAMFS backend and namespace in its own address
 space. Its initial namespace contains `/system/motd` and `/tmp`. Kernel launch
 grants explicitly identify the client or server side of a channel; neither
 process infers endpoint identity from handle numbers or launch order.
+The freestanding runtime uses a fixed bump allocator. After persistent service
+initialization, VFS records an arena mark and restores it before every request;
+temporary decode and dispatch allocations therefore remain request-bounded.

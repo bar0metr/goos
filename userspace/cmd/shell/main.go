@@ -22,6 +22,7 @@ var (
 	inputByte   byte
 	clockValue  uint64
 	heapPointer uintptr
+	arenaBase   uintptr
 	wire        [ipc.WireMaxSize]byte
 	descriptor  = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	correlation uint64
@@ -54,10 +55,12 @@ func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uin
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
+	arenaBase = heapPointer
 	root, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: cwd[:cwdSize]})
 	if !ok || root.Status != vfs.StatusOK || root.Kind != ramfs.KindDirectory {
 		fatal("SHELL_VFS_CONNECT_FAILED\n")
 	}
+	heapPointer = arenaBase
 	write("GoOS shell\nSHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\ngoos> ")
 	for {
 		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
@@ -77,6 +80,7 @@ func userspaceMain() {
 		}
 		write("\n")
 		execute(line)
+		heapPointer = arenaBase
 		editor.Reset()
 		write("goos> ")
 	}

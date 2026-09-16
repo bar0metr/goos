@@ -20,11 +20,25 @@ rm -f "$log"
 	 sleep 1
 	 printf 'ls /\n'
 	 sleep 1
+	 printf 'ls system\n'
+	 sleep 1
 	 printf 'cd /system\n'
+	 sleep 1
+	 printf 'ls\n'
 	 sleep 1
 	 printf 'pwd\n'
 	 sleep 1
 	 printf 'cat motd\n'
+	 count=0
+	 while [ "$count" -lt 6 ]; do
+		 sleep 1
+		 printf 'ls\n'
+		 sleep 1
+		 printf 'cat motd\n'
+		 count=$((count + 1))
+	 done
+	 sleep 1
+	 printf 'echo arena-stress-complete\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
@@ -88,6 +102,7 @@ while [ "$elapsed" -lt 45 ]; do
 		grep -q 'SHELL_CD_OK' "$log" 2>/dev/null && \
 		grep -q 'Welcome to GoOS' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CAT_OK' "$log" 2>/dev/null && \
+		[ "$(grep -c 'SHELL_CAT_OK' "$log" 2>/dev/null)" -ge 7 ] && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \
