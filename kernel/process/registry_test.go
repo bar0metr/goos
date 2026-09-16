@@ -8,14 +8,15 @@ import (
 func TestRegistryDeliversOwnedTaskExit(t *testing.T) {
 	first, _ := New(1, AddressSpace{Root: 0x1000})
 	second, _ := New(2, AddressSpace{Root: 0x2000})
+	task, _ := sched.NewTaskID(6, 1)
 	var registry Registry
 	if !registry.Add(&first) || !registry.Add(&second) || registry.Add(&first) ||
-		!registry.BindTask(2, sched.TaskID(7)) || registry.BindTask(1, sched.TaskID(7)) ||
-		!registry.ReportTaskExit(sched.TaskID(7), 9) {
+		!registry.BindTask(2, task) || registry.BindTask(1, task) ||
+		!registry.ReportTaskExit(task, 9) {
 		t.Fatal("registry setup failed")
 	}
 	event, ok := registry.NextExit()
-	if !ok || event.Process != 2 || event.Task != 7 || event.Code != 9 {
+	if !ok || event.Process != 2 || event.Task != task || event.Code != 9 {
 		t.Fatalf("exit event = %#v", event)
 	}
 	if _, ok := registry.NextExit(); ok || registry.ReportTaskExit(99, 1) {
@@ -27,20 +28,50 @@ func TestRegistryWaitsForLastTask(t *testing.T) {
 	owner, _ := New(1, AddressSpace{Root: 0x1000})
 	var registry Registry
 	registry.Add(&owner)
-	registry.BindTask(1, 4)
-	registry.BindTask(1, 5)
-	if !registry.ReportTaskExit(4, 0) {
+	first, _ := sched.NewTaskID(3, 1)
+	last, _ := sched.NewTaskID(4, 1)
+	registry.BindTask(1, first)
+	registry.BindTask(1, last)
+	if !registry.ReportTaskExit(first, 0) {
 		t.Fatal("first task exit rejected")
 	}
 	if _, ok := registry.NextExit(); ok {
 		t.Fatal("process exited while a task remained")
 	}
-	if !registry.ReportTaskExit(5, 7) {
+	if !registry.ReportTaskExit(last, 7) {
 		t.Fatal("last task exit rejected")
 	}
 	event, ok := registry.NextExit()
-	if !ok || event.Process != 1 || event.Task != 5 || event.Code != 7 {
+	if !ok || event.Process != 1 || event.Task != last || event.Code != 7 {
 		t.Fatalf("process exit = %#v", event)
+	}
+}
+
+func TestRegistryWaitSurvivesExitDeliveryAndRemoval(t *testing.T) {
+	var registry Registry
+	process, _ := New(9, AddressSpace{Root: 0x9000})
+	registry.Add(&process)
+	task, _ := sched.NewTaskID(3, 5)
+	registry.BindTask(9, task)
+	if _, status := registry.Wait(9); status != WaitRunning {
+		t.Fatalf("running wait status = %d", status)
+	}
+	if !registry.ReportTaskExit(task, 27) {
+		t.Fatal("task exit rejected")
+	}
+	event, status := registry.Wait(9)
+	if status != WaitExited || event.Process != 9 || event.Task != task || event.Code != 27 {
+		t.Fatalf("completed wait = %#v, %d", event, status)
+	}
+	if _, ok := registry.NextExit(); !ok || !registry.Remove(9) {
+		t.Fatal("exit delivery or removal failed")
+	}
+	event, status = registry.Wait(9)
+	if status != WaitExited || event.Code != 27 {
+		t.Fatalf("completion was not retained: %#v, %d", event, status)
+	}
+	if _, status = registry.Wait(99); status != WaitNotFound {
+		t.Fatalf("unknown wait status = %d", status)
 	}
 }
 

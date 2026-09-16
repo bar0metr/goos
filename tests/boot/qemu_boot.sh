@@ -80,6 +80,8 @@ while [ "$elapsed" -lt 90 ]; do
 		grep -q 'INITRAMFS_DISCOVERY_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_INIT_OK' "$log" 2>/dev/null && \
 		grep -q 'PROCESS_EXIT_EVENT_OK' "$log" 2>/dev/null && \
+		grep -q 'PROCESS_RECLAIM_OK' "$log" 2>/dev/null && \
+		grep -q 'PROCESS_WAIT_OK' "$log" 2>/dev/null && \
 		grep -q 'SUPERVISOR_CRASH_EVENT_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \

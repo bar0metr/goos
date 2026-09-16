@@ -577,6 +577,11 @@ goos_scheduler_install_user:
     jae .install_user_done
     incq goos_task_count(%rip)
 .install_user_slot:
+	 leaq goos_task_generations(%rip), %r11
+	 incq (%r11,%r10,8)
+	 jnz .install_user_generation_ready
+	 incq (%r11,%r10,8)
+.install_user_generation_ready:
     leaq goos_task_contexts(%rip), %r11
     movq %rcx, (%r11,%r10,8)
     leaq goos_task_roots(%rip), %r11
@@ -584,7 +589,10 @@ goos_scheduler_install_user:
     leaq goos_task_rsp0(%rip), %r11
     movq %r8, (%r11,%r10,8)
     btsq %r10, goos_runnable_mask(%rip)
-    leaq 1(%r10), %rax
+	 leaq goos_task_generations(%rip), %r11
+	 movq (%r11,%r10,8), %rax
+	 shlq $32, %rax
+	 leaq 1(%r10,%rax), %rax
 .install_user_done:
     popfq
     retq
@@ -619,6 +627,44 @@ goos_wake_task:
 .wake_done:
     retq
 
+.global goos_wake_task_id
+goos_wake_task_id:
+	 xorq %rax, %rax
+	 movl %ecx, %r8d
+	 testl %r8d, %r8d
+	 jz .wake_id_done
+	 cmpl $64, %r8d
+	 ja .wake_id_done
+	 decl %r8d
+	 movq %rcx, %r9
+	 shrq $32, %r9
+	 leaq goos_task_generations(%rip), %rdx
+	 cmpq (%rdx,%r8,8), %r9
+	 jne .wake_id_done
+	 btq %r8, goos_task_dead_mask(%rip)
+	 jc .wake_id_done
+	 pushfq
+	 cli
+	 btsq %r8, goos_runnable_mask(%rip)
+	 popfq
+	 movq $1, %rax
+.wake_id_done:
+	 retq
+
+.global goos_task_id_for_slot
+goos_task_id_for_slot:
+	 xorq %rax, %rax
+	 cmpq goos_task_count(%rip), %rcx
+	 jae .task_id_for_slot_done
+	 leaq goos_task_generations(%rip), %rdx
+	 movq (%rdx,%rcx,8), %rax
+	 testq %rax, %rax
+	 jz .task_id_for_slot_done
+	 shlq $32, %rax
+	 leaq 1(%rcx,%rax), %rax
+.task_id_for_slot_done:
+	 retq
+
 .global goos_set_current_task_exit_code
 goos_set_current_task_exit_code:
     movq goos_current_task(%rip), %rax
@@ -636,7 +682,10 @@ goos_take_exited_task:
     jz .take_exited_done
     bsfq %rdx, %rcx
     btrq %rcx, goos_task_exit_pending(%rip)
-    leaq 1(%rcx), %rax
+	 leaq goos_task_generations(%rip), %rax
+	 movq (%rax,%rcx,8), %rax
+	 shlq $32, %rax
+	 leaq 1(%rcx,%rax), %rax
 .take_exited_done:
     popfq
     retq
@@ -644,15 +693,53 @@ goos_take_exited_task:
 .global goos_task_exit_code
 goos_task_exit_code:
     xorq %rax, %rax
-    testq %rcx, %rcx
+	 movl %ecx, %r8d
+	 testl %r8d, %r8d
     jz .task_exit_code_done
-    cmpq $64, %rcx
+	 cmpl $64, %r8d
     ja .task_exit_code_done
-    decq %rcx
+	 decl %r8d
+	 movq %rcx, %r9
+	 shrq $32, %r9
+	 leaq goos_task_generations(%rip), %rdx
+	 cmpq (%rdx,%r8,8), %r9
+	 jne .task_exit_code_done
     leaq goos_task_exit_codes(%rip), %rdx
-    movq (%rdx,%rcx,8), %rax
-    movq $0, (%rdx,%rcx,8)
+	 movq (%rdx,%r8,8), %rax
+	 movq $0, (%rdx,%r8,8)
 .task_exit_code_done:
+    retq
+
+.global goos_reclaim_exited_task
+goos_reclaim_exited_task:
+    xorq %rax, %rax
+	 movl %ecx, %r8d
+	 testl %r8d, %r8d
+    jz .reclaim_exited_done
+	 cmpl $64, %r8d
+    ja .reclaim_exited_done
+	 decl %r8d
+	 movq %rcx, %r9
+	 shrq $32, %r9
+	 leaq goos_task_generations(%rip), %rdx
+	 cmpq (%rdx,%r8,8), %r9
+	 jne .reclaim_exited_done
+	 btq %r8, goos_task_dead_mask(%rip)
+    jnc .reclaim_exited_done
+	 btq %r8, goos_task_exit_pending(%rip)
+    jc .reclaim_exited_done
+    leaq goos_task_rsp0(%rip), %rdx
+	 movq (%rdx,%r8,8), %rax
+    testq %rax, %rax
+    jz .reclaim_exited_done
+    addq $64, %rax
+    subq $20480, %rax
+	 movq $0, (%rdx,%r8,8)
+    leaq goos_task_contexts(%rip), %rdx
+	 movq $0, (%rdx,%r8,8)
+    leaq goos_task_roots(%rip), %rdx
+	 movq $0, (%rdx,%r8,8)
+.reclaim_exited_done:
     retq
 
 .global goos_invalidate_page
@@ -678,6 +765,8 @@ goos_task_roots:
     .zero 512
 goos_task_rsp0:
     .zero 512
+goos_task_generations:
+	.zero 512
 goos_task_exit_codes:
     .zero 512
 goos_runnable_mask:

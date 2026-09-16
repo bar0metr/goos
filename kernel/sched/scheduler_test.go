@@ -91,3 +91,34 @@ func TestSchedulerRejectsPartialProcessOwnership(t *testing.T) {
 		t.Fatal("accepted kernel task with process address space")
 	}
 }
+
+func TestTaskIDRejectsStaleReusedSlot(t *testing.T) {
+	var scheduler Scheduler
+	first, ok := scheduler.Add(Context{StackPointer: 0x1000})
+	if !ok || !scheduler.Exit(first) {
+		t.Fatal("failed to retire first task")
+	}
+	replacement, ok := scheduler.Add(Context{StackPointer: 0x2000})
+	firstSlot, firstGeneration, firstValid := first.Parts()
+	replacementSlot, replacementGeneration, replacementValid := replacement.Parts()
+	if !ok || !firstValid || !replacementValid || firstSlot != replacementSlot || firstGeneration == replacementGeneration {
+		t.Fatalf("slot was not generation-safely reused: first=%x replacement=%x", first, replacement)
+	}
+	if scheduler.Wake(first) || !scheduler.Block(replacement) {
+		t.Fatal("stale task ID affected replacement")
+	}
+}
+
+func TestTaskIDValidation(t *testing.T) {
+	id, ok := NewTaskID(MaxTasks-1, 7)
+	slot, generation, valid := id.Parts()
+	if !ok || !valid || slot != MaxTasks-1 || generation != 7 {
+		t.Fatalf("task ID round trip failed: %x", id)
+	}
+	if _, ok := NewTaskID(MaxTasks, 1); ok {
+		t.Fatal("accepted out-of-range task slot")
+	}
+	if _, _, ok := TaskID(1).Parts(); ok {
+		t.Fatal("accepted generation-zero task ID")
+	}
+}

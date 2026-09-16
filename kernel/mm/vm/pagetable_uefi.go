@@ -100,6 +100,27 @@ func UnmapPage(rootAddress uint64, address uint64) bool {
 	return true
 }
 
+// MapKernelPage restores one supervisor RW+NX identity mapping. Guard-page
+// teardown uses it before returning the physical page to the allocator.
+func MapKernelPage(rootAddress uint64, address uint64) bool {
+	if rootAddress%PageSize != 0 || address%PageSize != 0 || address >= IdentityMapLimit {
+		return false
+	}
+	// SAFETY: rootAddress names the live kernel-owned PML4 and the shared
+	// identity-map hierarchy remains resident for the kernel lifetime.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, address)
+	if entry == nil || *entry&entryPresent != 0 {
+		return false
+	}
+	value, ok := pageEntry(address, Permissions{Writable: true})
+	if !ok {
+		return false
+	}
+	*entry = value
+	return true
+}
+
 // IsMapped reports whether a bootstrap leaf is present.
 func IsMapped(rootAddress uint64, address uint64) bool {
 	if rootAddress%PageSize != 0 || address >= IdentityMapLimit {
@@ -157,6 +178,16 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64) 
 // MapUserPage adds a supervisor-authorized user leaf to an existing process
 // address space. Writable executable mappings are rejected by pageEntry.
 func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
+	return mapUserPage(rootAddress, virtual, physical, permissions, false)
+}
+
+// MapOwnedUserPage maps private process storage. DestroyUserAddressSpace
+// returns the backing physical page; shared pages must use MapUserPage.
+func MapOwnedUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
+	return mapUserPage(rootAddress, virtual, physical, permissions, true)
+}
+
+func mapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions, owned bool) bool {
 	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || physical%PageSize != 0 ||
 		virtual < IdentityMapLimit || virtual >= UserAddressLimit || !permissions.User {
 		return false
@@ -172,8 +203,61 @@ func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permission
 	if !ok {
 		return false
 	}
+	if owned {
+		value |= entryOwned
+	}
 	*entry = value
 	return true
+}
+
+// DestroyUserAddressSpace releases private user leaves and every process-owned
+// page-table page. Kernel branches and shared-memory backing remain allocated.
+func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool {
+	if allocator == nil || rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
+		return false
+	}
+	// SAFETY: rootAddress names an inactive process PML4 created by this
+	// package. The caller guarantees that no task can load it again.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	ok := true
+	for rootIndex := range root {
+		rootEntry := root[rootIndex]
+		if rootEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+			continue
+		}
+		pdptAddress := rootEntry & addressMask
+		pdpt := (*table)(unsafe.Pointer(uintptr(pdptAddress)))
+		for pdptIndex := range pdpt {
+			pdptEntry := pdpt[pdptIndex]
+			if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+				continue
+			}
+			pdAddress := pdptEntry & addressMask
+			pd := (*table)(unsafe.Pointer(uintptr(pdAddress)))
+			for pdIndex := range pd {
+				pdEntry := pd[pdIndex]
+				if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+					continue
+				}
+				ptAddress := pdEntry & addressMask
+				pt := (*table)(unsafe.Pointer(uintptr(ptAddress)))
+				for leafIndex := range pt {
+					leaf := pt[leafIndex]
+					if leaf&(entryPresent|entryUser|entryOwned) == entryPresent|entryUser|entryOwned {
+						ok = allocator.Free(leaf&addressMask) && ok
+					}
+					pt[leafIndex] = 0
+				}
+				pd[pdIndex] = 0
+				ok = allocator.Free(ptAddress) && ok
+			}
+			pdpt[pdptIndex] = 0
+			ok = allocator.Free(pdAddress) && ok
+		}
+		root[rootIndex] = 0
+		ok = allocator.Free(pdptAddress) && ok
+	}
+	return allocator.Free(rootAddress) && ok
 }
 
 // CanMapUserPage reports whether the existing bootstrap page-table hierarchy

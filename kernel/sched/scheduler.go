@@ -4,6 +4,22 @@ const MaxTasks = 64
 
 type TaskID uint64
 
+func NewTaskID(slot uint32, generation uint32) (TaskID, bool) {
+	if slot >= MaxTasks || generation == 0 {
+		return 0, false
+	}
+	return TaskID(uint64(generation)<<32 | uint64(slot+1)), true
+}
+
+func (id TaskID) Parts() (uint32, uint32, bool) {
+	slotPart := uint32(id)
+	generation := uint32(uint64(id) >> 32)
+	if slotPart == 0 || slotPart > MaxTasks || generation == 0 {
+		return 0, 0, false
+	}
+	return slotPart - 1, generation, true
+}
+
 type State uint8
 
 const (
@@ -29,10 +45,10 @@ type Task struct {
 // Scheduler is a bounded single-CPU round-robin run queue. IRQ-level locking
 // is provided by the architecture layer until SMP introduces per-CPU queues.
 type Scheduler struct {
-	tasks   [MaxTasks]Task
-	count   int
-	current int
-	nextID  TaskID
+	tasks       [MaxTasks]Task
+	count       int
+	current     int
+	generations [MaxTasks]uint32
 }
 
 func (scheduler *Scheduler) Add(context Context) (TaskID, bool) {
@@ -42,16 +58,32 @@ func (scheduler *Scheduler) Add(context Context) (TaskID, bool) {
 // AddOwned associates a userspace task with its process and address-space
 // root. Kernel tasks use zero for both ownership fields.
 func (scheduler *Scheduler) AddOwned(context Context, processID uint64, addressSpace uint64) (TaskID, bool) {
-	if context.StackPointer == 0 || scheduler.count == len(scheduler.tasks) {
+	if context.StackPointer == 0 {
 		return 0, false
 	}
 	if (processID == 0) != (addressSpace == 0) {
 		return 0, false
 	}
-	scheduler.nextID++
-	task := Task{ID: scheduler.nextID, ProcessID: processID, AddressSpace: addressSpace, State: TaskRunnable, Context: context}
-	scheduler.tasks[scheduler.count] = task
-	scheduler.count++
+	slot := -1
+	for index := range scheduler.tasks {
+		if scheduler.tasks[index].ID == 0 || scheduler.tasks[index].State == TaskDead {
+			slot = index
+			break
+		}
+	}
+	if slot < 0 {
+		return 0, false
+	}
+	scheduler.generations[slot]++
+	if scheduler.generations[slot] == 0 {
+		scheduler.generations[slot] = 1
+	}
+	id, _ := NewTaskID(uint32(slot), scheduler.generations[slot])
+	task := Task{ID: id, ProcessID: processID, AddressSpace: addressSpace, State: TaskRunnable, Context: context}
+	scheduler.tasks[slot] = task
+	if slot >= scheduler.count {
+		scheduler.count = slot + 1
+	}
 	return task.ID, true
 }
 

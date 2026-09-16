@@ -155,6 +155,8 @@ The native kernel and the first isolated services are implemented:
 - a supervised userspace VFS service reached through explicit, non-transferable
   client and server channel endpoints;
 - unit, integration, boot, and performance tests.
+- reclamation of exited process address spaces and guarded kernel stacks.
+- generation-safe task-slot reuse and bounded process completion records.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -243,6 +245,8 @@ INIT_SERVICE_STARTED_OK
 INITRAMFS_DISCOVERY_OK
 PID1_INIT_OK
 PROCESS_EXIT_EVENT_OK
+PROCESS_RECLAIM_OK
+PROCESS_WAIT_OK
 SUPERVISOR_CRASH_EVENT_OK
 LIFECYCLE_IPC_OK
 PID1_SERVICE_LAUNCH_OK

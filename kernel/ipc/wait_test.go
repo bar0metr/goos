@@ -7,17 +7,19 @@ import (
 
 func TestWaitSetWakeAndTimeout(t *testing.T) {
 	var set WaitSet
-	if !set.Add(1, 7, 0, 10) || !set.Add(2, 7, 1, 20) || set.Add(1, 8, 0, 30) {
+	first, _ := sched.NewTaskID(0, 1)
+	second, _ := sched.NewTaskID(1, 1)
+	if !set.Add(first, 7, 0, 10) || !set.Add(second, 7, 1, 20) || set.Add(first, 8, 0, 30) {
 		t.Fatal("failed to register bounded waiters")
 	}
 	results := make([]WaitResult, 2)
-	if count := set.Wake(7, 0, WaitMessage, results); count != 1 || results[0] != (WaitResult{Task: 1, Reason: WaitMessage}) {
+	if count := set.Wake(7, 0, WaitMessage, results); count != 1 || results[0] != (WaitResult{Task: first, Reason: WaitMessage}) {
 		t.Fatalf("unexpected message wake: %#v", results)
 	}
 	if count := set.Expire(19, results); count != 0 {
 		t.Fatalf("waiter expired early: %d", count)
 	}
-	if count := set.Expire(20, results); count != 1 || results[0] != (WaitResult{Task: 2, Reason: WaitTimeout}) {
+	if count := set.Expire(20, results); count != 1 || results[0] != (WaitResult{Task: second, Reason: WaitTimeout}) {
 		t.Fatalf("unexpected timeout wake: %#v", results)
 	}
 }
@@ -25,7 +27,8 @@ func TestWaitSetWakeAndTimeout(t *testing.T) {
 func TestWaitSetIsBounded(t *testing.T) {
 	var set WaitSet
 	for index := 0; index < MaxWaiters; index++ {
-		if !set.Add(sched.TaskID(index+1), uint64(index+1), 0, 1) {
+		task, _ := sched.NewTaskID(uint32(index), 1)
+		if !set.Add(task, uint64(index+1), 0, 1) {
 			t.Fatalf("wait set filled at %d", index)
 		}
 	}

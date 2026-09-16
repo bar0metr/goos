@@ -45,7 +45,7 @@ func (set *WaitSet) Block(scheduler *sched.Scheduler, task sched.TaskID, channel
 }
 
 func (set *WaitSet) Add(task sched.TaskID, channel uint64, side uint8, deadline uint64) bool {
-	if task == 0 || channel == 0 || side > 1 || deadline == 0 {
+	if _, _, valid := task.Parts(); !valid || channel == 0 || side > 1 || deadline == 0 {
 		return false
 	}
 	for index := range set.waiters {

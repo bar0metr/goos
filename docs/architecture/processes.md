@@ -9,9 +9,9 @@ Process IDs and Task IDs reject zero. Each Process currently supports up to 32
 Tasks and rejects duplicate ownership. A bounded registry maps architecture
 Task exits back to their owning Process. It emits process death only when the
 last owned Task exits. Exited registry entries and architecture scheduler slots
-are reused after exit delivery, allowing repeated short-lived utilities.
-Address-space pages and guarded kernel-stack allocations are not yet reclaimed;
-physical-memory reclamation remains the next lifecycle boundary.
+are reused after exit delivery, allowing repeated short-lived utilities. Exit
+teardown returns guarded kernel stacks, private image pages, and process-owned
+page tables to the physical allocator. Shared-memory leaves remain non-owning.
 
 ## Address-space isolation
 
@@ -45,5 +45,7 @@ address space. Both bootstrap test processes are also loaded through the
 versioned native image loader.
 The second deliberately raises an invalid-opcode exception; the kernel removes
 only that userspace task and continues. Kernel-originated exceptions remain
-fatal. Initramfs discovery, resource reclamation, wait semantics, and task-ID
-reuse remain future work.
+fatal. Initramfs discovery and bounded resource reclamation are complete.
+The registry retains a bounded completion record after lifecycle delivery and
+resource teardown, allowing waiters to distinguish running, exited, and unknown
+processes without retaining reclaimed objects.

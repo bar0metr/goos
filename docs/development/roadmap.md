@@ -39,8 +39,12 @@ PID 1 brokers typed exec requests, supplies bounded startup data, creates a
 dedicated VFS channel pair per process, and grants only console output and the
 new VFS client endpoint. `/system/bin/pwd`, `/system/bin/ls`, and
 `/system/bin/cat` execute as isolated native processes; only `cd` remains a
-filesystem builtin because it mutates shell state. The next process slice
-reclaims exited address spaces and kernel stacks.
+filesystem builtin because it mutates shell state. Exited processes now reclaim
+private image pages, process-owned page-table hierarchies, and guarded kernel
+stacks without freeing shared-memory backing. Task slots now use generation-safe
+identities, and bounded process completion records provide race-free wait state
+after lifecycle delivery. The next process slice introduces process handles and
+a native wait kernel call.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

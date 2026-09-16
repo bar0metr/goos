@@ -4,6 +4,7 @@ package amd64
 
 import (
 	"goos/kernel/mm/pmm"
+	"goos/kernel/mm/vm"
 	"unsafe"
 )
 
@@ -112,6 +113,12 @@ func BlockCurrentTask()
 //export goos_wake_task
 func WakeTask(index uint64) bool
 
+//export goos_wake_task_id
+func WakeTaskID(task uint64) bool
+
+//export goos_task_id_for_slot
+func TaskIDForSlot(slot uint64) uint64
+
 //export goos_set_current_task_exit_code
 func SetCurrentTaskExitCode(code uint64)
 
@@ -120,6 +127,30 @@ func TakeExitedTask() uint64
 
 //export goos_task_exit_code
 func TaskExitCode(task uint64) uint64
+
+//export goos_reclaim_exited_task
+func reclaimExitedTask(task uint64) uint64
+
+// ReclaimExitedTask releases the guarded kernel stack after the dead task's
+// exit record has been consumed. Its architecture slot remains reusable.
+func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64) bool {
+	if allocator == nil || kernelRoot == 0 {
+		return false
+	}
+	allocation := reclaimExitedTask(task)
+	if allocation == 0 {
+		return false
+	}
+	if !vm.MapKernelPage(kernelRoot, allocation) {
+		return false
+	}
+	invalidatePage(allocation)
+	ok := true
+	for page := uint64(0); page < kernelStackPages+stackGuardPages; page++ {
+		ok = allocator.Free(allocation+page*pmm.PageSize) && ok
+	}
+	return ok
+}
 
 //export goos_invalidate_page
 func invalidatePage(address uint64)

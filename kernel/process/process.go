@@ -62,7 +62,7 @@ func (process *Process) Startup(target []byte) (int, bool) {
 }
 
 func (process *Process) AddTask(id sched.TaskID) bool {
-	if id == 0 || process.taskCount == len(process.tasks) {
+	if _, _, valid := id.Parts(); !valid || process.taskCount == len(process.tasks) {
 		return false
 	}
 	for index := 0; index < process.taskCount; index++ {
@@ -105,12 +105,22 @@ type ExitEvent struct {
 	Code    uint64
 }
 
+type WaitStatus uint8
+
+const (
+	WaitNotFound WaitStatus = iota
+	WaitRunning
+	WaitExited
+)
+
 type Registry struct {
-	processes [MaxProcesses]*Process
-	count     uint8
-	exits     [MaxExitEvents]ExitEvent
-	exitHead  uint8
-	exitCount uint8
+	processes     [MaxProcesses]*Process
+	count         uint8
+	exits         [MaxExitEvents]ExitEvent
+	exitHead      uint8
+	exitCount     uint8
+	completed     [MaxExitEvents]ExitEvent
+	completedNext uint8
 }
 
 func (registry *Registry) Add(process *Process) bool {
@@ -159,11 +169,30 @@ func (registry *Registry) ReportTaskExit(task sched.TaskID, code uint64) bool {
 			}
 			tail := (int(registry.exitHead) + int(registry.exitCount)) % MaxExitEvents
 			registry.exits[tail] = ExitEvent{Process: owner.ID(), Task: task, Code: code}
+			registry.completed[registry.completedNext] = registry.exits[tail]
+			registry.completedNext = (registry.completedNext + 1) % MaxExitEvents
 			registry.exitCount++
 			return true
 		}
 	}
 	return false
+}
+
+// Wait observes bounded process completion state without consuming lifecycle
+// delivery. Recent exit records remain queryable after registry removal.
+func (registry *Registry) Wait(id ID) (ExitEvent, WaitStatus) {
+	if id == 0 {
+		return ExitEvent{}, WaitNotFound
+	}
+	for index := range registry.completed {
+		if registry.completed[index].Process == id {
+			return registry.completed[index], WaitExited
+		}
+	}
+	if process, found := registry.ByID(id); found && process.TaskCount() != 0 {
+		return ExitEvent{}, WaitRunning
+	}
+	return ExitEvent{}, WaitNotFound
 }
 
 func (registry *Registry) NextExit() (ExitEvent, bool) {

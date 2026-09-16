@@ -172,6 +172,7 @@ docs:
 	@test -f docs/adr/0025-native-shell-console-session.md
 	@test -f docs/adr/0026-shell-vfs-session.md
 	@test -f docs/adr/0027-native-coreutils-exec.md
+	@test -f docs/adr/0028-generation-safe-task-ids-and-process-wait.md
 	@test -f docs/development/building.md
 
 clean:

@@ -13,8 +13,11 @@ const (
 	entryPresent  = uint64(1 << 0)
 	entryWritable = uint64(1 << 1)
 	entryUser     = uint64(1 << 2)
-	entryNX       = uint64(1 << 63)
-	addressMask   = uint64(0x000ffffffffff000)
+	// entryOwned uses an x86_64 software-available PTE bit. It marks private
+	// process pages whose physical storage is reclaimed with the address space.
+	entryOwned  = uint64(1 << 9)
+	entryNX     = uint64(1 << 63)
+	addressMask = uint64(0x000ffffffffff000)
 )
 
 // ValidateUserRange rejects wraparound and confines native user pointers to

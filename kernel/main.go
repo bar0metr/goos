@@ -55,6 +55,8 @@ var (
 	vfsReadback             [16]byte
 	initAnnounced           uint64
 	processExitDelivered    uint64
+	processReclaimConfirmed uint64
+	processWaitConfirmed    uint64
 	supervisorExitDelivered uint64
 	serviceLaunchConfirmed  uint64
 	userspaceSupervisorOK   uint64
@@ -107,7 +109,11 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
-		if !processRegistry.ReportTaskExit(sched.TaskID(task), amd64.TaskExitCode(task)) {
+		exitCode := amd64.TaskExitCode(task)
+		if !processRegistry.ReportTaskExit(sched.TaskID(task), exitCode) {
+			continue
+		}
+		if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task) {
 			continue
 		}
 		event, ok := processRegistry.NextExit()
@@ -115,6 +121,9 @@ func deliverProcessExits() {
 			continue
 		}
 		processExitDelivered = 1
+		if waited, status := processRegistry.Wait(event.Process); status == process.WaitExited && waited == event {
+			processWaitConfirmed = 1
+		}
 		if event.Process == 1 {
 			initExitObserved = 1
 			initExitCode = event.Code
@@ -128,7 +137,7 @@ func deliverProcessExits() {
 				}
 			}
 		}
-		if event.Process >= 4 {
+		if event.Process != 1 {
 			if exited, found := processRegistry.ByID(event.Process); found {
 				exited.Handles().CloseAll(func(typeID handle.Type, cap capability.Capability) {
 					if typeID != handle.TypeChannel {
@@ -141,6 +150,14 @@ func deliverProcessExits() {
 						channelRegistry.Release(channelID)
 					}
 				})
+				before := pageAllocator.Statistics().FreePages
+				if !vm.DestroyUserAddressSpace(&pageAllocator, exited.AddressSpace().Root) {
+					continue
+				}
+				if pageAllocator.Statistics().FreePages <= before {
+					continue
+				}
+				processReclaimConfirmed = 1
 			}
 			processRegistry.Remove(event.Process)
 			for index := range spawnedProcesses {
@@ -491,6 +508,10 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	if size != 24 || task >= sched.MaxTasks {
 		return kcall.StatusInvalidArgument, false
 	}
+	taskID := sched.TaskID(amd64.TaskIDForSlot(task))
+	if _, _, valid := taskID.Parts(); !valid {
+		return kcall.StatusInvalidArgument, false
+	}
 	if ipcWaitStatus[task] != kcall.StatusOK {
 		status := ipcWaitStatus[task]
 		ipcWaitStatus[task] = kcall.StatusOK
@@ -521,7 +542,7 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	now := amd64.TimerTicks()
 	deadline := now + timeout
 	channelID, _, valid := ipc.DecodeEndpointObject(cap.Object())
-	if !valid || deadline < now || !ipcWaitSet.Add(sched.TaskID(task+1), channelID, side, deadline) {
+	if !valid || deadline < now || !ipcWaitSet.Add(taskID, channelID, side, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
 	return kcall.StatusNotFound, true
@@ -541,11 +562,21 @@ func putUint64(data []byte, value uint64) {
 func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 	count := ipcWaitSet.Wake(channel, side, reason, ipcWakeResults[:])
 	for index := 0; index < count; index++ {
-		task := uint64(ipcWakeResults[index].Task - 1)
+		task, _, valid := ipcWakeResults[index].Task.Parts()
+		if !valid {
+			ipcWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
 		if reason == ipc.WaitPeerDied {
 			ipcWaitStatus[task] = kcall.StatusPeerDied
 		}
-		amd64.WakeTask(task)
+		if !amd64.WakeTaskID(uint64(ipcWakeResults[index].Task)) {
+			console := amd64.NewCOM1()
+			console.WriteString("PANIC: stale IPC wake task\n")
+			for {
+				amd64.Halt()
+			}
+		}
 		ipcWakeResults[index] = ipc.WaitResult{}
 	}
 }
@@ -553,9 +584,19 @@ func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 func expireIPCWaiters() {
 	count := ipcWaitSet.Expire(amd64.TimerTicks(), ipcWakeResults[:])
 	for index := 0; index < count; index++ {
-		task := uint64(ipcWakeResults[index].Task - 1)
+		task, _, valid := ipcWakeResults[index].Task.Parts()
+		if !valid {
+			ipcWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
 		ipcWaitStatus[task] = kcall.StatusTimeout
-		amd64.WakeTask(task)
+		if !amd64.WakeTaskID(uint64(ipcWakeResults[index].Task)) {
+			console := amd64.NewCOM1()
+			console.WriteString("PANIC: stale IPC timeout task\n")
+			for {
+				amd64.Halt()
+			}
+		}
 		ipcWakeResults[index] = ipc.WaitResult{}
 	}
 }
@@ -1214,6 +1255,20 @@ func main() {
 	console.WriteString("INITRAMFS_DISCOVERY_OK\n")
 	console.WriteString("PID1_INIT_OK\n")
 	console.WriteString("PROCESS_EXIT_EVENT_OK\n")
+	if processReclaimConfirmed == 0 {
+		console.WriteString("PANIC: process resources were not reclaimed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("PROCESS_RECLAIM_OK\n")
+	if processWaitConfirmed == 0 {
+		console.WriteString("PANIC: process wait record missing\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("PROCESS_WAIT_OK\n")
 	console.WriteString("SUPERVISOR_CRASH_EVENT_OK\n")
 	console.WriteString("LIFECYCLE_IPC_OK\n")
 	console.WriteString("INIT_EXECUTABLE_LOOKUP_OK\n")

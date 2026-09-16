@@ -32,6 +32,9 @@ One remains in ring 3 long enough to be preempted, performs native calls, and
 exits. The other executes an invalid opcode; the exception path terminates only
 that task, after which kernel tasks and the boot sequence continue.
 
-The implementation is single-CPU, and IRQ-level synchronization disables nested
-maskable interrupts. Stack and address-space reclamation, wait semantics, slot
-reuse, priorities, per-CPU queues, and SMP are not implemented yet.
+After exit delivery, the dead task's guarded kernel stack is returned to the
+physical allocator and its architecture slot can be reused. The implementation
+is single-CPU, and IRQ-level synchronization disables nested maskable
+interrupts. Task IDs combine a generation with their reusable slot; IPC wakeups
+and exit teardown validate both fields, so stale events cannot target a new
+task. Priorities, per-CPU queues, and SMP are not implemented yet.

@@ -68,7 +68,7 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 			Executable: segment.Flags&SegmentExecutable != 0,
 		}
 		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
-			if !vm.MapUserPage(root, segment.VirtualAddress+offset, pages[pageIndex], permissions) {
+			if !vm.MapOwnedUserPage(root, segment.VirtualAddress+offset, pages[pageIndex], permissions) {
 				return LoadedImage{}, false
 			}
 			pageIndex++

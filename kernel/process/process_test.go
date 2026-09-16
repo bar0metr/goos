@@ -10,7 +10,8 @@ func TestProcessOwnsAddressSpaceAndTasks(t *testing.T) {
 	if !ok || process.ID() != 1 || process.AddressSpace().Root != 0x1000 {
 		t.Fatal("valid process rejected")
 	}
-	if !process.AddTask(sched.TaskID(1)) || process.AddTask(sched.TaskID(1)) {
+	task, _ := sched.NewTaskID(0, 1)
+	if !process.AddTask(task) || process.AddTask(task) {
 		t.Fatal("duplicate task ownership accepted")
 	}
 	if process.TaskCount() != 1 {
@@ -30,11 +31,13 @@ func TestProcessRejectsInvalidIdentity(t *testing.T) {
 func TestProcessTaskCapacityIsBounded(t *testing.T) {
 	process, _ := New(1, AddressSpace{Root: 0x1000})
 	for index := 0; index < MaxTasksPerProcess; index++ {
-		if !process.AddTask(sched.TaskID(index + 1)) {
+		task, _ := sched.NewTaskID(uint32(index), 1)
+		if !process.AddTask(task) {
 			t.Fatalf("task %d rejected", index)
 		}
 	}
-	if process.AddTask(sched.TaskID(MaxTasksPerProcess + 1)) {
+	overflow, _ := sched.NewTaskID(MaxTasksPerProcess, 1)
+	if process.AddTask(overflow) {
 		t.Fatal("process task capacity exceeded")
 	}
 }
