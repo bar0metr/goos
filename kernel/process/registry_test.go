@@ -43,3 +43,18 @@ func TestRegistryWaitsForLastTask(t *testing.T) {
 		t.Fatalf("process exit = %#v", event)
 	}
 }
+
+func TestRegistryRemovesProcessSlot(t *testing.T) {
+	first, _ := New(10, AddressSpace{Root: 0x1000})
+	second, _ := New(11, AddressSpace{Root: 0x2000})
+	var registry Registry
+	if !registry.Add(&first) || !registry.Remove(10) || !registry.Add(&second) {
+		t.Fatal("registry slot was not reusable")
+	}
+	if _, found := registry.ByID(10); found {
+		t.Fatal("removed process remains registered")
+	}
+	if process, found := registry.ByID(11); !found || process != &second {
+		t.Fatal("replacement process missing")
+	}
+}

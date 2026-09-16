@@ -235,6 +235,7 @@ goos_exception_fatal:
     movq %rax, (%rdx,%rcx,8)
     btsq %rcx, goos_task_exit_pending(%rip)
     btrq %rcx, goos_runnable_mask(%rip)
+    btsq %rcx, goos_task_dead_mask(%rip)
     movq %rcx, %rax
 .user_fault_find_next:
     incq %rax
@@ -409,6 +410,7 @@ goos_user_call:
     movq goos_current_task(%rip), %rcx
     btsq %rcx, goos_task_exit_pending(%rip)
     btrq %rcx, goos_runnable_mask(%rip)
+    btsq %rcx, goos_task_dead_mask(%rip)
     movq %rcx, %rax
 .user_exit_find_next:
     incq %rax
@@ -563,9 +565,18 @@ goos_scheduler_install_user:
     xorq %rax, %rax
     pushfq
     cli
+    movq goos_task_dead_mask(%rip), %r10
+    testq %r10, %r10
+    jz .install_user_append
+    bsfq %r10, %r10
+    btrq %r10, goos_task_dead_mask(%rip)
+    jmp .install_user_slot
+.install_user_append:
     movq goos_task_count(%rip), %r10
     cmpq $64, %r10
     jae .install_user_done
+    incq goos_task_count(%rip)
+.install_user_slot:
     leaq goos_task_contexts(%rip), %r11
     movq %rcx, (%r11,%r10,8)
     leaq goos_task_roots(%rip), %r11
@@ -573,9 +584,7 @@ goos_scheduler_install_user:
     leaq goos_task_rsp0(%rip), %r11
     movq %r8, (%r11,%r10,8)
     btsq %r10, goos_runnable_mask(%rip)
-    incq %r10
-    movq %r10, goos_task_count(%rip)
-    movq %r10, %rax
+    leaq 1(%r10), %rax
 .install_user_done:
     popfq
     retq
@@ -674,6 +683,8 @@ goos_task_exit_codes:
 goos_runnable_mask:
     .quad 1
 goos_task_exit_pending:
+    .quad 0
+goos_task_dead_mask:
     .quad 0
 goos_scheduler_enabled:
     .byte 0

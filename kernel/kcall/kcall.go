@@ -13,6 +13,9 @@ const (
 	OperationConsoleWrite
 	OperationConsoleRead
 	OperationClockRead
+	OperationStartupRead
+	OperationChannelCreate
+	OperationHandleClose
 )
 
 type Status uint64
@@ -60,6 +63,9 @@ type Handler interface {
 	ConsoleWrite(device uint64, address uint64, length uint64) Status
 	ConsoleRead(device uint64, address uint64, length uint64) Status
 	ClockRead(address uint64, length uint64) Status
+	StartupRead(address uint64, length uint64) Status
+	ChannelCreate(address uint64, length uint64) Status
+	HandleClose(id uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -99,6 +105,18 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.ClockRead(request.Arg0, request.Arg1)}
+	case OperationStartupRead:
+		if request.Arg1 != 128 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.StartupRead(request.Arg0, request.Arg1)}
+	case OperationChannelCreate:
+		if request.Arg1 != 16 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ChannelCreate(request.Arg0, request.Arg1)}
+	case OperationHandleClose:
+		return Result{Status: handler.HandleClose(request.Arg0)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

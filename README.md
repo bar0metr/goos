@@ -149,8 +149,9 @@ The native kernel and the first isolated services are implemented:
   policy loop executing inside PID 1;
 - capability manifests that derive PID 1 authority into newly spawned process
   handle tables without rights escalation;
-- a supervised native shell with bounded line editing and `help`, `echo`,
-  `clear`, `uptime`, `pwd`, `ls`, `cd`, and `cat` commands;
+- a supervised native shell with bounded line editing, built-in `help`, `echo`,
+  `clear`, `uptime`, and `cd`, plus isolated native `pwd`, `ls`, and `cat`
+  executables;
 - a supervised userspace VFS service reached through explicit, non-transferable
   client and server channel endpoints;
 - unit, integration, boot, and performance tests.
@@ -158,9 +159,9 @@ The native kernel and the first isolated services are implemented:
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
 the policy loop and enforces bounded crash restart accounting. Spawn capability
-installation, a userspace VFS service, and an interactive filesystem-aware
-shell are implemented. The shell does not yet expose pipelines or executable
-launch. The current ISO boots a real kernel, leaves UEFI
+installation, a userspace VFS service, an interactive filesystem-aware shell,
+and capability-bounded native utility launch are implemented. The shell does
+not yet expose pipelines or general executable lookup. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but

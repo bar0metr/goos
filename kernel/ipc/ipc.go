@@ -67,6 +67,10 @@ func NewChannel() Channel {
 	return Channel{alive: [2]bool{true, true}}
 }
 
+func (channel *Channel) Alive(side uint8) bool {
+	return channel != nil && side <= 1 && channel.alive[side]
+}
+
 // Send validates and queues one typed message. Side identifies the sender;
 // side zero and side one are the only endpoints. External IRQ-level locking is
 // required until channels gain per-object synchronization for SMP.

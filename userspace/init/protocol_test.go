@@ -64,7 +64,7 @@ func TestLifecycleProtocol(t *testing.T) {
 	if _, ok := LaunchRequest(3, "/system/init", []Capability{{Handle: 1, Type: handle.TypeDevice}}, 9); ok {
 		t.Fatal("capability without rights accepted")
 	}
-	endpointGrant := []Capability{{Handle: 3, Type: handle.TypeChannel, Rights: capability.Read | capability.Write, Endpoint: 2}}
+	endpointGrant := []Capability{{Handle: 3, Type: handle.TypeChannel, Rights: capability.Read | capability.Write, Consume: true}}
 	endpointLaunch, ok := LaunchRequest(4, "/system/vfs", endpointGrant, 10)
 	if !ok {
 		t.Fatal("endpoint grant encode failed")
@@ -73,8 +73,14 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok || endpointEvent.Capabilities[0] != endpointGrant[0] {
 		t.Fatalf("endpoint grant = %#v", endpointEvent)
 	}
-	if _, ok := LaunchRequest(4, "/system/vfs", []Capability{{Handle: 3, Type: handle.TypeDevice, Rights: capability.Write, Endpoint: 1}}, 10); ok {
-		t.Fatal("endpoint metadata accepted for non-channel capability")
+	startup := []byte("startup")
+	startupLaunch, ok := LaunchRequestWithStartup(4, "/system/bin/cat", endpointGrant, startup, 11)
+	if !ok {
+		t.Fatal("startup launch encode failed")
+	}
+	startupEvent, ok := DecodeLifecycle(startupLaunch)
+	if !ok || string(startupEvent.Startup[:startupEvent.StartupSize]) != "startup" {
+		t.Fatalf("startup = %#v", startupEvent)
 	}
 	tooMany := make([]Capability, MaxCapabilities+1)
 	for index := range tooMany {

@@ -81,3 +81,25 @@ func TestInvalidInsertAndFullTable(t *testing.T) {
 		t.Fatal("full table reports available slots")
 	}
 }
+
+func TestCloseAllInvalidatesAndReportsHandles(t *testing.T) {
+	var table Table
+	first, _ := table.Insert(TypeMemory, capability.New(11, capability.Read))
+	second, _ := table.Insert(TypeChannel, capability.New(12, capability.Write))
+	seen := uint64(0)
+	table.CloseAll(func(typeID Type, cap capability.Capability) {
+		seen += cap.Object()
+		if cap.Object() == 12 && typeID != TypeChannel {
+			t.Fatal("channel reported with wrong type")
+		}
+	})
+	if seen != 23 || table.Available() != MaxHandles {
+		t.Fatalf("close all left state behind: seen=%d available=%d", seen, table.Available())
+	}
+	if _, ok := table.Lookup(first, TypeMemory, capability.Read); ok {
+		t.Fatal("first closed handle still resolves")
+	}
+	if _, ok := table.Lookup(second, TypeChannel, capability.Write); ok {
+		t.Fatal("second closed handle still resolves")
+	}
+}

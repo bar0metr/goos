@@ -12,8 +12,10 @@ one channel through explicit endpoint metadata in the launch capability
 manifest. Child capabilities omit `Transfer` authority.
 
 Complete the `GVF1` request/reply contract with bounded typed replies. The shell
-owns its working-directory state, canonicalizes relative paths in a fixed
-buffer, and implements `pwd`, `ls`, `cd`, and `cat` through correlated VFS IPC.
+owns its working-directory state and canonicalizes relative paths in a fixed
+buffer. This first implementation placed `pwd`, `ls`, and `cat` in shell; ADR
+0027 replaces them with isolated native executables while retaining `cd` as a
+builtin.
 The service owns a private RAMFS-backed namespace containing `/system/motd` and
 `/tmp`.
 
@@ -34,6 +36,6 @@ The initial VFS namespace is volatile and is not the executable initramfs.
 Persistent storage, an initramfs filesystem backend, shared-memory bulk I/O,
 permissions, and process launch remain separate work.
 
-Adding the VFS image raises the bounded UEFI initramfs reservation from 512 KiB
-to 1 MiB. The loader still performs one bounded read and rejects empty or
-oversized archives.
+Adding VFS first raised the bounded UEFI initramfs reservation from 512 KiB to
+1 MiB. Native coreutils later raise it to 1.5 MiB. The loader still performs one
+bounded read and rejects empty or oversized archives.

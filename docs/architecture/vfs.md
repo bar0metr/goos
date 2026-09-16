@@ -34,3 +34,10 @@ process infers endpoint identity from handle numbers or launch order.
 The freestanding runtime uses a fixed bump allocator. After persistent service
 initialization, VFS records an arena mark and restores it before every request;
 temporary decode and dispatch allocations therefore remain request-bounded.
+
+VFS also owns a control endpoint. PID 1 creates a new channel pair for every
+external process and moves the server endpoint to VFS in an attached IPC handle.
+The client endpoint is consumed by the child's launch manifest. VFS polls a
+fixed table of active sessions, closes a server endpoint on `PeerDied`, and the
+kernel then releases the channel object. Replies therefore cannot be consumed
+by another process sharing one queue.

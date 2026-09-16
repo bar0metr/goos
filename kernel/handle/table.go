@@ -100,6 +100,53 @@ func (table *Table) Close(id ID) bool {
 	return true
 }
 
+func (table *Table) Describe(id ID) (Type, capability.Capability, bool) {
+	index, generation, ok := decode(id)
+	if !ok {
+		return TypeInvalid, capability.Capability{}, false
+	}
+	entry := &table.slots[index]
+	if !entry.open || entry.generation != generation {
+		return TypeInvalid, capability.Capability{}, false
+	}
+	return entry.typeID, capability.New(entry.object, entry.rights), true
+}
+
+func (table *Table) HasObject(typeID Type, object uint64) bool {
+	for index := range table.slots {
+		entry := &table.slots[index]
+		if entry.open && entry.typeID == typeID && entry.object == object {
+			return true
+		}
+	}
+	return false
+}
+
+// CloseAll invalidates every open handle and reports each capability before it
+// is discarded so the owning subsystem can release object-level resources.
+func (table *Table) CloseAll(visit func(Type, capability.Capability)) {
+	if table == nil {
+		return
+	}
+	for index := range table.slots {
+		entry := &table.slots[index]
+		if !entry.open {
+			continue
+		}
+		if visit != nil {
+			visit(entry.typeID, capability.New(entry.object, entry.rights))
+		}
+		entry.open = false
+		entry.object = 0
+		entry.rights = 0
+		entry.typeID = TypeInvalid
+		entry.generation++
+		if entry.generation == 0 {
+			entry.generation = 1
+		}
+	}
+}
+
 // Transfer derives a non-escalating capability into another process-local
 // table. The source handle stays valid and must carry Transfer authority.
 func (table *Table) Transfer(target *Table, id ID, typeID Type, rights capability.Rights) (ID, bool) {

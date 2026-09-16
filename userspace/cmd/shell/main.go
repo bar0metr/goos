@@ -9,6 +9,7 @@ import (
 	"goos/kernel/ramfs"
 	"goos/kernel/tty"
 	"goos/kernel/vfs"
+	execproto "goos/userspace/exec"
 	shellcmd "goos/userspace/shell"
 	"runtime"
 	"unsafe"
@@ -16,6 +17,7 @@ import (
 
 const consoleHandle = handle.ID(0x0000000100000001)
 const vfsHandle = uint64(0x0000000100000002)
+const execHandle = uint64(0x0000000100000003)
 
 var (
 	editor      tty.LineEditor
@@ -114,18 +116,63 @@ func execute(line []byte) {
 		writeUint(clockValue)
 		write(" ticks\nSHELL_UPTIME_OK\n")
 	case shellcmd.CommandPwd:
-		writeBytes(cwd[:cwdSize])
-		write("\nSHELL_PWD_OK\n")
+		executeExternal("/system/bin/pwd", nil)
 	case shellcmd.CommandLs:
-		executeLs(arguments)
+		executeExternal("/system/bin/ls", arguments)
 	case shellcmd.CommandCd:
 		executeCd(arguments)
 	case shellcmd.CommandCat:
-		executeCat(arguments)
+		executeExternal("/system/bin/cat", arguments)
 	case shellcmd.CommandEmpty:
 		return
 	default:
 		write("unknown command\n")
+	}
+}
+
+func executeExternal(executable string, arguments []byte) {
+	correlation++
+	request, ok := execproto.EncodeRequest(execproto.Request{Path: []byte(executable), CWD: cwd[:cwdSize], Arguments: arguments}, correlation)
+	if !ok {
+		write("exec: invalid request\n")
+		return
+	}
+	size, ok := ipc.Encode(request, wire[:])
+	if !ok {
+		write("exec: encode failed\n")
+		return
+	}
+	if status := ipcSend(execHandle, unsafe.Pointer(&wire[0]), uintptr(size)); status != 0 {
+		write("exec: service unavailable\n")
+		write("exec status: ")
+		writeUint(status)
+		write("\n")
+		return
+	}
+	for {
+		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
+		status := ipcWaitReceive(execHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+		if status == uint64(ipc.StatusTimeout) {
+			continue
+		}
+		if status != 0 {
+			write("exec: service unavailable\n")
+			return
+		}
+		payloadSize := int(wire[24]) | int(wire[25])<<8
+		wireSize := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
+		message, valid := ipc.Decode(wire[:wireSize])
+		reply, validReply := execproto.DecodeReply(message)
+		if !valid || !validReply || message.Correlation != correlation {
+			write("exec: corrupt reply\n")
+			return
+		}
+		if reply.Status != 0 {
+			write("exec: launch failed\n")
+			return
+		}
+		write("SHELL_EXEC_OK\n")
+		return
 	}
 }
 
@@ -137,46 +184,6 @@ func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {
 		argument = []byte("/")
 	}
 	return shellcmd.ResolvePath(cwd[:cwdSize], argument, &pathBuffer)
-}
-
-func executeLs(argument []byte) {
-	path, ok := resolve(argument, true)
-	if !ok {
-		write("ls: invalid path\n")
-		return
-	}
-	stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
-	if !ok || stat.Status != vfs.StatusOK {
-		writeVFSError("ls", stat.Status)
-		return
-	}
-	if stat.Kind == ramfs.KindFile {
-		writeBytes(baseName(path))
-		write("\nSHELL_LS_OK\n")
-		return
-	}
-	var cursor uint32
-	for {
-		reply, received := callVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: uint64(cursor)})
-		if !received {
-			write("ls: service unavailable\n")
-			return
-		}
-		if reply.Status == vfs.StatusNotFound {
-			break
-		}
-		if reply.Status != vfs.StatusOK {
-			writeVFSError("ls", reply.Status)
-			return
-		}
-		writeBytes(reply.Name)
-		if reply.Kind == ramfs.KindDirectory {
-			write("/")
-		}
-		write("\n")
-		cursor = reply.Cursor
-	}
-	write("SHELL_LS_OK\n")
 }
 
 func executeCd(argument []byte) {
@@ -197,36 +204,6 @@ func executeCd(argument []byte) {
 	copy(cwd[:], path)
 	cwdSize = len(path)
 	write("SHELL_CD_OK\n")
-}
-
-func executeCat(argument []byte) {
-	path, ok := resolve(argument, false)
-	if !ok || len(argument) == 0 {
-		write("cat: path required\n")
-		return
-	}
-	opened, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
-	if !received || opened.Status != vfs.StatusOK {
-		writeVFSError("cat", opened.Status)
-		return
-	}
-	for {
-		reply, received := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: vfs.MaxReplyData})
-		if !received || reply.Status != vfs.StatusOK {
-			writeVFSError("cat", reply.Status)
-			break
-		}
-		if len(reply.Data) == 0 {
-			break
-		}
-		writeBytes(reply.Data)
-	}
-	closed, received := callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
-	if !received || closed.Status != vfs.StatusOK {
-		writeVFSError("cat", closed.Status)
-		return
-	}
-	write("SHELL_CAT_OK\n")
 }
 
 func callVFS(request vfs.Request) (vfs.Reply, bool) {
@@ -281,15 +258,6 @@ func writeVFSError(command string, status vfs.Status) {
 	default:
 		write("VFS error\n")
 	}
-}
-
-func baseName(path []byte) []byte {
-	for index := len(path) - 1; index >= 0; index-- {
-		if path[index] == '/' {
-			return path[index+1:]
-		}
-	}
-	return path
 }
 
 func write(message string) {

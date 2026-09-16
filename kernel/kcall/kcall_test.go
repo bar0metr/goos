@@ -35,6 +35,21 @@ func (handler *testHandler) ClockRead(address uint64, length uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) StartupRead(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
+func (handler *testHandler) ChannelCreate(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
+func (handler *testHandler) HandleClose(id uint64) Status {
+	handler.channel = id
+	return StatusOK
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -115,5 +130,18 @@ func TestDispatchRejectsOversizedIPCBuffer(t *testing.T) {
 	result := Dispatch(Request{Operation: OperationIPCSend, Arg2: MaxIPCMessage + 1}, handler)
 	if result.Status != StatusInvalidArgument || handler.length != 0 {
 		t.Fatalf("oversized IPC request reached handler: %#v", result)
+	}
+}
+
+func TestDispatchStartupAndHandleOperations(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationStartupRead, Arg0: 0x4000, Arg1: 128}, handler); result.Status != StatusOK || handler.address != 0x4000 || handler.length != 128 {
+		t.Fatalf("unexpected startup read: %#v, handler: %#v", result, handler)
+	}
+	if result := Dispatch(Request{Operation: OperationChannelCreate, Arg0: 0x5000, Arg1: 16}, handler); result.Status != StatusOK || handler.address != 0x5000 || handler.length != 16 {
+		t.Fatalf("unexpected channel create: %#v, handler: %#v", result, handler)
+	}
+	if result := Dispatch(Request{Operation: OperationHandleClose, Arg0: 17}, handler); result.Status != StatusOK || handler.channel != 17 {
+		t.Fatalf("unexpected handle close: %#v, handler: %#v", result, handler)
 	}
 }

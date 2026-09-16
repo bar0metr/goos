@@ -65,9 +65,7 @@ var (
 	initExitCode            uint64
 	kernelPageTable         uint64
 	spawnedProcesses        [process.MaxProcesses]process.Process
-	spawnedProcessCount     uint8
 	nextProcessID           process.ID = 4
-	endpointBindings        ipc.EndpointTable
 )
 
 type nativeCallHandler struct {
@@ -130,6 +128,28 @@ func deliverProcessExits() {
 				}
 			}
 		}
+		if event.Process >= 4 {
+			if exited, found := processRegistry.ByID(event.Process); found {
+				exited.Handles().CloseAll(func(typeID handle.Type, cap capability.Capability) {
+					if typeID != handle.TypeChannel {
+						return
+					}
+					channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
+					channel, exists := channelRegistry.Lookup(channelID)
+					if valid && exists && channel.Close(side) {
+						wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+						channelRegistry.Release(channelID)
+					}
+				})
+			}
+			processRegistry.Remove(event.Process)
+			for index := range spawnedProcesses {
+				if spawnedProcesses[index].ID() == event.Process {
+					spawnedProcesses[index].Reset()
+					break
+				}
+			}
+		}
 	}
 }
 
@@ -145,7 +165,7 @@ func consumeInitControl() {
 	if !valid || event.Operation != supervisor.LifecycleLaunch {
 		return
 	}
-	pid, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount])
+	pid, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], event.Startup[:event.StartupSize])
 	if launchStatus != supervisor.LaunchOK {
 		console := amd64.NewCOM1()
 		console.WriteString("INIT_LAUNCH_ERROR: ")
@@ -171,8 +191,8 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, supervisor.LaunchStatus) {
-	if kernelPageTable == 0 || spawnedProcessCount == uint8(len(spawnedProcesses)) || nextProcessID == 0 {
+func spawnExecutable(path string, grants []supervisor.Capability, startup []byte) (process.ID, supervisor.LaunchStatus) {
+	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, supervisor.LaunchResourceExhausted
 	}
 	if bootInitProcess == nil || len(grants) > supervisor.MaxCapabilities {
@@ -200,14 +220,21 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 		return 0, supervisor.LaunchInvalidImage
 	}
 	pid := nextProcessID
-	spawned := &spawnedProcesses[spawnedProcessCount]
-	*spawned, ok = process.New(pid, process.AddressSpace{Root: root})
+	var spawned *process.Process
+	for index := range spawnedProcesses {
+		if spawnedProcesses[index].ID() == 0 {
+			spawned = &spawnedProcesses[index]
+			break
+		}
+	}
+	if spawned == nil {
+		return 0, supervisor.LaunchResourceExhausted
+	}
+	*spawned, ok = process.NewWithStartup(pid, process.AddressSpace{Root: root}, startup)
 	if !ok || spawned.Handles().Available() < len(grants) {
 		return 0, supervisor.LaunchProcessFailed
 	}
 	var installed [supervisor.MaxCapabilities]handle.ID
-	var boundObjects [supervisor.MaxCapabilities]uint64
-	boundCount := 0
 	for index, grant := range grants {
 		installed[index], ok = bootInitProcess.Handles().Transfer(spawned.Handles(), grant.Handle, grant.Type, grant.Rights)
 		if !ok {
@@ -226,27 +253,7 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 			return 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
-	for index, grant := range grants {
-		if grant.Endpoint == 0 {
-			continue
-		}
-		channelCapability, found := spawned.Handles().Lookup(installed[index], handle.TypeChannel, grant.Rights)
-		if !found || !endpointBindings.BindProcess(channelCapability.Object(), root, grant.Endpoint) {
-			for rollback := 0; rollback < boundCount; rollback++ {
-				endpointBindings.Unbind(boundObjects[rollback], root)
-			}
-			for rollback := range grants {
-				spawned.Handles().Close(installed[rollback])
-			}
-			return 0, supervisor.LaunchCapabilityInstallFailed
-		}
-		boundObjects[boundCount] = channelCapability.Object()
-		boundCount++
-	}
 	if !processRegistry.Add(spawned) {
-		for rollback := 0; rollback < boundCount; rollback++ {
-			endpointBindings.Unbind(boundObjects[rollback], root)
-		}
 		for index := range grants {
 			spawned.Handles().Close(installed[index])
 		}
@@ -254,15 +261,16 @@ func spawnExecutable(path string, grants []supervisor.Capability) (process.ID, s
 	}
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
 	if !ok || !processRegistry.BindTask(pid, sched.TaskID(task)) {
-		for rollback := 0; rollback < boundCount; rollback++ {
-			endpointBindings.Unbind(boundObjects[rollback], root)
-		}
 		return 0, supervisor.LaunchTaskFailed
 	}
-	spawnedProcessCount++
 	nextProcessID++
 	if len(grants) != 0 {
 		capabilityManifestOK = 1
+	}
+	for _, grant := range grants {
+		if grant.Consume {
+			bootInitProcess.Handles().Close(grant.Handle)
+		}
 	}
 	return pid, supervisor.LaunchOK
 }
@@ -318,6 +326,82 @@ func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.
 	return kcall.StatusOK
 }
 
+func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || length != process.MaxStartupData {
+		return kcall.StatusPermissionDenied
+	}
+	var data [process.MaxStartupData]byte
+	if _, ok := owner.Startup(data[:]); !ok || !vm.CopyOut(handler.root, address, data[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || owner.ID() != 1 || length != 16 || owner.Handles().Available() < 2 {
+		return kcall.StatusPermissionDenied
+	}
+	channel, id, ok := channelRegistry.Create()
+	if !ok {
+		return kcall.StatusResourceExhausted
+	}
+	object0, _ := ipc.EndpointObject(id, 0)
+	object1, _ := ipc.EndpointObject(id, 1)
+	rights := capability.Read | capability.Write | capability.Wait | capability.Transfer
+	handle0, ok0 := owner.Handles().Insert(handle.TypeChannel, capability.New(object0, rights))
+	handle1, ok1 := owner.Handles().Insert(handle.TypeChannel, capability.New(object1, rights))
+	if !ok0 || !ok1 {
+		if ok0 {
+			owner.Handles().Close(handle0)
+		}
+		if ok1 {
+			owner.Handles().Close(handle1)
+		}
+		channel.Close(0)
+		channel.Close(1)
+		channelRegistry.Release(id)
+		return kcall.StatusResourceExhausted
+	}
+	var encoded [16]byte
+	putUint64(encoded[0:8], uint64(handle0))
+	putUint64(encoded[8:16], uint64(handle1))
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		owner.Handles().Close(handle0)
+		owner.Handles().Close(handle1)
+		channel.Close(0)
+		channel.Close(1)
+		channelRegistry.Release(id)
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	typeID, cap, found := owner.Handles().Describe(handle.ID(id))
+	if !found {
+		return kcall.StatusNotFound
+	}
+	if typeID == handle.TypeChannel {
+		channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
+		channel, exists := channelRegistry.Lookup(channelID)
+		if !valid || !exists || !channel.Close(side) {
+			return kcall.StatusNotFound
+		}
+		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+		channelRegistry.Release(channelID)
+	}
+	if !owner.Handles().Close(handle.ID(id)) {
+		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
 func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (*ipc.Channel, uint8, *process.Process, *process.Process, kcall.Status) {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
@@ -327,19 +411,14 @@ func (handler nativeCallHandler) endpoint(channel uint64, required capability.Ri
 	if !ok {
 		return nil, 0, nil, nil, kcall.StatusPermissionDenied
 	}
-	endpoint, ok := channelRegistry.Lookup(cap.Object())
-	if !ok {
+	channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
+	endpoint, ok := channelRegistry.Lookup(channelID)
+	if !valid || !ok {
 		return nil, 0, nil, nil, kcall.StatusNotFound
 	}
-	side, peerRoot, bound := endpointBindings.Lookup(cap.Object(), handler.root)
-	if bound {
-		var peer *process.Process
-		if peerRoot != 0 {
-			peer, _ = processRegistry.ByRoot(peerRoot)
-		}
-		return endpoint, side, owner, peer, kcall.StatusOK
-	}
-	return nil, 0, nil, nil, kcall.StatusPermissionDenied
+	peerObject, _ := ipc.EndpointObject(channelID, side^1)
+	peer, _ := processRegistry.ByCapabilityObject(handle.TypeChannel, peerObject)
+	return endpoint, side, owner, peer, kcall.StatusOK
 }
 
 func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length uint64) kcall.Status {
@@ -358,7 +437,7 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		return kcall.StatusInvalidArgument
 	}
 	message, ok := ipc.Decode(data)
-	if !ok || message.HandleCount != 0 {
+	if !ok {
 		handler.recordInitSend(kcall.StatusCorruptData)
 		return kcall.StatusCorruptData
 	}
@@ -366,11 +445,35 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	if peer != nil {
 		peerHandles = peer.Handles()
 	}
-	status = endpoint.Send(side, message, owner.Handles(), peerHandles, nil)
+	var transfers [ipc.MaxAttachedHandles]ipc.Transfer
+	transferCount := int(message.HandleCount)
+	if transferCount != 0 && peerHandles == nil {
+		return kcall.StatusPeerDied
+	}
+	for index := 0; index < transferCount; index++ {
+		typeID, attached, found := owner.Handles().Describe(message.Handles[index])
+		if !found || !attached.Allows(capability.Transfer) {
+			return kcall.StatusPermissionDenied
+		}
+		rights := attached.Rights() &^ capability.Transfer
+		if rights == 0 {
+			return kcall.StatusPermissionDenied
+		}
+		transfers[index] = ipc.Transfer{Handle: message.Handles[index], Type: typeID, Rights: rights}
+	}
+	message.HandleCount = 0
+	for index := range message.Handles {
+		message.Handles[index] = 0
+	}
+	status = endpoint.Send(side, message, owner.Handles(), peerHandles, transfers[:transferCount])
 	if status == ipc.StatusOK {
-		cap, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Write)
+		channelCapability, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Write)
 		if found {
-			wakeIPCWaiters(cap.Object(), side^1, ipc.WaitMessage)
+			channelID, _, _ := ipc.DecodeEndpointObject(channelCapability.Object())
+			wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
+		}
+		for index := 0; index < transferCount; index++ {
+			owner.Handles().Close(transfers[index].Handle)
 		}
 	}
 	handler.recordInitSend(status)
@@ -417,7 +520,8 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	}
 	now := amd64.TimerTicks()
 	deadline := now + timeout
-	if deadline < now || !ipcWaitSet.Add(sched.TaskID(task+1), cap.Object(), side, deadline) {
+	channelID, _, valid := ipc.DecodeEndpointObject(cap.Object())
+	if !valid || deadline < now || !ipcWaitSet.Add(sched.TaskID(task+1), channelID, side, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
 	return kcall.StatusNotFound, true
@@ -695,18 +799,34 @@ func main() {
 	console.WriteString("PROCESS_MODEL_OK\n")
 
 	registeredChannel, registeredChannelID, channelCreated := channelRegistry.Create()
-	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(registeredChannelID, capability.Read|capability.Write|capability.Wait))
-	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(registeredChannelID, capability.Read|capability.Write|capability.Wait))
+	registeredObjectA, _ := ipc.EndpointObject(registeredChannelID, 0)
+	registeredObjectB, _ := ipc.EndpointObject(registeredChannelID, 1)
+	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(registeredObjectA, capability.Read|capability.Write|capability.Wait))
+	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(registeredObjectB, capability.Read|capability.Write|capability.Wait))
 	_, channelACanWrite := processA.Handles().Lookup(channelA, handle.TypeChannel, capability.Write)
 	_, channelBCanRead := processB.Handles().Lookup(channelB, handle.TypeChannel, capability.Read)
-	channelsBound := endpointBindings.Bind(registeredChannelID, rootA, rootB, 0) && endpointBindings.Bind(registeredChannelID, rootB, rootA, 1)
+	channelsBound := true
 	var lifecycleCreated bool
 	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
-	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleChannelID, capability.Read|capability.Write|capability.Wait))
+	lifecycleObject, _ := ipc.EndpointObject(lifecycleChannelID, 1)
+	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleObject, capability.Read|capability.Write|capability.Wait))
 	serviceDeviceHandle, serviceDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Read|capability.Write|capability.Transfer))
 	_, vfsChannelID, vfsChannelCreated := channelRegistry.Create()
-	vfsChannelHandle, vfsChannelInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsChannelID, capability.Read|capability.Write|capability.Wait|capability.Transfer))
-	lifecycleBound := endpointBindings.Bind(lifecycleChannelID, rootInit, 0, 1)
+	vfsClientObject, _ := ipc.EndpointObject(vfsChannelID, 0)
+	vfsServerObject, _ := ipc.EndpointObject(vfsChannelID, 1)
+	vfsChannelHandle, vfsChannelInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
+	vfsServerHandle, vfsServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
+	_, vfsControlID, vfsControlCreated := channelRegistry.Create()
+	vfsControlClientObject, _ := ipc.EndpointObject(vfsControlID, 0)
+	vfsControlServerObject, _ := ipc.EndpointObject(vfsControlID, 1)
+	vfsControlHandle, vfsControlInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsControlClientObject, capability.Read|capability.Write|capability.Wait))
+	vfsControlServerHandle, vfsControlServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsControlServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
+	_, execControlID, execControlCreated := channelRegistry.Create()
+	execClientObject, _ := ipc.EndpointObject(execControlID, 0)
+	execServerObject, _ := ipc.EndpointObject(execControlID, 1)
+	execServerHandle, execServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(execServerObject, capability.Read|capability.Write|capability.Wait))
+	execClientHandle, execClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(execClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
+	lifecycleBound := true
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
 	wireSize, wireEncoded := ipc.Encode(request, ipcWireData[:])
@@ -722,8 +842,8 @@ func main() {
 	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
 	_, replyReceiveStatus := registeredChannel.Receive(0)
 	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !channelsBound ||
-		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || !wireEncoded || !wireDecoded ||
+		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
 		console.WriteString("PANIC: typed IPC request/reply failed\n")
@@ -1115,6 +1235,8 @@ func main() {
 	console.WriteString("BOOT_OK\n")
 
 	for {
+		deliverProcessExits()
+		consumeInitControl()
 		amd64.Halt()
 	}
 }

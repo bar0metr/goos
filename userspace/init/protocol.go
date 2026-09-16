@@ -9,7 +9,7 @@ import (
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(3)
+	LifecycleVersion    = uint16(4)
 	MaxExecutablePath   = 192
 	launchGrantSize     = 16
 )
@@ -44,6 +44,8 @@ type LifecycleEvent struct {
 	ExecutableSize  uint8
 	Capabilities    [MaxCapabilities]Capability
 	CapabilityCount uint8
+	Startup         [128]byte
+	StartupSize     uint8
 }
 
 func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
@@ -58,7 +60,11 @@ func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
 }
 
 func LaunchRequest(service uint64, executable string, capabilities []Capability, correlation uint64) (ipc.Message, bool) {
-	if service == 0 || correlation == 0 || !validLaunchPath(executable) || len(capabilities) > MaxCapabilities || 11+len(executable)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
+	return LaunchRequestWithStartup(service, executable, capabilities, nil, correlation)
+}
+
+func LaunchRequestWithStartup(service uint64, executable string, capabilities []Capability, startup []byte, correlation uint64) (ipc.Message, bool) {
+	if service == 0 || correlation == 0 || !validLaunchPath(executable) || len(capabilities) > MaxCapabilities || len(startup) > 128 || 12+len(executable)+len(startup)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	for _, grant := range capabilities {
@@ -66,18 +72,22 @@ func LaunchRequest(service uint64, executable string, capabilities []Capability,
 			return ipc.Message{}, false
 		}
 	}
-	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(11 + len(executable) + len(capabilities)*launchGrantSize)}
+	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(12 + len(executable) + len(startup) + len(capabilities)*launchGrantSize)}
 	message.Payload[0] = byte(LifecycleLaunch)
 	binary.LittleEndian.PutUint64(message.Payload[1:9], service)
 	message.Payload[9] = byte(len(executable))
 	message.Payload[10] = byte(len(capabilities))
-	copy(message.Payload[11:], executable)
-	offset := 11 + len(executable)
+	message.Payload[11] = byte(len(startup))
+	copy(message.Payload[12:], executable)
+	copy(message.Payload[12+len(executable):], startup)
+	offset := 12 + len(executable) + len(startup)
 	for _, grant := range capabilities {
 		binary.LittleEndian.PutUint64(message.Payload[offset:], uint64(grant.Handle))
 		binary.LittleEndian.PutUint16(message.Payload[offset+8:], uint16(grant.Type))
 		binary.LittleEndian.PutUint32(message.Payload[offset+10:], uint32(grant.Rights))
-		message.Payload[offset+14] = grant.Endpoint
+		if grant.Consume {
+			message.Payload[offset+14] = 1
+		}
 		offset += launchGrantSize
 	}
 	return message, true
@@ -109,29 +119,31 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		}
 		return LifecycleEvent{Operation: LifecycleProcessExited, Process: process, Code: binary.LittleEndian.Uint64(message.Payload[9:17])}, true
 	case LifecycleLaunch:
-		if message.Kind != ipc.KindRequest || message.Correlation == 0 || message.PayloadSize < 12 {
+		if message.Kind != ipc.KindRequest || message.Correlation == 0 || message.PayloadSize < 13 {
 			return LifecycleEvent{}, false
 		}
 		service := binary.LittleEndian.Uint64(message.Payload[1:9])
 		size := int(message.Payload[9])
 		capabilityCount := int(message.Payload[10])
-		if service == 0 || size == 0 || size > MaxExecutablePath || capabilityCount > MaxCapabilities || int(message.PayloadSize) != 11+size+capabilityCount*launchGrantSize {
+		startupSize := int(message.Payload[11])
+		if service == 0 || size == 0 || size > MaxExecutablePath || startupSize > 128 || capabilityCount > MaxCapabilities || int(message.PayloadSize) != 12+size+startupSize+capabilityCount*launchGrantSize {
 			return LifecycleEvent{}, false
 		}
-		if !validLaunchPathBytes(message.Payload[11 : 11+size]) {
+		if !validLaunchPathBytes(message.Payload[12 : 12+size]) {
 			return LifecycleEvent{}, false
 		}
-		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, ExecutableSize: uint8(size), CapabilityCount: uint8(capabilityCount)}
-		copy(event.Executable[:], message.Payload[11:11+size])
-		offset := 11 + size
+		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, ExecutableSize: uint8(size), CapabilityCount: uint8(capabilityCount), StartupSize: uint8(startupSize)}
+		copy(event.Executable[:], message.Payload[12:12+size])
+		copy(event.Startup[:], message.Payload[12+size:12+size+startupSize])
+		offset := 12 + size + startupSize
 		for index := 0; index < capabilityCount; index++ {
 			grant := Capability{
-				Handle:   handle.ID(binary.LittleEndian.Uint64(message.Payload[offset:])),
-				Type:     handle.Type(binary.LittleEndian.Uint16(message.Payload[offset+8:])),
-				Rights:   capability.Rights(binary.LittleEndian.Uint32(message.Payload[offset+10:])),
-				Endpoint: message.Payload[offset+14],
+				Handle:  handle.ID(binary.LittleEndian.Uint64(message.Payload[offset:])),
+				Type:    handle.Type(binary.LittleEndian.Uint16(message.Payload[offset+8:])),
+				Rights:  capability.Rights(binary.LittleEndian.Uint32(message.Payload[offset+10:])),
+				Consume: message.Payload[offset+14] == 1,
 			}
-			if message.Payload[offset+15] != 0 || !validCapability(grant) {
+			if message.Payload[offset+14] > 1 || message.Payload[offset+15] != 0 || !validCapability(grant) {
 				return LifecycleEvent{}, false
 			}
 			event.Capabilities[index] = grant
@@ -155,8 +167,7 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 
 func validCapability(grant Capability) bool {
 	const allRights = capability.Read | capability.Write | capability.Execute | capability.Transfer | capability.Wait
-	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeIRQ && grant.Rights != 0 && grant.Rights&^allRights == 0 &&
-		(grant.Type == handle.TypeChannel && grant.Endpoint <= 2 || grant.Type != handle.TypeChannel && grant.Endpoint == 0)
+	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeIRQ && grant.Rights != 0 && grant.Rights&^allRights == 0
 }
 
 func (event LifecycleEvent) ExecutablePath() string {

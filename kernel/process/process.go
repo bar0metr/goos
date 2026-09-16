@@ -9,6 +9,7 @@ const (
 	MaxTasksPerProcess = 32
 	MaxProcesses       = 32
 	MaxExitEvents      = 32
+	MaxStartupData     = 128
 )
 
 type ID uint64
@@ -23,13 +24,24 @@ type Process struct {
 	handles      handle.Table
 	tasks        [MaxTasksPerProcess]sched.TaskID
 	taskCount    int
+	startup      [MaxStartupData]byte
+	startupSize  uint8
 }
 
 func New(id ID, addressSpace AddressSpace) (Process, bool) {
+	return NewWithStartup(id, addressSpace, nil)
+}
+
+func NewWithStartup(id ID, addressSpace AddressSpace, startup []byte) (Process, bool) {
 	if id == 0 || addressSpace.Root == 0 {
 		return Process{}, false
 	}
-	return Process{id: id, addressSpace: addressSpace}, true
+	if len(startup) > MaxStartupData {
+		return Process{}, false
+	}
+	result := Process{id: id, addressSpace: addressSpace, startupSize: uint8(len(startup))}
+	copy(result.startup[:], startup)
+	return result, true
 }
 
 func (process *Process) ID() ID { return process.id }
@@ -37,6 +49,17 @@ func (process *Process) ID() ID { return process.id }
 func (process *Process) AddressSpace() AddressSpace { return process.addressSpace }
 
 func (process *Process) Handles() *handle.Table { return &process.handles }
+
+func (process *Process) Startup(target []byte) (int, bool) {
+	if len(target) < MaxStartupData {
+		return 0, false
+	}
+	for index := range target[:MaxStartupData] {
+		target[index] = 0
+	}
+	copy(target, process.startup[:process.startupSize])
+	return int(process.startupSize), true
+}
 
 func (process *Process) AddTask(id sched.TaskID) bool {
 	if id == 0 || process.taskCount == len(process.tasks) {
@@ -165,3 +188,36 @@ func (registry *Registry) ByRoot(root uint64) (*Process, bool) {
 	}
 	return nil, false
 }
+
+func (registry *Registry) ByCapabilityObject(typeID handle.Type, object uint64) (*Process, bool) {
+	for index := 0; index < int(registry.count); index++ {
+		if registry.processes[index].Handles().HasObject(typeID, object) {
+			return registry.processes[index], true
+		}
+	}
+	return nil, false
+}
+
+func (registry *Registry) ByID(id ID) (*Process, bool) {
+	for index := 0; index < int(registry.count); index++ {
+		if registry.processes[index].ID() == id {
+			return registry.processes[index], true
+		}
+	}
+	return nil, false
+}
+
+func (registry *Registry) Remove(id ID) bool {
+	for index := 0; index < int(registry.count); index++ {
+		if registry.processes[index].ID() != id {
+			continue
+		}
+		registry.count--
+		registry.processes[index] = registry.processes[registry.count]
+		registry.processes[registry.count] = nil
+		return true
+	}
+	return false
+}
+
+func (process *Process) Reset() { *process = Process{} }

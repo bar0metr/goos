@@ -30,10 +30,10 @@ rm -f "$log"
 	 sleep 1
 	 printf 'cat motd\n'
 	 count=0
-	 while [ "$count" -lt 6 ]; do
-		 sleep 1
+	 while [ "$count" -lt 30 ]; do
+		 sleep 0.2
 		 printf 'ls\n'
-		 sleep 1
+		 sleep 0.2
 		 printf 'cat motd\n'
 		 count=$((count + 1))
 	 done
@@ -45,7 +45,7 @@ rm -f "$log"
 pid=$!
 
 elapsed=0
-while [ "$elapsed" -lt 45 ]; do
+while [ "$elapsed" -lt 90 ]; do
 	if grep -q 'BOOT_SERVICES_EXITED' "$log" 2>/dev/null && \
 		grep -q 'PMM_OK' "$log" 2>/dev/null && \
 		grep -q 'NX_WX_OK' "$log" 2>/dev/null && \
@@ -97,12 +97,13 @@ while [ "$elapsed" -lt 45 ]; do
 		grep -q 'SHELL_ECHO_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_UPTIME_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_PWD_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_LS_OK' "$log" 2>/dev/null && \
+		grep -q 'PWD_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'LS_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CD_OK' "$log" 2>/dev/null && \
 		grep -q 'Welcome to GoOS' "$log" 2>/dev/null && \
-		grep -q 'SHELL_CAT_OK' "$log" 2>/dev/null && \
-		[ "$(grep -c 'SHELL_CAT_OK' "$log" 2>/dev/null)" -ge 7 ] && \
+		grep -q 'CAT_PROCESS_OK' "$log" 2>/dev/null && \
+		[ "$(grep -c 'CAT_PROCESS_OK' "$log" 2>/dev/null)" -ge 31 ] && \
+		[ "$(grep -c 'SHELL_EXEC_OK' "$log" 2>/dev/null)" -ge 66 ] && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
 		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
 		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \

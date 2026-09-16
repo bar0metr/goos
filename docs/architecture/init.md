@@ -19,7 +19,7 @@ scheduled restarts, and rate limiting enter a bounded diagnostic event ring.
 
 The policy core is in `userspace/init`; process creation is supplied through a
 narrow launcher callback. UEFI loads a strict, bounded USTAR initramfs before
-firmware handoff. The bootstrap reservation is capped at 1 MiB. The kernel
+firmware handoff. The bootstrap reservation is capped at 1.5 MiB. The kernel
 discovers `system/init`, validates its native image,
 creates a distinct address space and process ID 1, and schedules it at ring 3.
 
@@ -36,7 +36,7 @@ creates a new address space and initial task. Empty components and parent
 traversal are rejected.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
-assembly entry supplies the native kernel-call ABI, while a fixed 16 KiB stack
+assembly entry supplies the native kernel-call ABI, while a fixed 32 KiB stack
 and 64 KiB bump-allocation arena bound runtime memory. The host-side converter
 accepts only static x86-64 ELF load segments and wraps them in the validated
 GoOS native image envelope.
@@ -48,7 +48,11 @@ the service's bounded capability manifest. Entries reference existing PID 1
 handles and request an exact derived rights mask; the kernel requires Transfer
 authority, prevents escalation, and installs the derived handles into the new
 process before its first Task is created.
-Channel grants may additionally select one explicit endpoint side. The kernel
-binds that side to the child address-space root and links it to an already
-launched peer. PID 1 uses this mechanism to start VFS before the dependent shell
-without granting either child transfer authority.
+Channel capabilities identify their endpoint side. A launch grant may be marked
+consumed, removing PID 1's source handle after successful derivation. This is
+used for per-process VFS clients and prevents accumulation of temporary handles.
+
+Shell exec requests are restricted to `/system/bin/pwd`, `/system/bin/ls`, and
+`/system/bin/cat`. PID 1 creates a VFS channel pair, moves its server endpoint to
+VFS, supplies the client endpoint and console-write capability to the child,
+forwards bounded startup data, and replies only after process exit.

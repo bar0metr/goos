@@ -3,6 +3,10 @@ package initramfs
 const blockSize = 512
 
 func Find(archive []byte, path string) ([]byte, bool) {
+	return find(archive, path, 0)
+}
+
+func find(archive []byte, path string, depth uint8) ([]byte, bool) {
 	if !validPath(path) {
 		return nil, false
 	}
@@ -12,7 +16,7 @@ func Find(archive []byte, path string) ([]byte, bool) {
 			return nil, false
 		}
 		typeFlag := header[156]
-		if !checksumValid(header) || typeFlag != 0 && typeFlag != '0' && typeFlag != '5' || header[345] != 0 {
+		if !checksumValid(header) || typeFlag != 0 && typeFlag != '0' && typeFlag != '1' && typeFlag != '5' || header[345] != 0 {
 			return nil, false
 		}
 		nameSize := fieldSize(header[0:100])
@@ -21,6 +25,13 @@ func Find(archive []byte, path string) ([]byte, bool) {
 		dataEnd := dataStart + size
 		if !ok || nameSize == 0 || dataEnd < dataStart || dataEnd > len(archive) {
 			return nil, false
+		}
+		if typeFlag == '1' && equalString(header[:nameSize], path) {
+			linkSize := fieldSize(header[157:257])
+			if depth >= 4 || linkSize == 0 {
+				return nil, false
+			}
+			return find(archive, string(header[157:157+linkSize]), depth+1)
 		}
 		if typeFlag != '5' && equalString(header[:nameSize], path) {
 			return archive[dataStart:dataEnd], true

@@ -12,7 +12,9 @@ import (
 )
 
 const consoleHandle = uint64(0x0000000100000001)
-const channelHandle = uint64(0x0000000100000002)
+const initialSessionHandle = uint64(0x0000000100000002)
+const controlHandle = uint64(0x0000000100000003)
+const maxSessions = 12
 
 var (
 	service     vfsservice.Service
@@ -20,6 +22,7 @@ var (
 	descriptor  = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	heapPointer uintptr
 	arenaBase   uintptr
+	sessions    = [maxSessions]uint64{initialSessionHandle}
 )
 
 //go:extern _heap_start
@@ -37,6 +40,12 @@ func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname ipcWaitReceive goos_ipc_wait_receive
 func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
 
+//go:linkname ipcReceive goos_ipc_receive
+func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname handleClose goos_handle_close
+func handleClose(id uint64) uint64
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
@@ -47,42 +56,94 @@ func userspaceMain() {
 	write("VFS_SERVICE_OK\n")
 	for {
 		heapPointer = arenaBase
-		message, ok := receive()
-		if !ok {
-			fatal("VFS_RECEIVE_FAILED\n")
+		worked := pollControl()
+		for index, session := range sessions {
+			if session == 0 {
+				continue
+			}
+			message, status := receiveNow(session)
+			if status == ipc.StatusNotFound {
+				continue
+			}
+			if status == ipc.StatusPeerDied {
+				handleClose(session)
+				sessions[index] = 0
+				worked = true
+				continue
+			}
+			if status != ipc.StatusOK {
+				fatal("VFS_RECEIVE_FAILED\n")
+			}
+			serve(session, message)
+			worked = true
 		}
-		request, ok := vfs.DecodeRequest(message)
-		if !ok {
-			continue
-		}
-		reply, ok := vfs.EncodeReply(service.Dispatch(request), message.Correlation)
-		if !ok {
-			fatal("VFS_REPLY_FAILED\n")
-		}
-		size, ok := ipc.Encode(reply, wire[:])
-		if !ok || ipcSend(channelHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
-			fatal("VFS_SEND_FAILED\n")
+		if !worked {
+			descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 1
+			ipcWaitReceive(controlHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		}
 	}
 }
 
-func receive() (ipc.Message, bool) {
-	for {
-		descriptor[0] = uint64(uintptr(unsafe.Pointer(&wire[0])))
-		status := ipcWaitReceive(channelHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
-			continue
-		}
-		if status != 0 {
-			return ipc.Message{}, false
-		}
-		payloadSize := int(wire[24]) | int(wire[25])<<8
-		size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
-		if size < ipc.WireHeaderSize || size > len(wire) {
-			return ipc.Message{}, false
-		}
-		return ipc.Decode(wire[:size])
+func pollControl() bool {
+	message, status := receiveNow(controlHandle)
+	if status == ipc.StatusNotFound {
+		return false
 	}
+	if status != ipc.StatusOK {
+		fatal("VFS_CONTROL_FAILED\n")
+	}
+	server, ok := vfs.DecodeAddSession(message)
+	result := vfs.StatusResourceExhausted
+	if ok {
+		for index := range sessions {
+			if sessions[index] == 0 {
+				sessions[index], result = uint64(server), vfs.StatusOK
+				break
+			}
+		}
+	}
+	reply, encoded := vfs.AddSessionReply(result, message.Correlation)
+	if !encoded {
+		fatal("VFS_CONTROL_REPLY_FAILED\n")
+	}
+	send(controlHandle, reply)
+	return true
+}
+
+func serve(session uint64, message ipc.Message) {
+	request, ok := vfs.DecodeRequest(message)
+	if !ok {
+		return
+	}
+	reply, ok := vfs.EncodeReply(service.Dispatch(request), message.Correlation)
+	if !ok {
+		fatal("VFS_REPLY_FAILED\n")
+	}
+	send(session, reply)
+}
+
+func send(channel uint64, message ipc.Message) {
+	size, ok := ipc.Encode(message, wire[:])
+	if !ok || ipcSend(channel, unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
+		fatal("VFS_SEND_FAILED\n")
+	}
+}
+
+func receiveNow(channel uint64) (ipc.Message, ipc.Status) {
+	status := ipc.Status(ipcReceive(channel, unsafe.Pointer(&wire[0]), ipc.WireMaxSize))
+	if status != ipc.StatusOK {
+		return ipc.Message{}, status
+	}
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
+	if size < ipc.WireHeaderSize || size > len(wire) {
+		return ipc.Message{}, ipc.StatusInvalidArgument
+	}
+	message, ok := ipc.Decode(wire[:size])
+	if !ok {
+		return ipc.Message{}, ipc.StatusInvalidArgument
+	}
+	return message, ipc.StatusOK
 }
 
 func write(message string) {

@@ -6,7 +6,10 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/vfs"
+	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
+	"goos/userspace/startup"
 	"runtime"
 	"unsafe"
 )
@@ -14,6 +17,11 @@ import (
 const lifecycleHandle = uint64(0x0000000100000001)
 const serviceDeviceHandle = handle.ID(0x0000000100000002)
 const vfsChannelHandle = handle.ID(0x0000000100000003)
+const vfsServerHandle = handle.ID(0x0000000100000004)
+const vfsControlHandle = uint64(0x0000000100000005)
+const vfsControlServerHandle = handle.ID(0x0000000100000006)
+const execServerHandle = uint64(0x0000000100000007)
+const execClientHandle = handle.ID(0x0000000100000008)
 
 var (
 	manager             supervisor.Manager
@@ -22,6 +30,7 @@ var (
 	clock               uint64
 	correlation         uint64
 	heapPointer         uintptr
+	arenaBase           uintptr
 	supervisionComplete bool
 )
 
@@ -40,6 +49,15 @@ func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname ipcWaitReceive goos_ipc_wait_receive
 func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
 
+//go:linkname ipcReceive goos_ipc_receive
+func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname channelCreate goos_channel_create
+func channelCreate(address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname handleClose goos_handle_close
+func handleClose(id uint64) uint64
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
@@ -51,8 +69,18 @@ func userspaceMain() {
 	write("INIT_PROCESS_OK\n")
 	write("INIT_LIFECYCLE_IPC_OK\n")
 	for {
-		message, ok := receive()
-		if !ok {
+		if supervisionComplete {
+			pollExec()
+		}
+		timeout := uint64(100000)
+		if supervisionComplete {
+			timeout = 1
+		}
+		message, status := receive(lifecycleHandle, timeout)
+		if status == ipc.StatusTimeout {
+			continue
+		}
+		if status != ipc.StatusOK {
 			fatal("INIT_LIFECYCLE_FAILED\n")
 		}
 		event, valid := supervisor.DecodeLifecycle(message)
@@ -69,17 +97,20 @@ func userspaceMain() {
 			if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
 				Capabilities: []supervisor.Capability{
 					{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-					{Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Endpoint: 2},
+					{Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+					{Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
 					Capabilities: []supervisor.Capability{
 						{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-						{Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Endpoint: 1},
+						{Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+						{Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 2 {
 				fatal("SHELL_LAUNCH_FAILED\n")
 			}
 			supervisionComplete = true
+			arenaBase = heapPointer
 			write("USERSPACE_SUPERVISOR_OK\n")
 		}
 	}
@@ -98,8 +129,8 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		return 0, false
 	}
 	write("INIT_SERVICE_LAUNCH_OK\n")
-	reply, ok := receive()
-	if !ok {
+	reply, status := receive(lifecycleHandle, 100000)
+	if status != ipc.StatusOK {
 		return 0, false
 	}
 	event, valid := supervisor.DecodeLifecycle(reply)
@@ -110,26 +141,174 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	return event.Process, true
 }
 
-func receive() (ipc.Message, bool) {
+func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
 	for {
 		descriptor[0] = uint64(uintptr(unsafe.Pointer(&wire[0])))
 		descriptor[1] = ipc.WireMaxSize
-		descriptor[2] = 100000
-		status := ipcWaitReceive(lifecycleHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+		descriptor[2] = timeout
+		status := ipcWaitReceive(channel, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
-			continue
+			return ipc.Message{}, ipc.StatusTimeout
 		}
 		if status != 0 {
-			return ipc.Message{}, false
+			return ipc.Message{}, ipc.Status(status)
 		}
 		break
 	}
 	payloadSize := int(wire[24]) | int(wire[25])<<8
 	size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
 	if size < ipc.WireHeaderSize || size > len(wire) {
-		return ipc.Message{}, false
+		return ipc.Message{}, ipc.StatusInvalidArgument
 	}
-	return ipc.Decode(wire[:size])
+	message, ok := ipc.Decode(wire[:size])
+	if !ok {
+		return ipc.Message{}, ipc.StatusInvalidArgument
+	}
+	return message, ipc.StatusOK
+}
+
+func pollExec() {
+	heapPointer = arenaBase
+	status := ipc.Status(ipcReceive(execServerHandle, unsafe.Pointer(&wire[0]), ipc.WireMaxSize))
+	if status == ipc.StatusNotFound {
+		return
+	}
+	if status != ipc.StatusOK {
+		fatal("INIT_EXEC_RECEIVE_FAILED\n")
+	}
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
+	message, ok := ipc.Decode(wire[:size])
+	if !ok {
+		fatal("INIT_EXEC_CORRUPT\n")
+	}
+	request, ok := execproto.DecodeRequest(message)
+	if !ok {
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage))
+		return
+	}
+	var path [execproto.MaxPath]byte
+	pathSize := copy(path[:], request.Path)
+	var cwd [96]byte
+	cwdSize := copy(cwd[:], request.CWD)
+	var arguments [128]byte
+	argumentSize := copy(arguments[:], request.Arguments)
+	if !allowedExecutable(path[:pathSize]) {
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied))
+		return
+	}
+	pid, launchStatus := launchApplication(bytesString(path[:pathSize]), cwd[:cwdSize], arguments[:argumentSize])
+	if launchStatus == supervisor.LaunchOK {
+		waitApplicationExit(pid)
+	}
+	sendExecReply(message.Correlation, pid, uint64(launchStatus))
+}
+
+func launchApplication(path string, cwd, arguments []byte) (uint64, supervisor.LaunchStatus) {
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		return 0, supervisor.LaunchResourceExhausted
+	}
+	correlation++
+	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
+	if !ok || !sendMessage(vfsControlHandle, control) {
+		closePair(pair)
+		return 0, supervisor.LaunchCapabilityInstallFailed
+	}
+	controlReply, status := receive(vfsControlHandle, 1000)
+	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
+	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
+		handleClose(pair[0])
+		return 0, supervisor.LaunchCapabilityInstallFailed
+	}
+	var startupWire [startup.Size]byte
+	startupData, ok := startup.Encode(commandForPath(path), cwd, arguments, &startupWire)
+	if !ok {
+		handleClose(pair[0])
+		return 0, supervisor.LaunchInvalidImage
+	}
+	grants := []supervisor.Capability{
+		{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		{Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+	}
+	correlation++
+	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
+	if !ok || !sendMessage(lifecycleHandle, request) {
+		handleClose(pair[0])
+		return 0, supervisor.LaunchInvalidImage
+	}
+	reply, status := receive(lifecycleHandle, 100000)
+	event, valid := supervisor.DecodeLifecycle(reply)
+	if status != ipc.StatusOK || !valid || event.Operation != supervisor.LifecycleLaunchResult || reply.Correlation != correlation {
+		return 0, supervisor.LaunchProcessFailed
+	}
+	if event.Code != uint64(supervisor.LaunchOK) {
+		handleClose(pair[0])
+	}
+	return event.Process, supervisor.LaunchStatus(event.Code)
+}
+
+func waitApplicationExit(pid uint64) {
+	for {
+		message, status := receive(lifecycleHandle, 100000)
+		if status != ipc.StatusOK {
+			fatal("INIT_EXEC_WAIT_FAILED\n")
+		}
+		event, valid := supervisor.DecodeLifecycle(message)
+		if valid && event.Operation == supervisor.LifecycleProcessExited && event.Process == pid {
+			return
+		}
+	}
+}
+
+func sendExecReply(correlation, pid, status uint64) {
+	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, Status: status}, correlation)
+	if !ok || !sendMessage(execServerHandle, reply) {
+		fatal("INIT_EXEC_REPLY_FAILED\n")
+	}
+}
+
+func sendMessage(channel uint64, message ipc.Message) bool {
+	size, ok := ipc.Encode(message, wire[:])
+	return ok && ipcSend(channel, unsafe.Pointer(&wire[0]), uintptr(size)) == 0
+}
+
+func closePair(pair [2]uint64) {
+	if pair[0] != 0 {
+		handleClose(pair[0])
+	}
+	if pair[1] != 0 {
+		handleClose(pair[1])
+	}
+}
+
+func allowedExecutable(path []byte) bool {
+	return equalBytes(path, "/system/bin/pwd") || equalBytes(path, "/system/bin/ls") || equalBytes(path, "/system/bin/cat")
+}
+
+func commandForPath(path string) byte {
+	if path == "/system/bin/pwd" {
+		return 1
+	}
+	if path == "/system/bin/ls" {
+		return 2
+	}
+	if path == "/system/bin/cat" {
+		return 3
+	}
+	return 0
+}
+
+func equalBytes(value []byte, expected string) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range value {
+		if value[index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func bytesString(value []byte) string {

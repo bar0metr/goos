@@ -18,28 +18,30 @@ correlation ID, payload size, handle count, and reserved fields. The payload is
 followed by up to four receiver-local opaque handle IDs. Decoding requires the
 exact encoded length and zero reserved fields.
 
-Handle passing derives capabilities from the sender's process-local table into
-the receiver's table. The source handle must carry Transfer authority, and the
-requested rights cannot exceed the source. A failed multi-handle transfer closes
-all handles already derived for that message. Transfer is copy semantics; the
-source remains valid.
+The channel core derives capabilities from the sender's process-local table
+into the receiver's table. The source handle must carry Transfer authority, and
+the requested rights cannot exceed the source. A failed multi-handle transfer
+closes all handles already derived for that message. Kernel-internal callers may
+retain the source; the native `IPCSend` boundary applies move semantics after a
+successful send and strips Transfer authority from the receiver.
 
 Closing one endpoint prevents further sends. Its peer may drain already queued
 messages and then receives `PeerDied`. The mechanism is single-CPU: callers
 provide IRQ-level exclusion. Userspace accesses channels only through
-capability-checked handles, never through kernel object addresses. Service
-launch manifests distinguish the two endpoints of a shared channel. Endpoint
-bindings remain scoped by channel object and process address-space root;
-binding the second side links both peers.
+capability-checked handles, never through kernel object addresses. Each channel
+capability identifies one endpoint side. PID 1 may create a bounded channel pair
+through the native call ABI. Userspace IPC attachments use move semantics and
+strip `Transfer` from the receiver. Closing both endpoint capabilities releases
+the fixed registry slot.
 
 # Native call boundary
 
 `IPCSend` and `IPCReceive` accept a process-local channel handle, a user virtual
 address, and a bounded wire-buffer size. The dispatcher validates the size,
 the handle table enforces endpoint rights, and `CopyIn`/`CopyOut` validate every
-mapped page before data crosses the privilege boundary. Native calls currently
-reject attached handles; in-kernel transfers retain the explicit type and
-rights contract described below.
+mapped page before data crosses the privilege boundary. Native sends may attach
+up to four handles. Successful attachment consumes each sender handle; failed
+sends leave the sender table unchanged.
 
 `IPCWaitReceive` takes a fixed 24-byte descriptor containing the destination
 buffer, its capacity, and a relative timeout in timer ticks. An empty channel
@@ -52,11 +54,12 @@ timeout status.
 
 ## PID 1 lifecycle channel
 
-The `GINITLIF` version 1 protocol uses a dedicated channel capability installed
+The `GINITLIF` version 4 protocol uses a dedicated channel capability installed
 only in PID 1. Process-exit notifications carry the PID and typed exit code.
 Launch requests and results are correlated, so each pending request is retired
-by exactly one reply. Endpoint routing is keyed by both channel object and
-process address-space root and has capacity for both sides of every channel.
+by exactly one reply. Launch requests also carry bounded startup data and may
+consume selected PID 1 handles after successful derivation. Endpoint routing is
+derived from the endpoint identity stored in each channel capability.
 
 Calls from the interrupt bridge obey Win64's 16-byte stack alignment. This is
 explicit rather than dependent on the generated Go function's current stack

@@ -11,7 +11,8 @@ PID 1 is compiled from Go using a project-owned TinyGo target for the
 scheduler, links at the native userspace base, and enters through a small
 assembly stub. Kernel calls use the existing `int 0x80` ABI.
 
-The runtime has a fixed 16 KiB stack and a fixed 64 KiB zero-initialized arena
+The runtime initially used a 16 KiB stack; the exec control-plane extension
+raises the shared userspace stack bound to 32 KiB. It retains a fixed 64 KiB zero-initialized arena
 served by a non-freeing bounded allocator. Exhaustion is fatal. The build emits
 a static ELF intermediate; a host tool copies validated `PT_LOAD` segments into
 the versioned GoOS native image format. The kernel never parses ELF.

@@ -8,7 +8,10 @@ process and a thread as interchangeable kernel objects.
 Process IDs and Task IDs reject zero. Each Process currently supports up to 32
 Tasks and rejects duplicate ownership. A bounded registry maps architecture
 Task exits back to their owning Process. It emits process death only when the
-last owned Task exits. Resource reclamation and ID reuse remain deferred.
+last owned Task exits. Exited registry entries and architecture scheduler slots
+are reused after exit delivery, allowing repeated short-lived utilities.
+Address-space pages and guarded kernel-stack allocations are not yet reclaimed;
+physical-memory reclamation remains the next lifecycle boundary.
 
 ## Address-space isolation
 

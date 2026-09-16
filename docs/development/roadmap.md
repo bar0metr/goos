@@ -34,8 +34,13 @@ bounded line editing, and the `help`, `echo`, `clear`, and `uptime` built-ins.
 The shell is now connected to a supervised userspace VFS service through an
 explicit pair of channel endpoints. It maintains a bounded working directory
 and implements `pwd`, `ls`, `cd`, and `cat` over correlated `GVF1` requests.
-The next shell slice adds native executable launch without introducing ambient
-filesystem or process authority.
+Native executable launch is now complete for the first external core utilities.
+PID 1 brokers typed exec requests, supplies bounded startup data, creates a
+dedicated VFS channel pair per process, and grants only console output and the
+new VFS client endpoint. `/system/bin/pwd`, `/system/bin/ls`, and
+`/system/bin/cat` execute as isolated native processes; only `cd` remains a
+filesystem builtin because it mutates shell state. The next process slice
+reclaims exited address spaces and kernel stacks.
 
 Linux ELF compatibility begins only after the native security and process
 model is stable. It is not part of the native ABI.

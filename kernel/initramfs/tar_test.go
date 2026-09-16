@@ -48,3 +48,25 @@ func TestRejectsMalformedArchiveAndPath(t *testing.T) {
 		t.Fatal("accepted corrupt checksum")
 	}
 }
+
+func TestFindValidatedHardlink(t *testing.T) {
+	var output bytes.Buffer
+	writer := tar.NewWriter(&output)
+	payload := []byte("coreutils")
+	if err := writer.WriteHeader(&tar.Header{Name: "system/bin/coreutils", Mode: 0o555, Size: int64(len(payload)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteHeader(&tar.Header{Name: "system/bin/cat", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, ok := Find(output.Bytes(), "system/bin/cat")
+	if !ok || string(data) != "coreutils" {
+		t.Fatalf("hardlink = %q, %v", data, ok)
+	}
+}
