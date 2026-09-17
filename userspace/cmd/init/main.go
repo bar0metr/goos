@@ -359,7 +359,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte)
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	var startupWire [startup.Size]byte
-	bindings := []startup.Handle{{Name: []byte("stdout")}, {Name: []byte("vfs")}}
+	bindings := []startup.Handle{{Name: []byte("stdout")}, {Name: []byte("stderr")}, {Name: []byte("vfs")}}
 	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
 	if !ok {
 		handleClose(pair[0])
@@ -367,6 +367,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte)
 	}
 	grants := []supervisor.Capability{
 		{Name: "stdout", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		{Name: "stderr", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 		{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 	}
 	correlation++
