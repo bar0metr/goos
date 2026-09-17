@@ -23,7 +23,6 @@ var (
 	startupWire      [startup.Size]byte
 	editor           tty.LineEditor
 	inputByte        byte
-	clockValue       uint64
 	heapPointer      uintptr
 	arenaBase        uintptr
 	wire             [ipc.WireMaxSize]byte
@@ -33,6 +32,8 @@ var (
 	cwdSize          = 1
 	pathBuffer       [shellcmd.MaxPath]byte
 	executableBuffer [execproto.MaxPath]byte
+	argumentStorage  [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
+	vectorWire       [96]byte
 )
 
 //go:extern _heap_start
@@ -46,9 +47,6 @@ func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname consoleRead goos_console_read
 func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname clockRead goos_clock_read
-func clockRead(address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
@@ -125,45 +123,39 @@ func execute(line []byte) {
 	command, arguments := shellcmd.Parse(line)
 	switch command {
 	case shellcmd.CommandHelp:
-		write("builtins: help echo clear uptime cd\nexecutables: /system/bin\nSHELL_HELP_OK\n")
-	case shellcmd.CommandEcho:
-		writeBytes(arguments)
-		write("\nSHELL_ECHO_OK\n")
+		write("builtins: help clear cd\nexecutables: /system/bin\nSHELL_HELP_OK\n")
 	case shellcmd.CommandClear:
 		write("\x1b[2J\x1b[H")
 		write("SHELL_CLEAR_OK\n")
-	case shellcmd.CommandUptime:
-		if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
-			write("uptime unavailable\n")
-			return
-		}
-		write("uptime: ")
-		writeUint(clockValue)
-		write(" ticks\nSHELL_UPTIME_OK\n")
-	case shellcmd.CommandPwd:
-		executeExternal([]byte("pwd"), nil)
-	case shellcmd.CommandLs:
-		executeExternal([]byte("ls"), arguments)
 	case shellcmd.CommandCd:
 		executeCd(arguments)
-	case shellcmd.CommandCat:
-		executeExternal([]byte("cat"), arguments)
 	case shellcmd.CommandEmpty:
 		return
 	default:
-		name, args := shellcmd.SplitInvocation(line)
-		executeExternal(name, args)
+		executeExternal(line)
 	}
 }
 
-func executeExternal(command []byte, arguments []byte) {
+func executeExternal(line []byte) {
+	invocation, parsed := shellcmd.ParseInvocation(line, &argumentStorage)
+	if !parsed {
+		write("exec: invalid arguments\n")
+		return
+	}
+	command := invocation.Arguments[0]
 	executable, ok := execproto.ResolveExecutable(command, &executableBuffer)
 	if !ok {
 		write("exec: invalid command\n")
 		return
 	}
 	correlation++
-	request, ok := execproto.EncodeRequest(execproto.Request{Path: executable, CWD: cwd[:cwdSize], Arguments: arguments}, correlation)
+	environment := []startup.Variable{{Name: []byte("PATH"), Value: []byte(execproto.SearchRoot[:len(execproto.SearchRoot)-1])}}
+	argumentData, environmentData, ok := startup.EncodeVectors(invocation.Arguments[:invocation.Count], environment, &vectorWire)
+	if !ok {
+		write("exec: arguments too large\n")
+		return
+	}
+	request, ok := execproto.EncodeRequest(execproto.Request{Path: executable, CWD: cwd[:cwdSize], Arguments: argumentData, Environment: environmentData}, correlation)
 	if !ok {
 		write("exec: invalid request\n")
 		return
@@ -198,9 +190,15 @@ func executeExternal(command []byte, arguments []byte) {
 			write("exec: corrupt reply\n")
 			return
 		}
-		if reply.Status != 0 {
+		if reply.LaunchStatus != 0 {
 			write("exec: launch failed\n")
 			return
+		}
+		if reply.ExitCode != 0 {
+			write("exit status: ")
+			writeUint(reply.ExitCode)
+			write("\n")
+			write("EXIT_STATUS_PROPAGATION_OK\n")
 		}
 		write("SHELL_EXEC_OK\n")
 		return

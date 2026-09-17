@@ -52,7 +52,7 @@ Channel capabilities identify their endpoint side. A launch grant may be marked
 consumed, removing PID 1's source handle after successful derivation. This is
 used for per-process VFS clients and prevents accumulation of temporary handles.
 
-PID 1 also supplies a `GST1` startup template with a unique role name for each
+PID 1 also supplies a `GST2` startup template with a unique role name for each
 manifest entry. After installing all capabilities, the kernel writes their
 actual generation-safe IDs into the startup block before creating the first
 Task. Services resolve roles rather than depending on handle-table insertion

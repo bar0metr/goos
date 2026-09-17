@@ -1,22 +1,30 @@
 package exec
 
-import "testing"
+import (
+	"goos/userspace/startup"
+	"testing"
+)
 
 func TestProtocolRoundTrip(t *testing.T) {
-	message, ok := EncodeRequest(Request{Path: []byte("/system/bin/cat"), CWD: []byte("/system"), Arguments: []byte("motd")}, 7)
+	var wire [96]byte
+	arguments, environment, ok := startup.EncodeVectors([][]byte{[]byte("cat"), []byte("motd")}, []startup.Variable{{Name: []byte("PATH"), Value: []byte("/system/bin")}}, &wire)
+	if !ok {
+		t.Fatal("vector encode failed")
+	}
+	message, ok := EncodeRequest(Request{Path: []byte("/system/bin/cat"), CWD: []byte("/system"), Arguments: arguments, Environment: environment}, 7)
 	if !ok {
 		t.Fatal("request encode failed")
 	}
 	request, ok := DecodeRequest(message)
-	if !ok || string(request.Path) != "/system/bin/cat" || string(request.CWD) != "/system" || string(request.Arguments) != "motd" {
+	if !ok || string(request.Path) != "/system/bin/cat" || string(request.CWD) != "/system" {
 		t.Fatalf("request = %#v", request)
 	}
-	replyMessage, ok := EncodeReply(Reply{Process: 12}, 7)
+	replyMessage, ok := EncodeReply(Reply{Process: 12, ExitCode: 7}, 7)
 	if !ok {
 		t.Fatal("reply encode failed")
 	}
 	reply, ok := DecodeReply(replyMessage)
-	if !ok || reply.Process != 12 || reply.Status != 0 {
+	if !ok || reply.Process != 12 || reply.LaunchStatus != 0 || reply.ExitCode != 7 {
 		t.Fatalf("reply = %#v", reply)
 	}
 }

@@ -22,7 +22,7 @@ The following foundation is already implemented:
 - isolated native `pwd`, `ls`, and `cat` processes;
 - capability-protected process handles, wait, completion records, and process
   resource reclamation;
-- the versioned `GST1` native startup ABI and named startup handles without
+- the versioned `GST2` native startup ABI and named startup handles without
   application dependence on numeric handle slots.
 
 The project has therefore reached the point where additional kernel mechanisms
@@ -39,21 +39,23 @@ Completed in ADR 0031:
 - remove application dependence on globally assumed numeric handle IDs;
 - pass named startup handles explicitly with bounded rights.
 
-Remaining work:
+Completed in ADR 0032:
 
-4. Stabilize `argv`, working-directory inheritance, exit status, and bounded
-   startup/environment data.
+- stabilize structured `argv`, working-directory inheritance, exit status,
+  and bounded startup/environment data;
+- expand `/system/bin` with `echo`, `mkdir`, `touch`, `rm`, `cp`, `mv`, `stat`,
+  `ps`, `mem`, `uptime`, `uname`, and `sleep`.
+
+Maintained invariants:
+
 5. Keep executable lookup bounded and policy-controlled. This is implemented
    for `/system/bin` and remains an invariant for later launch paths.
-6. Expand `/system/bin` with small native utilities:
-   `echo`, `mkdir`, `touch`, `rm`, `cp`, `mv`, `stat`, `ps`, `mem`, `uptime`,
-   `uname`, and `sleep`.
 7. Keep `cd` as a shell builtin because it mutates shell-local state. This is
    implemented.
 8. Keep each external command as an isolated userspace process with a minimal
    capability manifest. This is implemented and remains an invariant.
 
-Quoting may be added here. Full pipelines and job control are not prerequisites
+Priority 1 is complete. Full pipelines and job control are not prerequisites
 for persistent storage.
 
 ## Priority 2 — Persistent storage

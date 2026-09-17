@@ -149,9 +149,8 @@ The native kernel and the first isolated services are implemented:
   policy loop executing inside PID 1;
 - capability manifests that derive PID 1 authority into newly spawned process
   handle tables without rights escalation;
-- a supervised native shell with bounded line editing, built-in `help`, `echo`,
-  `clear`, `uptime`, and `cd`, plus isolated native `pwd`, `ls`, and `cat`
-  executables;
+- a supervised native shell with bounded quoting, structured `argv`, built-in
+  `help`, `clear`, and `cd`, plus isolated native base utilities;
 - a supervised userspace VFS service reached through explicit, non-transferable
   client and server channel endpoints;
 - unit, integration, boot, and performance tests.
@@ -160,20 +159,21 @@ The native kernel and the first isolated services are implemented:
 - capability-protected process handles and a blocking native wait call.
 - bounded `/system/bin` executable lookup with per-process VFS sessions.
 - a versioned native startup ABI with named, capability-bounded handle roles.
+- bounded environment data, child exit-status propagation, and read-only
+  process/memory system information.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
 the policy loop and enforces bounded crash restart accounting. Spawn capability
 installation, a userspace VFS service, an interactive filesystem-aware shell,
 and capability-bounded native utility launch are implemented. The shell resolves
-general native executables beneath `/system/bin`, but does not yet expose
-quoting, pipelines, or redirection. The current ISO boots a real kernel, leaves UEFI
+general native executables beneath `/system/bin` with bounded quoting and
+structured arguments, but does not yet expose pipelines or redirection. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but
 is not yet a general application environment. Native programs no longer assume
-numeric handle slots, but structured argv/environment data and a broader base
-utility set remain incomplete.
+numeric handle slots and the Priority 1 base application environment is complete.
 
 ## Building and running
 
@@ -269,10 +269,9 @@ benchmark results under `build/reports/`.
 ## Development direction
 
 Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, the
-versioned named-handle startup ABI, and the first isolated native utilities are
-already implemented. The next work is structured argv, exit-status propagation,
-bounded environment data, and expansion of the small native base system, then
-capability-isolated persistent storage through a userspace
+versioned named-handle startup ABI, structured argv/environment data, exit
+status propagation, and the native base utilities are implemented. The next
+major milestone is capability-isolated persistent storage through a userspace
 `virtio-blk` driver, block service, filesystem service, and the existing VFS.
 
 Once persistent storage is proven across reboot, shell redirection and pipelines

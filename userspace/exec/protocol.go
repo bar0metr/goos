@@ -8,9 +8,9 @@ import (
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(1)
+	Version    = uint16(2)
 	MaxPath    = 192
-	replySize  = 16
+	replySize  = 24
 	SearchRoot = "/system/bin/"
 )
 
@@ -49,41 +49,46 @@ func CommandFromSystemPath(path []byte) ([]byte, bool) {
 	return command, true
 }
 
-type Request struct{ Path, CWD, Arguments []byte }
+type Request struct{ Path, CWD, Arguments, Environment []byte }
 type Reply struct {
-	Process uint64
-	Status  uint64
+	Process      uint64
+	LaunchStatus uint64
+	ExitCode     uint64
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || !validPath(request.Path) || !validCWD(request.CWD) || len(request.Arguments) > 128 || 4+len(request.Path)+len(request.CWD)+len(request.Arguments) > ipc.MaxPayload {
+	if correlation == 0 || !validPath(request.Path) || !validCWD(request.CWD) || len(request.Arguments) > 96 || len(request.Environment) > 96 || 6+len(request.Path)+len(request.CWD)+len(request.Arguments)+len(request.Environment) > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(4 + len(request.Path) + len(request.CWD) + len(request.Arguments))}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(6 + len(request.Path) + len(request.CWD) + len(request.Arguments) + len(request.Environment))}
 	message.HandleCount = 0
 	for index := range message.Handles {
 		message.Handles[index] = 0
 	}
 	message.Payload[0], message.Payload[1] = byte(len(request.Path)), byte(len(request.CWD))
 	binary.LittleEndian.PutUint16(message.Payload[2:4], uint16(len(request.Arguments)))
-	offset := 4
+	binary.LittleEndian.PutUint16(message.Payload[4:6], uint16(len(request.Environment)))
+	offset := 6
 	copy(message.Payload[offset:], request.Path)
 	offset += len(request.Path)
 	copy(message.Payload[offset:], request.CWD)
 	offset += len(request.CWD)
 	copy(message.Payload[offset:], request.Arguments)
+	offset += len(request.Arguments)
+	copy(message.Payload[offset:], request.Environment)
 	return message, true
 }
 
 func DecodeRequest(message ipc.Message) (Request, bool) {
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 4 {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 6 {
 		return Request{}, false
 	}
-	pathSize, cwdSize, argumentSize := int(message.Payload[0]), int(message.Payload[1]), int(binary.LittleEndian.Uint16(message.Payload[2:4]))
-	if 4+pathSize+cwdSize+argumentSize != int(message.PayloadSize) || argumentSize > 128 {
+	pathSize, cwdSize := int(message.Payload[0]), int(message.Payload[1])
+	argumentSize, environmentSize := int(binary.LittleEndian.Uint16(message.Payload[2:4])), int(binary.LittleEndian.Uint16(message.Payload[4:6]))
+	if 6+pathSize+cwdSize+argumentSize+environmentSize != int(message.PayloadSize) || argumentSize > 96 || environmentSize > 96 {
 		return Request{}, false
 	}
-	offset := 4
+	offset := 6
 	path := message.Payload[offset : offset+pathSize]
 	offset += pathSize
 	cwd := message.Payload[offset : offset+cwdSize]
@@ -91,13 +96,15 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	if !validPath(path) || !validCWD(cwd) {
 		return Request{}, false
 	}
-	return Request{Path: path, CWD: cwd, Arguments: message.Payload[offset : offset+argumentSize]}, true
+	arguments := message.Payload[offset : offset+argumentSize]
+	offset += argumentSize
+	return Request{Path: path, CWD: cwd, Arguments: arguments, Environment: message.Payload[offset : offset+environmentSize]}, true
 }
 
 func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || validPath(path) }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || reply.Process == 0 && reply.Status == 0 || reply.Process != 0 && reply.Status != 0 {
+	if correlation == 0 || reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: replySize}
@@ -106,7 +113,8 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 		message.Handles[index] = 0
 	}
 	binary.LittleEndian.PutUint64(message.Payload[0:8], reply.Process)
-	binary.LittleEndian.PutUint64(message.Payload[8:16], reply.Status)
+	binary.LittleEndian.PutUint64(message.Payload[8:16], reply.LaunchStatus)
+	binary.LittleEndian.PutUint64(message.Payload[16:24], reply.ExitCode)
 	return message, true
 }
 
@@ -114,8 +122,8 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize != replySize {
 		return Reply{}, false
 	}
-	reply := Reply{Process: binary.LittleEndian.Uint64(message.Payload[0:8]), Status: binary.LittleEndian.Uint64(message.Payload[8:16])}
-	if reply.Process == 0 && reply.Status == 0 || reply.Process != 0 && reply.Status != 0 {
+	reply := Reply{Process: binary.LittleEndian.Uint64(message.Payload[0:8]), LaunchStatus: binary.LittleEndian.Uint64(message.Payload[8:16]), ExitCode: binary.LittleEndian.Uint64(message.Payload[16:24])}
+	if reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 || reply.Process == 0 && reply.ExitCode != 0 {
 		return Reply{}, false
 	}
 	return reply, true

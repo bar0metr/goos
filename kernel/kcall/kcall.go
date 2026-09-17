@@ -17,6 +17,7 @@ const (
 	OperationChannelCreate
 	OperationHandleClose
 	OperationProcessWait
+	OperationSystemInfo
 )
 
 type Status uint64
@@ -67,6 +68,7 @@ type Handler interface {
 	StartupRead(address uint64, length uint64) Status
 	ChannelCreate(address uint64, length uint64) Status
 	HandleClose(id uint64) Status
+	SystemInfo(address uint64, length uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -118,9 +120,15 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ChannelCreate(request.Arg0, request.Arg1)}
 	case OperationHandleClose:
 		return Result{Status: handler.HandleClose(request.Arg0)}
+	case OperationSystemInfo:
+		if request.Arg1 != SystemInfoSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.SystemInfo(request.Arg0, request.Arg1)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
 }
 
 const MaxIPCMessage = uint64(320)
+const SystemInfoSize = uint64(40)

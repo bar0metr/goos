@@ -249,6 +249,8 @@ func (registry *Registry) ByID(id ID) (*Process, bool) {
 	return nil, false
 }
 
+func (registry *Registry) Count() int { return int(registry.count) }
+
 func (registry *Registry) Remove(id ID) bool {
 	for index := 0; index < int(registry.count); index++ {
 		if registry.processes[index].ID() != id {

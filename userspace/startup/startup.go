@@ -7,13 +7,15 @@ import (
 
 const (
 	Size       = 128
-	Version    = 1
+	Version    = 2
 	MaxHandles = 7
 	MaxName    = 15
+	MaxArgs    = 8
+	MaxEnv     = 4
 	headerSize = 12
 )
 
-var magic = [4]byte{'G', 'S', 'T', '1'}
+var magic = [4]byte{'G', 'S', 'T', '2'}
 
 type Handle struct {
 	Name []byte
@@ -21,20 +23,25 @@ type Handle struct {
 }
 
 type Data struct {
-	Command        []byte
-	CWD, Arguments []byte
-	Handles        [MaxHandles]Handle
-	HandleCount    uint8
+	Command     []byte
+	CWD         []byte
+	Arguments   []byte
+	Environment []byte
+	Handles     [MaxHandles]Handle
+	HandleCount uint8
 }
 
 // Encode serializes the versioned native process startup ABI. A zero handle ID
 // is permitted only in a launch template and must be resolved by BindHandles
 // before the child can read the block.
-func Encode(command, cwd, arguments []byte, handles []Handle, target *[Size]byte) ([]byte, bool) {
-	if target == nil || len(command) == 0 || len(command) > 32 || len(cwd) == 0 || len(cwd) > 96 || len(arguments) > 120 || len(handles) > MaxHandles {
+func Encode(command, cwd, arguments, environment []byte, handles []Handle, target *[Size]byte) ([]byte, bool) {
+	if target == nil || len(command) == 0 || len(command) > 32 || len(cwd) == 0 || len(cwd) > 96 || len(arguments) > 255 || len(environment) > 255 || len(handles) > MaxHandles {
 		return nil, false
 	}
-	size := headerSize + len(command) + len(cwd) + len(arguments)
+	if _, _, ok := DecodeVectors(arguments, environment); !ok {
+		return nil, false
+	}
+	size := headerSize + len(command) + len(cwd) + len(arguments) + len(environment)
 	for index, binding := range handles {
 		if len(binding.Name) == 0 || len(binding.Name) > MaxName || duplicateName(handles[:index], binding.Name) {
 			return nil, false
@@ -49,7 +56,7 @@ func Encode(command, cwd, arguments []byte, handles []Handle, target *[Size]byte
 	}
 	copy(target[:4], magic[:])
 	target[4], target[5] = Version, byte(len(handles))
-	target[6], target[7], target[8] = byte(len(command)), byte(len(cwd)), byte(len(arguments))
+	target[6], target[7], target[8], target[9] = byte(len(command)), byte(len(cwd)), byte(len(arguments)), byte(len(environment))
 	binary.LittleEndian.PutUint16(target[10:12], uint16(size))
 	offset := headerSize
 	copy(target[offset:], command)
@@ -58,6 +65,8 @@ func Encode(command, cwd, arguments []byte, handles []Handle, target *[Size]byte
 	offset += len(cwd)
 	copy(target[offset:], arguments)
 	offset += len(arguments)
+	copy(target[offset:], environment)
+	offset += len(environment)
 	for _, binding := range handles {
 		target[offset] = byte(len(binding.Name))
 		binary.LittleEndian.PutUint64(target[offset+1:offset+9], uint64(binding.ID))
@@ -81,7 +90,7 @@ func BindHandles(template []byte, installed []handle.ID, target *[Size]byte) ([]
 		}
 		bindings[index].ID = installed[index]
 	}
-	encoded, ok := Encode(data.Command, data.CWD, data.Arguments, bindings, target)
+	encoded, ok := Encode(data.Command, data.CWD, data.Arguments, data.Environment, bindings, target)
 	if !ok || len(encoded) != size {
 		return nil, false
 	}
@@ -103,13 +112,13 @@ func (data Data) Handle(name string) (handle.ID, bool) {
 }
 
 func decode(source []byte, allowUnbound bool) (Data, int, bool) {
-	if len(source) < headerSize || !equal(source[:4], magic[:]) || source[4] != Version || source[9] != 0 {
+	if len(source) < headerSize || !equal(source[:4], magic[:]) || source[4] != Version {
 		return Data{}, 0, false
 	}
 	handleCount := int(source[5])
-	commandSize, cwdSize, argumentSize := int(source[6]), int(source[7]), int(source[8])
+	commandSize, cwdSize, argumentSize, environmentSize := int(source[6]), int(source[7]), int(source[8]), int(source[9])
 	size := int(binary.LittleEndian.Uint16(source[10:12]))
-	if handleCount > MaxHandles || commandSize == 0 || commandSize > 32 || cwdSize == 0 || size < headerSize+commandSize+cwdSize+argumentSize || size > len(source) || size > Size {
+	if handleCount > MaxHandles || commandSize == 0 || commandSize > 32 || cwdSize == 0 || size < headerSize+commandSize+cwdSize+argumentSize+environmentSize || size > len(source) || size > Size {
 		return Data{}, 0, false
 	}
 	offset := headerSize
@@ -119,6 +128,11 @@ func decode(source []byte, allowUnbound bool) (Data, int, bool) {
 	offset += cwdSize
 	data.Arguments = source[offset : offset+argumentSize]
 	offset += argumentSize
+	data.Environment = source[offset : offset+environmentSize]
+	offset += environmentSize
+	if _, _, ok := DecodeVectors(data.Arguments, data.Environment); !ok {
+		return Data{}, 0, false
+	}
 	for index := 0; index < handleCount; index++ {
 		if offset+9 > size {
 			return Data{}, 0, false

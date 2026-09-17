@@ -1,6 +1,75 @@
 // Package shell implements allocation-free parsing for the native command loop.
 package shell
 
+const (
+	MaxArguments    = 8
+	MaxArgumentSize = 63
+)
+
+type Invocation struct {
+	Arguments [MaxArguments][]byte
+	Count     uint8
+}
+
+// ParseInvocation tokenizes a bounded command line with single quotes, double
+// quotes, and backslash escaping. The returned slices refer to storage.
+func ParseInvocation(line []byte, storage *[MaxArguments][MaxArgumentSize]byte) (Invocation, bool) {
+	var result Invocation
+	if storage == nil {
+		return result, false
+	}
+	position := 0
+	for position < len(line) {
+		for position < len(line) && line[position] == ' ' {
+			position++
+		}
+		if position == len(line) {
+			break
+		}
+		if result.Count == MaxArguments {
+			return Invocation{}, false
+		}
+		index, quote := int(result.Count), byte(0)
+		size := 0
+		for position < len(line) {
+			value := line[position]
+			if quote == 0 && value == ' ' {
+				break
+			}
+			if value == '\\' {
+				position++
+				if position == len(line) {
+					return Invocation{}, false
+				}
+				value = line[position]
+			} else if value == '\'' || value == '"' {
+				if quote == 0 {
+					quote = value
+					position++
+					continue
+				}
+				if quote == value {
+					quote = 0
+					position++
+					continue
+				}
+			}
+			if size == MaxArgumentSize {
+				return Invocation{}, false
+			}
+			storage[index][size] = value
+			size++
+			position++
+		}
+		if quote != 0 || size == 0 {
+			return Invocation{}, false
+		}
+		result.Arguments[index] = storage[index][:size]
+		result.Count++
+	}
+	return result, result.Count != 0
+}
+
 type Command uint8
 
 const (
