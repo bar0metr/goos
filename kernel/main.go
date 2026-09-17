@@ -21,6 +21,7 @@ import (
 	"goos/kernel/tty"
 	"goos/kernel/vfs"
 	supervisor "goos/userspace/init"
+	"goos/userspace/startup"
 )
 
 var (
@@ -64,6 +65,7 @@ var (
 	serviceLaunchConfirmed  uint64
 	userspaceSupervisorOK   uint64
 	capabilityManifestOK    uint64
+	startupABIConfirmed     uint64
 	initSendObserved        uint64
 	initSendStatus          kcall.Status
 	initExitObserved        uint64
@@ -212,7 +214,7 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path string, grants []supervisor.Capability, startup []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+func spawnExecutable(path string, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -251,7 +253,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startup []byte
 	if spawned == nil {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
-	*spawned, ok = process.NewWithStartup(pid, process.AddressSpace{Root: root}, startup)
+	*spawned, ok = process.NewWithStartup(pid, process.AddressSpace{Root: root}, startupData)
 	if !ok || spawned.Handles().Available() < len(grants) {
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
@@ -273,6 +275,17 @@ func spawnExecutable(path string, grants []supervisor.Capability, startup []byte
 			}
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
+	}
+	if len(startupData) != 0 {
+		var boundWire [startup.Size]byte
+		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &boundWire)
+		if !boundOK || !spawned.SetStartup(bound) {
+			for index := range grants {
+				spawned.Handles().Close(installed[index])
+			}
+			return 0, 0, supervisor.LaunchInvalidImage
+		}
+		startupABIConfirmed = 1
 	}
 	if !processRegistry.Add(spawned) {
 		for index := range grants {
@@ -1371,6 +1384,13 @@ func main() {
 	console.WriteString("LIFECYCLE_IPC_OK\n")
 	console.WriteString("INIT_EXECUTABLE_LOOKUP_OK\n")
 	console.WriteString("INIT_CAPABILITY_MANIFEST_OK\n")
+	if startupABIConfirmed == 0 {
+		console.WriteString("PANIC: native startup ABI not exercised\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("NATIVE_STARTUP_ABI_OK\n")
 	console.WriteString("PID1_SERVICE_LAUNCH_OK\n")
 	if amd64.UserPreemptions() == 0 {
 		console.WriteString("PANIC: userspace task was not preempted\n")

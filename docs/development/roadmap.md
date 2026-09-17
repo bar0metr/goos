@@ -21,7 +21,9 @@ The following foundation is already implemented:
 - bounded `/system/bin` lookup;
 - isolated native `pwd`, `ls`, and `cat` processes;
 - capability-protected process handles, wait, completion records, and process
-  resource reclamation.
+  resource reclamation;
+- the versioned `GST1` native startup ABI and named startup handles without
+  application dependence on numeric handle slots.
 
 The project has therefore reached the point where additional kernel mechanisms
 are no longer the main route to a more useful system.
@@ -31,20 +33,25 @@ are no longer the main route to a more useful system.
 Before expanding Linux compatibility, make native GoOS applications a stable
 execution environment.
 
-Required work:
+Completed in ADR 0031:
 
-1. Define and document a versioned native process startup ABI.
-2. Remove application dependence on globally assumed numeric handle IDs.
-3. Pass named startup handles explicitly with bounded rights.
+- define and document a versioned native process startup ABI;
+- remove application dependence on globally assumed numeric handle IDs;
+- pass named startup handles explicitly with bounded rights.
+
+Remaining work:
+
 4. Stabilize `argv`, working-directory inheritance, exit status, and bounded
    startup/environment data.
-5. Keep executable lookup bounded and policy-controlled.
+5. Keep executable lookup bounded and policy-controlled. This is implemented
+   for `/system/bin` and remains an invariant for later launch paths.
 6. Expand `/system/bin` with small native utilities:
    `echo`, `mkdir`, `touch`, `rm`, `cp`, `mv`, `stat`, `ps`, `mem`, `uptime`,
    `uname`, and `sleep`.
-7. Keep `cd` as a shell builtin because it mutates shell-local state.
+7. Keep `cd` as a shell builtin because it mutates shell-local state. This is
+   implemented.
 8. Keep each external command as an isolated userspace process with a minimal
-   capability manifest.
+   capability manifest. This is implemented and remains an invariant.
 
 Quoting may be added here. Full pipelines and job control are not prerequisites
 for persistent storage.

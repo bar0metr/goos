@@ -4,8 +4,9 @@ PID 1 launches `/system/shell` as a normal supervised native image after the
 crash-policy boot probe completes. Its capability manifest contains one device
 handle derived from PID 1 with `Read|Write` rights and without `Transfer`.
 
-The shell reads one serial byte at a time through the capability-checked console
-session ABI. The bounded TTY line editor supplies printable input, backspace,
+The shell resolves its `console`, `vfs`, and `exec` handles from the versioned
+startup block, then reads one serial byte at a time through the
+capability-checked console session ABI. The bounded TTY line editor supplies printable input, backspace,
 delete, CR/LF completion, and a 128-byte maximum command line. Runtime
 allocation remains confined to the fixed userspace arena.
 
@@ -25,4 +26,8 @@ The QEMU boot test writes real commands to serial stdin and requires the shell's
 responses in serial output. The shell receives non-transferable VFS and exec
 endpoints and cannot delegate them. Every external utility receives a fresh VFS
 session instead of sharing the shell reply queue. Fast exit notifications that
-arrive before a launch reply are retained in a bounded PID 1 queue. The next native-application work is a versioned startup ABI with explicit startup handles, bounded argv/environment data, working-directory inheritance, and exit status. Quoting may follow that ABI work. I/O redirection and pipelines are intentionally scheduled after persistent storage; job control and a persistent userspace TTY server remain later work.
+arrive before a launch reply are retained in a bounded PID 1 queue. The next
+native-application work is structured argv, explicit exit-status propagation,
+bounded environment data, and more utilities. Quoting may accompany argv work.
+I/O redirection and pipelines are intentionally scheduled after persistent
+storage; job control and a persistent userspace TTY server remain later work.

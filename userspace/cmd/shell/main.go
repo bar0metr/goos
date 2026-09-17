@@ -11,15 +11,16 @@ import (
 	"goos/kernel/vfs"
 	execproto "goos/userspace/exec"
 	shellcmd "goos/userspace/shell"
+	"goos/userspace/startup"
 	"runtime"
 	"unsafe"
 )
 
-const consoleHandle = handle.ID(0x0000000100000001)
-const vfsHandle = uint64(0x0000000100000002)
-const execHandle = uint64(0x0000000100000003)
-
 var (
+	consoleHandle    handle.ID
+	vfsHandle        handle.ID
+	execHandle       handle.ID
+	startupWire      [startup.Size]byte
 	editor           tty.LineEditor
 	inputByte        byte
 	clockValue       uint64
@@ -49,6 +50,9 @@ func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname clockRead goos_clock_read
 func clockRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname startupRead goos_startup_read
+func startupRead(address unsafe.Pointer, size uintptr) uint64
+
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 
@@ -58,6 +62,26 @@ func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uin
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
+	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+		fatal("SHELL_STARTUP_UNAVAILABLE\n")
+	}
+	startupData, validStartup := startup.Decode(startupWire[:])
+	var found bool
+	if !validStartup {
+		fatal("SHELL_STARTUP_INVALID\n")
+	}
+	consoleHandle, found = startupData.Handle("console")
+	if !found {
+		fatal("SHELL_CONSOLE_MISSING\n")
+	}
+	vfsHandle, found = startupData.Handle("vfs")
+	if !found {
+		fatal("SHELL_VFS_MISSING\n")
+	}
+	execHandle, found = startupData.Handle("exec")
+	if !found {
+		fatal("SHELL_EXEC_MISSING\n")
+	}
 	arenaBase = heapPointer
 	root, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: cwd[:cwdSize]})
 	if !ok || root.Status != vfs.StatusOK || root.Kind != ramfs.KindDirectory {
@@ -149,7 +173,7 @@ func executeExternal(command []byte, arguments []byte) {
 		write("exec: encode failed\n")
 		return
 	}
-	if status := ipcSend(execHandle, unsafe.Pointer(&wire[0]), uintptr(size)); status != 0 {
+	if status := ipcSend(uint64(execHandle), unsafe.Pointer(&wire[0]), uintptr(size)); status != 0 {
 		write("exec: service unavailable\n")
 		write("exec status: ")
 		writeUint(status)
@@ -158,7 +182,7 @@ func executeExternal(command []byte, arguments []byte) {
 	}
 	for {
 		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
-		status := ipcWaitReceive(execHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+		status := ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
 			continue
 		}
@@ -223,12 +247,12 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		return vfs.Reply{}, false
 	}
 	size, ok := ipc.Encode(message, wire[:])
-	if !ok || ipcSend(vfsHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+	if !ok || ipcSend(uint64(vfsHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
 		return vfs.Reply{}, false
 	}
 	for {
 		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
-		status := ipcWaitReceive(vfsHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+		status := ipcWaitReceive(uint64(vfsHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
 			continue
 		}

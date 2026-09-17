@@ -69,7 +69,7 @@ func processWait(process uint64, result unsafe.Pointer, timeout uint64) uint64
 func userspaceMain() {
 	runtimeInitHeap()
 	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
-		Capabilities: []supervisor.Capability{{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+		Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 		manager.StartReady(0, bootstrapService) != 1 {
 		fatal("INIT_POLICY_SETUP_FAILED\n")
 	}
@@ -103,15 +103,15 @@ func userspaceMain() {
 		if found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
 			if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
 				Capabilities: []supervisor.Capability{
-					{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-					{Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					{Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+					{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+					{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+					{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
 					Capabilities: []supervisor.Capability{
-						{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-						{Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+						{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+						{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 2 {
 				fatal("SHELL_LAUNCH_FAILED\n")
@@ -127,7 +127,16 @@ func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }
 
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	correlation++
-	request, ok := supervisor.LaunchRequest(1, bytesString(spec.Executable[:spec.ExecutableSize]), spec.Capabilities[:spec.CapabilityCount], correlation)
+	var startupWire [startup.Size]byte
+	var bindings [supervisor.MaxCapabilities]startup.Handle
+	for index := 0; index < int(spec.CapabilityCount); index++ {
+		bindings[index].Name = []byte(spec.Capabilities[index].Name)
+	}
+	startupData, ok := startup.Encode(spec.Name[:spec.NameSize], []byte("/"), nil, bindings[:spec.CapabilityCount], &startupWire)
+	if !ok {
+		return 0, false
+	}
+	request, ok := supervisor.LaunchRequestWithStartup(1, bytesString(spec.Executable[:spec.ExecutableSize]), spec.Capabilities[:spec.CapabilityCount], startupData, correlation)
 	if !ok {
 		return 0, false
 	}
@@ -259,14 +268,15 @@ func launchApplication(path string, command, cwd, arguments []byte) (uint64, han
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	var startupWire [startup.Size]byte
-	startupData, ok := startup.Encode(command, cwd, arguments, &startupWire)
+	bindings := []startup.Handle{{Name: []byte("stdout")}, {Name: []byte("vfs")}}
+	startupData, ok := startup.Encode(command, cwd, arguments, bindings, &startupWire)
 	if !ok {
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	grants := []supervisor.Capability{
-		{Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-		{Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "stdout", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 	}
 	correlation++
 	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)

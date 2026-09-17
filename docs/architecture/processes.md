@@ -55,3 +55,9 @@ authority. Native `ProcessWait` validates that handle, blocks on a bounded wait
 set, supports timer deadlines, and copies the exit code to validated user
 memory. PID 1 uses this path for shell-launched applications and closes the
 handle after completion.
+
+Before the first Task becomes runnable, the kernel completes the bounded
+versioned `GST1` startup block with the actual generation-safe IDs returned by
+capability installation. Applications resolve handles by explicit role names
+instead of assuming process-local slot numbers. Startup metadata never grants
+rights; the installed handle-table entry remains authoritative.

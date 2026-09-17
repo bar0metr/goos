@@ -60,6 +60,7 @@ const (
 )
 
 type Capability struct {
+	Name    string
 	Handle  handle.ID
 	Type    handle.Type
 	Rights  capability.Rights
@@ -137,10 +138,15 @@ func (manager *Manager) Register(definition Definition) Status {
 		len(definition.Dependencies) > MaxDependencies || len(definition.Capabilities) > MaxCapabilities || definition.Restart > RestartAlways {
 		return StatusInvalidArgument
 	}
-	for _, grant := range definition.Capabilities {
+	for index, grant := range definition.Capabilities {
 		const allRights = capability.Read | capability.Write | capability.Execute | capability.Transfer | capability.Wait
-		if grant.Handle == 0 || grant.Type == handle.TypeInvalid || grant.Rights == 0 || grant.Rights&^allRights != 0 {
+		if !validCapabilityName(grant.Name) || grant.Handle == 0 || grant.Type == handle.TypeInvalid || grant.Rights == 0 || grant.Rights&^allRights != 0 {
 			return StatusInvalidArgument
+		}
+		for previous := 0; previous < index; previous++ {
+			if definition.Capabilities[previous].Name == grant.Name {
+				return StatusInvalidArgument
+			}
 		}
 	}
 	if _, found := manager.index(definition.Name); found {
@@ -349,6 +355,19 @@ func validName(value string) bool {
 	}
 	for index := range value {
 		if value[index] == 0 || value[index] == '/' {
+			return false
+		}
+	}
+	return true
+}
+
+func validCapabilityName(value string) bool {
+	if len(value) == 0 || len(value) > 15 {
+		return false
+	}
+	for index := range value {
+		character := value[index]
+		if character < 'a' || character > 'z' {
 			return false
 		}
 	}

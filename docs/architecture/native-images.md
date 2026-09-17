@@ -29,3 +29,9 @@ Relocations, executable ASLR, demand paging, and mapping rollback after an
 internal VM failure remain future work.
 Linux ELF is a separate compatibility-layer format and does not define this
 native envelope.
+
+Process startup is a separate versioned ABI described by ADR 0031. The current
+`GST1` block is limited to 128 bytes and carries command, working directory,
+raw bounded arguments, and named process-local handle bindings. Keeping startup
+metadata outside the image format allows one immutable image to run under
+different capability manifests.

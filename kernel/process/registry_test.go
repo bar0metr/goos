@@ -89,3 +89,19 @@ func TestRegistryRemovesProcessSlot(t *testing.T) {
 		t.Fatal("replacement process missing")
 	}
 }
+
+func TestStartupCanOnlyBeFinalizedBeforeTaskBinding(t *testing.T) {
+	owner, _ := New(12, AddressSpace{Root: 0x12000})
+	if !owner.SetStartup([]byte("startup")) {
+		t.Fatal("startup finalization failed")
+	}
+	var data [MaxStartupData]byte
+	size, ok := owner.Startup(data[:])
+	if !ok || string(data[:size]) != "startup" {
+		t.Fatalf("startup = %q, %v", data[:size], ok)
+	}
+	task, _ := sched.NewTaskID(1, 1)
+	if !owner.AddTask(task) || owner.SetStartup([]byte("changed")) {
+		t.Fatal("startup changed after task binding")
+	}
+}
