@@ -167,6 +167,8 @@ The native kernel and the first isolated services are implemented:
   IRQ and DMA authority, and an isolated ring-3 virtio-blk probe driver.
 - a persistent legacy virtio-blk data path with bounded DMA, IOAPIC-backed IRQ
   waits, a private driver channel, and QEMU-verified read/write/flush requests.
+- a bounded FAT32 backend mounted at `/persist`, reached through VFS and a
+  dedicated capability-scoped block-service endpoint.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -180,8 +182,9 @@ verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but
 is not yet a general application environment. Native programs no longer assume
 numeric handle slots and the Priority 1 base application environment is complete.
-The storage path now reaches a persistent QEMU block device through an isolated
-driver. Persistent filesystem integration is not implemented.
+The storage path reaches a persistent QEMU block device through an isolated
+driver, and native utilities can access bounded FAT32 regular files at
+`/persist` through VFS.
 
 ## Building and running
 
@@ -279,9 +282,9 @@ benchmark results under `build/reports/`.
 Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, the
 versioned named-handle startup ABI, structured argv/environment data, exit
 status propagation, the native base utilities, and the block-service IPC
-boundary are implemented. The next storage iteration is PCI discovery and
-capability-scoped MMIO/IRQ/DMA for a userspace `virtio-blk` driver, followed by
-a persistent filesystem service and the existing VFS.
+boundary, capability-scoped virtio-blk driver, and bounded FAT32 VFS mount are
+implemented. The next storage work is an explicit reboot-persistence gate,
+followed by FAT32 hardening and failure recovery.
 
 Once persistent storage is proven across reboot, shell redirection and pipelines
 can be built on explicit native stdin/stdout/stderr handles and native IPC

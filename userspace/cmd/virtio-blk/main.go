@@ -30,6 +30,8 @@ var (
 	dmaDescriptor  [3]uint64
 	wire           [ipc.WireMaxSize]byte
 	waitDescriptor [3]uint64
+	requestMessage ipc.Message
+	replyMessage   ipc.Message
 	heapPointer    uintptr
 	queueSize      uint16
 	capacity       uint64
@@ -165,13 +167,13 @@ func serve() {
 			fatal("VIRTIO_BLK_RECEIVE_FAILED\n")
 		}
 		payloadSize := int(wire[24]) | int(wire[25])<<8
-		message, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
-		request, validRequest := blockproto.DecodeRequest(message)
+		valid := ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage)
+		request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
 		if !valid || !validRequest {
 			continue
 		}
-		response, encoded := blockproto.EncodeReply(dispatch(request), message.Correlation)
-		size, wireEncoded := ipc.Encode(response, wire[:])
+		encoded := blockproto.EncodeReplyInto(dispatch(request), requestMessage.Correlation, &replyMessage)
+		size, wireEncoded := ipc.EncodeFrom(&replyMessage, wire[:])
 		if !encoded || !wireEncoded || ipcSend(uint64(serviceHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
 			fatal("VIRTIO_BLK_REPLY_FAILED\n")
 		}

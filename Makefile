@@ -68,7 +68,7 @@ $(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec ke
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
 
@@ -100,9 +100,9 @@ $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loa
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
 
-$(BUILD_DIR)/virtio-blk.img:
+$(BUILD_DIR)/virtio-blk.img: tools/mkfat32/main.go
 	@mkdir -p $(BUILD_DIR)
-	@dd if=/dev/zero of=$@ bs=1m count=8 2>/dev/null
+	@$(BUILD_ENV) go run ./tools/mkfat32 $@
 
 initramfs: userspace
 	@mkdir -p $(BUILD_DIR)/initramfs/root/system
@@ -203,6 +203,7 @@ docs:
 	@test -f docs/adr/0033-bounded-block-service-protocol.md
 	@test -f docs/adr/0034-capability-scoped-pci-driver-bootstrap.md
 	@test -f docs/adr/0035-userspace-virtio-block-data-path.md
+	@test -f docs/adr/0036-bounded-fat32-vfs-mount.md
 	@test -f docs/development/building.md
 
 clean:

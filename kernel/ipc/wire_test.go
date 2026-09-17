@@ -17,6 +17,22 @@ func TestWireRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWirePointerRoundTrip(t *testing.T) {
+	original := message(KindRequest, 91)
+	var storage [WireMaxSize]byte
+	if size, ok := EncodeFrom(&original, storage[:]); !ok {
+		t.Fatal("pointer encode failed")
+	} else {
+		var decoded Message
+		if !DecodeInto(storage[:size], &decoded) || decoded.Correlation != original.Correlation || string(decoded.Payload[:decoded.PayloadSize]) != "ping" {
+			t.Fatalf("unexpected decoded message: %#v", decoded)
+		}
+	}
+	if _, ok := EncodeFrom(nil, storage[:]); ok || DecodeInto(storage[:], nil) {
+		t.Fatal("nil message accepted")
+	}
+}
+
 func TestWireRejectsMalformedInput(t *testing.T) {
 	original := message(KindNotification, 0)
 	var storage [WireMaxSize]byte

@@ -27,4 +27,5 @@ capability-protected channel and controls validated service restarts and native
 application launches. The supervised VFS and block-service processes use
 versioned capability-bounded IPC. The block service reaches a persistent QEMU
 disk through an isolated userspace virtio-blk driver with bounded port-I/O,
-DMA, and IRQ authority. Persistent filesystem layers remain future work.
+DMA, and IRQ authority. A bounded FAT32 backend mounted at `/persist` reaches
+that block service through a dedicated capability-scoped endpoint.

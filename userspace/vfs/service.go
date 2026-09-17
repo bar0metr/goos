@@ -4,12 +4,19 @@ package vfsservice
 import (
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
+	"goos/userspace/fat32"
 )
 
 type Service struct {
-	fs        ramfs.FileSystem
-	namespace vfs.Namespace
-	readData  [vfs.MaxReplyData]byte
+	fs         ramfs.FileSystem
+	namespace  vfs.Namespace
+	readData   [vfs.MaxReplyData]byte
+	persistent fat32.FileSystem
+}
+
+func (service *Service) MountPersistent(device fat32.Device) bool {
+	root, ok := service.persistent.Mount(device)
+	return ok && service.namespace.Mount([]byte("/persist"), &service.persistent, root) == vfs.StatusOK
 }
 
 func (service *Service) Init() bool {

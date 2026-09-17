@@ -7,6 +7,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	blockproto "goos/userspace/block"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
 	"runtime"
@@ -20,13 +21,55 @@ var (
 	consoleHandle        handle.ID
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
+	blockHandle          handle.ID
 	startupWire          [startup.Size]byte
 	wire                 [ipc.WireMaxSize]byte
+	blockWire            [ipc.WireMaxSize]byte
+	blockDescriptor      [3]uint64
 	descriptor           = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	heapPointer          uintptr
 	arenaBase            uintptr
 	sessions             [maxSessions]uint64
+	correlation          uint64
 )
+
+type blockDevice struct{}
+
+func (blockDevice) ReadAt(offset uint64, target []byte) bool {
+	for len(target) != 0 {
+		chunk := len(target)
+		if chunk > blockproto.MaxData {
+			chunk = blockproto.MaxData
+		}
+		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationRead, Offset: offset, Length: uint32(chunk)})
+		if !ok || reply.Status != blockproto.StatusOK || len(reply.Data) != chunk {
+			return false
+		}
+		copy(target[:chunk], reply.Data)
+		target = target[chunk:]
+		offset += uint64(chunk)
+	}
+	return true
+}
+func (blockDevice) WriteAt(offset uint64, data []byte) bool {
+	for len(data) != 0 {
+		chunk := len(data)
+		if chunk > blockproto.MaxData {
+			chunk = blockproto.MaxData
+		}
+		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationWrite, Offset: offset, Length: uint32(chunk), Data: data[:chunk]})
+		if !ok || reply.Status != blockproto.StatusOK {
+			return false
+		}
+		data = data[chunk:]
+		offset += uint64(chunk)
+	}
+	return true
+}
+func (blockDevice) Flush() bool {
+	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationFlush})
+	return ok && reply.Status == blockproto.StatusOK
+}
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -75,12 +118,20 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_CONTROL_MISSING\n")
 	}
+	blockHandle, found = startupData.Handle("block")
+	if !found {
+		fatal("VFS_BLOCK_MISSING\n")
+	}
 	sessions[0] = uint64(initialSessionHandle)
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
+	if !service.MountPersistent(blockDevice{}) {
+		fatal("VFS_FAT32_MOUNT_FAILED\n")
+	}
 	arenaBase = heapPointer
 	write("VFS_SERVICE_OK\n")
+	write("FAT32_MOUNT_OK\n")
 	for {
 		heapPointer = arenaBase
 		worked := pollControl()
@@ -109,6 +160,26 @@ func userspaceMain() {
 			ipcWaitReceive(uint64(controlHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		}
 	}
+}
+
+func blockExchange(request blockproto.Request) (blockproto.Reply, bool) {
+	correlation++
+	message, ok := blockproto.EncodeRequest(request, correlation)
+	if !ok {
+		return blockproto.Reply{}, false
+	}
+	size, ok := ipc.Encode(message, blockWire[:])
+	if !ok || ipcSend(uint64(blockHandle), unsafe.Pointer(&blockWire[0]), uintptr(size)) != 0 {
+		return blockproto.Reply{}, false
+	}
+	blockDescriptor[0], blockDescriptor[1], blockDescriptor[2] = uint64(uintptr(unsafe.Pointer(&blockWire[0]))), ipc.WireMaxSize, 100000
+	if ipcWaitReceive(uint64(blockHandle), unsafe.Pointer(&blockDescriptor[0]), uintptr(len(blockDescriptor)*8)) != 0 {
+		return blockproto.Reply{}, false
+	}
+	payloadSize := int(blockWire[24]) | int(blockWire[25])<<8
+	received, valid := ipc.Decode(blockWire[:ipc.WireHeaderSize+payloadSize+int(blockWire[26])*8])
+	reply, validReply := blockproto.DecodeReply(received)
+	return reply, valid && validReply && received.Correlation == correlation
 }
 
 func pollControl() bool {

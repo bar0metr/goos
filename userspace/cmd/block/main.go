@@ -43,16 +43,25 @@ func (backend *driverBackend) Flush() blockproto.Status {
 }
 
 var (
-	backend       driverBackend
-	service       blockproto.Service
-	consoleHandle handle.ID
-	serviceHandle handle.ID
-	driverHandle  handle.ID
-	startupWire   [startup.Size]byte
-	wire          [ipc.WireMaxSize]byte
-	descriptor    [3]uint64
-	heapPointer   uintptr
-	correlation   uint64
+	backend          driverBackend
+	service          blockproto.Service
+	consoleHandle    handle.ID
+	serviceHandle    handle.ID
+	filesystemHandle handle.ID
+	driverHandle     handle.ID
+	startupWire      [startup.Size]byte
+	wire             [ipc.WireMaxSize]byte
+	driverWire       [ipc.WireMaxSize]byte
+	requestMessage   ipc.Message
+	replyMessage     ipc.Message
+	driverRequest    ipc.Message
+	driverReply      ipc.Message
+	driverDescriptor [3]uint64
+	descriptor       [3]uint64
+	heapPointer      uintptr
+	arenaBase        uintptr
+	correlation      uint64
+	waitIndex        uint8
 )
 
 //go:extern _heap_start
@@ -69,6 +78,9 @@ func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname ipcWaitReceive goos_ipc_wait_receive
 func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname ipcReceive goos_ipc_receive
+func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
@@ -95,6 +107,10 @@ func userspaceMain() {
 	if !ok {
 		fatal("BLOCK_DRIVER_MISSING\n")
 	}
+	filesystemHandle, ok = data.Handle("filesystem")
+	if !ok {
+		fatal("BLOCK_FILESYSTEM_MISSING\n")
+	}
 	info, ok := exchange(blockproto.Request{Operation: blockproto.OperationInfo})
 	if !ok || info.Status != blockproto.StatusOK || info.Capacity == 0 || info.BlockSize != 512 {
 		fatal("BLOCK_DRIVER_INFO_FAILED\n")
@@ -104,48 +120,68 @@ func userspaceMain() {
 	if !ok {
 		fatal("BLOCK_SERVICE_INIT_FAILED\n")
 	}
+	arenaBase = heapPointer
 	write("BLOCK_SERVICE_OK\n")
 	for {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
-		status := ipcWaitReceive(uint64(serviceHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
-			continue
+		heapPointer = arenaBase
+		worked := false
+		for _, endpoint := range [...]handle.ID{serviceHandle, filesystemHandle} {
+			status := ipcReceive(uint64(endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
+			if status == uint64(ipc.StatusNotFound) {
+				continue
+			}
+			if status != 0 {
+				fatal("BLOCK_RECEIVE_FAILED\n")
+			}
+			serve(endpoint)
+			worked = true
 		}
-		if status != 0 {
-			fatal("BLOCK_RECEIVE_FAILED\n")
+		if !worked {
+			endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
+			endpoint := endpoints[waitIndex]
+			waitIndex = (waitIndex + 1) % uint8(len(endpoints))
+			descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 1
+			status := ipcWaitReceive(uint64(endpoint), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+			if status == uint64(ipc.StatusOK) {
+				serve(endpoint)
+			} else if status != uint64(ipc.StatusTimeout) {
+				fatal("BLOCK_WAIT_FAILED\n")
+			}
 		}
-		payloadSize := int(wire[24]) | int(wire[25])<<8
-		message, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
-		request, validRequest := blockproto.DecodeRequest(message)
-		if !valid || !validRequest {
-			continue
-		}
-		reply, encoded := blockproto.EncodeReply(service.Dispatch(request), message.Correlation)
-		size, wireEncoded := ipc.Encode(reply, wire[:])
-		if !encoded || !wireEncoded || ipcSend(uint64(serviceHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
-			fatal("BLOCK_REPLY_FAILED\n")
-		}
+	}
+}
+
+func serve(endpoint handle.ID) {
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	valid := ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage)
+	request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
+	if !valid || !validRequest {
+		return
+	}
+	encoded := blockproto.EncodeReplyInto(service.Dispatch(request), requestMessage.Correlation, &replyMessage)
+	size, wireEncoded := ipc.EncodeFrom(&replyMessage, wire[:])
+	if !encoded || !wireEncoded || ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
+		fatal("BLOCK_REPLY_FAILED\n")
 	}
 }
 
 func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 	correlation++
-	message, ok := blockproto.EncodeRequest(request, correlation)
-	if !ok {
+	if !blockproto.EncodeRequestInto(request, correlation, &driverRequest) {
 		return blockproto.Reply{}, false
 	}
-	size, ok := ipc.Encode(message, wire[:])
-	if !ok || ipcSend(uint64(driverHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+	size, ok := ipc.EncodeFrom(&driverRequest, driverWire[:])
+	if !ok || ipcSend(uint64(driverHandle), unsafe.Pointer(&driverWire[0]), uintptr(size)) != 0 {
 		return blockproto.Reply{}, false
 	}
-	descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
-	if ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8)) != 0 {
+	driverDescriptor[0], driverDescriptor[1], driverDescriptor[2] = uint64(uintptr(unsafe.Pointer(&driverWire[0]))), ipc.WireMaxSize, 100000
+	if ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&driverDescriptor[0]), uintptr(len(driverDescriptor)*8)) != 0 {
 		return blockproto.Reply{}, false
 	}
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	received, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
-	reply, validReply := blockproto.DecodeReply(received)
-	return reply, valid && validReply && received.Correlation == correlation
+	payloadSize := int(driverWire[24]) | int(driverWire[25])<<8
+	valid := ipc.DecodeInto(driverWire[:ipc.WireHeaderSize+payloadSize+int(driverWire[26])*8], &driverReply)
+	reply, validReply := blockproto.DecodeReplyFrom(&driverReply)
+	return reply, valid && validReply && driverReply.Correlation == correlation
 }
 
 func write(message string) {

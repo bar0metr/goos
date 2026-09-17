@@ -30,6 +30,8 @@ const virtioIRQHandle = handle.ID(0x000000010000000c)
 const virtioDMAHandle = handle.ID(0x000000010000000d)
 const driverClientHandle = handle.ID(0x000000010000000e)
 const driverServerHandle = handle.ID(0x000000010000000f)
+const filesystemBlockClientHandle = handle.ID(0x0000000100000010)
+const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
 
 var (
 	manager              supervisor.Manager
@@ -114,12 +116,14 @@ func userspaceMain() {
 					{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 					{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+					{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
 					Capabilities: []supervisor.Capability{
 						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 						{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 						{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+						{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
 					Capabilities: []supervisor.Capability{
@@ -153,11 +157,11 @@ func probeBlockService() bool {
 	}
 	message, status := receive(blockClientHandle, 1000)
 	infoReply, valid := blockproto.DecodeReply(message)
-	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 8*1024*1024 || infoReply.BlockSize != 512 {
+	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 64*1024*1024 || infoReply.BlockSize != 512 {
 		return false
 	}
 	correlation++
-	writeRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationWrite, Offset: 509, Length: 6, Data: []byte("GBLKIO")}, correlation)
+	writeRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationWrite, Offset: 4093, Length: 6, Data: []byte("GBLKIO")}, correlation)
 	if !ok || !sendMessage(blockClientHandle, writeRequest) {
 		return false
 	}
@@ -167,7 +171,7 @@ func probeBlockService() bool {
 		return false
 	}
 	correlation++
-	readRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationRead, Offset: 509, Length: 6}, correlation)
+	readRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationRead, Offset: 4093, Length: 6}, correlation)
 	if !ok || !sendMessage(blockClientHandle, readRequest) {
 		return false
 	}

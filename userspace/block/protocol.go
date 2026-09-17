@@ -49,19 +49,35 @@ type Reply struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
+	var message ipc.Message
+	ok := EncodeRequestInto(request, correlation, &message)
+	return message, ok
+}
+
+func EncodeRequestInto(request Request, correlation uint64, message *ipc.Message) bool {
 	if correlation == 0 || request.Operation < OperationInfo || request.Operation > OperationFlush || !validRequest(request) {
-		return ipc.Message{}, false
+		return false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(headerSize + len(request.Data))}
+	if message == nil {
+		return false
+	}
+	*message = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(headerSize + len(request.Data))}
 	message.Payload[0] = byte(request.Operation)
 	binary.LittleEndian.PutUint64(message.Payload[8:16], request.Offset)
 	binary.LittleEndian.PutUint32(message.Payload[16:20], request.Length)
 	binary.LittleEndian.PutUint16(message.Payload[20:22], uint16(len(request.Data)))
 	copy(message.Payload[headerSize:], request.Data)
-	return message, true
+	return true
 }
 
 func DecodeRequest(message ipc.Message) (Request, bool) {
+	return DecodeRequestFrom(&message)
+}
+
+func DecodeRequestFrom(message *ipc.Message) (Request, bool) {
+	if message == nil {
+		return Request{}, false
+	}
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < headerSize {
 		return Request{}, false
 	}
@@ -80,19 +96,35 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
+	var message ipc.Message
+	ok := EncodeReplyInto(reply, correlation, &message)
+	return message, ok
+}
+
+func EncodeReplyInto(reply Reply, correlation uint64, message *ipc.Message) bool {
 	if correlation == 0 || reply.Operation < OperationInfo || reply.Operation > OperationFlush || reply.Status > StatusIOError || len(reply.Data) > MaxData || reply.Operation != OperationRead && len(reply.Data) != 0 || reply.Status != StatusOK && len(reply.Data) != 0 {
-		return ipc.Message{}, false
+		return false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: uint16(headerSize + len(reply.Data))}
+	if message == nil {
+		return false
+	}
+	*message = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: uint16(headerSize + len(reply.Data))}
 	message.Payload[0], message.Payload[1] = byte(reply.Operation), byte(reply.Status)
 	binary.LittleEndian.PutUint64(message.Payload[8:16], reply.Capacity)
 	binary.LittleEndian.PutUint32(message.Payload[16:20], reply.BlockSize)
 	binary.LittleEndian.PutUint16(message.Payload[20:22], uint16(len(reply.Data)))
 	copy(message.Payload[headerSize:], reply.Data)
-	return message, true
+	return true
 }
 
 func DecodeReply(message ipc.Message) (Reply, bool) {
+	return DecodeReplyFrom(&message)
+}
+
+func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
+	if message == nil {
+		return Reply{}, false
+	}
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < headerSize || !zero(message.Payload[2:8]) || message.Payload[22] != 0 || message.Payload[23] != 0 {
 		return Reply{}, false
 	}
