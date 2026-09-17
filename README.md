@@ -168,7 +168,8 @@ The native kernel and the first isolated services are implemented:
 - a persistent legacy virtio-blk data path with bounded DMA, IOAPIC-backed IRQ
   waits, a private driver channel, and QEMU-verified read/write/flush requests.
 - a bounded FAT32 backend mounted at `/persist`, reached through VFS and a
-  dedicated capability-scoped block-service endpoint.
+  dedicated capability-scoped block-service endpoint, with persistence verified
+  across separate QEMU boots.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -282,9 +283,10 @@ benchmark results under `build/reports/`.
 Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, the
 versioned named-handle startup ABI, structured argv/environment data, exit
 status propagation, the native base utilities, and the block-service IPC
-boundary, capability-scoped virtio-blk driver, and bounded FAT32 VFS mount are
-implemented. The next storage work is an explicit reboot-persistence gate,
-followed by FAT32 hardening and failure recovery.
+boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
+reboot-persistence gate are implemented. Priority 3 shell composition is now
+the next roadmap milestone; FAT32 hardening and storage failure recovery remain
+incremental storage work.
 
 Once persistent storage is proven across reboot, shell redirection and pipelines
 can be built on explicit native stdin/stdout/stderr handles and native IPC

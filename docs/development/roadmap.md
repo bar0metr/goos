@@ -110,10 +110,11 @@ Current progress: ADRs 0033 through 0036 implement the bounded `GBLK001`
 protocol, capability-scoped PCI/IRQ/DMA driver authority, the userspace
 virtio-blk data path, and a bounded FAT32 backend mounted at `/persist`. QEMU
 validates file creation and readback through VFS and verifies the bytes in the
-persistent raw image. Items 1 through 7 are complete for the initial bounded
-single-device design. The remaining Priority 2 boundary is an explicit reboot
-persistence gate and then hardening beyond the deliberately constrained FAT32
-subset.
+persistent raw image. The boot gate then starts a fresh VM on the same image and
+reads the file without rewriting it. Items 1 through 8 are complete for the
+initial bounded single-device design. Priority 2 hardening beyond the
+deliberately constrained FAT32 subset remains incremental work rather than a
+blocker for Priority 3.
 
 ## Priority 3 — Shell composition
 
