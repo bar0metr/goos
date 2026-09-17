@@ -165,6 +165,8 @@ The native kernel and the first isolated services are implemented:
   service with a volatile validation backend.
 - PCI discovery for a legacy virtio-blk function, capability-scoped port I/O,
   IRQ and DMA authority, and an isolated ring-3 virtio-blk probe driver.
+- a persistent legacy virtio-blk data path with bounded DMA, IOAPIC-backed IRQ
+  waits, a private driver channel, and QEMU-verified read/write/flush requests.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -178,8 +180,8 @@ verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but
 is not yet a general application environment. Native programs no longer assume
 numeric handle slots and the Priority 1 base application environment is complete.
-The storage path has crossed the kernel/userspace hardware boundary, but the
-virtqueue data path and persistent filesystem integration are not implemented.
+The storage path now reaches a persistent QEMU block device through an isolated
+driver. Persistent filesystem integration is not implemented.
 
 ## Building and running
 

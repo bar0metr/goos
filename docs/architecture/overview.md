@@ -25,6 +25,6 @@ supervision policy, UEFI initramfs discovery, ring-3 PID 1 launch, and bounded
 process-death delivery are implemented. PID 1 receives lifecycle events over a
 capability-protected channel and controls validated service restarts and native
 application launches. The supervised VFS and block-service processes use
-versioned capability-bounded IPC; the current block backend is deliberately
-volatile while PCI, MMIO/IRQ/DMA capabilities, virtio-blk, and persistent
-filesystem layers remain future work.
+versioned capability-bounded IPC. The block service reaches a persistent QEMU
+disk through an isolated userspace virtio-blk driver with bounded port-I/O,
+DMA, and IRQ authority. Persistent filesystem layers remain future work.

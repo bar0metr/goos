@@ -130,6 +130,7 @@ while [ "$elapsed" -lt 120 ]; do
 		grep -q 'PCI_DISCOVERY_OK' "$log" 2>/dev/null && \
 		grep -q 'VIRTIO_BLK_CAPABILITIES_OK' "$log" 2>/dev/null && \
 		grep -q 'VIRTIO_BLK_DRIVER_OK' "$log" 2>/dev/null && \
+		grep -q 'VIRTIO_BLK_IRQ_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_VFS_CONNECTED_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \
@@ -185,6 +186,8 @@ while [ "$elapsed" -lt 120 ]; do
 		grep -q 'BOOT_OK' "$log" 2>/dev/null; then
 		kill "$pid" 2>/dev/null || true
 		wait "$pid" 2>/dev/null || true
+		value=$(dd if="$disk" bs=1 skip=509 count=6 2>/dev/null)
+		[ "$value" = 'GBLKIO' ] || { printf 'persistent block verification failed\n' >&2; exit 1; }
 		printf 'boot test passed\n'
 		exit 0
 	fi

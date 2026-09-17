@@ -311,6 +311,7 @@ goos_interrupt_table:
     .quad goos_exception_28, goos_exception_29, goos_exception_30, goos_exception_31
     .quad goos_irq_timer
     .quad goos_user_call
+    .quad goos_irq_11
 
 .section .text
 .global goos_user_call
@@ -339,6 +340,8 @@ goos_user_call:
 	 je .user_call_wait
 	 cmpq $12, 48(%rsp)
 	 je .user_call_process_wait
+	 cmpq $17, 48(%rsp)
+	 je .user_call_irq_wait
 	 movq 48(%rsp), %rcx
 	 movq 96(%rsp), %rdx
 	 movq 88(%rsp), %r8
@@ -368,6 +371,14 @@ goos_user_call:
 	 movq (%r9,%rax,8), %r9
 	 orq %rax, %r9
 	 callq goos_dispatch_process_wait
+	 jmp .user_call_result
+.user_call_irq_wait:
+	 movq 96(%rsp), %rcx
+	 movq goos_current_task(%rip), %rax
+	 leaq goos_task_roots(%rip), %rdx
+	 movq (%rdx,%rax,8), %rdx
+	 orq %rax, %rdx
+	 callq goos_dispatch_irq_wait
 .user_call_result:
 	 movq $0, 48(%rsp)
 	 movl %eax, 48(%rsp)
@@ -530,6 +541,57 @@ goos_irq_timer:
     movb $0x20, %al
     outb %al, $0x20
 .restore_context:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    iretq
+
+.global goos_irq_11
+goos_irq_11:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movl $0x26, 0x3fffe000
+    movl 0x3fffe010, %eax
+    orl $0x10000, %eax
+    movl %eax, 0x3fffe010
+    movq $1, goos_irq_11_pending(%rip)
+    movq goos_irq_11_waiter(%rip), %rcx
+    testq %rcx, %rcx
+    jz .irq_11_eoi
+    decq %rcx
+    btsq %rcx, goos_runnable_mask(%rip)
+    movq $0, goos_irq_11_waiter(%rip)
+    jmp .irq_11_eoi
+.irq_11_eoi:
+    movl $0, 0x3fffD0b0
+    movb $0x20, %al
+    outb %al, $0xa0
+    outb %al, $0x20
     popq %r15
     popq %r14
     popq %r13
@@ -822,6 +884,40 @@ goos_tss_rsp0_address:
     .quad 0
 goos_kernel_call_arg2:
     .quad 0
+goos_irq_11_pending:
+    .quad 0
+goos_irq_11_waiter:
+    .quad 0
+
+.section .text
+.global goos_take_irq_11
+goos_take_irq_11:
+    xorq %rax, %rax
+    cmpq $0, goos_irq_11_pending(%rip)
+    je .take_irq_11_done
+    decq goos_irq_11_pending(%rip)
+    movq $1, %rax
+.take_irq_11_done:
+    retq
+
+.global goos_set_irq_11_waiter
+goos_set_irq_11_waiter:
+    movq %rcx, goos_irq_11_waiter(%rip)
+    retq
+
+.global goos_rearm_irq_11
+goos_rearm_irq_11:
+    movl $0x26, 0x3fffe000
+    movl $0xa02b, 0x3fffe010
+    retq
+
+.global goos_quiesce_irq_11
+goos_quiesce_irq_11:
+    movl $0x26, 0x3fffe000
+    movl $0x1a02b, 0x3fffe010
+    movq $0, goos_irq_11_pending(%rip)
+    movq $0, goos_irq_11_waiter(%rip)
+    retq
 
 .section .text
 .global goos_user_preemptions_read

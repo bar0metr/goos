@@ -21,6 +21,7 @@ const (
 	OperationPortRead
 	OperationPortWrite
 	OperationDMAAllocate
+	OperationIRQWait
 )
 
 type Status uint64
