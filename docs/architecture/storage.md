@@ -46,7 +46,9 @@ intentionally limited to a flat root directory, 8.3 ASCII names, one-sector
 clusters, sixteen directory entries, and 64 KiB files. It supports the regular
 file lifecycle needed by native utilities and preserves the raw image across
 QEMU boots. The boot gate copies `/system/motd` through VFS and verifies the
-result in the host-visible disk image.
+result in the host-visible disk image. A second VM boot mounts the same image
+and reads the file without issuing another copy, proving persistence across a
+complete guest restart.
 
 Subdirectories, long-file-name creation, general FAT32 geometry, crash
 consistency, dynamic interrupt routing, multiple devices, scatter-gather

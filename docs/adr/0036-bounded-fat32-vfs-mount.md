@@ -37,8 +37,9 @@ request loss and starvation.
 
 Native utilities can persist regular files under `/persist` without receiving
 block or device capabilities. QEMU validates the complete VFS-to-FAT32-to-block-
-service-to-virtio path and verifies the resulting bytes in the raw image. Host
-tests remount the same device and read data written before the remount.
+service-to-virtio path, verifies the resulting bytes in the raw image, starts a
+fresh VM, and reads the file without rewriting it. Host tests also remount the
+same device and read data written before the remount.
 
 Subdirectories, long-file-name creation, multiple FAT copies, variable cluster
 sizes, crash consistency, repair, concurrent requests, and a separate

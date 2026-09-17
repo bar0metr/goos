@@ -5,8 +5,9 @@ iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=build/virtio-blk.img
 log=build/logs/boot.log
+reboot_log=build/logs/reboot.log
 mkdir -p build/logs
-rm -f "$log"
+rm -f "$log" "$reboot_log"
 
 ( sleep 4
   printf 'help\n'
@@ -80,6 +81,7 @@ rm -f "$log"
 pid=$!
 
 elapsed=0
+first_passed=0
 while [ "$elapsed" -lt 120 ]; do
 	if grep -q 'BOOT_SERVICES_EXITED' "$log" 2>/dev/null && \
 		grep -q 'PMM_OK' "$log" 2>/dev/null && \
@@ -194,7 +196,41 @@ while [ "$elapsed" -lt 120 ]; do
 		value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)
 		[ "$value" = 'GBLKIO' ] || { printf 'persistent block verification failed\n' >&2; exit 1; }
 		grep -a -q 'Welcome to GoOS' "$disk" || { printf 'persistent FAT32 file verification failed\n' >&2; exit 1; }
-		printf 'boot test passed\n'
+		first_passed=1
+		break
+	fi
+	sleep 1
+	elapsed=$((elapsed + 1))
+done
+
+if [ "$first_passed" -ne 1 ]; then
+	kill "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+	printf 'boot test timed out; serial output follows:\n' >&2
+	cat "$log" >&2
+	exit 1
+fi
+
+( sleep 4
+	printf 'cat /persist/state.txt\n'
+) | qemu-system-x86_64 -machine q35 -m 512M \
+	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$reboot_log" 2>&1 &
+pid=$!
+
+elapsed=0
+while [ "$elapsed" -lt 60 ]; do
+	if grep -q 'BOOT_OK' "$reboot_log" 2>/dev/null && \
+		grep -q 'FAT32_MOUNT_OK' "$reboot_log" 2>/dev/null && \
+		grep -q 'SHELL_VFS_CONNECTED_OK' "$reboot_log" 2>/dev/null && \
+		grep -q 'Welcome to GoOS' "$reboot_log" 2>/dev/null && \
+		grep -q 'CAT_PROCESS_OK' "$reboot_log" 2>/dev/null && \
+		! grep -q 'CP_PROCESS_OK' "$reboot_log" 2>/dev/null; then
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+		printf 'boot and reboot persistence tests passed\n'
 		exit 0
 	fi
 	sleep 1
@@ -203,6 +239,6 @@ done
 
 kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
-printf 'boot test timed out; serial output follows:\n' >&2
-cat "$log" >&2
+printf 'reboot persistence test timed out; serial output follows:\n' >&2
+cat "$reboot_log" >&2
 exit 1
