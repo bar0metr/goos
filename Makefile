@@ -20,13 +20,15 @@ COREUTILS_IMAGE := $(BUILD_DIR)/userspace/coreutils
 COREUTILS_ELF := $(BUILD_DIR)/userspace/coreutils.elf
 BLOCK_IMAGE := $(BUILD_DIR)/userspace/block
 BLOCK_ELF := $(BUILD_DIR)/userspace/block.elf
+VIRTIO_BLOCK_IMAGE := $(BUILD_DIR)/userspace/virtio-blk
+VIRTIO_BLOCK_ELF := $(BUILD_DIR)/userspace/virtio-blk.elf
 EFI_IMAGE := $(BUILD_DIR)/iso/efi.img
 ISO_BOOT_IMAGE := $(ISO_ROOT)/efi.img
 ISO := $(BUILD_DIR)/goos-x86_64.iso
 QEMU := qemu-system-x86_64
 QEMU_SHARE ?= /opt/local/share/qemu
 OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
-QEMU_FLAGS := -machine q35 -m 512M -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -serial stdio -display none -no-reboot
+QEMU_FLAGS := -machine q35 -m 512M -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
 SOURCE_DATE_EPOCH ?= 0
 
 .DEFAULT_GOAL := all
@@ -46,7 +48,7 @@ $(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(BUILD_DIR)/userspace
@@ -87,14 +89,25 @@ $(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup
 $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
+$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup kernel/handle kernel/kcall -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(BUILD_DIR)/userspace
+	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/virtio-blk
+
+$(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
 
+$(BUILD_DIR)/virtio-blk.img:
+	@mkdir -p $(BUILD_DIR)
+	@dd if=/dev/zero of=$@ bs=1m count=8 2>/dev/null
+
 initramfs: userspace
 	@mkdir -p $(BUILD_DIR)/initramfs/root/system
 	@cp $(INIT_IMAGE) $(BUILD_DIR)/initramfs/root/system/init
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
 
 $(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
@@ -115,10 +128,10 @@ $(ISO): $(EFI_IMAGE)
 	@test -s $@
 	@printf 'built %s\n' '$@'
 
-run: iso
+run: iso $(BUILD_DIR)/virtio-blk.img
 	$(QEMU) $(QEMU_FLAGS) -cdrom $(ISO)
 
-run-debug: iso
+run-debug: iso $(BUILD_DIR)/virtio-blk.img
 	$(QEMU) $(QEMU_FLAGS) -s -S -cdrom $(ISO)
 
 test: test-unit test-integration test-security
@@ -130,9 +143,9 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
 
-test-boot: iso
+test-boot: iso $(BUILD_DIR)/virtio-blk.img
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
 
 test-performance:
@@ -188,6 +201,7 @@ docs:
 	@test -f docs/adr/0031-versioned-native-process-startup.md
 	@test -f docs/adr/0032-native-argv-environment-and-base-utilities.md
 	@test -f docs/adr/0033-bounded-block-service-protocol.md
+	@test -f docs/adr/0034-capability-scoped-pci-driver-bootstrap.md
 	@test -f docs/development/building.md
 
 clean:

@@ -25,6 +25,9 @@ const execServerHandle = uint64(0x0000000100000007)
 const execClientHandle = handle.ID(0x0000000100000008)
 const blockClientHandle = uint64(0x0000000100000009)
 const blockServerHandle = handle.ID(0x000000010000000a)
+const virtioPortHandle = handle.ID(0x000000010000000b)
+const virtioIRQHandle = handle.ID(0x000000010000000c)
+const virtioDMAHandle = handle.ID(0x000000010000000d)
 
 var (
 	manager              supervisor.Manager
@@ -115,13 +118,20 @@ func userspaceMain() {
 						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 						{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+				manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
+					Capabilities: []supervisor.Capability{
+						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+						{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
+						{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
+						{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
+					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
 					Capabilities: []supervisor.Capability{
 						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
 						{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 						{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 3 || !probeBlockService() {
+				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 4 || !probeBlockService() {
 				fatal("SHELL_LAUNCH_FAILED\n")
 			}
 			supervisionComplete = true

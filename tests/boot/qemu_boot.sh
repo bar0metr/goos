@@ -3,6 +3,7 @@ set -eu
 
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
+disk=build/virtio-blk.img
 log=build/logs/boot.log
 mkdir -p build/logs
 rm -f "$log"
@@ -69,11 +70,13 @@ rm -f "$log"
 	 printf 'echo arena-stress-complete\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
 elapsed=0
-while [ "$elapsed" -lt 90 ]; do
+while [ "$elapsed" -lt 120 ]; do
 	if grep -q 'BOOT_SERVICES_EXITED' "$log" 2>/dev/null && \
 		grep -q 'PMM_OK' "$log" 2>/dev/null && \
 		grep -q 'NX_WX_OK' "$log" 2>/dev/null && \
@@ -124,6 +127,9 @@ while [ "$elapsed" -lt 90 ]; do
 		grep -q 'VFS_SERVICE_OK' "$log" 2>/dev/null && \
 		grep -q 'BLOCK_SERVICE_OK' "$log" 2>/dev/null && \
 		grep -q 'BLOCK_SERVICE_IO_OK' "$log" 2>/dev/null && \
+		grep -q 'PCI_DISCOVERY_OK' "$log" 2>/dev/null && \
+		grep -q 'VIRTIO_BLK_CAPABILITIES_OK' "$log" 2>/dev/null && \
+		grep -q 'VIRTIO_BLK_DRIVER_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_VFS_CONNECTED_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \

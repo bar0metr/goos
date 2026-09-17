@@ -18,9 +18,17 @@ logical block size, read, write, and flush operations. It does not know about
 PCI, virtio queues, FAT, paths, or VFS handles. The filesystem service will be
 the only layer translating file semantics into block operations.
 
-The current iteration supplies the protocol and a supervised ring-3 block
-service. Its private volatile backend exists only to exercise real IPC reads,
-writes across a logical-block boundary, device information, and flush in QEMU.
-It does not claim persistent storage: PCI discovery, capability-scoped
-MMIO/IRQ/DMA, the userspace virtio-blk driver process, FAT32, VFS mounting, and
-reboot persistence remain required.
+The kernel discovers the QEMU legacy virtio-blk PCI function through PCI
+configuration mechanism 1. PID 1 receives three independently typed authorities:
+a bounded port-I/O range, the device IRQ line, and a DMA allocation domain. It
+derives only the required rights into a separate ring-3 `virtio-blk` process.
+Native calls reject out-of-range port offsets and unsupported widths. DMA
+allocation is limited to one zeroed contiguous page, maps it only into the
+caller's address space, and returns an explicit physical/virtual/size descriptor.
+
+The driver resets and probes the legacy device, validates its feature register,
+queue size, capacity, IRQ capability, and DMA mapping in QEMU. The block service
+still uses its private volatile validation backend. IRQ delivery/wait semantics,
+virtqueue ownership and teardown, request completion, connection of the block
+service to the driver, FAT32, VFS mounting, and reboot persistence remain
+required. The current driver bootstrap is not persistent storage.
