@@ -128,11 +128,16 @@ func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	correlation++
 	var startupWire [startup.Size]byte
+	var vectorWire [96]byte
 	var bindings [supervisor.MaxCapabilities]startup.Handle
 	for index := 0; index < int(spec.CapabilityCount); index++ {
 		bindings[index].Name = []byte(spec.Capabilities[index].Name)
 	}
-	startupData, ok := startup.Encode(spec.Name[:spec.NameSize], []byte("/"), nil, bindings[:spec.CapabilityCount], &startupWire)
+	arguments, environment, ok := startup.EncodeVectors([][]byte{spec.Name[:spec.NameSize]}, nil, &vectorWire)
+	if !ok {
+		return 0, false
+	}
+	startupData, ok := startup.Encode(spec.Name[:spec.NameSize], []byte("/"), arguments, environment, bindings[:spec.CapabilityCount], &startupWire)
 	if !ok {
 		return 0, false
 	}
@@ -229,7 +234,7 @@ func pollExec() {
 	}
 	request, ok := execproto.DecodeRequest(message)
 	if !ok {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage))
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
 		return
 	}
 	var path [execproto.MaxPath]byte
@@ -238,19 +243,22 @@ func pollExec() {
 	cwdSize := copy(cwd[:], request.CWD)
 	var arguments [128]byte
 	argumentSize := copy(arguments[:], request.Arguments)
+	var environment [96]byte
+	environmentSize := copy(environment[:], request.Environment)
 	command, allowed := execproto.CommandFromSystemPath(path[:pathSize])
 	if !allowed {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied))
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied), 0)
 		return
 	}
-	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), command, cwd[:cwdSize], arguments[:argumentSize])
+	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), command, cwd[:cwdSize], arguments[:argumentSize], environment[:environmentSize])
+	exitCode := uint64(0)
 	if launchStatus == supervisor.LaunchOK {
-		waitApplicationExit(processHandle)
+		exitCode = waitApplicationExit(processHandle)
 	}
-	sendExecReply(message.Correlation, pid, uint64(launchStatus))
+	sendExecReply(message.Correlation, pid, uint64(launchStatus), exitCode)
 }
 
-func launchApplication(path string, command, cwd, arguments []byte) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchApplication(path string, command, cwd, arguments, environment []byte) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
 	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
@@ -269,7 +277,7 @@ func launchApplication(path string, command, cwd, arguments []byte) (uint64, han
 	}
 	var startupWire [startup.Size]byte
 	bindings := []startup.Handle{{Name: []byte("stdout")}, {Name: []byte("vfs")}}
-	startupData, ok := startup.Encode(command, cwd, arguments, bindings, &startupWire)
+	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
 	if !ok {
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
@@ -294,7 +302,7 @@ func launchApplication(path string, command, cwd, arguments []byte) (uint64, han
 	return event.Process, event.ProcessHandle, supervisor.LaunchStatus(event.Code)
 }
 
-func waitApplicationExit(processHandle handle.ID) {
+func waitApplicationExit(processHandle handle.ID) uint64 {
 	var exitCode uint64
 	for {
 		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), 100000)
@@ -308,12 +316,12 @@ func waitApplicationExit(processHandle handle.ID) {
 			write("PROCESS_HANDLE_WAIT_OK\n")
 			processWaitAnnounced = true
 		}
-		return
+		return exitCode
 	}
 }
 
-func sendExecReply(correlation, pid, status uint64) {
-	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, Status: status}, correlation)
+func sendExecReply(correlation, pid, status, exitCode uint64) {
+	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, LaunchStatus: status, ExitCode: exitCode}, correlation)
 	if !ok || !sendMessage(execServerHandle, reply) {
 		fatal("INIT_EXEC_REPLY_FAILED\n")
 	}

@@ -10,9 +10,9 @@ rm -f "$log"
 ( sleep 4
   printf 'help\n'
   sleep 1
-  printf 'echo hello\n'
-  sleep 1
-	 printf 'args alpha beta\n'
+	printf 'echo "hello structured world"\n'
+	sleep 1
+	 printf 'args "alpha beta" escaped\\ value\n'
 	 sleep 1
   printf 'clear\n'
   sleep 1
@@ -31,6 +31,32 @@ rm -f "$log"
 	 printf 'pwd\n'
 	 sleep 1
 	 printf 'cat motd\n'
+	 sleep 1
+	 printf 'mkdir /tmp/demo\n'
+	 sleep 1
+	 printf 'touch /tmp/demo/file\n'
+	 sleep 1
+	 printf 'stat /tmp/demo/file\n'
+	 sleep 1
+	 printf 'cp /system/motd /tmp/demo/copy\n'
+	 sleep 1
+	 printf 'cat /tmp/demo/copy\n'
+	 sleep 1
+	 printf 'mv /tmp/demo/file /tmp/demo/moved\n'
+	 sleep 1
+	 printf 'rm /tmp/demo/moved\n'
+	 sleep 1
+	 printf 'uname\n'
+	 sleep 1
+	 printf 'ps\n'
+	 sleep 1
+	 printf 'mem\n'
+	 sleep 1
+	 printf 'uptime\n'
+	 sleep 1
+	 printf 'sleep 1\n'
+	 sleep 1
+	 printf 'cat /missing\n'
 	 count=0
 	 while [ "$count" -lt 30 ]; do
 		 sleep 0.2
@@ -99,17 +125,30 @@ while [ "$elapsed" -lt 90 ]; do
 		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_VFS_CONNECTED_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \
-		grep -q 'hello' "$log" 2>/dev/null && \
-		grep -q 'SHELL_ECHO_OK' "$log" 2>/dev/null && \
-		grep -q 'alpha beta' "$log" 2>/dev/null && \
+		grep -q 'hello structured world' "$log" 2>/dev/null && \
+		grep -q 'ECHO_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'alpha beta escaped value' "$log" 2>/dev/null && \
+		grep -q 'PATH=/system/bin' "$log" 2>/dev/null && \
 		grep -q 'ARGS_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'ARGV_ENV_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_UPTIME_OK' "$log" 2>/dev/null && \
+		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'PWD_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'LS_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CD_OK' "$log" 2>/dev/null && \
 		grep -q 'Welcome to GoOS' "$log" 2>/dev/null && \
 		grep -q 'CAT_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'MKDIR_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'TOUCH_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'STAT_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'CP_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'MV_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'RM_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'UNAME_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'PS_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'MEM_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'SLEEP_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'EXIT_STATUS_PROPAGATION_OK' "$log" 2>/dev/null && \
 		[ "$(grep -c 'CAT_PROCESS_OK' "$log" 2>/dev/null)" -ge 31 ] && \
 		[ "$(grep -c 'SHELL_EXEC_OK' "$log" 2>/dev/null)" -ge 66 ] && \
 		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \

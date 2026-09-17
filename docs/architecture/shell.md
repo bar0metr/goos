@@ -10,14 +10,14 @@ capability-checked console session ABI. The bounded TTY line editor supplies pri
 delete, CR/LF completion, and a 128-byte maximum command line. Runtime
 allocation remains confined to the fixed userspace arena.
 
-The built-ins are `help`, `echo`, `clear`, `uptime`, and `cd`. `clear` emits
-ANSI terminal control, while `uptime` reads the kernel's monotonic 100 Hz tick
-counter. The shell owns a fixed 192-byte working-directory buffer matching the
+The built-ins are `help`, `clear`, and `cd`. `clear` emits ANSI terminal
+control. Commands are split into at most eight arguments with bounded single
+quotes, double quotes, and backslash escaping. The shell owns a fixed 192-byte working-directory buffer matching the
 inline `GVF1` path limit and resolves
 relative paths without heap allocation. `cd` commits a new directory only after
 VFS `Stat` confirms it. Other command names are resolved beneath the fixed
-`/system/bin/` search root; shell sends the executable path, raw bounded
-argument tail, and current directory to PID 1 and waits through a process
+`/system/bin/` search root; shell sends the executable path, structured bounded
+argument and environment vectors, and current directory to PID 1 and waits through a process
 handle. PID 1 independently validates the system path and executable image.
 The shell similarly restores its post-startup arena mark after every completed
 command, so repeated IPC commands cannot exhaust the non-freeing TinyGo heap.
@@ -26,8 +26,9 @@ The QEMU boot test writes real commands to serial stdin and requires the shell's
 responses in serial output. The shell receives non-transferable VFS and exec
 endpoints and cannot delegate them. Every external utility receives a fresh VFS
 session instead of sharing the shell reply queue. Fast exit notifications that
-arrive before a launch reply are retained in a bounded PID 1 queue. The next
-native-application work is structured argv, explicit exit-status propagation,
-bounded environment data, and more utilities. Quoting may accompany argv work.
-I/O redirection and pipelines are intentionally scheduled after persistent
-storage; job control and a persistent userspace TTY server remain later work.
+arrive before a launch reply are retained in a bounded PID 1 queue. The exec
+reply distinguishes launch status from the final child exit code. The native
+base utilities receive structured `argv`, `PATH=/system/bin`, and only their
+named console/VFS handles. I/O redirection and pipelines are intentionally
+scheduled after persistent storage; job control and a persistent userspace TTY
+server remain later work.

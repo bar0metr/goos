@@ -50,6 +50,11 @@ func (handler *testHandler) HandleClose(id uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) SystemInfo(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -143,5 +148,16 @@ func TestDispatchStartupAndHandleOperations(t *testing.T) {
 	}
 	if result := Dispatch(Request{Operation: OperationHandleClose, Arg0: 17}, handler); result.Status != StatusOK || handler.channel != 17 {
 		t.Fatalf("unexpected handle close: %#v, handler: %#v", result, handler)
+	}
+}
+
+func TestDispatchSystemInfo(t *testing.T) {
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationSystemInfo, Arg0: 0x6000, Arg1: SystemInfoSize}, handler)
+	if result.Status != StatusOK || handler.address != 0x6000 || handler.length != SystemInfoSize {
+		t.Fatalf("system info = %#v, handler: %#v", result, handler)
+	}
+	if result = Dispatch(Request{Operation: OperationSystemInfo, Arg1: SystemInfoSize - 1}, handler); result.Status != StatusInvalidArgument {
+		t.Fatalf("short system info = %#v", result)
 	}
 }

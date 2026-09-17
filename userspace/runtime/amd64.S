@@ -96,6 +96,14 @@ goos_process_wait:
     ret
 .size goos_process_wait, .-goos_process_wait
 
+.global goos_system_info
+.type goos_system_info,@function
+goos_system_info:
+    movl $13, %eax
+    int $0x80
+    ret
+.size goos_system_info, .-goos_system_info
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

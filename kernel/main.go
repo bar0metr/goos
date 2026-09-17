@@ -364,6 +364,24 @@ func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.
 	return kcall.StatusOK
 }
 
+func (handler nativeCallHandler) SystemInfo(address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || length != kcall.SystemInfoSize {
+		return kcall.StatusInvalidArgument
+	}
+	statistics := pageAllocator.Statistics()
+	var encoded [kcall.SystemInfoSize]byte
+	putUint64(encoded[0:8], uint64(owner.ID()))
+	putUint64(encoded[8:16], uint64(processRegistry.Count()))
+	putUint64(encoded[16:24], statistics.ManagedPages)
+	putUint64(encoded[24:32], statistics.FreePages)
+	putUint64(encoded[32:40], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || length != process.MaxStartupData {

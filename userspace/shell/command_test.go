@@ -37,3 +37,14 @@ func TestSplitInvocation(t *testing.T) {
 		t.Fatalf("invocation = %q, %q", command, arguments)
 	}
 }
+
+func TestParseInvocation(t *testing.T) {
+	var storage [MaxArguments][MaxArgumentSize]byte
+	invocation, ok := ParseInvocation([]byte(`echo "hello world" 'two words' escaped\ value`), &storage)
+	if !ok || invocation.Count != 4 || string(invocation.Arguments[0]) != "echo" || string(invocation.Arguments[1]) != "hello world" || string(invocation.Arguments[2]) != "two words" || string(invocation.Arguments[3]) != "escaped value" {
+		t.Fatalf("invocation = %#v, %v", invocation, ok)
+	}
+	if _, ok := ParseInvocation([]byte(`echo "unterminated`), &storage); ok {
+		t.Fatal("unterminated quote accepted")
+	}
+}
