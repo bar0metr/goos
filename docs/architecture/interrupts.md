@@ -25,9 +25,15 @@ increments a monotonic 64-bit tick counter, acknowledges the master PIC, and
 returns with `IRETQ`. Boot waits for three physical timer interrupts before
 emitting `TIMER_OK`.
 
-The PIC/PIT path is a deliberately small bootstrap mechanism for the current
-single-CPU QEMU target. Local APIC, IOAPIC, per-CPU timers, and calibrated time
-conversion are required before SMP and are not hidden behind the current API.
+The PIC/PIT path remains the bootstrap timer mechanism. For Q35 PCI INTx, the
+kernel maps the LAPIC and IOAPIC into supervisor-only pages and routes virtio
+GSI 11 to vector 43. The handler coalesces the level-triggered source, masks the
+route, wakes the single capability-authorized waiter, and acknowledges the
+LAPIC. The driver acknowledges the device ISR; its next wait rearms the route.
+
+The current interrupt routing is deliberately single-CPU and single-device.
+ACPI MADT parsing, dynamic GSI routing, per-CPU timers, and calibrated time
+conversion are required before SMP.
 
 ## Ring transition state
 

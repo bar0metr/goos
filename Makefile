@@ -202,6 +202,7 @@ docs:
 	@test -f docs/adr/0032-native-argv-environment-and-base-utilities.md
 	@test -f docs/adr/0033-bounded-block-service-protocol.md
 	@test -f docs/adr/0034-capability-scoped-pci-driver-bootstrap.md
+	@test -f docs/adr/0035-userspace-virtio-block-data-path.md
 	@test -f docs/development/building.md
 
 clean:

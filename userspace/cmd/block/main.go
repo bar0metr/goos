@@ -12,29 +12,47 @@ import (
 	"unsafe"
 )
 
-type memoryBackend struct{ data [4096]byte }
+type driverBackend struct {
+	capacity  uint64
+	blockSize uint32
+}
 
-func (backend *memoryBackend) Capacity() uint64  { return uint64(len(backend.data)) }
-func (backend *memoryBackend) BlockSize() uint32 { return 512 }
-func (backend *memoryBackend) ReadAt(offset uint64, target []byte) blockproto.Status {
-	copy(target, backend.data[offset:offset+uint64(len(target))])
+func (backend *driverBackend) Capacity() uint64  { return backend.capacity }
+func (backend *driverBackend) BlockSize() uint32 { return backend.blockSize }
+func (backend *driverBackend) ReadAt(offset uint64, target []byte) blockproto.Status {
+	reply, ok := exchange(blockproto.Request{Operation: blockproto.OperationRead, Offset: offset, Length: uint32(len(target))})
+	if !ok || reply.Status != blockproto.StatusOK || len(reply.Data) != len(target) {
+		return blockproto.StatusIOError
+	}
+	copy(target, reply.Data)
 	return blockproto.StatusOK
 }
-func (backend *memoryBackend) WriteAt(offset uint64, data []byte) blockproto.Status {
-	copy(backend.data[offset:offset+uint64(len(data))], data)
-	return blockproto.StatusOK
+func (backend *driverBackend) WriteAt(offset uint64, data []byte) blockproto.Status {
+	reply, ok := exchange(blockproto.Request{Operation: blockproto.OperationWrite, Offset: offset, Length: uint32(len(data)), Data: data})
+	if !ok {
+		return blockproto.StatusIOError
+	}
+	return reply.Status
 }
-func (backend *memoryBackend) Flush() blockproto.Status { return blockproto.StatusOK }
+func (backend *driverBackend) Flush() blockproto.Status {
+	reply, ok := exchange(blockproto.Request{Operation: blockproto.OperationFlush})
+	if !ok {
+		return blockproto.StatusIOError
+	}
+	return reply.Status
+}
 
 var (
-	backend       memoryBackend
+	backend       driverBackend
 	service       blockproto.Service
 	consoleHandle handle.ID
 	serviceHandle handle.ID
+	driverHandle  handle.ID
 	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
 	descriptor    [3]uint64
 	heapPointer   uintptr
+	correlation   uint64
 )
 
 //go:extern _heap_start
@@ -73,6 +91,15 @@ func userspaceMain() {
 	if !ok {
 		fatal("BLOCK_ENDPOINT_MISSING\n")
 	}
+	driverHandle, ok = data.Handle("driver")
+	if !ok {
+		fatal("BLOCK_DRIVER_MISSING\n")
+	}
+	info, ok := exchange(blockproto.Request{Operation: blockproto.OperationInfo})
+	if !ok || info.Status != blockproto.StatusOK || info.Capacity == 0 || info.BlockSize != 512 {
+		fatal("BLOCK_DRIVER_INFO_FAILED\n")
+	}
+	backend.capacity, backend.blockSize = info.Capacity, info.BlockSize
 	service, ok = blockproto.NewService(&backend)
 	if !ok {
 		fatal("BLOCK_SERVICE_INIT_FAILED\n")
@@ -99,6 +126,26 @@ func userspaceMain() {
 			fatal("BLOCK_REPLY_FAILED\n")
 		}
 	}
+}
+
+func exchange(request blockproto.Request) (blockproto.Reply, bool) {
+	correlation++
+	message, ok := blockproto.EncodeRequest(request, correlation)
+	if !ok {
+		return blockproto.Reply{}, false
+	}
+	size, ok := ipc.Encode(message, wire[:])
+	if !ok || ipcSend(uint64(driverHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+		return blockproto.Reply{}, false
+	}
+	descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
+	if ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8)) != 0 {
+		return blockproto.Reply{}, false
+	}
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	received, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
+	reply, validReply := blockproto.DecodeReply(received)
+	return reply, valid && validReply && received.Correlation == correlation
 }
 
 func write(message string) {

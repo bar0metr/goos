@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. The deferred data-path work is completed by ADR 0035.
 
 ## Context
 

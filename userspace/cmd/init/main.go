@@ -28,6 +28,8 @@ const blockServerHandle = handle.ID(0x000000010000000a)
 const virtioPortHandle = handle.ID(0x000000010000000b)
 const virtioIRQHandle = handle.ID(0x000000010000000c)
 const virtioDMAHandle = handle.ID(0x000000010000000d)
+const driverClientHandle = handle.ID(0x000000010000000e)
+const driverServerHandle = handle.ID(0x000000010000000f)
 
 var (
 	manager              supervisor.Manager
@@ -117,6 +119,7 @@ func userspaceMain() {
 					Capabilities: []supervisor.Capability{
 						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 						{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+						{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
 					Capabilities: []supervisor.Capability{
@@ -124,6 +127,7 @@ func userspaceMain() {
 						{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
 						{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
 						{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
+						{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
 					Capabilities: []supervisor.Capability{
@@ -149,7 +153,7 @@ func probeBlockService() bool {
 	}
 	message, status := receive(blockClientHandle, 1000)
 	infoReply, valid := blockproto.DecodeReply(message)
-	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 4096 || infoReply.BlockSize != 512 {
+	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 8*1024*1024 || infoReply.BlockSize != 512 {
 		return false
 	}
 	correlation++

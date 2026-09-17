@@ -128,6 +128,14 @@ goos_dma_allocate:
     ret
 .size goos_dma_allocate, .-goos_dma_allocate
 
+.global goos_irq_wait
+.type goos_irq_wait,@function
+goos_irq_wait:
+    movl $17, %eax
+    int $0x80
+    ret
+.size goos_irq_wait, .-goos_irq_wait
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

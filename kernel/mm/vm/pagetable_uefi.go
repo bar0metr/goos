@@ -121,6 +121,25 @@ func MapKernelPage(rootAddress uint64, address uint64) bool {
 	return true
 }
 
+// MapKernelDevicePage replaces a high bootstrap identity leaf with a
+// supervisor-only RW+NX mapping of one device MMIO page.
+func MapKernelDevicePage(rootAddress uint64, virtual uint64, physical uint64) bool {
+	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || virtual >= IdentityMapLimit || physical%PageSize != 0 {
+		return false
+	}
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, virtual)
+	if entry == nil {
+		return false
+	}
+	value, ok := pageEntry(physical, Permissions{Writable: true})
+	if !ok {
+		return false
+	}
+	*entry = value
+	return true
+}
+
 // IsMapped reports whether a bootstrap leaf is present.
 func IsMapped(rootAddress uint64, address uint64) bool {
 	if rootAddress%PageSize != 0 || address >= IdentityMapLimit {
