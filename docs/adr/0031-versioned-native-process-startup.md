@@ -34,7 +34,7 @@ type and rights checks; startup names do not grant authority.
 
 Shell, VFS, and native utilities no longer depend on global numeric handle IDs
 or insertion order. Capability rights remain bounded by the launch manifest.
-The 128-byte startup limit intentionally constrains the combined command, cwd,
-arguments, and binding names. Structured `argv`, environment entries, and
-separate stdin/stdout/stderr roles remain later extensions of this versioned
-contract.
+The bounded startup limit intentionally constrains the combined command, cwd,
+arguments, and binding names. ADRs 0032, 0037, and 0038 subsequently add
+structured vectors and separate standard-stream roles without replacing the
+versioned contract.

@@ -82,6 +82,9 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok || string(startupEvent.Startup[:startupEvent.StartupSize]) != "startup" {
 		t.Fatalf("startup = %#v", startupEvent)
 	}
+	if _, ok := LaunchRequestWithStartup(4, "/system/x", nil, make([]byte, MaxStartupData+1), 12); ok {
+		t.Fatal("oversized startup accepted")
+	}
 	tooMany := make([]Capability, MaxCapabilities+1)
 	for index := range tooMany {
 		tooMany[index] = Capability{Handle: handle.ID(index + 1), Type: handle.TypeDevice, Rights: capability.Write}

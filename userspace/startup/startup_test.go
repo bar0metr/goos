@@ -12,7 +12,7 @@ func TestRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("vector encode failed")
 	}
-	handles := []Handle{{Name: []byte("stdout"), ID: 0x100000001}, {Name: []byte("stderr"), ID: 0x100000002}, {Name: []byte("vfs"), ID: 0x100000003}}
+	handles := []Handle{{Name: []byte("in"), ID: 0x100000001}, {Name: []byte("stdout"), ID: 0x100000002}, {Name: []byte("stderr"), ID: 0x100000003}, {Name: []byte("vfs"), ID: 0x100000004}}
 	encoded, ok := Encode([]byte("cat"), []byte("/system"), arguments, environment, handles, &wire)
 	if !ok {
 		t.Fatal("encode failed")
@@ -23,10 +23,13 @@ func TestRoundTrip(t *testing.T) {
 	if !ok || string(data.Command) != "cat" || string(data.CWD) != "/system" || !argumentFound || string(argument) != "motd" || !pathFound || string(path) != "/system/bin" {
 		t.Fatalf("data = %#v", data)
 	}
-	if stdout, found := data.Handle("stdout"); !found || stdout != handles[0].ID {
+	if stdin, found := data.Handle("in"); !found || stdin != handles[0].ID {
+		t.Fatalf("stdin = %#x, %v", stdin, found)
+	}
+	if stdout, found := data.Handle("stdout"); !found || stdout != handles[1].ID {
 		t.Fatalf("stdout = %#x, %v", stdout, found)
 	}
-	if stderr, found := data.Handle("stderr"); !found || stderr != handles[1].ID {
+	if stderr, found := data.Handle("stderr"); !found || stderr != handles[2].ID {
 		t.Fatalf("stderr = %#x, %v", stderr, found)
 	}
 }
@@ -87,7 +90,7 @@ func TestRejectsMalformedVectors(t *testing.T) {
 	}
 }
 
-func TestExternalUtilityStandardErrorBindingsFit(t *testing.T) {
+func TestExternalUtilityStandardStreamBindingsFit(t *testing.T) {
 	var vectors [96]byte
 	arguments, environment, ok := EncodeVectors(
 		[][]byte{[]byte("cp"), []byte("/system/motd"), []byte("/persist/state.txt")},
@@ -98,7 +101,7 @@ func TestExternalUtilityStandardErrorBindingsFit(t *testing.T) {
 		t.Fatal("vector encode failed")
 	}
 	var wire [Size]byte
-	bindings := []Handle{{Name: []byte("stdout")}, {Name: []byte("stderr")}, {Name: []byte("vfs")}}
+	bindings := []Handle{{Name: []byte("in")}, {Name: []byte("stdout")}, {Name: []byte("stderr")}, {Name: []byte("vfs")}}
 	if _, ok = Encode([]byte("cp"), []byte("/system"), arguments, environment, bindings, &wire); !ok {
 		t.Fatal("standard stream bindings exceed startup ABI")
 	}

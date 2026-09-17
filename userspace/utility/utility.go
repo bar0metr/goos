@@ -22,6 +22,7 @@ var correlation uint64
 var heapPointer uintptr
 var stdoutHandle uint64
 var stderrHandle uint64
+var stdinHandle uint64
 var vfsHandle uint64
 var clockValue uint64
 var systemInfo [kcall.SystemInfoSize]byte
@@ -65,11 +66,12 @@ func Run() {
 	if !ok {
 		finish(1, "invalid startup data\n")
 	}
+	stdin, stdinFound := data.Handle("in")
 	stdout, stdoutFound := data.Handle("stdout")
 	stderr, stderrFound := data.Handle("stderr")
 	vfsEndpoint, vfsFound := data.Handle("vfs")
-	stdoutHandle, stderrHandle, vfsHandle = uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
-	if !stdoutFound || !stderrFound || !vfsFound {
+	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
+	if !stdinFound || !stdoutFound || !stderrFound || !vfsFound {
 		finish(1, "startup handles unavailable\n")
 	}
 	switch {
@@ -88,7 +90,7 @@ func Run() {
 			writeBytes(path)
 			write("\n")
 		}
-		write("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDERR_HANDLE_OK\n")
+		write("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDIN_HANDLE_OK\nSTDERR_HANDLE_OK\n")
 	case equal(data.Command, "echo"):
 		writeArguments(data, 1)
 		write("\nECHO_PROCESS_OK\n")

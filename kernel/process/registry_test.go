@@ -105,3 +105,9 @@ func TestStartupCanOnlyBeFinalizedBeforeTaskBinding(t *testing.T) {
 		t.Fatal("startup changed after task binding")
 	}
 }
+
+func TestStartupDataBound(t *testing.T) {
+	if _, ok := NewWithStartup(13, AddressSpace{Root: 0x13000}, make([]byte, MaxStartupData+1)); ok {
+		t.Fatal("oversized startup accepted")
+	}
+}
