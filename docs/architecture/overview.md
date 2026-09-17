@@ -23,5 +23,8 @@ capability-derived handle passing, peer-death reporting, and shared pages for
 bulk data. Restartable IPC waits, the first service protocol cores, bounded init
 supervision policy, UEFI initramfs discovery, ring-3 PID 1 launch, and bounded
 process-death delivery are implemented. PID 1 receives lifecycle events over a
-capability-protected channel and controls a validated bootstrap service restart.
-General service executable resolution remains unfinished.
+capability-protected channel and controls validated service restarts and native
+application launches. The supervised VFS and block-service processes use
+versioned capability-bounded IPC; the current block backend is deliberately
+volatile while PCI, MMIO/IRQ/DMA capabilities, virtio-blk, and persistent
+filesystem layers remain future work.

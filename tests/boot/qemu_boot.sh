@@ -122,6 +122,8 @@ while [ "$elapsed" -lt 90 ]; do
 		grep -q 'NATIVE_STARTUP_ABI_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
 		grep -q 'VFS_SERVICE_OK' "$log" 2>/dev/null && \
+		grep -q 'BLOCK_SERVICE_OK' "$log" 2>/dev/null && \
+		grep -q 'BLOCK_SERVICE_IO_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_VFS_CONNECTED_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \

@@ -18,6 +18,8 @@ VFS_IMAGE := $(BUILD_DIR)/userspace/vfs
 VFS_ELF := $(BUILD_DIR)/userspace/vfs.elf
 COREUTILS_IMAGE := $(BUILD_DIR)/userspace/coreutils
 COREUTILS_ELF := $(BUILD_DIR)/userspace/coreutils.elf
+BLOCK_IMAGE := $(BUILD_DIR)/userspace/block
+BLOCK_ELF := $(BUILD_DIR)/userspace/block.elf
 EFI_IMAGE := $(BUILD_DIR)/iso/efi.img
 ISO_BOOT_IMAGE := $(ISO_ROOT)/efi.img
 ISO := $(BUILD_DIR)/goos-x86_64.iso
@@ -44,7 +46,7 @@ $(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(BUILD_DIR)/userspace
@@ -78,6 +80,13 @@ $(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspa
 $(COREUTILS_IMAGE): $(COREUTILS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(COREUTILS_ELF) $@
 
+$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup kernel/handle kernel/ipc kernel/kcall internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(BUILD_DIR)/userspace
+	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
+
+$(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
@@ -85,7 +94,7 @@ $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loa
 initramfs: userspace
 	@mkdir -p $(BUILD_DIR)/initramfs/root/system
 	@cp $(INIT_IMAGE) $(BUILD_DIR)/initramfs/root/system/init
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
 
 $(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
@@ -121,7 +130,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
+	$(BUILD_ENV) go test ./internal/capability ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
 
 test-boot: iso
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -154,6 +163,7 @@ docs:
 	@test -f docs/architecture/vfs.md
 	@test -f docs/architecture/init.md
 	@test -f docs/architecture/shell.md
+	@test -f docs/architecture/storage.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/adr/0011-native-image-format.md
@@ -177,6 +187,7 @@ docs:
 	@test -f docs/adr/0030-bounded-system-path-native-exec.md
 	@test -f docs/adr/0031-versioned-native-process-startup.md
 	@test -f docs/adr/0032-native-argv-environment-and-base-utilities.md
+	@test -f docs/adr/0033-bounded-block-service-protocol.md
 	@test -f docs/development/building.md
 
 clean:

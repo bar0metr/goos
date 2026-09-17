@@ -106,6 +106,12 @@ persistent
 
 The second `cat` must read data written before reboot.
 
+Current progress: ADR 0033 defines and tests the bounded `GBLK001` protocol and
+the device-independent block-service core in a supervised ring-3 process. QEMU
+validates info, write, cross-block read, and flush against an explicitly
+volatile private backend. The virtio backend is not implemented; items 1 and 2
+remain the next iteration.
+
 ## Priority 3 — Shell composition
 
 After persistent storage works, finish the shell composition primitives:
