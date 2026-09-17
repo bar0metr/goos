@@ -170,6 +170,8 @@ The native kernel and the first isolated services are implemented:
 - a bounded FAT32 backend mounted at `/persist`, reached through VFS and a
   dedicated capability-scoped block-service endpoint, with persistence verified
   across separate QEMU boots.
+- distinct named, write-only `stdout` and `stderr` capabilities for external
+  native utilities.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs

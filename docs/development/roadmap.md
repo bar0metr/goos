@@ -130,6 +130,11 @@ After persistent storage works, finish the shell composition primitives:
 Do not introduce POSIX file descriptors into the native ABI merely to make the
 shell familiar. POSIX fd semantics belong to the Linux compatibility layer.
 
+Current progress: ADR 0037 gives every external utility distinct named,
+write-only `stdout` and `stderr` capabilities and routes non-zero-exit
+diagnostics through `stderr`. Both currently target the serial console. Explicit
+`stdin`, alternate stream endpoints, redirection, and pipes remain unfinished.
+
 ## Priority 4 — Separate normal boot from validation boot
 
 The production boot path should become progressively quieter and should not be

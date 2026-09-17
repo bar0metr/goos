@@ -28,7 +28,9 @@ endpoints and cannot delegate them. Every external utility receives a fresh VFS
 session instead of sharing the shell reply queue. Fast exit notifications that
 arrive before a launch reply are retained in a bounded PID 1 queue. The exec
 reply distinguishes launch status from the final child exit code. The native
-base utilities receive structured `argv`, `PATH=/system/bin`, and only their
-named console/VFS handles. I/O redirection and pipelines are intentionally
-scheduled after persistent storage; job control and a persistent userspace TTY
-server remain later work.
+base utilities receive structured `argv`, `PATH=/system/bin`, a fresh VFS
+session, and distinct write-only `stdout` and `stderr` handles. Normal output
+uses `stdout`; non-zero-exit diagnostics use `stderr`. Both currently target the
+same serial console, so observable terminal behavior is unchanged. Explicit
+`stdin`, alternate stream endpoints, I/O redirection, pipelines, job control,
+and a persistent userspace TTY server remain later work.

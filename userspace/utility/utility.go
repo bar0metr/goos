@@ -20,7 +20,8 @@ var startupWire [startup.Size]byte
 var pathBuffer [shell.MaxPath]byte
 var correlation uint64
 var heapPointer uintptr
-var consoleHandle uint64
+var stdoutHandle uint64
+var stderrHandle uint64
 var vfsHandle uint64
 var clockValue uint64
 var systemInfo [kcall.SystemInfoSize]byte
@@ -65,11 +66,12 @@ func Run() {
 		finish(1, "invalid startup data\n")
 	}
 	stdout, stdoutFound := data.Handle("stdout")
+	stderr, stderrFound := data.Handle("stderr")
 	vfsEndpoint, vfsFound := data.Handle("vfs")
-	if !stdoutFound || !vfsFound {
+	stdoutHandle, stderrHandle, vfsHandle = uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
+	if !stdoutFound || !stderrFound || !vfsFound {
 		finish(1, "startup handles unavailable\n")
 	}
-	consoleHandle, vfsHandle = uint64(stdout), uint64(vfsEndpoint)
 	switch {
 	case equal(data.Command, "pwd"):
 		writeBytes(data.CWD)
@@ -86,7 +88,7 @@ func Run() {
 			writeBytes(path)
 			write("\n")
 		}
-		write("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\n")
+		write("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDERR_HANDLE_OK\n")
 	case equal(data.Command, "echo"):
 		writeArguments(data, 1)
 		write("\nECHO_PROCESS_OK\n")
@@ -421,7 +423,11 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 
 func finish(code uint64, message string) {
 	if message != "" {
-		write(message)
+		if code == 0 {
+			write(message)
+		} else {
+			writeError(message)
+		}
 	}
 	handleClose(vfsHandle)
 	processExit(code)
@@ -429,11 +435,20 @@ func finish(code uint64, message string) {
 	}
 }
 func write(message string) {
-	consoleWrite(consoleHandle, unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	consoleWrite(stdoutHandle, unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func writeBytes(value []byte) {
 	if len(value) != 0 {
-		consoleWrite(consoleHandle, unsafe.Pointer(&value[0]), uintptr(len(value)))
+		consoleWrite(stdoutHandle, unsafe.Pointer(&value[0]), uintptr(len(value)))
+	}
+}
+func writeError(message string) {
+	target := stderrHandle
+	if target == 0 {
+		target = stdoutHandle
+	}
+	if target != 0 {
+		consoleWrite(target, unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 	}
 }
 func writeUint(value uint64) {

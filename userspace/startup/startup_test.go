@@ -12,7 +12,7 @@ func TestRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("vector encode failed")
 	}
-	handles := []Handle{{Name: []byte("stdout"), ID: 0x100000001}, {Name: []byte("vfs"), ID: 0x100000002}}
+	handles := []Handle{{Name: []byte("stdout"), ID: 0x100000001}, {Name: []byte("stderr"), ID: 0x100000002}, {Name: []byte("vfs"), ID: 0x100000003}}
 	encoded, ok := Encode([]byte("cat"), []byte("/system"), arguments, environment, handles, &wire)
 	if !ok {
 		t.Fatal("encode failed")
@@ -25,6 +25,9 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if stdout, found := data.Handle("stdout"); !found || stdout != handles[0].ID {
 		t.Fatalf("stdout = %#x, %v", stdout, found)
+	}
+	if stderr, found := data.Handle("stderr"); !found || stderr != handles[1].ID {
+		t.Fatalf("stderr = %#x, %v", stderr, found)
 	}
 }
 
@@ -81,6 +84,23 @@ func TestRejectsMalformedVectors(t *testing.T) {
 	environment := []byte{2, 1, 1, 'A', '1', 1, 1, 'A', '2'}
 	if _, _, ok := DecodeVectors(arguments, environment); ok {
 		t.Fatal("duplicate environment name accepted")
+	}
+}
+
+func TestExternalUtilityStandardErrorBindingsFit(t *testing.T) {
+	var vectors [96]byte
+	arguments, environment, ok := EncodeVectors(
+		[][]byte{[]byte("cp"), []byte("/system/motd"), []byte("/persist/state.txt")},
+		[]Variable{{Name: []byte("PATH"), Value: []byte("/system/bin")}},
+		&vectors,
+	)
+	if !ok {
+		t.Fatal("vector encode failed")
+	}
+	var wire [Size]byte
+	bindings := []Handle{{Name: []byte("stdout")}, {Name: []byte("stderr")}, {Name: []byte("vfs")}}
+	if _, ok = Encode([]byte("cp"), []byte("/system"), arguments, environment, bindings, &wire); !ok {
+		t.Fatal("standard stream bindings exceed startup ABI")
 	}
 }
 

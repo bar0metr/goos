@@ -147,6 +147,7 @@ while [ "$elapsed" -lt 120 ]; do
 		grep -q 'PATH=/system/bin' "$log" 2>/dev/null && \
 		grep -q 'ARGS_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'ARGV_ENV_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'STDERR_HANDLE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'PWD_PROCESS_OK' "$log" 2>/dev/null && \

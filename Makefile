@@ -204,6 +204,7 @@ docs:
 	@test -f docs/adr/0034-capability-scoped-pci-driver-bootstrap.md
 	@test -f docs/adr/0035-userspace-virtio-block-data-path.md
 	@test -f docs/adr/0036-bounded-fat32-vfs-mount.md
+	@test -f docs/adr/0037-explicit-standard-error-handle.md
 	@test -f docs/development/building.md
 
 clean:
