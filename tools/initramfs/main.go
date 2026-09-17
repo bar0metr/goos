@@ -8,8 +8,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 7 {
-		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE COREUTILS_IMAGE OUTPUT")
+	if len(os.Args) != 8 {
+		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE COREUTILS_IMAGE BLOCK_IMAGE OUTPUT")
 		os.Exit(2)
 	}
 	image, err := os.ReadFile(os.Args[1])
@@ -32,7 +32,11 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	file, err := os.Create(os.Args[6])
+	block, err := os.ReadFile(os.Args[6])
+	if err != nil {
+		fail(err)
+	}
+	file, err := os.Create(os.Args[7])
 	if err != nil {
 		fail(err)
 	}
@@ -45,6 +49,7 @@ func main() {
 		{Name: "system/fault-probe", Mode: 0o555, Size: int64(len(service)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/vfs", Mode: 0o555, Size: int64(len(vfs)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/shell", Mode: 0o555, Size: int64(len(shell)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/block", Mode: 0o555, Size: int64(len(block)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/coreutils", Mode: 0o555, Size: int64(len(coreutils)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/pwd", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/ls", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
@@ -75,6 +80,8 @@ func main() {
 				payload = vfs
 			} else if headers[index].Name == "system/shell" {
 				payload = shell
+			} else if headers[index].Name == "system/block" {
+				payload = block
 			} else if headers[index].Name == "system/bin/coreutils" {
 				payload = coreutils
 			}

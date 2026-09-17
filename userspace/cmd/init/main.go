@@ -7,6 +7,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
+	blockproto "goos/userspace/block"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	"goos/userspace/startup"
@@ -22,6 +23,8 @@ const vfsControlHandle = uint64(0x0000000100000005)
 const vfsControlServerHandle = handle.ID(0x0000000100000006)
 const execServerHandle = uint64(0x0000000100000007)
 const execClientHandle = handle.ID(0x0000000100000008)
+const blockClientHandle = uint64(0x0000000100000009)
+const blockServerHandle = handle.ID(0x000000010000000a)
 
 var (
 	manager              supervisor.Manager
@@ -107,13 +110,18 @@ func userspaceMain() {
 					{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+				manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
+					Capabilities: []supervisor.Capability{
+						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+						{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
 					Capabilities: []supervisor.Capability{
 						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
 						{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 						{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 2 {
+				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 3 || !probeBlockService() {
 				fatal("SHELL_LAUNCH_FAILED\n")
 			}
 			supervisionComplete = true
@@ -121,6 +129,63 @@ func userspaceMain() {
 			write("USERSPACE_SUPERVISOR_OK\n")
 		}
 	}
+}
+
+func probeBlockService() bool {
+	correlation++
+	info, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationInfo}, correlation)
+	if !ok || !sendMessage(blockClientHandle, info) {
+		return false
+	}
+	message, status := receive(blockClientHandle, 1000)
+	infoReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 4096 || infoReply.BlockSize != 512 {
+		return false
+	}
+	correlation++
+	writeRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationWrite, Offset: 509, Length: 6, Data: []byte("GBLKIO")}, correlation)
+	if !ok || !sendMessage(blockClientHandle, writeRequest) {
+		return false
+	}
+	message, status = receive(blockClientHandle, 1000)
+	writeReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || writeReply.Status != blockproto.StatusOK {
+		return false
+	}
+	correlation++
+	readRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationRead, Offset: 509, Length: 6}, correlation)
+	if !ok || !sendMessage(blockClientHandle, readRequest) {
+		return false
+	}
+	message, status = receive(blockClientHandle, 1000)
+	readReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || readReply.Status != blockproto.StatusOK || !equalBytes(readReply.Data, "GBLKIO") {
+		return false
+	}
+	correlation++
+	flushRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationFlush}, correlation)
+	if !ok || !sendMessage(blockClientHandle, flushRequest) {
+		return false
+	}
+	message, status = receive(blockClientHandle, 1000)
+	flushReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || flushReply.Status != blockproto.StatusOK {
+		return false
+	}
+	write("BLOCK_SERVICE_IO_OK\n")
+	return true
+}
+
+func equalBytes(value []byte, expected string) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range value {
+		if value[index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }

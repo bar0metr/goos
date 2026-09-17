@@ -161,6 +161,8 @@ The native kernel and the first isolated services are implemented:
 - a versioned native startup ABI with named, capability-bounded handle roles.
 - bounded environment data, child exit-status propagation, and read-only
   process/memory system information.
+- a bounded versioned block-device protocol and a supervised ring-3 block
+  service with a volatile validation backend.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -270,9 +272,10 @@ benchmark results under `build/reports/`.
 
 Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, the
 versioned named-handle startup ABI, structured argv/environment data, exit
-status propagation, and the native base utilities are implemented. The next
-major milestone is capability-isolated persistent storage through a userspace
-`virtio-blk` driver, block service, filesystem service, and the existing VFS.
+status propagation, the native base utilities, and the block-service IPC
+boundary are implemented. The next storage iteration is PCI discovery and
+capability-scoped MMIO/IRQ/DMA for a userspace `virtio-blk` driver, followed by
+a persistent filesystem service and the existing VFS.
 
 Once persistent storage is proven across reboot, shell redirection and pipelines
 can be built on explicit native stdin/stdout/stderr handles and native IPC
@@ -291,6 +294,7 @@ Further documentation:
 - [processes](docs/architecture/processes.md);
 - [native images](docs/architecture/native-images.md);
 - [typed IPC](docs/architecture/ipc.md);
+- [storage](docs/architecture/storage.md);
 - [init and service supervision](docs/architecture/init.md);
 - [capabilities and handles](docs/architecture/capabilities.md);
 - [building and debugging](docs/development/building.md);
