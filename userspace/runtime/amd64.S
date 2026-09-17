@@ -104,6 +104,30 @@ goos_system_info:
     ret
 .size goos_system_info, .-goos_system_info
 
+.global goos_port_read
+.type goos_port_read,@function
+goos_port_read:
+    movl $14, %eax
+    int $0x80
+    ret
+.size goos_port_read, .-goos_port_read
+
+.global goos_port_write
+.type goos_port_write,@function
+goos_port_write:
+    movl $15, %eax
+    int $0x80
+    ret
+.size goos_port_write, .-goos_port_write
+
+.global goos_dma_allocate
+.type goos_dma_allocate,@function
+goos_dma_allocate:
+    movl $16, %eax
+    int $0x80
+    ret
+.size goos_dma_allocate, .-goos_dma_allocate
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

@@ -18,6 +18,9 @@ const (
 	OperationHandleClose
 	OperationProcessWait
 	OperationSystemInfo
+	OperationPortRead
+	OperationPortWrite
+	OperationDMAAllocate
 )
 
 type Status uint64
@@ -69,6 +72,9 @@ type Handler interface {
 	ChannelCreate(address uint64, length uint64) Status
 	HandleClose(id uint64) Status
 	SystemInfo(address uint64, length uint64) Status
+	PortRead(device uint64, specification uint64, address uint64) Status
+	PortWrite(device uint64, specification uint64, value uint64) Status
+	DMAAllocate(device uint64, virtual uint64, address uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -125,6 +131,12 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.SystemInfo(request.Arg0, request.Arg1)}
+	case OperationPortRead:
+		return Result{Status: handler.PortRead(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationPortWrite:
+		return Result{Status: handler.PortWrite(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationDMAAllocate:
+		return Result{Status: handler.DMAAllocate(request.Arg0, request.Arg1, request.Arg2)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

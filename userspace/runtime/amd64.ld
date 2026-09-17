@@ -32,7 +32,7 @@ SECTIONS
 
   .heap (NOLOAD) : ALIGN(0x1000) {
     _heap_start = .;
-    . += 0x10000;
+    . += 0x20000;
     _heap_end = .;
   } :data
 

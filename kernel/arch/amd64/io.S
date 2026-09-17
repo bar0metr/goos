@@ -15,6 +15,32 @@ goos_inb:
     inb %dx, %al
     retq
 
+.global goos_outw
+goos_outw:
+    movw %dx, %ax
+    movw %cx, %dx
+    outw %ax, %dx
+    retq
+
+.global goos_inw
+goos_inw:
+    movw %cx, %dx
+    inw %dx, %ax
+    retq
+
+.global goos_outl
+goos_outl:
+    movl %edx, %eax
+    movw %cx, %dx
+    outl %eax, %dx
+    retq
+
+.global goos_inl
+goos_inl:
+    movw %cx, %dx
+    inl %dx, %eax
+    retq
+
 .global goos_pause
 goos_pause:
     pause

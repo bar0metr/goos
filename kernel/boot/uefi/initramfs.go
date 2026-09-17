@@ -8,9 +8,9 @@ import (
 	"unsafe"
 )
 
-// One and a half MiB keeps the boot archive bounded while accommodating the
-// supervised services and native coreutils image.
-const initramfsPages = uintptr(384)
+// Two MiB keeps the boot archive bounded while accommodating the supervised
+// services, native coreutils image, and the isolated storage driver.
+const initramfsPages = uintptr(512)
 
 var (
 	loadedImageGUID      = deviceuefi.EFI_GUID{Data1: 0x5b1b31a1, Data2: 0x9562, Data3: 0x11d2, Data4: [8]byte{0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}}

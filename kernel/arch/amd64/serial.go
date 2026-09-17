@@ -87,6 +87,51 @@ func outb(port uint16, value byte)
 //export goos_inb
 func inb(port uint16) byte
 
+//export goos_outw
+func outw(port uint16, value uint16)
+
+//export goos_inw
+func inw(port uint16) uint16
+
+//export goos_outl
+func outl(port uint16, value uint32)
+
+//export goos_inl
+func inl(port uint16) uint32
+
+func PortRead(port uint16, width uint8) (uint32, bool) {
+	switch width {
+	case 1:
+		return uint32(inb(port)), true
+	case 2:
+		return uint32(inw(port)), true
+	case 4:
+		return inl(port), true
+	default:
+		return 0, false
+	}
+}
+
+func PortWrite(port uint16, width uint8, value uint32) bool {
+	switch width {
+	case 1:
+		outb(port, byte(value))
+	case 2:
+		outw(port, uint16(value))
+	case 4:
+		outl(port, value)
+	default:
+		return false
+	}
+	return true
+}
+
+func PCIConfigRead32(bus, slot, function, offset uint8) uint32 {
+	address := uint32(1<<31) | uint32(bus)<<16 | uint32(slot&0x1f)<<11 | uint32(function&7)<<8 | uint32(offset&0xfc)
+	outl(0xcf8, address)
+	return inl(0xcfc)
+}
+
 //export goos_pause
 func cpuPause()
 

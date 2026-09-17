@@ -7,6 +7,7 @@ import (
 	"goos/kernel/arch/amd64"
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
+	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/initramfs"
 	"goos/kernel/ipc"
@@ -14,6 +15,7 @@ import (
 	"goos/kernel/loader"
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
+	"goos/kernel/pci"
 	"goos/kernel/process"
 	"goos/kernel/ramfs"
 	"goos/kernel/sched"
@@ -77,6 +79,12 @@ var (
 
 type nativeCallHandler struct {
 	root uint64
+}
+
+type pciConfig struct{}
+
+func (pciConfig) Read32(bus, slot, function, offset uint8) uint32 {
+	return amd64.PCIConfigRead32(bus, slot, function, offset)
 }
 
 func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
@@ -382,6 +390,88 @@ func (handler nativeCallHandler) SystemInfo(address uint64, length uint64) kcall
 	return kcall.StatusOK
 }
 
+func portSpecification(specification uint64) (uint16, uint8, bool) {
+	if specification>>24 != 0 {
+		return 0, 0, false
+	}
+	offset, width := uint16(specification), uint8(specification>>16)
+	return offset, width, width == 1 || width == 2 || width == 4
+}
+
+func (handler nativeCallHandler) PortRead(id uint64, specification uint64, address uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
+	base, size, valid := device.DecodePortObject(cap.Object())
+	offset, width, specValid := portSpecification(specification)
+	if !ok || !valid || !specValid || uint32(offset)+uint32(width) > uint32(size) {
+		return kcall.StatusPermissionDenied
+	}
+	value, read := amd64.PortRead(base+offset, width)
+	if !read {
+		return kcall.StatusInvalidArgument
+	}
+	var encoded [4]byte
+	putUint32(encoded[:], value)
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) PortWrite(id uint64, specification uint64, value uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
+	base, size, valid := device.DecodePortObject(cap.Object())
+	offset, width, specValid := portSpecification(specification)
+	valueValid := width == 1 && value <= 0xff || width == 2 && value <= 0xffff || width == 4 && value <= 0xffffffff
+	if !ok || !valid || !specValid || uint32(offset)+uint32(width) > uint32(size) || !valueValid {
+		return kcall.StatusPermissionDenied
+	}
+	if !amd64.PortWrite(base+offset, width, uint32(value)) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || virtual != vm.UserDMAAddress || !vm.CanMapUserPage(handler.root, virtual) {
+		return kcall.StatusInvalidArgument
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
+	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
+		return kcall.StatusPermissionDenied
+	}
+	var encoded [24]byte
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	physical, allocated := pageAllocator.AllocateContiguous(1)
+	if !allocated {
+		return kcall.StatusResourceExhausted
+	}
+	for index := range kernelCallData {
+		kernelCallData[index] = 0
+	}
+	if !vm.InitializePhysical(physical, kernelCallData[:]) || !vm.MapOwnedUserPage(handler.root, virtual, physical, vm.Permissions{User: true, Writable: true}) {
+		pageAllocator.Free(physical)
+		return kcall.StatusResourceExhausted
+	}
+	putUint64(encoded[0:8], physical)
+	putUint64(encoded[8:16], virtual)
+	putUint64(encoded[16:24], vm.PageSize)
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || length != process.MaxStartupData {
@@ -596,6 +686,13 @@ func putUint64(data []byte, value uint64) {
 	for index := 0; index < 8; index++ {
 		data[index] = byte(value >> uint(index*8))
 	}
+}
+
+func putUint32(data []byte, value uint32) {
+	data[0] = byte(value)
+	data[1] = byte(value >> 8)
+	data[2] = byte(value >> 16)
+	data[3] = byte(value >> 24)
 }
 
 func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
@@ -835,6 +932,14 @@ func main() {
 		}
 	}
 	console.WriteString("BOOT_SERVICES_EXITED\n")
+	virtioBlock, virtioBlockFound := pci.FindLegacyVirtioBlock(pciConfig{})
+	if !virtioBlockFound {
+		console.WriteString("PANIC: legacy virtio-blk PCI device not found\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	console.WriteString("PCI_DISCOVERY_OK\n")
 	console.WriteString("Memory: ")
 	console.WriteUint(bootInfo.UsableBytes / (1024 * 1024))
 	console.WriteString(" MiB usable\n")
@@ -1001,6 +1106,12 @@ func main() {
 	blockServerObject, _ := ipc.EndpointObject(blockChannelID, 1)
 	blockClientHandle, blockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(blockClientObject, capability.Read|capability.Write|capability.Wait))
 	blockServerHandle, blockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(blockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
+	portObject, portObjectValid := device.PortObject(virtioBlock.IOBase, virtioBlock.IOSize)
+	dmaObject, dmaObjectValid := device.DMAObject(1)
+	irqObject, irqObjectValid := device.IRQObject(virtioBlock.IRQ)
+	virtioPortHandle, virtioPortInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(portObject, capability.Read|capability.Write|capability.Transfer))
+	virtioIRQHandle, virtioIRQInstalled := initProcess.Handles().Insert(handle.TypeIRQ, capability.New(irqObject, capability.Wait|capability.Transfer))
+	virtioDMAHandle, virtioDMAInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(dmaObject, capability.Write|capability.Transfer))
 	lifecycleBound := true
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
@@ -1017,8 +1128,8 @@ func main() {
 	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
 	_, replyReceiveStatus := registeredChannel.Receive(0)
 	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !channelsBound ||
-		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || !wireEncoded || !wireDecoded ||
+		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
 		console.WriteString("PANIC: typed IPC request/reply failed\n")

@@ -55,6 +55,16 @@ func (handler *testHandler) SystemInfo(address uint64, length uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) PortRead(device uint64, specification uint64, address uint64) Status {
+	return StatusOK
+}
+func (handler *testHandler) PortWrite(device uint64, specification uint64, value uint64) Status {
+	return StatusOK
+}
+func (handler *testHandler) DMAAllocate(device uint64, virtual uint64, address uint64) Status {
+	return StatusOK
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
