@@ -264,11 +264,19 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-The next stage adds init and service supervision, followed by the native shell.
+Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, and the
+first isolated native utilities are already implemented. The next work is to
+stabilize the native process startup ABI and expand the small native base
+system, then add capability-isolated persistent storage through a userspace
+`virtio-blk` driver, block service, filesystem service, and the existing VFS.
 
-The Linux ABI is a future compatibility layer. It does not block the first
-self-contained GoOS release and must not weaken the native security model for
-the sake of POSIX compatibility.
+Once persistent storage is proven across reboot, shell redirection and pipelines
+can be built on explicit native stdin/stdout/stderr handles and native IPC
+primitives. Linux ABI compatibility remains a later compatibility layer. It
+must translate into the same GoOS process, VFS, IPC, handle, and capability
+model rather than weakening the native architecture for POSIX compatibility.
+
+See [roadmap](docs/development/roadmap.md) for the current implementation order.
 
 Further documentation:
 

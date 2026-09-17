@@ -25,5 +25,4 @@ The QEMU boot test writes real commands to serial stdin and requires the shell's
 responses in serial output. The shell receives non-transferable VFS and exec
 endpoints and cannot delegate them. Every external utility receives a fresh VFS
 session instead of sharing the shell reply queue. Fast exit notifications that
-arrive before a launch reply are retained in a bounded PID 1 queue. Quoting,
-pipelines, job control, and a persistent userspace TTY server remain future work.
+arrive before a launch reply are retained in a bounded PID 1 queue. The next native-application work is a versioned startup ABI with explicit startup handles, bounded argv/environment data, working-directory inheritance, and exit status. Quoting may follow that ABI work. I/O redirection and pipelines are intentionally scheduled after persistent storage; job control and a persistent userspace TTY server remain later work.
