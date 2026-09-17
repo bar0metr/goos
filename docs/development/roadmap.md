@@ -1,7 +1,6 @@
 # Roadmap
 
-This roadmap follows `GOOS_SPEC.md` and records implementation priority from the
-current repository state. It does not replace the architectural ADRs.
+This roadmap records implementation priority from the current repository state.
 
 ## Current baseline
 
