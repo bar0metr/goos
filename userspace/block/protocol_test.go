@@ -24,6 +24,28 @@ func TestProtocolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProtocolPointerRoundTrip(t *testing.T) {
+	var requestMessage ipc.Message
+	if !EncodeRequestInto(Request{Operation: OperationRead, Offset: 7, Length: 4}, 9, &requestMessage) {
+		t.Fatal("request encode failed")
+	}
+	request, ok := DecodeRequestFrom(&requestMessage)
+	if !ok || request.Offset != 7 || request.Length != 4 {
+		t.Fatalf("request = %#v", request)
+	}
+	var replyMessage ipc.Message
+	if !EncodeReplyInto(Reply{Operation: OperationRead, Data: []byte("data")}, 9, &replyMessage) {
+		t.Fatal("reply encode failed")
+	}
+	reply, ok := DecodeReplyFrom(&replyMessage)
+	if !ok || string(reply.Data) != "data" {
+		t.Fatalf("reply = %#v", reply)
+	}
+	if EncodeRequestInto(Request{Operation: OperationInfo}, 1, nil) || EncodeReplyInto(Reply{Operation: OperationInfo}, 1, nil) {
+		t.Fatal("nil message accepted")
+	}
+}
+
 func TestProtocolRejectsMalformedMessages(t *testing.T) {
 	if _, ok := EncodeRequest(Request{Operation: OperationRead, Length: MaxData + 1}, 1); ok {
 		t.Fatal("oversized read accepted")

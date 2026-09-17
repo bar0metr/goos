@@ -13,7 +13,14 @@ const (
 var wireMagic = [4]byte{'G', 'I', 'P', 'C'}
 
 func Encode(message Message, target []byte) (int, bool) {
-	if !validMessage(message) || message.HandleCount > MaxAttachedHandles {
+	return EncodeFrom(&message, target)
+}
+
+func EncodeFrom(message *Message, target []byte) (int, bool) {
+	if message == nil {
+		return 0, false
+	}
+	if !validMessage(*message) || message.HandleCount > MaxAttachedHandles {
 		return 0, false
 	}
 	size := WireHeaderSize + int(message.PayloadSize) + int(message.HandleCount)*8
@@ -40,9 +47,18 @@ func Encode(message Message, target []byte) (int, bool) {
 
 func Decode(data []byte) (Message, bool) {
 	var message Message
+	ok := DecodeInto(data, &message)
+	return message, ok
+}
+
+func DecodeInto(data []byte, message *Message) bool {
+	if message == nil {
+		return false
+	}
+	*message = Message{}
 	if len(data) < WireHeaderSize || data[0] != wireMagic[0] || data[1] != wireMagic[1] || data[2] != wireMagic[2] || data[3] != wireMagic[3] ||
 		data[15] != 0 || binary.LittleEndian.Uint32(data[28:]) != 0 {
-		return message, false
+		return false
 	}
 	message.ProtocolID = binary.LittleEndian.Uint64(data[4:])
 	message.Version = binary.LittleEndian.Uint16(data[12:])
@@ -51,24 +67,24 @@ func Decode(data []byte) (Message, bool) {
 	message.PayloadSize = binary.LittleEndian.Uint16(data[24:])
 	message.HandleCount = data[26]
 	if data[27] != 0 || message.PayloadSize > MaxPayload || message.HandleCount > MaxAttachedHandles {
-		return Message{}, false
+		return false
 	}
 	size := WireHeaderSize + int(message.PayloadSize) + int(message.HandleCount)*8
 	if len(data) != size {
-		return Message{}, false
+		return false
 	}
 	copy(message.Payload[:], data[WireHeaderSize:WireHeaderSize+int(message.PayloadSize)])
 	offset := WireHeaderSize + int(message.PayloadSize)
 	for index := 0; index < int(message.HandleCount); index++ {
 		message.Handles[index] = handle.ID(binary.LittleEndian.Uint64(data[offset+index*8:]))
 		if message.Handles[index] == 0 {
-			return Message{}, false
+			return false
 		}
 	}
-	if !validWireMessage(message) {
-		return Message{}, false
+	if !validWireMessage(*message) {
+		return false
 	}
-	return message, true
+	return true
 }
 
 func validWireMessage(message Message) bool {

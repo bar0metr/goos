@@ -47,6 +47,13 @@ type Name struct {
 	size uint8
 }
 
+func (name Name) CopyTo(target []byte) int {
+	if !name.valid() || len(target) < int(name.size) {
+		return 0
+	}
+	return copy(target, name.data[:name.size])
+}
+
 func MakeName(value []byte) (Name, bool) {
 	var name Name
 	if !validName(value) {

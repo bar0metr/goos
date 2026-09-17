@@ -15,8 +15,9 @@ read-only media, and backend I/O errors.
 
 The service core depends on a narrow backend interface containing capacity,
 logical block size, read, write, and flush operations. It does not know about
-PCI, virtio queues, FAT, paths, or VFS handles. The filesystem service will be
-the only layer translating file semantics into block operations.
+PCI, virtio queues, FAT, paths, or VFS handles. A dedicated endpoint lets the
+FAT32 backend in the VFS service translate file semantics into block operations
+without acquiring device authority.
 
 The kernel discovers the QEMU legacy virtio-blk PCI function through PCI
 configuration mechanism 1. PID 1 receives three independently typed authorities:
@@ -40,6 +41,14 @@ The QEMU gate verifies an unaligned write spanning two sectors, a readback,
 flush, and the resulting bytes in the persistent raw disk image. Driver teardown
 resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
-FAT32, mounting a persistent filesystem into VFS, dynamic interrupt routing,
-multiple devices, scatter-gather payloads larger than the inline IPC limit, and
-recovery from a failed storage driver remain required.
+A bounded FAT32 backend is mounted at `/persist`. The first implementation is
+intentionally limited to a flat root directory, 8.3 ASCII names, one-sector
+clusters, sixteen directory entries, and 64 KiB files. It supports the regular
+file lifecycle needed by native utilities and preserves the raw image across
+QEMU boots. The boot gate copies `/system/motd` through VFS and verifies the
+result in the host-visible disk image.
+
+Subdirectories, long-file-name creation, general FAT32 geometry, crash
+consistency, dynamic interrupt routing, multiple devices, scatter-gather
+payloads larger than the inline IPC limit, and recovery from a failed storage
+driver remain required.

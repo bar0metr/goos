@@ -106,11 +106,14 @@ persistent
 
 The second `cat` must read data written before reboot.
 
-Current progress: ADR 0033 defines and tests the bounded `GBLK001` protocol and
-the device-independent block-service core in a supervised ring-3 process. QEMU
-validates info, write, cross-block read, and flush against an explicitly
-volatile private backend. The virtio backend is not implemented; items 1 and 2
-remain the next iteration.
+Current progress: ADRs 0033 through 0036 implement the bounded `GBLK001`
+protocol, capability-scoped PCI/IRQ/DMA driver authority, the userspace
+virtio-blk data path, and a bounded FAT32 backend mounted at `/persist`. QEMU
+validates file creation and readback through VFS and verifies the bytes in the
+persistent raw image. Items 1 through 7 are complete for the initial bounded
+single-device design. The remaining Priority 2 boundary is an explicit reboot
+persistence gate and then hardening beyond the deliberately constrained FAT32
+subset.
 
 ## Priority 3 — Shell composition
 

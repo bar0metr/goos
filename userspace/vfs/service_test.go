@@ -6,6 +6,31 @@ import (
 	"testing"
 )
 
+type testBlockDevice struct{ data []byte }
+
+func (device *testBlockDevice) ReadAt(offset uint64, target []byte) bool {
+	return offset+uint64(len(target)) <= uint64(len(device.data)) && copy(target, device.data[offset:]) == len(target)
+}
+func (device *testBlockDevice) WriteAt(offset uint64, data []byte) bool {
+	return offset+uint64(len(data)) <= uint64(len(device.data)) && copy(device.data[offset:], data) == len(data)
+}
+func (*testBlockDevice) Flush() bool { return true }
+
+func testFAT32Device() *testBlockDevice {
+	device := &testBlockDevice{data: make([]byte, 4*1024*1024)}
+	boot := device.data[:512]
+	boot[11], boot[12], boot[13] = 0, 2, 1
+	boot[14], boot[15], boot[16] = 32, 0, 1
+	boot[32], boot[33] = 0, 32
+	boot[36], boot[44] = 64, 2
+	boot[510], boot[511] = 0x55, 0xaa
+	fat := device.data[32*512:]
+	fat[0], fat[1], fat[2], fat[3] = 0xf8, 0xff, 0xff, 0x0f
+	fat[4], fat[5], fat[6], fat[7] = 0xff, 0xff, 0xff, 0xff
+	fat[8], fat[9], fat[10], fat[11] = 0xff, 0xff, 0xff, 0x0f
+	return device
+}
+
 func TestServiceFilesystemLifecycle(t *testing.T) {
 	var service Service
 	if !service.Init() {
@@ -36,5 +61,32 @@ func TestServiceReadDirIsBounded(t *testing.T) {
 	first := service.Dispatch(vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/"), Offset: 0})
 	if first.Status != vfs.StatusOK || first.Cursor == 0 || len(first.Name) == 0 {
 		t.Fatalf("readdir = %+v", first)
+	}
+}
+
+func TestServicePersistentFileLifecycle(t *testing.T) {
+	var service Service
+	if !service.Init() || !service.MountPersistent(testFAT32Device()) {
+		t.Fatal("service mount failed")
+	}
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/state.txt")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("create = %d", reply.Status)
+	}
+	opened := service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte("/persist/state.txt")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open write = %d", opened.Status)
+	}
+	payload := []byte("Welcome to GoOS\n")
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: payload}); reply.Status != vfs.StatusOK || reply.Size != uint64(len(payload)) {
+		t.Fatalf("write = %+v", reply)
+	}
+	service.Dispatch(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	opened = service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/persist/state.txt")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open read = %d", opened.Status)
+	}
+	read := service.Dispatch(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+	if read.Status != vfs.StatusOK || string(read.Data) != string(payload) {
+		t.Fatalf("read = %d, %q", read.Status, read.Data)
 	}
 }
