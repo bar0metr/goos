@@ -93,6 +93,7 @@ while [ "$elapsed" -lt 90 ]; do
 		grep -q 'LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_EXECUTABLE_LOOKUP_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_CAPABILITY_MANIFEST_OK' "$log" 2>/dev/null && \
+		grep -q 'NATIVE_STARTUP_ABI_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
 		grep -q 'VFS_SERVICE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \

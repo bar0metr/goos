@@ -159,6 +159,7 @@ The native kernel and the first isolated services are implemented:
 - generation-safe task-slot reuse and bounded process completion records.
 - capability-protected process handles and a blocking native wait call.
 - bounded `/system/bin` executable lookup with per-process VFS sessions.
+- a versioned native startup ABI with named, capability-bounded handle roles.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -170,7 +171,9 @@ quoting, pipelines, or redirection. The current ISO boots a real kernel, leaves 
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but
-is not yet a general application environment.
+is not yet a general application environment. Native programs no longer assume
+numeric handle slots, but structured argv/environment data and a broader base
+utility set remain incomplete.
 
 ## Building and running
 
@@ -253,6 +256,7 @@ PROCESS_WAIT_OK
 PROCESS_HANDLE_WAIT_OK
 SUPERVISOR_CRASH_EVENT_OK
 LIFECYCLE_IPC_OK
+NATIVE_STARTUP_ABI_OK
 PID1_SERVICE_LAUNCH_OK
 Kernel initialized
 BOOT_OK
@@ -264,10 +268,11 @@ benchmark results under `build/reports/`.
 
 ## Development direction
 
-Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, and the
-first isolated native utilities are already implemented. The next work is to
-stabilize the native process startup ABI and expand the small native base
-system, then add capability-isolated persistent storage through a userspace
+Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, the
+versioned named-handle startup ABI, and the first isolated native utilities are
+already implemented. The next work is structured argv, exit-status propagation,
+bounded environment data, and expansion of the small native base system, then
+capability-isolated persistent storage through a userspace
 `virtio-blk` driver, block service, filesystem service, and the existing VFS.
 
 Once persistent storage is proven across reboot, shell redirection and pipelines

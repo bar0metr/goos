@@ -52,8 +52,15 @@ Channel capabilities identify their endpoint side. A launch grant may be marked
 consumed, removing PID 1's source handle after successful derivation. This is
 used for per-process VFS clients and prevents accumulation of temporary handles.
 
-Shell exec requests are restricted to `/system/bin/pwd`, `/system/bin/ls`, and
-`/system/bin/cat`. PID 1 creates a VFS channel pair, moves its server endpoint to
+PID 1 also supplies a `GST1` startup template with a unique role name for each
+manifest entry. After installing all capabilities, the kernel writes their
+actual generation-safe IDs into the startup block before creating the first
+Task. Services resolve roles rather than depending on handle-table insertion
+order. Names are descriptive metadata; type and rights enforcement remains in
+the kernel handle table.
+
+Shell exec requests are restricted to simple names below `/system/bin`. PID 1
+creates a VFS channel pair, moves its server endpoint to
 VFS, supplies the client endpoint and console-write capability to the child,
 forwards bounded startup data, waits through a capability-protected process
 handle, and replies only after process exit.

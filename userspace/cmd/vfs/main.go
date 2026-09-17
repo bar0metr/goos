@@ -3,26 +3,29 @@
 package main
 
 import (
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
 	"runtime"
 	"unsafe"
 )
 
-const consoleHandle = uint64(0x0000000100000001)
-const initialSessionHandle = uint64(0x0000000100000002)
-const controlHandle = uint64(0x0000000100000003)
 const maxSessions = 12
 
 var (
-	service     vfsservice.Service
-	wire        [ipc.WireMaxSize]byte
-	descriptor  = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	heapPointer uintptr
-	arenaBase   uintptr
-	sessions    = [maxSessions]uint64{initialSessionHandle}
+	service              vfsservice.Service
+	consoleHandle        handle.ID
+	initialSessionHandle handle.ID
+	controlHandle        handle.ID
+	startupWire          [startup.Size]byte
+	wire                 [ipc.WireMaxSize]byte
+	descriptor           = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
+	heapPointer          uintptr
+	arenaBase            uintptr
+	sessions             [maxSessions]uint64
 )
 
 //go:extern _heap_start
@@ -46,9 +49,33 @@ func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname handleClose goos_handle_close
 func handleClose(id uint64) uint64
 
+//go:linkname startupRead goos_startup_read
+func startupRead(address unsafe.Pointer, size uintptr) uint64
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
+	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+		fatal("VFS_STARTUP_UNAVAILABLE\n")
+	}
+	startupData, validStartup := startup.Decode(startupWire[:])
+	var found bool
+	if !validStartup {
+		fatal("VFS_STARTUP_INVALID\n")
+	}
+	consoleHandle, found = startupData.Handle("console")
+	if !found {
+		fatal("VFS_CONSOLE_MISSING\n")
+	}
+	initialSessionHandle, found = startupData.Handle("session")
+	if !found {
+		fatal("VFS_SESSION_MISSING\n")
+	}
+	controlHandle, found = startupData.Handle("control")
+	if !found {
+		fatal("VFS_CONTROL_MISSING\n")
+	}
+	sessions[0] = uint64(initialSessionHandle)
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
@@ -79,13 +106,13 @@ func userspaceMain() {
 		}
 		if !worked {
 			descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 1
-			ipcWaitReceive(controlHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
+			ipcWaitReceive(uint64(controlHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		}
 	}
 }
 
 func pollControl() bool {
-	message, status := receiveNow(controlHandle)
+	message, status := receiveNow(uint64(controlHandle))
 	if status == ipc.StatusNotFound {
 		return false
 	}
@@ -106,7 +133,7 @@ func pollControl() bool {
 	if !encoded {
 		fatal("VFS_CONTROL_REPLY_FAILED\n")
 	}
-	send(controlHandle, reply)
+	send(uint64(controlHandle), reply)
 	return true
 }
 
@@ -147,7 +174,7 @@ func receiveNow(channel uint64) (ipc.Message, ipc.Status) {
 }
 
 func write(message string) {
-	consoleWrite(consoleHandle, unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
 	write(message)

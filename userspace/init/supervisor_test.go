@@ -10,7 +10,7 @@ import (
 func TestStartsServicesInDependencyOrder(t *testing.T) {
 	var manager Manager
 	if manager.Register(Definition{Name: "ramfs", Executable: "/system/ramfs", Restart: RestartAlways}) != StatusOK ||
-		manager.Register(Definition{Name: "vfs", Executable: "/system/vfs", Dependencies: []string{"ramfs"}, Capabilities: []Capability{{Handle: 7, Type: handle.TypeChannel, Rights: capability.Read}}, Restart: RestartOnFailure}) != StatusOK {
+		manager.Register(Definition{Name: "vfs", Executable: "/system/vfs", Dependencies: []string{"ramfs"}, Capabilities: []Capability{{Name: "session", Handle: 7, Type: handle.TypeChannel, Rights: capability.Read}}, Restart: RestartOnFailure}) != StatusOK {
 		t.Fatal("registration failed")
 	}
 	var order [2]string

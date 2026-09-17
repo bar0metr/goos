@@ -12,15 +12,14 @@ import (
 	"unsafe"
 )
 
-const consoleHandle = uint64(0x0000000100000001)
-const vfsHandle = uint64(0x0000000100000002)
-
 var wire [ipc.WireMaxSize]byte
 var descriptor = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 var startupWire [startup.Size]byte
 var pathBuffer [shell.MaxPath]byte
 var correlation uint64
 var heapPointer uintptr
+var consoleHandle uint64
+var vfsHandle uint64
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -55,6 +54,12 @@ func Run() {
 	if !ok {
 		finish(1, "invalid startup data\n")
 	}
+	stdout, stdoutFound := data.Handle("stdout")
+	vfsEndpoint, vfsFound := data.Handle("vfs")
+	if !stdoutFound || !vfsFound {
+		finish(1, "startup handles unavailable\n")
+	}
+	consoleHandle, vfsHandle = uint64(stdout), uint64(vfsEndpoint)
 	switch {
 	case equal(data.Command, "pwd"):
 		writeBytes(data.CWD)

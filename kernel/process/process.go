@@ -61,6 +61,19 @@ func (process *Process) Startup(target []byte) (int, bool) {
 	return int(process.startupSize), true
 }
 
+// SetStartup completes process construction before its first task is runnable.
+func (process *Process) SetStartup(startup []byte) bool {
+	if process == nil || process.id == 0 || process.taskCount != 0 || len(startup) > MaxStartupData {
+		return false
+	}
+	for index := range process.startup {
+		process.startup[index] = 0
+	}
+	copy(process.startup[:], startup)
+	process.startupSize = uint8(len(startup))
+	return true
+}
+
 func (process *Process) AddTask(id sched.TaskID) bool {
 	if _, _, valid := id.Parts(); !valid || process.taskCount == len(process.tasks) {
 		return false
