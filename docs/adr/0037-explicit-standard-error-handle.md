@@ -27,5 +27,5 @@ boot command is tested to remain within the bounded GST2 startup envelope.
 
 Utilities no longer assume that normal and diagnostic output share one startup
 role. Existing serial behavior is unchanged because both capabilities target
-the console. Explicit `stdin`, alternate stream endpoints, redirection, and
-pipes remain future Priority 3 work.
+the console. ADR 0038 subsequently adds explicit `stdin`; alternate stream
+endpoints, redirection, and pipes remain future Priority 3 work.

@@ -61,14 +61,14 @@ $(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup usersp
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
 
@@ -205,6 +205,7 @@ docs:
 	@test -f docs/adr/0035-userspace-virtio-block-data-path.md
 	@test -f docs/adr/0036-bounded-fat32-vfs-mount.md
 	@test -f docs/adr/0037-explicit-standard-error-handle.md
+	@test -f docs/adr/0038-explicit-standard-input-handle.md
 	@test -f docs/development/building.md
 
 clean:

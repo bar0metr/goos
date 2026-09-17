@@ -11,6 +11,7 @@ const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
 	LifecycleVersion    = uint16(5)
 	MaxExecutablePath   = 192
+	MaxStartupData      = 128
 	launchGrantSize     = 16
 )
 
@@ -45,7 +46,7 @@ type LifecycleEvent struct {
 	ExecutableSize  uint8
 	Capabilities    [MaxCapabilities]Capability
 	CapabilityCount uint8
-	Startup         [128]byte
+	Startup         [MaxStartupData]byte
 	StartupSize     uint8
 }
 
@@ -65,7 +66,7 @@ func LaunchRequest(service uint64, executable string, capabilities []Capability,
 }
 
 func LaunchRequestWithStartup(service uint64, executable string, capabilities []Capability, startup []byte, correlation uint64) (ipc.Message, bool) {
-	if service == 0 || correlation == 0 || !validLaunchPath(executable) || len(capabilities) > MaxCapabilities || len(startup) > 128 || 12+len(executable)+len(startup)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
+	if service == 0 || correlation == 0 || !validLaunchPath(executable) || len(capabilities) > MaxCapabilities || len(startup) > MaxStartupData || 12+len(executable)+len(startup)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	for _, grant := range capabilities {
@@ -128,7 +129,7 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		size := int(message.Payload[9])
 		capabilityCount := int(message.Payload[10])
 		startupSize := int(message.Payload[11])
-		if service == 0 || size == 0 || size > MaxExecutablePath || startupSize > 128 || capabilityCount > MaxCapabilities || int(message.PayloadSize) != 12+size+startupSize+capabilityCount*launchGrantSize {
+		if service == 0 || size == 0 || size > MaxExecutablePath || startupSize > MaxStartupData || capabilityCount > MaxCapabilities || int(message.PayloadSize) != 12+size+startupSize+capabilityCount*launchGrantSize {
 			return LifecycleEvent{}, false
 		}
 		if !validLaunchPathBytes(message.Payload[12 : 12+size]) {

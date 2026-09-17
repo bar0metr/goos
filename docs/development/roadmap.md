@@ -130,10 +130,11 @@ After persistent storage works, finish the shell composition primitives:
 Do not introduce POSIX file descriptors into the native ABI merely to make the
 shell familiar. POSIX fd semantics belong to the Linux compatibility layer.
 
-Current progress: ADR 0037 gives every external utility distinct named,
-write-only `stdout` and `stderr` capabilities and routes non-zero-exit
-diagnostics through `stderr`. Both currently target the serial console. Explicit
-`stdin`, alternate stream endpoints, redirection, and pipes remain unfinished.
+Current progress: ADRs 0037 and 0038 give every external utility distinct named
+standard streams: read-only input role `in` plus write-only `stdout` and `stderr`.
+Non-zero-exit diagnostics use `stderr`; all three streams currently target the
+serial console. Alternate stream endpoints, input-consuming utilities,
+redirection, and pipes remain unfinished.
 
 ## Priority 4 — Separate normal boot from validation boot
 

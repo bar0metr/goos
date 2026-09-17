@@ -29,8 +29,10 @@ session instead of sharing the shell reply queue. Fast exit notifications that
 arrive before a launch reply are retained in a bounded PID 1 queue. The exec
 reply distinguishes launch status from the final child exit code. The native
 base utilities receive structured `argv`, `PATH=/system/bin`, a fresh VFS
-session, and distinct write-only `stdout` and `stderr` handles. Normal output
-uses `stdout`; non-zero-exit diagnostics use `stderr`. Both currently target the
-same serial console, so observable terminal behavior is unchanged. Explicit
-`stdin`, alternate stream endpoints, I/O redirection, pipelines, job control,
-and a persistent userspace TTY server remain later work.
+session, a read-only standard-input handle named `in`, and distinct write-only
+`stdout` and `stderr` handles. Normal output uses `stdout`; non-zero-exit
+diagnostics use `stderr`. All three currently target the serial console, so
+observable terminal behavior is unchanged. The utilities validate `in` but do
+not read it yet.
+Alternate stream endpoints, I/O redirection, pipelines, job control, and a
+persistent userspace TTY server remain later work.
