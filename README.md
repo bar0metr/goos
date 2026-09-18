@@ -172,6 +172,8 @@ The native kernel and the first isolated services are implemented:
   across separate QEMU boots.
 - distinct named standard-stream capabilities for external native utilities:
   read-only input role `in` and write-only `stdout` and `stderr`.
+- bounded `readline` input through an isolated utility's inherited `in`
+  capability.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -287,8 +289,9 @@ versioned named-handle startup ABI, structured argv/environment data, exit
 status propagation, the native base utilities, and the block-service IPC
 boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
 reboot-persistence gate are implemented. Priority 3 shell composition is now
-the next roadmap milestone; FAT32 hardening and storage failure recovery remain
-incremental storage work.
+the active roadmap milestone; its first stdin consumer is complete, while
+alternate stream endpoints, redirection, and pipes remain. FAT32 hardening and
+storage failure recovery remain incremental storage work.
 
 Once persistent storage is proven across reboot, shell redirection and pipelines
 can be built on explicit native stdin/stdout/stderr handles and native IPC

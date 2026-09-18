@@ -206,6 +206,7 @@ docs:
 	@test -f docs/adr/0036-bounded-fat32-vfs-mount.md
 	@test -f docs/adr/0037-explicit-standard-error-handle.md
 	@test -f docs/adr/0038-explicit-standard-input-handle.md
+	@test -f docs/adr/0039-bounded-standard-input-consumer.md
 	@test -f docs/development/building.md
 
 clean:

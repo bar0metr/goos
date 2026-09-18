@@ -16,6 +16,10 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	 printf 'args "alpha beta" escaped\\ value\n'
 	 sleep 1
+	 printf 'readline\n'
+	 sleep 1
+	 printf 'bounded stdin payload\n'
+	 sleep 1
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
@@ -148,6 +152,8 @@ while [ "$elapsed" -lt 120 ]; do
 		grep -q 'ARGS_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'ARGV_ENV_PROCESS_OK' "$log" 2>/dev/null && \
 		grep -q 'STDIN_HANDLE_OK' "$log" 2>/dev/null && \
+		grep -q 'bounded stdin payload' "$log" 2>/dev/null && \
+		grep -q 'STDIN_READ_OK' "$log" 2>/dev/null && \
 		grep -q 'STDERR_HANDLE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \
