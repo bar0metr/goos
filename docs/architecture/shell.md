@@ -32,7 +32,9 @@ base utilities receive structured `argv`, `PATH=/system/bin`, a fresh VFS
 session, a read-only standard-input handle named `in`, and distinct write-only
 `stdout` and `stderr` handles. Normal output uses `stdout`; non-zero-exit
 diagnostics use `stderr`. All three currently target the serial console, so
-observable terminal behavior is unchanged. The utilities validate `in` but do
-not read it yet.
+observable terminal behavior is unchanged. The bounded `readline` utility reads
+one line from `in`, rejects input beyond 128 bytes, and writes accepted bytes to
+`stdout`. This validates the inherited read-only input capability independently
+of the shell's own console handle.
 Alternate stream endpoints, I/O redirection, pipelines, job control, and a
 persistent userspace TTY server remain later work.

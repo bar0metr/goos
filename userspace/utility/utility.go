@@ -26,6 +26,7 @@ var stdinHandle uint64
 var vfsHandle uint64
 var clockValue uint64
 var systemInfo [kcall.SystemInfoSize]byte
+var inputByte byte
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -35,6 +36,9 @@ var heapEndSymbol [0]byte
 
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname consoleRead goos_console_read
+func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
@@ -94,6 +98,8 @@ func Run() {
 	case equal(data.Command, "echo"):
 		writeArguments(data, 1)
 		write("\nECHO_PROCESS_OK\n")
+	case equal(data.Command, "readline"):
+		runReadline()
 	case equal(data.Command, "mkdir"):
 		runCreate(data, true)
 	case equal(data.Command, "touch"):
@@ -120,6 +126,31 @@ func Run() {
 		finish(1, "invalid utility\n")
 	}
 	finish(0, "")
+}
+
+func runReadline() {
+	const maxLine = 128
+	var line [maxLine]byte
+	size := 0
+	for {
+		status := consoleRead(stdinHandle, unsafe.Pointer(&inputByte), 1)
+		if status == uint64(kcall.StatusNotFound) {
+			continue
+		}
+		if status != 0 {
+			finish(2, "readline: input unavailable\n")
+		}
+		if inputByte == '\r' || inputByte == '\n' {
+			break
+		}
+		if size == len(line) {
+			finish(2, "readline: input too long\n")
+		}
+		line[size] = inputByte
+		size++
+	}
+	writeBytes(line[:size])
+	write("\nSTDIN_READ_OK\n")
 }
 
 func equal(value []byte, expected string) bool {

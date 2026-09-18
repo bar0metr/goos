@@ -29,5 +29,5 @@ combined executable path, startup data, and capability manifest against the
 
 Every external utility now has explicit standard-input, `stdout`, and `stderr`
 authority with least-privilege directions. Existing behavior is unchanged.
-Alternate stream endpoints, actual stdin-consuming utilities, redirection, and
-pipes remain future Priority 3 work.
+ADR 0039 subsequently adds the first bounded stdin-consuming utility. Alternate
+stream endpoints, redirection, and pipes remain future Priority 3 work.
