@@ -139,7 +139,8 @@ byte streams with directional endpoints, bounded buffering, backpressure, and
 EOF after writer close. ADR 0041 adds scheduler-backed stream readiness and a
 real two-process `producer | consumer` shell pipeline with stream endpoints
 substituted into the child startup roles. Longer pipelines and file redirection
-remain unfinished.
+remain unfinished. ADR 0042 adds bounded sequential execution with `;`,
+whole-line syntax validation, and completion before advancing to the next command.
 
 ## Priority 4 — Separate normal boot from validation boot
 

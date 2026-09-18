@@ -22,6 +22,16 @@ rm -f "$log" "$reboot_log"
 	 sleep 1
 	 printf 'echo piped-native-data | readline\n'
 	 sleep 1
+  printf 'echo sequence-first; echo sequence-pipe | readline; echo sequence-last\n'
+  sleep 1
+  printf 'cd "/system"; pwd; cd /\n'
+  sleep 1
+  printf 'cat /missing; echo sequence-after-failure\n'
+  sleep 1
+  printf 'echo sequence-must-not-run; echo "unterminated\n'
+  sleep 1
+  printf 'echo "quoted;separator"; echo escaped\\;separator\n'
+  sleep 1
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
@@ -159,6 +169,15 @@ while [ "$elapsed" -lt 120 ]; do
 		grep -q 'STDIN_READ_OK' "$log" 2>/dev/null && \
 		grep -q 'piped-native-data' "$log" 2>/dev/null && \
 		grep -q 'PIPELINE_EXEC_OK' "$log" 2>/dev/null && \
+		grep -q '^sequence-first$' "$log" 2>/dev/null && \
+		grep -q '^sequence-pipe$' "$log" 2>/dev/null && \
+		grep -q '^sequence-last$' "$log" 2>/dev/null && \
+		grep -q '^/system$' "$log" 2>/dev/null && \
+		grep -q '^sequence-after-failure$' "$log" 2>/dev/null && \
+		grep -q '^exec: invalid command sequence$' "$log" 2>/dev/null && \
+		! grep -q '^sequence-must-not-run$' "$log" 2>/dev/null && \
+		grep -q '^quoted;separator$' "$log" 2>/dev/null && \
+		grep -q '^escaped;separator$' "$log" 2>/dev/null && \
 		grep -q 'STDERR_HANDLE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \

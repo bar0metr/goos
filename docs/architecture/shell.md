@@ -42,3 +42,13 @@ the producer and only the reader to the consumer, and returns the first failing
 exit code. Quoted and escaped `|` bytes remain ordinary argument data. File
 redirection, longer pipelines, job control, and a persistent userspace TTY
 server remain later work.
+
+Up to eight commands or two-stage pipelines may be separated by unquoted `;`
+within the existing 128-byte line limit. A trailing separator is accepted; empty
+intermediate commands are rejected. The entire line is checked for balanced
+quotes, escaping, argument bounds, and pipeline syntax before any command runs.
+Quoted or escaped semicolons remain data. Builtins cannot be pipeline stages.
+Each command completes before the next starts; a runtime failure is reported
+and does not stop the sequence. `cd` accepts a quoted path and changes the cwd
+inherited by subsequent commands. The shell resets its arena after each command.
+This syntax does not implement conditional execution (`&&` or `||`).

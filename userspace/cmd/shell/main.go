@@ -123,17 +123,36 @@ func echoInput(value byte) {
 }
 
 func execute(line []byte) {
-	command, arguments := shellcmd.Parse(line)
-	switch command {
-	case shellcmd.CommandHelp:
+	commands, count, valid := shellcmd.ParseSequence(line, &argumentStorage)
+	if !valid {
+		write("exec: invalid command sequence\n")
+		return
+	}
+	for index := 0; index < count; index++ {
+		executeCommand(commands[index])
+		// Sequence slices borrow the static line-editor buffer, not the arena.
+		heapPointer = arenaBase
+	}
+}
+
+func executeCommand(line []byte) {
+	first, second, _ := shellcmd.SplitPipeline(line)
+	invocation, _ := shellcmd.ParseInvocation(first, &argumentStorage)
+	name := string(invocation.Arguments[0])
+	switch {
+	case len(second) == 0 && name == "help" && invocation.Count == 1:
 		write("builtins: help clear cd\nexecutables: /system/bin\nSHELL_HELP_OK\n")
-	case shellcmd.CommandClear:
+	case len(second) == 0 && name == "clear" && invocation.Count == 1:
 		write("\x1b[2J\x1b[H")
 		write("SHELL_CLEAR_OK\n")
-	case shellcmd.CommandCd:
-		executeCd(arguments)
-	case shellcmd.CommandEmpty:
-		return
+	case len(second) == 0 && name == "cd":
+		if invocation.Count > 2 {
+			write("cd: expected at most one path\n")
+		} else if invocation.Count == 2 {
+			executeCd(invocation.Arguments[1])
+		} else {
+			executeCd(nil)
+		}
 	default:
 		executeExternal(line)
 	}
