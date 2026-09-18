@@ -25,6 +25,7 @@ const (
 	OperationStreamCreate
 	OperationStreamRead
 	OperationStreamWrite
+	OperationStreamWait
 )
 
 type Status uint64

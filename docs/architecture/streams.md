@@ -14,13 +14,16 @@ numbers. The kernel validates handle type, direction, and rights for every
 operation. Each stream owns a fixed 4096-byte ring buffer. One operation moves
 at most 256 bytes and reports the exact transferred size through a validated
 descriptor. A full write reports bounded backpressure; an empty read reports
-that it would block while the writer remains open.
+that it would block while the writer remains open. `StreamWait` registers the
+current task in a bounded wait set and removes it from the runnable set until
+data, buffer space, peer closure, or timeout.
 
 Closing the writer preserves buffered bytes. After the reader drains them, the
 next read reports peer closure as EOF. Closing the reader discards buffered
 bytes and makes later writes fail with peer closure. Process teardown closes
 all owned stream endpoints and releases the object after both sides close.
 
-The first userspace integration probe creates a stream, writes and reads data,
-closes the writer, observes EOF, and closes the reader. Shell startup-handle
-routing and blocking waits are separate follow-up work.
+The userspace integration probe creates a stream, writes and reads data, closes
+the writer, observes EOF, and closes the reader. The shell uses the same object
+for a real two-stage pipeline, and PID 1 substitutes directional endpoints for
+the children's named standard-stream roles.

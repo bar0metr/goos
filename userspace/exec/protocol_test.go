@@ -29,6 +29,20 @@ func TestProtocolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPipelineProtocolRoundTrip(t *testing.T) {
+	message, ok := EncodeRequest(Request{
+		Path: []byte("/system/bin/echo"), CWD: []byte("/"), Arguments: []byte{1, 2}, Environment: []byte{3},
+		NextPath: []byte("/system/bin/readline"), NextArguments: []byte{4},
+	}, 9)
+	if !ok {
+		t.Fatal("pipeline encode failed")
+	}
+	request, ok := DecodeRequest(message)
+	if !ok || string(request.NextPath) != "/system/bin/readline" || len(request.NextArguments) != 1 {
+		t.Fatalf("pipeline request = %#v", request)
+	}
+}
+
 func TestProtocolRejectsInvalidPathsAndResults(t *testing.T) {
 	for _, path := range []string{"hello", "/system/../hello", "/system//hello", "/"} {
 		if _, ok := EncodeRequest(Request{Path: []byte(path), CWD: []byte("/")}, 1); ok {

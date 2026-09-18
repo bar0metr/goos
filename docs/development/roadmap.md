@@ -136,8 +136,10 @@ Non-zero-exit diagnostics use `stderr`; all three streams currently target the
 serial console. ADR 0039 adds bounded `readline` as the first utility that
 consumes the explicit input role. ADR 0040 adds independent capability-protected
 byte streams with directional endpoints, bounded buffering, backpressure, and
-EOF after writer close. Routing startup standard streams to these endpoints,
-redirection, and shell pipeline grammar remain unfinished.
+EOF after writer close. ADR 0041 adds scheduler-backed stream readiness and a
+real two-process `producer | consumer` shell pipeline with stream endpoints
+substituted into the child startup roles. Longer pipelines and file redirection
+remain unfinished.
 
 ## Priority 4 — Separate normal boot from validation boot
 

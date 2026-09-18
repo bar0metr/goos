@@ -87,3 +87,29 @@ func (stream *Stream) CloseWriter() bool {
 }
 
 func (stream *Stream) Closed() bool { return stream == nil || !stream.readerOpen && !stream.writerOpen }
+
+func (stream *Stream) ReadStatus() Status {
+	if stream == nil || !stream.readerOpen {
+		return StatusInvalidEndpoint
+	}
+	if stream.count != 0 {
+		return StatusOK
+	}
+	if !stream.writerOpen {
+		return StatusPeerClosed
+	}
+	return StatusWouldBlock
+}
+
+func (stream *Stream) WriteStatus() Status {
+	if stream == nil || !stream.writerOpen {
+		return StatusInvalidEndpoint
+	}
+	if !stream.readerOpen {
+		return StatusPeerClosed
+	}
+	if stream.count == Capacity {
+		return StatusWouldBlock
+	}
+	return StatusOK
+}

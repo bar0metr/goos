@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(2)
+	Version    = uint16(3)
 	MaxPath    = 192
 	replySize  = 24
 	SearchRoot = "/system/bin/"
@@ -49,7 +49,10 @@ func CommandFromSystemPath(path []byte) ([]byte, bool) {
 	return command, true
 }
 
-type Request struct{ Path, CWD, Arguments, Environment []byte }
+type Request struct {
+	Path, CWD, Arguments, Environment []byte
+	NextPath, NextArguments           []byte
+}
 type Reply struct {
 	Process      uint64
 	LaunchStatus uint64
@@ -57,10 +60,11 @@ type Reply struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || !validPath(request.Path) || !validCWD(request.CWD) || len(request.Arguments) > 96 || len(request.Environment) > 96 || 6+len(request.Path)+len(request.CWD)+len(request.Arguments)+len(request.Environment) > ipc.MaxPayload {
+	pipeline := len(request.NextPath) != 0
+	if correlation == 0 || !validPath(request.Path) || !validCWD(request.CWD) || len(request.Arguments) > 128 || len(request.Environment) > 96 || pipeline != (len(request.NextArguments) != 0) || pipeline && !validPath(request.NextPath) || len(request.NextArguments) > 128 || 10+len(request.Path)+len(request.CWD)+len(request.Arguments)+len(request.Environment)+len(request.NextPath)+len(request.NextArguments) > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(6 + len(request.Path) + len(request.CWD) + len(request.Arguments) + len(request.Environment))}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(10 + len(request.Path) + len(request.CWD) + len(request.Arguments) + len(request.Environment) + len(request.NextPath) + len(request.NextArguments))}
 	message.HandleCount = 0
 	for index := range message.Handles {
 		message.Handles[index] = 0
@@ -68,7 +72,10 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	message.Payload[0], message.Payload[1] = byte(len(request.Path)), byte(len(request.CWD))
 	binary.LittleEndian.PutUint16(message.Payload[2:4], uint16(len(request.Arguments)))
 	binary.LittleEndian.PutUint16(message.Payload[4:6], uint16(len(request.Environment)))
-	offset := 6
+	message.Payload[6] = byte(len(request.NextPath))
+	binary.LittleEndian.PutUint16(message.Payload[7:9], uint16(len(request.NextArguments)))
+	message.Payload[9] = 0
+	offset := 10
 	copy(message.Payload[offset:], request.Path)
 	offset += len(request.Path)
 	copy(message.Payload[offset:], request.CWD)
@@ -76,19 +83,24 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	copy(message.Payload[offset:], request.Arguments)
 	offset += len(request.Arguments)
 	copy(message.Payload[offset:], request.Environment)
+	offset += len(request.Environment)
+	copy(message.Payload[offset:], request.NextPath)
+	offset += len(request.NextPath)
+	copy(message.Payload[offset:], request.NextArguments)
 	return message, true
 }
 
 func DecodeRequest(message ipc.Message) (Request, bool) {
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 6 {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 10 || message.Payload[9] != 0 {
 		return Request{}, false
 	}
 	pathSize, cwdSize := int(message.Payload[0]), int(message.Payload[1])
 	argumentSize, environmentSize := int(binary.LittleEndian.Uint16(message.Payload[2:4])), int(binary.LittleEndian.Uint16(message.Payload[4:6]))
-	if 6+pathSize+cwdSize+argumentSize+environmentSize != int(message.PayloadSize) || argumentSize > 96 || environmentSize > 96 {
+	nextPathSize, nextArgumentSize := int(message.Payload[6]), int(binary.LittleEndian.Uint16(message.Payload[7:9]))
+	if 10+pathSize+cwdSize+argumentSize+environmentSize+nextPathSize+nextArgumentSize != int(message.PayloadSize) || argumentSize > 128 || environmentSize > 96 || nextArgumentSize > 128 || (nextPathSize == 0) != (nextArgumentSize == 0) {
 		return Request{}, false
 	}
-	offset := 6
+	offset := 10
 	path := message.Payload[offset : offset+pathSize]
 	offset += pathSize
 	cwd := message.Payload[offset : offset+cwdSize]
@@ -98,7 +110,15 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	}
 	arguments := message.Payload[offset : offset+argumentSize]
 	offset += argumentSize
-	return Request{Path: path, CWD: cwd, Arguments: arguments, Environment: message.Payload[offset : offset+environmentSize]}, true
+	environment := message.Payload[offset : offset+environmentSize]
+	offset += environmentSize
+	nextPath := message.Payload[offset : offset+nextPathSize]
+	offset += nextPathSize
+	nextArguments := message.Payload[offset : offset+nextArgumentSize]
+	if nextPathSize != 0 && !validPath(nextPath) {
+		return Request{}, false
+	}
+	return Request{Path: path, CWD: cwd, Arguments: arguments, Environment: environment, NextPath: nextPath, NextArguments: nextArguments}, true
 }
 
 func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || validPath(path) }

@@ -11,6 +11,55 @@ type Invocation struct {
 	Count     uint8
 }
 
+// SplitPipeline returns either one command or two commands separated by one
+// unquoted pipe operator. Empty stages and additional operators are rejected.
+func SplitPipeline(line []byte) ([]byte, []byte, bool) {
+	quote, escaped, split := byte(0), false, -1
+	for index, value := range line {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if value == '\\' {
+			escaped = true
+			continue
+		}
+		if value == '\'' || value == '"' {
+			if quote == 0 {
+				quote = value
+			} else if quote == value {
+				quote = 0
+			}
+			continue
+		}
+		if value == '|' && quote == 0 {
+			if split >= 0 {
+				return nil, nil, false
+			}
+			split = index
+		}
+	}
+	if quote != 0 || escaped {
+		return nil, nil, false
+	}
+	if split < 0 {
+		return trimSpaces(line), nil, len(trimSpaces(line)) != 0
+	}
+	left, right := trimSpaces(line[:split]), trimSpaces(line[split+1:])
+	return left, right, len(left) != 0 && len(right) != 0
+}
+
+func trimSpaces(value []byte) []byte {
+	start, end := 0, len(value)
+	for start < end && value[start] == ' ' {
+		start++
+	}
+	for end > start && value[end-1] == ' ' {
+		end--
+	}
+	return value[start:end]
+}
+
 // ParseInvocation tokenizes a bounded command line with single quotes, double
 // quotes, and backslash escaping. The returned slices refer to storage.
 func ParseInvocation(line []byte, storage *[MaxArguments][MaxArgumentSize]byte) (Invocation, bool) {
