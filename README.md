@@ -185,7 +185,7 @@ the policy loop and enforces bounded crash restart accounting. Spawn capability
 installation, a userspace VFS service, an interactive filesystem-aware shell,
 and capability-bounded native utility launch are implemented. The shell resolves
 general native executables beneath `/system/bin` with bounded quoting and
-structured arguments and one two-stage pipeline. Redirection and longer
+structured arguments, one two-stage pipeline, and bounded `;` command sequences. Redirection and longer
 pipelines are not yet exposed. The current ISO boots a real kernel, leaves UEFI
 boot services, installs its own page tables, runs preempted kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
@@ -295,7 +295,7 @@ status propagation, the native base utilities, and the block-service IPC
 boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
 reboot-persistence gate are implemented. Priority 3 shell composition is now
 the active roadmap milestone; stdin consumption, native streams, and one real
-two-stage pipeline are complete. Longer pipelines and file redirection remain.
+two-stage pipeline and sequential execution are complete. Longer pipelines and file redirection remain.
 FAT32 hardening and storage failure recovery remain incremental work.
 
 Shell redirection and longer pipelines can now extend the explicit native

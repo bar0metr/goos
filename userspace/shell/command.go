@@ -4,7 +4,73 @@ package shell
 const (
 	MaxArguments    = 8
 	MaxArgumentSize = 63
+	MaxCommands     = 8
 )
+
+// ParseSequence validates the whole line before exposing any command for
+// execution. Returned slices borrow line; scratch is reused for validation.
+// A trailing separator is allowed, but empty commands between separators are not.
+func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([MaxCommands][]byte, int, bool) {
+	var commands [MaxCommands][]byte
+	count, start := 0, 0
+	quote, escaped := byte(0), false
+	for index := 0; index <= len(line); index++ {
+		atEnd := index == len(line)
+		if !atEnd {
+			value := line[index]
+			if escaped {
+				escaped = false
+				continue
+			}
+			if value == '\\' {
+				escaped = true
+				continue
+			}
+			if value == '\'' || value == '"' {
+				if quote == 0 {
+					quote = value
+				} else if quote == value {
+					quote = 0
+				}
+				continue
+			}
+			if value != ';' || quote != 0 {
+				continue
+			}
+		}
+		if quote != 0 || escaped {
+			return commands, 0, false
+		}
+		command := trimSpaces(line[start:index])
+		if len(command) == 0 {
+			return commands, count, atEnd
+		}
+		if count == MaxCommands {
+			return commands, 0, false
+		}
+		left, right, ok := SplitPipeline(command)
+		if !ok {
+			return commands, 0, false
+		}
+		for _, stage := range [2][]byte{left, right} {
+			if len(stage) == 0 {
+				continue
+			}
+			invocation, valid := ParseInvocation(stage, scratch)
+			if !valid {
+				return commands, 0, false
+			}
+			name := invocation.Arguments[0]
+			if len(right) != 0 && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
+				return commands, 0, false
+			}
+		}
+		commands[count] = command
+		count++
+		start = index + 1
+	}
+	return commands, count, true
+}
 
 type Invocation struct {
 	Arguments [MaxArguments][]byte

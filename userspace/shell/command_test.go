@@ -1,6 +1,47 @@
 package shell
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestParseSequence(t *testing.T) {
+	for _, test := range []struct {
+		line string
+		want []string
+	}{
+		{"", nil}, {"   ", nil},
+		{"echo a; pwd;", []string{"echo a", "pwd"}},
+		{`echo "a;b"; echo 'c;d'; echo e\;f`, []string{`echo "a;b"`, `echo 'c;d'`, `echo e\;f`}},
+		{`echo x | readline; cd "/system"; pwd`, []string{`echo x | readline`, `cd "/system"`, "pwd"}},
+		{strings.Repeat("pwd;", MaxCommands), []string{"pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd"}},
+	} {
+		var scratch [MaxArguments][MaxArgumentSize]byte
+		commands, count, ok := ParseSequence([]byte(test.line), &scratch)
+		if !ok || count != len(test.want) {
+			t.Fatalf("ParseSequence(%q): count=%d ok=%v", test.line, count, ok)
+		}
+		for i, want := range test.want {
+			if string(commands[i]) != want {
+				t.Fatalf("command %d = %q, want %q", i, commands[i], want)
+			}
+		}
+	}
+}
+
+func TestParseSequenceRejectsMalformedTail(t *testing.T) {
+	for _, line := range []string{
+		";pwd", "pwd;;pwd", "pwd; ;", `pwd; echo "unfinished`, "pwd; echo x\\",
+		"pwd; echo x |", "pwd; a | b | c", "pwd; cd / | readline",
+		"pwd; echo x | help", "pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
+		"pwd; echo a b c d e f g h", strings.Repeat("pwd;", MaxCommands+1),
+	} {
+		var scratch [MaxArguments][MaxArgumentSize]byte
+		if _, _, ok := ParseSequence([]byte(line), &scratch); ok {
+			t.Fatalf("accepted malformed sequence %q", line)
+		}
+	}
+}
 
 func TestParse(t *testing.T) {
 	tests := []struct {
