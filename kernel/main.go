@@ -20,6 +20,7 @@ import (
 	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
+	"goos/kernel/stream"
 	"goos/kernel/tty"
 	"goos/kernel/vfs"
 	supervisor "goos/userspace/init"
@@ -41,6 +42,8 @@ var (
 	ipcWireData             [ipc.WireMaxSize]byte
 	sharedRegistry          shmem.Registry
 	channelRegistry         ipc.Registry
+	streamRegistry          stream.Registry
+	streamCallData          [kcall.MaxStreamIO]byte
 	lifecycleChannel        *ipc.Channel
 	lifecycleChannelID      uint64
 	vfsChannelID            uint64
@@ -160,6 +163,10 @@ func deliverProcessExits() {
 							amd64.PortWrite(virtioBlockPort+18, 1, 0)
 							amd64.QuiesceIRQ11()
 						}
+					}
+					if typeID == handle.TypeStream {
+						closeStreamCapability(cap)
+						return
 					}
 					if typeID != handle.TypeChannel {
 						return
@@ -562,9 +569,162 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 		}
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
 		channelRegistry.Release(channelID)
+	} else if typeID == handle.TypeStream {
+		if !closeStreamCapability(cap) {
+			return kcall.StatusNotFound
+		}
 	}
 	if !owner.Handles().Close(handle.ID(id)) {
 		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
+func closeStreamCapability(cap capability.Capability) bool {
+	streamID, writer, valid := stream.DecodeEndpointObject(cap.Object())
+	endpoint, exists := streamRegistry.Lookup(streamID)
+	if !valid || !exists {
+		return false
+	}
+	closed := false
+	if writer {
+		closed = endpoint.CloseWriter()
+	} else {
+		closed = endpoint.CloseReader()
+	}
+	if closed {
+		streamRegistry.Release(streamID)
+	}
+	return closed
+}
+
+func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || length != 16 || owner.Handles().Available() < 2 {
+		return kcall.StatusPermissionDenied
+	}
+	endpoint, id, created := streamRegistry.Create()
+	if !created {
+		return kcall.StatusResourceExhausted
+	}
+	readerObject, _ := stream.ReaderObject(id)
+	writerObject, _ := stream.WriterObject(id)
+	reader, readerOK := owner.Handles().Insert(handle.TypeStream, capability.New(readerObject, capability.Read|capability.Transfer))
+	writer, writerOK := owner.Handles().Insert(handle.TypeStream, capability.New(writerObject, capability.Write|capability.Transfer))
+	if !readerOK || !writerOK {
+		if readerOK {
+			owner.Handles().Close(reader)
+		}
+		if writerOK {
+			owner.Handles().Close(writer)
+		}
+		endpoint.CloseReader()
+		endpoint.CloseWriter()
+		streamRegistry.Release(id)
+		return kcall.StatusResourceExhausted
+	}
+	var encoded [16]byte
+	putUint64(encoded[0:8], uint64(reader))
+	putUint64(encoded[8:16], uint64(writer))
+	if !vm.CopyOut(handler.root, address, encoded[:]) {
+		owner.Handles().Close(reader)
+		owner.Handles().Close(writer)
+		endpoint.CloseReader()
+		endpoint.CloseWriter()
+		streamRegistry.Release(id)
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) streamEndpoint(id uint64, required capability.Rights, writer bool) (*stream.Stream, kcall.Status) {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return nil, kcall.StatusPermissionDenied
+	}
+	cap, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeStream, required)
+	streamID, isWriter, valid := stream.DecodeEndpointObject(cap.Object())
+	endpoint, exists := streamRegistry.Lookup(streamID)
+	if !allowed || !valid || !exists || isWriter != writer {
+		return nil, kcall.StatusPermissionDenied
+	}
+	return endpoint, kcall.StatusOK
+}
+
+func streamStatus(status stream.Status) kcall.Status {
+	switch status {
+	case stream.StatusOK:
+		return kcall.StatusOK
+	case stream.StatusWouldBlock:
+		return kcall.StatusResourceExhausted
+	case stream.StatusPeerClosed:
+		return kcall.StatusPeerDied
+	default:
+		return kcall.StatusInvalidArgument
+	}
+}
+
+func streamDescriptor(root, address, length uint64) (uint64, uint64, bool) {
+	if length != kcall.StreamDescriptorSize {
+		return 0, 0, false
+	}
+	var descriptor [24]byte
+	if !vm.CopyIn(root, address, descriptor[:]) {
+		return 0, 0, false
+	}
+	buffer, size := decodeUint64(descriptor[0:8]), decodeUint64(descriptor[8:16])
+	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(descriptor[16:24]) != 0 {
+		return 0, 0, false
+	}
+	return buffer, size, true
+}
+
+func writeStreamResult(root, descriptor, size uint64) bool {
+	var encoded [8]byte
+	putUint64(encoded[:], size)
+	return vm.CopyOut(root, descriptor+16, encoded[:])
+}
+
+func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length uint64) kcall.Status {
+	endpoint, status := handler.streamEndpoint(id, capability.Read, false)
+	buffer, size, valid := streamDescriptor(handler.root, descriptor, length)
+	if status != kcall.StatusOK || !valid {
+		if status != kcall.StatusOK {
+			return status
+		}
+		return kcall.StatusInvalidArgument
+	}
+	if !vm.CanCopyOut(handler.root, buffer, size) || !vm.CanCopyOut(handler.root, descriptor+16, 8) {
+		return kcall.StatusInvalidArgument
+	}
+	count, result := endpoint.Read(streamCallData[:size])
+	if result != stream.StatusOK {
+		return streamStatus(result)
+	}
+	if !vm.CopyOut(handler.root, buffer, streamCallData[:count]) || !writeStreamResult(handler.root, descriptor, uint64(count)) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+func (handler nativeCallHandler) StreamWrite(id uint64, descriptor uint64, length uint64) kcall.Status {
+	endpoint, status := handler.streamEndpoint(id, capability.Write, true)
+	buffer, size, valid := streamDescriptor(handler.root, descriptor, length)
+	if status != kcall.StatusOK || !valid {
+		if status != kcall.StatusOK {
+			return status
+		}
+		return kcall.StatusInvalidArgument
+	}
+	if !vm.CopyIn(handler.root, buffer, streamCallData[:size]) {
+		return kcall.StatusInvalidArgument
+	}
+	count, result := endpoint.Write(streamCallData[:size])
+	if result != stream.StatusOK {
+		return streamStatus(result)
+	}
+	if !writeStreamResult(handler.root, descriptor, uint64(count)) {
+		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }

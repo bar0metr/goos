@@ -34,6 +34,11 @@ through the native call ABI. Userspace IPC attachments use move semantics and
 strip `Transfer` from the receiver. Closing both endpoint capabilities releases
 the fixed registry slot.
 
+Unstructured byte flow is intentionally separate from typed IPC. Native streams
+preserve byte order in a fixed ring buffer and expose directional capability
+endpoints; see [native byte streams](streams.md). Typed IPC remains the control
+plane for requests, replies, and handle transfer.
+
 # Native call boundary
 
 `IPCSend` and `IPCReceive` accept a process-local channel handle, a user virtual
@@ -54,7 +59,7 @@ timeout status.
 
 ## PID 1 lifecycle channel
 
-The `GINITLIF` version 4 protocol uses a dedicated channel capability installed
+The `GINITLIF` version 5 protocol uses a dedicated channel capability installed
 only in PID 1. Process-exit notifications carry the PID and typed exit code.
 Launch requests and results are correlated, so each pending request is retired
 by exactly one reply. Launch requests also carry bounded startup data and may

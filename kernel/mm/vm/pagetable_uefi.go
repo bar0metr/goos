@@ -351,6 +351,26 @@ func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
 	return true
 }
 
+// CanCopyOut validates an entire writable user range without modifying it.
+func CanCopyOut(rootAddress uint64, address uint64, length uint64) bool {
+	if !ValidateUserRange(address, length) || length == 0 || rootAddress%PageSize != 0 {
+		return false
+	}
+	for checked := uint64(0); checked < length; {
+		physical, leaf, ok := resolveUser(rootAddress, address+checked)
+		if !ok || leaf&entryWritable == 0 || physical >= IdentityMapLimit {
+			return false
+		}
+		pageRemaining := PageSize - physical&(PageSize-1)
+		remaining := length - checked
+		if pageRemaining > remaining {
+			pageRemaining = remaining
+		}
+		checked += pageRemaining
+	}
+	return true
+}
+
 // InitializePhysicalByte initializes an exclusively owned physical page before
 // it is exposed through a process mapping.
 func InitializePhysicalByte(address uint64, value byte) bool {

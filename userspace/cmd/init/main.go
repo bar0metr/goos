@@ -46,6 +46,9 @@ var (
 	lifecyclePending     [16]ipc.Message
 	lifecycleHead        uint8
 	lifecycleCount       uint8
+	streamPair           [2]uint64
+	streamDescriptor     [3]uint64
+	streamReadback       [16]byte
 )
 
 //go:extern _heap_start
@@ -75,9 +78,22 @@ func handleClose(id uint64) uint64
 //go:linkname processWait goos_process_wait
 func processWait(process uint64, result unsafe.Pointer, timeout uint64) uint64
 
+//go:linkname streamCreate goos_stream_create
+func streamCreate(address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname streamRead goos_stream_read
+func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname streamWrite goos_stream_write
+func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
+	if !probeStreamEndpoint() {
+		fatal("STREAM_ENDPOINT_FAILED\n")
+	}
+	write("STREAM_ENDPOINT_OK\n")
 	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
 		Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 		manager.StartReady(0, bootstrapService) != 1 {
@@ -147,6 +163,31 @@ func userspaceMain() {
 			write("USERSPACE_SUPERVISOR_OK\n")
 		}
 	}
+}
+
+func probeStreamEndpoint() bool {
+	if streamCreate(unsafe.Pointer(&streamPair[0]), 16) != 0 {
+		return false
+	}
+	payload := "bounded-stream"
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(unsafe.StringData(payload))))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(payload)), 0
+	if streamWrite(streamPair[1], unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || streamDescriptor[2] != uint64(len(payload)) {
+		return false
+	}
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&streamReadback[0])))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(streamReadback)), 0
+	if streamRead(streamPair[0], unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || streamDescriptor[2] != uint64(len(payload)) || !equalBytes(streamReadback[:len(payload)], payload) {
+		return false
+	}
+	if handleClose(streamPair[1]) != 0 {
+		return false
+	}
+	streamDescriptor[2] = 0
+	if streamRead(streamPair[0], unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(ipc.StatusPeerDied) {
+		return false
+	}
+	return handleClose(streamPair[0]) == 0
 }
 
 func probeBlockService() bool {

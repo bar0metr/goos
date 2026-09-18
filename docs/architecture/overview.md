@@ -29,3 +29,7 @@ versioned capability-bounded IPC. The block service reaches a persistent QEMU
 disk through an isolated userspace virtio-blk driver with bounded port-I/O,
 DMA, and IRQ authority. A bounded FAT32 backend mounted at `/persist` reaches
 that block service through a dedicated capability-scoped endpoint.
+Native composition also has bounded unidirectional byte-stream objects with
+separate read and write capabilities, backpressure, and close-driven EOF. These
+objects are the non-POSIX foundation for later standard-stream redirection and
+shell pipelines.

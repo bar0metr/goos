@@ -143,7 +143,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
 
 test-boot: iso $(BUILD_DIR)/virtio-blk.img
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
@@ -153,6 +153,7 @@ test-performance:
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkAllocateFree -benchmem ./kernel/mm/pmm | tee $(BUILD_DIR)/reports/page-allocation.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkChannelPingPong -benchmem ./kernel/ipc | tee $(BUILD_DIR)/reports/ipc-ping-pong.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkSharedPagePayloadAccess -benchmem ./kernel/shmem | tee $(BUILD_DIR)/reports/shared-memory.txt
+	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkStreamRoundTrip -benchmem ./kernel/stream | tee $(BUILD_DIR)/reports/stream-roundtrip.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkMetadataCreateUnlink -benchmem ./kernel/ramfs | tee $(BUILD_DIR)/reports/ramfs-metadata.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench 'Benchmark.*Resolve' -benchmem ./kernel/vfs | tee $(BUILD_DIR)/reports/vfs-resolve.txt
 
@@ -177,6 +178,7 @@ docs:
 	@test -f docs/architecture/init.md
 	@test -f docs/architecture/shell.md
 	@test -f docs/architecture/storage.md
+	@test -f docs/architecture/streams.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/adr/0011-native-image-format.md
@@ -207,6 +209,7 @@ docs:
 	@test -f docs/adr/0037-explicit-standard-error-handle.md
 	@test -f docs/adr/0038-explicit-standard-input-handle.md
 	@test -f docs/adr/0039-bounded-standard-input-consumer.md
+	@test -f docs/adr/0040-capability-protected-byte-streams.md
 	@test -f docs/development/building.md
 
 clean:
