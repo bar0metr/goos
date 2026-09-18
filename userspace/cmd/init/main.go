@@ -361,71 +361,43 @@ func pollExec() {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
 		return
 	}
-	var path [execproto.MaxPath]byte
-	pathSize := copy(path[:], request.Path)
-	var cwd [96]byte
-	cwdSize := copy(cwd[:], request.CWD)
-	var arguments [128]byte
-	argumentSize := copy(arguments[:], request.Arguments)
+	// Own every invocation before launch/VFS operations reuse the IPC buffer.
+	var paths [execproto.MaxStages][execproto.MaxPath]byte
+	var arguments [execproto.MaxStages][128]byte
+	var cwd [execproto.MaxPath]byte
 	var environment [96]byte
-	environmentSize := copy(environment[:], request.Environment)
-	var nextPath [execproto.MaxPath]byte
-	nextPathSize := copy(nextPath[:], request.NextPath)
-	var nextArguments [128]byte
-	nextArgumentSize := copy(nextArguments[:], request.NextArguments)
-	command, allowed := execproto.CommandFromSystemPath(path[:pathSize])
-	if !allowed {
-		write("PIPELINE_PATH_DENIED\n")
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied), 0)
-		return
+	request.CWD = cwd[:copy(cwd[:], request.CWD)]
+	request.Environment = environment[:copy(environment[:], request.Environment)]
+	for index := 0; index < int(request.Count); index++ {
+		stage := &request.Stages[index]
+		stage.Path = paths[index][:copy(paths[index][:], stage.Path)]
+		stage.Arguments = arguments[index][:copy(arguments[index][:], stage.Arguments)]
 	}
-	if len(request.NextPath) != 0 {
-		handlePipelineExec(message.Correlation, path[:pathSize], command, cwd[:cwdSize], arguments[:argumentSize], environment[:environmentSize], nextPath[:nextPathSize], nextArguments[:nextArgumentSize])
-		return
-	}
-	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), command, cwd[:cwdSize], arguments[:argumentSize], environment[:environmentSize], serviceDeviceHandle, handle.TypeDevice, serviceDeviceHandle, handle.TypeDevice)
-	exitCode := uint64(0)
-	if launchStatus == supervisor.LaunchOK {
-		exitCode = waitApplicationExit(processHandle)
-	}
+	pid, launchStatus, exitCode := supervisor.RunPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
 	sendExecReply(message.Correlation, pid, uint64(launchStatus), exitCode)
 }
 
-func handlePipelineExec(replyCorrelation uint64, path, command, cwd, arguments, environment, nextPath, nextArguments []byte) {
-	nextCommand, allowed := execproto.CommandFromSystemPath(nextPath)
-	if !allowed {
-		sendExecReply(replyCorrelation, 0, uint64(supervisor.LaunchCapabilityDenied), 0)
-		return
+type nativePipelineRunner struct{}
+
+func (nativePipelineRunner) CreateStream() (handle.ID, handle.ID, bool) {
+	var pair [2]uint64
+	if streamCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		return 0, 0, false
 	}
-	if streamCreate(unsafe.Pointer(&streamPair[0]), 16) != 0 {
-		write("PIPELINE_STREAM_CREATE_FAILED\n")
-		sendExecReply(replyCorrelation, 0, uint64(supervisor.LaunchResourceExhausted), 0)
-		return
-	}
-	_, producerHandle, producerStatus := launchApplication(bytesString(path), command, cwd, arguments, environment, serviceDeviceHandle, handle.TypeDevice, handle.ID(streamPair[1]), handle.TypeStream)
-	if producerStatus != supervisor.LaunchOK {
-		handleClose(streamPair[0])
-		handleClose(streamPair[1])
-		sendExecReply(replyCorrelation, 0, uint64(producerStatus), 0)
-		return
-	}
-	consumerPID, consumerHandle, consumerStatus := launchApplication(bytesString(nextPath), nextCommand, cwd, nextArguments, environment, handle.ID(streamPair[0]), handle.TypeStream, serviceDeviceHandle, handle.TypeDevice)
-	if consumerStatus != supervisor.LaunchOK {
-		write("PIPELINE_CONSUMER_LAUNCH_FAILED\n")
-		handleClose(streamPair[0])
-		producerExit := waitApplicationExit(producerHandle)
-		_ = producerExit
-		sendExecReply(replyCorrelation, 0, uint64(consumerStatus), 0)
-		return
-	}
-	producerExit := waitApplicationExit(producerHandle)
-	consumerExit := waitApplicationExit(consumerHandle)
-	exitCode := consumerExit
-	if producerExit != 0 {
-		exitCode = producerExit
-	}
-	sendExecReply(replyCorrelation, consumerPID, uint64(supervisor.LaunchOK), exitCode)
+	return handle.ID(pair[0]), handle.ID(pair[1]), true
 }
+
+func (nativePipelineRunner) Close(id handle.ID) bool { return handleClose(uint64(id)) == 0 }
+
+func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byte, input handle.ID, inputType handle.Type, output handle.ID, outputType handle.Type) (uint64, handle.ID, supervisor.LaunchStatus) {
+	command, allowed := execproto.CommandFromSystemPath(stage.Path)
+	if !allowed {
+		return 0, 0, supervisor.LaunchCapabilityDenied
+	}
+	return launchApplication(bytesString(stage.Path), command, cwd, stage.Arguments, environment, input, inputType, output, outputType)
+}
+
+func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicationExit(process) }
 
 func launchApplication(path string, command, cwd, arguments, environment []byte, input handle.ID, inputType handle.Type, output handle.ID, outputType handle.Type) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
@@ -483,8 +455,13 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	}
 	correlation++
 	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
-	if !ok || !sendMessage(lifecycleHandle, request) {
-		write("APP_LAUNCH_REQUEST_FAILED\n")
+	if !ok {
+		write("APP_LAUNCH_ENCODE_FAILED\n")
+		handleClose(pair[0])
+		return 0, 0, supervisor.LaunchInvalidImage
+	}
+	if !sendMessage(lifecycleHandle, request) {
+		write("APP_LAUNCH_SEND_FAILED\n")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}

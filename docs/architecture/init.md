@@ -60,12 +60,29 @@ order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
 Shell exec requests are restricted to simple names below `/system/bin`. The
-version 3 request carries either one invocation or exactly two pipeline stages.
-For a pipeline PID 1 creates a byte stream, starts both processes before
-waiting, and installs only the writer as the producer's `stdout` and only the
-reader as the consumer's `in`. It closes its residual stream handles, waits
-through capability-protected process handles, and returns the first nonzero
-stage status in execution order.
+version 4 request carries one to four invocation records, a shared cwd, and a
+shared environment in the existing 256-byte IPC payload. Each record contains
+its own executable path and structured argv. The decoder checks the complete
+payload, all lengths, system paths, vector encodings, and trailing bytes before
+any resource operations. Oversized requests are rejected rather than truncated.
+
+The payload begins with four bytes: stage count, cwd byte length, environment
+byte length, and a zero reserved byte. Cwd and environment bytes follow. Each
+stage then stores one-byte path and argv lengths followed by those byte strings.
+Argv and environment use the existing GST2 vector encoding. No handles are
+attached to the exec request; PID 1 derives child capabilities from its own table.
+
+For N stages PID 1 creates N-1 streams and starts stages from right to left,
+so a downstream launch failure cannot leave a newly started producer reading
+the console. Each middle stage receives only its upstream reader and downstream
+writer; stderr remains on the console. Successful launch consumes those stream
+handles. On any failure PID 1 closes every retained endpoint before waiting
+for children already started. This releases stream waits through EOF or peer
+closure. It is not forced cancellation of an arbitrary nonterminating program.
+
+All stages start before process waits. PID 1 reaps every started process and
+returns the first nonzero exit code in left-to-right pipeline order. Launch
+failure instead returns a launch status with no successful process result.
 
 PID 1 creates and transfers a fresh VFS session only for utilities that access
 the filesystem. Pure stream and diagnostic utilities receive no VFS endpoint.

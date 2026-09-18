@@ -32,6 +32,24 @@ rm -f "$log" "$reboot_log"
   sleep 1
   printf 'echo "quoted;separator"; echo escaped\\;separator\n'
   sleep 1
+  printf 'echo pipeline-four-data | readline | readline | readline\n'
+  sleep 1
+  printf 'readline | missing-stage; echo pipeline-last-failure-recovered\n'
+  sleep 1
+  printf 'echo pipeline-must-not-run | missing-stage | readline; echo pipeline-middle-failure-recovered\n'
+  sleep 1
+  printf 'missing-stage | readline | readline; echo pipeline-first-failure-recovered\n'
+  sleep 1
+  count=0
+  while [ "$count" -lt 20 ]; do
+    printf 'echo pipeline-reuse | readline | readline | readline\n'
+    sleep 0.3
+    printf 'missing-stage | readline | readline\n'
+    sleep 0.3
+    count=$((count + 1))
+  done
+  printf 'echo pipeline-stress-complete\n'
+  sleep 1
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
@@ -178,6 +196,15 @@ while [ "$elapsed" -lt 120 ]; do
 		! grep -q '^sequence-must-not-run$' "$log" 2>/dev/null && \
 		grep -q '^quoted;separator$' "$log" 2>/dev/null && \
 		grep -q '^escaped;separator$' "$log" 2>/dev/null && \
+		grep -q '^pipeline-four-data$' "$log" 2>/dev/null && \
+		grep -q '^pipeline-last-failure-recovered$' "$log" 2>/dev/null && \
+		grep -q '^pipeline-middle-failure-recovered$' "$log" 2>/dev/null && \
+		grep -q '^pipeline-first-failure-recovered$' "$log" 2>/dev/null && \
+		! grep -q '^pipeline-must-not-run$' "$log" 2>/dev/null && \
+		[ "$(grep -c '^pipeline-reuse$' "$log" 2>/dev/null)" -eq 20 ] && \
+		[ "$(grep -c '^exec: launch failed: 2$' "$log" 2>/dev/null)" -eq 23 ] && \
+		! grep -q 'APP_LAUNCH_.*FAILED' "$log" 2>/dev/null && \
+		grep -q '^pipeline-stress-complete$' "$log" 2>/dev/null && \
 		grep -q 'STDERR_HANDLE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \

@@ -4,12 +4,14 @@ package exec
 import (
 	"encoding/binary"
 	"goos/kernel/ipc"
+	"goos/userspace/startup"
 )
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(3)
+	Version    = uint16(4)
 	MaxPath    = 192
+	MaxStages  = 4
 	replySize  = 24
 	SearchRoot = "/system/bin/"
 )
@@ -49,9 +51,15 @@ func CommandFromSystemPath(path []byte) ([]byte, bool) {
 	return command, true
 }
 
+// Stage is one isolated native invocation in a bounded pipeline.
+type Stage struct {
+	Path, Arguments []byte
+}
+
 type Request struct {
-	Path, CWD, Arguments, Environment []byte
-	NextPath, NextArguments           []byte
+	Stages           [MaxStages]Stage
+	Count            uint8
+	CWD, Environment []byte
 }
 type Reply struct {
 	Process      uint64
@@ -60,65 +68,84 @@ type Reply struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	pipeline := len(request.NextPath) != 0
-	if correlation == 0 || !validPath(request.Path) || !validCWD(request.CWD) || len(request.Arguments) > 128 || len(request.Environment) > 96 || pipeline != (len(request.NextArguments) != 0) || pipeline && !validPath(request.NextPath) || len(request.NextArguments) > 128 || 10+len(request.Path)+len(request.CWD)+len(request.Arguments)+len(request.Environment)+len(request.NextPath)+len(request.NextArguments) > ipc.MaxPayload {
+	if correlation == 0 || request.Count == 0 || request.Count > MaxStages || !validCWD(request.CWD) || len(request.Environment) > 96 {
 		return ipc.Message{}, false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(10 + len(request.Path) + len(request.CWD) + len(request.Arguments) + len(request.Environment) + len(request.NextPath) + len(request.NextArguments))}
+	size := 4 + len(request.CWD) + len(request.Environment)
+	for _, stage := range request.Stages[:request.Count] {
+		if !validStage(stage, request.Environment) {
+			return ipc.Message{}, false
+		}
+		size += 2 + len(stage.Path) + len(stage.Arguments)
+	}
+	if size > ipc.MaxPayload {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(size)}
+	// TinyGo callers require explicit clearing of the attachment fields.
 	message.HandleCount = 0
 	for index := range message.Handles {
 		message.Handles[index] = 0
 	}
-	message.Payload[0], message.Payload[1] = byte(len(request.Path)), byte(len(request.CWD))
-	binary.LittleEndian.PutUint16(message.Payload[2:4], uint16(len(request.Arguments)))
-	binary.LittleEndian.PutUint16(message.Payload[4:6], uint16(len(request.Environment)))
-	message.Payload[6] = byte(len(request.NextPath))
-	binary.LittleEndian.PutUint16(message.Payload[7:9], uint16(len(request.NextArguments)))
-	message.Payload[9] = 0
-	offset := 10
-	copy(message.Payload[offset:], request.Path)
-	offset += len(request.Path)
+	message.Payload[0], message.Payload[1], message.Payload[2], message.Payload[3] = request.Count, byte(len(request.CWD)), byte(len(request.Environment)), 0
+	offset := 4
 	copy(message.Payload[offset:], request.CWD)
 	offset += len(request.CWD)
-	copy(message.Payload[offset:], request.Arguments)
-	offset += len(request.Arguments)
 	copy(message.Payload[offset:], request.Environment)
 	offset += len(request.Environment)
-	copy(message.Payload[offset:], request.NextPath)
-	offset += len(request.NextPath)
-	copy(message.Payload[offset:], request.NextArguments)
+	for _, stage := range request.Stages[:request.Count] {
+		message.Payload[offset], message.Payload[offset+1] = byte(len(stage.Path)), byte(len(stage.Arguments))
+		offset += 2
+		copy(message.Payload[offset:], stage.Path)
+		offset += len(stage.Path)
+		copy(message.Payload[offset:], stage.Arguments)
+		offset += len(stage.Arguments)
+	}
 	return message, true
 }
 
 func DecodeRequest(message ipc.Message) (Request, bool) {
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 10 || message.Payload[9] != 0 {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 4 || message.PayloadSize > ipc.MaxPayload || message.Payload[3] != 0 {
 		return Request{}, false
 	}
-	pathSize, cwdSize := int(message.Payload[0]), int(message.Payload[1])
-	argumentSize, environmentSize := int(binary.LittleEndian.Uint16(message.Payload[2:4])), int(binary.LittleEndian.Uint16(message.Payload[4:6]))
-	nextPathSize, nextArgumentSize := int(message.Payload[6]), int(binary.LittleEndian.Uint16(message.Payload[7:9]))
-	if 10+pathSize+cwdSize+argumentSize+environmentSize+nextPathSize+nextArgumentSize != int(message.PayloadSize) || argumentSize > 128 || environmentSize > 96 || nextArgumentSize > 128 || (nextPathSize == 0) != (nextArgumentSize == 0) {
+	count, cwdSize, environmentSize := message.Payload[0], int(message.Payload[1]), int(message.Payload[2])
+	size := int(message.PayloadSize)
+	if count == 0 || count > MaxStages || environmentSize > 96 || 4+cwdSize+environmentSize > size {
 		return Request{}, false
 	}
-	offset := 10
-	path := message.Payload[offset : offset+pathSize]
-	offset += pathSize
-	cwd := message.Payload[offset : offset+cwdSize]
-	offset += cwdSize
-	if !validPath(path) || !validCWD(cwd) {
+	request := Request{Count: count, CWD: message.Payload[4 : 4+cwdSize], Environment: message.Payload[4+cwdSize : 4+cwdSize+environmentSize]}
+	if !validCWD(request.CWD) {
 		return Request{}, false
 	}
-	arguments := message.Payload[offset : offset+argumentSize]
-	offset += argumentSize
-	environment := message.Payload[offset : offset+environmentSize]
-	offset += environmentSize
-	nextPath := message.Payload[offset : offset+nextPathSize]
-	offset += nextPathSize
-	nextArguments := message.Payload[offset : offset+nextArgumentSize]
-	if nextPathSize != 0 && !validPath(nextPath) {
+	offset := 4 + cwdSize + environmentSize
+	for index := 0; index < int(count); index++ {
+		if offset+2 > size {
+			return Request{}, false
+		}
+		pathSize, argumentSize := int(message.Payload[offset]), int(message.Payload[offset+1])
+		offset += 2
+		if offset+pathSize+argumentSize > size {
+			return Request{}, false
+		}
+		stage := Stage{Path: message.Payload[offset : offset+pathSize], Arguments: message.Payload[offset+pathSize : offset+pathSize+argumentSize]}
+		if !validStage(stage, request.Environment) {
+			return Request{}, false
+		}
+		request.Stages[index] = stage
+		offset += pathSize + argumentSize
+	}
+	if offset != size {
 		return Request{}, false
 	}
-	return Request{Path: path, CWD: cwd, Arguments: arguments, Environment: environment, NextPath: nextPath, NextArguments: nextArguments}, true
+	return request, true
+}
+
+func validStage(stage Stage, environment []byte) bool {
+	if _, ok := CommandFromSystemPath(stage.Path); !ok || !validPath(stage.Path) || len(stage.Arguments) > 128 {
+		return false
+	}
+	_, _, ok := startup.DecodeVectors(stage.Arguments, environment)
+	return ok
 }
 
 func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || validPath(path) }

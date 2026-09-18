@@ -21,6 +21,18 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok {
 		t.Fatal("launch encode failed")
 	}
+	if launch.HandleCount != 0 {
+		t.Fatal("manifest references became IPC attachments")
+	}
+	for _, id := range launch.Handles {
+		if id != 0 {
+			t.Fatal("nonzero unused attachment")
+		}
+	}
+	grantOffset := 12 + len("/system/fault-probe")
+	if launch.Payload[grantOffset+14] != 0 || launch.Payload[grantOffset+15] != 0 {
+		t.Fatal("non-consuming grant has flags or reserved bytes set")
+	}
 	event, ok = DecodeLifecycle(launch)
 	if !ok || event.Operation != LifecycleLaunch || event.Process != 3 || event.ExecutablePath() != "/system/fault-probe" ||
 		event.CapabilityCount != 1 || event.Capabilities[0] != grants[0] {

@@ -25,5 +25,7 @@ all owned stream endpoints and releases the object after both sides close.
 
 The userspace integration probe creates a stream, writes and reads data, closes
 the writer, observes EOF, and closes the reader. The shell uses the same object
-for a real two-stage pipeline, and PID 1 substitutes directional endpoints for
-the children's named standard-stream roles.
+for pipelines of up to four concurrent processes. PID 1 creates one object
+per adjacent pair and substitutes directional endpoints for the children's
+named standard-stream roles. Retained endpoints are closed before reaping
+children after a partial launch failure.
