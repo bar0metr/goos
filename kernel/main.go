@@ -57,6 +57,9 @@ var (
 	processWaitSet          process.WaitSet
 	processWakeResults      [process.MaxWaiters]process.WaitResult
 	processWaitStatus       [sched.MaxTasks]kcall.Status
+	streamWaitSet           ipc.WaitSet
+	streamWakeResults       [ipc.MaxWaiters]ipc.WaitResult
+	streamWaitStatus        [sched.MaxTasks]kcall.Status
 	bootRAMFS               ramfs.FileSystem
 	deviceRAMFS             ramfs.FileSystem
 	bootVFS                 vfs.Namespace
@@ -246,9 +249,17 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 	for _, grant := range grants {
 		source, allowed := bootInitProcess.Handles().Lookup(grant.Handle, grant.Type, capability.Transfer)
 		if !allowed {
+			console := amd64.NewCOM1()
+			console.WriteString("INIT_GRANT_DENIED: ")
+			console.WriteString(grant.Name)
+			console.WriteString("\n")
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 		if _, allowed = source.Derive(grant.Rights); !allowed {
+			console := amd64.NewCOM1()
+			console.WriteString("INIT_GRANT_RIGHTS_DENIED: ")
+			console.WriteString(grant.Name)
+			console.WriteString("\n")
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 	}
@@ -593,6 +604,11 @@ func closeStreamCapability(cap capability.Capability) bool {
 		closed = endpoint.CloseReader()
 	}
 	if closed {
+		side := uint8(1)
+		if writer {
+			side = 0
+		}
+		wakeStreamWaiters(streamID, side, ipc.WaitPeerDied)
 		streamRegistry.Release(streamID)
 	}
 	return closed
@@ -609,8 +625,8 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 	}
 	readerObject, _ := stream.ReaderObject(id)
 	writerObject, _ := stream.WriterObject(id)
-	reader, readerOK := owner.Handles().Insert(handle.TypeStream, capability.New(readerObject, capability.Read|capability.Transfer))
-	writer, writerOK := owner.Handles().Insert(handle.TypeStream, capability.New(writerObject, capability.Write|capability.Transfer))
+	reader, readerOK := owner.Handles().Insert(handle.TypeStream, capability.New(readerObject, capability.Read|capability.Wait|capability.Transfer))
+	writer, writerOK := owner.Handles().Insert(handle.TypeStream, capability.New(writerObject, capability.Write|capability.Wait|capability.Transfer))
 	if !readerOK || !writerOK {
 		if readerOK {
 			owner.Handles().Close(reader)
@@ -704,6 +720,10 @@ func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length
 	if !vm.CopyOut(handler.root, buffer, streamCallData[:count]) || !writeStreamResult(handler.root, descriptor, uint64(count)) {
 		return kcall.StatusInvalidArgument
 	}
+	cap, _ := processRegistry.ByRoot(handler.root)
+	streamCap, _ := cap.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Read)
+	streamID, _, _ := stream.DecodeEndpointObject(streamCap.Object())
+	wakeStreamWaiters(streamID, 1, ipc.WaitMessage)
 	return kcall.StatusOK
 }
 
@@ -726,6 +746,10 @@ func (handler nativeCallHandler) StreamWrite(id uint64, descriptor uint64, lengt
 	if !writeStreamResult(handler.root, descriptor, uint64(count)) {
 		return kcall.StatusInvalidArgument
 	}
+	owner, _ := processRegistry.ByRoot(handler.root)
+	streamCap, _ := owner.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Write)
+	streamID, _, _ := stream.DecodeEndpointObject(streamCap.Object())
+	wakeStreamWaiters(streamID, 0, ipc.WaitMessage)
 	return kcall.StatusOK
 }
 
@@ -918,6 +942,99 @@ func expireIPCWaiters() {
 	}
 }
 
+func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
+	count := streamWaitSet.Wake(streamID, side, reason, streamWakeResults[:])
+	for index := 0; index < count; index++ {
+		task, _, valid := streamWakeResults[index].Task.Parts()
+		if !valid {
+			streamWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
+		if reason == ipc.WaitPeerDied {
+			streamWaitStatus[task] = kcall.StatusPeerDied
+		}
+		if !amd64.WakeTaskID(uint64(streamWakeResults[index].Task)) {
+			panicSerial("stale stream wake task")
+		}
+		streamWakeResults[index] = ipc.WaitResult{}
+	}
+}
+
+func panicSerial(message string) {
+	console := amd64.NewCOM1()
+	console.WriteString("PANIC: ")
+	console.WriteString(message)
+	console.WriteString("\n")
+	for {
+		amd64.Halt()
+	}
+}
+
+func expireStreamWaiters() {
+	count := streamWaitSet.Expire(amd64.TimerTicks(), streamWakeResults[:])
+	for index := 0; index < count; index++ {
+		task, _, valid := streamWakeResults[index].Task.Parts()
+		if !valid {
+			streamWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
+		streamWaitStatus[task] = kcall.StatusTimeout
+		if !amd64.WakeTaskID(uint64(streamWakeResults[index].Task)) {
+			panicSerial("stale stream timeout task")
+		}
+		streamWakeResults[index] = ipc.WaitResult{}
+	}
+}
+
+func waitStream(handler nativeCallHandler, id, timeout, task uint64) (kcall.Status, bool) {
+	if task >= sched.MaxTasks || timeout == 0 {
+		return kcall.StatusInvalidArgument, false
+	}
+	taskID := sched.TaskID(amd64.TaskIDForSlot(task))
+	if _, _, valid := taskID.Parts(); !valid {
+		return kcall.StatusInvalidArgument, false
+	}
+	if streamWaitStatus[task] != kcall.StatusOK {
+		status := streamWaitStatus[task]
+		streamWaitStatus[task] = kcall.StatusOK
+		return status, false
+	}
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied, false
+	}
+	cap, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Wait)
+	streamID, writer, valid := stream.DecodeEndpointObject(cap.Object())
+	endpoint, exists := streamRegistry.Lookup(streamID)
+	if !allowed || !valid || !exists {
+		return kcall.StatusPermissionDenied, false
+	}
+	status := endpoint.ReadStatus()
+	side := uint8(0)
+	if writer {
+		status, side = endpoint.WriteStatus(), 1
+	}
+	if status != stream.StatusWouldBlock {
+		return streamStatus(status), false
+	}
+	now := amd64.TimerTicks()
+	deadline := now + timeout
+	if deadline < now || !streamWaitSet.Add(taskID, streamID, side, deadline) {
+		return kcall.StatusResourceExhausted, false
+	}
+	return kcall.StatusNotFound, true
+}
+
+//export goos_dispatch_stream_wait
+func dispatchStreamWait(id, timeout, rootAndTask uint64) uint64 {
+	status, blocked := waitStream(nativeCallHandler{root: rootAndTask &^ 0xfff}, id, timeout, rootAndTask&0xfff)
+	action := kcall.ActionReturn
+	if blocked {
+		action = kcall.ActionBlock
+	}
+	return uint64(action)<<32 | uint64(status)
+}
+
 func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress uint64, timeout uint64, task uint64) (kcall.Status, bool) {
 	if task >= sched.MaxTasks || !vm.ValidateUserRange(resultAddress, 8) {
 		return kcall.StatusInvalidArgument, false
@@ -1105,6 +1222,7 @@ func runDemoTaskB() {
 		demoTaskB++
 		expireIPCWaiters()
 		expireProcessWaiters()
+		expireStreamWaiters()
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
 			amd64.WakeTask(1)
 		}

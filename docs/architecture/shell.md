@@ -36,6 +36,9 @@ observable terminal behavior is unchanged. The bounded `readline` utility reads
 one line from `in`, rejects input beyond 128 bytes, and writes accepted bytes to
 `stdout`. This validates the inherited read-only input capability independently
 of the shell's own console handle.
-A capability-protected stream object now exists independently, but utilities
-are not yet routed to it. I/O redirection, pipelines, job control, and a
-persistent userspace TTY server remain later work.
+One unquoted `|` splits a command into two bounded invocations. PID 1 creates a
+private stream, launches both children before waiting, gives only the writer to
+the producer and only the reader to the consumer, and returns the first failing
+exit code. Quoted and escaped `|` bytes remain ordinary argument data. File
+redirection, longer pipelines, job control, and a persistent userspace TTY
+server remain later work.

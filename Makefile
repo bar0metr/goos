@@ -210,6 +210,7 @@ docs:
 	@test -f docs/adr/0038-explicit-standard-input-handle.md
 	@test -f docs/adr/0039-bounded-standard-input-consumer.md
 	@test -f docs/adr/0040-capability-protected-byte-streams.md
+	@test -f docs/adr/0041-native-two-stage-pipelines.md
 	@test -f docs/development/building.md
 
 clean:

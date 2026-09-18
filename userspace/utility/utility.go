@@ -27,6 +27,7 @@ var vfsHandle uint64
 var clockValue uint64
 var systemInfo [kcall.SystemInfoSize]byte
 var inputByte byte
+var streamDescriptor [3]uint64
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -39,6 +40,15 @@ func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname consoleRead goos_console_read
 func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname streamRead goos_stream_read
+func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname streamWrite goos_stream_write
+func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname streamWait goos_stream_wait
+func streamWait(stream uint64, timeout uint64) uint64
 
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
@@ -75,7 +85,7 @@ func Run() {
 	stderr, stderrFound := data.Handle("stderr")
 	vfsEndpoint, vfsFound := data.Handle("vfs")
 	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
-	if !stdinFound || !stdoutFound || !stderrFound || !vfsFound {
+	if !stdinFound || !stdoutFound || !stderrFound || needsVFS(data.Command) && !vfsFound {
 		finish(1, "startup handles unavailable\n")
 	}
 	switch {
@@ -128,13 +138,18 @@ func Run() {
 	finish(0, "")
 }
 
+func needsVFS(command []byte) bool {
+	return equal(command, "pwd") || equal(command, "ls") || equal(command, "cat") || equal(command, "mkdir") ||
+		equal(command, "touch") || equal(command, "rm") || equal(command, "cp") || equal(command, "mv") || equal(command, "stat")
+}
+
 func runReadline() {
 	const maxLine = 128
 	var line [maxLine]byte
 	size := 0
 	for {
-		status := consoleRead(stdinHandle, unsafe.Pointer(&inputByte), 1)
-		if status == uint64(kcall.StatusNotFound) {
+		status := readInputByte()
+		if status == uint64(kcall.StatusNotFound) || status == uint64(kcall.StatusResourceExhausted) {
 			continue
 		}
 		if status != 0 {
@@ -151,6 +166,26 @@ func runReadline() {
 	}
 	writeBytes(line[:size])
 	write("\nSTDIN_READ_OK\n")
+}
+
+func readInputByte() uint64 {
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&inputByte)))
+	streamDescriptor[1], streamDescriptor[2] = 1, 0
+	status := streamRead(stdinHandle, unsafe.Pointer(&streamDescriptor[0]), 24)
+	if status == uint64(kcall.StatusResourceExhausted) {
+		waitStatus := streamWait(stdinHandle, 100000)
+		if waitStatus == uint64(kcall.StatusTimeout) {
+			return uint64(kcall.StatusResourceExhausted)
+		}
+		if waitStatus != 0 {
+			return waitStatus
+		}
+		return uint64(kcall.StatusNotFound)
+	}
+	if status == uint64(kcall.StatusPermissionDenied) {
+		return consoleRead(stdinHandle, unsafe.Pointer(&inputByte), 1)
+	}
+	return status
 }
 
 func equal(value []byte, expected string) bool {
@@ -462,26 +497,50 @@ func finish(code uint64, message string) {
 			writeError(message)
 		}
 	}
-	handleClose(vfsHandle)
+	if vfsHandle != 0 {
+		handleClose(vfsHandle)
+	}
 	processExit(code)
 	for {
 	}
 }
 func write(message string) {
-	consoleWrite(stdoutHandle, unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	writeHandle(stdoutHandle, unsafe.Slice(unsafe.StringData(message), len(message)))
 }
 func writeBytes(value []byte) {
-	if len(value) != 0 {
-		consoleWrite(stdoutHandle, unsafe.Pointer(&value[0]), uintptr(len(value)))
-	}
+	writeHandle(stdoutHandle, value)
 }
 func writeError(message string) {
 	target := stderrHandle
 	if target == 0 {
 		target = stdoutHandle
 	}
-	if target != 0 {
-		consoleWrite(target, unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	writeHandle(target, unsafe.Slice(unsafe.StringData(message), len(message)))
+}
+
+func writeHandle(target uint64, value []byte) {
+	for len(value) != 0 {
+		size := len(value)
+		if size > int(kcall.MaxStreamIO) {
+			size = int(kcall.MaxStreamIO)
+		}
+		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&value[0])))
+		streamDescriptor[1], streamDescriptor[2] = uint64(size), 0
+		status := streamWrite(target, unsafe.Pointer(&streamDescriptor[0]), 24)
+		if status == uint64(kcall.StatusPermissionDenied) {
+			consoleWrite(target, unsafe.Pointer(&value[0]), uintptr(len(value)))
+			return
+		}
+		if status == uint64(kcall.StatusResourceExhausted) {
+			if streamWait(target, 100000) != 0 {
+				processExit(2)
+			}
+			continue
+		}
+		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(size) {
+			processExit(2)
+		}
+		value = value[streamDescriptor[2]:]
 	}
 }
 func writeUint(value uint64) {

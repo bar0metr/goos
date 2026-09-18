@@ -48,3 +48,15 @@ func TestParseInvocation(t *testing.T) {
 		t.Fatal("unterminated quote accepted")
 	}
 }
+
+func TestSplitPipeline(t *testing.T) {
+	left, right, ok := SplitPipeline([]byte(`echo "a|b" | readline`))
+	if !ok || string(left) != `echo "a|b"` || string(right) != "readline" {
+		t.Fatalf("pipeline = %q | %q, %v", left, right, ok)
+	}
+	for _, input := range []string{"| readline", "echo x |", "a | b | c", `echo "unterminated | b`} {
+		if _, _, ok := SplitPipeline([]byte(input)); ok {
+			t.Fatalf("accepted %q", input)
+		}
+	}
+}

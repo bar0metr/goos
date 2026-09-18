@@ -59,8 +59,16 @@ Task. Services resolve roles rather than depending on handle-table insertion
 order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
-Shell exec requests are restricted to simple names below `/system/bin`. PID 1
-creates a VFS channel pair, moves its server endpoint to
-VFS, supplies the client endpoint and console-write capability to the child,
-forwards bounded startup data, waits through a capability-protected process
-handle, and replies only after process exit.
+Shell exec requests are restricted to simple names below `/system/bin`. The
+version 3 request carries either one invocation or exactly two pipeline stages.
+For a pipeline PID 1 creates a byte stream, starts both processes before
+waiting, and installs only the writer as the producer's `stdout` and only the
+reader as the consumer's `in`. It closes its residual stream handles, waits
+through capability-protected process handles, and returns the first nonzero
+stage status in execution order.
+
+PID 1 creates and transfers a fresh VFS session only for utilities that access
+the filesystem. Pure stream and diagnostic utilities receive no VFS endpoint.
+The VFS control protocol version 2 identifies the add-session operation with an
+explicit payload byte, preventing an unrelated control-shaped message from
+being accepted as a session request.

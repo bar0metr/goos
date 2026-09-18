@@ -369,12 +369,21 @@ func pollExec() {
 	argumentSize := copy(arguments[:], request.Arguments)
 	var environment [96]byte
 	environmentSize := copy(environment[:], request.Environment)
+	var nextPath [execproto.MaxPath]byte
+	nextPathSize := copy(nextPath[:], request.NextPath)
+	var nextArguments [128]byte
+	nextArgumentSize := copy(nextArguments[:], request.NextArguments)
 	command, allowed := execproto.CommandFromSystemPath(path[:pathSize])
 	if !allowed {
+		write("PIPELINE_PATH_DENIED\n")
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchCapabilityDenied), 0)
 		return
 	}
-	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), command, cwd[:cwdSize], arguments[:argumentSize], environment[:environmentSize])
+	if len(request.NextPath) != 0 {
+		handlePipelineExec(message.Correlation, path[:pathSize], command, cwd[:cwdSize], arguments[:argumentSize], environment[:environmentSize], nextPath[:nextPathSize], nextArguments[:nextArgumentSize])
+		return
+	}
+	pid, processHandle, launchStatus := launchApplication(bytesString(path[:pathSize]), command, cwd[:cwdSize], arguments[:argumentSize], environment[:environmentSize], serviceDeviceHandle, handle.TypeDevice, serviceDeviceHandle, handle.TypeDevice)
 	exitCode := uint64(0)
 	if launchStatus == supervisor.LaunchOK {
 		exitCode = waitApplicationExit(processHandle)
@@ -382,50 +391,136 @@ func pollExec() {
 	sendExecReply(message.Correlation, pid, uint64(launchStatus), exitCode)
 }
 
-func launchApplication(path string, command, cwd, arguments, environment []byte) (uint64, handle.ID, supervisor.LaunchStatus) {
+func handlePipelineExec(replyCorrelation uint64, path, command, cwd, arguments, environment, nextPath, nextArguments []byte) {
+	nextCommand, allowed := execproto.CommandFromSystemPath(nextPath)
+	if !allowed {
+		sendExecReply(replyCorrelation, 0, uint64(supervisor.LaunchCapabilityDenied), 0)
+		return
+	}
+	if streamCreate(unsafe.Pointer(&streamPair[0]), 16) != 0 {
+		write("PIPELINE_STREAM_CREATE_FAILED\n")
+		sendExecReply(replyCorrelation, 0, uint64(supervisor.LaunchResourceExhausted), 0)
+		return
+	}
+	_, producerHandle, producerStatus := launchApplication(bytesString(path), command, cwd, arguments, environment, serviceDeviceHandle, handle.TypeDevice, handle.ID(streamPair[1]), handle.TypeStream)
+	if producerStatus != supervisor.LaunchOK {
+		handleClose(streamPair[0])
+		handleClose(streamPair[1])
+		sendExecReply(replyCorrelation, 0, uint64(producerStatus), 0)
+		return
+	}
+	consumerPID, consumerHandle, consumerStatus := launchApplication(bytesString(nextPath), nextCommand, cwd, nextArguments, environment, handle.ID(streamPair[0]), handle.TypeStream, serviceDeviceHandle, handle.TypeDevice)
+	if consumerStatus != supervisor.LaunchOK {
+		write("PIPELINE_CONSUMER_LAUNCH_FAILED\n")
+		handleClose(streamPair[0])
+		producerExit := waitApplicationExit(producerHandle)
+		_ = producerExit
+		sendExecReply(replyCorrelation, 0, uint64(consumerStatus), 0)
+		return
+	}
+	producerExit := waitApplicationExit(producerHandle)
+	consumerExit := waitApplicationExit(consumerHandle)
+	exitCode := consumerExit
+	if producerExit != 0 {
+		exitCode = producerExit
+	}
+	sendExecReply(replyCorrelation, consumerPID, uint64(supervisor.LaunchOK), exitCode)
+}
+
+func launchApplication(path string, command, cwd, arguments, environment []byte, input handle.ID, inputType handle.Type, output handle.ID, outputType handle.Type) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	useVFS := commandNeedsVFS(command)
+	if useVFS && channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		write("APP_CHANNEL_CREATE_FAILED\n")
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
-	correlation++
+	if useVFS {
+		correlation++
+	}
 	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
-	if !ok || !sendMessage(vfsControlHandle, control) {
+	if useVFS && (!ok || !sendMessage(vfsControlHandle, control)) {
+		write("APP_VFS_REQUEST_FAILED\n")
 		closePair(pair)
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
-	controlReply, status := receive(vfsControlHandle, 1000)
-	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
-	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
+	var status ipc.Status
+	vfsStatus, valid := vfs.StatusOK, true
+	if useVFS {
+		controlReply, received := receive(vfsControlHandle, 1000)
+		status = received
+		vfsStatus, valid = vfs.DecodeAddSessionReply(controlReply)
+	}
+	if useVFS && (status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK) {
+		write("APP_VFS_SESSION_FAILED\n")
+		if status != ipc.StatusOK {
+			write("APP_VFS_RECEIVE_STATUS\n")
+		} else if !valid {
+			write("APP_VFS_REPLY_INVALID\n")
+		} else {
+			write("APP_VFS_RESOURCE_EXHAUSTED\n")
+		}
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	var startupWire [startup.Size]byte
-	bindings := []startup.Handle{{Name: []byte("in")}, {Name: []byte("stdout")}, {Name: []byte("stderr")}, {Name: []byte("vfs")}}
+	bindings := []startup.Handle{{Name: []byte("in")}, {Name: []byte("stdout")}, {Name: []byte("stderr")}}
+	if useVFS {
+		bindings = append(bindings, startup.Handle{Name: []byte("vfs")})
+	}
 	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
 	if !ok {
+		write("APP_STARTUP_ENCODE_FAILED\n")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	grants := []supervisor.Capability{
-		{Name: "in", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
-		{Name: "stdout", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		{Name: "in", Handle: input, Type: inputType, Rights: streamRights(inputType, capability.Read), Consume: inputType == handle.TypeStream},
+		{Name: "stdout", Handle: output, Type: outputType, Rights: streamRights(outputType, capability.Write), Consume: outputType == handle.TypeStream},
 		{Name: "stderr", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-		{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+	}
+	if useVFS {
+		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	correlation++
 	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
 	if !ok || !sendMessage(lifecycleHandle, request) {
+		write("APP_LAUNCH_REQUEST_FAILED\n")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	event, status := receiveLaunchResult(correlation)
 	if status != ipc.StatusOK {
+		write("APP_LAUNCH_REPLY_FAILED\n")
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	if event.Code != uint64(supervisor.LaunchOK) {
 		handleClose(pair[0])
 	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchStatus(event.Code)
+}
+
+func commandNeedsVFS(command []byte) bool {
+	return equalSlice(command, "pwd") || equalSlice(command, "ls") || equalSlice(command, "cat") || equalSlice(command, "mkdir") ||
+		equalSlice(command, "touch") || equalSlice(command, "rm") || equalSlice(command, "cp") || equalSlice(command, "mv") || equalSlice(command, "stat")
+}
+
+func equalSlice(value []byte, expected string) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range value {
+		if value[index] != expected[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func streamRights(typeID handle.Type, rights capability.Rights) capability.Rights {
+	if typeID == handle.TypeStream {
+		return rights | capability.Wait
+	}
+	return rights
 }
 
 func waitApplicationExit(processHandle handle.ID) uint64 {

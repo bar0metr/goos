@@ -32,8 +32,11 @@ var (
 	cwdSize          = 1
 	pathBuffer       [shellcmd.MaxPath]byte
 	executableBuffer [execproto.MaxPath]byte
+	nextExecutable   [execproto.MaxPath]byte
 	argumentStorage  [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
+	nextArguments    [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
 	vectorWire       [96]byte
+	nextVectorWire   [96]byte
 )
 
 //go:extern _heap_start
@@ -137,7 +140,12 @@ func execute(line []byte) {
 }
 
 func executeExternal(line []byte) {
-	invocation, parsed := shellcmd.ParseInvocation(line, &argumentStorage)
+	first, second, split := shellcmd.SplitPipeline(line)
+	if !split {
+		write("exec: invalid pipeline\n")
+		return
+	}
+	invocation, parsed := shellcmd.ParseInvocation(first, &argumentStorage)
 	if !parsed {
 		write("exec: invalid arguments\n")
 		return
@@ -155,7 +163,26 @@ func executeExternal(line []byte) {
 		write("exec: arguments too large\n")
 		return
 	}
-	request, ok := execproto.EncodeRequest(execproto.Request{Path: executable, CWD: cwd[:cwdSize], Arguments: argumentData, Environment: environmentData}, correlation)
+	requestData := execproto.Request{Path: executable, CWD: cwd[:cwdSize], Arguments: argumentData, Environment: environmentData}
+	if len(second) != 0 {
+		next, valid := shellcmd.ParseInvocation(second, &nextArguments)
+		if !valid {
+			write("exec: invalid pipeline command\n")
+			return
+		}
+		nextPath, valid := execproto.ResolveExecutable(next.Arguments[0], &nextExecutable)
+		if !valid {
+			write("exec: invalid pipeline command\n")
+			return
+		}
+		nextData, _, valid := startup.EncodeVectors(next.Arguments[:next.Count], nil, &nextVectorWire)
+		if !valid {
+			write("exec: pipeline arguments too large\n")
+			return
+		}
+		requestData.NextPath, requestData.NextArguments = nextPath, nextData
+	}
+	request, ok := execproto.EncodeRequest(requestData, correlation)
 	if !ok {
 		write("exec: invalid request\n")
 		return
@@ -191,7 +218,9 @@ func executeExternal(line []byte) {
 			return
 		}
 		if reply.LaunchStatus != 0 {
-			write("exec: launch failed\n")
+			write("exec: launch failed: ")
+			writeUint(reply.LaunchStatus)
+			write("\n")
 			return
 		}
 		if reply.ExitCode != 0 {
@@ -201,6 +230,9 @@ func executeExternal(line []byte) {
 			write("EXIT_STATUS_PROPAGATION_OK\n")
 		}
 		write("SHELL_EXEC_OK\n")
+		if len(second) != 0 {
+			write("PIPELINE_EXEC_OK\n")
+		}
 		return
 	}
 }

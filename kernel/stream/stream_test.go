@@ -4,6 +4,12 @@ import "testing"
 
 func TestBoundedStreamLifecycle(t *testing.T) {
 	stream := New()
+	if status := stream.ReadStatus(); status != StatusWouldBlock {
+		t.Fatalf("empty read readiness = %v", status)
+	}
+	if status := stream.WriteStatus(); status != StatusOK {
+		t.Fatalf("empty write readiness = %v", status)
+	}
 	if _, status := stream.Read(make([]byte, 1)); status != StatusWouldBlock {
 		t.Fatalf("empty read status = %v", status)
 	}
@@ -17,6 +23,9 @@ func TestBoundedStreamLifecycle(t *testing.T) {
 	if _, status := stream.Write(input[:1]); status != StatusWouldBlock {
 		t.Fatalf("full write status = %v", status)
 	}
+	if status := stream.WriteStatus(); status != StatusWouldBlock {
+		t.Fatalf("full write readiness = %v", status)
+	}
 	output := make([]byte, Capacity)
 	if size, status := stream.Read(output); status != StatusOK || size != Capacity {
 		t.Fatalf("read = %d, %v", size, status)
@@ -29,11 +38,21 @@ func TestBoundedStreamLifecycle(t *testing.T) {
 	if !stream.CloseWriter() {
 		t.Fatal("writer close failed")
 	}
+	if status := stream.ReadStatus(); status != StatusPeerClosed {
+		t.Fatalf("closed writer readiness = %v", status)
+	}
 	if _, status := stream.Read(output[:1]); status != StatusPeerClosed {
 		t.Fatalf("EOF status = %v", status)
 	}
 	if !stream.CloseReader() || !stream.Closed() {
 		t.Fatal("stream did not close")
+	}
+}
+
+func TestWriteStatusReportsClosedReader(t *testing.T) {
+	stream := New()
+	if !stream.CloseReader() || stream.WriteStatus() != StatusPeerClosed {
+		t.Fatal("closed reader was not reported")
 	}
 }
 

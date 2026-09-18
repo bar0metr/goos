@@ -32,4 +32,5 @@ that block service through a dedicated capability-scoped endpoint.
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for later standard-stream redirection and
-shell pipelines.
+already carry a real concurrent two-process shell pipeline; file redirection
+and longer pipelines remain later composition work.

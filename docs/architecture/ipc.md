@@ -57,6 +57,11 @@ switches to another runnable task. Message arrival and timer expiry wake the
 task. The retry either consumes the queued message or returns the stored typed
 timeout status.
 
+`StreamWait` applies the same scheduler handoff to directional byte streams.
+Readers sleep while the ring is empty and a writer still exists; writers sleep
+while the ring is full and a reader still exists. Data movement, peer closure,
+or timeout wakes the registered task, which retries the original operation.
+
 ## PID 1 lifecycle channel
 
 The `GINITLIF` version 5 protocol uses a dedicated channel capability installed
