@@ -133,6 +133,7 @@ while [ "$elapsed" -lt 120 ]; do
 		grep -q 'INIT_EXECUTABLE_LOOKUP_OK' "$log" 2>/dev/null && \
 		grep -q 'INIT_CAPABILITY_MANIFEST_OK' "$log" 2>/dev/null && \
 		grep -q 'NATIVE_STARTUP_ABI_OK' "$log" 2>/dev/null && \
+		grep -q 'STREAM_ENDPOINT_OK' "$log" 2>/dev/null && \
 		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
 		grep -q 'VFS_SERVICE_OK' "$log" 2>/dev/null && \
 		grep -q 'FAT32_MOUNT_OK' "$log" 2>/dev/null && \

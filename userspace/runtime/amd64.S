@@ -136,6 +136,30 @@ goos_irq_wait:
     ret
 .size goos_irq_wait, .-goos_irq_wait
 
+.global goos_stream_create
+.type goos_stream_create,@function
+goos_stream_create:
+    movl $18, %eax
+    int $0x80
+    ret
+.size goos_stream_create, .-goos_stream_create
+
+.global goos_stream_read
+.type goos_stream_read,@function
+goos_stream_read:
+    movl $19, %eax
+    int $0x80
+    ret
+.size goos_stream_read, .-goos_stream_read
+
+.global goos_stream_write
+.type goos_stream_write,@function
+goos_stream_write:
+    movl $20, %eax
+    int $0x80
+    ret
+.size goos_stream_write, .-goos_stream_write
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

@@ -28,3 +28,9 @@ forged generations, unauthorized transfer, rights escalation, and capacity
 exhaustion. The boot path transfers a read-only memory capability between two
 Process tables and launches supervised processes with a derived device
 capability that omits PID 1's Transfer right.
+
+Native byte streams use the same table and transfer rules. A newly created
+stream exposes distinct typed handles: the reader has only `Read|Transfer`, and
+the writer has only `Write|Transfer`. Presenting either endpoint to the opposite
+operation fails type, direction, and rights validation before user memory is
+accessed.

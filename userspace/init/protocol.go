@@ -171,7 +171,7 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 
 func validCapability(grant Capability) bool {
 	const allRights = capability.Read | capability.Write | capability.Execute | capability.Transfer | capability.Wait
-	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeIRQ && grant.Rights != 0 && grant.Rights&^allRights == 0
+	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeStream && grant.Rights != 0 && grant.Rights&^allRights == 0
 }
 
 func (event LifecycleEvent) ExecutablePath() string {

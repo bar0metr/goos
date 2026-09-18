@@ -16,6 +16,7 @@ const (
 	TypeChannel
 	TypeDevice
 	TypeIRQ
+	TypeStream
 )
 
 type slot struct {

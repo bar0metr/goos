@@ -134,8 +134,10 @@ Current progress: ADRs 0037 and 0038 give every external utility distinct named
 standard streams: read-only input role `in` plus write-only `stdout` and `stderr`.
 Non-zero-exit diagnostics use `stderr`; all three streams currently target the
 serial console. ADR 0039 adds bounded `readline` as the first utility that
-consumes the explicit input role. Alternate stream endpoints, redirection, and
-pipes remain unfinished.
+consumes the explicit input role. ADR 0040 adds independent capability-protected
+byte streams with directional endpoints, bounded buffering, backpressure, and
+EOF after writer close. Routing startup standard streams to these endpoints,
+redirection, and shell pipeline grammar remain unfinished.
 
 ## Priority 4 — Separate normal boot from validation boot
 

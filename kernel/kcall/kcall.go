@@ -22,6 +22,9 @@ const (
 	OperationPortWrite
 	OperationDMAAllocate
 	OperationIRQWait
+	OperationStreamCreate
+	OperationStreamRead
+	OperationStreamWrite
 )
 
 type Status uint64
@@ -76,6 +79,9 @@ type Handler interface {
 	PortRead(device uint64, specification uint64, address uint64) Status
 	PortWrite(device uint64, specification uint64, value uint64) Status
 	DMAAllocate(device uint64, virtual uint64, address uint64) Status
+	StreamCreate(address uint64, length uint64) Status
+	StreamRead(stream uint64, descriptor uint64, length uint64) Status
+	StreamWrite(stream uint64, descriptor uint64, length uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -138,6 +144,21 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.PortWrite(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationDMAAllocate:
 		return Result{Status: handler.DMAAllocate(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationStreamCreate:
+		if request.Arg1 != 16 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.StreamCreate(request.Arg0, request.Arg1)}
+	case OperationStreamRead:
+		if request.Arg2 != StreamDescriptorSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.StreamRead(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationStreamWrite:
+		if request.Arg2 != StreamDescriptorSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.StreamWrite(request.Arg0, request.Arg1, request.Arg2)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
@@ -145,3 +166,5 @@ func Dispatch(request Request, handler Handler) Result {
 
 const MaxIPCMessage = uint64(320)
 const SystemInfoSize = uint64(40)
+const MaxStreamIO = uint64(256)
+const StreamDescriptorSize = uint64(24)

@@ -64,6 +64,18 @@ func (handler *testHandler) PortWrite(device uint64, specification uint64, value
 func (handler *testHandler) DMAAllocate(device uint64, virtual uint64, address uint64) Status {
 	return StatusOK
 }
+func (handler *testHandler) StreamCreate(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+func (handler *testHandler) StreamRead(stream uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = stream, address, length
+	return StatusOK
+}
+func (handler *testHandler) StreamWrite(stream uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = stream, address, length
+	return StatusOK
+}
 
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
@@ -169,5 +181,21 @@ func TestDispatchSystemInfo(t *testing.T) {
 	}
 	if result = Dispatch(Request{Operation: OperationSystemInfo, Arg1: SystemInfoSize - 1}, handler); result.Status != StatusInvalidArgument {
 		t.Fatalf("short system info = %#v", result)
+	}
+}
+
+func TestDispatchStreamOperations(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationStreamCreate, Arg0: 0x7000, Arg1: 16}, handler); result.Status != StatusOK {
+		t.Fatalf("stream create = %#v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationStreamWrite, Arg0: 3, Arg1: 0x8000, Arg2: StreamDescriptorSize}, handler); result.Status != StatusOK {
+		t.Fatalf("stream write = %#v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationStreamRead, Arg0: 4, Arg1: 0x9000, Arg2: StreamDescriptorSize}, handler); result.Status != StatusOK {
+		t.Fatalf("stream read = %#v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationStreamRead, Arg2: StreamDescriptorSize - 1}, handler); result.Status != StatusInvalidArgument {
+		t.Fatalf("short stream descriptor = %#v", result)
 	}
 }
