@@ -36,14 +36,14 @@ observable terminal behavior is unchanged. The bounded `readline` utility reads
 one line from `in`, rejects input beyond 128 bytes, and writes accepted bytes to
 `stdout`. This validates the inherited read-only input capability independently
 of the shell's own console handle.
-One unquoted `|` splits a command into two bounded invocations. PID 1 creates a
-private stream, launches both children before waiting, gives only the writer to
-the producer and only the reader to the consumer, and returns the first failing
-exit code. Quoted and escaped `|` bytes remain ordinary argument data. File
-redirection, longer pipelines, job control, and a persistent userspace TTY
-server remain later work.
+Up to three unquoted `|` operators split a command into at most four bounded
+invocations. PID 1 creates private streams, starts all children before waiting,
+and gives each stage only its adjacent directional endpoints. It returns the
+first failing exit code in left-to-right order. Quoted and escaped `|` bytes
+remain ordinary argument data. File redirection, job control, and a persistent
+userspace TTY server remain later work.
 
-Up to eight commands or two-stage pipelines may be separated by unquoted `;`
+Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty
 intermediate commands are rejected. The entire line is checked for balanced
 quotes, escaping, argument bounds, and pipeline syntax before any command runs.

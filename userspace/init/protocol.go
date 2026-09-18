@@ -75,6 +75,12 @@ func LaunchRequestWithStartup(service uint64, executable string, capabilities []
 		}
 	}
 	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(12 + len(executable) + len(startup) + len(capabilities)*launchGrantSize)}
+	// Manifest references are payload data, never IPC handle attachments. Set
+	// these fields explicitly when the freestanding arena reuses message storage.
+	message.HandleCount = 0
+	for index := range message.Handles {
+		message.Handles[index] = 0
+	}
 	message.Payload[0] = byte(LifecycleLaunch)
 	binary.LittleEndian.PutUint64(message.Payload[1:9], service)
 	message.Payload[9] = byte(len(executable))
@@ -87,6 +93,7 @@ func LaunchRequestWithStartup(service uint64, executable string, capabilities []
 		binary.LittleEndian.PutUint64(message.Payload[offset:], uint64(grant.Handle))
 		binary.LittleEndian.PutUint16(message.Payload[offset+8:], uint16(grant.Type))
 		binary.LittleEndian.PutUint32(message.Payload[offset+10:], uint32(grant.Rights))
+		message.Payload[offset+14], message.Payload[offset+15] = 0, 0
 		if grant.Consume {
 			message.Payload[offset+14] = 1
 		}

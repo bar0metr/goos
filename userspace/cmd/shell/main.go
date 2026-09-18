@@ -17,26 +17,23 @@ import (
 )
 
 var (
-	consoleHandle    handle.ID
-	vfsHandle        handle.ID
-	execHandle       handle.ID
-	startupWire      [startup.Size]byte
-	editor           tty.LineEditor
-	inputByte        byte
-	heapPointer      uintptr
-	arenaBase        uintptr
-	wire             [ipc.WireMaxSize]byte
-	descriptor       = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	correlation      uint64
-	cwd              = [shellcmd.MaxPath]byte{'/'}
-	cwdSize          = 1
-	pathBuffer       [shellcmd.MaxPath]byte
-	executableBuffer [execproto.MaxPath]byte
-	nextExecutable   [execproto.MaxPath]byte
-	argumentStorage  [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
-	nextArguments    [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
-	vectorWire       [96]byte
-	nextVectorWire   [96]byte
+	consoleHandle     handle.ID
+	vfsHandle         handle.ID
+	execHandle        handle.ID
+	startupWire       [startup.Size]byte
+	editor            tty.LineEditor
+	inputByte         byte
+	heapPointer       uintptr
+	arenaBase         uintptr
+	wire              [ipc.WireMaxSize]byte
+	descriptor        = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
+	correlation       uint64
+	cwd               = [shellcmd.MaxPath]byte{'/'}
+	cwdSize           = 1
+	pathBuffer        [shellcmd.MaxPath]byte
+	executableBuffers [execproto.MaxStages][execproto.MaxPath]byte
+	argumentStorage   [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
+	vectorWires       [execproto.MaxStages][96]byte
 )
 
 //go:extern _heap_start
@@ -136,16 +133,16 @@ func execute(line []byte) {
 }
 
 func executeCommand(line []byte) {
-	first, second, _ := shellcmd.SplitPipeline(line)
-	invocation, _ := shellcmd.ParseInvocation(first, &argumentStorage)
+	stages, count, _ := shellcmd.SplitPipeline(line)
+	invocation, _ := shellcmd.ParseInvocation(stages[0], &argumentStorage)
 	name := string(invocation.Arguments[0])
 	switch {
-	case len(second) == 0 && name == "help" && invocation.Count == 1:
+	case count == 1 && name == "help" && invocation.Count == 1:
 		write("builtins: help clear cd\nexecutables: /system/bin\nSHELL_HELP_OK\n")
-	case len(second) == 0 && name == "clear" && invocation.Count == 1:
+	case count == 1 && name == "clear" && invocation.Count == 1:
 		write("\x1b[2J\x1b[H")
 		write("SHELL_CLEAR_OK\n")
-	case len(second) == 0 && name == "cd":
+	case count == 1 && name == "cd":
 		if invocation.Count > 2 {
 			write("cd: expected at most one path\n")
 		} else if invocation.Count == 2 {
@@ -159,47 +156,34 @@ func executeCommand(line []byte) {
 }
 
 func executeExternal(line []byte) {
-	first, second, split := shellcmd.SplitPipeline(line)
+	stages, count, split := shellcmd.SplitPipeline(line)
 	if !split {
 		write("exec: invalid pipeline\n")
 		return
 	}
-	invocation, parsed := shellcmd.ParseInvocation(first, &argumentStorage)
-	if !parsed {
-		write("exec: invalid arguments\n")
-		return
-	}
-	command := invocation.Arguments[0]
-	executable, ok := execproto.ResolveExecutable(command, &executableBuffer)
-	if !ok {
-		write("exec: invalid command\n")
-		return
-	}
 	correlation++
 	environment := []startup.Variable{{Name: []byte("PATH"), Value: []byte(execproto.SearchRoot[:len(execproto.SearchRoot)-1])}}
-	argumentData, environmentData, ok := startup.EncodeVectors(invocation.Arguments[:invocation.Count], environment, &vectorWire)
-	if !ok {
-		write("exec: arguments too large\n")
-		return
-	}
-	requestData := execproto.Request{Path: executable, CWD: cwd[:cwdSize], Arguments: argumentData, Environment: environmentData}
-	if len(second) != 0 {
-		next, valid := shellcmd.ParseInvocation(second, &nextArguments)
-		if !valid {
-			write("exec: invalid pipeline command\n")
+	requestData := execproto.Request{Count: uint8(count), CWD: cwd[:cwdSize]}
+	for index := 0; index < count; index++ {
+		invocation, parsed := shellcmd.ParseInvocation(stages[index], &argumentStorage)
+		if !parsed {
+			write("exec: invalid arguments\n")
 			return
 		}
-		nextPath, valid := execproto.ResolveExecutable(next.Arguments[0], &nextExecutable)
-		if !valid {
-			write("exec: invalid pipeline command\n")
+		executable, ok := execproto.ResolveExecutable(invocation.Arguments[0], &executableBuffers[index])
+		if !ok {
+			write("exec: invalid command\n")
 			return
 		}
-		nextData, _, valid := startup.EncodeVectors(next.Arguments[:next.Count], nil, &nextVectorWire)
-		if !valid {
-			write("exec: pipeline arguments too large\n")
+		argumentData, environmentData, ok := startup.EncodeVectors(invocation.Arguments[:invocation.Count], environment, &vectorWires[index])
+		if !ok {
+			write("exec: arguments too large\n")
 			return
 		}
-		requestData.NextPath, requestData.NextArguments = nextPath, nextData
+		requestData.Stages[index] = execproto.Stage{Path: executable, Arguments: argumentData}
+		if index == 0 {
+			requestData.Environment = environmentData
+		}
 	}
 	request, ok := execproto.EncodeRequest(requestData, correlation)
 	if !ok {
@@ -249,7 +233,7 @@ func executeExternal(line []byte) {
 			write("EXIT_STATUS_PROPAGATION_OK\n")
 		}
 		write("SHELL_EXEC_OK\n")
-		if len(second) != 0 {
+		if count > 1 {
 			write("PIPELINE_EXEC_OK\n")
 		}
 		return

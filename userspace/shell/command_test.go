@@ -32,7 +32,7 @@ func TestParseSequence(t *testing.T) {
 func TestParseSequenceRejectsMalformedTail(t *testing.T) {
 	for _, line := range []string{
 		";pwd", "pwd;;pwd", "pwd; ;", `pwd; echo "unfinished`, "pwd; echo x\\",
-		"pwd; echo x |", "pwd; a | b | c", "pwd; cd / | readline",
+		"pwd; echo x |", "pwd; a | b | c | d | e", "pwd; cd / | readline",
 		"pwd; echo x | help", "pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
 		"pwd; echo a b c d e f g h", strings.Repeat("pwd;", MaxCommands+1),
 	} {
@@ -91,11 +91,25 @@ func TestParseInvocation(t *testing.T) {
 }
 
 func TestSplitPipeline(t *testing.T) {
-	left, right, ok := SplitPipeline([]byte(`echo "a|b" | readline`))
-	if !ok || string(left) != `echo "a|b"` || string(right) != "readline" {
-		t.Fatalf("pipeline = %q | %q, %v", left, right, ok)
+	for _, test := range []struct {
+		line string
+		want []string
+	}{
+		{`echo "a|b" | readline`, []string{`echo "a|b"`, "readline"}},
+		{`echo a\|b | readline | readline | readline`, []string{`echo a\|b`, "readline", "readline", "readline"}},
+		{`echo 'a|b'`, []string{`echo 'a|b'`}},
+	} {
+		stages, count, ok := SplitPipeline([]byte(test.line))
+		if !ok || count != len(test.want) {
+			t.Fatalf("pipeline %q count=%d ok=%v", test.line, count, ok)
+		}
+		for index, want := range test.want {
+			if string(stages[index]) != want {
+				t.Fatalf("stage = %q, want %q", stages[index], want)
+			}
+		}
 	}
-	for _, input := range []string{"| readline", "echo x |", "a | b | c", `echo "unterminated | b`} {
+	for _, input := range []string{"", "| readline", "echo x |", "a || b", "a | b | c | d | e", `echo "unterminated | b`, "echo x\\"} {
 		if _, _, ok := SplitPipeline([]byte(input)); ok {
 			t.Fatalf("accepted %q", input)
 		}

@@ -176,8 +176,8 @@ The native kernel and the first isolated services are implemented:
   capability.
 - capability-protected byte streams with separate reader/writer endpoints,
   bounded buffering, backpressure, and close-driven EOF.
-- scheduler-backed two-process native pipelines with directional startup
-  capabilities and no POSIX file descriptors.
+- scheduler-backed native pipelines of up to four processes with directional
+  startup capabilities and no POSIX file descriptors.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -185,9 +185,10 @@ the policy loop and enforces bounded crash restart accounting. Spawn capability
 installation, a userspace VFS service, an interactive filesystem-aware shell,
 and capability-bounded native utility launch are implemented. The shell resolves
 general native executables beneath `/system/bin` with bounded quoting and
-structured arguments, one two-stage pipeline, and bounded `;` command sequences. Redirection and longer
-pipelines are not yet exposed. The current ISO boots a real kernel, leaves UEFI
-boot services, installs its own page tables, runs preempted kernel tasks,
+structured arguments, pipelines of up to four processes, and bounded `;` command
+sequences. File redirection is not yet exposed. The current ISO boots a real
+kernel, leaves UEFI boot services, installs its own page tables, runs preempted
+kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
 at CPL 3. It is now interactively usable for the built-in shell commands, but
 is not yet a general application environment. Native programs no longer assume
@@ -294,11 +295,12 @@ versioned named-handle startup ABI, structured argv/environment data, exit
 status propagation, the native base utilities, and the block-service IPC
 boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
 reboot-persistence gate are implemented. Priority 3 shell composition is now
-the active roadmap milestone; stdin consumption, native streams, and one real
-two-stage pipeline and sequential execution are complete. Longer pipelines and file redirection remain.
+the active roadmap milestone; stdin consumption, native streams, pipelines of
+up to four processes, and sequential execution are complete. File
+redirection remains.
 FAT32 hardening and storage failure recovery remain incremental work.
 
-Shell redirection and longer pipelines can now extend the explicit native
+Shell redirection can now extend the explicit native
 stdin/stdout/stderr handles and stream primitives without adding POSIX file
 descriptors. Linux ABI compatibility remains a later compatibility layer. It
 must translate into the same GoOS process, VFS, IPC, handle, and capability

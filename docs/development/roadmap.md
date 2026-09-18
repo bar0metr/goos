@@ -138,9 +138,11 @@ consumes the explicit input role. ADR 0040 adds independent capability-protected
 byte streams with directional endpoints, bounded buffering, backpressure, and
 EOF after writer close. ADR 0041 adds scheduler-backed stream readiness and a
 real two-process `producer | consumer` shell pipeline with stream endpoints
-substituted into the child startup roles. Longer pipelines and file redirection
-remain unfinished. ADR 0042 adds bounded sequential execution with `;`,
-whole-line syntax validation, and completion before advancing to the next command.
+substituted into the child startup roles. ADR 0042 adds bounded sequential
+execution with `;`, whole-line syntax validation, and completion before advancing
+to the next command. ADR 0043 extends pipelines to four concurrent stages with
+versioned bounded requests, downstream-first launch, and partial-failure cleanup.
+File redirection remains the next unfinished Priority 3 item.
 
 ## Priority 4 — Separate normal boot from validation boot
 

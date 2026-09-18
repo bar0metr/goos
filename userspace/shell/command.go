@@ -1,6 +1,8 @@
 // Package shell implements allocation-free parsing for the native command loop.
 package shell
 
+import execproto "goos/userspace/exec"
+
 const (
 	MaxArguments    = 8
 	MaxArgumentSize = 63
@@ -48,11 +50,11 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		if count == MaxCommands {
 			return commands, 0, false
 		}
-		left, right, ok := SplitPipeline(command)
+		stages, stageCount, ok := SplitPipeline(command)
 		if !ok {
 			return commands, 0, false
 		}
-		for _, stage := range [2][]byte{left, right} {
+		for _, stage := range stages[:stageCount] {
 			if len(stage) == 0 {
 				continue
 			}
@@ -61,7 +63,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 				return commands, 0, false
 			}
 			name := invocation.Arguments[0]
-			if len(right) != 0 && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
+			if stageCount > 1 && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
 				return commands, 0, false
 			}
 		}
@@ -77,42 +79,47 @@ type Invocation struct {
 	Count     uint8
 }
 
-// SplitPipeline returns either one command or two commands separated by one
-// unquoted pipe operator. Empty stages and additional operators are rejected.
-func SplitPipeline(line []byte) ([]byte, []byte, bool) {
-	quote, escaped, split := byte(0), false, -1
-	for index, value := range line {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if value == '\\' {
-			escaped = true
-			continue
-		}
-		if value == '\'' || value == '"' {
-			if quote == 0 {
-				quote = value
-			} else if quote == value {
-				quote = 0
+// SplitPipeline returns up to MaxStages invocations separated by unquoted
+// pipes. Empty stages, unmatched quotes, and trailing escapes are rejected.
+func SplitPipeline(line []byte) ([execproto.MaxStages][]byte, int, bool) {
+	var stages [execproto.MaxStages][]byte
+	quote, escaped := byte(0), false
+	start, count := 0, 0
+	for index := 0; index <= len(line); index++ {
+		if index < len(line) {
+			value := line[index]
+			if escaped {
+				escaped = false
+				continue
 			}
-			continue
-		}
-		if value == '|' && quote == 0 {
-			if split >= 0 {
-				return nil, nil, false
+			if value == '\\' {
+				escaped = true
+				continue
 			}
-			split = index
+			if value == '\'' || value == '"' {
+				if quote == 0 {
+					quote = value
+				} else if quote == value {
+					quote = 0
+				}
+				continue
+			}
+			if value != '|' || quote != 0 {
+				continue
+			}
 		}
+		if quote != 0 || escaped || count == len(stages) {
+			return stages, 0, false
+		}
+		stage := trimSpaces(line[start:index])
+		if len(stage) == 0 {
+			return stages, 0, false
+		}
+		stages[count] = stage
+		count++
+		start = index + 1
 	}
-	if quote != 0 || escaped {
-		return nil, nil, false
-	}
-	if split < 0 {
-		return trimSpaces(line), nil, len(trimSpaces(line)) != 0
-	}
-	left, right := trimSpaces(line[:split]), trimSpaces(line[split+1:])
-	return left, right, len(left) != 0 && len(right) != 0
+	return stages, count, true
 }
 
 func trimSpaces(value []byte) []byte {
