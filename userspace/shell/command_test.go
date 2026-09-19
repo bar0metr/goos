@@ -14,6 +14,7 @@ func TestParseSequence(t *testing.T) {
 		{"echo a; pwd;", []string{"echo a", "pwd"}},
 		{`echo "a;b"; echo 'c;d'; echo e\;f`, []string{`echo "a;b"`, `echo 'c;d'`, `echo e\;f`}},
 		{`echo x | readline; cd "/system"; pwd`, []string{`echo x | readline`, `cd "/system"`, "pwd"}},
+		{`echo redirected > "/tmp/result file"; cat "/tmp/result file"`, []string{`echo redirected > "/tmp/result file"`, `cat "/tmp/result file"`}},
 		{strings.Repeat("pwd;", MaxCommands), []string{"pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd"}},
 	} {
 		var scratch [MaxArguments][MaxArgumentSize]byte
@@ -33,6 +34,7 @@ func TestParseSequenceRejectsMalformedTail(t *testing.T) {
 	for _, line := range []string{
 		";pwd", "pwd;;pwd", "pwd; ;", `pwd; echo "unfinished`, "pwd; echo x\\",
 		"pwd; echo x |", "pwd; a | b | c | d | e", "pwd; cd / | readline",
+		"pwd; a | b | c | d > out", "pwd; cd / > out", "pwd; echo > a b",
 		"pwd; echo x | help", "pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
 		"pwd; echo a b c d e f g h", strings.Repeat("pwd;", MaxCommands+1),
 	} {
@@ -111,6 +113,29 @@ func TestSplitPipeline(t *testing.T) {
 	}
 	for _, input := range []string{"", "| readline", "echo x |", "a || b", "a | b | c | d | e", `echo "unterminated | b`, "echo x\\"} {
 		if _, _, ok := SplitPipeline([]byte(input)); ok {
+			t.Fatalf("accepted %q", input)
+		}
+	}
+}
+
+func TestSplitOutputRedirect(t *testing.T) {
+	for _, test := range []struct {
+		line, command, target string
+		redirected            bool
+	}{
+		{"echo value", "echo value", "", false},
+		{"echo value > /tmp/out", "echo value", "/tmp/out", true},
+		{`echo value > "/tmp/two words"`, "echo value", `"/tmp/two words"`, true},
+		{`echo "a>b"`, `echo "a>b"`, "", false},
+		{`echo a\>b`, `echo a\>b`, "", false},
+	} {
+		command, target, redirected, ok := SplitOutputRedirect([]byte(test.line))
+		if !ok || redirected != test.redirected || string(command) != test.command || string(target) != test.target {
+			t.Fatalf("SplitOutputRedirect(%q) = %q, %q, %v, %v", test.line, command, target, redirected, ok)
+		}
+	}
+	for _, input := range []string{"> out", "echo >", "echo > a b", "echo >> out", "echo > a > b", "cat < in", "echo error 2> out"} {
+		if _, _, _, ok := SplitOutputRedirect([]byte(input)); ok {
 			t.Fatalf("accepted %q", input)
 		}
 	}

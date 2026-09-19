@@ -178,6 +178,8 @@ The native kernel and the first isolated services are implemented:
   bounded buffering, backpressure, and close-driven EOF.
 - scheduler-backed native pipelines of up to four processes with directional
   startup capabilities and no POSIX file descriptors.
+- bounded stdout file redirection with `>` through an isolated stream consumer
+  and capability-scoped VFS session.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
 resolution, and kernel-side process death delivery are implemented. PID 1 runs
@@ -186,7 +188,8 @@ installation, a userspace VFS service, an interactive filesystem-aware shell,
 and capability-bounded native utility launch are implemented. The shell resolves
 general native executables beneath `/system/bin` with bounded quoting and
 structured arguments, pipelines of up to four processes, and bounded `;` command
-sequences. File redirection is not yet exposed. The current ISO boots a real
+sequences. Stdout can be redirected with one bounded `>` target; input, stderr,
+and append redirection are not yet exposed. The current ISO boots a real
 kernel, leaves UEFI boot services, installs its own page tables, runs preempted
 kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
