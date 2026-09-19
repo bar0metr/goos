@@ -210,7 +210,7 @@ silently install or download dependencies.
 make toolchain-check
 make
 make test
-make test-boot
+make test-all
 make run
 ```
 
@@ -290,6 +290,11 @@ BOOT_OK
 `make run` attaches COM1 to the current terminal. `make run-debug` starts QEMU
 paused with a GDB server on TCP port 1234. `make test-performance` stores
 benchmark results under `build/reports/`.
+`make test` is the fast host-side validation set. `make test-all` is the
+canonical complete gate and includes lint, documentation checks, ISO creation,
+and the two-phase QEMU boot/persistence test. Complete serial logs remain in
+`build/logs/boot.log` and `build/logs/reboot.log`; successful harness output is
+grouped and concise. See [`docs/development/testing.md`](docs/development/testing.md).
 
 ## Development direction
 
@@ -299,8 +304,8 @@ status propagation, the native base utilities, and the block-service IPC
 boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
 reboot-persistence gate are implemented. Priority 3 shell composition is now
 the active roadmap milestone; stdin consumption, native streams, pipelines of
-up to four processes, and sequential execution are complete. File
-redirection remains.
+up to four processes, sequential execution, and bounded stdout `>` redirection
+are complete. Input, stderr, and append redirection remain.
 FAT32 hardening and storage failure recovery remain incremental work.
 
 Shell redirection can now extend the explicit native

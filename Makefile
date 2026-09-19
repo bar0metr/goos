@@ -33,7 +33,7 @@ SOURCE_DATE_EPOCH ?= 0
 
 .DEFAULT_GOAL := all
 
-.PHONY: all kernel userspace initramfs iso run run-debug test test-unit test-integration test-security test-boot test-performance lint fmt docs clean distclean toolchain-check help
+.PHONY: all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-performance lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -136,6 +136,12 @@ run-debug: iso $(BUILD_DIR)/virtio-blk.img
 
 test: test-unit test-integration test-security
 
+test-all:
+	$(MAKE) test
+	$(MAKE) lint
+	$(MAKE) docs
+	$(MAKE) test-boot
+
 test-unit:
 	$(BUILD_ENV) go test ./...
 
@@ -179,6 +185,7 @@ docs:
 	@test -f docs/architecture/shell.md
 	@test -f docs/architecture/storage.md
 	@test -f docs/architecture/streams.md
+	@test -f docs/development/testing.md
 	@test -f docs/adr/0009-native-kernel-call-abi.md
 	@test -f docs/adr/0010-process-aware-userspace-scheduling.md
 	@test -f docs/adr/0011-native-image-format.md
@@ -213,6 +220,7 @@ docs:
 	@test -f docs/adr/0041-native-two-stage-pipelines.md
 	@test -f docs/adr/0042-bounded-sequential-shell-execution.md
 	@test -f docs/adr/0043-bounded-multistage-pipelines.md
+	@test -f docs/adr/0044-bounded-stdout-file-redirection.md
 	@test -f docs/development/building.md
 
 clean:
@@ -231,6 +239,7 @@ help:
 	  '  run             boot with QEMU and serial on this terminal' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test            run host unit and artifact integration tests' \
+	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-performance run microbenchmarks into build/reports' \
