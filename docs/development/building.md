@@ -15,9 +15,14 @@ intermediate build format only; the kernel accepts the GoOS native envelope.
 terminal. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
 1234 before executing the first instruction.
 
-`make test` runs host unit tests and validates the EFI artifact. `make
-test-boot` boots headlessly, waits at most 20 seconds for `BOOT_OK`, and writes
-the serial transcript to `build/logs/boot.log`.
+`make test` runs the fast host unit, artifact-integration, and security targets
+without starting QEMU. `make test-boot` performs the bounded two-phase QEMU boot
+and persistence validation. It keeps the complete serial transcripts in
+`build/logs/boot.log` and `build/logs/reboot.log` while printing only grouped
+PASS lines or a bounded diagnostic for the first failed named check. `make
+test-all` is the canonical complete Definition-of-Done gate and includes host
+tests, lint, documentation checks, ISO construction, and QEMU validation. See
+`docs/development/testing.md` for the target hierarchy and harness details.
 `make test-performance` writes the page-allocation benchmark to
 `build/reports/page-allocation.txt`.
 `make test-security` runs the capability, generation-safe handle, and virtual

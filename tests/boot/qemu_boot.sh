@@ -1,12 +1,131 @@
 #!/bin/sh
 set -eu
 
+log=build/logs/boot.log
+reboot_log=build/logs/reboot.log
+pid=
+checks=0
+
+cleanup() {
+	if [ -n "$pid" ]; then
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+		pid=
+	fi
+}
+
+print_context() {
+	file=$1
+	anchor=$2
+	match=$(grep -n -F "$anchor" "$file" 2>/dev/null | sed -n '1p' || true)
+	case "$match" in
+	*:*)
+		line=${match%%:*}
+		start=$((line > 8 ? line - 8 : 1))
+		end=$((line + 12))
+		sed -n "${start},${end}p" "$file" >&2
+		;;
+	*) tail -n 40 "$file" >&2 || true ;;
+	esac
+}
+
+fail_check() {
+	name=$1
+	expected=$2
+	observed=$3
+	file=$4
+	anchor=$5
+	printf 'FAIL %s\n  expected: %s\n  observed: %s\n  log: %s\n' "$name" "$expected" "$observed" "$file" >&2
+	printf '  context:\n' >&2
+	print_context "$file" "$anchor"
+	exit 1
+}
+
+require_marker() {
+	name=$1
+	marker=$2
+	file=$3
+	anchor=${4-$marker}
+	grep -F -q "$marker" "$file" 2>/dev/null || fail_check "$name" "$marker" 'marker not found' "$file" "$anchor"
+	checks=$((checks + 1))
+}
+
+require_regex() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	anchor=$5
+	grep -q "$pattern" "$file" 2>/dev/null || fail_check "$name" "$expected" 'marker not found' "$file" "$anchor"
+	checks=$((checks + 1))
+}
+
+forbid_regex() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	anchor=$5
+	if grep -q "$pattern" "$file" 2>/dev/null; then
+		observed=$(grep "$pattern" "$file" 2>/dev/null | sed -n '1p')
+		fail_check "$name" "$expected" "$observed" "$file" "$anchor"
+	fi
+	checks=$((checks + 1))
+}
+
+require_count() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	anchor=$5
+	observed=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+	[ "$observed" -eq "$expected" ] || fail_check "$name" "$expected" "$observed" "$file" "$anchor"
+	checks=$((checks + 1))
+}
+
+require_min_count() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	anchor=$5
+	observed=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+	[ "$observed" -ge "$expected" ] || fail_check "$name" "at least $expected" "$observed" "$file" "$anchor"
+	checks=$((checks + 1))
+}
+
+wait_for_marker() {
+	phase=$1
+	marker=$2
+	timeout=$3
+	file=$4
+	elapsed=0
+	while [ "$elapsed" -lt "$timeout" ]; do
+		grep -q "$marker" "$file" 2>/dev/null && return
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	fail_check "timeout.$phase" "$marker within ${timeout}s" "timeout after ${elapsed}s" "$file" "$marker"
+}
+
+pass_group() { printf 'PASS %s\n' "$1"; }
+
+trap cleanup EXIT
+trap 'cleanup; exit 130' HUP INT TERM
+
+mkdir -p build/logs
+
+if [ "${1-}" = '--self-test-failure' ]; then
+	self_log=build/logs/harness-selftest.log
+	printf '%s\n' 'GoOS harness diagnostic fixture' 'goos> echo expected-command' 'unrelated output' >"$self_log"
+	require_marker harness.simulated missing-marker "$self_log" 'goos> echo expected-command'
+	exit 0
+fi
+
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=build/virtio-blk.img
-log=build/logs/boot.log
-reboot_log=build/logs/reboot.log
-mkdir -p build/logs
 rm -f "$log" "$reboot_log"
 
 ( sleep 4
@@ -14,14 +133,14 @@ rm -f "$log" "$reboot_log"
   sleep 1
 	printf 'echo "hello structured world"\n'
 	sleep 1
-	 printf 'args "alpha beta" escaped\\ value\n'
-	 sleep 1
-	 printf 'readline\n'
-	 sleep 1
-	 printf 'bounded stdin payload\n'
-	 sleep 1
-	 printf 'echo piped-native-data | readline\n'
-	 sleep 1
+	printf 'args "alpha beta" escaped\\ value\n'
+	sleep 1
+	printf 'readline\n'
+	sleep 1
+	printf 'bounded stdin payload\n'
+	sleep 1
+	printf 'echo piped-native-data | readline\n'
+	sleep 1
   printf 'echo sequence-first; echo sequence-pipe | readline; echo sequence-last\n'
   sleep 1
   printf 'cd "/system"; pwd; cd /\n'
@@ -57,60 +176,60 @@ rm -f "$log" "$reboot_log"
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
-	 sleep 1
-	 printf 'pwd\n'
-	 sleep 1
-	 printf 'ls /\n'
-	 sleep 1
-	 printf 'ls system\n'
-	 sleep 1
-	 printf 'cd /system\n'
-	 sleep 1
-	 printf 'ls\n'
-	 sleep 1
-	 printf 'pwd\n'
-	 sleep 1
-	 printf 'cat motd\n'
-	 sleep 1
-	 printf 'cp /system/motd /persist/state.txt\n'
-	 sleep 1
-	 printf 'cat /persist/state.txt\n'
-	 sleep 1
-	 printf 'mkdir /tmp/demo\n'
-	 sleep 1
-	 printf 'touch /tmp/demo/file\n'
-	 sleep 1
-	 printf 'stat /tmp/demo/file\n'
-	 sleep 1
-	 printf 'cp /system/motd /tmp/demo/copy\n'
-	 sleep 1
-	 printf 'cat /tmp/demo/copy\n'
-	 sleep 1
-	 printf 'mv /tmp/demo/file /tmp/demo/moved\n'
-	 sleep 1
-	 printf 'rm /tmp/demo/moved\n'
-	 sleep 1
-	 printf 'uname\n'
-	 sleep 1
-	 printf 'ps\n'
-	 sleep 1
-	 printf 'mem\n'
-	 sleep 1
-	 printf 'uptime\n'
-	 sleep 1
-	 printf 'sleep 1\n'
-	 sleep 1
-	 printf 'cat /missing\n'
-	 count=0
-	 while [ "$count" -lt 30 ]; do
-		 sleep 0.2
-		 printf 'ls\n'
-		 sleep 0.2
-		 printf 'cat motd\n'
-		 count=$((count + 1))
-	 done
-	 sleep 1
-	 printf 'echo arena-stress-complete\n'
+	sleep 1
+	printf 'pwd\n'
+	sleep 1
+	printf 'ls /\n'
+	sleep 1
+	printf 'ls system\n'
+	sleep 1
+	printf 'cd /system\n'
+	sleep 1
+	printf 'ls\n'
+	sleep 1
+	printf 'pwd\n'
+	sleep 1
+	printf 'cat motd\n'
+	sleep 1
+	printf 'cp /system/motd /persist/state.txt\n'
+	sleep 1
+	printf 'cat /persist/state.txt\n'
+	sleep 1
+	printf 'mkdir /tmp/demo\n'
+	sleep 1
+	printf 'touch /tmp/demo/file\n'
+	sleep 1
+	printf 'stat /tmp/demo/file\n'
+	sleep 1
+	printf 'cp /system/motd /tmp/demo/copy\n'
+	sleep 1
+	printf 'cat /tmp/demo/copy\n'
+	sleep 1
+	printf 'mv /tmp/demo/file /tmp/demo/moved\n'
+	sleep 1
+	printf 'rm /tmp/demo/moved\n'
+	sleep 1
+	printf 'uname\n'
+	sleep 1
+	printf 'ps\n'
+	sleep 1
+	printf 'mem\n'
+	sleep 1
+	printf 'uptime\n'
+	sleep 1
+	printf 'sleep 1\n'
+	sleep 1
+	printf 'cat /missing\n'
+	count=0
+	while [ "$count" -lt 30 ]; do
+		sleep 0.2
+		printf 'ls\n'
+		sleep 0.2
+		printf 'cat motd\n'
+		count=$((count + 1))
+	done
+	sleep 1
+	printf 'echo arena-stress-complete\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -118,164 +237,83 @@ rm -f "$log" "$reboot_log"
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
-elapsed=0
-first_passed=0
-while [ "$elapsed" -lt 120 ]; do
-	if grep -q 'BOOT_SERVICES_EXITED' "$log" 2>/dev/null && \
-		grep -q 'PMM_OK' "$log" 2>/dev/null && \
-		grep -q 'NX_WX_OK' "$log" 2>/dev/null && \
-		grep -q 'VM_OK' "$log" 2>/dev/null && \
-		grep -q 'EXCEPTION_OK' "$log" 2>/dev/null && \
-		grep -q 'GDT_OK' "$log" 2>/dev/null && \
-		grep -q 'IDT_OK' "$log" 2>/dev/null && \
-		grep -q 'TIMER_OK' "$log" 2>/dev/null && \
-		grep -q 'STACK_GUARDS_OK' "$log" 2>/dev/null && \
-		grep -q 'TASK_BLOCK_OK' "$log" 2>/dev/null && \
-		grep -q 'TASK_WAKE_OK' "$log" 2>/dev/null && \
-		grep -q 'TASK_A_OK' "$log" 2>/dev/null && \
-		grep -q 'TASK_B_OK' "$log" 2>/dev/null && \
-		grep -q 'IDLE_TASK_OK' "$log" 2>/dev/null && \
-		grep -q 'SCHEDULER_OK' "$log" 2>/dev/null && \
-		grep -q 'HANDLE_TABLE_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_MODEL_OK' "$log" 2>/dev/null && \
-		grep -q 'IPC_WIRE_OK' "$log" 2>/dev/null && \
-		grep -q 'IPC_REQUEST_REPLY_OK' "$log" 2>/dev/null && \
-		grep -q 'IPC_HANDLE_TRANSFER_OK' "$log" 2>/dev/null && \
-		grep -q 'TTY_CAPABILITY_OK' "$log" 2>/dev/null && \
-		grep -q 'RAMFS_PROTOCOL_OK' "$log" 2>/dev/null && \
-		grep -q 'RAMFS_METADATA_OK' "$log" 2>/dev/null && \
-		grep -q 'RAMFS_IO_OK' "$log" 2>/dev/null && \
-		grep -q 'RAMFS_BOUNDS_OK' "$log" 2>/dev/null && \
-		grep -q 'VFS_NAMESPACE_OK' "$log" 2>/dev/null && \
-		grep -q 'VFS_MOUNT_OK' "$log" 2>/dev/null && \
-		grep -q 'VFS_PATH_OK' "$log" 2>/dev/null && \
-		grep -q 'VFS_CACHE_OK' "$log" 2>/dev/null && \
-		grep -q 'VFS_PROTOCOL_OK' "$log" 2>/dev/null && \
-		grep -q 'INIT_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'INITRAMFS_DISCOVERY_OK' "$log" 2>/dev/null && \
-		grep -q 'PID1_INIT_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_EXIT_EVENT_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_RECLAIM_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_WAIT_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_HANDLE_WAIT_OK' "$log" 2>/dev/null && \
-		grep -q 'SUPERVISOR_CRASH_EVENT_OK' "$log" 2>/dev/null && \
-		grep -q 'INIT_LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
-		grep -q 'INIT_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
-		grep -q 'INIT_SERVICE_STARTED_OK' "$log" 2>/dev/null && \
-		grep -q 'USERSPACE_SUPERVISOR_OK' "$log" 2>/dev/null && \
-		grep -q 'LIFECYCLE_IPC_OK' "$log" 2>/dev/null && \
-		grep -q 'INIT_EXECUTABLE_LOOKUP_OK' "$log" 2>/dev/null && \
-		grep -q 'INIT_CAPABILITY_MANIFEST_OK' "$log" 2>/dev/null && \
-		grep -q 'NATIVE_STARTUP_ABI_OK' "$log" 2>/dev/null && \
-		grep -q 'STREAM_ENDPOINT_OK' "$log" 2>/dev/null && \
-		grep -q 'PID1_SERVICE_LAUNCH_OK' "$log" 2>/dev/null && \
-		grep -q 'VFS_SERVICE_OK' "$log" 2>/dev/null && \
-		grep -q 'FAT32_MOUNT_OK' "$log" 2>/dev/null && \
-		grep -q 'BLOCK_SERVICE_OK' "$log" 2>/dev/null && \
-		grep -q 'BLOCK_SERVICE_IO_OK' "$log" 2>/dev/null && \
-		grep -q 'PCI_DISCOVERY_OK' "$log" 2>/dev/null && \
-		grep -q 'VIRTIO_BLK_CAPABILITIES_OK' "$log" 2>/dev/null && \
-		grep -q 'VIRTIO_BLK_DRIVER_OK' "$log" 2>/dev/null && \
-		grep -q 'VIRTIO_BLK_IRQ_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_VFS_CONNECTED_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_HELP_OK' "$log" 2>/dev/null && \
-		grep -q 'hello structured world' "$log" 2>/dev/null && \
-		grep -q 'ECHO_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'alpha beta escaped value' "$log" 2>/dev/null && \
-		grep -q 'PATH=/system/bin' "$log" 2>/dev/null && \
-		grep -q 'ARGS_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'ARGV_ENV_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'STDIN_HANDLE_OK' "$log" 2>/dev/null && \
-		grep -q 'bounded stdin payload' "$log" 2>/dev/null && \
-		grep -q 'STDIN_READ_OK' "$log" 2>/dev/null && \
-		grep -q 'piped-native-data' "$log" 2>/dev/null && \
-		grep -q 'PIPELINE_EXEC_OK' "$log" 2>/dev/null && \
-		grep -q '^sequence-first$' "$log" 2>/dev/null && \
-		grep -q '^sequence-pipe$' "$log" 2>/dev/null && \
-		grep -q '^sequence-last$' "$log" 2>/dev/null && \
-		grep -q '^/system$' "$log" 2>/dev/null && \
-		grep -q '^sequence-after-failure$' "$log" 2>/dev/null && \
-		grep -q '^exec: invalid command sequence$' "$log" 2>/dev/null && \
-		! grep -q '^sequence-must-not-run$' "$log" 2>/dev/null && \
-		grep -q '^quoted;separator$' "$log" 2>/dev/null && \
-		grep -q '^escaped;separator$' "$log" 2>/dev/null && \
-		grep -q '^pipeline-four-data$' "$log" 2>/dev/null && \
-		grep -q '^pipeline-last-failure-recovered$' "$log" 2>/dev/null && \
-		grep -q '^pipeline-middle-failure-recovered$' "$log" 2>/dev/null && \
-		grep -q '^pipeline-first-failure-recovered$' "$log" 2>/dev/null && \
-		! grep -q '^pipeline-must-not-run$' "$log" 2>/dev/null && \
-		[ "$(grep -c '^pipeline-reuse$' "$log" 2>/dev/null)" -eq 20 ] && \
-		[ "$(grep -c '^exec: launch failed: 2$' "$log" 2>/dev/null)" -eq 23 ] && \
-		! grep -q 'APP_LAUNCH_.*FAILED' "$log" 2>/dev/null && \
-		grep -q '^pipeline-stress-complete$' "$log" 2>/dev/null && \
-		grep -q '^redirected-native-data$' "$log" 2>/dev/null && \
-		grep -q 'WRITE_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'REDIRECTION_EXEC_OK' "$log" 2>/dev/null && \
-		grep -q 'STDERR_HANDLE_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
-		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'PWD_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'LS_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'SHELL_CD_OK' "$log" 2>/dev/null && \
-		grep -q 'Welcome to GoOS' "$log" 2>/dev/null && \
-		grep -q 'CAT_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'MKDIR_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'TOUCH_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'STAT_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'CP_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'MV_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'RM_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'UNAME_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'PS_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'MEM_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'SLEEP_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'EXIT_STATUS_PROPAGATION_OK' "$log" 2>/dev/null && \
-		[ "$(grep -c 'CAT_PROCESS_OK' "$log" 2>/dev/null)" -ge 31 ] && \
-		[ "$(grep -c 'SHELL_EXEC_OK' "$log" 2>/dev/null)" -ge 66 ] && \
-		grep -q 'IPC_BOUNDED_OK' "$log" 2>/dev/null && \
-		grep -q 'IPC_PEER_DEATH_OK' "$log" 2>/dev/null && \
-		grep -q 'SHMEM_OBJECT_OK' "$log" 2>/dev/null && \
-		grep -q 'SHMEM_ZERO_COPY_OK' "$log" 2>/dev/null && \
-		grep -q 'SHMEM_RIGHTS_OK' "$log" 2>/dev/null && \
-		grep -q 'ADDRESS_SPACE_A_OK' "$log" 2>/dev/null && \
-		grep -q 'ADDRESS_SPACE_B_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_ISOLATION_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_RX_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_STACK_NX_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_COPYOUT_OK' "$log" 2>/dev/null && \
-		grep -q 'KCALL_ABI_OK' "$log" 2>/dev/null && \
-		grep -q 'NATIVE_IMAGE_LOADER_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_COPYIN_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_DEBUG_WRITE_OK' "$log" 2>/dev/null && \
-		grep -q 'TTY_SERVICE_OK' "$log" 2>/dev/null && \
-		grep -q 'TTY_RIGHTS_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_EXIT_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_PREEMPT_OK' "$log" 2>/dev/null && \
-		grep -q 'PROCESS_CR3_SCHED_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_FAULT_ISOLATION_OK' "$log" 2>/dev/null && \
-		grep -q 'USER_RING3_OK' "$log" 2>/dev/null && \
-		grep -q 'NATIVE_PROCESS_OK' "$log" 2>/dev/null && \
-		grep -q 'BOOT_OK' "$log" 2>/dev/null; then
-		kill "$pid" 2>/dev/null || true
-		wait "$pid" 2>/dev/null || true
-		value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)
-		[ "$value" = 'GBLKIO' ] || { printf 'persistent block verification failed\n' >&2; exit 1; }
-		grep -a -q 'Welcome to GoOS' "$disk" || { printf 'persistent FAT32 file verification failed\n' >&2; exit 1; }
-		first_passed=1
-		break
-	fi
-	sleep 1
-	elapsed=$((elapsed + 1))
-done
+wait_for_marker boot '^arena-stress-complete$' 120 "$log"
+cleanup
 
-if [ "$first_passed" -ne 1 ]; then
-	kill "$pid" 2>/dev/null || true
-	wait "$pid" 2>/dev/null || true
-	printf 'boot test timed out; serial output follows:\n' >&2
-	cat "$log" >&2
-	exit 1
-fi
+for marker in BOOT_SERVICES_EXITED EXCEPTION_OK GDT_OK IDT_OK TIMER_OK NATIVE_IMAGE_LOADER_OK BOOT_OK; do
+	require_marker "boot.$marker" "$marker" "$log"
+done
+pass_group boot
+
+for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK; do
+	require_marker "memory-security.$marker" "$marker" "$log"
+done
+pass_group memory-security
+
+for marker in TASK_BLOCK_OK TASK_WAKE_OK TASK_A_OK TASK_B_OK IDLE_TASK_OK SCHEDULER_OK PROCESS_MODEL_OK PROCESS_WAIT_OK PROCESS_HANDLE_WAIT_OK PROCESS_RECLAIM_OK USER_PREEMPT_OK PROCESS_CR3_SCHED_OK; do
+	require_marker "scheduler-process.$marker" "$marker" "$log"
+done
+pass_group scheduler-process
+
+for marker in HANDLE_TABLE_OK KCALL_ABI_OK IPC_WIRE_OK IPC_REQUEST_REPLY_OK IPC_HANDLE_TRANSFER_OK IPC_BOUNDED_OK IPC_PEER_DEATH_OK SHMEM_OBJECT_OK SHMEM_ZERO_COPY_OK SHMEM_RIGHTS_OK STREAM_ENDPOINT_OK TTY_CAPABILITY_OK; do
+	require_marker "ipc-capabilities.$marker" "$marker" "$log"
+done
+pass_group ipc-capabilities
+
+for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK USER_DEBUG_WRITE_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
+	require_marker "userspace.$marker" "$marker" "$log"
+done
+pass_group userspace
+
+for marker in BLOCK_SERVICE_OK BLOCK_SERVICE_IO_OK PCI_DISCOVERY_OK VIRTIO_BLK_CAPABILITIES_OK VIRTIO_BLK_DRIVER_OK VIRTIO_BLK_IRQ_OK; do
+	require_marker "storage.$marker" "$marker" "$log"
+done
+pass_group storage
+
+for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do
+	require_marker "filesystem.$marker" "$marker" "$log"
+done
+require_marker filesystem.persisted-content 'Welcome to GoOS' "$log" 'cat /persist/state.txt'
+pass_group filesystem
+
+for marker in SHELL_PROCESS_OK SHELL_VFS_CONNECTED_OK SHELL_HELP_OK ECHO_PROCESS_OK ARGS_PROCESS_OK ARGV_ENV_PROCESS_OK STDIN_HANDLE_OK STDERR_HANDLE_OK STDIN_READ_OK SHELL_CLEAR_OK UPTIME_PROCESS_OK PWD_PROCESS_OK LS_PROCESS_OK SHELL_CD_OK CAT_PROCESS_OK MKDIR_PROCESS_OK TOUCH_PROCESS_OK STAT_PROCESS_OK CP_PROCESS_OK MV_PROCESS_OK RM_PROCESS_OK UNAME_PROCESS_OK PS_PROCESS_OK MEM_PROCESS_OK SLEEP_PROCESS_OK EXIT_STATUS_PROPAGATION_OK; do
+	require_marker "shell.$marker" "$marker" "$log"
+done
+require_marker shell.echo-output 'hello structured world' "$log" 'echo "hello structured world"'
+require_marker shell.argv-output 'alpha beta escaped value' "$log" 'args "alpha beta"'
+require_marker shell.path-environment 'PATH=/system/bin' "$log" 'args "alpha beta"'
+require_marker shell.stdin-output 'bounded stdin payload' "$log" readline
+require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
+pass_group shell
+
+require_marker pipeline.exec PIPELINE_EXEC_OK "$log"
+require_marker pipeline.data piped-native-data "$log" 'echo piped-native-data'
+for marker in sequence-first sequence-pipe sequence-last sequence-after-failure 'exec: invalid command sequence' 'quoted;separator' 'escaped;separator' pipeline-four-data pipeline-last-failure-recovered pipeline-middle-failure-recovered pipeline-first-failure-recovered; do
+	require_regex "pipeline.$marker" "^${marker}$" "$marker on its own line" "$log" "$marker"
+done
+forbid_regex pipeline.rejected-sequence '^sequence-must-not-run$' 'sequence-must-not-run absent' "$log" sequence-must-not-run
+forbid_regex pipeline.failed-stage-output '^pipeline-must-not-run$' 'pipeline-must-not-run absent' "$log" pipeline-must-not-run
+pass_group pipeline
+
+require_count pipeline-stress.reuse '^pipeline-reuse$' 20 "$log" pipeline-reuse
+require_count pipeline-stress.expected-failures '^exec: launch failed: 2$' 23 "$log" 'exec: launch failed: 2'
+forbid_regex pipeline-stress.launch-errors 'APP_LAUNCH_.*FAILED' 'no APP_LAUNCH_* failures' "$log" APP_LAUNCH_
+require_regex pipeline-stress.complete '^pipeline-stress-complete$' 'pipeline-stress-complete on its own line' "$log" pipeline-stress-complete
+require_min_count process-reuse.cat '^CAT_PROCESS_OK$' 31 "$log" CAT_PROCESS_OK
+require_min_count process-reuse.exec '^SHELL_EXEC_OK$' 66 "$log" SHELL_EXEC_OK
+require_marker process-reuse.arena arena-stress-complete "$log"
+pass_group pipeline-stress
+
+require_regex redirection.data '^redirected-native-data$' 'redirected-native-data on its own line' "$log" 'cat /tmp/redirected.txt'
+require_marker redirection.writer WRITE_PROCESS_OK "$log" 'echo redirected-native-data'
+require_marker redirection.shell REDIRECTION_EXEC_OK "$log" 'echo redirected-native-data'
+pass_group redirection
+
+value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)
+[ "$value" = GBLKIO ] || fail_check persistence.block-bytes GBLKIO "$value" "$log" BLOCK_SERVICE_IO_OK
+checks=$((checks + 1))
+grep -a -q 'Welcome to GoOS' "$disk" || fail_check persistence.fat32-image 'Welcome to GoOS in disk image' 'content not found' "$log" 'cat /persist/state.txt'
+checks=$((checks + 1))
 
 ( sleep 4
 	printf 'cat /persist/state.txt\n'
@@ -286,25 +324,14 @@ fi
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$reboot_log" 2>&1 &
 pid=$!
 
-elapsed=0
-while [ "$elapsed" -lt 60 ]; do
-	if grep -q 'BOOT_OK' "$reboot_log" 2>/dev/null && \
-		grep -q 'FAT32_MOUNT_OK' "$reboot_log" 2>/dev/null && \
-		grep -q 'SHELL_VFS_CONNECTED_OK' "$reboot_log" 2>/dev/null && \
-		grep -q 'Welcome to GoOS' "$reboot_log" 2>/dev/null && \
-		grep -q 'CAT_PROCESS_OK' "$reboot_log" 2>/dev/null && \
-		! grep -q 'CP_PROCESS_OK' "$reboot_log" 2>/dev/null; then
-		kill "$pid" 2>/dev/null || true
-		wait "$pid" 2>/dev/null || true
-		printf 'boot and reboot persistence tests passed\n'
-		exit 0
-	fi
-	sleep 1
-	elapsed=$((elapsed + 1))
-done
+wait_for_marker reboot '^CAT_PROCESS_OK$' 60 "$reboot_log"
+cleanup
+require_marker persistence.reboot-boot BOOT_OK "$reboot_log"
+require_marker persistence.reboot-mount FAT32_MOUNT_OK "$reboot_log"
+require_marker persistence.reboot-shell SHELL_VFS_CONNECTED_OK "$reboot_log"
+require_marker persistence.reboot-content 'Welcome to GoOS' "$reboot_log" 'cat /persist/state.txt'
+require_marker persistence.reboot-cat CAT_PROCESS_OK "$reboot_log" 'cat /persist/state.txt'
+forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on reboot' "$reboot_log" CP_PROCESS_OK
+pass_group persistence
 
-kill "$pid" 2>/dev/null || true
-wait "$pid" 2>/dev/null || true
-printf 'reboot persistence test timed out; serial output follows:\n' >&2
-cat "$reboot_log" >&2
-exit 1
+printf '\nPASS qemu-boot (%s checks)\n' "$checks"
