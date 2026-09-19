@@ -50,7 +50,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		if count == MaxCommands {
 			return commands, 0, false
 		}
-		pipeline, _, redirected, ok := SplitOutputRedirect(command)
+		pipeline, _, redirected, _, ok := SplitOutputRedirect(command)
 		if !ok {
 			return commands, 0, false
 		}
@@ -83,9 +83,9 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 
 // SplitOutputRedirect separates one unquoted output redirection. The target is
 // left encoded so ParseInvocation can apply the normal quoting and escaping
-// rules. Append redirection and multiple targets are intentionally rejected.
-func SplitOutputRedirect(line []byte) (command, target []byte, redirected, ok bool) {
-	quote, escaped, separator := byte(0), false, -1
+// rules. Multiple targets are rejected.
+func SplitOutputRedirect(line []byte) (command, target []byte, redirected, appendMode, ok bool) {
+	quote, escaped, separator, operatorSize := byte(0), false, -1, 1
 	for index, value := range line {
 		if escaped {
 			escaped = false
@@ -104,35 +104,42 @@ func SplitOutputRedirect(line []byte) (command, target []byte, redirected, ok bo
 			continue
 		}
 		if value == '<' && quote == 0 {
-			return nil, nil, false, false
+			return nil, nil, false, false, false
 		}
 		if value == '>' && quote == 0 {
+			if separator >= 0 && operatorSize == 2 && index == separator+1 {
+				continue
+			}
 			if separator >= 0 {
-				return nil, nil, false, false
+				return nil, nil, false, false, false
 			}
 			if index > 0 && line[index-1] == '2' && (index == 1 || line[index-2] == ' ') {
-				return nil, nil, false, false
+				return nil, nil, false, false, false
 			}
 			separator = index
+			if index+1 < len(line) && line[index+1] == '>' {
+				operatorSize = 2
+				appendMode = true
+			}
 		}
 	}
 	if quote != 0 || escaped {
-		return nil, nil, false, false
+		return nil, nil, false, false, false
 	}
 	if separator < 0 {
 		line = trimSpaces(line)
-		return line, nil, false, len(line) != 0
+		return line, nil, false, false, len(line) != 0
 	}
-	command, target = trimSpaces(line[:separator]), trimSpaces(line[separator+1:])
+	command, target = trimSpaces(line[:separator]), trimSpaces(line[separator+operatorSize:])
 	if len(command) == 0 || len(target) == 0 || target[0] == '>' {
-		return nil, nil, false, false
+		return nil, nil, false, false, false
 	}
 	var storage [MaxArguments][MaxArgumentSize]byte
 	invocation, valid := ParseInvocation(target, &storage)
 	if !valid || invocation.Count != 1 {
-		return nil, nil, false, false
+		return nil, nil, false, false, false
 	}
-	return command, target, true, true
+	return command, target, true, appendMode, true
 }
 
 type Invocation struct {

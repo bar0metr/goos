@@ -133,7 +133,7 @@ func execute(line []byte) {
 }
 
 func executeCommand(line []byte) {
-	pipeline, _, _, _ := shellcmd.SplitOutputRedirect(line)
+	pipeline, _, _, _, _ := shellcmd.SplitOutputRedirect(line)
 	stages, count, _ := shellcmd.SplitPipeline(pipeline)
 	invocation, _ := shellcmd.ParseInvocation(stages[0], &argumentStorage)
 	name := string(invocation.Arguments[0])
@@ -157,7 +157,7 @@ func executeCommand(line []byte) {
 }
 
 func executeExternal(line []byte) {
-	pipeline, redirectTarget, redirected, validRedirect := shellcmd.SplitOutputRedirect(line)
+	pipeline, redirectTarget, redirected, appendMode, validRedirect := shellcmd.SplitOutputRedirect(line)
 	if !validRedirect {
 		write("exec: invalid redirection\n")
 		return
@@ -202,7 +202,11 @@ func executeExternal(line []byte) {
 			write("exec: invalid redirection\n")
 			return
 		}
-		argumentData, _, ok := startup.EncodeVectors([][]byte{[]byte("write"), target.Arguments[0]}, environment, &vectorWires[count])
+		arguments := [][]byte{[]byte("write"), target.Arguments[0]}
+		if appendMode {
+			arguments = [][]byte{[]byte("write"), []byte("--append"), target.Arguments[0]}
+		}
+		argumentData, _, ok := startup.EncodeVectors(arguments, environment, &vectorWires[count])
 		if !ok {
 			write("exec: redirection target too large\n")
 			return

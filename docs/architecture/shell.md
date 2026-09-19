@@ -41,15 +41,15 @@ Up to three unquoted `|` operators split a command into at most four bounded
 invocations. PID 1 creates private streams, starts all children before waiting,
 and gives each stage only its adjacent directional endpoints. It returns the
 first failing exit code in left-to-right order. Quoted and escaped `|` bytes
-remain ordinary argument data. One unquoted `>` redirects stdout to a single
-bounded VFS path. The shell adds an isolated `write` consumer to the pipeline;
-it receives only the upstream reader endpoint and a fresh VFS session, creates
-or truncates the target, drains the stream, and exits on EOF. This reuses typed
+remain ordinary argument data. One unquoted `>` or `>>` redirects stdout to a
+single bounded VFS path. The shell adds an isolated `write` consumer to the
+pipeline; it receives only the upstream reader endpoint and a fresh VFS session,
+then truncates the target for `>` or seeks to its current size for `>>` before
+draining the stream and exiting on EOF. This reuses typed
 handles and does not add POSIX file descriptors. A redirected pipeline may
 contain at most three user stages because the sink occupies the fourth bounded
-exec slot. Quoted or escaped `>` bytes remain argument data. Input (`<`),
-stderr, append (`>>`), job control, and a persistent userspace TTY server remain
-later work.
+exec slot. Quoted or escaped `>` bytes remain argument data. Input (`<`), stderr,
+job control, and a persistent userspace TTY server remain later work.
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty

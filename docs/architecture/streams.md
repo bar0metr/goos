@@ -32,6 +32,7 @@ children after a partial launch failure.
 
 Stdout file redirection uses the same pipeline path. The shell adds a bounded
 `write` consumer as the final stage. PID 1 grants it a read-only stream endpoint
-and a private VFS session; the utility creates or truncates one resolved path and
-writes bytes until peer closure. Validation markers use the separate stderr
-capability and therefore do not contaminate redirected data.
+and a private VFS session; the utility creates one resolved path, then either
+truncates it for `>` or seeks to its current size for `>>`, and writes bytes
+until peer closure. Validation markers use the separate stderr capability and
+therefore do not contaminate redirected data.
