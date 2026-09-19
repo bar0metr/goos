@@ -50,8 +50,15 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		if count == MaxCommands {
 			return commands, 0, false
 		}
-		stages, stageCount, ok := SplitPipeline(command)
+		pipeline, _, redirected, ok := SplitOutputRedirect(command)
 		if !ok {
+			return commands, 0, false
+		}
+		stages, stageCount, ok := SplitPipeline(pipeline)
+		if !ok {
+			return commands, 0, false
+		}
+		if redirected && stageCount == execproto.MaxStages {
 			return commands, 0, false
 		}
 		for _, stage := range stages[:stageCount] {
@@ -63,7 +70,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 				return commands, 0, false
 			}
 			name := invocation.Arguments[0]
-			if stageCount > 1 && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
+			if (stageCount > 1 || redirected) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
 				return commands, 0, false
 			}
 		}
@@ -72,6 +79,60 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		start = index + 1
 	}
 	return commands, count, true
+}
+
+// SplitOutputRedirect separates one unquoted output redirection. The target is
+// left encoded so ParseInvocation can apply the normal quoting and escaping
+// rules. Append redirection and multiple targets are intentionally rejected.
+func SplitOutputRedirect(line []byte) (command, target []byte, redirected, ok bool) {
+	quote, escaped, separator := byte(0), false, -1
+	for index, value := range line {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if value == '\\' {
+			escaped = true
+			continue
+		}
+		if value == '\'' || value == '"' {
+			if quote == 0 {
+				quote = value
+			} else if quote == value {
+				quote = 0
+			}
+			continue
+		}
+		if value == '<' && quote == 0 {
+			return nil, nil, false, false
+		}
+		if value == '>' && quote == 0 {
+			if separator >= 0 {
+				return nil, nil, false, false
+			}
+			if index > 0 && line[index-1] == '2' && (index == 1 || line[index-2] == ' ') {
+				return nil, nil, false, false
+			}
+			separator = index
+		}
+	}
+	if quote != 0 || escaped {
+		return nil, nil, false, false
+	}
+	if separator < 0 {
+		line = trimSpaces(line)
+		return line, nil, false, len(line) != 0
+	}
+	command, target = trimSpaces(line[:separator]), trimSpaces(line[separator+1:])
+	if len(command) == 0 || len(target) == 0 || target[0] == '>' {
+		return nil, nil, false, false
+	}
+	var storage [MaxArguments][MaxArgumentSize]byte
+	invocation, valid := ParseInvocation(target, &storage)
+	if !valid || invocation.Count != 1 {
+		return nil, nil, false, false
+	}
+	return command, target, true, true
 }
 
 type Invocation struct {

@@ -50,6 +50,10 @@ rm -f "$log" "$reboot_log"
   done
   printf 'echo pipeline-stress-complete\n'
   sleep 1
+	printf 'echo redirected-native-data > /tmp/redirected.txt\n'
+	sleep 1
+	printf 'cat /tmp/redirected.txt\n'
+	sleep 1
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
@@ -205,6 +209,9 @@ while [ "$elapsed" -lt 120 ]; do
 		[ "$(grep -c '^exec: launch failed: 2$' "$log" 2>/dev/null)" -eq 23 ] && \
 		! grep -q 'APP_LAUNCH_.*FAILED' "$log" 2>/dev/null && \
 		grep -q '^pipeline-stress-complete$' "$log" 2>/dev/null && \
+		grep -q '^redirected-native-data$' "$log" 2>/dev/null && \
+		grep -q 'WRITE_PROCESS_OK' "$log" 2>/dev/null && \
+		grep -q 'REDIRECTION_EXEC_OK' "$log" 2>/dev/null && \
 		grep -q 'STDERR_HANDLE_OK' "$log" 2>/dev/null && \
 		grep -q 'SHELL_CLEAR_OK' "$log" 2>/dev/null && \
 		grep -q 'UPTIME_PROCESS_OK' "$log" 2>/dev/null && \

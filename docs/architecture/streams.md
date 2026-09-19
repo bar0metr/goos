@@ -29,3 +29,9 @@ for pipelines of up to four concurrent processes. PID 1 creates one object
 per adjacent pair and substitutes directional endpoints for the children's
 named standard-stream roles. Retained endpoints are closed before reaping
 children after a partial launch failure.
+
+Stdout file redirection uses the same pipeline path. The shell adds a bounded
+`write` consumer as the final stage. PID 1 grants it a read-only stream endpoint
+and a private VFS session; the utility creates or truncates one resolved path and
+writes bytes until peer closure. Validation markers use the separate stderr
+capability and therefore do not contaminate redirected data.

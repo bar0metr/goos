@@ -91,7 +91,8 @@ func Run() {
 	switch {
 	case equal(data.Command, "pwd"):
 		writeBytes(data.CWD)
-		write("\nPWD_PROCESS_OK\n")
+		write("\n")
+		writeError("PWD_PROCESS_OK\n")
 	case equal(data.Command, "ls"):
 		runLs(data)
 	case equal(data.Command, "cat"):
@@ -104,10 +105,11 @@ func Run() {
 			writeBytes(path)
 			write("\n")
 		}
-		write("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDIN_HANDLE_OK\nSTDERR_HANDLE_OK\n")
+		writeError("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDIN_HANDLE_OK\nSTDERR_HANDLE_OK\n")
 	case equal(data.Command, "echo"):
 		writeArguments(data, 1)
-		write("\nECHO_PROCESS_OK\n")
+		write("\n")
+		writeError("ECHO_PROCESS_OK\n")
 	case equal(data.Command, "readline"):
 		runReadline()
 	case equal(data.Command, "mkdir"):
@@ -122,10 +124,13 @@ func Run() {
 		runCopy(data)
 	case equal(data.Command, "stat"):
 		runStat(data)
+	case equal(data.Command, "write"):
+		runWrite(data)
 	case equal(data.Command, "uptime"):
 		runUptime()
 	case equal(data.Command, "uname"):
-		write("GoOS 0.1-dev x86_64\nUNAME_PROCESS_OK\n")
+		write("GoOS 0.1-dev x86_64\n")
+		writeError("UNAME_PROCESS_OK\n")
 	case equal(data.Command, "sleep"):
 		runSleep(data)
 	case equal(data.Command, "ps"):
@@ -140,7 +145,41 @@ func Run() {
 
 func needsVFS(command []byte) bool {
 	return equal(command, "pwd") || equal(command, "ls") || equal(command, "cat") || equal(command, "mkdir") ||
-		equal(command, "touch") || equal(command, "rm") || equal(command, "cp") || equal(command, "mv") || equal(command, "stat")
+		equal(command, "touch") || equal(command, "rm") || equal(command, "cp") || equal(command, "mv") || equal(command, "stat") || equal(command, "write")
+}
+
+func runWrite(data startup.Data) {
+	path := requiredPath(data, 1)
+	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
+	if !received || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
+		finish(2, "write: create failed\n")
+	}
+	truncated, received := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: path, Offset: 0})
+	if !received || truncated.Status != vfs.StatusOK {
+		finish(2, "write: truncate failed\n")
+	}
+	opened, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: path})
+	if !received || opened.Status != vfs.StatusOK {
+		finish(2, "write: open failed\n")
+	}
+	for {
+		status := readInputByte()
+		if status == uint64(kcall.StatusNotFound) || status == uint64(kcall.StatusResourceExhausted) {
+			continue
+		}
+		if status == uint64(kcall.StatusPeerDied) {
+			break
+		}
+		if status != 0 {
+			finish(2, "write: input failed\n")
+		}
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: unsafe.Slice(&inputByte, 1)})
+		if !ok || reply.Status != vfs.StatusOK || reply.Size != 1 {
+			finish(2, "write: VFS error\n")
+		}
+	}
+	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	writeError("WRITE_PROCESS_OK\n")
 }
 
 func runReadline() {
@@ -165,7 +204,8 @@ func runReadline() {
 		size++
 	}
 	writeBytes(line[:size])
-	write("\nSTDIN_READ_OK\n")
+	write("\n")
+	writeError("STDIN_READ_OK\n")
 }
 
 func readInputByte() uint64 {
@@ -215,7 +255,8 @@ func runLs(data startup.Data) {
 	}
 	if stat.Kind == ramfs.KindFile {
 		writeBytes(baseName(path))
-		write("\nLS_PROCESS_OK\n")
+		write("\n")
+		writeError("LS_PROCESS_OK\n")
 		return
 	}
 	var cursor uint32
@@ -237,7 +278,7 @@ func runLs(data startup.Data) {
 		write("\n")
 		cursor = reply.Cursor
 	}
-	write("LS_PROCESS_OK\n")
+	writeError("LS_PROCESS_OK\n")
 }
 
 func runCat(data startup.Data) {
@@ -264,7 +305,7 @@ func runCat(data startup.Data) {
 		writeBytes(reply.Data)
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
-	write("CAT_PROCESS_OK\n")
+	writeError("CAT_PROCESS_OK\n")
 }
 
 func runCreate(data startup.Data, directory bool) {
@@ -285,7 +326,7 @@ func runCreate(data startup.Data, directory bool) {
 	if !received || reply.Status != vfs.StatusOK && !(operation == vfs.OperationCreate && reply.Status == vfs.StatusAlreadyExists) {
 		finish(2, "create failed\n")
 	}
-	write(marker)
+	writeError(marker)
 }
 
 func runUnlink(data startup.Data) {
@@ -294,7 +335,7 @@ func runUnlink(data startup.Data) {
 	if !received || reply.Status != vfs.StatusOK {
 		finish(2, "rm: failed\n")
 	}
-	write("RM_PROCESS_OK\n")
+	writeError("RM_PROCESS_OK\n")
 }
 
 func runMove(data startup.Data) {
@@ -312,7 +353,7 @@ func runMove(data startup.Data) {
 	if !received || reply.Status != vfs.StatusOK {
 		finish(2, "mv: failed\n")
 	}
-	write("MV_PROCESS_OK\n")
+	writeError("MV_PROCESS_OK\n")
 }
 
 func runCopy(data startup.Data) {
@@ -354,7 +395,7 @@ func runCopy(data startup.Data) {
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: input.Handle})
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: output.Handle})
-	write("CP_PROCESS_OK\n")
+	writeError("CP_PROCESS_OK\n")
 }
 
 func runStat(data startup.Data) {
@@ -369,7 +410,8 @@ func runStat(data startup.Data) {
 		write("file ")
 	}
 	writeUint(reply.Size)
-	write(" bytes\nSTAT_PROCESS_OK\n")
+	write(" bytes\n")
+	writeError("STAT_PROCESS_OK\n")
 }
 
 func runUptime() {
@@ -377,7 +419,8 @@ func runUptime() {
 		finish(2, "uptime unavailable\n")
 	}
 	writeUint(clockValue)
-	write(" ticks\nUPTIME_PROCESS_OK\n")
+	write(" ticks\n")
+	writeError("UPTIME_PROCESS_OK\n")
 }
 
 func runSleep(data startup.Data) {
@@ -395,7 +438,7 @@ func runSleep(data startup.Data) {
 			finish(2, "sleep unavailable\n")
 		}
 	}
-	write("SLEEP_PROCESS_OK\n")
+	writeError("SLEEP_PROCESS_OK\n")
 }
 
 func runPS() {
@@ -406,7 +449,8 @@ func runPS() {
 	writeUint(binary.LittleEndian.Uint64(systemInfo[0:8]))
 	write(" processes ")
 	writeUint(binary.LittleEndian.Uint64(systemInfo[8:16]))
-	write("\nPS_PROCESS_OK\n")
+	write("\n")
+	writeError("PS_PROCESS_OK\n")
 }
 
 func runMem() {
@@ -417,7 +461,8 @@ func runMem() {
 	writeUint(binary.LittleEndian.Uint64(systemInfo[16:24]))
 	write(" free ")
 	writeUint(binary.LittleEndian.Uint64(systemInfo[24:32]))
-	write("\nMEM_PROCESS_OK\n")
+	write("\n")
+	writeError("MEM_PROCESS_OK\n")
 }
 
 func requiredPath(data startup.Data, index int) []byte {

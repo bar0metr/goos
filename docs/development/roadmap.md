@@ -142,7 +142,9 @@ substituted into the child startup roles. ADR 0042 adds bounded sequential
 execution with `;`, whole-line syntax validation, and completion before advancing
 to the next command. ADR 0043 extends pipelines to four concurrent stages with
 versioned bounded requests, downstream-first launch, and partial-failure cleanup.
-File redirection remains the next unfinished Priority 3 item.
+ADR 0044 adds bounded stdout file redirection with `>` by composing the existing
+stream abstraction with an isolated `write` utility and a fresh VFS session.
+Input, stderr, and append redirection remain unfinished Priority 3 items.
 
 ## Priority 4 — Separate normal boot from validation boot
 

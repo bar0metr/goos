@@ -133,7 +133,8 @@ func execute(line []byte) {
 }
 
 func executeCommand(line []byte) {
-	stages, count, _ := shellcmd.SplitPipeline(line)
+	pipeline, _, _, _ := shellcmd.SplitOutputRedirect(line)
+	stages, count, _ := shellcmd.SplitPipeline(pipeline)
 	invocation, _ := shellcmd.ParseInvocation(stages[0], &argumentStorage)
 	name := string(invocation.Arguments[0])
 	switch {
@@ -156,7 +157,12 @@ func executeCommand(line []byte) {
 }
 
 func executeExternal(line []byte) {
-	stages, count, split := shellcmd.SplitPipeline(line)
+	pipeline, redirectTarget, redirected, validRedirect := shellcmd.SplitOutputRedirect(line)
+	if !validRedirect {
+		write("exec: invalid redirection\n")
+		return
+	}
+	stages, count, split := shellcmd.SplitPipeline(pipeline)
 	if !split {
 		write("exec: invalid pipeline\n")
 		return
@@ -184,6 +190,26 @@ func executeExternal(line []byte) {
 		if index == 0 {
 			requestData.Environment = environmentData
 		}
+	}
+	if redirected {
+		target, parsed := shellcmd.ParseInvocation(redirectTarget, &argumentStorage)
+		if !parsed || target.Count != 1 || count == execproto.MaxStages {
+			write("exec: invalid redirection\n")
+			return
+		}
+		writePath, ok := execproto.ResolveExecutable([]byte("write"), &executableBuffers[count])
+		if !ok {
+			write("exec: invalid redirection\n")
+			return
+		}
+		argumentData, _, ok := startup.EncodeVectors([][]byte{[]byte("write"), target.Arguments[0]}, environment, &vectorWires[count])
+		if !ok {
+			write("exec: redirection target too large\n")
+			return
+		}
+		requestData.Stages[count] = execproto.Stage{Path: writePath, Arguments: argumentData}
+		count++
+		requestData.Count = uint8(count)
 	}
 	request, ok := execproto.EncodeRequest(requestData, correlation)
 	if !ok {
@@ -235,6 +261,9 @@ func executeExternal(line []byte) {
 		write("SHELL_EXEC_OK\n")
 		if count > 1 {
 			write("PIPELINE_EXEC_OK\n")
+		}
+		if redirected {
+			write("REDIRECTION_EXEC_OK\n")
 		}
 		return
 	}
