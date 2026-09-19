@@ -173,6 +173,12 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'cat /tmp/redirected.txt\n'
 	sleep 1
+	printf 'echo append-first > /tmp/appended.txt\n'
+	sleep 1
+	printf 'echo append-second >> /tmp/appended.txt\n'
+	sleep 1
+	printf 'cat /tmp/appended.txt\n'
+	sleep 1
   printf 'clear\n'
   sleep 1
   printf 'uptime\n'
@@ -305,6 +311,8 @@ require_marker process-reuse.arena arena-stress-complete "$log"
 pass_group pipeline-stress
 
 require_regex redirection.data '^redirected-native-data$' 'redirected-native-data on its own line' "$log" 'cat /tmp/redirected.txt'
+require_regex redirection.append-first '^append-first$' 'append-first on its own line' "$log" 'cat /tmp/appended.txt'
+require_regex redirection.append-second '^append-second$' 'append-second on its own line' "$log" 'cat /tmp/appended.txt'
 require_marker redirection.writer WRITE_PROCESS_OK "$log" 'echo redirected-native-data'
 require_marker redirection.shell REDIRECTION_EXEC_OK "$log" 'echo redirected-native-data'
 pass_group redirection

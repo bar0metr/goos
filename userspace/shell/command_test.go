@@ -120,22 +120,23 @@ func TestSplitPipeline(t *testing.T) {
 
 func TestSplitOutputRedirect(t *testing.T) {
 	for _, test := range []struct {
-		line, command, target string
-		redirected            bool
+		line, command, target  string
+		redirected, appendMode bool
 	}{
-		{"echo value", "echo value", "", false},
-		{"echo value > /tmp/out", "echo value", "/tmp/out", true},
-		{`echo value > "/tmp/two words"`, "echo value", `"/tmp/two words"`, true},
-		{`echo "a>b"`, `echo "a>b"`, "", false},
-		{`echo a\>b`, `echo a\>b`, "", false},
+		{"echo value", "echo value", "", false, false},
+		{"echo value > /tmp/out", "echo value", "/tmp/out", true, false},
+		{"echo value >> /tmp/out", "echo value", "/tmp/out", true, true},
+		{`echo value >> "/tmp/two words"`, "echo value", `"/tmp/two words"`, true, true},
+		{`echo "a>b"`, `echo "a>b"`, "", false, false},
+		{`echo a\>b`, `echo a\>b`, "", false, false},
 	} {
-		command, target, redirected, ok := SplitOutputRedirect([]byte(test.line))
-		if !ok || redirected != test.redirected || string(command) != test.command || string(target) != test.target {
-			t.Fatalf("SplitOutputRedirect(%q) = %q, %q, %v, %v", test.line, command, target, redirected, ok)
+		command, target, redirected, appendMode, ok := SplitOutputRedirect([]byte(test.line))
+		if !ok || redirected != test.redirected || appendMode != test.appendMode || string(command) != test.command || string(target) != test.target {
+			t.Fatalf("SplitOutputRedirect(%q) = %q, %q, %v, %v, %v", test.line, command, target, redirected, appendMode, ok)
 		}
 	}
-	for _, input := range []string{"> out", "echo >", "echo > a b", "echo >> out", "echo > a > b", "cat < in", "echo error 2> out"} {
-		if _, _, _, ok := SplitOutputRedirect([]byte(input)); ok {
+	for _, input := range []string{"> out", ">> out", "echo >", "echo >>", "echo > a b", "echo >>> out", "echo > a > b", "cat < in", "echo error 2> out"} {
+		if _, _, _, _, ok := SplitOutputRedirect([]byte(input)); ok {
 			t.Fatalf("accepted %q", input)
 		}
 	}

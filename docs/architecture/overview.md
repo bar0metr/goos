@@ -31,6 +31,6 @@ DMA, and IRQ authority. A bounded FAT32 backend mounted at `/persist` reaches
 that block service through a dedicated capability-scoped endpoint.
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
-objects are the non-POSIX foundation for later standard-stream redirection and
-carry concurrent shell pipelines of up to four processes, composed with bounded
-sequential execution. File redirection remains later composition work.
+objects are the non-POSIX foundation for standard-stream redirection and carry
+concurrent shell pipelines of up to four processes, composed with bounded
+sequential execution and bounded stdout truncate/append redirection.

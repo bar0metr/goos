@@ -149,18 +149,37 @@ func needsVFS(command []byte) bool {
 }
 
 func runWrite(data startup.Data) {
-	path := requiredPath(data, 1)
+	pathIndex, appendMode := 1, false
+	if argument, found := data.Arg(1); found && equal(argument, "--append") {
+		pathIndex, appendMode = 2, true
+	}
+	path := requiredPath(data, pathIndex)
 	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
 	if !received || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
 		finish(2, "write: create failed\n")
 	}
-	truncated, received := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: path, Offset: 0})
-	if !received || truncated.Status != vfs.StatusOK {
-		finish(2, "write: truncate failed\n")
+	offset := uint64(0)
+	if appendMode {
+		stat, received := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
+		if !received || stat.Status != vfs.StatusOK {
+			finish(2, "write: stat failed\n")
+		}
+		offset = stat.Size
+	} else {
+		truncated, received := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: path, Offset: 0})
+		if !received || truncated.Status != vfs.StatusOK {
+			finish(2, "write: truncate failed\n")
+		}
 	}
 	opened, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: path})
 	if !received || opened.Status != vfs.StatusOK {
 		finish(2, "write: open failed\n")
+	}
+	if appendMode {
+		seek, received := callVFS(vfs.Request{Operation: vfs.OperationSeek, Handle: opened.Handle, Offset: offset})
+		if !received || seek.Status != vfs.StatusOK {
+			finish(2, "write: seek failed\n")
+		}
 	}
 	for {
 		status := readInputByte()

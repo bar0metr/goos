@@ -178,7 +178,7 @@ The native kernel and the first isolated services are implemented:
   bounded buffering, backpressure, and close-driven EOF.
 - scheduler-backed native pipelines of up to four processes with directional
   startup capabilities and no POSIX file descriptors.
-- bounded stdout file redirection with `>` through an isolated stream consumer
+- bounded stdout file redirection with `>` and `>>` through an isolated stream consumer
   and capability-scoped VFS session.
 
 The init policy core, initramfs discovery, PID 1 launch, general initramfs image
@@ -188,8 +188,8 @@ installation, a userspace VFS service, an interactive filesystem-aware shell,
 and capability-bounded native utility launch are implemented. The shell resolves
 general native executables beneath `/system/bin` with bounded quoting and
 structured arguments, pipelines of up to four processes, and bounded `;` command
-sequences. Stdout can be redirected with one bounded `>` target; input, stderr,
-and append redirection are not yet exposed. The current ISO boots a real
+sequences. Stdout can be truncated or appended through one bounded `>` or `>>`
+target; input and stderr redirection are not yet exposed. The current ISO boots a real
 kernel, leaves UEFI boot services, installs its own page tables, runs preempted
 kernel tasks,
 verifies process address-space isolation, and runs supervised native programs
@@ -304,8 +304,8 @@ status propagation, the native base utilities, and the block-service IPC
 boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
 reboot-persistence gate are implemented. Priority 3 shell composition is now
 the active roadmap milestone; stdin consumption, native streams, pipelines of
-up to four processes, sequential execution, and bounded stdout `>` redirection
-are complete. Input, stderr, and append redirection remain.
+up to four processes, sequential execution, and bounded stdout `>`/`>>`
+redirection are complete. Input and stderr redirection remain.
 FAT32 hardening and storage failure recovery remain incremental work.
 
 Shell redirection can now extend the explicit native
