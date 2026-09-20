@@ -34,11 +34,17 @@ through a supervisor-only IOAPIC/LAPIC mapping. A wait-only IRQ capability is
 required by the blocking native IRQ call; the route is masked in the interrupt
 handler and acknowledged by reading the device ISR. It is rearmed on demand by
 the next wait, preventing an idle level-triggered route from flooding the CPU.
+The driver treats the virtqueue used index as the authoritative completion
+signal and IRQ delivery only as a wakeup. It rechecks the used ring after every
+acknowledged IRQ and also accepts completion that raced ahead of the wait.
+Freestanding protocol encoding and port reads reuse fixed storage so repeated
+interactive filesystem operations do not accumulate heap allocations.
 
 The block service now uses a private IPC channel to the driver instead of a
 volatile backend. Its public `GBLK001` protocol remains hardware-independent.
 The QEMU gate verifies an unaligned write spanning two sectors, a readback,
-flush, and the resulting bytes in the persistent raw disk image. Driver teardown
+flush, repeated relative-path FAT32 reads and writes, and the resulting bytes in
+the persistent raw disk image. Driver teardown
 resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
 A bounded FAT32 backend is mounted at `/persist`. The first implementation is

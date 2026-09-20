@@ -27,6 +27,11 @@ shell composition, or boot behavior.
 - `build/logs/boot.log` for the main validation boot;
 - `build/logs/reboot.log` for the persistence boot.
 
+The target creates a fresh `build/boot-test-virtio-blk.img` for each run. Tests
+therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
+used by `make run`; both QEMU phases share the fresh test image to validate
+reboot persistence.
+
 The main phase has a 120-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,

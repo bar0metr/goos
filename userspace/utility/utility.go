@@ -149,6 +149,7 @@ func needsVFS(command []byte) bool {
 }
 
 func runWrite(data startup.Data) {
+	var buffer [vfs.MaxProtocolData]byte
 	pathIndex, appendMode := 1, false
 	if argument, found := data.Arg(1); found && equal(argument, "--append") {
 		pathIndex, appendMode = 2, true
@@ -182,7 +183,7 @@ func runWrite(data startup.Data) {
 		}
 	}
 	for {
-		status := readInputByte()
+		status, size := readInput(buffer[:])
 		if status == uint64(kcall.StatusNotFound) || status == uint64(kcall.StatusResourceExhausted) {
 			continue
 		}
@@ -192,8 +193,8 @@ func runWrite(data startup.Data) {
 		if status != 0 {
 			finish(2, "write: input failed\n")
 		}
-		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: unsafe.Slice(&inputByte, 1)})
-		if !ok || reply.Status != vfs.StatusOK || reply.Size != 1 {
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:size]})
+		if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(size) {
 			finish(2, "write: VFS error\n")
 		}
 	}
@@ -228,23 +229,31 @@ func runReadline() {
 }
 
 func readInputByte() uint64 {
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&inputByte)))
-	streamDescriptor[1], streamDescriptor[2] = 1, 0
+	status, _ := readInput(unsafe.Slice(&inputByte, 1))
+	return status
+}
+
+func readInput(target []byte) (uint64, int) {
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&target[0])))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(target)), 0
 	status := streamRead(stdinHandle, unsafe.Pointer(&streamDescriptor[0]), 24)
 	if status == uint64(kcall.StatusResourceExhausted) {
 		waitStatus := streamWait(stdinHandle, 100000)
 		if waitStatus == uint64(kcall.StatusTimeout) {
-			return uint64(kcall.StatusResourceExhausted)
+			return uint64(kcall.StatusResourceExhausted), 0
 		}
 		if waitStatus != 0 {
-			return waitStatus
+			return waitStatus, 0
 		}
-		return uint64(kcall.StatusNotFound)
+		return uint64(kcall.StatusNotFound), 0
 	}
 	if status == uint64(kcall.StatusPermissionDenied) {
-		return consoleRead(stdinHandle, unsafe.Pointer(&inputByte), 1)
+		status = consoleRead(stdinHandle, unsafe.Pointer(&target[0]), 1)
+		if status == 0 {
+			return 0, 1
+		}
 	}
-	return status
+	return status, int(streamDescriptor[2])
 }
 
 func equal(value []byte, expected string) bool {
