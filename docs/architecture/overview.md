@@ -33,4 +33,5 @@ Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for standard-stream redirection and carry
 concurrent shell pipelines of up to four processes, composed with bounded
-sequential execution and bounded stdout truncate/append redirection.
+sequential execution, bounded stdout truncate/append redirection, and bounded
+file-backed stdin production.
