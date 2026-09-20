@@ -9,7 +9,7 @@ import (
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(4)
+	Version    = uint16(5)
 	MaxPath    = 192
 	MaxStages  = 4
 	replySize  = 24
@@ -56,9 +56,14 @@ type Stage struct {
 	Path, Arguments []byte
 }
 
+// Request describes one bounded pipeline. A non-zero ErrorSource is one plus the
+// index of the stage whose stderr feeds the final stage. That final stage is a
+// stderr sink outside the stdout chain: it reads a private stream and never
+// receives the previous stage's stdout.
 type Request struct {
 	Stages           [MaxStages]Stage
 	Count            uint8
+	ErrorSource      uint8
 	CWD, Environment []byte
 }
 type Reply struct {
@@ -68,7 +73,7 @@ type Reply struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || request.Count == 0 || request.Count > MaxStages || !validCWD(request.CWD) || len(request.Environment) > 96 {
+	if correlation == 0 || request.Count == 0 || request.Count > MaxStages || !validErrorSource(request.ErrorSource, request.Count) || !validCWD(request.CWD) || len(request.Environment) > 96 {
 		return ipc.Message{}, false
 	}
 	size := 4 + len(request.CWD) + len(request.Environment)
@@ -87,7 +92,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	for index := range message.Handles {
 		message.Handles[index] = 0
 	}
-	message.Payload[0], message.Payload[1], message.Payload[2], message.Payload[3] = request.Count, byte(len(request.CWD)), byte(len(request.Environment)), 0
+	message.Payload[0], message.Payload[1], message.Payload[2], message.Payload[3] = request.Count, byte(len(request.CWD)), byte(len(request.Environment)), request.ErrorSource
 	offset := 4
 	copy(message.Payload[offset:], request.CWD)
 	offset += len(request.CWD)
@@ -105,15 +110,15 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 }
 
 func DecodeRequest(message ipc.Message) (Request, bool) {
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 4 || message.PayloadSize > ipc.MaxPayload || message.Payload[3] != 0 {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 4 || message.PayloadSize > ipc.MaxPayload {
 		return Request{}, false
 	}
 	count, cwdSize, environmentSize := message.Payload[0], int(message.Payload[1]), int(message.Payload[2])
 	size := int(message.PayloadSize)
-	if count == 0 || count > MaxStages || environmentSize > 96 || 4+cwdSize+environmentSize > size {
+	if count == 0 || count > MaxStages || !validErrorSource(message.Payload[3], count) || environmentSize > 96 || 4+cwdSize+environmentSize > size {
 		return Request{}, false
 	}
-	request := Request{Count: count, CWD: message.Payload[4 : 4+cwdSize], Environment: message.Payload[4+cwdSize : 4+cwdSize+environmentSize]}
+	request := Request{Count: count, ErrorSource: message.Payload[3], CWD: message.Payload[4 : 4+cwdSize], Environment: message.Payload[4+cwdSize : 4+cwdSize+environmentSize]}
 	if !validCWD(request.CWD) {
 		return Request{}, false
 	}
@@ -138,6 +143,11 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		return Request{}, false
 	}
 	return request, true
+}
+
+// validErrorSource requires a sink stage plus at least one distinct source.
+func validErrorSource(source, count uint8) bool {
+	return source == 0 || count >= 2 && source < count
 }
 
 func validStage(stage Stage, environment []byte) bool {

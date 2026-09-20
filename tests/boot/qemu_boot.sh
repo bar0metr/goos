@@ -95,6 +95,47 @@ require_min_count() {
 	checks=$((checks + 1))
 }
 
+# window prints the log lines after the first line containing $2 and before the
+# next line containing $3, so checks can be tied to a single command's output.
+window() {
+	awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { exit } seen { print } !seen && index($0, start) { seen = 1 }' "$1"
+}
+
+require_window() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	start=$5
+	stop=$6
+	window "$file" "$start" "$stop" | grep -q "$pattern" || fail_check "$name" "$expected" 'marker not found' "$file" "$start"
+	checks=$((checks + 1))
+}
+
+forbid_window() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	start=$5
+	stop=$6
+	observed=$(window "$file" "$start" "$stop" | grep "$pattern" | sed -n '1p' || true)
+	[ -z "$observed" ] || fail_check "$name" "$expected" "$observed" "$file" "$start"
+	checks=$((checks + 1))
+}
+
+count_window() {
+	name=$1
+	pattern=$2
+	expected=$3
+	file=$4
+	start=$5
+	stop=$6
+	observed=$(window "$file" "$start" "$stop" | grep -c "$pattern" || true)
+	[ "$observed" -eq "$expected" ] || fail_check "$name" "$expected" "$observed" "$file" "$start"
+	checks=$((checks + 1))
+}
+
 wait_for_marker() {
 	phase=$1
 	marker=$2
@@ -184,6 +225,16 @@ rm -f "$log" "$reboot_log"
 	printf 'readline < /tmp/input.txt > /tmp/input-copy.txt\n'
 	sleep 1
 	printf 'cat /tmp/input-copy.txt\n'
+	sleep 1
+	printf 'echo stderr-probe 2> /tmp/stderr.txt\n'
+	sleep 1
+	printf 'cat /tmp/stderr.txt\n'
+	sleep 1
+	printf 'echo stderr-append 2>> /tmp/stderr.txt\n'
+	sleep 1
+	printf 'cat /tmp/stderr.txt\n'
+	sleep 1
+	printf 'echo stderr-sink-failure 2> /missing-dir/err.txt; echo stderr-sink-failure-recovered\n'
 	sleep 1
   printf 'clear\n'
   sleep 1
@@ -331,6 +382,12 @@ require_regex redirection.append-first '^append-first$' 'append-first on its own
 require_regex redirection.append-second '^append-second$' 'append-second on its own line' "$log" 'cat /tmp/appended.txt'
 require_regex redirection.input '^input-redirection-data$' 'input-redirection-data on its own line' "$log" 'cat /tmp/input-copy.txt'
 require_regex redirection.persist-relative '^interactive-persist-data$' 'interactive-persist-data on its own line' "$log" 'cat tt.txt'
+forbid_window redirection.stderr-diverted '^ECHO_PROCESS_OK$' 'echo diagnostics absent from console' "$log" 'echo stderr-probe 2> /tmp/stderr.txt' 'cat /tmp/stderr.txt'
+require_window redirection.stderr-stdout-kept '^stderr-probe$' 'stdout still reaches console' "$log" 'echo stderr-probe 2> /tmp/stderr.txt' 'cat /tmp/stderr.txt'
+require_window redirection.stderr-file '^ECHO_PROCESS_OK$' 'diagnostic read back from file' "$log" 'cat /tmp/stderr.txt' 'echo stderr-append'
+forbid_window redirection.stderr-append-diverted '^ECHO_PROCESS_OK$' 'append diagnostics absent from console' "$log" 'echo stderr-append 2>> /tmp/stderr.txt' 'cat /tmp/stderr.txt'
+count_window redirection.stderr-append-preserved '^ECHO_PROCESS_OK$' 2 "$log" 'echo stderr-append 2>> /tmp/stderr.txt' 'echo stderr-sink-failure'
+require_regex redirection.stderr-sink-failure '^stderr-sink-failure-recovered$' 'shell recovers after failed stderr sink' "$log" 'echo stderr-sink-failure'
 require_marker redirection.writer WRITE_PROCESS_OK "$log" 'echo redirected-native-data'
 require_marker redirection.shell REDIRECTION_EXEC_OK "$log" 'echo redirected-native-data'
 forbid_regex redirection.driver-oom 'VIRTIO_BLK_OUT_OF_MEMORY' 'no virtio-blk heap exhaustion' "$log" VIRTIO_BLK_OUT_OF_MEMORY

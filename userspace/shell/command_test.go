@@ -122,27 +122,62 @@ func TestSplitPipeline(t *testing.T) {
 
 func TestSplitRedirections(t *testing.T) {
 	for _, test := range []struct {
-		line, command, input, output string
-		appendMode                   bool
+		line, command, input, output, failure string
+		appendMode, failureAppend             bool
 	}{
-		{"echo value", "echo value", "", "", false},
-		{"echo value < /tmp/in", "echo value", "/tmp/in", "", false},
-		{"echo value > /tmp/out", "echo value", "", "/tmp/out", false},
-		{"echo value >> /tmp/out", "echo value", "", "/tmp/out", true},
-		{"echo value < /tmp/in >> /tmp/out", "echo value", "/tmp/in", "/tmp/out", true},
-		{"echo value > /tmp/out < /tmp/in", "echo value", "/tmp/in", "/tmp/out", false},
-		{`echo value < "/tmp/input file"`, "echo value", `"/tmp/input file"`, "", false},
-		{`echo "a>b<c"`, `echo "a>b<c"`, "", "", false},
-		{`echo a\>b\<c`, `echo a\>b\<c`, "", "", false},
+		{line: "echo value", command: "echo value"},
+		{line: "echo value < /tmp/in", command: "echo value", input: "/tmp/in"},
+		{line: "echo value > /tmp/out", command: "echo value", output: "/tmp/out"},
+		{line: "echo value >> /tmp/out", command: "echo value", output: "/tmp/out", appendMode: true},
+		{line: "echo value < /tmp/in >> /tmp/out", command: "echo value", input: "/tmp/in", output: "/tmp/out", appendMode: true},
+		{line: "echo value > /tmp/out < /tmp/in", command: "echo value", input: "/tmp/in", output: "/tmp/out"},
+		{line: `echo value < "/tmp/input file"`, command: "echo value", input: `"/tmp/input file"`},
+		{line: `echo "a>b<c"`, command: `echo "a>b<c"`},
+		{line: `echo a\>b\<c`, command: `echo a\>b\<c`},
+		{line: "echo value 2> /tmp/err", command: "echo value", failure: "/tmp/err"},
+		{line: "echo value 2>> /tmp/err", command: "echo value", failure: "/tmp/err", failureAppend: true},
+		{line: "echo value 2> /tmp/err > /tmp/out", command: "echo value", output: "/tmp/out", failure: "/tmp/err"},
+		{line: "echo value >> /tmp/out 2>> /tmp/err < /tmp/in", command: "echo value", input: "/tmp/in", output: "/tmp/out", appendMode: true, failure: "/tmp/err", failureAppend: true},
+		{line: "echo value2> /tmp/out", command: "echo value2", output: "/tmp/out"},
+		{line: "echo 2 > /tmp/out", command: "echo 2", output: "/tmp/out"},
+		{line: `echo "x 2> y"`, command: `echo "x 2> y"`},
+		{line: `echo x 2\> y`, command: `echo x 2\> y`},
 	} {
 		redirects, ok := SplitRedirections([]byte(test.line))
-		if !ok || redirects.Append != test.appendMode || string(redirects.Command) != test.command || string(redirects.Input) != test.input || string(redirects.Output) != test.output {
+		if !ok || redirects.Append != test.appendMode || redirects.ErrorAppend != test.failureAppend || string(redirects.Command) != test.command || string(redirects.Input) != test.input || string(redirects.Output) != test.output || string(redirects.Error) != test.failure {
 			t.Fatalf("SplitRedirections(%q) = %+v, %v", test.line, redirects, ok)
 		}
 	}
-	for _, input := range []string{"< in", "> out", ">> out", "echo <", "echo >", "echo >>", "echo < a b", "echo > a b", "echo >>> out", "echo < a < b", "echo > a > b", "echo error 2> out"} {
+	for _, input := range []string{"< in", "> out", ">> out", "echo <", "echo >", "echo >>", "echo < a b", "echo > a b", "echo >>> out", "echo < a < b", "echo > a > b", "2> out", "echo 2>", "echo 2>>", "echo 2> a b", "echo 2> a 2> b", "echo 2>>> out", "echo 2> a 2>> b"} {
 		if _, ok := SplitRedirections([]byte(input)); ok {
 			t.Fatalf("accepted %q", input)
+		}
+	}
+}
+
+func TestRedirectionStagesAndSequenceBounds(t *testing.T) {
+	redirects, ok := SplitRedirections([]byte("readline < in > out 2> err"))
+	if !ok || redirects.Stages() != 3 {
+		t.Fatalf("redirections = %+v, %v", redirects, ok)
+	}
+	var scratch [MaxArguments][MaxArgumentSize]byte
+	for _, test := range []struct {
+		line string
+		ok   bool
+	}{
+		{"echo a 2> err", true},
+		{"echo a | readline 2> err", true},
+		{"echo a | readline | readline 2> err", true},
+		{"echo a | readline | readline | readline 2> err", false},
+		{"echo a | readline > out 2> err", true},
+		{"echo a | readline | readline > out 2> err", false},
+		{"readline < in > out 2> err", true},
+		{"echo a | readline < in > out 2> err", false},
+		{"cd / 2> err", false},
+		{"echo a 2> err; echo b 2>> err", true},
+	} {
+		if _, _, ok := ParseSequence([]byte(test.line), &scratch); ok != test.ok {
+			t.Fatalf("ParseSequence(%q) = %v, want %v", test.line, ok, test.ok)
 		}
 	}
 }
