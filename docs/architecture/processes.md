@@ -68,3 +68,18 @@ PID 1 can report application failure without confusing it with loader or
 capability-installation failure. The read-only `SystemInfo` call exposes a
 fixed-size snapshot for native `ps` and `mem` without granting access to kernel
 structures.
+
+## Teardown liveness
+
+Process teardown separates what other parties observe from what merely reclaims
+resources. Once the kernel knows a process has exited it records the completion,
+wakes every waiter, and closes the process's handles so that channel and stream
+peers observe closure. Reclaiming the guarded kernel stack and the address space
+is attempted independently; a failure there is counted and reported and never
+prevents the steps above, because a waiter or a peer would otherwise block
+forever on a process that has already ended.
+
+The completion record is written unconditionally rather than depending on a
+bounded queue having room, and lifecycle messages that the channel cannot accept
+yet are retained and retried by the kernel loop instead of being dropped.
+

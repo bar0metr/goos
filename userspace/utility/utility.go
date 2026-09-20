@@ -240,7 +240,7 @@ func readInput(target []byte) (uint64, int) {
 	streamDescriptor[1], streamDescriptor[2] = uint64(len(target)), 0
 	status := streamRead(stdinHandle, unsafe.Pointer(&streamDescriptor[0]), 24)
 	if status == uint64(kcall.StatusResourceExhausted) {
-		waitStatus := streamWait(stdinHandle, 100000)
+		waitStatus := streamWait(stdinHandle, streamWaitDeadline)
 		if waitStatus == uint64(kcall.StatusTimeout) {
 			return uint64(kcall.StatusResourceExhausted), 0
 		}
@@ -537,6 +537,10 @@ func parseUint(value []byte) (uint64, bool) {
 }
 
 const (
+	// streamWaitDeadline bounds one wait for stream readiness. Wakeups are
+	// event-driven, so this only limits how long a lost one can stall a
+	// utility before it retries.
+	streamWaitDeadline = 5 * clock.TicksPerSecond
 	// One VFS call may reach persistent storage, so allow a few bounded waits
 	// before reporting failure.
 	vfsReplyDeadline = 2 * clock.TicksPerSecond
@@ -660,7 +664,7 @@ func writeHandle(target uint64, value []byte) {
 			return
 		}
 		if status == uint64(kcall.StatusResourceExhausted) {
-			if streamWait(target, 100000) != 0 {
+			if streamWait(target, streamWaitDeadline) != 0 {
 				processExit(2)
 			}
 			continue

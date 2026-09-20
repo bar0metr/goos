@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -181,6 +182,13 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
 }
 
+const (
+	// The exec reply is answered by PID 1, which is itself bounded, so a long
+	// but finite wait keeps a fault reportable instead of freezing the shell.
+	execReplyDeadline = 5 * clock.TicksPerSecond
+	execReplyAttempts = 6
+)
+
 func executeExternal(line []byte) {
 	redirects, validRedirect := shellcmd.SplitRedirections(line)
 	if !validRedirect {
@@ -273,8 +281,8 @@ func executeExternal(line []byte) {
 		write("\n")
 		return
 	}
-	for {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
+	for attempt := 0; attempt < execReplyAttempts; attempt++ {
+		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, execReplyDeadline
 		status := ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
 			continue
@@ -312,6 +320,7 @@ func executeExternal(line []byte) {
 		}
 		return
 	}
+	write("exec: no reply\n")
 }
 
 func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {

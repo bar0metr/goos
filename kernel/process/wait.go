@@ -38,6 +38,31 @@ func (set *WaitSet) Add(task sched.TaskID, process ID, deadline uint64) bool {
 	return false
 }
 
+// Count reports how many registrations the set holds.
+func (set *WaitSet) Count() int {
+	count := 0
+	for index := range set.waiters {
+		if set.waiters[index].active {
+			count++
+		}
+	}
+	return count
+}
+
+// Cancel removes a task's registration and reports whether one existed. A
+// waiter registers before it re-checks completion, so that an exit delivered in
+// between cannot be missed; a successful re-check then cancels instead of
+// blocking.
+func (set *WaitSet) Cancel(task sched.TaskID) bool {
+	for index := range set.waiters {
+		if set.waiters[index].active && set.waiters[index].task == task {
+			set.waiters[index] = waiter{}
+			return true
+		}
+	}
+	return false
+}
+
 func (set *WaitSet) Wake(process ID, output []WaitResult) int {
 	count := 0
 	for index := range set.waiters {

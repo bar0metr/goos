@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
@@ -37,7 +38,7 @@ var (
 	manager              supervisor.Manager
 	wire                 [ipc.WireMaxSize]byte
 	descriptor           = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	clock                uint64
+	supervisionTicks     uint64
 	correlation          uint64
 	heapPointer          uintptr
 	arenaBase            uintptr
@@ -120,11 +121,11 @@ func userspaceMain() {
 		if !valid || event.Operation != supervisor.LifecycleProcessExited {
 			continue
 		}
-		clock += supervisor.RestartBackoff
-		if manager.Exit(event.Process, event.Code, clock) == supervisor.StatusNotFound {
+		supervisionTicks += supervisor.RestartBackoff
+		if manager.Exit(event.Process, event.Code, supervisionTicks) == supervisor.StatusNotFound {
 			continue
 		}
-		manager.StartReady(clock+supervisor.RestartBackoff, launchService)
+		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
 		snapshot, found := manager.Snapshot("fault-probe")
 		if found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
 			if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
@@ -155,7 +156,7 @@ func userspaceMain() {
 						{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 						{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.StartReady(clock+supervisor.RestartBackoff, launchService) != 4 || !probeBlockService() {
+				manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService) != 4 || !probeBlockService() {
 				fatal("SHELL_LAUNCH_FAILED\n")
 			}
 			supervisionComplete = true
@@ -196,7 +197,7 @@ func probeBlockService() bool {
 	if !ok || !sendMessage(blockClientHandle, info) {
 		return false
 	}
-	message, status := receive(blockClientHandle, 1000)
+	message, status := receive(blockClientHandle, storageProbeDeadline)
 	infoReply, valid := blockproto.DecodeReply(message)
 	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 64*1024*1024 || infoReply.BlockSize != 512 {
 		return false
@@ -206,7 +207,7 @@ func probeBlockService() bool {
 	if !ok || !sendMessage(blockClientHandle, writeRequest) {
 		return false
 	}
-	message, status = receive(blockClientHandle, 1000)
+	message, status = receive(blockClientHandle, storageProbeDeadline)
 	writeReply, valid := blockproto.DecodeReply(message)
 	if status != ipc.StatusOK || !valid || writeReply.Status != blockproto.StatusOK {
 		return false
@@ -216,7 +217,7 @@ func probeBlockService() bool {
 	if !ok || !sendMessage(blockClientHandle, readRequest) {
 		return false
 	}
-	message, status = receive(blockClientHandle, 1000)
+	message, status = receive(blockClientHandle, storageProbeDeadline)
 	readReply, valid := blockproto.DecodeReply(message)
 	if status != ipc.StatusOK || !valid || readReply.Status != blockproto.StatusOK || !equalBytes(readReply.Data, "GBLKIO") {
 		return false
@@ -226,7 +227,7 @@ func probeBlockService() bool {
 	if !ok || !sendMessage(blockClientHandle, flushRequest) {
 		return false
 	}
-	message, status = receive(blockClientHandle, 1000)
+	message, status = receive(blockClientHandle, storageProbeDeadline)
 	flushReply, valid := blockproto.DecodeReply(message)
 	if status != ipc.StatusOK || !valid || flushReply.Status != blockproto.StatusOK {
 		return false
@@ -296,10 +297,30 @@ func receiveLifecycle(timeout uint64) (ipc.Message, ipc.Status) {
 	return receive(lifecycleHandle, timeout)
 }
 
+const (
+	// storageProbeDeadline covers the first answer from the storage stack,
+	// which is still completing its own startup when PID 1 probes it.
+	storageProbeDeadline = 5 * clock.TicksPerSecond
+	// vfsSessionDeadline bounds one session handshake with the VFS service.
+	vfsSessionDeadline = 2 * clock.TicksPerSecond
+)
+
+// waitStallReport is how many expired one-second deadlines are tolerated before
+// PID 1 reports that a child is not finishing.
+const waitStallReport = 3
+
+// launchReplyDeadline bounds the wait for a launch result. The kernel retains
+// and retries these replies, so expiry means a real fault and must be reported
+// instead of stalling PID 1 and every shell behind it.
+const launchReplyDeadline = 5 * clock.TicksPerSecond
+
 func receiveLaunchResult(expectedCorrelation uint64) (supervisor.LifecycleEvent, ipc.Status) {
 	for {
-		message, status := receive(lifecycleHandle, 100000)
+		message, status := receive(lifecycleHandle, launchReplyDeadline)
 		if status != ipc.StatusOK {
+			if status == ipc.StatusTimeout {
+				write("INIT_LAUNCH_REPLY_TIMEOUT\n")
+			}
 			return supervisor.LifecycleEvent{}, status
 		}
 		event, valid := supervisor.DecodeLifecycle(message)
@@ -418,7 +439,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	var status ipc.Status
 	vfsStatus, valid := vfs.StatusOK, true
 	if useVFS {
-		controlReply, received := receive(vfsControlHandle, 1000)
+		controlReply, received := receive(vfsControlHandle, vfsSessionDeadline)
 		status = received
 		vfsStatus, valid = vfs.DecodeAddSessionReply(controlReply)
 	}
@@ -508,13 +529,24 @@ func streamRights(typeID handle.Type, rights capability.Rights) capability.Right
 
 func waitApplicationExit(processHandle handle.ID) uint64 {
 	var exitCode uint64
+	// Wakeups are event-driven; the deadline is only a safety net that keeps
+	// PID 1 responsive if one ever goes missing. A child that outlives several
+	// deadlines is reported once, because a silent stall here blocks the shell.
+	expired := 0
 	for {
-		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), 100000)
+		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), clock.TicksPerSecond)
 		if status == uint64(ipc.StatusTimeout) {
+			expired++
+			if expired == waitStallReport {
+				write("INIT_WAIT_STALLED\n")
+			}
 			continue
 		}
-		if status != 0 || handleClose(uint64(processHandle)) != 0 {
+		if status != 0 {
 			fatal("INIT_EXEC_WAIT_FAILED\n")
+		}
+		if handleClose(uint64(processHandle)) != 0 {
+			fatal("INIT_EXEC_CLOSE_FAILED\n")
 		}
 		if !processWaitAnnounced {
 			write("PROCESS_HANDLE_WAIT_OK\n")

@@ -40,7 +40,7 @@ func (set *WaitSet) Block(scheduler *sched.Scheduler, task sched.TaskID, channel
 	if scheduler.Block(task) {
 		return true
 	}
-	set.remove(task)
+	set.Cancel(task)
 	return false
 }
 
@@ -104,11 +104,27 @@ func (set *WaitSet) Apply(scheduler *sched.Scheduler, results []WaitResult) int 
 	return woken
 }
 
-func (set *WaitSet) remove(task sched.TaskID) {
+// Cancel removes a task's registration and reports whether one existed. A
+// waiter registers before it re-checks its condition, so that an event arriving
+// in between cannot be missed; a successful re-check then cancels instead of
+// blocking.
+// Count reports how many registrations the set holds.
+func (set *WaitSet) Count() int {
+	count := 0
+	for index := range set.waiters {
+		if set.waiters[index].active {
+			count++
+		}
+	}
+	return count
+}
+
+func (set *WaitSet) Cancel(task sched.TaskID) bool {
 	for index := range set.waiters {
 		if set.waiters[index].active && set.waiters[index].task == task {
 			set.waiters[index] = waiter{}
-			return
+			return true
 		}
 	}
+	return false
 }
