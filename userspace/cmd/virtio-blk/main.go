@@ -32,6 +32,7 @@ var (
 	waitDescriptor [3]uint64
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
+	portValue      uint32
 	heapPointer    uintptr
 	queueSize      uint16
 	capacity       uint64
@@ -77,9 +78,9 @@ func irqWait(irq uint64) uint64
 func specification(offset uint16, width uint8) uint64 { return uint64(offset) | uint64(width)<<16 }
 
 func portIn(offset uint16, width uint8) (uint32, bool) {
-	var value uint32
-	ok := portRead(uint64(portHandle), specification(offset, width), unsafe.Pointer(&value)) == 0
-	return value, ok
+	portValue = 0
+	ok := portRead(uint64(portHandle), specification(offset, width), unsafe.Pointer(&portValue)) == 0
+	return portValue, ok
 }
 
 func portOut(offset uint16, width uint8, value uint32) bool {
@@ -259,16 +260,22 @@ func transfer(operation uint32, sector uint64, sectors uint16) bool {
 	if !portOut(16, 2, 0) {
 		return false
 	}
-	if irqWait(uint64(irqHandle)) != 0 {
-		return false
-	}
-	isr, ok := portIn(19, 1)
-	if !ok || isr&1 == 0 {
-		return false
-	}
 	current := get16(usedOffset + 2)
-	if current == usedIndex {
-		return false
+	acknowledged := false
+	for current == usedIndex {
+		if irqWait(uint64(irqHandle)) != 0 {
+			return false
+		}
+		if _, ok := portIn(19, 1); !ok {
+			return false
+		}
+		acknowledged = true
+		current = get16(usedOffset + 2)
+	}
+	if !acknowledged {
+		if _, ok := portIn(19, 1); !ok {
+			return false
+		}
 	}
 	usedIndex = current
 	if !irqConfirmed {

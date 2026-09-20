@@ -20,7 +20,7 @@ func EncodeFrom(message *Message, target []byte) (int, bool) {
 	if message == nil {
 		return 0, false
 	}
-	if !validMessage(*message) || message.HandleCount > MaxAttachedHandles {
+	if !validMessage(message) || message.HandleCount > MaxAttachedHandles {
 		return 0, false
 	}
 	size := WireHeaderSize + int(message.PayloadSize) + int(message.HandleCount)*8
@@ -81,12 +81,12 @@ func DecodeInto(data []byte, message *Message) bool {
 			return false
 		}
 	}
-	if !validWireMessage(*message) {
+	if !validWireMessage(message) {
 		return false
 	}
 	return true
 }
 
-func validWireMessage(message Message) bool {
+func validWireMessage(message *Message) bool {
 	return validMessage(message)
 }

@@ -23,6 +23,8 @@ PASS lines or a bounded diagnostic for the first failed named check. `make
 test-all` is the canonical complete Definition-of-Done gate and includes host
 tests, lint, documentation checks, ISO construction, and QEMU validation. See
 `docs/development/testing.md` for the target hierarchy and harness details.
+Boot tests use a disposable test disk; `make run` retains
+`build/virtio-blk.img` across interactive boots.
 `make test-performance` writes the page-allocation benchmark to
 `build/reports/page-allocation.txt`.
 `make test-security` runs the capability, generation-safe handle, and virtual

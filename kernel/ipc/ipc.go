@@ -75,7 +75,7 @@ func (channel *Channel) Alive(side uint8) bool {
 // side zero and side one are the only endpoints. External IRQ-level locking is
 // required until channels gain per-object synchronization for SMP.
 func (channel *Channel) Send(side uint8, message Message, source *handle.Table, target *handle.Table, transfers []Transfer) Status {
-	if channel == nil || side > 1 || !validMessage(message) || len(transfers) > MaxAttachedHandles || message.HandleCount != 0 {
+	if channel == nil || side > 1 || !validMessage(&message) || len(transfers) > MaxAttachedHandles || message.HandleCount != 0 {
 		return StatusInvalidArgument
 	}
 	peer := side ^ 1
@@ -152,8 +152,8 @@ func (channel *Channel) Close(side uint8) bool {
 	return true
 }
 
-func validMessage(message Message) bool {
-	if message.ProtocolID == 0 || message.Version == 0 || message.PayloadSize > MaxPayload || message.HandleCount > MaxAttachedHandles {
+func validMessage(message *Message) bool {
+	if message == nil || message.ProtocolID == 0 || message.Version == 0 || message.PayloadSize > MaxPayload || message.HandleCount > MaxAttachedHandles {
 		return false
 	}
 	switch message.Kind {

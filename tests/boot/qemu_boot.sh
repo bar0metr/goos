@@ -125,7 +125,7 @@ fi
 
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
-disk=build/virtio-blk.img
+disk=${3:?test disk path required}
 rm -f "$log" "$reboot_log"
 
 ( sleep 4
@@ -206,6 +206,16 @@ rm -f "$log" "$reboot_log"
 	printf 'cp /system/motd /persist/state.txt\n'
 	sleep 1
 	printf 'cat /persist/state.txt\n'
+	sleep 1
+	printf 'cd /persist\n'
+	sleep 1
+	printf 'cat state.txt\n'
+	sleep 1
+	printf 'echo interactive-persist-data > tt.txt\n'
+	sleep 1
+	printf 'cat tt.txt\n'
+	sleep 1
+	printf 'cd /system\n'
 	sleep 1
 	printf 'mkdir /tmp/demo\n'
 	sleep 1
@@ -320,8 +330,10 @@ require_regex redirection.data '^redirected-native-data$' 'redirected-native-dat
 require_regex redirection.append-first '^append-first$' 'append-first on its own line' "$log" 'cat /tmp/appended.txt'
 require_regex redirection.append-second '^append-second$' 'append-second on its own line' "$log" 'cat /tmp/appended.txt'
 require_regex redirection.input '^input-redirection-data$' 'input-redirection-data on its own line' "$log" 'cat /tmp/input-copy.txt'
+require_regex redirection.persist-relative '^interactive-persist-data$' 'interactive-persist-data on its own line' "$log" 'cat tt.txt'
 require_marker redirection.writer WRITE_PROCESS_OK "$log" 'echo redirected-native-data'
 require_marker redirection.shell REDIRECTION_EXEC_OK "$log" 'echo redirected-native-data'
+forbid_regex redirection.driver-oom 'VIRTIO_BLK_OUT_OF_MEMORY' 'no virtio-blk heap exhaustion' "$log" VIRTIO_BLK_OUT_OF_MEMORY
 pass_group redirection
 
 value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)

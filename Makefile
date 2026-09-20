@@ -151,8 +151,10 @@ test-integration: kernel
 test-security:
 	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
 
-test-boot: iso $(BUILD_DIR)/virtio-blk.img
-	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE)
+test-boot: iso
+	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
+	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
 
 test-performance:
 	@mkdir -p $(BUILD_DIR)/reports

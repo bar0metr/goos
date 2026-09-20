@@ -108,7 +108,11 @@ func EncodeReplyInto(reply Reply, correlation uint64, message *ipc.Message) bool
 	if message == nil {
 		return false
 	}
-	*message = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: uint16(headerSize + len(reply.Data))}
+	for index := range message.Payload {
+		message.Payload[index] = 0
+	}
+	message.ProtocolID, message.Version, message.Kind = ProtocolID, Version, ipc.KindReply
+	message.Correlation, message.PayloadSize, message.HandleCount = correlation, uint16(headerSize+len(reply.Data)), 0
 	message.Payload[0], message.Payload[1] = byte(reply.Operation), byte(reply.Status)
 	binary.LittleEndian.PutUint64(message.Payload[8:16], reply.Capacity)
 	binary.LittleEndian.PutUint32(message.Payload[16:20], reply.BlockSize)
