@@ -8,6 +8,7 @@ import (
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 	"runtime"
 	"unsafe"
 )
@@ -57,11 +58,9 @@ var (
 	driverRequest    ipc.Message
 	driverReply      ipc.Message
 	driverDescriptor [3]uint64
-	descriptor       [3]uint64
 	heapPointer      uintptr
 	arenaBase        uintptr
 	correlation      uint64
-	waitIndex        uint8
 )
 
 //go:extern _heap_start
@@ -124,29 +123,23 @@ func userspaceMain() {
 	write("BLOCK_SERVICE_OK\n")
 	for {
 		heapPointer = arenaBase
-		worked := false
-		for _, endpoint := range [...]handle.ID{serviceHandle, filesystemHandle} {
-			status := ipcReceive(uint64(endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
-			if status == uint64(ipc.StatusNotFound) {
+		endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
+		var interests [userwait.MaxObjects]userwait.Interest
+		for index, endpoint := range endpoints {
+			interests[index] = userwait.Interest{Handle: endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		}
+		result, status := userwait.Any(&interests, len(endpoints), kcall.WaitAnyInfiniteTimeout)
+		if status != kcall.StatusOK {
+			fatal("BLOCK_WAIT_FAILED\n")
+		}
+		for index, endpoint := range endpoints {
+			if result.ReadyMask&(1<<index) == 0 {
 				continue
 			}
-			if status != 0 {
+			if ipcReceive(uint64(endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != uint64(ipc.StatusOK) {
 				fatal("BLOCK_RECEIVE_FAILED\n")
 			}
 			serve(endpoint)
-			worked = true
-		}
-		if !worked {
-			endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
-			endpoint := endpoints[waitIndex]
-			waitIndex = (waitIndex + 1) % uint8(len(endpoints))
-			descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 1
-			status := ipcWaitReceive(uint64(endpoint), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-			if status == uint64(ipc.StatusOK) {
-				serve(endpoint)
-			} else if status != uint64(ipc.StatusTimeout) {
-				fatal("BLOCK_WAIT_FAILED\n")
-			}
 		}
 	}
 }

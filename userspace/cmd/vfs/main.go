@@ -10,6 +10,7 @@ import (
 	blockproto "goos/userspace/block"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
+	userwait "goos/userspace/wait"
 	"runtime"
 	"unsafe"
 )
@@ -134,30 +135,51 @@ func userspaceMain() {
 	write("FAT32_MOUNT_OK\n")
 	for {
 		heapPointer = arenaBase
-		worked := pollControl()
+		var interests [userwait.MaxObjects]userwait.Interest
+		var sessionIndexes [maxSessions]int
+		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count := 1
 		for index, session := range sessions {
-			if session == 0 {
+			if session != 0 {
+				interests[count] = userwait.Interest{Handle: handle.ID(session), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				sessionIndexes[count-1] = index
+				count++
+			}
+		}
+		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+		if status != kcall.StatusOK {
+			switch status {
+			case kcall.StatusPermissionDenied:
+				fatal("VFS_WAIT_PERMISSION_DENIED\n")
+			case kcall.StatusNotFound:
+				fatal("VFS_WAIT_NOT_FOUND\n")
+			case kcall.StatusResourceExhausted:
+				fatal("VFS_WAIT_RESOURCE_EXHAUSTED\n")
+			case kcall.StatusPeerDied:
+				fatal("VFS_WAIT_PEER_DIED\n")
+			default:
+				fatal("VFS_WAIT_FAILED\n")
+			}
+		}
+		if result.ReadyMask&1 != 0 {
+			pollControl()
+		}
+		for interest := 1; interest < count; interest++ {
+			if result.ReadyMask&(1<<interest) == 0 {
 				continue
 			}
-			message, status := receiveNow(session)
-			if status == ipc.StatusNotFound {
-				continue
-			}
-			if status == ipc.StatusPeerDied {
+			index := sessionIndexes[interest-1]
+			session := sessions[index]
+			message, receiveStatus := receiveNow(session)
+			if receiveStatus == ipc.StatusPeerDied {
 				handleClose(session)
 				sessions[index] = 0
-				worked = true
 				continue
 			}
-			if status != ipc.StatusOK {
+			if receiveStatus != ipc.StatusOK {
 				fatal("VFS_RECEIVE_FAILED\n")
 			}
 			serve(session, message)
-			worked = true
-		}
-		if !worked {
-			descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 1
-			ipcWaitReceive(uint64(controlHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		}
 	}
 }

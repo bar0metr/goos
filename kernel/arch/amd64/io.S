@@ -344,6 +344,8 @@ goos_user_call:
 	 je .user_call_irq_wait
 	 cmpq $21, 48(%rsp)
 	 je .user_call_stream_wait
+	 cmpq $22, 48(%rsp)
+	 je .user_call_wait_any
 	 movq 48(%rsp), %rcx
 	 movq 96(%rsp), %rdx
 	 movq 88(%rsp), %r8
@@ -390,6 +392,16 @@ goos_user_call:
 	 movq (%r8,%rax,8), %r8
 	 orq %rax, %r8
 	 callq goos_dispatch_stream_wait
+	 jmp .user_call_result
+.user_call_wait_any:
+	 movq 96(%rsp), %rcx
+	 movq 88(%rsp), %rdx
+	 movq 64(%rsp), %r8
+	 movq goos_current_task(%rip), %rax
+	 leaq goos_task_roots(%rip), %r9
+	 movq (%r9,%rax,8), %r9
+	 orq %rax, %r9
+	 callq goos_dispatch_wait_any
 .user_call_result:
 	 movq $0, 48(%rsp)
 	 movl %eax, 48(%rsp)

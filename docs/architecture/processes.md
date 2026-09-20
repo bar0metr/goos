@@ -56,6 +56,12 @@ set, supports timer deadlines, and copies the exit code to validated user
 memory. PID 1 uses this path for shell-launched applications and closes the
 handle after completion.
 
+Process handles can also participate in the readiness-only `WaitAny` operation.
+The kernel validates their type and `Wait` authority and publishes completion to
+a table keyed by the full generation-safe Task ID. `ProcessWait` remains the
+operation that consumes and returns the exit code, preserving the existing
+single-object interface.
+
 Before the first Task becomes runnable, the kernel completes the bounded
 versioned `GST2` startup block with the actual generation-safe IDs returned by
 capability installation. Applications resolve handles by explicit role names
@@ -82,4 +88,3 @@ forever on a process that has already ended.
 The completion record is written unconditionally rather than depending on a
 bounded queue having room, and lifecycle messages that the channel cannot accept
 yet are retained and retried by the kernel loop instead of being dropped.
-

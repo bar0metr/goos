@@ -144,6 +144,22 @@ func (channel *Channel) Receive(side uint8) (Message, Status) {
 	return message, StatusOK
 }
 
+// ReceiveStatus observes endpoint readiness without consuming a message.
+// WaitAny uses it after registering interest so the observation and the
+// subsequent decision to block cannot lose an intervening state change.
+func (channel *Channel) ReceiveStatus(side uint8) Status {
+	if channel == nil || side > 1 || !channel.alive[side] {
+		return StatusInvalidArgument
+	}
+	if channel.inbound[side].count != 0 {
+		return StatusOK
+	}
+	if !channel.alive[side^1] {
+		return StatusPeerDied
+	}
+	return StatusNotFound
+}
+
 func (channel *Channel) Close(side uint8) bool {
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return false

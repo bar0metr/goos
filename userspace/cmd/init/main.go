@@ -7,11 +7,13 @@ import (
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 	"runtime"
 	"unsafe"
 )
@@ -103,17 +105,28 @@ func userspaceMain() {
 	write("INIT_PROCESS_OK\n")
 	write("INIT_LIFECYCLE_IPC_OK\n")
 	for {
+		var interests [userwait.MaxObjects]userwait.Interest
+		count := 1
+		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		if supervisionComplete {
-			pollExec()
+			interests[1] = userwait.Interest{Handle: handle.ID(execServerHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			count++
 		}
-		timeout := uint64(100000)
-		if supervisionComplete {
-			timeout = 1
+		readyMask := uint16(1)
+		if lifecycleCount == 0 {
+			result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+			if status != kcall.StatusOK {
+				fatal("INIT_WAIT_FAILED\n")
+			}
+			readyMask = result.ReadyMask
 		}
-		message, status := receiveLifecycle(timeout)
-		if status == ipc.StatusTimeout {
+		if readyMask&1 == 0 {
+			if readyMask&2 != 0 {
+				pollExec()
+			}
 			continue
 		}
+		message, status := receiveLifecycle(0)
 		if status != ipc.StatusOK {
 			fatal("INIT_LIFECYCLE_FAILED\n")
 		}
@@ -304,10 +317,6 @@ const (
 	// vfsSessionDeadline bounds one session handshake with the VFS service.
 	vfsSessionDeadline = 2 * clock.TicksPerSecond
 )
-
-// waitStallReport is how many expired one-second deadlines are tolerated before
-// PID 1 reports that a child is not finishing.
-const waitStallReport = 3
 
 // launchReplyDeadline bounds the wait for a launch result. The kernel retains
 // and retries these replies, so expiry means a real fault and must be reported
@@ -529,20 +538,17 @@ func streamRights(typeID handle.Type, rights capability.Rights) capability.Right
 
 func waitApplicationExit(processHandle handle.ID) uint64 {
 	var exitCode uint64
-	// Wakeups are event-driven; the deadline is only a safety net that keeps
-	// PID 1 responsive if one ever goes missing. A child that outlives several
-	// deadlines is reported once, because a silent stall here blocks the shell.
-	expired := 0
 	for {
-		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), clock.TicksPerSecond)
-		if status == uint64(ipc.StatusTimeout) {
-			expired++
-			if expired == waitStallReport {
-				write("INIT_WAIT_STALLED\n")
-			}
-			continue
+		var interests [userwait.MaxObjects]userwait.Interest
+		interests[0] = userwait.Interest{Handle: processHandle, Events: kcall.WaitCompleted}
+		if _, status := userwait.Any(&interests, 1, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
+			fatal("INIT_EXEC_WAIT_READY_FAILED\n")
 		}
+		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), 0)
 		if status != 0 {
+			if status == uint64(ipc.StatusNotFound) {
+				continue
+			}
 			fatal("INIT_EXEC_WAIT_FAILED\n")
 		}
 		if handleClose(uint64(processHandle)) != 0 {

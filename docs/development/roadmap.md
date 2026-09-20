@@ -14,6 +14,7 @@ The following foundation is already implemented:
 - ring-3 native processes and a versioned native image format;
 - versioned typed IPC, bounded queues, request/reply, handle passing, waits,
   deadlines, peer-death handling, and shared-memory objects;
+- bounded readiness-only multi-object waits for channels, streams, and processes;
 - userspace TTY, RAMFS, and namespace-scoped VFS services;
 - PID 1, bounded supervision, restart policy, lifecycle events, and
   capability-bounded process spawning;
@@ -165,10 +166,17 @@ liveness defects that experiment exposed: teardown now wakes waiters and closes
 handles before any cleanup that can fail, completion records no longer depend on
 a bounded queue, undeliverable lifecycle messages are retried instead of
 dropped, every wait registers before re-checking its condition, and deadline
-expiry is driven by the kernel loop. One intermittent stall remains at 1 kHz, so
-the rate stays at 100 Hz. That stall, event-driven multi-endpoint waits, which
-would make latency independent of the tick rate, and the process-launch cost are
-the next performance items.
+expiry is driven by the kernel loop. ADR 0051 adds bounded event-driven
+multi-object readiness waits and migrates PID 1 lifecycle/exec handling, VFS
+control/session handling, and block service/filesystem handling away from
+polling. Safe wakeup currently makes a task runnable; an immediate switch occurs
+when the publisher blocks, while a nonblocking publisher still runs until timer
+preemption because there is no safe-return reschedule hook yet.
+
+The default rate therefore remains 100 Hz. The performance matrix is still
+pending, including QEMU validation of 1,000 PID 1 lifecycle events and the target
+of keeping process launch below 500 ms. Process-launch cost and the remaining
+nonblocking-publisher scheduling latency are the next performance items.
 
 ## Priority 4 — Separate normal boot from validation boot
 

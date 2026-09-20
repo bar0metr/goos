@@ -54,7 +54,7 @@ $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(BUILD_DIR)/userspace
 	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
 
-$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/cmd/init internal/capability kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
 
@@ -68,7 +68,7 @@ $(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec us
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
 
@@ -82,7 +82,7 @@ $(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspa
 $(COREUTILS_IMAGE): $(COREUTILS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(COREUTILS_ELF) $@
 
-$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup kernel/handle kernel/ipc kernel/kcall internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
 
