@@ -682,10 +682,25 @@ goos_scheduler_install_user:
     movq goos_task_dead_mask(%rip), %r10
     testq %r10, %r10
     jz .install_user_append
-    bsfq %r10, %r10
+    leaq goos_task_rsp0(%rip), %r11
+.install_user_dead_scan:
+    // Only a dead slot whose exit record was already delivered may be reused:
+    // reclaim zeroes rsp0 last, so a non-zero rsp0 means the exit is still
+    // pending or being reclaimed. Reusing it would bump the generation and
+    // orphan the exit record, leaving waiters blocked forever.
+    bsfq %r10, %rax
+    cmpq $0, (%r11,%rax,8)
+    je .install_user_dead_found
+    btrq %rax, %r10
+    testq %r10, %r10
+    jnz .install_user_dead_scan
+    jmp .install_user_append
+.install_user_dead_found:
+    movq %rax, %r10
     btrq %r10, goos_task_dead_mask(%rip)
     jmp .install_user_slot
 .install_user_append:
+    xorq %rax, %rax
     movq goos_task_count(%rip), %r10
     cmpq $64, %r10
     jae .install_user_done

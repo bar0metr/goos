@@ -37,4 +37,7 @@ physical allocator and its architecture slot can be reused. The implementation
 is single-CPU, and IRQ-level synchronization disables nested maskable
 interrupts. Task IDs combine a generation with their reusable slot; IPC wakeups
 and exit teardown validate both fields, so stale events cannot target a new
-task. Priorities, per-CPU queues, and SMP are not implemented yet.
+task. A dead slot becomes reusable only after its exit record has been delivered
+and its kernel stack reclaimed, because installing a new task bumps the slot
+generation: reusing a slot with an undelivered exit would orphan that record and
+block every waiter on the exited process forever. Priorities, per-CPU queues, and SMP are not implemented yet.
