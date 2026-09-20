@@ -15,6 +15,7 @@ func TestParseSequence(t *testing.T) {
 		{`echo "a;b"; echo 'c;d'; echo e\;f`, []string{`echo "a;b"`, `echo 'c;d'`, `echo e\;f`}},
 		{`echo x | readline; cd "/system"; pwd`, []string{`echo x | readline`, `cd "/system"`, "pwd"}},
 		{`echo redirected > "/tmp/result file"; cat "/tmp/result file"`, []string{`echo redirected > "/tmp/result file"`, `cat "/tmp/result file"`}},
+		{`readline < "/tmp/input file" > /tmp/output`, []string{`readline < "/tmp/input file" > /tmp/output`}},
 		{strings.Repeat("pwd;", MaxCommands), []string{"pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd"}},
 	} {
 		var scratch [MaxArguments][MaxArgumentSize]byte
@@ -34,7 +35,8 @@ func TestParseSequenceRejectsMalformedTail(t *testing.T) {
 	for _, line := range []string{
 		";pwd", "pwd;;pwd", "pwd; ;", `pwd; echo "unfinished`, "pwd; echo x\\",
 		"pwd; echo x |", "pwd; a | b | c | d | e", "pwd; cd / | readline",
-		"pwd; a | b | c | d > out", "pwd; cd / > out", "pwd; echo > a b",
+		"pwd; a | b | c | d > out", "pwd; a | b | c | d < in", "pwd; a | b | c < in > out",
+		"pwd; cd / > out", "pwd; echo > a b",
 		"pwd; echo x | help", "pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
 		"pwd; echo a b c d e f g h", strings.Repeat("pwd;", MaxCommands+1),
 	} {
@@ -118,25 +120,28 @@ func TestSplitPipeline(t *testing.T) {
 	}
 }
 
-func TestSplitOutputRedirect(t *testing.T) {
+func TestSplitRedirections(t *testing.T) {
 	for _, test := range []struct {
-		line, command, target  string
-		redirected, appendMode bool
+		line, command, input, output string
+		appendMode                   bool
 	}{
-		{"echo value", "echo value", "", false, false},
-		{"echo value > /tmp/out", "echo value", "/tmp/out", true, false},
-		{"echo value >> /tmp/out", "echo value", "/tmp/out", true, true},
-		{`echo value >> "/tmp/two words"`, "echo value", `"/tmp/two words"`, true, true},
-		{`echo "a>b"`, `echo "a>b"`, "", false, false},
-		{`echo a\>b`, `echo a\>b`, "", false, false},
+		{"echo value", "echo value", "", "", false},
+		{"echo value < /tmp/in", "echo value", "/tmp/in", "", false},
+		{"echo value > /tmp/out", "echo value", "", "/tmp/out", false},
+		{"echo value >> /tmp/out", "echo value", "", "/tmp/out", true},
+		{"echo value < /tmp/in >> /tmp/out", "echo value", "/tmp/in", "/tmp/out", true},
+		{"echo value > /tmp/out < /tmp/in", "echo value", "/tmp/in", "/tmp/out", false},
+		{`echo value < "/tmp/input file"`, "echo value", `"/tmp/input file"`, "", false},
+		{`echo "a>b<c"`, `echo "a>b<c"`, "", "", false},
+		{`echo a\>b\<c`, `echo a\>b\<c`, "", "", false},
 	} {
-		command, target, redirected, appendMode, ok := SplitOutputRedirect([]byte(test.line))
-		if !ok || redirected != test.redirected || appendMode != test.appendMode || string(command) != test.command || string(target) != test.target {
-			t.Fatalf("SplitOutputRedirect(%q) = %q, %q, %v, %v, %v", test.line, command, target, redirected, appendMode, ok)
+		redirects, ok := SplitRedirections([]byte(test.line))
+		if !ok || redirects.Append != test.appendMode || string(redirects.Command) != test.command || string(redirects.Input) != test.input || string(redirects.Output) != test.output {
+			t.Fatalf("SplitRedirections(%q) = %+v, %v", test.line, redirects, ok)
 		}
 	}
-	for _, input := range []string{"> out", ">> out", "echo >", "echo >>", "echo > a b", "echo >>> out", "echo > a > b", "cat < in", "echo error 2> out"} {
-		if _, _, _, _, ok := SplitOutputRedirect([]byte(input)); ok {
+	for _, input := range []string{"< in", "> out", ">> out", "echo <", "echo >", "echo >>", "echo < a b", "echo > a b", "echo >>> out", "echo < a < b", "echo > a > b", "echo error 2> out"} {
+		if _, ok := SplitRedirections([]byte(input)); ok {
 			t.Fatalf("accepted %q", input)
 		}
 	}

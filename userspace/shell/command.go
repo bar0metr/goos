@@ -50,15 +50,22 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		if count == MaxCommands {
 			return commands, 0, false
 		}
-		pipeline, _, redirected, _, ok := SplitOutputRedirect(command)
+		redirects, ok := SplitRedirections(command)
 		if !ok {
 			return commands, 0, false
 		}
-		stages, stageCount, ok := SplitPipeline(pipeline)
+		stages, stageCount, ok := SplitPipeline(redirects.Command)
 		if !ok {
 			return commands, 0, false
 		}
-		if redirected && stageCount == execproto.MaxStages {
+		redirectCount := 0
+		if len(redirects.Input) != 0 {
+			redirectCount++
+		}
+		if len(redirects.Output) != 0 {
+			redirectCount++
+		}
+		if stageCount+redirectCount > execproto.MaxStages {
 			return commands, 0, false
 		}
 		for _, stage := range stages[:stageCount] {
@@ -70,7 +77,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 				return commands, 0, false
 			}
 			name := invocation.Arguments[0]
-			if (stageCount > 1 || redirected) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
+			if (stageCount > 1 || redirectCount != 0) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear")) {
 				return commands, 0, false
 			}
 		}
@@ -81,11 +88,26 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 	return commands, count, true
 }
 
-// SplitOutputRedirect separates one unquoted output redirection. The target is
-// left encoded so ParseInvocation can apply the normal quoting and escaping
-// rules. Multiple targets are rejected.
-func SplitOutputRedirect(line []byte) (command, target []byte, redirected, appendMode, ok bool) {
-	quote, escaped, separator, operatorSize := byte(0), false, -1, 1
+type Redirections struct {
+	Command []byte
+	Input   []byte
+	Output  []byte
+	Append  bool
+}
+
+type redirectOperator struct {
+	offset int
+	size   int
+	input  bool
+}
+
+// SplitRedirections separates at most one input and one output redirection.
+// Targets remain encoded for ParseInvocation to apply normal argument rules.
+func SplitRedirections(line []byte) (Redirections, bool) {
+	var operators [2]redirectOperator
+	count := 0
+	quote, escaped := byte(0), false
+	hasInput, hasOutput := false, false
 	for index, value := range line {
 		if escaped {
 			escaped = false
@@ -103,43 +125,74 @@ func SplitOutputRedirect(line []byte) (command, target []byte, redirected, appen
 			}
 			continue
 		}
-		if value == '<' && quote == 0 {
-			return nil, nil, false, false, false
+		if quote != 0 || value != '<' && value != '>' {
+			continue
 		}
-		if value == '>' && quote == 0 {
-			if separator >= 0 && operatorSize == 2 && index == separator+1 {
-				continue
+		if count != 0 && operators[count-1].size == 2 && index == operators[count-1].offset+1 {
+			continue
+		}
+		if count == len(operators) {
+			return Redirections{}, false
+		}
+		if value == '<' {
+			if hasInput {
+				return Redirections{}, false
 			}
-			if separator >= 0 {
-				return nil, nil, false, false, false
+			hasInput = true
+			operators[count] = redirectOperator{offset: index, size: 1, input: true}
+		} else {
+			if hasOutput || index > 0 && line[index-1] == '2' && (index == 1 || line[index-2] == ' ') {
+				return Redirections{}, false
 			}
-			if index > 0 && line[index-1] == '2' && (index == 1 || line[index-2] == ' ') {
-				return nil, nil, false, false, false
-			}
-			separator = index
+			hasOutput = true
+			size := 1
 			if index+1 < len(line) && line[index+1] == '>' {
-				operatorSize = 2
-				appendMode = true
+				size = 2
 			}
+			operators[count] = redirectOperator{offset: index, size: size}
 		}
+		count++
 	}
 	if quote != 0 || escaped {
-		return nil, nil, false, false, false
+		return Redirections{}, false
 	}
-	if separator < 0 {
-		line = trimSpaces(line)
-		return line, nil, false, false, len(line) != 0
+	if count == 0 {
+		command := trimSpaces(line)
+		return Redirections{Command: command}, len(command) != 0
 	}
-	command, target = trimSpaces(line[:separator]), trimSpaces(line[separator+operatorSize:])
-	if len(command) == 0 || len(target) == 0 || target[0] == '>' {
-		return nil, nil, false, false, false
+	result := Redirections{Command: trimSpaces(line[:operators[0].offset])}
+	if len(result.Command) == 0 {
+		return Redirections{}, false
 	}
 	var storage [MaxArguments][MaxArgumentSize]byte
-	invocation, valid := ParseInvocation(target, &storage)
-	if !valid || invocation.Count != 1 {
+	for index := 0; index < count; index++ {
+		start := operators[index].offset + operators[index].size
+		end := len(line)
+		if index+1 < count {
+			end = operators[index+1].offset
+		}
+		target := trimSpaces(line[start:end])
+		invocation, valid := ParseInvocation(target, &storage)
+		if !valid || invocation.Count != 1 {
+			return Redirections{}, false
+		}
+		if operators[index].input {
+			result.Input = target
+		} else {
+			result.Output = target
+			result.Append = operators[index].size == 2
+		}
+	}
+	return result, true
+}
+
+// SplitOutputRedirect preserves the output-only parser interface.
+func SplitOutputRedirect(line []byte) (command, target []byte, redirected, appendMode, ok bool) {
+	redirects, ok := SplitRedirections(line)
+	if !ok || len(redirects.Input) != 0 {
 		return nil, nil, false, false, false
 	}
-	return command, target, true, appendMode, true
+	return redirects.Command, redirects.Output, len(redirects.Output) != 0, redirects.Append, true
 }
 
 type Invocation struct {

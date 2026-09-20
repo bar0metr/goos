@@ -36,3 +36,8 @@ and a private VFS session; the utility creates one resolved path, then either
 truncates it for `>` or seeks to its current size for `>>`, and writes bytes
 until peer closure. Validation markers use the separate stderr capability and
 therefore do not contaminate redirected data.
+
+Input file redirection uses the symmetric composition. The shell prepends the
+existing `cat` utility as a producer with a private VFS session. PID 1 only sees
+an ordinary pipeline and connects the producer's stdout endpoint to the first
+requested stage's read-only `in` role.

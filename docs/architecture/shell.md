@@ -32,7 +32,7 @@ base utilities receive structured `argv`, `PATH=/system/bin`, a fresh VFS
 session, a read-only standard-input handle named `in`, and distinct write-only
 `stdout` and `stderr` handles. Normal output uses `stdout`; diagnostics and
 validation markers use `stderr`. Streams target the serial console unless
-pipeline or stdout-redirection composition substitutes an endpoint. The bounded
+pipeline or redirection composition substitutes an endpoint. The bounded
 `readline` utility reads
 one line from `in`, rejects input beyond 128 bytes, and writes accepted bytes to
 `stdout`. This validates the inherited read-only input capability independently
@@ -48,8 +48,12 @@ then truncates the target for `>` or seeks to its current size for `>>` before
 draining the stream and exiting on EOF. This reuses typed
 handles and does not add POSIX file descriptors. A redirected pipeline may
 contain at most three user stages because the sink occupies the fourth bounded
-exec slot. Quoted or escaped `>` bytes remain argument data. Input (`<`), stderr,
-job control, and a persistent userspace TTY server remain later work.
+exec slot. One unquoted `<` target prepends the existing `cat` utility as a file
+producer with its own VFS session; its stdout stream becomes the first requested
+stage's stdin. Input and output redirection may be combined while staying within
+the four-stage bound. Quoted or escaped operator bytes remain argument data.
+Stderr redirection, job control, and a persistent userspace TTY server remain
+later work.
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty

@@ -145,8 +145,9 @@ versioned bounded requests, downstream-first launch, and partial-failure cleanup
 ADR 0044 adds bounded stdout file redirection with `>` by composing the existing
 stream abstraction with an isolated `write` utility and a fresh VFS session.
 ADR 0045 extends that consumer with bounded `>>` append mode by seeking through
-the existing VFS protocol. Input and stderr redirection remain unfinished
-Priority 3 items.
+the existing VFS protocol. ADR 0046 adds bounded `<` input redirection by
+prepending the existing `cat` utility as a VFS-backed pipeline producer. Stderr
+redirection remains the unfinished Priority 3 item.
 
 ## Priority 4 — Separate normal boot from validation boot
 

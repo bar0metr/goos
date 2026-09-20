@@ -222,6 +222,7 @@ docs:
 	@test -f docs/adr/0043-bounded-multistage-pipelines.md
 	@test -f docs/adr/0044-bounded-stdout-file-redirection.md
 	@test -f docs/adr/0045-bounded-stdout-append-redirection.md
+	@test -f docs/adr/0046-bounded-stdin-file-redirection.md
 	@test -f docs/development/building.md
 
 clean:
