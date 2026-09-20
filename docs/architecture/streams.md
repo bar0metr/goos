@@ -41,3 +41,10 @@ Input file redirection uses the symmetric composition. The shell prepends the
 existing `cat` utility as a producer with a private VFS session. PID 1 only sees
 an ordinary pipeline and connects the producer's stdout endpoint to the first
 requested stage's read-only `in` role.
+
+Stderr redirection reuses the same consumer but stays outside the stdout chain.
+The versioned exec request names the stage whose diagnostics are diverted; PID 1
+creates one private stream for that stage and the sink, launches the sink first,
+and grants the source a write-only endpoint as its `stderr` role. Stdout of the
+redirected stage still reaches its normal destination, and stages without a
+diverted role keep the console.

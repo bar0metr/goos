@@ -156,6 +156,31 @@ func executeCommand(line []byte) {
 	}
 }
 
+// writeSink builds the isolated `write` stage that drains its input stream into
+// one VFS path. It reports its own diagnostics and returns false on failure.
+func writeSink(encodedTarget []byte, appendMode bool, index int, environment []startup.Variable) (execproto.Stage, bool) {
+	target, parsed := shellcmd.ParseInvocation(encodedTarget, &argumentStorage)
+	if !parsed || target.Count != 1 {
+		write("exec: invalid redirection\n")
+		return execproto.Stage{}, false
+	}
+	writePath, ok := execproto.ResolveExecutable([]byte("write"), &executableBuffers[index])
+	if !ok {
+		write("exec: invalid redirection\n")
+		return execproto.Stage{}, false
+	}
+	arguments := [][]byte{[]byte("write"), target.Arguments[0]}
+	if appendMode {
+		arguments = [][]byte{[]byte("write"), []byte("--append"), target.Arguments[0]}
+	}
+	argumentData, _, ok := startup.EncodeVectors(arguments, environment, &vectorWires[index])
+	if !ok {
+		write("exec: redirection target too large\n")
+		return execproto.Stage{}, false
+	}
+	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
+}
+
 func executeExternal(line []byte) {
 	redirects, validRedirect := shellcmd.SplitRedirections(line)
 	if !validRedirect {
@@ -167,13 +192,7 @@ func executeExternal(line []byte) {
 		write("exec: invalid pipeline\n")
 		return
 	}
-	redirectCount := 0
-	if len(redirects.Input) != 0 {
-		redirectCount++
-	}
-	if len(redirects.Output) != 0 {
-		redirectCount++
-	}
+	redirectCount := redirects.Stages()
 	if count+redirectCount > execproto.MaxStages {
 		write("exec: invalid redirection\n")
 		return
@@ -219,28 +238,23 @@ func executeExternal(line []byte) {
 			requestData.Environment = environmentData
 		}
 	}
+	nextIndex := stageOffset + count
 	if len(redirects.Output) != 0 {
-		requestIndex := stageOffset + count
-		target, parsed := shellcmd.ParseInvocation(redirects.Output, &argumentStorage)
-		if !parsed || target.Count != 1 {
-			write("exec: invalid redirection\n")
-			return
-		}
-		writePath, ok := execproto.ResolveExecutable([]byte("write"), &executableBuffers[requestIndex])
+		stage, ok := writeSink(redirects.Output, redirects.Append, nextIndex, environment)
 		if !ok {
-			write("exec: invalid redirection\n")
 			return
 		}
-		arguments := [][]byte{[]byte("write"), target.Arguments[0]}
-		if redirects.Append {
-			arguments = [][]byte{[]byte("write"), []byte("--append"), target.Arguments[0]}
-		}
-		argumentData, _, ok := startup.EncodeVectors(arguments, environment, &vectorWires[requestIndex])
+		requestData.Stages[nextIndex] = stage
+		nextIndex++
+	}
+	if len(redirects.Error) != 0 {
+		stage, ok := writeSink(redirects.Error, redirects.ErrorAppend, nextIndex, environment)
 		if !ok {
-			write("exec: redirection target too large\n")
 			return
 		}
-		requestData.Stages[requestIndex] = execproto.Stage{Path: writePath, Arguments: argumentData}
+		// The sink reads the stderr of the last user stage, not stdout.
+		requestData.Stages[nextIndex] = stage
+		requestData.ErrorSource = uint8(stageOffset + count)
 	}
 	request, ok := execproto.EncodeRequest(requestData, correlation)
 	if !ok {

@@ -48,12 +48,16 @@ then truncates the target for `>` or seeks to its current size for `>>` before
 draining the stream and exiting on EOF. This reuses typed
 handles and does not add POSIX file descriptors. A redirected pipeline may
 contain at most three user stages because the sink occupies the fourth bounded
-exec slot. One unquoted `<` target prepends the existing `cat` utility as a file
+exec slot. One unquoted `2>` or `2>>` target adds a second `write` consumer for the last
+requested stage's diagnostics. It stays outside the stdout chain: the shell names
+the diverted stage in the exec request, and PID 1 connects that stage's `stderr`
+role to the sink through a private stream. The `2` is an operator only at the
+start of a word, so arguments ending in `2` remain data. One unquoted `<` target prepends the existing `cat` utility as a file
 producer with its own VFS session; its stdout stream becomes the first requested
 stage's stdin. Input and output redirection may be combined while staying within
 the four-stage bound. Quoted or escaped operator bytes remain argument data.
-Stderr redirection, job control, and a persistent userspace TTY server remain
-later work.
+Stream merging such as `2>&1`, job control, and a persistent userspace TTY
+server remain later work.
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty

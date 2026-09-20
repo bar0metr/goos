@@ -58,13 +58,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		if !ok {
 			return commands, 0, false
 		}
-		redirectCount := 0
-		if len(redirects.Input) != 0 {
-			redirectCount++
-		}
-		if len(redirects.Output) != 0 {
-			redirectCount++
-		}
+		redirectCount := redirects.Stages()
 		if stageCount+redirectCount > execproto.MaxStages {
 			return commands, 0, false
 		}
@@ -89,26 +83,50 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 }
 
 type Redirections struct {
-	Command []byte
-	Input   []byte
-	Output  []byte
-	Append  bool
+	Command     []byte
+	Input       []byte
+	Output      []byte
+	Error       []byte
+	Append      bool
+	ErrorAppend bool
 }
+
+// Stages returns how many pipeline slots the redirections consume: a file
+// producer for input plus one write sink per redirected output stream.
+func (r Redirections) Stages() int {
+	count := 0
+	for _, target := range [][]byte{r.Input, r.Output, r.Error} {
+		if len(target) != 0 {
+			count++
+		}
+	}
+	return count
+}
+
+type redirectKind uint8
+
+const (
+	redirectInput redirectKind = iota
+	redirectOutput
+	redirectError
+)
 
 type redirectOperator struct {
 	offset int
 	size   int
-	input  bool
+	kind   redirectKind
 }
 
-// SplitRedirections separates at most one input and one output redirection.
+// SplitRedirections separates at most one input, one stdout, and one stderr
+// redirection. `2>` and `2>>` are recognised only when the digit starts a word.
 // Targets remain encoded for ParseInvocation to apply normal argument rules.
 func SplitRedirections(line []byte) (Redirections, bool) {
-	var operators [2]redirectOperator
+	var operators [3]redirectOperator
 	count := 0
 	quote, escaped := byte(0), false
-	hasInput, hasOutput := false, false
-	for index, value := range line {
+	var seen [3]bool
+	for index := 0; index < len(line); index++ {
+		value := line[index]
 		if escaped {
 			escaped = false
 			continue
@@ -128,29 +146,22 @@ func SplitRedirections(line []byte) (Redirections, bool) {
 		if quote != 0 || value != '<' && value != '>' {
 			continue
 		}
-		if count != 0 && operators[count-1].size == 2 && index == operators[count-1].offset+1 {
-			continue
+		operator := redirectOperator{offset: index, size: 1, kind: redirectInput}
+		if value == '>' {
+			operator.kind = redirectOutput
+			if index > 0 && line[index-1] == '2' && (index == 1 || line[index-2] == ' ') {
+				operator.offset, operator.size, operator.kind = index-1, 2, redirectError
+			}
+			if index+1 < len(line) && line[index+1] == '>' {
+				operator.size++
+				index++
+			}
 		}
-		if count == len(operators) {
+		if seen[operator.kind] || count == len(operators) {
 			return Redirections{}, false
 		}
-		if value == '<' {
-			if hasInput {
-				return Redirections{}, false
-			}
-			hasInput = true
-			operators[count] = redirectOperator{offset: index, size: 1, input: true}
-		} else {
-			if hasOutput || index > 0 && line[index-1] == '2' && (index == 1 || line[index-2] == ' ') {
-				return Redirections{}, false
-			}
-			hasOutput = true
-			size := 1
-			if index+1 < len(line) && line[index+1] == '>' {
-				size = 2
-			}
-			operators[count] = redirectOperator{offset: index, size: size}
-		}
+		seen[operator.kind] = true
+		operators[count] = operator
 		count++
 	}
 	if quote != 0 || escaped {
@@ -166,7 +177,8 @@ func SplitRedirections(line []byte) (Redirections, bool) {
 	}
 	var storage [MaxArguments][MaxArgumentSize]byte
 	for index := 0; index < count; index++ {
-		start := operators[index].offset + operators[index].size
+		operator := operators[index]
+		start := operator.offset + operator.size
 		end := len(line)
 		if index+1 < count {
 			end = operators[index+1].offset
@@ -176,11 +188,13 @@ func SplitRedirections(line []byte) (Redirections, bool) {
 		if !valid || invocation.Count != 1 {
 			return Redirections{}, false
 		}
-		if operators[index].input {
+		switch operator.kind {
+		case redirectInput:
 			result.Input = target
-		} else {
-			result.Output = target
-			result.Append = operators[index].size == 2
+		case redirectOutput:
+			result.Output, result.Append = target, operator.size == 2
+		default:
+			result.Error, result.ErrorAppend = target, operator.size == 3
 		}
 	}
 	return result, true
@@ -189,7 +203,7 @@ func SplitRedirections(line []byte) (Redirections, bool) {
 // SplitOutputRedirect preserves the output-only parser interface.
 func SplitOutputRedirect(line []byte) (command, target []byte, redirected, appendMode, ok bool) {
 	redirects, ok := SplitRedirections(line)
-	if !ok || len(redirects.Input) != 0 {
+	if !ok || len(redirects.Input) != 0 || len(redirects.Error) != 0 {
 		return nil, nil, false, false, false
 	}
 	return redirects.Command, redirects.Output, len(redirects.Output) != 0, redirects.Append, true

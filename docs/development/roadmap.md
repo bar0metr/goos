@@ -146,8 +146,13 @@ ADR 0044 adds bounded stdout file redirection with `>` by composing the existing
 stream abstraction with an isolated `write` utility and a fresh VFS session.
 ADR 0045 extends that consumer with bounded `>>` append mode by seeking through
 the existing VFS protocol. ADR 0046 adds bounded `<` input redirection by
-prepending the existing `cat` utility as a VFS-backed pipeline producer. Stderr
-redirection remains the unfinished Priority 3 item.
+prepending the existing `cat` utility as a VFS-backed pipeline producer. ADR 0047
+adds bounded `2>` and `2>>` redirection with a stderr sink outside the stdout
+chain, carried by exec protocol version 5, and fixes the task-slot reuse race it
+exposed in the kernel.
+
+Priority 3 is complete. Stream merging (`2>&1`) and job control are deliberately
+out of scope and do not block Priority 4.
 
 ## Priority 4 — Separate normal boot from validation boot
 

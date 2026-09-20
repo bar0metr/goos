@@ -65,6 +65,23 @@ func TestPipelineProtocolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPipelineProtocolRoundTripsErrorSource(t *testing.T) {
+	for count := uint8(2); count <= MaxStages; count++ {
+		for source := uint8(1); source < count; source++ {
+			original := pipelineRequest(t)
+			original.Count, original.ErrorSource = count, source
+			message, ok := EncodeRequest(original, 9)
+			if !ok {
+				t.Fatalf("encode count=%d source=%d", count, source)
+			}
+			request, ok := DecodeRequest(message)
+			if !ok || request.ErrorSource != source || request.Count != count {
+				t.Fatalf("decoded request = %#v", request)
+			}
+		}
+	}
+}
+
 func TestPipelineProtocolRejectsMalformedWire(t *testing.T) {
 	original, ok := EncodeRequest(pipelineRequest(t), 1)
 	if !ok {
@@ -85,7 +102,8 @@ func TestPipelineProtocolRejectsMalformedWire(t *testing.T) {
 		func(m *ipc.Message) { m.Payload[0] = MaxStages + 1 },
 		func(m *ipc.Message) { m.Payload[1] = 255 },
 		func(m *ipc.Message) { m.Payload[2] = 255 },
-		func(m *ipc.Message) { m.Payload[3] = 1 },
+		func(m *ipc.Message) { m.Payload[3] = MaxStages },
+		func(m *ipc.Message) { m.Payload[3] = 255 },
 		func(m *ipc.Message) { m.Payload[6] = 255 },
 		func(m *ipc.Message) { m.Payload[7] = 255 },
 		func(m *ipc.Message) { m.Payload[8] = '.' },
@@ -104,6 +122,9 @@ func TestPipelineProtocolRejectsInvalidStageAndOverflow(t *testing.T) {
 	for _, mutate := range []func(*Request){
 		func(r *Request) { r.Count = 0 },
 		func(r *Request) { r.Count = MaxStages + 1 },
+		func(r *Request) { r.Count, r.ErrorSource = 1, 1 },
+		func(r *Request) { r.ErrorSource = MaxStages },
+		func(r *Request) { r.ErrorSource = 255 },
 		func(r *Request) { r.Stages[3].Path = []byte("/tmp/readline") },
 		func(r *Request) { r.Stages[3].Arguments = []byte{1, 8, 'x'} },
 		func(r *Request) { r.Environment = []byte{1} },

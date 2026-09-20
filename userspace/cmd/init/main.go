@@ -389,17 +389,17 @@ func (nativePipelineRunner) CreateStream() (handle.ID, handle.ID, bool) {
 
 func (nativePipelineRunner) Close(id handle.ID) bool { return handleClose(uint64(id)) == 0 }
 
-func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byte, input handle.ID, inputType handle.Type, output handle.ID, outputType handle.Type) (uint64, handle.ID, supervisor.LaunchStatus) {
+func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	command, allowed := execproto.CommandFromSystemPath(stage.Path)
 	if !allowed {
 		return 0, 0, supervisor.LaunchCapabilityDenied
 	}
-	return launchApplication(bytesString(stage.Path), command, cwd, stage.Arguments, environment, input, inputType, output, outputType)
+	return launchApplication(bytesString(stage.Path), command, cwd, stage.Arguments, environment, streams)
 }
 
 func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicationExit(process) }
 
-func launchApplication(path string, command, cwd, arguments, environment []byte, input handle.ID, inputType handle.Type, output handle.ID, outputType handle.Type) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchApplication(path string, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
 	useVFS := commandNeedsVFS(command)
 	if useVFS && channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
@@ -446,9 +446,9 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	grants := []supervisor.Capability{
-		{Name: "in", Handle: input, Type: inputType, Rights: streamRights(inputType, capability.Read), Consume: inputType == handle.TypeStream},
-		{Name: "stdout", Handle: output, Type: outputType, Rights: streamRights(outputType, capability.Write), Consume: outputType == handle.TypeStream},
-		{Name: "stderr", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		streamGrant("in", streams.Input, capability.Read),
+		streamGrant("stdout", streams.Output, capability.Write),
+		streamGrant("stderr", streams.Error, capability.Write),
 	}
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
@@ -491,6 +491,12 @@ func equalSlice(value []byte, expected string) bool {
 		}
 	}
 	return true
+}
+
+// streamGrant grants one standard-stream endpoint; stream endpoints are consumed
+// by a successful launch while the console device handle stays with PID 1.
+func streamGrant(name string, endpoint supervisor.Endpoint, rights capability.Rights) supervisor.Capability {
+	return supervisor.Capability{Name: name, Handle: endpoint.ID, Type: endpoint.Type, Rights: streamRights(endpoint.Type, rights), Consume: endpoint.Type == handle.TypeStream}
 }
 
 func streamRights(typeID handle.Type, rights capability.Rights) capability.Rights {

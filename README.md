@@ -303,17 +303,21 @@ Init, supervision, VFS, the native shell, bounded `/system/bin` lookup, the
 versioned named-handle startup ABI, structured argv/environment data, exit
 status propagation, the native base utilities, and the block-service IPC
 boundary, capability-scoped virtio-blk driver, bounded FAT32 VFS mount, and
-reboot-persistence gate are implemented. Priority 3 shell composition is now
-the active roadmap milestone; stdin consumption, native streams, pipelines of
-up to four processes, sequential execution, and bounded stdout `>`/`>>`
-redirection plus bounded stdin `<` redirection are complete. Stderr redirection remains.
-FAT32 hardening and storage failure recovery remain incremental work.
+reboot-persistence gate are implemented. Priority 3 shell composition is
+complete: stdin consumption, native streams, pipelines of up to four processes,
+sequential execution, bounded stdout `>`/`>>` redirection, bounded stdin `<`
+redirection, and bounded stderr `2>`/`2>>` redirection all work through explicit
+typed handles. Separating the normal boot from the validation boot is the next
+roadmap milestone. FAT32 hardening and storage failure recovery remain
+incremental work.
 
-Shell redirection can now extend the explicit native
-stdin/stdout/stderr handles and stream primitives without adding POSIX file
-descriptors. Linux ABI compatibility remains a later compatibility layer. It
-must translate into the same GoOS process, VFS, IPC, handle, and capability
-model rather than weakening the native architecture for POSIX compatibility.
+Shell redirection extends the explicit native stdin/stdout/stderr handles and
+stream primitives without adding POSIX file descriptors; stream merging such as
+`2>&1` and job control are deliberately out of scope for now.
+
+Linux ABI compatibility remains a later compatibility layer. It must translate
+into the same GoOS process, VFS, IPC, handle, and capability model rather than
+weakening the native architecture for POSIX compatibility.
 
 See [roadmap](docs/development/roadmap.md) for the current implementation order.
 
