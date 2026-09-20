@@ -126,12 +126,22 @@ const (
 	WaitExited
 )
 
+// ExitReport states what ReportTaskExit did with one exited task.
+type ExitReport uint8
+
+const (
+	// ExitUnknownTask means no live process owned the task.
+	ExitUnknownTask ExitReport = iota
+	// ExitTaskRemoved means the owning process still has other tasks.
+	ExitTaskRemoved
+	// ExitProcessEnded means the last task exited and the returned event was
+	// recorded as the process completion.
+	ExitProcessEnded
+)
+
 type Registry struct {
 	processes     [MaxProcesses]*Process
 	count         uint8
-	exits         [MaxExitEvents]ExitEvent
-	exitHead      uint8
-	exitCount     uint8
 	completed     [MaxExitEvents]ExitEvent
 	completedNext uint8
 }
@@ -167,28 +177,28 @@ func (registry *Registry) BindTask(id ID, task sched.TaskID) bool {
 	return false
 }
 
-func (registry *Registry) ReportTaskExit(task sched.TaskID, code uint64) bool {
+// ReportTaskExit removes an exited task from its owning process and, when that
+// was the process's last task, records the completion and returns it. The
+// record is written unconditionally: callers perform teardown that can fail,
+// and a waiter must still be able to observe that the process ended.
+func (registry *Registry) ReportTaskExit(task sched.TaskID, code uint64) (ExitEvent, ExitReport) {
 	for index := 0; index < int(registry.count); index++ {
 		owner := registry.processes[index]
-		if owner.OwnsTask(task) {
-			if !owner.removeTask(task) {
-				return false
-			}
-			if owner.TaskCount() != 0 {
-				return true
-			}
-			if registry.exitCount == MaxExitEvents {
-				return false
-			}
-			tail := (int(registry.exitHead) + int(registry.exitCount)) % MaxExitEvents
-			registry.exits[tail] = ExitEvent{Process: owner.ID(), Task: task, Code: code}
-			registry.completed[registry.completedNext] = registry.exits[tail]
-			registry.completedNext = (registry.completedNext + 1) % MaxExitEvents
-			registry.exitCount++
-			return true
+		if !owner.OwnsTask(task) {
+			continue
 		}
+		if !owner.removeTask(task) {
+			return ExitEvent{}, ExitUnknownTask
+		}
+		if owner.TaskCount() != 0 {
+			return ExitEvent{}, ExitTaskRemoved
+		}
+		event := ExitEvent{Process: owner.ID(), Task: task, Code: code}
+		registry.completed[registry.completedNext] = event
+		registry.completedNext = (registry.completedNext + 1) % MaxExitEvents
+		return event, ExitProcessEnded
 	}
-	return false
+	return ExitEvent{}, ExitUnknownTask
 }
 
 // Wait observes bounded process completion state without consuming lifecycle
@@ -206,17 +216,6 @@ func (registry *Registry) Wait(id ID) (ExitEvent, WaitStatus) {
 		return ExitEvent{}, WaitRunning
 	}
 	return ExitEvent{}, WaitNotFound
-}
-
-func (registry *Registry) NextExit() (ExitEvent, bool) {
-	if registry.exitCount == 0 {
-		return ExitEvent{}, false
-	}
-	event := registry.exits[registry.exitHead]
-	registry.exits[registry.exitHead] = ExitEvent{}
-	registry.exitHead = (registry.exitHead + 1) % MaxExitEvents
-	registry.exitCount--
-	return event, true
 }
 
 func (registry *Registry) ByRoot(root uint64) (*Process, bool) {

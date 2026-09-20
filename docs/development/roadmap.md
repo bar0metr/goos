@@ -160,11 +160,15 @@ sectors, answered protocol rejections, and bounded storage deadlines. Measured
 command latency is now dominated by process launch (about half a second) rather
 than by storage. ADR 0049 names the timer rate and every deadline in one place
 and records the measurements: at 1 kHz storage commands are three to five times
-faster, while process launch is unchanged and therefore not timer-bound. Raising
-the rate is blocked on a teardown wakeup defect it exposed, where a stage that
-survives a failed pipeline launch is not woken by its peer's exit. That defect,
-event-driven multi-endpoint waits, and the process-launch cost are the next
-performance items.
+faster, while process launch is unchanged and therefore not timer-bound. ADR 0050 fixes the
+liveness defects that experiment exposed: teardown now wakes waiters and closes
+handles before any cleanup that can fail, completion records no longer depend on
+a bounded queue, undeliverable lifecycle messages are retried instead of
+dropped, every wait registers before re-checking its condition, and deadline
+expiry is driven by the kernel loop. One intermittent stall remains at 1 kHz, so
+the rate stays at 100 Hz. That stall, event-driven multi-endpoint waits, which
+would make latency independent of the tick rate, and the process-launch cost are
+the next performance items.
 
 ## Priority 4 — Separate normal boot from validation boot
 

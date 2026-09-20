@@ -74,3 +74,13 @@ derived from the endpoint identity stored in each channel capability.
 Calls from the interrupt bridge obey Win64's 16-byte stack alignment. This is
 explicit rather than dependent on the generated Go function's current stack
 frame size.
+
+## Wait registration
+
+Every blocking wait registers itself in its wait set before it re-checks its
+condition, and cancels that registration if the condition already holds. The
+opposite order would let an event delivered between the check and the
+registration wake nobody, leaving the task asleep until its deadline. Deadlines
+are expired by the kernel's own loop, so they remain the reliable last line of
+defence behind a missed wakeup rather than depending on which task is scheduled.
+

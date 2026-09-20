@@ -65,23 +65,31 @@ var (
 	bootVFS                 vfs.Namespace
 	ramfsReadback           [16]byte
 	vfsReadback             [16]byte
+	pendingLifecycle        [maxPendingLifecycle]ipc.Message
+	pendingLifecycleHead    uint8
+	pendingLifecycleCount   uint8
+	lifecycleOverflows      uint64
 	initAnnounced           uint64
 	processExitDelivered    uint64
 	processReclaimConfirmed uint64
-	processWaitConfirmed    uint64
-	supervisorExitDelivered uint64
-	serviceLaunchConfirmed  uint64
-	userspaceSupervisorOK   uint64
-	capabilityManifestOK    uint64
-	startupABIConfirmed     uint64
-	initSendObserved        uint64
-	initSendStatus          kcall.Status
-	initExitObserved        uint64
-	initExitCode            uint64
-	kernelPageTable         uint64
-	spawnedProcesses        [process.MaxProcesses]process.Process
-	nextProcessID           process.ID = 4
-	virtioBlockPort         uint16
+	// Teardown steps that may fail are counted rather than allowed to abort
+	// delivery, and reported once the boot sequence has settled.
+	taskStackReclaimFailures    uint64
+	addressSpaceReclaimFailures uint64
+	processWaitConfirmed        uint64
+	supervisorExitDelivered     uint64
+	serviceLaunchConfirmed      uint64
+	userspaceSupervisorOK       uint64
+	capabilityManifestOK        uint64
+	startupABIConfirmed         uint64
+	initSendObserved            uint64
+	initSendStatus              kcall.Status
+	initExitObserved            uint64
+	initExitCode                uint64
+	kernelPageTable             uint64
+	spawnedProcesses            [process.MaxProcesses]process.Process
+	nextProcessID               process.ID = 4
+	virtioBlockPort             uint16
 )
 
 type nativeCallHandler struct {
@@ -129,80 +137,138 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
-		exitCode := amd64.TaskExitCode(task)
-		if !processRegistry.ReportTaskExit(sched.TaskID(task), exitCode) {
-			continue
-		}
+		event, report := processRegistry.ReportTaskExit(sched.TaskID(task), amd64.TaskExitCode(task))
+		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
+		// not gate the steps below: a process that has exited has to release its
+		// waiters and its handles even if its stack cannot be returned, or its
+		// peers wait forever for an EOF that never arrives.
 		if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task) {
+			taskStackReclaimFailures++
+			if taskStackReclaimFailures == 1 {
+				amd64.NewCOM1().WriteString("TASK_STACK_RECLAIM_FAILED\n")
+			}
+		}
+		if report != process.ExitProcessEnded {
 			continue
 		}
-		event, ok := processRegistry.NextExit()
-		if !ok {
-			continue
+		releaseExitedProcess(event)
+	}
+}
+
+// releaseExitedProcess performs the observable half of process teardown first,
+// so that waiters and peers are released before any cleanup that may fail.
+func releaseExitedProcess(event process.ExitEvent) {
+	processExitDelivered = 1
+	if waited, status := processRegistry.Wait(event.Process); status == process.WaitExited && waited == event {
+		processWaitConfirmed = 1
+	}
+	wakeProcessWaiters(event.Process)
+	if event.Process == 1 {
+		initExitObserved = 1
+		initExitCode = event.Code
+		return
+	}
+	if lifecycleChannel != nil {
+		message, encoded := supervisor.ProcessExited(uint64(event.Process), event.Code)
+		if encoded && queueLifecycle(message) && event.Process == 3 {
+			supervisorExitDelivered = 1
 		}
-		processExitDelivered = 1
-		if waited, status := processRegistry.Wait(event.Process); status == process.WaitExited && waited == event {
-			processWaitConfirmed = 1
-		}
-		wakeProcessWaiters(event.Process)
-		if event.Process == 1 {
-			initExitObserved = 1
-			initExitCode = event.Code
-		}
-		if event.Process != 1 && lifecycleChannel != nil {
-			message, encoded := supervisor.ProcessExited(uint64(event.Process), event.Code)
-			if encoded && lifecycleChannel.Send(0, message, nil, nil, nil) == ipc.StatusOK {
-				wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
-				if event.Process == 3 {
-					supervisorExitDelivered = 1
-				}
+	}
+	if exited, found := processRegistry.ByID(event.Process); found {
+		releaseProcessHandles(exited)
+		before := pageAllocator.Statistics().FreePages
+		if !vm.DestroyUserAddressSpace(&pageAllocator, exited.AddressSpace().Root) {
+			addressSpaceReclaimFailures++
+			if addressSpaceReclaimFailures == 1 {
+				amd64.NewCOM1().WriteString("ADDRESS_SPACE_RECLAIM_FAILED\n")
 			}
+		} else if pageAllocator.Statistics().FreePages > before {
+			processReclaimConfirmed = 1
 		}
-		if event.Process != 1 {
-			if exited, found := processRegistry.ByID(event.Process); found {
-				exited.Handles().CloseAll(func(typeID handle.Type, cap capability.Capability) {
-					if typeID == handle.TypeDevice {
-						if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
-							amd64.PortWrite(virtioBlockPort+18, 1, 0)
-							amd64.QuiesceIRQ11()
-						}
-					}
-					if typeID == handle.TypeStream {
-						closeStreamCapability(cap)
-						return
-					}
-					if typeID != handle.TypeChannel {
-						return
-					}
-					channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-					channel, exists := channelRegistry.Lookup(channelID)
-					if valid && exists && channel.Close(side) {
-						wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-						channelRegistry.Release(channelID)
-					}
-				})
-				before := pageAllocator.Statistics().FreePages
-				if !vm.DestroyUserAddressSpace(&pageAllocator, exited.AddressSpace().Root) {
-					continue
-				}
-				if pageAllocator.Statistics().FreePages <= before {
-					continue
-				}
-				processReclaimConfirmed = 1
-			}
-			processRegistry.Remove(event.Process)
-			for index := range spawnedProcesses {
-				if spawnedProcesses[index].ID() == event.Process {
-					spawnedProcesses[index].Reset()
-					break
-				}
-			}
+	}
+	processRegistry.Remove(event.Process)
+	for index := range spawnedProcesses {
+		if spawnedProcesses[index].ID() == event.Process {
+			spawnedProcesses[index].Reset()
+			break
 		}
 	}
 }
 
+// releaseProcessHandles closes everything the exited process held so that the
+// peer of each channel and stream observes closure instead of blocking.
+func releaseProcessHandles(exited *process.Process) {
+	exited.Handles().CloseAll(func(typeID handle.Type, cap capability.Capability) {
+		if typeID == handle.TypeDevice {
+			if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
+				amd64.PortWrite(virtioBlockPort+18, 1, 0)
+				amd64.QuiesceIRQ11()
+			}
+		}
+		if typeID == handle.TypeStream {
+			closeStreamCapability(cap)
+			return
+		}
+		if typeID != handle.TypeChannel {
+			return
+		}
+		channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
+		channel, exists := channelRegistry.Lookup(channelID)
+		if valid && exists && channel.Close(side) {
+			wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+			channelRegistry.Release(channelID)
+		}
+	})
+}
+
+// maxPendingLifecycle bounds the lifecycle messages retained for retry. PID 1
+// launches one program at a time and blocks on the result, so a short queue
+// covers a launch reply plus the exit notifications that may collide with it.
+const maxPendingLifecycle = 8
+
+// queueLifecycle delivers a lifecycle message, retaining it for retry when the
+// channel is momentarily full. PID 1 blocks waiting for these, so dropping one
+// strands it until its deadline expires.
+func queueLifecycle(message ipc.Message) bool {
+	if pendingLifecycleCount == 0 && sendLifecycle(message) {
+		return true
+	}
+	if pendingLifecycleCount == maxPendingLifecycle {
+		lifecycleOverflows++
+		if lifecycleOverflows == 1 {
+			amd64.NewCOM1().WriteString("LIFECYCLE_QUEUE_OVERFLOW\n")
+		}
+		return false
+	}
+	tail := (int(pendingLifecycleHead) + int(pendingLifecycleCount)) % maxPendingLifecycle
+	pendingLifecycle[tail] = message
+	pendingLifecycleCount++
+	return true
+}
+
+func flushLifecycle() {
+	for pendingLifecycleCount != 0 {
+		if !sendLifecycle(pendingLifecycle[pendingLifecycleHead]) {
+			return
+		}
+		pendingLifecycle[pendingLifecycleHead] = ipc.Message{}
+		pendingLifecycleHead = (pendingLifecycleHead + 1) % maxPendingLifecycle
+		pendingLifecycleCount--
+	}
+}
+
+func sendLifecycle(message ipc.Message) bool {
+	if lifecycleChannel == nil || lifecycleChannel.Send(0, message, nil, nil, nil) != ipc.StatusOK {
+		return false
+	}
+	wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
+	return true
+}
+
 func consumeInitControl() {
-	if lifecycleChannel == nil {
+	// Retained replies are delivered before new work is accepted, so that the
+	// caller waiting on one is never overtaken by a later request.
+	if lifecycleChannel == nil || pendingLifecycleCount != 0 {
 		return
 	}
 	message, status := lifecycleChannel.Receive(0)
@@ -211,6 +277,10 @@ func consumeInitControl() {
 	}
 	event, valid := supervisor.DecodeLifecycle(message)
 	if !valid || event.Operation != supervisor.LifecycleLaunch {
+		// Answer anyway: the sender is blocked on this correlation.
+		if reply, encoded := supervisor.LaunchResult(0, 0, supervisor.LaunchInvalidImage, message.Correlation); encoded && message.Correlation != 0 {
+			queueLifecycle(reply)
+		}
 		return
 	}
 	pid, processHandle, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], event.Startup[:event.StartupSize])
@@ -221,8 +291,7 @@ func consumeInitControl() {
 		console.WriteString("\n")
 	}
 	reply, encoded := supervisor.LaunchResult(uint64(pid), processHandle, launchStatus, message.Correlation)
-	if encoded && lifecycleChannel.Send(0, reply, nil, nil, nil) == ipc.StatusOK {
-		wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
+	if encoded && queueLifecycle(reply) {
 		serviceLaunchConfirmed++
 	}
 }
@@ -879,6 +948,15 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	if !valid || deadline < now || !ipcWaitSet.Add(taskID, channelID, side, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
+	// Re-check after registering, because a message sent between the receive
+	// above and the registration would wake nobody.
+	if status := handler.IPCReceive(channel, buffer, capacity); status != kcall.StatusNotFound {
+		ipcWaitSet.Cancel(taskID)
+		// A waker may already have removed the registration and stored a resume
+		// status. It must not surface on the next wait, which this call answers.
+		ipcWaitStatus[task] = kcall.StatusOK
+		return status, false
+	}
 	return kcall.StatusNotFound, true
 }
 
@@ -1022,6 +1100,18 @@ func waitStream(handler nativeCallHandler, id, timeout, task uint64) (kcall.Stat
 	if deadline < now || !streamWaitSet.Add(taskID, streamID, side, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
+	// Re-check after registering: data, buffer space, or peer closure arriving
+	// in between would wake nobody and strand this task until its deadline.
+	if writer {
+		status = endpoint.WriteStatus()
+	} else {
+		status = endpoint.ReadStatus()
+	}
+	if status != stream.StatusWouldBlock {
+		streamWaitSet.Cancel(taskID)
+		streamWaitStatus[task] = kcall.StatusOK
+		return streamStatus(status), false
+	}
 	return kcall.StatusNotFound, true
 }
 
@@ -1060,12 +1150,7 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 	event, status := processRegistry.Wait(pid)
 	switch status {
 	case process.WaitExited:
-		var encoded [8]byte
-		putUint64(encoded[:], event.Code)
-		if !vm.CopyOut(handler.root, resultAddress, encoded[:]) {
-			return kcall.StatusInvalidArgument, false
-		}
-		return kcall.StatusOK, false
+		return reportProcessExit(handler, resultAddress, event), false
 	case process.WaitNotFound:
 		return kcall.StatusNotFound, false
 	}
@@ -1077,7 +1162,27 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 	if deadline < now || !processWaitSet.Add(taskID, pid, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
+	// Re-check after registering. The process can exit between the check above
+	// and the registration, and that wakeup would find no waiter and be lost,
+	// leaving this task asleep until its deadline.
+	if event, status := processRegistry.Wait(pid); status != process.WaitRunning {
+		processWaitSet.Cancel(taskID)
+		processWaitStatus[task] = kcall.StatusOK
+		if status != process.WaitExited {
+			return kcall.StatusNotFound, false
+		}
+		return reportProcessExit(handler, resultAddress, event), false
+	}
 	return kcall.StatusNotFound, true
+}
+
+func reportProcessExit(handler nativeCallHandler, resultAddress uint64, event process.ExitEvent) kcall.Status {
+	var encoded [8]byte
+	putUint64(encoded[:], event.Code)
+	if !vm.CopyOut(handler.root, resultAddress, encoded[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
 }
 
 func wakeProcessWaiters(pid process.ID) {
@@ -1187,6 +1292,13 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 	}
 	amd64.SetIRQ11Waiter(task + 1)
 	amd64.RearmIRQ11()
+	// Re-check after registering. An interrupt delivered between the check
+	// above and the registration would set the pending flag while no waiter was
+	// recorded, and IRQ waits have no deadline to recover from that.
+	if amd64.TakeIRQ11() {
+		amd64.SetIRQ11Waiter(0)
+		return kcall.StatusOK, false
+	}
 	return kcall.StatusNotFound, true
 }
 
@@ -1220,14 +1332,21 @@ func runDemoTaskA() {
 func runDemoTaskB() {
 	for {
 		demoTaskB++
-		expireIPCWaiters()
-		expireProcessWaiters()
-		expireStreamWaiters()
+		expireWaitDeadlines()
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
 			amd64.WakeTask(1)
 		}
 		amd64.Halt()
 	}
+}
+
+// expireWaitDeadlines releases waiters whose deadline has passed. It is driven
+// from the kernel's own loop: a deadline is the last line of defence behind an
+// event wakeup, so it must not depend on any particular task being scheduled.
+func expireWaitDeadlines() {
+	expireIPCWaiters()
+	expireProcessWaiters()
+	expireStreamWaiters()
 }
 
 //export goos_idle_task
@@ -1895,6 +2014,8 @@ func main() {
 	console.WriteString("BOOT_OK\n")
 
 	for {
+		expireWaitDeadlines()
+		flushLifecycle()
 		deliverProcessExits()
 		consumeInitControl()
 		amd64.Halt()
