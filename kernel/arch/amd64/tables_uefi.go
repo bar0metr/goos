@@ -122,7 +122,7 @@ func loadGDT(base *uint64, limit uint16)
 func loadIDT(base *IDTEntry, limit uint16)
 
 // StartBootstrapTimer remaps the legacy PIC, unmasks IRQ0, configures the PIT
-// for 100 Hz, and enables maskable interrupts.
+// for the rate named by kernel/clock, and enables maskable interrupts.
 //
 //export goos_start_bootstrap_timer
 func StartBootstrapTimer()

@@ -158,8 +158,13 @@ ADR 0048 fixes a freeze on persistent-storage reads whose root cause was the
 freestanding arena allocators handing out uncleared memory, and adds resident
 sectors, answered protocol rejections, and bounded storage deadlines. Measured
 command latency is now dominated by process launch (about half a second) rather
-than by storage, which is attributed to the 100 Hz timer granularity and remains
-open.
+than by storage. ADR 0049 names the timer rate and every deadline in one place
+and records the measurements: at 1 kHz storage commands are three to five times
+faster, while process launch is unchanged and therefore not timer-bound. Raising
+the rate is blocked on a teardown wakeup defect it exposed, where a stage that
+survives a failed pipeline launch is not woken by its peer's exit. That defect,
+event-driven multi-endpoint waits, and the process-launch cost are the next
+performance items.
 
 ## Priority 4 — Separate normal boot from validation boot
 

@@ -109,7 +109,8 @@ The native kernel and the first isolated services are implemented:
 - kernel-owned GDT and IDT tables;
 - gates for all architectural CPU exception vectors;
 - a live INT3 exception-path self-test;
-- a 100 Hz PIT bootstrap timer through a remapped legacy PIC;
+- a PIT bootstrap timer at the rate named by `kernel/clock` through a remapped
+  legacy PIC;
 - hardware IRQ delivery with end-of-interrupt acknowledgement;
 - a bounded architecture-neutral Task and round-robin run-queue model;
 - timer-preempted x86_64 context switching across independent kernel stacks;
