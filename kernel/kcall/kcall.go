@@ -26,6 +26,7 @@ const (
 	OperationStreamRead
 	OperationStreamWrite
 	OperationStreamWait
+	OperationWaitAny
 )
 
 type Status uint64
@@ -169,3 +170,23 @@ const MaxIPCMessage = uint64(320)
 const SystemInfoSize = uint64(40)
 const MaxStreamIO = uint64(256)
 const StreamDescriptorSize = uint64(24)
+
+// WaitAny is a readiness operation: it never consumes data from a waitable
+// object. Userspace performs the typed receive/read/wait operation after the
+// returned ready mask identifies the objects whose state changed.
+const (
+	WaitAnyMaxObjects      = 16
+	WaitAnyInterestSize    = uint64(16)
+	WaitAnyResultSize      = uint64(16)
+	WaitAnyInfiniteTimeout = ^uint64(0)
+)
+
+type WaitEvent uint64
+
+const (
+	WaitReadable WaitEvent = 1 << iota
+	WaitWritable
+	WaitCompleted
+	WaitPeerClosed
+	WaitInterrupt
+)

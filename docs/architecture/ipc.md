@@ -62,6 +62,14 @@ Readers sleep while the ring is empty and a writer still exists; writers sleep
 while the ring is full and a reader still exists. Data movement, peer closure,
 or timeout wakes the registered task, which retries the original operation.
 
+Native operation 22, `WaitAny`, generalizes readiness waits without consuming
+data. Userspace supplies one to 16 fixed-size `(handle, event mask)` interests
+and receives a 16-bit ready mask. The kernel validates every handle generation,
+object type, event mask, endpoint direction, and required capability rights
+before registering the complete generation-safe Task ID. Current interests cover
+channels, streams, and processes. Existing one-object receive, stream, process,
+and IRQ waits remain available.
+
 ## PID 1 lifecycle channel
 
 The `GINITLIF` version 5 protocol uses a dedicated channel capability installed
@@ -84,3 +92,8 @@ registration wake nobody, leaving the task asleep until its deadline. Deadlines
 are expired by the kernel's own loop, so they remain the reliable last line of
 defence behind a missed wakeup rather than depending on which task is scheduled.
 
+`WaitAny` uses the same rule across the complete interest set. Message arrival,
+stream readiness, process exit, peer death, or timeout completes the bounded
+registration and wakes its task. The ready mask reports observations only; the
+caller must still perform the typed operation, handle races with other consumers,
+and wait again when necessary.

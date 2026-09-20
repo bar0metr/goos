@@ -137,6 +137,8 @@ The native kernel and the first isolated services are implemented:
 - controlled IPC handle passing and peer-death reporting;
 - capability-controlled NX shared-memory mappings for bulk IPC;
 - restartable blocking IPC with message and timeout wakeups;
+- bounded readiness-only waits across up to 16 capability-checked channel,
+  stream, or process handles, with a ready bit mask and generation-safe wakeups;
 - a capability-isolated userspace TTY protocol and serial service;
 - a bounded generation-safe RAMFS core and versioned service protocol;
 - namespace-scoped VFS mounts, path resolution, open handles, and caches;
@@ -201,6 +203,12 @@ numeric handle slots and the Priority 1 base application environment is complete
 The storage path reaches a persistent QEMU block device through an isolated
 driver, and native utilities can access bounded FAT32 regular files at
 `/persist` through VFS.
+
+PID 1, VFS, and the block service use event-driven multi-object waits for their
+independent control and client endpoints. A wake marks the task runnable, but a
+nonblocking publisher still yields at timer preemption because an explicit
+safe-return reschedule hook is not implemented. The default timer rate remains
+100 Hz while the full performance and lifecycle stress matrix is pending.
 
 ## Building and running
 

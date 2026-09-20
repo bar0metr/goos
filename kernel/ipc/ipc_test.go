@@ -13,6 +13,26 @@ func message(kind Kind, correlation uint64) Message {
 	return value
 }
 
+func TestReceiveStatusDoesNotConsumeMessage(t *testing.T) {
+	channel := NewChannel()
+	if status := channel.ReceiveStatus(1); status != StatusNotFound {
+		t.Fatalf("empty status = %d", status)
+	}
+	message := Message{ProtocolID: 1, Version: 1, Kind: KindNotification}
+	if status := channel.Send(0, message, nil, nil, nil); status != StatusOK {
+		t.Fatalf("send status = %d", status)
+	}
+	if status := channel.ReceiveStatus(1); status != StatusOK {
+		t.Fatalf("ready status = %d", status)
+	}
+	if _, status := channel.Receive(1); status != StatusOK {
+		t.Fatalf("receive status = %d", status)
+	}
+	if !channel.Close(0) || channel.ReceiveStatus(1) != StatusPeerDied {
+		t.Fatal("peer close was not observable")
+	}
+}
+
 func TestRequestReply(t *testing.T) {
 	channel := NewChannel()
 	if status := channel.Send(0, message(KindRequest, 7), nil, nil, nil); status != StatusOK {

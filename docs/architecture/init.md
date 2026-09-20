@@ -26,8 +26,10 @@ creates a distinct address space and process ID 1, and schedules it at ring 3.
 Normal native exits and isolated CPU faults enter the same bounded task-exit
 path. The process registry emits a process event only after its final Task dies,
 then sends a typed lifecycle notification over a channel available only to PID
-1. Init blocks on that channel, issues a correlated launch request, waits for
-the result, and continues only after the replacement Process and Task exist.
+1. PID 1 uses one readiness-only `WaitAny` call for the lifecycle channel and,
+after bootstrap, the shell-exec channel. A returned bit mask can identify both;
+PID 1 then performs the typed receives, issues correlated launch requests, and
+continues only after the replacement Process and Task exist.
 
 Launch requests identify an executable by a normalized absolute path. The
 kernel resolves that path from the immutable boot archive, validates
@@ -83,6 +85,8 @@ closure. It is not forced cancellation of an arbitrary nonterminating program.
 All stages start before process waits. PID 1 reaps every started process and
 returns the first nonzero exit code in left-to-right pipeline order. Launch
 failure instead returns a launch status with no successful process result.
+Completion readiness is observed through the generation-safe `WaitAny` table;
+PID 1 then consumes the exit code with the typed process wait.
 
 PID 1 creates and transfers a fresh VFS session only for utilities that access
 the filesystem. Pure stream and diagnostic utilities receive no VFS endpoint.

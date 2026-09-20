@@ -42,6 +42,10 @@ interactive filesystem operations do not accumulate heap allocations.
 
 The block service now uses a private IPC channel to the driver instead of a
 volatile backend. Its public `GBLK001` protocol remains hardware-independent.
+Its main loop uses one readiness-only `WaitAny` operation for the public service
+endpoint and the dedicated filesystem endpoint, then receives and serves every
+bit reported ready. The older one-object wait APIs remain unchanged for the
+driver exchange and other single-endpoint paths.
 The QEMU gate verifies an unaligned write spanning two sectors, a readback,
 flush, repeated relative-path FAT32 reads and writes, and the resulting bytes in
 the persistent raw disk image. Driver teardown
@@ -76,4 +80,3 @@ they cannot parse with an invalid-argument reply whenever the caller can be
 identified, because a silent drop would strand a caller that is waiting for
 exactly that correlation. Both rules exist so that a fault anywhere in the
 storage path degrades into a reported error instead of an apparent freeze.
-

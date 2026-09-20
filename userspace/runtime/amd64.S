@@ -168,6 +168,14 @@ goos_stream_wait:
     ret
 .size goos_stream_wait, .-goos_stream_wait
 
+.global goos_wait_any
+.type goos_wait_any,@function
+goos_wait_any:
+    movl $22, %eax
+    int $0x80
+    ret
+.size goos_wait_any, .-goos_wait_any
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

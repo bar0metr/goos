@@ -37,7 +37,9 @@ temporary decode and dispatch allocations therefore remain request-bounded.
 
 VFS also owns a control endpoint. PID 1 creates a new channel pair for every
 external process and moves the server endpoint to VFS in an attached IPC handle.
-The client endpoint is consumed by the child's launch manifest. VFS polls a
-fixed table of active sessions, closes a server endpoint on `PeerDied`, and the
+The client endpoint is consumed by the child's launch manifest. VFS maintains a
+fixed table of active sessions. One bounded `WaitAny` operation covers the
+control endpoint and every active session, and its ready mask identifies the
+endpoints to receive from. VFS closes a server endpoint on `PeerDied`, and the
 kernel then releases the channel object. Replies therefore cannot be consumed
 by another process sharing one queue.
