@@ -4,6 +4,7 @@ package utility
 
 import (
 	"encoding/binary"
+	"goos/kernel/clock"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/ramfs"
@@ -90,8 +91,8 @@ func Run() {
 	}
 	switch {
 	case equal(data.Command, "pwd"):
-		writeBytes(data.CWD)
-		write("\n")
+		lineBytes(data.CWD)
+		lineFlush()
 		writeError("PWD_PROCESS_OK\n")
 	case equal(data.Command, "ls"):
 		runLs(data)
@@ -99,16 +100,16 @@ func Run() {
 		runCat(data)
 	case equal(data.Command, "args"):
 		writeArguments(data, 1)
-		write("\n")
+		lineFlush()
 		if path, found := data.Env("PATH"); found {
-			write("PATH=")
-			writeBytes(path)
-			write("\n")
+			lineText("PATH=")
+			lineBytes(path)
+			lineFlush()
 		}
 		writeError("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDIN_HANDLE_OK\nSTDERR_HANDLE_OK\n")
 	case equal(data.Command, "echo"):
 		writeArguments(data, 1)
-		write("\n")
+		lineFlush()
 		writeError("ECHO_PROCESS_OK\n")
 	case equal(data.Command, "readline"):
 		runReadline()
@@ -129,7 +130,8 @@ func Run() {
 	case equal(data.Command, "uptime"):
 		runUptime()
 	case equal(data.Command, "uname"):
-		write("GoOS 0.1-dev x86_64\n")
+		lineText("GoOS 0.1-dev x86_64")
+		lineFlush()
 		writeError("UNAME_PROCESS_OK\n")
 	case equal(data.Command, "sleep"):
 		runSleep(data)
@@ -223,8 +225,8 @@ func runReadline() {
 		line[size] = inputByte
 		size++
 	}
-	writeBytes(line[:size])
-	write("\n")
+	lineBytes(line[:size])
+	lineFlush()
 	writeError("STDIN_READ_OK\n")
 }
 
@@ -282,8 +284,8 @@ func runLs(data startup.Data) {
 		finish(2, "ls: not found\n")
 	}
 	if stat.Kind == ramfs.KindFile {
-		writeBytes(baseName(path))
-		write("\n")
+		lineBytes(baseName(path))
+		lineFlush()
 		writeError("LS_PROCESS_OK\n")
 		return
 	}
@@ -299,11 +301,11 @@ func runLs(data startup.Data) {
 		if reply.Status != vfs.StatusOK {
 			finish(2, "ls: VFS error\n")
 		}
-		writeBytes(reply.Name)
+		lineBytes(reply.Name)
 		if reply.Kind == ramfs.KindDirectory {
-			write("/")
+			lineText("/")
 		}
-		write("\n")
+		lineFlush()
 		cursor = reply.Cursor
 	}
 	writeError("LS_PROCESS_OK\n")
@@ -433,12 +435,13 @@ func runStat(data startup.Data) {
 		finish(2, "stat: not found\n")
 	}
 	if reply.Kind == ramfs.KindDirectory {
-		write("directory ")
+		lineText("directory ")
 	} else {
-		write("file ")
+		lineText("file ")
 	}
-	writeUint(reply.Size)
-	write(" bytes\n")
+	lineUint(reply.Size)
+	lineText(" bytes")
+	lineFlush()
 	writeError("STAT_PROCESS_OK\n")
 }
 
@@ -446,8 +449,9 @@ func runUptime() {
 	if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
 		finish(2, "uptime unavailable\n")
 	}
-	writeUint(clockValue)
-	write(" ticks\n")
+	lineUint(clockValue)
+	lineText(" ticks")
+	lineFlush()
 	writeError("UPTIME_PROCESS_OK\n")
 }
 
@@ -473,11 +477,11 @@ func runPS() {
 	if systemInfoRead(unsafe.Pointer(&systemInfo[0]), uintptr(len(systemInfo))) != 0 {
 		finish(2, "ps unavailable\n")
 	}
-	write("pid ")
-	writeUint(binary.LittleEndian.Uint64(systemInfo[0:8]))
-	write(" processes ")
-	writeUint(binary.LittleEndian.Uint64(systemInfo[8:16]))
-	write("\n")
+	lineText("pid ")
+	lineUint(binary.LittleEndian.Uint64(systemInfo[0:8]))
+	lineText(" processes ")
+	lineUint(binary.LittleEndian.Uint64(systemInfo[8:16]))
+	lineFlush()
 	writeError("PS_PROCESS_OK\n")
 }
 
@@ -485,11 +489,11 @@ func runMem() {
 	if systemInfoRead(unsafe.Pointer(&systemInfo[0]), uintptr(len(systemInfo))) != 0 {
 		finish(2, "mem unavailable\n")
 	}
-	write("pages managed ")
-	writeUint(binary.LittleEndian.Uint64(systemInfo[16:24]))
-	write(" free ")
-	writeUint(binary.LittleEndian.Uint64(systemInfo[24:32]))
-	write("\n")
+	lineText("pages managed ")
+	lineUint(binary.LittleEndian.Uint64(systemInfo[16:24]))
+	lineText(" free ")
+	lineUint(binary.LittleEndian.Uint64(systemInfo[24:32]))
+	lineFlush()
 	writeError("MEM_PROCESS_OK\n")
 }
 
@@ -512,9 +516,9 @@ func writeArguments(data startup.Data, start int) {
 			return
 		}
 		if index != start {
-			write(" ")
+			lineText(" ")
 		}
-		writeBytes(argument)
+		lineBytes(argument)
 	}
 }
 
@@ -534,8 +538,8 @@ func parseUint(value []byte) (uint64, bool) {
 
 const (
 	// One VFS call may reach persistent storage, so allow a few bounded waits
-	// of 100 Hz timer ticks before reporting failure.
-	vfsReplyDeadline = 500
+	// before reporting failure.
+	vfsReplyDeadline = 2 * clock.TicksPerSecond
 	vfsReplyAttempts = 4
 )
 
@@ -587,6 +591,47 @@ func finish(code uint64, message string) {
 	for {
 	}
 }
+
+// Output lines are assembled in one buffer and written once. Processes share
+// the console, so a line split across several writes can interleave with
+// another process's output and arrive as one unreadable line.
+var (
+	lineBuffer [256]byte
+	lineSize   int
+)
+
+func lineBytes(value []byte) {
+	if lineSize+len(value) > len(lineBuffer) {
+		finish(2, "output line too long\n")
+	}
+	lineSize += copy(lineBuffer[lineSize:], value)
+}
+
+func lineText(value string) {
+	lineBytes(unsafe.Slice(unsafe.StringData(value), len(value)))
+}
+
+func lineUint(value uint64) {
+	var digits [20]byte
+	position := len(digits)
+	if value == 0 {
+		lineText("0")
+		return
+	}
+	for value != 0 {
+		position--
+		digits[position] = byte(value%10) + '0'
+		value /= 10
+	}
+	lineBytes(digits[position:])
+}
+
+func lineFlush() {
+	lineText("\n")
+	writeHandle(stdoutHandle, lineBuffer[:lineSize])
+	lineSize = 0
+}
+
 func write(message string) {
 	writeHandle(stdoutHandle, unsafe.Slice(unsafe.StringData(message), len(message)))
 }

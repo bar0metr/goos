@@ -3,6 +3,7 @@ package supervisor
 
 import (
 	"goos/internal/capability"
+	"goos/kernel/clock"
 	"goos/kernel/handle"
 )
 
@@ -15,7 +16,7 @@ const (
 	MaxExecutable   = 127
 	MaxRestarts     = 3
 	RestartWindow   = uint64(1000)
-	RestartBackoff  = uint64(10)
+	RestartBackoff  = uint64(clock.TicksPerSecond / 10)
 )
 
 type Status uint8

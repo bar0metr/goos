@@ -4,6 +4,7 @@ package block
 
 import (
 	"encoding/binary"
+	"goos/kernel/clock"
 	"goos/kernel/ipc"
 )
 
@@ -11,10 +12,9 @@ const (
 	ProtocolID = uint64(0x47424c4b30303100)
 	Version    = uint16(1)
 	headerSize = 24
-	// RequestDeadline bounds one storage exchange at roughly five seconds of
-	// 100 Hz timer ticks. A stalled peer must surface an I/O error rather than
-	// block the caller for minutes.
-	RequestDeadline = 500
+	// RequestDeadline bounds one storage exchange. A stalled peer must surface
+	// an I/O error rather than block the caller indefinitely.
+	RequestDeadline = 5 * clock.TicksPerSecond
 	MaxData         = ipc.MaxPayload - headerSize
 )
 

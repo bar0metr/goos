@@ -11,7 +11,8 @@ of scope for this milestone.
 ## Decision
 
 Use the legacy 8259 PIC and PIT channel 0 as a bootstrap timer. Remap IRQs away
-from CPU exception vectors, mask every line except IRQ0, configure 100 Hz, and
+from CPU exception vectors, mask every line except IRQ0, configure a fixed tick
+rate (100 Hz, named by `kernel/clock` since ADR 0049), and
 acknowledge each interrupt explicitly. Require three delivered interrupts in
 the boot test.
 

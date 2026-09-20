@@ -643,6 +643,8 @@ goos_start_bootstrap_timer:
     outb %al, $0xa1
     movb $0x36, %al
     outb %al, $0x43
+    // Reload value 0x2e9c divides the fixed 1.193182 MHz PIT input down to the
+    // rate named by kernel/clock. Keep both in step.
     movb $0x9c, %al
     outb %al, $0x40
     movb $0x2e, %al

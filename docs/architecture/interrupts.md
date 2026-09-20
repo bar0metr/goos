@@ -20,7 +20,10 @@ and resumes another runnable task.
 ## Bootstrap timer
 
 The first timer path remaps the dual 8259 PIC to vectors 32 through 47, masks
-every line except IRQ0, and configures PIT channel 0 for 100 Hz. The IRQ0 stub
+every line except IRQ0, and configures PIT channel 0 for the rate named by
+`kernel/clock`, currently 100 Hz. The PIT divides a fixed 1.193182 MHz input and
+is independent of CPU frequency, so the rate is a deliberate trade between
+wakeup latency and per-tick interrupt overhead. The IRQ0 stub
 increments a monotonic 64-bit tick counter, acknowledges the master PIC, and
 returns with `IRETQ`. Boot waits for three physical timer interrupts before
 emitting `TIMER_OK`.
