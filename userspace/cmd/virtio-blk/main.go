@@ -168,9 +168,12 @@ func serve() {
 			fatal("VIRTIO_BLK_RECEIVE_FAILED\n")
 		}
 		payloadSize := int(wire[24]) | int(wire[25])<<8
-		valid := ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage)
+		if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage) {
+			continue
+		}
 		request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
-		if !valid || !validRequest {
+		if !validRequest {
+			reject()
 			continue
 		}
 		encoded := blockproto.EncodeReplyInto(dispatch(request), requestMessage.Correlation, &replyMessage)
@@ -178,6 +181,21 @@ func serve() {
 		if !encoded || !wireEncoded || ipcSend(uint64(serviceHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
 			fatal("VIRTIO_BLK_REPLY_FAILED\n")
 		}
+	}
+}
+
+// reject answers a request the driver cannot parse instead of dropping it and
+// stranding the block service until its deadline expires.
+func reject() {
+	operation := blockproto.Operation(requestMessage.Payload[0])
+	if requestMessage.Correlation == 0 || operation < blockproto.OperationInfo || operation > blockproto.OperationFlush {
+		return
+	}
+	if !blockproto.EncodeReplyInto(blockproto.Reply{Operation: operation, Status: blockproto.StatusInvalidArgument}, requestMessage.Correlation, &replyMessage) {
+		return
+	}
+	if size, ok := ipc.EncodeFrom(&replyMessage, wire[:]); ok {
+		ipcSend(uint64(serviceHandle), unsafe.Pointer(&wire[0]), uintptr(size))
 	}
 }
 
@@ -343,6 +361,13 @@ func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		fatal("VIRTIO_BLK_OUT_OF_MEMORY\n")
 	}
 	heapPointer = end
+	// Go guarantees zeroed allocations, and the compiler relies on it when it
+	// skips clearing large composite literals. The arena is reused after every
+	// reset, so stale bytes would otherwise leak into fresh values.
+	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
+	for index := range cleared {
+		cleared[index] = 0
+	}
 	return unsafe.Pointer(start)
 }
 

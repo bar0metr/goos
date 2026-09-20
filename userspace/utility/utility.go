@@ -532,6 +532,13 @@ func parseUint(value []byte) (uint64, bool) {
 	return result, true
 }
 
+const (
+	// One VFS call may reach persistent storage, so allow a few bounded waits
+	// of 100 Hz timer ticks before reporting failure.
+	vfsReplyDeadline = 500
+	vfsReplyAttempts = 4
+)
+
 func callVFS(request vfs.Request) (vfs.Reply, bool) {
 	correlation++
 	message, ok := vfs.EncodeRequest(request, correlation)
@@ -542,8 +549,10 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 	if !ok || ipcSend(vfsHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
 		return vfs.Reply{}, false
 	}
-	for {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
+	// Bound the wait: a service that never answers must surface an error rather
+	// than freeze the utility, and with it the shell, indefinitely.
+	for attempt := 0; attempt < vfsReplyAttempts; attempt++ {
+		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, vfsReplyDeadline
 		status := ipcWaitReceive(vfsHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
 			continue
@@ -560,6 +569,7 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		reply, valid := vfs.DecodeReply(received)
 		return reply, valid && reply.Operation == request.Operation
 	}
+	return vfs.Reply{}, false
 }
 
 func finish(code uint64, message string) {
@@ -650,6 +660,13 @@ func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		finish(1, "UTILITY_OUT_OF_MEMORY\n")
 	}
 	heapPointer = end
+	// Go guarantees zeroed allocations, and the compiler relies on it when it
+	// skips clearing large composite literals. The arena is reused after every
+	// reset, so stale bytes would otherwise leak into fresh values.
+	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
+	for index := range cleared {
+		cleared[index] = 0
+	}
 	return unsafe.Pointer(start)
 }
 

@@ -64,3 +64,30 @@ func TestProtocolRejectsMalformedMessages(t *testing.T) {
 		t.Fatal("non-zero reserved field accepted")
 	}
 }
+
+// TestEncodeRequestClearsReusedMessage covers the freestanding services, which
+// reuse message storage and once shipped stale reserved bytes that the peer
+// correctly rejected and silently dropped.
+func TestEncodeRequestClearsReusedMessage(t *testing.T) {
+	var message ipc.Message
+	for index := range message.Payload {
+		message.Payload[index] = 0xab
+	}
+	message.HandleCount = 2
+	message.Handles[0] = 7
+	if !EncodeRequestInto(Request{Operation: OperationRead, Offset: 512, Length: 32}, 9, &message) {
+		t.Fatal("encode failed")
+	}
+	request, ok := DecodeRequestFrom(&message)
+	if !ok || request.Operation != OperationRead || request.Offset != 512 || request.Length != 32 || len(request.Data) != 0 {
+		t.Fatalf("request = %+v ok=%v", request, ok)
+	}
+	if message.HandleCount != 0 || message.Handles[0] != 0 {
+		t.Fatal("stale handle attachments survived encoding")
+	}
+	for index := headerSize; index < len(message.Payload); index++ {
+		if message.Payload[index] != 0 {
+			t.Fatalf("stale payload byte at %d", index)
+		}
+	}
+}

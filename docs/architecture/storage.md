@@ -60,3 +60,20 @@ Subdirectories, long-file-name creation, general FAT32 geometry, crash
 consistency, dynamic interrupt routing, multiple devices, scatter-gather
 payloads larger than the inline IPC limit, and recovery from a failed storage
 driver remain required.
+
+## Resident sectors and bounded failure
+
+The FAT32 backend keeps a small write-through window of resident sectors.
+Directory entries and FAT links are packed many to a sector, so a metadata scan
+that once cost one device round trip per 32-byte entry now costs one sector
+fetch. Writes reach the device immediately and update the resident copy, and a
+failed device write drops that copy rather than leaving superseded bytes behind.
+A full-sector write becomes resident without reading the sector back.
+
+Every storage wait is bounded. One block exchange and one VFS call expire after
+a few seconds of timer ticks and report an I/O error. Services answer requests
+they cannot parse with an invalid-argument reply whenever the caller can be
+identified, because a silent drop would strand a caller that is waiting for
+exactly that correlation. Both rules exist so that a fault anywhere in the
+storage path degrades into a reported error instead of an apparent freeze.
+

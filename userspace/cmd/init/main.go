@@ -575,6 +575,13 @@ func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		fatal("INIT_OUT_OF_MEMORY\n")
 	}
 	heapPointer = end
+	// Go guarantees zeroed allocations, and the compiler relies on it when it
+	// skips clearing large composite literals. The arena is reused after every
+	// reset, so stale bytes would otherwise leak into fresh values.
+	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
+	for index := range cleared {
+		cleared[index] = 0
+	}
 	return unsafe.Pointer(start)
 }
 

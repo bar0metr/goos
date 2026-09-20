@@ -154,14 +154,33 @@ func userspaceMain() {
 func serve(endpoint handle.ID) {
 	payloadSize := int(wire[24]) | int(wire[25])<<8
 	valid := ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMessage)
+	if !valid {
+		return
+	}
 	request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
-	if !valid || !validRequest {
+	if !validRequest {
+		reject(endpoint)
 		return
 	}
 	encoded := blockproto.EncodeReplyInto(service.Dispatch(request), requestMessage.Correlation, &replyMessage)
 	size, wireEncoded := ipc.EncodeFrom(&replyMessage, wire[:])
 	if !encoded || !wireEncoded || ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
 		fatal("BLOCK_REPLY_FAILED\n")
+	}
+}
+
+// reject answers a request this service cannot parse. Staying silent would
+// strand the caller until its deadline expires instead of reporting the fault.
+func reject(endpoint handle.ID) {
+	operation := blockproto.Operation(requestMessage.Payload[0])
+	if requestMessage.Correlation == 0 || operation < blockproto.OperationInfo || operation > blockproto.OperationFlush {
+		return
+	}
+	if !blockproto.EncodeReplyInto(blockproto.Reply{Operation: operation, Status: blockproto.StatusInvalidArgument}, requestMessage.Correlation, &replyMessage) {
+		return
+	}
+	if size, ok := ipc.EncodeFrom(&replyMessage, wire[:]); ok {
+		ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size))
 	}
 }
 
@@ -174,7 +193,7 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 	if !ok || ipcSend(uint64(driverHandle), unsafe.Pointer(&driverWire[0]), uintptr(size)) != 0 {
 		return blockproto.Reply{}, false
 	}
-	driverDescriptor[0], driverDescriptor[1], driverDescriptor[2] = uint64(uintptr(unsafe.Pointer(&driverWire[0]))), ipc.WireMaxSize, 100000
+	driverDescriptor[0], driverDescriptor[1], driverDescriptor[2] = uint64(uintptr(unsafe.Pointer(&driverWire[0]))), ipc.WireMaxSize, blockproto.RequestDeadline
 	if ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&driverDescriptor[0]), uintptr(len(driverDescriptor)*8)) != 0 {
 		return blockproto.Reply{}, false
 	}
@@ -205,6 +224,13 @@ func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		fatal("BLOCK_OUT_OF_MEMORY\n")
 	}
 	heapPointer = end
+	// Go guarantees zeroed allocations, and the compiler relies on it when it
+	// skips clearing large composite literals. The arena is reused after every
+	// reset, so stale bytes would otherwise leak into fresh values.
+	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
+	for index := range cleared {
+		cleared[index] = 0
+	}
 	return unsafe.Pointer(start)
 }
 
