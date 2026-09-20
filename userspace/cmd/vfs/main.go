@@ -172,7 +172,7 @@ func blockExchange(request blockproto.Request) (blockproto.Reply, bool) {
 	if !ok || ipcSend(uint64(blockHandle), unsafe.Pointer(&blockWire[0]), uintptr(size)) != 0 {
 		return blockproto.Reply{}, false
 	}
-	blockDescriptor[0], blockDescriptor[1], blockDescriptor[2] = uint64(uintptr(unsafe.Pointer(&blockWire[0]))), ipc.WireMaxSize, 100000
+	blockDescriptor[0], blockDescriptor[1], blockDescriptor[2] = uint64(uintptr(unsafe.Pointer(&blockWire[0]))), ipc.WireMaxSize, blockproto.RequestDeadline
 	if ipcWaitReceive(uint64(blockHandle), unsafe.Pointer(&blockDescriptor[0]), uintptr(len(blockDescriptor)*8)) != 0 {
 		return blockproto.Reply{}, false
 	}
@@ -211,6 +211,14 @@ func pollControl() bool {
 func serve(session uint64, message ipc.Message) {
 	request, ok := vfs.DecodeRequest(message)
 	if !ok {
+		// Answer unusable requests: a silent drop strands the caller, which is
+		// waiting for exactly this correlation.
+		operation := vfs.Operation(message.Payload[0])
+		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationTruncate {
+			if reply, encoded := vfs.EncodeReply(vfs.Reply{Operation: operation, Status: vfs.StatusInvalidArgument}, message.Correlation); encoded {
+				send(session, reply)
+			}
+		}
 		return
 	}
 	reply, ok := vfs.EncodeReply(service.Dispatch(request), message.Correlation)
@@ -265,6 +273,13 @@ func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 		fatal("VFS_OUT_OF_MEMORY\n")
 	}
 	heapPointer = end
+	// Go guarantees zeroed allocations, and the compiler relies on it when it
+	// skips clearing large composite literals. The arena is reused after every
+	// reset, so stale bytes would otherwise leak into fresh values.
+	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
+	for index := range cleared {
+		cleared[index] = 0
+	}
 	return unsafe.Pointer(start)
 }
 

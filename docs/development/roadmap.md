@@ -154,6 +154,13 @@ exposed in the kernel.
 Priority 3 is complete. Stream merging (`2>&1`) and job control are deliberately
 out of scope and do not block Priority 4.
 
+ADR 0048 fixes a freeze on persistent-storage reads whose root cause was the
+freestanding arena allocators handing out uncleared memory, and adds resident
+sectors, answered protocol rejections, and bounded storage deadlines. Measured
+command latency is now dominated by process launch (about half a second) rather
+than by storage, which is attributed to the 100 Hz timer granularity and remains
+open.
+
 ## Priority 4 — Separate normal boot from validation boot
 
 The production boot path should become progressively quieter and should not be

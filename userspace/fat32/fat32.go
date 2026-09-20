@@ -6,6 +6,10 @@ const (
 	sectorSize  = uint64(512)
 	rootNode    = ramfs.NodeID(1)
 	maxFileSize = uint64(64 * 1024)
+	// cacheSectors bounds the resident sector window. Directory entries and FAT
+	// links are packed many to a sector, so a small window removes almost all
+	// repeated device traffic for metadata scans.
+	cacheSectors = 4
 )
 
 type Device interface {
@@ -21,9 +25,104 @@ type FileSystem struct {
 	totalClusters uint32
 	rootCluster   uint32
 	sector        [512]byte
+	cache         [cacheSectors]cachedSector
+	victim        uint8
+}
+
+// cachedSector holds one resident device sector. The filesystem owns the
+// device, so a write-through copy stays coherent without invalidation traffic.
+type cachedSector struct {
+	lba   uint64
+	valid bool
+	data  [512]byte
+}
+
+// resident returns the cached sector for lba, reading it from the device on a
+// miss and replacing entries round-robin.
+func (fs *FileSystem) resident(lba uint64) (*cachedSector, bool) {
+	for index := range fs.cache {
+		if entry := &fs.cache[index]; entry.valid && entry.lba == lba {
+			return entry, true
+		}
+	}
+	entry := &fs.cache[fs.victim]
+	fs.victim = (fs.victim + 1) % cacheSectors
+	entry.valid = false
+	if !fs.device.ReadAt(lba*sectorSize, entry.data[:]) {
+		return nil, false
+	}
+	entry.lba, entry.valid = lba, true
+	return entry, true
+}
+
+// readAt serves bounded reads from resident sectors.
+func (fs *FileSystem) readAt(offset uint64, target []byte) bool {
+	for len(target) != 0 {
+		entry, ok := fs.resident(offset / sectorSize)
+		if !ok {
+			return false
+		}
+		within := offset % sectorSize
+		chunk := sectorSize - within
+		if chunk > uint64(len(target)) {
+			chunk = uint64(len(target))
+		}
+		copy(target[:chunk], entry.data[within:within+chunk])
+		target = target[chunk:]
+		offset += chunk
+	}
+	return true
+}
+
+// writeAt writes through to the device and keeps the resident copy coherent.
+// A resident sector is never left holding superseded bytes: it is updated on
+// success and dropped when the device write fails.
+func (fs *FileSystem) writeAt(offset uint64, data []byte) bool {
+	for len(data) != 0 {
+		lba := offset / sectorSize
+		within := offset % sectorSize
+		chunk := sectorSize - within
+		if chunk > uint64(len(data)) {
+			chunk = uint64(len(data))
+		}
+		resident := fs.lookup(lba)
+		if !fs.device.WriteAt(offset, data[:chunk]) {
+			if resident != nil {
+				resident.valid = false
+			}
+			return false
+		}
+		switch {
+		case resident != nil:
+			copy(resident.data[within:within+chunk], data[:chunk])
+		case chunk == sectorSize:
+			// A full-sector write supplies every byte, so the sector can become
+			// resident without reading it back.
+			entry := &fs.cache[fs.victim]
+			fs.victim = (fs.victim + 1) % cacheSectors
+			copy(entry.data[:], data[:chunk])
+			entry.lba, entry.valid = lba, true
+		}
+		data = data[chunk:]
+		offset += chunk
+	}
+	return true
+}
+
+func (fs *FileSystem) lookup(lba uint64) *cachedSector {
+	for index := range fs.cache {
+		if entry := &fs.cache[index]; entry.valid && entry.lba == lba {
+			return entry
+		}
+	}
+	return nil
 }
 
 func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
+	for index := range fs.cache {
+		fs.cache[index] = cachedSector{}
+	}
+	fs.victim = 0
 	if device == nil || !device.ReadAt(0, fs.sector[:]) || fs.sector[510] != 0x55 || fs.sector[511] != 0xaa || get16(fs.sector[11:13]) != 512 || fs.sector[13] != 1 || fs.sector[16] != 1 {
 		return 0, false
 	}
@@ -102,14 +201,13 @@ func (fs *FileSystem) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 	}
 	done, within := uint64(0), offset%sectorSize
 	for done < count {
-		if !fs.device.ReadAt(fs.clusterOffset(cluster), fs.sector[:]) {
-			return int(done), ramfs.StatusResourceExhausted
-		}
 		chunk := count - done
 		if chunk > sectorSize-within {
 			chunk = sectorSize - within
 		}
-		copy(target[done:done+chunk], fs.sector[within:within+chunk])
+		if !fs.readAt(fs.clusterOffset(cluster)+within, target[done:done+chunk]) {
+			return int(done), ramfs.StatusResourceExhausted
+		}
 		done += chunk
 		within = 0
 		if done < count {
@@ -145,15 +243,11 @@ func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 	cluster, _ = fs.advance(cluster, uint32(offset/sectorSize))
 	done, within := uint64(0), offset%sectorSize
 	for done < uint64(len(data)) {
-		if (within != 0 || uint64(len(data))-done < sectorSize) && !fs.device.ReadAt(fs.clusterOffset(cluster), fs.sector[:]) {
-			return int(done), ramfs.StatusResourceExhausted
-		}
 		chunk := uint64(len(data)) - done
 		if chunk > sectorSize-within {
 			chunk = sectorSize - within
 		}
-		copy(fs.sector[within:within+chunk], data[done:done+chunk])
-		if !fs.device.WriteAt(fs.clusterOffset(cluster), fs.sector[:]) {
+		if !fs.writeAt(fs.clusterOffset(cluster)+within, data[done:done+chunk]) {
 			return int(done), ramfs.StatusResourceExhausted
 		}
 		done += chunk
@@ -266,13 +360,13 @@ func (fs *FileSystem) clusterOffset(cluster uint32) uint64 {
 }
 func (fs *FileSystem) readEntry(index int) ([32]byte, bool) {
 	var entry [32]byte
-	if index < 0 || index >= 16 || !fs.device.ReadAt(fs.rootOffset()+uint64(index*32), entry[:]) {
+	if index < 0 || index >= 16 || !fs.readAt(fs.rootOffset()+uint64(index*32), entry[:]) {
 		return entry, false
 	}
 	return entry, true
 }
 func (fs *FileSystem) writeEntry(index int, entry [32]byte) bool {
-	return index >= 0 && index < 16 && fs.device.WriteAt(fs.rootOffset()+uint64(index*32), entry[:])
+	return index >= 0 && index < 16 && fs.writeAt(fs.rootOffset()+uint64(index*32), entry[:])
 }
 func (fs *FileSystem) fileEntry(id ramfs.NodeID) ([32]byte, ramfs.Status) {
 	if id < 2 || id >= 18 {
@@ -319,7 +413,7 @@ func (fs *FileSystem) freeEntry() (int, [32]byte, bool) {
 }
 func (fs *FileSystem) fat(cluster uint32) (uint32, bool) {
 	var data [4]byte
-	if cluster >= fs.totalClusters+2 || !fs.device.ReadAt(fs.fatStart+uint64(cluster)*4, data[:]) {
+	if cluster >= fs.totalClusters+2 || !fs.readAt(fs.fatStart+uint64(cluster)*4, data[:]) {
 		return 0, false
 	}
 	return get32(data[:]) & 0x0fffffff, true
@@ -327,7 +421,7 @@ func (fs *FileSystem) fat(cluster uint32) (uint32, bool) {
 func (fs *FileSystem) setFAT(cluster, value uint32) bool {
 	var data [4]byte
 	put32(data[:], value)
-	return fs.device.WriteAt(fs.fatStart+uint64(cluster)*4, data[:])
+	return fs.writeAt(fs.fatStart+uint64(cluster)*4, data[:])
 }
 func (fs *FileSystem) next(cluster uint32) (uint32, bool) {
 	value, ok := fs.fat(cluster)
@@ -359,7 +453,7 @@ func (fs *FileSystem) allocate() uint32 {
 			for i := range fs.sector {
 				fs.sector[i] = 0
 			}
-			if !fs.device.WriteAt(fs.clusterOffset(cluster), fs.sector[:]) {
+			if !fs.writeAt(fs.clusterOffset(cluster), fs.sector[:]) {
 				return 0
 			}
 			return cluster

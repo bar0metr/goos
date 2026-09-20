@@ -11,7 +11,11 @@ const (
 	ProtocolID = uint64(0x47424c4b30303100)
 	Version    = uint16(1)
 	headerSize = 24
-	MaxData    = ipc.MaxPayload - headerSize
+	// RequestDeadline bounds one storage exchange at roughly five seconds of
+	// 100 Hz timer ticks. A stalled peer must surface an I/O error rather than
+	// block the caller for minutes.
+	RequestDeadline = 500
+	MaxData         = ipc.MaxPayload - headerSize
 )
 
 type Operation uint8
@@ -61,7 +65,18 @@ func EncodeRequestInto(request Request, correlation uint64, message *ipc.Message
 	if message == nil {
 		return false
 	}
-	*message = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(headerSize + len(request.Data))}
+	// Clear the payload explicitly, like EncodeReplyInto: reserved bytes must
+	// reach the peer as zero even when the message still holds older data. The
+	// decoder rejects a request whose reserved bytes are dirty, so relying on
+	// the caller's memory being zero would make encoding non-deterministic.
+	for index := range message.Payload {
+		message.Payload[index] = 0
+	}
+	message.ProtocolID, message.Version, message.Kind = ProtocolID, Version, ipc.KindRequest
+	message.Correlation, message.PayloadSize, message.HandleCount = correlation, uint16(headerSize+len(request.Data)), 0
+	for index := range message.Handles {
+		message.Handles[index] = 0
+	}
 	message.Payload[0] = byte(request.Operation)
 	binary.LittleEndian.PutUint64(message.Payload[8:16], request.Offset)
 	binary.LittleEndian.PutUint32(message.Payload[16:20], request.Length)
