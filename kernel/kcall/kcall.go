@@ -27,6 +27,7 @@ const (
 	OperationStreamWrite
 	OperationStreamWait
 	OperationWaitAny
+	OperationDiagnostics
 )
 
 type Status uint64
@@ -84,6 +85,7 @@ type Handler interface {
 	StreamCreate(address uint64, length uint64) Status
 	StreamRead(stream uint64, descriptor uint64, length uint64) Status
 	StreamWrite(stream uint64, descriptor uint64, length uint64) Status
+	Diagnostics(device uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -161,6 +163,8 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.StreamWrite(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationDiagnostics:
+		return Result{Status: handler.Diagnostics(request.Arg0)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

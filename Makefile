@@ -30,22 +30,42 @@ QEMU_SHARE ?= /opt/local/share/qemu
 OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
 QEMU_FLAGS := -machine q35 -m 512M -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
 SOURCE_DATE_EPOCH ?= 0
+HZ ?= 100
+ifeq ($(filter $(HZ),100 250 1000),)
+$(error HZ must be 100, 250, or 1000)
+endif
+BUILD_CONFIG := $(BUILD_DIR)/config/build
+DIAG ?= 0
+ifeq ($(filter $(DIAG),0 1),)
+$(error DIAG must be 0 or 1)
+endif
+ifeq ($(DIAG),1)
+TINYGO_TAGS := -tags "goos_hz$(HZ) goos_diag"
+else
+TINYGO_TAGS := -tags goos_hz$(HZ)
+endif
 
 .DEFAULT_GOAL := all
 
-.PHONY: all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-performance lint fmt docs clean distclean toolchain-check help
+FORCE:
+
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-performance lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
 kernel: $(KERNEL)
 
+$(BUILD_CONFIG): FORCE
+	@mkdir -p $(dir $@)
+	@[ "$$(cat $@ 2>/dev/null)" = "$(HZ) $(DIAG)" ] || printf '%s\n' '$(HZ) $(DIAG)' >$@
+
 $(KERNEL_IO): kernel/arch/amd64/io.S
 	@mkdir -p $(KERNEL_DIR)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
-$(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO)
+$(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO) $(BUILD_CONFIG)
 	@mkdir -p $(KERNEL_DIR)
-	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
+	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE)
@@ -54,44 +74,44 @@ $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(BUILD_DIR)/userspace
 	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
 
-$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
 
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
 
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
-$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/coreutils
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/coreutils
 
 $(COREUTILS_IMAGE): $(COREUTILS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(COREUTILS_ELF) $@
 
-$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
 
 $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
-$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup kernel/handle kernel/kcall -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup kernel/handle kernel/kcall kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
-	$(BUILD_ENV) tinygo build -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/virtio-blk
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/virtio-blk
 
 $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
@@ -141,9 +161,12 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-boot
+	$(MAKE) test-stress STRESS_RUNS=2
 
 test-unit:
 	$(BUILD_ENV) go test ./...
+	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
+	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
@@ -155,6 +178,13 @@ test-boot: iso
 	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+
+STRESS_RUNS ?= 4
+STRESS_JOBS ?= 4
+STRESS_ROUNDS ?= 15
+
+test-stress: iso
+	@tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
 
 test-performance:
 	@mkdir -p $(BUILD_DIR)/reports
@@ -225,6 +255,8 @@ docs:
 	@test -f docs/adr/0044-bounded-stdout-file-redirection.md
 	@test -f docs/adr/0045-bounded-stdout-append-redirection.md
 	@test -f docs/adr/0046-bounded-stdin-file-redirection.md
+	@test -f docs/adr/0052-build-time-timer-rate-and-diagnostic-build.md
+	@test -f docs/adr/0053-kernel-exclusion-domain.md
 	@test -f docs/development/building.md
 
 clean:
@@ -242,10 +274,13 @@ help:
 	  '  kernel          build the UEFI kernel' \
 	  '  run             boot with QEMU and serial on this terminal' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
+	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
+	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
+	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-performance run microbenchmarks into build/reports' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \

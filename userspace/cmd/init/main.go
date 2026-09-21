@@ -60,6 +60,9 @@ var heapStartSymbol [0]byte
 //go:extern _heap_end
 var heapEndSymbol [0]byte
 
+//go:linkname diagnostics goos_diagnostics
+func diagnostics(device uint64) uint64
+
 //go:linkname debugWrite goos_debug_write
 func debugWrite(address unsafe.Pointer, size uintptr) uint64
 
@@ -593,6 +596,7 @@ func write(message string) {
 
 func fatal(message string) {
 	write(message)
+	diagnostics(uint64(serviceDeviceHandle))
 	for {
 	}
 }

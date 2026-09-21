@@ -62,3 +62,11 @@ func (registry *Registry) Release(id uint64) bool {
 	}
 	return false
 }
+
+// At returns the live channel stored in slot index, if any.
+func (registry *Registry) At(index int) (uint64, *Channel, bool) {
+	if index < 0 || index >= MaxChannels || registry.ids[index] == 0 {
+		return 0, nil, false
+	}
+	return registry.ids[index], &registry.channels[index], true
+}

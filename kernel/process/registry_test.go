@@ -141,3 +141,18 @@ func TestStartupDataBound(t *testing.T) {
 		t.Fatal("oversized startup accepted")
 	}
 }
+
+func TestRegistryAtListsProcessesAndTasks(t *testing.T) {
+	var registry Registry
+	first, _ := New(1, AddressSpace{Root: 0x1000})
+	registry.Add(&first)
+	task, _ := sched.NewTaskID(3, 1)
+	registry.BindTask(1, task)
+	found, ok := registry.At(0)
+	if !ok || found.ID() != 1 || len(found.Tasks()) != 1 || found.Tasks()[0] != task {
+		t.Fatal("process or task not listed")
+	}
+	if _, ok := registry.At(1); ok {
+		t.Fatal("empty index listed")
+	}
+}

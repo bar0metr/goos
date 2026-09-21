@@ -31,6 +31,26 @@ Boot tests use a disposable test disk; `make run` retains
 memory permission tests explicitly; these tests are also included by `make
 test`.
 
+## Build configuration
+
+`HZ` selects the timer rate for every target: `make HZ=250 run` or
+`make HZ=1000 test-boot`. The default is 100 Hz; 250 and 1000 are the supported
+diagnostic rates, and any other value is rejected. The rate is a build tag
+(`goos_hz250`, `goos_hz1000`) that selects the `kernel/clock` constant, so the
+kernel, the PIT reload value, and every userspace deadline change together
+without editing Go or assembly. The boot log prints the active rate as
+`Timer: <rate> Hz`.
+
+`DIAG=1` builds the diagnostic variant (ADR 0052). It records a bounded trace
+of wait, channel, handle-transfer, and process events and lets `diag` in the
+shell print the kernel state. Services and PID 1 print the same dump when they
+stop on a fatal error. A normal build compiles all of this out and `diag`
+reports that it is unavailable.
+
+`build/config/build` records the active `HZ` and `DIAG` values. Changing either
+rebuilds the kernel and userspace; repeating a build with the same values does
+not.
+
 Set `OVMF_CODE=/path/to/firmware.fd` if QEMU firmware is not installed under
 `/opt/local/share/qemu`. Set `SOURCE_DATE_EPOCH` to a fixed project release
 timestamp for release builds.

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Refines the fixed rate chosen in ADR 0005 rather than replacing its
+Accepted, amended by ADR 0052, which selects the rate at build time. Refines
+the fixed rate chosen in ADR 0005 rather than replacing its
 PIC/PIT bootstrap design.
 
 ## Context
