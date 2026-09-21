@@ -245,6 +245,7 @@ VM_OK
 EXCEPTION_OK
 GDT_OK
 IDT_OK
+Timer: 100 Hz
 TIMER_OK
 STACK_GUARDS_OK
 TASK_BLOCK_OK
@@ -305,6 +306,12 @@ canonical complete gate and includes lint, documentation checks, ISO creation,
 and the two-phase QEMU boot/persistence test. Complete serial logs remain in
 `build/logs/boot.log` and `build/logs/reboot.log`; successful harness output is
 grouped and concise. See [`docs/development/testing.md`](docs/development/testing.md).
+
+`HZ=250` or `HZ=1000` builds any target at a diagnostic timer rate, and
+`DIAG=1` builds the diagnostic variant whose `diag` shell builtin prints the
+kernel's process, handle, channel, and wait state. `make test-stress` boots
+several guests in parallel and drives repeated command rounds through each.
+See [`docs/development/building.md`](docs/development/building.md).
 
 ## Development direction
 

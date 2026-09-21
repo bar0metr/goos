@@ -68,3 +68,22 @@ func TestRegistryReusesReleasedChannelSlot(t *testing.T) {
 		t.Fatalf("channel slot was not safely reused: id=%#x reused=%#x", id, reusedID)
 	}
 }
+
+func TestRegistryAtAndQueueState(t *testing.T) {
+	var registry Registry
+	channel, id, _ := registry.Create()
+	message := Message{ProtocolID: 1, Version: 1, Kind: KindRequest, Correlation: 5}
+	if channel.Send(0, message, nil, nil, nil) != StatusOK {
+		t.Fatal("request was not queued")
+	}
+	found, at, ok := registry.At(0)
+	if !ok || found != id || at != channel {
+		t.Fatal("live channel not reported")
+	}
+	if channel.Queued(1) != 1 || channel.Queued(0) != 0 || channel.Pending(0) != 1 || channel.Pending(1) != 0 {
+		t.Fatalf("queued %d/%d pending %d/%d", channel.Queued(0), channel.Queued(1), channel.Pending(0), channel.Pending(1))
+	}
+	if _, _, ok := registry.At(1); ok {
+		t.Fatal("empty slot reported")
+	}
+}

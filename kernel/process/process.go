@@ -90,6 +90,8 @@ func (process *Process) AddTask(id sched.TaskID) bool {
 
 func (process *Process) TaskCount() int { return process.taskCount }
 
+func (process *Process) Tasks() []sched.TaskID { return process.tasks[:process.taskCount] }
+
 func (process *Process) OwnsTask(id sched.TaskID) bool {
 	for index := 0; index < process.taskCount; index++ {
 		if process.tasks[index] == id {
@@ -249,6 +251,13 @@ func (registry *Registry) ByID(id ID) (*Process, bool) {
 }
 
 func (registry *Registry) Count() int { return int(registry.count) }
+
+func (registry *Registry) At(index int) (*Process, bool) {
+	if index < 0 || index >= int(registry.count) {
+		return nil, false
+	}
+	return registry.processes[index], true
+}
 
 func (registry *Registry) Remove(id ID) bool {
 	for index := 0; index < int(registry.count); index++ {

@@ -160,6 +160,28 @@ func (channel *Channel) ReceiveStatus(side uint8) Status {
 	return StatusNotFound
 }
 
+// Queued reports how many messages wait at the given endpoint.
+func (channel *Channel) Queued(side uint8) int {
+	if channel == nil || side > 1 {
+		return 0
+	}
+	return int(channel.inbound[side].count)
+}
+
+// Pending reports how many requests sent from side still await a reply.
+func (channel *Channel) Pending(side uint8) int {
+	if channel == nil || side > 1 {
+		return 0
+	}
+	count := 0
+	for _, correlation := range channel.pending[side] {
+		if correlation != 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func (channel *Channel) Close(side uint8) bool {
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return false

@@ -113,6 +113,15 @@ func (table *Table) Describe(id ID) (Type, capability.Capability, bool) {
 	return entry.typeID, capability.New(entry.object, entry.rights), true
 }
 
+// At describes the open handle stored in slot index, if any.
+func (table *Table) At(index int) (ID, Type, capability.Capability, bool) {
+	if index < 0 || index >= MaxHandles || !table.slots[index].open {
+		return 0, TypeInvalid, capability.Capability{}, false
+	}
+	entry := &table.slots[index]
+	return encode(index, entry.generation), entry.typeID, capability.New(entry.object, entry.rights), true
+}
+
 func (table *Table) HasObject(typeID Type, object uint64) bool {
 	for index := range table.slots {
 		entry := &table.slots[index]

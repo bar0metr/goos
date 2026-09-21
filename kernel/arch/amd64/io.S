@@ -51,6 +51,33 @@ goos_halt:
     hlt
     retq
 
+.global goos_scheduler_state_read
+goos_scheduler_state_read:
+    movq goos_runnable_mask(%rip), %rax
+    movq %rax, 0(%rcx)
+    movq goos_task_dead_mask(%rip), %rax
+    movq %rax, 8(%rcx)
+    movq goos_task_count(%rip), %rax
+    movq %rax, 16(%rcx)
+    movq goos_current_task(%rip), %rax
+    movq %rax, 24(%rcx)
+    retq
+
+.global goos_interrupts_disable
+goos_interrupts_disable:
+    pushfq
+    popq %rax
+    cli
+    retq
+
+.global goos_interrupts_restore
+goos_interrupts_restore:
+    testq $0x200, %rcx
+    jz .interrupts_restore_done
+    sti
+.interrupts_restore_done:
+    retq
+
 .global goos_has_nx
 goos_has_nx:
     pushq %rbx
@@ -655,11 +682,9 @@ goos_start_bootstrap_timer:
     outb %al, $0xa1
     movb $0x36, %al
     outb %al, $0x43
-    // Reload value 0x2e9c divides the fixed 1.193182 MHz PIT input down to the
-    // rate named by kernel/clock. Keep both in step.
-    movb $0x9c, %al
+    movl %ecx, %eax
     outb %al, $0x40
-    movb $0x2e, %al
+    movb %ch, %al
     outb %al, $0x40
     sti
     retq

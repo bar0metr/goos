@@ -121,11 +121,11 @@ func loadGDT(base *uint64, limit uint16)
 //export goos_load_idt
 func loadIDT(base *IDTEntry, limit uint16)
 
-// StartBootstrapTimer remaps the legacy PIC, unmasks IRQ0, configures the PIT
-// for the rate named by kernel/clock, and enables maskable interrupts.
+// StartBootstrapTimer remaps the legacy PIC, unmasks IRQ0, programs the PIT
+// with the given reload value, and enables maskable interrupts.
 //
 //export goos_start_bootstrap_timer
-func StartBootstrapTimer()
+func StartBootstrapTimer(divisor uint16)
 
 // TimerTicks returns the number of IRQ0 deliveries observed by the kernel.
 //

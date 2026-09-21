@@ -14,6 +14,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, and the real QEMU
   boot/persistence test in sequence so host builds cannot contend with QEMU.
+- `make test-stress` boots `STRESS_RUNS` guests (default 4) in parallel
+  batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
+  through each; `make test-all` includes two runs.
 - `make test-performance` writes microbenchmark reports under `build/reports/`.
 
 Use `make test` during the normal edit loop. Use `make test-all` before delivery
@@ -58,6 +61,30 @@ returns failure without starting QEMU:
 ```sh
 tests/boot/qemu_boot.sh --self-test-failure
 ```
+
+## Stress test
+
+`tests/boot/stress.sh` drives one guest through a FIFO instead of a timed
+script: it sends a command, waits for the next prompt, and fails if the prompt
+does not appear within `COMMAND_TIMEOUT` seconds (default 30) or if any fatal
+service marker appears. Each round reads and writes the FAT32 mount, runs a
+pipeline, launches a failing pipeline stage, creates and removes files, and
+runs a command sequence, so every round exercises VFS session creation and
+teardown, peer death, process-slot reuse, and PID 1 exec handling. Output is
+checked for the round's persistent read-back and pipeline data.
+
+`tests/boot/stress_matrix.sh` runs several guests in parallel, each with its
+own disk under `build/stress/hz<rate>/`, and prints one line per guest. Run it
+at every supported rate before changing scheduling or timer behavior:
+
+```sh
+make test-stress HZ=100 STRESS_RUNS=8
+make test-stress HZ=250 STRESS_RUNS=8
+make test-stress HZ=1000 STRESS_RUNS=8
+```
+
+On failure the driver sends `diag`, so a `DIAG=1` build leaves the kernel state
+dump in that guest's log.
 
 ## Adding a boot assertion
 
