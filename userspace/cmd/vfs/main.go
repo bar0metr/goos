@@ -78,6 +78,9 @@ var heapStartSymbol [0]byte
 //go:extern _heap_end
 var heapEndSymbol [0]byte
 
+//go:linkname diagnostics goos_diagnostics
+func diagnostics(device uint64) uint64
+
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
 
@@ -279,8 +282,34 @@ func write(message string) {
 }
 func fatal(message string) {
 	write(message)
+	if diagnostics(uint64(consoleHandle)) == 0 {
+		writeSessions()
+	}
 	for {
 	}
+}
+
+func writeSessions() {
+	write("VFS_DIAG control=")
+	writeHex(uint64(controlHandle))
+	for index, session := range sessions {
+		if session != 0 {
+			write(" session")
+			writeHex(uint64(index))
+			write("=")
+			writeHex(session)
+		}
+	}
+	write("\n")
+}
+
+func writeHex(value uint64) {
+	var digits [18]byte
+	digits[0], digits[1] = '0', 'x'
+	for index := 0; index < 16; index++ {
+		digits[17-index] = "0123456789abcdef"[value>>(uint(index)*4)&0xf]
+	}
+	consoleWrite(uint64(consoleHandle), unsafe.Pointer(&digits[0]), uintptr(len(digits)))
 }
 func main() {}
 

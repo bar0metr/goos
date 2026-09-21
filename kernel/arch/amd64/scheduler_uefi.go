@@ -110,6 +110,23 @@ func UserFaults() uint64
 //export goos_block_current_task
 func BlockCurrentTask()
 
+// SchedulerState is a snapshot of the architecture run queue.
+type SchedulerState struct {
+	Runnable uint64
+	Dead     uint64
+	Count    uint64
+	Current  uint64
+}
+
+//export goos_scheduler_state_read
+func readSchedulerState(state *SchedulerState)
+
+func ReadSchedulerState() SchedulerState {
+	var state SchedulerState
+	readSchedulerState(&state)
+	return state
+}
+
 //export goos_wake_task
 func WakeTask(index uint64) bool
 

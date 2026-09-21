@@ -138,3 +138,25 @@ func TestSimultaneousReadinessUsesMaskAndLowestIndex(t *testing.T) {
 		t.Fatalf("unexpected simultaneous result: %+v %v", result, ok)
 	}
 }
+
+func TestAtReportsRegisteredAndCompletedOperations(t *testing.T) {
+	var table Table
+	id := task(4, 2)
+	first := entry(KindChannel, 9, 1, Readable)
+	table.Begin(id, []Entry{first}, 77)
+	view, ok := table.At(4)
+	if !ok || view.Task != id || !view.Active || view.Complete || view.Count != 1 || view.Deadline != 77 || view.Entries[0] != first {
+		t.Fatalf("unexpected active view: %+v %v", view, ok)
+	}
+	table.Publish(first.Key, Readable, nil)
+	if view, ok = table.At(4); !ok || view.Active || !view.Complete || view.Ready[0] != Readable {
+		t.Fatalf("unexpected completed view: %+v %v", view, ok)
+	}
+	table.Take(id)
+	if _, ok := table.At(4); ok {
+		t.Fatal("taken operation still visible")
+	}
+	if _, ok := table.At(-1); ok {
+		t.Fatal("negative slot visible")
+	}
+}

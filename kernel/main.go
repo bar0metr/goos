@@ -7,7 +7,9 @@ import (
 	"goos/kernel/arch/amd64"
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
+	"goos/kernel/clock"
 	"goos/kernel/device"
+	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/initramfs"
 	"goos/kernel/ipc"
@@ -143,7 +145,9 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
 		taskID := sched.TaskID(task)
-		waitAnyTable.Cancel(taskID)
+		if waitAnyTable.Cancel(taskID) && diag.Enabled {
+			trace(diag.WaitCancelExit, pidOfTask(taskID), task, 0, 0)
+		}
 		event, report := processRegistry.ReportTaskExit(taskID, amd64.TaskExitCode(task))
 		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
 		// not gate the steps below: a process that has exited has to release its
@@ -166,6 +170,7 @@ func deliverProcessExits() {
 // so that waiters and peers are released before any cleanup that may fail.
 func releaseExitedProcess(event process.ExitEvent) {
 	processExitDelivered = 1
+	trace(diag.ProcessExited, event.Process, uint64(event.Task), 0, event.Code)
 	if waited, status := processRegistry.Wait(event.Process); status == process.WaitExited && waited == event {
 		processWaitConfirmed = 1
 	}
@@ -222,6 +227,7 @@ func releaseProcessHandles(exited *process.Process) {
 		channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
 		channel, exists := channelRegistry.Lookup(channelID)
 		if valid && exists && channel.Close(side) {
+			trace(diag.ChannelClosed, exited.ID(), 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
 			wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
 			channelRegistry.Release(channelID)
 		}
@@ -411,6 +417,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	nextProcessID++
+	trace(diag.ProcessSpawned, pid, task, 0, 0)
 	if len(grants) != 0 {
 		capabilityManifestOK = 1
 	}
@@ -636,6 +643,7 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		channelRegistry.Release(id)
 		return kcall.StatusInvalidArgument
 	}
+	trace(diag.ChannelCreated, owner.ID(), 0, id, uint64(handle1))
 	return kcall.StatusOK
 }
 
@@ -654,6 +662,7 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 		if !valid || !exists || !channel.Close(side) {
 			return kcall.StatusNotFound
 		}
+		trace(diag.ChannelClosed, owner.ID(), id, channelID|uint64(side)<<63, diag.CloseByHandle)
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
 		channelRegistry.Release(channelID)
 	} else if typeID == handle.TypeStream {
@@ -900,6 +909,9 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 			wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
 		}
 		for index := 0; index < transferCount; index++ {
+			if diag.Enabled && peer != nil {
+				trace(diag.HandleTransferred, owner.ID(), uint64(transfers[index].Handle), channel, uint64(peer.ID()))
+			}
 			owner.Handles().Close(transfers[index].Handle)
 		}
 	}
@@ -1343,6 +1355,9 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		return kcall.StatusInvalidArgument, false
 	}
 	if completion, ready := waitAnyTable.Take(taskID); ready {
+		if diag.Enabled {
+			trace(diag.WaitTaken, pidOfTask(taskID), uint64(taskID), 0, uint64(completion.ReadyMask))
+		}
 		if completion.TimedOut {
 			return kcall.StatusTimeout, false
 		}
@@ -1350,6 +1365,9 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	}
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
+		if diag.Enabled {
+			trace(diag.WaitDenied, pidOfTask(taskID), uint64(taskID), handler.root, uint64(diag.DenyOwner))
+		}
 		return kcall.StatusPermissionDenied, false
 	}
 	wireSize := count * kcall.WaitAnyInterestSize
@@ -1366,14 +1384,16 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		offset := index * int(kcall.WaitAnyInterestSize)
 		handleID := handle.ID(decodeUint64(waitAnyWire[offset : offset+8]))
 		events := kcall.WaitEvent(decodeUint64(waitAnyWire[offset+8 : offset+16]))
-		entry, status := resolveWaitAny(owner, handleID, events)
+		entry, status, reason := resolveWaitAny(owner, handleID, events)
 		if status != kcall.StatusOK {
+			trace(diag.WaitDenied, owner.ID(), uint64(taskID), uint64(handleID), uint64(reason))
 			return status, false
 		}
 		waitAnyEntries[index] = entry
 	}
 	entries := waitAnyEntries[:int(count)]
 	if mask := readyWaitAny(entries); mask != 0 {
+		trace(diag.WaitReady, owner.ID(), uint64(taskID), entries[0].Key.Object, uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
 	}
 	if timeout == 0 {
@@ -1390,36 +1410,40 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	if !waitAnyTable.Begin(taskID, entries, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
+	trace(diag.WaitBegin, owner.ID(), uint64(taskID), entries[0].Key.Object, count)
 	// Registration precedes the final readiness observation. The interrupt
 	// gate keeps publication in the same exclusion domain until assembly
 	// commits the task to BLOCKED.
 	if mask := readyWaitAny(entries); mask != 0 {
 		waitAnyTable.Cancel(taskID)
+		trace(diag.WaitRecheck, owner.ID(), uint64(taskID), entries[0].Key.Object, uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
 	}
 	return kcall.StatusNotFound, true
 }
 
-func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent) (kernelwait.Entry, kcall.Status) {
+func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent) (kernelwait.Entry, kcall.Status, diag.Deny) {
 	typeID, authority, found := owner.Handles().Describe(id)
 	if !found {
-		return kernelwait.Entry{}, kcall.StatusPermissionDenied
+		return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyHandle
 	}
 	switch typeID {
 	case handle.TypeChannel:
-		if events == 0 || events & ^(kcall.WaitReadable|kcall.WaitPeerClosed) != 0 ||
-			!authority.Allows(capability.Read|capability.Wait) {
-			return kernelwait.Entry{}, kcall.StatusPermissionDenied
+		if events == 0 || events & ^(kcall.WaitReadable|kcall.WaitPeerClosed) != 0 {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+		}
+		if !authority.Allows(capability.Read | capability.Wait) {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
 		object, side, valid := ipc.DecodeEndpointObject(authority.Object())
 		if _, exists := channelRegistry.Lookup(object); !valid || !exists {
-			return kernelwait.Entry{}, kcall.StatusNotFound
+			return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
 		}
-		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindChannel, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK
+		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindChannel, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK, 0
 	case handle.TypeStream:
 		object, writer, valid := stream.DecodeEndpointObject(authority.Object())
 		if !valid {
-			return kernelwait.Entry{}, kcall.StatusNotFound
+			return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
 		}
 		side := uint8(0)
 		allowed := kcall.WaitReadable | kcall.WaitPeerClosed
@@ -1427,24 +1451,30 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 		if writer {
 			side, allowed, rights = 1, kcall.WaitWritable|kcall.WaitPeerClosed, capability.Write|capability.Wait
 		}
-		if events == 0 || events & ^allowed != 0 || !authority.Allows(rights) {
-			return kernelwait.Entry{}, kcall.StatusPermissionDenied
+		if events == 0 || events & ^allowed != 0 {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+		}
+		if !authority.Allows(rights) {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
 		if _, exists := streamRegistry.Lookup(object); !exists {
-			return kernelwait.Entry{}, kcall.StatusNotFound
+			return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
 		}
-		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindStream, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK
+		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindStream, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK, 0
 	case handle.TypeProcess:
-		if events != kcall.WaitCompleted || !authority.Allows(capability.Wait) {
-			return kernelwait.Entry{}, kcall.StatusPermissionDenied
+		if events != kcall.WaitCompleted {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+		}
+		if !authority.Allows(capability.Wait) {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
 		pid := process.ID(authority.Object())
 		if _, status := processRegistry.Wait(pid); status == process.WaitNotFound {
-			return kernelwait.Entry{}, kcall.StatusNotFound
+			return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
 		}
-		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindProcess, Object: uint64(pid)}, Events: kernelwait.Exited}, kcall.StatusOK
+		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindProcess, Object: uint64(pid)}, Events: kernelwait.Exited}, kcall.StatusOK, 0
 	default:
-		return kernelwait.Entry{}, kcall.StatusUnsupported
+		return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyType
 	}
 }
 
@@ -1509,6 +1539,9 @@ func writeWaitAnyMask(root, resultAddress uint64, mask uint16) kcall.Status {
 func publishWaitAny(key kernelwait.Key, event kernelwait.Event) {
 	count := waitAnyTable.Publish(key, event, waitAnyCompletions[:])
 	for index := 0; index < count && index < len(waitAnyCompletions); index++ {
+		if diag.Enabled {
+			traceWaitKey(diag.WaitComplete, pidOfTask(waitAnyCompletions[index].Task), waitAnyCompletions[index].Task, key, uint64(event))
+		}
 		amd64.WakeTaskID(uint64(waitAnyCompletions[index].Task))
 		waitAnyCompletions[index] = kernelwait.Completion{}
 	}
@@ -1517,6 +1550,9 @@ func publishWaitAny(key kernelwait.Key, event kernelwait.Event) {
 func expireWaitAny() {
 	count := waitAnyTable.Expire(amd64.TimerTicks(), waitAnyCompletions[:])
 	for index := 0; index < count && index < len(waitAnyCompletions); index++ {
+		if diag.Enabled {
+			trace(diag.WaitTimeout, pidOfTask(waitAnyCompletions[index].Task), uint64(waitAnyCompletions[index].Task), 0, 0)
+		}
 		amd64.WakeTaskID(uint64(waitAnyCompletions[index].Task))
 		waitAnyCompletions[index] = kernelwait.Completion{}
 	}
@@ -1677,10 +1713,13 @@ func main() {
 	console.WriteString("GDT_OK\n")
 	console.WriteString("IDT_OK\n")
 
-	amd64.StartBootstrapTimer()
+	amd64.StartBootstrapTimer(clock.PITDivisor)
 	for amd64.TimerTicks() < 3 {
 		amd64.Halt()
 	}
+	console.WriteString("Timer: ")
+	console.WriteUint(clock.TicksPerSecond)
+	console.WriteString(" Hz\n")
 	console.WriteString("TIMER_OK\n")
 
 	if !amd64.SetupBootstrapScheduler(&pageAllocator, pageTable) {

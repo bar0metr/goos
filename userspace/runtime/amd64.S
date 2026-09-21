@@ -176,6 +176,14 @@ goos_wait_any:
     ret
 .size goos_wait_any, .-goos_wait_any
 
+.global goos_diagnostics
+.type goos_diagnostics,@function
+goos_diagnostics:
+    movl $23, %eax
+    int $0x80
+    ret
+.size goos_diagnostics, .-goos_diagnostics
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

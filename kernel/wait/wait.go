@@ -194,6 +194,30 @@ func completion(op *operation) Completion {
 	return result
 }
 
+// View is a read-only copy of one slot's operation for diagnostics.
+type View struct {
+	Task     sched.TaskID
+	Deadline uint64
+	Entries  [MaxObjects]Entry
+	Ready    [MaxObjects]Event
+	Count    int
+	Active   bool
+	Complete bool
+	TimedOut bool
+}
+
+func (table *Table) At(slot int) (View, bool) {
+	if slot < 0 || slot >= len(table.operations) {
+		return View{}, false
+	}
+	op := &table.operations[slot]
+	if !op.active && !op.complete {
+		return View{}, false
+	}
+	return View{Task: op.task, Deadline: op.deadline, Entries: op.entries, Ready: op.readyEvents, Count: int(op.count),
+		Active: op.active, Complete: op.complete, TimedOut: op.timedOut}, true
+}
+
 func (table *Table) Count() int { return table.active }
 
 func (table *Table) RegistrationCount() int { return table.registered }
