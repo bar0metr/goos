@@ -103,3 +103,19 @@ func TestCloseAllInvalidatesAndReportsHandles(t *testing.T) {
 		t.Fatal("second closed handle still resolves")
 	}
 }
+
+func TestAtDescribesOnlyOpenHandles(t *testing.T) {
+	var table Table
+	id, _ := table.Insert(TypeChannel, capability.New(7, capability.Read))
+	found, typeID, cap, ok := table.At(0)
+	if !ok || found != id || typeID != TypeChannel || cap.Object() != 7 || cap.Rights() != capability.Read {
+		t.Fatal("open handle not described")
+	}
+	table.Close(id)
+	if _, _, _, ok := table.At(0); ok {
+		t.Fatal("closed handle described")
+	}
+	if _, _, _, ok := table.At(MaxHandles); ok {
+		t.Fatal("out-of-range slot described")
+	}
+}

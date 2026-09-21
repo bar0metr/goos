@@ -77,6 +77,11 @@ func (handler *testHandler) StreamWrite(stream uint64, address uint64, length ui
 	return StatusOK
 }
 
+func (handler *testHandler) Diagnostics(device uint64) Status {
+	handler.channel = device
+	return StatusUnsupported
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -197,5 +202,13 @@ func TestDispatchStreamOperations(t *testing.T) {
 	}
 	if result := Dispatch(Request{Operation: OperationStreamRead, Arg2: StreamDescriptorSize - 1}, handler); result.Status != StatusInvalidArgument {
 		t.Fatalf("short stream descriptor = %#v", result)
+	}
+}
+
+func TestDispatchDiagnosticsPassesDeviceHandle(t *testing.T) {
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationDiagnostics, Arg0: 7}, handler)
+	if result.Status != StatusUnsupported || handler.channel != 7 || result.Action != ActionReturn {
+		t.Fatalf("result %+v, device %d", result, handler.channel)
 	}
 }
