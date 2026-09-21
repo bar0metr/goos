@@ -1588,7 +1588,6 @@ func runDemoTaskA() {
 func runDemoTaskB() {
 	for {
 		demoTaskB++
-		expireWaitDeadlines()
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
 			amd64.WakeTask(1)
 		}
@@ -1597,8 +1596,8 @@ func runDemoTaskB() {
 }
 
 // expireWaitDeadlines releases waiters whose deadline has passed. It is driven
-// from the kernel's own loop: a deadline is the last line of defence behind an
-// event wakeup, so it must not depend on any particular task being scheduled.
+// from serviceKernel: a deadline is the last line of defence behind an event
+// wakeup, so it must not depend on any particular task being scheduled.
 func expireWaitDeadlines() {
 	expireIPCWaiters()
 	expireProcessWaiters()
@@ -2198,6 +2197,7 @@ func main() {
 	console.WriteString("USER_COPYOUT_OK\n")
 	console.WriteString("KCALL_ABI_OK\n")
 	console.WriteString("NATIVE_IMAGE_LOADER_OK\n")
+	flags := amd64.DisableInterrupts()
 	initTaskID, initTaskAdded := amd64.AddUserTask(&pageAllocator, rootInit, loadedInit.Entry, loadedInit.StackTop)
 	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, rootA, loadedA.Entry, loadedA.StackTop)
 	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, rootB, loadedB.Entry, loadedB.StackTop)
@@ -2208,9 +2208,9 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	amd64.RestoreInterrupts(flags)
 	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
-		deliverProcessExits()
-		consumeInitControl()
+		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")
 			console.WriteHex(uint64(initSendStatus))
@@ -2274,10 +2274,19 @@ func main() {
 	console.WriteString("BOOT_OK\n")
 
 	for {
-		expireWaitDeadlines()
-		flushLifecycle()
-		deliverProcessExits()
-		consumeInitControl()
+		serviceKernel()
 		amd64.Halt()
 	}
+}
+
+// serviceKernel runs one step of the kernel's own work inside the exclusion
+// domain native calls already run in. Preempted mid-step, it would expose torn
+// registries and handle tables to whichever task the timer selects next.
+func serviceKernel() {
+	flags := amd64.DisableInterrupts()
+	expireWaitDeadlines()
+	flushLifecycle()
+	deliverProcessExits()
+	consumeInitControl()
+	amd64.RestoreInterrupts(flags)
 }

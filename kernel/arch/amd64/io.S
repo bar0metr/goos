@@ -63,6 +63,20 @@ goos_scheduler_state_read:
     movq %rax, 24(%rcx)
     retq
 
+.global goos_interrupts_disable
+goos_interrupts_disable:
+    pushfq
+    popq %rax
+    cli
+    retq
+
+.global goos_interrupts_restore
+goos_interrupts_restore:
+    testq $0x200, %rcx
+    jz .interrupts_restore_done
+    sti
+.interrupts_restore_done:
+    retq
 
 .global goos_has_nx
 goos_has_nx:
