@@ -289,6 +289,7 @@ docs:
 	@test -f docs/architecture/logging.md
 	@test -f docs/adr/0064-asynchronous-exec-and-background-jobs.md
 	@test -f docs/adr/0062-startup-data-through-shared-memory.md
+	@test -f docs/adr/0063-mapping-shared-memory.md
 	@test -f docs/adr/0061-release-shell-commands-and-system-reset.md
 	@test -f docs/adr/0060-fat32-subdirectories.md
 	@test -f docs/development/building.md

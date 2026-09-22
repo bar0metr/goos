@@ -63,6 +63,11 @@ Task. Services resolve roles rather than depending on handle-table insertion
 order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
+The kernel also grants PID 1 a one-page exec page (handle `0x100000014`,
+`Read|Write|Transfer`) for the shell exec protocol. It is not mapped at boot;
+PID 1 maps it with `MemoryMap` and passes a derived `Read|Write` handle to the
+shell through the launch manifest (ADR 0063).
+
 Shell exec requests are restricted to simple names below `/system/bin`. A
 request carries one to four invocation records, a shared cwd, and a shared
 environment. The shell writes it into a 1024-byte slot of the exec page it

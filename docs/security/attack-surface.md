@@ -56,6 +56,7 @@ table with type, generation, and rights checks.
 | 27 | `HandleInfo` | registered; own table only | slot < 128; 16-byte `CopyOut` of ID, type, rights | none | no |
 | 28 | `ProcessInfo` | registered | index < 32; 32-byte `CopyOut` of PID, state, task count, name | none | no |
 | 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
+| 30 | `MemoryMap` | memory handle, Read (+ Write when writable), kernel-registered shared object | flags: only bit 0 (writable); address page-aligned and whole object inside `[0x40180000, 0x401c0000)`; every leaf must be free before any is installed | whole object, NX, non-owned; at most 4 registered objects | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording

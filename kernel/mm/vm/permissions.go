@@ -11,7 +11,10 @@ const (
 	UserCodeAddress    = uint64(0x40002000)
 	UserStackAddress   = uint64(0x40003000)
 	UserDataAddress    = uint64(0x40004000)
-	UserDMAAddress     = uint64(0x401c0000)
+	// Processes may map shared memory only inside [UserSharedAddress, UserSharedLimit).
+	UserSharedAddress = uint64(0x40180000)
+	UserSharedLimit   = uint64(0x401c0000)
+	UserDMAAddress    = uint64(0x401c0000)
 
 	entryPresent  = uint64(1 << 0)
 	entryWritable = uint64(1 << 1)
