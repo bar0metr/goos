@@ -39,11 +39,18 @@ DIAG ?= 0
 ifeq ($(filter $(DIAG),0 1),)
 $(error DIAG must be 0 or 1)
 endif
-ifeq ($(DIAG),1)
-TINYGO_TAGS := -tags "goos_hz$(HZ) goos_diag"
-else
-TINYGO_TAGS := -tags goos_hz$(HZ)
+VALIDATION ?= 0
+ifeq ($(filter $(VALIDATION),0 1),)
+$(error VALIDATION must be 0 or 1)
 endif
+BUILD_TAGS := goos_hz$(HZ)
+ifeq ($(DIAG),1)
+BUILD_TAGS += goos_diag
+endif
+ifeq ($(VALIDATION),1)
+BUILD_TAGS += goos_validation
+endif
+TINYGO_TAGS := -tags "$(BUILD_TAGS)"
 
 .DEFAULT_GOAL := all
 
@@ -57,13 +64,13 @@ kernel: $(KERNEL)
 
 $(BUILD_CONFIG): FORCE
 	@mkdir -p $(dir $@)
-	@[ "$$(cat $@ 2>/dev/null)" = "$(HZ) $(DIAG)" ] || printf '%s\n' '$(HZ) $(DIAG)' >$@
+	@[ "$$(cat $@ 2>/dev/null)" = "$(HZ) $(DIAG) $(VALIDATION)" ] || printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION)' >$@
 
 $(KERNEL_IO): kernel/arch/amd64/io.S
 	@mkdir -p $(KERNEL_DIR)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
-$(KERNEL): $(shell find kernel -type f) go.mod $(KERNEL_IO) $(BUILD_CONFIG)
+$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(BUILD_CONFIG)
 	@mkdir -p $(KERNEL_DIR)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
@@ -74,42 +81,42 @@ $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(BUILD_DIR)/userspace
 	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
 
-$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
+$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
 
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
+$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
 
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
-$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
+$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell internal/version internal/validation kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/coreutils
 
 $(COREUTILS_IMAGE): $(COREUTILS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(COREUTILS_ELF) $@
 
-$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
+$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
 
 $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
-$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup kernel/handle kernel/kcall kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
+$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup internal/validation internal/version kernel/handle kernel/kcall kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
 	@mkdir -p $(BUILD_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/virtio-blk
 
@@ -174,7 +181,8 @@ test-integration: kernel
 test-security:
 	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
 
-test-boot: iso
+test-boot:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
 	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
@@ -268,6 +276,7 @@ docs:
 	@test -f docs/adr/0055-safe-return-reschedule.md
 	@test -f docs/adr/0056-sse-state-in-task-context.md
 	@test -f docs/adr/0057-launch-path-and-latency-baseline.md
+	@test -f docs/adr/0058-normal-and-validation-builds.md
 	@test -f docs/development/building.md
 
 clean:

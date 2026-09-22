@@ -9,7 +9,7 @@ disk=${3:?disk path required}
 repeats=${LATENCY_REPEATS:-10}
 command_timeout=${COMMAND_TIMEOUT:-30}
 case $repeats in '' | *[!0-9]* | 0) echo "LATENCY_REPEATS must be a positive integer" >&2; exit 2 ;; esac
-read -r hz diag_build <build/config/build
+read -r hz diag_build validation_build <build/config/build
 log=build/logs/latency-hz$hz.log
 report=build/reports/latency-hz$hz.md
 fatal='PANIC\|_WAIT_PERMISSION_DENIED\|_WAIT_NOT_FOUND\|_WAIT_FAILED\|_RECEIVE_FAILED\|_SEND_FAILED\|_CONTROL_FAILED\|OUT_OF_MEMORY\|exec: no reply\|APP_.*FAILED\|INIT_EXEC_.*FAILED\|LIFECYCLE_QUEUE_OVERFLOW\|CLOCK_CALIBRATION_FAILED'
@@ -80,7 +80,7 @@ pid=$!
 exec 3>"$fifo"
 
 elapsed=0
-until grep -q SHELL_VFS_CONNECTED_OK "$log" 2>/dev/null && [ "$(prompts)" -ge 1 ]; do
+until [ "$(prompts)" -ge 1 ]; do
 	grep -q "$fatal" "$log" 2>/dev/null && fail "fatal marker during boot"
 	[ "$elapsed" -lt 1200 ] || fail "boot timeout"
 	sleep 0.1
@@ -103,7 +103,7 @@ EOF
 # The warm-up pass creates the file the persistent cases use and runs each
 # case once, so first-use costs do not land in the samples.
 run 'echo payload > /persist/latency.txt'
-grep -q SHELL_EXEC_OK "$work/output" || fail "creating /persist/latency.txt"
+! grep -q "exec:\|exit status:" "$work/output" || fail "creating /persist/latency.txt"
 while IFS= read -r command; do
 	run "$command"
 done <"$work/cases"

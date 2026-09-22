@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -94,7 +95,8 @@ func userspaceMain() {
 		fatal("SHELL_VFS_CONNECT_FAILED\n")
 	}
 	heapPointer = arenaBase
-	write("GoOS shell\nSHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\ngoos> ")
+	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
+	write("\ngoos> ")
 	for {
 		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
 		if status == uint64(kcall.StatusNotFound) {
@@ -173,7 +175,8 @@ func executeCommand(line []byte) {
 	name := string(invocation.Arguments[0])
 	switch {
 	case count == 1 && name == "help" && invocation.Count == 1:
-		write("builtins: help clear cd diag time\nexecutables: /system/bin\nSHELL_HELP_OK\n")
+		write("builtins: help clear cd diag time\nexecutables: /system/bin\n")
+		mark("SHELL_HELP_OK\n")
 	case count == 1 && name == "diag" && invocation.Count == 1:
 		if diagnostics(uint64(consoleHandle), 0) != 0 {
 			write("diag: unavailable in this build\n")
@@ -183,7 +186,7 @@ func executeCommand(line []byte) {
 		executeTimed(command)
 	case count == 1 && name == "clear" && invocation.Count == 1:
 		write("\x1b[2J\x1b[H")
-		write("SHELL_CLEAR_OK\n")
+		mark("SHELL_CLEAR_OK\n")
 	case count == 1 && name == "cd":
 		if invocation.Count > 2 {
 			write("cd: expected at most one path\n")
@@ -349,14 +352,14 @@ func executeExternal(line []byte) {
 			write("exit status: ")
 			writeUint(reply.ExitCode)
 			write("\n")
-			write("EXIT_STATUS_PROPAGATION_OK\n")
+			mark("EXIT_STATUS_PROPAGATION_OK\n")
 		}
-		write("SHELL_EXEC_OK\n")
+		mark("SHELL_EXEC_OK\n")
 		if requestData.Count > 1 {
-			write("PIPELINE_EXEC_OK\n")
+			mark("PIPELINE_EXEC_OK\n")
 		}
 		if redirectCount != 0 {
-			write("REDIRECTION_EXEC_OK\n")
+			mark("REDIRECTION_EXEC_OK\n")
 		}
 		return
 	}
@@ -391,7 +394,7 @@ func executeCd(argument []byte) {
 	}
 	copy(cwd[:], path)
 	cwdSize = len(path)
-	write("SHELL_CD_OK\n")
+	mark("SHELL_CD_OK\n")
 }
 
 func callVFS(request vfs.Request) (vfs.Reply, bool) {
@@ -445,6 +448,12 @@ func writeVFSError(command string, status vfs.Status) {
 		write("resource exhausted\n")
 	default:
 		write("VFS error\n")
+	}
+}
+
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
 	}
 }
 

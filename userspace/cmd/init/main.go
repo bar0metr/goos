@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -96,17 +97,21 @@ func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
-	if !probeStreamEndpoint() {
-		fatal("STREAM_ENDPOINT_FAILED\n")
+	if validation.Enabled {
+		if !probeStreamEndpoint() {
+			fatal("STREAM_ENDPOINT_FAILED\n")
+		}
+		mark("STREAM_ENDPOINT_OK\n")
+		if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
+			Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+			manager.StartReady(0, bootstrapService) != 1 {
+			fatal("INIT_POLICY_SETUP_FAILED\n")
+		}
+		mark("INIT_PROCESS_OK\n")
+		mark("INIT_LIFECYCLE_IPC_OK\n")
+	} else {
+		startServices(0)
 	}
-	write("STREAM_ENDPOINT_OK\n")
-	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
-		Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
-		manager.StartReady(0, bootstrapService) != 1 {
-		fatal("INIT_POLICY_SETUP_FAILED\n")
-	}
-	write("INIT_PROCESS_OK\n")
-	write("INIT_LIFECYCLE_IPC_OK\n")
 	for {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
@@ -143,43 +148,52 @@ func userspaceMain() {
 		}
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
 		snapshot, found := manager.Snapshot("fault-probe")
-		if found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
-			if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
-				Capabilities: []supervisor.Capability{
-					{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-					{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
-					Capabilities: []supervisor.Capability{
-						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-						{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
-					Capabilities: []supervisor.Capability{
-						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-						{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
-						{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
-						{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
-						{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
-					Capabilities: []supervisor.Capability{
-						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-						{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService) != 4 || !probeBlockService() {
-				fatal("SHELL_LAUNCH_FAILED\n")
-			}
-			supervisionComplete = true
-			arenaBase = heapPointer
-			write("USERSPACE_SUPERVISOR_OK\n")
+		if validation.Enabled && found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
+			startServices(supervisionTicks)
+			mark("USERSPACE_SUPERVISOR_OK\n")
 		}
 	}
+}
+
+// startServices registers the system services and launches them in
+// dependency order, reporting each on the console.
+func startServices(ticks uint64) {
+	write("\nStarting services...\n")
+	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
+		Capabilities: []supervisor.Capability{
+			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+				{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+				{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
+				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
+				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
+				{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+				{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 4 || validation.Enabled && !probeBlockService() {
+		fatal("SHELL_LAUNCH_FAILED\n")
+	}
+	supervisionComplete = true
+	arenaBase = heapPointer
 }
 
 func probeStreamEndpoint() bool {
@@ -248,7 +262,7 @@ func probeBlockService() bool {
 	if status != ipc.StatusOK || !valid || flushReply.Status != blockproto.StatusOK {
 		return false
 	}
-	write("BLOCK_SERVICE_IO_OK\n")
+	mark("BLOCK_SERVICE_IO_OK\n")
 	return true
 }
 
@@ -290,15 +304,15 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if !ok || ipcSend(lifecycleHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
 		return 0, false
 	}
-	write("INIT_SERVICE_LAUNCH_OK\n")
+	mark("INIT_SERVICE_LAUNCH_OK\n")
+	name := bytesString(spec.Name[:spec.NameSize])
 	event, status := receiveLaunchResult(correlation)
-	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) {
+	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || handleClose(uint64(event.ProcessHandle)) != 0 {
+		write("[FAIL] " + name + "\n")
 		return 0, false
 	}
-	if handleClose(uint64(event.ProcessHandle)) != 0 {
-		return 0, false
-	}
-	write("INIT_SERVICE_STARTED_OK\n")
+	mark("INIT_SERVICE_STARTED_OK\n")
+	write("[ OK ] " + name + "\n")
 	return event.Process, true
 }
 
@@ -558,7 +572,7 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 			fatal("INIT_EXEC_CLOSE_FAILED\n")
 		}
 		if !processWaitAnnounced {
-			write("PROCESS_HANDLE_WAIT_OK\n")
+			mark("PROCESS_HANDLE_WAIT_OK\n")
 			processWaitAnnounced = true
 		}
 		return exitCode
@@ -592,6 +606,12 @@ func bytesString(value []byte) string {
 
 func write(message string) {
 	debugWrite(unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+}
+
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
 }
 
 func fatal(message string) {

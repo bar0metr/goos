@@ -210,6 +210,14 @@ goos>
 
 Boot and integration tests remain mandatory; only their placement changes.
 
+Current progress: ADR 0058 splits the build into a normal and a validation
+variant. A normal build boots quietly to a banner, `Starting services...`, one
+`[ OK ]` line per service, and the prompt. `VALIDATION=1` keeps the kernel
+self-tests, the scheduling demonstration, the isolation and fault-injection
+processes, PID 1's supervision scenario, and every `*_OK` marker; `make
+test-boot` always uses it, while the stress and latency harnesses run the
+normal build.
+
 ## Priority 5 — Linux ABI compatibility
 
 Begin Linux compatibility only after native process startup, persistent storage,

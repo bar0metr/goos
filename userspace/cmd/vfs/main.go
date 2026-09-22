@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -138,8 +139,8 @@ func userspaceMain() {
 		fatal("VFS_FAT32_MOUNT_FAILED\n")
 	}
 	arenaBase = heapPointer
-	write("VFS_SERVICE_OK\n")
-	write("FAT32_MOUNT_OK\n")
+	mark("VFS_SERVICE_OK\n")
+	mark("FAT32_MOUNT_OK\n")
 	for {
 		heapPointer = arenaBase
 		var interests [userwait.MaxObjects]userwait.Interest
@@ -290,6 +291,12 @@ func receiveNow(channel uint64) (ipc.Message, ipc.Status) {
 		return ipc.Message{}, ipc.StatusInvalidArgument
 	}
 	return message, ipc.StatusOK
+}
+
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
 }
 
 func write(message string) {

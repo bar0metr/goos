@@ -229,76 +229,31 @@ make run
 The resulting image is written to `build/goos-x86_64.iso`. All intermediate
 files and caches remain under `build/`.
 
-A successful boot currently produces:
+A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1-dev
-Kernel
+GoOS 0.1.0-dev
+TinyGo kernel
 
 CPU: x86_64
-Boot: UEFI
-Security: capabilities (foundation)
-BOOT_SERVICES_EXITED
-Memory: 375 MiB usable
-Physical pages free: 96043
-PMM_OK
-NX_WX_OK
-VM_OK
-EXCEPTION_OK
-GDT_OK
-IDT_OK
+Memory: 368 MiB usable
 Timer: 100 Hz
-TIMER_OK
-STACK_GUARDS_OK
-TASK_BLOCK_OK
-TASK_WAKE_OK
-TASK_A_OK
-TASK_B_OK
-IDLE_TASK_OK
-SCHEDULER_OK
-HANDLE_TABLE_OK
-PROCESS_MODEL_OK
-IPC_WIRE_OK
-IPC_REQUEST_REPLY_OK
-IPC_HANDLE_TRANSFER_OK
-IPC_BOUNDED_OK
-IPC_PEER_DEATH_OK
-SHMEM_OBJECT_OK
-SHMEM_ZERO_COPY_OK
-SHMEM_RIGHTS_OK
-ADDRESS_SPACE_A_OK
-ADDRESS_SPACE_B_OK
-PROCESS_ISOLATION_OK
-USER_RX_OK
-USER_STACK_NX_OK
-USER_COPYOUT_OK
-KCALL_ABI_OK
-NATIVE_IMAGE_LOADER_OK
-USER_COPYIN_OK
-USER_DEBUG_WRITE_OK
-USER_EXIT_OK
-USER_PREEMPT_OK
-PROCESS_CR3_SCHED_OK
-USER_FAULT_ISOLATION_OK
-USER_RING3_OK
-NATIVE_PROCESS_OK
-INIT_PROCESS_OK
-INIT_LIFECYCLE_IPC_OK
-INIT_SERVICE_LAUNCH_OK
-INIT_SERVICE_STARTED_OK
-INITRAMFS_DISCOVERY_OK
-PID1_INIT_OK
-PROCESS_EXIT_EVENT_OK
-PROCESS_RECLAIM_OK
-PROCESS_WAIT_OK
-PROCESS_HANDLE_WAIT_OK
-SUPERVISOR_CRASH_EVENT_OK
-LIFECYCLE_IPC_OK
-NATIVE_STARTUP_ABI_OK
-PID1_SERVICE_LAUNCH_OK
+Security: capabilities, NX, W^X
+Scheduler: preemptive round-robin
 Kernel initialized
-BOOT_OK
+
+Starting services...
+[ OK ] vfs
+[ OK ] block
+[ OK ] virtio-blk
+[ OK ] shell
+
+goos>
 ```
+
+`make VALIDATION=1` builds the validation variant used by `make test-boot`. It
+runs the kernel self-tests and fault-injection scenarios and prints the `*_OK`
+markers that the boot test asserts.
 
 `make run` attaches COM1 to the current terminal. `make run-debug` starts QEMU
 paused with a GDB server on TCP port 1234. `make test-performance` stores

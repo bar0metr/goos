@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -123,7 +124,7 @@ func userspaceMain() {
 		fatal("BLOCK_SERVICE_INIT_FAILED\n")
 	}
 	arenaBase = heapPointer
-	write("BLOCK_SERVICE_OK\n")
+	mark("BLOCK_SERVICE_OK\n")
 	for {
 		heapPointer = arenaBase
 		endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
@@ -197,6 +198,12 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 	valid := ipc.DecodeInto(driverWire[:ipc.WireHeaderSize+payloadSize+int(driverWire[26])*8], &driverReply)
 	reply, validReply := blockproto.DecodeReplyFrom(&driverReply)
 	return reply, valid && validReply && driverReply.Correlation == correlation
+}
+
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
 }
 
 func write(message string) {

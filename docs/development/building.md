@@ -50,7 +50,13 @@ reports that it is unavailable.
 `make HZ=<rate> test-latency` measures command latency at one rate and writes
 `build/reports/latency-hz<rate>.md`; see `docs/development/testing.md`.
 
-`build/config/build` records the active `HZ` and `DIAG` values. Changing either
+`VALIDATION=1` builds the validation variant (ADR 0058): kernel self-tests,
+fault injection, PID 1's supervision scenario, and the `*_OK` markers the boot
+test asserts. A normal build runs none of them and prints only the banner,
+service status, and prompt. `make test-boot` always builds the validation
+variant.
+
+`build/config/build` records the active `HZ`, `DIAG`, and `VALIDATION` values. Changing any
 rebuilds the kernel and userspace; repeating a build with the same values does
 not.
 
