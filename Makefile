@@ -103,7 +103,7 @@ $(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspa
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
-$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell internal/version internal/validation kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell userspace/wait internal/version internal/validation kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/coreutils
 
@@ -287,8 +287,11 @@ docs:
 	@test -f docs/adr/0058-normal-and-validation-builds.md
 	@test -f docs/adr/0059-structured-system-log.md
 	@test -f docs/architecture/logging.md
+	@test -f docs/adr/0068-timed-sleep.md
+	@test -f docs/adr/0067-stopping-jobs.md
 	@test -f docs/adr/0064-asynchronous-exec-and-background-jobs.md
 	@test -f docs/adr/0065-kernel-heap-discipline.md
+	@test -f docs/adr/0066-fat32-long-names.md
 	@test -f docs/adr/0062-startup-data-through-shared-memory.md
 	@test -f docs/adr/0063-mapping-shared-memory.md
 	@test -f docs/adr/0061-release-shell-commands-and-system-reset.md

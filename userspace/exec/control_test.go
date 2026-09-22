@@ -6,17 +6,34 @@ import (
 )
 
 func TestControlRequestRoundTrip(t *testing.T) {
-	message, ok := EncodeControl(ControlReboot, 7)
-	operation, decoded := DecodeControl(message)
-	if !ok || !decoded || operation != ControlReboot || !IsControl(message) {
-		t.Fatalf("operation %d %v %v", operation, ok, decoded)
+	message, ok := EncodeControl(ControlReboot, 0, 7)
+	operation, argument, decoded := DecodeControl(message)
+	if !ok || !decoded || operation != ControlReboot || argument != 0 || !IsControl(message) {
+		t.Fatalf("operation %d %d %v %v", operation, argument, ok, decoded)
 	}
-	if _, ok := EncodeControl(ControlOperation(9), 7); ok {
-		t.Fatal("unknown operation encoded")
+	kill, ok := EncodeControl(ControlKill, Slots-1, 8)
+	operation, argument, decoded = DecodeControl(kill)
+	if !ok || !decoded || operation != ControlKill || argument != Slots-1 {
+		t.Fatalf("kill = %d %d %v %v", operation, argument, ok, decoded)
 	}
-	message.Payload[0] = 9
-	if _, ok := DecodeControl(message); ok {
-		t.Fatal("unknown operation decoded")
+	for _, bad := range []struct {
+		operation ControlOperation
+		argument  uint8
+	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}} {
+		if _, ok := EncodeControl(bad.operation, bad.argument, 7); ok {
+			t.Fatalf("encoded %#v", bad)
+		}
+	}
+	for _, mutate := range []func(*ipc.Message){
+		func(m *ipc.Message) { m.Payload[0] = 9 },
+		func(m *ipc.Message) { m.Payload[1] = 1 },
+		func(m *ipc.Message) { m.PayloadSize = 1 },
+	} {
+		corrupt := message
+		mutate(&corrupt)
+		if _, _, ok := DecodeControl(corrupt); ok {
+			t.Fatal("decoded malformed control request")
+		}
 	}
 	if _, _, ok := DecodeSubmit(message); ok {
 		t.Fatal("control message decoded as a launch request")

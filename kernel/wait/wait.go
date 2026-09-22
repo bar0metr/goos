@@ -65,9 +65,11 @@ type Table struct {
 	registered int
 }
 
+// Begin registers a wait. An empty interest set is a timed sleep and needs a
+// deadline, or the task would never run again.
 func (table *Table) Begin(task sched.TaskID, entries []Entry, deadline uint64) bool {
 	slot, _, valid := task.Parts()
-	if !valid || len(entries) == 0 || len(entries) > MaxObjects {
+	if !valid || len(entries) > MaxObjects || len(entries) == 0 && deadline == 0 {
 		return false
 	}
 	for index, entry := range entries {

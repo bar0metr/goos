@@ -51,6 +51,8 @@ type job struct {
 	active      bool
 	background  bool
 	correlation uint64
+	command     [tty.MaxLine]byte
+	commandSize int
 }
 
 //go:linkname memoryMap goos_memory_map
@@ -138,6 +140,12 @@ func userspaceMain() {
 		}
 		if status != 0 {
 			fatal("SHELL_INPUT_FAILED\n")
+		}
+		if inputByte == 3 {
+			write("^C\n")
+			editor.Reset()
+			write("goos> ")
+			continue
 		}
 		line, complete, accepted := editor.Feed(inputByte)
 		if !accepted {
@@ -231,12 +239,20 @@ func executeCommand(line []byte) {
 	name := string(invocation.Arguments[0])
 	switch {
 	case count == 1 && name == "help" && invocation.Count == 1:
-		write("builtins: help clear cd services handles caps log reboot diag time\nexecutables: /system/bin\n")
+		write("builtins: help clear cd services handles caps log jobs kill reboot diag time\nexecutables: /system/bin\n")
 		mark("SHELL_HELP_OK\n")
 	case count == 1 && name == "log" && invocation.Count == 1:
 		printLog()
 	case count == 1 && name == "services" && invocation.Count == 1:
 		printServices()
+	case count == 1 && name == "jobs" && invocation.Count == 1:
+		printJobs()
+	case count == 1 && name == "kill":
+		if invocation.Count != 2 {
+			write("kill: expected one job\n")
+		} else {
+			killJob(invocation.Arguments[1])
+		}
 	case count == 1 && name == "reboot" && invocation.Count == 1:
 		reboot()
 	case count == 1 && name == "handles" && invocation.Count == 1:
@@ -291,9 +307,67 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
 }
 
-// execReplyDeadline bounds one receive; a foreground command may run longer,
-// and a dead PID 1 is reported as a closed channel.
-const execReplyDeadline = 5 * clock.TicksPerSecond
+// interruptPoll bounds one receive so the shell can look for Ctrl-C while a
+// foreground command runs. A command may run for as long as it likes; a dead
+// PID 1 is reported as a closed channel.
+const interruptPoll = clock.TicksPerSecond / 10
+
+// interrupted reports whether Ctrl-C was typed. Other input during a command
+// is discarded: the shell has no line discipline to buffer it.
+func interrupted() bool {
+	for {
+		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
+		if status != 0 {
+			return false
+		}
+		if inputByte == 3 {
+			return true
+		}
+	}
+}
+
+func printJobs() {
+	found := false
+	for index := range jobs {
+		if !jobs[index].active || !jobs[index].background {
+			continue
+		}
+		found = true
+		write("[")
+		writeUint(uint64(index) + 1)
+		write("] running  ")
+		write(string(jobs[index].command[:jobs[index].commandSize]))
+		write("\n")
+	}
+	if !found {
+		write("no background jobs\n")
+	}
+	mark("SHELL_JOBS_OK\n")
+}
+
+// killJob stops one background job, named as N or %N.
+func killJob(argument []byte) {
+	if len(argument) != 0 && argument[0] == '%' {
+		argument = argument[1:]
+	}
+	number, ok := parseUint(argument)
+	if !ok || number == 0 || number > uint64(len(jobs)) {
+		write("kill: invalid job\n")
+		return
+	}
+	slot := number - 1
+	if !jobs[slot].active || !jobs[slot].background {
+		write("kill: no such job\n")
+		return
+	}
+	reply, ok := controlExchange(execproto.ControlKill, uint8(slot))
+	status, valid := execproto.DecodeControlStatus(reply)
+	if !ok || !valid || status != execproto.ControlOK {
+		write("kill: job could not be stopped\n")
+		return
+	}
+	mark("SHELL_KILL_OK\n")
+}
 
 func executeExternal(line []byte, background bool) {
 	redirects, validRedirect := shellcmd.SplitRedirections(line)
@@ -389,13 +463,14 @@ func executeExternal(line []byte, background bool) {
 		return
 	}
 	jobs[slot] = job{active: true, background: background, correlation: correlation}
+	jobs[slot].commandSize = copy(jobs[slot].command[:], line)
 	if background {
 		write("[")
 		writeUint(uint64(slot) + 1)
 		write("] started\n")
 		return
 	}
-	message, received := awaitReply(correlation)
+	message, received := awaitReply(correlation, int(slot))
 	jobs[slot].active = false
 	reply, validReply := execproto.DecodeReply(message)
 	if !received {
@@ -411,7 +486,9 @@ func executeExternal(line []byte, background bool) {
 		write("\n")
 		return
 	}
-	if reply.ExitCode != 0 {
+	if reply.ExitCode == kcall.ExitKilled {
+		mark("SHELL_KILL_OK\n")
+	} else if reply.ExitCode != 0 {
 		write("exit status: ")
 		writeUint(reply.ExitCode)
 		write("\n")
@@ -457,10 +534,15 @@ func sendExec(request ipc.Message) bool {
 }
 
 // awaitReply receives until the reply with correlation arrives, reporting
-// background jobs that finish in the meantime.
-func awaitReply(correlation uint64) (ipc.Message, bool) {
+// background jobs that finish in the meantime. While a foreground job runs,
+// Ctrl-C stops it; other input typed during the command is discarded.
+func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 	for {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, execReplyDeadline
+		if foreground >= 0 && interrupted() {
+			write("^C\n")
+			controlExchange(execproto.ControlKill, uint8(foreground))
+		}
+		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, interruptPoll
 		status := ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
 			continue
@@ -526,6 +608,8 @@ func reportJob(message ipc.Message) bool {
 			write("] launch failed: ")
 			writeUint(reply.LaunchStatus)
 			write("\n")
+		case reply.ExitCode == kcall.ExitKilled:
+			write("] killed\n")
 		case reply.ExitCode != 0:
 			write("] exit status: ")
 			writeUint(reply.ExitCode)
@@ -548,20 +632,20 @@ var (
 )
 
 // controlExchange sends one control request to PID 1 and returns its reply.
-func controlExchange(operation execproto.ControlOperation) (ipc.Message, bool) {
+func controlExchange(operation execproto.ControlOperation, argument uint8) (ipc.Message, bool) {
 	correlation++
-	request, ok := execproto.EncodeControl(operation, correlation)
+	request, ok := execproto.EncodeControl(operation, argument, correlation)
 	if !ok {
 		return ipc.Message{}, false
 	}
 	if !sendExec(request) {
 		return ipc.Message{}, false
 	}
-	return awaitReply(correlation)
+	return awaitReply(correlation, -1)
 }
 
 func printServices() {
-	reply, ok := controlExchange(execproto.ControlServices)
+	reply, ok := controlExchange(execproto.ControlServices, 0)
 	count, valid := execproto.DecodeServices(reply, &serviceEntries)
 	if !ok || !valid {
 		write("services: no reply\n")
@@ -582,7 +666,7 @@ func printServices() {
 }
 
 func reboot() {
-	reply, ok := controlExchange(execproto.ControlReboot)
+	reply, ok := controlExchange(execproto.ControlReboot, 0)
 	if !ok || reply.PayloadSize != 1 || int(reply.Payload[0]) >= len(controlStatus) || reply.Payload[0] == 0 {
 		write("reboot: no reply\n")
 		return
@@ -777,6 +861,21 @@ func writeBytes(value []byte) {
 	if len(value) != 0 {
 		consoleWrite(uint64(consoleHandle), unsafe.Pointer(&value[0]), uintptr(len(value)))
 	}
+}
+
+// parseUint reads a bounded decimal job number.
+func parseUint(value []byte) (uint64, bool) {
+	if len(value) == 0 || len(value) > 3 {
+		return 0, false
+	}
+	result := uint64(0)
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, false
+		}
+		result = result*10 + uint64(character-'0')
+	}
+	return result, true
 }
 
 func writeUint(value uint64) {

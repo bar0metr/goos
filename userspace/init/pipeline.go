@@ -179,6 +179,14 @@ func (job *Job) skipIdle() {
 	}
 }
 
+// Processes returns the handles of the stages that are still running.
+func (job *Job) Processes() []handle.ID {
+	if job.next >= job.count {
+		return nil
+	}
+	return job.processes[job.next:job.count]
+}
+
 // Result reports the last stdout stage's PID and the first non-zero exit code
 // in stage order, or the launch failure.
 func (job *Job) Result() (uint64, LaunchStatus, uint64) {

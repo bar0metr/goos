@@ -22,7 +22,7 @@ type Result struct {
 // It observes readiness only; callers retain responsibility for the typed
 // receive/read/process operation that consumes the ready state.
 func Any(interests *[MaxObjects]Interest, count int, timeout uint64) (Result, kcall.Status) {
-	if interests == nil || count <= 0 || count > MaxObjects {
+	if interests == nil || count < 0 || count > MaxObjects {
 		return Result{}, kcall.StatusInvalidArgument
 	}
 	descriptor := [2]uint64{timeout, 0}
@@ -32,6 +32,14 @@ func Any(interests *[MaxObjects]Interest, count int, timeout uint64) (Result, kc
 		unsafe.Pointer(&descriptor[0]),
 	)
 	return Result{ReadyMask: uint16(descriptor[1])}, kcall.Status(status)
+}
+
+// Sleep blocks the caller for timeout ticks. It is Any with no interests, so
+// the kernel needs no separate sleep operation.
+func Sleep(timeout uint64) kcall.Status {
+	var interests [MaxObjects]Interest
+	_, status := Any(&interests, 0, timeout)
+	return status
 }
 
 //go:linkname goosWaitAny goos_wait_any

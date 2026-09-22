@@ -963,6 +963,43 @@ goos_set_current_task_exit_code:
     movq %rcx, (%rdx,%rax,8)
     retq
 
+// goos_terminate_task(task, code) marks another task dead, the way a faulting
+// task is retired. The caller has already cancelled its wait registrations.
+.global goos_terminate_task
+goos_terminate_task:
+    xorq %rax, %rax
+    movl %ecx, %r8d
+    testl %r8d, %r8d
+    jz .terminate_task_done
+    cmpl $64, %r8d
+    ja .terminate_task_done
+    decl %r8d
+    movq %rcx, %r9
+    shrq $32, %r9
+    leaq goos_task_generations(%rip), %r10
+    cmpq (%r10,%r8,8), %r9
+    jne .terminate_task_done
+    cmpq $GOOS_KERNEL_SLOT, %r8
+    je .terminate_task_done
+    cmpq $GOOS_IDLE_SLOT, %r8
+    je .terminate_task_done
+    cmpq goos_current_task(%rip), %r8
+    je .terminate_task_done
+    pushfq
+    cli
+    btq %r8, goos_task_dead_mask(%rip)
+    jc .terminate_task_locked
+    leaq goos_task_exit_codes(%rip), %r10
+    movq %rdx, (%r10,%r8,8)
+    btsq %r8, goos_task_exit_pending(%rip)
+    btrq %r8, goos_runnable_mask(%rip)
+    btsq %r8, goos_task_dead_mask(%rip)
+    movq $1, %rax
+.terminate_task_locked:
+    popfq
+.terminate_task_done:
+    retq
+
 .global goos_take_exited_task
 goos_take_exited_task:
     pushfq

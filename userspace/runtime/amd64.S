@@ -240,6 +240,14 @@ goos_memory_map:
     ret
 .size goos_memory_map, .-goos_memory_map
 
+.global goos_process_kill
+.type goos_process_kill,@function
+goos_process_kill:
+    movl $31, %eax
+    int $0x80
+    ret
+.size goos_process_kill, .-goos_process_kill
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

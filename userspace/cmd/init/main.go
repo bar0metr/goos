@@ -40,6 +40,9 @@ const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
 const systemControlHandle = uint64(0x0000000100000012)
 const execPageHandle = handle.ID(0x0000000100000014)
 
+//go:linkname processKill goos_process_kill
+func processKill(process uint64) uint64
+
 //go:linkname memoryMap goos_memory_map
 func memoryMap(memory uint64, address uint64, flags uint64) uint64
 
@@ -514,10 +517,12 @@ func finishJob(job *execJob) {
 
 // handleControl answers the shell's requests that launch nothing.
 func handleControl(message ipc.Message) {
-	operation, ok := execproto.DecodeControl(message)
+	operation, argument, ok := execproto.DecodeControl(message)
 	switch {
 	case !ok:
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
+	case operation == execproto.ControlKill:
+		sendControlStatus(killJob(argument), message.Correlation)
 	case operation == execproto.ControlServices:
 		var entries [execproto.MaxServiceEntries]execproto.ServiceEntry
 		count := 0
@@ -556,6 +561,29 @@ func handleControl(message ipc.Message) {
 		syslog.Error("reboot: reset refused")
 		sendControlStatus(execproto.ControlResetFailed, correlationOfShell)
 	}
+}
+
+// killJob stops every stage of the job in one slot. The kernel retires their
+// tasks, so the reply to the job itself still arrives through the normal path.
+func killJob(slot uint8) execproto.ControlStatus {
+	for index := range execJobs {
+		job := &execJobs[index]
+		if !job.active || job.slot != slot {
+			continue
+		}
+		stopped := false
+		for _, process := range job.job.Processes() {
+			if process != 0 && processKill(uint64(process)) == 0 {
+				stopped = true
+			}
+		}
+		if !stopped {
+			return execproto.ControlNotFound
+		}
+		syslog.Info("job stopped", syslog.Uint("slot", uint64(slot)))
+		return execproto.ControlOK
+	}
+	return execproto.ControlNotFound
 }
 
 func sendControlStatus(status execproto.ControlStatus, correlation uint64) {

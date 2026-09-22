@@ -170,6 +170,12 @@ func TaskIDForSlot(slot uint64) uint64
 //export goos_set_current_task_exit_code
 func SetCurrentTaskExitCode(code uint64)
 
+// TerminateTask retires another task with an exit code, as a fault does. The
+// caller cancels the task's wait registrations first.
+//
+//export goos_terminate_task
+func TerminateTask(task uint64, code uint64) bool
+
 //export goos_take_exited_task
 func TakeExitedTask() uint64
 

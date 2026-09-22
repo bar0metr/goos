@@ -13,6 +13,7 @@ import (
 	"goos/kernel/vfs"
 	"goos/userspace/shell"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 	"runtime"
 	"unsafe"
 )
@@ -492,19 +493,65 @@ func runUptime() {
 func runSleep(data startup.Data) {
 	value, found := data.Arg(1)
 	if !found {
-		finish(2, "sleep: ticks required\n")
+		finish(2, "sleep: seconds required\n")
 	}
-	duration, ok := parseUint(value)
-	if !ok || clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
-		finish(2, "sleep: invalid ticks\n")
+	duration, ok := parseSeconds(value)
+	if !ok {
+		finish(2, "sleep: invalid duration\n")
+	}
+	if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
+		finish(2, "sleep unavailable\n")
 	}
 	deadline := clockValue + duration
 	for clockValue < deadline {
+		// A wait with no interests blocks until the deadline instead of
+		// spinning on the clock.
+		userwait.Sleep(deadline - clockValue)
 		if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
 			finish(2, "sleep unavailable\n")
 		}
 	}
 	mark("SLEEP_PROCESS_OK\n")
+}
+
+// parseSeconds converts seconds, with up to three decimals, into timer ticks.
+// A non-zero duration never rounds down to no wait at all.
+func parseSeconds(value []byte) (uint64, bool) {
+	var whole, fraction uint64
+	digits, seen, point := 0, false, false
+	for _, character := range value {
+		switch {
+		case character >= '0' && character <= '9':
+			seen = true
+			if point {
+				if digits < 3 {
+					fraction = fraction*10 + uint64(character-'0')
+					digits++
+				}
+				continue
+			}
+			whole = whole*10 + uint64(character-'0')
+			if whole > 86400 {
+				return 0, false
+			}
+		case character == '.' && !point:
+			point = true
+		default:
+			return 0, false
+		}
+	}
+	if !seen {
+		return 0, false
+	}
+	for digits < 3 {
+		fraction *= 10
+		digits++
+	}
+	ticks := whole*clock.TicksPerSecond + fraction*clock.TicksPerSecond/1000
+	if ticks == 0 && (whole != 0 || fraction != 0) {
+		ticks = 1
+	}
+	return ticks, true
 }
 
 func runPS() {

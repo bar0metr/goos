@@ -325,14 +325,32 @@ rm -f "$log" "$reboot_log"
 	sleep 2
 	printf 'cat /persist/startup.txt\n'
 	sleep 1
-	printf 'sleep 500 &\n'
+	printf 'mkdir /persist/long-directory-name\n'
+	sleep 2
+	printf 'write /persist/long-directory-name/startup-block-regression.txt "a long file name in a long directory"\n'
+	sleep 2
+	printf 'cat /persist/long-directory-name/startup-block-regression.txt\n'
 	sleep 1
-	printf 'sleep 500 &\n'
+	printf 'ls /persist/long-directory-name\n'
+	sleep 1
+	printf 'ls /persist\n'
+	sleep 1
+	printf 'sleep 4 &\n'
+	sleep 1
+	printf 'sleep 30 &\n'
+	sleep 1
+	printf 'jobs\n'
 	sleep 1
 	printf 'services\n'
 	sleep 1
 	printf 'echo foreground while jobs run\n'
-	sleep 5
+	sleep 1
+	printf 'kill %%2\n'
+	sleep 3
+	printf 'sleep 30\n'
+	sleep 2
+	printf '\003'
+	sleep 2
 	deep=/persist
 	for dir in aaaaaaaa bbbbbbbb cccccccc dddddddd eeeeeeee; do
 		deep=$deep/$dir
@@ -504,11 +522,16 @@ require_regex release.caps '^console   device    read,write$' 'shell console cap
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
-require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$log" 'goos> sleep 500 &'
-require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 500 &'
-require_window jobs.foreground '^foreground while jobs run$' 'foreground command runs while jobs are active' "$log" 'goos> echo foreground while jobs run' '[1] done'
-require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 500 &'
-require_regex jobs.done-2 '^\[2\] done$' 'second background job reported' "$log" 'goos> sleep 500 &'
+require_regex release.long-name-read '^a long file name in a long directory$' 'long name created and read back' "$log" 'goos> cat /persist/long-directory-name/startup-block-regression.txt'
+require_window release.long-name-listed 'startup-block-regression\.txt' 'long file name in ls output' "$log" 'goos> ls /persist/long-directory-name' 'goos> ls /persist'
+require_window release.long-directory-listed 'long-directory-name' 'long directory name in ls output' "$log" 'goos> ls /persist' 'goos> sleep 4 &'
+require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$log" 'goos> sleep 4 &'
+require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 30 &'
+require_regex jobs.list '^\[2\] running  sleep 30$' 'jobs lists a running background job' "$log" 'goos> jobs'
+require_window jobs.foreground '^foreground while jobs run$' 'foreground command runs while a job is active' "$log" 'goos> echo foreground while jobs run' '[2] killed'
+require_regex jobs.killed '^\[2\] killed$' 'kill stops a background job' "$log" 'goos> kill %2'
+require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 4 &'
+require_regex jobs.interrupt '^\^C$' 'Ctrl-C stops the foreground command' "$log" 'goos> sleep 30'
 require_regex exec.large-pipeline '^pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz$' 'pipeline request over 256 bytes' "$log" 'readline | readline | readline'
 pass_group release-shell
 
