@@ -192,6 +192,22 @@ goos_clock_read_nanos:
     ret
 .size goos_clock_read_nanos, .-goos_clock_read_nanos
 
+.global goos_log_write
+.type goos_log_write,@function
+goos_log_write:
+    movl $25, %eax
+    int $0x80
+    ret
+.size goos_log_write, .-goos_log_write
+
+.global goos_log_read
+.type goos_log_read,@function
+goos_log_read:
+    movl $26, %eax
+    int $0x80
+    ret
+.size goos_log_read, .-goos_log_read
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

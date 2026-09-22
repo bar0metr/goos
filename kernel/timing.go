@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
 	"goos/kernel/diag"
@@ -30,7 +31,7 @@ func calibrateClock() {
 	endTick := amd64.TimerTicks()
 	end := amd64.ReadTSC()
 	if !monotonicClock.Calibrate(startTick, start, end, endTick-startTick) {
-		amd64.NewCOM1().WriteString("CLOCK_CALIBRATION_FAILED\n")
+		kernelLog(logfmt.Error, "CLOCK_CALIBRATION_FAILED", nil)
 	}
 }
 

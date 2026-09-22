@@ -8,6 +8,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	"runtime"
 	"unsafe"
@@ -99,6 +100,7 @@ func userspaceMain() {
 		fatal("VIRTIO_BLK_STARTUP_INVALID\n")
 	}
 	consoleHandle, ok = data.Handle("console")
+	syslog.Init(consoleHandle, "virtio-blk")
 	if !ok {
 		fatal("VIRTIO_BLK_CONSOLE_MISSING\n")
 	}
@@ -123,6 +125,7 @@ func userspaceMain() {
 	}
 	mark("VIRTIO_BLK_CAPABILITIES_OK\n")
 	mark("VIRTIO_BLK_DRIVER_OK\n")
+	syslog.Info("device ready", syslog.Uint("capacity-mib", capacity>>20), syslog.Uint("queue", uint64(queueSize)))
 	serve()
 }
 
@@ -351,7 +354,9 @@ func write(message string) {
 	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	for {
 	}
 }

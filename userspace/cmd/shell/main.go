@@ -45,6 +45,9 @@ var heapStartSymbol [0]byte
 //go:extern _heap_end
 var heapEndSymbol [0]byte
 
+//go:linkname logRead goos_log_read
+func logRead(device uint64, index uint64, address unsafe.Pointer) uint64
+
 //go:linkname diagnostics goos_diagnostics
 func diagnostics(device uint64, address uintptr) uint64
 
@@ -175,8 +178,10 @@ func executeCommand(line []byte) {
 	name := string(invocation.Arguments[0])
 	switch {
 	case count == 1 && name == "help" && invocation.Count == 1:
-		write("builtins: help clear cd diag time\nexecutables: /system/bin\n")
+		write("builtins: help clear cd log diag time\nexecutables: /system/bin\n")
 		mark("SHELL_HELP_OK\n")
+	case count == 1 && name == "log" && invocation.Count == 1:
+		printLog()
 	case count == 1 && name == "diag" && invocation.Count == 1:
 		if diagnostics(uint64(consoleHandle), 0) != 0 {
 			write("diag: unavailable in this build\n")
@@ -365,6 +370,22 @@ func executeExternal(line []byte) {
 	}
 	write("exec: no reply\n")
 	diagnostics(uint64(consoleHandle), 0)
+}
+
+var logLine [kcall.LogText]byte
+
+// printLog prints the retained system log, oldest record first.
+func printLog() {
+	for index := uint64(0); ; index++ {
+		if logRead(uint64(consoleHandle), index, unsafe.Pointer(&logLine[0])) != 0 {
+			return
+		}
+		size := 0
+		for size < len(logLine) && logLine[size] != 0 {
+			size++
+		}
+		writeBytes(logLine[:size])
+	}
 }
 
 func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {

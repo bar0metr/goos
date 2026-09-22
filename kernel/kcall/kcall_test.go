@@ -82,6 +82,16 @@ func (handler *testHandler) Diagnostics(device uint64, address uint64) Status {
 	return StatusUnsupported
 }
 
+func (handler *testHandler) LogWrite(device uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = device, address, length
+	return StatusOK
+}
+
+func (handler *testHandler) LogRead(device uint64, index uint64, address uint64) Status {
+	handler.channel, handler.length, handler.address = device, index, address
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -232,5 +242,23 @@ func TestDispatchClockReadNanos(t *testing.T) {
 		if result := Dispatch(Request{Operation: OperationClockReadNanos, Arg0: 0xa000, Arg1: length}, handler); result.Status != StatusInvalidArgument || handler.length != 0 {
 			t.Fatalf("length %d reached handler: %#v", length, result)
 		}
+	}
+}
+
+func TestDispatchLogOperations(t *testing.T) {
+	if OperationLogWrite != 25 || OperationLogRead != 26 {
+		t.Fatalf("log operations are %d and %d", OperationLogWrite, OperationLogRead)
+	}
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationLogWrite, Arg0: 2, Arg1: 0xa000, Arg2: 40}, handler); result.Status != StatusOK || handler.length != 40 {
+		t.Fatalf("log write %+v", result)
+	}
+	for _, length := range []uint64{0, MaxLogRecord + 1} {
+		if result := Dispatch(Request{Operation: OperationLogWrite, Arg0: 2, Arg1: 0xa000, Arg2: length}, &testHandler{}); result.Status != StatusInvalidArgument {
+			t.Fatalf("log write length %d accepted", length)
+		}
+	}
+	if result := Dispatch(Request{Operation: OperationLogRead, Arg0: 2, Arg1: 3, Arg2: 0xb000}, handler); result.Status != StatusOK || handler.length != 3 || handler.address != 0xb000 {
+		t.Fatalf("log read %+v", result)
 	}
 }
