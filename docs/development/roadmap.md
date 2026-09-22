@@ -23,7 +23,7 @@ The following foundation is already implemented:
 - isolated native `pwd`, `ls`, and `cat` processes;
 - capability-protected process handles, wait, completion records, and process
   resource reclamation;
-- the versioned `GST2` native startup ABI and named startup handles without
+- the versioned `GST3` native startup ABI and named startup handles without
   application dependence on numeric handle slots.
 
 The project has therefore reached the point where additional kernel mechanisms
@@ -228,6 +228,9 @@ The 0.1.0 shell and logging gaps are closed as well:
 - `reboot` syncs storage and resets through a capability held only by
   PID 1, and the boot test now runs the M7 write/reboot/read acceptance
   inside one VM.
+
+ADR 0062 moves startup data through shared memory, so `write PATH "TEXT"`
+from the spec fits and the M7 test uses it.
 
 Remaining 0.1.0 work is a persistent log service, a typed configuration
 service (spec §28), and per-process resource quotas (spec §36).

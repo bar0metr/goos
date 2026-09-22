@@ -124,7 +124,8 @@ caller:
 | IPC wire | 320 B | `ipc.WireMaxSize` |
 | stream transfer | 256 B | `kcall.MaxStreamIO` |
 | `WaitAny` interests | 16 × 16 B | `kcall.WaitAnyMaxObjects` |
-| startup block | 128 B | `process.MaxStartupData` |
+| startup block | 1024 B | `kcall.StartupSize`, one read-only page per process |
+| launch staging | 4 × 1024 B | `supervisor.StagingSlots`, copied once per launch |
 
 Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
 16 channels with 16-message queues, 16 streams with 4 KiB rings, 64 waiters

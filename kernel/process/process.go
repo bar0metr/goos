@@ -9,7 +9,6 @@ const (
 	MaxTasksPerProcess = 32
 	MaxProcesses       = 32
 	MaxExitEvents      = 32
-	MaxStartupData     = 128
 )
 
 type ID uint64
@@ -24,26 +23,15 @@ type Process struct {
 	handles      handle.Table
 	tasks        [MaxTasksPerProcess]sched.TaskID
 	taskCount    int
-	startup      [MaxStartupData]byte
-	startupSize  uint8
 	name         [16]byte
 	nameSize     uint8
 }
 
 func New(id ID, addressSpace AddressSpace) (Process, bool) {
-	return NewWithStartup(id, addressSpace, nil)
-}
-
-func NewWithStartup(id ID, addressSpace AddressSpace, startup []byte) (Process, bool) {
 	if id == 0 || addressSpace.Root == 0 {
 		return Process{}, false
 	}
-	if len(startup) > MaxStartupData {
-		return Process{}, false
-	}
-	result := Process{id: id, addressSpace: addressSpace, startupSize: uint8(len(startup))}
-	copy(result.startup[:], startup)
-	return result, true
+	return Process{id: id, addressSpace: addressSpace}, true
 }
 
 func (process *Process) ID() ID { return process.id }
@@ -58,30 +46,6 @@ func (process *Process) Name() []byte { return process.name[:process.nameSize] }
 func (process *Process) AddressSpace() AddressSpace { return process.addressSpace }
 
 func (process *Process) Handles() *handle.Table { return &process.handles }
-
-func (process *Process) Startup(target []byte) (int, bool) {
-	if len(target) < MaxStartupData {
-		return 0, false
-	}
-	for index := range target[:MaxStartupData] {
-		target[index] = 0
-	}
-	copy(target, process.startup[:process.startupSize])
-	return int(process.startupSize), true
-}
-
-// SetStartup completes process construction before its first task is runnable.
-func (process *Process) SetStartup(startup []byte) bool {
-	if process == nil || process.id == 0 || process.taskCount != 0 || len(startup) > MaxStartupData {
-		return false
-	}
-	for index := range process.startup {
-		process.startup[index] = 0
-	}
-	copy(process.startup[:], startup)
-	process.startupSize = uint8(len(startup))
-	return true
-}
 
 func (process *Process) AddTask(id sched.TaskID) bool {
 	if _, _, valid := id.Parts(); !valid || process.taskCount == len(process.tasks) {

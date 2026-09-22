@@ -50,8 +50,8 @@ The `ps` utility prints `PID TYPE STATE COMMAND`, with type `native` for every
 process today.
 
 `write PATH TEXT...` writes its arguments instead of standard input, as in the
-spec's M7 script. The 128-byte startup block limits how long the path and
-text can be.
+spec's M7 script. ADR 0062 removed the 128-byte startup block limit on how
+long the path and text can be.
 
 ## Alternatives
 

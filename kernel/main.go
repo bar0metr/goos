@@ -46,6 +46,8 @@ var (
 	boundedChannel          ipc.Channel
 	ipcWireData             [ipc.WireMaxSize]byte
 	sharedRegistry          shmem.Registry
+	launchTemplate          [supervisor.StagingSlotSize]byte
+	launchBound             [startup.Size]byte
 	channelRegistry         ipc.Registry
 	streamRegistry          stream.Registry
 	streamCallData          [kcall.MaxStreamIO]byte
@@ -297,7 +299,13 @@ func consumeInitControl() {
 		}
 		return
 	}
-	pid, processHandle, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], event.Startup[:event.StartupSize])
+	// The template is copied out of the staging page once, so PID 1 cannot
+	// change it between validation and use.
+	staged := launchTemplate[:event.StartupSize]
+	pid, processHandle, launchStatus := process.ID(0), handle.ID(0), supervisor.LaunchInvalidImage
+	if len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged) {
+		pid, processHandle, launchStatus = spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], staged)
+	}
 	if launchStatus != supervisor.LaunchOK {
 		level := logfmt.Warn
 		if launchStatus == supervisor.LaunchNotFound {
@@ -370,7 +378,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
-	*spawned, ok = process.NewWithStartup(pid, process.AddressSpace{Root: root}, startupData)
+	*spawned, ok = process.New(pid, process.AddressSpace{Root: root})
 	spawned.SetName(path[lastSlash(path)+1:])
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
@@ -392,9 +400,8 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		}
 	}
 	if len(startupData) != 0 {
-		var boundWire [startup.Size]byte
-		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &boundWire)
-		if !boundOK || !spawned.SetStartup(bound) {
+		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &launchBound)
+		if !boundOK || !mapStartup(root, bound) {
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
@@ -607,13 +614,31 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	return kcall.StatusOK
 }
 
+// mapStartup gives a new process its bound startup block as a private
+// read-only page; it is released with the address space.
+func mapStartup(root uint64, bound []byte) bool {
+	physical, ok := pageAllocator.Allocate()
+	if !ok {
+		return false
+	}
+	if !vm.InitializePhysical(physical, bound) || !vm.MapOwnedUserPage(root, vm.UserStartupAddress, physical, vm.Permissions{User: true}) {
+		pageAllocator.Free(physical)
+		return false
+	}
+	return true
+}
+
+// StartupRead copies the caller's startup page, or zeros for a process that
+// was started without one.
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
-	if !found || length != process.MaxStartupData {
+	if _, found := processRegistry.ByRoot(handler.root); !found || length != kcall.StartupSize {
 		return kcall.StatusPermissionDenied
 	}
-	var data [process.MaxStartupData]byte
-	if _, ok := owner.Startup(data[:]); !ok || !vm.CopyOut(handler.root, address, data[:]) {
+	clear(launchBound[:])
+	if _, mapped := vm.ResolveUser(handler.root, vm.UserStartupAddress); mapped && !vm.CopyIn(handler.root, vm.UserStartupAddress, launchBound[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	if !vm.CopyOut(handler.root, address, launchBound[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -1819,8 +1844,11 @@ func main() {
 	filesystemBlockClientHandle, filesystemBlockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	filesystemBlockServerHandle, filesystemBlockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	systemControlHandle, systemControlInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.SystemControlObject, capability.Write))
-	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) {
+	launchStaging, launchStagingCreated := sharedRegistry.Create(&pageAllocator, 1)
+	launchStagingHandle, launchStagingGranted := launchStaging.Grant(initProcess.Handles(), capability.Read|capability.Write)
+	launchStagingMapped := launchStagingCreated && launchStagingGranted && launchStaging.Map(initProcess.Handles(), launchStagingHandle, rootInit, supervisor.StagingAddress, 0, 1, true)
+	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !launchStagingMapped || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) {
 		panicSerial("PID 1 capability layout failed")
 	}
 	if validation.Enabled {

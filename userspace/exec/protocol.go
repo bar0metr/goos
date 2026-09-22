@@ -151,7 +151,7 @@ func validErrorSource(source, count uint8) bool {
 }
 
 func validStage(stage Stage, environment []byte) bool {
-	if _, ok := CommandFromSystemPath(stage.Path); !ok || !validPath(stage.Path) || len(stage.Arguments) > 128 {
+	if _, ok := CommandFromSystemPath(stage.Path); !ok || !validPath(stage.Path) || len(stage.Arguments) > startup.MaxVector {
 		return false
 	}
 	_, _, ok := startup.DecodeVectors(stage.Arguments, environment)

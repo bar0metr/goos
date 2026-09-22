@@ -35,7 +35,7 @@ table with type, generation, and rights checks.
 | 6 | `ConsoleWrite` | device handle, Write, console object | length 1..4096; `CopyIn` | static 4 KiB buffer | no |
 | 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte | no; no input → `NotFound` |
 | 8 | `ClockRead` | — | length exactly 8; `CopyOut` | none | no |
-| 9 | `StartupRead` | registered | length exactly 128; `CopyOut` | none | no |
+| 9 | `StartupRead` | registered | length exactly 1024; `CopyIn` of own startup page, `CopyOut` | none | no |
 | 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 channels, global | no |
 | 11 | `HandleClose` | own handle | generation and slot | none | no; wakes peers |
 | 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 64 waiters | yes, tick deadline; 0 → `Timeout` |

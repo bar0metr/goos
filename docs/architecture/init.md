@@ -54,8 +54,10 @@ Channel capabilities identify their endpoint side. A launch grant may be marked
 consumed, removing PID 1's source handle after successful derivation. This is
 used for per-process VFS clients and prevents accumulation of temporary handles.
 
-PID 1 also supplies a `GST2` startup template with a unique role name for each
-manifest entry. After installing all capabilities, the kernel writes their
+PID 1 also supplies a `GST3` startup template with a unique role name for each
+manifest entry. It writes the template into a slot of the launch staging page
+shared with the kernel (handle `0x100000013`), and the launch message names the
+slot (ADR 0062). After installing all capabilities, the kernel writes their
 actual generation-safe IDs into the startup block before creating the first
 Task. Services resolve roles rather than depending on handle-table insertion
 order. Names are descriptive metadata; type and rights enforcement remains in
@@ -71,7 +73,7 @@ any resource operations. Oversized requests are rejected rather than truncated.
 The payload begins with four bytes: stage count, cwd byte length, environment
 byte length, and a zero reserved byte. Cwd and environment bytes follow. Each
 stage then stores one-byte path and argv lengths followed by those byte strings.
-Argv and environment use the existing GST2 vector encoding. No handles are
+Argv and environment use the GST3 vector encoding, up to 255 bytes each. No handles are
 attached to the exec request; PID 1 derives child capabilities from its own table.
 
 For N stages PID 1 creates N-1 streams and starts stages from right to left,

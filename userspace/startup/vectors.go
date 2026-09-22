@@ -5,16 +5,23 @@ type Variable struct {
 	Value []byte
 }
 
+// VectorSize bounds one encoded argv plus environment pair; each vector is at
+// most MaxVector bytes, the width of its GST3 length field.
+const (
+	VectorSize = 256
+	MaxVector  = 255
+)
+
 // EncodeVectors serializes bounded argv and environment vectors independently
-// so the shell-to-init protocol can carry the same representation as GST2.
-func EncodeVectors(arguments [][]byte, environment []Variable, target *[96]byte) ([]byte, []byte, bool) {
+// so the shell-to-init protocol can carry the same representation as GST3.
+func EncodeVectors(arguments [][]byte, environment []Variable, target *[VectorSize]byte) ([]byte, []byte, bool) {
 	if target == nil || len(arguments) == 0 || len(arguments) > MaxArgs || len(environment) > MaxEnv {
 		return nil, nil, false
 	}
 	offset := 1
 	target[0] = byte(len(arguments))
 	for _, argument := range arguments {
-		if len(argument) == 0 || len(argument) > 63 || offset+1+len(argument) > len(target) {
+		if len(argument) == 0 || offset+1+len(argument) > MaxVector {
 			return nil, nil, false
 		}
 		target[offset] = byte(len(argument))
@@ -22,13 +29,13 @@ func EncodeVectors(arguments [][]byte, environment []Variable, target *[96]byte)
 		offset += 1 + len(argument)
 	}
 	argumentEnd := offset
-	if offset >= len(target) {
+	if offset >= len(target)-1 {
 		return nil, nil, false
 	}
 	target[offset] = byte(len(environment))
 	offset++
 	for index, variable := range environment {
-		if len(variable.Name) == 0 || len(variable.Name) > 31 || len(variable.Value) > 63 || duplicateVariable(environment[:index], variable.Name) || offset+2+len(variable.Name)+len(variable.Value) > len(target) {
+		if len(variable.Name) == 0 || len(variable.Name) > 31 || len(variable.Value) > 63 || duplicateVariable(environment[:index], variable.Name) || offset+2+len(variable.Name)+len(variable.Value) > len(target) || offset+2+len(variable.Name)+len(variable.Value)-argumentEnd > MaxVector {
 			return nil, nil, false
 		}
 		for _, value := range variable.Name {

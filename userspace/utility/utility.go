@@ -192,25 +192,27 @@ func runWrite(data startup.Data) {
 		}
 	}
 	if _, inline := data.Arg(pathIndex + 1); inline {
+		var text [startup.MaxVector + 1]byte
 		size := 0
 		for index := pathIndex + 1; ; index++ {
 			argument, found := data.Arg(index)
 			if !found {
 				break
 			}
-			if size != 0 && size < len(buffer) {
-				buffer[size] = ' '
+			if size != 0 {
+				text[size] = ' '
 				size++
 			}
-			if size+len(argument)+1 > len(buffer) {
-				finish(2, "write: text too long\n")
-			}
-			size += copy(buffer[size:], argument)
+			size += copy(text[size:len(text)-1], argument)
 		}
-		buffer[size] = '\n'
-		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:size+1]})
-		if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(size+1) {
-			finish(2, "write: VFS error\n")
+		text[size] = '\n'
+		for written := 0; written <= size; {
+			chunk := copy(buffer[:], text[written:size+1])
+			reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:chunk]})
+			if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(chunk) {
+				finish(2, "write: VFS error\n")
+			}
+			written += chunk
 		}
 		callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 		mark("WRITE_PROCESS_OK\n")

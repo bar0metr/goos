@@ -120,28 +120,6 @@ func TestRegistryRemovesProcessSlot(t *testing.T) {
 	}
 }
 
-func TestStartupCanOnlyBeFinalizedBeforeTaskBinding(t *testing.T) {
-	owner, _ := New(12, AddressSpace{Root: 0x12000})
-	if !owner.SetStartup([]byte("startup")) {
-		t.Fatal("startup finalization failed")
-	}
-	var data [MaxStartupData]byte
-	size, ok := owner.Startup(data[:])
-	if !ok || string(data[:size]) != "startup" {
-		t.Fatalf("startup = %q, %v", data[:size], ok)
-	}
-	task, _ := sched.NewTaskID(1, 1)
-	if !owner.AddTask(task) || owner.SetStartup([]byte("changed")) {
-		t.Fatal("startup changed after task binding")
-	}
-}
-
-func TestStartupDataBound(t *testing.T) {
-	if _, ok := NewWithStartup(13, AddressSpace{Root: 0x13000}, make([]byte, MaxStartupData+1)); ok {
-		t.Fatal("oversized startup accepted")
-	}
-}
-
 func TestRegistryAtListsProcessesAndTasks(t *testing.T) {
 	var registry Registry
 	first, _ := New(1, AddressSpace{Root: 0x1000})

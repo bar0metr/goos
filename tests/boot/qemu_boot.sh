@@ -297,6 +297,10 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'log\n'
 	sleep 1
+	printf 'write /persist/startup.txt "a startup block larger than the former 128-byte limit"\n'
+	sleep 2
+	printf 'cat /persist/startup.txt\n'
+	sleep 1
 	printf 'uptime\n'
 	sleep 1
 	printf 'sleep 1\n'
@@ -433,6 +437,7 @@ require_regex release.services 'vfs         running     [0-9]' 'vfs listed as ru
 require_regex release.caps '^console   device    read,write$' 'shell console capability' "$log" 'goos> caps'
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
+require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
 pass_group release-shell
 
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.
@@ -440,13 +445,13 @@ rm -f "$m7_log"
 ( sleep 6
 	printf 'mkdir /persist/demo\n'
 	sleep 2
-	printf 'echo persistent > /persist/demo/msg.txt\n'
+	printf 'write /persist/demo/hello.txt "Hello from GoOS"\n'
 	sleep 2
-	printf 'cat /persist/demo/msg.txt\n'
+	printf 'cat /persist/demo/hello.txt\n'
 	sleep 2
 	printf 'reboot\n'
 	sleep 12
-	printf 'cat /persist/demo/msg.txt\n'
+	printf 'cat /persist/demo/hello.txt\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -456,14 +461,14 @@ pid=$!
 
 wait_for_marker m7 '^Rebooting\.\.\.$' 60 "$m7_log"
 elapsed=0
-until [ "$(grep -c '^persistent$' "$m7_log" 2>/dev/null || true)" -ge 2 ] || [ "$elapsed" -ge 60 ]; do
+until [ "$(grep -c '^Hello from GoOS$' "$m7_log" 2>/dev/null || true)" -ge 2 ] || [ "$elapsed" -ge 60 ]; do
 	sleep 1
 	elapsed=$((elapsed + 1))
 done
 cleanup
 require_count m7.boots 'Kernel initialized' 2 "$m7_log" 'Rebooting...'
-require_count m7.read-before-and-after '^persistent$' 2 "$m7_log" 'cat /persist/demo/msg.txt'
-require_window m7.read-after-reboot '^persistent$' 'file read back after the in-guest reboot' "$m7_log" 'Rebooting...' 'NO_SUCH_LINE'
+require_count m7.read-before-and-after '^Hello from GoOS$' 2 "$m7_log" 'cat /persist/demo/hello.txt'
+require_window m7.read-after-reboot '^Hello from GoOS$' 'file read back after the in-guest reboot' "$m7_log" 'Rebooting...' 'NO_SUCH_LINE'
 pass_group m7-reboot
 
 printf '\nPASS qemu-boot (%s checks)\n' "$checks"

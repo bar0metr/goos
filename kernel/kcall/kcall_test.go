@@ -197,7 +197,7 @@ func TestDispatchRejectsOversizedIPCBuffer(t *testing.T) {
 
 func TestDispatchStartupAndHandleOperations(t *testing.T) {
 	handler := &testHandler{}
-	if result := Dispatch(Request{Operation: OperationStartupRead, Arg0: 0x4000, Arg1: 128}, handler); result.Status != StatusOK || handler.address != 0x4000 || handler.length != 128 {
+	if result := Dispatch(Request{Operation: OperationStartupRead, Arg0: 0x4000, Arg1: StartupSize}, handler); result.Status != StatusOK || handler.address != 0x4000 || handler.length != StartupSize {
 		t.Fatalf("unexpected startup read: %#v, handler: %#v", result, handler)
 	}
 	if result := Dispatch(Request{Operation: OperationChannelCreate, Arg0: 0x5000, Arg1: 16}, handler); result.Status != StatusOK || handler.address != 0x5000 || handler.length != 16 {
