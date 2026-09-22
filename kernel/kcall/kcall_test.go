@@ -107,6 +107,11 @@ func (handler *testHandler) SystemReset(device uint64) Status {
 	return StatusPermissionDenied
 }
 
+func (handler *testHandler) MemoryMap(memoryHandle uint64, address uint64, flags uint64) Status {
+	handler.channel, handler.address, handler.length = memoryHandle, address, flags
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -291,5 +296,19 @@ func TestDispatchSystemInformationOperations(t *testing.T) {
 	}
 	if result := Dispatch(Request{Operation: OperationSystemReset, Arg0: 18}, handler); result.Status != StatusPermissionDenied || handler.channel != 18 || result.Action != ActionReturn {
 		t.Fatalf("system reset %+v", result)
+	}
+}
+
+func TestDispatchMemoryMap(t *testing.T) {
+	if OperationMemoryMap != 30 {
+		t.Fatalf("operation %d", OperationMemoryMap)
+	}
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationMemoryMap, Arg0: 20, Arg1: 0x40180000, Arg2: MemoryMapWritable}, handler); result.Status != StatusOK || handler.channel != 20 || handler.address != 0x40180000 || handler.length != MemoryMapWritable {
+		t.Fatalf("memory map %+v %+v", result, handler)
+	}
+	handler = &testHandler{}
+	if result := Dispatch(Request{Operation: OperationMemoryMap, Arg0: 20, Arg1: 0x40180000, Arg2: 2}, handler); result.Status != StatusInvalidArgument || handler.channel != 0 {
+		t.Fatalf("unknown memory map flag accepted: %+v", result)
 	}
 }

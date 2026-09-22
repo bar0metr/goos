@@ -65,6 +65,38 @@ func TestRegistryAllocatesUniqueNonzeroIdentities(t *testing.T) {
 	}
 }
 
+func TestTableRegistersAndFindsObjects(t *testing.T) {
+	var table Table
+	if table.Register(Object{}) {
+		t.Fatal("invalid object registered")
+	}
+	for index := uint64(1); index <= MaxObjects; index++ {
+		if !table.Register(Object{id: index, count: 1}) {
+			t.Fatalf("object %d rejected", index)
+		}
+	}
+	if table.Register(Object{id: MaxObjects + 1, count: 1}) {
+		t.Fatal("table overflow accepted")
+	}
+	object, found := table.Find(3)
+	if !found || object.ID() != 3 {
+		t.Fatalf("find returned %v %v", object, found)
+	}
+	if _, found := table.Find(MaxObjects + 1); found {
+		t.Fatal("unregistered object found")
+	}
+	if _, found := table.Find(0); found {
+		t.Fatal("zero identity found")
+	}
+}
+
+func TestTableRejectsDuplicateIdentity(t *testing.T) {
+	var table Table
+	if !table.Register(Object{id: 7, count: 1}) || table.Register(Object{id: 7, count: 2}) {
+		t.Fatal("duplicate identity handling wrong")
+	}
+}
+
 func BenchmarkSharedPagePayloadAccess(b *testing.B) {
 	var page [4096]byte
 	producer := page[:]

@@ -57,6 +57,10 @@ existing site follows this yet: the UEFI protocol calls in
   executable segments and fills pages through the kernel identity map before
   installing the final user mappings (docs/architecture/native-images.md).
 - Shared-memory and DMA mappings are always NX.
+- `MemoryMap` installs shared pages only inside the shared window
+  `[0x40180000, 0x401c0000)` and only after every target leaf is free. The
+  leaves are not owned, so an exiting process never frees shared storage
+  (ADR 0063).
 
 ## Guard pages
 
