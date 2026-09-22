@@ -438,13 +438,15 @@ pass_group release-shell
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.
 rm -f "$m7_log"
 ( sleep 6
-	printf 'echo persistent > /persist/m7.txt\n'
+	printf 'mkdir /persist/demo\n'
 	sleep 2
-	printf 'cat /persist/m7.txt\n'
+	printf 'echo persistent > /persist/demo/msg.txt\n'
+	sleep 2
+	printf 'cat /persist/demo/msg.txt\n'
 	sleep 2
 	printf 'reboot\n'
 	sleep 12
-	printf 'cat /persist/m7.txt\n'
+	printf 'cat /persist/demo/msg.txt\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -460,7 +462,7 @@ until [ "$(grep -c '^persistent$' "$m7_log" 2>/dev/null || true)" -ge 2 ] || [ "
 done
 cleanup
 require_count m7.boots 'Kernel initialized' 2 "$m7_log" 'Rebooting...'
-require_count m7.read-before-and-after '^persistent$' 2 "$m7_log" 'cat /persist/m7.txt'
+require_count m7.read-before-and-after '^persistent$' 2 "$m7_log" 'cat /persist/demo/msg.txt'
 require_window m7.read-after-reboot '^persistent$' 'file read back after the in-guest reboot' "$m7_log" 'Rebooting...' 'NO_SUCH_LINE'
 pass_group m7-reboot
 
