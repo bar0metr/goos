@@ -18,10 +18,19 @@ const (
 //go:extern goos_task_entry_table
 var taskEntryTable [3]uintptr
 
+// taskFPU holds the FXSAVE image of every scheduler slot. Every switch saves
+// the outgoing task's SSE and x87 state and restores the incoming one's.
+//
+//go:extern goos_task_fpu
+var taskFPU [64][FPUAreaSize]byte
+
 // SetupBootstrapScheduler creates contexts for two demonstration tasks and one
 // idle task. The currently executing boot task becomes slot zero on the first
 // timer interrupt.
 func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
+	for slot := range taskFPU {
+		InitialFPUArea(&taskFPU[slot])
+	}
 	var contexts [3]uint64
 	for index := range contexts {
 		if taskEntryTable[index] == 0 {
@@ -175,6 +184,9 @@ func reclaimExitedTask(task uint64) uint64
 func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64) bool {
 	if allocator == nil || kernelRoot == 0 {
 		return false
+	}
+	if slot := uint32(task); slot != 0 && int(slot) <= len(taskFPU) {
+		InitialFPUArea(&taskFPU[slot-1])
 	}
 	allocation := reclaimExitedTask(task)
 	if allocation == 0 {
