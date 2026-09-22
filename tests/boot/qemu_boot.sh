@@ -301,6 +301,26 @@ rm -f "$log" "$reboot_log"
 	sleep 2
 	printf 'cat /persist/startup.txt\n'
 	sleep 1
+	printf 'sleep 5 &\n'
+	sleep 1
+	printf 'sleep 5 &\n'
+	sleep 1
+	printf 'services\n'
+	sleep 1
+	printf 'echo foreground while jobs run\n'
+	sleep 5
+	deep=/persist
+	for dir in aaaaaaaa bbbbbbbb cccccccc dddddddd eeeeeeee; do
+		deep=$deep/$dir
+		printf 'mkdir %s\n' "$deep"
+		sleep 2
+	done
+	printf 'cd /persist/aaaaaaaa/bbbbbbbb/cccccccc/dddddddd/eeeeeeee\n'
+	sleep 1
+	printf 'echo "pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz" | readline | readline | readline\n'
+	sleep 3
+	printf 'cd /\n'
+	sleep 1
 	printf 'uptime\n'
 	sleep 1
 	printf 'sleep 1\n'
@@ -438,6 +458,12 @@ require_regex release.caps '^console   device    read,write$' 'shell console cap
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
+require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$log" 'goos> sleep 5 &'
+require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 5 &'
+require_window jobs.foreground '^foreground while jobs run$' 'foreground command runs while jobs are active' "$log" 'goos> echo foreground while jobs run' '[1] done'
+require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 5 &'
+require_regex jobs.done-2 '^\[2\] done$' 'second background job reported' "$log" 'goos> sleep 5 &'
+require_regex exec.large-pipeline '^pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz$' 'pipeline request over 256 bytes' "$log" 'readline | readline | readline'
 pass_group release-shell
 
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.

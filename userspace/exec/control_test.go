@@ -18,7 +18,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	if _, ok := DecodeControl(message); ok {
 		t.Fatal("unknown operation decoded")
 	}
-	if _, ok := DecodeRequest(message); ok {
+	if _, _, ok := DecodeSubmit(message); ok {
 		t.Fatal("control message decoded as a launch request")
 	}
 }

@@ -67,6 +67,9 @@ func (editor *LineEditor) Feed(value byte) (line []byte, complete bool, accepted
 	}
 }
 
+// Pending returns the line typed so far.
+func (editor *LineEditor) Pending() []byte { return editor.data[:editor.size] }
+
 func (editor *LineEditor) Reset() {
 	for index := range editor.data {
 		editor.data[index] = 0

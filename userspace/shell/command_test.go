@@ -204,3 +204,23 @@ func TestRedirectionStagesAndSequenceBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitBackground(t *testing.T) {
+	for _, test := range []struct {
+		line, command string
+		background    bool
+	}{
+		{"sleep 2 &", "sleep 2", true},
+		{"  cat a | readline&  ", "cat a | readline", true},
+		{"echo '&'", "echo '&'", false},
+		{"echo \"a &\"", "echo \"a &\"", false},
+		{"echo \\&", "echo \\&", false},
+		{"echo a & b", "echo a & b", false},
+		{"&", "", true},
+	} {
+		command, background := SplitBackground([]byte(test.line))
+		if string(command) != test.command || background != test.background {
+			t.Errorf("SplitBackground(%q) = %q, %v", test.line, command, background)
+		}
+	}
+}

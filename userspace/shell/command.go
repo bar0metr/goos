@@ -71,7 +71,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 				return commands, 0, false
 			}
 			name := invocation.Arguments[0]
-			if (stageCount > 1 || redirectCount != 0) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear") || equal(name, "diag") || equal(name, "log") || equal(name, "services") || equal(name, "reboot") || equal(name, "handles") || equal(name, "caps") || equal(name, "time")) {
+			if (stageCount > 1 || redirectCount != 0) && IsBuiltin(name) {
 				return commands, 0, false
 			}
 		}
@@ -90,6 +90,43 @@ func SplitTime(line []byte) ([]byte, bool) {
 		return nil, false
 	}
 	return trimSpaces(line[4:]), true
+}
+
+// IsBuiltin reports whether name runs inside the shell rather than as a
+// launched command.
+func IsBuiltin(name []byte) bool {
+	for _, builtin := range [...]string{"cd", "help", "clear", "diag", "log", "services", "reboot", "handles", "caps", "time"} {
+		if equal(name, builtin) {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitBackground removes an unquoted trailing '&' that asks for the line to
+// run as a background job.
+func SplitBackground(line []byte) ([]byte, bool) {
+	line = trimSpaces(line)
+	if len(line) == 0 || line[len(line)-1] != '&' {
+		return line, false
+	}
+	quote, escaped := byte(0), false
+	for _, value := range line[:len(line)-1] {
+		switch {
+		case escaped:
+			escaped = false
+		case value == '\\':
+			escaped = true
+		case quote == 0 && (value == '\'' || value == '"'):
+			quote = value
+		case value == quote:
+			quote = 0
+		}
+	}
+	if quote != 0 || escaped {
+		return line, false
+	}
+	return trimSpaces(line[:len(line)-1]), true
 }
 
 type Redirections struct {
