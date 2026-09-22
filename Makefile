@@ -269,6 +269,16 @@ docs:
 	@test -f docs/adr/0056-sse-state-in-task-context.md
 	@test -f docs/adr/0057-launch-path-and-latency-baseline.md
 	@test -f docs/development/building.md
+	@test -f docs/security/threat-model.md
+	@test -f docs/security/capabilities.md
+	@test -f docs/security/memory-safety.md
+	@test -f docs/security/attack-surface.md
+	@test -f docs/architecture/boot.md
+	@test -f docs/architecture/filesystem.md
+	@test -f docs/architecture/linux-compat.md
+	@test -f docs/development/debugging.md
+	@test -f docs/development/coding-style.md
+	@test -f docs/development/adding-service.md
 
 clean:
 	@rm -rf $(BUILD_DIR)
