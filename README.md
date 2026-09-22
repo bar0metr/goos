@@ -212,6 +212,16 @@ context. A single-process command takes about 5 ms at 100 Hz and a VFS round
 trip about 0.15 ms, nearly independent of the tick rate (ADR 0057). The stress
 suite passes at 100, 250, and 1000 Hz; the default remains 100 Hz.
 
+A normal boot is quiet: a short banner, `Starting services...`, one `[ OK ]`
+line per service, and the prompt. Kernel self-tests and markers live in the
+`VALIDATION=1` build (ADR 0058). Services and the kernel log structured events
+to a bounded kernel ring, printed by `log` (ADR 0059). The shell provides
+`services`, `handles`, `caps`, `log`, and `reboot`, and `ps` shows PID, type,
+state, and command (ADR 0061). `reboot` syncs storage and restarts the machine
+through a capability held only by PID 1. The FAT32 volume at `/persist`
+supports subdirectories (ADR 0060), so the M7 acceptance of writing, rebooting
+from the shell, and reading back runs inside one VM in the boot test.
+
 ## Building and running
 
 The primary development environment is macOS. The build requires Go, TinyGo,
