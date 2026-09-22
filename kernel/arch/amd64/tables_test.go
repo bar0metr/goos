@@ -33,3 +33,19 @@ func TestTSSDescriptorEncodesBaseAndLimit(t *testing.T) {
 		t.Fatalf("invalid TSS descriptor: low=%#x high=%#x", low, high)
 	}
 }
+
+func TestInitialFPUAreaMasksExceptionsAndClearsState(t *testing.T) {
+	var area [FPUAreaSize]byte
+	for index := range area {
+		area[index] = 0xa5
+	}
+	InitialFPUArea(&area)
+	if area[0] != 0x7f || area[1] != 0x03 || area[24] != 0x80 || area[25] != 0x1f || area[26] != 0 || area[27] != 0 {
+		t.Fatalf("control words %x %x", area[0:2], area[24:28])
+	}
+	for index, value := range area {
+		if index != 0 && index != 1 && index != 24 && index != 25 && value != 0 {
+			t.Fatalf("byte %d kept %#x", index, value)
+		}
+	}
+}

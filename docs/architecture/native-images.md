@@ -19,6 +19,8 @@ ranges, truncated headers, invalid versions, reserved fields, offset overflow,
 occupied destination mappings, and unsupported page-table branches are rejected
 before pages are exposed.
 
+`elf2native` stores only a segment's bytes up to its last non-zero byte; the
+stack and heap reservations of a TinyGo image are therefore not part of the file.
 For each accepted segment the loader allocates and zeroes every required
 physical page, copies bounded payload chunks through the kernel identity map,
 and only then installs the final user mappings. This preserves W^X while

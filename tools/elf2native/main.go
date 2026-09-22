@@ -51,6 +51,11 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
+		// The loader zero-fills memory past the file bytes, so trailing zeros
+		// such as the stack and heap reservations need not be stored or copied.
+		for len(payload) != 0 && payload[len(payload)-1] == 0 {
+			payload = payload[:len(payload)-1]
+		}
 		flags := uint32(loader.SegmentReadable)
 		if program.Flags&elf.PF_W != 0 {
 			flags |= loader.SegmentWritable

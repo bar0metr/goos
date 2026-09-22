@@ -11,6 +11,15 @@ const entriesPerTable = 512
 
 type table [entriesPerTable]uint64
 
+// copyBytes and zeroBytes use string instructions. Both addresses must be
+// identity-mapped kernel memory that the caller owns for the whole range.
+//
+//export goos_copy_bytes
+func copyBytes(destination uintptr, source uintptr, length uint64)
+
+//export goos_zero_bytes
+func zeroBytes(destination uintptr, length uint64)
+
 // LoadedImage reads the fixed-address, non-relocatable PE image installed by
 // the TinyGo UEFI target. The function validates every header before the image
 // description is used to create executable mappings.
@@ -313,11 +322,7 @@ func CopyIn(rootAddress uint64, address uint64, destination []byte) bool {
 		// SAFETY: resolveUser validated every page-table level and returned a
 		// present user leaf. Bootstrap user pages come from PMM below the active
 		// identity-map limit, so this physical range is kernel-addressable.
-		source := (*[PageSize]byte)(unsafe.Pointer(uintptr(physical &^ (PageSize - 1))))
-		offset := physical & (PageSize - 1)
-		for index := uint64(0); index < pageRemaining; index++ {
-			destination[copied+index] = source[offset+index]
-		}
+		copyBytes(uintptr(unsafe.Pointer(&destination[copied])), uintptr(physical), pageRemaining)
 		copied += pageRemaining
 	}
 	return true
@@ -341,11 +346,7 @@ func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
 		}
 		// SAFETY: resolveUser validated a present user leaf and the writable bit.
 		// The backing PMM page is below the active physical identity-map limit.
-		target := (*[PageSize]byte)(unsafe.Pointer(uintptr(physical &^ (PageSize - 1))))
-		offset := physical & (PageSize - 1)
-		for index := uint64(0); index < pageRemaining; index++ {
-			target[offset+index] = source[copied+index]
-		}
+		copyBytes(uintptr(physical), uintptr(unsafe.Pointer(&source[copied])), pageRemaining)
 		copied += pageRemaining
 	}
 	return true
@@ -379,10 +380,8 @@ func InitializePhysicalByte(address uint64, value byte) bool {
 	}
 	// SAFETY: the caller passes a page freshly allocated from PMM while the
 	// bootstrap identity map is active. The complete page is exclusively owned.
+	zeroBytes(uintptr(address), PageSize)
 	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
-	for index := range target {
-		target[index] = 0
-	}
 	target[0] = value
 	return true
 }
@@ -394,13 +393,10 @@ func InitializePhysical(address uint64, data []byte) bool {
 	}
 	// SAFETY: the page is exclusively owned by the caller and identity-mapped;
 	// the length check confines every write to that page.
-	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
-	for index := range target {
-		target[index] = 0
+	if len(data) != 0 {
+		copyBytes(uintptr(address), uintptr(unsafe.Pointer(&data[0])), uint64(len(data)))
 	}
-	for index := range data {
-		target[index] = data[index]
-	}
+	zeroBytes(uintptr(address)+uintptr(len(data)), PageSize-uint64(len(data)))
 	return true
 }
 
@@ -417,6 +413,87 @@ func Resolve(rootAddress uint64, virtual uint64) (uint64, bool) {
 		return 0, false
 	}
 	return *entry&addressMask | virtual&(PageSize-1), true
+}
+
+// ResolveUser returns the physical address behind a user-accessible mapping.
+func ResolveUser(rootAddress uint64, virtual uint64) (uint64, bool) {
+	physical, _, ok := resolveUser(rootAddress, virtual)
+	return physical, ok
+}
+
+// FindUserMapping returns a user virtual address that maps the physical page,
+// scanning the process's user leaves. It exists for diagnostics only.
+func FindUserMapping(rootAddress uint64, physicalPage uint64) (uint64, bool) {
+	if rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
+		return 0, false
+	}
+	// SAFETY: rootAddress names a live process PML4 created by this package;
+	// every level is checked for presence before it is dereferenced.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	for rootIndex, rootEntry := range root {
+		if rootEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+			continue
+		}
+		// SAFETY: present user entries name owned page-table pages.
+		pdpt := (*table)(unsafe.Pointer(uintptr(rootEntry & addressMask)))
+		for pdptIndex, pdptEntry := range pdpt {
+			if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+				continue
+			}
+			pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+			for pdIndex, pdEntry := range pd {
+				if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+					continue
+				}
+				pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
+				for leafIndex, leaf := range pt {
+					if leaf&(entryPresent|entryUser) == entryPresent|entryUser && leaf&addressMask == physicalPage&^(PageSize-1) {
+						return uint64(rootIndex)<<39 | uint64(pdptIndex)<<30 | uint64(pdIndex)<<21 | uint64(leafIndex)<<12, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// UserLeaf returns the index-th present user leaf of a process in address
+// order, for diagnostics only.
+func UserLeaf(rootAddress uint64, index int) (uint64, uint64, bool) {
+	if rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
+		return 0, 0, false
+	}
+	// SAFETY: see FindUserMapping.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	seen := 0
+	for rootIndex, rootEntry := range root {
+		if rootEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+			continue
+		}
+		pdpt := (*table)(unsafe.Pointer(uintptr(rootEntry & addressMask)))
+		for pdptIndex, pdptEntry := range pdpt {
+			if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+				continue
+			}
+			pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+			for pdIndex, pdEntry := range pd {
+				if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+					continue
+				}
+				pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
+				for leafIndex, leaf := range pt {
+					if leaf&(entryPresent|entryUser) != entryPresent|entryUser {
+						continue
+					}
+					if seen == index {
+						return uint64(rootIndex)<<39 | uint64(pdptIndex)<<30 | uint64(pdIndex)<<21 | uint64(leafIndex)<<12, leaf & addressMask, true
+					}
+					seen++
+				}
+			}
+		}
+	}
+	return 0, 0, false
 }
 
 func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {
@@ -458,11 +535,8 @@ func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {
 	}
 	// SAFETY: allocator returned an exclusively owned, page-aligned physical
 	// page below the current identity-map limit. It becomes page-table metadata.
-	value := (*table)(unsafe.Pointer(uintptr(address)))
-	for index := range value {
-		value[index] = 0
-	}
-	return address, value, true
+	zeroBytes(uintptr(address), PageSize)
+	return address, (*table)(unsafe.Pointer(uintptr(address))), true
 }
 
 func protectRange(root *table, address uint64, size uint64, permissions Permissions) bool {

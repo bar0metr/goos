@@ -10,6 +10,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
 	"goos/kernel/stream"
@@ -22,11 +23,123 @@ func trace(kind diag.Kind, pid process.ID, task uint64, object uint64, value uin
 	if !diag.Enabled {
 		return
 	}
-	diagRing.Record(diag.Event{Tick: amd64.TimerTicks(), Kind: kind, Process: uint64(pid), Task: task, Object: object, Value: value})
+	diagRing.Record(diag.Event{Time: nowNanos(), Kind: kind, Process: uint64(pid), Task: task, Object: object, Value: value})
 }
 
 func traceWaitKey(kind diag.Kind, pid process.ID, task sched.TaskID, key kernelwait.Key, value uint64) {
 	trace(kind, pid, uint64(task), key.Object|uint64(key.Side)<<63, value)
+}
+
+// traceDeniedInterests reports where a rejected interest array lives and who
+// else can reach that physical page, so memory aliasing can be told apart from
+// a genuinely stale handle.
+func traceDeniedInterests(root, address, count uint64) {
+	out := diagWriter{console: amd64.NewCOM1()}
+	out.text("DIAG denied wire=")
+	for index := uint64(0); index < count*kcall.WaitAnyInterestSize && index < uint64(len(waitAnyWire)); index += 8 {
+		out.console.WriteHex(decodeUint64(waitAnyWire[index : index+8]))
+		out.text(",")
+	}
+	out.end()
+	traceAddress(out, root, address)
+}
+
+// traceAddress reports the physical page behind a user address, whether the
+// allocator and kernel image own it, and every other mapping or kernel stack
+// that reaches the same page.
+func traceAddress(out diagWriter, root, address uint64) {
+	physical, mapped := vm.ResolveUser(root, address)
+	page := physical &^ (vm.PageSize - 1)
+	out.text("DIAG address")
+	out.hex("va", address)
+	out.hex("pa", physical)
+	out.uint("mapped", boolValue(mapped))
+	out.uint("pmm-allocated", boolValue(pageAllocator.IsAllocated(page)))
+	image, valid := vm.LoadedImage()
+	out.uint("in-kernel-image", boolValue(valid && page >= vm.KernelImageBase && page < vm.KernelImageBase+image.Size))
+	out.end()
+	if !mapped {
+		return
+	}
+	for index := 0; ; index++ {
+		other, found := processRegistry.At(index)
+		if !found {
+			break
+		}
+		if other.AddressSpace().Root == root {
+			continue
+		}
+		if virtual, aliased := vm.FindUserMapping(other.AddressSpace().Root, page); aliased {
+			out.text("DIAG alias")
+			out.uint("pid", uint64(other.ID()))
+			out.hex("va", virtual)
+			out.end()
+		}
+	}
+	state := amd64.ReadSchedulerState()
+	for slot := uint64(0); slot < state.Count; slot++ {
+		top := amd64.TaskStackTop(slot)
+		if top != 0 && page < top && page+vm.PageSize > top-4*vm.PageSize-vm.PageSize {
+			out.text("DIAG alias-kernel-stack")
+			out.uint("slot", slot)
+			out.hex("top", top)
+			out.end()
+		}
+	}
+	auditAddressSpace(out, root)
+	var bytes [64]byte
+	if vm.CopyIn(root, address, bytes[:]) {
+		out.text("DIAG bytes=")
+		for index := 0; index < len(bytes); index += 8 {
+			out.console.WriteHex(decodeUint64(bytes[index : index+8]))
+			out.text(",")
+		}
+		out.end()
+	}
+}
+
+// auditAddressSpace reports every user page of a process that the allocator
+// does not own, that lies in the kernel image, or that another process maps.
+func auditAddressSpace(out diagWriter, root uint64) {
+	image, _ := vm.LoadedImage()
+	leaves, flagged := 0, 0
+	for index := 0; ; index++ {
+		virtual, physical, found := vm.UserLeaf(root, index)
+		if !found {
+			break
+		}
+		leaves++
+		allocated := pageAllocator.IsAllocated(physical)
+		inImage := physical >= vm.KernelImageBase && physical < vm.KernelImageBase+image.Size
+		sharedWith := uint64(0)
+		for other := 0; ; other++ {
+			candidate, exists := processRegistry.At(other)
+			if !exists {
+				break
+			}
+			if candidate.AddressSpace().Root == root {
+				continue
+			}
+			if _, aliased := vm.FindUserMapping(candidate.AddressSpace().Root, physical); aliased {
+				sharedWith = uint64(candidate.ID())
+			}
+		}
+		if allocated && !inImage && sharedWith == 0 {
+			continue
+		}
+		flagged++
+		out.text("DIAG audit")
+		out.hex("va", virtual)
+		out.hex("pa", physical)
+		out.uint("pmm-allocated", boolValue(allocated))
+		out.uint("in-kernel-image", boolValue(inImage))
+		out.uint("shared-with", sharedWith)
+		out.end()
+	}
+	out.text("DIAG audit")
+	out.uint("leaves", uint64(leaves))
+	out.uint("flagged", uint64(flagged))
+	out.end()
 }
 
 func pidOfTask(task sched.TaskID) process.ID {
@@ -44,7 +157,7 @@ func pidOfTask(task sched.TaskID) process.ID {
 // Diagnostics prints a kernel state dump on the serial console in goos_diag
 // builds. The caller needs the same console authority it would need to print
 // the dump itself.
-func (handler nativeCallHandler) Diagnostics(device uint64) kcall.Status {
+func (handler nativeCallHandler) Diagnostics(device uint64, address uint64) kcall.Status {
 	if !diag.Enabled {
 		return kcall.StatusUnsupported
 	}
@@ -57,6 +170,9 @@ func (handler nativeCallHandler) Diagnostics(device uint64) kcall.Status {
 		return kcall.StatusPermissionDenied
 	}
 	dumpDiagnostics(owner.ID())
+	if address != 0 {
+		traceAddress(diagWriter{console: amd64.NewCOM1()}, handler.root, address)
+	}
 	return kcall.StatusOK
 }
 
@@ -168,13 +284,14 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("lifecycle-pending", uint64(pendingLifecycleCount))
 	out.uint("lifecycle-overflows", lifecycleOverflows)
 	out.end()
+	dumpTiming(out)
 	out.text("DIAG events")
 	out.uint("total", diagRing.Total())
 	out.end()
 	for index := 0; index < diagRing.Len(); index++ {
 		event := diagRing.At(index)
 		out.text("DIAG event")
-		out.uint("tick", event.Tick)
+		out.uint("us", event.Time/1000)
 		out.word("kind", event.Kind.String())
 		out.uint("pid", event.Process)
 		out.hex("task", event.Task)

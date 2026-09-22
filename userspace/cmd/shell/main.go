@@ -35,6 +35,7 @@ var (
 	executableBuffers [execproto.MaxStages][execproto.MaxPath]byte
 	argumentStorage   [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
 	vectorWires       [execproto.MaxStages][96]byte
+	clockNanos        uint64
 )
 
 //go:extern _heap_start
@@ -44,7 +45,10 @@ var heapStartSymbol [0]byte
 var heapEndSymbol [0]byte
 
 //go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64) uint64
+func diagnostics(device uint64, address uintptr) uint64
+
+//go:linkname clockReadNanos goos_clock_read_nanos
+func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
@@ -124,6 +128,10 @@ func echoInput(value byte) {
 }
 
 func execute(line []byte) {
+	if command, timed := shellcmd.SplitTime(line); timed {
+		executeTimed(command)
+		return
+	}
 	commands, count, valid := shellcmd.ParseSequence(line, &argumentStorage)
 	if !valid {
 		write("exec: invalid command sequence\n")
@@ -136,6 +144,28 @@ func execute(line []byte) {
 	}
 }
 
+// executeTimed runs the rest of a command line through the normal path and
+// reports the elapsed wall-clock time, including every launch it caused.
+func executeTimed(line []byte) {
+	if len(line) == 0 {
+		write("time: expected a command\n")
+		return
+	}
+	if clockReadNanos(unsafe.Pointer(&clockNanos), 8) != 0 {
+		write("time: clock unavailable\n")
+		return
+	}
+	start := clockNanos
+	execute(line)
+	if clockReadNanos(unsafe.Pointer(&clockNanos), 8) != 0 {
+		write("time: clock unavailable\n")
+		return
+	}
+	write("time: ")
+	writeUint((clockNanos - start) / 1000)
+	write(" us\n")
+}
+
 func executeCommand(line []byte) {
 	redirects, _ := shellcmd.SplitRedirections(line)
 	stages, count, _ := shellcmd.SplitPipeline(redirects.Command)
@@ -143,11 +173,14 @@ func executeCommand(line []byte) {
 	name := string(invocation.Arguments[0])
 	switch {
 	case count == 1 && name == "help" && invocation.Count == 1:
-		write("builtins: help clear cd diag\nexecutables: /system/bin\nSHELL_HELP_OK\n")
+		write("builtins: help clear cd diag time\nexecutables: /system/bin\nSHELL_HELP_OK\n")
 	case count == 1 && name == "diag" && invocation.Count == 1:
-		if diagnostics(uint64(consoleHandle)) != 0 {
+		if diagnostics(uint64(consoleHandle), 0) != 0 {
 			write("diag: unavailable in this build\n")
 		}
+	case count == 1 && name == "time":
+		command, _ := shellcmd.SplitTime(line)
+		executeTimed(command)
 	case count == 1 && name == "clear" && invocation.Count == 1:
 		write("\x1b[2J\x1b[H")
 		write("SHELL_CLEAR_OK\n")
@@ -328,7 +361,7 @@ func executeExternal(line []byte) {
 		return
 	}
 	write("exec: no reply\n")
-	diagnostics(uint64(consoleHandle))
+	diagnostics(uint64(consoleHandle), 0)
 }
 
 func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {

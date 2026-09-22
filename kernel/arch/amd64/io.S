@@ -1,5 +1,11 @@
 //go:build uefi && amd64
 
+.set GOOS_KERNEL_SLOT, 0
+.set GOOS_IDLE_SLOT, 3
+.set GOOS_YIELD_VECTOR, 0x81
+.set GOOS_FPU_AREA_SHIFT, 9
+.set GOOS_CR4_SSE, 0x600
+
 .section .text
 
 .global goos_outb
@@ -51,6 +57,38 @@ goos_halt:
     hlt
     retq
 
+.global goos_copy_bytes
+goos_copy_bytes:
+    pushq %rdi
+    pushq %rsi
+    movq %rcx, %rdi
+    movq %rdx, %rsi
+    movq %r8, %rcx
+    shrq $3, %rcx
+    cld
+    rep movsq
+    movq %r8, %rcx
+    andq $7, %rcx
+    rep movsb
+    popq %rsi
+    popq %rdi
+    retq
+
+.global goos_zero_bytes
+goos_zero_bytes:
+    pushq %rdi
+    movq %rcx, %rdi
+    movq %rdx, %rcx
+    shrq $3, %rcx
+    xorl %eax, %eax
+    cld
+    rep stosq
+    movq %rdx, %rcx
+    andq $7, %rcx
+    rep stosb
+    popq %rdi
+    retq
+
 .global goos_scheduler_state_read
 goos_scheduler_state_read:
     movq goos_runnable_mask(%rip), %rax
@@ -61,6 +99,12 @@ goos_scheduler_state_read:
     movq %rax, 16(%rcx)
     movq goos_current_task(%rip), %rax
     movq %rax, 24(%rcx)
+    retq
+
+.global goos_task_rsp0_read
+goos_task_rsp0_read:
+    leaq goos_task_rsp0(%rip), %rax
+    movq (%rax,%rcx,8), %rax
     retq
 
 .global goos_interrupts_disable
@@ -105,6 +149,9 @@ goos_enable_nx_wp:
     movq %cr0, %rax
     orq $0x10000, %rax
     movq %rax, %cr0
+    movq %cr4, %rax
+    orq $GOOS_CR4_SSE, %rax
+    movq %rax, %cr4
     retq
 
 .global goos_load_cr3
@@ -115,6 +162,13 @@ goos_load_cr3:
 .global goos_read_rsp
 goos_read_rsp:
     movq %rsp, %rax
+    retq
+
+.global goos_read_tsc
+goos_read_tsc:
+    rdtsc
+    shlq $32, %rdx
+    orq %rdx, %rax
     retq
 
 .global goos_probe_address_spaces
@@ -289,29 +343,10 @@ goos_exception_fatal:
     btsq %rcx, goos_task_exit_pending(%rip)
     btrq %rcx, goos_runnable_mask(%rip)
     btsq %rcx, goos_task_dead_mask(%rip)
+    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
     movq %rcx, %rax
-.user_fault_find_next:
-    incq %rax
-    cmpq goos_task_count(%rip), %rax
-    jb .user_fault_select
-    xorq %rax, %rax
-.user_fault_select:
-    btq %rax, goos_runnable_mask(%rip)
-    jnc .user_fault_find_next
-    movq %rax, goos_current_task(%rip)
-    leaq goos_task_roots(%rip), %rdx
-    movq (%rdx,%rax,8), %r10
-    movq %r10, %cr3
-    leaq goos_task_rsp0(%rip), %rdx
-    movq (%rdx,%rax,8), %r10
-    testq %r10, %r10
-    jz .user_fault_restore
-    movq goos_tss_rsp0_address(%rip), %r11
-    movq %r10, (%r11)
-.user_fault_restore:
-    leaq goos_task_contexts(%rip), %rdx
-    movq (%rdx,%rax,8), %rsp
-    jmp .restore_context
+    callq goos_select_next
+    jmp .switch_to
 
 .section .rdata
 breakpoint_message:
@@ -339,6 +374,7 @@ goos_interrupt_table:
     .quad goos_irq_timer
     .quad goos_user_call
     .quad goos_irq_11
+    .quad goos_irq_yield
 
 .section .text
 .global goos_user_call
@@ -440,6 +476,8 @@ goos_user_call:
 	 jmp .user_block
 .user_return:
 	 movq $0, 64(%rsp)
+	 cmpq $0, goos_need_reschedule(%rip)
+	 jne .user_yield
 	 addq $48, %rsp
 	 popq %rax
 	 popq %rcx
@@ -457,7 +495,14 @@ goos_user_call:
 	 popq %r14
 	 popq %r15
 	 iretq
+.user_yield:
+	 movq 48(%rsp), %rax
+	 movq %rax, 40(%rsp)
+	 xorq %r11, %r11
+	 jmp .user_park
 .user_block:
+	 movq $2, %r11
+.user_park:
 	 movq %rsp, %r10
 	 subq $160, %rsp
 	 movq 160(%r10), %rax
@@ -490,8 +535,10 @@ goos_user_call:
 	 movq %rax, 104(%rsp)
 	 movq 40(%r10), %rax
 	 movq %rax, 112(%rsp)
+	 // A blocked call is rewound over its two-byte INT so it retries on wake;
+	 // a yielding call has completed and resumes after it.
 	 movq 168(%r10), %rax
-	 subq $2, %rax
+	 subq %r11, %rax
 	 movq %rax, 120(%rsp)
 	 movq 176(%r10), %rax
 	 movq %rax, 128(%rsp)
@@ -504,38 +551,27 @@ goos_user_call:
 	 movq goos_current_task(%rip), %rcx
 	 leaq goos_task_contexts(%rip), %rdx
 	 movq %rsp, (%rdx,%rcx,8)
+	 movq %rcx, %r9
+	 shlq $GOOS_FPU_AREA_SHIFT, %r9
+	 leaq goos_task_fpu(%rip), %r10
+	 fxsave64 (%r10,%r9)
+	 testq %r11, %r11
+	 jz .user_park_select
 	 btrq %rcx, goos_runnable_mask(%rip)
+.user_park_select:
 	 movq %rcx, %rax
-	 jmp .user_exit_find_next
+	 callq goos_select_next
+	 jmp .switch_to
 .user_exit:
     addq $48, %rsp
     movq goos_current_task(%rip), %rcx
     btsq %rcx, goos_task_exit_pending(%rip)
     btrq %rcx, goos_runnable_mask(%rip)
     btsq %rcx, goos_task_dead_mask(%rip)
+    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
     movq %rcx, %rax
-.user_exit_find_next:
-    incq %rax
-    cmpq goos_task_count(%rip), %rax
-    jb .user_exit_select
-    xorq %rax, %rax
-.user_exit_select:
-    btq %rax, goos_runnable_mask(%rip)
-    jnc .user_exit_find_next
-    movq %rax, goos_current_task(%rip)
-    leaq goos_task_roots(%rip), %rdx
-    movq (%rdx,%rax,8), %r10
-    movq %r10, %cr3
-    leaq goos_task_rsp0(%rip), %rdx
-    movq (%rdx,%rax,8), %r10
-    testq %r10, %r10
-    jz .user_exit_restore
-    movq goos_tss_rsp0_address(%rip), %r11
-    movq %r10, (%r11)
-.user_exit_restore:
-    leaq goos_task_contexts(%rip), %rdx
-    movq (%rdx,%rax,8), %rsp
-    jmp .restore_context
+    callq goos_select_next
+    jmp .switch_to
 
 .section .text
 .global goos_irq_timer
@@ -560,36 +596,44 @@ goos_irq_timer:
     jne .timer_not_user
     incq goos_user_preemptions(%rip)
 .timer_not_user:
+    movb $0x20, %al
+    outb %al, $0x20
     cmpb $0, goos_scheduler_enabled(%rip)
-    je .timer_eoi
+    je .restore_context
+    // The kernel task sleeps between housekeeping steps; each tick wakes it
+    // to expire deadlines and retry retained lifecycle messages.
+    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
+.preempt_current:
     movq goos_current_task(%rip), %rax
     leaq goos_task_contexts(%rip), %rdx
     movq %rsp, (%rdx,%rax,8)
-.timer_find_next:
-    incq %rax
-    cmpq goos_task_count(%rip), %rax
-    jb .timer_select
-    xorq %rax, %rax
-.timer_select:
-    btq %rax, goos_runnable_mask(%rip)
-    jc .timer_selected
-    jmp .timer_find_next
-.timer_selected:
+    movq %rax, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxsave64 (%r10,%r9)
+    callq goos_select_next
+.switch_to:
+    movq %rax, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxrstor64 (%r10,%r9)
     movq %rax, goos_current_task(%rip)
     leaq goos_task_roots(%rip), %r10
     movq (%r10,%rax,8), %r11
+    movq %cr3, %r10
+    cmpq %r10, %r11
+    je .switch_rsp0
     movq %r11, %cr3
+.switch_rsp0:
     leaq goos_task_rsp0(%rip), %r10
     movq (%r10,%rax,8), %r11
     testq %r11, %r11
-    jz .timer_load_context
+    jz .switch_load
     movq goos_tss_rsp0_address(%rip), %r10
     movq %r11, (%r10)
-.timer_load_context:
+.switch_load:
+    leaq goos_task_contexts(%rip), %rdx
     movq (%rdx,%rax,8), %rsp
-.timer_eoi:
-    movb $0x20, %al
-    outb %al, $0x20
 .restore_context:
     popq %r15
     popq %r14
@@ -607,6 +651,52 @@ goos_irq_timer:
     popq %rbx
     popq %rax
     iretq
+
+// goos_irq_yield switches away from a kernel task without advancing time.
+// Its vector is not callable from ring 3.
+.global goos_irq_yield
+goos_irq_yield:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    cmpb $0, goos_scheduler_enabled(%rip)
+    je .restore_context
+    jmp .preempt_current
+
+// goos_select_next returns in %rax the runnable slot after the one in %rax,
+// in round-robin order. The idle slot is chosen only when no other task is
+// runnable. Clobbers %r8.
+goos_select_next:
+    movq %rax, %r8
+.select_loop:
+    incq %rax
+    cmpq goos_task_count(%rip), %rax
+    jb .select_check
+    xorq %rax, %rax
+.select_check:
+    cmpq $GOOS_IDLE_SLOT, %rax
+    je .select_skip
+    btq %rax, goos_runnable_mask(%rip)
+    jc .select_done
+.select_skip:
+    cmpq %r8, %rax
+    jne .select_loop
+    movq $GOOS_IDLE_SLOT, %rax
+.select_done:
+    movq $0, goos_need_reschedule(%rip)
+    retq
 
 .global goos_irq_11
 goos_irq_11:
@@ -635,13 +725,18 @@ goos_irq_11:
     jz .irq_11_eoi
     decq %rcx
     btsq %rcx, goos_runnable_mask(%rip)
+    movq $1, goos_need_reschedule(%rip)
     movq $0, goos_irq_11_waiter(%rip)
-    jmp .irq_11_eoi
 .irq_11_eoi:
     movl $0, 0x3fffD0b0
     movb $0x20, %al
     outb %al, $0xa0
     outb %al, $0x20
+    cmpq $0, goos_need_reschedule(%rip)
+    je .irq_11_return
+    cmpb $0, goos_scheduler_enabled(%rip)
+    jne .preempt_current
+.irq_11_return:
     popq %r15
     popq %r14
     popq %r13
@@ -782,6 +877,16 @@ goos_block_current_task:
     popfq
     retq
 
+.global goos_kernel_sleep
+goos_kernel_sleep:
+    pushfq
+    cli
+    movq goos_current_task(%rip), %rax
+    btrq %rax, goos_runnable_mask(%rip)
+    int $GOOS_YIELD_VECTOR
+    popfq
+    retq
+
 .global goos_wake_task
 goos_wake_task:
     xorq %rax, %rax
@@ -790,6 +895,7 @@ goos_wake_task:
     pushfq
     cli
     btsq %rcx, goos_runnable_mask(%rip)
+    movq $1, goos_need_reschedule(%rip)
     popfq
     movq $1, %rax
 .wake_done:
@@ -814,6 +920,7 @@ goos_wake_task_id:
 	 pushfq
 	 cli
 	 btsq %r8, goos_runnable_mask(%rip)
+	 movq $1, goos_need_reschedule(%rip)
 	 popfq
 	 movq $1, %rax
 .wake_id_done:
@@ -943,6 +1050,12 @@ goos_task_exit_pending:
     .quad 0
 goos_task_dead_mask:
     .quad 0
+goos_need_reschedule:
+    .quad 0
+.align 16
+.global goos_task_fpu
+goos_task_fpu:
+    .zero 32768
 goos_scheduler_enabled:
     .byte 0
 goos_tss_rsp0_address:

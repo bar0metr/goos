@@ -32,6 +32,9 @@ var (
 	arenaBase            uintptr
 	sessions             [maxSessions]uint64
 	correlation          uint64
+	waitInterests        *[userwait.MaxObjects]userwait.Interest
+	waitCount            int
+	liveSessions         int
 )
 
 type blockDevice struct{}
@@ -79,7 +82,7 @@ var heapStartSymbol [0]byte
 var heapEndSymbol [0]byte
 
 //go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64) uint64
+func diagnostics(device uint64, address uintptr) uint64
 
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
@@ -127,6 +130,7 @@ func userspaceMain() {
 		fatal("VFS_BLOCK_MISSING\n")
 	}
 	sessions[0] = uint64(initialSessionHandle)
+	liveSessions = 1
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
@@ -147,6 +151,15 @@ func userspaceMain() {
 				interests[count] = userwait.Interest{Handle: handle.ID(session), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 				sessionIndexes[count-1] = index
 				count++
+			}
+		}
+		waitInterests, waitCount = &interests, count
+		if count-1 != liveSessions {
+			write("VFS_SESSIONS_CORRUPT\n")
+			if diagnostics(uint64(consoleHandle), uintptr(unsafe.Pointer(&sessions))) == 0 {
+				writeSessions()
+			}
+			for {
 			}
 		}
 		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
@@ -177,6 +190,7 @@ func userspaceMain() {
 			if receiveStatus == ipc.StatusPeerDied {
 				handleClose(session)
 				sessions[index] = 0
+				liveSessions--
 				continue
 			}
 			if receiveStatus != ipc.StatusOK {
@@ -221,6 +235,7 @@ func pollControl() bool {
 		for index := range sessions {
 			if sessions[index] == 0 {
 				sessions[index], result = uint64(server), vfs.StatusOK
+				liveSessions++
 				break
 			}
 		}
@@ -282,7 +297,7 @@ func write(message string) {
 }
 func fatal(message string) {
 	write(message)
-	if diagnostics(uint64(consoleHandle)) == 0 {
+	if diagnostics(uint64(consoleHandle), 0) == 0 {
 		writeSessions()
 	}
 	for {
@@ -299,6 +314,15 @@ func writeSessions() {
 			write("=")
 			writeHex(session)
 		}
+	}
+	if waitInterests != nil {
+		write(" interests=")
+		for index := 0; index < waitCount; index++ {
+			writeHex(uint64(waitInterests[index].Handle))
+			write(",")
+		}
+		write(" at=")
+		writeHex(uint64(uintptr(unsafe.Pointer(waitInterests))))
 	}
 	write("\n")
 }

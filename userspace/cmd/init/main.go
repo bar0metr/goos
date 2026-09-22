@@ -61,7 +61,7 @@ var heapStartSymbol [0]byte
 var heapEndSymbol [0]byte
 
 //go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64) uint64
+func diagnostics(device uint64, address uintptr) uint64
 
 //go:linkname debugWrite goos_debug_write
 func debugWrite(address unsafe.Pointer, size uintptr) uint64
@@ -511,7 +511,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 
 func commandNeedsVFS(command []byte) bool {
 	return equalSlice(command, "pwd") || equalSlice(command, "ls") || equalSlice(command, "cat") || equalSlice(command, "mkdir") ||
-		equalSlice(command, "touch") || equalSlice(command, "rm") || equalSlice(command, "cp") || equalSlice(command, "mv") || equalSlice(command, "stat") || equalSlice(command, "write")
+		equalSlice(command, "touch") || equalSlice(command, "rm") || equalSlice(command, "cp") || equalSlice(command, "mv") || equalSlice(command, "stat") || equalSlice(command, "write") || equalSlice(command, "bench")
 }
 
 func equalSlice(value []byte, expected string) bool {
@@ -596,7 +596,7 @@ func write(message string) {
 
 func fatal(message string) {
 	write(message)
-	diagnostics(uint64(serviceDeviceHandle))
+	diagnostics(uint64(serviceDeviceHandle), 0)
 	for {
 	}
 }
