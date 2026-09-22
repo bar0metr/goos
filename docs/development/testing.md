@@ -41,7 +41,10 @@ reboot persistence.
 The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,
-resource-reuse stress, redirection, and the on-disk persistent bytes. The
+resource-reuse stress, redirection, background jobs, and the on-disk persistent
+bytes. It runs two background jobs while a foreground command and `services`
+are served, and a four-stage pipeline whose request is larger than one IPC
+message. The
 reboot phase has a 60-second bound and reads the persisted file in a fresh VM
 without recreating it. A third phase runs the M7 acceptance inside one VM,
 logged to `build/logs/m7-reboot.log`. It creates `/persist/demo`, writes a file in it, runs the

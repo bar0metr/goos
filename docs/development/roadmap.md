@@ -230,7 +230,10 @@ The 0.1.0 shell and logging gaps are closed as well:
   inside one VM.
 
 ADR 0062 moves startup data through shared memory, so `write PATH "TEXT"`
-from the spec fits and the M7 test uses it.
+from the spec fits and the M7 test uses it. ADR 0063 adds `MemoryMap`, so a
+process can map a shared page it holds a capability for, and ADR 0064 uses one
+for the exec protocol: PID 1 now runs up to four requests as jobs instead of
+blocking on each command, and the shell can start a job with `&`.
 
 Remaining 0.1.0 work is a persistent log service, a typed configuration
 service (spec §28), and per-process resource quotas (spec §36).
