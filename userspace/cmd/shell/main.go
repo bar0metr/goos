@@ -44,7 +44,7 @@ var heapStartSymbol [0]byte
 var heapEndSymbol [0]byte
 
 //go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64) uint64
+func diagnostics(device uint64, address uintptr) uint64
 
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
@@ -145,7 +145,7 @@ func executeCommand(line []byte) {
 	case count == 1 && name == "help" && invocation.Count == 1:
 		write("builtins: help clear cd diag\nexecutables: /system/bin\nSHELL_HELP_OK\n")
 	case count == 1 && name == "diag" && invocation.Count == 1:
-		if diagnostics(uint64(consoleHandle)) != 0 {
+		if diagnostics(uint64(consoleHandle), 0) != 0 {
 			write("diag: unavailable in this build\n")
 		}
 	case count == 1 && name == "clear" && invocation.Count == 1:
@@ -328,7 +328,7 @@ func executeExternal(line []byte) {
 		return
 	}
 	write("exec: no reply\n")
-	diagnostics(uint64(consoleHandle))
+	diagnostics(uint64(consoleHandle), 0)
 }
 
 func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {

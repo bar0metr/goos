@@ -257,6 +257,7 @@ docs:
 	@test -f docs/adr/0046-bounded-stdin-file-redirection.md
 	@test -f docs/adr/0052-build-time-timer-rate-and-diagnostic-build.md
 	@test -f docs/adr/0053-kernel-exclusion-domain.md
+	@test -f docs/adr/0055-safe-return-reschedule.md
 	@test -f docs/development/building.md
 
 clean:

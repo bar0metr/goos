@@ -70,7 +70,7 @@ var heapStartSymbol [0]byte
 var heapEndSymbol [0]byte
 
 //go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64) uint64
+func diagnostics(device uint64, address uintptr) uint64
 
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
@@ -204,7 +204,7 @@ func write(message string) {
 }
 func fatal(message string) {
 	write(message)
-	diagnostics(uint64(consoleHandle))
+	diagnostics(uint64(consoleHandle), 0)
 	for {
 	}
 }
