@@ -52,7 +52,9 @@ the persistent raw disk image. Driver teardown
 resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
 A bounded FAT32 backend is mounted at `/persist`. It is intentionally limited
-to 8.3 ASCII names, one-sector clusters, and 64 KiB files. It supports the
+to ASCII names of at most 63 bytes (ADR 0066), one-sector clusters, and 64 KiB
+files. A name that fits the 8.3 form stays a single directory entry; anything
+longer or mixed case gets a VFAT long-name chain and a generated alias. It supports the
 regular file lifecycle needed by native utilities and preserves the raw image
 across QEMU boots. The boot gate copies `/system/motd` through VFS and verifies
 the result in the host-visible disk image. A second VM boot mounts the same

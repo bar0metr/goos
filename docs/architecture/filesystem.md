@@ -68,9 +68,21 @@ repeated metadata reads (ADR 0048).
 - A crashed service closes its endpoints on teardown, and peers observe
   `PeerDied`. The storage services are not restarted today.
 
+## Names
+
+A path component is at most 63 bytes (`ramfs.MaxName`), the width of a VFS
+directory reply. FAT32 stores a component that fits the 8.3 form — lower case,
+at most eight characters and a three-character extension — in a single
+directory entry, exactly as before. Any other component gets a generated
+`NAME~1` alias plus a VFAT long-name chain in front of it, so case, length, and
+the wider character set survive a round trip (ADR 0066). A chain whose
+ordinals, padding, or checksum do not match is ignored and the alias is used
+instead. Names longer than the bound, or holding characters the system cannot
+carry, are rejected with `InvalidArgument`.
+
 ## Limits
 
-FAT32 supports only a flat root directory, 8.3 names, 512-byte sectors,
-one-sector clusters, one FAT, sixteen root entries, and files up to 64 KiB.
-Subdirectories, long names, crash consistency, shared-memory bulk transfers,
-and a separate filesystem process are future work.
+FAT32 supports only 512-byte sectors, one-sector clusters, one FAT, four
+clusters per directory (64 entries, of which a long name costs up to six), and
+files up to 64 KiB. Crash consistency, shared-memory bulk transfers, and a
+separate filesystem process are future work.
