@@ -16,7 +16,12 @@ firmware-owned structures reference it.
 
 Allocation and release operate on 4 KiB pages. Unaligned, unmanaged, low-memory,
 and double-free requests are rejected. The boot path allocates and releases one
-page as a live self-test before emitting `PMM_OK`.
+page as a live self-test before emitting `PMM_OK`. The search starts after the
+last allocation, falls back to the lowest freed page, skips bitmap words that
+have no free page, and finds the first free bit with a trailing-zero count, so a
+long used run costs one test per 64 pages (ADR 0057). Allocation, release, and
+every other change to allocator state happen inside the kernel exclusion domain
+of ADR 0053.
 
 ## Virtual-memory bootstrap
 
@@ -41,7 +46,8 @@ Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
 range, then validate every page crossed by the request. Every page-table level
 and leaf must be present and user-accessible; `CopyOut` additionally requires a
 writable leaf. The validated physical pages are accessed through the kernel
-identity map.
+identity map with quadword string instructions, which also clear page-table
+pages and initialize loaded image pages.
 
 ## Shared memory
 
