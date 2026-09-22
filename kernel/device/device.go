@@ -1,5 +1,12 @@
 package device
 
+// Fixed device objects. Kind-encoded objects below use the top byte, so these
+// small values cannot collide with them.
+const (
+	ConsoleObject       = uint64(1)
+	SystemControlObject = uint64(2)
+)
+
 const (
 	kindPort = uint64(1)
 	kindDMA  = uint64(2)

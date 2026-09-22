@@ -74,6 +74,8 @@ func runKernelSelfTests(pageTable uint64) {
 	selfTestRootA, selfTestRootB = rootA, rootB
 	processA, validA := process.New(2, process.AddressSpace{Root: rootA})
 	processB, validB := process.New(3, process.AddressSpace{Root: rootB})
+	processA.SetName("selftest-a")
+	processB.SetName("selftest-b")
 	bootProcessA, bootProcessB = &processA, &processB
 	if !validA || !validB || !processRegistry.Add(&processA) || !processRegistry.Add(&processB) {
 		console.WriteString("PANIC: process model initialization failed\n")

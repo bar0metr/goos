@@ -196,3 +196,21 @@ func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 		t.Fatal("nonzero reply reserved field accepted")
 	}
 }
+
+func TestSyncRequestIsDistinctFromAddSession(t *testing.T) {
+	sync, ok := SyncRequest(4)
+	if !ok || !IsSync(sync) {
+		t.Fatal("sync request not recognized")
+	}
+	if _, ok := DecodeAddSession(sync); ok {
+		t.Fatal("sync decoded as add-session")
+	}
+	add, _ := AddSessionRequest(7, 5)
+	if IsSync(add) {
+		t.Fatal("add-session recognized as sync")
+	}
+	reply, ok := AddSessionReply(StatusOK, 4)
+	if status, valid := DecodeAddSessionReply(reply); !ok || !valid || status != StatusOK {
+		t.Fatal("sync reply does not decode")
+	}
+}

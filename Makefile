@@ -279,6 +279,7 @@ docs:
 	@test -f docs/adr/0058-normal-and-validation-builds.md
 	@test -f docs/adr/0059-structured-system-log.md
 	@test -f docs/architecture/logging.md
+	@test -f docs/adr/0061-release-shell-commands-and-system-reset.md
 	@test -f docs/development/building.md
 	@test -f docs/security/threat-model.md
 	@test -f docs/security/capabilities.md

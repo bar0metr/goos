@@ -10,8 +10,11 @@ capability-checked console session ABI. The bounded TTY line editor supplies pri
 delete, CR/LF completion, and a 128-byte maximum command line. Runtime
 allocation remains confined to the fixed userspace arena.
 
-The built-ins are `help`, `clear`, `cd`, `diag`, and `time`. `clear` emits
-ANSI terminal control. `time` prefixes a whole command line, runs it through
+The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`, `log`,
+`reboot`, `diag`, and `time`. `services` and `reboot` are requests to PID 1
+over the control protocol on the exec channel. `handles` and `caps` list the
+shell's own handle table, raw and under its startup names. `log` prints the
+system log (ADRs 0059 and 0061). `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
 the normal path, and prints the elapsed time from the kernel's nanosecond
 clock as `time: <N> us` (ADR 0054). Commands are split into at most eight arguments with bounded single
 quotes, double quotes, and backslash escaping. The shell owns a fixed 192-byte working-directory buffer matching the

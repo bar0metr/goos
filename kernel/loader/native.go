@@ -7,7 +7,7 @@ const (
 	NativeHeaderSize  = uint16(32)
 	SegmentHeaderSize = uint64(32)
 	MaxSegments       = 8
-	MaxImagePages     = 128
+	MaxImagePages     = 256
 	SegmentReadable   = uint32(1 << 0)
 	SegmentWritable   = uint32(1 << 1)
 	SegmentExecutable = uint32(1 << 2)

@@ -31,6 +31,9 @@ const (
 	OperationClockReadNanos
 	OperationLogWrite
 	OperationLogRead
+	OperationHandleInfo
+	OperationProcessInfo
+	OperationSystemReset
 )
 
 type Status uint64
@@ -92,6 +95,9 @@ type Handler interface {
 	ClockReadNanos(address uint64, length uint64) Status
 	LogWrite(device uint64, address uint64, length uint64) Status
 	LogRead(device uint64, index uint64, address uint64) Status
+	HandleInfo(slot uint64, address uint64) Status
+	ProcessInfo(index uint64, address uint64) Status
+	SystemReset(device uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -183,6 +189,12 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.LogWrite(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationLogRead:
 		return Result{Status: handler.LogRead(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationHandleInfo:
+		return Result{Status: handler.HandleInfo(request.Arg0, request.Arg1)}
+	case OperationProcessInfo:
+		return Result{Status: handler.ProcessInfo(request.Arg0, request.Arg1)}
+	case OperationSystemReset:
+		return Result{Status: handler.SystemReset(request.Arg0)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
@@ -191,6 +203,21 @@ func Dispatch(request Request, handler Handler) Result {
 const MaxIPCMessage = uint64(320)
 const SystemInfoSize = uint64(40)
 const MaxStreamIO = uint64(256)
+
+// HandleInfoSize and ProcessInfoSize are the fixed record sizes written by
+// HandleInfo and ProcessInfo.
+const (
+	HandleInfoSize  = uint64(16)
+	ProcessInfoSize = uint64(32)
+	MaxProcessName  = 16
+)
+
+// Process states reported by ProcessInfo.
+const (
+	ProcessRunning = uint8(1)
+	ProcessReady   = uint8(2)
+	ProcessWaiting = uint8(3)
+)
 
 // MaxLogRecord bounds an encoded log record; LogText bounds its text form.
 const (

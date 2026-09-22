@@ -208,6 +208,30 @@ goos_log_read:
     ret
 .size goos_log_read, .-goos_log_read
 
+.global goos_handle_info
+.type goos_handle_info,@function
+goos_handle_info:
+    movl $27, %eax
+    int $0x80
+    ret
+.size goos_handle_info, .-goos_handle_info
+
+.global goos_process_info
+.type goos_process_info,@function
+goos_process_info:
+    movl $28, %eax
+    int $0x80
+    ret
+.size goos_process_info, .-goos_process_info
+
+.global goos_system_reset
+.type goos_system_reset,@function
+goos_system_reset:
+    movl $29, %eax
+    int $0x80
+    ret
+.size goos_system_reset, .-goos_system_reset
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

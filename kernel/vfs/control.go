@@ -7,9 +7,25 @@ import (
 
 const (
 	ControlProtocolID   = uint64(0x4756465343544c31)
-	ControlVersion      = uint16(2)
+	ControlVersion      = uint16(3)
 	operationAddSession = byte(1)
+	operationSync       = byte(2)
 )
+
+// SyncRequest asks the VFS service to make every completed write durable.
+func SyncRequest(correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 1}
+	message.Payload[0] = operationSync
+	return message, true
+}
+
+func IsSync(message ipc.Message) bool {
+	return message.ProtocolID == ControlProtocolID && message.Version == ControlVersion && message.Kind == ipc.KindRequest &&
+		message.Correlation != 0 && message.PayloadSize == 1 && message.Payload[0] == operationSync && message.HandleCount == 0
+}
 
 func AddSessionRequest(server handle.ID, correlation uint64) (ipc.Message, bool) {
 	if server == 0 || correlation == 0 {
