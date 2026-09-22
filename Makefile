@@ -268,6 +268,7 @@ docs:
 	@test -f docs/adr/0055-safe-return-reschedule.md
 	@test -f docs/adr/0056-sse-state-in-task-context.md
 	@test -f docs/adr/0057-launch-path-and-latency-baseline.md
+	@test -f docs/adr/0060-fat32-subdirectories.md
 	@test -f docs/development/building.md
 
 clean:
