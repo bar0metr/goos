@@ -308,6 +308,13 @@ Further documentation:
 - [storage](docs/architecture/storage.md);
 - [init and service supervision](docs/architecture/init.md);
 - [capabilities and handles](docs/architecture/capabilities.md);
+- [boot sequence](docs/architecture/boot.md);
+- [filesystem stack](docs/architecture/filesystem.md);
+- [Linux compatibility (planned)](docs/architecture/linux-compat.md);
+- [security: threat model, capabilities, memory safety, attack surface](docs/security/threat-model.md);
 - [building and debugging](docs/development/building.md);
+- [debugging](docs/development/debugging.md);
+- [coding style](docs/development/coding-style.md);
+- [adding a service](docs/development/adding-service.md);
 - [roadmap](docs/development/roadmap.md);
 - [architecture decisions](docs/adr/).
