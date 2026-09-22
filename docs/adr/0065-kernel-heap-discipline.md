@@ -116,6 +116,11 @@ from the QEMU monitor before and after a batch of commands:
 (printf 'x/1gx 0x<addr>\n'; sleep 0.4) | nc -U "$TMPDIR/mon.sock"
 ```
 
+The boot test does this on every run: it attaches a monitor to the main phase,
+reads the pointer at the first prompt and again after the last command, and
+fails `kernel-heap.stable` if the two differ. Where the monitor or `nc -U` is
+missing, the check reports itself as skipped rather than passing quietly.
+
 Host tests use `testing.AllocsPerRun` where the code is reachable from them —
 `internal/logfmt/logfmt_test.go`, `kernel/vfs/vfs_test.go`, and
 `kernel/process/process_test.go`. That guard is weaker than the build: the host

@@ -6,6 +6,8 @@ reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
 pid=
 checks=0
+monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
+heap_first=
 
 cleanup() {
 	if [ -n "$pid" ]; then
@@ -13,6 +15,28 @@ cleanup() {
 		wait "$pid" 2>/dev/null || true
 		pid=
 	fi
+	rm -f "$monitor"
+}
+
+# heap_symbol prints the address of runtime.heapptr in the running kernel.
+heap_symbol() {
+	read -r hz diag validation <build/config/build
+	variant=build/variants/hz$hz
+	if [ "$diag" = 1 ]; then
+		variant=$variant-diag
+	fi
+	if [ "$validation" = 1 ]; then
+		variant=$variant-validation
+	fi
+	awk '$3 == "runtime.heapptr" { print $1; exit }' "$variant/kernel/goos.sym" 2>/dev/null
+}
+
+# heap_pointer reads that address through the QEMU monitor. The kernel leaks
+# every allocation (ADR 0065), so this must not move once the system is up.
+heap_pointer() {
+	[ -n "${1:-}" ] || return 0
+	(printf 'x/1gx 0x%s\n' "$1"; sleep 0.4) | nc -U "$monitor" 2>/dev/null |
+		tr -d '\r' | sed -n 's/^[0-9a-f][0-9a-f]*: \(0x[0-9a-f][0-9a-f]*\)$/\1/p' | tail -n 1
 }
 
 print_context() {
@@ -340,11 +364,33 @@ rm -f "$log" "$reboot_log"
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-monitor "unix:$monitor,server,nowait" \
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
+heap_address=$(heap_symbol || true)
+(
+	waited=0
+	while [ "$waited" -lt 600 ] && ! grep -q '^goos> ' "$log" 2>/dev/null; do
+		sleep 0.2
+		waited=$((waited + 1))
+	done
+	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
+) &
+
 wait_for_marker boot '^arena-stress-complete$' 180 "$log"
+heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
+heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
+rm -f "$monitor.heap"
 cleanup
+
+if [ -n "$heap_first" ] && [ -n "$heap_last" ]; then
+	[ "$heap_first" = "$heap_last" ] ||
+		fail_check kernel-heap.stable "$heap_first (no kernel allocation after boot)" "$heap_last" "$log" 'goos> '
+	checks=$((checks + 1))
+else
+	printf 'SKIP kernel-heap.stable (QEMU monitor unavailable)\n'
+fi
 
 for marker in BOOT_SERVICES_EXITED EXCEPTION_OK GDT_OK IDT_OK TIMER_OK NATIVE_IMAGE_LOADER_OK BOOT_OK; do
 	require_marker "boot.$marker" "$marker" "$log"

@@ -50,6 +50,11 @@ without recreating it. A third phase runs the M7 acceptance inside one VM,
 logged to `build/logs/m7-reboot.log`. It creates `/persist/demo`, writes a file in it, runs the
 shell's `reboot`, and requires both boots and both reads of the file.
 
+The main phase also reads `runtime.heapptr` through the QEMU monitor at the
+first prompt and again at the end, and fails if it moved: the kernel leaks every
+allocation, so no repeating path may allocate (ADR 0065). The check is skipped
+with a `SKIP` line where the monitor or `nc -U` is unavailable.
+
 Successful runs print one `PASS` line per architectural group and a final check
 count. Repeated guest output remains only in the full serial log. Failed checks
 print a stable name, expected and observed values, the log path, and a bounded
