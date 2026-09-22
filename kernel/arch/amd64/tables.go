@@ -45,3 +45,25 @@ func tssDescriptor(base uintptr, limit uint32) (uint64, uint64) {
 		uint64((base>>24)&0xff)<<56
 	return low, uint64(base >> 32)
 }
+
+const (
+	FPUAreaSize       = 512
+	initialFPUControl = uint16(0x037f)
+	initialMXCSR      = uint32(0x1f80)
+	fpuControlOffset  = 0
+	fpuMXCSROffset    = 24
+)
+
+// InitialFPUArea writes the FXSAVE image a task starts from: every register
+// cleared and every floating-point exception masked, so no state of a previous
+// owner of the slot is visible.
+func InitialFPUArea(area *[FPUAreaSize]byte) {
+	for index := range area {
+		area[index] = 0
+	}
+	area[fpuControlOffset] = byte(initialFPUControl & 0xff)
+	area[fpuControlOffset+1] = byte(initialFPUControl >> 8)
+	for shift := 0; shift < 4; shift++ {
+		area[fpuMXCSROffset+shift] = byte(initialMXCSR >> (8 * shift))
+	}
+}

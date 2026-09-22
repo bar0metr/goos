@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted. Corrects the liveness work in ADRs 0050 and 0051, whose defects at
-1 kHz had the same cause.
+Accepted. Its diagnosis is corrected by ADR 0056: the corrupted wait interests
+described below were SSE register state lost across preemption, not aliased
+physical pages. The races this record closes are real and the decision stands,
+but they were not shown to cause the observed failures.
 
 ## Context
 

@@ -3,6 +3,8 @@
 .set GOOS_KERNEL_SLOT, 0
 .set GOOS_IDLE_SLOT, 3
 .set GOOS_YIELD_VECTOR, 0x81
+.set GOOS_FPU_AREA_SHIFT, 9
+.set GOOS_CR4_SSE, 0x600
 
 .section .text
 
@@ -115,6 +117,9 @@ goos_enable_nx_wp:
     movq %cr0, %rax
     orq $0x10000, %rax
     movq %rax, %cr0
+    movq %cr4, %rax
+    orq $GOOS_CR4_SSE, %rax
+    movq %rax, %cr4
     retq
 
 .global goos_load_cr3
@@ -507,6 +512,10 @@ goos_user_call:
 	 movq goos_current_task(%rip), %rcx
 	 leaq goos_task_contexts(%rip), %rdx
 	 movq %rsp, (%rdx,%rcx,8)
+	 movq %rcx, %r9
+	 shlq $GOOS_FPU_AREA_SHIFT, %r9
+	 leaq goos_task_fpu(%rip), %r10
+	 fxsave64 (%r10,%r9)
 	 testq %r11, %r11
 	 jz .user_park_select
 	 btrq %rcx, goos_runnable_mask(%rip)
@@ -559,8 +568,16 @@ goos_irq_timer:
     movq goos_current_task(%rip), %rax
     leaq goos_task_contexts(%rip), %rdx
     movq %rsp, (%rdx,%rax,8)
+    movq %rax, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxsave64 (%r10,%r9)
     callq goos_select_next
 .switch_to:
+    movq %rax, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxrstor64 (%r10,%r9)
     movq %rax, goos_current_task(%rip)
     leaq goos_task_roots(%rip), %r10
     movq (%r10,%rax,8), %r11
@@ -996,6 +1013,10 @@ goos_task_dead_mask:
     .quad 0
 goos_need_reschedule:
     .quad 0
+.align 16
+.global goos_task_fpu
+goos_task_fpu:
+    .zero 32768
 goos_scheduler_enabled:
     .byte 0
 goos_tss_rsp0_address:

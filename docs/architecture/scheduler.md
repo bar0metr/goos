@@ -12,9 +12,12 @@ round-robin policy skips non-runnable tasks and wraps deterministically.
 ## x86_64 context switch
 
 Every switch saves all 15 general-purpose registers above the interrupt frame,
-records that stack pointer as the task context, selects the next slot, loads its
-CR3 when it differs from the current one, updates TSS.RSP0 for userspace, and
-resumes it with `IRETQ`. The switch points are:
+records that stack pointer as the task context, saves the SSE and x87 state into
+the slot's 512-byte FXSAVE area, selects the next slot, restores its FXSAVE
+area, loads its CR3 when it differs from the current one, updates TSS.RSP0 for
+userspace, and resumes it with `IRETQ`. A slot's FXSAVE area is reset to a clean
+image, all exceptions masked, when the scheduler starts and when an exited
+task's slot is reclaimed (ADR 0056). The switch points are:
 
 - PIT IRQ0, the preemption point, once per tick;
 - a native call that blocks, rewound over its `INT` so it retries on wake;
