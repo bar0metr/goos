@@ -345,15 +345,19 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 	}
+	began := launchMark()
 	image, found := initramfs.Find(bootuefi.Initramfs(&bootInfo), path[1:])
+	began = launchStageDone(launchLookup, began)
 	if !found {
 		return 0, 0, supervisor.LaunchNotFound
 	}
 	root, ok := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
+	began = launchStageDone(launchAddressSpace, began)
 	if !ok {
 		return 0, 0, supervisor.LaunchAddressSpaceFailed
 	}
 	loaded, ok := loader.LoadNative(&pageAllocator, root, image)
+	began = launchStageDone(launchLoad, began)
 	if !ok {
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
@@ -408,7 +412,9 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		}
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
+	began = launchStageDone(launchSetup, began)
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
+	launchStageDone(launchTask, began)
 	if !ok || !processRegistry.BindTask(pid, sched.TaskID(task)) {
 		return 0, 0, supervisor.LaunchTaskFailed
 	}
@@ -1716,6 +1722,7 @@ func main() {
 	for amd64.TimerTicks() < 3 {
 		amd64.Halt()
 	}
+	calibrateClock()
 	console.WriteString("Timer: ")
 	console.WriteUint(clock.TicksPerSecond)
 	console.WriteString(" Hz\n")

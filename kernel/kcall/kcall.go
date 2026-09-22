@@ -28,6 +28,7 @@ const (
 	OperationStreamWait
 	OperationWaitAny
 	OperationDiagnostics
+	OperationClockReadNanos
 )
 
 type Status uint64
@@ -86,6 +87,7 @@ type Handler interface {
 	StreamRead(stream uint64, descriptor uint64, length uint64) Status
 	StreamWrite(stream uint64, descriptor uint64, length uint64) Status
 	Diagnostics(device uint64) Status
+	ClockReadNanos(address uint64, length uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -165,6 +167,11 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.StreamWrite(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationDiagnostics:
 		return Result{Status: handler.Diagnostics(request.Arg0)}
+	case OperationClockReadNanos:
+		if request.Arg1 != 8 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ClockReadNanos(request.Arg0, request.Arg1)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

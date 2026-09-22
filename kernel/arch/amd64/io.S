@@ -117,6 +117,13 @@ goos_read_rsp:
     movq %rsp, %rax
     retq
 
+.global goos_read_tsc
+goos_read_tsc:
+    rdtsc
+    shlq $32, %rdx
+    orq %rdx, %rax
+    retq
+
 .global goos_probe_address_spaces
 goos_probe_address_spaces:
     pushfq
