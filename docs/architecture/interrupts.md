@@ -25,8 +25,9 @@ every line except IRQ0, and configures PIT channel 0 for the rate named by
 is independent of CPU frequency, so the rate is a deliberate trade between
 wakeup latency and per-tick interrupt overhead. The IRQ0 stub
 increments a monotonic 64-bit tick counter, acknowledges the master PIC, and
-returns with `IRETQ`. Boot waits for three physical timer interrupts before
-emitting `TIMER_OK`.
+returns with `IRETQ`. Boot waits for three physical timer interrupts, then
+counts TSC cycles across 100 ms of ticks to calibrate a nanosecond clock
+(ADR 0054), before emitting `TIMER_OK`.
 
 The PIC/PIT path remains the bootstrap timer mechanism. For Q35 PCI INTx, the
 kernel maps the LAPIC and IOAPIC into supervisor-only pages and routes virtio

@@ -37,12 +37,35 @@ func TestParseSequenceRejectsMalformedTail(t *testing.T) {
 		"pwd; echo x |", "pwd; a | b | c | d | e", "pwd; cd / | readline",
 		"pwd; a | b | c | d > out", "pwd; a | b | c | d < in", "pwd; a | b | c < in > out",
 		"pwd; cd / > out", "pwd; echo > a b",
-		"pwd; echo x | help", "pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
+		"pwd; echo x | help", "pwd; echo x | time readline", "pwd; time echo x > out",
+		"pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
 		"pwd; echo a b c d e f g h", strings.Repeat("pwd;", MaxCommands+1),
 	} {
 		var scratch [MaxArguments][MaxArgumentSize]byte
 		if _, _, ok := ParseSequence([]byte(line), &scratch); ok {
 			t.Fatalf("accepted malformed sequence %q", line)
+		}
+	}
+}
+
+func TestSplitTime(t *testing.T) {
+	for _, test := range []struct {
+		line, command string
+		timed         bool
+	}{
+		{"time", "", true},
+		{"  time   ", "", true},
+		{"time uname", "uname", true},
+		{" time  echo y > /persist/x; pwd ", "echo y > /persist/x; pwd", true},
+		{"time time echo", "time echo", true},
+		{"timer", "", false},
+		{"times x", "", false},
+		{"echo time", "", false},
+		{"", "", false},
+	} {
+		command, timed := SplitTime([]byte(test.line))
+		if timed != test.timed || string(command) != test.command {
+			t.Fatalf("SplitTime(%q) = %q, %v", test.line, command, timed)
 		}
 	}
 }

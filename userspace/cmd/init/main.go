@@ -511,7 +511,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 
 func commandNeedsVFS(command []byte) bool {
 	return equalSlice(command, "pwd") || equalSlice(command, "ls") || equalSlice(command, "cat") || equalSlice(command, "mkdir") ||
-		equalSlice(command, "touch") || equalSlice(command, "rm") || equalSlice(command, "cp") || equalSlice(command, "mv") || equalSlice(command, "stat") || equalSlice(command, "write")
+		equalSlice(command, "touch") || equalSlice(command, "rm") || equalSlice(command, "cp") || equalSlice(command, "mv") || equalSlice(command, "stat") || equalSlice(command, "write") || equalSlice(command, "bench")
 }
 
 func equalSlice(value []byte, expected string) bool {
