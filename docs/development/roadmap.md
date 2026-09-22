@@ -229,6 +229,9 @@ The 0.1.0 shell and logging gaps are closed as well:
   PID 1, and the boot test now runs the M7 write/reboot/read acceptance
   inside one VM.
 
+ADR 0066 gives FAT32 long names, so `/persist` no longer restricts files to
+the 8.3 form.
+
 ADR 0067 adds `ProcessKill`, so the shell can stop a background job with
 `kill` and the foreground command with Ctrl-C, and ADR 0068 makes `sleep` take
 seconds and block instead of spinning.
