@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, amended by ADR 0052, which selects the rate at build time. Refines
+Accepted, amended by ADR 0052, which selects the rate at build time. ADR 0057
+shows the launch cost below was image loading and tick-bound hand-offs. Refines
 the fixed rate chosen in ADR 0005 rather than replacing its
 PIC/PIT bootstrap design.
 
