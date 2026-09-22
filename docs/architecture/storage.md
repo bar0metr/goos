@@ -51,16 +51,28 @@ flush, repeated relative-path FAT32 reads and writes, and the resulting bytes in
 the persistent raw disk image. Driver teardown
 resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
-A bounded FAT32 backend is mounted at `/persist`. The first implementation is
-intentionally limited to a flat root directory, 8.3 ASCII names, one-sector
-clusters, sixteen directory entries, and 64 KiB files. It supports the regular
-file lifecycle needed by native utilities and preserves the raw image across
-QEMU boots. The boot gate copies `/system/motd` through VFS and verifies the
-result in the host-visible disk image. A second VM boot mounts the same image
-and reads the file without issuing another copy, proving persistence across a
-complete guest restart.
+A bounded FAT32 backend is mounted at `/persist`. It is intentionally limited
+to 8.3 ASCII names, one-sector clusters, and 64 KiB files. It supports the
+regular file lifecycle needed by native utilities and preserves the raw image
+across QEMU boots. The boot gate copies `/system/motd` through VFS and verifies
+the result in the host-visible disk image. A second VM boot mounts the same
+image and reads the file without issuing another copy, proving persistence
+across a complete guest restart.
 
-Subdirectories, long-file-name creation, general FAT32 geometry, crash
+Subdirectories are supported (ADR 0060). `mkdir` allocates one zeroed cluster
+with `.` and `..` entries, and `..` records cluster 0 when the parent is the
+root, as the FAT specification requires. Every directory, the root included,
+holds at most four clusters (64 entries, 62 usable in a subdirectory) and grows
+one cluster at a time. Nesting depth is bounded only by the VFS path length. A
+node ID packs the directory key (0 for the root, otherwise the directory's
+first cluster) above bit 16 and the entry index plus two below it, so root
+entries keep their historical IDs. Rename stays within one directory, and a
+directory can be removed only when it holds nothing but `.` and `..`; its
+cluster is freed. Directory chains that are too long, loop, reach a free
+cluster, or leave the data area are reported as errors, as are file chains
+that leave the data area.
+
+Cross-directory rename, long-file-name creation, general FAT32 geometry, crash
 consistency, dynamic interrupt routing, multiple devices, scatter-gather
 payloads larger than the inline IPC limit, and recovery from a failed storage
 driver remain required.
