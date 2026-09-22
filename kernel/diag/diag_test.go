@@ -8,11 +8,11 @@ func TestRingKeepsNewestInOrder(t *testing.T) {
 	}
 	var ring Ring
 	for tick := uint64(1); tick <= RingSize+5; tick++ {
-		ring.Record(Event{Tick: tick, Kind: WaitBegin})
+		ring.Record(Event{Time: tick, Kind: WaitBegin})
 	}
 	var seen []uint64
 	for index := 0; index < ring.Len(); index++ {
-		seen = append(seen, ring.At(index).Tick)
+		seen = append(seen, ring.At(index).Time)
 	}
 	if len(seen) != RingSize || seen[0] != 6 || seen[len(seen)-1] != RingSize+5 {
 		t.Fatalf("retained %d events from %d to %d", len(seen), seen[0], seen[len(seen)-1])
