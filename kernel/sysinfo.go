@@ -27,11 +27,12 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 	if !open {
 		return kcall.StatusNotFound
 	}
-	var record [kcall.HandleInfoSize]byte
+	record := handleInfoWire[:]
+	clear(record)
 	putUint64(record[0:8], uint64(id))
 	record[8] = byte(typeID)
 	putUint32(record[12:16], uint32(authority.Rights()))
-	if !vm.CopyOut(handler.root, address, record[:]) {
+	if !vm.CopyOut(handler.root, address, record) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -62,12 +63,13 @@ func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall
 			status = kcall.ProcessReady
 		}
 	}
-	var record [kcall.ProcessInfoSize]byte
+	record := processInfoWire[:]
+	clear(record)
 	putUint64(record[0:8], uint64(target.ID()))
 	record[8] = status
 	record[9] = byte(target.TaskCount())
 	copy(record[16:16+kcall.MaxProcessName], target.Name())
-	if !vm.CopyOut(handler.root, address, record[:]) {
+	if !vm.CopyOut(handler.root, address, record) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

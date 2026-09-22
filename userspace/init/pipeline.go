@@ -26,26 +26,51 @@ type PipelineRunner interface {
 	Wait(handle.ID) uint64
 }
 
-// RunPipeline starts downstream stages first, before the console-input stage.
+// Job is a started pipeline. Its processes are reaped in stage order; a stage
+// that exits early stays completed in the kernel until its turn.
+type Job struct {
+	processes [execproto.MaxStages]handle.ID
+	codes     [execproto.MaxStages]uint64
+	count     uint8
+	next      uint8
+	lastPID   uint64
+	status    LaunchStatus
+}
+
+// RunPipeline starts a pipeline and waits for all of its processes.
+func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) (uint64, LaunchStatus, uint64) {
+	job := StartPipeline(request, console, runner)
+	for {
+		process, pending := job.Next()
+		if !pending {
+			return job.Result()
+		}
+		job.Complete(runner.Wait(process))
+	}
+}
+
+// StartPipeline starts downstream stages first, before the console-input stage.
 // When request.ErrorSource is set the final stage is a stderr sink: it reads a
 // private stream fed by the source stage's stderr and is not part of the stdout
 // chain. It is launched first so its reader exists before the source writes.
-// On failure it closes all retained endpoints before reaping started children,
-// allowing stream readers to observe EOF and blocked writers to observe closure.
-// Applications still control their own termination; this is not job cancellation.
-func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) (uint64, LaunchStatus, uint64) {
+// A background request gives the first stage an input stream that is already
+// at EOF instead of the console.
+// On failure it closes all retained endpoints, so the stages already started
+// observe EOF or closure; the job still reaps them before it reports.
+func StartPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) Job {
+	var job Job
 	if runner == nil || console == 0 || request.Count == 0 || request.Count > execproto.MaxStages || request.ErrorSource != 0 && (request.Count < 2 || request.ErrorSource >= request.Count) {
-		return 0, LaunchInvalidImage, 0
+		job.status = LaunchInvalidImage
+		return job
 	}
+	job.count = request.Count
 	chain, errorSource := int(request.Count), -1
 	if request.ErrorSource != 0 {
 		chain--
 		errorSource = int(request.ErrorSource) - 1
 	}
 	var readers, writers [execproto.MaxStages - 1]handle.ID
-	var errorReader, errorWriter handle.ID
-	var processes [execproto.MaxStages]handle.ID
-	var lastPID uint64
+	var errorReader, errorWriter, emptyInput handle.ID
 	status := LaunchOK
 	for index := 0; index < chain-1; index++ {
 		var ok bool
@@ -62,6 +87,14 @@ func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRu
 			status = LaunchResourceExhausted
 		}
 	}
+	if status == LaunchOK && request.Background {
+		var writer handle.ID
+		var ok bool
+		emptyInput, writer, ok = runner.CreateStream()
+		if !ok || !runner.Close(writer) {
+			status = LaunchResourceExhausted
+		}
+	}
 	if status == LaunchOK {
 		for index := int(request.Count) - 1; index >= 0; index-- {
 			device := Endpoint{ID: console, Type: handle.TypeDevice}
@@ -71,6 +104,8 @@ func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRu
 			} else {
 				if index > 0 {
 					streams.Input = Endpoint{ID: readers[index-1], Type: handle.TypeStream}
+				} else if emptyInput != 0 {
+					streams.Input = Endpoint{ID: emptyInput, Type: handle.TypeStream}
 				}
 				if index < chain-1 {
 					streams.Output = Endpoint{ID: writers[index], Type: handle.TypeStream}
@@ -80,19 +115,21 @@ func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRu
 				}
 			}
 			var pid uint64
-			pid, processes[index], status = runner.Launch(request.Stages[index], request.CWD, request.Environment, streams)
+			pid, job.processes[index], status = runner.Launch(request.Stages[index], request.CWD, request.Environment, streams)
 			if status != LaunchOK {
-				processes[index] = 0
+				job.processes[index] = 0
 				break
 			}
 			if index == chain-1 {
-				lastPID = pid
+				job.lastPID = pid
 			}
 			if index >= chain {
 				errorReader = 0
 			} else {
 				if index > 0 {
 					readers[index-1] = 0
+				} else {
+					emptyInput = 0
 				}
 				if index < chain-1 {
 					writers[index] = 0
@@ -111,20 +148,47 @@ func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRu
 			status = LaunchCapabilityInstallFailed
 		}
 	}
-	if errorReader != 0 && !runner.Close(errorReader) || errorWriter != 0 && !runner.Close(errorWriter) {
+	if errorReader != 0 && !runner.Close(errorReader) || errorWriter != 0 && !runner.Close(errorWriter) || emptyInput != 0 && !runner.Close(emptyInput) {
 		status = LaunchCapabilityInstallFailed
 	}
-	var exitCode uint64
-	for _, process := range processes[:request.Count] {
-		if process != 0 {
-			code := runner.Wait(process)
-			if exitCode == 0 {
-				exitCode = code
-			}
+	job.status = status
+	job.skipIdle()
+	return job
+}
+
+// Next returns the process the job waits for now.
+func (job *Job) Next() (handle.ID, bool) {
+	if job.next >= job.count {
+		return 0, false
+	}
+	return job.processes[job.next], true
+}
+
+// Complete records the exit code of the process returned by Next.
+func (job *Job) Complete(code uint64) {
+	if job.next < job.count {
+		job.codes[job.next] = code
+		job.next++
+		job.skipIdle()
+	}
+}
+
+func (job *Job) skipIdle() {
+	for job.next < job.count && job.processes[job.next] == 0 {
+		job.next++
+	}
+}
+
+// Result reports the last stdout stage's PID and the first non-zero exit code
+// in stage order, or the launch failure.
+func (job *Job) Result() (uint64, LaunchStatus, uint64) {
+	if job.status != LaunchOK {
+		return 0, job.status, 0
+	}
+	for index := uint8(0); index < job.count; index++ {
+		if job.codes[index] != 0 {
+			return job.lastPID, LaunchOK, job.codes[index]
 		}
 	}
-	if status != LaunchOK {
-		return 0, status, 0
-	}
-	return lastPID, LaunchOK, exitCode
+	return job.lastPID, LaunchOK, 0
 }

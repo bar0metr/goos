@@ -38,14 +38,22 @@ therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
 used by `make run`; both QEMU phases share the fresh test image to validate
 reboot persistence.
 
-The main phase has a 120-second bound. It validates kernel initialization,
+The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,
-resource-reuse stress, redirection, and the on-disk persistent bytes. The
+resource-reuse stress, redirection, background jobs, and the on-disk persistent
+bytes. It runs two background jobs while a foreground command and `services`
+are served, and a four-stage pipeline whose request is larger than one IPC
+message. The
 reboot phase has a 60-second bound and reads the persisted file in a fresh VM
 without recreating it. A third phase runs the M7 acceptance inside one VM,
 logged to `build/logs/m7-reboot.log`. It creates `/persist/demo`, writes a file in it, runs the
 shell's `reboot`, and requires both boots and both reads of the file.
+
+The main phase also reads `runtime.heapptr` through the QEMU monitor at the
+first prompt and again at the end, and fails if it moved: the kernel leaks every
+allocation, so no repeating path may allocate (ADR 0065). The check is skipped
+with a `SKIP` line where the monitor or `nc -U` is unavailable.
 
 Successful runs print one `PASS` line per architectural group and a final check
 count. Repeated guest output remains only in the full serial log. Failed checks

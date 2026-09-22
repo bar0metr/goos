@@ -121,7 +121,7 @@ func Format(record Record, target []byte) int {
 // AppendField appends `key=value` to fields, quoting a value that contains a
 // space. It reports false when the result would be invalid or too long.
 func AppendField(fields []byte, key string, value []byte) ([]byte, bool) {
-	if !validName([]byte(key)) || !validText(value, MaxFields, true) {
+	if !validKey(key) || !validText(value, MaxFields, true) {
 		return fields, false
 	}
 	quoted := false
@@ -170,15 +170,25 @@ func AppendUint(target []byte, value uint64) []byte {
 	return append(target, digits[position:]...)
 }
 
+// putPadded writes value right-aligned in width, without allocating: a
+// kernel build leaks every allocation.
 func putPadded(target []byte, value uint64, width int, pad byte) int {
-	var buffer [20]byte
-	digits := AppendUint(buffer[:0], value)
+	var digits [20]byte
+	position := len(digits)
+	for {
+		position--
+		digits[position] = byte('0' + value%10)
+		value /= 10
+		if value == 0 {
+			break
+		}
+	}
 	size := 0
-	for index := len(digits); index < width; index++ {
+	for index := len(digits) - position; index < width; index++ {
 		target[size] = pad
 		size++
 	}
-	return size + copy(target[size:], digits)
+	return size + copy(target[size:], digits[position:])
 }
 
 func validName(name []byte) bool {
@@ -186,11 +196,28 @@ func validName(name []byte) bool {
 		return false
 	}
 	for _, character := range name {
-		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_') {
+		if !validNameByte(character) {
 			return false
 		}
 	}
 	return true
+}
+
+// validKey takes a string so that a kernel caller never converts one.
+func validKey(key string) bool {
+	if len(key) == 0 || len(key) > MaxComponent {
+		return false
+	}
+	for index := 0; index < len(key); index++ {
+		if !validNameByte(key[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validNameByte(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_'
 }
 
 func validText(text []byte, limit int, allowEmpty bool) bool {

@@ -63,15 +63,23 @@ Task. Services resolve roles rather than depending on handle-table insertion
 order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
-Shell exec requests are restricted to simple names below `/system/bin`. The
-version 4 request carries one to four invocation records, a shared cwd, and a
-shared environment in the existing 256-byte IPC payload. Each record contains
+The kernel also grants PID 1 a one-page exec page (handle `0x100000014`,
+`Read|Write|Transfer`) for the shell exec protocol. It is not mapped at boot;
+PID 1 maps it with `MemoryMap` and passes a derived `Read|Write` handle to the
+shell through the launch manifest (ADR 0063).
+
+Shell exec requests are restricted to simple names below `/system/bin`. A
+request carries one to four invocation records, a shared cwd, and a shared
+environment. The shell writes it into a 1024-byte slot of the exec page it
+shares with PID 1, and the version 6 submit message names the slot and size
+(ADR 0064). PID 1 copies the slot before decoding it. Each record contains
 its own executable path and structured argv. The decoder checks the complete
-payload, all lengths, system paths, vector encodings, and trailing bytes before
+request, all lengths, system paths, vector encodings, and trailing bytes before
 any resource operations. Oversized requests are rejected rather than truncated.
 
-The payload begins with four bytes: stage count, cwd byte length, environment
-byte length, and a zero reserved byte. Cwd and environment bytes follow. Each
+The request begins with five bytes: stage count, cwd byte length, environment
+byte length, error source, and flags (bit 0: background, whose first stage
+reads an empty stream). Cwd and environment bytes follow. Each
 stage then stores one-byte path and argv lengths followed by those byte strings.
 Argv and environment use the GST3 vector encoding, up to 255 bytes each. No handles are
 attached to the exec request; PID 1 derives child capabilities from its own table.
@@ -84,7 +92,10 @@ handles. On any failure PID 1 closes every retained endpoint before waiting
 for children already started. This releases stream waits through EOF or peer
 closure. It is not forced cancellation of an arbitrary nonterminating program.
 
-All stages start before process waits. PID 1 reaps every started process and
+All stages start before process waits. The request then becomes one of up to
+four jobs: PID 1 returns to its loop, which waits on the lifecycle channel, the
+exec channel, and the next process of every job, so supervision and further
+requests continue while commands run. PID 1 reaps every started process and
 returns the first nonzero exit code in left-to-right pipeline order. Launch
 failure instead returns a launch status with no successful process result.
 Completion readiness is observed through the generation-safe `WaitAny` table;

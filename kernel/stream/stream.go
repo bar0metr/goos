@@ -23,6 +23,14 @@ type Stream struct {
 
 func New() Stream { return Stream{readerOpen: true, writerOpen: true} }
 
+// Reset reopens a registry slot in place. Assigning New() instead would build
+// the whole ring as a temporary, which the kernel's leaking heap never frees.
+func (stream *Stream) Reset() {
+	clear(stream.data[:])
+	stream.head, stream.tail, stream.count = 0, 0, 0
+	stream.readerOpen, stream.writerOpen = true, true
+}
+
 func (stream *Stream) Read(target []byte) (int, Status) {
 	if stream == nil || !stream.readerOpen || len(target) == 0 {
 		return 0, StatusInvalidEndpoint

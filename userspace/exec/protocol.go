@@ -9,12 +9,25 @@ import (
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(5)
+	Version    = uint16(6)
 	MaxPath    = 192
 	MaxStages  = 4
 	replySize  = 24
+	submitSize = 3
+	headerSize = 5
 	SearchRoot = "/system/bin/"
 )
+
+// Requests are written to a page shared by the shell and PID 1, one slot per
+// job in flight; the submit message names the slot.
+const (
+	PageAddress = uint64(0x40180000)
+	PageSize    = 4096
+	Slots       = 4
+	SlotSize    = PageSize / Slots
+)
+
+const flagBackground = 1
 
 func ResolveExecutable(command []byte, target *[MaxPath]byte) ([]byte, bool) {
 	if target == nil || len(command) == 0 || len(SearchRoot)+len(command) > len(target) {
@@ -60,10 +73,13 @@ type Stage struct {
 // index of the stage whose stderr feeds the final stage. That final stage is a
 // stderr sink outside the stdout chain: it reads a private stream and never
 // receives the previous stage's stdout.
+//
+// A background request runs with an empty standard input.
 type Request struct {
 	Stages           [MaxStages]Stage
 	Count            uint8
 	ErrorSource      uint8
+	Background       bool
 	CWD, Environment []byte
 }
 type Reply struct {
@@ -72,67 +88,62 @@ type Reply struct {
 	ExitCode     uint64
 }
 
-func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || request.Count == 0 || request.Count > MaxStages || !validErrorSource(request.ErrorSource, request.Count) || !validCWD(request.CWD) || len(request.Environment) > 96 {
-		return ipc.Message{}, false
+// EncodeRequest writes request into one slot and returns the encoded bytes.
+func EncodeRequest(request Request, target *[SlotSize]byte) ([]byte, bool) {
+	if target == nil || request.Count == 0 || request.Count > MaxStages || !validErrorSource(request.ErrorSource, request.Count) || !validCWD(request.CWD) || len(request.Environment) > 96 {
+		return nil, false
 	}
-	size := 4 + len(request.CWD) + len(request.Environment)
+	size := headerSize + len(request.CWD) + len(request.Environment)
 	for _, stage := range request.Stages[:request.Count] {
 		if !validStage(stage, request.Environment) {
-			return ipc.Message{}, false
+			return nil, false
 		}
 		size += 2 + len(stage.Path) + len(stage.Arguments)
 	}
-	if size > ipc.MaxPayload {
-		return ipc.Message{}, false
+	if size > SlotSize {
+		return nil, false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(size)}
-	// TinyGo callers require explicit clearing of the attachment fields.
-	message.HandleCount = 0
-	for index := range message.Handles {
-		message.Handles[index] = 0
+	target[0], target[1], target[2], target[3], target[4] = request.Count, byte(len(request.CWD)), byte(len(request.Environment)), request.ErrorSource, 0
+	if request.Background {
+		target[4] = flagBackground
 	}
-	message.Payload[0], message.Payload[1], message.Payload[2], message.Payload[3] = request.Count, byte(len(request.CWD)), byte(len(request.Environment)), request.ErrorSource
-	offset := 4
-	copy(message.Payload[offset:], request.CWD)
-	offset += len(request.CWD)
-	copy(message.Payload[offset:], request.Environment)
-	offset += len(request.Environment)
+	offset := headerSize
+	offset += copy(target[offset:], request.CWD)
+	offset += copy(target[offset:], request.Environment)
 	for _, stage := range request.Stages[:request.Count] {
-		message.Payload[offset], message.Payload[offset+1] = byte(len(stage.Path)), byte(len(stage.Arguments))
+		target[offset], target[offset+1] = byte(len(stage.Path)), byte(len(stage.Arguments))
 		offset += 2
-		copy(message.Payload[offset:], stage.Path)
-		offset += len(stage.Path)
-		copy(message.Payload[offset:], stage.Arguments)
-		offset += len(stage.Arguments)
+		offset += copy(target[offset:], stage.Path)
+		offset += copy(target[offset:], stage.Arguments)
 	}
-	return message, true
+	return target[:size], true
 }
 
-func DecodeRequest(message ipc.Message) (Request, bool) {
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < 4 || message.PayloadSize > ipc.MaxPayload {
+// DecodeRequest validates a complete request; the result aliases data.
+func DecodeRequest(data []byte) (Request, bool) {
+	size := len(data)
+	if size < headerSize || size > SlotSize {
 		return Request{}, false
 	}
-	count, cwdSize, environmentSize := message.Payload[0], int(message.Payload[1]), int(message.Payload[2])
-	size := int(message.PayloadSize)
-	if count == 0 || count > MaxStages || !validErrorSource(message.Payload[3], count) || environmentSize > 96 || 4+cwdSize+environmentSize > size {
+	count, cwdSize, environmentSize := data[0], int(data[1]), int(data[2])
+	if count == 0 || count > MaxStages || !validErrorSource(data[3], count) || data[4]&^flagBackground != 0 || environmentSize > 96 || headerSize+cwdSize+environmentSize > size {
 		return Request{}, false
 	}
-	request := Request{Count: count, ErrorSource: message.Payload[3], CWD: message.Payload[4 : 4+cwdSize], Environment: message.Payload[4+cwdSize : 4+cwdSize+environmentSize]}
+	request := Request{Count: count, ErrorSource: data[3], Background: data[4] == flagBackground, CWD: data[headerSize : headerSize+cwdSize], Environment: data[headerSize+cwdSize : headerSize+cwdSize+environmentSize]}
 	if !validCWD(request.CWD) {
 		return Request{}, false
 	}
-	offset := 4 + cwdSize + environmentSize
+	offset := headerSize + cwdSize + environmentSize
 	for index := 0; index < int(count); index++ {
 		if offset+2 > size {
 			return Request{}, false
 		}
-		pathSize, argumentSize := int(message.Payload[offset]), int(message.Payload[offset+1])
+		pathSize, argumentSize := int(data[offset]), int(data[offset+1])
 		offset += 2
 		if offset+pathSize+argumentSize > size {
 			return Request{}, false
 		}
-		stage := Stage{Path: message.Payload[offset : offset+pathSize], Arguments: message.Payload[offset+pathSize : offset+pathSize+argumentSize]}
+		stage := Stage{Path: data[offset : offset+pathSize], Arguments: data[offset+pathSize : offset+pathSize+argumentSize]}
 		if !validStage(stage, request.Environment) {
 			return Request{}, false
 		}
@@ -143,6 +154,32 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		return Request{}, false
 	}
 	return request, true
+}
+
+// EncodeSubmit asks PID 1 to run the request of size bytes in slot.
+func EncodeSubmit(slot uint8, size int, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 || slot >= Slots || size < headerSize || size > SlotSize {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: submitSize}
+	message.HandleCount = 0
+	for index := range message.Handles {
+		message.Handles[index] = 0
+	}
+	message.Payload[0] = slot
+	binary.LittleEndian.PutUint16(message.Payload[1:3], uint16(size))
+	return message, true
+}
+
+func DecodeSubmit(message ipc.Message) (uint8, int, bool) {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize != submitSize {
+		return 0, 0, false
+	}
+	slot, size := message.Payload[0], int(binary.LittleEndian.Uint16(message.Payload[1:3]))
+	if slot >= Slots || size < headerSize || size > SlotSize {
+		return 0, 0, false
+	}
+	return slot, size, true
 }
 
 // validErrorSource requires a sink stage plus at least one distinct source.

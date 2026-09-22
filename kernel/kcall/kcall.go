@@ -34,6 +34,7 @@ const (
 	OperationHandleInfo
 	OperationProcessInfo
 	OperationSystemReset
+	OperationMemoryMap
 )
 
 type Status uint64
@@ -98,6 +99,7 @@ type Handler interface {
 	HandleInfo(slot uint64, address uint64) Status
 	ProcessInfo(index uint64, address uint64) Status
 	SystemReset(device uint64) Status
+	MemoryMap(handle uint64, address uint64, flags uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -195,6 +197,11 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ProcessInfo(request.Arg0, request.Arg1)}
 	case OperationSystemReset:
 		return Result{Status: handler.SystemReset(request.Arg0)}
+	case OperationMemoryMap:
+		if request.Arg2&^MemoryMapWritable != 0 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.MemoryMap(request.Arg0, request.Arg1, request.Arg2)}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
@@ -225,6 +232,9 @@ const (
 	LogText      = uint64(240)
 )
 const StreamDescriptorSize = uint64(24)
+
+// MemoryMapWritable requests a writable shared-memory mapping.
+const MemoryMapWritable = uint64(1)
 
 // StartupSize is the fixed length of a StartupRead copy.
 const StartupSize = uint64(1024)

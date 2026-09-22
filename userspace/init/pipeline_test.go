@@ -13,6 +13,7 @@ type pipelineRunnerTest struct {
 	owned                                              map[handle.ID]bool
 	launched, waited                                   []int
 	exits                                              [execproto.MaxStages]uint64
+	background                                         bool
 }
 
 func (r *pipelineRunnerTest) CreateStream() (handle.ID, handle.ID, bool) {
@@ -64,6 +65,12 @@ func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd, env []byte, stre
 	} else {
 		if i > 0 {
 			input = Endpoint{handle.ID((i-1)*2 + 1), handle.TypeStream}
+		} else if r.background {
+			empty := chain - 1
+			if r.errorSource >= 0 {
+				empty++
+			}
+			input = Endpoint{handle.ID(empty*2 + 1), handle.TypeStream}
 		}
 		if i < chain-1 {
 			output = Endpoint{handle.ID(i*2 + 2), handle.TypeStream}
@@ -206,5 +213,31 @@ func TestPipelineRejectsInvalidErrorSource(t *testing.T) {
 		if _, status, _ := RunPipeline(request, 99, r); status != LaunchInvalidImage || r.created != 0 || len(r.launched) != 0 {
 			t.Fatalf("accepted %+v", request)
 		}
+	}
+}
+
+func TestBackgroundPipelineReadsEmptyInput(t *testing.T) {
+	runner := &pipelineRunnerTest{t: t, count: 3, errorSource: -1, failCreate: -1, failStage: -1, owned: map[handle.ID]bool{}, background: true}
+	runner.exits = [execproto.MaxStages]uint64{0, 4, 7}
+	request := execproto.Request{Count: 3, Background: true, CWD: []byte("/system"), Environment: []byte{0}}
+	for index := range request.Stages[:3] {
+		request.Stages[index].Path = []byte{byte(index)}
+	}
+	job := StartPipeline(request, 99, runner)
+	if runner.created != 3 || len(runner.owned) != 0 {
+		t.Fatalf("created %d streams, retained %v", runner.created, runner.owned)
+	}
+	var order []handle.ID
+	for {
+		process, pending := job.Next()
+		if !pending {
+			break
+		}
+		order = append(order, process)
+		job.Complete(runner.Wait(process))
+	}
+	pid, status, code := job.Result()
+	if !reflect.DeepEqual(order, []handle.ID{20, 21, 22}) || pid != 12 || status != LaunchOK || code != 4 {
+		t.Fatalf("order %v pid %d status %d code %d", order, pid, status, code)
 	}
 }

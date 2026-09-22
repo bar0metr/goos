@@ -192,8 +192,10 @@ func validCapability(grant Capability) bool {
 	return grant.Handle != 0 && grant.Type > handle.TypeInvalid && grant.Type <= handle.TypeStream && grant.Rights != 0 && grant.Rights&^allRights == 0
 }
 
-func (event LifecycleEvent) ExecutablePath() string {
-	return string(event.Executable[:event.ExecutableSize])
+// ExecutablePath returns the event's own bytes. The kernel calls this on every
+// launch, and a string conversion would allocate on its leaking heap.
+func (event *LifecycleEvent) ExecutablePath() []byte {
+	return event.Executable[:event.ExecutableSize]
 }
 
 func validLaunchPath(path string) bool {

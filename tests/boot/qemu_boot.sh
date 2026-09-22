@@ -6,6 +6,8 @@ reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
 pid=
 checks=0
+monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
+heap_first=
 
 cleanup() {
 	if [ -n "$pid" ]; then
@@ -13,6 +15,28 @@ cleanup() {
 		wait "$pid" 2>/dev/null || true
 		pid=
 	fi
+	rm -f "$monitor"
+}
+
+# heap_symbol prints the address of runtime.heapptr in the running kernel.
+heap_symbol() {
+	read -r hz diag validation <build/config/build
+	variant=build/variants/hz$hz
+	if [ "$diag" = 1 ]; then
+		variant=$variant-diag
+	fi
+	if [ "$validation" = 1 ]; then
+		variant=$variant-validation
+	fi
+	awk '$3 == "runtime.heapptr" { print $1; exit }' "$variant/kernel/goos.sym" 2>/dev/null
+}
+
+# heap_pointer reads that address through the QEMU monitor. The kernel leaks
+# every allocation (ADR 0065), so this must not move once the system is up.
+heap_pointer() {
+	[ -n "${1:-}" ] || return 0
+	(printf 'x/1gx 0x%s\n' "$1"; sleep 0.4) | nc -U "$monitor" 2>/dev/null |
+		tr -d '\r' | sed -n 's/^[0-9a-f][0-9a-f]*: \(0x[0-9a-f][0-9a-f]*\)$/\1/p' | tail -n 1
 }
 
 print_context() {
@@ -301,6 +325,26 @@ rm -f "$log" "$reboot_log"
 	sleep 2
 	printf 'cat /persist/startup.txt\n'
 	sleep 1
+	printf 'sleep 500 &\n'
+	sleep 1
+	printf 'sleep 500 &\n'
+	sleep 1
+	printf 'services\n'
+	sleep 1
+	printf 'echo foreground while jobs run\n'
+	sleep 5
+	deep=/persist
+	for dir in aaaaaaaa bbbbbbbb cccccccc dddddddd eeeeeeee; do
+		deep=$deep/$dir
+		printf 'mkdir %s\n' "$deep"
+		sleep 2
+	done
+	printf 'cd /persist/aaaaaaaa/bbbbbbbb/cccccccc/dddddddd/eeeeeeee\n'
+	sleep 1
+	printf 'echo "pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz" | readline | readline | readline\n'
+	sleep 3
+	printf 'cd /system\n'
+	sleep 1
 	printf 'uptime\n'
 	sleep 1
 	printf 'sleep 1\n'
@@ -320,11 +364,33 @@ rm -f "$log" "$reboot_log"
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-monitor "unix:$monitor,server,nowait" \
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
-wait_for_marker boot '^arena-stress-complete$' 120 "$log"
+heap_address=$(heap_symbol || true)
+(
+	waited=0
+	while [ "$waited" -lt 600 ] && ! grep -q '^goos> ' "$log" 2>/dev/null; do
+		sleep 0.2
+		waited=$((waited + 1))
+	done
+	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
+) &
+
+wait_for_marker boot '^arena-stress-complete$' 180 "$log"
+heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
+heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
+rm -f "$monitor.heap"
 cleanup
+
+if [ -n "$heap_first" ] && [ -n "$heap_last" ]; then
+	[ "$heap_first" = "$heap_last" ] ||
+		fail_check kernel-heap.stable "$heap_first (no kernel allocation after boot)" "$heap_last" "$log" 'goos> '
+	checks=$((checks + 1))
+else
+	printf 'SKIP kernel-heap.stable (QEMU monitor unavailable)\n'
+fi
 
 for marker in BOOT_SERVICES_EXITED EXCEPTION_OK GDT_OK IDT_OK TIMER_OK NATIVE_IMAGE_LOADER_OK BOOT_OK; do
 	require_marker "boot.$marker" "$marker" "$log"
@@ -438,6 +504,12 @@ require_regex release.caps '^console   device    read,write$' 'shell console cap
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
+require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$log" 'goos> sleep 500 &'
+require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 500 &'
+require_window jobs.foreground '^foreground while jobs run$' 'foreground command runs while jobs are active' "$log" 'goos> echo foreground while jobs run' '[1] done'
+require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 500 &'
+require_regex jobs.done-2 '^\[2\] done$' 'second background job reported' "$log" 'goos> sleep 500 &'
+require_regex exec.large-pipeline '^pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz$' 'pipeline request over 256 bytes' "$log" 'readline | readline | readline'
 pass_group release-shell
 
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.

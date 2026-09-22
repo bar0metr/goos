@@ -41,7 +41,23 @@ var (
 	argumentStorage   [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
 	vectorWires       [execproto.MaxStages][startup.VectorSize]byte
 	clockNanos        uint64
+	jobs              [execproto.Slots]job
+	execPage          = (*[execproto.Slots][execproto.SlotSize]byte)(unsafe.Pointer(uintptr(execproto.PageAddress)))
 )
+
+// job is an exec request in flight; its slot of the shared page is reused
+// only after PID 1 replies.
+type job struct {
+	active      bool
+	background  bool
+	correlation uint64
+}
+
+//go:linkname memoryMap goos_memory_map
+func memoryMap(memory uint64, address uint64, flags uint64) uint64
+
+//go:linkname ipcReceive goos_ipc_receive
+func ipcReceive(channel uint64, address unsafe.Pointer, capacity uintptr) uint64
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -99,6 +115,10 @@ func userspaceMain() {
 	if !found {
 		fatal("SHELL_EXEC_MISSING\n")
 	}
+	pageHandle, found := startupData.Handle("execpage")
+	if !found || memoryMap(uint64(pageHandle), execproto.PageAddress, kcall.MemoryMapWritable) != 0 {
+		fatal("SHELL_EXEC_PAGE_FAILED\n")
+	}
 	arenaBase = heapPointer
 	root, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: cwd[:cwdSize]})
 	if !ok || root.Status != vfs.StatusOK || root.Kind != ramfs.KindDirectory {
@@ -110,6 +130,10 @@ func userspaceMain() {
 	for {
 		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
 		if status == uint64(kcall.StatusNotFound) {
+			if pollReplies() {
+				write("goos> ")
+				write(string(editor.Pending()))
+			}
 			continue
 		}
 		if status != 0 {
@@ -140,6 +164,10 @@ func echoInput(value byte) {
 }
 
 func execute(line []byte) {
+	if command, background := shellcmd.SplitBackground(line); background {
+		executeBackground(command)
+		return
+	}
 	if command, timed := shellcmd.SplitTime(line); timed {
 		executeTimed(command)
 		return
@@ -154,6 +182,24 @@ func execute(line []byte) {
 		// Sequence slices borrow the static line-editor buffer, not the arena.
 		heapPointer = arenaBase
 	}
+}
+
+// executeBackground starts one pipeline without waiting for it. Builtins and
+// command sequences run in the shell itself and cannot be backgrounded.
+func executeBackground(line []byte) {
+	commands, count, valid := shellcmd.ParseSequence(line, &argumentStorage)
+	if !valid || count != 1 || len(commands[0]) == 0 {
+		write("exec: & applies to one command or pipeline\n")
+		return
+	}
+	redirects, _ := shellcmd.SplitRedirections(line)
+	stages, _, _ := shellcmd.SplitPipeline(redirects.Command)
+	invocation, parsed := shellcmd.ParseInvocation(stages[0], &argumentStorage)
+	if !parsed || invocation.Count == 0 || shellcmd.IsBuiltin(invocation.Arguments[0]) {
+		write("exec: builtins cannot run in the background\n")
+		return
+	}
+	executeExternal(line, true)
 }
 
 // executeTimed runs the rest of a command line through the normal path and
@@ -216,7 +262,7 @@ func executeCommand(line []byte) {
 			executeCd(nil)
 		}
 	default:
-		executeExternal(line)
+		executeExternal(line, false)
 	}
 }
 
@@ -245,14 +291,11 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
 }
 
-const (
-	// The exec reply is answered by PID 1, which is itself bounded, so a long
-	// but finite wait keeps a fault reportable instead of freezing the shell.
-	execReplyDeadline = 5 * clock.TicksPerSecond
-	execReplyAttempts = 6
-)
+// execReplyDeadline bounds one receive; a foreground command may run longer,
+// and a dead PID 1 is reported as a closed channel.
+const execReplyDeadline = 5 * clock.TicksPerSecond
 
-func executeExternal(line []byte) {
+func executeExternal(line []byte, background bool) {
 	redirects, validRedirect := shellcmd.SplitRedirections(line)
 	if !validRedirect {
 		write("exec: invalid redirection\n")
@@ -270,7 +313,7 @@ func executeExternal(line []byte) {
 	}
 	correlation++
 	environment := []startup.Variable{{Name: []byte("PATH"), Value: []byte(execproto.SearchRoot[:len(execproto.SearchRoot)-1])}}
-	requestData := execproto.Request{Count: uint8(count + redirectCount), CWD: cwd[:cwdSize]}
+	requestData := execproto.Request{Count: uint8(count + redirectCount), Background: background, CWD: cwd[:cwdSize]}
 	stageOffset := 0
 	if len(redirects.Input) != 0 {
 		target, parsed := shellcmd.ParseInvocation(redirects.Input, &argumentStorage)
@@ -327,24 +370,96 @@ func executeExternal(line []byte) {
 		requestData.Stages[nextIndex] = stage
 		requestData.ErrorSource = uint8(stageOffset + count)
 	}
-	request, ok := execproto.EncodeRequest(requestData, correlation)
+	slot, ok := freeSlot(background)
+	if !ok {
+		write("exec: too many background jobs\n")
+		return
+	}
+	data, ok := execproto.EncodeRequest(requestData, &execPage[slot])
+	if !ok {
+		write("exec: command too large\n")
+		return
+	}
+	request, ok := execproto.EncodeSubmit(slot, len(data), correlation)
 	if !ok {
 		write("exec: invalid request\n")
 		return
 	}
-	size, ok := ipc.Encode(request, wire[:])
-	if !ok {
-		write("exec: encode failed\n")
+	if !sendExec(request) {
 		return
 	}
-	if status := ipcSend(uint64(execHandle), unsafe.Pointer(&wire[0]), uintptr(size)); status != 0 {
-		write("exec: service unavailable\n")
-		write("exec status: ")
-		writeUint(status)
+	jobs[slot] = job{active: true, background: background, correlation: correlation}
+	if background {
+		write("[")
+		writeUint(uint64(slot) + 1)
+		write("] started\n")
+		return
+	}
+	message, received := awaitReply(correlation)
+	jobs[slot].active = false
+	reply, validReply := execproto.DecodeReply(message)
+	if !received {
+		return
+	}
+	if !validReply {
+		write("exec: corrupt reply\n")
+		return
+	}
+	if reply.LaunchStatus != 0 {
+		write("exec: launch failed: ")
+		writeUint(reply.LaunchStatus)
 		write("\n")
 		return
 	}
-	for attempt := 0; attempt < execReplyAttempts; attempt++ {
+	if reply.ExitCode != 0 {
+		write("exit status: ")
+		writeUint(reply.ExitCode)
+		write("\n")
+		mark("EXIT_STATUS_PROPAGATION_OK\n")
+	}
+	mark("SHELL_EXEC_OK\n")
+	if requestData.Count > 1 {
+		mark("PIPELINE_EXEC_OK\n")
+	}
+	if redirectCount != 0 {
+		mark("REDIRECTION_EXEC_OK\n")
+	}
+}
+
+// freeSlot keeps one slot for the foreground, so background jobs never
+// block an interactive command.
+func freeSlot(background bool) (uint8, bool) {
+	free, count := -1, 0
+	for index := range jobs {
+		if jobs[index].active {
+			count++
+		} else if free < 0 {
+			free = index
+		}
+	}
+	if free < 0 || background && count >= len(jobs)-1 {
+		return 0, false
+	}
+	return uint8(free), true
+}
+
+func sendExec(request ipc.Message) bool {
+	size, ok := ipc.Encode(request, wire[:])
+	if !ok {
+		write("exec: encode failed\n")
+		return false
+	}
+	if status := ipcSend(uint64(execHandle), unsafe.Pointer(&wire[0]), uintptr(size)); status != 0 {
+		write("exec: service unavailable\n")
+		return false
+	}
+	return true
+}
+
+// awaitReply receives until the reply with correlation arrives, reporting
+// background jobs that finish in the meantime.
+func awaitReply(correlation uint64) (ipc.Message, bool) {
+	for {
 		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, execReplyDeadline
 		status := ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
 		if status == uint64(ipc.StatusTimeout) {
@@ -352,39 +467,75 @@ func executeExternal(line []byte) {
 		}
 		if status != 0 {
 			write("exec: service unavailable\n")
-			return
+			return ipc.Message{}, false
 		}
-		payloadSize := int(wire[24]) | int(wire[25])<<8
-		wireSize := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
-		message, valid := ipc.Decode(wire[:wireSize])
-		reply, validReply := execproto.DecodeReply(message)
-		if !valid || !validReply || message.Correlation != correlation {
+		message, valid := decodeWire()
+		if !valid {
 			write("exec: corrupt reply\n")
-			return
+			return ipc.Message{}, false
 		}
-		if reply.LaunchStatus != 0 {
-			write("exec: launch failed: ")
+		if message.Correlation == correlation {
+			return message, true
+		}
+		reportJob(message)
+	}
+}
+
+// pollReplies reports finished background jobs without blocking.
+func pollReplies() bool {
+	reported := false
+	for {
+		active := false
+		for index := range jobs {
+			active = active || jobs[index].active
+		}
+		if !active || ipcReceive(uint64(execHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
+			return reported
+		}
+		if message, valid := decodeWire(); valid {
+			if !reported {
+				write("\n")
+			}
+			reported = reportJob(message) || reported
+		}
+	}
+}
+
+func decodeWire() (ipc.Message, bool) {
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
+	if size > len(wire) {
+		return ipc.Message{}, false
+	}
+	return ipc.Decode(wire[:size])
+}
+
+func reportJob(message ipc.Message) bool {
+	for index := range jobs {
+		if !jobs[index].active || !jobs[index].background || jobs[index].correlation != message.Correlation {
+			continue
+		}
+		jobs[index].active = false
+		write("[")
+		writeUint(uint64(index) + 1)
+		reply, valid := execproto.DecodeReply(message)
+		switch {
+		case !valid:
+			write("] corrupt reply\n")
+		case reply.LaunchStatus != 0:
+			write("] launch failed: ")
 			writeUint(reply.LaunchStatus)
 			write("\n")
-			return
-		}
-		if reply.ExitCode != 0 {
-			write("exit status: ")
+		case reply.ExitCode != 0:
+			write("] exit status: ")
 			writeUint(reply.ExitCode)
 			write("\n")
-			mark("EXIT_STATUS_PROPAGATION_OK\n")
+		default:
+			write("] done\n")
 		}
-		mark("SHELL_EXEC_OK\n")
-		if requestData.Count > 1 {
-			mark("PIPELINE_EXEC_OK\n")
-		}
-		if redirectCount != 0 {
-			mark("REDIRECTION_EXEC_OK\n")
-		}
-		return
+		return true
 	}
-	write("exec: no reply\n")
-	diagnostics(uint64(consoleHandle), 0)
+	return false
 }
 
 var (
@@ -403,17 +554,10 @@ func controlExchange(operation execproto.ControlOperation) (ipc.Message, bool) {
 	if !ok {
 		return ipc.Message{}, false
 	}
-	size, ok := ipc.Encode(request, wire[:])
-	if !ok || ipcSend(uint64(execHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+	if !sendExec(request) {
 		return ipc.Message{}, false
 	}
-	descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, execReplyDeadline
-	if ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8)) != 0 {
-		return ipc.Message{}, false
-	}
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	message, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
-	return message, valid && message.Correlation == correlation
+	return awaitReply(correlation)
 }
 
 func printServices() {

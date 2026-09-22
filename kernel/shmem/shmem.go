@@ -22,6 +22,38 @@ type Registry struct {
 	nextID uint64
 }
 
+// MaxObjects bounds the kernel-created objects a process may map by handle.
+const MaxObjects = 4
+
+type Table struct {
+	objects [MaxObjects]Object
+	count   int
+}
+
+func (table *Table) Register(object Object) bool {
+	if table == nil || object.id == 0 || table.count == MaxObjects {
+		return false
+	}
+	if _, exists := table.Find(object.id); exists {
+		return false
+	}
+	table.objects[table.count] = object
+	table.count++
+	return true
+}
+
+func (table *Table) Find(id uint64) (*Object, bool) {
+	if table == nil || id == 0 {
+		return nil, false
+	}
+	for index := 0; index < table.count; index++ {
+		if table.objects[index].id == id {
+			return &table.objects[index], true
+		}
+	}
+	return nil, false
+}
+
 func (registry *Registry) allocateID() (uint64, bool) {
 	if registry == nil || registry.nextID == identityLimit {
 		return 0, false

@@ -61,8 +61,16 @@ start of a word, so arguments ending in `2` remain data. One unquoted `<` target
 producer with its own VFS session; its stdout stream becomes the first requested
 stage's stdin. Input and output redirection may be combined while staying within
 the four-stage bound. Quoted or escaped operator bytes remain argument data.
-Stream merging such as `2>&1`, job control, and a persistent userspace TTY
+Stream merging such as `2>&1`, stopping jobs, and a persistent userspace TTY
 server remain later work.
+
+A line ending in an unquoted `&` runs as a background job with an empty
+standard input. The shell prints `[N] started`, returns to the prompt, and
+reports `[N] done`, `[N] exit status: C`, or `[N] launch failed: S` when PID 1
+replies, redrawing the line being typed. Up to three background jobs may run,
+and one exec slot stays free for the foreground. Builtins and `;` sequences
+cannot run in the background. A foreground command has no reply time limit
+(ADR 0064).
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty

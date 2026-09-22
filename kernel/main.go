@@ -33,19 +33,39 @@ import (
 )
 
 var (
-	bootInfo                boot.Info
-	pageAllocator           pmm.Allocator
-	demoTaskA               uint64
-	demoTaskB               uint64
-	demoABlocked            uint64
-	demoAResumed            uint64
-	userExited              uint64
-	kernelCallData          [kcall.MaxDebugWrite]byte
-	nativeImageData         [1024]byte
-	faultImageData          [1024]byte
-	boundedChannel          ipc.Channel
-	ipcWireData             [ipc.WireMaxSize]byte
-	sharedRegistry          shmem.Registry
+	bootInfo        boot.Info
+	pageAllocator   pmm.Allocator
+	demoTaskA       uint64
+	demoTaskB       uint64
+	demoABlocked    uint64
+	demoAResumed    uint64
+	userExited      uint64
+	kernelCallData  [kcall.MaxDebugWrite]byte
+	nativeImageData [1024]byte
+	faultImageData  [1024]byte
+	boundedChannel  ipc.Channel
+	ipcWireData     [ipc.WireMaxSize]byte
+	sharedRegistry  shmem.Registry
+	sharedObjects   shmem.Table
+	dispatchHandler nativeCallHandler
+	// Native calls run one at a time in the kernel exclusion domain, so the
+	// call paths share these buffers instead of allocating on a leaking heap.
+	handleInfoWire          [kcall.HandleInfoSize]byte
+	processInfoWire         [kcall.ProcessInfoSize]byte
+	clockWire               [8]byte
+	nanosWire               [8]byte
+	consoleByteWire         [1]byte
+	systemInfoWire          [kcall.SystemInfoSize]byte
+	portWire                [4]byte
+	dmaWire                 [24]byte
+	channelWire             [16]byte
+	streamCreateWire        [16]byte
+	streamDescriptorWire    [24]byte
+	streamResultWire        [8]byte
+	receiveDescriptorWire   [24]byte
+	exitWire                [8]byte
+	waitAnyResultWire       [kcall.WaitAnyResultSize]byte
+	waitMaskWire            [8]byte
 	launchTemplate          [supervisor.StagingSlotSize]byte
 	launchBound             [startup.Size]byte
 	channelRegistry         ipc.Registry
@@ -98,6 +118,9 @@ var (
 	initExitObserved            uint64
 	initExitCode                uint64
 	kernelPageTable             uint64
+	initName                    = []byte("init")
+	initImagePath               = []byte("system/init")
+	initProcessSlot             process.Process
 	spawnedProcesses            [process.MaxProcesses]process.Process
 	nextProcessID               process.ID = 4
 	virtioBlockPort             uint16
@@ -210,31 +233,39 @@ func releaseExitedProcess(event process.ExitEvent) {
 	}
 }
 
+// releasingProcess names the process releaseProcessHandles is tearing down. A
+// closure capturing it would be built on the kernel's leaking heap.
+var releasingProcess process.ID
+
 // releaseProcessHandles closes everything the exited process held so that the
 // peer of each channel and stream observes closure instead of blocking.
 func releaseProcessHandles(exited *process.Process) {
-	exited.Handles().CloseAll(func(typeID handle.Type, cap capability.Capability) {
-		if typeID == handle.TypeDevice {
-			if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
-				amd64.PortWrite(virtioBlockPort+18, 1, 0)
-				amd64.QuiesceIRQ11()
-			}
+	releasingProcess = exited.ID()
+	exited.Handles().CloseAll(releaseProcessHandle)
+	releasingProcess = 0
+}
+
+func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
+	if typeID == handle.TypeDevice {
+		if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
+			amd64.PortWrite(virtioBlockPort+18, 1, 0)
+			amd64.QuiesceIRQ11()
 		}
-		if typeID == handle.TypeStream {
-			closeStreamCapability(cap)
-			return
-		}
-		if typeID != handle.TypeChannel {
-			return
-		}
-		channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-		channel, exists := channelRegistry.Lookup(channelID)
-		if valid && exists && channel.Close(side) {
-			trace(diag.ChannelClosed, exited.ID(), 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
-			wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-			channelRegistry.Release(channelID)
-		}
-	})
+	}
+	if typeID == handle.TypeStream {
+		closeStreamCapability(cap)
+		return
+	}
+	if typeID != handle.TypeChannel {
+		return
+	}
+	channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
+	channel, exists := channelRegistry.Lookup(channelID)
+	if valid && exists && channel.Close(side) {
+		trace(diag.ChannelClosed, releasingProcess, 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
+		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+		channelRegistry.Release(channelID)
+	}
 }
 
 // maxPendingLifecycle bounds the lifecycle messages retained for retry. PID 1
@@ -331,7 +362,7 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path string, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -378,7 +409,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
-	*spawned, ok = process.New(pid, process.AddressSpace{Root: root})
+	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
 	spawned.SetName(path[lastSlash(path)+1:])
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
@@ -478,7 +509,8 @@ func (handler nativeCallHandler) ConsoleRead(device uint64, address uint64, leng
 	if !ready {
 		return kcall.StatusNotFound
 	}
-	if !vm.CopyOut(handler.root, address, []byte{value}) {
+	consoleByteWire[0] = value
+	if !vm.CopyOut(handler.root, address, consoleByteWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -488,9 +520,8 @@ func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.
 	if length != 8 {
 		return kcall.StatusInvalidArgument
 	}
-	var encoded [8]byte
-	putUint64(encoded[:], amd64.TimerTicks())
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(clockWire[:], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, clockWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -502,13 +533,12 @@ func (handler nativeCallHandler) SystemInfo(address uint64, length uint64) kcall
 		return kcall.StatusInvalidArgument
 	}
 	statistics := pageAllocator.Statistics()
-	var encoded [kcall.SystemInfoSize]byte
-	putUint64(encoded[0:8], uint64(owner.ID()))
-	putUint64(encoded[8:16], uint64(processRegistry.Count()))
-	putUint64(encoded[16:24], statistics.ManagedPages)
-	putUint64(encoded[24:32], statistics.FreePages)
-	putUint64(encoded[32:40], amd64.TimerTicks())
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(systemInfoWire[0:8], uint64(owner.ID()))
+	putUint64(systemInfoWire[8:16], uint64(processRegistry.Count()))
+	putUint64(systemInfoWire[16:24], statistics.ManagedPages)
+	putUint64(systemInfoWire[24:32], statistics.FreePages)
+	putUint64(systemInfoWire[32:40], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, systemInfoWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -537,9 +567,8 @@ func (handler nativeCallHandler) PortRead(id uint64, specification uint64, addre
 	if !read {
 		return kcall.StatusInvalidArgument
 	}
-	var encoded [4]byte
-	putUint32(encoded[:], value)
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint32(portWire[:], value)
+	if !vm.CopyOut(handler.root, address, portWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -577,8 +606,7 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
 		return kcall.StatusPermissionDenied
 	}
-	var encoded [24]byte
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	physical, allocated := pageAllocator.AllocateContiguous(4)
@@ -605,10 +633,10 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 			return kcall.StatusResourceExhausted
 		}
 	}
-	putUint64(encoded[0:8], physical)
-	putUint64(encoded[8:16], virtual)
-	putUint64(encoded[16:24], 4*vm.PageSize)
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(dmaWire[0:8], physical)
+	putUint64(dmaWire[8:16], virtual)
+	putUint64(dmaWire[16:24], 4*vm.PageSize)
+	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -670,10 +698,9 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		channelRegistry.Release(id)
 		return kcall.StatusResourceExhausted
 	}
-	var encoded [16]byte
-	putUint64(encoded[0:8], uint64(handle0))
-	putUint64(encoded[8:16], uint64(handle1))
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(channelWire[0:8], uint64(handle0))
+	putUint64(channelWire[8:16], uint64(handle1))
+	if !vm.CopyOut(handler.root, address, channelWire[:]) {
 		owner.Handles().Close(handle0)
 		owner.Handles().Close(handle1)
 		channel.Close(0)
@@ -762,10 +789,9 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 		streamRegistry.Release(id)
 		return kcall.StatusResourceExhausted
 	}
-	var encoded [16]byte
-	putUint64(encoded[0:8], uint64(reader))
-	putUint64(encoded[8:16], uint64(writer))
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(streamCreateWire[0:8], uint64(reader))
+	putUint64(streamCreateWire[8:16], uint64(writer))
+	if !vm.CopyOut(handler.root, address, streamCreateWire[:]) {
 		owner.Handles().Close(reader)
 		owner.Handles().Close(writer)
 		endpoint.CloseReader()
@@ -807,21 +833,19 @@ func streamDescriptor(root, address, length uint64) (uint64, uint64, bool) {
 	if length != kcall.StreamDescriptorSize {
 		return 0, 0, false
 	}
-	var descriptor [24]byte
-	if !vm.CopyIn(root, address, descriptor[:]) {
+	if !vm.CopyIn(root, address, streamDescriptorWire[:]) {
 		return 0, 0, false
 	}
-	buffer, size := decodeUint64(descriptor[0:8]), decodeUint64(descriptor[8:16])
-	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(descriptor[16:24]) != 0 {
+	buffer, size := decodeUint64(streamDescriptorWire[0:8]), decodeUint64(streamDescriptorWire[8:16])
+	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(streamDescriptorWire[16:24]) != 0 {
 		return 0, 0, false
 	}
 	return buffer, size, true
 }
 
 func writeStreamResult(root, descriptor, size uint64) bool {
-	var encoded [8]byte
-	putUint64(encoded[:], size)
-	return vm.CopyOut(root, descriptor+16, encoded[:])
+	putUint64(streamResultWire[:], size)
+	return vm.CopyOut(root, descriptor+16, streamResultWire[:])
 }
 
 func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length uint64) kcall.Status {
@@ -977,13 +1001,12 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 		ipcWaitStatus[task] = kcall.StatusOK
 		return status, false
 	}
-	var data [24]byte
-	if !vm.CopyIn(handler.root, descriptor, data[:]) {
+	if !vm.CopyIn(handler.root, descriptor, receiveDescriptorWire[:]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	buffer := decodeUint64(data[0:8])
-	capacity := decodeUint64(data[8:16])
-	timeout := decodeUint64(data[16:24])
+	buffer := decodeUint64(receiveDescriptorWire[0:8])
+	capacity := decodeUint64(receiveDescriptorWire[8:16])
+	timeout := decodeUint64(receiveDescriptorWire[16:24])
 	status := handler.IPCReceive(channel, buffer, capacity)
 	if status != kcall.StatusNotFound {
 		return status, false
@@ -1250,9 +1273,8 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 }
 
 func reportProcessExit(handler nativeCallHandler, resultAddress uint64, event process.ExitEvent) kcall.Status {
-	var encoded [8]byte
-	putUint64(encoded[:], event.Code)
-	if !vm.CopyOut(handler.root, resultAddress, encoded[:]) {
+	putUint64(exitWire[:], event.Code)
+	if !vm.CopyOut(handler.root, resultAddress, exitWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -1321,7 +1343,10 @@ func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capa
 //
 //export goos_dispatch_kernel_call
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
-	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, nativeCallHandler{root: root})
+	// The handler is reused through a pointer: a struct passed as an interface
+	// would be boxed, and the kernel leaks every heap allocation.
+	dispatchHandler.root = root
+	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, &dispatchHandler)
 	return uint64(result.Action)<<32 | uint64(result.Status)
 }
 
@@ -1416,11 +1441,10 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		!vm.CopyIn(handler.root, interestsAddress, waitAnyWire[:int(wireSize)]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	var resultWire [kcall.WaitAnyResultSize]byte
-	if !vm.CopyIn(handler.root, resultAddress, resultWire[:]) {
+	if !vm.CopyIn(handler.root, resultAddress, waitAnyResultWire[:]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	timeout := decodeUint64(resultWire[0:8])
+	timeout := decodeUint64(waitAnyResultWire[0:8])
 	for index := 0; index < int(count); index++ {
 		offset := index * int(kcall.WaitAnyInterestSize)
 		handleID := handle.ID(decodeUint64(waitAnyWire[offset : offset+8]))
@@ -1572,9 +1596,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint16 {
 }
 
 func writeWaitAnyMask(root, resultAddress uint64, mask uint16) kcall.Status {
-	var encoded [8]byte
-	putUint64(encoded[:], uint64(mask))
-	if !vm.CopyOut(root, resultAddress+8, encoded[:]) {
+	putUint64(waitMaskWire[:], uint64(mask))
+	if !vm.CopyOut(root, resultAddress+8, waitMaskWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -1796,10 +1819,11 @@ func main() {
 	if !addressSpaceInit {
 		panicSerial("PID 1 address-space construction failed")
 	}
-	initProcess, validInit := process.New(1, process.AddressSpace{Root: rootInit})
-	initProcess.SetName("init")
-	bootInitProcess = &initProcess
-	if !validInit || !processRegistry.Add(&initProcess) {
+	initProcess := &initProcessSlot
+	validInit := process.Init(initProcess, 1, process.AddressSpace{Root: rootInit})
+	initProcess.SetName(initName)
+	bootInitProcess = initProcess
+	if !validInit || !processRegistry.Add(initProcess) {
 		panicSerial("PID 1 process initialization failed")
 	}
 	var lifecycleCreated bool
@@ -1847,14 +1871,20 @@ func main() {
 	launchStaging, launchStagingCreated := sharedRegistry.Create(&pageAllocator, 1)
 	launchStagingHandle, launchStagingGranted := launchStaging.Grant(initProcess.Handles(), capability.Read|capability.Write)
 	launchStagingMapped := launchStagingCreated && launchStagingGranted && launchStaging.Map(initProcess.Handles(), launchStagingHandle, rootInit, supervisor.StagingAddress, 0, 1, true)
-	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !launchStagingMapped || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) {
+	execPage, execPageCreated := sharedRegistry.Create(&pageAllocator, 1)
+	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
+	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && sharedObjects.Register(launchStaging) && sharedObjects.Register(execPage)
+	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) {
 		panicSerial("PID 1 capability layout failed")
 	}
 	if validation.Enabled {
+		if !memoryMapRejectsInvalid(rootInit, systemControlHandle, execPageHandle) {
+			panicSerial("MemoryMap validation failed")
+		}
 		runKernelSelfTests(pageTable)
 	}
-	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), "system/init")
+	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), initImagePath)
 	if !initDiscovered {
 		console.WriteString("PANIC: init image not found in initramfs\n")
 		for {
@@ -1899,7 +1929,9 @@ func main() {
 // mark prints a validation marker. Normal builds print none.
 func mark(marker string) {
 	if validation.Enabled {
-		amd64.NewCOM1().WriteString(marker + "\n")
+		port := amd64.NewCOM1()
+		port.WriteString(marker)
+		port.WriteString("\n")
 	}
 }
 
@@ -1934,7 +1966,7 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 	}
 }
 
-func lastSlash(path string) int {
+func lastSlash(path []byte) int {
 	for index := len(path) - 1; index >= 0; index-- {
 		if path[index] == '/' {
 			return index

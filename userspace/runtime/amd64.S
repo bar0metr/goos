@@ -232,6 +232,14 @@ goos_system_reset:
     ret
 .size goos_system_reset, .-goos_system_reset
 
+.global goos_memory_map
+.type goos_memory_map,@function
+goos_memory_map:
+    movl $30, %eax
+    int $0x80
+    ret
+.size goos_memory_map, .-goos_memory_map
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

@@ -46,7 +46,7 @@ func (registry *Registry) Create() (*Stream, uint64, bool) {
 		registry.next++
 		id := streamNamespace | registry.next
 		registry.ids[index] = id
-		registry.streams[index] = New()
+		registry.streams[index].Reset()
 		return &registry.streams[index], id, true
 	}
 	return nil, 0, false

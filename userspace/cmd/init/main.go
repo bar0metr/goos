@@ -38,6 +38,20 @@ const driverServerHandle = handle.ID(0x000000010000000f)
 const filesystemBlockClientHandle = handle.ID(0x0000000100000010)
 const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
 const systemControlHandle = uint64(0x0000000100000012)
+const execPageHandle = handle.ID(0x0000000100000014)
+
+//go:linkname memoryMap goos_memory_map
+func memoryMap(memory uint64, address uint64, flags uint64) uint64
+
+// execJob is one shell request in flight. The request is copied out of the
+// shared page, so the shell cannot change it while it runs.
+type execJob struct {
+	active      bool
+	slot        uint8
+	correlation uint64
+	data        [execproto.SlotSize]byte
+	job         supervisor.Job
+}
 
 //go:linkname systemReset goos_system_reset
 func systemReset(device uint64) uint64
@@ -53,6 +67,8 @@ var (
 	supervisionComplete  bool
 	processWaitAnnounced bool
 	nextStagingSlot      uint8
+	execJobs             [execproto.Slots]execJob
+	execPage             = (*[execproto.Slots][execproto.SlotSize]byte)(unsafe.Pointer(uintptr(execproto.PageAddress)))
 	lifecyclePending     [16]ipc.Message
 	lifecycleHead        uint8
 	lifecycleCount       uint8
@@ -123,9 +139,17 @@ func userspaceMain() {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		var jobs [execproto.Slots]int
 		if supervisionComplete {
 			interests[1] = userwait.Interest{Handle: handle.ID(execServerHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 			count++
+			for index := range execJobs {
+				if process, pending := execJobs[index].job.Next(); execJobs[index].active && pending {
+					interests[count] = userwait.Interest{Handle: process, Events: kcall.WaitCompleted}
+					jobs[count-2] = index
+					count++
+				}
+			}
 		}
 		readyMask := uint16(1)
 		if lifecycleCount == 0 {
@@ -134,6 +158,11 @@ func userspaceMain() {
 				fatal("INIT_WAIT_FAILED\n")
 			}
 			readyMask = result.ReadyMask
+		}
+		for bit := 2; bit < count; bit++ {
+			if readyMask&(1<<bit) != 0 {
+				advanceJob(jobs[bit-2])
+			}
 		}
 		if readyMask&1 == 0 {
 			if readyMask&2 != 0 {
@@ -166,6 +195,9 @@ func userspaceMain() {
 // startServices registers the system services and launches them in
 // dependency order, reporting each on the console.
 func startServices(ticks uint64) {
+	if memoryMap(uint64(execPageHandle), execproto.PageAddress, kcall.MemoryMapWritable) != 0 {
+		fatal("INIT_EXEC_PAGE_FAILED\n")
+	}
 	write("\nStarting services...\n")
 	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
 		Capabilities: []supervisor.Capability{
@@ -194,6 +226,7 @@ func startServices(ticks uint64) {
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
 				{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
 			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
@@ -425,25 +458,58 @@ func pollExec() {
 		handleControl(message)
 		return
 	}
-	request, ok := execproto.DecodeRequest(message)
+	slot, size, ok := execproto.DecodeSubmit(message)
 	if !ok {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
 		return
 	}
-	// Own every invocation before launch/VFS operations reuse the IPC buffer.
-	var paths [execproto.MaxStages][execproto.MaxPath]byte
-	var arguments [execproto.MaxStages][startup.MaxVector]byte
-	var cwd [execproto.MaxPath]byte
-	var environment [96]byte
-	request.CWD = cwd[:copy(cwd[:], request.CWD)]
-	request.Environment = environment[:copy(environment[:], request.Environment)]
-	for index := 0; index < int(request.Count); index++ {
-		stage := &request.Stages[index]
-		stage.Path = paths[index][:copy(paths[index][:], stage.Path)]
-		stage.Arguments = arguments[index][:copy(arguments[index][:], stage.Arguments)]
+	job := freeJob(slot)
+	if job == nil {
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0)
+		return
 	}
-	pid, launchStatus, exitCode := supervisor.RunPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
-	sendExecReply(message.Correlation, pid, uint64(launchStatus), exitCode)
+	copy(job.data[:size], execPage[slot][:size])
+	request, ok := execproto.DecodeRequest(job.data[:size])
+	if !ok {
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
+		return
+	}
+	job.active, job.slot, job.correlation = true, slot, message.Correlation
+	job.job = supervisor.StartPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
+	finishJob(job)
+}
+
+// freeJob returns an unused job record, or nil when the slot is still owned
+// by a running job or every record is busy.
+func freeJob(slot uint8) *execJob {
+	var free *execJob
+	for index := range execJobs {
+		if execJobs[index].active && execJobs[index].slot == slot {
+			return nil
+		}
+		if !execJobs[index].active && free == nil {
+			free = &execJobs[index]
+		}
+	}
+	return free
+}
+
+// advanceJob reaps the process a job was waiting for; it has completed.
+func advanceJob(index int) {
+	job := &execJobs[index]
+	if process, pending := job.job.Next(); job.active && pending {
+		job.job.Complete(waitApplicationExit(process))
+		finishJob(job)
+	}
+}
+
+func finishJob(job *execJob) {
+	if _, pending := job.job.Next(); pending {
+		return
+	}
+	pid, launchStatus, exitCode := job.job.Result()
+	job.active = false
+	sendExecReply(job.correlation, pid, uint64(launchStatus), exitCode)
 }
 
 // handleControl answers the shell's requests that launch nothing.

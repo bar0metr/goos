@@ -83,3 +83,25 @@ func TestBoundsOnEncodeAndFields(t *testing.T) {
 		t.Fatal("largest record does not fit MaxText")
 	}
 }
+
+// TestFormatDoesNotAllocate guards the kernel, which leaks every allocation
+// and cannot grow its heap after it leaves boot services.
+func TestFormatDoesNotAllocate(t *testing.T) {
+	record := Record{Time: 1234567890, Process: 7, Level: Warn, Component: []byte("kernel"), Message: []byte("launch failed"), Fields: []byte("status=2")}
+	var target [MaxText]byte
+	if allocations := testing.AllocsPerRun(100, func() { Format(record, target[:]) }); allocations != 0 {
+		t.Fatalf("Format allocated %v times per run", allocations)
+	}
+	var fields [MaxFields]byte
+	if allocations := testing.AllocsPerRun(100, func() { AppendUint(fields[:0], 987654321) }); allocations != 0 {
+		t.Fatalf("AppendUint allocated %v times per run", allocations)
+	}
+}
+
+func TestAppendFieldDoesNotAllocate(t *testing.T) {
+	var fields [MaxFields]byte
+	value := []byte("vfs")
+	if allocations := testing.AllocsPerRun(100, func() { AppendField(fields[:0], "grant", value) }); allocations != 0 {
+		t.Fatalf("AppendField allocated %v times per run", allocations)
+	}
+}

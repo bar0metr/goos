@@ -36,7 +36,7 @@ func (registry *Registry) Create() (*Channel, uint64, bool) {
 			registry.next++
 			id := channelNamespace | registry.next
 			registry.ids[index] = id
-			registry.channels[index] = NewChannel()
+			registry.channels[index].Reset()
 			return &registry.channels[index], id, true
 		}
 	}

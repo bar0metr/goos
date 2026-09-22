@@ -17,10 +17,15 @@ import (
 // levels are retained in the ring and read with LogRead.
 const consoleThreshold = logfmt.Warn
 
+// The kernel leaks every heap allocation, so its own log path uses fixed
+// buffers and never converts a string to a slice.
 var (
 	systemLog  klog.Ring
 	logWire    [kcall.MaxLogRecord]byte
 	logText    [kcall.LogText]byte
+	logMessage [logfmt.MaxMessage]byte
+	logFields  [logfmt.MaxFields]byte
+	logGrant   [logfmt.MaxFields]byte
 	kernelName = []byte("kernel")
 )
 
@@ -40,13 +45,14 @@ func logRecord(record logfmt.Record) {
 
 // kernelLog records an event raised by the kernel itself as process 0.
 func kernelLog(level logfmt.Level, message string, fields []byte) {
-	logRecord(logfmt.Record{Level: level, Component: kernelName, Message: []byte(message), Fields: fields})
+	size := copy(logMessage[:], message)
+	logRecord(logfmt.Record{Level: level, Component: kernelName, Message: logMessage[:size], Fields: fields})
 }
 
 func kernelLogUint(level logfmt.Level, message string, key string, value uint64) {
-	var buffer [logfmt.MaxFields]byte
-	fields := append(append(buffer[:0], key...), '=')
-	kernelLog(level, message, logfmt.AppendUint(fields, value))
+	size := copy(logFields[:], key)
+	logFields[size] = '='
+	kernelLog(level, message, logfmt.AppendUint(logFields[:size+1], value))
 }
 
 // consoleAuthority resolves the caller's console device capability, which
@@ -99,7 +105,7 @@ func (handler nativeCallHandler) LogRead(device uint64, index uint64, address ui
 }
 
 func kernelLogGrant(message string, name string) {
-	var buffer [logfmt.MaxFields]byte
-	fields, _ := logfmt.AppendField(buffer[:0], "grant", []byte(name))
+	size := copy(logGrant[:], name)
+	fields, _ := logfmt.AppendField(logFields[:0], "grant", logGrant[:size])
 	kernelLog(logfmt.Warn, message, fields)
 }
