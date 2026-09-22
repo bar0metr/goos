@@ -355,6 +355,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 	loaded, ok := loader.LoadNative(&pageAllocator, root, image)
 	began = launchStageDone(launchLoad, began)
 	if !ok {
+		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	pid := nextProcessID
@@ -366,29 +367,27 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		}
 	}
 	if spawned == nil {
+		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
 	*spawned, ok = process.NewWithStartup(pid, process.AddressSpace{Root: root}, startupData)
 	spawned.SetName(path[lastSlash(path)+1:])
 	if !ok || spawned.Handles().Available() < len(grants) {
+		abandonSpawn(root, spawned, false)
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	var installed [supervisor.MaxCapabilities]handle.ID
 	for index, grant := range grants {
 		installed[index], ok = bootInitProcess.Handles().Transfer(spawned.Handles(), grant.Handle, grant.Type, grant.Rights)
 		if !ok {
-			for rollback := 0; rollback < index; rollback++ {
-				spawned.Handles().Close(installed[rollback])
-			}
+			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
 	for index, grant := range grants {
 		installedCapability, found := spawned.Handles().Lookup(installed[index], grant.Type, grant.Rights)
 		if !found || installedCapability.Rights() != grant.Rights {
-			for rollback := range grants {
-				spawned.Handles().Close(installed[rollback])
-			}
+			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
@@ -396,30 +395,37 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		var boundWire [startup.Size]byte
 		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &boundWire)
 		if !boundOK || !spawned.SetStartup(bound) {
-			for index := range grants {
-				spawned.Handles().Close(installed[index])
-			}
+			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
 		startupABIConfirmed = 1
 	}
 	if !processRegistry.Add(spawned) {
-		for index := range grants {
-			spawned.Handles().Close(installed[index])
-		}
+		abandonSpawn(root, spawned, false)
 		return 0, 0, supervisor.LaunchProcessFailed
+	}
+	// The process handle is reserved before the task exists, so a started
+	// child is never left without the handle its parent waits on.
+	processHandle, ok := bootInitProcess.Handles().Insert(handle.TypeProcess, capability.New(uint64(pid), capability.Wait))
+	if !ok {
+		abandonSpawn(root, spawned, true)
+		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
 	began = launchStageDone(launchSetup, began)
 	task, ok := amd64.AddUserTask(&pageAllocator, root, loaded.Entry, loaded.StackTop)
 	launchStageDone(launchTask, began)
-	if !ok || !processRegistry.BindTask(pid, sched.TaskID(task)) {
+	if !ok {
+		bootInitProcess.Handles().Close(processHandle)
+		abandonSpawn(root, spawned, true)
 		return 0, 0, supervisor.LaunchTaskFailed
 	}
-	processHandle, ok := bootInitProcess.Handles().Insert(handle.TypeProcess, capability.New(uint64(pid), capability.Wait))
-	if !ok {
-		return 0, 0, supervisor.LaunchCapabilityInstallFailed
-	}
+	// A runnable task cannot be withdrawn; its process ID is consumed either
+	// way so it is never handed out twice.
 	nextProcessID++
+	if !processRegistry.BindTask(pid, sched.TaskID(task)) {
+		kernelLogUint(logfmt.Error, "task bind failed", "pid", uint64(pid))
+		return 0, 0, supervisor.LaunchTaskFailed
+	}
 	trace(diag.ProcessSpawned, pid, task, 0, 0)
 	if len(grants) != 0 {
 		capabilityManifestOK = 1
@@ -585,6 +591,10 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	}
 	for page := uint64(0); page < 4; page++ {
 		if !vm.MapOwnedUserPage(handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true, Writable: true}) {
+			// Mapped pages are owned and return with the address space.
+			for release := page; release < 4; release++ {
+				pageAllocator.Free(physical + release*vm.PageSize)
+			}
 			return kcall.StatusResourceExhausted
 		}
 	}
@@ -1879,6 +1889,21 @@ func serviceKernel() {
 	consumeInitControl()
 	amd64.KernelSleep()
 	amd64.RestoreInterrupts(flags)
+}
+
+// abandonSpawn releases a launch that failed before its task existed: the
+// derived handles, the registry entry, the process slot, and the address space.
+func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
+	if spawned != nil {
+		spawned.Handles().CloseAll(nil)
+		if registered {
+			processRegistry.Remove(spawned.ID())
+		}
+		spawned.Reset()
+	}
+	if !vm.DestroyUserAddressSpace(&pageAllocator, root) {
+		addressSpaceReclaimFailures++
+	}
 }
 
 func lastSlash(path string) int {
