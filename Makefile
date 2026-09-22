@@ -7,10 +7,10 @@ KERNEL_DIR = $(OUT_DIR)/kernel
 ISO_ROOT = $(OUT_DIR)/iso/root
 EFI_BOOT = $(ISO_ROOT)/EFI/BOOT
 KERNEL = $(KERNEL_DIR)/goos.efi
-KERNEL_IO = $(KERNEL_DIR)/io.o
+KERNEL_IO := $(BUILD_DIR)/kernel/io.o
 INIT_IMAGE = $(OUT_DIR)/userspace/init
 INIT_ELF = $(OUT_DIR)/userspace/init.elf
-INIT_RUNTIME = $(OUT_DIR)/userspace/runtime.o
+INIT_RUNTIME := $(BUILD_DIR)/userspace/runtime.o
 SERVICE_IMAGE = $(OUT_DIR)/userspace/fault-probe
 SHELL_IMAGE = $(OUT_DIR)/userspace/shell
 SHELL_ELF = $(OUT_DIR)/userspace/shell.elf
@@ -68,7 +68,7 @@ kernel: $(KERNEL)
 
 
 $(KERNEL_IO): kernel/arch/amd64/io.S
-	@mkdir -p $(KERNEL_DIR)
+	@mkdir -p $(dir $@)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
 $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
@@ -79,7 +79,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
-	@mkdir -p $(OUT_DIR)/userspace
+	@mkdir -p $(dir $@)
 	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
 
 $(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)

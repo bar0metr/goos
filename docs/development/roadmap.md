@@ -218,6 +218,20 @@ processes, PID 1's supervision scenario, and every `*_OK` marker; `make
 test-boot` always uses it, while the stress and latency harnesses run the
 normal build.
 
+The 0.1.0 shell and logging gaps are closed as well:
+
+- ADR 0059 adds a structured system log: a kernel ring fed by the kernel and
+  the services, with warnings echoed to the console and `log` in the shell.
+- ADR 0061 adds `services`, `handles`, `caps`, `reboot`, and `ps` with
+  type and state columns, built on public kernel operations and a PID 1
+  control protocol.
+- `reboot` syncs storage and resets through a capability held only by
+  PID 1, and the boot test now runs the M7 write/reboot/read acceptance
+  inside one VM.
+
+Remaining 0.1.0 work is a persistent log service, a typed configuration
+service (spec §28), and per-process resource quotas (spec §36).
+
 ## Priority 5 — Linux ABI compatibility
 
 Begin Linux compatibility only after native process startup, persistent storage,
