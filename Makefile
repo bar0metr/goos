@@ -289,6 +289,7 @@ docs:
 	@test -f docs/architecture/logging.md
 	@test -f docs/adr/0064-asynchronous-exec-and-background-jobs.md
 	@test -f docs/adr/0065-kernel-heap-discipline.md
+	@test -f docs/adr/0066-fat32-long-names.md
 	@test -f docs/adr/0062-startup-data-through-shared-memory.md
 	@test -f docs/adr/0063-mapping-shared-memory.md
 	@test -f docs/adr/0061-release-shell-commands-and-system-reset.md
