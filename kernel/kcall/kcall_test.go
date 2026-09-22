@@ -82,6 +82,11 @@ func (handler *testHandler) Diagnostics(device uint64, address uint64) Status {
 	return StatusUnsupported
 }
 
+func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -210,5 +215,22 @@ func TestDispatchDiagnosticsPassesDeviceHandle(t *testing.T) {
 	result := Dispatch(Request{Operation: OperationDiagnostics, Arg0: 7, Arg1: 0x40001000}, handler)
 	if result.Status != StatusUnsupported || handler.channel != 7 || handler.address != 0x40001000 || result.Action != ActionReturn {
 		t.Fatalf("result %+v, device %d", result, handler.channel)
+	}
+}
+
+func TestDispatchClockReadNanos(t *testing.T) {
+	if OperationClockReadNanos != 24 {
+		t.Fatalf("clock nanoseconds operation is %d, want 24", OperationClockReadNanos)
+	}
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationClockReadNanos, Arg0: 0xa000, Arg1: 8}, handler)
+	if result.Status != StatusOK || result.Action != ActionReturn || handler.address != 0xa000 || handler.length != 8 {
+		t.Fatalf("clock nanoseconds = %#v, handler: %#v", result, handler)
+	}
+	for _, length := range []uint64{0, 4, 16} {
+		handler = &testHandler{}
+		if result := Dispatch(Request{Operation: OperationClockReadNanos, Arg0: 0xa000, Arg1: length}, handler); result.Status != StatusInvalidArgument || handler.length != 0 {
+			t.Fatalf("length %d reached handler: %#v", length, result)
+		}
 	}
 }
