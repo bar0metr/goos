@@ -10,6 +10,40 @@ const (
 	// links are packed many to a sector, so a small window removes almost all
 	// repeated device traffic for metadata scans.
 	cacheSectors = 4
+
+	entrySize         = uint64(32)
+	entriesPerCluster = int(sectorSize / entrySize)
+	// maxDirClusters bounds every directory, the root included, to four
+	// one-sector clusters of sixteen entries each.
+	maxDirClusters = 4
+	maxDirEntries  = maxDirClusters * entriesPerCluster
+
+	// A NodeID packs the directory key (0 for the root, otherwise the first
+	// cluster of the directory) above slotBits and the entry index plus
+	// slotBase below them. Slot 1 alone is the root node.
+	slotBits   = 16
+	slotMask   = uint64(1)<<slotBits - 1
+	slotBase   = 2
+	maxCluster = uint64(0x0fffffff)
+
+	clusterMask    = uint32(0x0fffffff)
+	endOfChain     = uint32(0x0ffffff8)
+	endOfChainMark = uint32(0x0fffffff)
+
+	entryEnd      = byte(0x00)
+	entryDeleted  = byte(0xe5)
+	attrVolume    = byte(0x08)
+	attrDirectory = byte(0x10)
+	attrArchive   = byte(0x20)
+
+	// statusCorrupt reports on-disk structures that fail validation; ramfs has
+	// no dedicated corruption status.
+	statusCorrupt = ramfs.StatusResourceExhausted
+)
+
+var (
+	dotName    = [11]byte{'.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '}
+	dotDotName = [11]byte{'.', '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '}
 )
 
 type Device interface {
@@ -135,53 +169,64 @@ func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
 	}
 	fs.device, fs.fatStart, fs.dataStart = device, reserved*sectorSize, (reserved+fatSectors)*sectorSize
 	fs.totalClusters, fs.rootCluster = uint32(total-reserved-fatSectors), root
+	if !fs.valid(root) {
+		return 0, false
+	}
 	return rootNode, true
 }
 
 func (fs *FileSystem) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	if parent != rootNode {
-		return 0, ramfs.StatusNotDirectory
+	dir, encoded, status := fs.parentAndName(parent, name)
+	if status != ramfs.StatusOK {
+		return 0, status
 	}
-	encoded, ok := encodeName(name)
-	if !ok {
-		return 0, ramfs.StatusInvalidArgument
+	index, _, found, status := fs.find(&dir, encoded)
+	if status != ramfs.StatusOK {
+		return 0, status
 	}
-	index, _, found := fs.find(encoded)
 	if !found {
 		return 0, ramfs.StatusNotFound
 	}
-	return ramfs.NodeID(index + 2), ramfs.StatusOK
+	return dir.node(index), ramfs.StatusOK
 }
 
 func (fs *FileSystem) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	if parent != rootNode {
-		return 0, ramfs.StatusNotDirectory
+	dir, index, entry, status := fs.reserve(parent, name)
+	if status != ramfs.StatusOK {
+		return 0, status
 	}
-	encoded, ok := encodeName(name)
-	if !ok {
-		return 0, ramfs.StatusInvalidArgument
-	}
-	if _, _, found := fs.find(encoded); found {
-		return 0, ramfs.StatusAlreadyExists
-	}
-	index, entry, ok := fs.freeEntry()
-	if !ok {
+	entry[11] = attrArchive
+	if !fs.writeEntry(&dir, index, entry) || !fs.device.Flush() {
 		return 0, ramfs.StatusResourceExhausted
 	}
-	copy(entry[:11], encoded[:])
-	entry[11] = 0x20
-	if !fs.writeEntry(index, entry) || !fs.device.Flush() {
-		return 0, ramfs.StatusResourceExhausted
-	}
-	return ramfs.NodeID(index + 2), ramfs.StatusOK
+	return dir.node(index), ramfs.StatusOK
 }
 
-func (fs *FileSystem) MkdirName(ramfs.NodeID, ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	return 0, ramfs.StatusResourceExhausted
+// MkdirName creates a one-cluster directory holding "." and "..". Per the FAT
+// specification ".." records cluster 0 when the parent is the root.
+func (fs *FileSystem) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
+	dir, index, entry, status := fs.reserve(parent, name)
+	if status != ramfs.StatusOK {
+		return 0, status
+	}
+	cluster := fs.allocate()
+	if cluster == 0 {
+		return 0, ramfs.StatusResourceExhausted
+	}
+	dot := dotEntry(dotName, cluster)
+	dotDot := dotEntry(dotDotName, dir.key)
+	base := fs.clusterOffset(cluster)
+	entry[11] = attrDirectory
+	setEntryCluster(&entry, cluster)
+	if !fs.writeAt(base, dot[:]) || !fs.writeAt(base+entrySize, dotDot[:]) || !fs.writeEntry(&dir, index, entry) || !fs.device.Flush() {
+		fs.freeChain(cluster)
+		return 0, ramfs.StatusResourceExhausted
+	}
+	return dir.node(index), ramfs.StatusOK
 }
 
 func (fs *FileSystem) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
-	entry, status := fs.fileEntry(id)
+	_, _, entry, status := fs.fileNode(id)
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
@@ -197,7 +242,7 @@ func (fs *FileSystem) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 	var ok bool
 	cluster, ok = fs.advance(cluster, uint32(offset/sectorSize))
 	if !ok {
-		return 0, ramfs.StatusResourceExhausted
+		return 0, statusCorrupt
 	}
 	done, within := uint64(0), offset%sectorSize
 	for done < count {
@@ -213,7 +258,7 @@ func (fs *FileSystem) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 		if done < count {
 			cluster, ok = fs.next(cluster)
 			if !ok {
-				return int(done), ramfs.StatusResourceExhausted
+				return int(done), statusCorrupt
 			}
 		}
 	}
@@ -221,7 +266,7 @@ func (fs *FileSystem) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 }
 
 func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, ramfs.Status) {
-	entry, status := fs.fileEntry(id)
+	dir, index, entry, status := fs.fileNode(id)
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
@@ -230,6 +275,9 @@ func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 	}
 	needed := uint32((offset + uint64(len(data)) + sectorSize - 1) / sectorSize)
 	cluster := entryCluster(entry)
+	if cluster != 0 && !fs.valid(cluster) {
+		return 0, statusCorrupt
+	}
 	if needed != 0 && cluster == 0 {
 		cluster = fs.allocate()
 		if cluster == 0 {
@@ -260,14 +308,14 @@ func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 	if offset+done > size {
 		put32(entry[28:32], uint32(offset+done))
 	}
-	if !fs.writeEntry(int(id-2), entry) || !fs.device.Flush() {
+	if !fs.writeEntry(&dir, index, entry) || !fs.device.Flush() {
 		return int(done), ramfs.StatusResourceExhausted
 	}
 	return int(done), ramfs.StatusOK
 }
 
 func (fs *FileSystem) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
-	entry, status := fs.fileEntry(id)
+	dir, index, entry, status := fs.fileNode(id)
 	if status != ramfs.StatusOK {
 		return status
 	}
@@ -279,7 +327,7 @@ func (fs *FileSystem) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 		setEntryCluster(&entry, 0)
 	}
 	put32(entry[28:32], uint32(size))
-	if !fs.writeEntry(int(id-2), entry) || !fs.device.Flush() {
+	if !fs.writeEntry(&dir, index, entry) || !fs.device.Flush() {
 		return ramfs.StatusResourceExhausted
 	}
 	return ramfs.StatusOK
@@ -289,146 +337,326 @@ func (fs *FileSystem) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if id == rootNode {
 		return ramfs.Stat{ID: id, Kind: ramfs.KindDirectory}, ramfs.StatusOK
 	}
-	entry, status := fs.fileEntry(id)
+	_, _, entry, status := fs.node(id)
 	if status != ramfs.StatusOK {
 		return ramfs.Stat{}, status
 	}
-	return ramfs.Stat{ID: id, Kind: ramfs.KindFile, Size: uint64(get32(entry[28:32]))}, ramfs.StatusOK
+	return entryStat(id, entry), ramfs.StatusOK
 }
 
 func (fs *FileSystem) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int, ramfs.Status) {
-	if parent != rootNode || cursor < 0 {
+	if cursor < 0 {
 		return ramfs.Entry{}, cursor, ramfs.StatusInvalidArgument
 	}
-	for index := cursor; index < 16; index++ {
-		entry, ok := fs.readEntry(index)
+	dir, status := fs.directoryOf(parent)
+	if status != ramfs.StatusOK {
+		return ramfs.Entry{}, cursor, status
+	}
+	for index := cursor; index < dir.entries(); index++ {
+		entry, ok := fs.readEntry(&dir, index)
 		if !ok {
 			return ramfs.Entry{}, cursor, ramfs.StatusResourceExhausted
 		}
-		if entry[0] == 0 {
-			return ramfs.Entry{}, cursor, ramfs.StatusNotFound
+		if entry[0] == entryEnd {
+			break
 		}
-		if entry[0] == 0xe5 || entry[11]&0x18 != 0 {
+		if !listed(entry) {
 			continue
 		}
 		name, size := decodeName(entry[:11])
-		result := ramfs.Entry{Stat: ramfs.Stat{ID: ramfs.NodeID(index + 2), Kind: ramfs.KindFile, Size: uint64(get32(entry[28:32]))}, Size: uint8(size)}
+		result := ramfs.Entry{Stat: entryStat(dir.node(index), entry), Size: uint8(size)}
 		copy(result.Name[:], name[:size])
 		return result, index + 1, ramfs.StatusOK
 	}
 	return ramfs.Entry{}, cursor, ramfs.StatusNotFound
 }
 
+// RenameName renames an entry within its own directory. Moving an entry to
+// another directory is reported as an invalid argument.
 func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
-	if parent != rootNode {
-		return ramfs.StatusNotDirectory
+	target, encoded, status := fs.parentAndName(parent, name)
+	if status != ramfs.StatusOK {
+		return status
 	}
-	encoded, ok := encodeName(name)
-	if !ok {
+	dir, index, entry, status := fs.node(id)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if dir.key != target.key {
 		return ramfs.StatusInvalidArgument
 	}
-	if _, _, found := fs.find(encoded); found {
+	_, _, found, status := fs.find(&dir, encoded)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if found {
 		return ramfs.StatusAlreadyExists
 	}
-	entry, status := fs.fileEntry(id)
-	if status != ramfs.StatusOK {
-		return status
-	}
 	copy(entry[:11], encoded[:])
-	if !fs.writeEntry(int(id-2), entry) || !fs.device.Flush() {
-		return ramfs.StatusResourceExhausted
-	}
-	return ramfs.StatusOK
-}
-func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
-	id, status := fs.OpenName(parent, name)
-	if status != ramfs.StatusOK {
-		return status
-	}
-	entry, _ := fs.fileEntry(id)
-	fs.freeChain(entryCluster(entry))
-	entry[0] = 0xe5
-	if !fs.writeEntry(int(id-2), entry) || !fs.device.Flush() {
+	if !fs.writeEntry(&dir, index, entry) || !fs.device.Flush() {
 		return ramfs.StatusResourceExhausted
 	}
 	return ramfs.StatusOK
 }
 
-func (fs *FileSystem) rootOffset() uint64 { return fs.clusterOffset(fs.rootCluster) }
+// UnlinkName removes a file or an empty directory and frees its clusters.
+func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	dir, encoded, status := fs.parentAndName(parent, name)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	index, entry, found, status := fs.find(&dir, encoded)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if !found {
+		return ramfs.StatusNotFound
+	}
+	if isDirectory(entry) {
+		if status = fs.checkEmpty(entryCluster(entry)); status != ramfs.StatusOK {
+			return status
+		}
+	}
+	fs.freeChain(entryCluster(entry))
+	entry[0] = entryDeleted
+	if !fs.writeEntry(&dir, index, entry) || !fs.device.Flush() {
+		return ramfs.StatusResourceExhausted
+	}
+	return ramfs.StatusOK
+}
+
+// directory is a resolved directory: its key (0 for the root, otherwise its
+// first cluster) and its bounded cluster chain.
+type directory struct {
+	key   uint32
+	chain [maxDirClusters]uint32
+	count int
+}
+
+func (dir *directory) entries() int { return dir.count * entriesPerCluster }
+
+// node encodes an entry position. Root entries keep the historical IDs
+// index+2 because the root key is 0.
+func (dir *directory) node(index int) ramfs.NodeID {
+	return ramfs.NodeID(uint64(dir.key)<<slotBits | uint64(index+slotBase))
+}
+
+// openDirectory walks a directory chain. A chain that is longer than
+// maxDirClusters, loops, or leaves the data area is reported as corrupt.
+func (fs *FileSystem) openDirectory(key uint32) (directory, ramfs.Status) {
+	dir := directory{key: key}
+	cluster := key
+	if key == 0 {
+		cluster = fs.rootCluster
+	}
+	for dir.count < maxDirClusters {
+		if !fs.valid(cluster) {
+			return dir, statusCorrupt
+		}
+		dir.chain[dir.count] = cluster
+		dir.count++
+		value, ok := fs.fat(cluster)
+		if !ok {
+			return dir, ramfs.StatusResourceExhausted
+		}
+		if value >= endOfChain {
+			return dir, ramfs.StatusOK
+		}
+		cluster = value
+	}
+	return dir, statusCorrupt
+}
+
+// directoryOf resolves a directory node to its directory.
+func (fs *FileSystem) directoryOf(id ramfs.NodeID) (directory, ramfs.Status) {
+	if id == rootNode {
+		return fs.openDirectory(0)
+	}
+	_, _, entry, status := fs.node(id)
+	if status != ramfs.StatusOK {
+		return directory{}, status
+	}
+	if !isDirectory(entry) {
+		return directory{}, ramfs.StatusNotDirectory
+	}
+	cluster := entryCluster(entry)
+	if cluster == 0 {
+		return directory{}, statusCorrupt
+	}
+	return fs.openDirectory(cluster)
+}
+
+func (fs *FileSystem) parentAndName(parent ramfs.NodeID, name ramfs.Name) (directory, [11]byte, ramfs.Status) {
+	dir, status := fs.directoryOf(parent)
+	if status != ramfs.StatusOK {
+		return dir, [11]byte{}, status
+	}
+	encoded, ok := encodeName(name)
+	if !ok {
+		return dir, encoded, ramfs.StatusInvalidArgument
+	}
+	return dir, encoded, ramfs.StatusOK
+}
+
+// reserve returns a free entry slot, already named, for a new child of parent.
+func (fs *FileSystem) reserve(parent ramfs.NodeID, name ramfs.Name) (directory, int, [32]byte, ramfs.Status) {
+	var entry [32]byte
+	dir, encoded, status := fs.parentAndName(parent, name)
+	if status != ramfs.StatusOK {
+		return dir, 0, entry, status
+	}
+	_, _, found, status := fs.find(&dir, encoded)
+	if status != ramfs.StatusOK {
+		return dir, 0, entry, status
+	}
+	if found {
+		return dir, 0, entry, ramfs.StatusAlreadyExists
+	}
+	index, status := fs.freeEntry(&dir)
+	if status != ramfs.StatusOK {
+		return dir, 0, entry, status
+	}
+	copy(entry[:11], encoded[:])
+	return dir, index, entry, ramfs.StatusOK
+}
+
+// node decodes id and returns the live entry it names.
+func (fs *FileSystem) node(id ramfs.NodeID) (directory, int, [32]byte, ramfs.Status) {
+	var entry [32]byte
+	key, slot := uint64(id)>>slotBits, uint64(id)&slotMask
+	if slot < slotBase || slot >= uint64(maxDirEntries+slotBase) || key > maxCluster || key != 0 && !fs.valid(uint32(key)) {
+		return directory{}, 0, entry, ramfs.StatusNotFound
+	}
+	dir, status := fs.openDirectory(uint32(key))
+	if status != ramfs.StatusOK {
+		return dir, 0, entry, ramfs.StatusNotFound
+	}
+	index := int(slot - slotBase)
+	entry, ok := fs.readEntry(&dir, index)
+	if !ok || !listed(entry) {
+		return dir, 0, entry, ramfs.StatusNotFound
+	}
+	return dir, index, entry, ramfs.StatusOK
+}
+
+func (fs *FileSystem) fileNode(id ramfs.NodeID) (directory, int, [32]byte, ramfs.Status) {
+	dir, index, entry, status := fs.node(id)
+	if status == ramfs.StatusOK && isDirectory(entry) {
+		status = ramfs.StatusIsDirectory
+	}
+	return dir, index, entry, status
+}
+
+// checkEmpty accepts a directory that holds nothing but "." and "..".
+func (fs *FileSystem) checkEmpty(cluster uint32) ramfs.Status {
+	if cluster == 0 {
+		return statusCorrupt
+	}
+	dir, status := fs.openDirectory(cluster)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	for index := 0; index < dir.entries(); index++ {
+		entry, ok := fs.readEntry(&dir, index)
+		if !ok {
+			return ramfs.StatusResourceExhausted
+		}
+		if entry[0] == entryEnd {
+			return ramfs.StatusOK
+		}
+		if entry[0] != entryDeleted && entry[0] != '.' {
+			return ramfs.StatusNotEmpty
+		}
+	}
+	return ramfs.StatusOK
+}
+
 func (fs *FileSystem) clusterOffset(cluster uint32) uint64 {
 	return fs.dataStart + uint64(cluster-2)*sectorSize
 }
-func (fs *FileSystem) readEntry(index int) ([32]byte, bool) {
+func (fs *FileSystem) entryOffset(dir *directory, index int) (uint64, bool) {
+	if index < 0 || index >= dir.entries() {
+		return 0, false
+	}
+	cluster := dir.chain[index/entriesPerCluster]
+	return fs.clusterOffset(cluster) + uint64(index%entriesPerCluster)*entrySize, true
+}
+func (fs *FileSystem) readEntry(dir *directory, index int) ([32]byte, bool) {
 	var entry [32]byte
-	if index < 0 || index >= 16 || !fs.readAt(fs.rootOffset()+uint64(index*32), entry[:]) {
+	offset, ok := fs.entryOffset(dir, index)
+	if !ok || !fs.readAt(offset, entry[:]) {
 		return entry, false
 	}
 	return entry, true
 }
-func (fs *FileSystem) writeEntry(index int, entry [32]byte) bool {
-	return index >= 0 && index < 16 && fs.writeAt(fs.rootOffset()+uint64(index*32), entry[:])
+func (fs *FileSystem) writeEntry(dir *directory, index int, entry [32]byte) bool {
+	offset, ok := fs.entryOffset(dir, index)
+	return ok && fs.writeAt(offset, entry[:])
 }
-func (fs *FileSystem) fileEntry(id ramfs.NodeID) ([32]byte, ramfs.Status) {
-	if id < 2 || id >= 18 {
-		return [32]byte{}, ramfs.StatusNotFound
-	}
-	entry, ok := fs.readEntry(int(id - 2))
-	if !ok || entry[0] == 0 || entry[0] == 0xe5 {
-		return [32]byte{}, ramfs.StatusNotFound
-	}
-	return entry, ramfs.StatusOK
-}
-func (fs *FileSystem) find(name [11]byte) (int, [32]byte, bool) {
-	for i := 0; i < 16; i++ {
-		entry, ok := fs.readEntry(i)
+func (fs *FileSystem) find(dir *directory, name [11]byte) (int, [32]byte, bool, ramfs.Status) {
+	for i := 0; i < dir.entries(); i++ {
+		entry, ok := fs.readEntry(dir, i)
 		if !ok {
-			return 0, entry, false
+			return 0, entry, false, ramfs.StatusResourceExhausted
 		}
-		if entry[0] == 0 {
-			return 0, entry, false
+		if entry[0] == entryEnd {
+			break
 		}
-		same := true
-		for j := 0; j < 11; j++ {
-			if entry[j] != name[j] {
-				same = false
-			}
-		}
-		if entry[0] != 0xe5 && same {
-			return i, entry, true
+		if listed(entry) && sameName(entry, name) {
+			return i, entry, true, ramfs.StatusOK
 		}
 	}
-	return 0, [32]byte{}, false
+	return 0, [32]byte{}, false, ramfs.StatusOK
 }
-func (fs *FileSystem) freeEntry() (int, [32]byte, bool) {
-	for i := 0; i < 16; i++ {
-		entry, ok := fs.readEntry(i)
+
+// freeEntry finds a free slot, growing the directory by one zeroed cluster
+// while it is below maxDirClusters.
+func (fs *FileSystem) freeEntry(dir *directory) (int, ramfs.Status) {
+	for i := 0; i < dir.entries(); i++ {
+		entry, ok := fs.readEntry(dir, i)
 		if !ok {
-			return 0, entry, false
+			return 0, ramfs.StatusResourceExhausted
 		}
-		if entry[0] == 0 || entry[0] == 0xe5 {
-			return i, [32]byte{}, true
+		if entry[0] == entryEnd || entry[0] == entryDeleted {
+			return i, ramfs.StatusOK
 		}
 	}
-	return 0, [32]byte{}, false
+	if dir.count == maxDirClusters {
+		return 0, ramfs.StatusResourceExhausted
+	}
+	cluster := fs.allocate()
+	if cluster == 0 {
+		return 0, ramfs.StatusResourceExhausted
+	}
+	if !fs.setFAT(dir.chain[dir.count-1], cluster) {
+		fs.freeChain(cluster)
+		return 0, ramfs.StatusResourceExhausted
+	}
+	dir.chain[dir.count] = cluster
+	dir.count++
+	return dir.entries() - entriesPerCluster, ramfs.StatusOK
+}
+func (fs *FileSystem) valid(cluster uint32) bool {
+	return cluster >= 2 && cluster < fs.totalClusters+2
 }
 func (fs *FileSystem) fat(cluster uint32) (uint32, bool) {
 	var data [4]byte
-	if cluster >= fs.totalClusters+2 || !fs.readAt(fs.fatStart+uint64(cluster)*4, data[:]) {
+	if !fs.valid(cluster) || !fs.readAt(fs.fatStart+uint64(cluster)*4, data[:]) {
 		return 0, false
 	}
-	return get32(data[:]) & 0x0fffffff, true
+	return get32(data[:]) & clusterMask, true
 }
 func (fs *FileSystem) setFAT(cluster, value uint32) bool {
 	var data [4]byte
 	put32(data[:], value)
-	return fs.writeAt(fs.fatStart+uint64(cluster)*4, data[:])
+	return fs.valid(cluster) && fs.writeAt(fs.fatStart+uint64(cluster)*4, data[:])
 }
 func (fs *FileSystem) next(cluster uint32) (uint32, bool) {
 	value, ok := fs.fat(cluster)
-	return value, ok && value >= 2 && value < 0x0ffffff8
+	return value, ok && fs.valid(value)
 }
 func (fs *FileSystem) advance(cluster uint32, count uint32) (uint32, bool) {
-	if cluster < 2 {
+	if !fs.valid(cluster) {
 		return 0, false
 	}
 	for i := uint32(0); i < count; i++ {
@@ -447,7 +675,7 @@ func (fs *FileSystem) allocate() uint32 {
 			return 0
 		}
 		if value == 0 {
-			if !fs.setFAT(cluster, 0x0fffffff) {
+			if !fs.setFAT(cluster, endOfChainMark) {
 				return 0
 			}
 			for i := range fs.sector {
@@ -478,12 +706,14 @@ func (fs *FileSystem) ensure(first uint32, count uint32) bool {
 	}
 	return true
 }
+
+// freeChain releases a chain. Each link is cleared before it is followed, so
+// a looped chain ends at the first revisited cluster.
 func (fs *FileSystem) freeChain(cluster uint32) {
-	for cluster >= 2 {
+	for steps := uint32(0); steps < fs.totalClusters && fs.valid(cluster); steps++ {
 		next, ok := fs.fat(cluster)
-		fs.setFAT(cluster, 0)
-		if !ok || next >= 0x0ffffff8 {
-			break
+		if !ok || !fs.setFAT(cluster, 0) {
+			return
 		}
 		cluster = next
 	}
@@ -494,6 +724,34 @@ func entryCluster(entry [32]byte) uint32 {
 func setEntryCluster(entry *[32]byte, cluster uint32) {
 	put16(entry[20:22], uint16(cluster>>16))
 	put16(entry[26:28], uint16(cluster))
+}
+func isDirectory(entry [32]byte) bool { return entry[11]&attrDirectory != 0 }
+
+// listed reports whether entry is a live file or subdirectory: not free,
+// deleted, a volume label or long-name fragment, nor "." or "..".
+func listed(entry [32]byte) bool {
+	return entry[0] != entryEnd && entry[0] != entryDeleted && entry[0] != '.' && entry[11]&attrVolume == 0
+}
+func sameName(entry [32]byte, name [11]byte) bool {
+	for i := range name {
+		if entry[i] != name[i] {
+			return false
+		}
+	}
+	return true
+}
+func entryStat(id ramfs.NodeID, entry [32]byte) ramfs.Stat {
+	if isDirectory(entry) {
+		return ramfs.Stat{ID: id, Kind: ramfs.KindDirectory}
+	}
+	return ramfs.Stat{ID: id, Kind: ramfs.KindFile, Size: uint64(get32(entry[28:32]))}
+}
+func dotEntry(name [11]byte, cluster uint32) [32]byte {
+	var entry [32]byte
+	copy(entry[:11], name[:])
+	entry[11] = attrDirectory
+	setEntryCluster(&entry, cluster)
+	return entry
 }
 
 func encodeName(name ramfs.Name) ([11]byte, bool) {
