@@ -85,17 +85,24 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok || endpointEvent.Capabilities[0] != endpointGrant[0] {
 		t.Fatalf("endpoint grant = %#v", endpointEvent)
 	}
-	startup := []byte("startup")
-	startupLaunch, ok := LaunchRequestWithStartup(4, "/system/bin/cat", endpointGrant, startup, 11)
+	startupLaunch, ok := LaunchRequestWithStartup(4, "/system/bin/cat", endpointGrant, 3, StagingSlotSize, 11)
 	if !ok {
 		t.Fatal("startup launch encode failed")
 	}
 	startupEvent, ok := DecodeLifecycle(startupLaunch)
-	if !ok || string(startupEvent.Startup[:startupEvent.StartupSize]) != "startup" {
+	if !ok || startupEvent.StartupSlot != 3 || startupEvent.StartupSize != StagingSlotSize {
 		t.Fatalf("startup = %#v", startupEvent)
 	}
-	if _, ok := LaunchRequestWithStartup(4, "/system/x", nil, make([]byte, MaxStartupData+1), 12); ok {
+	if _, ok := LaunchRequestWithStartup(4, "/system/x", nil, 0, StagingSlotSize+1, 12); ok {
 		t.Fatal("oversized startup accepted")
+	}
+	if _, ok := LaunchRequestWithStartup(4, "/system/x", nil, StagingSlots, 8, 12); ok {
+		t.Fatal("out-of-range staging slot accepted")
+	}
+	corrupt := startupLaunch
+	corrupt.Payload[11] = StagingSlots
+	if _, ok := DecodeLifecycle(corrupt); ok {
+		t.Fatal("decoded out-of-range staging slot")
 	}
 	tooMany := make([]Capability, MaxCapabilities+1)
 	for index := range tooMany {

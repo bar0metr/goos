@@ -63,12 +63,14 @@ operation that consumes and returns the exit code, preserving the existing
 single-object interface.
 
 Before the first Task becomes runnable, the kernel completes the bounded
-versioned `GST2` startup block with the actual generation-safe IDs returned by
+versioned `GST3` startup block with the actual generation-safe IDs returned by
 capability installation. Applications resolve handles by explicit role names
 instead of assuming process-local slot numbers. Startup metadata never grants
 rights; the installed handle-table entry remains authoritative.
 
-`GST2` adds bounded length-prefixed `argv` and environment vectors. The exec
+The startup block adds bounded length-prefixed `argv` and environment vectors.
+PID 1 passes the template through a shared staging page, and the child
+receives the bound block on a read-only page at `0x40001000` (ADR 0062). The exec
 control protocol returns final child status separately from launch status, so
 PID 1 can report application failure without confusing it with loader or
 capability-installation failure. The read-only `SystemInfo` call exposes a

@@ -5,7 +5,7 @@ import execproto "goos/userspace/exec"
 
 const (
 	MaxArguments    = 8
-	MaxArgumentSize = 63
+	MaxArgumentSize = 127
 	MaxCommands     = 8
 )
 

@@ -5,14 +5,23 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/userspace/startup"
 )
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(5)
+	LifecycleVersion    = uint16(6)
 	MaxExecutablePath   = 192
-	MaxStartupData      = 128
 	launchGrantSize     = 16
+	launchHeaderSize    = 14
+)
+
+// Startup blocks travel through a page shared by PID 1 and the kernel instead
+// of the launch message. PID 1 writes one slot per launch in flight.
+const (
+	StagingAddress  = uint64(0x401ff000)
+	StagingSlots    = 4
+	StagingSlotSize = startup.Size
 )
 
 type LifecycleOperation uint8
@@ -46,8 +55,8 @@ type LifecycleEvent struct {
 	ExecutableSize  uint8
 	Capabilities    [MaxCapabilities]Capability
 	CapabilityCount uint8
-	Startup         [MaxStartupData]byte
-	StartupSize     uint8
+	StartupSlot     uint8
+	StartupSize     uint16
 }
 
 func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
@@ -62,11 +71,13 @@ func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
 }
 
 func LaunchRequest(service uint64, executable string, capabilities []Capability, correlation uint64) (ipc.Message, bool) {
-	return LaunchRequestWithStartup(service, executable, capabilities, nil, correlation)
+	return LaunchRequestWithStartup(service, executable, capabilities, 0, 0, correlation)
 }
 
-func LaunchRequestWithStartup(service uint64, executable string, capabilities []Capability, startup []byte, correlation uint64) (ipc.Message, bool) {
-	if service == 0 || correlation == 0 || !validLaunchPath(executable) || len(capabilities) > MaxCapabilities || len(startup) > MaxStartupData || 12+len(executable)+len(startup)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
+// LaunchRequestWithStartup names a startup template of startupSize bytes that
+// the caller has written to staging slot startupSlot.
+func LaunchRequestWithStartup(service uint64, executable string, capabilities []Capability, startupSlot uint8, startupSize uint16, correlation uint64) (ipc.Message, bool) {
+	if service == 0 || correlation == 0 || !validLaunchPath(executable) || len(capabilities) > MaxCapabilities || startupSlot >= StagingSlots || startupSize > StagingSlotSize || launchHeaderSize+len(executable)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	for _, grant := range capabilities {
@@ -74,7 +85,7 @@ func LaunchRequestWithStartup(service uint64, executable string, capabilities []
 			return ipc.Message{}, false
 		}
 	}
-	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(12 + len(executable) + len(startup) + len(capabilities)*launchGrantSize)}
+	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(launchHeaderSize + len(executable) + len(capabilities)*launchGrantSize)}
 	// Manifest references are payload data, never IPC handle attachments. Set
 	// these fields explicitly when the freestanding arena reuses message storage.
 	message.HandleCount = 0
@@ -85,10 +96,10 @@ func LaunchRequestWithStartup(service uint64, executable string, capabilities []
 	binary.LittleEndian.PutUint64(message.Payload[1:9], service)
 	message.Payload[9] = byte(len(executable))
 	message.Payload[10] = byte(len(capabilities))
-	message.Payload[11] = byte(len(startup))
-	copy(message.Payload[12:], executable)
-	copy(message.Payload[12+len(executable):], startup)
-	offset := 12 + len(executable) + len(startup)
+	message.Payload[11] = startupSlot
+	binary.LittleEndian.PutUint16(message.Payload[12:14], startupSize)
+	copy(message.Payload[launchHeaderSize:], executable)
+	offset := launchHeaderSize + len(executable)
 	for _, grant := range capabilities {
 		binary.LittleEndian.PutUint64(message.Payload[offset:], uint64(grant.Handle))
 		binary.LittleEndian.PutUint16(message.Payload[offset+8:], uint16(grant.Type))
@@ -129,23 +140,23 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		}
 		return LifecycleEvent{Operation: LifecycleProcessExited, Process: process, Code: binary.LittleEndian.Uint64(message.Payload[9:17])}, true
 	case LifecycleLaunch:
-		if message.Kind != ipc.KindRequest || message.Correlation == 0 || message.PayloadSize < 13 {
+		if message.Kind != ipc.KindRequest || message.Correlation == 0 || message.PayloadSize < launchHeaderSize+2 {
 			return LifecycleEvent{}, false
 		}
 		service := binary.LittleEndian.Uint64(message.Payload[1:9])
 		size := int(message.Payload[9])
 		capabilityCount := int(message.Payload[10])
-		startupSize := int(message.Payload[11])
-		if service == 0 || size == 0 || size > MaxExecutablePath || startupSize > MaxStartupData || capabilityCount > MaxCapabilities || int(message.PayloadSize) != 12+size+startupSize+capabilityCount*launchGrantSize {
+		startupSlot := message.Payload[11]
+		startupSize := binary.LittleEndian.Uint16(message.Payload[12:14])
+		if service == 0 || size == 0 || size > MaxExecutablePath || startupSlot >= StagingSlots || startupSize > StagingSlotSize || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
 			return LifecycleEvent{}, false
 		}
-		if !validLaunchPathBytes(message.Payload[12 : 12+size]) {
+		if !validLaunchPathBytes(message.Payload[launchHeaderSize : launchHeaderSize+size]) {
 			return LifecycleEvent{}, false
 		}
-		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, ExecutableSize: uint8(size), CapabilityCount: uint8(capabilityCount), StartupSize: uint8(startupSize)}
-		copy(event.Executable[:], message.Payload[12:12+size])
-		copy(event.Startup[:], message.Payload[12+size:12+size+startupSize])
-		offset := 12 + size + startupSize
+		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, ExecutableSize: uint8(size), CapabilityCount: uint8(capabilityCount), StartupSlot: startupSlot, StartupSize: startupSize}
+		copy(event.Executable[:], message.Payload[launchHeaderSize:launchHeaderSize+size])
+		offset := launchHeaderSize + size
 		for index := 0; index < capabilityCount; index++ {
 			grant := Capability{
 				Handle:  handle.ID(binary.LittleEndian.Uint64(message.Payload[offset:])),

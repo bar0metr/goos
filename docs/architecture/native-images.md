@@ -33,7 +33,7 @@ Linux ELF is a separate compatibility-layer format and does not define this
 native envelope.
 
 Process startup is a separate versioned ABI described by ADR 0031. The current
-`GST2` block is limited to 128 bytes and carries command, working directory,
+`GST3` block (ADR 0062) is limited to 1024 bytes and carries command, working directory,
 bounded `argv` and environment vectors, and named process-local handle bindings. Keeping startup
 metadata outside the image format allows one immutable image to run under
 different capability manifests.

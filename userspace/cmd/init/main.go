@@ -52,6 +52,7 @@ var (
 	arenaBase            uintptr
 	supervisionComplete  bool
 	processWaitAnnounced bool
+	nextStagingSlot      uint8
 	lifecyclePending     [16]ipc.Message
 	lifecycleHead        uint8
 	lifecycleCount       uint8
@@ -287,10 +288,18 @@ func equalBytes(value []byte, expected string) bool {
 
 func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }
 
+// stagingSlot returns the next slot of the page shared with the kernel for
+// launch startup templates.
+func stagingSlot() (uint8, *[startup.Size]byte) {
+	nextStagingSlot = (nextStagingSlot + 1) % supervisor.StagingSlots
+	address := supervisor.StagingAddress + uint64(nextStagingSlot)*supervisor.StagingSlotSize
+	return nextStagingSlot, (*[startup.Size]byte)(unsafe.Pointer(uintptr(address)))
+}
+
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	correlation++
-	var startupWire [startup.Size]byte
-	var vectorWire [96]byte
+	slot, staging := stagingSlot()
+	var vectorWire [startup.VectorSize]byte
 	var bindings [supervisor.MaxCapabilities]startup.Handle
 	for index := 0; index < int(spec.CapabilityCount); index++ {
 		bindings[index].Name = []byte(spec.Capabilities[index].Name)
@@ -299,11 +308,11 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	startupData, ok := startup.Encode(spec.Name[:spec.NameSize], []byte("/"), arguments, environment, bindings[:spec.CapabilityCount], &startupWire)
+	startupData, ok := startup.Encode(spec.Name[:spec.NameSize], []byte("/"), arguments, environment, bindings[:spec.CapabilityCount], staging)
 	if !ok {
 		return 0, false
 	}
-	request, ok := supervisor.LaunchRequestWithStartup(1, bytesString(spec.Executable[:spec.ExecutableSize]), spec.Capabilities[:spec.CapabilityCount], startupData, correlation)
+	request, ok := supervisor.LaunchRequestWithStartup(1, bytesString(spec.Executable[:spec.ExecutableSize]), spec.Capabilities[:spec.CapabilityCount], slot, uint16(len(startupData)), correlation)
 	if !ok {
 		return 0, false
 	}
@@ -423,7 +432,7 @@ func pollExec() {
 	}
 	// Own every invocation before launch/VFS operations reuse the IPC buffer.
 	var paths [execproto.MaxStages][execproto.MaxPath]byte
-	var arguments [execproto.MaxStages][128]byte
+	var arguments [execproto.MaxStages][startup.MaxVector]byte
 	var cwd [execproto.MaxPath]byte
 	var environment [96]byte
 	request.CWD = cwd[:copy(cwd[:], request.CWD)]
@@ -546,12 +555,12 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
-	var startupWire [startup.Size]byte
+	slot, staging := stagingSlot()
 	bindings := []startup.Handle{{Name: []byte("in")}, {Name: []byte("stdout")}, {Name: []byte("stderr")}}
 	if useVFS {
 		bindings = append(bindings, startup.Handle{Name: []byte("vfs")})
 	}
-	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
+	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, staging)
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		handleClose(pair[0])
@@ -566,7 +575,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	correlation++
-	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
+	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, slot, uint16(len(startupData)), correlation)
 	if !ok {
 		syslog.Error("APP_LAUNCH_ENCODE_FAILED")
 		handleClose(pair[0])

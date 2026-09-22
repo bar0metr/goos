@@ -8,7 +8,7 @@ import (
 )
 
 func TestProtocolRoundTrip(t *testing.T) {
-	var wire [96]byte
+	var wire [startup.VectorSize]byte
 	arguments, environment, ok := startup.EncodeVectors([][]byte{[]byte("cat"), []byte("motd")}, []startup.Variable{{Name: []byte("PATH"), Value: []byte("/system/bin")}}, &wire)
 	if !ok {
 		t.Fatal("vector encode failed")
@@ -35,7 +35,7 @@ func pipelineRequest(t *testing.T) Request {
 	t.Helper()
 	request := Request{Count: MaxStages, CWD: []byte("/"), Environment: []byte{0}}
 	for index := range request.Stages {
-		var wire [96]byte
+		var wire [startup.VectorSize]byte
 		arguments, _, ok := startup.EncodeVectors([][]byte{[]byte("readline")}, nil, &wire)
 		if !ok {
 			t.Fatal("vectors")

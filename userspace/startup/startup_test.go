@@ -2,12 +2,13 @@ package startup
 
 import (
 	"goos/kernel/handle"
+	"goos/kernel/kcall"
 	"testing"
 )
 
 func TestRoundTrip(t *testing.T) {
 	var wire [Size]byte
-	var vectors [96]byte
+	var vectors [VectorSize]byte
 	arguments, environment, ok := EncodeVectors([][]byte{[]byte("cat"), []byte("motd")}, []Variable{{Name: []byte("PATH"), Value: []byte("/system/bin")}}, &vectors)
 	if !ok {
 		t.Fatal("vector encode failed")
@@ -79,7 +80,7 @@ func TestRejectsMalformedStartup(t *testing.T) {
 }
 
 func TestRejectsMalformedVectors(t *testing.T) {
-	var wire [96]byte
+	var wire [VectorSize]byte
 	if _, _, ok := EncodeVectors([][]byte{[]byte("tool")}, []Variable{{Name: []byte("bad"), Value: []byte("value")}}, &wire); ok {
 		t.Fatal("lowercase environment name accepted")
 	}
@@ -91,7 +92,7 @@ func TestRejectsMalformedVectors(t *testing.T) {
 }
 
 func TestExternalUtilityStandardStreamBindingsFit(t *testing.T) {
-	var vectors [96]byte
+	var vectors [VectorSize]byte
 	arguments, environment, ok := EncodeVectors(
 		[][]byte{[]byte("cp"), []byte("/system/motd"), []byte("/persist/state.txt")},
 		[]Variable{{Name: []byte("PATH"), Value: []byte("/system/bin")}},
@@ -109,10 +110,65 @@ func TestExternalUtilityStandardStreamBindingsFit(t *testing.T) {
 
 func testVectors(t *testing.T) ([]byte, []byte) {
 	t.Helper()
-	var wire [96]byte
+	var wire [VectorSize]byte
 	arguments, environment, ok := EncodeVectors([][]byte{[]byte("cat")}, nil, &wire)
 	if !ok {
 		t.Fatal("vector encode failed")
 	}
 	return append([]byte(nil), arguments...), append([]byte(nil), environment...)
+}
+
+func TestLargestStartupFits(t *testing.T) {
+	arguments := make([]byte, 1, 255)
+	arguments[0] = 4
+	for index := 0; index < 4; index++ {
+		arguments = append(arguments, 62)
+		arguments = append(arguments, make([]byte, 62)...)
+		for offset := len(arguments) - 62; offset < len(arguments); offset++ {
+			arguments[offset] = 'a'
+		}
+	}
+	environment := []byte{3}
+	for _, name := range []string{"A", "B", "C"} {
+		environment = append(environment, 1, 80)
+		environment = append(environment, name...)
+		environment = append(environment, make([]byte, 80)...)
+	}
+	var handles [MaxHandles]Handle
+	for index := range handles {
+		handles[index] = Handle{Name: []byte("handle-name-00" + string(rune('0'+index))), ID: handle.ID(index + 1)}
+	}
+	command := []byte("command-name-with-thirty-two-byt")
+	cwd := append([]byte("/"), make([]byte, 95)...)
+	for index := 1; index < len(cwd); index++ {
+		cwd[index] = 'd'
+	}
+	var wire [Size]byte
+	encoded, ok := Encode(command, cwd, arguments, environment, handles[:], &wire)
+	if !ok {
+		t.Fatalf("largest startup block rejected (arguments %d, environment %d)", len(arguments), len(environment))
+	}
+	if _, ok := Decode(encoded); !ok {
+		t.Fatal("largest startup block does not decode")
+	}
+}
+
+func TestKernelStartupSizeMatches(t *testing.T) {
+	if kcall.StartupSize != Size {
+		t.Fatalf("kcall.StartupSize = %d, startup.Size = %d", kcall.StartupSize, Size)
+	}
+}
+
+func TestVectorBounds(t *testing.T) {
+	var wire [VectorSize]byte
+	long := make([]byte, 127)
+	for index := range long {
+		long[index] = 'x'
+	}
+	if _, _, ok := EncodeVectors([][]byte{[]byte("write"), long}, nil, &wire); !ok {
+		t.Fatal("127-byte argument rejected")
+	}
+	if _, _, ok := EncodeVectors([][]byte{long, long, long}, nil, &wire); ok {
+		t.Fatal("argument vector over 255 bytes accepted")
+	}
 }

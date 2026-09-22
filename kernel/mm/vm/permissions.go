@@ -6,10 +6,12 @@ const (
 	UserAddressLimit = uint64(2 << 30)
 	KernelImageBase  = uint64(0x400000)
 	UserProbeAddress = uint64(0x40000000)
-	UserCodeAddress  = uint64(0x40002000)
-	UserStackAddress = uint64(0x40003000)
-	UserDataAddress  = uint64(0x40004000)
-	UserDMAAddress   = uint64(0x401c0000)
+	// UserStartupAddress holds a process's read-only startup block.
+	UserStartupAddress = uint64(0x40001000)
+	UserCodeAddress    = uint64(0x40002000)
+	UserStackAddress   = uint64(0x40003000)
+	UserDataAddress    = uint64(0x40004000)
+	UserDMAAddress     = uint64(0x401c0000)
 
 	entryPresent  = uint64(1 << 0)
 	entryWritable = uint64(1 << 1)

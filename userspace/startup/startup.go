@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	Size       = 128
-	Version    = 2
+	Size       = 1024
+	Version    = 3
 	MaxHandles = 7
 	MaxName    = 15
 	MaxArgs    = 8
@@ -15,7 +15,7 @@ const (
 	headerSize = 12
 )
 
-var magic = [4]byte{'G', 'S', 'T', '2'}
+var magic = [4]byte{'G', 'S', 'T', '3'}
 
 type Handle struct {
 	Name []byte

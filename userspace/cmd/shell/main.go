@@ -39,7 +39,7 @@ var (
 	pathBuffer        [shellcmd.MaxPath]byte
 	executableBuffers [execproto.MaxStages][execproto.MaxPath]byte
 	argumentStorage   [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
-	vectorWires       [execproto.MaxStages][96]byte
+	vectorWires       [execproto.MaxStages][startup.VectorSize]byte
 	clockNanos        uint64
 )
 

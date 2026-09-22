@@ -138,7 +138,7 @@ func Dispatch(request Request, handler Handler) Result {
 		}
 		return Result{Status: handler.ClockRead(request.Arg0, request.Arg1)}
 	case OperationStartupRead:
-		if request.Arg1 != 128 {
+		if request.Arg1 != StartupSize {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.StartupRead(request.Arg0, request.Arg1)}
@@ -225,6 +225,9 @@ const (
 	LogText      = uint64(240)
 )
 const StreamDescriptorSize = uint64(24)
+
+// StartupSize is the fixed length of a StartupRead copy.
+const StartupSize = uint64(1024)
 
 // WaitAny is a readiness operation: it never consumes data from a waitable
 // object. Userspace performs the typed receive/read/wait operation after the
