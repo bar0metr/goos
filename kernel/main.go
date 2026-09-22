@@ -33,20 +33,39 @@ import (
 )
 
 var (
-	bootInfo                boot.Info
-	pageAllocator           pmm.Allocator
-	demoTaskA               uint64
-	demoTaskB               uint64
-	demoABlocked            uint64
-	demoAResumed            uint64
-	userExited              uint64
-	kernelCallData          [kcall.MaxDebugWrite]byte
-	nativeImageData         [1024]byte
-	faultImageData          [1024]byte
-	boundedChannel          ipc.Channel
-	ipcWireData             [ipc.WireMaxSize]byte
-	sharedRegistry          shmem.Registry
-	sharedObjects           shmem.Table
+	bootInfo        boot.Info
+	pageAllocator   pmm.Allocator
+	demoTaskA       uint64
+	demoTaskB       uint64
+	demoABlocked    uint64
+	demoAResumed    uint64
+	userExited      uint64
+	kernelCallData  [kcall.MaxDebugWrite]byte
+	nativeImageData [1024]byte
+	faultImageData  [1024]byte
+	boundedChannel  ipc.Channel
+	ipcWireData     [ipc.WireMaxSize]byte
+	sharedRegistry  shmem.Registry
+	sharedObjects   shmem.Table
+	dispatchHandler nativeCallHandler
+	// Native calls run one at a time in the kernel exclusion domain, so the
+	// call paths share these buffers instead of allocating on a leaking heap.
+	handleInfoWire          [kcall.HandleInfoSize]byte
+	processInfoWire         [kcall.ProcessInfoSize]byte
+	clockWire               [8]byte
+	nanosWire               [8]byte
+	consoleByteWire         [1]byte
+	systemInfoWire          [kcall.SystemInfoSize]byte
+	portWire                [4]byte
+	dmaWire                 [24]byte
+	channelWire             [16]byte
+	streamCreateWire        [16]byte
+	streamDescriptorWire    [24]byte
+	streamResultWire        [8]byte
+	receiveDescriptorWire   [24]byte
+	exitWire                [8]byte
+	waitAnyResultWire       [kcall.WaitAnyResultSize]byte
+	waitMaskWire            [8]byte
 	launchTemplate          [supervisor.StagingSlotSize]byte
 	launchBound             [startup.Size]byte
 	channelRegistry         ipc.Registry
@@ -479,7 +498,8 @@ func (handler nativeCallHandler) ConsoleRead(device uint64, address uint64, leng
 	if !ready {
 		return kcall.StatusNotFound
 	}
-	if !vm.CopyOut(handler.root, address, []byte{value}) {
+	consoleByteWire[0] = value
+	if !vm.CopyOut(handler.root, address, consoleByteWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -489,9 +509,8 @@ func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.
 	if length != 8 {
 		return kcall.StatusInvalidArgument
 	}
-	var encoded [8]byte
-	putUint64(encoded[:], amd64.TimerTicks())
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(clockWire[:], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, clockWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -503,13 +522,12 @@ func (handler nativeCallHandler) SystemInfo(address uint64, length uint64) kcall
 		return kcall.StatusInvalidArgument
 	}
 	statistics := pageAllocator.Statistics()
-	var encoded [kcall.SystemInfoSize]byte
-	putUint64(encoded[0:8], uint64(owner.ID()))
-	putUint64(encoded[8:16], uint64(processRegistry.Count()))
-	putUint64(encoded[16:24], statistics.ManagedPages)
-	putUint64(encoded[24:32], statistics.FreePages)
-	putUint64(encoded[32:40], amd64.TimerTicks())
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(systemInfoWire[0:8], uint64(owner.ID()))
+	putUint64(systemInfoWire[8:16], uint64(processRegistry.Count()))
+	putUint64(systemInfoWire[16:24], statistics.ManagedPages)
+	putUint64(systemInfoWire[24:32], statistics.FreePages)
+	putUint64(systemInfoWire[32:40], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, systemInfoWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -538,9 +556,8 @@ func (handler nativeCallHandler) PortRead(id uint64, specification uint64, addre
 	if !read {
 		return kcall.StatusInvalidArgument
 	}
-	var encoded [4]byte
-	putUint32(encoded[:], value)
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint32(portWire[:], value)
+	if !vm.CopyOut(handler.root, address, portWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -578,8 +595,7 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
 		return kcall.StatusPermissionDenied
 	}
-	var encoded [24]byte
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	physical, allocated := pageAllocator.AllocateContiguous(4)
@@ -606,10 +622,10 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 			return kcall.StatusResourceExhausted
 		}
 	}
-	putUint64(encoded[0:8], physical)
-	putUint64(encoded[8:16], virtual)
-	putUint64(encoded[16:24], 4*vm.PageSize)
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(dmaWire[0:8], physical)
+	putUint64(dmaWire[8:16], virtual)
+	putUint64(dmaWire[16:24], 4*vm.PageSize)
+	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -671,10 +687,9 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		channelRegistry.Release(id)
 		return kcall.StatusResourceExhausted
 	}
-	var encoded [16]byte
-	putUint64(encoded[0:8], uint64(handle0))
-	putUint64(encoded[8:16], uint64(handle1))
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(channelWire[0:8], uint64(handle0))
+	putUint64(channelWire[8:16], uint64(handle1))
+	if !vm.CopyOut(handler.root, address, channelWire[:]) {
 		owner.Handles().Close(handle0)
 		owner.Handles().Close(handle1)
 		channel.Close(0)
@@ -763,10 +778,9 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 		streamRegistry.Release(id)
 		return kcall.StatusResourceExhausted
 	}
-	var encoded [16]byte
-	putUint64(encoded[0:8], uint64(reader))
-	putUint64(encoded[8:16], uint64(writer))
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(streamCreateWire[0:8], uint64(reader))
+	putUint64(streamCreateWire[8:16], uint64(writer))
+	if !vm.CopyOut(handler.root, address, streamCreateWire[:]) {
 		owner.Handles().Close(reader)
 		owner.Handles().Close(writer)
 		endpoint.CloseReader()
@@ -808,21 +822,19 @@ func streamDescriptor(root, address, length uint64) (uint64, uint64, bool) {
 	if length != kcall.StreamDescriptorSize {
 		return 0, 0, false
 	}
-	var descriptor [24]byte
-	if !vm.CopyIn(root, address, descriptor[:]) {
+	if !vm.CopyIn(root, address, streamDescriptorWire[:]) {
 		return 0, 0, false
 	}
-	buffer, size := decodeUint64(descriptor[0:8]), decodeUint64(descriptor[8:16])
-	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(descriptor[16:24]) != 0 {
+	buffer, size := decodeUint64(streamDescriptorWire[0:8]), decodeUint64(streamDescriptorWire[8:16])
+	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(streamDescriptorWire[16:24]) != 0 {
 		return 0, 0, false
 	}
 	return buffer, size, true
 }
 
 func writeStreamResult(root, descriptor, size uint64) bool {
-	var encoded [8]byte
-	putUint64(encoded[:], size)
-	return vm.CopyOut(root, descriptor+16, encoded[:])
+	putUint64(streamResultWire[:], size)
+	return vm.CopyOut(root, descriptor+16, streamResultWire[:])
 }
 
 func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length uint64) kcall.Status {
@@ -978,13 +990,12 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 		ipcWaitStatus[task] = kcall.StatusOK
 		return status, false
 	}
-	var data [24]byte
-	if !vm.CopyIn(handler.root, descriptor, data[:]) {
+	if !vm.CopyIn(handler.root, descriptor, receiveDescriptorWire[:]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	buffer := decodeUint64(data[0:8])
-	capacity := decodeUint64(data[8:16])
-	timeout := decodeUint64(data[16:24])
+	buffer := decodeUint64(receiveDescriptorWire[0:8])
+	capacity := decodeUint64(receiveDescriptorWire[8:16])
+	timeout := decodeUint64(receiveDescriptorWire[16:24])
 	status := handler.IPCReceive(channel, buffer, capacity)
 	if status != kcall.StatusNotFound {
 		return status, false
@@ -1251,9 +1262,8 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 }
 
 func reportProcessExit(handler nativeCallHandler, resultAddress uint64, event process.ExitEvent) kcall.Status {
-	var encoded [8]byte
-	putUint64(encoded[:], event.Code)
-	if !vm.CopyOut(handler.root, resultAddress, encoded[:]) {
+	putUint64(exitWire[:], event.Code)
+	if !vm.CopyOut(handler.root, resultAddress, exitWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -1322,7 +1332,10 @@ func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capa
 //
 //export goos_dispatch_kernel_call
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
-	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, nativeCallHandler{root: root})
+	// The handler is reused through a pointer: a struct passed as an interface
+	// would be boxed, and the kernel leaks every heap allocation.
+	dispatchHandler.root = root
+	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, &dispatchHandler)
 	return uint64(result.Action)<<32 | uint64(result.Status)
 }
 
@@ -1417,11 +1430,10 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		!vm.CopyIn(handler.root, interestsAddress, waitAnyWire[:int(wireSize)]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	var resultWire [kcall.WaitAnyResultSize]byte
-	if !vm.CopyIn(handler.root, resultAddress, resultWire[:]) {
+	if !vm.CopyIn(handler.root, resultAddress, waitAnyResultWire[:]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	timeout := decodeUint64(resultWire[0:8])
+	timeout := decodeUint64(waitAnyResultWire[0:8])
 	for index := 0; index < int(count); index++ {
 		offset := index * int(kcall.WaitAnyInterestSize)
 		handleID := handle.ID(decodeUint64(waitAnyWire[offset : offset+8]))
@@ -1573,9 +1585,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint16 {
 }
 
 func writeWaitAnyMask(root, resultAddress uint64, mask uint16) kcall.Status {
-	var encoded [8]byte
-	putUint64(encoded[:], uint64(mask))
-	if !vm.CopyOut(root, resultAddress+8, encoded[:]) {
+	putUint64(waitMaskWire[:], uint64(mask))
+	if !vm.CopyOut(root, resultAddress+8, waitMaskWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

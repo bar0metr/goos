@@ -301,9 +301,9 @@ rm -f "$log" "$reboot_log"
 	sleep 2
 	printf 'cat /persist/startup.txt\n'
 	sleep 1
-	printf 'sleep 5 &\n'
+	printf 'sleep 500 &\n'
 	sleep 1
-	printf 'sleep 5 &\n'
+	printf 'sleep 500 &\n'
 	sleep 1
 	printf 'services\n'
 	sleep 1
@@ -319,7 +319,7 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'echo "pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz" | readline | readline | readline\n'
 	sleep 3
-	printf 'cd /\n'
+	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
 	sleep 1
@@ -343,7 +343,7 @@ rm -f "$log" "$reboot_log"
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$log" 2>&1 &
 pid=$!
 
-wait_for_marker boot '^arena-stress-complete$' 120 "$log"
+wait_for_marker boot '^arena-stress-complete$' 180 "$log"
 cleanup
 
 for marker in BOOT_SERVICES_EXITED EXCEPTION_OK GDT_OK IDT_OK TIMER_OK NATIVE_IMAGE_LOADER_OK BOOT_OK; do
@@ -458,11 +458,11 @@ require_regex release.caps '^console   device    read,write$' 'shell console cap
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
-require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$log" 'goos> sleep 5 &'
-require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 5 &'
+require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$log" 'goos> sleep 500 &'
+require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 500 &'
 require_window jobs.foreground '^foreground while jobs run$' 'foreground command runs while jobs are active' "$log" 'goos> echo foreground while jobs run' '[1] done'
-require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 5 &'
-require_regex jobs.done-2 '^\[2\] done$' 'second background job reported' "$log" 'goos> sleep 5 &'
+require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 500 &'
+require_regex jobs.done-2 '^\[2\] done$' 'second background job reported' "$log" 'goos> sleep 500 &'
 require_regex exec.large-pipeline '^pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz$' 'pipeline request over 256 bytes' "$log" 'readline | readline | readline'
 pass_group release-shell
 

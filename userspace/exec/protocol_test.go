@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"goos/kernel/ipc"
+	"goos/kernel/mm/vm"
 	"goos/userspace/startup"
 	"testing"
 )
@@ -230,5 +231,11 @@ func TestResolveExecutableUsesBoundedSystemPath(t *testing.T) {
 		if _, ok := ResolveExecutable(command, &target); ok {
 			t.Fatalf("accepted command %q", command)
 		}
+	}
+}
+
+func TestPageInsideSharedWindow(t *testing.T) {
+	if PageAddress%PageSize != 0 || PageAddress < vm.UserSharedAddress || PageAddress+PageSize > vm.UserSharedLimit {
+		t.Fatalf("exec page %#x outside [%#x, %#x)", PageAddress, vm.UserSharedAddress, vm.UserSharedLimit)
 	}
 }

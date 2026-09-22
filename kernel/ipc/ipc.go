@@ -67,6 +67,12 @@ func NewChannel() Channel {
 	return Channel{alive: [2]bool{true, true}}
 }
 
+// Reset reopens a registry slot in place; see stream.Stream.Reset.
+func (channel *Channel) Reset() {
+	*channel = Channel{}
+	channel.alive = [2]bool{true, true}
+}
+
 func (channel *Channel) Alive(side uint8) bool {
 	return channel != nil && side <= 1 && channel.alive[side]
 }

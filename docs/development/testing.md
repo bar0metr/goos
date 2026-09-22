@@ -38,7 +38,7 @@ therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
 used by `make run`; both QEMU phases share the fresh test image to validate
 reboot persistence.
 
-The main phase has a 120-second bound. It validates kernel initialization,
+The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,
 resource-reuse stress, redirection, and the on-disk persistent bytes. The

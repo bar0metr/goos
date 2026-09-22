@@ -115,7 +115,7 @@ func userspaceMain() {
 	if !found {
 		fatal("SHELL_EXEC_MISSING\n")
 	}
-	pageHandle, found := startupData.Handle("exec-page")
+	pageHandle, found := startupData.Handle("execpage")
 	if !found || memoryMap(uint64(pageHandle), execproto.PageAddress, kcall.MemoryMapWritable) != 0 {
 		fatal("SHELL_EXEC_PAGE_FAILED\n")
 	}

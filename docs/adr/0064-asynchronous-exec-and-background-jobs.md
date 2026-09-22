@@ -24,7 +24,7 @@ argument.
 
 **Shared exec page.** The kernel creates a one-page shared-memory object for
 exec requests and gives it to PID 1 (ADR 0063). PID 1 maps it and grants the
-shell a `Read|Write` handle named `exec-page`. Both map the page at
+shell a `Read|Write` handle named `execpage`. Both map the page at
 `exec.PageAddress`. The page has four slots of 1024 bytes.
 
 To run a command, the shell encodes the request into a free slot and sends an

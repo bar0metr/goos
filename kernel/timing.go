@@ -46,9 +46,8 @@ func (handler nativeCallHandler) ClockReadNanos(address uint64, length uint64) k
 	if !monotonicClock.Calibrated() {
 		return kcall.StatusUnsupported
 	}
-	var encoded [8]byte
-	putUint64(encoded[:], nowNanos())
-	if !vm.CopyOut(handler.root, address, encoded[:]) {
+	putUint64(nanosWire[:], nowNanos())
+	if !vm.CopyOut(handler.root, address, nanosWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
