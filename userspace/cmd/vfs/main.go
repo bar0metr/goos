@@ -9,6 +9,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
 	userwait "goos/userspace/wait"
@@ -118,6 +119,7 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_CONSOLE_MISSING\n")
 	}
+	syslog.Init(consoleHandle, "vfs")
 	initialSessionHandle, found = startupData.Handle("session")
 	if !found {
 		fatal("VFS_SESSION_MISSING\n")
@@ -141,6 +143,7 @@ func userspaceMain() {
 	arenaBase = heapPointer
 	mark("VFS_SERVICE_OK\n")
 	mark("FAT32_MOUNT_OK\n")
+	syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
 	for {
 		heapPointer = arenaBase
 		var interests [userwait.MaxObjects]userwait.Interest
@@ -303,7 +306,9 @@ func write(message string) {
 	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	if diagnostics(uint64(consoleHandle), 0) == 0 {
 		writeSessions()
 	}

@@ -8,6 +8,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
 	"runtime"
@@ -99,6 +100,7 @@ func userspaceMain() {
 		fatal("BLOCK_STARTUP_INVALID\n")
 	}
 	consoleHandle, ok = data.Handle("console")
+	syslog.Init(consoleHandle, "block")
 	if !ok {
 		fatal("BLOCK_CONSOLE_MISSING\n")
 	}
@@ -125,6 +127,7 @@ func userspaceMain() {
 	}
 	arenaBase = heapPointer
 	mark("BLOCK_SERVICE_OK\n")
+	syslog.Info("ready")
 	for {
 		heapPointer = arenaBase
 		endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
@@ -210,7 +213,9 @@ func write(message string) {
 	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	diagnostics(uint64(consoleHandle), 0)
 	for {
 	}

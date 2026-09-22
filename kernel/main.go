@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/internal/version"
 	"goos/kernel/arch/amd64"
@@ -156,7 +157,7 @@ func deliverProcessExits() {
 		if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task) {
 			taskStackReclaimFailures++
 			if taskStackReclaimFailures == 1 {
-				amd64.NewCOM1().WriteString("TASK_STACK_RECLAIM_FAILED\n")
+				kernelLog(logfmt.Warn, "TASK_STACK_RECLAIM_FAILED", nil)
 			}
 		}
 		if report != process.ExitProcessEnded {
@@ -192,7 +193,7 @@ func releaseExitedProcess(event process.ExitEvent) {
 		if !vm.DestroyUserAddressSpace(&pageAllocator, exited.AddressSpace().Root) {
 			addressSpaceReclaimFailures++
 			if addressSpaceReclaimFailures == 1 {
-				amd64.NewCOM1().WriteString("ADDRESS_SPACE_RECLAIM_FAILED\n")
+				kernelLog(logfmt.Warn, "ADDRESS_SPACE_RECLAIM_FAILED", nil)
 			}
 		} else if pageAllocator.Statistics().FreePages > before {
 			processReclaimConfirmed = 1
@@ -249,7 +250,7 @@ func queueLifecycle(message ipc.Message) bool {
 	if pendingLifecycleCount == maxPendingLifecycle {
 		lifecycleOverflows++
 		if lifecycleOverflows == 1 {
-			amd64.NewCOM1().WriteString("LIFECYCLE_QUEUE_OVERFLOW\n")
+			kernelLog(logfmt.Error, "LIFECYCLE_QUEUE_OVERFLOW", nil)
 		}
 		return false
 	}
@@ -298,10 +299,11 @@ func consumeInitControl() {
 	}
 	pid, processHandle, launchStatus := spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], event.Startup[:event.StartupSize])
 	if launchStatus != supervisor.LaunchOK {
-		console := amd64.NewCOM1()
-		console.WriteString("INIT_LAUNCH_ERROR: ")
-		console.WriteHex(uint64(launchStatus))
-		console.WriteString("\n")
+		level := logfmt.Warn
+		if launchStatus == supervisor.LaunchNotFound {
+			level = logfmt.Info
+		}
+		kernelLogUint(level, "launch failed", "status", uint64(launchStatus))
 	}
 	reply, encoded := supervisor.LaunchResult(uint64(pid), processHandle, launchStatus, message.Correlation)
 	if encoded && queueLifecycle(reply) {
@@ -331,17 +333,11 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 	for _, grant := range grants {
 		source, allowed := bootInitProcess.Handles().Lookup(grant.Handle, grant.Type, capability.Transfer)
 		if !allowed {
-			console := amd64.NewCOM1()
-			console.WriteString("INIT_GRANT_DENIED: ")
-			console.WriteString(grant.Name)
-			console.WriteString("\n")
+			kernelLogGrant("INIT_GRANT_DENIED", grant.Name)
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 		if _, allowed = source.Derive(grant.Rights); !allowed {
-			console := amd64.NewCOM1()
-			console.WriteString("INIT_GRANT_RIGHTS_DENIED: ")
-			console.WriteString(grant.Name)
-			console.WriteString("\n")
+			kernelLogGrant("INIT_GRANT_RIGHTS_DENIED", grant.Name)
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 	}
@@ -1845,6 +1841,7 @@ func main() {
 	} else {
 		console.WriteString("Kernel initialized\n")
 	}
+	kernelLogUint(logfmt.Info, "kernel initialized", "free-pages", pageAllocator.Statistics().FreePages)
 	for {
 		serviceKernel()
 		if initExitObserved != 0 {

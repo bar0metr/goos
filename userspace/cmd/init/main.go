@@ -13,6 +13,7 @@ import (
 	blockproto "goos/userspace/block"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
 	"runtime"
@@ -97,6 +98,7 @@ func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
+	syslog.Init(serviceDeviceHandle, "init")
 	if validation.Enabled {
 		if !probeStreamEndpoint() {
 			fatal("STREAM_ENDPOINT_FAILED\n")
@@ -146,6 +148,7 @@ func userspaceMain() {
 		if manager.Exit(event.Process, event.Code, supervisionTicks) == supervisor.StatusNotFound {
 			continue
 		}
+		syslog.Warn("service exited", syslog.Uint("pid", event.Process), syslog.Uint("code", event.Code))
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
 		snapshot, found := manager.Snapshot("fault-probe")
 		if validation.Enabled && found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
@@ -309,10 +312,12 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	event, status := receiveLaunchResult(correlation)
 	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || handleClose(uint64(event.ProcessHandle)) != 0 {
 		write("[FAIL] " + name + "\n")
+		syslog.Error("service launch failed", syslog.Str("service", name), syslog.Uint("status", event.Code))
 		return 0, false
 	}
 	mark("INIT_SERVICE_STARTED_OK\n")
 	write("[ OK ] " + name + "\n")
+	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	return event.Process, true
 }
 
@@ -345,7 +350,7 @@ func receiveLaunchResult(expectedCorrelation uint64) (supervisor.LifecycleEvent,
 		message, status := receive(lifecycleHandle, launchReplyDeadline)
 		if status != ipc.StatusOK {
 			if status == ipc.StatusTimeout {
-				write("INIT_LAUNCH_REPLY_TIMEOUT\n")
+				syslog.Warn("INIT_LAUNCH_REPLY_TIMEOUT")
 			}
 			return supervisor.LifecycleEvent{}, status
 		}
@@ -450,7 +455,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	var pair [2]uint64
 	useVFS := commandNeedsVFS(command)
 	if useVFS && channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
-		write("APP_CHANNEL_CREATE_FAILED\n")
+		syslog.Error("APP_CHANNEL_CREATE_FAILED")
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
 	if useVFS {
@@ -458,7 +463,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	}
 	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
 	if useVFS && (!ok || !sendMessage(vfsControlHandle, control)) {
-		write("APP_VFS_REQUEST_FAILED\n")
+		syslog.Error("APP_VFS_REQUEST_FAILED")
 		closePair(pair)
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
@@ -470,13 +475,13 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 		vfsStatus, valid = vfs.DecodeAddSessionReply(controlReply)
 	}
 	if useVFS && (status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK) {
-		write("APP_VFS_SESSION_FAILED\n")
+		syslog.Error("APP_VFS_SESSION_FAILED")
 		if status != ipc.StatusOK {
-			write("APP_VFS_RECEIVE_STATUS\n")
+			syslog.Error("APP_VFS_RECEIVE_STATUS")
 		} else if !valid {
-			write("APP_VFS_REPLY_INVALID\n")
+			syslog.Error("APP_VFS_REPLY_INVALID")
 		} else {
-			write("APP_VFS_RESOURCE_EXHAUSTED\n")
+			syslog.Error("APP_VFS_RESOURCE_EXHAUSTED")
 		}
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
@@ -488,7 +493,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	}
 	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
 	if !ok {
-		write("APP_STARTUP_ENCODE_FAILED\n")
+		syslog.Error("APP_STARTUP_ENCODE_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
@@ -503,18 +508,18 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	correlation++
 	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
 	if !ok {
-		write("APP_LAUNCH_ENCODE_FAILED\n")
+		syslog.Error("APP_LAUNCH_ENCODE_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	if !sendMessage(lifecycleHandle, request) {
-		write("APP_LAUNCH_SEND_FAILED\n")
+		syslog.Error("APP_LAUNCH_SEND_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	event, status := receiveLaunchResult(correlation)
 	if status != ipc.StatusOK {
-		write("APP_LAUNCH_REPLY_FAILED\n")
+		syslog.Error("APP_LAUNCH_REPLY_FAILED")
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	if event.Code != uint64(supervisor.LaunchOK) {
@@ -615,7 +620,9 @@ func mark(message string) {
 }
 
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	diagnostics(uint64(serviceDeviceHandle), 0)
 	for {
 	}
