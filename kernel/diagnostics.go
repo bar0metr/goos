@@ -168,6 +168,7 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("lifecycle-pending", uint64(pendingLifecycleCount))
 	out.uint("lifecycle-overflows", lifecycleOverflows)
 	out.end()
+	dumpTiming(out)
 	out.text("DIAG events")
 	out.uint("total", diagRing.Total())
 	out.end()

@@ -184,6 +184,14 @@ goos_diagnostics:
     ret
 .size goos_diagnostics, .-goos_diagnostics
 
+.global goos_clock_read_nanos
+.type goos_clock_read_nanos,@function
+goos_clock_read_nanos:
+    movl $24, %eax
+    int $0x80
+    ret
+.size goos_clock_read_nanos, .-goos_clock_read_nanos
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:
