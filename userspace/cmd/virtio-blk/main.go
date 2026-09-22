@@ -3,10 +3,12 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	"runtime"
 	"unsafe"
@@ -98,6 +100,7 @@ func userspaceMain() {
 		fatal("VIRTIO_BLK_STARTUP_INVALID\n")
 	}
 	consoleHandle, ok = data.Handle("console")
+	syslog.Init(consoleHandle, "virtio-blk")
 	if !ok {
 		fatal("VIRTIO_BLK_CONSOLE_MISSING\n")
 	}
@@ -120,8 +123,9 @@ func userspaceMain() {
 	if !initializeDevice() {
 		fatal("VIRTIO_BLK_INIT_FAILED\n")
 	}
-	write("VIRTIO_BLK_CAPABILITIES_OK\n")
-	write("VIRTIO_BLK_DRIVER_OK\n")
+	mark("VIRTIO_BLK_CAPABILITIES_OK\n")
+	mark("VIRTIO_BLK_DRIVER_OK\n")
+	syslog.Info("device ready", syslog.Uint("capacity-mib", capacity>>20), syslog.Uint("queue", uint64(queueSize)))
 	serve()
 }
 
@@ -297,7 +301,7 @@ func transfer(operation uint32, sector uint64, sectors uint16) bool {
 	}
 	usedIndex = current
 	if !irqConfirmed {
-		write("VIRTIO_BLK_IRQ_OK\n")
+		mark("VIRTIO_BLK_IRQ_OK\n")
 		irqConfirmed = true
 	}
 	return get8(statusOffset) == 0
@@ -340,11 +344,19 @@ func put64(offset uint64, value uint64) {
 }
 func align(value, alignment uint64) uint64 { return (value + alignment - 1) &^ (alignment - 1) }
 
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
+}
+
 func write(message string) {
 	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	for {
 	}
 }

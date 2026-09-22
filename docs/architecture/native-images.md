@@ -10,7 +10,7 @@ pointer. It is followed by fixed 32-byte segment records containing virtual
 address, payload offset and size, in-memory size, permission flags, and a
 reserved field. All integers are little-endian.
 
-The loader accepts at most eight segments and 128 pages across the complete
+The loader accepts at most eight segments and 256 pages across the complete
 image. Every segment must be page-aligned, lie in the current userspace range, have a bounded
 payload, and request known permissions. Writable-executable mappings are
 rejected. Entry must lie inside an executable segment; the aligned initial stack

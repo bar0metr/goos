@@ -250,6 +250,15 @@ func (manager *Manager) Snapshot(name string) (Snapshot, bool) {
 	return Snapshot{ID: index + 1, PID: entry.pid, State: entry.state, Health: entry.health, Restarts: entry.restarts}, true
 }
 
+// At returns the name and state of the index-th registered service.
+func (manager *Manager) At(index int) ([]byte, Snapshot, bool) {
+	if index < 0 || index >= int(manager.count) || !manager.services[index].used {
+		return nil, Snapshot{}, false
+	}
+	entry := &manager.services[index]
+	return entry.launch.Name[:entry.launch.NameSize], Snapshot{ID: uint8(index + 1), PID: entry.pid, State: entry.state, Health: entry.health, Restarts: entry.restarts}, true
+}
+
 func (manager *Manager) Event(index int) (Event, bool) {
 	if index < 0 || index >= int(manager.eventCount) {
 		return Event{}, false

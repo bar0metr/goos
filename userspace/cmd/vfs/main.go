@@ -3,11 +3,13 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
 	userwait "goos/userspace/wait"
@@ -117,6 +119,7 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_CONSOLE_MISSING\n")
 	}
+	syslog.Init(consoleHandle, "vfs")
 	initialSessionHandle, found = startupData.Handle("session")
 	if !found {
 		fatal("VFS_SESSION_MISSING\n")
@@ -138,8 +141,9 @@ func userspaceMain() {
 		fatal("VFS_FAT32_MOUNT_FAILED\n")
 	}
 	arenaBase = heapPointer
-	write("VFS_SERVICE_OK\n")
-	write("FAT32_MOUNT_OK\n")
+	mark("VFS_SERVICE_OK\n")
+	mark("FAT32_MOUNT_OK\n")
+	syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
 	for {
 		heapPointer = arenaBase
 		var interests [userwait.MaxObjects]userwait.Interest
@@ -229,6 +233,19 @@ func pollControl() bool {
 	if status != ipc.StatusOK {
 		fatal("VFS_CONTROL_FAILED\n")
 	}
+	if vfs.IsSync(message) {
+		result := vfs.StatusBackendError
+		if (blockDevice{}).Flush() {
+			result = vfs.StatusOK
+			syslog.Info("synced")
+		}
+		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
+		if !encoded {
+			fatal("VFS_CONTROL_REPLY_FAILED\n")
+		}
+		send(uint64(controlHandle), reply)
+		return true
+	}
 	server, ok := vfs.DecodeAddSession(message)
 	result := vfs.StatusResourceExhausted
 	if ok {
@@ -292,11 +309,19 @@ func receiveNow(channel uint64) (ipc.Message, ipc.Status) {
 	return message, ipc.StatusOK
 }
 
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
+}
+
 func write(message string) {
 	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	if diagnostics(uint64(consoleHandle), 0) == 0 {
 		writeSessions()
 	}

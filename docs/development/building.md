@@ -50,9 +50,18 @@ reports that it is unavailable.
 `make HZ=<rate> test-latency` measures command latency at one rate and writes
 `build/reports/latency-hz<rate>.md`; see `docs/development/testing.md`.
 
-`build/config/build` records the active `HZ` and `DIAG` values. Changing either
-rebuilds the kernel and userspace; repeating a build with the same values does
-not.
+`VALIDATION=1` builds the validation variant (ADR 0058): kernel self-tests,
+fault injection, PID 1's supervision scenario, and the `*_OK` markers the boot
+test asserts. A normal build runs none of them and prints only the banner,
+service status, and prompt. `make test-boot` always builds the validation
+variant.
+
+Each configuration builds into its own tree, `build/variants/hz<rate>`, with
+`-diag` and `-validation` suffixes, so switching `HZ`, `DIAG`, or `VALIDATION`
+never mixes objects from different configurations and returning to a built
+configuration does not rebuild it. `make iso` copies the requested variant to
+`build/goos-x86_64.iso` and records its values in `build/config/build` for the
+test harnesses.
 
 Set `OVMF_CODE=/path/to/firmware.fd` if QEMU firmware is not installed under
 `/opt/local/share/qemu`. Set `SOURCE_DATE_EPOCH` to a fixed project release

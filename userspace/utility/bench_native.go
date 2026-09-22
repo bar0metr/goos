@@ -43,7 +43,7 @@ func runBench(data startup.Data) {
 	default:
 		finish(2, "usage: bench vfs COUNT | bench read PATH COUNT\n")
 	}
-	writeError("BENCH_PROCESS_OK\n")
+	mark("BENCH_PROCESS_OK\n")
 }
 
 func benchReadFile(path []byte) {

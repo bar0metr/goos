@@ -4,6 +4,8 @@ package utility
 
 import (
 	"encoding/binary"
+	"goos/internal/validation"
+	"goos/internal/version"
 	"goos/kernel/clock"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -69,6 +71,9 @@ func processExit(code uint64)
 //go:linkname clockRead goos_clock_read
 func clockRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname processInfo goos_process_info
+func processInfo(index uint64, address unsafe.Pointer) uint64
+
 //go:linkname systemInfoRead goos_system_info
 func systemInfoRead(address unsafe.Pointer, size uintptr) uint64
 
@@ -93,7 +98,7 @@ func Run() {
 	case equal(data.Command, "pwd"):
 		lineBytes(data.CWD)
 		lineFlush()
-		writeError("PWD_PROCESS_OK\n")
+		mark("PWD_PROCESS_OK\n")
 	case equal(data.Command, "ls"):
 		runLs(data)
 	case equal(data.Command, "cat"):
@@ -106,11 +111,11 @@ func Run() {
 			lineBytes(path)
 			lineFlush()
 		}
-		writeError("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDIN_HANDLE_OK\nSTDERR_HANDLE_OK\n")
+		mark("ARGS_PROCESS_OK\nARGV_ENV_PROCESS_OK\nSTDIN_HANDLE_OK\nSTDERR_HANDLE_OK\n")
 	case equal(data.Command, "echo"):
 		writeArguments(data, 1)
 		lineFlush()
-		writeError("ECHO_PROCESS_OK\n")
+		mark("ECHO_PROCESS_OK\n")
 	case equal(data.Command, "readline"):
 		runReadline()
 	case equal(data.Command, "mkdir"):
@@ -130,9 +135,9 @@ func Run() {
 	case equal(data.Command, "uptime"):
 		runUptime()
 	case equal(data.Command, "uname"):
-		lineText("GoOS 0.1-dev x86_64")
+		lineText(version.Name + " " + version.Release + " " + version.Machine)
 		lineFlush()
-		writeError("UNAME_PROCESS_OK\n")
+		mark("UNAME_PROCESS_OK\n")
 	case equal(data.Command, "sleep"):
 		runSleep(data)
 	case equal(data.Command, "ps"):
@@ -186,6 +191,31 @@ func runWrite(data startup.Data) {
 			finish(2, "write: seek failed\n")
 		}
 	}
+	if _, inline := data.Arg(pathIndex + 1); inline {
+		size := 0
+		for index := pathIndex + 1; ; index++ {
+			argument, found := data.Arg(index)
+			if !found {
+				break
+			}
+			if size != 0 && size < len(buffer) {
+				buffer[size] = ' '
+				size++
+			}
+			if size+len(argument)+1 > len(buffer) {
+				finish(2, "write: text too long\n")
+			}
+			size += copy(buffer[size:], argument)
+		}
+		buffer[size] = '\n'
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:size+1]})
+		if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(size+1) {
+			finish(2, "write: VFS error\n")
+		}
+		callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		mark("WRITE_PROCESS_OK\n")
+		return
+	}
 	for {
 		status, size := readInput(buffer[:])
 		if status == uint64(kcall.StatusNotFound) || status == uint64(kcall.StatusResourceExhausted) {
@@ -203,7 +233,7 @@ func runWrite(data startup.Data) {
 		}
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
-	writeError("WRITE_PROCESS_OK\n")
+	mark("WRITE_PROCESS_OK\n")
 }
 
 func runReadline() {
@@ -229,7 +259,7 @@ func runReadline() {
 	}
 	lineBytes(line[:size])
 	lineFlush()
-	writeError("STDIN_READ_OK\n")
+	mark("STDIN_READ_OK\n")
 }
 
 func readInputByte() uint64 {
@@ -288,7 +318,7 @@ func runLs(data startup.Data) {
 	if stat.Kind == ramfs.KindFile {
 		lineBytes(baseName(path))
 		lineFlush()
-		writeError("LS_PROCESS_OK\n")
+		mark("LS_PROCESS_OK\n")
 		return
 	}
 	var cursor uint32
@@ -310,7 +340,7 @@ func runLs(data startup.Data) {
 		lineFlush()
 		cursor = reply.Cursor
 	}
-	writeError("LS_PROCESS_OK\n")
+	mark("LS_PROCESS_OK\n")
 }
 
 func runCat(data startup.Data) {
@@ -337,7 +367,7 @@ func runCat(data startup.Data) {
 		writeBytes(reply.Data)
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
-	writeError("CAT_PROCESS_OK\n")
+	mark("CAT_PROCESS_OK\n")
 }
 
 func runCreate(data startup.Data, directory bool) {
@@ -358,7 +388,7 @@ func runCreate(data startup.Data, directory bool) {
 	if !received || reply.Status != vfs.StatusOK && !(operation == vfs.OperationCreate && reply.Status == vfs.StatusAlreadyExists) {
 		finish(2, "create failed\n")
 	}
-	writeError(marker)
+	mark(marker)
 }
 
 func runUnlink(data startup.Data) {
@@ -367,7 +397,7 @@ func runUnlink(data startup.Data) {
 	if !received || reply.Status != vfs.StatusOK {
 		finish(2, "rm: failed\n")
 	}
-	writeError("RM_PROCESS_OK\n")
+	mark("RM_PROCESS_OK\n")
 }
 
 func runMove(data startup.Data) {
@@ -385,7 +415,7 @@ func runMove(data startup.Data) {
 	if !received || reply.Status != vfs.StatusOK {
 		finish(2, "mv: failed\n")
 	}
-	writeError("MV_PROCESS_OK\n")
+	mark("MV_PROCESS_OK\n")
 }
 
 func runCopy(data startup.Data) {
@@ -427,7 +457,7 @@ func runCopy(data startup.Data) {
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: input.Handle})
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: output.Handle})
-	writeError("CP_PROCESS_OK\n")
+	mark("CP_PROCESS_OK\n")
 }
 
 func runStat(data startup.Data) {
@@ -444,7 +474,7 @@ func runStat(data startup.Data) {
 	lineUint(reply.Size)
 	lineText(" bytes")
 	lineFlush()
-	writeError("STAT_PROCESS_OK\n")
+	mark("STAT_PROCESS_OK\n")
 }
 
 func runUptime() {
@@ -454,7 +484,7 @@ func runUptime() {
 	lineUint(clockValue)
 	lineText(" ticks")
 	lineFlush()
-	writeError("UPTIME_PROCESS_OK\n")
+	mark("UPTIME_PROCESS_OK\n")
 }
 
 func runSleep(data startup.Data) {
@@ -472,19 +502,50 @@ func runSleep(data startup.Data) {
 			finish(2, "sleep unavailable\n")
 		}
 	}
-	writeError("SLEEP_PROCESS_OK\n")
+	mark("SLEEP_PROCESS_OK\n")
 }
 
 func runPS() {
-	if systemInfoRead(unsafe.Pointer(&systemInfo[0]), uintptr(len(systemInfo))) != 0 {
-		finish(2, "ps unavailable\n")
-	}
-	lineText("pid ")
-	lineUint(binary.LittleEndian.Uint64(systemInfo[0:8]))
-	lineText(" processes ")
-	lineUint(binary.LittleEndian.Uint64(systemInfo[8:16]))
+	var record [kcall.ProcessInfoSize]byte
+	lineText("PID   TYPE     STATE      COMMAND")
 	lineFlush()
-	writeError("PS_PROCESS_OK\n")
+	for index := uint64(0); processInfo(index, unsafe.Pointer(&record[0])) == 0; index++ {
+		pid := binary.LittleEndian.Uint64(record[0:8])
+		state := "waiting"
+		switch record[8] {
+		case kcall.ProcessRunning:
+			state = "running"
+		case kcall.ProcessReady:
+			state = "ready"
+		}
+		name := record[16 : 16+kcall.MaxProcessName]
+		size := 0
+		for size < len(name) && name[size] != 0 {
+			size++
+		}
+		column := lineUintWidth(pid)
+		for ; column < 6; column++ {
+			lineText(" ")
+		}
+		lineText("native   ")
+		lineText(state)
+		for column = len(state); column < 11; column++ {
+			lineText(" ")
+		}
+		lineBytes(name[:size])
+		lineFlush()
+	}
+	mark("PS_PROCESS_OK\n")
+}
+
+func lineUintWidth(value uint64) int {
+	lineUint(value)
+	width := 1
+	for value >= 10 {
+		value /= 10
+		width++
+	}
+	return width
 }
 
 func runMem() {
@@ -496,7 +557,7 @@ func runMem() {
 	lineText(" free ")
 	lineUint(binary.LittleEndian.Uint64(systemInfo[24:32]))
 	lineFlush()
-	writeError("MEM_PROCESS_OK\n")
+	mark("MEM_PROCESS_OK\n")
 }
 
 func requiredPath(data startup.Data, index int) []byte {
@@ -630,6 +691,12 @@ func write(message string) {
 func writeBytes(value []byte) {
 	writeHandle(stdoutHandle, value)
 }
+func mark(message string) {
+	if validation.Enabled {
+		writeError(message)
+	}
+}
+
 func writeError(message string) {
 	target := stderrHandle
 	if target == 0 {

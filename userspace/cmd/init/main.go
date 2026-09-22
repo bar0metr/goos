@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -12,6 +13,7 @@ import (
 	blockproto "goos/userspace/block"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
 	"runtime"
@@ -35,6 +37,10 @@ const driverClientHandle = handle.ID(0x000000010000000e)
 const driverServerHandle = handle.ID(0x000000010000000f)
 const filesystemBlockClientHandle = handle.ID(0x0000000100000010)
 const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
+const systemControlHandle = uint64(0x0000000100000012)
+
+//go:linkname systemReset goos_system_reset
+func systemReset(device uint64) uint64
 
 var (
 	manager              supervisor.Manager
@@ -96,17 +102,22 @@ func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
-	if !probeStreamEndpoint() {
-		fatal("STREAM_ENDPOINT_FAILED\n")
+	syslog.Init(serviceDeviceHandle, "init")
+	if validation.Enabled {
+		if !probeStreamEndpoint() {
+			fatal("STREAM_ENDPOINT_FAILED\n")
+		}
+		mark("STREAM_ENDPOINT_OK\n")
+		if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
+			Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+			manager.StartReady(0, bootstrapService) != 1 {
+			fatal("INIT_POLICY_SETUP_FAILED\n")
+		}
+		mark("INIT_PROCESS_OK\n")
+		mark("INIT_LIFECYCLE_IPC_OK\n")
+	} else {
+		startServices(0)
 	}
-	write("STREAM_ENDPOINT_OK\n")
-	if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
-		Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
-		manager.StartReady(0, bootstrapService) != 1 {
-		fatal("INIT_POLICY_SETUP_FAILED\n")
-	}
-	write("INIT_PROCESS_OK\n")
-	write("INIT_LIFECYCLE_IPC_OK\n")
 	for {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
@@ -141,45 +152,55 @@ func userspaceMain() {
 		if manager.Exit(event.Process, event.Code, supervisionTicks) == supervisor.StatusNotFound {
 			continue
 		}
+		syslog.Warn("service exited", syslog.Uint("pid", event.Process), syslog.Uint("code", event.Code))
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
 		snapshot, found := manager.Snapshot("fault-probe")
-		if found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
-			if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
-				Capabilities: []supervisor.Capability{
-					{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-					{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-				}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
-					Capabilities: []supervisor.Capability{
-						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-						{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
-					Capabilities: []supervisor.Capability{
-						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-						{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
-						{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
-						{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
-						{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
-					Capabilities: []supervisor.Capability{
-						{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-						{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-						{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-					}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-				manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService) != 4 || !probeBlockService() {
-				fatal("SHELL_LAUNCH_FAILED\n")
-			}
-			supervisionComplete = true
-			arenaBase = heapPointer
-			write("USERSPACE_SUPERVISOR_OK\n")
+		if validation.Enabled && found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
+			startServices(supervisionTicks)
+			mark("USERSPACE_SUPERVISOR_OK\n")
 		}
 	}
+}
+
+// startServices registers the system services and launches them in
+// dependency order, reporting each on the console.
+func startServices(ticks uint64) {
+	write("\nStarting services...\n")
+	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
+		Capabilities: []supervisor.Capability{
+			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+				{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+				{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
+				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
+				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
+				{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+				{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 4 || validation.Enabled && !probeBlockService() {
+		fatal("SHELL_LAUNCH_FAILED\n")
+	}
+	supervisionComplete = true
+	arenaBase = heapPointer
 }
 
 func probeStreamEndpoint() bool {
@@ -248,7 +269,7 @@ func probeBlockService() bool {
 	if status != ipc.StatusOK || !valid || flushReply.Status != blockproto.StatusOK {
 		return false
 	}
-	write("BLOCK_SERVICE_IO_OK\n")
+	mark("BLOCK_SERVICE_IO_OK\n")
 	return true
 }
 
@@ -290,15 +311,17 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if !ok || ipcSend(lifecycleHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
 		return 0, false
 	}
-	write("INIT_SERVICE_LAUNCH_OK\n")
+	mark("INIT_SERVICE_LAUNCH_OK\n")
+	name := bytesString(spec.Name[:spec.NameSize])
 	event, status := receiveLaunchResult(correlation)
-	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) {
+	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || handleClose(uint64(event.ProcessHandle)) != 0 {
+		write("[FAIL] " + name + "\n")
+		syslog.Error("service launch failed", syslog.Str("service", name), syslog.Uint("status", event.Code))
 		return 0, false
 	}
-	if handleClose(uint64(event.ProcessHandle)) != 0 {
-		return 0, false
-	}
-	write("INIT_SERVICE_STARTED_OK\n")
+	mark("INIT_SERVICE_STARTED_OK\n")
+	write("[ OK ] " + name + "\n")
+	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	return event.Process, true
 }
 
@@ -331,7 +354,7 @@ func receiveLaunchResult(expectedCorrelation uint64) (supervisor.LifecycleEvent,
 		message, status := receive(lifecycleHandle, launchReplyDeadline)
 		if status != ipc.StatusOK {
 			if status == ipc.StatusTimeout {
-				write("INIT_LAUNCH_REPLY_TIMEOUT\n")
+				syslog.Warn("INIT_LAUNCH_REPLY_TIMEOUT")
 			}
 			return supervisor.LifecycleEvent{}, status
 		}
@@ -389,6 +412,10 @@ func pollExec() {
 	if !ok {
 		fatal("INIT_EXEC_CORRUPT\n")
 	}
+	if execproto.IsControl(message) {
+		handleControl(message)
+		return
+	}
 	request, ok := execproto.DecodeRequest(message)
 	if !ok {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
@@ -408,6 +435,58 @@ func pollExec() {
 	}
 	pid, launchStatus, exitCode := supervisor.RunPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
 	sendExecReply(message.Correlation, pid, uint64(launchStatus), exitCode)
+}
+
+// handleControl answers the shell's requests that launch nothing.
+func handleControl(message ipc.Message) {
+	operation, ok := execproto.DecodeControl(message)
+	switch {
+	case !ok:
+		sendControlStatus(execproto.ControlInvalid, message.Correlation)
+	case operation == execproto.ControlServices:
+		var entries [execproto.MaxServiceEntries]execproto.ServiceEntry
+		count := 0
+		for index := 0; count < len(entries); index++ {
+			name, snapshot, found := manager.At(index)
+			if !found {
+				break
+			}
+			if len(name) > execproto.MaxServiceName {
+				name = name[:execproto.MaxServiceName]
+			}
+			entries[count] = execproto.ServiceEntry{Name: name, State: uint8(snapshot.State), Restarts: snapshot.Restarts, PID: uint32(snapshot.PID)}
+			count++
+		}
+		if reply, encoded := execproto.EncodeServices(entries[:count], message.Correlation); encoded {
+			sendMessage(execServerHandle, reply)
+		}
+	case operation == execproto.ControlReboot:
+		correlationOfShell := message.Correlation
+		syslog.Info("reboot requested")
+		correlation++
+		sync, encoded := vfs.SyncRequest(correlation)
+		if !encoded || !sendMessage(vfsControlHandle, sync) {
+			sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
+			return
+		}
+		reply, status := receive(vfsControlHandle, vfsSessionDeadline)
+		synced, valid := vfs.DecodeAddSessionReply(reply)
+		if status != ipc.StatusOK || !valid || synced != vfs.StatusOK || reply.Correlation != correlation {
+			syslog.Error("reboot: storage sync failed")
+			sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
+			return
+		}
+		write("\nRebooting...\n")
+		systemReset(systemControlHandle)
+		syslog.Error("reboot: reset refused")
+		sendControlStatus(execproto.ControlResetFailed, correlationOfShell)
+	}
+}
+
+func sendControlStatus(status execproto.ControlStatus, correlation uint64) {
+	if reply, encoded := execproto.EncodeControlStatus(status, correlation); encoded {
+		sendMessage(execServerHandle, reply)
+	}
 }
 
 type nativePipelineRunner struct{}
@@ -436,7 +515,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	var pair [2]uint64
 	useVFS := commandNeedsVFS(command)
 	if useVFS && channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
-		write("APP_CHANNEL_CREATE_FAILED\n")
+		syslog.Error("APP_CHANNEL_CREATE_FAILED")
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
 	if useVFS {
@@ -444,7 +523,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	}
 	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
 	if useVFS && (!ok || !sendMessage(vfsControlHandle, control)) {
-		write("APP_VFS_REQUEST_FAILED\n")
+		syslog.Error("APP_VFS_REQUEST_FAILED")
 		closePair(pair)
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
 	}
@@ -456,13 +535,13 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 		vfsStatus, valid = vfs.DecodeAddSessionReply(controlReply)
 	}
 	if useVFS && (status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK) {
-		write("APP_VFS_SESSION_FAILED\n")
+		syslog.Error("APP_VFS_SESSION_FAILED")
 		if status != ipc.StatusOK {
-			write("APP_VFS_RECEIVE_STATUS\n")
+			syslog.Error("APP_VFS_RECEIVE_STATUS")
 		} else if !valid {
-			write("APP_VFS_REPLY_INVALID\n")
+			syslog.Error("APP_VFS_REPLY_INVALID")
 		} else {
-			write("APP_VFS_RESOURCE_EXHAUSTED\n")
+			syslog.Error("APP_VFS_RESOURCE_EXHAUSTED")
 		}
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
@@ -474,7 +553,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	}
 	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
 	if !ok {
-		write("APP_STARTUP_ENCODE_FAILED\n")
+		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
@@ -489,18 +568,18 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	correlation++
 	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, startupData, correlation)
 	if !ok {
-		write("APP_LAUNCH_ENCODE_FAILED\n")
+		syslog.Error("APP_LAUNCH_ENCODE_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	if !sendMessage(lifecycleHandle, request) {
-		write("APP_LAUNCH_SEND_FAILED\n")
+		syslog.Error("APP_LAUNCH_SEND_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	event, status := receiveLaunchResult(correlation)
 	if status != ipc.StatusOK {
-		write("APP_LAUNCH_REPLY_FAILED\n")
+		syslog.Error("APP_LAUNCH_REPLY_FAILED")
 		return 0, 0, supervisor.LaunchProcessFailed
 	}
 	if event.Code != uint64(supervisor.LaunchOK) {
@@ -558,7 +637,7 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 			fatal("INIT_EXEC_CLOSE_FAILED\n")
 		}
 		if !processWaitAnnounced {
-			write("PROCESS_HANDLE_WAIT_OK\n")
+			mark("PROCESS_HANDLE_WAIT_OK\n")
 			processWaitAnnounced = true
 		}
 		return exitCode
@@ -594,8 +673,16 @@ func write(message string) {
 	debugWrite(unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
+}
+
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	diagnostics(uint64(serviceDeviceHandle), 0)
 	for {
 	}

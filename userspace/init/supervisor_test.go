@@ -149,3 +149,20 @@ func TestServiceTableIsBounded(t *testing.T) {
 		t.Fatal("service capacity exceeded")
 	}
 }
+
+func TestAtListsRegisteredServicesInOrder(t *testing.T) {
+	var manager Manager
+	manager.Register(Definition{Name: "vfs", Executable: "/system/vfs"})
+	manager.Register(Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"}})
+	manager.StartReady(0, func(LaunchSpec) (uint64, bool) { return 9, true })
+	name, snapshot, ok := manager.At(0)
+	if !ok || string(name) != "vfs" || snapshot.State != StateRunning || snapshot.PID != 9 {
+		t.Fatalf("first service %q %+v %v", name, snapshot, ok)
+	}
+	if name, _, ok := manager.At(1); !ok || string(name) != "shell" {
+		t.Fatalf("second service %q %v", name, ok)
+	}
+	if _, _, ok := manager.At(2); ok {
+		t.Fatal("unregistered index listed")
+	}
+}

@@ -9,8 +9,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
   userspace security-focused host tests explicitly.
 - `make test` runs the three fast targets above and does not start QEMU.
-- `make test-boot` builds the ISO and runs the two-phase QEMU boot and reboot
-  persistence test.
+- `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
+  runs the two-phase QEMU boot and reboot persistence test.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, and the real QEMU
   boot/persistence test in sequence so host builds cannot contend with QEMU.
@@ -43,7 +43,9 @@ memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,
 resource-reuse stress, redirection, and the on-disk persistent bytes. The
 reboot phase has a 60-second bound and reads the persisted file in a fresh VM
-without recreating it.
+without recreating it. A third phase runs the M7 acceptance inside one VM,
+logged to `build/logs/m7-reboot.log`. It creates `/persist/demo`, writes a file in it, runs the
+shell's `reboot`, and requires both boots and both reads of the file.
 
 Successful runs print one `PASS` line per architectural group and a final check
 count. Repeated guest output remains only in the full serial log. Failed checks

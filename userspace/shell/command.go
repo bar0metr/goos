@@ -71,7 +71,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 				return commands, 0, false
 			}
 			name := invocation.Arguments[0]
-			if (stageCount > 1 || redirectCount != 0) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear") || equal(name, "diag") || equal(name, "time")) {
+			if (stageCount > 1 || redirectCount != 0) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear") || equal(name, "diag") || equal(name, "log") || equal(name, "services") || equal(name, "reboot") || equal(name, "handles") || equal(name, "caps") || equal(name, "time")) {
 				return commands, 0, false
 			}
 		}

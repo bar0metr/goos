@@ -3,10 +3,12 @@
 package main
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
+	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
 	"runtime"
@@ -98,6 +100,7 @@ func userspaceMain() {
 		fatal("BLOCK_STARTUP_INVALID\n")
 	}
 	consoleHandle, ok = data.Handle("console")
+	syslog.Init(consoleHandle, "block")
 	if !ok {
 		fatal("BLOCK_CONSOLE_MISSING\n")
 	}
@@ -123,7 +126,8 @@ func userspaceMain() {
 		fatal("BLOCK_SERVICE_INIT_FAILED\n")
 	}
 	arenaBase = heapPointer
-	write("BLOCK_SERVICE_OK\n")
+	mark("BLOCK_SERVICE_OK\n")
+	syslog.Info("ready")
 	for {
 		heapPointer = arenaBase
 		endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
@@ -199,11 +203,19 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 	return reply, valid && validReply && driverReply.Correlation == correlation
 }
 
+func mark(message string) {
+	if validation.Enabled {
+		write(message)
+	}
+}
+
 func write(message string) {
 	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
 }
 func fatal(message string) {
-	write(message)
+	if !syslog.Error(message[:len(message)-1]) {
+		write(message)
+	}
 	diagnostics(uint64(consoleHandle), 0)
 	for {
 	}

@@ -57,6 +57,20 @@ goos_halt:
     hlt
     retq
 
+.global goos_system_reset
+goos_system_reset:
+    cli
+    movw $0xcf9, %dx
+    movb $0x02, %al
+    outb %al, %dx
+    movb $0x06, %al
+    outb %al, %dx
+    movb $0xfe, %al
+    outb %al, $0x64
+    lidt goos_zero_idtr(%rip)
+    int3
+    retq
+
 .global goos_copy_bytes
 goos_copy_bytes:
     pushq %rdi
@@ -349,6 +363,8 @@ goos_exception_fatal:
     jmp .switch_to
 
 .section .rdata
+goos_zero_idtr:
+    .quad 0, 0
 breakpoint_message:
     .asciz "EXCEPTION_OK\r\n"
 fatal_exception_message:

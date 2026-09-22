@@ -26,6 +26,8 @@ type Process struct {
 	taskCount    int
 	startup      [MaxStartupData]byte
 	startupSize  uint8
+	name         [16]byte
+	nameSize     uint8
 }
 
 func New(id ID, addressSpace AddressSpace) (Process, bool) {
@@ -45,6 +47,13 @@ func NewWithStartup(id ID, addressSpace AddressSpace, startup []byte) (Process, 
 }
 
 func (process *Process) ID() ID { return process.id }
+
+// SetName records a display name, truncated to 16 bytes.
+func (process *Process) SetName(name string) {
+	process.nameSize = uint8(copy(process.name[:], name))
+}
+
+func (process *Process) Name() []byte { return process.name[:process.nameSize] }
 
 func (process *Process) AddressSpace() AddressSpace { return process.addressSpace }
 
