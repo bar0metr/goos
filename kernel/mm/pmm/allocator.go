@@ -1,6 +1,9 @@
 package pmm
 
-import "goos/kernel/boot"
+import (
+	"goos/kernel/boot"
+	"math/bits"
+)
 
 const (
 	PageSize       = boot.PageSize
@@ -63,38 +66,55 @@ func (allocator *Allocator) Allocate() (uint64, bool) {
 	if allocator.freePages == 0 || allocator.managedPage == 0 {
 		return 0, false
 	}
-	for checked := uint64(0); checked < allocator.managedPage; checked++ {
-		page := (allocator.next + checked) % allocator.managedPage
-		if !allocator.isUsed(page) {
-			allocator.markUsed(page)
-			allocator.next = page + 1
-			return page * PageSize, true
-		}
+	page, found := allocator.firstFree(allocator.next, allocator.managedPage)
+	if !found {
+		page, found = allocator.firstFree(0, allocator.next)
 	}
-	return 0, false
+	if !found {
+		return 0, false
+	}
+	allocator.markUsed(page)
+	allocator.next = page + 1
+	return page * PageSize, true
 }
 
 func (allocator *Allocator) AllocateContiguous(count uint64) (uint64, bool) {
 	if count == 0 || count > allocator.freePages || count > allocator.managedPage {
 		return 0, false
 	}
-	for start := lowMemoryPages; start+count <= allocator.managedPage; start++ {
-		available := true
-		for page := start; page < start+count; page++ {
-			if allocator.isUsed(page) {
-				available = false
-				start = page
-				break
-			}
+	for start := lowMemoryPages; start+count <= allocator.managedPage; {
+		first, found := allocator.firstFree(start, allocator.managedPage)
+		if !found || first+count > allocator.managedPage {
+			return 0, false
 		}
-		if !available {
+		end := first
+		for end < first+count && !allocator.isUsed(end) {
+			end++
+		}
+		if end < first+count {
+			start = end + 1
 			continue
 		}
-		for page := start; page < start+count; page++ {
+		for page := first; page < end; page++ {
 			allocator.markUsed(page)
 		}
-		allocator.next = start + count
-		return start * PageSize, true
+		allocator.next = end
+		return first * PageSize, true
+	}
+	return 0, false
+}
+
+// firstFree returns the lowest free page in [start, end), skipping bitmap
+// words with no free page instead of testing each bit.
+func (allocator *Allocator) firstFree(start, end uint64) (uint64, bool) {
+	for page := start; page < end; {
+		free := ^allocator.used[page/bitmapWordBits] >> (page % bitmapWordBits)
+		if free == 0 {
+			page = (page/bitmapWordBits + 1) * bitmapWordBits
+			continue
+		}
+		page += uint64(bits.TrailingZeros64(free))
+		return page, page < end
 	}
 	return 0, false
 }

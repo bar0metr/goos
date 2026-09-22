@@ -11,6 +11,15 @@ const entriesPerTable = 512
 
 type table [entriesPerTable]uint64
 
+// copyBytes and zeroBytes use string instructions. Both addresses must be
+// identity-mapped kernel memory that the caller owns for the whole range.
+//
+//export goos_copy_bytes
+func copyBytes(destination uintptr, source uintptr, length uint64)
+
+//export goos_zero_bytes
+func zeroBytes(destination uintptr, length uint64)
+
 // LoadedImage reads the fixed-address, non-relocatable PE image installed by
 // the TinyGo UEFI target. The function validates every header before the image
 // description is used to create executable mappings.
@@ -313,11 +322,7 @@ func CopyIn(rootAddress uint64, address uint64, destination []byte) bool {
 		// SAFETY: resolveUser validated every page-table level and returned a
 		// present user leaf. Bootstrap user pages come from PMM below the active
 		// identity-map limit, so this physical range is kernel-addressable.
-		source := (*[PageSize]byte)(unsafe.Pointer(uintptr(physical &^ (PageSize - 1))))
-		offset := physical & (PageSize - 1)
-		for index := uint64(0); index < pageRemaining; index++ {
-			destination[copied+index] = source[offset+index]
-		}
+		copyBytes(uintptr(unsafe.Pointer(&destination[copied])), uintptr(physical), pageRemaining)
 		copied += pageRemaining
 	}
 	return true
@@ -341,11 +346,7 @@ func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
 		}
 		// SAFETY: resolveUser validated a present user leaf and the writable bit.
 		// The backing PMM page is below the active physical identity-map limit.
-		target := (*[PageSize]byte)(unsafe.Pointer(uintptr(physical &^ (PageSize - 1))))
-		offset := physical & (PageSize - 1)
-		for index := uint64(0); index < pageRemaining; index++ {
-			target[offset+index] = source[copied+index]
-		}
+		copyBytes(uintptr(physical), uintptr(unsafe.Pointer(&source[copied])), pageRemaining)
 		copied += pageRemaining
 	}
 	return true
@@ -379,10 +380,8 @@ func InitializePhysicalByte(address uint64, value byte) bool {
 	}
 	// SAFETY: the caller passes a page freshly allocated from PMM while the
 	// bootstrap identity map is active. The complete page is exclusively owned.
+	zeroBytes(uintptr(address), PageSize)
 	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
-	for index := range target {
-		target[index] = 0
-	}
 	target[0] = value
 	return true
 }
@@ -394,13 +393,10 @@ func InitializePhysical(address uint64, data []byte) bool {
 	}
 	// SAFETY: the page is exclusively owned by the caller and identity-mapped;
 	// the length check confines every write to that page.
-	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
-	for index := range target {
-		target[index] = 0
+	if len(data) != 0 {
+		copyBytes(uintptr(address), uintptr(unsafe.Pointer(&data[0])), uint64(len(data)))
 	}
-	for index := range data {
-		target[index] = data[index]
-	}
+	zeroBytes(uintptr(address)+uintptr(len(data)), PageSize-uint64(len(data)))
 	return true
 }
 
@@ -539,11 +535,8 @@ func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {
 	}
 	// SAFETY: allocator returned an exclusively owned, page-aligned physical
 	// page below the current identity-map limit. It becomes page-table metadata.
-	value := (*table)(unsafe.Pointer(uintptr(address)))
-	for index := range value {
-		value[index] = 0
-	}
-	return address, value, true
+	zeroBytes(uintptr(address), PageSize)
+	return address, (*table)(unsafe.Pointer(uintptr(address))), true
 }
 
 func protectRange(root *table, address uint64, size uint64, permissions Permissions) bool {

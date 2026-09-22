@@ -57,6 +57,38 @@ goos_halt:
     hlt
     retq
 
+.global goos_copy_bytes
+goos_copy_bytes:
+    pushq %rdi
+    pushq %rsi
+    movq %rcx, %rdi
+    movq %rdx, %rsi
+    movq %r8, %rcx
+    shrq $3, %rcx
+    cld
+    rep movsq
+    movq %r8, %rcx
+    andq $7, %rcx
+    rep movsb
+    popq %rsi
+    popq %rdi
+    retq
+
+.global goos_zero_bytes
+goos_zero_bytes:
+    pushq %rdi
+    movq %rcx, %rdi
+    movq %rdx, %rcx
+    shrq $3, %rcx
+    xorl %eax, %eax
+    cld
+    rep stosq
+    movq %rdx, %rcx
+    andq $7, %rcx
+    rep stosb
+    popq %rdi
+    retq
+
 .global goos_scheduler_state_read
 goos_scheduler_state_read:
     movq goos_runnable_mask(%rip), %rax
