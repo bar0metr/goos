@@ -23,7 +23,7 @@ func trace(kind diag.Kind, pid process.ID, task uint64, object uint64, value uin
 	if !diag.Enabled {
 		return
 	}
-	diagRing.Record(diag.Event{Tick: amd64.TimerTicks(), Kind: kind, Process: uint64(pid), Task: task, Object: object, Value: value})
+	diagRing.Record(diag.Event{Time: nowNanos(), Kind: kind, Process: uint64(pid), Task: task, Object: object, Value: value})
 }
 
 func traceWaitKey(kind diag.Kind, pid process.ID, task sched.TaskID, key kernelwait.Key, value uint64) {
@@ -291,7 +291,7 @@ func dumpDiagnostics(requester process.ID) {
 	for index := 0; index < diagRing.Len(); index++ {
 		event := diagRing.At(index)
 		out.text("DIAG event")
-		out.uint("tick", event.Tick)
+		out.uint("us", event.Time/1000)
 		out.word("kind", event.Kind.String())
 		out.uint("pid", event.Process)
 		out.hex("task", event.Task)
