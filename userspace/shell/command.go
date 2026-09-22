@@ -95,7 +95,7 @@ func SplitTime(line []byte) ([]byte, bool) {
 // IsBuiltin reports whether name runs inside the shell rather than as a
 // launched command.
 func IsBuiltin(name []byte) bool {
-	for _, builtin := range [...]string{"cd", "help", "clear", "diag", "log", "services", "reboot", "handles", "caps", "time"} {
+	for _, builtin := range [...]string{"cd", "help", "clear", "diag", "log", "services", "reboot", "handles", "caps", "time", "jobs", "kill"} {
 		if equal(name, builtin) {
 			return true
 		}

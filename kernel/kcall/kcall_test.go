@@ -112,6 +112,11 @@ func (handler *testHandler) MemoryMap(memoryHandle uint64, address uint64, flags
 	return StatusOK
 }
 
+func (handler *testHandler) ProcessKill(process uint64) Status {
+	handler.channel = process
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -310,5 +315,12 @@ func TestDispatchMemoryMap(t *testing.T) {
 	handler = &testHandler{}
 	if result := Dispatch(Request{Operation: OperationMemoryMap, Arg0: 20, Arg1: 0x40180000, Arg2: 2}, handler); result.Status != StatusInvalidArgument || handler.channel != 0 {
 		t.Fatalf("unknown memory map flag accepted: %+v", result)
+	}
+}
+
+func TestDispatchProcessKill(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationProcessKill, Arg0: 0x100000009}, handler); result.Status != StatusOK || handler.channel != 0x100000009 {
+		t.Fatalf("process kill = %#v, handler %#v", result, handler)
 	}
 }

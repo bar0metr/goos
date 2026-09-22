@@ -160,3 +160,22 @@ func TestAtReportsRegisteredAndCompletedOperations(t *testing.T) {
 		t.Fatal("negative slot visible")
 	}
 }
+
+func TestEmptyWaitIsATimedSleep(t *testing.T) {
+	var table Table
+	task, _ := sched.NewTaskID(4, 1)
+	if table.Begin(task, nil, 0) {
+		t.Fatal("empty wait without a deadline accepted")
+	}
+	if !table.Begin(task, nil, 50) {
+		t.Fatal("empty wait with a deadline rejected")
+	}
+	var completions [1]Completion
+	if count := table.Expire(50, completions[:]); count != 1 || completions[0].Task != task || !completions[0].TimedOut {
+		t.Fatalf("expire = %d, %#v", count, completions[0])
+	}
+	completion, ready := table.Take(task)
+	if !ready || !completion.TimedOut || completion.ReadyMask != 0 {
+		t.Fatalf("completion = %#v, %v", completion, ready)
+	}
+}

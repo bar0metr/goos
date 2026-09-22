@@ -444,7 +444,9 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	}
 	// The process handle is reserved before the task exists, so a started
 	// child is never left without the handle its parent waits on.
-	processHandle, ok := bootInitProcess.Handles().Insert(handle.TypeProcess, capability.New(uint64(pid), capability.Wait))
+	// Write authorizes ProcessKill, so only the parent that launched the
+	// process can stop it.
+	processHandle, ok := bootInitProcess.Handles().Insert(handle.TypeProcess, capability.New(uint64(pid), capability.Wait|capability.Write))
 	if !ok {
 		abandonSpawn(root, spawned, true)
 		return 0, 0, supervisor.LaunchCapabilityInstallFailed
@@ -1411,8 +1413,15 @@ func dispatchIRQWait(irqHandle uint64, rootAndTask uint64) uint64 {
 	return uint64(action)<<32 | uint64(status)
 }
 
+func waitTraceObject(entries []kernelwait.Entry) uint64 {
+	if len(entries) == 0 {
+		return 0
+	}
+	return entries[0].Key.Object
+}
+
 func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, task uint64) (kcall.Status, bool) {
-	if task >= sched.MaxTasks || count == 0 || count > kernelwait.MaxObjects ||
+	if task >= sched.MaxTasks || count > kernelwait.MaxObjects ||
 		!vm.ValidateUserRange(resultAddress, kcall.WaitAnyResultSize) {
 		return kcall.StatusInvalidArgument, false
 	}
@@ -1437,8 +1446,8 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		return kcall.StatusPermissionDenied, false
 	}
 	wireSize := count * kcall.WaitAnyInterestSize
-	if !vm.ValidateUserRange(interestsAddress, wireSize) ||
-		!vm.CopyIn(handler.root, interestsAddress, waitAnyWire[:int(wireSize)]) {
+	if count != 0 && (!vm.ValidateUserRange(interestsAddress, wireSize) ||
+		!vm.CopyIn(handler.root, interestsAddress, waitAnyWire[:int(wireSize)])) {
 		return kcall.StatusInvalidArgument, false
 	}
 	if !vm.CopyIn(handler.root, resultAddress, waitAnyResultWire[:]) {
@@ -1467,6 +1476,10 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	if timeout == 0 {
 		return kcall.StatusTimeout, false
 	}
+	// No interests is a timed sleep, so it needs a deadline to end on.
+	if count == 0 && timeout == kcall.WaitAnyInfiniteTimeout {
+		return kcall.StatusInvalidArgument, false
+	}
 	deadline := uint64(0)
 	if timeout != kcall.WaitAnyInfiniteTimeout {
 		now := amd64.TimerTicks()
@@ -1478,13 +1491,13 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	if !waitAnyTable.Begin(taskID, entries, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
-	trace(diag.WaitBegin, owner.ID(), uint64(taskID), entries[0].Key.Object, count)
+	trace(diag.WaitBegin, owner.ID(), uint64(taskID), waitTraceObject(entries), count)
 	// Registration precedes the final readiness observation. The interrupt
 	// gate keeps publication in the same exclusion domain until assembly
 	// commits the task to BLOCKED.
 	if mask := readyWaitAny(entries); mask != 0 {
 		waitAnyTable.Cancel(taskID)
-		trace(diag.WaitRecheck, owner.ID(), uint64(taskID), entries[0].Key.Object, uint64(mask))
+		trace(diag.WaitRecheck, owner.ID(), uint64(taskID), waitTraceObject(entries), uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
 	}
 	return kcall.StatusNotFound, true

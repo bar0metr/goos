@@ -35,7 +35,11 @@ const (
 	OperationProcessInfo
 	OperationSystemReset
 	OperationMemoryMap
+	OperationProcessKill
 )
+
+// ExitKilled is the exit code of a process stopped through ProcessKill.
+const ExitKilled = uint64(1)<<63 | 9
 
 type Status uint64
 
@@ -100,6 +104,7 @@ type Handler interface {
 	ProcessInfo(index uint64, address uint64) Status
 	SystemReset(device uint64) Status
 	MemoryMap(handle uint64, address uint64, flags uint64) Status
+	ProcessKill(process uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -197,6 +202,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ProcessInfo(request.Arg0, request.Arg1)}
 	case OperationSystemReset:
 		return Result{Status: handler.SystemReset(request.Arg0)}
+	case OperationProcessKill:
+		return Result{Status: handler.ProcessKill(request.Arg0)}
 	case OperationMemoryMap:
 		if request.Arg2&^MemoryMapWritable != 0 {
 			return Result{Status: StatusInvalidArgument}

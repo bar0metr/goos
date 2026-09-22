@@ -6,10 +6,11 @@ import (
 )
 
 // The control protocol shares the shell's exec channel to PID 1 for requests
-// that launch nothing: listing supervised services and rebooting.
+// that launch nothing: listing supervised services, stopping a running job,
+// and rebooting.
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
-	ControlVersion    = uint16(1)
+	ControlVersion    = uint16(2)
 	MaxServiceEntries = 8
 	MaxServiceName    = 15
 	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
@@ -20,6 +21,7 @@ type ControlOperation uint8
 const (
 	ControlServices ControlOperation = iota + 1
 	ControlReboot
+	ControlKill
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -31,6 +33,7 @@ const (
 	ControlSyncFailed
 	ControlResetFailed
 	ControlInvalid
+	ControlNotFound
 )
 
 type ServiceEntry struct {
@@ -42,26 +45,32 @@ type ServiceEntry struct {
 
 func IsControl(message ipc.Message) bool { return message.ProtocolID == ControlProtocolID }
 
-func EncodeControl(operation ControlOperation, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || operation < ControlServices || operation > ControlReboot {
+// EncodeControl carries one operation and its argument. Only ControlKill uses
+// the argument, which names the job slot to stop.
+func EncodeControl(operation ControlOperation, argument uint8, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 || operation < ControlServices || operation > ControlKill ||
+		argument != 0 && operation != ControlKill || operation == ControlKill && argument >= Slots {
 		return ipc.Message{}, false
 	}
-	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 1}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 2}
 	message.HandleCount = 0
 	for index := range message.Handles {
 		message.Handles[index] = 0
 	}
-	message.Payload[0] = byte(operation)
+	message.Payload[0], message.Payload[1] = byte(operation), argument
 	return message, true
 }
 
-func DecodeControl(message ipc.Message) (ControlOperation, bool) {
+func DecodeControl(message ipc.Message) (ControlOperation, uint8, bool) {
 	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest ||
-		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize != 1 {
-		return 0, false
+		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize != 2 {
+		return 0, 0, false
 	}
-	operation := ControlOperation(message.Payload[0])
-	return operation, operation >= ControlServices && operation <= ControlReboot
+	operation, argument := ControlOperation(message.Payload[0]), message.Payload[1]
+	if operation < ControlServices || operation > ControlKill || argument != 0 && operation != ControlKill || operation == ControlKill && argument >= Slots {
+		return 0, 0, false
+	}
+	return operation, argument, true
 }
 
 func EncodeServices(entries []ServiceEntry, correlation uint64) (ipc.Message, bool) {
@@ -108,8 +117,10 @@ func DecodeServices(message ipc.Message, target *[MaxServiceEntries]ServiceEntry
 	return count, true
 }
 
+// EncodeControlStatus answers a control request. A reboot that succeeds is
+// never answered, because the machine resets first.
 func EncodeControlStatus(status ControlStatus, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || status == ControlOK {
+	if correlation == 0 || status > ControlNotFound {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 1}
@@ -119,4 +130,13 @@ func EncodeControlStatus(status ControlStatus, correlation uint64) (ipc.Message,
 	}
 	message.Payload[0] = byte(status)
 	return message, true
+}
+
+func DecodeControlStatus(message ipc.Message) (ControlStatus, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindReply ||
+		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize != 1 {
+		return 0, false
+	}
+	status := ControlStatus(message.Payload[0])
+	return status, status <= ControlNotFound
 }

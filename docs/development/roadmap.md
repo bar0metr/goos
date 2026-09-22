@@ -229,6 +229,10 @@ The 0.1.0 shell and logging gaps are closed as well:
   PID 1, and the boot test now runs the M7 write/reboot/read acceptance
   inside one VM.
 
+ADR 0067 adds `ProcessKill`, so the shell can stop a background job with
+`kill` and the foreground command with Ctrl-C, and ADR 0068 makes `sleep` take
+seconds and block instead of spinning.
+
 ADR 0062 moves startup data through shared memory, so `write PATH "TEXT"`
 from the spec fits and the M7 test uses it. ADR 0063 adds `MemoryMap`, so a
 process can map a shared page it holds a capability for, and ADR 0064 uses one
