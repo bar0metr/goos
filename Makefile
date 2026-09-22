@@ -49,7 +49,7 @@ endif
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-performance lint fmt docs clean distclean toolchain-check help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-performance lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -186,6 +186,13 @@ STRESS_ROUNDS ?= 15
 test-stress: iso
 	@tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
 
+LATENCY_REPEATS ?= 10
+
+test-latency: iso
+	@rm -f $(BUILD_DIR)/latency-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/latency-virtio-blk.img
+	@LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
+
 test-performance:
 	@mkdir -p $(BUILD_DIR)/reports
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkAllocateFree -benchmem ./kernel/mm/pmm | tee $(BUILD_DIR)/reports/page-allocation.txt
@@ -257,6 +264,7 @@ docs:
 	@test -f docs/adr/0046-bounded-stdin-file-redirection.md
 	@test -f docs/adr/0052-build-time-timer-rate-and-diagnostic-build.md
 	@test -f docs/adr/0053-kernel-exclusion-domain.md
+	@test -f docs/adr/0054-in-guest-latency-measurement.md
 	@test -f docs/development/building.md
 
 clean:
@@ -281,6 +289,7 @@ help:
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
+	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-performance run microbenchmarks into build/reports' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \

@@ -71,7 +71,7 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 				return commands, 0, false
 			}
 			name := invocation.Arguments[0]
-			if (stageCount > 1 || redirectCount != 0) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear") || equal(name, "diag")) {
+			if (stageCount > 1 || redirectCount != 0) && (equal(name, "cd") || equal(name, "help") || equal(name, "clear") || equal(name, "diag") || equal(name, "time")) {
 				return commands, 0, false
 			}
 		}
@@ -80,6 +80,16 @@ func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([
 		start = index + 1
 	}
 	return commands, count, true
+}
+
+// SplitTime reports whether line starts with the time builtin and returns the
+// command line it measures, which is empty when none was given.
+func SplitTime(line []byte) ([]byte, bool) {
+	line = trimSpaces(line)
+	if !hasPrefix(line, "time") || len(line) > 4 && line[4] != ' ' {
+		return nil, false
+	}
+	return trimSpaces(line[4:]), true
 }
 
 type Redirections struct {
