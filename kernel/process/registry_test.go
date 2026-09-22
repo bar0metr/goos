@@ -156,3 +156,11 @@ func TestRegistryAtListsProcessesAndTasks(t *testing.T) {
 		t.Fatal("empty index listed")
 	}
 }
+
+func TestProcessNameIsBounded(t *testing.T) {
+	process, _ := New(4, AddressSpace{Root: 0x1000})
+	process.SetName("a-very-long-executable-name")
+	if string(process.Name()) != "a-very-long-exec" {
+		t.Fatalf("name %q", process.Name())
+	}
+}

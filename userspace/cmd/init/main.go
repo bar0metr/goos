@@ -37,6 +37,10 @@ const driverClientHandle = handle.ID(0x000000010000000e)
 const driverServerHandle = handle.ID(0x000000010000000f)
 const filesystemBlockClientHandle = handle.ID(0x0000000100000010)
 const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
+const systemControlHandle = uint64(0x0000000100000012)
+
+//go:linkname systemReset goos_system_reset
+func systemReset(device uint64) uint64
 
 var (
 	manager              supervisor.Manager
@@ -408,6 +412,10 @@ func pollExec() {
 	if !ok {
 		fatal("INIT_EXEC_CORRUPT\n")
 	}
+	if execproto.IsControl(message) {
+		handleControl(message)
+		return
+	}
 	request, ok := execproto.DecodeRequest(message)
 	if !ok {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
@@ -427,6 +435,58 @@ func pollExec() {
 	}
 	pid, launchStatus, exitCode := supervisor.RunPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
 	sendExecReply(message.Correlation, pid, uint64(launchStatus), exitCode)
+}
+
+// handleControl answers the shell's requests that launch nothing.
+func handleControl(message ipc.Message) {
+	operation, ok := execproto.DecodeControl(message)
+	switch {
+	case !ok:
+		sendControlStatus(execproto.ControlInvalid, message.Correlation)
+	case operation == execproto.ControlServices:
+		var entries [execproto.MaxServiceEntries]execproto.ServiceEntry
+		count := 0
+		for index := 0; count < len(entries); index++ {
+			name, snapshot, found := manager.At(index)
+			if !found {
+				break
+			}
+			if len(name) > execproto.MaxServiceName {
+				name = name[:execproto.MaxServiceName]
+			}
+			entries[count] = execproto.ServiceEntry{Name: name, State: uint8(snapshot.State), Restarts: snapshot.Restarts, PID: uint32(snapshot.PID)}
+			count++
+		}
+		if reply, encoded := execproto.EncodeServices(entries[:count], message.Correlation); encoded {
+			sendMessage(execServerHandle, reply)
+		}
+	case operation == execproto.ControlReboot:
+		correlationOfShell := message.Correlation
+		syslog.Info("reboot requested")
+		correlation++
+		sync, encoded := vfs.SyncRequest(correlation)
+		if !encoded || !sendMessage(vfsControlHandle, sync) {
+			sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
+			return
+		}
+		reply, status := receive(vfsControlHandle, vfsSessionDeadline)
+		synced, valid := vfs.DecodeAddSessionReply(reply)
+		if status != ipc.StatusOK || !valid || synced != vfs.StatusOK || reply.Correlation != correlation {
+			syslog.Error("reboot: storage sync failed")
+			sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
+			return
+		}
+		write("\nRebooting...\n")
+		systemReset(systemControlHandle)
+		syslog.Error("reboot: reset refused")
+		sendControlStatus(execproto.ControlResetFailed, correlationOfShell)
+	}
+}
+
+func sendControlStatus(status execproto.ControlStatus, correlation uint64) {
+	if reply, encoded := execproto.EncodeControlStatus(status, correlation); encoded {
+		sendMessage(execServerHandle, reply)
+	}
 }
 
 type nativePipelineRunner struct{}
@@ -493,7 +553,7 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	}
 	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, &startupWire)
 	if !ok {
-		syslog.Error("APP_STARTUP_ENCODE_FAILED")
+		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		handleClose(pair[0])
 		return 0, 0, supervisor.LaunchInvalidImage
 	}

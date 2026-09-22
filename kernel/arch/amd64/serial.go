@@ -159,6 +159,12 @@ func HasNX() bool
 //export goos_enable_nx_wp
 func EnableNXAndWriteProtect()
 
+// SystemReset restarts the machine through the chipset reset control register,
+// then the keyboard controller, then a forced triple fault.
+//
+//export goos_system_reset
+func SystemReset()
+
 // LoadPageTable installs the physical PML4 address in CR3.
 //
 //export goos_load_cr3

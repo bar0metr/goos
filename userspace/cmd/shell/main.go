@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
@@ -15,6 +16,7 @@ import (
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	"runtime"
+	"strconv"
 	"unsafe"
 )
 
@@ -30,6 +32,8 @@ var (
 	wire              [ipc.WireMaxSize]byte
 	descriptor        = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	correlation       uint64
+	startupData       startup.Data
+	handleRecord      [kcall.HandleInfoSize]byte
 	cwd               = [shellcmd.MaxPath]byte{'/'}
 	cwdSize           = 1
 	pathBuffer        [shellcmd.MaxPath]byte
@@ -44,6 +48,9 @@ var heapStartSymbol [0]byte
 
 //go:extern _heap_end
 var heapEndSymbol [0]byte
+
+//go:linkname handleInfo goos_handle_info
+func handleInfo(slot uint64, address unsafe.Pointer) uint64
 
 //go:linkname logRead goos_log_read
 func logRead(device uint64, index uint64, address unsafe.Pointer) uint64
@@ -75,8 +82,8 @@ func userspaceMain() {
 	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
 		fatal("SHELL_STARTUP_UNAVAILABLE\n")
 	}
-	startupData, validStartup := startup.Decode(startupWire[:])
-	var found bool
+	var validStartup, found bool
+	startupData, validStartup = startup.Decode(startupWire[:])
 	if !validStartup {
 		fatal("SHELL_STARTUP_INVALID\n")
 	}
@@ -178,10 +185,18 @@ func executeCommand(line []byte) {
 	name := string(invocation.Arguments[0])
 	switch {
 	case count == 1 && name == "help" && invocation.Count == 1:
-		write("builtins: help clear cd log diag time\nexecutables: /system/bin\n")
+		write("builtins: help clear cd services handles caps log reboot diag time\nexecutables: /system/bin\n")
 		mark("SHELL_HELP_OK\n")
 	case count == 1 && name == "log" && invocation.Count == 1:
 		printLog()
+	case count == 1 && name == "services" && invocation.Count == 1:
+		printServices()
+	case count == 1 && name == "reboot" && invocation.Count == 1:
+		reboot()
+	case count == 1 && name == "handles" && invocation.Count == 1:
+		printHandles(false)
+	case count == 1 && name == "caps" && invocation.Count == 1:
+		printHandles(true)
 	case count == 1 && name == "diag" && invocation.Count == 1:
 		if diagnostics(uint64(consoleHandle), 0) != 0 {
 			write("diag: unavailable in this build\n")
@@ -372,7 +387,139 @@ func executeExternal(line []byte) {
 	diagnostics(uint64(consoleHandle), 0)
 }
 
-var logLine [kcall.LogText]byte
+var (
+	logLine        [kcall.LogText]byte
+	handleTypes    = [...]string{"invalid", "process", "task", "memory", "channel", "device", "irq", "stream"}
+	rightNames     = [...]string{"read", "write", "execute", "transfer", "wait"}
+	serviceStates  = [...]string{"registered", "blocked", "starting", "running", "stopped", "failed"}
+	controlStatus  = [...]string{"", "storage sync failed", "reset refused", "request rejected"}
+	serviceEntries [execproto.MaxServiceEntries]execproto.ServiceEntry
+)
+
+// controlExchange sends one control request to PID 1 and returns its reply.
+func controlExchange(operation execproto.ControlOperation) (ipc.Message, bool) {
+	correlation++
+	request, ok := execproto.EncodeControl(operation, correlation)
+	if !ok {
+		return ipc.Message{}, false
+	}
+	size, ok := ipc.Encode(request, wire[:])
+	if !ok || ipcSend(uint64(execHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+		return ipc.Message{}, false
+	}
+	descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, execReplyDeadline
+	if ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8)) != 0 {
+		return ipc.Message{}, false
+	}
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	message, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
+	return message, valid && message.Correlation == correlation
+}
+
+func printServices() {
+	reply, ok := controlExchange(execproto.ControlServices)
+	count, valid := execproto.DecodeServices(reply, &serviceEntries)
+	if !ok || !valid {
+		write("services: no reply\n")
+		return
+	}
+	write("NAME        STATE       PID   RESTARTS\n")
+	for _, entry := range serviceEntries[:count] {
+		writePadded(entry.Name, 12)
+		state := "unknown"
+		if int(entry.State) < len(serviceStates) {
+			state = serviceStates[entry.State]
+		}
+		writePadded([]byte(state), 12)
+		writePaddedUint(uint64(entry.PID), 6)
+		writeUint(uint64(entry.Restarts))
+		write("\n")
+	}
+}
+
+func reboot() {
+	reply, ok := controlExchange(execproto.ControlReboot)
+	if !ok || reply.PayloadSize != 1 || int(reply.Payload[0]) >= len(controlStatus) || reply.Payload[0] == 0 {
+		write("reboot: no reply\n")
+		return
+	}
+	write("reboot: ")
+	write(controlStatus[reply.Payload[0]])
+	write("\n")
+}
+
+// printHandles lists the shell's own handle table. With names it shows each
+// startup capability by the name it was granted under.
+func printHandles(names bool) {
+	if names {
+		write("NAME      TYPE      RIGHTS\n")
+	} else {
+		write("HANDLE              TYPE      RIGHTS\n")
+	}
+	for slot := uint64(0); slot < handle.MaxHandles; slot++ {
+		if handleInfo(slot, unsafe.Pointer(&handleRecord[0])) != 0 {
+			continue
+		}
+		id := binary.LittleEndian.Uint64(handleRecord[0:8])
+		typeID := handleRecord[8]
+		rights := binary.LittleEndian.Uint32(handleRecord[12:16])
+		if names {
+			name := capabilityName(handle.ID(id))
+			if name == nil {
+				continue
+			}
+			writePadded(name, 10)
+		} else {
+			writeHex(id)
+			write("  ")
+		}
+		typeName := "unknown"
+		if int(typeID) < len(handleTypes) {
+			typeName = handleTypes[typeID]
+		}
+		writePadded([]byte(typeName), 10)
+		separator := ""
+		for bit, right := range rightNames {
+			if rights&(1<<bit) != 0 {
+				write(separator)
+				write(right)
+				separator = ","
+			}
+		}
+		write("\n")
+	}
+}
+
+func capabilityName(id handle.ID) []byte {
+	for index := 0; index < int(startupData.HandleCount); index++ {
+		if startupData.Handles[index].ID == id {
+			return startupData.Handles[index].Name
+		}
+	}
+	return nil
+}
+
+func writePadded(value []byte, width int) {
+	writeBytes(value)
+	for column := len(value); column < width; column++ {
+		write(" ")
+	}
+}
+
+func writePaddedUint(value uint64, width int) {
+	var digits [20]byte
+	text := strconv.AppendUint(digits[:0], value, 10)
+	writePadded(text, width)
+}
+
+func writeHex(value uint64) {
+	var digits [18]byte
+	digits[0], digits[1] = '0', 'x'
+	for index := 0; index < 16; index++ {
+		digits[17-index] = "0123456789abcdef"[value>>(uint(index)*4)&0xf]
+	}
+	writeBytes(digits[:])
+}
 
 // printLog prints the retained system log, oldest record first.
 func printLog() {

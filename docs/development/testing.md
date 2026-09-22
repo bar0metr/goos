@@ -43,7 +43,9 @@ memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,
 resource-reuse stress, redirection, and the on-disk persistent bytes. The
 reboot phase has a 60-second bound and reads the persisted file in a fresh VM
-without recreating it.
+without recreating it. A third phase runs the M7 acceptance inside one VM,
+logged to `build/logs/m7-reboot.log`. It writes a file on `/persist`, runs the
+shell's `reboot`, and requires both boots and both reads of the file.
 
 Successful runs print one `PASS` line per architectural group and a final check
 count. Repeated guest output remains only in the full serial log. Failed checks

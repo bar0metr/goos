@@ -71,6 +71,9 @@ func processExit(code uint64)
 //go:linkname clockRead goos_clock_read
 func clockRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname processInfo goos_process_info
+func processInfo(index uint64, address unsafe.Pointer) uint64
+
 //go:linkname systemInfoRead goos_system_info
 func systemInfoRead(address unsafe.Pointer, size uintptr) uint64
 
@@ -187,6 +190,31 @@ func runWrite(data startup.Data) {
 		if !received || seek.Status != vfs.StatusOK {
 			finish(2, "write: seek failed\n")
 		}
+	}
+	if _, inline := data.Arg(pathIndex + 1); inline {
+		size := 0
+		for index := pathIndex + 1; ; index++ {
+			argument, found := data.Arg(index)
+			if !found {
+				break
+			}
+			if size != 0 && size < len(buffer) {
+				buffer[size] = ' '
+				size++
+			}
+			if size+len(argument)+1 > len(buffer) {
+				finish(2, "write: text too long\n")
+			}
+			size += copy(buffer[size:], argument)
+		}
+		buffer[size] = '\n'
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:size+1]})
+		if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(size+1) {
+			finish(2, "write: VFS error\n")
+		}
+		callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		mark("WRITE_PROCESS_OK\n")
+		return
 	}
 	for {
 		status, size := readInput(buffer[:])
@@ -478,15 +506,46 @@ func runSleep(data startup.Data) {
 }
 
 func runPS() {
-	if systemInfoRead(unsafe.Pointer(&systemInfo[0]), uintptr(len(systemInfo))) != 0 {
-		finish(2, "ps unavailable\n")
-	}
-	lineText("pid ")
-	lineUint(binary.LittleEndian.Uint64(systemInfo[0:8]))
-	lineText(" processes ")
-	lineUint(binary.LittleEndian.Uint64(systemInfo[8:16]))
+	var record [kcall.ProcessInfoSize]byte
+	lineText("PID   TYPE     STATE      COMMAND")
 	lineFlush()
+	for index := uint64(0); processInfo(index, unsafe.Pointer(&record[0])) == 0; index++ {
+		pid := binary.LittleEndian.Uint64(record[0:8])
+		state := "waiting"
+		switch record[8] {
+		case kcall.ProcessRunning:
+			state = "running"
+		case kcall.ProcessReady:
+			state = "ready"
+		}
+		name := record[16 : 16+kcall.MaxProcessName]
+		size := 0
+		for size < len(name) && name[size] != 0 {
+			size++
+		}
+		column := lineUintWidth(pid)
+		for ; column < 6; column++ {
+			lineText(" ")
+		}
+		lineText("native   ")
+		lineText(state)
+		for column = len(state); column < 11; column++ {
+			lineText(" ")
+		}
+		lineBytes(name[:size])
+		lineFlush()
+	}
 	mark("PS_PROCESS_OK\n")
+}
+
+func lineUintWidth(value uint64) int {
+	lineUint(value)
+	width := 1
+	for value >= 10 {
+		value /= 10
+		width++
+	}
+	return width
 }
 
 func runMem() {

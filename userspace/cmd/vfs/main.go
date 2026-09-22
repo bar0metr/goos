@@ -233,6 +233,19 @@ func pollControl() bool {
 	if status != ipc.StatusOK {
 		fatal("VFS_CONTROL_FAILED\n")
 	}
+	if vfs.IsSync(message) {
+		result := vfs.StatusBackendError
+		if (blockDevice{}).Flush() {
+			result = vfs.StatusOK
+			syslog.Info("synced")
+		}
+		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
+		if !encoded {
+			fatal("VFS_CONTROL_REPLY_FAILED\n")
+		}
+		send(uint64(controlHandle), reply)
+		return true
+	}
 	server, ok := vfs.DecodeAddSession(message)
 	result := vfs.StatusResourceExhausted
 	if ok {

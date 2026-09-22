@@ -51,6 +51,11 @@ table with type, generation, and rights checks.
 | 22 | `WaitAny` | per interest: type-specific rights + Wait | count 1..16; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
+| 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax; time and PID are set by the kernel | 64-record ring, oldest overwritten | no |
+| 26 | `LogRead` | device handle, Read, console object | index < 64; 240-byte `CopyOut` | none | no |
+| 27 | `HandleInfo` | registered; own table only | slot < 128; 16-byte `CopyOut` of ID, type, rights | none | no |
+| 28 | `ProcessInfo` | registered | index < 32; 32-byte `CopyOut` of PID, state, task count, name | none | no |
+| 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -111,7 +116,9 @@ identity or need nothing: `Exit`, `DebugWrite`, `ClockRead`, `StartupRead`,
 Limits are global fixed arrays, not per-process quotas. A process with no
 special authority can exhaust the 16-entry stream registry with
 `StreamCreate`, and any process can fill its own 128-entry handle table.
-`ChannelCreate` is limited to PID 1. Process and task slots are consumed only
+`ChannelCreate` is limited to PID 1. A component holding the console
+capability can fill the 64-record log ring and, with warning-level records,
+the console; logging is bounded by record size, not rate. Process and task slots are consumed only
 through PID 1 launches.
 
 ### Work with interrupts disabled
@@ -127,6 +134,8 @@ interrupts off, and takes about 2 ms (ADR 0057).
 | --- | --- |
 | `SystemInfo` | caller PID, process count, managed and free pages, tick count |
 | `ClockReadNanos` | nanosecond TSC-derived time |
+| `ProcessInfo` | PID, scheduling state, task count, and executable name of every process |
+| `LogRead` | every retained log record, including other components' events |
 | `DMAAllocate` | physical address of the caller's DMA window |
 | `Diagnostics` (`goos_diag`) | every process's handle table, channel state, physical addresses |
 
