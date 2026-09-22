@@ -311,6 +311,8 @@ grouped and concise. See [`docs/development/testing.md`](docs/development/testin
 `DIAG=1` builds the diagnostic variant whose `diag` shell builtin prints the
 kernel's process, handle, channel, and wait state. `make test-stress` boots
 several guests in parallel and drives repeated command rounds through each.
+`make test-latency` measures command and VFS latency with the shell's `time`
+builtin and the `bench` utility and writes a table to `build/reports/`.
 See [`docs/development/building.md`](docs/development/building.md).
 
 ## Development direction

@@ -47,6 +47,9 @@ shell print the kernel state. Services and PID 1 print the same dump when they
 stop on a fatal error. A normal build compiles all of this out and `diag`
 reports that it is unavailable.
 
+`make HZ=<rate> test-latency` measures command latency at one rate and writes
+`build/reports/latency-hz<rate>.md`; see `docs/development/testing.md`.
+
 `build/config/build` records the active `HZ` and `DIAG` values. Changing either
 rebuilds the kernel and userspace; repeating a build with the same values does
 not.
