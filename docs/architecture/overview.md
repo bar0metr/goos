@@ -35,3 +35,16 @@ objects are the non-POSIX foundation for standard-stream redirection and carry
 concurrent shell pipelines of up to four processes, composed with bounded
 sequential execution, bounded stdout truncate/append redirection, and bounded
 file-backed stdin production.
+
+## Further reading
+
+- [boot sequence](boot.md);
+- [filesystem stack](filesystem.md);
+- [Linux compatibility (planned)](linux-compat.md);
+- [threat model](../security/threat-model.md);
+- [capabilities: security view](../security/capabilities.md);
+- [memory safety](../security/memory-safety.md);
+- [native-call attack surface](../security/attack-surface.md);
+- [debugging](../development/debugging.md);
+- [coding style](../development/coding-style.md);
+- [adding a service](../development/adding-service.md).
