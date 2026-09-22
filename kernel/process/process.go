@@ -27,17 +27,31 @@ type Process struct {
 	nameSize     uint8
 }
 
-func New(id ID, addressSpace AddressSpace) (Process, bool) {
-	if id == 0 || addressSpace.Root == 0 {
-		return Process{}, false
+// Init prepares a process slot in place; see stream.Stream.Reset. Returning a
+// Process by value instead would build the whole handle table as a temporary,
+// which the kernel's leaking heap never frees.
+func Init(target *Process, id ID, addressSpace AddressSpace) bool {
+	if target == nil || id == 0 || addressSpace.Root == 0 {
+		return false
 	}
-	return Process{id: id, addressSpace: addressSpace}, true
+	target.Reset()
+	target.id = id
+	target.addressSpace = addressSpace
+	return true
+}
+
+func New(id ID, addressSpace AddressSpace) (Process, bool) {
+	var created Process
+	ok := Init(&created, id, addressSpace)
+	return created, ok
 }
 
 func (process *Process) ID() ID { return process.id }
 
-// SetName records a display name, truncated to 16 bytes.
-func (process *Process) SetName(name string) {
+// SetName records a display name, truncated to 16 bytes. It takes bytes
+// because the launch path names a process from the requested path, which the
+// kernel must not turn into a string.
+func (process *Process) SetName(name []byte) {
 	process.nameSize = uint8(copy(process.name[:], name))
 }
 

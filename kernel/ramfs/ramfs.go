@@ -75,6 +75,17 @@ type node struct {
 	used       bool
 }
 
+// reset clears a slot in place and gives it the supplied generation. Assigning
+// a node literal instead would build the whole 4 KiB file body as a temporary,
+// which the kernel's leaking heap never frees.
+func (entry *node) reset(generation uint32) {
+	*entry = node{}
+	if generation == 0 {
+		generation = 1
+	}
+	entry.generation = generation
+}
+
 type FileSystem struct {
 	nodes [MaxNodes]node
 }
@@ -83,7 +94,8 @@ func (fs *FileSystem) Init() NodeID {
 	if fs.nodes[0].used {
 		return fs.id(0)
 	}
-	fs.nodes[0] = node{generation: 1, kind: KindDirectory, used: true}
+	fs.nodes[0].reset(1)
+	fs.nodes[0].kind, fs.nodes[0].used = KindDirectory, true
 	return fs.id(0)
 }
 
@@ -290,11 +302,7 @@ func (fs *FileSystem) UnlinkName(parent NodeID, name Name) Status {
 			}
 		}
 	}
-	generation := entry.generation + 1
-	if generation == 0 {
-		generation = 1
-	}
-	*entry = node{generation: generation}
+	entry.reset(entry.generation + 1)
 	return StatusOK
 }
 
@@ -311,11 +319,8 @@ func (fs *FileSystem) createName(parent NodeID, name Name, kind Kind) (NodeID, S
 	for index := 1; index < len(fs.nodes); index++ {
 		entry := &fs.nodes[index]
 		if !entry.used {
-			generation := entry.generation
-			if generation == 0 {
-				generation = 1
-			}
-			*entry = node{parent: parent, generation: generation, kind: kind, name: name.data, nameSize: name.size, used: true}
+			entry.reset(entry.generation)
+			entry.parent, entry.kind, entry.name, entry.nameSize, entry.used = parent, kind, name.data, name.size, true
 			return fs.id(index), StatusOK
 		}
 	}

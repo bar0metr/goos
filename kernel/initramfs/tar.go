@@ -2,11 +2,13 @@ package initramfs
 
 const blockSize = 512
 
-func Find(archive []byte, path string) ([]byte, bool) {
+// Find takes the name as bytes: the kernel looks one up on every launch, and
+// converting a path to or from a string would allocate on its leaking heap.
+func Find(archive []byte, path []byte) ([]byte, bool) {
 	return find(archive, path, 0)
 }
 
-func find(archive []byte, path string, depth uint8) ([]byte, bool) {
+func find(archive []byte, path []byte, depth uint8) ([]byte, bool) {
 	if !validPath(path) {
 		return nil, false
 	}
@@ -26,14 +28,14 @@ func find(archive []byte, path string, depth uint8) ([]byte, bool) {
 		if !ok || nameSize == 0 || dataEnd < dataStart || dataEnd > len(archive) {
 			return nil, false
 		}
-		if typeFlag == '1' && equalString(header[:nameSize], path) {
+		if typeFlag == '1' && equalName(header[:nameSize], path) {
 			linkSize := fieldSize(header[157:257])
 			if depth >= 4 || linkSize == 0 {
 				return nil, false
 			}
-			return find(archive, string(header[157:157+linkSize]), depth+1)
+			return find(archive, header[157:157+linkSize], depth+1)
 		}
-		if typeFlag != '5' && equalString(header[:nameSize], path) {
+		if typeFlag != '5' && equalName(header[:nameSize], path) {
 			return archive[dataStart:dataEnd], true
 		}
 		next := dataStart + align(size)
@@ -100,7 +102,7 @@ func zero(block []byte) bool {
 	return true
 }
 
-func equalString(value []byte, expected string) bool {
+func equalName(value []byte, expected []byte) bool {
 	if len(value) != len(expected) {
 		return false
 	}
@@ -112,21 +114,25 @@ func equalString(value []byte, expected string) bool {
 	return true
 }
 
-func validPath(path string) bool {
+func validPath(path []byte) bool {
 	if len(path) == 0 || path[0] == '/' {
 		return false
 	}
 	componentStart := 0
-	for index, value := range []byte(path) {
+	for index, value := range path {
 		if value == 0 || index != 0 && value == '/' && path[index-1] == '/' {
 			return false
 		}
 		if value == '/' {
-			if path[componentStart:index] == ".." {
+			if parentComponent(path[componentStart:index]) {
 				return false
 			}
 			componentStart = index + 1
 		}
 	}
-	return componentStart < len(path) && path[componentStart:] != ".."
+	return componentStart < len(path) && !parentComponent(path[componentStart:])
+}
+
+func parentComponent(component []byte) bool {
+	return len(component) == 2 && component[0] == '.' && component[1] == '.'
 }

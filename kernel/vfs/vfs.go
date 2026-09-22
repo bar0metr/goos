@@ -72,10 +72,17 @@ type Namespace struct {
 	mounts [MaxMounts]mount
 	files  [MaxOpenFiles]openFile
 	cache  [MaxCache]cacheEntry
+	// Canonical paths live here because a local [MaxPath]byte escapes into the
+	// helpers below and the kernel's leaking heap never frees it. Resolve owns
+	// resolved; the operations that canonicalize a path before calling Resolve
+	// own requested.
+	resolved  [MaxPath]byte
+	requested [MaxPath]byte
 }
 
 func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeID) Status {
-	canonical, size, ok := canonicalPath(path)
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
 	if !ok || backend == nil || root == 0 {
 		return StatusInvalidArgument
 	}
@@ -88,7 +95,7 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 	for index := range namespace.mounts {
 		entry := &namespace.mounts[index]
 		if !entry.used {
-			entry.backend, entry.root, entry.path, entry.size, entry.used = backend, root, canonical, uint16(size), true
+			entry.backend, entry.root, entry.path, entry.size, entry.used = backend, root, *canonical, uint16(size), true
 			namespace.invalidate()
 			return StatusOK
 		}
@@ -97,7 +104,8 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 }
 
 func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
-	canonical, size, ok := canonicalPath(path)
+	canonical := &namespace.resolved
+	size, ok := canonicalPath(canonical, path)
 	if !ok {
 		return 0, 0, StatusInvalidArgument
 	}
@@ -272,7 +280,8 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 }
 
 func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, ramfs.Name, Status) {
-	canonical, size, ok := canonicalPath(path)
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
 	if !ok || size == 1 {
 		return 0, 0, ramfs.Name{}, StatusInvalidArgument
 	}
@@ -355,10 +364,11 @@ func (namespace *Namespace) invalidate() {
 	}
 }
 
-func canonicalPath(path []byte) ([MaxPath]byte, int, bool) {
-	var output [MaxPath]byte
+// canonicalPath writes the canonical form of path into output, which the
+// caller owns.
+func canonicalPath(output *[MaxPath]byte, path []byte) (int, bool) {
 	if len(path) == 0 || len(path) > MaxPath || path[0] != '/' {
-		return output, 0, false
+		return 0, false
 	}
 	output[0] = '/'
 	size := 1
@@ -379,11 +389,11 @@ func canonicalPath(path []byte) ([MaxPath]byte, int, bool) {
 			continue
 		}
 		if len(component) > ramfs.MaxName {
-			return output, 0, false
+			return 0, false
 		}
 		for _, value := range component {
 			if value == 0 {
-				return output, 0, false
+				return 0, false
 			}
 		}
 		components[count] = uint16(size)
@@ -393,12 +403,12 @@ func canonicalPath(path []byte) ([MaxPath]byte, int, bool) {
 			size++
 		}
 		if size+len(component) > MaxPath {
-			return output, 0, false
+			return 0, false
 		}
 		copy(output[size:], component)
 		size += len(component)
 	}
-	return output, size, true
+	return size, true
 }
 
 func nextComponent(path []byte) ([]byte, []byte) {

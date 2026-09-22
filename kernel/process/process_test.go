@@ -41,3 +41,29 @@ func TestProcessTaskCapacityIsBounded(t *testing.T) {
 		t.Fatal("process task capacity exceeded")
 	}
 }
+
+func TestInitPreparesSlotInPlace(t *testing.T) {
+	var slot Process
+	task, _ := sched.NewTaskID(0, 1)
+	if !Init(&slot, 1, AddressSpace{Root: 0x1000}) || !slot.AddTask(task) {
+		t.Fatal("valid process rejected")
+	}
+	if !Init(&slot, 2, AddressSpace{Root: 0x2000}) {
+		t.Fatal("slot reuse rejected")
+	}
+	if slot.ID() != 2 || slot.AddressSpace().Root != 0x2000 || slot.TaskCount() != 0 {
+		t.Fatalf("slot not reinitialized: id=%d root=%#x tasks=%d", slot.ID(), slot.AddressSpace().Root, slot.TaskCount())
+	}
+	if Init(nil, 1, AddressSpace{Root: 0x1000}) || Init(&slot, 0, AddressSpace{Root: 0x1000}) || Init(&slot, 1, AddressSpace{}) {
+		t.Fatal("invalid identity accepted")
+	}
+}
+
+// TestInitDoesNotAllocate guards the kernel, which leaks every allocation and
+// cannot grow its heap after it leaves boot services.
+func TestInitDoesNotAllocate(t *testing.T) {
+	var slot Process
+	if allocations := testing.AllocsPerRun(100, func() { Init(&slot, 1, AddressSpace{Root: 0x1000}) }); allocations != 0 {
+		t.Fatalf("Init allocated %v times per run", allocations)
+	}
+}

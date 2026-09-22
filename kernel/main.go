@@ -118,6 +118,9 @@ var (
 	initExitObserved            uint64
 	initExitCode                uint64
 	kernelPageTable             uint64
+	initName                    = []byte("init")
+	initImagePath               = []byte("system/init")
+	initProcessSlot             process.Process
 	spawnedProcesses            [process.MaxProcesses]process.Process
 	nextProcessID               process.ID = 4
 	virtioBlockPort             uint16
@@ -230,31 +233,39 @@ func releaseExitedProcess(event process.ExitEvent) {
 	}
 }
 
+// releasingProcess names the process releaseProcessHandles is tearing down. A
+// closure capturing it would be built on the kernel's leaking heap.
+var releasingProcess process.ID
+
 // releaseProcessHandles closes everything the exited process held so that the
 // peer of each channel and stream observes closure instead of blocking.
 func releaseProcessHandles(exited *process.Process) {
-	exited.Handles().CloseAll(func(typeID handle.Type, cap capability.Capability) {
-		if typeID == handle.TypeDevice {
-			if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
-				amd64.PortWrite(virtioBlockPort+18, 1, 0)
-				amd64.QuiesceIRQ11()
-			}
+	releasingProcess = exited.ID()
+	exited.Handles().CloseAll(releaseProcessHandle)
+	releasingProcess = 0
+}
+
+func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
+	if typeID == handle.TypeDevice {
+		if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
+			amd64.PortWrite(virtioBlockPort+18, 1, 0)
+			amd64.QuiesceIRQ11()
 		}
-		if typeID == handle.TypeStream {
-			closeStreamCapability(cap)
-			return
-		}
-		if typeID != handle.TypeChannel {
-			return
-		}
-		channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-		channel, exists := channelRegistry.Lookup(channelID)
-		if valid && exists && channel.Close(side) {
-			trace(diag.ChannelClosed, exited.ID(), 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
-			wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-			channelRegistry.Release(channelID)
-		}
-	})
+	}
+	if typeID == handle.TypeStream {
+		closeStreamCapability(cap)
+		return
+	}
+	if typeID != handle.TypeChannel {
+		return
+	}
+	channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
+	channel, exists := channelRegistry.Lookup(channelID)
+	if valid && exists && channel.Close(side) {
+		trace(diag.ChannelClosed, releasingProcess, 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
+		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+		channelRegistry.Release(channelID)
+	}
 }
 
 // maxPendingLifecycle bounds the lifecycle messages retained for retry. PID 1
@@ -351,7 +362,7 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path string, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -398,7 +409,7 @@ func spawnExecutable(path string, grants []supervisor.Capability, startupData []
 		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
-	*spawned, ok = process.New(pid, process.AddressSpace{Root: root})
+	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
 	spawned.SetName(path[lastSlash(path)+1:])
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
@@ -1808,10 +1819,11 @@ func main() {
 	if !addressSpaceInit {
 		panicSerial("PID 1 address-space construction failed")
 	}
-	initProcess, validInit := process.New(1, process.AddressSpace{Root: rootInit})
-	initProcess.SetName("init")
-	bootInitProcess = &initProcess
-	if !validInit || !processRegistry.Add(&initProcess) {
+	initProcess := &initProcessSlot
+	validInit := process.Init(initProcess, 1, process.AddressSpace{Root: rootInit})
+	initProcess.SetName(initName)
+	bootInitProcess = initProcess
+	if !validInit || !processRegistry.Add(initProcess) {
 		panicSerial("PID 1 process initialization failed")
 	}
 	var lifecycleCreated bool
@@ -1872,7 +1884,7 @@ func main() {
 		}
 		runKernelSelfTests(pageTable)
 	}
-	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), "system/init")
+	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), initImagePath)
 	if !initDiscovered {
 		console.WriteString("PANIC: init image not found in initramfs\n")
 		for {
@@ -1917,7 +1929,9 @@ func main() {
 // mark prints a validation marker. Normal builds print none.
 func mark(marker string) {
 	if validation.Enabled {
-		amd64.NewCOM1().WriteString(marker + "\n")
+		port := amd64.NewCOM1()
+		port.WriteString(marker)
+		port.WriteString("\n")
 	}
 }
 
@@ -1952,7 +1966,7 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 	}
 }
 
-func lastSlash(path string) int {
+func lastSlash(path []byte) int {
 	for index := len(path) - 1; index >= 0; index-- {
 		if path[index] == '/' {
 			return index

@@ -34,7 +34,7 @@ func TestLifecycleProtocol(t *testing.T) {
 		t.Fatal("non-consuming grant has flags or reserved bytes set")
 	}
 	event, ok = DecodeLifecycle(launch)
-	if !ok || event.Operation != LifecycleLaunch || event.Process != 3 || event.ExecutablePath() != "/system/fault-probe" ||
+	if !ok || event.Operation != LifecycleLaunch || event.Process != 3 || string(event.ExecutablePath()) != "/system/fault-probe" ||
 		event.CapabilityCount != 1 || event.Capabilities[0] != grants[0] {
 		t.Fatalf("launch event = %#v", event)
 	}
