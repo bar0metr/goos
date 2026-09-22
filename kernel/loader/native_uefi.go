@@ -12,6 +12,12 @@ type LoadedImage struct {
 	StackTop uint64
 }
 
+// loadPages records the frames LoadNative allocated, so that a failure can
+// hand them back. It is shared because a local array escapes into the rollback
+// loops and the kernel's leaking heap never frees it; only one image is loaded
+// at a time.
+var loadPages [MaxImagePages]uint64
+
 // LoadNative validates, allocates, initializes, and maps a native image into an
 // empty process address space. All payload bytes are copied before executable
 // permission is exposed.
@@ -28,7 +34,6 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 			}
 		}
 	}
-	var pages [MaxImagePages]uint64
 	pageCount := 0
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
@@ -36,11 +41,11 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 			physical, allocated := allocator.Allocate()
 			if !allocated {
 				for rollback := 0; rollback < pageCount; rollback++ {
-					allocator.Free(pages[rollback])
+					allocator.Free(loadPages[rollback])
 				}
 				return LoadedImage{}, false
 			}
-			pages[pageCount] = physical
+			loadPages[pageCount] = physical
 			fileOffset := offset
 			fileEnd := fileOffset + vm.PageSize
 			if fileEnd > segment.FileSize {
@@ -52,7 +57,7 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 			}
 			if !vm.InitializePhysical(physical, payload) {
 				for rollback := 0; rollback <= pageCount; rollback++ {
-					allocator.Free(pages[rollback])
+					allocator.Free(loadPages[rollback])
 				}
 				return LoadedImage{}, false
 			}
@@ -68,7 +73,7 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 			Executable: segment.Flags&SegmentExecutable != 0,
 		}
 		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
-			if !vm.MapOwnedUserPage(root, segment.VirtualAddress+offset, pages[pageIndex], permissions) {
+			if !vm.MapOwnedUserPage(root, segment.VirtualAddress+offset, loadPages[pageIndex], permissions) {
 				return LoadedImage{}, false
 			}
 			pageIndex++

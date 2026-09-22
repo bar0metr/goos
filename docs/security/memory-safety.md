@@ -135,6 +135,20 @@ Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
 16 channels with 16-message queues, 16 streams with 4 KiB rings, 64 waiters
 per wait set. Exhaustion returns `ResourceExhausted` or `PermissionDenied`.
 
+## The kernel heap is boot-only
+
+TinyGo builds the kernel with `gc: leaking`, so nothing the kernel allocates is
+ever freed, and the 64 MiB arena cannot grow once the kernel has left boot
+services: `runtime.growHeap` faults and the machine dies with no output. An
+allocation on a repeating path is therefore a remote denial of service, reached
+by running enough commands. Kernel code reachable from a native call, from
+`serviceKernel`, or from a process launch or exit must not allocate: it uses
+shared fixed buffers, in-place `Reset`/`Init` instead of returning large
+structures by value, and `[]byte` rather than string conversions. ADR 0065
+states the rule and the two checks that enforce it — the `runtime.alloc` caller
+list in the built image, and `runtime.heapptr` read from the QEMU monitor
+before and after a batch of commands.
+
 ## No panics on untrusted input
 
 Native calls return a `kcall.Status`; they do not panic or halt on bad
