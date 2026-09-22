@@ -66,7 +66,7 @@ pid=$!
 exec 3>"$fifo"
 
 elapsed=0
-until grep -q SHELL_VFS_CONNECTED_OK "$log" 2>/dev/null && [ "$(prompts)" -ge 1 ]; do
+until [ "$(prompts)" -ge 1 ]; do
 	grep -q "$fatal" "$log" 2>/dev/null && fail "fatal marker during boot"
 	[ "$elapsed" -lt 1200 ] || fail "boot timeout"
 	sleep 0.1

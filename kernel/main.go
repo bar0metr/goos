@@ -4,6 +4,8 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
+	"goos/internal/version"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
@@ -23,7 +25,6 @@ import (
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
 	"goos/kernel/stream"
-	"goos/kernel/tty"
 	"goos/kernel/vfs"
 	kernelwait "goos/kernel/wait"
 	supervisor "goos/userspace/init"
@@ -114,8 +115,7 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	if bootProcessA != nil && handler.root == bootProcessA.AddressSpace().Root {
 		userExited = 1
 	}
-	console := amd64.NewCOM1()
-	console.WriteString("USER_EXIT_OK\n")
+	mark("USER_EXIT_OK")
 	return kcall.StatusOK
 }
 
@@ -127,7 +127,7 @@ func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall
 	}
 	data := kernelCallData[:int(length)]
 	if !vm.CopyIn(handler.root, address, data) {
-		console.WriteString("USER_COPYIN_OK\n")
+		mark("USER_COPYIN_OK")
 		return kcall.StatusInvalidArgument
 	}
 	for _, value := range data {
@@ -1582,6 +1582,9 @@ func dispatchWaitAny(interestsAddress, count, resultAddress, rootAndTask uint64)
 
 //export goos_demo_task_a
 func runDemoTaskA() {
+	for !validation.Enabled {
+		amd64.KernelSleep()
+	}
 	for demoTaskA < 3 {
 		demoTaskA++
 		amd64.Halt()
@@ -1598,6 +1601,9 @@ func runDemoTaskA() {
 
 //export goos_demo_task_b
 func runDemoTaskB() {
+	for !validation.Enabled {
+		amd64.KernelSleep()
+	}
 	for {
 		demoTaskB++
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
@@ -1633,11 +1639,9 @@ func runIdleTask() {
 func main() {
 	console := amd64.NewCOM1()
 	console.Init()
-	console.WriteString("GoOS 0.1-dev\n")
-	console.WriteString("Kernel\n\n")
-	console.WriteString("CPU: x86_64\n")
-	console.WriteString("Boot: UEFI\n")
-	console.WriteString("Security: capabilities (foundation)\n")
+	console.WriteString(version.Name + " " + version.Release + "\n")
+	console.WriteString("TinyGo kernel\n\n")
+	console.WriteString("CPU: " + version.Machine + "\n")
 
 	status := bootuefi.LoadInitramfs(&bootInfo)
 	if status != 0 {
@@ -1657,7 +1661,7 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	console.WriteString("BOOT_SERVICES_EXITED\n")
+	mark("BOOT_SERVICES_EXITED")
 	virtioBlock, virtioBlockFound := pci.FindLegacyVirtioBlock(pciConfig{})
 	if !virtioBlockFound || virtioBlock.IRQ != 11 {
 		console.WriteString("PANIC: legacy virtio-blk PCI device not found\n")
@@ -1669,7 +1673,7 @@ func main() {
 	command = command&^uint16(1<<10) | 1<<0 | 1<<2
 	amd64.PCIConfigWrite16(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4, command)
 	virtioBlockPort = virtioBlock.IOBase
-	console.WriteString("PCI_DISCOVERY_OK\n")
+	mark("PCI_DISCOVERY_OK")
 	console.WriteString("Memory: ")
 	console.WriteUint(bootInfo.UsableBytes / (1024 * 1024))
 	console.WriteString(" MiB usable\n")
@@ -1682,10 +1686,12 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	stats := pageAllocator.Statistics()
-	console.WriteString("Physical pages free: ")
-	console.WriteUint(stats.FreePages)
-	console.WriteString("\nPMM_OK\n")
+	if validation.Enabled {
+		console.WriteString("Physical pages free: ")
+		console.WriteUint(pageAllocator.Statistics().FreePages)
+		console.WriteString("\n")
+	}
+	mark("PMM_OK")
 
 	if !amd64.HasNX() {
 		console.WriteString("PANIC: CPU does not support NX\n")
@@ -1711,8 +1717,8 @@ func main() {
 	kernelPageTable = pageTable
 	amd64.EnableNXAndWriteProtect()
 	amd64.LoadPageTable(pageTable)
-	console.WriteString("NX_WX_OK\n")
-	console.WriteString("VM_OK\n")
+	mark("NX_WX_OK")
+	mark("VM_OK")
 
 	if !amd64.InstallDescriptorTables(&pageAllocator, pageTable) {
 		console.WriteString("PANIC: descriptor-table installation failed\n")
@@ -1726,9 +1732,11 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	amd64.TriggerBreakpoint()
-	console.WriteString("GDT_OK\n")
-	console.WriteString("IDT_OK\n")
+	if validation.Enabled {
+		amd64.TriggerBreakpoint()
+	}
+	mark("GDT_OK")
+	mark("IDT_OK")
 
 	amd64.StartBootstrapTimer(clock.PITDivisor)
 	for amd64.TimerTicks() < 3 {
@@ -1738,7 +1746,8 @@ func main() {
 	console.WriteString("Timer: ")
 	console.WriteUint(clock.TicksPerSecond)
 	console.WriteString(" Hz\n")
-	console.WriteString("TIMER_OK\n")
+	mark("TIMER_OK")
+	console.WriteString("Security: capabilities, NX, W^X\n")
 
 	if !amd64.SetupBootstrapScheduler(&pageAllocator, pageTable) {
 		console.WriteString("PANIC: scheduler bootstrap failed\n")
@@ -1746,81 +1755,20 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	for demoTaskA < 4 || demoTaskB < 6 || demoABlocked == 0 || demoAResumed == 0 {
-		amd64.Halt()
+	console.WriteString("Scheduler: preemptive round-robin\n")
+	if validation.Enabled {
+		awaitSchedulerSelfTest()
 	}
-	console.WriteString("STACK_GUARDS_OK\n")
-	console.WriteString("TASK_BLOCK_OK\n")
-	console.WriteString("TASK_WAKE_OK\n")
-	console.WriteString("TASK_A_OK\n")
-	console.WriteString("TASK_B_OK\n")
-	console.WriteString("IDLE_TASK_OK\n")
-	console.WriteString("SCHEDULER_OK\n")
 
-	physicalA, allocatedA := pageAllocator.Allocate()
-	physicalB, allocatedB := pageAllocator.Allocate()
-	if !allocatedA || !allocatedB ||
-		!vm.InitializePhysicalByte(physicalA, 0xa1) ||
-		!vm.InitializePhysicalByte(physicalB, 0xb2) {
-		console.WriteString("PANIC: process page allocation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
 	rootInit, addressSpaceInit := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
-	rootA, addressSpaceA := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
-	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
-	if addressSpaceA {
-		addressSpaceA = vm.MapUserPage(rootA, vm.UserProbeAddress, physicalA, vm.Permissions{User: true, Writable: true})
-	}
-	if addressSpaceB {
-		addressSpaceB = vm.MapUserPage(rootB, vm.UserProbeAddress, physicalB, vm.Permissions{User: true, Writable: true})
-	}
-	resolvedA, resolvesA := vm.Resolve(rootA, vm.UserProbeAddress)
-	resolvedB, resolvesB := vm.Resolve(rootB, vm.UserProbeAddress)
-	if !addressSpaceInit || !addressSpaceA || !addressSpaceB || !resolvesA || !resolvesB || resolvedA != physicalA || resolvedB != physicalB {
-		console.WriteString("PANIC: process address-space construction failed\n")
-		for {
-			amd64.Halt()
-		}
+	if !addressSpaceInit {
+		panicSerial("PID 1 address-space construction failed")
 	}
 	initProcess, validInit := process.New(1, process.AddressSpace{Root: rootInit})
-	processA, validA := process.New(2, process.AddressSpace{Root: rootA})
-	processB, validB := process.New(3, process.AddressSpace{Root: rootB})
 	bootInitProcess = &initProcess
-	bootProcessA, bootProcessB = &processA, &processB
-	if !validInit || !validA || !validB || !processRegistry.Add(&initProcess) || !processRegistry.Add(&processA) || !processRegistry.Add(&processB) {
-		console.WriteString("PANIC: process model initialization failed\n")
-		for {
-			amd64.Halt()
-		}
+	if !validInit || !processRegistry.Add(&initProcess) {
+		panicSerial("PID 1 process initialization failed")
 	}
-	memoryHandle, inserted := processA.Handles().Insert(
-		handle.TypeMemory,
-		capability.New(physicalA, capability.Read|capability.Transfer),
-	)
-	transferred, didTransfer := processA.Handles().Transfer(
-		processB.Handles(), memoryHandle, handle.TypeMemory, capability.Read,
-	)
-	_, targetCanRead := processB.Handles().Lookup(transferred, handle.TypeMemory, capability.Read)
-	_, targetCanWrite := processB.Handles().Lookup(transferred, handle.TypeMemory, capability.Write)
-	if !inserted || !didTransfer || !targetCanRead || targetCanWrite {
-		console.WriteString("PANIC: process-local handle enforcement failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("HANDLE_TABLE_OK\n")
-	console.WriteString("PROCESS_MODEL_OK\n")
-
-	registeredChannel, registeredChannelID, channelCreated := channelRegistry.Create()
-	registeredObjectA, _ := ipc.EndpointObject(registeredChannelID, 0)
-	registeredObjectB, _ := ipc.EndpointObject(registeredChannelID, 1)
-	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(registeredObjectA, capability.Read|capability.Write|capability.Wait))
-	channelB, channelBInstalled := processB.Handles().Insert(handle.TypeChannel, capability.New(registeredObjectB, capability.Read|capability.Write|capability.Wait))
-	_, channelACanWrite := processA.Handles().Lookup(channelA, handle.TypeChannel, capability.Write)
-	_, channelBCanRead := processB.Handles().Lookup(channelB, handle.TypeChannel, capability.Read)
-	channelsBound := true
 	var lifecycleCreated bool
 	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
 	lifecycleObject, _ := ipc.EndpointObject(lifecycleChannelID, 1)
@@ -1862,334 +1810,13 @@ func main() {
 	filesystemBlockServerObject, _ := ipc.EndpointObject(filesystemBlockChannelID, 1)
 	filesystemBlockClientHandle, filesystemBlockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	filesystemBlockServerHandle, filesystemBlockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
-	lifecycleBound := true
-	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
-	copy(request.Payload[:], []byte("ping"))
-	wireSize, wireEncoded := ipc.Encode(request, ipcWireData[:])
-	wireRequest, wireDecoded := ipc.Decode(ipcWireData[:wireSize])
-	ipcStatus := registeredChannel.Send(0, wireRequest, processA.Handles(), processB.Handles(), []ipc.Transfer{{
-		Handle: memoryHandle,
-		Type:   handle.TypeMemory,
-		Rights: capability.Read,
-	}})
-	receivedRequest, receivedStatus := registeredChannel.Receive(1)
-	_, receivedMemoryReadable := processB.Handles().Lookup(receivedRequest.Handles[0], handle.TypeMemory, capability.Read)
-	reply := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindReply, Correlation: request.Correlation}
-	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
-	_, replyReceiveStatus := registeredChannel.Receive(0)
-	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !channelsBound ||
-		!lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !lifecycleBound || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || !wireEncoded || !wireDecoded ||
-		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
-		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
-		console.WriteString("PANIC: typed IPC request/reply failed\n")
-		for {
-			amd64.Halt()
-		}
+	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) {
+		panicSerial("PID 1 capability layout failed")
 	}
-	if channelA != handle.ID(0x0000000100000002) || channelB != handle.ID(0x0000000100000002) {
-		console.WriteString("PANIC: bootstrap channel handle layout changed\n")
-		for {
-			amd64.Halt()
-		}
+	if validation.Enabled {
+		runKernelSelfTests(pageTable)
 	}
-	console.WriteString("IPC_WIRE_OK\n")
-	console.WriteString("IPC_REQUEST_REPLY_OK\n")
-	console.WriteString("IPC_HANDLE_TRANSFER_OK\n")
-	consoleDeviceB, consoleGranted := processB.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Write))
-	_, consoleBCanWrite := processB.Handles().Lookup(consoleDeviceB, handle.TypeDevice, capability.Write)
-	if !consoleGranted || !consoleBCanWrite || consoleDeviceB != handle.ID(0x0000000100000004) {
-		console.WriteString("PANIC: TTY device capability setup failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("TTY_CAPABILITY_OK\n")
-
-	ramfsRoot := bootRAMFS.Init()
-	ramfsDirectory, ramfsDirectoryCreated := bootRAMFS.Mkdir(ramfsRoot, []byte("etc"))
-	ramfsFile, ramfsFileCreated := bootRAMFS.Create(ramfsDirectory, []byte("motd"))
-	ramfsWritten, ramfsWriteStatus := bootRAMFS.Write(ramfsFile, 0, []byte("GoOS RAMFS"))
-	ramfsRead, ramfsReadStatus := bootRAMFS.Read(ramfsFile, 0, ramfsReadback[:])
-	ramfsStat, ramfsStatStatus := bootRAMFS.Stat(ramfsFile)
-	ramfsEntry, _, ramfsReadDirStatus := bootRAMFS.ReadDir(ramfsDirectory, 0)
-	ramfsRenamed := bootRAMFS.Rename(ramfsFile, ramfsRoot, []byte("welcome"))
-	ramfsOpened, ramfsOpenStatus := bootRAMFS.Open(ramfsRoot, []byte("welcome"))
-	ramfsRequest, ramfsRequestEncoded := ramfs.EncodeRequest(ramfs.Request{Operation: ramfs.OperationOpen, Parent: ramfsRoot, Name: []byte("welcome")}, 1)
-	ramfsDecoded, ramfsRequestDecoded := ramfs.DecodeRequest(ramfsRequest)
-	if ramfsDirectoryCreated != ramfs.StatusOK || ramfsFileCreated != ramfs.StatusOK || ramfsWriteStatus != ramfs.StatusOK || ramfsWritten != 10 ||
-		ramfsReadStatus != ramfs.StatusOK || ramfsRead != 10 || string(ramfsReadback[:ramfsRead]) != "GoOS RAMFS" || ramfsStatStatus != ramfs.StatusOK || ramfsStat.Size != 10 ||
-		ramfsReadDirStatus != ramfs.StatusOK || string(ramfsEntry.Name[:ramfsEntry.Size]) != "motd" || ramfsRenamed != ramfs.StatusOK || ramfsOpenStatus != ramfs.StatusOK || ramfsOpened != ramfsFile ||
-		!ramfsRequestEncoded || !ramfsRequestDecoded || ramfsDecoded.Operation != ramfs.OperationOpen || ramfsDecoded.Parent != ramfsRoot || string(ramfsDecoded.Name) != "welcome" {
-		console.WriteString("PANIC: RAMFS operation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootRAMFS.Truncate(ramfsFile, 4) != ramfs.StatusOK || bootRAMFS.Unlink(ramfsRoot, []byte("welcome")) != ramfs.StatusOK {
-		console.WriteString("PANIC: RAMFS lifecycle failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if _, status := bootRAMFS.Stat(ramfsFile); status != ramfs.StatusNotFound {
-		console.WriteString("PANIC: RAMFS stale node accepted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if _, status := bootRAMFS.Create(ramfsRoot, []byte("bad/name")); status != ramfs.StatusInvalidArgument {
-		console.WriteString("PANIC: RAMFS invalid name accepted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("RAMFS_PROTOCOL_OK\n")
-	console.WriteString("RAMFS_METADATA_OK\n")
-	console.WriteString("RAMFS_IO_OK\n")
-	console.WriteString("RAMFS_BOUNDS_OK\n")
-
-	deviceRoot := deviceRAMFS.Init()
-	if bootVFS.Mount([]byte("/"), &bootRAMFS, ramfsRoot) != vfs.StatusOK || bootVFS.Create([]byte("/tmp"), true) != vfs.StatusOK ||
-		bootVFS.Mount([]byte("/tmp/dev"), &deviceRAMFS, deviceRoot) != vfs.StatusOK || bootVFS.Create([]byte("/tmp/note"), false) != vfs.StatusOK ||
-		bootVFS.Create([]byte("/tmp/dev/console"), false) != vfs.StatusOK {
-		console.WriteString("PANIC: VFS namespace setup failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	vfsFile, vfsOpened := bootVFS.Open([]byte("//tmp/./note"), vfs.Read|vfs.Write)
-	vfsWritten, vfsWriteStatus := bootVFS.Write(vfsFile, []byte("VFS works"))
-	vfsSeekStatus := bootVFS.Seek(vfsFile, 0)
-	vfsRead, vfsReadStatus := bootVFS.Read(vfsFile, vfsReadback[:])
-	vfsStat, vfsStatStatus := bootVFS.Stat([]byte("/tmp/note"))
-	_, mountedConsole, mountedResolveStatus := bootVFS.Resolve([]byte("/tmp/dev/console"))
-	deviceConsole, deviceConsoleStatus := deviceRAMFS.Open(deviceRoot, []byte("console"))
-	vfsRequest, vfsRequestEncoded := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/tmp/note")}, 2)
-	vfsDecoded, vfsRequestDecoded := vfs.DecodeRequest(vfsRequest)
-	if vfsOpened != vfs.StatusOK || vfsWriteStatus != vfs.StatusOK || vfsWritten != 9 || vfsSeekStatus != vfs.StatusOK ||
-		vfsReadStatus != vfs.StatusOK || vfsRead != 9 || string(vfsReadback[:vfsRead]) != "VFS works" || vfsStatStatus != vfs.StatusOK || vfsStat.Size != 9 ||
-		mountedResolveStatus != vfs.StatusOK || deviceConsoleStatus != ramfs.StatusOK || mountedConsole != deviceConsole ||
-		!vfsRequestEncoded || !vfsRequestDecoded || vfsDecoded.Operation != vfs.OperationOpen || string(vfsDecoded.Path) != "/tmp/note" {
-		console.WriteString("PANIC: VFS operation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootVFS.Close(vfsFile) != vfs.StatusOK || bootVFS.Rename([]byte("/tmp/note"), []byte("/tmp/renamed")) != vfs.StatusOK {
-		console.WriteString("PANIC: VFS lifecycle failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if _, _, status := bootVFS.Resolve([]byte("/tmp/note")); status != vfs.StatusNotFound {
-		console.WriteString("PANIC: VFS stale path cache accepted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootVFS.Unlink([]byte("/tmp/renamed")) != vfs.StatusOK {
-		console.WriteString("PANIC: VFS unlink failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("VFS_NAMESPACE_OK\n")
-	console.WriteString("VFS_MOUNT_OK\n")
-	console.WriteString("VFS_PATH_OK\n")
-	console.WriteString("VFS_CACHE_OK\n")
-	console.WriteString("VFS_PROTOCOL_OK\n")
-
-	boundedChannel = ipc.NewChannel()
-	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
-	for index := 0; index < ipc.QueueCapacity; index++ {
-		if boundedChannel.Send(0, notification, nil, nil, nil) != ipc.StatusOK {
-			console.WriteString("PANIC: IPC queue filled early\n")
-			for {
-				amd64.Halt()
-			}
-		}
-	}
-	if boundedChannel.Send(0, notification, nil, nil, nil) != ipc.StatusResourceExhausted || !boundedChannel.Close(0) {
-		console.WriteString("PANIC: IPC bounds or close failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	for index := 0; index < ipc.QueueCapacity; index++ {
-		if _, status := boundedChannel.Receive(1); status != ipc.StatusOK {
-			console.WriteString("PANIC: IPC queue drain failed\n")
-			for {
-				amd64.Halt()
-			}
-		}
-	}
-	if _, status := boundedChannel.Receive(1); status != ipc.StatusPeerDied {
-		console.WriteString("PANIC: IPC peer death missing\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("IPC_BOUNDED_OK\n")
-	console.WriteString("IPC_PEER_DEATH_OK\n")
-
-	sharedObject, sharedCreated := sharedRegistry.Create(&pageAllocator, 2)
-	sharedHandleA, sharedGranted := sharedObject.Grant(processA.Handles(), capability.Read|capability.Write|capability.Transfer)
-	sharedHandleB, sharedTransferred := processA.Handles().Transfer(processB.Handles(), sharedHandleA, handle.TypeMemory, capability.Read)
-	const sharedAddress = uint64(0x40010000)
-	sharedMappedA := sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress, 0, 2, true)
-	sharedMappedB := sharedObject.Map(processB.Handles(), sharedHandleB, rootB, sharedAddress, 0, 2, false)
-	sharedInitiallyZero := [8]byte{}
-	sharedZeroRead := vm.CopyIn(rootB, sharedAddress, sharedInitiallyZero[:])
-	sharedPayload := []byte("SHAREDOK")
-	sharedReadback := [8]byte{}
-	sharedWriteAddress := sharedAddress + vm.PageSize - 4
-	sharedWritten := vm.CopyOut(rootA, sharedWriteAddress, sharedPayload)
-	sharedRead := vm.CopyIn(rootB, sharedWriteAddress, sharedReadback[:])
-	sharedPhysicalA0, sharedResolvedA0 := vm.Resolve(rootA, sharedAddress)
-	sharedPhysicalB0, sharedResolvedB0 := vm.Resolve(rootB, sharedAddress)
-	sharedPhysicalA1, sharedResolvedA1 := vm.Resolve(rootA, sharedAddress+vm.PageSize)
-	sharedPhysicalB1, sharedResolvedB1 := vm.Resolve(rootB, sharedAddress+vm.PageSize)
-	if !sharedCreated || !sharedGranted || !sharedTransferred || !sharedMappedA || !sharedMappedB || !sharedZeroRead || sharedInitiallyZero != [8]byte{} ||
-		sharedObject.Map(processA.Handles(), memoryHandle, rootA, sharedAddress+4*vm.PageSize, 0, 1, false) ||
-		sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress+4*vm.PageSize, 2, 1, false) || !sharedWritten || !sharedRead ||
-		string(sharedReadback[:]) != "SHAREDOK" || vm.CopyOut(rootB, sharedAddress, []byte{1}) ||
-		!sharedResolvedA0 || !sharedResolvedB0 || !sharedResolvedA1 || !sharedResolvedB1 ||
-		sharedPhysicalA0 != sharedPhysicalB0 || sharedPhysicalA1 != sharedPhysicalB1 {
-		console.WriteString("PANIC: shared-memory isolation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("SHMEM_OBJECT_OK\n")
-	console.WriteString("SHMEM_ZERO_COPY_OK\n")
-	console.WriteString("SHMEM_RIGHTS_OK\n")
-
-	probe := amd64.ProbeAddressSpaces(rootA, rootB, pageTable, vm.UserProbeAddress)
-	if byte(probe) != 0xa1 || byte(probe>>8) != 0xb2 {
-		console.WriteString("PANIC: address-space isolation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("ADDRESS_SPACE_A_OK\n")
-	console.WriteString("ADDRESS_SPACE_B_OK\n")
-	console.WriteString("PROCESS_ISOLATION_OK\n")
-
-	userProgram := [...]byte{
-		0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5: IPCWaitReceive.
-		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
-		0x48, 0xbe, 0x44, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+68.
-		0xba, 0x18, 0x00, 0x00, 0x00, // mov edx, descriptor size: time out after the peer's shorter wait.
-		0xcd, 0x80,
-		0xb9, 0x00, 0x00, 0x00, 0x01, // mov ecx, 0x01000000: remain preemptible.
-		0xff, 0xc9, // dec ecx.
-		0x75, 0xfc, // jnz dec ecx.
-		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: DebugWrite.
-		0x48, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rdi, 0: invalid pointer.
-		0xbe, 0x01, 0x00, 0x00, 0x00, // mov esi, 1.
-		0xcd, 0x80,
-		0x83, 0xf8, 0x01, // cmp eax, InvalidArgument.
-		0x74, 0x02, // je valid write.
-		0x0f, 0x0b,
-		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: DebugWrite.
-		0x48, 0xbf, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rdi, UserDataAddress.
-		0xbe, 0x14, 0x00, 0x00, 0x00, // mov esi, 20.
-		0xcd, 0x80,
-		0x85, 0xc0, // test eax, eax.
-		0x74, 0x02, // je TTY rights check.
-		0x0f, 0x0b,
-		0xb8, 0x06, 0x00, 0x00, 0x00, // mov eax, 6: ConsoleWrite.
-		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // forged service handle.
-		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-		0xba, 0x01, 0x00, 0x00, 0x00,
-		0xcd, 0x80,
-		0x83, 0xf8, 0x02, // cmp eax, PermissionDenied.
-		0x74, 0x02,
-		0x0f, 0x0b,
-		0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax, 3: IPCSend.
-		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
-		0x48, 0xbe, 0x14, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+20.
-		0xba, 0x30, 0x00, 0x00, 0x00, // mov edx, TTY wire size.
-		0xcd, 0x80,
-		0x85, 0xc0,
-		0x74, 0x02,
-		0x0f, 0x0b,
-		0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1: Exit.
-		0x31, 0xff, // xor edi, edi: status 0.
-		0xcd, 0x80,
-		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
-	}
-	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
-	userData := [20 + ipc.WireHeaderSize + 16 + 24]byte{}
-	copy(userData[:], userMessage)
-	putUint64(userData[68:76], vm.UserStackAddress)
-	putUint64(userData[76:84], ipc.WireMaxSize)
-	putUint64(userData[84:92], 10)
-	userNotification, userTTYEncoded := tty.Message(tty.OperationWrite, 0, []byte("TTY_SERVICE_OK\n"))
-	userWireSize, userWireEncoded := ipc.Encode(userNotification, userData[len(userMessage):])
-	faultProgram := []byte{
-		0xb8, 0x05, 0x00, 0x00, 0x00,
-		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-		0xba, 0x18, 0x00, 0x00, 0x00,
-		0xcd, 0x80,
-		0x83, 0xf8, 0x06,
-		0x74, 0x02,
-		0x0f, 0x0b,
-		0xb8, 0x02, 0x00, 0x00, 0x00,
-		0x48, 0xbf, 0x30, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-		0xbe, 0x14, 0x00, 0x00, 0x00,
-		0xcd, 0x80,
-		0xb8, 0x05, 0x00, 0x00, 0x00,
-		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x18, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-		0xba, 0x18, 0x00, 0x00, 0x00,
-		0xcd, 0x80,
-		0x85, 0xc0,
-		0x74, 0x02,
-		0x0f, 0x0b,
-		0xb8, 0x06, 0x00, 0x00, 0x00,
-		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x21, 0x30, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-		0xba, 0x0f, 0x00, 0x00, 0x00,
-		0xcd, 0x80,
-		0x85, 0xc0,
-		0x74, 0x02,
-		0x0f, 0x0b,
-		0xb8, 0x02, 0x00, 0x00, 0x00,
-		0x48, 0xbf, 0x44, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
-		0xbe, 0x14, 0x00, 0x00, 0x00,
-		0xcd, 0x80,
-		0x0f, 0x0b,
-	}
-	faultData := [88]byte{}
-	putUint64(faultData[0:8], vm.UserStackAddress)
-	putUint64(faultData[8:16], ipc.WireMaxSize)
-	putUint64(faultData[16:24], 5)
-	putUint64(faultData[24:32], vm.UserStackAddress)
-	putUint64(faultData[32:40], ipc.WireMaxSize)
-	putUint64(faultData[40:48], 1000)
-	copy(faultData[48:68], []byte("IPC_WAIT_TIMEOUT_OK\n"))
-	copy(faultData[68:88], []byte("IPC_WAIT_MESSAGE_OK\n"))
-	nativeBytes, nativeEncoded := loader.EncodeNative(nativeImageData[:], loader.ImageSource{
-		Entry:    vm.UserCodeAddress,
-		StackTop: vm.UserStackAddress + vm.PageSize - 16,
-		Segments: []loader.SegmentSource{
-			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(userProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: userProgram[:]},
-			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
-			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(userData)), Flags: loader.SegmentReadable, Data: userData[:]},
-		},
-	})
-	faultBytes, faultEncoded := loader.EncodeNative(faultImageData[:], loader.ImageSource{
-		Entry:    vm.UserCodeAddress,
-		StackTop: vm.UserStackAddress + vm.PageSize - 16,
-		Segments: []loader.SegmentSource{
-			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(faultProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: faultProgram},
-			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
-			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
-		},
-	})
 	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), "system/init")
 	if !initDiscovered {
 		console.WriteString("PANIC: init image not found in initramfs\n")
@@ -2204,48 +1831,22 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	loadedA, loadedImageA := loader.LoadNative(&pageAllocator, rootA, nativeBytes)
-	loadedB, loadedImageB := loader.LoadNative(&pageAllocator, rootB, faultBytes)
-	if !userTTYEncoded || !userWireEncoded || userWireSize != ipc.WireHeaderSize+16 || !nativeEncoded || !faultEncoded || !loadedImageA || !loadedImageB {
-		console.WriteString("PANIC: native user image setup failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("USER_RX_OK\n")
-	console.WriteString("USER_STACK_NX_OK\n")
-	copyOutProbe := []byte{0x5a}
-	if vm.CopyOut(rootA, vm.UserDataAddress, copyOutProbe) || !vm.CopyOut(rootA, vm.UserStackAddress, copyOutProbe) {
-		console.WriteString("PANIC: user copyout validation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("USER_COPYOUT_OK\n")
-	console.WriteString("KCALL_ABI_OK\n")
-	console.WriteString("NATIVE_IMAGE_LOADER_OK\n")
 	flags := amd64.DisableInterrupts()
 	initTaskID, initTaskAdded := amd64.AddUserTask(&pageAllocator, rootInit, loadedInit.Entry, loadedInit.StackTop)
-	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, rootA, loadedA.Entry, loadedA.StackTop)
-	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, rootB, loadedB.Entry, loadedB.StackTop)
-	if !initTaskAdded || !userTaskAdded || !faultTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) ||
-		!processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) {
-		console.WriteString("PANIC: userspace task scheduling failed\n")
-		for {
-			amd64.Halt()
-		}
+	if !initTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) {
+		panicSerial("PID 1 task scheduling failed")
+	}
+	if validation.Enabled {
+		startSelfTestTasks()
 	}
 	amd64.RestoreInterrupts(flags)
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
+	if validation.Enabled {
+		awaitValidationBoot()
+	} else {
+		console.WriteString("Kernel initialized\n")
+	}
+	for {
 		serviceKernel()
-		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
-			console.WriteString("PANIC: init launch IPC failed: ")
-			console.WriteHex(uint64(initSendStatus))
-			console.WriteString("\n")
-			for {
-				amd64.Halt()
-			}
-		}
 		if initExitObserved != 0 {
 			console.WriteString("PANIC: init process exited: ")
 			console.WriteHex(initExitCode)
@@ -2255,52 +1856,12 @@ func main() {
 			}
 		}
 	}
-	console.WriteString("INITRAMFS_DISCOVERY_OK\n")
-	console.WriteString("PID1_INIT_OK\n")
-	console.WriteString("PROCESS_EXIT_EVENT_OK\n")
-	if processReclaimConfirmed == 0 {
-		console.WriteString("PANIC: process resources were not reclaimed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("PROCESS_RECLAIM_OK\n")
-	if processWaitConfirmed == 0 {
-		console.WriteString("PANIC: process wait record missing\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("PROCESS_WAIT_OK\n")
-	console.WriteString("SUPERVISOR_CRASH_EVENT_OK\n")
-	console.WriteString("LIFECYCLE_IPC_OK\n")
-	console.WriteString("INIT_EXECUTABLE_LOOKUP_OK\n")
-	console.WriteString("INIT_CAPABILITY_MANIFEST_OK\n")
-	if startupABIConfirmed == 0 {
-		console.WriteString("PANIC: native startup ABI not exercised\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("NATIVE_STARTUP_ABI_OK\n")
-	console.WriteString("PID1_SERVICE_LAUNCH_OK\n")
-	if amd64.UserPreemptions() == 0 {
-		console.WriteString("PANIC: userspace task was not preempted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	console.WriteString("USER_PREEMPT_OK\n")
-	console.WriteString("PROCESS_CR3_SCHED_OK\n")
-	console.WriteString("USER_FAULT_ISOLATION_OK\n")
-	console.WriteString("USER_RING3_OK\n")
-	console.WriteString("NATIVE_PROCESS_OK\n")
-	console.WriteString("TTY_RIGHTS_OK\n")
-	console.WriteString("Kernel initialized\n")
-	console.WriteString("BOOT_OK\n")
+}
 
-	for {
-		serviceKernel()
+// mark prints a validation marker. Normal builds print none.
+func mark(marker string) {
+	if validation.Enabled {
+		amd64.NewCOM1().WriteString(marker + "\n")
 	}
 }
 
