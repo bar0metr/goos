@@ -122,6 +122,12 @@ func (allocator *Allocator) Statistics() Stats {
 	}
 }
 
+// IsAllocated reports whether the page containing address is marked in use.
+func (allocator *Allocator) IsAllocated(address uint64) bool {
+	page := address / PageSize
+	return page < managedPages && allocator.isUsed(page)
+}
+
 func (allocator *Allocator) isUsed(page uint64) bool {
 	return allocator.used[page/bitmapWordBits]&(uint64(1)<<(page%bitmapWordBits)) != 0
 }

@@ -110,6 +110,13 @@ func UserFaults() uint64
 //export goos_block_current_task
 func BlockCurrentTask()
 
+// KernelSleep blocks the calling kernel task and switches away at once instead
+// of halting until the next tick. It returns after a wake, with the caller's
+// interrupt state restored.
+//
+//export goos_kernel_sleep
+func KernelSleep()
+
 // DisableInterrupts enters the uniprocessor kernel exclusion domain that native
 // calls already run in, and returns the flags RestoreInterrupts needs to leave it.
 //
@@ -129,6 +136,12 @@ type SchedulerState struct {
 
 //export goos_scheduler_state_read
 func readSchedulerState(state *SchedulerState)
+
+// TaskStackTop returns the kernel-entry stack top of a user task slot, or zero
+// for kernel tasks and unused slots.
+//
+//export goos_task_rsp0_read
+func TaskStackTop(slot uint64) uint64
 
 func ReadSchedulerState() SchedulerState {
 	var state SchedulerState

@@ -419,6 +419,87 @@ func Resolve(rootAddress uint64, virtual uint64) (uint64, bool) {
 	return *entry&addressMask | virtual&(PageSize-1), true
 }
 
+// ResolveUser returns the physical address behind a user-accessible mapping.
+func ResolveUser(rootAddress uint64, virtual uint64) (uint64, bool) {
+	physical, _, ok := resolveUser(rootAddress, virtual)
+	return physical, ok
+}
+
+// FindUserMapping returns a user virtual address that maps the physical page,
+// scanning the process's user leaves. It exists for diagnostics only.
+func FindUserMapping(rootAddress uint64, physicalPage uint64) (uint64, bool) {
+	if rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
+		return 0, false
+	}
+	// SAFETY: rootAddress names a live process PML4 created by this package;
+	// every level is checked for presence before it is dereferenced.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	for rootIndex, rootEntry := range root {
+		if rootEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+			continue
+		}
+		// SAFETY: present user entries name owned page-table pages.
+		pdpt := (*table)(unsafe.Pointer(uintptr(rootEntry & addressMask)))
+		for pdptIndex, pdptEntry := range pdpt {
+			if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+				continue
+			}
+			pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+			for pdIndex, pdEntry := range pd {
+				if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+					continue
+				}
+				pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
+				for leafIndex, leaf := range pt {
+					if leaf&(entryPresent|entryUser) == entryPresent|entryUser && leaf&addressMask == physicalPage&^(PageSize-1) {
+						return uint64(rootIndex)<<39 | uint64(pdptIndex)<<30 | uint64(pdIndex)<<21 | uint64(leafIndex)<<12, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// UserLeaf returns the index-th present user leaf of a process in address
+// order, for diagnostics only.
+func UserLeaf(rootAddress uint64, index int) (uint64, uint64, bool) {
+	if rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
+		return 0, 0, false
+	}
+	// SAFETY: see FindUserMapping.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	seen := 0
+	for rootIndex, rootEntry := range root {
+		if rootEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+			continue
+		}
+		pdpt := (*table)(unsafe.Pointer(uintptr(rootEntry & addressMask)))
+		for pdptIndex, pdptEntry := range pdpt {
+			if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+				continue
+			}
+			pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+			for pdIndex, pdEntry := range pd {
+				if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+					continue
+				}
+				pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
+				for leafIndex, leaf := range pt {
+					if leaf&(entryPresent|entryUser) != entryPresent|entryUser {
+						continue
+					}
+					if seen == index {
+						return uint64(rootIndex)<<39 | uint64(pdptIndex)<<30 | uint64(pdIndex)<<21 | uint64(leafIndex)<<12, leaf & addressMask, true
+					}
+					seen++
+				}
+			}
+		}
+	}
+	return 0, 0, false
+}
+
 func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {
 	if rootAddress%PageSize != 0 || !ValidateUserRange(virtual, 1) {
 		return 0, 0, false

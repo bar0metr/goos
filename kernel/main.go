@@ -998,6 +998,9 @@ func putUint32(data []byte, value uint32) {
 }
 
 func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
+	if channel == lifecycleChannelID && side == 0 {
+		amd64.WakeTask(0)
+	}
 	event := kernelwait.Readable
 	if reason == ipc.WaitPeerDied {
 		event = kernelwait.PeerClosed
@@ -1387,6 +1390,9 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		entry, status, reason := resolveWaitAny(owner, handleID, events)
 		if status != kcall.StatusOK {
 			trace(diag.WaitDenied, owner.ID(), uint64(taskID), uint64(handleID), uint64(reason))
+			if diag.Enabled {
+				traceDeniedInterests(handler.root, interestsAddress, count)
+			}
 			return status, false
 		}
 		waitAnyEntries[index] = entry
@@ -1578,9 +1584,9 @@ func runDemoTaskA() {
 	amd64.BlockCurrentTask()
 	amd64.Halt()
 	demoAResumed = 1
+	demoTaskA++
 	for {
-		demoTaskA++
-		amd64.Halt()
+		amd64.KernelSleep()
 	}
 }
 
@@ -1591,7 +1597,13 @@ func runDemoTaskB() {
 		if demoABlocked != 0 && demoAResumed == 0 && demoTaskB >= 6 {
 			amd64.WakeTask(1)
 		}
+		if demoAResumed != 0 {
+			break
+		}
 		amd64.Halt()
+	}
+	for {
+		amd64.KernelSleep()
 	}
 }
 
@@ -2058,6 +2070,11 @@ func main() {
 	console.WriteString("PROCESS_ISOLATION_OK\n")
 
 	userProgram := [...]byte{
+		0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5: IPCWaitReceive.
+		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
+		0x48, 0xbe, 0x44, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+68.
+		0xba, 0x18, 0x00, 0x00, 0x00, // mov edx, descriptor size: time out after the peer's shorter wait.
+		0xcd, 0x80,
 		0xb9, 0x00, 0x00, 0x00, 0x01, // mov ecx, 0x01000000: remain preemptible.
 		0xff, 0xc9, // dec ecx.
 		0x75, 0xfc, // jnz dec ecx.
@@ -2097,8 +2114,11 @@ func main() {
 		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
 	}
 	userMessage := []byte("USER_DEBUG_WRITE_OK\n")
-	userData := [20 + ipc.WireHeaderSize + 16]byte{}
+	userData := [20 + ipc.WireHeaderSize + 16 + 24]byte{}
 	copy(userData[:], userMessage)
+	putUint64(userData[68:76], vm.UserStackAddress)
+	putUint64(userData[76:84], ipc.WireMaxSize)
+	putUint64(userData[84:92], 10)
 	userNotification, userTTYEncoded := tty.Message(tty.OperationWrite, 0, []byte("TTY_SERVICE_OK\n"))
 	userWireSize, userWireEncoded := ipc.Encode(userNotification, userData[len(userMessage):])
 	faultProgram := []byte{
@@ -2227,7 +2247,6 @@ func main() {
 				amd64.Halt()
 			}
 		}
-		amd64.Halt()
 	}
 	console.WriteString("INITRAMFS_DISCOVERY_OK\n")
 	console.WriteString("PID1_INIT_OK\n")
@@ -2275,18 +2294,21 @@ func main() {
 
 	for {
 		serviceKernel()
-		amd64.Halt()
 	}
 }
 
 // serviceKernel runs one step of the kernel's own work inside the exclusion
-// domain native calls already run in. Preempted mid-step, it would expose torn
-// registries and handle tables to whichever task the timer selects next.
+// domain native calls already run in, then sleeps until the next tick, task
+// exit, or lifecycle request. Preempted mid-step, it would expose torn
+// registries and handle tables to whichever task the timer selects next;
+// sleeping inside the domain means no wake can fall between the last check
+// and the sleep.
 func serviceKernel() {
 	flags := amd64.DisableInterrupts()
 	expireWaitDeadlines()
 	flushLifecycle()
 	deliverProcessExits()
 	consumeInitControl()
+	amd64.KernelSleep()
 	amd64.RestoreInterrupts(flags)
 }
