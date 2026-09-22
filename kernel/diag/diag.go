@@ -78,8 +78,9 @@ const (
 	CloseByTeardown = 2
 )
 
+// Event times are nanoseconds since the timer started.
 type Event struct {
-	Tick    uint64
+	Time    uint64
 	Kind    Kind
 	Process uint64
 	Task    uint64

@@ -152,8 +152,9 @@ func Halt()
 //export goos_has_nx
 func HasNX() bool
 
-// EnableNXAndWriteProtect enables EFER.NXE and CR0.WP. After this call the CPU
-// enforces both non-executable mappings and supervisor read-only mappings.
+// EnableNXAndWriteProtect enables EFER.NXE, CR0.WP, and CR4.OSFXSR/OSXMMEXCPT.
+// After this call the CPU enforces non-executable and supervisor read-only
+// mappings, and FXSAVE covers the SSE registers the scheduler switches.
 //
 //export goos_enable_nx_wp
 func EnableNXAndWriteProtect()

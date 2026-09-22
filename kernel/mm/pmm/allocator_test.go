@@ -101,3 +101,48 @@ func BenchmarkAllocateFree(b *testing.B) {
 		}
 	}
 }
+
+func fragmentedAllocator() *Allocator {
+	allocator := &Allocator{}
+	allocator.Init([]boot.MemoryRegion{
+		{Start: lowMemoryPages * PageSize, Pages: 1, Kind: boot.MemoryUsable},
+		{Start: (lowMemoryPages + 40000) * PageSize, Pages: 4096, Kind: boot.MemoryUsable},
+	})
+	return allocator
+}
+
+func TestAllocateSkipsLongUsedRuns(t *testing.T) {
+	allocator := fragmentedAllocator()
+	low, _ := allocator.Allocate()
+	high, ok := allocator.Allocate()
+	if !ok || low != lowMemoryPages*PageSize || high != (lowMemoryPages+40000)*PageSize {
+		t.Fatalf("allocations %#x %#x %v", low, high, ok)
+	}
+	block, ok := allocator.AllocateContiguous(5)
+	if !ok || block != (lowMemoryPages+40001)*PageSize {
+		t.Fatalf("contiguous allocation %#x %v", block, ok)
+	}
+	for page := uint64(0); page < 5; page++ {
+		if !allocator.IsAllocated(block + page*PageSize) {
+			t.Fatalf("page %d of the block is not marked", page)
+		}
+	}
+	if !allocator.Free(low) {
+		t.Fatal("low page not freed")
+	}
+	if again, ok := allocator.Allocate(); !ok || again != low {
+		t.Fatalf("freed low page not reused first: %#x", again)
+	}
+}
+
+func BenchmarkAllocateAcrossUsedRun(b *testing.B) {
+	allocator := fragmentedAllocator()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		low, _ := allocator.Allocate()
+		high, ok := allocator.Allocate()
+		if !ok || !allocator.Free(low) || !allocator.Free(high) {
+			b.Fatal("allocator failed")
+		}
+	}
+}

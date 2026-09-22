@@ -18,6 +18,7 @@ const (
 	timerVector     = 32
 	virtioIRQVector = 43
 	userCallVector  = 0x80
+	yieldVector     = 0x81
 	tssBytes        = 104
 )
 
@@ -36,7 +37,7 @@ var (
 )
 
 //go:extern goos_interrupt_table
-var interruptTable [exceptionCount + 3]uintptr
+var interruptTable [exceptionCount + 4]uintptr
 
 // InstallDescriptorTables replaces firmware GDT/IDT state. All architectural
 // exception vectors receive a gate; vector 3 is deliberately callable from
@@ -64,6 +65,10 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 		return false
 	}
 	idt[userCallVector] = NewIDTEntry(interruptTable[exceptionCount+1], userCallGate)
+	if interruptTable[exceptionCount+3] == 0 {
+		return false
+	}
+	idt[yieldVector] = NewIDTEntry(interruptTable[exceptionCount+3], interruptGate)
 
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
 	if !ok || !unmapGuardPage(pageTable, allocation) {

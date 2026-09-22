@@ -17,6 +17,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-stress` boots `STRESS_RUNS` guests (default 4) in parallel
   batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
   through each; `make test-all` includes two runs.
+- `make test-latency` boots one guest and measures command and VFS latency
+  into `build/reports/latency-hz<rate>.md`. It is a measurement, not a gate,
+  and is not part of `make test-all`.
 - `make test-performance` writes microbenchmark reports under `build/reports/`.
 
 Use `make test` during the normal edit loop. Use `make test-all` before delivery
@@ -85,6 +88,41 @@ make test-stress HZ=1000 STRESS_RUNS=8
 
 On failure the driver sends `diag`, so a `DIAG=1` build leaves the kernel state
 dump in that guest's log.
+
+## Latency measurement
+
+The kernel calibrates the TSC against the PIT at boot and serves nanoseconds
+since boot through native operation 24 (ADR 0054). Two guest tools use it:
+
+- `time <command line>` is a shell builtin. It runs the rest of the line
+  through the normal path, so builtins, pipelines, redirections, and `;`
+  sequences all work, and then prints `time: <N> us`. The time covers the
+  shell's exec request, PID 1, every launch, and the wait for exit.
+- `bench vfs N` sends N `Stat /` requests and `bench read PATH N` opens, reads
+  to EOF, and closes PATH N times, both from inside one process with its own
+  VFS session. Each prints `bench <mode>: N ops, total <us> us, avg <ns> ns/op`.
+  N is at most 10000. A file under `/persist` exercises VFS, FAT32, the block
+  service, and the virtio-blk driver, subject to the FAT32 sector cache.
+
+`tests/boot/latency.sh` drives one guest through a FIFO the way the stress test
+does. After a warm-up pass it runs each case under `time` `LATENCY_REPEATS`
+times (default 10) and writes the median, p90 (nearest rank), and minimum per
+case, followed by the `bench` lines:
+
+```sh
+make test-latency
+make HZ=1000 test-latency LATENCY_REPEATS=20
+make HZ=1000 DIAG=1 test-latency
+```
+
+The `help` case launches nothing and shows the measurement floor. The serial
+transcript is kept in `build/logs/latency-hz<rate>.log`. In a `DIAG=1` build
+the script ends with
+`diag` and adds the `DIAG clock` and `DIAG launch` lines to the report: per
+stage of `spawnExecutable` (image lookup, address-space creation, image load,
+process and grant setup, task install), the number of launches since boot and
+their total and average time. Failed lookups are counted too. Numbers from
+QEMU TCG describe the emulated system on that host, not hardware.
 
 ## Adding a boot assertion
 

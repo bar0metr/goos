@@ -139,6 +139,8 @@ func Run() {
 		runPS()
 	case equal(data.Command, "mem"):
 		runMem()
+	case equal(data.Command, "bench"):
+		runBench(data)
 	default:
 		finish(1, "invalid utility\n")
 	}
@@ -147,7 +149,7 @@ func Run() {
 
 func needsVFS(command []byte) bool {
 	return equal(command, "pwd") || equal(command, "ls") || equal(command, "cat") || equal(command, "mkdir") ||
-		equal(command, "touch") || equal(command, "rm") || equal(command, "cp") || equal(command, "mv") || equal(command, "stat") || equal(command, "write")
+		equal(command, "touch") || equal(command, "rm") || equal(command, "cp") || equal(command, "mv") || equal(command, "stat") || equal(command, "write") || equal(command, "bench")
 }
 
 func runWrite(data startup.Data) {
@@ -520,20 +522,6 @@ func writeArguments(data startup.Data, start int) {
 		}
 		lineBytes(argument)
 	}
-}
-
-func parseUint(value []byte) (uint64, bool) {
-	if len(value) == 0 {
-		return 0, false
-	}
-	var result uint64
-	for _, digit := range value {
-		if digit < '0' || digit > '9' || result > (^uint64(0)-uint64(digit-'0'))/10 {
-			return 0, false
-		}
-		result = result*10 + uint64(digit-'0')
-	}
-	return result, true
 }
 
 const (

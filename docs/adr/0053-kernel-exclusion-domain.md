@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted. Corrects the liveness work in ADRs 0050 and 0051, whose defects at
-1 kHz had the same cause.
+Accepted. Its diagnosis is corrected by ADR 0056: the corrupted wait interests
+described below were SSE register state lost across preemption, not aliased
+physical pages. The races this record closes are real and the decision stands,
+but they were not shown to cause the observed failures.
 
 ## Context
 
@@ -68,7 +70,7 @@ the failure signatures above are gone.
 
 While a housekeeping step runs, timer interrupts are held pending. A step that
 takes longer than one tick coalesces ticks, so time advances slightly slower
-during program launch. ADR 0055 measures this cost.
+during program launch. ADR 0057 measures this cost.
 
 SMP needs real locks. The exclusion domain marks where they will be needed:
 the shared structures a native call or housekeeping step touches.
