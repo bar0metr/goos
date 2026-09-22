@@ -3,27 +3,28 @@ SHELL := /bin/sh
 BUILD_DIR := build
 CACHE_DIR := $(BUILD_DIR)/cache
 BUILD_ENV := GOCACHE=$(abspath $(CACHE_DIR)/go) XDG_CACHE_HOME=$(abspath $(CACHE_DIR))
-KERNEL_DIR := $(BUILD_DIR)/kernel
-ISO_ROOT := $(BUILD_DIR)/iso/root
-EFI_BOOT := $(ISO_ROOT)/EFI/BOOT
-KERNEL := $(KERNEL_DIR)/goos.efi
-KERNEL_IO := $(KERNEL_DIR)/io.o
-INIT_IMAGE := $(BUILD_DIR)/userspace/init
-INIT_ELF := $(BUILD_DIR)/userspace/init.elf
-INIT_RUNTIME := $(BUILD_DIR)/userspace/runtime.o
-SERVICE_IMAGE := $(BUILD_DIR)/userspace/fault-probe
-SHELL_IMAGE := $(BUILD_DIR)/userspace/shell
-SHELL_ELF := $(BUILD_DIR)/userspace/shell.elf
-VFS_IMAGE := $(BUILD_DIR)/userspace/vfs
-VFS_ELF := $(BUILD_DIR)/userspace/vfs.elf
-COREUTILS_IMAGE := $(BUILD_DIR)/userspace/coreutils
-COREUTILS_ELF := $(BUILD_DIR)/userspace/coreutils.elf
-BLOCK_IMAGE := $(BUILD_DIR)/userspace/block
-BLOCK_ELF := $(BUILD_DIR)/userspace/block.elf
-VIRTIO_BLOCK_IMAGE := $(BUILD_DIR)/userspace/virtio-blk
-VIRTIO_BLOCK_ELF := $(BUILD_DIR)/userspace/virtio-blk.elf
-EFI_IMAGE := $(BUILD_DIR)/iso/efi.img
-ISO_BOOT_IMAGE := $(ISO_ROOT)/efi.img
+KERNEL_DIR = $(OUT_DIR)/kernel
+ISO_ROOT = $(OUT_DIR)/iso/root
+EFI_BOOT = $(ISO_ROOT)/EFI/BOOT
+KERNEL = $(KERNEL_DIR)/goos.efi
+KERNEL_IO = $(KERNEL_DIR)/io.o
+INIT_IMAGE = $(OUT_DIR)/userspace/init
+INIT_ELF = $(OUT_DIR)/userspace/init.elf
+INIT_RUNTIME = $(OUT_DIR)/userspace/runtime.o
+SERVICE_IMAGE = $(OUT_DIR)/userspace/fault-probe
+SHELL_IMAGE = $(OUT_DIR)/userspace/shell
+SHELL_ELF = $(OUT_DIR)/userspace/shell.elf
+VFS_IMAGE = $(OUT_DIR)/userspace/vfs
+VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
+COREUTILS_IMAGE = $(OUT_DIR)/userspace/coreutils
+COREUTILS_ELF = $(OUT_DIR)/userspace/coreutils.elf
+BLOCK_IMAGE = $(OUT_DIR)/userspace/block
+BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
+VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
+VIRTIO_BLOCK_ELF = $(OUT_DIR)/userspace/virtio-blk.elf
+EFI_IMAGE = $(OUT_DIR)/iso/efi.img
+ISO_BOOT_IMAGE = $(ISO_ROOT)/efi.img
+VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
 ISO := $(BUILD_DIR)/goos-x86_64.iso
 QEMU := qemu-system-x86_64
 QEMU_SHARE ?= /opt/local/share/qemu
@@ -51,6 +52,9 @@ ifeq ($(VALIDATION),1)
 BUILD_TAGS += goos_validation
 endif
 TINYGO_TAGS := -tags "$(BUILD_TAGS)"
+# Each configuration builds into its own tree, so switching HZ, DIAG, or
+# VALIDATION never mixes objects built for another configuration.
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)
 
 .DEFAULT_GOAL := all
 
@@ -62,15 +66,12 @@ all: iso
 
 kernel: $(KERNEL)
 
-$(BUILD_CONFIG): FORCE
-	@mkdir -p $(dir $@)
-	@[ "$$(cat $@ 2>/dev/null)" = "$(HZ) $(DIAG) $(VALIDATION)" ] || printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION)' >$@
 
 $(KERNEL_IO): kernel/arch/amd64/io.S
 	@mkdir -p $(KERNEL_DIR)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
-$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(BUILD_CONFIG)
+$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 	@mkdir -p $(KERNEL_DIR)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
@@ -78,53 +79,53 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(BUILD_CON
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
-	@mkdir -p $(BUILD_DIR)/userspace
+	@mkdir -p $(OUT_DIR)/userspace
 	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
 
-$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
-	@mkdir -p $(BUILD_DIR)/userspace
+$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
 
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
-	@mkdir -p $(BUILD_DIR)/userspace
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
-	@mkdir -p $(BUILD_DIR)/userspace
+$(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
 
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
-$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell internal/version internal/validation kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
-	@mkdir -p $(BUILD_DIR)/userspace
+$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell internal/version internal/validation kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/coreutils
 
 $(COREUTILS_IMAGE): $(COREUTILS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(COREUTILS_ELF) $@
 
-$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
-	@mkdir -p $(BUILD_DIR)/userspace
+$(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
 
 $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
-$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/kcall kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME) $(BUILD_CONFIG)
-	@mkdir -p $(BUILD_DIR)/userspace
+$(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/kcall kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/virtio-blk
 
 $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
-	@mkdir -p $(BUILD_DIR)/userspace
+	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
 
 $(BUILD_DIR)/virtio-blk.img: tools/mkfat32/main.go
@@ -132,28 +133,35 @@ $(BUILD_DIR)/virtio-blk.img: tools/mkfat32/main.go
 	@$(BUILD_ENV) go run ./tools/mkfat32 $@
 
 initramfs: userspace
-	@mkdir -p $(BUILD_DIR)/initramfs/root/system
-	@cp $(INIT_IMAGE) $(BUILD_DIR)/initramfs/root/system/init
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(BUILD_DIR)/initramfs/initramfs.tar
+	@mkdir -p $(OUT_DIR)/initramfs/root/system
+	@cp $(INIT_IMAGE) $(OUT_DIR)/initramfs/root/system/init
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(OUT_DIR)/initramfs/initramfs.tar
 
 $(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
 	@cp $(KERNEL) $(EFI_BOOT)/BOOTX64.EFI
-	@cp $(BUILD_DIR)/initramfs/initramfs.tar $(ISO_ROOT)/initramfs.tar
+	@cp $(OUT_DIR)/initramfs/initramfs.tar $(ISO_ROOT)/initramfs.tar
 	@rm -f $@ $@.cdr $(ISO_BOOT_IMAGE)
 	@hdiutil create -quiet -fs MS-DOS -format UDTO -size 8m -volname GOOS_EFI -srcfolder $(ISO_ROOT) $@
 	@mv $@.cdr $@
 
 iso: $(ISO)
 
-$(ISO): $(EFI_IMAGE)
+$(VARIANT_ISO): $(EFI_IMAGE)
 	@rm -f $@
 	@dd if=$(EFI_IMAGE) of=$(ISO_BOOT_IMAGE) bs=512 skip=1 2>/dev/null
 	@dd if=/dev/zero of=$(ISO_BOOT_IMAGE) bs=1 seek=8388607 count=1 conv=notrunc 2>/dev/null
 	@hdiutil makehybrid -quiet -iso -joliet -eltorito-boot $(abspath $(ISO_BOOT_IMAGE)) -no-emul-boot -o $@ $(ISO_ROOT)
 	@$(BUILD_ENV) go run ./tools/iso-uefi $@
 	@test -s $@
-	@printf 'built %s\n' '$@'
+
+# build/goos-x86_64.iso is always the most recently requested configuration;
+# build/config/build names it for the test harnesses.
+$(ISO): $(VARIANT_ISO) FORCE
+	@cmp -s $(VARIANT_ISO) $@ || cp $(VARIANT_ISO) $@
+	@mkdir -p $(dir $(BUILD_CONFIG))
+	@printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION)' >$(BUILD_CONFIG)
+	@printf 'built %s (%s)\n' '$@' '$(notdir $(OUT_DIR))'
 
 run: iso $(BUILD_DIR)/virtio-blk.img
 	$(QEMU) $(QEMU_FLAGS) -cdrom $(ISO)
