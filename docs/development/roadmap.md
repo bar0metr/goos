@@ -169,14 +169,26 @@ dropped, every wait registers before re-checking its condition, and deadline
 expiry is driven by the kernel loop. ADR 0051 adds bounded event-driven
 multi-object readiness waits and migrates PID 1 lifecycle/exec handling, VFS
 control/session handling, and block service/filesystem handling away from
-polling. Safe wakeup currently makes a task runnable; an immediate switch occurs
-when the publisher blocks, while a nonblocking publisher still runs until timer
-preemption because there is no safe-return reschedule hook yet.
+polling.
 
-The default rate therefore remains 100 Hz. The performance matrix is still
-pending, including QEMU validation of 1,000 PID 1 lifecycle events and the target
-of keeping process launch below 500 ms. Process-launch cost and the remaining
-nonblocking-publisher scheduling latency are the next performance items.
+ADR 0052 selects the timer rate at build time (`HZ=100|250|1000`) and adds a
+diagnostic build with a kernel event trace and state dump. ADR 0053 moves kernel
+housekeeping into the exclusion domain native calls run in. ADR 0054 adds a
+calibrated nanosecond clock, the shell `time` builtin, `bench`, and
+`make test-latency`. ADR 0055 reschedules on the return from the native call or
+IRQ that woke a task, and lets kernel tasks sleep instead of halting through
+their round-robin turn. ADR 0056 fixes the defect behind the 1 kHz failures:
+SSE state was not part of the task context, so preemption corrupted XMM
+registers. ADR 0057 records the launch-path analysis and the latency baseline.
+Commands now take 4–9 ms at 100 Hz instead of 160–330 ms, a persistent write
+21 ms instead of 1.9 s, and a VFS round trip 0.15 ms instead of 40 ms, with
+latency nearly independent of the tick rate. `make test-stress` passes 16 of 16
+guests at 100, 250, and 1000 Hz.
+
+The default rate remains 100 Hz because nothing now depends on a faster one.
+Remaining performance items are demand-zero stack and heap pages, TinyGo
+utility startup cost, and a deadline index so the housekeeping loop wakes only
+when a deadline is due.
 
 ## Priority 4 — Separate normal boot from validation boot
 

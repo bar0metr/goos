@@ -205,10 +205,12 @@ driver, and native utilities can access bounded FAT32 regular files at
 `/persist` through VFS.
 
 PID 1, VFS, and the block service use event-driven multi-object waits for their
-independent control and client endpoints. A wake marks the task runnable, but a
-nonblocking publisher still yields at timer preemption because an explicit
-safe-return reschedule hook is not implemented. The default timer rate remains
-100 Hz while the full performance and lifecycle stress matrix is pending.
+independent control and client endpoints. A wake marks the task runnable and the
+switch happens on the return from the native call or interrupt that caused it,
+so no hand-off waits for a timer tick. SSE state is saved with every task
+context. A single-process command takes about 5 ms at 100 Hz and a VFS round
+trip about 0.15 ms, nearly independent of the tick rate (ADR 0057). The stress
+suite passes at 100, 250, and 1000 Hz; the default remains 100 Hz.
 
 ## Building and running
 
