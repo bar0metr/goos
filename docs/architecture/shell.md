@@ -1,14 +1,16 @@
 # Native shell
 
 PID 1 launches `/system/shell` as a normal supervised native image after the
-crash-policy boot probe completes. Its capability manifest contains one device
-handle derived from PID 1 with `Read|Write` rights and without `Transfer`.
+terminal service. Its console capability is write-only: the shell cannot read
+the console, and what is typed reaches it as lines from the terminal service
+over its `tty` session (ADR 0082). Reading the system log is a separate `log`
+capability.
 
-The shell resolves its `console`, `vfs`, and `exec` handles from the versioned
-startup block, then reads one serial byte at a time through the
-capability-checked console session ABI. The bounded TTY line editor supplies printable input, backspace,
-delete, CR/LF completion, and a 128-byte maximum command line. Runtime
-allocation remains confined to the fixed userspace arena.
+The shell resolves its `console`, `tty`, `log`, `vfs`, and `exec` handles from
+the versioned startup block and asks the terminal service for each line with
+its prompt. Editing, echo and the control keys belong to the terminal service
+([tty.md](tty.md)); a command line is at most 128 bytes. Runtime allocation
+remains confined to the fixed userspace arena.
 
 The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`,
 `config`, `log`, `jobs`, `kill`, `reboot`, `diag`, and `time`. Every command,
@@ -43,12 +45,12 @@ the build collects into `/system/commands` (ADR 0080). They receive structured
 `argv`, `PATH=/system/bin`, a VFS session when their manifest asks for one, a
 read-only standard-input handle named `in`, and distinct write-only
 `stdout` and `stderr` handles. Normal output uses `stdout`; diagnostics and
-validation markers use `stderr`. Streams target the serial console unless
-pipeline or redirection composition substitutes an endpoint. The bounded
-`readline` utility reads
-one line from `in`, rejects input beyond 128 bytes, and writes accepted bytes to
-`stdout`. This validates the inherited read-only input capability independently
-of the shell's own console handle.
+validation markers use `stderr`. Output streams target the serial console, write-only, unless pipeline or
+redirection composition substitutes an endpoint. Standard input is always a
+stream: a foreground command's is fed by the shell with the lines typed while it
+runs, and a background command's is at end of input. The bounded `readline`
+utility reads one line from `in`, rejects input beyond 128 bytes, and writes
+accepted bytes to `stdout`.
 Up to three unquoted `|` operators split a command into at most four bounded
 invocations. PID 1 creates private streams, starts all children before waiting,
 and gives each stage only its adjacent directional endpoints. It returns the
@@ -82,8 +84,9 @@ cannot run in the background. A foreground command has no reply time limit
 `jobs` lists the running background jobs with their command lines, and
 `kill %N` (or `kill N`) stops one; the job is then reported as `[N] killed`.
 Ctrl-C stops the foreground command and prints `^C`, and at the prompt it
-clears the line being typed. Input other than Ctrl-C typed while a command runs
-is discarded (ADR 0067).
+clears the line being typed (ADR 0067). A line typed while a command runs is
+that command's input; Ctrl-D ends it. Typing ahead of a command that does not
+read keeps the text for the next prompt (ADR 0082).
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty

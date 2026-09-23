@@ -34,6 +34,8 @@ LOG_IMAGE = $(OUT_DIR)/userspace/log
 LOG_ELF = $(OUT_DIR)/userspace/log.elf
 CONFIG_IMAGE = $(OUT_DIR)/userspace/config
 CONFIG_ELF = $(OUT_DIR)/userspace/config.elf
+TTY_IMAGE = $(OUT_DIR)/userspace/tty
+TTY_ELF = $(OUT_DIR)/userspace/tty.elf
 EFI_IMAGE = $(OUT_DIR)/iso/efi.img
 VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
 ISO := $(BUILD_DIR)/goos-x86_64.iso
@@ -87,7 +89,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -100,7 +102,7 @@ $(INIT_ELF): $(shell find userspace/init userspace/commands userspace/exec users
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/commands userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/commands userspace/tty userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
@@ -157,6 +159,13 @@ $(CONFIG_ELF): $(shell find userspace/cmd/configd userspace/config userspace/sta
 $(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
 
+$(TTY_ELF): $(shell find userspace/cmd/tty userspace/tty userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/tty
+
+$(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(TTY_ELF) $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
@@ -171,7 +180,7 @@ initramfs: userspace
 	@# A command whose directory was removed leaves its image behind; the
 	@# archive takes only the commands the tree still has.
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
@@ -297,10 +306,11 @@ docs:
 	@test -f docs/adr/0079-command-help-and-diagnostics.md
 	@test -f docs/adr/0080-commands-as-separate-images.md
 	@test -f docs/adr/0081-shared-read-only-image-pages.md
-	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
+	@test -f docs/adr/0082-userspace-terminal-service.md
 	@test -f docs/adr/0083-user-stack-guard-pages.md
-	@test -f docs/adr/0086-pinned-toolchain-and-reproducible-builds.md
+	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
 	@test -f docs/adr/0085-in-guest-microbenchmarks.md
+	@test -f docs/adr/0086-pinned-toolchain-and-reproducible-builds.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

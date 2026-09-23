@@ -13,10 +13,10 @@ import (
 
 // usage names the fixed system images in order, then the directory of
 // command images and the command index the build generated from them.
-const usage = "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE LOG_IMAGE CONFIG_IMAGE COMMAND_DIR COMMAND_INDEX OUTPUT"
+const usage = "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE LOG_IMAGE CONFIG_IMAGE TTY_IMAGE COMMAND_DIR COMMAND_INDEX OUTPUT"
 
 func main() {
-	if len(os.Args) != 12 {
+	if len(os.Args) != 13 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -29,17 +29,17 @@ func main() {
 		// this archive.
 		file("system/motd", 0o444, []byte("Welcome to GoOS\n")),
 	}
-	for index, name := range []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "log", "config"} {
+	for index, name := range []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "log", "config", "tty"} {
 		members = append(members, file("system/"+name, 0o555, read(os.Args[1+index])))
 	}
-	index := read(os.Args[10])
+	index := read(os.Args[11])
 	members = append(members, file("system/commands", 0o444, index))
-	binaries, err := commandImages(os.Args[9], index)
+	binaries, err := commandImages(os.Args[10], index)
 	if err != nil {
 		fail(err)
 	}
 	members = append(members, binaries...)
-	output, err := os.Create(os.Args[11])
+	output, err := os.Create(os.Args[12])
 	if err != nil {
 		fail(err)
 	}

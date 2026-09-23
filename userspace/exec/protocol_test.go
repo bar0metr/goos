@@ -2,6 +2,7 @@ package exec
 
 import (
 	"bytes"
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/mm/vm"
 	"goos/userspace/startup"
@@ -258,5 +259,31 @@ func TestReplyNamesTheFailedStage(t *testing.T) {
 	message.Payload[24] = MaxStages
 	if _, ok := DecodeReply(message); ok {
 		t.Fatal("stage beyond the pipeline decoded")
+	}
+}
+
+func TestStartedCarriesTheInputHandle(t *testing.T) {
+	message, ok := EncodeStarted(2, 0x100000009, 5)
+	if !ok {
+		t.Fatal("started refused")
+	}
+	slot, input, ok := DecodeStarted(message)
+	if !ok || slot != 2 || input != 0x100000009 {
+		t.Fatalf("started = %d %#x %v", slot, input, ok)
+	}
+	if _, ok := DecodeReply(message); ok {
+		t.Fatal("started decoded as a reply")
+	}
+	for _, bad := range []struct {
+		slot  uint8
+		input uint64
+	}{{Slots, 1}, {0, 0}} {
+		if _, ok := EncodeStarted(bad.slot, handle.ID(bad.input), 5); ok {
+			t.Fatalf("%+v encoded", bad)
+		}
+	}
+	message.HandleCount = 0
+	if _, _, ok := DecodeStarted(message); ok {
+		t.Fatal("started without a handle decoded")
 	}
 }

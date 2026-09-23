@@ -3,13 +3,14 @@ package exec
 
 import (
 	"encoding/binary"
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/userspace/startup"
 )
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(7)
+	Version    = uint16(8)
 	MaxPath    = 192
 	MaxStages  = 4
 	replySize  = 25
@@ -200,6 +201,29 @@ func validStage(stage Stage, environment []byte) bool {
 }
 
 func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || validPath(path) }
+
+// EncodeStarted tells the shell a foreground job in slot is running and moves
+// to it the writing end of the job's standard input, which the shell feeds
+// with the lines the terminal service gives it (ADR 0082). It shares the job's
+// correlation and precedes the job's reply.
+func EncodeStarted(slot uint8, input handle.ID, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 || slot >= Slots || input == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindNotification, Correlation: correlation, PayloadSize: 1, HandleCount: 1}
+	message.Payload[0] = slot
+	message.Handles[0] = input
+	return message, true
+}
+
+// DecodeStarted returns the slot and the input handle as received.
+func DecodeStarted(message ipc.Message) (uint8, handle.ID, bool) {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindNotification ||
+		message.Correlation == 0 || message.PayloadSize != 1 || message.HandleCount != 1 || message.Handles[0] == 0 || message.Payload[0] >= Slots {
+		return 0, 0, false
+	}
+	return message.Payload[0], message.Handles[0], true
+}
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	if correlation == 0 || reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 || !validReplyStage(reply) {
