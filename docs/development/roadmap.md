@@ -312,6 +312,12 @@ startup.
 Consolidation is done. The 0.1.0 release remains a matter of judging the
 existing surface rather than adding to it.
 
+ADR 0079 is the first such judgement: every command has help and a synopsis
+from one table, a malformed invocation is answered with its usage, diagnostics
+name the command, the path and the reason, a launch failure names the stage
+that failed, and `uptime` and `mem` report time and memory in the units a
+person reads.
+
 ## Priority 5 — Linux ABI compatibility
 
 Begin Linux compatibility only after native process startup, persistent storage,

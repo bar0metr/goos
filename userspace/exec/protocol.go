@@ -9,10 +9,10 @@ import (
 
 const (
 	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(6)
+	Version    = uint16(7)
 	MaxPath    = 192
 	MaxStages  = 4
-	replySize  = 24
+	replySize  = 25
 	submitSize = 3
 	headerSize = 5
 	SearchRoot = "/system/bin/"
@@ -82,10 +82,14 @@ type Request struct {
 	Background       bool
 	CWD, Environment []byte
 }
+
+// Reply reports a finished job. When LaunchStatus is not zero, Stage is the
+// index of the stage that could not be launched, so the shell can name it.
 type Reply struct {
 	Process      uint64
 	LaunchStatus uint64
 	ExitCode     uint64
+	Stage        uint8
 }
 
 // EncodeRequest writes request into one slot and returns the encoded bytes.
@@ -198,7 +202,7 @@ func validStage(stage Stage, environment []byte) bool {
 func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || validPath(path) }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 {
+	if correlation == 0 || reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 || !validReplyStage(reply) {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: replySize}
@@ -209,6 +213,7 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	binary.LittleEndian.PutUint64(message.Payload[0:8], reply.Process)
 	binary.LittleEndian.PutUint64(message.Payload[8:16], reply.LaunchStatus)
 	binary.LittleEndian.PutUint64(message.Payload[16:24], reply.ExitCode)
+	message.Payload[24] = reply.Stage
 	return message, true
 }
 
@@ -216,11 +221,19 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize != replySize {
 		return Reply{}, false
 	}
-	reply := Reply{Process: binary.LittleEndian.Uint64(message.Payload[0:8]), LaunchStatus: binary.LittleEndian.Uint64(message.Payload[8:16]), ExitCode: binary.LittleEndian.Uint64(message.Payload[16:24])}
-	if reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 || reply.Process == 0 && reply.ExitCode != 0 {
+	reply := Reply{Process: binary.LittleEndian.Uint64(message.Payload[0:8]), LaunchStatus: binary.LittleEndian.Uint64(message.Payload[8:16]), ExitCode: binary.LittleEndian.Uint64(message.Payload[16:24]), Stage: message.Payload[24]}
+	if reply.Process == 0 && reply.LaunchStatus == 0 || reply.Process != 0 && reply.LaunchStatus != 0 || reply.Process == 0 && reply.ExitCode != 0 || !validReplyStage(reply) {
 		return Reply{}, false
 	}
 	return reply, true
+}
+
+// validReplyStage allows a stage index only where it names a launch failure.
+func validReplyStage(reply Reply) bool {
+	if reply.LaunchStatus == 0 {
+		return reply.Stage == 0
+	}
+	return reply.Stage < MaxStages
 }
 
 func validPath(path []byte) bool {

@@ -207,6 +207,13 @@ func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 	if _, ok := DecodeReply(message); ok {
 		t.Fatal("nonzero reply reserved field accepted")
 	}
+	busy, ok := EncodeReply(Reply{Operation: OperationUnlink, Status: StatusBusy}, 12)
+	if reply, valid := DecodeReply(busy); !ok || !valid || reply.Status != StatusBusy {
+		t.Fatal("the last status does not round-trip")
+	}
+	if _, ok := EncodeReply(Reply{Operation: OperationUnlink, Status: lastStatus + 1}, 13); ok {
+		t.Fatal("unknown status encoded")
+	}
 }
 
 func TestSyncRequestIsDistinctFromAddSession(t *testing.T) {
@@ -360,13 +367,13 @@ func TestUnlinkRefusesToOrphanAMount(t *testing.T) {
 	}
 
 	// The same directory under its other name must stay protected.
-	if status := namespace.Unlink([]byte("/persist/home")); status != StatusPermissionDenied {
+	if status := namespace.Unlink([]byte("/persist/home")); status != StatusBusy {
 		t.Fatalf("aliased mount root removed: %d", status)
 	}
-	if status := namespace.Unlink([]byte("/home")); status != StatusPermissionDenied {
+	if status := namespace.Unlink([]byte("/home")); status != StatusBusy {
 		t.Fatalf("mount root removed: %d", status)
 	}
-	if status := namespace.Unlink([]byte("/system")); status != StatusPermissionDenied {
+	if status := namespace.Unlink([]byte("/system")); status != StatusBusy {
 		t.Fatalf("directory carrying a mount removed: %d", status)
 	}
 	if _, _, status := namespace.Resolve([]byte("/home")); status != StatusOK {
@@ -382,5 +389,21 @@ func TestUnlinkRefusesToOrphanAMount(t *testing.T) {
 	}
 	if fs.Root() == 0 {
 		t.Fatal("owning backend lost its root")
+	}
+}
+
+func TestMapStatusKeepsTheReason(t *testing.T) {
+	for _, test := range []struct {
+		backend ramfs.Status
+		want    Status
+	}{
+		{ramfs.StatusNotDirectory, StatusNotDirectory},
+		{ramfs.StatusIsDirectory, StatusIsDirectory},
+		{ramfs.StatusNotEmpty, StatusNotEmpty},
+		{ramfs.StatusInvalidArgument, StatusInvalidArgument},
+	} {
+		if got := mapStatus(test.backend); got != test.want {
+			t.Fatalf("mapStatus(%d) = %d, want %d", test.backend, got, test.want)
+		}
 	}
 }

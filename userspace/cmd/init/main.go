@@ -719,18 +719,18 @@ func pollExec() {
 	}
 	slot, size, ok := execproto.DecodeSubmit(message)
 	if !ok {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
 	job := freeJob(slot)
 	if job == nil {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0)
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0, 0)
 		return
 	}
 	copy(job.data[:size], execPage[slot][:size])
 	request, ok := execproto.DecodeRequest(job.data[:size])
 	if !ok {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0)
+		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
 	job.active, job.slot, job.correlation = true, slot, message.Correlation
@@ -768,7 +768,11 @@ func finishJob(job *execJob) {
 	}
 	pid, launchStatus, exitCode := job.job.Result()
 	job.active = false
-	sendExecReply(job.correlation, pid, uint64(launchStatus), exitCode)
+	stage := uint8(0)
+	if launchStatus != supervisor.LaunchOK {
+		stage = job.job.FailedStage()
+	}
+	sendExecReply(job.correlation, pid, uint64(launchStatus), exitCode, stage)
 }
 
 // handleControl answers the shell's requests that launch nothing.
@@ -1016,8 +1020,8 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 	}
 }
 
-func sendExecReply(correlation, pid, status, exitCode uint64) {
-	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, LaunchStatus: status, ExitCode: exitCode}, correlation)
+func sendExecReply(correlation, pid, status, exitCode uint64, stage uint8) {
+	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, LaunchStatus: status, ExitCode: exitCode, Stage: stage}, correlation)
 	if !ok || !sendMessage(execServerHandle, reply) {
 		fatal("INIT_EXEC_REPLY_FAILED\n")
 	}

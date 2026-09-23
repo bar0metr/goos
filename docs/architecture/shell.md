@@ -10,8 +10,12 @@ capability-checked console session ABI. The bounded TTY line editor supplies pri
 delete, CR/LF completion, and a 128-byte maximum command line. Runtime
 allocation remains confined to the fixed userspace arena.
 
-The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`, `log`,
-`reboot`, `diag`, and `time`. `services` and `reboot` are requests to PID 1
+The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`,
+`config`, `log`, `jobs`, `kill`, `reboot`, `diag`, and `time`. Every command,
+builtin or executable, is documented in one table in `userspace/shell`: `help`
+lists them with a summary, `help NAME` and `NAME --help` print the synopsis, and
+a command given the wrong number of arguments prints `usage: ...` instead of
+running (ADR 0079). `services` and `reboot` are requests to PID 1
 over the control protocol on the exec channel. `handles` and `caps` list the
 shell's own handle table, raw and under its startup names. `log` prints the
 system log (ADRs 0059 and 0061). `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
@@ -66,7 +70,7 @@ later work.
 
 A line ending in an unquoted `&` runs as a background job with an empty
 standard input. The shell prints `[N] started`, returns to the prompt, and
-reports `[N] done`, `[N] exit status: C`, or `[N] launch failed: S` when PID 1
+reports `[N] done`, `[N] exit status: C`, or the launch failure when PID 1
 replies, redrawing the line being typed. Up to three background jobs may run,
 and one exec slot stays free for the foreground. Builtins and `;` sequences
 cannot run in the background. A foreground command has no reply time limit
@@ -87,3 +91,11 @@ Each command completes before the next starts; a runtime failure is reported
 and does not stop the sequence. `cd` accepts a quoted path and changes the cwd
 inherited by subsequent commands. The shell resets its arena after each command.
 This syntax does not implement conditional execution (`&&` or `||`).
+
+Diagnostics name what failed. A utility reports `cmd: path: reason` on stderr,
+with the reason taken from the VFS status — `no such file or directory`, `not a
+directory`, `directory not empty`, `read-only filesystem`, `a mount depends on
+it` — and exits with status 2. A command PID 1 cannot start is reported by the
+name of the stage that failed, `NAME: command not found`, even inside a pipeline
+(ADR 0079). `uptime` prints `up H:MM:SS` and `mem` prints total, used and free
+memory in binary units.

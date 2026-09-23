@@ -30,9 +30,12 @@ benchmarks. Path components cross the backend interface as fixed-size values,
 so canonicalization remains on the caller stack and both resolver paths allocate
 zero bytes per request.
 
-Protocol `GVF1` version 1 carries bounded path, handle, offset, size, rights, and
+Protocol `GVF1` version 2 carries bounded path, handle, offset, size, rights, and
 inline data fields in typed IPC requests. Replies carry typed status, metadata,
 directory entries, open handles, cursors, and at most 224 inline data bytes.
+Version 2 keeps why a path was refused — not a directory, is a directory, not
+empty, or a mount depends on it — instead of folding those into an invalid
+argument (ADR 0079).
 Bulk file data will use shared memory.
 
 PID 1 supervises `/system/vfs` and starts the shell only after the service is

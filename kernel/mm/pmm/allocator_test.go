@@ -2,8 +2,16 @@ package pmm
 
 import (
 	"goos/kernel/boot"
+	"goos/kernel/kcall"
 	"testing"
 )
+
+// The page counts SystemInfo reports are converted to bytes in userspace.
+func TestSystemInfoPageSizeMatchesTheAllocator(t *testing.T) {
+	if kcall.SystemInfoPageSize != PageSize {
+		t.Fatalf("SystemInfo page size %d, allocator page size %d", kcall.SystemInfoPageSize, PageSize)
+	}
+}
 
 func TestAllocateFreeAndReuse(t *testing.T) {
 	var allocator Allocator

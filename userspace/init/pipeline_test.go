@@ -241,3 +241,35 @@ func TestBackgroundPipelineReadsEmptyInput(t *testing.T) {
 		t.Fatalf("order %v pid %d status %d code %d", order, pid, status, code)
 	}
 }
+
+func TestPipelineNamesTheStageThatFailedToLaunch(t *testing.T) {
+	for failStage := 0; failStage < execproto.MaxStages; failStage++ {
+		r := &pipelineRunnerTest{t: t, count: execproto.MaxStages, errorSource: -1, failCreate: -1, failStage: failStage, owned: make(map[handle.ID]bool)}
+		request := execproto.Request{Count: execproto.MaxStages, CWD: []byte("/system"), Environment: []byte{0}}
+		for i := range request.Stages {
+			request.Stages[i].Path = []byte{byte(i)}
+		}
+		job := StartPipeline(request, 99, r)
+		for {
+			process, pending := job.Next()
+			if !pending {
+				break
+			}
+			job.Complete(r.Wait(process))
+		}
+		if _, status, _ := job.Result(); status != LaunchNotFound || int(job.FailedStage()) != failStage {
+			t.Fatalf("fail stage %d: status=%d stage=%d", failStage, status, job.FailedStage())
+		}
+	}
+}
+
+func TestLaunchStatusReasons(t *testing.T) {
+	for status := LaunchOK; status <= LaunchCapabilityInstallFailed; status++ {
+		if status.Reason() == "launch failed" {
+			t.Fatalf("status %d has no reason", status)
+		}
+	}
+	if LaunchNotFound.Reason() != "command not found" || !LaunchNotFound.NamesExecutable() || LaunchResourceExhausted.NamesExecutable() {
+		t.Fatal("not-found launch is not described by the executable's name")
+	}
+}

@@ -22,6 +22,7 @@ var wire [ipc.WireMaxSize]byte
 var descriptor = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 var startupWire [startup.Size]byte
 var pathBuffer [shell.MaxPath]byte
+var targetBuffer [shell.MaxPath]byte
 var correlation uint64
 var heapPointer uintptr
 var stdoutHandle uint64
@@ -95,6 +96,24 @@ func Run() {
 	if !stdinFound || !stdoutFound || !stderrFound || needsVFS(data.Command) && !vfsFound {
 		finish(1, "startup handles unavailable\n")
 	}
+	commandName = data.Command
+	info, documented := shell.LookupCommand(data.Command)
+	if !documented || info.Builtin {
+		failf(nil, "not a utility in this image")
+	}
+	current = info
+	// Utility startup is on every command's latency path, so the checks read
+	// the count byte and decode the vector only when there is a flag to test.
+	count := data.ArgCount()
+	if count == 1 {
+		if first, _ := data.Arg(1); shell.IsHelpFlag(first) {
+			printHelp(info)
+			finish(0, "")
+		}
+	}
+	if !info.Accepts(count) {
+		usage()
+	}
 	switch {
 	case equal(data.Command, "pwd"):
 		lineBytes(data.CWD)
@@ -150,9 +169,63 @@ func Run() {
 	case equal(data.Command, "bench"):
 		runBench(data)
 	default:
-		finish(1, "invalid utility\n")
+		failf(nil, "not a utility in this image")
 	}
 	finish(0, "")
+}
+
+// current is the invoking command's entry in the shared command table, and
+// commandName the name it was started under; diagnostics are prefixed with it.
+var (
+	current     shell.CommandInfo
+	commandName []byte
+	errorBuffer [512]byte
+)
+
+func printHelp(info shell.CommandInfo) {
+	lineText("usage: ")
+	lineText(info.Usage)
+	lineFlush()
+	lineText("  ")
+	lineText(info.Summary)
+	lineFlush()
+}
+
+// usage ends a malformed invocation with the command's synopsis.
+func usage() {
+	size := copy(errorBuffer[:], "usage: ")
+	size += copy(errorBuffer[size:len(errorBuffer)-1], current.Usage)
+	errorBuffer[size] = '\n'
+	writeErrorBytes(errorBuffer[:size+1])
+	finish(2, "")
+}
+
+// failf ends the utility with "command: path: reason", or "command: reason"
+// when path is nil. The line is written at once so it cannot interleave.
+func failf(path []byte, reason string) {
+	// Every copy stops one byte short so the newline always fits.
+	limit := len(errorBuffer) - 1
+	size := copy(errorBuffer[:limit], commandName)
+	size += copy(errorBuffer[size:limit], ": ")
+	if path != nil {
+		size += copy(errorBuffer[size:limit], path)
+		size += copy(errorBuffer[size:limit], ": ")
+	}
+	size += copy(errorBuffer[size:limit], reason)
+	errorBuffer[size] = '\n'
+	writeErrorBytes(errorBuffer[:size+1])
+	finish(2, "")
+}
+
+// check ends the utility when a VFS request about path failed. A refused
+// mutation of a read-only mount is named as such.
+func check(reply vfs.Reply, received bool, path []byte, mutation bool) {
+	if !received {
+		failf(path, "filesystem service unavailable")
+	}
+	if reply.Status != vfs.StatusOK {
+		failf(path, shell.VFSReason(reply.Status, mutation))
+	}
 }
 
 func needsVFS(command []byte) bool {
@@ -168,31 +241,24 @@ func runWrite(data startup.Data) {
 	}
 	path := requiredPath(data, pathIndex)
 	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
-	if !received || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
-		finish(2, refusal(created.Status, "write: read-only filesystem\n", "write: create failed\n"))
+	if created.Status == vfs.StatusAlreadyExists {
+		created.Status = vfs.StatusOK
 	}
+	check(created, received, path, true)
 	offset := uint64(0)
 	if appendMode {
 		stat, received := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
-		if !received || stat.Status != vfs.StatusOK {
-			finish(2, "write: stat failed\n")
-		}
+		check(stat, received, path, false)
 		offset = stat.Size
 	} else {
 		truncated, received := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: path, Offset: 0})
-		if !received || truncated.Status != vfs.StatusOK {
-			finish(2, "write: truncate failed\n")
-		}
+		check(truncated, received, path, true)
 	}
 	opened, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: path})
-	if !received || opened.Status != vfs.StatusOK {
-		finish(2, "write: open failed\n")
-	}
+	check(opened, received, path, true)
 	if appendMode {
 		seek, received := callVFS(vfs.Request{Operation: vfs.OperationSeek, Handle: opened.Handle, Offset: offset})
-		if !received || seek.Status != vfs.StatusOK {
-			finish(2, "write: seek failed\n")
-		}
+		check(seek, received, path, false)
 	}
 	if _, inline := data.Arg(pathIndex + 1); inline {
 		var text [startup.MaxVector + 1]byte
@@ -212,9 +278,7 @@ func runWrite(data startup.Data) {
 		for written := 0; written <= size; {
 			chunk := copy(buffer[:], text[written:size+1])
 			reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:chunk]})
-			if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(chunk) {
-				finish(2, "write: VFS error\n")
-			}
+			checkWritten(reply, ok, path, chunk)
 			written += chunk
 		}
 		callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
@@ -230,12 +294,10 @@ func runWrite(data startup.Data) {
 			break
 		}
 		if status != 0 {
-			finish(2, "write: input failed\n")
+			failf(nil, "cannot read standard input")
 		}
 		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:size]})
-		if !ok || reply.Status != vfs.StatusOK || reply.Size != uint64(size) {
-			finish(2, "write: VFS error\n")
-		}
+		checkWritten(reply, ok, path, size)
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 	mark("WRITE_PROCESS_OK\n")
@@ -250,14 +312,23 @@ func runReadline() {
 		if status == uint64(kcall.StatusNotFound) || status == uint64(kcall.StatusResourceExhausted) {
 			continue
 		}
+		if status == uint64(kcall.StatusPeerDied) {
+			// A closed input is end of input, not a fault: a pipeline whose
+			// producer never started ends here. With nothing read there is no
+			// line, which the exit status says without a message.
+			if size == 0 {
+				finish(1, "")
+			}
+			break
+		}
 		if status != 0 {
-			finish(2, "readline: input unavailable\n")
+			failf(nil, "cannot read standard input")
 		}
 		if inputByte == '\r' || inputByte == '\n' {
 			break
 		}
 		if size == len(line) {
-			finish(2, "readline: input too long\n")
+			failf(nil, "line longer than 128 bytes")
 		}
 		line[size] = inputByte
 		size++
@@ -312,14 +383,9 @@ func runLs(data startup.Data) {
 	if !found {
 		argument = []byte(".")
 	}
-	path, ok := shell.ResolvePath(data.CWD, argument, &pathBuffer)
-	if !ok {
-		finish(2, "ls: invalid path\n")
-	}
+	path := resolve(data, argument)
 	stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
-	if !ok || stat.Status != vfs.StatusOK {
-		finish(2, "ls: not found\n")
-	}
+	check(stat, ok, path, false)
 	if stat.Kind == ramfs.KindFile {
 		lineBytes(baseName(path))
 		lineFlush()
@@ -329,15 +395,10 @@ func runLs(data startup.Data) {
 	var cursor uint32
 	for {
 		reply, received := callVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: uint64(cursor)})
-		if !received {
-			finish(2, "ls: service unavailable\n")
-		}
-		if reply.Status == vfs.StatusNotFound {
+		if received && reply.Status == vfs.StatusNotFound {
 			break
 		}
-		if reply.Status != vfs.StatusOK {
-			finish(2, "ls: VFS error\n")
-		}
+		check(reply, received, path, false)
 		lineBytes(reply.Name)
 		if reply.Kind == ramfs.KindDirectory {
 			lineText("/")
@@ -349,23 +410,12 @@ func runLs(data startup.Data) {
 }
 
 func runCat(data startup.Data) {
-	argument, found := data.Arg(1)
-	if !found {
-		finish(2, "cat: path required\n")
-	}
-	path, ok := shell.ResolvePath(data.CWD, argument, &pathBuffer)
-	if !ok {
-		finish(2, "cat: invalid path\n")
-	}
+	path := requiredPath(data, 1)
 	opened, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
-	if !received || opened.Status != vfs.StatusOK {
-		finish(2, "cat: not found\n")
-	}
+	check(opened, received, path, false)
 	for {
 		reply, received := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: vfs.MaxReplyData})
-		if !received || reply.Status != vfs.StatusOK {
-			finish(2, "cat: VFS error\n")
-		}
+		check(reply, received, path, false)
 		if len(reply.Data) == 0 {
 			break
 		}
@@ -376,98 +426,61 @@ func runCat(data startup.Data) {
 }
 
 func runCreate(data startup.Data, directory bool) {
-	argument, found := data.Arg(1)
-	if !found {
-		finish(2, "path required\n")
-	}
-	path, ok := shell.ResolvePath(data.CWD, argument, &pathBuffer)
-	if !ok {
-		finish(2, "invalid path\n")
-	}
+	path := requiredPath(data, 1)
 	operation := vfs.OperationCreate
 	marker := "TOUCH_PROCESS_OK\n"
 	if directory {
 		operation, marker = vfs.OperationMkdir, "MKDIR_PROCESS_OK\n"
 	}
 	reply, received := callVFS(vfs.Request{Operation: operation, Path: path})
-	if !received || reply.Status != vfs.StatusOK && !(operation == vfs.OperationCreate && reply.Status == vfs.StatusAlreadyExists) {
-		finish(2, refusal(reply.Status, "read-only filesystem\n", "create failed\n"))
+	if operation == vfs.OperationCreate && reply.Status == vfs.StatusAlreadyExists {
+		reply.Status = vfs.StatusOK
 	}
+	check(reply, received, path, true)
 	mark(marker)
-}
-
-// refusal picks the message for a refused mutation. A read-only mount is named
-// as such so the user can tell an immutable path from a bad one.
-func refusal(status vfs.Status, denied string, generic string) string {
-	if status == vfs.StatusPermissionDenied {
-		return denied
-	}
-	return generic
 }
 
 func runUnlink(data startup.Data) {
 	path := requiredPath(data, 1)
 	reply, received := callVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: path})
-	if !received || reply.Status != vfs.StatusOK {
-		finish(2, refusal(reply.Status, "rm: read-only filesystem\n", "rm: failed\n"))
-	}
+	check(reply, received, path, true)
 	mark("RM_PROCESS_OK\n")
 }
 
 func runMove(data startup.Data) {
 	source := requiredPath(data, 1)
-	var targetBuffer [shell.MaxPath]byte
-	targetArg, found := data.Arg(2)
-	if !found {
-		finish(2, "mv: target required\n")
-	}
-	target, ok := shell.ResolvePath(data.CWD, targetArg, &targetBuffer)
-	if !ok {
-		finish(2, "mv: invalid target\n")
-	}
+	target := requiredTarget(data)
 	reply, received := callVFS(vfs.Request{Operation: vfs.OperationRename, Path: source, Data: target})
-	if !received || reply.Status != vfs.StatusOK {
-		finish(2, "mv: failed\n")
+	if reply.Status == vfs.StatusAlreadyExists {
+		check(reply, received, target, true)
 	}
+	check(reply, received, source, true)
 	mark("MV_PROCESS_OK\n")
 }
 
 func runCopy(data startup.Data) {
 	source := requiredPath(data, 1)
-	var targetBuffer [shell.MaxPath]byte
-	targetArg, found := data.Arg(2)
-	if !found {
-		finish(2, "cp: target required\n")
-	}
-	target, ok := shell.ResolvePath(data.CWD, targetArg, &targetBuffer)
-	if !ok {
-		finish(2, "cp: invalid target\n")
-	}
-	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: target})
-	if !received || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
-		finish(2, refusal(created.Status, "cp: read-only target\n", "cp: create failed\n"))
-	}
-	callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: target, Offset: 0})
+	target := requiredTarget(data)
+	// Open the source first so a missing one leaves the target untouched.
 	input, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: source})
-	if !received || input.Status != vfs.StatusOK {
-		finish(2, "cp: source failed\n")
+	check(input, received, source, false)
+	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: target})
+	if created.Status == vfs.StatusAlreadyExists {
+		created.Status = vfs.StatusOK
 	}
+	check(created, received, target, true)
+	truncated, received := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: target, Offset: 0})
+	check(truncated, received, target, true)
 	output, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: target})
-	if !received || output.Status != vfs.StatusOK {
-		finish(2, "cp: target failed\n")
-	}
+	check(output, received, target, true)
 	for {
 		chunk, ok := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: input.Handle, Size: vfs.MaxProtocolData})
-		if !ok || chunk.Status != vfs.StatusOK {
-			finish(2, "cp: read failed\n")
-		}
+		check(chunk, ok, source, false)
 		if len(chunk.Data) == 0 {
 			break
 		}
 		written, ok := callVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: output.Handle, Data: chunk.Data})
-		if !ok || written.Status != vfs.StatusOK || written.Size != uint64(len(chunk.Data)) {
-			finish(2, "cp: write failed\n")
-		}
+		checkWritten(written, ok, target, len(chunk.Data))
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: input.Handle})
 	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: output.Handle})
@@ -477,9 +490,7 @@ func runCopy(data startup.Data) {
 func runStat(data startup.Data) {
 	path := requiredPath(data, 1)
 	reply, received := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
-	if !received || reply.Status != vfs.StatusOK {
-		finish(2, "stat: not found\n")
-	}
+	check(reply, received, path, false)
 	if reply.Kind == ramfs.KindDirectory {
 		lineText("directory ")
 	} else {
@@ -493,25 +504,22 @@ func runStat(data startup.Data) {
 
 func runUptime() {
 	if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
-		finish(2, "uptime unavailable\n")
+		failf(nil, "clock unavailable")
 	}
-	lineUint(clockValue)
-	lineText(" ticks")
+	var text [32]byte
+	lineBytes(shell.FormatUptime(clockValue/clock.TicksPerSecond, &text))
 	lineFlush()
 	mark("UPTIME_PROCESS_OK\n")
 }
 
 func runSleep(data startup.Data) {
-	value, found := data.Arg(1)
-	if !found {
-		finish(2, "sleep: seconds required\n")
-	}
+	value, _ := data.Arg(1)
 	duration, ok := parseSeconds(value)
 	if !ok {
-		finish(2, "sleep: invalid duration\n")
+		failf(value, "not a number of seconds between 0 and 86400")
 	}
 	if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
-		finish(2, "sleep unavailable\n")
+		failf(nil, "clock unavailable")
 	}
 	deadline := clockValue + duration
 	for clockValue < deadline {
@@ -519,7 +527,7 @@ func runSleep(data startup.Data) {
 		// spinning on the clock.
 		userwait.Sleep(deadline - clockValue)
 		if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
-			finish(2, "sleep unavailable\n")
+			failf(nil, "clock unavailable")
 		}
 	}
 	mark("SLEEP_PROCESS_OK\n")
@@ -649,26 +657,63 @@ func lineUintWidth(value uint64) int {
 
 func runMem() {
 	if systemInfoRead(unsafe.Pointer(&systemInfo[0]), uintptr(len(systemInfo))) != 0 {
-		finish(2, "mem unavailable\n")
+		failf(nil, "system information unavailable")
 	}
-	lineText("pages managed ")
-	lineUint(binary.LittleEndian.Uint64(systemInfo[16:24]))
-	lineText(" free ")
-	lineUint(binary.LittleEndian.Uint64(systemInfo[24:32]))
-	lineFlush()
+	// total is the memory the page allocator manages, not the machine's RAM:
+	// firmware, the kernel image and unmanaged regions are outside it.
+	total := binary.LittleEndian.Uint64(systemInfo[16:24]) * kcall.SystemInfoPageSize
+	free := binary.LittleEndian.Uint64(systemInfo[24:32]) * kcall.SystemInfoPageSize
+	memLine("total: ", total)
+	memLine("used:  ", total-free)
+	memLine("free:  ", free)
 	mark("MEM_PROCESS_OK\n")
 }
 
+func memLine(label string, bytes uint64) {
+	var text [24]byte
+	lineText(label)
+	lineBytes(shell.FormatSize(bytes, &text))
+	lineFlush()
+}
+
+// requiredPath resolves argument index against the working directory; a
+// missing argument is a usage error.
 func requiredPath(data startup.Data, index int) []byte {
 	argument, found := data.Arg(index)
 	if !found {
-		finish(2, "path required\n")
+		usage()
 	}
-	path, ok := shell.ResolvePath(data.CWD, argument, &pathBuffer)
+	return resolve(data, argument)
+}
+
+// requiredTarget resolves the second path of a two-path command into its own
+// buffer, so it does not overwrite the first.
+func requiredTarget(data startup.Data) []byte {
+	argument, found := data.Arg(2)
+	if !found {
+		usage()
+	}
+	path, ok := shell.ResolvePath(data.CWD, argument, &targetBuffer)
 	if !ok {
-		finish(2, "invalid path\n")
+		failf(argument, "invalid path")
 	}
 	return path
+}
+
+func resolve(data startup.Data, argument []byte) []byte {
+	path, ok := shell.ResolvePath(data.CWD, argument, &pathBuffer)
+	if !ok {
+		failf(argument, "invalid path")
+	}
+	return path
+}
+
+// checkWritten also refuses a short write, which would silently truncate.
+func checkWritten(reply vfs.Reply, received bool, path []byte, size int) {
+	check(reply, received, path, true)
+	if reply.Size != uint64(size) {
+		failf(path, "short write")
+	}
 }
 
 func writeArguments(data startup.Data, start int) {
@@ -797,11 +842,15 @@ func mark(message string) {
 }
 
 func writeError(message string) {
+	writeErrorBytes(unsafe.Slice(unsafe.StringData(message), len(message)))
+}
+
+func writeErrorBytes(message []byte) {
 	target := stderrHandle
 	if target == 0 {
 		target = stdoutHandle
 	}
-	writeHandle(target, unsafe.Slice(unsafe.StringData(message), len(message)))
+	writeHandle(target, message)
 }
 
 func writeHandle(target uint64, value []byte) {
