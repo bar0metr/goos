@@ -117,6 +117,11 @@ func (handler *testHandler) ProcessKill(process uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) ImageMap(device uint64, virtual uint64, address uint64) Status {
+	handler.channel, handler.address, handler.length = device, virtual, address
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -322,5 +327,19 @@ func TestDispatchProcessKill(t *testing.T) {
 	handler := &testHandler{}
 	if result := Dispatch(Request{Operation: OperationProcessKill, Arg0: 0x100000009}, handler); result.Status != StatusOK || handler.channel != 0x100000009 {
 		t.Fatalf("process kill = %#v, handler %#v", result, handler)
+	}
+}
+
+func TestDispatchImageMap(t *testing.T) {
+	if OperationImageMap != 32 {
+		t.Fatalf("operation %d", OperationImageMap)
+	}
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationImageMap, Arg0: 7, Arg1: 0x40200000, Arg2: 0x40004000}, handler)
+	if result.Status != StatusOK || result.Action != ActionReturn || handler.channel != 7 || handler.address != 0x40200000 || handler.length != 0x40004000 {
+		t.Fatalf("image map %+v %+v", result, handler)
+	}
+	if result := Dispatch(Request{Operation: OperationImageMap + 1}, handler); result.Status != StatusUnsupported {
+		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 }

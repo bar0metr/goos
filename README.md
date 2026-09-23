@@ -141,7 +141,8 @@ The native kernel and the first isolated services are implemented:
   stream, or process handles, with a ready bit mask and generation-safe wakeups;
 - a capability-isolated userspace TTY protocol and serial service;
 - a bounded generation-safe RAMFS core and versioned service protocol;
-- namespace-scoped VFS mounts, path resolution, open handles, and caches;
+- namespace-scoped VFS mounts, path resolution, open handles, and caches, with
+  every mount listed in its parent directory and protected from removal;
 - bounded init policy with dependencies, capability manifests, supervised
   restart policies, health states, and rate limiting;
 - deterministic USTAR initramfs discovery and a ring-3 native init as PID 1;
@@ -161,6 +162,9 @@ The native kernel and the first isolated services are implemented:
 - generation-safe task-slot reuse and bounded process completion records.
 - capability-protected process handles and a blocking native wait call.
 - bounded `/system/bin` executable lookup with per-process VFS sessions.
+- the boot archive mounted read-only at `/system` through a capability only the
+  filesystem service holds, so `ls /system/bin` lists the executables the launch
+  path resolves and every write to them is refused.
 - a versioned native startup ABI with named, capability-bounded handle roles.
 - bounded environment data, child exit-status propagation, and read-only
   process/memory system information.
@@ -173,6 +177,8 @@ The native kernel and the first isolated services are implemented:
 - a bounded FAT32 backend mounted at `/persist`, reached through VFS and a
   dedicated capability-scoped block-service endpoint, with persistence verified
   across separate QEMU boots.
+- user data at `/home` and mutable system state at `/state` on that volume,
+  named apart from the immutable system image.
 - distinct named standard-stream capabilities for external native utilities:
   read-only input role `in` and write-only `stdout` and `stderr`.
 - bounded `readline` input through an isolated utility's inherited `in`
@@ -202,7 +208,7 @@ is not yet a general application environment. Native programs no longer assume
 numeric handle slots and the Priority 1 base application environment is complete.
 The storage path reaches a persistent QEMU block device through an isolated
 driver, and native utilities can access bounded FAT32 regular files at
-`/persist` through VFS.
+`/persist`, `/home` and `/state` through VFS.
 
 PID 1, VFS, and the block service use event-driven multi-object waits for their
 independent control and client endpoints. A wake marks the task runnable and the
@@ -218,9 +224,16 @@ line per service, and the prompt. Kernel self-tests and markers live in the
 to a bounded kernel ring, printed by `log` (ADR 0059). The shell provides
 `services`, `handles`, `caps`, `log`, and `reboot`, and `ps` shows PID, type,
 state, and command (ADR 0061). `reboot` syncs storage and restarts the machine
-through a capability held only by PID 1. The FAT32 volume at `/persist`
-supports subdirectories (ADR 0060), so the M7 acceptance of writing, rebooting
-from the shell, and reading back runs inside one VM in the boot test.
+through a capability held only by PID 1. The FAT32 volume supports
+subdirectories (ADR 0060), so the M7 acceptance of writing, rebooting from the
+shell, and reading back runs inside one VM in the boot test, through `/home`.
+
+The namespace describes itself. `ls /` names `system`, `tmp`, `persist`, `home`
+and `state` because a mount is listed in the directory it is mounted on (ADR
+0069). `/system` is the boot archive itself, mounted read-only (ADR 0070), so
+the twenty utilities under `/system/bin` are visible and `mkdir /system/backdoor`
+answers "read-only filesystem". `/home` and `/state` name user data and mutable
+system state on the persistent volume (ADR 0071).
 
 ## Building and running
 
@@ -261,6 +274,53 @@ Starting services...
 goos>
 ```
 
+The namespace is walkable from there. This is real output, not a transcript:
+
+```text
+goos> ls /
+tmp/
+system/
+persist/
+home/
+state/
+goos> ls /system
+bin/
+motd
+init
+fault-probe
+vfs
+shell
+block
+virtio-blk
+goos> ls /system/bin
+coreutils
+pwd
+ls
+cat
+args
+echo
+readline
+mkdir
+touch
+rm
+cp
+mv
+stat
+write
+ps
+mem
+uptime
+uname
+sleep
+bench
+goos> mkdir /system/backdoor
+read-only filesystem
+goos> mkdir /home/user
+goos> write /home/user/notes.txt "Hello from GoOS"
+goos> cat /home/user/notes.txt
+Hello from GoOS
+```
+
 `make VALIDATION=1` builds the validation variant used by `make test-boot`. It
 runs the kernel self-tests and fault-injection scenarios and prints the `*_OK`
 markers that the boot test asserts.
@@ -292,9 +352,12 @@ reboot-persistence gate are implemented. Priority 3 shell composition is
 complete: stdin consumption, native streams, pipelines of up to four processes,
 sequential execution, bounded stdout `>`/`>>` redirection, bounded stdin `<`
 redirection, and bounded stderr `2>`/`2>>` redirection all work through explicit
-typed handles. Separating the normal boot from the validation boot is the next
-roadmap milestone. FAT32 hardening and storage failure recovery remain
-incremental work.
+typed handles. The namespace now describes the system it serves: mounts are
+discoverable and protected, `/system` is the read-only boot image, and `/home`
+and `/state` separate user data from mutable system state. Remaining 0.1.0 work
+is a persistent log service, a typed configuration service, and per-process
+resource quotas. FAT32 hardening and storage failure recovery remain incremental
+work.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors; stream merging such as

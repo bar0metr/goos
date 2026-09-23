@@ -248,6 +248,14 @@ goos_process_kill:
     ret
 .size goos_process_kill, .-goos_process_kill
 
+.global goos_image_map
+.type goos_image_map,@function
+goos_image_map:
+    movl $32, %eax
+    int $0x80
+    ret
+.size goos_image_map, .-goos_image_map
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

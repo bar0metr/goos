@@ -203,6 +203,43 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64) 
 	return rootAddress, true
 }
 
+// ExtendUserAddressSpace adds the leaf table covering the two MiB region that
+// contains virtual, so a later MapUserPage has somewhere to record its leaf.
+// Only the region the bootstrap layout already reaches is extended: the page
+// directory pointer and page directory must already exist, which confines
+// address-space growth to one level and one page.
+func ExtendUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64, virtual uint64) bool {
+	if allocator == nil || rootAddress%PageSize != 0 || virtual < IdentityMapLimit || virtual >= UserAddressLimit {
+		return false
+	}
+	// SAFETY: rootAddress names a process PML4 created by this package; its
+	// page-table pages stay owned and identity-mapped during bootstrap.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	pml4Entry := root[(virtual>>39)&0x1ff]
+	if pml4Entry&entryPresent == 0 {
+		return false
+	}
+	// SAFETY: non-leaf entries were produced only by allocateTable and retain
+	// exclusive, identity-mapped page-table addresses.
+	pdpt := (*table)(unsafe.Pointer(uintptr(pml4Entry & addressMask)))
+	pdptEntry := pdpt[(virtual>>30)&0x1ff]
+	if pdptEntry&entryPresent == 0 {
+		return false
+	}
+	// SAFETY: same page-table ownership invariant as above.
+	pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+	index := (virtual >> 21) & 0x1ff
+	if pd[index]&entryPresent != 0 {
+		return true
+	}
+	pageTableAddress, _, ok := allocateTable(allocator)
+	if !ok {
+		return false
+	}
+	pd[index] = pageTableAddress | entryPresent | entryWritable | entryUser
+	return true
+}
+
 // MapUserPage adds a supervisor-authorized user leaf to an existing process
 // address space. Writable executable mappings are rejected by pageEntry.
 func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {

@@ -19,7 +19,8 @@ The following foundation is already implemented:
 - PID 1, bounded supervision, restart policy, lifecycle events, and
   capability-bounded process spawning;
 - interactive native shell;
-- bounded `/system/bin` lookup;
+- bounded `/system/bin` lookup, with the boot image itself mounted read-only at
+  `/system` so the executables it resolves are the ones a listing shows;
 - isolated native `pwd`, `ls`, and `cat` processes;
 - capability-protected process handles, wait, completion records, and process
   resource reclamation;
@@ -105,11 +106,15 @@ goos> cat /home/demo/message.txt
 persistent
 ```
 
-The second `cat` must read data written before reboot.
+The second `cat` must read data written before reboot. This runs verbatim: ADR
+0071 mounts the volume's `home` and `state` directories at `/home` and `/state`
+beside the whole-volume `/persist`, and the boot test performs the sequence
+through `/home` inside one VM.
 
 Current progress: ADRs 0033 through 0036 implement the bounded `GBLK001`
 protocol, capability-scoped PCI/IRQ/DMA driver authority, the userspace
-virtio-blk data path, and a bounded FAT32 backend mounted at `/persist`. QEMU
+virtio-blk data path, and a bounded FAT32 backend mounted at `/persist`,
+`/home` and `/state`. QEMU
 validates file creation and readback through VFS and verifies the bytes in the
 persistent raw image. The boot gate then starts a fresh VM on the same image and
 reads the file without rewriting it. Items 1 through 8 are complete for the
@@ -235,6 +240,19 @@ the 8.3 form.
 ADR 0067 adds `ProcessKill`, so the shell can stop a background job with
 `kill` and the foreground command with Ctrl-C, and ADR 0068 makes `sleep` take
 seconds and block instead of spinning.
+
+ADRs 0069 through 0071 close the gap between the namespace and the system it
+describes. A mount is now listed in its parent directory, so `ls /` names every
+mount instead of only the entries one backend happens to own, and a directory
+another mount points at cannot be removed, under its own name or under an alias.
+`/system` is the boot archive mounted read-only through a capability only the
+filesystem service holds, so `ls /system/bin` lists the executables the launch
+path actually resolves and every write to them is refused with "read-only
+filesystem"; the specification's acceptance criterion for the native application
+environment therefore holds. `/home` and `/state` name user data and mutable
+system state on the persistent volume, which is what the immutable-system-image
+split needs and what the persistent-storage acceptance criterion is written
+against.
 
 ADR 0062 moves startup data through shared memory, so `write PATH "TEXT"`
 from the spec fits and the M7 test uses it. ADR 0063 adds `MemoryMap`, so a

@@ -51,7 +51,14 @@ flush, repeated relative-path FAT32 reads and writes, and the resulting bytes in
 the persistent raw disk image. Driver teardown
 resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
-A bounded FAT32 backend is mounted at `/persist`. It is intentionally limited
+A bounded FAT32 backend is mounted at `/persist`, and its `home` and `state`
+directories are mounted again at `/home` and `/state` so that user data and
+mutable system state are named apart from the immutable system image (ADR 0071).
+The filesystem service creates those directories on a volume that lacks them.
+The three mounts share one backend instance and one sector cache, so
+`/persist/home` and `/home` are one directory rather than two views; the
+namespace refuses to remove a directory another mount points at, under either
+name. It is intentionally limited
 to ASCII names of at most 63 bytes (ADR 0066), one-sector clusters, and 64 KiB
 files. A name that fits the 8.3 form stays a single directory entry; anything
 longer or mixed case gets a VFAT long-name chain and a generated alias. It supports the

@@ -167,7 +167,7 @@ func runWrite(data startup.Data) {
 	path := requiredPath(data, pathIndex)
 	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
 	if !received || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
-		finish(2, "write: create failed\n")
+		finish(2, refusal(created.Status, "write: read-only filesystem\n", "write: create failed\n"))
 	}
 	offset := uint64(0)
 	if appendMode {
@@ -389,16 +389,25 @@ func runCreate(data startup.Data, directory bool) {
 	}
 	reply, received := callVFS(vfs.Request{Operation: operation, Path: path})
 	if !received || reply.Status != vfs.StatusOK && !(operation == vfs.OperationCreate && reply.Status == vfs.StatusAlreadyExists) {
-		finish(2, "create failed\n")
+		finish(2, refusal(reply.Status, "read-only filesystem\n", "create failed\n"))
 	}
 	mark(marker)
+}
+
+// refusal picks the message for a refused mutation. A read-only mount is named
+// as such so the user can tell an immutable path from a bad one.
+func refusal(status vfs.Status, denied string, generic string) string {
+	if status == vfs.StatusPermissionDenied {
+		return denied
+	}
+	return generic
 }
 
 func runUnlink(data startup.Data) {
 	path := requiredPath(data, 1)
 	reply, received := callVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: path})
 	if !received || reply.Status != vfs.StatusOK {
-		finish(2, "rm: failed\n")
+		finish(2, refusal(reply.Status, "rm: read-only filesystem\n", "rm: failed\n"))
 	}
 	mark("RM_PROCESS_OK\n")
 }
@@ -434,7 +443,7 @@ func runCopy(data startup.Data) {
 	}
 	created, received := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: target})
 	if !received || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
-		finish(2, "cp: create failed\n")
+		finish(2, refusal(created.Status, "cp: read-only target\n", "cp: create failed\n"))
 	}
 	callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: target, Offset: 0})
 	input, received := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: source})

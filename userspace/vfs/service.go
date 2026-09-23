@@ -2,6 +2,7 @@
 package vfsservice
 
 import (
+	"goos/kernel/initramfs"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/fat32"
@@ -12,27 +13,88 @@ type Service struct {
 	namespace  vfs.Namespace
 	readData   [vfs.MaxReplyData]byte
 	persistent fat32.FileSystem
+	image      initramfs.Archive
+}
+
+// MountSystemImage mounts the boot image read-only at /system. The executables
+// the launch path resolves under /system/bin therefore appear in the namespace
+// under exactly those names, instead of the search root being a path that
+// nothing can list. The archive is untrusted input, so a malformed image is
+// refused here rather than at a later lookup.
+func (service *Service) MountSystemImage(archive []byte) bool {
+	if !service.image.Init(archive) {
+		return false
+	}
+	// The archive stores its members under a system/ prefix, which is what the
+	// launch path resolves, so the mount root is that directory rather than the
+	// archive root. The two then name the same bytes by the same path.
+	name, valid := ramfs.MakeName([]byte(systemImageDirectory))
+	if !valid {
+		return false
+	}
+	root, status := service.image.OpenName(service.image.Root(), name)
+	if status != ramfs.StatusOK {
+		return false
+	}
+	return service.namespace.Mount([]byte("/"+systemImageDirectory), &service.image, root) == vfs.StatusOK
+}
+
+// systemImageDirectory is the archive directory mounted as /system.
+const systemImageDirectory = "system"
+
+// persistentMounts names the directories of the persistent volume that get
+// their own place in the namespace. User data and mutable system state are
+// separate entries so the layout distinguishes them from the immutable system
+// image, as the architecture requires, without needing a second device. The
+// whole volume stays reachable at /persist; the namespace refuses to remove a
+// directory another mount points at, so the two names cannot diverge.
+var persistentMounts = [...]struct{ path, directory string }{
+	{"/home", "home"},
+	{"/state", "state"},
 }
 
 func (service *Service) MountPersistent(device fat32.Device) bool {
 	root, ok := service.persistent.Mount(device)
-	return ok && service.namespace.Mount([]byte("/persist"), &service.persistent, root) == vfs.StatusOK
+	if !ok || service.namespace.Mount([]byte("/persist"), &service.persistent, root) != vfs.StatusOK {
+		return false
+	}
+	for _, mount := range persistentMounts {
+		node, ok := service.persistentDirectory(root, mount.directory)
+		if !ok || service.namespace.Mount([]byte(mount.path), &service.persistent, node) != vfs.StatusOK {
+			return false
+		}
+	}
+	return true
 }
 
+// persistentDirectory returns the volume directory of the given name, creating
+// it on a volume that does not have one yet. A name already taken by a regular
+// file is an error rather than something to overwrite.
+func (service *Service) persistentDirectory(root ramfs.NodeID, name string) (ramfs.NodeID, bool) {
+	value, valid := ramfs.MakeName([]byte(name))
+	if !valid {
+		return 0, false
+	}
+	node, status := service.persistent.OpenName(root, value)
+	if status == ramfs.StatusNotFound {
+		node, status = service.persistent.MkdirName(root, value)
+	}
+	if status != ramfs.StatusOK {
+		return 0, false
+	}
+	stat, status := service.persistent.Stat(node)
+	if status != ramfs.StatusOK || stat.Kind != ramfs.KindDirectory {
+		return 0, false
+	}
+	return node, true
+}
+
+// Init builds the volatile root. /system is not created here: it is the mount
+// point of the immutable boot image, and the namespace lists a mount in its
+// parent directory without needing a placeholder to stand in for it.
 func (service *Service) Init() bool {
 	root := service.fs.Init()
-	system, status := service.fs.Mkdir(root, []byte("system"))
-	if status != ramfs.StatusOK {
-		return false
-	}
-	motd, status := service.fs.Create(system, []byte("motd"))
-	if status != ramfs.StatusOK {
-		return false
-	}
-	if _, status = service.fs.Write(motd, 0, []byte("Welcome to GoOS\n")); status != ramfs.StatusOK {
-		return false
-	}
-	if _, status = service.fs.Mkdir(root, []byte("tmp")); status != ramfs.StatusOK {
+	if _, status := service.fs.Mkdir(root, []byte("tmp")); status != ramfs.StatusOK {
 		return false
 	}
 	return service.namespace.Mount([]byte("/"), &service.fs, root) == vfs.StatusOK
