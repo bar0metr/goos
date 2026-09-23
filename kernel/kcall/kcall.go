@@ -224,10 +224,38 @@ const MaxStreamIO = uint64(256)
 
 // HandleInfoSize and ProcessInfoSize are the fixed record sizes written by
 // HandleInfo and ProcessInfo.
+//
+// A ProcessInfo record is laid out as:
+//
+//	[0:8]   process ID
+//	[8]     scheduling state
+//	[9]     task count
+//	[10:16] reserved, zero
+//	[16:32] executable name, NUL padded
+//	[32:40] CPU ticks charged to the process
+//	[40:56] resources held, one uint32 per Resource
+//	[56:72] resource limits, same order
+//	[72:80] reserved, zero
 const (
 	HandleInfoSize  = uint64(16)
-	ProcessInfoSize = uint64(32)
+	ProcessInfoSize = uint64(80)
 	MaxProcessName  = 16
+	// ProcessResources is the number of counters in each of the held and limit
+	// arrays of a ProcessInfo record.
+	ProcessResources = 4
+	// Offsets into a ProcessInfo record.
+	ProcessInfoCPUOffset    = 32
+	ProcessInfoUsedOffset   = 40
+	ProcessInfoLimitsOffset = 56
+)
+
+// Resource indices inside a ProcessInfo record's counter arrays. They match
+// the kernel's own ordering and are part of the record's contract.
+const (
+	ProcessChannels = 0
+	ProcessStreams  = 1
+	ProcessTasks    = 2
+	ProcessPages    = 3
 )
 
 // Process states reported by ProcessInfo.

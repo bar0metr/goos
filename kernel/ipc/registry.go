@@ -9,7 +9,11 @@ const (
 type Registry struct {
 	channels [MaxChannels]Channel
 	ids      [MaxChannels]uint64
-	next     uint64
+	// owners records which process is charged for each live channel, so the
+	// charge is returned when the channel really goes away rather than when
+	// one holder happens to close its endpoint.
+	owners [MaxChannels]uint64
+	next   uint64
 }
 
 func EndpointObject(channel uint64, side uint8) (uint64, bool) {
@@ -30,12 +34,14 @@ func DecodeEndpointObject(object uint64) (uint64, uint8, bool) {
 	return object &^ endpointSideBit, side, true
 }
 
-func (registry *Registry) Create() (*Channel, uint64, bool) {
+// Create records owner as the process accountable for the channel.
+func (registry *Registry) Create(owner uint64) (*Channel, uint64, bool) {
 	for index := range registry.ids {
 		if registry.ids[index] == 0 {
 			registry.next++
 			id := channelNamespace | registry.next
 			registry.ids[index] = id
+			registry.owners[index] = owner
 			registry.channels[index].Reset()
 			return &registry.channels[index], id, true
 		}
@@ -52,15 +58,18 @@ func (registry *Registry) Lookup(id uint64) (*Channel, bool) {
 	return nil, false
 }
 
-func (registry *Registry) Release(id uint64) bool {
+// Release frees the slot once both endpoints are closed and reports the process
+// that was charged for it, which may already have exited.
+func (registry *Registry) Release(id uint64) (uint64, bool) {
 	for index, candidate := range registry.ids {
 		if candidate == id && !registry.channels[index].Alive(0) && !registry.channels[index].Alive(1) {
-			registry.ids[index] = 0
+			owner := registry.owners[index]
+			registry.ids[index], registry.owners[index] = 0, 0
 			registry.channels[index] = Channel{}
-			return true
+			return owner, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // At returns the live channel stored in slot index, if any.

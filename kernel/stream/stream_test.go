@@ -58,7 +58,7 @@ func TestWriteStatusReportsClosedReader(t *testing.T) {
 
 func TestRegistryEndpointIdentity(t *testing.T) {
 	var registry Registry
-	_, id, ok := registry.Create()
+	_, id, ok := registry.Create(7)
 	reader, readerOK := ReaderObject(id)
 	writer, writerOK := WriterObject(id)
 	readerID, readerIsWriter, readerValid := DecodeEndpointObject(reader)
@@ -80,5 +80,26 @@ func BenchmarkStreamRoundTrip(b *testing.B) {
 		if size, status := stream.Read(output); status != StatusOK || size != len(output) {
 			b.Fatal("read failed")
 		}
+	}
+}
+
+func TestRegistryReportsTheChargedProcessOnRelease(t *testing.T) {
+	var registry Registry
+	endpoint, id, ok := registry.Create(9)
+	if !ok {
+		t.Fatal("stream was not created")
+	}
+	if _, released := registry.Release(id); released {
+		t.Fatal("live stream was released")
+	}
+	endpoint.CloseReader()
+	endpoint.CloseWriter()
+	owner, released := registry.Release(id)
+	if !released || owner != 9 {
+		t.Fatalf("released = %v, charged to %d", released, owner)
+	}
+	// The slot is reusable and no longer names the old owner.
+	if _, _, created := registry.Create(11); !created {
+		t.Fatal("released slot was not reused")
 	}
 }

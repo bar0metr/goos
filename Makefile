@@ -241,6 +241,7 @@ docs:
 	@test -f docs/architecture/storage.md
 	@test -f docs/architecture/streams.md
 	@test -f docs/development/testing.md
+	@test -f docs/adr/0072-per-process-resource-quotas.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
 	@test -f docs/adr/0071-persistent-volume-layout.md

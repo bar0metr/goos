@@ -90,3 +90,34 @@ forever on a process that has already ended.
 The completion record is written unconditionally rather than depending on a
 bounded queue having room, and lifecycle messages that the channel cannot accept
 yet are retained and retried by the kernel loop instead of being dropped.
+
+## Resource accounting
+
+A process has a typed resource account alongside its handle table (ADR 0072).
+Channels, streams, tasks and pages are charged to the process that causes them
+to exist and released when they cease to; a charge that would exceed the quota
+is refused and changes nothing, so a refused request never reaches the global
+table. A quota is not a capability: it cannot be transferred, and no process can
+raise its own or another's.
+
+| Resource | Ordinary | PID 1 | Charged at |
+| --- | ---: | ---: | --- |
+| channels | 4 | 16 | `ChannelCreate`, released when the registry frees the channel |
+| streams | 4 | 16 | `StreamCreate`, released when the registry frees the stream |
+| tasks | 4 | 8 | task binding, released when the task exits |
+| pages | 192 | 512 | launch, `DMAAllocate`, `ImageMap`; released at teardown |
+
+PID 1 holds the larger share because it creates the endpoints every other
+process communicates through. The share is granted once, at boot, and
+`GrantSystemQuota` refuses every other process.
+
+Channels and streams are charged to their creator until the object is released
+rather than until the creator's handle closes, because both endpoints can be
+transferred and the object outlives them. Launch memory is measured as the
+difference in free pages across address-space creation and image loading, and
+charged before the task exists, so an image that does not fit fails to launch.
+
+CPU is sampled rather than measured: the timer charges a tick to the task it
+interrupted, and a task's count folds into its process when it exits. `ps`
+reports memory and CPU per process, and `quota` prints each process's held and
+permitted share of every resource.
