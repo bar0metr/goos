@@ -49,6 +49,17 @@ writable leaf. The validated physical pages are accessed through the kernel
 identity map with quadword string instructions, which also clear page-table
 pages and initialize loaded image pages.
 
+## Shared image pages
+
+The read-only segments of images from the system image — code and constants —
+are loaded once and mapped by every process that runs the image (ADR 0081).
+The frames are keyed by the image's offset in the immutable archive, mapped with
+the segment's own permissions, which never include write, and mapped without the
+owned bit, so a process's teardown leaves them. They are not charged to any
+process and are never freed. Writable segments and stacks remain private copies.
+The cache is bounded at 128 segments and 1024 frames; a launch that does not fit
+loads a private copy.
+
 ## Shared memory
 
 Shared-memory objects own between one and 16 zeroed physical pages. A monotonic

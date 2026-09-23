@@ -122,6 +122,12 @@ holds at most four channels, four streams, four tasks and 192 pages; PID 1, whic
 creates the endpoints every other process communicates through, holds at most
 sixteen, sixteen, eight and 512, and is refused past that like anything else.
 
+The shared image cache (ADR 0081) is not charged to any process. It grows only
+when PID 1 launches an image from the immutable system image, it is keyed by
+the image's place in that archive, and it is bounded at 128 segments and 1024
+frames, past which launches load private copies. No process input selects or
+enlarges it.
+
 `StreamCreate` still needs no capability, because a stream is a primitive any
 process may need, but a process calling it in a loop is refused at its share and
 leaves the rest of the registry for everyone else. A launch whose address space

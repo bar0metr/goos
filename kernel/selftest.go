@@ -450,6 +450,7 @@ func runKernelSelfTests(pageTable uint64) {
 		}
 	}
 	mark("USER_COPYOUT_OK")
+	checkSharedImagePages(faultBytes)
 	mark("KCALL_ABI_OK")
 	mark("NATIVE_IMAGE_LOADER_OK")
 	selfTestLoadedA, selfTestLoadedB = loadedA, loadedB
@@ -512,6 +513,15 @@ func awaitValidationBoot() {
 		}
 	}
 	mark("NATIVE_STARTUP_ABI_OK")
+	// The supervision scenario above relaunches the same image, so its code
+	// must by now have been mapped from the shared cache at least once.
+	if imagePages.Hits() == 0 {
+		console.WriteString("PANIC: image pages were not shared\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	mark("IMAGE_PAGES_SHARED_OK")
 	mark("PID1_SERVICE_LAUNCH_OK")
 	if amd64.UserPreemptions() == 0 {
 		console.WriteString("PANIC: userspace task was not preempted\n")
@@ -527,4 +537,41 @@ func awaitValidationBoot() {
 	mark("TTY_RIGHTS_OK")
 	console.WriteString("Kernel initialized\n")
 	mark("BOOT_OK")
+}
+
+// selfTestShared is a private cache, so the check below neither depends on nor
+// disturbs the one launches use.
+var selfTestShared loader.SharedPages
+
+// checkSharedImagePages loads one image into two address spaces through a
+// shared cache (ADR 0081) and requires that the code is one frame mapped by
+// both, that the stack is not, that neither process can have the kernel write
+// into the shared frame, and that tearing one process down leaves the frame
+// allocated and mapped for the other.
+func checkSharedImagePages(image []byte) {
+	first, firstOK := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
+	second, secondOK := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
+	if !firstOK || !secondOK {
+		panicSerial("shared image address spaces failed")
+	}
+	_, firstLoaded := loader.LoadImage(&pageAllocator, first, image, &selfTestShared, 1)
+	_, secondLoaded := loader.LoadImage(&pageAllocator, second, image, &selfTestShared, 1)
+	firstCode, firstCodeOK := vm.ResolveUser(first, vm.UserCodeAddress)
+	secondCode, secondCodeOK := vm.ResolveUser(second, vm.UserCodeAddress)
+	firstStack, _ := vm.ResolveUser(first, vm.UserStackAddress)
+	secondStack, _ := vm.ResolveUser(second, vm.UserStackAddress)
+	if !firstLoaded || !secondLoaded || !firstCodeOK || !secondCodeOK || firstCode != secondCode || firstStack == secondStack || selfTestShared.Hits() != 2 {
+		panicSerial("image code was not shared, or its stack was")
+	}
+	probe := []byte{0xcc}
+	if vm.CopyOut(first, vm.UserCodeAddress, probe) || vm.CanCopyOut(second, vm.UserCodeAddress, 1) || vm.CopyOut(second, vm.UserDataAddress, probe) {
+		panicSerial("a shared image page accepted a kernel write")
+	}
+	if !vm.DestroyUserAddressSpace(&pageAllocator, first) || !pageAllocator.IsAllocated(secondCode) {
+		panicSerial("teardown released a shared image page")
+	}
+	if code, ok := vm.ResolveUser(second, vm.UserCodeAddress); !ok || code != secondCode || !vm.DestroyUserAddressSpace(&pageAllocator, second) {
+		panicSerial("teardown disturbed the other process's code")
+	}
+	mark("IMAGE_PAGES_ISOLATED_OK")
 }

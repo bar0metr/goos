@@ -558,6 +558,9 @@ require_regex format.uptime '^up [0-9][0-9]*:[0-9][0-9]:[0-9][0-9]$' 'uptime as 
 require_regex format.mem '^total: [0-9][0-9]*\.[0-9] [KMG]iB$' 'memory in binary units' "$log" 'goos> mem'
 pass_group help
 
+# Relaunching an image maps its code from the shared cache (ADR 0081).
+require_marker boot.image-pages-shared IMAGE_PAGES_SHARED_OK "$log"
+require_marker memory-security.image-pages-isolated IMAGE_PAGES_ISOLATED_OK "$log"
 require_marker pipeline.exec PIPELINE_EXEC_OK "$log"
 require_marker pipeline.data piped-native-data "$log" 'echo piped-native-data'
 for marker in sequence-first sequence-pipe sequence-last sequence-after-failure 'exec: invalid command sequence' 'quoted;separator' 'escaped;separator' pipeline-four-data pipeline-last-failure-recovered pipeline-middle-failure-recovered pipeline-first-failure-recovered; do

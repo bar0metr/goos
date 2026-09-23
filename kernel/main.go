@@ -50,47 +50,50 @@ var (
 	dispatchHandler nativeCallHandler
 	// Native calls run one at a time in the kernel exclusion domain, so the
 	// call paths share these buffers instead of allocating on a leaking heap.
-	handleInfoWire          [kcall.HandleInfoSize]byte
-	processInfoWire         [kcall.ProcessInfoSize]byte
-	clockWire               [8]byte
-	nanosWire               [8]byte
-	consoleByteWire         [1]byte
-	systemInfoWire          [kcall.SystemInfoSize]byte
-	portWire                [4]byte
-	dmaWire                 [24]byte
-	channelWire             [16]byte
-	streamCreateWire        [16]byte
-	streamDescriptorWire    [24]byte
-	streamResultWire        [8]byte
-	receiveDescriptorWire   [24]byte
-	exitWire                [8]byte
-	waitAnyResultWire       [kcall.WaitAnyResultSize]byte
-	waitMaskWire            [8]byte
-	launchTemplate          [supervisor.StagingSlotSize]byte
-	launchBound             [startup.Size]byte
-	channelRegistry         ipc.Registry
-	streamRegistry          stream.Registry
-	streamCallData          [kcall.MaxStreamIO]byte
-	lifecycleChannel        *ipc.Channel
-	lifecycleChannelID      uint64
-	vfsChannelID            uint64
-	bootProcessA            *process.Process
-	bootProcessB            *process.Process
-	bootInitProcess         *process.Process
-	processRegistry         process.Registry
-	ipcWaitSet              ipc.WaitSet
-	ipcWakeResults          [ipc.MaxWaiters]ipc.WaitResult
-	ipcWaitStatus           [sched.MaxTasks]kcall.Status
-	processWaitSet          process.WaitSet
-	processWakeResults      [process.MaxWaiters]process.WaitResult
-	processWaitStatus       [sched.MaxTasks]kcall.Status
-	streamWaitSet           ipc.WaitSet
-	streamWakeResults       [ipc.MaxWaiters]ipc.WaitResult
-	streamWaitStatus        [sched.MaxTasks]kcall.Status
-	waitAnyTable            kernelwait.Table
-	waitAnyCompletions      [sched.MaxTasks]kernelwait.Completion
-	waitAnyEntries          [kernelwait.MaxObjects]kernelwait.Entry
-	waitAnyWire             [kernelwait.MaxObjects * int(kcall.WaitAnyInterestSize)]byte
+	handleInfoWire        [kcall.HandleInfoSize]byte
+	processInfoWire       [kcall.ProcessInfoSize]byte
+	clockWire             [8]byte
+	nanosWire             [8]byte
+	consoleByteWire       [1]byte
+	systemInfoWire        [kcall.SystemInfoSize]byte
+	portWire              [4]byte
+	dmaWire               [24]byte
+	channelWire           [16]byte
+	streamCreateWire      [16]byte
+	streamDescriptorWire  [24]byte
+	streamResultWire      [8]byte
+	receiveDescriptorWire [24]byte
+	exitWire              [8]byte
+	waitAnyResultWire     [kcall.WaitAnyResultSize]byte
+	waitMaskWire          [8]byte
+	launchTemplate        [supervisor.StagingSlotSize]byte
+	launchBound           [startup.Size]byte
+	channelRegistry       ipc.Registry
+	streamRegistry        stream.Registry
+	streamCallData        [kcall.MaxStreamIO]byte
+	lifecycleChannel      *ipc.Channel
+	lifecycleChannelID    uint64
+	vfsChannelID          uint64
+	bootProcessA          *process.Process
+	bootProcessB          *process.Process
+	bootInitProcess       *process.Process
+	processRegistry       process.Registry
+	ipcWaitSet            ipc.WaitSet
+	ipcWakeResults        [ipc.MaxWaiters]ipc.WaitResult
+	ipcWaitStatus         [sched.MaxTasks]kcall.Status
+	processWaitSet        process.WaitSet
+	processWakeResults    [process.MaxWaiters]process.WaitResult
+	processWaitStatus     [sched.MaxTasks]kcall.Status
+	streamWaitSet         ipc.WaitSet
+	streamWakeResults     [ipc.MaxWaiters]ipc.WaitResult
+	streamWaitStatus      [sched.MaxTasks]kcall.Status
+	waitAnyTable          kernelwait.Table
+	waitAnyCompletions    [sched.MaxTasks]kernelwait.Completion
+	waitAnyEntries        [kernelwait.MaxObjects]kernelwait.Entry
+	waitAnyWire           [kernelwait.MaxObjects * int(kcall.WaitAnyInterestSize)]byte
+	// imagePages holds the read-only pages of system images that every
+	// process running them maps (ADR 0081).
+	imagePages              loader.SharedPages
 	bootRAMFS               ramfs.FileSystem
 	deviceRAMFS             ramfs.FileSystem
 	bootVFS                 vfs.Namespace
@@ -445,7 +448,7 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 		}
 	}
 	began := launchMark()
-	image, found := initramfs.Find(bootuefi.Initramfs(&bootInfo), path[1:])
+	image, imageKey, found := initramfs.Locate(bootuefi.Initramfs(&bootInfo), path[1:])
 	began = launchStageDone(launchLookup, began)
 	if !found {
 		return 0, 0, supervisor.LaunchNotFound
@@ -459,7 +462,7 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	if !ok {
 		return 0, 0, supervisor.LaunchAddressSpaceFailed
 	}
-	loaded, ok := loader.LoadNative(&pageAllocator, root, image)
+	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, imageKey)
 	began = launchStageDone(launchLoad, began)
 	if !ok {
 		abandonSpawn(root, nil, false)
@@ -513,7 +516,9 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	// Charging happens before the task exists, because a runnable task cannot
 	// be withdrawn. An image whose address space does not fit the page quota
 	// therefore fails to launch rather than running over its share.
-	if pagesUsed := pagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !spawned.Charge(process.ResourcePages, uint32(pagesUsed)) {
+	// Frames the load added to the shared image cache belong to the system
+	// image rather than to this process, so they are not charged to it.
+	if pagesUsed := pagesBefore - pageAllocator.Statistics().FreePages - loaded.SharedPagesAllocated; pagesUsed != 0 && !spawned.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		kernelLogUint(logfmt.Warn, "launch over page quota", "pages", pagesUsed)
 		abandonSpawn(root, spawned, true)
 		return 0, 0, supervisor.LaunchResourceExhausted
