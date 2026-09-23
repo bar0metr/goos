@@ -93,7 +93,7 @@ $(INIT_ELF): $(shell find userspace/init userspace/exec userspace/startup usersp
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
@@ -263,6 +263,7 @@ docs:
 	@test -f docs/adr/0072-per-process-resource-quotas.md
 	@test -f docs/adr/0073-persistent-log-service.md
 	@test -f docs/adr/0074-typed-configuration-service.md
+	@test -f docs/adr/0075-interrupt-driven-console.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
 	@test -f docs/adr/0071-persistent-volume-layout.md

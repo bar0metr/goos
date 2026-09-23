@@ -583,13 +583,34 @@ func (handler nativeCallHandler) ConsoleRead(device uint64, address uint64, leng
 	if !ok || cap.Object() != 1 {
 		return kcall.StatusPermissionDenied
 	}
-	value, ready := amd64.NewCOM1().TryReadByte()
-	if !ready {
+	// The byte comes from the ring the serial interrupt fills, not from the
+	// UART: polling the device here is what made a reader spin.
+	taken := amd64.ConsoleTake()
+	if taken == 0 {
 		return kcall.StatusNotFound
 	}
-	consoleByteWire[0] = value
+	consoleByteWire[0] = byte(taken)
 	if !vm.CopyOut(handler.root, address, consoleByteWire[:]) {
 		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+// ConsoleInterrupt reports whether Ctrl-C was typed and consumes it. It exists
+// so a shell can watch for an interrupt while a command owns the console: the
+// alternative, reading bytes and discarding the ones that are not Ctrl-C, takes
+// input away from the process the user is typing to.
+func (handler nativeCallHandler) ConsoleInterrupt(device uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Read)
+	if !ok || cap.Object() != deviceConsoleObject {
+		return kcall.StatusPermissionDenied
+	}
+	if !amd64.ConsoleTakeInterrupt() {
+		return kcall.StatusNotFound
 	}
 	return kcall.StatusOK
 }
@@ -1638,6 +1659,19 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 			return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
 		}
 		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindStream, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK, 0
+	case handle.TypeDevice:
+		// Only the console device is waitable. Read authority is what a reader
+		// already needs to take a byte, so waiting for one needs no more.
+		if authority.Object() != deviceConsoleObject {
+			return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyObject
+		}
+		if events == 0 || events & ^kcall.WaitReadable != 0 {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+		}
+		if !authority.Allows(capability.Read) {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
+		}
+		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindConsole, Object: deviceConsoleObject}, Events: kernelwait.Readable}, kcall.StatusOK, 0
 	case handle.TypeProcess:
 		if events != kcall.WaitCompleted {
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
@@ -1696,6 +1730,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint16 {
 		case kernelwait.KindProcess:
 			_, status := processRegistry.Wait(process.ID(entry.Key.Object))
 			ready = status != process.WaitRunning
+		case kernelwait.KindConsole:
+			ready = amd64.ConsolePending()
 		}
 		if ready {
 			mask |= 1 << index
@@ -1722,6 +1758,26 @@ func publishWaitAny(key kernelwait.Key, event kernelwait.Event) {
 		waitAnyCompletions[index] = kernelwait.Completion{}
 	}
 }
+
+// wakeConsoleWaiters publishes console readability from the kernel loop. The
+// serial interrupt drains the UART so nothing is lost, and the wake travels the
+// same path every other readiness does, so there is one place that completes a
+// wait. It costs at most one tick of latency on a keystroke.
+func wakeConsoleWaiters() {
+	// Input arriving faster than it is read overruns the ring. Nothing can
+	// recover the bytes, so the loss is reported rather than hidden; once is
+	// enough, because a reader that has fallen behind will keep falling behind.
+	if dropped := amd64.ConsoleDropped(); dropped != 0 && !consoleOverrunReported {
+		consoleOverrunReported = true
+		kernelLogUint(logfmt.Warn, "console input dropped", "bytes", dropped)
+	}
+	if !amd64.ConsolePending() {
+		return
+	}
+	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindConsole, Object: deviceConsoleObject}, kernelwait.Readable)
+}
+
+var consoleOverrunReported bool
 
 func expireWaitAny() {
 	count := waitAnyTable.Expire(amd64.TimerTicks(), waitAnyCompletions[:])
@@ -1791,6 +1847,7 @@ func expireWaitDeadlines() {
 	expireProcessWaiters()
 	expireStreamWaiters()
 	expireWaitAny()
+	wakeConsoleWaiters()
 }
 
 //export goos_idle_task
@@ -1890,12 +1947,15 @@ func main() {
 			amd64.Halt()
 		}
 	}
-	if !amd64.ConfigureVirtioIRQ(pageTable) {
-		console.WriteString("PANIC: virtio IRQ routing failed\n")
+	if !amd64.ConfigureDeviceIRQs(pageTable) {
+		console.WriteString("PANIC: device IRQ routing failed\n")
 		for {
 			amd64.Halt()
 		}
 	}
+	// The UART interrupt is enabled only now: its gate exists, so the first
+	// byte to arrive has a handler to drain it.
+	amd64.EnableConsoleInterrupt()
 	if validation.Enabled {
 		amd64.TriggerBreakpoint()
 	}

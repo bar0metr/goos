@@ -14,8 +14,11 @@ const (
 )
 
 const (
-	exceptionCount  = 32
-	timerVector     = 32
+	exceptionCount = 32
+	timerVector    = 32
+	// GSI 4 is the legacy UART line. Vector numbering follows the IOAPIC
+	// convention this bootstrap already uses for GSI 11.
+	serialIRQVector = 36
 	virtioIRQVector = 43
 	userCallVector  = 0x80
 	yieldVector     = 0x81
@@ -37,7 +40,7 @@ var (
 )
 
 //go:extern goos_interrupt_table
-var interruptTable [exceptionCount + 4]uintptr
+var interruptTable [exceptionCount + 5]uintptr
 
 // InstallDescriptorTables replaces firmware GDT/IDT state. All architectural
 // exception vectors receive a gate; vector 3 is deliberately callable from
@@ -69,6 +72,10 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 		return false
 	}
 	idt[yieldVector] = NewIDTEntry(interruptTable[exceptionCount+3], interruptGate)
+	if interruptTable[exceptionCount+4] == 0 {
+		return false
+	}
+	idt[serialIRQVector] = NewIDTEntry(interruptTable[exceptionCount+4], interruptGate)
 
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
 	if !ok || !unmapGuardPage(pageTable, allocation) {
@@ -86,9 +93,11 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	return true
 }
 
-// ConfigureVirtioIRQ maps the architectural APIC pages and routes GSI 11 to
-// vector 43 as an active-low, level-triggered interrupt on bootstrap CPU 0.
-func ConfigureVirtioIRQ(pageTable uint64) bool {
+// ConfigureDeviceIRQs maps the architectural APIC pages and routes the two
+// device lines this system uses on bootstrap CPU 0: GSI 11 for virtio, as an
+// active-low level-triggered interrupt, and GSI 4 for the console UART, which
+// the ISA convention makes active-high and edge-triggered.
+func ConfigureDeviceIRQs(pageTable uint64) bool {
 	if !vm.MapKernelDevicePage(pageTable, uint64(lapicVirtual), 0xfee00000) ||
 		!vm.MapKernelDevicePage(pageTable, uint64(ioapicVirtual), 0xfec00000) {
 		return false
@@ -98,6 +107,8 @@ func ConfigureVirtioIRQ(pageTable uint64) bool {
 	mmioWrite32(lapicVirtual+0xf0, mmioRead32(lapicVirtual+0xf0)|1<<8|0xff)
 	ioapicWrite(0x10+2*11+1, 0)
 	ioapicWrite(0x10+2*11, uint32(virtioIRQVector)|1<<13|1<<15)
+	ioapicWrite(0x10+2*4+1, 0)
+	ioapicWrite(0x10+2*4, uint32(serialIRQVector))
 	return true
 }
 
@@ -106,8 +117,16 @@ func ioapicWrite(register uint32, value uint32) {
 	mmioWrite32(ioapicVirtual+0x10, value)
 }
 
-func mmioRead32(address uintptr) uint32         { return *(*uint32)(unsafe.Pointer(address)) }
-func mmioWrite32(address uintptr, value uint32) { *(*uint32)(unsafe.Pointer(address)) = value }
+// Device registers are reached through assembly. As Go, these were ordinary
+// memory operations that the optimiser was free to reorder, merge or discard,
+// and an IOAPIC access is a register select followed by a data transfer that
+// must reach the device in that order and exactly once.
+//
+//export goos_mmio_read32
+func mmioRead32(address uintptr) uint32
+
+//export goos_mmio_write32
+func mmioWrite32(address uintptr, value uint32)
 
 func putUint64(target []byte, value uint64) {
 	for index := 0; index < 8; index++ {
@@ -142,6 +161,37 @@ func TimerTicks() uint64
 //
 //export goos_kernel_call_arg2_read
 func KernelCallArg2() uint64
+
+// ConsoleTake removes one byte from the console input ring. The result carries
+// the byte in its low eight bits with bit eight set, or zero when the ring is
+// empty, so one return value distinguishes an empty ring from a NUL byte.
+//
+//export goos_console_take
+func ConsoleTake() uint64
+
+// ConsolePending reports whether the console ring holds a byte.
+//
+//export goos_console_pending
+func ConsolePending() bool
+
+// ConsoleTakeInterrupt consumes a pending console interrupt. Ctrl-C never
+// enters the input ring, so asking whether it was typed does not consume the
+// bytes a running command is owed.
+//
+//export goos_console_take_interrupt
+func ConsoleTakeInterrupt() bool
+
+// ConsoleDropped counts bytes that arrived with the ring already full.
+//
+//export goos_console_dropped_read
+func ConsoleDropped() uint64
+
+// EnableConsoleInterrupt turns on the UART's received-data-available interrupt.
+// It must run after the IDT gate for the serial vector exists, or the first
+// byte would arrive with no handler installed.
+//
+//export goos_enable_console_interrupt
+func EnableConsoleInterrupt()
 
 // TakeIRQ11 consumes one pending device interrupt.
 //

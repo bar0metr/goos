@@ -12,6 +12,10 @@ const (
 	KindStream
 	KindProcess
 	KindIRQ
+	// KindConsole is the system console's input. It has one object and no
+	// sides, so a reader waits on it the way it waits on anything else instead
+	// of polling the device.
+	KindConsole
 )
 
 type Event uint8
@@ -229,7 +233,7 @@ func validEntry(entry Entry) bool {
 }
 
 func validKey(key Key) bool {
-	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindIRQ {
+	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindConsole {
 		return false
 	}
 	if (key.Kind == KindChannel || key.Kind == KindStream) && key.Side > 1 {

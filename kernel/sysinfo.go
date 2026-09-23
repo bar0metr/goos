@@ -101,4 +101,7 @@ func (handler nativeCallHandler) SystemReset(device uint64) kcall.Status {
 	return kcall.StatusIOError
 }
 
-const deviceSystemControl = device.SystemControlObject
+const (
+	deviceSystemControl = device.SystemControlObject
+	deviceConsoleObject = device.ConsoleObject
+)

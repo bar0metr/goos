@@ -70,6 +70,11 @@ declares, that a published value cannot be rewritten, that an undeclared key is
 not a new setting, that the exported file holds the writable entries and not the
 published ones, and that a value set in one session is restored in the next.
 
+The release-shell group also asserts that the shell's CPU total stays in three
+digits and that no console input was dropped, which is the regression guard on
+the interrupt-driven console: before it, the shell was charged over seven
+thousand ticks in a session.
+
 The release-shell group asserts the resource accounting: that `ps` reports
 non-zero pages for PID 1, that `quota` shows an ordinary process holding a share
 of the stream table rather than all of it, and that PID 1 holds the system

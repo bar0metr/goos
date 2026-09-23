@@ -127,6 +127,11 @@ func (handler *testHandler) LogBounds(device uint64, address uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) ConsoleInterrupt(device uint64) Status {
+	handler.channel = device
+	return StatusNotFound
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -356,8 +361,19 @@ func TestDispatchLogBounds(t *testing.T) {
 	if result.Status != StatusOK || result.Action != ActionReturn || handler.channel != 2 || handler.address != 0x40004000 {
 		t.Fatalf("log bounds %+v %+v", result, handler)
 	}
-	// LogBounds is the last operation, so anything past it is unsupported.
-	if result := Dispatch(Request{Operation: OperationLogBounds + 1}, handler); result.Status != StatusUnsupported {
+}
+
+func TestDispatchConsoleInterrupt(t *testing.T) {
+	if OperationConsoleInterrupt != 34 {
+		t.Fatalf("operation %d", OperationConsoleInterrupt)
+	}
+	handler := &testHandler{}
+	// No interrupt pending is a status, not an error: a shell asks often.
+	if result := Dispatch(Request{Operation: OperationConsoleInterrupt, Arg0: 2}, handler); result.Status != StatusNotFound || handler.channel != 2 {
+		t.Fatalf("console interrupt %+v %+v", result, handler)
+	}
+	// ConsoleInterrupt is the last operation, so anything past it is unsupported.
+	if result := Dispatch(Request{Operation: OperationConsoleInterrupt + 1}, handler); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 }

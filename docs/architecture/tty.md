@@ -23,8 +23,15 @@ device access.
 
 The native shell currently uses the smaller console-session kernel ABI rather
 than the bootstrap TTY channel. A device handle with `Read|Write` authority
-permits single-byte nonblocking input and bounded output; processes without the
-handle are rejected. Monotonic timer reads are exposed separately and carry no
+permits single-byte input and bounded output; processes without the handle are
+rejected.
+
+Input is interrupt-driven (ADR 0075). The UART handler drains arriving bytes
+into a kernel ring, `ConsoleRead` takes one from that ring, and the console is a
+waitable object, so a reader blocks on `WaitAny` instead of retrying the read.
+`ConsoleInterrupt` reports and consumes a Ctrl-C, which the handler keeps out of
+the ring: watching for an interrupt therefore takes no input away from the
+process the user is typing to. Monotonic timer reads are exposed separately and carry no
 device authority. `DebugWrite` remains restricted to PID 1 and the legacy ABI
 probe, so the shell cannot bypass its manifest.
 
