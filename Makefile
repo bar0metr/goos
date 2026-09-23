@@ -22,6 +22,10 @@ BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
 VIRTIO_BLOCK_ELF = $(OUT_DIR)/userspace/virtio-blk.elf
+LOG_IMAGE = $(OUT_DIR)/userspace/log
+LOG_ELF = $(OUT_DIR)/userspace/log.elf
+CONFIG_IMAGE = $(OUT_DIR)/userspace/config
+CONFIG_ELF = $(OUT_DIR)/userspace/config.elf
 EFI_IMAGE = $(OUT_DIR)/iso/efi.img
 ISO_BOOT_IMAGE = $(ISO_ROOT)/efi.img
 VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
@@ -76,7 +80,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -124,6 +128,20 @@ $(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup int
 $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
+$(LOG_ELF): $(shell find userspace/cmd/logd userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/logd
+
+$(LOG_IMAGE): $(LOG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(LOG_ELF) $@
+
+$(CONFIG_ELF): $(shell find userspace/cmd/configd userspace/config userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/configd
+
+$(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
@@ -135,7 +153,7 @@ $(BUILD_DIR)/virtio-blk.img: tools/mkfat32/main.go
 initramfs: userspace
 	@mkdir -p $(OUT_DIR)/initramfs/root/system
 	@cp $(INIT_IMAGE) $(OUT_DIR)/initramfs/root/system/init
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(OUT_DIR)/initramfs/initramfs.tar
 
 $(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
@@ -238,10 +256,13 @@ docs:
 	@test -f docs/architecture/vfs.md
 	@test -f docs/architecture/init.md
 	@test -f docs/architecture/shell.md
+	@test -f docs/architecture/configuration.md
 	@test -f docs/architecture/storage.md
 	@test -f docs/architecture/streams.md
 	@test -f docs/development/testing.md
 	@test -f docs/adr/0072-per-process-resource-quotas.md
+	@test -f docs/adr/0073-persistent-log-service.md
+	@test -f docs/adr/0074-typed-configuration-service.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
 	@test -f docs/adr/0071-persistent-volume-layout.md

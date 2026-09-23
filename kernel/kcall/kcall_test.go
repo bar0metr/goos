@@ -122,6 +122,11 @@ func (handler *testHandler) ImageMap(device uint64, virtual uint64, address uint
 	return StatusOK
 }
 
+func (handler *testHandler) LogBounds(device uint64, address uint64) Status {
+	handler.channel, handler.address = device, address
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -339,7 +344,20 @@ func TestDispatchImageMap(t *testing.T) {
 	if result.Status != StatusOK || result.Action != ActionReturn || handler.channel != 7 || handler.address != 0x40200000 || handler.length != 0x40004000 {
 		t.Fatalf("image map %+v %+v", result, handler)
 	}
-	if result := Dispatch(Request{Operation: OperationImageMap + 1}, handler); result.Status != StatusUnsupported {
+
+}
+
+func TestDispatchLogBounds(t *testing.T) {
+	if OperationLogBounds != 33 {
+		t.Fatalf("operation %d", OperationLogBounds)
+	}
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationLogBounds, Arg0: 2, Arg1: 0x40004000}, handler)
+	if result.Status != StatusOK || result.Action != ActionReturn || handler.channel != 2 || handler.address != 0x40004000 {
+		t.Fatalf("log bounds %+v %+v", result, handler)
+	}
+	// LogBounds is the last operation, so anything past it is unsupported.
+	if result := Dispatch(Request{Operation: OperationLogBounds + 1}, handler); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 }

@@ -225,21 +225,107 @@ func startServices(ticks uint64) {
 				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
 				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
 				{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
-		manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
-			Capabilities: []supervisor.Capability{
-				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-				{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-				{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-				{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
 			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
-	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 4 || validation.Enabled && !probeBlockService() {
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 3 || validation.Enabled && !probeBlockService() {
+		fatal("SHELL_LAUNCH_FAILED\n")
+	}
+	// The log service comes after the filesystem and before the shell: its
+	// session has to be asked for rather than handed over at boot, and it
+	// should be persisting records by the time a prompt appears.
+	startLogService(ticks)
+	configClient := startConfigService(ticks)
+	shellCapabilities := []supervisor.Capability{
+		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+		{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
+	}
+	if configClient != 0 {
+		shellCapabilities = append(shellCapabilities, supervisor.Capability{Name: "config", Handle: configClient,
+			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
+	if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
+		Capabilities: shellCapabilities, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
 		fatal("SHELL_LAUNCH_FAILED\n")
 	}
 	supervisionComplete = true
 	arenaBase = heapPointer
+}
+
+// startLogService registers and starts the persistent log service after the
+// filesystem is up, because its session has to be asked for rather than handed
+// over at boot: it is the only service whose VFS endpoint is created the same
+// way an application's is.
+//
+// A failure here does not stop the system. The kernel ring is the system log
+// and keeps working; only its persistence is lost, and that is worth a warning
+// rather than a dead boot.
+func startLogService(ticks uint64) {
+	session, reason := openVFSSession()
+	if reason != "" {
+		syslog.Warn("log service has no filesystem session", syslog.Str("reason", reason))
+		return
+	}
+	if manager.Register(supervisor.Definition{Name: "log", Executable: "/system/log", Dependencies: []string{"vfs"},
+		Capabilities: []supervisor.Capability{
+			// Read authorizes draining the kernel ring; write is the service's
+			// own logging. It gets no other authority.
+			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+			{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		syslog.Warn("log service registration failed")
+		handleClose(uint64(session))
+		return
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
+		syslog.Warn("log service did not start")
+	}
+}
+
+// startConfigService brings up the typed configuration store and returns the
+// client endpoint the shell's session runs over, or zero if it could not start.
+//
+// PID 1 creates that session and is the only process that decides what it may
+// do. The scope and rights the service applies to it are granted here, not
+// asked for by the client, which is what makes the store's checks authority
+// rather than convention.
+//
+// Like the log service, a failure warns rather than stopping the boot: nothing
+// else reads configuration yet, and a system without it is still a system.
+func startConfigService(ticks uint64) handle.ID {
+	session, reason := openVFSSession()
+	if reason != "" {
+		syslog.Warn("config service has no filesystem session", syslog.Str("reason", reason))
+		return 0
+	}
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		syslog.Warn("config service channel unavailable")
+		handleClose(uint64(session))
+		return 0
+	}
+	if manager.Register(supervisor.Definition{Name: "config", Executable: "/system/config", Dependencies: []string{"vfs"},
+		Capabilities: []supervisor.Capability{
+			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+			{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		syslog.Warn("config service registration failed")
+		closePair(pair)
+		handleClose(uint64(session))
+		return 0
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
+		syslog.Warn("config service did not start")
+		handleClose(pair[0])
+		return 0
+	}
+	return handle.ID(pair[0])
 }
 
 func probeStreamEndpoint() bool {
@@ -616,40 +702,53 @@ func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byt
 
 func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicationExit(process) }
 
+// openVFSSession asks VFS for a new session and returns the client endpoint the
+// child will be given. PID 1 keeps no copy of either end: the server end moves
+// to VFS in the request and the client end is consumed into the child's
+// manifest, so no two processes ever share one session queue.
+//
+// The second result is empty on success and otherwise names the step that
+// failed, which the caller records.
+func openVFSSession() (handle.ID, string) {
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		return 0, "APP_CHANNEL_CREATE_FAILED"
+	}
+	correlation++
+	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
+	if !ok || !sendMessage(vfsControlHandle, control) {
+		closePair(pair)
+		return 0, "APP_VFS_REQUEST_FAILED"
+	}
+	controlReply, status := receive(vfsControlHandle, vfsSessionDeadline)
+	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
+	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
+		handleClose(pair[0])
+		if status != ipc.StatusOK {
+			return 0, "APP_VFS_RECEIVE_STATUS"
+		}
+		if !valid {
+			return 0, "APP_VFS_REPLY_INVALID"
+		}
+		return 0, "APP_VFS_RESOURCE_EXHAUSTED"
+	}
+	return handle.ID(pair[0]), ""
+}
+
 func launchApplication(path string, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
 	useVFS := commandNeedsVFS(command)
-	if useVFS && channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
-		syslog.Error("APP_CHANNEL_CREATE_FAILED")
-		return 0, 0, supervisor.LaunchResourceExhausted
-	}
 	if useVFS {
-		correlation++
-	}
-	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
-	if useVFS && (!ok || !sendMessage(vfsControlHandle, control)) {
-		syslog.Error("APP_VFS_REQUEST_FAILED")
-		closePair(pair)
-		return 0, 0, supervisor.LaunchCapabilityInstallFailed
-	}
-	var status ipc.Status
-	vfsStatus, valid := vfs.StatusOK, true
-	if useVFS {
-		controlReply, received := receive(vfsControlHandle, vfsSessionDeadline)
-		status = received
-		vfsStatus, valid = vfs.DecodeAddSessionReply(controlReply)
-	}
-	if useVFS && (status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK) {
-		syslog.Error("APP_VFS_SESSION_FAILED")
-		if status != ipc.StatusOK {
-			syslog.Error("APP_VFS_RECEIVE_STATUS")
-		} else if !valid {
-			syslog.Error("APP_VFS_REPLY_INVALID")
-		} else {
-			syslog.Error("APP_VFS_RESOURCE_EXHAUSTED")
+		session, reason := openVFSSession()
+		if reason != "" {
+			syslog.Error("APP_VFS_SESSION_FAILED")
+			syslog.Error(reason)
+			if reason == "APP_CHANNEL_CREATE_FAILED" {
+				return 0, 0, supervisor.LaunchResourceExhausted
+			}
+			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
-		handleClose(pair[0])
-		return 0, 0, supervisor.LaunchCapabilityInstallFailed
+		pair[0] = uint64(session)
 	}
 	slot, staging := stagingSlot()
 	bindings := []startup.Handle{{Name: []byte("in")}, {Name: []byte("stdout")}, {Name: []byte("stderr")}}

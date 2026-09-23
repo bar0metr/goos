@@ -8,8 +8,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 9 {
-		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE COREUTILS_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE OUTPUT")
+	if len(os.Args) != 11 {
+		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE COREUTILS_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE LOG_IMAGE CONFIG_IMAGE OUTPUT")
 		os.Exit(2)
 	}
 	image, err := os.ReadFile(os.Args[1])
@@ -40,7 +40,15 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	file, err := os.Create(os.Args[8])
+	logService, err := os.ReadFile(os.Args[8])
+	if err != nil {
+		fail(err)
+	}
+	configService, err := os.ReadFile(os.Args[9])
+	if err != nil {
+		fail(err)
+	}
+	file, err := os.Create(os.Args[10])
 	if err != nil {
 		fail(err)
 	}
@@ -60,6 +68,8 @@ func main() {
 		{Name: "system/shell", Mode: 0o555, Size: int64(len(shell)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/block", Mode: 0o555, Size: int64(len(block)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/virtio-blk", Mode: 0o555, Size: int64(len(virtioBlock)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/log", Mode: 0o555, Size: int64(len(logService)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/config", Mode: 0o555, Size: int64(len(configService)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/coreutils", Mode: 0o555, Size: int64(len(coreutils)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/pwd", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/ls", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
@@ -100,6 +110,10 @@ func main() {
 				payload = block
 			} else if headers[index].Name == "system/virtio-blk" {
 				payload = virtioBlock
+			} else if headers[index].Name == "system/log" {
+				payload = logService
+			} else if headers[index].Name == "system/config" {
+				payload = configService
 			} else if headers[index].Name == "system/bin/coreutils" {
 				payload = coreutils
 			}

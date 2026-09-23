@@ -269,8 +269,24 @@ accounting also exposed a defect it does not fix: the shell busy-polls the
 serial console while waiting for input and is charged most of the ticks in a
 session.
 
-Remaining 0.1.0 work is a persistent log service and a typed configuration
-service (spec §28).
+ADR 0073 adds the persistent log service. A supervised userspace process drains
+the bounded kernel ring onto `/state`, so a session's records outlive its reset:
+`cat /state/system.log` reads this boot and `cat /state/system.log.1` the one
+before it. The ring stays the ordering point every component writes to; the
+service is a consumer of it, holding only the console capability that authorises
+reading it and a VFS session for its own file.
+
+ADR 0074 adds the typed configuration service, which was the last of the 0.1.0
+gaps. Keys are declared with a type, a write is checked against the declaration,
+a session's scope and rights decide what it may see and change, and the writable
+settings persist at `/state/config` in a form a person can read and edit. The
+shell's `config` builtin lists, reads and writes them.
+
+The 0.1.0 feature set of spec §56 is therefore complete. What remains before the
+release is consolidation rather than new subsystems: making the components that
+own a setting consult the configuration service instead of a constant, the
+shell's busy-poll of the serial console (ADR 0072), FAT32 hardening, and storage
+failure recovery.
 
 ## Priority 5 — Linux ABI compatibility
 

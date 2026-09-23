@@ -20,13 +20,14 @@ const consoleThreshold = logfmt.Warn
 // The kernel leaks every heap allocation, so its own log path uses fixed
 // buffers and never converts a string to a slice.
 var (
-	systemLog  klog.Ring
-	logWire    [kcall.MaxLogRecord]byte
-	logText    [kcall.LogText]byte
-	logMessage [logfmt.MaxMessage]byte
-	logFields  [logfmt.MaxFields]byte
-	logGrant   [logfmt.MaxFields]byte
-	kernelName = []byte("kernel")
+	systemLog     klog.Ring
+	logWire       [kcall.MaxLogRecord]byte
+	logBoundsWire [kcall.LogBoundsSize]byte
+	logText       [kcall.LogText]byte
+	logMessage    [logfmt.MaxMessage]byte
+	logFields     [logfmt.MaxFields]byte
+	logGrant      [logfmt.MaxFields]byte
+	kernelName    = []byte("kernel")
 )
 
 func logRecord(record logfmt.Record) {
@@ -99,6 +100,22 @@ func (handler nativeCallHandler) LogRead(device uint64, index uint64, address ui
 	size := logfmt.Format(record, logText[:])
 	clear(logText[size:])
 	if !vm.CopyOut(handler.root, address, logText[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+// LogBounds reports the sequence window the log ring currently retains, so a
+// reader that persists records knows which are new and whether any were
+// overwritten before it got to them. It takes the same console authority as
+// LogRead, because it describes the same records.
+func (handler nativeCallHandler) LogBounds(device uint64, address uint64) kcall.Status {
+	if _, allowed := handler.consoleAuthority(device, capability.Read); !allowed {
+		return kcall.StatusPermissionDenied
+	}
+	putUint64(logBoundsWire[0:8], systemLog.Oldest())
+	putUint64(logBoundsWire[8:16], systemLog.Total())
+	if !vm.CopyOut(handler.root, address, logBoundsWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

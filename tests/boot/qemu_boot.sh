@@ -327,6 +327,24 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'quota\n'
 	sleep 1
+	printf 'ls /state\n'
+	sleep 1
+	printf 'cat /state/system.log\n'
+	sleep 1
+	printf 'config\n'
+	sleep 1
+	printf 'config set system.shell.prompt boot-test\n'
+	sleep 1
+	printf 'config get system.shell.prompt\n'
+	sleep 1
+	printf 'config set system.build.release 9.9.9\n'
+	sleep 1
+	printf 'config set system.log.persist maybe\n'
+	sleep 1
+	printf 'config get system.missing.key\n'
+	sleep 1
+	printf 'cat /state/config\n'
+	sleep 1
 	printf 'mem\n'
 	sleep 1
 	printf 'services\n'
@@ -531,6 +549,12 @@ checks=$((checks + 1))
 
 ( sleep 4
 	printf 'cat /persist/state.txt\n'
+	sleep 2
+	printf 'cat /state/system.log.1\n'
+	sleep 2
+	printf 'ls /state\n'
+	sleep 2
+	printf 'config get system.shell.prompt\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -538,7 +562,7 @@ checks=$((checks + 1))
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$reboot_log" 2>&1 &
 pid=$!
 
-wait_for_marker reboot '^CAT_PROCESS_OK$' 60 "$reboot_log"
+wait_for_marker reboot '^boot-test$' 60 "$reboot_log"
 cleanup
 require_marker persistence.reboot-boot BOOT_OK "$reboot_log"
 require_marker persistence.reboot-mount FAT32_MOUNT_OK "$reboot_log"
@@ -546,7 +570,36 @@ require_marker persistence.reboot-shell SHELL_VFS_CONNECTED_OK "$reboot_log"
 require_marker persistence.reboot-content 'Welcome to GoOS' "$reboot_log" 'cat /persist/state.txt'
 require_marker persistence.reboot-cat CAT_PROCESS_OK "$reboot_log" 'cat /persist/state.txt'
 forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on reboot' "$reboot_log" CP_PROCESS_OK
+# The rotated file can only have been written before this boot, so reading a
+# record out of it proves the log survived the reset.
+require_window persistence.reboot-log '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
+# The value set in the previous session is restored over the schema default.
+require_window persistence.reboot-config '^boot-test$' 'a setting restored from the previous session' "$reboot_log" 'goos> config get system.shell.prompt' 'NO_SUCH_LINE'
 pass_group persistence
+
+# The persistent log is a service, not a kernel feature: it drains the bounded
+# kernel ring onto the volume so a session's records outlive its reset.
+require_marker log.started LOG_SERVICE_OK "$log"
+require_regex log.service-reported '^\[ OK \] log$' 'the log service reported started' "$log" 'Starting services'
+require_regex log.file-listed '^system\.log$' 'system.log on the state volume' "$log" 'goos> ls /state'
+require_regex log.rotated '^system\.log\.1$' 'a rotated log beside it' "$log" 'goos> ls /state'
+require_window log.persisted-record '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record read back from the file' "$log" 'goos> cat /state/system.log' 'goos> config'
+pass_group log
+
+# Configuration is typed and scoped: a value is checked against the declaration
+# its key carries, a key the schema does not declare is not a new setting, and
+# what the running image publishes cannot be rewritten.
+require_marker config.started CONFIG_SERVICE_OK "$log"
+require_regex config.service-reported '^\[ OK \] config$' 'the config service reported started' "$log" 'Starting services'
+require_regex config.read-only-listed '^system\.build\.release .* (read-only)$' 'the published release marked read-only' "$log" 'goos> config'
+require_regex config.typed-listing '^system\.log\.persist true$' 'a typed value in the listing' "$log" 'goos> config'
+require_window config.set-read-back '^boot-test$' 'a value read back after being set' "$log" 'goos> config get system.shell.prompt' 'goos> config set system.build.release'
+require_regex config.read-only-refused '^config: setting is read-only$' 'a write to a published value refused' "$log" 'goos> config set system.build.release 9.9.9'
+require_regex config.type-refused '^config: value does not match the declared type$' 'a wrongly typed value refused' "$log" 'goos> config set system.log.persist maybe'
+require_regex config.unknown-refused '^config: no such setting$' 'an undeclared key refused' "$log" 'goos> config get system.missing.key'
+require_window config.exported '^system\.shell\.prompt text boot-test$' 'the exported form on the state volume' "$log" 'goos> cat /state/config' 'goos> mem'
+forbid_window config.read-only-not-exported '^system\.build\.release' 'published values absent from the exported file' "$log" 'goos> cat /state/config' 'goos> mem'
+pass_group config
 
 require_regex release.ps-header '^PID   TYPE     STATE      MEM  CPU   COMMAND$' 'ps table header' "$log" 'goos> ps'
 # Memory and CPU are accounted per process, so init must report pages of its own.
@@ -555,8 +608,8 @@ require_marker quota.enforced QUOTA_OK "$log"
 require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quota table header' "$log" 'goos> quota'
 # The shell is an ordinary process: its stream share must be a part of the
 # table rather than all of it, or the quota bounds nothing.
-require_regex quota.shell-streams '^10    shell             strm      [0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
-require_regex quota.init-streams '^1     init              strm      [0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
+require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 require_regex release.services 'vfs         running     [0-9]' 'vfs listed as running' "$log" 'goos> services'
 require_regex release.caps '^console   device    read,write$' 'shell console capability' "$log" 'goos> caps'

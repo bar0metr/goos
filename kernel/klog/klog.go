@@ -45,6 +45,11 @@ func (ring *Ring) Len() int {
 
 func (ring *Ring) Total() uint64 { return ring.total }
 
+// Oldest is the sequence number of the oldest retained record. Records before
+// it were overwritten, so a reader whose cursor is below it has lost some and
+// can say how many rather than silently skipping them.
+func (ring *Ring) Oldest() uint64 { return ring.total - uint64(ring.Len()) }
+
 // At returns the index-th retained record, oldest first. The slices alias the
 // ring and stay valid until that slot is overwritten.
 func (ring *Ring) At(index int) (logfmt.Record, bool) {

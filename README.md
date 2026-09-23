@@ -145,6 +145,10 @@ The native kernel and the first isolated services are implemented:
   every mount listed in its parent directory and protected from removal;
 - per-process quotas on channels, streams, tasks, and pages, plus per-process
   CPU accounting, so one process cannot take a whole kernel table;
+- a supervised log service that drains the bounded kernel ring onto persistent
+  storage, so a session's records outlive its reset;
+- a typed configuration service with declared keys, namespace-scoped sessions,
+  read-only published values, and a human-readable stored form;
 - bounded init policy with dependencies, capability manifests, supervised
   restart policies, health states, and rate limiting;
 - deterministic USTAR initramfs discovery and a ring-3 native init as PID 1;
@@ -271,6 +275,8 @@ Starting services...
 [ OK ] vfs
 [ OK ] block
 [ OK ] virtio-blk
+[ OK ] log
+[ OK ] config
 [ OK ] shell
 
 goos>
@@ -381,9 +387,12 @@ typed handles. The namespace now describes the system it serves: mounts are
 discoverable and protected, `/system` is the read-only boot image, and `/home`
 and `/state` separate user data from mutable system state. Per-process resource
 quotas bound each process's share of every kernel table, and `ps` and `quota`
-report what each process holds. Remaining 0.1.0 work is a persistent log service
-and a typed configuration service. FAT32 hardening and storage failure recovery
-remain incremental work.
+report what each process holds. A supervised log service persists the kernel
+ring to `/state`, so records survive a reboot, and a typed configuration service
+holds the system's settings. The 0.1.0 feature set is complete; what remains is
+consolidation — having the components that own a setting consult the
+configuration service, the shell's busy-poll of the console, FAT32 hardening, and
+storage failure recovery.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors; stream merging such as
