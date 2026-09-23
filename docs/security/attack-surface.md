@@ -54,14 +54,14 @@ table with type, generation, and rights checks.
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
 | 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax (failure → `CorruptData`); time and PID are set by the kernel | 64-record ring, oldest overwritten | no |
-| 26 | `LogRead` | device handle, Read, console object | index < 64; 240-byte `CopyOut` | none | no |
+| 26 | `LogRead` | device handle, Read, log object (ADR 0082) | index < 64; 240-byte `CopyOut` | none | no |
 | 27 | `HandleInfo` | registered; own table only | slot < 128; 16-byte `CopyOut` of ID, type, rights | none | no |
 | 28 | `ProcessInfo` | registered | index < 32; 80-byte `CopyOut` of PID, state, task count, name, CPU ticks, and the held and permitted resource counts | none | no |
 | 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
 | 30 | `MemoryMap` | memory handle, Read (+ Write when writable), kernel-registered shared object | flags: only bit 0 (writable); address page-aligned and whole object inside `[0x40180000, 0x401c0000)`; every leaf must be free before any is installed | whole object, NX, non-owned; at most 4 registered objects | no |
 | 31 | `ProcessKill` | process handle, Write | handle lookup; refuses PID 1 and the caller's own process | none | retires the target's tasks |
 | 32 | `ImageMap` | device handle, Read, system-image object (held only by VFS) | virtual address must equal `0x40200000`; archive must be page-aligned and fit `[0x40200000, 0x40400000)`; 16-byte descriptor probed before mapping; every leaf must be free | one leaf table, charged to the page quota; archive mapped read-only, NX, non-owned | no |
-| 33 | `LogBounds` | device handle, Read, console object | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
+| 33 | `LogBounds` | device handle, Read, log object (ADR 0082) | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).

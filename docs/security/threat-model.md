@@ -29,8 +29,9 @@ host (QEMU, OVMF, ISO, disk image file)
      │   ├─ block service                  holds block endpoints, driver client endpoint
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
      │   ├─ config service                 holds the configuration store and a VFS session
-     │   ├─ log service                    holds console read/write and a VFS session
-     │   └─ shell                          holds console, a VFS session, exec endpoint and page, a config session
+     │   ├─ log service                    holds the log (read), console write, and a VFS session
+     │   ├─ terminal service               the only holder of console read; a session with the shell
+     │   └─ shell                          holds console write, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session
      └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr and optionally one VFS session
 ```
 
@@ -59,10 +60,11 @@ driver, and utilities are untrusted relative to each other.
 A program launched from the shell, for example a compromised command image in
 `/system/bin` or a command fed hostile arguments.
 
-- Holds only `in`, `stdout`, `stderr` (stream endpoints or the console device
-  with a single right) and, when its manifest in the command index asks for
-  one, a private VFS session channel (ADR 0080).
-  No Transfer right on any of them.
+- Holds only `in`, `stdout`, `stderr` and, when its manifest in the command
+  index asks for one, a private VFS session channel (ADR 0080). `in` is always
+  a stream; `stdout` and `stderr` are streams or the console, write only. It
+  cannot read what is typed except the lines the shell writes to its input
+  (ADR 0082). No Transfer right on any of them.
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
