@@ -37,6 +37,7 @@ const (
 	OperationMemoryMap
 	OperationProcessKill
 	OperationImageMap
+	OperationLogBounds
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -107,6 +108,7 @@ type Handler interface {
 	MemoryMap(handle uint64, address uint64, flags uint64) Status
 	ProcessKill(process uint64) Status
 	ImageMap(device uint64, virtual uint64, address uint64) Status
+	LogBounds(device uint64, address uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -208,6 +210,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ProcessKill(request.Arg0)}
 	case OperationImageMap:
 		return Result{Status: handler.ImageMap(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationLogBounds:
+		return Result{Status: handler.LogBounds(request.Arg0, request.Arg1)}
 	case OperationMemoryMap:
 		if request.Arg2&^MemoryMapWritable != 0 {
 			return Result{Status: StatusInvalidArgument}
@@ -270,6 +274,13 @@ const (
 	MaxLogRecord = uint64(181)
 	LogText      = uint64(240)
 )
+
+// LogBoundsSize is the fixed length of the record LogBounds writes: the
+// sequence number of the oldest retained record, then one past the newest.
+// A reader keeps a cursor between them; a cursor below the oldest means records
+// were overwritten before it read them, and it can say how many were lost
+// rather than skipping them silently.
+const LogBoundsSize = uint64(16)
 const StreamDescriptorSize = uint64(24)
 
 // MemoryMapWritable requests a writable shared-memory mapping.

@@ -269,8 +269,14 @@ accounting also exposed a defect it does not fix: the shell busy-polls the
 serial console while waiting for input and is charged most of the ticks in a
 session.
 
-Remaining 0.1.0 work is a persistent log service and a typed configuration
-service (spec §28).
+ADR 0073 adds the persistent log service. A supervised userspace process drains
+the bounded kernel ring onto `/state`, so a session's records outlive its reset:
+`cat /state/system.log` reads this boot and `cat /state/system.log.1` the one
+before it. The ring stays the ordering point every component writes to; the
+service is a consumer of it, holding only the console capability that authorises
+reading it and a VFS session for its own file.
+
+Remaining 0.1.0 work is a typed configuration service (spec §28).
 
 ## Priority 5 — Linux ABI compatibility
 

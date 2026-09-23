@@ -106,3 +106,18 @@ the filesystem. Pure stream and diagnostic utilities receive no VFS endpoint.
 The VFS control protocol version 2 identifies the add-session operation with an
 explicit payload byte, preventing an unrelated control-shaped message from
 being accepted as a session request.
+
+## Startup phases
+
+Services start in two phases. The first registers and launches `vfs`, `block`
+and `virtio-blk`, whose endpoints PID 1 holds from boot. The second starts the
+log service and then the shell.
+
+The split exists because the log service's VFS session cannot be handed over at
+boot: it has to be asked for, through the VFS control endpoint, the same way an
+application's session is, and that needs VFS already running (ADR 0073). Placing
+it before the shell also means the prompt appears after every service line
+rather than in the middle of them.
+
+A failure to start the log service warns and continues. Every other service is
+required, because the system cannot serve files or a prompt without them.

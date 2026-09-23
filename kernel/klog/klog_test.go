@@ -22,3 +22,26 @@ func TestRingKeepsNewestRecordsInOrder(t *testing.T) {
 		t.Fatal("index past the ring accepted")
 	}
 }
+
+func TestOldestTracksWhatWasOverwritten(t *testing.T) {
+	var ring Ring
+	if ring.Oldest() != 0 || ring.Total() != 0 {
+		t.Fatal("an empty ring does not start at zero")
+	}
+	for index := uint64(1); index <= 5; index++ {
+		ring.Append(logfmt.Record{Time: index, Level: logfmt.Info, Component: []byte("kernel")})
+	}
+	if ring.Oldest() != 0 || ring.Total() != 5 {
+		t.Fatalf("a partly filled ring: oldest %d total %d", ring.Oldest(), ring.Total())
+	}
+	for index := uint64(0); index < Capacity; index++ {
+		ring.Append(logfmt.Record{Time: index, Level: logfmt.Info, Component: []byte("kernel")})
+	}
+	// Once the ring has wrapped, the window is the last Capacity records.
+	if ring.Total() != Capacity+5 || ring.Oldest() != 5 {
+		t.Fatalf("a wrapped ring: oldest %d total %d", ring.Oldest(), ring.Total())
+	}
+	if ring.Total()-ring.Oldest() != uint64(ring.Len()) {
+		t.Fatal("the window does not match the retained count")
+	}
+}

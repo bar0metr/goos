@@ -327,6 +327,10 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'quota\n'
 	sleep 1
+	printf 'ls /state\n'
+	sleep 1
+	printf 'cat /state/system.log\n'
+	sleep 1
 	printf 'mem\n'
 	sleep 1
 	printf 'services\n'
@@ -531,6 +535,10 @@ checks=$((checks + 1))
 
 ( sleep 4
 	printf 'cat /persist/state.txt\n'
+	sleep 2
+	printf 'cat /state/system.log.1\n'
+	sleep 2
+	printf 'ls /state\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -538,7 +546,7 @@ checks=$((checks + 1))
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$reboot_log" 2>&1 &
 pid=$!
 
-wait_for_marker reboot '^CAT_PROCESS_OK$' 60 "$reboot_log"
+wait_for_marker reboot '^LS_PROCESS_OK$' 60 "$reboot_log"
 cleanup
 require_marker persistence.reboot-boot BOOT_OK "$reboot_log"
 require_marker persistence.reboot-mount FAT32_MOUNT_OK "$reboot_log"
@@ -546,7 +554,19 @@ require_marker persistence.reboot-shell SHELL_VFS_CONNECTED_OK "$reboot_log"
 require_marker persistence.reboot-content 'Welcome to GoOS' "$reboot_log" 'cat /persist/state.txt'
 require_marker persistence.reboot-cat CAT_PROCESS_OK "$reboot_log" 'cat /persist/state.txt'
 forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on reboot' "$reboot_log" CP_PROCESS_OK
+# The rotated file can only have been written before this boot, so reading a
+# record out of it proves the log survived the reset.
+require_window persistence.reboot-log '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
 pass_group persistence
+
+# The persistent log is a service, not a kernel feature: it drains the bounded
+# kernel ring onto the volume so a session's records outlive its reset.
+require_marker log.started LOG_SERVICE_OK "$log"
+require_regex log.service-reported '^\[ OK \] log$' 'the log service reported started' "$log" 'Starting services'
+require_regex log.file-listed '^system\.log$' 'system.log on the state volume' "$log" 'goos> ls /state'
+require_regex log.rotated '^system\.log\.1$' 'a rotated log beside it' "$log" 'goos> ls /state'
+require_window log.persisted-record '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record read back from the file' "$log" 'goos> cat /state/system.log' 'goos> mem'
+pass_group log
 
 require_regex release.ps-header '^PID   TYPE     STATE      MEM  CPU   COMMAND$' 'ps table header' "$log" 'goos> ps'
 # Memory and CPU are accounted per process, so init must report pages of its own.
@@ -555,8 +575,8 @@ require_marker quota.enforced QUOTA_OK "$log"
 require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quota table header' "$log" 'goos> quota'
 # The shell is an ordinary process: its stream share must be a part of the
 # table rather than all of it, or the quota bounds nothing.
-require_regex quota.shell-streams '^10    shell             strm      [0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
-require_regex quota.init-streams '^1     init              strm      [0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
+require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 require_regex release.services 'vfs         running     [0-9]' 'vfs listed as running' "$log" 'goos> services'
 require_regex release.caps '^console   device    read,write$' 'shell console capability' "$log" 'goos> caps'

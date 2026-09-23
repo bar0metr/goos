@@ -256,6 +256,14 @@ goos_image_map:
     ret
 .size goos_image_map, .-goos_image_map
 
+.global goos_log_bounds
+.type goos_log_bounds,@function
+goos_log_bounds:
+    movl $33, %eax
+    int $0x80
+    ret
+.size goos_log_bounds, .-goos_log_bounds
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

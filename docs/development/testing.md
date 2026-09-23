@@ -52,6 +52,19 @@ logged to `build/logs/m7-reboot.log`. It creates `/home/m7`, writes a file in
 it, runs the shell's `reboot`, and requires both boots and both reads of the
 file. It uses `/home` because that is where the specification puts user data.
 
+`make test-latency` runs with the log service present. A drain pass that has
+records to write contends with the benchmark for the single-threaded filesystem
+service, so the in-process `bench vfs` figure varies with whether one landed in
+its window; the command latency medians do not move. ADR 0073 records the
+isolation measurement.
+
+The log group asserts that the log service started, that `/state` holds both the
+live file and one rotation, and that a formatted record reads back out of the
+file. The reboot phase then reads the rotated file, which can only have been
+written before that boot, so a record surviving the reset is a persistence
+proof. The validation build uses a smaller rotation bound so one session crosses
+it.
+
 The release-shell group asserts the resource accounting: that `ps` reports
 non-zero pages for PID 1, that `quota` shows an ordinary process holding a share
 of the stream table rather than all of it, and that PID 1 holds the system
