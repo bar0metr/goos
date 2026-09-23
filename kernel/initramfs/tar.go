@@ -14,26 +14,39 @@ const (
 // Find takes the name as bytes: the kernel looks one up on every launch, and
 // converting a path to or from a string would allocate on its leaking heap.
 func Find(archive []byte, path []byte) ([]byte, bool) {
-	return find(archive, path, 0)
+	entry, ok := find(archive, path, 0)
+	return entry.data, ok
 }
 
-func find(archive []byte, path []byte, depth uint8) ([]byte, bool) {
+// Locate is Find that also names the member's contents with a key that is the
+// same for every path leading to them, hard links included, and never zero.
+// The archive is immutable, so the key identifies the same bytes for the whole
+// boot; the loader shares an image's read-only pages under it.
+func Locate(archive []byte, path []byte) ([]byte, uint64, bool) {
+	entry, ok := find(archive, path, 0)
+	if !ok {
+		return nil, 0, false
+	}
+	return entry.data, uint64(entry.offset) + 1, true
+}
+
+func find(archive []byte, path []byte, depth uint8) (member, bool) {
 	if !validPath(path) {
-		return nil, false
+		return member{}, false
 	}
 	for offset := 0; ; {
 		entry, next, ok := scan(archive, offset)
 		if !ok {
-			return nil, false
+			return member{}, false
 		}
 		if entry.typeFlag == typeLink && equalName(entry.name, path) {
 			if depth >= maxLinkDepth || len(entry.link) == 0 {
-				return nil, false
+				return member{}, false
 			}
 			return find(archive, entry.link, depth+1)
 		}
 		if entry.typeFlag != typeDirectory && equalName(entry.name, path) {
-			return entry.data, true
+			return entry, true
 		}
 		offset = next
 	}

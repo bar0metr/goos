@@ -87,7 +87,9 @@ VFS, block service, or shell executing attacker-controlled code.
 The `virtio-blk` process programs a bus-mastering device. There is no IOMMU:
 the device can DMA to any physical address the driver writes into the
 virtqueue or into the legacy queue-address register inside its port range. A
-malicious driver can therefore corrupt kernel memory. Capability scoping
+malicious driver can therefore corrupt kernel memory, including the shared
+read-only image pages every process running an image maps (ADR 0081); sharing
+does not widen what it can reach. Capability scoping
 (ADR 0034) contains accidental driver faults and removes ambient port access;
 it does not contain a malicious driver. The driver is part of the effective
 TCB until an IOMMU is used.
@@ -148,7 +150,8 @@ whoever controls the ISO controls the system.
 - Signed or measured images, Secure Boot, and initramfs integrity.
 - Per-process resource quotas. Registries are bounded globally, not per
   process.
-- Side channels, including timing through `ClockReadNanos`.
+- Side channels, including timing through `ClockReadNanos` and cache timing
+  between processes that share an image's read-only pages (ADR 0081).
 - Physical attacks, malicious firmware, and a malicious hypervisor.
 - Confidentiality of `/persist` against anyone with host access to the image.
 - Users, logins, and multi-user separation. There is no UID model.

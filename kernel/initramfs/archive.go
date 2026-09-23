@@ -197,7 +197,8 @@ func (archive *Archive) content(entry member) ([]byte, bool) {
 	if len(entry.link) == 0 {
 		return nil, false
 	}
-	return find(archive.data, entry.link, 1)
+	target, ok := find(archive.data, entry.link, 1)
+	return target.data, ok
 }
 
 // child reports whether name is a direct child of the directory named by

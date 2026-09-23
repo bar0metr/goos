@@ -69,4 +69,34 @@ func TestFindValidatedHardlink(t *testing.T) {
 	if !ok || string(data) != "coreutils" {
 		t.Fatalf("hardlink = %q, %v", data, ok)
 	}
+	// Both names lead to the same bytes, so they share one key.
+	_, linkKey, linkOK := Locate(output.Bytes(), []byte("system/bin/cat"))
+	_, fileKey, fileOK := Locate(output.Bytes(), []byte("system/bin/coreutils"))
+	if !linkOK || !fileOK || linkKey == 0 || linkKey != fileKey {
+		t.Fatalf("keys = %d, %d", linkKey, fileKey)
+	}
+}
+
+func TestLocateKeysDistinctMembers(t *testing.T) {
+	var output bytes.Buffer
+	writer := tar.NewWriter(&output)
+	for _, name := range []string{"system/a", "system/b"} {
+		if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o555, Size: 1, Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write([]byte{'x'}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, first, _ := Locate(output.Bytes(), []byte("system/a"))
+	_, second, _ := Locate(output.Bytes(), []byte("system/b"))
+	if first == 0 || second == 0 || first == second {
+		t.Fatalf("keys = %d, %d", first, second)
+	}
+	if _, key, ok := Locate(output.Bytes(), []byte("system/missing")); ok || key != 0 {
+		t.Fatal("missing member located")
+	}
 }
