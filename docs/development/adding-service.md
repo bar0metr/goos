@@ -106,9 +106,11 @@ In the `Makefile`:
 
 ## 6. Initramfs
 
-`tools/initramfs` takes a fixed positional list of images and writes each to a
-fixed path. Add an argument and a `system/<name>` entry (mode `0o555`). Only
-programs launched by name from the shell belong in `system/bin/`. The kernel
+`tools/initramfs` takes a fixed positional list of service images and writes
+each to a fixed path. Add an argument and a `system/<name>` entry (mode
+`0o555`). Programs launched by name from the shell are commands, not services:
+they belong in `userspace/bin/` and need none of this (see
+[Adding a command](adding-command.md)). The kernel
 looks up executables by exact path in this archive; there is no other source
 of code.
 

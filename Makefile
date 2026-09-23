@@ -16,8 +16,16 @@ SHELL_IMAGE = $(OUT_DIR)/userspace/shell
 SHELL_ELF = $(OUT_DIR)/userspace/shell.elf
 VFS_IMAGE = $(OUT_DIR)/userspace/vfs
 VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
-COREUTILS_IMAGE = $(OUT_DIR)/userspace/coreutils
-COREUTILS_ELF = $(OUT_DIR)/userspace/coreutils.elf
+# Every directory under userspace/bin is one command in /system/bin. Nothing
+# lists them: adding a directory adds the command, and the index PID 1 and the
+# shell read is generated from the manifests the commands declare (ADR 0080).
+COMMANDS := $(sort $(notdir $(wildcard userspace/bin/*)))
+COMMAND_DIR = $(OUT_DIR)/userspace/bin
+COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
+COMMAND_IMAGES = $(addprefix $(COMMAND_DIR)/,$(COMMANDS))
+COMMAND_ELFS = $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(COMMANDS)))
+COMMAND_INDEX = $(OUT_DIR)/userspace/commands
+COMMAND_LIBRARY := $(shell find userspace/utility userspace/commands userspace/startup userspace/shell userspace/exec userspace/wait internal/version internal/validation internal/capability internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f)
 BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
@@ -80,20 +88,20 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
 	clang -target x86_64-unknown-none-elf -ffreestanding -mno-red-zone -c $< -o $@
 
-$(INIT_ELF): $(shell find userspace/init userspace/exec userspace/config userspace/block userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(INIT_ELF): $(shell find userspace/init userspace/commands userspace/exec userspace/config userspace/block userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
 
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/commands userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
@@ -107,12 +115,20 @@ $(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspa
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
-$(COREUTILS_ELF): $(shell find userspace/cmd/coreutils userspace/utility userspace/startup userspace/shell userspace/wait internal/version internal/validation kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
-	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/coreutils
+.SECONDEXPANSION:
+$(COMMAND_ELFS): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(COMMAND_ELF_DIR)
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/bin/$*
 
-$(COREUTILS_IMAGE): $(COREUTILS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
-	$(BUILD_ENV) go run ./tools/elf2native $(COREUTILS_ELF) $@
+$(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	@mkdir -p $(COMMAND_DIR)
+	$(BUILD_ENV) go run ./tools/elf2native $< $@
+
+# The directory itself is a prerequisite: removing a command changes no source
+# file, only the listing, and the index must drop it.
+$(COMMAND_INDEX): userspace/bin $(wildcard userspace/bin/*/*.go) tools/commands/main.go userspace/commands/commands.go
+	@mkdir -p $(dir $@)
+	$(BUILD_ENV) go run ./tools/commands userspace/bin $@
 
 $(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
@@ -153,7 +169,10 @@ $(BUILD_DIR)/virtio-blk.img: tools/mkfat32/main.go
 initramfs: userspace
 	@mkdir -p $(OUT_DIR)/initramfs/root/system
 	@cp $(INIT_IMAGE) $(OUT_DIR)/initramfs/root/system/init
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COREUTILS_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(OUT_DIR)/initramfs/initramfs.tar
+	@# A command whose directory was removed leaves its image behind; the
+	@# archive takes only the commands the tree still has.
+	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
 $(EFI_IMAGE): $(KERNEL) initramfs
 	@mkdir -p $(EFI_BOOT)
@@ -268,6 +287,8 @@ docs:
 	@test -f docs/adr/0077-refusing-a-volume-without-losing-the-system.md
 	@test -f docs/adr/0078-restarting-the-storage-driver.md
 	@test -f docs/adr/0079-command-help-and-diagnostics.md
+	@test -f docs/adr/0080-commands-as-separate-images.md
+	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
 	@test -f docs/adr/0071-persistent-volume-layout.md

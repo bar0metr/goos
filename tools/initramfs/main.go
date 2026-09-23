@@ -4,120 +4,54 @@ import (
 	"archive/tar"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"time"
+
+	"goos/userspace/commands"
 )
 
+// usage names the fixed system images in order, then the directory of
+// command images and the command index the build generated from them.
+const usage = "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE LOG_IMAGE CONFIG_IMAGE COMMAND_DIR COMMAND_INDEX OUTPUT"
+
 func main() {
-	if len(os.Args) != 11 {
-		fmt.Fprintln(os.Stderr, "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE COREUTILS_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE LOG_IMAGE CONFIG_IMAGE OUTPUT")
+	if len(os.Args) != 12 {
+		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	image, err := os.ReadFile(os.Args[1])
-	if err != nil {
-		fail(err)
-	}
-	service, err := os.ReadFile(os.Args[2])
-	if err != nil {
-		fail(err)
-	}
-	vfs, err := os.ReadFile(os.Args[3])
-	if err != nil {
-		fail(err)
-	}
-	shell, err := os.ReadFile(os.Args[4])
-	if err != nil {
-		fail(err)
-	}
-	coreutils, err := os.ReadFile(os.Args[5])
-	if err != nil {
-		fail(err)
-	}
-	block, err := os.ReadFile(os.Args[6])
-	if err != nil {
-		fail(err)
-	}
-	virtioBlock, err := os.ReadFile(os.Args[7])
-	if err != nil {
-		fail(err)
-	}
-	logService, err := os.ReadFile(os.Args[8])
-	if err != nil {
-		fail(err)
-	}
-	configService, err := os.ReadFile(os.Args[9])
-	if err != nil {
-		fail(err)
-	}
-	file, err := os.Create(os.Args[10])
-	if err != nil {
-		fail(err)
-	}
-	writer := tar.NewWriter(file)
 	epoch := time.Unix(0, 0)
-	// The message of the day belongs to the immutable system image rather than
-	// to the volatile root, because /system is a read-only mount of this
-	// archive.
-	motd := []byte("Welcome to GoOS\n")
-	headers := []tar.Header{
-		{Name: "system/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/motd", Mode: 0o444, Size: int64(len(motd)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/init", Mode: 0o555, Size: int64(len(image)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/fault-probe", Mode: 0o555, Size: int64(len(service)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/vfs", Mode: 0o555, Size: int64(len(vfs)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/shell", Mode: 0o555, Size: int64(len(shell)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/block", Mode: 0o555, Size: int64(len(block)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/virtio-blk", Mode: 0o555, Size: int64(len(virtioBlock)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/log", Mode: 0o555, Size: int64(len(logService)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/config", Mode: 0o555, Size: int64(len(configService)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/coreutils", Mode: 0o555, Size: int64(len(coreutils)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/pwd", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/ls", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/cat", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/args", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/echo", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/readline", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/mkdir", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/touch", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/rm", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/cp", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/mv", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/stat", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/write", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/ps", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/mem", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/uptime", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/uname", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/sleep", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/bench", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
-		{Name: "system/bin/quota", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
+	members := []member{
+		directory("system/"),
+		directory("system/bin/"),
+		// The message of the day belongs to the immutable system image rather
+		// than to the volatile root, because /system is a read-only mount of
+		// this archive.
+		file("system/motd", 0o444, []byte("Welcome to GoOS\n")),
 	}
-	for index := range headers {
-		if err := writer.WriteHeader(&headers[index]); err != nil {
+	for index, name := range []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "log", "config"} {
+		members = append(members, file("system/"+name, 0o555, read(os.Args[1+index])))
+	}
+	index := read(os.Args[10])
+	members = append(members, file("system/commands", 0o444, index))
+	binaries, err := commandImages(os.Args[9], index)
+	if err != nil {
+		fail(err)
+	}
+	members = append(members, binaries...)
+	output, err := os.Create(os.Args[11])
+	if err != nil {
+		fail(err)
+	}
+	writer := tar.NewWriter(output)
+	for _, entry := range members {
+		entry.header.ModTime = epoch
+		entry.header.Format = tar.FormatUSTAR
+		if err := writer.WriteHeader(&entry.header); err != nil {
 			fail(err)
 		}
-		if headers[index].Typeflag == tar.TypeReg {
-			payload := image
-			if headers[index].Name == "system/motd" {
-				payload = motd
-			} else if headers[index].Name == "system/fault-probe" {
-				payload = service
-			} else if headers[index].Name == "system/vfs" {
-				payload = vfs
-			} else if headers[index].Name == "system/shell" {
-				payload = shell
-			} else if headers[index].Name == "system/block" {
-				payload = block
-			} else if headers[index].Name == "system/virtio-blk" {
-				payload = virtioBlock
-			} else if headers[index].Name == "system/log" {
-				payload = logService
-			} else if headers[index].Name == "system/config" {
-				payload = configService
-			} else if headers[index].Name == "system/bin/coreutils" {
-				payload = coreutils
-			}
-			if _, err := writer.Write(payload); err != nil {
+		if entry.header.Typeflag == tar.TypeReg {
+			if _, err := writer.Write(entry.data); err != nil {
 				fail(err)
 			}
 		}
@@ -125,8 +59,67 @@ func main() {
 	if err := writer.Close(); err != nil {
 		fail(err)
 	}
-	if err := file.Close(); err != nil {
+	if err := output.Close(); err != nil {
 		fail(err)
+	}
+}
+
+type member struct {
+	header tar.Header
+	data   []byte
+}
+
+func directory(name string) member {
+	return member{header: tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeDir}}
+}
+
+func file(name string, mode int64, data []byte) member {
+	return member{header: tar.Header{Name: name, Mode: mode, Size: int64(len(data)), Typeflag: tar.TypeReg}, data: data}
+}
+
+func read(path string) []byte {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fail(err)
+	}
+	return data
+}
+
+// commandImages returns one /system/bin member per image in directory, in
+// name order, and refuses an image the index does not describe or an index
+// entry without an image: the two are built from the same tree and must agree,
+// or PID 1 would grant from a description of a different program.
+func commandImages(directory string, index []byte) ([]member, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	var members []member
+	for _, name := range names {
+		if _, found := commands.Lookup(index, []byte(name)); !found {
+			return nil, fmt.Errorf("%s: image without an index entry", name)
+		}
+		members = append(members, file("system/bin/"+name, 0o555, read(filepath.Join(directory, name))))
+	}
+	for offset := 0; ; {
+		entry, next, ok := commands.Next(index, offset)
+		if !ok {
+			if offset != len(index) {
+				return nil, fmt.Errorf("command index is malformed at byte %d", offset)
+			}
+			return members, nil
+		}
+		if sort.SearchStrings(names, string(entry.Name)) == len(names) || names[sort.SearchStrings(names, string(entry.Name))] != string(entry.Name) {
+			return nil, fmt.Errorf("%s: index entry without an image", entry.Name)
+		}
+		offset = next
 	}
 }
 

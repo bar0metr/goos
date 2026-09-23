@@ -48,11 +48,12 @@ the driver, and utilities are untrusted relative to each other.
 
 ### Malicious utility
 
-A program launched from the shell, for example a compromised `coreutils`
-image or a utility fed hostile arguments.
+A program launched from the shell, for example a compromised command image in
+`/system/bin` or a command fed hostile arguments.
 
 - Holds only `in`, `stdout`, `stderr` (stream endpoints or the console device
-  with a single right) and, for file commands, one private VFS session channel.
+  with a single right) and, when its manifest in the command index asks for
+  one, a private VFS session channel (ADR 0080).
   No Transfer right on any of them.
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch processes, cannot reach block, driver, or lifecycle endpoints.

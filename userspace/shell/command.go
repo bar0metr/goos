@@ -95,8 +95,8 @@ func SplitTime(line []byte) ([]byte, bool) {
 // IsBuiltin reports whether name runs inside the shell rather than as a
 // launched command.
 func IsBuiltin(name []byte) bool {
-	command, found := LookupCommand(name)
-	return found && command.Builtin
+	_, found := LookupCommand(name)
+	return found
 }
 
 // SplitBackground removes an unquoted trailing '&' that asks for the line to

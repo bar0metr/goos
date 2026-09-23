@@ -33,12 +33,15 @@ command, so repeated IPC commands cannot exhaust the non-freeing TinyGo heap.
 
 The QEMU boot test writes real commands to serial stdin and requires the shell's
 responses in serial output. The shell receives non-transferable VFS and exec
-endpoints and cannot delegate them. Every external utility receives a fresh VFS
-session instead of sharing the shell reply queue. Fast exit notifications that
+endpoints and cannot delegate them. Every external command whose manifest asks
+for filesystem access receives a fresh VFS session instead of sharing the shell
+reply queue. Fast exit notifications that
 arrive before a launch reply are retained in a bounded PID 1 queue. The exec
 reply distinguishes launch status from the final child exit code. The native
-base utilities receive structured `argv`, `PATH=/system/bin`, a fresh VFS
-session, a read-only standard-input handle named `in`, and distinct write-only
+base utilities are separate images under `userspace/bin`, each with a manifest
+the build collects into `/system/commands` (ADR 0080). They receive structured
+`argv`, `PATH=/system/bin`, a VFS session when their manifest asks for one, a
+read-only standard-input handle named `in`, and distinct write-only
 `stdout` and `stderr` handles. Normal output uses `stdout`; diagnostics and
 validation markers use `stderr`. Streams target the serial console unless
 pipeline or redirection composition substitutes an endpoint. The bounded
