@@ -2,10 +2,10 @@ SHELL := /bin/sh
 
 BUILD_DIR := build
 CACHE_DIR := $(BUILD_DIR)/cache
-BUILD_ENV := GOCACHE=$(abspath $(CACHE_DIR)/go) XDG_CACHE_HOME=$(abspath $(CACHE_DIR))
+# GOTOOLCHAIN=local: the go command never downloads another toolchain; the
+# pinned one (tools/toolchain.versions) is the one on PATH.
+BUILD_ENV := GOTOOLCHAIN=local GOCACHE=$(abspath $(CACHE_DIR)/go) XDG_CACHE_HOME=$(abspath $(CACHE_DIR))
 KERNEL_DIR = $(OUT_DIR)/kernel
-ISO_ROOT = $(OUT_DIR)/iso/root
-EFI_BOOT = $(ISO_ROOT)/EFI/BOOT
 KERNEL = $(KERNEL_DIR)/goos.efi
 KERNEL_IO := $(BUILD_DIR)/kernel/io.o
 INIT_IMAGE = $(OUT_DIR)/userspace/init
@@ -35,7 +35,6 @@ LOG_ELF = $(OUT_DIR)/userspace/log.elf
 CONFIG_IMAGE = $(OUT_DIR)/userspace/config
 CONFIG_ELF = $(OUT_DIR)/userspace/config.elf
 EFI_IMAGE = $(OUT_DIR)/iso/efi.img
-ISO_BOOT_IMAGE = $(ISO_ROOT)/efi.img
 VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
 ISO := $(BUILD_DIR)/goos-x86_64.iso
 QEMU := qemu-system-x86_64
@@ -72,7 +71,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-performance lint fmt docs clean distclean toolchain-check help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-performance test-reproducible lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -174,22 +173,17 @@ initramfs: userspace
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
 	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
-$(EFI_IMAGE): $(KERNEL) initramfs
-	@mkdir -p $(EFI_BOOT)
-	@cp $(KERNEL) $(EFI_BOOT)/BOOTX64.EFI
-	@cp $(OUT_DIR)/initramfs/initramfs.tar $(ISO_ROOT)/initramfs.tar
-	@rm -f $@ $@.cdr $(ISO_BOOT_IMAGE)
-	@hdiutil create -quiet -fs MS-DOS -format UDTO -size 8m -volname GOOS_EFI -srcfolder $(ISO_ROOT) $@
-	@mv $@.cdr $@
+# tools/mkiso writes both images from their inputs alone, with fixed names,
+# serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
+# byte-identical (ADR 0086).
+$(EFI_IMAGE): $(KERNEL) initramfs $(wildcard tools/mkiso/*.go)
+	@mkdir -p $(dir $@)
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(OUT_DIR)/initramfs/initramfs.tar $@
 
 iso: $(ISO)
 
 $(VARIANT_ISO): $(EFI_IMAGE)
-	@rm -f $@
-	@dd if=$(EFI_IMAGE) of=$(ISO_BOOT_IMAGE) bs=512 skip=1 2>/dev/null
-	@dd if=/dev/zero of=$(ISO_BOOT_IMAGE) bs=1 seek=8388607 count=1 conv=notrunc 2>/dev/null
-	@hdiutil makehybrid -quiet -iso -joliet -eltorito-boot $(abspath $(ISO_BOOT_IMAGE)) -no-emul-boot -o $@ $(ISO_ROOT)
-	@$(BUILD_ENV) go run ./tools/iso-uefi $@
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(EFI_IMAGE) $(KERNEL) $(OUT_DIR)/initramfs/initramfs.tar $@
 	@test -s $@
 
 # build/goos-x86_64.iso is always the most recently requested configuration;
@@ -238,6 +232,11 @@ STRESS_ROUNDS ?= 15
 
 test-stress: iso
 	@tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
+
+# Builds the ISO twice from a clean build/ and compares every artifact (ADR
+# 0086). It cleans build/ itself, keeping only disks, logs, and reports.
+test-reproducible:
+	@MAKE='$(MAKE)' tests/build/reproducible.sh
 
 LATENCY_REPEATS ?= 10
 
@@ -291,6 +290,7 @@ docs:
 	@test -f docs/adr/0081-shared-read-only-image-pages.md
 	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
 	@test -f docs/adr/0083-user-stack-guard-pages.md
+	@test -f docs/adr/0086-pinned-toolchain-and-reproducible-builds.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -368,7 +368,7 @@ clean:
 distclean: clean
 
 toolchain-check:
-	@tools/toolchain-check.sh
+	@OVMF_CODE='$(OVMF_CODE)' tools/toolchain-check.sh
 
 help:
 	@printf '%s\n' \
@@ -386,6 +386,7 @@ help:
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-performance run microbenchmarks into build/reports' \
+	  '  test-reproducible build the ISO twice from clean and compare every artifact' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \
-	  '  toolchain-check validate local prerequisites'
+	  '  toolchain-check validate tools and pinned versions (tools/toolchain.versions)'

@@ -5,6 +5,48 @@ installing or downloading anything. `make iso` creates all generated files
 under `build/`, including `build/kernel/goos.efi` and
 `build/goos-x86_64.iso`.
 
+## Toolchain and pinned versions
+
+`tools/toolchain.versions` pins every external tool (ADR 0086):
+
+| Tool | Pinned | On a different version |
+| --- | --- | --- |
+| Go | 1.25.5 | error: it compiles the binaries |
+| TinyGo | 0.42.0 (LLVM 22.1.4) | error: it compiles the binaries |
+| clang (Xcode Command Line Tools) | Apple clang 21.0.0 | warning: assembles two `.S` files |
+| make | GNU Make 3.81 | warning |
+| `qemu-system-x86_64` | 11.0.1 | warning: runs the result only |
+| OVMF `edk2-x86_64-code.fd` | SHA-256 of MacPorts qemu 11.0.1 | warning |
+
+`make toolchain-check` prints `[ OK ]`, `[MISS]`, `[FAIL]` (an error pin
+differs), or `[WARN]` for each tool, `nm`, and the base-system `file`, `nc`,
+and `shasum` the tests use, with a macOS install hint for each problem: the
+go.dev package and TinyGo release archive for the pinned versions,
+`xcode-select --install`, `sudo port install qemu`, or `brew install qemu`. It
+also checks that the pinned Go matches the `go` directive in `go.mod`. It never
+installs anything and exits non-zero on a missing tool or an error pin. The
+build runs Go with `GOTOOLCHAIN=local`, so the go command never downloads a
+different toolchain. Move a pin only after `make test-reproducible` and
+`make test-all` pass on the new version.
+
+The build needs no disk-image tool: `tools/mkiso` writes the FAT16 EFI system
+partition (`build/variants/<config>/iso/efi.img`) and the ISO with its UEFI El
+Torito entry.
+
+## Reproducible builds
+
+Two builds of the same sources are byte-identical. Every timestamp in the
+images is `SOURCE_DATE_EPOCH` (default 0), archive and directory entries are in
+name order, and nothing records the host, the time, or a random value.
+`make test-reproducible` checks it: it cleans `build/` (keeping disks, logs,
+and reports), builds the ISO, sets the outputs aside in `build/reproducible/`,
+cleans again, caches included, builds again, and compares the SHA-256 of every
+artifact. A difference names each file that differs and leaves both trees in
+`build/reproducible/`. It honours `HZ`, `DIAG`, and `VALIDATION`, and leaves the
+next build to start cold, as `make clean` does.
+
+## Building, running, and testing
+
 The userspace build compiles `userspace/cmd/init`, `userspace/cmd/vfs`, and
 `userspace/cmd/shell` with the dedicated
 `goos-userspace-amd64` TinyGo target, links a static ELF at the native userspace
@@ -64,5 +106,7 @@ configuration does not rebuild it. `make iso` copies the requested variant to
 test harnesses.
 
 Set `OVMF_CODE=/path/to/firmware.fd` if QEMU firmware is not installed under
-`/opt/local/share/qemu`. Set `SOURCE_DATE_EPOCH` to a fixed project release
-timestamp for release builds.
+`/opt/local/share/qemu` (Homebrew installs it under
+`$(brew --prefix)/share/qemu`). Set `SOURCE_DATE_EPOCH` to a fixed project
+release timestamp for release builds; the kernel build and the timestamps in
+the EFI partition and the ISO take it.

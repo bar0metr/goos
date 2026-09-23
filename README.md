@@ -251,9 +251,12 @@ system state on the persistent volume (ADR 0071).
 
 ## Building and running
 
-The primary development environment is macOS. The build requires Go, TinyGo,
-GNU Make, `qemu-system-x86_64` with OVMF, `hdiutil`, and `nm`. It does not
-silently install or download dependencies.
+The primary development environment is macOS. The build requires Go 1.25.5,
+TinyGo 0.42.0, clang and make from the Xcode Command Line Tools, and
+`qemu-system-x86_64` 11.0.1 with OVMF firmware. `tools/toolchain.versions` pins
+these versions and `make toolchain-check` compares the installed tools against
+it, printing a macOS install hint for anything missing. It does not silently
+install or download dependencies.
 
 ```sh
 make toolchain-check
@@ -264,7 +267,9 @@ make run
 ```
 
 The resulting image is written to `build/goos-x86_64.iso`. All intermediate
-files and caches remain under `build/`.
+files and caches remain under `build/`. Builds are reproducible: `make
+test-reproducible` builds the ISO twice from a clean tree and requires every
+artifact to be byte-identical (ADR 0086).
 
 A successful boot of a normal build produces:
 
