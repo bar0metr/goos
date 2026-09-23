@@ -78,6 +78,10 @@ repeated metadata reads (ADR 0048).
 
 ## Failure behaviour
 
+- A volume whose declared geometry does not fit its device, or whose FAT cannot
+  describe the clusters it claims, is refused at mount. The system still boots:
+  `/persist`, `/home` and `/state` are absent and everything else works
+  (ADR 0077).
 - Each hop validates sizes, offsets, and reserved fields before acting.
 - Services reply `InvalidArgument` to requests they can attribute but not
   parse.

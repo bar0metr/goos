@@ -296,7 +296,15 @@ the setting that governs it, and sessions are now created through a control
 endpoint with per-client scopes and rights — the shell administers
 configuration, the log service only reads the one namespace that governs it.
 
-What remains: FAT32 hardening and storage failure recovery.
+ADR 0077 closes the third: the geometry an image declares is checked against the
+device before any offset is derived from it, and a volume the filesystem refuses
+no longer takes the system with it. The machine boots to a prompt with the
+persistent mounts absent, which is the state the volume can be inspected from.
+
+What remains of consolidation is storage failure recovery for a device that
+fails while running, rather than one that is wrong at mount: the storage
+services are still `restart: never`, because restarting one leaves its peers
+holding endpoints whose other side has gone.
 
 ## Priority 5 — Linux ABI compatibility
 

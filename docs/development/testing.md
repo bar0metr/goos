@@ -65,6 +65,12 @@ written before that boot, so a record surviving the reset is a persistence
 proof. The validation build uses a smaller rotation bound so one session crosses
 it.
 
+A fourth QEMU phase boots the system on a volume claiming far more sectors than
+its device holds, logged to `build/logs/corrupt-volume.log`. It requires the
+system to reach a prompt, report the refused volume, list a root without the
+persistent mounts, run a command and answer a configuration query: a corrupt
+disk must cost the storage, not the system.
+
 The config group also asserts that a setting is actually consulted: changing the
 prompt applies on the next line and is then restored, and the log shows two
 sessions created with different rights. That a confined session cannot reach

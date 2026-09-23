@@ -51,6 +51,30 @@ flush, repeated relative-path FAT32 reads and writes, and the resulting bytes in
 the persistent raw disk image. Driver teardown
 resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
+## Mounting an untrusted volume
+
+Everything the FAT32 backend computes comes from the boot sector: where the FAT
+begins, where a cluster is, how far a chain may run. The image is on a device the
+system does not control, so the geometry is checked against that device before an
+offset is derived from it (ADR 0077):
+
+- the device reports its capacity, which must be a whole number of sectors;
+- the declared volume must fit the device;
+- the metadata must fit the volume;
+- the FAT must be large enough for an entry per cluster plus the two reserved.
+
+Only one geometry is handled: 512-byte sectors, one sector per cluster, one FAT.
+Any other is refused rather than approximated, because a valid FAT32 volume this
+code would misread is worse than one it declines.
+
+A refused volume is not fatal. The filesystem service reports it, prints
+`[WARN] no persistent storage`, and serves the rest of the namespace: the
+volatile root and the read-only system image are already mounted, so the machine
+comes up to a prompt with `/persist`, `/home` and `/state` simply absent. That
+prompt is where the volume gets looked at. The log service keeps draining the
+kernel ring and retries its file on each pass; the configuration service serves
+its declared defaults.
+
 A bounded FAT32 backend is mounted at `/persist`, and its `home` and `state`
 directories are mounted again at `/home` and `/state` so that user data and
 mutable system state are named apart from the immutable system image (ADR 0071).

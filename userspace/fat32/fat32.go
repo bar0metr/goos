@@ -50,6 +50,10 @@ type Device interface {
 	ReadAt(offset uint64, target []byte) bool
 	WriteAt(offset uint64, data []byte) bool
 	Flush() bool
+	// Capacity is the device size in bytes. The filesystem checks the geometry
+	// the image declares against it, because every offset this code computes
+	// comes from numbers the image supplies and an image is untrusted input.
+	Capacity() uint64
 }
 
 type FileSystem struct {
@@ -157,23 +161,54 @@ func (fs *FileSystem) lookup(lba uint64) *cachedSector {
 	return nil
 }
 
+// Mount validates the geometry an image declares before deriving a single
+// offset from it. Everything this filesystem computes — where the FAT is, where
+// a cluster is, how far a chain may run — comes from these fields, and the
+// image is untrusted input: a volume that does not fit its own device, or whose
+// FAT cannot describe the clusters it claims, is refused rather than read.
 func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
 	for index := range fs.cache {
 		fs.cache[index] = cachedSector{}
 	}
 	fs.victim = 0
-	if device == nil || !device.ReadAt(0, fs.sector[:]) || fs.sector[510] != 0x55 || fs.sector[511] != 0xaa || get16(fs.sector[11:13]) != 512 || fs.sector[13] != 1 || fs.sector[16] != 1 {
+	if device == nil || !device.ReadAt(0, fs.sector[:]) {
+		return 0, false
+	}
+	capacity := device.Capacity()
+	if capacity < sectorSize || capacity%sectorSize != 0 {
+		return 0, false
+	}
+	// This implementation handles one geometry: 512-byte sectors, one sector
+	// per cluster, one FAT. Anything else is a valid FAT32 volume this code
+	// would misread, so it is refused rather than approximated.
+	if fs.sector[510] != 0x55 || fs.sector[511] != 0xaa || get16(fs.sector[11:13]) != 512 || fs.sector[13] != 1 || fs.sector[16] != 1 {
 		return 0, false
 	}
 	reserved := uint64(get16(fs.sector[14:16]))
 	fatSectors := uint64(get32(fs.sector[36:40]))
 	total := uint64(get32(fs.sector[32:36]))
 	root := get32(fs.sector[44:48])
-	if reserved < 2 || fatSectors == 0 || total <= reserved+fatSectors || root < 2 {
+	if reserved < 2 || fatSectors == 0 || root < 2 {
 		return 0, false
 	}
-	fs.device, fs.fatStart, fs.dataStart = device, reserved*sectorSize, (reserved+fatSectors)*sectorSize
-	fs.totalClusters, fs.rootCluster = uint32(total-reserved-fatSectors), root
+	// The volume must fit the device it is on, or a cluster offset this code
+	// computes would name storage that is not there.
+	if total > capacity/sectorSize {
+		return 0, false
+	}
+	metadata := reserved + fatSectors
+	if metadata < reserved || total <= metadata {
+		return 0, false
+	}
+	clusters := total - metadata
+	// The FAT has one entry per cluster plus the two reserved ones. A FAT too
+	// small for the clusters the volume claims cannot describe them, and a walk
+	// would read entries belonging to the data region.
+	if (clusters+2)*4 > fatSectors*sectorSize {
+		return 0, false
+	}
+	fs.device, fs.fatStart, fs.dataStart = device, reserved*sectorSize, metadata*sectorSize
+	fs.totalClusters, fs.rootCluster = uint32(clusters), root
 	if !fs.valid(root) {
 		return 0, false
 	}

@@ -127,6 +127,10 @@ func userspaceMain() {
 		fatal("CONFIG_SCOPE_INVALID\n")
 	}
 	declareSchema()
+	// A volume that is absent or unreadable leaves the declared defaults in
+	// place. Configuration that cannot be loaded is not a reason to refuse to
+	// serve it: the shell needs a configuration service to repair a broken
+	// configuration.
 	restore()
 	arenaBase = heapPointer
 	mark("CONFIG_SERVICE_OK\n")

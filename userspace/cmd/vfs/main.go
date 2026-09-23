@@ -38,6 +38,7 @@ var (
 	waitInterests        *[userwait.MaxObjects]userwait.Interest
 	waitCount            int
 	liveSessions         int
+	persistentMounted    bool
 )
 
 type blockDevice struct{}
@@ -77,6 +78,24 @@ func (blockDevice) Flush() bool {
 	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationFlush})
 	return ok && reply.Status == blockproto.StatusOK
 }
+
+// Capacity asks the block service how large the device really is, so the
+// filesystem can check the geometry its image declares against it. The answer
+// is cached: it does not change while the device is attached, and the
+// filesystem asks once per mount.
+func (blockDevice) Capacity() uint64 {
+	if blockCapacity != 0 {
+		return blockCapacity
+	}
+	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationInfo})
+	if !ok || reply.Status != blockproto.StatusOK {
+		return 0
+	}
+	blockCapacity = reply.Capacity
+	return blockCapacity
+}
+
+var blockCapacity uint64
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -166,15 +185,23 @@ func userspaceMain() {
 	if !mountSystemImage(imageHandle) {
 		fatal("VFS_IMAGE_MOUNT_FAILED\n")
 	}
-	if !service.MountPersistent(blockDevice{}) {
-		fatal("VFS_FAT32_MOUNT_FAILED\n")
+	// A volume that cannot be mounted is not a reason for the system to stop.
+	// The root filesystem and the system image are already up, so the machine
+	// boots to a prompt with no persistent storage rather than to nothing at
+	// all, which is the state from which the volume can be inspected.
+	persistentMounted = service.MountPersistent(blockDevice{})
+	if !persistentMounted {
+		syslog.Error("persistent volume not mounted", syslog.Str("reason", "image rejected or device unavailable"))
+		write("[WARN] no persistent storage\n")
 	}
 	arenaBase = heapPointer
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
-	mark("FAT32_MOUNT_OK\n")
 	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", "/system"))
-	syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
+	if persistentMounted {
+		mark("FAT32_MOUNT_OK\n")
+		syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
+	}
 	for {
 		heapPointer = arenaBase
 		var interests [userwait.MaxObjects]userwait.Interest
