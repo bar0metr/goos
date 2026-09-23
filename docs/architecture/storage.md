@@ -125,3 +125,21 @@ they cannot parse with an invalid-argument reply whenever the caller can be
 identified, because a silent drop would strand a caller that is waiting for
 exactly that correlation. Both rules exist so that a fault anywhere in the
 storage path degrades into a reported error instead of an apparent freeze.
+
+## A driver that fails while running
+
+The driver is the component that talks to hardware and the one most likely to
+fail. It restarts (ADR 0078): PID 1 creates a fresh channel to the block
+service, tells that service over a control endpoint only PID 1 holds the client
+of, and launches a replacement with the same ports, interrupt line and DMA
+domain. The dead process's teardown has already reset the device and masked its
+interrupt, so the replacement starts against quiesced hardware.
+
+The block service installs the endpoint without probing it, because PID 1 hands
+it over before the replacement exists; the next real request is what discovers
+whether the driver works. While it knows the driver is gone it refuses requests
+at once rather than waiting out a deadline against a process that is not there.
+
+The block and filesystem services do not restart. Their clients hold sessions
+rather than a single endpoint, and reconnecting those needs each client to be
+told, which is a larger change than the leaf of the chain needed.

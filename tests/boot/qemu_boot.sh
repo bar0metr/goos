@@ -480,6 +480,19 @@ pass_group userspace
 for marker in BLOCK_SERVICE_OK BLOCK_SERVICE_IO_OK PCI_DISCOVERY_OK VIRTIO_BLK_CAPABILITIES_OK VIRTIO_BLK_DRIVER_OK VIRTIO_BLK_IRQ_OK; do
 	require_marker "storage.$marker" "$marker" "$log"
 done
+# The validation build kills the storage driver once, after the system is up.
+# A driver is the component most likely to fail, so the path it takes when it
+# does is exercised on every boot rather than only when hardware misbehaves.
+require_marker storage.fault-injected BLOCK_DRIVER_FAULT_INJECTED "$log"
+# Whether the block service observes the loss depends on whether a request was
+# in flight when the driver died, so the replacement is asserted and the loss is
+# not: the replacement is what recovery means.
+require_marker storage.driver-replaced BLOCK_DRIVER_REPLACED_OK "$log"
+require_count storage.driver-started '^VIRTIO_BLK_DRIVER_OK$' 2 "$log" BLOCK_DRIVER_FAULT_INJECTED
+# The services either side of the driver stay up: a crash in one is not a
+# cascade through the storage stack.
+require_count storage.block-service-stable '^BLOCK_SERVICE_OK$' 1 "$log" BLOCK_SERVICE_OK
+forbid_regex storage.no-block-restart 'service exited service=block' 'the block service did not restart' "$log" BLOCK_DRIVER_LOST_OK
 pass_group storage
 
 for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do

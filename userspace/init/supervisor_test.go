@@ -166,3 +166,77 @@ func TestAtListsRegisteredServicesInOrder(t *testing.T) {
 		t.Fatal("unregistered index listed")
 	}
 }
+
+func TestSetCapabilityRefreshesOneHandle(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "driver", Executable: "/system/driver",
+		Capabilities: []Capability{
+			{Name: "ports", Handle: 1, Type: handle.TypeDevice, Rights: capability.Read},
+			{Name: "service", Handle: 2, Type: handle.TypeChannel, Rights: capability.Read | capability.Write},
+		}}) != StatusOK {
+		t.Fatal("register failed")
+	}
+	if manager.SetCapability("driver", "service", 9) != StatusOK {
+		t.Fatal("refresh refused")
+	}
+	var launched LaunchSpec
+	if manager.StartReady(0, func(request LaunchSpec) (uint64, bool) {
+		launched = request
+		return 7, true
+	}) != 1 {
+		t.Fatal("start failed")
+	}
+	if launched.Capabilities[1].Handle != 9 {
+		t.Fatalf("stale handle launched: %d", launched.Capabilities[1].Handle)
+	}
+	// The other capabilities are untouched.
+	if launched.Capabilities[0].Handle != 1 {
+		t.Fatalf("an unrelated capability changed: %d", launched.Capabilities[0].Handle)
+	}
+	if manager.SetCapability("driver", "missing", 3) != StatusNotFound ||
+		manager.SetCapability("absent", "service", 3) != StatusNotFound ||
+		manager.SetCapability("driver", "service", 0) != StatusInvalidArgument {
+		t.Fatal("an invalid refresh was accepted")
+	}
+}
+
+func TestScheduledRestartIsVisibleAsPending(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "driver", Executable: "/system/driver", Restart: RestartOnFailure,
+		Capabilities: []Capability{{Name: "ports", Handle: 1, Type: handle.TypeDevice, Rights: capability.Read}}}) != StatusOK {
+		t.Fatal("register failed")
+	}
+	if !manager.RestartPending() {
+		t.Fatal("a registered service is not reported as wanting to start")
+	}
+	if manager.StartReady(0, func(LaunchSpec) (uint64, bool) { return 5, true }) != 1 {
+		t.Fatal("start failed")
+	}
+	if manager.RestartPending() {
+		t.Fatal("a running service is reported as pending")
+	}
+	// A crash schedules a restart that nothing else will trigger.
+	if manager.Exit(5, 1, 10) != StatusOK {
+		t.Fatal("exit not recorded")
+	}
+	if !manager.RestartPending() {
+		t.Fatal("a scheduled restart is invisible")
+	}
+	if manager.StartReady(10+RestartBackoff, func(LaunchSpec) (uint64, bool) { return 6, true }) != 1 {
+		t.Fatal("the scheduled restart did not run")
+	}
+	if manager.RestartPending() {
+		t.Fatal("the restarted service is still pending")
+	}
+	// A service that exhausts its restarts stops being pending, or the
+	// supervisor would spin on a deadline that can never be met.
+	pid := uint64(6)
+	for attempt := 0; attempt < MaxRestarts+2; attempt++ {
+		manager.Exit(pid, 1, uint64(20+attempt*int(RestartBackoff)))
+		pid++
+		manager.StartReady(uint64(20+attempt*int(RestartBackoff))+RestartBackoff, func(LaunchSpec) (uint64, bool) { return pid, true })
+	}
+	if snapshot, _ := manager.Snapshot("driver"); snapshot.State == StateFailed && manager.RestartPending() {
+		t.Fatal("a failed service is still pending")
+	}
+}

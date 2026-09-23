@@ -91,3 +91,40 @@ func TestEncodeRequestClearsReusedMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestControlReplacesTheDriverEndpoint(t *testing.T) {
+	message, ok := SetDriverRequest(9, 4)
+	if !ok {
+		t.Fatal("encode failed")
+	}
+	driver, valid := DecodeSetDriver(message)
+	if !valid || driver != 9 {
+		t.Fatalf("decoded %d %v", driver, valid)
+	}
+	if _, ok := SetDriverRequest(0, 4); ok {
+		t.Fatal("a request with no endpoint was encoded")
+	}
+	if _, ok := SetDriverRequest(9, 0); ok {
+		t.Fatal("a request with no correlation was encoded")
+	}
+	// The attached handle is the whole point of the message.
+	corrupt := message
+	corrupt.HandleCount = 0
+	if _, ok := DecodeSetDriver(corrupt); ok {
+		t.Fatal("decoded a request with no endpoint")
+	}
+	corrupt = message
+	corrupt.Payload[0] = 2
+	if _, ok := DecodeSetDriver(corrupt); ok {
+		t.Fatal("decoded an unknown control operation")
+	}
+	corrupt = message
+	corrupt.ProtocolID = ProtocolID
+	if _, ok := DecodeSetDriver(corrupt); ok {
+		t.Fatal("decoded a data request as control")
+	}
+	reply, ok := SetDriverReply(StatusIOError, 4)
+	if status, valid := DecodeSetDriverReply(reply); !ok || !valid || status != StatusIOError {
+		t.Fatalf("reply round trip: %d %v", status, valid)
+	}
+}

@@ -5,6 +5,7 @@ package block
 import (
 	"encoding/binary"
 	"goos/kernel/clock"
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 )
 
@@ -175,4 +176,50 @@ func zero(value []byte) bool {
 		}
 	}
 	return true
+}
+
+// The control protocol replaces the endpoint this service talks to a driver
+// over. A driver that has crashed leaves its peer holding a channel whose other
+// side is gone; PID 1 restarts the driver, creates a fresh pair, and hands this
+// service the new client side. PID 1 holds the only control endpoint, so no
+// other process can redirect where storage requests go.
+const (
+	ControlProtocolID  = uint64(0x47424c4b43)
+	ControlVersion     = uint16(1)
+	operationSetDriver = byte(1)
+)
+
+func SetDriverRequest(driver handle.ID, correlation uint64) (ipc.Message, bool) {
+	if driver == 0 || correlation == 0 {
+		return ipc.Message{}, false
+	}
+	return ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, Payload: [ipc.MaxPayload]byte{operationSetDriver}, PayloadSize: 1,
+		Handles: [ipc.MaxAttachedHandles]handle.ID{driver}, HandleCount: 1}, true
+}
+
+func DecodeSetDriver(message ipc.Message) (handle.ID, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest ||
+		message.Correlation == 0 || message.PayloadSize != 1 || message.Payload[0] != operationSetDriver ||
+		message.HandleCount != 1 || message.Handles[0] == 0 {
+		return 0, false
+	}
+	return message.Handles[0], true
+}
+
+func SetDriverReply(status Status, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 || status > StatusIOError {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 1}
+	message.Payload[0] = byte(status)
+	return message, true
+}
+
+func DecodeSetDriverReply(message ipc.Message) (Status, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindReply ||
+		message.Correlation == 0 || message.PayloadSize != 1 || message.HandleCount != 0 || Status(message.Payload[0]) > StatusIOError {
+		return 0, false
+	}
+	return Status(message.Payload[0]), true
 }

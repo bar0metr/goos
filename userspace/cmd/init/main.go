@@ -47,6 +47,17 @@ const systemImageHandle = handle.ID(0x0000000100000015)
 // configuration session.
 var configControlHandle handle.ID
 
+var (
+	// blockControl is the channel pair whose client side PID 1 keeps to tell
+	// the block service about a replacement driver.
+	blockControl [2]uint64
+	// driverStarted marks the first launch, which uses the boot channel.
+	driverStarted bool
+	// driverProcessHandle is kept only by the validation build, to inject the
+	// fault that proves a crashed driver is replaced.
+	driverProcessHandle handle.ID
+)
+
 //go:linkname processKill goos_process_kill
 func processKill(process uint64) uint64
 
@@ -163,7 +174,19 @@ func userspaceMain() {
 		}
 		readyMask := uint16(1)
 		if lifecycleCount == 0 {
-			result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+			// A scheduled restart is a deadline rather than an event. While one
+			// is outstanding the wait is bounded, so the service comes back
+			// even when nothing else happens; otherwise it blocks indefinitely.
+			timeout := uint64(kcall.WaitAnyInfiniteTimeout)
+			if manager.RestartPending() {
+				timeout = supervisor.RestartBackoff
+			}
+			result, status := userwait.Any(&interests, count, timeout)
+			if status == kcall.StatusTimeout {
+				supervisionTicks += supervisor.RestartBackoff
+				manager.StartReady(supervisionTicks, launchService)
+				continue
+			}
 			if status != kcall.StatusOK {
 				fatal("INIT_WAIT_FAILED\n")
 			}
@@ -209,6 +232,11 @@ func startServices(ticks uint64) {
 		fatal("INIT_EXEC_PAGE_FAILED\n")
 	}
 	write("\nStarting services...\n")
+	// The block service's control endpoint, over which a restarted driver's
+	// replacement channel is delivered. PID 1 holds the only client side.
+	if channelCreate(unsafe.Pointer(&blockControl[0]), 16) != 0 {
+		fatal("INIT_BLOCK_CONTROL_FAILED\n")
+	}
 	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
@@ -223,15 +251,21 @@ func startServices(ticks uint64) {
 				{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "control", Handle: handle.ID(blockControl[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+		// The driver's device authority stays with PID 1 rather than being
+		// consumed. A driver that crashes has to be replaced by another one
+		// holding the same ports, line and DMA domain, and only PID 1 can grant
+		// them. The dead process's copies are released by its teardown, which
+		// also resets the device and masks its interrupt.
 		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-				{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write, Consume: true},
-				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait, Consume: true},
-				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write, Consume: true},
+				{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait},
+				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 3 || validation.Enabled && !probeBlockService() {
@@ -264,6 +298,10 @@ func startServices(ticks uint64) {
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
 		fatal("SHELL_LAUNCH_FAILED\n")
 	}
+	// The fault goes in last, once the filesystem has mounted and the system is
+	// up: the point is that a driver crashing under a working system is
+	// recovered from, not that one crashing during boot is survivable.
+	injectDriverFault()
 	supervisionComplete = true
 	arenaBase = heapPointer
 }
@@ -471,7 +509,76 @@ func stagingSlot() (uint8, *[startup.Size]byte) {
 	return nextStagingSlot, (*[startup.Size]byte)(unsafe.Pointer(uintptr(address)))
 }
 
+// injectDriverFault kills the storage driver once, in the validation build
+// only, so that the path a crashed driver takes is exercised on every boot
+// rather than only when hardware misbehaves. The supervisor restarts it, PID 1
+// gives it a fresh channel, and the block service installs it.
+func injectDriverFault() {
+	if !validation.Enabled || driverProcessHandle == 0 {
+		return
+	}
+	target := driverProcessHandle
+	driverProcessHandle = 0
+	if processKill(uint64(target)) != 0 {
+		syslog.Warn("driver fault injection failed")
+		return
+	}
+	handleClose(uint64(target))
+	syslog.Warn("driver fault injected")
+	mark("BLOCK_DRIVER_FAULT_INJECTED\n")
+}
+
+// driverName is the one service whose endpoints cannot survive its own restart.
+const driverName = "virtio-blk"
+
+// replaceDriverChannel gives a restarting driver a fresh channel to the block
+// service. The old pair died with the process that held one half of it, so the
+// replacement cannot be handed the endpoint its predecessor had: a new pair is
+// created, the block service is told about the client side over its control
+// endpoint, and the definition is updated so the next restart does not hand out
+// a handle that is already dead.
+func replaceDriverChannel(spec *supervisor.LaunchSpec) bool {
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		syslog.Error("driver channel unavailable")
+		return false
+	}
+	correlation++
+	request, ok := blockproto.SetDriverRequest(handle.ID(pair[0]), correlation)
+	if !ok || !sendMessage(uint64(blockControl[0]), request) {
+		closePair(pair)
+		return false
+	}
+	reply, status := receive(uint64(blockControl[0]), vfsSessionDeadline)
+	blockStatus, valid := blockproto.DecodeSetDriverReply(reply)
+	if status != ipc.StatusOK || !valid || blockStatus != blockproto.StatusOK {
+		handleClose(pair[1])
+		syslog.Error("block service refused the replacement driver")
+		return false
+	}
+	// The definition and the copy about to be launched both have to name the
+	// new endpoint: the launcher was handed its copy before this ran, and the
+	// definition is what the launch after this one will use.
+	if manager.SetCapability(driverName, "service", handle.ID(pair[1])) != supervisor.StatusOK {
+		handleClose(pair[1])
+		return false
+	}
+	for index := 0; index < int(spec.CapabilityCount); index++ {
+		if spec.Capabilities[index].Name == "service" {
+			spec.Capabilities[index].Handle = handle.ID(pair[1])
+			return true
+		}
+	}
+	handleClose(pair[1])
+	return false
+}
+
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
+	// A driver that is starting again needs a channel whose other end is live.
+	// The first launch uses the pair created at boot, which still is.
+	if driverStarted && bytesString(spec.Name[:spec.NameSize]) == driverName && !replaceDriverChannel(&spec) {
+		return 0, false
+	}
 	correlation++
 	slot, staging := stagingSlot()
 	var vectorWire [startup.VectorSize]byte
@@ -498,7 +605,14 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	mark("INIT_SERVICE_LAUNCH_OK\n")
 	name := bytesString(spec.Name[:spec.NameSize])
 	event, status := receiveLaunchResult(correlation)
-	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || handleClose(uint64(event.ProcessHandle)) != 0 {
+	// The validation build keeps the driver's process handle so it can inject
+	// the fault that proves a crashed driver is replaced. Every other service's
+	// handle is closed: PID 1 supervises through lifecycle events, not handles.
+	keep := validation.Enabled && name == driverName && driverProcessHandle == 0
+	if keep && status == ipc.StatusOK && event.Code == uint64(supervisor.LaunchOK) {
+		driverProcessHandle = event.ProcessHandle
+	}
+	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || !keep && handleClose(uint64(event.ProcessHandle)) != 0 {
 		write("[FAIL] " + name + "\n")
 		syslog.Error("service launch failed", syslog.Str("service", name), syslog.Uint("status", event.Code))
 		return 0, false
@@ -506,6 +620,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	mark("INIT_SERVICE_STARTED_OK\n")
 	write("[ OK ] " + name + "\n")
 	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
+	if name == driverName {
+		driverStarted = true
+	}
 	return event.Process, true
 }
 
