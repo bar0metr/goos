@@ -20,7 +20,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-latency` boots one guest and measures command and VFS latency
   into `build/reports/latency-hz<rate>.md`. It is a measurement, not a gate,
   and is not part of `make test-all`.
-- `make test-performance` writes microbenchmark reports under `build/reports/`.
+- `make test-microbench` boots one guest and runs the in-guest
+  microbenchmarks (context switch, IPC, VFS reads, RAMFS metadata) into
+  `build/reports/microbench-hz<rate>.md` (ADR 0085). Like `test-latency` it is
+  a measurement, not a gate.
+- `make test-performance` runs `test-microbench` and then the host
+  microbenchmarks, writing every report under `build/reports/`.
 
 Use `make test` during the normal edit loop. Use `make test-all` before delivery
 of changes that affect the kernel, native userspace, startup protocols, storage,
@@ -165,9 +170,11 @@ since boot through native operation 24 (ADR 0054). Two guest tools use it:
   shell's exec request, PID 1, every launch, and the wait for exit.
 - `bench vfs N` sends N `Stat /` requests and `bench read PATH N` opens, reads
   to EOF, and closes PATH N times, both from inside one process with its own
-  VFS session. Each prints `bench <mode>: N ops, total <us> us, avg <ns> ns/op`.
-  N is at most 10000. A file under `/persist` exercises VFS, FAT32, the block
-  service, and the virtio-blk driver, subject to the FAT32 sector cache.
+  VFS session. Each prints `bench <mode>: N ops, total <us> us, avg <ns> ns/op`;
+  `read` adds the file size and the rate. N is at most 10000. A file under
+  `/persist` exercises VFS, FAT32, the block service, and the virtio-blk
+  driver, subject to the FAT32 sector cache. The other modes are described
+  under [In-guest microbenchmarks](#in-guest-microbenchmarks).
 
 `tests/boot/latency.sh` drives one guest through a FIFO the way the stress test
 does. After a warm-up pass it runs each case under `time` `LATENCY_REPEATS`
@@ -188,6 +195,63 @@ stage of `spawnExecutable` (image lookup, address-space creation, image load,
 process and grant setup, task install), the number of launches since boot and
 their total and average time. Failed lookups are counted too. Numbers from
 QEMU TCG describe the emulated system on that host, not hardware.
+
+## Performance measurement
+
+The specification (§51) asks for microbenchmarks of the context switch, IPC
+ping-pong and throughput, shared-memory throughput, page allocation, page
+faults, cached and uncached VFS reads, and RAMFS metadata operations, with
+results in `build/reports/`, and for no optimisation on assumptions.
+`make test-performance` produces two kinds of report.
+
+Host benchmarks (`go test -bench`) time the kernel data structures on the host:
+`page-allocation.txt` (`pmm` allocate/free), `ipc-ping-pong.txt` (channel
+send/receive in one address space), `shared-memory.txt`, `stream-roundtrip.txt`,
+`ramfs-metadata.txt`, and `vfs-resolve.txt`. They measure the algorithms, not
+the system: no trap, no context switch, no second process.
+
+### In-guest microbenchmarks
+
+`make test-microbench` (ADR 0085) boots one normal-build guest, runs each case
+of `tests/boot/microbench.sh` once to warm up and `MICROBENCH_REPEATS` times
+(default 5), and writes `build/reports/microbench-hz<rate>.md` with the median
+over the runs and the raw `bench` lines. The transcript is kept in
+`build/logs/microbench-hz<rate>.log`.
+
+| Case | Command | What it measures |
+| --- | --- | --- |
+| IPC ping-pong | `bench vfs 1000` | a request/reply on a channel between the client and the VFS service, including the service's `Stat /` |
+| Stream calls, one process | `bench stream N SIZE` | write, drain, and empty read of a private stream plus a clock read per operation; no switch |
+| Stream handoff | `bench send 200 1 \| bench recv 200 1` | one-byte round trips between two processes |
+| IPC throughput | `bench send N SIZE \| bench recv N SIZE` | bytes per second through a two-stage pipeline |
+| Cached VFS read | `bench read /system/bin/uname 50` | a 10 KiB file of the memory-resident system image |
+| Uncached VFS read | `bench read /persist/uname.bin 20` | the same bytes on FAT32; 20 sectors exceed the 4-sector cache, so each pass reads the device |
+| RAMFS metadata | `bench meta /tmp/bench.tmp 500` | create and unlink of one file in the RAMFS `/tmp`, two VFS requests |
+
+`bench recv` times from its first chunk to its last and reads the clock after
+every chunk. While it is blocked on the empty stream, every write wakes it and
+the kernel switches to it on the write's return (ADR 0055); it drains the chunk
+and blocks again. A chunk preceded by exactly one wait is therefore one round
+trip, and the report gives the median of those intervals separately from the
+average. The sender never blocks, so a timer tick that preempts the receiver
+lets the sender fill the stream and the pair then moves many chunks per switch:
+that is the throughput case, and it is why the handoff case is short.
+
+The context switch is derived: (handoff op median - one-process op median) / 2,
+both at one byte and both with one clock read per operation. The difference is
+one switch between two address spaces plus half of a blocking wait, its wake,
+and the retried wait.
+
+```sh
+make test-microbench
+make HZ=1000 test-microbench MICROBENCH_REPEATS=9
+```
+
+Page faults and shared-memory throughput between processes are not measured in
+the guest; ADR 0085 records why. The guest TSC advances in steps of about 1 µs
+under TCG on an arm64 host, so single intervals are quantised to that step.
+Other QEMU guests running on the same host change the results by tens of
+percent; rerun on a quiet host before comparing builds.
 
 ## Adding a boot assertion
 

@@ -71,7 +71,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-performance test-reproducible lint fmt docs clean distclean toolchain-check help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -245,7 +245,16 @@ test-latency: iso
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/latency-virtio-blk.img
 	@LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
 
-test-performance:
+MICROBENCH_REPEATS ?= 5
+
+# In-guest microbenchmarks (ADR 0085): context switch, IPC, and VFS reads
+# measured in a booted system.
+test-microbench: iso
+	@rm -f $(BUILD_DIR)/microbench-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/microbench-virtio-blk.img
+	@MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
+
+test-performance: test-microbench
 	@mkdir -p $(BUILD_DIR)/reports
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkAllocateFree -benchmem ./kernel/mm/pmm | tee $(BUILD_DIR)/reports/page-allocation.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkChannelPingPong -benchmem ./kernel/ipc | tee $(BUILD_DIR)/reports/ipc-ping-pong.txt
@@ -291,6 +300,7 @@ docs:
 	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
 	@test -f docs/adr/0083-user-stack-guard-pages.md
 	@test -f docs/adr/0086-pinned-toolchain-and-reproducible-builds.md
+	@test -f docs/adr/0085-in-guest-microbenchmarks.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -385,7 +395,8 @@ help:
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
-	  '  test-performance run microbenchmarks into build/reports' \
+	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
+	  '  test-performance run host and in-guest microbenchmarks into build/reports' \
 	  '  test-reproducible build the ISO twice from clean and compare every artifact' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \

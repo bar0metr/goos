@@ -1,5 +1,7 @@
 package utility
 
+import "math/bits"
+
 // MaxBenchOps bounds one bench run. The shell stops waiting for a command after
 // about 30 seconds, so large counts at a low timer rate outlive the prompt.
 const MaxBenchOps = 10000
@@ -53,4 +55,63 @@ func appendUint(target []byte, value uint64) []byte {
 			return append(target, digits[position:]...)
 		}
 	}
+}
+
+// MaxBenchChunk bounds the bytes one stream bench operation moves; it is the
+// most one native stream call accepts.
+const MaxBenchChunk = 256
+
+// BenchChunk parses a per-operation byte count between 1 and MaxBenchChunk.
+func BenchChunk(value []byte) (int, bool) {
+	size, ok := parseUint(value)
+	return int(size), ok && size != 0 && size <= MaxBenchChunk
+}
+
+// AppendBenchRate appends ", <size> B/op, <rate> KiB/s" to a result line for
+// ops operations of size bytes each that took nanos.
+func AppendBenchRate(target []byte, ops, size, nanos uint64) []byte {
+	rate := uint64(0)
+	if nanos != 0 {
+		// A 128-bit product keeps large files from overflowing; a quotient
+		// that would not fit saturates.
+		high, low := bits.Mul64(ops*size, 1_000_000_000)
+		if high >= nanos {
+			rate = ^uint64(0)
+		} else {
+			rate, _ = bits.Div64(high, low, nanos)
+			rate /= 1024
+		}
+	}
+	target = append(target, ", "...)
+	target = appendUint(target, size)
+	target = append(target, " B/op, "...)
+	target = appendUint(target, rate)
+	return append(target, " KiB/s"...)
+}
+
+// MaxBenchSamples bounds the per-operation intervals one run keeps.
+const MaxBenchSamples = 512
+
+// Median sorts values in place and returns the middle one, or the lower
+// middle one for an even count; it returns 0 for none.
+func Median(values []uint64) uint64 {
+	if len(values) == 0 {
+		return 0
+	}
+	for index := 1; index < len(values); index++ {
+		value, position := values[index], index
+		for ; position > 0 && values[position-1] > value; position-- {
+			values[position] = values[position-1]
+		}
+		values[position] = value
+	}
+	return values[(len(values)-1)/2]
+}
+
+// AppendBenchCount appends ", <value> <label>" to a result line.
+func AppendBenchCount(target []byte, value uint64, label string) []byte {
+	target = append(target, ", "...)
+	target = appendUint(target, value)
+	target = append(target, ' ')
+	return append(target, label...)
 }

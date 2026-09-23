@@ -371,7 +371,9 @@ markers that the boot test asserts.
 
 `make run` attaches COM1 to the current terminal. `make run-debug` starts QEMU
 paused with a GDB server on TCP port 1234. `make test-performance` stores
-benchmark results under `build/reports/`.
+benchmark results under `build/reports/`: host benchmarks of the kernel data
+structures and, through `make test-microbench`, context switch, IPC, VFS read,
+and RAMFS metadata costs measured in a booted guest.
 `make test` is the fast host-side validation set. `make test-all` is the
 canonical complete gate and includes lint, documentation checks, ISO creation,
 and the two-phase QEMU boot/persistence test. Complete serial logs remain in

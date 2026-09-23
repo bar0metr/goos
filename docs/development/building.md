@@ -67,8 +67,9 @@ tests, lint, documentation checks, ISO construction, and QEMU validation. See
 `docs/development/testing.md` for the target hierarchy and harness details.
 Boot tests use a disposable test disk; `make run` retains
 `build/virtio-blk.img` across interactive boots.
-`make test-performance` writes the page-allocation benchmark to
-`build/reports/page-allocation.txt`.
+`make test-performance` writes the host benchmarks, such as
+`build/reports/page-allocation.txt`, and the in-guest microbenchmarks of
+`make test-microbench` to `build/reports/microbench-hz<rate>.md`.
 `make test-security` runs the capability, generation-safe handle, and virtual
 memory permission tests explicitly; these tests are also included by `make
 test`.
