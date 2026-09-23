@@ -28,17 +28,27 @@ func TestProcessRejectsInvalidIdentity(t *testing.T) {
 	}
 }
 
+// The task quota binds before the table does, which is the point: the table
+// size is a structural bound and the quota is the policy one.
 func TestProcessTaskCapacityIsBounded(t *testing.T) {
-	process, _ := New(1, AddressSpace{Root: 0x1000})
-	for index := 0; index < MaxTasksPerProcess; index++ {
+	process, _ := New(2, AddressSpace{Root: 0x1000})
+	_, limits := process.Quota()
+	limit := int(limits[ResourceTasks])
+	if limit >= MaxTasksPerProcess {
+		t.Fatalf("task quota %d does not bind before the table of %d", limit, MaxTasksPerProcess)
+	}
+	for index := 0; index < limit; index++ {
 		task, _ := sched.NewTaskID(uint32(index), 1)
 		if !process.AddTask(task) {
 			t.Fatalf("task %d rejected", index)
 		}
 	}
-	overflow, _ := sched.NewTaskID(MaxTasksPerProcess, 1)
+	overflow, _ := sched.NewTaskID(uint32(limit), 1)
 	if process.AddTask(overflow) {
-		t.Fatal("process task capacity exceeded")
+		t.Fatal("process task quota exceeded")
+	}
+	if used, _ := process.Quota(); used[ResourceTasks] != uint32(limit) {
+		t.Fatalf("tasks charged %d, expected %d", used[ResourceTasks], limit)
 	}
 }
 

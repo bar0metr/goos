@@ -174,6 +174,10 @@ func deliverProcessExits() {
 		if waitAnyTable.Cancel(taskID) && diag.Enabled {
 			trace(diag.WaitCancelExit, pidOfTask(taskID), task, 0, 0)
 		}
+		// The exiting task's run time is folded into its process before the
+		// slot is released, so the process keeps the time and the next task to
+		// take the slot starts from zero.
+		accountTaskCPU(taskID)
 		event, report := processRegistry.ReportTaskExit(taskID, amd64.TaskExitCode(task))
 		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
 		// not gate the steps below: a process that has exited has to release its
@@ -190,6 +194,31 @@ func deliverProcessExits() {
 		}
 		releaseExitedProcess(event)
 	}
+}
+
+// accountTaskCPU moves a task's tick count onto its process and clears the
+// slot counter.
+func accountTaskCPU(taskID sched.TaskID) {
+	slot, _, valid := taskID.Parts()
+	if !valid {
+		return
+	}
+	if owner, found := processRegistry.ByTask(taskID); found {
+		owner.AccountCPU(amd64.TaskTicks(uint64(slot)))
+	}
+	amd64.ClearTaskTicks(uint64(slot))
+}
+
+// processCPUTicks reports a process's total run time: what its exited tasks
+// contributed plus what its live tasks have accumulated since.
+func processCPUTicks(owner *process.Process) uint64 {
+	total := owner.CPUTicks()
+	for _, taskID := range owner.Tasks() {
+		if slot, _, valid := taskID.Parts(); valid {
+			total += amd64.TaskTicks(uint64(slot))
+		}
+	}
+	return total
 }
 
 // releaseExitedProcess performs the observable half of process teardown first,
@@ -223,6 +252,10 @@ func releaseExitedProcess(event process.ExitEvent) {
 		} else if pageAllocator.Statistics().FreePages > before {
 			processReclaimConfirmed = 1
 		}
+		// The address space is gone, so its pages are no longer held. Channels
+		// and streams the process created are released by their own registries
+		// when their endpoints close, which may be later than this.
+		exited.Release(process.ResourcePages, exitedPages(exited))
 	}
 	processRegistry.Remove(event.Process)
 	for index := range spawnedProcesses {
@@ -264,7 +297,38 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 	if valid && exists && channel.Close(side) {
 		trace(diag.ChannelClosed, releasingProcess, 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-		channelRegistry.Release(channelID)
+		releaseChannelSlot(channelID)
+	}
+}
+
+// bootChannel creates a channel charged to PID 1. The boot endpoints belong to
+// PID 1 exactly as the ones it later creates do, so they are accounted the same
+// way and the charge comes back when they are released.
+func bootChannel() (*ipc.Channel, uint64, bool) {
+	if bootInitProcess == nil || !bootInitProcess.Charge(process.ResourceChannels, 1) {
+		return nil, 0, false
+	}
+	channel, id, created := channelRegistry.Create(1)
+	if !created {
+		bootInitProcess.Release(process.ResourceChannels, 1)
+	}
+	return channel, id, created
+}
+
+// releaseChannelSlot frees a released channel's slot and returns the quota
+// charge to whichever process created it, which has often already exited.
+func releaseChannelSlot(channelID uint64) {
+	if owner, released := channelRegistry.Release(channelID); released && owner != 0 {
+		processRegistry.ReleaseProcess(process.ID(owner), process.ResourceChannels, 1)
+	}
+}
+
+// releaseStreamSlot does the same for a stream. A stream outlives the handles
+// its creator held, because both endpoints may be transferred, so the charge is
+// returned when the object is gone rather than when a handle closes.
+func releaseStreamSlot(streamID uint64) {
+	if owner, released := streamRegistry.Release(streamID); released && owner != 0 {
+		processRegistry.ReleaseProcess(process.ID(owner), process.ResourceStreams, 1)
 	}
 }
 
@@ -386,6 +450,10 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	if !found {
 		return 0, 0, supervisor.LaunchNotFound
 	}
+	// The pages a launch allocates are counted from the allocator rather than
+	// threaded through the loader: the difference is exactly what this address
+	// space owns, and it is charged to the new process below.
+	pagesBefore := pageAllocator.Statistics().FreePages
 	root, ok := vm.CreateUserAddressSpace(&pageAllocator, kernelPageTable)
 	began = launchStageDone(launchAddressSpace, began)
 	if !ok {
@@ -441,6 +509,14 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	if !processRegistry.Add(spawned) {
 		abandonSpawn(root, spawned, false)
 		return 0, 0, supervisor.LaunchProcessFailed
+	}
+	// Charging happens before the task exists, because a runnable task cannot
+	// be withdrawn. An image whose address space does not fit the page quota
+	// therefore fails to launch rather than running over its share.
+	if pagesUsed := pagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !spawned.Charge(process.ResourcePages, uint32(pagesUsed)) {
+		kernelLogUint(logfmt.Warn, "launch over page quota", "pages", pagesUsed)
+		abandonSpawn(root, spawned, true)
+		return 0, 0, supervisor.LaunchResourceExhausted
 	}
 	// The process handle is reserved before the task exists, so a started
 	// child is never left without the handle its parent waits on.
@@ -611,8 +687,14 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
+	// The DMA region is kernel memory allocated at the driver's request, so it
+	// is charged to the driver like any other page it causes to be allocated.
+	if !owner.Charge(process.ResourcePages, 4) {
+		return kcall.StatusResourceExhausted
+	}
 	physical, allocated := pageAllocator.AllocateContiguous(4)
 	if !allocated {
+		owner.Release(process.ResourcePages, 4)
 		return kcall.StatusResourceExhausted
 	}
 	for index := range kernelCallData {
@@ -623,12 +705,15 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 			for release := uint64(0); release < 4; release++ {
 				pageAllocator.Free(physical + release*vm.PageSize)
 			}
+			owner.Release(process.ResourcePages, 4)
 			return kcall.StatusResourceExhausted
 		}
 	}
 	for page := uint64(0); page < 4; page++ {
 		if !vm.MapOwnedUserPage(handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true, Writable: true}) {
-			// Mapped pages are owned and return with the address space.
+			// Mapped pages are owned and return with the address space, so only
+			// the unmapped remainder is freed here; the charge stays with the
+			// process until its teardown releases the whole account.
 			for release := page; release < 4; release++ {
 				pageAllocator.Free(physical + release*vm.PageSize)
 			}
@@ -679,8 +764,12 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 	if !found || owner.ID() != 1 || length != 16 || owner.Handles().Available() < 2 {
 		return kcall.StatusPermissionDenied
 	}
-	channel, id, ok := channelRegistry.Create()
+	if !owner.Charge(process.ResourceChannels, 1) {
+		return kcall.StatusResourceExhausted
+	}
+	channel, id, ok := channelRegistry.Create(uint64(owner.ID()))
 	if !ok {
+		owner.Release(process.ResourceChannels, 1)
 		return kcall.StatusResourceExhausted
 	}
 	object0, _ := ipc.EndpointObject(id, 0)
@@ -697,7 +786,7 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		}
 		channel.Close(0)
 		channel.Close(1)
-		channelRegistry.Release(id)
+		releaseChannelSlot(id)
 		return kcall.StatusResourceExhausted
 	}
 	putUint64(channelWire[0:8], uint64(handle0))
@@ -707,7 +796,7 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		owner.Handles().Close(handle1)
 		channel.Close(0)
 		channel.Close(1)
-		channelRegistry.Release(id)
+		releaseChannelSlot(id)
 		return kcall.StatusInvalidArgument
 	}
 	trace(diag.ChannelCreated, owner.ID(), 0, id, uint64(handle1))
@@ -731,7 +820,7 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 		}
 		trace(diag.ChannelClosed, owner.ID(), id, channelID|uint64(side)<<63, diag.CloseByHandle)
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-		channelRegistry.Release(channelID)
+		releaseChannelSlot(channelID)
 	} else if typeID == handle.TypeStream {
 		if !closeStreamCapability(cap) {
 			return kcall.StatusNotFound
@@ -761,7 +850,7 @@ func closeStreamCapability(cap capability.Capability) bool {
 			side = 0
 		}
 		wakeStreamWaiters(streamID, side, ipc.WaitPeerDied)
-		streamRegistry.Release(streamID)
+		releaseStreamSlot(streamID)
 	}
 	return closed
 }
@@ -771,8 +860,15 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 	if !found || length != 16 || owner.Handles().Available() < 2 {
 		return kcall.StatusPermissionDenied
 	}
-	endpoint, id, created := streamRegistry.Create()
+	// Any process may create a stream, so the quota is what stops one of them
+	// draining the registry and breaking every later pipeline. It is charged
+	// before a slot is taken, so a refusal leaves nothing to unwind.
+	if !owner.Charge(process.ResourceStreams, 1) {
+		return kcall.StatusResourceExhausted
+	}
+	endpoint, id, created := streamRegistry.Create(uint64(owner.ID()))
 	if !created {
+		owner.Release(process.ResourceStreams, 1)
 		return kcall.StatusResourceExhausted
 	}
 	readerObject, _ := stream.ReaderObject(id)
@@ -788,7 +884,7 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 		}
 		endpoint.CloseReader()
 		endpoint.CloseWriter()
-		streamRegistry.Release(id)
+		releaseStreamSlot(id)
 		return kcall.StatusResourceExhausted
 	}
 	putUint64(streamCreateWire[0:8], uint64(reader))
@@ -798,7 +894,7 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 		owner.Handles().Close(writer)
 		endpoint.CloseReader()
 		endpoint.CloseWriter()
-		streamRegistry.Release(id)
+		releaseStreamSlot(id)
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -1828,6 +1924,9 @@ func main() {
 		awaitSchedulerSelfTest()
 	}
 
+	// PID 1's own pages are counted the same way a launched process's are, so
+	// the reported memory of init means what it means for everything else.
+	initPagesBefore := pageAllocator.Statistics().FreePages
 	rootInit, addressSpaceInit := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
 	if !addressSpaceInit {
 		panicSerial("PID 1 address-space construction failed")
@@ -1839,27 +1938,33 @@ func main() {
 	if !validInit || !processRegistry.Add(initProcess) {
 		panicSerial("PID 1 process initialization failed")
 	}
+	// PID 1 creates the endpoints every other process communicates through, so
+	// its share of each table is the rest of it. This is the only place the
+	// system quota is granted, and GrantSystemQuota refuses any other process.
+	if !initProcess.GrantSystemQuota() {
+		panicSerial("PID 1 quota grant failed")
+	}
 	var lifecycleCreated bool
-	lifecycleChannel, lifecycleChannelID, lifecycleCreated = channelRegistry.Create()
+	lifecycleChannel, lifecycleChannelID, lifecycleCreated = bootChannel()
 	lifecycleObject, _ := ipc.EndpointObject(lifecycleChannelID, 1)
 	lifecycleHandle, lifecycleInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(lifecycleObject, capability.Read|capability.Write|capability.Wait))
 	serviceDeviceHandle, serviceDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(1, capability.Read|capability.Write|capability.Transfer))
-	_, vfsChannelID, vfsChannelCreated := channelRegistry.Create()
+	_, vfsChannelID, vfsChannelCreated := bootChannel()
 	vfsClientObject, _ := ipc.EndpointObject(vfsChannelID, 0)
 	vfsServerObject, _ := ipc.EndpointObject(vfsChannelID, 1)
 	vfsChannelHandle, vfsChannelInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	vfsServerHandle, vfsServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
-	_, vfsControlID, vfsControlCreated := channelRegistry.Create()
+	_, vfsControlID, vfsControlCreated := bootChannel()
 	vfsControlClientObject, _ := ipc.EndpointObject(vfsControlID, 0)
 	vfsControlServerObject, _ := ipc.EndpointObject(vfsControlID, 1)
 	vfsControlHandle, vfsControlInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsControlClientObject, capability.Read|capability.Write|capability.Wait))
 	vfsControlServerHandle, vfsControlServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(vfsControlServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
-	_, execControlID, execControlCreated := channelRegistry.Create()
+	_, execControlID, execControlCreated := bootChannel()
 	execClientObject, _ := ipc.EndpointObject(execControlID, 0)
 	execServerObject, _ := ipc.EndpointObject(execControlID, 1)
 	execServerHandle, execServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(execServerObject, capability.Read|capability.Write|capability.Wait))
 	execClientHandle, execClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(execClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
-	_, blockChannelID, blockChannelCreated := channelRegistry.Create()
+	_, blockChannelID, blockChannelCreated := bootChannel()
 	blockClientObject, _ := ipc.EndpointObject(blockChannelID, 0)
 	blockServerObject, _ := ipc.EndpointObject(blockChannelID, 1)
 	blockClientHandle, blockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(blockClientObject, capability.Read|capability.Write|capability.Wait))
@@ -1870,12 +1975,12 @@ func main() {
 	virtioPortHandle, virtioPortInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(portObject, capability.Read|capability.Write|capability.Transfer))
 	virtioIRQHandle, virtioIRQInstalled := initProcess.Handles().Insert(handle.TypeIRQ, capability.New(irqObject, capability.Wait|capability.Transfer))
 	virtioDMAHandle, virtioDMAInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(dmaObject, capability.Write|capability.Transfer))
-	_, driverChannelID, driverChannelCreated := channelRegistry.Create()
+	_, driverChannelID, driverChannelCreated := bootChannel()
 	driverClientObject, _ := ipc.EndpointObject(driverChannelID, 0)
 	driverServerObject, _ := ipc.EndpointObject(driverChannelID, 1)
 	driverClientHandle, driverClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(driverClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	driverServerHandle, driverServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(driverServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
-	_, filesystemBlockChannelID, filesystemBlockChannelCreated := channelRegistry.Create()
+	_, filesystemBlockChannelID, filesystemBlockChannelCreated := bootChannel()
 	filesystemBlockClientObject, _ := ipc.EndpointObject(filesystemBlockChannelID, 0)
 	filesystemBlockServerObject, _ := ipc.EndpointObject(filesystemBlockChannelID, 1)
 	filesystemBlockClientHandle, filesystemBlockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
@@ -1899,6 +2004,10 @@ func main() {
 		if !memoryMapRejectsInvalid(rootInit, systemControlHandle, execPageHandle) {
 			panicSerial("MemoryMap validation failed")
 		}
+		if !quotaBoundsStreamRegistry() {
+			panicSerial("resource quota validation failed")
+		}
+		console.WriteString("QUOTA_OK\n")
 		runKernelSelfTests(pageTable)
 	}
 	initBytes, initDiscovered := initramfs.Find(bootuefi.Initramfs(&bootInfo), initImagePath)
@@ -1916,6 +2025,9 @@ func main() {
 		}
 	}
 	flags := amd64.DisableInterrupts()
+	if pagesUsed := initPagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !initProcess.Charge(process.ResourcePages, uint32(pagesUsed)) {
+		panicSerial("PID 1 exceeded its page quota")
+	}
 	initTaskID, initTaskAdded := amd64.AddUserTask(&pageAllocator, rootInit, loadedInit.Entry, loadedInit.StackTop)
 	if !initTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) {
 		panicSerial("PID 1 task scheduling failed")
@@ -1981,6 +2093,14 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 	if !vm.DestroyUserAddressSpace(&pageAllocator, root) {
 		addressSpaceReclaimFailures++
 	}
+}
+
+// exitedPages reports the page reservation a process still holds, so teardown
+// returns exactly that and an accounting bug shows up as a refused release
+// rather than as a counter that wraps.
+func exitedPages(exited *process.Process) uint32 {
+	used, _ := exited.Quota()
+	return used[process.ResourcePages]
 }
 
 func lastSlash(path []byte) int {

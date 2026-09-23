@@ -115,13 +115,27 @@ identity or need nothing: `Exit`, `DebugWrite`, `ClockRead`, `StartupRead`,
 
 ### Resource limits
 
-Limits are global fixed arrays, not per-process quotas. A process with no
-special authority can exhaust the 16-entry stream registry with
-`StreamCreate`, and any process can fill its own 128-entry handle table.
-`ChannelCreate` is limited to PID 1. A component holding the console
-capability can fill the 64-record log ring and, with warning-level records,
-the console; logging is bounded by record size, not rate. Process and task slots are consumed only
-through PID 1 launches.
+Global fixed arrays bound the system; per-process quotas bound each process's
+share of them (ADR 0072). Channels, streams, tasks and pages are charged to the
+process that causes them to exist and released when it does. An ordinary process
+holds at most four channels, four streams, four tasks and 192 pages; PID 1, which
+creates the endpoints every other process communicates through, holds at most
+sixteen, sixteen, eight and 512, and is refused past that like anything else.
+
+`StreamCreate` still needs no capability, because a stream is a primitive any
+process may need, but a process calling it in a loop is refused at its share and
+leaves the rest of the registry for everyone else. A launch whose address space
+would exceed the page quota fails rather than running over. A process can still
+fill its own 128-entry handle table, which costs only itself.
+
+A component holding the console capability can fill the 64-record log ring and,
+with warning-level records, the console; logging is bounded by record size, not
+rate. Process and task slots are consumed only through PID 1 launches.
+
+CPU is accounted, not limited: the timer charges a tick to the task it
+interrupted, and `ps` reports the total per process. Nothing refuses a process
+that never yields. Under round-robin on one CPU that costs throughput, not
+progress; it would need a policy before SMP.
 
 ### Work with interrupts disabled
 

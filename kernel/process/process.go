@@ -23,6 +23,8 @@ type Process struct {
 	handles      handle.Table
 	tasks        [MaxTasksPerProcess]sched.TaskID
 	taskCount    int
+	quota        Quota
+	cpuTicks     uint64
 	name         [16]byte
 	nameSize     uint8
 }
@@ -37,6 +39,7 @@ func Init(target *Process, id ID, addressSpace AddressSpace) bool {
 	target.Reset()
 	target.id = id
 	target.addressSpace = addressSpace
+	target.quota = defaultQuota()
 	return true
 }
 
@@ -70,6 +73,9 @@ func (process *Process) AddTask(id sched.TaskID) bool {
 			return false
 		}
 	}
+	if !process.Charge(ResourceTasks, 1) {
+		return false
+	}
 	process.tasks[process.taskCount] = id
 	process.taskCount++
 	return true
@@ -96,6 +102,7 @@ func (process *Process) removeTask(id sched.TaskID) bool {
 		process.taskCount--
 		process.tasks[index] = process.tasks[process.taskCount]
 		process.tasks[process.taskCount] = 0
+		process.Release(ResourceTasks, 1)
 		return true
 	}
 	return false
@@ -205,6 +212,17 @@ func (registry *Registry) Wait(id ID) (ExitEvent, WaitStatus) {
 		return ExitEvent{}, WaitRunning
 	}
 	return ExitEvent{}, WaitNotFound
+}
+
+// ByTask finds the process owning a task, which teardown needs after the task
+// has stopped running but before it is removed from its process.
+func (registry *Registry) ByTask(task sched.TaskID) (*Process, bool) {
+	for index := 0; index < int(registry.count); index++ {
+		if registry.processes[index].OwnsTask(task) {
+			return registry.processes[index], true
+		}
+	}
+	return nil, false
 }
 
 func (registry *Registry) ByRoot(root uint64) (*Process, bool) {

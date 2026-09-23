@@ -9,6 +9,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
+	"goos/kernel/process"
 )
 
 var imageWire [16]byte
@@ -51,11 +52,19 @@ func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uin
 	// The image window lies outside the two MiB the bootstrap layout maps, so
 	// the one leaf table covering it is added here rather than in every
 	// address space that will never hold an image.
-	if !vm.ExtendUserAddressSpace(&pageAllocator, handler.root, virtual) {
+	if !owner.Charge(process.ResourcePages, 1) {
 		return kcall.StatusResourceExhausted
 	}
+	if !vm.ExtendUserAddressSpace(&pageAllocator, handler.root, virtual) {
+		owner.Release(process.ResourcePages, 1)
+		return kcall.StatusResourceExhausted
+	}
+	// A second call finds the window already mapped and fails here, which also
+	// returns the page it was charged for: the leaf table was added by the
+	// first call and this one allocated nothing.
 	for page := uint64(0); page < pages; page++ {
 		if !vm.CanMapUserPage(handler.root, virtual+page*vm.PageSize) {
+			owner.Release(process.ResourcePages, 1)
 			return kcall.StatusInvalidArgument
 		}
 	}

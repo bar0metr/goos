@@ -100,7 +100,9 @@ func runKernelSelfTests(pageTable uint64) {
 	}
 	mark("HANDLE_TABLE_OK")
 	mark("PROCESS_MODEL_OK")
-	registeredChannel, registeredChannelID, channelCreated := channelRegistry.Create()
+	// Owner 0 leaves this channel unaccounted: it belongs to the kernel's own
+	// self-test, not to a process, and must not move PID 1's counters.
+	registeredChannel, registeredChannelID, channelCreated := channelRegistry.Create(0)
 	registeredObjectA, _ := ipc.EndpointObject(registeredChannelID, 0)
 	registeredObjectB, _ := ipc.EndpointObject(registeredChannelID, 1)
 	channelA, channelAInstalled := processA.Handles().Insert(handle.TypeChannel, capability.New(registeredObjectA, capability.Read|capability.Write|capability.Wait))

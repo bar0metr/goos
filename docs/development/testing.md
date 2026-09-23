@@ -52,6 +52,13 @@ logged to `build/logs/m7-reboot.log`. It creates `/home/m7`, writes a file in
 it, runs the shell's `reboot`, and requires both boots and both reads of the
 file. It uses `/home` because that is where the specification puts user data.
 
+The release-shell group asserts the resource accounting: that `ps` reports
+non-zero pages for PID 1, that `quota` shows an ordinary process holding a share
+of the stream table rather than all of it, and that PID 1 holds the system
+share. The `QUOTA_OK` marker comes from a validation-build check that drives the
+same charge-then-create order `StreamCreate` uses and requires the refusal to
+arrive while registry slots remain.
+
 The filesystem group also asserts the namespace layout: that `ls /` names every
 mount, that `/system` is the boot image with its twenty utilities listed under
 `/system/bin`, that `mkdir /system/backdoor` is refused with "read-only

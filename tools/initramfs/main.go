@@ -80,6 +80,7 @@ func main() {
 		{Name: "system/bin/uname", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/sleep", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/bench", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/bin/quota", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
 	}
 	for index := range headers {
 		if err := writer.WriteHeader(&headers[index]); err != nil {

@@ -260,8 +260,17 @@ process can map a shared page it holds a capability for, and ADR 0064 uses one
 for the exec protocol: PID 1 now runs up to four requests as jobs instead of
 blocking on each command, and the shell can start a job with `&`.
 
-Remaining 0.1.0 work is a persistent log service, a typed configuration
-service (spec §28), and per-process resource quotas (spec §36).
+ADR 0072 adds per-process resource quotas. Channels, streams, tasks and pages
+are charged to the process that causes them to exist, so a process that creates
+streams until it is refused leaves slots for everyone else instead of taking the
+whole registry and breaking every later pipeline. CPU is accounted per process,
+`ps` reports memory and CPU, and `quota` prints each process's share. That
+accounting also exposed a defect it does not fix: the shell busy-polls the
+serial console while waiting for input and is charged most of the ticks in a
+session.
+
+Remaining 0.1.0 work is a persistent log service and a typed configuration
+service (spec §28).
 
 ## Priority 5 — Linux ABI compatibility
 

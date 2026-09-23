@@ -4,7 +4,7 @@ import "testing"
 
 func TestRegistryCreatesUniqueBoundedChannels(t *testing.T) {
 	var registry Registry
-	first, firstID, ok := registry.Create()
+	first, firstID, ok := registry.Create(7)
 	if !ok || first == nil || firstID&channelNamespace == 0 {
 		t.Fatal("first channel was not created")
 	}
@@ -12,12 +12,12 @@ func TestRegistryCreatesUniqueBoundedChannels(t *testing.T) {
 		t.Fatal("created channel cannot be resolved")
 	}
 	for index := 1; index < MaxChannels; index++ {
-		_, id, created := registry.Create()
+		_, id, created := registry.Create(7)
 		if !created || id == firstID {
 			t.Fatalf("channel %d was not unique", index)
 		}
 	}
-	if channel, id, created := registry.Create(); created || channel != nil || id != 0 {
+	if channel, id, created := registry.Create(7); created || channel != nil || id != 0 {
 		t.Fatal("registry exceeded its bound")
 	}
 	if _, ok := registry.Lookup(channelNamespace | 0xffff); ok {
@@ -50,20 +50,24 @@ func TestEndpointObjectRoundTrip(t *testing.T) {
 
 func TestRegistryReusesReleasedChannelSlot(t *testing.T) {
 	var registry Registry
-	channel, id, ok := registry.Create()
+	channel, id, ok := registry.Create(7)
 	if !ok {
 		t.Fatal("channel was not created")
 	}
-	if registry.Release(id) {
+	if _, released := registry.Release(id); released {
 		t.Fatal("live channel was released")
 	}
-	if !channel.Close(0) || !channel.Close(1) || !registry.Release(id) {
-		t.Fatal("closed channel was not released")
+	if !channel.Close(0) || !channel.Close(1) {
+		t.Fatal("endpoints were not closed")
+	}
+	owner, released := registry.Release(id)
+	if !released || owner != 7 {
+		t.Fatalf("closed channel released = %v, charged to %d", released, owner)
 	}
 	if _, found := registry.Lookup(id); found {
 		t.Fatal("released channel still resolves")
 	}
-	reused, reusedID, created := registry.Create()
+	reused, reusedID, created := registry.Create(7)
 	if !created || reused == nil || reusedID == id {
 		t.Fatalf("channel slot was not safely reused: id=%#x reused=%#x", id, reusedID)
 	}
@@ -71,7 +75,7 @@ func TestRegistryReusesReleasedChannelSlot(t *testing.T) {
 
 func TestRegistryAtAndQueueState(t *testing.T) {
 	var registry Registry
-	channel, id, _ := registry.Create()
+	channel, id, _ := registry.Create(7)
 	message := Message{ProtocolID: 1, Version: 1, Kind: KindRequest, Correlation: 5}
 	if channel.Send(0, message, nil, nil, nil) != StatusOK {
 		t.Fatal("request was not queued")

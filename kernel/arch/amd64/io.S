@@ -608,6 +608,9 @@ goos_irq_timer:
     pushq %r14
     pushq %r15
     incq goos_timer_ticks(%rip)
+    movq goos_current_task(%rip), %rax
+    leaq goos_task_ticks(%rip), %rdx
+    incq (%rdx,%rax,8)
     cmpq $0x23, 128(%rsp)
     jne .timer_not_user
     incq goos_user_preemptions(%rip)
@@ -803,6 +806,29 @@ goos_start_bootstrap_timer:
 .global goos_timer_ticks_read
 goos_timer_ticks_read:
     movq goos_timer_ticks(%rip), %rax
+    retq
+
+// goos_task_ticks_read returns the ticks charged to one task slot, or zero for
+// a slot outside the table.
+.global goos_task_ticks_read
+goos_task_ticks_read:
+    xorq %rax, %rax
+    cmpq $64, %rcx
+    jae .task_ticks_done
+    leaq goos_task_ticks(%rip), %rdx
+    movq (%rdx,%rcx,8), %rax
+.task_ticks_done:
+    retq
+
+// goos_task_ticks_clear resets one slot's counter, so a slot reused by a new
+// task does not inherit the previous one's time.
+.global goos_task_ticks_clear
+goos_task_ticks_clear:
+    cmpq $64, %rcx
+    jae .task_ticks_clear_done
+    leaq goos_task_ticks(%rip), %rdx
+    movq $0, (%rdx,%rcx,8)
+.task_ticks_clear_done:
     retq
 
 .global goos_scheduler_install
@@ -1096,6 +1122,11 @@ goos_task_rsp0:
 goos_task_generations:
 	.zero 512
 goos_task_exit_codes:
+    .zero 512
+// One tick counter per task slot. The timer charges the task it interrupted,
+// so the count is a sample of who was running rather than an exact duration,
+// which is what a tick-driven scheduler can honestly report.
+goos_task_ticks:
     .zero 512
 goos_runnable_mask:
     .quad 1

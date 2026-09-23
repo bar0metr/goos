@@ -143,6 +143,8 @@ func Run() {
 		runSleep(data)
 	case equal(data.Command, "ps"):
 		runPS()
+	case equal(data.Command, "quota"):
+		runQuota()
 	case equal(data.Command, "mem"):
 		runMem()
 	case equal(data.Command, "bench"):
@@ -563,9 +565,25 @@ func parseSeconds(value []byte) (uint64, bool) {
 	return ticks, true
 }
 
+// pad writes spaces until the current column reaches width.
+func pad(column int, width int) {
+	for ; column < width; column++ {
+		lineText(" ")
+	}
+}
+
+func processName(record []byte) []byte {
+	name := record[16 : 16+kcall.MaxProcessName]
+	size := 0
+	for size < len(name) && name[size] != 0 {
+		size++
+	}
+	return name[:size]
+}
+
 func runPS() {
 	var record [kcall.ProcessInfoSize]byte
-	lineText("PID   TYPE     STATE      COMMAND")
+	lineText("PID   TYPE     STATE      MEM  CPU   COMMAND")
 	lineFlush()
 	for index := uint64(0); processInfo(index, unsafe.Pointer(&record[0])) == 0; index++ {
 		pid := binary.LittleEndian.Uint64(record[0:8])
@@ -576,24 +594,47 @@ func runPS() {
 		case kcall.ProcessReady:
 			state = "ready"
 		}
-		name := record[16 : 16+kcall.MaxProcessName]
-		size := 0
-		for size < len(name) && name[size] != 0 {
-			size++
-		}
-		column := lineUintWidth(pid)
-		for ; column < 6; column++ {
-			lineText(" ")
-		}
+		pages := binary.LittleEndian.Uint32(record[kcall.ProcessInfoUsedOffset+kcall.ProcessPages*4:])
+		cpu := binary.LittleEndian.Uint64(record[kcall.ProcessInfoCPUOffset:])
+		pad(lineUintWidth(pid), 6)
 		lineText("native   ")
 		lineText(state)
-		for column = len(state); column < 11; column++ {
-			lineText(" ")
-		}
-		lineBytes(name[:size])
+		pad(len(state), 11)
+		// MEM is the pages the kernel allocated for the process; CPU is the
+		// timer ticks it was found running on.
+		pad(lineUintWidth(uint64(pages)), 5)
+		pad(lineUintWidth(cpu), 6)
+		lineBytes(processName(record[:]))
 		lineFlush()
 	}
 	mark("PS_PROCESS_OK\n")
+}
+
+// runQuota prints every process's resource account: what it holds of each
+// bounded kernel resource and the share it may hold.
+func runQuota() {
+	var record [kcall.ProcessInfoSize]byte
+	names := [kcall.ProcessResources]string{"chan", "strm", "task", "page"}
+	lineText("PID   COMMAND           RESOURCE  HELD/LIMIT")
+	lineFlush()
+	for index := uint64(0); processInfo(index, unsafe.Pointer(&record[0])) == 0; index++ {
+		pid := binary.LittleEndian.Uint64(record[0:8])
+		name := processName(record[:])
+		for resource := 0; resource < kcall.ProcessResources; resource++ {
+			held := binary.LittleEndian.Uint32(record[kcall.ProcessInfoUsedOffset+resource*4:])
+			limit := binary.LittleEndian.Uint32(record[kcall.ProcessInfoLimitsOffset+resource*4:])
+			pad(lineUintWidth(pid), 6)
+			lineBytes(name)
+			pad(len(name), 18)
+			lineText(names[resource])
+			pad(len(names[resource]), 10)
+			lineUint(uint64(held))
+			lineText("/")
+			lineUint(uint64(limit))
+			lineFlush()
+		}
+	}
+	mark("QUOTA_PROCESS_OK\n")
 }
 
 func lineUintWidth(value uint64) int {

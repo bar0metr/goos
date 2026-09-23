@@ -131,7 +131,8 @@ whoever controls the ISO controls the system.
 | forged or stale handle | generation + type + rights check in `handle.Table.Lookup` |
 | authority escalation | `Derive` refuses added rights; IPC transfer strips Transfer |
 | peer death | channel and stream close on teardown; waiters woken with `PeerDied` |
-| resource exhaustion | fixed-size tables everywhere; failure is a status, not a panic |
+| resource exhaustion | fixed-size tables everywhere, plus per-process quotas on channels, streams, tasks and pages (ADR 0072); failure is a status, not a panic |
+| one process starving the rest | each process holds a share of each table, not the table; a refused charge reaches no global structure |
 | crash loop | bounded restart count and backoff in the PID 1 supervisor (ADR 0019) |
 | stalled storage peer | bounded storage deadlines (ADR 0048) |
 | driver exit with DMA armed | teardown resets the device and masks IRQ 11 before freeing pages (ADR 0035) |

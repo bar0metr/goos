@@ -325,6 +325,8 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'ps\n'
 	sleep 1
+	printf 'quota\n'
+	sleep 1
 	printf 'mem\n'
 	sleep 1
 	printf 'services\n'
@@ -546,8 +548,16 @@ require_marker persistence.reboot-cat CAT_PROCESS_OK "$reboot_log" 'cat /persist
 forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on reboot' "$reboot_log" CP_PROCESS_OK
 pass_group persistence
 
-require_regex release.ps-header '^PID   TYPE     STATE      COMMAND$' 'ps table header' "$log" 'goos> ps'
-require_regex release.ps-init '^1     native   [a-z]* *init$' 'PID 1 listed as init' "$log" 'goos> ps'
+require_regex release.ps-header '^PID   TYPE     STATE      MEM  CPU   COMMAND$' 'ps table header' "$log" 'goos> ps'
+# Memory and CPU are accounted per process, so init must report pages of its own.
+require_regex release.ps-accounting '^1     native   [a-z]*  *[1-9][0-9]*  *[0-9]' 'init with accounted pages' "$log" 'goos> ps'
+require_marker quota.enforced QUOTA_OK "$log"
+require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quota table header' "$log" 'goos> quota'
+# The shell is an ordinary process: its stream share must be a part of the
+# table rather than all of it, or the quota bounds nothing.
+require_regex quota.shell-streams '^10    shell             strm      [0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
+require_regex quota.init-streams '^1     init              strm      [0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 require_regex release.services 'vfs         running     [0-9]' 'vfs listed as running' "$log" 'goos> services'
 require_regex release.caps '^console   device    read,write$' 'shell console capability' "$log" 'goos> caps'
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'

@@ -167,6 +167,18 @@ func WakeTaskID(task uint64) bool
 //export goos_task_id_for_slot
 func TaskIDForSlot(slot uint64) uint64
 
+// TaskTicks returns the timer ticks charged to a task slot. The timer charges
+// the task it interrupted, so this samples who was running rather than timing
+// it exactly.
+//
+//export goos_task_ticks_read
+func TaskTicks(slot uint64) uint64
+
+// ClearTaskTicks resets a slot's counter so a reused slot starts from zero.
+//
+//export goos_task_ticks_clear
+func ClearTaskTicks(slot uint64)
+
 //export goos_set_current_task_exit_code
 func SetCurrentTaskExitCode(code uint64)
 
