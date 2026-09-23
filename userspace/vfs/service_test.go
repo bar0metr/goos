@@ -63,6 +63,7 @@ type fat32Device interface {
 	ReadAt(offset uint64, target []byte) bool
 	WriteAt(offset uint64, data []byte) bool
 	Flush() bool
+	Capacity() uint64
 }
 
 type testBlockDevice struct{ data []byte }
@@ -73,7 +74,8 @@ func (device *testBlockDevice) ReadAt(offset uint64, target []byte) bool {
 func (device *testBlockDevice) WriteAt(offset uint64, data []byte) bool {
 	return offset+uint64(len(data)) <= uint64(len(device.data)) && copy(device.data[offset:], data) == len(data)
 }
-func (*testBlockDevice) Flush() bool { return true }
+func (*testBlockDevice) Flush() bool             { return true }
+func (device *testBlockDevice) Capacity() uint64 { return uint64(len(device.data)) }
 
 func testFAT32Device() *testBlockDevice {
 	device := &testBlockDevice{data: make([]byte, 4*1024*1024)}
@@ -331,5 +333,54 @@ func TestMalformedSystemImageIsRefused(t *testing.T) {
 	}
 	if (&Service{}).MountSystemImage(nil) {
 		t.Fatal("empty system image mounted")
+	}
+}
+
+func TestRejectedVolumeLeavesTheRestOfTheNamespace(t *testing.T) {
+	device := testFAT32Device()
+	// Claim a volume far larger than the device holds.
+	device.data[32], device.data[33], device.data[34], device.data[35] = 0, 0, 0, 0x20
+	service := &Service{}
+	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+		t.Fatal("service init failed")
+	}
+	if service.MountPersistent(device) {
+		t.Fatal("an oversized volume was mounted")
+	}
+	// A refused volume must not take the rest of the namespace with it: the
+	// system has to come up to a prompt from which the volume can be looked at.
+	for _, path := range []string{"/", "/tmp", "/system", "/system/bin"} {
+		if stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); stat.Status != vfs.StatusOK {
+			t.Fatalf("stat %s after a refused mount = %d", path, stat.Status)
+		}
+	}
+	for _, path := range []string{"/persist", "/home", "/state"} {
+		if stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); stat.Status != vfs.StatusNotFound {
+			t.Fatalf("stat %s after a refused mount = %d", path, stat.Status)
+		}
+	}
+	// The volatile root still works, so the system is usable without storage.
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/tmp/work")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("mkdir on the volatile root = %d", reply.Status)
+	}
+}
+
+func TestPartiallyMountedVolumeIsNotHalfInstalled(t *testing.T) {
+	device := testFAT32Device()
+	service := &Service{}
+	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+		t.Fatal("service init failed")
+	}
+	if !service.MountPersistent(device) {
+		t.Fatal("a well-formed volume was refused")
+	}
+	// Mounting twice must not install a second set of the same mounts.
+	if service.MountPersistent(device) {
+		t.Fatal("the volume was mounted twice")
+	}
+	for _, path := range []string{"/persist", "/home", "/state"} {
+		if stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); stat.Status != vfs.StatusOK {
+			t.Fatalf("stat %s = %d", path, stat.Status)
+		}
 	}
 }

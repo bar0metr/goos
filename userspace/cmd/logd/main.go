@@ -121,8 +121,11 @@ func userspaceMain() {
 	// The configuration session is optional: without one the service keeps its
 	// default, which is to persist.
 	configHandle, _ = data.Handle("config")
+	// No file is not a reason to stop: the kernel ring is the system log and
+	// keeps working. The service retries on its next pass, so a volume that
+	// arrives late, or is repaired, starts being written to without a restart.
 	if !openLog() {
-		fatal("LOG_FILE_UNAVAILABLE\n")
+		syslog.Warn("log file unavailable", syslog.Str("path", logPath))
 	}
 	arenaBase = heapPointer
 	mark("LOG_SERVICE_OK\n")
@@ -137,15 +140,12 @@ func userspaceMain() {
 // ring. Records already in the ring at startup are persisted: they describe
 // this boot, and losing them would mean the log never covers its own start.
 func openLog() bool {
-	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(logPath)})
-	if !ok || reply.Status != vfs.StatusOK && reply.Status != vfs.StatusAlreadyExists {
-		return false
-	}
 	if logBounds(uint64(consoleHandle), unsafe.Pointer(&boundsWire[0])) != 0 {
 		return false
 	}
 	cursor = readUint64(boundsWire[0:8])
-	return true
+	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(logPath)})
+	return ok && (reply.Status == vfs.StatusOK || reply.Status == vfs.StatusAlreadyExists)
 }
 
 // drain appends every record produced since the last pass. A cursor below the

@@ -4,6 +4,7 @@ set -eu
 log=build/logs/boot.log
 reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
+corrupt_log=build/logs/corrupt-volume.log
 pid=
 checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
@@ -680,5 +681,39 @@ require_count m7.boots 'Kernel initialized' 2 "$m7_log" 'Rebooting...'
 require_count m7.read-before-and-after '^Hello from GoOS$' 2 "$m7_log" 'cat /home/m7/hello.txt'
 require_window m7.read-after-reboot '^Hello from GoOS$' 'file read back after the in-guest reboot' "$m7_log" 'Rebooting...' 'NO_SUCH_LINE'
 pass_group m7-reboot
+
+# A volume the filesystem refuses must not take the system with it. The image
+# claims far more sectors than the device holds, which is the first geometry
+# check a mount makes, and the machine has to come up to a prompt anyway: that
+# prompt is where the volume gets looked at.
+rm -f "$corrupt_log"
+corrupt_disk=build/corrupt-virtio-blk.img
+go run ./tools/mkfat32 "$corrupt_disk"
+printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=32 count=4 conv=notrunc 2>/dev/null
+( sleep 6
+	printf 'ls /\n'
+	sleep 2
+	printf 'echo volatile-root-still-works\n'
+	sleep 2
+	printf 'config get system.shell.prompt\n'
+) | qemu-system-x86_64 -machine q35 -m 512M \
+	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$corrupt_disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$corrupt_log" 2>&1 &
+pid=$!
+
+wait_for_marker corrupt '^CONFIG_GET_OK$' 60 "$corrupt_log"
+cleanup
+require_marker corrupt.boot BOOT_OK "$corrupt_log"
+require_marker corrupt.shell SHELL_VFS_CONNECTED_OK "$corrupt_log"
+require_regex corrupt.reported '^\[WARN\] no persistent storage$' 'the refused volume reported' "$corrupt_log" 'Starting services'
+forbid_regex corrupt.no-mount-marker '^FAT32_MOUNT_OK$' 'no mount claimed for a refused volume' "$corrupt_log" 'Starting services'
+# The namespace tells the truth about what is there.
+require_window corrupt.root-listed '^system/$' 'the system image still mounted' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
+forbid_window corrupt.persist-absent '^persist/$' 'no persistent mounts listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
+require_regex corrupt.usable '^volatile-root-still-works$' 'the system usable without storage' "$corrupt_log" 'goos> echo volatile-root-still-works'
+require_marker corrupt.config CONFIG_GET_OK "$corrupt_log" 'config get system.shell.prompt'
+pass_group corrupt-volume
 
 printf '\nPASS qemu-boot (%s checks)\n' "$checks"
