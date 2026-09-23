@@ -6,8 +6,8 @@
 // a file on the persistent volume so that what happened before a reboot can be
 // read after one.
 //
-// It holds no authority beyond the console capability that authorises reading
-// the ring and a VFS session for its own file, and it never becomes a path that
+// It holds no authority beyond the log capability that authorises reading the
+// ring, console write for its own records, and a VFS session for its own file, and it never becomes a path that
 // other services log through: they keep writing to the kernel ring, which stays
 // the single ordering point.
 package main
@@ -49,9 +49,12 @@ const (
 
 var (
 	consoleHandle handle.ID
-	vfsHandle     handle.ID
-	configHandle  handle.ID
-	configWire    [ipc.WireMaxSize]byte
+	// logHandle authorizes reading the kernel ring. It is not the console:
+	// the service can drain the log without being able to read the keyboard.
+	logHandle    handle.ID
+	vfsHandle    handle.ID
+	configHandle handle.ID
+	configWire   [ipc.WireMaxSize]byte
 	// persisting is the setting that governs this service. It is consulted on
 	// every pass, so turning persistence off takes effect at the next one
 	// rather than at the next boot.
@@ -114,6 +117,10 @@ func userspaceMain() {
 	if !ok {
 		fatal("LOG_CONSOLE_MISSING\n")
 	}
+	logHandle, ok = data.Handle("log")
+	if !ok {
+		fatal("LOG_RING_CAPABILITY_MISSING\n")
+	}
 	vfsHandle, ok = data.Handle("vfs")
 	if !ok {
 		fatal("LOG_VFS_MISSING\n")
@@ -140,7 +147,7 @@ func userspaceMain() {
 // pass that has something to write, so storage that is not ready yet delays
 // persistence rather than disabling it.
 func openLog() bool {
-	if logBounds(uint64(consoleHandle), unsafe.Pointer(&boundsWire[0])) != 0 {
+	if logBounds(uint64(logHandle), unsafe.Pointer(&boundsWire[0])) != 0 {
 		return false
 	}
 	cursor = readUint64(boundsWire[0:8])
@@ -153,7 +160,7 @@ func openLog() bool {
 // a gap in the persisted log is visible as a gap.
 func drain() {
 	heapPointer = arenaBase
-	if logBounds(uint64(consoleHandle), unsafe.Pointer(&boundsWire[0])) != 0 {
+	if logBounds(uint64(logHandle), unsafe.Pointer(&boundsWire[0])) != 0 {
 		return
 	}
 	oldest, total := readUint64(boundsWire[0:8]), readUint64(boundsWire[8:16])
@@ -198,7 +205,7 @@ func drain() {
 		// would not fit the bump allocator this runtime has. The open handle is
 		// a value, so it survives the reset.
 		heapPointer = arenaBase
-		if logRead(uint64(consoleHandle), cursor-oldest, unsafe.Pointer(&logLine[0])) != 0 {
+		if logRead(uint64(logHandle), cursor-oldest, unsafe.Pointer(&logLine[0])) != 0 {
 			break
 		}
 		size := 0

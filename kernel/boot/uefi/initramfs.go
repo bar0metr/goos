@@ -8,9 +8,12 @@ import (
 	"unsafe"
 )
 
-// Two MiB keeps the boot archive bounded while accommodating the supervised
-// services, native coreutils image, and the isolated storage driver.
-const initramfsPages = uintptr(512)
+// InitramfsTooLarge is what LoadInitramfs returns for an archive over
+// boot.MaxInitramfs.
+const InitramfsTooLarge = deviceuefi.EFI_BAD_BUFFER_SIZE
+
+// initramfsPages is the read buffer, the archive's bound in pages.
+const initramfsPages = uintptr(boot.MaxInitramfs / boot.PageSize)
 
 var (
 	loadedImageGUID      = deviceuefi.EFI_GUID{Data1: 0x5b1b31a1, Data2: 0x9562, Data3: 0x11d2, Data4: [8]byte{0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}}
@@ -91,6 +94,24 @@ func LoadInitramfs(info *boot.Info) deviceuefi.EFI_STATUS {
 	if size == 0 || size > uintptr(initramfsPages)*uintptr(boot.PageSize) {
 		deviceuefi.BS().FreePages(address, deviceuefi.UINTN(initramfsPages))
 		return deviceuefi.EFI_COMPROMISED_DATA
+	}
+	// A read that fills the buffer may have stopped short of the file. One
+	// more byte tells: an archive over the bound is refused rather than used
+	// cut short, which would lose whatever the tail held.
+	if size == uintptr(initramfsPages)*uintptr(boot.PageSize) {
+		var probe byte
+		extra := uintptr(1)
+		status = deviceuefi.UefiCall3(file.read, uintptr(unsafe.Pointer(file)), uintptr(unsafe.Pointer(&extra)), uintptr(unsafe.Pointer(&probe)))
+		if status != deviceuefi.EFI_SUCCESS || extra != 0 {
+			deviceuefi.BS().FreePages(address, deviceuefi.UINTN(initramfsPages))
+			return InitramfsTooLarge
+		}
+	}
+	// The pages past the archive go back to the firmware, so the bound costs
+	// nothing when the archive is smaller.
+	used := (size + uintptr(boot.PageSize) - 1) / uintptr(boot.PageSize)
+	if used < initramfsPages {
+		deviceuefi.BS().FreePages(address+deviceuefi.EFI_PHYSICAL_ADDRESS(used*uintptr(boot.PageSize)), deviceuefi.UINTN(initramfsPages-used))
 	}
 	info.InitramfsAddress = uint64(address)
 	info.InitramfsSize = uint64(size)

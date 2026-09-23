@@ -5,6 +5,10 @@ package device
 const (
 	ConsoleObject       = uint64(1)
 	SystemControlObject = uint64(2)
+	// LogObject authorizes reading the kernel log ring. It is separate from the
+	// console so that the right to read the log is not the right to read what
+	// is typed, which belongs to the terminal service alone (ADR 0082).
+	LogObject = uint64(3)
 )
 
 const (

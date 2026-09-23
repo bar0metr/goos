@@ -126,6 +126,7 @@ The native kernel and the first isolated services are implemented:
 - a 64-bit TSS with a dedicated guarded RSP0 kernel stack;
 - ring 3 code and data descriptors;
 - separate RX user code and RW+NX user stack mappings;
+- an unmapped guard page below every user stack, enforced by the loader;
 - a DPL 3 native kernel-call gate;
 - the first native program executing at CPL 3;
 - a typed native kernel-call dispatcher with Exit and bounded DebugWrite;
@@ -250,9 +251,12 @@ system state on the persistent volume (ADR 0071).
 
 ## Building and running
 
-The primary development environment is macOS. The build requires Go, TinyGo,
-GNU Make, `qemu-system-x86_64` with OVMF, `hdiutil`, and `nm`. It does not
-silently install or download dependencies.
+The primary development environment is macOS. The build requires Go 1.25.5,
+TinyGo 0.42.0, clang and make from the Xcode Command Line Tools, and
+`qemu-system-x86_64` 11.0.1 with OVMF firmware. `tools/toolchain.versions` pins
+these versions and `make toolchain-check` compares the installed tools against
+it, printing a macOS install hint for anything missing. It does not silently
+install or download dependencies.
 
 ```sh
 make toolchain-check
@@ -263,13 +267,14 @@ make run
 ```
 
 The resulting image is written to `build/goos-x86_64.iso`. All intermediate
-files and caches remain under `build/`.
+files and caches remain under `build/`. Builds are reproducible: `make
+test-reproducible` builds the ISO twice from a clean tree and requires every
+artifact to be byte-identical (ADR 0086).
 
 A successful boot of a normal build produces:
 
 ```text
 GoOS 0.1.0-dev
-TinyGo kernel
 
 CPU: x86_64
 Memory: 368 MiB usable
@@ -366,7 +371,9 @@ markers that the boot test asserts.
 
 `make run` attaches COM1 to the current terminal. `make run-debug` starts QEMU
 paused with a GDB server on TCP port 1234. `make test-performance` stores
-benchmark results under `build/reports/`.
+benchmark results under `build/reports/`: host benchmarks of the kernel data
+structures and, through `make test-microbench`, context switch, IPC, VFS read,
+and RAMFS metadata costs measured in a booted guest.
 `make test` is the fast host-side validation set. `make test-all` is the
 canonical complete gate and includes lint, documentation checks, ISO creation,
 and the two-phase QEMU boot/persistence test. Complete serial logs remain in
@@ -412,23 +419,33 @@ See [roadmap](docs/development/roadmap.md) for the current implementation order.
 
 Further documentation:
 
-- [architecture overview](docs/architecture/overview.md);
-- [physical memory](docs/architecture/memory.md);
-- [interrupts](docs/architecture/interrupts.md);
-- [scheduler](docs/architecture/scheduler.md);
-- [processes](docs/architecture/processes.md);
-- [native images](docs/architecture/native-images.md);
-- [typed IPC](docs/architecture/ipc.md);
-- [storage](docs/architecture/storage.md);
-- [init and service supervision](docs/architecture/init.md);
-- [capabilities and handles](docs/architecture/capabilities.md);
-- [boot sequence](docs/architecture/boot.md);
-- [filesystem stack](docs/architecture/filesystem.md);
-- [Linux compatibility (planned)](docs/architecture/linux-compat.md);
-- [security: threat model, capabilities, memory safety, attack surface](docs/security/threat-model.md);
-- [building and debugging](docs/development/building.md);
-- [debugging](docs/development/debugging.md);
-- [coding style](docs/development/coding-style.md);
-- [adding a service](docs/development/adding-service.md);
-- [roadmap](docs/development/roadmap.md);
-- [architecture decisions](docs/adr/).
+- Architecture: [overview](docs/architecture/overview.md),
+  [boot sequence](docs/architecture/boot.md),
+  [processes](docs/architecture/processes.md),
+  [scheduler](docs/architecture/scheduler.md),
+  [memory](docs/architecture/memory.md), [typed IPC](docs/architecture/ipc.md),
+  [capabilities and handles](docs/architecture/capabilities.md),
+  [filesystem stack](docs/architecture/filesystem.md),
+  [Linux compatibility (planned)](docs/architecture/linux-compat.md).
+- Kernel: [interrupts](docs/kernel/interrupts.md),
+  [native images](docs/kernel/native-images.md),
+  [byte streams](docs/kernel/streams.md).
+- Userspace: [init and service supervision](docs/userspace/init.md),
+  [terminal](docs/userspace/tty.md), [shell](docs/userspace/shell.md),
+  [VFS](docs/userspace/vfs.md), [RAMFS](docs/userspace/ramfs.md),
+  [storage](docs/userspace/storage.md),
+  [configuration](docs/userspace/configuration.md),
+  [logging](docs/userspace/logging.md).
+- Security: [threat model](docs/security/threat-model.md),
+  [capabilities](docs/security/capabilities.md),
+  [memory safety](docs/security/memory-safety.md),
+  [attack surface](docs/security/attack-surface.md),
+  [boot chain and signature verification (planned)](docs/security/boot-chain.md).
+- Development: [building](docs/development/building.md),
+  [debugging](docs/development/debugging.md),
+  [testing](docs/development/testing.md),
+  [coding style](docs/development/coding-style.md),
+  [adding a command](docs/development/adding-command.md),
+  [adding a service](docs/development/adding-service.md),
+  [roadmap](docs/development/roadmap.md).
+- [Architecture decisions](docs/adr).

@@ -86,8 +86,10 @@ Argv and environment use the GST3 vector encoding, up to 255 bytes each. No hand
 attached to the exec request; PID 1 derives child capabilities from its own table.
 
 For N stages PID 1 creates N-1 streams and starts stages from right to left,
-so a downstream launch failure cannot leave a newly started producer reading
-the console. Each middle stage receives only its upstream reader and downstream
+so a downstream launch failure cannot leave a newly started producer waiting on
+input. The first stage reads a standard-input stream of its own: a background
+job's is closed at once, and a foreground job's writing end is moved to the
+shell in an exec `Started` message before the job's reply (ADR 0082). Each middle stage receives only its upstream reader and downstream
 writer; stderr remains on the console. Successful launch consumes those stream
 handles. On any failure PID 1 closes every retained endpoint before waiting
 for children already started. This releases stream waits through EOF or peer

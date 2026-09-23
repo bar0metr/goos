@@ -11,17 +11,17 @@ import (
 	"goos/kernel/loader"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
-	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/tty"
-	"goos/kernel/vfs"
 	supervisor "goos/userspace/init"
 )
 
 // The self-tests below run only in validation builds. They exercise the
 // kernel's own mechanisms in place: a scheduling demonstration, two fixed
 // processes that probe isolation, IPC, TTY rights, and fault containment, and
-// in-kernel checks of RAMFS, VFS, bounded channels, and shared memory.
+// in-kernel checks of RAMFS, VFS, bounded channels, and shared memory. The
+// RAMFS and VFS checks live in filesystem_selftest_on.go, compiled only into
+// validation builds, so the normal kernel does not link a filesystem (ADR 0084).
 
 var (
 	selfTestRootA   uint64
@@ -149,99 +149,7 @@ func runKernelSelfTests(pageTable uint64) {
 		}
 	}
 	mark("TTY_CAPABILITY_OK")
-	ramfsRoot := bootRAMFS.Init()
-	ramfsDirectory, ramfsDirectoryCreated := bootRAMFS.Mkdir(ramfsRoot, []byte("etc"))
-	ramfsFile, ramfsFileCreated := bootRAMFS.Create(ramfsDirectory, []byte("motd"))
-	ramfsWritten, ramfsWriteStatus := bootRAMFS.Write(ramfsFile, 0, []byte("GoOS RAMFS"))
-	ramfsRead, ramfsReadStatus := bootRAMFS.Read(ramfsFile, 0, ramfsReadback[:])
-	ramfsStat, ramfsStatStatus := bootRAMFS.Stat(ramfsFile)
-	ramfsEntry, _, ramfsReadDirStatus := bootRAMFS.ReadDir(ramfsDirectory, 0)
-	ramfsRenamed := bootRAMFS.Rename(ramfsFile, ramfsRoot, []byte("welcome"))
-	ramfsOpened, ramfsOpenStatus := bootRAMFS.Open(ramfsRoot, []byte("welcome"))
-	ramfsRequest, ramfsRequestEncoded := ramfs.EncodeRequest(ramfs.Request{Operation: ramfs.OperationOpen, Parent: ramfsRoot, Name: []byte("welcome")}, 1)
-	ramfsDecoded, ramfsRequestDecoded := ramfs.DecodeRequest(ramfsRequest)
-	if ramfsDirectoryCreated != ramfs.StatusOK || ramfsFileCreated != ramfs.StatusOK || ramfsWriteStatus != ramfs.StatusOK || ramfsWritten != 10 ||
-		ramfsReadStatus != ramfs.StatusOK || ramfsRead != 10 || string(ramfsReadback[:ramfsRead]) != "GoOS RAMFS" || ramfsStatStatus != ramfs.StatusOK || ramfsStat.Size != 10 ||
-		ramfsReadDirStatus != ramfs.StatusOK || string(ramfsEntry.Name[:ramfsEntry.Size]) != "motd" || ramfsRenamed != ramfs.StatusOK || ramfsOpenStatus != ramfs.StatusOK || ramfsOpened != ramfsFile ||
-		!ramfsRequestEncoded || !ramfsRequestDecoded || ramfsDecoded.Operation != ramfs.OperationOpen || ramfsDecoded.Parent != ramfsRoot || string(ramfsDecoded.Name) != "welcome" {
-		console.WriteString("PANIC: RAMFS operation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootRAMFS.Truncate(ramfsFile, 4) != ramfs.StatusOK || bootRAMFS.Unlink(ramfsRoot, []byte("welcome")) != ramfs.StatusOK {
-		console.WriteString("PANIC: RAMFS lifecycle failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if _, status := bootRAMFS.Stat(ramfsFile); status != ramfs.StatusNotFound {
-		console.WriteString("PANIC: RAMFS stale node accepted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if _, status := bootRAMFS.Create(ramfsRoot, []byte("bad/name")); status != ramfs.StatusInvalidArgument {
-		console.WriteString("PANIC: RAMFS invalid name accepted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	mark("RAMFS_PROTOCOL_OK")
-	mark("RAMFS_METADATA_OK")
-	mark("RAMFS_IO_OK")
-	mark("RAMFS_BOUNDS_OK")
-
-	deviceRoot := deviceRAMFS.Init()
-	if bootVFS.Mount([]byte("/"), &bootRAMFS, ramfsRoot) != vfs.StatusOK || bootVFS.Create([]byte("/tmp"), true) != vfs.StatusOK ||
-		bootVFS.Mount([]byte("/tmp/dev"), &deviceRAMFS, deviceRoot) != vfs.StatusOK || bootVFS.Create([]byte("/tmp/note"), false) != vfs.StatusOK ||
-		bootVFS.Create([]byte("/tmp/dev/console"), false) != vfs.StatusOK {
-		console.WriteString("PANIC: VFS namespace setup failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	vfsFile, vfsOpened := bootVFS.Open([]byte("//tmp/./note"), vfs.Read|vfs.Write)
-	vfsWritten, vfsWriteStatus := bootVFS.Write(vfsFile, []byte("VFS works"))
-	vfsSeekStatus := bootVFS.Seek(vfsFile, 0)
-	vfsRead, vfsReadStatus := bootVFS.Read(vfsFile, vfsReadback[:])
-	vfsStat, vfsStatStatus := bootVFS.Stat([]byte("/tmp/note"))
-	_, mountedConsole, mountedResolveStatus := bootVFS.Resolve([]byte("/tmp/dev/console"))
-	deviceConsole, deviceConsoleStatus := deviceRAMFS.Open(deviceRoot, []byte("console"))
-	vfsRequest, vfsRequestEncoded := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/tmp/note")}, 2)
-	vfsDecoded, vfsRequestDecoded := vfs.DecodeRequest(vfsRequest)
-	if vfsOpened != vfs.StatusOK || vfsWriteStatus != vfs.StatusOK || vfsWritten != 9 || vfsSeekStatus != vfs.StatusOK ||
-		vfsReadStatus != vfs.StatusOK || vfsRead != 9 || string(vfsReadback[:vfsRead]) != "VFS works" || vfsStatStatus != vfs.StatusOK || vfsStat.Size != 9 ||
-		mountedResolveStatus != vfs.StatusOK || deviceConsoleStatus != ramfs.StatusOK || mountedConsole != deviceConsole ||
-		!vfsRequestEncoded || !vfsRequestDecoded || vfsDecoded.Operation != vfs.OperationOpen || string(vfsDecoded.Path) != "/tmp/note" {
-		console.WriteString("PANIC: VFS operation failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootVFS.Close(vfsFile) != vfs.StatusOK || bootVFS.Rename([]byte("/tmp/note"), []byte("/tmp/renamed")) != vfs.StatusOK {
-		console.WriteString("PANIC: VFS lifecycle failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if _, _, status := bootVFS.Resolve([]byte("/tmp/note")); status != vfs.StatusNotFound {
-		console.WriteString("PANIC: VFS stale path cache accepted\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	if bootVFS.Unlink([]byte("/tmp/renamed")) != vfs.StatusOK {
-		console.WriteString("PANIC: VFS unlink failed\n")
-		for {
-			amd64.Halt()
-		}
-	}
-	mark("VFS_NAMESPACE_OK")
-	mark("VFS_MOUNT_OK")
-	mark("VFS_PATH_OK")
-	mark("VFS_CACHE_OK")
-	mark("VFS_PROTOCOL_OK")
+	runFilesystemSelfTests(console)
 
 	boundedChannel = ipc.NewChannel()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
@@ -393,7 +301,7 @@ func runKernelSelfTests(pageTable uint64) {
 		0x0f, 0x0b,
 		0xb8, 0x06, 0x00, 0x00, 0x00,
 		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x21, 0x30, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x21, 0x60, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserStackAddress+0x21.
 		0xba, 0x0f, 0x00, 0x00, 0x00,
 		0xcd, 0x80,
 		0x85, 0xc0,
@@ -466,7 +374,7 @@ func startSelfTestTasks() {
 
 func awaitValidationBoot() {
 	console := amd64.NewCOM1()
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
 		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")
@@ -532,11 +440,40 @@ func awaitValidationBoot() {
 	mark("USER_PREEMPT_OK")
 	mark("PROCESS_CR3_SCHED_OK")
 	mark("USER_FAULT_ISOLATION_OK")
+	mark("USER_STACK_GUARD_OK")
 	mark("USER_RING3_OK")
 	mark("NATIVE_PROCESS_OK")
 	mark("TTY_RIGHTS_OK")
 	console.WriteString("Kernel initialized\n")
 	mark("BOOT_OK")
+}
+
+// pageFaultExit is the exit code of a task retired by a user page fault: the
+// fault bit and vector 14.
+const pageFaultExit = uint64(1)<<63 | 14
+
+// stackGuardFaults counts fault-probe runs that overflowed their stack into
+// the unmapped guard page below it (ADR 0083).
+var stackGuardFaults uint64
+
+// noteStackGuardFault counts an exit as a stack guard fault when the task died
+// of a page fault inside the page below the probe layout's stack and that page
+// is still unmapped in its address space. The process is still registered, so
+// its address space can be inspected before teardown.
+func noteStackGuardFault(taskID sched.TaskID, code uint64) {
+	slot, _, valid := taskID.Parts()
+	if !valid {
+		return
+	}
+	address := amd64.TakeTaskFaultAddress(uint64(slot))
+	owner, found := processRegistry.ByTask(taskID)
+	guard := vm.UserStackAddress - vm.PageSize
+	if !found || code != pageFaultExit || address < guard || address >= vm.UserStackAddress {
+		return
+	}
+	if _, mapped := vm.ResolveUser(owner.AddressSpace().Root, guard); !mapped {
+		stackGuardFaults++
+	}
 }
 
 // selfTestShared is a private cache, so the check below neither depends on nor

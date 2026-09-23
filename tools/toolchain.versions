@@ -1,0 +1,22 @@
+# Pinned external toolchain (ADR 0086). tools/toolchain-check.sh reads this
+# file; `make toolchain-check` compares every installed tool against it.
+#
+# The versions are the known-good ones every clean build and QEMU run has been
+# validated with. Change a line only together with a clean `make
+# test-reproducible` and `make test-all` on the new version.
+#
+# policy: error - a different version fails the check. Go and TinyGo compile
+#                 every byte of the kernel and userspace; another version
+#                 produces different binaries.
+#         warn  - a different version is reported but accepted. These tools
+#                 assemble two hand-written .S files (clang), drive the build
+#                 (make), or only run the result (QEMU, firmware).
+#
+# tool                  version   policy
+go                      1.25.5    error
+tinygo                  0.42.0    error
+clang                   21.0.0    warn
+make                    3.81      warn
+qemu-system-x86_64      11.0.1    warn
+# SHA-256 of edk2-x86_64-code.fd shipped with MacPorts qemu 11.0.1.
+ovmf                    33090cc07675baa5190d9f1e84bf5176b33bcbfa9bacac522961150cdb6dbb2a  warn

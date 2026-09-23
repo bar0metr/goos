@@ -36,7 +36,7 @@ the fixed registry slot.
 
 Unstructured byte flow is intentionally separate from typed IPC. Native streams
 preserve byte order in a fixed ring buffer and expose directional capability
-endpoints; see [native byte streams](streams.md). Typed IPC remains the control
+endpoints; see [native byte streams](../kernel/streams.md). Typed IPC remains the control
 plane for requests, replies, and handle transfer.
 
 # Native call boundary

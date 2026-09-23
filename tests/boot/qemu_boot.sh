@@ -328,6 +328,16 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'quota\n'
 	sleep 1
+	printf 'echo arrow\033[Akeys\n'
+	sleep 1
+	printf 'garbage-before-kill\025echo killed-line\n'
+	sleep 1
+	printf 'readline\n'
+	sleep 1
+	printf '\004'
+	sleep 1
+	printf 'echo after-end-of-input\n'
+	sleep 1
 	printf 'help cat\n'
 	sleep 1
 	printf 'ls --help\n'
@@ -469,7 +479,7 @@ for marker in BOOT_SERVICES_EXITED EXCEPTION_OK GDT_OK IDT_OK TIMER_OK NATIVE_IM
 done
 pass_group boot
 
-for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK; do
+for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK USER_STACK_GUARD_OK; do
 	require_marker "memory-security.$marker" "$marker" "$log"
 done
 pass_group memory-security
@@ -557,6 +567,18 @@ require_regex errors.not-empty '^rm: /tmp/demo: directory not empty$' 'a non-emp
 require_regex format.uptime '^up [0-9][0-9]*:[0-9][0-9]:[0-9][0-9]$' 'uptime as hours, minutes and seconds' "$log" uptime
 require_regex format.mem '^total: [0-9][0-9]*\.[0-9] [KMG]iB$' 'memory in binary units' "$log" 'goos> mem'
 pass_group help
+
+# The terminal service edits the line (ADR 0082): an arrow key's escape
+# sequence is not typed as text, Ctrl-U discards the line, and Ctrl-D ends a
+# command's input instead of reaching it as a byte.
+require_marker terminal.service TTY_TERMINAL_OK "$log"
+require_marker terminal.line TTY_LINE_OK "$log"
+require_marker terminal.shell-line SHELL_TERMINAL_LINE_OK "$log"
+require_regex terminal.escape-skipped '^arrowkeys$' 'an arrow key typed no text' "$log" 'echo arrow'
+require_regex terminal.kill-line '^killed-line$' 'the line after Ctrl-U runs alone' "$log" 'killed-line'
+forbid_regex terminal.kill-line-discarded 'garbage-before-kill.*not found' 'the killed text never ran' "$log" 'killed-line'
+require_regex terminal.end-of-input '^after-end-of-input$' 'the shell continues after Ctrl-D ended a command' "$log" 'after-end-of-input'
+pass_group terminal
 
 # Relaunching an image maps its code from the shared cache (ADR 0081).
 require_marker boot.image-pages-shared IMAGE_PAGES_SHARED_OK "$log"
@@ -679,7 +701,11 @@ require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*
 require_regex release.shell-idle '^[0-9][0-9]*  *native  *[a-z]*  *[0-9][0-9]*  *[0-9][0-9]\{0,2\}  *shell$' 'the shell idle rather than polling' "$log" 'goos> ps'
 forbid_regex release.console-overrun 'console input dropped' 'no console input lost' "$log" 'goos> ps'
 require_regex release.services 'vfs         running     [0-9]' 'vfs listed as running' "$log" 'goos> services'
-require_regex release.caps '^console   device    read,write$' 'shell console capability' "$log" 'goos> caps'
+# The shell writes to the console but cannot read it: typed lines reach it from
+# the terminal service, and reading the log is a capability of its own (ADR 0082).
+require_regex release.caps '^console   device    write$' 'shell console capability, write only' "$log" 'goos> caps'
+require_regex release.caps-terminal '^tty       channel   read,write,wait$' 'shell terminal session' "$log" 'goos> caps'
+require_regex release.caps-log '^log       device    read$' 'shell log capability' "$log" 'goos> caps'
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'

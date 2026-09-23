@@ -9,8 +9,10 @@ const (
 	// UserStartupAddress holds a process's read-only startup block.
 	UserStartupAddress = uint64(0x40001000)
 	UserCodeAddress    = uint64(0x40002000)
-	UserStackAddress   = uint64(0x40003000)
 	UserDataAddress    = uint64(0x40004000)
+	// UserStackAddress leaves the page below it unmapped as the stack's guard
+	// page (ADR 0083).
+	UserStackAddress = uint64(0x40006000)
 	// Processes may map shared memory only inside [UserSharedAddress, UserSharedLimit).
 	UserSharedAddress = uint64(0x40180000)
 	UserSharedLimit   = uint64(0x401c0000)

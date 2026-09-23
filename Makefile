@@ -2,10 +2,10 @@ SHELL := /bin/sh
 
 BUILD_DIR := build
 CACHE_DIR := $(BUILD_DIR)/cache
-BUILD_ENV := GOCACHE=$(abspath $(CACHE_DIR)/go) XDG_CACHE_HOME=$(abspath $(CACHE_DIR))
+# GOTOOLCHAIN=local: the go command never downloads another toolchain; the
+# pinned one (tools/toolchain.versions) is the one on PATH.
+BUILD_ENV := GOTOOLCHAIN=local GOCACHE=$(abspath $(CACHE_DIR)/go) XDG_CACHE_HOME=$(abspath $(CACHE_DIR))
 KERNEL_DIR = $(OUT_DIR)/kernel
-ISO_ROOT = $(OUT_DIR)/iso/root
-EFI_BOOT = $(ISO_ROOT)/EFI/BOOT
 KERNEL = $(KERNEL_DIR)/goos.efi
 KERNEL_IO := $(BUILD_DIR)/kernel/io.o
 INIT_IMAGE = $(OUT_DIR)/userspace/init
@@ -34,8 +34,9 @@ LOG_IMAGE = $(OUT_DIR)/userspace/log
 LOG_ELF = $(OUT_DIR)/userspace/log.elf
 CONFIG_IMAGE = $(OUT_DIR)/userspace/config
 CONFIG_ELF = $(OUT_DIR)/userspace/config.elf
+TTY_IMAGE = $(OUT_DIR)/userspace/tty
+TTY_ELF = $(OUT_DIR)/userspace/tty.elf
 EFI_IMAGE = $(OUT_DIR)/iso/efi.img
-ISO_BOOT_IMAGE = $(ISO_ROOT)/efi.img
 VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
 ISO := $(BUILD_DIR)/goos-x86_64.iso
 QEMU := qemu-system-x86_64
@@ -72,7 +73,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-performance lint fmt docs clean distclean toolchain-check help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check help
 
 all: iso
 
@@ -88,7 +89,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -101,7 +102,7 @@ $(INIT_ELF): $(shell find userspace/init userspace/commands userspace/exec users
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
-$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/commands userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/commands userspace/tty userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
 
@@ -158,6 +159,13 @@ $(CONFIG_ELF): $(shell find userspace/cmd/configd userspace/config userspace/sta
 $(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
 
+$(TTY_ELF): $(shell find userspace/cmd/tty userspace/tty userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/tty
+
+$(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+	$(BUILD_ENV) go run ./tools/elf2native $(TTY_ELF) $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
@@ -172,24 +180,19 @@ initramfs: userspace
 	@# A command whose directory was removed leaves its image behind; the
 	@# archive takes only the commands the tree still has.
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
-$(EFI_IMAGE): $(KERNEL) initramfs
-	@mkdir -p $(EFI_BOOT)
-	@cp $(KERNEL) $(EFI_BOOT)/BOOTX64.EFI
-	@cp $(OUT_DIR)/initramfs/initramfs.tar $(ISO_ROOT)/initramfs.tar
-	@rm -f $@ $@.cdr $(ISO_BOOT_IMAGE)
-	@hdiutil create -quiet -fs MS-DOS -format UDTO -size 8m -volname GOOS_EFI -srcfolder $(ISO_ROOT) $@
-	@mv $@.cdr $@
+# tools/mkiso writes both images from their inputs alone, with fixed names,
+# serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
+# byte-identical (ADR 0086).
+$(EFI_IMAGE): $(KERNEL) initramfs $(wildcard tools/mkiso/*.go)
+	@mkdir -p $(dir $@)
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(OUT_DIR)/initramfs/initramfs.tar $@
 
 iso: $(ISO)
 
 $(VARIANT_ISO): $(EFI_IMAGE)
-	@rm -f $@
-	@dd if=$(EFI_IMAGE) of=$(ISO_BOOT_IMAGE) bs=512 skip=1 2>/dev/null
-	@dd if=/dev/zero of=$(ISO_BOOT_IMAGE) bs=1 seek=8388607 count=1 conv=notrunc 2>/dev/null
-	@hdiutil makehybrid -quiet -iso -joliet -eltorito-boot $(abspath $(ISO_BOOT_IMAGE)) -no-emul-boot -o $@ $(ISO_ROOT)
-	@$(BUILD_ENV) go run ./tools/iso-uefi $@
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(EFI_IMAGE) $(KERNEL) $(OUT_DIR)/initramfs/initramfs.tar $@
 	@test -s $@
 
 # build/goos-x86_64.iso is always the most recently requested configuration;
@@ -239,6 +242,11 @@ STRESS_ROUNDS ?= 15
 test-stress: iso
 	@tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
 
+# Builds the ISO twice from a clean build/ and compares every artifact (ADR
+# 0086). It cleans build/ itself, keeping only disks, logs, and reports.
+test-reproducible:
+	@MAKE='$(MAKE)' tests/build/reproducible.sh
+
 LATENCY_REPEATS ?= 10
 
 test-latency: iso
@@ -246,7 +254,16 @@ test-latency: iso
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/latency-virtio-blk.img
 	@LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
 
-test-performance:
+MICROBENCH_REPEATS ?= 5
+
+# In-guest microbenchmarks (ADR 0085): context switch, IPC, and VFS reads
+# measured in a booted system.
+test-microbench: iso
+	@rm -f $(BUILD_DIR)/microbench-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/microbench-virtio-blk.img
+	@MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
+
+test-performance: test-microbench
 	@mkdir -p $(BUILD_DIR)/reports
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkAllocateFree -benchmem ./kernel/mm/pmm | tee $(BUILD_DIR)/reports/page-allocation.txt
 	@$(BUILD_ENV) go test -run '^$$' -bench BenchmarkChannelPingPong -benchmem ./kernel/ipc | tee $(BUILD_DIR)/reports/ipc-ping-pong.txt
@@ -267,17 +284,17 @@ docs:
 	@test -f README.md
 	@test -f docs/architecture/overview.md
 	@test -f docs/architecture/processes.md
-	@test -f docs/architecture/native-images.md
+	@test -f docs/kernel/native-images.md
 	@test -f docs/architecture/capabilities.md
 	@test -f docs/architecture/ipc.md
-	@test -f docs/architecture/tty.md
-	@test -f docs/architecture/ramfs.md
-	@test -f docs/architecture/vfs.md
-	@test -f docs/architecture/init.md
-	@test -f docs/architecture/shell.md
-	@test -f docs/architecture/configuration.md
-	@test -f docs/architecture/storage.md
-	@test -f docs/architecture/streams.md
+	@test -f docs/userspace/tty.md
+	@test -f docs/userspace/ramfs.md
+	@test -f docs/userspace/vfs.md
+	@test -f docs/userspace/init.md
+	@test -f docs/userspace/shell.md
+	@test -f docs/userspace/configuration.md
+	@test -f docs/userspace/storage.md
+	@test -f docs/kernel/streams.md
 	@test -f docs/development/testing.md
 	@test -f docs/adr/0072-per-process-resource-quotas.md
 	@test -f docs/adr/0073-persistent-log-service.md
@@ -289,6 +306,12 @@ docs:
 	@test -f docs/adr/0079-command-help-and-diagnostics.md
 	@test -f docs/adr/0080-commands-as-separate-images.md
 	@test -f docs/adr/0081-shared-read-only-image-pages.md
+	@test -f docs/adr/0082-userspace-terminal-service.md
+	@test -f docs/adr/0083-user-stack-guard-pages.md
+	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
+	@test -f docs/adr/0085-in-guest-microbenchmarks.md
+	@test -f docs/adr/0086-pinned-toolchain-and-reproducible-builds.md
+	@test -f docs/adr/0087-bounded-boot-archive.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -338,7 +361,7 @@ docs:
 	@test -f docs/adr/0057-launch-path-and-latency-baseline.md
 	@test -f docs/adr/0058-normal-and-validation-builds.md
 	@test -f docs/adr/0059-structured-system-log.md
-	@test -f docs/architecture/logging.md
+	@test -f docs/userspace/logging.md
 	@test -f docs/adr/0068-timed-sleep.md
 	@test -f docs/adr/0067-stopping-jobs.md
 	@test -f docs/adr/0064-asynchronous-exec-and-background-jobs.md
@@ -353,6 +376,7 @@ docs:
 	@test -f docs/security/capabilities.md
 	@test -f docs/security/memory-safety.md
 	@test -f docs/security/attack-surface.md
+	@test -f docs/security/boot-chain.md
 	@test -f docs/architecture/boot.md
 	@test -f docs/architecture/filesystem.md
 	@test -f docs/architecture/linux-compat.md
@@ -366,7 +390,7 @@ clean:
 distclean: clean
 
 toolchain-check:
-	@tools/toolchain-check.sh
+	@OVMF_CODE='$(OVMF_CODE)' tools/toolchain-check.sh
 
 help:
 	@printf '%s\n' \
@@ -383,7 +407,9 @@ help:
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
-	  '  test-performance run microbenchmarks into build/reports' \
+	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
+	  '  test-performance run host and in-guest microbenchmarks into build/reports' \
+	  '  test-reproducible build the ISO twice from clean and compare every artifact' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \
-	  '  toolchain-check validate local prerequisites'
+	  '  toolchain-check validate tools and pinned versions (tools/toolchain.versions)'

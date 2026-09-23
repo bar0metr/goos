@@ -327,6 +327,10 @@ of copying them into every process. Under TCG a launch no longer retranslates
 code it has run before: `uname` takes 1.5 ms instead of 3.8 ms and a
 three-stage pipeline 3.0 ms instead of 10.2 ms.
 
+ADR 0084 compiles the kernel's RAMFS and VFS self-tests only into the
+validation build, so the normal kernel links no filesystem code, and drops the
+toolchain line from the boot banner.
+
 ## Priority 5 — Linux ABI compatibility
 
 Begin Linux compatibility only after native process startup, persistent storage,

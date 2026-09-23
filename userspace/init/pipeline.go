@@ -36,11 +36,17 @@ type Job struct {
 	lastPID   uint64
 	status    LaunchStatus
 	failed    uint8
+	// input is the writing end of a foreground job's standard input, held
+	// until the caller takes it to hand to the shell.
+	input handle.ID
 }
 
 // RunPipeline starts a pipeline and waits for all of its processes.
 func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) (uint64, LaunchStatus, uint64) {
 	job := StartPipeline(request, console, runner)
+	if input := job.TakeInput(); input != 0 {
+		runner.Close(input)
+	}
 	for {
 		process, pending := job.Next()
 		if !pending {
@@ -50,12 +56,15 @@ func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRu
 	}
 }
 
-// StartPipeline starts downstream stages first, before the console-input stage.
+// StartPipeline starts downstream stages first, before the first stage.
 // When request.ErrorSource is set the final stage is a stderr sink: it reads a
 // private stream fed by the source stage's stderr and is not part of the stdout
 // chain. It is launched first so its reader exists before the source writes.
-// A background request gives the first stage an input stream that is already
-// at EOF instead of the console.
+//
+// Output and diagnostics go to console, which is write-only. The first stage
+// reads a stream of its own rather than the console, whose input belongs to
+// the terminal service (ADR 0082): a background job's stream is already at EOF,
+// and a foreground job's writing end is kept for TakeInput.
 // On failure it closes all retained endpoints, so the stages already started
 // observe EOF or closure; the job still reaps them before it reports.
 func StartPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) Job {
@@ -71,7 +80,7 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 		errorSource = int(request.ErrorSource) - 1
 	}
 	var readers, writers [execproto.MaxStages - 1]handle.ID
-	var errorReader, errorWriter, emptyInput handle.ID
+	var errorReader, errorWriter, inputReader handle.ID
 	status := LaunchOK
 	for index := 0; index < chain-1; index++ {
 		var ok bool
@@ -88,12 +97,18 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 			status = LaunchResourceExhausted
 		}
 	}
-	if status == LaunchOK && request.Background {
+	if status == LaunchOK {
 		var writer handle.ID
 		var ok bool
-		emptyInput, writer, ok = runner.CreateStream()
-		if !ok || !runner.Close(writer) {
+		inputReader, writer, ok = runner.CreateStream()
+		if !ok {
 			status = LaunchResourceExhausted
+		} else if request.Background {
+			if !runner.Close(writer) {
+				status = LaunchResourceExhausted
+			}
+		} else {
+			job.input = writer
 		}
 	}
 	if status == LaunchOK {
@@ -105,8 +120,8 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 			} else {
 				if index > 0 {
 					streams.Input = Endpoint{ID: readers[index-1], Type: handle.TypeStream}
-				} else if emptyInput != 0 {
-					streams.Input = Endpoint{ID: emptyInput, Type: handle.TypeStream}
+				} else if inputReader != 0 {
+					streams.Input = Endpoint{ID: inputReader, Type: handle.TypeStream}
 				}
 				if index < chain-1 {
 					streams.Output = Endpoint{ID: writers[index], Type: handle.TypeStream}
@@ -131,7 +146,7 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 				if index > 0 {
 					readers[index-1] = 0
 				} else {
-					emptyInput = 0
+					inputReader = 0
 				}
 				if index < chain-1 {
 					writers[index] = 0
@@ -150,8 +165,13 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 			status = LaunchCapabilityInstallFailed
 		}
 	}
-	if errorReader != 0 && !runner.Close(errorReader) || errorWriter != 0 && !runner.Close(errorWriter) || emptyInput != 0 && !runner.Close(emptyInput) {
+	if errorReader != 0 && !runner.Close(errorReader) || errorWriter != 0 && !runner.Close(errorWriter) || inputReader != 0 && !runner.Close(inputReader) {
 		status = LaunchCapabilityInstallFailed
+	}
+	// A job that did not start has no one to give input to.
+	if status != LaunchOK && job.input != 0 {
+		runner.Close(job.input)
+		job.input = 0
 	}
 	job.status = status
 	job.skipIdle()
@@ -187,6 +207,14 @@ func (job *Job) Processes() []handle.ID {
 		return nil
 	}
 	return job.processes[job.next:job.count]
+}
+
+// TakeInput returns the writing end of a started foreground job's standard
+// input, once; the caller owns it from then on.
+func (job *Job) TakeInput() handle.ID {
+	input := job.input
+	job.input = 0
+	return input
 }
 
 // FailedStage is the index of the stage whose launch failed. It is meaningful

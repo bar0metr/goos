@@ -10,7 +10,6 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/ramfs"
-	"goos/kernel/tty"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
 	"goos/userspace/config"
@@ -18,6 +17,7 @@ import (
 	supervisor "goos/userspace/init"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
+	terminal "goos/userspace/tty"
 	userwait "goos/userspace/wait"
 	"runtime"
 	"strconv"
@@ -25,7 +25,11 @@ import (
 )
 
 var (
+	// consoleHandle writes to the console. The shell cannot read it: what is
+	// typed arrives as lines over ttyHandle from the terminal service.
 	consoleHandle handle.ID
+	ttyHandle     handle.ID
+	logHandle     handle.ID
 	vfsHandle     handle.ID
 	execHandle    handle.ID
 	configHandle  handle.ID
@@ -33,11 +37,25 @@ var (
 	// prompt is read from the configuration service rather than compiled in.
 	// It falls back to the built-in text when there is no session, because the
 	// shell has to come up whether or not configuration is available.
-	promptText        = [config.MaxText]byte{'g', 'o', 'o', 's', '>', ' '}
-	promptSize        = 6
-	startupWire       [startup.Size]byte
-	editor            tty.LineEditor
-	inputByte         byte
+	promptText  = [config.MaxText]byte{'g', 'o', 'o', 's', '>', ' '}
+	promptSize  = 6
+	startupWire [startup.Size]byte
+	ttyWire     [ipc.WireMaxSize]byte
+	// lineStorage holds the command line being executed; typedStorage the
+	// last line received, which may be input for a running command. They are
+	// separate so input typed during `a; b` cannot overwrite `b`.
+	lineStorage  [terminal.MaxLine]byte
+	typedStorage [terminal.MaxLine]byte
+	// reading is the correlation of the outstanding read from the terminal
+	// service, or zero. One is kept outstanding while a foreground command
+	// runs too, so what is typed reaches the command and Ctrl-C reaches the
+	// shell.
+	reading uint64
+	// stashed holds a foreground job's reply that arrived while the shell was
+	// waiting for another answer from PID 1, such as the one to a kill.
+	stashed           ipc.Message
+	stashedValid      bool
+	streamDescriptor  [3]uint64
 	heapPointer       uintptr
 	arenaBase         uintptr
 	wire              [ipc.WireMaxSize]byte
@@ -62,7 +80,7 @@ type job struct {
 	active      bool
 	background  bool
 	correlation uint64
-	command     [tty.MaxLine]byte
+	command     [terminal.MaxLine]byte
 	commandSize int
 	// requestSize is the length of the request left in the job's exec page
 	// slot; a launch failure is described from it.
@@ -96,11 +114,14 @@ func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
 
-//go:linkname consoleInterrupt goos_console_interrupt
-func consoleInterrupt(device uint64) uint64
+//go:linkname handleClose goos_handle_close
+func handleClose(id uint64) uint64
 
-//go:linkname consoleRead goos_console_read
-func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
+//go:linkname streamWrite goos_stream_write
+func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname streamWait goos_stream_wait
+func streamWait(stream uint64, timeout uint64) uint64
 
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
@@ -126,6 +147,14 @@ func userspaceMain() {
 	if !found {
 		fatal("SHELL_CONSOLE_MISSING\n")
 	}
+	ttyHandle, found = startupData.Handle("tty")
+	if !found {
+		fatal("SHELL_TERMINAL_MISSING\n")
+	}
+	logHandle, found = startupData.Handle("log")
+	if !found {
+		fatal("SHELL_LOG_MISSING\n")
+	}
 	vfsHandle, found = startupData.Handle("vfs")
 	if !found {
 		fatal("SHELL_VFS_MISSING\n")
@@ -150,45 +179,94 @@ func userspaceMain() {
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
 	loadPrompt()
 	write("\n")
-	prompt()
 	for {
-		// Ctrl-C reaches the shell as an interrupt rather than as a byte, so
-		// asking for it takes nothing away from a command that is reading.
-		if consoleInterrupt(uint64(consoleHandle)) == 0 {
-			write("^C\n")
-			editor.Reset()
-			prompt()
-			continue
-		}
-		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
-		if status == uint64(kcall.StatusNotFound) {
+		showPrompt()
+		for {
 			if pollReplies() {
-				prompt()
-				writeBytes(editor.Pending())
+				// A finished background job was reported over the line being
+				// typed, so the terminal service shows it again.
+				redraw(promptText[:promptSize])
 			}
-			awaitInput()
-			continue
+			result, text, received := takeLine()
+			if !received {
+				awaitInput()
+				continue
+			}
+			if result == terminal.ResultLine {
+				mark("SHELL_TERMINAL_LINE_OK\n")
+				size := copy(lineStorage[:], text)
+				execute(lineStorage[:size])
+				heapPointer = arenaBase
+			}
+			// Ctrl-C at the prompt was echoed by the terminal service and
+			// discards the line; end of input there is ignored.
+			break
 		}
-		if status != 0 {
-			fatal("SHELL_INPUT_FAILED\n")
-		}
-		line, complete, accepted := editor.Feed(inputByte)
-		if !accepted {
-			continue
-		}
-		if !complete {
-			echoInput(inputByte)
-			continue
-		}
-		write("\n")
-		execute(line)
-		heapPointer = arenaBase
-		editor.Reset()
-		prompt()
 	}
 }
 
-func prompt() { writeBytes(promptText[:promptSize]) }
+// showPrompt asks for the next line with the shell's prompt. A read left
+// outstanding by a foreground command already holds what was typed ahead, so
+// it is shown again with the prompt instead of being asked for anew.
+func showPrompt() {
+	if reading != 0 {
+		redraw(promptText[:promptSize])
+		return
+	}
+	requestLine(promptText[:promptSize])
+}
+
+func requestLine(prompt []byte) {
+	correlation++
+	request, ok := terminal.Request(terminal.OperationReadLine, prompt, correlation)
+	if !ok || !sendTerminal(request) {
+		fatal("SHELL_TERMINAL_REQUEST_FAILED\n")
+	}
+	reading = correlation
+}
+
+func redraw(prompt []byte) {
+	correlation++
+	if request, ok := terminal.Request(terminal.OperationRedraw, prompt, correlation); ok {
+		sendTerminal(request)
+	}
+}
+
+func sendTerminal(message ipc.Message) bool {
+	size, ok := ipc.Encode(message, ttyWire[:])
+	return ok && ipcSend(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), uintptr(size)) == 0
+}
+
+// takeLine returns the answer to the outstanding read if it has arrived. The
+// terminal service's other replies, acknowledgements of redraws, are consumed.
+// The returned text aliases a buffer the next call reuses.
+func takeLine() (terminal.Result, []byte, bool) {
+	for {
+		status := ipcReceive(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), ipc.WireMaxSize)
+		if status == uint64(ipc.StatusNotFound) {
+			return 0, nil, false
+		}
+		if status != 0 {
+			fatal("SHELL_TERMINAL_LOST\n")
+		}
+		payloadSize := int(ttyWire[24]) | int(ttyWire[25])<<8
+		size := ipc.WireHeaderSize + payloadSize + int(ttyWire[26])*8
+		if size > len(ttyWire) {
+			continue
+		}
+		message, valid := ipc.Decode(ttyWire[:size])
+		if !valid || reading == 0 || message.Correlation != reading {
+			continue
+		}
+		result, text, valid := terminal.DecodeReply(&message)
+		if !valid {
+			continue
+		}
+		reading = 0
+		size = copy(typedStorage[:], text)
+		return result, typedStorage[:size], true
+	}
+}
 
 // loadPrompt asks the configuration service what the prompt is. A shell that
 // cannot reach the service, or a value it will not accept, leaves the built-in
@@ -202,15 +280,12 @@ func loadPrompt() {
 	if !ok || reply.Status != config.StatusOK || reply.Value.Kind != config.KindText || reply.Value.Size == 0 {
 		return
 	}
-	promptSize = copy(promptText[:], reply.Value.Bytes())
-}
-
-func echoInput(value byte) {
-	if value == 8 || value == 127 {
-		write("\b \b")
+	// The terminal service shows only printable prompts, so a value it would
+	// refuse keeps the built-in one rather than leaving the shell promptless.
+	if _, valid := terminal.Request(terminal.OperationReadLine, reply.Value.Bytes(), 1); !valid {
 		return
 	}
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
+	promptSize = copy(promptText[:], reply.Value.Bytes())
 }
 
 func execute(line []byte) {
@@ -229,7 +304,7 @@ func execute(line []byte) {
 	}
 	for index := 0; index < count; index++ {
 		executeCommand(commands[index])
-		// Sequence slices borrow the static line-editor buffer, not the arena.
+		// Sequence slices borrow the static line buffer, not the arena.
 		heapPointer = arenaBase
 	}
 }
@@ -468,13 +543,11 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
 }
 
-// awaitInput blocks until a key arrives or PID 1 answers. Retrying the read
-// immediately is what made the shell hold a CPU for as long as it waited for a
-// prompt to be typed at; both things it waits for are waitable objects, so it
-// waits on them.
+// awaitInput blocks until the terminal service or PID 1 has something for the
+// shell. Both are waitable objects, so the shell never polls either.
 func awaitInput() {
 	var interests [userwait.MaxObjects]userwait.Interest
-	interests[0] = userwait.Interest{Handle: consoleHandle, Events: kcall.WaitReadable}
+	interests[0] = userwait.Interest{Handle: ttyHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 	interests[1] = userwait.Interest{Handle: execHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 	if _, status := userwait.Any(&interests, 2, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
 		// A wait that cannot be established must not become a spin. Sleeping a
@@ -484,17 +557,35 @@ func awaitInput() {
 	}
 }
 
-// interruptPoll bounds one receive so the shell can look for Ctrl-C while a
-// foreground command runs. A command may run for as long as it likes; a dead
-// PID 1 is reported as a closed channel.
-const interruptPoll = clock.TicksPerSecond / 10
-
-// interrupted reports whether Ctrl-C was typed. It consumes only the interrupt:
-// the bytes a foreground command is being typed are left for that command,
-// which is what the shell reading and discarding them used to take away.
-func interrupted() bool {
-	return consoleInterrupt(uint64(consoleHandle)) == 0
+// feedInput writes one typed line to a foreground command's standard input.
+// It reports false once the command has stopped reading.
+func feedInput(input handle.ID, text []byte) bool {
+	var line [terminal.MaxLine + 1]byte
+	size := copy(line[:], text)
+	line[size] = '\n'
+	pending := line[:size+1]
+	for len(pending) != 0 {
+		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&pending[0])))
+		streamDescriptor[1], streamDescriptor[2] = uint64(len(pending)), 0
+		status := streamWrite(uint64(input), unsafe.Pointer(&streamDescriptor[0]), 24)
+		if status == uint64(kcall.StatusResourceExhausted) {
+			// A full stream is a command not reading yet; wait for room, but
+			// not for ever, so a stuck command cannot hold the shell.
+			if streamWait(uint64(input), inputDeadline) != 0 {
+				return false
+			}
+			continue
+		}
+		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(len(pending)) {
+			return false
+		}
+		pending = pending[streamDescriptor[2]:]
+	}
+	return true
 }
+
+// inputDeadline bounds one wait for room in a command's input stream.
+const inputDeadline = 5 * clock.TicksPerSecond
 
 func printJobs() {
 	found := false
@@ -726,32 +817,87 @@ func sendExec(request ipc.Message) bool {
 }
 
 // awaitReply receives until the reply with correlation arrives, reporting
-// background jobs that finish in the meantime. While a foreground job runs,
-// Ctrl-C stops it; other input typed during the command is discarded.
+// background jobs that finish in the meantime.
+//
+// While a foreground job runs (foreground is its slot), a read stays
+// outstanding at the terminal service: a typed line is written to the job's
+// standard input, Ctrl-C stops the job, and Ctrl-D ends its input. The job's
+// input arrives from PID 1 in a started message before its reply.
 func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
+	var input handle.ID
 	for {
-		if foreground >= 0 && interrupted() {
-			write("^C\n")
-			controlExchange(execproto.ControlKill, uint8(foreground))
+		if stashedValid && stashed.Correlation == correlation {
+			stashedValid = false
+			closeInput(&input)
+			return stashed, true
 		}
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, interruptPoll
-		status := ipcWaitReceive(uint64(execHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
+		if foreground >= 0 {
+			if reading == 0 {
+				requestLine(nil)
+			}
+			if result, text, ok := takeLine(); ok {
+				switch result {
+				case terminal.ResultLine:
+					if input != 0 && !feedInput(input, text) {
+						closeInput(&input)
+					}
+				case terminal.ResultInterrupt:
+					controlExchange(execproto.ControlKill, uint8(foreground))
+				case terminal.ResultEndOfInput:
+					closeInput(&input)
+				}
+				continue
+			}
+		}
+		status := ipcReceive(uint64(execHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
+		if status == uint64(ipc.StatusNotFound) {
+			awaitInput()
 			continue
 		}
 		if status != 0 {
 			write("exec: service unavailable\n")
+			closeInput(&input)
 			return ipc.Message{}, false
 		}
 		message, valid := decodeWire()
 		if !valid {
 			write("exec: corrupt reply\n")
+			closeInput(&input)
 			return ipc.Message{}, false
 		}
+		if _, started, ok := execproto.DecodeStarted(message); ok {
+			if message.Correlation == correlation && input == 0 {
+				input = started
+			} else {
+				handleClose(uint64(started))
+			}
+			continue
+		}
 		if message.Correlation == correlation {
+			closeInput(&input)
 			return message, true
 		}
-		reportJob(message)
+		if !reportJob(message) && isForeground(message.Correlation) {
+			stashed, stashedValid = message, true
+		}
+	}
+}
+
+// isForeground reports whether correlation names a running foreground job.
+func isForeground(correlation uint64) bool {
+	for index := range jobs {
+		if jobs[index].active && !jobs[index].background && jobs[index].correlation == correlation {
+			return true
+		}
+	}
+	return false
+}
+
+// closeInput ends a foreground job's input, if it still has one.
+func closeInput(input *handle.ID) {
+	if *input != 0 {
+		handleClose(uint64(*input))
+		*input = 0
 	}
 }
 
@@ -1134,7 +1280,7 @@ func callConfig(request config.Request) (config.Reply, bool) {
 // printLog prints the retained system log, oldest record first.
 func printLog() {
 	for index := uint64(0); ; index++ {
-		if logRead(uint64(consoleHandle), index, unsafe.Pointer(&logLine[0])) != 0 {
+		if logRead(uint64(logHandle), index, unsafe.Pointer(&logLine[0])) != 0 {
 			return
 		}
 		size := 0

@@ -17,7 +17,9 @@ func main() {
 		Entry:    vm.UserCodeAddress,
 		StackTop: vm.UserStackAddress + vm.PageSize - 16,
 		Segments: []loader.SegmentSource{
-			{VirtualAddress: vm.UserCodeAddress, MemorySize: 2, Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: []byte{0x0f, 0x0b}},
+			// call .: recurse until the stack runs into its unmapped guard
+			// page, so every run of the probe ends in a page fault (ADR 0083).
+			{VirtualAddress: vm.UserCodeAddress, MemorySize: 5, Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: []byte{0xe8, 0xfb, 0xff, 0xff, 0xff}},
 			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
 		},
 	})

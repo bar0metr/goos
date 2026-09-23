@@ -21,14 +21,18 @@ Current kernel users:
 | --- | --- |
 | `kernel/boot/uefi` | UEFI protocol calls, memory-map descriptors, initramfs slice |
 | `kernel/mm/vm` | page-table walks, identity-mapped physical access, kernel image header |
-| `kernel/arch/amd64` | task context and kernel stacks, TSS descriptor, LAPIC/IOAPIC MMIO |
+| `kernel/arch/amd64` | task context and kernel stacks, TSS descriptor |
 
 All other kernel packages (`handle`, `ipc`, `stream`, `process`, `loader`,
 `ramfs`, `vfs`, `wait`, `kcall`, ...) are plain Go and are tested on the host.
+LAPIC and IOAPIC registers are reached through the assembly accessors
+`goos_mmio_read32` and `goos_mmio_write32`, not through Go pointers, so the
+compiler cannot reorder, merge, or drop a device access (ADR 0075).
 
-Userspace commands under `userspace/cmd/` also use `unsafe`, for native-call
-stubs, arena allocators, and wire buffers. The lint rule does not cover them;
-the kernel treats everything they pass as untrusted.
+Userspace programs under `userspace/cmd/` and the libraries
+`userspace/utility`, `userspace/wait`, and `userspace/log` also use `unsafe`,
+for native-call stubs, arena allocators, and wire buffers. The lint rule does
+not cover them; the kernel treats everything they pass as untrusted.
 
 ## SAFETY comments
 
@@ -42,8 +46,7 @@ is mapped, and why the size is bounded. Example from `kernel/mm/vm`:
 
 A new `unsafe` use without such a comment should not pass review. Not every
 existing site follows this yet: the UEFI protocol calls in
-`kernel/boot/uefi/initramfs.go` and the `mmioRead32`/`mmioWrite32` helpers in
-`kernel/arch/amd64/tables_uefi.go` have no SAFETY comment.
+`kernel/boot/uefi/initramfs.go` have no SAFETY comment.
 
 ## W^X and NX
 
@@ -55,12 +58,19 @@ existing site follows this yet: the UEFI protocol calls in
   is unmapped.
 - User leaves reject W+X at map time. The native loader rejects writable
   executable segments and fills pages through the kernel identity map before
-  installing the final user mappings (docs/architecture/native-images.md).
+  installing the final user mappings (docs/kernel/native-images.md).
 - Shared-memory and DMA mappings are always NX.
 - `MemoryMap` installs shared pages only inside the shared window
   `[0x40180000, 0x401c0000)` and only after every target leaf is free. The
   leaves are not owned, so an exiting process never frees shared storage
   (ADR 0063).
+- `ImageMap` maps the boot archive user-readable, never writable and never
+  executable, unowned, inside `[0x40200000, 0x40400000)` (ADR 0070).
+- Read-only segments of images from the system image are backed by frames
+  shared between the processes running the image. They are mapped with the
+  segment's permissions, which never include write, and without the owned bit;
+  `CopyOut` needs a writable leaf, so the kernel cannot write them for a
+  process either (ADR 0081).
 
 ## Guard pages
 
@@ -69,10 +79,17 @@ existing site follows this yet: the UEFI protocol calls in
   corrupting the neighbouring allocation.
 - User address space starts at 1 GiB; low addresses are unmapped in every
   process, so null dereferences fault.
-- User stacks are not guarded yet. The userspace linker script places a
-  32 KiB stack after `.data`/`.bss` in the same segment, so a user stack
-  overflow corrupts that process's own globals. It cannot reach another
-  process or the kernel.
+- Every user stack has an unmapped guard page directly below it (ADR 0083).
+  The userspace linker script gives the 32 KiB stack its own RW+NX segment one
+  page above the heap. The loader enforces the gap for every image, not only
+  those built by that script: `ParseNative` rejects an image whose stack
+  segment has another segment in the page below it or starts within one page
+  of the user range, and `LoadImage` rejects a guard page the kernel would
+  map later (the startup page and the shared, DMA and system image windows).
+  An overflow therefore takes a page fault, which retires the process like any
+  other user fault; the kernel does not panic. The validation build's
+  fault-probe overflows its stack on every run, and the kernel requires a
+  not-present fault in its guard page (`USER_STACK_GUARD_OK`).
 
 ## User pointers
 
@@ -130,10 +147,16 @@ caller:
 | `WaitAny` interests | 16 × 16 B | `kcall.WaitAnyMaxObjects` |
 | startup block | 1024 B | `kcall.StartupSize`, one read-only page per process |
 | launch staging | 4 × 1024 B | `supervisor.StagingSlots`, copied once per launch |
+| log record | 181 B encoded, 240 B as text | `kcall.MaxLogRecord`, `kcall.LogText` |
+| console input | 256 B ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
 
 Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
 16 channels with 16-message queues, 16 streams with 4 KiB rings, 64 waiters
-per wait set. Exhaustion returns `ResourceExhausted` or `PermissionDenied`.
+per wait set, 64 log records, 4 registered shared-memory objects of at most
+16 pages, and a shared image cache of 128 segments and 1024 frames. On top of
+the tables, each process is charged for the channels, streams, tasks, and
+pages it causes to exist, up to its quota (ADR 0072). Exhaustion returns
+`ResourceExhausted` or `PermissionDenied`.
 
 ## The kernel heap is boot-only
 
@@ -159,5 +182,7 @@ range wraparound) are listed per operation in
 [attack-surface.md](attack-surface.md).
 
 Userspace services stop with a fatal marker on conditions they treat as
-unrecoverable, for example a failed receive on a service endpoint. The
-supervisor restart policy decides what happens next.
+unrecoverable, for example an allocator arena that is exhausted. A dead peer
+is not one of them: a service drops the request and keeps serving its other
+clients (ADR 0078). The supervisor restart policy decides what happens after a
+service stops.

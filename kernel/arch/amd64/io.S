@@ -368,6 +368,15 @@ goos_exception_fatal:
 .terminate_user_fault:
     incq goos_user_faults(%rip)
     movq goos_current_task(%rip), %rcx
+    // A page fault records its address, any other fault zero, so the kernel
+    // can tell which page a faulting task touched.
+    xorl %eax, %eax
+    cmpq $14, (%rsp)
+    jne .record_user_fault_address
+    movq %cr2, %rax
+.record_user_fault_address:
+    leaq goos_task_fault_addresses(%rip), %rdx
+    movq %rax, (%rdx,%rcx,8)
     movq (%rsp), %rax
     btsq $63, %rax
     leaq goos_task_exit_codes(%rip), %rdx
@@ -883,6 +892,19 @@ goos_task_ticks_read:
 .task_ticks_done:
     retq
 
+// goos_task_fault_address_take returns and clears the address recorded for one
+// task slot's last user fault, or zero for a slot outside the table.
+.global goos_task_fault_address_take
+goos_task_fault_address_take:
+    xorq %rax, %rax
+    cmpq $64, %rcx
+    jae .task_fault_address_done
+    leaq goos_task_fault_addresses(%rip), %rdx
+    movq (%rdx,%rcx,8), %rax
+    movq $0, (%rdx,%rcx,8)
+.task_fault_address_done:
+    retq
+
 // goos_task_ticks_clear resets one slot's counter, so a slot reused by a new
 // task does not inherit the previous one's time.
 .global goos_task_ticks_clear
@@ -1185,6 +1207,10 @@ goos_task_rsp0:
 goos_task_generations:
 	.zero 512
 goos_task_exit_codes:
+    .zero 512
+// The faulting address of each slot's last user page fault, zero after any
+// other fault.
+goos_task_fault_addresses:
     .zero 512
 // One tick counter per task slot. The timer charges the task it interrupted,
 // so the count is a sample of who was running rather than an exact duration,

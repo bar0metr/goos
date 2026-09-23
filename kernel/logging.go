@@ -6,6 +6,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
+	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/klog"
@@ -56,15 +57,26 @@ func kernelLogUint(level logfmt.Level, message string, key string, value uint64)
 	kernelLog(level, message, logfmt.AppendUint(logFields[:size+1], value))
 }
 
+// logAuthority reports whether id is the caller's read capability for the log
+// ring.
+func (handler nativeCallHandler) logAuthority(id uint64) bool {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return false
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
+	return allowed && authority.Object() == device.LogObject
+}
+
 // consoleAuthority resolves the caller's console device capability, which
-// authorizes both writing records and reading the log.
-func (handler nativeCallHandler) consoleAuthority(device uint64, rights capability.Rights) (*process.Process, bool) {
+// authorizes writing records to the log.
+func (handler nativeCallHandler) consoleAuthority(id uint64, rights capability.Rights) (*process.Process, bool) {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return nil, false
 	}
-	authority, allowed := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, rights)
-	return owner, allowed && authority.Object() == 1
+	authority, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, rights)
+	return owner, allowed && authority.Object() == device.ConsoleObject
 }
 
 func (handler nativeCallHandler) LogWrite(device uint64, address uint64, length uint64) kcall.Status {
@@ -87,7 +99,7 @@ func (handler nativeCallHandler) LogWrite(device uint64, address uint64, length 
 // LogRead writes the index-th retained record, oldest first, as one text line
 // padded with zeros to kcall.LogText bytes.
 func (handler nativeCallHandler) LogRead(device uint64, index uint64, address uint64) kcall.Status {
-	if _, allowed := handler.consoleAuthority(device, capability.Read); !allowed {
+	if !handler.logAuthority(device) {
 		return kcall.StatusPermissionDenied
 	}
 	if index >= klog.Capacity {
@@ -107,10 +119,10 @@ func (handler nativeCallHandler) LogRead(device uint64, index uint64, address ui
 
 // LogBounds reports the sequence window the log ring currently retains, so a
 // reader that persists records knows which are new and whether any were
-// overwritten before it got to them. It takes the same console authority as
+// overwritten before it got to them. It takes the same log authority as
 // LogRead, because it describes the same records.
 func (handler nativeCallHandler) LogBounds(device uint64, address uint64) kcall.Status {
-	if _, allowed := handler.consoleAuthority(device, capability.Read); !allowed {
+	if !handler.logAuthority(device) {
 		return kcall.StatusPermissionDenied
 	}
 	putUint64(logBoundsWire[0:8], systemLog.Oldest())

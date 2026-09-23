@@ -22,7 +22,7 @@ Priority 5 and will be refined by an ADR before implementation starts.
 ### ELF loader
 
 Linux ELF is a distinct format from the native envelope
-([native-images.md](native-images.md)). Planned stages:
+([native-images.md](../kernel/native-images.md)). Planned stages:
 
 1. validate the ELF64 header (x86_64, `ET_EXEC`, then `ET_DYN` for static PIE);
 2. validate program headers: bounded count, page-aligned `PT_LOAD` segments in

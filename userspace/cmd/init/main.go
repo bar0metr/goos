@@ -43,6 +43,10 @@ const systemControlHandle = uint64(0x0000000100000012)
 const execPageHandle = handle.ID(0x0000000100000014)
 const systemImageHandle = handle.ID(0x0000000100000015)
 
+// logDeviceHandle authorizes reading the kernel log ring and nothing else, so
+// the log service and the shell can read the log without the console's input.
+const logDeviceHandle = handle.ID(0x0000000100000016)
+
 // configControlHandle is the configuration service's control endpoint. PID 1
 // holds the only client side of it, so it is the only process that can create a
 // configuration session.
@@ -279,11 +283,16 @@ func startServices(ticks uint64) {
 	// answering before anything that reads a setting starts.
 	startConfigService(ticks)
 	startLogService(ticks)
+	terminal := startTerminalService(ticks)
 	// The shell administers configuration, so its session is the whole
 	// namespace and may write. Every other client gets less.
 	configClient, _ := openConfigSession("", configproto.Read|configproto.Write)
+	// The shell writes to the console but does not read it: what is typed
+	// reaches it as lines from the terminal service.
 	shellCapabilities := []supervisor.Capability{
-		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		{Name: "tty", Handle: terminal, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
 		{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
@@ -292,7 +301,7 @@ func startServices(ticks uint64) {
 		shellCapabilities = append(shellCapabilities, supervisor.Capability{Name: "config", Handle: configClient,
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
+	if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs", "tty"},
 		Capabilities: shellCapabilities, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
@@ -305,6 +314,31 @@ func startServices(ticks uint64) {
 	injectDriverFault()
 	supervisionComplete = true
 	arenaBase = heapPointer
+}
+
+// startTerminalService starts the terminal service and returns the client end
+// of the session the shell reads its lines over. The service is the only
+// process given the right to read the console (ADR 0082).
+//
+// The terminal and the shell form one interactive session: the channel between
+// them is created here once, so neither restarts on its own; recovering the
+// session as a unit is later work, as it is for the shell today.
+func startTerminalService(ticks uint64) handle.ID {
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		fatal("INIT_TTY_CHANNEL_FAILED\n")
+	}
+	if manager.Register(supervisor.Definition{Name: "tty", Executable: "/system/tty",
+		Capabilities: []supervisor.Capability{
+			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
+		fatal("INIT_TTY_LAUNCH_FAILED\n")
+	}
+	return handle.ID(pair[0])
 }
 
 // startLogService registers and starts the persistent log service after the
@@ -322,9 +356,11 @@ func startLogService(ticks uint64) {
 		return
 	}
 	capabilities := []supervisor.Capability{
-		// Read authorizes draining the kernel ring; write is the service's
-		// own logging. It gets no other authority.
-		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+		// The log capability authorizes draining the kernel ring; console
+		// write is the service's own logging. It gets no other authority,
+		// and in particular cannot read what is typed.
+		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
+		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 		{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 	}
 	// A read-only session confined to the service's own namespace. It consults
@@ -736,6 +772,15 @@ func pollExec() {
 	}
 	job.active, job.slot, job.correlation = true, slot, message.Correlation
 	job.job = supervisor.StartPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
+	// A foreground job's input is fed by the shell, which receives the writing
+	// end before the job's reply. If it cannot be delivered, closing it gives
+	// the job end of input instead of a stream no one will ever write.
+	if input := job.job.TakeInput(); input != 0 {
+		started, ok := execproto.EncodeStarted(slot, input, message.Correlation)
+		if !ok || !sendMessage(execServerHandle, started) {
+			handleClose(uint64(input))
+		}
+	}
 	finishJob(job)
 }
 

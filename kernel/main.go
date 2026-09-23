@@ -22,11 +22,9 @@ import (
 	"goos/kernel/mm/vm"
 	"goos/kernel/pci"
 	"goos/kernel/process"
-	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
 	"goos/kernel/stream"
-	"goos/kernel/vfs"
 	kernelwait "goos/kernel/wait"
 	supervisor "goos/userspace/init"
 	"goos/userspace/startup"
@@ -94,11 +92,6 @@ var (
 	// imagePages holds the read-only pages of system images that every
 	// process running them maps (ADR 0081).
 	imagePages              loader.SharedPages
-	bootRAMFS               ramfs.FileSystem
-	deviceRAMFS             ramfs.FileSystem
-	bootVFS                 vfs.Namespace
-	ramfsReadback           [16]byte
-	vfsReadback             [16]byte
 	pendingLifecycle        [maxPendingLifecycle]ipc.Message
 	pendingLifecycleHead    uint8
 	pendingLifecycleCount   uint8
@@ -181,7 +174,11 @@ func deliverProcessExits() {
 		// slot is released, so the process keeps the time and the next task to
 		// take the slot starts from zero.
 		accountTaskCPU(taskID)
-		event, report := processRegistry.ReportTaskExit(taskID, amd64.TaskExitCode(task))
+		code := amd64.TaskExitCode(task)
+		if validation.Enabled {
+			noteStackGuardFault(taskID, code)
+		}
+		event, report := processRegistry.ReportTaskExit(taskID, code)
 		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
 		// not gate the steps below: a process that has exited has to release its
 		// waiters and its handles even if its stack cannot be returned, or its
@@ -1865,11 +1862,16 @@ func runIdleTask() {
 func main() {
 	console := amd64.NewCOM1()
 	console.Init()
-	console.WriteString(version.Name + " " + version.Release + "\n")
-	console.WriteString("TinyGo kernel\n\n")
+	console.WriteString(version.Name + " " + version.Release + "\n\n")
 	console.WriteString("CPU: " + version.Machine + "\n")
 
 	status := bootuefi.LoadInitramfs(&bootInfo)
+	if status == bootuefi.InitramfsTooLarge {
+		console.WriteString("PANIC: initramfs is larger than the 4 MiB the loader reads\n")
+		for {
+			amd64.Halt()
+		}
+	}
 	if status != 0 {
 		console.WriteString("PANIC: initramfs load failed: ")
 		console.WriteHex(uint64(status))
@@ -2061,8 +2063,11 @@ func main() {
 	// The image capability is read-only and transferable: PID 1 holds it only
 	// to hand to the filesystem service, which mounts the image at /system.
 	systemImageHandle, systemImageInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(imageObject, capability.Read|capability.Transfer))
-	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !imageObjectValid || !systemImageInstalled || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) || systemImageHandle != handle.ID(0x0000000100000015) {
+	// Reading the log is its own capability, so PID 1 can give it to the log
+	// service and the shell without giving them the console's input.
+	logDeviceHandle, logDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LogObject, capability.Read|capability.Transfer))
+	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !imageObjectValid || !systemImageInstalled || !logDeviceInstalled || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) || systemImageHandle != handle.ID(0x0000000100000015) || logDeviceHandle != handle.ID(0x0000000100000016) {
 		panicSerial("PID 1 capability layout failed")
 	}
 	if validation.Enabled {

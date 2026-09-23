@@ -65,7 +65,9 @@ func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd, env []byte, stre
 	} else {
 		if i > 0 {
 			input = Endpoint{handle.ID((i-1)*2 + 1), handle.TypeStream}
-		} else if r.background {
+		} else {
+			// The first stage reads its own input stream, created after the
+			// chain and the error stream; a background job's is already at EOF.
 			empty := chain - 1
 			if r.errorSource >= 0 {
 				empty++
@@ -271,5 +273,43 @@ func TestLaunchStatusReasons(t *testing.T) {
 	}
 	if LaunchNotFound.Reason() != "command not found" || !LaunchNotFound.NamesExecutable() || LaunchResourceExhausted.NamesExecutable() {
 		t.Fatal("not-found launch is not described by the executable's name")
+	}
+}
+
+func TestForegroundPipelineHandsOverItsInput(t *testing.T) {
+	runner := &pipelineRunnerTest{t: t, count: 2, errorSource: -1, failCreate: -1, failStage: -1, owned: map[handle.ID]bool{}}
+	request := execproto.Request{Count: 2, CWD: []byte("/system"), Environment: []byte{0}}
+	for index := range request.Stages[:2] {
+		request.Stages[index].Path = []byte{byte(index)}
+	}
+	job := StartPipeline(request, 99, runner)
+	input := job.TakeInput()
+	// The chain stream comes first, then the input stream: its writer is the
+	// only endpoint PID 1 still holds.
+	if input == 0 || !runner.owned[input] || len(runner.owned) != 1 || runner.created != 2 {
+		t.Fatalf("input %d, retained %v, created %d", input, runner.owned, runner.created)
+	}
+	if job.TakeInput() != 0 {
+		t.Fatal("input handed over twice")
+	}
+	runner.Close(input)
+	for {
+		process, pending := job.Next()
+		if !pending {
+			break
+		}
+		job.Complete(runner.Wait(process))
+	}
+	if _, status, _ := job.Result(); status != LaunchOK {
+		t.Fatalf("status %d", status)
+	}
+}
+
+func TestBackgroundPipelineKeepsNoInput(t *testing.T) {
+	runner := &pipelineRunnerTest{t: t, count: 1, errorSource: -1, failCreate: -1, failStage: -1, owned: map[handle.ID]bool{}, background: true}
+	request := execproto.Request{Count: 1, Background: true, CWD: []byte("/system"), Environment: []byte{0}, Stages: [execproto.MaxStages]execproto.Stage{{Path: []byte{0}}}}
+	job := StartPipeline(request, 99, runner)
+	if job.TakeInput() != 0 || len(runner.owned) != 0 {
+		t.Fatalf("background job kept input: %v", runner.owned)
 	}
 }

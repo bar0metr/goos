@@ -47,6 +47,11 @@ func LoadImage(allocator *pmm.Allocator, root uint64, data []byte, shared *Share
 	if !ok || root == 0 {
 		return LoadedImage{}, false
 	}
+	// ParseNative keeps other segments out of the stack's guard page; the
+	// kernel's own mappings must stay out of it too (ADR 0083).
+	if stack, _ := image.StackSegment(); kernelMappedUserPage(stack.VirtualAddress - vm.PageSize) {
+		return LoadedImage{}, false
+	}
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
 		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
@@ -160,4 +165,12 @@ func allocatePage(allocator *pmm.Allocator, segment Segment, offset uint64, data
 		return 0, false
 	}
 	return physical, true
+}
+
+// kernelMappedUserPage reports whether the kernel may map address into a
+// process after its image is loaded: the probe and startup pages below the
+// image, and the shared-memory, DMA and system image windows.
+func kernelMappedUserPage(address uint64) bool {
+	return address >= vm.UserProbeAddress && address < vm.UserCodeAddress ||
+		address >= vm.UserSharedAddress && address < vm.UserImageLimit
 }
