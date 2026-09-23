@@ -18,6 +18,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	"goos/userspace/config"
 	syslog "goos/userspace/log"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
@@ -49,15 +50,21 @@ const (
 var (
 	consoleHandle handle.ID
 	vfsHandle     handle.ID
-	startupWire   [startup.Size]byte
-	wire          [ipc.WireMaxSize]byte
-	descriptor    [3]uint64
-	logLine       [kcall.LogText]byte
-	lostLine      [64]byte
-	boundsWire    [kcall.LogBoundsSize]byte
-	heapPointer   uintptr
-	arenaBase     uintptr
-	correlation   uint64
+	configHandle  handle.ID
+	configWire    [ipc.WireMaxSize]byte
+	// persisting is the setting that governs this service. It is consulted on
+	// every pass, so turning persistence off takes effect at the next one
+	// rather than at the next boot.
+	persisting  = true
+	startupWire [startup.Size]byte
+	wire        [ipc.WireMaxSize]byte
+	descriptor  [3]uint64
+	logLine     [kcall.LogText]byte
+	lostLine    [64]byte
+	boundsWire  [kcall.LogBoundsSize]byte
+	heapPointer uintptr
+	arenaBase   uintptr
+	correlation uint64
 	// cursor is the sequence number of the next record to persist.
 	cursor uint64
 	// reported bounds how often a persistent failure is announced, so a full
@@ -111,6 +118,9 @@ func userspaceMain() {
 	if !ok {
 		fatal("LOG_VFS_MISSING\n")
 	}
+	// The configuration session is optional: without one the service keeps its
+	// default, which is to persist.
+	configHandle, _ = data.Handle("config")
 	if !openLog() {
 		fatal("LOG_FILE_UNAVAILABLE\n")
 	}
@@ -148,6 +158,13 @@ func drain() {
 		return
 	}
 	oldest, total := readUint64(boundsWire[0:8]), readUint64(boundsWire[8:16])
+	if !shouldPersist() {
+		// The cursor still advances. Re-enabling persistence should start from
+		// the present rather than write out everything that happened while it
+		// was off, which the ring has mostly lost anyway.
+		cursor = total
+		return
+	}
 	if cursor >= total && cursor >= oldest {
 		// Nothing new. An idle pass costs one native call and touches neither
 		// the filesystem nor the disk, so a quiet system pays almost nothing
@@ -204,6 +221,49 @@ func drain() {
 	if offset >= rotationBound() {
 		rotate()
 	}
+}
+
+// shouldPersist asks the configuration service whether this service should be
+// writing. A session it cannot reach, or an answer it cannot use, leaves the
+// last known value in place: configuration governs the service, it does not
+// decide whether the service works.
+func shouldPersist() bool {
+	if configHandle == 0 {
+		return persisting
+	}
+	reply, ok := callConfig(config.Request{Operation: config.OperationGet, Key: []byte("system.log.persist")})
+	if !ok || reply.Status != config.StatusOK || reply.Value.Kind != config.KindBool {
+		return persisting
+	}
+	enabled := reply.Value.Uint == 1
+	if enabled != persisting {
+		persisting = enabled
+		syslog.Info("persistence changed", syslog.Uint("enabled", reply.Value.Uint))
+	}
+	return persisting
+}
+
+func callConfig(request config.Request) (config.Reply, bool) {
+	correlation++
+	message, ok := config.EncodeRequest(request, correlation)
+	if !ok {
+		return config.Reply{}, false
+	}
+	size, ok := ipc.Encode(message, configWire[:])
+	if !ok || ipcSend(uint64(configHandle), unsafe.Pointer(&configWire[0]), uintptr(size)) != 0 {
+		return config.Reply{}, false
+	}
+	configDescriptor := [3]uint64{uint64(uintptr(unsafe.Pointer(&configWire[0]))), ipc.WireMaxSize, vfsReplyDeadline}
+	if ipcWaitReceive(uint64(configHandle), unsafe.Pointer(&configDescriptor[0]), uintptr(len(configDescriptor)*8)) != 0 {
+		return config.Reply{}, false
+	}
+	payloadSize := int(configWire[24]) | int(configWire[25])<<8
+	received, valid := ipc.Decode(configWire[:ipc.WireHeaderSize+payloadSize+int(configWire[26])*8])
+	if !valid || received.Correlation != correlation {
+		return config.Reply{}, false
+	}
+	reply, valid := config.DecodeReply(received)
+	return reply, valid && reply.Operation == request.Operation
 }
 
 func rotationBound() uint64 {

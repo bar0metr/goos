@@ -23,11 +23,16 @@ import (
 )
 
 var (
-	consoleHandle     handle.ID
-	vfsHandle         handle.ID
-	execHandle        handle.ID
-	configHandle      handle.ID
-	configWire        [ipc.WireMaxSize]byte
+	consoleHandle handle.ID
+	vfsHandle     handle.ID
+	execHandle    handle.ID
+	configHandle  handle.ID
+	configWire    [ipc.WireMaxSize]byte
+	// prompt is read from the configuration service rather than compiled in.
+	// It falls back to the built-in text when there is no session, because the
+	// shell has to come up whether or not configuration is available.
+	promptText        = [config.MaxText]byte{'g', 'o', 'o', 's', '>', ' '}
+	promptSize        = 6
 	startupWire       [startup.Size]byte
 	editor            tty.LineEditor
 	inputByte         byte
@@ -138,21 +143,23 @@ func userspaceMain() {
 	}
 	heapPointer = arenaBase
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
-	write("\ngoos> ")
+	loadPrompt()
+	write("\n")
+	prompt()
 	for {
 		// Ctrl-C reaches the shell as an interrupt rather than as a byte, so
 		// asking for it takes nothing away from a command that is reading.
 		if consoleInterrupt(uint64(consoleHandle)) == 0 {
 			write("^C\n")
 			editor.Reset()
-			write("goos> ")
+			prompt()
 			continue
 		}
 		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
 		if status == uint64(kcall.StatusNotFound) {
 			if pollReplies() {
-				write("goos> ")
-				write(string(editor.Pending()))
+				prompt()
+				writeBytes(editor.Pending())
 			}
 			awaitInput()
 			continue
@@ -172,8 +179,25 @@ func userspaceMain() {
 		execute(line)
 		heapPointer = arenaBase
 		editor.Reset()
-		write("goos> ")
+		prompt()
 	}
+}
+
+func prompt() { writeBytes(promptText[:promptSize]) }
+
+// loadPrompt asks the configuration service what the prompt is. A shell that
+// cannot reach the service, or a value it will not accept, leaves the built-in
+// text in place: configuration decides what the prompt is, not whether the
+// shell starts.
+func loadPrompt() {
+	if configHandle == 0 {
+		return
+	}
+	reply, ok := callConfig(config.Request{Operation: config.OperationGet, Key: []byte("system.shell.prompt")})
+	if !ok || reply.Status != config.StatusOK || reply.Value.Kind != config.KindText || reply.Value.Size == 0 {
+		return
+	}
+	promptSize = copy(promptText[:], reply.Value.Bytes())
 }
 
 func echoInput(value byte) {
@@ -874,6 +898,9 @@ func setConfig(key []byte, text []byte) {
 		writeConfigStatus(reply.Status)
 		return
 	}
+	// The shell owns this setting, so a change to it applies now rather than at
+	// the next boot.
+	loadPrompt()
 	mark("CONFIG_SET_OK\n")
 }
 

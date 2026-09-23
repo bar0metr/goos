@@ -35,18 +35,24 @@ const (
 	// exportSize bounds the whole exported file. Every entry fits a key, a type
 	// name and a value, and the store is bounded, so the file is too.
 	exportSize = config.MaxEntries * (config.MaxKey + config.MaxText + 8)
+	// maxSessions bounds the clients served at once. Configuration has few
+	// readers, and each costs a channel PID 1 must create.
+	maxSessions = 6
 )
 
 var (
 	store         config.Store
 	consoleHandle handle.ID
 	vfsHandle     handle.ID
-	sessionHandle handle.ID
-	// sessionScope and sessionRights are what PID 1 granted this session. The
-	// service applies them to every request; the message carries no authority
-	// of its own.
-	sessionScope  config.Scope
-	sessionRights config.Rights
+	controlHandle handle.ID
+	// Each session carries the scope and rights PID 1 granted it. The service
+	// applies them to every request on that endpoint; the message carries no
+	// authority of its own, so a client cannot ask for more than it was given.
+	sessions     [maxSessions]session
+	liveSessions int
+	// ownScope is the service's own view for seeding and exporting. It is not
+	// reachable from any endpoint.
+	ownScope      config.Scope
 	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
 	vfsWire       [ipc.WireMaxSize]byte
@@ -83,6 +89,16 @@ func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname handleClose goos_handle_close
+func handleClose(id uint64) uint64
+
+type session struct {
+	endpoint handle.ID
+	scope    config.Scope
+	rights   config.Rights
+	used     bool
+}
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
@@ -102,16 +118,11 @@ func userspaceMain() {
 	if !ok {
 		fatal("CONFIG_VFS_MISSING\n")
 	}
-	sessionHandle, ok = data.Handle("session")
+	controlHandle, ok = data.Handle("control")
 	if !ok {
-		fatal("CONFIG_SESSION_MISSING\n")
+		fatal("CONFIG_CONTROL_MISSING\n")
 	}
-	// The one session this build serves is the console session PID 1 creates
-	// for the shell: the whole namespace, readable and writable. Additional
-	// sessions with narrower scopes need a control endpoint like the VFS one,
-	// and the store already enforces whatever they are given.
-	sessionScope, ok = config.MakeScope("")
-	sessionRights = config.Read | config.Write
+	ownScope, ok = config.MakeScope("")
 	if !ok {
 		fatal("CONFIG_SCOPE_INVALID\n")
 	}
@@ -123,12 +134,76 @@ func userspaceMain() {
 	for {
 		heapPointer = arenaBase
 		var interests [userwait.MaxObjects]userwait.Interest
-		interests[0] = userwait.Interest{Handle: sessionHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		if _, status := userwait.Any(&interests, 1, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
+		var indexes [maxSessions]int
+		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count := 1
+		for index := range sessions {
+			if !sessions[index].used {
+				continue
+			}
+			interests[count] = userwait.Interest{Handle: sessions[index].endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			indexes[count-1] = index
+			count++
+		}
+		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
+		if status != kcall.StatusOK {
 			fatal("CONFIG_WAIT_FAILED\n")
 		}
-		serve()
+		if result.ReadyMask&1 != 0 {
+			addSession()
+		}
+		for position := 1; position < count; position++ {
+			if result.ReadyMask&(1<<uint(position)) != 0 {
+				serve(&sessions[indexes[position-1]])
+			}
+		}
 	}
+}
+
+// addSession installs an endpoint PID 1 has decided the scope and rights for.
+// The service never chooses either: it is told, by the one process holding the
+// control endpoint, and it enforces what it was told.
+func addSession() {
+	if ipcReceive(uint64(controlHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
+		return
+	}
+	payloadSize := int(wire[24]) | int(wire[25])<<8
+	if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMsg) {
+		return
+	}
+	endpoint, scope, rights, valid := config.DecodeAddSession(requestMsg)
+	status := config.StatusOK
+	if !valid {
+		status = config.StatusInvalidArgument
+	} else if !install(endpoint, scope, rights) {
+		status = config.StatusResourceExhausted
+	}
+	if message, ok := config.AddSessionReply(status, requestMsg.Correlation); ok {
+		if size, encoded := ipc.Encode(message, wire[:]); encoded {
+			ipcSend(uint64(controlHandle), unsafe.Pointer(&wire[0]), uintptr(size))
+		}
+	}
+	if status == config.StatusOK {
+		syslog.Info("session added", syslog.Uint("rights", uint64(rights)))
+	}
+}
+
+func install(endpoint handle.ID, scope config.Scope, rights config.Rights) bool {
+	for index := range sessions {
+		if sessions[index].used {
+			continue
+		}
+		sessions[index] = session{endpoint: endpoint, scope: scope, rights: rights, used: true}
+		liveSessions++
+		return true
+	}
+	return false
+}
+
+func dropSession(current *session) {
+	handleClose(uint64(current.endpoint))
+	*current = session{}
+	liveSessions--
 }
 
 // declareSchema is the set of settings this image publishes. A key must be
@@ -150,7 +225,6 @@ func declareSchema() {
 		{"system.build.machine", machine, true},
 		{"system.log.persist", config.Bool(true), false},
 		{"system.shell.prompt", mustText("goos> "), false},
-		{"system.storage.volume", mustText("/persist"), false},
 		{"user.name", mustText("goos"), false},
 	}
 	for _, declaration := range declarations {
@@ -184,7 +258,7 @@ func restore() {
 			continue
 		}
 		key, value, parsed := config.ParseEntry(exportBuffer[start:index])
-		if !parsed || store.Set(sessionScope, config.Read|config.Write, key, value) != config.StatusOK {
+		if !parsed || store.Set(ownScope, config.Read|config.Write, key, value) != config.StatusOK {
 			skipped++
 		}
 		start = index + 1
@@ -194,9 +268,10 @@ func restore() {
 	}
 }
 
-func serve() {
-	descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 0
-	if ipcReceive(uint64(sessionHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
+func serve(current *session) {
+	if ipcReceive(uint64(current.endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
+		// A peer that has gone leaves its endpoint readable forever otherwise.
+		dropSession(current)
 		return
 	}
 	payloadSize := int(wire[24]) | int(wire[25])<<8
@@ -206,7 +281,7 @@ func serve() {
 	request, valid := config.DecodeRequest(requestMsg)
 	reply := config.Reply{Operation: request.Operation, Status: config.StatusInvalidArgument}
 	if valid {
-		reply = store.Serve(sessionScope, sessionRights, request)
+		reply = store.Serve(current.scope, current.rights, request)
 	}
 	if valid && request.Operation == config.OperationSet && reply.Status == config.StatusOK {
 		persist()
@@ -218,7 +293,7 @@ func serve() {
 		message, encoded = config.EncodeReply(config.Reply{Operation: request.Operation, Status: config.StatusInvalidArgument}, requestMsg.Correlation)
 	}
 	if size, ok := ipc.Encode(message, wire[:]); encoded && ok {
-		ipcSend(uint64(sessionHandle), unsafe.Pointer(&wire[0]), uintptr(size))
+		ipcSend(uint64(current.endpoint), unsafe.Pointer(&wire[0]), uintptr(size))
 	}
 }
 
@@ -228,7 +303,7 @@ func serve() {
 func persist() {
 	size := 0
 	for cursor := 0; ; {
-		key, value, readOnly, next, status := store.At(sessionScope, config.Read, cursor)
+		key, value, readOnly, next, status := store.At(ownScope, config.Read, cursor)
 		if status != config.StatusOK {
 			break
 		}
