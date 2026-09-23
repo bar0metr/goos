@@ -71,8 +71,9 @@ shell through the launch manifest (ADR 0063).
 Shell exec requests are restricted to simple names below `/system/bin`. A
 request carries one to four invocation records, a shared cwd, and a shared
 environment. The shell writes it into a 1024-byte slot of the exec page it
-shares with PID 1, and the version 6 submit message names the slot and size
-(ADR 0064). PID 1 copies the slot before decoding it. Each record contains
+shares with PID 1, and the version 7 submit message names the slot and size
+(ADR 0064). The reply to a launch that failed names the stage that could not be
+started, so the shell can report it by name (ADR 0079). PID 1 copies the slot before decoding it. Each record contains
 its own executable path and structured argv. The decoder checks the complete
 request, all lengths, system paths, vector encodings, and trailing bytes before
 any resource operations. Oversized requests are rejected rather than truncated.

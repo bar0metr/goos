@@ -239,3 +239,24 @@ func TestPageInsideSharedWindow(t *testing.T) {
 		t.Fatalf("exec page %#x outside [%#x, %#x)", PageAddress, vm.UserSharedAddress, vm.UserSharedLimit)
 	}
 }
+
+func TestReplyNamesTheFailedStage(t *testing.T) {
+	message, ok := EncodeReply(Reply{LaunchStatus: 2, Stage: 2}, 9)
+	if !ok {
+		t.Fatal("failed-launch reply refused")
+	}
+	reply, ok := DecodeReply(message)
+	if !ok || reply.LaunchStatus != 2 || reply.Stage != 2 {
+		t.Fatalf("reply = %#v", reply)
+	}
+	if _, ok := EncodeReply(Reply{LaunchStatus: 2, Stage: MaxStages}, 9); ok {
+		t.Fatal("stage beyond the pipeline encoded")
+	}
+	if _, ok := EncodeReply(Reply{Process: 3, Stage: 1}, 9); ok {
+		t.Fatal("stage on a launched job encoded")
+	}
+	message.Payload[24] = MaxStages
+	if _, ok := DecodeReply(message); ok {
+		t.Fatal("stage beyond the pipeline decoded")
+	}
+}

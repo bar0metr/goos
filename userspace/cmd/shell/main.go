@@ -14,6 +14,7 @@ import (
 	"goos/kernel/vfs"
 	"goos/userspace/config"
 	execproto "goos/userspace/exec"
+	supervisor "goos/userspace/init"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
@@ -62,6 +63,9 @@ type job struct {
 	correlation uint64
 	command     [tty.MaxLine]byte
 	commandSize int
+	// requestSize is the length of the request left in the job's exec page
+	// slot; a launch failure is described from it.
+	requestSize int
 }
 
 //go:linkname memoryMap goos_memory_map
@@ -273,52 +277,102 @@ func executeCommand(line []byte) {
 	redirects, _ := shellcmd.SplitRedirections(line)
 	stages, count, _ := shellcmd.SplitPipeline(redirects.Command)
 	invocation, _ := shellcmd.ParseInvocation(stages[0], &argumentStorage)
-	name := string(invocation.Arguments[0])
-	switch {
-	case count == 1 && name == "help" && invocation.Count == 1:
-		write("builtins: help clear cd services handles caps config log jobs kill reboot diag time\nexecutables: /system/bin\n")
-		mark("SHELL_HELP_OK\n")
-	case count == 1 && name == "log" && invocation.Count == 1:
+	if count != 1 || !shellcmd.IsBuiltin(invocation.Arguments[0]) {
+		executeExternal(line, false)
+		return
+	}
+	// A builtin with the wrong arguments is answered with its usage here. It
+	// used to fall through to the launch path and fail as a missing executable.
+	info, _ := shellcmd.LookupCommand(invocation.Arguments[0])
+	arguments := int(invocation.Count) - 1
+	if arguments == 1 && shellcmd.IsHelpFlag(invocation.Arguments[1]) {
+		writeCommandHelp(info)
+		return
+	}
+	if !info.Accepts(arguments) {
+		write("usage: ")
+		write(info.Usage)
+		write("\n")
+		return
+	}
+	switch info.Name {
+	case "help":
+		printHelp(invocation)
+	case "log":
 		printLog()
-	case count == 1 && name == "config":
+	case "config":
 		runConfig(invocation)
-	case count == 1 && name == "services" && invocation.Count == 1:
+	case "services":
 		printServices()
-	case count == 1 && name == "jobs" && invocation.Count == 1:
+	case "jobs":
 		printJobs()
-	case count == 1 && name == "kill":
-		if invocation.Count != 2 {
-			write("kill: expected one job\n")
-		} else {
-			killJob(invocation.Arguments[1])
-		}
-	case count == 1 && name == "reboot" && invocation.Count == 1:
+	case "kill":
+		killJob(invocation.Arguments[1])
+	case "reboot":
 		reboot()
-	case count == 1 && name == "handles" && invocation.Count == 1:
+	case "handles":
 		printHandles(false)
-	case count == 1 && name == "caps" && invocation.Count == 1:
+	case "caps":
 		printHandles(true)
-	case count == 1 && name == "diag" && invocation.Count == 1:
+	case "diag":
 		if diagnostics(uint64(consoleHandle), 0) != 0 {
 			write("diag: unavailable in this build\n")
 		}
-	case count == 1 && name == "time":
+	case "time":
 		command, _ := shellcmd.SplitTime(line)
 		executeTimed(command)
-	case count == 1 && name == "clear" && invocation.Count == 1:
+	case "clear":
 		write("\x1b[2J\x1b[H")
 		mark("SHELL_CLEAR_OK\n")
-	case count == 1 && name == "cd":
-		if invocation.Count > 2 {
-			write("cd: expected at most one path\n")
-		} else if invocation.Count == 2 {
+	case "cd":
+		if invocation.Count == 2 {
 			executeCd(invocation.Arguments[1])
 		} else {
 			executeCd(nil)
 		}
-	default:
-		executeExternal(line, false)
 	}
+}
+
+// printHelp lists every documented command, or describes the one named.
+func printHelp(invocation shellcmd.Invocation) {
+	if invocation.Count == 2 {
+		info, found := shellcmd.LookupCommand(invocation.Arguments[1])
+		if !found {
+			write("help: no such command: ")
+			writeBytes(invocation.Arguments[1])
+			write("\n")
+			return
+		}
+		writeCommandHelp(info)
+		mark("SHELL_HELP_COMMAND_OK\n")
+		return
+	}
+	write("Shell builtins:\n")
+	writeCommandList(true)
+	write("Commands in /system/bin:\n")
+	writeCommandList(false)
+	write("Run 'help COMMAND' or 'COMMAND --help' for usage.\n")
+	mark("SHELL_HELP_OK\n")
+}
+
+func writeCommandList(builtin bool) {
+	for _, info := range shellcmd.Commands {
+		if info.Builtin != builtin {
+			continue
+		}
+		write("  ")
+		writePadded([]byte(info.Name), 10)
+		write(info.Summary)
+		write("\n")
+	}
+}
+
+func writeCommandHelp(info shellcmd.CommandInfo) {
+	write("usage: ")
+	write(info.Usage)
+	write("\n  ")
+	write(info.Summary)
+	write("\n")
 }
 
 // writeSink builds the isolated `write` stage that drains its input stream into
@@ -461,7 +515,8 @@ func executeExternal(line []byte, background bool) {
 		}
 		executable, ok := execproto.ResolveExecutable(invocation.Arguments[0], &executableBuffers[requestIndex])
 		if !ok {
-			write("exec: invalid command\n")
+			writeBytes(invocation.Arguments[0])
+			write(": not a command name; commands are run by name from /system/bin\n")
 			return
 		}
 		argumentData, environmentData, ok := startup.EncodeVectors(invocation.Arguments[:invocation.Count], environment, &vectorWires[requestIndex])
@@ -510,7 +565,7 @@ func executeExternal(line []byte, background bool) {
 	if !sendExec(request) {
 		return
 	}
-	jobs[slot] = job{active: true, background: background, correlation: correlation}
+	jobs[slot] = job{active: true, background: background, correlation: correlation, requestSize: len(data)}
 	jobs[slot].commandSize = copy(jobs[slot].command[:], line)
 	if background {
 		write("[")
@@ -529,9 +584,7 @@ func executeExternal(line []byte, background bool) {
 		return
 	}
 	if reply.LaunchStatus != 0 {
-		write("exec: launch failed: ")
-		writeUint(reply.LaunchStatus)
-		write("\n")
+		writeLaunchFailure(int(slot), reply)
 		return
 	}
 	if reply.ExitCode == kcall.ExitKilled {
@@ -553,6 +606,29 @@ func executeExternal(line []byte, background bool) {
 
 // freeSlot keeps one slot for the foreground, so background jobs never
 // block an interactive command.
+// writeLaunchFailure names the stage PID 1 could not start. The request is
+// still in the job's exec page slot, so the name is read back from it rather
+// than kept for every job.
+func writeLaunchFailure(slot int, reply execproto.Reply) {
+	status := supervisor.LaunchStatus(reply.LaunchStatus)
+	var name []byte
+	if request, ok := execproto.DecodeRequest(execPage[slot][:jobs[slot].requestSize]); ok && reply.Stage < request.Count {
+		name, _ = execproto.CommandFromSystemPath(request.Stages[reply.Stage].Path)
+	}
+	if len(name) != 0 && status.NamesExecutable() {
+		writeBytes(name)
+		write(": ")
+	} else if len(name) != 0 {
+		write("exec: cannot start ")
+		writeBytes(name)
+		write(": ")
+	} else {
+		write("exec: cannot start: ")
+	}
+	write(status.Reason())
+	write("\n")
+}
+
 func freeSlot(background bool) (uint8, bool) {
 	free, count := -1, 0
 	for index := range jobs {
@@ -653,9 +729,8 @@ func reportJob(message ipc.Message) bool {
 		case !valid:
 			write("] corrupt reply\n")
 		case reply.LaunchStatus != 0:
-			write("] launch failed: ")
-			writeUint(reply.LaunchStatus)
-			write("\n")
+			write("] ")
+			writeLaunchFailure(index, reply)
 		case reply.ExitCode == kcall.ExitKilled:
 			write("] killed\n")
 		case reply.ExitCode != 0:
@@ -1015,16 +1090,20 @@ func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {
 func executeCd(argument []byte) {
 	path, ok := resolve(argument, false)
 	if !ok {
-		write("cd: invalid path\n")
+		writeCdError(argument, "invalid path")
 		return
 	}
 	reply, received := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
-	if !received || reply.Status != vfs.StatusOK {
-		writeVFSError("cd", reply.Status)
+	if !received {
+		writeCdError(path, "filesystem service unavailable")
+		return
+	}
+	if reply.Status != vfs.StatusOK {
+		writeCdError(path, shellcmd.VFSReason(reply.Status, false))
 		return
 	}
 	if reply.Kind != ramfs.KindDirectory {
-		write("cd: not a directory\n")
+		writeCdError(path, "not a directory")
 		return
 	}
 	copy(cwd[:], path)
@@ -1071,19 +1150,12 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 	}
 }
 
-func writeVFSError(command string, status vfs.Status) {
-	write(command)
+func writeCdError(path []byte, reason string) {
+	write("cd: ")
+	writeBytes(path)
 	write(": ")
-	switch status {
-	case vfs.StatusNotFound:
-		write("not found\n")
-	case vfs.StatusPermissionDenied:
-		write("permission denied\n")
-	case vfs.StatusResourceExhausted:
-		write("resource exhausted\n")
-	default:
-		write("VFS error\n")
-	}
+	write(reason)
+	write("\n")
 }
 
 func mark(message string) {

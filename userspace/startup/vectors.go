@@ -93,6 +93,15 @@ func DecodeVectors(arguments, environment []byte) ([MaxArgs][]byte, [MaxEnv]Vari
 	return args, env, offset == len(environment)
 }
 
+// ArgCount is the number of arguments after the command name. Decode has
+// validated the vector, so its count byte is read without decoding it again.
+func (data Data) ArgCount() int {
+	if len(data.Arguments) == 0 || data.Arguments[0] == 0 {
+		return 0
+	}
+	return int(data.Arguments[0]) - 1
+}
+
 func (data Data) Arg(index int) ([]byte, bool) {
 	arguments, _, ok := DecodeVectors(data.Arguments, data.Environment)
 	if !ok || index < 0 || index >= int(data.Arguments[0]) {

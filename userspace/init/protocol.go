@@ -46,6 +46,38 @@ const (
 	LaunchCapabilityInstallFailed
 )
 
+// Reason describes a launch failure for a person reading the console.
+func (status LaunchStatus) Reason() string {
+	switch status {
+	case LaunchOK:
+		return "started"
+	case LaunchResourceExhausted:
+		return "out of resources"
+	case LaunchNotFound:
+		return "command not found"
+	case LaunchAddressSpaceFailed:
+		return "cannot create its address space"
+	case LaunchInvalidImage:
+		return "not a valid executable"
+	case LaunchProcessFailed:
+		return "process could not be created"
+	case LaunchTaskFailed:
+		return "task could not be created"
+	case LaunchCapabilityDenied:
+		return "permission denied"
+	case LaunchCapabilityInstallFailed:
+		return "capabilities could not be granted"
+	default:
+		return "launch failed"
+	}
+}
+
+// NamesExecutable reports whether the failure is a property of the executable
+// being launched, so the message should name it.
+func (status LaunchStatus) NamesExecutable() bool {
+	return status == LaunchNotFound || status == LaunchInvalidImage || status == LaunchCapabilityDenied
+}
+
 type LifecycleEvent struct {
 	Operation       LifecycleOperation
 	Process         uint64

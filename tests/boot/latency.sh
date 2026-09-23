@@ -87,9 +87,11 @@ until [ "$(prompts)" -ge 1 ]; do
 	elapsed=$((elapsed + 1))
 done
 
-# help is a builtin that launches nothing: it bounds the measurement overhead.
+# help cd is a builtin that launches nothing: it bounds the measurement
+# overhead. Plain help prints the whole command table and would time the serial
+# line instead.
 cat >"$work/cases" <<'EOF'
-help
+help cd
 uname
 echo x
 ls /system

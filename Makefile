@@ -267,6 +267,7 @@ docs:
 	@test -f docs/adr/0076-components-consult-configuration.md
 	@test -f docs/adr/0077-refusing-a-volume-without-losing-the-system.md
 	@test -f docs/adr/0078-restarting-the-storage-driver.md
+	@test -f docs/adr/0079-command-help-and-diagnostics.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
 	@test -f docs/adr/0071-persistent-volume-layout.md

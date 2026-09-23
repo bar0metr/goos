@@ -35,6 +35,7 @@ type Job struct {
 	next      uint8
 	lastPID   uint64
 	status    LaunchStatus
+	failed    uint8
 }
 
 // RunPipeline starts a pipeline and waits for all of its processes.
@@ -118,6 +119,7 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 			pid, job.processes[index], status = runner.Launch(request.Stages[index], request.CWD, request.Environment, streams)
 			if status != LaunchOK {
 				job.processes[index] = 0
+				job.failed = uint8(index)
 				break
 			}
 			if index == chain-1 {
@@ -186,6 +188,10 @@ func (job *Job) Processes() []handle.ID {
 	}
 	return job.processes[job.next:job.count]
 }
+
+// FailedStage is the index of the stage whose launch failed. It is meaningful
+// only when Result reports a launch failure caused by that stage.
+func (job *Job) FailedStage() uint8 { return job.failed }
 
 // Result reports the last stdout stage's PID and the first non-zero exit code
 // in stage order, or the launch failure.

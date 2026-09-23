@@ -25,9 +25,7 @@ func runBench(data startup.Data) {
 		mark, start := heapPointer, benchNow()
 		for index := uint64(0); index < count; index++ {
 			reply, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: root})
-			if !ok || reply.Status != vfs.StatusOK {
-				finish(2, "bench: VFS error\n")
-			}
+			check(reply, ok, root, false)
 			heapPointer = mark
 		}
 		benchReport("vfs", count, benchNow()-start)
@@ -41,43 +39,37 @@ func runBench(data startup.Data) {
 		}
 		benchReport("read", count, benchNow()-start)
 	default:
-		finish(2, "usage: bench vfs COUNT | bench read PATH COUNT\n")
+		usage()
 	}
 	mark("BENCH_PROCESS_OK\n")
 }
 
 func benchReadFile(path []byte) {
 	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
-	if !ok || opened.Status != vfs.StatusOK {
-		finish(2, "bench: open failed\n")
-	}
+	check(opened, ok, path, false)
 	for {
 		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: vfs.MaxReplyData})
-		if !ok || reply.Status != vfs.StatusOK {
-			finish(2, "bench: read failed\n")
-		}
+		check(reply, ok, path, false)
 		if len(reply.Data) == 0 {
 			break
 		}
 	}
 	closed, ok := callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
-	if !ok || closed.Status != vfs.StatusOK {
-		finish(2, "bench: close failed\n")
-	}
+	check(closed, ok, path, false)
 }
 
 func benchArgument(data startup.Data, index int) uint64 {
 	value, _ := data.Arg(index)
 	count, ok := benchCount(value)
 	if !ok {
-		finish(2, "bench: count must be 1..10000\n")
+		failf(value, "count must be 1..10000")
 	}
 	return count
 }
 
 func benchNow() uint64 {
 	if clockReadNanos(unsafe.Pointer(&benchClock), 8) != 0 {
-		finish(2, "bench: clock unavailable\n")
+		failf(nil, "clock unavailable")
 	}
 	return benchClock
 }

@@ -23,6 +23,15 @@ const (
 	StatusPermissionDenied
 	StatusResourceExhausted
 	StatusBackendError
+	// The statuses below name why a path was refused so a client can say so
+	// instead of reporting an invalid argument. They follow the original set
+	// to keep its wire values.
+	StatusNotDirectory
+	StatusIsDirectory
+	StatusNotEmpty
+	// StatusBusy refuses to remove a path a mount depends on.
+	StatusBusy
+	lastStatus = StatusBusy
 )
 
 type Rights uint8
@@ -306,7 +315,7 @@ func (namespace *Namespace) Truncate(path []byte, size uint64) Status {
 
 func (namespace *Namespace) Unlink(path []byte) Status {
 	if namespace.carriesMount(path) {
-		return StatusPermissionDenied
+		return StatusBusy
 	}
 	mountIndex, parent, name, status := namespace.resolveParent(path)
 	if status != StatusOK {
@@ -560,8 +569,14 @@ func mapStatus(status ramfs.Status) Status {
 	switch status {
 	case ramfs.StatusOK:
 		return StatusOK
-	case ramfs.StatusInvalidArgument, ramfs.StatusNotDirectory, ramfs.StatusIsDirectory, ramfs.StatusNotEmpty:
+	case ramfs.StatusInvalidArgument:
 		return StatusInvalidArgument
+	case ramfs.StatusNotDirectory:
+		return StatusNotDirectory
+	case ramfs.StatusIsDirectory:
+		return StatusIsDirectory
+	case ramfs.StatusNotEmpty:
+		return StatusNotEmpty
 	case ramfs.StatusNotFound:
 		return StatusNotFound
 	case ramfs.StatusAlreadyExists:

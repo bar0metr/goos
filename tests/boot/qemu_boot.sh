@@ -328,6 +328,18 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'quota\n'
 	sleep 1
+	printf 'help cat\n'
+	sleep 1
+	printf 'ls --help\n'
+	sleep 1
+	printf 'cp /system/motd\n'
+	sleep 1
+	printf 'services now\n'
+	sleep 1
+	printf 'rm /home\n'
+	sleep 1
+	printf 'rm /tmp/demo\n'
+	sleep 1
 	printf 'ls /state\n'
 	sleep 1
 	printf 'cat /state/system.log\n'
@@ -511,7 +523,7 @@ require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" '
 for entry in coreutils ls cat write; do
 	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
 done
-require_regex filesystem.system-image-immutable '^read-only filesystem$' 'a refused write to the system image' "$log" 'mkdir /system/backdoor'
+require_regex filesystem.system-image-immutable '^mkdir: /system/backdoor: read-only filesystem$' 'a refused write to the system image' "$log" 'mkdir /system/backdoor'
 # User data has its own mount on the persistent volume and is the same bytes
 # under the whole-volume name.
 require_regex filesystem.home-content '^persistent$' 'persistent through /home' "$log" 'cat /home/demo/message.txt'
@@ -528,6 +540,19 @@ require_marker shell.stdin-output 'bounded stdin payload' "$log" readline
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
 pass_group shell
 
+require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'
+require_marker help.command SHELL_HELP_COMMAND_OK "$log" 'help cat'
+require_regex help.command-usage '^usage: cat FILE$' 'help cat prints the usage' "$log" 'help cat'
+require_regex help.utility-flag '^usage: ls \[PATH\]$' 'ls --help prints the usage' "$log" 'ls --help'
+require_regex help.utility-arity '^usage: cp SOURCE TARGET$' 'cp with one path prints the usage' "$log" 'cp /system/motd'
+require_regex help.builtin-arity '^usage: services$' 'a builtin with arguments prints the usage' "$log" 'services now'
+require_regex errors.missing-file '^cat: /missing: no such file or directory$' 'a missing file named with its reason' "$log" 'cat /missing'
+require_regex errors.busy-mount '^rm: /home: a mount depends on it$' 'a mount point refused as busy' "$log" 'rm /home'
+require_regex errors.not-empty '^rm: /tmp/demo: directory not empty$' 'a non-empty directory refused as such' "$log" 'rm /tmp/demo'
+require_regex format.uptime '^up [0-9][0-9]*:[0-9][0-9]:[0-9][0-9]$' 'uptime as hours, minutes and seconds' "$log" uptime
+require_regex format.mem '^total: [0-9][0-9]*\.[0-9] [KMG]iB$' 'memory in binary units' "$log" 'goos> mem'
+pass_group help
+
 require_marker pipeline.exec PIPELINE_EXEC_OK "$log"
 require_marker pipeline.data piped-native-data "$log" 'echo piped-native-data'
 for marker in sequence-first sequence-pipe sequence-last sequence-after-failure 'exec: invalid command sequence' 'quoted;separator' 'escaped;separator' pipeline-four-data pipeline-last-failure-recovered pipeline-middle-failure-recovered pipeline-first-failure-recovered; do
@@ -538,7 +563,7 @@ forbid_regex pipeline.failed-stage-output '^pipeline-must-not-run$' 'pipeline-mu
 pass_group pipeline
 
 require_count pipeline-stress.reuse '^pipeline-reuse$' 20 "$log" pipeline-reuse
-require_count pipeline-stress.expected-failures '^exec: launch failed: 2$' 23 "$log" 'exec: launch failed: 2'
+require_count pipeline-stress.expected-failures '^missing-stage: command not found$' 23 "$log" 'missing-stage: command not found'
 forbid_regex pipeline-stress.launch-errors 'APP_LAUNCH_.*FAILED' 'no APP_LAUNCH_* failures' "$log" APP_LAUNCH_
 require_regex pipeline-stress.complete '^pipeline-stress-complete$' 'pipeline-stress-complete on its own line' "$log" pipeline-stress-complete
 require_min_count process-reuse.cat '^CAT_PROCESS_OK$' 31 "$log" CAT_PROCESS_OK

@@ -24,6 +24,9 @@ func TestRoundTrip(t *testing.T) {
 	if !ok || string(data.Command) != "cat" || string(data.CWD) != "/system" || !argumentFound || string(argument) != "motd" || !pathFound || string(path) != "/system/bin" {
 		t.Fatalf("data = %#v", data)
 	}
+	if data.ArgCount() != 1 || (Data{}).ArgCount() != 0 {
+		t.Fatalf("argument count = %d", data.ArgCount())
+	}
 	if stdin, found := data.Handle("in"); !found || stdin != handles[0].ID {
 		t.Fatalf("stdin = %#x, %v", stdin, found)
 	}

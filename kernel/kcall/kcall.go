@@ -228,6 +228,9 @@ func Dispatch(request Request, handler Handler) Result {
 
 const MaxIPCMessage = uint64(320)
 const SystemInfoSize = uint64(40)
+
+// SystemInfoPageSize is the size in bytes of the pages SystemInfo counts.
+const SystemInfoPageSize = uint64(4096)
 const MaxStreamIO = uint64(256)
 
 // HandleInfoSize and ProcessInfoSize are the fixed record sizes written by

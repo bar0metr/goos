@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolID      = uint64(0x47564631)
-	ProtocolVersion = uint16(1)
+	ProtocolVersion = uint16(2)
 	protocolHeader  = 32
 	MaxProtocolPath = 192
 	MaxProtocolData = ipc.MaxPayload - protocolHeader - MaxProtocolPath
@@ -56,7 +56,7 @@ type Reply struct {
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	if reply.Operation < OperationOpen || reply.Operation > OperationTruncate || correlation == 0 ||
-		reply.Status > StatusBackendError || len(reply.Name) > ramfs.MaxName || len(reply.Data) > MaxReplyData ||
+		reply.Status > lastStatus || len(reply.Name) > ramfs.MaxName || len(reply.Data) > MaxReplyData ||
 		replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
@@ -85,7 +85,7 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 	kind := ramfs.Kind(message.Payload[2])
 	nameSize := int(message.Payload[3])
 	dataSize := int(binary.LittleEndian.Uint16(message.Payload[4:]))
-	if operation < OperationOpen || operation > OperationTruncate || status > StatusBackendError ||
+	if operation < OperationOpen || operation > OperationTruncate || status > lastStatus ||
 		kind > ramfs.KindDirectory || nameSize > ramfs.MaxName || dataSize > MaxReplyData ||
 		message.Payload[6] != 0 || message.Payload[7] != 0 || binary.LittleEndian.Uint32(message.Payload[28:]) != 0 ||
 		replyHeader+nameSize+dataSize != int(message.PayloadSize) {
