@@ -36,8 +36,16 @@ A key outside the scope reads as absent rather than denied, so a session
 confined to `user.` learns nothing about what exists elsewhere. Scopes match
 whole components: `user.` covers `user.name` and never `username.x`.
 
-Today the deployment grants one session, to the shell, with the whole namespace
-and both rights. Narrower sessions need a control endpoint like the VFS one.
+Sessions are created through a control endpoint whose only client side PID 1
+holds, so PID 1 is the only process that can create one and the scope and rights
+travel in the request (ADR 0076):
+
+| Client | Scope | Rights |
+| --- | --- | --- |
+| shell | the whole namespace | read, write |
+| log service | `system.log.` | read |
+
+The service serves up to six sessions and drops one whose peer has gone.
 
 ## Protocol
 
@@ -95,3 +103,21 @@ goos> config set system.log.persist false
 `config set` resolves the key's declared type first and parses the argument
 against it, so a value is converted by what the key is rather than by how the
 text looks.
+
+## Consumers
+
+A setting is not configuration until something reads it:
+
+| Setting | Read by | When |
+| --- | --- | --- |
+| `system.shell.prompt` | the shell | at startup and after a successful write |
+| `system.log.persist` | the log service | on every drain pass |
+
+A component that cannot reach the service, or gets an answer of the wrong type,
+keeps its built-in default. Configuration decides what a component does, not
+whether it starts — the shell has to come up to fix a configuration that stops
+things coming up.
+
+Turning `system.log.persist` off advances the log service's cursor without
+writing, so turning it back on starts from the present rather than writing out a
+backlog.

@@ -11,6 +11,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
+	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
@@ -40,6 +41,11 @@ const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
 const systemControlHandle = uint64(0x0000000100000012)
 const execPageHandle = handle.ID(0x0000000100000014)
 const systemImageHandle = handle.ID(0x0000000100000015)
+
+// configControlHandle is the configuration service's control endpoint. PID 1
+// holds the only client side of it, so it is the only process that can create a
+// configuration session.
+var configControlHandle handle.ID
 
 //go:linkname processKill goos_process_kill
 func processKill(process uint64) uint64
@@ -234,8 +240,13 @@ func startServices(ticks uint64) {
 	// The log service comes after the filesystem and before the shell: its
 	// session has to be asked for rather than handed over at boot, and it
 	// should be persisting records by the time a prompt appears.
+	// Configuration comes first: the log service consults it, so it has to be
+	// answering before anything that reads a setting starts.
+	startConfigService(ticks)
 	startLogService(ticks)
-	configClient := startConfigService(ticks)
+	// The shell administers configuration, so its session is the whole
+	// namespace and may write. Every other client gets less.
+	configClient, _ := openConfigSession("", configproto.Read|configproto.Write)
 	shellCapabilities := []supervisor.Capability{
 		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
 		{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
@@ -271,13 +282,21 @@ func startLogService(ticks uint64) {
 		syslog.Warn("log service has no filesystem session", syslog.Str("reason", reason))
 		return
 	}
+	capabilities := []supervisor.Capability{
+		// Read authorizes draining the kernel ring; write is the service's
+		// own logging. It gets no other authority.
+		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+		{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+	}
+	// A read-only session confined to the service's own namespace. It consults
+	// the setting that governs it and can neither change it nor see anything
+	// else. Without a session it keeps its default.
+	if configSession, ok := openConfigSession("system.log.", configproto.Read); ok {
+		capabilities = append(capabilities, supervisor.Capability{Name: "config", Handle: configSession,
+			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	if manager.Register(supervisor.Definition{Name: "log", Executable: "/system/log", Dependencies: []string{"vfs"},
-		Capabilities: []supervisor.Capability{
-			// Read authorizes draining the kernel ring; write is the service's
-			// own logging. It gets no other authority.
-			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-			{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		syslog.Warn("log service registration failed")
 		handleClose(uint64(session))
 		return
@@ -313,7 +332,7 @@ func startConfigService(ticks uint64) handle.ID {
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 			{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "control", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		syslog.Warn("config service registration failed")
 		closePair(pair)
@@ -325,7 +344,39 @@ func startConfigService(ticks uint64) handle.ID {
 		handleClose(pair[0])
 		return 0
 	}
-	return handle.ID(pair[0])
+	configControlHandle = handle.ID(pair[0])
+	return configControlHandle
+}
+
+// openConfigSession asks the configuration service for a session confined to
+// scope and limited to rights, and returns the client endpoint for the process
+// that will use it. PID 1 chooses both: a client receives an endpoint that is
+// already limited and cannot ask for more.
+func openConfigSession(scope string, rights configproto.Rights) (handle.ID, bool) {
+	if configControlHandle == 0 {
+		return 0, false
+	}
+	confined, ok := configproto.MakeScope(scope)
+	if !ok {
+		return 0, false
+	}
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		return 0, false
+	}
+	correlation++
+	request, ok := configproto.AddSessionRequest(handle.ID(pair[1]), confined, rights, correlation)
+	if !ok || !sendMessage(uint64(configControlHandle), request) {
+		closePair(pair)
+		return 0, false
+	}
+	reply, status := receive(uint64(configControlHandle), vfsSessionDeadline)
+	configStatus, valid := configproto.DecodeAddSessionReply(reply)
+	if status != ipc.StatusOK || !valid || configStatus != configproto.StatusOK {
+		handleClose(pair[0])
+		return 0, false
+	}
+	return handle.ID(pair[0]), true
 }
 
 func probeStreamEndpoint() bool {

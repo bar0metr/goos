@@ -65,6 +65,13 @@ written before that boot, so a record surviving the reset is a persistence
 proof. The validation build uses a smaller rotation bound so one session crosses
 it.
 
+The config group also asserts that a setting is actually consulted: changing the
+prompt applies on the next line and is then restored, and the log shows two
+sessions created with different rights. That a confined session cannot reach
+outside its scope is covered by the store's unit tests and the control
+protocol's round trip; proving it from inside the system would need a client
+built to try, which is a fixture rather than a component.
+
 The config group asserts that a value is checked against the type its key
 declares, that a published value cannot be rewritten, that an undeclared key is
 not a new setting, that the exported file holds the writable entries and not the

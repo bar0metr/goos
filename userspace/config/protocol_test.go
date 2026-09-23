@@ -120,3 +120,63 @@ func TestServeAppliesSessionAuthority(t *testing.T) {
 		t.Fatalf("list end: %d", end.Status)
 	}
 }
+
+func TestControlCarriesScopeAndRights(t *testing.T) {
+	scope, _ := MakeScope("system.log.")
+	message, ok := AddSessionRequest(7, scope, Read, 3)
+	if !ok {
+		t.Fatal("encode failed")
+	}
+	server, decodedScope, rights, valid := DecodeAddSession(message)
+	if !valid || server != 7 || rights != Read || decodedScope.size != scope.size {
+		t.Fatalf("decoded %v %d %v", server, rights, valid)
+	}
+	if !decodedScope.covers([]byte("system.log.persist")) || decodedScope.covers([]byte("user.name")) {
+		t.Fatal("scope did not survive the round trip")
+	}
+	// The whole namespace travels as an empty scope.
+	full, _ := MakeScope("")
+	message, ok = AddSessionRequest(7, full, Read|Write, 3)
+	if _, decodedScope, rights, valid = DecodeAddSession(message); !ok || !valid || rights != Read|Write || decodedScope.size != 0 {
+		t.Fatal("full scope did not survive the round trip")
+	}
+}
+
+func TestControlRefusesMalformedSessions(t *testing.T) {
+	scope, _ := MakeScope("user.")
+	if _, ok := AddSessionRequest(0, scope, Read, 1); ok {
+		t.Fatal("missing endpoint accepted")
+	}
+	if _, ok := AddSessionRequest(7, scope, 0, 1); ok {
+		t.Fatal("session with no rights accepted")
+	}
+	if _, ok := AddSessionRequest(7, scope, Rights(0xf0), 1); ok {
+		t.Fatal("unknown rights accepted")
+	}
+	message, _ := AddSessionRequest(7, scope, Read, 1)
+	corrupt := message
+	corrupt.Payload[1] = 0
+	if _, _, _, ok := DecodeAddSession(corrupt); ok {
+		t.Fatal("decoded a session with no rights")
+	}
+	corrupt = message
+	corrupt.Payload[2] = MaxKey + 1
+	if _, _, _, ok := DecodeAddSession(corrupt); ok {
+		t.Fatal("decoded an oversized scope")
+	}
+	corrupt = message
+	// A scope that is not a whole-component prefix would match partial names.
+	corrupt.Payload[3+int(corrupt.Payload[2])-1] = 'x'
+	if _, _, _, ok := DecodeAddSession(corrupt); ok {
+		t.Fatal("decoded a scope without a separator")
+	}
+	corrupt = message
+	corrupt.HandleCount = 0
+	if _, _, _, ok := DecodeAddSession(corrupt); ok {
+		t.Fatal("decoded a session with no endpoint")
+	}
+	reply, ok := AddSessionReply(StatusResourceExhausted, 4)
+	if status, valid := DecodeAddSessionReply(reply); !ok || !valid || status != StatusResourceExhausted {
+		t.Fatalf("reply round trip: %d %v", status, valid)
+	}
+}

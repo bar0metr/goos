@@ -291,8 +291,12 @@ charged two timer ticks over a twenty-second session instead of 7,174. Fixing it
 also uncovered and fixed a latent defect in the IOAPIC accessors, which were
 ordinary Go memory operations the optimiser was free to reorder or discard.
 
-What remains: making the components that own a setting consult the configuration
-service instead of a constant, FAT32 hardening, and storage failure recovery.
+ADR 0076 closes the second: the shell reads its prompt and the log service reads
+the setting that governs it, and sessions are now created through a control
+endpoint with per-client scopes and rights — the shell administers
+configuration, the log service only reads the one namespace that governs it.
+
+What remains: FAT32 hardening and storage failure recovery.
 
 ## Priority 5 — Linux ABI compatibility
 

@@ -333,9 +333,9 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'config\n'
 	sleep 1
-	printf 'config set system.shell.prompt boot-test\n'
+	printf 'config set user.name boot-test\n'
 	sleep 1
-	printf 'config get system.shell.prompt\n'
+	printf 'config get user.name\n'
 	sleep 1
 	printf 'config set system.build.release 9.9.9\n'
 	sleep 1
@@ -344,6 +344,13 @@ rm -f "$log" "$reboot_log"
 	printf 'config get system.missing.key\n'
 	sleep 1
 	printf 'cat /state/config\n'
+	sleep 1
+	printf 'config set system.shell.prompt "cfg> "\n'
+	sleep 1
+	printf 'echo prompt-applied-live\n'
+	sleep 1
+	printf 'config set system.shell.prompt "goos> "\n'
+	sleep 1
 	sleep 1
 	printf 'mem\n'
 	sleep 1
@@ -554,7 +561,7 @@ checks=$((checks + 1))
 	sleep 2
 	printf 'ls /state\n'
 	sleep 2
-	printf 'config get system.shell.prompt\n'
+	printf 'config get user.name\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -574,7 +581,7 @@ forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on r
 # record out of it proves the log survived the reset.
 require_window persistence.reboot-log '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
 # The value set in the previous session is restored over the schema default.
-require_window persistence.reboot-config '^boot-test$' 'a setting restored from the previous session' "$reboot_log" 'goos> config get system.shell.prompt' 'NO_SUCH_LINE'
+require_window persistence.reboot-config '^boot-test$' 'a setting restored from the previous session' "$reboot_log" 'goos> config get user.name' 'NO_SUCH_LINE'
 pass_group persistence
 
 # The persistent log is a service, not a kernel feature: it drains the bounded
@@ -593,12 +600,20 @@ require_marker config.started CONFIG_SERVICE_OK "$log"
 require_regex config.service-reported '^\[ OK \] config$' 'the config service reported started' "$log" 'Starting services'
 require_regex config.read-only-listed '^system\.build\.release .* (read-only)$' 'the published release marked read-only' "$log" 'goos> config'
 require_regex config.typed-listing '^system\.log\.persist true$' 'a typed value in the listing' "$log" 'goos> config'
-require_window config.set-read-back '^boot-test$' 'a value read back after being set' "$log" 'goos> config get system.shell.prompt' 'goos> config set system.build.release'
+require_window config.set-read-back '^boot-test$' 'a value read back after being set' "$log" 'goos> config get user.name' 'goos> config set system.build.release'
 require_regex config.read-only-refused '^config: setting is read-only$' 'a write to a published value refused' "$log" 'goos> config set system.build.release 9.9.9'
 require_regex config.type-refused '^config: value does not match the declared type$' 'a wrongly typed value refused' "$log" 'goos> config set system.log.persist maybe'
 require_regex config.unknown-refused '^config: no such setting$' 'an undeclared key refused' "$log" 'goos> config get system.missing.key'
-require_window config.exported '^system\.shell\.prompt text boot-test$' 'the exported form on the state volume' "$log" 'goos> cat /state/config' 'goos> mem'
-forbid_window config.read-only-not-exported '^system\.build\.release' 'published values absent from the exported file' "$log" 'goos> cat /state/config' 'goos> mem'
+require_window config.exported '^user\.name text boot-test$' 'the exported form on the state volume' "$log" 'goos> cat /state/config' 'goos> config set system.shell.prompt'
+forbid_window config.read-only-not-exported '^system\.build\.release' 'published values absent from the exported file' "$log" 'goos> cat /state/config' 'goos> config set system.shell.prompt'
+# A setting is not configuration until something reads it. The shell owns the
+# prompt, so changing it applies at once rather than at the next boot.
+require_regex config.prompt-applied '^cfg> echo prompt-applied-live$' 'the new prompt in use' "$log" 'config set system.shell.prompt'
+require_regex config.prompt-restored '^cfg> config set system.shell.prompt "goos> "$' 'the prompt set back' "$log" 'prompt-applied-live'
+# Sessions are granted with different scopes and rights: the shell administers
+# configuration, the log service only reads the one namespace that governs it.
+require_regex config.session-admin 'config\[[0-9]*\]: session added rights=3' 'a read-write session' "$log" 'goos> log'
+require_regex config.session-confined 'config\[[0-9]*\]: session added rights=1' 'a read-only session' "$log" 'goos> log'
 pass_group config
 
 require_regex release.ps-header '^PID   TYPE     STATE      MEM  CPU   COMMAND$' 'ps table header' "$log" 'goos> ps'
