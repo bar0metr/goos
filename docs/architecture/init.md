@@ -102,8 +102,11 @@ failure instead returns a launch status with no successful process result.
 Completion readiness is observed through the generation-safe `WaitAny` table;
 PID 1 then consumes the exit code with the typed process wait.
 
-PID 1 creates and transfers a fresh VFS session only for utilities that access
-the filesystem. Pure stream and diagnostic utilities receive no VFS endpoint.
+PID 1 creates and transfers a fresh VFS session only for commands whose manifest
+asks for one. It reads those manifests once, from the command index
+`/system/commands` in the immutable system image, through a VFS session of its
+own; no list of command names is kept in PID 1 (ADR 0080). Pure stream and
+diagnostic commands receive no VFS endpoint.
 The VFS control protocol version 2 identifies the add-session operation with an
 explicit payload byte, preventing an unrelated control-shaped message from
 being accepted as a session request.

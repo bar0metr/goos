@@ -12,6 +12,7 @@ import (
 	"goos/kernel/ramfs"
 	"goos/kernel/tty"
 	"goos/kernel/vfs"
+	"goos/userspace/commands"
 	"goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
@@ -336,43 +337,110 @@ func executeCommand(line []byte) {
 // printHelp lists every documented command, or describes the one named.
 func printHelp(invocation shellcmd.Invocation) {
 	if invocation.Count == 2 {
-		info, found := shellcmd.LookupCommand(invocation.Arguments[1])
-		if !found {
-			write("help: no such command: ")
-			writeBytes(invocation.Arguments[1])
-			write("\n")
+		name := invocation.Arguments[1]
+		if info, found := shellcmd.LookupCommand(name); found {
+			writeUsage(info.Usage, info.Summary)
+			mark("SHELL_HELP_COMMAND_OK\n")
 			return
 		}
-		writeCommandHelp(info)
-		mark("SHELL_HELP_COMMAND_OK\n")
+		if index, ok := systemCommands(); ok {
+			if entry, found := commands.Lookup(index, name); found {
+				writeUsageBytes(entry.Usage, entry.Summary)
+				mark("SHELL_HELP_COMMAND_OK\n")
+				return
+			}
+		}
+		write("help: no such command: ")
+		writeBytes(name)
+		write("\n")
 		return
 	}
 	write("Shell builtins:\n")
-	writeCommandList(true)
+	for index := range shellcmd.Commands {
+		writeCommandLine([]byte(shellcmd.Commands[index].Name), []byte(shellcmd.Commands[index].Summary))
+	}
 	write("Commands in /system/bin:\n")
-	writeCommandList(false)
+	index, ok := systemCommands()
+	if !ok {
+		write("  (the command index could not be read)\n")
+	}
+	for offset := 0; ok; {
+		entry, next, valid := commands.Next(index, offset)
+		if !valid {
+			break
+		}
+		writeCommandLine(entry.Name, entry.Summary)
+		offset = next
+	}
 	write("Run 'help COMMAND' or 'COMMAND --help' for usage.\n")
 	mark("SHELL_HELP_OK\n")
 }
 
-func writeCommandList(builtin bool) {
-	for _, info := range shellcmd.Commands {
-		if info.Builtin != builtin {
-			continue
-		}
-		write("  ")
-		writePadded([]byte(info.Name), 10)
-		write(info.Summary)
-		write("\n")
-	}
+func writeCommandLine(name, summary []byte) {
+	write("  ")
+	writePadded(name, 10)
+	writeBytes(summary)
+	write("\n")
 }
 
-func writeCommandHelp(info shellcmd.CommandInfo) {
+func writeCommandHelp(info shellcmd.CommandInfo) { writeUsage(info.Usage, info.Summary) }
+
+func writeUsage(usage, summary string) {
+	writeUsageBytes([]byte(usage), []byte(summary))
+}
+
+func writeUsageBytes(usage, summary []byte) {
 	write("usage: ")
-	write(info.Usage)
+	writeBytes(usage)
 	write("\n  ")
-	write(info.Summary)
+	writeBytes(summary)
 	write("\n")
+}
+
+// The command index describes the executables in /system/bin. It is part of
+// the immutable system image, so it is read once and kept (ADR 0080).
+var (
+	commandIndex       [commands.MaxIndex]byte
+	commandIndexSize   int
+	commandIndexLoaded bool
+)
+
+func systemCommands() ([]byte, bool) {
+	if !commandIndexLoaded {
+		size, ok := readWholeFile([]byte(commands.IndexPath), commandIndex[:])
+		if !ok {
+			return nil, false
+		}
+		commandIndexSize, commandIndexLoaded = size, true
+	}
+	return commandIndex[:commandIndexSize], true
+}
+
+// readWholeFile reads path into target and refuses a file that does not fit,
+// rather than using a prefix of it.
+func readWholeFile(path []byte, target []byte) (int, bool) {
+	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
+	if !ok || opened.Status != vfs.StatusOK {
+		return 0, false
+	}
+	size, complete := 0, false
+	for {
+		want := uint32(vfs.MaxReplyData)
+		if remaining := len(target) - size; remaining < int(want) {
+			want = uint32(remaining) + 1
+		}
+		reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: want})
+		if !ok || reply.Status != vfs.StatusOK || size+len(reply.Data) > len(target) {
+			break
+		}
+		if len(reply.Data) == 0 {
+			complete = true
+			break
+		}
+		size += copy(target[size:], reply.Data)
+	}
+	callVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	return size, complete
 }
 
 // writeSink builds the isolated `write` stage that drains its input stream into

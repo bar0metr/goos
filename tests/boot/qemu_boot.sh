@@ -520,9 +520,14 @@ done
 # /system is the boot image itself: the executables the launch path resolves are
 # the ones a listing shows, and nothing can write to them.
 require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" 'ls system'
-for entry in coreutils ls cat write; do
+for entry in ls cat write; do
 	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
 done
+# Commands are separate images described by a generated index; there is no
+# multicall image behind them any more (ADR 0080).
+forbid_regex filesystem.no-multicall-image '^coreutils$' 'no coreutils image' "$log" 'ls /system/bin'
+require_regex filesystem.command-index '^commands$' 'the command index in /system' "$log" 'ls system'
+require_marker filesystem.pid1-read-index INIT_COMMAND_INDEX_OK "$log"
 require_regex filesystem.system-image-immutable '^mkdir: /system/backdoor: read-only filesystem$' 'a refused write to the system image' "$log" 'mkdir /system/backdoor'
 # User data has its own mount on the persistent volume and is the same bytes
 # under the whole-volume name.

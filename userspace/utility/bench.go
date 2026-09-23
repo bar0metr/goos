@@ -18,15 +18,15 @@ func parseUint(value []byte) (uint64, bool) {
 	return result, true
 }
 
-// benchCount parses an operation count between 1 and MaxBenchOps.
-func benchCount(value []byte) (uint64, bool) {
+// BenchCount parses an operation count between 1 and MaxBenchOps.
+func BenchCount(value []byte) (uint64, bool) {
 	count, ok := parseUint(value)
 	return count, ok && count != 0 && count <= MaxBenchOps
 }
 
-// appendBenchResult formats one result line without a trailing newline:
+// AppendBenchResult formats one result line without a trailing newline:
 // "bench <name>: <ops> ops, total <us> us, avg <ns> ns/op".
-func appendBenchResult(target []byte, name string, ops, nanos uint64) []byte {
+func AppendBenchResult(target []byte, name string, ops, nanos uint64) []byte {
 	average := uint64(0)
 	if ops != 0 {
 		average = nanos / ops

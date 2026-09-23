@@ -18,9 +18,9 @@ func TestBenchCount(t *testing.T) {
 		{"12a", 0, false},
 		{"99999999999999999999999", 0, false},
 	} {
-		count, ok := benchCount([]byte(test.value))
+		count, ok := BenchCount([]byte(test.value))
 		if ok != test.ok || ok && count != test.want {
-			t.Fatalf("benchCount(%q) = %d, %v", test.value, count, ok)
+			t.Fatalf("BenchCount(%q) = %d, %v", test.value, count, ok)
 		}
 	}
 }
@@ -37,7 +37,7 @@ func TestAppendBenchResult(t *testing.T) {
 		{"vfs", 0, 0, "bench vfs: 0 ops, total 0 us, avg 0 ns/op"},
 		{"vfs", MaxBenchOps, ^uint64(0), "bench vfs: 10000 ops, total 18446744073709551 us, avg 1844674407370955 ns/op"},
 	} {
-		got := appendBenchResult(storage[:0], test.name, test.ops, test.nanos)
+		got := AppendBenchResult(storage[:0], test.name, test.ops, test.nanos)
 		if string(got) != test.want {
 			t.Fatalf("got %q, want %q", got, test.want)
 		}

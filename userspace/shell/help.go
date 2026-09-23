@@ -5,57 +5,32 @@ import "goos/kernel/vfs"
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
 const Unbounded = -1
 
-// CommandInfo documents one command the shell accepts. The shell and utilities
-// read the same table, so `help NAME`, `NAME --help` and a usage error always
-// agree. MinArgs and MaxArgs count the arguments after the name.
+// CommandInfo documents one shell builtin. The executables in /system/bin are
+// described by their own manifests and the command index built from them
+// (ADR 0080). MinArgs and MaxArgs count the arguments after the name.
 type CommandInfo struct {
 	Name, Usage, Summary string
-	Builtin              bool
 	MinArgs, MaxArgs     int
 }
 
-// Commands lists builtins first, then the executables in /system/bin, each group
-// in the order `help` prints it.
+// Commands lists the builtins in the order `help` prints them.
 var Commands = [...]CommandInfo{
-	{Name: "help", Usage: "help [COMMAND]", Summary: "list commands, or describe one", Builtin: true, MaxArgs: 1},
-	{Name: "cd", Usage: "cd [DIRECTORY]", Summary: "change the working directory (default /)", Builtin: true, MaxArgs: 1},
-	{Name: "clear", Usage: "clear", Summary: "clear the screen", Builtin: true},
-	{Name: "time", Usage: "time COMMAND [ARGUMENT...]", Summary: "run a command line and report how long it took", Builtin: true, MinArgs: 1, MaxArgs: Unbounded},
-	{Name: "jobs", Usage: "jobs", Summary: "list background jobs started with &", Builtin: true},
-	{Name: "kill", Usage: "kill JOB", Summary: "stop a background job, named as N or %N", Builtin: true, MinArgs: 1, MaxArgs: 1},
-	{Name: "services", Usage: "services", Summary: "show supervised services and their state", Builtin: true},
-	{Name: "handles", Usage: "handles", Summary: "list the shell's handles", Builtin: true},
-	{Name: "caps", Usage: "caps", Summary: "list the shell's capabilities and rights", Builtin: true},
-	{Name: "config", Usage: "config [list] | config get KEY | config set KEY VALUE", Summary: "read and change typed settings", Builtin: true, MaxArgs: 3},
-	{Name: "log", Usage: "log", Summary: "print the system log", Builtin: true},
-	{Name: "diag", Usage: "diag", Summary: "dump kernel diagnostics (diagnostic builds only)", Builtin: true},
-	{Name: "reboot", Usage: "reboot", Summary: "flush storage and restart the machine", Builtin: true},
-
-	{Name: "ls", Usage: "ls [PATH]", Summary: "list a directory (default: the working directory)", MaxArgs: 1},
-	{Name: "cat", Usage: "cat FILE", Summary: "print a file", MinArgs: 1, MaxArgs: 1},
-	{Name: "echo", Usage: "echo [TEXT...]", Summary: "print its arguments", MaxArgs: Unbounded},
-	{Name: "write", Usage: "write [--append] FILE [TEXT...]", Summary: "write TEXT, or standard input, to FILE", MinArgs: 1, MaxArgs: Unbounded},
-	{Name: "pwd", Usage: "pwd", Summary: "print the working directory"},
-	{Name: "mkdir", Usage: "mkdir DIRECTORY", Summary: "create a directory", MinArgs: 1, MaxArgs: 1},
-	{Name: "touch", Usage: "touch FILE", Summary: "create an empty file if it does not exist", MinArgs: 1, MaxArgs: 1},
-	{Name: "rm", Usage: "rm PATH", Summary: "remove a file or an empty directory", MinArgs: 1, MaxArgs: 1},
-	{Name: "cp", Usage: "cp SOURCE TARGET", Summary: "copy a file", MinArgs: 2, MaxArgs: 2},
-	{Name: "mv", Usage: "mv SOURCE TARGET", Summary: "rename or move a file or directory", MinArgs: 2, MaxArgs: 2},
-	{Name: "stat", Usage: "stat PATH", Summary: "show the type and size of a path", MinArgs: 1, MaxArgs: 1},
-	{Name: "ps", Usage: "ps", Summary: "list processes with their memory and CPU use"},
-	{Name: "quota", Usage: "quota", Summary: "show each process's share of kernel resources"},
-	{Name: "mem", Usage: "mem", Summary: "show physical memory use"},
-	{Name: "uptime", Usage: "uptime", Summary: "show how long the system has been running"},
-	{Name: "uname", Usage: "uname", Summary: "print the system name, release and machine"},
-	{Name: "sleep", Usage: "sleep SECONDS", Summary: "wait for SECONDS (up to three decimals)", MinArgs: 1, MaxArgs: 1},
-	{Name: "readline", Usage: "readline", Summary: "copy one line of standard input to standard output"},
-	{Name: "bench", Usage: "bench vfs COUNT | bench read FILE COUNT", Summary: "measure VFS round trips or file reads", MinArgs: 2, MaxArgs: 3},
-	{Name: "args", Usage: "args [ARGUMENT...]", Summary: "print its arguments and PATH (startup ABI check)", MaxArgs: Unbounded},
+	{Name: "help", Usage: "help [COMMAND]", Summary: "list commands, or describe one", MaxArgs: 1},
+	{Name: "cd", Usage: "cd [DIRECTORY]", Summary: "change the working directory (default /)", MaxArgs: 1},
+	{Name: "clear", Usage: "clear", Summary: "clear the screen"},
+	{Name: "time", Usage: "time COMMAND [ARGUMENT...]", Summary: "run a command line and report how long it took", MinArgs: 1, MaxArgs: Unbounded},
+	{Name: "jobs", Usage: "jobs", Summary: "list background jobs started with &"},
+	{Name: "kill", Usage: "kill JOB", Summary: "stop a background job, named as N or %N", MinArgs: 1, MaxArgs: 1},
+	{Name: "services", Usage: "services", Summary: "show supervised services and their state"},
+	{Name: "handles", Usage: "handles", Summary: "list the shell's handles"},
+	{Name: "caps", Usage: "caps", Summary: "list the shell's capabilities and rights"},
+	{Name: "config", Usage: "config [list] | config get KEY | config set KEY VALUE", Summary: "read and change typed settings", MaxArgs: 3},
+	{Name: "log", Usage: "log", Summary: "print the system log"},
+	{Name: "diag", Usage: "diag", Summary: "dump kernel diagnostics (diagnostic builds only)"},
+	{Name: "reboot", Usage: "reboot", Summary: "flush storage and restart the machine"},
 }
 
-// LookupCommand finds a documented command by name.
-// It indexes the table rather than ranging over a copy of it: every utility
-// runs this at startup, where each code path it touches is paid for again.
+// LookupCommand finds a builtin by name.
 func LookupCommand(name []byte) (CommandInfo, bool) {
 	for index := range Commands {
 		if equal(name, Commands[index].Name) {

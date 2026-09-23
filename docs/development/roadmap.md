@@ -318,6 +318,10 @@ name the command, the path and the reason, a launch failure names the stage
 that failed, and `uptime` and `mem` report time and memory in the units a
 person reads.
 
+ADR 0080 makes every command its own image under `userspace/bin`, described by
+a manifest in its source; the build generates the command index PID 1 grants
+from and the shell lists, so adding a command is adding a directory.
+
 ## Priority 5 — Linux ABI compatibility
 
 Begin Linux compatibility only after native process startup, persistent storage,

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. The multicall image is superseded by ADR 0080: each command is now
+its own image.
 
 ## Decision
 

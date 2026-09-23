@@ -11,6 +11,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
+	"goos/userspace/commands"
 	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
@@ -909,7 +910,7 @@ func openVFSSession() (handle.ID, string) {
 
 func launchApplication(path string, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	var pair [2]uint64
-	useVFS := commandNeedsVFS(command)
+	useVFS := commandGrants(command)&commands.GrantVFS != 0
 	if useVFS {
 		session, reason := openVFSSession()
 		if reason != "" {
@@ -964,21 +965,86 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	return event.Process, event.ProcessHandle, supervisor.LaunchStatus(event.Code)
 }
 
-func commandNeedsVFS(command []byte) bool {
-	return equalSlice(command, "pwd") || equalSlice(command, "ls") || equalSlice(command, "cat") || equalSlice(command, "mkdir") ||
-		equalSlice(command, "touch") || equalSlice(command, "rm") || equalSlice(command, "cp") || equalSlice(command, "mv") || equalSlice(command, "stat") || equalSlice(command, "write") || equalSlice(command, "bench")
+// The command index is read once, through a VFS session of PID 1's own, from
+// the immutable system image. What a command is granted beyond its standard
+// streams is decided from the manifest it was built with, not from a list of
+// names kept here (ADR 0080). A command the index does not describe gets the
+// standard streams only.
+var (
+	commandIndex       [commands.MaxIndex]byte
+	commandIndexSize   int
+	commandIndexLoaded bool
+	commandIndexPath   = []byte(commands.IndexPath)
+)
+
+func commandGrants(command []byte) commands.Grant {
+	if !commandIndexLoaded {
+		loadCommandIndex()
+	}
+	entry, found := commands.Lookup(commandIndex[:commandIndexSize], command)
+	if !found {
+		return 0
+	}
+	return entry.Grants
 }
 
-func equalSlice(value []byte, expected string) bool {
-	if len(value) != len(expected) {
-		return false
+// loadCommandIndex reads the index, or leaves it unloaded so the next launch
+// tries again: a VFS that is briefly unavailable must not cost the commands
+// their grants for the rest of the boot.
+func loadCommandIndex() {
+	session, reason := openVFSSession()
+	if reason != "" {
+		syslog.Warn("INIT_COMMAND_INDEX_UNAVAILABLE")
+		return
 	}
-	for index := range value {
-		if value[index] != expected[index] {
-			return false
+	size, ok := readSessionFile(session, commandIndexPath, commandIndex[:])
+	handleClose(uint64(session))
+	if !ok {
+		syslog.Warn("INIT_COMMAND_INDEX_UNREADABLE")
+		return
+	}
+	commandIndexSize, commandIndexLoaded = size, true
+	mark("INIT_COMMAND_INDEX_OK\n")
+}
+
+// readSessionFile reads the whole of path into target and refuses a file that
+// does not fit, rather than using a prefix of it.
+func readSessionFile(session handle.ID, path []byte, target []byte) (int, bool) {
+	opened, ok := callSession(session, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
+	if !ok || opened.Status != vfs.StatusOK {
+		return 0, false
+	}
+	size := 0
+	for {
+		want := uint32(vfs.MaxReplyData)
+		if remaining := len(target) - size; remaining < int(want) {
+			// Ask for one byte past a full buffer, so an oversized file is
+			// detected instead of silently truncated.
+			want = uint32(remaining) + 1
 		}
+		reply, ok := callSession(session, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: want})
+		if !ok || reply.Status != vfs.StatusOK || size+len(reply.Data) > len(target) {
+			return 0, false
+		}
+		if len(reply.Data) == 0 {
+			return size, true
+		}
+		size += copy(target[size:], reply.Data)
 	}
-	return true
+}
+
+func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
+	correlation++
+	message, ok := vfs.EncodeRequest(request, correlation)
+	if !ok || !sendMessage(uint64(session), message) {
+		return vfs.Reply{}, false
+	}
+	reply, status := receive(uint64(session), vfsSessionDeadline)
+	if status != ipc.StatusOK || reply.Correlation != correlation {
+		return vfs.Reply{}, false
+	}
+	decoded, ok := vfs.DecodeReply(reply)
+	return decoded, ok && decoded.Operation == request.Operation
 }
 
 // streamGrant grants one standard-stream endpoint; stream endpoints are consumed

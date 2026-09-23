@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Extends ADR 0032, ADR 0043, ADR 0061 and ADR 0069.
+Accepted. Extends ADR 0032, ADR 0043, ADR 0061 and ADR 0069. ADR 0080 moves the
+description of executables out of the table and into each command's manifest;
+the table keeps the shell builtins.
 
 ## Context
 

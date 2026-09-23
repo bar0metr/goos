@@ -13,9 +13,10 @@ contains:
 
 - `EFI/BOOT/BOOTX64.EFI`: the kernel, a TinyGo UEFI PE image linked at
   `0x400000` (ADR 0001);
-- `initramfs.tar`: a USTAR archive with `system/init`, the services, and
-  `system/bin/coreutils` plus hard links for each utility name
-  (`tools/initramfs`).
+- `initramfs.tar`: a USTAR archive with `system/init`, the services, one
+  image per command in `system/bin/`, and the command index
+  `system/commands` generated from the commands' manifests
+  (`tools/initramfs`, `tools/commands`, ADR 0080).
 
 QEMU runs q35 with OVMF, 512 MiB RAM, COM1 on stdio, and a legacy virtio-blk
 disk (`Makefile`, `QEMU_FLAGS`).

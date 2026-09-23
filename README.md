@@ -307,29 +307,32 @@ vfs
 shell
 block
 virtio-blk
+log
+config
+commands
 goos> ls /system/bin
-coreutils
-pwd
-ls
-cat
 args
-echo
-readline
-mkdir
-touch
-rm
-cp
-mv
-stat
-write
-ps
-mem
-uptime
-uname
-sleep
 bench
+cat
+cp
+echo
+ls
+mem
+mkdir
+mv
+ps
+pwd
+quota
+readline
+rm
+sleep
+stat
+touch
+uname
+uptime
+write
 goos> mkdir /system/backdoor
-read-only filesystem
+mkdir: /system/backdoor: read-only filesystem
 goos> mkdir /home/user
 goos> write /home/user/notes.txt "Hello from GoOS"
 goos> cat /home/user/notes.txt

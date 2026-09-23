@@ -35,10 +35,9 @@ func TestCommandArity(t *testing.T) {
 		count int
 		want  bool
 	}{
-		{"cp", 1, false}, {"cp", 2, true}, {"cp", 3, false},
-		{"ls", 0, true}, {"ls", 2, false},
-		{"echo", 0, true}, {"echo", 40, true},
-		{"services", 1, false}, {"kill", 0, false},
+		{"help", 0, true}, {"help", 1, true}, {"help", 2, false},
+		{"time", 0, false}, {"time", 40, true},
+		{"services", 1, false}, {"kill", 0, false}, {"kill", 1, true},
 	} {
 		command, found := LookupCommand([]byte(test.name))
 		if !found || command.Accepts(test.count) != test.want {
