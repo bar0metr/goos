@@ -22,11 +22,9 @@ import (
 	"goos/kernel/mm/vm"
 	"goos/kernel/pci"
 	"goos/kernel/process"
-	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/shmem"
 	"goos/kernel/stream"
-	"goos/kernel/vfs"
 	kernelwait "goos/kernel/wait"
 	supervisor "goos/userspace/init"
 	"goos/userspace/startup"
@@ -94,11 +92,6 @@ var (
 	// imagePages holds the read-only pages of system images that every
 	// process running them maps (ADR 0081).
 	imagePages              loader.SharedPages
-	bootRAMFS               ramfs.FileSystem
-	deviceRAMFS             ramfs.FileSystem
-	bootVFS                 vfs.Namespace
-	ramfsReadback           [16]byte
-	vfsReadback             [16]byte
 	pendingLifecycle        [maxPendingLifecycle]ipc.Message
 	pendingLifecycleHead    uint8
 	pendingLifecycleCount   uint8
@@ -1865,8 +1858,7 @@ func runIdleTask() {
 func main() {
 	console := amd64.NewCOM1()
 	console.Init()
-	console.WriteString(version.Name + " " + version.Release + "\n")
-	console.WriteString("TinyGo kernel\n\n")
+	console.WriteString(version.Name + " " + version.Release + "\n\n")
 	console.WriteString("CPU: " + version.Machine + "\n")
 
 	status := bootuefi.LoadInitramfs(&bootInfo)

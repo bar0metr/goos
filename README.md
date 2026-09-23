@@ -269,7 +269,6 @@ A successful boot of a normal build produces:
 
 ```text
 GoOS 0.1.0-dev
-TinyGo kernel
 
 CPU: x86_64
 Memory: 368 MiB usable

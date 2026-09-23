@@ -289,6 +289,7 @@ docs:
 	@test -f docs/adr/0079-command-help-and-diagnostics.md
 	@test -f docs/adr/0080-commands-as-separate-images.md
 	@test -f docs/adr/0081-shared-read-only-image-pages.md
+	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

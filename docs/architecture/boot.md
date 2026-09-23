@@ -63,9 +63,11 @@ the console device, the service channel endpoints, and the virtio port, IRQ,
 and DMA authorities. The table is listed in
 [docs/security/capabilities.md](../security/capabilities.md#holders-at-boot).
 
-Between these steps the kernel runs built-in checks of handle transfer, typed
-IPC, RAMFS, VFS, shared memory, address-space isolation, and user-copy
-validation. They halt the boot on failure.
+In a validation build (ADR 0058) the kernel runs built-in checks of handle
+transfer, typed IPC, RAMFS, VFS, shared memory, address-space isolation, and
+user-copy validation between these steps. They halt the boot on failure. The
+RAMFS and VFS checks are compiled only into that build, so the normal kernel
+links no filesystem code (ADR 0084).
 
 The three user tasks are added to the scheduler with interrupts disabled.
 From then on the boot thread runs `serviceKernel` in a loop: each step disables
@@ -111,6 +113,5 @@ kernel and userspace.
 
 The kernel's built-in checks, the demo processes, the fault-probe service, and
 the success markers printed along the way are validation, not system function.
-Roadmap Priority 4 moves them into a separate validation build so that a
-normal boot prints a short status summary and reaches the shell prompt. Until
-that lands, every boot runs them.
+They run only in the `VALIDATION=1` build (ADR 0058); a normal boot prints a
+short status summary and reaches the shell prompt.
