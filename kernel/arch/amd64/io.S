@@ -6,6 +6,10 @@
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
 
+// The console ring is a power of two so the wrap is a mask.
+.set GOOS_CONSOLE_RING, 256
+.set GOOS_CONSOLE_RING_MASK, 255
+
 .section .text
 
 .global goos_outb
@@ -39,6 +43,20 @@ goos_outl:
     movl %edx, %eax
     movw %cx, %dx
     outl %eax, %dx
+    retq
+
+// goos_mmio_write32 and goos_mmio_read32 keep memory-mapped device access out
+// of the compiler's reach. These are ordinary memory operations to the
+// optimiser, which may reorder, merge or discard them; a device register select
+// followed by a data write must survive exactly as written.
+.global goos_mmio_write32
+goos_mmio_write32:
+    movl %edx, (%rcx)
+    retq
+
+.global goos_mmio_read32
+goos_mmio_read32:
+    movl (%rcx), %eax
     retq
 
 .global goos_inl
@@ -391,6 +409,7 @@ goos_interrupt_table:
     .quad goos_user_call
     .quad goos_irq_11
     .quad goos_irq_yield
+    .quad goos_irq_serial
 
 .section .text
 .global goos_user_call
@@ -716,6 +735,50 @@ goos_select_next:
 .select_done:
     movq $0, goos_need_reschedule(%rip)
     retq
+
+// goos_irq_serial drains every byte the UART has and returns. It takes no
+// scheduling decision: the kernel loop sees the ring and wakes the waiters
+// through the ordinary wait table, so one path publishes readiness.
+.global goos_irq_serial
+goos_irq_serial:
+    pushq %rax
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+.serial_drain:
+    movw $0x3fd, %dx
+    inb %dx, %al
+    testb $0x01, %al
+    jz .serial_eoi
+    movw $0x3f8, %dx
+    inb %dx, %al
+    cmpb $3, %al
+    jne .serial_store
+    incq goos_console_interrupt(%rip)
+    jmp .serial_drain
+.serial_store:
+    movq goos_console_head(%rip), %rcx
+    movq %rcx, %rsi
+    incq %rsi
+    andq $GOOS_CONSOLE_RING_MASK, %rsi
+    cmpq goos_console_tail(%rip), %rsi
+    je .serial_drop
+    leaq goos_console_ring(%rip), %rdx
+    movb %al, (%rdx,%rcx,1)
+    movq %rsi, goos_console_head(%rip)
+    jmp .serial_drain
+.serial_drop:
+    incq goos_console_dropped(%rip)
+    jmp .serial_drain
+.serial_eoi:
+    movl $0, 0x3fffD0b0
+    movb $0x20, %al
+    outb %al, $0x20
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rax
+    iretq
 
 .global goos_irq_11
 goos_irq_11:
@@ -1150,8 +1213,81 @@ goos_irq_11_pending:
     .quad 0
 goos_irq_11_waiter:
     .quad 0
+// Console input arrives faster than a tick, so the interrupt drains the UART
+// FIFO into this ring immediately and the kernel loop wakes readers from it.
+// Draining in the handler is what keeps pasted input from being lost; the wake
+// can wait for the next tick because the bytes are already safe.
+goos_console_head:
+    .quad 0
+goos_console_tail:
+    .quad 0
+goos_console_dropped:
+    .quad 0
+// Ctrl-C is a signal, not input. The handler diverts it here so the shell can
+// see it without reading, and consuming, the bytes a running command is owed.
+goos_console_interrupt:
+    .quad 0
+goos_console_ring:
+    .zero GOOS_CONSOLE_RING
 
 .section .text
+// goos_console_take removes one byte, returning it with bit 8 set, or zero when
+// the ring is empty.
+.global goos_console_take
+goos_console_take:
+    xorq %rax, %rax
+    movq goos_console_tail(%rip), %rcx
+    cmpq goos_console_head(%rip), %rcx
+    je .console_take_done
+    leaq goos_console_ring(%rip), %rdx
+    movzbq (%rdx,%rcx,1), %rax
+    orq $0x100, %rax
+    incq %rcx
+    andq $GOOS_CONSOLE_RING_MASK, %rcx
+    movq %rcx, goos_console_tail(%rip)
+.console_take_done:
+    retq
+
+// goos_console_pending reports whether the console has anything for a reader:
+// a byte in the ring, or an interrupt to deliver.
+.global goos_console_pending
+goos_console_pending:
+    movq $1, %rax
+    cmpq $0, goos_console_interrupt(%rip)
+    jne .console_pending_done
+    movq goos_console_tail(%rip), %rcx
+    cmpq goos_console_head(%rip), %rcx
+    jne .console_pending_done
+    xorq %rax, %rax
+.console_pending_done:
+    retq
+
+// goos_console_take_interrupt consumes one pending interrupt.
+.global goos_console_take_interrupt
+goos_console_take_interrupt:
+    xorq %rax, %rax
+    cmpq $0, goos_console_interrupt(%rip)
+    je .console_interrupt_done
+    movq $0, goos_console_interrupt(%rip)
+    movq $1, %rax
+.console_interrupt_done:
+    retq
+
+// goos_console_dropped_read returns how many bytes arrived with the ring full.
+.global goos_console_dropped_read
+goos_console_dropped_read:
+    movq goos_console_dropped(%rip), %rax
+    retq
+
+// goos_enable_console_interrupt sets the UART's received-data-available bit.
+// It runs after the IDT gate exists, so no byte can arrive without a handler.
+.global goos_enable_console_interrupt
+goos_enable_console_interrupt:
+    movw $0x3f9, %dx
+    movb $0x01, %al
+    outb %al, %dx
+    retq
+
 .global goos_take_irq_11
 goos_take_irq_11:
     xorq %rax, %rax

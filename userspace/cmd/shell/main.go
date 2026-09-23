@@ -16,6 +16,7 @@ import (
 	execproto "goos/userspace/exec"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 	"runtime"
 	"strconv"
 	"unsafe"
@@ -85,6 +86,9 @@ func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
 //go:linkname consoleWrite goos_console_write
 func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname consoleInterrupt goos_console_interrupt
+func consoleInterrupt(device uint64) uint64
+
 //go:linkname consoleRead goos_console_read
 func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
 
@@ -136,22 +140,25 @@ func userspaceMain() {
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
 	write("\ngoos> ")
 	for {
+		// Ctrl-C reaches the shell as an interrupt rather than as a byte, so
+		// asking for it takes nothing away from a command that is reading.
+		if consoleInterrupt(uint64(consoleHandle)) == 0 {
+			write("^C\n")
+			editor.Reset()
+			write("goos> ")
+			continue
+		}
 		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
 		if status == uint64(kcall.StatusNotFound) {
 			if pollReplies() {
 				write("goos> ")
 				write(string(editor.Pending()))
 			}
+			awaitInput()
 			continue
 		}
 		if status != 0 {
 			fatal("SHELL_INPUT_FAILED\n")
-		}
-		if inputByte == 3 {
-			write("^C\n")
-			editor.Reset()
-			write("goos> ")
-			continue
 		}
 		line, complete, accepted := editor.Feed(inputByte)
 		if !accepted {
@@ -315,23 +322,32 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
 }
 
+// awaitInput blocks until a key arrives or PID 1 answers. Retrying the read
+// immediately is what made the shell hold a CPU for as long as it waited for a
+// prompt to be typed at; both things it waits for are waitable objects, so it
+// waits on them.
+func awaitInput() {
+	var interests [userwait.MaxObjects]userwait.Interest
+	interests[0] = userwait.Interest{Handle: consoleHandle, Events: kcall.WaitReadable}
+	interests[1] = userwait.Interest{Handle: execHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+	if _, status := userwait.Any(&interests, 2, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
+		// A wait that cannot be established must not become a spin. Sleeping a
+		// tick degrades to slow polling, which is visible in the CPU column
+		// rather than hidden in a loop.
+		userwait.Sleep(1)
+	}
+}
+
 // interruptPoll bounds one receive so the shell can look for Ctrl-C while a
 // foreground command runs. A command may run for as long as it likes; a dead
 // PID 1 is reported as a closed channel.
 const interruptPoll = clock.TicksPerSecond / 10
 
-// interrupted reports whether Ctrl-C was typed. Other input during a command
-// is discarded: the shell has no line discipline to buffer it.
+// interrupted reports whether Ctrl-C was typed. It consumes only the interrupt:
+// the bytes a foreground command is being typed are left for that command,
+// which is what the shell reading and discarding them used to take away.
 func interrupted() bool {
-	for {
-		status := consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1)
-		if status != 0 {
-			return false
-		}
-		if inputByte == 3 {
-			return true
-		}
-	}
+	return consoleInterrupt(uint64(consoleHandle)) == 0
 }
 
 func printJobs() {

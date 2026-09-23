@@ -283,10 +283,16 @@ settings persist at `/state/config` in a form a person can read and edit. The
 shell's `config` builtin lists, reads and writes them.
 
 The 0.1.0 feature set of spec §56 is therefore complete. What remains before the
-release is consolidation rather than new subsystems: making the components that
-own a setting consult the configuration service instead of a constant, the
-shell's busy-poll of the serial console (ADR 0072), FAT32 hardening, and storage
-failure recovery.
+release is consolidation rather than new subsystems.
+
+ADR 0075 closes the first of those: the console is interrupt-driven, its input
+is a waitable object, and the shell blocks instead of retrying the read. It is
+charged two timer ticks over a twenty-second session instead of 7,174. Fixing it
+also uncovered and fixed a latent defect in the IOAPIC accessors, which were
+ordinary Go memory operations the optimiser was free to reorder or discard.
+
+What remains: making the components that own a setting consult the configuration
+service instead of a constant, FAT32 hardening, and storage failure recovery.
 
 ## Priority 5 — Linux ABI compatibility
 

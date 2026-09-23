@@ -38,6 +38,7 @@ const (
 	OperationProcessKill
 	OperationImageMap
 	OperationLogBounds
+	OperationConsoleInterrupt
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -109,6 +110,7 @@ type Handler interface {
 	ProcessKill(process uint64) Status
 	ImageMap(device uint64, virtual uint64, address uint64) Status
 	LogBounds(device uint64, address uint64) Status
+	ConsoleInterrupt(device uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -212,6 +214,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ImageMap(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationLogBounds:
 		return Result{Status: handler.LogBounds(request.Arg0, request.Arg1)}
+	case OperationConsoleInterrupt:
+		return Result{Status: handler.ConsoleInterrupt(request.Arg0)}
 	case OperationMemoryMap:
 		if request.Arg2&^MemoryMapWritable != 0 {
 			return Result{Status: StatusInvalidArgument}

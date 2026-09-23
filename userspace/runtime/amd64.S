@@ -264,6 +264,14 @@ goos_log_bounds:
     ret
 .size goos_log_bounds, .-goos_log_bounds
 
+.global goos_console_interrupt
+.type goos_console_interrupt,@function
+goos_console_interrupt:
+    movl $34, %eax
+    int $0x80
+    ret
+.size goos_console_interrupt, .-goos_console_interrupt
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

@@ -611,6 +611,11 @@ require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quo
 require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
 require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
+# The shell waits for input instead of retrying the read, so after a session of
+# this length its CPU total stays in three digits. Before it was over seven
+# thousand: the accounting is what makes the regression visible.
+require_regex release.shell-idle '^[0-9][0-9]*  *native  *[a-z]*  *[0-9][0-9]*  *[0-9][0-9]\{0,2\}  *shell$' 'the shell idle rather than polling' "$log" 'goos> ps'
+forbid_regex release.console-overrun 'console input dropped' 'no console input lost' "$log" 'goos> ps'
 require_regex release.services 'vfs         running     [0-9]' 'vfs listed as running' "$log" 'goos> services'
 require_regex release.caps '^console   device    read,write$' 'shell console capability' "$log" 'goos> caps'
 require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'

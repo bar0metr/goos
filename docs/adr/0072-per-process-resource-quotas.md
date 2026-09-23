@@ -126,14 +126,15 @@ by it yet.
 `ProcessInfo` records grew from 32 bytes to 80. The native ABI is not stable
 until it is declared so, and the record's layout is documented with the constant.
 
-**The accounting exposed a defect it does not fix.** The shell is charged about
+**The accounting exposed a defect, since fixed by ADR 0075.** The shell is charged about
 95% of the ticks in a session. `ConsoleRead` answers `StatusNotFound` when no
 byte has arrived and the shell immediately retries, so it busy-polls COM1 for as
 long as it waits for input. Nothing breaks today — round-robin still runs
 everyone and there is nothing else to run — but it defeats the idle task, it
 contradicts the move away from polling in ADR 0051, and it would matter on real
-hardware and under SMP. Making the console a waitable object, or sleeping
-between retries, is its own decision and is left to one.
+hardware and under SMP. ADR 0075 makes the console interrupt-driven and its
+input a waitable object, after which the shell is charged two ticks over a
+comparable session.
 
 Shared-memory objects are bounded as they were, by `shmem.MaxObjects` per handle
 table and `shmem.MaxPages` per object. No native call creates one, so there is

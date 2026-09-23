@@ -52,3 +52,32 @@ architecture-independent dispatcher. Returning operations resume with `IRETQ`;
 Exit marks the task non-runnable and schedules its successor. The gate is a
 temporary transport;
 future `SYSCALL/SYSRET` support must preserve the same native call contract.
+
+## Device interrupts
+
+Two device lines are routed through the IOAPIC on bootstrap CPU 0:
+
+| Line | Vector | Trigger | Owner |
+| --- | ---: | --- | --- |
+| GSI 11 | 43 | active-low, level | the userspace virtio-blk driver, through `IRQWait` |
+| GSI 4 | 36 | active-high, edge | the console UART, handled in the kernel |
+
+The virtio line is masked by its handler and rearmed by the driver's next wait,
+so an unserviced device cannot storm. The console line is not: every byte
+matters and the handler consumes the condition by reading the device.
+
+The console handler drains every byte the UART has into a 256-byte ring and
+returns. It takes no scheduling decision. The kernel loop sees the ring and
+publishes readability through the ordinary wait table, so one mechanism
+completes a wait and a reader blocks on the console the way it blocks on a
+channel (ADR 0075). Draining in the handler is what keeps input from being lost;
+the wake can wait for the next tick because the bytes are already safe.
+
+Byte three is diverted into an interrupt flag rather than the ring. Ctrl-C is a
+signal, so a shell can ask whether it was typed without consuming the input a
+running command is being given.
+
+Memory-mapped device registers are reached through assembly helpers. As Go they
+were ordinary loads and stores that the optimiser could reorder, merge or
+discard, which is not a contract an IOAPIC register select and data write can be
+written against.

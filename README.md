@@ -145,6 +145,8 @@ The native kernel and the first isolated services are implemented:
   every mount listed in its parent directory and protected from removal;
 - per-process quotas on channels, streams, tasks, and pages, plus per-process
   CPU accounting, so one process cannot take a whole kernel table;
+- an interrupt-driven console whose input is a waitable object, so a reader
+  blocks instead of holding a CPU while it waits to be typed at;
 - a supervised log service that drains the bounded kernel ring onto persistent
   storage, so a session's records outlive its reset;
 - a typed configuration service with declared keys, namespace-scoped sessions,
@@ -333,7 +335,7 @@ PID   TYPE     STATE      MEM  CPU   COMMAND
 7     native   waiting    139  5     vfs
 8     native   waiting    50   1     block
 9     native   waiting    54   0     virtio-blk
-10    native   waiting    81   7174  shell
+10    native   waiting    92   2     shell
 207   native   running    61   0     ps
 goos> quota
 PID   COMMAND           RESOURCE  HELD/LIMIT
@@ -348,9 +350,7 @@ PID   COMMAND           RESOURCE  HELD/LIMIT
 ```
 
 MEM is the pages the kernel allocated for the process and CPU the timer ticks it
-was found running on. The shell's share is large because it busy-polls the
-serial console while waiting for input, which the accounting exposed and ADR
-0072 records as open.
+was found running on.
 
 `make VALIDATION=1` builds the validation variant used by `make test-boot`. It
 runs the kernel self-tests and fault-injection scenarios and prints the `*_OK`
@@ -391,8 +391,7 @@ report what each process holds. A supervised log service persists the kernel
 ring to `/state`, so records survive a reboot, and a typed configuration service
 holds the system's settings. The 0.1.0 feature set is complete; what remains is
 consolidation — having the components that own a setting consult the
-configuration service, the shell's busy-poll of the console, FAT32 hardening, and
-storage failure recovery.
+configuration service, FAT32 hardening, and storage failure recovery.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors; stream merging such as
