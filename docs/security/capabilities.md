@@ -128,7 +128,7 @@ For each pipeline stage PID 1 grants:
 
 The VFS session is a fresh channel from `ChannelCreate`. PID 1 sends the
 server end to VFS as an IPC attachment on the control channel and consumes the
-client end into the child manifest (docs/architecture/vfs.md). Which commands
+client end into the child manifest (docs/userspace/vfs.md). Which commands
 get one is decided by the manifest each command declares in its source, which
 the build turns into the command index in the immutable system image
 (ADR 0080). A command without an index entry gets the standard streams only.

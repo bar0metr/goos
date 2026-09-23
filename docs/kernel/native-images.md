@@ -40,7 +40,7 @@ frames shared by every process running the image (ADR 0081).
 Relocations, executable ASLR, demand paging, and mapping rollback after an
 internal VM failure remain future work. Images are static `ET_EXEC` programs
 linked at `0x40002000`; what randomizing their placement would change in this
-format is described in [memory.md](memory.md#aslr-readiness).
+format is described in [memory.md](../architecture/memory.md#aslr-readiness).
 Linux ELF is a separate compatibility-layer format and does not define this
 native envelope.
 

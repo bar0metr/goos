@@ -284,17 +284,17 @@ docs:
 	@test -f README.md
 	@test -f docs/architecture/overview.md
 	@test -f docs/architecture/processes.md
-	@test -f docs/architecture/native-images.md
+	@test -f docs/kernel/native-images.md
 	@test -f docs/architecture/capabilities.md
 	@test -f docs/architecture/ipc.md
-	@test -f docs/architecture/tty.md
-	@test -f docs/architecture/ramfs.md
-	@test -f docs/architecture/vfs.md
-	@test -f docs/architecture/init.md
-	@test -f docs/architecture/shell.md
-	@test -f docs/architecture/configuration.md
-	@test -f docs/architecture/storage.md
-	@test -f docs/architecture/streams.md
+	@test -f docs/userspace/tty.md
+	@test -f docs/userspace/ramfs.md
+	@test -f docs/userspace/vfs.md
+	@test -f docs/userspace/init.md
+	@test -f docs/userspace/shell.md
+	@test -f docs/userspace/configuration.md
+	@test -f docs/userspace/storage.md
+	@test -f docs/kernel/streams.md
 	@test -f docs/development/testing.md
 	@test -f docs/adr/0072-per-process-resource-quotas.md
 	@test -f docs/adr/0073-persistent-log-service.md
@@ -361,7 +361,7 @@ docs:
 	@test -f docs/adr/0057-launch-path-and-latency-baseline.md
 	@test -f docs/adr/0058-normal-and-validation-builds.md
 	@test -f docs/adr/0059-structured-system-log.md
-	@test -f docs/architecture/logging.md
+	@test -f docs/userspace/logging.md
 	@test -f docs/adr/0068-timed-sleep.md
 	@test -f docs/adr/0067-stopping-jobs.md
 	@test -f docs/adr/0064-asynchronous-exec-and-background-jobs.md

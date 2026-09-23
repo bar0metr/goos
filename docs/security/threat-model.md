@@ -69,7 +69,7 @@ A program launched from the shell, for example a compromised command image in
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
 - Its VFS session is a dedicated channel; it cannot read replies meant for
-  another process (ADR 0030, docs/architecture/vfs.md).
+  another process (ADR 0030, docs/userspace/vfs.md).
 - A fault terminates only its task; exit closes its handles, so peers see
   `PeerDied`/EOF instead of hanging (ADR 0050).
 - Residual risks: it can create up to four streams, its per-process quota,
@@ -161,7 +161,7 @@ Images come only from the initramfs built into the ISO. A tampered image is
 still loaded through the bounded native loader: fixed header, at most eight
 page-aligned segments and 256 pages, user range only, no W+X, no overlaps, entry
 in an executable segment, stack in a writable NX segment with an unmapped
-guard page below it (docs/architecture/native-images.md). A valid but hostile image runs with
+guard page below it (docs/kernel/native-images.md). A valid but hostile image runs with
 exactly the manifest PID 1 grants it. Its read-only segments are shared with
 every other process running the same image, but never writable by any of them
 (ADR 0081). Images are not signed or measured, so whoever controls the ISO

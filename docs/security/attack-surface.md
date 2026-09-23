@@ -76,7 +76,7 @@ compiles away.
   their integrity is the authority model.
 - Port I/O, DMA memory, and IRQ routing need ring 0.
 - `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` are in the kernel
-  because no TTY service owns COM1 yet (docs/architecture/tty.md). They are
+  because no TTY service owns COM1 yet (docs/userspace/tty.md). They are
   candidates to move to userspace.
 - `DebugWrite` is a bootstrap path. Boot validation now has its own build
   (ADR 0058); in a normal build only PID 1 passes its root comparison, and the

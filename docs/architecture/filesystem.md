@@ -12,12 +12,12 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
-| VFS | `/system/vfs` | control endpoint, one server endpoint per session, block client endpoint | [vfs.md](vfs.md), ADR 0018, 0026 |
-| RAMFS | inside VFS | nothing; library core | [ramfs.md](ramfs.md), ADR 0017 |
+| VFS | `/system/vfs` | control endpoint, one server endpoint per session, block client endpoint | [vfs.md](../userspace/vfs.md), ADR 0018, 0026 |
+| RAMFS | inside VFS | nothing; library core | [ramfs.md](../userspace/ramfs.md), ADR 0017 |
 | System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
-| FAT32 | inside VFS | uses the VFS block client endpoint | [storage.md](storage.md), ADR 0036 |
-| Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](storage.md), ADR 0033 |
-| virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](storage.md), ADR 0034, 0035 |
+| FAT32 | inside VFS | uses the VFS block client endpoint | [storage.md](../userspace/storage.md), ADR 0036 |
+| Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](../userspace/storage.md), ADR 0033 |
+| virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
 
 ## Namespace
 

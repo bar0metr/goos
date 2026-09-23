@@ -419,24 +419,33 @@ See [roadmap](docs/development/roadmap.md) for the current implementation order.
 
 Further documentation:
 
-- [architecture overview](docs/architecture/overview.md);
-- [physical memory](docs/architecture/memory.md);
-- [interrupts](docs/architecture/interrupts.md);
-- [scheduler](docs/architecture/scheduler.md);
-- [processes](docs/architecture/processes.md);
-- [native images](docs/architecture/native-images.md);
-- [typed IPC](docs/architecture/ipc.md);
-- [storage](docs/architecture/storage.md);
-- [init and service supervision](docs/architecture/init.md);
-- [capabilities and handles](docs/architecture/capabilities.md);
-- [boot sequence](docs/architecture/boot.md);
-- [filesystem stack](docs/architecture/filesystem.md);
-- [Linux compatibility (planned)](docs/architecture/linux-compat.md);
-- [security: threat model, capabilities, memory safety, attack surface](docs/security/threat-model.md);
-- [boot chain and signature verification (planned)](docs/security/boot-chain.md);
-- [building and debugging](docs/development/building.md);
-- [debugging](docs/development/debugging.md);
-- [coding style](docs/development/coding-style.md);
-- [adding a service](docs/development/adding-service.md);
-- [roadmap](docs/development/roadmap.md);
-- [architecture decisions](docs/adr/).
+- Architecture: [overview](docs/architecture/overview.md),
+  [boot sequence](docs/architecture/boot.md),
+  [processes](docs/architecture/processes.md),
+  [scheduler](docs/architecture/scheduler.md),
+  [memory](docs/architecture/memory.md), [typed IPC](docs/architecture/ipc.md),
+  [capabilities and handles](docs/architecture/capabilities.md),
+  [filesystem stack](docs/architecture/filesystem.md),
+  [Linux compatibility (planned)](docs/architecture/linux-compat.md).
+- Kernel: [interrupts](docs/kernel/interrupts.md),
+  [native images](docs/kernel/native-images.md),
+  [byte streams](docs/kernel/streams.md).
+- Userspace: [init and service supervision](docs/userspace/init.md),
+  [terminal](docs/userspace/tty.md), [shell](docs/userspace/shell.md),
+  [VFS](docs/userspace/vfs.md), [RAMFS](docs/userspace/ramfs.md),
+  [storage](docs/userspace/storage.md),
+  [configuration](docs/userspace/configuration.md),
+  [logging](docs/userspace/logging.md).
+- Security: [threat model](docs/security/threat-model.md),
+  [capabilities](docs/security/capabilities.md),
+  [memory safety](docs/security/memory-safety.md),
+  [attack surface](docs/security/attack-surface.md),
+  [boot chain and signature verification (planned)](docs/security/boot-chain.md).
+- Development: [building](docs/development/building.md),
+  [debugging](docs/development/debugging.md),
+  [testing](docs/development/testing.md),
+  [coding style](docs/development/coding-style.md),
+  [adding a command](docs/development/adding-command.md),
+  [adding a service](docs/development/adding-service.md),
+  [roadmap](docs/development/roadmap.md).
+- [Architecture decisions](docs/adr).

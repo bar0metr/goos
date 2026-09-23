@@ -58,7 +58,7 @@ existing site follows this yet: the UEFI protocol calls in
   is unmapped.
 - User leaves reject W+X at map time. The native loader rejects writable
   executable segments and fills pages through the kernel identity map before
-  installing the final user mappings (docs/architecture/native-images.md).
+  installing the final user mappings (docs/kernel/native-images.md).
 - Shared-memory and DMA mappings are always NX.
 - `MemoryMap` installs shared pages only inside the shared window
   `[0x40180000, 0x401c0000)` and only after every target leaf is free. The

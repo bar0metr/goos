@@ -48,3 +48,17 @@ file-backed stdin production.
 - [debugging](../development/debugging.md);
 - [coding style](../development/coding-style.md);
 - [adding a service](../development/adding-service.md).
+
+## Documentation map
+
+`docs/architecture/` describes the system as a whole: boot, processes,
+scheduling, memory, IPC, capabilities and the filesystem stack.
+`docs/kernel/` holds kernel mechanisms that are not system-wide design:
+[interrupts](../kernel/interrupts.md), the [native image format](../kernel/native-images.md)
+and [byte streams](../kernel/streams.md). `docs/userspace/` holds the services
+and programs above the kernel: [init](../userspace/init.md),
+[terminal](../userspace/tty.md), [shell](../userspace/shell.md),
+[VFS](../userspace/vfs.md), [RAMFS](../userspace/ramfs.md),
+[storage](../userspace/storage.md), [configuration](../userspace/configuration.md)
+and [logging](../userspace/logging.md). Security, development practice and
+decisions live in `docs/security/`, `docs/development/` and `docs/adr/`.
