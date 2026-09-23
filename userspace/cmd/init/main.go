@@ -235,13 +235,19 @@ func startServices(ticks uint64) {
 	// session has to be asked for rather than handed over at boot, and it
 	// should be persisting records by the time a prompt appears.
 	startLogService(ticks)
+	configClient := startConfigService(ticks)
+	shellCapabilities := []supervisor.Capability{
+		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+		{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
+	}
+	if configClient != 0 {
+		shellCapabilities = append(shellCapabilities, supervisor.Capability{Name: "config", Handle: configClient,
+			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs"},
-		Capabilities: []supervisor.Capability{
-			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-			{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
-		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+		Capabilities: shellCapabilities, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
@@ -279,6 +285,47 @@ func startLogService(ticks uint64) {
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
 		syslog.Warn("log service did not start")
 	}
+}
+
+// startConfigService brings up the typed configuration store and returns the
+// client endpoint the shell's session runs over, or zero if it could not start.
+//
+// PID 1 creates that session and is the only process that decides what it may
+// do. The scope and rights the service applies to it are granted here, not
+// asked for by the client, which is what makes the store's checks authority
+// rather than convention.
+//
+// Like the log service, a failure warns rather than stopping the boot: nothing
+// else reads configuration yet, and a system without it is still a system.
+func startConfigService(ticks uint64) handle.ID {
+	session, reason := openVFSSession()
+	if reason != "" {
+		syslog.Warn("config service has no filesystem session", syslog.Str("reason", reason))
+		return 0
+	}
+	var pair [2]uint64
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		syslog.Warn("config service channel unavailable")
+		handleClose(uint64(session))
+		return 0
+	}
+	if manager.Register(supervisor.Definition{Name: "config", Executable: "/system/config", Dependencies: []string{"vfs"},
+		Capabilities: []supervisor.Capability{
+			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+			{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+		syslog.Warn("config service registration failed")
+		closePair(pair)
+		handleClose(uint64(session))
+		return 0
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
+		syslog.Warn("config service did not start")
+		handleClose(pair[0])
+		return 0
+	}
+	return handle.ID(pair[0])
 }
 
 func probeStreamEndpoint() bool {
