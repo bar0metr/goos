@@ -433,6 +433,7 @@ Further documentation:
 - [filesystem stack](docs/architecture/filesystem.md);
 - [Linux compatibility (planned)](docs/architecture/linux-compat.md);
 - [security: threat model, capabilities, memory safety, attack surface](docs/security/threat-model.md);
+- [boot chain and signature verification (planned)](docs/security/boot-chain.md);
 - [building and debugging](docs/development/building.md);
 - [debugging](docs/development/debugging.md);
 - [coding style](docs/development/coding-style.md);

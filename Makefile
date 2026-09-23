@@ -365,6 +365,7 @@ docs:
 	@test -f docs/security/capabilities.md
 	@test -f docs/security/memory-safety.md
 	@test -f docs/security/attack-surface.md
+	@test -f docs/security/boot-chain.md
 	@test -f docs/architecture/boot.md
 	@test -f docs/architecture/filesystem.md
 	@test -f docs/architecture/linux-compat.md

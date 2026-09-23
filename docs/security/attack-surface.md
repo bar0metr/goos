@@ -1,8 +1,9 @@
 # Native kernel attack surface
 
 The only intentional ring 3 → ring 0 entry points are `int 0x80` native calls,
-CPU exceptions, and the timer and virtio interrupts. This document covers the
-native calls defined by `kcall.Operation` in `kernel/kcall/kcall.go`.
+CPU exceptions, and the timer, virtio (GSI 11), and console UART (GSI 4,
+ADR 0075) interrupts. This document covers the native calls defined by
+`kcall.Operation` in `kernel/kcall/kcall.go`.
 
 ## Entry path
 
@@ -11,8 +12,9 @@ general-purpose registers (stubs in `userspace/runtime/amd64.S`). The assembly
 bridge in `kernel/arch/amd64/io.S` routes the five blocking operations (5, 12,
 17, 21, 22) to dedicated dispatchers in `kernel/main.go`. Everything else goes through
 `kcall.Dispatch`, which checks fixed sizes before calling the handler in
-`kernel/main.go`, `kernel/diagnostics.go`, or `kernel/timing.go`. Unknown
-numbers return `Unsupported`.
+`kernel/main.go` or one of its sibling files (`diagnostics.go`, `timing.go`,
+`logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`, `imagemap.go`).
+Unknown numbers return `Unsupported`.
 
 Every call runs with interrupts disabled, inside the kernel exclusion domain
 (ADR 0053). The caller is identified by its CR3 root, and blocking calls also
@@ -33,31 +35,34 @@ table with type, generation, and rights checks.
 | 4 | `IPCReceive` | channel handle, Read | capacity ≥ 320; `CopyOut` | static wire buffer | no; empty → `NotFound` |
 | 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 64 waiters; per-task status slot | yes, tick deadline; 0 → `Timeout` |
 | 6 | `ConsoleWrite` | device handle, Write, console object | length 1..4096; `CopyIn` | static 4 KiB buffer | no |
-| 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte | no; no input → `NotFound` |
+| 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte from the 256-byte ring the UART interrupt fills | no; no input → `NotFound`; wait with `WaitAny` |
 | 8 | `ClockRead` | — | length exactly 8; `CopyOut` | none | no |
 | 9 | `StartupRead` | registered | length exactly 1024; `CopyIn` of own startup page, `CopyOut` | none | no |
-| 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 channels, global | no |
+| 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 channels, global; charged to PID 1's channel quota | no |
 | 11 | `HandleClose` | own handle | generation and slot | none | no; wakes peers |
 | 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 64 waiters | yes, tick deadline; 0 → `Timeout` |
 | 13 | `SystemInfo` | registered | length exactly 40; `CopyOut` | none | no |
 | 14 | `PortRead` | device handle, Read, port object | spec: width 1/2/4, bits 24+ zero, `offset + width ≤ BAR size` (32-bit sum); `CopyOut` | one port access | no |
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
-| 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; four target pages must be unmapped; output buffer probed before allocation | 4 contiguous pages; at most once per address space | no |
+| 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; four target pages must be unmapped; output buffer probed before allocation | 4 contiguous pages, charged to the page quota; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
-| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 streams × 4 KiB, global | no |
+| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 streams × 4 KiB, global; four per ordinary process (quota) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
 | 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload | static 256 B buffer | no; full → `ResourceExhausted` |
 | 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline |
-| 22 | `WaitAny` | per interest: type-specific rights + Wait | count 1..16; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
+| 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..16, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
-| 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax; time and PID are set by the kernel | 64-record ring, oldest overwritten | no |
+| 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax (failure → `CorruptData`); time and PID are set by the kernel | 64-record ring, oldest overwritten | no |
 | 26 | `LogRead` | device handle, Read, console object | index < 64; 240-byte `CopyOut` | none | no |
 | 27 | `HandleInfo` | registered; own table only | slot < 128; 16-byte `CopyOut` of ID, type, rights | none | no |
-| 28 | `ProcessInfo` | registered | index < 32; 32-byte `CopyOut` of PID, state, task count, name | none | no |
+| 28 | `ProcessInfo` | registered | index < 32; 80-byte `CopyOut` of PID, state, task count, name, CPU ticks, and the held and permitted resource counts | none | no |
 | 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
-| 31 | `ProcessKill` | process handle, Write | handle lookup; refuses PID 1 and the caller's own process | none | retires the target's tasks |
 | 30 | `MemoryMap` | memory handle, Read (+ Write when writable), kernel-registered shared object | flags: only bit 0 (writable); address page-aligned and whole object inside `[0x40180000, 0x401c0000)`; every leaf must be free before any is installed | whole object, NX, non-owned; at most 4 registered objects | no |
+| 31 | `ProcessKill` | process handle, Write | handle lookup; refuses PID 1 and the caller's own process | none | retires the target's tasks |
+| 32 | `ImageMap` | device handle, Read, system-image object (held only by VFS) | virtual address must equal `0x40200000`; archive must be page-aligned and fit `[0x40200000, 0x40400000)`; 16-byte descriptor probed before mapping; every leaf must be free | one leaf table, charged to the page quota; archive mapped read-only, NX, non-owned | no |
+| 33 | `LogBounds` | device handle, Read, console object | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
+| 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -70,11 +75,17 @@ compiles away.
 - Handles, channels, streams, waits, and process lifetime are kernel objects;
   their integrity is the authority model.
 - Port I/O, DMA memory, and IRQ routing need ring 0.
-- `ConsoleRead`/`ConsoleWrite` are in the kernel because no TTY service owns
-  COM1 yet (docs/architecture/tty.md). They are candidates to move to
-  userspace.
-- `DebugWrite` is a bootstrap path and a candidate for removal once boot
-  validation leaves the normal kernel (roadmap Priority 4).
+- `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` are in the kernel
+  because no TTY service owns COM1 yet (docs/architecture/tty.md). They are
+  candidates to move to userspace.
+- `DebugWrite` is a bootstrap path. Boot validation now has its own build
+  (ADR 0058); in a normal build only PID 1 passes its root comparison, and the
+  call remains a candidate for removal.
+- `ImageMap` maps the firmware-reserved boot archive, which only the kernel can
+  name; serving it through VFS keeps the archive parser in userspace
+  (ADR 0070).
+- `LogWrite`, `LogRead`, and `LogBounds` serve the kernel log ring, which must
+  work before any service exists (ADR 0059, 0073).
 - `SystemInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters and
   have no userspace source.
 - Process launch is not a native call. It is requested over the lifecycle
@@ -109,9 +120,10 @@ virtio-blk driver, which re-checks the used ring after every wake (ADR 0035).
 
 ### Capabilities
 
-See [capabilities.md](capabilities.md). Eight calls authorize by caller
+See [capabilities.md](capabilities.md). Ten calls authorize by caller
 identity or need nothing: `Exit`, `DebugWrite`, `ClockRead`, `StartupRead`,
-`SystemInfo`, `ChannelCreate`, `StreamCreate`, and `ClockReadNanos`.
+`SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
+`HandleInfo` (own table only), and `ProcessInfo`.
 
 ### Resource limits
 
@@ -156,8 +168,9 @@ interrupts off, and takes about 2 ms (ADR 0057).
 | --- | --- |
 | `SystemInfo` | caller PID, process count, managed and free pages, tick count |
 | `ClockReadNanos` | nanosecond TSC-derived time |
-| `ProcessInfo` | PID, scheduling state, task count, and executable name of every process |
-| `LogRead` | every retained log record, including other components' events |
+| `ProcessInfo` | PID, scheduling state, task count, executable name, CPU ticks, and resource use and limits of every process |
+| `HandleInfo` | ID, type, and rights of the caller's own handles; never the kernel object |
+| `LogRead`, `LogBounds` | every retained log record, including other components' events, and the ring's sequence window |
 | `DMAAllocate` | physical address of the caller's DMA window |
 | `Diagnostics` (`goos_diag`) | every process's handle table, channel state, physical addresses |
 

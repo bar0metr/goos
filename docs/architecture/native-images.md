@@ -34,8 +34,13 @@ and only then installs the final user mappings. This preserves W^X while
 loading executable bytes. The loader returns only the validated entry and stack
 pointer needed to create a userspace Task.
 
+Read-only segments of images from the system image are loaded once and their
+frames shared by every process running the image (ADR 0081).
+
 Relocations, executable ASLR, demand paging, and mapping rollback after an
-internal VM failure remain future work.
+internal VM failure remain future work. Images are static `ET_EXEC` programs
+linked at `0x40002000`; what randomizing their placement would change in this
+format is described in [memory.md](memory.md#aslr-readiness).
 Linux ELF is a separate compatibility-layer format and does not define this
 native envelope.
 
