@@ -45,11 +45,12 @@ OVMF (UEFI firmware, pflash, read-only)
 4. **System image.** Before `ExitBootServices`, the kernel asks the
    loaded-image protocol for the device it was loaded from, opens
    `\initramfs.tar` on that volume through the simple-file-system protocol,
-   and reads it into 512 pages (2 MiB) of `EfiLoaderData` below 1 GiB
-   (`kernel/boot/uefi/initramfs.go`, ADR 0020). The read is bounded by the
-   buffer; the kernel does not compare it against the file size, so a larger
-   archive would be cut at 2 MiB. The pages stay reserved after the handoff and
-   are never writable from userspace.
+   and reads it into at most `boot.MaxInitramfs` (4 MiB) of `EfiLoaderData`
+   below 1 GiB (`kernel/boot/uefi/initramfs.go`, ADR 0020). A read that fills
+   the buffer is followed by a one-byte read; an archive over the bound stops
+   the boot rather than being used cut short, and the build refuses to produce
+   one. The pages stay reserved after the handoff and are never writable from
+   userspace.
 5. **PID 1.** The kernel finds `system/init` in the archive, loads it through
    the native image loader, and runs it with the fixed capability layout.
    USTAR header checksums are verified on every lookup, which catches damage,
@@ -165,8 +166,6 @@ Missing:
 - a signature format for the system image, a signing step in
   `tools/initramfs`, and a verifier in the kernel. It would run once at boot,
   where ADR 0065 permits allocation;
-- a check that `initramfs.tar` fits the 2 MiB buffer instead of being cut
-  short, at build time and in `LoadInitramfs`;
 - rollback protection (a version the kernel refuses to go below) and
   revocation beyond what `dbx` gives for the kernel;
 - a recovery path when verification fails, which today would simply be a

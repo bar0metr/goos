@@ -1866,6 +1866,12 @@ func main() {
 	console.WriteString("CPU: " + version.Machine + "\n")
 
 	status := bootuefi.LoadInitramfs(&bootInfo)
+	if status == bootuefi.InitramfsTooLarge {
+		console.WriteString("PANIC: initramfs is larger than the 4 MiB the loader reads\n")
+		for {
+			amd64.Halt()
+		}
+	}
 	if status != 0 {
 		console.WriteString("PANIC: initramfs load failed: ")
 		console.WriteHex(uint64(status))

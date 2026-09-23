@@ -2,6 +2,11 @@ package boot
 
 const PageSize = uint64(4096)
 
+// MaxInitramfs bounds the boot archive the firmware loader reads. The build
+// refuses a larger archive and the kernel refuses to boot from one, so an
+// archive can never be used cut short.
+const MaxInitramfs = uint64(4 << 20)
+
 // MemoryKind is architecture-neutral. Firmware-specific numeric values never
 // cross the boot package boundary.
 type MemoryKind uint8

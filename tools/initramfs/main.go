@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"goos/kernel/boot"
 	"goos/userspace/commands"
 )
 
@@ -62,6 +63,23 @@ func main() {
 	if err := output.Close(); err != nil {
 		fail(err)
 	}
+	// The kernel reads at most boot.MaxInitramfs and refuses to boot from a
+	// larger archive, so the build refuses to produce one.
+	written, err := os.Stat(os.Args[12])
+	if err != nil {
+		fail(err)
+	}
+	if err := checkSize(written.Size()); err != nil {
+		os.Remove(os.Args[12])
+		fail(err)
+	}
+}
+
+func checkSize(size int64) error {
+	if size <= 0 || uint64(size) > boot.MaxInitramfs {
+		return fmt.Errorf("initramfs is %d bytes, over the %d the kernel loads (boot.MaxInitramfs)", size, boot.MaxInitramfs)
+	}
+	return nil
 }
 
 type member struct {

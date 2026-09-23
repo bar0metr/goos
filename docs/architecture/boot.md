@@ -19,7 +19,7 @@ contains:
   (`tools/initramfs`, `tools/commands`, ADR 0080).
 
 The ESP is the ISO's El Torito boot image, an 8 MiB FAT volume
-(`tools/iso-uefi`, ADR 0001). QEMU runs q35 with OVMF, 512 MiB RAM, COM1 on
+(`tools/mkiso`, ADR 0086). QEMU runs q35 with OVMF, 512 MiB RAM, COM1 on
 stdio, and a legacy virtio-blk disk (`Makefile`, `QEMU_FLAGS`).
 
 Nothing in this chain is signed or verified. How firmware, kernel, system
@@ -32,8 +32,11 @@ is described in [boot-chain.md](../security/boot-chain.md).
    reported.
 2. **Initramfs load.** Using the loaded-image and simple-file-system
    protocols, the kernel opens `\initramfs.tar` on its boot volume and reads it
-   into 512 pages (2 MiB) of `EfiLoaderData` (`kernel/boot/uefi/initramfs.go`,
-   ADR 0020).
+   into at most `boot.MaxInitramfs` (4 MiB) of `EfiLoaderData`
+   (`kernel/boot/uefi/initramfs.go`, ADR 0020). A larger archive stops the boot
+   with `PANIC: initramfs is larger than the 4 MiB the loader reads` instead of
+   being used cut short, and `tools/initramfs` refuses to build one. The pages
+   past the archive go back to the firmware.
 3. **Memory map and exit.** The kernel captures the final UEFI memory map into
    a fixed buffer, normalizes region types, and calls `ExitBootServices` with
    the matching key, retrying on a stale key without allocating in between
