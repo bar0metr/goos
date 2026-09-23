@@ -301,10 +301,16 @@ device before any offset is derived from it, and a volume the filesystem refuses
 no longer takes the system with it. The machine boots to a prompt with the
 persistent mounts absent, which is the state the volume can be inspected from.
 
-What remains of consolidation is storage failure recovery for a device that
-fails while running, rather than one that is wrong at mount: the storage
-services are still `restart: never`, because restarting one leaves its peers
-holding endpoints whose other side has gone.
+ADR 0078 closes the last: the storage driver restarts, PID 1 gives its
+replacement a fresh channel and tells the block service, and a dead peer no
+longer kills the service its other clients depend on. The validation build kills
+the driver on every boot so the path is exercised rather than assumed. It also
+fixed a wider supervisor defect — a scheduled restart was only acted on when the
+next event happened to arrive — and a log service that created its file only at
+startup.
+
+Consolidation is done. The 0.1.0 release remains a matter of judging the
+existing surface rather than adding to it.
 
 ## Priority 5 — Linux ABI compatibility
 

@@ -241,6 +241,42 @@ func (manager *Manager) Exit(pid uint64, code uint64, now uint64) Status {
 	return StatusNotFound
 }
 
+// RestartPending reports whether any service is waiting to be started. A
+// scheduled restart is a deadline, not an event: nothing else will arrive to
+// make it happen, so a supervisor that only wakes on events would leave the
+// service down forever.
+func (manager *Manager) RestartPending() bool {
+	for index := 0; index < int(manager.count); index++ {
+		if state := manager.services[index].state; state == StateRegistered || state == StateBlocked {
+			return true
+		}
+	}
+	return false
+}
+
+// SetCapability replaces the handle of one named capability in a registered
+// service's launch spec. A restarted service cannot always be handed the
+// endpoints it had: a channel dies with the process that held the other half,
+// so its replacement needs a fresh one, and the definition has to say so or the
+// next restart would hand out the dead handle again.
+func (manager *Manager) SetCapability(name string, capability string, id handle.ID) Status {
+	index, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	if id == 0 {
+		return StatusInvalidArgument
+	}
+	entry := &manager.services[index]
+	for slot := 0; slot < int(entry.launch.CapabilityCount); slot++ {
+		if entry.launch.Capabilities[slot].Name == capability {
+			entry.launch.Capabilities[slot].Handle = id
+			return StatusOK
+		}
+	}
+	return StatusNotFound
+}
+
 func (manager *Manager) Snapshot(name string) (Snapshot, bool) {
 	index, found := manager.index(name)
 	if !found {

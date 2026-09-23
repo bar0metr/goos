@@ -121,11 +121,8 @@ func userspaceMain() {
 	// The configuration session is optional: without one the service keeps its
 	// default, which is to persist.
 	configHandle, _ = data.Handle("config")
-	// No file is not a reason to stop: the kernel ring is the system log and
-	// keeps working. The service retries on its next pass, so a volume that
-	// arrives late, or is repaired, starts being written to without a restart.
 	if !openLog() {
-		syslog.Warn("log file unavailable", syslog.Str("path", logPath))
+		fatal("LOG_RING_UNAVAILABLE\n")
 	}
 	arenaBase = heapPointer
 	mark("LOG_SERVICE_OK\n")
@@ -139,13 +136,15 @@ func userspaceMain() {
 // openLog makes sure the file exists and starts the cursor at the end of the
 // ring. Records already in the ring at startup are persisted: they describe
 // this boot, and losing them would mean the log never covers its own start.
+// openLog fixes the starting cursor. The file itself is created by the first
+// pass that has something to write, so storage that is not ready yet delays
+// persistence rather than disabling it.
 func openLog() bool {
 	if logBounds(uint64(consoleHandle), unsafe.Pointer(&boundsWire[0])) != 0 {
 		return false
 	}
 	cursor = readUint64(boundsWire[0:8])
-	reply, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(logPath)})
-	return ok && (reply.Status == vfs.StatusOK || reply.Status == vfs.StatusAlreadyExists)
+	return true
 }
 
 // drain appends every record produced since the last pass. A cursor below the
@@ -290,6 +289,14 @@ func rotate() {
 // openForAppend opens the live file and positions it at the end, returning the
 // handle and the size it starts at.
 func openForAppend() (uint64, uint64, bool) {
+	// The file is created here rather than only at startup. Storage can be
+	// absent when this service starts and arrive later, and the file can be
+	// removed from under it; either way the next pass makes one rather than
+	// giving up until a restart.
+	created, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(logPath)})
+	if !ok || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
+		return 0, 0, false
+	}
 	stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: []byte(logPath)})
 	if !ok || stat.Status != vfs.StatusOK {
 		return 0, 0, false

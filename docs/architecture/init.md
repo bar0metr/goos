@@ -121,3 +121,21 @@ rather than in the middle of them.
 
 A failure to start the log service warns and continues. Every other service is
 required, because the system cannot serve files or a prompt without them.
+
+## Restarts
+
+A restart is scheduled as a deadline, not delivered as an event, so the
+supervision wait is bounded while one is outstanding and the expiry starts
+whatever is ready. Waiting only on events left a service that was scheduled to
+restart down forever when nothing else happened (ADR 0078).
+
+A service that cannot be handed the endpoints it had needs them replaced before
+it is launched. The storage driver is the one such service: its channel to the
+block service died with it, so PID 1 creates a fresh pair, tells the block
+service over a control endpoint, and updates both the launch about to happen and
+the stored definition. Its device authority — ports, interrupt line, DMA domain
+— is granted rather than consumed, so PID 1 can grant it again.
+
+The validation build kills the driver once, after the system is up, so the path
+a crashed driver takes is exercised on every boot rather than only when hardware
+misbehaves.

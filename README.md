@@ -149,6 +149,8 @@ The native kernel and the first isolated services are implemented:
   blocks instead of holding a CPU while it waits to be typed at;
 - a FAT32 mount that checks the geometry an image declares against the device it
   is on, and a system that still boots when it refuses one;
+- a storage driver that restarts with a fresh channel when it crashes, without
+  taking the services around it down;
 - a supervised log service that drains the bounded kernel ring onto persistent
   storage, so a session's records outlive its reset;
 - a typed configuration service with declared keys, namespace-scoped sessions,
@@ -393,7 +395,7 @@ quotas bound each process's share of every kernel table, and `ps` and `quota`
 report what each process holds. A supervised log service persists the kernel
 ring to `/state`, so records survive a reboot, and a typed configuration service
 holds the system's settings, which the shell and the log service consult. The
-0.1.0 feature set is complete; what remains is consolidation — storage failure recovery for a device that fails while running.
+0.1.0 feature set is complete; what remains is consolidation — judging the existing surface rather than adding to it.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors; stream merging such as

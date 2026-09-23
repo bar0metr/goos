@@ -52,6 +52,13 @@ var (
 	serviceHandle    handle.ID
 	filesystemHandle handle.ID
 	driverHandle     handle.ID
+	controlHandle    handle.ID
+	controlWire      [ipc.WireMaxSize]byte
+	controlMessage   ipc.Message
+	// driverLive is cleared when the driver's endpoint reports its peer gone.
+	// Requests are then refused at once rather than each waiting out a deadline
+	// for a process that is not there.
+	driverLive       = true
 	startupWire      [startup.Size]byte
 	wire             [ipc.WireMaxSize]byte
 	driverWire       [ipc.WireMaxSize]byte
@@ -89,6 +96,9 @@ func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname handleClose goos_handle_close
+func handleClose(id uint64) uint64
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
@@ -112,6 +122,10 @@ func userspaceMain() {
 	if !ok {
 		fatal("BLOCK_DRIVER_MISSING\n")
 	}
+	controlHandle, ok = data.Handle("control")
+	if !ok {
+		fatal("BLOCK_CONTROL_MISSING\n")
+	}
 	filesystemHandle, ok = data.Handle("filesystem")
 	if !ok {
 		fatal("BLOCK_FILESYSTEM_MISSING\n")
@@ -130,7 +144,7 @@ func userspaceMain() {
 	syslog.Info("ready")
 	for {
 		heapPointer = arenaBase
-		endpoints := [...]handle.ID{serviceHandle, filesystemHandle}
+		endpoints := [...]handle.ID{controlHandle, serviceHandle, filesystemHandle}
 		var interests [userwait.MaxObjects]userwait.Interest
 		for index, endpoint := range endpoints {
 			interests[index] = userwait.Interest{Handle: endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -143,10 +157,49 @@ func userspaceMain() {
 			if result.ReadyMask&(1<<index) == 0 {
 				continue
 			}
+			if index == 0 {
+				setDriver()
+				continue
+			}
+			// A client that has gone leaves its endpoint readable forever. It
+			// is not a reason to stop serving the others: this service outlives
+			// the processes that use it.
 			if ipcReceive(uint64(endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != uint64(ipc.StatusOK) {
-				fatal("BLOCK_RECEIVE_FAILED\n")
+				syslog.Warn("client endpoint closed")
+				continue
 			}
 			serve(endpoint)
+		}
+	}
+}
+
+// setDriver installs the endpoint of a restarted driver. PID 1 holds the only
+// control endpoint, so nothing else can redirect where storage requests go.
+func setDriver() {
+	if ipcReceive(uint64(controlHandle), unsafe.Pointer(&controlWire[0]), ipc.WireMaxSize) != uint64(ipc.StatusOK) {
+		return
+	}
+	payloadSize := int(controlWire[24]) | int(controlWire[25])<<8
+	if !ipc.DecodeInto(controlWire[:ipc.WireHeaderSize+payloadSize+int(controlWire[26])*8], &controlMessage) {
+		return
+	}
+	replacement, valid := blockproto.DecodeSetDriver(controlMessage)
+	status := blockproto.StatusOK
+	if !valid {
+		status = blockproto.StatusInvalidArgument
+	} else {
+		handleClose(uint64(driverHandle))
+		driverHandle, driverLive = replacement, true
+		// The endpoint is installed without probing it. PID 1 hands it over
+		// before the replacement driver exists, so a probe here would time out
+		// against a process that has not started; the next real request is what
+		// finds out whether the driver works, and reports it the ordinary way.
+		syslog.Info("driver replaced")
+		mark("BLOCK_DRIVER_REPLACED_OK\n")
+	}
+	if message, ok := blockproto.SetDriverReply(status, controlMessage.Correlation); ok {
+		if size, encoded := ipc.EncodeFrom(&message, controlWire[:]); encoded {
+			ipcSend(uint64(controlHandle), unsafe.Pointer(&controlWire[0]), uintptr(size))
 		}
 	}
 }
@@ -164,8 +217,12 @@ func serve(endpoint handle.ID) {
 	}
 	encoded := blockproto.EncodeReplyInto(service.Dispatch(request), requestMessage.Correlation, &replyMessage)
 	size, wireEncoded := ipc.EncodeFrom(&replyMessage, wire[:])
-	if !encoded || !wireEncoded || ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
-		fatal("BLOCK_REPLY_FAILED\n")
+	if !encoded || !wireEncoded {
+		return
+	}
+	if ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
+		// The caller is gone. Its request dies with it; the service does not.
+		syslog.Warn("reply undeliverable")
 	}
 }
 
@@ -185,6 +242,9 @@ func reject(endpoint handle.ID) {
 }
 
 func exchange(request blockproto.Request) (blockproto.Reply, bool) {
+	if !driverLive {
+		return blockproto.Reply{}, false
+	}
 	correlation++
 	if !blockproto.EncodeRequestInto(request, correlation, &driverRequest) {
 		return blockproto.Reply{}, false
@@ -194,7 +254,14 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 		return blockproto.Reply{}, false
 	}
 	driverDescriptor[0], driverDescriptor[1], driverDescriptor[2] = uint64(uintptr(unsafe.Pointer(&driverWire[0]))), ipc.WireMaxSize, blockproto.RequestDeadline
-	if ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&driverDescriptor[0]), uintptr(len(driverDescriptor)*8)) != 0 {
+	if status := ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&driverDescriptor[0]), uintptr(len(driverDescriptor)*8)); status != 0 {
+		if status == uint64(ipc.StatusPeerDied) {
+			// Every later request would wait out its deadline against a process
+			// that is not there. They are refused until a driver is installed.
+			driverLive = false
+			syslog.Error("driver gone")
+			mark("BLOCK_DRIVER_LOST_OK\n")
+		}
 		return blockproto.Reply{}, false
 	}
 	payloadSize := int(driverWire[24]) | int(driverWire[25])<<8

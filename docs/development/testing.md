@@ -65,6 +65,10 @@ written before that boot, so a record surviving the reset is a persistence
 proof. The validation build uses a smaller rotation bound so one session crosses
 it.
 
+The storage group asserts that the driver, which the validation build kills once
+after the system is up, starts twice and that the block service is told about
+the replacement and does not itself restart.
+
 A fourth QEMU phase boots the system on a volume claiming far more sectors than
 its device holds, logged to `build/logs/corrupt-volume.log`. It requires the
 system to reach a prompt, report the refused volume, list a root without the

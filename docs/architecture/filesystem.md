@@ -87,7 +87,13 @@ repeated metadata reads (ADR 0048).
   parse.
 - Every storage wait is bounded; an expired wait becomes an I/O error.
 - A crashed service closes its endpoints on teardown, and peers observe
-  `PeerDied`. The storage services are not restarted today.
+  `PeerDied`. A dead peer is dropped rather than treated as fatal: a service
+  outlives the processes that use it.
+- The driver restarts (`restart: on-failure`). PID 1 creates a fresh channel,
+  tells the block service over a control endpoint, and launches the replacement
+  with the same device authority, which it kept rather than consumed. The block
+  service and the filesystem service do not restart: their clients hold sessions
+  that would each have to be rebuilt (ADR 0078).
 
 ## Names
 
