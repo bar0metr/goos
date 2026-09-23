@@ -163,6 +163,18 @@ func TestResolveDoesNotAllocate(t *testing.T) {
 	}); allocations != 0 {
 		t.Fatalf("Resolve allocated: %v", allocations)
 	}
+	// The mount phase of a listing runs in the same leak-free kernel heap.
+	mounted := &ramfs.FileSystem{}
+	if namespace.Mount([]byte("/mounted"), mounted, mounted.Init()) != StatusOK {
+		t.Fatal("mount failed")
+	}
+	if allocations := testing.AllocsPerRun(1000, func() {
+		if _, _, status := namespace.ReadDir([]byte("/"), mountCursor); status != StatusOK {
+			t.Fatalf("readdir: %d", status)
+		}
+	}); allocations != 0 {
+		t.Fatalf("ReadDir allocated: %v", allocations)
+	}
 }
 
 func TestProtocolRoundTripAndReservedFields(t *testing.T) {
@@ -212,5 +224,163 @@ func TestSyncRequestIsDistinctFromAddSession(t *testing.T) {
 	reply, ok := AddSessionReply(StatusOK, 4)
 	if status, valid := DecodeAddSessionReply(reply); !ok || !valid || status != StatusOK {
 		t.Fatal("sync reply does not decode")
+	}
+}
+
+// listing walks a directory the way a client does, through opaque cursors.
+func listing(t testing.TB, namespace *Namespace, path string) []string {
+	t.Helper()
+	var names []string
+	cursor := 0
+	for len(names) <= MaxMounts+MaxCache {
+		entry, next, status := namespace.ReadDir([]byte(path), cursor)
+		if status == StatusNotFound {
+			return names
+		}
+		if status != StatusOK {
+			t.Fatalf("readdir %s: %d", path, status)
+		}
+		names = append(names, string(entry.Name[:entry.Size]))
+		if next <= cursor {
+			t.Fatalf("readdir %s: cursor did not advance past %d", path, cursor)
+		}
+		cursor = next
+	}
+	t.Fatalf("readdir %s did not terminate", path)
+	return nil
+}
+
+func contains(names []string, wanted string) bool {
+	for _, name := range names {
+		if name == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func TestMountsAreListedInTheirParentDirectory(t *testing.T) {
+	namespace, fs := mountedNamespace(t)
+	if namespace.Create([]byte("/system"), true) != StatusOK || namespace.Create([]byte("/tmp"), true) != StatusOK {
+		t.Fatal("create failed")
+	}
+	persistent := &ramfs.FileSystem{}
+	if namespace.Mount([]byte("/persist"), persistent, persistent.Init()) != StatusOK {
+		t.Fatal("persistent mount failed")
+	}
+	image := &ramfs.FileSystem{}
+	imageRoot := image.Init()
+	if _, status := image.Mkdir(imageRoot, []byte("bin")); status != ramfs.StatusOK {
+		t.Fatalf("image mkdir: %d", status)
+	}
+	if namespace.Mount([]byte("/system/image"), image, imageRoot) != StatusOK {
+		t.Fatal("image mount failed")
+	}
+
+	root := listing(t, namespace, "/")
+	for _, wanted := range []string{"system", "tmp", "persist"} {
+		if !contains(root, wanted) {
+			t.Fatalf("root listing %v is missing %q", root, wanted)
+		}
+	}
+	if contains(root, "image") {
+		t.Fatalf("root listing %v leaked a nested mount", root)
+	}
+	if system := listing(t, namespace, "/system"); !contains(system, "image") {
+		t.Fatalf("/system listing %v is missing its mount", system)
+	}
+	if nested := listing(t, namespace, "/system/image"); !contains(nested, "bin") {
+		t.Fatalf("/system/image listing %v is missing backend content", nested)
+	}
+
+	// A mount is a directory to its parent and resolves into its own backend.
+	stat, status := namespace.Stat([]byte("/persist"))
+	if status != StatusOK || stat.Kind != ramfs.KindDirectory {
+		t.Fatalf("stat mount point: %d %d", status, stat.Kind)
+	}
+	if fs.Root() == 0 {
+		t.Fatal("owning backend lost its root")
+	}
+}
+
+func TestBackendEntryShadowsItsMountPointName(t *testing.T) {
+	namespace, fs := mountedNamespace(t)
+	if _, status := fs.Mkdir(fs.Root(), []byte("persist")); status != ramfs.StatusOK {
+		t.Fatalf("mkdir: %d", status)
+	}
+	persistent := &ramfs.FileSystem{}
+	if namespace.Mount([]byte("/persist"), persistent, persistent.Init()) != StatusOK {
+		t.Fatal("mount failed")
+	}
+	names := listing(t, namespace, "/")
+	seen := 0
+	for _, name := range names {
+		if name == "persist" {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("root listing %v names the mount point %d times", names, seen)
+	}
+}
+
+func TestReadDirRejectsNegativeAndInvalidCursors(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	if _, _, status := namespace.ReadDir([]byte("/"), -1); status != StatusInvalidArgument {
+		t.Fatalf("negative cursor accepted: %d", status)
+	}
+	if _, _, status := namespace.ReadDir([]byte("relative"), 0); status != StatusInvalidArgument {
+		t.Fatalf("relative path accepted: %d", status)
+	}
+	if _, _, status := namespace.ReadDir([]byte("/"), mountCursor+MaxMounts); status != StatusNotFound {
+		t.Fatalf("exhausted mount cursor: %d", status)
+	}
+}
+
+func TestUnlinkRefusesToOrphanAMount(t *testing.T) {
+	namespace, fs := mountedNamespace(t)
+	if namespace.Create([]byte("/system"), true) != StatusOK {
+		t.Fatal("create failed")
+	}
+	volume := &ramfs.FileSystem{}
+	volumeRoot := volume.Init()
+	if namespace.Mount([]byte("/persist"), volume, volumeRoot) != StatusOK {
+		t.Fatal("volume mount failed")
+	}
+	home, status := volume.Mkdir(volumeRoot, []byte("home"))
+	if status != ramfs.StatusOK {
+		t.Fatalf("mkdir home: %d", status)
+	}
+	if namespace.Mount([]byte("/home"), volume, home) != StatusOK {
+		t.Fatal("home mount failed")
+	}
+	nested := &ramfs.FileSystem{}
+	if namespace.Mount([]byte("/system/image"), nested, nested.Init()) != StatusOK {
+		t.Fatal("nested mount failed")
+	}
+
+	// The same directory under its other name must stay protected.
+	if status := namespace.Unlink([]byte("/persist/home")); status != StatusPermissionDenied {
+		t.Fatalf("aliased mount root removed: %d", status)
+	}
+	if status := namespace.Unlink([]byte("/home")); status != StatusPermissionDenied {
+		t.Fatalf("mount root removed: %d", status)
+	}
+	if status := namespace.Unlink([]byte("/system")); status != StatusPermissionDenied {
+		t.Fatalf("directory carrying a mount removed: %d", status)
+	}
+	if _, _, status := namespace.Resolve([]byte("/home")); status != StatusOK {
+		t.Fatalf("mount lost after refused removals: %d", status)
+	}
+
+	// An ordinary entry is still removable.
+	if namespace.Create([]byte("/persist/note"), false) != StatusOK {
+		t.Fatal("create note failed")
+	}
+	if status := namespace.Unlink([]byte("/persist/note")); status != StatusOK {
+		t.Fatalf("ordinary unlink refused: %d", status)
+	}
+	if fs.Root() == 0 {
+		t.Fatal("owning backend lost its root")
 	}
 }

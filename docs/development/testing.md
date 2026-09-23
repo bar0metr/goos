@@ -48,8 +48,15 @@ command with Ctrl-C, and runs a four-stage pipeline whose request is larger
 than one IPC message. The
 reboot phase has a 60-second bound and reads the persisted file in a fresh VM
 without recreating it. A third phase runs the M7 acceptance inside one VM,
-logged to `build/logs/m7-reboot.log`. It creates `/persist/demo`, writes a file in it, runs the
-shell's `reboot`, and requires both boots and both reads of the file.
+logged to `build/logs/m7-reboot.log`. It creates `/home/m7`, writes a file in
+it, runs the shell's `reboot`, and requires both boots and both reads of the
+file. It uses `/home` because that is where the specification puts user data.
+
+The filesystem group also asserts the namespace layout: that `ls /` names every
+mount, that `/system` is the boot image with its twenty utilities listed under
+`/system/bin`, that `mkdir /system/backdoor` is refused with "read-only
+filesystem", and that a file written through `/home` reads back through
+`/persist/home` as the same bytes.
 
 The main phase also reads `runtime.heapptr` through the QEMU monitor at the
 first prompt and again at the end, and fails if it moved: the kernel leaks every

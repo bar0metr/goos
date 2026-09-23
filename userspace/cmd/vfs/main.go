@@ -7,6 +7,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	syslog "goos/userspace/log"
@@ -104,6 +105,27 @@ func handleClose(id uint64) uint64
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname imageMap goos_image_map
+func imageMap(device uint64, virtual uint64, address unsafe.Pointer) uint64
+
+// mountSystemImage maps the read-only boot image and mounts it at /system, so
+// the executables the launch path resolves are the ones a listing shows. The
+// capability is the only authority the service has over the image, and the
+// mapping it produces is not writable.
+func mountSystemImage(imageHandle handle.ID) bool {
+	var descriptor [2]uint64
+	if imageMap(uint64(imageHandle), vm.UserImageAddress, unsafe.Pointer(&descriptor[0])) != 0 {
+		return false
+	}
+	if descriptor[0] != vm.UserImageAddress || descriptor[1] == 0 || descriptor[1] > vm.UserImageLimit-vm.UserImageAddress {
+		return false
+	}
+	// SAFETY: the kernel mapped exactly descriptor[1] bytes of the boot image
+	// read-only at descriptor[0] before returning success, and the mapping
+	// lives for as long as this address space does.
+	return service.MountSystemImage(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(descriptor[0]))), int(descriptor[1])))
+}
+
 //export userspaceMain
 func userspaceMain() {
 	runtimeInitHeap()
@@ -132,17 +154,26 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_BLOCK_MISSING\n")
 	}
+	imageHandle, found := startupData.Handle("image")
+	if !found {
+		fatal("VFS_IMAGE_MISSING\n")
+	}
 	sessions[0] = uint64(initialSessionHandle)
 	liveSessions = 1
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
+	}
+	if !mountSystemImage(imageHandle) {
+		fatal("VFS_IMAGE_MOUNT_FAILED\n")
 	}
 	if !service.MountPersistent(blockDevice{}) {
 		fatal("VFS_FAT32_MOUNT_FAILED\n")
 	}
 	arenaBase = heapPointer
 	mark("VFS_SERVICE_OK\n")
+	mark("SYSTEM_IMAGE_MOUNT_OK\n")
 	mark("FAT32_MOUNT_OK\n")
+	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", "/system"))
 	syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
 	for {
 		heapPointer = arenaBase

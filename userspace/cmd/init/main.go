@@ -39,6 +39,7 @@ const filesystemBlockClientHandle = handle.ID(0x0000000100000010)
 const filesystemBlockServerHandle = handle.ID(0x0000000100000011)
 const systemControlHandle = uint64(0x0000000100000012)
 const execPageHandle = handle.ID(0x0000000100000014)
+const systemImageHandle = handle.ID(0x0000000100000015)
 
 //go:linkname processKill goos_process_kill
 func processKill(process uint64) uint64
@@ -208,6 +209,7 @@ func startServices(ticks uint64) {
 			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read, Consume: true},
 		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
 			Capabilities: []supervisor.Capability{

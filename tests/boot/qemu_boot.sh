@@ -271,6 +271,20 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'ls system\n'
 	sleep 1
+	printf 'ls /system/bin\n'
+	sleep 1
+	printf 'stat /system/bin/ls\n'
+	sleep 1
+	printf 'mkdir /system/backdoor\n'
+	sleep 1
+	printf 'mkdir /home/demo\n'
+	sleep 1
+	printf 'write /home/demo/message.txt "persistent"\n'
+	sleep 1
+	printf 'cat /home/demo/message.txt\n'
+	sleep 1
+	printf 'cat /persist/home/demo/message.txt\n'
+	sleep 1
 	printf 'cd /system\n'
 	sleep 1
 	printf 'ls\n'
@@ -444,6 +458,23 @@ for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VF
 	require_marker "filesystem.$marker" "$marker" "$log"
 done
 require_marker filesystem.persisted-content 'Welcome to GoOS' "$log" 'cat /persist/state.txt'
+require_marker filesystem.system-image-mounted SYSTEM_IMAGE_MOUNT_OK "$log"
+# The namespace must name every mount, so the layout is discoverable by walking
+# it rather than only by knowing a path in advance.
+for entry in system tmp persist home state; do
+	require_regex "filesystem.root-lists-$entry" "^$entry/\$" "$entry/ in the root listing" "$log" 'ls /'
+done
+# /system is the boot image itself: the executables the launch path resolves are
+# the ones a listing shows, and nothing can write to them.
+require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" 'ls system'
+for entry in coreutils ls cat write; do
+	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
+done
+require_regex filesystem.system-image-immutable '^read-only filesystem$' 'a refused write to the system image' "$log" 'mkdir /system/backdoor'
+# User data has its own mount on the persistent volume and is the same bytes
+# under the whole-volume name.
+require_regex filesystem.home-content '^persistent$' 'persistent through /home' "$log" 'cat /home/demo/message.txt'
+require_regex filesystem.home-alias '^persistent$' 'persistent through /persist/home' "$log" 'cat /persist/home/demo/message.txt'
 pass_group filesystem
 
 for marker in SHELL_PROCESS_OK SHELL_VFS_CONNECTED_OK SHELL_HELP_OK ECHO_PROCESS_OK ARGS_PROCESS_OK ARGV_ENV_PROCESS_OK STDIN_HANDLE_OK STDERR_HANDLE_OK STDIN_READ_OK SHELL_CLEAR_OK UPTIME_PROCESS_OK PWD_PROCESS_OK LS_PROCESS_OK SHELL_CD_OK CAT_PROCESS_OK MKDIR_PROCESS_OK TOUCH_PROCESS_OK STAT_PROCESS_OK CP_PROCESS_OK MV_PROCESS_OK RM_PROCESS_OK UNAME_PROCESS_OK PS_PROCESS_OK MEM_PROCESS_OK SLEEP_PROCESS_OK EXIT_STATUS_PROPAGATION_OK; do
@@ -536,17 +567,18 @@ require_regex exec.large-pipeline '^pipeline request larger than one ipc message
 pass_group release-shell
 
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.
+# It uses /home because that is where the specification puts user data.
 rm -f "$m7_log"
 ( sleep 6
-	printf 'mkdir /persist/demo\n'
+	printf 'mkdir /home/m7\n'
 	sleep 2
-	printf 'write /persist/demo/hello.txt "Hello from GoOS"\n'
+	printf 'write /home/m7/hello.txt "Hello from GoOS"\n'
 	sleep 2
-	printf 'cat /persist/demo/hello.txt\n'
+	printf 'cat /home/m7/hello.txt\n'
 	sleep 2
 	printf 'reboot\n'
 	sleep 12
-	printf 'cat /persist/demo/hello.txt\n'
+	printf 'cat /home/m7/hello.txt\n'
 ) | qemu-system-x86_64 -machine q35 -m 512M \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -562,7 +594,7 @@ until [ "$(grep -c '^Hello from GoOS$' "$m7_log" 2>/dev/null || true)" -ge 2 ] |
 done
 cleanup
 require_count m7.boots 'Kernel initialized' 2 "$m7_log" 'Rebooting...'
-require_count m7.read-before-and-after '^Hello from GoOS$' 2 "$m7_log" 'cat /persist/demo/hello.txt'
+require_count m7.read-before-and-after '^Hello from GoOS$' 2 "$m7_log" 'cat /home/m7/hello.txt'
 require_window m7.read-after-reboot '^Hello from GoOS$' 'file read back after the in-guest reboot' "$m7_log" 'Rebooting...' 'NO_SUCH_LINE'
 pass_group m7-reboot
 

@@ -7,6 +7,10 @@ const (
 	MaxOpenFiles = 64
 	MaxPath      = 255
 	MaxCache     = 32
+	// mountCursor separates the backend phase of a directory scan from the
+	// mount phase. It is above every cursor a backend can return and below the
+	// uint32 the service protocol carries.
+	mountCursor = 1 << 30
 )
 
 type Status uint8
@@ -231,13 +235,65 @@ func (namespace *Namespace) Stat(path []byte) (ramfs.Stat, Status) {
 	return stat, mapStatus(backendStatus)
 }
 
+// ReadDir lists a directory in two phases. Cursors below mountCursor belong to
+// the backend that owns the directory; once the backend is exhausted the scan
+// continues through the mount table, so a mounted filesystem is discoverable by
+// walking the tree rather than only by knowing its path in advance.
 func (namespace *Namespace) ReadDir(path []byte, cursor int) (ramfs.Entry, int, Status) {
-	mountIndex, node, status := namespace.Resolve(path)
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
+	if !ok || cursor < 0 {
+		return ramfs.Entry{}, cursor, StatusInvalidArgument
+	}
+	mountIndex, node, status := namespace.Resolve(canonical[:size])
 	if status != StatusOK {
 		return ramfs.Entry{}, cursor, status
 	}
-	entry, next, backendStatus := namespace.mounts[mountIndex].backend.ReadDir(node, cursor)
-	return entry, next, mapStatus(backendStatus)
+	if cursor < mountCursor {
+		entry, next, backendStatus := namespace.mounts[mountIndex].backend.ReadDir(node, cursor)
+		if backendStatus != ramfs.StatusNotFound {
+			return entry, next, mapStatus(backendStatus)
+		}
+		cursor = mountCursor
+	}
+	return namespace.mountedEntry(canonical[:size], node, mountIndex, cursor-mountCursor)
+}
+
+// mountedEntry reports the filesystems mounted directly on the directory named
+// by path, starting at index. A mount whose name the owning backend already
+// listed is skipped, because resolution prefers the mount and the name must
+// name one entry rather than two.
+func (namespace *Namespace) mountedEntry(path []byte, node ramfs.NodeID, owner uint8, index int) (ramfs.Entry, int, Status) {
+	if index < 0 {
+		index = 0
+	}
+	for ; index < len(namespace.mounts); index++ {
+		mounted := &namespace.mounts[index]
+		if !mounted.used || uint8(index) == owner {
+			continue
+		}
+		component, direct := mountedName(path, mounted.path[:mounted.size])
+		if !direct {
+			continue
+		}
+		name, valid := ramfs.MakeName(component)
+		if !valid {
+			continue
+		}
+		if _, status := namespace.mounts[owner].backend.OpenName(node, name); status == ramfs.StatusOK {
+			continue
+		}
+		stat, status := mounted.backend.Stat(mounted.root)
+		if status != ramfs.StatusOK {
+			// A mount root is a directory by construction, so the mount stays
+			// visible even when its backend cannot describe it.
+			stat = ramfs.Stat{ID: mounted.root, Kind: ramfs.KindDirectory}
+		}
+		entry := ramfs.Entry{Stat: stat, Size: uint8(len(component))}
+		copy(entry.Name[:], component)
+		return entry, mountCursor + index + 1, StatusOK
+	}
+	return ramfs.Entry{}, mountCursor + len(namespace.mounts), StatusNotFound
 }
 
 func (namespace *Namespace) Truncate(path []byte, size uint64) Status {
@@ -249,6 +305,9 @@ func (namespace *Namespace) Truncate(path []byte, size uint64) Status {
 }
 
 func (namespace *Namespace) Unlink(path []byte) Status {
+	if namespace.carriesMount(path) {
+		return StatusPermissionDenied
+	}
 	mountIndex, parent, name, status := namespace.resolveParent(path)
 	if status != StatusOK {
 		return status
@@ -258,6 +317,35 @@ func (namespace *Namespace) Unlink(path []byte) Status {
 		namespace.invalidate()
 	}
 	return status
+}
+
+// carriesMount reports whether removing path would orphan a mount, either
+// because path names a mount root or because a mount sits below it. The node
+// check matters because one filesystem can be reachable under several paths:
+// removing /persist/home must not strand a mount of the same directory at
+// /home.
+func (namespace *Namespace) carriesMount(path []byte) bool {
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
+	if !ok {
+		return false
+	}
+	for index := range namespace.mounts {
+		if entry := &namespace.mounts[index]; entry.used && mountMatches(entry.path[:entry.size], canonical[:size]) {
+			return true
+		}
+	}
+	mountIndex, node, status := namespace.Resolve(canonical[:size])
+	if status != StatusOK {
+		return false
+	}
+	backend := namespace.mounts[mountIndex].backend
+	for index := range namespace.mounts {
+		if entry := &namespace.mounts[index]; entry.used && entry.root == node && entry.backend == backend {
+			return true
+		}
+	}
+	return false
 }
 
 func (namespace *Namespace) Rename(path []byte, target []byte) Status {
@@ -423,6 +511,27 @@ func nextComponent(path []byte) ([]byte, []byte) {
 	return path, nil
 }
 
+// mountedName returns the single component naming mountPath as a direct child
+// of directory, and reports whether it is one.
+func mountedName(directory []byte, mountPath []byte) ([]byte, bool) {
+	if len(mountPath) <= len(directory) || !mountMatches(mountPath, directory) {
+		return nil, false
+	}
+	remainder := mountPath[len(directory):]
+	if remainder[0] == '/' {
+		remainder = remainder[1:]
+	}
+	if len(remainder) == 0 {
+		return nil, false
+	}
+	for _, value := range remainder {
+		if value == '/' {
+			return nil, false
+		}
+	}
+	return remainder, true
+}
+
 func mountMatches(path []byte, mountPath []byte) bool {
 	return len(path) >= len(mountPath) && equal(path[:len(mountPath)], mountPath) && (len(mountPath) == 1 || len(path) == len(mountPath) || path[len(mountPath)] == '/')
 }
@@ -459,6 +568,8 @@ func mapStatus(status ramfs.Status) Status {
 		return StatusAlreadyExists
 	case ramfs.StatusResourceExhausted:
 		return StatusResourceExhausted
+	case ramfs.StatusPermissionDenied:
+		return StatusPermissionDenied
 	default:
 		return StatusBackendError
 	}

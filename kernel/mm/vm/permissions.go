@@ -15,6 +15,11 @@ const (
 	UserSharedAddress = uint64(0x40180000)
 	UserSharedLimit   = uint64(0x401c0000)
 	UserDMAAddress    = uint64(0x401c0000)
+	// The boot system image is mapped read-only inside
+	// [UserImageAddress, UserImageLimit). The window is two MiB because that is
+	// what the bootloader reserves for the archive.
+	UserImageAddress = uint64(0x40200000)
+	UserImageLimit   = uint64(0x40400000)
 
 	entryPresent  = uint64(1 << 0)
 	entryWritable = uint64(1 << 1)

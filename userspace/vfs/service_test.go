@@ -1,10 +1,69 @@
 package vfsservice
 
 import (
+	"archive/tar"
+	"bytes"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"testing"
+	"time"
 )
+
+// testSystemImage builds the shape the real boot archive has: a system
+// directory, its message of the day, and one program reachable under several
+// names in system/bin.
+func testSystemImage(t testing.TB) []byte {
+	t.Helper()
+	buffer := &bytes.Buffer{}
+	writer := tar.NewWriter(buffer)
+	epoch := time.Unix(0, 0)
+	program := []byte("PROGRAM")
+	motd := []byte("Welcome to GoOS\n")
+	headers := []tar.Header{
+		{Name: "system/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/bin/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/motd", Mode: 0o444, Size: int64(len(motd)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/bin/coreutils", Mode: 0o555, Size: int64(len(program)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/bin/ls", Mode: 0o555, Typeflag: tar.TypeLink, Linkname: "system/bin/coreutils", ModTime: epoch, Format: tar.FormatUSTAR},
+	}
+	for index := range headers {
+		if err := writer.WriteHeader(&headers[index]); err != nil {
+			t.Fatalf("header %s: %v", headers[index].Name, err)
+		}
+		if headers[index].Name == "system/motd" {
+			if _, err := writer.Write(motd); err != nil {
+				t.Fatalf("motd: %v", err)
+			}
+		} else if headers[index].Name == "system/bin/coreutils" {
+			if _, err := writer.Write(program); err != nil {
+				t.Fatalf("program: %v", err)
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+// startedService is a service with the mounts a booted system has.
+func startedService(t testing.TB, device fat32Device) *Service {
+	t.Helper()
+	service := &Service{}
+	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+		t.Fatal("service init failed")
+	}
+	if device != nil && !service.MountPersistent(device) {
+		t.Fatal("persistent mount failed")
+	}
+	return service
+}
+
+type fat32Device interface {
+	ReadAt(offset uint64, target []byte) bool
+	WriteAt(offset uint64, data []byte) bool
+	Flush() bool
+}
 
 type testBlockDevice struct{ data []byte }
 
@@ -32,10 +91,7 @@ func testFAT32Device() *testBlockDevice {
 }
 
 func TestServiceFilesystemLifecycle(t *testing.T) {
-	var service Service
-	if !service.Init() {
-		t.Fatal("service init failed")
-	}
+	service := startedService(t, nil)
 	stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte("/system")})
 	if stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
 		t.Fatalf("stat = %+v", stat)
@@ -54,10 +110,7 @@ func TestServiceFilesystemLifecycle(t *testing.T) {
 }
 
 func TestServiceReadDirIsBounded(t *testing.T) {
-	var service Service
-	if !service.Init() {
-		t.Fatal("service init failed")
-	}
+	service := startedService(t, nil)
 	first := service.Dispatch(vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/"), Offset: 0})
 	if first.Status != vfs.StatusOK || first.Cursor == 0 || len(first.Name) == 0 {
 		t.Fatalf("readdir = %+v", first)
@@ -65,10 +118,7 @@ func TestServiceReadDirIsBounded(t *testing.T) {
 }
 
 func TestServicePersistentFileLifecycle(t *testing.T) {
-	var service Service
-	if !service.Init() || !service.MountPersistent(testFAT32Device()) {
-		t.Fatal("service mount failed")
-	}
+	service := startedService(t, testFAT32Device())
 	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/state.txt")}); reply.Status != vfs.StatusOK {
 		t.Fatalf("create = %d", reply.Status)
 	}
@@ -93,10 +143,7 @@ func TestServicePersistentFileLifecycle(t *testing.T) {
 
 func TestServicePersistentSubdirectoryLifecycle(t *testing.T) {
 	device := testFAT32Device()
-	service := &Service{}
-	if !service.Init() || !service.MountPersistent(device) {
-		t.Fatal("service mount failed")
-	}
+	service := startedService(t, device)
 	dispatch := func(request vfs.Request) vfs.Reply {
 		t.Helper()
 		reply := service.Dispatch(request)
@@ -123,10 +170,7 @@ func TestServicePersistentSubdirectoryLifecycle(t *testing.T) {
 		t.Fatalf("readdir end = %d", end.Status)
 	}
 
-	service = &Service{}
-	if !service.Init() || !service.MountPersistent(device) {
-		t.Fatal("remount failed")
-	}
+	service = startedService(t, device)
 	opened = dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
 	if read := dispatch(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64}); string(read.Data) != "persistent\n" {
 		t.Fatalf("read = %q", read.Data)
@@ -139,5 +183,153 @@ func TestServicePersistentSubdirectoryLifecycle(t *testing.T) {
 	dispatch(vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/persist/demo")})
 	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte("/persist/demo")}); reply.Status != vfs.StatusNotFound {
 		t.Fatalf("stat removed = %d", reply.Status)
+	}
+}
+
+func TestUserDataAndStateHaveTheirOwnMounts(t *testing.T) {
+	device := testFAT32Device()
+	service := startedService(t, device)
+	for _, path := range []string{"/home", "/state"} {
+		stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
+		if stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
+			t.Fatalf("stat %s = %d %d", path, stat.Status, stat.Kind)
+		}
+	}
+
+	// The root listing names every mount, so the layout is discoverable.
+	names := map[string]bool{}
+	for cursor := uint32(0); ; {
+		reply := service.Dispatch(vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/"), Offset: uint64(cursor)})
+		if reply.Status == vfs.StatusNotFound {
+			break
+		}
+		if reply.Status != vfs.StatusOK || reply.Cursor <= cursor {
+			t.Fatalf("readdir / = %d cursor %d", reply.Status, reply.Cursor)
+		}
+		names[string(reply.Name)] = true
+		cursor = reply.Cursor
+	}
+	for _, wanted := range []string{"system", "tmp", "persist", "home", "state"} {
+		if !names[wanted] {
+			t.Fatalf("root listing %v is missing %q", names, wanted)
+		}
+	}
+
+	// Writing through /home lands on the volume and survives a remount.
+	write := func(path string, payload string) {
+		t.Helper()
+		if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(path)}); reply.Status != vfs.StatusOK {
+			t.Fatalf("create %s = %d", path, reply.Status)
+		}
+		opened := service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(path)})
+		if opened.Status != vfs.StatusOK {
+			t.Fatalf("open %s = %d", path, opened.Status)
+		}
+		if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte(payload)}); reply.Status != vfs.StatusOK {
+			t.Fatalf("write %s = %d", path, reply.Status)
+		}
+		service.Dispatch(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	}
+	read := func(path string) string {
+		t.Helper()
+		opened := service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte(path)})
+		if opened.Status != vfs.StatusOK {
+			t.Fatalf("open %s = %d", path, opened.Status)
+		}
+		reply := service.Dispatch(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+		if reply.Status != vfs.StatusOK {
+			t.Fatalf("read %s = %d", path, reply.Status)
+		}
+		service.Dispatch(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+		return string(reply.Data)
+	}
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationMkdir, Path: []byte("/home/demo")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("mkdir /home/demo = %d", reply.Status)
+	}
+	write("/home/demo/message.txt", "persistent")
+
+	// /persist is the same volume, so the file is reachable under both names.
+	if value := read("/persist/home/demo/message.txt"); value != "persistent" {
+		t.Fatalf("aliased read = %q", value)
+	}
+
+	service = startedService(t, device)
+	if value := read("/home/demo/message.txt"); value != "persistent" {
+		t.Fatalf("read after remount = %q", value)
+	}
+}
+
+func TestPersistentMountsSurviveDirectoryRemoval(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	for _, path := range []string{"/home", "/persist/home", "/state", "/persist"} {
+		if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationUnlink, Path: []byte(path)}); reply.Status == vfs.StatusOK {
+			t.Fatalf("removing %s orphaned a mount", path)
+		}
+	}
+	if stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home")}); stat.Status != vfs.StatusOK {
+		t.Fatalf("/home lost: %d", stat.Status)
+	}
+}
+
+func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+
+	// The executables the launch path resolves are the ones a listing shows.
+	names := map[string]bool{}
+	for cursor := uint32(0); ; {
+		reply := service.Dispatch(vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/system/bin"), Offset: uint64(cursor)})
+		if reply.Status == vfs.StatusNotFound {
+			break
+		}
+		if reply.Status != vfs.StatusOK || reply.Cursor <= cursor {
+			t.Fatalf("readdir /system/bin = %d cursor %d", reply.Status, reply.Cursor)
+		}
+		names[string(reply.Name)] = true
+		cursor = reply.Cursor
+	}
+	if !names["ls"] || !names["coreutils"] {
+		t.Fatalf("/system/bin listing = %v", names)
+	}
+	if stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte("/system/bin/ls")}); stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 7 {
+		t.Fatalf("stat /system/bin/ls = %+v", stat)
+	}
+	opened := service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/system/motd")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open motd = %d", opened.Status)
+	}
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64}); string(reply.Data) != "Welcome to GoOS\n" {
+		t.Fatalf("read motd = %q", reply.Data)
+	}
+	service.Dispatch(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+
+	// Nothing can change the system image through the namespace.
+	for _, request := range []vfs.Request{
+		{Operation: vfs.OperationCreate, Path: []byte("/system/bin/backdoor")},
+		{Operation: vfs.OperationMkdir, Path: []byte("/system/extra")},
+		{Operation: vfs.OperationUnlink, Path: []byte("/system/motd")},
+		{Operation: vfs.OperationTruncate, Path: []byte("/system/motd"), Offset: 0},
+		{Operation: vfs.OperationRename, Path: []byte("/system/motd"), Data: []byte("/system/banner")},
+	} {
+		if reply := service.Dispatch(request); reply.Status != vfs.StatusPermissionDenied {
+			t.Fatalf("mutation %d of %s = %d", request.Operation, request.Path, reply.Status)
+		}
+	}
+	writable := service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte("/system/motd")})
+	if writable.Status == vfs.StatusOK {
+		if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationWrite, Handle: writable.Handle, Data: []byte("x")}); reply.Status != vfs.StatusPermissionDenied {
+			t.Fatalf("write to the system image = %d", reply.Status)
+		}
+		service.Dispatch(vfs.Request{Operation: vfs.OperationClose, Handle: writable.Handle})
+	}
+}
+
+func TestMalformedSystemImageIsRefused(t *testing.T) {
+	image := testSystemImage(t)
+	image[0] = 'x'
+	if (&Service{}).MountSystemImage(image) {
+		t.Fatal("corrupt system image mounted")
+	}
+	if (&Service{}).MountSystemImage(nil) {
+		t.Fatal("empty system image mounted")
 	}
 }

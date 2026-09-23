@@ -46,9 +46,14 @@ func main() {
 	}
 	writer := tar.NewWriter(file)
 	epoch := time.Unix(0, 0)
+	// The message of the day belongs to the immutable system image rather than
+	// to the volatile root, because /system is a read-only mount of this
+	// archive.
+	motd := []byte("Welcome to GoOS\n")
 	headers := []tar.Header{
 		{Name: "system/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/bin/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: epoch, Format: tar.FormatUSTAR},
+		{Name: "system/motd", Mode: 0o444, Size: int64(len(motd)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/init", Mode: 0o555, Size: int64(len(image)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/fault-probe", Mode: 0o555, Size: int64(len(service)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
 		{Name: "system/vfs", Mode: 0o555, Size: int64(len(vfs)), Typeflag: tar.TypeReg, ModTime: epoch, Format: tar.FormatUSTAR},
@@ -82,7 +87,9 @@ func main() {
 		}
 		if headers[index].Typeflag == tar.TypeReg {
 			payload := image
-			if headers[index].Name == "system/fault-probe" {
+			if headers[index].Name == "system/motd" {
+				payload = motd
+			} else if headers[index].Name == "system/fault-probe" {
 				payload = service
 			} else if headers[index].Name == "system/vfs" {
 				payload = vfs

@@ -8,8 +8,9 @@ const (
 )
 
 const (
-	kindPort = uint64(1)
-	kindDMA  = uint64(2)
+	kindPort  = uint64(1)
+	kindDMA   = uint64(2)
+	kindImage = uint64(3)
 )
 
 func PortObject(base, size uint16) (uint64, bool) {
@@ -36,6 +37,23 @@ func DMAObject(domain uint16) (uint64, bool) {
 
 func DecodeDMAObject(object uint64) (uint16, bool) {
 	if object>>56 != kindDMA || uint16(object) == 0 {
+		return 0, false
+	}
+	return uint16(object), true
+}
+
+// ImageObject names the read-only boot system image. Holding it authorizes
+// mapping that image, and nothing else; the filesystem service needs it to
+// serve /system, and no other process is given it.
+func ImageObject(generation uint16) (uint64, bool) {
+	if generation == 0 {
+		return 0, false
+	}
+	return kindImage<<56 | uint64(generation), true
+}
+
+func DecodeImageObject(object uint64) (uint16, bool) {
+	if object>>56 != kindImage || uint16(object) == 0 {
 		return 0, false
 	}
 	return uint16(object), true

@@ -5,6 +5,15 @@ table. Mount selection uses the longest complete-component prefix. `/dev` can
 therefore override a subtree without capturing `/devx`, and separate namespaces
 can expose different mounts over the same underlying filesystem.
 
+A directory listing runs in two phases. Cursors below `1 << 30` belong to the
+backend that owns the directory; once it is exhausted the scan continues through
+the mount table and reports the mounts whose path names a direct child of that
+directory. A mount therefore appears as a directory in its parent's listing
+without any placeholder existing in the parent filesystem, and a name the
+backend already listed is not reported twice. Removing a path that a mount sits
+at or below is refused, and so is removing a node some mount uses as its root,
+which is what protects a mount reachable under a second name (ADR 0069).
+
 Paths are absolute and bounded to 255 bytes. Resolution collapses repeated
 slashes and `.`, applies `..` without escaping the namespace root, and rejects
 NUL and oversized components. VFS translates the remaining components into
@@ -28,7 +37,8 @@ Bulk file data will use shared memory.
 
 PID 1 supervises `/system/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address
-space. Its initial namespace contains `/system/motd` and `/tmp`. Kernel launch
+space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archive at
+`/system`, and the persistent volume at `/persist`, `/home` and `/state`. Kernel launch
 grants explicitly identify the client or server side of a channel; neither
 process infers endpoint identity from handle numbers or launch order.
 The freestanding runtime uses a fixed bump allocator. After persistent service

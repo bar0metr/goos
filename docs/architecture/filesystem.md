@@ -4,15 +4,17 @@ Files reach applications through four isolated components. None of them runs
 in the kernel, and none holds more authority than its layer needs.
 
 ```text
-utility ──GVF1──▶ VFS service ─┬─ RAMFS backend           (/, /system, /tmp)
+utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp)
+                               ├─ image backend            (/system, read-only boot archive)
                                └─ FAT32 backend ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
-                                  (/persist)
+                                  (/persist, /home, /state)
 ```
 
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
 | VFS | `/system/vfs` | control endpoint, one server endpoint per session, block client endpoint | [vfs.md](vfs.md), ADR 0018, 0026 |
 | RAMFS | inside VFS | nothing; library core | [ramfs.md](ramfs.md), ADR 0017 |
+| System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
 | FAT32 | inside VFS | uses the VFS block client endpoint | [storage.md](storage.md), ADR 0036 |
 | Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](storage.md), ADR 0033 |
 | virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](storage.md), ADR 0034, 0035 |
@@ -28,12 +30,27 @@ longest whole-component prefix.
 | Path | Backend | Persistence |
 | --- | --- | --- |
 | `/` | RAMFS | volatile |
-| `/system` | RAMFS | volatile, populated at VFS start |
 | `/tmp` | RAMFS | volatile |
-| `/persist` | FAT32 over the virtio-blk disk | survives reboot |
+| `/system` | boot archive, read-only | immutable; replaced only by a new image |
+| `/persist` | FAT32 over the virtio-blk disk | survives reboot; the whole volume |
+| `/home` | the volume's `home` directory | survives reboot; user data |
+| `/state` | the volume's `state` directory | survives reboot; mutable system state |
 
-Executables are not loaded through VFS. The kernel reads them from the
-immutable initramfs on PID 1's launch request.
+A mount appears as a directory in the listing of its parent, so the layout is
+found by walking the namespace rather than by knowing a path in advance. A
+directory another mount points at cannot be removed, by path or under an alias
+such as `/persist/home` (ADR 0069).
+
+`/system` is the boot archive itself, mounted read-only, so the executables the
+launch path resolves under `/system/bin` are exactly the ones a listing shows.
+Every mutation of it is refused with permission denied. Executables are still
+not *loaded* through VFS: the kernel reads them from the same archive on PID 1's
+launch request, and the filesystem service maps that archive read-only through a
+capability only it holds (ADR 0070).
+
+`/persist` names the whole volume and `/home` and `/state` name directories on
+it, so `/persist/home` and `/home` are one directory under two names, backed by
+one filesystem instance and one sector cache (ADR 0071).
 
 ## Sessions
 

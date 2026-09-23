@@ -17,6 +17,9 @@ const (
 	StatusIsDirectory
 	StatusNotEmpty
 	StatusResourceExhausted
+	// StatusPermissionDenied is what a read-only backend answers to a
+	// mutation, so an immutable mount is distinguishable from a bad request.
+	StatusPermissionDenied
 )
 
 type Kind uint8
