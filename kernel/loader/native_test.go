@@ -16,10 +16,10 @@ func validNativeImage(t *testing.T) []byte {
 	storage := make([]byte, 512)
 	data, ok := EncodeNative(storage, ImageSource{
 		Entry:    0x40002000,
-		StackTop: 0x40004000,
+		StackTop: 0x40005000,
 		Segments: []SegmentSource{
 			{VirtualAddress: 0x40002000, MemorySize: 16, Flags: SegmentReadable | SegmentExecutable, Data: []byte{0x90, 0xcc}},
-			{VirtualAddress: 0x40003000, MemorySize: 4096, Flags: SegmentReadable | SegmentWritable},
+			{VirtualAddress: 0x40004000, MemorySize: 4096, Flags: SegmentReadable | SegmentWritable},
 		},
 	})
 	if !ok {
@@ -31,7 +31,7 @@ func validNativeImage(t *testing.T) []byte {
 func TestParseNativeImage(t *testing.T) {
 	data := validNativeImage(t)
 	image, ok := ParseNative(data, testPageSize, testUserStart, testUserEnd)
-	if !ok || image.Entry != 0x40002000 || image.StackTop != 0x40004000 || image.SegmentCount != 2 {
+	if !ok || image.Entry != 0x40002000 || image.StackTop != 0x40005000 || image.SegmentCount != 2 {
 		t.Fatalf("unexpected image: %#v", image)
 	}
 }
@@ -91,13 +91,45 @@ func TestParseNativeRejectsMalformedImages(t *testing.T) {
 		{name: "memory smaller than file", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[48:], 1) }},
 		{name: "write execute", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[52:], SegmentWritable|SegmentExecutable) }},
 		{name: "duplicate address", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[64:], 0x40002000) }},
-		{name: "unaligned stack", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[24:], 0x40003fff) }},
+		{name: "unaligned stack", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[24:], 0x40004fff) }},
 	}
 	for _, test := range tests {
 		data := append([]byte(nil), validNativeImage(t)...)
 		test.mutate(data)
 		if _, ok := ParseNative(data, testPageSize, testUserStart, testUserEnd); ok {
 			t.Errorf("accepted malformed image: %s", test.name)
+		}
+	}
+}
+
+func TestParseNativeRequiresStackGuardPage(t *testing.T) {
+	code := SegmentSource{VirtualAddress: 0x40002000, MemorySize: 16, Flags: SegmentReadable | SegmentExecutable, Data: []byte{0x90}}
+	stack := SegmentSource{VirtualAddress: 0x40004000, MemorySize: 2 * 4096, Flags: SegmentReadable | SegmentWritable}
+	tests := []struct {
+		name     string
+		stackTop uint64
+		segments []SegmentSource
+		accepted bool
+	}{
+		{name: "unmapped page below", stackTop: 0x40006000, segments: []SegmentSource{code, stack}, accepted: true},
+		{name: "heap directly above", stackTop: 0x40006000, accepted: true, segments: []SegmentSource{code, stack,
+			{VirtualAddress: 0x40006000, MemorySize: 4096, Flags: SegmentReadable | SegmentWritable}}},
+		{name: "code directly below", stackTop: 0x40004000, segments: []SegmentSource{code,
+			{VirtualAddress: 0x40003000, MemorySize: 4096, Flags: SegmentReadable | SegmentWritable}}},
+		{name: "data in guard page", stackTop: 0x40006000, segments: []SegmentSource{code, stack,
+			{VirtualAddress: 0x40003000, MemorySize: 8, Flags: SegmentReadable, Data: []byte{1}}}},
+		{name: "segment tail in guard page", stackTop: 0x40006000, segments: []SegmentSource{
+			{VirtualAddress: 0x40002000, MemorySize: 0x1800, Flags: SegmentReadable | SegmentExecutable, Data: []byte{0x90}}, stack}},
+		{name: "no room below user start", stackTop: 0x40001000, segments: []SegmentSource{code,
+			{VirtualAddress: 0x40000000, MemorySize: 4096, Flags: SegmentReadable | SegmentWritable}}},
+	}
+	for _, test := range tests {
+		data, ok := EncodeNative(make([]byte, 512), ImageSource{Entry: 0x40002000, StackTop: test.stackTop, Segments: test.segments})
+		if !ok {
+			t.Fatalf("%s: encode failed", test.name)
+		}
+		if _, ok := ParseNative(data, testPageSize, testUserStart, testUserEnd); ok != test.accepted {
+			t.Errorf("%s: accepted = %v, want %v", test.name, ok, test.accepted)
 		}
 	}
 }

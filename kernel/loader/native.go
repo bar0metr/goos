@@ -90,7 +90,7 @@ func ParseNative(data []byte, pageSize uint64, userStart uint64, userEnd uint64)
 		}
 	}
 	image.SegmentCount = count
-	if !image.entryIsExecutable() || !image.stackIsWritable(pageSize) {
+	if !image.entryIsExecutable() || !image.stackIsGuarded(pageSize, userStart) {
 		return Image{}, false
 	}
 	return image, true
@@ -106,16 +106,36 @@ func (image Image) entryIsExecutable() bool {
 	return false
 }
 
-func (image Image) stackIsWritable(pageSize uint64) bool {
+// StackSegment returns the writable, non-executable segment that holds the
+// initial stack pointer.
+func (image Image) StackSegment() (Segment, bool) {
 	if image.StackTop == 0 || image.StackTop%16 != 0 {
-		return false
+		return Segment{}, false
 	}
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
 		if segment.Flags&SegmentWritable != 0 && segment.Flags&SegmentExecutable == 0 &&
 			image.StackTop > segment.VirtualAddress && image.StackTop <= segment.VirtualAddress+segment.MemorySize {
-			return true
+			return segment, true
 		}
 	}
-	return false
+	return Segment{}, false
+}
+
+// stackIsGuarded requires the page directly below the stack segment to lie in
+// the user range and to be covered by no segment, so a stack that overflows
+// faults on an unmapped page instead of overwriting what lies below it.
+func (image Image) stackIsGuarded(pageSize uint64, userStart uint64) bool {
+	stack, ok := image.StackSegment()
+	if !ok || stack.VirtualAddress-userStart < pageSize {
+		return false
+	}
+	guard := stack.VirtualAddress - pageSize
+	for index := 0; index < image.SegmentCount; index++ {
+		segment := image.Segments[index]
+		if segment.VirtualAddress < stack.VirtualAddress && segment.VirtualAddress+segment.MemorySize > guard {
+			return false
+		}
+	}
+	return true
 }

@@ -41,6 +41,11 @@ user page-table levels. User leaves require the user bit at every parent, reject
 W+X, and are zeroed before exposure. The bootstrap native program uses a
 separate RX code page, read-only data page, and RW+NX stack page.
 
+Every image's stack segment has an unmapped guard page directly below it
+(ADR 0083). The loader rejects an image with a segment in that page, and
+TinyGo images place their stack in its own segment one page above the heap.
+A stack overflow is a page fault that retires the process.
+
 Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
 `CopyOut` reject arithmetic wraparound and addresses outside the bootstrap user
 range, then validate every page crossed by the request. Every page-table level
@@ -79,5 +84,5 @@ read through B, and verified to resolve to identical physical pages. A write
 through B is rejected.
 
 The one-GiB kernel identity map is a bootstrap constraint, not the final process
-layout. A higher-half kernel, complete guard regions, demand paging, and ASLR
+layout. A higher-half kernel, guard regions beyond the stack's, demand paging, and ASLR
 remain later work.

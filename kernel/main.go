@@ -174,7 +174,11 @@ func deliverProcessExits() {
 		// slot is released, so the process keeps the time and the next task to
 		// take the slot starts from zero.
 		accountTaskCPU(taskID)
-		event, report := processRegistry.ReportTaskExit(taskID, amd64.TaskExitCode(task))
+		code := amd64.TaskExitCode(task)
+		if validation.Enabled {
+			noteStackGuardFault(taskID, code)
+		}
+		event, report := processRegistry.ReportTaskExit(taskID, code)
 		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
 		// not gate the steps below: a process that has exited has to release its
 		// waiters and its handles even if its stack cannot be returned, or its

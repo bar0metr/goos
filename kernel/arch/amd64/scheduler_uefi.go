@@ -179,6 +179,12 @@ func TaskTicks(slot uint64) uint64
 //export goos_task_ticks_clear
 func ClearTaskTicks(slot uint64)
 
+// TakeTaskFaultAddress returns and clears the address of the last user page
+// fault a task slot took, or zero when its last fault was of another kind.
+//
+//export goos_task_fault_address_take
+func TakeTaskFaultAddress(slot uint64) uint64
+
 //export goos_set_current_task_exit_code
 func SetCurrentTaskExitCode(code uint64)
 

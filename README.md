@@ -126,6 +126,7 @@ The native kernel and the first isolated services are implemented:
 - a 64-bit TSS with a dedicated guarded RSP0 kernel stack;
 - ring 3 code and data descriptors;
 - separate RX user code and RW+NX user stack mappings;
+- an unmapped guard page below every user stack, enforced by the loader;
 - a DPL 3 native kernel-call gate;
 - the first native program executing at CPL 3;
 - a typed native kernel-call dispatcher with Exit and bounded DebugWrite;

@@ -69,10 +69,17 @@ existing site follows this yet: the UEFI protocol calls in
   corrupting the neighbouring allocation.
 - User address space starts at 1 GiB; low addresses are unmapped in every
   process, so null dereferences fault.
-- User stacks are not guarded yet. The userspace linker script places a
-  32 KiB stack after `.data`/`.bss` in the same segment, so a user stack
-  overflow corrupts that process's own globals. It cannot reach another
-  process or the kernel.
+- Every user stack has an unmapped guard page directly below it (ADR 0083).
+  The userspace linker script gives the 32 KiB stack its own RW+NX segment one
+  page above the heap. The loader enforces the gap for every image, not only
+  those built by that script: `ParseNative` rejects an image whose stack
+  segment has another segment in the page below it or starts within one page
+  of the user range, and `LoadImage` rejects a guard page the kernel would
+  map later (the startup page and the shared, DMA and system image windows).
+  An overflow therefore takes a page fault, which retires the process like any
+  other user fault; the kernel does not panic. The validation build's
+  fault-probe overflows its stack on every run, and the kernel requires a
+  not-present fault in its guard page (`USER_STACK_GUARD_OK`).
 
 ## User pointers
 

@@ -120,8 +120,8 @@ The raw disk image is host-provided and persists across boots.
 Images come only from the initramfs built into the ISO. A tampered image is
 still loaded through the bounded native loader: fixed header, at most eight
 page-aligned segments and 128 pages, user range only, no W+X, no overlaps, entry
-in an executable segment, stack in a writable NX segment
-(docs/architecture/native-images.md). A valid but hostile image runs with
+in an executable segment, stack in a writable NX segment with an unmapped
+guard page below it (docs/architecture/native-images.md). A valid but hostile image runs with
 exactly the manifest PID 1 grants it. Images are not signed or measured, so
 whoever controls the ISO controls the system.
 
@@ -165,5 +165,3 @@ whoever controls the ISO controls the system.
   bootstrap processes, not by a capability.
 - The `goos_diag` build prints other processes' handle tables and physical
   addresses. It is for diagnosis only (ADR 0052).
-- User stacks have no guard page below them; see
-  [memory-safety.md](memory-safety.md).
