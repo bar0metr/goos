@@ -126,6 +126,50 @@ func TestEnterAndInterruptEndTheLine(t *testing.T) {
 	}
 }
 
+// A line typed and finished while no read was outstanding is echoed with no
+// prompt. When the read arrives, the service shows it again after the prompt
+// before delivering it, the way startRead does, so the prompt is never lost
+// to a burst of typing that beat the shell's request.
+func TestTypedAheadLineIsShownWithItsPrompt(t *testing.T) {
+	var c console
+	c.typed("echo x\r")
+	c.write(c.screen.Hide())
+	text, complete := c.line.Line()
+	if !complete {
+		t.Fatal("line not complete")
+	}
+	c.write(c.screen.Show([]byte("goos> "), text))
+	c.write([]byte{'\n'})
+	c.screen.Echoed([]byte{'\n'}, 0)
+	if c.written != "echo x\ngoos> echo x\n" {
+		t.Fatalf("written %q", c.written)
+	}
+	if active, _ := c.screen.Shown(); active {
+		t.Fatal("the delivered line is still on the screen")
+	}
+	// Output that follows goes on its own rows with nothing to erase.
+	c.line.Next()
+	c.written = ""
+	c.output("x\n", "")
+	if c.written != "x\n" {
+		t.Fatalf("output after the line %q", c.written)
+	}
+}
+
+// Output interleaved with a burst of typing — a job's report between the keys
+// of a line and its Enter — leaves the prompt and the whole line on the screen.
+func TestReportInsideABurstKeepsThePrompt(t *testing.T) {
+	var c console
+	c.show("goos> ")
+	c.typed("echo fore")
+	c.output("[1] done\n", "goos> ")
+	c.typed("ground\r")
+	want := "goos> echo fore\r\x1b[K[1] done\ngoos> echo foreground\n"
+	if c.written != want {
+		t.Fatalf("written %q, want %q", c.written, want)
+	}
+}
+
 func TestClearingForgetsTheLine(t *testing.T) {
 	var c console
 	c.show("goos> ")

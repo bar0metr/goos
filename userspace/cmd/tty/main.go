@@ -338,7 +338,18 @@ func startRead(text []byte, correlation uint64) {
 		endQueued = false
 		answer(tty.ResultEndOfInput)
 	default:
-		if _, complete := line.Line(); complete {
+		if text, complete := line.Line(); complete {
+			// A line finished before this read was echoed with no prompt,
+			// possibly in the middle of other output. It is shown again with
+			// the prompt it answers, as a shell's line editor does with typed
+			// ahead input, so the screen always reads as a prompt followed by
+			// the command it ran.
+			if promptSize != 0 {
+				writeBytes(screen.Hide())
+				writeBytes(screen.Show(prompt[:promptSize], text))
+				writeBytes(newline[:])
+				screen.Echoed(newline[:], 0)
+			}
 			deliverLine()
 			return
 		}

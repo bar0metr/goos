@@ -122,6 +122,9 @@ var (
 	virtioBlockPort             uint16
 )
 
+// userExitAnnounced records that the validation marker for Exit was printed.
+var userExitAnnounced uint64
+
 type nativeCallHandler struct {
 	root uint64
 }
@@ -137,7 +140,13 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	if bootProcessA != nil && handler.root == bootProcessA.AddressSpace().Root {
 		userExited = 1
 	}
-	mark("USER_EXIT_OK")
+	// Once is enough to show the call works. Printed on every exit, the marker
+	// lands at arbitrary places on a console the terminal service owns, which
+	// cannot know the cursor moved (ADR 0089).
+	if userExitAnnounced == 0 {
+		userExitAnnounced = 1
+		mark("USER_EXIT_OK")
+	}
 	return kcall.StatusOK
 }
 
