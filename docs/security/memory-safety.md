@@ -156,7 +156,7 @@ caller:
 
 | Buffer | Size | Bound enforced by |
 | --- | --- | --- |
-| debug and console write | 4096 B | `kcall.MaxDebugWrite` |
+| console write | 4096 B | `kcall.MaxConsoleWrite` |
 | IPC wire | 320 B | `ipc.WireMaxSize` |
 | stream transfer | 256 B | `kcall.MaxStreamIO` |
 | `WaitAny` interests | 16 × 16 B | `kcall.WaitAnyMaxObjects` |

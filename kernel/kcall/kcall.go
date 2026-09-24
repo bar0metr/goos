@@ -1,12 +1,16 @@
 package kcall
 
-const MaxDebugWrite = uint64(4096)
+// MaxConsoleWrite bounds one console write.
+const MaxConsoleWrite = uint64(4096)
 
 type Operation uint64
 
 const (
 	OperationExit Operation = iota + 1
-	OperationDebugWrite
+	// OperationRetiredDebugWrite was DebugWrite, a console write authorized by
+	// the caller's identity rather than a capability. It is refused with
+	// Unsupported in every build and its number is not reused (ADR 0094).
+	OperationRetiredDebugWrite
 	OperationIPCSend
 	OperationIPCReceive
 	OperationIPCWaitReceive
@@ -89,7 +93,6 @@ type Result struct {
 
 type Handler interface {
 	Exit(code uint64) Status
-	DebugWrite(address uint64, length uint64) Status
 	IPCSend(channel uint64, address uint64, length uint64) Status
 	IPCReceive(channel uint64, address uint64, capacity uint64) Status
 	ConsoleWrite(device uint64, address uint64, length uint64) Status
@@ -128,11 +131,6 @@ func Dispatch(request Request, handler Handler) Result {
 	switch request.Operation {
 	case OperationExit:
 		return Result{Status: handler.Exit(request.Arg0), Action: ActionExit}
-	case OperationDebugWrite:
-		if request.Arg1 > MaxDebugWrite {
-			return Result{Status: StatusInvalidArgument}
-		}
-		return Result{Status: handler.DebugWrite(request.Arg0, request.Arg1)}
 	case OperationIPCSend:
 		if request.Arg2 > MaxIPCMessage {
 			return Result{Status: StatusInvalidArgument}
@@ -144,7 +142,7 @@ func Dispatch(request Request, handler Handler) Result {
 		}
 		return Result{Status: handler.IPCReceive(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationConsoleWrite:
-		if request.Arg2 > MaxDebugWrite {
+		if request.Arg2 > MaxConsoleWrite {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.ConsoleWrite(request.Arg0, request.Arg1, request.Arg2)}

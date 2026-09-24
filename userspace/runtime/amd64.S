@@ -8,14 +8,6 @@ _start:
 .size _start, .-_start
 
 .section .text.kcall,"ax",@progbits
-.global goos_debug_write
-.type goos_debug_write,@function
-goos_debug_write:
-    movl $2, %eax
-    int $0x80
-    ret
-.size goos_debug_write, .-goos_debug_write
-
 .global goos_ipc_send
 .type goos_ipc_send,@function
 goos_ipc_send:

@@ -30,7 +30,7 @@ table with type, generation, and rights checks.
 | # | Operation | Authority | Untrusted inputs and validation | Bounds | Blocks |
 | ---: | --- | --- | --- | --- | --- |
 | 1 | `Exit` | — | exit code, not interpreted | none | ends task |
-| 2 | `DebugWrite` | caller is PID 1 or bootstrap process A (root compare) | length ≤ 4096; `CopyIn` | static 4 KiB buffer | no |
+| 2 | retired (`DebugWrite`) | none: refused with `Unsupported` in every build, never reaches a handler (ADR 0094) | — | — | no |
 | 3 | `IPCSend` | channel handle, Write | wire length 32..320; `CopyIn`; `ipc.Decode` checks header and sizes; each attached handle (≤ 4) needs Transfer; an attached stream end must have room for four more references, checked before anything moves | 16-message queue; full → `ResourceExhausted` | no |
 | 4 | `IPCReceive` | channel handle, Read | capacity ≥ 320; `CopyOut` | static wire buffer | no; empty → `NotFound` |
 | 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 64 waiters; per-task status slot | yes, tick deadline; 0 → `Timeout` |
@@ -82,9 +82,9 @@ compiles away.
   echo. The terminal service holds the only read right and relays everything the
   shell and commands print (ADR 0082, 0089); console write remains with it and
   with the system services that start before it.
-- `DebugWrite` is a bootstrap path. Boot validation now has its own build
-  (ADR 0058); in a normal build only PID 1 passes its root comparison, and the
-  call remains a candidate for removal.
+- `DebugWrite`, the console write authorized by the caller's identity, is
+  retired; PID 1 prints through `ConsoleWrite` with its console capability
+  (ADR 0094).
 - `ImageMap` maps the firmware-reserved boot archive, which only the kernel can
   name; serving it through VFS keeps the archive parser in userspace
   (ADR 0070).
@@ -128,8 +128,8 @@ virtio-blk driver, which re-checks the used ring after every wake (ADR 0035).
 
 ### Capabilities
 
-See [capabilities.md](capabilities.md). Ten calls authorize by caller
-identity or need nothing: `Exit`, `DebugWrite`, `ClockRead`, `StartupRead`,
+See [capabilities.md](capabilities.md). Nine calls authorize by caller
+identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
 `SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
 `HandleInfo` (own table only), and `ProcessInfo`.
 
@@ -186,7 +186,7 @@ progress; it would need a policy before SMP.
 ### Work with interrupts disabled
 
 Each call runs to completion with interrupts off. The longest native calls are
-`DebugWrite`/`ConsoleWrite` (up to 4096 bytes to the UART) and, in diagnostic
+`ConsoleWrite` (up to 4096 bytes to the UART) and, in diagnostic
 builds, `Diagnostics`. Process launch runs in housekeeping, also with
 interrupts off, and takes about 2 ms (ADR 0057).
 

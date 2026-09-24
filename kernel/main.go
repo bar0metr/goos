@@ -39,7 +39,7 @@ var (
 	demoABlocked    uint64
 	demoAResumed    uint64
 	userExited      uint64
-	kernelCallData  [kcall.MaxDebugWrite]byte
+	kernelCallData  [kcall.MaxConsoleWrite]byte
 	nativeImageData [1024]byte
 	faultImageData  [1024]byte
 	boundedChannel  ipc.Channel
@@ -147,29 +147,6 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	if userExitAnnounced == 0 {
 		userExitAnnounced = 1
 		mark("USER_EXIT_OK")
-	}
-	return kcall.StatusOK
-}
-
-func (handler nativeCallHandler) DebugWrite(address uint64, length uint64) kcall.Status {
-	console := amd64.NewCOM1()
-	if (bootProcessA == nil || handler.root != bootProcessA.AddressSpace().Root) &&
-		(bootInitProcess == nil || handler.root != bootInitProcess.AddressSpace().Root) {
-		return kcall.StatusPermissionDenied
-	}
-	data := kernelCallData[:int(length)]
-	if !vm.CopyIn(handler.root, address, data) {
-		mark("USER_COPYIN_OK")
-		return kcall.StatusInvalidArgument
-	}
-	for _, value := range data {
-		console.WriteByte(value)
-	}
-	if bootInitProcess != nil && handler.root == bootInitProcess.AddressSpace().Root {
-		initAnnounced = 1
-		if equalBytes(data, "USERSPACE_SUPERVISOR_OK\n") {
-			userspaceSupervisorOK = 1
-		}
 	}
 	return kcall.StatusOK
 }
@@ -599,22 +576,34 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	return pid, processHandle, supervisor.LaunchOK
 }
 
-func (handler nativeCallHandler) ConsoleWrite(device uint64, address uint64, length uint64) kcall.Status {
+func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
-	cap, ok := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
-	if !ok || cap.Object() != 1 || length == 0 || length > kcall.MaxDebugWrite {
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
+	if !ok || cap.Object() != device.ConsoleObject || length == 0 || length > kcall.MaxConsoleWrite {
 		return kcall.StatusPermissionDenied
 	}
 	data := kernelCallData[:int(length)]
 	if !vm.CopyIn(handler.root, address, data) {
+		if validation.Enabled {
+			mark("USER_COPYIN_OK")
+		}
 		return kcall.StatusInvalidArgument
 	}
 	console := amd64.NewCOM1()
 	for _, value := range data {
 		console.WriteByte(value)
+	}
+	// Validation bookkeeping, not authority: the boot sequence waits until
+	// PID 1 has printed and its supervisor has reported. The write itself was
+	// authorized by the capability above like any other process's.
+	if validation.Enabled && owner == bootInitProcess {
+		initAnnounced = 1
+		if equalBytes(data, "USERSPACE_SUPERVISOR_OK\n") {
+			userspaceSupervisorOK = 1
+		}
 	}
 	return kcall.StatusOK
 }

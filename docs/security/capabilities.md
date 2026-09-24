@@ -219,7 +219,6 @@ Some calls authorize by caller identity or need nothing:
 | `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo` | caller must be a registered process |
 | `HandleInfo` | caller must be a registered process; describes only its own table |
 | `ChannelCreate` | caller must be PID 1 |
-| `DebugWrite` | caller must be PID 1 or bootstrap process A (root comparison) |
 
 `StreamCreate` is open because the new endpoints grant nothing beyond
 themselves (ADR 0040); the per-process stream quota bounds how many one

@@ -29,9 +29,10 @@ requires both distinct values before emitting `PROCESS_ISOLATION_OK`.
 ## First ring 3 process
 
 The bootstrap native process owns separate RX code, read-only data, and RW+NX
-stack pages. Its architecture-level program first submits an invalid pointer,
-then copies a valid message through the native DebugWrite call, and finally
-requests Exit through interrupt vector `0x80`. Code is copied into a zeroed
+stack pages. Its architecture-level program first requires the retired DebugWrite number to
+be refused, submits an invalid pointer to `ConsoleWrite`, then copies a valid
+message through `ConsoleWrite` with the console capability it was given, and
+finally requests Exit through interrupt vector `0x80` (ADR 0094). Code is copied into a zeroed
 physical page before that page becomes executable, preserving W^X.
 
 The scheduler loads the process CR3 and enters CPL 3 through a complete `IRETQ`

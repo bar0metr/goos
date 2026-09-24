@@ -233,9 +233,6 @@ controls the system ([boot-chain.md](boot-chain.md)).
 - The kernel's warning echo, and the reports of the services that start before
   the terminal, still write the console directly and can land in a line being
   typed (ADR 0089).
-- `DebugWrite` is authorized by comparing address-space roots against
-  bootstrap processes, not by a capability. In a normal build only PID 1
-  passes the check.
 - The `goos_diag` build prints other processes' handle tables and physical
   addresses. It is for diagnosis only (ADR 0052).
 - Every kernel stack has an unmapped guard below it, including the boot

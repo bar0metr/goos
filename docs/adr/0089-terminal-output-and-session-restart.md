@@ -150,7 +150,7 @@ arrive in pieces with a command's output between them.
 | Writer | Why |
 | --- | --- |
 | The kernel | early console, panics, the warning echo of the log (ADR 0059), and the `goos_diag` dump. They must work when nothing else does. |
-| PID 1 (`DebugWrite`) | the boot banner's `[ OK ]` lines, before the terminal exists; `Rebooting...`, which must be written before the reset, not queued behind it; validation markers. After boot, a restarted service is recorded in the log instead of printed, so PID 1 does not write into a line being typed. |
+| PID 1 (`ConsoleWrite` with its console capability since ADR 0094; `DebugWrite` before) | the boot banner's `[ OK ]` lines, before the terminal exists; `Rebooting...`, which must be written before the reset, not queued behind it; validation markers. After boot, a restarted service is recorded in the log instead of printed, so PID 1 does not write into a line being typed. |
 | The terminal service (console read and write) | it is the console's owner. |
 | VFS, block, virtio-blk, config, log, and the validation `fault-probe` (console write only) | `LogWrite` is authorised by console write, and their fatal paths report through it. They start before the terminal and underneath it: a storage failure has to be reportable when the terminal cannot be. |
 

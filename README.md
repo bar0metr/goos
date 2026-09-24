@@ -131,7 +131,7 @@ The native kernel and the first isolated services are implemented:
   build-time check that no stack frame can step over it;
 - a DPL 3 native kernel-call gate;
 - the first native program executing at CPL 3;
-- a typed native kernel-call dispatcher with Exit and bounded DebugWrite;
+- a typed native kernel-call dispatcher with bounded, capability-checked calls;
 - validated `CopyIn` and `CopyOut` across user page mappings;
 - preemptively scheduled ring 3 tasks with process-specific CR3 roots;
 - task-local guarded RSP0 stacks and isolated userspace fault termination;

@@ -144,8 +144,8 @@ var heapEndSymbol [0]byte
 //go:linkname diagnostics goos_diagnostics
 func diagnostics(device uint64, address uintptr) uint64
 
-//go:linkname debugWrite goos_debug_write
-func debugWrite(address unsafe.Pointer, size uintptr) uint64
+//go:linkname consoleWrite goos_console_write
+func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
 
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
@@ -1564,8 +1564,14 @@ func bytesString(value []byte) string {
 	return *(*string)(unsafe.Pointer(&value))
 }
 
+// write prints to the console through the console capability PID 1 holds,
+// like every other process that prints: there is no identity-authorized
+// console path (ADR 0094). It is used before the terminal service exists and
+// for the few lines that must not queue behind it (ADR 0089).
 func write(message string) {
-	debugWrite(unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	if len(message) != 0 {
+		consoleWrite(uint64(serviceDeviceHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	}
 }
 
 func mark(message string) {
