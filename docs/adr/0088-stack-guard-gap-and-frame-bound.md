@@ -174,4 +174,6 @@ Each kernel stack takes one more physical page, six instead of five.
 
 The boot task's stack, and any other TinyGo goroutine stack in the kernel, has
 no guard page at all; an overflow there corrupts the kernel heap. That is a
-separate weakness this ADR records but does not fix.
+separate weakness this ADR records but does not fix. ADR 0091 fixes it: the
+boot task moves to a guarded stack once paging is up, and the per-function
+exemptions above become the bound of that stack's guard.

@@ -23,6 +23,9 @@ const (
 	userCallVector  = 0x80
 	yieldVector     = 0x81
 	tssBytes        = 104
+	// tssIST1 is the offset of the first interrupt stack pointer in the TSS.
+	tssIST1           = 36
+	doubleFaultVector = 8
 )
 
 var (
@@ -83,6 +86,14 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	}
 	rsp0 := allocation + (kernelStackPages+stackGuardPages)*pmm.PageSize - 64
 	putUint64(tss[4:12], rsp0)
+	// A double fault switches to the TSS's first interrupt stack, so it can be
+	// reported when the stack that faulted has run into its guard (ADR 0091).
+	fault, ok := allocator.AllocateContiguous(faultStackPages + stackGuardPages)
+	if !ok || !unmapGuardPages(pageTable, fault) {
+		return false
+	}
+	putUint64(tss[tssIST1:tssIST1+8], fault+(faultStackPages+stackGuardPages)*pmm.PageSize-64)
+	idt[doubleFaultVector].IST = 1
 	setTSSStackAddress(&tss[4])
 	tss[102], tss[103] = byte(tssBytes), 0
 	// SAFETY: tss is static kernel storage with a stable address for the entire

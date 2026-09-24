@@ -12,4 +12,17 @@ const (
 	// allocation is these pages plus the guard; goos_reclaim_exited_task in
 	// io.S recomputes its start from the stack top.
 	kernelStackPages = uint64(4)
+	// BootStackSize is the stack the boot task runs on once paging is up: the
+	// rest of boot, the validation self-tests, and the service loop. It
+	// replaces the goroutine stack TinyGo's runtime allocates from the heap,
+	// which has no guard (ADR 0091).
+	BootStackSize = 64 << 10
+	// BootStackGuardSize is the unmapped gap below the boot stack. It is
+	// wider than the other kernel stacks' guard because the boot task's own
+	// functions, the self-tests above all, have frames larger than that.
+	BootStackGuardSize = 32 << 10
+	// faultStackPages is the stack a double fault is delivered on, through the
+	// TSS's first interrupt stack, so an overflow of any other kernel stack is
+	// reported instead of resetting the machine.
+	faultStackPages = uint64(1)
 )

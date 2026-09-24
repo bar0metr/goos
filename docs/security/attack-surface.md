@@ -63,6 +63,7 @@ table with type, generation, and rights checks.
 | 32 | `ImageMap` | device handle, Read, system-image object (held only by VFS) | virtual address must equal `0x40200000`; archive must be page-aligned and fit `[0x40200000, 0x40600000)`; 16-byte descriptor probed before mapping; every leaf must be free | one leaf table per 2 MiB of archive (at most two), each charged to the page quota; archive mapped read-only, NX, non-owned | no |
 | 33 | `LogBounds` | device handle, Read, log object (ADR 0082) | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
+| 35 | `ValidationFault` | validation build only (`Unsupported` otherwise); device handle, Write, system-control object (PID 1 only) | handle lookup only | none: overflows the caller's kernel stack on purpose and ends the machine with a double-fault report (ADR 0091) | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording

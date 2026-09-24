@@ -237,7 +237,8 @@ controls the system ([boot-chain.md](boot-chain.md)).
   passes the check.
 - The `goos_diag` build prints other processes' handle tables and physical
   addresses. It is for diagnosis only (ADR 0052).
-- The kernel's boot task runs on the 64 KiB goroutine stack TinyGo's runtime
-  allocates from the kernel heap, which has a canary but no guard page. An
-  overflow there corrupts the heap. Kernel-entry and kernel-task stacks are
-  guarded (ADR 0088).
+- Every kernel stack has an unmapped guard below it, including the boot
+  task's since ADR 0091. Only the early boot, before paging is up, runs on the
+  unguarded goroutine stack TinyGo allocated for `main`. A kernel stack
+  overflow ends the machine with a double-fault report rather than being
+  recovered from.

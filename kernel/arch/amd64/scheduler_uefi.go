@@ -231,3 +231,21 @@ func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64)
 
 //export goos_invalidate_page
 func invalidatePage(address uint64)
+
+// KernelStackGuard returns the unmapped guard below the kernel-entry stack
+// that holds address, found among the user task slots, as [low, high).
+func KernelStackGuard(address uint64) (uint64, uint64, bool) {
+	state := ReadSchedulerState()
+	for slot := uint64(0); slot < state.Count; slot++ {
+		top := TaskStackTop(slot)
+		if top == 0 {
+			continue
+		}
+		// The top sits 64 bytes below the end of the usable pages.
+		start := top + 64 - kernelStackPages*pmm.PageSize
+		if address >= start && address < top+64 {
+			return start - KernelStackGuardSize, start, true
+		}
+	}
+	return 0, 0, false
+}

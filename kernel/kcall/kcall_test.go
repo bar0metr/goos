@@ -132,6 +132,11 @@ func (handler *testHandler) ConsoleInterrupt(device uint64) Status {
 	return StatusNotFound
 }
 
+func (handler *testHandler) ValidationFault(device uint64) Status {
+	handler.channel = device
+	return StatusUnsupported
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -372,8 +377,18 @@ func TestDispatchConsoleInterrupt(t *testing.T) {
 	if result := Dispatch(Request{Operation: OperationConsoleInterrupt, Arg0: 2}, handler); result.Status != StatusNotFound || handler.channel != 2 {
 		t.Fatalf("console interrupt %+v %+v", result, handler)
 	}
-	// ConsoleInterrupt is the last operation, so anything past it is unsupported.
-	if result := Dispatch(Request{Operation: OperationConsoleInterrupt + 1}, handler); result.Status != StatusUnsupported {
+}
+
+func TestDispatchValidationFault(t *testing.T) {
+	if OperationValidationFault != 35 {
+		t.Fatalf("operation %d", OperationValidationFault)
+	}
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationValidationFault, Arg0: 7}, handler); result.Status != StatusUnsupported || handler.channel != 7 {
+		t.Fatalf("validation fault %+v %+v", result, handler)
+	}
+	// ValidationFault is the last operation, so anything past it is unsupported.
+	if result := Dispatch(Request{Operation: OperationValidationFault + 1}, handler); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 }

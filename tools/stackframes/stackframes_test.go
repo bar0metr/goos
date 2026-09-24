@@ -277,15 +277,21 @@ func TestCheckKernelFrames(t *testing.T) {
 		t.Fatalf("report = %+v", result)
 	}
 	result = checkKernelFrames([]kernelFrame{
-		{address: 0x2010, size: 20000, probed: true},
+		{address: 0x2010, size: bootStackFrameLimit + 8, probed: true},
 		{address: 0x3010, size: kernelFrameLimit + 8, probed: true},
 	}, symbols)
 	if len(result.problems) != 2 || !strings.HasPrefix(result.problems[0], "main.serviceKernel: ") ||
 		!strings.HasPrefix(result.problems[1], "main.big: probed frame of 8192 bytes") {
 		t.Fatalf("problems = %v", result.problems)
 	}
-	if kernelFrameLimit != 8192-8 {
-		t.Fatalf("kernelFrameLimit = %d", kernelFrameLimit)
+	if kernelFrameLimit != 8192-8 || bootStackFrameLimit != 32768-8 {
+		t.Fatalf("kernelFrameLimit = %d, bootStackFrameLimit = %d", kernelFrameLimit, bootStackFrameLimit)
+	}
+	// A boot-stack function may be larger than any other kernel frame, up to
+	// its own stack's guard.
+	result = checkKernelFrames([]kernelFrame{{address: 0x2010, size: bootStackFrameLimit, probed: true}}, symbols)
+	if len(result.problems) != 0 {
+		t.Fatalf("problems = %v", result.problems)
 	}
 	if owner(symbols, 0x0fff) != "0xfff" || owner(symbols, 0x2fff) != "main.serviceKernel" {
 		t.Fatal("owner lookup")

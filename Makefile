@@ -350,6 +350,7 @@ docs:
 	@test -f docs/adr/0088-stack-guard-gap-and-frame-bound.md
 	@test -f docs/adr/0089-terminal-output-and-session-restart.md
 	@test -f docs/adr/0090-speed-optimised-builds.md
+	@test -f docs/adr/0091-guarded-boot-stack-and-double-fault-stack.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

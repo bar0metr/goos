@@ -102,6 +102,9 @@ type execJob struct {
 //go:linkname systemReset goos_system_reset
 func systemReset(device uint64) uint64
 
+//go:linkname validationFault goos_validation_fault
+func validationFault(device uint64) uint64
+
 var (
 	manager              supervisor.Manager
 	wire                 [ipc.WireMaxSize]byte
@@ -981,6 +984,13 @@ func endShellSession() {
 // working (ADR 0089).
 func injectSessionFault(target uint8) execproto.ControlStatus {
 	if !validation.Enabled {
+		return execproto.ControlInvalid
+	}
+	if target == execproto.FaultKernelStack {
+		// A successful call does not return: the kernel reports the double
+		// fault and halts.
+		mark("KERNEL_STACK_FAULT_INJECTED\n")
+		validationFault(systemControlHandle)
 		return execproto.ControlInvalid
 	}
 	process := &ttyProcessHandle

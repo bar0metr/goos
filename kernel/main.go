@@ -2017,6 +2017,34 @@ func main() {
 	mark("NX_WX_OK")
 	mark("VM_OK")
 
+	// The boot task leaves the goroutine stack TinyGo's runtime gave main,
+	// which has no guard, for one that has (ADR 0091). Everything from here
+	// on, the service loop included, runs in bootContinue on that stack.
+	bootVirtioBlock = virtioBlock
+	if !amd64.RunOnBootStack(&pageAllocator, pageTable) {
+		console.WriteString("PANIC: boot stack allocation failed\n")
+		for {
+			amd64.Halt()
+		}
+	}
+}
+
+// bootVirtioBlock carries the PCI discovery result across the stack switch.
+var bootVirtioBlock pci.Device
+
+// bootContinue is the rest of main, on the guarded boot stack. It never
+// returns.
+//
+//export goos_boot_continue
+func bootContinue() {
+	console := amd64.NewCOM1()
+	pageTable := kernelPageTable
+	virtioBlock := bootVirtioBlock
+	if validation.Enabled && !amd64.BootStackGuarded(pageTable) {
+		panicSerial("boot task is not on its guarded stack")
+	}
+	mark("BOOT_STACK_GUARD_OK")
+
 	if !amd64.InstallDescriptorTables(&pageAllocator, pageTable) {
 		console.WriteString("PANIC: descriptor-table installation failed\n")
 		for {

@@ -79,9 +79,13 @@ existing site follows this yet: the UEFI protocol calls in
   neighbouring allocation. TinyGo's UEFI runtime makes LLVM's stack probe
   (`___chkstk_ms`) a no-op, so `tools/stackframes` checks every kernel frame at
   build time: none may exceed the 8 KiB guard less the 8-byte return address.
-  Only `main.main`, `main.serviceKernel` and `main.runKernelSelfTests` are
-  exempt, up to a stated size, because they run only on the boot task's stack, a 64 KiB
-  goroutine stack from TinyGo's heap that has no guard page (ADR 0088).
+  The boot task's own functions, `goos_boot_continue`, `main.serviceKernel`
+  and `main.runKernelSelfTests`, are held to the boot stack's wider guard
+  instead. That stack is 64 KiB with 32 KiB of unmapped guard, and the boot
+  task moves onto it as soon as paging is up (ADR 0091).
+- A double fault is delivered on its own stack (TSS IST 1), so an overflow of
+  any kernel stack is reported with the guard address it hit instead of
+  resetting the machine (ADR 0091).
 - User address space starts at 1 GiB; low addresses are unmapped in every
   process, so null dereferences fault.
 - Every user stack has 64 KiB of unmapped address space directly below it
