@@ -10,10 +10,12 @@ ADR 0075) interrupts. This document covers the native calls defined by
 The operation number is in `EAX`; up to three arguments follow in
 general-purpose registers (stubs in `userspace/runtime/amd64.S`). The assembly
 bridge in `kernel/arch/amd64/io.S` routes the five blocking operations (5, 12,
-17, 21, 22) to dedicated dispatchers in `kernel/main.go`. Everything else goes through
-`kcall.Dispatch`, which checks fixed sizes before calling the handler in
-`kernel/main.go` or one of its sibling files (`diagnostics.go`, `timing.go`,
-`logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`, `imagemap.go`).
+17, 21, 22) to dedicated dispatchers in `kernel/ipccalls.go`, `kernel/streamcalls.go`
+and `kernel/waits.go`. Everything else goes through `kcall.Dispatch`, which checks
+fixed sizes before calling the handler in the file for its area: `devicecalls.go`,
+`ipccalls.go`, `streamcalls.go`, `launch.go`, `lifecycle.go`, `diagnostics.go`,
+`timing.go`, `logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`,
+`imagemap.go`.
 Unknown numbers return `Unsupported`.
 
 Every call runs with interrupts disabled, inside the kernel exclusion domain

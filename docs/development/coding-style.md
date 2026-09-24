@@ -38,7 +38,8 @@ code; propose changes through an ADR.
 - Services answer malformed but attributable requests with an error reply
   instead of dropping them (ADR 0048).
 - On a multi-step operation, roll back partial state on failure (see
-  `ChannelCreate` and manifest installation in `kernel/main.go`).
+  `ChannelCreate` in `kernel/ipccalls.go` and manifest installation in
+  `kernel/launch.go`).
 
 ## Constants
 
@@ -51,7 +52,7 @@ offset used in teardown) are debt, not precedent.
 - Few comments. Names and types should carry the meaning.
 - Comment *why*: an invariant, an ordering requirement, a race being closed,
   a reason a simpler approach is wrong. See the register-then-recheck comments
-  in the wait paths of `kernel/main.go`.
+  in the wait paths of `kernel/waits.go`.
 - Doc comments on exported identifiers whose contract is not obvious.
 - Every `unsafe` use in the kernel needs a `// SAFETY:` comment stating the
   ownership and bounds invariant ([memory-safety.md](../security/memory-safety.md)).
