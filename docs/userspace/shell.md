@@ -57,6 +57,13 @@ stream: a foreground command's is fed by the shell with the lines typed while it
 runs, and a background command's is at end of input. The bounded `readline`
 utility reads one line from `in`, rejects input beyond 128 bytes, and writes
 accepted bytes to `stdout`.
+`stat [-b|-k|-m|-g] PATH` prints a path's type and size in KiB by default, or
+in bytes, MiB or GiB, with two decimals and the exact byte count:
+`file 2.46 KiB (2519 bytes)`. A directory's size is the total of the files
+under it at any depth, followed by how many files and directories it holds;
+mounts inside it are counted like the directories they appear as. The walk
+keeps one cursor per level in fixed arrays, so its memory does not grow with
+the tree, and costs one VFS request per entry.
 Up to three unquoted `|` operators split a command into at most four bounded
 invocations. PID 1 creates private streams, starts all children before waiting,
 and gives each stage only its adjacent directional endpoints. It returns the
