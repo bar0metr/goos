@@ -53,6 +53,13 @@ The userspace build compiles `userspace/cmd/init`, `userspace/cmd/vfs`, and
 base, and converts its load segments to `build/userspace/init`. ELF is an
 intermediate build format only; the kernel accepts the GoOS native envelope.
 
+Each userspace program is rebuilt when any file of a project package it
+imports changes. The Makefile asks `go list -deps` for those packages under the
+userspace target's build tags rather than keeping the lists by hand; hand lists
+had drifted, and an edit to `kernel/mm/vm` once left the filesystem service
+built against the old image window. The kernel depends on everything under
+`kernel/` and `internal/`.
+
 `make run` boots the ISO with 512 MiB in QEMU and attaches COM1 to the current
 terminal. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
 1234 before executing the first instruction.
