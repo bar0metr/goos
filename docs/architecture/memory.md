@@ -41,10 +41,11 @@ user page-table levels. User leaves require the user bit at every parent, reject
 W+X, and are zeroed before exposure. The bootstrap native program uses a
 separate RX code page, read-only data page, and RW+NX stack page.
 
-Every image's stack segment has an unmapped guard page directly below it
-(ADR 0083). The loader rejects an image with a segment in that page, and
-TinyGo images place their stack in its own segment one page above the heap.
-A stack overflow is a page fault that retires the process.
+Every image's stack segment has 64 KiB of unmapped address space directly
+below it (ADR 0083, ADR 0088). The loader rejects an image with a segment in
+that gap, TinyGo images place their stack in its own segment 64 KiB above the
+heap, and the build rejects a program with a stack frame that could step over
+the gap. A stack overflow is a page fault that retires the process.
 
 Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
 `CopyOut` reject arithmetic wraparound and addresses outside the bootstrap user

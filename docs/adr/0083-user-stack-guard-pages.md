@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Extends ADR 0011 and ADR 0081.
+Accepted. Extends ADR 0011 and ADR 0081. ADR 0088 widens the guard from one
+page to a 64 KiB gap, bounds every frame by it at build time, and replaces the
+fault probe's recursion with one through a frame larger than a page.
 
 ## Context
 

@@ -31,10 +31,12 @@ SECTIONS
     _heap_end = .;
   } :data
 
-  /* One unmapped page separates the stack from everything below it, so an
-     overflow faults instead of corrupting the heap or globals (ADR 0083).
-     The loader rejects an image without this gap. */
-  . = ALIGN(0x1000) + 0x1000;
+  /* 64 KiB of unmapped address space separate the stack from everything
+     below it, so an overflow faults instead of corrupting the heap or globals
+     (ADR 0083, ADR 0088). The size must equal loader.StackGuardSize: the
+     loader rejects an image with a smaller gap, tools/stackframes bounds every
+     frame by it, and kernel/loader's tests compare this line with it. */
+  . = ALIGN(0x1000) + 0x10000;
 
   .stack (NOLOAD) : ALIGN(0x1000) {
     _stack_bottom = .;

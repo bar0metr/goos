@@ -98,7 +98,9 @@ In the `Makefile`:
    script, `$(INIT_RUNTIME)`, and `$(BUILD_CONFIG)`, so `HZ` and `DIAG`
    changes rebuild it. It builds with
    `-target=tinygo/targets/goos-userspace-amd64.json` and `$(TINYGO_TAGS)`.
-3. Add an image rule that runs `tools/elf2native` on the ELF.
+3. Add an image rule modelled on `$(BLOCK_IMAGE)`: it runs `$(STACKFRAMES)`
+   on the ELF, which fails the build if a stack frame could step over the
+   guard below the stack (ADR 0088), and then `tools/elf2native`.
 4. Add `$(<NAME>_IMAGE)` to the `userspace` target and to the `initramfs`
    recipe.
 5. Add the host test package to `test-security` if it validates untrusted

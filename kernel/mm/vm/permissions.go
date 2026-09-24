@@ -10,9 +10,11 @@ const (
 	UserStartupAddress = uint64(0x40001000)
 	UserCodeAddress    = uint64(0x40002000)
 	UserDataAddress    = uint64(0x40004000)
-	// UserStackAddress leaves the page below it unmapped as the stack's guard
-	// page (ADR 0083).
-	UserStackAddress = uint64(0x40006000)
+	// UserStackAddress is the stack of the fixed self-test and fault-probe
+	// layout. The 64 KiB below it are its unmapped guard gap (ADR 0083, ADR
+	// 0088); it sits above the self-test's shared-memory pages at 0x40010000
+	// so that the gap stays clear of them.
+	UserStackAddress = uint64(0x40030000)
 	// Processes may map shared memory only inside [UserSharedAddress, UserSharedLimit).
 	UserSharedAddress = uint64(0x40180000)
 	UserSharedLimit   = uint64(0x401c0000)

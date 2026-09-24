@@ -115,7 +115,8 @@ The native kernel and the first isolated services are implemented:
 - a bounded architecture-neutral Task and round-robin run-queue model;
 - timer-preempted x86_64 context switching across independent kernel stacks;
 - two live worker tasks and an idle task;
-- unmapped guard pages below every created kernel-task stack;
+- two unmapped guard pages below every created kernel-task stack, with every
+  kernel frame bounded by them at build time;
 - task blocking and explicit wakeup in the live IRQ scheduler;
 - a basic capability primitive that prevents rights escalation;
 - separate Process and Task models;
@@ -126,7 +127,8 @@ The native kernel and the first isolated services are implemented:
 - a 64-bit TSS with a dedicated guarded RSP0 kernel stack;
 - ring 3 code and data descriptors;
 - separate RX user code and RW+NX user stack mappings;
-- an unmapped guard page below every user stack, enforced by the loader;
+- a 64 KiB unmapped gap below every user stack, enforced by the loader, and a
+  build-time check that no stack frame can step over it;
 - a DPL 3 native kernel-call gate;
 - the first native program executing at CPL 3;
 - a typed native kernel-call dispatcher with Exit and bounded DebugWrite;

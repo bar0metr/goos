@@ -160,8 +160,8 @@ The raw disk image is host-provided and persists across boots.
 Images come only from the initramfs built into the ISO. A tampered image is
 still loaded through the bounded native loader: fixed header, at most eight
 page-aligned segments and 256 pages, user range only, no W+X, no overlaps, entry
-in an executable segment, stack in a writable NX segment with an unmapped
-guard page below it (docs/kernel/native-images.md). A valid but hostile image runs with
+in an executable segment, stack in a writable NX segment with a 64 KiB
+unmapped gap below it (docs/kernel/native-images.md). A valid but hostile image runs with
 exactly the manifest PID 1 grants it. Its read-only segments are shared with
 every other process running the same image, but never writable by any of them
 (ADR 0081). Images are not signed or measured, so whoever controls the ISO
@@ -214,3 +214,7 @@ controls the system ([boot-chain.md](boot-chain.md)).
   passes the check.
 - The `goos_diag` build prints other processes' handle tables and physical
   addresses. It is for diagnosis only (ADR 0052).
+- The kernel's boot task runs on the 64 KiB goroutine stack TinyGo's runtime
+  allocates from the kernel heap, which has a canary but no guard page. An
+  overflow there corrupts the heap. Kernel-entry and kernel-task stacks are
+  guarded (ADR 0088).

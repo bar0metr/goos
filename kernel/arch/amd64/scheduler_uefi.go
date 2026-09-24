@@ -9,10 +9,9 @@ import (
 )
 
 const (
-	kernelStackPages = uint64(4)
-	stackGuardPages  = uint64(1)
-	contextWords     = 20
-	initialRFlags    = uint64(0x202)
+	stackGuardPages = uint64(KernelStackGuardSize / pmm.PageSize)
+	contextWords    = 20
+	initialRFlags   = uint64(0x202)
 )
 
 //go:extern goos_task_entry_table
@@ -40,7 +39,7 @@ func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
 		if !ok {
 			return false
 		}
-		if !unmapGuardPage(pageTable, allocation) {
+		if !unmapGuardPages(pageTable, allocation) {
 			return false
 		}
 		stackStart := allocation + stackGuardPages*pmm.PageSize
@@ -58,7 +57,7 @@ func AddUserTask(allocator *pmm.Allocator, pageTable uint64, entry uint64, userS
 		return 0, false
 	}
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
-	if !ok || !unmapGuardPage(pageTable, allocation) {
+	if !ok || !unmapGuardPages(pageTable, allocation) {
 		return 0, false
 	}
 	stackStart := allocation + stackGuardPages*pmm.PageSize
@@ -216,10 +215,13 @@ func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64)
 	if allocation == 0 {
 		return false
 	}
-	if !vm.MapKernelPage(kernelRoot, allocation) {
-		return false
+	for page := uint64(0); page < stackGuardPages; page++ {
+		guard := allocation + page*pmm.PageSize
+		if !vm.MapKernelPage(kernelRoot, guard) {
+			return false
+		}
+		invalidatePage(guard)
 	}
-	invalidatePage(allocation)
 	ok := true
 	for page := uint64(0); page < kernelStackPages+stackGuardPages; page++ {
 		ok = allocator.Free(allocation+page*pmm.PageSize) && ok

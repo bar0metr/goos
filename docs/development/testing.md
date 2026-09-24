@@ -7,7 +7,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-unit` runs all host-side Go tests.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
-  userspace security-focused host tests explicitly.
+  userspace security-focused host tests explicitly, and those of the
+  build-time stack frame check (`tools/stackframes`, ADR 0088).
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.

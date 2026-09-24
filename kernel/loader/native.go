@@ -1,6 +1,9 @@
 package loader
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"goos/kernel/mm/vm"
+)
 
 const (
 	NativeVersion     = uint16(1)
@@ -11,6 +14,12 @@ const (
 	SegmentReadable   = uint32(1 << 0)
 	SegmentWritable   = uint32(1 << 1)
 	SegmentExecutable = uint32(1 << 2)
+	// StackGuardSize is the unmapped gap every image leaves directly below its
+	// stack segment (ADR 0083, ADR 0088). Userspace code has no stack probes,
+	// so the gap has to be wider than any frame: tools/stackframes rejects a
+	// program with a frame that could step over it, and
+	// userspace/runtime/amd64.ld leaves exactly this much below the stack.
+	StackGuardSize = uint64(64 << 10)
 )
 
 var nativeMagic = [8]byte{'G', 'O', 'O', 'S', 'N', 'A', 'T', 0}
@@ -122,20 +131,39 @@ func (image Image) StackSegment() (Segment, bool) {
 	return Segment{}, false
 }
 
-// stackIsGuarded requires the page directly below the stack segment to lie in
-// the user range and to be covered by no segment, so a stack that overflows
-// faults on an unmapped page instead of overwriting what lies below it.
+// StackGuard returns the range [start, end) directly below the stack segment
+// that must stay unmapped. ok is false when the image has no valid stack.
+func (image Image) StackGuard() (start uint64, end uint64, ok bool) {
+	stack, found := image.StackSegment()
+	if !found || stack.VirtualAddress < StackGuardSize {
+		return 0, 0, false
+	}
+	return stack.VirtualAddress - StackGuardSize, stack.VirtualAddress, true
+}
+
+// stackIsGuarded requires the StackGuardSize bytes directly below the stack
+// segment to lie in the user range and to be covered by no segment, so a stack
+// that overflows faults on an unmapped page instead of overwriting what lies
+// below it.
 func (image Image) stackIsGuarded(pageSize uint64, userStart uint64) bool {
-	stack, ok := image.StackSegment()
-	if !ok || stack.VirtualAddress-userStart < pageSize {
+	start, end, ok := image.StackGuard()
+	if !ok || StackGuardSize%pageSize != 0 || start < userStart {
 		return false
 	}
-	guard := stack.VirtualAddress - pageSize
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
-		if segment.VirtualAddress < stack.VirtualAddress && segment.VirtualAddress+segment.MemorySize > guard {
+		if segment.VirtualAddress < end && segment.VirtualAddress+segment.MemorySize > start {
 			return false
 		}
 	}
 	return true
+}
+
+// KernelMapsUserRange reports whether the kernel may map any page of
+// [start, end) into a process after its image is loaded: the probe and startup
+// pages below the image, and the shared-memory, DMA and system image windows.
+// A stack guard must avoid all of them (ADR 0083, ADR 0088).
+func KernelMapsUserRange(start uint64, end uint64) bool {
+	return start < vm.UserCodeAddress && end > vm.UserProbeAddress ||
+		start < vm.UserImageLimit && end > vm.UserSharedAddress
 }
