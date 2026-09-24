@@ -140,7 +140,11 @@ The native kernel and the first isolated services are implemented:
 - restartable blocking IPC with message and timeout wakeups;
 - bounded readiness-only waits across up to 16 capability-checked channel,
   stream, or process handles, with a ready bit mask and generation-safe wakeups;
-- a capability-isolated userspace TTY protocol and serial service;
+- a userspace terminal service that alone reads the console and relays
+  everything the shell and its commands print, redrawing the line being typed
+  around it, so no ordinary process holds a console capability;
+- reference-counted stream endpoints, so one writing end can be shared by the
+  shell and every pipeline stage and closes only with its last holder;
 - a bounded generation-safe RAMFS core and versioned service protocol;
 - namespace-scoped VFS mounts, path resolution, open handles, and caches, with
   every mount listed in its parent directory and protected from removal;
@@ -152,6 +156,9 @@ The native kernel and the first isolated services are implemented:
   is on, and a system that still boots when it refuses one;
 - a storage driver that restarts with a fresh channel when it crashes, without
   taking the services around it down;
+- a terminal service and a shell that restart independently: whichever dies is
+  relaunched on a fresh session and the survivor is handed the other end, and a
+  dead shell's jobs are stopped with it;
 - a supervised log service that drains the bounded kernel ring onto persistent
   storage, so a session's records outlive its reset;
 - a typed configuration service with declared keys, namespace-scoped sessions,
@@ -233,7 +240,10 @@ trip about 0.15 ms, nearly independent of the tick rate (ADR 0057). The stress
 suite passes at 100, 250, and 1000 Hz; the default remains 100 Hz.
 
 A normal boot is quiet: a short banner, `Starting services...`, one `[ OK ]`
-line per service, and the prompt. Kernel self-tests and markers live in the
+line per service, and the prompt. Everything after that — the prompt, what is
+typed, and what the shell and its commands print — passes through the terminal
+service, which keeps the line being typed intact when a background job reports
+(ADR 0082, ADR 0089). Kernel self-tests and markers live in the
 `VALIDATION=1` build (ADR 0058). Services and the kernel log structured events
 to a bounded kernel ring, printed by `log` (ADR 0059). The shell provides
 `services`, `handles`, `caps`, `log`, and `reboot`, and `ps` shows PID, type,
@@ -287,8 +297,9 @@ Starting services...
 [ OK ] vfs
 [ OK ] block
 [ OK ] virtio-blk
-[ OK ] log
 [ OK ] config
+[ OK ] log
+[ OK ] tty
 [ OK ] shell
 
 goos>
@@ -314,6 +325,7 @@ block
 virtio-blk
 log
 config
+tty
 commands
 goos> ls /system/bin
 args
@@ -338,27 +350,31 @@ uptime
 write
 goos> mkdir /system/backdoor
 mkdir: /system/backdoor: read-only filesystem
+exit status: 2
 goos> mkdir /home/user
 goos> write /home/user/notes.txt "Hello from GoOS"
 goos> cat /home/user/notes.txt
 Hello from GoOS
 goos> ps
 PID   TYPE     STATE      MEM  CPU   COMMAND
-1     native   waiting    159  45    init
-7     native   waiting    139  5     vfs
-8     native   waiting    50   1     block
-9     native   waiting    54   0     virtio-blk
-10    native   waiting    92   2     shell
-207   native   running    61   0     ps
+1     native   waiting    138  6     init
+4     native   waiting    84   4     vfs
+5     native   waiting    47   2     block
+6     native   waiting    50   0     virtio-blk
+7     native   waiting    50   0     config
+8     native   waiting    46   1     log
+9     native   waiting    46   3     tty
+10    native   waiting    48   4     shell
+18    native   running    46   0     ps
 goos> quota
 PID   COMMAND           RESOURCE  HELD/LIMIT
-1     init              chan      7/16
-1     init              strm      0/16
+1     init              chan      15/24
+1     init              strm      2/24
 1     init              task      1/8
-1     init              page      159/512
-7     vfs               chan      0/4
-7     vfs               strm      0/4
-7     vfs               task      1/4
+1     init              page      138/512
+4     vfs               chan      0/4
+4     vfs               strm      0/4
+4     vfs               task      1/4
 ...
 ```
 
@@ -410,6 +426,11 @@ holds the system's settings, which the shell and the log service consult. The
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors; stream merging such as
 `2>&1` and job control are deliberately out of scope for now.
+
+The terminal service relays all shell and command output, but the kernel's
+warning echo and the system services that start before it still write the
+console directly and can land in a line being typed, and its redraw assumes the
+edited line fits one row (ADR 0089).
 
 Linux ABI compatibility remains a later compatibility layer. It must translate
 into the same GoOS process, VFS, IPC, handle, and capability model rather than

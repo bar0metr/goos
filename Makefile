@@ -307,6 +307,7 @@ docs:
 	@test -f docs/adr/0080-commands-as-separate-images.md
 	@test -f docs/adr/0081-shared-read-only-image-pages.md
 	@test -f docs/adr/0082-userspace-terminal-service.md
+	@test -f docs/adr/0089-terminal-output-and-session-restart.md
 	@test -f docs/adr/0083-user-stack-guard-pages.md
 	@test -f docs/adr/0084-filesystems-out-of-the-normal-kernel.md
 	@test -f docs/adr/0085-in-guest-microbenchmarks.md

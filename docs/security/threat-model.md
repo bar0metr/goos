@@ -16,7 +16,7 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 | System image | initramfs USTAR on the ESP, held in firmware-reserved pages and mounted read-only at `/system` | Defines every program the kernel will run and the command index that decides their grants |
 | Persistent data | FAT32 image on the virtio-blk disk (`/persist`, with `/home` and `/state` on the same volume) | Survives reboot; reachable only through VFS |
 | System log and configuration | kernel log ring, `/state/system.log`, `/state/config` | Diagnostics and the settings components act on |
-| Console | COM1 through the console device capability | Operator I/O, warning echo, and read access to the log ring |
+| Console | COM1 through the console device capability, and the terminal output stream the terminal service relays | Operator I/O, warning echo, and read access to the log ring |
 | CPU time | scheduler slots, wait sets | Liveness of every service |
 
 ## Trust boundaries
@@ -30,15 +30,16 @@ host (QEMU, OVMF, ISO, disk image file)
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
      │   ├─ config service                 holds the configuration store and a VFS session
      │   ├─ log service                    holds the log (read), console write, and a VFS session
-     │   ├─ terminal service               the only holder of console read; a session with the shell
-     │   └─ shell                          holds console write, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session
-     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr and optionally one VFS session
+     │   ├─ terminal service               the only holder of console read and of the terminal output stream's reader; a session with the shell
+     │   └─ shell                          holds a terminal output writer, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session; no console
+     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session
 ```
 
 | Boundary | Crossing | Enforcement |
 | --- | --- | --- |
 | user → kernel | `int 0x80` native calls, CPU faults | bounded `kcall` contract, handle lookup with type and rights, `CopyIn`/`CopyOut` ([attack-surface.md](attack-surface.md)) |
 | process ↔ process | typed IPC, streams, handle transfer, shared pages | per-process address spaces, generation-safe handles, non-escalating transfer ([capabilities.md](capabilities.md)); shared image pages are never writable (ADR 0081) |
+| shell, commands → terminal | terminal output stream (write-only copies) | only the terminal service holds a reading end besides PID 1; stream ends are reference counted, so no holder can close the stream for the others (ADR 0089) |
 | PID 1 → kernel launch | lifecycle channel | only PID 1 holds the lifecycle endpoint; the kernel validates every grant against PID 1's table (ADR 0024) and resolves the executable only inside the boot archive |
 | shell → PID 1 | exec channel and exec page | PID 1 copies the request out of the shared page before validating it, accepts only `/system/bin/<name>` paths, and grants a VFS session only when the command's entry in the command index asks for one (ADR 0030, 0064, 0080) |
 | VFS → storage | `GBLK001` IPC | block service validates ranges and overflow; VFS never holds device authority (ADR 0033, 0036) |
@@ -61,10 +62,18 @@ A program launched from the shell, for example a compromised command image in
 `/system/bin` or a command fed hostile arguments.
 
 - Holds only `in`, `stdout`, `stderr` and, when its manifest in the command
-  index asks for one, a private VFS session channel (ADR 0080). `in` is always
-  a stream; `stdout` and `stderr` are streams or the console, write only. It
-  cannot read what is typed except the lines the shell writes to its input
-  (ADR 0082). No Transfer right on any of them.
+  index asks for one, a private VFS session channel (ADR 0080). All three are
+  streams; `stdout` and `stderr` are write only, and where they reach the
+  terminal they are copies of one writing end shared with the shell and every
+  other command (ADR 0089). It cannot read what is typed except the lines the
+  shell writes to its input (ADR 0082), cannot read what other processes print,
+  and holds no console capability. No Transfer right on any of them.
+- Sharing the terminal's writing end lets it write into the same stream as
+  everything else that prints, as the shared console did before: it can spoof
+  another command's output on the screen, and a command that writes without
+  pause fills the 4 KiB stream so that other writers wait. It cannot close the
+  stream for anyone else, and the terminal service keeps serving the keyboard
+  while it relays (ADR 0089).
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
@@ -101,14 +110,22 @@ attacker-controlled code.
   and warnings to the console; logging is bounded by record size, not rate
   (ADR 0059, 0073).
 - Shell compromise can ask PID 1 to run any `/system/bin` image with the grants
-  its index entry names, stop its own jobs, read and write the console, read
-  and write every configuration setting through its full-scope session, and ask
-  PID 1 to sync and reset the machine (`reboot`, ADR 0061). It cannot reset the
-  machine itself: only PID 1 holds the system-control capability.
+  its index entry names, stop its own jobs, write to the terminal, read the
+  lines the terminal service gives it, read and write every configuration
+  setting through its full-scope session, and ask PID 1 to sync and reset the
+  machine (`reboot`, ADR 0061). It cannot reset the machine itself: only PID 1
+  holds the system-control capability. It holds no console capability and
+  cannot read the terminal's output stream (ADR 0089).
+- Terminal service compromise can read everything typed and everything the
+  shell and commands print, and write anything to the console. It holds nothing
+  else: no filesystem, no process control, and a control channel that only
+  accepts a session from PID 1.
 - The storage driver, the config service, and the log service restart on
-  failure. VFS, the block service, and the shell use `RestartNever` and stay
-  down after a crash; clients observe `PeerDied`, and bounded storage deadlines
-  report I/O errors instead of freezing (ADR 0048, 0078).
+  failure; the terminal service and the shell always restart, independently,
+  each handed a fresh session with the other (ADR 0089). VFS and the block
+  service use `RestartNever` and stay down after a crash; clients observe
+  `PeerDied`, and bounded storage deadlines report I/O errors instead of
+  freezing (ADR 0048, 0078).
 
 ### Compromised driver
 
@@ -182,6 +199,8 @@ controls the system ([boot-chain.md](boot-chain.md)).
 | crash loop | bounded restart count and backoff in the PID 1 supervisor (ADR 0019) |
 | stalled storage peer | bounded storage deadlines (ADR 0048) |
 | storage driver crash | PID 1 restarts the driver on a fresh channel and hands the block service the new endpoint (ADR 0078) |
+| terminal or shell crash | PID 1 restarts it on a fresh session and hands the survivor the other end; a dead shell's jobs are stopped with it (ADR 0089) |
+| a pipeline stage exiting | closes only its own copies of shared stream ends; the terminal's writing end stays open for the other stages (ADR 0089) |
 | corrupt persistent volume | mount refused, system runs without persistent storage (ADR 0077) |
 | driver exit with DMA armed | teardown resets the device and masks IRQ 11 before freeing pages (ADR 0035) |
 
@@ -205,10 +224,14 @@ controls the system ([boot-chain.md](boot-chain.md)).
 ## Known weaknesses
 
 - PID 1 is a single point of authority. Compromising it grants every
-  capability it still holds, including the console with Transfer, the
-  lifecycle channel, the VFS, block, and configuration control endpoints, the
-  system-control capability, the driver's port, IRQ, and DMA authority, and a
-  stop right over every running job.
+  capability it still holds, including the console with Transfer, both ends of
+  the terminal output stream, the lifecycle channel, the VFS, block,
+  configuration and terminal control endpoints, the system-control capability,
+  the driver's port, IRQ, and DMA authority, and a stop right over every running
+  job.
+- The kernel's warning echo, and the reports of the services that start before
+  the terminal, still write the console directly and can land in a line being
+  typed (ADR 0089).
 - `DebugWrite` is authorized by comparing address-space roots against
   bootstrap processes, not by a capability. In a normal build only PID 1
   passes the check.

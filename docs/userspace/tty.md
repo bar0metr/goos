@@ -1,15 +1,17 @@
 # Terminal
 
-The terminal service, `/system/tty`, owns the console's input (ADR 0082). It is
-the only process that holds the right to read the console, so nothing else can
-see what is typed. It edits the line, echoes it, recognises the control keys,
-and hands finished lines to its client, the shell, over a typed session.
+The terminal service, `/system/tty`, owns the console (ADR 0082, ADR 0089). It
+is the only process that holds the right to read the console, so nothing else
+can see what is typed. It edits the line, echoes it, recognises the control
+keys, and hands finished lines to its client, the shell, over a typed session.
+It is also the only process that reads what the shell and its commands print,
+and it writes that to the console around the line being typed.
 
 ```text
 keyboard ──UART──▶ kernel ring ──ConsoleRead──▶ tty ──GTTY lines──▶ shell
-                                                                      │
-                                    command input stream ◀────────────┘
-processes ──ConsoleWrite (write-only)──▶ console
+                                                 ▲                    │
+                                                 │  command input ◀───┘
+shell, commands ──terminal output stream─────────┘──ConsoleWrite──▶ console
 ```
 
 ## Line discipline
@@ -40,10 +42,9 @@ shell. A client sends:
 - `ReadLine(prompt)`: show the prompt and answer with the next line, an
   interrupt, or end of input. One read may be outstanding; a second is refused.
 - `Redraw(prompt)`: replace the outstanding read's prompt and show it again with
-  what has been typed. The shell sends it after output has moved the cursor —
-  when a background job is reported, or when a foreground command ends while a
-  line was being typed ahead. The line is erased first only if typed text is on
-  it.
+  what has been typed. The shell sends it when a foreground command ends while
+  its read — which had no prompt — is still outstanding. Output does not need
+  it any more: the service redraws around every write it relays.
 
 Prompts are at most 64 bytes of printable ASCII, so a client cannot use the
 service to send control sequences. Replies carry at most 128 bytes. A line
@@ -61,17 +62,53 @@ at end of input. No command reads the console.
 
 ## Output
 
-Output does not pass through the service. Every process that prints holds a
-write-only console capability, and the kernel writes each call whole. Routing
-output through the service would let it redraw the line under any output, but
-it needs many-writer streams the kernel does not have: closing a shared writing
-end today ends the stream for every holder.
+The shell and every command print to one stream whose reading end only the
+service holds (ADR 0089). PID 1 creates it, keeps both ends, and grants copies:
+`output` to the service, `stdout` to the shell, and `stdout` and `stderr` to
+every command stage that is not piped or redirected. Stream ends are reference
+counted, so a stage exiting closes only its own copies ([streams](../kernel/streams.md)).
+
+The service relays what arrives. It keeps a model of the screen
+(`userspace/tty.Screen`): what the prompt and the typed text occupy, and whether
+the cursor is at the start of a row. Before relaying a batch of output it takes
+the line being typed off the screen — `\r\x1b[K` when the line began a row,
+otherwise back over exactly its columns — and after the batch it shows the
+prompt and the typed text again, on a new row if the output ended mid-row. A
+foreground command's output, arriving while the read has no prompt and nothing
+is typed, is written exactly as it came. A line finished before the shell asked
+for it was echoed without a prompt; when the read arrives the service shows it
+again after the prompt, then delivers it. One pass relays at most sixteen reads
+(4 KiB), so output cannot keep the service from the keyboard, and Ctrl-C gets
+through a command that prints without pause.
+
+The service only reads the stream and writes the console; it never waits on a
+writer. A writer facing a full stream waits for room with a deadline (the shell
+two seconds per flush, then it drops that output; a command five seconds, then
+it exits with status 2).
+
+The kernel's warning echo, panics and early console, PID 1's boot lines, and the
+system services' own reports still reach the console directly
+([ADR 0089](../adr/0089-terminal-output-and-session-restart.md)).
 
 ## Supervision
 
-The service and the shell form one interactive session over a channel created
-once, so the service is not restarted on its own, and neither is the shell;
-recovering the session as a unit is later work.
+The service and the shell restart independently, both `restart: always`
+(ADR 0089). A session is a channel, which dies with either end, so whichever
+restarts is launched with a fresh one and the survivor is handed the other end
+as a `GTTY` session notice — a notification carrying exactly one handle:
+
+- When the service restarts, PID 1 gives the new process a new session and a
+  new control channel, and sends the session's client end to the shell over its
+  exec channel. The output stream needs nothing: PID 1 held a copy of its
+  reading end, so output written meanwhile is waiting.
+- When the shell restarts, PID 1 sends the new session's server end to the
+  service over its control channel. The service had kept editing input with no
+  one to give it to; it installs the session, forgets the old client's read, and
+  keeps what had been typed of the line.
+
+The control channel carries nothing but session notices, and only PID 1 holds
+its other end; anything else arriving on it is dropped and its handles closed.
+The validation build kills each once (`fault tty`, `fault shell`) to prove it.
 
 ## The bootstrap TTY demonstration
 
