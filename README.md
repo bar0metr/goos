@@ -250,7 +250,9 @@ service, which keeps the line being typed intact when a background job reports
 to a bounded kernel ring, printed by `log` (ADR 0059). The shell provides
 `services`, `handles`, `caps`, `log`, and `reboot`, and `ps` shows PID, type,
 state, and command (ADR 0061). `reboot` syncs storage and restarts the machine
-through a capability held only by PID 1. The FAT32 volume supports
+through a capability held only by PID 1; `poweroff` syncs storage the same way
+and switches the machine off through ACPI S5, which in QEMU ends the emulator
+(ADR 0092). The FAT32 volume supports
 subdirectories (ADR 0060), so the M7 acceptance of writing, rebooting from the
 shell, and reading back runs inside one VM in the boot test, through `/home`.
 
@@ -289,7 +291,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.0-dev
+GoOS 0.1.0
 
 CPU: x86_64
 Memory: 368 MiB usable
@@ -425,8 +427,10 @@ and `/state` separate user data from mutable system state. Per-process resource
 quotas bound each process's share of every kernel table, and `ps` and `quota`
 report what each process holds. A supervised log service persists the kernel
 ring to `/state`, so records survive a reboot, and a typed configuration service
-holds the system's settings, which the shell and the log service consult. The
-0.1.0 feature set is complete; what remains is consolidation — judging the existing surface rather than adding to it.
+holds the system's settings, which the shell and the log service consult.
+GoOS 0.1.0 is released; [docs/releases/0.1.0.md](docs/releases/0.1.0.md)
+summarises it and lists its known limitations. The next milestone is Linux ELF
+compatibility.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors; stream merging such as

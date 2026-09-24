@@ -92,7 +92,7 @@ because it administers the shell's own session:
 
 ```text
 goos> config
-system.build.release 0.1.0-dev (read-only)
+system.build.release 0.1.0 (read-only)
 system.log.persist true
 system.shell.prompt goos>
 goos> config get system.shell.prompt

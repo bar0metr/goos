@@ -359,6 +359,13 @@ image window had stayed at two MiB after the boot archive bound grew to four
 (ADR 0087 addendum). The release version is written once, in
 `internal/version/version.go`.
 
+ADR 0092 adds `poweroff`, which flushes storage and switches the machine off
+through ACPI S5; the kernel reads the firmware's ACPI tables once at boot as
+untrusted input.
+
+GoOS 0.1.0 is released (docs/releases/0.1.0.md). The next milestone is
+Priority 5, Linux ELF compatibility.
+
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
 can land in a line being typed; the terminal's redraw assumes the edited line
