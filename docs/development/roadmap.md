@@ -348,7 +348,11 @@ percent on a one-line command under emulation.
 ADR 0088 widens the gap below every user stack to 64 KiB and the kernel stacks'
 guard to two pages, and the build now fails if any function's stack frame could
 step over them: TinyGo emits no stack probes for userspace, and the kernel's
-probe routine is an empty stub. ADR 0090 makes TinyGo's `-opt=2` the default
+probe routine is an empty stub. ADR 0091 gives the boot task, the last kernel
+stack without a guard, a guarded stack of its own, and delivers double faults on
+a separate stack, so a kernel stack overflow is reported with the guard address
+it hit rather than resetting the machine; the boot test overflows one on purpose.
+ADR 0090 makes TinyGo's `-opt=2` the default
 build level, measured a fifth to a third faster on IPC, VFS and command paths
 than the size-optimised `-opt=z`; building at that level found that the system
 image window had stayed at two MiB after the boot archive bound grew to four

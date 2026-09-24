@@ -39,6 +39,10 @@ const (
 	OperationImageMap
 	OperationLogBounds
 	OperationConsoleInterrupt
+	// OperationValidationFault exists only in the validation build, where it
+	// overflows the calling task's kernel stack on purpose so the boot test
+	// can see the guard and the double-fault report work (ADR 0091).
+	OperationValidationFault
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -111,6 +115,7 @@ type Handler interface {
 	ImageMap(device uint64, virtual uint64, address uint64) Status
 	LogBounds(device uint64, address uint64) Status
 	ConsoleInterrupt(device uint64) Status
+	ValidationFault(device uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -216,6 +221,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.LogBounds(request.Arg0, request.Arg1)}
 	case OperationConsoleInterrupt:
 		return Result{Status: handler.ConsoleInterrupt(request.Arg0)}
+	case OperationValidationFault:
+		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationMemoryMap:
 		if request.Arg2&^MemoryMapWritable != 0 {
 			return Result{Status: StatusInvalidArgument}

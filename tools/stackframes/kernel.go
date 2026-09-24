@@ -29,19 +29,22 @@ const (
 	kernelFrameLimit = int64(amd64.KernelStackGuardSize) - kernelMargin
 )
 
-// bootStackFunctions may exceed the kernel limit, up to the size given,
-// because they never run on a guarded kernel stack. They run only on the boot
-// task: main.main is its entry, main.serviceKernel is called from main and
-// awaitValidationBoot, and main.runKernelSelfTests, in the validation build,
-// from main. The boot task's
-// stack is the 64 KiB one TinyGo's runtime allocates from the heap for the
-// main goroutine (internal/task.start), with a canary but no guard page, so
-// the kernel guard bound does not apply to it. The sizes keep each frame well
-// inside that stack and make any growth a deliberate change.
-var bootStackFunctions = map[string]int64{
-	"main.main":               16 << 10,
-	"main.serviceKernel":      16 << 10,
-	"main.runKernelSelfTests": 24 << 10,
+// bootStackFrameLimit bounds the frames of the functions that run only on the
+// boot task's stack, whose guard is wider than the other kernel stacks'.
+const bootStackFrameLimit = int64(amd64.BootStackGuardSize) - kernelMargin
+
+// bootStackFunctions may exceed the kernel limit, up to bootStackFrameLimit,
+// because they run only on the boot task, whose stack has a guard of
+// amd64.BootStackGuardSize (ADR 0091): goos_boot_continue is its entry on
+// that stack, main.serviceKernel is the service loop it ends in, and
+// main.runKernelSelfTests, in the validation build, is called from it.
+// main.main runs before the switch, on the goroutine stack TinyGo allocates,
+// which has no guard; it is bounded like any other kernel function and does
+// little enough to stay far below that stack's 64 KiB.
+var bootStackFunctions = map[string]bool{
+	"goos_boot_continue":      true,
+	"main.serviceKernel":      true,
+	"main.runKernelSelfTests": true,
 }
 
 // kernelFrame is one frame allocation found in the kernel's code.
@@ -107,9 +110,10 @@ func checkKernelFrames(frames []kernelFrame, symbols []symbol) report {
 			kind = "probed frame"
 		}
 		result.frames = append(result.frames, namedFrame{name: fmt.Sprintf("%s (%s at %#x)", name, kind, frame.address), size: frame.size})
-		if allowed, bootOnly := bootStackFunctions[name]; bootOnly {
-			if frame.size > allowed {
-				result.problems = append(result.problems, fmt.Sprintf("%s: %s of %d bytes at %#x exceeds the %d bytes allowed on the boot stack", name, kind, frame.size, frame.address, allowed))
+		if bootStackFunctions[name] {
+			if frame.size > bootStackFrameLimit {
+				result.problems = append(result.problems, fmt.Sprintf("%s: %s of %d bytes at %#x exceeds %d bytes (the %d-byte boot stack guard less the %d-byte return address)",
+					name, kind, frame.size, frame.address, bootStackFrameLimit, amd64.BootStackGuardSize, kernelMargin))
 			}
 			continue
 		}

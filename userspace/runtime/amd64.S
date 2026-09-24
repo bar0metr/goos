@@ -272,6 +272,14 @@ goos_console_interrupt:
     ret
 .size goos_console_interrupt, .-goos_console_interrupt
 
+.global goos_validation_fault
+.type goos_validation_fault,@function
+goos_validation_fault:
+    movl $35, %eax
+    int $0x80
+    ret
+.size goos_validation_fault, .-goos_validation_fault
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

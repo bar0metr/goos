@@ -196,6 +196,22 @@ goos_read_rsp:
     movq %rsp, %rax
     retq
 
+// goos_switch_to_boot_stack(top) moves the boot task onto the guarded boot
+// stack and calls goos_boot_continue there (ADR 0091). Win64 wants the stack
+// 16-byte aligned at the call and 32 bytes of home space above the return
+// address. Nothing returns here; a return would halt.
+.global goos_switch_to_boot_stack
+goos_switch_to_boot_stack:
+    movq %rcx, %rsp
+    andq $-16, %rsp
+    subq $32, %rsp
+    xorl %ebp, %ebp
+    callq goos_boot_continue
+.boot_stack_returned:
+    cli
+    hlt
+    jmp .boot_stack_returned
+
 .global goos_read_tsc
 goos_read_tsc:
     rdtsc
@@ -332,6 +348,8 @@ GOOS_FATAL_NOERR 31
 goos_exception_fatal:
     cmpq $0x23, 24(%rsp)
     je .terminate_user_fault
+    cmpq $8, (%rsp)
+    je .fatal_double
     leaq fatal_exception_message(%rip), %rsi
     cmpq $6, (%rsp)
     jne .fatal_check_gp
@@ -364,6 +382,51 @@ goos_exception_fatal:
 .fatal_halt:
     hlt
     jmp .fatal_halt
+
+// A double fault arrives on its own stack (IST 1). Its usual cause here is a
+// kernel stack overflow: the page fault on a guard page cannot push its frame
+// onto the exhausted stack. CR2 still holds that fault's address, which names
+// the guard page, so it is printed after the message.
+.fatal_double:
+    leaq fatal_df_message(%rip), %rsi
+.fatal_double_next:
+    movb (%rsi), %al
+    testb %al, %al
+    jz .fatal_double_address
+    movb %al, %ah
+    callq .fatal_serial_byte
+    incq %rsi
+    jmp .fatal_double_next
+.fatal_double_address:
+    movq %cr2, %rsi
+    movl $16, %ecx
+.fatal_double_digit:
+    rolq $4, %rsi
+    movl %esi, %eax
+    andl $0xf, %eax
+    leaq hex_digits(%rip), %rdx
+    movb (%rdx,%rax), %ah
+    callq .fatal_serial_byte
+    decl %ecx
+    jnz .fatal_double_digit
+    movb $0x0d, %ah
+    callq .fatal_serial_byte
+    movb $0x0a, %ah
+    callq .fatal_serial_byte
+    jmp .fatal_halt
+
+// .fatal_serial_byte writes %ah to COM1 once the transmitter is empty. It
+// clobbers %al and %dx only.
+.fatal_serial_byte:
+    movw $0x3fd, %dx
+.fatal_serial_wait:
+    inb %dx, %al
+    testb $0x20, %al
+    jz .fatal_serial_wait
+    movw $0x3f8, %dx
+    movb %ah, %al
+    outb %al, %dx
+    retq
 
 .terminate_user_fault:
     incq goos_user_faults(%rip)
@@ -402,6 +465,10 @@ fatal_gp_message:
     .asciz "PANIC: general protection fault\r\n"
 fatal_pf_message:
     .asciz "PANIC: page fault\r\n"
+fatal_df_message:
+    .asciz "PANIC: double fault, a kernel stack overflow if this address is a guard page: 0x"
+hex_digits:
+    .ascii "0123456789abcdef"
 
 .align 8
 .global goos_interrupt_table

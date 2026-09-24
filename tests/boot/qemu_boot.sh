@@ -5,6 +5,7 @@ log=build/logs/boot.log
 reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
 corrupt_log=build/logs/corrupt-volume.log
+stack_log=build/logs/kernel-stack-overflow.log
 pid=
 checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
@@ -504,7 +505,7 @@ require_regex version.banner "^GoOS $release_pattern[[:cntrl:]]*\$" "GoOS $relea
 require_regex version.uname "^GoOS $release_pattern x86_64[[:cntrl:]]*\$" "GoOS $release x86_64" "$log" uname
 pass_group version
 
-for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK USER_STACK_GUARD_OK; do
+for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK USER_STACK_GUARD_OK BOOT_STACK_GUARD_OK; do
 	require_marker "memory-security.$marker" "$marker" "$log"
 done
 pass_group memory-security
@@ -852,5 +853,40 @@ forbid_window corrupt.persist-absent '^persist/$' 'no persistent mounts listed' 
 require_regex corrupt.usable '^volatile-root-still-works$' 'the system usable without storage' "$corrupt_log" 'goos> echo volatile-root-still-works'
 require_marker corrupt.config CONFIG_GET_OK "$corrupt_log" 'config get system.shell.prompt'
 pass_group corrupt-volume
+
+# A kernel stack that overflows must stop at its guard and be reported, not
+# run into the memory below it or reset the machine without a word. PID 1's
+# validation-only native call recurses on its own kernel-entry stack; the
+# kernel prints that stack's guard range first, and the double fault, taken on
+# its own stack, prints the address of the fault that could not be delivered.
+# That address has to lie in the guard (ADR 0091).
+rm -f "$stack_log"
+stack_disk=build/stack-virtio-blk.img
+go run ./tools/mkfat32 "$stack_disk"
+( sleep 6
+	printf 'fault kernel-stack\n'
+	sleep 10
+) | qemu-system-x86_64 -machine q35 -m 512M \
+	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$stack_disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$stack_log" 2>&1 &
+pid=$!
+
+wait_for_marker kernel-stack '^PANIC: double fault' 60 "$stack_log"
+cleanup
+require_marker kernel-stack.injected KERNEL_STACK_FAULT_INJECTED "$stack_log"
+guard=$(tr -d '\r' <"$stack_log" | sed -n 's/^KERNEL_STACK_GUARD \(0x[0-9a-f]*\) \(0x[0-9a-f]*\)$/\1 \2/p' | head -n 1)
+fault=$(tr -d '\r' <"$stack_log" | sed -n 's/^PANIC: double fault.*: 0x\([0-9a-f]\{16\}\)$/0x\1/p' | head -n 1)
+[ -n "$guard" ] && [ -n "$fault" ] ||
+	fail_check kernel-stack.report 'the guard range and the double-fault address' "guard '$guard', fault '$fault'" "$stack_log" 'KERNEL_STACK'
+checks=$((checks + 1))
+guard_low=${guard% *}
+guard_high=${guard#* }
+[ $((fault)) -ge $((guard_low)) ] && [ $((fault)) -lt $((guard_high)) ] ||
+	fail_check kernel-stack.in-guard "a fault address in [$guard_low, $guard_high)" "$fault" "$stack_log" 'PANIC: double fault'
+checks=$((checks + 1))
+require_count kernel-stack.one-boot 'BOOT_SERVICES_EXITED' 1 "$stack_log" 'PANIC: double fault'
+pass_group kernel-stack-overflow
 
 printf '\nPASS qemu-boot (%s checks)\n' "$checks"

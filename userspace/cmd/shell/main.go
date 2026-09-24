@@ -469,8 +469,10 @@ func injectFault(target []byte) {
 	service := execproto.FaultTerminal
 	if argumentIs(target, "shell") {
 		service = execproto.FaultShell
+	} else if argumentIs(target, "kernel-stack") {
+		service = execproto.FaultKernelStack
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty or shell\n")
+		write("fault: tty, shell or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)
