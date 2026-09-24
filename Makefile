@@ -262,7 +262,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -310,7 +310,8 @@ test-performance: test-microbench
 lint:
 	$(BUILD_ENV) go vet ./...
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
-	@! grep -R --include='*.go' -n '"unsafe"' kernel internal --exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 2>/dev/null
+	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
+	@tests/lint/unsafe_boundary.sh
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './build/*')

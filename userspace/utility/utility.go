@@ -10,78 +10,27 @@ package utility
 import (
 	"goos/internal/validation"
 	"goos/kernel/clock"
+	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/shell"
 	"goos/userspace/startup"
-	"runtime"
-	"unsafe"
 )
 
 var wire [ipc.WireMaxSize]byte
-var descriptor = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 var startupWire [startup.Size]byte
 var pathBuffer [shell.MaxPath]byte
 var targetBuffer [shell.MaxPath]byte
 var correlation uint64
-var heapPointer uintptr
 var stdoutHandle uint64
 var stderrHandle uint64
 var stdinHandle uint64
 var vfsHandle uint64
-var clockValue uint64
-var inputByte byte
-var streamDescriptor [3]uint64
-
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname consoleRead goos_console_read
-func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamRead goos_stream_read
-func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamWrite goos_stream_write
-func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamWait goos_stream_wait
-func streamWait(stream uint64, timeout uint64) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
-
-//go:linkname processExit goos_exit
-func processExit(code uint64)
-
-//go:linkname clockRead goos_clock_read
-func clockRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname clockReadNanos goos_clock_read_nanos
-func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname processInfo goos_process_info
-func processInfo(index uint64, address unsafe.Pointer) uint64
-
-//go:linkname systemInfoRead goos_system_info
-func systemInfoRead(address unsafe.Pointer, size uintptr) uint64
+var inputByte [1]byte
 
 // current is the running command's manifest, and commandName the name it was
 // started under; usage errors and diagnostics are written from them.
@@ -99,8 +48,9 @@ var (
 // read the argument count byte and decode the vector only when there is a flag
 // to test.
 func Run(manifest commands.Manifest, main func(startup.Data)) {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { finish(1, "UTILITY_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		finish(1, "startup unavailable\n")
 	}
 	data, ok := startup.Decode(startupWire[:])
@@ -236,71 +186,74 @@ func Arguments(data startup.Data, start int) {
 
 // Clock reads the monotonic timer in ticks.
 func Clock() uint64 {
-	if clockRead(unsafe.Pointer(&clockValue), 8) != 0 {
+	value, status := sys.ClockRead()
+	if status != kcall.StatusOK {
 		Fail(nil, "clock unavailable")
 	}
-	return clockValue
+	return value
 }
 
 // ClockNanos reads the calibrated nanosecond clock.
 func ClockNanos() uint64 {
-	if clockReadNanos(unsafe.Pointer(&clockValue), 8) != 0 {
+	value, status := sys.ClockReadNanos()
+	if status != kcall.StatusOK {
 		Fail(nil, "clock unavailable")
 	}
-	return clockValue
+	return value
 }
 
 // SystemInfo fills record with the kernel's system summary.
 func SystemInfo(record *[kcall.SystemInfoSize]byte) {
-	if systemInfoRead(unsafe.Pointer(&record[0]), uintptr(len(record))) != 0 {
+	if sys.SystemInfo(record) != kcall.StatusOK {
 		Fail(nil, "system information unavailable")
 	}
 }
 
 // ProcessInfo fills record with process index and reports whether it exists.
 func ProcessInfo(index uint64, record *[kcall.ProcessInfoSize]byte) bool {
-	return processInfo(index, unsafe.Pointer(&record[0])) == 0
+	return sys.ProcessInfo(index, record) == kcall.StatusOK
 }
 
 // HeapMark and HeapReset let a command that repeats an operation discard what
 // each repetition allocated; the arena never frees on its own.
-func HeapMark() uintptr { return heapPointer }
+func HeapMark() arena.Mark { return arena.Current() }
 
-func HeapReset(mark uintptr) { heapPointer = mark }
+func HeapReset(mark arena.Mark) { arena.Reset(mark) }
 
 // Equal compares bytes with a string without converting either.
 func Equal(value []byte, expected string) bool { return equal(value, expected) }
 
 // ReadByte reads one byte of standard input; the status is as for ReadInput.
 func ReadByte() (byte, uint64) {
-	status, _ := ReadInput(unsafe.Slice(&inputByte, 1))
-	return inputByte, status
+	status, _ := ReadInput(inputByte[:])
+	return inputByte[0], status
 }
 
 // ReadInput reads what standard input has available into target.
 // StatusNotFound and StatusResourceExhausted mean nothing arrived yet and the
 // caller should retry; StatusPeerDied means end of input.
 func ReadInput(target []byte) (uint64, int) {
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&target[0])))
-	streamDescriptor[1], streamDescriptor[2] = uint64(len(target)), 0
-	status := streamRead(stdinHandle, unsafe.Pointer(&streamDescriptor[0]), 24)
-	if status == uint64(kcall.StatusResourceExhausted) {
-		waitStatus := streamWait(stdinHandle, streamWaitDeadline)
-		if waitStatus == uint64(kcall.StatusTimeout) {
+	count, status := sys.StreamRead(handle.ID(stdinHandle), target)
+	if status == kcall.StatusResourceExhausted {
+		waitStatus := sys.StreamWait(handle.ID(stdinHandle), streamWaitDeadline)
+		if waitStatus == kcall.StatusTimeout {
 			return uint64(kcall.StatusResourceExhausted), 0
 		}
-		if waitStatus != 0 {
-			return waitStatus, 0
+		if waitStatus != kcall.StatusOK {
+			return uint64(waitStatus), 0
 		}
 		return uint64(kcall.StatusNotFound), 0
 	}
-	if status == uint64(kcall.StatusPermissionDenied) {
-		status = consoleRead(stdinHandle, unsafe.Pointer(&target[0]), 1)
-		if status == 0 {
+	if status == kcall.StatusPermissionDenied && len(target) != 0 {
+		// Standard input that is the console rather than a stream.
+		value, consoleStatus := sys.ConsoleRead(handle.ID(stdinHandle))
+		if consoleStatus == kcall.StatusOK {
+			target[0] = value
 			return 0, 1
 		}
+		status = consoleStatus
 	}
-	return status, int(streamDescriptor[2])
+	return uint64(status), count
 }
 
 // Retry reports whether a ReadInput status means nothing has arrived yet.
@@ -340,15 +293,14 @@ func CallVFS(request vfs.Request) (vfs.Reply, bool) {
 		return vfs.Reply{}, false
 	}
 	size, ok := ipc.Encode(message, wire[:])
-	if !ok || ipcSend(vfsHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+	if !ok || sys.IPCSend(handle.ID(vfsHandle), wire[:size]) != 0 {
 		return vfs.Reply{}, false
 	}
 	// Bound the wait: a service that never answers must surface an error rather
 	// than freeze the utility, and with it the shell, indefinitely.
 	for attempt := 0; attempt < vfsReplyAttempts; attempt++ {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, vfsReplyDeadline
-		status := ipcWaitReceive(vfsHandle, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
+		status := sys.IPCWaitReceive(handle.ID(vfsHandle), wire[:], vfsReplyDeadline)
+		if status == ipc.StatusTimeout {
 			continue
 		}
 		if status != 0 {
@@ -375,9 +327,9 @@ func finish(code uint64, message string) {
 		}
 	}
 	if vfsHandle != 0 {
-		handleClose(vfsHandle)
+		sys.HandleClose(handle.ID(vfsHandle))
 	}
-	processExit(code)
+	sys.Exit(code)
 	for {
 	}
 }
@@ -400,7 +352,7 @@ func Print(value []byte) {
 
 // PrintText appends value to the current output line.
 func PrintText(value string) {
-	Print(unsafe.Slice(unsafe.StringData(value), len(value)))
+	Print(sys.Bytes(value))
 }
 
 // PrintUint appends value in decimal and returns how many digits it took.
@@ -439,7 +391,7 @@ func Write(value []byte) {
 }
 
 func write(message string) {
-	writeHandle(stdoutHandle, unsafe.Slice(unsafe.StringData(message), len(message)))
+	writeHandle(stdoutHandle, sys.Bytes(message))
 }
 
 // Mark writes a validation marker; normal builds print nothing.
@@ -450,7 +402,7 @@ func Mark(message string) {
 }
 
 func writeError(message string) {
-	writeErrorBytes(unsafe.Slice(unsafe.StringData(message), len(message)))
+	writeErrorBytes(sys.Bytes(message))
 }
 
 func writeErrorBytes(message []byte) {
@@ -467,58 +419,20 @@ func writeHandle(target uint64, value []byte) {
 		if size > int(kcall.MaxStreamIO) {
 			size = int(kcall.MaxStreamIO)
 		}
-		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&value[0])))
-		streamDescriptor[1], streamDescriptor[2] = uint64(size), 0
-		status := streamWrite(target, unsafe.Pointer(&streamDescriptor[0]), 24)
-		if status == uint64(kcall.StatusPermissionDenied) {
-			consoleWrite(target, unsafe.Pointer(&value[0]), uintptr(len(value)))
+		written, status := sys.StreamWrite(handle.ID(target), value[:size])
+		if status == kcall.StatusPermissionDenied {
+			sys.ConsoleWrite(handle.ID(target), value)
 			return
 		}
-		if status == uint64(kcall.StatusResourceExhausted) {
-			if streamWait(target, streamWaitDeadline) != 0 {
-				processExit(2)
+		if status == kcall.StatusResourceExhausted {
+			if sys.StreamWait(handle.ID(target), streamWaitDeadline) != kcall.StatusOK {
+				sys.Exit(2)
 			}
 			continue
 		}
-		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(size) {
-			processExit(2)
+		if status != kcall.StatusOK || written == 0 || written > size {
+			sys.Exit(2)
 		}
-		value = value[streamDescriptor[2]:]
+		value = value[written:]
 	}
 }
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() { heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol)) }
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start, end := heapPointer, heapPointer+size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		finish(1, "UTILITY_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	// Go guarantees zeroed allocations, and the compiler relies on it when it
-	// skips clearing large composite literals. The arena is reused after every
-	// reset, so stale bytes would otherwise leak into fresh values.
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

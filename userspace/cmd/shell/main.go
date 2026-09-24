@@ -15,13 +15,13 @@ import (
 	"goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	terminal "goos/userspace/tty"
 	userwait "goos/userspace/wait"
-	"runtime"
 	"strconv"
-	"unsafe"
 )
 
 var (
@@ -57,11 +57,8 @@ var (
 	// waiting for another answer from PID 1, such as the one to a kill.
 	stashed           ipc.Message
 	stashedValid      bool
-	streamDescriptor  [3]uint64
-	heapPointer       uintptr
-	arenaBase         uintptr
+	arenaBase         arena.Mark
 	wire              [ipc.WireMaxSize]byte
-	descriptor        = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	correlation       uint64
 	startupData       startup.Data
 	handleRecord      [kcall.HandleInfoSize]byte
@@ -71,10 +68,17 @@ var (
 	executableBuffers [execproto.MaxStages][execproto.MaxPath]byte
 	argumentStorage   [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
 	vectorWires       [execproto.MaxStages][startup.VectorSize]byte
-	clockNanos        uint64
 	jobs              [execproto.Slots]job
-	execPage          = (*[execproto.Slots][execproto.SlotSize]byte)(unsafe.Pointer(uintptr(execproto.PageAddress)))
+	// execPage is the page shared with PID 1 that carries exec requests, one
+	// slot per job in flight (ADR 0064).
+	execPage []byte
 )
+
+// execSlot is slot of the shared exec page.
+func execSlot(slot int) *[execproto.SlotSize]byte {
+	start := int(slot) * execproto.SlotSize
+	return (*[execproto.SlotSize]byte)(execPage[start : start+execproto.SlotSize])
+}
 
 // job is an exec request in flight; its slot of the shared page is reused
 // only after PID 1 replies.
@@ -89,55 +93,11 @@ type job struct {
 	requestSize int
 }
 
-//go:linkname memoryMap goos_memory_map
-func memoryMap(memory uint64, address uint64, flags uint64) uint64
-
-//go:linkname ipcReceive goos_ipc_receive
-func ipcReceive(channel uint64, address unsafe.Pointer, capacity uintptr) uint64
-
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname handleInfo goos_handle_info
-func handleInfo(slot uint64, address unsafe.Pointer) uint64
-
-//go:linkname logRead goos_log_read
-func logRead(device uint64, index uint64, address unsafe.Pointer) uint64
-
-//go:linkname clockReadNanos goos_clock_read_nanos
-func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamRead goos_stream_read
-func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname processExit goos_exit
-func processExit(code uint64)
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
-
-//go:linkname streamWrite goos_stream_write
-func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamWait goos_stream_wait
-func streamWait(stream uint64, timeout uint64) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { fatal("SHELL_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		fatal("SHELL_STARTUP_UNAVAILABLE\n")
 	}
 	var validStartup, found bool
@@ -169,15 +129,20 @@ func userspaceMain() {
 	// it cannot start, and the shell must still come up without it.
 	configHandle, _ = startupData.Handle("config")
 	pageHandle, found := startupData.Handle("execpage")
-	if !found || memoryMap(uint64(pageHandle), execproto.PageAddress, kcall.MemoryMapWritable) != 0 {
+	if !found {
 		fatal("SHELL_EXEC_PAGE_FAILED\n")
 	}
-	arenaBase = heapPointer
+	page, pageStatus := sys.MemoryMap(pageHandle, execproto.PageAddress, execproto.PageSize, true)
+	if pageStatus != kcall.StatusOK {
+		fatal("SHELL_EXEC_PAGE_FAILED\n")
+	}
+	execPage = page
+	arenaBase = arena.Current()
 	root, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: cwd[:cwdSize]})
 	if !ok || root.Status != vfs.StatusOK || root.Kind != ramfs.KindDirectory {
 		fatal("SHELL_VFS_CONNECT_FAILED\n")
 	}
-	heapPointer = arenaBase
+	arena.Reset(arenaBase)
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
 	if validation.Enabled {
 		checkOutputIsWriteOnly()
@@ -203,7 +168,7 @@ func userspaceMain() {
 				mark("SHELL_TERMINAL_LINE_OK\n")
 				size := copy(lineStorage[:], text)
 				execute(lineStorage[:size])
-				heapPointer = arenaBase
+				arena.Reset(arenaBase)
 			}
 			// Ctrl-C at the prompt was echoed by the terminal service and
 			// discards the line; end of input there is ignored.
@@ -258,7 +223,7 @@ func redraw(prompt []byte) {
 // hand it the session of the terminal's replacement (ADR 0089).
 func terminalLost() {
 	if ttyHandle != 0 {
-		handleClose(uint64(ttyHandle))
+		sys.HandleClose(ttyHandle)
 		ttyHandle = 0
 	}
 	reading = 0
@@ -268,7 +233,7 @@ func terminalLost() {
 // restarted, and this is its client end.
 func installTerminal(session handle.ID) {
 	if ttyHandle != 0 {
-		handleClose(uint64(ttyHandle))
+		sys.HandleClose(ttyHandle)
 	}
 	ttyHandle, reading = session, 0
 	mark("SHELL_TERMINAL_REPLACED_OK\n")
@@ -278,7 +243,7 @@ func sendTerminal(message ipc.Message) bool {
 	// What the shell printed goes out before it asks for the next line.
 	flushOutput()
 	size, ok := ipc.Encode(message, ttyWire[:])
-	return ok && ipcSend(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), uintptr(size)) == 0
+	return ok && sys.IPCSend(ttyHandle, ttyWire[:size]) == 0
 }
 
 // takeLine returns the answer to the outstanding read if it has arrived. The
@@ -286,8 +251,8 @@ func sendTerminal(message ipc.Message) bool {
 // The returned text aliases a buffer the next call reuses.
 func takeLine() (terminal.Result, []byte, bool) {
 	for ttyHandle != 0 {
-		status := ipcReceive(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), ipc.WireMaxSize)
-		if status == uint64(ipc.StatusNotFound) {
+		status := sys.IPCReceive(ttyHandle, ttyWire[:])
+		if status == ipc.StatusNotFound {
 			return 0, nil, false
 		}
 		if status != 0 {
@@ -351,7 +316,7 @@ func execute(line []byte) {
 	for index := 0; index < count; index++ {
 		executeCommand(commands[index])
 		// Sequence slices borrow the static line buffer, not the arena.
-		heapPointer = arenaBase
+		arena.Reset(arenaBase)
 	}
 }
 
@@ -380,18 +345,19 @@ func executeTimed(line []byte) {
 		write("time: expected a command\n")
 		return
 	}
-	if clockReadNanos(unsafe.Pointer(&clockNanos), 8) != 0 {
+	start, status := sys.ClockReadNanos()
+	if status != kcall.StatusOK {
 		write("time: clock unavailable\n")
 		return
 	}
-	start := clockNanos
 	execute(line)
-	if clockReadNanos(unsafe.Pointer(&clockNanos), 8) != 0 {
+	end, status := sys.ClockReadNanos()
+	if status != kcall.StatusOK {
 		write("time: clock unavailable\n")
 		return
 	}
 	write("time: ")
-	writeUint((clockNanos - start) / 1000)
+	writeUint((end - start) / 1000)
 	write(" us\n")
 }
 
@@ -642,23 +608,27 @@ func feedInput(input handle.ID, text []byte) bool {
 	var line [terminal.MaxLine + 1]byte
 	size := copy(line[:], text)
 	line[size] = '\n'
-	pending := line[:size+1]
-	for len(pending) != 0 {
-		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&pending[0])))
-		streamDescriptor[1], streamDescriptor[2] = uint64(len(pending)), 0
-		status := streamWrite(uint64(input), unsafe.Pointer(&streamDescriptor[0]), 24)
-		if status == uint64(kcall.StatusResourceExhausted) {
-			// A full stream is a command not reading yet; wait for room, but
-			// not for ever, so a stuck command cannot hold the shell.
-			if streamWait(uint64(input), inputDeadline) != 0 {
+	// A full stream is a command not reading yet; wait for room, but not for
+	// ever, so a stuck command cannot hold the shell.
+	return writeStream(input, line[:size+1], inputDeadline)
+}
+
+// writeStream writes all of data to stream, waiting at most deadline ticks
+// each time the stream is full. It reports false if the reader has gone, the
+// wait ran out, or the stream answered with something other than progress.
+func writeStream(stream handle.ID, data []byte, deadline uint64) bool {
+	for len(data) != 0 {
+		written, status := sys.StreamWrite(stream, data)
+		if status == kcall.StatusResourceExhausted {
+			if sys.StreamWait(stream, deadline) != kcall.StatusOK {
 				return false
 			}
 			continue
 		}
-		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(len(pending)) {
+		if status != kcall.StatusOK || written == 0 || written > len(data) {
 			return false
 		}
-		pending = pending[streamDescriptor[2]:]
+		data = data[written:]
 	}
 	return true
 }
@@ -790,7 +760,7 @@ func executeExternal(line []byte, background bool) {
 		write("exec: too many background jobs\n")
 		return
 	}
-	data, ok := execproto.EncodeRequest(requestData, &execPage[slot])
+	data, ok := execproto.EncodeRequest(requestData, execSlot(int(slot)))
 	if !ok {
 		write("exec: command too large\n")
 		return
@@ -850,7 +820,7 @@ func executeExternal(line []byte, background bool) {
 func writeLaunchFailure(slot int, reply execproto.Reply) {
 	status := supervisor.LaunchStatus(reply.LaunchStatus)
 	var name []byte
-	if request, ok := execproto.DecodeRequest(execPage[slot][:jobs[slot].requestSize]); ok && reply.Stage < request.Count {
+	if request, ok := execproto.DecodeRequest(execSlot(slot)[:jobs[slot].requestSize]); ok && reply.Stage < request.Count {
 		name, _ = execproto.CommandFromSystemPath(request.Stages[reply.Stage].Path)
 	}
 	if len(name) != 0 && status.NamesExecutable() {
@@ -888,7 +858,7 @@ func sendExec(request ipc.Message) bool {
 		write("exec: encode failed\n")
 		return false
 	}
-	if status := ipcSend(uint64(execHandle), unsafe.Pointer(&wire[0]), uintptr(size)); status != 0 {
+	if status := sys.IPCSend(execHandle, wire[:size]); status != 0 {
 		write("exec: service unavailable\n")
 		return false
 	}
@@ -928,8 +898,8 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 				continue
 			}
 		}
-		status := ipcReceive(uint64(execHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
-		if status == uint64(ipc.StatusNotFound) {
+		status := sys.IPCReceive(execHandle, wire[:])
+		if status == ipc.StatusNotFound {
 			awaitInput()
 			continue
 		}
@@ -952,7 +922,7 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			if job == correlation && input == 0 {
 				input = started
 			} else {
-				handleClose(uint64(started))
+				sys.HandleClose(started)
 			}
 			continue
 		}
@@ -979,7 +949,7 @@ func isForeground(correlation uint64) bool {
 // closeInput ends a foreground job's input, if it still has one.
 func closeInput(input *handle.ID) {
 	if *input != 0 {
-		handleClose(uint64(*input))
+		sys.HandleClose(*input)
 		*input = 0
 	}
 }
@@ -989,7 +959,7 @@ func closeInput(input *handle.ID) {
 // needs the prompt asked for again.
 func pollReplies() bool {
 	replaced := false
-	for ipcReceive(uint64(execHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) == 0 {
+	for sys.IPCReceive(execHandle, wire[:]) == 0 {
 		message, valid := decodeWire()
 		if !valid {
 			continue
@@ -1108,7 +1078,7 @@ func printHandles(names bool) {
 		write("HANDLE              TYPE      RIGHTS\n")
 	}
 	for slot := uint64(0); slot < handle.MaxHandles; slot++ {
-		if handleInfo(slot, unsafe.Pointer(&handleRecord[0])) != 0 {
+		if sys.HandleInfo(slot, &handleRecord) != kcall.StatusOK {
 			continue
 		}
 		id := binary.LittleEndian.Uint64(handleRecord[0:8])
@@ -1347,11 +1317,10 @@ func callConfig(request config.Request) (config.Reply, bool) {
 		return config.Reply{}, false
 	}
 	size, ok := ipc.Encode(message, configWire[:])
-	if !ok || ipcSend(uint64(configHandle), unsafe.Pointer(&configWire[0]), uintptr(size)) != 0 {
+	if !ok || sys.IPCSend(configHandle, configWire[:size]) != 0 {
 		return config.Reply{}, false
 	}
-	configDescriptor := [3]uint64{uint64(uintptr(unsafe.Pointer(&configWire[0]))), ipc.WireMaxSize, 100000}
-	if ipcWaitReceive(uint64(configHandle), unsafe.Pointer(&configDescriptor[0]), uintptr(len(configDescriptor)*8)) != 0 {
+	if sys.IPCWaitReceive(configHandle, configWire[:], 100000) != 0 {
 		return config.Reply{}, false
 	}
 	payloadSize := int(configWire[24]) | int(configWire[25])<<8
@@ -1366,7 +1335,7 @@ func callConfig(request config.Request) (config.Reply, bool) {
 // printLog prints the retained system log, oldest record first.
 func printLog() {
 	for index := uint64(0); ; index++ {
-		if logRead(uint64(logHandle), index, unsafe.Pointer(&logLine[0])) != 0 {
+		if sys.LogRead(logHandle, index, &logLine) != kcall.StatusOK {
 			return
 		}
 		size := 0
@@ -1421,13 +1390,12 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		return vfs.Reply{}, false
 	}
 	size, ok := ipc.Encode(message, wire[:])
-	if !ok || ipcSend(uint64(vfsHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
+	if !ok || sys.IPCSend(vfsHandle, wire[:size]) != 0 {
 		return vfs.Reply{}, false
 	}
 	for {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
-		status := ipcWaitReceive(uint64(vfsHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
+		status := sys.IPCWaitReceive(vfsHandle, wire[:], 100000)
+		if status == ipc.StatusTimeout {
 			continue
 		}
 		if status != 0 {
@@ -1465,7 +1433,7 @@ func mark(message string) {
 }
 
 func write(message string) {
-	writeBytes(unsafe.Slice(unsafe.StringData(message), len(message)))
+	writeBytes(sys.Bytes(message))
 }
 
 // Output is assembled into lines before it is sent. The terminal service
@@ -1503,21 +1471,7 @@ func writeBytes(value []byte) {
 func flushOutput() {
 	pending := outputLine[:outputSize]
 	outputSize = 0
-	for len(pending) != 0 {
-		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&pending[0])))
-		streamDescriptor[1], streamDescriptor[2] = uint64(len(pending)), 0
-		status := streamWrite(uint64(outputHandle), unsafe.Pointer(&streamDescriptor[0]), 24)
-		if status == uint64(kcall.StatusResourceExhausted) {
-			if streamWait(uint64(outputHandle), outputDeadline) != 0 {
-				return
-			}
-			continue
-		}
-		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(len(pending)) {
-			return
-		}
-		pending = pending[streamDescriptor[2]:]
-	}
+	writeStream(outputHandle, pending, outputDeadline)
 }
 
 // outputDeadline bounds one wait for room in the terminal's output stream.
@@ -1528,9 +1482,7 @@ const outputDeadline = 2 * clock.TicksPerSecond
 // shell see what commands print to the terminal, is refused by the kernel.
 func checkOutputIsWriteOnly() {
 	var probe [8]byte
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&probe[0])))
-	streamDescriptor[1], streamDescriptor[2] = uint64(len(probe)), 0
-	if streamRead(uint64(outputHandle), unsafe.Pointer(&streamDescriptor[0]), 24) == uint64(kcall.StatusPermissionDenied) {
+	if _, status := sys.StreamRead(outputHandle, probe[:]); status == kcall.StatusPermissionDenied {
 		mark("TERMINAL_STREAM_READ_DENIED_OK\n")
 	}
 }
@@ -1572,48 +1524,9 @@ func fatal(message string) {
 		write(message)
 		flushOutput()
 	}
-	processExit(1)
+	sys.Exit(1)
 	for {
 	}
 }
 
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() {
-	heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol))
-}
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start := heapPointer
-	end := start + size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("SHELL_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	// Go guarantees zeroed allocations, and the compiler relies on it when it
-	// skips clearing large composite literals. The arena is reused after every
-	// reset, so stale bytes would otherwise leak into fresh values.
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

@@ -7,13 +7,15 @@ happens and which rules keep it contained.
 
 ## Where `unsafe` is allowed
 
-`make lint` fails if any `.go` file under `kernel/` or `internal/` imports
-`"unsafe"` outside directories named `uefi`, `vm`, or `amd64`:
+`make lint` runs `tests/lint/unsafe_boundary.sh`, which fails if
 
-```sh
-grep -R --include='*.go' -n '"unsafe"' kernel internal \
-  --exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64
-```
+- any `.go` file under `kernel/` or `internal/` imports `"unsafe"` outside
+  directories named `uefi`, `vm`, or `amd64`;
+- any `.go` file under `userspace/` imports `"unsafe"` or uses `//go:linkname`
+  or `//go:extern` outside `userspace/runtime/` (ADR 0095).
+
+The script checks itself first (`--self-test`) by planting each forbidden
+form in a scratch tree and requiring the check to fail.
 
 Current kernel users:
 
@@ -29,14 +31,21 @@ LAPIC and IOAPIC registers are reached through the assembly accessors
 `goos_mmio_read32` and `goos_mmio_write32`, not through Go pointers, so the
 compiler cannot reorder, merge, or drop a device access (ADR 0075).
 
-Userspace programs under `userspace/cmd/` and the libraries
-`userspace/utility`, `userspace/wait`, and `userspace/log` also use `unsafe`,
-for native-call stubs, arena allocators, and wire buffers. The lint rule does
-not cover them; the kernel treats everything they pass as untrusted.
+In userspace, `unsafe` lives in two packages (ADR 0095):
+
+| Package | Use |
+| --- | --- |
+| `userspace/runtime/sys` | the native-call stubs of `userspace/runtime/amd64.S`, descriptor addresses, slices over kernel-mapped windows (system image, shared pages, DMA, the launch staging page), zero-copy string/byte views |
+| `userspace/runtime/arena` | the bump allocator over `_heap_start`/`_heap_end` and the TinyGo runtime hooks |
+
+Programs, services, commands, and libraries call typed wrappers instead
+(`sys.IPCSend(channel, wire)`, `sys.StreamRead(stream, buffer)`,
+`sys.ImageMap(handle)`), and none of them imports `unsafe`. The kernel still
+treats everything userspace passes as untrusted.
 
 ## SAFETY comments
 
-Every `unsafe` conversion in the kernel should carry a `// SAFETY:` comment
+Every `unsafe` conversion in the kernel and in `userspace/runtime` should carry a `// SAFETY:` comment
 directly above it that states the invariant making it sound: who owns the memory, why it
 is mapped, and why the size is bounded. Example from `kernel/mm/vm`:
 

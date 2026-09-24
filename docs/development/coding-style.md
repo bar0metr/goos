@@ -59,11 +59,12 @@ offset used in teardown) are debt, not precedent.
 
 ## `unsafe`
 
-Allowed in the kernel only under `uefi`, `vm`, and `amd64` directories;
-`make lint` enforces this for `kernel/` and `internal/`. Userspace uses it for
-native-call stubs, arena allocators, and wire buffers; keep it in `cmd/` and
-the thin call-wrapper packages (`userspace/wait`, `userspace/utility`), not in
-protocol or policy cores.
+Allowed in the kernel only under `uefi`, `vm`, and `amd64` directories, and in
+userspace only under `userspace/runtime/` (`sys` for native calls and mapped
+windows, `arena` for the allocator). `make lint` enforces both, including
+`//go:linkname` and `//go:extern` in userspace (ADR 0095). A program that needs
+a native call the wrappers lack adds a typed wrapper to `userspace/runtime/sys`
+rather than a stub of its own.
 
 ## Formatting and checks
 

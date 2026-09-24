@@ -16,11 +16,11 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	terminal "goos/userspace/tty"
 	userwait "goos/userspace/wait"
-	"runtime"
-	"unsafe"
 )
 
 const lifecycleHandle = uint64(0x0000000100000001)
@@ -80,12 +80,6 @@ var (
 	ttyProcessHandle, shellProcessHandle handle.ID
 )
 
-//go:linkname processKill goos_process_kill
-func processKill(process uint64) uint64
-
-//go:linkname memoryMap goos_memory_map
-func memoryMap(memory uint64, address uint64, flags uint64) uint64
-
 // execJob is one shell request in flight. The request is copied out of the
 // shared page, so the shell cannot change it while it runs.
 type execJob struct {
@@ -99,34 +93,25 @@ type execJob struct {
 	job         supervisor.Job
 }
 
-//go:linkname systemReset goos_system_reset
-func systemReset(device uint64) uint64
-
-//go:linkname validationFault goos_validation_fault
-func validationFault(device uint64) uint64
-
-//go:linkname systemPowerOff goos_system_power_off
-func systemPowerOff(device uint64) uint64
-
 var (
 	manager              supervisor.Manager
 	wire                 [ipc.WireMaxSize]byte
-	descriptor           = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
 	supervisionTicks     uint64
 	correlation          uint64
-	heapPointer          uintptr
-	arenaBase            uintptr
+	arenaBase            arena.Mark
 	supervisionComplete  bool
 	processWaitAnnounced bool
 	nextStagingSlot      uint8
 	execJobs             [execproto.Slots]execJob
-	execPage             = (*[execproto.Slots][execproto.SlotSize]byte)(unsafe.Pointer(uintptr(execproto.PageAddress)))
-	lifecyclePending     [16]ipc.Message
-	lifecycleHead        uint8
-	lifecycleCount       uint8
-	streamPair           [2]uint64
-	streamDescriptor     [3]uint64
-	streamReadback       [16]byte
+	// execPage is the page shared with the shell that carries its exec
+	// requests, one slot per job (ADR 0064).
+	execPage         []byte
+	lifecyclePending [16]ipc.Message
+	lifecycleHead    uint8
+	lifecycleCount   uint8
+	streamPair       [2]uint64
+	streamDescriptor [3]uint64
+	streamReadback   [16]byte
 	// terminalOutput is the stream the shell and every command write to and
 	// the terminal service reads (ADR 0089). PID 1 keeps both ends for as
 	// long as it runs and grants copies: the service's reader survives the
@@ -135,48 +120,10 @@ var (
 	terminalOutput [2]uint64
 )
 
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcReceive goos_ipc_receive
-func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname channelCreate goos_channel_create
-func channelCreate(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
-
-//go:linkname processWait goos_process_wait
-func processWait(process uint64, result unsafe.Pointer, timeout uint64) uint64
-
-//go:linkname streamCreate goos_stream_create
-func streamCreate(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamRead goos_stream_read
-func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamWrite goos_stream_write
-func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
+	arena.Init()
+	arena.OnExhausted(func() { fatal("INIT_OUT_OF_MEMORY\n") })
 	syslog.Init(serviceDeviceHandle, "init")
 	if !mapSystemImage() {
 		fatal("INIT_IMAGE_MAP_FAILED\n")
@@ -287,13 +234,15 @@ func userspaceMain() {
 // startServices registers the system services and launches them in
 // dependency order, reporting each on the console.
 func startServices(ticks uint64) {
-	if memoryMap(uint64(execPageHandle), execproto.PageAddress, kcall.MemoryMapWritable) != 0 {
+	page, pageStatus := sys.MemoryMap(execPageHandle, execproto.PageAddress, execproto.PageSize, true)
+	execPage = page
+	if pageStatus != kcall.StatusOK {
 		fatal("INIT_EXEC_PAGE_FAILED\n")
 	}
 	write("\nStarting services...\n")
 	// The block service's control endpoint, over which a restarted driver's
 	// replacement channel is delivered. PID 1 holds the only client side.
-	if channelCreate(unsafe.Pointer(&blockControl[0]), 16) != 0 {
+	if !createChannel(&blockControl) {
 		fatal("INIT_BLOCK_CONTROL_FAILED\n")
 	}
 	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
@@ -370,7 +319,7 @@ func startServices(ticks uint64) {
 	// recovered from, not that one crashing during boot is survivable.
 	injectDriverFault()
 	supervisionComplete = true
-	arenaBase = heapPointer
+	arenaBase = arena.Current()
 }
 
 // startTerminalService starts the terminal service and returns the client end
@@ -384,10 +333,10 @@ func startServices(ticks uint64) {
 // exec channel, the terminal over the control channel created here.
 func startTerminalService(ticks uint64) handle.ID {
 	var pair, control [2]uint64
-	if streamCreate(unsafe.Pointer(&terminalOutput[0]), 16) != 0 {
+	if !createStream(&terminalOutput) {
 		fatal("INIT_TTY_OUTPUT_FAILED\n")
 	}
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 || channelCreate(unsafe.Pointer(&control[0]), 16) != 0 {
+	if !createChannel(&pair) || !createChannel(&control) {
 		fatal("INIT_TTY_CHANNEL_FAILED\n")
 	}
 	ttyControl = handle.ID(control[0])
@@ -440,7 +389,7 @@ func startLogService(ticks uint64) {
 	if manager.Register(supervisor.Definition{Name: "log", Executable: "/system/log", Dependencies: []string{"vfs"},
 		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		syslog.Warn("log service registration failed")
-		handleClose(uint64(session))
+		sys.HandleClose(session)
 		return
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
@@ -465,9 +414,9 @@ func startConfigService(ticks uint64) handle.ID {
 		return 0
 	}
 	var pair [2]uint64
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	if !createChannel(&pair) {
 		syslog.Warn("config service channel unavailable")
-		handleClose(uint64(session))
+		sys.HandleClose(session)
 		return 0
 	}
 	if manager.Register(supervisor.Definition{Name: "config", Executable: "/system/config", Dependencies: []string{"vfs"},
@@ -478,12 +427,12 @@ func startConfigService(ticks uint64) handle.ID {
 		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		syslog.Warn("config service registration failed")
 		closePair(pair)
-		handleClose(uint64(session))
+		sys.HandleClose(session)
 		return 0
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
 		syslog.Warn("config service did not start")
-		handleClose(pair[0])
+		sys.HandleClose(handle.ID(pair[0]))
 		return 0
 	}
 	configControlHandle = handle.ID(pair[0])
@@ -503,7 +452,7 @@ func openConfigSession(scope string, rights configproto.Rights) (handle.ID, bool
 		return 0, false
 	}
 	var pair [2]uint64
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	if !createChannel(&pair) {
 		return 0, false
 	}
 	correlation++
@@ -515,35 +464,30 @@ func openConfigSession(scope string, rights configproto.Rights) (handle.ID, bool
 	reply, status := receive(uint64(configControlHandle), vfsSessionDeadline)
 	configStatus, valid := configproto.DecodeAddSessionReply(reply)
 	if status != ipc.StatusOK || !valid || configStatus != configproto.StatusOK {
-		handleClose(pair[0])
+		sys.HandleClose(handle.ID(pair[0]))
 		return 0, false
 	}
 	return handle.ID(pair[0]), true
 }
 
 func probeStreamEndpoint() bool {
-	if streamCreate(unsafe.Pointer(&streamPair[0]), 16) != 0 {
+	if !createStream(&streamPair) {
 		return false
 	}
 	payload := "bounded-stream"
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(unsafe.StringData(payload))))
-	streamDescriptor[1], streamDescriptor[2] = uint64(len(payload)), 0
-	if streamWrite(streamPair[1], unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || streamDescriptor[2] != uint64(len(payload)) {
+	if written, status := sys.StreamWrite(handle.ID(streamPair[1]), sys.Bytes(payload)); status != kcall.StatusOK || written != len(payload) {
 		return false
 	}
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&streamReadback[0])))
-	streamDescriptor[1], streamDescriptor[2] = uint64(len(streamReadback)), 0
-	if streamRead(streamPair[0], unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || streamDescriptor[2] != uint64(len(payload)) || !equalBytes(streamReadback[:len(payload)], payload) {
+	if read, status := sys.StreamRead(handle.ID(streamPair[0]), streamReadback[:]); status != kcall.StatusOK || read != len(payload) || !equalBytes(streamReadback[:len(payload)], payload) {
 		return false
 	}
-	if handleClose(streamPair[1]) != 0 {
+	if sys.HandleClose(handle.ID(streamPair[1])) != 0 {
 		return false
 	}
-	streamDescriptor[2] = 0
-	if streamRead(streamPair[0], unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(ipc.StatusPeerDied) {
+	if _, status := sys.StreamRead(handle.ID(streamPair[0]), streamReadback[:]); status != ipc.StatusPeerDied {
 		return false
 	}
-	return handleClose(streamPair[0]) == 0
+	return sys.HandleClose(handle.ID(streamPair[0])) == 0
 }
 
 // probeSharedEndpoint checks, in the booted kernel, that stream ends are
@@ -553,18 +497,18 @@ func probeStreamEndpoint() bool {
 // handle must be refused.
 func probeSharedEndpoint() bool {
 	var pair [2]uint64
-	if streamCreate(unsafe.Pointer(&streamPair[0]), 16) != 0 {
+	if !createStream(&streamPair) {
 		return false
 	}
 	reader, writer := streamPair[0], streamPair[1]
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
-		handleClose(writer)
-		handleClose(reader)
+	if !createChannel(&pair) {
+		sys.HandleClose(handle.ID(writer))
+		sys.HandleClose(handle.ID(reader))
 		return false
 	}
 	ok := sharedEndpointHolds(pair, reader, writer)
 	closePair(pair)
-	handleClose(reader)
+	sys.HandleClose(handle.ID(reader))
 	return ok
 }
 
@@ -572,7 +516,7 @@ func sharedEndpointHolds(pair [2]uint64, reader, writer uint64) bool {
 	message := ipc.Message{ProtocolID: 1, Version: 1, Kind: ipc.KindNotification, HandleCount: 2}
 	message.Handles[0], message.Handles[1] = handle.ID(writer), handle.ID(writer)
 	if !sendMessage(pair[0], message) {
-		handleClose(writer)
+		sys.HandleClose(handle.ID(writer))
 		return false
 	}
 	received, status := receive(pair[1], 0)
@@ -581,38 +525,35 @@ func sharedEndpointHolds(pair [2]uint64, reader, writer uint64) bool {
 	}
 	first, second := uint64(received.Handles[0]), uint64(received.Handles[1])
 	// The moved handle is gone: closing it again is refused.
-	if handleClose(writer) != uint64(ipc.StatusNotFound) {
+	if sys.HandleClose(handle.ID(writer)) != ipc.StatusNotFound {
 		return false
 	}
 	payload := "shared"
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(unsafe.StringData(payload))))
-	streamDescriptor[1], streamDescriptor[2] = uint64(len(payload)), 0
-	if streamWrite(first, unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || handleClose(first) != 0 {
-		handleClose(second)
+	if _, status := sys.StreamWrite(handle.ID(first), sys.Bytes(payload)); status != kcall.StatusOK || sys.HandleClose(handle.ID(first)) != 0 {
+		sys.HandleClose(handle.ID(second))
 		return false
 	}
 	// A writing end cannot be read through.
-	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&streamReadback[0])))
-	streamDescriptor[1], streamDescriptor[2] = uint64(len(streamReadback)), 0
-	if streamRead(second, unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(kcall.StatusPermissionDenied) ||
-		streamRead(reader, unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || !equalBytes(streamReadback[:streamDescriptor[2]], payload) {
-		handleClose(second)
+	_, wrongEnd := sys.StreamRead(handle.ID(second), streamReadback[:])
+	read, readStatus := sys.StreamRead(handle.ID(reader), streamReadback[:])
+	if wrongEnd != kcall.StatusPermissionDenied || readStatus != kcall.StatusOK || !equalBytes(streamReadback[:read], payload) {
+		sys.HandleClose(handle.ID(second))
 		return false
 	}
 	// One writer is still held, so the drained stream is empty, not ended.
-	streamDescriptor[2] = 0
-	if streamRead(reader, unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(kcall.StatusResourceExhausted) {
-		handleClose(second)
+	if _, status := sys.StreamRead(handle.ID(reader), streamReadback[:]); status != kcall.StatusResourceExhausted {
+		sys.HandleClose(handle.ID(second))
 		return false
 	}
-	if handleClose(second) != 0 || handleClose(second) != uint64(ipc.StatusNotFound) {
+	if sys.HandleClose(handle.ID(second)) != 0 || sys.HandleClose(handle.ID(second)) != ipc.StatusNotFound {
 		return false
 	}
-	if streamRead(reader, unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(ipc.StatusPeerDied) {
+	if _, status := sys.StreamRead(handle.ID(reader), streamReadback[:]); status != ipc.StatusPeerDied {
 		return false
 	}
 	// A closed handle is not an endpoint any more.
-	return streamWrite(second, unsafe.Pointer(&streamDescriptor[0]), 24) == uint64(kcall.StatusPermissionDenied)
+	_, closedStatus := sys.StreamWrite(handle.ID(second), streamReadback[:1])
+	return closedStatus == kcall.StatusPermissionDenied
 }
 
 func probeBlockService() bool {
@@ -679,7 +620,7 @@ func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }
 func stagingSlot() (uint8, *[startup.Size]byte) {
 	nextStagingSlot = (nextStagingSlot + 1) % supervisor.StagingSlots
 	address := supervisor.StagingAddress + uint64(nextStagingSlot)*supervisor.StagingSlotSize
-	return nextStagingSlot, (*[startup.Size]byte)(unsafe.Pointer(uintptr(address)))
+	return nextStagingSlot, (*[startup.Size]byte)(sys.MappedAtStart(address, startup.Size))
 }
 
 // injectDriverFault kills the storage driver once, in the validation build
@@ -692,11 +633,11 @@ func injectDriverFault() {
 	}
 	target := driverProcessHandle
 	driverProcessHandle = 0
-	if processKill(uint64(target)) != 0 {
+	if sys.ProcessKill(target) != 0 {
 		syslog.Warn("driver fault injection failed")
 		return
 	}
-	handleClose(uint64(target))
+	sys.HandleClose(target)
 	syslog.Warn("driver fault injected")
 	mark("BLOCK_DRIVER_FAULT_INJECTED\n")
 }
@@ -712,7 +653,7 @@ const driverName = "virtio-blk"
 // a handle that is already dead.
 func replaceDriverChannel(spec *supervisor.LaunchSpec) bool {
 	var pair [2]uint64
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	if !createChannel(&pair) {
 		syslog.Error("driver channel unavailable")
 		return false
 	}
@@ -725,7 +666,7 @@ func replaceDriverChannel(spec *supervisor.LaunchSpec) bool {
 	reply, status := receive(uint64(blockControl[0]), vfsSessionDeadline)
 	blockStatus, valid := blockproto.DecodeSetDriverReply(reply)
 	if status != ipc.StatusOK || !valid || blockStatus != blockproto.StatusOK {
-		handleClose(pair[1])
+		sys.HandleClose(handle.ID(pair[1]))
 		syslog.Error("block service refused the replacement driver")
 		return false
 	}
@@ -733,7 +674,7 @@ func replaceDriverChannel(spec *supervisor.LaunchSpec) bool {
 	// new endpoint: the launcher was handed its copy before this ran, and the
 	// definition is what the launch after this one will use.
 	if manager.SetCapability(driverName, "service", handle.ID(pair[1])) != supervisor.StatusOK {
-		handleClose(pair[1])
+		sys.HandleClose(handle.ID(pair[1]))
 		return false
 	}
 	for index := 0; index < int(spec.CapabilityCount); index++ {
@@ -742,7 +683,7 @@ func replaceDriverChannel(spec *supervisor.LaunchSpec) bool {
 			return true
 		}
 	}
-	handleClose(pair[1])
+	sys.HandleClose(handle.ID(pair[1]))
 	return false
 }
 
@@ -798,7 +739,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			shellProcessHandle = keepProcess(shellProcessHandle, event.ProcessHandle)
 		}
 	}
-	if launched != supervisor.LaunchOK || !keep && handleClose(uint64(event.ProcessHandle)) != 0 {
+	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
 		if !supervisionComplete {
 			write("[FAIL] " + name + "\n")
 		}
@@ -835,7 +776,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 // process that has exited.
 func keepProcess(previous, next handle.ID) handle.ID {
 	if previous != 0 {
-		handleClose(uint64(previous))
+		sys.HandleClose(previous)
 	}
 	return next
 }
@@ -847,7 +788,7 @@ func keepProcess(previous, next handle.ID) handle.ID {
 // closing its stale ID is refused.
 func renewGrant(spec *supervisor.LaunchSpec, name string, capabilityName string, id handle.ID) bool {
 	if previous, found := manager.Capability(name, capabilityName); found && previous != id {
-		handleClose(uint64(previous))
+		sys.HandleClose(previous)
 	}
 	if manager.SetCapability(name, capabilityName, id) != supervisor.StatusOK {
 		return false
@@ -870,7 +811,7 @@ func offerSession(channel uint64, session handle.ID) bool {
 			return true
 		}
 	}
-	handleClose(uint64(session))
+	sys.HandleClose(session)
 	return false
 }
 
@@ -881,11 +822,11 @@ func offerSession(channel uint64, session handle.ID) bool {
 // written while the terminal was down is waiting in it.
 func renewTerminalSession(spec *supervisor.LaunchSpec) bool {
 	var session, control [2]uint64
-	if channelCreate(unsafe.Pointer(&session[0]), 16) != 0 {
+	if !createChannel(&session) {
 		syslog.Error("terminal session unavailable")
 		return false
 	}
-	if channelCreate(unsafe.Pointer(&control[0]), 16) != 0 {
+	if !createChannel(&control) {
 		closePair(session)
 		syslog.Error("terminal control unavailable")
 		return false
@@ -896,7 +837,7 @@ func renewTerminalSession(spec *supervisor.LaunchSpec) bool {
 		return false
 	}
 	if ttyControl != 0 {
-		handleClose(uint64(ttyControl))
+		sys.HandleClose(ttyControl)
 	}
 	ttyControl = handle.ID(control[0])
 	if offerSession(execServer, handle.ID(session[0])) {
@@ -911,11 +852,11 @@ func renewTerminalSession(spec *supervisor.LaunchSpec) bool {
 // PID 1 keeps, and new filesystem and configuration sessions.
 func renewShellSession(spec *supervisor.LaunchSpec) bool {
 	var session, exec [2]uint64
-	if channelCreate(unsafe.Pointer(&session[0]), 16) != 0 {
+	if !createChannel(&session) {
 		syslog.Error("shell session unavailable")
 		return false
 	}
-	if channelCreate(unsafe.Pointer(&exec[0]), 16) != 0 {
+	if !createChannel(&exec) {
 		closePair(session)
 		syslog.Error("shell exec channel unavailable")
 		return false
@@ -931,7 +872,7 @@ func renewShellSession(spec *supervisor.LaunchSpec) bool {
 		!renewGrant(spec, "shell", "vfs", files) {
 		closePair(session)
 		closePair(exec)
-		handleClose(uint64(files))
+		sys.HandleClose(files)
 		return false
 	}
 	// Configuration is optional, as it is at boot: a shell without a session
@@ -940,17 +881,17 @@ func renewShellSession(spec *supervisor.LaunchSpec) bool {
 		settings, ok := openConfigSession("", configproto.Read|configproto.Write)
 		if !ok || !renewGrant(spec, "shell", "config", settings) {
 			if ok {
-				handleClose(uint64(settings))
+				sys.HandleClose(settings)
 			}
 			if previous, found := manager.Capability("shell", "config"); found {
-				handleClose(uint64(previous))
+				sys.HandleClose(previous)
 			}
 			manager.RemoveCapability("shell", "config")
 			supervisor.RemoveGrant(spec, "config")
 		}
 	}
 	if execServer != 0 {
-		handleClose(execServer)
+		sys.HandleClose(handle.ID(execServer))
 	}
 	execServer = exec[1]
 	if offerSession(uint64(ttyControl), handle.ID(session[1])) {
@@ -975,7 +916,7 @@ func endShellSession() {
 		}
 		job.orphaned = true
 		for _, process := range job.job.Processes() {
-			if process != 0 && processKill(uint64(process)) == 0 {
+			if process != 0 && sys.ProcessKill(process) == 0 {
 				stopped = true
 			}
 		}
@@ -985,7 +926,7 @@ func endShellSession() {
 		mark("SESSION_JOBS_STOPPED_OK\n")
 	}
 	if execServer != 0 {
-		handleClose(execServer)
+		sys.HandleClose(handle.ID(execServer))
 		execServer = 0
 	}
 }
@@ -1001,7 +942,7 @@ func injectSessionFault(target uint8) execproto.ControlStatus {
 		// A successful call does not return: the kernel reports the double
 		// fault and halts.
 		mark("KERNEL_STACK_FAULT_INJECTED\n")
-		validationFault(systemControlHandle)
+		sys.ValidationFault(handle.ID(systemControlHandle))
 		return execproto.ControlInvalid
 	}
 	process := &ttyProcessHandle
@@ -1009,10 +950,10 @@ func injectSessionFault(target uint8) execproto.ControlStatus {
 	if target == execproto.FaultShell {
 		process, name = &shellProcessHandle, "SHELL_FAULT_INJECTED\n"
 	}
-	if *process == 0 || processKill(uint64(*process)) != 0 {
+	if *process == 0 || sys.ProcessKill(*process) != 0 {
 		return execproto.ControlNotFound
 	}
-	handleClose(uint64(*process))
+	sys.HandleClose(*process)
 	*process = 0
 	syslog.Warn("session fault injected")
 	mark(name)
@@ -1067,15 +1008,12 @@ func receiveLaunchResult(expectedCorrelation uint64) (supervisor.LifecycleEvent,
 
 func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
 	for {
-		descriptor[0] = uint64(uintptr(unsafe.Pointer(&wire[0])))
-		descriptor[1] = ipc.WireMaxSize
-		descriptor[2] = timeout
-		status := ipcWaitReceive(channel, unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
+		status := sys.IPCWaitReceive(handle.ID(channel), wire[:], timeout)
+		if status == ipc.StatusTimeout {
 			return ipc.Message{}, ipc.StatusTimeout
 		}
-		if status != 0 {
-			return ipc.Message{}, ipc.Status(status)
+		if status != ipc.StatusOK {
+			return ipc.Message{}, status
 		}
 		break
 	}
@@ -1092,15 +1030,15 @@ func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
 }
 
 func pollExec() {
-	heapPointer = arenaBase
-	status := ipc.Status(ipcReceive(execServer, unsafe.Pointer(&wire[0]), ipc.WireMaxSize))
+	arena.Reset(arenaBase)
+	status := ipc.Status(sys.IPCReceive(handle.ID(execServer), wire[:]))
 	if status == ipc.StatusNotFound {
 		return
 	}
 	if status == ipc.StatusPeerDied {
 		// The shell is gone; its exit event ends the session, and its
 		// replacement brings a new channel.
-		handleClose(execServer)
+		sys.HandleClose(handle.ID(execServer))
 		execServer = 0
 		return
 	}
@@ -1127,7 +1065,8 @@ func pollExec() {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0, 0)
 		return
 	}
-	copy(job.data[:size], execPage[slot][:size])
+	start := int(slot) * execproto.SlotSize
+	copy(job.data[:size], execPage[start:start+size])
 	request, ok := execproto.DecodeRequest(job.data[:size])
 	if !ok {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
@@ -1141,7 +1080,7 @@ func pollExec() {
 	if input := job.job.TakeInput(); input != 0 {
 		started, ok := execproto.EncodeStarted(slot, input, message.Correlation)
 		if !ok || !sendMessage(execServer, started) {
-			handleClose(uint64(input))
+			sys.HandleClose(input)
 		}
 	}
 	finishJob(job)
@@ -1205,7 +1144,7 @@ func handleControl(message ipc.Message) {
 	case operation == execproto.ControlDiagnostics:
 		// Only a diagnostic build dumps; the others answer unsupported.
 		status := execproto.ControlInvalid
-		if diagnostics(uint64(serviceDeviceHandle), 0) == 0 {
+		if sys.Diagnostics(serviceDeviceHandle) == 0 {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
@@ -1254,13 +1193,13 @@ func shutDown(powerOff bool, correlationOfShell uint64) {
 	}
 	if !powerOff {
 		write("\nRebooting...\n")
-		systemReset(systemControlHandle)
+		sys.SystemReset(handle.ID(systemControlHandle))
 		syslog.Error("reboot: reset refused")
 		sendControlStatus(execproto.ControlResetFailed, correlationOfShell)
 		return
 	}
 	write("\nPowering off...\n")
-	if systemPowerOff(systemControlHandle) == uint64(kcall.StatusUnsupported) {
+	if sys.SystemPowerOff(handle.ID(systemControlHandle)) == kcall.StatusUnsupported {
 		syslog.Warn("poweroff: no ACPI power-off on this machine")
 		sendControlStatus(execproto.ControlUnsupported, correlationOfShell)
 		return
@@ -1279,7 +1218,7 @@ func killJob(slot uint8) execproto.ControlStatus {
 		}
 		stopped := false
 		for _, process := range job.job.Processes() {
-			if process != 0 && processKill(uint64(process)) == 0 {
+			if process != 0 && sys.ProcessKill(process) == 0 {
 				stopped = true
 			}
 		}
@@ -1302,13 +1241,13 @@ type nativePipelineRunner struct{}
 
 func (nativePipelineRunner) CreateStream() (handle.ID, handle.ID, bool) {
 	var pair [2]uint64
-	if streamCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	if !createStream(&pair) {
 		return 0, 0, false
 	}
 	return handle.ID(pair[0]), handle.ID(pair[1]), true
 }
 
-func (nativePipelineRunner) Close(id handle.ID) bool { return handleClose(uint64(id)) == 0 }
+func (nativePipelineRunner) Close(id handle.ID) bool { return sys.HandleClose(id) == 0 }
 
 func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	command, allowed := execproto.CommandFromSystemPath(stage.Path)
@@ -1329,7 +1268,7 @@ func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicat
 // failed, which the caller records.
 func openVFSSession() (handle.ID, string) {
 	var pair [2]uint64
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	if !createChannel(&pair) {
 		return 0, "APP_CHANNEL_CREATE_FAILED"
 	}
 	correlation++
@@ -1341,7 +1280,7 @@ func openVFSSession() (handle.ID, string) {
 	controlReply, status := receive(vfsControlHandle, vfsSessionDeadline)
 	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
 	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
-		handleClose(pair[0])
+		sys.HandleClose(handle.ID(pair[0]))
 		if status != ipc.StatusOK {
 			return 0, "APP_VFS_RECEIVE_STATUS"
 		}
@@ -1389,7 +1328,7 @@ func launchApplication(path, command, cwd, arguments, environment []byte, stream
 	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, staging)
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
-		handleClose(pair[0])
+		sys.HandleClose(handle.ID(pair[0]))
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	grants := []supervisor.Capability{
@@ -1405,7 +1344,7 @@ func launchApplication(path, command, cwd, arguments, environment []byte, stream
 		if launched == supervisor.LaunchProcessFailed && event.Operation == 0 {
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
 		}
-		handleClose(pair[0])
+		sys.HandleClose(handle.ID(pair[0]))
 		return 0, 0, launched
 	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchOK
@@ -1444,7 +1383,7 @@ func loadCommandIndex() {
 		return
 	}
 	size, ok := readSessionFile(session, commandIndexPath, commandIndex[:])
-	handleClose(uint64(session))
+	sys.HandleClose(session)
 	if !ok {
 		syslog.Warn("INIT_COMMAND_INDEX_UNREADABLE")
 		return
@@ -1515,14 +1454,15 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 		if _, status := userwait.Any(&interests, 1, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
 			fatal("INIT_EXEC_WAIT_READY_FAILED\n")
 		}
-		status := processWait(uint64(processHandle), unsafe.Pointer(&exitCode), 0)
-		if status != 0 {
-			if status == uint64(ipc.StatusNotFound) {
+		code, status := sys.ProcessWait(processHandle, 0)
+		exitCode = code
+		if status != kcall.StatusOK {
+			if status == ipc.StatusNotFound {
 				continue
 			}
 			fatal("INIT_EXEC_WAIT_FAILED\n")
 		}
-		if handleClose(uint64(processHandle)) != 0 {
+		if sys.HandleClose(processHandle) != 0 {
 			fatal("INIT_EXEC_CLOSE_FAILED\n")
 		}
 		if !processWaitAnnounced {
@@ -1548,21 +1488,33 @@ func sendExecReply(correlation, pid, status, exitCode uint64, stage uint8) {
 
 func sendMessage(channel uint64, message ipc.Message) bool {
 	size, ok := ipc.Encode(message, wire[:])
-	return ok && ipcSend(channel, unsafe.Pointer(&wire[0]), uintptr(size)) == 0
+	return ok && sys.IPCSend(handle.ID(channel), wire[:size]) == 0
+}
+
+// createChannel and createStream fill pair with the two endpoints of a new
+// channel or stream, the shape PID 1 keeps them in.
+func createChannel(pair *[2]uint64) bool {
+	first, second, status := sys.ChannelCreate()
+	pair[0], pair[1] = uint64(first), uint64(second)
+	return status == kcall.StatusOK
+}
+
+func createStream(pair *[2]uint64) bool {
+	first, second, status := sys.StreamCreate()
+	pair[0], pair[1] = uint64(first), uint64(second)
+	return status == kcall.StatusOK
 }
 
 func closePair(pair [2]uint64) {
 	if pair[0] != 0 {
-		handleClose(pair[0])
+		sys.HandleClose(handle.ID(pair[0]))
 	}
 	if pair[1] != 0 {
-		handleClose(pair[1])
+		sys.HandleClose(handle.ID(pair[1]))
 	}
 }
 
-func bytesString(value []byte) string {
-	return *(*string)(unsafe.Pointer(&value))
-}
+func bytesString(value []byte) string { return sys.String(value) }
 
 // write prints to the console through the console capability PID 1 holds,
 // like every other process that prints: there is no identity-authorized
@@ -1570,7 +1522,7 @@ func bytesString(value []byte) string {
 // for the few lines that must not queue behind it (ADR 0089).
 func write(message string) {
 	if len(message) != 0 {
-		consoleWrite(uint64(serviceDeviceHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+		sys.ConsoleWriteString(serviceDeviceHandle, message)
 	}
 }
 
@@ -1584,48 +1536,9 @@ func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	diagnostics(uint64(serviceDeviceHandle), 0)
+	sys.Diagnostics(serviceDeviceHandle)
 	for {
 	}
 }
 
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() {
-	heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol))
-}
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start := heapPointer
-	end := start + size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("INIT_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	// Go guarantees zeroed allocations, and the compiler relies on it when it
-	// skips clearing large composite literals. The arena is reused after every
-	// reset, so stale bytes would otherwise leak into fresh values.
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

@@ -6,7 +6,8 @@ package log
 import (
 	"goos/internal/logfmt"
 	"goos/kernel/handle"
-	"unsafe"
+	"goos/kernel/kcall"
+	"goos/userspace/runtime/sys"
 )
 
 type Field struct {
@@ -22,7 +23,7 @@ const (
 )
 
 var (
-	console   uint64
+	console   handle.ID
 	component string
 	wire      [logfmt.MaxWire]byte
 	fields    [logfmt.MaxFields]byte
@@ -31,11 +32,11 @@ var (
 // Init names the calling component and the console device that authorizes
 // logging.
 func Init(device handle.ID, name string) {
-	console, component = uint64(device), name
+	console, component = device, name
 }
 
 func Str(key string, value string) Field {
-	return Field{Key: key, Value: unsafe.Slice(unsafe.StringData(value), len(value))}
+	return Field{Key: key, Value: sys.Bytes(value)}
 }
 
 func Bytes(key string, value []byte) Field { return Field{Key: key, Value: value} }
@@ -59,10 +60,6 @@ func emit(level logfmt.Level, message string, values []Field) bool {
 			return false
 		}
 	}
-	size, ok := logfmt.Encode(level, unsafe.Slice(unsafe.StringData(component), len(component)),
-		unsafe.Slice(unsafe.StringData(message), len(message)), encoded, wire[:])
-	return ok && logWrite(console, unsafe.Pointer(&wire[0]), uintptr(size)) == 0
+	size, ok := logfmt.Encode(level, sys.Bytes(component), sys.Bytes(message), encoded, wire[:])
+	return ok && sys.LogWrite(console, wire[:size]) == kcall.StatusOK
 }
-
-//go:linkname logWrite goos_log_write
-func logWrite(device uint64, address unsafe.Pointer, size uintptr) uint64

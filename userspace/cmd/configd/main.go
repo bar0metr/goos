@@ -20,10 +20,10 @@ import (
 	"goos/kernel/vfs"
 	"goos/userspace/config"
 	syslog "goos/userspace/log"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
-	"runtime"
-	"unsafe"
 )
 
 const (
@@ -59,38 +59,10 @@ var (
 	descriptor    [3]uint64
 	exportBuffer  [exportSize]byte
 	requestMsg    ipc.Message
-	heapPointer   uintptr
-	arenaBase     uintptr
+	arenaBase     arena.Mark
 	correlation   uint64
 	persistFailed bool
 )
-
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcReceive goos_ipc_receive
-func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
 
 type session struct {
 	endpoint handle.ID
@@ -101,8 +73,9 @@ type session struct {
 
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { fatal("CONFIG_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		fatal("CONFIG_STARTUP_UNAVAILABLE\n")
 	}
 	data, ok := startup.Decode(startupWire[:])
@@ -132,11 +105,11 @@ func userspaceMain() {
 	// serve it: the shell needs a configuration service to repair a broken
 	// configuration.
 	restore()
-	arenaBase = heapPointer
+	arenaBase = arena.Current()
 	mark("CONFIG_SERVICE_OK\n")
 	syslog.Info("ready", syslog.Str("path", configPath))
 	for {
-		heapPointer = arenaBase
+		arena.Reset(arenaBase)
 		var interests [userwait.MaxObjects]userwait.Interest
 		var indexes [maxSessions]int
 		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -168,7 +141,7 @@ func userspaceMain() {
 // The service never chooses either: it is told, by the one process holding the
 // control endpoint, and it enforces what it was told.
 func addSession() {
-	if ipcReceive(uint64(controlHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
+	if sys.IPCReceive(controlHandle, wire[:]) != 0 {
 		return
 	}
 	payloadSize := int(wire[24]) | int(wire[25])<<8
@@ -184,7 +157,7 @@ func addSession() {
 	}
 	if message, ok := config.AddSessionReply(status, requestMsg.Correlation); ok {
 		if size, encoded := ipc.Encode(message, wire[:]); encoded {
-			ipcSend(uint64(controlHandle), unsafe.Pointer(&wire[0]), uintptr(size))
+			sys.IPCSend(controlHandle, wire[:size])
 		}
 	}
 	if status == config.StatusOK {
@@ -205,7 +178,7 @@ func install(endpoint handle.ID, scope config.Scope, rights config.Rights) bool 
 }
 
 func dropSession(current *session) {
-	handleClose(uint64(current.endpoint))
+	sys.HandleClose(current.endpoint)
 	*current = session{}
 	liveSessions--
 }
@@ -239,7 +212,7 @@ func declareSchema() {
 }
 
 func mustText(value string) config.Value {
-	result, ok := config.Text(unsafe.Slice(unsafe.StringData(value), len(value)))
+	result, ok := config.Text(sys.Bytes(value))
 	if !ok {
 		fatal("CONFIG_SCHEMA_INVALID\n")
 	}
@@ -273,7 +246,7 @@ func restore() {
 }
 
 func serve(current *session) {
-	if ipcReceive(uint64(current.endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
+	if sys.IPCReceive(current.endpoint, wire[:]) != 0 {
 		// A peer that has gone leaves its endpoint readable forever otherwise.
 		dropSession(current)
 		return
@@ -297,7 +270,7 @@ func serve(current *session) {
 		message, encoded = config.EncodeReply(config.Reply{Operation: request.Operation, Status: config.StatusInvalidArgument}, requestMsg.Correlation)
 	}
 	if size, ok := ipc.Encode(message, wire[:]); encoded && ok {
-		ipcSend(uint64(current.endpoint), unsafe.Pointer(&wire[0]), uintptr(size))
+		sys.IPCSend(current.endpoint, wire[:size])
 	}
 }
 
@@ -385,13 +358,12 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		return vfs.Reply{}, false
 	}
 	size, ok := ipc.Encode(message, vfsWire[:])
-	if !ok || ipcSend(uint64(vfsHandle), unsafe.Pointer(&vfsWire[0]), uintptr(size)) != 0 {
+	if !ok || sys.IPCSend(vfsHandle, vfsWire[:size]) != 0 {
 		return vfs.Reply{}, false
 	}
 	for attempt := 0; attempt < vfsReplyAttempts; attempt++ {
-		descriptor[0], descriptor[1], descriptor[2] = uint64(uintptr(unsafe.Pointer(&vfsWire[0]))), ipc.WireMaxSize, vfsReplyDeadline
-		status := ipcWaitReceive(uint64(vfsHandle), unsafe.Pointer(&descriptor[0]), uintptr(len(descriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
+		status := sys.IPCWaitReceive(vfsHandle, vfsWire[:], vfsReplyDeadline)
+		if status == ipc.StatusTimeout {
 			continue
 		}
 		if status != 0 {
@@ -415,49 +387,16 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	sys.ConsoleWriteString(consoleHandle, message)
 }
 
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	diagnostics(uint64(consoleHandle), 0)
+	sys.Diagnostics(consoleHandle)
 	for {
 	}
 }
 
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() { heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol)) }
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start, end := heapPointer, heapPointer+size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("CONFIG_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

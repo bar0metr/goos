@@ -5,14 +5,11 @@ package main
 import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
-	"goos/kernel/mm/vm"
+	"goos/kernel/kcall"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
-	"unsafe"
+	"goos/userspace/runtime/sys"
 )
-
-//go:linkname imageMap goos_image_map
-func imageMap(device uint64, virtual uint64, address unsafe.Pointer) uint64
 
 // systemImage is the boot system image, mapped read-only into PID 1. It is the
 // executable source for every launch: PID 1 finds a program here under its own
@@ -24,18 +21,9 @@ var systemImage []byte
 // service is itself launched from it, so PID 1 cannot wait for /system to be
 // served before it can start a process.
 func mapSystemImage() bool {
-	var descriptor [2]uint64
-	if imageMap(uint64(systemImageHandle), vm.UserImageAddress, unsafe.Pointer(&descriptor[0])) != 0 {
-		return false
-	}
-	if descriptor[0] != vm.UserImageAddress || descriptor[1] == 0 || descriptor[1] > vm.UserImageLimit-vm.UserImageAddress {
-		return false
-	}
-	// SAFETY: the kernel mapped exactly descriptor[1] bytes of the boot image
-	// read-only at descriptor[0] before returning success, and the mapping
-	// lives for as long as PID 1's address space, which is the whole boot.
-	systemImage = unsafe.Slice((*byte)(unsafe.Pointer(uintptr(descriptor[0]))), int(descriptor[1]))
-	return true
+	image, status := sys.ImageMap(systemImageHandle)
+	systemImage = image
+	return status == kcall.StatusOK
 }
 
 // locateExecutable turns an executable path into what the kernel launches: an

@@ -9,10 +9,10 @@ import (
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
 	syslog "goos/userspace/log"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
-	"runtime"
-	"unsafe"
 )
 
 type driverBackend struct {
@@ -67,42 +67,15 @@ var (
 	driverRequest    ipc.Message
 	driverReply      ipc.Message
 	driverDescriptor [3]uint64
-	heapPointer      uintptr
-	arenaBase        uintptr
+	arenaBase        arena.Mark
 	correlation      uint64
 )
 
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcReceive goos_ipc_receive
-func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
-
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { fatal("BLOCK_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		fatal("BLOCK_STARTUP_UNAVAILABLE\n")
 	}
 	data, ok := startup.Decode(startupWire[:])
@@ -139,11 +112,11 @@ func userspaceMain() {
 	if !ok {
 		fatal("BLOCK_SERVICE_INIT_FAILED\n")
 	}
-	arenaBase = heapPointer
+	arenaBase = arena.Current()
 	mark("BLOCK_SERVICE_OK\n")
 	syslog.Info("ready")
 	for {
-		heapPointer = arenaBase
+		arena.Reset(arenaBase)
 		endpoints := [...]handle.ID{controlHandle, serviceHandle, filesystemHandle}
 		var interests [userwait.MaxObjects]userwait.Interest
 		for index, endpoint := range endpoints {
@@ -164,7 +137,7 @@ func userspaceMain() {
 			// A client that has gone leaves its endpoint readable forever. It
 			// is not a reason to stop serving the others: this service outlives
 			// the processes that use it.
-			if ipcReceive(uint64(endpoint), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != uint64(ipc.StatusOK) {
+			if sys.IPCReceive(endpoint, wire[:]) != ipc.StatusOK {
 				syslog.Warn("client endpoint closed")
 				continue
 			}
@@ -176,7 +149,7 @@ func userspaceMain() {
 // setDriver installs the endpoint of a restarted driver. PID 1 holds the only
 // control endpoint, so nothing else can redirect where storage requests go.
 func setDriver() {
-	if ipcReceive(uint64(controlHandle), unsafe.Pointer(&controlWire[0]), ipc.WireMaxSize) != uint64(ipc.StatusOK) {
+	if sys.IPCReceive(controlHandle, controlWire[:]) != ipc.StatusOK {
 		return
 	}
 	payloadSize := int(controlWire[24]) | int(controlWire[25])<<8
@@ -188,7 +161,7 @@ func setDriver() {
 	if !valid {
 		status = blockproto.StatusInvalidArgument
 	} else {
-		handleClose(uint64(driverHandle))
+		sys.HandleClose(driverHandle)
 		driverHandle, driverLive = replacement, true
 		// The endpoint is installed without probing it. PID 1 hands it over
 		// before the replacement driver exists, so a probe here would time out
@@ -199,7 +172,7 @@ func setDriver() {
 	}
 	if message, ok := blockproto.SetDriverReply(status, controlMessage.Correlation); ok {
 		if size, encoded := ipc.EncodeFrom(&message, controlWire[:]); encoded {
-			ipcSend(uint64(controlHandle), unsafe.Pointer(&controlWire[0]), uintptr(size))
+			sys.IPCSend(controlHandle, controlWire[:size])
 		}
 	}
 }
@@ -220,7 +193,7 @@ func serve(endpoint handle.ID) {
 	if !encoded || !wireEncoded {
 		return
 	}
-	if ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
+	if sys.IPCSend(endpoint, wire[:size]) != kcall.StatusOK {
 		// The caller is gone. Its request dies with it; the service does not.
 		syslog.Warn("reply undeliverable")
 	}
@@ -237,7 +210,7 @@ func reject(endpoint handle.ID) {
 		return
 	}
 	if size, ok := ipc.EncodeFrom(&replyMessage, wire[:]); ok {
-		ipcSend(uint64(endpoint), unsafe.Pointer(&wire[0]), uintptr(size))
+		sys.IPCSend(endpoint, wire[:size])
 	}
 }
 
@@ -250,12 +223,11 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 		return blockproto.Reply{}, false
 	}
 	size, ok := ipc.EncodeFrom(&driverRequest, driverWire[:])
-	if !ok || ipcSend(uint64(driverHandle), unsafe.Pointer(&driverWire[0]), uintptr(size)) != 0 {
+	if !ok || sys.IPCSend(driverHandle, driverWire[:size]) != 0 {
 		return blockproto.Reply{}, false
 	}
-	driverDescriptor[0], driverDescriptor[1], driverDescriptor[2] = uint64(uintptr(unsafe.Pointer(&driverWire[0]))), ipc.WireMaxSize, blockproto.RequestDeadline
-	if status := ipcWaitReceive(uint64(driverHandle), unsafe.Pointer(&driverDescriptor[0]), uintptr(len(driverDescriptor)*8)); status != 0 {
-		if status == uint64(ipc.StatusPeerDied) {
+	if status := sys.IPCWaitReceive(driverHandle, driverWire[:], blockproto.RequestDeadline); status != 0 {
+		if status == ipc.StatusPeerDied {
 			// Every later request would wait out its deadline against a process
 			// that is not there. They are refused until a driver is installed.
 			driverLive = false
@@ -277,50 +249,14 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	sys.ConsoleWriteString(consoleHandle, message)
 }
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	diagnostics(uint64(consoleHandle), 0)
+	sys.Diagnostics(consoleHandle)
 	for {
 	}
 }
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() { heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol)) }
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start, end := heapPointer, heapPointer+size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("BLOCK_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	// Go guarantees zeroed allocations, and the compiler relies on it when it
-	// skips clearing large composite literals. The arena is reused after every
-	// reset, so stale bytes would otherwise leak into fresh values.
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

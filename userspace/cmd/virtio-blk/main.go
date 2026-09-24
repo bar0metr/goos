@@ -9,13 +9,14 @@ import (
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
 	syslog "goos/userspace/log"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
-	"runtime"
-	"unsafe"
 )
 
 const (
 	dmaVirtualAddress = uint64(0x401c0000)
+	dmaSize           = uint64(16384)
 	sectorSize        = uint64(512)
 	virtioRead        = uint32(0)
 	virtioWrite       = uint32(1)
@@ -29,13 +30,12 @@ var (
 	dmaHandle      handle.ID
 	serviceHandle  handle.ID
 	startupWire    [startup.Size]byte
-	dmaDescriptor  [3]uint64
 	wire           [ipc.WireMaxSize]byte
-	waitDescriptor [3]uint64
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
-	portValue      uint32
-	heapPointer    uintptr
+	// dma is the queue, request header, status byte, and bounce buffer the
+	// device reads and writes.
+	dma            sys.DMARegion
 	queueSize      uint16
 	capacity       uint64
 	availableIndex uint16
@@ -47,52 +47,22 @@ var (
 	statusOffset   uint64
 )
 
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname portRead goos_port_read
-func portRead(device uint64, specification uint64, address unsafe.Pointer) uint64
-
-//go:linkname portWrite goos_port_write
-func portWrite(device uint64, specification uint64, value uint64) uint64
-
-//go:linkname dmaAllocate goos_dma_allocate
-func dmaAllocate(device uint64, virtual uint64, address unsafe.Pointer) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname irqWait goos_irq_wait
-func irqWait(irq uint64) uint64
-
 func specification(offset uint16, width uint8) uint64 { return uint64(offset) | uint64(width)<<16 }
 
 func portIn(offset uint16, width uint8) (uint32, bool) {
-	portValue = 0
-	ok := portRead(uint64(portHandle), specification(offset, width), unsafe.Pointer(&portValue)) == 0
-	return portValue, ok
+	value, status := sys.PortRead(portHandle, specification(offset, width))
+	return uint32(value), status == kcall.StatusOK
 }
 
 func portOut(offset uint16, width uint8, value uint32) bool {
-	return portWrite(uint64(portHandle), specification(offset, width), uint64(value)) == 0
+	return sys.PortWrite(portHandle, specification(offset, width), uint64(value)) == kcall.StatusOK
 }
 
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { fatal("VIRTIO_BLK_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		fatal("VIRTIO_BLK_STARTUP_FAILED\n")
 	}
 	data, ok := startup.Decode(startupWire[:])
@@ -150,11 +120,17 @@ func initializeDevice() bool {
 	usedOffset = align(uint64(16)*uint64(queueSize)+4+uint64(queueSize)*2+2, 4096)
 	dataOffset = align(usedOffset+4+uint64(queueSize)*8+2, 1024)
 	headerOffset, statusOffset = dataOffset+1024, dataOffset+1040
-	if statusOffset >= 16384 || dmaAllocate(uint64(dmaHandle), dmaVirtualAddress, unsafe.Pointer(&dmaDescriptor[0])) != 0 || dmaDescriptor[0] == 0 || dmaDescriptor[1] != dmaVirtualAddress || dmaDescriptor[2] != 16384 {
+	if statusOffset >= dmaSize {
 		write("VIRTIO_BLK_DMA_INIT_FAILED\n")
 		return false
 	}
-	if !portOut(8, 4, uint32(dmaDescriptor[0]>>12)) || !portOut(18, 1, 7) {
+	region, status := sys.DMAAllocate(dmaHandle, dmaVirtualAddress, dmaSize)
+	if status != kcall.StatusOK {
+		write("VIRTIO_BLK_DMA_INIT_FAILED\n")
+		return false
+	}
+	dma = region
+	if !portOut(8, 4, uint32(dma.Physical>>12)) || !portOut(18, 1, 7) {
 		write("VIRTIO_BLK_QUEUE_ACTIVATE_FAILED\n")
 		return false
 	}
@@ -163,9 +139,8 @@ func initializeDevice() bool {
 
 func serve() {
 	for {
-		waitDescriptor[0], waitDescriptor[1], waitDescriptor[2] = uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000
-		status := ipcWaitReceive(uint64(serviceHandle), unsafe.Pointer(&waitDescriptor[0]), uintptr(len(waitDescriptor)*8))
-		if status == uint64(ipc.StatusTimeout) {
+		status := sys.IPCWaitReceive(serviceHandle, wire[:], 100000)
+		if status == kcall.StatusTimeout {
 			continue
 		}
 		if status != 0 {
@@ -182,7 +157,7 @@ func serve() {
 		}
 		encoded := blockproto.EncodeReplyInto(dispatch(request), requestMessage.Correlation, &replyMessage)
 		size, wireEncoded := ipc.EncodeFrom(&replyMessage, wire[:])
-		if !encoded || !wireEncoded || ipcSend(uint64(serviceHandle), unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
+		if !encoded || !wireEncoded || sys.IPCSend(serviceHandle, wire[:size]) != kcall.StatusOK {
 			fatal("VIRTIO_BLK_REPLY_FAILED\n")
 		}
 	}
@@ -199,7 +174,7 @@ func reject() {
 		return
 	}
 	if size, ok := ipc.EncodeFrom(&replyMessage, wire[:]); ok {
-		ipcSend(uint64(serviceHandle), unsafe.Pointer(&wire[0]), uintptr(size))
+		sys.IPCSend(serviceHandle, wire[:size])
 	}
 }
 
@@ -264,17 +239,17 @@ func transfer(operation uint32, sector uint64, sectors uint16) bool {
 	put32(headerOffset+4, 0)
 	put64(headerOffset+8, sector)
 	put8(statusOffset, 0xff)
-	putDescriptor(0, dmaDescriptor[0]+headerOffset, 16, 1, 1)
+	putDescriptor(0, dma.Physical+headerOffset, 16, 1, 1)
 	if operation == virtioFlush {
-		putDescriptor(0, dmaDescriptor[0]+headerOffset, 16, 1, 2)
+		putDescriptor(0, dma.Physical+headerOffset, 16, 1, 2)
 	} else {
 		flags := uint16(1)
 		if operation == virtioRead {
 			flags |= 2
 		}
-		putDescriptor(1, dmaDescriptor[0]+dataOffset, dataLength, flags, 2)
+		putDescriptor(1, dma.Physical+dataOffset, dataLength, flags, 2)
 	}
-	putDescriptor(2, dmaDescriptor[0]+statusOffset, 1, 2, 0)
+	putDescriptor(2, dma.Physical+statusOffset, 1, 2, 0)
 	avail := uint64(16) * uint64(queueSize)
 	put16(avail+4+uint64(availableIndex%queueSize)*2, 0)
 	availableIndex++
@@ -285,7 +260,7 @@ func transfer(operation uint32, sector uint64, sectors uint16) bool {
 	current := get16(usedOffset + 2)
 	acknowledged := false
 	for current == usedIndex {
-		if irqWait(uint64(irqHandle)) != 0 {
+		if sys.IRQWait(irqHandle) != kcall.StatusOK {
 			return false
 		}
 		if _, ok := portIn(19, 1); !ok {
@@ -316,12 +291,12 @@ func putDescriptor(index uint64, address uint64, length uint32, flags, next uint
 }
 
 func memory(offset, size uint64) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(dmaVirtualAddress+offset))), int(size))
+	return dma.Memory[offset : offset+size]
 }
 func put8(offset uint64, value byte) {
-	*(*byte)(unsafe.Pointer(uintptr(dmaVirtualAddress + offset))) = value
+	dma.Memory[offset] = value
 }
-func get8(offset uint64) byte { return *(*byte)(unsafe.Pointer(uintptr(dmaVirtualAddress + offset))) }
+func get8(offset uint64) byte { return dma.Memory[offset] }
 func put16(offset uint64, value uint16) {
 	data := memory(offset, 2)
 	data[0], data[1] = byte(value), byte(value>>8)
@@ -351,7 +326,7 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	sys.ConsoleWriteString(consoleHandle, message)
 }
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
@@ -361,39 +336,3 @@ func fatal(message string) {
 	}
 }
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() { heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol)) }
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start, end := heapPointer, heapPointer+size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("VIRTIO_BLK_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	// Go guarantees zeroed allocations, and the compiler relies on it when it
-	// skips clearing large composite literals. The arena is reused after every
-	// reset, so stale bytes would otherwise leak into fresh values.
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}
