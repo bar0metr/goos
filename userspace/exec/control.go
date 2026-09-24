@@ -7,10 +7,12 @@ import (
 
 // The control protocol shares the shell's exec channel to PID 1 for requests
 // that launch nothing: listing supervised services, stopping a running job,
-// and rebooting.
+// rebooting, and dumping kernel diagnostics. Version 3 adds the diagnostics
+// dump, which the shell can no longer make itself because it holds no console
+// capability, and the validation build's fault injection (ADR 0089).
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
-	ControlVersion    = uint16(2)
+	ControlVersion    = uint16(3)
 	MaxServiceEntries = 8
 	MaxServiceName    = 15
 	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
@@ -22,6 +24,19 @@ const (
 	ControlServices ControlOperation = iota + 1
 	ControlReboot
 	ControlKill
+	// ControlDiagnostics asks PID 1 to have the kernel dump its state to the
+	// console. Only a diagnostic build answers it with ControlOK.
+	ControlDiagnostics
+	// ControlFault asks PID 1 to kill one interactive service, named by the
+	// argument, so that its restart is exercised. Only the validation build
+	// carries it out.
+	ControlFault
+)
+
+// The services ControlFault may name.
+const (
+	FaultTerminal uint8 = iota + 1
+	FaultShell
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -48,8 +63,7 @@ func IsControl(message ipc.Message) bool { return message.ProtocolID == ControlP
 // EncodeControl carries one operation and its argument. Only ControlKill uses
 // the argument, which names the job slot to stop.
 func EncodeControl(operation ControlOperation, argument uint8, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || operation < ControlServices || operation > ControlKill ||
-		argument != 0 && operation != ControlKill || operation == ControlKill && argument >= Slots {
+	if correlation == 0 || !validControl(operation, argument) {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 2}
@@ -67,10 +81,25 @@ func DecodeControl(message ipc.Message) (ControlOperation, uint8, bool) {
 		return 0, 0, false
 	}
 	operation, argument := ControlOperation(message.Payload[0]), message.Payload[1]
-	if operation < ControlServices || operation > ControlKill || argument != 0 && operation != ControlKill || operation == ControlKill && argument >= Slots {
+	if !validControl(operation, argument) {
 		return 0, 0, false
 	}
 	return operation, argument, true
+}
+
+// validControl accepts an argument only where the operation takes one: a job
+// slot for ControlKill and a service for ControlFault.
+func validControl(operation ControlOperation, argument uint8) bool {
+	switch operation {
+	case ControlServices, ControlReboot, ControlDiagnostics:
+		return argument == 0
+	case ControlKill:
+		return argument < Slots
+	case ControlFault:
+		return argument == FaultTerminal || argument == FaultShell
+	default:
+		return false
+	}
 }
 
 func EncodeServices(entries []ServiceEntry, correlation uint64) (ipc.Message, bool) {

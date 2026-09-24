@@ -9,14 +9,15 @@ import (
 )
 
 const (
-	ProtocolID = uint64(0x4745584543303031)
-	Version    = uint16(8)
-	MaxPath    = 192
-	MaxStages  = 4
-	replySize  = 25
-	submitSize = 3
-	headerSize = 5
-	SearchRoot = "/system/bin/"
+	ProtocolID  = uint64(0x4745584543303031)
+	Version     = uint16(9)
+	MaxPath     = 192
+	MaxStages   = 4
+	replySize   = 25
+	submitSize  = 3
+	startedSize = 9
+	headerSize  = 5
+	SearchRoot  = "/system/bin/"
 )
 
 // Requests are written to a page shared by the shell and PID 1, one slot per
@@ -204,25 +205,33 @@ func validCWD(path []byte) bool { return len(path) == 1 && path[0] == '/' || val
 
 // EncodeStarted tells the shell a foreground job in slot is running and moves
 // to it the writing end of the job's standard input, which the shell feeds
-// with the lines the terminal service gives it (ADR 0082). It shares the job's
-// correlation and precedes the job's reply.
+// with the lines the terminal service gives it (ADR 0082). It precedes the
+// job's reply and names the job's correlation in its payload: a notification
+// carries no correlation of its own, and version 8 put it in the header, where
+// the IPC layer refuses it, so the notice was never sent (ADR 0089).
 func EncodeStarted(slot uint8, input handle.ID, correlation uint64) (ipc.Message, bool) {
 	if correlation == 0 || slot >= Slots || input == 0 {
 		return ipc.Message{}, false
 	}
-	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindNotification, Correlation: correlation, PayloadSize: 1, HandleCount: 1}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindNotification, PayloadSize: startedSize, HandleCount: 1}
 	message.Payload[0] = slot
+	binary.LittleEndian.PutUint64(message.Payload[1:9], correlation)
 	message.Handles[0] = input
 	return message, true
 }
 
-// DecodeStarted returns the slot and the input handle as received.
-func DecodeStarted(message ipc.Message) (uint8, handle.ID, bool) {
+// DecodeStarted returns the slot, the input handle as received, and the
+// correlation of the job it belongs to.
+func DecodeStarted(message ipc.Message) (uint8, handle.ID, uint64, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindNotification ||
-		message.Correlation == 0 || message.PayloadSize != 1 || message.HandleCount != 1 || message.Handles[0] == 0 || message.Payload[0] >= Slots {
-		return 0, 0, false
+		message.Correlation != 0 || message.PayloadSize != startedSize || message.HandleCount != 1 || message.Handles[0] == 0 || message.Payload[0] >= Slots {
+		return 0, 0, 0, false
 	}
-	return message.Payload[0], message.Handles[0], true
+	correlation := binary.LittleEndian.Uint64(message.Payload[1:9])
+	if correlation == 0 {
+		return 0, 0, 0, false
+	}
+	return message.Payload[0], message.Handles[0], correlation, true
 }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {

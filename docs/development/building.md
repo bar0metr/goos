@@ -53,6 +53,21 @@ The userspace build compiles `userspace/cmd/init`, `userspace/cmd/vfs`, and
 base, and converts its load segments to `build/userspace/init`. ELF is an
 intermediate build format only; the kernel accepts the GoOS native envelope.
 
+Each userspace program is rebuilt when any file of a project package it
+imports changes. The Makefile asks `go list -deps` for those packages under the
+userspace target's build tags rather than keeping the lists by hand; hand lists
+had drifted, and an edit to `kernel/mm/vm` once left the filesystem service
+built against the old image window. The kernel depends on everything under
+`kernel/` and `internal/`.
+
+Before the conversion, `tools/stackframes` disassembles each userspace ELF
+with `go tool objdump` and fails the build if a function's stack frame is deep
+enough to step over the 64 KiB guard below the stack, or changes the stack
+pointer by an amount it cannot bound. It also checks the kernel as soon as it
+is linked, against the kernel stacks' 8 KiB guard. Each check prints the
+largest frame of the binary; `go run ./tools/stackframes -v BINARY` lists
+every frame (ADR 0088).
+
 `make run` boots the ISO with 512 MiB in QEMU and attaches COM1 to the current
 terminal. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
 1234 before executing the first instruction.
@@ -69,7 +84,7 @@ Boot tests use a disposable test disk; `make run` retains
 `build/virtio-blk.img` across interactive boots.
 `make test-performance` writes the host benchmarks, such as
 `build/reports/page-allocation.txt`, and the in-guest microbenchmarks of
-`make test-microbench` to `build/reports/microbench-hz<rate>.md`.
+`make test-microbench` to `build/reports/microbench-<variant>.md`.
 `make test-security` runs the capability, generation-safe handle, and virtual
 memory permission tests explicitly; these tests are also included by `make
 test`.
@@ -91,7 +106,15 @@ stop on a fatal error. A normal build compiles all of this out and `diag`
 reports that it is unavailable.
 
 `make HZ=<rate> test-latency` measures command latency at one rate and writes
-`build/reports/latency-hz<rate>.md`; see `docs/development/testing.md`.
+`build/reports/latency-<variant>.md`; see `docs/development/testing.md`.
+
+`OPT` sets TinyGo's optimisation level for the kernel and every userspace
+image: `2` (the default, TinyGo's fastest; there is no `-O3`), `1`, `s`, or `z`
+(the smallest code). ADR 0090 records why the default is `2`. Each level
+builds into its own variant directory (`build/variants/hz100-opt2`,
+`build/variants/hz100-optz`), and `make test-latency` and `make test-microbench`
+name their reports after it (`build/reports/microbench-hz100-optz.md`), so two
+levels can be measured side by side.
 
 `VALIDATION=1` builds the validation variant (ADR 0058): kernel self-tests,
 fault injection, PID 1's supervision scenario, and the `*_OK` markers the boot
@@ -111,3 +134,11 @@ Set `OVMF_CODE=/path/to/firmware.fd` if QEMU firmware is not installed under
 `$(brew --prefix)/share/qemu`). Set `SOURCE_DATE_EPOCH` to a fixed project
 release timestamp for release builds; the kernel build and the timestamps in
 the EFI partition and the ISO take it.
+
+## Release version
+
+The release is written once, as `Release` in `internal/version/version.go`.
+The kernel banner, `uname`, the read-only `system.build.release` setting, and
+`make version` all take it from there, and the boot test reads the expected
+banner and `uname` line from the same file. Changing the version is that one
+edit followed by `make`.

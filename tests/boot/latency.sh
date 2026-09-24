@@ -9,9 +9,12 @@ disk=${3:?disk path required}
 repeats=${LATENCY_REPEATS:-10}
 command_timeout=${COMMAND_TIMEOUT:-30}
 case $repeats in '' | *[!0-9]* | 0) echo "LATENCY_REPEATS must be a positive integer" >&2; exit 2 ;; esac
-read -r hz diag_build validation_build <build/config/build
-log=build/logs/latency-hz$hz.log
-report=build/reports/latency-hz$hz.md
+read -r hz diag_build validation_build opt_build variant <build/config/build
+# Each build configuration, OPT level included, reports separately, so two
+# can be compared.
+variant=${variant:-hz$hz}
+log=build/logs/latency-$variant.log
+report=build/reports/latency-$variant.md
 fatal='PANIC\|_WAIT_PERMISSION_DENIED\|_WAIT_NOT_FOUND\|_WAIT_FAILED\|_RECEIVE_FAILED\|_SEND_FAILED\|_CONTROL_FAILED\|OUT_OF_MEMORY\|exec: no reply\|APP_.*FAILED\|INIT_EXEC_.*FAILED\|LIFECYCLE_QUEUE_OVERFLOW\|CLOCK_CALIBRATION_FAILED'
 
 mkdir -p build/logs build/reports
@@ -139,8 +142,8 @@ fi
 
 {
 	printf '# GoOS command latency at %s Hz\n\n' "$hz"
-	printf 'Build HZ=%s DIAG=%s, %s runs per case, QEMU %s (TCG) on %s.\n' \
-		"$hz" "$diag_build" "$repeats" "$(qemu-system-x86_64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')" "$(uname -m)"
+	printf 'Build HZ=%s DIAG=%s OPT=%s, %s runs per case, QEMU %s (TCG) on %s.\n' \
+		"$hz" "$diag_build" "${opt_build:-?}" "$repeats" "$(qemu-system-x86_64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')" "$(uname -m)"
 	printf 'Times are wall-clock microseconds measured by the shell `time` builtin.\n\n'
 	printf '| Case | Median us | p90 us | Min us |\n'
 	printf '| --- | ---: | ---: | ---: |\n'

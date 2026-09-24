@@ -78,7 +78,7 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	idt[serialIRQVector] = NewIDTEntry(interruptTable[exceptionCount+4], interruptGate)
 
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
-	if !ok || !unmapGuardPage(pageTable, allocation) {
+	if !ok || !unmapGuardPages(pageTable, allocation) {
 		return false
 	}
 	rsp0 := allocation + (kernelStackPages+stackGuardPages)*pmm.PageSize - 64

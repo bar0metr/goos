@@ -28,6 +28,9 @@ func (r *pipelineRunnerTest) CreateStream() (handle.ID, handle.ID, bool) {
 }
 
 func (r *pipelineRunnerTest) Close(id handle.ID) bool {
+	if id == 99 {
+		r.t.Fatal("the pipeline closed the terminal's shared writing end")
+	}
 	if !r.owned[id] {
 		r.t.Fatalf("close of unowned endpoint %d", id)
 	}
@@ -45,7 +48,7 @@ func (r *pipelineRunnerTest) chain() int {
 }
 
 func (r *pipelineRunnerTest) expect(name string, endpoint, want Endpoint) {
-	if endpoint != want || want.Type == handle.TypeStream && !r.owned[want.ID] {
+	if endpoint != want || want.Type == handle.TypeStream && !want.Shared && !r.owned[want.ID] {
 		r.t.Fatalf("invalid %s endpoint %+v want %+v", name, endpoint, want)
 	}
 }
@@ -58,13 +61,15 @@ func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd, env []byte, stre
 	}
 	chain := r.chain()
 	errRead, errWrite := handle.ID((chain-1)*2+1), handle.ID((chain-1)*2+2)
-	console := Endpoint{99, handle.TypeDevice}
-	input, output, failure := console, console, console
+	// Whatever is not connected to a stream of the pipeline's own writes to a
+	// copy of the terminal's writing end, which PID 1 keeps.
+	terminal := Endpoint{ID: 99, Type: handle.TypeStream, Shared: true}
+	input, output, failure := terminal, terminal, terminal
 	if i >= chain {
-		input = Endpoint{errRead, handle.TypeStream}
+		input = Endpoint{ID: errRead, Type: handle.TypeStream}
 	} else {
 		if i > 0 {
-			input = Endpoint{handle.ID((i-1)*2 + 1), handle.TypeStream}
+			input = Endpoint{ID: handle.ID((i-1)*2 + 1), Type: handle.TypeStream}
 		} else {
 			// The first stage reads its own input stream, created after the
 			// chain and the error stream; a background job's is already at EOF.
@@ -72,13 +77,13 @@ func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd, env []byte, stre
 			if r.errorSource >= 0 {
 				empty++
 			}
-			input = Endpoint{handle.ID(empty*2 + 1), handle.TypeStream}
+			input = Endpoint{ID: handle.ID(empty*2 + 1), Type: handle.TypeStream}
 		}
 		if i < chain-1 {
-			output = Endpoint{handle.ID(i*2 + 2), handle.TypeStream}
+			output = Endpoint{ID: handle.ID(i*2 + 2), Type: handle.TypeStream}
 		}
 		if i == r.errorSource {
-			failure = Endpoint{errWrite, handle.TypeStream}
+			failure = Endpoint{ID: errWrite, Type: handle.TypeStream}
 		}
 	}
 	r.expect("input", streams.Input, input)
@@ -88,7 +93,7 @@ func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd, env []byte, stre
 		return 0, 0, LaunchNotFound
 	}
 	for _, endpoint := range []Endpoint{streams.Input, streams.Output, streams.Error} {
-		if endpoint.Type == handle.TypeStream {
+		if endpoint.Type == handle.TypeStream && !endpoint.Shared {
 			delete(r.owned, endpoint.ID)
 		}
 	}

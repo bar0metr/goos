@@ -73,8 +73,14 @@ func main() {
 	if !ok {
 		fail(fmt.Errorf("native image encoding failed"))
 	}
-	if _, ok := loader.ParseNative(image, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit); !ok {
+	parsed, ok := loader.ParseNative(image, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit)
+	if !ok {
 		fail(fmt.Errorf("ELF load layout is not a valid native image"))
+	}
+	// The loader refuses a stack guard the kernel maps pages into; refuse it
+	// here too, so the build fails rather than the launch (ADR 0088).
+	if start, end, _ := parsed.StackGuard(); loader.KernelMapsUserRange(start, end) {
+		fail(fmt.Errorf("stack guard [%#x, %#x) overlaps a window the kernel maps", start, end))
 	}
 	if err := os.WriteFile(os.Args[2], image, 0o644); err != nil {
 		fail(err)

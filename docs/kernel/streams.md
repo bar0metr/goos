@@ -13,15 +13,42 @@ The endpoints encode object identity and direction independently of handle slot
 numbers. The kernel validates handle type, direction, and rights for every
 operation. Each stream owns a fixed 4096-byte ring buffer. One operation moves
 at most 256 bytes and reports the exact transferred size through a validated
-descriptor. A full write reports bounded backpressure; an empty read reports
+descriptor. A write of at most 256 bytes — every write a native call can make —
+lands whole or not at all, so writers sharing an end never interleave inside
+one call. A full write reports bounded backpressure; an empty read reports
 that it would block while the writer remains open. `StreamWait` registers the
 current task in a bounded wait set and removes it from the runnable set until
-data, buffer space, peer closure, or timeout.
+data, peer closure, timeout, or, for a writer, room for a whole 256-byte write:
+a writer is not woken for less, because its write would be refused again.
 
-Closing the writer preserves buffered bytes. After the reader drains them, the
-next read reports peer closure as EOF. Closing the reader discards buffered
-bytes and makes later writes fail with peer closure. Process teardown closes
-all owned stream endpoints and releases the object after both sides close.
+## Shared endpoints
+
+Each end counts the handles, in every process, that name it (ADR 0089). The
+end closes only when the last of them does:
+
+| Path | Count |
+| --- | --- |
+| `StreamCreate` | each end starts at one |
+| IPC attachment | +1 for the receiver's copy, −1 for the sender's handle, which the send closes: a move |
+| launch grant | +1 for the child's copy; −1 more if the grant is consumed |
+| `HandleClose`, process teardown, a failed launch's unwinding | −1 per handle |
+
+So an end can be shared: PID 1 grants the terminal's writing end to the shell
+and to every stage of every pipeline, and a stage exiting closes only its own
+copies. Counts are 16-bit and bounded by the handles that exist (32 processes ×
+128 handles); the bound is checked anyway, before anything is installed, and a
+count is never decremented below zero. The counting is in `kernel/stream`
+(`Retain`, `Drop`, `Placed`, `CloseHandle`) and host-tested with real handle
+tables and IPC channels.
+
+Closing the writer — its last handle — preserves buffered bytes. After the
+reader drains them, the next read reports peer closure as EOF. Closing the
+reader discards buffered bytes and makes later writes fail with peer closure.
+Process teardown drops every owned stream handle and releases the object after
+both ends close.
+
+The registry holds 64 streams, 256 KiB of static kernel memory. An ordinary
+process may hold four and PID 1 twenty-four (ADR 0072, ADR 0089).
 
 The userspace integration probe creates a stream, writes and reads data, closes
 the writer, observes EOF, and closes the reader. The shell uses the same object
@@ -47,4 +74,13 @@ The versioned exec request names the stage whose diagnostics are diverted; PID 1
 creates one private stream for that stage and the sink, launches the sink first,
 and grants the source a write-only endpoint as its `stderr` role. Stdout of the
 redirected stage still reaches its normal destination, and stages without a
-diverted role keep the console.
+diverted role keep the terminal.
+
+## The terminal's output stream
+
+Output that is not piped or redirected goes to one stream PID 1 creates for the
+terminal service (ADR 0089). PID 1 keeps both of its ends and grants copies: the
+reading end to the terminal service, the writing end to the shell and, as
+`stdout` and `stderr`, to every stage that prints to the terminal. Because PID 1
+keeps a copy of each, neither end ever closes; output written while the terminal
+service restarts waits for its replacement.

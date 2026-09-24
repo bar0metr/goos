@@ -10,18 +10,22 @@ const (
 	UserStartupAddress = uint64(0x40001000)
 	UserCodeAddress    = uint64(0x40002000)
 	UserDataAddress    = uint64(0x40004000)
-	// UserStackAddress leaves the page below it unmapped as the stack's guard
-	// page (ADR 0083).
-	UserStackAddress = uint64(0x40006000)
+	// UserStackAddress is the stack of the fixed self-test and fault-probe
+	// layout. The 64 KiB below it are its unmapped guard gap (ADR 0083, ADR
+	// 0088); it sits above the self-test's shared-memory pages at 0x40010000
+	// so that the gap stays clear of them.
+	UserStackAddress = uint64(0x40030000)
 	// Processes may map shared memory only inside [UserSharedAddress, UserSharedLimit).
 	UserSharedAddress = uint64(0x40180000)
 	UserSharedLimit   = uint64(0x401c0000)
 	UserDMAAddress    = uint64(0x401c0000)
 	// The boot system image is mapped read-only inside
-	// [UserImageAddress, UserImageLimit). The window is two MiB because that is
-	// what the bootloader reserves for the archive.
+	// [UserImageAddress, UserImageLimit). The window is four MiB, the most the
+	// kernel loads (boot.MaxInitramfs); a test keeps the two equal.
 	UserImageAddress = uint64(0x40200000)
-	UserImageLimit   = uint64(0x40400000)
+	UserImageLimit   = uint64(0x40600000)
+	// LeafTableSpan is the address range one leaf page table covers.
+	LeafTableSpan = uint64(2 << 20)
 
 	entryPresent  = uint64(1 << 0)
 	entryWritable = uint64(1 << 1)

@@ -42,7 +42,7 @@ conversion are required before SMP.
 ## Ring transition state
 
 The GDT also contains ring 3 code and data descriptors plus a 64-bit TSS. RSP0
-points into a dedicated four-page kernel stack with an unmapped guard page. The
+points into a dedicated four-page kernel stack with two unmapped guard pages. The
 task register is loaded only after the TSS descriptor and stack are complete.
 
 IDT vector `0x80` is a DPL 3 interrupt gate used by the bootstrap native call.

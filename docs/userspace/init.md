@@ -89,9 +89,13 @@ For N stages PID 1 creates N-1 streams and starts stages from right to left,
 so a downstream launch failure cannot leave a newly started producer waiting on
 input. The first stage reads a standard-input stream of its own: a background
 job's is closed at once, and a foreground job's writing end is moved to the
-shell in an exec `Started` message before the job's reply (ADR 0082). Each middle stage receives only its upstream reader and downstream
-writer; stderr remains on the console. Successful launch consumes those stream
-handles. On any failure PID 1 closes every retained endpoint before waiting
+shell in an exec `Started` notice before the job's reply (ADR 0082; since
+version 9 of the exec protocol the notice carries the job's correlation in its
+payload, ADR 0089). Each middle stage receives only its upstream reader and
+downstream writer. Whatever is not piped or redirected — the last stage's
+stdout and every stage's stderr — is a copy of the terminal's writing end, which
+PID 1 keeps (ADR 0089). Successful launch consumes the pipeline's own stream
+handles; the terminal's copies are counted and PID 1's own stays. On any failure PID 1 closes every retained endpoint before waiting
 for children already started. This releases stream waits through EOF or peer
 closure. It is not forced cancellation of an arbitrary nonterminating program.
 
@@ -145,3 +149,20 @@ the stored definition. Its device authority — ports, interrupt line, DMA domai
 The validation build kills the driver once, after the system is up, so the path
 a crashed driver takes is exercised on every boot rather than only when hardware
 misbehaves.
+
+The terminal service and the shell are the other two (ADR 0089). Both are
+`restart: always`, and the session between them is renewed on either's restart:
+
+| Restarting | Launched with | Handed to the survivor |
+| --- | --- | --- |
+| `tty` | a new session (server end) and a new control channel | the session's client end, to the shell over its exec channel |
+| `shell` | a new session (client end), exec channel, VFS session and configuration session | the session's server end, to the terminal over its control channel |
+
+A handle renewed for a launch that then fails is closed at the next renewal, so
+failures cannot fill PID 1's table. When the shell exits, PID 1 stops every
+stage of its running jobs; they are reaped as usual and answered to no one, and
+their streams close with them. The exec channel is not waited on until the next
+shell brings a new one. After boot, a restarted service is recorded in the log
+rather than printed as an `[ OK ]` line, which would land in the line being
+typed. The validation build's `fault tty` and `fault shell` (exec control
+`ControlFault`) kill each once during the boot test.

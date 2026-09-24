@@ -65,7 +65,7 @@ existing site follows this yet: the UEFI protocol calls in
   leaves are not owned, so an exiting process never frees shared storage
   (ADR 0063).
 - `ImageMap` maps the boot archive user-readable, never writable and never
-  executable, unowned, inside `[0x40200000, 0x40400000)` (ADR 0070).
+  executable, unowned, inside `[0x40200000, 0x40600000)` (ADR 0070, ADR 0087).
 - Read-only segments of images from the system image are backed by frames
   shared between the processes running the image. They are mapped with the
   segment's permissions, which never include write, and without the owned bit;
@@ -74,22 +74,33 @@ existing site follows this yet: the UEFI protocol calls in
 
 ## Guard pages
 
-- Every kernel-entry stack is four pages with an unmapped guard page below it
-  (`kernel/arch/amd64/scheduler_uefi.go`). Overflow faults instead of
-  corrupting the neighbouring allocation.
+- Every kernel-entry stack is four pages with two unmapped guard pages below
+  it (`kernel/arch/amd64/stack.go`). Overflow faults instead of corrupting the
+  neighbouring allocation. TinyGo's UEFI runtime makes LLVM's stack probe
+  (`___chkstk_ms`) a no-op, so `tools/stackframes` checks every kernel frame at
+  build time: none may exceed the 8 KiB guard less the 8-byte return address.
+  Only `main.main`, `main.serviceKernel` and `main.runKernelSelfTests` are
+  exempt, up to a stated size, because they run only on the boot task's stack, a 64 KiB
+  goroutine stack from TinyGo's heap that has no guard page (ADR 0088).
 - User address space starts at 1 GiB; low addresses are unmapped in every
   process, so null dereferences fault.
-- Every user stack has an unmapped guard page directly below it (ADR 0083).
-  The userspace linker script gives the 32 KiB stack its own RW+NX segment one
-  page above the heap. The loader enforces the gap for every image, not only
-  those built by that script: `ParseNative` rejects an image whose stack
-  segment has another segment in the page below it or starts within one page
-  of the user range, and `LoadImage` rejects a guard page the kernel would
-  map later (the startup page and the shared, DMA and system image windows).
-  An overflow therefore takes a page fault, which retires the process like any
-  other user fault; the kernel does not panic. The validation build's
-  fault-probe overflows its stack on every run, and the kernel requires a
-  not-present fault in its guard page (`USER_STACK_GUARD_OK`).
+- Every user stack has 64 KiB of unmapped address space directly below it
+  (`loader.StackGuardSize`, ADR 0083, ADR 0088). The userspace linker script
+  gives the 32 KiB stack its own RW+NX segment 64 KiB above the heap. The
+  loader enforces the gap for every image, not only those built by that
+  script: `ParseNative` rejects an image with another segment in the gap or
+  a gap reaching below the user range, and `LoadImage` rejects a gap the
+  kernel maps pages into, now or later (the startup page and the shared, DMA
+  and system image windows). Userspace code has no stack probes, so the gap
+  is sound only because no frame can step over it: `tools/stackframes`
+  computes every function's stack depth from `go tool objdump` and fails the
+  build for a depth over 65400 bytes (the gap less the return address and the
+  128-byte red zone) or for any stack-pointer change it cannot bound. An
+  overflow therefore takes a page fault in the gap, which retires the process
+  like any other user fault; the kernel does not panic. The validation
+  build's fault-probe overflows its stack through a 12 KiB frame on every run,
+  and the kernel requires a not-present fault in the gap more than a page
+  below the stack (`USER_STACK_GUARD_OK`).
 
 ## User pointers
 
@@ -151,7 +162,7 @@ caller:
 | console input | 256 B ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
 
 Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
-16 channels with 16-message queues, 16 streams with 4 KiB rings, 64 waiters
+24 channels with 16-message queues, 64 streams with 4 KiB rings, 64 waiters
 per wait set, 64 log records, 4 registered shared-memory objects of at most
 16 pages, and a shared image cache of 128 segments and 1024 frames. On top of
 the tables, each process is charged for the channels, streams, tasks, and

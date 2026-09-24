@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Extends ADR 0022, ADR 0030 and ADR 0069.
+Accepted. Extends ADR 0022, ADR 0030 and ADR 0069. The window is four MiB since the ADR 0087 addendum.
 
 ## Context
 

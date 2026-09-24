@@ -121,8 +121,11 @@ In every build it then:
    and flush exchange;
 4. starts `config` and then `log`, both restarted on failure; a failure to
    start either is a warning, not a stopped boot (ADR 0073, 0074);
-5. opens a full-scope configuration session for the shell and starts `shell`,
-   `RestartNever`, which depends on `vfs` (ADR 0076);
+5. creates the terminal's output stream, session and control channels and
+   starts `tty`, then opens a full-scope configuration session for the shell
+   and starts `shell`, which depends on `vfs` and `tty` (ADR 0076, 0082).
+   Both are `RestartAlways` and restart independently on a renewed session
+   (ADR 0089);
 6. in a validation build, kills the driver once to exercise its restart
    (ADR 0078);
 7. enters its main loop: one `WaitAny` over the lifecycle channel, the shell's

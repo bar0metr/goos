@@ -7,7 +7,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-unit` runs all host-side Go tests.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
-  userspace security-focused host tests explicitly.
+  userspace security-focused host tests explicitly, and those of the
+  build-time stack frame check (`tools/stackframes`, ADR 0088).
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
@@ -18,11 +19,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
   through each; `make test-all` includes two runs.
 - `make test-latency` boots one guest and measures command and VFS latency
-  into `build/reports/latency-hz<rate>.md`. It is a measurement, not a gate,
-  and is not part of `make test-all`.
+  into `build/reports/latency-<variant>.md`, where `<variant>` is the build's
+  directory under `build/variants/` (`hz100-opt2` by default). It is a
+  measurement, not a gate, and is not part of `make test-all`.
 - `make test-microbench` boots one guest and runs the in-guest
   microbenchmarks (context switch, IPC, VFS reads, RAMFS metadata) into
-  `build/reports/microbench-hz<rate>.md` (ADR 0085). Like `test-latency` it is
+  `build/reports/microbench-<variant>.md` (ADR 0085). Like `test-latency` it is
   a measurement, not a gate.
 - `make test-performance` runs `test-microbench` and then the host
   microbenchmarks, writing every report under `build/reports/`.
@@ -103,6 +105,19 @@ of the stream table rather than all of it, and that PID 1 holds the system
 share. The `QUOTA_OK` marker comes from a validation-build check that drives the
 same charge-then-create order `StreamCreate` uses and requires the refusal to
 arrive while registry slots remain.
+
+The release-shell group also asserts the terminal session (ADR 0089). The
+shell's capability list names a write-only `stdout` stream and no console, and
+the shell checks in the validation build that the kernel refuses a read on it
+(`TERMINAL_STREAM_READ_DENIED_OK`). A line typed into `readline` has to be
+printed by it and never run as a command. `fault tty` and `fault shell`, a
+validation-only shell command that asks PID 1 to kill the service, restart each
+once: the terminal's replacement has to serve the running shell's next command,
+the shell's replacement has to be served by the running terminal, and the
+background job the old shell left has to be gone. The ipc-capabilities group's
+`STREAM_SHARED_ENDPOINT_OK` comes from PID 1 sending itself a writer attached
+twice and checking that the end stays open until both copies close, and that
+closed and wrong-direction handles are refused.
 
 The filesystem group also asserts the namespace layout: that `ls /` names every
 mount, that `/system` is the boot image with its twenty utilities listed under
@@ -188,7 +203,7 @@ make HZ=1000 DIAG=1 test-latency
 ```
 
 The `help` case launches nothing and shows the measurement floor. The serial
-transcript is kept in `build/logs/latency-hz<rate>.log`. In a `DIAG=1` build
+transcript is kept in `build/logs/latency-<variant>.log`. In a `DIAG=1` build
 the script ends with
 `diag` and adds the `DIAG clock` and `DIAG launch` lines to the report: per
 stage of `spawnExecutable` (image lookup, address-space creation, image load,
@@ -214,9 +229,9 @@ the system: no trap, no context switch, no second process.
 
 `make test-microbench` (ADR 0085) boots one normal-build guest, runs each case
 of `tests/boot/microbench.sh` once to warm up and `MICROBENCH_REPEATS` times
-(default 5), and writes `build/reports/microbench-hz<rate>.md` with the median
+(default 5), and writes `build/reports/microbench-<variant>.md` with the median
 over the runs and the raw `bench` lines. The transcript is kept in
-`build/logs/microbench-hz<rate>.log`.
+`build/logs/microbench-<variant>.log`.
 
 | Case | Command | What it measures |
 | --- | --- | --- |

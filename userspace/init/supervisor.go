@@ -277,6 +277,49 @@ func (manager *Manager) SetCapability(name string, capability string, id handle.
 	return StatusNotFound
 }
 
+// Capability returns the handle a registered service's launch spec names for
+// one capability. PID 1 closes the handle it is about to replace with it, so a
+// replacement created for a launch that then failed does not stay in its table.
+func (manager *Manager) Capability(name string, capability string) (handle.ID, bool) {
+	index, found := manager.index(name)
+	if !found {
+		return 0, false
+	}
+	entry := &manager.services[index]
+	for slot := 0; slot < int(entry.launch.CapabilityCount); slot++ {
+		if entry.launch.Capabilities[slot].Name == capability {
+			return entry.launch.Capabilities[slot].Handle, true
+		}
+	}
+	return 0, false
+}
+
+// RemoveCapability drops one named capability from a registered service's
+// launch spec. An optional endpoint that could not be renewed for a restart is
+// left out rather than handed over dead, which would fail the launch.
+func (manager *Manager) RemoveCapability(name string, capability string) Status {
+	index, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	return RemoveGrant(&manager.services[index].launch, capability)
+}
+
+// RemoveGrant drops one named capability from a launch spec, keeping the order
+// of the rest.
+func RemoveGrant(spec *LaunchSpec, capability string) Status {
+	for slot := 0; slot < int(spec.CapabilityCount); slot++ {
+		if spec.Capabilities[slot].Name != capability {
+			continue
+		}
+		copy(spec.Capabilities[slot:spec.CapabilityCount], spec.Capabilities[slot+1:spec.CapabilityCount])
+		spec.CapabilityCount--
+		spec.Capabilities[spec.CapabilityCount] = Capability{}
+		return StatusOK
+	}
+	return StatusNotFound
+}
+
 func (manager *Manager) Snapshot(name string) (Snapshot, bool) {
 	index, found := manager.index(name)
 	if !found {

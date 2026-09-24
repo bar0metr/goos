@@ -301,7 +301,7 @@ func runKernelSelfTests(pageTable uint64) {
 		0x0f, 0x0b,
 		0xb8, 0x06, 0x00, 0x00, 0x00,
 		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x21, 0x60, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserStackAddress+0x21.
+		0x48, 0xbe, 0x21, 0x00, 0x03, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserStackAddress+0x21.
 		0xba, 0x0f, 0x00, 0x00, 0x00,
 		0xcd, 0x80,
 		0x85, 0xc0,
@@ -374,7 +374,7 @@ func startSelfTestTasks() {
 
 func awaitValidationBoot() {
 	console := amd64.NewCOM1()
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
 		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")
@@ -453,13 +453,16 @@ func awaitValidationBoot() {
 const pageFaultExit = uint64(1)<<63 | 14
 
 // stackGuardFaults counts fault-probe runs that overflowed their stack into
-// the unmapped guard page below it (ADR 0083).
-var stackGuardFaults uint64
+// the unmapped gap below it. stackGuardDeepFaults counts those among them that
+// faulted more than a page below the stack, where ADR 0083's single guard page
+// ended: the probe allocates a 12 KiB frame, so its overflow proves that a
+// frame larger than a page still lands in the gap (ADR 0083, ADR 0088).
+var stackGuardFaults, stackGuardDeepFaults uint64
 
 // noteStackGuardFault counts an exit as a stack guard fault when the task died
-// of a page fault inside the page below the probe layout's stack and that page
-// is still unmapped in its address space. The process is still registered, so
-// its address space can be inspected before teardown.
+// of a page fault anywhere in the gap below the probe layout's stack and the
+// faulting page is unmapped in its address space. The process is still
+// registered, so its address space can be inspected before teardown.
 func noteStackGuardFault(taskID sched.TaskID, code uint64) {
 	slot, _, valid := taskID.Parts()
 	if !valid {
@@ -467,12 +470,15 @@ func noteStackGuardFault(taskID sched.TaskID, code uint64) {
 	}
 	address := amd64.TakeTaskFaultAddress(uint64(slot))
 	owner, found := processRegistry.ByTask(taskID)
-	guard := vm.UserStackAddress - vm.PageSize
-	if !found || code != pageFaultExit || address < guard || address >= vm.UserStackAddress {
+	if !found || code != pageFaultExit || address < vm.UserStackAddress-loader.StackGuardSize || address >= vm.UserStackAddress {
 		return
 	}
-	if _, mapped := vm.ResolveUser(owner.AddressSpace().Root, guard); !mapped {
-		stackGuardFaults++
+	if _, mapped := vm.Resolve(owner.AddressSpace().Root, address&^(vm.PageSize-1)); mapped {
+		return
+	}
+	stackGuardFaults++
+	if address < vm.UserStackAddress-vm.PageSize {
+		stackGuardDeepFaults++
 	}
 }
 

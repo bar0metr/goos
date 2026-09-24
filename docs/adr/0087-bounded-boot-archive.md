@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR 0020.
+Accepted. Amends ADR 0020 and ADR 0070.
 
 ## Context
 
@@ -45,3 +45,20 @@ The 8 MiB boot partition holds the kernel and an archive at the bound with room
 to spare. The build test covers the size check; the refusal path was checked by
 booting an ISO built by hand around a 4.5 MiB archive, which halts with the
 message above.
+
+## Addendum: the system image window
+
+Raising the bound left one reader of the archive behind. `ImageMap` maps the
+whole archive into the filesystem service's image window, which ADR 0070 sized
+at two MiB, the old buffer. An archive between two and four MiB passed the build
+check and the kernel's, then failed to map: the filesystem service stopped with
+`VFS_IMAGE_MOUNT_FAILED`, and the system came up with no `/system` and no
+prompt. A build at TinyGo's `-opt=2`, whose archive is 2.1 MiB, found it; the
+default build's 1.6 MiB archive would have reached it as it grew.
+
+The window is now `[0x40200000, 0x40600000)`, four MiB, the same as the bound.
+`ImageMap` adds one leaf table per two MiB the archive covers and charges each
+table it allocates to the caller's page quota. A host test in `kernel/mm/vm`
+fails if the window is ever smaller than `boot.MaxInitramfs` again. The loader
+already refused segments inside `[UserSharedAddress, UserImageLimit)`, so no
+native image can overlap the larger window.

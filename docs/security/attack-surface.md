@@ -31,25 +31,25 @@ table with type, generation, and rights checks.
 | ---: | --- | --- | --- | --- | --- |
 | 1 | `Exit` | — | exit code, not interpreted | none | ends task |
 | 2 | `DebugWrite` | caller is PID 1 or bootstrap process A (root compare) | length ≤ 4096; `CopyIn` | static 4 KiB buffer | no |
-| 3 | `IPCSend` | channel handle, Write | wire length 32..320; `CopyIn`; `ipc.Decode` checks header and sizes; each attached handle (≤ 4) needs Transfer | 16-message queue; full → `ResourceExhausted` | no |
+| 3 | `IPCSend` | channel handle, Write | wire length 32..320; `CopyIn`; `ipc.Decode` checks header and sizes; each attached handle (≤ 4) needs Transfer; an attached stream end must have room for four more references, checked before anything moves | 16-message queue; full → `ResourceExhausted` | no |
 | 4 | `IPCReceive` | channel handle, Read | capacity ≥ 320; `CopyOut` | static wire buffer | no; empty → `NotFound` |
 | 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 64 waiters; per-task status slot | yes, tick deadline; 0 → `Timeout` |
 | 6 | `ConsoleWrite` | device handle, Write, console object | length 1..4096; `CopyIn` | static 4 KiB buffer | no |
 | 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte from the 256-byte ring the UART interrupt fills | no; no input → `NotFound`; wait with `WaitAny` |
 | 8 | `ClockRead` | — | length exactly 8; `CopyOut` | none | no |
 | 9 | `StartupRead` | registered | length exactly 1024; `CopyIn` of own startup page, `CopyOut` | none | no |
-| 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 channels, global; charged to PID 1's channel quota | no |
-| 11 | `HandleClose` | own handle | generation and slot | none | no; wakes peers |
+| 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 24 channels, global; charged to PID 1's channel quota | no |
+| 11 | `HandleClose` | own handle | generation and slot; a stream handle drops one reference, refused below zero | none | no; wakes peers when a stream end's last handle closes |
 | 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 64 waiters | yes, tick deadline; 0 → `Timeout` |
 | 13 | `SystemInfo` | registered | length exactly 40; `CopyOut` | none | no |
 | 14 | `PortRead` | device handle, Read, port object | spec: width 1/2/4, bits 24+ zero, `offset + width ≤ BAR size` (32-bit sum); `CopyOut` | one port access | no |
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
 | 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; four target pages must be unmapped; output buffer probed before allocation | 4 contiguous pages, charged to the page quota; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
-| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 16 streams × 4 KiB, global; four per ordinary process (quota) | no |
+| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 64 streams × 4 KiB, global; four per ordinary process, 24 for PID 1 (quota) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
-| 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload | static 256 B buffer | no; full → `ResourceExhausted` |
-| 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline |
+| 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload; a write that does not fit whole is refused, never split | static 256 B buffer | no; full → `ResourceExhausted` |
+| 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline; a writer wakes when 256 bytes are free |
 | 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..16, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
@@ -60,7 +60,7 @@ table with type, generation, and rights checks.
 | 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
 | 30 | `MemoryMap` | memory handle, Read (+ Write when writable), kernel-registered shared object | flags: only bit 0 (writable); address page-aligned and whole object inside `[0x40180000, 0x401c0000)`; every leaf must be free before any is installed | whole object, NX, non-owned; at most 4 registered objects | no |
 | 31 | `ProcessKill` | process handle, Write | handle lookup; refuses PID 1 and the caller's own process | none | retires the target's tasks |
-| 32 | `ImageMap` | device handle, Read, system-image object (held only by VFS) | virtual address must equal `0x40200000`; archive must be page-aligned and fit `[0x40200000, 0x40400000)`; 16-byte descriptor probed before mapping; every leaf must be free | one leaf table, charged to the page quota; archive mapped read-only, NX, non-owned | no |
+| 32 | `ImageMap` | device handle, Read, system-image object (held only by VFS) | virtual address must equal `0x40200000`; archive must be page-aligned and fit `[0x40200000, 0x40600000)`; 16-byte descriptor probed before mapping; every leaf must be free | one leaf table per 2 MiB of archive (at most two), each charged to the page quota; archive mapped read-only, NX, non-owned | no |
 | 33 | `LogBounds` | device handle, Read, log object (ADR 0082) | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 
@@ -75,9 +75,11 @@ compiles away.
 - Handles, channels, streams, waits, and process lifetime are kernel objects;
   their integrity is the authority model.
 - Port I/O, DMA memory, and IRQ routing need ring 0.
-- `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` are in the kernel
-  because no TTY service owns COM1 yet (docs/userspace/tty.md). They are
-  candidates to move to userspace.
+- `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` stay in the kernel
+  because COM1 is also the early console, the panic path and the log's warning
+  echo. The terminal service holds the only read right and relays everything the
+  shell and commands print (ADR 0082, 0089); console write remains with it and
+  with the system services that start before it.
 - `DebugWrite` is a bootstrap path. Boot validation now has its own build
   (ADR 0058); in a normal build only PID 1 passes its root comparison, and the
   call remains a candidate for removal.
@@ -125,6 +127,23 @@ identity or need nothing: `Exit`, `DebugWrite`, `ClockRead`, `StartupRead`,
 `SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
 `HandleInfo` (own table only), and `ProcessInfo`.
 
+### Stream reference counts (ADR 0089)
+
+- *Why in the kernel*: the count describes handle tables, which only the
+  kernel sees; a userspace count could be forged or forgotten by a process that
+  exits.
+- *Untrusted inputs*: the handle a process closes, the handles it attaches to a
+  message (including the same handle twice), and, from PID 1, launch grants.
+  A handle is resolved in the caller's own table with type and rights before
+  its count is touched, so a forged or stale ID changes nothing.
+- *Overflow*: counts are 16-bit; no end can have more handles than the
+  32 × 128 slots that exist, which a test holds below the bound, and every path
+  that adds a reference checks the headroom it needs before installing anything.
+  A drop with nothing counted is refused rather than wrapping.
+- *Waits*: none added. Writers are woken only when a whole 256-byte write fits,
+  so a woken writer is not refused again.
+- *Resources*: two 16-bit counters per stream; the registry is 64 streams.
+
 ### Resource limits
 
 Global fixed arrays bound the system; per-process quotas bound each process's
@@ -132,7 +151,8 @@ share of them (ADR 0072). Channels, streams, tasks and pages are charged to the
 process that causes them to exist and released when it does. An ordinary process
 holds at most four channels, four streams, four tasks and 192 pages; PID 1, which
 creates the endpoints every other process communicates through, holds at most
-sixteen, sixteen, eight and 512, and is refused past that like anything else.
+twenty-four, twenty-four, eight and 512, and is refused past that like anything
+else (ADR 0089).
 
 The shared image cache (ADR 0081) is not charged to any process. It grows only
 when PID 1 launches an image from the immutable system image, it is keyed by

@@ -1,13 +1,14 @@
 //go:build goos_userspace
 
-// The terminal service owns the console's input (ADR 0082). It is the only
-// process holding the right to read the console: it edits the line being typed,
-// echoes it, and turns Ctrl-C and Ctrl-D into events, and a client gets
+// The terminal service owns the console (ADR 0082, ADR 0089). It is the only
+// process holding the right to read the console: it edits the line being
+// typed, echoes it, and turns Ctrl-C and Ctrl-D into events, and a client gets
 // finished lines by asking for them over its session.
 //
-// Output does not pass through it. Processes write to the console with a
-// write-only capability, so the service redraws the prompt and the line being
-// typed when a client says output has moved the cursor.
+// Output passes through it too. The shell and every command write to a shared
+// stream whose reading end only this service holds; it writes what arrives to
+// the console, taking the line being typed off the screen first and putting it
+// back after, so output never lands in the middle of what someone is typing.
 package main
 
 import (
@@ -25,12 +26,17 @@ import (
 
 var (
 	consoleHandle handle.ID
+	outputHandle  handle.ID
 	sessionHandle handle.ID
+	// controlHandle is the channel PID 1 hands a new session over when the
+	// shell has been restarted (ADR 0089).
+	controlHandle handle.ID
 	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
 	heapPointer   uintptr
 	inputByte     byte
 	line          tty.Discipline
+	screen        tty.Screen
 	// reading is the correlation of the client's outstanding read, or zero.
 	reading    uint64
 	prompt     [tty.MaxPrompt]byte
@@ -40,10 +46,17 @@ var (
 	interruptQueued bool
 	endQueued       bool
 	sessionClosed   bool
+	outputClosed    bool
+	outputReported  bool
+	outputBuffer    [kcall.MaxStreamIO]byte
+	outputRequest   [3]uint64
+	newline         = [1]byte{'\n'}
 )
 
-// eraseLine returns the cursor to the start of the line and clears it.
-const eraseLine = "\r\x1b[K"
+// outputBatch bounds the reads one pass relays, so a program writing without
+// pause cannot keep the service from reading the keyboard: Ctrl-C has to get
+// through while output is streaming.
+const outputBatch = 16
 
 //go:extern _heap_start
 var heapStartSymbol [0]byte
@@ -66,11 +79,17 @@ func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname ipcReceive goos_ipc_receive
 func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname streamRead goos_stream_read
+func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname handleClose goos_handle_close
+func handleClose(id uint64) uint64
+
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
 
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
+//go:linkname processExit goos_exit
+func processExit(code uint64)
 
 //export userspaceMain
 func userspaceMain() {
@@ -87,17 +106,63 @@ func userspaceMain() {
 	if !ok {
 		fatal("TTY_CONSOLE_MISSING\n")
 	}
+	outputHandle, ok = data.Handle("output")
+	if !ok {
+		fatal("TTY_OUTPUT_MISSING\n")
+	}
 	sessionHandle, ok = data.Handle("session")
 	if !ok {
 		fatal("TTY_SESSION_MISSING\n")
+	}
+	controlHandle, ok = data.Handle("control")
+	if !ok {
+		fatal("TTY_CONTROL_MISSING\n")
 	}
 	mark("TTY_TERMINAL_OK\n")
 	base := heapPointer
 	for {
 		heapPointer = base
 		serveConsole()
+		serveOutput()
+		serveControl()
 		serveSession()
 		awaitWork()
+	}
+}
+
+// serveControl takes a new session from PID 1. The shell was restarted: the
+// old session died with it, and this is the server end of its replacement's.
+// What has been typed of the current line is kept for the new shell.
+func serveControl() {
+	for controlHandle != 0 {
+		status := ipcReceive(uint64(controlHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
+		if status == uint64(ipc.StatusNotFound) {
+			return
+		}
+		if status != 0 {
+			handleClose(uint64(controlHandle))
+			controlHandle = 0
+			return
+		}
+		message, valid := decodeWire()
+		if !valid {
+			continue
+		}
+		session, valid := tty.DecodeSessionNotice(&message)
+		if !valid {
+			// Only PID 1 holds the other end, and it sends nothing else;
+			// any handle a malformed message carried is not kept.
+			for index := 0; index < int(message.HandleCount); index++ {
+				handleClose(uint64(message.Handles[index]))
+			}
+			continue
+		}
+		if sessionHandle != 0 {
+			handleClose(uint64(sessionHandle))
+		}
+		sessionHandle, sessionClosed = session, false
+		reading, interruptQueued, endQueued = 0, false, false
+		mark("TTY_SESSION_REPLACED_OK\n")
 	}
 }
 
@@ -112,8 +177,48 @@ func serveConsole() {
 	}
 }
 
+// serveOutput relays what the shell and its commands have written. The line
+// being typed is taken off the screen before the first write and put back
+// after the last, so a background job's report or a command's output never
+// lands inside it.
+func serveOutput() {
+	relayed := false
+	for batch := 0; batch < outputBatch && !outputClosed; batch++ {
+		outputRequest[0] = uint64(uintptr(unsafe.Pointer(&outputBuffer[0])))
+		outputRequest[1], outputRequest[2] = uint64(len(outputBuffer)), 0
+		status := streamRead(uint64(outputHandle), unsafe.Pointer(&outputRequest[0]), 24)
+		if status == uint64(kcall.StatusResourceExhausted) {
+			break
+		}
+		if status != 0 || outputRequest[2] == 0 || outputRequest[2] > uint64(len(outputBuffer)) {
+			// PID 1 keeps a writing end for as long as it runs, so this is
+			// not an ordinary end of output; stop waiting on the stream
+			// rather than spin on it.
+			outputClosed = true
+			syslog.Warn("output stream closed")
+			break
+		}
+		if !relayed {
+			writeBytes(screen.Hide())
+			relayed = true
+		}
+		data := outputBuffer[:outputRequest[2]]
+		writeBytes(data)
+		screen.Output(data)
+	}
+	if relayed {
+		showLine()
+		if !outputReported {
+			outputReported = true
+			mark("TTY_OUTPUT_OK\n")
+		}
+	}
+}
+
 func apply(event tty.Event) {
-	writeBytes(line.Echo())
+	echo := line.Echo()
+	writeBytes(echo)
+	screen.Echoed(echo, len(line.Pending()))
 	switch event {
 	case tty.EventLine:
 		deliverLine()
@@ -127,6 +232,7 @@ func apply(event tty.Event) {
 		}
 	case tty.EventRedraw:
 		write("\x1b[2J\x1b[H")
+		screen.Cleared()
 		showLine()
 	}
 }
@@ -138,11 +244,12 @@ func deliverLine() {
 	if !complete || reading == 0 {
 		return
 	}
-	if reply(tty.ResultLine, text) {
-		mark("TTY_LINE_OK\n")
-	}
+	delivered := reply(tty.ResultLine, text)
 	reading = 0
 	line.Next()
+	if delivered {
+		mark("TTY_LINE_OK\n")
+	}
 }
 
 // answer ends the outstanding read with result, reporting whether there was one.
@@ -169,7 +276,7 @@ func serveSession() {
 		if status != 0 {
 			// The client is gone. Input still arrives and is still edited, but
 			// there is no one to give it to until the session is replaced.
-			sessionClosed = true
+			closeSession()
 			syslog.Warn("session closed")
 			return
 		}
@@ -184,24 +291,31 @@ func serveSession() {
 			}
 			continue
 		}
+		// Output the client wrote before asking goes out before the prompt.
+		serveOutput()
 		switch operation {
 		case tty.OperationReadLine:
 			startRead(text, message.Correlation)
 		case tty.OperationRedraw:
 			promptSize = copy(prompt[:], text)
 			if reading != 0 {
-				// Only text typed ahead is on the cursor's line; without it the
-				// client's own output ended the line and there is nothing to
-				// erase.
-				if len(line.Pending()) != 0 {
-					write(eraseLine)
-				}
 				showLine()
 			}
 			if accepted, ok := tty.Reply(tty.ResultAccepted, nil, message.Correlation); ok {
 				send(accepted)
 			}
 		}
+	}
+}
+
+// closeSession forgets a session whose client has gone, closing its endpoint
+// so the channel is released rather than left half open.
+func closeSession() {
+	sessionClosed = true
+	reading = 0
+	if sessionHandle != 0 {
+		handleClose(uint64(sessionHandle))
+		sessionHandle = 0
 	}
 }
 
@@ -224,7 +338,18 @@ func startRead(text []byte, correlation uint64) {
 		endQueued = false
 		answer(tty.ResultEndOfInput)
 	default:
-		if _, complete := line.Line(); complete {
+		if text, complete := line.Line(); complete {
+			// A line finished before this read was echoed with no prompt,
+			// possibly in the middle of other output. It is shown again with
+			// the prompt it answers, as a shell's line editor does with typed
+			// ahead input, so the screen always reads as a prompt followed by
+			// the command it ran.
+			if promptSize != 0 {
+				writeBytes(screen.Hide())
+				writeBytes(screen.Show(prompt[:promptSize], text))
+				writeBytes(newline[:])
+				screen.Echoed(newline[:], 0)
+			}
 			deliverLine()
 			return
 		}
@@ -232,20 +357,34 @@ func startRead(text []byte, correlation uint64) {
 	}
 }
 
-// showLine writes the prompt and what has been typed so far.
+// showLine replaces whatever line is on the screen with the prompt of the
+// outstanding read, if there is one, and what has been typed so far.
 func showLine() {
-	writeBytes(prompt[:promptSize])
-	writeBytes(line.Pending())
+	writeBytes(screen.Hide())
+	shown := prompt[:0]
+	if reading != 0 {
+		shown = prompt[:promptSize]
+	}
+	writeBytes(screen.Show(shown, line.Pending()))
 }
 
-// awaitWork blocks until a key arrives or the client sends a request.
+// awaitWork blocks until a key arrives, output is written, or the client
+// sends a request.
 func awaitWork() {
 	var interests [userwait.MaxObjects]userwait.Interest
 	interests[0] = userwait.Interest{Handle: consoleHandle, Events: kcall.WaitReadable}
 	count := 1
+	if !outputClosed {
+		interests[count] = userwait.Interest{Handle: outputHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count++
+	}
 	if !sessionClosed {
-		interests[1] = userwait.Interest{Handle: sessionHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		count = 2
+		interests[count] = userwait.Interest{Handle: sessionHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count++
+	}
+	if controlHandle != 0 {
+		interests[count] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count++
 	}
 	if _, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
 		// A wait that cannot be established must not become a spin.
@@ -267,9 +406,14 @@ func decodeWire() (ipc.Message, bool) {
 	return ipc.Decode(wire[:size])
 }
 
+// mark writes a validation marker on a row of its own: it goes around the line
+// being typed the way relayed output does.
 func mark(message string) {
 	if validation.Enabled {
+		writeBytes(screen.Hide())
 		write(message)
+		screen.Output(newline[:])
+		showLine()
 	}
 }
 
@@ -283,11 +427,13 @@ func writeBytes(value []byte) {
 	}
 }
 
+// fatal reports and exits, so the supervisor starts a replacement rather than
+// leaving a service that neither works nor ends.
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	diagnostics(uint64(consoleHandle), 0)
+	processExit(1)
 	for {
 	}
 }

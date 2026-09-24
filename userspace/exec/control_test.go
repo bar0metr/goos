@@ -19,7 +19,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, bad := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}} {
+	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultShell + 1}} {
 		if _, ok := EncodeControl(bad.operation, bad.argument, 7); ok {
 			t.Fatalf("encoded %#v", bad)
 		}
@@ -37,6 +37,22 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	}
 	if _, _, ok := DecodeSubmit(message); ok {
 		t.Fatal("control message decoded as a launch request")
+	}
+	for _, request := range []struct {
+		operation ControlOperation
+		argument  uint8
+	}{{ControlDiagnostics, 0}, {ControlFault, FaultTerminal}, {ControlFault, FaultShell}} {
+		encoded, ok := EncodeControl(request.operation, request.argument, 11)
+		operation, argument, decoded := DecodeControl(encoded)
+		if !ok || !decoded || operation != request.operation || argument != request.argument {
+			t.Fatalf("%d %d did not round trip", request.operation, request.argument)
+		}
+	}
+	// A version 2 request is refused rather than read with the new meanings.
+	old := message
+	old.Version = 2
+	if _, _, ok := DecodeControl(old); ok {
+		t.Fatal("version 2 control request accepted")
 	}
 }
 

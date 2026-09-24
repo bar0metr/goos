@@ -25,15 +25,17 @@ import (
 )
 
 var (
-	// consoleHandle writes to the console. The shell cannot read it: what is
-	// typed arrives as lines over ttyHandle from the terminal service.
-	consoleHandle handle.ID
-	ttyHandle     handle.ID
-	logHandle     handle.ID
-	vfsHandle     handle.ID
-	execHandle    handle.ID
-	configHandle  handle.ID
-	configWire    [ipc.WireMaxSize]byte
+	// outputHandle is the shell's copy of the terminal's writing end: what the
+	// shell prints goes through the terminal service, like every command's
+	// output (ADR 0089). The shell holds no console capability; what is typed
+	// arrives as lines over ttyHandle from the same service.
+	outputHandle handle.ID
+	ttyHandle    handle.ID
+	logHandle    handle.ID
+	vfsHandle    handle.ID
+	execHandle   handle.ID
+	configHandle handle.ID
+	configWire   [ipc.WireMaxSize]byte
 	// prompt is read from the configuration service rather than compiled in.
 	// It falls back to the built-in text when there is no session, because the
 	// shell has to come up whether or not configuration is available.
@@ -105,14 +107,14 @@ func handleInfo(slot uint64, address unsafe.Pointer) uint64
 //go:linkname logRead goos_log_read
 func logRead(device uint64, index uint64, address unsafe.Pointer) uint64
 
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
-
 //go:linkname clockReadNanos goos_clock_read_nanos
 func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
 
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
+//go:linkname streamRead goos_stream_read
+func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname processExit goos_exit
+func processExit(code uint64)
 
 //go:linkname handleClose goos_handle_close
 func handleClose(id uint64) uint64
@@ -143,9 +145,9 @@ func userspaceMain() {
 	if !validStartup {
 		fatal("SHELL_STARTUP_INVALID\n")
 	}
-	consoleHandle, found = startupData.Handle("console")
+	outputHandle, found = startupData.Handle("stdout")
 	if !found {
-		fatal("SHELL_CONSOLE_MISSING\n")
+		fatal("SHELL_OUTPUT_MISSING\n")
 	}
 	ttyHandle, found = startupData.Handle("tty")
 	if !found {
@@ -177,15 +179,20 @@ func userspaceMain() {
 	}
 	heapPointer = arenaBase
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
+	if validation.Enabled {
+		checkOutputIsWriteOnly()
+	}
 	loadPrompt()
 	write("\n")
 	for {
 		showPrompt()
 		for {
+			// A finished background job is reported through the terminal
+			// service, which takes the line being typed off the screen and
+			// puts it back, so the shell does not redraw it. A new terminal
+			// session needs the prompt asked for again.
 			if pollReplies() {
-				// A finished background job was reported over the line being
-				// typed, so the terminal service shows it again.
-				redraw(promptText[:promptSize])
+				break
 			}
 			result, text, received := takeLine()
 			if !received {
@@ -207,8 +214,12 @@ func userspaceMain() {
 
 // showPrompt asks for the next line with the shell's prompt. A read left
 // outstanding by a foreground command already holds what was typed ahead, so
-// it is shown again with the prompt instead of being asked for anew.
+// it is shown again with the prompt instead of being asked for anew. Without a
+// terminal there is no one to ask until PID 1 hands over a new session.
 func showPrompt() {
+	if ttyHandle == 0 {
+		return
+	}
 	if reading != 0 {
 		redraw(promptText[:promptSize])
 		return
@@ -217,22 +228,55 @@ func showPrompt() {
 }
 
 func requestLine(prompt []byte) {
+	if ttyHandle == 0 {
+		return
+	}
 	correlation++
 	request, ok := terminal.Request(terminal.OperationReadLine, prompt, correlation)
-	if !ok || !sendTerminal(request) {
+	if !ok {
 		fatal("SHELL_TERMINAL_REQUEST_FAILED\n")
+	}
+	if !sendTerminal(request) {
+		terminalLost()
+		return
 	}
 	reading = correlation
 }
 
 func redraw(prompt []byte) {
+	if ttyHandle == 0 {
+		return
+	}
 	correlation++
-	if request, ok := terminal.Request(terminal.OperationRedraw, prompt, correlation); ok {
-		sendTerminal(request)
+	if request, ok := terminal.Request(terminal.OperationRedraw, prompt, correlation); ok && !sendTerminal(request) {
+		terminalLost()
 	}
 }
 
+// terminalLost forgets a session whose terminal service has gone. The shell
+// keeps running — its jobs, its output, its state — and waits for PID 1 to
+// hand it the session of the terminal's replacement (ADR 0089).
+func terminalLost() {
+	if ttyHandle != 0 {
+		handleClose(uint64(ttyHandle))
+		ttyHandle = 0
+	}
+	reading = 0
+}
+
+// installTerminal takes a new session from PID 1: the terminal service was
+// restarted, and this is its client end.
+func installTerminal(session handle.ID) {
+	if ttyHandle != 0 {
+		handleClose(uint64(ttyHandle))
+	}
+	ttyHandle, reading = session, 0
+	mark("SHELL_TERMINAL_REPLACED_OK\n")
+}
+
 func sendTerminal(message ipc.Message) bool {
+	// What the shell printed goes out before it asks for the next line.
+	flushOutput()
 	size, ok := ipc.Encode(message, ttyWire[:])
 	return ok && ipcSend(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), uintptr(size)) == 0
 }
@@ -241,13 +285,14 @@ func sendTerminal(message ipc.Message) bool {
 // terminal service's other replies, acknowledgements of redraws, are consumed.
 // The returned text aliases a buffer the next call reuses.
 func takeLine() (terminal.Result, []byte, bool) {
-	for {
+	for ttyHandle != 0 {
 		status := ipcReceive(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), ipc.WireMaxSize)
 		if status == uint64(ipc.StatusNotFound) {
 			return 0, nil, false
 		}
 		if status != 0 {
-			fatal("SHELL_TERMINAL_LOST\n")
+			terminalLost()
+			return 0, nil, false
 		}
 		payloadSize := int(ttyWire[24]) | int(ttyWire[25])<<8
 		size := ipc.WireHeaderSize + payloadSize + int(ttyWire[26])*8
@@ -266,6 +311,7 @@ func takeLine() (terminal.Result, []byte, bool) {
 		size = copy(typedStorage[:], text)
 		return result, typedStorage[:size], true
 	}
+	return 0, nil, false
 }
 
 // loadPrompt asks the configuration service what the prompt is. A shell that
@@ -353,6 +399,10 @@ func executeCommand(line []byte) {
 	redirects, _ := shellcmd.SplitRedirections(line)
 	stages, count, _ := shellcmd.SplitPipeline(redirects.Command)
 	invocation, _ := shellcmd.ParseInvocation(stages[0], &argumentStorage)
+	if validation.Enabled && count == 1 && invocation.Count == 2 && argumentIs(invocation.Arguments[0], "fault") {
+		injectFault(invocation.Arguments[1])
+		return
+	}
 	if count != 1 || !shellcmd.IsBuiltin(invocation.Arguments[0]) {
 		executeExternal(line, false)
 		return
@@ -391,7 +441,10 @@ func executeCommand(line []byte) {
 	case "caps":
 		printHandles(true)
 	case "diag":
-		if diagnostics(uint64(consoleHandle), 0) != 0 {
+		// The dump goes to the console, which only PID 1 and the terminal
+		// service can write, so PID 1 asks the kernel for it.
+		reply, ok := controlExchange(execproto.ControlDiagnostics, 0)
+		if status, valid := execproto.DecodeControlStatus(reply); !ok || !valid || status != execproto.ControlOK {
 			write("diag: unavailable in this build\n")
 		}
 	case "time":
@@ -406,6 +459,23 @@ func executeCommand(line []byte) {
 		} else {
 			executeCd(nil)
 		}
+	}
+}
+
+// injectFault asks PID 1 to kill the terminal service or this shell. It exists
+// only in the validation build, where the boot test uses it to show that each
+// restarts on its own while the other keeps working (ADR 0089).
+func injectFault(target []byte) {
+	service := execproto.FaultTerminal
+	if argumentIs(target, "shell") {
+		service = execproto.FaultShell
+	} else if !argumentIs(target, "tty") {
+		write("fault: tty or shell\n")
+		return
+	}
+	reply, ok := controlExchange(execproto.ControlFault, service)
+	if status, valid := execproto.DecodeControlStatus(reply); !ok || !valid || status != execproto.ControlOK {
+		write("fault: refused\n")
 	}
 }
 
@@ -546,10 +616,15 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 // awaitInput blocks until the terminal service or PID 1 has something for the
 // shell. Both are waitable objects, so the shell never polls either.
 func awaitInput() {
+	flushOutput()
 	var interests [userwait.MaxObjects]userwait.Interest
-	interests[0] = userwait.Interest{Handle: ttyHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-	interests[1] = userwait.Interest{Handle: execHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-	if _, status := userwait.Any(&interests, 2, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
+	interests[0] = userwait.Interest{Handle: execHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+	count := 1
+	if ttyHandle != 0 {
+		interests[1] = userwait.Interest{Handle: ttyHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count++
+	}
+	if _, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {
 		// A wait that cannot be established must not become a spin. Sleeping a
 		// tick degrades to slow polling, which is visible in the CPU column
 		// rather than hidden in a loop.
@@ -865,8 +940,12 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			closeInput(&input)
 			return ipc.Message{}, false
 		}
-		if _, started, ok := execproto.DecodeStarted(message); ok {
-			if message.Correlation == correlation && input == 0 {
+		if session, ok := terminal.DecodeSessionNotice(&message); ok {
+			installTerminal(session)
+			continue
+		}
+		if _, started, job, ok := execproto.DecodeStarted(message); ok {
+			if job == correlation && input == 0 {
 				input = started
 			} else {
 				handleClose(uint64(started))
@@ -901,24 +980,24 @@ func closeInput(input *handle.ID) {
 	}
 }
 
-// pollReplies reports finished background jobs without blocking.
+// pollReplies reports finished background jobs and takes a new terminal
+// session without blocking. It reports whether the session was replaced, which
+// needs the prompt asked for again.
 func pollReplies() bool {
-	reported := false
-	for {
-		active := false
-		for index := range jobs {
-			active = active || jobs[index].active
+	replaced := false
+	for ipcReceive(uint64(execHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) == 0 {
+		message, valid := decodeWire()
+		if !valid {
+			continue
 		}
-		if !active || ipcReceive(uint64(execHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize) != 0 {
-			return reported
+		if session, ok := terminal.DecodeSessionNotice(&message); ok {
+			installTerminal(session)
+			replaced = true
+			continue
 		}
-		if message, valid := decodeWire(); valid {
-			if !reported {
-				write("\n")
-			}
-			reported = reportJob(message) || reported
-		}
+		reportJob(message)
 	}
+	return replaced
 }
 
 func decodeWire() (ipc.Message, bool) {
@@ -1379,12 +1458,73 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	writeBytes(unsafe.Slice(unsafe.StringData(message), len(message)))
 }
 
+// Output is assembled into lines before it is sent. The terminal service
+// relays each write as it arrives, so a line written in pieces could have a
+// command's output land between them; a whole line of at most 256 bytes is
+// one write, which the stream never splits.
+var (
+	outputLine [256]byte
+	outputSize int
+)
+
+// writeBytes queues value for the terminal and sends what is queued at the end
+// of a line or when the buffer fills.
 func writeBytes(value []byte) {
-	if len(value) != 0 {
-		consoleWrite(uint64(consoleHandle), unsafe.Pointer(&value[0]), uintptr(len(value)))
+	if len(value) == 0 {
+		return
+	}
+	for len(value) != 0 {
+		copied := copy(outputLine[outputSize:], value)
+		outputSize += copied
+		value = value[copied:]
+		if outputSize == len(outputLine) {
+			flushOutput()
+		}
+	}
+	if outputSize != 0 && outputLine[outputSize-1] == '\n' {
+		flushOutput()
+	}
+}
+
+// flushOutput sends the queued output. A full stream means the service is
+// behind; the shell waits for room, but not for ever: a terminal that is not
+// draining must not hold the shell, so what cannot be written within the
+// deadline is dropped.
+func flushOutput() {
+	pending := outputLine[:outputSize]
+	outputSize = 0
+	for len(pending) != 0 {
+		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&pending[0])))
+		streamDescriptor[1], streamDescriptor[2] = uint64(len(pending)), 0
+		status := streamWrite(uint64(outputHandle), unsafe.Pointer(&streamDescriptor[0]), 24)
+		if status == uint64(kcall.StatusResourceExhausted) {
+			if streamWait(uint64(outputHandle), outputDeadline) != 0 {
+				return
+			}
+			continue
+		}
+		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(len(pending)) {
+			return
+		}
+		pending = pending[streamDescriptor[2]:]
+	}
+}
+
+// outputDeadline bounds one wait for room in the terminal's output stream.
+const outputDeadline = 2 * clock.TicksPerSecond
+
+// checkOutputIsWriteOnly proves, in the validation build, that the shell's
+// terminal endpoint writes and nothing else: reading it, which would let the
+// shell see what commands print to the terminal, is refused by the kernel.
+func checkOutputIsWriteOnly() {
+	var probe [8]byte
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&probe[0])))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(probe)), 0
+	if streamRead(uint64(outputHandle), unsafe.Pointer(&streamDescriptor[0]), 24) == uint64(kcall.StatusPermissionDenied) {
+		mark("TERMINAL_STREAM_READ_DENIED_OK\n")
 	}
 }
 
@@ -1418,8 +1558,14 @@ func writeUint(value uint64) {
 	writeBytes(digits[position:])
 }
 
+// fatal reports and exits, so the supervisor starts a replacement rather than
+// leaving a shell that neither works nor ends.
 func fatal(message string) {
-	write(message)
+	if outputHandle != 0 {
+		write(message)
+		flushOutput()
+	}
+	processExit(1)
 	for {
 	}
 }

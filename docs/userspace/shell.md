@@ -1,12 +1,14 @@
 # Native shell
 
 PID 1 launches `/system/shell` as a normal supervised native image after the
-terminal service. Its console capability is write-only: the shell cannot read
-the console, and what is typed reaches it as lines from the terminal service
-over its `tty` session (ADR 0082). Reading the system log is a separate `log`
-capability.
+terminal service. The shell holds no console capability (ADR 0089): what is
+typed reaches it as lines from the terminal service over its `tty` session
+(ADR 0082), and what it prints goes back through the same service on `stdout`,
+a write-only copy of the terminal's output stream. It assembles its output into
+lines and sends each as one write, flushing before it asks for a line or waits.
+Reading the system log is a separate `log` capability.
 
-The shell resolves its `console`, `tty`, `log`, `vfs`, and `exec` handles from
+The shell resolves its `stdout`, `tty`, `log`, `vfs`, and `exec` handles from
 the versioned startup block and asks the terminal service for each line with
 its prompt. Editing, echo and the control keys belong to the terminal service
 ([tty.md](tty.md)); a command line is at most 128 bytes. Runtime allocation
@@ -20,7 +22,9 @@ a command given the wrong number of arguments prints `usage: ...` instead of
 running (ADR 0079). `services` and `reboot` are requests to PID 1
 over the control protocol on the exec channel. `handles` and `caps` list the
 shell's own handle table, raw and under its startup names. `log` prints the
-system log (ADRs 0059 and 0061). `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
+system log (ADRs 0059 and 0061). `diag`, in a `goos_diag` build, asks PID 1 to
+have the kernel dump its state to the console, since the shell cannot write the
+console itself. `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
 the normal path, and prints the elapsed time from the kernel's nanosecond
 clock as `time: <N> us` (ADR 0054). Commands are split into at most eight arguments with bounded single
 quotes, double quotes, and backslash escaping. The shell owns a fixed 192-byte working-directory buffer matching the
@@ -45,8 +49,10 @@ the build collects into `/system/commands` (ADR 0080). They receive structured
 `argv`, `PATH=/system/bin`, a VFS session when their manifest asks for one, a
 read-only standard-input handle named `in`, and distinct write-only
 `stdout` and `stderr` handles. Normal output uses `stdout`; diagnostics and
-validation markers use `stderr`. Output streams target the serial console, write-only, unless pipeline or
-redirection composition substitutes an endpoint. Standard input is always a
+validation markers use `stderr`. Both are write-only copies of the terminal's
+output stream, which the terminal service relays to the console, unless pipeline
+or redirection composition substitutes an endpoint (ADR 0089). No command holds a
+console capability. Standard input is always a
 stream: a foreground command's is fed by the shell with the lines typed while it
 runs, and a background command's is at end of input. The bounded `readline`
 utility reads one line from `in`, rejects input beyond 128 bytes, and writes
@@ -76,7 +82,8 @@ later work.
 A line ending in an unquoted `&` runs as a background job with an empty
 standard input. The shell prints `[N] started`, returns to the prompt, and
 reports `[N] done`, `[N] exit status: C`, or the launch failure when PID 1
-replies, redrawing the line being typed. Up to three background jobs may run,
+replies. The terminal service takes the line being typed off the screen, writes
+the report, and shows the line again (ADR 0089). Up to three background jobs may run,
 and one exec slot stays free for the foreground. Builtins and `;` sequences
 cannot run in the background. A foreground command has no reply time limit
 (ADR 0064).
@@ -87,6 +94,15 @@ Ctrl-C stops the foreground command and prints `^C`, and at the prompt it
 clears the line being typed (ADR 0067). A line typed while a command runs is
 that command's input; Ctrl-D ends it. Typing ahead of a command that does not
 read keeps the text for the next prompt (ADR 0082).
+
+The shell is `restart: always` and restarts independently of the terminal
+service (ADR 0089). When the terminal service dies, the shell keeps running —
+its jobs, its working directory, its output, which waits in the terminal's
+stream — and takes the new terminal's session from PID 1 as a notice on its exec
+channel, then asks for its next line through it. When the shell itself dies, its
+running jobs are stopped with it, and the new shell starts with a fresh
+terminal session, exec channel, VFS session and configuration session, and no
+jobs.
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
 within the existing 128-byte line limit. A trailing separator is accepted; empty
