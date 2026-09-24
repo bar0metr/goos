@@ -28,6 +28,9 @@ var (
 	consoleHandle handle.ID
 	outputHandle  handle.ID
 	sessionHandle handle.ID
+	// controlHandle is the channel PID 1 hands a new session over when the
+	// shell has been restarted (ADR 0089).
+	controlHandle handle.ID
 	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
 	heapPointer   uintptr
@@ -111,14 +114,55 @@ func userspaceMain() {
 	if !ok {
 		fatal("TTY_SESSION_MISSING\n")
 	}
+	controlHandle, ok = data.Handle("control")
+	if !ok {
+		fatal("TTY_CONTROL_MISSING\n")
+	}
 	mark("TTY_TERMINAL_OK\n")
 	base := heapPointer
 	for {
 		heapPointer = base
 		serveConsole()
 		serveOutput()
+		serveControl()
 		serveSession()
 		awaitWork()
+	}
+}
+
+// serveControl takes a new session from PID 1. The shell was restarted: the
+// old session died with it, and this is the server end of its replacement's.
+// What has been typed of the current line is kept for the new shell.
+func serveControl() {
+	for controlHandle != 0 {
+		status := ipcReceive(uint64(controlHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
+		if status == uint64(ipc.StatusNotFound) {
+			return
+		}
+		if status != 0 {
+			handleClose(uint64(controlHandle))
+			controlHandle = 0
+			return
+		}
+		message, valid := decodeWire()
+		if !valid {
+			continue
+		}
+		session, valid := tty.DecodeSessionNotice(&message)
+		if !valid {
+			// Only PID 1 holds the other end, and it sends nothing else;
+			// any handle a malformed message carried is not kept.
+			for index := 0; index < int(message.HandleCount); index++ {
+				handleClose(uint64(message.Handles[index]))
+			}
+			continue
+		}
+		if sessionHandle != 0 {
+			handleClose(uint64(sessionHandle))
+		}
+		sessionHandle, sessionClosed = session, false
+		reading, interruptQueued, endQueued = 0, false, false
+		mark("TTY_SESSION_REPLACED_OK\n")
 	}
 }
 
@@ -325,6 +369,10 @@ func awaitWork() {
 	}
 	if !sessionClosed {
 		interests[count] = userwait.Interest{Handle: sessionHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		count++
+	}
+	if controlHandle != 0 {
+		interests[count] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		count++
 	}
 	if _, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout); status != kcall.StatusOK {

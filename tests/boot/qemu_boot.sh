@@ -417,6 +417,18 @@ rm -f "$log" "$reboot_log"
 	sleep 2
 	printf '\003'
 	sleep 2
+	# The terminal service and the shell restart independently (ADR 0089):
+	# each is killed once, and the other has to carry on with its replacement.
+	printf 'fault tty\n'
+	sleep 2
+	printf 'echo after-terminal-restart\n'
+	sleep 1
+	printf 'sleep 30 &\n'
+	sleep 1
+	printf 'fault shell\n'
+	sleep 3
+	printf 'echo after-shell-restart; jobs; ps\n'
+	sleep 2
 	deep=/persist
 	for dir in aaaaaaaa bbbbbbbb cccccccc dddddddd eeeeeeee; do
 		deep=$deep/$dir
@@ -735,6 +747,27 @@ require_window jobs.foreground '^foreground while jobs run$' 'foreground command
 require_regex jobs.killed '\[2\] killed$' 'kill stops a background job' "$log" 'goos> kill %2'
 require_regex jobs.done-1 '\[1\] done$' 'first background job reported' "$log" 'goos> sleep 4 &'
 require_regex jobs.interrupt '^\^C$' 'Ctrl-C stops the foreground command' "$log" 'goos> sleep 30'
+# Killing the terminal service restarts it on a fresh session, which PID 1
+# hands to the running shell; the shell's next prompt and command go through
+# the replacement.
+require_marker session.tty-fault TTY_FAULT_INJECTED "$log" 'fault tty'
+require_marker session.tty-restarted TTY_RESTARTED_OK "$log" 'fault tty'
+require_count session.tty-started 'TTY_TERMINAL_OK' 2 "$log" 'fault tty'
+require_marker session.tty-session-offered TTY_SESSION_OFFERED_OK "$log" 'fault tty'
+require_marker session.shell-took-session SHELL_TERMINAL_REPLACED_OK "$log" 'fault tty'
+require_regex session.shell-survived-terminal '^after-terminal-restart$' 'the shell working through the new terminal' "$log" 'after-terminal-restart'
+# Killing the shell restarts it; the running terminal service takes the new
+# session over its control channel. The job the old shell left running is
+# stopped with its session rather than orphaned.
+require_marker session.shell-fault SHELL_FAULT_INJECTED "$log" 'fault shell'
+require_marker session.shell-restarted SHELL_RESTARTED_OK "$log" 'fault shell'
+require_count session.shell-started 'SHELL_PROCESS_OK' 2 "$log" 'fault shell'
+require_marker session.shell-session-offered SHELL_SESSION_OFFERED_OK "$log" 'fault shell'
+require_marker session.terminal-took-session TTY_SESSION_REPLACED_OK "$log" 'fault shell'
+require_marker session.jobs-stopped SESSION_JOBS_STOPPED_OK "$log" 'fault shell'
+require_regex session.terminal-survived-shell '^after-shell-restart$' 'the terminal serving the new shell' "$log" 'after-shell-restart'
+require_window session.no-inherited-jobs '^no background jobs$' 'the new shell starts with no jobs' "$log" 'goos> echo after-shell-restart' 'goos> mkdir'
+forbid_window session.jobs-ended '  *sleep$' 'the old shell'"'"'s job was stopped' "$log" 'goos> echo after-shell-restart' 'goos> mkdir'
 require_regex exec.large-pipeline '^pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz$' 'pipeline request over 256 bytes' "$log" 'readline | readline | readline'
 pass_group release-shell
 

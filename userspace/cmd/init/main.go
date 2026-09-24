@@ -17,6 +17,7 @@ import (
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/startup"
+	terminal "goos/userspace/tty"
 	userwait "goos/userspace/wait"
 	"runtime"
 	"unsafe"
@@ -28,7 +29,11 @@ const vfsChannelHandle = handle.ID(0x0000000100000003)
 const vfsServerHandle = handle.ID(0x0000000100000004)
 const vfsControlHandle = uint64(0x0000000100000005)
 const vfsControlServerHandle = handle.ID(0x0000000100000006)
-const execServerHandle = uint64(0x0000000100000007)
+
+// execServerBoot is the server end of the exec channel created at boot. A
+// restarted shell is given a fresh channel, so the end PID 1 serves is the
+// variable execServer (ADR 0089).
+const execServerBoot = uint64(0x0000000100000007)
 const execClientHandle = handle.ID(0x0000000100000008)
 const blockClientHandle = uint64(0x0000000100000009)
 const blockServerHandle = handle.ID(0x000000010000000a)
@@ -61,6 +66,18 @@ var (
 	// driverProcessHandle is kept only by the validation build, to inject the
 	// fault that proves a crashed driver is replaced.
 	driverProcessHandle handle.ID
+	// execServer is the end of the shell's exec channel PID 1 serves, or zero
+	// while the shell is gone.
+	execServer = execServerBoot
+	// ttyControl is PID 1's end of the terminal service's control channel,
+	// over which a restarted shell's session is handed to a running terminal.
+	ttyControl handle.ID
+	// ttyStarted and shellStarted mark the first launches, which use the
+	// endpoints created at boot; every later launch renews them.
+	ttyStarted, shellStarted bool
+	// The validation build keeps the interactive services' process handles to
+	// inject the faults that prove each restarts on its own.
+	ttyProcessHandle, shellProcessHandle handle.ID
 )
 
 //go:linkname processKill goos_process_kill
@@ -72,7 +89,10 @@ func memoryMap(memory uint64, address uint64, flags uint64) uint64
 // execJob is one shell request in flight. The request is copied out of the
 // shared page, so the shell cannot change it while it runs.
 type execJob struct {
-	active      bool
+	active bool
+	// orphaned marks a job whose shell has gone. Its stages are stopped with
+	// the session and reaped as usual, but no one is left to answer.
+	orphaned    bool
 	slot        uint8
 	correlation uint64
 	data        [execproto.SlotSize]byte
@@ -176,13 +196,20 @@ func userspaceMain() {
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		var jobs [execproto.Slots]int
+		execBit, firstJob := 0, 1
 		if supervisionComplete {
-			interests[1] = userwait.Interest{Handle: handle.ID(execServerHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-			count++
+			// While the shell is gone there is no exec channel to wait on; its
+			// replacement brings a new one.
+			if execServer != 0 {
+				interests[count] = userwait.Interest{Handle: handle.ID(execServer), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				execBit = count
+				count++
+			}
+			firstJob = count
 			for index := range execJobs {
 				if process, pending := execJobs[index].job.Next(); execJobs[index].active && pending {
 					interests[count] = userwait.Interest{Handle: process, Events: kcall.WaitCompleted}
-					jobs[count-2] = index
+					jobs[count-firstJob] = index
 					count++
 				}
 			}
@@ -207,13 +234,13 @@ func userspaceMain() {
 			}
 			readyMask = result.ReadyMask
 		}
-		for bit := 2; bit < count; bit++ {
+		for bit := firstJob; bit < count; bit++ {
 			if readyMask&(1<<bit) != 0 {
-				advanceJob(jobs[bit-2])
+				advanceJob(jobs[bit-firstJob])
 			}
 		}
 		if readyMask&1 == 0 {
-			if readyMask&2 != 0 {
+			if execBit != 0 && readyMask&(1<<execBit) != 0 {
 				pollExec()
 			}
 			continue
@@ -227,8 +254,12 @@ func userspaceMain() {
 			continue
 		}
 		supervisionTicks += supervisor.RestartBackoff
+		shell, _ := manager.Snapshot("shell")
 		if manager.Exit(event.Process, event.Code, supervisionTicks) == supervisor.StatusNotFound {
 			continue
+		}
+		if shell.State == supervisor.StateRunning && shell.PID == event.Process {
+			endShellSession()
 		}
 		syslog.Warn("service exited", syslog.Uint("pid", event.Process), syslog.Uint("code", event.Code))
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
@@ -313,7 +344,7 @@ func startServices(ticks uint64) {
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs", "tty"},
-		Capabilities: shellCapabilities, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+		Capabilities: shellCapabilities, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
@@ -331,20 +362,29 @@ func startServices(ticks uint64) {
 // of the session the shell reads its lines over. The service is the only
 // process given the right to read the console (ADR 0082), and the only one
 // that reads what the shell and its commands print (ADR 0089).
+//
+// The terminal and the shell restart independently. The session between them
+// is a channel, which dies with either, so whichever restarts is launched with
+// a fresh one and the survivor is handed the other end: the shell over its
+// exec channel, the terminal over the control channel created here.
 func startTerminalService(ticks uint64) handle.ID {
-	var pair [2]uint64
+	var pair, control [2]uint64
 	if streamCreate(unsafe.Pointer(&terminalOutput[0]), 16) != 0 {
 		fatal("INIT_TTY_OUTPUT_FAILED\n")
 	}
-	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 || channelCreate(unsafe.Pointer(&control[0]), 16) != 0 {
 		fatal("INIT_TTY_CHANNEL_FAILED\n")
 	}
+	ttyControl = handle.ID(control[0])
+	// Always, not on failure: a terminal that exits, even cleanly, leaves a
+	// console no one can type at. The restart limit still ends a crash loop.
 	if manager.Register(supervisor.Definition{Name: "tty", Executable: "/system/tty",
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
 			{Name: "output", Handle: handle.ID(terminalOutput[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait},
 			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
+			{Name: "control", Handle: handle.ID(control[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		}, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
@@ -697,6 +737,13 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if driverStarted && bytesString(spec.Name[:spec.NameSize]) == driverName && !replaceDriverChannel(&spec) {
 		return 0, false
 	}
+	// So do the terminal and the shell, and so does the peer that survived.
+	if ttyStarted && bytesString(spec.Name[:spec.NameSize]) == "tty" && !renewTerminalSession(&spec) {
+		return 0, false
+	}
+	if shellStarted && bytesString(spec.Name[:spec.NameSize]) == "shell" && !renewShellSession(&spec) {
+		return 0, false
+	}
 	correlation++
 	slot, staging := stagingSlot()
 	var vectorWire [startup.VectorSize]byte
@@ -726,9 +773,16 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
-	keep := validation.Enabled && name == driverName && driverProcessHandle == 0
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell")
 	if keep && status == ipc.StatusOK && event.Code == uint64(supervisor.LaunchOK) {
-		driverProcessHandle = event.ProcessHandle
+		switch name {
+		case driverName:
+			driverProcessHandle = event.ProcessHandle
+		case "tty":
+			ttyProcessHandle = keepProcess(ttyProcessHandle, event.ProcessHandle)
+		case "shell":
+			shellProcessHandle = keepProcess(shellProcessHandle, event.ProcessHandle)
+		}
 	}
 	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || !keep && handleClose(uint64(event.ProcessHandle)) != 0 {
 		if !supervisionComplete {
@@ -748,7 +802,200 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if name == driverName {
 		driverStarted = true
 	}
+	if name == "tty" {
+		if ttyStarted {
+			mark("TTY_RESTARTED_OK\n")
+		}
+		ttyStarted = true
+	}
+	if name == "shell" {
+		if shellStarted {
+			mark("SHELL_RESTARTED_OK\n")
+		}
+		shellStarted = true
+	}
 	return event.Process, true
+}
+
+// keepProcess replaces a kept process handle; the one it replaces names a
+// process that has exited.
+func keepProcess(previous, next handle.ID) handle.ID {
+	if previous != 0 {
+		handleClose(uint64(previous))
+	}
+	return next
+}
+
+// renewGrant points one capability of a service at a fresh handle, in both the
+// definition and the launch about to happen. A handle the definition named and
+// no launch consumed — one renewed for a launch that then failed — is closed
+// rather than left in PID 1's table; one that was consumed is already gone, and
+// closing its stale ID is refused.
+func renewGrant(spec *supervisor.LaunchSpec, name string, capabilityName string, id handle.ID) bool {
+	if previous, found := manager.Capability(name, capabilityName); found && previous != id {
+		handleClose(uint64(previous))
+	}
+	if manager.SetCapability(name, capabilityName, id) != supervisor.StatusOK {
+		return false
+	}
+	for index := 0; index < int(spec.CapabilityCount); index++ {
+		if spec.Capabilities[index].Name == capabilityName {
+			spec.Capabilities[index].Handle = id
+			return true
+		}
+	}
+	return false
+}
+
+// offerSession hands one end of a new session to the peer that survived, as a
+// typed notice over channel. A peer that is gone too gets nothing: the end is
+// closed, and the peer's own restart brings it a session of its own.
+func offerSession(channel uint64, session handle.ID) bool {
+	if channel != 0 {
+		if notice, ok := terminal.SessionNotice(session); ok && sendMessage(channel, notice) {
+			return true
+		}
+	}
+	handleClose(uint64(session))
+	return false
+}
+
+// renewTerminalSession prepares a restarting terminal service (ADR 0089). Its
+// session and control channels died with it: it gets new ones, and the running
+// shell is given the client end of the session over its exec channel. The
+// output stream needs nothing: PID 1 holds both of its ends, so what was
+// written while the terminal was down is waiting in it.
+func renewTerminalSession(spec *supervisor.LaunchSpec) bool {
+	var session, control [2]uint64
+	if channelCreate(unsafe.Pointer(&session[0]), 16) != 0 {
+		syslog.Error("terminal session unavailable")
+		return false
+	}
+	if channelCreate(unsafe.Pointer(&control[0]), 16) != 0 {
+		closePair(session)
+		syslog.Error("terminal control unavailable")
+		return false
+	}
+	if !renewGrant(spec, "tty", "session", handle.ID(session[1])) || !renewGrant(spec, "tty", "control", handle.ID(control[1])) {
+		closePair(session)
+		closePair(control)
+		return false
+	}
+	if ttyControl != 0 {
+		handleClose(uint64(ttyControl))
+	}
+	ttyControl = handle.ID(control[0])
+	if offerSession(execServer, handle.ID(session[0])) {
+		mark("TTY_SESSION_OFFERED_OK\n")
+	}
+	return true
+}
+
+// renewShellSession prepares a restarting shell (ADR 0089). Every channel the
+// shell held died with it: it gets a new terminal session, whose server end is
+// handed to the running terminal service, a new exec channel, whose server end
+// PID 1 keeps, and new filesystem and configuration sessions.
+func renewShellSession(spec *supervisor.LaunchSpec) bool {
+	var session, exec [2]uint64
+	if channelCreate(unsafe.Pointer(&session[0]), 16) != 0 {
+		syslog.Error("shell session unavailable")
+		return false
+	}
+	if channelCreate(unsafe.Pointer(&exec[0]), 16) != 0 {
+		closePair(session)
+		syslog.Error("shell exec channel unavailable")
+		return false
+	}
+	files, reason := openVFSSession()
+	if reason != "" {
+		closePair(session)
+		closePair(exec)
+		syslog.Error("shell filesystem session unavailable", syslog.Str("reason", reason))
+		return false
+	}
+	if !renewGrant(spec, "shell", "tty", handle.ID(session[0])) || !renewGrant(spec, "shell", "exec", handle.ID(exec[0])) ||
+		!renewGrant(spec, "shell", "vfs", files) {
+		closePair(session)
+		closePair(exec)
+		handleClose(uint64(files))
+		return false
+	}
+	// Configuration is optional, as it is at boot: a shell without a session
+	// keeps its built-in prompt rather than failing to start.
+	if _, granted := manager.Capability("shell", "config"); granted {
+		settings, ok := openConfigSession("", configproto.Read|configproto.Write)
+		if !ok || !renewGrant(spec, "shell", "config", settings) {
+			if ok {
+				handleClose(uint64(settings))
+			}
+			if previous, found := manager.Capability("shell", "config"); found {
+				handleClose(uint64(previous))
+			}
+			manager.RemoveCapability("shell", "config")
+			supervisor.RemoveGrant(spec, "config")
+		}
+	}
+	if execServer != 0 {
+		handleClose(execServer)
+	}
+	execServer = exec[1]
+	if offerSession(uint64(ttyControl), handle.ID(session[1])) {
+		mark("SHELL_SESSION_OFFERED_OK\n")
+	}
+	return true
+}
+
+// endShellSession runs when the shell exits. Its jobs belong to its session:
+// every stage still running is stopped, and each job is reaped as usual but
+// answered to no one. Their streams close with them — a job's input writer was
+// the shell's, and its pipes and its copies of the terminal's writing end go
+// with each stage's teardown — so nothing is left behind (ADR 0089). The exec
+// channel's other end is gone, so it is closed and not waited on until a new
+// shell brings a new one.
+func endShellSession() {
+	stopped := false
+	for index := range execJobs {
+		job := &execJobs[index]
+		if !job.active {
+			continue
+		}
+		job.orphaned = true
+		for _, process := range job.job.Processes() {
+			if process != 0 && processKill(uint64(process)) == 0 {
+				stopped = true
+			}
+		}
+	}
+	if stopped {
+		syslog.Info("session jobs stopped")
+		mark("SESSION_JOBS_STOPPED_OK\n")
+	}
+	if execServer != 0 {
+		handleClose(execServer)
+		execServer = 0
+	}
+}
+
+// injectSessionFault kills the terminal service or the shell, in the validation
+// build only, so that each is seen to restart on its own while the other keeps
+// working (ADR 0089).
+func injectSessionFault(target uint8) execproto.ControlStatus {
+	if !validation.Enabled {
+		return execproto.ControlInvalid
+	}
+	process := &ttyProcessHandle
+	name := "TTY_FAULT_INJECTED\n"
+	if target == execproto.FaultShell {
+		process, name = &shellProcessHandle, "SHELL_FAULT_INJECTED\n"
+	}
+	if *process == 0 || processKill(uint64(*process)) != 0 {
+		return execproto.ControlNotFound
+	}
+	handleClose(uint64(*process))
+	*process = 0
+	syslog.Warn("session fault injected")
+	mark(name)
+	return execproto.ControlOK
 }
 
 func receiveLifecycle(timeout uint64) (ipc.Message, ipc.Status) {
@@ -825,8 +1072,15 @@ func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
 
 func pollExec() {
 	heapPointer = arenaBase
-	status := ipc.Status(ipcReceive(execServerHandle, unsafe.Pointer(&wire[0]), ipc.WireMaxSize))
+	status := ipc.Status(ipcReceive(execServer, unsafe.Pointer(&wire[0]), ipc.WireMaxSize))
 	if status == ipc.StatusNotFound {
+		return
+	}
+	if status == ipc.StatusPeerDied {
+		// The shell is gone; its exit event ends the session, and its
+		// replacement brings a new channel.
+		handleClose(execServer)
+		execServer = 0
 		return
 	}
 	if status != ipc.StatusOK {
@@ -858,14 +1112,14 @@ func pollExec() {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
-	job.active, job.slot, job.correlation = true, slot, message.Correlation
+	job.active, job.orphaned, job.slot, job.correlation = true, false, slot, message.Correlation
 	job.job = supervisor.StartPipeline(request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
 	// A foreground job's input is fed by the shell, which receives the writing
 	// end before the job's reply. If it cannot be delivered, closing it gives
 	// the job end of input instead of a stream no one will ever write.
 	if input := job.job.TakeInput(); input != 0 {
 		started, ok := execproto.EncodeStarted(slot, input, message.Correlation)
-		if !ok || !sendMessage(execServerHandle, started) {
+		if !ok || !sendMessage(execServer, started) {
 			handleClose(uint64(input))
 		}
 	}
@@ -902,6 +1156,10 @@ func finishJob(job *execJob) {
 	}
 	pid, launchStatus, exitCode := job.job.Result()
 	job.active = false
+	if job.orphaned {
+		job.orphaned = false
+		return
+	}
 	stage := uint8(0)
 	if launchStatus != supervisor.LaunchOK {
 		stage = job.job.FailedStage()
@@ -917,6 +1175,12 @@ func handleControl(message ipc.Message) {
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
 	case operation == execproto.ControlKill:
 		sendControlStatus(killJob(argument), message.Correlation)
+	case operation == execproto.ControlFault:
+		status := injectSessionFault(argument)
+		// A shell that was stopped is not there to be answered.
+		if argument != execproto.FaultShell || status != execproto.ControlOK {
+			sendControlStatus(status, message.Correlation)
+		}
 	case operation == execproto.ControlDiagnostics:
 		// Only a diagnostic build dumps; the others answer unsupported.
 		status := execproto.ControlInvalid
@@ -939,7 +1203,7 @@ func handleControl(message ipc.Message) {
 			count++
 		}
 		if reply, encoded := execproto.EncodeServices(entries[:count], message.Correlation); encoded {
-			sendMessage(execServerHandle, reply)
+			sendMessage(execServer, reply)
 		}
 	case operation == execproto.ControlReboot:
 		correlationOfShell := message.Correlation
@@ -989,7 +1253,7 @@ func killJob(slot uint8) execproto.ControlStatus {
 
 func sendControlStatus(status execproto.ControlStatus, correlation uint64) {
 	if reply, encoded := execproto.EncodeControlStatus(status, correlation); encoded {
-		sendMessage(execServerHandle, reply)
+		sendMessage(execServer, reply)
 	}
 }
 
@@ -1227,10 +1491,16 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 	}
 }
 
+// sendExecReply answers the shell. A reply that cannot be encoded is PID 1's
+// own fault; one that cannot be delivered means the shell has just gone, and
+// its restart does not want the answer.
 func sendExecReply(correlation, pid, status, exitCode uint64, stage uint8) {
 	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, LaunchStatus: status, ExitCode: exitCode, Stage: stage}, correlation)
-	if !ok || !sendMessage(execServerHandle, reply) {
+	if !ok {
 		fatal("INIT_EXEC_REPLY_FAILED\n")
+	}
+	if execServer == 0 || !sendMessage(execServer, reply) {
+		syslog.Warn("exec reply undelivered")
 	}
 }
 
