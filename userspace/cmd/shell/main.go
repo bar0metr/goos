@@ -25,15 +25,17 @@ import (
 )
 
 var (
-	// consoleHandle writes to the console. The shell cannot read it: what is
-	// typed arrives as lines over ttyHandle from the terminal service.
-	consoleHandle handle.ID
-	ttyHandle     handle.ID
-	logHandle     handle.ID
-	vfsHandle     handle.ID
-	execHandle    handle.ID
-	configHandle  handle.ID
-	configWire    [ipc.WireMaxSize]byte
+	// outputHandle is the shell's copy of the terminal's writing end: what the
+	// shell prints goes through the terminal service, like every command's
+	// output (ADR 0089). The shell holds no console capability; what is typed
+	// arrives as lines over ttyHandle from the same service.
+	outputHandle handle.ID
+	ttyHandle    handle.ID
+	logHandle    handle.ID
+	vfsHandle    handle.ID
+	execHandle   handle.ID
+	configHandle handle.ID
+	configWire   [ipc.WireMaxSize]byte
 	// prompt is read from the configuration service rather than compiled in.
 	// It falls back to the built-in text when there is no session, because the
 	// shell has to come up whether or not configuration is available.
@@ -105,14 +107,14 @@ func handleInfo(slot uint64, address unsafe.Pointer) uint64
 //go:linkname logRead goos_log_read
 func logRead(device uint64, index uint64, address unsafe.Pointer) uint64
 
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
-
 //go:linkname clockReadNanos goos_clock_read_nanos
 func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
 
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
+//go:linkname streamRead goos_stream_read
+func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
+
+//go:linkname processExit goos_exit
+func processExit(code uint64)
 
 //go:linkname handleClose goos_handle_close
 func handleClose(id uint64) uint64
@@ -143,9 +145,9 @@ func userspaceMain() {
 	if !validStartup {
 		fatal("SHELL_STARTUP_INVALID\n")
 	}
-	consoleHandle, found = startupData.Handle("console")
+	outputHandle, found = startupData.Handle("stdout")
 	if !found {
-		fatal("SHELL_CONSOLE_MISSING\n")
+		fatal("SHELL_OUTPUT_MISSING\n")
 	}
 	ttyHandle, found = startupData.Handle("tty")
 	if !found {
@@ -177,16 +179,18 @@ func userspaceMain() {
 	}
 	heapPointer = arenaBase
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
+	if validation.Enabled {
+		checkOutputIsWriteOnly()
+	}
 	loadPrompt()
 	write("\n")
 	for {
 		showPrompt()
 		for {
-			if pollReplies() {
-				// A finished background job was reported over the line being
-				// typed, so the terminal service shows it again.
-				redraw(promptText[:promptSize])
-			}
+			// A finished background job is reported through the terminal
+			// service, which takes the line being typed off the screen and
+			// puts it back, so the shell does not redraw it.
+			pollReplies()
 			result, text, received := takeLine()
 			if !received {
 				awaitInput()
@@ -233,6 +237,8 @@ func redraw(prompt []byte) {
 }
 
 func sendTerminal(message ipc.Message) bool {
+	// What the shell printed goes out before it asks for the next line.
+	flushOutput()
 	size, ok := ipc.Encode(message, ttyWire[:])
 	return ok && ipcSend(uint64(ttyHandle), unsafe.Pointer(&ttyWire[0]), uintptr(size)) == 0
 }
@@ -391,7 +397,10 @@ func executeCommand(line []byte) {
 	case "caps":
 		printHandles(true)
 	case "diag":
-		if diagnostics(uint64(consoleHandle), 0) != 0 {
+		// The dump goes to the console, which only PID 1 and the terminal
+		// service can write, so PID 1 asks the kernel for it.
+		reply, ok := controlExchange(execproto.ControlDiagnostics, 0)
+		if status, valid := execproto.DecodeControlStatus(reply); !ok || !valid || status != execproto.ControlOK {
 			write("diag: unavailable in this build\n")
 		}
 	case "time":
@@ -546,6 +555,7 @@ func writeSink(encodedTarget []byte, appendMode bool, index int, environment []s
 // awaitInput blocks until the terminal service or PID 1 has something for the
 // shell. Both are waitable objects, so the shell never polls either.
 func awaitInput() {
+	flushOutput()
 	var interests [userwait.MaxObjects]userwait.Interest
 	interests[0] = userwait.Interest{Handle: ttyHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 	interests[1] = userwait.Interest{Handle: execHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -865,8 +875,8 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			closeInput(&input)
 			return ipc.Message{}, false
 		}
-		if _, started, ok := execproto.DecodeStarted(message); ok {
-			if message.Correlation == correlation && input == 0 {
+		if _, started, job, ok := execproto.DecodeStarted(message); ok {
+			if job == correlation && input == 0 {
 				input = started
 			} else {
 				handleClose(uint64(started))
@@ -913,9 +923,6 @@ func pollReplies() bool {
 			return reported
 		}
 		if message, valid := decodeWire(); valid {
-			if !reported {
-				write("\n")
-			}
 			reported = reportJob(message) || reported
 		}
 	}
@@ -1379,12 +1386,73 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	writeBytes(unsafe.Slice(unsafe.StringData(message), len(message)))
 }
 
+// Output is assembled into lines before it is sent. The terminal service
+// relays each write as it arrives, so a line written in pieces could have a
+// command's output land between them; a whole line of at most 256 bytes is
+// one write, which the stream never splits.
+var (
+	outputLine [256]byte
+	outputSize int
+)
+
+// writeBytes queues value for the terminal and sends what is queued at the end
+// of a line or when the buffer fills.
 func writeBytes(value []byte) {
-	if len(value) != 0 {
-		consoleWrite(uint64(consoleHandle), unsafe.Pointer(&value[0]), uintptr(len(value)))
+	if len(value) == 0 {
+		return
+	}
+	for len(value) != 0 {
+		copied := copy(outputLine[outputSize:], value)
+		outputSize += copied
+		value = value[copied:]
+		if outputSize == len(outputLine) {
+			flushOutput()
+		}
+	}
+	if outputSize != 0 && outputLine[outputSize-1] == '\n' {
+		flushOutput()
+	}
+}
+
+// flushOutput sends the queued output. A full stream means the service is
+// behind; the shell waits for room, but not for ever: a terminal that is not
+// draining must not hold the shell, so what cannot be written within the
+// deadline is dropped.
+func flushOutput() {
+	pending := outputLine[:outputSize]
+	outputSize = 0
+	for len(pending) != 0 {
+		streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&pending[0])))
+		streamDescriptor[1], streamDescriptor[2] = uint64(len(pending)), 0
+		status := streamWrite(uint64(outputHandle), unsafe.Pointer(&streamDescriptor[0]), 24)
+		if status == uint64(kcall.StatusResourceExhausted) {
+			if streamWait(uint64(outputHandle), outputDeadline) != 0 {
+				return
+			}
+			continue
+		}
+		if status != 0 || streamDescriptor[2] == 0 || streamDescriptor[2] > uint64(len(pending)) {
+			return
+		}
+		pending = pending[streamDescriptor[2]:]
+	}
+}
+
+// outputDeadline bounds one wait for room in the terminal's output stream.
+const outputDeadline = 2 * clock.TicksPerSecond
+
+// checkOutputIsWriteOnly proves, in the validation build, that the shell's
+// terminal endpoint writes and nothing else: reading it, which would let the
+// shell see what commands print to the terminal, is refused by the kernel.
+func checkOutputIsWriteOnly() {
+	var probe [8]byte
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&probe[0])))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(probe)), 0
+	if streamRead(uint64(outputHandle), unsafe.Pointer(&streamDescriptor[0]), 24) == uint64(kcall.StatusPermissionDenied) {
+		mark("TERMINAL_STREAM_READ_DENIED_OK\n")
 	}
 }
 
@@ -1418,8 +1486,14 @@ func writeUint(value uint64) {
 	writeBytes(digits[position:])
 }
 
+// fatal reports and exits, so the supervisor starts a replacement rather than
+// leaving a shell that neither works nor ends.
 func fatal(message string) {
-	write(message)
+	if outputHandle != 0 {
+		write(message)
+		flushOutput()
+	}
+	processExit(1)
 	for {
 	}
 }

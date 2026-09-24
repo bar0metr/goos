@@ -208,6 +208,8 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'echo piped-native-data | readline\n'
 	sleep 1
+	printf 'echo pipeline-early-exit | readline | readline\n'
+	sleep 1
   printf 'echo sequence-first; echo sequence-pipe | readline; echo sequence-last\n'
   sleep 1
   printf 'cd "/system"; pwd; cd /\n'
@@ -551,7 +553,10 @@ done
 require_marker shell.echo-output 'hello structured world' "$log" 'echo "hello structured world"'
 require_marker shell.argv-output 'alpha beta escaped value' "$log" 'args "alpha beta"'
 require_marker shell.path-environment 'PATH=/system/bin' "$log" 'args "alpha beta"'
-require_marker shell.stdin-output 'bounded stdin payload' "$log" readline
+# A line typed while a command runs is that command's input: it is echoed once
+# and printed once more by readline, and never reaches the shell as a command.
+require_count shell.stdin-output '^bounded stdin payload$' 2 "$log" 'goos> readline'
+forbid_regex shell.stdin-not-a-command '^bounded: command not found$' 'typed input reached the command, not the shell' "$log" 'goos> readline'
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
 pass_group shell
 
@@ -574,6 +579,10 @@ pass_group help
 require_marker terminal.service TTY_TERMINAL_OK "$log"
 require_marker terminal.line TTY_LINE_OK "$log"
 require_marker terminal.shell-line SHELL_TERMINAL_LINE_OK "$log"
+# Output goes through the terminal service too (ADR 0089): it relays what the
+# shell and every command write, and the shell cannot read that stream back.
+require_marker terminal.output-relayed TTY_OUTPUT_OK "$log"
+require_marker terminal.output-write-only TERMINAL_STREAM_READ_DENIED_OK "$log"
 require_regex terminal.escape-skipped '^arrowkeys$' 'an arrow key typed no text' "$log" 'echo arrow'
 require_regex terminal.kill-line '^killed-line$' 'the line after Ctrl-U runs alone' "$log" 'killed-line'
 forbid_regex terminal.kill-line-discarded 'garbage-before-kill.*not found' 'the killed text never ran' "$log" 'killed-line'
@@ -585,6 +594,9 @@ require_marker boot.image-pages-shared IMAGE_PAGES_SHARED_OK "$log"
 require_marker memory-security.image-pages-isolated IMAGE_PAGES_ISOLATED_OK "$log"
 require_marker pipeline.exec PIPELINE_EXEC_OK "$log"
 require_marker pipeline.data piped-native-data "$log" 'echo piped-native-data'
+# Every stage holds a copy of the terminal's writing end for its diagnostics;
+# the first stage exiting must not close it for the stage that prints last.
+require_regex pipeline.early-exit '^pipeline-early-exit$' 'the last stage printed after the first exited' "$log" 'echo pipeline-early-exit'
 for marker in sequence-first sequence-pipe sequence-last sequence-after-failure 'exec: invalid command sequence' 'quoted;separator' 'escaped;separator' pipeline-four-data pipeline-last-failure-recovered pipeline-middle-failure-recovered pipeline-first-failure-recovered; do
 	require_regex "pipeline.$marker" "^${marker}$" "$marker on its own line" "$log" "$marker"
 done
@@ -701,12 +713,14 @@ require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*
 require_regex release.shell-idle '^[0-9][0-9]*  *native  *[a-z]*  *[0-9][0-9]*  *[0-9][0-9]\{0,2\}  *shell$' 'the shell idle rather than polling' "$log" 'goos> ps'
 forbid_regex release.console-overrun 'console input dropped' 'no console input lost' "$log" 'goos> ps'
 require_regex release.services 'vfs         running     [0-9]' 'vfs listed as running' "$log" 'goos> services'
-# The shell writes to the console but cannot read it: typed lines reach it from
-# the terminal service, and reading the log is a capability of its own (ADR 0082).
-require_regex release.caps '^console   device    write$' 'shell console capability, write only' "$log" 'goos> caps'
+# The shell holds no console capability at all: typed lines reach it from the
+# terminal service (ADR 0082), what it prints goes back through that service on
+# a write-only stream (ADR 0089), and reading the log is a capability of its own.
+require_regex release.caps '^stdout    stream    write,wait$' 'shell terminal output, write only' "$log" 'goos> caps'
+forbid_window release.caps-no-console '^console ' 'no console capability in the shell' "$log" 'goos> caps' 'goos> handles'
 require_regex release.caps-terminal '^tty       channel   read,write,wait$' 'shell terminal session' "$log" 'goos> caps'
 require_regex release.caps-log '^log       device    read$' 'shell log capability' "$log" 'goos> caps'
-require_regex release.handles '^0x0000000100000001  device' 'shell handle table' "$log" 'goos> handles'
+require_regex release.handles '^0x0000000100000001  stream' 'shell handle table' "$log" 'goos> handles'
 require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
 require_regex release.long-name-read '^a long file name in a long directory$' 'long name created and read back' "$log" 'goos> cat /persist/long-directory-name/startup-block-regression.txt'
@@ -716,8 +730,10 @@ require_regex jobs.started '^\[1\] started$' 'first background job accepted' "$l
 require_regex jobs.second '^\[2\] started$' 'second background job accepted' "$log" 'goos> sleep 30 &'
 require_regex jobs.list '^\[2\] running  sleep 30$' 'jobs lists a running background job' "$log" 'goos> jobs'
 require_window jobs.foreground '^foreground while jobs run$' 'foreground command runs while a job is active' "$log" 'goos> echo foreground while jobs run' '[2] killed'
-require_regex jobs.killed '^\[2\] killed$' 'kill stops a background job' "$log" 'goos> kill %2'
-require_regex jobs.done-1 '^\[1\] done$' 'first background job reported' "$log" 'goos> sleep 4 &'
+# A job's report arrives while the prompt is shown, so the terminal service
+# erases the prompt line first: the report ends a row that began with it.
+require_regex jobs.killed '\[2\] killed$' 'kill stops a background job' "$log" 'goos> kill %2'
+require_regex jobs.done-1 '\[1\] done$' 'first background job reported' "$log" 'goos> sleep 4 &'
 require_regex jobs.interrupt '^\^C$' 'Ctrl-C stops the foreground command' "$log" 'goos> sleep 30'
 require_regex exec.large-pipeline '^pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz$' 'pipeline request over 256 bytes' "$log" 'readline | readline | readline'
 pass_group release-shell

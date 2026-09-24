@@ -4,7 +4,10 @@
 // end of input (ADR 0082).
 package tty
 
-import "goos/kernel/ipc"
+import (
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
+)
 
 const (
 	ProtocolID = uint64(0x4754545932303031)
@@ -24,8 +27,16 @@ const (
 	// input. One may be outstanding at a time.
 	OperationReadLine Operation = iota + 1
 	// OperationRedraw replaces the prompt of the outstanding read and shows it
-	// again with what has been typed, after output has moved the cursor.
+	// again with what has been typed. Output no longer needs it: the service
+	// takes the line off the screen and puts it back around every write it
+	// relays (ADR 0089); a client sends it to change the prompt of a read it
+	// left outstanding.
 	OperationRedraw
+	// OperationSession is not a request but a notification from PID 1. It
+	// carries one endpoint of a new session: the server end to the terminal
+	// service over its control channel, and the client end to the shell over
+	// its exec channel, when the other one has been restarted (ADR 0089).
+	OperationSession
 )
 
 // Result says how a read ended.
@@ -90,6 +101,28 @@ func DecodeReply(message *ipc.Message) (Result, []byte, bool) {
 		return 0, nil, false
 	}
 	return result, line, true
+}
+
+// SessionNotice hands over one end of a new session.
+func SessionNotice(session handle.ID) (ipc.Message, bool) {
+	if session == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindNotification, PayloadSize: 1, HandleCount: 1}
+	message.Payload[0] = byte(OperationSession)
+	message.Handles[0] = session
+	return message, true
+}
+
+// DecodeSessionNotice returns the session endpoint a notice carries, as the
+// receiver's handle.
+func DecodeSessionNotice(message *ipc.Message) (handle.ID, bool) {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindNotification ||
+		message.Correlation != 0 || message.PayloadSize != 1 || message.Payload[0] != byte(OperationSession) ||
+		message.HandleCount != 1 || message.Handles[0] == 0 {
+		return 0, false
+	}
+	return message.Handles[0], true
 }
 
 // printable accepts the bytes a prompt may show: printable ASCII only, so a

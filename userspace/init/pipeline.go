@@ -6,9 +6,13 @@ import (
 )
 
 // Endpoint is one handle granted to a child together with its object type.
+// A shared endpoint is granted as a copy and stays with PID 1: the terminal's
+// writing end is shared by every stage that writes to the terminal, and its
+// reference count keeps it open until the last of them exits (ADR 0089).
 type Endpoint struct {
-	ID   handle.ID
-	Type handle.Type
+	ID     handle.ID
+	Type   handle.Type
+	Shared bool
 }
 
 // Streams names the standard-stream endpoints granted to one stage.
@@ -17,7 +21,8 @@ type Streams struct {
 }
 
 // PipelineRunner implements PID 1's resource operations. A successful Launch
-// consumes its stream endpoints; a failed Launch leaves them with the caller.
+// consumes its stream endpoints that are not shared; a failed Launch leaves
+// them with the caller.
 // Wait reaps the process and closes its process handle.
 type PipelineRunner interface {
 	CreateStream() (handle.ID, handle.ID, bool)
@@ -42,8 +47,8 @@ type Job struct {
 }
 
 // RunPipeline starts a pipeline and waits for all of its processes.
-func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) (uint64, LaunchStatus, uint64) {
-	job := StartPipeline(request, console, runner)
+func RunPipeline(request execproto.Request, terminal handle.ID, runner PipelineRunner) (uint64, LaunchStatus, uint64) {
+	job := StartPipeline(request, terminal, runner)
 	if input := job.TakeInput(); input != 0 {
 		runner.Close(input)
 	}
@@ -61,15 +66,18 @@ func RunPipeline(request execproto.Request, console handle.ID, runner PipelineRu
 // private stream fed by the source stage's stderr and is not part of the stdout
 // chain. It is launched first so its reader exists before the source writes.
 //
-// Output and diagnostics go to console, which is write-only. The first stage
-// reads a stream of its own rather than the console, whose input belongs to
-// the terminal service (ADR 0082): a background job's stream is already at EOF,
-// and a foreground job's writing end is kept for TakeInput.
+// Output and diagnostics that are not diverted go to terminal, the writing end
+// of the terminal service's output stream. Every such stage gets a copy of it
+// rather than the console, so the service sees all output and can redraw the
+// line being typed around it (ADR 0089). The first stage reads a stream of its
+// own rather than the console, whose input belongs to the terminal service
+// (ADR 0082): a background job's stream is already at EOF, and a foreground
+// job's writing end is kept for TakeInput.
 // On failure it closes all retained endpoints, so the stages already started
 // observe EOF or closure; the job still reaps them before it reports.
-func StartPipeline(request execproto.Request, console handle.ID, runner PipelineRunner) Job {
+func StartPipeline(request execproto.Request, terminal handle.ID, runner PipelineRunner) Job {
 	var job Job
-	if runner == nil || console == 0 || request.Count == 0 || request.Count > execproto.MaxStages || request.ErrorSource != 0 && (request.Count < 2 || request.ErrorSource >= request.Count) {
+	if runner == nil || terminal == 0 || request.Count == 0 || request.Count > execproto.MaxStages || request.ErrorSource != 0 && (request.Count < 2 || request.ErrorSource >= request.Count) {
 		job.status = LaunchInvalidImage
 		return job
 	}
@@ -113,8 +121,8 @@ func StartPipeline(request execproto.Request, console handle.ID, runner Pipeline
 	}
 	if status == LaunchOK {
 		for index := int(request.Count) - 1; index >= 0; index-- {
-			device := Endpoint{ID: console, Type: handle.TypeDevice}
-			streams := Streams{Input: device, Output: device, Error: device}
+			shared := Endpoint{ID: terminal, Type: handle.TypeStream, Shared: true}
+			streams := Streams{Input: shared, Output: shared, Error: shared}
 			if index >= chain {
 				streams.Input = Endpoint{ID: errorReader, Type: handle.TypeStream}
 			} else {

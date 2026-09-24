@@ -101,6 +101,12 @@ var (
 	streamPair           [2]uint64
 	streamDescriptor     [3]uint64
 	streamReadback       [16]byte
+	// terminalOutput is the stream the shell and every command write to and
+	// the terminal service reads (ADR 0089). PID 1 keeps both ends for as
+	// long as it runs and grants copies: the service's reader survives the
+	// service, so output written while it restarts waits in the stream, and
+	// the writer is shared by every process that prints.
+	terminalOutput [2]uint64
 )
 
 //go:extern _heap_start
@@ -291,10 +297,11 @@ func startServices(ticks uint64) {
 	// The shell administers configuration, so its session is the whole
 	// namespace and may write. Every other client gets less.
 	configClient, _ := openConfigSession("", configproto.Read|configproto.Write)
-	// The shell writes to the console but does not read it: what is typed
-	// reaches it as lines from the terminal service.
+	// The shell holds no console capability: what is typed reaches it as
+	// lines from the terminal service, and what it prints goes back through
+	// that service on a copy of the terminal's writing end.
 	shellCapabilities := []supervisor.Capability{
-		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+		{Name: "stdout", Handle: handle.ID(terminalOutput[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
 		{Name: "tty", Handle: terminal, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
 		{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
@@ -322,19 +329,20 @@ func startServices(ticks uint64) {
 
 // startTerminalService starts the terminal service and returns the client end
 // of the session the shell reads its lines over. The service is the only
-// process given the right to read the console (ADR 0082).
-//
-// The terminal and the shell form one interactive session: the channel between
-// them is created here once, so neither restarts on its own; recovering the
-// session as a unit is later work, as it is for the shell today.
+// process given the right to read the console (ADR 0082), and the only one
+// that reads what the shell and its commands print (ADR 0089).
 func startTerminalService(ticks uint64) handle.ID {
 	var pair [2]uint64
+	if streamCreate(unsafe.Pointer(&terminalOutput[0]), 16) != 0 {
+		fatal("INIT_TTY_OUTPUT_FAILED\n")
+	}
 	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
 		fatal("INIT_TTY_CHANNEL_FAILED\n")
 	}
 	if manager.Register(supervisor.Definition{Name: "tty", Executable: "/system/tty",
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+			{Name: "output", Handle: handle.ID(terminalOutput[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait},
 			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
@@ -723,12 +731,19 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		driverProcessHandle = event.ProcessHandle
 	}
 	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || !keep && handleClose(uint64(event.ProcessHandle)) != 0 {
-		write("[FAIL] " + name + "\n")
+		if !supervisionComplete {
+			write("[FAIL] " + name + "\n")
+		}
 		syslog.Error("service launch failed", syslog.Str("service", name), syslog.Uint("status", event.Code))
 		return 0, false
 	}
 	mark("INIT_SERVICE_STARTED_OK\n")
-	write("[ OK ] " + name + "\n")
+	// Once the prompt is up the console belongs to the terminal service, and
+	// a line written past it would land in whatever is being typed. A restart
+	// after boot is recorded in the log instead.
+	if !supervisionComplete {
+		write("[ OK ] " + name + "\n")
+	}
 	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	if name == driverName {
 		driverStarted = true
@@ -844,7 +859,7 @@ func pollExec() {
 		return
 	}
 	job.active, job.slot, job.correlation = true, slot, message.Correlation
-	job.job = supervisor.StartPipeline(request, serviceDeviceHandle, nativePipelineRunner{})
+	job.job = supervisor.StartPipeline(request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
 	// A foreground job's input is fed by the shell, which receives the writing
 	// end before the job's reply. If it cannot be delivered, closing it gives
 	// the job end of input instead of a stream no one will ever write.
@@ -902,6 +917,13 @@ func handleControl(message ipc.Message) {
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
 	case operation == execproto.ControlKill:
 		sendControlStatus(killJob(argument), message.Correlation)
+	case operation == execproto.ControlDiagnostics:
+		// Only a diagnostic build dumps; the others answer unsupported.
+		status := execproto.ControlInvalid
+		if diagnostics(uint64(serviceDeviceHandle), 0) == 0 {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlServices:
 		var entries [execproto.MaxServiceEntries]execproto.ServiceEntry
 		count := 0
@@ -1165,10 +1187,11 @@ func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
 	return decoded, ok && decoded.Operation == request.Operation
 }
 
-// streamGrant grants one standard-stream endpoint; stream endpoints are consumed
-// by a successful launch while the console device handle stays with PID 1.
+// streamGrant grants one standard-stream endpoint. A pipeline's own streams are
+// consumed by a successful launch; the terminal's writing end is shared, so the
+// child gets a counted copy and PID 1 keeps its own (ADR 0089).
 func streamGrant(name string, endpoint supervisor.Endpoint, rights capability.Rights) supervisor.Capability {
-	return supervisor.Capability{Name: name, Handle: endpoint.ID, Type: endpoint.Type, Rights: streamRights(endpoint.Type, rights), Consume: endpoint.Type == handle.TypeStream}
+	return supervisor.Capability{Name: name, Handle: endpoint.ID, Type: endpoint.Type, Rights: streamRights(endpoint.Type, rights), Consume: endpoint.Type == handle.TypeStream && !endpoint.Shared}
 }
 
 func streamRights(typeID handle.Type, rights capability.Rights) capability.Rights {
