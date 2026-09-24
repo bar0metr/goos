@@ -1,6 +1,6 @@
 # Threat model
 
-Scope: GoOS 0.1-dev on one x86_64 CPU under QEMU q35 with OVMF, booted from
+Scope: GoOS 0.1 on one x86_64 CPU under QEMU q35 with OVMF, booted from
 the project ISO. This document states what is protected, from whom, and which
 mechanisms enforce it. Mechanism details live in the linked documents.
 

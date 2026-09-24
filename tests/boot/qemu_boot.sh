@@ -21,13 +21,16 @@ cleanup() {
 
 # heap_symbol prints the address of runtime.heapptr in the running kernel.
 heap_symbol() {
-	read -r hz diag validation <build/config/build
+	read -r hz diag validation opt <build/config/build
 	variant=build/variants/hz$hz
 	if [ "$diag" = 1 ]; then
 		variant=$variant-diag
 	fi
 	if [ "$validation" = 1 ]; then
 		variant=$variant-validation
+	fi
+	if [ -n "$opt" ] && [ "$opt" != z ]; then
+		variant=$variant-opt$opt
 	fi
 	awk '$3 == "runtime.heapptr" { print $1; exit }' "$variant/kernel/goos.sym" 2>/dev/null
 }
@@ -478,6 +481,15 @@ for marker in BOOT_SERVICES_EXITED EXCEPTION_OK GDT_OK IDT_OK TIMER_OK NATIVE_IM
 	require_marker "boot.$marker" "$marker" "$log"
 done
 pass_group boot
+
+# The expected release is read from the one place it is written, so changing
+# the version needs no edit here.
+release=$(sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
+[ -n "$release" ] || fail_check version.source 'Release in internal/version/version.go' 'not found' "$log" 'GoOS'
+release_pattern=$(printf '%s' "$release" | sed 's/[].[*^$\\]/\\&/g')
+require_regex version.banner "^GoOS $release_pattern[[:cntrl:]]*\$" "GoOS $release" "$log" GoOS
+require_regex version.uname "^GoOS $release_pattern x86_64[[:cntrl:]]*\$" "GoOS $release x86_64" "$log" uname
+pass_group version
 
 for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK USER_STACK_GUARD_OK; do
 	require_marker "memory-security.$marker" "$marker" "$log"

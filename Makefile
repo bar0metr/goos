@@ -65,15 +65,25 @@ ifeq ($(VALIDATION),1)
 BUILD_TAGS += goos_validation
 endif
 TINYGO_TAGS := -tags "$(BUILD_TAGS)"
-# Each configuration builds into its own tree, so switching HZ, DIAG, or
-# VALIDATION never mixes objects built for another configuration.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)
+# OPT is TinyGo's optimisation level for the kernel and every userspace image.
+# TinyGo accepts 0, 1, 2, s, and z; 2 is its highest speed level (there is no 3).
+# z, the smallest code, is the default; see docs/development/building.md.
+OPT ?= z
+ifeq ($(filter $(OPT),1 2 s z),)
+$(error OPT must be 1, 2, s, or z)
+endif
+# The release comes from internal/version/version.go, the only place it is
+# written; the kernel banner, uname, and system.build.release all read it there.
+VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
+# Each configuration builds into its own tree, so switching HZ, DIAG,
+# VALIDATION, or OPT never mixes objects built for another configuration.
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter-out z,$(OPT)),-opt$(OPT))
 
 .DEFAULT_GOAL := all
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -86,7 +96,7 @@ $(KERNEL_IO): kernel/arch/amd64/io.S
 
 $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
 	@mkdir -p $(KERNEL_DIR)
-	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=z -no-debug -o $@ ./kernel
+	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE)
@@ -97,21 +107,21 @@ $(INIT_RUNTIME): userspace/runtime/amd64.S
 
 $(INIT_ELF): $(shell find userspace/init userspace/commands userspace/exec userspace/config userspace/block userspace/startup userspace/wait userspace/cmd/init internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/init
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/init
 
 $(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
 $(SHELL_ELF): $(shell find userspace/cmd/shell userspace/shell userspace/commands userspace/tty userspace/exec userspace/startup userspace/wait userspace/config kernel/handle kernel/kcall kernel/tty kernel/ipc kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/shell
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/shell
 
 $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
 $(VFS_ELF): $(shell find userspace/cmd/vfs userspace/vfs userspace/fat32 userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/vfs
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/vfs
 
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
@@ -119,7 +129,7 @@ $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel
 .SECONDEXPANSION:
 $(COMMAND_ELFS): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/bin/$*
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
 
 $(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	@mkdir -p $(COMMAND_DIR)
@@ -133,35 +143,35 @@ $(COMMAND_INDEX): userspace/bin $(wildcard userspace/bin/*/*.go) tools/commands/
 
 $(BLOCK_ELF): $(shell find userspace/cmd/block userspace/block userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/block
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/block
 
 $(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
 $(VIRTIO_BLOCK_ELF): $(shell find userspace/cmd/virtio-blk userspace/startup internal/validation internal/version internal/logfmt userspace/log kernel/handle kernel/kcall kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/virtio-blk
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-blk
 
 $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
 $(LOG_ELF): $(shell find userspace/cmd/logd userspace/config userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/logd
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/logd
 
 $(LOG_IMAGE): $(LOG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(LOG_ELF) $@
 
 $(CONFIG_ELF): $(shell find userspace/cmd/configd userspace/config userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall kernel/ramfs kernel/vfs internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/configd
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/configd
 
 $(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
 
 $(TTY_ELF): $(shell find userspace/cmd/tty userspace/tty userspace/startup userspace/wait kernel/handle kernel/ipc kernel/kcall internal/capability internal/validation internal/version internal/logfmt userspace/log kernel/clock -type f) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=z -no-debug -o $@ ./userspace/cmd/tty
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/tty
 
 $(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
 	$(BUILD_ENV) go run ./tools/elf2native $(TTY_ELF) $@
@@ -200,8 +210,8 @@ $(VARIANT_ISO): $(EFI_IMAGE)
 $(ISO): $(VARIANT_ISO) FORCE
 	@cmp -s $(VARIANT_ISO) $@ || cp $(VARIANT_ISO) $@
 	@mkdir -p $(dir $(BUILD_CONFIG))
-	@printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION)' >$(BUILD_CONFIG)
-	@printf 'built %s (%s)\n' '$@' '$(notdir $(OUT_DIR))'
+	@printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION) $(OPT)' >$(BUILD_CONFIG)
+	@printf 'built %s (GoOS %s, %s)\n' '$@' '$(VERSION)' '$(notdir $(OUT_DIR))'
 
 run: iso $(BUILD_DIR)/virtio-blk.img
 	$(QEMU) $(QEMU_FLAGS) -cdrom $(ISO)
@@ -392,6 +402,9 @@ distclean: clean
 toolchain-check:
 	@OVMF_CODE='$(OVMF_CODE)' tools/toolchain-check.sh
 
+version:
+	@printf '%s\n' '$(VERSION)'
+
 help:
 	@printf '%s\n' \
 	  'GoOS build targets:' \
@@ -401,6 +414,8 @@ help:
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
+	  '  OPT=z|s|1|2     TinyGo optimisation level (default z; 2 is fastest)' \
+	  '  version         print the release from internal/version/version.go' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \

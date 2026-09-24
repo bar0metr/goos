@@ -93,6 +93,14 @@ reports that it is unavailable.
 `make HZ=<rate> test-latency` measures command latency at one rate and writes
 `build/reports/latency-hz<rate>.md`; see `docs/development/testing.md`.
 
+`OPT` sets TinyGo's optimisation level for the kernel and every userspace
+image: `z` (the default, smallest code), `s`, `1`, or `2`. TinyGo has no `-O3`;
+`2` is its fastest level. A level other than `z` builds into its own variant
+directory (`build/variants/hz100-opt2`), and `make test-latency` and
+`make test-microbench` name their reports after it
+(`build/reports/microbench-hz100-opt2.md`), so two levels can be measured side
+by side.
+
 `VALIDATION=1` builds the validation variant (ADR 0058): kernel self-tests,
 fault injection, PID 1's supervision scenario, and the `*_OK` markers the boot
 test asserts. A normal build runs none of them and prints only the banner,
@@ -111,3 +119,11 @@ Set `OVMF_CODE=/path/to/firmware.fd` if QEMU firmware is not installed under
 `$(brew --prefix)/share/qemu`). Set `SOURCE_DATE_EPOCH` to a fixed project
 release timestamp for release builds; the kernel build and the timestamps in
 the EFI partition and the ISO take it.
+
+## Release version
+
+The release is written once, as `Release` in `internal/version/version.go`.
+The kernel banner, `uname`, the read-only `system.build.release` setting, and
+`make version` all take it from there, and the boot test reads the expected
+banner and `uname` line from the same file. Changing the version is that one
+edit followed by `make`.
