@@ -44,9 +44,11 @@ such as `/persist/home` (ADR 0069).
 `/system` is the boot archive itself, mounted read-only, so the executables the
 launch path resolves under `/system/bin` are exactly the ones a listing shows.
 Every mutation of it is refused with permission denied. Executables are still
-not *loaded* through VFS: the kernel reads them from the same archive on PID 1's
-launch request, and the filesystem service maps that archive read-only through a
-capability only it holds (ADR 0070).
+not *loaded* through VFS: PID 1 maps the same archive read-only, resolves the
+path there, and asks the kernel to launch the extent it found under an image
+capability with Execute. The filesystem service maps the archive through a
+Read-only copy of that capability, which cannot launch anything (ADR 0070,
+ADR 0093).
 
 `/persist` names the whole volume and `/home` and `/state` name directories on
 it, so `/persist/home` and `/home` are one directory under two names, backed by

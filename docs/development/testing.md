@@ -206,7 +206,7 @@ The `help` case launches nothing and shows the measurement floor. The serial
 transcript is kept in `build/logs/latency-<variant>.log`. In a `DIAG=1` build
 the script ends with
 `diag` and adds the `DIAG clock` and `DIAG launch` lines to the report: per
-stage of `spawnExecutable` (image lookup, address-space creation, image load,
+stage of `spawnExecutable` (image authority and extent check, address-space creation, image load,
 process and grant setup, task install), the number of launches since boot and
 their total and average time. Failed lookups are counted too. Numbers from
 QEMU TCG describe the emulated system on that host, not hardware.

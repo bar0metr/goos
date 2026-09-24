@@ -17,7 +17,8 @@ func TestLifecycleProtocol(t *testing.T) {
 		t.Fatalf("exit event = %#v", event)
 	}
 	grants := []Capability{{Handle: 0x100000002, Type: handle.TypeDevice, Rights: capability.Write}}
-	launch, ok := LaunchRequest(3, "/system/fault-probe", grants, 9)
+	probe := Executable{Image: 0x100000015, Offset: 0x2200, Size: 0x3000}
+	launch, ok := LaunchRequest(3, probe, "fault-probe", grants, 9)
 	if !ok {
 		t.Fatal("launch encode failed")
 	}
@@ -29,12 +30,12 @@ func TestLifecycleProtocol(t *testing.T) {
 			t.Fatal("nonzero unused attachment")
 		}
 	}
-	grantOffset := 12 + len("/system/fault-probe")
+	grantOffset := launchHeaderSize + len("fault-probe")
 	if launch.Payload[grantOffset+14] != 0 || launch.Payload[grantOffset+15] != 0 {
 		t.Fatal("non-consuming grant has flags or reserved bytes set")
 	}
 	event, ok = DecodeLifecycle(launch)
-	if !ok || event.Operation != LifecycleLaunch || event.Process != 3 || string(event.ExecutablePath()) != "/system/fault-probe" ||
+	if !ok || event.Operation != LifecycleLaunch || event.Process != 3 || event.Executable != probe || string(event.ProcessName()) != "fault-probe" ||
 		event.CapabilityCount != 1 || event.Capabilities[0] != grants[0] {
 		t.Fatalf("launch event = %#v", event)
 	}
@@ -50,14 +51,29 @@ func TestLifecycleProtocol(t *testing.T) {
 	if _, ok := DecodeLifecycle(ipc.Message{}); ok {
 		t.Fatal("empty message accepted")
 	}
-	if _, ok := LaunchRequest(3, "../escape", nil, 9); ok {
-		t.Fatal("parent traversal accepted")
+	// A launch names bytes, never a path: the name is a label and cannot
+	// carry a separator, and an extent needs an image and a length.
+	for _, name := range []string{"", "/system/init", "bin/ls", "..x/", "sp ace", "\x00", "seventeen-letters"} {
+		if _, ok := LaunchRequest(3, probe, name, nil, 9); ok {
+			t.Fatalf("name %q accepted", name)
+		}
 	}
-	if _, ok := LaunchRequest(3, "/system/./init", nil, 9); ok {
-		t.Fatal("non-canonical executable accepted")
+	for _, extent := range []Executable{{Offset: 1, Size: 1}, {Image: 1, Offset: 1}} {
+		if _, ok := LaunchRequest(3, extent, "x", nil, 9); ok {
+			t.Fatalf("extent %#v accepted", extent)
+		}
 	}
-	if _, ok := LaunchRequest(3, "system/init", nil, 9); ok {
-		t.Fatal("relative executable accepted")
+	corruptName := launch
+	corruptName.Payload[launchHeaderSize] = '/'
+	if _, ok := DecodeLifecycle(corruptName); ok {
+		t.Fatal("decoded a name with a separator")
+	}
+	corruptExtent := launch
+	for index := 26; index < 30; index++ {
+		corruptExtent.Payload[index] = 0
+	}
+	if _, ok := DecodeLifecycle(corruptExtent); ok {
+		t.Fatal("decoded an empty extent")
 	}
 	result, ok := LaunchResult(8, handle.ID(0x100000001), LaunchOK, 9)
 	if !ok {
@@ -73,11 +89,11 @@ func TestLifecycleProtocol(t *testing.T) {
 	if _, ok := LaunchResult(0, 0, LaunchOK, 9); ok {
 		t.Fatal("successful result without process accepted")
 	}
-	if _, ok := LaunchRequest(3, "/system/init", []Capability{{Handle: 1, Type: handle.TypeDevice}}, 9); ok {
+	if _, ok := LaunchRequest(3, probe, "init", []Capability{{Handle: 1, Type: handle.TypeDevice}}, 9); ok {
 		t.Fatal("capability without rights accepted")
 	}
 	endpointGrant := []Capability{{Handle: 3, Type: handle.TypeChannel, Rights: capability.Read | capability.Write, Consume: true}}
-	endpointLaunch, ok := LaunchRequest(4, "/system/vfs", endpointGrant, 10)
+	endpointLaunch, ok := LaunchRequest(4, probe, "vfs", endpointGrant, 10)
 	if !ok {
 		t.Fatal("endpoint grant encode failed")
 	}
@@ -85,7 +101,7 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok || endpointEvent.Capabilities[0] != endpointGrant[0] {
 		t.Fatalf("endpoint grant = %#v", endpointEvent)
 	}
-	startupLaunch, ok := LaunchRequestWithStartup(4, "/system/bin/cat", endpointGrant, 3, StagingSlotSize, 11)
+	startupLaunch, ok := LaunchRequestWithStartup(4, probe, "cat", endpointGrant, 3, StagingSlotSize, 11)
 	if !ok {
 		t.Fatal("startup launch encode failed")
 	}
@@ -93,10 +109,10 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok || startupEvent.StartupSlot != 3 || startupEvent.StartupSize != StagingSlotSize {
 		t.Fatalf("startup = %#v", startupEvent)
 	}
-	if _, ok := LaunchRequestWithStartup(4, "/system/x", nil, 0, StagingSlotSize+1, 12); ok {
+	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, 0, StagingSlotSize+1, 12); ok {
 		t.Fatal("oversized startup accepted")
 	}
-	if _, ok := LaunchRequestWithStartup(4, "/system/x", nil, StagingSlots, 8, 12); ok {
+	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, StagingSlots, 8, 12); ok {
 		t.Fatal("out-of-range staging slot accepted")
 	}
 	corrupt := startupLaunch
@@ -108,7 +124,7 @@ func TestLifecycleProtocol(t *testing.T) {
 	for index := range tooMany {
 		tooMany[index] = Capability{Handle: handle.ID(index + 1), Type: handle.TypeDevice, Rights: capability.Write}
 	}
-	if _, ok := LaunchRequest(3, "/system/init", tooMany, 9); ok {
+	if _, ok := LaunchRequest(3, probe, "init", tooMany, 9); ok {
 		t.Fatal("oversized capability manifest accepted")
 	}
 }

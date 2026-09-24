@@ -11,23 +11,26 @@ const (
 	maxLinkDepth = uint8(4)
 )
 
-// Find takes the name as bytes: the kernel looks one up on every launch, and
-// converting a path to or from a string would allocate on its leaking heap.
+// Find returns the contents of the member named path. The kernel uses it once,
+// to locate the bootstrap program; every other launch names its image by
+// extent (Extent) and the kernel resolves no path for it (ADR 0093).
 func Find(archive []byte, path []byte) ([]byte, bool) {
 	entry, ok := find(archive, path, 0)
 	return entry.data, ok
 }
 
-// Locate is Find that also names the member's contents with a key that is the
-// same for every path leading to them, hard links included, and never zero.
-// The archive is immutable, so the key identifies the same bytes for the whole
-// boot; the loader shares an image's read-only pages under it.
-func Locate(archive []byte, path []byte) ([]byte, uint64, bool) {
+// Extent reports where the contents of the member named path lie in the
+// archive: the byte offset of its data and its length. Hard links resolve to
+// the member they name, so every path leading to the same bytes reports the
+// same extent. PID 1 uses it to name an executable to the kernel by its place
+// in the immutable image rather than by a path the kernel would have to
+// resolve.
+func Extent(archive []byte, path []byte) (int, int, bool) {
 	entry, ok := find(archive, path, 0)
 	if !ok {
-		return nil, 0, false
+		return 0, 0, false
 	}
-	return entry.data, uint64(entry.offset) + 1, true
+	return entry.offset + blockSize, len(entry.data), true
 }
 
 func find(archive []byte, path []byte, depth uint8) (member, bool) {

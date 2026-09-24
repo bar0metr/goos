@@ -69,34 +69,38 @@ func TestFindValidatedHardlink(t *testing.T) {
 	if !ok || string(data) != "coreutils" {
 		t.Fatalf("hardlink = %q, %v", data, ok)
 	}
-	// Both names lead to the same bytes, so they share one key.
-	_, linkKey, linkOK := Locate(output.Bytes(), []byte("system/bin/cat"))
-	_, fileKey, fileOK := Locate(output.Bytes(), []byte("system/bin/coreutils"))
-	if !linkOK || !fileOK || linkKey == 0 || linkKey != fileKey {
-		t.Fatalf("keys = %d, %d", linkKey, fileKey)
+	// Both names lead to the same bytes, so they report one extent.
+	linkOffset, linkSize, linkOK := Extent(output.Bytes(), []byte("system/bin/cat"))
+	fileOffset, fileSize, fileOK := Extent(output.Bytes(), []byte("system/bin/coreutils"))
+	if !linkOK || !fileOK || linkOffset != fileOffset || linkSize != fileSize || string(output.Bytes()[fileOffset:fileOffset+fileSize]) != "coreutils" {
+		t.Fatalf("extents = %d+%d, %d+%d", linkOffset, linkSize, fileOffset, fileSize)
 	}
 }
 
-func TestLocateKeysDistinctMembers(t *testing.T) {
+func TestExtentsOfDistinctMembers(t *testing.T) {
 	var output bytes.Buffer
 	writer := tar.NewWriter(&output)
 	for _, name := range []string{"system/a", "system/b"} {
 		if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o555, Size: 1, Typeflag: tar.TypeReg}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := writer.Write([]byte{'x'}); err != nil {
+		if _, err := writer.Write([]byte{name[len(name)-1]}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, first, _ := Locate(output.Bytes(), []byte("system/a"))
-	_, second, _ := Locate(output.Bytes(), []byte("system/b"))
-	if first == 0 || second == 0 || first == second {
-		t.Fatalf("keys = %d, %d", first, second)
+	archive := output.Bytes()
+	first, firstSize, _ := Extent(archive, []byte("system/a"))
+	second, secondSize, _ := Extent(archive, []byte("system/b"))
+	if first == second || firstSize != 1 || secondSize != 1 || archive[first] != 'a' || archive[second] != 'b' {
+		t.Fatalf("extents = %d, %d", first, second)
 	}
-	if _, key, ok := Locate(output.Bytes(), []byte("system/missing")); ok || key != 0 {
+	if offset, size, ok := Extent(archive, []byte("system/missing")); ok || offset != 0 || size != 0 {
 		t.Fatal("missing member located")
+	}
+	if _, _, ok := Extent(archive, []byte("/system/a")); ok {
+		t.Fatal("absolute archive path accepted")
 	}
 }

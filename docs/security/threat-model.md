@@ -99,9 +99,10 @@ attacker-controlled code.
   client endpoint, the whole disk. It gains no device, port, IRQ, or DMA
   authority. It also serves `/system/commands`, which PID 1 reads to decide
   which commands get a VFS session; a lying VFS can only change who receives a
-  session it serves itself. It cannot change what executes: the kernel resolves
-  launches in the archive directly, and the archive mapping VFS holds is
-  read-only.
+  session it serves itself. It cannot change what executes: PID 1 resolves
+  launches in its own mapping of the archive, the kernel loads only extents of
+  that archive, and the image capability VFS holds is Read-only, without the
+  Execute right a launch requires (ADR 0093).
 - Block service compromise exposes the disk through the driver channel. It
   gains no hardware authority.
 - Config service compromise exposes and can rewrite every setting, including

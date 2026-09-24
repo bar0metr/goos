@@ -93,7 +93,11 @@ compiles away.
 - `SystemInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters and
   have no userspace source.
 - Process launch is not a native call. It is requested over the lifecycle
-  channel that only PID 1 holds and runs in kernel housekeeping.
+  channel that only PID 1 holds and runs in kernel housekeeping. The request
+  names an extent of the system image and a handle; the kernel requires Execute
+  on the image object, checks the extent against the image length without
+  overflow (`loader.ImageExtent`), and validates the bytes as a native image.
+  It resolves no path (ADR 0093).
 
 ### Untrusted data and validation
 
@@ -158,9 +162,11 @@ else (ADR 0089).
 
 The shared image cache (ADR 0081) is not charged to any process. It grows only
 when PID 1 launches an image from the immutable system image, it is keyed by
-the image's place in that archive, and it is bounded at 128 segments and 1024
-frames, past which launches load private copies. No process input selects or
-enlarges it.
+the launch extent in that archive, and it is bounded at 128 segments and 1024
+frames, past which launches load private copies. PID 1 chooses the extent, but
+an extent always names the same immutable bytes, which must validate as a native
+image before anything is cached, and no other process can reach the launch
+path (ADR 0093).
 
 `StreamCreate` still needs no capability, because a stream is a primitive any
 process may need, but a process calling it in a loop is refused at its share and

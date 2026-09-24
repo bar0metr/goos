@@ -37,18 +37,25 @@ document states the security properties and who holds what.
 | --- | --- | --- |
 | Read | `0x01` | receive IPC, read stream, read console and wait on it (the console object), read the log (the log object), read ports, map shared memory or the system image |
 | Write | `0x02` | send IPC, write stream, write console and the log, write ports, allocate DMA, map shared memory writable, stop a process, reset the machine |
-| Execute | `0x04` | defined; no native call uses it yet |
+| Execute | `0x04` | launch a native image from the system image object (PID 1 only, ADR 0093) |
 | Transfer | `0x08` | derive into another process (manifest or IPC attachment) |
 | Wait | `0x10` | block on a channel, stream, process, or IRQ |
 
 ## Spawn manifests
 
 Only PID 1 can reach the kernel launch path: launch requests arrive on the
-lifecycle channel, whose only endpoint is in PID 1. A request carries at most
-seven grants of `{source handle, type, rights, name}` (ADR 0024, 0031).
+lifecycle channel, whose only endpoint is in PID 1. A request names its
+executable as an extent of an image object, together with the handle that
+authorizes executing from it, and carries at most seven grants of
+`{source handle, type, rights, name}` (ADR 0024, 0031, 0093). The kernel
+resolves no path: PID 1 found the executable in its own read-only mapping of
+the system image.
 
 Before creating the address space the kernel:
 
+0. requires the image handle in PID 1's table to be the system image with
+   Execute, and the extent to lie inside the image; the native image validator
+   then decides whether the bytes are a program;
 1. resolves each source in PID 1's table with Transfer authority;
 2. checks that the requested rights derive from the source;
 3. installs derived handles into the empty child table in manifest order,
@@ -57,8 +64,10 @@ Before creating the address space the kernel:
 5. binds the handle IDs into the child's startup block by role name.
 
 A grant marked `Consume` closes PID 1's source handle after a successful
-launch. Exclusive endpoints (service channel ends, the system image, pipeline
-streams) are consumed, so PID 1 does not keep a second copy. The storage
+launch. Exclusive endpoints (service channel ends, pipeline streams) are consumed, so
+PID 1 does not keep a second copy. The system image is not: PID 1 keeps it with
+Execute to launch from, and the filesystem service receives a Read-only copy
+that cannot launch anything. The storage
 driver's device authority is the exception: PID 1 keeps it to relaunch the
 driver (ADR 0078). Startup role names locate handles; they do not grant
 authority.

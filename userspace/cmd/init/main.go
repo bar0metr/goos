@@ -178,7 +178,14 @@ func streamWrite(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
 func userspaceMain() {
 	runtimeInitHeap()
 	syslog.Init(serviceDeviceHandle, "init")
+	if !mapSystemImage() {
+		fatal("INIT_IMAGE_MAP_FAILED\n")
+	}
 	if validation.Enabled {
+		if !probeLaunchAuthority() {
+			fatal("LAUNCH_AUTHORITY_FAILED\n")
+		}
+		mark("LAUNCH_AUTHORITY_OK\n")
 		if !probeStreamEndpoint() {
 			fatal("STREAM_ENDPOINT_FAILED\n")
 		}
@@ -295,7 +302,9 @@ func startServices(ticks uint64) {
 			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read, Consume: true},
+			// PID 1 keeps its own copy, with Execute, to launch from the
+			// image; the filesystem service may only read it (ADR 0093).
+			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read},
 		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
 			Capabilities: []supervisor.Capability{
@@ -750,7 +759,14 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if shellStarted && bytesString(spec.Name[:spec.NameSize]) == "shell" && !renewShellSession(&spec) {
 		return 0, false
 	}
-	correlation++
+	executable, processName, located := locateExecutable(spec.Executable[:spec.ExecutableSize])
+	if located != supervisor.LaunchOK {
+		if !supervisionComplete {
+			write("[FAIL] " + bytesString(spec.Name[:spec.NameSize]) + "\n")
+		}
+		syslog.Error("service executable not found", syslog.Str("service", bytesString(spec.Name[:spec.NameSize])), syslog.Uint("status", uint64(located)))
+		return 0, false
+	}
 	slot, staging := stagingSlot()
 	var vectorWire [startup.VectorSize]byte
 	var bindings [supervisor.MaxCapabilities]startup.Handle
@@ -765,22 +781,14 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	request, ok := supervisor.LaunchRequestWithStartup(1, bytesString(spec.Executable[:spec.ExecutableSize]), spec.Capabilities[:spec.CapabilityCount], slot, uint16(len(startupData)), correlation)
-	if !ok {
-		return 0, false
-	}
-	size, ok := ipc.Encode(request, wire[:])
-	if !ok || ipcSend(lifecycleHandle, unsafe.Pointer(&wire[0]), uintptr(size)) != 0 {
-		return 0, false
-	}
+	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], slot, len(startupData))
 	mark("INIT_SERVICE_LAUNCH_OK\n")
 	name := bytesString(spec.Name[:spec.NameSize])
-	event, status := receiveLaunchResult(correlation)
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
 	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell")
-	if keep && status == ipc.StatusOK && event.Code == uint64(supervisor.LaunchOK) {
+	if keep && launched == supervisor.LaunchOK {
 		switch name {
 		case driverName:
 			driverProcessHandle = event.ProcessHandle
@@ -790,11 +798,11 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			shellProcessHandle = keepProcess(shellProcessHandle, event.ProcessHandle)
 		}
 	}
-	if status != ipc.StatusOK || event.Code != uint64(supervisor.LaunchOK) || !keep && handleClose(uint64(event.ProcessHandle)) != 0 {
+	if launched != supervisor.LaunchOK || !keep && handleClose(uint64(event.ProcessHandle)) != 0 {
 		if !supervisionComplete {
 			write("[FAIL] " + name + "\n")
 		}
-		syslog.Error("service launch failed", syslog.Str("service", name), syslog.Uint("status", event.Code))
+		syslog.Error("service launch failed", syslog.Str("service", name), syslog.Uint("status", uint64(launched)))
 		return 0, false
 	}
 	mark("INIT_SERVICE_STARTED_OK\n")
@@ -1307,7 +1315,7 @@ func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byt
 	if !allowed {
 		return 0, 0, supervisor.LaunchCapabilityDenied
 	}
-	return launchApplication(bytesString(stage.Path), command, cwd, stage.Arguments, environment, streams)
+	return launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams)
 }
 
 func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicationExit(process) }
@@ -1345,7 +1353,20 @@ func openVFSSession() (handle.ID, string) {
 	return handle.ID(pair[0]), ""
 }
 
-func launchApplication(path string, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchApplication(path, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+	// A command the image does not hold is reported before a session or a
+	// stream is committed to it.
+	executable, processName, located := locateExecutable(path)
+	if located != supervisor.LaunchOK {
+		// The kernel used to record this when it did the lookup; the record
+		// moved with the lookup, so a failed command still leaves a trace.
+		if located == supervisor.LaunchNotFound {
+			syslog.Info("launch failed", syslog.Str("command", bytesString(command)), syslog.Uint("status", uint64(located)))
+		} else {
+			syslog.Warn("launch failed", syslog.Str("command", bytesString(command)), syslog.Uint("status", uint64(located)))
+		}
+		return 0, 0, located
+	}
 	var pair [2]uint64
 	useVFS := commandGrants(command)&commands.GrantVFS != 0
 	if useVFS {
@@ -1379,27 +1400,15 @@ func launchApplication(path string, command, cwd, arguments, environment []byte,
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	correlation++
-	request, ok := supervisor.LaunchRequestWithStartup(1, path, grants, slot, uint16(len(startupData)), correlation)
-	if !ok {
-		syslog.Error("APP_LAUNCH_ENCODE_FAILED")
+	event, launched := requestLaunch(executable, processName, grants, slot, len(startupData))
+	if launched != supervisor.LaunchOK {
+		if launched == supervisor.LaunchProcessFailed && event.Operation == 0 {
+			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
+		}
 		handleClose(pair[0])
-		return 0, 0, supervisor.LaunchInvalidImage
+		return 0, 0, launched
 	}
-	if !sendMessage(lifecycleHandle, request) {
-		syslog.Error("APP_LAUNCH_SEND_FAILED")
-		handleClose(pair[0])
-		return 0, 0, supervisor.LaunchInvalidImage
-	}
-	event, status := receiveLaunchResult(correlation)
-	if status != ipc.StatusOK {
-		syslog.Error("APP_LAUNCH_REPLY_FAILED")
-		return 0, 0, supervisor.LaunchProcessFailed
-	}
-	if event.Code != uint64(supervisor.LaunchOK) {
-		handleClose(pair[0])
-	}
-	return event.Process, event.ProcessHandle, supervisor.LaunchStatus(event.Code)
+	return event.Process, event.ProcessHandle, supervisor.LaunchOK
 }
 
 // The command index is read once, through a VFS session of PID 1's own, from

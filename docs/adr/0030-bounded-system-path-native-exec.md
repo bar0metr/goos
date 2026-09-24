@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. Since ADR 0093 PID 1 resolves the path in the mapped system image
+itself and the kernel receives an extent, not the path.
 
 ## Context
 

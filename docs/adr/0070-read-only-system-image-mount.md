@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Extends ADR 0022, ADR 0030 and ADR 0069. The window is four MiB since the ADR 0087 addendum.
+Accepted. Extends ADR 0022, ADR 0030 and ADR 0069. The window is four MiB since the ADR 0087 addendum. Since ADR 0093 PID 1 keeps an image capability with Execute and maps the image too; the filesystem service receives a Read-only copy.
 
 ## Context
 

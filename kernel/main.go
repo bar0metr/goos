@@ -411,7 +411,7 @@ func consumeInitControl() {
 	staged := launchTemplate[:event.StartupSize]
 	pid, processHandle, launchStatus := process.ID(0), handle.ID(0), supervisor.LaunchInvalidImage
 	if len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged) {
-		pid, processHandle, launchStatus = spawnExecutable(event.ExecutablePath(), event.Capabilities[:event.CapabilityCount], staged)
+		pid, processHandle, launchStatus = spawnExecutable(event.Executable, event.ProcessName(), event.Capabilities[:event.CapabilityCount], staged)
 	}
 	if launchStatus != supervisor.LaunchOK {
 		level := logfmt.Warn
@@ -438,7 +438,12 @@ func equalBytes(value []byte, expected string) bool {
 	return true
 }
 
-func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+// spawnExecutable starts the native image that executable names. The kernel
+// resolves no path here: PID 1 has already found the image under its own
+// search policy, and names it by an extent of an image object together with
+// the handle that authorizes executing from it (ADR 0093). The only name the
+// kernel knows at launch is the bootstrap program's, in bootContinue.
+func spawnExecutable(executable supervisor.Executable, name []byte, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -457,10 +462,18 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 		}
 	}
 	began := launchMark()
-	image, imageKey, found := initramfs.Locate(bootuefi.Initramfs(&bootInfo), path[1:])
+	// Execute on an image object is the authority to run what it holds. The
+	// filesystem service reads the same image with Read alone and cannot
+	// launch from it.
+	authority, allowed := bootInitProcess.Handles().Lookup(executable.Image, handle.TypeDevice, capability.Execute)
+	if _, isImage := device.DecodeImageObject(authority.Object()); !allowed || !isImage {
+		launchStageDone(launchLookup, began)
+		return 0, 0, supervisor.LaunchCapabilityDenied
+	}
+	image, imageKey, inside := loader.ImageExtent(bootuefi.Initramfs(&bootInfo), uint64(executable.Offset), uint64(executable.Size))
 	began = launchStageDone(launchLookup, began)
-	if !found {
-		return 0, 0, supervisor.LaunchNotFound
+	if !inside {
+		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	// The pages a launch allocates are counted from the allocator rather than
 	// threaded through the loader: the difference is exactly what this address
@@ -502,7 +515,7 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 		}
 	}
 	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
-	spawned.SetName(path[lastSlash(path)+1:])
+	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
 		return 0, 0, supervisor.LaunchProcessFailed
@@ -2166,9 +2179,10 @@ func bootContinue() {
 	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
 	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && sharedObjects.Register(launchStaging) && sharedObjects.Register(execPage)
 	imageObject, imageObjectValid := device.ImageObject(1)
-	// The image capability is read-only and transferable: PID 1 holds it only
-	// to hand to the filesystem service, which mounts the image at /system.
-	systemImageHandle, systemImageInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(imageObject, capability.Read|capability.Transfer))
+	// PID 1 maps the image to find executables in it and launches them with
+	// Execute (ADR 0093). It hands the filesystem service a Read-only copy to
+	// mount at /system, which cannot be used to launch anything.
+	systemImageHandle, systemImageInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(imageObject, capability.Read|capability.Execute|capability.Transfer))
 	// Reading the log is its own capability, so PID 1 can give it to the log
 	// service and the shell without giving them the console's input.
 	logDeviceHandle, logDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LogObject, capability.Read|capability.Transfer))
@@ -2285,13 +2299,4 @@ func abandonHandle(typeID handle.Type, cap capability.Capability) {
 func exitedPages(exited *process.Process) uint32 {
 	used, _ := exited.Quota()
 	return used[process.ResourcePages]
-}
-
-func lastSlash(path []byte) int {
-	for index := len(path) - 1; index >= 0; index-- {
-		if path[index] == '/' {
-			return index
-		}
-	}
-	return -1
 }
