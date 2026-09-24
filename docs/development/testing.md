@@ -19,11 +19,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
   through each; `make test-all` includes two runs.
 - `make test-latency` boots one guest and measures command and VFS latency
-  into `build/reports/latency-hz<rate>.md`. It is a measurement, not a gate,
-  and is not part of `make test-all`.
+  into `build/reports/latency-<variant>.md`, where `<variant>` is the build's
+  directory under `build/variants/` (`hz100-opt2` by default). It is a
+  measurement, not a gate, and is not part of `make test-all`.
 - `make test-microbench` boots one guest and runs the in-guest
   microbenchmarks (context switch, IPC, VFS reads, RAMFS metadata) into
-  `build/reports/microbench-hz<rate>.md` (ADR 0085). Like `test-latency` it is
+  `build/reports/microbench-<variant>.md` (ADR 0085). Like `test-latency` it is
   a measurement, not a gate.
 - `make test-performance` runs `test-microbench` and then the host
   microbenchmarks, writing every report under `build/reports/`.
@@ -202,7 +203,7 @@ make HZ=1000 DIAG=1 test-latency
 ```
 
 The `help` case launches nothing and shows the measurement floor. The serial
-transcript is kept in `build/logs/latency-hz<rate>.log`. In a `DIAG=1` build
+transcript is kept in `build/logs/latency-<variant>.log`. In a `DIAG=1` build
 the script ends with
 `diag` and adds the `DIAG clock` and `DIAG launch` lines to the report: per
 stage of `spawnExecutable` (image lookup, address-space creation, image load,
@@ -228,9 +229,9 @@ the system: no trap, no context switch, no second process.
 
 `make test-microbench` (ADR 0085) boots one normal-build guest, runs each case
 of `tests/boot/microbench.sh` once to warm up and `MICROBENCH_REPEATS` times
-(default 5), and writes `build/reports/microbench-hz<rate>.md` with the median
+(default 5), and writes `build/reports/microbench-<variant>.md` with the median
 over the runs and the raw `bench` lines. The transcript is kept in
-`build/logs/microbench-hz<rate>.log`.
+`build/logs/microbench-<variant>.log`.
 
 | Case | Command | What it measures |
 | --- | --- | --- |

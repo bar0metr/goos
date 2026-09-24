@@ -345,6 +345,16 @@ command had never received what was typed while it ran; that is fixed and
 tested. Each printed line now costs a relay through the terminal, about ten
 percent on a one-line command under emulation.
 
+ADR 0088 widens the gap below every user stack to 64 KiB and the kernel stacks'
+guard to two pages, and the build now fails if any function's stack frame could
+step over them: TinyGo emits no stack probes for userspace, and the kernel's
+probe routine is an empty stub. ADR 0090 makes TinyGo's `-opt=2` the default
+build level, measured a fifth to a third faster on IPC, VFS and command paths
+than the size-optimised `-opt=z`; building at that level found that the system
+image window had stayed at two MiB after the boot archive bound grew to four
+(ADR 0087 addendum). The release version is written once, in
+`internal/version/version.go`.
+
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
 can land in a line being typed; the terminal's redraw assumes the edited line

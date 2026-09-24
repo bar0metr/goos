@@ -21,17 +21,8 @@ cleanup() {
 
 # heap_symbol prints the address of runtime.heapptr in the running kernel.
 heap_symbol() {
-	read -r hz diag validation opt <build/config/build
-	variant=build/variants/hz$hz
-	if [ "$diag" = 1 ]; then
-		variant=$variant-diag
-	fi
-	if [ "$validation" = 1 ]; then
-		variant=$variant-validation
-	fi
-	if [ -n "$opt" ] && [ "$opt" != z ]; then
-		variant=$variant-opt$opt
-	fi
+	read -r hz diag validation opt variant <build/config/build
+	variant=build/variants/${variant:-hz$hz}
 	awk '$3 == "runtime.heapptr" { print $1; exit }' "$variant/kernel/goos.sym" 2>/dev/null
 }
 

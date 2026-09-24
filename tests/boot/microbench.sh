@@ -10,10 +10,10 @@ disk=${3:?disk path required}
 repeats=${MICROBENCH_REPEATS:-5}
 command_timeout=${COMMAND_TIMEOUT:-30}
 case $repeats in '' | *[!0-9]* | 0) echo "MICROBENCH_REPEATS must be a positive integer" >&2; exit 2 ;; esac
-read -r hz diag_build validation_build opt_build <build/config/build
-# A build at another OPT level reports separately, so the two can be compared.
-variant=hz$hz
-[ "${opt_build:-z}" = z ] || variant=$variant-opt$opt_build
+read -r hz diag_build validation_build opt_build variant <build/config/build
+# Each build configuration, OPT level included, reports separately, so two
+# can be compared.
+variant=${variant:-hz$hz}
 log=build/logs/microbench-$variant.log
 report=build/reports/microbench-$variant.md
 fatal='PANIC\|_WAIT_PERMISSION_DENIED\|_WAIT_NOT_FOUND\|_WAIT_FAILED\|_RECEIVE_FAILED\|_SEND_FAILED\|_CONTROL_FAILED\|OUT_OF_MEMORY\|exec: no reply\|APP_.*FAILED\|INIT_EXEC_.*FAILED\|LIFECYCLE_QUEUE_OVERFLOW\|CLOCK_CALIBRATION_FAILED'
@@ -153,7 +153,7 @@ row() {
 {
 	printf '# GoOS in-guest microbenchmarks at %s Hz\n\n' "$hz"
 	printf 'Build HZ=%s DIAG=%s OPT=%s, %s runs per case after one warm-up run, QEMU %s (TCG) on %s.\n' \
-		"$hz" "$diag_build" "${opt_build:-z}" "$repeats" "$(qemu-system-x86_64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')" "$(uname -m)"
+		"$hz" "$diag_build" "${opt_build:-?}" "$repeats" "$(qemu-system-x86_64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')" "$(uname -m)"
 	printf 'Times come from the TSC clock inside the guest. "Avg" is the average over one\n'
 	printf 'run; "op median" is the median interval of the operations a run sampled (for\n'
 	printf '`recv`, the chunks that followed exactly one wait, which are round trips).\n'

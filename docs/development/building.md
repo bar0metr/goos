@@ -84,7 +84,7 @@ Boot tests use a disposable test disk; `make run` retains
 `build/virtio-blk.img` across interactive boots.
 `make test-performance` writes the host benchmarks, such as
 `build/reports/page-allocation.txt`, and the in-guest microbenchmarks of
-`make test-microbench` to `build/reports/microbench-hz<rate>.md`.
+`make test-microbench` to `build/reports/microbench-<variant>.md`.
 `make test-security` runs the capability, generation-safe handle, and virtual
 memory permission tests explicitly; these tests are also included by `make
 test`.
@@ -106,15 +106,15 @@ stop on a fatal error. A normal build compiles all of this out and `diag`
 reports that it is unavailable.
 
 `make HZ=<rate> test-latency` measures command latency at one rate and writes
-`build/reports/latency-hz<rate>.md`; see `docs/development/testing.md`.
+`build/reports/latency-<variant>.md`; see `docs/development/testing.md`.
 
 `OPT` sets TinyGo's optimisation level for the kernel and every userspace
-image: `z` (the default, smallest code), `s`, `1`, or `2`. TinyGo has no `-O3`;
-`2` is its fastest level. A level other than `z` builds into its own variant
-directory (`build/variants/hz100-opt2`), and `make test-latency` and
-`make test-microbench` name their reports after it
-(`build/reports/microbench-hz100-opt2.md`), so two levels can be measured side
-by side.
+image: `2` (the default, TinyGo's fastest; there is no `-O3`), `1`, `s`, or `z`
+(the smallest code). ADR 0090 records why the default is `2`. Each level
+builds into its own variant directory (`build/variants/hz100-opt2`,
+`build/variants/hz100-optz`), and `make test-latency` and `make test-microbench`
+name their reports after it (`build/reports/microbench-hz100-optz.md`), so two
+levels can be measured side by side.
 
 `VALIDATION=1` builds the validation variant (ADR 0058): kernel self-tests,
 fault injection, PID 1's supervision scenario, and the `*_OK` markers the boot

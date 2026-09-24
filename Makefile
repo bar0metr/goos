@@ -80,8 +80,8 @@ USERSPACE_TAGS := uefi baremetal linux amd64 tinygo goos_userspace $(BUILD_TAGS)
 go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
 # OPT is TinyGo's optimisation level for the kernel and every userspace image.
 # TinyGo accepts 0, 1, 2, s, and z; 2 is its highest speed level (there is no 3).
-# z, the smallest code, is the default; see docs/development/building.md.
-OPT ?= z
+# 2 is the default, measured faster than z (the smallest) in ADR 0090.
+OPT ?= 2
 ifeq ($(filter $(OPT),1 2 s z),)
 $(error OPT must be 1, 2, s, or z)
 endif
@@ -89,8 +89,10 @@ endif
 # written; the kernel banner, uname, and system.build.release all read it there.
 VERSION := $(shell sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
 # Each configuration builds into its own tree, so switching HZ, DIAG,
-# VALIDATION, or OPT never mixes objects built for another configuration.
-OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)$(if $(filter-out z,$(OPT)),-opt$(OPT))
+# VALIDATION, or OPT never mixes objects built for another configuration. The
+# level is always in the name, so a tree built before the default changed is
+# never taken for one built at the new default.
+OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(filter 1,$(VALIDATION)),-validation)-opt$(OPT)
 
 .DEFAULT_GOAL := all
 
@@ -229,11 +231,11 @@ $(VARIANT_ISO): $(EFI_IMAGE)
 	@test -s $@
 
 # build/goos-x86_64.iso is always the most recently requested configuration;
-# build/config/build names it for the test harnesses.
+# build/config/build names it, and its variant directory, for the test harnesses.
 $(ISO): $(VARIANT_ISO) FORCE
 	@cmp -s $(VARIANT_ISO) $@ || cp $(VARIANT_ISO) $@
 	@mkdir -p $(dir $(BUILD_CONFIG))
-	@printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION) $(OPT)' >$(BUILD_CONFIG)
+	@printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION) $(OPT) $(notdir $(OUT_DIR))' >$(BUILD_CONFIG)
 	@printf 'built %s (GoOS %s, %s)\n' '$@' '$(VERSION)' '$(notdir $(OUT_DIR))'
 
 run: iso $(BUILD_DIR)/virtio-blk.img
@@ -347,6 +349,7 @@ docs:
 	@test -f docs/adr/0087-bounded-boot-archive.md
 	@test -f docs/adr/0088-stack-guard-gap-and-frame-bound.md
 	@test -f docs/adr/0089-terminal-output-and-session-restart.md
+	@test -f docs/adr/0090-speed-optimised-builds.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -439,7 +442,7 @@ help:
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
-	  '  OPT=z|s|1|2     TinyGo optimisation level (default z; 2 is fastest)' \
+	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  test-all        run the complete validation gate, including QEMU' \

@@ -281,7 +281,10 @@ make run
 The resulting image is written to `build/goos-x86_64.iso`. All intermediate
 files and caches remain under `build/`. Builds are reproducible: `make
 test-reproducible` builds the ISO twice from a clean tree and requires every
-artifact to be byte-identical (ADR 0086).
+artifact to be byte-identical (ADR 0086). Images are built with TinyGo's
+`-opt=2` by default (ADR 0090); `make OPT=z` builds the smallest variant. The
+release version is set in one place, `internal/version/version.go`, and
+`make version` prints it.
 
 A successful boot of a normal build produces:
 

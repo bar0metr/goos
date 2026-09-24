@@ -97,7 +97,7 @@ for file in "$@"; do
 	fi
 done
 
-printf 'reproducible: %d artifacts identical, %d different (HZ DIAG VALIDATION OPT: %s)\n' "$same" "$different" "$config"
+printf 'reproducible: %d artifacts identical, %d different (HZ DIAG VALIDATION OPT variant: %s)\n' "$same" "$different" "$config"
 if [ "$status" -ne 0 ]; then
 	printf 'reproducible: FAIL, the two clean builds differ; both trees are kept in %s\n' "$work" >&2
 	exit 1
