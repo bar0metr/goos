@@ -1172,7 +1172,7 @@ goos_reclaim_exited_task:
     testq %rax, %rax
     jz .reclaim_exited_done
     addq $64, %rax
-    subq $20480, %rax
+    subq $24576, %rax  // (kernelStackPages + stackGuardPages) * 4096; stack_test.go
 	 movq $0, (%rdx,%r8,8)
     leaq goos_task_contexts(%rip), %rdx
 	 movq $0, (%rdx,%r8,8)

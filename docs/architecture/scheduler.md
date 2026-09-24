@@ -32,7 +32,8 @@ task, is chosen only when no other task is runnable, so a runnable task never
 waits behind a halted kernel task.
 
 New kernel tasks receive four contiguous stack pages, a synthetic interrupt
-frame, and an unmapped guard page. The frame preserves Win64 entry alignment
+frame, and two unmapped guard pages below them; the build bounds every kernel
+frame by that guard (ADR 0088). The frame preserves Win64 entry alignment
 and home space required by compiler-generated functions. Userspace tasks receive
 the same guarded kernel stack plus a ring 3 frame naming their RX entry point
 and RW+NX user stack.

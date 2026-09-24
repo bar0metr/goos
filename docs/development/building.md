@@ -60,6 +60,14 @@ had drifted, and an edit to `kernel/mm/vm` once left the filesystem service
 built against the old image window. The kernel depends on everything under
 `kernel/` and `internal/`.
 
+Before the conversion, `tools/stackframes` disassembles each userspace ELF
+with `go tool objdump` and fails the build if a function's stack frame is deep
+enough to step over the 64 KiB guard below the stack, or changes the stack
+pointer by an amount it cannot bound. It also checks the kernel as soon as it
+is linked, against the kernel stacks' 8 KiB guard. Each check prints the
+largest frame of the binary; `go run ./tools/stackframes -v BINARY` lists
+every frame (ADR 0088).
+
 `make run` boots the ISO with 512 MiB in QEMU and attaches COM1 to the current
 terminal. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
 1234 before executing the first instruction.

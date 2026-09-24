@@ -38,6 +38,11 @@ CONFIG_IMAGE = $(OUT_DIR)/userspace/config
 CONFIG_ELF = $(OUT_DIR)/userspace/config.elf
 TTY_IMAGE = $(OUT_DIR)/userspace/tty
 TTY_ELF = $(OUT_DIR)/userspace/tty.elf
+# tools/stackframes bounds every stack frame by the unmapped guard below the
+# stack (ADR 0088). It runs on every userspace ELF before elf2native turns it
+# into an image, and on the kernel right after it is linked.
+STACKFRAMES_SOURCES := $(wildcard tools/stackframes/*.go) kernel/loader/native.go kernel/arch/amd64/stack.go
+STACKFRAMES = $(BUILD_ENV) go run ./tools/stackframes
 EFI_IMAGE = $(OUT_DIR)/iso/efi.img
 VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
 ISO := $(BUILD_DIR)/goos-x86_64.iso
@@ -102,9 +107,10 @@ $(KERNEL_IO): kernel/arch/amd64/io.S
 	@mkdir -p $(dir $@)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
-$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO)
+$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAMES_SOURCES)
 	@mkdir -p $(KERNEL_DIR)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
+	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
 userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE)
@@ -117,21 +123,24 @@ $(INIT_ELF): $(call go_deps,./userspace/cmd/init) tinygo/targets/goos-userspace-
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/init
 
-$(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(INIT_IMAGE): $(INIT_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(INIT_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(INIT_ELF) $@
 
 $(SHELL_ELF): $(call go_deps,./userspace/cmd/shell) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/shell
 
-$(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(SHELL_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
 $(VFS_ELF): $(call go_deps,./userspace/cmd/vfs) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/vfs
 
-$(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(VFS_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
 .SECONDEXPANSION:
@@ -139,8 +148,9 @@ $(COMMAND_ELFS): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
 
-$(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@mkdir -p $(COMMAND_DIR)
+	@$(STACKFRAMES) $<
 	$(BUILD_ENV) go run ./tools/elf2native $< $@
 
 # The directory itself is a prerequisite: removing a command changes no source
@@ -153,38 +163,43 @@ $(BLOCK_ELF): $(call go_deps,./userspace/cmd/block) tinygo/targets/goos-userspac
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/block
 
-$(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(BLOCK_IMAGE): $(BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(BLOCK_ELF) $@
 
 $(VIRTIO_BLOCK_ELF): $(call go_deps,./userspace/cmd/virtio-blk) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-blk
 
-$(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(VIRTIO_BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
 $(LOG_ELF): $(call go_deps,./userspace/cmd/logd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/logd
 
-$(LOG_IMAGE): $(LOG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(LOG_IMAGE): $(LOG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(LOG_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(LOG_ELF) $@
 
 $(CONFIG_ELF): $(call go_deps,./userspace/cmd/configd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/configd
 
-$(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(CONFIG_IMAGE): $(CONFIG_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(CONFIG_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(CONFIG_ELF) $@
 
 $(TTY_ELF): $(call go_deps,./userspace/cmd/tty) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/tty
 
-$(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(TTY_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(TTY_ELF) $@
 
-$(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go
+$(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go kernel/mm/vm/permissions.go
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
 
@@ -245,7 +260,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -330,6 +345,7 @@ docs:
 	@test -f docs/adr/0085-in-guest-microbenchmarks.md
 	@test -f docs/adr/0086-pinned-toolchain-and-reproducible-builds.md
 	@test -f docs/adr/0087-bounded-boot-archive.md
+	@test -f docs/adr/0088-stack-guard-gap-and-frame-bound.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
