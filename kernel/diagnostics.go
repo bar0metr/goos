@@ -354,6 +354,11 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 			streamID, writer, _ := stream.DecodeEndpointObject(authority.Object())
 			out.hex("stream", streamID)
 			out.uint("writer", boolValue(writer))
+			if endpoint, exists := streamRegistry.Lookup(streamID); exists {
+				readers, writers := endpoint.References()
+				out.uint("readers", uint64(readers))
+				out.uint("writers", uint64(writers))
+			}
 		default:
 			out.hex("object", authority.Object())
 		}

@@ -151,6 +151,10 @@ func userspaceMain() {
 			fatal("STREAM_ENDPOINT_FAILED\n")
 		}
 		mark("STREAM_ENDPOINT_OK\n")
+		if !probeSharedEndpoint() {
+			fatal("STREAM_SHARED_ENDPOINT_FAILED\n")
+		}
+		mark("STREAM_SHARED_ENDPOINT_OK\n")
 		if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
 			Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 			manager.StartReady(0, bootstrapService) != 1 {
@@ -477,6 +481,75 @@ func probeStreamEndpoint() bool {
 		return false
 	}
 	return handleClose(streamPair[0]) == 0
+}
+
+// probeSharedEndpoint checks, in the booted kernel, that stream ends are
+// reference counted (ADR 0089). PID 1 sends a writer to itself attached twice,
+// which leaves two handles naming one end: closing the first must not end the
+// reader's input, closing the second must, and a closed or wrong-direction
+// handle must be refused.
+func probeSharedEndpoint() bool {
+	var pair [2]uint64
+	if streamCreate(unsafe.Pointer(&streamPair[0]), 16) != 0 {
+		return false
+	}
+	reader, writer := streamPair[0], streamPair[1]
+	if channelCreate(unsafe.Pointer(&pair[0]), 16) != 0 {
+		handleClose(writer)
+		handleClose(reader)
+		return false
+	}
+	ok := sharedEndpointHolds(pair, reader, writer)
+	closePair(pair)
+	handleClose(reader)
+	return ok
+}
+
+func sharedEndpointHolds(pair [2]uint64, reader, writer uint64) bool {
+	message := ipc.Message{ProtocolID: 1, Version: 1, Kind: ipc.KindNotification, HandleCount: 2}
+	message.Handles[0], message.Handles[1] = handle.ID(writer), handle.ID(writer)
+	if !sendMessage(pair[0], message) {
+		handleClose(writer)
+		return false
+	}
+	received, status := receive(pair[1], 0)
+	if status != ipc.StatusOK || received.HandleCount != 2 || received.Handles[0] == received.Handles[1] {
+		return false
+	}
+	first, second := uint64(received.Handles[0]), uint64(received.Handles[1])
+	// The moved handle is gone: closing it again is refused.
+	if handleClose(writer) != uint64(ipc.StatusNotFound) {
+		return false
+	}
+	payload := "shared"
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(unsafe.StringData(payload))))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(payload)), 0
+	if streamWrite(first, unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || handleClose(first) != 0 {
+		handleClose(second)
+		return false
+	}
+	// A writing end cannot be read through.
+	streamDescriptor[0] = uint64(uintptr(unsafe.Pointer(&streamReadback[0])))
+	streamDescriptor[1], streamDescriptor[2] = uint64(len(streamReadback)), 0
+	if streamRead(second, unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(kcall.StatusPermissionDenied) ||
+		streamRead(reader, unsafe.Pointer(&streamDescriptor[0]), 24) != 0 || !equalBytes(streamReadback[:streamDescriptor[2]], payload) {
+		handleClose(second)
+		return false
+	}
+	// One writer is still held, so the drained stream is empty, not ended.
+	streamDescriptor[2] = 0
+	if streamRead(reader, unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(kcall.StatusResourceExhausted) {
+		handleClose(second)
+		return false
+	}
+	if handleClose(second) != 0 || handleClose(second) != uint64(ipc.StatusNotFound) {
+		return false
+	}
+	if streamRead(reader, unsafe.Pointer(&streamDescriptor[0]), 24) != uint64(ipc.StatusPeerDied) {
+		return false
+	}
+	// A closed handle is not an endpoint any more.
+	return streamWrite(second, unsafe.Pointer(&streamDescriptor[0]), 24) == uint64(kcall.StatusPermissionDenied)
 }
 
 func probeBlockService() bool {

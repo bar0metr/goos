@@ -489,7 +489,7 @@ for marker in TASK_BLOCK_OK TASK_WAKE_OK TASK_A_OK TASK_B_OK IDLE_TASK_OK SCHEDU
 done
 pass_group scheduler-process
 
-for marker in HANDLE_TABLE_OK KCALL_ABI_OK IPC_WIRE_OK IPC_REQUEST_REPLY_OK IPC_HANDLE_TRANSFER_OK IPC_BOUNDED_OK IPC_PEER_DEATH_OK SHMEM_OBJECT_OK SHMEM_ZERO_COPY_OK SHMEM_RIGHTS_OK STREAM_ENDPOINT_OK TTY_CAPABILITY_OK; do
+for marker in HANDLE_TABLE_OK KCALL_ABI_OK IPC_WIRE_OK IPC_REQUEST_REPLY_OK IPC_HANDLE_TRANSFER_OK IPC_BOUNDED_OK IPC_PEER_DEATH_OK SHMEM_OBJECT_OK SHMEM_ZERO_COPY_OK SHMEM_RIGHTS_OK STREAM_ENDPOINT_OK STREAM_SHARED_ENDPOINT_OK TTY_CAPABILITY_OK; do
 	require_marker "ipc-capabilities.$marker" "$marker" "$log"
 done
 pass_group ipc-capabilities
@@ -693,7 +693,7 @@ require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quo
 # The shell is an ordinary process: its stream share must be a part of the
 # table rather than all of it, or the quota bounds nothing.
 require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
-require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/16$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/24$' 'PID 1 holding the system share' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 # The shell waits for input instead of retrying the read, so after a session of
 # this length its CPU total stays in three digits. Before it was over seven
