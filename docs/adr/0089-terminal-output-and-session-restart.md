@@ -291,6 +291,10 @@ after this change:
 | `echo a \| readline \| readline` | 3006 | 3285 | +9% |
 | `missing-stage` | 1241 | 1365 | +10% |
 
+A second run after the last change of this ADR came out closer to the baseline
+(`uname` 1751, `echo x` 1654, `ls /system` 6133, `cat /system/motd` 2829,
+`missing-stage` 1281); the table keeps the slower run as the cost to plan for.
+
 A line printed now costs a stream write, a switch to the terminal service, its
 console write, and a switch back, instead of one console write: roughly 150 µs
 per line under emulation, which is why `ls /system`, twelve lines, pays most.
