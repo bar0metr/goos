@@ -122,6 +122,9 @@ var (
 	virtioBlockPort             uint16
 )
 
+// userExitAnnounced records that the validation marker for Exit was printed.
+var userExitAnnounced uint64
+
 type nativeCallHandler struct {
 	root uint64
 }
@@ -137,7 +140,13 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	if bootProcessA != nil && handler.root == bootProcessA.AddressSpace().Root {
 		userExited = 1
 	}
-	mark("USER_EXIT_OK")
+	// Once is enough to show the call works. Printed on every exit, the marker
+	// lands at arbitrary places on a console the terminal service owns, which
+	// cannot know the cursor moved (ADR 0089).
+	if userExitAnnounced == 0 {
+		userExitAnnounced = 1
+		mark("USER_EXIT_OK")
+	}
 	return kcall.StatusOK
 }
 
@@ -286,7 +295,9 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 		}
 	}
 	if typeID == handle.TypeStream {
-		closeStreamCapability(cap)
+		// One reference goes with each handle. The end closes only when the
+		// process was its last holder (ADR 0089).
+		dropStreamCapability(cap)
 		return
 	}
 	if typeID != handle.TypeChannel {
@@ -477,6 +488,18 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
+	// Every stream grant becomes one more handle naming its end. Refusing
+	// here, before anything is installed, keeps the unwinding below free of a
+	// count that could not be taken.
+	for _, grant := range grants {
+		if grant.Type == handle.TypeStream {
+			source, _ := bootInitProcess.Handles().Lookup(grant.Handle, grant.Type, capability.Transfer)
+			if !streamRegistry.CanRetain(source.Object(), len(grants)) {
+				abandonSpawn(root, nil, false)
+				return 0, 0, supervisor.LaunchResourceExhausted
+			}
+		}
+	}
 	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
 	spawned.SetName(path[lastSlash(path)+1:])
 	if !ok || spawned.Handles().Available() < len(grants) {
@@ -487,6 +510,12 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	for index, grant := range grants {
 		installed[index], ok = bootInitProcess.Handles().Transfer(spawned.Handles(), grant.Handle, grant.Type, grant.Rights)
 		if !ok {
+			abandonSpawn(root, spawned, false)
+			return 0, 0, supervisor.LaunchCapabilityInstallFailed
+		}
+		if _, derived, _ := spawned.Handles().Describe(installed[index]); !streamRegistry.Placed(grant.Type, derived.Object()) {
+			// Uncounted, so it is closed without dropping a reference.
+			spawned.Handles().Close(installed[index])
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
@@ -550,7 +579,7 @@ func spawnExecutable(path []byte, grants []supervisor.Capability, startupData []
 	}
 	for _, grant := range grants {
 		if grant.Consume {
-			bootInitProcess.Handles().Close(grant.Handle)
+			closeMovedHandle(bootInitProcess.Handles(), grant.Handle)
 		}
 	}
 	return pid, processHandle, supervisor.LaunchOK
@@ -845,9 +874,14 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
 		releaseChannelSlot(channelID)
 	} else if typeID == handle.TypeStream {
-		if !closeStreamCapability(cap) {
+		// Closing a stream handle forgets its reference; the end itself closes
+		// only with its last handle (ADR 0089).
+		closure, closed := streamRegistry.CloseHandle(owner.Handles(), handle.ID(id))
+		if !closed {
 			return kcall.StatusNotFound
 		}
+		finishStreamClosure(closure)
+		return kcall.StatusOK
 	}
 	if !owner.Handles().Close(handle.ID(id)) {
 		return kcall.StatusNotFound
@@ -855,27 +889,42 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 	return kcall.StatusOK
 }
 
-func closeStreamCapability(cap capability.Capability) bool {
-	streamID, writer, valid := stream.DecodeEndpointObject(cap.Object())
-	endpoint, exists := streamRegistry.Lookup(streamID)
-	if !valid || !exists {
-		return false
+// dropStreamCapability forgets the reference of a stream handle that is being
+// discarded, as process teardown does for every handle it visits.
+func dropStreamCapability(cap capability.Capability) bool {
+	streamID, writer, closed, ok := streamRegistry.Drop(cap.Object())
+	if ok {
+		finishStreamClosure(stream.Closure{Stream: streamID, Writer: writer, Closed: closed})
 	}
-	closed := false
-	if writer {
-		closed = endpoint.CloseWriter()
-	} else {
-		closed = endpoint.CloseReader()
+	return ok
+}
+
+// finishStreamClosure acts on an end whose last handle has gone: the peer's
+// waiters observe the closure and the stream is freed once both ends are.
+func finishStreamClosure(closure stream.Closure) {
+	if !closure.Closed {
+		return
 	}
-	if closed {
-		side := uint8(1)
-		if writer {
-			side = 0
+	side := uint8(1)
+	if closure.Writer {
+		side = 0
+	}
+	wakeStreamWaiters(closure.Stream, side, ipc.WaitPeerDied)
+	releaseStreamSlot(closure.Stream)
+}
+
+// closeMovedHandle closes a handle whose authority has moved to another table
+// — an IPC attachment or a consumed launch grant. A channel side lives on in
+// its new holder, so only the handle goes; a stream handle also gives up its
+// reference, which the new holder's copy has already taken.
+func closeMovedHandle(table *handle.Table, id handle.ID) {
+	if typeID, _, found := table.Describe(id); found && typeID == handle.TypeStream {
+		if closure, closed := streamRegistry.CloseHandle(table, id); closed {
+			finishStreamClosure(closure)
 		}
-		wakeStreamWaiters(streamID, side, ipc.WaitPeerDied)
-		releaseStreamSlot(streamID)
+		return
 	}
-	return closed
+	table.Close(id)
 }
 
 func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kcall.Status {
@@ -988,10 +1037,15 @@ func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length
 	if !vm.CopyOut(handler.root, buffer, streamCallData[:count]) || !writeStreamResult(handler.root, descriptor, uint64(count)) {
 		return kcall.StatusInvalidArgument
 	}
-	cap, _ := processRegistry.ByRoot(handler.root)
-	streamCap, _ := cap.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Read)
-	streamID, _, _ := stream.DecodeEndpointObject(streamCap.Object())
-	wakeStreamWaiters(streamID, 1, ipc.WaitMessage)
+	// Writers wait for room for a whole atomic write, so they are woken only
+	// once there is that much; waking them for less would have them refused
+	// and wait again.
+	if endpoint.WriteStatus() != stream.StatusWouldBlock {
+		cap, _ := processRegistry.ByRoot(handler.root)
+		streamCap, _ := cap.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Read)
+		streamID, _, _ := stream.DecodeEndpointObject(streamCap.Object())
+		wakeStreamWaiters(streamID, 1, ipc.WaitMessage)
+	}
 	return kcall.StatusOK
 }
 
@@ -1065,6 +1119,7 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		peerHandles = peer.Handles()
 	}
 	var transfers [ipc.MaxAttachedHandles]ipc.Transfer
+	var transferObjects [ipc.MaxAttachedHandles]uint64
 	transferCount := int(message.HandleCount)
 	if transferCount != 0 && peerHandles == nil {
 		return kcall.StatusPeerDied
@@ -1078,7 +1133,14 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		if rights == 0 {
 			return kcall.StatusPermissionDenied
 		}
+		// The receiver's copy of a stream endpoint is counted after the send,
+		// so the end must have room for it now: a send that cannot be
+		// accounted is refused before anything moves.
+		if typeID == handle.TypeStream && !streamRegistry.CanRetain(attached.Object(), ipc.MaxAttachedHandles) {
+			return kcall.StatusResourceExhausted
+		}
 		transfers[index] = ipc.Transfer{Handle: message.Handles[index], Type: typeID, Rights: rights}
+		transferObjects[index] = attached.Object()
 	}
 	message.HandleCount = 0
 	for index := range message.Handles {
@@ -1095,7 +1157,14 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 			if diag.Enabled && peer != nil {
 				trace(diag.HandleTransferred, owner.ID(), uint64(transfers[index].Handle), channel, uint64(peer.ID()))
 			}
-			owner.Handles().Close(transfers[index].Handle)
+			// A transfer is a move. The receiver's copy is counted before the
+			// sender's handle goes, so a stream end never closes in between,
+			// and a handle attached twice is two copies and one close. The
+			// check above guarantees the count has room.
+			if !streamRegistry.Placed(transfers[index].Type, transferObjects[index]) {
+				panicSerial("stream transfer count refused after check")
+			}
+			closeMovedHandle(owner.Handles(), transfers[index].Handle)
 		}
 	}
 	handler.recordInitSend(status)
@@ -2154,7 +2223,9 @@ func serviceKernel() {
 // derived handles, the registry entry, the process slot, and the address space.
 func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 	if spawned != nil {
-		spawned.Handles().CloseAll(nil)
+		// Only stream handles were counted when installed; the source handles
+		// stay with PID 1, so no end can close here.
+		spawned.Handles().CloseAll(abandonHandle)
 		if registered {
 			processRegistry.Remove(spawned.ID())
 		}
@@ -2162,6 +2233,12 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 	}
 	if !vm.DestroyUserAddressSpace(&pageAllocator, root) {
 		addressSpaceReclaimFailures++
+	}
+}
+
+func abandonHandle(typeID handle.Type, cap capability.Capability) {
+	if typeID == handle.TypeStream {
+		dropStreamCapability(cap)
 	}
 }
 

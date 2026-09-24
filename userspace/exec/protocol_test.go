@@ -267,9 +267,18 @@ func TestStartedCarriesTheInputHandle(t *testing.T) {
 	if !ok {
 		t.Fatal("started refused")
 	}
-	slot, input, ok := DecodeStarted(message)
-	if !ok || slot != 2 || input != 0x100000009 {
-		t.Fatalf("started = %d %#x %v", slot, input, ok)
+	slot, input, correlation, ok := DecodeStarted(message)
+	if !ok || slot != 2 || input != 0x100000009 || correlation != 5 {
+		t.Fatalf("started = %d %#x %d %v", slot, input, correlation, ok)
+	}
+	// The notice has to survive the IPC layer: version 8 carried the
+	// correlation in a notification's header, which ipc.Encode refuses, and
+	// every foreground job was left without its input.
+	var wire [ipc.WireMaxSize]byte
+	if size, encoded := ipc.Encode(message, wire[:]); !encoded {
+		t.Fatal("started notice cannot be sent")
+	} else if decoded, valid := ipc.Decode(wire[:size]); !valid || decoded.Correlation != 0 {
+		t.Fatal("started notice does not round trip through the wire")
 	}
 	if _, ok := DecodeReply(message); ok {
 		t.Fatal("started decoded as a reply")
@@ -283,7 +292,12 @@ func TestStartedCarriesTheInputHandle(t *testing.T) {
 		}
 	}
 	message.HandleCount = 0
-	if _, _, ok := DecodeStarted(message); ok {
+	if _, _, _, ok := DecodeStarted(message); ok {
 		t.Fatal("started without a handle decoded")
+	}
+	message.HandleCount = 1
+	message.Payload[1] = 0
+	if _, _, _, ok := DecodeStarted(message); ok {
+		t.Fatal("started without a job correlation decoded")
 	}
 }

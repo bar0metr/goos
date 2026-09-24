@@ -162,7 +162,7 @@ caller:
 | console input | 256 B ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
 
 Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
-16 channels with 16-message queues, 16 streams with 4 KiB rings, 64 waiters
+24 channels with 16-message queues, 64 streams with 4 KiB rings, 64 waiters
 per wait set, 64 log records, 4 registered shared-memory objects of at most
 16 pages, and a shared image cache of 128 segments and 1024 frames. On top of
 the tables, each process is charged for the channels, streams, tasks, and

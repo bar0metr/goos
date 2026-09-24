@@ -24,6 +24,12 @@ document states the security properties and who holds what.
   Transfer right on the source handle. IPC transfer also removes Transfer from
   the delivered handle and closes the sender's handle, so a received
   capability cannot be forwarded again.
+- **Counted stream ends.** A stream end counts the handles that name it in
+  every table and closes with the last (ADR 0089). Holding a copy of an end
+  confers nothing beyond the end's direction: several processes can write one
+  stream, but only a holder of its reading end reads it, and closing one's own
+  handle cannot close the end for another holder. Counts cannot underflow and
+  are bounded before any handle is installed.
 
 ## Rights
 
@@ -69,7 +75,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | PID 1 slot | Object | PID 1 rights | Derived to | Child rights | Consumed |
 | --- | --- | --- | --- | --- | --- |
 | 1 | lifecycle channel | R W Wait | PID 1 only | - | - |
-| 2 | console device | R W T | VFS, block, virtio-blk, config, log, shell | W | no |
+| 2 | console device | R W T | VFS, block, virtio-blk, config, log | W | no |
 | | | | tty `console` | R W | no |
 | 3 | VFS session, client end | R W Wait T | shell `vfs` | R W Wait | yes |
 | 4 | VFS session, server end | R W Wait T | VFS `session` | R W Wait | yes |
@@ -97,9 +103,26 @@ can hand the same authority to a restarted driver; the dead driver's copies go
 with its teardown (ADR 0078).
 
 Only the terminal service holds the console's read right: nothing else can read
-what is typed (ADR 0082). PID 1 also creates the terminal session channel, whose
-server end goes to the terminal service as `session` and client end to the shell
-as `tty`.
+what is typed (ADR 0082). The shell and the commands hold no console capability
+at all (ADR 0089). PID 1 creates, when it starts the terminal service:
+
+| Object | PID 1 keeps | Derived to | Child rights | Consumed |
+| --- | --- | --- | --- | --- |
+| terminal output stream, reading end | R Wait T | tty `output` | R Wait | no |
+| terminal output stream, writing end | W Wait T | shell `stdout`; every stage's `stdout`/`stderr` that is not piped or redirected | W Wait | no |
+| terminal session, server end | - | tty `session` | R W Wait | yes |
+| terminal session, client end | - | shell `tty` | R W Wait | yes |
+| terminal control, client end | R W Wait T | PID 1 only | - | - |
+| terminal control, server end | - | tty `control` | R W Wait | yes |
+
+PID 1 keeps both ends of the output stream so that neither ever closes: the
+terminal service's reader survives the service, and no writer sees it go away.
+When the terminal service or the shell restarts, PID 1 creates a new session
+(and, for the shell, a new exec channel and new VFS and configuration sessions)
+and hands the survivor its end as a `GTTY` session notice: over the shell's
+exec channel, or over the terminal's control channel, whose other end only PID 1
+holds. The validation build additionally keeps both services' process handles
+for fault injection.
 
 PID 1 also creates channels at run time with `ChannelCreate`: the block
 service's `control` endpoint, over which a restarted driver's channel is
@@ -111,9 +134,11 @@ index entry asks for one (ADR 0073, 0076, 0078, 0080). It keeps only the
 client side of each control endpoint.
 
 No child receives Transfer. After boot, PID 1 still holds slots 1, 2, 5, 7, 9,
-11, 12, 13, 18, 19, and 20, the client sides of the block and config control
-endpoints, and a Wait + Write process handle for each running job stage; the
-Write right is what `ProcessKill` requires (ADR 0067).
+11, 12, 13, 18, 19, and 20, the client sides of the block, config and terminal
+control endpoints, both ends of the terminal output stream, and a Wait + Write
+process handle for each running job stage; the Write right is what
+`ProcessKill` requires (ADR 0067). Slot 7, the exec server end, is replaced by a
+fresh channel's when the shell restarts.
 
 ### Utilities
 
@@ -122,8 +147,8 @@ For each pipeline stage PID 1 grants:
 | Role | Object | Rights |
 | --- | --- | --- |
 | `in` | stream reader: the pipeline's upstream stage, or a stream of its own that the shell feeds with typed lines (foreground) or that is at end of input (background) | R Wait |
-| `stdout` | stream writer, or console device | stream: W Wait; console: W |
-| `stderr` | stream writer, or console device | stream: W Wait; console: W |
+| `stdout` | stream writer: the next stage's pipe, a redirection sink's, or a copy of the terminal's writing end | W Wait |
+| `stderr` | stream writer: a `2>` sink's, or a copy of the terminal's writing end | W Wait |
 | `vfs` | new private VFS session channel, only when the command's entry in `/system/commands` asks for one | R W Wait |
 
 The VFS session is a fresh channel from `ChannelCreate`. PID 1 sends the
@@ -155,10 +180,13 @@ do on its behalf; see [threat-model.md](threat-model.md).
 
 Four further device objects are not tied to hardware discovery:
 
-- **Console**: COM1. Write authorizes `ConsoleWrite` and `LogWrite`; Read
-  authorizes `ConsoleRead`, `ConsoleInterrupt`, and waiting on console input
-  with `WaitAny` (ADR 0059, 0075). Only the terminal service is given Read
-  (ADR 0082).
+- **Console**: COM1. Write authorizes `ConsoleWrite`, `LogWrite` and, in a
+  `goos_diag` build, `Diagnostics`; Read authorizes `ConsoleRead`,
+  `ConsoleInterrupt`, and waiting on console input with `WaitAny` (ADR 0059,
+  0075). Only the terminal service is given Read (ADR 0082). Write goes to the
+  terminal service and to the system services that start before it and report
+  through the log; the shell and commands print through the terminal's output
+  stream instead (ADR 0089).
 - **Log**: Read authorizes `LogRead` and `LogBounds` and nothing else, so the
   log service and the shell read the log without the console's input
   (ADR 0082).
@@ -194,7 +222,9 @@ only process names, states, and accounting. The full list is in
 
 `make test-security` runs host tests for wrong types, missing rights, stale
 and forged IDs, unauthorized transfer, rights escalation, capacity exhaustion,
-manifest rollback, stream direction, and the shared-memory and image mapping
-checks (`internal/capability`, `kernel/handle`, `kernel/ipc`, `kernel/stream`,
+manifest rollback, stream direction, stream reference counts (shared ends
+held open by every holder, moves that keep the count, copies that add to it,
+double closes and forged endpoints refused, the bound), and the shared-memory
+and image mapping checks (`internal/capability`, `kernel/handle`, `kernel/ipc`, `kernel/stream`,
 `kernel/shmem`, `kernel/loader`, `userspace/init`, and others). Quota charging
 and release are tested in `kernel/process`.

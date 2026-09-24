@@ -33,8 +33,8 @@ const (
 // quota at once and one cannot starve the rest.
 //
 // Streams are the limit that binds today: a utility that creates them in a loop
-// used to drain the sixteen the system has and break every later pipeline.
-// Four leaves twelve for the pipelines PID 1 builds.
+// used to drain the table and break every later pipeline. Four is a share of
+// the sixty-four the registry holds (ADR 0089).
 //
 // Pages cover an address space, a loaded image, guarded stacks and a startup
 // page. The largest image is the coreutils multi-call binary; 192 leaves room
@@ -50,9 +50,14 @@ const (
 // and stream endpoints its children communicate through, so its share is the
 // rest of each table rather than an equal slice. This is a larger quota, not a
 // waiver: PID 1 is refused past it like anything else.
+//
+// Only PID 1 can create channels, so its channel share is the whole table. Its
+// stream share covers the most it ever holds at once — four streams for each
+// of the four job slots and the terminal's output stream — with room to spare,
+// and leaves the rest of the registry to everyone else (ADR 0089).
 const (
-	systemChannelLimit = 16
-	systemStreamLimit  = 16
+	systemChannelLimit = 24
+	systemStreamLimit  = 24
 	systemTaskLimit    = 8
 	systemPageLimit    = 512
 )

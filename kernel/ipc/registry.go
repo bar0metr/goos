@@ -1,7 +1,13 @@
 package ipc
 
+// MaxChannels sizes the channel registry. A channel embeds two 16-message
+// queues, about 10.5 KiB, so 24 channels are about 250 KiB of static kernel
+// memory. PID 1, the only process that creates channels, holds fourteen in a
+// running system; the terminal's control channel adds one and restarting the
+// shell or the terminal briefly holds up to four more while the old endpoints
+// are closed (ADR 0089).
 const (
-	MaxChannels      = 16
+	MaxChannels      = 24
 	channelNamespace = uint64(0x4000000000000000)
 	endpointSideBit  = uint64(0x2000000000000000)
 )

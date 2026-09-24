@@ -1,7 +1,13 @@
 package stream
 
+// MaxStreams sizes the registry. Each stream embeds its 4 KiB ring, so the
+// table is 64 x 4 KiB = 256 KiB of static kernel memory; it is a fixed array
+// because the kernel heap never frees (ADR 0065). PID 1 needs at most 17 at
+// once — four per job for its four job slots plus the terminal's output
+// stream — and its quota of 24 leaves 40, ten ordinary processes at their
+// full share of four (ADR 0089).
 const (
-	MaxStreams        = 16
+	MaxStreams        = 64
 	streamNamespace   = uint64(0x1000000000000000)
 	writerEndpointBit = uint64(0x0800000000000000)
 )
@@ -79,4 +85,42 @@ func (registry *Registry) Release(id uint64) (uint64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// endpoint resolves an endpoint object to its live stream and direction.
+func (registry *Registry) endpoint(object uint64) (*Stream, bool, bool) {
+	id, writer, valid := DecodeEndpointObject(object)
+	if !valid {
+		return nil, false, false
+	}
+	stream, found := registry.Lookup(id)
+	return stream, writer, found
+}
+
+// Retain counts one more handle naming the endpoint object. Every path that
+// places a stream capability into a handle table calls it, except creation,
+// which starts each end at one.
+func (registry *Registry) Retain(object uint64) bool {
+	stream, writer, found := registry.endpoint(object)
+	return found && stream.Retain(writer)
+}
+
+// CanRetain reports whether extra more handles may name the endpoint object,
+// so a caller can refuse before it installs anything rather than unwind after.
+func (registry *Registry) CanRetain(object uint64, extra int) bool {
+	stream, writer, found := registry.endpoint(object)
+	return found && stream.CanRetain(writer, extra)
+}
+
+// Drop forgets one handle naming the endpoint object. It returns the stream ID
+// and direction, whether that was the end's last handle, and false when the
+// object names no live stream or the end has no handle counted.
+func (registry *Registry) Drop(object uint64) (id uint64, writer bool, closed bool, ok bool) {
+	stream, writer, found := registry.endpoint(object)
+	if !found {
+		return 0, false, false, false
+	}
+	closed, ok = stream.Drop(writer)
+	id, _, _ = DecodeEndpointObject(object)
+	return id, writer, closed, ok
 }

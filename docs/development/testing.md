@@ -105,6 +105,19 @@ share. The `QUOTA_OK` marker comes from a validation-build check that drives the
 same charge-then-create order `StreamCreate` uses and requires the refusal to
 arrive while registry slots remain.
 
+The release-shell group also asserts the terminal session (ADR 0089). The
+shell's capability list names a write-only `stdout` stream and no console, and
+the shell checks in the validation build that the kernel refuses a read on it
+(`TERMINAL_STREAM_READ_DENIED_OK`). A line typed into `readline` has to be
+printed by it and never run as a command. `fault tty` and `fault shell`, a
+validation-only shell command that asks PID 1 to kill the service, restart each
+once: the terminal's replacement has to serve the running shell's next command,
+the shell's replacement has to be served by the running terminal, and the
+background job the old shell left has to be gone. The ipc-capabilities group's
+`STREAM_SHARED_ENDPOINT_OK` comes from PID 1 sending itself a writer attached
+twice and checking that the end stays open until both copies close, and that
+closed and wrong-direction handles are refused.
+
 The filesystem group also asserts the namespace layout: that `ls /` names every
 mount, that `/system` is the boot image with its twenty utilities listed under
 `/system/bin`, that `mkdir /system/backdoor` is refused with "read-only

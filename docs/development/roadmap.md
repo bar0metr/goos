@@ -15,7 +15,9 @@ The following foundation is already implemented:
 - versioned typed IPC, bounded queues, request/reply, handle passing, waits,
   deadlines, peer-death handling, and shared-memory objects;
 - bounded readiness-only multi-object waits for channels, streams, and processes;
-- userspace TTY, RAMFS, and namespace-scoped VFS services;
+- a userspace terminal service that owns the console's input and relays all
+  shell and command output, restartable independently of the shell;
+- RAMFS and namespace-scoped VFS services;
 - PID 1, bounded supervision, restart policy, lifecycle events, and
   capability-bounded process spawning;
 - interactive native shell;
@@ -330,6 +332,24 @@ three-stage pipeline 3.0 ms instead of 10.2 ms.
 ADR 0084 compiles the kernel's RAMFS and VFS self-tests only into the
 validation build, so the normal kernel links no filesystem code, and drops the
 toolchain line from the boot banner.
+
+ADR 0082 gives the console's input to a userspace terminal service, and ADR 0089
+removes the two limitations it recorded. Stream endpoints are reference counted
+in the kernel, so one writing end can be shared, and the shell's and every
+command's output goes through the terminal service, which redraws the line being
+typed around it; the shell and the commands hold no console capability. The
+terminal service and the shell restart independently: whichever dies is
+relaunched on a fresh session and the survivor is handed the other end, and a
+dead shell's jobs are stopped with it. Building it found that a foreground
+command had never received what was typed while it ran; that is fixed and
+tested. Each printed line now costs a relay through the terminal, about ten
+percent on a one-line command under emulation.
+
+Known gaps left by ADR 0089: the system services that start before the terminal
+still write the console directly, as does the kernel's warning echo, so either
+can land in a line being typed; the terminal's redraw assumes the edited line
+fits one row; and what was typed but not finished is lost if the terminal
+service dies.
 
 ## Priority 5 — Linux ABI compatibility
 

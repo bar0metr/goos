@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. Supersedes the console-session input of ADR 0025 and extends ADR 0016,
-ADR 0059 and ADR 0075.
+ADR 0059 and ADR 0075. The decision that output stays direct, and the
+consequence that the terminal service and the shell are one session restarted
+together, are superseded by ADR 0089.
 
 ## Context
 
