@@ -280,6 +280,14 @@ goos_validation_fault:
     ret
 .size goos_validation_fault, .-goos_validation_fault
 
+.global goos_system_power_off
+.type goos_system_power_off,@function
+goos_system_power_off:
+    movl $36, %eax
+    int $0x80
+    ret
+.size goos_system_power_off, .-goos_system_power_off
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

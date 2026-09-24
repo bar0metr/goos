@@ -12,7 +12,7 @@ import (
 // capability, and the validation build's fault injection (ADR 0089).
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
-	ControlVersion    = uint16(3)
+	ControlVersion    = uint16(4)
 	MaxServiceEntries = 8
 	MaxServiceName    = 15
 	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
@@ -31,6 +31,9 @@ const (
 	// argument, so that its restart is exercised. Only the validation build
 	// carries it out.
 	ControlFault
+	// ControlPowerOff asks PID 1 to flush storage and switch the machine off
+	// (ADR 0092).
+	ControlPowerOff
 )
 
 // The targets ControlFault may name: an interactive service to kill, or the
@@ -52,6 +55,9 @@ const (
 	ControlResetFailed
 	ControlInvalid
 	ControlNotFound
+	// ControlUnsupported answers a power-off the machine cannot perform, for
+	// want of the ACPI tables that say how.
+	ControlUnsupported
 )
 
 type ServiceEntry struct {
@@ -94,7 +100,7 @@ func DecodeControl(message ipc.Message) (ControlOperation, uint8, bool) {
 // slot for ControlKill and a service for ControlFault.
 func validControl(operation ControlOperation, argument uint8) bool {
 	switch operation {
-	case ControlServices, ControlReboot, ControlDiagnostics:
+	case ControlServices, ControlReboot, ControlDiagnostics, ControlPowerOff:
 		return argument == 0
 	case ControlKill:
 		return argument < Slots

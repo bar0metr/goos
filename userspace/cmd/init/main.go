@@ -105,6 +105,9 @@ func systemReset(device uint64) uint64
 //go:linkname validationFault goos_validation_fault
 func validationFault(device uint64) uint64
 
+//go:linkname systemPowerOff goos_system_power_off
+func systemPowerOff(device uint64) uint64
+
 var (
 	manager              supervisor.Manager
 	wire                 [ipc.WireMaxSize]byte
@@ -1215,27 +1218,47 @@ func handleControl(message ipc.Message) {
 		if reply, encoded := execproto.EncodeServices(entries[:count], message.Correlation); encoded {
 			sendMessage(execServer, reply)
 		}
-	case operation == execproto.ControlReboot:
-		correlationOfShell := message.Correlation
-		syslog.Info("reboot requested")
-		correlation++
-		sync, encoded := vfs.SyncRequest(correlation)
-		if !encoded || !sendMessage(vfsControlHandle, sync) {
-			sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
-			return
-		}
-		reply, status := receive(vfsControlHandle, vfsSessionDeadline)
-		synced, valid := vfs.DecodeAddSessionReply(reply)
-		if status != ipc.StatusOK || !valid || synced != vfs.StatusOK || reply.Correlation != correlation {
-			syslog.Error("reboot: storage sync failed")
-			sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
-			return
-		}
+	case operation == execproto.ControlReboot, operation == execproto.ControlPowerOff:
+		shutDown(operation == execproto.ControlPowerOff, message.Correlation)
+	}
+}
+
+// shutDown flushes storage and restarts or switches off the machine. A
+// successful one is never answered; the shell hears only why it failed.
+func shutDown(powerOff bool, correlationOfShell uint64) {
+	name := "reboot"
+	if powerOff {
+		name = "poweroff"
+	}
+	syslog.Info("shutdown requested", syslog.Str("action", name))
+	correlation++
+	sync, encoded := vfs.SyncRequest(correlation)
+	if !encoded || !sendMessage(vfsControlHandle, sync) {
+		sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
+		return
+	}
+	reply, status := receive(vfsControlHandle, vfsSessionDeadline)
+	synced, valid := vfs.DecodeAddSessionReply(reply)
+	if status != ipc.StatusOK || !valid || synced != vfs.StatusOK || reply.Correlation != correlation {
+		syslog.Error("shutdown: storage sync failed", syslog.Str("action", name))
+		sendControlStatus(execproto.ControlSyncFailed, correlationOfShell)
+		return
+	}
+	if !powerOff {
 		write("\nRebooting...\n")
 		systemReset(systemControlHandle)
 		syslog.Error("reboot: reset refused")
 		sendControlStatus(execproto.ControlResetFailed, correlationOfShell)
+		return
 	}
+	write("\nPowering off...\n")
+	if systemPowerOff(systemControlHandle) == uint64(kcall.StatusUnsupported) {
+		syslog.Warn("poweroff: no ACPI power-off on this machine")
+		sendControlStatus(execproto.ControlUnsupported, correlationOfShell)
+		return
+	}
+	syslog.Error("poweroff: power-off refused")
+	sendControlStatus(execproto.ControlResetFailed, correlationOfShell)
 }
 
 // killJob stops every stage of the job in one slot. The kernel retires their

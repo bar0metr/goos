@@ -41,7 +41,10 @@ is described in [boot-chain.md](../security/boot-chain.md).
    a fixed buffer, normalizes region types, and calls `ExitBootServices` with
    the matching key, retrying on a stale key without allocating in between
    (ADR 0002, [memory.md](memory.md)). No firmware service is called after
-   this point.
+   this point. Just before, the kernel records the ACPI RSDP from the UEFI
+   configuration table. Right after, it reads the FADT and DSDT once, checking
+   every checksum and length, and keeps only the port and value that switch the
+   machine off (`kernel/acpi`, ADR 0092).
 
 Any failure in this phase prints a panic line and halts.
 

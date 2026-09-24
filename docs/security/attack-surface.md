@@ -64,6 +64,7 @@ table with type, generation, and rights checks.
 | 33 | `LogBounds` | device handle, Read, log object (ADR 0082) | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 | 35 | `ValidationFault` | validation build only (`Unsupported` otherwise); device handle, Write, system-control object (PID 1 only) | handle lookup only | none: overflows the caller's kernel stack on purpose and ends the machine with a double-fault report (ADR 0091) | no |
+| 36 | `SystemPowerOff` | device handle, Write, system-control object (PID 1 only) | handle lookup only; the port and value come from ACPI tables checked at boot (`kernel/acpi`, ADR 0092) | none: one port write that switches the machine off; `Unsupported` without usable tables | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording

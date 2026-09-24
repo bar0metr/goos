@@ -19,7 +19,7 @@ func TestCommandTableIsConsistent(t *testing.T) {
 			t.Fatalf("%s: impossible arity %d..%d", command.Name, command.MinArgs, command.MaxArgs)
 		}
 	}
-	for _, name := range []string{"cd", "help", "clear", "diag", "log", "services", "reboot", "handles", "caps", "time", "jobs", "kill", "config"} {
+	for _, name := range []string{"cd", "help", "clear", "diag", "log", "services", "reboot", "poweroff", "handles", "caps", "time", "jobs", "kill", "config"} {
 		if !IsBuiltin([]byte(name)) {
 			t.Fatalf("%s is not a builtin", name)
 		}

@@ -435,7 +435,9 @@ func executeCommand(line []byte) {
 	case "kill":
 		killJob(invocation.Arguments[1])
 	case "reboot":
-		reboot()
+		shutDown(execproto.ControlReboot, "reboot")
+	case "poweroff":
+		shutDown(execproto.ControlPowerOff, "poweroff")
 	case "handles":
 		printHandles(false)
 	case "caps":
@@ -1045,7 +1047,7 @@ var (
 	handleTypes    = [...]string{"invalid", "process", "task", "memory", "channel", "device", "irq", "stream"}
 	rightNames     = [...]string{"read", "write", "execute", "transfer", "wait"}
 	serviceStates  = [...]string{"registered", "blocked", "starting", "running", "stopped", "failed"}
-	controlStatus  = [...]string{"", "storage sync failed", "reset refused", "request rejected"}
+	controlStatus  = [...]string{"", "storage sync failed", "refused by the machine", "request rejected", "not found", "not supported on this machine"}
 	serviceEntries [execproto.MaxServiceEntries]execproto.ServiceEntry
 )
 
@@ -1083,13 +1085,16 @@ func printServices() {
 	}
 }
 
-func reboot() {
-	reply, ok := controlExchange(execproto.ControlReboot, 0)
+// shutDown asks PID 1 to reboot or power off. Only a failure is answered.
+func shutDown(operation execproto.ControlOperation, name string) {
+	reply, ok := controlExchange(operation, 0)
 	if !ok || reply.PayloadSize != 1 || int(reply.Payload[0]) >= len(controlStatus) || reply.Payload[0] == 0 {
-		write("reboot: no reply\n")
+		write(name)
+		write(": no reply\n")
 		return
 	}
-	write("reboot: ")
+	write(name)
+	write(": ")
 	write(controlStatus[reply.Payload[0]])
 	write("\n")
 }

@@ -7,6 +7,7 @@ import (
 	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/internal/version"
+	"goos/kernel/acpi"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
@@ -1949,6 +1950,7 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	bootuefi.FindACPIRoot(&bootInfo)
 	status = bootuefi.CaptureAndExit(&bootInfo)
 	if status != 0 {
 		console.WriteString("PANIC: UEFI handoff failed: ")
@@ -1959,6 +1961,13 @@ func main() {
 		}
 	}
 	mark("BOOT_SERVICES_EXITED")
+	// ACPI says how to switch the machine off. The tables are read once, here,
+	// as untrusted firmware input; a machine without them simply cannot power
+	// off (ADR 0092).
+	systemPowerOff, systemPowerOffFound = acpi.FindPowerOff(bootuefi.PhysicalMemory{Limit: vm.IdentityMapLimit}, bootInfo.ACPIRoot)
+	if systemPowerOffFound {
+		mark("ACPI_POWEROFF_OK")
+	}
 	virtioBlock, virtioBlockFound := pci.FindLegacyVirtioBlock(pciConfig{})
 	if !virtioBlockFound || virtioBlock.IRQ != 11 {
 		console.WriteString("PANIC: legacy virtio-blk PCI device not found\n")

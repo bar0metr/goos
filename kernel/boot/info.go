@@ -38,6 +38,8 @@ type Info struct {
 	FirmwareName     string
 	InitramfsAddress uint64
 	InitramfsSize    uint64
+	// ACPIRoot is the physical address of the firmware's RSDP, or zero.
+	ACPIRoot uint64
 }
 
 func (info *Info) AddRegion(region MemoryRegion) bool {

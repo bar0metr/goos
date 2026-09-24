@@ -5,6 +5,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
+	"goos/kernel/acpi"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/device"
 	"goos/kernel/handle"
@@ -98,6 +99,33 @@ func (handler nativeCallHandler) SystemReset(device uint64) kcall.Status {
 	}
 	kernelLogUint(logfmt.Info, "system reset", "pid", uint64(owner.ID()))
 	amd64.SystemReset()
+	return kcall.StatusIOError
+}
+
+// systemPowerOff is the ACPI S5 transition found at boot, if any.
+var (
+	systemPowerOff      acpi.PowerOff
+	systemPowerOffFound bool
+)
+
+// SystemPowerOff switches the machine off through ACPI. Like SystemReset it
+// needs the system-control capability, which only PID 1 holds, and does not
+// return when it works. Without the ACPI tables it answers Unsupported.
+func (handler nativeCallHandler) SystemPowerOff(device uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
+	if !allowed || authority.Object() != deviceSystemControl {
+		return kcall.StatusPermissionDenied
+	}
+	if !systemPowerOffFound {
+		return kcall.StatusUnsupported
+	}
+	kernelLogUint(logfmt.Info, "system power off", "pid", uint64(owner.ID()))
+	amd64.PortWrite(systemPowerOff.Port, 2, uint32(systemPowerOff.Value))
+	// The write takes effect at once; a machine still running has ignored it.
 	return kcall.StatusIOError
 }
 

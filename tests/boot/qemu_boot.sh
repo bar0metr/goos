@@ -6,6 +6,8 @@ reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
 corrupt_log=build/logs/corrupt-volume.log
 stack_log=build/logs/kernel-stack-overflow.log
+poweroff_log=build/logs/poweroff.log
+poweroff_after_log=build/logs/poweroff-after.log
 pid=
 checks=0
 monitor=${TMPDIR:-/tmp}/goos-boot-monitor.$$
@@ -888,5 +890,57 @@ guard_high=${guard#* }
 checks=$((checks + 1))
 require_count kernel-stack.one-boot 'BOOT_SERVICES_EXITED' 1 "$stack_log" 'PANIC: double fault'
 pass_group kernel-stack-overflow
+
+# poweroff flushes storage and switches the machine off through ACPI S5 (ADR
+# 0092). QEMU runs without -no-shutdown here, so it exits by itself when the
+# guest powers off; a second boot from the same disk reads the file back.
+rm -f "$poweroff_log" "$poweroff_after_log"
+poweroff_disk=build/poweroff-virtio-blk.img
+go run ./tools/mkfat32 "$poweroff_disk"
+( sleep 6
+	printf 'write /home/poweroff.txt "kept across poweroff"\n'
+	sleep 2
+	printf 'poweroff\n'
+	sleep 30
+) | qemu-system-x86_64 -machine q35 -m 512M \
+	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-cdrom "$iso" -display none -serial stdio -no-reboot >"$poweroff_log" 2>&1 &
+pid=$!
+elapsed=0
+while kill -0 "$pid" 2>/dev/null && ! grep -q 'Powering off' "$poweroff_log" 2>/dev/null && [ "$elapsed" -lt 60 ]; do
+	sleep 1
+	elapsed=$((elapsed + 1))
+done
+# From the message on, the machine has ten seconds to switch itself off.
+elapsed=0
+while kill -0 "$pid" 2>/dev/null && [ "$elapsed" -lt 10 ]; do
+	sleep 1
+	elapsed=$((elapsed + 1))
+done
+qemu_running=0
+kill -0 "$pid" 2>/dev/null && qemu_running=1
+cleanup
+require_marker poweroff.acpi ACPI_POWEROFF_OK "$poweroff_log"
+require_regex poweroff.message '^Powering off\.\.\.' 'the power-off announced' "$poweroff_log" 'goos> poweroff'
+[ "$qemu_running" -eq 0 ] ||
+	fail_check poweroff.machine-off 'QEMU exited when the guest powered off' 'QEMU still running 10s after the message' "$poweroff_log" 'Powering off'
+checks=$((checks + 1))
+forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log" 'Powering off'
+
+( sleep 6
+	printf 'cat /home/poweroff.txt\n'
+	sleep 3
+) | qemu-system-x86_64 -machine q35 -m 512M \
+	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$poweroff_after_log" 2>&1 &
+pid=$!
+wait_for_marker poweroff-after '^kept across poweroff' 60 "$poweroff_after_log"
+cleanup
+require_regex poweroff.data-kept '^kept across poweroff' 'the file written before poweroff' "$poweroff_after_log" 'goos> cat /home/poweroff.txt'
+pass_group poweroff
 
 printf '\nPASS qemu-boot (%s checks)\n' "$checks"
