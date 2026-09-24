@@ -272,6 +272,14 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'stat /system/bin/ls\n'
 	sleep 1
+	printf 'stat /system/bin\n'
+	sleep 1
+	printf 'stat -m /system\n'
+	sleep 1
+	printf 'stat -b /system/motd\n'
+	sleep 1
+	printf 'stat -x /system\n'
+	sleep 1
 	printf 'mkdir /system/backdoor\n'
 	sleep 1
 	printf 'mkdir /home/demo\n'
@@ -573,6 +581,11 @@ require_marker shell.path-environment 'PATH=/system/bin' "$log" 'args "alpha bet
 require_count shell.stdin-output '^bounded stdin payload$' 2 "$log" 'goos> readline'
 forbid_regex shell.stdin-not-a-command '^bounded: command not found$' 'typed input reached the command, not the shell' "$log" 'goos> readline'
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
+require_regex stat.file-kib '^file [0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes)$' 'a file size in KiB by default' "$log" 'goos> stat /system/bin/ls'
+require_regex stat.directory-size '^directory [1-9][0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 0 directories$' 'a directory sized by its contents' "$log" 'goos> stat /system/bin'
+require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 1 directory$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
+require_regex stat.bytes '^file 16 bytes$' 'stat -b prints exact bytes' "$log" 'goos> stat -b /system/motd'
+require_regex stat.bad-flag '^usage: stat \[-b|-k|-m|-g\] PATH$' 'an unknown unit flag is a usage error' "$log" 'goos> stat -x /system'
 pass_group shell
 
 require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'
