@@ -65,7 +65,7 @@ existing site follows this yet: the UEFI protocol calls in
   leaves are not owned, so an exiting process never frees shared storage
   (ADR 0063).
 - `ImageMap` maps the boot archive user-readable, never writable and never
-  executable, unowned, inside `[0x40200000, 0x40400000)` (ADR 0070).
+  executable, unowned, inside `[0x40200000, 0x40600000)` (ADR 0070, ADR 0087).
 - Read-only segments of images from the system image are backed by frames
   shared between the processes running the image. They are mapped with the
   segment's permissions, which never include write, and without the owned bit;

@@ -111,7 +111,7 @@ decided so far is in the way.
 | Shared-memory window | `[0x40180000, 0x401c0000)` | `vm.UserSharedAddress`/`UserSharedLimit`; the exec page is mapped at its start (`exec.PageAddress`) |
 | DMA window | `0x401c0000`, four pages | `vm.UserDMAAddress`; `DMAAllocate` refuses any other address |
 | PID 1 launch staging page | `0x401ff000` | `supervisor.StagingAddress`, mapped by the kernel |
-| System image window | `[0x40200000, 0x40400000)` | `vm.UserImageAddress`/`UserImageLimit`; `ImageMap` refuses any other address |
+| System image window | `[0x40200000, 0x40600000)` | `vm.UserImageAddress`/`UserImageLimit`; `ImageMap` refuses any other address |
 | Shared image frames | one physical copy per read-only segment | keyed by the image's offset in the boot archive (ADR 0081); mapped at the segment's link address |
 
 There is no source of randomness in the kernel. The TSC is read for the clock

@@ -50,21 +50,26 @@ func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uin
 		return kcall.StatusInvalidArgument
 	}
 	// The image window lies outside the two MiB the bootstrap layout maps, so
-	// the one leaf table covering it is added here rather than in every
-	// address space that will never hold an image.
-	if !owner.Charge(process.ResourcePages, 1) {
-		return kcall.StatusResourceExhausted
+	// the leaf tables covering the image, one per two MiB, are added here
+	// rather than in every address space that will never hold an image. Each
+	// is charged before it is allocated; a table that already exists, as on a
+	// second call, costs nothing. Tables added before a failure stay charged
+	// and are freed with the address space.
+	for region := virtual; region < virtual+pages*vm.PageSize; region += vm.LeafTableSpan {
+		if !owner.Charge(process.ResourcePages, 1) {
+			return kcall.StatusResourceExhausted
+		}
+		added, extended := vm.ExtendUserAddressSpace(&pageAllocator, handler.root, region)
+		if !added {
+			owner.Release(process.ResourcePages, 1)
+		}
+		if !extended {
+			return kcall.StatusResourceExhausted
+		}
 	}
-	if !vm.ExtendUserAddressSpace(&pageAllocator, handler.root, virtual) {
-		owner.Release(process.ResourcePages, 1)
-		return kcall.StatusResourceExhausted
-	}
-	// A second call finds the window already mapped and fails here, which also
-	// returns the page it was charged for: the leaf table was added by the
-	// first call and this one allocated nothing.
+	// A second call finds the window already mapped and fails here.
 	for page := uint64(0); page < pages; page++ {
 		if !vm.CanMapUserPage(handler.root, virtual+page*vm.PageSize) {
-			owner.Release(process.ResourcePages, 1)
 			return kcall.StatusInvalidArgument
 		}
 	}
