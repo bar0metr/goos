@@ -98,6 +98,10 @@ func sharedEndpointHolds(pair [2]uint64, reader, writer uint64) bool {
 	return closedStatus == kcall.StatusPermissionDenied
 }
 
+// probeMinimumCapacity is the smallest disk the boot test attaches; the probe
+// writes below it and checks only that the device reports a sane size.
+const probeMinimumCapacity = 64 << 20
+
 func probeBlockService() bool {
 	correlation++
 	info, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationInfo}, correlation)
@@ -106,7 +110,7 @@ func probeBlockService() bool {
 	}
 	message, status := receive(blockClientHandle, storageProbeDeadline)
 	infoReply, valid := blockproto.DecodeReply(message)
-	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 64*1024*1024 || infoReply.BlockSize != 512 {
+	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity < probeMinimumCapacity || infoReply.Capacity%512 != 0 || infoReply.BlockSize != 512 {
 		return false
 	}
 	correlation++

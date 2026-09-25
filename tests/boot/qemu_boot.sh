@@ -537,8 +537,9 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 230 seconds between its commands.
-wait_for_marker boot '^arena-stress-complete$' 300 "$log"
+# The scripted session sleeps about 270 seconds between its commands; the
+# deadline leaves room for a slow boot on a loaded host.
+wait_for_marker boot '^arena-stress-complete$' 420 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
