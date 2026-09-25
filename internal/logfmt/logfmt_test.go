@@ -105,3 +105,19 @@ func TestAppendFieldDoesNotAllocate(t *testing.T) {
 		t.Fatalf("AppendField allocated %v times per run", allocations)
 	}
 }
+
+func TestTimeOfReadsWhatFormatWrote(t *testing.T) {
+	var line [MaxText]byte
+	for _, nanos := range []uint64{0, 999, 1_500_000_000, 12_345_678_901_234} {
+		size := Format(Record{Time: nanos, Level: Info, Component: []byte("init"), Process: 1, Message: []byte("m")}, line[:])
+		got, ok := TimeOf(line[:size])
+		if !ok || got != nanos/1000 {
+			t.Fatalf("time of %q = %d, %v; want %d", line[:size], got, ok, nanos/1000)
+		}
+	}
+	for _, text := range []string{"", "[", "[ 1.5] x", "[   .000001] x", "[   1.00000x] x", "hello", "[   1.000001 x"} {
+		if _, ok := TimeOf([]byte(text)); ok {
+			t.Fatalf("read a time from %q", text)
+		}
+	}
+}

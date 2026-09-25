@@ -123,6 +123,16 @@ func handleControl(message ipc.Message) {
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
 	case operation == execproto.ControlKill:
 		sendControlStatus(killJob(argument), message.Correlation)
+	case operation == execproto.ControlFault && (argument == execproto.FaultConfig || argument == execproto.FaultLog):
+		process, marker := &configProcessHandle, "CONFIG_FAULT_INJECTED\n"
+		if argument == execproto.FaultLog {
+			process, marker = &logProcessHandle, "LOG_FAULT_INJECTED\n"
+		}
+		status := execproto.ControlNotFound
+		if injectServiceFault(process, marker) {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultVFS:
 		status := execproto.ControlNotFound
 		if injectVFSFault() {

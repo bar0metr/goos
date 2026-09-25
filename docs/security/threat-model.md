@@ -136,7 +136,9 @@ attacker-controlled code.
   restart, independently, each handed a fresh session with the other
   (ADR 0089). The VFS restarts on failure, and PID 1 hands the shell, config
   and log services new sessions over channels they already hold; `/tmp` and
-  the files open at the time are lost (ADR 0099). The block service uses
+  the files open at the time are lost (ADR 0099). The config and log services
+  get the sessions their first launch consumed, and the config service's
+  clients new sessions with it (ADR 0100). The block service uses
   `RestartNever` and stays down after a crash; clients observe `PeerDied`, and
   bounded storage deadlines report I/O errors instead of freezing (ADR 0048,
   0078).

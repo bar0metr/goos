@@ -48,6 +48,10 @@ const (
 	// FaultVFS kills the VFS service, which PID 1 restarts and whose clients
 	// it hands new sessions (ADR 0099).
 	FaultVFS
+	// FaultConfig and FaultLog kill the configuration and log services, which
+	// PID 1 restarts with the sessions they need (ADR 0100).
+	FaultConfig
+	FaultLog
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -110,7 +114,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultVFS
+		return argument >= FaultTerminal && argument <= FaultLog
 	default:
 		return false
 	}

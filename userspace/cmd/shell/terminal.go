@@ -89,6 +89,16 @@ func installFilesystem(session handle.ID) {
 	mark("SHELL_VFS_RENEWED_OK\n")
 }
 
+// installSettings takes the configuration session PID 1 hands over after the
+// configuration service was restarted: the old one died with it (ADR 0100).
+func installSettings(session handle.ID) {
+	if configHandle != 0 {
+		sys.HandleClose(configHandle)
+	}
+	configHandle = session
+	mark("SHELL_CONFIG_RENEWED_OK\n")
+}
+
 func sendTerminal(message ipc.Message) bool {
 	// What the shell printed goes out before it asks for the next line.
 	flushOutput()

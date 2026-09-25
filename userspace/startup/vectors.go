@@ -12,6 +12,10 @@ const (
 	MaxVector  = 255
 )
 
+// RestartVariable is set in the environment of a service PID 1 starts again
+// in the same boot (ADR 0100).
+const RestartVariable = "RESTART"
+
 // EncodeVectors serializes bounded argv and environment vectors independently
 // so the shell-to-init protocol can carry the same representation as GST3.
 func EncodeVectors(arguments [][]byte, environment []Variable, target *[VectorSize]byte) ([]byte, []byte, bool) {

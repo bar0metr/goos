@@ -243,3 +243,37 @@ func validFields(fields []byte) bool {
 	}
 	return true
 }
+
+// TimeOf returns the time of a line Format rendered, in microseconds since
+// boot, read from its `[seconds.micros]` prefix.
+func TimeOf(line []byte) (uint64, bool) {
+	if len(line) < 2 || line[0] != '[' {
+		return 0, false
+	}
+	index := 1
+	for index < len(line) && line[index] == ' ' {
+		index++
+	}
+	seconds, digits := uint64(0), 0
+	for ; index < len(line) && line[index] >= '0' && line[index] <= '9'; index++ {
+		if digits == 12 {
+			return 0, false
+		}
+		seconds = seconds*10 + uint64(line[index]-'0')
+		digits++
+	}
+	if digits == 0 || index+fractionDigits+1 >= len(line) || line[index] != '.' {
+		return 0, false
+	}
+	micros := uint64(0)
+	for _, value := range line[index+1 : index+1+fractionDigits] {
+		if value < '0' || value > '9' {
+			return 0, false
+		}
+		micros = micros*10 + uint64(value-'0')
+	}
+	if line[index+1+fractionDigits] != ']' {
+		return 0, false
+	}
+	return seconds*1_000_000 + micros, true
+}
