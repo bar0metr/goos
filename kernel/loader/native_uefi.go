@@ -26,7 +26,16 @@ var pageScratch [vm.PageSize]byte
 // process address space that has no region map, the kernel's self-test
 // processes. Such an image must carry its own stack.
 func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage, bool) {
-	return LoadImage(allocator, root, Contiguous(data), nil, 0, nil)
+	return LoadImage(allocator, root, Contiguous(data), nil, Origin{}, nil)
+}
+
+// Origin names where an image's bytes live, so a page can be read from there
+// when a process first touches it (ADR 0106): an extent of the system image,
+// by its key, or an executable object, by its identity. The zero Origin is
+// bytes that do not outlive the load, which are loaded whole.
+type Origin struct {
+	Key    uint64
+	Object uint64
 }
 
 // LoadImage validates an image and maps it into an empty process address
@@ -36,13 +45,16 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 // The bytes come from source, an extent of the system image or the pages of a
 // sealed executable object (ADR 0097).
 //
-// With a region map (ADR 0104), each segment becomes a pinned image region
-// and only the pages that hold file bytes are loaded now; the zero-filled rest
-// of a segment, its BSS, is supplied on demand as it is touched. An image that
-// leaves its stack to the kernel gets a stack region below vm.UserStackTop,
-// with an unmapped guard below it. Without a map every page is loaded.
+// With a region map (ADR 0104) and an origin the bytes outlive the load in,
+// each segment becomes a pinned image region that records its origin, and no
+// private page is loaded now: a page is copied from the origin, or zeroed past
+// the segment's file bytes, when the process first touches it (ADR 0106). A
+// large program therefore costs only the pages it uses, and is never copied
+// whole. An image that leaves its stack to the kernel gets a stack region
+// below vm.UserStackTop, with an unmapped guard below it. Without a map, or
+// without an origin, every page is loaded.
 //
-// When shared is not nil and key names the image within the immutable system
+// When shared is not nil and the origin is an extent of the immutable system
 // image, each read-only segment is mapped from frames in shared, filling them
 // on the first load. Those frames are mapped without the owned bit, so the
 // process's teardown leaves them for the next process, and never writable, so
@@ -51,7 +63,9 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 //
 // A failure leaves whatever was mapped in the address space; the caller
 // destroys it, which frees every owned page.
-func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *SharedPages, key uint64, regions *region.Map) (LoadedImage, bool) {
+func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *SharedPages, origin Origin, regions *region.Map) (LoadedImage, bool) {
+	key := origin.Key
+	lazy := regions != nil && (origin.Key != 0 || origin.Object != 0)
 	image, ok := ParseSource(source, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit)
 	if !ok || root == 0 || image.StackTop == 0 && regions == nil {
 		return LoadedImage{}, false
@@ -81,8 +95,18 @@ func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *Sha
 				return LoadedImage{}, false
 			}
 		}
-		if regions != nil && regions.Insert(region.Region{Base: segment.VirtualAddress, Length: length, Protection: protection(segment.Flags),
-			Backing: region.Image, Flags: region.Pinned, Object: key, Offset: segment.FileOffset}) != region.OK {
+		if regions == nil {
+			continue
+		}
+		entry := region.Region{Base: segment.VirtualAddress, Length: length, Protection: protection(segment.Flags),
+			Backing: region.Image, Flags: region.Pinned, Object: origin.Key, Offset: segment.FileOffset}
+		if lazy {
+			entry.Data = segment.FileSize
+			if origin.Object != 0 {
+				entry.Object, entry.Flags = origin.Object, region.Pinned|region.FromObject
+			}
+		}
+		if regions.Insert(entry) != region.OK {
 			return LoadedImage{}, false
 		}
 	}
@@ -90,7 +114,13 @@ func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *Sha
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
 		pages := int(roundUp(segment.MemorySize) / vm.PageSize)
-		if regions != nil {
+		shareable := shared != nil && key != 0 && Shareable(segment)
+		switch {
+		case lazy && !shareable:
+			// Every page arrives on first touch.
+			continue
+		case regions != nil:
+			// Only pages with file bytes; the rest is supplied on demand.
 			pages = int(roundUp(segment.FileSize) / vm.PageSize)
 		}
 		permissions := vm.Permissions{
@@ -98,7 +128,7 @@ func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *Sha
 			Writable:   segment.Flags&SegmentWritable != 0,
 			Executable: segment.Flags&SegmentExecutable != 0,
 		}
-		if pages != 0 && shared != nil && key != 0 && Shareable(segment) {
+		if pages != 0 && shareable {
 			frames, hit := shared.Lookup(key, index, pages)
 			if !hit {
 				frames, hit = fillShared(allocator, shared, key, index, segment, source, pages)

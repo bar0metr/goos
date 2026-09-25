@@ -133,6 +133,11 @@ func releaseExitedProcess(event process.ExitEvent) {
 		// and streams the process created are released by their own registries
 		// when their endpoints close, which may be later than this.
 		exited.Release(process.ResourcePages, exitedPages(exited))
+		if id := exited.Executable(); id != 0 {
+			releasingProcess = exited.ID()
+			dropExecutable(id)
+			releasingProcess = 0
+		}
 	}
 	processRegistry.Remove(event.Process)
 	for index := range spawnedProcesses {
@@ -159,8 +164,7 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 		}
 	}
 	if typeID == handle.TypeMemory && executable.IsObject(cap.Object()) {
-		// The rest of the page reservation is returned with the process.
-		destroyExecutable(nil, cap.Object())
+		dropExecutable(cap.Object())
 		return
 	}
 	if typeID == handle.TypeStream {

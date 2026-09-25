@@ -31,7 +31,7 @@ func ImageExtent(image []byte, offset uint64, size uint64) ([]byte, uint64, bool
 // the same bytes whichever source they come from.
 type Source struct {
 	data     []byte
-	pages    [][]byte
+	page     func(index uint64) ([]byte, bool)
 	pageSize uint64
 	size     uint64
 }
@@ -41,18 +41,15 @@ func Contiguous(data []byte) Source {
 	return Source{data: data, size: uint64(len(data))}
 }
 
-// Paged is a source of size bytes held in whole pages of pageSize bytes, in
-// order; the bytes past size in the last page are not part of it.
-func Paged(pages [][]byte, pageSize uint64, size uint64) (Source, bool) {
-	if pageSize == 0 || size == 0 || uint64(len(pages)) != (size+pageSize-1)/pageSize {
+// Paged is a source of size bytes held in whole pages of pageSize bytes that
+// page returns by number; the bytes past size in the last page are not part
+// of it. page must be a function that captures nothing: the kernel's heap
+// never frees.
+func Paged(page func(index uint64) ([]byte, bool), pageSize uint64, size uint64) (Source, bool) {
+	if page == nil || pageSize == 0 || size == 0 {
 		return Source{}, false
 	}
-	for _, page := range pages {
-		if uint64(len(page)) != pageSize {
-			return Source{}, false
-		}
-	}
-	return Source{pages: pages, pageSize: pageSize, size: size}, true
+	return Source{page: page, pageSize: pageSize, size: size}, true
 }
 
 // Len is the number of bytes in the source.
@@ -65,7 +62,7 @@ func (source Source) Read(offset uint64, length uint64, scratch []byte) ([]byte,
 	if offset > source.size || length > source.size-offset {
 		return nil, false
 	}
-	if source.pages == nil {
+	if source.page == nil {
 		return source.data[offset : offset+length], true
 	}
 	if length == 0 {
@@ -74,14 +71,44 @@ func (source Source) Read(offset uint64, length uint64, scratch []byte) ([]byte,
 	pageSize := source.pageSize
 	first, within := offset/pageSize, offset%pageSize
 	if within+length <= pageSize {
-		return source.pages[first][within : within+length], true
+		page, ok := source.page(first)
+		if !ok || uint64(len(page)) != pageSize {
+			return nil, false
+		}
+		return page[within : within+length], true
 	}
 	if uint64(len(scratch)) < length {
 		return nil, false
 	}
 	for copied := uint64(0); copied < length; {
-		page, within := (offset+copied)/pageSize, (offset+copied)%pageSize
-		copied += uint64(copy(scratch[copied:length], source.pages[page][within:]))
+		index, within := (offset+copied)/pageSize, (offset+copied)%pageSize
+		page, ok := source.page(index)
+		if !ok || uint64(len(page)) != pageSize {
+			return nil, false
+		}
+		copied += uint64(copy(scratch[copied:length], page[within:]))
 	}
 	return scratch[:length], true
+}
+
+// CopyOut copies the length bytes at offset into target, which must hold
+// them, a page at a time.
+func (source Source) CopyOut(offset uint64, target []byte) bool {
+	length := uint64(len(target))
+	if offset > source.size || length > source.size-offset {
+		return false
+	}
+	if source.page == nil {
+		copy(target, source.data[offset:offset+length])
+		return true
+	}
+	for copied := uint64(0); copied < length; {
+		index, within := (offset+copied)/source.pageSize, (offset+copied)%source.pageSize
+		page, ok := source.page(index)
+		if !ok || uint64(len(page)) != source.pageSize {
+			return false
+		}
+		copied += uint64(copy(target[copied:], page[within:]))
+	}
+	return true
 }

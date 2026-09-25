@@ -373,7 +373,7 @@ const (
 const VMRecordSize = uint64(24)
 
 // MaxExecutableWrite bounds the bytes one ExecutableWrite appends.
-const MaxExecutableWrite = uint64(4096)
+const MaxExecutableWrite = uint64(1 << 20)
 
 // ImageDescriptorSize is the fixed length of the record ImageMap writes back:
 // the virtual address the image was mapped at and its length in bytes.

@@ -99,13 +99,12 @@ existing site follows this yet: the UEFI protocol calls in
 - User address space starts at 1 GiB; low addresses are unmapped in every
   process, so null dereferences fault.
 - Every user stack has 64 KiB of unmapped address space directly below it
-  (`loader.StackGuardSize`, ADR 0083, ADR 0088). The userspace linker script
-  gives the 32 KiB stack its own RW+NX segment 64 KiB above the heap. The
-  loader enforces the gap for every image, not only those built by that
-  script: `ParseNative` rejects an image with another segment in the gap or
-  a gap reaching below the user range, and `LoadImage` rejects a gap the
-  kernel maps pages into, now or later (the startup page and the shared, DMA
-  and system image windows). Userspace code has no stack probes, so the gap
+  (`loader.StackGuardSize`, ADR 0083, ADR 0088). The kernel reserves every
+  program's stack itself, below the top of the user range, with that guard
+  recorded as a guard region no mapping may enter (ADR 0104); an image that
+  carries its own stack segment must leave the same gap, which `ParseNative`
+  checks, and `LoadImage` rejects a gap the kernel maps pages into (the probe
+  and startup pages). Userspace code has no stack probes, so the gap
   is sound only because no frame can step over it: `tools/stackframes`
   computes every function's stack depth from `go tool objdump` and fails the
   build for a depth over 65400 bytes (the gap less the return address and the

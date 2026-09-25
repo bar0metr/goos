@@ -493,7 +493,7 @@ func bootContinue() {
 			amd64.Halt()
 		}
 	}
-	loadedInit, loadedImageInit := loader.LoadImage(&pageAllocator, rootInit, loader.Contiguous(initBytes), nil, 0, initProcess.Regions())
+	loadedInit, loadedImageInit := loader.LoadImage(&pageAllocator, rootInit, loader.Contiguous(initBytes), nil, loader.Origin{}, initProcess.Regions())
 	if !loadedImageInit {
 		console.WriteString("PANIC: init native image rejected\n")
 		for {

@@ -203,6 +203,13 @@ firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
 # MEMORY is the guest RAM, in QEMU -m syntax; the Makefile passes it.
 memory=${MEMORY:-512M}
+# An executable far larger than anything the build produces (ADR 0106): the
+# validation build's vmprobe with three MiB of read-only data it never
+# touches, put on the volume the guest mounts, so launching it proves a large
+# program starts without being copied whole.
+variant=$(cut -d' ' -f5 build/config/build)
+go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
+go run ./tools/mkfat32 -put build/bigprobe:/home/tools/bigprobe "$disk"
 rm -f "$log" "$reboot_log"
 
 ( sleep 4
@@ -316,6 +323,8 @@ rm -f "$log" "$reboot_log"
 	sleep 3
 	printf '/home/demo/args piped-file-exec | readline\n'
 	sleep 3
+	printf '/home/tools/bigprobe\n'
+	sleep 25
 	printf '/home/demo/message.txt\n'
 	sleep 2
 	printf '/home/demo/missing\n'
@@ -560,9 +569,9 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 290 seconds between its commands; the
+# The scripted session sleeps about 315 seconds between its commands; the
 # deadline leaves room for a slow boot on a loaded host.
-wait_for_marker boot '^arena-stress-complete$' 420 "$log"
+wait_for_marker boot '^arena-stress-complete$' 480 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -775,6 +784,7 @@ forbid_regex redirection.driver-oom 'VIRTIO_BLK_OUT_OF_MEMORY' 'no virtio-blk he
 pass_group redirection
 
 require_marker vm.probe VM_PROBE_OK "$log" 'goos> vmprobe'
+require_count vm.large-executable '^vm: all checks passed$' 2 "$log" 'goos> /home/tools/bigprobe'
 for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
 	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
 done

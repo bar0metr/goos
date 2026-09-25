@@ -191,11 +191,13 @@ The raw disk image is host-provided and persists across boots.
 
 ### Malicious native image
 
-Images come only from the initramfs built into the ISO. A tampered image is
-still loaded through the bounded native loader: fixed header, at most eight
-page-aligned segments and 256 pages, user range only, no W+X, no overlaps, entry
-in an executable segment, stack in a writable NX segment with a 64 KiB
-unmapped gap below it (docs/kernel/native-images.md). A valid but hostile image runs with
+Images come from the initramfs built into the ISO or, for a command outside
+`/system`, from a file PID 1 read into a sealed executable object. A tampered
+image is still loaded through the bounded native loader: fixed header, at most
+eight page-aligned segments inside the image area, no W+X, no overlaps, entry
+in an executable segment, and a stack the kernel reserves with a 64 KiB guard
+below it (docs/kernel/native-images.md). Its pages are copied in only as it
+touches them, each charged to its page quota. A valid but hostile image runs with
 exactly the manifest PID 1 grants it. Its read-only segments are shared with
 every other process running the same image, but never writable by any of them
 (ADR 0081). Images are not signed or measured, so whoever controls the ISO

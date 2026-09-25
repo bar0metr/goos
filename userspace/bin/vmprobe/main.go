@@ -103,11 +103,18 @@ func check(ok bool, what string) {
 // requires that untouched pages read as zero and cost nothing.
 func checkDemandZero() {
 	const size = uint64(64 << 20)
+	// A program started from a file has its code copied in as it first runs
+	// (ADR 0106); one round of the calls measured below brings theirs in
+	// first, so the measurement counts only what the reservation costs.
+	sys.VMUnmap(reserve(size, kcall.VMRead|kcall.VMWrite), size)
+	sys.VMQuery(0)
+	pagesUsed()
 	before := pagesUsed()
 	base := reserve(size, kcall.VMRead|kcall.VMWrite)
+	reserved := pagesUsed()
 	region, status := sys.VMQuery(base)
 	check(status == kcall.StatusOK && region.Base == base && region.Length == size && region.Backing == 1 && !region.Pinned, "anonymous region reserved")
-	check(pagesUsed() == before, "reservation costs no pages")
+	check(reserved == before, "reservation costs no pages")
 	memory := sys.Window(base, size)
 	for offset := uint64(0); offset < size; offset += 1 << 20 {
 		memory[offset] = byte(offset >> 20)
@@ -119,9 +126,10 @@ func checkDemandZero() {
 	}
 	check(ok, "demand-zero pages")
 	// Sixty-four pages, a page table for each two MiB they are spread over,
-	// and the directories above them.
+	// the directories above them, and any code of this loop run for the
+	// first time.
 	grown := pagesUsed() - before
-	check(grown >= 64 && grown <= 64+32+4, "touched pages charged, untouched not")
+	check(grown >= 64 && grown <= 64+32+4+8, "touched pages charged, untouched not")
 	// Many consecutive pages.
 	for offset := uint64(0); offset < 256*page; offset++ {
 		memory[offset] = byte(offset * 7)

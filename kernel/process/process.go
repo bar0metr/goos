@@ -27,8 +27,11 @@ type Process struct {
 	taskCount    int
 	quota        Quota
 	// regions is the process's virtual-memory region map (ADR 0104).
-	regions  region.Map
-	cpuTicks uint64
+	regions region.Map
+	// executable is the executable object the process was started from and
+	// reads its pages from, or zero (ADR 0106).
+	executable uint64
+	cpuTicks   uint64
 	name     [16]byte
 	nameSize uint8
 }
@@ -68,6 +71,12 @@ func (process *Process) Name() []byte { return process.name[:process.nameSize] }
 func (process *Process) AddressSpace() AddressSpace { return process.addressSpace }
 
 func (process *Process) Handles() *handle.Table { return &process.handles }
+
+// Executable is the executable object the process reads its image from.
+func (process *Process) Executable() uint64 { return process.executable }
+
+// SetExecutable records the executable object the process was started from.
+func (process *Process) SetExecutable(id uint64) { process.executable = id }
 
 // Regions is the process's region map.
 func (process *Process) Regions() *region.Map { return &process.regions }

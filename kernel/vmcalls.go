@@ -7,6 +7,9 @@ package main
 
 import (
 	"goos/internal/capability"
+	bootuefi "goos/kernel/boot/uefi"
+	"goos/kernel/executable"
+	"goos/kernel/loader"
 	"goos/internal/logfmt"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
@@ -116,6 +119,10 @@ func demandFault(root uint64, page uint64, write bool, fetch bool) (bool, uint64
 		pageAllocator.Free(physical)
 		return false, faultQuota
 	}
+	if entry.Backing == region.Image && !fillFromOrigin(entry, page, physical) {
+		pageAllocator.Free(physical)
+		return false, faultInvalid
+	}
 	tables, mapped := vm.MapUserPageAt(&pageAllocator, root, page, physical, regionPermissions(entry.Protection), true)
 	if tables != 0 {
 		owner.Charge(process.ResourcePages, uint32(tables))
@@ -126,6 +133,53 @@ func demandFault(root uint64, page uint64, write bool, fetch bool) (bool, uint64
 	}
 	owner.Charge(process.ResourcePages, 1)
 	return true, 0
+}
+
+// pagingObject is the executable object a fault is reading, for objectPage.
+var pagingObject *executable.Object
+
+// objectPage is the page source of pagingObject; see executablePage.
+func objectPage(index uint64) ([]byte, bool) {
+	if pagingObject == nil {
+		return nil, false
+	}
+	frame, ok := pagingObject.Frame(vm.PhysicalPage, index)
+	if !ok {
+		return nil, false
+	}
+	return vm.PhysicalPage(frame)
+}
+
+// fillFromOrigin copies into the zeroed page at physical the bytes an image
+// region's page holds in its origin: an extent of the system image or an
+// executable object (ADR 0106). A page past the segment's file bytes stays
+// zero. The origin is immutable — the system image for the whole boot, a
+// sealed object for as long as the process holds its reference — so a page
+// read now is the page the loader validated at launch.
+func fillFromOrigin(entry region.Region, page uint64, physical uint64) bool {
+	within := page - entry.Base
+	if within >= entry.Data {
+		return true
+	}
+	count := min(vm.PageSize, entry.Data-within)
+	target, ok := vm.PhysicalPage(physical)
+	if !ok {
+		return false
+	}
+	offset := entry.Offset + within
+	if entry.Flags&region.FromObject != 0 {
+		object, found := executables.Find(entry.Object)
+		if !found || !object.Sealed() {
+			return false
+		}
+		pagingObject = object
+		source, valid := loader.Paged(objectPage, vm.PageSize, object.Size())
+		copied := valid && source.CopyOut(offset, target[:count])
+		pagingObject = nil
+		return copied
+	}
+	image, _, inside := loader.ImageExtent(bootuefi.Initramfs(&bootInfo), entry.Object>>32, entry.Object&0xffffffff)
+	return inside && loader.Contiguous(image).CopyOut(offset, target[:count])
 }
 
 // regionPermissions is the leaf permission of a region protection. A region

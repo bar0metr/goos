@@ -132,7 +132,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// Execute on an image or executable object is the authority to run what
 	// it holds. The filesystem service reads the system image with Read alone
 	// and cannot launch from it.
-	image, imageKey, sourceStatus := launchSource(executable)
+	image, origin, sourceStatus := launchSource(executable)
 	began = launchStageDone(launchLookup, began)
 	if sourceStatus != supervisor.LaunchOK {
 		return 0, 0, sourceStatus
@@ -149,7 +149,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// The region map is built while the image loads and moves into the
 	// process slot once there is one (ADR 0104).
 	launchRegions.Init(vm.IdentityMapLimit, vm.UserAddressLimit)
-	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, imageKey, &launchRegions)
+	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, origin, &launchRegions)
 	began = launchStageDone(launchLoad, began)
 	if !ok {
 		abandonSpawn(root, nil, false)
@@ -226,6 +226,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// image rather than to this process, so they are not charged to it.
 	if pagesUsed := pagesBefore - pageAllocator.Statistics().FreePages - loaded.SharedPagesAllocated; pagesUsed != 0 && !spawned.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		kernelLogUint(logfmt.Warn, "launch over page quota", "pages", pagesUsed)
+		abandonSpawn(root, spawned, true)
+		return 0, 0, supervisor.LaunchResourceExhausted
+	}
+	// A process started from an executable object keeps reading it, so it
+	// holds a reference and, the first time, takes over the charge.
+	if origin.Object != 0 && !adoptExecutable(spawned, origin.Object) {
 		abandonSpawn(root, spawned, true)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}

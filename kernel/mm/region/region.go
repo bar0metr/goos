@@ -75,6 +75,9 @@ const (
 	// structure — its image, stack guard, startup page — and cannot be
 	// unmapped or reprotected through the native VM calls.
 	Pinned Flags = 1 << iota
+	// FromObject says an image region's source is an executable object
+	// rather than an extent of the system image (ADR 0106).
+	FromObject
 )
 
 // Region is one contiguous range of a process's address space.
@@ -88,6 +91,9 @@ type Region struct {
 	// identity, an image's key — and Offset where in it the region starts.
 	Object uint64
 	Offset uint64
+	// Data is how many bytes at the start of an image region come from its
+	// source; the rest of the region is zero-filled (ADR 0106).
+	Data uint64
 }
 
 // End is the first address past the region.
@@ -406,12 +412,22 @@ func (m *Map) removeAt(index int) {
 // head is the part of region below at.
 func head(region Region, at uint64) Region {
 	region.Length = at - region.Base
+	if region.Data > region.Length {
+		region.Data = region.Length
+	}
 	return region
 }
 
-// tail is the part of region from at on, its offset advanced to match.
+// tail is the part of region from at on, its offset and source bytes
+// advanced to match.
 func tail(region Region, at uint64) Region {
-	region.Offset += at - region.Base
+	delta := at - region.Base
+	region.Offset += delta
+	if region.Data > delta {
+		region.Data -= delta
+	} else {
+		region.Data = 0
+	}
 	region.Length = region.End() - at
 	region.Base = at
 	return region

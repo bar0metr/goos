@@ -47,15 +47,19 @@ A command path outside `/system` is a program on a filesystem. PID 1 reads it
 through a VFS session of its own into an executable object: it creates the
 object with its loader capability (handle `0x100000017`) at the file's size,
 appends the file to it, and names the whole sealed object in the launch
-request instead of an image extent. A file that is not a regular file of at
-most 1 MiB, or whose size changes while it is read, is refused. Such a program
+request instead of an image extent. A file that is not a regular file, is
+larger than PID 1's page quota allows, or whose size changes while it is read,
+is refused. The launched process copies the object's pages in as it touches
+them and holds a reference that keeps the object alive while it runs, and the
+object's pages are charged to it rather than to PID 1 (ADR 0106). Such a program
 receives its standard streams and no other grant, and PID 1 closes the object
 once the kernel has answered (ADR 0097). Services are launched only from the
 image, and paths in `/system` outside `/system/bin` are not commands.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
-assembly entry supplies the native kernel-call ABI, while a fixed 32 KiB stack
-and 64 KiB bump-allocation arena bound runtime memory. The host-side converter
+assembly entry supplies the native kernel-call ABI; its stack and heap are
+reservations the kernel supplies pages for as they are touched (ADR 0104),
+bounded by PID 1's page quota. The host-side converter
 accepts only static x86-64 ELF load segments and wraps them in the validated
 GoOS native image envelope.
 

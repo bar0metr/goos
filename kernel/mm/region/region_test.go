@@ -240,3 +240,24 @@ func TestGuardCannotBeOpened(t *testing.T) {
 		t.Fatal("demand-zero backings")
 	}
 }
+
+func TestSplitsKeepSourceBytes(t *testing.T) {
+	m := newMap(t)
+	image := Region{Base: lower, Length: 8 * PageSize, Protection: Read, Backing: Image, Offset: 100, Data: 5*PageSize + 10}
+	m.Insert(image)
+	if status := m.Remove(lower+2*PageSize, PageSize, true); status != OK {
+		t.Fatal(status)
+	}
+	low, _ := m.At(0)
+	high, _ := m.At(1)
+	if low.Length != 2*PageSize || low.Data != 2*PageSize || high.Base != lower+3*PageSize || high.Offset != 100+3*PageSize || high.Data != 2*PageSize+10 {
+		t.Fatalf("pieces %+v %+v", low, high)
+	}
+	if status := m.Remove(lower+5*PageSize, PageSize, true); status != OK {
+		t.Fatal(status)
+	}
+	last, _ := m.At(2)
+	if last.Base != lower+6*PageSize || last.Data != 0 {
+		t.Fatalf("a piece past the source bytes %+v", last)
+	}
+}
