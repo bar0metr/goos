@@ -8,6 +8,6 @@ package version
 
 const (
 	Name    = "GoOS"
-	Release = "0.1.1"
+	Release = "0.1.2"
 	Machine = "x86_64"
 )

@@ -143,6 +143,13 @@ func serve() {
 		if status == kcall.StatusTimeout {
 			continue
 		}
+		if status == kcall.StatusPeerDied {
+			// The block service is gone. A restarted one needs a driver on a
+			// new channel, which the supervisor gives a new instance of this
+			// one; the teardown of this process resets the device (ADR 0101).
+			syslog.Warn("block service gone")
+			sys.Exit(exitBlockGone)
+		}
 		if status != 0 {
 			fatal("VIRTIO_BLK_RECEIVE_FAILED\n")
 		}
@@ -328,11 +335,19 @@ func mark(message string) {
 func write(message string) {
 	sys.ConsoleWriteString(consoleHandle, message)
 }
+
+// Exit codes. Neither is zero, so the supervisor starts the driver again.
+const (
+	exitFailed    = 1
+	exitBlockGone = 2
+)
+
+// fatal reports why the driver stops and exits: a driver spinning here would
+// hold the device, and the supervisor could not replace it.
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	for {
-	}
+	sys.Exit(exitFailed)
 }
 func main() {}

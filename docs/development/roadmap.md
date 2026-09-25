@@ -373,13 +373,14 @@ confined to `userspace/runtime` (ADR 0095), FAT32 runs as its own service
 (ADR 0096), the kernel, PID 1 and shell sources are split by responsibility,
 and `make release-check` gates a release.
 
-GoOS 0.1.2 (in progress, docs/releases/0.1.2.md) prepares storage for Linux
+GoOS 0.1.2 (docs/releases/0.1.2.md) prepares storage for Linux
 compatibility. Programs anywhere outside `/system` run from executable
 objects PID 1 fills from the file (ADR 0097), so a Linux ELF program on the
 persistent volume will have a way to be launched. File data between the VFS
-and FAT32 moves through a shared-memory file cache (ADR 0098), and the VFS
-restarts on failure with its clients handed new sessions (ADR 0099). The milestone
-after 0.1.2 is Priority 5, Linux ELF compatibility.
+and FAT32 moves through a shared-memory file cache (ADR 0098), and the VFS,
+the configuration and log services and the block service restart on failure
+with their clients handed new sessions (ADR 0099, 0100, 0101). The next
+milestone is Priority 5, Linux ELF compatibility.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

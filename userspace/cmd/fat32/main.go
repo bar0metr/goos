@@ -21,6 +21,7 @@ import (
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 )
 
 // requestWait bounds one wait for the next request. Waking without one is not
@@ -146,8 +147,26 @@ func userspaceMain() {
 	base := arena.Current()
 	for {
 		arena.Reset(base)
-		status := sys.IPCWaitReceive(vfsHandle, wire[:], requestWait)
-		if status == kcall.StatusTimeout {
+		// The block endpoint is watched as well as the VFS one. A block
+		// service that restarts takes this channel with it, and an idle
+		// service would otherwise find out only on the next request, which
+		// would fail (ADR 0101).
+		var interests [userwait.MaxObjects]userwait.Interest
+		interests[0] = userwait.Interest{Handle: vfsHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		interests[1] = userwait.Interest{Handle: blockHandle, Events: kcall.WaitPeerClosed}
+		ready, waited := userwait.Any(&interests, 2, requestWait)
+		if waited == kcall.StatusTimeout {
+			continue
+		}
+		if waited != kcall.StatusOK {
+			fatal("FAT32_WAIT_FAILED\n")
+		}
+		if ready.ReadyMask&2 != 0 {
+			syslog.Warn("block endpoint closed")
+			sys.Exit(exitBlockGone)
+		}
+		status := sys.IPCReceive(vfsHandle, wire[:])
+		if status == kcall.StatusNotFound {
 			continue
 		}
 		if status == kcall.StatusPeerDied {
@@ -229,8 +248,9 @@ func mark(message string) {
 
 // Exit codes. Neither is zero, so the supervisor starts the service again.
 const (
-	exitFailed  = 1
-	exitVFSGone = 2
+	exitFailed    = 1
+	exitVFSGone   = 2
+	exitBlockGone = 3
 )
 
 // fatal reports why the service stops and exits, so that the supervisor

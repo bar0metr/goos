@@ -142,6 +142,10 @@ it over before the replacement exists; the next real request is what discovers
 whether the driver works. While it knows the driver is gone it refuses requests
 at once rather than waiting out a deadline against a process that is not there.
 
-The block and filesystem services do not restart. Their clients hold sessions
-rather than a single endpoint, and reconnecting those needs each client to be
-told, which is a larger change than the leaf of the chain needed.
+The block service restarts on failure too (ADR 0101). A restarted instance is
+launched with a new control channel and public endpoint and without a driver or
+filesystem endpoint, and learns the device's geometry from the first request
+after a driver is handed over. The driver exits when its service channel dies,
+and the FAT32 service when its block endpoint closes; both restart after the
+block service, the FAT32 service after the driver, and each hands the new block
+service its endpoint over the control channel.

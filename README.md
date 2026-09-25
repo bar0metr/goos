@@ -290,7 +290,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.1
+GoOS 0.1.2
 
 CPU: x86_64
 Memory: 368 MiB usable
@@ -435,8 +435,12 @@ summarises it and lists its known limitations. GoOS 0.1.1
 ([docs/releases/0.1.1.md](docs/releases/0.1.1.md)) is an architectural
 cleanup before Linux compatibility: executable-image launch authority, FAT32
 as a separate service, no identity-authorized console path, userspace `unsafe`
-confined to `userspace/runtime`, and smaller source files. The next milestone is
-Linux ELF compatibility.
+confined to `userspace/runtime`, and smaller source files. GoOS 0.1.2
+([docs/releases/0.1.2.md](docs/releases/0.1.2.md)) prepares storage for Linux
+compatibility: programs run from the persistent volume through executable
+objects, file data between the VFS and FAT32 moves through a shared file cache,
+and every system service restarts on failure without taking its clients down.
+The next milestone is Linux ELF compatibility.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors. Background jobs can be

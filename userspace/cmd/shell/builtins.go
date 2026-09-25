@@ -36,8 +36,10 @@ func injectFault(target []byte) {
 		service = execproto.FaultConfig
 	} else if argumentIs(target, "log") {
 		service = execproto.FaultLog
+	} else if argumentIs(target, "block") {
+		service = execproto.FaultBlock
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty, shell, fat32, vfs, config, log or kernel-stack\n")
+		write("fault: tty, shell, fat32, vfs, config, log, block or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)

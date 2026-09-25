@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Amends ADR 0018, ADR 0096 and ADR 0098.
+Accepted. Amends ADR 0018, ADR 0096 and ADR 0098. The block service, left
+`RestartNever` here, restarts since ADR 0101.
 
 ## Context
 

@@ -91,26 +91,17 @@ func userspaceMain() {
 	if !ok {
 		fatal("BLOCK_ENDPOINT_MISSING\n")
 	}
-	driverHandle, ok = data.Handle("driver")
-	if !ok {
-		fatal("BLOCK_DRIVER_MISSING\n")
-	}
 	controlHandle, ok = data.Handle("control")
 	if !ok {
 		fatal("BLOCK_CONTROL_MISSING\n")
 	}
-	filesystemHandle, ok = data.Handle("filesystem")
-	if !ok {
-		fatal("BLOCK_FILESYSTEM_MISSING\n")
-	}
-	info, ok := exchange(blockproto.Request{Operation: blockproto.OperationInfo})
-	if !ok || info.Status != blockproto.StatusOK || info.Capacity == 0 || info.BlockSize != 512 {
+	// At boot the driver and the filesystem service are there before this
+	// service. A restarted one starts with neither: PID 1 hands over the
+	// endpoint of each as it starts again after this one (ADR 0101).
+	driverHandle, driverLive = data.Handle("driver")
+	filesystemHandle, _ = data.Handle("filesystem")
+	if driverLive && !describeDevice() {
 		fatal("BLOCK_DRIVER_INFO_FAILED\n")
-	}
-	backend.capacity, backend.blockSize = info.Capacity, info.BlockSize
-	service, ok = blockproto.NewService(&backend)
-	if !ok {
-		fatal("BLOCK_SERVICE_INIT_FAILED\n")
 	}
 	arenaBase = arena.Current()
 	mark("BLOCK_SERVICE_OK\n")
@@ -181,7 +172,9 @@ func control() {
 	} else if replacement, valid := blockproto.DecodeSetDriver(controlMessage); !valid {
 		status = blockproto.StatusInvalidArgument
 	} else {
-		sys.HandleClose(driverHandle)
+		if driverHandle != 0 {
+			sys.HandleClose(driverHandle)
+		}
 		driverHandle, driverLive = replacement, true
 		// The endpoint is installed without probing it. PID 1 hands it over
 		// before the replacement driver exists, so a probe here would time out
@@ -203,6 +196,9 @@ func serve(endpoint handle.ID) {
 	if !valid {
 		return
 	}
+	// A restarted service learns the device from the first request that
+	// needs it, once a driver has been handed over.
+	describeDevice()
 	request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
 	if !validRequest {
 		reject(endpoint)
@@ -232,6 +228,21 @@ func reject(endpoint handle.ID) {
 	if size, ok := ipc.EncodeFrom(&replyMessage, wire[:]); ok {
 		sys.IPCSend(endpoint, wire[:size])
 	}
+}
+
+// describeDevice asks the driver for the device's geometry, once. Until it has
+// an answer the service refuses every request with an I/O error.
+func describeDevice() bool {
+	if backend.capacity != 0 {
+		return true
+	}
+	info, ok := exchange(blockproto.Request{Operation: blockproto.OperationInfo})
+	if !ok || info.Status != blockproto.StatusOK || info.Capacity == 0 || info.BlockSize != 512 {
+		return false
+	}
+	backend.capacity, backend.blockSize = info.Capacity, info.BlockSize
+	service, ok = blockproto.NewService(&backend)
+	return ok
 }
 
 func exchange(request blockproto.Request) (blockproto.Reply, bool) {
@@ -271,12 +282,14 @@ func mark(message string) {
 func write(message string) {
 	sys.ConsoleWriteString(consoleHandle, message)
 }
+
+// fatal reports why the service stops and exits, so that the supervisor
+// restarts it (ADR 0101).
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
 	sys.Diagnostics(consoleHandle)
-	for {
-	}
+	sys.Exit(1)
 }
 func main() {}
