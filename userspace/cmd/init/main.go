@@ -22,7 +22,11 @@ const lifecycleHandle = uint64(0x0000000100000001)
 const serviceDeviceHandle = handle.ID(0x0000000100000002)
 const vfsChannelHandle = handle.ID(0x0000000100000003)
 const vfsServerHandle = handle.ID(0x0000000100000004)
-const vfsControlHandle = uint64(0x0000000100000005)
+
+// vfsControlHandle is PID 1's end of the VFS control endpoint: the boot
+// channel at first, a new one after every VFS restart (ADR 0099).
+var vfsControlHandle = uint64(0x0000000100000005)
+
 const vfsControlServerHandle = handle.ID(0x0000000100000006)
 
 // execServerBoot is the server end of the exec channel created at boot. A

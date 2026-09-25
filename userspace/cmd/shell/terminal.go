@@ -77,6 +77,18 @@ func installTerminal(session handle.ID) {
 	mark("SHELL_TERMINAL_REPLACED_OK\n")
 }
 
+// installFilesystem takes the filesystem session PID 1 hands over after the
+// VFS was restarted: the old one died with it (ADR 0099). The working
+// directory is kept; a later command reports it missing if it was in /tmp,
+// which a restarted VFS starts empty.
+func installFilesystem(session handle.ID) {
+	if vfsHandle != 0 {
+		sys.HandleClose(vfsHandle)
+	}
+	vfsHandle = session
+	mark("SHELL_VFS_RENEWED_OK\n")
+}
+
 func sendTerminal(message ipc.Message) bool {
 	// What the shell printed goes out before it asks for the next line.
 	flushOutput()

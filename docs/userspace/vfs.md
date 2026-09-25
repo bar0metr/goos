@@ -55,6 +55,13 @@ reaches it through a remote backend over the `GFSPRT01` protocol, and mounts it
 when PID 1 hands over the channel with the `SetFilesystem` control operation.
 File data moves through the file cache the two map (ADR 0098): the VFS indexes
 which slot holds which page and serves reads of cached pages itself.
+
+The service restarts on failure, and exits rather than spinning when it cannot
+go on (ADR 0099). PID 1 launches the new instance with a new control endpoint
+and first session and hands the shell, config and log services new sessions
+with a session notice over channels they already hold; the FAT32 service
+restarts behind it and is mounted again. `/tmp` starts empty, and files open
+in the old instance are gone.
 A dead or stalled FAT32 service is an I/O error on those three mounts only; a
 restarted one is attached under the same mounts and open files (ADR 0096). Kernel launch
 grants explicitly identify the client or server side of a channel; neither

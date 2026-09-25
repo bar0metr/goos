@@ -131,12 +131,15 @@ attacker-controlled code.
   shell and commands print, and write anything to the console. It holds nothing
   else: no filesystem, no process control, and a control channel that only
   accepts a session from PID 1.
-- The storage driver, the config service, and the log service restart on
-  failure; the terminal service and the shell always restart, independently,
-  each handed a fresh session with the other (ADR 0089). VFS and the block
-  service use `RestartNever` and stay down after a crash; clients observe
-  `PeerDied`, and bounded storage deadlines report I/O errors instead of
-  freezing (ADR 0048, 0078).
+- The storage driver, the FAT32 service, the config service, and the log
+  service restart on failure; the terminal service and the shell always
+  restart, independently, each handed a fresh session with the other
+  (ADR 0089). The VFS restarts on failure, and PID 1 hands the shell, config
+  and log services new sessions over channels they already hold; `/tmp` and
+  the files open at the time are lost (ADR 0099). The block service uses
+  `RestartNever` and stays down after a crash; clients observe `PeerDied`, and
+  bounded storage deadlines report I/O errors instead of freezing (ADR 0048,
+  0078).
 
 ### Compromised driver
 

@@ -217,8 +217,7 @@ func userspaceMain() {
 			if sys.DiagnosticsTrace(consoleHandle, sessions[:]) == kcall.StatusOK {
 				writeSessions()
 			}
-			for {
-			}
+			sys.Exit(exitFailed)
 		}
 		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
 		if status != kcall.StatusOK {
@@ -367,6 +366,14 @@ func mark(message string) {
 func write(message string) {
 	sys.ConsoleWriteString(consoleHandle, message)
 }
+
+// exitFailed is the code the service exits with when it cannot go on. It is
+// not zero, so the supervisor restarts the service (ADR 0099).
+const exitFailed = 1
+
+// fatal reports why the service stops and exits. The VFS used to spin here,
+// which left every client waiting on a service that would never answer; now
+// PID 1 sees the exit and starts a new one.
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
@@ -374,8 +381,7 @@ func fatal(message string) {
 	if sys.Diagnostics(consoleHandle) == 0 {
 		writeSessions()
 	}
-	for {
-	}
+	sys.Exit(exitFailed)
 }
 
 func writeSessions() {

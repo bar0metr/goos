@@ -151,11 +151,12 @@ func userspaceMain() {
 			continue
 		}
 		if status == kcall.StatusPeerDied {
-			// The VFS is gone and nothing else can reach this service. There is
-			// nothing left to serve; stopping cleanly is not a failure to
-			// restart from.
+			// The VFS is gone and nothing else can reach this service. When
+			// the VFS is restarted, it needs a filesystem service again, and
+			// a new channel to it; exiting with a failure has the supervisor
+			// start one once the VFS is back (ADR 0099).
 			syslog.Warn("vfs endpoint closed")
-			sys.Exit(0)
+			sys.Exit(exitVFSGone)
 		}
 		if status != kcall.StatusOK {
 			fatal("FAT32_RECEIVE_FAILED\n")
@@ -226,13 +227,20 @@ func mark(message string) {
 	}
 }
 
+// Exit codes. Neither is zero, so the supervisor starts the service again.
+const (
+	exitFailed  = 1
+	exitVFSGone = 2
+)
+
+// fatal reports why the service stops and exits, so that the supervisor
+// restarts it rather than the VFS waiting out a deadline on every request.
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		sys.ConsoleWriteString(consoleHandle, message)
 	}
 	sys.Diagnostics(consoleHandle)
-	for {
-	}
+	sys.Exit(exitFailed)
 }
 
 func main() {}

@@ -40,6 +40,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if filesystemStarted && bytesString(spec.Name[:spec.NameSize]) == filesystemName && !renewFilesystemChannels(&spec) {
 		return 0, false
 	}
+	if vfsStarted && bytesString(spec.Name[:spec.NameSize]) == "vfs" && !renewVFSChannels(&spec) {
+		return 0, false
+	}
 	executable, processName, located := locateExecutable(spec.Executable[:spec.ExecutableSize])
 	if located != supervisor.LaunchOK {
 		if !supervisionComplete {
@@ -68,7 +71,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName)
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName || name == "vfs")
 	if keep && launched == supervisor.LaunchOK {
 		switch name {
 		case driverName:
@@ -79,6 +82,8 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			shellProcessHandle = keepProcess(shellProcessHandle, event.ProcessHandle)
 		case filesystemName:
 			filesystemProcessHandle = keepProcess(filesystemProcessHandle, event.ProcessHandle)
+		case "vfs":
+			vfsProcessHandle = keepProcess(vfsProcessHandle, event.ProcessHandle)
 		}
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
@@ -99,9 +104,16 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if name == driverName {
 		driverStarted = true
 	}
+	if name == "vfs" {
+		if vfsStarted {
+			vfsRestarted()
+		}
+		vfsStarted = true
+	}
 	if name == filesystemName {
 		attachFilesystem()
 		filesystemStarted = true
+		renewVFSClients()
 	}
 	if name == "tty" {
 		if ttyStarted {

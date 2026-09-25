@@ -125,8 +125,9 @@ In every build it then:
 1. maps the exec page and creates the block service's control channel and the
    channel between the VFS and the FAT32 service;
 2. registers and starts `vfs` (VFS with the RAMFS root and the read-only system
-   image at `/system`) and `block`, both `RestartNever`, `virtio-blk`, and
-   `fat32`, both restarted on failure; once `fat32` runs, hands the VFS its
+   image at `/system`), restarted on failure with its clients handed new
+   sessions (ADR 0099), `block`, `RestartNever`, and `virtio-blk` and `fat32`,
+   both restarted on failure; once `fat32` runs, hands the VFS its
    channel to it and waits for the volume to be mounted at `/persist`, `/home`,
    and `/state` (ADR 0070, 0071, 0078, 0096);
 3. in a validation build, probes the block service with an info, write, read,

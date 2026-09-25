@@ -123,6 +123,12 @@ func handleControl(message ipc.Message) {
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
 	case operation == execproto.ControlKill:
 		sendControlStatus(killJob(argument), message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultVFS:
+		status := execproto.ControlNotFound
+		if injectVFSFault() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultFilesystem:
 		status := execproto.ControlNotFound
 		if injectFilesystemFault() {
