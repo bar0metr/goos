@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
+	"goos/userspace/fat32"
 	"testing"
 	"time"
 )
@@ -46,24 +47,19 @@ func testSystemImage(t testing.TB) []byte {
 	return buffer.Bytes()
 }
 
-// startedService is a service with the mounts a booted system has.
-func startedService(t testing.TB, device fat32Device) *Service {
+// startedService is a service with the mounts a booted system has. Its
+// persistent volume is served by a FAT32 service over the protocol the real
+// one speaks, run in memory (see loopback).
+func startedService(t testing.TB, device fat32.Device) *Service {
 	t.Helper()
 	service := &Service{}
 	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
 		t.Fatal("service init failed")
 	}
-	if device != nil && !service.MountPersistent(device) {
+	if device != nil && !service.AttachFilesystem(newLoopback(device)) {
 		t.Fatal("persistent mount failed")
 	}
 	return service
-}
-
-type fat32Device interface {
-	ReadAt(offset uint64, target []byte) bool
-	WriteAt(offset uint64, data []byte) bool
-	Flush() bool
-	Capacity() uint64
 }
 
 type testBlockDevice struct{ data []byte }
@@ -344,7 +340,7 @@ func TestRejectedVolumeLeavesTheRestOfTheNamespace(t *testing.T) {
 	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
 		t.Fatal("service init failed")
 	}
-	if service.MountPersistent(device) {
+	if service.AttachFilesystem(newLoopback(device)) {
 		t.Fatal("an oversized volume was mounted")
 	}
 	// A refused volume must not take the rest of the namespace with it: the
@@ -371,12 +367,13 @@ func TestPartiallyMountedVolumeIsNotHalfInstalled(t *testing.T) {
 	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
 		t.Fatal("service init failed")
 	}
-	if !service.MountPersistent(device) {
+	if !service.AttachFilesystem(newLoopback(device)) {
 		t.Fatal("a well-formed volume was refused")
 	}
-	// Mounting twice must not install a second set of the same mounts.
-	if service.MountPersistent(device) {
-		t.Fatal("the volume was mounted twice")
+	// Attaching again, as after a service restart, must not install a second
+	// set of the same mounts.
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("a restarted service was refused")
 	}
 	for _, path := range []string{"/persist", "/home", "/state"} {
 		if stat := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); stat.Status != vfs.StatusOK {

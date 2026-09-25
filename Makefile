@@ -32,6 +32,8 @@ BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
 VIRTIO_BLOCK_ELF = $(OUT_DIR)/userspace/virtio-blk.elf
+FAT32_IMAGE = $(OUT_DIR)/userspace/fat32
+FAT32_ELF = $(OUT_DIR)/userspace/fat32.elf
 LOG_IMAGE = $(OUT_DIR)/userspace/log
 LOG_ELF = $(OUT_DIR)/userspace/log.elf
 CONFIG_IMAGE = $(OUT_DIR)/userspace/config
@@ -98,7 +100,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -115,7 +117,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAM
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -177,6 +179,14 @@ $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loade
 	@$(STACKFRAMES) $(VIRTIO_BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
+$(FAT32_ELF): $(call go_deps,./userspace/cmd/fat32) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/fat32
+
+$(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(FAT32_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(FAT32_ELF) $@
+
 $(LOG_ELF): $(call go_deps,./userspace/cmd/logd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/logd
@@ -215,7 +225,7 @@ initramfs: userspace
 	@# A command whose directory was removed leaves its image behind; the
 	@# archive takes only the commands the tree still has.
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
@@ -253,6 +263,21 @@ test-all:
 	$(MAKE) test-boot
 	$(MAKE) test-stress STRESS_RUNS=2
 
+# The release gate (0.1.1 specification §7). The reproducible-build test runs
+# first: it cleans build/ and builds the ISO twice, which also proves that a
+# clean build succeeds. Everything else then runs against that tree. Timing
+# benchmarks are not a gate: they depend on the host (ADR 0085).
+release-check:
+	$(MAKE) test-reproducible
+	$(MAKE) lint
+	$(MAKE) docs
+	$(MAKE) test
+	$(MAKE) iso
+	@tests/release/check.sh $(OUT_DIR) $(ISO)
+	$(MAKE) test-boot
+	$(MAKE) test-stress STRESS_RUNS=2
+	@tests/release/check.sh $(OUT_DIR) $(ISO)
+
 test-unit:
 	$(BUILD_ENV) go test ./...
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
@@ -262,7 +287,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -310,7 +335,8 @@ test-performance: test-microbench
 lint:
 	$(BUILD_ENV) go vet ./...
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
-	@! grep -R --include='*.go' -n '"unsafe"' kernel internal --exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 2>/dev/null
+	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
+	@tests/lint/unsafe_boundary.sh
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './build/*')
@@ -353,6 +379,11 @@ docs:
 	@test -f docs/adr/0091-guarded-boot-stack-and-double-fault-stack.md
 	@test -f docs/adr/0092-acpi-power-off.md
 	@test -f docs/releases/0.1.0.md
+	@test -f docs/releases/0.1.1.md
+	@test -f docs/adr/0093-executable-image-launch-authority.md
+	@test -f docs/adr/0094-debug-console-capability-policy.md
+	@test -f docs/adr/0095-userspace-runtime-and-unsafe-boundary.md
+	@test -f docs/adr/0096-separate-fat32-filesystem-service.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -424,6 +455,7 @@ docs:
 	@test -f docs/development/debugging.md
 	@test -f docs/development/coding-style.md
 	@test -f docs/development/adding-service.md
+	@tests/docs/check.sh
 
 clean:
 	@rm -rf $(BUILD_DIR)
@@ -448,6 +480,7 @@ help:
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  test            run host unit and artifact integration tests' \
+	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \

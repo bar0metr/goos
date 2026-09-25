@@ -185,9 +185,30 @@ func zero(value []byte) bool {
 // other process can redirect where storage requests go.
 const (
 	ControlProtocolID  = uint64(0x47424c4b43)
-	ControlVersion     = uint16(1)
+	ControlVersion     = uint16(2)
 	operationSetDriver = byte(1)
+	// operationSetFilesystem replaces the endpoint the filesystem service
+	// reaches this service over, after that service restarts (ADR 0096).
+	operationSetFilesystem = byte(2)
 )
+
+func SetFilesystemRequest(server handle.ID, correlation uint64) (ipc.Message, bool) {
+	if server == 0 || correlation == 0 {
+		return ipc.Message{}, false
+	}
+	return ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, Payload: [ipc.MaxPayload]byte{operationSetFilesystem}, PayloadSize: 1,
+		Handles: [ipc.MaxAttachedHandles]handle.ID{server}, HandleCount: 1}, true
+}
+
+func DecodeSetFilesystem(message ipc.Message) (handle.ID, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest ||
+		message.Correlation == 0 || message.PayloadSize != 1 || message.Payload[0] != operationSetFilesystem ||
+		message.HandleCount != 1 || message.Handles[0] == 0 {
+		return 0, false
+	}
+	return message.Handles[0], true
+}
 
 func SetDriverRequest(driver handle.ID, correlation uint64) (ipc.Message, bool) {
 	if driver == 0 || correlation == 0 {

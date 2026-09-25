@@ -1,6 +1,6 @@
 # ADR 0009: Native kernel-call ABI and validated user memory
 
-Status: Accepted
+Status: Accepted. DebugWrite was retired by ADR 0094; the rest stands.
 
 ## Context
 

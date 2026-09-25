@@ -35,7 +35,7 @@ normal builds contain none of this code. A diagnostic build:
 - records the last 128 kernel events in a ring: wait-any begin, ready,
   re-check, completion, timeout, take, cancel on exit, and denial with reason;
   channel create and close; handle transfer; process spawn and exit;
-- times the five `spawnExecutable` stages (image lookup, address space, image
+- times the five `spawnExecutable` stages (image authority and extent check, address space, image
   load, process setup, task install);
 - answers the `Diagnostics` native operation with a full dump.
 

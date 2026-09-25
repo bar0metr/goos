@@ -444,6 +444,15 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'echo "pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz" | readline | readline | readline\n'
 	sleep 3
+	# The FAT32 service parses the volume in a process of its own (ADR 0096).
+	# Killing it leaves the rest of the namespace working, and its restart
+	# serves the same volume under the mounts and handles the VFS kept.
+	printf 'fault fat32\n'
+	sleep 3
+	printf 'ls /tmp; echo after-fat32-fault\n'
+	sleep 1
+	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
+	sleep 2
 	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
@@ -522,7 +531,7 @@ for marker in HANDLE_TABLE_OK KCALL_ABI_OK IPC_WIRE_OK IPC_REQUEST_REPLY_OK IPC_
 done
 pass_group ipc-capabilities
 
-for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK USER_DEBUG_WRITE_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
+for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK LAUNCH_AUTHORITY_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK USER_CONSOLE_CAP_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
 	require_marker "userspace.$marker" "$marker" "$log"
 done
 pass_group userspace
@@ -543,6 +552,17 @@ require_count storage.driver-started '^VIRTIO_BLK_DRIVER_OK$' 2 "$log" BLOCK_DRI
 # cascade through the storage stack.
 require_count storage.block-service-stable '^BLOCK_SERVICE_OK$' 1 "$log" BLOCK_SERVICE_OK
 forbid_regex storage.no-block-restart 'service exited service=block' 'the block service did not restart' "$log" BLOCK_DRIVER_LOST_OK
+# The persistent volume is served by a filesystem service of its own, and a
+# crash in it is recovered from like the driver's (ADR 0096).
+require_window storage.fat32-process ' fat32$' 'fat32 listed by ps as a process of its own' "$log" 'goos> echo after-shell-restart' 'goos> mkdir'
+require_min_count storage.fat32-started '^FAT32_SERVICE_OK$' 2 "$log" FAT32_SERVICE_OK
+require_marker storage.fat32-fault FAT32_FAULT_INJECTED "$log" 'fault fat32'
+require_marker storage.fat32-block-renewed BLOCK_FILESYSTEM_REPLACED_OK "$log" 'fault fat32'
+require_marker storage.fat32-reattached FAT32_REATTACHED_OK "$log" 'fault fat32'
+require_marker storage.fat32-restarted FAT32_RESTARTED_OK "$log" 'fault fat32'
+require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
+require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
+require_count storage.vfs-not-restarted '^VFS_SERVICE_OK$' 1 "$log" 'fault fat32'
 pass_group storage
 
 for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do

@@ -17,11 +17,11 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	syslog "goos/userspace/log"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	"goos/userspace/tty"
 	userwait "goos/userspace/wait"
-	"runtime"
-	"unsafe"
 )
 
 var (
@@ -33,8 +33,6 @@ var (
 	controlHandle handle.ID
 	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
-	heapPointer   uintptr
-	inputByte     byte
 	line          tty.Discipline
 	screen        tty.Screen
 	// reading is the correlation of the client's outstanding read, or zero.
@@ -49,7 +47,6 @@ var (
 	outputClosed    bool
 	outputReported  bool
 	outputBuffer    [kcall.MaxStreamIO]byte
-	outputRequest   [3]uint64
 	newline         = [1]byte{'\n'}
 )
 
@@ -58,43 +55,11 @@ var (
 // through while output is streaming.
 const outputBatch = 16
 
-//go:extern _heap_start
-var heapStartSymbol [0]byte
-
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname consoleRead goos_console_read
-func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname consoleInterrupt goos_console_interrupt
-func consoleInterrupt(device uint64) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcReceive goos_ipc_receive
-func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname streamRead goos_stream_read
-func streamRead(stream uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname processExit goos_exit
-func processExit(code uint64)
-
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { fatal("TTY_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		fatal("TTY_STARTUP_UNAVAILABLE\n")
 	}
 	data, ok := startup.Decode(startupWire[:])
@@ -119,9 +84,9 @@ func userspaceMain() {
 		fatal("TTY_CONTROL_MISSING\n")
 	}
 	mark("TTY_TERMINAL_OK\n")
-	base := heapPointer
+	base := arena.Current()
 	for {
-		heapPointer = base
+		arena.Reset(base)
 		serveConsole()
 		serveOutput()
 		serveControl()
@@ -135,12 +100,12 @@ func userspaceMain() {
 // What has been typed of the current line is kept for the new shell.
 func serveControl() {
 	for controlHandle != 0 {
-		status := ipcReceive(uint64(controlHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
-		if status == uint64(ipc.StatusNotFound) {
+		status := sys.IPCReceive(controlHandle, wire[:])
+		if status == ipc.StatusNotFound {
 			return
 		}
 		if status != 0 {
-			handleClose(uint64(controlHandle))
+			sys.HandleClose(controlHandle)
 			controlHandle = 0
 			return
 		}
@@ -153,12 +118,12 @@ func serveControl() {
 			// Only PID 1 holds the other end, and it sends nothing else;
 			// any handle a malformed message carried is not kept.
 			for index := 0; index < int(message.HandleCount); index++ {
-				handleClose(uint64(message.Handles[index]))
+				sys.HandleClose(message.Handles[index])
 			}
 			continue
 		}
 		if sessionHandle != 0 {
-			handleClose(uint64(sessionHandle))
+			sys.HandleClose(sessionHandle)
 		}
 		sessionHandle, sessionClosed = session, false
 		reading, interruptQueued, endQueued = 0, false, false
@@ -169,11 +134,15 @@ func serveControl() {
 // serveConsole applies everything the console has: the interrupt first, which
 // the kernel keeps out of the input ring, then each byte.
 func serveConsole() {
-	if consoleInterrupt(uint64(consoleHandle)) == 0 {
+	if sys.ConsoleInterrupt(consoleHandle) == kcall.StatusOK {
 		apply(line.Feed(0x03))
 	}
-	for consoleRead(uint64(consoleHandle), unsafe.Pointer(&inputByte), 1) == 0 {
-		apply(line.Feed(inputByte))
+	for {
+		input, status := sys.ConsoleRead(consoleHandle)
+		if status != kcall.StatusOK {
+			break
+		}
+		apply(line.Feed(input))
 	}
 }
 
@@ -184,13 +153,11 @@ func serveConsole() {
 func serveOutput() {
 	relayed := false
 	for batch := 0; batch < outputBatch && !outputClosed; batch++ {
-		outputRequest[0] = uint64(uintptr(unsafe.Pointer(&outputBuffer[0])))
-		outputRequest[1], outputRequest[2] = uint64(len(outputBuffer)), 0
-		status := streamRead(uint64(outputHandle), unsafe.Pointer(&outputRequest[0]), 24)
-		if status == uint64(kcall.StatusResourceExhausted) {
+		count, status := sys.StreamRead(outputHandle, outputBuffer[:])
+		if status == kcall.StatusResourceExhausted {
 			break
 		}
-		if status != 0 || outputRequest[2] == 0 || outputRequest[2] > uint64(len(outputBuffer)) {
+		if status != kcall.StatusOK || count == 0 || count > len(outputBuffer) {
 			// PID 1 keeps a writing end for as long as it runs, so this is
 			// not an ordinary end of output; stop waiting on the stream
 			// rather than spin on it.
@@ -202,7 +169,7 @@ func serveOutput() {
 			writeBytes(screen.Hide())
 			relayed = true
 		}
-		data := outputBuffer[:outputRequest[2]]
+		data := outputBuffer[:count]
 		writeBytes(data)
 		screen.Output(data)
 	}
@@ -269,8 +236,8 @@ func reply(result tty.Result, text []byte) bool {
 
 func serveSession() {
 	for !sessionClosed {
-		status := ipcReceive(uint64(sessionHandle), unsafe.Pointer(&wire[0]), ipc.WireMaxSize)
-		if status == uint64(ipc.StatusNotFound) {
+		status := sys.IPCReceive(sessionHandle, wire[:])
+		if status == ipc.StatusNotFound {
 			return
 		}
 		if status != 0 {
@@ -314,7 +281,7 @@ func closeSession() {
 	sessionClosed = true
 	reading = 0
 	if sessionHandle != 0 {
-		handleClose(uint64(sessionHandle))
+		sys.HandleClose(sessionHandle)
 		sessionHandle = 0
 	}
 }
@@ -394,7 +361,7 @@ func awaitWork() {
 
 func send(message ipc.Message) bool {
 	size, ok := ipc.Encode(message, wire[:])
-	return ok && ipcSend(uint64(sessionHandle), unsafe.Pointer(&wire[0]), uintptr(size)) == 0
+	return ok && sys.IPCSend(sessionHandle, wire[:size]) == 0
 }
 
 func decodeWire() (ipc.Message, bool) {
@@ -418,12 +385,12 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	sys.ConsoleWriteString(consoleHandle, message)
 }
 
 func writeBytes(value []byte) {
 	if len(value) != 0 {
-		consoleWrite(uint64(consoleHandle), unsafe.Pointer(&value[0]), uintptr(len(value)))
+		sys.ConsoleWrite(consoleHandle, value[:])
 	}
 }
 
@@ -433,42 +400,9 @@ func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	processExit(1)
+	sys.Exit(1)
 	for {
 	}
 }
 
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() { heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol)) }
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start, end := heapPointer, heapPointer+size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("TTY_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

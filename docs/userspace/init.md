@@ -31,11 +31,17 @@ after bootstrap, the shell-exec channel. A returned bit mask can identify both;
 PID 1 then performs the typed receives, issues correlated launch requests, and
 continues only after the replacement Process and Task exist.
 
-Launch requests identify an executable by a normalized absolute path. The
-kernel resolves that path from the immutable boot archive, validates
-the native image, assigns a fresh process identifier from a bounded pool, and
-creates a new address space and initial task. Empty components and parent
-traversal are rejected.
+PID 1 is its own executable source. Before it launches anything it maps the
+immutable system image read-only (`ImageMap`, handle `0x100000015`), and it
+resolves every executable path there with `exec.LocateImage`: the path must be
+canonical and under `/system/`, and hard links resolve to the program they name.
+A missing path is answered "command not found" without asking the kernel.
+Launch requests (lifecycle version 7) then identify the executable as an extent
+of the image, `{image handle, offset, length}`, plus a display name for `ps`.
+The kernel resolves no path: it requires Execute on the image handle, checks
+that the extent lies inside the image, validates the native image, assigns a
+fresh process identifier from a bounded pool, and creates a new address space
+and initial task (ADR 0093).
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
 assembly entry supplies the native kernel-call ABI, while a fixed 32 KiB stack
@@ -119,8 +125,13 @@ being accepted as a session request.
 
 ## Startup phases
 
-Services start in two phases. The first registers and launches `vfs`, `block`
-and `virtio-blk`, whose endpoints PID 1 holds from boot. The second starts the
+Services start in two phases. The first registers and launches `vfs`, `block`,
+`virtio-blk` and `fat32`, whose endpoints PID 1 holds from boot or creates
+before registering them. Once `fat32` runs, PID 1 hands the VFS its channel to
+it through the VFS control endpoint and waits for the persistent volume to be
+mounted, so the services started next find `/state` (ADR 0096). `fat32`
+restarts on failure; PID 1 then gives the new instance fresh channels to the
+VFS and the block service and hands their other ends over as at first start. The second starts the
 log service and then the shell.
 
 The split exists because the log service's VFS session cannot be handed over at

@@ -19,7 +19,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, bad := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultKernelStack + 1}} {
+	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultFilesystem + 1}} {
 		if _, ok := EncodeControl(bad.operation, bad.argument, 7); ok {
 			t.Fatalf("encoded %#v", bad)
 		}
@@ -41,7 +41,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, request := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlDiagnostics, 0}, {ControlFault, FaultTerminal}, {ControlFault, FaultShell}, {ControlFault, FaultKernelStack}} {
+	}{{ControlDiagnostics, 0}, {ControlFault, FaultTerminal}, {ControlFault, FaultShell}, {ControlFault, FaultKernelStack}, {ControlFault, FaultFilesystem}} {
 		encoded, ok := EncodeControl(request.operation, request.argument, 11)
 		operation, argument, decoded := DecodeControl(encoded)
 		if !ok || !decoded || operation != request.operation || argument != request.argument {

@@ -20,6 +20,11 @@ const (
 	// StatusPermissionDenied is what a read-only backend answers to a
 	// mutation, so an immutable mount is distinguishable from a bad request.
 	StatusPermissionDenied
+	// StatusIOError is a backend that could not be reached or did not answer
+	// usably: a filesystem served by another process that has died, stalled
+	// past its deadline, or sent a malformed reply (ADR 0096). Nothing in the
+	// kernel produces it.
+	StatusIOError
 )
 
 type Kind uint8

@@ -16,8 +16,10 @@ read-only media, and backend I/O errors.
 The service core depends on a narrow backend interface containing capacity,
 logical block size, read, write, and flush operations. It does not know about
 PCI, virtio queues, FAT, paths, or VFS handles. A dedicated endpoint lets the
-FAT32 backend in the VFS service translate file semantics into block operations
-without acquiring device authority.
+FAT32 filesystem service translate file semantics into block operations
+without acquiring device authority. That service is a process of its own
+between the VFS and the block service (ADR 0096); it restarts on failure, and
+PID 1 hands the block service and the VFS fresh endpoints to the new instance.
 
 The kernel discovers the QEMU legacy virtio-blk PCI function through PCI
 configuration mechanism 1. PID 1 receives three independently typed authorities:

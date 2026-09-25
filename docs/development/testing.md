@@ -28,6 +28,27 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   a measurement, not a gate.
 - `make test-performance` runs `test-microbench` and then the host
   microbenchmarks, writing every report under `build/reports/`.
+- `make lint` runs `go vet`, the `gofmt` check, and
+  `tests/lint/unsafe_boundary.sh`, which refuses `unsafe` in the kernel outside
+  `uefi`, `vm`, and `amd64`, and `unsafe`, `//go:linkname`, and `//go:extern` in
+  userspace outside `userspace/runtime` (ADR 0095). The script tests itself
+  first by planting each forbidden form in a scratch tree.
+- `make docs` checks that the required documents exist and runs
+  `tests/docs/check.sh`: every relative Markdown link resolves, every ADR has
+  a status and a decision, and the current release has notes.
+- `make release-check` is the release gate. It runs `test-reproducible`
+  first — which cleans `build/` and builds twice, so a clean build is part of
+  the gate — then lint, docs, `make test`, the ISO, `tests/release/check.sh`,
+  `test-boot`, and a two-guest `test-stress`, and the release checks once more
+  at the end. The release checks require notes for the version in
+  `internal/version/version.go`, a kernel that reports it, no validation marker
+  or fault-injection report in any normal image, no retired `DebugWrite` stub,
+  and no untracked or ignored file outside `build/`. Timing measurements are
+  not part of it: they depend on the host.
+
+When comparing timings between two trees, put both disk images on the same
+host volume: QEMU writes the image file synchronously, so a slower volume
+shows up as slower persistent writes (ADR 0096).
 
 Use `make test` during the normal edit loop. Use `make test-all` before delivery
 of changes that affect the kernel, native userspace, startup protocols, storage,
@@ -206,7 +227,7 @@ The `help` case launches nothing and shows the measurement floor. The serial
 transcript is kept in `build/logs/latency-<variant>.log`. In a `DIAG=1` build
 the script ends with
 `diag` and adds the `DIAG clock` and `DIAG launch` lines to the report: per
-stage of `spawnExecutable` (image lookup, address-space creation, image load,
+stage of `spawnExecutable` (image authority and extent check, address-space creation, image load,
 process and grant setup, task install), the number of launches since boot and
 their total and average time. Failed lookups are counted too. Numbers from
 QEMU TCG describe the emulated system on that host, not hardware.

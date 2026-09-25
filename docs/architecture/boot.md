@@ -2,7 +2,7 @@
 
 This document follows `main` in `kernel/main.go` from firmware entry to the
 steady-state kernel loop, then PID 1's service startup in
-`userspace/cmd/init/main.go`. It describes order and mechanism. Exact serial
+`userspace/cmd/init/main.go` and `services.go`. It describes order and mechanism. Exact serial
 output is deliberately not listed; it differs between the normal and the
 validation build (see [Build variants](#build-variants)).
 
@@ -103,10 +103,13 @@ kernel halts.
 
 ## PID 1 and service start order
 
-PID 1 is a freestanding TinyGo program (ADR 0023). In a validation build it
-first:
+PID 1 is a freestanding TinyGo program (ADR 0023). It first maps the
+read-only system image through its image capability: every executable it
+launches is found there (ADR 0093). In a validation build it then:
 
-1. probes a native byte stream end to end;
+1. proves that the kernel refuses launches without Execute authority, outside
+   the image, or of bytes that are not a native image (`LAUNCH_AUTHORITY_OK`),
+   and probes a native byte stream end to end;
 2. registers `fault-probe` (restart on failure) and adopts the already running
    PID 3 as its first instance;
 3. handles each fault-probe exit through the supervisor, which relaunches
@@ -115,11 +118,13 @@ first:
 
 In every build it then:
 
-1. maps the exec page and creates the block service's control channel;
-2. registers and starts `vfs` (VFS with the RAMFS root, the read-only system
-   image at `/system`, and the FAT32 volume at `/persist`, `/home`, and
-   `/state`) and `block`, both `RestartNever`, and `virtio-blk`, restarted on
-   failure (ADR 0070, 0071, 0078);
+1. maps the exec page and creates the block service's control channel and the
+   channel between the VFS and the FAT32 service;
+2. registers and starts `vfs` (VFS with the RAMFS root and the read-only system
+   image at `/system`) and `block`, both `RestartNever`, `virtio-blk`, and
+   `fat32`, both restarted on failure; once `fat32` runs, hands the VFS its
+   channel to it and waits for the volume to be mounted at `/persist`, `/home`,
+   and `/state` (ADR 0070, 0071, 0078, 0096);
 3. in a validation build, probes the block service with an info, write, read,
    and flush exchange;
 4. starts `config` and then `log`, both restarted on failure; a failure to
@@ -135,10 +140,11 @@ In every build it then:
    exec channel, and the next process of each running job, bounded by the
    restart backoff while a restart is pending (ADR 0051, 0064, 0078).
 
-Each launch is a correlated request on the lifecycle channel. The kernel
-validates the capability manifest, finds the image in the boot archive, loads
-it, installs handles, binds the startup block, and creates the task
-(ADR 0022, 0024, 0031, 0062).
+Each launch is a correlated request on the lifecycle channel that names the
+executable as an extent of the system image. The kernel checks Execute on the
+image capability and the extent's bounds, validates the capability manifest,
+loads the image, installs handles, binds the startup block, and creates the
+task (ADR 0024, 0031, 0062, 0093).
 
 ## Build variants
 

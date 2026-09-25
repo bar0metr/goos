@@ -55,11 +55,12 @@ OVMF (UEFI firmware, pflash, read-only)
    the native image loader, and runs it with the fixed capability layout.
    USTAR header checksums are verified on every lookup, which catches damage,
    not tampering.
-6. **Services and commands.** PID 1 asks the kernel to launch
-   `/system/<service>` and `/system/bin/<command>`. The kernel resolves every
-   launch in the same archive with `initramfs.Locate`; there is no path by which
-   a file on `/persist`, `/home`, `/state`, or `/tmp` can become a process
-   (ADR 0022, 0030). The VFS service mounts the same archive read-only at
+6. **Services and commands.** PID 1 maps the archive read-only, resolves
+   `/system/<service>` and `/system/bin/<command>` in it, and asks the kernel to
+   launch the extent it found, under an image capability with Execute. The
+   kernel checks that the extent lies inside the same archive and validates the
+   bytes as a native image; there is no path by which a file on `/persist`,
+   `/home`, `/state`, or `/tmp` can become a process (ADR 0022, 0030, 0093). The VFS service mounts the same archive read-only at
    `/system` and validates it as a whole at mount time (ADR 0070). PID 1 reads
    the command index `/system/commands` through VFS and grants a VFS session
    only to commands whose entry asks for one (ADR 0080).

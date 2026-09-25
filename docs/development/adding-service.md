@@ -25,20 +25,22 @@ the protocol header). See `userspace/block/protocol.go`.
 - starts with `//go:build goos_userspace` and `package main`;
 - exports `userspaceMain` (called by `_start` in `userspace/runtime/amd64.S`)
   and keeps an empty `func main() {}`;
-- declares the native calls it uses with `//go:linkname`, for example
-  `//go:linkname startupRead goos_startup_read`. The stubs are in
-  `userspace/runtime/amd64.S`;
-- provides the runtime hooks (`runtime.initHeap`, `runtime.alloc`,
-  `runtime.free`, `runtime.GC`, ...) as a bump arena between `_heap_start` and
-  `_heap_end`. `runtime.alloc` **must zero** every allocation (ADR 0048). Copy
-  the hooks from an existing service.
+- makes native calls through the typed wrappers in `userspace/runtime/sys`
+  (`sys.StartupRead`, `sys.IPCWaitReceive`, `sys.ConsoleWriteString`, ...),
+  never through stubs of its own; `make lint` refuses `unsafe`, `//go:linkname`,
+  and `//go:extern` outside `userspace/runtime` (ADR 0095);
+- links the allocator by importing `userspace/runtime/arena`, calls
+  `arena.Init()` first thing in `userspaceMain`, and registers its
+  out-of-memory report with `arena.OnExhausted`. A service loop takes
+  `arena.Current()` once its long-lived state exists and `arena.Reset`s to it
+  before each request.
 
 ## 3. Startup and named handles
 
 At start, read and decode the startup block, then resolve every role by name:
 
 ```go
-if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+if sys.StartupRead(&startupWire) != kcall.StatusOK {
     fatal("NAME_STARTUP_UNAVAILABLE\n")
 }
 data, ok := startup.Decode(startupWire[:])
@@ -57,9 +59,9 @@ Wait on all endpoints with one readiness-only `WaitAny`, then receive from each
 ready endpoint:
 
 ```go
-arenaBase = heapPointer
+arenaBase := arena.Current()
 for {
-    heapPointer = arenaBase // request-bounded allocation
+    arena.Reset(arenaBase) // request-bounded allocation
     var interests [userwait.MaxObjects]userwait.Interest
     for index, endpoint := range endpoints {
         interests[index] = userwait.Interest{Handle: endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -70,7 +72,7 @@ for {
     }
     for index, endpoint := range endpoints {
         if result.ReadyMask&(1<<index) != 0 {
-            // ipcReceive, decode, dispatch, reply
+            // sys.IPCReceive, decode, dispatch, reply
         }
     }
 }
@@ -118,7 +120,7 @@ of code.
 
 ## 7. Supervision and capabilities
 
-Register the service in `userspace/cmd/init/main.go` with a
+Register the service in `userspace/cmd/init/services.go` with a
 `supervisor.Definition`:
 
 ```go

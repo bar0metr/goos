@@ -7,15 +7,14 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
-	"goos/kernel/mm/vm"
 	"goos/kernel/vfs"
-	blockproto "goos/userspace/block"
+	"goos/userspace/fsproto"
 	syslog "goos/userspace/log"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
 	userwait "goos/userspace/wait"
-	"runtime"
-	"unsafe"
 )
 
 const maxSessions = 12
@@ -25,130 +24,128 @@ var (
 	consoleHandle        handle.ID
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
-	blockHandle          handle.ID
 	startupWire          [startup.Size]byte
 	wire                 [ipc.WireMaxSize]byte
-	blockWire            [ipc.WireMaxSize]byte
-	blockDescriptor      [3]uint64
-	descriptor           = [3]uint64{uint64(uintptr(unsafe.Pointer(&wire[0]))), ipc.WireMaxSize, 100000}
-	heapPointer          uintptr
-	arenaBase            uintptr
+	arenaBase            arena.Mark
 	sessions             [maxSessions]uint64
 	correlation          uint64
 	waitInterests        *[userwait.MaxObjects]userwait.Interest
 	waitCount            int
 	liveSessions         int
-	persistentMounted    bool
 )
 
-type blockDevice struct{}
+// filesystem is the channel to the persistent filesystem service, or zero
+// while there is none (ADR 0096). PID 1 hands it over when that service starts
+// and again after every restart.
+var (
+	filesystem        handle.ID
+	filesystemWire    [ipc.WireMaxSize]byte
+	filesystemRequest ipc.Message
+	filesystemReply   ipc.Message
+)
 
-func (blockDevice) ReadAt(offset uint64, target []byte) bool {
-	for len(target) != 0 {
-		chunk := len(target)
-		if chunk > blockproto.MaxData {
-			chunk = blockproto.MaxData
-		}
-		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationRead, Offset: offset, Length: uint32(chunk)})
-		if !ok || reply.Status != blockproto.StatusOK || len(reply.Data) != chunk {
-			return false
-		}
-		copy(target[:chunk], reply.Data)
-		target = target[chunk:]
-		offset += uint64(chunk)
-	}
-	return true
-}
-func (blockDevice) WriteAt(offset uint64, data []byte) bool {
-	for len(data) != 0 {
-		chunk := len(data)
-		if chunk > blockproto.MaxData {
-			chunk = blockproto.MaxData
-		}
-		reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationWrite, Offset: offset, Length: uint32(chunk), Data: data[:chunk]})
-		if !ok || reply.Status != blockproto.StatusOK {
-			return false
-		}
-		data = data[chunk:]
-		offset += uint64(chunk)
-	}
-	return true
-}
-func (blockDevice) Flush() bool {
-	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationFlush})
-	return ok && reply.Status == blockproto.StatusOK
-}
+// filesystemTransport carries backend calls to the filesystem service. Each
+// exchange is bounded by the protocol deadline; a service that has died is
+// forgotten at once, so later calls fail without waiting.
+type filesystemTransport struct{}
 
-// Capacity asks the block service how large the device really is, so the
-// filesystem can check the geometry its image declares against it. The answer
-// is cached: it does not change while the device is attached, and the
-// filesystem asks once per mount.
-func (blockDevice) Capacity() uint64 {
-	if blockCapacity != 0 {
-		return blockCapacity
+func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+	if filesystem == 0 {
+		return fsproto.Reply{}, false
 	}
-	reply, ok := blockExchange(blockproto.Request{Operation: blockproto.OperationInfo})
-	if !ok || reply.Status != blockproto.StatusOK {
-		return 0
+	correlation++
+	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest) {
+		return fsproto.Reply{}, false
 	}
-	blockCapacity = reply.Capacity
-	return blockCapacity
+	size, ok := ipc.EncodeFrom(&filesystemRequest, filesystemWire[:])
+	if !ok {
+		return fsproto.Reply{}, false
+	}
+	status := sys.IPCSend(filesystem, filesystemWire[:size])
+	// A reply to an earlier request that timed out may still be queued; it is
+	// discarded rather than taken for this one's.
+	for status == kcall.StatusOK {
+		status = sys.IPCWaitReceive(filesystem, filesystemWire[:], fsproto.RequestDeadline)
+		if status != kcall.StatusOK {
+			break
+		}
+		if !ipc.DecodeInto(filesystemWire[:wireSize(filesystemWire[:])], &filesystemReply) {
+			return fsproto.Reply{}, false
+		}
+		if filesystemReply.Correlation < correlation {
+			continue
+		}
+		reply, valid := fsproto.DecodeReply(&filesystemReply)
+		return reply, valid && filesystemReply.Correlation == correlation
+	}
+	if status == kcall.StatusPeerDied {
+		dropFilesystem()
+	}
+	return fsproto.Reply{}, false
 }
 
-var blockCapacity uint64
+// dropFilesystem forgets a filesystem service that has gone. Its mounts answer
+// with I/O errors until PID 1 hands over a restarted one.
+func dropFilesystem() {
+	sys.HandleClose(filesystem)
+	filesystem = 0
+	service.DetachFilesystem()
+	syslog.Warn("filesystem service gone")
+}
 
-//go:extern _heap_start
-var heapStartSymbol [0]byte
+// attachFilesystem installs the channel to a filesystem service that has just
+// started. The first attach mounts its volume; a later one checks that the
+// restarted service serves the volume the mounts already name.
+func attachFilesystem(client handle.ID) vfs.Status {
+	if filesystem != 0 {
+		sys.HandleClose(filesystem)
+	}
+	filesystem = client
+	first := !service.PersistentMounted()
+	if service.AttachFilesystem(filesystemTransport{}) {
+		if first {
+			mark("FAT32_MOUNT_OK\n")
+			syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
+		} else {
+			mark("FAT32_REATTACHED_OK\n")
+			syslog.Info("filesystem service reattached", syslog.Str("path", "/persist"))
+		}
+		return vfs.StatusOK
+	}
+	// A volume that cannot be mounted is not a reason for the system to stop.
+	// The root filesystem and the system image are up, so the machine comes to
+	// a prompt with no persistent storage rather than to nothing at all, which
+	// is the state from which the volume can be inspected (ADR 0077).
+	if first {
+		syslog.Error("persistent volume not mounted", syslog.Str("reason", "image rejected or device unavailable"))
+		write("[WARN] no persistent storage\n")
+	}
+	return vfs.StatusBackendError
+}
 
-//go:extern _heap_end
-var heapEndSymbol [0]byte
-
-//go:linkname diagnostics goos_diagnostics
-func diagnostics(device uint64, address uintptr) uint64
-
-//go:linkname consoleWrite goos_console_write
-func consoleWrite(device uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcSend goos_ipc_send
-func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcWaitReceive goos_ipc_wait_receive
-func ipcWaitReceive(channel uint64, descriptor unsafe.Pointer, size uintptr) uint64
-
-//go:linkname ipcReceive goos_ipc_receive
-func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname handleClose goos_handle_close
-func handleClose(id uint64) uint64
-
-//go:linkname startupRead goos_startup_read
-func startupRead(address unsafe.Pointer, size uintptr) uint64
-
-//go:linkname imageMap goos_image_map
-func imageMap(device uint64, virtual uint64, address unsafe.Pointer) uint64
+// wireSize is the length of the message at the start of data, from its header.
+func wireSize(data []byte) int {
+	size := ipc.WireHeaderSize + (int(data[24]) | int(data[25])<<8) + int(data[26])*8
+	if size > len(data) {
+		return len(data)
+	}
+	return size
+}
 
 // mountSystemImage maps the read-only boot image and mounts it at /system, so
 // the executables the launch path resolves are the ones a listing shows. The
 // capability is the only authority the service has over the image, and the
 // mapping it produces is not writable.
 func mountSystemImage(imageHandle handle.ID) bool {
-	var descriptor [2]uint64
-	if imageMap(uint64(imageHandle), vm.UserImageAddress, unsafe.Pointer(&descriptor[0])) != 0 {
-		return false
-	}
-	if descriptor[0] != vm.UserImageAddress || descriptor[1] == 0 || descriptor[1] > vm.UserImageLimit-vm.UserImageAddress {
-		return false
-	}
-	// SAFETY: the kernel mapped exactly descriptor[1] bytes of the boot image
-	// read-only at descriptor[0] before returning success, and the mapping
-	// lives for as long as this address space does.
-	return service.MountSystemImage(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(descriptor[0]))), int(descriptor[1])))
+	image, status := sys.ImageMap(imageHandle)
+	return status == kcall.StatusOK && service.MountSystemImage(image)
 }
 
 //export userspaceMain
 func userspaceMain() {
-	runtimeInitHeap()
-	if startupRead(unsafe.Pointer(&startupWire[0]), startup.Size) != 0 {
+	arena.Init()
+	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
+	if sys.StartupRead(&startupWire) != 0 {
 		fatal("VFS_STARTUP_UNAVAILABLE\n")
 	}
 	startupData, validStartup := startup.Decode(startupWire[:])
@@ -169,10 +166,6 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_CONTROL_MISSING\n")
 	}
-	blockHandle, found = startupData.Handle("block")
-	if !found {
-		fatal("VFS_BLOCK_MISSING\n")
-	}
 	imageHandle, found := startupData.Handle("image")
 	if !found {
 		fatal("VFS_IMAGE_MISSING\n")
@@ -185,25 +178,15 @@ func userspaceMain() {
 	if !mountSystemImage(imageHandle) {
 		fatal("VFS_IMAGE_MOUNT_FAILED\n")
 	}
-	// A volume that cannot be mounted is not a reason for the system to stop.
-	// The root filesystem and the system image are already up, so the machine
-	// boots to a prompt with no persistent storage rather than to nothing at
-	// all, which is the state from which the volume can be inspected.
-	persistentMounted = service.MountPersistent(blockDevice{})
-	if !persistentMounted {
-		syslog.Error("persistent volume not mounted", syslog.Str("reason", "image rejected or device unavailable"))
-		write("[WARN] no persistent storage\n")
-	}
-	arenaBase = heapPointer
+	// The persistent volume is not mounted here: it is served by the FAT32
+	// service, which PID 1 starts after this one and hands over through the
+	// control endpoint (ADR 0096).
+	arenaBase = arena.Current()
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
 	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", "/system"))
-	if persistentMounted {
-		mark("FAT32_MOUNT_OK\n")
-		syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
-	}
 	for {
-		heapPointer = arenaBase
+		arena.Reset(arenaBase)
 		var interests [userwait.MaxObjects]userwait.Interest
 		var sessionIndexes [maxSessions]int
 		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -218,7 +201,7 @@ func userspaceMain() {
 		waitInterests, waitCount = &interests, count
 		if count-1 != liveSessions {
 			write("VFS_SESSIONS_CORRUPT\n")
-			if diagnostics(uint64(consoleHandle), uintptr(unsafe.Pointer(&sessions))) == 0 {
+			if sys.DiagnosticsTrace(consoleHandle, sessions[:]) == kcall.StatusOK {
 				writeSessions()
 			}
 			for {
@@ -250,7 +233,7 @@ func userspaceMain() {
 			session := sessions[index]
 			message, receiveStatus := receiveNow(session)
 			if receiveStatus == ipc.StatusPeerDied {
-				handleClose(session)
+				sys.HandleClose(handle.ID(session))
 				sessions[index] = 0
 				liveSessions--
 				continue
@@ -263,26 +246,6 @@ func userspaceMain() {
 	}
 }
 
-func blockExchange(request blockproto.Request) (blockproto.Reply, bool) {
-	correlation++
-	message, ok := blockproto.EncodeRequest(request, correlation)
-	if !ok {
-		return blockproto.Reply{}, false
-	}
-	size, ok := ipc.Encode(message, blockWire[:])
-	if !ok || ipcSend(uint64(blockHandle), unsafe.Pointer(&blockWire[0]), uintptr(size)) != 0 {
-		return blockproto.Reply{}, false
-	}
-	blockDescriptor[0], blockDescriptor[1], blockDescriptor[2] = uint64(uintptr(unsafe.Pointer(&blockWire[0]))), ipc.WireMaxSize, blockproto.RequestDeadline
-	if ipcWaitReceive(uint64(blockHandle), unsafe.Pointer(&blockDescriptor[0]), uintptr(len(blockDescriptor)*8)) != 0 {
-		return blockproto.Reply{}, false
-	}
-	payloadSize := int(blockWire[24]) | int(blockWire[25])<<8
-	received, valid := ipc.Decode(blockWire[:ipc.WireHeaderSize+payloadSize+int(blockWire[26])*8])
-	reply, validReply := blockproto.DecodeReply(received)
-	return reply, valid && validReply && received.Correlation == correlation
-}
-
 func pollControl() bool {
 	message, status := receiveNow(uint64(controlHandle))
 	if status == ipc.StatusNotFound {
@@ -291,9 +254,17 @@ func pollControl() bool {
 	if status != ipc.StatusOK {
 		fatal("VFS_CONTROL_FAILED\n")
 	}
+	if client, ok := vfs.DecodeSetFilesystem(message); ok {
+		reply, encoded := vfs.AddSessionReply(attachFilesystem(client), message.Correlation)
+		if !encoded {
+			fatal("VFS_CONTROL_REPLY_FAILED\n")
+		}
+		send(uint64(controlHandle), reply)
+		return true
+	}
 	if vfs.IsSync(message) {
 		result := vfs.StatusBackendError
-		if (blockDevice{}).Flush() {
+		if service.Sync() {
 			result = vfs.StatusOK
 			syslog.Info("synced")
 		}
@@ -345,13 +316,13 @@ func serve(session uint64, message ipc.Message) {
 
 func send(channel uint64, message ipc.Message) {
 	size, ok := ipc.Encode(message, wire[:])
-	if !ok || ipcSend(channel, unsafe.Pointer(&wire[0]), uintptr(size)) != uint64(kcall.StatusOK) {
+	if !ok || sys.IPCSend(handle.ID(channel), wire[:size]) != kcall.StatusOK {
 		fatal("VFS_SEND_FAILED\n")
 	}
 }
 
 func receiveNow(channel uint64) (ipc.Message, ipc.Status) {
-	status := ipc.Status(ipcReceive(channel, unsafe.Pointer(&wire[0]), ipc.WireMaxSize))
+	status := ipc.Status(sys.IPCReceive(handle.ID(channel), wire[:]))
 	if status != ipc.StatusOK {
 		return ipc.Message{}, status
 	}
@@ -374,13 +345,13 @@ func mark(message string) {
 }
 
 func write(message string) {
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(unsafe.StringData(message)), uintptr(len(message)))
+	sys.ConsoleWriteString(consoleHandle, message)
 }
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
 	}
-	if diagnostics(uint64(consoleHandle), 0) == 0 {
+	if sys.Diagnostics(consoleHandle) == 0 {
 		writeSessions()
 	}
 	for {
@@ -404,8 +375,6 @@ func writeSessions() {
 			writeHex(uint64(waitInterests[index].Handle))
 			write(",")
 		}
-		write(" at=")
-		writeHex(uint64(uintptr(unsafe.Pointer(waitInterests))))
 	}
 	write("\n")
 }
@@ -416,42 +385,6 @@ func writeHex(value uint64) {
 	for index := 0; index < 16; index++ {
 		digits[17-index] = "0123456789abcdef"[value>>(uint(index)*4)&0xf]
 	}
-	consoleWrite(uint64(consoleHandle), unsafe.Pointer(&digits[0]), uintptr(len(digits)))
+	sys.ConsoleWrite(consoleHandle, digits[:])
 }
 func main() {}
-
-//go:linkname runtimeInitHeap runtime.initHeap
-func runtimeInitHeap() { heapPointer = uintptr(unsafe.Pointer(&heapStartSymbol)) }
-
-//go:linkname runtimeAlloc runtime.alloc
-func runtimeAlloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
-	size = (size + 15) &^ 15
-	start, end := heapPointer, heapPointer+size
-	if end < start || end > uintptr(unsafe.Pointer(&heapEndSymbol)) {
-		fatal("VFS_OUT_OF_MEMORY\n")
-	}
-	heapPointer = end
-	// Go guarantees zeroed allocations, and the compiler relies on it when it
-	// skips clearing large composite literals. The arena is reused after every
-	// reset, so stale bytes would otherwise leak into fresh values.
-	cleared := unsafe.Slice((*byte)(unsafe.Pointer(start)), size)
-	for index := range cleared {
-		cleared[index] = 0
-	}
-	return unsafe.Pointer(start)
-}
-
-//go:linkname runtimeFree runtime.free
-func runtimeFree(unsafe.Pointer) {}
-
-//go:linkname runtimeMarkRoots runtime.markRoots
-func runtimeMarkRoots(uintptr, uintptr) {}
-
-//go:linkname runtimeGC runtime.GC
-func runtimeGC() {}
-
-//go:linkname runtimeSetFinalizer runtime.SetFinalizer
-func runtimeSetFinalizer(interface{}, interface{}) {}
-
-//go:linkname runtimeReadMemStats runtime.ReadMemStats
-func runtimeReadMemStats(*runtime.MemStats) {}

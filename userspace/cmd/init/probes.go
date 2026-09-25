@@ -1,0 +1,144 @@
+//go:build goos_userspace
+
+package main
+
+// Validation-build probes of kernel mechanisms PID 1 relies on.
+
+import (
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
+	"goos/kernel/kcall"
+	blockproto "goos/userspace/block"
+	"goos/userspace/runtime/sys"
+)
+
+func probeStreamEndpoint() bool {
+	if !createStream(&streamPair) {
+		return false
+	}
+	payload := "bounded-stream"
+	if written, status := sys.StreamWrite(handle.ID(streamPair[1]), sys.Bytes(payload)); status != kcall.StatusOK || written != len(payload) {
+		return false
+	}
+	if read, status := sys.StreamRead(handle.ID(streamPair[0]), streamReadback[:]); status != kcall.StatusOK || read != len(payload) || !equalBytes(streamReadback[:len(payload)], payload) {
+		return false
+	}
+	if sys.HandleClose(handle.ID(streamPair[1])) != 0 {
+		return false
+	}
+	if _, status := sys.StreamRead(handle.ID(streamPair[0]), streamReadback[:]); status != ipc.StatusPeerDied {
+		return false
+	}
+	return sys.HandleClose(handle.ID(streamPair[0])) == 0
+}
+
+// probeSharedEndpoint checks, in the booted kernel, that stream ends are
+// reference counted (ADR 0089). PID 1 sends a writer to itself attached twice,
+// which leaves two handles naming one end: closing the first must not end the
+// reader's input, closing the second must, and a closed or wrong-direction
+// handle must be refused.
+func probeSharedEndpoint() bool {
+	var pair [2]uint64
+	if !createStream(&streamPair) {
+		return false
+	}
+	reader, writer := streamPair[0], streamPair[1]
+	if !createChannel(&pair) {
+		sys.HandleClose(handle.ID(writer))
+		sys.HandleClose(handle.ID(reader))
+		return false
+	}
+	ok := sharedEndpointHolds(pair, reader, writer)
+	closePair(pair)
+	sys.HandleClose(handle.ID(reader))
+	return ok
+}
+
+func sharedEndpointHolds(pair [2]uint64, reader, writer uint64) bool {
+	message := ipc.Message{ProtocolID: 1, Version: 1, Kind: ipc.KindNotification, HandleCount: 2}
+	message.Handles[0], message.Handles[1] = handle.ID(writer), handle.ID(writer)
+	if !sendMessage(pair[0], message) {
+		sys.HandleClose(handle.ID(writer))
+		return false
+	}
+	received, status := receive(pair[1], 0)
+	if status != ipc.StatusOK || received.HandleCount != 2 || received.Handles[0] == received.Handles[1] {
+		return false
+	}
+	first, second := uint64(received.Handles[0]), uint64(received.Handles[1])
+	// The moved handle is gone: closing it again is refused.
+	if sys.HandleClose(handle.ID(writer)) != ipc.StatusNotFound {
+		return false
+	}
+	payload := "shared"
+	if _, status := sys.StreamWrite(handle.ID(first), sys.Bytes(payload)); status != kcall.StatusOK || sys.HandleClose(handle.ID(first)) != 0 {
+		sys.HandleClose(handle.ID(second))
+		return false
+	}
+	// A writing end cannot be read through.
+	_, wrongEnd := sys.StreamRead(handle.ID(second), streamReadback[:])
+	read, readStatus := sys.StreamRead(handle.ID(reader), streamReadback[:])
+	if wrongEnd != kcall.StatusPermissionDenied || readStatus != kcall.StatusOK || !equalBytes(streamReadback[:read], payload) {
+		sys.HandleClose(handle.ID(second))
+		return false
+	}
+	// One writer is still held, so the drained stream is empty, not ended.
+	if _, status := sys.StreamRead(handle.ID(reader), streamReadback[:]); status != kcall.StatusResourceExhausted {
+		sys.HandleClose(handle.ID(second))
+		return false
+	}
+	if sys.HandleClose(handle.ID(second)) != 0 || sys.HandleClose(handle.ID(second)) != ipc.StatusNotFound {
+		return false
+	}
+	if _, status := sys.StreamRead(handle.ID(reader), streamReadback[:]); status != ipc.StatusPeerDied {
+		return false
+	}
+	// A closed handle is not an endpoint any more.
+	_, closedStatus := sys.StreamWrite(handle.ID(second), streamReadback[:1])
+	return closedStatus == kcall.StatusPermissionDenied
+}
+
+func probeBlockService() bool {
+	correlation++
+	info, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationInfo}, correlation)
+	if !ok || !sendMessage(blockClientHandle, info) {
+		return false
+	}
+	message, status := receive(blockClientHandle, storageProbeDeadline)
+	infoReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity != 64*1024*1024 || infoReply.BlockSize != 512 {
+		return false
+	}
+	correlation++
+	writeRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationWrite, Offset: 4093, Length: 6, Data: []byte("GBLKIO")}, correlation)
+	if !ok || !sendMessage(blockClientHandle, writeRequest) {
+		return false
+	}
+	message, status = receive(blockClientHandle, storageProbeDeadline)
+	writeReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || writeReply.Status != blockproto.StatusOK {
+		return false
+	}
+	correlation++
+	readRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationRead, Offset: 4093, Length: 6}, correlation)
+	if !ok || !sendMessage(blockClientHandle, readRequest) {
+		return false
+	}
+	message, status = receive(blockClientHandle, storageProbeDeadline)
+	readReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || readReply.Status != blockproto.StatusOK || !equalBytes(readReply.Data, "GBLKIO") {
+		return false
+	}
+	correlation++
+	flushRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationFlush}, correlation)
+	if !ok || !sendMessage(blockClientHandle, flushRequest) {
+		return false
+	}
+	message, status = receive(blockClientHandle, storageProbeDeadline)
+	flushReply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || flushReply.Status != blockproto.StatusOK {
+		return false
+	}
+	mark("BLOCK_SERVICE_IO_OK\n")
+	return true
+}

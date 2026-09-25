@@ -29,9 +29,10 @@ requires both distinct values before emitting `PROCESS_ISOLATION_OK`.
 ## First ring 3 process
 
 The bootstrap native process owns separate RX code, read-only data, and RW+NX
-stack pages. Its architecture-level program first submits an invalid pointer,
-then copies a valid message through the native DebugWrite call, and finally
-requests Exit through interrupt vector `0x80`. Code is copied into a zeroed
+stack pages. Its architecture-level program first requires the retired DebugWrite number to
+be refused, submits an invalid pointer to `ConsoleWrite`, then copies a valid
+message through `ConsoleWrite` with the console capability it was given, and
+finally requests Exit through interrupt vector `0x80` (ADR 0094). Code is copied into a zeroed
 physical page before that page becomes executable, preserving W^X.
 
 The scheduler loads the process CR3 and enters CPL 3 through a complete `IRETQ`
@@ -50,8 +51,13 @@ The registry retains a bounded completion record after lifecycle delivery and
 resource teardown, allowing waiters to distinguish running, exited, and unknown
 processes without retaining reclaimed objects.
 
-Successful launches install a typed process handle in PID 1 with only `Wait`
-authority. Native `ProcessWait` validates that handle, blocks on a bounded wait
+Every launch after PID 1 names its executable as an extent of the system image
+together with PID 1's image capability, which must carry Execute; PID 1 has
+resolved the path in its own read-only mapping of the image, and the kernel
+checks only the authority, the bounds, and the native image (ADR 0093).
+
+Successful launches install a typed process handle in PID 1 with `Wait` and
+`Write` authority; `Write` authorizes `ProcessKill` (ADR 0067). Native `ProcessWait` validates that handle, blocks on a bounded wait
 set, supports timer deadlines, and copies the exit code to validated user
 memory. PID 1 uses this path for shell-launched applications and closes the
 handle after completion.

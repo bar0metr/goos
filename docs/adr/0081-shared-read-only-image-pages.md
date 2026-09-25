@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0011 and ADR 0080.
+Accepted. Extends ADR 0011 and ADR 0080. Since ADR 0093 the cache key is the
+launch extent (`offset<<32 | length`) rather than the member's archive offset.
 
 ## Context
 

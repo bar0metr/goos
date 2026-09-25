@@ -27,8 +27,12 @@ capability-protected channel and controls validated service restarts and native
 application launches. The supervised VFS and block-service processes use
 versioned capability-bounded IPC. The block service reaches a persistent QEMU
 disk through an isolated userspace virtio-blk driver with bounded port-I/O,
-DMA, and IRQ authority. A bounded FAT32 backend mounted at `/persist` reaches
-that block service through a dedicated capability-scoped endpoint.
+DMA, and IRQ authority. A bounded FAT32 filesystem service, a process of its
+own that the VFS mounts at `/persist`, reaches that block service through a
+dedicated capability-scoped endpoint (ADR 0096). Every process after PID 1 is
+launched from an extent of the immutable system image that PID 1 names under
+an image capability with Execute; the kernel resolves no application path
+(ADR 0093).
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for standard-stream redirection and carry

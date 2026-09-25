@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted. The kernel-side path lookup is superseded by ADR 0093: launches name
+an extent of the system image, and only the bootstrap `system/init` is found by
+name.
 
 ## Decision
 

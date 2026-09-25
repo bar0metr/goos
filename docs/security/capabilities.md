@@ -37,18 +37,25 @@ document states the security properties and who holds what.
 | --- | --- | --- |
 | Read | `0x01` | receive IPC, read stream, read console and wait on it (the console object), read the log (the log object), read ports, map shared memory or the system image |
 | Write | `0x02` | send IPC, write stream, write console and the log, write ports, allocate DMA, map shared memory writable, stop a process, reset the machine |
-| Execute | `0x04` | defined; no native call uses it yet |
+| Execute | `0x04` | launch a native image from the system image object (PID 1 only, ADR 0093) |
 | Transfer | `0x08` | derive into another process (manifest or IPC attachment) |
 | Wait | `0x10` | block on a channel, stream, process, or IRQ |
 
 ## Spawn manifests
 
 Only PID 1 can reach the kernel launch path: launch requests arrive on the
-lifecycle channel, whose only endpoint is in PID 1. A request carries at most
-seven grants of `{source handle, type, rights, name}` (ADR 0024, 0031).
+lifecycle channel, whose only endpoint is in PID 1. A request names its
+executable as an extent of an image object, together with the handle that
+authorizes executing from it, and carries at most seven grants of
+`{source handle, type, rights, name}` (ADR 0024, 0031, 0093). The kernel
+resolves no path: PID 1 found the executable in its own read-only mapping of
+the system image.
 
 Before creating the address space the kernel:
 
+0. requires the image handle in PID 1's table to be the system image with
+   Execute, and the extent to lie inside the image; the native image validator
+   then decides whether the bytes are a program;
 1. resolves each source in PID 1's table with Transfer authority;
 2. checks that the requested rights derive from the source;
 3. installs derived handles into the empty child table in manifest order,
@@ -57,8 +64,10 @@ Before creating the address space the kernel:
 5. binds the handle IDs into the child's startup block by role name.
 
 A grant marked `Consume` closes PID 1's source handle after a successful
-launch. Exclusive endpoints (service channel ends, the system image, pipeline
-streams) are consumed, so PID 1 does not keep a second copy. The storage
+launch. Exclusive endpoints (service channel ends, pipeline streams) are consumed, so
+PID 1 does not keep a second copy. The system image is not: PID 1 keeps it with
+Execute to launch from, and the filesystem service receives a Read-only copy
+that cannot launch anything. The storage
 driver's device authority is the exception: PID 1 keeps it to relaunch the
 driver (ADR 0078). Startup role names locate handles; they do not grant
 authority.
@@ -68,14 +77,14 @@ authority.
 The kernel installs PID 1's initial table in a fixed order before PID 1 runs
 and panics if any slot lands out of order (`kernel/main.go`). PID 1 then
 derives rights into children through the manifests in
-`userspace/cmd/init/main.go`. The rows below are the normal build; the
+`userspace/cmd/init/services.go`. The rows below are the normal build; the
 validation build also grants the console, write only, to `fault-probe`, and
 uses slot 9 for a block-service probe (ADR 0058).
 
 | PID 1 slot | Object | PID 1 rights | Derived to | Child rights | Consumed |
 | --- | --- | --- | --- | --- | --- |
 | 1 | lifecycle channel | R W Wait | PID 1 only | - | - |
-| 2 | console device | R W T | VFS, block, virtio-blk, config, log | W | no |
+| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log | W | no |
 | | | | tty `console` | R W | no |
 | 3 | VFS session, client end | R W Wait T | shell `vfs` | R W Wait | yes |
 | 4 | VFS session, server end | R W Wait T | VFS `session` | R W Wait | yes |
@@ -90,12 +99,12 @@ uses slot 9 for a block-service probe (ADR 0058).
 | 13 | DMA domain 1 | W T | virtio-blk `dma` | W | no |
 | 14 | driver, client end | R W Wait T | block `driver` | R W Wait | yes |
 | 15 | driver, server end | R W Wait T | virtio-blk `service` | R W Wait | yes |
-| 16 | FS-block, client end | R W Wait T | VFS `block` | R W Wait | yes |
+| 16 | FS-block, client end | R W Wait T | fat32 `block` (first launch) | R W Wait | yes |
 | 17 | FS-block, server end | R W Wait T | block `filesystem` | R W Wait | yes |
 | 18 | system control | W | PID 1 only | - | - |
 | 19 | launch staging page (memory) | R W | PID 1 only; mapped by the kernel at `0x401ff000` | - | - |
 | 20 | exec page (memory) | R W T | shell `execpage` | R W | no |
-| 21 | system image | R T | VFS `image` | R | yes |
+| 21 | system image | R X T | VFS `image` | R | no; PID 1 keeps it to launch from (ADR 0093) |
 | 22 | log | R T | log `log`, shell `log` | R | no |
 
 The driver's port, IRQ, and DMA authority is granted, not consumed, so PID 1
@@ -125,8 +134,10 @@ holds. The validation build additionally keeps both services' process handles
 for fault injection.
 
 PID 1 also creates channels at run time with `ChannelCreate`: the block
-service's `control` endpoint, over which a restarted driver's channel is
-delivered; the config service's `control` endpoint; one configuration session
+service's `control` endpoint, over which a restarted driver's channel and a
+restarted FAT32 service's block channel are delivered; the channel between
+the VFS and the FAT32 service, renewed with the block channel on every restart
+of that service, whose VFS end goes over the VFS control endpoint (ADR 0096); the config service's `control` endpoint; one configuration session
 each for the shell (whole namespace, read and write) and the log service
 (`system.log.`, read only); and one VFS session each for the log service, the
 config service, its own reading of the command index, and every command whose
@@ -210,7 +221,6 @@ Some calls authorize by caller identity or need nothing:
 | `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo` | caller must be a registered process |
 | `HandleInfo` | caller must be a registered process; describes only its own table |
 | `ChannelCreate` | caller must be PID 1 |
-| `DebugWrite` | caller must be PID 1 or bootstrap process A (root comparison) |
 
 `StreamCreate` is open because the new endpoints grant nothing beyond
 themselves (ADR 0040); the per-process stream quota bounds how many one

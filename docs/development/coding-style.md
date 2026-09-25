@@ -38,7 +38,8 @@ code; propose changes through an ADR.
 - Services answer malformed but attributable requests with an error reply
   instead of dropping them (ADR 0048).
 - On a multi-step operation, roll back partial state on failure (see
-  `ChannelCreate` and manifest installation in `kernel/main.go`).
+  `ChannelCreate` in `kernel/ipccalls.go` and manifest installation in
+  `kernel/launch.go`).
 
 ## Constants
 
@@ -51,18 +52,19 @@ offset used in teardown) are debt, not precedent.
 - Few comments. Names and types should carry the meaning.
 - Comment *why*: an invariant, an ordering requirement, a race being closed,
   a reason a simpler approach is wrong. See the register-then-recheck comments
-  in the wait paths of `kernel/main.go`.
+  in the wait paths of `kernel/waits.go`.
 - Doc comments on exported identifiers whose contract is not obvious.
 - Every `unsafe` use in the kernel needs a `// SAFETY:` comment stating the
   ownership and bounds invariant ([memory-safety.md](../security/memory-safety.md)).
 
 ## `unsafe`
 
-Allowed in the kernel only under `uefi`, `vm`, and `amd64` directories;
-`make lint` enforces this for `kernel/` and `internal/`. Userspace uses it for
-native-call stubs, arena allocators, and wire buffers; keep it in `cmd/` and
-the thin call-wrapper packages (`userspace/wait`, `userspace/utility`), not in
-protocol or policy cores.
+Allowed in the kernel only under `uefi`, `vm`, and `amd64` directories, and in
+userspace only under `userspace/runtime/` (`sys` for native calls and mapped
+windows, `arena` for the allocator). `make lint` enforces both, including
+`//go:linkname` and `//go:extern` in userspace (ADR 0095). A program that needs
+a native call the wrappers lack adds a typed wrapper to `userspace/runtime/sys`
+rather than a stub of its own.
 
 ## Formatting and checks
 

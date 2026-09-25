@@ -10,10 +10,12 @@ ADR 0075) interrupts. This document covers the native calls defined by
 The operation number is in `EAX`; up to three arguments follow in
 general-purpose registers (stubs in `userspace/runtime/amd64.S`). The assembly
 bridge in `kernel/arch/amd64/io.S` routes the five blocking operations (5, 12,
-17, 21, 22) to dedicated dispatchers in `kernel/main.go`. Everything else goes through
-`kcall.Dispatch`, which checks fixed sizes before calling the handler in
-`kernel/main.go` or one of its sibling files (`diagnostics.go`, `timing.go`,
-`logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`, `imagemap.go`).
+17, 21, 22) to dedicated dispatchers in `kernel/ipccalls.go`, `kernel/streamcalls.go`
+and `kernel/waits.go`. Everything else goes through `kcall.Dispatch`, which checks
+fixed sizes before calling the handler in the file for its area: `devicecalls.go`,
+`ipccalls.go`, `streamcalls.go`, `launch.go`, `lifecycle.go`, `diagnostics.go`,
+`timing.go`, `logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`,
+`imagemap.go`.
 Unknown numbers return `Unsupported`.
 
 Every call runs with interrupts disabled, inside the kernel exclusion domain
@@ -30,7 +32,7 @@ table with type, generation, and rights checks.
 | # | Operation | Authority | Untrusted inputs and validation | Bounds | Blocks |
 | ---: | --- | --- | --- | --- | --- |
 | 1 | `Exit` | — | exit code, not interpreted | none | ends task |
-| 2 | `DebugWrite` | caller is PID 1 or bootstrap process A (root compare) | length ≤ 4096; `CopyIn` | static 4 KiB buffer | no |
+| 2 | retired (`DebugWrite`) | none: refused with `Unsupported` in every build, never reaches a handler (ADR 0094) | — | — | no |
 | 3 | `IPCSend` | channel handle, Write | wire length 32..320; `CopyIn`; `ipc.Decode` checks header and sizes; each attached handle (≤ 4) needs Transfer; an attached stream end must have room for four more references, checked before anything moves | 16-message queue; full → `ResourceExhausted` | no |
 | 4 | `IPCReceive` | channel handle, Read | capacity ≥ 320; `CopyOut` | static wire buffer | no; empty → `NotFound` |
 | 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 64 waiters; per-task status slot | yes, tick deadline; 0 → `Timeout` |
@@ -82,9 +84,9 @@ compiles away.
   echo. The terminal service holds the only read right and relays everything the
   shell and commands print (ADR 0082, 0089); console write remains with it and
   with the system services that start before it.
-- `DebugWrite` is a bootstrap path. Boot validation now has its own build
-  (ADR 0058); in a normal build only PID 1 passes its root comparison, and the
-  call remains a candidate for removal.
+- `DebugWrite`, the console write authorized by the caller's identity, is
+  retired; PID 1 prints through `ConsoleWrite` with its console capability
+  (ADR 0094).
 - `ImageMap` maps the firmware-reserved boot archive, which only the kernel can
   name; serving it through VFS keeps the archive parser in userspace
   (ADR 0070).
@@ -93,7 +95,11 @@ compiles away.
 - `SystemInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters and
   have no userspace source.
 - Process launch is not a native call. It is requested over the lifecycle
-  channel that only PID 1 holds and runs in kernel housekeeping.
+  channel that only PID 1 holds and runs in kernel housekeeping. The request
+  names an extent of the system image and a handle; the kernel requires Execute
+  on the image object, checks the extent against the image length without
+  overflow (`loader.ImageExtent`), and validates the bytes as a native image.
+  It resolves no path (ADR 0093).
 
 ### Untrusted data and validation
 
@@ -124,8 +130,8 @@ virtio-blk driver, which re-checks the used ring after every wake (ADR 0035).
 
 ### Capabilities
 
-See [capabilities.md](capabilities.md). Ten calls authorize by caller
-identity or need nothing: `Exit`, `DebugWrite`, `ClockRead`, `StartupRead`,
+See [capabilities.md](capabilities.md). Nine calls authorize by caller
+identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
 `SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
 `HandleInfo` (own table only), and `ProcessInfo`.
 
@@ -158,9 +164,11 @@ else (ADR 0089).
 
 The shared image cache (ADR 0081) is not charged to any process. It grows only
 when PID 1 launches an image from the immutable system image, it is keyed by
-the image's place in that archive, and it is bounded at 128 segments and 1024
-frames, past which launches load private copies. No process input selects or
-enlarges it.
+the launch extent in that archive, and it is bounded at 128 segments and 1024
+frames, past which launches load private copies. PID 1 chooses the extent, but
+an extent always names the same immutable bytes, which must validate as a native
+image before anything is cached, and no other process can reach the launch
+path (ADR 0093).
 
 `StreamCreate` still needs no capability, because a stream is a primitive any
 process may need, but a process calling it in a loop is refused at its share and
@@ -180,7 +188,7 @@ progress; it would need a policy before SMP.
 ### Work with interrupts disabled
 
 Each call runs to completion with interrupts off. The longest native calls are
-`DebugWrite`/`ConsoleWrite` (up to 4096 bytes to the UART) and, in diagnostic
+`ConsoleWrite` (up to 4096 bytes to the UART) and, in diagnostic
 builds, `Diagnostics`. Process launch runs in housekeeping, also with
 interrupts off, and takes about 2 ms (ADR 0057).
 

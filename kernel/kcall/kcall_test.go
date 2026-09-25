@@ -152,11 +152,6 @@ func (handler *testHandler) Exit(code uint64) Status {
 	return StatusOK
 }
 
-func (handler *testHandler) DebugWrite(address uint64, length uint64) Status {
-	handler.address, handler.length = address, length
-	return StatusOK
-}
-
 func TestDispatchExit(t *testing.T) {
 	handler := &testHandler{}
 	result := Dispatch(Request{Operation: OperationExit, Arg0: 7}, handler)
@@ -165,17 +160,27 @@ func TestDispatchExit(t *testing.T) {
 	}
 }
 
-func TestDispatchDebugWrite(t *testing.T) {
+// The retired DebugWrite number reaches no handler and is refused whatever its
+// arguments, so no build carries an identity-authorized console path.
+func TestDispatchRefusesRetiredDebugWrite(t *testing.T) {
 	handler := &testHandler{}
-	result := Dispatch(Request{Operation: OperationDebugWrite, Arg0: 0x1234, Arg1: 32}, handler)
-	if result.Status != StatusOK || result.Action != ActionReturn || handler.address != 0x1234 || handler.length != 32 {
-		t.Fatalf("unexpected write result: %#v, handler: %#v", result, handler)
+	for _, request := range []Request{
+		{Operation: OperationRetiredDebugWrite, Arg0: 0x1234, Arg1: 32},
+		{Operation: OperationRetiredDebugWrite},
+		{Operation: OperationRetiredDebugWrite, Arg0: 0x1234, Arg1: MaxConsoleWrite + 1},
+	} {
+		if result := Dispatch(request, handler); result.Status != StatusUnsupported || result.Action != ActionReturn {
+			t.Fatalf("retired debug write = %#v", result)
+		}
+	}
+	if *handler != (testHandler{}) {
+		t.Fatalf("retired debug write reached the handler: %#v", handler)
 	}
 }
 
-func TestDispatchRejectsOversizedWrite(t *testing.T) {
+func TestDispatchRejectsOversizedConsoleWrite(t *testing.T) {
 	handler := &testHandler{}
-	result := Dispatch(Request{Operation: OperationDebugWrite, Arg0: 0x1234, Arg1: MaxDebugWrite + 1}, handler)
+	result := Dispatch(Request{Operation: OperationConsoleWrite, Arg0: 0x100000001, Arg1: 0x1234, Arg2: MaxConsoleWrite + 1}, handler)
 	if result.Status != StatusInvalidArgument || handler.length != 0 {
 		t.Fatalf("oversized request reached handler: %#v, handler: %#v", result, handler)
 	}
