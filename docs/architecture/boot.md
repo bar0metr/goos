@@ -19,7 +19,7 @@ contains:
   (`tools/initramfs`, `tools/commands`, ADR 0080).
 
 The ESP is the ISO's El Torito boot image, an 8 MiB FAT volume
-(`tools/mkiso`, ADR 0086). QEMU runs q35 with OVMF, 512 MiB RAM, COM1 on
+(`tools/mkiso`, ADR 0086). QEMU runs q35 with OVMF, 512 MiB RAM (`MEMORY`), COM1 on
 stdio, and a legacy virtio-blk disk (`Makefile`, `QEMU_FLAGS`).
 
 Nothing in this chain is signed or verified. How firmware, kernel, system
@@ -53,8 +53,8 @@ Any failure in this phase prints a panic line and halts.
 | Step | What happens | Reference |
 | --- | --- | --- |
 | PCI discovery | Find the legacy virtio-blk function through configuration mechanism 1; require IRQ line 11; enable I/O decoding, bus mastering, and INTx | ADR 0034 |
-| PMM | Build the physical bitmap from conventional memory below 1 GiB; allocate and free one page as a self-test | ADR 0002 |
-| VM | Require NX; build the kernel identity map with PE section permissions; enable `EFER.NXE` and `CR0.WP`; load CR3 | ADR 0003 |
+| PMM | Build one bitmap segment per run of conventional memory, carving the bitmaps from low memory; allocate and free one page as a self-test | ADR 0002, 0103 |
+| VM | Require NX; build the kernel identity map with PE section permissions and the direct map of managed memory; map loader memory above 1 GiB; enable `EFER.NXE` and `CR0.WP`; load CR3 | ADR 0003, 0103 |
 | GDT, IDT, TSS | Install descriptor tables and the user native-call gate; map LAPIC/IOAPIC; route GSI 11 to the virtio vector and GSI 4 to the console vector, then enable the UART receive interrupt; test a breakpoint trap (validation build) | ADR 0004, 0035, 0075 |
 | Timer | Program the PIT at the build-time rate (`HZ`); wait for three ticks; calibrate the TSC over about 100 ms | ADR 0005, 0052, 0054 |
 | Scheduler | Allocate guarded kernel stacks; reset per-slot FXSAVE areas; start kernel tasks: housekeeping (slot 0), two demo tasks that sleep at once in a normal build, idle | ADR 0006, 0055, 0056, 0058 |

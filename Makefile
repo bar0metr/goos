@@ -51,7 +51,10 @@ ISO := $(BUILD_DIR)/goos-x86_64.iso
 QEMU := qemu-system-x86_64
 QEMU_SHARE ?= /opt/local/share/qemu
 OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
-QEMU_FLAGS := -machine q35 -m 512M -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
+# Guest RAM for run and the QEMU tests, in QEMU -m syntax. q35 places RAM
+# above 4 GiB once the guest has more than 2.75 GiB (ADR 0103).
+MEMORY ?= 512M
+QEMU_FLAGS := -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
 SOURCE_DATE_EPOCH ?= 0
 HZ ?= 100
 ifeq ($(filter $(HZ),100 250 1000),)
@@ -293,14 +296,14 @@ test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
-	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
 
 STRESS_RUNS ?= 4
 STRESS_JOBS ?= 4
 STRESS_ROUNDS ?= 15
 
 test-stress: iso
-	@tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
+	@MEMORY=$(MEMORY) tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
 
 # Builds the ISO twice from a clean build/ and compares every artifact (ADR
 # 0086). It cleans build/ itself, keeping only disks, logs, and reports.
@@ -312,7 +315,7 @@ LATENCY_REPEATS ?= 10
 test-latency: iso
 	@rm -f $(BUILD_DIR)/latency-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/latency-virtio-blk.img
-	@LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
+	@MEMORY=$(MEMORY) LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
 
 MICROBENCH_REPEATS ?= 5
 
@@ -321,7 +324,7 @@ MICROBENCH_REPEATS ?= 5
 test-microbench: iso
 	@rm -f $(BUILD_DIR)/microbench-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/microbench-virtio-blk.img
-	@MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
+	@MEMORY=$(MEMORY) MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
 
 test-performance: test-microbench
 	@mkdir -p $(BUILD_DIR)/reports
@@ -484,6 +487,7 @@ help:
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
+	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \

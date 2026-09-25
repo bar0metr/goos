@@ -175,6 +175,17 @@ wait_for_marker() {
 
 pass_group() { printf 'PASS %s\n' "$1"; }
 
+# guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
+# whole number with an optional M or G suffix and fails on anything else.
+guest_memory_mib() {
+	number=${1%[MmGg]}
+	case $number in '' | *[!0-9]*) return 1 ;; esac
+	case $1 in
+	*[Gg]) echo $((number * 1024)) ;;
+	*) echo "$number" ;;
+	esac
+}
+
 trap cleanup EXIT
 trap 'cleanup; exit 130' HUP INT TERM
 
@@ -190,6 +201,8 @@ fi
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
+# MEMORY is the guest RAM, in QEMU -m syntax; the Makefile passes it.
+memory=${MEMORY:-512M}
 rm -f "$log" "$reboot_log"
 
 ( sleep 4
@@ -519,7 +532,7 @@ rm -f "$log" "$reboot_log"
 	done
 	sleep 1
 	printf 'echo arena-stress-complete\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -570,6 +583,24 @@ for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_S
 	require_marker "memory-security.$marker" "$marker" "$log"
 done
 pass_group memory-security
+
+# The page allocator manages memory above the first GiB (ADR 0103). The
+# validation kernel exercises one high page through the direct map and a
+# process mapping whenever the machine has any. q35 places RAM above 4 GiB
+# once the guest has more than 2.75 GiB.
+memory_mib=$(guest_memory_mib "$memory") ||
+	fail_check physical-memory.size 'MEMORY as a whole number with an optional M or G suffix' "$memory" "$log" PMM_OK
+require_regex physical-memory.managed '^Memory: [1-9][0-9]* MiB managed' 'managed memory in the boot banner' "$log" 'Memory:'
+if [ "$memory_mib" -ge 2048 ]; then
+	require_regex physical-memory.high-managed '^Physical pages above 1 GiB: [1-9]' 'managed pages above 1 GiB' "$log" PMM_OK
+	require_marker physical-memory.high-page PMM_HIGH_OK "$log"
+elif [ "$memory_mib" -le 1024 ]; then
+	require_marker physical-memory.no-high-memory PMM_HIGH_NONE "$log"
+fi
+if [ "$memory_mib" -ge 3072 ]; then
+	require_regex physical-memory.above-4gib '^PMM high page: 0x[1-9a-f][0-9a-f]\{8\}[[:cntrl:]]*$' 'a high page above 4 GiB' "$log" 'PMM high page'
+fi
+pass_group physical-memory
 
 for marker in TASK_BLOCK_OK TASK_WAKE_OK TASK_A_OK TASK_B_OK IDLE_TASK_OK SCHEDULER_OK PROCESS_MODEL_OK PROCESS_WAIT_OK PROCESS_HANDLE_WAIT_OK PROCESS_RECLAIM_OK USER_PREEMPT_OK PROCESS_CR3_SCHED_OK; do
 	require_marker "scheduler-process.$marker" "$marker" "$log"
@@ -748,7 +779,7 @@ checks=$((checks + 1))
 	printf 'ls /state\n'
 	sleep 2
 	printf 'config get user.name\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -945,7 +976,7 @@ rm -f "$m7_log"
 	printf 'reboot\n'
 	sleep 12
 	printf 'cat /home/m7/hello.txt\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -978,7 +1009,7 @@ printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=32 count=4 conv=notr
 	printf 'echo volatile-root-still-works\n'
 	sleep 2
 	printf 'config get system.shell.prompt\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$corrupt_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1010,7 +1041,7 @@ go run ./tools/mkfat32 "$stack_disk"
 ( sleep 6
 	printf 'fault kernel-stack\n'
 	sleep 10
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$stack_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1044,7 +1075,7 @@ go run ./tools/mkfat32 "$poweroff_disk"
 	sleep 2
 	printf 'poweroff\n'
 	sleep 30
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1074,7 +1105,7 @@ forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log
 ( sleep 6
 	printf 'cat /home/poweroff.txt\n'
 	sleep 3
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

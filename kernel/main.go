@@ -176,6 +176,21 @@ func panicSerial(message string) {
 	}
 }
 
+// firmwareTableLimit bounds the firmware tables the kernel reads at boot,
+// before its own page tables are loaded.
+const firmwareTableLimit = uint64(4 << 30)
+
+// inLoaderMemory reports whether address lies in memory the firmware loader
+// allocated for the kernel.
+func inLoaderMemory(address uint64) bool {
+	for _, region := range bootInfo.MemoryRegions() {
+		if region.Kind == boot.MemoryLoader && address >= region.Start && address < region.End() {
+			return true
+		}
+	}
+	return false
+}
+
 var consoleOverrunReported bool
 
 func main() {
@@ -212,8 +227,9 @@ func main() {
 	mark("BOOT_SERVICES_EXITED")
 	// ACPI says how to switch the machine off. The tables are read once, here,
 	// as untrusted firmware input; a machine without them simply cannot power
-	// off (ADR 0092).
-	systemPowerOff, systemPowerOffFound = acpi.FindPowerOff(bootuefi.PhysicalMemory{Limit: vm.IdentityMapLimit}, bootInfo.ACPIRoot)
+	// off (ADR 0092). The firmware's page tables are still loaded and
+	// identity-map all memory; firmware keeps its tables below 4 GiB.
+	systemPowerOff, systemPowerOffFound = acpi.FindPowerOff(bootuefi.PhysicalMemory{Limit: firmwareTableLimit}, bootInfo.ACPIRoot)
 	if systemPowerOffFound {
 		mark("ACPI_POWEROFF_OK")
 	}
@@ -229,11 +245,12 @@ func main() {
 	amd64.PCIConfigWrite16(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4, command)
 	virtioBlockPort = virtioBlock.IOBase
 	mark("PCI_DISCOVERY_OK")
-	console.WriteString("Memory: ")
-	console.WriteUint(bootInfo.UsableBytes / (1024 * 1024))
-	console.WriteString(" MiB usable\n")
 
-	pageAllocator.Init(bootInfo.MemoryRegions())
+	// The allocator's bitmap is carved out of low memory and reached through
+	// the firmware's identity map until the kernel's own map replaces it.
+	if !pageAllocator.Init(bootInfo.MemoryRegions(), vm.PhysicalWords) {
+		panicSerial("physical page allocator initialization failed")
+	}
 	page, ok := pageAllocator.Allocate()
 	if !ok || !pageAllocator.Free(page) {
 		console.WriteString("PANIC: physical page allocator self-test failed\n")
@@ -241,9 +258,20 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	memory := pageAllocator.Statistics()
+	console.WriteString("Memory: ")
+	console.WriteUint(memory.ManagedPages * pmm.PageSize / (1024 * 1024))
+	console.WriteString(" MiB managed\n")
+	if memory.UnmanagedPages != 0 {
+		console.WriteString("Memory: ")
+		console.WriteUint(memory.UnmanagedPages * pmm.PageSize / (1024 * 1024))
+		console.WriteString(" MiB usable but unmanaged\n")
+	}
 	if validation.Enabled {
 		console.WriteString("Physical pages free: ")
-		console.WriteUint(pageAllocator.Statistics().FreePages)
+		console.WriteUint(memory.FreePages)
+		console.WriteString("\nPhysical pages above 1 GiB: ")
+		console.WriteUint(memory.HighPages)
 		console.WriteString("\n")
 	}
 	mark("PMM_OK")
@@ -255,14 +283,20 @@ func main() {
 		}
 	}
 	image, validImage := vm.LoadedImage()
+	// main still runs on the stack TinyGo took from the loader's memory. With
+	// more than a GiB of RAM the firmware places it above the identity map,
+	// where MapLoaderMemory keeps it reachable.
 	stack := amd64.StackPointer()
-	if !validImage || stack < 1024*1024 || stack >= vm.IdentityMapLimit {
+	if !validImage || stack < 1024*1024 || (stack >= vm.IdentityMapLimit && !inLoaderMemory(stack)) {
 		console.WriteString("PANIC: unsafe virtual-memory bootstrap state\n")
 		for {
 			amd64.Halt()
 		}
 	}
 	pageTable, built := vm.BuildIdentity(&pageAllocator, image)
+	if built {
+		built = vm.MapLoaderMemory(&pageAllocator, pageTable, bootInfo.MemoryRegions())
+	}
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {

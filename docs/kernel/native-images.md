@@ -32,7 +32,7 @@ the guard fails the build. Before that, `tools/stackframes` checks that no
 function in the ELF has a stack frame deep enough to step over the gap
 (ADR 0088).
 For each accepted segment the loader allocates and zeroes every required
-physical page, copies bounded payload chunks through the kernel identity map,
+physical page, copies bounded payload chunks through the kernel's physical view,
 and only then installs the final user mappings. This preserves W^X while
 loading executable bytes. The loader returns only the validated entry and stack
 pointer needed to create a userspace Task.

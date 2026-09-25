@@ -61,6 +61,10 @@ shell composition, or boot behavior.
 - `build/logs/boot.log` for the main validation boot;
 - `build/logs/reboot.log` for the persistence boot.
 
+`make test-boot MEMORY=4G` runs the same test with more guest RAM (default
+`512M`). The physical-memory group then requires the validation kernel to have
+used a page above 1 GiB from 2 GiB, and one above 4 GiB from 3 GiB (ADR 0103).
+
 The target creates a fresh `build/boot-test-virtio-blk.img` for each run. Tests
 therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
 used by `make run`; both QEMU phases share the fresh test image to validate

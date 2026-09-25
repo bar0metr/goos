@@ -10,6 +10,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
+	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -45,6 +46,7 @@ func awaitSchedulerSelfTest() {
 }
 
 func runKernelSelfTests(pageTable uint64) {
+	checkHighMemory(pageTable)
 	console := amd64.NewCOM1()
 	physicalA, allocatedA := pageAllocator.Allocate()
 	physicalB, allocatedB := pageAllocator.Allocate()
@@ -524,4 +526,57 @@ func checkSharedImagePages(image []byte) {
 		panicSerial("teardown disturbed the other process's code")
 	}
 	mark("IMAGE_PAGES_ISOLATED_OK")
+}
+
+// highMemoryProbe is the buffer the high-memory check copies through.
+var highMemoryProbe [16]byte
+
+// checkHighMemory exercises a page above the identity map when the machine
+// has one (ADR 0103): the allocator hands it out first, the kernel reaches it
+// only through the direct map, and a process maps it like any other page.
+func checkHighMemory(pageTable uint64) {
+	before := pageAllocator.Statistics()
+	if before.HighPages == 0 {
+		mark("PMM_HIGH_NONE")
+		return
+	}
+	physical, allocated := pageAllocator.Allocate()
+	if !allocated || physical < pmm.LowLimit || !vm.InitializePhysicalByte(physical, 0x5a) {
+		panicSerial("high page allocation failed")
+	}
+	page, viewed := vm.PhysicalPage(physical)
+	if !viewed || page[0] != 0x5a || page[1] != 0 || page[vm.PageSize-1] != 0 {
+		panicSerial("high page was not initialized through the direct map")
+	}
+	for index := range page {
+		page[index] = byte(index * 7)
+	}
+	root, created := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
+	mapped := created && vm.MapUserPage(root, vm.UserProbeAddress, physical, vm.Permissions{User: true, Writable: true})
+	tail := vm.UserProbeAddress + vm.PageSize - uint64(len(highMemoryProbe))
+	if !mapped || !vm.CopyIn(root, tail, highMemoryProbe[:]) {
+		panicSerial("high page could not be read through a process mapping")
+	}
+	for index, value := range highMemoryProbe {
+		if value != byte((int(vm.PageSize)-len(highMemoryProbe)+index)*7) {
+			panicSerial("high page read back wrong bytes")
+		}
+	}
+	for index := range highMemoryProbe {
+		highMemoryProbe[index] = byte(0xa0 + index)
+	}
+	if !vm.CopyOut(root, vm.UserProbeAddress+0x100, highMemoryProbe[:]) || page[0x100] != 0xa0 || page[0x10f] != 0xaf {
+		panicSerial("high page write through a process mapping was lost")
+	}
+	if !vm.DestroyUserAddressSpace(&pageAllocator, root) || !pageAllocator.IsAllocated(physical) || !pageAllocator.Free(physical) {
+		panicSerial("high page release failed")
+	}
+	if after := pageAllocator.Statistics(); after.FreePages != before.FreePages {
+		panicSerial("high memory check leaked pages")
+	}
+	console := amd64.NewCOM1()
+	console.WriteString("PMM high page: ")
+	console.WriteHex(physical)
+	console.WriteString("\n")
+	mark("PMM_HIGH_OK")
 }
