@@ -481,6 +481,19 @@ rm -f "$log" "$reboot_log"
 	sleep 2
 	printf 'jobs\n'
 	sleep 1
+	# The configuration and log services restart on their own (ADR 0100):
+	# each gets the sessions its first launch consumed, and the shell and the
+	# log service are handed new configuration sessions.
+	printf 'fault config\n'
+	sleep 3
+	printf 'config get user.name\n'
+	sleep 1
+	printf 'config set user.name boot-test\n'
+	sleep 1
+	printf 'fault log\n'
+	sleep 3
+	printf 'echo after-log-restart\n'
+	sleep 2
 	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
@@ -516,8 +529,8 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 210 seconds between its commands.
-wait_for_marker boot '^arena-stress-complete$' 260 "$log"
+# The scripted session sleeps about 220 seconds between its commands.
+wait_for_marker boot '^arena-stress-complete$' 280 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -769,6 +782,24 @@ require_window vfs-restart.volume '^persistent$' 'the volume read through the ne
 require_regex vfs-restart.jobs-kept '^\[[0-9]\] running  sleep 25$' 'the shell kept its job across the restart' "$log" 'fault vfs'
 count_window vfs-restart.shell-kept '^SHELL_RESTARTED_OK$' 0 "$log" 'goos> fault vfs' 'arena-stress-complete'
 pass_group vfs-restart
+
+# The configuration and log services restart on their own (ADR 0100). The
+# restarted configuration service is back with the stored settings, and the
+# shell reads and writes them over the session it was handed; the restarted
+# log service resumes after the last record its predecessor wrote.
+require_marker service-restart.config-injected CONFIG_FAULT_INJECTED "$log" 'fault config'
+require_marker service-restart.config-restarted CONFIG_RESTARTED_OK "$log" 'fault config'
+require_count service-restart.config-started-twice '^CONFIG_SERVICE_OK$' 2 "$log" 'fault config'
+require_marker service-restart.shell-config SHELL_CONFIG_RENEWED_OK "$log" 'fault config'
+require_marker service-restart.log-config LOG_CONFIG_RENEWED_OK "$log" 'fault config'
+require_window service-restart.config-read '^boot-test$' 'a setting read back from the restarted service' "$log" 'goos> fault config' 'goos> fault log'
+require_window service-restart.config-write '^CONFIG_SET_OK$' 'a setting written through the new session' "$log" 'goos> fault config' 'goos> fault log'
+forbid_window service-restart.config-errors 'config:' 'no configuration error after the restart' "$log" 'goos> fault config' 'goos> fault log'
+require_marker service-restart.log-injected LOG_FAULT_INJECTED "$log" 'fault log'
+require_marker service-restart.log-restarted LOG_RESTARTED_OK "$log" 'fault log'
+require_count service-restart.log-started-twice '^LOG_SERVICE_OK$' 2 "$log" 'fault log'
+require_marker service-restart.log-resumed LOG_RESUMED_OK "$log" 'fault log'
+pass_group service-restart
 
 # Programs outside /system run from executable objects PID 1 fills (ADR 0097).
 # The kernel proves the object's bounds and sealing at boot, the shell proves

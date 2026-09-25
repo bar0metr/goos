@@ -10,6 +10,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
 	"goos/userspace/runtime/sys"
 	terminal "goos/userspace/tty"
@@ -130,6 +131,10 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			installFilesystem(session)
 			continue
 		}
+		if session, ok := configproto.DecodeSessionNotice(&message); ok {
+			installSettings(session)
+			continue
+		}
 		if _, started, job, ok := execproto.DecodeStarted(message); ok {
 			if job == correlation && input == 0 {
 				input = started
@@ -183,6 +188,10 @@ func pollReplies() bool {
 		}
 		if session, ok := vfs.DecodeSessionNotice(&message); ok {
 			installFilesystem(session)
+			continue
+		}
+		if session, ok := configproto.DecodeSessionNotice(&message); ok {
+			installSettings(session)
 			continue
 		}
 		reportJob(message)

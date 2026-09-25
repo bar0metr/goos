@@ -13,6 +13,7 @@
 package main
 
 import (
+	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -104,7 +105,8 @@ func userspaceMain() {
 	// default, which is to persist.
 	configHandle, _ = data.Handle("config")
 	controlHandle, _ = data.Handle("control")
-	if !openLog() {
+	_, restarted := data.Env(startup.RestartVariable)
+	if !openLog(restarted) {
 		fatal("LOG_RING_UNAVAILABLE\n")
 	}
 	arenaBase = arena.Current()
@@ -122,13 +124,84 @@ func userspaceMain() {
 // openLog fixes the starting cursor. The file itself is created by the first
 // pass that has something to write, so storage that is not ready yet delays
 // persistence rather than disabling it.
-func openLog() bool {
-	oldest, _, status := sys.LogBounds(logHandle)
+func openLog(restarted bool) bool {
+	oldest, total, status := sys.LogBounds(logHandle)
 	if status != kcall.StatusOK {
 		return false
 	}
 	cursor = oldest
+	// A service started again in the same boot finds the records its
+	// predecessor wrote at the end of the file, and the ring still holds
+	// them. It resumes after the last one, so a crash of this service writes
+	// nothing twice (ADR 0100). After a reboot the file ends with an earlier
+	// boot's records, whose times say nothing about this one's.
+	if last, found := lastPersisted(); restarted && found {
+		for cursor < total && sys.LogRead(logHandle, cursor-oldest, &logLine) == kcall.StatusOK {
+			written, ok := logfmt.TimeOf(logLine[:])
+			if !ok || written > last {
+				break
+			}
+			cursor++
+		}
+		syslog.Info("resumed", syslog.Uint("skipped", cursor-oldest))
+		mark("LOG_RESUMED_OK\n")
+	}
 	return true
+}
+
+// tailSize is how much of a log file is read to find its last record: more
+// than the longest record and its newline, so the last one is always whole.
+const tailSize = kcall.LogText + 16
+
+var tail [tailSize]byte
+
+// lastPersisted returns the time of the last record in the log, which is in
+// the rotated file when the current one has just been started.
+func lastPersisted() (uint64, bool) {
+	for _, path := range [...]string{logPath, rotatePath} {
+		if last, found := lastRecordTime([]byte(path)); found {
+			return last, true
+		}
+	}
+	return 0, false
+}
+
+func lastRecordTime(path []byte) (uint64, bool) {
+	stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
+	if !ok || stat.Status != vfs.StatusOK || stat.Size == 0 {
+		return 0, false
+	}
+	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
+	if !ok || opened.Status != vfs.StatusOK {
+		return 0, false
+	}
+	start := stat.Size - min(stat.Size, tailSize)
+	size := 0
+	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationSeek, Handle: opened.Handle, Offset: start}); ok && reply.Status == vfs.StatusOK {
+		for size < len(tail) {
+			reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: uint32(min(len(tail)-size, vfs.MaxReplyData))})
+			if !ok || reply.Status != vfs.StatusOK || len(reply.Data) == 0 {
+				break
+			}
+			size += copy(tail[size:], reply.Data)
+		}
+	}
+	closeFile(uint64(opened.Handle))
+	return logfmt.TimeOf(lastLine(tail[:size]))
+}
+
+// lastLine returns the last newline-terminated line of data, without its
+// newline.
+func lastLine(data []byte) []byte {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return nil
+	}
+	end := len(data) - 1
+	start := end
+	for start > 0 && data[start-1] != '\n' {
+		start--
+	}
+	return data[start:end]
 }
 
 // drain appends every record produced since the last pass. A cursor below the
@@ -216,6 +289,16 @@ func takeSession() {
 		payloadSize := int(wire[24]) | int(wire[25])<<8
 		message, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
 		if !valid {
+			continue
+		}
+		if settings, ok := config.DecodeSessionNotice(&message); ok {
+			// The configuration service was restarted and took the old
+			// session with it (ADR 0100).
+			if configHandle != 0 {
+				sys.HandleClose(configHandle)
+			}
+			configHandle = settings
+			mark("LOG_CONFIG_RENEWED_OK\n")
 			continue
 		}
 		session, ok := vfs.DecodeSessionNotice(&message)

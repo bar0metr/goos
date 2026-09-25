@@ -172,12 +172,18 @@ a crashed driver takes is exercised on every boot rather than only when hardware
 misbehaves.
 
 The terminal service and the shell are the other two (ADR 0089). Both are
-`restart: always`, and the session between them is renewed on either's restart:
+`restart: always`, and the session between them is renewed on either's restart.
+The VFS and the configuration and log services renew what they held the same
+way, and their clients are handed new sessions instead of being restarted
+(ADR 0099, 0100):
 
 | Restarting | Launched with | Handed to the survivor |
 | --- | --- | --- |
 | `tty` | a new session (server end) and a new control channel | the session's client end, to the shell over its exec channel |
 | `shell` | a new session (client end), exec channel, VFS session and configuration session | the session's server end, to the terminal over its control channel |
+| `vfs` | a new control channel (client end kept) and first session | the session's client end to the shell, and new VFS sessions to the config and log services once `fat32` is attached, as session notices (ADR 0099) |
+| `config` | a new VFS session and control channel (client end kept) | new configuration sessions to the shell and the log service, as session notices (ADR 0100) |
+| `log` | a new VFS session, configuration session and control channel (client end kept) | nothing; it starts with `RESTART=1` and resumes after the last record in the file (ADR 0100) |
 
 A handle renewed for a launch that then fails is closed at the next renewal, so
 failures cannot fill PID 1's table. When the shell exits, PID 1 stops every
@@ -185,5 +191,6 @@ stage of its running jobs; they are reaped as usual and answered to no one, and
 their streams close with them. The exec channel is not waited on until the next
 shell brings a new one. After boot, a restarted service is recorded in the log
 rather than printed as an `[ OK ]` line, which would land in the line being
-typed. The validation build's `fault tty` and `fault shell` (exec control
-`ControlFault`) kill each once during the boot test.
+typed. The validation build's `fault tty`, `fault shell`, `fault fat32`,
+`fault vfs`, `fault config` and `fault log` (exec control `ControlFault`) kill
+each once during the boot test.

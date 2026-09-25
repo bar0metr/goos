@@ -43,6 +43,12 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if vfsStarted && bytesString(spec.Name[:spec.NameSize]) == "vfs" && !renewVFSChannels(&spec) {
 		return 0, false
 	}
+	if configStarted && bytesString(spec.Name[:spec.NameSize]) == "config" && !renewConfigGrants(&spec) {
+		return 0, false
+	}
+	if logStarted && bytesString(spec.Name[:spec.NameSize]) == "log" && !renewLogGrants(&spec) {
+		return 0, false
+	}
 	executable, processName, located := locateExecutable(spec.Executable[:spec.ExecutableSize])
 	if located != supervisor.LaunchOK {
 		if !supervisionComplete {
@@ -57,7 +63,14 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	for index := 0; index < int(spec.CapabilityCount); index++ {
 		bindings[index].Name = []byte(spec.Capabilities[index].Name)
 	}
-	arguments, environment, ok := startup.EncodeVectors([][]byte{spec.Name[:spec.NameSize]}, nil, &vectorWire)
+	// A service started again in this boot is told so. What it left behind,
+	// such as the end of the log file, is then its own work to pick up
+	// rather than an earlier boot's (ADR 0100).
+	var variables []startup.Variable
+	if snapshot, found := manager.Snapshot(bytesString(spec.Name[:spec.NameSize])); found && snapshot.Restarts != 0 {
+		variables = []startup.Variable{{Name: []byte(startup.RestartVariable), Value: []byte("1")}}
+	}
+	arguments, environment, ok := startup.EncodeVectors([][]byte{spec.Name[:spec.NameSize]}, variables, &vectorWire)
 	if !ok {
 		return 0, false
 	}
@@ -71,7 +84,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName || name == "vfs")
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName || name == "vfs" || name == "config" || name == "log")
 	if keep && launched == supervisor.LaunchOK {
 		switch name {
 		case driverName:
@@ -84,6 +97,10 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			filesystemProcessHandle = keepProcess(filesystemProcessHandle, event.ProcessHandle)
 		case "vfs":
 			vfsProcessHandle = keepProcess(vfsProcessHandle, event.ProcessHandle)
+		case "config":
+			configProcessHandle = keepProcess(configProcessHandle, event.ProcessHandle)
+		case "log":
+			logProcessHandle = keepProcess(logProcessHandle, event.ProcessHandle)
 		}
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
@@ -109,6 +126,18 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			vfsRestarted()
 		}
 		vfsStarted = true
+	}
+	if name == "config" {
+		if configStarted {
+			configRestarted()
+		}
+		configStarted = true
+	}
+	if name == "log" {
+		if logStarted {
+			mark("LOG_RESTARTED_OK\n")
+		}
+		logStarted = true
 	}
 	if name == filesystemName {
 		attachFilesystem()
