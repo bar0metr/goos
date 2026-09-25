@@ -23,6 +23,14 @@ Open-file handles carry generations, backend/mount identity, independent
 offsets, and explicit read/write rights. Closing a handle increments its
 generation. Reads and writes advance only that open object's offset.
 
+Every open file belongs to the session that opened it. A handle is valid only
+on that session: another session's handle is answered as not found, so one
+client can neither use nor probe the files another holds. A session holds at
+most 16 of the 64 open files, and when its channel closes, because the client
+exited or crashed, every file it left open is closed with it before its slot
+is reused. Until 0.1.2 the table was shared by all sessions and a file left
+open by a dead process stayed open for the rest of the boot.
+
 The fixed resolver cache stores resolved file and directory nodes. Mount and
 metadata mutations invalidate it synchronously, preventing rename/unlink from
 leaving stale path aliases. Cached and uncached resolution have separate

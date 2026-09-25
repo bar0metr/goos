@@ -5,8 +5,11 @@ import "goos/kernel/ramfs"
 const (
 	MaxMounts    = 8
 	MaxOpenFiles = 64
-	MaxPath      = 255
-	MaxCache     = 32
+	// MaxOpenPerOwner bounds the files one owner holds open, so a single
+	// session cannot take the whole table from the others.
+	MaxOpenPerOwner = 16
+	MaxPath         = 255
+	MaxCache        = 32
 	// mountCursor separates the backend phase of a directory scan from the
 	// mount phase. It is above every cursor a backend can return and below the
 	// uint32 the service protocol carries.
@@ -43,6 +46,11 @@ const (
 
 type Handle uint64
 
+// Owner is who opened a file: the VFS passes the session a request arrived
+// on. A handle is valid only for its owner, and an owner's files are closed
+// together when it goes. Zero is no owner.
+type Owner uint16
+
 type Backend interface {
 	OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status)
 	CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status)
@@ -68,6 +76,7 @@ type openFile struct {
 	node       ramfs.NodeID
 	offset     uint64
 	generation uint32
+	owner      Owner
 	mount      uint8
 	rights     Rights
 	used       bool
@@ -148,9 +157,12 @@ func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
 	return mountIndex, node, StatusOK
 }
 
-func (namespace *Namespace) Open(path []byte, rights Rights) (Handle, Status) {
-	if rights == 0 || rights&^(Read|Write) != 0 {
+func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handle, Status) {
+	if owner == 0 || rights == 0 || rights&^(Read|Write) != 0 {
 		return 0, StatusInvalidArgument
+	}
+	if namespace.OpenBy(owner) >= MaxOpenPerOwner {
+		return 0, StatusResourceExhausted
 	}
 	mountIndex, node, status := namespace.Resolve(path)
 	if status != StatusOK {
@@ -166,28 +178,58 @@ func (namespace *Namespace) Open(path []byte, rights Rights) (Handle, Status) {
 			if entry.generation == 0 {
 				entry.generation = 1
 			}
-			entry.node, entry.mount, entry.rights, entry.used = node, mountIndex, rights, true
+			entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
 			return encodeHandle(index, entry.generation), StatusOK
 		}
 	}
 	return 0, StatusResourceExhausted
 }
 
-func (namespace *Namespace) Close(handle Handle) Status {
-	entry, status := namespace.file(handle, 0)
+func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
+	entry, status := namespace.file(owner, handle, 0)
 	if status != StatusOK {
 		return status
 	}
+	entry.release()
+	return StatusOK
+}
+
+// CloseOwner closes every file owner holds, when the session it names has
+// gone, and returns how many there were.
+func (namespace *Namespace) CloseOwner(owner Owner) int {
+	closed := 0
+	for index := range namespace.files {
+		if entry := &namespace.files[index]; owner != 0 && entry.used && entry.owner == owner {
+			entry.release()
+			closed++
+		}
+	}
+	return closed
+}
+
+// OpenBy counts the files owner holds open.
+func (namespace *Namespace) OpenBy(owner Owner) int {
+	count := 0
+	for index := range namespace.files {
+		if entry := &namespace.files[index]; entry.used && entry.owner == owner {
+			count++
+		}
+	}
+	return count
+}
+
+// release frees the slot and moves its generation on, so the handle that
+// named it names nothing from now on.
+func (entry *openFile) release() {
 	generation := entry.generation + 1
 	if generation == 0 {
 		generation = 1
 	}
 	*entry = openFile{generation: generation}
-	return StatusOK
 }
 
-func (namespace *Namespace) Read(handle Handle, target []byte) (int, Status) {
-	entry, status := namespace.file(handle, Read)
+func (namespace *Namespace) Read(owner Owner, handle Handle, target []byte) (int, Status) {
+	entry, status := namespace.file(owner, handle, Read)
 	if status != StatusOK {
 		return 0, status
 	}
@@ -198,8 +240,8 @@ func (namespace *Namespace) Read(handle Handle, target []byte) (int, Status) {
 	return count, mapStatus(backendStatus)
 }
 
-func (namespace *Namespace) Write(handle Handle, data []byte) (int, Status) {
-	entry, status := namespace.file(handle, Write)
+func (namespace *Namespace) Write(owner Owner, handle Handle, data []byte) (int, Status) {
+	entry, status := namespace.file(owner, handle, Write)
 	if status != StatusOK {
 		return 0, status
 	}
@@ -210,8 +252,8 @@ func (namespace *Namespace) Write(handle Handle, data []byte) (int, Status) {
 	return count, mapStatus(backendStatus)
 }
 
-func (namespace *Namespace) Seek(handle Handle, offset uint64) Status {
-	entry, status := namespace.file(handle, 0)
+func (namespace *Namespace) Seek(owner Owner, handle Handle, offset uint64) Status {
+	entry, status := namespace.file(owner, handle, 0)
 	if status != StatusOK {
 		return status
 	}
@@ -418,14 +460,17 @@ func (namespace *Namespace) selectMount(path []byte) (uint8, int, Status) {
 	return uint8(selected), relative, StatusOK
 }
 
-func (namespace *Namespace) file(handle Handle, required Rights) (*openFile, Status) {
+// file returns the open file handle names for owner. Another owner's handle
+// is not found rather than refused, so a session learns nothing about the
+// files others hold.
+func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*openFile, Status) {
 	index := int(uint32(handle)) - 1
 	generation := uint32(uint64(handle) >> 32)
 	if index < 0 || index >= len(namespace.files) || generation == 0 {
 		return nil, StatusNotFound
 	}
 	entry := &namespace.files[index]
-	if !entry.used || entry.generation != generation {
+	if !entry.used || entry.generation != generation || owner == 0 || entry.owner != owner {
 		return nil, StatusNotFound
 	}
 	if required != 0 && entry.rights&required != required {

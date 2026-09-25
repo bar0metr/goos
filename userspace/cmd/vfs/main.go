@@ -233,6 +233,9 @@ func userspaceMain() {
 			session := sessions[index]
 			message, receiveStatus := receiveNow(session)
 			if receiveStatus == ipc.StatusPeerDied {
+				// The files the session left open close with it, before its
+				// slot, and with it its owner number, can be reused.
+				service.CloseSession(sessionOwner(index))
 				sys.HandleClose(handle.ID(session))
 				sessions[index] = 0
 				liveSessions--
@@ -241,7 +244,7 @@ func userspaceMain() {
 			if receiveStatus != ipc.StatusOK {
 				fatal("VFS_RECEIVE_FAILED\n")
 			}
-			serve(session, message)
+			serve(sessionOwner(index), session, message)
 		}
 	}
 }
@@ -294,7 +297,11 @@ func pollControl() bool {
 	return true
 }
 
-func serve(session uint64, message ipc.Message) {
+// sessionOwner names the session in slot index as the owner of the files it
+// opens.
+func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
+
+func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	request, ok := vfs.DecodeRequest(message)
 	if !ok {
 		// Answer unusable requests: a silent drop strands the caller, which is
@@ -307,7 +314,7 @@ func serve(session uint64, message ipc.Message) {
 		}
 		return
 	}
-	reply, ok := vfs.EncodeReply(service.Dispatch(request), message.Correlation)
+	reply, ok := vfs.EncodeReply(service.Dispatch(owner, request), message.Correlation)
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}

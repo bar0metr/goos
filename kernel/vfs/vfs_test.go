@@ -21,24 +21,24 @@ func TestPathAndOpenFileLifecycle(t *testing.T) {
 	if namespace.Create([]byte("/etc"), true) != StatusOK || namespace.Create([]byte("/etc/motd"), false) != StatusOK {
 		t.Fatal("create failed")
 	}
-	handle, status := namespace.Open([]byte("//etc/./tmp/../motd"), Read|Write)
+	handle, status := namespace.Open(testOwner, []byte("//etc/./tmp/../motd"), Read|Write)
 	if status != StatusOK {
 		t.Fatalf("open: %d", status)
 	}
-	if count, status := namespace.Write(handle, []byte("GoOS")); status != StatusOK || count != 4 {
+	if count, status := namespace.Write(testOwner, handle, []byte("GoOS")); status != StatusOK || count != 4 {
 		t.Fatalf("write: %d %d", count, status)
 	}
-	if namespace.Seek(handle, 0) != StatusOK {
+	if namespace.Seek(testOwner, handle, 0) != StatusOK {
 		t.Fatal("seek failed")
 	}
 	data := make([]byte, 4)
-	if count, status := namespace.Read(handle, data); status != StatusOK || count != 4 || string(data) != "GoOS" {
+	if count, status := namespace.Read(testOwner, handle, data); status != StatusOK || count != 4 || string(data) != "GoOS" {
 		t.Fatalf("read: %d %d %q", count, status, data)
 	}
-	if namespace.Close(handle) != StatusOK {
+	if namespace.Close(testOwner, handle) != StatusOK {
 		t.Fatal("close failed")
 	}
-	if _, status := namespace.Read(handle, data); status != StatusNotFound {
+	if _, status := namespace.Read(testOwner, handle, data); status != StatusNotFound {
 		t.Fatal("stale open handle accepted")
 	}
 }
@@ -89,8 +89,8 @@ func TestRightsAndInvalidPaths(t *testing.T) {
 	if namespace.Create([]byte("/file"), false) != StatusOK {
 		t.Fatal("create failed")
 	}
-	handle, _ := namespace.Open([]byte("/file"), Read)
-	if _, status := namespace.Write(handle, []byte("x")); status != StatusPermissionDenied {
+	handle, _ := namespace.Open(testOwner, []byte("/file"), Read)
+	if _, status := namespace.Write(testOwner, handle, []byte("x")); status != StatusPermissionDenied {
 		t.Fatal("read-only handle wrote data")
 	}
 	for _, path := range [][]byte{nil, []byte("relative"), append([]byte{'/'}, make([]byte, MaxPath)...), []byte{'/', 'a', 0}} {
@@ -406,5 +406,59 @@ func TestMapStatusKeepsTheReason(t *testing.T) {
 		if got := mapStatus(test.backend); got != test.want {
 			t.Fatalf("mapStatus(%d) = %d, want %d", test.backend, got, test.want)
 		}
+	}
+}
+
+const testOwner = Owner(1)
+
+// A handle belongs to the session that opened it: another session is told it
+// does not exist, and a session's files close when it goes.
+func TestOpenFilesBelongToTheirOwner(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	if namespace.Create([]byte("/file"), false) != StatusOK {
+		t.Fatal("create failed")
+	}
+	mine, status := namespace.Open(1, []byte("/file"), Read|Write)
+	if status != StatusOK {
+		t.Fatalf("open = %d", status)
+	}
+	data := make([]byte, 4)
+	if _, status := namespace.Read(2, mine, data); status != StatusNotFound {
+		t.Fatalf("foreign read = %d", status)
+	}
+	if _, status := namespace.Write(2, mine, []byte("x")); status != StatusNotFound {
+		t.Fatalf("foreign write = %d", status)
+	}
+	if namespace.Seek(2, mine, 0) != StatusNotFound || namespace.Close(2, mine) != StatusNotFound {
+		t.Fatal("foreign seek or close accepted")
+	}
+	if _, status := namespace.Open(0, []byte("/file"), Read); status != StatusInvalidArgument {
+		t.Fatalf("open without owner = %d", status)
+	}
+	other, _ := namespace.Open(2, []byte("/file"), Read)
+	if closed := namespace.CloseOwner(1); closed != 1 {
+		t.Fatalf("closed %d files", closed)
+	}
+	if _, status := namespace.Read(1, mine, data); status != StatusNotFound {
+		t.Fatal("a file of a closed owner is still open")
+	}
+	if _, status := namespace.Read(2, other, data); status != StatusOK {
+		t.Fatalf("another owner's file closed with it: %d", status)
+	}
+}
+
+func TestOneOwnerCannotTakeTheWholeTable(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	namespace.Create([]byte("/file"), false)
+	for index := 0; index < MaxOpenPerOwner; index++ {
+		if _, status := namespace.Open(1, []byte("/file"), Read); status != StatusOK {
+			t.Fatalf("open %d = %d", index, status)
+		}
+	}
+	if _, status := namespace.Open(1, []byte("/file"), Read); status != StatusResourceExhausted {
+		t.Fatalf("open past the share = %d", status)
+	}
+	if _, status := namespace.Open(2, []byte("/file"), Read); status != StatusOK {
+		t.Fatalf("another owner refused: %d", status)
 	}
 }
