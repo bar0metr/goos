@@ -10,9 +10,10 @@ type SegmentSource struct {
 }
 
 type ImageSource struct {
-	Entry    uint64
-	StackTop uint64
-	Segments []SegmentSource
+	Entry        uint64
+	StackTop     uint64
+	StackReserve uint64
+	Segments     []SegmentSource
 }
 
 // EncodeNative writes a native image into caller-owned storage. It is used by
@@ -41,6 +42,7 @@ func EncodeNative(target []byte, source ImageSource) ([]byte, bool) {
 	binary.LittleEndian.PutUint16(target[12:], uint16(count))
 	binary.LittleEndian.PutUint64(target[16:], source.Entry)
 	binary.LittleEndian.PutUint64(target[24:], source.StackTop)
+	binary.LittleEndian.PutUint64(target[32:], source.StackReserve)
 	payloadOffset := headerEnd
 	for index, segment := range source.Segments {
 		offset := uint64(NativeHeaderSize) + uint64(index)*SegmentHeaderSize

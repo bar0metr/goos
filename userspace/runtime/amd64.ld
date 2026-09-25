@@ -5,8 +5,14 @@ PHDRS
   text PT_LOAD FLAGS(5);
   rodata PT_LOAD FLAGS(4);
   data PT_LOAD FLAGS(6);
-  stack PT_LOAD FLAGS(6);
 }
+
+/* The stack and the heap are not part of the image (ADR 0104). The kernel
+   reserves the stack below the top of the user range, with an unmapped guard
+   of loader.StackGuardSize below it, and supplies its pages as it grows; the
+   heap is anonymous memory the runtime reserves at start. _goos_stack_reserve
+   is the stack a program asks for; elf2native records it in the image. */
+_goos_stack_reserve = 0x100000;
 
 SECTIONS
 {
@@ -24,25 +30,6 @@ SECTIONS
     *(.data .data.*)
     *(.bss .bss.* COMMON)
   } :data
-
-  .heap (NOLOAD) : ALIGN(0x1000) {
-    _heap_start = .;
-    . += 0x20000;
-    _heap_end = .;
-  } :data
-
-  /* 64 KiB of unmapped address space separate the stack from everything
-     below it, so an overflow faults instead of corrupting the heap or globals
-     (ADR 0083, ADR 0088). The size must equal loader.StackGuardSize: the
-     loader rejects an image with a smaller gap, tools/stackframes bounds every
-     frame by it, and kernel/loader's tests compare this line with it. */
-  . = ALIGN(0x1000) + 0x10000;
-
-  .stack (NOLOAD) : ALIGN(0x1000) {
-    _stack_bottom = .;
-    . += 0x8000;
-    _stack_top = .;
-  } :stack
 
   /DISCARD/ : { *(.comment) *(.eh_frame*) *(.note*) }
 }

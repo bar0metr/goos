@@ -37,8 +37,9 @@ func TestWrappersRefuseArgumentsBeforeTheKernel(t *testing.T) {
 	}
 	for _, region := range [][2]uint64{
 		{vm.UserSharedAddress, 0},
-		{vm.UserSharedAddress - vm.PageSize, vm.PageSize},
-		{vm.UserSharedLimit - vm.PageSize, 2 * vm.PageSize},
+		{vm.UserSharedAddress + 1, vm.PageSize},
+		{vm.PageSize, vm.PageSize},
+		{vm.UserAddressLimit - vm.PageSize, 2 * vm.PageSize},
 		{vm.UserSharedAddress, ^uint64(0)},
 	} {
 		if _, status := MemoryMap(handle.ID(1), region[0], region[1], true); status != kcall.StatusInvalidArgument {

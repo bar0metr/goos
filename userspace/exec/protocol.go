@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/mm/vm"
 	"goos/userspace/startup"
 )
 
@@ -23,7 +24,7 @@ const (
 // Requests are written to a page shared by the shell and PID 1, one slot per
 // job in flight; the submit message names the slot.
 const (
-	PageAddress = uint64(0x40180000)
+	PageAddress = vm.UserSharedAddress + 16<<20
 	PageSize    = 4096
 	Slots       = 4
 	SlotSize    = PageSize / Slots

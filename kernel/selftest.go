@@ -198,8 +198,8 @@ func runKernelSelfTests(pageTable uint64) {
 		panicSerial("self-test console capability setup failed")
 	}
 	const sharedAddress = uint64(0x40010000)
-	sharedMappedA := sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress, 0, 2, true)
-	sharedMappedB := sharedObject.Map(processB.Handles(), sharedHandleB, rootB, sharedAddress, 0, 2, false)
+	_, sharedMappedA := sharedObject.Map(&pageAllocator, processA.Handles(), sharedHandleA, rootA, sharedAddress, 0, 2, true)
+	_, sharedMappedB := sharedObject.Map(&pageAllocator, processB.Handles(), sharedHandleB, rootB, sharedAddress, 0, 2, false)
 	sharedInitiallyZero := [8]byte{}
 	sharedZeroRead := vm.CopyIn(rootB, sharedAddress, sharedInitiallyZero[:])
 	sharedPayload := []byte("SHAREDOK")
@@ -212,8 +212,8 @@ func runKernelSelfTests(pageTable uint64) {
 	sharedPhysicalA1, sharedResolvedA1 := vm.Resolve(rootA, sharedAddress+vm.PageSize)
 	sharedPhysicalB1, sharedResolvedB1 := vm.Resolve(rootB, sharedAddress+vm.PageSize)
 	if !sharedCreated || !sharedGranted || !sharedTransferred || !sharedMappedA || !sharedMappedB || !sharedZeroRead || sharedInitiallyZero != [8]byte{} ||
-		sharedObject.Map(processA.Handles(), memoryHandle, rootA, sharedAddress+4*vm.PageSize, 0, 1, false) ||
-		sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress+4*vm.PageSize, 2, 1, false) || !sharedWritten || !sharedRead ||
+		mapped(sharedObject.Map(&pageAllocator, processA.Handles(), memoryHandle, rootA, sharedAddress+4*vm.PageSize, 0, 1, false)) ||
+		mapped(sharedObject.Map(&pageAllocator, processA.Handles(), sharedHandleA, rootA, sharedAddress+4*vm.PageSize, 2, 1, false)) || !sharedWritten || !sharedRead ||
 		string(sharedReadback[:]) != "SHAREDOK" || vm.CopyOut(rootB, sharedAddress, []byte{1}) ||
 		!sharedResolvedA0 || !sharedResolvedB0 || !sharedResolvedA1 || !sharedResolvedB1 ||
 		sharedPhysicalA0 != sharedPhysicalB0 || sharedPhysicalA1 != sharedPhysicalB1 {
@@ -506,8 +506,8 @@ func checkSharedImagePages(image []byte) {
 	if !firstOK || !secondOK {
 		panicSerial("shared image address spaces failed")
 	}
-	_, firstLoaded := loader.LoadImage(&pageAllocator, first, loader.Contiguous(image), &selfTestShared, 1)
-	_, secondLoaded := loader.LoadImage(&pageAllocator, second, loader.Contiguous(image), &selfTestShared, 1)
+	_, firstLoaded := loader.LoadImage(&pageAllocator, first, loader.Contiguous(image), &selfTestShared, 1, nil)
+	_, secondLoaded := loader.LoadImage(&pageAllocator, second, loader.Contiguous(image), &selfTestShared, 1, nil)
 	firstCode, firstCodeOK := vm.ResolveUser(first, vm.UserCodeAddress)
 	secondCode, secondCodeOK := vm.ResolveUser(second, vm.UserCodeAddress)
 	firstStack, _ := vm.ResolveUser(first, vm.UserStackAddress)
@@ -580,3 +580,7 @@ func checkHighMemory(pageTable uint64) {
 	console.WriteString("\n")
 	mark("PMM_HIGH_OK")
 }
+
+// mapped is the success of a shared-memory mapping, for checks that expect a
+// refusal and so never charge the tables it reports.
+func mapped(_ int, ok bool) bool { return ok }

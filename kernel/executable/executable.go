@@ -10,14 +10,12 @@ package executable
 
 import (
 	"goos/kernel/kcall"
-	"goos/kernel/loader"
 	"goos/kernel/mm/vm"
 )
 
 const (
-	// MaxPages bounds one object. A native image maps at most
-	// loader.MaxImagePages pages, and its file is never larger than that.
-	MaxPages = loader.MaxImagePages
+	// MaxPages bounds one object: 1 MiB.
+	MaxPages = 256
 	// MaxSize is the largest program an object can hold.
 	MaxSize = uint64(MaxPages) * vm.PageSize
 	// MaxObjects bounds the objects in existence at once. PID 1 launches one

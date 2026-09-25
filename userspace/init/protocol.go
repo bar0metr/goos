@@ -5,6 +5,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/mm/vm"
 	"goos/userspace/startup"
 )
 
@@ -21,7 +22,7 @@ const (
 // Startup blocks travel through a page shared by PID 1 and the kernel instead
 // of the launch message. PID 1 writes one slot per launch in flight.
 const (
-	StagingAddress  = uint64(0x401ff000)
+	StagingAddress  = vm.UserStagingAddress
 	StagingSlots    = 4
 	StagingSlotSize = startup.Size
 )

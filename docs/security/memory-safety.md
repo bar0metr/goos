@@ -36,7 +36,7 @@ In userspace, `unsafe` lives in two packages (ADR 0095):
 | Package | Use |
 | --- | --- |
 | `userspace/runtime/sys` | the native-call stubs of `userspace/runtime/amd64.S`, descriptor addresses, slices over kernel-mapped windows (system image, shared pages, DMA, the launch staging page), zero-copy string/byte views |
-| `userspace/runtime/arena` | the bump allocator over `_heap_start`/`_heap_end` and the TinyGo runtime hooks |
+| `userspace/runtime/arena` | the bump allocator over the heap it reserves with `VMMap` (ADR 0104), and the TinyGo runtime hooks |
 
 Programs, services, commands, and libraries call typed wrappers instead
 (`sys.IPCSend(channel, wire)`, `sys.StreamRead(stream, buffer)`,

@@ -21,21 +21,38 @@ func ImageMap(device handle.ID) ([]byte, kcall.Status) {
 }
 
 // MemoryMap maps the shared-memory object the handle names at address, which
-// must lie in the shared window, and returns size bytes of it. The object is
-// at least as large as the caller's protocol says; size is that bound, not a
-// value the kernel reports.
+// must be free in the caller's address space, and returns size bytes of it.
+// The object is at least as large as the caller's protocol says; size is that
+// bound, not a value the kernel reports.
 func MemoryMap(memory handle.ID, address uint64, size uint64, writable bool) ([]byte, kcall.Status) {
 	flags := uint64(0)
 	if writable {
 		flags = kcall.MemoryMapWritable
 	}
-	if size == 0 || address < vm.UserSharedAddress || size > vm.UserSharedLimit-address {
+	if size == 0 || address%vm.PageSize != 0 || address < vm.IdentityMapLimit || address >= vm.UserAddressLimit || size > vm.UserAddressLimit-address {
 		return nil, kcall.StatusInvalidArgument
 	}
 	if result := status(memoryMap(uint64(memory), address, flags)); result != kcall.StatusOK {
 		return nil, result
 	}
 	return window(address, size), kcall.StatusOK
+}
+
+// MemoryMapAnywhere maps the shared-memory object at an address the kernel
+// chooses and returns size bytes of it.
+func MemoryMapAnywhere(memory handle.ID, size uint64, writable bool) ([]byte, kcall.Status) {
+	flags := kcall.MemoryMapAnywhere
+	if writable {
+		flags |= kcall.MemoryMapWritable
+	}
+	valueWire = 0
+	if size == 0 {
+		return nil, kcall.StatusInvalidArgument
+	}
+	if result := status(memoryMap(uint64(memory), uint64(uintptr(unsafe.Pointer(&valueWire))), flags)); result != kcall.StatusOK {
+		return nil, result
+	}
+	return window(valueWire, size), kcall.StatusOK
 }
 
 // DMARegion is memory a device may read and write: the processor sees Memory,

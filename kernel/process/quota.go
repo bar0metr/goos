@@ -36,14 +36,16 @@ const (
 // used to drain the table and break every later pipeline. Four is a share of
 // the sixty-four the registry holds (ADR 0089).
 //
-// Pages cover an address space, a loaded image, guarded stacks and a startup
-// page. The largest image is the coreutils multi-call binary; 192 leaves room
-// for it plus a DMA region and the leaf table an image mapping needs.
+// Pages count every physical page a process's address space holds: its image
+// pages, page tables, and the heap, stack, and anonymous pages it has touched
+// (ADR 0104). Reservations cost nothing until touched, so the limit bounds
+// memory actually used: 32 MiB, room for a full default stack, a large heap,
+// and multi-megabyte buffers.
 const (
 	defaultChannelLimit = 4
 	defaultStreamLimit  = 4
 	defaultTaskLimit    = 4
-	defaultPageLimit    = 192
+	defaultPageLimit    = 8192
 )
 
 // PID 1 multiplexes on behalf of every other process: it creates the channel
@@ -59,7 +61,7 @@ const (
 	systemChannelLimit = 24
 	systemStreamLimit  = 24
 	systemTaskLimit    = 8
-	systemPageLimit    = 512
+	systemPageLimit    = 16384
 )
 
 // Quota is a process's resource account. Its counters only ever move through
@@ -115,6 +117,14 @@ func (process *Process) Charge(resource Resource, amount uint32) bool {
 	}
 	process.quota.used[resource] = used + amount
 	return true
+}
+
+// Available is how much more of a resource the quota allows.
+func (process *Process) Available(resource Resource) uint32 {
+	if process == nil || resource >= resourceCount {
+		return 0
+	}
+	return process.quota.limits[resource] - process.quota.used[resource]
 }
 
 // Release returns amount of a resource. It reports false, and releases what

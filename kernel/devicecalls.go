@@ -12,6 +12,7 @@ import (
 	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 )
@@ -167,13 +168,8 @@ func (handler nativeCallHandler) PortWrite(id uint64, specification uint64, valu
 
 func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
-	if !found || virtual != vm.UserDMAAddress {
+	if !found || virtual != vm.UserDMAAddress || !owner.Regions().Free(virtual, 4*vm.PageSize) {
 		return kcall.StatusInvalidArgument
-	}
-	for page := uint64(0); page < 4; page++ {
-		if !vm.CanMapUserPage(handler.root, virtual+page*vm.PageSize) {
-			return kcall.StatusInvalidArgument
-		}
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
 	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
@@ -183,8 +179,9 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 		return kcall.StatusInvalidArgument
 	}
 	// The DMA region is kernel memory allocated at the driver's request, so it
-	// is charged to the driver like any other page it causes to be allocated.
-	if !owner.Charge(process.ResourcePages, 4) {
+	// is charged to the driver like any other page it causes to be allocated,
+	// together with the page tables its window needs.
+	if owner.Available(process.ResourcePages) < 4+faultTables || !owner.Charge(process.ResourcePages, 4) {
 		return kcall.StatusResourceExhausted
 	}
 	physical, allocated := pageAllocator.AllocateContiguous(4)
@@ -204,8 +201,21 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 			return kcall.StatusResourceExhausted
 		}
 	}
+	// The region is pinned: freeing pages a device may still write into is
+	// the driver's teardown, not an unmap it can ask for.
+	if recordKernelRegion(owner, region.Region{Base: virtual, Length: 4 * vm.PageSize, Protection: region.Read | region.Write, Backing: region.Device, Flags: region.Pinned}) != kcall.StatusOK {
+		for release := uint64(0); release < 4; release++ {
+			pageAllocator.Free(physical + release*vm.PageSize)
+		}
+		owner.Release(process.ResourcePages, 4)
+		return kcall.StatusInvalidArgument
+	}
 	for page := uint64(0); page < 4; page++ {
-		if !vm.MapOwnedUserPage(handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true, Writable: true}) {
+		tables, mapped := vm.MapUserPageAt(&pageAllocator, handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true, Writable: true}, true)
+		if tables != 0 {
+			owner.Charge(process.ResourcePages, uint32(tables))
+		}
+		if !mapped {
 			// Mapped pages are owned and return with the address space, so only
 			// the unmapped remainder is freed here; the charge stays with the
 			// process until its teardown releases the whole account.

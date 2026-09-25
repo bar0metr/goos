@@ -297,6 +297,9 @@ func main() {
 	if built {
 		built = vm.MapLoaderMemory(&pageAllocator, pageTable, bootInfo.MemoryRegions())
 	}
+	// The kernel's copies into user memory fault in demand-zero pages the
+	// way the processor's accesses do (ADR 0104).
+	vm.SetFaultResolver(resolveCopyFault)
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {
@@ -444,7 +447,7 @@ func bootContinue() {
 	systemControlHandle, systemControlInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.SystemControlObject, capability.Write))
 	launchStaging, launchStagingCreated := sharedRegistry.Create(&pageAllocator, 1)
 	launchStagingHandle, launchStagingGranted := launchStaging.Grant(initProcess.Handles(), capability.Read|capability.Write)
-	launchStagingMapped := launchStagingCreated && launchStagingGranted && launchStaging.Map(initProcess.Handles(), launchStagingHandle, rootInit, supervisor.StagingAddress, 0, 1, true)
+	launchStagingMapped := launchStagingCreated && launchStagingGranted && mapPinnedShared(initProcess, &launchStaging, launchStagingHandle, supervisor.StagingAddress)
 	execPage, execPageCreated := sharedRegistry.Create(&pageAllocator, 1)
 	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
 	// The file cache is the memory the VFS and the filesystem service share:
@@ -490,7 +493,7 @@ func bootContinue() {
 			amd64.Halt()
 		}
 	}
-	loadedInit, loadedImageInit := loader.LoadNative(&pageAllocator, rootInit, initBytes)
+	loadedInit, loadedImageInit := loader.LoadImage(&pageAllocator, rootInit, loader.Contiguous(initBytes), nil, 0, initProcess.Regions())
 	if !loadedImageInit {
 		console.WriteString("PANIC: init native image rejected\n")
 		for {

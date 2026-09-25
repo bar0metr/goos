@@ -327,56 +327,10 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64) 
 	return rootAddress, true
 }
 
-// ExtendUserAddressSpace adds the leaf table covering the two MiB region that
-// contains virtual, so a later MapUserPage has somewhere to record its leaf.
-// Only the region the bootstrap layout already reaches is extended: the page
-// directory pointer and page directory must already exist, which confines
-// address-space growth to one level and one page. added reports whether a
-// table was allocated, so the caller charges only for what it gained.
-func ExtendUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64, virtual uint64) (added bool, ok bool) {
-	if allocator == nil || rootAddress%PageSize != 0 || virtual < IdentityMapLimit || virtual >= UserAddressLimit {
-		return false, false
-	}
-	// SAFETY: rootAddress names a process PML4 created by this package; its
-	// page-table pages stay owned and identity-mapped during bootstrap.
-	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
-	pml4Entry := root[(virtual>>39)&0x1ff]
-	if pml4Entry&entryPresent == 0 {
-		return false, false
-	}
-	// SAFETY: non-leaf entries were produced only by allocateTable and retain
-	// exclusive, identity-mapped page-table addresses.
-	pdpt := (*table)(unsafe.Pointer(uintptr(pml4Entry & addressMask)))
-	pdptEntry := pdpt[(virtual>>30)&0x1ff]
-	if pdptEntry&entryPresent == 0 {
-		return false, false
-	}
-	// SAFETY: same page-table ownership invariant as above.
-	pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
-	index := (virtual >> 21) & 0x1ff
-	if pd[index]&entryPresent != 0 {
-		// A kernel directory entry (MapLoaderMemory) is not the user's to
-		// extend.
-		return false, pd[index]&entryUser != 0
-	}
-	pageTableAddress, _, allocated := allocateTable(allocator)
-	if !allocated {
-		return false, false
-	}
-	pd[index] = pageTableAddress | entryPresent | entryWritable | entryUser
-	return true, true
-}
-
 // MapUserPage adds a supervisor-authorized user leaf to an existing process
 // address space. Writable executable mappings are rejected by pageEntry.
 func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
 	return mapUserPage(rootAddress, virtual, physical, permissions, false)
-}
-
-// MapOwnedUserPage maps private process storage. DestroyUserAddressSpace
-// returns the backing physical page; shared pages must use MapUserPage.
-func MapOwnedUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
-	return mapUserPage(rootAddress, virtual, physical, permissions, true)
 }
 
 func mapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions, owned bool) bool {
@@ -435,7 +389,7 @@ func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool 
 				pt := (*table)(unsafe.Pointer(uintptr(ptAddress)))
 				for leafIndex := range pt {
 					leaf := pt[leafIndex]
-					if leaf&(entryPresent|entryUser|entryOwned) == entryPresent|entryUser|entryOwned {
+					if leaf&(entryPresent|entryOwned) == entryPresent|entryOwned {
 						ok = allocator.Free(leaf&addressMask) && ok
 					}
 					pt[leafIndex] = 0
@@ -452,20 +406,6 @@ func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool 
 	return allocator.Free(rootAddress) && ok
 }
 
-// CanMapUserPage reports whether the existing bootstrap page-table hierarchy
-// has an unused leaf for the requested user address. Loaders use this to reject
-// unsupported branches and conflicts before allocating or exposing pages.
-func CanMapUserPage(rootAddress uint64, virtual uint64) bool {
-	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || virtual < IdentityMapLimit || virtual >= UserAddressLimit {
-		return false
-	}
-	// SAFETY: rootAddress names a process PML4 created by this package; the
-	// function only inspects its owned, identity-mapped page-table hierarchy.
-	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
-	entry := userLeafEntry(root, virtual)
-	return entry != nil && *entry&entryPresent == 0
-}
-
 // CopyIn copies a bounded range from a process address space through the
 // kernel's view of physical memory (kernelAddress). Every page in the range
 // must be explicitly user-accessible; supervisor mappings are never accepted
@@ -475,7 +415,7 @@ func CopyIn(rootAddress uint64, address uint64, destination []byte) bool {
 		return false
 	}
 	for copied := uint64(0); copied < uint64(len(destination)); {
-		physical, _, ok := resolveUser(rootAddress, address+copied)
+		physical, _, ok := resolveOrFault(rootAddress, address+copied, false)
 		if !ok {
 			return false
 		}
@@ -504,7 +444,7 @@ func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
 		return false
 	}
 	for copied := uint64(0); copied < uint64(len(source)); {
-		physical, leaf, ok := resolveUser(rootAddress, address+copied)
+		physical, leaf, ok := resolveOrFault(rootAddress, address+copied, true)
 		if !ok || leaf&entryWritable == 0 {
 			return false
 		}
@@ -532,7 +472,7 @@ func CanCopyOut(rootAddress uint64, address uint64, length uint64) bool {
 		return false
 	}
 	for checked := uint64(0); checked < length; {
-		physical, leaf, ok := resolveUser(rootAddress, address+checked)
+		physical, leaf, ok := resolveOrFault(rootAddress, address+checked, true)
 		if !ok || leaf&entryWritable == 0 {
 			return false
 		}
@@ -712,6 +652,17 @@ func UserLeaf(rootAddress uint64, index int) (uint64, uint64, bool) {
 		}
 	}
 	return 0, 0, false
+}
+
+// resolveOrFault is resolveUser for the kernel's copies: an absent page is
+// first offered to the demand-fault resolver, as the processor would when the
+// process itself touched it.
+func resolveOrFault(rootAddress uint64, virtual uint64, write bool) (uint64, uint64, bool) {
+	physical, leaf, ok := resolveUser(rootAddress, virtual)
+	if ok || faultResolver == nil || !ValidateUserRange(virtual, 1) || !faultResolver(rootAddress, virtual&^(PageSize-1), write) {
+		return physical, leaf, ok
+	}
+	return resolveUser(rootAddress, virtual)
 }
 
 func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {

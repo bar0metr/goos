@@ -56,8 +56,9 @@ page through one accessor: pages in `[1 MiB, 1 GiB)` at their physical
 address, managed pages above that through the direct map. On a machine with
 more than about a GiB, the firmware places the loader memory that holds the
 kernel heap above 1 GiB; `vm.MapLoaderMemory` maps it at its physical address,
-supervisor-only, and every process shares those directory entries in its user
-GiB until the user range moves (ADR 0103).
+supervisor-only, and every process shares those directory entries. No user
+leaf can be placed under them, so the few MiB they cover at the top of the
+image area are simply unavailable to images (ADR 0103, ADR 0104).
 
 Ordinary identity-mapped pages are writable and non-executable. The loaded PE
 image is validated in memory and its section flags are translated into leaf
@@ -65,26 +66,77 @@ permissions. Executable sections are read-only; writable sections are NX. A PE
 section requesting write and execute simultaneously is rejected. EFER.NXE and
 CR0.WP are enabled before the kernel installs its PML4 through CR3.
 
-Process roots clone the supervisor-only kernel PDPT path and allocate private
-user page-table levels. User leaves require the user bit at every parent, reject
-W+X, and are zeroed before exposure. The bootstrap native program uses a
-separate RX code page, read-only data page, and RW+NX stack page.
-
-Every image's stack segment has 64 KiB of unmapped address space directly
-below it (ADR 0083, ADR 0088). The loader rejects an image with a segment in
-that gap, TinyGo images place their stack in its own segment 64 KiB above the
-heap, and the build rejects a program with a stack frame that could step over
-the gap. A stack overflow is a page fault that retires the process.
+Process roots clone the supervisor-only kernel PDPT path and share the direct
+map; every user page-table level below them is private and created on demand.
+User leaves require the user bit at every parent, reject W+X, and are zeroed
+before exposure.
 
 Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
-`CopyOut` reject arithmetic wraparound and addresses outside the bootstrap user
-range, then validate every page crossed by the request. Every page-table level
-and leaf must be present and user-accessible; `CopyOut` additionally requires a
-writable leaf. The validated physical pages are accessed through the kernel
-identity map or the direct map with quadword string instructions, which also
-clear page-table pages and initialize loaded image pages. User leaves are
-placed only under page tables that carry the user bit at every level, so a
-kernel table shared between address spaces never receives one.
+`CopyOut` reject arithmetic wraparound and addresses outside the user range,
+then validate every page crossed by the request. Every page-table level and
+leaf must be present and user-accessible; `CopyOut` additionally requires a
+writable leaf. An absent page is first offered to the demand-fault resolver,
+exactly as a touch by the process would be, so a call may name memory the
+process has not touched yet. The validated physical pages are accessed through
+the kernel identity map or the direct map with quadword string instructions.
+User leaves are placed only under page tables that carry the user bit at every
+level, so a kernel table shared between address spaces never receives one.
+
+## User address space and regions
+
+User addresses are canonical lower-half addresses in `[1 GiB,
+0x00007ffffffff000)` (ADR 0104):
+
+| Range | Use |
+| --- | --- |
+| `0x40000000` | self-test probe page (validation build) |
+| `0x40001000` | startup page, read-only |
+| `0x40002000` – `2 GiB` | image segments; static small-code-model executables |
+| `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec page) |
+| `0x0000081000000000` | DMA window |
+| `0x0000082000000000` | system image window |
+| `0x0000083000000000` | PID 1 launch staging page |
+| `0x0000100000000000` – `0x0000700000000000` | addresses the kernel chooses: heap, anonymous maps, shared maps |
+| below `0x00007fffff000000` | stack reservation, guard below it |
+
+Every process has a region map (`kernel/mm/region`): a sorted table of at
+most 128 non-overlapping regions, each with a protection, a backing
+(anonymous, image, shared, device, guard), and flags. The page tables say which
+pages are present; a region says what a page may become. The kernel's own
+structure — image segments, the stack reservation and its guard, the startup
+page, the DMA and image windows, PID 1's staging page — is recorded as pinned
+regions the native calls cannot unmap or reprotect.
+
+**Demand-zero memory.** Anonymous memory and the zero-filled tail of an image
+segment are supplied on first touch. The user page-fault path saves the
+registers and SSE state and asks the kernel to resolve the fault: an absent
+page inside a demand-zero region whose protection allows the access gets a
+zeroed page, charged to the process with any page tables it needed, and the
+instruction is retried. Anything else — a guard region, an access the
+protection refuses, an address in no region, a spent page quota — retires the
+process and logs which it was (`user fault: guard page`, `access not
+permitted`, `no mapping`, `page quota exhausted`). A fault in kernel mode is
+still fatal.
+
+**Native calls.** `VMMap` reserves anonymous memory at a free address the
+caller names or one the kernel chooses; `VMUnmap` removes a range and frees the
+owned pages in it; `VMProtect` changes the protection of anonymous memory (to
+none, read-only, or read-write — never executable); `VMDiscard` frees the pages
+of anonymous memory and keeps the reservation; `VMQuery` describes the region
+at an address. `MemoryMap` of a shared-memory object records a shared region
+and may let the kernel choose the address. Every range is checked for
+alignment, wraparound, and the user range, and W^X holds for every mapping.
+Page tables, once created, stay with the address space until it is destroyed.
+
+**Stack and heap.** An image no longer carries its stack or heap. The kernel
+reserves the stack below `0x00007fffff000000` — 1 MiB by default, as much as
+the image header asks up to 64 MiB — above 64 KiB of guard, the gap
+`tools/stackframes` bounds every frame by (ADR 0088), and supplies the top page
+at launch and the rest as the stack grows. The userspace runtime reserves a
+256 MiB heap at start; only the pages it touches count, and a service's
+per-request reset returns what it touched above its mark once that exceeds
+256 KiB. Self-test and fault-probe images may still carry their own stack
+segment, with the same 64 KiB gap below it.
 
 ## Shared image pages
 
@@ -99,14 +151,14 @@ loads a private copy.
 
 ## Shared memory
 
-Shared-memory objects own between one and 16 zeroed physical pages. A monotonic
+Shared-memory objects own between one and 32 zeroed physical pages. A monotonic
 registry assigns their nonzero identities in a separate object namespace.
 Processes receive only local memory
 handles; mappings require Read authority and writable mappings additionally
 require Write. Transfer derives equal or narrower rights in the receiver.
 
-The mapper validates the complete object page range and all destination leaves
-before installing mappings. The same physical pages may appear in different
+The mapper validates the complete object page range and the destination region
+before installing mappings, and records the mapping as a shared region. The same physical pages may appear in different
 process roots or at different virtual addresses. Every shared mapping is NX.
 Executable shared memory requires a future explicit write-then-seal design.
 
@@ -115,9 +167,8 @@ only in process B. A payload crossing the page boundary is written through A,
 read through B, and verified to resolve to identical physical pages. A write
 through B is rejected.
 
-The one-GiB kernel identity map is a bootstrap constraint, not the final process
-layout. A higher-half kernel, guard regions beyond the stack's, demand paging, and ASLR
-remain later work.
+The kernel still occupies the first GiB of every address space, identity
+mapped and supervisor-only. A higher-half kernel and ASLR remain later work.
 
 ## ASLR readiness
 
@@ -136,16 +187,17 @@ decided so far is in the way.
 | Kernel identity map | physical = virtual for `[1 MiB, 1 GiB)` | `vm.BuildIdentity`; kernel stacks, heap arena, page tables, and the boot archive are all reached at their physical address |
 | Loader memory above 1 GiB | physical = virtual, supervisor-only | `vm.MapLoaderMemory`; where OVMF puts the heap arena on machines with more than about a GiB |
 | Direct map | `0xffff800000000000` + physical | `vm.DirectMapBase`; every managed page, shared by all address spaces |
-| User pointer range | `[0x40000000, 0x80000000)` | `vm.ValidateUserRange` (`IdentityMapLimit`..`UserAddressLimit`) |
-| Initial user page tables | one leaf table for `[0x40000000, 0x40200000)` | `vm.CreateUserAddressSpace`; `ExtendUserAddressSpace` can add one more leaf table per two-MiB region in the same GiB |
+| User pointer range | `[0x40000000, 0x00007ffffffff000)` | `vm.ValidateUserRange` (`IdentityMapLimit`..`UserAddressLimit`) |
+| User page tables | created on demand at every level | `vm.MapUserPageAt` |
 | Startup page | `0x40001000` | `vm.UserStartupAddress`; read only through `StartupRead` |
-| Image base (code, then rodata, data, bss, stack, heap) | `0x40002000` | `userspace/runtime/amd64.ld`; images are static `ET_EXEC` files |
-| Initial stack pointer | `_stack_top` in the image's data segment | `StackTop` in the native header, taken from the linker symbol by `elf2native` |
-| Userspace heap arena | `_heap_start`..`_heap_end` in the image | linker script; each program's bump allocator uses it |
-| Shared-memory window | `[0x40180000, 0x401c0000)` | `vm.UserSharedAddress`/`UserSharedLimit`; the exec page is mapped at its start (`exec.PageAddress`) |
-| DMA window | `0x401c0000`, four pages | `vm.UserDMAAddress`; `DMAAllocate` refuses any other address |
-| PID 1 launch staging page | `0x401ff000` | `supervisor.StagingAddress`, mapped by the kernel |
-| System image window | `[0x40200000, 0x40600000)` | `vm.UserImageAddress`/`UserImageLimit`; `ImageMap` refuses any other address |
+| Image base (code, then rodata, data, bss) | `0x40002000` | `userspace/runtime/amd64.ld`; images are static `ET_EXEC` files below 2 GiB |
+| Initial stack pointer | `0x00007fffff000000` | `vm.UserStackTop`; the reservation below it comes from the image header |
+| Userspace heap | chosen by the kernel's first-fit search from `0x0000100000000000` | `arena.Init` reserves it with `VMMap` |
+| Kernel-chosen mappings | first fit in `[0x0000100000000000, 0x0000700000000000)` | `vm.UserMapBase`/`UserMapLimit`; `region.Map.FindFree` takes the starting point as a parameter |
+| Shared-memory window | `[0x0000080000000000, 0x0000081000000000)` | `vm.UserSharedAddress`; the file cache at its start, the exec page 16 MiB in (`exec.PageAddress`) |
+| DMA window | `0x0000081000000000`, four pages | `vm.UserDMAAddress`; `DMAAllocate` refuses any other address |
+| PID 1 launch staging page | `0x0000083000000000` | `vm.UserStagingAddress`, mapped by the kernel |
+| System image window | `[0x0000082000000000, 0x0000082040000000)` | `vm.UserImageAddress`/`UserImageLimit`; `ImageMap` refuses any other address |
 | Shared image frames | one physical copy per read-only segment | keyed by the image's offset in the boot archive (ADR 0081); mapped at the segment's link address |
 
 There is no source of randomness in the kernel. The TSC is read for the clock
@@ -197,12 +249,11 @@ top, with no relocation table. A per-process base needs:
   must be zero, so an old loader refuses a new image rather than misreading it;
 - the kernel choosing the base per launch and adding it to every segment,
   the entry, and the stack top;
-- page tables allocated on demand across the user range. Today a new address
-  space has one leaf table, so an image must fit in
-  `[0x40000000, 0x40200000)`. Randomizing inside the one-GiB user range at
-  page granularity gives at most 18 bits of entropy, fewer after alignment and
-  the fixed windows are excluded. A larger user range would need a wider
-  `ValidateUserRange` bound.
+- an image base inside the image area. Page tables are already created on
+  demand across the whole user range (ADR 0104), and kernel-chosen mappings
+  and the stack sit far above it, so the 47-bit range leaves ample entropy for
+  those; images, linked for the small code model, stay below 2 GiB until they
+  are position-independent.
 
 **Shared image pages under ASLR.** The frames of ADR 0081 hold code as it was
 loaded, and their key is only the archive offset. With position-independent
@@ -249,8 +300,8 @@ and none of them is part of a declared stable ABI.
 
 What does stand in the way is implementation, in this order of cost: the
 kernel's fixed, identity-mapped placement; the native image format's lack of
-relocations together with the untested PIE build of TinyGo programs; the
-single preallocated user leaf table; and the missing entropy source. Two
+relocations together with the untested PIE build of TinyGo programs; and the
+missing entropy source. Two
 decisions should keep this open: a new fixed user address should be returned
 by the call that maps it rather than assumed by the caller, and a new wire
 format should keep carrying slots or offsets rather than pointers.

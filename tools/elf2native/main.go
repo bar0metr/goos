@@ -26,15 +26,17 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	var stackTop uint64
+	// The kernel provides the stack (ADR 0104); the program only says how
+	// large a reservation it wants.
+	var stackReserve uint64
 	for _, symbol := range symbols {
-		if symbol.Name == "_stack_top" {
-			stackTop = symbol.Value
+		if symbol.Name == "_goos_stack_reserve" {
+			stackReserve = symbol.Value
 			break
 		}
 	}
-	if stackTop == 0 {
-		fail(fmt.Errorf("missing _stack_top"))
+	if stackReserve == 0 || stackReserve%vm.PageSize != 0 || stackReserve > loader.MaxStackReserve {
+		fail(fmt.Errorf("missing or invalid _goos_stack_reserve"))
 	}
 	segments := make([]loader.SegmentSource, 0, loader.MaxSegments)
 	for _, program := range input.Progs {
@@ -52,7 +54,7 @@ func main() {
 			fail(err)
 		}
 		// The loader zero-fills memory past the file bytes, so trailing zeros
-		// such as the stack and heap reservations need not be stored or copied.
+		// such as the BSS need not be stored or copied.
 		for len(payload) != 0 && payload[len(payload)-1] == 0 {
 			payload = payload[:len(payload)-1]
 		}
@@ -69,18 +71,12 @@ func main() {
 	for _, segment := range segments {
 		storageSize += len(segment.Data)
 	}
-	image, ok := loader.EncodeNative(make([]byte, storageSize), loader.ImageSource{Entry: input.Entry, StackTop: stackTop, Segments: segments})
+	image, ok := loader.EncodeNative(make([]byte, storageSize), loader.ImageSource{Entry: input.Entry, StackReserve: stackReserve, Segments: segments})
 	if !ok {
 		fail(fmt.Errorf("native image encoding failed"))
 	}
-	parsed, ok := loader.ParseNative(image, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit)
-	if !ok {
+	if _, ok := loader.ParseNative(image, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit); !ok {
 		fail(fmt.Errorf("ELF load layout is not a valid native image"))
-	}
-	// The loader refuses a stack guard the kernel maps pages into; refuse it
-	// here too, so the build fails rather than the launch (ADR 0088).
-	if start, end, _ := parsed.StackGuard(); loader.KernelMapsUserRange(start, end) {
-		fail(fmt.Errorf("stack guard [%#x, %#x) overlaps a window the kernel maps", start, end))
 	}
 	if err := os.WriteFile(os.Args[2], image, 0o644); err != nil {
 		fail(err)

@@ -114,7 +114,7 @@ raise its own or another's.
 | channels | 4 | 16 | `ChannelCreate`, released when the registry frees the channel |
 | streams | 4 | 16 | `StreamCreate`, released when the registry frees the stream |
 | tasks | 4 | 8 | task binding, released when the task exits |
-| pages | 192 | 512 | launch, `DMAAllocate`, `ImageMap`; released at teardown |
+| pages | 8192 | 16384 | launch, demand-zero faults and the page tables they need, `MemoryMap`, `DMAAllocate`, `ImageMap`; released by `VMUnmap`, `VMDiscard`, and teardown |
 
 PID 1 holds the larger share because it creates the endpoints every other
 process communicates through. The share is granted once, at boot, and
@@ -125,6 +125,9 @@ rather than until the creator's handle closes, because both endpoints can be
 transferred and the object outlives them. Launch memory is measured as the
 difference in free pages across address-space creation and image loading, and
 charged before the task exists, so an image that does not fit fails to launch.
+Everything after that is charged as it is touched: heap, stack, BSS, and
+anonymous pages arrive on demand (ADR 0104), and a process whose quota is spent
+when it touches a new page is retired with a logged `page quota exhausted`.
 
 CPU is sampled rather than measured: the timer charges a tick to the task it
 interrupted, and a task's count folds into its process when it exits. `ps`

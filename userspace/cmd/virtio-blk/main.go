@@ -7,6 +7,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	blockproto "goos/userspace/block"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/arena"
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	dmaVirtualAddress = uint64(0x401c0000)
+	dmaVirtualAddress = vm.UserDMAAddress
 	dmaSize           = uint64(16384)
 	sectorSize        = uint64(512)
 	virtioRead        = uint32(0)

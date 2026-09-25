@@ -519,6 +519,16 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'uptime\n'
 	sleep 1
+	# Native virtual memory (ADR 0104): the checks, then one process per
+	# fault it must not survive while the system does.
+	printf 'vmprobe\n'
+	sleep 8
+	for fault in read-only guard unmapped quota; do
+		printf 'vmprobe %s\n' "$fault"
+		sleep 3
+	done
+	printf 'echo after-vm-faults\n'
+	sleep 1
 	printf 'sleep 1\n'
 	sleep 1
 	printf 'cat /missing\n'
@@ -550,7 +560,7 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 270 seconds between its commands; the
+# The scripted session sleeps about 290 seconds between its commands; the
 # deadline leaves room for a slow boot on a loaded host.
 wait_for_marker boot '^arena-stress-complete$' 420 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
@@ -763,6 +773,17 @@ require_marker redirection.writer WRITE_PROCESS_OK "$log" 'echo redirected-nativ
 require_marker redirection.shell REDIRECTION_EXEC_OK "$log" 'echo redirected-native-data'
 forbid_regex redirection.driver-oom 'VIRTIO_BLK_OUT_OF_MEMORY' 'no virtio-blk heap exhaustion' "$log" VIRTIO_BLK_OUT_OF_MEMORY
 pass_group redirection
+
+require_marker vm.probe VM_PROBE_OK "$log" 'goos> vmprobe'
+for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
+	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
+done
+require_regex vm.read-only 'user fault: access not permitted' 'a write to a read-only page retired' "$log" 'goos> vmprobe read-only'
+require_regex vm.guard 'user fault: guard page' 'a stack overflow stopped at the guard' "$log" 'goos> vmprobe guard'
+require_regex vm.unmapped 'user fault: no mapping' 'an unmapped access retired' "$log" 'goos> vmprobe unmapped'
+require_regex vm.quota 'user fault: page quota exhausted' 'a process past its page quota retired' "$log" 'goos> vmprobe quota'
+require_regex vm.system-survives '^after-vm-faults$' 'the system carries on after the faults' "$log" 'goos> echo after-vm-faults'
+pass_group vm
 
 value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)
 [ "$value" = GBLKIO ] || fail_check persistence.block-bytes GBLKIO "$value" "$log" BLOCK_SERVICE_IO_OK

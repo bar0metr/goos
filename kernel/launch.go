@@ -14,6 +14,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
+	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -145,7 +146,10 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	if !ok {
 		return 0, 0, supervisor.LaunchAddressSpaceFailed
 	}
-	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, imageKey)
+	// The region map is built while the image loads and moves into the
+	// process slot once there is one (ADR 0104).
+	launchRegions.Init(vm.IdentityMapLimit, vm.UserAddressLimit)
+	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, imageKey, &launchRegions)
 	began = launchStageDone(launchLoad, began)
 	if !ok {
 		abandonSpawn(root, nil, false)
@@ -176,6 +180,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
+	*spawned.Regions() = launchRegions
 	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
@@ -204,7 +209,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	}
 	if len(startupData) != 0 {
 		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &launchBound)
-		if !boundOK || !mapStartup(root, bound) {
+		if !boundOK || !mapStartup(root, spawned.Regions(), bound) {
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
@@ -283,14 +288,26 @@ func abandonHandle(typeID handle.Type, cap capability.Capability) {
 	}
 }
 
+// launchRegions is the region map of the process being launched. Only one
+// launch runs at a time.
+var launchRegions region.Map
+
 // mapStartup gives a new process its bound startup block as a private
-// read-only page; it is released with the address space.
-func mapStartup(root uint64, bound []byte) bool {
+// read-only page, recorded as a pinned region; it is released with the
+// address space.
+func mapStartup(root uint64, regions *region.Map, bound []byte) bool {
+	if regions.Insert(region.Region{Base: vm.UserStartupAddress, Length: vm.PageSize, Protection: region.Read, Backing: region.Device, Flags: region.Pinned}) != region.OK {
+		return false
+	}
 	physical, ok := pageAllocator.Allocate()
 	if !ok {
 		return false
 	}
-	if !vm.InitializePhysical(physical, bound) || !vm.MapOwnedUserPage(root, vm.UserStartupAddress, physical, vm.Permissions{User: true}) {
+	if !vm.InitializePhysical(physical, bound) {
+		pageAllocator.Free(physical)
+		return false
+	}
+	if _, mapped := vm.MapUserPageAt(&pageAllocator, root, vm.UserStartupAddress, physical, vm.Permissions{User: true}, true); !mapped {
 		pageAllocator.Free(physical)
 		return false
 	}

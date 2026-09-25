@@ -152,6 +152,31 @@ func (handler *testHandler) ExecutableWrite(executable uint64, address uint64, l
 	return StatusOK
 }
 
+func (handler *testHandler) VMMap(descriptor uint64, protection uint64, flags uint64) Status {
+	handler.address, handler.length, handler.channel = descriptor, protection, flags
+	return StatusOK
+}
+
+func (handler *testHandler) VMUnmap(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
+func (handler *testHandler) VMProtect(address uint64, length uint64, protection uint64) Status {
+	handler.address, handler.length, handler.channel = address, length, protection
+	return StatusOK
+}
+
+func (handler *testHandler) VMDiscard(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
+func (handler *testHandler) VMQuery(address uint64, record uint64) Status {
+	handler.address, handler.length = address, record
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -353,7 +378,7 @@ func TestDispatchMemoryMap(t *testing.T) {
 		t.Fatalf("memory map %+v %+v", result, handler)
 	}
 	handler = &testHandler{}
-	if result := Dispatch(Request{Operation: OperationMemoryMap, Arg0: 20, Arg1: 0x40180000, Arg2: 2}, handler); result.Status != StatusInvalidArgument || handler.channel != 0 {
+	if result := Dispatch(Request{Operation: OperationMemoryMap, Arg0: 20, Arg1: 0x40180000, Arg2: 4}, handler); result.Status != StatusInvalidArgument || handler.channel != 0 {
 		t.Fatalf("unknown memory map flag accepted: %+v", result)
 	}
 }
@@ -423,8 +448,11 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationExecutableCreate != 37 || OperationExecutableWrite != 38 {
 		t.Fatalf("operations %d %d", OperationExecutableCreate, OperationExecutableWrite)
 	}
-	// ExecutableWrite is the last operation, so anything past it is unsupported.
-	if result := Dispatch(Request{Operation: OperationExecutableWrite + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	// VMQuery is the last operation, so anything past it is unsupported.
+	if OperationVMMap != 39 || OperationVMQuery != 43 {
+		t.Fatalf("vm operations %d %d", OperationVMMap, OperationVMQuery)
+	}
+	if result := Dispatch(Request{Operation: OperationVMQuery + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -442,6 +470,28 @@ func TestDispatchExecutableCalls(t *testing.T) {
 		result = Dispatch(Request{Operation: OperationExecutableWrite, Arg0: 5, Arg1: 0x3000, Arg2: length}, handler)
 		if result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
 			t.Fatalf("write of %d reached the handler: %#v", length, result)
+		}
+	}
+}
+
+func TestVMCallsValidateFlags(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationVMMap, Arg0: 0x1000, Arg1: VMRead | VMWrite, Arg2: VMMapFixed}, handler); result.Status != StatusOK || handler.address != 0x1000 || handler.length != VMRead|VMWrite || handler.channel != VMMapFixed {
+		t.Fatalf("map: %+v", result)
+	}
+	for _, request := range []Request{
+		{Operation: OperationVMMap, Arg1: 8},
+		{Operation: OperationVMMap, Arg2: 2},
+		{Operation: OperationVMProtect, Arg2: 16},
+		{Operation: OperationMemoryMap, Arg2: 4},
+	} {
+		if result := Dispatch(request, handler); result.Status != StatusInvalidArgument {
+			t.Fatalf("%+v accepted: %v", request, result.Status)
+		}
+	}
+	for _, operation := range []Operation{OperationVMUnmap, OperationVMProtect, OperationVMDiscard, OperationVMQuery} {
+		if result := Dispatch(Request{Operation: operation, Arg0: 0x2000, Arg1: 0x3000}, handler); result.Status != StatusOK || handler.address != 0x2000 {
+			t.Fatalf("operation %d: %+v", operation, result)
 		}
 	}
 }
