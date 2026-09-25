@@ -77,7 +77,7 @@ authority.
 The kernel installs PID 1's initial table in a fixed order before PID 1 runs
 and panics if any slot lands out of order (`kernel/main.go`). PID 1 then
 derives rights into children through the manifests in
-`userspace/cmd/init/main.go`. The rows below are the normal build; the
+`userspace/cmd/init/services.go`. The rows below are the normal build; the
 validation build also grants the console, write only, to `fault-probe`, and
 uses slot 9 for a block-service probe (ADR 0058).
 

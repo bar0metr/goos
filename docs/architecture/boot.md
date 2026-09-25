@@ -2,7 +2,7 @@
 
 This document follows `main` in `kernel/main.go` from firmware entry to the
 steady-state kernel loop, then PID 1's service startup in
-`userspace/cmd/init/main.go`. It describes order and mechanism. Exact serial
+`userspace/cmd/init/main.go` and `services.go`. It describes order and mechanism. Exact serial
 output is deliberately not listed; it differs between the normal and the
 validation build (see [Build variants](#build-variants)).
 

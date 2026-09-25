@@ -120,7 +120,7 @@ of code.
 
 ## 7. Supervision and capabilities
 
-Register the service in `userspace/cmd/init/main.go` with a
+Register the service in `userspace/cmd/init/services.go` with a
 `supervisor.Definition`:
 
 ```go
