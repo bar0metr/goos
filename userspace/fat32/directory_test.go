@@ -130,11 +130,11 @@ func TestNestedDirectoriesAndReadDir(t *testing.T) {
 	}
 	cluster := uint32(uint64(deep) >> slotBits)
 	var dotDot [32]byte
-	fs.readAt(fs.clusterOffset(entryClusterOf(t, fs, deep))+entrySize, dotDot[:])
+	fs.readMeta(fs.clusterOffset(entryClusterOf(t, fs, deep))+entrySize, dotDot[:])
 	if entryCluster(dotDot) != cluster {
 		t.Fatalf("deep '..' = %d, want %d", entryCluster(dotDot), cluster)
 	}
-	fs.readAt(fs.clusterOffset(entryClusterOf(t, fs, outer))+entrySize, dotDot[:])
+	fs.readMeta(fs.clusterOffset(entryClusterOf(t, fs, outer))+entrySize, dotDot[:])
 	if entryCluster(dotDot) != 0 {
 		t.Fatalf("outer '..' = %d, want 0 for the root", entryCluster(dotDot))
 	}
@@ -149,18 +149,79 @@ func entryClusterOf(t *testing.T, fs *FileSystem, id ramfs.NodeID) uint32 {
 	return entryCluster(entry)
 }
 
-func TestRenameWithinDirectoryOnly(t *testing.T) {
+func TestRenameAcrossDirectories(t *testing.T) {
 	fs, root := mounted(t, formattedDevice())
-	demo := mkdir(t, fs, root, "demo")
-	id := writeFile(t, fs, demo, "old.txt", "x")
-	if status := fs.RenameName(id, demo, mustName(t, "new.txt")); status != ramfs.StatusOK {
+	a, b := mkdir(t, fs, root, "a"), mkdir(t, fs, root, "b")
+	id := writeFile(t, fs, a, "file", "payload")
+	cluster := entryClusterOf(t, fs, id)
+	if status := fs.RenameName(id, a, mustName(t, "renamed")); status != ramfs.StatusOK {
 		t.Fatal(status)
 	}
-	if _, status := fs.OpenName(demo, mustName(t, "new.txt")); status != ramfs.StatusOK {
+	id, _ = fs.OpenName(a, mustName(t, "renamed"))
+	if status := fs.RenameName(id, b, mustName(t, "moved-with-a-long-name")); status != ramfs.StatusOK {
+		t.Fatalf("move: %v", status)
+	}
+	if names := listNames(t, fs, a); len(names) != 0 {
+		t.Fatalf("source still lists %v", names)
+	}
+	moved, status := fs.OpenName(b, mustName(t, "moved-with-a-long-name"))
+	if status != ramfs.StatusOK || entryClusterOf(t, fs, moved) != cluster || readFile(t, fs, moved) != "payload" {
+		t.Fatalf("moved file: %v", status)
+	}
+	if _, status := fs.Stat(id); status != ramfs.StatusNotFound {
+		t.Fatalf("the old node still resolves: %v", status)
+	}
+	other := writeFile(t, fs, a, "taken", "x")
+	if status := fs.RenameName(other, b, mustName(t, "moved-with-a-long-name")); status != ramfs.StatusAlreadyExists {
+		t.Fatalf("move onto an existing name: %v", status)
+	}
+}
+
+func TestMoveDirectoryRepointsParent(t *testing.T) {
+	device := formattedDevice()
+	fs, root := mounted(t, device)
+	outer := mkdir(t, fs, root, "outer")
+	inner := mkdir(t, fs, outer, "inner")
+	writeFile(t, fs, inner, "leaf", "deep")
+	innerCluster := entryClusterOf(t, fs, inner)
+	if status := fs.RenameName(inner, root, mustName(t, "top")); status != ramfs.StatusOK {
 		t.Fatal(status)
 	}
-	if status := fs.RenameName(id, root, mustName(t, "moved.txt")); status != ramfs.StatusInvalidArgument {
-		t.Fatalf("cross-directory rename: %v", status)
+	if parent, status := fs.parentKey(innerCluster); status != ramfs.StatusOK || parent != 0 {
+		t.Fatalf("moved '..' = %d %v, want the root", parent, status)
+	}
+	top, _ := fs.OpenName(root, mustName(t, "top"))
+	outer, _ = fs.OpenName(root, mustName(t, "outer"))
+	if status := fs.RenameName(top, outer, mustName(t, "back")); status != ramfs.StatusOK {
+		t.Fatal(status)
+	}
+	if parent, _ := fs.parentKey(innerCluster); parent != entryClusterOf(t, fs, outer) {
+		t.Fatalf("moved back '..' = %d", parent)
+	}
+	reopened, root := mounted(t, device)
+	outer, _ = reopened.OpenName(root, mustName(t, "outer"))
+	back, status := reopened.OpenName(outer, mustName(t, "back"))
+	if status != ramfs.StatusOK {
+		t.Fatal(status)
+	}
+	leaf, status := reopened.OpenName(back, mustName(t, "leaf"))
+	if status != ramfs.StatusOK || readFile(t, reopened, leaf) != "deep" {
+		t.Fatalf("leaf after moves: %v", status)
+	}
+}
+
+func TestMoveDirectoryIntoItselfIsRefused(t *testing.T) {
+	fs, root := mounted(t, formattedDevice())
+	outer := mkdir(t, fs, root, "outer")
+	inner := mkdir(t, fs, outer, "inner")
+	deep := mkdir(t, fs, inner, "deep")
+	for _, parent := range []ramfs.NodeID{outer, inner, deep} {
+		if status := fs.RenameName(outer, parent, mustName(t, "loop")); status != ramfs.StatusInvalidArgument {
+			t.Fatalf("move into own subtree: %v", status)
+		}
+	}
+	if names := listNames(t, fs, root); len(names) != 1 || names[0] != "outer" {
+		t.Fatalf("root after refused moves %v", names)
 	}
 }
 
@@ -218,25 +279,26 @@ func TestSubdirectoryPersistsAcrossRemount(t *testing.T) {
 func TestDirectoryGrowsToBound(t *testing.T) {
 	fs, root := mounted(t, formattedDevice())
 	demo := mkdir(t, fs, root, "demo")
-	created := 0
-	for ; created < maxDirEntries; created++ {
-		name := []byte{'f', byte('0' + created/10), byte('0' + created%10)}
-		id, status := fs.CreateName(demo, mustName(t, string(name)))
-		if status == ramfs.StatusResourceExhausted {
-			break
-		}
-		if status != ramfs.StatusOK {
-			t.Fatal(status)
-		}
-		if _, _, _, status := fs.node(id); status != ramfs.StatusOK {
-			t.Fatalf("entry %d unreachable: %v", created, status)
-		}
+	dir, status := fs.directoryOf(demo)
+	if status != ramfs.StatusOK {
+		t.Fatal(status)
 	}
-	if created != maxDirEntries-2 {
-		t.Fatalf("created %d entries, want %d", created, maxDirEntries-2)
+	if status = fs.cover(&dir, maxDirEntries); status != ramfs.StatusOK {
+		t.Fatalf("grow to the FAT limit: %v", status)
 	}
-	if names := listNames(t, fs, demo); len(names) != created {
-		t.Fatalf("listed %d", len(names))
+	if dir.clusters != uint64(maxDirEntries/fs.entriesPerCluster()) {
+		t.Fatalf("directory holds %d clusters", dir.clusters)
+	}
+	if status = fs.cover(&dir, maxDirEntries+1); status != ramfs.StatusNoSpace {
+		t.Fatalf("grow past the FAT limit: %v", status)
+	}
+	// Every grown cluster was zeroed, so the directory still ends after "..".
+	if names := listNames(t, fs, demo); len(names) != 0 {
+		t.Fatalf("grown directory lists %v", names)
+	}
+	id := writeFile(t, fs, demo, "last.txt", "x")
+	if _, _, _, status := fs.node(id); status != ramfs.StatusOK {
+		t.Fatal(status)
 	}
 }
 
@@ -259,7 +321,7 @@ func TestCorruptDirectoryReportsError(t *testing.T) {
 	fs.setFAT(cluster, endOfChainMark)
 	_, index, entry, _ := fs.node(demo)
 	dir, _ := fs.openDirectory(0)
-	setEntryCluster(&entry, fs.totalClusters+100)
+	setEntryCluster(&entry, fs.clusters+100)
 	fs.writeEntry(&dir, index, entry)
 	if _, status := fs.OpenName(demo, mustName(t, "a.txt")); status == ramfs.StatusOK || status == ramfs.StatusNotFound {
 		t.Fatalf("out-of-range directory cluster: %v", status)
@@ -267,7 +329,7 @@ func TestCorruptDirectoryReportsError(t *testing.T) {
 	if status := fs.UnlinkName(root, mustName(t, "demo")); status == ramfs.StatusOK {
 		t.Fatal("unlinked corrupt directory")
 	}
-	for _, id := range []ramfs.NodeID{0, 1 << 60, ramfs.NodeID(cluster)<<slotBits | 1, ramfs.NodeID(fs.totalClusters+9) << slotBits} {
+	for _, id := range []ramfs.NodeID{0, 1 << 60, ramfs.NodeID(cluster)<<slotBits | 1, ramfs.NodeID(fs.clusters+9) << slotBits} {
 		if _, status := fs.Stat(id); status != ramfs.StatusNotFound {
 			t.Fatalf("stat %#x: %v", id, status)
 		}
@@ -278,7 +340,7 @@ func TestCorruptFileChainReportsError(t *testing.T) {
 	fs, root := mounted(t, formattedDevice())
 	id := writeFile(t, fs, root, "loop.txt", string(make([]byte, 1500)))
 	first := entryClusterOf(t, fs, id)
-	fs.setFAT(first, fs.totalClusters+50)
+	fs.setFAT(first, fs.clusters+50)
 	if _, status := fs.Read(id, 0, make([]byte, 1500)); status == ramfs.StatusOK {
 		t.Fatal("chain leaving the data area accepted")
 	}

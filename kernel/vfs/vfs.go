@@ -34,7 +34,11 @@ const (
 	StatusNotEmpty
 	// StatusBusy refuses to remove a path a mount depends on.
 	StatusBusy
-	lastStatus = StatusBusy
+	// StatusNoSpace is storage that is full.
+	StatusNoSpace
+	// StatusCorrupt is a filesystem whose on-disk metadata failed validation.
+	StatusCorrupt
+	lastStatus = StatusCorrupt
 )
 
 type Rights uint8
@@ -630,6 +634,10 @@ func mapStatus(status ramfs.Status) Status {
 		return StatusResourceExhausted
 	case ramfs.StatusPermissionDenied:
 		return StatusPermissionDenied
+	case ramfs.StatusNoSpace:
+		return StatusNoSpace
+	case ramfs.StatusCorrupt:
+		return StatusCorrupt
 	case ramfs.StatusIOError:
 		// A filesystem service that is gone or stalled is a storage error.
 		return StatusBackendError

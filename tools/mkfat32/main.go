@@ -1,18 +1,46 @@
+// mkfat32 creates the FAT32 volume QEMU attaches as the virtio-blk disk. An
+// existing FAT32 image is left alone, so the data on the development disk
+// survives rebuilds; delete it to get a fresh volume.
 package main
 
 import (
+	"flag"
 	"fmt"
+	"goos/userspace/fat32"
 	"os"
 )
 
-const imageSize = int64(64 * 1024 * 1024)
+// fileDevice is a host file as the device fat32.Format writes to.
+type fileDevice struct {
+	file *os.File
+	size uint64
+}
+
+func (device fileDevice) ReadAt(offset uint64, target []byte) bool {
+	_, err := device.file.ReadAt(target, int64(offset))
+	return err == nil
+}
+func (device fileDevice) WriteAt(offset uint64, data []byte) bool {
+	_, err := device.file.WriteAt(data, int64(offset))
+	return err == nil
+}
+func (device fileDevice) Flush() bool      { return device.file.Sync() == nil }
+func (device fileDevice) Capacity() uint64 { return device.size }
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: mkfat32 IMAGE")
+	size := flag.Uint64("size", 512, "volume size in MiB")
+	perCluster := flag.Uint("cluster-sectors", 8, "512-byte sectors per cluster (power of two, 1-128)")
+	fats := flag.Uint("fats", 2, "number of FAT copies (1 or 2)")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-size MiB] [-cluster-sectors N] [-fats N] IMAGE")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if flag.NArg() != 1 || *perCluster == 0 || *perCluster > 128 || *fats == 0 || *fats > 2 {
+		flag.Usage()
 		os.Exit(2)
 	}
-	path := os.Args[1]
+	path := flag.Arg(0)
 	if valid(path) {
 		return
 	}
@@ -21,56 +49,28 @@ func main() {
 		fail(err)
 	}
 	defer file.Close()
-	if err = file.Truncate(imageSize); err != nil {
+	bytes := *size << 20
+	if err = file.Truncate(int64(bytes)); err != nil {
 		fail(err)
 	}
-	sector := make([]byte, 512)
-	copy(sector[3:11], []byte("GOOSFAT "))
-	put16(sector[11:13], 512)
-	sector[13] = 1
-	put16(sector[14:16], 32)
-	sector[16] = 1
-	put32(sector[32:36], uint32(imageSize/512))
-	put32(sector[36:40], 1024)
-	put32(sector[44:48], 2)
-	put16(sector[48:50], 1)
-	put16(sector[50:52], 6)
-	copy(sector[82:90], []byte("FAT32   "))
-	sector[510], sector[511] = 0x55, 0xaa
-	if _, err = file.WriteAt(sector, 0); err != nil {
-		fail(err)
-	}
-	for i := range sector {
-		sector[i] = 0
-	}
-	put32(sector[0:4], 0x0ffffff8)
-	put32(sector[4:8], 0xffffffff)
-	put32(sector[8:12], 0x0fffffff)
-	if _, err = file.WriteAt(sector, 32*512); err != nil {
-		fail(err)
+	layout := fat32.Layout{SectorsPerCluster: uint8(*perCluster), FATs: uint8(*fats)}
+	if !fat32.Format(fileDevice{file: file, size: bytes}, layout) {
+		fail(fmt.Errorf("cannot format %s as FAT32 (%d MiB, %+v)", path, *size, layout))
 	}
 }
 
+// valid reports whether path already holds a FAT32 volume of any geometry.
 func valid(path string) bool {
 	file, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || info.Size() != imageSize {
-		return false
-	}
 	var data [512]byte
-	if _, err = file.Read(data[:]); err != nil {
+	if _, err = file.ReadAt(data[:], 0); err != nil {
 		return false
 	}
 	return data[510] == 0x55 && data[511] == 0xaa && string(data[82:90]) == "FAT32   "
 }
-func put16(data []byte, value uint16) { data[0] = byte(value); data[1] = byte(value >> 8) }
-func put32(data []byte, value uint32) {
-	for i := 0; i < 4; i++ {
-		data[i] = byte(value >> uint(i*8))
-	}
-}
+
 func fail(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }

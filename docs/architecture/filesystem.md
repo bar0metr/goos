@@ -83,13 +83,13 @@ service to fill a 4 KiB slot with a page of the file, a write names the slot
 its bytes are in, and the VFS serves later reads of a cached page without
 asking the service. Writes go through to the service before they return.
 Elsewhere payloads are inline IPC data: at most 224 bytes per VFS reply and 232
-bytes per block request. FAT32 keeps a four-sector write-through window to avoid
-repeated metadata reads (ADR 0048).
+bytes per block request. FAT32 keeps a sixteen-sector write-through window of
+metadata to avoid repeated FAT and directory reads (ADR 0048, ADR 0102).
 
 ## Failure behaviour
 
-- A volume whose declared geometry does not fit its device, or whose FAT cannot
-  describe the clusters it claims, is refused at mount. The system still boots:
+- A volume whose declared geometry does not fit its device, or that is not a
+  FAT32 volume this service can read, is refused at mount (ADR 0102). The system still boots:
   `/persist`, `/home` and `/state` are absent and everything else works
   (ADR 0077).
 - Each hop validates sizes, offsets, and reserved fields before acting.
@@ -123,7 +123,9 @@ carry, are rejected with `InvalidArgument`.
 
 ## Limits
 
-FAT32 supports only 512-byte sectors, one-sector clusters, one FAT, four
-clusters per directory (64 entries, of which a long name costs up to six), and
-files up to 64 KiB. Crash consistency, shared-memory bulk transfers, and a
-separate filesystem process are future work.
+FAT32 reads volumes with 512-byte sectors, 512-byte to 64 KiB clusters, and one
+or two FATs. Files reach the FAT32 maximum of 4 GiB − 1, directories the FAT
+maximum of 65536 entries, and every chain walk is bounded by the volume's
+cluster count, so corrupt media ends in a typed error (ADR 0102). There is no
+journal: changes are ordered so that an interruption leaves only states a
+filesystem checker repairs.

@@ -25,6 +25,15 @@ const (
 	// past its deadline, or sent a malformed reply (ADR 0096). Nothing in the
 	// kernel produces it.
 	StatusIOError
+	// StatusNoSpace is a backend whose storage is full: no free cluster or
+	// directory slot is left for the request.
+	StatusNoSpace
+	// StatusCorrupt is on-disk metadata that fails validation: a cluster
+	// chain that loops, leaves the data area, or ends before the file does.
+	StatusCorrupt
+	// LastStatus is the highest status a backend may report; decoders refuse
+	// anything above it.
+	LastStatus = StatusCorrupt
 )
 
 type Kind uint8

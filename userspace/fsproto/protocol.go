@@ -19,8 +19,9 @@ import (
 
 const (
 	ProtocolID = uint64(0x4746535052543031)
-	// Version 2 moves file data from the messages to the file cache.
-	Version = uint16(2)
+	// Version 2 moves file data from the messages to the file cache; version
+	// 3 adds the no-space and corrupt statuses (ADR 0102).
+	Version = uint16(3)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -174,7 +175,7 @@ func DecodeRequest(message *ipc.Message) (Request, bool) {
 }
 
 func EncodeReply(reply Reply, correlation uint64, message *ipc.Message) bool {
-	if message == nil || correlation == 0 || !validOperation(reply.Operation) || reply.Status > ramfs.StatusIOError ||
+	if message == nil || correlation == 0 || !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus ||
 		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName || replyHeader+len(reply.Name) > ipc.MaxPayload {
 		return false
 	}
@@ -210,7 +211,7 @@ func DecodeReply(message *ipc.Message) (Reply, bool) {
 		Cursor:    binary.LittleEndian.Uint32(payload[24:]),
 		Name:      payload[replyHeader : replyHeader+nameSize],
 	}
-	if !validOperation(reply.Operation) || reply.Status > ramfs.StatusIOError || reply.Kind > ramfs.KindDirectory {
+	if !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus || reply.Kind > ramfs.KindDirectory {
 		return Reply{}, false
 	}
 	return reply, true

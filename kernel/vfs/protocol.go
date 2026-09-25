@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	ProtocolID      = uint64(0x47564631)
-	ProtocolVersion = uint16(2)
+	ProtocolID = uint64(0x47564631)
+	// Version 3 adds the no-space and corrupt statuses (ADR 0102).
+	ProtocolVersion = uint16(3)
 	protocolHeader  = 32
 	MaxProtocolPath = 192
 	MaxProtocolData = ipc.MaxPayload - protocolHeader - MaxProtocolPath

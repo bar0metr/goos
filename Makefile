@@ -100,7 +100,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -272,6 +272,7 @@ release-check:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test
+	$(MAKE) test-storage-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
@@ -288,6 +289,12 @@ test-integration: kernel
 
 test-security:
 	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+
+# The storage stress test (ADR 0102): the model-based FAT32 workload at a
+# larger scale than the default suite, and the host FAT checker over volumes
+# the filesystem built.
+test-storage-stress:
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -run 'TestRandomOperationsAgainstModel|TestExternalFsckAcceptsVolume|TestFileLargerThanSixteenMiB|TestDeviceFailureIsContained' ./userspace/fat32
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -491,6 +498,7 @@ help:
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
+	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
 	  '  test-performance run host and in-guest microbenchmarks into build/reports' \

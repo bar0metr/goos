@@ -8,6 +8,9 @@ import (
 type memoryDevice struct {
 	data          []byte
 	reads, writes int
+	// failAt, when nonzero, makes that write and every later one fail, as a
+	// device that has gone away would.
+	failAt int
 }
 
 func (device *memoryDevice) ReadAt(offset uint64, target []byte) bool {
@@ -16,6 +19,9 @@ func (device *memoryDevice) ReadAt(offset uint64, target []byte) bool {
 }
 func (device *memoryDevice) WriteAt(offset uint64, data []byte) bool {
 	device.writes++
+	if device.failAt != 0 && device.writes >= device.failAt {
+		return false
+	}
 	return offset+uint64(len(data)) <= uint64(len(device.data)) && copy(device.data[offset:], data) == len(data)
 }
 func (*memoryDevice) Flush() bool             { return true }
@@ -101,16 +107,15 @@ func TestSectorCacheServesRepeatedMetadata(t *testing.T) {
 	if _, status := fs.Write(id, 0, []byte("cached")); status != ramfs.StatusOK {
 		t.Fatal(status)
 	}
+	// File data is not kept in the window (the VFS caches it), so a read
+	// costs exactly its data transfer: the entry and the FAT stay resident.
 	target := make([]byte, 6)
+	device.reads = 0
 	if count, status := fs.Read(id, 0, target); status != ramfs.StatusOK || count != 6 || string(target) != "cached" {
 		t.Fatalf("read %d %v %q", count, status, target)
 	}
-	device.reads = 0
-	if count, status := fs.Read(id, 0, target); status != ramfs.StatusOK || count != 6 || string(target) != "cached" {
-		t.Fatalf("second read %d %v %q", count, status, target)
-	}
-	if device.reads != 0 {
-		t.Fatalf("repeated read issued %d device reads", device.reads)
+	if device.reads != 1 {
+		t.Fatalf("a one-cluster read issued %d device reads, want 1", device.reads)
 	}
 }
 
@@ -178,10 +183,15 @@ func TestMountRejectsGeometryItCannotHonour(t *testing.T) {
 	}
 	mountRejects(t, "a missing signature", func(boot []byte, _ *memoryDevice) { boot[510] = 0 })
 	mountRejects(t, "a foreign sector size", func(boot []byte, _ *memoryDevice) { put16(boot[11:13], 1024) })
-	mountRejects(t, "multi-sector clusters", func(boot []byte, _ *memoryDevice) { boot[13] = 8 })
-	mountRejects(t, "a second FAT", func(boot []byte, _ *memoryDevice) { boot[16] = 2 })
-	mountRejects(t, "no reserved sectors", func(boot []byte, _ *memoryDevice) { put16(boot[14:16], 1) })
+	mountRejects(t, "a zero cluster size", func(boot []byte, _ *memoryDevice) { boot[13] = 0 })
+	mountRejects(t, "a cluster size that is not a power of two", func(boot []byte, _ *memoryDevice) { boot[13] = 3 })
+	mountRejects(t, "no FAT", func(boot []byte, _ *memoryDevice) { boot[16] = 0 })
+	mountRejects(t, "three FATs", func(boot []byte, _ *memoryDevice) { boot[16] = 3 })
+	mountRejects(t, "no reserved sectors", func(boot []byte, _ *memoryDevice) { put16(boot[14:16], 0) })
 	mountRejects(t, "an empty FAT", func(boot []byte, _ *memoryDevice) { put32(boot[36:40], 0) })
+	mountRejects(t, "a FAT16 root directory", func(boot []byte, _ *memoryDevice) { put16(boot[17:19], 512) })
+	mountRejects(t, "a FAT16 FAT size", func(boot []byte, _ *memoryDevice) { put16(boot[22:24], 64) })
+	mountRejects(t, "an active FAT that does not exist", func(boot []byte, _ *memoryDevice) { put16(boot[40:42], 0x81) })
 	mountRejects(t, "a root cluster below two", func(boot []byte, _ *memoryDevice) { put32(boot[44:48], 1) })
 	mountRejects(t, "a root cluster past the volume", func(boot []byte, _ *memoryDevice) { put32(boot[44:48], 1<<20) })
 
@@ -190,9 +200,15 @@ func TestMountRejectsGeometryItCannotHonour(t *testing.T) {
 	mountRejects(t, "a volume larger than its device", func(boot []byte, _ *memoryDevice) { put32(boot[32:36], 1<<28) })
 	mountRejects(t, "a volume of metadata only", func(boot []byte, _ *memoryDevice) { put32(boot[32:36], 96) })
 
-	// A FAT too small to hold an entry per cluster would have a chain walk
-	// reading entries out of the data region.
-	mountRejects(t, "a FAT too small for its clusters", func(boot []byte, _ *memoryDevice) { put32(boot[36:40], 1) })
+	// A FAT too small for its data region limits the volume to what it
+	// describes, as Linux does, so no walk reads an entry past the FAT.
+	device := formattedDevice()
+	put32(device.data[36:40], 1)
+	put32(device.data[44:48], 2)
+	var small FileSystem
+	if _, ok := small.Mount(device); !ok || small.clusters != 512/4-2 {
+		t.Fatalf("a short FAT: mounted %v with %d clusters", ok, small.clusters)
+	}
 
 	// A device that cannot answer for its own size is not usable either.
 	mountRejects(t, "a device of no capacity", func(_ []byte, device *memoryDevice) { device.data = device.data[:0] })

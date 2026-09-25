@@ -9,7 +9,8 @@ const (
 	maxLongName    = ramfs.MaxName
 	longChars      = 13
 	maxLongEntries = (maxLongName + longChars - 1) / longChars
-	maxAlias       = 99
+	// maxAliasAttempts bounds the hashed aliases tried for one name.
+	maxAliasAttempts = 4096
 
 	attrLongName = byte(0x0f)
 	attrMask     = byte(0x3f)
@@ -53,6 +54,24 @@ func (want *request) set(name ramfs.Name) bool {
 	}
 	want.short, want.fits = shortForm(want.raw[:want.size])
 	return true
+}
+
+// caseFlags is byte 12 of the short entry: a name stored in one 8.3 entry is
+// lower case, and the Windows NT flags say so to other systems.
+func (want *request) caseFlags() byte {
+	if want.fits {
+		return caseLowerBase | caseLowerExt
+	}
+	return 0
+}
+
+// hash folds the name into the sixteen bits a hashed alias carries.
+func (want *request) hash() uint16 {
+	value := uint32(2166136261)
+	for i := 0; i < want.size; i++ {
+		value = (value ^ uint32(lower(want.raw[i]))) * 16777619
+	}
+	return uint16(value ^ value>>16)
 }
 
 func (want *request) same(name []byte) bool {
@@ -259,16 +278,31 @@ func decodeShort(short [11]byte, out *[maxLongName]byte) int {
 	return n
 }
 
-// alias builds the short name a long entry is stored under, numbering the
-// `~N` suffix until the directory holds no entry with that 8.3 name.
+// alias builds the short name a long entry is stored under, the way Linux
+// and Windows do: the first six characters of the name with a "~1" to "~9"
+// tail, and after those are taken two characters, four hexadecimal digits of
+// a hash of the long name, and a tail, varying the digits until the directory
+// holds no entry with that 8.3 name. The hash keeps a directory of many
+// similar names from costing a scan per candidate number.
 func (fs *FileSystem) alias(dir *directory, want *request) ([11]byte, ramfs.Status) {
 	var short [11]byte
 	for i := range short {
 		short[i] = ' '
 	}
-	base := 0
-	for i := 0; i < want.size && base < 6; i++ {
+	dot := -1
+	for i := want.size - 1; i > 0; i-- {
 		if want.raw[i] == '.' {
+			dot = i
+			break
+		}
+	}
+	stem := want.size
+	if dot >= 0 {
+		stem = dot
+	}
+	base := 0
+	for i := 0; i < stem && base < 8; i++ {
+		if want.raw[i] == '.' || want.raw[i] == ' ' {
 			continue
 		}
 		short[base] = aliasByte(want.raw[i])
@@ -277,28 +311,40 @@ func (fs *FileSystem) alias(dir *directory, want *request) ([11]byte, ramfs.Stat
 	if base == 0 {
 		short[0], base = '_', 1
 	}
-	for i := want.size - 1; i > 0; i-- {
-		if want.raw[i] != '.' {
-			continue
+	if dot >= 0 {
+		ext := 0
+		for i := dot + 1; i < want.size && ext < 3; i++ {
+			if want.raw[i] == ' ' {
+				continue
+			}
+			short[8+ext] = aliasByte(want.raw[i])
+			ext++
 		}
-		for j := 0; j < 3 && i+1+j < want.size; j++ {
-			short[8+j] = aliasByte(want.raw[i+1+j])
-		}
-		break
 	}
-	for number := 1; number <= maxAlias; number++ {
-		tail := base
-		if number >= 10 && tail > 5 {
-			tail = 5
+	if base > 6 {
+		base = 6
+	}
+	for number := byte(1); number <= 9; number++ {
+		for i := base; i < 8; i++ {
+			short[i] = ' '
 		}
-		short[tail] = '~'
-		end := tail + 1
-		if number >= 10 {
-			short[end] = byte('0' + number/10)
-			end++
+		short[base], short[base+1] = '~', '0'+number
+		taken, status := fs.taken(dir, short)
+		if status != ramfs.StatusOK || !taken {
+			return short, status
 		}
-		short[end] = byte('0' + number%10)
-		for i := end + 1; i < 8; i++ {
+	}
+	if base > 2 {
+		base = 2
+	}
+	seed := want.hash()
+	for attempt := 0; attempt < maxAliasAttempts; attempt++ {
+		value := seed - uint16(attempt*11)
+		for i := 0; i < 4; i++ {
+			short[base+i] = hexDigit(byte(value >> uint(12-4*i)))
+		}
+		short[base+4], short[base+5] = '~', '1'+byte(attempt%9)
+		for i := base + 6; i < 8; i++ {
 			short[i] = ' '
 		}
 		taken, status := fs.taken(dir, short)
@@ -306,14 +352,23 @@ func (fs *FileSystem) alias(dir *directory, want *request) ([11]byte, ramfs.Stat
 			return short, status
 		}
 	}
-	return short, ramfs.StatusResourceExhausted
+	return short, ramfs.StatusNoSpace
 }
 
+func hexDigit(value byte) byte {
+	value &= 0xf
+	if value < 10 {
+		return '0' + value
+	}
+	return 'A' + value - 10
+}
+
+// taken reports whether a live entry of dir already has the 8.3 name short.
 func (fs *FileSystem) taken(dir *directory, short [11]byte) (bool, ramfs.Status) {
-	for i := 0; i < dir.entries(); i++ {
-		entry, ok := fs.readEntry(dir, i)
-		if !ok {
-			return false, ramfs.StatusResourceExhausted
+	for i := 0; i < fs.entries(dir); i++ {
+		entry, status := fs.readEntry(dir, i)
+		if status != ramfs.StatusOK {
+			return false, status
 		}
 		if entry[0] == entryEnd {
 			return false, ramfs.StatusOK
@@ -328,7 +383,7 @@ func (fs *FileSystem) taken(dir *directory, short [11]byte) (bool, ramfs.Status)
 // commit writes a reserved run: the long entries in descending ordinal order
 // first, then the short entry, so a scan that races the write stops at the
 // end marker instead of seeing a short entry without its chain.
-func (fs *FileSystem) commit(dir *directory, at *placement, entry [32]byte) bool {
+func (fs *FileSystem) commit(dir *directory, at *placement, entry [32]byte) ramfs.Status {
 	sum := shortChecksum(at.short)
 	for ordinal := at.count; ordinal >= 1; ordinal-- {
 		var long [32]byte
@@ -349,8 +404,8 @@ func (fs *FileSystem) commit(dir *directory, at *placement, entry [32]byte) bool
 			long[longSlots[i]] = byte(code)
 			long[longSlots[i]+1] = byte(code >> 8)
 		}
-		if !fs.writeEntry(dir, at.start+at.count-ordinal, long) {
-			return false
+		if status := fs.writeEntry(dir, at.start+at.count-ordinal, long); status != ramfs.StatusOK {
+			return status
 		}
 	}
 	copy(entry[:11], at.short[:])
@@ -359,16 +414,43 @@ func (fs *FileSystem) commit(dir *directory, at *placement, entry [32]byte) bool
 
 // erase marks a whole chain deleted, the short entry first so a scan never
 // finds a live short entry whose long entries have already gone.
-func (fs *FileSystem) erase(dir *directory, start, index int) bool {
+func (fs *FileSystem) erase(dir *directory, start, index int) ramfs.Status {
 	for i := index; i >= start; i-- {
-		entry, ok := fs.readEntry(dir, i)
-		if !ok {
-			return false
+		entry, status := fs.readEntry(dir, i)
+		if status != ramfs.StatusOK {
+			return status
 		}
 		entry[0] = entryDeleted
-		if !fs.writeEntry(dir, i, entry) {
-			return false
+		if status = fs.writeEntry(dir, i, entry); status != ramfs.StatusOK {
+			return status
 		}
 	}
-	return true
+	return ramfs.StatusOK
+}
+
+// locate returns the first entry of the chain covering the short entry at
+// index. A chain is at most maxLongEntries long, so the scan starts no
+// further back than that.
+func (fs *FileSystem) locate(dir *directory, index int) (int, ramfs.Status) {
+	fs.scan.reset()
+	from := index - maxLongEntries
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i <= index && i < fs.entries(dir); i++ {
+		entry, status := fs.readEntry(dir, i)
+		if status != ramfs.StatusOK {
+			return index, status
+		}
+		if isLongEntry(entry) {
+			fs.scan.long(entry, i)
+			continue
+		}
+		if i == index {
+			_, start := fs.resolveName(entry, i)
+			return start, ramfs.StatusOK
+		}
+		fs.scan.reset()
+	}
+	return index, ramfs.StatusOK
 }

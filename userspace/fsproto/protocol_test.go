@@ -62,7 +62,7 @@ func TestEncodeRefusesWhatCannotBeSent(t *testing.T) {
 	if EncodeRequest(Request{Operation: OperationMount}, 0, &message) {
 		t.Fatal("encoded an uncorrelated request")
 	}
-	if EncodeReply(Reply{Operation: OperationStat, Status: ramfs.StatusIOError + 1}, 1, &message) {
+	if EncodeReply(Reply{Operation: OperationStat, Status: ramfs.LastStatus + 1}, 1, &message) {
 		t.Fatal("encoded an unknown status")
 	}
 }
@@ -102,7 +102,7 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		t.Fatal("encode reply")
 	}
 	for index, apply := range []func(*ipc.Message){
-		func(m *ipc.Message) { m.Payload[1] = byte(ramfs.StatusIOError + 1) },
+		func(m *ipc.Message) { m.Payload[1] = byte(ramfs.LastStatus + 1) },
 		func(m *ipc.Message) { m.Payload[2] = byte(ramfs.KindDirectory + 1) },
 		func(m *ipc.Message) { m.Payload[5] = 1 },
 		func(m *ipc.Message) { m.Kind = ipc.KindRequest },
