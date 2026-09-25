@@ -37,7 +37,9 @@ if grep -R -n 'goos_debug_write' userspace kernel >/dev/null 2>&1; then
 fi
 
 stray=$(git ls-files --others --exclude-standard; git ls-files --others --ignored --exclude-standard | grep -v -e '^build/' -e '^\.claude/' || true)
-stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '^\.claude/' || true)
+# Finder's .DS_Store files are host metadata the repository ignores, not
+# build output.
+stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '^\.claude/' -e '\(^\|/\)\.DS_Store$' || true)
 [ -z "$stray" ] || complain "files outside build/ that are not in the repository: $(printf '%s' "$stray" | tr '\n' ' ')"
 
 [ "$status" -eq 0 ] && printf 'PASS release checks (%s)\n' "$release"
