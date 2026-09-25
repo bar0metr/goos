@@ -51,6 +51,10 @@ const logDeviceHandle = handle.ID(0x0000000100000016)
 // programs it reads from a filesystem (ADR 0097).
 const loaderHandle = handle.ID(0x0000000100000017)
 
+// fileCacheHandle is the file cache, the memory the VFS and the filesystem
+// service share for file data (ADR 0098). Each gets a copy at every launch.
+const fileCacheHandle = handle.ID(0x0000000100000018)
+
 // configControlHandle is the configuration service's control endpoint. PID 1
 // holds the only client side of it, so it is the only process that can create a
 // configuration session.

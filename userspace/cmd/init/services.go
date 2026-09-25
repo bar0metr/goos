@@ -48,6 +48,7 @@ func startServices(ticks uint64) {
 			// PID 1 keeps its own copy, with Execute, to launch from the
 			// image; the filesystem service may only read it (ADR 0093).
 			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read},
+			{Name: "cache", Handle: fileCacheHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
 		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
 		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
 			Capabilities: []supervisor.Capability{
@@ -78,6 +79,9 @@ func startServices(ticks uint64) {
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "vfs", Handle: handle.ID(filesystemPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				// File data moves through the cache it shares with the VFS,
+				// not through messages (ADR 0098).
+				{Name: "cache", Handle: fileCacheHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
 			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}

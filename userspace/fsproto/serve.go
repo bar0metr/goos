@@ -19,11 +19,13 @@ type Volume interface {
 	Flush() bool
 }
 
-// Serve performs one decoded request on volume. Read data is placed in
-// scratch, which the reply aliases until the caller encodes it.
-func Serve(volume Volume, request Request, scratch *[MaxReplyData]byte) Reply {
+// Serve performs one decoded request on volume. A read fills, and a write
+// takes its bytes from, the request's slot of cache, the file cache mapping;
+// a listed name is placed in name, which the reply aliases until the caller
+// encodes it.
+func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]byte) Reply {
 	reply := Reply{Operation: request.Operation}
-	name, named := ramfs.MakeName(request.Name)
+	requested, named := ramfs.MakeName(request.Name)
 	switch request.Operation {
 	case OperationMount:
 		reply.Node, reply.Status = volume.Root()
@@ -34,15 +36,15 @@ func Serve(volume Volume, request Request, scratch *[MaxReplyData]byte) Reply {
 		}
 		switch request.Operation {
 		case OperationOpen:
-			reply.Node, reply.Status = volume.OpenName(request.Parent, name)
+			reply.Node, reply.Status = volume.OpenName(request.Parent, requested)
 		case OperationCreate:
-			reply.Node, reply.Status = volume.CreateName(request.Parent, name)
+			reply.Node, reply.Status = volume.CreateName(request.Parent, requested)
 		case OperationMkdir:
-			reply.Node, reply.Status = volume.MkdirName(request.Parent, name)
+			reply.Node, reply.Status = volume.MkdirName(request.Parent, requested)
 		case OperationRename:
-			reply.Status = volume.RenameName(request.Node, request.Parent, name)
+			reply.Status = volume.RenameName(request.Node, request.Parent, requested)
 		default:
-			reply.Status = volume.UnlinkName(request.Parent, name)
+			reply.Status = volume.UnlinkName(request.Parent, requested)
 		}
 		// A node that was looked up or made comes back with its attributes,
 		// which the VFS asks for next; answering both in one exchange saves
@@ -52,15 +54,23 @@ func Serve(volume Volume, request Request, scratch *[MaxReplyData]byte) Reply {
 				reply.Kind, reply.Value = stat.Kind, stat.Size
 			}
 		}
-	case OperationRead:
-		count, status := volume.Read(request.Node, request.Offset, scratch[:request.Size])
-		if count < 0 || count > int(request.Size) {
-			count, status = 0, ramfs.StatusIOError
+	case OperationRead, OperationWrite:
+		bytes, mapped := SlotBytes(cache, request)
+		if !mapped {
+			// No cache is mapped, or the request names none of it.
+			reply.Status = ramfs.StatusIOError
+			break
 		}
-		reply.Status, reply.Data = status, scratch[:count]
-	case OperationWrite:
-		count, status := volume.Write(request.Node, request.Offset, request.Data)
-		reply.Status, reply.Value = status, uint64(count)
+		var count int
+		if request.Operation == OperationRead {
+			count, reply.Status = volume.Read(request.Node, request.Offset, bytes)
+		} else {
+			count, reply.Status = volume.Write(request.Node, request.Offset, bytes)
+		}
+		if count < 0 || count > len(bytes) {
+			count, reply.Status = 0, ramfs.StatusIOError
+		}
+		reply.Value = uint64(count)
 	case OperationTruncate:
 		reply.Status = volume.Truncate(request.Node, request.Offset)
 	case OperationStat:
@@ -75,9 +85,9 @@ func Serve(volume Volume, request Request, scratch *[MaxReplyData]byte) Reply {
 				break
 			}
 			reply.Node, reply.Kind, reply.Value, reply.Cursor = entry.Stat.ID, entry.Stat.Kind, entry.Stat.Size, uint32(cursor)
-			// The name is copied into scratch: entry is a local, and the
-			// reply must not alias memory that is gone once Serve returns.
-			reply.Name = scratch[:copy(scratch[:], entry.Name[:entry.Size])]
+			// The name is copied out: entry is a local, and the reply must
+			// not alias memory that is gone once Serve returns.
+			reply.Name = name[:copy(name[:], entry.Name[:entry.Size])]
 		}
 	case OperationFlush:
 		if !volume.Flush() {

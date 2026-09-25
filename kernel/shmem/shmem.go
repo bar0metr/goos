@@ -5,7 +5,9 @@ import (
 	"goos/kernel/handle"
 )
 
-const MaxPages = 16
+// MaxPages bounds one object. The largest is the file cache the VFS and a
+// filesystem service share (ADR 0098).
+const MaxPages = 32
 
 const (
 	identityNamespace = uint64(1 << 63)

@@ -80,6 +80,13 @@ func (service *Service) AttachFilesystem(transport Transport) bool {
 	return true
 }
 
+// AttachCache gives the persistent backend the file cache it shares with the
+// filesystem service (ADR 0098). Without it the volume can be listed but no
+// file on it read or written.
+func (service *Service) AttachCache(memory []byte) bool {
+	return service.persistent.AttachCache(memory)
+}
+
 // DetachFilesystem forgets a filesystem service that has gone. Its mounts stay
 // in the namespace and answer with I/O errors until a restarted service is
 // attached.

@@ -26,6 +26,7 @@ import (
 	"goos/kernel/shmem"
 	"goos/kernel/stream"
 	kernelwait "goos/kernel/wait"
+	"goos/userspace/fsproto"
 	supervisor "goos/userspace/init"
 	"goos/userspace/startup"
 )
@@ -412,7 +413,12 @@ func bootContinue() {
 	launchStagingMapped := launchStagingCreated && launchStagingGranted && launchStaging.Map(initProcess.Handles(), launchStagingHandle, rootInit, supervisor.StagingAddress, 0, 1, true)
 	execPage, execPageCreated := sharedRegistry.Create(&pageAllocator, 1)
 	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
-	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && sharedObjects.Register(launchStaging) && sharedObjects.Register(execPage)
+	// The file cache is the memory the VFS and the filesystem service share:
+	// file data moves through it instead of through messages (ADR 0098). PID 1
+	// hands each of them a copy of the right to map it, at every launch.
+	fileCache, fileCacheCreated := sharedRegistry.Create(&pageAllocator, fsproto.CachePages)
+	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && fileCacheCreated &&
+		sharedObjects.Register(launchStaging) && sharedObjects.Register(execPage) && sharedObjects.Register(fileCache)
 	imageObject, imageObjectValid := device.ImageObject(1)
 	// PID 1 maps the image to find executables in it and launches them with
 	// Execute (ADR 0093). It hands the filesystem service a Read-only copy to
@@ -424,8 +430,9 @@ func bootContinue() {
 	// PID 1 fills executable objects with programs it reads from a filesystem
 	// and launches them (ADR 0097). The right stays with PID 1.
 	loaderHandle, loaderInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LoaderObject, capability.Write))
-	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !imageObjectValid || !systemImageInstalled || !logDeviceInstalled || !loaderInstalled || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
-		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) || systemImageHandle != handle.ID(0x0000000100000015) || logDeviceHandle != handle.ID(0x0000000100000016) || loaderHandle != handle.ID(0x0000000100000017) {
+	fileCacheHandle, fileCacheGranted := fileCache.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
+	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !imageObjectValid || !systemImageInstalled || !logDeviceInstalled || !loaderInstalled || !fileCacheGranted || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
+		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) || systemImageHandle != handle.ID(0x0000000100000015) || logDeviceHandle != handle.ID(0x0000000100000016) || loaderHandle != handle.ID(0x0000000100000017) || fileCacheHandle != handle.ID(0x0000000100000018) {
 		panicSerial("PID 1 capability layout failed")
 	}
 	if validation.Enabled {

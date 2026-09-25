@@ -579,6 +579,9 @@ require_marker storage.fat32-reattached FAT32_REATTACHED_OK "$log" 'fault fat32'
 require_marker storage.fat32-restarted FAT32_RESTARTED_OK "$log" 'fault fat32'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
+# File data moves between the VFS and the FAT32 service through the file cache
+# they share, not through messages (ADR 0098).
+require_marker storage.file-cache FILE_CACHE_OK "$log"
 require_count storage.vfs-not-restarted '^VFS_SERVICE_OK$' 1 "$log" 'fault fat32'
 pass_group storage
 

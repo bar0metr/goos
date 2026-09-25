@@ -376,9 +376,9 @@ and `make release-check` gates a release.
 GoOS 0.1.2 (in progress, docs/releases/0.1.2.md) prepares storage for Linux
 compatibility. Programs anywhere outside `/system` run from executable
 objects PID 1 fills from the file (ADR 0097), so a Linux ELF program on the
-persistent volume will have a way to be launched. Still to come in 0.1.2: a
-shared-memory page cache between the VFS and FAT32, so file data stops moving
-224 bytes per IPC exchange, and then a VFS that can restart. The milestone
+persistent volume will have a way to be launched. File data between the VFS
+and FAT32 moves through a shared-memory file cache (ADR 0098). Still to come
+in 0.1.2: a VFS that can restart. The milestone
 after 0.1.2 is Priority 5, Linux ELF compatibility.
 
 Known gaps left by ADR 0089: the system services that start before the terminal

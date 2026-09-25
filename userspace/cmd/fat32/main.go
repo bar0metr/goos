@@ -12,6 +12,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/ramfs"
 	blockproto "goos/userspace/block"
 	"goos/userspace/fat32"
@@ -35,10 +36,13 @@ var (
 	blockWire      [ipc.WireMaxSize]byte
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
-	scratch        [fsproto.MaxReplyData]byte
-	volume         fat32.Volume
-	correlation    uint64
-	blockCapacity  uint64
+	listedName     [ramfs.MaxName]byte
+	// cache is the file cache this service shares with the VFS. A read fills,
+	// and a write takes its bytes from, the slot a request names (ADR 0098).
+	cache         []byte
+	volume        fat32.Volume
+	correlation   uint64
+	blockCapacity uint64
 )
 
 // blockDevice is the volume's device: the block service, one bounded exchange
@@ -120,6 +124,16 @@ func userspaceMain() {
 	if blockHandle, ok = data.Handle("block"); !ok {
 		fatal("FAT32_BLOCK_MISSING\n")
 	}
+	cacheHandle, ok := data.Handle("cache")
+	if !ok {
+		fatal("FAT32_CACHE_MISSING\n")
+	}
+	if mapped, status := sys.MemoryMap(cacheHandle, vm.UserSharedAddress, fsproto.CacheSize, true); status == kcall.StatusOK {
+		cache = mapped
+	} else {
+		// Without it no file data can move; metadata still can.
+		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
+	}
 	// A volume that is refused is not a reason to stop: the service keeps
 	// answering, with I/O errors, so the VFS reports the volume as absent
 	// rather than the service as crashing in a restart loop (ADR 0077).
@@ -165,7 +179,7 @@ func serve() {
 		}
 		reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}
 	} else {
-		reply = fsproto.Serve(&volume, request, &scratch)
+		reply = fsproto.Serve(&volume, request, cache, &listedName)
 	}
 	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage) {
 		fatal("FAT32_REPLY_FAILED\n")

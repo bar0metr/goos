@@ -53,7 +53,7 @@ func testSystemImage(t testing.TB) []byte {
 func startedService(t testing.TB, device fat32.Device) *Service {
 	t.Helper()
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) || !service.AttachCache(testCache) {
 		t.Fatal("service init failed")
 	}
 	if device != nil && !service.AttachFilesystem(newLoopback(device)) {

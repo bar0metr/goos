@@ -12,10 +12,10 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
-| VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096 |
+| VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel, file cache mapping | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096, 0098 |
 | RAMFS | inside VFS | nothing; library core | [ramfs.md](../userspace/ramfs.md), ADR 0017 |
 | System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
-| FAT32 | `/system/fat32` | server end of the VFS channel, block client endpoint | [storage.md](../userspace/storage.md), ADR 0036, 0096 |
+| FAT32 | `/system/fat32` | server end of the VFS channel, block client endpoint, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098 |
 | Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](../userspace/storage.md), ADR 0033 |
 | virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
 
@@ -77,8 +77,13 @@ service's block client endpoint, and the block service forwards it to the driver
 private channel. The driver performs the virtqueue transfer and waits for
 IRQ 11. Replies unwind in reverse.
 
-Payloads are inline IPC data: at most 224 bytes per VFS reply, 224 per FAT32
-read reply and 216 per FAT32 write request, and 232 bytes per block request. FAT32 keeps a four-sector write-through window to avoid
+File data between the VFS and the FAT32 service moves through the file cache,
+a 128 KiB shared-memory object both map (ADR 0098): a `GFSPRT01` read asks the
+service to fill a 4 KiB slot with a page of the file, a write names the slot
+its bytes are in, and the VFS serves later reads of a cached page without
+asking the service. Writes go through to the service before they return.
+Elsewhere payloads are inline IPC data: at most 224 bytes per VFS reply and 232
+bytes per block request. FAT32 keeps a four-sector write-through window to avoid
 repeated metadata reads (ADR 0048).
 
 ## Failure behaviour

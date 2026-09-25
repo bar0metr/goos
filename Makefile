@@ -385,6 +385,7 @@ docs:
 	@test -f docs/adr/0095-userspace-runtime-and-unsafe-boundary.md
 	@test -f docs/adr/0096-separate-fat32-filesystem-service.md
 	@test -f docs/adr/0097-executable-objects.md
+	@test -f docs/adr/0098-file-cache-between-vfs-and-filesystem-service.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

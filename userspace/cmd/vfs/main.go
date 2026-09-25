@@ -7,6 +7,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	syslog "goos/userspace/log"
@@ -170,6 +171,10 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_IMAGE_MISSING\n")
 	}
+	cacheHandle, found := startupData.Handle("cache")
+	if !found {
+		fatal("VFS_CACHE_MISSING\n")
+	}
 	sessions[0] = uint64(initialSessionHandle)
 	liveSessions = 1
 	if !service.Init() {
@@ -177,6 +182,14 @@ func userspaceMain() {
 	}
 	if !mountSystemImage(imageHandle) {
 		fatal("VFS_IMAGE_MOUNT_FAILED\n")
+	}
+	// File data on the persistent volume moves through the cache this
+	// process shares with the filesystem service (ADR 0098). Without it that
+	// volume can be listed but not read, and the rest of the namespace works.
+	if cache, status := sys.MemoryMap(cacheHandle, vm.UserSharedAddress, fsproto.CacheSize, true); status != kcall.StatusOK || !service.AttachCache(cache) {
+		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
+	} else {
+		mark("FILE_CACHE_OK\n")
 	}
 	// The persistent volume is not mounted here: it is served by the FAT32
 	// service, which PID 1 starts after this one and hands over through the

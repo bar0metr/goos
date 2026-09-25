@@ -27,7 +27,7 @@ func writePersistent(t *testing.T, service *Service, path string, payload string
 func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 	device := testFAT32Device()
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) || !service.AttachCache(testCache) {
 		t.Fatal("service init failed")
 	}
 	first := newLoopback(device)

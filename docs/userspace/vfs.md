@@ -53,6 +53,8 @@ space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archiv
 persistent volume is served by the FAT32 service, a separate process: VFS
 reaches it through a remote backend over the `GFSPRT01` protocol, and mounts it
 when PID 1 hands over the channel with the `SetFilesystem` control operation.
+File data moves through the file cache the two map (ADR 0098): the VFS indexes
+which slot holds which page and serves reads of cached pages itself.
 A dead or stalled FAT32 service is an I/O error on those three mounts only; a
 restarted one is attached under the same mounts and open files (ADR 0096). Kernel launch
 grants explicitly identify the client or server side of a channel; neither

@@ -100,8 +100,9 @@ attacker-controlled code.
   volume through the FAT32 protocol, but not the raw disk: it holds no block
   endpoint (ADR 0096). It gains no device, port, IRQ, or DMA authority.
 - FAT32 service compromise, for example through a malformed volume, exposes
-  the persistent volume and the disk through its block endpoint. It gains no
-  namespace, session, other mount, or device authority, and a crash in it is
+  the persistent volume and the disk through its block endpoint, and the file
+  cache it shares with the VFS, which holds only pages of that volume
+  (ADR 0098). It gains no namespace, session, other mount, or device authority, and a crash in it is
   restarted without taking down the VFS. It also serves `/system/commands`, which PID 1 reads to decide
   which commands get a VFS session; a lying VFS can only change who receives a
   session it serves itself. It cannot change which services and system
