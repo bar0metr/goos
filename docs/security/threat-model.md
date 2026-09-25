@@ -138,8 +138,9 @@ attacker-controlled code.
   and log services new sessions over channels they already hold; `/tmp` and
   the files open at the time are lost (ADR 0099). The config and log services
   get the sessions their first launch consumed, and the config service's
-  clients new sessions with it (ADR 0100). The block service uses
-  `RestartNever` and stays down after a crash; clients observe `PeerDied`, and
+  clients new sessions with it (ADR 0100). The block service restarts on
+  failure, with the driver and the FAT32 service restarting behind it
+  (ADR 0101). While a service is down its clients observe `PeerDied`, and
   bounded storage deadlines report I/O errors instead of freezing (ADR 0048,
   0078).
 

@@ -101,9 +101,13 @@ repeated metadata reads (ADR 0048).
   outlives the processes that use it.
 - The driver restarts (`restart: on-failure`). PID 1 creates a fresh channel,
   tells the block service over a control endpoint, and launches the replacement
-  with the same device authority, which it kept rather than consumed. The block
-  service and the filesystem service do not restart: their clients hold sessions
-  that would each have to be rebuilt (ADR 0078).
+  with the same device authority, which it kept rather than consumed (ADR 0078).
+- Every other service in the stack restarts too. The FAT32 service is attached
+  to the VFS again (ADR 0096); a restarted VFS hands its clients new sessions
+  and has the FAT32 service restart behind it (ADR 0099); a restarted block
+  service has the driver and the FAT32 service restart behind it (ADR 0101).
+  What lived only in a dead process is gone: `/tmp` with the VFS, and a write
+  in flight with whichever service died under it.
 
 ## Names
 

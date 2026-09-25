@@ -52,6 +52,9 @@ const (
 	// PID 1 restarts with the sessions they need (ADR 0100).
 	FaultConfig
 	FaultLog
+	// FaultBlock kills the block service, which PID 1 restarts with the
+	// driver and the filesystem service behind it (ADR 0101).
+	FaultBlock
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -114,7 +117,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultLog
+		return argument >= FaultTerminal && argument <= FaultBlock
 	default:
 		return false
 	}

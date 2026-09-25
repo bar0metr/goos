@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0099.
+Accepted. Extends ADR 0099. The block service, the one left that did not
+restart, does since ADR 0101.
 
 ## Context
 

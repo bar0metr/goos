@@ -40,6 +40,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if filesystemStarted && bytesString(spec.Name[:spec.NameSize]) == filesystemName && !renewFilesystemChannels(&spec) {
 		return 0, false
 	}
+	if blockStarted && bytesString(spec.Name[:spec.NameSize]) == "block" && !renewBlockGrants(&spec) {
+		return 0, false
+	}
 	if vfsStarted && bytesString(spec.Name[:spec.NameSize]) == "vfs" && !renewVFSChannels(&spec) {
 		return 0, false
 	}
@@ -84,7 +87,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName || name == "vfs" || name == "config" || name == "log")
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName || name == "vfs" || name == "config" || name == "log" || name == "block")
 	if keep && launched == supervisor.LaunchOK {
 		switch name {
 		case driverName:
@@ -101,6 +104,8 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			configProcessHandle = keepProcess(configProcessHandle, event.ProcessHandle)
 		case "log":
 			logProcessHandle = keepProcess(logProcessHandle, event.ProcessHandle)
+		case "block":
+			blockProcessHandle = keepProcess(blockProcessHandle, event.ProcessHandle)
 		}
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
@@ -120,6 +125,13 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	if name == driverName {
 		driverStarted = true
+	}
+	if name == "block" {
+		if blockStarted {
+			syslog.Info("block restarted")
+			mark("BLOCK_RESTARTED_OK\n")
+		}
+		blockStarted = true
 	}
 	if name == "vfs" {
 		if vfsStarted {

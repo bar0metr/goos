@@ -380,6 +380,7 @@ docs:
 	@test -f docs/adr/0092-acpi-power-off.md
 	@test -f docs/releases/0.1.0.md
 	@test -f docs/releases/0.1.1.md
+	@test -f docs/releases/0.1.2.md
 	@test -f docs/adr/0093-executable-image-launch-authority.md
 	@test -f docs/adr/0094-debug-console-capability-policy.md
 	@test -f docs/adr/0095-userspace-runtime-and-unsafe-boundary.md
@@ -388,6 +389,7 @@ docs:
 	@test -f docs/adr/0098-file-cache-between-vfs-and-filesystem-service.md
 	@test -f docs/adr/0099-restartable-vfs.md
 	@test -f docs/adr/0100-config-and-log-service-restart.md
+	@test -f docs/adr/0101-restartable-block-service.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

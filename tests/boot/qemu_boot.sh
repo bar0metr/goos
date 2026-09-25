@@ -494,6 +494,14 @@ rm -f "$log" "$reboot_log"
 	sleep 3
 	printf 'echo after-log-restart\n'
 	sleep 2
+	# The block service restarts too (ADR 0101): the driver and the FAT32
+	# service start again behind it, and the volume is read and written.
+	printf 'fault block\n'
+	sleep 5
+	printf 'cat /home/demo/message.txt; echo after-block-restart\n'
+	sleep 2
+	printf 'write /home/demo/after-block.txt block-restart-write; cat /home/demo/after-block.txt\n'
+	sleep 3
 	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
@@ -529,8 +537,8 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 220 seconds between its commands.
-wait_for_marker boot '^arena-stress-complete$' 280 "$log"
+# The scripted session sleeps about 230 seconds between its commands.
+wait_for_marker boot '^arena-stress-complete$' 300 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -589,11 +597,10 @@ require_marker storage.fault-injected BLOCK_DRIVER_FAULT_INJECTED "$log"
 # in flight when the driver died, so the replacement is asserted and the loss is
 # not: the replacement is what recovery means.
 require_marker storage.driver-replaced BLOCK_DRIVER_REPLACED_OK "$log"
-require_count storage.driver-started '^VIRTIO_BLK_DRIVER_OK$' 2 "$log" BLOCK_DRIVER_FAULT_INJECTED
+count_window storage.driver-started '^VIRTIO_BLK_DRIVER_OK$' 2 "$log" 'Starting services' 'goos> fault block'
 # The services either side of the driver stay up: a crash in one is not a
 # cascade through the storage stack.
-require_count storage.block-service-stable '^BLOCK_SERVICE_OK$' 1 "$log" BLOCK_SERVICE_OK
-forbid_regex storage.no-block-restart 'service exited service=block' 'the block service did not restart' "$log" BLOCK_DRIVER_LOST_OK
+count_window storage.block-service-stable '^BLOCK_SERVICE_OK$' 1 "$log" 'Starting services' 'goos> fault block'
 # The persistent volume is served by a filesystem service of its own, and a
 # crash in it is recovered from like the driver's (ADR 0096).
 require_window storage.fat32-process ' fat32$' 'fat32 listed by ps as a process of its own' "$log" 'goos> echo after-shell-restart' 'goos> mkdir'
@@ -800,6 +807,20 @@ require_marker service-restart.log-restarted LOG_RESTARTED_OK "$log" 'fault log'
 require_count service-restart.log-started-twice '^LOG_SERVICE_OK$' 2 "$log" 'fault log'
 require_marker service-restart.log-resumed LOG_RESUMED_OK "$log" 'fault log'
 pass_group service-restart
+
+# The block service restarts (ADR 0101). The driver and the FAT32 service see
+# it gone, exit, and start again after it; each hands the new block service
+# its endpoint, and the volume is mounted, read and written again.
+require_marker block-restart.injected BLOCK_FAULT_INJECTED "$log" 'fault block'
+require_marker block-restart.restarted BLOCK_RESTARTED_OK "$log" 'fault block'
+require_count block-restart.service-started-twice '^BLOCK_SERVICE_OK$' 2 "$log" 'fault block'
+require_window block-restart.driver-again '^VIRTIO_BLK_DRIVER_OK$' 'a driver started for the new block service' "$log" 'goos> fault block' 'after-block-restart'
+require_window block-restart.driver-installed '^BLOCK_DRIVER_REPLACED_OK$' 'the new driver handed to the block service' "$log" 'goos> fault block' 'after-block-restart'
+require_window block-restart.filesystem-installed '^BLOCK_FILESYSTEM_REPLACED_OK$' 'the new FAT32 service handed to the block service' "$log" 'goos> fault block' 'after-block-restart'
+require_window block-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 'the FAT32 service attached again' "$log" 'goos> fault block' 'after-block-restart'
+require_window block-restart.volume-read '^persistent$' 'the volume read through the new block service' "$log" 'goos> cat /home/demo/message.txt; echo after-block-restart' 'after-block-restart'
+require_regex block-restart.volume-written '^block-restart-write$' 'a file written and read back through the new block service' "$log" 'after-block.txt'
+pass_group block-restart
 
 # Programs outside /system run from executable objects PID 1 fills (ADR 0097).
 # The kernel proves the object's bounds and sealing at boot, the shell proves

@@ -133,6 +133,12 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultBlock:
+		status := execproto.ControlNotFound
+		if injectBlockFault() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultVFS:
 		status := execproto.ControlNotFound
 		if injectVFSFault() {

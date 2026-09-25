@@ -59,13 +59,18 @@ func startServices(ticks uint64) {
 				{Name: "driver", Handle: driverClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "filesystem", Handle: filesystemBlockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "control", Handle: handle.ID(blockControl[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+				// A block service that fails is started again; the driver
+				// and the filesystem service start again after it
+				// (ADR 0101).
+			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 		// The driver's device authority stays with PID 1 rather than being
 		// consumed. A driver that crashes has to be replaced by another one
 		// holding the same ports, line and DMA domain, and only PID 1 can grant
 		// them. The dead process's copies are released by its teardown, which
 		// also resets the device and masks its interrupt.
-		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk",
+		// The driver serves the block service and nothing else, so it starts
+		// after it, and again after it restarts.
+		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk", Dependencies: []string{"block"},
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
@@ -76,10 +81,11 @@ func startServices(ticks uint64) {
 		// The FAT32 service parses the untrusted volume in a process of its
 		// own, between the VFS and the block service (ADR 0096). It holds a
 		// channel to each and nothing else: no namespace, no device.
-		// It depends on the VFS as well as the block service: it serves
-		// nothing without one, and after a VFS restart it has to start again
-		// once the new VFS runs.
-		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/system/fat32", Dependencies: []string{"block", "vfs"},
+		// It depends on the VFS as well as the block service and its driver:
+		// it serves nothing without either, and after a restart of any of
+		// them it has to start again once they run, so its mount can ask the
+		// device for its size.
+		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/system/fat32", Dependencies: []string{"block", "virtio-blk", "vfs"},
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "vfs", Handle: handle.ID(filesystemPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
