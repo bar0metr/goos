@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Amends ADR 0022, ADR 0030, ADR 0070 and ADR 0081.
+Accepted. Amends ADR 0022, ADR 0030, ADR 0070 and ADR 0081. Extended by ADR
+0097, which adds executable objects as a second launch source.
 
 ## Context
 

@@ -23,6 +23,14 @@ Open-file handles carry generations, backend/mount identity, independent
 offsets, and explicit read/write rights. Closing a handle increments its
 generation. Reads and writes advance only that open object's offset.
 
+Every open file belongs to the session that opened it. A handle is valid only
+on that session: another session's handle is answered as not found, so one
+client can neither use nor probe the files another holds. A session holds at
+most 16 of the 64 open files, and when its channel closes, because the client
+exited or crashed, every file it left open is closed with it before its slot
+is reused. Until 0.1.2 the table was shared by all sessions and a file left
+open by a dead process stayed open for the rest of the boot.
+
 The fixed resolver cache stores resolved file and directory nodes. Mount and
 metadata mutations invalidate it synchronously, preventing rename/unlink from
 leaving stale path aliases. Cached and uncached resolution have separate
@@ -45,6 +53,15 @@ space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archiv
 persistent volume is served by the FAT32 service, a separate process: VFS
 reaches it through a remote backend over the `GFSPRT01` protocol, and mounts it
 when PID 1 hands over the channel with the `SetFilesystem` control operation.
+File data moves through the file cache the two map (ADR 0098): the VFS indexes
+which slot holds which page and serves reads of cached pages itself.
+
+The service restarts on failure, and exits rather than spinning when it cannot
+go on (ADR 0099). PID 1 launches the new instance with a new control endpoint
+and first session and hands the shell, config and log services new sessions
+with a session notice over channels they already hold; the FAT32 service
+restarts behind it and is mounted again. `/tmp` starts empty, and files open
+in the old instance are gone.
 A dead or stalled FAT32 service is an I/O error on those three mounts only; a
 restarted one is attached under the same mounts and open files (ADR 0096). Kernel launch
 grants explicitly identify the client or server side of a channel; neither

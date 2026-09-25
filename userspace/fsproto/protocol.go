@@ -4,9 +4,10 @@
 // paths, mounts and open files while the filesystem service owns its on-disk
 // format and the device it reads.
 //
-// Every message is one bounded IPC payload. File data moves in chunks of at
-// most MaxRequestData bytes per write and MaxReplyData bytes per read; the
-// caller splits larger transfers.
+// Every message is one bounded IPC payload, and no message carries file data.
+// The data of a read or a write lies in the file cache, a shared-memory object
+// of CachePages pages both processes map: a request names a slot of it, and the
+// bytes at the request's offset within that page (ADR 0098).
 package fsproto
 
 import (
@@ -18,17 +19,24 @@ import (
 
 const (
 	ProtocolID = uint64(0x4746535052543031)
-	Version    = uint16(1)
+	// Version 2 moves file data from the messages to the file cache.
+	Version = uint16(2)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
 	// by the service before the VFS gives up on the service.
 	RequestDeadline = 6 * clock.TicksPerSecond
 
-	requestHeader  = 40
-	replyHeader    = 32
-	MaxRequestData = ipc.MaxPayload - requestHeader
-	MaxReplyData   = ipc.MaxPayload - replyHeader
+	requestHeader = 40
+	replyHeader   = 32
+
+	// PageSize is the size of one file-cache slot, and the most a read or a
+	// write moves in one exchange.
+	PageSize = 4096
+	// CachePages is the number of slots in the file cache.
+	CachePages = 32
+	// CacheSize is the size of the file cache mapping.
+	CacheSize = CachePages * PageSize
 )
 
 type Operation uint8
@@ -51,7 +59,7 @@ const (
 	OperationFlush
 )
 
-// Request is one backend call. Node, Parent, Offset, Size, Name and Data are
+// Request is one backend call. Node, Parent, Offset, Size, Slot and Name are
 // used as the operation needs them; the rest are zero.
 type Request struct {
 	Operation Operation
@@ -60,10 +68,14 @@ type Request struct {
 	// Offset is the file offset of a read or write, or the new size of a
 	// truncation.
 	Offset uint64
-	// Size is the length of a read, or the cursor of a directory listing.
+	// Size is the length of a read or write, or the cursor of a directory
+	// listing.
 	Size uint32
+	// Slot is the file-cache page a read fills or a write takes its bytes
+	// from. The bytes sit at Offset's position within the page, so a read or
+	// write never crosses a page.
+	Slot uint32
 	Name []byte
-	Data []byte
 }
 
 // Reply answers the request with the same correlation.
@@ -75,12 +87,30 @@ type Reply struct {
 	Node ramfs.NodeID
 	// Kind and Value are the attributes of a stat or listed entry, and of the
 	// node an open, create, or mkdir returns; a Kind of zero means none were
-	// sent. For a write, Value is the bytes it moved.
+	// sent. For a read or a write, Value is the bytes it moved.
 	Value uint64
 	// Cursor is the position of the next directory entry.
 	Cursor uint32
 	Name   []byte
-	Data   []byte
+}
+
+// validTransfer reports whether a read or write names a slot and stays
+// within one page of it.
+func validTransfer(request Request) bool {
+	if request.Operation != OperationRead && request.Operation != OperationWrite {
+		return request.Slot == 0
+	}
+	return request.Slot < CachePages && request.Size != 0 && request.Offset%PageSize+uint64(request.Size) <= PageSize
+}
+
+// SlotBytes returns the bytes of cache a read or write moves: Size bytes at
+// Offset's position in the request's slot. The request must be valid.
+func SlotBytes(cache []byte, request Request) ([]byte, bool) {
+	if len(cache) != CacheSize || !validTransfer(request) || (request.Operation != OperationRead && request.Operation != OperationWrite) {
+		return nil, false
+	}
+	start := uint64(request.Slot)*PageSize + request.Offset%PageSize
+	return cache[start : start+uint64(request.Size)], true
 }
 
 func validOperation(operation Operation) bool {
@@ -99,23 +129,21 @@ func validName(name []byte) bool {
 
 func EncodeRequest(request Request, correlation uint64, message *ipc.Message) bool {
 	if message == nil || correlation == 0 || !validOperation(request.Operation) || len(request.Name) > ramfs.MaxName ||
-		!validName(request.Name) || requestHeader+len(request.Name)+len(request.Data) > ipc.MaxPayload ||
-		request.Operation == OperationRead && request.Size > MaxReplyData {
+		!validName(request.Name) || requestHeader+len(request.Name) > ipc.MaxPayload || !validTransfer(request) {
 		return false
 	}
 	clearMessage(message)
 	message.ProtocolID, message.Version, message.Kind, message.Correlation = ProtocolID, Version, ipc.KindRequest, correlation
-	message.PayloadSize = uint16(requestHeader + len(request.Name) + len(request.Data))
+	message.PayloadSize = uint16(requestHeader + len(request.Name))
 	payload := message.Payload[:]
 	payload[0] = byte(request.Operation)
 	payload[1] = byte(len(request.Name))
-	binary.LittleEndian.PutUint16(payload[2:], uint16(len(request.Data)))
+	binary.LittleEndian.PutUint32(payload[4:], request.Slot)
 	binary.LittleEndian.PutUint64(payload[8:], uint64(request.Node))
 	binary.LittleEndian.PutUint64(payload[16:], uint64(request.Parent))
 	binary.LittleEndian.PutUint64(payload[24:], request.Offset)
 	binary.LittleEndian.PutUint32(payload[32:], request.Size)
 	copy(payload[requestHeader:], request.Name)
-	copy(payload[requestHeader+len(request.Name):], request.Data)
 	return true
 }
 
@@ -126,20 +154,20 @@ func DecodeRequest(message *ipc.Message) (Request, bool) {
 		return Request{}, false
 	}
 	payload := message.Payload[:]
-	nameSize, dataSize := int(payload[1]), int(binary.LittleEndian.Uint16(payload[2:]))
-	if !zero(payload[4:8]) || !zero(payload[36:40]) || nameSize > ramfs.MaxName || requestHeader+nameSize+dataSize != int(message.PayloadSize) {
+	nameSize := int(payload[1])
+	if !zero(payload[2:4]) || !zero(payload[36:40]) || nameSize > ramfs.MaxName || requestHeader+nameSize != int(message.PayloadSize) {
 		return Request{}, false
 	}
 	request := Request{
 		Operation: Operation(payload[0]),
+		Slot:      binary.LittleEndian.Uint32(payload[4:]),
 		Node:      ramfs.NodeID(binary.LittleEndian.Uint64(payload[8:])),
 		Parent:    ramfs.NodeID(binary.LittleEndian.Uint64(payload[16:])),
 		Offset:    binary.LittleEndian.Uint64(payload[24:]),
 		Size:      binary.LittleEndian.Uint32(payload[32:]),
 		Name:      payload[requestHeader : requestHeader+nameSize],
-		Data:      payload[requestHeader+nameSize : requestHeader+nameSize+dataSize],
 	}
-	if !validOperation(request.Operation) || !validName(request.Name) || request.Operation == OperationRead && request.Size > MaxReplyData {
+	if !validOperation(request.Operation) || !validName(request.Name) || !validTransfer(request) {
 		return Request{}, false
 	}
 	return request, true
@@ -147,20 +175,18 @@ func DecodeRequest(message *ipc.Message) (Request, bool) {
 
 func EncodeReply(reply Reply, correlation uint64, message *ipc.Message) bool {
 	if message == nil || correlation == 0 || !validOperation(reply.Operation) || reply.Status > ramfs.StatusIOError ||
-		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName || replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload {
+		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName || replyHeader+len(reply.Name) > ipc.MaxPayload {
 		return false
 	}
 	clearMessage(message)
 	message.ProtocolID, message.Version, message.Kind, message.Correlation = ProtocolID, Version, ipc.KindReply, correlation
-	message.PayloadSize = uint16(replyHeader + len(reply.Name) + len(reply.Data))
+	message.PayloadSize = uint16(replyHeader + len(reply.Name))
 	payload := message.Payload[:]
 	payload[0], payload[1], payload[2], payload[3] = byte(reply.Operation), byte(reply.Status), byte(reply.Kind), byte(len(reply.Name))
-	binary.LittleEndian.PutUint16(payload[4:], uint16(len(reply.Data)))
 	binary.LittleEndian.PutUint64(payload[8:], uint64(reply.Node))
 	binary.LittleEndian.PutUint64(payload[16:], reply.Value)
 	binary.LittleEndian.PutUint32(payload[24:], reply.Cursor)
 	copy(payload[replyHeader:], reply.Name)
-	copy(payload[replyHeader+len(reply.Name):], reply.Data)
 	return true
 }
 
@@ -171,8 +197,8 @@ func DecodeReply(message *ipc.Message) (Reply, bool) {
 		return Reply{}, false
 	}
 	payload := message.Payload[:]
-	nameSize, dataSize := int(payload[3]), int(binary.LittleEndian.Uint16(payload[4:]))
-	if !zero(payload[6:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName || replyHeader+nameSize+dataSize != int(message.PayloadSize) {
+	nameSize := int(payload[3])
+	if !zero(payload[4:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName || replyHeader+nameSize != int(message.PayloadSize) {
 		return Reply{}, false
 	}
 	reply := Reply{
@@ -183,7 +209,6 @@ func DecodeReply(message *ipc.Message) (Reply, bool) {
 		Value:     binary.LittleEndian.Uint64(payload[16:]),
 		Cursor:    binary.LittleEndian.Uint32(payload[24:]),
 		Name:      payload[replyHeader : replyHeader+nameSize],
-		Data:      payload[replyHeader+nameSize : replyHeader+nameSize+dataSize],
 	}
 	if !validOperation(reply.Operation) || reply.Status > ramfs.StatusIOError || reply.Kind > ramfs.KindDirectory {
 		return Reply{}, false

@@ -28,7 +28,14 @@ type Remote struct {
 	// drops the entry (ADR 0096).
 	attributes [attributeEntries]ramfs.Stat
 	nextEntry  int
+	// pages indexes the file cache, the memory this backend shares with the
+	// service; every read and write moves its bytes there (ADR 0098).
+	pages PageCache
 }
+
+// AttachCache gives the backend the file-cache mapping it shares with its
+// service.
+func (remote *Remote) AttachCache(memory []byte) bool { return remote.pages.Attach(memory) }
 
 // attributeEntries bounds the attribute cache. A command touches a handful of
 // nodes; eight covers a path walk and the file at its end.
@@ -65,10 +72,11 @@ func (remote *Remote) forget(id ramfs.NodeID) {
 	}
 }
 
-// forgetAll drops the cache: after a rename or unlink, which can move node
+// forgetAll drops both caches: after a rename or unlink, which can move node
 // IDs, and after any failure, which may mean the service is gone.
 func (remote *Remote) forgetAll() {
 	remote.attributes = [attributeEntries]ramfs.Stat{}
+	remote.pages.ForgetAll()
 }
 
 func (remote *Remote) call(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
@@ -142,8 +150,8 @@ func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 	return status
 }
 
-// Read fills target in as many exchanges as it needs. A short chunk is the end
-// of the file.
+// Read serves target from the file cache, asking the service for each page it
+// does not hold. A page shorter than a page is the end of the file.
 func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
 	// A read that starts at or past the end of a regular file of known size
 	// is the end of the file, and needs no exchange to find that out.
@@ -152,44 +160,92 @@ func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 	}
 	total := 0
 	for total < len(target) {
-		chunk := len(target) - total
-		if chunk > fsproto.MaxReplyData {
-			chunk = fsproto.MaxReplyData
-		}
-		reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationRead, Node: id, Offset: offset + uint64(total), Size: uint32(chunk)})
+		position := offset + uint64(total)
+		within := position % fsproto.PageSize
+		slot, length, status := remote.page(id, position/fsproto.PageSize)
 		if status != ramfs.StatusOK {
 			return total, status
 		}
-		if len(reply.Data) > chunk {
-			return total, ramfs.StatusIOError
+		if within >= length {
+			break
 		}
-		total += copy(target[total:], reply.Data)
-		if len(reply.Data) < chunk {
+		copied := copy(target[total:], remote.pages.Slot(slot)[within:length])
+		total += copied
+		if length < fsproto.PageSize && within+uint64(copied) == length {
+			// The page ends the file, and the read has reached its end.
 			break
 		}
 	}
 	return total, ramfs.StatusOK
 }
 
-// Write sends data in as many exchanges as it needs. A short write ends it.
+// page returns the slot holding page of id, filling one from the service on a
+// miss.
+func (remote *Remote) page(id ramfs.NodeID, page uint64) (int, uint64, ramfs.Status) {
+	if !remote.pages.Ready() {
+		return 0, 0, ramfs.StatusIOError
+	}
+	if slot, length, found := remote.pages.Lookup(id, page); found {
+		return slot, length, ramfs.StatusOK
+	}
+	slot := remote.pages.Victim()
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationRead, Node: id, Offset: page * fsproto.PageSize, Size: fsproto.PageSize, Slot: uint32(slot)})
+	if status != ramfs.StatusOK {
+		return 0, 0, status
+	}
+	if reply.Value > fsproto.PageSize {
+		remote.forgetAll()
+		return 0, 0, ramfs.StatusIOError
+	}
+	remote.pages.Fill(slot, id, page, reply.Value)
+	return slot, reply.Value, ramfs.StatusOK
+}
+
+// Write sends data a page at a time from the file cache. A page the cache
+// holds is updated in place and written from its slot; any other is written
+// from the scratch slot and not cached. The service writes each piece through
+// before it answers, so a write that returns is on the service's side, and an
+// error is reported by the write that caused it. A short write ends it.
 func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, ramfs.Status) {
+	if !remote.pages.Ready() {
+		return 0, ramfs.StatusIOError
+	}
 	total := 0
 	for total < len(data) {
-		chunk := len(data) - total
-		if chunk > fsproto.MaxRequestData {
-			chunk = fsproto.MaxRequestData
+		position := offset + uint64(total)
+		page, within := position/fsproto.PageSize, position%fsproto.PageSize
+		chunk := min(uint64(len(data)-total), fsproto.PageSize-within)
+		slot, length, found := remote.pages.Lookup(id, page)
+		if !found {
+			slot = scratchSlot
 		}
-		reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationWrite, Node: id, Offset: offset + uint64(total), Data: data[total : total+chunk]})
+		copy(remote.pages.Slot(slot)[within:within+chunk], data[total:uint64(total)+chunk])
+		reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationWrite, Node: id, Offset: position, Size: uint32(chunk), Slot: uint32(slot)})
+		if status == ramfs.StatusOK && reply.Value > chunk {
+			remote.forgetAll()
+			status = ramfs.StatusIOError
+		}
 		if status != ramfs.StatusOK {
+			// The slot holds bytes the file may not.
+			remote.pages.Forget(id)
 			remote.forget(id)
 			return total, status
 		}
-		if reply.Value > uint64(chunk) {
-			remote.forget(id)
-			return total, ramfs.StatusIOError
+		// A write elsewhere may have moved the end of the file past a page
+		// that used to end it.
+		keep := -1
+		if found {
+			keep = slot
+			if reply.Value < chunk {
+				remote.pages.Drop(slot)
+				keep = -1
+			} else {
+				remote.pages.Written(slot, length, within, reply.Value)
+			}
 		}
+		remote.pages.DropPartial(id, keep)
 		total += int(reply.Value)
-		if reply.Value < uint64(chunk) {
+		if reply.Value < chunk {
 			break
 		}
 	}
@@ -202,6 +258,7 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 }
 
 func (remote *Remote) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
+	remote.pages.Forget(id)
 	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationTruncate, Node: id, Offset: size})
 	stat, known := remote.cached(id)
 	switch {

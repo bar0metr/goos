@@ -24,3 +24,64 @@ func ImageExtent(image []byte, offset uint64, size uint64) ([]byte, uint64, bool
 	}
 	return image[offset : offset+size], offset<<32 | size, true
 }
+
+// Source is the bytes of one executable: an extent of the system image, which
+// is contiguous, or the pages of an executable object, which are not
+// (ADR 0097). The loader reads both through it, so validation and loading see
+// the same bytes whichever source they come from.
+type Source struct {
+	data     []byte
+	pages    [][]byte
+	pageSize uint64
+	size     uint64
+}
+
+// Contiguous is a source whose bytes lie in one slice.
+func Contiguous(data []byte) Source {
+	return Source{data: data, size: uint64(len(data))}
+}
+
+// Paged is a source of size bytes held in whole pages of pageSize bytes, in
+// order; the bytes past size in the last page are not part of it.
+func Paged(pages [][]byte, pageSize uint64, size uint64) (Source, bool) {
+	if pageSize == 0 || size == 0 || uint64(len(pages)) != (size+pageSize-1)/pageSize {
+		return Source{}, false
+	}
+	for _, page := range pages {
+		if uint64(len(page)) != pageSize {
+			return Source{}, false
+		}
+	}
+	return Source{pages: pages, pageSize: pageSize, size: size}, true
+}
+
+// Len is the number of bytes in the source.
+func (source Source) Len() uint64 { return source.size }
+
+// Read returns the length bytes at offset. Bytes that lie in one slice of the
+// source are returned in place; bytes that cross a page are gathered into
+// scratch, which must hold length bytes.
+func (source Source) Read(offset uint64, length uint64, scratch []byte) ([]byte, bool) {
+	if offset > source.size || length > source.size-offset {
+		return nil, false
+	}
+	if source.pages == nil {
+		return source.data[offset : offset+length], true
+	}
+	if length == 0 {
+		return nil, true
+	}
+	pageSize := source.pageSize
+	first, within := offset/pageSize, offset%pageSize
+	if within+length <= pageSize {
+		return source.pages[first][within : within+length], true
+	}
+	if uint64(len(scratch)) < length {
+		return nil, false
+	}
+	for copied := uint64(0); copied < length; {
+		page, within := (offset+copied)/pageSize, (offset+copied)%pageSize
+		copied += uint64(copy(scratch[copied:length], source.pages[page][within:]))
+	}
+	return scratch[:length], true
+}

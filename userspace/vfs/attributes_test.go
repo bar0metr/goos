@@ -20,7 +20,7 @@ func (transport *counting) Exchange(request fsproto.Request) (fsproto.Reply, boo
 func dispatchCounted(t *testing.T, service *Service, transport *counting, request vfs.Request) (vfs.Reply, int) {
 	t.Helper()
 	before := transport.exchanges
-	reply := service.Dispatch(request)
+	reply := service.Dispatch(testSession, request)
 	return reply, transport.exchanges - before
 }
 
@@ -62,18 +62,18 @@ func TestAttributeCacheFollowsChanges(t *testing.T) {
 	writePersistent(t, service, "/persist/a.txt", "0123456789")
 	stat := func(path string) vfs.Reply {
 		t.Helper()
-		return service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
+		return service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)})
 	}
 	if reply := stat("/persist/a.txt"); reply.Status != vfs.StatusOK || reply.Size != 10 {
 		t.Fatalf("stat = %d, %d", reply.Status, reply.Size)
 	}
-	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationTruncate, Path: []byte("/persist/a.txt"), Offset: 4}); reply.Status != vfs.StatusOK {
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationTruncate, Path: []byte("/persist/a.txt"), Offset: 4}); reply.Status != vfs.StatusOK {
 		t.Fatalf("truncate = %d", reply.Status)
 	}
 	if reply := stat("/persist/a.txt"); reply.Size != 4 {
 		t.Fatalf("size after truncate = %d", reply.Size)
 	}
-	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationRename, Path: []byte("/persist/a.txt"), Data: []byte("/persist/b.txt")}); reply.Status != vfs.StatusOK {
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/persist/a.txt"), Data: []byte("/persist/b.txt")}); reply.Status != vfs.StatusOK {
 		t.Fatalf("rename = %d", reply.Status)
 	}
 	if reply := stat("/persist/a.txt"); reply.Status != vfs.StatusNotFound {
@@ -82,7 +82,7 @@ func TestAttributeCacheFollowsChanges(t *testing.T) {
 	if reply := stat("/persist/b.txt"); reply.Status != vfs.StatusOK || reply.Size != 4 {
 		t.Fatalf("stat of the new name = %d, %d", reply.Status, reply.Size)
 	}
-	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/persist/b.txt")}); reply.Status != vfs.StatusOK {
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/persist/b.txt")}); reply.Status != vfs.StatusOK {
 		t.Fatalf("unlink = %d", reply.Status)
 	}
 	if reply := stat("/persist/b.txt"); reply.Status != vfs.StatusNotFound {
@@ -91,7 +91,7 @@ func TestAttributeCacheFollowsChanges(t *testing.T) {
 	// What the cache says agrees with a fresh look at the volume.
 	writePersistent(t, service, "/persist/c.txt", "abc")
 	fresh := startedService(t, device)
-	if cached, direct := stat("/persist/c.txt"), fresh.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte("/persist/c.txt")}); cached.Size != direct.Size || cached.Kind != direct.Kind {
+	if cached, direct := stat("/persist/c.txt"), fresh.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/persist/c.txt")}); cached.Size != direct.Size || cached.Kind != direct.Kind {
 		t.Fatalf("cached %+v, volume %+v", cached, direct)
 	}
 }

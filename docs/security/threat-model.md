@@ -100,14 +100,19 @@ attacker-controlled code.
   volume through the FAT32 protocol, but not the raw disk: it holds no block
   endpoint (ADR 0096). It gains no device, port, IRQ, or DMA authority.
 - FAT32 service compromise, for example through a malformed volume, exposes
-  the persistent volume and the disk through its block endpoint. It gains no
-  namespace, session, other mount, or device authority, and a crash in it is
+  the persistent volume and the disk through its block endpoint, and the file
+  cache it shares with the VFS, which holds only pages of that volume
+  (ADR 0098). It gains no namespace, session, other mount, or device authority, and a crash in it is
   restarted without taking down the VFS. It also serves `/system/commands`, which PID 1 reads to decide
   which commands get a VFS session; a lying VFS can only change who receives a
-  session it serves itself. It cannot change what executes: PID 1 resolves
-  launches in its own mapping of the archive, the kernel loads only extents of
-  that archive, and the image capability VFS holds is Read-only, without the
-  Execute right a launch requires (ADR 0093).
+  session it serves itself. It cannot change which services and system
+  commands execute: PID 1 resolves those in its own mapping of the archive,
+  the kernel loads them only as extents of that archive, and the image
+  capability VFS holds is Read-only, without the Execute right a launch
+  requires (ADR 0093). It can change what runs for a program path outside
+  `/system`, which PID 1 reads through the VFS, as a compromised FAT32 service
+  can for a program on the volume; such a program gets only its standard
+  streams (ADR 0097).
 - Block service compromise exposes the disk through the driver channel. It
   gains no hardware authority.
 - Config service compromise exposes and can rewrite every setting, including
@@ -126,12 +131,15 @@ attacker-controlled code.
   shell and commands print, and write anything to the console. It holds nothing
   else: no filesystem, no process control, and a control channel that only
   accepts a session from PID 1.
-- The storage driver, the config service, and the log service restart on
-  failure; the terminal service and the shell always restart, independently,
-  each handed a fresh session with the other (ADR 0089). VFS and the block
-  service use `RestartNever` and stay down after a crash; clients observe
-  `PeerDied`, and bounded storage deadlines report I/O errors instead of
-  freezing (ADR 0048, 0078).
+- The storage driver, the FAT32 service, the config service, and the log
+  service restart on failure; the terminal service and the shell always
+  restart, independently, each handed a fresh session with the other
+  (ADR 0089). The VFS restarts on failure, and PID 1 hands the shell, config
+  and log services new sessions over channels they already hold; `/tmp` and
+  the files open at the time are lost (ADR 0099). The block service uses
+  `RestartNever` and stays down after a crash; clients observe `PeerDied`, and
+  bounded storage deadlines report I/O errors instead of freezing (ADR 0048,
+  0078).
 
 ### Compromised driver
 

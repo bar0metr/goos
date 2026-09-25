@@ -54,7 +54,10 @@ var (
 	logHandle    handle.ID
 	vfsHandle    handle.ID
 	configHandle handle.ID
-	configWire   [ipc.WireMaxSize]byte
+	// controlHandle is the channel PID 1 hands a new filesystem session over
+	// when the VFS was restarted and the old one died with it (ADR 0099).
+	controlHandle handle.ID
+	configWire    [ipc.WireMaxSize]byte
 	// persisting is the setting that governs this service. It is consulted on
 	// every pass, so turning persistence off takes effect at the next one
 	// rather than at the next boot.
@@ -100,6 +103,7 @@ func userspaceMain() {
 	// The configuration session is optional: without one the service keeps its
 	// default, which is to persist.
 	configHandle, _ = data.Handle("config")
+	controlHandle, _ = data.Handle("control")
 	if !openLog() {
 		fatal("LOG_RING_UNAVAILABLE\n")
 	}
@@ -133,6 +137,7 @@ func openLog() bool {
 // a gap in the persisted log is visible as a gap.
 func drain() {
 	arena.Reset(arenaBase)
+	takeSession()
 	oldest, total, status := sys.LogBounds(logHandle)
 	if status != kcall.StatusOK {
 		return
@@ -199,6 +204,29 @@ func drain() {
 	reported = false
 	if offset >= rotationBound() {
 		rotate()
+	}
+}
+
+// takeSession installs a filesystem session PID 1 has handed over, if there
+// is one. The records produced while the VFS was down are still in the ring,
+// and the cursor still names the first of them, so the next pass persists them
+// without writing any twice.
+func takeSession() {
+	for controlHandle != 0 && sys.IPCReceive(controlHandle, wire[:]) == 0 {
+		payloadSize := int(wire[24]) | int(wire[25])<<8
+		message, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
+		if !valid {
+			continue
+		}
+		session, ok := vfs.DecodeSessionNotice(&message)
+		if !ok {
+			sys.HandleClose(message.Handles[0])
+			continue
+		}
+		sys.HandleClose(vfsHandle)
+		vfsHandle, reported = session, false
+		syslog.Info("filesystem session renewed")
+		mark("LOG_SESSION_RENEWED_OK\n")
 	}
 }
 

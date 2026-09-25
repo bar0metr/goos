@@ -73,10 +73,10 @@ func runFilesystemSelfTests(console amd64.COM1) {
 			amd64.Halt()
 		}
 	}
-	vfsFile, vfsOpened := bootVFS.Open([]byte("//tmp/./note"), vfs.Read|vfs.Write)
-	vfsWritten, vfsWriteStatus := bootVFS.Write(vfsFile, []byte("VFS works"))
-	vfsSeekStatus := bootVFS.Seek(vfsFile, 0)
-	vfsRead, vfsReadStatus := bootVFS.Read(vfsFile, vfsReadback[:])
+	vfsFile, vfsOpened := bootVFS.Open(1, []byte("//tmp/./note"), vfs.Read|vfs.Write)
+	vfsWritten, vfsWriteStatus := bootVFS.Write(1, vfsFile, []byte("VFS works"))
+	vfsSeekStatus := bootVFS.Seek(1, vfsFile, 0)
+	vfsRead, vfsReadStatus := bootVFS.Read(1, vfsFile, vfsReadback[:])
 	vfsStat, vfsStatStatus := bootVFS.Stat([]byte("/tmp/note"))
 	_, mountedConsole, mountedResolveStatus := bootVFS.Resolve([]byte("/tmp/dev/console"))
 	deviceConsole, deviceConsoleStatus := deviceRAMFS.Open(deviceRoot, []byte("console"))
@@ -91,7 +91,7 @@ func runFilesystemSelfTests(console amd64.COM1) {
 			amd64.Halt()
 		}
 	}
-	if bootVFS.Close(vfsFile) != vfs.StatusOK || bootVFS.Rename([]byte("/tmp/note"), []byte("/tmp/renamed")) != vfs.StatusOK {
+	if bootVFS.Close(1, vfsFile) != vfs.StatusOK || bootVFS.Rename([]byte("/tmp/note"), []byte("/tmp/renamed")) != vfs.StatusOK {
 		console.WriteString("PANIC: VFS lifecycle failed\n")
 		for {
 			amd64.Halt()

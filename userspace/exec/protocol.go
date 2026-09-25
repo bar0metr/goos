@@ -10,7 +10,7 @@ import (
 
 const (
 	ProtocolID  = uint64(0x4745584543303031)
-	Version     = uint16(9)
+	Version     = uint16(10)
 	MaxPath     = 192
 	MaxStages   = 4
 	replySize   = 25
@@ -193,8 +193,10 @@ func validErrorSource(source, count uint8) bool {
 	return source == 0 || count >= 2 && source < count
 }
 
+// validStage accepts any canonical absolute path. Where the executable comes
+// from, and whether it may run, is PID 1's decision (ADR 0097).
 func validStage(stage Stage, environment []byte) bool {
-	if _, ok := CommandFromSystemPath(stage.Path); !ok || !validPath(stage.Path) || len(stage.Arguments) > startup.MaxVector {
+	if !validPath(stage.Path) || len(stage.Arguments) > startup.MaxVector {
 		return false
 	}
 	_, _, ok := startup.DecodeVectors(stage.Arguments, environment)

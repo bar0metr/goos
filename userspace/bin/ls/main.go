@@ -38,7 +38,11 @@ func run(data startup.Data) {
 		return
 	}
 	var cursor uint32
+	// Each exchange allocates from an arena that never frees, so it is
+	// rewound per entry; a large directory would otherwise exhaust it.
+	mark := utility.HeapMark()
 	for {
+		utility.HeapReset(mark)
 		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: uint64(cursor)})
 		if received && reply.Status == vfs.StatusNotFound {
 			break

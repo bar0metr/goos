@@ -45,6 +45,9 @@ const (
 	FaultShell
 	FaultKernelStack
 	FaultFilesystem
+	// FaultVFS kills the VFS service, which PID 1 restarts and whose clients
+	// it hands new sessions (ADR 0099).
+	FaultVFS
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -107,7 +110,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultFilesystem
+		return argument >= FaultTerminal && argument <= FaultVFS
 	default:
 		return false
 	}

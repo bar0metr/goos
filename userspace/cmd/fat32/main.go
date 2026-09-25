@@ -12,6 +12,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/ramfs"
 	blockproto "goos/userspace/block"
 	"goos/userspace/fat32"
@@ -35,10 +36,13 @@ var (
 	blockWire      [ipc.WireMaxSize]byte
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
-	scratch        [fsproto.MaxReplyData]byte
-	volume         fat32.Volume
-	correlation    uint64
-	blockCapacity  uint64
+	listedName     [ramfs.MaxName]byte
+	// cache is the file cache this service shares with the VFS. A read fills,
+	// and a write takes its bytes from, the slot a request names (ADR 0098).
+	cache         []byte
+	volume        fat32.Volume
+	correlation   uint64
+	blockCapacity uint64
 )
 
 // blockDevice is the volume's device: the block service, one bounded exchange
@@ -120,6 +124,16 @@ func userspaceMain() {
 	if blockHandle, ok = data.Handle("block"); !ok {
 		fatal("FAT32_BLOCK_MISSING\n")
 	}
+	cacheHandle, ok := data.Handle("cache")
+	if !ok {
+		fatal("FAT32_CACHE_MISSING\n")
+	}
+	if mapped, status := sys.MemoryMap(cacheHandle, vm.UserSharedAddress, fsproto.CacheSize, true); status == kcall.StatusOK {
+		cache = mapped
+	} else {
+		// Without it no file data can move; metadata still can.
+		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
+	}
 	// A volume that is refused is not a reason to stop: the service keeps
 	// answering, with I/O errors, so the VFS reports the volume as absent
 	// rather than the service as crashing in a restart loop (ADR 0077).
@@ -137,11 +151,12 @@ func userspaceMain() {
 			continue
 		}
 		if status == kcall.StatusPeerDied {
-			// The VFS is gone and nothing else can reach this service. There is
-			// nothing left to serve; stopping cleanly is not a failure to
-			// restart from.
+			// The VFS is gone and nothing else can reach this service. When
+			// the VFS is restarted, it needs a filesystem service again, and
+			// a new channel to it; exiting with a failure has the supervisor
+			// start one once the VFS is back (ADR 0099).
 			syslog.Warn("vfs endpoint closed")
-			sys.Exit(0)
+			sys.Exit(exitVFSGone)
 		}
 		if status != kcall.StatusOK {
 			fatal("FAT32_RECEIVE_FAILED\n")
@@ -165,7 +180,7 @@ func serve() {
 		}
 		reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}
 	} else {
-		reply = fsproto.Serve(&volume, request, &scratch)
+		reply = fsproto.Serve(&volume, request, cache, &listedName)
 	}
 	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage) {
 		fatal("FAT32_REPLY_FAILED\n")
@@ -212,13 +227,20 @@ func mark(message string) {
 	}
 }
 
+// Exit codes. Neither is zero, so the supervisor starts the service again.
+const (
+	exitFailed  = 1
+	exitVFSGone = 2
+)
+
+// fatal reports why the service stops and exits, so that the supervisor
+// restarts it rather than the VFS waiting out a deadline on every request.
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		sys.ConsoleWriteString(consoleHandle, message)
 	}
 	sys.Diagnostics(consoleHandle)
-	for {
-	}
+	sys.Exit(exitFailed)
 }
 
 func main() {}

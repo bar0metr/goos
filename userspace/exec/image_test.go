@@ -55,12 +55,17 @@ func TestLocateImageNamesTheBytesOfAnExecutable(t *testing.T) {
 
 func TestLocateImageRefusesPathsOutsideItsPolicy(t *testing.T) {
 	image := systemImage(t)
-	for _, path := range []string{"", "/", "/system", "/system/", "system/vfs", "/persist/bin/ls", "/systemx/vfs", "/system//vfs", "/system/./vfs", "/system/bin/../vfs", "/system/vfs/"} {
+	for _, path := range []string{"", "/", "/system/", "system/vfs", "/system//vfs", "/system/./vfs", "/system/bin/../vfs", "/system/vfs/"} {
+		if _, _, status := LocateImage(image, []byte(path)); status != ImageInvalidPath {
+			t.Fatalf("%q = %d", path, status)
+		}
+	}
+	for _, path := range []string{"/persist/bin/ls", "/systemx/vfs", "/home/demo/args", "/tmp/system/vfs"} {
 		if _, _, status := LocateImage(image, []byte(path)); status != ImageOutsideSystem {
 			t.Fatalf("%q = %d", path, status)
 		}
 	}
-	for _, path := range []string{"/system/bin/missing", "/system/bin"} {
+	for _, path := range []string{"/system/bin/missing", "/system/bin", "/system"} {
 		if _, _, status := LocateImage(image, []byte(path)); status != ImageNotFound {
 			t.Fatalf("%q = %d", path, status)
 		}
@@ -68,5 +73,13 @@ func TestLocateImageRefusesPathsOutsideItsPolicy(t *testing.T) {
 	image[148] ^= 1
 	if _, _, status := LocateImage(image, []byte("/system/vfs")); status != ImageNotFound {
 		t.Fatal("corrupt image resolved")
+	}
+}
+
+func TestInSystem(t *testing.T) {
+	for path, want := range map[string]bool{"/system": true, "/system/vfs": true, "/system/bin/ls": true, "/systemx": false, "/persist/system": false, "/": false} {
+		if got := InSystem([]byte(path)); got != want {
+			t.Fatalf("%q = %v", path, got)
+		}
 	}
 }

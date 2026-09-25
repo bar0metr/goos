@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Amends ADR 0036, ADR 0071, ADR 0077 and ADR 0078.
+Accepted. Amends ADR 0036, ADR 0071, ADR 0077 and ADR 0078. Its data path is
+amended by ADR 0098: file data moves through a shared file cache instead of
+message payloads.
 
 ## Context
 

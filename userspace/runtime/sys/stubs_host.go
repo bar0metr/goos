@@ -86,3 +86,11 @@ func imageMap(device uint64, virtual uint64, address unsafe.Pointer) uint64 { re
 func validationFault(device uint64) uint64 { return unsupported }
 
 func systemPowerOff(device uint64) uint64 { return unsupported }
+
+func executableCreate(loader uint64, size uint64, address unsafe.Pointer) uint64 {
+	return unsupported
+}
+
+func executableWrite(executable uint64, address unsafe.Pointer, size uintptr) uint64 {
+	return unsupported
+}

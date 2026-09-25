@@ -38,7 +38,12 @@ func run(data startup.Data) {
 	utility.Check(truncated, received, target, true)
 	output, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: target})
 	utility.Check(output, received, target, true)
+	// Each exchange allocates from an arena that never frees, so it is rewound
+	// per chunk, as cat does; without it a copy stopped after a few hundred
+	// bytes and left the target truncated.
+	mark := utility.HeapMark()
 	for {
+		utility.HeapReset(mark)
 		chunk, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationRead, Handle: input.Handle, Size: vfs.MaxProtocolData})
 		utility.Check(chunk, ok, source, false)
 		if len(chunk.Data) == 0 {

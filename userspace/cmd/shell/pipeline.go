@@ -53,6 +53,20 @@ func readWholeFile(path []byte, target []byte) (int, bool) {
 	return size, complete
 }
 
+// commandPath turns a command word into the path PID 1 launches. A bare name
+// is looked up in /system/bin; a word with a slash is a program path, absolute
+// or relative to the working directory, which PID 1 reads from the filesystem
+// when it lies outside /system (ADR 0097).
+func commandPath(word []byte, target *[execproto.MaxPath]byte) ([]byte, bool) {
+	for _, value := range word {
+		if value == '/' {
+			path, ok := shellcmd.ResolvePath(cwd[:cwdSize], word, target)
+			return path, ok && len(path) > 1
+		}
+	}
+	return execproto.ResolveExecutable(word, target)
+}
+
 // writeSink builds the isolated `write` stage that drains its input stream into
 // one VFS path. It reports its own diagnostics and returns false on failure.
 func writeSink(encodedTarget []byte, appendMode bool, index int, environment []startup.Variable) (execproto.Stage, bool) {
@@ -170,10 +184,10 @@ func executeExternal(line []byte, background bool) {
 			write("exec: invalid arguments\n")
 			return
 		}
-		executable, ok := execproto.ResolveExecutable(invocation.Arguments[0], &executableBuffers[requestIndex])
+		executable, ok := commandPath(invocation.Arguments[0], &executableBuffers[requestIndex])
 		if !ok {
 			writeBytes(invocation.Arguments[0])
-			write(": not a command name; commands are run by name from /system/bin\n")
+			write(": not a command name or a program path\n")
 			return
 		}
 		argumentData, environmentData, ok := startup.EncodeVectors(invocation.Arguments[:invocation.Count], environment, &vectorWires[requestIndex])
@@ -270,7 +284,13 @@ func writeLaunchFailure(slot int, reply execproto.Reply) {
 	status := supervisor.LaunchStatus(reply.LaunchStatus)
 	var name []byte
 	if request, ok := execproto.DecodeRequest(execSlot(slot)[:jobs[slot].requestSize]); ok && reply.Stage < request.Count {
-		name, _ = execproto.CommandFromSystemPath(request.Stages[reply.Stage].Path)
+		// A command is named as it was typed; a program path in full.
+		path := request.Stages[reply.Stage].Path
+		if command, searched := execproto.CommandFromSystemPath(path); searched {
+			name = command
+		} else {
+			name = path
+		}
 	}
 	if len(name) != 0 && status.NamesExecutable() {
 		writeBytes(name)

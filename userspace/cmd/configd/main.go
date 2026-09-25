@@ -148,6 +148,19 @@ func addSession() {
 	if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMsg) {
 		return
 	}
+	// A restarted VFS takes the old filesystem session with it; PID 1 hands a
+	// new one over this channel. A setting changed while the VFS was down is
+	// written out now rather than at the next change (ADR 0099).
+	if files, renewed := vfs.DecodeSessionNotice(&requestMsg); renewed {
+		sys.HandleClose(vfsHandle)
+		vfsHandle = files
+		syslog.Info("filesystem session renewed")
+		mark("CONFIG_SESSION_RENEWED_OK\n")
+		if persistFailed {
+			persist()
+		}
+		return
+	}
 	endpoint, scope, rights, valid := config.DecodeAddSession(requestMsg)
 	status := config.StatusOK
 	if !valid {

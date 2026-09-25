@@ -49,6 +49,11 @@ const (
 	OperationValidationFault
 	// OperationSystemPowerOff switches the machine off (ADR 0092).
 	OperationSystemPowerOff
+	// OperationExecutableCreate and OperationExecutableWrite create and fill
+	// an executable object, which a launch can name in place of an extent of
+	// the system image (ADR 0097).
+	OperationExecutableCreate
+	OperationExecutableWrite
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -122,6 +127,8 @@ type Handler interface {
 	ConsoleInterrupt(device uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
+	ExecutableCreate(device uint64, size uint64, address uint64) Status
+	ExecutableWrite(executable uint64, address uint64, length uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -226,6 +233,13 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:
 		return Result{Status: handler.SystemPowerOff(request.Arg0)}
+	case OperationExecutableCreate:
+		return Result{Status: handler.ExecutableCreate(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationExecutableWrite:
+		if request.Arg2 == 0 || request.Arg2 > MaxExecutableWrite {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ExecutableWrite(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationMemoryMap:
 		if request.Arg2&^MemoryMapWritable != 0 {
 			return Result{Status: StatusInvalidArgument}
@@ -302,6 +316,9 @@ const StreamDescriptorSize = uint64(24)
 
 // MemoryMapWritable requests a writable shared-memory mapping.
 const MemoryMapWritable = uint64(1)
+
+// MaxExecutableWrite bounds the bytes one ExecutableWrite appends.
+const MaxExecutableWrite = uint64(4096)
 
 // ImageDescriptorSize is the fixed length of the record ImageMap writes back:
 // the virtual address the image was mapped at and its length in bytes.

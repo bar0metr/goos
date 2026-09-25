@@ -177,7 +177,7 @@ caller:
 Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
 24 channels with 16-message queues, 64 streams with 4 KiB rings, 64 waiters
 per wait set, 64 log records, 4 registered shared-memory objects of at most
-16 pages, and a shared image cache of 128 segments and 1024 frames. On top of
+32 pages, and a shared image cache of 128 segments and 1024 frames. On top of
 the tables, each process is charged for the channels, streams, tasks, and
 pages it causes to exist, up to its quota (ADR 0072). Exhaustion returns
 `ResourceExhausted` or `PermissionDenied`.

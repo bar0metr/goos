@@ -7,6 +7,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	syslog "goos/userspace/log"
@@ -170,6 +171,10 @@ func userspaceMain() {
 	if !found {
 		fatal("VFS_IMAGE_MISSING\n")
 	}
+	cacheHandle, found := startupData.Handle("cache")
+	if !found {
+		fatal("VFS_CACHE_MISSING\n")
+	}
 	sessions[0] = uint64(initialSessionHandle)
 	liveSessions = 1
 	if !service.Init() {
@@ -177,6 +182,14 @@ func userspaceMain() {
 	}
 	if !mountSystemImage(imageHandle) {
 		fatal("VFS_IMAGE_MOUNT_FAILED\n")
+	}
+	// File data on the persistent volume moves through the cache this
+	// process shares with the filesystem service (ADR 0098). Without it that
+	// volume can be listed but not read, and the rest of the namespace works.
+	if cache, status := sys.MemoryMap(cacheHandle, vm.UserSharedAddress, fsproto.CacheSize, true); status != kcall.StatusOK || !service.AttachCache(cache) {
+		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
+	} else {
+		mark("FILE_CACHE_OK\n")
 	}
 	// The persistent volume is not mounted here: it is served by the FAT32
 	// service, which PID 1 starts after this one and hands over through the
@@ -204,8 +217,7 @@ func userspaceMain() {
 			if sys.DiagnosticsTrace(consoleHandle, sessions[:]) == kcall.StatusOK {
 				writeSessions()
 			}
-			for {
-			}
+			sys.Exit(exitFailed)
 		}
 		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
 		if status != kcall.StatusOK {
@@ -233,6 +245,9 @@ func userspaceMain() {
 			session := sessions[index]
 			message, receiveStatus := receiveNow(session)
 			if receiveStatus == ipc.StatusPeerDied {
+				// The files the session left open close with it, before its
+				// slot, and with it its owner number, can be reused.
+				service.CloseSession(sessionOwner(index))
 				sys.HandleClose(handle.ID(session))
 				sessions[index] = 0
 				liveSessions--
@@ -241,7 +256,7 @@ func userspaceMain() {
 			if receiveStatus != ipc.StatusOK {
 				fatal("VFS_RECEIVE_FAILED\n")
 			}
-			serve(session, message)
+			serve(sessionOwner(index), session, message)
 		}
 	}
 }
@@ -294,7 +309,11 @@ func pollControl() bool {
 	return true
 }
 
-func serve(session uint64, message ipc.Message) {
+// sessionOwner names the session in slot index as the owner of the files it
+// opens.
+func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
+
+func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	request, ok := vfs.DecodeRequest(message)
 	if !ok {
 		// Answer unusable requests: a silent drop strands the caller, which is
@@ -307,7 +326,7 @@ func serve(session uint64, message ipc.Message) {
 		}
 		return
 	}
-	reply, ok := vfs.EncodeReply(service.Dispatch(request), message.Correlation)
+	reply, ok := vfs.EncodeReply(service.Dispatch(owner, request), message.Correlation)
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
@@ -347,6 +366,14 @@ func mark(message string) {
 func write(message string) {
 	sys.ConsoleWriteString(consoleHandle, message)
 }
+
+// exitFailed is the code the service exits with when it cannot go on. It is
+// not zero, so the supervisor restarts the service (ADR 0099).
+const exitFailed = 1
+
+// fatal reports why the service stops and exits. The VFS used to spin here,
+// which left every client waiting on a service that would never answer; now
+// PID 1 sees the exit and starts a new one.
 func fatal(message string) {
 	if !syslog.Error(message[:len(message)-1]) {
 		write(message)
@@ -354,8 +381,7 @@ func fatal(message string) {
 	if sys.Diagnostics(consoleHandle) == 0 {
 		writeSessions()
 	}
-	for {
-	}
+	sys.Exit(exitFailed)
 }
 
 func writeSessions() {

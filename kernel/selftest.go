@@ -504,8 +504,8 @@ func checkSharedImagePages(image []byte) {
 	if !firstOK || !secondOK {
 		panicSerial("shared image address spaces failed")
 	}
-	_, firstLoaded := loader.LoadImage(&pageAllocator, first, image, &selfTestShared, 1)
-	_, secondLoaded := loader.LoadImage(&pageAllocator, second, image, &selfTestShared, 1)
+	_, firstLoaded := loader.LoadImage(&pageAllocator, first, loader.Contiguous(image), &selfTestShared, 1)
+	_, secondLoaded := loader.LoadImage(&pageAllocator, second, loader.Contiguous(image), &selfTestShared, 1)
 	firstCode, firstCodeOK := vm.ResolveUser(first, vm.UserCodeAddress)
 	secondCode, secondCodeOK := vm.ResolveUser(second, vm.UserCodeAddress)
 	firstStack, _ := vm.ResolveUser(first, vm.UserStackAddress)

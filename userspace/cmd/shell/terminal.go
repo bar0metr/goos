@@ -77,6 +77,18 @@ func installTerminal(session handle.ID) {
 	mark("SHELL_TERMINAL_REPLACED_OK\n")
 }
 
+// installFilesystem takes the filesystem session PID 1 hands over after the
+// VFS was restarted: the old one died with it (ADR 0099). The working
+// directory is kept; a later command reports it missing if it was in /tmp,
+// which a restarted VFS starts empty.
+func installFilesystem(session handle.ID) {
+	if vfsHandle != 0 {
+		sys.HandleClose(vfsHandle)
+	}
+	vfsHandle = session
+	mark("SHELL_VFS_RENEWED_OK\n")
+}
+
 func sendTerminal(message ipc.Message) bool {
 	// What the shell printed goes out before it asks for the next line.
 	flushOutput()
@@ -178,6 +190,19 @@ func checkOutputIsWriteOnly() {
 	if _, status := sys.StreamRead(outputHandle, probe[:]); status == kcall.StatusPermissionDenied {
 		mark("TERMINAL_STREAM_READ_DENIED_OK\n")
 	}
+}
+
+// checkNoLoaderAuthority proves, in the validation build, that the shell
+// cannot create an executable object: that is PID 1's capability alone, and
+// no handle the shell holds, nor the slot where PID 1 keeps it, is taken for
+// it (ADR 0097).
+func checkNoLoaderAuthority() {
+	for _, candidate := range []handle.ID{0, logHandle, outputHandle, handle.ID(0x0000000100000017)} {
+		if _, status := sys.ExecutableCreate(candidate, 1); status != kcall.StatusPermissionDenied {
+			return
+		}
+	}
+	mark("EXECUTABLE_CREATE_DENIED_OK\n")
 }
 
 func writeUint(value uint64) {

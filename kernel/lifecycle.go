@@ -12,6 +12,7 @@ import (
 	"goos/kernel/arch/amd64"
 	"goos/kernel/device"
 	"goos/kernel/diag"
+	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -156,6 +157,11 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 			amd64.PortWrite(virtioBlockPort+18, 1, 0)
 			amd64.QuiesceIRQ11()
 		}
+	}
+	if typeID == handle.TypeMemory && executable.IsObject(cap.Object()) {
+		// The rest of the page reservation is returned with the process.
+		destroyExecutable(nil, cap.Object())
+		return
 	}
 	if typeID == handle.TypeStream {
 		// One reference goes with each handle. The end closes only when the

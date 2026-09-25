@@ -48,7 +48,10 @@ func startServices(ticks uint64) {
 			// PID 1 keeps its own copy, with Execute, to launch from the
 			// image; the filesystem service may only read it (ADR 0093).
 			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read},
-		}, Restart: supervisor.RestartNever}) != supervisor.StatusOK ||
+			{Name: "cache", Handle: fileCacheHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
+			// A VFS that fails is started again, and its clients are handed
+			// new sessions (ADR 0099).
+		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
@@ -73,11 +76,17 @@ func startServices(ticks uint64) {
 		// The FAT32 service parses the untrusted volume in a process of its
 		// own, between the VFS and the block service (ADR 0096). It holds a
 		// channel to each and nothing else: no namespace, no device.
-		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/system/fat32", Dependencies: []string{"block"},
+		// It depends on the VFS as well as the block service: it serves
+		// nothing without one, and after a VFS restart it has to start again
+		// once the new VFS runs.
+		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/system/fat32", Dependencies: []string{"block", "vfs"},
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "vfs", Handle: handle.ID(filesystemPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 				{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				// File data moves through the cache it shares with the VFS,
+				// not through messages (ADR 0098).
+				{Name: "cache", Handle: fileCacheHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
 			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
@@ -188,6 +197,14 @@ func startLogService(ticks uint64) {
 	if configSession, ok := openConfigSession("system.log.", configproto.Read); ok {
 		capabilities = append(capabilities, supervisor.Capability{Name: "config", Handle: configSession,
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
+	// The channel a new filesystem session arrives on after a VFS restart,
+	// so the service keeps its place in the log rather than restarting.
+	var control [2]uint64
+	if createChannel(&control) {
+		logControl = handle.ID(control[0])
+		capabilities = append(capabilities, supervisor.Capability{Name: "control", Handle: handle.ID(control[1]),
+			Type: handle.TypeChannel, Rights: capability.Read | capability.Wait, Consume: true})
 	}
 	if manager.Register(supervisor.Definition{Name: "log", Executable: "/system/log", Dependencies: []string{"vfs"},
 		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {

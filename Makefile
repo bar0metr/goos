@@ -287,7 +287,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -384,6 +384,9 @@ docs:
 	@test -f docs/adr/0094-debug-console-capability-policy.md
 	@test -f docs/adr/0095-userspace-runtime-and-unsafe-boundary.md
 	@test -f docs/adr/0096-separate-fat32-filesystem-service.md
+	@test -f docs/adr/0097-executable-objects.md
+	@test -f docs/adr/0098-file-cache-between-vfs-and-filesystem-service.md
+	@test -f docs/adr/0099-restartable-vfs.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

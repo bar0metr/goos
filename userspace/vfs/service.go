@@ -80,6 +80,13 @@ func (service *Service) AttachFilesystem(transport Transport) bool {
 	return true
 }
 
+// AttachCache gives the persistent backend the file cache it shares with the
+// filesystem service (ADR 0098). Without it the volume can be listed but no
+// file on it read or written.
+func (service *Service) AttachCache(memory []byte) bool {
+	return service.persistent.AttachCache(memory)
+}
+
 // DetachFilesystem forgets a filesystem service that has gone. Its mounts stay
 // in the namespace and answer with I/O errors until a restarted service is
 // attached.
@@ -137,25 +144,30 @@ func (service *Service) Init() bool {
 	return service.namespace.Mount([]byte("/"), &service.fs, root) == vfs.StatusOK
 }
 
-func (service *Service) Dispatch(request vfs.Request) vfs.Reply {
+// CloseSession closes the files a session left open when it went.
+func (service *Service) CloseSession(owner vfs.Owner) int { return service.namespace.CloseOwner(owner) }
+
+// Dispatch serves one request from the session owner. File handles are the
+// session's own: another session's handle is not found.
+func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
 	switch request.Operation {
 	case vfs.OperationOpen:
-		reply.Handle, reply.Status = service.namespace.Open(request.Path, request.Rights)
+		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights)
 	case vfs.OperationClose:
-		reply.Status = service.namespace.Close(request.Handle)
+		reply.Status = service.namespace.Close(owner, request.Handle)
 	case vfs.OperationRead:
 		size := int(request.Size)
 		if size > len(service.readData) {
 			size = len(service.readData)
 		}
-		count, status := service.namespace.Read(request.Handle, service.readData[:size])
+		count, status := service.namespace.Read(owner, request.Handle, service.readData[:size])
 		reply.Status, reply.Data, reply.Size = status, service.readData[:count], uint64(count)
 	case vfs.OperationWrite:
-		count, status := service.namespace.Write(request.Handle, request.Data)
+		count, status := service.namespace.Write(owner, request.Handle, request.Data)
 		reply.Status, reply.Size = status, uint64(count)
 	case vfs.OperationSeek:
-		reply.Status = service.namespace.Seek(request.Handle, request.Offset)
+		reply.Status = service.namespace.Seek(owner, request.Handle, request.Offset)
 	case vfs.OperationCreate, vfs.OperationMkdir:
 		reply.Status = service.namespace.Create(request.Path, request.Operation == vfs.OperationMkdir)
 	case vfs.OperationReadDir:

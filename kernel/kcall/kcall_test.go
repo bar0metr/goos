@@ -142,6 +142,16 @@ func (handler *testHandler) SystemPowerOff(device uint64) Status {
 	return StatusPermissionDenied
 }
 
+func (handler *testHandler) ExecutableCreate(device uint64, size uint64, address uint64) Status {
+	handler.channel, handler.length, handler.address = device, size, address
+	return StatusOK
+}
+
+func (handler *testHandler) ExecutableWrite(executable uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = executable, address, length
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -407,8 +417,31 @@ func TestDispatchSystemPowerOff(t *testing.T) {
 	if result := Dispatch(Request{Operation: OperationSystemPowerOff, Arg0: 18}, handler); result.Status != StatusPermissionDenied || handler.channel != 18 || result.Action != ActionReturn {
 		t.Fatalf("power off %+v %+v", result, handler)
 	}
-	// SystemPowerOff is the last operation, so anything past it is unsupported.
-	if result := Dispatch(Request{Operation: OperationSystemPowerOff + 1}, handler); result.Status != StatusUnsupported {
+}
+
+func TestDispatchExecutableCalls(t *testing.T) {
+	if OperationExecutableCreate != 37 || OperationExecutableWrite != 38 {
+		t.Fatalf("operations %d %d", OperationExecutableCreate, OperationExecutableWrite)
+	}
+	// ExecutableWrite is the last operation, so anything past it is unsupported.
+	if result := Dispatch(Request{Operation: OperationExecutableWrite + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
+	}
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationExecutableCreate, Arg0: 0x100000017, Arg1: 4096, Arg2: 0x2000}, handler)
+	if result.Status != StatusOK || handler.channel != 0x100000017 || handler.length != 4096 || handler.address != 0x2000 {
+		t.Fatalf("create: %#v, handler: %#v", result, handler)
+	}
+	handler = &testHandler{}
+	result = Dispatch(Request{Operation: OperationExecutableWrite, Arg0: 5, Arg1: 0x3000, Arg2: MaxExecutableWrite}, handler)
+	if result.Status != StatusOK || handler.channel != 5 || handler.address != 0x3000 || handler.length != MaxExecutableWrite {
+		t.Fatalf("write: %#v, handler: %#v", result, handler)
+	}
+	for _, length := range []uint64{0, MaxExecutableWrite + 1} {
+		handler = &testHandler{}
+		result = Dispatch(Request{Operation: OperationExecutableWrite, Arg0: 5, Arg1: 0x3000, Arg2: length}, handler)
+		if result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
+			t.Fatalf("write of %d reached the handler: %#v", length, result)
+		}
 	}
 }

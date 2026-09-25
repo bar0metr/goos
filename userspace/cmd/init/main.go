@@ -22,7 +22,11 @@ const lifecycleHandle = uint64(0x0000000100000001)
 const serviceDeviceHandle = handle.ID(0x0000000100000002)
 const vfsChannelHandle = handle.ID(0x0000000100000003)
 const vfsServerHandle = handle.ID(0x0000000100000004)
-const vfsControlHandle = uint64(0x0000000100000005)
+
+// vfsControlHandle is PID 1's end of the VFS control endpoint: the boot
+// channel at first, a new one after every VFS restart (ADR 0099).
+var vfsControlHandle = uint64(0x0000000100000005)
+
 const vfsControlServerHandle = handle.ID(0x0000000100000006)
 
 // execServerBoot is the server end of the exec channel created at boot. A
@@ -46,6 +50,14 @@ const systemImageHandle = handle.ID(0x0000000100000015)
 // logDeviceHandle authorizes reading the kernel log ring and nothing else, so
 // the log service and the shell can read the log without the console's input.
 const logDeviceHandle = handle.ID(0x0000000100000016)
+
+// loaderHandle authorizes creating executable objects, which PID 1 fills with
+// programs it reads from a filesystem (ADR 0097).
+const loaderHandle = handle.ID(0x0000000100000017)
+
+// fileCacheHandle is the file cache, the memory the VFS and the filesystem
+// service share for file data (ADR 0098). Each gets a copy at every launch.
+const fileCacheHandle = handle.ID(0x0000000100000018)
 
 // configControlHandle is the configuration service's control endpoint. PID 1
 // holds the only client side of it, so it is the only process that can create a
@@ -124,7 +136,13 @@ func userspaceMain() {
 		fatal("INIT_IMAGE_MAP_FAILED\n")
 	}
 	if validation.Enabled {
-		if !probeLaunchAuthority() {
+		// Each probed launch allocates its request and reply, and nothing the
+		// probe keeps points into the arena, so what it used is given back
+		// rather than taken from every later request (ADR 0097).
+		probeBase := arena.Current()
+		probed := probeLaunchAuthority()
+		arena.Reset(probeBase)
+		if !probed {
 			fatal("LAUNCH_AUTHORITY_FAILED\n")
 		}
 		mark("LAUNCH_AUTHORITY_OK\n")

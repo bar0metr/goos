@@ -9,6 +9,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/vfs"
 	execproto "goos/userspace/exec"
 	"goos/userspace/runtime/sys"
 	terminal "goos/userspace/tty"
@@ -125,6 +126,10 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			installTerminal(session)
 			continue
 		}
+		if session, ok := vfs.DecodeSessionNotice(&message); ok {
+			installFilesystem(session)
+			continue
+		}
 		if _, started, job, ok := execproto.DecodeStarted(message); ok {
 			if job == correlation && input == 0 {
 				input = started
@@ -174,6 +179,10 @@ func pollReplies() bool {
 		if session, ok := terminal.DecodeSessionNotice(&message); ok {
 			installTerminal(session)
 			replaced = true
+			continue
+		}
+		if session, ok := vfs.DecodeSessionNotice(&message); ok {
+			installFilesystem(session)
 			continue
 		}
 		reportJob(message)

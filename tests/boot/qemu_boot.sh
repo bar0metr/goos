@@ -293,6 +293,22 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'cat /persist/home/demo/message.txt\n'
 	sleep 1
+	# A program on the persistent volume runs from there: PID 1 reads it into
+	# an executable object and the kernel launches the object (ADR 0097).
+	printf 'cp /system/bin/args /home/demo/args\n'
+	sleep 3
+	printf '/home/demo/args file-exec "from the volume"\n'
+	sleep 3
+	printf 'cd /home/demo; ./args relative-file-exec; cd /\n'
+	sleep 3
+	printf '/home/demo/args piped-file-exec | readline\n'
+	sleep 3
+	printf '/home/demo/message.txt\n'
+	sleep 2
+	printf '/home/demo/missing\n'
+	sleep 2
+	printf '/system/vfs\n'
+	sleep 1
 	printf 'cd /system\n'
 	sleep 1
 	printf 'ls\n'
@@ -453,6 +469,18 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
 	sleep 2
+	# The VFS restarts too (ADR 0099): its clients are handed new sessions,
+	# the FAT32 service restarts behind it, and the shell keeps its jobs.
+	printf 'sleep 25 &\n'
+	sleep 1
+	printf 'fault vfs\n'
+	sleep 5
+	printf 'ls /tmp; echo after-vfs-fault\n'
+	sleep 1
+	printf 'cat /home/demo/message.txt; echo after-vfs-restart\n'
+	sleep 2
+	printf 'jobs\n'
+	sleep 1
 	printf 'cd /system\n'
 	sleep 1
 	printf 'uptime\n'
@@ -488,7 +516,8 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-wait_for_marker boot '^arena-stress-complete$' 180 "$log"
+# The scripted session sleeps about 210 seconds between its commands.
+wait_for_marker boot '^arena-stress-complete$' 260 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -562,7 +591,10 @@ require_marker storage.fat32-reattached FAT32_REATTACHED_OK "$log" 'fault fat32'
 require_marker storage.fat32-restarted FAT32_RESTARTED_OK "$log" 'fault fat32'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
-require_count storage.vfs-not-restarted '^VFS_SERVICE_OK$' 1 "$log" 'fault fat32'
+# File data moves between the VFS and the FAT32 service through the file cache
+# they share, not through messages (ADR 0098).
+require_marker storage.file-cache FILE_CACHE_OK "$log"
+count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'goos> fault vfs'
 pass_group storage
 
 for marker in RAMFS_PROTOCOL_OK RAMFS_METADATA_OK RAMFS_IO_OK RAMFS_BOUNDS_OK VFS_NAMESPACE_OK VFS_MOUNT_OK VFS_PATH_OK VFS_CACHE_OK VFS_PROTOCOL_OK VFS_SERVICE_OK FAT32_MOUNT_OK; do
@@ -689,6 +721,8 @@ checks=$((checks + 1))
 ( sleep 4
 	printf 'cat /persist/state.txt\n'
 	sleep 2
+	printf '/home/demo/args after-reboot\n'
+	sleep 3
 	printf 'cat /state/system.log.1\n'
 	sleep 2
 	printf 'ls /state\n'
@@ -713,8 +747,44 @@ forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on r
 # record out of it proves the log survived the reset.
 require_window persistence.reboot-log '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
 # The value set in the previous session is restored over the schema default.
+require_regex persistence.reboot-file-exec '^after-reboot$' 'a program on the volume run after the reset' "$reboot_log" 'goos> /home/demo/args after-reboot'
 require_window persistence.reboot-config '^boot-test$' 'a setting restored from the previous session' "$reboot_log" 'goos> config get user.name' 'NO_SUCH_LINE'
 pass_group persistence
+
+# A VFS that dies is restarted (ADR 0099). Its clients are handed new
+# sessions instead of being restarted: the shell keeps its jobs, the config
+# and log services their state. The FAT32 service restarts behind it and is
+# attached to the new VFS, so the volume is served again; /tmp, which lived in
+# the old VFS, starts empty.
+require_marker vfs-restart.injected VFS_FAULT_INJECTED "$log" 'fault vfs'
+require_marker vfs-restart.restarted VFS_RESTARTED_OK "$log" 'fault vfs'
+require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fault vfs'
+require_marker vfs-restart.shell-session SHELL_VFS_RENEWED_OK "$log" 'fault vfs'
+require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
+require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
+require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
+require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'goos> ls /tmp; echo after-vfs-fault'
+forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
+require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
+require_regex vfs-restart.jobs-kept '^\[[0-9]\] running  sleep 25$' 'the shell kept its job across the restart' "$log" 'fault vfs'
+count_window vfs-restart.shell-kept '^SHELL_RESTARTED_OK$' 0 "$log" 'goos> fault vfs' 'arena-stress-complete'
+pass_group vfs-restart
+
+# Programs outside /system run from executable objects PID 1 fills (ADR 0097).
+# The kernel proves the object's bounds and sealing at boot, the shell proves
+# it cannot create one, and PID 1 proves partial, unsealed, closed and
+# non-program objects are refused.
+require_marker file-exec.kernel-object EXECUTABLE_OBJECT_OK "$log"
+require_marker file-exec.shell-denied EXECUTABLE_CREATE_DENIED_OK "$log"
+require_marker file-exec.launched FILE_EXEC_OK "$log" '/home/demo/args'
+require_window file-exec.absolute '^file-exec from the volume$' 'arguments printed by the copy on /home' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
+require_window file-exec.environment '^PATH=/system/bin$' 'the shell environment given to the copy' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
+require_regex file-exec.relative '^relative-file-exec$' 'a program path relative to the working directory' "$log" './args relative-file-exec'
+require_regex file-exec.pipeline '^piped-file-exec$' 'a program from the volume as a pipeline stage' "$log" 'piped-file-exec | readline'
+require_regex file-exec.not-a-program '^/home/demo/message.txt: not a valid executable$' 'a data file refused by the validator' "$log" 'goos> /home/demo/message.txt'
+require_regex file-exec.missing '^/home/demo/missing: command not found$' 'a missing program named by its path' "$log" 'goos> /home/demo/missing'
+require_regex file-exec.service-refused '^/system/vfs: permission denied$' 'a service of the image is not a command' "$log" 'goos> /system/vfs'
+pass_group file-exec
 
 # The persistent log is a service, not a kernel feature: it drains the bounded
 # kernel ring onto the volume so a session's records outlive its reset.
