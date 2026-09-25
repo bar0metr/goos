@@ -155,6 +155,8 @@ func memoryKind(kind deviceuefi.EFI_MEMORY_TYPE) boot.MemoryKind {
 		return boot.MemoryReclaimable
 	case deviceuefi.EfiRuntimeServicesCode, deviceuefi.EfiRuntimeServicesData:
 		return boot.MemoryRuntime
+	case deviceuefi.EfiLoaderCode, deviceuefi.EfiLoaderData:
+		return boot.MemoryLoader
 	default:
 		return boot.MemoryReserved
 	}

@@ -16,6 +16,10 @@ const (
 	MemoryUsable
 	MemoryReclaimable
 	MemoryRuntime
+	// MemoryLoader is memory the firmware allocated for the loaded kernel:
+	// its image, the TinyGo heap and stack, and the boot archive. It stays
+	// reserved, and the kernel keeps reaching it at its physical address.
+	MemoryLoader
 )
 
 // MemoryRegion describes whole physical pages using a half-open interval.

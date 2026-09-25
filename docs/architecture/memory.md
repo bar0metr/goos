@@ -6,22 +6,40 @@ map, normalizes firmware types into architecture-neutral regions, and calls
 allocating between map capture and exit. After success, firmware boot services
 must never be called again.
 
-The first physical allocator uses a fixed bitmap and manages physical addresses
-below 1 GiB. This covers the supported 512 MiB QEMU configuration without
-requiring dynamic metadata during allocator bootstrap. Page zero through the
-first MiB stays reserved. Only UEFI conventional memory is initially free;
-loader, runtime, MMIO, ACPI, and firmware regions stay reserved. Boot-services
-memory is tagged reclaimable but remains reserved until later code proves no
-firmware-owned structures reference it.
+The physical allocator manages every usable range below 512 GiB as a bounded
+array of at most 64 segments, each a contiguous run of usable pages with its
+own bitmap (ADR 0103). Page zero through the first MiB stays reserved. Only
+UEFI conventional memory is free; loader, runtime, MMIO, ACPI, and firmware
+regions stay outside every segment. Boot-services memory is tagged reclaimable
+but remains reserved until later code proves no firmware-owned structures
+reference it. Segments are built in address order, whatever order the firmware
+lists them in, and none straddles 1 GiB. Usable memory above 512 GiB or in
+ranges beyond the 64th is left unmanaged; the boot banner reports it.
 
-Allocation and release operate on 4 KiB pages. Unaligned, unmanaged, low-memory,
-and double-free requests are rejected. The boot path allocates and releases one
-page as a live self-test before emitting `PMM_OK`. The search starts after the
-last allocation, falls back to the lowest freed page, skips bitmap words that
-have no free page, and finds the first free bit with a trailing-zero count, so a
-long used run costs one test per 64 pages (ADR 0057). Allocation, release, and
-every other change to allocator state happen inside the kernel exclusion domain
-of ADR 0053.
+The bitmaps, one bit per managed page, are carved at boot from the top of low
+memory and stay marked used. The allocator reaches them through the firmware's
+identity map while it initializes and through the kernel's afterwards.
+
+Allocation and release operate on 4 KiB pages. There are two classes.
+`Allocate` takes from the highest segment that has a free page, so process
+memory comes from the top of RAM; such a page may lie above 1 GiB and is
+reached only through the direct map. `AllocateLow` and `AllocateContiguous`
+return pages below 1 GiB, whose physical address is also a kernel pointer:
+page tables, kernel stacks with their guard pages, and the DMA window use
+them. A contiguous run never crosses a segment boundary. Unaligned, unmanaged,
+reserved, bitmap, and double-free requests are rejected. The boot path
+allocates and releases one page as a live self-test before emitting `PMM_OK`;
+the validation build also exercises a page above 1 GiB, when there is one,
+through the direct map and a process mapping (`PMM_HIGH_OK`). Within a
+segment, the search starts after the last allocation, falls back to the
+lowest freed page, skips bitmap words that have no free page, and finds the
+first free bit with a trailing-zero count, so a long used run costs one test
+per 64 pages (ADR 0057). Allocation, release, and every other change to
+allocator state happen inside the kernel exclusion domain of ADR 0053.
+
+The allocator counts the usable pages it manages, its bitmap included, and
+how many are free; `mem` reports both. `make MEMORY=4G run` and
+`make MEMORY=4G test-boot` boot a guest with more RAM; the default is 512 MiB.
 
 ## Virtual-memory bootstrap
 
@@ -29,6 +47,17 @@ The kernel replaces the firmware page tables after `ExitBootServices`. The
 bootstrap map uses four-level x86_64 tables and 4 KiB leaves for the first GiB.
 The first MiB remains unmapped to catch null and low-address accesses. Every
 mapping is supervisor-only.
+
+The direct map places every managed physical page at
+`vm.DirectMapBase + physical` (`0xffff800000000000`, PML4 slot 256) with
+two-MiB RW+NX leaves. Every process root shares the slot, without the user
+bit, and teardown never frees it. The kernel reaches an arbitrary physical
+page through one accessor: pages in `[1 MiB, 1 GiB)` at their physical
+address, managed pages above that through the direct map. On a machine with
+more than about a GiB, the firmware places the loader memory that holds the
+kernel heap above 1 GiB; `vm.MapLoaderMemory` maps it at its physical address,
+supervisor-only, and every process shares those directory entries in its user
+GiB until the user range moves (ADR 0103).
 
 Ordinary identity-mapped pages are writable and non-executable. The loaded PE
 image is validated in memory and its section flags are translated into leaf
@@ -52,8 +81,10 @@ Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
 range, then validate every page crossed by the request. Every page-table level
 and leaf must be present and user-accessible; `CopyOut` additionally requires a
 writable leaf. The validated physical pages are accessed through the kernel
-identity map with quadword string instructions, which also clear page-table
-pages and initialize loaded image pages.
+identity map or the direct map with quadword string instructions, which also
+clear page-table pages and initialize loaded image pages. User leaves are
+placed only under page tables that carry the user bit at every level, so a
+kernel table shared between address spaces never receives one.
 
 ## Shared image pages
 
@@ -103,6 +134,8 @@ decided so far is in the way.
 | --- | --- | --- |
 | Kernel PE image | `0x400000` | TinyGo's `uefi-amd64` target links with `--image-base 0x400000 --no-dynamicbase`; `vm.KernelImageBase` reads the PE header there |
 | Kernel identity map | physical = virtual for `[1 MiB, 1 GiB)` | `vm.BuildIdentity`; kernel stacks, heap arena, page tables, and the boot archive are all reached at their physical address |
+| Loader memory above 1 GiB | physical = virtual, supervisor-only | `vm.MapLoaderMemory`; where OVMF puts the heap arena on machines with more than about a GiB |
+| Direct map | `0xffff800000000000` + physical | `vm.DirectMapBase`; every managed page, shared by all address spaces |
 | User pointer range | `[0x40000000, 0x80000000)` | `vm.ValidateUserRange` (`IdentityMapLimit`..`UserAddressLimit`) |
 | Initial user page tables | one leaf table for `[0x40000000, 0x40200000)` | `vm.CreateUserAddressSpace`; `ExtendUserAddressSpace` can add one more leaf table per two-MiB region in the same GiB |
 | Startup page | `0x40001000` | `vm.UserStartupAddress`; read only through `StartupRead` |

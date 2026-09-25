@@ -7,6 +7,8 @@ set -eu
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?disk path required}
+# MEMORY is the guest RAM, in QEMU -m syntax; the Makefile passes it.
+memory=${MEMORY:-512M}
 repeats=${MICROBENCH_REPEATS:-5}
 command_timeout=${COMMAND_TIMEOUT:-30}
 case $repeats in '' | *[!0-9]* | 0) echo "MICROBENCH_REPEATS must be a positive integer" >&2; exit 2 ;; esac
@@ -77,7 +79,7 @@ stats() {
 	}'
 }
 
-qemu-system-x86_64 -machine q35 -m 512M \
+qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

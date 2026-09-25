@@ -1,6 +1,6 @@
 # ADR 0002: Fixed bitmap physical allocator
 
-Status: Accepted
+Status: Accepted; the one-GiB limit is replaced by ADR 0103
 
 ## Context
 

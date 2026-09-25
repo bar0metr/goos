@@ -101,7 +101,7 @@ The native kernel and the first isolated services are implemented:
 - UEFI memory-map capture;
 - a correct `ExitBootServices` handoff;
 - normalization of physical memory types;
-- a bitmap page allocator for the first GiB;
+- a segmented bitmap page allocator for all usable RAM, with a kernel direct map;
 - reservation of low memory and firmware-owned regions;
 - kernel-owned four-level x86_64 page tables;
 - enforced NX, supervisor write protection, and W^X mappings;
@@ -293,7 +293,7 @@ A successful boot of a normal build produces:
 GoOS 0.1.2
 
 CPU: x86_64
-Memory: 368 MiB usable
+Memory: 366 MiB managed
 Timer: 100 Hz
 Security: capabilities, NX, W^X
 Scheduler: preemptive round-robin

@@ -22,7 +22,7 @@ Current kernel users:
 | Package | Use |
 | --- | --- |
 | `kernel/boot/uefi` | UEFI protocol calls, memory-map descriptors, initramfs slice |
-| `kernel/mm/vm` | page-table walks, identity-mapped physical access, kernel image header |
+| `kernel/mm/vm` | page-table walks, physical access through the identity and direct maps, the page allocator's bitmap view, kernel image header |
 | `kernel/arch/amd64` | task context and kernel stacks, TSS descriptor |
 
 All other kernel packages (`handle`, `ipc`, `stream`, `process`, `loader`,
@@ -64,9 +64,10 @@ existing site follows this yet: the UEFI protocol calls in
 - Kernel PE sections map to leaves by flags: executable sections read-only,
   writable sections NX. A section requesting write and execute is rejected.
 - Identity-mapped memory outside the image is writable and NX. The first MiB
-  is unmapped.
+  is unmapped. The direct map of managed memory is supervisor-only, writable,
+  and NX (ADR 0103).
 - User leaves reject W+X at map time. The native loader rejects writable
-  executable segments and fills pages through the kernel identity map before
+  executable segments and fills pages through the kernel's physical view before
   installing the final user mappings (docs/kernel/native-images.md).
 - Shared-memory and DMA mappings are always NX.
 - `MemoryMap` installs shared pages only inside the shared window
@@ -123,7 +124,8 @@ The kernel never dereferences a user virtual address. Native calls use
 - the range must lie within `[1 GiB, 2 GiB)` and must not wrap;
 - every page crossed must be present and user-accessible at all four levels;
 - `CopyOut` additionally requires a writable leaf;
-- data moves through the kernel identity map after validation.
+- data moves through the kernel identity map or direct map after validation;
+- a user leaf is placed only under tables with the user bit at every level.
 
 Calls that both consume object state and write results validate the output
 buffer first. `StreamRead`, for example, checks `CanCopyOut` before removing
