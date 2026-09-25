@@ -8,10 +8,12 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/pages"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
@@ -142,6 +144,29 @@ func mountSystemImage(imageHandle handle.ID) bool {
 	return status == kcall.StatusOK && service.MountSystemImage(image)
 }
 
+// The volatile root's bounds. Its pages count against this process's page
+// quota, which is what bounds /tmp in the end; the page limit keeps a full
+// /tmp from taking the memory the VFS itself needs to serve requests.
+const (
+	ramfsReserve   = uint64(1 << 30)
+	ramfsNodes     = 8192
+	ramfsPageLimit = 4096
+)
+
+// ramfsPages is the memory of the volatile root.
+var ramfsPages pages.Pool
+
+// ramfsStore gives the volatile root its pages from ramfsPages.
+type ramfsStore struct{}
+
+func (ramfsStore) Allocate() (ramfs.PageRef, bool) {
+	ref, ok := ramfsPages.Allocate()
+	return ramfs.PageRef(ref), ok
+}
+func (ramfsStore) Page(ref ramfs.PageRef) *[ramfs.PageSize]byte { return ramfsPages.Page(uint32(ref)) }
+func (ramfsStore) Free(ref ramfs.PageRef)                       { ramfsPages.Free(uint32(ref)) }
+func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.Permanent[ramfs.NodeChunk](&ramfsPages) }
+
 //export userspaceMain
 func userspaceMain() {
 	arena.Init()
@@ -177,6 +202,11 @@ func userspaceMain() {
 	}
 	sessions[0] = uint64(initialSessionHandle)
 	liveSessions = 1
+	// The volatile root keeps its files in pages that outlive the per-request
+	// arena and go back to the kernel when a file shrinks or goes (ADR 0105).
+	if !ramfsPages.Init(ramfsReserve) || !service.ConfigureRAMFS(ramfsStore{}, ramfs.Limits{Nodes: ramfsNodes, Pages: ramfsPageLimit}) {
+		fatal("VFS_RAMFS_UNAVAILABLE\n")
+	}
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}

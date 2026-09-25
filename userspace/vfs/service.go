@@ -133,6 +133,16 @@ func (service *Service) persistentDirectory(root ramfs.NodeID, name string) (ram
 	return node, true
 }
 
+// ConfigureRAMFS sets where the volatile root keeps its pages and how much it
+// may hold (ADR 0105). It must come before Init; without it the root uses the
+// default store and limits.
+func (service *Service) ConfigureRAMFS(store ramfs.Store, limits ramfs.Limits) bool {
+	return service.fs.Configure(store, limits)
+}
+
+// RAMFSUsage reports what the volatile root holds against its limits.
+func (service *Service) RAMFSUsage() ramfs.Usage { return service.fs.Usage() }
+
 // Init builds the volatile root. /system is not created here: it is the mount
 // point of the immutable boot image, and the namespace lists a mount in its
 // parent directory without needing a placeholder to stand in for it.

@@ -82,13 +82,13 @@ func TestRejectsInvalidNamesCyclesAndBounds(t *testing.T) {
 func TestNodeCapacity(t *testing.T) {
 	var fs FileSystem
 	root := fs.Init()
-	for index := 1; index < MaxNodes; index++ {
-		name := []byte{byte('a' + index/10), byte('0' + index%10)}
+	for index := 1; index < DefaultNodes; index++ {
+		name := []byte{byte('a' + index/1000), byte('0' + index/100%10), byte('0' + index/10%10), byte('0' + index%10)}
 		if _, status := fs.Create(root, name); status != StatusOK {
 			t.Fatalf("node %d: %d", index, status)
 		}
 	}
-	if _, status := fs.Create(root, []byte("full")); status != StatusResourceExhausted {
+	if _, status := fs.Create(root, []byte("full")); status != StatusNoSpace {
 		t.Fatal("node capacity exceeded")
 	}
 }

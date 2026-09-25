@@ -1,126 +1,123 @@
 package ramfs
 
-const (
-	MaxNodes    = 32
-	MaxName     = 63
-	MaxFileSize = 4096
-)
-
-type Status uint8
-
-const (
-	StatusOK Status = iota
-	StatusInvalidArgument
-	StatusNotFound
-	StatusAlreadyExists
-	StatusNotDirectory
-	StatusIsDirectory
-	StatusNotEmpty
-	StatusResourceExhausted
-	// StatusPermissionDenied is what a read-only backend answers to a
-	// mutation, so an immutable mount is distinguishable from a bad request.
-	StatusPermissionDenied
-	// StatusIOError is a backend that could not be reached or did not answer
-	// usably: a filesystem served by another process that has died, stalled
-	// past its deadline, or sent a malformed reply (ADR 0096). Nothing in the
-	// kernel produces it.
-	StatusIOError
-	// StatusNoSpace is a backend whose storage is full: no free cluster or
-	// directory slot is left for the request.
-	StatusNoSpace
-	// StatusCorrupt is on-disk metadata that fails validation: a cluster
-	// chain that loops, leaves the data area, or ends before the file does.
-	StatusCorrupt
-	// LastStatus is the highest status a backend may report; decoders refuse
-	// anything above it.
-	LastStatus = StatusCorrupt
-)
-
-type Kind uint8
+// RAMFS keeps files in pages (ADR 0105). A file's bytes live in pages located
+// through its node the way a classic inode locates blocks: twelve direct
+// references, one page of references, and one page of pages of references.
+// A page is allocated only when bytes are written to it; a page never written
+// is a hole and reads as zeros, so extending a file costs nothing until it is
+// written. Truncation and removal hand every page they no longer need back to
+// the store.
+//
+// The node table grows a chunk at a time up to its bound. Both bounds — nodes
+// and pages — are limits of the instance, set when it is configured, and a
+// request past either is refused rather than allowed to take the memory of
+// the process serving it.
 
 const (
-	KindFile Kind = iota + 1
-	KindDirectory
+	chunkNodes = 64
+	maxChunks  = 1024
+	// MaxNodes is the most nodes any instance can be configured for.
+	MaxNodes = chunkNodes * maxChunks
+
+	directPages = 12
+	refsPerPage = PageSize / 4
+	indirectEnd = directPages + refsPerPage
+	doubleEnd   = indirectEnd + refsPerPage*refsPerPage
+	// MaxFileSize is the most a file can index: a little over 4 GiB.
+	MaxFileSize = uint64(doubleEnd) * PageSize
+
+	// DefaultNodes and DefaultPages are the limits of an instance nothing
+	// configured: 4096 nodes and 64 MiB of pages.
+	DefaultNodes = 4096
+	DefaultPages = 16384
 )
-
-type NodeID uint64
-
-type Stat struct {
-	ID   NodeID
-	Kind Kind
-	Size uint64
-}
-
-type Entry struct {
-	Stat Stat
-	Name [MaxName]byte
-	Size uint8
-}
-
-// Name is the allocation-free representation used at filesystem boundaries.
-// Its fields are private so every value accepted by a backend is valid.
-type Name struct {
-	data [MaxName]byte
-	size uint8
-}
-
-func (name Name) CopyTo(target []byte) int {
-	if !name.valid() || len(target) < int(name.size) {
-		return 0
-	}
-	return copy(target, name.data[:name.size])
-}
-
-func MakeName(value []byte) (Name, bool) {
-	var name Name
-	if !validName(value) {
-		return name, false
-	}
-	copy(name.data[:], value)
-	name.size = uint8(len(value))
-	return name, true
-}
 
 type node struct {
 	parent     NodeID
+	size       uint64
 	generation uint32
 	kind       Kind
-	name       [MaxName]byte
-	nameSize   uint8
-	data       [MaxFileSize]byte
-	size       uint16
 	used       bool
+	nameSize   uint8
+	name       [MaxName]byte
+	// firstChild and next link a directory's children in ascending index
+	// order, as index+1; zero ends the list.
+	firstChild uint32
+	next       uint32
+	direct     [directPages]PageRef
+	indirect   PageRef
+	double     PageRef
 }
 
-// reset clears a slot in place and gives it the supplied generation. Assigning
-// a node literal instead would build the whole 4 KiB file body as a temporary,
-// which the kernel's leaking heap never frees.
-func (entry *node) reset(generation uint32) {
-	*entry = node{}
-	if generation == 0 {
-		generation = 1
-	}
-	entry.generation = generation
+// NodeChunk is one allocation unit of the node table.
+type NodeChunk [chunkNodes]node
+
+// Limits bound an instance.
+type Limits struct {
+	Nodes int
+	Pages uint64
+}
+
+// Usage is what an instance holds against its limits.
+type Usage struct {
+	Nodes, MaxNodes int
+	Pages, MaxPages uint64
 }
 
 type FileSystem struct {
-	nodes [MaxNodes]node
+	store     Store
+	chunks    [maxChunks]*NodeChunk
+	allocated int
+	limits    Limits
+	nodes     int
+	pages     uint64
+	hint      int
+	ready     bool
 }
 
+// Configure sets the store and limits of an instance that has not been
+// initialized. Nodes is capped at MaxNodes.
+func (fs *FileSystem) Configure(store Store, limits Limits) bool {
+	if fs.ready || store == nil || limits.Nodes < 1 || limits.Pages == 0 {
+		return false
+	}
+	if limits.Nodes > MaxNodes {
+		limits.Nodes = MaxNodes
+	}
+	fs.store, fs.limits = store, limits
+	return true
+}
+
+// Init creates the root directory, configuring the default store and limits
+// first if Configure was not called. A second call returns the existing root.
 func (fs *FileSystem) Init() NodeID {
-	if fs.nodes[0].used {
+	if fs.ready {
 		return fs.id(0)
 	}
-	fs.nodes[0].reset(1)
-	fs.nodes[0].kind, fs.nodes[0].used = KindDirectory, true
+	if fs.store == nil {
+		fs.store, fs.limits = &heapStore{}, Limits{Nodes: DefaultNodes, Pages: DefaultPages}
+	}
+	chunk := fs.store.Chunk()
+	if chunk == nil {
+		return 0
+	}
+	fs.chunks[0], fs.allocated = chunk, 1
+	root := fs.at(0)
+	root.generation, root.kind, root.used = 1, KindDirectory, true
+	fs.nodes, fs.ready = 1, true
 	return fs.id(0)
 }
 
 func (fs *FileSystem) Root() NodeID {
-	if !fs.nodes[0].used {
+	if !fs.ready {
 		return 0
 	}
 	return fs.id(0)
+}
+
+// Usage reports what the instance holds.
+func (fs *FileSystem) Usage() Usage {
+	return Usage{Nodes: fs.nodes, MaxNodes: fs.limits.Nodes, Pages: fs.pages, MaxPages: fs.limits.Pages}
 }
 
 func (fs *FileSystem) Create(parent NodeID, name []byte) (NodeID, Status) {
@@ -165,73 +162,111 @@ func (fs *FileSystem) OpenName(parent NodeID, name Name) (NodeID, Status) {
 	if !name.valid() {
 		return 0, StatusInvalidArgument
 	}
-	if _, status := fs.directory(parent); status != StatusOK {
+	directory, status := fs.directory(parent)
+	if status != StatusOK {
 		return 0, status
 	}
-	for index := range fs.nodes {
-		if fs.nodes[index].used && fs.nodes[index].parent == parent && sameName(&fs.nodes[index], name) {
-			return fs.id(index), StatusOK
-		}
+	if index, found := fs.child(directory, name); found {
+		return fs.id(index), StatusOK
 	}
 	return 0, StatusNotFound
 }
 
 func (fs *FileSystem) Read(id NodeID, offset uint64, target []byte) (int, Status) {
-	entry, status := fs.lookup(id)
+	entry, status := fs.file(id)
 	if status != StatusOK {
 		return 0, status
 	}
-	if entry.kind != KindFile {
-		return 0, StatusIsDirectory
-	}
-	if offset >= uint64(entry.size) {
+	if offset >= entry.size || len(target) == 0 {
 		return 0, StatusOK
 	}
-	count := len(target)
-	remaining := int(uint64(entry.size) - offset)
-	if count > remaining {
-		count = remaining
+	count := uint64(len(target))
+	if count > entry.size-offset {
+		count = entry.size - offset
 	}
-	copy(target[:count], entry.data[int(offset):int(offset)+count])
-	return count, StatusOK
+	for done := uint64(0); done < count; {
+		position := offset + done
+		within := position % PageSize
+		chunk := PageSize - within
+		if chunk > count-done {
+			chunk = count - done
+		}
+		part := target[done : done+chunk]
+		if ref := fs.pageRef(entry, position/PageSize); ref != 0 {
+			copy(part, fs.store.Page(ref)[within:within+chunk])
+		} else {
+			clear(part)
+		}
+		done += chunk
+	}
+	return int(count), StatusOK
 }
 
+// Write stores data at offset. The pages it needs, index pages included, are
+// counted first, so a write the instance has no room for is refused whole
+// with StatusNoSpace and changes nothing.
 func (fs *FileSystem) Write(id NodeID, offset uint64, data []byte) (int, Status) {
-	entry, status := fs.lookup(id)
+	entry, status := fs.file(id)
 	if status != StatusOK {
 		return 0, status
 	}
-	if entry.kind != KindFile {
-		return 0, StatusIsDirectory
+	if len(data) == 0 {
+		return 0, StatusOK
 	}
-	if offset > MaxFileSize || uint64(len(data)) > MaxFileSize-offset {
+	length := uint64(len(data))
+	if offset > MaxFileSize || length > MaxFileSize-offset {
 		return 0, StatusResourceExhausted
 	}
-	copy(entry.data[int(offset):], data)
-	end := offset + uint64(len(data))
-	if end > uint64(entry.size) {
-		entry.size = uint16(end)
+	end := offset + length
+	if needed := fs.missing(entry, offset/PageSize, (end-1)/PageSize); needed > fs.limits.Pages-fs.pages {
+		return 0, StatusNoSpace
 	}
-	return len(data), StatusOK
+	done := uint64(0)
+	for done < length {
+		position := offset + done
+		within := position % PageSize
+		chunk := PageSize - within
+		if chunk > length-done {
+			chunk = length - done
+		}
+		ref, status := fs.ensurePage(entry, position/PageSize)
+		if status != StatusOK {
+			break
+		}
+		copy(fs.store.Page(ref)[within:within+chunk], data[done:done+chunk])
+		done += chunk
+	}
+	if offset+done > entry.size {
+		entry.size = offset + done
+	}
+	if done < length {
+		// The store ran out below the instance's own limit.
+		return int(done), StatusNoSpace
+	}
+	return int(done), StatusOK
 }
 
+// Truncate sets a file's size. Pages past the new end are freed, and the
+// bytes of the last kept page past it are zeroed, so a later extension reads
+// zeros there as it does in a hole.
 func (fs *FileSystem) Truncate(id NodeID, size uint64) Status {
-	entry, status := fs.lookup(id)
+	entry, status := fs.file(id)
 	if status != StatusOK {
 		return status
-	}
-	if entry.kind != KindFile {
-		return StatusIsDirectory
 	}
 	if size > MaxFileSize {
 		return StatusResourceExhausted
 	}
-	if size < uint64(entry.size) {
-		for index := int(size); index < int(entry.size); index++ {
-			entry.data[index] = 0
+	if size < entry.size {
+		keep := (size + PageSize - 1) / PageSize
+		fs.release(entry, keep)
+		if within := size % PageSize; within != 0 {
+			if ref := fs.pageRef(entry, size/PageSize); ref != 0 {
+				clear(fs.store.Page(ref)[within:])
+			}
 		}
 	}
-	entry.size = uint16(size)
+	entry.size = size
 	return StatusOK
 }
 
@@ -240,24 +275,30 @@ func (fs *FileSystem) Stat(id NodeID) (Stat, Status) {
 	if status != StatusOK {
 		return Stat{}, status
 	}
-	return Stat{ID: id, Kind: entry.kind, Size: uint64(entry.size)}, StatusOK
+	return fs.stat(id, entry), StatusOK
 }
 
+// ReadDir returns the first child of parent whose index is at least cursor,
+// and the cursor after it. Children are kept in index order, so a cursor stays
+// meaningful across removals.
 func (fs *FileSystem) ReadDir(parent NodeID, cursor int) (Entry, int, Status) {
-	if _, status := fs.directory(parent); status != StatusOK || cursor < 0 || cursor > MaxNodes {
-		if status != StatusOK {
-			return Entry{}, cursor, status
-		}
+	directory, status := fs.directory(parent)
+	if status != StatusOK {
+		return Entry{}, cursor, status
+	}
+	if cursor < 0 || cursor > MaxNodes {
 		return Entry{}, cursor, StatusInvalidArgument
 	}
-	for index := cursor; index < len(fs.nodes); index++ {
-		node := &fs.nodes[index]
-		if node.used && node.parent == parent {
-			entry := Entry{Stat: Stat{ID: fs.id(index), Kind: node.kind, Size: uint64(node.size)}, Name: node.name, Size: node.nameSize}
+	for link := directory.firstChild; link != 0; {
+		index := int(link - 1)
+		child := fs.at(index)
+		if index >= cursor {
+			entry := Entry{Stat: fs.stat(fs.id(index), child), Name: child.name, Size: child.nameSize}
 			return entry, index + 1, StatusOK
 		}
+		link = child.next
 	}
-	return Entry{}, MaxNodes, StatusNotFound
+	return Entry{}, cursor, StatusNotFound
 }
 
 func (fs *FileSystem) Rename(id NodeID, parent NodeID, name []byte) Status {
@@ -273,25 +314,29 @@ func (fs *FileSystem) RenameName(id NodeID, parent NodeID, name Name) Status {
 		return StatusInvalidArgument
 	}
 	entry, status := fs.lookup(id)
-	if status != StatusOK || id == fs.Root() {
-		if status != StatusOK {
-			return status
-		}
-		return StatusInvalidArgument
-	}
-	if _, status = fs.directory(parent); status != StatusOK {
+	if status != StatusOK {
 		return status
 	}
-	if _, status = fs.OpenName(parent, name); status == StatusOK {
+	if id == fs.Root() {
+		return StatusInvalidArgument
+	}
+	directory, status := fs.directory(parent)
+	if status != StatusOK {
+		return status
+	}
+	if _, found := fs.child(directory, name); found {
 		return StatusAlreadyExists
 	}
 	if entry.kind == KindDirectory && fs.descendsFrom(parent, id) {
 		return StatusInvalidArgument
 	}
+	index := int(uint32(id)) - 1
+	old, _ := fs.lookup(entry.parent)
+	fs.unlink(old, index)
 	entry.parent = parent
-	entry.name = [MaxName]byte{}
 	entry.name = name.data
 	entry.nameSize = name.size
+	fs.link(directory, index)
 	return StatusOK
 }
 
@@ -303,54 +348,106 @@ func (fs *FileSystem) Unlink(parent NodeID, name []byte) Status {
 	return fs.UnlinkName(parent, value)
 }
 
+// UnlinkName removes a file, freeing its pages, or an empty directory.
 func (fs *FileSystem) UnlinkName(parent NodeID, name Name) Status {
 	if !name.valid() {
 		return StatusInvalidArgument
 	}
-	id, status := fs.OpenName(parent, name)
+	directory, status := fs.directory(parent)
 	if status != StatusOK {
 		return status
 	}
-	entry, _ := fs.lookup(id)
-	if entry.kind == KindDirectory {
-		for index := range fs.nodes {
-			if fs.nodes[index].used && fs.nodes[index].parent == id {
-				return StatusNotEmpty
-			}
-		}
+	index, found := fs.child(directory, name)
+	if !found {
+		return StatusNotFound
 	}
-	entry.reset(entry.generation + 1)
+	entry := fs.at(index)
+	if entry.kind == KindDirectory && entry.firstChild != 0 {
+		return StatusNotEmpty
+	}
+	fs.release(entry, 0)
+	fs.unlink(directory, index)
+	generation := entry.generation + 1
+	if generation == 0 {
+		generation = 1
+	}
+	*entry = node{generation: generation}
+	fs.nodes--
+	if index < fs.hint {
+		fs.hint = index
+	}
 	return StatusOK
 }
 
 func (fs *FileSystem) createName(parent NodeID, name Name, kind Kind) (NodeID, Status) {
-	if fs.Root() == 0 {
+	if !fs.ready {
 		fs.Init()
 	}
-	if _, status := fs.directory(parent); status != StatusOK {
+	directory, status := fs.directory(parent)
+	if status != StatusOK {
 		return 0, status
 	}
-	if _, status := fs.OpenName(parent, name); status == StatusOK {
+	if _, found := fs.child(directory, name); found {
 		return 0, StatusAlreadyExists
 	}
-	for index := 1; index < len(fs.nodes); index++ {
-		entry := &fs.nodes[index]
-		if !entry.used {
-			entry.reset(entry.generation)
-			entry.parent, entry.kind, entry.name, entry.nameSize, entry.used = parent, kind, name.data, name.size, true
-			return fs.id(index), StatusOK
+	index, status := fs.allocateNode()
+	if status != StatusOK {
+		return 0, status
+	}
+	entry := fs.at(index)
+	generation := entry.generation
+	if generation == 0 {
+		generation = 1
+	}
+	*entry = node{parent: parent, generation: generation, kind: kind, used: true, name: name.data, nameSize: name.size}
+	fs.link(directory, index)
+	fs.nodes++
+	return fs.id(index), StatusOK
+}
+
+// allocateNode finds a free slot, growing the table by a chunk when every
+// slot is taken and the limit allows.
+func (fs *FileSystem) allocateNode() (int, Status) {
+	if fs.nodes >= fs.limits.Nodes {
+		return 0, StatusNoSpace
+	}
+	for index := fs.hint; index < fs.allocated*chunkNodes; index++ {
+		if !fs.at(index).used {
+			fs.hint = index + 1
+			return index, StatusOK
 		}
 	}
-	return 0, StatusResourceExhausted
+	if fs.allocated == maxChunks {
+		return 0, StatusNoSpace
+	}
+	chunk := fs.store.Chunk()
+	if chunk == nil {
+		return 0, StatusNoSpace
+	}
+	index := fs.allocated * chunkNodes
+	fs.chunks[fs.allocated] = chunk
+	fs.allocated++
+	fs.hint = index + 1
+	return index, StatusOK
+}
+
+func (fs *FileSystem) at(index int) *node { return &fs.chunks[index/chunkNodes][index%chunkNodes] }
+
+func (fs *FileSystem) id(index int) NodeID {
+	return NodeID(uint64(fs.at(index).generation)<<32 | uint64(index+1))
+}
+
+func (fs *FileSystem) stat(id NodeID, entry *node) Stat {
+	return Stat{ID: id, Kind: entry.kind, Size: entry.size}
 }
 
 func (fs *FileSystem) lookup(id NodeID) (*node, Status) {
 	index := int(uint32(id)) - 1
 	generation := uint32(uint64(id) >> 32)
-	if index < 0 || index >= len(fs.nodes) || generation == 0 {
+	if !fs.ready || index < 0 || index >= fs.allocated*chunkNodes || generation == 0 {
 		return nil, StatusNotFound
 	}
-	entry := &fs.nodes[index]
+	entry := fs.at(index)
 	if !entry.used || entry.generation != generation {
 		return nil, StatusNotFound
 	}
@@ -368,12 +465,56 @@ func (fs *FileSystem) directory(id NodeID) (*node, Status) {
 	return entry, StatusOK
 }
 
-func (fs *FileSystem) id(index int) NodeID {
-	return NodeID(uint64(fs.nodes[index].generation)<<32 | uint64(index+1))
+func (fs *FileSystem) file(id NodeID) (*node, Status) {
+	entry, status := fs.lookup(id)
+	if status != StatusOK {
+		return nil, status
+	}
+	if entry.kind != KindFile {
+		return nil, StatusIsDirectory
+	}
+	return entry, StatusOK
+}
+
+// child finds name among the children of directory.
+func (fs *FileSystem) child(directory *node, name Name) (int, bool) {
+	for link := directory.firstChild; link != 0; {
+		index := int(link - 1)
+		entry := fs.at(index)
+		if sameName(entry, name) {
+			return index, true
+		}
+		link = entry.next
+	}
+	return 0, false
+}
+
+// link inserts index into directory's children, keeping them in index order.
+func (fs *FileSystem) link(directory *node, index int) {
+	next := &directory.firstChild
+	for *next != 0 && int(*next-1) < index {
+		next = &fs.at(int(*next - 1)).next
+	}
+	fs.at(index).next = *next
+	*next = uint32(index + 1)
+}
+
+// unlink removes index from directory's children.
+func (fs *FileSystem) unlink(directory *node, index int) {
+	if directory == nil {
+		return
+	}
+	for next := &directory.firstChild; *next != 0; next = &fs.at(int(*next - 1)).next {
+		if int(*next-1) == index {
+			*next = fs.at(index).next
+			fs.at(index).next = 0
+			return
+		}
+	}
 }
 
 func (fs *FileSystem) descendsFrom(candidate NodeID, ancestor NodeID) bool {
-	for candidate != 0 {
+	for steps := 0; candidate != 0 && steps <= MaxNodes; steps++ {
 		if candidate == ancestor {
 			return true
 		}
@@ -386,22 +527,6 @@ func (fs *FileSystem) descendsFrom(candidate NodeID, ancestor NodeID) bool {
 	return false
 }
 
-func validName(name []byte) bool {
-	if len(name) == 0 || len(name) > MaxName || (len(name) == 1 && name[0] == '.') || (len(name) == 2 && name[0] == '.' && name[1] == '.') {
-		return false
-	}
-	for _, value := range name {
-		if value == 0 || value == '/' {
-			return false
-		}
-	}
-	return true
-}
-
-func (name Name) valid() bool {
-	return name.size != 0 && name.size <= MaxName
-}
-
 func sameName(entry *node, name Name) bool {
 	if entry.nameSize != name.size {
 		return false
@@ -412,4 +537,189 @@ func sameName(entry *node, name Name) bool {
 		}
 	}
 	return true
+}
+
+// getRef and setRef read and write reference slot of an index page.
+func (fs *FileSystem) getRef(page PageRef, slot uint64) PageRef {
+	data := fs.store.Page(page)[slot*4:]
+	return PageRef(uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16 | uint32(data[3])<<24)
+}
+
+func (fs *FileSystem) setRef(page PageRef, slot uint64, ref PageRef) {
+	data := fs.store.Page(page)[slot*4:]
+	data[0], data[1], data[2], data[3] = byte(ref), byte(ref>>8), byte(ref>>16), byte(ref>>24)
+}
+
+// pageRef returns the page holding file page number page, or zero for a hole.
+func (fs *FileSystem) pageRef(entry *node, page uint64) PageRef {
+	switch {
+	case page < directPages:
+		return entry.direct[page]
+	case page < indirectEnd:
+		if entry.indirect == 0 {
+			return 0
+		}
+		return fs.getRef(entry.indirect, page-directPages)
+	case page < doubleEnd:
+		if entry.double == 0 {
+			return 0
+		}
+		relative := page - indirectEnd
+		inner := fs.getRef(entry.double, relative/refsPerPage)
+		if inner == 0 {
+			return 0
+		}
+		return fs.getRef(inner, relative%refsPerPage)
+	}
+	return 0
+}
+
+// newPage takes a page from the store and counts it.
+func (fs *FileSystem) newPage() (PageRef, Status) {
+	if fs.pages >= fs.limits.Pages {
+		return 0, StatusNoSpace
+	}
+	ref, ok := fs.store.Allocate()
+	if !ok {
+		return 0, StatusNoSpace
+	}
+	fs.pages++
+	return ref, StatusOK
+}
+
+func (fs *FileSystem) freePage(ref PageRef) {
+	if ref != 0 {
+		fs.store.Free(ref)
+		fs.pages--
+	}
+}
+
+// ensurePage returns the page holding file page number page, allocating it
+// and the index pages leading to it as needed.
+func (fs *FileSystem) ensurePage(entry *node, page uint64) (PageRef, Status) {
+	if ref := fs.pageRef(entry, page); ref != 0 {
+		return ref, StatusOK
+	}
+	var status Status
+	switch {
+	case page < directPages:
+		entry.direct[page], status = fs.newPage()
+		return entry.direct[page], status
+	case page < indirectEnd:
+		if entry.indirect == 0 {
+			if entry.indirect, status = fs.newPage(); status != StatusOK {
+				return 0, status
+			}
+		}
+		ref, status := fs.newPage()
+		if status == StatusOK {
+			fs.setRef(entry.indirect, page-directPages, ref)
+		}
+		return ref, status
+	case page < doubleEnd:
+		if entry.double == 0 {
+			if entry.double, status = fs.newPage(); status != StatusOK {
+				return 0, status
+			}
+		}
+		relative := page - indirectEnd
+		inner := fs.getRef(entry.double, relative/refsPerPage)
+		if inner == 0 {
+			if inner, status = fs.newPage(); status != StatusOK {
+				return 0, status
+			}
+			fs.setRef(entry.double, relative/refsPerPage, inner)
+		}
+		ref, status := fs.newPage()
+		if status == StatusOK {
+			fs.setRef(inner, relative%refsPerPage, ref)
+		}
+		return ref, status
+	}
+	return 0, StatusResourceExhausted
+}
+
+// missing counts the pages, data and index, that writing file pages
+// [first, last] would allocate.
+func (fs *FileSystem) missing(entry *node, first, last uint64) uint64 {
+	count := uint64(0)
+	indirectCounted, doubleCounted := entry.indirect != 0, entry.double != 0
+	innerCounted := ^uint64(0)
+	for page := first; page <= last; page++ {
+		if page >= indirectEnd && !doubleCounted {
+			// Nothing below the double index exists yet: every page, each
+			// inner index its range reaches, and the outer index are new.
+			span := last - page + 1
+			return count + span + (last-indirectEnd)/refsPerPage - (page-indirectEnd)/refsPerPage + 1 + 1
+		}
+		if fs.pageRef(entry, page) == 0 {
+			count++
+		}
+		switch {
+		case page >= directPages && page < indirectEnd && !indirectCounted:
+			count++
+			indirectCounted = true
+		case page >= indirectEnd:
+			outer := (page - indirectEnd) / refsPerPage
+			if outer != innerCounted {
+				innerCounted = outer
+				if fs.getRef(entry.double, outer) == 0 {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
+// release frees every data page from file page keep on and the index pages
+// that then index nothing.
+func (fs *FileSystem) release(entry *node, keep uint64) {
+	for page := keep; page < directPages; page++ {
+		fs.freePage(entry.direct[page])
+		entry.direct[page] = 0
+	}
+	if entry.indirect != 0 {
+		from := uint64(0)
+		if keep > directPages {
+			from = keep - directPages
+		}
+		for slot := from; slot < refsPerPage; slot++ {
+			if ref := fs.getRef(entry.indirect, slot); ref != 0 {
+				fs.freePage(ref)
+				fs.setRef(entry.indirect, slot, 0)
+			}
+		}
+		if keep <= directPages {
+			fs.freePage(entry.indirect)
+			entry.indirect = 0
+		}
+	}
+	if entry.double != 0 {
+		for outer := uint64(0); outer < refsPerPage; outer++ {
+			inner := fs.getRef(entry.double, outer)
+			base := indirectEnd + outer*refsPerPage
+			if inner == 0 || keep >= base+refsPerPage {
+				continue
+			}
+			from := uint64(0)
+			if keep > base {
+				from = keep - base
+			}
+			for slot := from; slot < refsPerPage; slot++ {
+				if ref := fs.getRef(inner, slot); ref != 0 {
+					fs.freePage(ref)
+					fs.setRef(inner, slot, 0)
+				}
+			}
+			if keep <= base {
+				fs.freePage(inner)
+				fs.setRef(entry.double, outer, 0)
+			}
+		}
+		if keep <= indirectEnd {
+			fs.freePage(entry.double)
+			entry.double = 0
+		}
+	}
 }

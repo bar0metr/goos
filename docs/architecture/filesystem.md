@@ -13,7 +13,7 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
 | VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel, file cache mapping | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096, 0098 |
-| RAMFS | inside VFS | nothing; library core | [ramfs.md](../userspace/ramfs.md), ADR 0017 |
+| RAMFS | inside VFS | a page pool in the VFS's address space | [ramfs.md](../userspace/ramfs.md), ADR 0017, 0105 |
 | System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
 | FAT32 | `/system/fat32` | server end of the VFS channel, block client endpoint, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098 |
 | Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](../userspace/storage.md), ADR 0033 |
