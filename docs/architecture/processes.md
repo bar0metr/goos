@@ -54,7 +54,10 @@ processes without retaining reclaimed objects.
 Every launch after PID 1 names its executable as an extent of the system image
 together with PID 1's image capability, which must carry Execute; PID 1 has
 resolved the path in its own read-only mapping of the image, and the kernel
-checks only the authority, the bounds, and the native image (ADR 0093).
+checks only the authority, the bounds, and the native image (ADR 0093). A
+program outside `/system` is named instead by a sealed executable object that
+PID 1 filled from the file, whole, under the object's own Execute right
+(ADR 0097).
 
 Successful launches install a typed process handle in PID 1 with `Wait` and
 `Write` authority; `Write` authorizes `ProcessKill` (ADR 0067). Native `ProcessWait` validates that handle, blocks on a bounded wait

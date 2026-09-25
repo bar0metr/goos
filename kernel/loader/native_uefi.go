@@ -22,6 +22,10 @@ type LoadedImage struct {
 // at a time.
 var loadPages [MaxImagePages]uint64
 
+// pageScratch gathers one page of a segment whose bytes cross a page of a
+// paged source. Shared for the same reason as loadPages.
+var pageScratch [vm.PageSize]byte
+
 // segmentFrames holds, per segment, the shared frames that back it, or nil for
 // a segment given private pages. Shared for the same reason as loadPages.
 var segmentFrames [MaxSegments][]uint64
@@ -29,12 +33,15 @@ var segmentFrames [MaxSegments][]uint64
 // LoadNative loads a private copy of every segment of an image into an empty
 // process address space.
 func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage, bool) {
-	return LoadImage(allocator, root, data, nil, 0)
+	return LoadImage(allocator, root, Contiguous(data), nil, 0)
 }
 
 // LoadImage validates, allocates, initializes, and maps a native image into an
 // empty process address space. All payload bytes are copied before executable
 // permission is exposed.
+//
+// The bytes come from source, an extent of the system image or the pages of a
+// sealed executable object (ADR 0097).
 //
 // When shared is not nil and key names the image within the immutable system
 // image, each read-only segment is mapped from frames in shared, filling them
@@ -42,8 +49,8 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 // process's teardown leaves them for the next process, and never writable, so
 // no process can change what another runs. Writable segments are always
 // private.
-func LoadImage(allocator *pmm.Allocator, root uint64, data []byte, shared *SharedPages, key uint64) (LoadedImage, bool) {
-	image, ok := ParseNative(data, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit)
+func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *SharedPages, key uint64) (LoadedImage, bool) {
+	image, ok := ParseSource(source, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit)
 	if !ok || root == 0 {
 		return LoadedImage{}, false
 	}
@@ -76,7 +83,7 @@ func LoadImage(allocator *pmm.Allocator, root uint64, data []byte, shared *Share
 		if shared != nil && key != 0 && Shareable(segment) {
 			frames, hit := shared.Lookup(key, index, pages)
 			if !hit {
-				frames, hit = fillShared(allocator, shared, key, index, segment, data)
+				frames, hit = fillShared(allocator, shared, key, index, segment, source)
 				if hit {
 					loaded.SharedPagesAllocated += uint64(pages)
 				}
@@ -87,7 +94,7 @@ func LoadImage(allocator *pmm.Allocator, root uint64, data []byte, shared *Share
 			}
 		}
 		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
-			physical, ok := allocatePage(allocator, segment, offset, data)
+			physical, ok := allocatePage(allocator, segment, offset, source)
 			if !ok {
 				for rollback := 0; rollback < pageCount; rollback++ {
 					allocator.Free(loadPages[rollback])
@@ -127,14 +134,14 @@ func LoadImage(allocator *pmm.Allocator, root uint64, data []byte, shared *Share
 // fillShared copies a read-only segment into frames it records in shared. A
 // cache that is full, or an allocation that fails, leaves nothing recorded and
 // the segment is loaded privately instead.
-func fillShared(allocator *pmm.Allocator, shared *SharedPages, key uint64, index int, segment Segment, data []byte) ([]uint64, bool) {
+func fillShared(allocator *pmm.Allocator, shared *SharedPages, key uint64, index int, segment Segment, source Source) ([]uint64, bool) {
 	pages := int((segment.MemorySize + vm.PageSize - 1) / vm.PageSize)
 	frames, ok := shared.Reserve(pages)
 	if !ok {
 		return nil, false
 	}
 	for page := 0; page < pages; page++ {
-		physical, ok := allocatePage(allocator, segment, uint64(page)*vm.PageSize, data)
+		physical, ok := allocatePage(allocator, segment, uint64(page)*vm.PageSize, source)
 		if !ok {
 			for rollback := 0; rollback < page; rollback++ {
 				allocator.Free(frames[rollback])
@@ -154,18 +161,24 @@ func fillShared(allocator *pmm.Allocator, shared *SharedPages, key uint64, index
 
 // allocatePage returns a fresh frame holding the segment's bytes at offset,
 // zero past the end of its file contents.
-func allocatePage(allocator *pmm.Allocator, segment Segment, offset uint64, data []byte) (uint64, bool) {
-	physical, allocated := allocator.Allocate()
-	if !allocated {
-		return 0, false
-	}
+func allocatePage(allocator *pmm.Allocator, segment Segment, offset uint64, source Source) (uint64, bool) {
 	fileEnd := offset + vm.PageSize
 	if fileEnd > segment.FileSize {
 		fileEnd = segment.FileSize
 	}
 	var payload []byte
 	if offset < segment.FileSize {
-		payload = data[segment.FileOffset+offset : segment.FileOffset+fileEnd]
+		// ParseSource checked that the segment's file bytes lie inside the
+		// source, so this read fails only on a source that changed size.
+		bytes, ok := source.Read(segment.FileOffset+offset, fileEnd-offset, pageScratch[:])
+		if !ok {
+			return 0, false
+		}
+		payload = bytes
+	}
+	physical, allocated := allocator.Allocate()
+	if !allocated {
+		return 0, false
 	}
 	if !vm.InitializePhysical(physical, payload) {
 		allocator.Free(physical)

@@ -31,9 +31,13 @@ quotes, double quotes, and backslash escaping. The shell owns a fixed 192-byte w
 inline `GVF1` path limit and resolves
 relative paths without heap allocation. `cd` commits a new directory only after
 VFS `Stat` confirms it. Other command names are resolved beneath the fixed
-`/system/bin/` search root; shell sends the executable path, structured bounded
-argument and environment vectors, and current directory to PID 1 and waits through a process
-handle. PID 1 independently validates the system path and executable image.
+`/system/bin/` search root; a command word with a slash is a program path,
+absolute or relative to the working directory, such as `/home/demo/args` or
+`./args` (ADR 0097). The shell sends the executable path, structured bounded
+argument and environment vectors, and current directory to PID 1 and waits
+through a process handle. PID 1 independently validates the path: under
+`/system` it looks in the image, elsewhere it reads the file into an
+executable object, and the kernel validates the executable image either way.
 The shell similarly restores its post-startup arena mark after every completed
 command, so repeated IPC commands cannot exhaust the non-freeing TinyGo heap.
 

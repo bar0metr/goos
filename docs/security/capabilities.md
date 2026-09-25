@@ -49,13 +49,15 @@ executable as an extent of an image object, together with the handle that
 authorizes executing from it, and carries at most seven grants of
 `{source handle, type, rights, name}` (ADR 0024, 0031, 0093). The kernel
 resolves no path: PID 1 found the executable in its own read-only mapping of
-the system image.
+the system image, or read it from a file into an executable object that only
+its non-transferable loader capability can create (ADR 0097).
 
 Before creating the address space the kernel:
 
 0. requires the image handle in PID 1's table to be the system image with
-   Execute, and the extent to lie inside the image; the native image validator
-   then decides whether the bytes are a program;
+   Execute and the extent to lie inside the image, or a sealed executable
+   object with Execute named whole; the native image validator then decides
+   whether the bytes are a program;
 1. resolves each source in PID 1's table with Transfer authority;
 2. checks that the requested rights derive from the source;
 3. installs derived handles into the empty child table in manifest order,

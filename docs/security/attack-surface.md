@@ -67,6 +67,8 @@ table with type, generation, and rights checks.
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 | 35 | `ValidationFault` | validation build only (`Unsupported` otherwise); device handle, Write, system-control object (PID 1 only) | handle lookup only | none: overflows the caller's kernel stack on purpose and ends the machine with a double-fault report (ADR 0091) | no |
 | 36 | `SystemPowerOff` | device handle, Write, system-control object (PID 1 only) | handle lookup only; the port and value come from ACPI tables checked at boot (`kernel/acpi`, ADR 0092) | none: one port write that switches the machine off; `Unsupported` without usable tables | no |
+| 37 | `ExecutableCreate` | device handle, Write, loader object (PID 1 only, not transferable) | size 1..1 MiB; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | 2 objects, global; `ceil(size/4096)` zeroed pages charged to the page quota; returned when the handle closes or its holder exits (ADR 0097) | no |
+| 38 | `ExecutableWrite` | memory handle, Write, executable object | length 1..4096 in `Dispatch`; append only, refused whole past the object's end or once sealed; `CopyIn` page by page, the length advanced only after the whole copy | none beyond the object's own pages | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -90,6 +92,10 @@ compiles away.
 - `ImageMap` maps the firmware-reserved boot archive, which only the kernel can
   name; serving it through VFS keeps the archive parser in userspace
   (ADR 0070).
+- `ExecutableCreate` and `ExecutableWrite` fill kernel memory that no process
+  maps, so a launch can name a program read from a filesystem without the
+  kernel reading any filesystem, and the bytes validated at launch cannot
+  change before they are loaded (ADR 0097).
 - `LogWrite`, `LogRead`, and `LogBounds` serve the kernel log ring, which must
   work before any service exists (ADR 0059, 0073).
 - `SystemInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters and
@@ -99,7 +105,9 @@ compiles away.
   names an extent of the system image and a handle; the kernel requires Execute
   on the image object, checks the extent against the image length without
   overflow (`loader.ImageExtent`), and validates the bytes as a native image.
-  It resolves no path (ADR 0093).
+  A request may instead name a sealed executable object with Execute, whole:
+  offset zero and the object's length (ADR 0097). It resolves no path
+  (ADR 0093).
 
 ### Untrusted data and validation
 

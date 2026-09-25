@@ -48,7 +48,9 @@ not *loaded* through VFS: PID 1 maps the same archive read-only, resolves the
 path there, and asks the kernel to launch the extent it found under an image
 capability with Execute. The filesystem service maps the archive through a
 Read-only copy of that capability, which cannot launch anything (ADR 0070,
-ADR 0093).
+ADR 0093). A program anywhere else in the namespace is read through the VFS,
+by PID 1, into an executable object the kernel launches whole once it has
+sealed (ADR 0097).
 
 `/persist` names the whole volume and `/home` and `/state` name directories on
 it, so `/persist/home` and `/home` are one directory under two names, backed by

@@ -104,10 +104,14 @@ attacker-controlled code.
   namespace, session, other mount, or device authority, and a crash in it is
   restarted without taking down the VFS. It also serves `/system/commands`, which PID 1 reads to decide
   which commands get a VFS session; a lying VFS can only change who receives a
-  session it serves itself. It cannot change what executes: PID 1 resolves
-  launches in its own mapping of the archive, the kernel loads only extents of
-  that archive, and the image capability VFS holds is Read-only, without the
-  Execute right a launch requires (ADR 0093).
+  session it serves itself. It cannot change which services and system
+  commands execute: PID 1 resolves those in its own mapping of the archive,
+  the kernel loads them only as extents of that archive, and the image
+  capability VFS holds is Read-only, without the Execute right a launch
+  requires (ADR 0093). It can change what runs for a program path outside
+  `/system`, which PID 1 reads through the VFS, as a compromised FAT32 service
+  can for a program on the volume; such a program gets only its standard
+  streams (ADR 0097).
 - Block service compromise exposes the disk through the driver channel. It
   gains no hardware authority.
 - Config service compromise exposes and can rewrite every setting, including

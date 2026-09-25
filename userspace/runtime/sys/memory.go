@@ -87,3 +87,21 @@ func Bytes(value string) []byte {
 // staging page PID 1 shares with the kernel (ADR 0062). Nothing checks that
 // the range is mapped, so it is for those ABI-defined ranges only.
 func MappedAtStart(address uint64, size uint64) []byte { return window(address, size) }
+
+// ExecutableCreate creates an empty executable object of size bytes. The
+// loader capability authorizes it; the handle it returns fills the object with
+// ExecutableWrite and names it in a launch once full (ADR 0097).
+func ExecutableCreate(loader handle.ID, size uint64) (handle.ID, kcall.Status) {
+	valueWire = 0
+	result := status(executableCreate(uint64(loader), size, unsafe.Pointer(&valueWire)))
+	if result != kcall.StatusOK {
+		return 0, result
+	}
+	return handle.ID(valueWire), kcall.StatusOK
+}
+
+// ExecutableWrite appends data, at most kcall.MaxExecutableWrite bytes, to an
+// executable object. The object seals when its last byte is written.
+func ExecutableWrite(executable handle.ID, data []byte) kcall.Status {
+	return status(executableWrite(uint64(executable), address(data), uintptr(len(data))))
+}

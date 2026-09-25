@@ -9,8 +9,6 @@ import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
-	bootuefi "goos/kernel/boot/uefi"
-	"goos/kernel/device"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -107,8 +105,9 @@ func consumeInitControl() {
 
 // spawnExecutable starts the native image that executable names. The kernel
 // resolves no path here: PID 1 has already found the image under its own
-// search policy, and names it by an extent of an image object together with
-// the handle that authorizes executing from it (ADR 0093). The only name the
+// search policy, and names it by an extent of the system image or by an
+// executable object it filled, together with the handle that authorizes
+// executing from it (ADR 0093, ADR 0097). The only name the
 // kernel knows at launch is the bootstrap program's, in bootContinue.
 func spawnExecutable(executable supervisor.Executable, name []byte, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
@@ -129,18 +128,13 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	began := launchMark()
-	// Execute on an image object is the authority to run what it holds. The
-	// filesystem service reads the same image with Read alone and cannot
-	// launch from it.
-	authority, allowed := bootInitProcess.Handles().Lookup(executable.Image, handle.TypeDevice, capability.Execute)
-	if _, isImage := device.DecodeImageObject(authority.Object()); !allowed || !isImage {
-		launchStageDone(launchLookup, began)
-		return 0, 0, supervisor.LaunchCapabilityDenied
-	}
-	image, imageKey, inside := loader.ImageExtent(bootuefi.Initramfs(&bootInfo), uint64(executable.Offset), uint64(executable.Size))
+	// Execute on an image or executable object is the authority to run what
+	// it holds. The filesystem service reads the system image with Read alone
+	// and cannot launch from it.
+	image, imageKey, sourceStatus := launchSource(executable)
 	began = launchStageDone(launchLookup, began)
-	if !inside {
-		return 0, 0, supervisor.LaunchInvalidImage
+	if sourceStatus != supervisor.LaunchOK {
+		return 0, 0, sourceStatus
 	}
 	// The pages a launch allocates are counted from the allocator rather than
 	// threaded through the loader: the difference is exactly what this address

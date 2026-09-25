@@ -280,6 +280,22 @@ goos_system_power_off:
     ret
 .size goos_system_power_off, .-goos_system_power_off
 
+.global goos_executable_create
+.type goos_executable_create,@function
+goos_executable_create:
+    movl $37, %eax
+    int $0x80
+    ret
+.size goos_executable_create, .-goos_executable_create
+
+.global goos_executable_write
+.type goos_executable_write,@function
+goos_executable_write:
+    movl $38, %eax
+    int $0x80
+    ret
+.size goos_executable_write, .-goos_executable_write
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

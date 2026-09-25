@@ -39,10 +39,35 @@ type Image struct {
 	SegmentCount int
 }
 
+// maxHeader is the most bytes the envelope and its segment table occupy.
+const maxHeader = uint64(NativeHeaderSize) + MaxSegments*SegmentHeaderSize
+
 // ParseNative validates the versioned native image envelope. The bootstrap
 // loader bounds the total mapped image size so malformed inputs cannot force
 // unbounded physical allocation.
 func ParseNative(data []byte, pageSize uint64, userStart uint64, userEnd uint64) (Image, bool) {
+	return ParseSource(Contiguous(data), pageSize, userStart, userEnd)
+}
+
+// ParseSource validates the native image envelope of an executable held in
+// any source. Only the envelope and segment table are read here; segment
+// bytes are checked against the source's length.
+func ParseSource(source Source, pageSize uint64, userStart uint64, userEnd uint64) (Image, bool) {
+	var scratch [maxHeader]byte
+	length := source.Len()
+	if length > maxHeader {
+		length = maxHeader
+	}
+	header, ok := source.Read(0, length, scratch[:])
+	if !ok {
+		return Image{}, false
+	}
+	return parseNative(header, source.Len(), pageSize, userStart, userEnd)
+}
+
+// parseNative validates an image of size bytes whose first bytes, at least
+// its envelope and segment table when the image is well formed, are data.
+func parseNative(data []byte, size uint64, pageSize uint64, userStart uint64, userEnd uint64) (Image, bool) {
 	var image Image
 	if len(data) < int(NativeHeaderSize) || pageSize == 0 || userStart >= userEnd {
 		return image, false
@@ -78,7 +103,7 @@ func ParseNative(data []byte, pageSize uint64, userStart uint64, userEnd uint64)
 		memoryEnd := segment.VirtualAddress + segment.MemorySize
 		if segment.VirtualAddress%pageSize != 0 || segment.VirtualAddress < userStart || segment.VirtualAddress >= userEnd ||
 			segment.MemorySize == 0 || segment.MemorySize > pageSize*MaxImagePages || memoryEnd < segment.VirtualAddress || memoryEnd > userEnd || segment.FileSize > segment.MemorySize ||
-			segment.FileOffset < segmentTableEnd || end < segment.FileOffset || end > uint64(len(data)) || !validFlags ||
+			segment.FileOffset < segmentTableEnd || end < segment.FileOffset || end > size || !validFlags ||
 			segment.Flags&SegmentWritable != 0 && segment.Flags&SegmentExecutable != 0 || binary.LittleEndian.Uint64(header[24:]) != 0 {
 			return Image{}, false
 		}

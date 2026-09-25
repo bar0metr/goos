@@ -9,6 +9,10 @@ const (
 	// console so that the right to read the log is not the right to read what
 	// is typed, which belongs to the terminal service alone (ADR 0082).
 	LogObject = uint64(3)
+	// LoaderObject authorizes creating executable objects, which a launch can
+	// name instead of an extent of the system image (ADR 0097). Only PID 1
+	// holds it; it is not transferable.
+	LoaderObject = uint64(4)
 )
 
 const (

@@ -47,6 +47,10 @@ const systemImageHandle = handle.ID(0x0000000100000015)
 // the log service and the shell can read the log without the console's input.
 const logDeviceHandle = handle.ID(0x0000000100000016)
 
+// loaderHandle authorizes creating executable objects, which PID 1 fills with
+// programs it reads from a filesystem (ADR 0097).
+const loaderHandle = handle.ID(0x0000000100000017)
+
 // configControlHandle is the configuration service's control endpoint. PID 1
 // holds the only client side of it, so it is the only process that can create a
 // configuration session.
@@ -124,7 +128,13 @@ func userspaceMain() {
 		fatal("INIT_IMAGE_MAP_FAILED\n")
 	}
 	if validation.Enabled {
-		if !probeLaunchAuthority() {
+		// Each probed launch allocates its request and reply, and nothing the
+		// probe keeps points into the arena, so what it used is given back
+		// rather than taken from every later request (ADR 0097).
+		probeBase := arena.Current()
+		probed := probeLaunchAuthority()
+		arena.Reset(probeBase)
+		if !probed {
 			fatal("LAUNCH_AUTHORITY_FAILED\n")
 		}
 		mark("LAUNCH_AUTHORITY_OK\n")

@@ -438,6 +438,19 @@ func InitializePhysical(address uint64, data []byte) bool {
 	return true
 }
 
+// PhysicalPage returns the bytes of one kernel-owned physical page, for the
+// kernel to fill and read memory no process maps, such as an executable
+// object's (ADR 0097).
+func PhysicalPage(address uint64) ([]byte, bool) {
+	if address == 0 || address%PageSize != 0 || address >= IdentityMapLimit {
+		return nil, false
+	}
+	// SAFETY: the page lies below the identity-map limit, so the kernel
+	// addresses it at its physical address, and the slice covers exactly that
+	// page. The caller owns the page for as long as it uses the slice.
+	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(address))), PageSize), true
+}
+
 // Resolve returns the physical leaf backing a virtual address.
 func Resolve(rootAddress uint64, virtual uint64) (uint64, bool) {
 	if rootAddress%PageSize != 0 {

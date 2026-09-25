@@ -2,8 +2,9 @@ package exec
 
 import "goos/kernel/initramfs"
 
-// SystemRoot is where the immutable system image is mounted. Every executable
-// PID 1 launches today lives under it, services and commands alike.
+// SystemRoot is where the immutable system image is mounted. Services and the
+// commands in /system/bin live under it; a program anywhere else is read from
+// the filesystem into an executable object (ADR 0097).
 const SystemRoot = "/system/"
 
 // ImageStatus says why a path does not name an executable in the image.
@@ -11,14 +12,16 @@ type ImageStatus uint8
 
 const (
 	ImageFound ImageStatus = iota
-	// ImageOutsideSystem is a path that is not under SystemRoot. The system
-	// image is the only executable source so far; a path elsewhere is refused
-	// rather than looked up, and never reaches the kernel.
+	// ImageOutsideSystem is a canonical path that is not under SystemRoot.
+	// The system image does not hold it; the filesystem may.
 	ImageOutsideSystem
-	// ImageNotFound is a canonical path under SystemRoot the image lacks.
+	// ImageNotFound is a canonical path under SystemRoot the image lacks. It
+	// is not looked up anywhere else: /system is the image and nothing more.
 	ImageNotFound
 	// ImageTooLarge is a member whose extent cannot be named in a launch.
 	ImageTooLarge
+	// ImageInvalidPath is a path that is not absolute and canonical.
+	ImageInvalidPath
 )
 
 // LocateImage resolves an absolute executable path in the mapped system image
@@ -31,8 +34,14 @@ const (
 // components. Hard links resolve to the member they name, so every name of one
 // program yields the same extent and shares its read-only pages.
 func LocateImage(image []byte, path []byte) (uint32, uint32, ImageStatus) {
-	if !validPath(path) || len(path) <= len(SystemRoot) || !component(path[:len(SystemRoot)], SystemRoot) {
+	if !validPath(path) {
+		return 0, 0, ImageInvalidPath
+	}
+	if !InSystem(path) {
 		return 0, 0, ImageOutsideSystem
+	}
+	if len(path) <= len(SystemRoot) {
+		return 0, 0, ImageNotFound
 	}
 	// Archive members carry their whole path without the leading slash, so
 	// "/system/vfs" is the member "system/vfs".
@@ -44,4 +53,11 @@ func LocateImage(image []byte, path []byte) (uint32, uint32, ImageStatus) {
 		return 0, 0, ImageTooLarge
 	}
 	return uint32(offset), uint32(size), ImageFound
+}
+
+// InSystem reports whether a canonical path is /system or lies under it, where
+// only the system image is looked in.
+func InSystem(path []byte) bool {
+	root := SystemRoot[:len(SystemRoot)-1]
+	return component(path, root) || len(path) > len(SystemRoot) && component(path[:len(SystemRoot)], SystemRoot)
 }

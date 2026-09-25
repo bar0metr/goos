@@ -180,6 +180,19 @@ func checkOutputIsWriteOnly() {
 	}
 }
 
+// checkNoLoaderAuthority proves, in the validation build, that the shell
+// cannot create an executable object: that is PID 1's capability alone, and
+// no handle the shell holds, nor the slot where PID 1 keeps it, is taken for
+// it (ADR 0097).
+func checkNoLoaderAuthority() {
+	for _, candidate := range []handle.ID{0, logHandle, outputHandle, handle.ID(0x0000000100000017)} {
+		if _, status := sys.ExecutableCreate(candidate, 1); status != kcall.StatusPermissionDenied {
+			return
+		}
+	}
+	mark("EXECUTABLE_CREATE_DENIED_OK\n")
+}
+
 func writeUint(value uint64) {
 	var digits [20]byte
 	position := len(digits)

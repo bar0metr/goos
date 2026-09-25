@@ -216,11 +216,13 @@ The native kernel and the first isolated services are implemented:
   capability-scoped VFS session, and bounded stdin file redirection with `<`
   through an isolated producer.
 
-PID 1 runs the supervision policy and resolves every executable in its own
-read-only mapping of the system image; the kernel launches only an extent of
-that image under an image capability with Execute, and knows no path but the
-bootstrap `system/init` (ADR 0093). The shell resolves native executables
-beneath `/system/bin` with bounded quoting and structured arguments, runs
+PID 1 runs the supervision policy and resolves every service and system
+command in its own read-only mapping of the system image; the kernel launches
+an extent of that image under an image capability with Execute, or a sealed
+executable object PID 1 filled from a program file elsewhere, and knows no path
+but the bootstrap `system/init` (ADR 0093, 0097). The shell resolves native
+executables beneath `/system/bin`, runs program paths such as `./args`, with
+bounded quoting and structured arguments, runs
 pipelines of up to four processes, `;` sequences, and background jobs, and
 redirects stdin with `<`, stdout with `>`/`>>`, and stderr with `2>`/`2>>`.
 Every command is a separate process that receives only its standard streams

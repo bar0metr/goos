@@ -33,8 +33,8 @@ continues only after the replacement Process and Task exist.
 
 PID 1 is its own executable source. Before it launches anything it maps the
 immutable system image read-only (`ImageMap`, handle `0x100000015`), and it
-resolves every executable path there with `exec.LocateImage`: the path must be
-canonical and under `/system/`, and hard links resolve to the program they name.
+resolves every executable path under `/system/` there with `exec.LocateImage`:
+the path must be canonical, and hard links resolve to the program they name.
 A missing path is answered "command not found" without asking the kernel.
 Launch requests (lifecycle version 7) then identify the executable as an extent
 of the image, `{image handle, offset, length}`, plus a display name for `ps`.
@@ -42,6 +42,16 @@ The kernel resolves no path: it requires Execute on the image handle, checks
 that the extent lies inside the image, validates the native image, assigns a
 fresh process identifier from a bounded pool, and creates a new address space
 and initial task (ADR 0093).
+
+A command path outside `/system` is a program on a filesystem. PID 1 reads it
+through a VFS session of its own into an executable object: it creates the
+object with its loader capability (handle `0x100000017`) at the file's size,
+appends the file to it, and names the whole sealed object in the launch
+request instead of an image extent. A file that is not a regular file of at
+most 1 MiB, or whose size changes while it is read, is refused. Such a program
+receives its standard streams and no other grant, and PID 1 closes the object
+once the kernel has answered (ADR 0097). Services are launched only from the
+image, and paths in `/system` outside `/system/bin` are not commands.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
 assembly entry supplies the native kernel-call ABI, while a fixed 32 KiB stack

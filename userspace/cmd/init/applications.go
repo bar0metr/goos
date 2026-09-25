@@ -11,6 +11,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
+	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/sys"
@@ -51,9 +52,23 @@ func openVFSSession() (handle.ID, string) {
 }
 
 func launchApplication(path, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
-	// A command the image does not hold is reported before a session or a
-	// stream is committed to it.
-	executable, processName, located := locateExecutable(path)
+	// A command that cannot be found or read is reported before a session or
+	// a stream is committed to it.
+	executable, processName, located := openExecutable(path)
+	// Grants are for the commands of the immutable image. A program read from
+	// the filesystem gets its standard streams and nothing more, whatever it
+	// is called (ADR 0097).
+	_, searchPath := execproto.CommandFromSystemPath(path)
+	grantable := searchPath && executable.Image == systemImageHandle
+	process, processHandle, launched := launchExecutable(executable, processName, located, grantable, command, cwd, arguments, environment, streams)
+	closeExecutable(executable)
+	if launched == supervisor.LaunchOK && executable.Image != systemImageHandle {
+		mark("FILE_EXEC_OK\n")
+	}
+	return process, processHandle, launched
+}
+
+func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	if located != supervisor.LaunchOK {
 		// The kernel used to record this when it did the lookup; the record
 		// moved with the lookup, so a failed command still leaves a trace.
@@ -65,7 +80,7 @@ func launchApplication(path, command, cwd, arguments, environment []byte, stream
 		return 0, 0, located
 	}
 	var pair [2]uint64
-	useVFS := commandGrants(command)&commands.GrantVFS != 0
+	useVFS := grantable && commandGrants(command)&commands.GrantVFS != 0
 	if useVFS {
 		session, reason := openVFSSession()
 		if reason != "" {

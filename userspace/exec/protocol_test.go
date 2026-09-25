@@ -181,7 +181,8 @@ func TestPipelineProtocolRejectsInvalidStageAndOverflow(t *testing.T) {
 		func(r *Request) { r.Count, r.ErrorSource = 1, 1 },
 		func(r *Request) { r.ErrorSource = MaxStages },
 		func(r *Request) { r.ErrorSource = 255 },
-		func(r *Request) { r.Stages[3].Path = []byte("/tmp/readline") },
+		func(r *Request) { r.Stages[3].Path = []byte("tmp/readline") },
+		func(r *Request) { r.Stages[3].Path = []byte("/tmp/../readline") },
 		func(r *Request) { r.Stages[3].Arguments = []byte{1, 8, 'x'} },
 		func(r *Request) { r.Environment = []byte{1} },
 		func(r *Request) {
@@ -200,6 +201,22 @@ func TestPipelineProtocolRejectsInvalidStageAndOverflow(t *testing.T) {
 		if _, ok := EncodeRequest(request, &slot); ok {
 			t.Fatal("accepted invalid pipeline")
 		}
+	}
+}
+
+// A stage may name a program anywhere in the namespace; PID 1 decides where it
+// is read from and whether it may run (ADR 0097).
+func TestProtocolCarriesPathsOutsideSystemBin(t *testing.T) {
+	request := pipelineRequest(t)
+	request.Stages[3].Path = []byte("/home/demo/readline")
+	var slot [SlotSize]byte
+	data, ok := EncodeRequest(request, &slot)
+	if !ok {
+		t.Fatal("refused a canonical path outside /system/bin")
+	}
+	decoded, ok := DecodeRequest(data)
+	if !ok || string(decoded.Stages[3].Path) != "/home/demo/readline" {
+		t.Fatalf("decoded %q, %v", decoded.Stages[3].Path, ok)
 	}
 }
 

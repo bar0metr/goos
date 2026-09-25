@@ -31,8 +31,9 @@ DMA, and IRQ authority. A bounded FAT32 filesystem service, a process of its
 own that the VFS mounts at `/persist`, reaches that block service through a
 dedicated capability-scoped endpoint (ADR 0096). Every process after PID 1 is
 launched from an extent of the immutable system image that PID 1 names under
-an image capability with Execute; the kernel resolves no application path
-(ADR 0093).
+an image capability with Execute, or, for a program outside `/system`, from an
+executable object PID 1 filled from the file; the kernel resolves no
+application path (ADR 0093, 0097).
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for standard-stream redirection and carry

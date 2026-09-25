@@ -136,6 +136,7 @@ func userspaceMain() {
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
 	if validation.Enabled {
 		checkOutputIsWriteOnly()
+		checkNoLoaderAuthority()
 	}
 	loadPrompt()
 	write("\n")

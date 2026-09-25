@@ -104,11 +104,15 @@ kernel halts.
 ## PID 1 and service start order
 
 PID 1 is a freestanding TinyGo program (ADR 0023). It first maps the
-read-only system image through its image capability: every executable it
-launches is found there (ADR 0093). In a validation build it then:
+read-only system image through its image capability: every service and every
+command in `/system/bin` it launches is found there (ADR 0093); a program
+elsewhere is read into an executable object (ADR 0097). In a validation build
+it then:
 
 1. proves that the kernel refuses launches without Execute authority, outside
-   the image, or of bytes that are not a native image (`LAUNCH_AUTHORITY_OK`),
+   the image, or of bytes that are not a native image, and executable objects
+   that are unsealed, named in part, closed, or not a program
+   (`LAUNCH_AUTHORITY_OK`),
    and probes a native byte stream end to end;
 2. registers `fault-probe` (restart on failure) and adopts the already running
    PID 3 as its first instance;
@@ -141,8 +145,10 @@ In every build it then:
    restart backoff while a restart is pending (ADR 0051, 0064, 0078).
 
 Each launch is a correlated request on the lifecycle channel that names the
-executable as an extent of the system image. The kernel checks Execute on the
-image capability and the extent's bounds, validates the capability manifest,
+executable as an extent of the system image, or a sealed executable object.
+The kernel checks Execute on the image capability and the extent's bounds, or
+Execute on the object and that it is sealed and named whole, validates the
+capability manifest,
 loads the image, installs handles, binds the startup block, and creates the
 task (ADR 0024, 0031, 0062, 0093).
 

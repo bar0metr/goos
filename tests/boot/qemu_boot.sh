@@ -293,6 +293,22 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'cat /persist/home/demo/message.txt\n'
 	sleep 1
+	# A program on the persistent volume runs from there: PID 1 reads it into
+	# an executable object and the kernel launches the object (ADR 0097).
+	printf 'cp /system/bin/args /home/demo/args\n'
+	sleep 3
+	printf '/home/demo/args file-exec "from the volume"\n'
+	sleep 3
+	printf 'cd /home/demo; ./args relative-file-exec; cd /\n'
+	sleep 3
+	printf '/home/demo/args piped-file-exec | readline\n'
+	sleep 3
+	printf '/home/demo/message.txt\n'
+	sleep 2
+	printf '/home/demo/missing\n'
+	sleep 2
+	printf '/system/vfs\n'
+	sleep 1
 	printf 'cd /system\n'
 	sleep 1
 	printf 'ls\n'
@@ -488,7 +504,8 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-wait_for_marker boot '^arena-stress-complete$' 180 "$log"
+# The scripted session sleeps about 200 seconds between its commands.
+wait_for_marker boot '^arena-stress-complete$' 240 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -689,6 +706,8 @@ checks=$((checks + 1))
 ( sleep 4
 	printf 'cat /persist/state.txt\n'
 	sleep 2
+	printf '/home/demo/args after-reboot\n'
+	sleep 3
 	printf 'cat /state/system.log.1\n'
 	sleep 2
 	printf 'ls /state\n'
@@ -713,8 +732,25 @@ forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on r
 # record out of it proves the log survived the reset.
 require_window persistence.reboot-log '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
 # The value set in the previous session is restored over the schema default.
+require_regex persistence.reboot-file-exec '^after-reboot$' 'a program on the volume run after the reset' "$reboot_log" 'goos> /home/demo/args after-reboot'
 require_window persistence.reboot-config '^boot-test$' 'a setting restored from the previous session' "$reboot_log" 'goos> config get user.name' 'NO_SUCH_LINE'
 pass_group persistence
+
+# Programs outside /system run from executable objects PID 1 fills (ADR 0097).
+# The kernel proves the object's bounds and sealing at boot, the shell proves
+# it cannot create one, and PID 1 proves partial, unsealed, closed and
+# non-program objects are refused.
+require_marker file-exec.kernel-object EXECUTABLE_OBJECT_OK "$log"
+require_marker file-exec.shell-denied EXECUTABLE_CREATE_DENIED_OK "$log"
+require_marker file-exec.launched FILE_EXEC_OK "$log" '/home/demo/args'
+require_window file-exec.absolute '^file-exec from the volume$' 'arguments printed by the copy on /home' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
+require_window file-exec.environment '^PATH=/system/bin$' 'the shell environment given to the copy' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
+require_regex file-exec.relative '^relative-file-exec$' 'a program path relative to the working directory' "$log" './args relative-file-exec'
+require_regex file-exec.pipeline '^piped-file-exec$' 'a program from the volume as a pipeline stage' "$log" 'piped-file-exec | readline'
+require_regex file-exec.not-a-program '^/home/demo/message.txt: not a valid executable$' 'a data file refused by the validator' "$log" 'goos> /home/demo/message.txt'
+require_regex file-exec.missing '^/home/demo/missing: command not found$' 'a missing program named by its path' "$log" 'goos> /home/demo/missing'
+require_regex file-exec.service-refused '^/system/vfs: permission denied$' 'a service of the image is not a command' "$log" 'goos> /system/vfs'
+pass_group file-exec
 
 # The persistent log is a service, not a kernel feature: it drains the bounded
 # kernel ring onto the volume so a session's records outlive its reset.
