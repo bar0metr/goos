@@ -88,8 +88,7 @@ member of the system image is equally trusted.
 ## Consequences
 
 The normal launch path contains no path handling and no USTAR lookup; the only
-`initramfs` call left in the kernel is the bootstrap `Find`, which also serves
-the validation self-tests. `initramfs.Locate` is gone; `initramfs.Extent`
+`initramfs` call left in the kernel is the bootstrap `Find` of `system/init`. `initramfs.Locate` is gone; `initramfs.Extent`
 reports where a member's bytes lie.
 
 The validation build proves the authority rules from PID 1
