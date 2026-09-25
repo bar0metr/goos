@@ -585,6 +585,9 @@ func mapStatus(status ramfs.Status) Status {
 		return StatusResourceExhausted
 	case ramfs.StatusPermissionDenied:
 		return StatusPermissionDenied
+	case ramfs.StatusIOError:
+		// A filesystem service that is gone or stalled is a storage error.
+		return StatusBackendError
 	default:
 		return StatusBackendError
 	}

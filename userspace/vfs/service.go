@@ -5,15 +5,20 @@ import (
 	"goos/kernel/initramfs"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
-	"goos/userspace/fat32"
 )
 
 type Service struct {
-	fs         ramfs.FileSystem
-	namespace  vfs.Namespace
-	readData   [vfs.MaxReplyData]byte
-	persistent fat32.FileSystem
-	image      initramfs.Archive
+	fs        ramfs.FileSystem
+	namespace vfs.Namespace
+	readData  [vfs.MaxReplyData]byte
+	image     initramfs.Archive
+	// persistent is the volume the FAT32 filesystem service serves (ADR
+	// 0096). The VFS holds no filesystem code and no block endpoint for it.
+	persistent Remote
+	// persistentRoot is the root the volume was mounted with, so a restarted
+	// service can be checked to serve the same one.
+	persistentRoot    ramfs.NodeID
+	persistentMounted bool
 }
 
 // MountSystemImage mounts the boot image read-only at /system. The executables
@@ -53,9 +58,41 @@ var persistentMounts = [...]struct{ path, directory string }{
 	{"/state", "state"},
 }
 
-func (service *Service) MountPersistent(device fat32.Device) bool {
-	root, ok := service.persistent.Mount(device)
-	if !ok || service.namespace.Mount([]byte("/persist"), &service.persistent, root) != vfs.StatusOK {
+// AttachFilesystem connects the filesystem service at the other end of
+// transport. The first attach mounts its volume at /persist, /home and /state;
+// a later one, after the service was restarted, only checks that the new
+// instance serves the volume those mounts name, so open files and mounts stay
+// valid across the restart. A service that refuses its volume leaves the
+// namespace without persistent mounts rather than without a root.
+func (service *Service) AttachFilesystem(transport Transport) bool {
+	service.persistent.transport = transport
+	root, status := service.persistent.Root()
+	if status != ramfs.StatusOK {
+		return false
+	}
+	if service.persistentMounted {
+		return root == service.persistentRoot
+	}
+	if !service.mountPersistent(root) {
+		return false
+	}
+	service.persistentRoot, service.persistentMounted = root, true
+	return true
+}
+
+// DetachFilesystem forgets a filesystem service that has gone. Its mounts stay
+// in the namespace and answer with I/O errors until a restarted service is
+// attached.
+func (service *Service) DetachFilesystem() { service.persistent.transport = nil }
+
+// PersistentMounted reports whether the persistent volume is in the namespace.
+func (service *Service) PersistentMounted() bool { return service.persistentMounted }
+
+// Sync makes every completed write to the persistent volume durable.
+func (service *Service) Sync() bool { return service.persistent.Flush() }
+
+func (service *Service) mountPersistent(root ramfs.NodeID) bool {
+	if service.namespace.Mount([]byte("/persist"), &service.persistent, root) != vfs.StatusOK {
 		return false
 	}
 	for _, mount := range persistentMounts {

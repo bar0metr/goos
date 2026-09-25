@@ -125,8 +125,13 @@ being accepted as a session request.
 
 ## Startup phases
 
-Services start in two phases. The first registers and launches `vfs`, `block`
-and `virtio-blk`, whose endpoints PID 1 holds from boot. The second starts the
+Services start in two phases. The first registers and launches `vfs`, `block`,
+`virtio-blk` and `fat32`, whose endpoints PID 1 holds from boot or creates
+before registering them. Once `fat32` runs, PID 1 hands the VFS its channel to
+it through the VFS control endpoint and waits for the persistent volume to be
+mounted, so the services started next find `/state` (ADR 0096). `fat32`
+restarts on failure; PID 1 then gives the new instance fresh channels to the
+VFS and the block service and hands their other ends over as at first start. The second starts the
 log service and then the shell.
 
 The split exists because the log service's VFS session cannot be handed over at

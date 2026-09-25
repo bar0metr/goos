@@ -117,28 +117,41 @@ func userspaceMain() {
 	syslog.Info("ready")
 	for {
 		arena.Reset(arenaBase)
+		// The filesystem endpoint is absent while the filesystem service is
+		// being restarted: waiting on a closed one would wake at once, forever.
 		endpoints := [...]handle.ID{controlHandle, serviceHandle, filesystemHandle}
+		count := len(endpoints)
+		if filesystemHandle == 0 {
+			count--
+		}
 		var interests [userwait.MaxObjects]userwait.Interest
-		for index, endpoint := range endpoints {
+		for index, endpoint := range endpoints[:count] {
 			interests[index] = userwait.Interest{Handle: endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		}
-		result, status := userwait.Any(&interests, len(endpoints), kcall.WaitAnyInfiniteTimeout)
+		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
 		if status != kcall.StatusOK {
 			fatal("BLOCK_WAIT_FAILED\n")
 		}
-		for index, endpoint := range endpoints {
+		for index, endpoint := range endpoints[:count] {
 			if result.ReadyMask&(1<<index) == 0 {
 				continue
 			}
 			if index == 0 {
-				setDriver()
+				control()
 				continue
 			}
-			// A client that has gone leaves its endpoint readable forever. It
-			// is not a reason to stop serving the others: this service outlives
-			// the processes that use it.
-			if sys.IPCReceive(endpoint, wire[:]) != ipc.StatusOK {
-				syslog.Warn("client endpoint closed")
+			// A client that has gone is not a reason to stop serving the
+			// others: this service outlives the processes that use it. A
+			// filesystem service that has died is dropped until PID 1 hands
+			// over its replacement's endpoint.
+			if status := sys.IPCReceive(endpoint, wire[:]); status != ipc.StatusOK {
+				if status == ipc.StatusPeerDied && endpoint == filesystemHandle {
+					sys.HandleClose(filesystemHandle)
+					filesystemHandle = 0
+					syslog.Warn("filesystem endpoint closed")
+				} else if status != ipc.StatusNotFound {
+					syslog.Warn("client endpoint closed")
+				}
 				continue
 			}
 			serve(endpoint)
@@ -146,9 +159,10 @@ func userspaceMain() {
 	}
 }
 
-// setDriver installs the endpoint of a restarted driver. PID 1 holds the only
-// control endpoint, so nothing else can redirect where storage requests go.
-func setDriver() {
+// control installs the endpoint of a restarted driver or filesystem service.
+// PID 1 holds the only control endpoint, so nothing else can redirect where
+// storage requests go or who may make them.
+func control() {
 	if sys.IPCReceive(controlHandle, controlWire[:]) != ipc.StatusOK {
 		return
 	}
@@ -156,9 +170,15 @@ func setDriver() {
 	if !ipc.DecodeInto(controlWire[:ipc.WireHeaderSize+payloadSize+int(controlWire[26])*8], &controlMessage) {
 		return
 	}
-	replacement, valid := blockproto.DecodeSetDriver(controlMessage)
 	status := blockproto.StatusOK
-	if !valid {
+	if filesystem, valid := blockproto.DecodeSetFilesystem(controlMessage); valid {
+		if filesystemHandle != 0 {
+			sys.HandleClose(filesystemHandle)
+		}
+		filesystemHandle = filesystem
+		syslog.Info("filesystem client replaced")
+		mark("BLOCK_FILESYSTEM_REPLACED_OK\n")
+	} else if replacement, valid := blockproto.DecodeSetDriver(controlMessage); !valid {
 		status = blockproto.StatusInvalidArgument
 	} else {
 		sys.HandleClose(driverHandle)

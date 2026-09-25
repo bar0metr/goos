@@ -7,10 +7,31 @@ import (
 
 const (
 	ControlProtocolID   = uint64(0x4756465343544c31)
-	ControlVersion      = uint16(3)
+	ControlVersion      = uint16(4)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
+	// operationSetFilesystem hands the service the client end of a channel to
+	// the persistent filesystem service, at its first start and after every
+	// restart (ADR 0096).
+	operationSetFilesystem = byte(3)
 )
+
+func SetFilesystemRequest(client handle.ID, correlation uint64) (ipc.Message, bool) {
+	if client == 0 || correlation == 0 {
+		return ipc.Message{}, false
+	}
+	return ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, Payload: [ipc.MaxPayload]byte{operationSetFilesystem}, PayloadSize: 1,
+		Handles: [ipc.MaxAttachedHandles]handle.ID{client}, HandleCount: 1}, true
+}
+
+func DecodeSetFilesystem(message ipc.Message) (handle.ID, bool) {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest || message.Correlation == 0 ||
+		message.PayloadSize != 1 || message.Payload[0] != operationSetFilesystem || message.HandleCount != 1 {
+		return 0, false
+	}
+	return message.Handles[0], message.Handles[0] != 0
+}
 
 // SyncRequest asks the VFS service to make every completed write durable.
 func SyncRequest(correlation uint64) (ipc.Message, bool) {

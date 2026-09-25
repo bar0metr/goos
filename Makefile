@@ -32,6 +32,8 @@ BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
 VIRTIO_BLOCK_ELF = $(OUT_DIR)/userspace/virtio-blk.elf
+FAT32_IMAGE = $(OUT_DIR)/userspace/fat32
+FAT32_ELF = $(OUT_DIR)/userspace/fat32.elf
 LOG_IMAGE = $(OUT_DIR)/userspace/log
 LOG_ELF = $(OUT_DIR)/userspace/log.elf
 CONFIG_IMAGE = $(OUT_DIR)/userspace/config
@@ -115,7 +117,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAM
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -177,6 +179,14 @@ $(VIRTIO_BLOCK_IMAGE): $(VIRTIO_BLOCK_ELF) tools/elf2native/main.go kernel/loade
 	@$(STACKFRAMES) $(VIRTIO_BLOCK_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_BLOCK_ELF) $@
 
+$(FAT32_ELF): $(call go_deps,./userspace/cmd/fat32) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/fat32
+
+$(FAT32_IMAGE): $(FAT32_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(FAT32_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(FAT32_ELF) $@
+
 $(LOG_ELF): $(call go_deps,./userspace/cmd/logd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/logd
@@ -215,7 +225,7 @@ initramfs: userspace
 	@# A command whose directory was removed leaves its image behind; the
 	@# archive takes only the commands the tree still has.
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
@@ -262,7 +272,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1

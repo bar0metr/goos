@@ -84,7 +84,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | PID 1 slot | Object | PID 1 rights | Derived to | Child rights | Consumed |
 | --- | --- | --- | --- | --- | --- |
 | 1 | lifecycle channel | R W Wait | PID 1 only | - | - |
-| 2 | console device | R W T | VFS, block, virtio-blk, config, log | W | no |
+| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log | W | no |
 | | | | tty `console` | R W | no |
 | 3 | VFS session, client end | R W Wait T | shell `vfs` | R W Wait | yes |
 | 4 | VFS session, server end | R W Wait T | VFS `session` | R W Wait | yes |
@@ -99,12 +99,12 @@ uses slot 9 for a block-service probe (ADR 0058).
 | 13 | DMA domain 1 | W T | virtio-blk `dma` | W | no |
 | 14 | driver, client end | R W Wait T | block `driver` | R W Wait | yes |
 | 15 | driver, server end | R W Wait T | virtio-blk `service` | R W Wait | yes |
-| 16 | FS-block, client end | R W Wait T | VFS `block` | R W Wait | yes |
+| 16 | FS-block, client end | R W Wait T | fat32 `block` (first launch) | R W Wait | yes |
 | 17 | FS-block, server end | R W Wait T | block `filesystem` | R W Wait | yes |
 | 18 | system control | W | PID 1 only | - | - |
 | 19 | launch staging page (memory) | R W | PID 1 only; mapped by the kernel at `0x401ff000` | - | - |
 | 20 | exec page (memory) | R W T | shell `execpage` | R W | no |
-| 21 | system image | R T | VFS `image` | R | yes |
+| 21 | system image | R X T | VFS `image` | R | no; PID 1 keeps it to launch from (ADR 0093) |
 | 22 | log | R T | log `log`, shell `log` | R | no |
 
 The driver's port, IRQ, and DMA authority is granted, not consumed, so PID 1
@@ -134,8 +134,10 @@ holds. The validation build additionally keeps both services' process handles
 for fault injection.
 
 PID 1 also creates channels at run time with `ChannelCreate`: the block
-service's `control` endpoint, over which a restarted driver's channel is
-delivered; the config service's `control` endpoint; one configuration session
+service's `control` endpoint, over which a restarted driver's channel and a
+restarted FAT32 service's block channel are delivered; the channel between
+the VFS and the FAT32 service, renewed with the block channel on every restart
+of that service, whose VFS end goes over the VFS control endpoint (ADR 0096); the config service's `control` endpoint; one configuration session
 each for the shell (whole namespace, read and write) and the log service
 (`system.log.`, read only); and one VFS session each for the log service, the
 config service, its own reading of the command index, and every command whose

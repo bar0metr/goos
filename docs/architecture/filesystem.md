@@ -1,21 +1,21 @@
 # Filesystem stack
 
-Files reach applications through four isolated components. None of them runs
+Files reach applications through five isolated components. None of them runs
 in the kernel, and none holds more authority than its layer needs.
 
 ```text
 utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp)
                                ├─ image backend            (/system, read-only boot archive)
-                               └─ FAT32 backend ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
+                               └─ remote backend ──GFSPRT01──▶ FAT32 service ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
                                   (/persist, /home, /state)
 ```
 
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
-| VFS | `/system/vfs` | control endpoint, one server endpoint per session, block client endpoint | [vfs.md](../userspace/vfs.md), ADR 0018, 0026 |
+| VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096 |
 | RAMFS | inside VFS | nothing; library core | [ramfs.md](../userspace/ramfs.md), ADR 0017 |
 | System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
-| FAT32 | inside VFS | uses the VFS block client endpoint | [storage.md](../userspace/storage.md), ADR 0036 |
+| FAT32 | `/system/fat32` | server end of the VFS channel, block client endpoint | [storage.md](../userspace/storage.md), ADR 0036, 0096 |
 | Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](../userspace/storage.md), ADR 0033 |
 | virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
 
@@ -68,14 +68,15 @@ offset, and are per session.
 ## Request path
 
 A `cat /persist/a.txt` stage issues `GVF1` open, read, and close requests on its
-session. VFS resolves the path to the FAT32 mount, and FAT32 translates the
-file range into sector reads. Each read becomes a `GBLK001` request on the
-block client endpoint, and the block service forwards it to the driver over a
+session. VFS resolves the path to the FAT32 mount and sends each backend call
+as a `GFSPRT01` request to the FAT32 service, which translates the file range
+into sector reads. Each read becomes a `GBLK001` request on the FAT32
+service's block client endpoint, and the block service forwards it to the driver over a
 private channel. The driver performs the virtqueue transfer and waits for
 IRQ 11. Replies unwind in reverse.
 
-Payloads are inline IPC data: at most 224 bytes per VFS reply and 232 bytes
-per block request. FAT32 keeps a four-sector write-through window to avoid
+Payloads are inline IPC data: at most 224 bytes per VFS reply, 224 per FAT32
+read reply and 216 per FAT32 write request, and 232 bytes per block request. FAT32 keeps a four-sector write-through window to avoid
 repeated metadata reads (ADR 0048).
 
 ## Failure behaviour

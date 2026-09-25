@@ -430,17 +430,20 @@ func executeCommand(line []byte) {
 	}
 }
 
-// injectFault asks PID 1 to kill the terminal service or this shell. It exists
-// only in the validation build, where the boot test uses it to show that each
-// restarts on its own while the other keeps working (ADR 0089).
+// injectFault asks PID 1 to kill the terminal service, this shell, or the
+// filesystem service. It exists only in the validation build, where the boot
+// test uses it to show that each restarts on its own while the rest keeps
+// working (ADR 0089, 0096).
 func injectFault(target []byte) {
 	service := execproto.FaultTerminal
 	if argumentIs(target, "shell") {
 		service = execproto.FaultShell
 	} else if argumentIs(target, "kernel-stack") {
 		service = execproto.FaultKernelStack
+	} else if argumentIs(target, "fat32") {
+		service = execproto.FaultFilesystem
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty, shell or kernel-stack\n")
+		write("fault: tty, shell, fat32 or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)

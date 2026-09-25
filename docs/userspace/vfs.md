@@ -41,7 +41,12 @@ Bulk file data will use shared memory.
 PID 1 supervises `/system/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address
 space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archive at
-`/system`, and the persistent volume at `/persist`, `/home` and `/state`. Kernel launch
+`/system`, and the persistent volume at `/persist`, `/home` and `/state`. The
+persistent volume is served by the FAT32 service, a separate process: VFS
+reaches it through a remote backend over the `GFSPRT01` protocol, and mounts it
+when PID 1 hands over the channel with the `SetFilesystem` control operation.
+A dead or stalled FAT32 service is an I/O error on those three mounts only; a
+restarted one is attached under the same mounts and open files (ADR 0096). Kernel launch
 grants explicitly identify the client or server side of a channel; neither
 process infers endpoint identity from handle numbers or launch order.
 The freestanding runtime uses a fixed bump allocator. After persistent service

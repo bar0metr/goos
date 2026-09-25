@@ -128,3 +128,25 @@ func TestControlReplacesTheDriverEndpoint(t *testing.T) {
 		t.Fatalf("reply round trip: %d %v", status, valid)
 	}
 }
+
+func TestSetFilesystemControl(t *testing.T) {
+	message, ok := SetFilesystemRequest(12, 5)
+	if !ok {
+		t.Fatal("encode failed")
+	}
+	server, valid := DecodeSetFilesystem(message)
+	if !valid || server != 12 {
+		t.Fatalf("decoded %d %v", server, valid)
+	}
+	if _, ok := DecodeSetDriver(message); ok {
+		t.Fatal("a filesystem endpoint was taken for a driver")
+	}
+	if _, ok := SetFilesystemRequest(0, 5); ok {
+		t.Fatal("a request with no endpoint was encoded")
+	}
+	corrupt := message
+	corrupt.HandleCount = 0
+	if _, ok := DecodeSetFilesystem(corrupt); ok {
+		t.Fatal("decoded a request with no endpoint")
+	}
+}

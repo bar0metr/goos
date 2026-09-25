@@ -25,7 +25,8 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 host (QEMU, OVMF, ISO, disk image file)
  └─ kernel (ring 0)                        trusted computing base
      ├─ PID 1 (ring 3)                     holds all initial authority
-     │   ├─ VFS service (+ FAT32 backend)  holds VFS sessions, a block client endpoint, the system image mapping
+     │   ├─ VFS service                    holds VFS sessions, the system image mapping (read-only), a channel to the FAT32 service
+     │   ├─ FAT32 service                  holds a channel to the VFS and a block client endpoint; parses the untrusted volume
      │   ├─ block service                  holds block endpoints, driver client endpoint
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
      │   ├─ config service                 holds the configuration store and a VFS session
@@ -95,9 +96,13 @@ attacker-controlled code.
 
 - Each service holds only the endpoints listed in its PID 1 manifest, with
   Transfer removed, so it cannot forward authority it received.
-- VFS compromise exposes every file in its namespace and, through its block
-  client endpoint, the whole disk. It gains no device, port, IRQ, or DMA
-  authority. It also serves `/system/commands`, which PID 1 reads to decide
+- VFS compromise exposes every file in its namespace, including the persistent
+  volume through the FAT32 protocol, but not the raw disk: it holds no block
+  endpoint (ADR 0096). It gains no device, port, IRQ, or DMA authority.
+- FAT32 service compromise, for example through a malformed volume, exposes
+  the persistent volume and the disk through its block endpoint. It gains no
+  namespace, session, other mount, or device authority, and a crash in it is
+  restarted without taking down the VFS. It also serves `/system/commands`, which PID 1 reads to decide
   which commands get a VFS session; a lying VFS can only change who receives a
   session it serves itself. It cannot change what executes: PID 1 resolves
   launches in its own mapping of the archive, the kernel loads only extents of

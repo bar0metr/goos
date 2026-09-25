@@ -245,12 +245,18 @@ func startServices(ticks uint64) {
 	if !createChannel(&blockControl) {
 		fatal("INIT_BLOCK_CONTROL_FAILED\n")
 	}
+	// The channel between the VFS and the filesystem service. The service is
+	// given one end at launch, the VFS the other once the service runs.
+	var filesystemPair [2]uint64
+	if !createChannel(&filesystemPair) {
+		fatal("INIT_FILESYSTEM_CHANNEL_FAILED\n")
+	}
+	filesystemClient = handle.ID(filesystemPair[0])
 	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			{Name: "control", Handle: vfsControlServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			// PID 1 keeps its own copy, with Execute, to launch from the
 			// image; the filesystem service may only read it (ADR 0093).
 			{Name: "image", Handle: systemImageHandle, Type: handle.TypeDevice, Rights: capability.Read},
@@ -275,10 +281,19 @@ func startServices(ticks uint64) {
 				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait},
 				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+		// The FAT32 service parses the untrusted volume in a process of its
+		// own, between the VFS and the block service (ADR 0096). It holds a
+		// channel to each and nothing else: no namespace, no device.
+		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/system/fat32", Dependencies: []string{"block"},
+			Capabilities: []supervisor.Capability{
+				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+				{Name: "vfs", Handle: handle.ID(filesystemPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+				{Name: "block", Handle: filesystemBlockClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
-	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 3 || validation.Enabled && !probeBlockService() {
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 4 || validation.Enabled && !probeBlockService() {
 		fatal("SHELL_LAUNCH_FAILED\n")
 	}
 	// The log service comes after the filesystem and before the shell: its
@@ -700,6 +715,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if shellStarted && bytesString(spec.Name[:spec.NameSize]) == "shell" && !renewShellSession(&spec) {
 		return 0, false
 	}
+	if filesystemStarted && bytesString(spec.Name[:spec.NameSize]) == filesystemName && !renewFilesystemChannels(&spec) {
+		return 0, false
+	}
 	executable, processName, located := locateExecutable(spec.Executable[:spec.ExecutableSize])
 	if located != supervisor.LaunchOK {
 		if !supervisionComplete {
@@ -728,7 +746,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell")
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName)
 	if keep && launched == supervisor.LaunchOK {
 		switch name {
 		case driverName:
@@ -737,6 +755,8 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			ttyProcessHandle = keepProcess(ttyProcessHandle, event.ProcessHandle)
 		case "shell":
 			shellProcessHandle = keepProcess(shellProcessHandle, event.ProcessHandle)
+		case filesystemName:
+			filesystemProcessHandle = keepProcess(filesystemProcessHandle, event.ProcessHandle)
 		}
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
@@ -756,6 +776,10 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	if name == driverName {
 		driverStarted = true
+	}
+	if name == filesystemName {
+		attachFilesystem()
+		filesystemStarted = true
 	}
 	if name == "tty" {
 		if ttyStarted {
@@ -1135,6 +1159,12 @@ func handleControl(message ipc.Message) {
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
 	case operation == execproto.ControlKill:
 		sendControlStatus(killJob(argument), message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultFilesystem:
+		status := execproto.ControlNotFound
+		if injectFilesystemFault() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault:
 		status := injectSessionFault(argument)
 		// A shell that was stopped is not there to be answered.

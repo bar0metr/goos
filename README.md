@@ -197,8 +197,9 @@ The native kernel and the first isolated services are implemented:
   IRQ and DMA authority, and an isolated ring-3 virtio-blk probe driver.
 - a persistent legacy virtio-blk data path with bounded DMA, IOAPIC-backed IRQ
   waits, a private driver channel, and QEMU-verified read/write/flush requests.
-- a bounded FAT32 backend mounted at `/persist`, reached through VFS and a
-  dedicated capability-scoped block-service endpoint, with persistence verified
+- a bounded FAT32 filesystem service, a process of its own mounted at
+  `/persist` through VFS and reaching the disk over a dedicated
+  capability-scoped block-service endpoint, with persistence verified
   across separate QEMU boots.
 - user data at `/home` and mutable system state at `/state` on that volume,
   named apart from the immutable system image.

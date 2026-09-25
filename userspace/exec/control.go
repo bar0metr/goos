@@ -36,13 +36,15 @@ const (
 	ControlPowerOff
 )
 
-// The targets ControlFault may name: an interactive service to kill, or the
-// kernel stack of PID 1's own native call, which the kernel overflows on
-// purpose and which ends the machine (ADR 0091).
+// The targets ControlFault may name: an interactive service to kill, the
+// persistent filesystem service (ADR 0096), or the kernel stack of PID 1's own
+// native call, which the kernel overflows on purpose and which ends the
+// machine (ADR 0091).
 const (
 	FaultTerminal uint8 = iota + 1
 	FaultShell
 	FaultKernelStack
+	FaultFilesystem
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -105,7 +107,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument == FaultTerminal || argument == FaultShell || argument == FaultKernelStack
+		return argument >= FaultTerminal && argument <= FaultFilesystem
 	default:
 		return false
 	}
