@@ -142,7 +142,6 @@ func putFile(volume *fat32.FileSystem, root ramfs.NodeID, source, path string) e
 	return nil
 }
 
-
 // valid reports whether path already holds a FAT32 volume of any geometry.
 func valid(path string) bool {
 	file, err := os.Open(path)

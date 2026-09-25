@@ -7,12 +7,12 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/logfmt"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/executable"
-	"goos/kernel/loader"
-	"goos/internal/logfmt"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/kernel/loader"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"

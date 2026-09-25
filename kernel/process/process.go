@@ -32,8 +32,8 @@ type Process struct {
 	// reads its pages from, or zero (ADR 0106).
 	executable uint64
 	cpuTicks   uint64
-	name     [16]byte
-	nameSize uint8
+	name       [16]byte
+	nameSize   uint8
 }
 
 // Init prepares a process slot in place; see stream.Stream.Reset. Returning a

@@ -10,7 +10,9 @@ type memory struct {
 	allocated int
 }
 
-func newMemory(limit int) *memory { return &memory{pages: map[uint64][]byte{}, next: PageSize, limit: limit} }
+func newMemory(limit int) *memory {
+	return &memory{pages: map[uint64][]byte{}, next: PageSize, limit: limit}
+}
 
 func (m *memory) Allocate() (uint64, bool) {
 	if m.allocated == m.limit {
