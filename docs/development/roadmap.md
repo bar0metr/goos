@@ -363,8 +363,16 @@ ADR 0092 adds `poweroff`, which flushes storage and switches the machine off
 through ACPI S5; the kernel reads the firmware's ACPI tables once at boot as
 untrusted input.
 
-GoOS 0.1.0 is released (docs/releases/0.1.0.md). The next milestone is
-Priority 5, Linux ELF compatibility.
+GoOS 0.1.0 is released (docs/releases/0.1.0.md).
+
+GoOS 0.1.1 (docs/releases/0.1.1.md) is an architectural cleanup that removes
+0.1.0 shortcuts before Linux compatibility depends on them: the kernel launches
+extents of the system image instead of resolving paths (ADR 0093), the
+identity-authorized `DebugWrite` is retired (ADR 0094), userspace `unsafe` is
+confined to `userspace/runtime` (ADR 0095), FAT32 runs as its own service
+(ADR 0096), the kernel, PID 1 and shell sources are split by responsibility,
+and `make release-check` gates a release. The next milestone is Priority 5,
+Linux ELF compatibility.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

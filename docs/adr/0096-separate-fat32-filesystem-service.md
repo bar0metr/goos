@@ -84,7 +84,29 @@ reaches the disk only through the FAT32 protocol, and a compromised FAT32
 service reaches the volume but not the namespace, sessions, or other mounts.
 
 Each persistent operation costs one more IPC round trip, and data moves in
-chunks of at most 224 bytes. The validation boot test kills the service
+chunks of at most 224 bytes. To keep that to the operations that need the
+volume, the remote backend caches node attributes: lookups and creations
+return the node's kind and size with the node, a stat of a node seen before
+costs no exchange, and a read at or past the end of a file is answered without
+one. The cache is coherent because the VFS is the service's only client and
+serves one request at a time; writes and truncations update it, renames and
+unlinks, which can move node IDs, and any transport failure drop it, and a
+newly attached service starts with it empty.
+
+Measured against 0.1.0 at 100 Hz under QEMU TCG on the same host, with both
+disk images on the same volume (10 runs, medians): `cat /persist/latency.txt`
+2585 → 2730 µs (+6%), `echo y > /persist/latency.txt` 6489 → 6974 µs (+7%),
+`bench read` of a resident FAT32 file 512 → 548 µs per open-read-close (+7%),
+and a 16 KiB read beyond the sector cache 48.1 → 54.6 ms (+13%). Commands off
+the persistent volume, IPC ping-pong, streams, and RAMFS are unchanged within
+noise. The cost is the extra address-space switch per exchange; the
+shared-memory page cache the specification describes is what removes it, and
+the protocol already names data by node and offset for that.
+
+An earlier comparison reported the persistent write 45% slower. It had placed
+the two builds' disk images on different host volumes, and QEMU writes the
+image file synchronously; with both on one volume the difference is the 7%
+above. The validation boot test kills the service
 (`fault fat32`) under a running system and requires `/tmp` and the shell to
 keep working, the block service and the VFS to take the new endpoints, and a
 file on `/home` to be read again through the restarted service.

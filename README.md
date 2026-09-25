@@ -211,28 +211,24 @@ The native kernel and the first isolated services are implemented:
   bounded buffering, backpressure, and close-driven EOF.
 - scheduler-backed native pipelines of up to four processes with directional
   startup capabilities and no POSIX file descriptors.
-- bounded stdout file redirection with `>` and `>>` through an isolated stream consumer
-  and bounded stdin file redirection with `<` through an isolated producer.
-  and capability-scoped VFS session.
+- bounded stdout file redirection with `>` and `>>` and stderr redirection with
+  `2>` and `2>>`, each through an isolated stream consumer with its own
+  capability-scoped VFS session, and bounded stdin file redirection with `<`
+  through an isolated producer.
 
-The init policy core, initramfs discovery, PID 1 launch, general initramfs image
-resolution, and kernel-side process death delivery are implemented. PID 1 runs
-the policy loop and enforces bounded crash restart accounting. Spawn capability
-installation, a userspace VFS service, an interactive filesystem-aware shell,
-and capability-bounded native utility launch are implemented. The shell resolves
-general native executables beneath `/system/bin` with bounded quoting and
-structured arguments, pipelines of up to four processes, and bounded `;` command
-sequences. Files can feed stdin through one bounded `<` target, and stdout can
-be truncated or appended through `>` or `>>`; stderr redirection is not yet exposed. The current ISO boots a real
-kernel, leaves UEFI boot services, installs its own page tables, runs preempted
-kernel tasks,
-verifies process address-space isolation, and runs supervised native programs
-at CPL 3. It is now interactively usable for the built-in shell commands, but
-is not yet a general application environment. Native programs no longer assume
-numeric handle slots and the Priority 1 base application environment is complete.
-The storage path reaches a persistent QEMU block device through an isolated
-driver, and native utilities can access bounded FAT32 regular files at
-`/persist`, `/home` and `/state` through VFS.
+PID 1 runs the supervision policy and resolves every executable in its own
+read-only mapping of the system image; the kernel launches only an extent of
+that image under an image capability with Execute, and knows no path but the
+bootstrap `system/init` (ADR 0093). The shell resolves native executables
+beneath `/system/bin` with bounded quoting and structured arguments, runs
+pipelines of up to four processes, `;` sequences, and background jobs, and
+redirects stdin with `<`, stdout with `>`/`>>`, and stderr with `2>`/`2>>`.
+Every command is a separate process that receives only its standard streams
+and, if its manifest asks, one VFS session: the native application environment
+of specification milestone 6 is complete. The storage path reaches a
+persistent QEMU block device through an isolated driver, block service, and
+FAT32 filesystem service, and native utilities use `/persist`, `/home` and
+`/state` through VFS.
 
 PID 1, VFS, and the block service use event-driven multi-object waits for their
 independent control and client endpoints. A wake marks the task runnable and the
@@ -292,7 +288,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.0
+GoOS 0.1.1
 
 CPU: x86_64
 Memory: 368 MiB usable
@@ -305,6 +301,7 @@ Starting services...
 [ OK ] vfs
 [ OK ] block
 [ OK ] virtio-blk
+[ OK ] fat32
 [ OK ] config
 [ OK ] log
 [ OK ] tty
@@ -334,6 +331,7 @@ virtio-blk
 log
 config
 tty
+fat32
 commands
 goos> ls /system/bin
 args
@@ -365,21 +363,22 @@ goos> cat /home/user/notes.txt
 Hello from GoOS
 goos> ps
 PID   TYPE     STATE      MEM  CPU   COMMAND
-1     native   waiting    138  6     init
-4     native   waiting    84   4     vfs
-5     native   waiting    47   2     block
-6     native   waiting    50   0     virtio-blk
-7     native   waiting    50   0     config
-8     native   waiting    46   1     log
-9     native   waiting    46   3     tty
-10    native   waiting    48   4     shell
-18    native   running    46   0     ps
+1     native   waiting    160  4     init
+4     native   waiting    84   6     vfs
+5     native   waiting    47   4     block
+6     native   waiting    50   2     virtio-blk
+7     native   waiting    47   4     fat32
+8     native   waiting    50   2     config
+9     native   waiting    46   1     log
+10    native   waiting    46   0     tty
+11    native   waiting    48   7     shell
+19    native   running    46   1     ps
 goos> quota
 PID   COMMAND           RESOURCE  HELD/LIMIT
-1     init              chan      15/24
+1     init              chan      16/24
 1     init              strm      2/24
 1     init              task      1/8
-1     init              page      138/512
+1     init              page      160/512
 4     vfs               chan      0/4
 4     vfs               strm      0/4
 4     vfs               task      1/4
@@ -430,12 +429,17 @@ report what each process holds. A supervised log service persists the kernel
 ring to `/state`, so records survive a reboot, and a typed configuration service
 holds the system's settings, which the shell and the log service consult.
 GoOS 0.1.0 is released; [docs/releases/0.1.0.md](docs/releases/0.1.0.md)
-summarises it and lists its known limitations. The next milestone is Linux ELF
-compatibility.
+summarises it and lists its known limitations. GoOS 0.1.1
+([docs/releases/0.1.1.md](docs/releases/0.1.1.md)) is an architectural
+cleanup before Linux compatibility: executable-image launch authority, FAT32
+as a separate service, no identity-authorized console path, userspace `unsafe`
+confined to `userspace/runtime`, and smaller source files. The next milestone is
+Linux ELF compatibility.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
-stream primitives without adding POSIX file descriptors; stream merging such as
-`2>&1` and job control are deliberately out of scope for now.
+stream primitives without adding POSIX file descriptors. Background jobs can be
+listed and stopped; stream merging such as `2>&1` and POSIX job control
+(suspending a job, `fg`/`bg`) are deliberately out of scope for now.
 
 The terminal service relays all shell and command output, but the kernel's
 warning echo and the system services that start before it still write the

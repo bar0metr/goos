@@ -21,17 +21,75 @@ type Transport interface {
 type Remote struct {
 	transport Transport
 	name      [ramfs.MaxName]byte
+	// attributes caches the kind and size of recently seen nodes, so a stat
+	// and a read at the end of a file cost no exchange. It is coherent because
+	// the VFS is the service's only client and runs one request at a time:
+	// every change to a node goes through this backend, which updates or
+	// drops the entry (ADR 0096).
+	attributes [attributeEntries]ramfs.Stat
+	nextEntry  int
+}
+
+// attributeEntries bounds the attribute cache. A command touches a handful of
+// nodes; eight covers a path walk and the file at its end.
+const attributeEntries = 8
+
+func (remote *Remote) cached(id ramfs.NodeID) (ramfs.Stat, bool) {
+	for _, stat := range remote.attributes {
+		if stat.ID == id && id != 0 {
+			return stat, true
+		}
+	}
+	return ramfs.Stat{}, false
+}
+
+func (remote *Remote) remember(stat ramfs.Stat) {
+	if stat.ID == 0 || stat.Kind == 0 {
+		return
+	}
+	for index := range remote.attributes {
+		if remote.attributes[index].ID == stat.ID {
+			remote.attributes[index] = stat
+			return
+		}
+	}
+	remote.attributes[remote.nextEntry] = stat
+	remote.nextEntry = (remote.nextEntry + 1) % attributeEntries
+}
+
+func (remote *Remote) forget(id ramfs.NodeID) {
+	for index := range remote.attributes {
+		if remote.attributes[index].ID == id {
+			remote.attributes[index] = ramfs.Stat{}
+		}
+	}
+}
+
+// forgetAll drops the cache: after a rename or unlink, which can move node
+// IDs, and after any failure, which may mean the service is gone.
+func (remote *Remote) forgetAll() {
+	remote.attributes = [attributeEntries]ramfs.Stat{}
 }
 
 func (remote *Remote) call(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	if remote.transport == nil {
+		remote.forgetAll()
 		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	reply, ok := remote.transport.Exchange(request)
 	if !ok || reply.Operation != request.Operation {
+		remote.forgetAll()
 		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	return reply, reply.Status
+}
+
+// looked records the attributes a lookup reply carried.
+func (remote *Remote) looked(reply fsproto.Reply, status ramfs.Status) (ramfs.NodeID, ramfs.Status) {
+	if status == ramfs.StatusOK {
+		remote.remember(ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value})
+	}
+	return reply.Node, status
 }
 
 func (remote *Remote) named(operation fsproto.Operation, node, parent ramfs.NodeID, name ramfs.Name) (fsproto.Reply, ramfs.Status) {
@@ -42,8 +100,10 @@ func (remote *Remote) named(operation fsproto.Operation, node, parent ramfs.Node
 	return remote.call(fsproto.Request{Operation: operation, Node: node, Parent: parent, Name: remote.name[:size]})
 }
 
-// Root asks the service for the root of the volume it has mounted.
+// Root asks the service for the root of the volume it has mounted. A new
+// service instance may be answering, so nothing cached is kept.
 func (remote *Remote) Root() (ramfs.NodeID, ramfs.Status) {
+	remote.forgetAll()
 	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationMount})
 	return reply.Node, status
 }
@@ -55,26 +115,29 @@ func (remote *Remote) Flush() bool {
 }
 
 func (remote *Remote) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	reply, status := remote.named(fsproto.OperationOpen, 0, parent, name)
-	return reply.Node, status
+	return remote.looked(remote.named(fsproto.OperationOpen, 0, parent, name))
 }
 
 func (remote *Remote) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	reply, status := remote.named(fsproto.OperationCreate, 0, parent, name)
-	return reply.Node, status
+	// The parent's own entry may change with what it contains.
+	remote.forget(parent)
+	return remote.looked(remote.named(fsproto.OperationCreate, 0, parent, name))
 }
 
 func (remote *Remote) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	reply, status := remote.named(fsproto.OperationMkdir, 0, parent, name)
-	return reply.Node, status
+	// The parent's own entry may change with what it contains.
+	remote.forget(parent)
+	return remote.looked(remote.named(fsproto.OperationMkdir, 0, parent, name))
 }
 
 func (remote *Remote) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	remote.forgetAll()
 	_, status := remote.named(fsproto.OperationRename, id, parent, name)
 	return status
 }
 
 func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	remote.forgetAll()
 	_, status := remote.named(fsproto.OperationUnlink, 0, parent, name)
 	return status
 }
@@ -82,6 +145,11 @@ func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 // Read fills target in as many exchanges as it needs. A short chunk is the end
 // of the file.
 func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
+	// A read that starts at or past the end of a regular file of known size
+	// is the end of the file, and needs no exchange to find that out.
+	if stat, known := remote.cached(id); known && stat.Kind == ramfs.KindFile && offset >= stat.Size {
+		return 0, ramfs.StatusOK
+	}
 	total := 0
 	for total < len(target) {
 		chunk := len(target) - total
@@ -113,9 +181,11 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 		}
 		reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationWrite, Node: id, Offset: offset + uint64(total), Data: data[total : total+chunk]})
 		if status != ramfs.StatusOK {
+			remote.forget(id)
 			return total, status
 		}
 		if reply.Value > uint64(chunk) {
+			remote.forget(id)
 			return total, ramfs.StatusIOError
 		}
 		total += int(reply.Value)
@@ -123,20 +193,38 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 			break
 		}
 	}
+	// A write past the end extends the file to where it stopped.
+	if stat, known := remote.cached(id); known && offset+uint64(total) > stat.Size {
+		stat.Size = offset + uint64(total)
+		remote.remember(stat)
+	}
 	return total, ramfs.StatusOK
 }
 
 func (remote *Remote) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationTruncate, Node: id, Offset: size})
+	stat, known := remote.cached(id)
+	switch {
+	case status == ramfs.StatusOK && known:
+		stat.Size = size
+		remote.remember(stat)
+	case status != ramfs.StatusOK:
+		remote.forget(id)
+	}
 	return status
 }
 
 func (remote *Remote) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
+	if stat, known := remote.cached(id); known {
+		return stat, ramfs.StatusOK
+	}
 	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationStat, Node: id})
 	if status != ramfs.StatusOK {
 		return ramfs.Stat{}, status
 	}
-	return ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value}, ramfs.StatusOK
+	stat := ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value}
+	remote.remember(stat)
+	return stat, ramfs.StatusOK
 }
 
 func (remote *Remote) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int, ramfs.Status) {

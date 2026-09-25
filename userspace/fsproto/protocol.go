@@ -73,7 +73,9 @@ type Reply struct {
 	Kind      ramfs.Kind
 	// Node is the node an operation named or created, or the root of a mount.
 	Node ramfs.NodeID
-	// Value is the size of a stat or listed entry, or the bytes a write moved.
+	// Kind and Value are the attributes of a stat or listed entry, and of the
+	// node an open, create, or mkdir returns; a Kind of zero means none were
+	// sent. For a write, Value is the bytes it moved.
 	Value uint64
 	// Cursor is the position of the next directory entry.
 	Cursor uint32

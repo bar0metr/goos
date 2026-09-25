@@ -100,7 +100,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -263,6 +263,21 @@ test-all:
 	$(MAKE) test-boot
 	$(MAKE) test-stress STRESS_RUNS=2
 
+# The release gate (0.1.1 specification §7). The reproducible-build test runs
+# first: it cleans build/ and builds the ISO twice, which also proves that a
+# clean build succeeds. Everything else then runs against that tree. Timing
+# benchmarks are not a gate: they depend on the host (ADR 0085).
+release-check:
+	$(MAKE) test-reproducible
+	$(MAKE) lint
+	$(MAKE) docs
+	$(MAKE) test
+	$(MAKE) iso
+	@tests/release/check.sh $(OUT_DIR) $(ISO)
+	$(MAKE) test-boot
+	$(MAKE) test-stress STRESS_RUNS=2
+	@tests/release/check.sh $(OUT_DIR) $(ISO)
+
 test-unit:
 	$(BUILD_ENV) go test ./...
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
@@ -364,6 +379,11 @@ docs:
 	@test -f docs/adr/0091-guarded-boot-stack-and-double-fault-stack.md
 	@test -f docs/adr/0092-acpi-power-off.md
 	@test -f docs/releases/0.1.0.md
+	@test -f docs/releases/0.1.1.md
+	@test -f docs/adr/0093-executable-image-launch-authority.md
+	@test -f docs/adr/0094-debug-console-capability-policy.md
+	@test -f docs/adr/0095-userspace-runtime-and-unsafe-boundary.md
+	@test -f docs/adr/0096-separate-fat32-filesystem-service.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -435,6 +455,7 @@ docs:
 	@test -f docs/development/debugging.md
 	@test -f docs/development/coding-style.md
 	@test -f docs/development/adding-service.md
+	@tests/docs/check.sh
 
 clean:
 	@rm -rf $(BUILD_DIR)
@@ -459,6 +480,7 @@ help:
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  test            run host unit and artifact integration tests' \
+	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \

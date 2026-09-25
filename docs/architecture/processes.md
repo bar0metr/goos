@@ -51,8 +51,13 @@ The registry retains a bounded completion record after lifecycle delivery and
 resource teardown, allowing waiters to distinguish running, exited, and unknown
 processes without retaining reclaimed objects.
 
-Successful launches install a typed process handle in PID 1 with only `Wait`
-authority. Native `ProcessWait` validates that handle, blocks on a bounded wait
+Every launch after PID 1 names its executable as an extent of the system image
+together with PID 1's image capability, which must carry Execute; PID 1 has
+resolved the path in its own read-only mapping of the image, and the kernel
+checks only the authority, the bounds, and the native image (ADR 0093).
+
+Successful launches install a typed process handle in PID 1 with `Wait` and
+`Write` authority; `Write` authorizes `ProcessKill` (ADR 0067). Native `ProcessWait` validates that handle, blocks on a bounded wait
 set, supports timer deadlines, and copies the exit code to validated user
 memory. PID 1 uses this path for shell-launched applications and closes the
 handle after completion.

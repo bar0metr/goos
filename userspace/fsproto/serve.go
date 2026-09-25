@@ -44,6 +44,14 @@ func Serve(volume Volume, request Request, scratch *[MaxReplyData]byte) Reply {
 		default:
 			reply.Status = volume.UnlinkName(request.Parent, name)
 		}
+		// A node that was looked up or made comes back with its attributes,
+		// which the VFS asks for next; answering both in one exchange saves
+		// it a round trip (ADR 0096).
+		if reply.Status == ramfs.StatusOK && reply.Node != 0 {
+			if stat, status := volume.Stat(reply.Node); status == ramfs.StatusOK && stat.ID == reply.Node {
+				reply.Kind, reply.Value = stat.Kind, stat.Size
+			}
+		}
 	case OperationRead:
 		count, status := volume.Read(request.Node, request.Offset, scratch[:request.Size])
 		if count < 0 || count > int(request.Size) {

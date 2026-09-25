@@ -122,3 +122,47 @@ func TestLargeTransfersCrossSeveralExchanges(t *testing.T) {
 		t.Fatal("large file changed across the protocol")
 	}
 }
+
+// failingDevice stops reading and writing once broken, as a device behind a
+// dead driver does.
+type failingDevice struct {
+	*testBlockDevice
+	broken bool
+}
+
+func (device *failingDevice) ReadAt(offset uint64, target []byte) bool {
+	return !device.broken && device.testBlockDevice.ReadAt(offset, target)
+}
+
+func (device *failingDevice) WriteAt(offset uint64, data []byte) bool {
+	return !device.broken && device.testBlockDevice.WriteAt(offset, data)
+}
+
+func (device *failingDevice) Flush() bool { return !device.broken }
+
+// A block I/O error inside the filesystem service is a controlled error on the
+// request that met it, and the service and the VFS keep serving.
+func TestBlockIOErrorIsReportedNotFatal(t *testing.T) {
+	device := &failingDevice{testBlockDevice: testFAT32Device()}
+	service := startedService(t, nil)
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("volume refused")
+	}
+	writePersistent(t, service, "/persist/io.txt", "before the failure")
+	device.broken = true
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/after.txt")}); reply.Status == vfs.StatusOK {
+		t.Fatal("a create succeeded on a failed device")
+	}
+	if service.Sync() {
+		t.Fatal("sync succeeded on a failed device")
+	}
+	if reply := service.Dispatch(vfs.Request{Operation: vfs.OperationStat, Path: []byte("/tmp")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("stat /tmp during a device failure = %d", reply.Status)
+	}
+	device.broken = false
+	opened := service.Dispatch(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/persist/io.txt")})
+	read := service.Dispatch(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+	if read.Status != vfs.StatusOK || string(read.Data) != "before the failure" {
+		t.Fatalf("read after the device recovered = %d, %q", read.Status, read.Data)
+	}
+}
