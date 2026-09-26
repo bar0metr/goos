@@ -383,6 +383,30 @@ func TestPartiallyMountedVolumeIsNotHalfInstalled(t *testing.T) {
 	}
 }
 
+func TestCleanUnmountFlushesAndRejectsLiveReferences(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/live")})
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/persist/live")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open = %d", opened.Status)
+	}
+	if status := service.UnmountFilesystem(); status != vfs.StatusBusy {
+		t.Fatalf("unmount with live file = %d", status)
+	}
+	if stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home")}); stat.Status != vfs.StatusOK {
+		t.Fatalf("busy unmount changed namespace: %d", stat.Status)
+	}
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	if status := service.UnmountFilesystem(); status != vfs.StatusOK || service.PersistentMounted() {
+		t.Fatalf("clean unmount = %d mounted=%v", status, service.PersistentMounted())
+	}
+	for _, path := range []string{"/persist", "/home", "/state"} {
+		if stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); stat.Status != vfs.StatusNotFound {
+			t.Fatalf("%s remains after unmount: %d", path, stat.Status)
+		}
+	}
+}
+
 // testSession is the session the tests' requests arrive on.
 const testSession = vfs.Owner(1)
 

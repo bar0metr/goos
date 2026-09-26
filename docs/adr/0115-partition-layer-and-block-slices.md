@@ -31,8 +31,11 @@ everything it reads: at most 128 used partitions, an entry array of at most
 
 **MBR.** The four primary entries are read. A used entry must start after LBA
 0, have a length, lie inside the device (checked without overflow), and not
-overlap another. An extended partition is listed but cannot be chosen: logical
-partitions are not read in this release.
+overlap another. One extended partition may contain a bounded EBR chain.
+Logical partitions are validated inside that container, checked for overlap,
+listed with Linux-compatible indices starting at five, and selectable like
+primary partitions. The extended container itself is listed but cannot be
+mounted.
 
 **GPT.** A header must carry the signature, revision 1, a size from 92 bytes to
 the block size, a zero reserved field, a matching CRC-32, and its own LBA;
@@ -109,8 +112,9 @@ request now closes its object.
 - **Trusting the GPT backup only when the primary header is intact.** Linux
   and firmware fall back to the backup; refusing a disk whose primary sector is
   damaged loses data the backup still describes.
-- **Reading MBR logical partitions now.** They need a bounded walk of a linked
-  list of extended boot records; nothing in this release needs them.
+- **Leaving MBR logical partitions unsupported.** Phase 3 needs selectable
+  volumes found on ordinary MBR disks; the bounded EBR walk is contained in
+  the partition parser and does not widen filesystem authority.
 
 ## Consequences
 

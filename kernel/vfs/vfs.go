@@ -151,6 +151,37 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 	return StatusResourceExhausted
 }
 
+// UnmountBackend atomically detaches every mount served by backend. It refuses
+// while an open file still refers to any of them, so a successful return makes
+// it safe for the caller to stop the backend and release its authority.
+func (namespace *Namespace) UnmountBackend(backend Backend) Status {
+	if backend == nil {
+		return StatusInvalidArgument
+	}
+	found := false
+	for index := range namespace.mounts {
+		if namespace.mounts[index].used && namespace.mounts[index].backend == backend {
+			found = true
+			for fileIndex := range namespace.files {
+				file := &namespace.files[fileIndex]
+				if file.used && int(file.mount) == index {
+					return StatusBusy
+				}
+			}
+		}
+	}
+	if !found {
+		return StatusNotFound
+	}
+	for index := range namespace.mounts {
+		if namespace.mounts[index].used && namespace.mounts[index].backend == backend {
+			namespace.mounts[index] = mount{}
+		}
+	}
+	namespace.invalidate()
+	return StatusOK
+}
+
 func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
 	canonical := &namespace.resolved
 	size, ok := canonicalPath(canonical, path)

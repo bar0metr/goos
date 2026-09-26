@@ -7,9 +7,8 @@ import (
 
 const (
 	ControlProtocolID = uint64(0x4756465343544c31)
-	// Version 5 adds the session notice a client of a restarted service is
-	// given.
-	ControlVersion      = uint16(5)
+	// Version 6 adds explicit clean unmount authority.
+	ControlVersion      = uint16(6)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
 	// operationSetFilesystem hands the service the client end of a channel to
@@ -19,6 +18,8 @@ const (
 	// operationSession hands a client the endpoint of a new session after the
 	// service was restarted and its old session died with it.
 	operationSession = byte(4)
+	// operationUnmount is accepted only on the control endpoint held by PID 1.
+	operationUnmount = byte(5)
 )
 
 // SessionNotice hands a client of a restarted VFS the client end of a new
@@ -76,6 +77,21 @@ func IsSync(message ipc.Message) bool {
 		message.Correlation != 0 && message.PayloadSize == 1 && message.Payload[0] == operationSync && message.HandleCount == 0
 }
 
+// UnmountRequest asks the VFS to flush and detach persistent storage.
+func UnmountRequest(correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 1}
+	message.Payload[0] = operationUnmount
+	return message, true
+}
+
+func IsUnmount(message ipc.Message) bool {
+	return message.ProtocolID == ControlProtocolID && message.Version == ControlVersion && message.Kind == ipc.KindRequest &&
+		message.Correlation != 0 && message.PayloadSize == 1 && message.Payload[0] == operationUnmount && message.HandleCount == 0
+}
+
 func AddSessionRequest(server handle.ID, correlation uint64) (ipc.Message, bool) {
 	if server == 0 || correlation == 0 {
 		return ipc.Message{}, false
@@ -93,7 +109,7 @@ func DecodeAddSession(message ipc.Message) (handle.ID, bool) {
 }
 
 func AddSessionReply(status Status, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || status > StatusBackendError {
+	if correlation == 0 || status > lastStatus {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 1}
@@ -102,7 +118,7 @@ func AddSessionReply(status Status, correlation uint64) (ipc.Message, bool) {
 }
 
 func DecodeAddSessionReply(message ipc.Message) (Status, bool) {
-	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindReply || message.Correlation == 0 || message.PayloadSize != 1 || message.HandleCount != 0 || Status(message.Payload[0]) > StatusBackendError {
+	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindReply || message.Correlation == 0 || message.PayloadSize != 1 || message.HandleCount != 0 || Status(message.Payload[0]) > lastStatus {
 		return 0, false
 	}
 	return Status(message.Payload[0]), true

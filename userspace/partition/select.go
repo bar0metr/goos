@@ -39,8 +39,8 @@ type Volume struct {
 
 // Select resolves a selector against a scanned table. Selecting by number,
 // GUID or name takes any partition of any type — the filesystem decides
-// whether it can use it — except an MBR extended partition, whose logical
-// partitions this package does not read.
+// whether it can use it — except an MBR extended container. Logical
+// partitions are normal selectable entries numbered from five.
 func Select(table *Table, selector *Selector) (Volume, Status) {
 	whole := Volume{Start: 0, Length: table.Capacity}
 	switch selector.Kind {

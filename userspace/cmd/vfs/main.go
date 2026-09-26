@@ -331,6 +331,20 @@ func pollControl() bool {
 		send(uint64(controlHandle), reply)
 		return true
 	}
+	if vfs.IsUnmount(message) {
+		result := service.UnmountFilesystem()
+		if result == vfs.StatusOK {
+			sys.HandleClose(filesystem)
+			filesystem = 0
+			syslog.Info("unmounted", syslog.Str("path", "/persist"))
+		}
+		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
+		if !encoded {
+			fatal("VFS_CONTROL_REPLY_FAILED\n")
+		}
+		send(uint64(controlHandle), reply)
+		return true
+	}
 	server, ok := vfs.DecodeAddSession(message)
 	result := vfs.StatusResourceExhausted
 	if ok {
