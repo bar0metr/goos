@@ -94,3 +94,19 @@ func executableCreate(loader uint64, size uint64, address unsafe.Pointer) uint64
 func executableWrite(executable uint64, address unsafe.Pointer, size uintptr) uint64 {
 	return unsupported
 }
+
+func vmMap(descriptor unsafe.Pointer, protection uint64, flags uint64) uint64 { return unsupported }
+
+func vmUnmap(address uint64, length uint64) uint64 { return unsupported }
+
+func vmProtect(address uint64, length uint64, protection uint64) uint64 { return unsupported }
+
+func vmDiscard(address uint64, length uint64) uint64 { return unsupported }
+
+func vmQuery(address uint64, record unsafe.Pointer) uint64 { return unsupported }
+
+func memoryCreate(pages uint64, address unsafe.Pointer) uint64 { return unsupported }
+
+func handleDuplicate(handle uint64, rights uint64, address unsafe.Pointer) uint64 {
+	return unsupported
+}

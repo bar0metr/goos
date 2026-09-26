@@ -69,7 +69,7 @@ largest frame of the binary; `go run ./tools/stackframes -v BINARY` lists
 every frame (ADR 0088).
 
 `make run` boots the ISO with 512 MiB in QEMU and attaches COM1 to the current
-terminal. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
+terminal; `MEMORY=4G` gives the guest more RAM, and applies to every QEMU test. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
 1234 before executing the first instruction.
 
 `make test` runs the fast host unit, artifact-integration, and security targets

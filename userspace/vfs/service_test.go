@@ -306,7 +306,7 @@ func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
 		{Operation: vfs.OperationMkdir, Path: []byte("/system/extra")},
 		{Operation: vfs.OperationUnlink, Path: []byte("/system/motd")},
 		{Operation: vfs.OperationTruncate, Path: []byte("/system/motd"), Offset: 0},
-		{Operation: vfs.OperationRename, Path: []byte("/system/motd"), Data: []byte("/system/banner")},
+		{Operation: vfs.OperationRename, Path: []byte("/system/motd"), Target: []byte("/system/banner")},
 	} {
 		if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusPermissionDenied {
 			t.Fatalf("mutation %d of %s = %d", request.Operation, request.Path, reply.Status)

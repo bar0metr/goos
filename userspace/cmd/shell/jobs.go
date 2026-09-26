@@ -59,6 +59,8 @@ func killJob(argument []byte) {
 	mark("SHELL_KILL_OK\n")
 }
 
+// freeSlot keeps one slot for the foreground, so background jobs never
+// block an interactive command.
 func freeSlot(background bool) (uint8, bool) {
 	free, count := -1, 0
 	for index := range jobs {

@@ -13,8 +13,9 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "mem",
-	Summary: "show physical memory use",
+	Usage:   "mem [-p]",
+	Summary: "show physical memory use, or with -p pages in use",
+	MaxArgs: 1,
 }
 
 //export userspaceMain
@@ -22,9 +23,20 @@ func userspaceMain() { utility.Run(manifest, run) }
 
 func main() {}
 
-func run(startup.Data) {
+func run(data startup.Data) {
 	var info [kcall.SystemInfoSize]byte
 	utility.SystemInfo(&info)
+	// -p prints the exact count of pages in use, which a test compares
+	// across repetitions of a workload to find what was not freed.
+	if flag, given := data.Arg(1); given {
+		if !utility.Equal(flag, "-p") {
+			utility.Usage()
+		}
+		utility.PrintText("pages used: ")
+		utility.PrintUint(binary.LittleEndian.Uint64(info[16:24]) - binary.LittleEndian.Uint64(info[24:32]))
+		utility.EndLine()
+		return
+	}
 	// total is the memory the page allocator manages, not the machine's RAM:
 	// firmware, the kernel image and unmanaged regions are outside it.
 	total := binary.LittleEndian.Uint64(info[16:24]) * kcall.SystemInfoPageSize

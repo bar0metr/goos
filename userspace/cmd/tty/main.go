@@ -31,12 +31,13 @@ var (
 	// controlHandle is the channel PID 1 hands a new session over when the
 	// shell has been restarted (ADR 0089).
 	controlHandle handle.ID
-	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
 	line          tty.Discipline
 	screen        tty.Screen
 	// reading is the correlation of the client's outstanding read, or zero.
-	reading    uint64
+	reading uint64
+	// sent is how much of the completed line earlier parts delivered.
+	sent       int
 	prompt     [tty.MaxPrompt]byte
 	promptSize int
 	// An interrupt or end of input typed while no read was outstanding is
@@ -59,10 +60,7 @@ const outputBatch = 16
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("TTY_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("TTY_STARTUP_UNAVAILABLE\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("TTY_STARTUP_INVALID\n")
 	}
@@ -126,7 +124,7 @@ func serveControl() {
 			sys.HandleClose(sessionHandle)
 		}
 		sessionHandle, sessionClosed = session, false
-		reading, interruptQueued, endQueued = 0, false, false
+		reading, sent, interruptQueued, endQueued = 0, 0, false, false
 		mark("TTY_SESSION_REPLACED_OK\n")
 	}
 }
@@ -190,6 +188,7 @@ func apply(event tty.Event) {
 	case tty.EventLine:
 		deliverLine()
 	case tty.EventInterrupt:
+		sent = 0
 		if !answer(tty.ResultInterrupt) {
 			interruptQueued, endQueued = true, false
 		}
@@ -206,17 +205,48 @@ func apply(event tty.Event) {
 
 // deliverLine hands a completed line to the outstanding read. Without one the
 // line waits in the discipline, which accepts no more input until it is read.
+//
+// A line longer than one message goes in parts: each but the last answers a
+// read with ResultPart, and the client asks for the next with a continue.
 func deliverLine() {
 	text, complete := line.Line()
 	if !complete || reading == 0 {
 		return
 	}
-	delivered := reply(tty.ResultLine, text)
-	reading = 0
+	if rest := text[sent:]; len(rest) > tty.MaxPart {
+		reply(tty.ResultPart, rest[:tty.MaxPart])
+		sent += tty.MaxPart
+		reading = 0
+		return
+	}
+	delivered := reply(tty.ResultLine, text[sent:])
+	reading, sent = 0, 0
 	line.Next()
 	if delivered {
 		mark("TTY_LINE_OK\n")
 	}
+}
+
+// continueRead answers a request for the next part of a line. A line taken
+// back meanwhile — Ctrl-C discards it — ends the read with the interrupt.
+func continueRead(correlation uint64) {
+	if reading != 0 {
+		if refusal, ok := tty.Reply(tty.ResultRefused, nil, correlation); ok {
+			send(refusal)
+		}
+		return
+	}
+	reading = correlation
+	if text, complete := line.Line(); complete && sent != 0 && sent < len(text) {
+		deliverLine()
+		return
+	}
+	if interruptQueued {
+		interruptQueued = false
+		answer(tty.ResultInterrupt)
+		return
+	}
+	answer(tty.ResultRefused)
 }
 
 // answer ends the outstanding read with result, reporting whether there was one.
@@ -263,6 +293,8 @@ func serveSession() {
 		switch operation {
 		case tty.OperationReadLine:
 			startRead(text, message.Correlation)
+		case tty.OperationContinue:
+			continueRead(message.Correlation)
 		case tty.OperationRedraw:
 			promptSize = copy(prompt[:], text)
 			if reading != 0 {
@@ -279,7 +311,7 @@ func serveSession() {
 // so the channel is released rather than left half open.
 func closeSession() {
 	sessionClosed = true
-	reading = 0
+	reading, sent = 0, 0
 	if sessionHandle != 0 {
 		sys.HandleClose(sessionHandle)
 		sessionHandle = 0

@@ -18,6 +18,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-stress` boots `STRESS_RUNS` guests (default 4) in parallel
   batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
   through each; `make test-all` includes two runs.
+- `make test-storage-stress` runs the FAT32 host workload at scale: a seeded
+  model-based sequence of creates, writes, truncations, moves, and removals
+  checked against a model and a consistency checker, device-failure injection,
+  a file past 16 MiB, and the host's own FAT checker (`fsck_msdos` or
+  `fsck.fat`, when installed) over volumes the filesystem built (ADR 0102). The
+  default `make test-unit` runs the same tests at a smaller scale.
 - `make test-latency` boots one guest and measures command and VFS latency
   into `build/reports/latency-<variant>.md`, where `<variant>` is the build's
   directory under `build/variants/` (`hz100-opt2` by default). It is a
@@ -38,7 +44,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   a status and a decision, and the current release has notes.
 - `make release-check` is the release gate. It runs `test-reproducible`
   first — which cleans `build/` and builds twice, so a clean build is part of
-  the gate — then lint, docs, `make test`, the ISO, `tests/release/check.sh`,
+  the gate — then lint, docs, `make test`, `test-storage-stress`, the ISO, `tests/release/check.sh`,
   `test-boot`, and a two-guest `test-stress`, and the release checks once more
   at the end. The release checks require notes for the version in
   `internal/version/version.go`, a kernel that reports it, no validation marker
@@ -60,6 +66,10 @@ shell composition, or boot behavior.
 
 - `build/logs/boot.log` for the main validation boot;
 - `build/logs/reboot.log` for the persistence boot.
+
+`make test-boot MEMORY=4G` runs the same test with more guest RAM (default
+`512M`). The physical-memory group then requires the validation kernel to have
+used a page above 1 GiB from 2 GiB, and one above 4 GiB from 3 GiB (ADR 0103).
 
 The target creates a fresh `build/boot-test-virtio-blk.img` for each run. Tests
 therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
@@ -209,7 +219,7 @@ since boot through native operation 24 (ADR 0054). Two guest tools use it:
   VFS session. Each prints `bench <mode>: N ops, total <us> us, avg <ns> ns/op`;
   `read` adds the file size and the rate. N is at most 10000. A file under
   `/persist` exercises VFS, FAT32, the block service, and the virtio-blk
-  driver, subject to the FAT32 sector cache. The other modes are described
+  driver. The other modes are described
   under [In-guest microbenchmarks](#in-guest-microbenchmarks).
 
 `tests/boot/latency.sh` drives one guest through a FIFO the way the stress test
@@ -261,7 +271,7 @@ over the runs and the raw `bench` lines. The transcript is kept in
 | Stream handoff | `bench send 200 1 \| bench recv 200 1` | one-byte round trips between two processes |
 | IPC throughput | `bench send N SIZE \| bench recv N SIZE` | bytes per second through a two-stage pipeline |
 | Cached VFS read | `bench read /system/bin/uname 50` | a 10 KiB file of the memory-resident system image |
-| Uncached VFS read | `bench read /persist/uname.bin 20` | the same bytes on FAT32; 20 sectors exceed the 4-sector cache, so each pass reads the device |
+| Uncached VFS read | `bench read /persist/uname.bin 20` | the same bytes on FAT32; file data is not held in the service's sector cache, so each pass reads the device |
 | RAMFS metadata | `bench meta /tmp/bench.tmp 500` | create and unlink of one file in the RAMFS `/tmp`, two VFS requests |
 
 `bench recv` times from its first chunk to its last and reads the clock after

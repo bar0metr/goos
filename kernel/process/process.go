@@ -2,13 +2,20 @@ package process
 
 import (
 	"goos/kernel/handle"
+	"goos/kernel/mm/region"
+	"goos/kernel/mm/vm"
 	"goos/kernel/sched"
 )
 
+// MaxProcesses is the system-wide process limit. A process needs at least one
+// of the scheduler's sched.MaxTasks task slots, so more processes than slots
+// could never run; the kernel allocates a process record's pages the first
+// time a slot is used (ADR 0111). MaxExitEvents keeps one exit report per
+// process until PID 1 collects it.
 const (
 	MaxTasksPerProcess = 32
-	MaxProcesses       = 32
-	MaxExitEvents      = 32
+	MaxProcesses       = sched.MaxTasks
+	MaxExitEvents      = MaxProcesses
 )
 
 type ID uint64
@@ -24,9 +31,14 @@ type Process struct {
 	tasks        [MaxTasksPerProcess]sched.TaskID
 	taskCount    int
 	quota        Quota
-	cpuTicks     uint64
-	name         [16]byte
-	nameSize     uint8
+	// regions is the process's virtual-memory region map (ADR 0104).
+	regions region.Map
+	// executable is the executable object the process was started from and
+	// reads its pages from, or zero (ADR 0106).
+	executable uint64
+	cpuTicks   uint64
+	name       [16]byte
+	nameSize   uint8
 }
 
 // Init prepares a process slot in place; see stream.Stream.Reset. Returning a
@@ -40,6 +52,7 @@ func Init(target *Process, id ID, addressSpace AddressSpace) bool {
 	target.id = id
 	target.addressSpace = addressSpace
 	target.quota = defaultQuota()
+	target.regions.Init(vm.IdentityMapLimit, vm.UserAddressLimit)
 	return true
 }
 
@@ -63,6 +76,15 @@ func (process *Process) Name() []byte { return process.name[:process.nameSize] }
 func (process *Process) AddressSpace() AddressSpace { return process.addressSpace }
 
 func (process *Process) Handles() *handle.Table { return &process.handles }
+
+// Executable is the executable object the process reads its image from.
+func (process *Process) Executable() uint64 { return process.executable }
+
+// SetExecutable records the executable object the process was started from.
+func (process *Process) SetExecutable(id uint64) { process.executable = id }
+
+// Regions is the process's region map.
+func (process *Process) Regions() *region.Map { return &process.regions }
 
 func (process *Process) AddTask(id sched.TaskID) bool {
 	if _, _, valid := id.Parts(); !valid || process.taskCount == len(process.tasks) {

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"goos/internal/limits"
 	"goos/kernel/kcall"
 	"goos/userspace/commands"
 	"goos/userspace/startup"
@@ -20,7 +21,8 @@ func userspaceMain() { utility.Run(manifest, run) }
 
 func main() {}
 
-const maxLine = 128
+// maxLine is the terminal's line limit, which is the native path limit.
+const maxLine = limits.PathMax
 
 func run(startup.Data) {
 	var line [maxLine]byte
@@ -46,7 +48,7 @@ func run(startup.Data) {
 			break
 		}
 		if size == len(line) {
-			utility.Fail(nil, "line longer than 128 bytes")
+			utility.Fail(nil, "line longer than 4096 bytes")
 		}
 		line[size] = value
 		size++

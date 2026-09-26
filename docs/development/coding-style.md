@@ -17,9 +17,13 @@ code; propose changes through an ADR.
 
 ## Bounded by construction
 
-- Use fixed-size arrays and named capacity constants (`handle.MaxHandles`,
-  `ipc.QueueCapacity`, `kcall.MaxStreamIO`). No kernel structure grows with
-  input.
+- Use named capacity constants (`handle.MaxHandles`, `ipc.QueueCapacity`,
+  `kcall.MaxStreamIO`) chosen as system limits, not prototype conveniences. A
+  registry of large entries holds pointers and takes each entry's pages when
+  it is created (`objects.Storage`, `vm.NewObject`; ADR 0111). No kernel
+  structure grows past its limit.
+- Range over a table's slice (`table[:]`), not the array: ranging over an
+  array value copies it onto the kernel stack.
 - Every loop over untrusted data has a bound independent of that data.
 - Every blocking operation has a deadline, or is explicitly infinite and
   documented as such.

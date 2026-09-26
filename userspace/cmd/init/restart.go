@@ -193,6 +193,9 @@ func endShellSession() {
 			continue
 		}
 		job.orphaned = true
+		if cancelPreparation(job) {
+			continue
+		}
 		for _, process := range job.job.Processes() {
 			if process != 0 && sys.ProcessKill(process) == 0 {
 				stopped = true

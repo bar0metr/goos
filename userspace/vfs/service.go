@@ -2,6 +2,7 @@
 package vfsservice
 
 import (
+	"goos/internal/limits"
 	"goos/kernel/initramfs"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
@@ -133,6 +134,16 @@ func (service *Service) persistentDirectory(root ramfs.NodeID, name string) (ram
 	return node, true
 }
 
+// ConfigureRAMFS sets where the volatile root keeps its pages and how much it
+// may hold (ADR 0105). It must come before Init; without it the root uses the
+// default store and limits.
+func (service *Service) ConfigureRAMFS(store ramfs.Store, limits ramfs.Limits) bool {
+	return service.fs.Configure(store, limits)
+}
+
+// RAMFSUsage reports what the volatile root holds against its limits.
+func (service *Service) RAMFSUsage() ramfs.Usage { return service.fs.Usage() }
+
 // Init builds the volatile root. /system is not created here: it is the mount
 // point of the immutable boot image, and the namespace lists a mount in its
 // parent directory without needing a placeholder to stand in for it.
@@ -144,6 +155,18 @@ func (service *Service) Init() bool {
 	return service.namespace.Mount([]byte("/"), &service.fs, root) == vfs.StatusOK
 }
 
+// ReadFile reads from an open file at its position into target, which may be
+// as large as the caller likes, and advances the position. The bulk
+// operations use it with the memory a client attached (ADR 0107).
+func (service *Service) ReadFile(owner vfs.Owner, file vfs.Handle, target []byte) (int, vfs.Status) {
+	return service.namespace.Read(owner, file, target)
+}
+
+// WriteFile writes data to an open file at its position and advances it.
+func (service *Service) WriteFile(owner vfs.Owner, file vfs.Handle, data []byte) (int, vfs.Status) {
+	return service.namespace.Write(owner, file, data)
+}
+
 // CloseSession closes the files a session left open when it went.
 func (service *Service) CloseSession(owner vfs.Owner) int { return service.namespace.CloseOwner(owner) }
 
@@ -151,6 +174,12 @@ func (service *Service) CloseSession(owner vfs.Owner) int { return service.names
 // session's own: another session's handle is not found.
 func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
+	// A path over the native limits is refused as such, not as a malformed
+	// request, so a client can say what is wrong (ADR 0110).
+	if tooLong(request.Path) || tooLong(request.Target) {
+		reply.Status = vfs.StatusNameTooLong
+		return reply
+	}
 	switch request.Operation {
 	case vfs.OperationOpen:
 		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights)
@@ -177,7 +206,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Kind, reply.Size, reply.Name = entry.Stat.Kind, entry.Stat.Size, entry.Name[:entry.Size]
 		}
 	case vfs.OperationRename:
-		reply.Status = service.namespace.Rename(request.Path, request.Data)
+		reply.Status = service.namespace.Rename(request.Path, request.Target)
 	case vfs.OperationUnlink:
 		reply.Status = service.namespace.Unlink(request.Path)
 	case vfs.OperationStat:
@@ -189,4 +218,22 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.Status = vfs.StatusInvalidArgument
 	}
 	return reply
+}
+
+// tooLong reports whether a path is longer than PathMax or has a component
+// longer than NameMax.
+func tooLong(path []byte) bool {
+	if len(path) > limits.PathMax {
+		return true
+	}
+	start := 0
+	for index := 0; index <= len(path); index++ {
+		if index == len(path) || path[index] == '/' {
+			if index-start > limits.NameMax {
+				return true
+			}
+			start = index + 1
+		}
+	}
+	return false
 }

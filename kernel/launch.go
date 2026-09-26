@@ -14,6 +14,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
+	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -131,7 +132,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// Execute on an image or executable object is the authority to run what
 	// it holds. The filesystem service reads the system image with Read alone
 	// and cannot launch from it.
-	image, imageKey, sourceStatus := launchSource(executable)
+	image, origin, sourceStatus := launchSource(executable)
 	began = launchStageDone(launchLookup, began)
 	if sourceStatus != supervisor.LaunchOK {
 		return 0, 0, sourceStatus
@@ -145,7 +146,10 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	if !ok {
 		return 0, 0, supervisor.LaunchAddressSpaceFailed
 	}
-	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, imageKey)
+	// The region map is built while the image loads and moves into the
+	// process slot once there is one (ADR 0104).
+	launchRegions.Init(vm.IdentityMapLimit, vm.UserAddressLimit)
+	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, origin, &launchRegions)
 	began = launchStageDone(launchLoad, began)
 	if !ok {
 		abandonSpawn(root, nil, false)
@@ -154,8 +158,19 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	pid := nextProcessID
 	var spawned *process.Process
 	for index := range spawnedProcesses {
+		// A slot gets its record's pages the first time it is needed and
+		// keeps them for the processes that reuse it: other kernel
+		// structures point at a live record, and reuse never frees one they
+		// might still name (ADR 0111).
+		if spawnedProcesses[index] == nil {
+			allocated, ok := vm.NewObject[process.Process](&pageAllocator)
+			if !ok {
+				break
+			}
+			spawnedProcesses[index] = allocated
+		}
 		if spawnedProcesses[index].ID() == 0 {
-			spawned = &spawnedProcesses[index]
+			spawned = spawnedProcesses[index]
 			break
 		}
 	}
@@ -176,6 +191,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
+	*spawned.Regions() = launchRegions
 	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
@@ -188,7 +204,11 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
-		if _, derived, _ := spawned.Handles().Describe(installed[index]); !streamRegistry.Placed(grant.Type, derived.Object()) {
+		_, derived, _ := spawned.Handles().Describe(installed[index])
+		if grant.Type == handle.TypeMemory {
+			retainMemory(derived)
+		}
+		if !streamRegistry.Placed(grant.Type, derived.Object()) {
 			// Uncounted, so it is closed without dropping a reference.
 			spawned.Handles().Close(installed[index])
 			abandonSpawn(root, spawned, false)
@@ -203,8 +223,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	if len(startupData) != 0 {
-		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &launchBound)
-		if !boundOK || !mapStartup(root, bound) {
+		// The template is the kernel's own copy, so it is bound in place.
+		bound, boundOK := startup.Data{}, startup.BindHandles(startupData, installed[:len(grants)])
+		if boundOK {
+			bound, boundOK = startup.Decode(startupData)
+		}
+		if !boundOK || !mapStartup(root, spawned.Regions(), bound.Bytes()) {
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
@@ -221,6 +245,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// image rather than to this process, so they are not charged to it.
 	if pagesUsed := pagesBefore - pageAllocator.Statistics().FreePages - loaded.SharedPagesAllocated; pagesUsed != 0 && !spawned.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		kernelLogUint(logfmt.Warn, "launch over page quota", "pages", pagesUsed)
+		abandonSpawn(root, spawned, true)
+		return 0, 0, supervisor.LaunchResourceExhausted
+	}
+	// A process started from an executable object keeps reading it, so it
+	// holds a reference and, the first time, takes over the charge.
+	if origin.Object != 0 && !adoptExecutable(spawned, origin.Object) {
 		abandonSpawn(root, spawned, true)
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -278,37 +308,76 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 }
 
 func abandonHandle(typeID handle.Type, cap capability.Capability) {
-	if typeID == handle.TypeStream {
+	switch typeID {
+	case handle.TypeStream:
 		dropStreamCapability(cap)
+	case handle.TypeMemory:
+		releaseMemory(cap)
 	}
 }
 
-// mapStartup gives a new process its bound startup block as a private
-// read-only page; it is released with the address space.
-func mapStartup(root uint64, bound []byte) bool {
-	physical, ok := pageAllocator.Allocate()
-	if !ok {
+// launchRegions is the region map of the process being launched. Only one
+// launch runs at a time.
+var launchRegions region.Map
+
+// mapStartup gives a new process its bound startup object as private
+// read-only pages, recorded as a pinned region; they are released with the
+// address space.
+func mapStartup(root uint64, regions *region.Map, bound []byte) bool {
+	pages := (uint64(len(bound)) + vm.PageSize - 1) / vm.PageSize
+	if regions.Insert(region.Region{Base: vm.UserStartupAddress, Length: pages * vm.PageSize, Protection: region.Read, Backing: region.Device, Flags: region.Pinned}) != region.OK {
 		return false
 	}
-	if !vm.InitializePhysical(physical, bound) || !vm.MapOwnedUserPage(root, vm.UserStartupAddress, physical, vm.Permissions{User: true}) {
-		pageAllocator.Free(physical)
-		return false
+	for page := uint64(0); page < pages; page++ {
+		physical, ok := pageAllocator.Allocate()
+		if !ok {
+			return false
+		}
+		end := min((page+1)*vm.PageSize, uint64(len(bound)))
+		if !vm.InitializePhysical(physical, bound[page*vm.PageSize:end]) {
+			pageAllocator.Free(physical)
+			return false
+		}
+		// A page mapped here is owned by the address space, which frees it
+		// if the launch is abandoned after this.
+		if _, mapped := vm.MapUserPageAt(&pageAllocator, root, vm.UserStartupAddress+page*vm.PageSize, physical, vm.Permissions{User: true}, true); !mapped {
+			pageAllocator.Free(physical)
+			return false
+		}
 	}
 	return true
 }
 
-// StartupRead copies the caller's startup page, or zeros for a process that
-// was started without one.
+// startupChunk carries StartupRead's copy from the caller's startup pages to
+// the buffer it named.
+var startupChunk [512]byte
+
+// StartupRead copies the first length bytes of the caller's startup pages to
+// address, or zeros past their end and for a process started without them.
+// A process reads the header, learns the object's size, and then reads the
+// rest or looks at the pages directly (ADR 0109).
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
-	if _, found := processRegistry.ByRoot(handler.root); !found || length != kcall.StartupSize {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || length == 0 || length > kcall.MaxStartupSize {
 		return kcall.StatusPermissionDenied
 	}
-	clear(launchBound[:])
-	if _, mapped := vm.ResolveUser(handler.root, vm.UserStartupAddress); mapped && !vm.CopyIn(handler.root, vm.UserStartupAddress, launchBound[:]) {
-		return kcall.StatusInvalidArgument
+	available := uint64(0)
+	if entry, mapped := owner.Regions().Find(vm.UserStartupAddress); mapped && entry.Base == vm.UserStartupAddress {
+		available = entry.Length
 	}
-	if !vm.CopyOut(handler.root, address, launchBound[:]) {
-		return kcall.StatusInvalidArgument
+	for done := uint64(0); done < length; {
+		chunk := startupChunk[:min(uint64(len(startupChunk)), length-done)]
+		clear(chunk)
+		if done < available {
+			chunk = chunk[:min(uint64(len(chunk)), available-done)]
+			if !vm.CopyIn(handler.root, vm.UserStartupAddress+done, chunk) {
+				return kcall.StatusInvalidArgument
+			}
+		}
+		if !vm.CopyOut(handler.root, address+done, chunk) {
+			return kcall.StatusInvalidArgument
+		}
+		done += uint64(len(chunk))
 	}
 	return kcall.StatusOK
 }

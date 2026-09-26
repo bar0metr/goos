@@ -9,7 +9,6 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/diag"
-	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -112,11 +111,13 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 		}
 		finishStreamClosure(closure)
 		return kcall.StatusOK
-	} else if typeID == handle.TypeMemory && executable.IsObject(cap.Object()) {
-		// An executable object has one handle, so closing it frees the object.
-		if !closeExecutable(owner, handle.ID(id), cap) {
+	} else if typeID == handle.TypeMemory {
+		// A memory handle is a reference to its object, which goes with the
+		// last reference (ADR 0106, ADR 0107).
+		if !owner.Handles().Close(handle.ID(id)) {
 			return kcall.StatusNotFound
 		}
+		releaseMemory(cap)
 		return kcall.StatusOK
 	}
 	if !owner.Handles().Close(handle.ID(id)) {

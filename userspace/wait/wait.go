@@ -12,7 +12,7 @@ const MaxObjects = kcall.WaitAnyMaxObjects
 type Interest = sys.Interest
 
 type Result struct {
-	ReadyMask uint16
+	ReadyMask uint64
 }
 
 // Any blocks until at least one interest is ready or timeout ticks elapse.

@@ -296,6 +296,62 @@ goos_executable_write:
     ret
 .size goos_executable_write, .-goos_executable_write
 
+.global goos_vm_map
+.type goos_vm_map,@function
+goos_vm_map:
+    movl $39, %eax
+    int $0x80
+    ret
+.size goos_vm_map, .-goos_vm_map
+
+.global goos_vm_unmap
+.type goos_vm_unmap,@function
+goos_vm_unmap:
+    movl $40, %eax
+    int $0x80
+    ret
+.size goos_vm_unmap, .-goos_vm_unmap
+
+.global goos_vm_protect
+.type goos_vm_protect,@function
+goos_vm_protect:
+    movl $41, %eax
+    int $0x80
+    ret
+.size goos_vm_protect, .-goos_vm_protect
+
+.global goos_vm_discard
+.type goos_vm_discard,@function
+goos_vm_discard:
+    movl $42, %eax
+    int $0x80
+    ret
+.size goos_vm_discard, .-goos_vm_discard
+
+.global goos_vm_query
+.type goos_vm_query,@function
+goos_vm_query:
+    movl $43, %eax
+    int $0x80
+    ret
+.size goos_vm_query, .-goos_vm_query
+
+.global goos_memory_create
+.type goos_memory_create,@function
+goos_memory_create:
+    movl $44, %eax
+    int $0x80
+    ret
+.size goos_memory_create, .-goos_memory_create
+
+.global goos_handle_duplicate
+.type goos_handle_duplicate,@function
+goos_handle_duplicate:
+    movl $45, %eax
+    int $0x80
+    ret
+.size goos_handle_duplicate, .-goos_handle_duplicate
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

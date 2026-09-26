@@ -16,8 +16,8 @@ shell, commands ──terminal output stream─────────┘──
 
 ## Line discipline
 
-`userspace/tty.Discipline` edits one line of at most 128 bytes and allocates
-nothing:
+`userspace/tty.Discipline` edits one line of at most 4096 bytes, the native
+path limit, and allocates nothing:
 
 | Key | Effect |
 | --- | --- |
@@ -36,7 +36,7 @@ readable while one is pending, so the service wakes for it.
 
 ## Session protocol
 
-`GTTY` version 1 runs over a channel PID 1 creates between the service and the
+`GTTY` version 2 runs over a channel PID 1 creates between the service and the
 shell. A client sends:
 
 - `ReadLine(prompt)`: show the prompt and answer with the next line, an
@@ -45,9 +45,15 @@ shell. A client sends:
   what has been typed. The shell sends it when a foreground command ends while
   its read — which had no prompt — is still outstanding. Output does not need
   it any more: the service redraws around every write it relays.
+- `Continue`: ask for the next part of a line (ADR 0109).
 
 Prompts are at most 64 bytes of printable ASCII, so a client cannot use the
-service to send control sequences. Replies carry at most 128 bytes. A line
+service to send control sequences. A reply carries at most 255 bytes of a
+line; a longer line is answered with `ResultPart` replies, each followed by the
+client's `Continue`, and ends with a `ResultLine` reply carrying the rest. A
+Ctrl-C between parts discards the line and answers the next `Continue` with the
+interrupt. The kernel's console input ring holds 8 KiB, so a pasted line of the
+full length arrives whole. A line
 completed while no read is outstanding waits in the discipline; an interrupt or
 end of input typed then is kept for the next read.
 

@@ -9,9 +9,10 @@ lines and sends each as one write, flushing before it asks for a line or waits.
 Reading the system log is a separate `log` capability.
 
 The shell resolves its `stdout`, `tty`, `log`, `vfs`, and `exec` handles from
-the versioned startup block and asks the terminal service for each line with
+the versioned startup object and asks the terminal service for each line with
 its prompt. Editing, echo and the control keys belong to the terminal service
-([tty.md](tty.md)); a command line is at most 128 bytes. Runtime allocation
+([tty.md](tty.md)); a command line is at most 4096 bytes, and the number of
+words in it is bounded only by its length (ADR 0109). Runtime allocation
 remains confined to the fixed userspace arena.
 
 The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`,
@@ -26,9 +27,10 @@ system log (ADRs 0059 and 0061). `diag`, in a `goos_diag` build, asks PID 1 to
 have the kernel dump its state to the console, since the shell cannot write the
 console itself. `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
 the normal path, and prints the elapsed time from the kernel's nanosecond
-clock as `time: <N> us` (ADR 0054). Commands are split into at most eight arguments with bounded single
-quotes, double quotes, and backslash escaping. The shell owns a fixed 192-byte working-directory buffer matching the
-inline `GVF1` path limit and resolves
+clock as `time: <N> us` (ADR 0054). Commands are split into words bounded only by the line's 4096 bytes, with single
+quotes, double quotes, and backslash escaping (ADR 0109). The shell owns a
+fixed working-directory buffer of the native path limit, 4096 bytes, and
+resolves
 relative paths without heap allocation. `cd` commits a new directory only after
 VFS `Stat` confirms it. Other command names are resolved beneath the fixed
 `/system/bin/` search root; a command word with a slash is a program path,
@@ -59,7 +61,7 @@ or redirection composition substitutes an endpoint (ADR 0089). No command holds 
 console capability. Standard input is always a
 stream: a foreground command's is fed by the shell with the lines typed while it
 runs, and a background command's is at end of input. The bounded `readline`
-utility reads one line from `in`, rejects input beyond 128 bytes, and writes
+utility reads one line from `in`, rejects input beyond 4096 bytes, and writes
 accepted bytes to `stdout`.
 `stat [-b|-k|-m|-g] PATH` prints a path's type and size in KiB by default, or
 in bytes, MiB or GiB, with two decimals and the exact byte count:
@@ -94,7 +96,7 @@ A line ending in an unquoted `&` runs as a background job with an empty
 standard input. The shell prints `[N] started`, returns to the prompt, and
 reports `[N] done`, `[N] exit status: C`, or the launch failure when PID 1
 replies. The terminal service takes the line being typed off the screen, writes
-the report, and shows the line again (ADR 0089). Up to three background jobs may run,
+the report, and shows the line again (ADR 0089). Up to seven background jobs may run (ADR 0111),
 and one exec slot stays free for the foreground. Builtins and `;` sequences
 cannot run in the background. A foreground command has no reply time limit
 (ADR 0064).
@@ -116,7 +118,7 @@ terminal session, exec channel, VFS session and configuration session, and no
 jobs.
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
-within the existing 128-byte line limit. A trailing separator is accepted; empty
+within the 4096-byte line limit. A trailing separator is accepted; empty
 intermediate commands are rejected. The entire line is checked for balanced
 quotes, escaping, argument bounds, and pipeline syntax before any command runs.
 Quoted or escaped semicolons remain data. Builtins cannot be pipeline stages.

@@ -119,3 +119,24 @@ func executableCreate(loader uint64, size uint64, address unsafe.Pointer) uint64
 
 //go:linkname executableWrite goos_executable_write
 func executableWrite(executable uint64, address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname vmMap goos_vm_map
+func vmMap(descriptor unsafe.Pointer, protection uint64, flags uint64) uint64
+
+//go:linkname vmUnmap goos_vm_unmap
+func vmUnmap(address uint64, length uint64) uint64
+
+//go:linkname vmProtect goos_vm_protect
+func vmProtect(address uint64, length uint64, protection uint64) uint64
+
+//go:linkname vmDiscard goos_vm_discard
+func vmDiscard(address uint64, length uint64) uint64
+
+//go:linkname vmQuery goos_vm_query
+func vmQuery(address uint64, record unsafe.Pointer) uint64
+
+//go:linkname memoryCreate goos_memory_create
+func memoryCreate(pages uint64, address unsafe.Pointer) uint64
+
+//go:linkname handleDuplicate goos_handle_duplicate
+func handleDuplicate(handle uint64, rights uint64, address unsafe.Pointer) uint64

@@ -4,8 +4,9 @@ import "goos/kernel/ramfs"
 
 // Volume is a FileSystem bound to the device it is mounted from: the shape the
 // FAT32 filesystem service serves over its protocol (ADR 0096). Until Mount
-// has accepted the volume, every operation is refused with an I/O error; the
-// filesystem code never runs against a volume it has not checked.
+// has accepted the volume, the root is refused with the reason Mount gave and
+// every other operation with an I/O error; the filesystem code never runs
+// against a volume it has not checked.
 type Volume struct {
 	fs      FileSystem
 	device  Device
@@ -23,6 +24,9 @@ func (volume *Volume) Mount(device Device) bool {
 // Root reports the root of the mounted volume, or that the volume was refused.
 func (volume *Volume) Root() (ramfs.NodeID, ramfs.Status) {
 	if !volume.mounted {
+		if refusal := volume.fs.Refused(); refusal != ramfs.StatusOK {
+			return 0, refusal
+		}
 		return 0, ramfs.StatusIOError
 	}
 	return volume.root, ramfs.StatusOK
@@ -30,7 +34,12 @@ func (volume *Volume) Root() (ramfs.NodeID, ramfs.Status) {
 
 // Flush makes every completed write durable on the device. It does not need
 // an accepted volume: shutting down flushes the device either way.
-func (volume *Volume) Flush() bool { return volume.device != nil && volume.device.Flush() }
+func (volume *Volume) Flush() bool {
+	if volume.mounted {
+		return volume.fs.Flush()
+	}
+	return volume.device != nil && volume.device.Flush()
+}
 
 func (volume *Volume) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
 	if !volume.mounted {

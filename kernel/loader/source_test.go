@@ -40,15 +40,25 @@ func TestImageExtentKeysDistinguishLengths(t *testing.T) {
 	}
 }
 
-// paged splits data into whole pages of pageSize bytes, the tail zero padded.
-func paged(data []byte, pageSize int) [][]byte {
+// paged splits data into whole pages of pageSize bytes, the tail zero padded,
+// and returns them by number.
+func paged(data []byte, pageSize int) func(uint64) ([]byte, bool) {
 	var pages [][]byte
 	for start := 0; start < len(data); start += pageSize {
 		page := make([]byte, pageSize)
 		copy(page, data[start:])
 		pages = append(pages, page)
 	}
-	return pages
+	return pageList(pages)
+}
+
+func pageList(pages [][]byte) func(uint64) ([]byte, bool) {
+	return func(index uint64) ([]byte, bool) {
+		if index >= uint64(len(pages)) {
+			return nil, false
+		}
+		return pages[index], true
+	}
 }
 
 func TestPagedSourceReadsLikeContiguous(t *testing.T) {
@@ -82,25 +92,38 @@ func TestPagedSourceReadsLikeContiguous(t *testing.T) {
 	}
 }
 
-func TestPagedSourceRequiresWholePagesForItsSize(t *testing.T) {
+func TestPagedSourceRequiresWholePages(t *testing.T) {
 	pages := paged(make([]byte, 128), 64)
 	for _, test := range []struct {
-		pages    [][]byte
+		page     func(uint64) ([]byte, bool)
 		pageSize uint64
 		size     uint64
 	}{
-		{pages, 64, 0},   // empty
-		{pages, 0, 128},  // no page size
-		{pages, 64, 129}, // more bytes than pages
-		{pages, 64, 64},  // a page too many
-		{[][]byte{pages[0], pages[1][:63]}, 64, 127}, // a short page
+		{pages, 64, 0},  // empty
+		{pages, 0, 128}, // no page size
+		{nil, 64, 128},  // no pages
 	} {
-		if _, ok := Paged(test.pages, test.pageSize, test.size); ok {
-			t.Fatalf("accepted %d pages of %d for %d bytes", len(test.pages), test.pageSize, test.size)
+		if _, ok := Paged(test.page, test.pageSize, test.size); ok {
+			t.Fatalf("accepted page size %d for %d bytes", test.pageSize, test.size)
 		}
 	}
-	if _, ok := Paged(pages, 64, 65); !ok {
-		t.Fatal("a partly used last page refused")
+	whole := make([]byte, 64)
+	short, _ := Paged(pageList([][]byte{whole, whole[:63]}), 64, 127)
+	if _, ok := short.Read(60, 10, make([]byte, 10)); ok {
+		t.Fatal("a short page was read")
+	}
+	missing, _ := Paged(pageList([][]byte{whole}), 64, 128)
+	if missing.CopyOut(0, make([]byte, 128)) {
+		t.Fatal("a missing page was copied")
+	}
+	data := make([]byte, 200)
+	for index := range data {
+		data[index] = byte(index)
+	}
+	source, _ := Paged(paged(data, 64), 64, 200)
+	target := make([]byte, 100)
+	if !source.CopyOut(50, target) || target[0] != 50 || target[99] != 149 {
+		t.Fatal("copy across pages")
 	}
 }
 

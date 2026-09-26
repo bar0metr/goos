@@ -35,15 +35,16 @@ var (
 	// prompt is read from the configuration service rather than compiled in.
 	// It falls back to the built-in text when there is no session, because the
 	// shell has to come up whether or not configuration is available.
-	promptText  = [config.MaxText]byte{'g', 'o', 'o', 's', '>', ' '}
-	promptSize  = 6
-	startupWire [startup.Size]byte
-	ttyWire     [ipc.WireMaxSize]byte
+	promptText = [config.MaxText]byte{'g', 'o', 'o', 's', '>', ' '}
+	promptSize = 6
+	ttyWire    [ipc.WireMaxSize]byte
 	// lineStorage holds the command line being executed; typedStorage the
 	// last line received, which may be input for a running command. They are
 	// separate so input typed during `a; b` cannot overwrite `b`.
 	lineStorage  [terminal.MaxLine]byte
 	typedStorage [terminal.MaxLine]byte
+	// typedSize is how much of a line delivered in parts has arrived.
+	typedSize int
 	// reading is the correlation of the outstanding read from the terminal
 	// service, or zero. One is kept outstanding while a foreground command
 	// runs too, so what is typed reaches the command and Ctrl-C reaches the
@@ -62,11 +63,10 @@ var (
 	cwdSize           = 1
 	pathBuffer        [shellcmd.MaxPath]byte
 	executableBuffers [execproto.MaxStages][execproto.MaxPath]byte
-	argumentStorage   [shellcmd.MaxArguments][shellcmd.MaxArgumentSize]byte
-	vectorWires       [execproto.MaxStages][startup.VectorSize]byte
+	argumentStorage   shellcmd.Storage
 	jobs              [execproto.Slots]job
-	// execPage is the page shared with PID 1 that carries exec requests, one
-	// slot per job in flight (ADR 0064).
+	// execPage is the area shared with PID 1 that carries exec requests, one
+	// slot per job in flight (ADR 0064, ADR 0109).
 	execPage []byte
 )
 
@@ -87,11 +87,8 @@ type job struct {
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("SHELL_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("SHELL_STARTUP_UNAVAILABLE\n")
-	}
 	var validStartup, found bool
-	startupData, validStartup = startup.Decode(startupWire[:])
+	startupData, validStartup = startup.Read()
 	if !validStartup {
 		fatal("SHELL_STARTUP_INVALID\n")
 	}
@@ -122,7 +119,7 @@ func userspaceMain() {
 	if !found {
 		fatal("SHELL_EXEC_PAGE_FAILED\n")
 	}
-	page, pageStatus := sys.MemoryMap(pageHandle, execproto.PageAddress, execproto.PageSize, true)
+	page, pageStatus := sys.MemoryMap(pageHandle, execproto.AreaAddress, execproto.AreaSize, true)
 	if pageStatus != kcall.StatusOK {
 		fatal("SHELL_EXEC_PAGE_FAILED\n")
 	}

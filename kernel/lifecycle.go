@@ -12,7 +12,6 @@ import (
 	"goos/kernel/arch/amd64"
 	"goos/kernel/device"
 	"goos/kernel/diag"
-	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -120,6 +119,9 @@ func releaseExitedProcess(event process.ExitEvent) {
 	}
 	if exited, found := processRegistry.ByID(event.Process); found {
 		releaseProcessHandles(exited)
+		releasingProcess = exited.ID()
+		releaseSharedMappings(exited)
+		releasingProcess = 0
 		before := pageAllocator.Statistics().FreePages
 		if !vm.DestroyUserAddressSpace(&pageAllocator, exited.AddressSpace().Root) {
 			addressSpaceReclaimFailures++
@@ -133,10 +135,15 @@ func releaseExitedProcess(event process.ExitEvent) {
 		// and streams the process created are released by their own registries
 		// when their endpoints close, which may be later than this.
 		exited.Release(process.ResourcePages, exitedPages(exited))
+		if id := exited.Executable(); id != 0 {
+			releasingProcess = exited.ID()
+			dropExecutable(id)
+			releasingProcess = 0
+		}
 	}
 	processRegistry.Remove(event.Process)
 	for index := range spawnedProcesses {
-		if spawnedProcesses[index].ID() == event.Process {
+		if spawnedProcesses[index] != nil && spawnedProcesses[index].ID() == event.Process {
 			spawnedProcesses[index].Reset()
 			break
 		}
@@ -158,9 +165,8 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 			amd64.QuiesceIRQ11()
 		}
 	}
-	if typeID == handle.TypeMemory && executable.IsObject(cap.Object()) {
-		// The rest of the page reservation is returned with the process.
-		destroyExecutable(nil, cap.Object())
+	if typeID == handle.TypeMemory {
+		releaseMemory(cap)
 		return
 	}
 	if typeID == handle.TypeStream {

@@ -2,6 +2,8 @@ package exec
 
 import (
 	"bytes"
+	"encoding/binary"
+	"goos/internal/limits"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/mm/vm"
@@ -9,20 +11,39 @@ import (
 	"testing"
 )
 
-func TestProtocolRoundTrip(t *testing.T) {
-	var wire [startup.VectorSize]byte
-	arguments, environment, ok := startup.EncodeVectors([][]byte{[]byte("cat"), []byte("motd")}, []startup.Variable{{Name: []byte("PATH"), Value: []byte("/system/bin")}}, &wire)
-	if !ok {
-		t.Fatal("vector encode failed")
+func words(values ...string) [][]byte {
+	result := make([][]byte, len(values))
+	for index, value := range values {
+		result[index] = []byte(value)
 	}
+	return result
+}
+
+func strings(list List) []string {
+	var result []string
+	for offset, index := 0, 0; index < list.Count(); index++ {
+		var value []byte
+		value, offset = list.Next(offset)
+		result = append(result, string(value))
+	}
+	return result
+}
+
+func TestProtocolRoundTrip(t *testing.T) {
 	var slot [SlotSize]byte
-	data, ok := EncodeRequest(Request{Stages: [MaxStages]Stage{{Path: []byte("/system/bin/cat"), Arguments: arguments}}, Count: 1, Background: true, CWD: []byte("/system"), Environment: environment}, &slot)
+	data, ok := EncodeRequest(Spec{Stages: [MaxStages]StageSpec{{Path: []byte("/system/bin/cat"), Arguments: words("cat", "motd")}}, Count: 1, Background: true, CWD: []byte("/system"), Environment: words("PATH=/system/bin")}, slot[:])
 	if !ok {
 		t.Fatal("request encode failed")
 	}
 	request, ok := DecodeRequest(data)
 	if !ok || string(request.Stages[0].Path) != "/system/bin/cat" || string(request.CWD) != "/system" || !request.Background {
 		t.Fatalf("request = %#v", request)
+	}
+	if got := strings(request.Stages[0].Arguments); len(got) != 2 || got[0] != "cat" || got[1] != "motd" {
+		t.Fatalf("arguments = %q", got)
+	}
+	if got := strings(request.Environment); len(got) != 1 || got[0] != "PATH=/system/bin" {
+		t.Fatalf("environment = %q", got)
 	}
 	replyMessage, ok := EncodeReply(Reply{Process: 12, ExitCode: 7}, 7)
 	if !ok {
@@ -34,35 +55,29 @@ func TestProtocolRoundTrip(t *testing.T) {
 	}
 }
 
-func pipelineRequest(t *testing.T) Request {
-	t.Helper()
-	request := Request{Count: MaxStages, CWD: []byte("/"), Environment: []byte{0}}
-	for index := range request.Stages {
-		var wire [startup.VectorSize]byte
-		arguments, _, ok := startup.EncodeVectors([][]byte{[]byte("readline")}, nil, &wire)
-		if !ok {
-			t.Fatal("vectors")
-		}
-		request.Stages[index] = Stage{Path: []byte("/system/bin/readline"), Arguments: arguments}
+func pipelineSpec() Spec {
+	spec := Spec{Count: MaxStages, CWD: []byte("/")}
+	for index := range spec.Stages {
+		spec.Stages[index] = StageSpec{Path: []byte("/system/bin/readline"), Arguments: words("readline")}
 	}
-	return request
+	return spec
 }
 
 func TestPipelineProtocolRoundTrip(t *testing.T) {
 	for count := uint8(1); count <= MaxStages; count++ {
-		original := pipelineRequest(t)
+		original := pipelineSpec()
 		original.Count = count
 		var slot [SlotSize]byte
-		data, ok := EncodeRequest(original, &slot)
+		data, ok := EncodeRequest(original, slot[:])
 		if !ok {
 			t.Fatal("pipeline encode failed")
 		}
 		request, ok := DecodeRequest(data)
-		if !ok || request.Count != count || !bytes.Equal(request.CWD, original.CWD) || !bytes.Equal(request.Environment, original.Environment) {
+		if !ok || request.Count != count || !bytes.Equal(request.CWD, original.CWD) || request.Environment.Count() != 0 {
 			t.Fatalf("pipeline request = %#v", request)
 		}
 		for i := 0; i < int(count); i++ {
-			if !bytes.Equal(request.Stages[i].Path, original.Stages[i].Path) || !bytes.Equal(request.Stages[i].Arguments, original.Stages[i].Arguments) {
+			if !bytes.Equal(request.Stages[i].Path, original.Stages[i].Path) || strings(request.Stages[i].Arguments)[0] != "readline" {
 				t.Fatal("stage changed")
 			}
 		}
@@ -72,10 +87,10 @@ func TestPipelineProtocolRoundTrip(t *testing.T) {
 func TestPipelineProtocolRoundTripsErrorSource(t *testing.T) {
 	for count := uint8(2); count <= MaxStages; count++ {
 		for source := uint8(1); source < count; source++ {
-			original := pipelineRequest(t)
+			original := pipelineSpec()
 			original.Count, original.ErrorSource = count, source
 			var slot [SlotSize]byte
-			data, ok := EncodeRequest(original, &slot)
+			data, ok := EncodeRequest(original, slot[:])
 			if !ok {
 				t.Fatalf("encode count=%d source=%d", count, source)
 			}
@@ -89,7 +104,9 @@ func TestPipelineProtocolRoundTripsErrorSource(t *testing.T) {
 
 func TestPipelineProtocolRejectsMalformedData(t *testing.T) {
 	var slot [SlotSize]byte
-	original, ok := EncodeRequest(pipelineRequest(t), &slot)
+	spec := pipelineSpec()
+	spec.Environment = words("PATH=/system/bin")
+	original, ok := EncodeRequest(spec, slot[:])
 	if !ok {
 		t.Fatal("encode")
 	}
@@ -101,22 +118,29 @@ func TestPipelineProtocolRejectsMalformedData(t *testing.T) {
 	if _, ok := DecodeRequest(append(append([]byte(nil), original...), 0)); ok {
 		t.Fatal("accepted trailing byte")
 	}
-	for _, mutate := range []func([]byte){
-		func(d []byte) { d[0] = 0 },
-		func(d []byte) { d[0] = MaxStages + 1 },
-		func(d []byte) { d[1] = 255 },
-		func(d []byte) { d[2] = 255 },
-		func(d []byte) { d[3] = MaxStages },
-		func(d []byte) { d[3] = 255 },
-		func(d []byte) { d[4] = 2 },
-		func(d []byte) { d[7] = 255 },
-		func(d []byte) { d[8] = 255 },
-		func(d []byte) { d[9] = '.' },
+	pathLength := headerSize + 1 + 4 + len("PATH=/system/bin")
+	for name, mutate := range map[string]func([]byte){
+		"no stages":          func(d []byte) { d[0] = 0 },
+		"too many stages":    func(d []byte) { d[0] = MaxStages + 1 },
+		"bad error source":   func(d []byte) { d[1] = 255 },
+		"error source count": func(d []byte) { d[1] = MaxStages },
+		"flags":              func(d []byte) { d[2] = 2 },
+		"reserved":           func(d []byte) { d[3] = 1 },
+		"cwd length":         func(d []byte) { binary.LittleEndian.PutUint32(d[4:8], 0xffffffff) },
+		"variable count":     func(d []byte) { binary.LittleEndian.PutUint32(d[8:12], 0xffffffff) },
+		"relative cwd":       func(d []byte) { d[headerSize] = 'x' },
+		"variable name":      func(d []byte) { d[headerSize+1+4] = '=' },
+		"zero in variable":   func(d []byte) { d[headerSize+1+4+2] = 0 },
+		"path length":        func(d []byte) { binary.LittleEndian.PutUint32(d[pathLength:], 0xfffffff0) },
+		"argument count": func(d []byte) {
+			binary.LittleEndian.PutUint32(d[pathLength+4+len("/system/bin/readline"):], 0x7fffffff)
+		},
+		"no arguments": func(d []byte) { binary.LittleEndian.PutUint32(d[pathLength+4+len("/system/bin/readline"):], 0) },
 	} {
 		data := append([]byte(nil), original...)
 		mutate(data)
 		if _, ok := DecodeRequest(data); ok {
-			t.Fatal("accepted malformed request")
+			t.Errorf("accepted malformed request: %s", name)
 		}
 	}
 }
@@ -140,7 +164,7 @@ func TestSubmitRoundTripAndBounds(t *testing.T) {
 		func(m *ipc.Message) { m.Version-- },
 		func(m *ipc.Message) { m.PayloadSize++ },
 		func(m *ipc.Message) { m.Payload[0] = Slots },
-		func(m *ipc.Message) { m.Payload[2] = 0xff },
+		func(m *ipc.Message) { m.Payload[4] = 0xff },
 		func(m *ipc.Message) { m.HandleCount = 1 },
 		func(m *ipc.Message) { m.Correlation = 0 },
 	} {
@@ -152,54 +176,53 @@ func TestSubmitRoundTripAndBounds(t *testing.T) {
 	}
 }
 
-// TestLongPipelineFitsSlot covers a request that exceeded the former
-// 256-byte IPC payload.
-func TestLongPipelineFitsSlot(t *testing.T) {
-	request := Request{Count: MaxStages, CWD: append([]byte("/"), bytes.Repeat([]byte{'d'}, 95)...), Environment: []byte{1, 4, 11, 'P', 'A', 'T', 'H', '/', 's', 'y', 's', 't', 'e', 'm', '/', 'b', 'i', 'n'}}
-	for index := range request.Stages {
-		var wire [startup.VectorSize]byte
-		arguments, _, ok := startup.EncodeVectors([][]byte{[]byte("readline"), bytes.Repeat([]byte{'a'}, 40)}, nil, &wire)
-		if !ok {
-			t.Fatal("vectors")
-		}
-		request.Stages[index] = Stage{Path: []byte("/system/bin/readline"), Arguments: append([]byte(nil), arguments...)}
+// TestManyArguments covers what GST3's one-byte counts could not carry: the
+// request is bounded by the slot's bytes, not by an argument count.
+func TestManyArguments(t *testing.T) {
+	spec := pipelineSpec()
+	spec.Count = 2
+	arguments := [][]byte{[]byte("echo")}
+	for index := 0; index < 3000; index++ {
+		arguments = append(arguments, []byte("argument"))
 	}
+	spec.Stages[0].Arguments = arguments
+	spec.CWD = append([]byte("/"), bytes.Repeat([]byte{'d'}, limits.PathMax-1)...)
 	var slot [SlotSize]byte
-	data, ok := EncodeRequest(request, &slot)
+	data, ok := EncodeRequest(spec, slot[:])
 	if !ok || len(data) <= ipc.MaxPayload {
 		t.Fatalf("encoded %d bytes, ok=%v", len(data), ok)
 	}
-	if _, ok := DecodeRequest(data); !ok {
-		t.Fatal("long pipeline rejected")
+	request, ok := DecodeRequest(data)
+	if !ok || request.Stages[0].Arguments.Count() != 3001 || len(request.CWD) != limits.PathMax {
+		t.Fatal("many arguments rejected")
+	}
+	spec.Stages[1].Arguments = [][]byte{[]byte("cat"), bytes.Repeat([]byte{'a'}, SlotSize)}
+	if _, ok := EncodeRequest(spec, slot[:]); ok {
+		t.Fatal("a request larger than its slot encoded")
 	}
 }
 
-func TestPipelineProtocolRejectsInvalidStageAndOverflow(t *testing.T) {
-	for _, mutate := range []func(*Request){
-		func(r *Request) { r.Count = 0 },
-		func(r *Request) { r.Count = MaxStages + 1 },
-		func(r *Request) { r.Count, r.ErrorSource = 1, 1 },
-		func(r *Request) { r.ErrorSource = MaxStages },
-		func(r *Request) { r.ErrorSource = 255 },
-		func(r *Request) { r.Stages[3].Path = []byte("tmp/readline") },
-		func(r *Request) { r.Stages[3].Path = []byte("/tmp/../readline") },
-		func(r *Request) { r.Stages[3].Arguments = []byte{1, 8, 'x'} },
-		func(r *Request) { r.Environment = []byte{1} },
-		func(r *Request) {
-			arguments := []byte{4}
-			for index := 0; index < 4; index++ {
-				arguments = append(append(arguments, 62), bytes.Repeat([]byte{'a'}, 62)...)
-			}
-			for index := range r.Stages {
-				r.Stages[index].Arguments = arguments
-			}
-		},
+func TestPipelineProtocolRejectsInvalidStage(t *testing.T) {
+	for name, mutate := range map[string]func(*Spec){
+		"no stages":          func(r *Spec) { r.Count = 0 },
+		"too many stages":    func(r *Spec) { r.Count = MaxStages + 1 },
+		"lone error source":  func(r *Spec) { r.Count, r.ErrorSource = 1, 1 },
+		"error source range": func(r *Spec) { r.ErrorSource = MaxStages },
+		"relative path":      func(r *Spec) { r.Stages[3].Path = []byte("tmp/readline") },
+		"dot-dot path":       func(r *Spec) { r.Stages[3].Path = []byte("/tmp/../readline") },
+		"no arguments":       func(r *Spec) { r.Stages[3].Arguments = nil },
+		"empty argv0":        func(r *Spec) { r.Stages[3].Arguments = words("") },
+		"zero byte":          func(r *Spec) { r.Stages[3].Arguments = words("x", "a\x00") },
+		"long argument":      func(r *Spec) { r.Stages[3].Arguments = [][]byte{[]byte("x"), make([]byte, startup.MaxString+1)} },
+		"bad variable":       func(r *Spec) { r.Environment = words("=value") },
+		"variable no equals": func(r *Spec) { r.Environment = words("NAME") },
+		"long path":          func(r *Spec) { r.Stages[0].Path = append([]byte("/"), bytes.Repeat([]byte{'p'}, limits.PathMax)...) },
 	} {
-		request := pipelineRequest(t)
-		mutate(&request)
+		spec := pipelineSpec()
+		mutate(&spec)
 		var slot [SlotSize]byte
-		if _, ok := EncodeRequest(request, &slot); ok {
-			t.Fatal("accepted invalid pipeline")
+		if _, ok := EncodeRequest(spec, slot[:]); ok {
+			t.Errorf("accepted invalid pipeline: %s", name)
 		}
 	}
 }
@@ -207,10 +230,10 @@ func TestPipelineProtocolRejectsInvalidStageAndOverflow(t *testing.T) {
 // A stage may name a program anywhere in the namespace; PID 1 decides where it
 // is read from and whether it may run (ADR 0097).
 func TestProtocolCarriesPathsOutsideSystemBin(t *testing.T) {
-	request := pipelineRequest(t)
-	request.Stages[3].Path = []byte("/home/demo/readline")
+	spec := pipelineSpec()
+	spec.Stages[3].Path = []byte("/home/demo/readline")
 	var slot [SlotSize]byte
-	data, ok := EncodeRequest(request, &slot)
+	data, ok := EncodeRequest(spec, slot[:])
 	if !ok {
 		t.Fatal("refused a canonical path outside /system/bin")
 	}
@@ -223,7 +246,7 @@ func TestProtocolCarriesPathsOutsideSystemBin(t *testing.T) {
 func TestProtocolRejectsInvalidPathsAndResults(t *testing.T) {
 	for _, path := range []string{"hello", "/system/../hello", "/system//hello", "/"} {
 		var slot [SlotSize]byte
-		if _, ok := EncodeRequest(Request{Count: 1, Stages: [MaxStages]Stage{{Path: []byte(path), Arguments: []byte{1, 1, 'x'}}}, CWD: []byte("/"), Environment: []byte{0}}, &slot); ok {
+		if _, ok := EncodeRequest(Spec{Count: 1, Stages: [MaxStages]StageSpec{{Path: []byte(path), Arguments: words("x")}}, CWD: []byte("/")}, slot[:]); ok {
 			t.Fatalf("accepted %q", path)
 		}
 	}
@@ -245,16 +268,16 @@ func TestResolveExecutableUsesBoundedSystemPath(t *testing.T) {
 	if _, ok := CommandFromSystemPath([]byte("/tmp/args")); ok {
 		t.Fatal("accepted executable outside system search root")
 	}
-	for _, command := range [][]byte{nil, []byte("../init"), []byte("nested/tool"), []byte("bad name")} {
+	for _, command := range [][]byte{nil, []byte("../init"), []byte("nested/tool"), []byte("bad name"), bytes.Repeat([]byte{'n'}, limits.NameMax+1)} {
 		if _, ok := ResolveExecutable(command, &target); ok {
 			t.Fatalf("accepted command %q", command)
 		}
 	}
 }
 
-func TestPageInsideSharedWindow(t *testing.T) {
-	if PageAddress%PageSize != 0 || PageAddress < vm.UserSharedAddress || PageAddress+PageSize > vm.UserSharedLimit {
-		t.Fatalf("exec page %#x outside [%#x, %#x)", PageAddress, vm.UserSharedAddress, vm.UserSharedLimit)
+func TestAreaInsideSharedWindow(t *testing.T) {
+	if AreaAddress%vm.PageSize != 0 || AreaSize%vm.PageSize != 0 || AreaAddress < vm.UserSharedAddress || AreaAddress+AreaSize > vm.UserSharedLimit {
+		t.Fatalf("exec area %#x outside [%#x, %#x)", AreaAddress, vm.UserSharedAddress, vm.UserSharedLimit)
 	}
 }
 

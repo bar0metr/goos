@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"goos/kernel/boot"
 	"goos/kernel/mm/pmm"
 	"unsafe"
 )
@@ -11,8 +12,13 @@ const entriesPerTable = 512
 
 type table [entriesPerTable]uint64
 
+// kernelDirectMap records what BuildIdentity placed in the direct map. It is
+// written once, before the kernel's page tables are loaded, and only read
+// afterwards.
+var kernelDirectMap directMap
+
 // copyBytes and zeroBytes use string instructions. Both addresses must be
-// identity-mapped kernel memory that the caller owns for the whole range.
+// kernel-mapped memory that the caller owns for the whole range.
 //
 //export goos_copy_bytes
 func copyBytes(destination uintptr, source uintptr, length uint64)
@@ -48,7 +54,8 @@ func LoadedImage() (Image, bool) {
 
 // BuildIdentity creates supervisor-only 4 KiB mappings for the first GiB.
 // Low memory remains unmapped. All ordinary pages are RW+NX; validated PE
-// sections replace those permissions, ensuring that no leaf is W+X.
+// sections replace those permissions, ensuring that no leaf is W+X. It then
+// builds the direct map of every managed physical page at DirectMapBase.
 func BuildIdentity(allocator *pmm.Allocator, image Image) (uint64, bool) {
 	rootAddress, root, ok := allocateTable(allocator)
 	if !ok {
@@ -90,7 +97,103 @@ func BuildIdentity(allocator *pmm.Allocator, image Image) (uint64, bool) {
 			return 0, false
 		}
 	}
+	if !buildDirectMap(allocator, root) {
+		return 0, false
+	}
 	return rootAddress, true
+}
+
+// buildDirectMap maps every segment the page allocator manages at
+// DirectMapBase+physical with supervisor-only RW+NX two MiB leaves, in the
+// one PML4 slot every address space shares. Its page tables are low pages.
+func buildDirectMap(allocator *pmm.Allocator, root *table) bool {
+	pdptAddress, pdpt, ok := allocateTable(allocator)
+	if !ok {
+		return false
+	}
+	root[directMapSlot] = pdptAddress | entryPresent | entryWritable
+	for index := 0; ; index++ {
+		start, end, found := allocator.Segment(index)
+		if !found {
+			return true
+		}
+		if !kernelDirectMap.add(start, end) {
+			return false
+		}
+		for page := start &^ (LargePageSize - 1); page < end; page += LargePageSize {
+			pd, ok := kernelTable(allocator, pdpt, (page>>30)&0x1ff)
+			if !ok {
+				return false
+			}
+			pd[(page>>21)&0x1ff] = largePageEntry(page)
+		}
+	}
+}
+
+// MapLoaderMemory identity-maps, supervisor-only RW+NX, the loader memory
+// above IdentityMapLimit. The firmware places the TinyGo heap and stack at the
+// top of low RAM, so on a machine with more than a GiB they lie above the
+// kernel identity map, and the kernel keeps using them at their physical
+// address. The mapping lives in the kernel's first PML4 slot; the part inside
+// the user GiB reaches every process as supervisor-only directory entries
+// copied by CreateUserAddressSpace (ADR 0103). Loader memory that overlaps the
+// fixed user windows, or lies beyond the first PML4 slot, is refused.
+func MapLoaderMemory(allocator *pmm.Allocator, rootAddress uint64, regions []boot.MemoryRegion) bool {
+	if allocator == nil || rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
+		return false
+	}
+	// SAFETY: rootAddress is the kernel PML4 returned by BuildIdentity; its
+	// page-table pages are low pages the kernel identity map covers.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	for _, region := range regions {
+		if region.Kind != boot.MemoryLoader || region.End() <= IdentityMapLimit {
+			continue
+		}
+		start := region.Start
+		if start < IdentityMapLimit {
+			start = IdentityMapLimit
+		}
+		if start < UserImageLimit || region.End() > 1<<39 {
+			return false
+		}
+		for page := start; page < region.End(); page += PageSize {
+			pdpt, ok := kernelTable(allocator, root, (page>>39)&0x1ff)
+			if !ok {
+				return false
+			}
+			pd, ok := kernelTable(allocator, pdpt, (page>>30)&0x1ff)
+			if !ok {
+				return false
+			}
+			pt, ok := kernelTable(allocator, pd, (page>>21)&0x1ff)
+			if !ok {
+				return false
+			}
+			pt[(page>>12)&0x1ff], _ = pageEntry(page, Permissions{Writable: true})
+		}
+	}
+	return true
+}
+
+// kernelTable returns the supervisor page table that parent[index] names,
+// allocating it when the entry is empty. A present leaf or user entry is
+// refused: kernel mappings are never built under either.
+func kernelTable(allocator *pmm.Allocator, parent *table, index uint64) (*table, bool) {
+	entry := parent[index]
+	if entry&entryPresent == 0 {
+		address, child, ok := allocateTable(allocator)
+		if !ok {
+			return nil, false
+		}
+		parent[index] = address | entryPresent | entryWritable
+		return child, true
+	}
+	if entry&(entryLarge|entryUser) != 0 {
+		return nil, false
+	}
+	// SAFETY: present non-leaf kernel entries are created only by
+	// allocateTable and name low page tables inside the identity map.
+	return (*table)(unsafe.Pointer(uintptr(entry & addressMask))), true
 }
 
 // UnmapPage removes one aligned leaf from a kernel-owned bootstrap table.
@@ -189,68 +292,45 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64) 
 		pdpt[index] = kernelPDPT[index]
 	}
 	root[0] = pdptAddress | entryPresent | entryWritable | entryUser
+	// Every address space shares the kernel's direct map. The entry carries
+	// no user bit, so user code cannot reach it and teardown never frees it.
+	root[directMapSlot] = kernelRoot[directMapSlot]
 
 	pdAddress, pd, ok := allocateTable(allocator)
 	if !ok {
+		return 0, false
+	}
+	// Loader memory in the user GiB (MapLoaderMemory) stays reachable to the
+	// kernel in every address space through the kernel's supervisor-only
+	// directory entries. They carry no user bit, so user access faults,
+	// CopyIn and CopyOut refuse them, no user leaf is placed under them, and
+	// teardown leaves their tables alone.
+	userSlot := (UserProbeAddress >> 30) & 0x1ff
+	if kernelUserEntry := kernelPDPT[userSlot]; kernelUserEntry&entryPresent != 0 {
+		// SAFETY: the entry is a kernel directory built by MapLoaderMemory from
+		// an allocateTable page inside the identity map.
+		kernelPD := (*table)(unsafe.Pointer(uintptr(kernelUserEntry & addressMask)))
+		for index := range pd {
+			pd[index] = kernelPD[index]
+		}
+	}
+	probeSlot := (UserProbeAddress >> 21) & 0x1ff
+	if pd[probeSlot]&entryPresent != 0 {
 		return 0, false
 	}
 	ptAddress, _, ok := allocateTable(allocator)
 	if !ok {
 		return 0, false
 	}
-	pdpt[(UserProbeAddress>>30)&0x1ff] = pdAddress | entryPresent | entryWritable | entryUser
-	pd[(UserProbeAddress>>21)&0x1ff] = ptAddress | entryPresent | entryWritable | entryUser
+	pdpt[userSlot] = pdAddress | entryPresent | entryWritable | entryUser
+	pd[probeSlot] = ptAddress | entryPresent | entryWritable | entryUser
 	return rootAddress, true
-}
-
-// ExtendUserAddressSpace adds the leaf table covering the two MiB region that
-// contains virtual, so a later MapUserPage has somewhere to record its leaf.
-// Only the region the bootstrap layout already reaches is extended: the page
-// directory pointer and page directory must already exist, which confines
-// address-space growth to one level and one page. added reports whether a
-// table was allocated, so the caller charges only for what it gained.
-func ExtendUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64, virtual uint64) (added bool, ok bool) {
-	if allocator == nil || rootAddress%PageSize != 0 || virtual < IdentityMapLimit || virtual >= UserAddressLimit {
-		return false, false
-	}
-	// SAFETY: rootAddress names a process PML4 created by this package; its
-	// page-table pages stay owned and identity-mapped during bootstrap.
-	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
-	pml4Entry := root[(virtual>>39)&0x1ff]
-	if pml4Entry&entryPresent == 0 {
-		return false, false
-	}
-	// SAFETY: non-leaf entries were produced only by allocateTable and retain
-	// exclusive, identity-mapped page-table addresses.
-	pdpt := (*table)(unsafe.Pointer(uintptr(pml4Entry & addressMask)))
-	pdptEntry := pdpt[(virtual>>30)&0x1ff]
-	if pdptEntry&entryPresent == 0 {
-		return false, false
-	}
-	// SAFETY: same page-table ownership invariant as above.
-	pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
-	index := (virtual >> 21) & 0x1ff
-	if pd[index]&entryPresent != 0 {
-		return false, true
-	}
-	pageTableAddress, _, allocated := allocateTable(allocator)
-	if !allocated {
-		return false, false
-	}
-	pd[index] = pageTableAddress | entryPresent | entryWritable | entryUser
-	return true, true
 }
 
 // MapUserPage adds a supervisor-authorized user leaf to an existing process
 // address space. Writable executable mappings are rejected by pageEntry.
 func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
 	return mapUserPage(rootAddress, virtual, physical, permissions, false)
-}
-
-// MapOwnedUserPage maps private process storage. DestroyUserAddressSpace
-// returns the backing physical page; shared pages must use MapUserPage.
-func MapOwnedUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions) bool {
-	return mapUserPage(rootAddress, virtual, physical, permissions, true)
 }
 
 func mapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions, owned bool) bool {
@@ -261,7 +341,7 @@ func mapUserPage(rootAddress uint64, virtual uint64, physical uint64, permission
 	// SAFETY: rootAddress names a process PML4 created by this package and its
 	// page-table pages remain owned and identity-mapped during bootstrap.
 	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
-	entry := leafEntry(root, virtual)
+	entry := userLeafEntry(root, virtual)
 	if entry == nil || *entry&entryPresent != 0 {
 		return false
 	}
@@ -309,7 +389,7 @@ func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool 
 				pt := (*table)(unsafe.Pointer(uintptr(ptAddress)))
 				for leafIndex := range pt {
 					leaf := pt[leafIndex]
-					if leaf&(entryPresent|entryUser|entryOwned) == entryPresent|entryUser|entryOwned {
+					if leaf&(entryPresent|entryOwned) == entryPresent|entryOwned {
 						ok = allocator.Free(leaf&addressMask) && ok
 					}
 					pt[leafIndex] = 0
@@ -326,30 +406,17 @@ func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool 
 	return allocator.Free(rootAddress) && ok
 }
 
-// CanMapUserPage reports whether the existing bootstrap page-table hierarchy
-// has an unused leaf for the requested user address. Loaders use this to reject
-// unsupported branches and conflicts before allocating or exposing pages.
-func CanMapUserPage(rootAddress uint64, virtual uint64) bool {
-	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || virtual < IdentityMapLimit || virtual >= UserAddressLimit {
-		return false
-	}
-	// SAFETY: rootAddress names a process PML4 created by this package; the
-	// function only inspects its owned, identity-mapped page-table hierarchy.
-	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
-	entry := leafEntry(root, virtual)
-	return entry != nil && *entry&entryPresent == 0
-}
-
 // CopyIn copies a bounded range from a process address space through the
-// kernel's physical identity map. Every page in the range must be explicitly
-// user-accessible; supervisor mappings are never accepted through this path.
+// kernel's view of physical memory (kernelAddress). Every page in the range
+// must be explicitly user-accessible; supervisor mappings are never accepted
+// through this path.
 func CopyIn(rootAddress uint64, address uint64, destination []byte) bool {
 	if !ValidateUserRange(address, uint64(len(destination))) || rootAddress%PageSize != 0 {
 		return false
 	}
 	for copied := uint64(0); copied < uint64(len(destination)); {
-		physical, _, ok := resolveUser(rootAddress, address+copied)
-		if !ok || physical >= IdentityMapLimit {
+		physical, _, ok := resolveOrFault(rootAddress, address+copied, false)
+		if !ok {
 			return false
 		}
 		pageRemaining := PageSize - physical&(PageSize-1)
@@ -357,10 +424,14 @@ func CopyIn(rootAddress uint64, address uint64, destination []byte) bool {
 		if pageRemaining > remaining {
 			pageRemaining = remaining
 		}
+		source, mapped := kernelDirectMap.kernelAddress(physical, pageRemaining)
+		if !mapped {
+			return false
+		}
 		// SAFETY: resolveUser validated every page-table level and returned a
-		// present user leaf. Bootstrap user pages come from PMM below the active
-		// identity-map limit, so this physical range is kernel-addressable.
-		copyBytes(uintptr(unsafe.Pointer(&destination[copied])), uintptr(physical), pageRemaining)
+		// present user leaf, and kernelAddress returned the kernel mapping of
+		// exactly this part of that page.
+		copyBytes(uintptr(unsafe.Pointer(&destination[copied])), uintptr(source), pageRemaining)
 		copied += pageRemaining
 	}
 	return true
@@ -373,8 +444,8 @@ func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
 		return false
 	}
 	for copied := uint64(0); copied < uint64(len(source)); {
-		physical, leaf, ok := resolveUser(rootAddress, address+copied)
-		if !ok || leaf&entryWritable == 0 || physical >= IdentityMapLimit {
+		physical, leaf, ok := resolveOrFault(rootAddress, address+copied, true)
+		if !ok || leaf&entryWritable == 0 {
 			return false
 		}
 		pageRemaining := PageSize - physical&(PageSize-1)
@@ -382,9 +453,14 @@ func CopyOut(rootAddress uint64, address uint64, source []byte) bool {
 		if pageRemaining > remaining {
 			pageRemaining = remaining
 		}
-		// SAFETY: resolveUser validated a present user leaf and the writable bit.
-		// The backing PMM page is below the active physical identity-map limit.
-		copyBytes(uintptr(physical), uintptr(unsafe.Pointer(&source[copied])), pageRemaining)
+		destination, mapped := kernelDirectMap.kernelAddress(physical, pageRemaining)
+		if !mapped {
+			return false
+		}
+		// SAFETY: resolveUser validated a present user leaf and the writable bit,
+		// and kernelAddress returned the kernel mapping of exactly this part of
+		// that page.
+		copyBytes(uintptr(destination), uintptr(unsafe.Pointer(&source[copied])), pageRemaining)
 		copied += pageRemaining
 	}
 	return true
@@ -396,14 +472,17 @@ func CanCopyOut(rootAddress uint64, address uint64, length uint64) bool {
 		return false
 	}
 	for checked := uint64(0); checked < length; {
-		physical, leaf, ok := resolveUser(rootAddress, address+checked)
-		if !ok || leaf&entryWritable == 0 || physical >= IdentityMapLimit {
+		physical, leaf, ok := resolveOrFault(rootAddress, address+checked, true)
+		if !ok || leaf&entryWritable == 0 {
 			return false
 		}
 		pageRemaining := PageSize - physical&(PageSize-1)
 		remaining := length - checked
 		if pageRemaining > remaining {
 			pageRemaining = remaining
+		}
+		if _, mapped := kernelDirectMap.kernelAddress(physical, pageRemaining); !mapped {
+			return false
 		}
 		checked += pageRemaining
 	}
@@ -413,28 +492,37 @@ func CanCopyOut(rootAddress uint64, address uint64, length uint64) bool {
 // InitializePhysicalByte initializes an exclusively owned physical page before
 // it is exposed through a process mapping.
 func InitializePhysicalByte(address uint64, value byte) bool {
-	if address%PageSize != 0 || address >= IdentityMapLimit {
+	if address%PageSize != 0 {
 		return false
 	}
-	// SAFETY: the caller passes a page freshly allocated from PMM while the
-	// bootstrap identity map is active. The complete page is exclusively owned.
-	zeroBytes(uintptr(address), PageSize)
-	target := (*[PageSize]byte)(unsafe.Pointer(uintptr(address)))
-	target[0] = value
+	target, mapped := kernelDirectMap.kernelAddress(address, PageSize)
+	if !mapped {
+		return false
+	}
+	// SAFETY: the caller passes a page freshly allocated from PMM and owns all
+	// of it; kernelAddress returned the kernel mapping of exactly that page.
+	zeroBytes(uintptr(target), PageSize)
+	page := (*[PageSize]byte)(unsafe.Pointer(uintptr(target)))
+	page[0] = value
 	return true
 }
 
 // InitializePhysical copies a bounded payload into a freshly allocated page.
 func InitializePhysical(address uint64, data []byte) bool {
-	if address%PageSize != 0 || address >= IdentityMapLimit || len(data) > int(PageSize) {
+	if address%PageSize != 0 || len(data) > int(PageSize) {
 		return false
 	}
-	// SAFETY: the page is exclusively owned by the caller and identity-mapped;
-	// the length check confines every write to that page.
-	if len(data) != 0 {
-		copyBytes(uintptr(address), uintptr(unsafe.Pointer(&data[0])), uint64(len(data)))
+	target, mapped := kernelDirectMap.kernelAddress(address, PageSize)
+	if !mapped {
+		return false
 	}
-	zeroBytes(uintptr(address)+uintptr(len(data)), PageSize-uint64(len(data)))
+	// SAFETY: the page is exclusively owned by the caller and kernelAddress
+	// returned its kernel mapping; the length check confines every write to
+	// that page.
+	if len(data) != 0 {
+		copyBytes(uintptr(target), uintptr(unsafe.Pointer(&data[0])), uint64(len(data)))
+	}
+	zeroBytes(uintptr(target)+uintptr(len(data)), PageSize-uint64(len(data)))
 	return true
 }
 
@@ -442,13 +530,32 @@ func InitializePhysical(address uint64, data []byte) bool {
 // kernel to fill and read memory no process maps, such as an executable
 // object's (ADR 0097).
 func PhysicalPage(address uint64) ([]byte, bool) {
-	if address == 0 || address%PageSize != 0 || address >= IdentityMapLimit {
+	if address%PageSize != 0 {
 		return nil, false
 	}
-	// SAFETY: the page lies below the identity-map limit, so the kernel
-	// addresses it at its physical address, and the slice covers exactly that
-	// page. The caller owns the page for as long as it uses the slice.
-	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(address))), PageSize), true
+	target, mapped := kernelDirectMap.kernelAddress(address, PageSize)
+	if !mapped {
+		return nil, false
+	}
+	// SAFETY: kernelAddress returned the kernel mapping of exactly this page,
+	// in the identity map or the direct map, and the slice covers only it.
+	// The caller owns the page for as long as it uses the slice.
+	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(target))), PageSize), true
+}
+
+// PhysicalWords is the page allocator's pmm.MetadataView: it returns words
+// 64-bit words at physical, which must lie in [1 MiB, IdentityMapLimit).
+func PhysicalWords(physical uint64, words uint64) []uint64 {
+	if physical < identityMapStart || physical%PageSize != 0 || words == 0 ||
+		physical >= IdentityMapLimit || words > (IdentityMapLimit-physical)/8 {
+		return nil
+	}
+	// SAFETY: the range lies in [1 MiB, IdentityMapLimit). The allocator calls
+	// this from Init, while the firmware's page tables still identity-map all
+	// memory, for usable pages it keeps marked used for the kernel lifetime;
+	// BuildIdentity maps the same range at the same addresses afterwards, so
+	// the slice stays valid once the kernel's own tables are loaded.
+	return unsafe.Slice((*uint64)(unsafe.Pointer(uintptr(physical))), words)
 }
 
 // Resolve returns the physical leaf backing a virtual address.
@@ -547,6 +654,17 @@ func UserLeaf(rootAddress uint64, index int) (uint64, uint64, bool) {
 	return 0, 0, false
 }
 
+// resolveOrFault is resolveUser for the kernel's copies: an absent page is
+// first offered to the demand-fault resolver, as the processor would when the
+// process itself touched it.
+func resolveOrFault(rootAddress uint64, virtual uint64, write bool) (uint64, uint64, bool) {
+	physical, leaf, ok := resolveUser(rootAddress, virtual)
+	if ok || faultResolver == nil || !ValidateUserRange(virtual, 1) || !faultResolver(rootAddress, virtual&^(PageSize-1), write) {
+		return physical, leaf, ok
+	}
+	return resolveUser(rootAddress, virtual)
+}
+
 func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {
 	if rootAddress%PageSize != 0 || !ValidateUserRange(virtual, 1) {
 		return 0, 0, false
@@ -579,8 +697,10 @@ func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {
 	return leaf&addressMask | virtual&(PageSize-1), leaf, true
 }
 
+// allocateTable takes page-table pages from low memory, so every walker in
+// this file can use a table's physical address as its kernel address.
 func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {
-	address, ok := allocator.Allocate()
+	address, ok := allocator.AllocateLow()
 	if !ok || address >= IdentityMapLimit {
 		return 0, nil, false
 	}
@@ -610,6 +730,35 @@ func protectRange(root *table, address uint64, size uint64, permissions Permissi
 	return true
 }
 
+// userLeafEntry is leafEntry for user mappings: every parent entry must be
+// present and user-accessible, so a user leaf is never written into a table
+// the kernel shares between address spaces.
+func userLeafEntry(root *table, address uint64) *uint64 {
+	if !ValidateUserRange(address, 1) {
+		return nil
+	}
+	pml4Entry := root[(address>>39)&0x1ff]
+	if pml4Entry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return nil
+	}
+	// SAFETY: present user entries were produced by allocateTable and name
+	// page-table pages inside the identity map.
+	pdpt := (*table)(unsafe.Pointer(uintptr(pml4Entry & addressMask)))
+	pdptEntry := pdpt[(address>>30)&0x1ff]
+	if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return nil
+	}
+	// SAFETY: same page-table ownership invariant as above.
+	pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
+	pdEntry := pd[(address>>21)&0x1ff]
+	if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return nil
+	}
+	// SAFETY: same page-table ownership invariant as above.
+	pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
+	return &pt[(address>>12)&0x1ff]
+}
+
 func leafEntry(root *table, address uint64) *uint64 {
 	pml4Entry := root[(address>>39)&0x1ff]
 	if pml4Entry&entryPresent == 0 {
@@ -619,13 +768,14 @@ func leafEntry(root *table, address uint64) *uint64 {
 	// exclusive, identity-mapped page-table addresses.
 	pdpt := (*table)(unsafe.Pointer(uintptr(pml4Entry & addressMask)))
 	pdptEntry := pdpt[(address>>30)&0x1ff]
-	if pdptEntry&entryPresent == 0 {
+	if pdptEntry&entryPresent == 0 || pdptEntry&entryLarge != 0 {
 		return nil
 	}
 	// SAFETY: same page-table ownership invariant as above.
 	pd := (*table)(unsafe.Pointer(uintptr(pdptEntry & addressMask)))
 	pdEntry := pd[(address>>21)&0x1ff]
-	if pdEntry&entryPresent == 0 {
+	// A two MiB direct-map leaf has no page table below it.
+	if pdEntry&entryPresent == 0 || pdEntry&entryLarge != 0 {
 		return nil
 	}
 	// SAFETY: same page-table ownership invariant as above.

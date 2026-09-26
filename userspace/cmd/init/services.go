@@ -22,7 +22,7 @@ import (
 // startServices registers the system services and launches them in
 // dependency order, reporting each on the console.
 func startServices(ticks uint64) {
-	page, pageStatus := sys.MemoryMap(execPageHandle, execproto.PageAddress, execproto.PageSize, true)
+	page, pageStatus := sys.MemoryMap(execPageHandle, execproto.AreaAddress, execproto.AreaSize, true)
 	execPage = page
 	if pageStatus != kcall.StatusOK {
 		fatal("INIT_EXEC_PAGE_FAILED\n")

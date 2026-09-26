@@ -1,6 +1,7 @@
 package vfsservice
 
 import (
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	"testing"
@@ -12,7 +13,7 @@ type counting struct {
 	exchanges int
 }
 
-func (transport *counting) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+func (transport *counting) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	transport.exchanges++
 	return transport.inner.Exchange(request)
 }
@@ -73,7 +74,7 @@ func TestAttributeCacheFollowsChanges(t *testing.T) {
 	if reply := stat("/persist/a.txt"); reply.Size != 4 {
 		t.Fatalf("size after truncate = %d", reply.Size)
 	}
-	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/persist/a.txt"), Data: []byte("/persist/b.txt")}); reply.Status != vfs.StatusOK {
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/persist/a.txt"), Target: []byte("/persist/b.txt")}); reply.Status != vfs.StatusOK {
 		t.Fatalf("rename = %d", reply.Status)
 	}
 	if reply := stat("/persist/a.txt"); reply.Status != vfs.StatusNotFound {

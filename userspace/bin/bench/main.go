@@ -15,8 +15,8 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "bench vfs COUNT | bench read|meta PATH COUNT | bench stream|send|recv COUNT SIZE",
-	Summary: "measure VFS requests, file reads, metadata, or stream transfers",
+	Usage:   "bench vfs N | bench read|meta PATH N | bench io PATH SIZE | bench stream|send|recv N SIZE",
+	Summary: "measure VFS requests, file reads and bulk I/O, metadata, or stream transfers",
 	MinArgs: 2,
 	MaxArgs: 3,
 	Grants:  commands.GrantVFS,
@@ -70,6 +70,8 @@ func run(data startup.Data) {
 			utility.HeapReset(mark)
 		}
 		report("meta", count, utility.ClockNanos()-start)
+	case utility.Equal(mode, "io"):
+		bulkIO(utility.Path(data, 2), size(data, 3))
 	case utility.Equal(mode, "stream"):
 		private(argument(data, 2), chunk(data, 3))
 	case utility.Equal(mode, "send"):
@@ -176,6 +178,110 @@ func receive(count uint64, size int) {
 		last, pending = now, 0
 	}
 	reportRate("recv", count-1, size, last-start, waits, true, kept)
+}
+
+// maxIOSize bounds the file bench io writes.
+const maxIOSize = 16 << 20
+
+// bulkIO writes size bytes to path through a bulk buffer, reads them back the
+// same way and checks them, then reads them once more inline, and reports the
+// exchanges each took with the VFS, the time, and the rate (ADR 0107).
+func bulkIO(path []byte, size uint64) {
+	buffer, ok := utility.NewBulk(utility.BulkSize)
+	if !ok {
+		utility.Fail(nil, "no memory for the buffer")
+	}
+	mark := utility.HeapMark()
+	created, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
+	if created.Status == vfs.StatusAlreadyExists {
+		created.Status = vfs.StatusOK
+	}
+	utility.Check(created, ok, path, true)
+	truncated, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: path})
+	utility.Check(truncated, ok, path, true)
+	file, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read | vfs.Write, Path: path})
+	utility.Check(file, ok, path, true)
+	exchanges, start := uint64(0), utility.ClockNanos()
+	for done := uint64(0); done < size; {
+		utility.HeapReset(mark)
+		chunk := min(size-done, uint64(len(buffer.Memory)))
+		for index := uint64(0); index < chunk; index++ {
+			buffer.Memory[index] = byte((done + index) * 7)
+		}
+		written, ok := buffer.WriteFile(file.Handle, int(chunk))
+		utility.CheckWritten(written, ok, path, int(chunk))
+		done += chunk
+		exchanges++
+	}
+	reportIO("write", size, exchanges, utility.ClockNanos()-start)
+	seek, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationSeek, Handle: file.Handle})
+	utility.Check(seek, ok, path, false)
+	exchanges, start = 0, utility.ClockNanos()
+	for done := uint64(0); done < size; {
+		utility.HeapReset(mark)
+		read, ok := buffer.ReadFile(file.Handle, len(buffer.Memory))
+		utility.Check(read, ok, path, false)
+		exchanges++
+		if read.Size == 0 {
+			utility.Fail(path, "file ended early")
+		}
+		for index := uint64(0); index < read.Size; index++ {
+			if buffer.Memory[index] != byte((done+index)*7) {
+				utility.Fail(path, "read back different bytes")
+			}
+		}
+		done += read.Size
+	}
+	reportIO("read", size, exchanges, utility.ClockNanos()-start)
+	utility.HeapReset(mark)
+	closed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: file.Handle})
+	utility.Check(closed, ok, path, false)
+	start = utility.ClockNanos()
+	inline := readFile(path)
+	if uint64(inline) != size {
+		utility.Fail(path, "inline read found a different size")
+	}
+	reportIO("inline read", size, (size+vfs.MaxReplyData-1)/vfs.MaxReplyData+1, utility.ClockNanos()-start)
+}
+
+func reportIO(name string, size, exchanges, nanos uint64) {
+	var line [224]byte
+	result := append(line[:0], "io "...)
+	result = append(result, name...)
+	result = utility.AppendBenchCount(result, size, "bytes")
+	result = utility.AppendBenchCount(result, exchanges, "exchanges")
+	result = utility.AppendBenchCount(result, nanos/1000, "us")
+	if nanos != 0 {
+		result = utility.AppendBenchCount(result, size*1000000000/nanos/1024, "KiB/s")
+	}
+	utility.Print(result)
+	utility.EndLine()
+}
+
+// size parses a byte count with an optional K or M suffix.
+func size(data startup.Data, index int) uint64 {
+	value, found := data.Arg(index)
+	if !found || len(value) == 0 {
+		utility.Usage()
+	}
+	multiplier := uint64(1)
+	switch value[len(value)-1] {
+	case 'K', 'k':
+		multiplier, value = 1<<10, value[:len(value)-1]
+	case 'M', 'm':
+		multiplier, value = 1<<20, value[:len(value)-1]
+	}
+	count := uint64(0)
+	for _, digit := range value {
+		if digit < '0' || digit > '9' || count > maxIOSize {
+			utility.Fail(value, "size must be a number of bytes, KiB (K) or MiB (M)")
+		}
+		count = count*10 + uint64(digit-'0')
+	}
+	if count == 0 || count*multiplier > maxIOSize {
+		utility.Fail(value, "size must be 1 byte to 16 MiB")
+	}
+	return count * multiplier
 }
 
 // readFile opens, reads to EOF, and closes path, and returns its size. Replies

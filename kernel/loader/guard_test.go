@@ -82,11 +82,7 @@ func TestKernelMapsUserRange(t *testing.T) {
 		{name: "startup page at the top of a gap", start: vm.UserCodeAddress - StackGuardSize, end: vm.UserCodeAddress, mapped: true},
 		{name: "ends at the probe page", start: vm.UserProbeAddress - StackGuardSize, end: vm.UserProbeAddress},
 		{name: "starts above the startup page", start: vm.UserCodeAddress, end: vm.UserCodeAddress + StackGuardSize},
-		{name: "ends at the shared window", start: vm.UserSharedAddress - StackGuardSize, end: vm.UserSharedAddress},
-		{name: "reaches into the shared window", start: vm.UserSharedAddress - StackGuardSize + 0x1000, end: vm.UserSharedAddress + 0x1000, mapped: true},
-		{name: "DMA window", start: vm.UserDMAAddress, end: vm.UserDMAAddress + StackGuardSize, mapped: true},
-		{name: "top of the system image window", start: vm.UserImageLimit - 0x1000, end: vm.UserImageLimit - 0x1000 + StackGuardSize, mapped: true},
-		{name: "above the system image window", start: vm.UserImageLimit, end: vm.UserImageLimit + StackGuardSize},
+		{name: "the rest of the image area", start: vm.UserImageAreaLimit - StackGuardSize, end: vm.UserImageAreaLimit},
 	}
 	for _, test := range tests {
 		if got := KernelMapsUserRange(test.start, test.end); got != test.mapped {
@@ -104,19 +100,23 @@ func TestFixedLayoutLeavesTheGapFree(t *testing.T) {
 	}
 }
 
-// The userspace linker script leaves the gap itself; it must leave exactly the
-// size the loader requires.
-func TestLinkerScriptLeavesTheGuardGap(t *testing.T) {
+// The userspace linker script leaves the stack to the kernel (ADR 0104): it
+// reserves no stack or heap in the image and asks for a stack the loader
+// accepts.
+func TestLinkerScriptLeavesTheStackToTheKernel(t *testing.T) {
 	script, err := os.ReadFile("../../userspace/runtime/amd64.ld")
 	if err != nil {
 		t.Fatal(err)
 	}
-	match := regexp.MustCompile(`\. = ALIGN\(0x1000\) \+ (0x[0-9a-fA-F]+);\s*\n\s*\.stack `).FindSubmatch(script)
-	if match == nil {
-		t.Fatal("amd64.ld: no gap before .stack")
+	if regexp.MustCompile(`\.(stack|heap)\b`).Match(script) {
+		t.Fatal("amd64.ld still reserves a stack or heap in the image")
 	}
-	gap, err := strconv.ParseUint(string(match[1]), 0, 64)
-	if err != nil || gap != StackGuardSize {
-		t.Fatalf("amd64.ld leaves %s below the stack, the loader requires %#x", match[1], StackGuardSize)
+	match := regexp.MustCompile(`_goos_stack_reserve = (0x[0-9a-fA-F]+);`).FindSubmatch(script)
+	if match == nil {
+		t.Fatal("amd64.ld: no _goos_stack_reserve")
+	}
+	reserve, err := strconv.ParseUint(string(match[1]), 0, 64)
+	if err != nil || reserve == 0 || reserve%4096 != 0 || reserve > MaxStackReserve {
+		t.Fatalf("amd64.ld asks for a stack of %s", match[1])
 	}
 }

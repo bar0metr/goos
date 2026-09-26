@@ -51,7 +51,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "encode service image failed")
 		os.Exit(1)
 	}
-	parsed, ok := loader.ParseNative(image, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit)
+	parsed, ok := loader.ParseNative(image, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit)
 	if start, end, guarded := parsed.StackGuard(); !ok || !guarded || loader.KernelMapsUserRange(start, end) {
 		fmt.Fprintln(os.Stderr, "service image is not a valid native image with a free stack guard")
 		os.Exit(1)

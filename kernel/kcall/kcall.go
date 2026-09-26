@@ -54,6 +54,16 @@ const (
 	// the system image (ADR 0097).
 	OperationExecutableCreate
 	OperationExecutableWrite
+	// The native virtual-memory calls (ADR 0104).
+	OperationVMMap
+	OperationVMUnmap
+	OperationVMProtect
+	OperationVMDiscard
+	OperationVMQuery
+	// OperationMemoryCreate creates a shared-memory object and
+	// OperationHandleDuplicate a narrower copy of a memory handle (ADR 0107).
+	OperationMemoryCreate
+	OperationHandleDuplicate
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -129,6 +139,13 @@ type Handler interface {
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
 	ExecutableWrite(executable uint64, address uint64, length uint64) Status
+	VMMap(descriptor uint64, protection uint64, flags uint64) Status
+	VMUnmap(address uint64, length uint64) Status
+	VMProtect(address uint64, length uint64, protection uint64) Status
+	VMDiscard(address uint64, length uint64) Status
+	VMQuery(address uint64, record uint64) Status
+	MemoryCreate(pages uint64, address uint64) Status
+	HandleDuplicate(handle uint64, rights uint64, address uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -164,7 +181,7 @@ func Dispatch(request Request, handler Handler) Result {
 		}
 		return Result{Status: handler.ClockRead(request.Arg0, request.Arg1)}
 	case OperationStartupRead:
-		if request.Arg1 != StartupSize {
+		if request.Arg1 == 0 || request.Arg1 > MaxStartupSize {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.StartupRead(request.Arg0, request.Arg1)}
@@ -240,8 +257,28 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.ExecutableWrite(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationVMMap:
+		if request.Arg1&^VMProtectionMask != 0 || request.Arg2&^VMMapFixed != 0 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.VMMap(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationVMUnmap:
+		return Result{Status: handler.VMUnmap(request.Arg0, request.Arg1)}
+	case OperationVMProtect:
+		if request.Arg2&^VMProtectionMask != 0 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.VMProtect(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationVMDiscard:
+		return Result{Status: handler.VMDiscard(request.Arg0, request.Arg1)}
+	case OperationVMQuery:
+		return Result{Status: handler.VMQuery(request.Arg0, request.Arg1)}
+	case OperationMemoryCreate:
+		return Result{Status: handler.MemoryCreate(request.Arg0, request.Arg1)}
+	case OperationHandleDuplicate:
+		return Result{Status: handler.HandleDuplicate(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationMemoryMap:
-		if request.Arg2&^MemoryMapWritable != 0 {
+		if request.Arg2&^(MemoryMapWritable|MemoryMapAnywhere) != 0 {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.MemoryMap(request.Arg0, request.Arg1, request.Arg2)}
@@ -317,21 +354,52 @@ const StreamDescriptorSize = uint64(24)
 // MemoryMapWritable requests a writable shared-memory mapping.
 const MemoryMapWritable = uint64(1)
 
+// MemoryMapAnywhere lets the kernel choose where a shared-memory object is
+// mapped; the address argument then names eight bytes of the caller's memory
+// that receive the address chosen.
+const MemoryMapAnywhere = uint64(2)
+
+// Virtual-memory protections and flags (ADR 0104). A VMMap descriptor is
+// sixteen bytes: the address, zero to let the kernel choose unless VMMapFixed
+// is set, then the length. The kernel writes the address it used back into the
+// first eight bytes.
+const (
+	VMRead           = uint64(1)
+	VMWrite          = uint64(2)
+	VMExecute        = uint64(4)
+	VMProtectionMask = VMRead | VMWrite | VMExecute
+	VMMapFixed       = uint64(1)
+	VMDescriptorSize = uint64(16)
+)
+
+// A VMQuery record is laid out as:
+//
+//	[0:8]   base of the region
+//	[8:16]  length
+//	[16]    protection (VMRead, VMWrite, VMExecute)
+//	[17]    backing: 1 anonymous, 2 image, 3 shared, 4 device, 5 guard
+//	[18]    flags: bit 0 pinned
+//	[19:24] reserved, zero
+const VMRecordSize = uint64(24)
+
 // MaxExecutableWrite bounds the bytes one ExecutableWrite appends.
-const MaxExecutableWrite = uint64(4096)
+const MaxExecutableWrite = uint64(1 << 20)
 
 // ImageDescriptorSize is the fixed length of the record ImageMap writes back:
 // the virtual address the image was mapped at and its length in bytes.
 const ImageDescriptorSize = uint64(16)
 
-// StartupSize is the fixed length of a StartupRead copy.
-const StartupSize = uint64(1024)
+// MaxStartupSize bounds a process's startup object (ADR 0109). 64 KiB holds a
+// PATH_MAX command and working directory and about 56 KiB of arguments and
+// environment, more than a shell line can produce, while PID 1's staging area
+// stays at 256 KiB for its four slots and the kernel's copy at 64 KiB.
+const MaxStartupSize = 64 << 10
 
 // WaitAny is a readiness operation: it never consumes data from a waitable
 // object. Userspace performs the typed receive/read/wait operation after the
 // returned ready mask identifies the objects whose state changed.
 const (
-	WaitAnyMaxObjects      = 16
+	WaitAnyMaxObjects      = 64
 	WaitAnyInterestSize    = uint64(16)
 	WaitAnyResultSize      = uint64(16)
 	WaitAnyInfiniteTimeout = ^uint64(0)

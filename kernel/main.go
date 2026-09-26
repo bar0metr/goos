@@ -13,6 +13,7 @@ import (
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
 	"goos/kernel/device"
+	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/initramfs"
 	"goos/kernel/ipc"
@@ -26,9 +27,9 @@ import (
 	"goos/kernel/shmem"
 	"goos/kernel/stream"
 	kernelwait "goos/kernel/wait"
+	execproto "goos/userspace/exec"
 	"goos/userspace/fsproto"
 	supervisor "goos/userspace/init"
-	"goos/userspace/startup"
 )
 
 var (
@@ -44,7 +45,6 @@ var (
 	faultImageData  [1024]byte
 	boundedChannel  ipc.Channel
 	ipcWireData     [ipc.WireMaxSize]byte
-	sharedRegistry  shmem.Registry
 	sharedObjects   shmem.Table
 	dispatchHandler nativeCallHandler
 	// Native calls run one at a time in the kernel exclusion domain, so the
@@ -66,7 +66,6 @@ var (
 	waitAnyResultWire     [kcall.WaitAnyResultSize]byte
 	waitMaskWire          [8]byte
 	launchTemplate        [supervisor.StagingSlotSize]byte
-	launchBound           [startup.Size]byte
 	channelRegistry       ipc.Registry
 	streamRegistry        stream.Registry
 	streamCallData        [kcall.MaxStreamIO]byte
@@ -118,7 +117,7 @@ var (
 	initName                    = []byte("init")
 	initImagePath               = []byte("system/init")
 	initProcessSlot             process.Process
-	spawnedProcesses            [process.MaxProcesses]process.Process
+	spawnedProcesses            [process.MaxProcesses]*process.Process
 	nextProcessID               process.ID = 4
 	virtioBlockPort             uint16
 )
@@ -176,6 +175,21 @@ func panicSerial(message string) {
 	}
 }
 
+// firmwareTableLimit bounds the firmware tables the kernel reads at boot,
+// before its own page tables are loaded.
+const firmwareTableLimit = uint64(4 << 30)
+
+// inLoaderMemory reports whether address lies in memory the firmware loader
+// allocated for the kernel.
+func inLoaderMemory(address uint64) bool {
+	for _, region := range bootInfo.MemoryRegions() {
+		if region.Kind == boot.MemoryLoader && address >= region.Start && address < region.End() {
+			return true
+		}
+	}
+	return false
+}
+
 var consoleOverrunReported bool
 
 func main() {
@@ -212,8 +226,9 @@ func main() {
 	mark("BOOT_SERVICES_EXITED")
 	// ACPI says how to switch the machine off. The tables are read once, here,
 	// as untrusted firmware input; a machine without them simply cannot power
-	// off (ADR 0092).
-	systemPowerOff, systemPowerOffFound = acpi.FindPowerOff(bootuefi.PhysicalMemory{Limit: vm.IdentityMapLimit}, bootInfo.ACPIRoot)
+	// off (ADR 0092). The firmware's page tables are still loaded and
+	// identity-map all memory; firmware keeps its tables below 4 GiB.
+	systemPowerOff, systemPowerOffFound = acpi.FindPowerOff(bootuefi.PhysicalMemory{Limit: firmwareTableLimit}, bootInfo.ACPIRoot)
 	if systemPowerOffFound {
 		mark("ACPI_POWEROFF_OK")
 	}
@@ -229,11 +244,12 @@ func main() {
 	amd64.PCIConfigWrite16(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4, command)
 	virtioBlockPort = virtioBlock.IOBase
 	mark("PCI_DISCOVERY_OK")
-	console.WriteString("Memory: ")
-	console.WriteUint(bootInfo.UsableBytes / (1024 * 1024))
-	console.WriteString(" MiB usable\n")
 
-	pageAllocator.Init(bootInfo.MemoryRegions())
+	// The allocator's bitmap is carved out of low memory and reached through
+	// the firmware's identity map until the kernel's own map replaces it.
+	if !pageAllocator.Init(bootInfo.MemoryRegions(), vm.PhysicalWords) {
+		panicSerial("physical page allocator initialization failed")
+	}
 	page, ok := pageAllocator.Allocate()
 	if !ok || !pageAllocator.Free(page) {
 		console.WriteString("PANIC: physical page allocator self-test failed\n")
@@ -241,9 +257,20 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	memory := pageAllocator.Statistics()
+	console.WriteString("Memory: ")
+	console.WriteUint(memory.ManagedPages * pmm.PageSize / (1024 * 1024))
+	console.WriteString(" MiB managed\n")
+	if memory.UnmanagedPages != 0 {
+		console.WriteString("Memory: ")
+		console.WriteUint(memory.UnmanagedPages * pmm.PageSize / (1024 * 1024))
+		console.WriteString(" MiB usable but unmanaged\n")
+	}
 	if validation.Enabled {
 		console.WriteString("Physical pages free: ")
-		console.WriteUint(pageAllocator.Statistics().FreePages)
+		console.WriteUint(memory.FreePages)
+		console.WriteString("\nPhysical pages above 1 GiB: ")
+		console.WriteUint(memory.HighPages)
 		console.WriteString("\n")
 	}
 	mark("PMM_OK")
@@ -255,14 +282,28 @@ func main() {
 		}
 	}
 	image, validImage := vm.LoadedImage()
+	// main still runs on the stack TinyGo took from the loader's memory. With
+	// more than a GiB of RAM the firmware places it above the identity map,
+	// where MapLoaderMemory keeps it reachable.
 	stack := amd64.StackPointer()
-	if !validImage || stack < 1024*1024 || stack >= vm.IdentityMapLimit {
+	if !validImage || stack < 1024*1024 || (stack >= vm.IdentityMapLimit && !inLoaderMemory(stack)) {
 		console.WriteString("PANIC: unsafe virtual-memory bootstrap state\n")
 		for {
 			amd64.Halt()
 		}
 	}
 	pageTable, built := vm.BuildIdentity(&pageAllocator, image)
+	if built {
+		built = vm.MapLoaderMemory(&pageAllocator, pageTable, bootInfo.MemoryRegions())
+	}
+	// The kernel's copies into user memory fault in demand-zero pages the
+	// way the processor's accesses do (ADR 0104).
+	vm.SetFaultResolver(resolveCopyFault)
+	// Registry entries take their pages as they are created (ADR 0111).
+	channelRegistry.SetStorage(pageObjects[ipc.Channel]{})
+	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
+	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
+	executables.SetStorage(pageObjects[executable.Object]{})
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {
@@ -408,17 +449,16 @@ func bootContinue() {
 	filesystemBlockClientHandle, filesystemBlockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	filesystemBlockServerHandle, filesystemBlockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	systemControlHandle, systemControlInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.SystemControlObject, capability.Write))
-	launchStaging, launchStagingCreated := sharedRegistry.Create(&pageAllocator, 1)
+	launchStaging, launchStagingCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, supervisor.StagingPages, 0)
 	launchStagingHandle, launchStagingGranted := launchStaging.Grant(initProcess.Handles(), capability.Read|capability.Write)
-	launchStagingMapped := launchStagingCreated && launchStagingGranted && launchStaging.Map(initProcess.Handles(), launchStagingHandle, rootInit, supervisor.StagingAddress, 0, 1, true)
-	execPage, execPageCreated := sharedRegistry.Create(&pageAllocator, 1)
+	launchStagingMapped := launchStagingCreated && launchStagingGranted && mapPinnedShared(initProcess, launchStaging, launchStagingHandle, supervisor.StagingAddress)
+	execPage, execPageCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, uint32(execproto.AreaSize/vm.PageSize), 0)
 	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
 	// The file cache is the memory the VFS and the filesystem service share:
 	// file data moves through it instead of through messages (ADR 0098). PID 1
 	// hands each of them a copy of the right to map it, at every launch.
-	fileCache, fileCacheCreated := sharedRegistry.Create(&pageAllocator, fsproto.CachePages)
-	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && fileCacheCreated &&
-		sharedObjects.Register(launchStaging) && sharedObjects.Register(execPage) && sharedObjects.Register(fileCache)
+	fileCache, fileCacheCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, fsproto.CacheSize/fsproto.PageSize, 0)
+	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && fileCacheCreated
 	imageObject, imageObjectValid := device.ImageObject(1)
 	// PID 1 maps the image to find executables in it and launches them with
 	// Execute (ADR 0093). It hands the filesystem service a Read-only copy to
@@ -456,7 +496,7 @@ func bootContinue() {
 			amd64.Halt()
 		}
 	}
-	loadedInit, loadedImageInit := loader.LoadNative(&pageAllocator, rootInit, initBytes)
+	loadedInit, loadedImageInit := loader.LoadImage(&pageAllocator, rootInit, loader.Contiguous(initBytes), nil, loader.Origin{}, initProcess.Regions())
 	if !loadedImageInit {
 		console.WriteString("PANIC: init native image rejected\n")
 		for {

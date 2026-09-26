@@ -3,7 +3,9 @@ package wait
 
 import "goos/kernel/sched"
 
-const MaxObjects = 16
+// MaxObjects is the most objects one wait names: kcall.WaitAnyMaxObjects,
+// the width of the ready mask a waiter receives (ADR 0111).
+const MaxObjects = 64
 
 type Kind uint8
 
@@ -43,7 +45,7 @@ type Entry struct {
 
 type Completion struct {
 	Task       sched.TaskID
-	ReadyMask  uint16
+	ReadyMask  uint64
 	Event      Event
 	ReadyIndex uint8
 	TimedOut   bool
@@ -95,7 +97,11 @@ func (table *Table) Begin(task sched.TaskID, entries []Entry, deadline uint64) b
 		table.active--
 		table.registered -= int(op.count)
 	}
-	*op = operation{task: task, deadline: deadline, count: uint8(len(entries)), active: true}
+	// The fields are set in place: an operation literal is larger than
+	// TinyGo keeps on the stack, and the kernel's heap never frees.
+	op.task, op.deadline, op.count = task, deadline, uint8(len(entries))
+	op.active, op.complete, op.timedOut = true, false, false
+	clear(op.readyEvents[:])
 	copy(op.entries[:], entries)
 	table.active++
 	table.registered += len(entries)

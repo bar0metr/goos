@@ -60,13 +60,21 @@ func pollExec() {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
-	job.active, job.orphaned, job.slot, job.correlation = true, false, slot, message.Correlation
-	job.job = supervisor.StartPipeline(request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
+	job.active, job.orphaned, job.slot, job.correlation, job.request = true, false, slot, message.Correlation, request
+	beginJob(job)
+}
+
+// startPipeline starts a job whose programs are ready.
+func startPipeline(job *execJob) {
+	launchingJob = job
+	job.job = supervisor.StartPipeline(job.request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
+	launchingJob = nil
+	releasePrepared(job)
 	// A foreground job's input is fed by the shell, which receives the writing
 	// end before the job's reply. If it cannot be delivered, closing it gives
 	// the job end of input instead of a stream no one will ever write.
 	if input := job.job.TakeInput(); input != 0 {
-		started, ok := execproto.EncodeStarted(slot, input, message.Correlation)
+		started, ok := execproto.EncodeStarted(job.slot, input, job.correlation)
 		if !ok || !sendMessage(execServer, started) {
 			sys.HandleClose(input)
 		}
@@ -194,6 +202,10 @@ func killJob(slot uint8) execproto.ControlStatus {
 		if !job.active || job.slot != slot {
 			continue
 		}
+		if cancelPreparation(job) {
+			syslog.Info("job stopped", syslog.Uint("slot", uint64(slot)))
+			return execproto.ControlOK
+		}
 		stopped := false
 		for _, process := range job.job.Processes() {
 			if process != 0 && sys.ProcessKill(process) == 0 {
@@ -229,7 +241,7 @@ func (nativePipelineRunner) CreateStream() (handle.ID, handle.ID, bool) {
 
 func (nativePipelineRunner) Close(id handle.ID) bool { return sys.HandleClose(id) == 0 }
 
-func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	// A command of /system/bin is known by its name there, which selects its
 	// grants. The rest of /system holds services, which are not commands; a
 	// program anywhere else is named by its file.

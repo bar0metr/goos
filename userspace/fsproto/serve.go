@@ -94,7 +94,7 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 			reply.Status = ramfs.StatusIOError
 		}
 	default:
-		reply.Status = ramfs.StatusInvalidArgument
+		reply.Status = ramfs.StatusUnsupported
 	}
 	return reply
 }

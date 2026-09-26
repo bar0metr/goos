@@ -64,7 +64,7 @@ func terminalLost() {
 		sys.HandleClose(ttyHandle)
 		ttyHandle = 0
 	}
-	reading = 0
+	reading, typedSize = 0, 0
 }
 
 // installTerminal takes a new session from PID 1: the terminal service was
@@ -73,7 +73,7 @@ func installTerminal(session handle.ID) {
 	if ttyHandle != 0 {
 		sys.HandleClose(ttyHandle)
 	}
-	ttyHandle, reading = session, 0
+	ttyHandle, reading, typedSize = session, 0, 0
 	mark("SHELL_TERMINAL_REPLACED_OK\n")
 }
 
@@ -133,7 +133,30 @@ func takeLine() (terminal.Result, []byte, bool) {
 			continue
 		}
 		reading = 0
-		size = copy(typedStorage[:], text)
+		if !terminal.CarriesText(result) {
+			typedSize = 0
+			return result, nil, true
+		}
+		if len(text) > len(typedStorage)-typedSize {
+			// The service sends at most MaxLine bytes; more is not a line.
+			typedSize = 0
+			return terminal.ResultRefused, nil, true
+		}
+		typedSize += copy(typedStorage[typedSize:], text)
+		if result == terminal.ResultPart {
+			// A long line comes in parts; ask for the next one.
+			correlation++
+			request, ok := terminal.Request(terminal.OperationContinue, nil, correlation)
+			if !ok || !sendTerminal(request) {
+				typedSize = 0
+				terminalLost()
+				return 0, nil, false
+			}
+			reading = correlation
+			continue
+		}
+		size = typedSize
+		typedSize = 0
 		return result, typedStorage[:size], true
 	}
 	return 0, nil, false

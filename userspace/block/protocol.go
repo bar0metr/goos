@@ -11,12 +11,15 @@ import (
 
 const (
 	ProtocolID = uint64(0x47424c4b30303100)
-	Version    = uint16(1)
+	// Version 2 adds the bulk operations (ADR 0107).
+	Version    = uint16(2)
 	headerSize = 24
 	// RequestDeadline bounds one storage exchange. A stalled peer must surface
 	// an I/O error rather than block the caller indefinitely.
 	RequestDeadline = 5 * clock.TicksPerSecond
 	MaxData         = ipc.MaxPayload - headerSize
+	// MaxBulk bounds one bulk transfer.
+	MaxBulk = 1 << 20
 )
 
 type Operation uint8
@@ -26,7 +29,25 @@ const (
 	OperationRead
 	OperationWrite
 	OperationFlush
+	// OperationReadBulk reads Length bytes into the shared-memory object
+	// attached to the request, at byte Buffer of it; OperationWriteBulk
+	// writes them from it. The data never travels in the messages
+	// (ADR 0107).
+	OperationReadBulk
+	OperationWriteBulk
+	lastOperation = OperationWriteBulk
 )
+
+// Valid reports whether an operation is one this protocol defines.
+func (operation Operation) Valid() bool {
+	return operation >= OperationInfo && operation <= lastOperation
+}
+
+// Bulk reports whether an operation moves its data through an attached
+// object.
+func (operation Operation) Bulk() bool {
+	return operation == OperationReadBulk || operation == OperationWriteBulk
+}
 
 type Status uint8
 
@@ -43,6 +64,10 @@ type Request struct {
 	Offset    uint64
 	Length    uint32
 	Data      []byte
+	// Buffer and Object are the offset in, and the handle of, the object a
+	// bulk operation moves its data through.
+	Buffer uint32
+	Object handle.ID
 }
 
 type Reply struct {
@@ -60,7 +85,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 }
 
 func EncodeRequestInto(request Request, correlation uint64, message *ipc.Message) bool {
-	if correlation == 0 || request.Operation < OperationInfo || request.Operation > OperationFlush || !validRequest(request) {
+	if correlation == 0 || request.Operation < OperationInfo || request.Operation > lastOperation || !validRequest(request) {
 		return false
 	}
 	if message == nil {
@@ -79,6 +104,10 @@ func EncodeRequestInto(request Request, correlation uint64, message *ipc.Message
 		message.Handles[index] = 0
 	}
 	message.Payload[0] = byte(request.Operation)
+	if request.Operation.Bulk() {
+		binary.LittleEndian.PutUint32(message.Payload[4:8], request.Buffer)
+		message.HandleCount, message.Handles[0] = 1, request.Object
+	}
 	binary.LittleEndian.PutUint64(message.Payload[8:16], request.Offset)
 	binary.LittleEndian.PutUint32(message.Payload[16:20], request.Length)
 	binary.LittleEndian.PutUint16(message.Payload[20:22], uint16(len(request.Data)))
@@ -94,10 +123,14 @@ func DecodeRequestFrom(message *ipc.Message) (Request, bool) {
 	if message == nil {
 		return Request{}, false
 	}
-	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < headerSize {
+	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest || message.Correlation == 0 || message.PayloadSize < headerSize {
 		return Request{}, false
 	}
-	if !zero(message.Payload[1:8]) || message.Payload[22] != 0 || message.Payload[23] != 0 {
+	bulk := Operation(message.Payload[0]).Bulk()
+	if !zero(message.Payload[1:4]) || !bulk && !zero(message.Payload[4:8]) || message.Payload[22] != 0 || message.Payload[23] != 0 {
+		return Request{}, false
+	}
+	if bulk != (message.HandleCount == 1) || bulk && message.Handles[0] == 0 || !bulk && message.HandleCount != 0 {
 		return Request{}, false
 	}
 	dataSize := int(binary.LittleEndian.Uint16(message.Payload[20:22]))
@@ -105,7 +138,10 @@ func DecodeRequestFrom(message *ipc.Message) (Request, bool) {
 		return Request{}, false
 	}
 	request := Request{Operation: Operation(message.Payload[0]), Offset: binary.LittleEndian.Uint64(message.Payload[8:16]), Length: binary.LittleEndian.Uint32(message.Payload[16:20]), Data: message.Payload[headerSize : headerSize+dataSize]}
-	if request.Operation < OperationInfo || request.Operation > OperationFlush || !validRequest(request) {
+	if bulk {
+		request.Buffer, request.Object = binary.LittleEndian.Uint32(message.Payload[4:8]), message.Handles[0]
+	}
+	if request.Operation < OperationInfo || request.Operation > lastOperation || !validRequest(request) {
 		return Request{}, false
 	}
 	return request, true
@@ -118,7 +154,7 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 }
 
 func EncodeReplyInto(reply Reply, correlation uint64, message *ipc.Message) bool {
-	if correlation == 0 || reply.Operation < OperationInfo || reply.Operation > OperationFlush || reply.Status > StatusIOError || len(reply.Data) > MaxData || reply.Operation != OperationRead && len(reply.Data) != 0 || reply.Status != StatusOK && len(reply.Data) != 0 {
+	if correlation == 0 || reply.Operation < OperationInfo || reply.Operation > lastOperation || reply.Status > StatusIOError || len(reply.Data) > MaxData || reply.Operation != OperationRead && len(reply.Data) != 0 || reply.Status != StatusOK && len(reply.Data) != 0 {
 		return false
 	}
 	if message == nil {
@@ -150,7 +186,7 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 	}
 	dataSize := int(binary.LittleEndian.Uint16(message.Payload[20:22]))
 	reply := Reply{Operation: Operation(message.Payload[0]), Status: Status(message.Payload[1]), Capacity: binary.LittleEndian.Uint64(message.Payload[8:16]), BlockSize: binary.LittleEndian.Uint32(message.Payload[16:20]), Data: message.Payload[headerSize : headerSize+dataSize]}
-	if reply.Operation < OperationInfo || reply.Operation > OperationFlush || reply.Status > StatusIOError || dataSize > MaxData || headerSize+dataSize != int(message.PayloadSize) || reply.Operation != OperationRead && dataSize != 0 || reply.Status != StatusOK && dataSize != 0 {
+	if reply.Operation < OperationInfo || reply.Operation > lastOperation || reply.Status > StatusIOError || dataSize > MaxData || headerSize+dataSize != int(message.PayloadSize) || reply.Operation != OperationRead && dataSize != 0 || reply.Status != StatusOK && dataSize != 0 {
 		return Reply{}, false
 	}
 	return reply, true
@@ -164,6 +200,9 @@ func validRequest(request Request) bool {
 		return request.Length != 0 && request.Length <= MaxData && len(request.Data) == 0
 	case OperationWrite:
 		return request.Length != 0 && request.Length == uint32(len(request.Data)) && len(request.Data) <= MaxData
+	case OperationReadBulk, OperationWriteBulk:
+		end := uint64(request.Buffer) + uint64(request.Length)
+		return request.Length != 0 && request.Length <= MaxBulk && end <= MaxBulk*16 && len(request.Data) == 0 && request.Object != 0
 	default:
 		return false
 	}

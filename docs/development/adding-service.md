@@ -37,13 +37,10 @@ the protocol header). See `userspace/block/protocol.go`.
 
 ## 3. Startup and named handles
 
-At start, read and decode the startup block, then resolve every role by name:
+At start, read the startup object, then resolve every role by name:
 
 ```go
-if sys.StartupRead(&startupWire) != kcall.StatusOK {
-    fatal("NAME_STARTUP_UNAVAILABLE\n")
-}
-data, ok := startup.Decode(startupWire[:])
+data, ok := startup.Read()
 if !ok {
     fatal("NAME_STARTUP_INVALID\n")
 }

@@ -12,8 +12,8 @@ func rootEntry(t *testing.T, fs *FileSystem, index int) [32]byte {
 	if status != ramfs.StatusOK {
 		t.Fatal(status)
 	}
-	entry, ok := fs.readEntry(&dir, index)
-	if !ok {
+	entry, status := fs.readEntry(&dir, index)
+	if status != ramfs.StatusOK {
 		t.Fatalf("entry %d unreadable", index)
 	}
 	return entry
@@ -26,9 +26,9 @@ func shortNames(t *testing.T, fs *FileSystem, key uint32) []string {
 		t.Fatal(status)
 	}
 	var names []string
-	for index := 0; index < dir.entries(); index++ {
-		entry, ok := fs.readEntry(&dir, index)
-		if !ok {
+	for index := 0; index < fs.entries(&dir); index++ {
+		entry, status := fs.readEntry(&dir, index)
+		if status != ramfs.StatusOK {
 			t.Fatalf("entry %d unreadable", index)
 		}
 		if entry[0] == entryEnd {
@@ -99,7 +99,7 @@ func TestLongNameChecksumMismatchFallsBackToShortName(t *testing.T) {
 		t.Fatalf("entry 0 is not a long entry: %#x", entry[11])
 	}
 	entry[13]++
-	if !fs.writeEntry(&dir, 0, entry) {
+	if fs.writeEntry(&dir, 0, entry) != ramfs.StatusOK {
 		t.Fatal("write failed")
 	}
 	if _, status := fs.OpenName(root, mustName(t, "long-name-file.txt")); status != ramfs.StatusNotFound {
@@ -120,7 +120,7 @@ func TestLongNameOrdinalMismatchFallsBackToShortName(t *testing.T) {
 	dir, _ := fs.openDirectory(0)
 	entry, _ := fs.readEntry(&dir, 0)
 	entry[0] = longLast | 3
-	if !fs.writeEntry(&dir, 0, entry) {
+	if fs.writeEntry(&dir, 0, entry) != ramfs.StatusOK {
 		t.Fatal("write failed")
 	}
 	if _, status := fs.OpenName(root, mustName(t, "another-long-name.txt")); status != ramfs.StatusNotFound {
@@ -182,7 +182,7 @@ func TestUnlinkRemovesWholeChain(t *testing.T) {
 	writeFile(t, fs, root, "removed-long-name.txt", "x")
 	dir, _ := fs.openDirectory(0)
 	used := 0
-	for ; used < dir.entries(); used++ {
+	for ; used < fs.entries(&dir); used++ {
 		entry, _ := fs.readEntry(&dir, used)
 		if entry[0] == entryEnd {
 			break
@@ -237,14 +237,16 @@ func TestRenameMovesWholeChain(t *testing.T) {
 // what is left of the current cluster.
 func TestLongNameChainSpansClusters(t *testing.T) {
 	fs, root := mounted(t, formattedDevice())
-	for i := 0; i < entriesPerCluster-2; i++ {
+	for i := 0; i < fs.entriesPerCluster()-2; i++ {
 		writeFile(t, fs, root, string([]byte{'f', byte('0' + i/10), byte('0' + i%10)}), "x")
 	}
 	long := strings.Repeat("s", maxLongName-4) + ".txt"
 	id := writeFile(t, fs, root, long, "spanned")
 	dir, _ := fs.openDirectory(0)
-	if dir.count != 2 {
-		t.Fatalf("directory holds %d clusters, want 2", dir.count)
+	per := fs.entriesPerCluster()
+	entries := per - 2 + (len(long)+longChars-1)/longChars + 1
+	if want := uint64((entries + per - 1) / per); dir.clusters != want {
+		t.Fatalf("directory holds %d clusters, want %d", dir.clusters, want)
 	}
 	if opened, status := fs.OpenName(root, mustName(t, long)); status != ramfs.StatusOK || opened != id {
 		t.Fatalf("open spanning chain: %v", status)

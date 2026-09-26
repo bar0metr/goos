@@ -22,7 +22,7 @@ Current kernel users:
 | Package | Use |
 | --- | --- |
 | `kernel/boot/uefi` | UEFI protocol calls, memory-map descriptors, initramfs slice |
-| `kernel/mm/vm` | page-table walks, identity-mapped physical access, kernel image header |
+| `kernel/mm/vm` | page-table walks, physical access through the identity and direct maps, the page allocator's bitmap view, kernel image header |
 | `kernel/arch/amd64` | task context and kernel stacks, TSS descriptor |
 
 All other kernel packages (`handle`, `ipc`, `stream`, `process`, `loader`,
@@ -36,7 +36,7 @@ In userspace, `unsafe` lives in two packages (ADR 0095):
 | Package | Use |
 | --- | --- |
 | `userspace/runtime/sys` | the native-call stubs of `userspace/runtime/amd64.S`, descriptor addresses, slices over kernel-mapped windows (system image, shared pages, DMA, the launch staging page), zero-copy string/byte views |
-| `userspace/runtime/arena` | the bump allocator over `_heap_start`/`_heap_end` and the TinyGo runtime hooks |
+| `userspace/runtime/arena` | the bump allocator over the heap it reserves with `VMMap` (ADR 0104), and the TinyGo runtime hooks |
 
 Programs, services, commands, and libraries call typed wrappers instead
 (`sys.IPCSend(channel, wire)`, `sys.StreamRead(stream, buffer)`,
@@ -64,9 +64,10 @@ existing site follows this yet: the UEFI protocol calls in
 - Kernel PE sections map to leaves by flags: executable sections read-only,
   writable sections NX. A section requesting write and execute is rejected.
 - Identity-mapped memory outside the image is writable and NX. The first MiB
-  is unmapped.
+  is unmapped. The direct map of managed memory is supervisor-only, writable,
+  and NX (ADR 0103).
 - User leaves reject W+X at map time. The native loader rejects writable
-  executable segments and fills pages through the kernel identity map before
+  executable segments and fills pages through the kernel's physical view before
   installing the final user mappings (docs/kernel/native-images.md).
 - Shared-memory and DMA mappings are always NX.
 - `MemoryMap` installs shared pages only inside the shared window
@@ -98,13 +99,12 @@ existing site follows this yet: the UEFI protocol calls in
 - User address space starts at 1 GiB; low addresses are unmapped in every
   process, so null dereferences fault.
 - Every user stack has 64 KiB of unmapped address space directly below it
-  (`loader.StackGuardSize`, ADR 0083, ADR 0088). The userspace linker script
-  gives the 32 KiB stack its own RW+NX segment 64 KiB above the heap. The
-  loader enforces the gap for every image, not only those built by that
-  script: `ParseNative` rejects an image with another segment in the gap or
-  a gap reaching below the user range, and `LoadImage` rejects a gap the
-  kernel maps pages into, now or later (the startup page and the shared, DMA
-  and system image windows). Userspace code has no stack probes, so the gap
+  (`loader.StackGuardSize`, ADR 0083, ADR 0088). The kernel reserves every
+  program's stack itself, below the top of the user range, with that guard
+  recorded as a guard region no mapping may enter (ADR 0104); an image that
+  carries its own stack segment must leave the same gap, which `ParseNative`
+  checks, and `LoadImage` rejects a gap the kernel maps pages into (the probe
+  and startup pages). Userspace code has no stack probes, so the gap
   is sound only because no frame can step over it: `tools/stackframes`
   computes every function's stack depth from `go tool objdump` and fails the
   build for a depth over 65400 bytes (the gap less the return address and the
@@ -123,7 +123,8 @@ The kernel never dereferences a user virtual address. Native calls use
 - the range must lie within `[1 GiB, 2 GiB)` and must not wrap;
 - every page crossed must be present and user-accessible at all four levels;
 - `CopyOut` additionally requires a writable leaf;
-- data moves through the kernel identity map after validation.
+- data moves through the kernel identity map or direct map after validation;
+- a user leaf is placed only under tables with the user bit at every level.
 
 Calls that both consume object state and write results validate the output
 buffer first. `StreamRead`, for example, checks `CanCopyOut` before removing
@@ -168,16 +169,22 @@ caller:
 | console write | 4096 B | `kcall.MaxConsoleWrite` |
 | IPC wire | 320 B | `ipc.WireMaxSize` |
 | stream transfer | 256 B | `kcall.MaxStreamIO` |
-| `WaitAny` interests | 16 × 16 B | `kcall.WaitAnyMaxObjects` |
-| startup block | 1024 B | `kcall.StartupSize`, one read-only page per process |
-| launch staging | 4 × 1024 B | `supervisor.StagingSlots`, copied once per launch |
+| `WaitAny` interests | 64 × 16 B | `kcall.WaitAnyMaxObjects`, a 64-bit ready mask |
+| startup object | 64 KiB | `kcall.MaxStartupSize`, read-only pages per process, validated and fuzzed (ADR 0109) |
+| launch staging | 4 × 64 KiB | `supervisor.StagingSlots`, copied once per launch |
+| exec request | 4 × 64 KiB | `exec.Slots`, copied once per job |
 | log record | 181 B encoded, 240 B as text | `kcall.MaxLogRecord`, `kcall.LogText` |
-| console input | 256 B ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
+| console input | 8 KiB ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
 
-Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
-24 channels with 16-message queues, 64 streams with 4 KiB rings, 64 waiters
-per wait set, 64 log records, 4 registered shared-memory objects of at most
-32 pages, and a shared image cache of 128 segments and 1024 frames. On top of
+Every table has a fixed system-wide limit, but the large entries are not
+static: a registry holds a pointer per slot and takes an entry's pages when
+the entry is created (ADR 0111). The limits are 256 handles per process, 64
+processes, 64 tasks (the scheduler's 64-bit masks), 256 channels with
+16-message queues, 256 streams with 4080-byte rings, a waiter per task slot,
+64 log records, 256 shared-memory objects (16 per paying process), 64
+executable objects, 128 regions per address space, and a shared image cache
+of 128 segments and 1024 frames. Objects index their pages in page
+lists allocated as they grow (ADR 0106, ADR 0107). On top of
 the tables, each process is charged for the channels, streams, tasks, and
 pages it causes to exist, up to its quota (ADR 0072). Exhaustion returns
 `ResourceExhausted` or `PermissionDenied`.

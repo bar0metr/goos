@@ -21,15 +21,15 @@ func ImageMap(device handle.ID) ([]byte, kcall.Status) {
 }
 
 // MemoryMap maps the shared-memory object the handle names at address, which
-// must lie in the shared window, and returns size bytes of it. The object is
-// at least as large as the caller's protocol says; size is that bound, not a
-// value the kernel reports.
+// must be free in the caller's address space, and returns size bytes of it.
+// The object is at least as large as the caller's protocol says; size is that
+// bound, not a value the kernel reports.
 func MemoryMap(memory handle.ID, address uint64, size uint64, writable bool) ([]byte, kcall.Status) {
 	flags := uint64(0)
 	if writable {
 		flags = kcall.MemoryMapWritable
 	}
-	if size == 0 || address < vm.UserSharedAddress || size > vm.UserSharedLimit-address {
+	if size == 0 || address%vm.PageSize != 0 || address < vm.IdentityMapLimit || address >= vm.UserAddressLimit || size > vm.UserAddressLimit-address {
 		return nil, kcall.StatusInvalidArgument
 	}
 	if result := status(memoryMap(uint64(memory), address, flags)); result != kcall.StatusOK {
@@ -38,6 +38,29 @@ func MemoryMap(memory handle.ID, address uint64, size uint64, writable bool) ([]
 	return window(address, size), kcall.StatusOK
 }
 
+// MemoryMapAnywhere maps the whole shared-memory object at an address the
+// kernel chooses and returns the address and the object's size, which the
+// region the mapping made records.
+func MemoryMapAnywhere(memory handle.ID, writable bool) (uint64, uint64, kcall.Status) {
+	flags := kcall.MemoryMapAnywhere
+	if writable {
+		flags |= kcall.MemoryMapWritable
+	}
+	valueWire = 0
+	if result := status(memoryMap(uint64(memory), uint64(uintptr(unsafe.Pointer(&valueWire))), flags)); result != kcall.StatusOK {
+		return 0, 0, result
+	}
+	base := valueWire
+	region, result := VMQuery(base)
+	if result != kcall.StatusOK || region.Base != base {
+		VMUnmap(base, vmPage)
+		return 0, 0, kcall.StatusInvalidArgument
+	}
+	return base, region.Length, kcall.StatusOK
+}
+
+const vmPage = 4096
+
 // DMARegion is memory a device may read and write: the processor sees Memory,
 // the device sees Physical.
 type DMARegion struct {
@@ -45,11 +68,12 @@ type DMARegion struct {
 	Memory   []byte
 }
 
-// DMAAllocate allocates the DMA region the device capability's domain allows
-// at virtual and returns it, or InvalidArgument if the kernel reported a
-// region other than the one asked for.
+// DMAAllocate allocates a DMA region of size bytes, a whole number of pages,
+// at virtual, which must be the DMA window, and returns it, or
+// InvalidArgument if the kernel reported a region other than the one asked
+// for.
 func DMAAllocate(device handle.ID, virtual uint64, size uint64) (DMARegion, kcall.Status) {
-	dmaWire[0], dmaWire[1], dmaWire[2] = 0, 0, 0
+	dmaWire[0], dmaWire[1], dmaWire[2] = 0, 0, size
 	if result := status(dmaAllocate(uint64(device), virtual, unsafe.Pointer(&dmaWire[0]))); result != kcall.StatusOK {
 		return DMARegion{}, result
 	}

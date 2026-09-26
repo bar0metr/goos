@@ -10,6 +10,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
+	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -45,6 +46,7 @@ func awaitSchedulerSelfTest() {
 }
 
 func runKernelSelfTests(pageTable uint64) {
+	checkHighMemory(pageTable)
 	console := amd64.NewCOM1()
 	physicalA, allocatedA := pageAllocator.Allocate()
 	physicalB, allocatedB := pageAllocator.Allocate()
@@ -73,12 +75,18 @@ func runKernelSelfTests(pageTable uint64) {
 		}
 	}
 	selfTestRootA, selfTestRootB = rootA, rootB
-	processA, validA := process.New(2, process.AddressSpace{Root: rootA})
-	processB, validB := process.New(3, process.AddressSpace{Root: rootB})
-	processA.SetName([]byte("selftest-a"))
-	processB.SetName([]byte("selftest-b"))
-	bootProcessA, bootProcessB = &processA, &processB
-	if !validA || !validB || !processRegistry.Add(&processA) || !processRegistry.Add(&processB) {
+	// Process records are too large for a kernel stack; they live in pages
+	// as every other process's do (ADR 0111).
+	processA, validA := vm.NewObject[process.Process](&pageAllocator)
+	processB, validB := vm.NewObject[process.Process](&pageAllocator)
+	validA = validA && process.Init(processA, 2, process.AddressSpace{Root: rootA})
+	validB = validB && process.Init(processB, 3, process.AddressSpace{Root: rootB})
+	if validA && validB {
+		processA.SetName([]byte("selftest-a"))
+		processB.SetName([]byte("selftest-b"))
+	}
+	bootProcessA, bootProcessB = processA, processB
+	if !validA || !validB || !processRegistry.Add(processA) || !processRegistry.Add(processB) {
 		console.WriteString("PANIC: process model initialization failed\n")
 		for {
 			amd64.Halt()
@@ -185,7 +193,7 @@ func runKernelSelfTests(pageTable uint64) {
 	mark("IPC_BOUNDED_OK")
 	mark("IPC_PEER_DEATH_OK")
 
-	sharedObject, sharedCreated := sharedRegistry.Create(&pageAllocator, 2)
+	sharedObject, sharedCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, 2, 0)
 	sharedHandleA, sharedGranted := sharedObject.Grant(processA.Handles(), capability.Read|capability.Write|capability.Transfer)
 	sharedHandleB, sharedTransferred := processA.Handles().Transfer(processB.Handles(), sharedHandleA, handle.TypeMemory, capability.Read)
 	// Process A prints through a console capability like every other process;
@@ -196,8 +204,8 @@ func runKernelSelfTests(pageTable uint64) {
 		panicSerial("self-test console capability setup failed")
 	}
 	const sharedAddress = uint64(0x40010000)
-	sharedMappedA := sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress, 0, 2, true)
-	sharedMappedB := sharedObject.Map(processB.Handles(), sharedHandleB, rootB, sharedAddress, 0, 2, false)
+	_, sharedMappedA := sharedObject.Map(&pageAllocator, processA.Handles(), sharedHandleA, rootA, sharedAddress, 0, 2, true)
+	_, sharedMappedB := sharedObject.Map(&pageAllocator, processB.Handles(), sharedHandleB, rootB, sharedAddress, 0, 2, false)
 	sharedInitiallyZero := [8]byte{}
 	sharedZeroRead := vm.CopyIn(rootB, sharedAddress, sharedInitiallyZero[:])
 	sharedPayload := []byte("SHAREDOK")
@@ -210,8 +218,8 @@ func runKernelSelfTests(pageTable uint64) {
 	sharedPhysicalA1, sharedResolvedA1 := vm.Resolve(rootA, sharedAddress+vm.PageSize)
 	sharedPhysicalB1, sharedResolvedB1 := vm.Resolve(rootB, sharedAddress+vm.PageSize)
 	if !sharedCreated || !sharedGranted || !sharedTransferred || !sharedMappedA || !sharedMappedB || !sharedZeroRead || sharedInitiallyZero != [8]byte{} ||
-		sharedObject.Map(processA.Handles(), memoryHandle, rootA, sharedAddress+4*vm.PageSize, 0, 1, false) ||
-		sharedObject.Map(processA.Handles(), sharedHandleA, rootA, sharedAddress+4*vm.PageSize, 2, 1, false) || !sharedWritten || !sharedRead ||
+		mapped(sharedObject.Map(&pageAllocator, processA.Handles(), memoryHandle, rootA, sharedAddress+4*vm.PageSize, 0, 1, false)) ||
+		mapped(sharedObject.Map(&pageAllocator, processA.Handles(), sharedHandleA, rootA, sharedAddress+4*vm.PageSize, 2, 1, false)) || !sharedWritten || !sharedRead ||
 		string(sharedReadback[:]) != "SHAREDOK" || vm.CopyOut(rootB, sharedAddress, []byte{1}) ||
 		!sharedResolvedA0 || !sharedResolvedB0 || !sharedResolvedA1 || !sharedResolvedB1 ||
 		sharedPhysicalA0 != sharedPhysicalB0 || sharedPhysicalA1 != sharedPhysicalB1 {
@@ -504,8 +512,8 @@ func checkSharedImagePages(image []byte) {
 	if !firstOK || !secondOK {
 		panicSerial("shared image address spaces failed")
 	}
-	_, firstLoaded := loader.LoadImage(&pageAllocator, first, loader.Contiguous(image), &selfTestShared, 1)
-	_, secondLoaded := loader.LoadImage(&pageAllocator, second, loader.Contiguous(image), &selfTestShared, 1)
+	_, firstLoaded := loader.LoadImage(&pageAllocator, first, loader.Contiguous(image), &selfTestShared, loader.Origin{Key: 1}, nil)
+	_, secondLoaded := loader.LoadImage(&pageAllocator, second, loader.Contiguous(image), &selfTestShared, loader.Origin{Key: 1}, nil)
 	firstCode, firstCodeOK := vm.ResolveUser(first, vm.UserCodeAddress)
 	secondCode, secondCodeOK := vm.ResolveUser(second, vm.UserCodeAddress)
 	firstStack, _ := vm.ResolveUser(first, vm.UserStackAddress)
@@ -525,3 +533,60 @@ func checkSharedImagePages(image []byte) {
 	}
 	mark("IMAGE_PAGES_ISOLATED_OK")
 }
+
+// highMemoryProbe is the buffer the high-memory check copies through.
+var highMemoryProbe [16]byte
+
+// checkHighMemory exercises a page above the identity map when the machine
+// has one (ADR 0103): the allocator hands it out first, the kernel reaches it
+// only through the direct map, and a process maps it like any other page.
+func checkHighMemory(pageTable uint64) {
+	before := pageAllocator.Statistics()
+	if before.HighPages == 0 {
+		mark("PMM_HIGH_NONE")
+		return
+	}
+	physical, allocated := pageAllocator.Allocate()
+	if !allocated || physical < pmm.LowLimit || !vm.InitializePhysicalByte(physical, 0x5a) {
+		panicSerial("high page allocation failed")
+	}
+	page, viewed := vm.PhysicalPage(physical)
+	if !viewed || page[0] != 0x5a || page[1] != 0 || page[vm.PageSize-1] != 0 {
+		panicSerial("high page was not initialized through the direct map")
+	}
+	for index := range page {
+		page[index] = byte(index * 7)
+	}
+	root, created := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
+	mapped := created && vm.MapUserPage(root, vm.UserProbeAddress, physical, vm.Permissions{User: true, Writable: true})
+	tail := vm.UserProbeAddress + vm.PageSize - uint64(len(highMemoryProbe))
+	if !mapped || !vm.CopyIn(root, tail, highMemoryProbe[:]) {
+		panicSerial("high page could not be read through a process mapping")
+	}
+	for index, value := range highMemoryProbe {
+		if value != byte((int(vm.PageSize)-len(highMemoryProbe)+index)*7) {
+			panicSerial("high page read back wrong bytes")
+		}
+	}
+	for index := range highMemoryProbe {
+		highMemoryProbe[index] = byte(0xa0 + index)
+	}
+	if !vm.CopyOut(root, vm.UserProbeAddress+0x100, highMemoryProbe[:]) || page[0x100] != 0xa0 || page[0x10f] != 0xaf {
+		panicSerial("high page write through a process mapping was lost")
+	}
+	if !vm.DestroyUserAddressSpace(&pageAllocator, root) || !pageAllocator.IsAllocated(physical) || !pageAllocator.Free(physical) {
+		panicSerial("high page release failed")
+	}
+	if after := pageAllocator.Statistics(); after.FreePages != before.FreePages {
+		panicSerial("high memory check leaked pages")
+	}
+	console := amd64.NewCOM1()
+	console.WriteString("PMM high page: ")
+	console.WriteHex(physical)
+	console.WriteString("\n")
+	mark("PMM_HIGH_OK")
+}
+
+// mapped is the success of a shared-memory mapping, for checks that expect a
+// refusal and so never charge the tables it reports.
+func mapped(_ int, ok bool) bool { return ok }

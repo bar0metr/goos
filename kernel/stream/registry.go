@@ -1,26 +1,37 @@
 package stream
 
-// MaxStreams sizes the registry. Each stream embeds its 4 KiB ring, so the
-// table is 64 x 4 KiB = 256 KiB of static kernel memory; it is a fixed array
-// because the kernel heap never frees (ADR 0065). PID 1 needs at most 17 at
-// once — four per job for its four job slots plus the terminal's output
-// stream — and its quota of 24 leaves 40, ten ordinary processes at their
-// full share of four (ADR 0089).
+import "goos/kernel/objects"
+
+// MaxStreams is the system-wide stream limit. A stream is one page, its ring
+// and counters; the registry holds a pointer per slot and takes the page when
+// the stream is created and returns it when the stream is released (ADR
+// 0111). PID 1 needs four streams for each job slot plus the terminal's
+// output stream; the rest are the shares of ordinary processes (ADR 0089).
 const (
-	MaxStreams        = 64
+	MaxStreams        = 256
 	streamNamespace   = uint64(0x1000000000000000)
 	writerEndpointBit = uint64(0x0800000000000000)
+	// A stream ID carries its slot in its low bits and a creation count above
+	// them, as a channel ID does.
+	slotBits = 9
+	slotMask = uint64(1)<<slotBits - 1
 )
 
 type Registry struct {
-	streams [MaxStreams]Stream
+	streams [MaxStreams]*Stream
 	ids     [MaxStreams]uint64
 	// owners records which process is charged for each live stream. A stream
 	// outlives the handles its creator held, because both endpoints can be
 	// transferred, so the charge is returned on release rather than on close.
-	owners [MaxStreams]uint64
-	next   uint64
+	owners  [MaxStreams]uint64
+	next    uint64
+	storage objects.Storage[Stream]
 }
+
+// SetStorage installs where streams are allocated; see ipc.Registry.
+func (registry *Registry) SetStorage(storage objects.Storage[Stream]) { registry.storage = storage }
+
+func (registry *Registry) memory() objects.Storage[Stream] { return objects.Or(registry.storage) }
 
 func ReaderObject(id uint64) (uint64, bool) {
 	return endpointObject(id, false)
@@ -54,37 +65,47 @@ func (registry *Registry) Create(owner uint64) (*Stream, uint64, bool) {
 		if registry.ids[index] != 0 {
 			continue
 		}
+		stream, allocated := registry.memory().New()
+		if !allocated {
+			return nil, 0, false
+		}
+		stream.Reset()
 		registry.next++
-		id := streamNamespace | registry.next
-		registry.ids[index] = id
-		registry.owners[index] = owner
-		registry.streams[index].Reset()
-		return &registry.streams[index], id, true
+		id := streamNamespace | registry.next<<slotBits | uint64(index)
+		registry.streams[index], registry.ids[index], registry.owners[index] = stream, id, owner
+		return stream, id, true
 	}
 	return nil, 0, false
 }
 
-func (registry *Registry) Lookup(id uint64) (*Stream, bool) {
-	for index, candidate := range registry.ids {
-		if candidate == id {
-			return &registry.streams[index], true
-		}
+func (registry *Registry) slot(id uint64) (int, bool) {
+	index := id & slotMask
+	if id&streamNamespace == 0 || id&writerEndpointBit != 0 || index >= MaxStreams || registry.ids[index] != id {
+		return 0, false
 	}
-	return nil, false
+	return int(index), true
 }
 
-// Release frees the slot once both endpoints are closed and reports the process
-// that was charged for it, which may already have exited.
-func (registry *Registry) Release(id uint64) (uint64, bool) {
-	for index, candidate := range registry.ids {
-		if candidate == id && registry.streams[index].Closed() {
-			owner := registry.owners[index]
-			registry.ids[index], registry.owners[index] = 0, 0
-			registry.streams[index] = Stream{}
-			return owner, true
-		}
+func (registry *Registry) Lookup(id uint64) (*Stream, bool) {
+	index, found := registry.slot(id)
+	if !found {
+		return nil, false
 	}
-	return 0, false
+	return registry.streams[index], true
+}
+
+// Release frees the stream once both endpoints are closed and reports the
+// process that was charged for it, which may already have exited. Its page
+// goes back to the storage.
+func (registry *Registry) Release(id uint64) (uint64, bool) {
+	index, found := registry.slot(id)
+	if !found || !registry.streams[index].Closed() {
+		return 0, false
+	}
+	owner, stream := registry.owners[index], registry.streams[index]
+	registry.ids[index], registry.owners[index], registry.streams[index] = 0, 0, nil
+	registry.memory().Free(stream)
+	return owner, true
 }
 
 // endpoint resolves an endpoint object to its live stream and direction.

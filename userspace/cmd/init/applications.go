@@ -14,6 +14,7 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 )
@@ -51,7 +52,7 @@ func openVFSSession() (handle.ID, string) {
 	return handle.ID(pair[0]), ""
 }
 
-func launchApplication(path, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchApplication(path, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	// A command that cannot be found or read is reported before a session or
 	// a stream is committed to it.
 	executable, processName, located := openExecutable(path)
@@ -68,7 +69,7 @@ func launchApplication(path, command, cwd, arguments, environment []byte, stream
 	return process, processHandle, launched
 }
 
-func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, command, cwd, arguments, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	if located != supervisor.LaunchOK {
 		// The kernel used to record this when it did the lookup; the record
 		// moved with the lookup, so a failed command still leaves a trace.
@@ -94,15 +95,36 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		pair[0] = uint64(session)
 	}
 	slot, staging := stagingSlot()
-	bindings := []startup.Handle{{Name: []byte("in")}, {Name: []byte("stdout")}, {Name: []byte("stderr")}}
+	handles := 3
 	if useVFS {
-		bindings = append(bindings, startup.Handle{Name: []byte("vfs")})
+		handles++
 	}
-	startupData, ok := startup.Encode(command, cwd, arguments, environment, bindings, staging)
+	writer := startup.NewWriter(staging, arguments.Count(), environment.Count(), handles)
+	writer.Command(command)
+	writer.CWD(cwd)
+	for offset, index := 0, 0; index < arguments.Count(); index++ {
+		var argument []byte
+		argument, offset = arguments.Next(offset)
+		writer.Argument(argument)
+	}
+	for offset, index := 0, 0; index < environment.Count(); index++ {
+		var variable []byte
+		variable, offset = environment.Next(offset)
+		writer.Entry(variable)
+	}
+	writer.Handle([]byte("in"), 0)
+	writer.Handle([]byte("stdout"), 0)
+	writer.Handle([]byte("stderr"), 0)
+	if useVFS {
+		writer.Handle([]byte("vfs"), 0)
+	}
+	// The request was validated when it arrived, so what does not fit is its
+	// size: its strings need more room in the startup object's tables.
+	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		sys.HandleClose(handle.ID(pair[0]))
-		return 0, 0, supervisor.LaunchInvalidImage
+		return 0, 0, supervisor.LaunchArgumentsTooLong
 	}
 	grants := []supervisor.Capability{
 		streamGrant("in", streams.Input, capability.Read),
@@ -112,7 +134,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	event, launched := requestLaunch(executable, processName, grants, slot, len(startupData))
+	event, launched := requestLaunch(executable, processName, grants, slot, uint32(len(startupData)))
 	if launched != supervisor.LaunchOK {
 		if launched == supervisor.LaunchProcessFailed && event.Operation == 0 {
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
@@ -180,12 +202,37 @@ func readSessionFile(session handle.ID, path []byte, target []byte) (int, bool) 
 }
 
 func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
+	return callSessionAttached(session, request, 0, vfsSessionDeadline)
+}
+
+// callSessionAttached is callSession with a handle moved to the VFS with the
+// request and a deadline of the caller's choosing.
+func callSessionAttached(session handle.ID, request vfs.Request, attached handle.ID, deadline uint64) (vfs.Reply, bool) {
+	// A program path too long for a message goes in the path page (ADR 0110).
+	if attached == 0 {
+		var ok bool
+		if attached, ok = pathpage.Prepare(&request); !ok {
+			return vfs.Reply{}, false
+		}
+	}
 	correlation++
 	message, ok := vfs.EncodeRequest(request, correlation)
-	if !ok || !sendMessage(uint64(session), message) {
+	if !ok {
+		if attached != 0 {
+			sys.HandleClose(attached)
+		}
 		return vfs.Reply{}, false
 	}
-	reply, status := receive(uint64(session), vfsSessionDeadline)
+	if attached != 0 {
+		message.HandleCount, message.Handles[0] = 1, attached
+	}
+	if !sendMessage(uint64(session), message) {
+		if attached != 0 {
+			sys.HandleClose(attached)
+		}
+		return vfs.Reply{}, false
+	}
+	reply, status := receive(uint64(session), deadline)
 	if status != ipc.StatusOK || reply.Correlation != correlation {
 		return vfs.Reply{}, false
 	}

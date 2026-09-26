@@ -10,14 +10,18 @@ import (
 // be reached, did not answer within its deadline, or answered with something
 // that does not decode; it never waits without bound.
 type Transport interface {
-	Exchange(request fsproto.Request) (fsproto.Reply, bool)
+	// Exchange sends request and returns the reply, or, when none usable
+	// came, why: StatusIOError for a malformed reply, StatusTimeout for none
+	// in time, StatusPeerDied for a service that has gone.
+	Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status)
 }
 
 // Remote is a namespace backend served by another process (ADR 0096). The VFS
 // keeps its node IDs in open files and in its mount table; the filesystem
-// service owns what they mean. A transport failure is an I/O error on this
-// backend's mounts and nothing else: the VFS itself, and every other mount,
-// keep working.
+// service owns what they mean. A transport failure — a timeout, a dead
+// service, a garbled reply — is an error on this backend's mounts and nothing
+// else, and keeps its reason: the VFS itself, and every other mount, keep
+// working.
 type Remote struct {
 	transport Transport
 	name      [ramfs.MaxName]byte
@@ -82,12 +86,15 @@ func (remote *Remote) forgetAll() {
 func (remote *Remote) call(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	if remote.transport == nil {
 		remote.forgetAll()
-		return fsproto.Reply{}, ramfs.StatusIOError
+		return fsproto.Reply{}, ramfs.StatusPeerDied
 	}
-	reply, ok := remote.transport.Exchange(request)
-	if !ok || reply.Operation != request.Operation {
+	reply, failure := remote.transport.Exchange(request)
+	if failure == ramfs.StatusOK && reply.Operation != request.Operation {
+		failure = ramfs.StatusIOError
+	}
+	if failure != ramfs.StatusOK {
 		remote.forgetAll()
-		return fsproto.Reply{}, ramfs.StatusIOError
+		return fsproto.Reply{}, failure
 	}
 	return reply, reply.Status
 }
@@ -162,7 +169,17 @@ func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 	for total < len(target) {
 		position := offset + uint64(total)
 		within := position % fsproto.PageSize
-		slot, length, status := remote.page(id, position/fsproto.PageSize)
+		page := position / fsproto.PageSize
+		// A miss with more of the read to come fetches the pages that follow
+		// with it, as many as are missing and wanted, in one exchange.
+		if pages := (within + uint64(len(target)-total) + fsproto.PageSize - 1) / fsproto.PageSize; pages > 1 && remote.pages.Ready() {
+			if _, _, cached := remote.pages.Lookup(id, page); !cached {
+				if status := remote.fill(id, page, pages); status != ramfs.StatusOK {
+					return total, status
+				}
+			}
+		}
+		slot, length, status := remote.page(id, page)
 		if status != ramfs.StatusOK {
 			return total, status
 		}
@@ -177,6 +194,35 @@ func (remote *Remote) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 		}
 	}
 	return total, ramfs.StatusOK
+}
+
+// maxRun is the most pages one exchange with the service moves.
+const maxRun = 16
+
+// fill reads up to wanted pages of id from page on, stopping at the first one
+// already cached, into a run of slots in one exchange. Pages past the end of
+// the file are not filled.
+func (remote *Remote) fill(id ramfs.NodeID, page uint64, wanted uint64) ramfs.Status {
+	count := uint64(1)
+	for count < wanted && count < maxRun {
+		if _, _, cached := remote.pages.Lookup(id, page+count); cached {
+			break
+		}
+		count++
+	}
+	start := remote.pages.ClaimRun(int(count))
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationRead, Node: id, Offset: page * fsproto.PageSize, Size: uint32(count * fsproto.PageSize), Slot: uint32(start)})
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if reply.Value > count*fsproto.PageSize {
+		remote.forgetAll()
+		return ramfs.StatusIOError
+	}
+	for index := uint64(0); index < count && index*fsproto.PageSize < reply.Value; index++ {
+		remote.pages.Fill(start+int(index), id, page+index, min(fsproto.PageSize, reply.Value-index*fsproto.PageSize))
+	}
+	return ramfs.StatusOK
 }
 
 // page returns the slot holding page of id, filling one from the service on a
@@ -214,6 +260,17 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 	for total < len(data) {
 		position := offset + uint64(total)
 		page, within := position/fsproto.PageSize, position%fsproto.PageSize
+		if within+uint64(len(data)-total) > fsproto.PageSize {
+			written, status := remote.writeRun(id, position, data[total:])
+			total += written
+			if status != ramfs.StatusOK {
+				return total, status
+			}
+			if written == 0 {
+				break
+			}
+			continue
+		}
 		chunk := min(uint64(len(data)-total), fsproto.PageSize-within)
 		slot, length, found := remote.pages.Lookup(id, page)
 		if !found {
@@ -255,6 +312,41 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 		remote.remember(stat)
 	}
 	return total, ramfs.StatusOK
+}
+
+// writeRun writes the part of data that fits a run of up to maxRun pages from
+// position in one exchange. The pages it wholly covers stay cached with what
+// was written; partial ones and any stale copies are dropped.
+func (remote *Remote) writeRun(id ramfs.NodeID, position uint64, data []byte) (int, ramfs.Status) {
+	page, within := position/fsproto.PageSize, position%fsproto.PageSize
+	count := min(uint64(maxRun), (within+uint64(len(data))+fsproto.PageSize-1)/fsproto.PageSize)
+	chunk := min(uint64(len(data)), count*fsproto.PageSize-within)
+	remote.pages.ForgetRange(id, page, page+count-1)
+	start := remote.pages.ClaimRun(int(count))
+	run := remote.pages.Run(start, int(count))
+	copy(run[within:within+chunk], data[:chunk])
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationWrite, Node: id, Offset: position, Size: uint32(chunk), Slot: uint32(start)})
+	if status == ramfs.StatusOK && reply.Value > chunk {
+		remote.forgetAll()
+		status = ramfs.StatusIOError
+	}
+	if status != ramfs.StatusOK {
+		remote.pages.Forget(id)
+		remote.forget(id)
+		return 0, status
+	}
+	end := within + reply.Value
+	for index := uint64(0); index < count; index++ {
+		if index*fsproto.PageSize >= within && (index+1)*fsproto.PageSize <= end {
+			remote.pages.Fill(start+int(index), id, page+index, fsproto.PageSize)
+		}
+	}
+	remote.pages.DropPartial(id, -1)
+	if stat, known := remote.cached(id); known && position+reply.Value > stat.Size {
+		stat.Size = position + reply.Value
+		remote.remember(stat)
+	}
+	return int(reply.Value), ramfs.StatusOK
 }
 
 func (remote *Remote) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {

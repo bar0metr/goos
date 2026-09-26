@@ -70,9 +70,9 @@ func TestParseNativeRejectsOverlappingAndOversizedSegments(t *testing.T) {
 	}
 
 	oversized := append([]byte(nil), validNativeImage(t)...)
-	binary.LittleEndian.PutUint32(oversized[48:], uint32((MaxImagePages+1)*testPageSize))
+	binary.LittleEndian.PutUint32(oversized[56:], uint32(testUserEnd-0x40002000+testPageSize))
 	if _, ok := ParseNative(oversized, testPageSize, testUserStart, testUserEnd); ok {
-		t.Fatal("oversized segment accepted")
+		t.Fatal("segment past the image area accepted")
 	}
 }
 
@@ -82,16 +82,25 @@ func TestParseNativeRejectsMalformedImages(t *testing.T) {
 		mutate func([]byte)
 	}{
 		{name: "magic", mutate: func(data []byte) { data[0] = 0 }},
-		{name: "version", mutate: func(data []byte) { binary.LittleEndian.PutUint16(data[8:], 2) }},
+		{name: "version", mutate: func(data []byte) { binary.LittleEndian.PutUint16(data[8:], 1) }},
 		{name: "too many segments", mutate: func(data []byte) { binary.LittleEndian.PutUint16(data[12:], MaxSegments+1) }},
 		{name: "entry outside executable", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[16:], 0x40003000) }},
-		{name: "unaligned segment", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[32:], 0x40002001) }},
-		{name: "kernel segment", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[32:], 0x1000) }},
-		{name: "file overflow", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[44:], 0xffffffff) }},
-		{name: "memory smaller than file", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[48:], 1) }},
-		{name: "write execute", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[52:], SegmentWritable|SegmentExecutable) }},
-		{name: "duplicate address", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[64:], 0x40002000) }},
+		{name: "unaligned segment", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[40:], 0x40002001) }},
+		{name: "kernel segment", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[40:], 0x1000) }},
+		{name: "file overflow", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[52:], 0xffffffff) }},
+		{name: "memory smaller than file", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[56:], 1) }},
+		{name: "write execute", mutate: func(data []byte) { binary.LittleEndian.PutUint32(data[60:], SegmentWritable|SegmentExecutable) }},
+		{name: "duplicate address", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[72:], 0x40002000) }},
 		{name: "unaligned stack", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[24:], 0x40020fff) }},
+		{name: "stack segment and reservation", mutate: func(data []byte) { binary.LittleEndian.PutUint64(data[32:], 1<<20) }},
+		{name: "unaligned reservation", mutate: func(data []byte) {
+			binary.LittleEndian.PutUint64(data[24:], 0)
+			binary.LittleEndian.PutUint64(data[32:], 1000)
+		}},
+		{name: "oversized reservation", mutate: func(data []byte) {
+			binary.LittleEndian.PutUint64(data[24:], 0)
+			binary.LittleEndian.PutUint64(data[32:], MaxStackReserve+testPageSize)
+		}},
 	}
 	for _, test := range tests {
 		data := append([]byte(nil), validNativeImage(t)...)
@@ -99,6 +108,16 @@ func TestParseNativeRejectsMalformedImages(t *testing.T) {
 		if _, ok := ParseNative(data, testPageSize, testUserStart, testUserEnd); ok {
 			t.Errorf("accepted malformed image: %s", test.name)
 		}
+	}
+}
+
+func TestParseNativeAcceptsKernelStack(t *testing.T) {
+	data := append([]byte(nil), validNativeImage(t)...)
+	binary.LittleEndian.PutUint64(data[24:], 0)
+	binary.LittleEndian.PutUint64(data[32:], 8<<20)
+	image, ok := ParseNative(data, testPageSize, testUserStart, testUserEnd)
+	if !ok || image.StackTop != 0 || image.StackReserve != 8<<20 {
+		t.Fatalf("kernel stack image: %v %+v", ok, image)
 	}
 }
 

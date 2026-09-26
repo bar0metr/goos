@@ -21,16 +21,30 @@ import (
 var (
 	executables    executable.Table
 	executableWire [8]byte
-	// executablePages views the frames of the object a launch loads. Launches
-	// run one at a time in the kernel exclusion domain.
-	executablePages [executable.MaxPages][]byte
+	// launchObject is the object a launch is reading, for executablePage.
+	// Launches run one at a time in the kernel exclusion domain.
+	launchObject *executable.Object
 )
+
+// executablePage is the page source of the object a launch reads. It is a
+// plain function, not a closure, because the kernel heap never frees.
+func executablePage(index uint64) ([]byte, bool) {
+	if launchObject == nil {
+		return nil, false
+	}
+	frame, ok := launchObject.Frame(vm.PhysicalPage, index)
+	if !ok {
+		return nil, false
+	}
+	return vm.PhysicalPage(frame)
+}
 
 // ExecutableCreate creates an empty executable object of size bytes, charged
 // to the caller's page quota, and writes its handle to address. The loader
-// capability authorizes it. The handle carries Write, to fill the object, and
-// Execute, to launch it; it is not transferable, so the object has exactly one
-// holder and is freed with that handle.
+// capability authorizes it. The handle carries Write, to fill the object,
+// Execute, to launch it, and Transfer, so the launcher can hand the VFS a
+// Write-only copy to fill it with (ADR 0107). Every handle and every process
+// started from the object is a reference; the last one frees it.
 func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, address uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
@@ -52,12 +66,12 @@ func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, addres
 	if owner.Handles().Available() == 0 {
 		return kcall.StatusResourceExhausted
 	}
-	object, reserved := executables.Reserve(size)
+	object, reserved := executables.Reserve(size, uint64(owner.ID()))
 	if !reserved {
 		return kcall.StatusResourceExhausted
 	}
 	objectID := object.ID()
-	if !owner.Charge(process.ResourcePages, uint32(object.Pages())) {
+	if !owner.Charge(process.ResourcePages, object.Charge()) {
 		executables.Remove(objectID)
 		return kcall.StatusResourceExhausted
 	}
@@ -67,23 +81,23 @@ func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, addres
 			pageAllocator.Free(physical)
 			ok = false
 		}
-		if !ok || !object.AddFrame(physical) {
+		if !ok || !object.AddFrame(&pageAllocator, vm.PhysicalPage, physical) {
 			if ok {
 				pageAllocator.Free(physical)
 			}
-			destroyExecutable(owner, objectID)
+			destroyExecutable(objectID)
 			return kcall.StatusResourceExhausted
 		}
 	}
-	created, inserted := owner.Handles().Insert(handle.TypeMemory, capability.New(objectID, capability.Write|capability.Execute))
+	created, inserted := owner.Handles().Insert(handle.TypeMemory, capability.New(objectID, capability.Write|capability.Execute|capability.Transfer))
 	if !inserted {
-		destroyExecutable(owner, objectID)
+		destroyExecutable(objectID)
 		return kcall.StatusResourceExhausted
 	}
 	putUint64(executableWire[:], uint64(created))
 	if !vm.CopyOut(handler.root, address, executableWire[:]) {
 		owner.Handles().Close(created)
-		destroyExecutable(owner, objectID)
+		destroyExecutable(objectID)
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -106,10 +120,11 @@ func (handler nativeCallHandler) ExecutableWrite(id uint64, address uint64, leng
 	if !ok {
 		return kcall.StatusInvalidArgument
 	}
-	frames := object.Frames()
 	for copied := uint64(0); copied < length; {
 		position := offset + copied
-		page, mapped := vm.PhysicalPage(frames[position/vm.PageSize])
+		frame, found := object.Frame(vm.PhysicalPage, position/vm.PageSize)
+		page, mapped := vm.PhysicalPage(frame)
+		mapped = mapped && found
 		within := position % vm.PageSize
 		chunk := min(vm.PageSize-within, length-copied)
 		// A fault part way leaves the object's length where it was, so the
@@ -123,70 +138,95 @@ func (handler nativeCallHandler) ExecutableWrite(id uint64, address uint64, leng
 	return kcall.StatusOK
 }
 
-// destroyExecutable frees an executable object's frames. owner is nil during
-// process teardown, which returns the whole page reservation at once.
-func destroyExecutable(owner *process.Process, id uint64) {
+// destroyExecutable frees an executable object's frames and returns their
+// charge to the process paying for them, unless that process is the one being
+// torn down, whose whole account goes at once.
+func destroyExecutable(id uint64) {
 	object, found := executables.Find(id)
 	if !found {
 		return
 	}
-	for _, frame := range object.Frames() {
-		pageAllocator.Free(frame)
-	}
-	if owner != nil {
-		owner.Release(process.ResourcePages, uint32(object.Pages()))
+	object.ReleaseFrames(&pageAllocator, vm.PhysicalPage)
+	if payer := process.ID(object.Payer()); payer != releasingProcess {
+		if holder, alive := processRegistry.ByID(payer); alive {
+			holder.Release(process.ResourcePages, object.Charge())
+		}
 	}
 	executables.Remove(id)
 }
 
-// closeExecutable closes the one handle to an executable object and frees it.
-// It reports false when id is not such a handle.
+// dropExecutable removes one reference to an executable object — a closed
+// handle, an exited process — and frees it with the last.
+func dropExecutable(id uint64) {
+	if object, found := executables.Find(id); found && object.Drop() {
+		destroyExecutable(id)
+	}
+}
+
+// closeExecutable closes the handle to an executable object and drops its
+// reference. It reports false when id is not such a handle.
 func closeExecutable(owner *process.Process, id handle.ID, cap capability.Capability) bool {
 	if !executable.IsObject(cap.Object()) || !owner.Handles().Close(id) {
 		return false
 	}
-	destroyExecutable(owner, cap.Object())
+	dropExecutable(cap.Object())
 	return true
 }
 
-// launchSource returns the bytes a launch names and the shared-page key for
-// them. Execute on the handle is the authority: on the system image object,
-// for an extent of the image (ADR 0093), or on a sealed executable object, for
-// the whole object (ADR 0097). An object's pages are loaded privately: its
-// identity is not the identity of its bytes, so they are not shared.
-func launchSource(named supervisor.Executable) (loader.Source, uint64, supervisor.LaunchStatus) {
+// adoptExecutable gives a process started from an executable object its
+// reference, and the first such process the object's charge: the process is
+// what keeps reading the pages, so it pays for them (ADR 0106).
+func adoptExecutable(spawned *process.Process, id uint64) bool {
+	object, found := executables.Find(id)
+	if !found {
+		return false
+	}
+	if !object.Launched() {
+		if !spawned.Charge(process.ResourcePages, object.Charge()) {
+			return false
+		}
+		if payer, alive := processRegistry.ByID(process.ID(object.Payer())); alive {
+			payer.Release(process.ResourcePages, object.Charge())
+		}
+		object.SetPayer(uint64(spawned.ID()))
+		object.MarkLaunched()
+	}
+	object.Retain()
+	spawned.SetExecutable(id)
+	return true
+}
+
+// launchSource returns the bytes a launch names and their origin. Execute on
+// the handle is the authority: on the system image object, for an extent of
+// the image (ADR 0093), or on a sealed executable object, for the whole object
+// (ADR 0097). An object's pages are copied into the process as it touches
+// them and never shared: its identity is not the identity of its bytes.
+func launchSource(named supervisor.Executable) (loader.Source, loader.Origin, supervisor.LaunchStatus) {
 	handles := bootInitProcess.Handles()
 	if authority, allowed := handles.Lookup(named.Image, handle.TypeDevice, capability.Execute); allowed {
 		if _, isImage := device.DecodeImageObject(authority.Object()); !isImage {
-			return loader.Source{}, 0, supervisor.LaunchCapabilityDenied
+			return loader.Source{}, loader.Origin{}, supervisor.LaunchCapabilityDenied
 		}
 		image, key, inside := loader.ImageExtent(bootuefi.Initramfs(&bootInfo), uint64(named.Offset), uint64(named.Size))
 		if !inside {
-			return loader.Source{}, 0, supervisor.LaunchInvalidImage
+			return loader.Source{}, loader.Origin{}, supervisor.LaunchInvalidImage
 		}
-		return loader.Contiguous(image), key, supervisor.LaunchOK
+		return loader.Contiguous(image), loader.Origin{Key: key}, supervisor.LaunchOK
 	}
 	authority, allowed := handles.Lookup(named.Image, handle.TypeMemory, capability.Execute)
 	object, known := executables.Find(authority.Object())
 	if !allowed || !known {
-		return loader.Source{}, 0, supervisor.LaunchCapabilityDenied
+		return loader.Source{}, loader.Origin{}, supervisor.LaunchCapabilityDenied
 	}
 	if !object.Sealed() || named.Offset != 0 || uint64(named.Size) != object.Size() {
-		return loader.Source{}, 0, supervisor.LaunchInvalidImage
+		return loader.Source{}, loader.Origin{}, supervisor.LaunchInvalidImage
 	}
-	frames := object.Frames()
-	for index, frame := range frames {
-		page, mapped := vm.PhysicalPage(frame)
-		if !mapped {
-			return loader.Source{}, 0, supervisor.LaunchInvalidImage
-		}
-		executablePages[index] = page
-	}
-	source, ok := loader.Paged(executablePages[:len(frames)], vm.PageSize, object.Size())
+	launchObject = object
+	source, ok := loader.Paged(executablePage, vm.PageSize, object.Size())
 	if !ok {
-		return loader.Source{}, 0, supervisor.LaunchInvalidImage
+		return loader.Source{}, loader.Origin{}, supervisor.LaunchInvalidImage
 	}
-	return source, 0, supervisor.LaunchOK
+	return source, loader.Origin{Object: object.ID()}, supervisor.LaunchOK
 }
 
 // executableRejectsInvalid checks, in the validation build, that PID 1's

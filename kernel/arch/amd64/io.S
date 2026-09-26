@@ -6,9 +6,11 @@
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
 
-// The console ring is a power of two so the wrap is a mask.
-.set GOOS_CONSOLE_RING, 256
-.set GOOS_CONSOLE_RING_MASK, 255
+// The console ring is a power of two so the wrap is a mask. It holds two of
+// the longest lines the terminal accepts (4096 bytes), so a pasted line
+// arrives whole even when the terminal service reads it a tick later.
+.set GOOS_CONSOLE_RING, 8192
+.set GOOS_CONSOLE_RING_MASK, 8191
 
 .section .text
 
@@ -347,7 +349,7 @@ GOOS_FATAL_NOERR 31
 
 goos_exception_fatal:
     cmpq $0x23, 24(%rsp)
-    je .terminate_user_fault
+    je .user_fault
     cmpq $8, (%rsp)
     je .fatal_double
     leaq fatal_exception_message(%rip), %rsi
@@ -427,6 +429,65 @@ goos_exception_fatal:
     movb %ah, %al
     outb %al, %dx
     retq
+
+// A page fault in user mode may be a demand-zero page (ADR 0104). The
+// registers and the SSE state are saved around the resolver, which runs on the
+// task's kernel stack with interrupts disabled; a supplied page retries the
+// instruction, anything else retires the task as before.
+.user_fault:
+    cmpq $14, (%rsp)
+    jne .terminate_user_fault
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+    movq goos_current_task(%rip), %rax
+    movq %rax, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxsave64 (%r10,%r9)
+    subq $32, %rsp
+    leaq goos_task_roots(%rip), %rcx
+    movq (%rcx,%rax,8), %rcx
+    movq %cr2, %rdx
+    movq 160(%rsp), %r8
+    callq goos_resolve_user_fault
+    addq $32, %rsp
+    movq %rax, %r11
+    movq goos_current_task(%rip), %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxrstor64 (%r10,%r9)
+    testq %r11, %r11
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+    jz .terminate_user_fault
+    addq $16, %rsp
+    iretq
 
 .terminate_user_fault:
     incq goos_user_faults(%rip)

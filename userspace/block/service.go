@@ -6,6 +6,9 @@ type Backend interface {
 	ReadAt(offset uint64, target []byte) Status
 	WriteAt(offset uint64, data []byte) Status
 	Flush() Status
+	// Transfer performs a bulk request, whose data moves through the object
+	// the request carries (ADR 0107). The range has been checked.
+	Transfer(request Request) Status
 }
 
 type Service struct {
@@ -46,6 +49,12 @@ func (service *Service) Dispatch(request Request) Reply {
 		reply.Status = service.backend.WriteAt(request.Offset, request.Data)
 	case OperationFlush:
 		reply.Status = service.backend.Flush()
+	case OperationReadBulk, OperationWriteBulk:
+		if !within(service.backend.Capacity(), request.Offset, uint64(request.Length)) {
+			reply.Status = StatusOutOfRange
+			break
+		}
+		reply.Status = service.backend.Transfer(request)
 	default:
 		reply.Status = StatusInvalidArgument
 	}

@@ -26,7 +26,7 @@ The following foundation is already implemented:
 - isolated native `pwd`, `ls`, and `cat` processes;
 - capability-protected process handles, wait, completion records, and process
   resource reclamation;
-- the versioned `GST3` native startup ABI and named startup handles without
+- the versioned native startup ABI (`GST4` since ADR 0109) and named startup handles without
   application dependence on numeric handle slots.
 
 The project has therefore reached the point where additional kernel mechanisms
@@ -379,7 +379,16 @@ objects PID 1 fills from the file (ADR 0097), so a Linux ELF program on the
 persistent volume will have a way to be launched. File data between the VFS
 and FAT32 moves through a shared-memory file cache (ADR 0098), and the VFS,
 the configuration and log services and the block service restart on failure
-with their clients handed new sessions (ADR 0099, 0100, 0101). The next
+with their clients handed new sessions (ADR 0099, 0100, 0101).
+
+GoOS 0.1.3 (docs/releases/0.1.3.md) removes the scalability limits Linux
+compatibility would otherwise inherit: FAT32 as a complete filesystem
+(ADR 0102), physical memory beyond the first GiB (ADR 0103), native
+virtual-memory regions and demand-zero memory (ADR 0104), page-backed RAMFS
+(ADR 0105), lazily loaded executables (ADR 0106), shared-memory bulk I/O
+(ADR 0107), non-blocking program preparation in PID 1 (ADR 0108), a
+variable-length startup object (ADR 0109), one name and path contract
+(ADR 0110), and bounded dynamic kernel registries (ADR 0111). The next
 milestone is Priority 5, Linux ELF compatibility.
 
 Known gaps left by ADR 0089: the system services that start before the terminal

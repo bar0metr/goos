@@ -8,6 +8,7 @@
 package main
 
 import (
+	"goos/internal/capability"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -32,12 +33,12 @@ var (
 	consoleHandle  handle.ID
 	vfsHandle      handle.ID
 	blockHandle    handle.ID
-	startupWire    [startup.Size]byte
 	wire           [ipc.WireMaxSize]byte
 	blockWire      [ipc.WireMaxSize]byte
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
 	listedName     [ramfs.MaxName]byte
+	requestedName  [ramfs.MaxName]byte
 	// cache is the file cache this service shares with the VFS. A read fills,
 	// and a write takes its bytes from, the slot a request names (ADR 0098).
 	cache         []byte
@@ -51,7 +52,56 @@ var (
 // Capacity, because every offset it computes comes from untrusted numbers.
 type blockDevice struct{}
 
+// bulkObject is the shared-memory buffer larger transfers move through: the
+// block service passes a copy of its handle to the driver, which reads and
+// writes it directly (ADR 0107). bulkMemory is this service's mapping of it.
+var (
+	bulkObject handle.ID
+	bulkMemory []byte
+)
+
+// bulkPages is the size of the bulk buffer: the driver's data area.
+const bulkPages = 32
+
+func setUpBulk() {
+	object, status := sys.MemoryCreate(bulkPages)
+	if status != kcall.StatusOK {
+		syslog.Warn("bulk buffer unavailable", syslog.Uint("status", uint64(status)))
+		return
+	}
+	base, size, status := sys.MemoryMapAnywhere(object, true)
+	if status != kcall.StatusOK {
+		sys.HandleClose(object)
+		return
+	}
+	bulkObject, bulkMemory = object, sys.Window(base, size)
+}
+
+// bulkTransfer moves one chunk through the bulk buffer; the block service
+// gets a copy of its handle with just the rights the transfer needs.
+func bulkTransfer(operation blockproto.Operation, offset uint64, length int) bool {
+	rights := capability.Read | capability.Transfer
+	if operation == blockproto.OperationReadBulk {
+		rights |= capability.Write
+	}
+	duplicate, status := sys.HandleDuplicate(bulkObject, rights)
+	if status != kcall.StatusOK {
+		return false
+	}
+	reply, ok := blockExchange(blockproto.Request{Operation: operation, Offset: offset, Length: uint32(length), Object: duplicate})
+	return ok && reply.Status == blockproto.StatusOK
+}
+
 func (blockDevice) ReadAt(offset uint64, target []byte) bool {
+	for len(target) > blockproto.MaxData && bulkMemory != nil {
+		chunk := min(len(target), len(bulkMemory))
+		if !bulkTransfer(blockproto.OperationReadBulk, offset, chunk) {
+			return false
+		}
+		copy(target[:chunk], bulkMemory[:chunk])
+		target = target[chunk:]
+		offset += uint64(chunk)
+	}
 	for len(target) != 0 {
 		chunk := len(target)
 		if chunk > blockproto.MaxData {
@@ -69,6 +119,15 @@ func (blockDevice) ReadAt(offset uint64, target []byte) bool {
 }
 
 func (blockDevice) WriteAt(offset uint64, data []byte) bool {
+	for len(data) > blockproto.MaxData && bulkMemory != nil {
+		chunk := min(len(data), len(bulkMemory))
+		copy(bulkMemory[:chunk], data[:chunk])
+		if !bulkTransfer(blockproto.OperationWriteBulk, offset, chunk) {
+			return false
+		}
+		data = data[chunk:]
+		offset += uint64(chunk)
+	}
 	for len(data) != 0 {
 		chunk := len(data)
 		if chunk > blockproto.MaxData {
@@ -107,10 +166,7 @@ func (blockDevice) Capacity() uint64 {
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("FAT32_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != kcall.StatusOK {
-		fatal("FAT32_STARTUP_UNAVAILABLE\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("FAT32_STARTUP_INVALID\n")
 	}
@@ -135,6 +191,7 @@ func userspaceMain() {
 		// Without it no file data can move; metadata still can.
 		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
 	}
+	setUpBulk()
 	// A volume that is refused is not a reason to stop: the service keeps
 	// answering, with I/O errors, so the VFS reports the volume as absent
 	// rather than the service as crashing in a restart loop (ADR 0077).
@@ -188,7 +245,7 @@ func userspaceMain() {
 }
 
 func serve() {
-	request, valid := fsproto.DecodeRequest(&requestMessage)
+	request, valid := fsproto.DecodeRequest(&requestMessage, cache, &requestedName)
 	var reply fsproto.Reply
 	if !valid {
 		// Answer an unusable request rather than drop it: the VFS is waiting
@@ -201,7 +258,7 @@ func serve() {
 	} else {
 		reply = fsproto.Serve(&volume, request, cache, &listedName)
 	}
-	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage) {
+	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage, cache) {
 		fatal("FAT32_REPLY_FAILED\n")
 	}
 	size, ok := ipc.EncodeFrom(&replyMessage, wire[:])
@@ -216,11 +273,15 @@ func serve() {
 func blockExchange(request blockproto.Request) (blockproto.Reply, bool) {
 	correlation++
 	message, ok := blockproto.EncodeRequest(request, correlation)
-	if !ok {
-		return blockproto.Reply{}, false
+	var size int
+	if ok {
+		size, ok = ipc.Encode(message, blockWire[:])
 	}
-	size, ok := ipc.Encode(message, blockWire[:])
 	if !ok || sys.IPCSend(blockHandle, blockWire[:size]) != kcall.StatusOK {
+		// A bulk request's object copy that never left is closed here.
+		if request.Operation.Bulk() {
+			sys.HandleClose(request.Object)
+		}
 		return blockproto.Reply{}, false
 	}
 	if sys.IPCWaitReceive(blockHandle, blockWire[:], blockproto.RequestDeadline) != kcall.StatusOK {

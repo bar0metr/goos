@@ -51,7 +51,10 @@ ISO := $(BUILD_DIR)/goos-x86_64.iso
 QEMU := qemu-system-x86_64
 QEMU_SHARE ?= /opt/local/share/qemu
 OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
-QEMU_FLAGS := -machine q35 -m 512M -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
+# Guest RAM for run and the QEMU tests, in QEMU -m syntax. q35 places RAM
+# above 4 GiB once the guest has more than 2.75 GiB (ADR 0103).
+MEMORY ?= 512M
+QEMU_FLAGS := -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
 SOURCE_DATE_EPOCH ?= 0
 HZ ?= 100
 ifeq ($(filter $(HZ),100 250 1000),)
@@ -100,7 +103,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -272,6 +275,7 @@ release-check:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test
+	$(MAKE) test-storage-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
@@ -289,18 +293,24 @@ test-integration: kernel
 test-security:
 	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
+# The storage stress test (ADR 0102): the model-based FAT32 workload at a
+# larger scale than the default suite, and the host FAT checker over volumes
+# the filesystem built.
+test-storage-stress:
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -run 'TestRandomOperationsAgainstModel|TestExternalFsckAcceptsVolume|TestFileLargerThanSixteenMiB|TestDeviceFailureIsContained' ./userspace/fat32
+
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
-	@tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
 
 STRESS_RUNS ?= 4
 STRESS_JOBS ?= 4
 STRESS_ROUNDS ?= 15
 
 test-stress: iso
-	@tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
+	@MEMORY=$(MEMORY) tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
 
 # Builds the ISO twice from a clean build/ and compares every artifact (ADR
 # 0086). It cleans build/ itself, keeping only disks, logs, and reports.
@@ -312,7 +322,7 @@ LATENCY_REPEATS ?= 10
 test-latency: iso
 	@rm -f $(BUILD_DIR)/latency-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/latency-virtio-blk.img
-	@LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
+	@MEMORY=$(MEMORY) LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
 
 MICROBENCH_REPEATS ?= 5
 
@@ -321,7 +331,7 @@ MICROBENCH_REPEATS ?= 5
 test-microbench: iso
 	@rm -f $(BUILD_DIR)/microbench-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/microbench-virtio-blk.img
-	@MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
+	@MEMORY=$(MEMORY) MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
 
 test-performance: test-microbench
 	@mkdir -p $(BUILD_DIR)/reports
@@ -390,6 +400,17 @@ docs:
 	@test -f docs/adr/0099-restartable-vfs.md
 	@test -f docs/adr/0100-config-and-log-service-restart.md
 	@test -f docs/adr/0101-restartable-block-service.md
+	@test -f docs/releases/0.1.3.md
+	@test -f docs/adr/0102-scalable-fat32.md
+	@test -f docs/adr/0103-physical-memory-beyond-the-first-gib.md
+	@test -f docs/adr/0104-native-virtual-memory-regions.md
+	@test -f docs/adr/0105-page-backed-ramfs.md
+	@test -f docs/adr/0106-lazily-loaded-executables.md
+	@test -f docs/adr/0107-bulk-io-through-shared-memory.md
+	@test -f docs/adr/0108-non-blocking-executable-preparation.md
+	@test -f docs/adr/0109-variable-length-startup-object.md
+	@test -f docs/adr/0110-native-name-and-path-limits.md
+	@test -f docs/adr/0111-bounded-dynamic-registries.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -484,6 +505,7 @@ help:
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
+	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
@@ -491,6 +513,7 @@ help:
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
+	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
 	  '  test-performance run host and in-guest microbenchmarks into build/reports' \

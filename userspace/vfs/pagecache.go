@@ -57,6 +57,11 @@ func (cache *PageCache) Slot(slot int) []byte {
 	return cache.memory[start : start+fsproto.PageSize]
 }
 
+// Run returns the bytes of count consecutive slots from start.
+func (cache *PageCache) Run(start, count int) []byte {
+	return cache.memory[start*fsproto.PageSize : (start+count)*fsproto.PageSize]
+}
+
 // Lookup returns the slot holding page of node and how much of it is data.
 func (cache *PageCache) Lookup(node ramfs.NodeID, page uint64) (int, uint64, bool) {
 	for slot := range cache.pages {
@@ -101,6 +106,37 @@ func (cache *PageCache) Written(slot int, length, within, count uint64) {
 		*entry = cachedPage{}
 	case within+count > length:
 		entry.length = within + count
+	}
+}
+
+// ClaimRun empties count consecutive slots — the run whose newest page was
+// used longest ago — and returns the first. A read or write that spans pages
+// moves them in one exchange through such a run (ADR 0107).
+func (cache *PageCache) ClaimRun(count int) int {
+	best, bestAge := 0, ^uint64(0)
+	for start := 0; start+count <= scratchSlot; start++ {
+		age := uint64(0)
+		for slot := start; slot < start+count; slot++ {
+			if entry := &cache.pages[slot]; entry.used && entry.stamp > age {
+				age = entry.stamp
+			}
+		}
+		if age < bestAge {
+			best, bestAge = start, age
+		}
+	}
+	for slot := best; slot < best+count; slot++ {
+		cache.pages[slot] = cachedPage{}
+	}
+	return best
+}
+
+// ForgetRange drops pages first through last of node.
+func (cache *PageCache) ForgetRange(node ramfs.NodeID, first, last uint64) {
+	for slot := range cache.pages {
+		if entry := &cache.pages[slot]; entry.used && entry.node == node && entry.page >= first && entry.page <= last {
+			*entry = cachedPage{}
+		}
 	}
 }
 

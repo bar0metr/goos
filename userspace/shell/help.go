@@ -70,7 +70,7 @@ func VFSReason(status vfs.Status, mutation bool) string {
 		}
 		return "permission denied"
 	case vfs.StatusResourceExhausted:
-		return "no space or too many open files"
+		return "resource limit reached"
 	case vfs.StatusBackendError:
 		return "storage error"
 	case vfs.StatusNotDirectory:
@@ -81,6 +81,18 @@ func VFSReason(status vfs.Status, mutation bool) string {
 		return "directory not empty"
 	case vfs.StatusBusy:
 		return "a mount depends on it"
+	case vfs.StatusNoSpace:
+		return "no space left on device"
+	case vfs.StatusCorrupt:
+		return "filesystem is corrupt"
+	case vfs.StatusNameTooLong:
+		return "file name too long"
+	case vfs.StatusTimeout:
+		return "storage did not answer in time"
+	case vfs.StatusPeerDied:
+		return "storage service unavailable"
+	case vfs.StatusUnsupported:
+		return "operation not supported"
 	default:
 		return "filesystem error"
 	}

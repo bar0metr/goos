@@ -13,7 +13,7 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
 | VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel, file cache mapping | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096, 0098 |
-| RAMFS | inside VFS | nothing; library core | [ramfs.md](../userspace/ramfs.md), ADR 0017 |
+| RAMFS | inside VFS | a page pool in the VFS's address space | [ramfs.md](../userspace/ramfs.md), ADR 0017, 0105 |
 | System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
 | FAT32 | `/system/fat32` | server end of the VFS channel, block client endpoint, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098 |
 | Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](../userspace/storage.md), ADR 0033 |
@@ -49,8 +49,9 @@ path there, and asks the kernel to launch the extent it found under an image
 capability with Execute. The filesystem service maps the archive through a
 Read-only copy of that capability, which cannot launch anything (ADR 0070,
 ADR 0093). A program anywhere else in the namespace is read through the VFS,
-by PID 1, into an executable object the kernel launches whole once it has
-sealed (ADR 0097).
+by PID 1, into an executable object the kernel launches once it has sealed;
+the process copies the object's pages in as it touches them (ADR 0097,
+ADR 0106).
 
 `/persist` names the whole volume and `/home` and `/state` name directories on
 it, so `/persist/home` and `/home` are one directory under two names, backed by
@@ -72,24 +73,40 @@ offset, and are per session.
 A `cat /persist/a.txt` stage issues `GVF1` open, read, and close requests on its
 session. VFS resolves the path to the FAT32 mount and sends each backend call
 as a `GFSPRT01` request to the FAT32 service, which translates the file range
-into sector reads. Each read becomes a `GBLK001` request on the FAT32
-service's block client endpoint, and the block service forwards it to the driver over a
+into cluster runs. Each run becomes a `GBLK001` request on the FAT32 service's
+block client endpoint, and the block service forwards it to the driver over a
 private channel. The driver performs the virtqueue transfer and waits for
 IRQ 11. Replies unwind in reverse.
 
-File data between the VFS and the FAT32 service moves through the file cache,
-a 128 KiB shared-memory object both map (ADR 0098): a `GFSPRT01` read asks the
-service to fill a 4 KiB slot with a page of the file, a write names the slot
-its bytes are in, and the VFS serves later reads of a cached page without
-asking the service. Writes go through to the service before they return.
-Elsewhere payloads are inline IPC data: at most 224 bytes per VFS reply and 232
-bytes per block request. FAT32 keeps a four-sector write-through window to avoid
-repeated metadata reads (ADR 0048).
+Small requests carry their data inline: at most 224 bytes per VFS reply and per
+VFS write request (GVF1 version 5 moved a rename's target out of the data
+field, which had held write data to 32 bytes). Large ones move it through shared memory instead
+(ADR 0107):
+
+- A client creates a buffer with `MemoryCreate`, maps it, and attaches to each
+  `GVF1` `ReadInto` or `WriteFrom` a copy of its handle narrowed with
+  `HandleDuplicate` to the rights the VFS needs. The VFS maps the buffer for
+  that request only. `cp` and `bench io` move 64 KiB per exchange this way;
+  PID 1 has the VFS fill an executable object with one `FillExecutable`.
+- File data between the VFS and the FAT32 service moves through the file
+  cache, a shared-memory object both map: 128 KiB of data slots and a page
+  for names too long for a message (ADR 0098, ADR 0110). A `GFSPRT01` read
+  or write names a run of up to 16 consecutive slots; the VFS serves later
+  reads of a cached page without asking the service, and writes go through to
+  the service before they return.
+- The FAT32 service moves runs of up to 128 KiB to and from the block service
+  with `ReadBulk` and `WriteBulk`, through a buffer of its own; the block
+  service copies through a buffer it shares with the driver, whose DMA region
+  has a 128 KiB data area. Requests of up to 232 bytes stay inline.
+
+FAT32 keeps a sixteen-sector window of metadata to avoid repeated FAT and
+directory reads, and gathers FAT changes there to write a sector at a time
+(ADR 0048, ADR 0102, ADR 0107).
 
 ## Failure behaviour
 
-- A volume whose declared geometry does not fit its device, or whose FAT cannot
-  describe the clusters it claims, is refused at mount. The system still boots:
+- A volume whose declared geometry does not fit its device, or that is not a
+  FAT32 volume this service can read, is refused at mount (ADR 0102). The system still boots:
   `/persist`, `/home` and `/state` are absent and everything else works
   (ADR 0077).
 - Each hop validates sizes, offsets, and reserved fields before acting.
@@ -111,19 +128,26 @@ repeated metadata reads (ADR 0048).
 
 ## Names
 
-A path component is at most 63 bytes (`ramfs.MaxName`), the width of a VFS
-directory reply. FAT32 stores a component that fits the 8.3 form — lower case,
+A path component is at most 255 bytes and a path at most 4096, in every layer
+(`limits.NameMax`, `limits.PathMax`; ADR 0110). Names are bytes other than NUL
+and `/`. A name too long for a message crosses to the VFS in a memory object
+the client attaches, and between the VFS and the FAT32 service in the name
+page of the file cache. FAT32 accepts printable ASCII names, one UTF-16 unit
+per byte, so its 255-unit VFAT limit is the same bound. FAT32 stores a component that fits the 8.3 form — lower case,
 at most eight characters and a three-character extension — in a single
 directory entry, exactly as before. Any other component gets a generated
 `NAME~1` alias plus a VFAT long-name chain in front of it, so case, length, and
 the wider character set survive a round trip (ADR 0066). A chain whose
 ordinals, padding, or checksum do not match is ignored and the alias is used
-instead. Names longer than the bound, or holding characters the system cannot
-carry, are rejected with `InvalidArgument`.
+instead. Names longer than the bound are rejected with `NameTooLong`, and names holding
+characters the service cannot carry with `InvalidArgument`; an on-disk long
+name holding such characters is shown by its alias.
 
 ## Limits
 
-FAT32 supports only 512-byte sectors, one-sector clusters, one FAT, four
-clusters per directory (64 entries, of which a long name costs up to six), and
-files up to 64 KiB. Crash consistency, shared-memory bulk transfers, and a
-separate filesystem process are future work.
+FAT32 reads volumes with 512-byte sectors, 512-byte to 64 KiB clusters, and one
+or two FATs. Files reach the FAT32 maximum of 4 GiB − 1, directories the FAT
+maximum of 65536 entries, and every chain walk is bounded by the volume's
+cluster count, so corrupt media ends in a typed error (ADR 0102). There is no
+journal: changes are ordered so that an interruption leaves only states a
+filesystem checker repairs.

@@ -55,19 +55,22 @@ resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 
 ## Mounting an untrusted volume
 
-Everything the FAT32 backend computes comes from the boot sector: where the FAT
-begins, where a cluster is, how far a chain may run. The image is on a device the
+Everything the FAT32 service computes comes from the boot sector: where the FATs
+begin, where a cluster is, how far a chain may run. The image is on a device the
 system does not control, so the geometry is checked against that device before an
-offset is derived from it (ADR 0077):
+offset is derived from it (ADR 0077, ADR 0102):
 
 - the device reports its capacity, which must be a whole number of sectors;
-- the declared volume must fit the device;
-- the metadata must fit the volume;
-- the FAT must be large enough for an entry per cluster plus the two reserved.
-
-Only one geometry is handled: 512-byte sectors, one sector per cluster, one FAT.
-Any other is refused rather than approximated, because a valid FAT32 volume this
-code would misread is worse than one it declines.
+- sectors are 512 bytes, sectors per cluster a power of two up to 128, and there
+  are one or two FATs; other sector sizes are refused as unsupported;
+- the boot sector must describe FAT32 (no fixed root directory, no 16-bit FAT
+  size), and a FAT named active by the extended flags must exist;
+- the declared volume must fit the device and its metadata must fit the volume;
+- a FAT too small for the data region limits the volume to the clusters it can
+  describe, as Linux does, and no volume may number more clusters than FAT32
+  addresses;
+- the root cluster must be inside the data area; an FSInfo sector is used only
+  for its next-free hint, and only when both signatures and the value check out.
 
 A refused volume is not fatal. The filesystem service reports it, prints
 `[WARN] no persistent storage`, and serves the rest of the namespace: the
@@ -77,49 +80,65 @@ prompt is where the volume gets looked at. The log service keeps draining the
 kernel ring and retries its file on each pass; the configuration service serves
 its declared defaults.
 
-A bounded FAT32 backend is mounted at `/persist`, and its `home` and `state`
-directories are mounted again at `/home` and `/state` so that user data and
-mutable system state are named apart from the immutable system image (ADR 0071).
-The filesystem service creates those directories on a volume that lacks them.
-The three mounts share one backend instance and one sector cache, so
-`/persist/home` and `/home` are one directory rather than two views; the
-namespace refuses to remove a directory another mount points at, under either
-name. It is intentionally limited
-to ASCII names of at most 63 bytes (ADR 0066), one-sector clusters, and 64 KiB
-files. A name that fits the 8.3 form stays a single directory entry; anything
-longer or mixed case gets a VFAT long-name chain and a generated alias. It supports the
-regular file lifecycle needed by native utilities and preserves the raw image
-across QEMU boots. The boot gate copies `/system/motd` through VFS and verifies
-the result in the host-visible disk image. A second VM boot mounts the same
-image and reads the file without issuing another copy, proving persistence
-across a complete guest restart.
+## The FAT32 volume
 
-Subdirectories are supported (ADR 0060). `mkdir` allocates one zeroed cluster
-with `.` and `..` entries, and `..` records cluster 0 when the parent is the
-root, as the FAT specification requires. Every directory, the root included,
-holds at most four clusters (64 entries, 62 usable in a subdirectory) and grows
-one cluster at a time. Nesting depth is bounded only by the VFS path length. A
-node ID packs the directory key (0 for the root, otherwise the directory's
-first cluster) above bit 16 and the entry index plus two below it, so root
-entries keep their historical IDs. Rename stays within one directory, and a
-directory can be removed only when it holds nothing but `.` and `..`; its
-cluster is freed. Directory chains that are too long, loop, reach a free
-cluster, or leave the data area are reported as errors, as are file chains
-that leave the data area.
+The volume is mounted at `/persist`, and its `home` and `state` directories are
+mounted again at `/home` and `/state` so that user data and mutable system state
+are named apart from the immutable system image (ADR 0071). The filesystem
+service creates those directories on a volume that lacks them. The three mounts
+share one backend instance and one sector cache, so `/persist/home` and `/home`
+are one directory rather than two views; the namespace refuses to remove a
+directory another mount points at, under either name.
 
-Cross-directory rename, long-file-name creation, general FAT32 geometry, crash
-consistency, dynamic interrupt routing, multiple devices, scatter-gather
-payloads larger than the inline IPC limit, and recovery from a failed storage
-driver remain required.
+Files are limited only by FAT32 itself: 4 GiB − 1 bytes, the free space, and the
+caller's memory. Directories are cluster chains of any valid length, up to the
+65536 entries FAT allows, and grow one zeroed cluster at a time; nesting depth
+is bounded only by the VFS path length. Names are printable ASCII of at most
+255 bytes, the native limit (ADR 0066, ADR 0110). A lower-case name that fits the 8.3 form stays a single directory
+entry, carrying the Windows NT lower-case flags; anything longer or mixed case
+gets a VFAT long-name chain and a generated alias — `~1` to `~9`, then a hashed
+form — so any number of similar names fit (ADR 0102).
+
+Truncation shrinks and grows. Shrinking records the new size, ends the chain
+after the last cluster still needed, and frees the rest; growing, like a write
+past the end, writes zeros over the new range first, so no stale disk bytes are
+ever read back. A write claims all the clusters it needs before writing, so a
+full volume refuses it whole with "no space left on device". Rename moves
+entries between directories, repointing a moved directory's `..`; a directory
+cannot be moved into its own subtree. A directory can be removed only when it
+holds nothing but `.` and `..`. Each FAT change is written to every FAT copy in
+use.
+
+A node ID packs the directory key (0 for the root, otherwise the directory's
+first cluster) above bit 17 and the entry index plus two below it, so root
+entries keep their historical IDs. A subdirectory key must lead to a directory
+whose `.` entry names it, so an ID that outlived its directory is not found.
+Chains that loop, reach a free or bad cluster, leave the data area, or end
+before the file does are reported as a corrupt filesystem; every walk is bounded
+by the volume's cluster count.
+
+There is no journal. Changes are ordered so that an interruption leaves at worst
+lost clusters, a chain longer than its file, or an entry under two names after
+a move — never a chain shared by two files or an entry naming freed clusters.
+Timestamps are not maintained. The boot gate copies `/system/motd` through VFS
+and verifies the result in the host-visible disk image, and a second VM boot
+reads it back, proving persistence across a complete guest restart.
+
+A journal, timestamps, dynamic interrupt routing, multiple devices, and block
+payloads larger than the inline IPC limit remain future work.
 
 ## Resident sectors and bounded failure
 
-The FAT32 backend keeps a small write-through window of resident sectors.
-Directory entries and FAT links are packed many to a sector, so a metadata scan
-that once cost one device round trip per 32-byte entry now costs one sector
-fetch. Writes reach the device immediately and update the resident copy, and a
-failed device write drops that copy rather than leaving superseded bytes behind.
-A full-sector write becomes resident without reading the sector back.
+The FAT32 service keeps a write-through window of sixteen resident metadata
+sectors, replaced least recently used. Directory entries and FAT links are
+packed many to a sector, so a metadata scan costs one sector fetch per sector,
+not one device round trip per entry. Writes reach the device immediately and
+update any resident copy, and a failed device write drops that copy rather than
+leaving superseded bytes behind. File data is not kept there: it moves between
+the device and the request directly, one device request per run of consecutive
+clusters, and the VFS caches it (ADR 0098). The last position reached in each of
+eight cluster chains is remembered, so sequential access follows one FAT link
+per cluster.
 
 Every storage wait is bounded. One block exchange and one VFS call expire after
 a few seconds of timer ticks and report an I/O error. Services answer requests

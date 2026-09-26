@@ -1,18 +1,31 @@
 // Package shell implements allocation-free parsing for the native command loop.
 package shell
 
-import execproto "goos/userspace/exec"
+import (
+	"goos/internal/limits"
+	execproto "goos/userspace/exec"
+)
 
 const (
-	MaxArguments    = 8
-	MaxArgumentSize = 127
-	MaxCommands     = 8
+	// MaxLine bounds a command line: the terminal delivers lines of up to a
+	// native path's length (ADR 0109).
+	MaxLine = limits.PathMax
+	// MaxArguments is the most words a line can hold, each a byte and a
+	// space. Arguments are bounded by the line's bytes, not by a count.
+	MaxArguments = MaxLine/2 + 1
+	MaxCommands  = 8
 )
+
+// Storage is where ParseInvocation puts the words of a line.
+type Storage struct {
+	bytes [MaxLine]byte
+	words [MaxArguments][]byte
+}
 
 // ParseSequence validates the whole line before exposing any command for
 // execution. Returned slices borrow line; scratch is reused for validation.
 // A trailing separator is allowed, but empty commands between separators are not.
-func ParseSequence(line []byte, scratch *[MaxArguments][MaxArgumentSize]byte) ([MaxCommands][]byte, int, bool) {
+func ParseSequence(line []byte, scratch *Storage) ([MaxCommands][]byte, int, bool) {
 	var commands [MaxCommands][]byte
 	count, start := 0, 0
 	quote, escaped := byte(0), false
@@ -218,7 +231,6 @@ func SplitRedirections(line []byte) (Redirections, bool) {
 	if len(result.Command) == 0 {
 		return Redirections{}, false
 	}
-	var storage [MaxArguments][MaxArgumentSize]byte
 	for index := 0; index < count; index++ {
 		operator := operators[index]
 		start := operator.offset + operator.size
@@ -227,8 +239,7 @@ func SplitRedirections(line []byte) (Redirections, bool) {
 			end = operators[index+1].offset
 		}
 		target := trimSpaces(line[start:end])
-		invocation, valid := ParseInvocation(target, &storage)
-		if !valid || invocation.Count != 1 {
+		if words, valid := tokenize(target, nil); !valid || words != 1 {
 			return Redirections{}, false
 		}
 		switch operator.kind {
@@ -252,9 +263,11 @@ func SplitOutputRedirect(line []byte) (command, target []byte, redirected, appen
 	return redirects.Command, redirects.Output, len(redirects.Output) != 0, redirects.Append, true
 }
 
+// Invocation is a tokenized command; its arguments alias the Storage it was
+// parsed into.
 type Invocation struct {
-	Arguments [MaxArguments][]byte
-	Count     uint8
+	Arguments [][]byte
+	Count     int
 }
 
 // SplitPipeline returns up to MaxStages invocations separated by unquoted
@@ -313,12 +326,25 @@ func trimSpaces(value []byte) []byte {
 
 // ParseInvocation tokenizes a bounded command line with single quotes, double
 // quotes, and backslash escaping. The returned slices refer to storage.
-func ParseInvocation(line []byte, storage *[MaxArguments][MaxArgumentSize]byte) (Invocation, bool) {
-	var result Invocation
+func ParseInvocation(line []byte, storage *Storage) (Invocation, bool) {
 	if storage == nil {
-		return result, false
+		return Invocation{}, false
 	}
-	position := 0
+	count, ok := tokenize(line, storage)
+	if !ok || count == 0 {
+		return Invocation{}, false
+	}
+	return Invocation{Arguments: storage.words[:count], Count: count}, true
+}
+
+// tokenize splits line into words, into storage when it is not nil, and
+// returns how many there are. A word's unquoted bytes are never more than the
+// line's, so a line of up to MaxLine bytes always fits.
+func tokenize(line []byte, storage *Storage) (int, bool) {
+	if len(line) > MaxLine {
+		return 0, false
+	}
+	count, size, position := 0, 0, 0
 	for position < len(line) {
 		for position < len(line) && line[position] == ' ' {
 			position++
@@ -326,11 +352,7 @@ func ParseInvocation(line []byte, storage *[MaxArguments][MaxArgumentSize]byte) 
 		if position == len(line) {
 			break
 		}
-		if result.Count == MaxArguments {
-			return Invocation{}, false
-		}
-		index, quote := int(result.Count), byte(0)
-		size := 0
+		start, quote := size, byte(0)
 		for position < len(line) {
 			value := line[position]
 			if quote == 0 && value == ' ' {
@@ -339,7 +361,7 @@ func ParseInvocation(line []byte, storage *[MaxArguments][MaxArgumentSize]byte) 
 			if value == '\\' {
 				position++
 				if position == len(line) {
-					return Invocation{}, false
+					return 0, false
 				}
 				value = line[position]
 			} else if value == '\'' || value == '"' {
@@ -354,20 +376,21 @@ func ParseInvocation(line []byte, storage *[MaxArguments][MaxArgumentSize]byte) 
 					continue
 				}
 			}
-			if size == MaxArgumentSize {
-				return Invocation{}, false
+			if storage != nil {
+				storage.bytes[size] = value
 			}
-			storage[index][size] = value
 			size++
 			position++
 		}
-		if quote != 0 || size == 0 {
-			return Invocation{}, false
+		if quote != 0 || size == start {
+			return 0, false
 		}
-		result.Arguments[index] = storage[index][:size]
-		result.Count++
+		if storage != nil {
+			storage.words[count] = storage.bytes[start:size]
+		}
+		count++
 	}
-	return result, result.Count != 0
+	return count, count != 0
 }
 
 type Command uint8

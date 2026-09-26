@@ -72,14 +72,16 @@ operation that consumes and returns the exit code, preserving the existing
 single-object interface.
 
 Before the first Task becomes runnable, the kernel completes the bounded
-versioned `GST3` startup block with the actual generation-safe IDs returned by
+versioned `GST4` startup object with the actual generation-safe IDs returned by
 capability installation. Applications resolve handles by explicit role names
 instead of assuming process-local slot numbers. Startup metadata never grants
 rights; the installed handle-table entry remains authoritative.
 
-The startup block adds bounded length-prefixed `argv` and environment vectors.
-PID 1 passes the template through a shared staging page, and the child
-receives the bound block on a read-only page at `0x40001000` (ADR 0062). The exec
+The startup object also carries the command, the working directory, `argv`,
+and the environment as a table of offsets into a string area, bounded by its
+64 KiB size rather than by counts (ADR 0109). PID 1 passes the template
+through a shared staging area, and the child receives the bound object on
+read-only pages at `vm.UserStartupAddress` (ADR 0062, ADR 0109). The exec
 control protocol returns final child status separately from launch status, so
 PID 1 can report application failure without confusing it with loader or
 capability-installation failure. The read-only `SystemInfo` call exposes a
@@ -114,7 +116,7 @@ raise its own or another's.
 | channels | 4 | 16 | `ChannelCreate`, released when the registry frees the channel |
 | streams | 4 | 16 | `StreamCreate`, released when the registry frees the stream |
 | tasks | 4 | 8 | task binding, released when the task exits |
-| pages | 192 | 512 | launch, `DMAAllocate`, `ImageMap`; released at teardown |
+| pages | 8192 | 16384 | launch, demand-zero faults and the page tables they need, `MemoryMap`, `DMAAllocate`, `ImageMap`; released by `VMUnmap`, `VMDiscard`, and teardown |
 
 PID 1 holds the larger share because it creates the endpoints every other
 process communicates through. The share is granted once, at boot, and
@@ -125,6 +127,9 @@ rather than until the creator's handle closes, because both endpoints can be
 transferred and the object outlives them. Launch memory is measured as the
 difference in free pages across address-space creation and image loading, and
 charged before the task exists, so an image that does not fit fails to launch.
+Everything after that is charged as it is touched: heap, stack, BSS, and
+anonymous pages arrive on demand (ADR 0104), and a process whose quota is spent
+when it touches a new page is retired with a logged `page quota exhausted`.
 
 CPU is sampled rather than measured: the timer charges a tick to the task it
 interrupted, and a task's count folds into its process when it exits. `ps`

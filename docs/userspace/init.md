@@ -46,16 +46,24 @@ and initial task (ADR 0093).
 A command path outside `/system` is a program on a filesystem. PID 1 reads it
 through a VFS session of its own into an executable object: it creates the
 object with its loader capability (handle `0x100000017`) at the file's size,
-appends the file to it, and names the whole sealed object in the launch
-request instead of an image extent. A file that is not a regular file of at
-most 1 MiB, or whose size changes while it is read, is refused. Such a program
+asks the VFS to fill it with one `FillExecutable` request (ADR 0107), and names
+the whole sealed object in the launch request instead of an image extent. The
+fill runs without blocking PID 1: the VFS answers on the job's own session,
+which PID 1 waits on with its other channels, and lifecycle events, other jobs,
+and restarts are served meanwhile. A job stopped while its programs are being
+read ends with the launch status "stopped before it started" (ADR 0108). A file that is not a regular file, is
+larger than PID 1's page quota allows, or whose size changes while it is read,
+is refused. The launched process copies the object's pages in as it touches
+them and holds a reference that keeps the object alive while it runs, and the
+object's pages are charged to it rather than to PID 1 (ADR 0106). Such a program
 receives its standard streams and no other grant, and PID 1 closes the object
 once the kernel has answered (ADR 0097). Services are launched only from the
 image, and paths in `/system` outside `/system/bin` are not commands.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
-assembly entry supplies the native kernel-call ABI, while a fixed 32 KiB stack
-and 64 KiB bump-allocation arena bound runtime memory. The host-side converter
+assembly entry supplies the native kernel-call ABI; its stack and heap are
+reservations the kernel supplies pages for as they are touched (ADR 0104),
+bounded by PID 1's page quota. The host-side converter
 accepts only static x86-64 ELF load segments and wraps them in the validated
 GoOS native image envelope.
 
@@ -70,36 +78,40 @@ Channel capabilities identify their endpoint side. A launch grant may be marked
 consumed, removing PID 1's source handle after successful derivation. This is
 used for per-process VFS clients and prevents accumulation of temporary handles.
 
-PID 1 also supplies a `GST3` startup template with a unique role name for each
-manifest entry. It writes the template into a slot of the launch staging page
-shared with the kernel (handle `0x100000013`), and the launch message names the
-slot (ADR 0062). After installing all capabilities, the kernel writes their
-actual generation-safe IDs into the startup block before creating the first
-Task. Services resolve roles rather than depending on handle-table insertion
+PID 1 also supplies a `GST4` startup template with a unique role name for each
+manifest entry. It writes the template with `startup.Writer` into a 64 KiB
+slot of the launch staging area shared with the kernel (handle `0x100000013`,
+four slots), and the launch message (lifecycle version 8) names the slot and
+the template's size (ADR 0062, ADR 0109). After installing all capabilities,
+the kernel writes their actual generation-safe IDs into its copy of the
+startup object before creating the first Task. Services resolve roles rather than depending on handle-table insertion
 order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
-The kernel also grants PID 1 a one-page exec page (handle `0x100000014`,
+The kernel also grants PID 1 a 512 KiB exec area of eight slots (handle `0x100000014`,
 `Read|Write|Transfer`) for the shell exec protocol. It is not mapped at boot;
 PID 1 maps it with `MemoryMap` and passes a derived `Read|Write` handle to the
 shell through the launch manifest (ADR 0063).
 
 Shell exec requests are restricted to simple names below `/system/bin`. A
 request carries one to four invocation records, a shared cwd, and a shared
-environment. The shell writes it into a 1024-byte slot of the exec page it
-shares with PID 1, and the version 7 submit message names the slot and size
-(ADR 0064). The reply to a launch that failed names the stage that could not be
+environment. The shell writes it into a 64 KiB slot of the exec area it
+shares with PID 1, and the version 11 submit message names the slot and size
+(ADR 0064, ADR 0109). The reply to a launch that failed names the stage that could not be
 started, so the shell can report it by name (ADR 0079). PID 1 copies the slot before decoding it. Each record contains
 its own executable path and structured argv. The decoder checks the complete
 request, all lengths, system paths, vector encodings, and trailing bytes before
 any resource operations. Oversized requests are rejected rather than truncated.
 
-The request begins with five bytes: stage count, cwd byte length, environment
-byte length, error source, and flags (bit 0: background, whose first stage
-reads an empty stream). Cwd and environment bytes follow. Each
-stage then stores one-byte path and argv lengths followed by those byte strings.
-Argv and environment use the GST3 vector encoding, up to 255 bytes each. No handles are
-attached to the exec request; PID 1 derives child capabilities from its own table.
+The request begins with twelve bytes: stage count, error source, flags (bit 0:
+background, whose first stage reads an empty stream), a zero byte, the cwd's
+length, and the number of environment variables. The cwd and the variables
+follow; each stage then stores its path, its argument count, and its
+arguments. Every variable, path, and argument is a 32-bit length followed by
+its bytes; variables are `NAME=VALUE`. Arguments are limited by the slot's
+bytes, not by a count, and PID 1 turns them into the startup object; one that
+does not fit fails with "arguments too long". No handles are attached to the
+exec request; PID 1 derives child capabilities from its own table.
 
 For N stages PID 1 creates N-1 streams and starts stages from right to left,
 so a downstream launch failure cannot leave a newly started producer waiting on
@@ -116,7 +128,7 @@ for children already started. This releases stream waits through EOF or peer
 closure. It is not forced cancellation of an arbitrary nonterminating program.
 
 All stages start before process waits. The request then becomes one of up to
-four jobs: PID 1 returns to its loop, which waits on the lifecycle channel, the
+eight jobs (ADR 0111): PID 1 returns to its loop, which waits on the lifecycle channel, the
 exec channel, and the next process of every job, so supervision and further
 requests continue while commands run. PID 1 reaps every started process and
 returns the first nonzero exit code in left-to-right pipeline order. Launch

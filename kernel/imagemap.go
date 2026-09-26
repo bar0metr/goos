@@ -8,6 +8,7 @@ import (
 	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 )
@@ -49,32 +50,21 @@ func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uin
 	if !vm.CopyOut(handler.root, address, imageWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
-	// The image window lies outside the two MiB the bootstrap layout maps, so
-	// the leaf tables covering the image, one per two MiB, are added here
-	// rather than in every address space that will never hold an image. Each
-	// is charged before it is allocated; a table that already exists, as on a
-	// second call, costs nothing. Tables added before a failure stay charged
-	// and are freed with the address space.
-	for region := virtual; region < virtual+pages*vm.PageSize; region += vm.LeafTableSpan {
-		if !owner.Charge(process.ResourcePages, 1) {
-			return kcall.StatusResourceExhausted
-		}
-		added, extended := vm.ExtendUserAddressSpace(&pageAllocator, handler.root, region)
-		if !added {
-			owner.Release(process.ResourcePages, 1)
-		}
-		if !extended {
-			return kcall.StatusResourceExhausted
-		}
-	}
-	// A second call finds the window already mapped and fails here.
-	for page := uint64(0); page < pages; page++ {
-		if !vm.CanMapUserPage(handler.root, virtual+page*vm.PageSize) {
-			return kcall.StatusInvalidArgument
-		}
+	// The window is a pinned read-only region; its page tables are created
+	// as the pages are mapped and charged to the caller. A second call finds
+	// the window taken and fails here.
+	if recordKernelRegion(owner, region.Region{Base: virtual, Length: pages * vm.PageSize, Protection: region.Read, Backing: region.Device, Flags: region.Pinned}) != kcall.StatusOK {
+		return kcall.StatusInvalidArgument
 	}
 	for page := uint64(0); page < pages; page++ {
-		if !vm.MapUserPage(handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true}) {
+		if owner.Available(process.ResourcePages) < faultTables {
+			return kcall.StatusResourceExhausted
+		}
+		tables, mapped := vm.MapUserPageAt(&pageAllocator, handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true}, false)
+		if tables != 0 {
+			owner.Charge(process.ResourcePages, uint32(tables))
+		}
+		if !mapped {
 			return kcall.StatusResourceExhausted
 		}
 	}

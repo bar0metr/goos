@@ -5,25 +5,27 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/mm/vm"
 	"goos/userspace/startup"
 )
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(7)
+	LifecycleVersion    = uint16(8)
 	// MaxProcessName bounds the display name a launch carries. The kernel
 	// records it for ps and resolves nothing from it.
 	MaxProcessName   = 16
 	launchGrantSize  = 16
-	launchHeaderSize = 30
+	launchHeaderSize = 32
 )
 
 // Startup blocks travel through a page shared by PID 1 and the kernel instead
 // of the launch message. PID 1 writes one slot per launch in flight.
 const (
-	StagingAddress  = uint64(0x401ff000)
+	StagingAddress  = vm.UserStagingAddress
 	StagingSlots    = 4
-	StagingSlotSize = startup.Size
+	StagingSlotSize = startup.MaxSize
+	StagingPages    = StagingSlots * StagingSlotSize / 4096
 )
 
 type LifecycleOperation uint8
@@ -46,6 +48,12 @@ const (
 	LaunchTaskFailed
 	LaunchCapabilityDenied
 	LaunchCapabilityInstallFailed
+	// LaunchStopped is a job stopped while its programs were still being
+	// read, before anything was launched (ADR 0108). Only PID 1 reports it.
+	LaunchStopped
+	// LaunchArgumentsTooLong is a command whose arguments and environment do
+	// not fit a startup object (ADR 0109).
+	LaunchArgumentsTooLong
 )
 
 // Reason describes a launch failure for a person reading the console.
@@ -69,6 +77,10 @@ func (status LaunchStatus) Reason() string {
 		return "permission denied"
 	case LaunchCapabilityInstallFailed:
 		return "capabilities could not be granted"
+	case LaunchStopped:
+		return "stopped before it started"
+	case LaunchArgumentsTooLong:
+		return "arguments too long"
 	default:
 		return "launch failed"
 	}
@@ -101,7 +113,7 @@ type LifecycleEvent struct {
 	Capabilities    [MaxCapabilities]Capability
 	CapabilityCount uint8
 	StartupSlot     uint8
-	StartupSize     uint16
+	StartupSize     uint32
 }
 
 func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
@@ -121,8 +133,8 @@ func LaunchRequest(service uint64, executable Executable, name string, capabilit
 
 // LaunchRequestWithStartup names a startup template of startupSize bytes that
 // the caller has written to staging slot startupSlot.
-func LaunchRequestWithStartup(service uint64, executable Executable, name string, capabilities []Capability, startupSlot uint8, startupSize uint16, correlation uint64) (ipc.Message, bool) {
-	if service == 0 || correlation == 0 || !validExtent(executable) || !validProcessName(name) || len(capabilities) > MaxCapabilities || startupSlot >= StagingSlots || startupSize > StagingSlotSize || launchHeaderSize+len(name)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
+func LaunchRequestWithStartup(service uint64, executable Executable, name string, capabilities []Capability, startupSlot uint8, startupSize uint32, correlation uint64) (ipc.Message, bool) {
+	if service == 0 || correlation == 0 || !validExtent(executable) || !validProcessName(name) || len(capabilities) > MaxCapabilities || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || launchHeaderSize+len(name)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	for _, grant := range capabilities {
@@ -142,10 +154,10 @@ func LaunchRequestWithStartup(service uint64, executable Executable, name string
 	message.Payload[9] = byte(len(name))
 	message.Payload[10] = byte(len(capabilities))
 	message.Payload[11] = startupSlot
-	binary.LittleEndian.PutUint16(message.Payload[12:14], startupSize)
-	binary.LittleEndian.PutUint64(message.Payload[14:22], uint64(executable.Image))
-	binary.LittleEndian.PutUint32(message.Payload[22:26], executable.Offset)
-	binary.LittleEndian.PutUint32(message.Payload[26:30], executable.Size)
+	binary.LittleEndian.PutUint32(message.Payload[12:16], startupSize)
+	binary.LittleEndian.PutUint64(message.Payload[16:24], uint64(executable.Image))
+	binary.LittleEndian.PutUint32(message.Payload[24:28], executable.Offset)
+	binary.LittleEndian.PutUint32(message.Payload[28:32], executable.Size)
 	copy(message.Payload[launchHeaderSize:], name)
 	offset := launchHeaderSize + len(name)
 	for _, grant := range capabilities {
@@ -195,13 +207,13 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 		size := int(message.Payload[9])
 		capabilityCount := int(message.Payload[10])
 		startupSlot := message.Payload[11]
-		startupSize := binary.LittleEndian.Uint16(message.Payload[12:14])
+		startupSize := binary.LittleEndian.Uint32(message.Payload[12:16])
 		executable := Executable{
-			Image:  handle.ID(binary.LittleEndian.Uint64(message.Payload[14:22])),
-			Offset: binary.LittleEndian.Uint32(message.Payload[22:26]),
-			Size:   binary.LittleEndian.Uint32(message.Payload[26:30]),
+			Image:  handle.ID(binary.LittleEndian.Uint64(message.Payload[16:24])),
+			Offset: binary.LittleEndian.Uint32(message.Payload[24:28]),
+			Size:   binary.LittleEndian.Uint32(message.Payload[28:32]),
 		}
-		if service == 0 || size == 0 || size > MaxProcessName || startupSlot >= StagingSlots || startupSize > StagingSlotSize || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
+		if service == 0 || size == 0 || size > MaxProcessName || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
 			return LifecycleEvent{}, false
 		}
 		if !validExtent(executable) || !validProcessNameBytes(message.Payload[launchHeaderSize:launchHeaderSize+size]) {

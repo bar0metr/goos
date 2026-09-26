@@ -38,19 +38,23 @@ func run(data startup.Data) {
 	utility.Check(truncated, received, target, true)
 	output, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: target})
 	utility.Check(output, received, target, true)
-	// Each exchange allocates from an arena that never frees, so it is rewound
-	// per chunk, as cat does; without it a copy stopped after a few hundred
-	// bytes and left the target truncated.
+	// The data moves through a shared buffer, 64 KiB per exchange, rather
+	// than inline in the messages (ADR 0107). Each exchange allocates from
+	// an arena that never frees, so it is rewound per chunk.
+	buffer, ok := utility.NewBulk(utility.BulkSize)
+	if !ok {
+		utility.Fail(nil, "no memory for the copy")
+	}
 	mark := utility.HeapMark()
 	for {
 		utility.HeapReset(mark)
-		chunk, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationRead, Handle: input.Handle, Size: vfs.MaxProtocolData})
+		chunk, ok := buffer.ReadFile(input.Handle, utility.BulkSize)
 		utility.Check(chunk, ok, source, false)
-		if len(chunk.Data) == 0 {
+		if chunk.Size == 0 {
 			break
 		}
-		written, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: output.Handle, Data: chunk.Data})
-		utility.CheckWritten(written, ok, target, len(chunk.Data))
+		written, ok := buffer.WriteFile(output.Handle, int(chunk.Size))
+		utility.CheckWritten(written, ok, target, int(chunk.Size))
 	}
 	utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: input.Handle})
 	utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: output.Handle})

@@ -63,7 +63,7 @@ Before creating the address space the kernel:
 3. installs derived handles into the empty child table in manifest order,
    rolling back on failure;
 4. verifies each installed handle has exactly the requested rights;
-5. binds the handle IDs into the child's startup block by role name.
+5. binds the handle IDs into the child's startup object by role name.
 
 A grant marked `Consume` closes PID 1's source handle after a successful
 launch. Exclusive endpoints (service channel ends, pipeline streams) are consumed, so
@@ -105,7 +105,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | 17 | FS-block, server end | R W Wait T | block `filesystem` | R W Wait | yes |
 | 18 | system control | W | PID 1 only | - | - |
 | 19 | launch staging page (memory) | R W | PID 1 only; mapped by the kernel at `0x401ff000` | - | - |
-| 20 | exec page (memory) | R W T | shell `execpage` | R W | no |
+| 20 | exec area (memory) | R W T | shell `execpage` | R W | no |
 | 21 | system image | R X T | VFS `image` | R | no; PID 1 keeps it to launch from (ADR 0093) |
 | 22 | log | R T | log `log`, shell `log` | R | no |
 

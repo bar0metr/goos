@@ -3,29 +3,33 @@
 package main
 
 import (
+	"goos/internal/limits"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/pages"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	vfsservice "goos/userspace/vfs"
 	userwait "goos/userspace/wait"
 )
 
-const maxSessions = 12
+// maxSessions bounds the clients served at once: one WaitAny names the
+// control channel and every session (ADR 0111).
+const maxSessions = userwait.MaxObjects - 1
 
 var (
 	service              vfsservice.Service
 	consoleHandle        handle.ID
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
-	startupWire          [startup.Size]byte
 	wire                 [ipc.WireMaxSize]byte
 	arenaBase            arena.Mark
 	sessions             [maxSessions]uint64
@@ -43,6 +47,10 @@ var (
 	filesystemWire    [ipc.WireMaxSize]byte
 	filesystemRequest ipc.Message
 	filesystemReply   ipc.Message
+	// filesystemName holds a name a reply carried in the file cache.
+	filesystemName [ramfs.MaxName]byte
+	// fileCache is the file cache mapping, once PID 1 has handed it over.
+	fileCache []byte
 )
 
 // filesystemTransport carries backend calls to the filesystem service. Each
@@ -50,17 +58,17 @@ var (
 // forgotten at once, so later calls fail without waiting.
 type filesystemTransport struct{}
 
-func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	if filesystem == 0 {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusPeerDied
 	}
 	correlation++
-	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest) {
-		return fsproto.Reply{}, false
+	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest, fileCache) {
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	size, ok := ipc.EncodeFrom(&filesystemRequest, filesystemWire[:])
 	if !ok {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	status := sys.IPCSend(filesystem, filesystemWire[:size])
 	// A reply to an earlier request that timed out may still be queued; it is
@@ -71,18 +79,25 @@ func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, boo
 			break
 		}
 		if !ipc.DecodeInto(filesystemWire[:wireSize(filesystemWire[:])], &filesystemReply) {
-			return fsproto.Reply{}, false
+			return fsproto.Reply{}, ramfs.StatusIOError
 		}
 		if filesystemReply.Correlation < correlation {
 			continue
 		}
-		reply, valid := fsproto.DecodeReply(&filesystemReply)
-		return reply, valid && filesystemReply.Correlation == correlation
+		reply, valid := fsproto.DecodeReply(&filesystemReply, fileCache, &filesystemName)
+		if !valid || filesystemReply.Correlation != correlation {
+			return fsproto.Reply{}, ramfs.StatusIOError
+		}
+		return reply, ramfs.StatusOK
 	}
-	if status == kcall.StatusPeerDied {
+	switch status {
+	case kcall.StatusPeerDied:
 		dropFilesystem()
+		return fsproto.Reply{}, ramfs.StatusPeerDied
+	case kcall.StatusTimeout:
+		return fsproto.Reply{}, ramfs.StatusTimeout
 	}
-	return fsproto.Reply{}, false
+	return fsproto.Reply{}, ramfs.StatusIOError
 }
 
 // dropFilesystem forgets a filesystem service that has gone. Its mounts answer
@@ -142,14 +157,34 @@ func mountSystemImage(imageHandle handle.ID) bool {
 	return status == kcall.StatusOK && service.MountSystemImage(image)
 }
 
+// The volatile root's bounds. Its pages count against this process's page
+// quota, which is what bounds /tmp in the end; the page limit keeps a full
+// /tmp from taking the memory the VFS itself needs to serve requests.
+const (
+	ramfsReserve   = uint64(1 << 30)
+	ramfsNodes     = 8192
+	ramfsPageLimit = 4096
+)
+
+// ramfsPages is the memory of the volatile root.
+var ramfsPages pages.Pool
+
+// ramfsStore gives the volatile root its pages from ramfsPages.
+type ramfsStore struct{}
+
+func (ramfsStore) Allocate() (ramfs.PageRef, bool) {
+	ref, ok := ramfsPages.Allocate()
+	return ramfs.PageRef(ref), ok
+}
+func (ramfsStore) Page(ref ramfs.PageRef) *[ramfs.PageSize]byte { return ramfsPages.Page(uint32(ref)) }
+func (ramfsStore) Free(ref ramfs.PageRef)                       { ramfsPages.Free(uint32(ref)) }
+func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.Permanent[ramfs.NodeChunk](&ramfsPages) }
+
 //export userspaceMain
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("VFS_STARTUP_UNAVAILABLE\n")
-	}
-	startupData, validStartup := startup.Decode(startupWire[:])
+	startupData, validStartup := startup.Read()
 	var found bool
 	if !validStartup {
 		fatal("VFS_STARTUP_INVALID\n")
@@ -177,6 +212,11 @@ func userspaceMain() {
 	}
 	sessions[0] = uint64(initialSessionHandle)
 	liveSessions = 1
+	// The volatile root keeps its files in pages that outlive the per-request
+	// arena and go back to the kernel when a file shrinks or goes (ADR 0105).
+	if !ramfsPages.Init(ramfsReserve) || !service.ConfigureRAMFS(ramfsStore{}, ramfs.Limits{Nodes: ramfsNodes, Pages: ramfsPageLimit}) {
+		fatal("VFS_RAMFS_UNAVAILABLE\n")
+	}
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
@@ -189,6 +229,7 @@ func userspaceMain() {
 	if cache, status := sys.MemoryMap(cacheHandle, vm.UserSharedAddress, fsproto.CacheSize, true); status != kcall.StatusOK || !service.AttachCache(cache) {
 		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
 	} else {
+		fileCache = cache
 		mark("FILE_CACHE_OK\n")
 	}
 	// The persistent volume is not mounted here: it is served by the FAT32
@@ -315,22 +356,142 @@ func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 
 func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	request, ok := vfs.DecodeRequest(message)
+	// A bulk operation, and a request whose paths or listed name travel in
+	// memory, carry exactly one handle, and nothing else carries any.
+	// Whatever arrived is this process's now and is closed once the request
+	// is answered, so a client cannot fill the handle table.
+	attached := message.Handles[:message.HandleCount]
+	if ok && request.Attaches() != (len(attached) == 1) {
+		ok = false
+	}
+	var object []byte
+	var base, size uint64
+	if ok && (request.PathsAttached || request.NameReturn) {
+		object, base, size, ok = mapPathObject(&request, attached[0])
+	}
 	if !ok {
+		closeAttached(attached)
 		// Answer unusable requests: a silent drop strands the caller, which is
 		// waiting for exactly this correlation.
 		operation := vfs.Operation(message.Payload[0])
-		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationTruncate {
+		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationFillExecutable {
 			if reply, encoded := vfs.EncodeReply(vfs.Reply{Operation: operation, Status: vfs.StatusInvalidArgument}, message.Correlation); encoded {
 				send(session, reply)
 			}
 		}
 		return
 	}
-	reply, ok := vfs.EncodeReply(service.Dispatch(owner, request), message.Correlation)
+	var answer vfs.Reply
+	if request.Operation.Bulk() {
+		answer = serveBulk(owner, request, attached[0])
+	} else {
+		answer = service.Dispatch(owner, request)
+		if len(answer.Name) > vfs.MaxInlineName {
+			answer = returnName(answer, request, object)
+		}
+	}
+	if object != nil {
+		sys.VMUnmap(base, size)
+	}
+	closeAttached(attached)
+	reply, ok := vfs.EncodeReply(answer, message.Correlation)
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
 	send(session, reply)
+}
+
+// maxPathObject bounds the object a client may attach for paths or a name.
+const maxPathObject = uint64(64 << 10)
+
+// pathCopy and targetCopy hold the paths a request carried in memory, copied
+// out of it before they are checked (ADR 0110).
+var pathCopy, targetCopy [limits.PathMax]byte
+
+// mapPathObject maps the object a request attached for its paths or a listed
+// name, writable only for the name, and takes the paths out of it.
+func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint64, bool) {
+	base, size, status := sys.MemoryMapAnywhere(object, request.NameReturn)
+	if status != kcall.StatusOK {
+		return nil, 0, 0, false
+	}
+	memory := sys.Window(base, size)
+	if size > maxPathObject || request.NameReturn && size < ramfs.MaxName || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
+		sys.VMUnmap(base, size)
+		return nil, 0, 0, false
+	}
+	return memory, base, size, true
+}
+
+// returnName delivers a listed name too long for the message: in the object
+// the request attached for it, or, without one, as a refusal that tells the
+// client how long it is so it can ask again with one.
+func returnName(answer vfs.Reply, request vfs.Request, object []byte) vfs.Reply {
+	if request.NameReturn && len(object) >= len(answer.Name) {
+		answer.AttachedName = uint8(copy(object, answer.Name))
+		answer.Name = nil
+		return answer
+	}
+	return vfs.Reply{Operation: answer.Operation, Status: vfs.StatusNameTooLong, Size: uint64(len(answer.Name))}
+}
+
+func closeAttached(attached []handle.ID) {
+	for _, id := range attached {
+		sys.HandleClose(id)
+	}
+}
+
+// maxBulkObject bounds the memory object a client may attach: the VFS maps
+// the whole object, and its page tables are the VFS's to pay for.
+const maxBulkObject = uint64(64 << 20)
+
+// fillBuffer is where a program's bytes pass on their way into the
+// executable object a launcher attached.
+var fillBuffer [128 << 10]byte
+
+// serveBulk moves a file's bytes to or from the object the client attached
+// (ADR 0107). The object is mapped for this request only.
+func serveBulk(owner vfs.Owner, request vfs.Request, object handle.ID) vfs.Reply {
+	reply := vfs.Reply{Operation: request.Operation}
+	if request.Operation == vfs.OperationFillExecutable {
+		for reply.Size < uint64(request.Size) && reply.Status == vfs.StatusOK {
+			chunk := min(uint64(len(fillBuffer)), uint64(request.Size)-reply.Size)
+			count, status := service.ReadFile(owner, request.Handle, fillBuffer[:chunk])
+			switch {
+			case status != vfs.StatusOK:
+				reply.Status = status
+			case count == 0:
+				// The file is shorter than the object: it changed size.
+				reply.Status = vfs.StatusInvalidArgument
+			case sys.ExecutableWrite(object, fillBuffer[:count]) != kcall.StatusOK:
+				reply.Status = vfs.StatusPermissionDenied
+			default:
+				reply.Size += uint64(count)
+			}
+		}
+		return reply
+	}
+	base, size, status := sys.MemoryMapAnywhere(object, request.Operation == vfs.OperationReadInto)
+	if status != kcall.StatusOK {
+		reply.Status = vfs.StatusPermissionDenied
+		return reply
+	}
+	end := request.Offset + uint64(request.Size)
+	if size > maxBulkObject || end < request.Offset || end > size {
+		reply.Status = vfs.StatusInvalidArgument
+		sys.VMUnmap(base, size)
+		return reply
+	}
+	memory := sys.Window(base, size)[request.Offset:end]
+	var count int
+	if request.Operation == vfs.OperationReadInto {
+		count, reply.Status = service.ReadFile(owner, request.Handle, memory)
+	} else {
+		count, reply.Status = service.WriteFile(owner, request.Handle, memory)
+	}
+	sys.VMUnmap(base, size)
+	reply.Size = uint64(count)
+	return reply
 }
 
 func send(channel uint64, message ipc.Message) {

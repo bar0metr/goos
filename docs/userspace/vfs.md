@@ -14,9 +14,10 @@ backend already listed is not reported twice. Removing a path that a mount sits
 at or below is refused, and so is removing a node some mount uses as its root,
 which is what protects a mount reachable under a second name (ADR 0069).
 
-Paths are absolute and bounded to 255 bytes. Resolution collapses repeated
-slashes and `.`, applies `..` without escaping the namespace root, and rejects
-NUL and oversized components. VFS translates the remaining components into
+Paths are absolute and bounded to 4096 bytes, components to 255 (ADR 0110).
+Resolution collapses repeated slashes and `.`, applies `..` without escaping
+the namespace root, and rejects NUL; a path or component over the limits is
+answered with `StatusNameTooLong`. VFS translates the remaining components into
 opaque backend node operations. Kernel APIs and RAMFS never parse POSIX paths.
 
 Open-file handles carry generations, backend/mount identity, independent
@@ -26,25 +27,28 @@ generation. Reads and writes advance only that open object's offset.
 Every open file belongs to the session that opened it. A handle is valid only
 on that session: another session's handle is answered as not found, so one
 client can neither use nor probe the files another holds. A session holds at
-most 16 of the 64 open files, and when its channel closes, because the client
+most 64 of the 256 open files (ADR 0111), and when its channel closes, because the client
 exited or crashed, every file it left open is closed with it before its slot
 is reused. Until 0.1.2 the table was shared by all sessions and a file left
 open by a dead process stayed open for the rest of the boot.
 
-The fixed resolver cache stores resolved file and directory nodes. Mount and
+The fixed resolver cache stores resolved file and directory nodes whose paths
+are at most 256 bytes; longer paths are resolved each time. Mount and
 metadata mutations invalidate it synchronously, preventing rename/unlink from
 leaving stale path aliases. Cached and uncached resolution have separate
 benchmarks. Path components cross the backend interface as fixed-size values,
 so canonicalization remains on the caller stack and both resolver paths allocate
 zero bytes per request.
 
-Protocol `GVF1` version 2 carries bounded path, handle, offset, size, rights, and
-inline data fields in typed IPC requests. Replies carry typed status, metadata,
-directory entries, open handles, cursors, and at most 224 inline data bytes.
-Version 2 keeps why a path was refused — not a directory, is a directory, not
-empty, or a mount depends on it — instead of folding those into an invalid
-argument (ADR 0079).
-Bulk file data will use shared memory.
+Protocol `GVF1` version 5 carries path, rename target, handle, offset, size,
+rights, and inline data fields in typed IPC requests. Replies carry typed
+status, metadata, directory entries, open handles, cursors, and at most 224
+inline data bytes. Version 2 keeps why a path was refused — not a directory,
+is a directory, not empty, or a mount depends on it — instead of folding those
+into an invalid argument (ADR 0079). Version 4 moves bulk file data through
+an attached memory object (ADR 0107). Version 5 lets paths too long for a
+message travel in an attached object the client owns, and returns a listed
+name longer than 224 bytes in one when the client attaches it (ADR 0110).
 
 PID 1 supervises `/system/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address

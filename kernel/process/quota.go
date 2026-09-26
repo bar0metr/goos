@@ -1,5 +1,7 @@
 package process
 
+import "goos/kernel/ipc"
+
 // Capability isolation decides whether a process may use a resource at all. It
 // says nothing about how much of one it may hold, so a process entitled to a
 // resource can still take the system's whole supply of it and deny it to
@@ -32,18 +34,20 @@ const (
 // table rather than the whole of it, so several processes can hold their full
 // quota at once and one cannot starve the rest.
 //
-// Streams are the limit that binds today: a utility that creates them in a loop
-// used to drain the table and break every later pipeline. Four is a share of
-// the sixty-four the registry holds (ADR 0089).
+// Streams were the limit that bound first: a utility that creates them in a
+// loop used to drain the table and break every later pipeline (ADR 0089).
+// Sixteen is a share of the 256 the registry holds (ADR 0111).
 //
-// Pages cover an address space, a loaded image, guarded stacks and a startup
-// page. The largest image is the coreutils multi-call binary; 192 leaves room
-// for it plus a DMA region and the leaf table an image mapping needs.
+// Pages count every physical page a process's address space holds: its image
+// pages, page tables, and the heap, stack, and anonymous pages it has touched
+// (ADR 0104). Reservations cost nothing until touched, so the limit bounds
+// memory actually used: 32 MiB, room for a full default stack, a large heap,
+// and multi-megabyte buffers.
 const (
 	defaultChannelLimit = 4
-	defaultStreamLimit  = 4
+	defaultStreamLimit  = 16
 	defaultTaskLimit    = 4
-	defaultPageLimit    = 192
+	defaultPageLimit    = 8192
 )
 
 // PID 1 multiplexes on behalf of every other process: it creates the channel
@@ -53,13 +57,14 @@ const (
 //
 // Only PID 1 can create channels, so its channel share is the whole table. Its
 // stream share covers the most it ever holds at once — four streams for each
-// of the four job slots and the terminal's output stream — with room to spare,
-// and leaves the rest of the registry to everyone else (ADR 0089).
+// of the eight job slots and the terminal's output stream — with room to
+// spare, and leaves the rest of the registry to everyone else (ADR 0089,
+// ADR 0111).
 const (
-	systemChannelLimit = 24
-	systemStreamLimit  = 24
+	systemChannelLimit = ipc.MaxChannels
+	systemStreamLimit  = 64
 	systemTaskLimit    = 8
-	systemPageLimit    = 512
+	systemPageLimit    = 16384
 )
 
 // Quota is a process's resource account. Its counters only ever move through
@@ -115,6 +120,14 @@ func (process *Process) Charge(resource Resource, amount uint32) bool {
 	}
 	process.quota.used[resource] = used + amount
 	return true
+}
+
+// Available is how much more of a resource the quota allows.
+func (process *Process) Available(resource Resource) uint32 {
+	if process == nil || resource >= resourceCount {
+		return 0
+	}
+	return process.quota.limits[resource] - process.quota.used[resource]
 }
 
 // Release returns amount of a resource. It reports false, and releases what

@@ -4,6 +4,7 @@ package loader
 
 import (
 	"goos/kernel/mm/pmm"
+	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 )
 
@@ -16,126 +17,201 @@ type LoadedImage struct {
 	SharedPagesAllocated uint64
 }
 
-// loadPages records the frames LoadNative allocated, so that a failure can
-// hand them back. It is shared because a local array escapes into the rollback
-// loops and the kernel's leaking heap never frees it; only one image is loaded
-// at a time.
-var loadPages [MaxImagePages]uint64
-
 // pageScratch gathers one page of a segment whose bytes cross a page of a
-// paged source. Shared for the same reason as loadPages.
+// paged source. It is shared because a local array escapes and the kernel's
+// leaking heap never frees it; only one image is loaded at a time.
 var pageScratch [vm.PageSize]byte
 
-// segmentFrames holds, per segment, the shared frames that back it, or nil for
-// a segment given private pages. Shared for the same reason as loadPages.
-var segmentFrames [MaxSegments][]uint64
-
 // LoadNative loads a private copy of every segment of an image into an empty
-// process address space.
+// process address space that has no region map, the kernel's self-test
+// processes. Such an image must carry its own stack.
 func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage, bool) {
-	return LoadImage(allocator, root, Contiguous(data), nil, 0)
+	return LoadImage(allocator, root, Contiguous(data), nil, Origin{}, nil)
 }
 
-// LoadImage validates, allocates, initializes, and maps a native image into an
-// empty process address space. All payload bytes are copied before executable
-// permission is exposed.
+// Origin names where an image's bytes live, so a page can be read from there
+// when a process first touches it (ADR 0106): an extent of the system image,
+// by its key, or an executable object, by its identity. The zero Origin is
+// bytes that do not outlive the load, which are loaded whole.
+type Origin struct {
+	Key    uint64
+	Object uint64
+}
+
+// LoadImage validates an image and maps it into an empty process address
+// space. All payload bytes are copied before executable permission is
+// exposed.
 //
 // The bytes come from source, an extent of the system image or the pages of a
 // sealed executable object (ADR 0097).
 //
-// When shared is not nil and key names the image within the immutable system
+// With a region map (ADR 0104) and an origin the bytes outlive the load in,
+// each segment becomes a pinned image region that records its origin, and no
+// private page is loaded now: a page is copied from the origin, or zeroed past
+// the segment's file bytes, when the process first touches it (ADR 0106). A
+// large program therefore costs only the pages it uses, and is never copied
+// whole. An image that leaves its stack to the kernel gets a stack region
+// below vm.UserStackTop, with an unmapped guard below it. Without a map, or
+// without an origin, every page is loaded.
+//
+// When shared is not nil and the origin is an extent of the immutable system
 // image, each read-only segment is mapped from frames in shared, filling them
 // on the first load. Those frames are mapped without the owned bit, so the
 // process's teardown leaves them for the next process, and never writable, so
 // no process can change what another runs. Writable segments are always
 // private.
-func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *SharedPages, key uint64) (LoadedImage, bool) {
-	image, ok := ParseSource(source, vm.PageSize, vm.IdentityMapLimit, vm.UserAddressLimit)
-	if !ok || root == 0 {
+//
+// A failure leaves whatever was mapped in the address space; the caller
+// destroys it, which frees every owned page.
+func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *SharedPages, origin Origin, regions *region.Map) (LoadedImage, bool) {
+	key := origin.Key
+	lazy := regions != nil && (origin.Key != 0 || origin.Object != 0)
+	image, ok := ParseSource(source, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit)
+	if !ok || root == 0 || image.StackTop == 0 && regions == nil {
 		return LoadedImage{}, false
 	}
-	// ParseNative keeps other segments out of the stack's guard gap; the
-	// kernel's own mappings must stay out of it too, now and after the load
-	// (ADR 0083, ADR 0088).
-	guardStart, guardEnd, guarded := image.StackGuard()
-	if !guarded || KernelMapsUserRange(guardStart, guardEnd) {
-		return LoadedImage{}, false
-	}
-	for page := guardStart; page < guardEnd; page += vm.PageSize {
-		if _, mapped := vm.Resolve(root, page); mapped {
+	if image.StackTop != 0 {
+		// ParseNative keeps other segments out of the stack's guard gap; the
+		// kernel's own mappings must stay out of it too, now and after the
+		// load (ADR 0083, ADR 0088).
+		guardStart, guardEnd, guarded := image.StackGuard()
+		if !guarded || KernelMapsUserRange(guardStart, guardEnd) {
+			return LoadedImage{}, false
+		}
+		for page := guardStart; page < guardEnd; page += vm.PageSize {
+			if vm.UserPageMapped(root, page) {
+				return LoadedImage{}, false
+			}
+		}
+		if regions != nil && regions.Insert(region.Region{Base: guardStart, Length: guardEnd - guardStart, Backing: region.Guard, Flags: region.Pinned}) != region.OK {
 			return LoadedImage{}, false
 		}
 	}
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
-		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
-			if !vm.CanMapUserPage(root, segment.VirtualAddress+offset) {
+		length := roundUp(segment.MemorySize)
+		for offset := uint64(0); offset < length; offset += vm.PageSize {
+			if vm.UserPageMapped(root, segment.VirtualAddress+offset) {
 				return LoadedImage{}, false
 			}
+		}
+		if regions == nil {
+			continue
+		}
+		entry := region.Region{Base: segment.VirtualAddress, Length: length, Protection: protection(segment.Flags),
+			Backing: region.Image, Flags: region.Pinned, Object: origin.Key, Offset: segment.FileOffset}
+		if lazy {
+			entry.Data = segment.FileSize
+			if origin.Object != 0 {
+				entry.Object, entry.Flags = origin.Object, region.Pinned|region.FromObject
+			}
+		}
+		if regions.Insert(entry) != region.OK {
+			return LoadedImage{}, false
 		}
 	}
 	var loaded LoadedImage
-	pageCount := 0
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
-		segmentFrames[index] = nil
-		pages := int((segment.MemorySize + vm.PageSize - 1) / vm.PageSize)
-		if shared != nil && key != 0 && Shareable(segment) {
-			frames, hit := shared.Lookup(key, index, pages)
-			if !hit {
-				frames, hit = fillShared(allocator, shared, key, index, segment, source)
-				if hit {
-					loaded.SharedPagesAllocated += uint64(pages)
-				}
-			}
-			if hit {
-				segmentFrames[index] = frames
-				continue
-			}
+		pages := int(roundUp(segment.MemorySize) / vm.PageSize)
+		shareable := shared != nil && key != 0 && Shareable(segment)
+		switch {
+		case lazy && !shareable:
+			// Every page arrives on first touch.
+			continue
+		case regions != nil:
+			// Only pages with file bytes; the rest is supplied on demand.
+			pages = int(roundUp(segment.FileSize) / vm.PageSize)
 		}
-		for offset := uint64(0); offset < segment.MemorySize; offset += vm.PageSize {
-			physical, ok := allocatePage(allocator, segment, offset, source)
-			if !ok {
-				for rollback := 0; rollback < pageCount; rollback++ {
-					allocator.Free(loadPages[rollback])
-				}
-				return LoadedImage{}, false
-			}
-			loadPages[pageCount] = physical
-			pageCount++
-		}
-	}
-	pageIndex := 0
-	for index := 0; index < image.SegmentCount; index++ {
-		segment := image.Segments[index]
 		permissions := vm.Permissions{
 			User:       true,
 			Writable:   segment.Flags&SegmentWritable != 0,
 			Executable: segment.Flags&SegmentExecutable != 0,
 		}
-		for page, offset := 0, uint64(0); offset < segment.MemorySize; page, offset = page+1, offset+vm.PageSize {
-			virtual := segment.VirtualAddress + offset
-			if frames := segmentFrames[index]; frames != nil {
-				if !vm.MapUserPage(root, virtual, frames[page], permissions) {
-					return LoadedImage{}, false
+		if pages != 0 && shareable {
+			frames, hit := shared.Lookup(key, index, pages)
+			if !hit {
+				frames, hit = fillShared(allocator, shared, key, index, segment, source, pages)
+				if hit {
+					loaded.SharedPagesAllocated += uint64(pages)
+				}
+			}
+			if hit {
+				for page := 0; page < pages; page++ {
+					if _, mapped := vm.MapUserPageAt(allocator, root, segment.VirtualAddress+uint64(page)*vm.PageSize, frames[page], permissions, false); !mapped {
+						return LoadedImage{}, false
+					}
 				}
 				continue
 			}
-			if !vm.MapOwnedUserPage(root, virtual, loadPages[pageIndex], permissions) {
+		}
+		for page := 0; page < pages; page++ {
+			offset := uint64(page) * vm.PageSize
+			physical, ok := allocatePage(allocator, segment, offset, source)
+			if !ok {
 				return LoadedImage{}, false
 			}
-			pageIndex++
+			if _, mapped := vm.MapUserPageAt(allocator, root, segment.VirtualAddress+offset, physical, permissions, true); !mapped {
+				allocator.Free(physical)
+				return LoadedImage{}, false
+			}
 		}
 	}
 	loaded.Entry, loaded.StackTop = image.Entry, image.StackTop
+	if image.StackTop == 0 {
+		if loaded.StackTop, ok = setUpStack(allocator, root, regions, image.StackReserve); !ok {
+			return LoadedImage{}, false
+		}
+	}
 	return loaded, true
 }
+
+// setUpStack reserves the kernel-provided stack: reserve bytes of anonymous
+// memory ending at vm.UserStackTop, which grow on demand, above StackGuardSize
+// of guard. The top page is supplied now, since every task touches it first.
+func setUpStack(allocator *pmm.Allocator, root uint64, regions *region.Map, reserve uint64) (uint64, bool) {
+	if reserve == 0 {
+		reserve = DefaultStackReserve
+	}
+	top := vm.UserStackTop
+	base := top - reserve
+	if regions.Insert(region.Region{Base: base - StackGuardSize, Length: StackGuardSize, Backing: region.Guard, Flags: region.Pinned}) != region.OK ||
+		regions.Insert(region.Region{Base: base, Length: reserve, Protection: region.Read | region.Write, Backing: region.Anonymous, Flags: region.Pinned}) != region.OK {
+		return 0, false
+	}
+	physical, ok := allocator.Allocate()
+	if !ok {
+		return 0, false
+	}
+	if !vm.InitializePhysical(physical, nil) {
+		allocator.Free(physical)
+		return 0, false
+	}
+	if _, mapped := vm.MapUserPageAt(allocator, root, top-vm.PageSize, physical, vm.Permissions{User: true, Writable: true}, true); !mapped {
+		allocator.Free(physical)
+		return 0, false
+	}
+	return top, true
+}
+
+// protection is the region protection of a segment's flags.
+func protection(flags uint32) region.Protection {
+	result := region.Read
+	if flags&SegmentWritable != 0 {
+		result |= region.Write
+	}
+	if flags&SegmentExecutable != 0 {
+		result |= region.Execute
+	}
+	return result
+}
+
+func roundUp(size uint64) uint64 { return (size + vm.PageSize - 1) &^ (vm.PageSize - 1) }
 
 // fillShared copies a read-only segment into frames it records in shared. A
 // cache that is full, or an allocation that fails, leaves nothing recorded and
 // the segment is loaded privately instead.
-func fillShared(allocator *pmm.Allocator, shared *SharedPages, key uint64, index int, segment Segment, source Source) ([]uint64, bool) {
-	pages := int((segment.MemorySize + vm.PageSize - 1) / vm.PageSize)
+func fillShared(allocator *pmm.Allocator, shared *SharedPages, key uint64, index int, segment Segment, source Source, pages int) ([]uint64, bool) {
 	frames, ok := shared.Reserve(pages)
 	if !ok {
 		return nil, false

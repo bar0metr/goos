@@ -175,6 +175,17 @@ wait_for_marker() {
 
 pass_group() { printf 'PASS %s\n' "$1"; }
 
+# guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
+# whole number with an optional M or G suffix and fails on anything else.
+guest_memory_mib() {
+	number=${1%[MmGg]}
+	case $number in '' | *[!0-9]*) return 1 ;; esac
+	case $1 in
+	*[Gg]) echo $((number * 1024)) ;;
+	*) echo "$number" ;;
+	esac
+}
+
 trap cleanup EXIT
 trap 'cleanup; exit 130' HUP INT TERM
 
@@ -190,14 +201,58 @@ fi
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
+# MEMORY is the guest RAM, in QEMU -m syntax; the Makefile passes it.
+memory=${MEMORY:-512M}
+# An executable far larger than anything the build produces (ADR 0106): the
+# validation build's vmprobe with three MiB of read-only data it never
+# touches, put on the volume the guest mounts, so launching it proves a large
+# program starts without being copied whole.
+variant=$(cut -d' ' -f5 build/config/build)
+go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
+# PID 1 must stay responsive while a program that takes a while to read is
+# prepared (ADR 0108): 12 MiB of padding keeps the read going long enough for
+# a command typed after it to be answered first.
+go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/hugeprobe 12582912
+go run ./tools/mkfat32 -put build/bigprobe:/home/tools/bigprobe -put build/hugeprobe:/home/tools/hugeprobe "$disk"
 rm -f "$log" "$reboot_log"
 
+# A command line of about 3.5 KiB with 700 arguments, and one argument of
+# 3000 bytes: more than a message, the former 128-byte line, or the former
+# eight-argument startup block could carry (ADR 0109).
+many_arguments=$(awk 'BEGIN { for (i = 0; i < 700; i++) printf "%sw%d", (i ? " " : ""), i }')
+long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
+# A 255-byte name, the native limit, and a 200-byte directory name, so two
+# levels make a path longer than a message (ADR 0110).
+long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
+long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 ( sleep 4
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
 	sleep 1
 	printf 'args "alpha beta" escaped\\ value\n'
+	sleep 1
+	printf 'args %s\n' "$many_arguments"
+	sleep 2
+	printf 'echo %s > /tmp/long-argument; stat /tmp/long-argument\n' "$long_argument"
+	sleep 2
+	printf 'touch /tmp/m1 /tmp/m2 /tmp/m3; rm /tmp/m1 /tmp/m2 /tmp/m3; echo many-paths-done\n'
+	sleep 1
+	printf 'mkdir /tmp/%s /tmp/%s/%s; echo deep-ramfs > /tmp/%s/%s/%s; cat /tmp/%s/%s/%s\n' "$long_directory" "$long_directory" "$long_directory" "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_name"
+	sleep 2
+	printf 'mkdir /home/%s; echo deep-fat32 > /home/%s/%s; ls /home/%s; mv /home/%s/%s /home/%s/renamed-%s; cat /home/%s/renamed-%s\n' "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_directory" "$long_directory"
+	sleep 3
+	printf 'touch /tmp/%sx\n' "$long_name"
+	sleep 1
+	# Seven background pipelines at once, two VFS sessions each: more jobs
+	# than the former four exec slots allowed, more sessions than the VFS's
+	# former twelve, and more channels than the kernel's former 24 (ADR 0111).
+	for job in 1 2 3 4 5 6 7; do
+		printf 'sleep 4 | cat /system/motd | write /tmp/bg%s &\n' "$job"
+		sleep 0.3
+	done
+	sleep 6
+	printf 'cat /tmp/bg1 /tmp/bg4 /tmp/bg7\n'
 	sleep 1
 	printf 'readline\n'
 	sleep 1
@@ -303,6 +358,20 @@ rm -f "$log" "$reboot_log"
 	sleep 3
 	printf '/home/demo/args piped-file-exec | readline\n'
 	sleep 3
+	printf '/home/tools/bigprobe\n'
+	sleep 25
+	# Bulk I/O (ADR 0107): a MiB through a shared buffer in sixteen
+	# exchanges, to the volatile root and to the volume.
+	printf 'bench io /tmp/bulk.bin 1M\n'
+	sleep 3
+	printf 'bench io /home/bulk.bin 1M\n'
+	sleep 6
+	printf 'cp /home/tools/bigprobe /tmp/bigprobe; stat /tmp/bigprobe\n'
+	sleep 5
+	printf '/home/tools/hugeprobe &\n'
+	sleep 0.5
+	printf 'echo responsive-while-loading\n'
+	sleep 15
 	printf '/home/demo/message.txt\n'
 	sleep 2
 	printf '/home/demo/missing\n'
@@ -506,6 +575,37 @@ rm -f "$log" "$reboot_log"
 	sleep 1
 	printf 'uptime\n'
 	sleep 1
+	# Native virtual memory (ADR 0104): the checks, then one process per
+	# fault it must not survive while the system does.
+	printf 'vmprobe\n'
+	sleep 8
+	for fault in read-only guard unmapped quota; do
+		printf 'vmprobe %s\n' "$fault"
+		sleep 3
+	done
+	printf 'echo after-vm-faults\n'
+	sleep 1
+	# The same workload three times, the pages in use counted after each: a
+	# path that does not free what it allocated — a channel, a stream, an
+	# executable object, a shared-memory mapping, a startup object, a RAMFS
+	# page, a path page — shows up as growth between the second round and
+	# the third, once the first has warmed the caches (GoOS 0.1.3 §11).
+	for round in 1 2 3; do
+		printf 'echo leak-round-%s\n' "$round"
+		sleep 1
+		printf 'cp /home/tools/bigprobe /tmp/leak.bin; rm /tmp/leak.bin\n'
+		sleep 2
+		printf '/home/demo/args leak-check | readline\n'
+		sleep 1
+		printf 'bench io /tmp/leak.io 256K; rm /tmp/leak.io\n'
+		sleep 2
+		printf 'touch /tmp/%s; ls /tmp > /tmp/leak.ls; rm /tmp/%s /tmp/leak.ls\n' "$long_name" "$long_name"
+		sleep 1
+		printf 'sleep 1 | cat /system/motd | write /tmp/leak.pipe; rm /tmp/leak.pipe\n'
+		sleep 3
+		printf 'mem -p\n'
+		sleep 1
+	done
 	printf 'sleep 1\n'
 	sleep 1
 	printf 'cat /missing\n'
@@ -519,7 +619,7 @@ rm -f "$log" "$reboot_log"
 	done
 	sleep 1
 	printf 'echo arena-stress-complete\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -537,8 +637,9 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 230 seconds between its commands.
-wait_for_marker boot '^arena-stress-complete$' 300 "$log"
+# The scripted session sleeps about 345 seconds between its commands; the
+# deadline leaves room for a slow boot on a loaded host.
+wait_for_marker boot '^arena-stress-complete$' 540 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -570,6 +671,24 @@ for marker in PMM_OK VM_OK NX_WX_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_S
 	require_marker "memory-security.$marker" "$marker" "$log"
 done
 pass_group memory-security
+
+# The page allocator manages memory above the first GiB (ADR 0103). The
+# validation kernel exercises one high page through the direct map and a
+# process mapping whenever the machine has any. q35 places RAM above 4 GiB
+# once the guest has more than 2.75 GiB.
+memory_mib=$(guest_memory_mib "$memory") ||
+	fail_check physical-memory.size 'MEMORY as a whole number with an optional M or G suffix' "$memory" "$log" PMM_OK
+require_regex physical-memory.managed '^Memory: [1-9][0-9]* MiB managed' 'managed memory in the boot banner' "$log" 'Memory:'
+if [ "$memory_mib" -ge 2048 ]; then
+	require_regex physical-memory.high-managed '^Physical pages above 1 GiB: [1-9]' 'managed pages above 1 GiB' "$log" PMM_OK
+	require_marker physical-memory.high-page PMM_HIGH_OK "$log"
+elif [ "$memory_mib" -le 1024 ]; then
+	require_marker physical-memory.no-high-memory PMM_HIGH_NONE "$log"
+fi
+if [ "$memory_mib" -ge 3072 ]; then
+	require_regex physical-memory.above-4gib '^PMM high page: 0x[1-9a-f][0-9a-f]\{8\}[[:cntrl:]]*$' 'a high page above 4 GiB' "$log" 'PMM high page'
+fi
+pass_group physical-memory
 
 for marker in TASK_BLOCK_OK TASK_WAKE_OK TASK_A_OK TASK_B_OK IDLE_TASK_OK SCHEDULER_OK PROCESS_MODEL_OK PROCESS_WAIT_OK PROCESS_HANDLE_WAIT_OK PROCESS_RECLAIM_OK USER_PREEMPT_OK PROCESS_CR3_SCHED_OK; do
 	require_marker "scheduler-process.$marker" "$marker" "$log"
@@ -651,6 +770,17 @@ done
 require_marker shell.echo-output 'hello structured world' "$log" 'echo "hello structured world"'
 require_marker shell.argv-output 'alpha beta escaped value' "$log" 'args "alpha beta"'
 require_marker shell.path-environment 'PATH=/system/bin' "$log" 'args "alpha beta"'
+require_regex startup.many-arguments '^w0 w1 w2 .* w698 w699$' '700 arguments reach the command in order' "$log" 'goos> args w0'
+require_regex startup.long-argument '^file 2\.93 KiB (3001 bytes)$' 'a 3000-byte argument written whole' "$log" 'goos> echo xxxx'
+require_window startup.many-paths '^many-paths-done$' 'touch and rm take several paths' "$log" 'goos> touch /tmp/m1' 'goos> readline'
+forbid_window startup.many-paths-errors 'not found\|usage:' 'no path was refused' "$log" 'goos> touch /tmp/m1' 'goos> readline'
+require_regex names.ramfs-long-path '^deep-ramfs$' 'a 255-byte name under a 405-byte path in /tmp' "$log" 'goos> mkdir /tmp/ddd'
+require_regex names.fat32-long-name "^$long_name\$" 'a 255-byte name listed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
+require_regex names.fat32-rename '^deep-fat32$' 'a long name renamed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
+require_regex names.too-long ': file name too long$' 'a 256-byte name refused as too long' "$log" 'goos> touch /tmp/nnn'
+count_window registries.background-jobs '\[[1-7]\] started$' 7 "$log" 'goos> sleep 4 | cat /system/motd | write /tmp/bg1 &' 'goos> cat /tmp/bg1 /tmp/bg4 /tmp/bg7'
+forbid_window registries.no-exhaustion 'resource limit\|too many background jobs\|cannot start' 'seven pipelines ran without running out of anything' "$log" 'goos> sleep 4 | cat /system/motd | write /tmp/bg1 &' 'goos> readline'
+count_window registries.background-output 'Welcome to GoOS' 3 "$log" 'goos> cat /tmp/bg1 /tmp/bg4 /tmp/bg7' 'goos> readline'
 # A line typed while a command runs is that command's input: it is echoed once
 # and printed once more by readline, and never reaches the shell as a command.
 require_count shell.stdin-output '^bounded stdin payload$' 2 "$log" 'goos> readline'
@@ -665,7 +795,7 @@ pass_group shell
 
 require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'
 require_marker help.command SHELL_HELP_COMMAND_OK "$log" 'help cat'
-require_regex help.command-usage '^usage: cat FILE$' 'help cat prints the usage' "$log" 'help cat'
+require_regex help.command-usage '^usage: cat FILE\.\.\.$' 'help cat prints the usage' "$log" 'help cat'
 require_regex help.utility-flag '^usage: ls \[PATH\]$' 'ls --help prints the usage' "$log" 'ls --help'
 require_regex help.utility-arity '^usage: cp SOURCE TARGET$' 'cp with one path prints the usage' "$log" 'cp /system/motd'
 require_regex help.builtin-arity '^usage: services$' 'a builtin with arguments prints the usage' "$log" 'services now'
@@ -732,6 +862,31 @@ require_marker redirection.shell REDIRECTION_EXEC_OK "$log" 'echo redirected-nat
 forbid_regex redirection.driver-oom 'VIRTIO_BLK_OUT_OF_MEMORY' 'no virtio-blk heap exhaustion' "$log" VIRTIO_BLK_OUT_OF_MEMORY
 pass_group redirection
 
+require_marker vm.probe VM_PROBE_OK "$log" 'goos> vmprobe'
+require_count vm.large-executable 'vm: all checks passed$' 3 "$log" 'goos> /home/tools/bigprobe'
+require_window exec.responsive '^responsive-while-loading$' 'a command answered while a 12 MiB program was read' "$log" 'goos> /home/tools/hugeprobe &' 'vm: anonymous region reserved'
+require_count bulk.write '^io write, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
+require_count bulk.read '^io read, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
+require_regex bulk.copy '^file 3[01][0-9][0-9]\.[0-9]* KiB (3[0-9]\{6\} bytes)' 'a 3 MiB copy from the volume' "$log" 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
+for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
+	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
+done
+require_regex vm.read-only 'user fault: access not permitted' 'a write to a read-only page retired' "$log" 'goos> vmprobe read-only'
+require_regex vm.guard 'user fault: guard page' 'a stack overflow stopped at the guard' "$log" 'goos> vmprobe guard'
+require_regex vm.unmapped 'user fault: no mapping' 'an unmapped access retired' "$log" 'goos> vmprobe unmapped'
+require_regex vm.quota 'user fault: page quota exhausted' 'a process past its page quota retired' "$log" 'goos> vmprobe quota'
+require_regex vm.system-survives '^after-vm-faults$' 'the system carries on after the faults' "$log" 'goos> echo after-vm-faults'
+leak_counts=$(sed -n '/goos> echo leak-round-2/,$p' "$log" | grep -a '^pages used: ' | sed -n '1,2s/^pages used: //p')
+leak_second=$(printf '%s\n' "$leak_counts" | sed -n 1p)
+leak_third=$(printf '%s\n' "$leak_counts" | sed -n 2p)
+if [ -n "$leak_second" ] && [ "$leak_second" = "$leak_third" ]; then
+	checks=$((checks + 1))
+else
+	fail_check leaks.steady-state 'the same pages in use after rounds 2 and 3' "${leak_second:-none} then ${leak_third:-none}" "$log" 'goos> echo leak-round-2'
+fi
+count_window leaks.rounds '^pages used: ' 1 "$log" 'goos> echo leak-round-1' 'goos> echo leak-round-2'
+pass_group vm
+
 value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)
 [ "$value" = GBLKIO ] || fail_check persistence.block-bytes GBLKIO "$value" "$log" BLOCK_SERVICE_IO_OK
 checks=$((checks + 1))
@@ -748,7 +903,7 @@ checks=$((checks + 1))
 	printf 'ls /state\n'
 	sleep 2
 	printf 'config get user.name\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -877,8 +1032,8 @@ require_marker quota.enforced QUOTA_OK "$log"
 require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quota table header' "$log" 'goos> quota'
 # The shell is an ordinary process: its stream share must be a part of the
 # table rather than all of it, or the quota bounds nothing.
-require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
-require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/24$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/16$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
+require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/64$' 'PID 1 holding the system share' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 # The shell waits for input instead of retrying the read, so after a session of
 # this length its CPU total stays in three digits. Before it was over seven
@@ -945,7 +1100,7 @@ rm -f "$m7_log"
 	printf 'reboot\n'
 	sleep 12
 	printf 'cat /home/m7/hello.txt\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -978,7 +1133,7 @@ printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=32 count=4 conv=notr
 	printf 'echo volatile-root-still-works\n'
 	sleep 2
 	printf 'config get system.shell.prompt\n'
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$corrupt_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1010,7 +1165,7 @@ go run ./tools/mkfat32 "$stack_disk"
 ( sleep 6
 	printf 'fault kernel-stack\n'
 	sleep 10
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$stack_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1044,7 +1199,7 @@ go run ./tools/mkfat32 "$poweroff_disk"
 	sleep 2
 	printf 'poweroff\n'
 	sleep 30
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1074,7 +1229,7 @@ forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log
 ( sleep 6
 	printf 'cat /home/poweroff.txt\n'
 	sleep 3
-) | qemu-system-x86_64 -machine q35 -m 512M \
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

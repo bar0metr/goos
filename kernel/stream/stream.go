@@ -6,7 +6,9 @@
 // the first to exit does not close it for the others.
 package stream
 
-const Capacity = 4096
+// Capacity is the ring's size: with the stream's counters it fills one page,
+// which is what the registry allocates for a stream (ADR 0111).
+const Capacity = 4080
 
 // AtomicWrite is the largest write that is never split. A write of at most
 // this many bytes lands whole or not at all, so writers sharing an endpoint

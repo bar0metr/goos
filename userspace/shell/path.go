@@ -1,6 +1,9 @@
 package shell
 
-const MaxPath = 192
+import "goos/internal/limits"
+
+// MaxPath is the native path limit (ADR 0110).
+const MaxPath = limits.PathMax
 
 // ResolvePath canonicalizes an absolute or cwd-relative path into target.
 func ResolvePath(cwd []byte, path []byte, target *[MaxPath]byte) ([]byte, bool) {
@@ -46,7 +49,7 @@ func ResolvePath(cwd []byte, path []byte, target *[MaxPath]byte) ([]byte, bool) 
 			}
 			continue
 		}
-		if len(component) > 63 || out+len(component)+1 > len(target) {
+		if len(component) > limits.NameMax || out+len(component)+1 > len(target) {
 			return nil, false
 		}
 		starts[count] = uint16(out)
@@ -59,4 +62,22 @@ func ResolvePath(cwd []byte, path []byte, target *[MaxPath]byte) ([]byte, bool) 
 		out += len(component)
 	}
 	return target[:out], true
+}
+
+// TooLong reports whether path is refused for its length: longer than
+// MaxPath, or with a component longer than the native name limit.
+func TooLong(path []byte) bool {
+	if len(path) > MaxPath {
+		return true
+	}
+	start := 0
+	for index := 0; index <= len(path); index++ {
+		if index == len(path) || path[index] == '/' {
+			if index-start > limits.NameMax {
+				return true
+			}
+			start = index + 1
+		}
+	}
+	return false
 }
