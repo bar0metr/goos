@@ -46,8 +46,12 @@ and initial task (ADR 0093).
 A command path outside `/system` is a program on a filesystem. PID 1 reads it
 through a VFS session of its own into an executable object: it creates the
 object with its loader capability (handle `0x100000017`) at the file's size,
-appends the file to it, and names the whole sealed object in the launch
-request instead of an image extent. A file that is not a regular file, is
+asks the VFS to fill it with one `FillExecutable` request (ADR 0107), and names
+the whole sealed object in the launch request instead of an image extent. The
+fill runs without blocking PID 1: the VFS answers on the job's own session,
+which PID 1 waits on with its other channels, and lifecycle events, other jobs,
+and restarts are served meanwhile. A job stopped while its programs are being
+read ends with the launch status "stopped before it started" (ADR 0108). A file that is not a regular file, is
 larger than PID 1's page quota allows, or whose size changes while it is read,
 is refused. The launched process copies the object's pages in as it touches
 them and holds a reference that keeps the object alive while it runs, and the

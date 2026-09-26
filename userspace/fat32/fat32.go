@@ -216,9 +216,12 @@ func (fs *FileSystem) readFSInfo(sector, reserved uint64) {
 	}
 }
 
-// sync makes a completed change durable: the FSInfo hints first, then a
-// device flush.
+// sync makes a completed change durable: the FAT sectors it changed, the
+// FSInfo hints, then a device flush.
 func (fs *FileSystem) sync() ramfs.Status {
+	if !fs.flushFAT() {
+		return ramfs.StatusIOError
+	}
 	if fs.fsInfo != 0 && (fs.hintDirty || fs.countStale) {
 		var data [8]byte
 		put32(data[0:4], fsInfoUnknown)
@@ -233,6 +236,9 @@ func (fs *FileSystem) sync() ramfs.Status {
 	}
 	return ramfs.StatusOK
 }
+
+// Flush makes every completed change durable.
+func (fs *FileSystem) Flush() bool { return fs.mounted && fs.sync() == ramfs.StatusOK }
 
 func (fs *FileSystem) valid(cluster uint32) bool {
 	return cluster >= 2 && cluster-2 < fs.clusters
@@ -260,23 +266,24 @@ func (fs *FileSystem) fat(cluster uint32) (uint32, ramfs.Status) {
 	return get32(data[:]) & clusterMask, ramfs.StatusOK
 }
 
-// setFAT writes the entry of cluster into every FAT copy in use, keeping the
-// reserved top four bits of each as the specification requires.
+// setFAT changes the entry of cluster, keeping its reserved top four bits as
+// the specification requires. The change is made in the resident sector of the
+// FAT read from and marked dirty; flushFAT writes the whole sector to every FAT
+// copy in use, as Linux mirrors whole FAT blocks, so a chain of many clusters
+// costs a write per sector rather than one per entry per copy.
 func (fs *FileSystem) setFAT(cluster, value uint32) ramfs.Status {
 	if !fs.valid(cluster) || value&^clusterMask != 0 {
 		return ramfs.StatusCorrupt
 	}
-	for copy := fs.fatFirst; copy < fs.fatFirst+fs.fatCopies; copy++ {
-		var data [4]byte
-		offset := fs.fatStart + uint64(copy)*fs.fatSize + uint64(cluster)*4
-		if !fs.readMeta(offset, data[:]) {
-			return ramfs.StatusIOError
-		}
-		put32(data[:], get32(data[:])&^clusterMask|value)
-		if !fs.write(offset, data[:]) {
-			return ramfs.StatusIOError
-		}
+	offset := fs.fatStart + uint64(fs.fatRead)*fs.fatSize + uint64(cluster)*4
+	entry, ok := fs.resident(offset / sectorSize)
+	if !ok {
+		return ramfs.StatusIOError
 	}
+	within := offset % sectorSize
+	data := entry.data[within : within+4]
+	put32(data, get32(data)&^clusterMask|value)
+	entry.dirty = true
 	return ramfs.StatusOK
 }
 

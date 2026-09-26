@@ -98,7 +98,20 @@ type execJob struct {
 	correlation uint64
 	data        [execproto.SlotSize]byte
 	job         supervisor.Job
+	// request is the job as the shell described it. While preparing, its
+	// programs from files are being read into executable objects; the
+	// pipeline starts once they are (ADR 0108).
+	request   execproto.Request
+	preparing bool
+	cancelled bool
+	nextStage uint8
+	prepared  [execproto.MaxStages]prepared
+	fill      pendingFill
 }
+
+// launchingJob is the job whose pipeline is starting, whose prepared
+// programs the stages' launches take.
+var launchingJob *execJob
 
 var (
 	manager              supervisor.Manager
@@ -168,8 +181,8 @@ func userspaceMain() {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		var jobs [execproto.Slots]int
-		execBit, firstJob := 0, 1
+		var jobs, fills [execproto.Slots]int
+		execBit, firstJob, firstFill := 0, 1, 1
 		if supervisionComplete {
 			// While the shell is gone there is no exec channel to wait on; its
 			// replacement brings a new one.
@@ -180,9 +193,17 @@ func userspaceMain() {
 			}
 			firstJob = count
 			for index := range execJobs {
-				if process, pending := execJobs[index].job.Next(); execJobs[index].active && pending {
+				if process, pending := execJobs[index].job.Next(); execJobs[index].active && !execJobs[index].preparing && pending {
 					interests[count] = userwait.Interest{Handle: process, Events: kcall.WaitCompleted}
 					jobs[count-firstJob] = index
+					count++
+				}
+			}
+			firstFill = count
+			for index := range execJobs {
+				if execJobs[index].active && execJobs[index].fill.session != 0 {
+					interests[count] = userwait.Interest{Handle: execJobs[index].fill.session, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+					fills[count-firstFill] = index
 					count++
 				}
 			}
@@ -192,14 +213,22 @@ func userspaceMain() {
 			// A scheduled restart is a deadline rather than an event. While one
 			// is outstanding the wait is bounded, so the service comes back
 			// even when nothing else happens; otherwise it blocks indefinitely.
+			// A pending program read bounds it too.
 			timeout := uint64(kcall.WaitAnyInfiniteTimeout)
-			if manager.RestartPending() {
+			restarting := manager.RestartPending()
+			if restarting {
 				timeout = supervisor.RestartBackoff
+			}
+			if remaining, pending := fillTimeout(); pending && (!restarting || remaining < timeout) {
+				timeout, restarting = remaining, false
 			}
 			result, status := userwait.Any(&interests, count, timeout)
 			if status == kcall.StatusTimeout {
-				supervisionTicks += supervisor.RestartBackoff
-				manager.StartReady(supervisionTicks, launchService)
+				expireFills()
+				if restarting {
+					supervisionTicks += supervisor.RestartBackoff
+					manager.StartReady(supervisionTicks, launchService)
+				}
 				continue
 			}
 			if status != kcall.StatusOK {
@@ -207,9 +236,14 @@ func userspaceMain() {
 			}
 			readyMask = result.ReadyMask
 		}
-		for bit := firstJob; bit < count; bit++ {
+		for bit := firstJob; bit < firstFill; bit++ {
 			if readyMask&(1<<bit) != 0 {
 				advanceJob(jobs[bit-firstJob])
+			}
+		}
+		for bit := firstFill; bit < count; bit++ {
+			if readyMask&(1<<bit) != 0 {
+				completeFill(&execJobs[fills[bit-firstFill]])
 			}
 		}
 		if readyMask&1 == 0 {

@@ -38,6 +38,7 @@ func (backend *driverBackend) WriteAt(offset uint64, data []byte) blockproto.Sta
 	}
 	return reply.Status
 }
+
 // Transfer serves a bulk request through this service's own buffer, which it
 // shares with the driver: the caller's object is mapped for the request, and
 // its bytes are copied to or from the buffer a chunk at a time. A handle that

@@ -152,6 +152,17 @@ row() {
 		"$(value "$1" KiB/s)" "$(value "$1" waits)" "$(value "$1" sampled)" "$(value "$1" 'ns median')"
 }
 
+# Bulk I/O (ADR 0107): each size written and read back through a shared
+# buffer, then read inline, on the volatile root and on the FAT32 volume. One
+# run each; the lines report exchanges with the VFS, time, and rate.
+: >"$work/io.lines"
+for path in /tmp/io.bin /persist/io.bin; do
+	for size in 4K 64K 1M 8M; do
+		run "bench io $path $size"
+		grep '^io ' "$work/output" | sed "s|^|$path $size: |" >>"$work/io.lines" || fail "no result from: bench io $path $size"
+	done
+done
+
 {
 	printf '# GoOS in-guest microbenchmarks at %s Hz\n\n' "$hz"
 	printf 'Build HZ=%s DIAG=%s OPT=%s, %s runs per case after one warm-up run, QEMU %s (TCG) on %s.\n' \
@@ -179,6 +190,10 @@ row() {
 	else
 		printf '\nContext switch: no chunk of the handoff case was a round trip.\n'
 	fi
+	printf '\nBulk I/O through a shared buffer, and the same bytes read inline\n'
+	printf '(`bench io PATH SIZE`, one run each):\n\n```\n'
+	cat "$work/io.lines"
+	printf '```\n'
 	printf '\nRaw results:\n\n```\n'
 	while IFS='|' read -r id command; do
 		cat "$work/$id.lines"

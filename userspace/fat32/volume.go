@@ -30,7 +30,12 @@ func (volume *Volume) Root() (ramfs.NodeID, ramfs.Status) {
 
 // Flush makes every completed write durable on the device. It does not need
 // an accepted volume: shutting down flushes the device either way.
-func (volume *Volume) Flush() bool { return volume.device != nil && volume.device.Flush() }
+func (volume *Volume) Flush() bool {
+	if volume.mounted {
+		return volume.fs.Flush()
+	}
+	return volume.device != nil && volume.device.Flush()
+}
 
 func (volume *Volume) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
 	if !volume.mounted {

@@ -4,9 +4,9 @@ import "testing"
 
 type memoryBackend struct {
 	transfers int
-	data     [1024]byte
-	readOnly bool
-	flushes  int
+	data      [1024]byte
+	readOnly  bool
+	flushes   int
 }
 
 func (backend *memoryBackend) Capacity() uint64  { return uint64(len(backend.data)) }

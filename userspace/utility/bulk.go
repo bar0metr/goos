@@ -1,3 +1,5 @@
+//go:build goos_userspace
+
 package utility
 
 import (

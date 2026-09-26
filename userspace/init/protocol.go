@@ -47,6 +47,9 @@ const (
 	LaunchTaskFailed
 	LaunchCapabilityDenied
 	LaunchCapabilityInstallFailed
+	// LaunchStopped is a job stopped while its programs were still being
+	// read, before anything was launched (ADR 0108). Only PID 1 reports it.
+	LaunchStopped
 )
 
 // Reason describes a launch failure for a person reading the console.
@@ -70,6 +73,8 @@ func (status LaunchStatus) Reason() string {
 		return "permission denied"
 	case LaunchCapabilityInstallFailed:
 		return "capabilities could not be granted"
+	case LaunchStopped:
+		return "stopped before it started"
 	default:
 		return "launch failed"
 	}

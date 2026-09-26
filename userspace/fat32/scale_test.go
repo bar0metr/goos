@@ -120,6 +120,9 @@ func checkVolume(t testing.TB, device *memoryDevice, interrupted bool) {
 			switch {
 			case isDirectory(entry):
 				walk(first, key, name)
+			case entrySizeOf(entry) == 0 && interrupted && first != 0:
+				// A write interrupted after its chain was recorded.
+				claim(name, first, -1)
 			case entrySizeOf(entry) == 0:
 				if first != 0 {
 					t.Fatalf("check: %s: empty file owns cluster %d", name, first)

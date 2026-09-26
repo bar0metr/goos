@@ -151,8 +151,12 @@ loads a private copy.
 
 ## Shared memory
 
-Shared-memory objects own between one and 32 zeroed physical pages. A monotonic
-registry assigns their nonzero identities in a separate object namespace.
+Shared-memory objects own between one page and 256 MiB of zeroed physical
+pages, kept in a page list. The kernel creates the file cache and the exec and
+staging pages at boot; a process creates its own with `MemoryCreate`, charged
+to its page quota (ADR 0107). Every handle and every mapping of an object is a
+reference, and the last one gone frees it. A monotonic counter assigns their
+nonzero identities in a separate object namespace.
 Processes receive only local memory
 handles; mappings require Read authority and writable mappings additionally
 require Write. Transfer derives equal or narrower rights in the receiver.

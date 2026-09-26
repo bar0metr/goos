@@ -209,7 +209,11 @@ memory=${MEMORY:-512M}
 # program starts without being copied whole.
 variant=$(cut -d' ' -f5 build/config/build)
 go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
-go run ./tools/mkfat32 -put build/bigprobe:/home/tools/bigprobe "$disk"
+# PID 1 must stay responsive while a program that takes a while to read is
+# prepared (ADR 0108): 12 MiB of padding keeps the read going long enough for
+# a command typed after it to be answered first.
+go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/hugeprobe 12582912
+go run ./tools/mkfat32 -put build/bigprobe:/home/tools/bigprobe -put build/hugeprobe:/home/tools/hugeprobe "$disk"
 rm -f "$log" "$reboot_log"
 
 ( sleep 4
@@ -325,6 +329,18 @@ rm -f "$log" "$reboot_log"
 	sleep 3
 	printf '/home/tools/bigprobe\n'
 	sleep 25
+	# Bulk I/O (ADR 0107): a MiB through a shared buffer in sixteen
+	# exchanges, to the volatile root and to the volume.
+	printf 'bench io /tmp/bulk.bin 1M\n'
+	sleep 3
+	printf 'bench io /home/bulk.bin 1M\n'
+	sleep 6
+	printf 'cp /home/tools/bigprobe /tmp/bigprobe; stat /tmp/bigprobe\n'
+	sleep 5
+	printf '/home/tools/hugeprobe &\n'
+	sleep 0.5
+	printf 'echo responsive-while-loading\n'
+	sleep 15
 	printf '/home/demo/message.txt\n'
 	sleep 2
 	printf '/home/demo/missing\n'
@@ -569,9 +585,9 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 315 seconds between its commands; the
+# The scripted session sleeps about 345 seconds between its commands; the
 # deadline leaves room for a slow boot on a loaded host.
-wait_for_marker boot '^arena-stress-complete$' 480 "$log"
+wait_for_marker boot '^arena-stress-complete$' 540 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -784,7 +800,11 @@ forbid_regex redirection.driver-oom 'VIRTIO_BLK_OUT_OF_MEMORY' 'no virtio-blk he
 pass_group redirection
 
 require_marker vm.probe VM_PROBE_OK "$log" 'goos> vmprobe'
-require_count vm.large-executable '^vm: all checks passed$' 2 "$log" 'goos> /home/tools/bigprobe'
+require_count vm.large-executable 'vm: all checks passed$' 3 "$log" 'goos> /home/tools/bigprobe'
+require_window exec.responsive '^responsive-while-loading$' 'a command answered while a 12 MiB program was read' "$log" 'goos> /home/tools/hugeprobe &' 'vm: anonymous region reserved'
+require_count bulk.write '^io write, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
+require_count bulk.read '^io read, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
+require_regex bulk.copy '^file 3[01][0-9][0-9]\.[0-9]* KiB (3[0-9]\{6\} bytes)' 'a 3 MiB copy from the volume' "$log" 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
 	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
 done

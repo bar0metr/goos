@@ -60,6 +60,10 @@ func openExecutable(path []byte) (supervisor.Executable, string, supervisor.Laun
 	if _, _, status := execproto.LocateImage(systemImage, path); status != execproto.ImageOutsideSystem {
 		return locateExecutable(path)
 	}
+	// A job's programs were read before its pipeline started (ADR 0108).
+	if executable, status, found := takePrepared(path); found {
+		return executable, processName(path), status
+	}
 	executable, status := readExecutable(path)
 	return executable, processName(path), status
 }

@@ -73,19 +73,33 @@ offset, and are per session.
 A `cat /persist/a.txt` stage issues `GVF1` open, read, and close requests on its
 session. VFS resolves the path to the FAT32 mount and sends each backend call
 as a `GFSPRT01` request to the FAT32 service, which translates the file range
-into sector reads. Each read becomes a `GBLK001` request on the FAT32
-service's block client endpoint, and the block service forwards it to the driver over a
+into cluster runs. Each run becomes a `GBLK001` request on the FAT32 service's
+block client endpoint, and the block service forwards it to the driver over a
 private channel. The driver performs the virtqueue transfer and waits for
 IRQ 11. Replies unwind in reverse.
 
-File data between the VFS and the FAT32 service moves through the file cache,
-a 128 KiB shared-memory object both map (ADR 0098): a `GFSPRT01` read asks the
-service to fill a 4 KiB slot with a page of the file, a write names the slot
-its bytes are in, and the VFS serves later reads of a cached page without
-asking the service. Writes go through to the service before they return.
-Elsewhere payloads are inline IPC data: at most 224 bytes per VFS reply and 232
-bytes per block request. FAT32 keeps a sixteen-sector write-through window of
-metadata to avoid repeated FAT and directory reads (ADR 0048, ADR 0102).
+Small requests carry their data inline: at most 224 bytes per VFS reply and 32
+bytes per VFS write request. Large ones move it through shared memory instead
+(ADR 0107):
+
+- A client creates a buffer with `MemoryCreate`, maps it, and attaches to each
+  `GVF1` `ReadInto` or `WriteFrom` a copy of its handle narrowed with
+  `HandleDuplicate` to the rights the VFS needs. The VFS maps the buffer for
+  that request only. `cp` and `bench io` move 64 KiB per exchange this way;
+  PID 1 has the VFS fill an executable object with one `FillExecutable`.
+- File data between the VFS and the FAT32 service moves through the file
+  cache, a 128 KiB shared-memory object both map (ADR 0098). A `GFSPRT01` read
+  or write names a run of up to 16 consecutive slots; the VFS serves later
+  reads of a cached page without asking the service, and writes go through to
+  the service before they return.
+- The FAT32 service moves runs of up to 128 KiB to and from the block service
+  with `ReadBulk` and `WriteBulk`, through a buffer of its own; the block
+  service copies through a buffer it shares with the driver, whose DMA region
+  has a 128 KiB data area. Requests of up to 232 bytes stay inline.
+
+FAT32 keeps a sixteen-sector window of metadata to avoid repeated FAT and
+directory reads, and gathers FAT changes there to write a sector at a time
+(ADR 0048, ADR 0102, ADR 0107).
 
 ## Failure behaviour
 

@@ -11,10 +11,13 @@ const (
 
 // cachedSector holds one resident device sector. The filesystem owns the
 // device, so a write-through copy stays coherent without invalidation traffic.
+// A FAT sector may be dirty: FAT changes are gathered in the window and
+// written, to every FAT copy in use, a sector at a time (flushFAT).
 type cachedSector struct {
 	lba   uint64
 	stamp uint64
 	valid bool
+	dirty bool
 	data  [sectorSize]byte
 }
 
@@ -36,6 +39,9 @@ func (fs *FileSystem) resident(lba uint64) (*cachedSector, bool) {
 		if candidate.stamp < entry.stamp {
 			entry = candidate
 		}
+	}
+	if entry.valid && entry.dirty && !fs.writeBack(entry) {
+		return nil, false
 	}
 	entry.valid = false
 	if !fs.device.ReadAt(lba*sectorSize, entry.data[:]) {
@@ -108,4 +114,28 @@ func (fs *FileSystem) write(offset uint64, data []byte) bool {
 		copy(entry.data[from-start:to-start], data[from-offset:to-offset])
 	}
 	return ok
+}
+
+// writeBack writes a dirty FAT sector to every FAT copy in use.
+func (fs *FileSystem) writeBack(entry *cachedSector) bool {
+	within := entry.lba*sectorSize - fs.fatStart - uint64(fs.fatRead)*fs.fatSize
+	for copy := fs.fatFirst; copy < fs.fatFirst+fs.fatCopies; copy++ {
+		if !fs.device.WriteAt(fs.fatStart+uint64(copy)*fs.fatSize+within, entry.data[:]) {
+			return false
+		}
+	}
+	entry.dirty = false
+	return true
+}
+
+// flushFAT writes every dirty FAT sector. It runs before anything that
+// refers to a cluster chain reaches the disk — a directory entry — and at
+// every sync, so a chain is always on disk before whatever names it.
+func (fs *FileSystem) flushFAT() bool {
+	for index := range fs.cache {
+		if entry := &fs.cache[index]; entry.valid && entry.dirty && !fs.writeBack(entry) {
+			return false
+		}
+	}
+	return true
 }

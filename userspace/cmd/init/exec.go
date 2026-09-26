@@ -60,13 +60,21 @@ func pollExec() {
 		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
-	job.active, job.orphaned, job.slot, job.correlation = true, false, slot, message.Correlation
-	job.job = supervisor.StartPipeline(request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
+	job.active, job.orphaned, job.slot, job.correlation, job.request = true, false, slot, message.Correlation, request
+	beginJob(job)
+}
+
+// startPipeline starts a job whose programs are ready.
+func startPipeline(job *execJob) {
+	launchingJob = job
+	job.job = supervisor.StartPipeline(job.request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
+	launchingJob = nil
+	releasePrepared(job)
 	// A foreground job's input is fed by the shell, which receives the writing
 	// end before the job's reply. If it cannot be delivered, closing it gives
 	// the job end of input instead of a stream no one will ever write.
 	if input := job.job.TakeInput(); input != 0 {
-		started, ok := execproto.EncodeStarted(slot, input, message.Correlation)
+		started, ok := execproto.EncodeStarted(job.slot, input, job.correlation)
 		if !ok || !sendMessage(execServer, started) {
 			sys.HandleClose(input)
 		}
@@ -193,6 +201,10 @@ func killJob(slot uint8) execproto.ControlStatus {
 		job := &execJobs[index]
 		if !job.active || job.slot != slot {
 			continue
+		}
+		if cancelPreparation(job) {
+			syslog.Info("job stopped", syslog.Uint("slot", uint64(slot)))
+			return execproto.ControlOK
 		}
 		stopped := false
 		for _, process := range job.job.Processes() {

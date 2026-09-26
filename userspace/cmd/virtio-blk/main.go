@@ -23,10 +23,10 @@ const (
 	queueArea    = uint64(16384)
 	dataCapacity = uint64(128 << 10)
 	dmaSize      = queueArea + dataCapacity
-	sectorSize        = uint64(512)
-	virtioRead        = uint32(0)
-	virtioWrite       = uint32(1)
-	virtioFlush       = uint32(4)
+	sectorSize   = uint64(512)
+	virtioRead   = uint32(0)
+	virtioWrite  = uint32(1)
+	virtioFlush  = uint32(4)
 )
 
 var (

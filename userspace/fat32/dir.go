@@ -141,6 +141,11 @@ func (fs *FileSystem) readEntry(dir *directory, index int) ([32]byte, ramfs.Stat
 }
 
 func (fs *FileSystem) writeEntry(dir *directory, index int, entry [32]byte) ramfs.Status {
+	// An entry may name a chain whose FAT sectors are still in the window:
+	// the chain reaches the disk first.
+	if !fs.flushFAT() {
+		return ramfs.StatusIOError
+	}
 	offset, status := fs.entryOffset(dir, index)
 	if status != ramfs.StatusOK {
 		return status

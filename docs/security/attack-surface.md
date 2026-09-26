@@ -46,7 +46,7 @@ table with type, generation, and rights checks.
 | 13 | `SystemInfo` | registered | length exactly 40; `CopyOut` | none | no |
 | 14 | `PortRead` | device handle, Read, port object | spec: width 1/2/4, bits 24+ zero, `offset + width ≤ BAR size` (32-bit sum); `CopyOut` | one port access | no |
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
-| 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; four target pages must be unmapped; output buffer probed before allocation | 4 contiguous pages, charged to the page quota; at most once per address space | no |
+| 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; 24-byte descriptor `CopyIn`, its size a whole number of pages up to 256 KiB (zero for 16 KiB); the window must be free in the region map | up to 64 contiguous low pages, charged with their page tables to the page quota; a pinned region; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
 | 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 64 streams × 4 KiB, global; four per ordinary process, 24 for PID 1 (quota) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
@@ -60,7 +60,7 @@ table with type, generation, and rights checks.
 | 27 | `HandleInfo` | registered; own table only | slot < 128; 16-byte `CopyOut` of ID, type, rights | none | no |
 | 28 | `ProcessInfo` | registered | index < 32; 80-byte `CopyOut` of PID, state, task count, name, CPU ticks, and the held and permitted resource counts | none | no |
 | 29 | `SystemReset` | device handle, Write, system-control object (PID 1 only) | handle lookup | none | resets the machine |
-| 30 | `MemoryMap` | memory handle, Read (+ Write when writable), kernel-registered shared object | flags: writable, anywhere; a named address page-aligned, in the user range, and free in the region map; with anywhere, an 8-byte result `CopyOut` | whole object, NX, non-owned, recorded as a region; page tables charged to the page quota; at most 4 registered objects | no |
+| 30 | `MemoryMap` | memory handle, Read (+ Write when writable), shared-memory object | flags: writable, anywhere; a named address page-aligned, in the user range, and free in the region map; with anywhere, an 8-byte result `CopyOut` | whole object, NX, non-owned, recorded as a region and counted as a reference to the object; page tables charged to the page quota | no |
 | 31 | `ProcessKill` | process handle, Write | handle lookup; refuses PID 1 and the caller's own process | none | retires the target's tasks |
 | 32 | `ImageMap` | device handle, Read, system-image object (held only by VFS) | virtual address must equal `vm.UserImageAddress`; archive must be page-aligned and fit the image window; 16-byte descriptor probed before mapping; the window must be free in the region map | page tables charged to the page quota; archive mapped read-only, NX, non-owned, as a pinned region | no |
 | 33 | `LogBounds` | device handle, Read, log object (ADR 0082) | 16-byte `CopyOut` of oldest and next sequence numbers | none | no |
@@ -74,6 +74,8 @@ table with type, generation, and rights checks.
 | 41 | `VMProtect` | registered; own map only | range wholly covered by unpinned anonymous regions; protection valid and never executable | none | no |
 | 42 | `VMDiscard` | registered; own map only | range wholly covered by unpinned anonymous regions | frees and uncharges the pages; the reservation stays | no |
 | 43 | `VMQuery` | registered; own map only | 24-byte `CopyOut` of the region at an address | none | no |
+| 44 | `MemoryCreate` | registered | page count 1..65536; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | pages plus page-list index pages charged to the page quota before allocation; 64 objects system-wide, 16 per payer; freed with the last handle or mapping (ADR 0107) | no |
+| 45 | `HandleDuplicate` | a memory handle; rights must be a subset of the original's | handle lookup; rights derivation; 8-byte result probed before insertion; a free handle slot | one handle-table slot; one reference to the object | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
