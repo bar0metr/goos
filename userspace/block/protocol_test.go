@@ -2,6 +2,7 @@ package block
 
 import (
 	"goos/kernel/ipc"
+	"goos/userspace/partition"
 	"testing"
 )
 
@@ -130,24 +131,56 @@ func TestControlReplacesTheDriverEndpoint(t *testing.T) {
 }
 
 func TestSetFilesystemControl(t *testing.T) {
-	message, ok := SetFilesystemRequest(12, 5)
-	if !ok {
-		t.Fatal("encode failed")
+	name, _ := partition.NameSelector("Данные")
+	guid, _ := partition.ParseGUID("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
+	for _, selector := range []partition.Selector{
+		{Kind: partition.SelectAuto},
+		{Kind: partition.SelectWhole},
+		{Kind: partition.SelectIndex, Index: 3},
+		{Kind: partition.SelectGUID, GUID: guid},
+		name,
+	} {
+		message, ok := SetFilesystemRequest(12, selector, 5)
+		if !ok {
+			t.Fatalf("%+v: encode failed", selector.Kind)
+		}
+		server, decoded, valid := DecodeSetFilesystem(message)
+		if !valid || server != 12 || decoded != selector {
+			t.Fatalf("%+v: decoded %d %+v %v", selector.Kind, server, decoded.Kind, valid)
+		}
+		if _, ok := DecodeSetDriver(message); ok {
+			t.Fatal("a filesystem endpoint was taken for a driver")
+		}
 	}
-	server, valid := DecodeSetFilesystem(message)
-	if !valid || server != 12 {
-		t.Fatalf("decoded %d %v", server, valid)
-	}
-	if _, ok := DecodeSetDriver(message); ok {
-		t.Fatal("a filesystem endpoint was taken for a driver")
-	}
-	if _, ok := SetFilesystemRequest(0, 5); ok {
+	if _, ok := SetFilesystemRequest(0, partition.Selector{}, 5); ok {
 		t.Fatal("a request with no endpoint was encoded")
 	}
-	corrupt := message
-	corrupt.HandleCount = 0
-	if _, ok := DecodeSetFilesystem(corrupt); ok {
-		t.Fatal("decoded a request with no endpoint")
+	for _, bad := range []partition.Selector{
+		{Kind: partition.SelectIndex},
+		{Kind: partition.SelectAuto, Index: 1},
+		{Kind: partition.SelectGUID},
+		{Kind: partition.SelectName},
+		{Kind: 9},
+	} {
+		if _, ok := SetFilesystemRequest(12, bad, 5); ok {
+			t.Errorf("encoded a malformed selector %+v", bad.Kind)
+		}
+	}
+	message, _ := SetFilesystemRequest(12, partition.Selector{Kind: partition.SelectIndex, Index: 1}, 5)
+	for name, corrupt := range map[string]func(message *ipc.Message){
+		"no endpoint":        func(message *ipc.Message) { message.HandleCount = 0 },
+		"old layout":         func(message *ipc.Message) { message.PayloadSize = 1 },
+		"old version":        func(message *ipc.Message) { message.Version = 2 },
+		"unknown kind":       func(message *ipc.Message) { message.Payload[selectorKind] = 9 },
+		"stray GUID byte":    func(message *ipc.Message) { message.Payload[selectorGUID] = 1 },
+		"name past its size": func(message *ipc.Message) { message.Payload[selectorName+3] = 'x' },
+		"name too long":      func(message *ipc.Message) { message.Payload[selectorNameSize] = partition.MaxName + 1 },
+	} {
+		damaged := message
+		corrupt(&damaged)
+		if _, _, ok := DecodeSetFilesystem(damaged); ok {
+			t.Errorf("decoded a request with %s", name)
+		}
 	}
 }
 

@@ -103,7 +103,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-fat32 test-fat32-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -291,7 +291,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -305,6 +305,9 @@ test-storage-stress: test-fat32-stress
 # corruptions, and a directory of 8000 long names.
 test-fat32:
 	$(BUILD_ENV) go test -count=1 ./userspace/fat32
+
+test-partitions:
+	$(BUILD_ENV) go test -count=1 ./userspace/partition ./userspace/block ./internal/imagefixture
 
 test-fat32-stress:
 	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m ./userspace/fat32
@@ -422,6 +425,7 @@ docs:
 	@test -f docs/adr/0110-native-name-and-path-limits.md
 	@test -f docs/adr/0111-bounded-dynamic-registries.md
 	@test -f docs/adr/0112-fat32-interoperability.md
+	@test -f docs/adr/0115-partition-layer-and-block-slices.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -527,6 +531,7 @@ help:
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \
 	  '  test-fat32-stress  run them at scale: huge files and clusters, fuzzing' \
+	  '  test-partitions    run the MBR/GPT partition and block-slice tests' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
 	  '  test-performance run host and in-guest microbenchmarks into build/reports' \

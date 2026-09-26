@@ -34,6 +34,16 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   every host; `GOOS_FAT32_FIXTURES=1 go test -run TestMakeForeignFixtures
   ./userspace/fat32` regenerates them on macOS. Tests that need a host tool
   skip without it. `make test-unit` includes all of this.
+- `make test-partitions` runs the partition-layer and block-slice tests (ADR
+  0115): MBR and GPT parsing at 512 and 4096-byte blocks, every selector, GPT
+  backup fallback and each header, array and entry corruption, seeded random
+  corruption, slice bounds and read-only slices. On macOS `hdiutil` makes MBR
+  and GPT disks whose FAT32 partition this code mounts and writes, and the
+  host's `gpt`, `fdisk`, `hdiutil` and `fsck_msdos` read, mount and check the
+  tables and volumes this code writes; two host-made disks in
+  `userspace/partition/testdata` cover foreign tables everywhere
+  (`GOOS_PARTITION_FIXTURES=1` regenerates them). The boot test boots from an
+  MBR and a GPT disk and reads the guest's file back out of the partition.
 - `make test-storage-stress` (`make test-fat32-stress`) runs the same tests at
   scale: 128 KiB to 512 KiB clusters, a 1 GiB and a 4 GiB − 1 file on a sparse
   host file, thousands of seeded corruptions, a directory of 8000 long names,

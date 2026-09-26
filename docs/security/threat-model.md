@@ -169,6 +169,13 @@ The raw disk image is host-provided and persists across boots.
   checked; hints and free counts are never trusted as allocation authority. A corrupt primary boot sector is served read-only from a
   valid backup and never rewritten at mount (ADR 0077, 0102, 0112). A seeded
   corruption corpus covers each case.
+- The partition table is parsed in the block service, which already holds the
+  whole disk, so the parser gains no authority. MBR entries and GPT headers,
+  CRCs and entries are checked against each other and the device; a GPT falls
+  back to its backup but is never rewritten. The FAT32 service is given only a
+  block slice of its partition: every offset is checked against the slice
+  before the device sees it, so a compromised filesystem service cannot reach
+  the table or another partition (ADR 0115).
 - A volume that fails the checks is refused, not fatal: the system boots with
   `/persist`, `/home`, and `/state` absent, and the log and config services
   continue without their files (ADR 0077).

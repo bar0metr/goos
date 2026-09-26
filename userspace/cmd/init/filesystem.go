@@ -11,6 +11,7 @@ import (
 	blockproto "goos/userspace/block"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/partition"
 	"goos/userspace/runtime/sys"
 )
 
@@ -37,6 +38,10 @@ var (
 	// filesystemProcessHandle is kept only by the validation build, to inject
 	// the fault that proves a crashed filesystem service is replaced.
 	filesystemProcessHandle handle.ID
+	// filesystemVolume says which volume of the disk the filesystem service
+	// may reach: automatically chosen, as at boot (ADR 0115). Choosing
+	// another belongs to mounting (GoOS 0.1.4 specification, Phase 3).
+	filesystemVolume partition.Selector
 )
 
 // renewFilesystemChannels gives a restarted filesystem service fresh channels
@@ -62,7 +67,7 @@ func renewFilesystemChannels(spec *supervisor.LaunchSpec) bool {
 		return false
 	}
 	correlation++
-	request, ok := blockproto.SetFilesystemRequest(handle.ID(toBlock[1]), correlation)
+	request, ok := blockproto.SetFilesystemRequest(handle.ID(toBlock[1]), filesystemVolume, correlation)
 	if !ok || !sendMessage(uint64(blockControl[0]), request) {
 		closePair(toBlock)
 		return false

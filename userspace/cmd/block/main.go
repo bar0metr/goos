@@ -10,6 +10,7 @@ import (
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
 	syslog "goos/userspace/log"
+	"goos/userspace/partition"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
@@ -45,6 +46,7 @@ func (backend *driverBackend) WriteAt(offset uint64, data []byte) blockproto.Sta
 // arrived over IPC cannot be passed on — the kernel strips Transfer when a
 // handle moves — so the caller's memory never reaches the driver (ADR 0107).
 func (backend *driverBackend) Transfer(request blockproto.Request) blockproto.Status {
+	transferred = true
 	read := request.Operation == blockproto.OperationReadBulk
 	base, size, status := sys.MemoryMapAnywhere(request.Object, read)
 	sys.HandleClose(request.Object)
@@ -140,7 +142,97 @@ var (
 	driverDescriptor [3]uint64
 	arenaBase        arena.Mark
 	correlation      uint64
+	// transferred says the backend took the object a bulk request carried;
+	// one the service refused first is closed after the reply.
+	transferred bool
 )
+
+// The filesystem service reaches one volume of the device, not the device
+// (ADR 0115). The partition table is read when the device is first
+// described, and again whenever PID 1 hands over a filesystem endpoint with a
+// selector; filesystemSlice is what the selector chose, and until a volume is
+// chosen the filesystem endpoint is answered with I/O errors.
+var (
+	scanner            partition.Scanner
+	table              partition.Table
+	filesystemSelector partition.Selector
+	filesystemSlice    blockproto.Slice
+	sliceChosen        bool
+)
+
+// deviceReader reads the device for the partition scanner, through the bulk
+// buffer when it has one and in message-sized pieces otherwise.
+type deviceReader struct{}
+
+func (deviceReader) ReadAt(offset uint64, target []byte) bool {
+	for len(target) != 0 {
+		chunk := min(len(target), blockproto.MaxData)
+		if bulkMemory != nil && len(target) > blockproto.MaxData {
+			chunk = min(len(target), len(bulkMemory))
+			duplicate, status := sys.HandleDuplicate(bulkObject, capability.Read|capability.Write|capability.Transfer)
+			if status != kcall.StatusOK {
+				return false
+			}
+			reply, ok := exchange(blockproto.Request{Operation: blockproto.OperationReadBulk, Offset: offset, Length: uint32(chunk), Object: duplicate})
+			if !ok || reply.Status != blockproto.StatusOK {
+				return false
+			}
+			copy(target[:chunk], bulkMemory[:chunk])
+		} else if backend.ReadAt(offset, target[:chunk]) != blockproto.StatusOK {
+			return false
+		}
+		target = target[chunk:]
+		offset += uint64(chunk)
+	}
+	return true
+}
+
+// chooseVolume reads the partition table and resolves the filesystem
+// service's selector against it. What it finds is logged; a device with no
+// usable volume leaves the filesystem endpoint without one, and the service
+// behind it reports its volume refused (ADR 0077).
+func chooseVolume() {
+	sliceChosen = false
+	status := scanner.Scan(deviceReader{}, backend.capacity, backend.blockSize, &table)
+	if status != partition.StatusOK {
+		syslog.Error("partition table unusable", syslog.Uint("status", uint64(status)))
+		mark("BLOCK_VOLUME_NONE\n")
+		return
+	}
+	if table.GPT.Degraded() {
+		syslog.Warn("partition table degraded",
+			syslog.Uint("used-backup", boolValue(table.GPT.UsedBackup)),
+			syslog.Uint("backup-invalid", boolValue(table.GPT.BackupInvalid)),
+			syslog.Uint("backup-differs", boolValue(table.GPT.BackupDiffers)),
+			syslog.Uint("backup-misplaced", boolValue(table.GPT.BackupMisplaced)))
+	}
+	volume, status := partition.Select(&table, &filesystemSelector)
+	if status != partition.StatusOK {
+		syslog.Error("no volume for the filesystem", syslog.Str("table", table.Scheme.String()),
+			syslog.Uint("partitions", uint64(table.Count)), syslog.Uint("status", uint64(status)))
+		mark("BLOCK_VOLUME_NONE\n")
+		return
+	}
+	filesystemSlice = blockproto.Slice{Start: volume.Start, Length: volume.Length, Writable: true}
+	sliceChosen = service.Contains(filesystemSlice)
+	syslog.Info("volume chosen", syslog.Str("table", table.Scheme.String()), syslog.Uint("partition", uint64(volume.Index)),
+		syslog.Uint("start-kib", volume.Start>>10), syslog.Uint("size-mib", volume.Length>>20))
+	switch table.Scheme {
+	case partition.SchemeGPT:
+		mark("BLOCK_VOLUME_GPT_OK\n")
+	case partition.SchemeMBR:
+		mark("BLOCK_VOLUME_MBR_OK\n")
+	default:
+		mark("BLOCK_VOLUME_WHOLE_OK\n")
+	}
+}
+
+func boolValue(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
+}
 
 //export userspaceMain
 func userspaceMain() {
@@ -168,10 +260,12 @@ func userspaceMain() {
 	// endpoint of each as it starts again after this one (ADR 0101).
 	driverHandle, driverLive = data.Handle("driver")
 	filesystemHandle, _ = data.Handle("filesystem")
+	// The bulk buffer comes first: describing the device reads its
+	// partition table through it.
+	setUpBulk()
 	if driverLive && !describeDevice() {
 		fatal("BLOCK_DRIVER_INFO_FAILED\n")
 	}
-	setUpBulk()
 	arenaBase = arena.Current()
 	mark("BLOCK_SERVICE_OK\n")
 	syslog.Info("ready")
@@ -231,13 +325,19 @@ func control() {
 		return
 	}
 	status := blockproto.StatusOK
-	if filesystem, valid := blockproto.DecodeSetFilesystem(controlMessage); valid {
+	if filesystem, selector, valid := blockproto.DecodeSetFilesystem(controlMessage); valid {
 		if filesystemHandle != 0 {
 			sys.HandleClose(filesystemHandle)
 		}
-		filesystemHandle = filesystem
+		filesystemHandle, filesystemSelector = filesystem, selector
 		syslog.Info("filesystem client replaced")
 		mark("BLOCK_FILESYSTEM_REPLACED_OK\n")
+		// The volume is chosen again, from the table as it is now; a
+		// restarted service without a driver chooses once it describes
+		// the device.
+		if backend.capacity != 0 {
+			chooseVolume()
+		}
 	} else if replacement, valid := blockproto.DecodeSetDriver(controlMessage); !valid {
 		status = blockproto.StatusInvalidArgument
 	} else {
@@ -277,7 +377,21 @@ func serve(endpoint handle.ID) {
 		reject(endpoint)
 		return
 	}
-	encoded := blockproto.EncodeReplyInto(service.Dispatch(request), requestMessage.Correlation, &replyMessage)
+	transferred = false
+	var reply blockproto.Reply
+	switch {
+	case endpoint != filesystemHandle:
+		reply = service.Dispatch(request)
+	case sliceChosen:
+		reply = service.DispatchIn(request, filesystemSlice)
+	default:
+		reply = blockproto.Reply{Operation: request.Operation, Status: blockproto.StatusIOError}
+	}
+	if request.Operation.Bulk() && !transferred {
+		// Refused before the backend took it: the object is still here.
+		sys.HandleClose(request.Object)
+	}
+	encoded := blockproto.EncodeReplyInto(reply, requestMessage.Correlation, &replyMessage)
 	size, wireEncoded := ipc.EncodeFrom(&replyMessage, wire[:])
 	if !encoded || !wireEncoded {
 		return
@@ -314,7 +428,9 @@ func describeDevice() bool {
 		return false
 	}
 	backend.capacity, backend.blockSize = info.Capacity, info.BlockSize
-	service, ok = blockproto.NewService(&backend)
+	if service, ok = blockproto.NewService(&backend); ok {
+		chooseVolume()
+	}
 	return ok
 }
 

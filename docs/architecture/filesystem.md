@@ -7,7 +7,7 @@ in the kernel, and none holds more authority than its layer needs.
 utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp)
                                ├─ image backend            (/system, read-only boot archive)
                                └─ remote backend ──GFSPRT01──▶ FAT32 service ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
-                                  (/persist, /home, /state)
+                                  (/persist, /home, /state)                      (one slice)   (partition table)
 ```
 
 | Component | Process | Holds | Details |
@@ -15,8 +15,8 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 | VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel, file cache mapping | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096, 0098 |
 | RAMFS | inside VFS | a page pool in the VFS's address space | [ramfs.md](../userspace/ramfs.md), ADR 0017, 0105 |
 | System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
-| FAT32 | `/system/fat32` | server end of the VFS channel, block client endpoint, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098 |
-| Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint | [storage.md](../userspace/storage.md), ADR 0033 |
+| FAT32 | `/system/fat32` | server end of the VFS channel, a block client endpoint bounded to its partition, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098, 0115 |
+| Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint; reads the partition table and serves the filesystem endpoint through a slice | [storage.md](../userspace/storage.md), ADR 0033, 0115 |
 | virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
 
 ## Namespace

@@ -31,6 +31,7 @@ const (
 	bpbTotal16      = 19
 	bpbMedia        = 21
 	bpbFATSize16    = 22
+	bpbHidden       = 28
 	bpbTotal32      = 32
 	bpbFATSize32    = 36
 	bpbExtFlags     = 40

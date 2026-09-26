@@ -16,6 +16,11 @@ type Layout struct {
 	// VolumeID is the serial number in the extended BPB. Format takes it
 	// from the caller rather than a clock so that images are reproducible.
 	VolumeID uint32
+	// HiddenSectors is the volume's first sector on the whole disk: the
+	// partition's start, in logical sectors, or zero for a whole-device
+	// volume. This filesystem ignores it, since it only ever sees its own
+	// slice (ADR 0115), but Windows and firmware read it.
+	HiddenSectors uint32
 }
 
 const (
@@ -77,6 +82,7 @@ func Format(device Device, layout Layout) bool {
 	put16(boot[bpbReserved:], formatReserved)
 	boot[bpbFATs] = layout.FATs
 	boot[bpbMedia] = formatMedia
+	put32(boot[bpbHidden:], layout.HiddenSectors)
 	put32(boot[bpbTotal32:], uint32(total))
 	put32(boot[bpbFATSize32:], uint32(fatSectors))
 	if layout.NoMirror {

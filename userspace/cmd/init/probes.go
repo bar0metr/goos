@@ -113,24 +113,20 @@ func probeBlockService() bool {
 	if status != ipc.StatusOK || !valid || infoReply.Status != blockproto.StatusOK || infoReply.Capacity < probeMinimumCapacity || infoReply.Capacity%512 != 0 || infoReply.BlockSize != 512 {
 		return false
 	}
-	correlation++
-	writeRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationWrite, Offset: 4093, Length: 6, Data: []byte("GBLKIO")}, correlation)
-	if !ok || !sendMessage(blockClientHandle, writeRequest) {
+	// The probe reads what is there, writes its pattern across a sector
+	// boundary, reads it back, and puts the original bytes back: on a
+	// partitioned disk these bytes lie in the GPT entry array, and on a
+	// superfloppy in the reserved sectors.
+	original, ok := probeRead()
+	if !ok || !probeWrite([]byte("GBLKIO")) {
 		return false
 	}
-	message, status = receive(blockClientHandle, storageProbeDeadline)
-	writeReply, valid := blockproto.DecodeReply(message)
-	if status != ipc.StatusOK || !valid || writeReply.Status != blockproto.StatusOK {
+	pattern, ok := probeRead()
+	if !ok || !equalBytes(pattern[:], "GBLKIO") || !probeWrite(original[:]) {
 		return false
 	}
-	correlation++
-	readRequest, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationRead, Offset: 4093, Length: 6}, correlation)
-	if !ok || !sendMessage(blockClientHandle, readRequest) {
-		return false
-	}
-	message, status = receive(blockClientHandle, storageProbeDeadline)
-	readReply, valid := blockproto.DecodeReply(message)
-	if status != ipc.StatusOK || !valid || readReply.Status != blockproto.StatusOK || !equalBytes(readReply.Data, "GBLKIO") {
+	restored, ok := probeRead()
+	if !ok || restored != original {
 		return false
 	}
 	correlation++
@@ -145,4 +141,38 @@ func probeBlockService() bool {
 	}
 	mark("BLOCK_SERVICE_IO_OK\n")
 	return true
+}
+
+// probeOffset and probeLength place the probe's pattern across the boundary
+// of sectors 7 and 8.
+const (
+	probeOffset = 4093
+	probeLength = 6
+)
+
+func probeRead() ([probeLength]byte, bool) {
+	var data [probeLength]byte
+	correlation++
+	request, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationRead, Offset: probeOffset, Length: probeLength}, correlation)
+	if !ok || !sendMessage(blockClientHandle, request) {
+		return data, false
+	}
+	message, status := receive(blockClientHandle, storageProbeDeadline)
+	reply, valid := blockproto.DecodeReply(message)
+	if status != ipc.StatusOK || !valid || reply.Status != blockproto.StatusOK || len(reply.Data) != probeLength {
+		return data, false
+	}
+	copy(data[:], reply.Data)
+	return data, true
+}
+
+func probeWrite(data []byte) bool {
+	correlation++
+	request, ok := blockproto.EncodeRequest(blockproto.Request{Operation: blockproto.OperationWrite, Offset: probeOffset, Length: uint32(len(data)), Data: data}, correlation)
+	if !ok || !sendMessage(blockClientHandle, request) {
+		return false
+	}
+	message, status := receive(blockClientHandle, storageProbeDeadline)
+	reply, valid := blockproto.DecodeReply(message)
+	return status == ipc.StatusOK && valid && reply.Status == blockproto.StatusOK
 }
