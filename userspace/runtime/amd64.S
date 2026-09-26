@@ -336,6 +336,22 @@ goos_vm_query:
     ret
 .size goos_vm_query, .-goos_vm_query
 
+.global goos_memory_create
+.type goos_memory_create,@function
+goos_memory_create:
+    movl $44, %eax
+    int $0x80
+    ret
+.size goos_memory_create, .-goos_memory_create
+
+.global goos_handle_duplicate
+.type goos_handle_duplicate,@function
+goos_handle_duplicate:
+    movl $45, %eax
+    int $0x80
+    ret
+.size goos_handle_duplicate, .-goos_handle_duplicate
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

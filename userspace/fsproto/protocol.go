@@ -20,8 +20,9 @@ import (
 const (
 	ProtocolID = uint64(0x4746535052543031)
 	// Version 2 moves file data from the messages to the file cache; version
-	// 3 adds the no-space and corrupt statuses (ADR 0102).
-	Version = uint16(3)
+	// 3 adds the no-space and corrupt statuses (ADR 0102); version 4 lets a
+	// read or write span consecutive slots (ADR 0107).
+	Version = uint16(4)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -31,8 +32,7 @@ const (
 	requestHeader = 40
 	replyHeader   = 32
 
-	// PageSize is the size of one file-cache slot, and the most a read or a
-	// write moves in one exchange.
+	// PageSize is the size of one file-cache slot.
 	PageSize = 4096
 	// CachePages is the number of slots in the file cache.
 	CachePages = 32
@@ -72,9 +72,10 @@ type Request struct {
 	// Size is the length of a read or write, or the cursor of a directory
 	// listing.
 	Size uint32
-	// Slot is the file-cache page a read fills or a write takes its bytes
-	// from. The bytes sit at Offset's position within the page, so a read or
-	// write never crosses a page.
+	// Slot is the first file-cache page a read fills or a write takes its
+	// bytes from. The bytes start at Offset's position within that page and
+	// run on through the slots after it, so one exchange moves up to the
+	// rest of the cache.
 	Slot uint32
 	Name []byte
 }
@@ -95,13 +96,14 @@ type Reply struct {
 	Name   []byte
 }
 
-// validTransfer reports whether a read or write names a slot and stays
-// within one page of it.
+// validTransfer reports whether a read or write names a slot and stays within
+// the cache from it.
 func validTransfer(request Request) bool {
 	if request.Operation != OperationRead && request.Operation != OperationWrite {
 		return request.Slot == 0
 	}
-	return request.Slot < CachePages && request.Size != 0 && request.Offset%PageSize+uint64(request.Size) <= PageSize
+	return request.Slot < CachePages && request.Size != 0 &&
+		request.Offset%PageSize+uint64(request.Size) <= uint64(CachePages-request.Slot)*PageSize
 }
 
 // SlotBytes returns the bytes of cache a read or write moves: Size bytes at

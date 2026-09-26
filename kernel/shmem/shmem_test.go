@@ -6,12 +6,38 @@ import (
 	"testing"
 )
 
-var sharedBenchmarkSink byte
+// memory is a fake frame allocator whose pages are Go slices.
+type memory struct {
+	pages map[uint64][]byte
+	next  uint64
+}
+
+func newMemory() *memory { return &memory{pages: map[uint64][]byte{}, next: 4096} }
+
+func (m *memory) Allocate() (uint64, bool) {
+	address := m.next
+	m.next += 4096
+	m.pages[address] = make([]byte, 4096)
+	return address, true
+}
+
+func (m *memory) Free(physical uint64) bool {
+	_, ok := m.pages[physical]
+	delete(m.pages, physical)
+	return ok
+}
+
+func (m *memory) view(physical uint64) ([]byte, bool) {
+	page, ok := m.pages[physical]
+	return page, ok
+}
+
+func zeroed(uint64) bool { return true }
 
 func TestMappingBounds(t *testing.T) {
 	tests := []struct {
-		offset uint16
-		count  uint16
+		offset uint32
+		count  uint32
 		valid  bool
 	}{
 		{offset: 0, count: 1, valid: true},
@@ -20,6 +46,7 @@ func TestMappingBounds(t *testing.T) {
 		{offset: 0, count: 0},
 		{offset: 2, count: 1},
 		{offset: 1, count: 2},
+		{offset: ^uint32(0), count: 2},
 	}
 	for _, test := range tests {
 		if got := validMapping(2, test.offset, test.count); got != test.valid {
@@ -28,85 +55,103 @@ func TestMappingBounds(t *testing.T) {
 	}
 }
 
-func TestGrantRejectsExecuteAndInvalidObject(t *testing.T) {
-	var table handle.Table
-	object := Object{id: 9, count: 1}
-	if _, ok := object.Grant(&table, capability.Read|capability.Write); !ok {
-		t.Fatal("valid shared-memory grant rejected")
+func TestCreateGrantAndFree(t *testing.T) {
+	var table Table
+	m := newMemory()
+	object, ok := table.Create(m, m.view, zeroed, 600, 7)
+	if !ok || object.PageCount() != 600 || object.Charge() != 602 || !IsObject(object.ID()) || object.Payer() != 7 {
+		t.Fatalf("create: %v %+v", ok, object)
 	}
-	if _, ok := object.Grant(&table, capability.Execute); ok {
+	if found, ok := table.Find(object.ID()); !ok || found != object {
+		t.Fatal("not found")
+	}
+	var handles handle.Table
+	if _, ok := object.Grant(&handles, capability.Execute); ok {
 		t.Fatal("executable shared-memory grant accepted")
 	}
-	if _, ok := (&Object{}).Grant(&table, capability.Read); ok {
-		t.Fatal("invalid shared-memory object granted")
+	if _, ok := object.Grant(&handles, capability.Read|capability.Write); !ok || object.References() != 1 {
+		t.Fatal("grant")
+	}
+	object.Retain()
+	if _, _, freed := table.Drop(object, m, m.view); freed {
+		t.Fatal("freed with a reference left")
+	}
+	id := object.ID()
+	payer, charge, freed := table.Drop(object, m, m.view)
+	if !freed || payer != 7 || charge != 602 || len(m.pages) != 0 {
+		t.Fatalf("drop: %d %d %v, %d pages left", payer, charge, freed, len(m.pages))
+	}
+	if _, ok := table.Find(id); ok {
+		t.Fatal("freed object still found")
 	}
 }
 
-func TestObjectMetadata(t *testing.T) {
-	object := Object{id: 11, count: 3}
-	if object.ID() != 11 || object.PageCount() != 3 {
-		t.Fatalf("unexpected metadata: id=%d pages=%d", object.ID(), object.PageCount())
-	}
-}
-
-func TestRegistryAllocatesUniqueNonzeroIdentities(t *testing.T) {
-	var registry Registry
-	first, firstOK := registry.allocateID()
-	second, secondOK := registry.allocateID()
-	if !firstOK || !secondOK || first == 0 || second == 0 || first == second {
-		t.Fatalf("invalid identities: %d %d", first, second)
-	}
-	if first&identityNamespace == 0 || second&identityNamespace == 0 {
-		t.Fatal("shared-memory identity lacks namespace bit")
-	}
-	registry.nextID = identityLimit
-	if _, ok := registry.allocateID(); ok {
-		t.Fatal("registry identity overflow accepted")
-	}
-}
-
-func TestTableRegistersAndFindsObjects(t *testing.T) {
+func TestKernelObjectsAreNeverFreed(t *testing.T) {
 	var table Table
-	if table.Register(Object{}) {
-		t.Fatal("invalid object registered")
+	m := newMemory()
+	object, _ := table.Create(m, m.view, zeroed, 1, 0)
+	var handles handle.Table
+	object.Grant(&handles, capability.Read)
+	if _, _, freed := table.Drop(object, m, m.view); freed || len(m.pages) != 2 {
+		t.Fatal("a kernel object was freed")
 	}
-	for index := uint64(1); index <= MaxObjects; index++ {
-		if !table.Register(Object{id: index, count: 1}) {
-			t.Fatalf("object %d rejected", index)
+}
+
+func TestTableAndProcessBounds(t *testing.T) {
+	var table Table
+	m := newMemory()
+	if _, ok := table.Create(m, m.view, zeroed, 0, 1); ok {
+		t.Fatal("empty object created")
+	}
+	if _, ok := table.Create(m, m.view, zeroed, uint32(MaxPages+1), 1); ok {
+		t.Fatal("object past MaxPages created")
+	}
+	for index := 0; index < MaxObjectsPerProcess; index++ {
+		if _, ok := table.Create(m, m.view, zeroed, 1, 5); !ok {
+			t.Fatalf("object %d refused", index)
 		}
 	}
-	if table.Register(Object{id: MaxObjects + 1, count: 1}) {
+	if _, ok := table.Create(m, m.view, zeroed, 1, 5); ok {
+		t.Fatal("more objects than one process may pay for")
+	}
+	for payer := uint64(6); table.Live() < MaxObjects; payer++ {
+		if _, ok := table.Create(m, m.view, zeroed, 1, payer); !ok {
+			t.Fatal("refused below the table bound")
+		}
+	}
+	if _, ok := table.Create(m, m.view, zeroed, 1, 99); ok {
 		t.Fatal("table overflow accepted")
 	}
-	object, found := table.Find(3)
-	if !found || object.ID() != 3 {
-		t.Fatalf("find returned %v %v", object, found)
-	}
-	if _, found := table.Find(MaxObjects + 1); found {
-		t.Fatal("unregistered object found")
-	}
-	if _, found := table.Find(0); found {
-		t.Fatal("zero identity found")
-	}
 }
 
-func TestTableRejectsDuplicateIdentity(t *testing.T) {
+func TestZeroFailureLeavesNothing(t *testing.T) {
 	var table Table
-	if !table.Register(Object{id: 7, count: 1}) || table.Register(Object{id: 7, count: 2}) {
-		t.Fatal("duplicate identity handling wrong")
+	m := newMemory()
+	calls := 0
+	failing := func(uint64) bool { calls++; return calls < 3 }
+	if _, ok := table.Create(m, m.view, failing, 5, 1); ok || len(m.pages) != 0 || table.Live() != 0 {
+		t.Fatalf("a failed create left %d pages, %d objects", len(m.pages), table.Live())
 	}
 }
 
-func BenchmarkSharedPagePayloadAccess(b *testing.B) {
-	var page [4096]byte
-	producer := page[:]
-	consumer := page[:]
-	b.SetBytes(int64(len(page)))
-	b.ResetTimer()
-	for iteration := 0; iteration < b.N; iteration++ {
-		for index := range producer {
-			producer[index]++
-			sharedBenchmarkSink ^= consumer[index]
+func TestNamespace(t *testing.T) {
+	for _, id := range []uint64{0, 1, 1 << 62, identityNamespace} {
+		if IsObject(id) {
+			t.Fatalf("%#x is a shared-memory id", id)
 		}
+	}
+}
+
+var sharedBenchmarkSink byte
+
+// BenchmarkSharedPagePayloadAccess measures reading a payload through two
+// views of the same page, the cost a zero-copy transfer pays instead of a copy.
+func BenchmarkSharedPagePayloadAccess(b *testing.B) {
+	page := make([]byte, 4096)
+	writer, reader := page, page
+	b.ReportAllocs()
+	for index := 0; index < b.N; index++ {
+		writer[index&4095] = byte(index)
+		sharedBenchmarkSink += reader[(index+1)&4095]
 	}
 }

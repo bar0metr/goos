@@ -1,6 +1,8 @@
 package sys
 
 import (
+	"goos/internal/capability"
+	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"unsafe"
 )
@@ -70,4 +72,25 @@ func le64(data []byte) uint64 {
 		value = value<<8 | uint64(data[index])
 	}
 	return value
+}
+
+// MemoryCreate creates a shared-memory object of pages zeroed pages, charged
+// to the caller, and returns a handle with Read, Write, and Transfer
+// (ADR 0107).
+func MemoryCreate(pages uint64) (handle.ID, kcall.Status) {
+	valueWire = 0
+	if result := status(memoryCreate(pages, unsafe.Pointer(&valueWire))); result != kcall.StatusOK {
+		return 0, result
+	}
+	return handle.ID(valueWire), kcall.StatusOK
+}
+
+// HandleDuplicate returns a second handle to the object a memory handle
+// names, with rights that must be a subset of the original's.
+func HandleDuplicate(id handle.ID, rights capability.Rights) (handle.ID, kcall.Status) {
+	valueWire = 0
+	if result := status(handleDuplicate(uint64(id), uint64(rights), unsafe.Pointer(&valueWire))); result != kcall.StatusOK {
+		return 0, result
+	}
+	return handle.ID(valueWire), kcall.StatusOK
 }

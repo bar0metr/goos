@@ -345,22 +345,96 @@ func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 
 func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	request, ok := vfs.DecodeRequest(message)
+	// A bulk operation carries exactly one handle and nothing else carries
+	// any. Whatever arrived is this process's now and is closed once the
+	// request is answered, so a client cannot fill the handle table.
+	attached := message.Handles[:message.HandleCount]
+	if ok && request.Operation.Bulk() != (len(attached) == 1) {
+		ok = false
+	}
 	if !ok {
+		closeAttached(attached)
 		// Answer unusable requests: a silent drop strands the caller, which is
 		// waiting for exactly this correlation.
 		operation := vfs.Operation(message.Payload[0])
-		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationTruncate {
+		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationFillExecutable {
 			if reply, encoded := vfs.EncodeReply(vfs.Reply{Operation: operation, Status: vfs.StatusInvalidArgument}, message.Correlation); encoded {
 				send(session, reply)
 			}
 		}
 		return
 	}
-	reply, ok := vfs.EncodeReply(service.Dispatch(owner, request), message.Correlation)
+	var answer vfs.Reply
+	if request.Operation.Bulk() {
+		answer = serveBulk(owner, request, attached[0])
+		closeAttached(attached)
+	} else {
+		answer = service.Dispatch(owner, request)
+	}
+	reply, ok := vfs.EncodeReply(answer, message.Correlation)
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
 	send(session, reply)
+}
+
+func closeAttached(attached []handle.ID) {
+	for _, id := range attached {
+		sys.HandleClose(id)
+	}
+}
+
+// maxBulkObject bounds the memory object a client may attach: the VFS maps
+// the whole object, and its page tables are the VFS's to pay for.
+const maxBulkObject = uint64(64 << 20)
+
+// fillBuffer is where a program's bytes pass on their way into the
+// executable object a launcher attached.
+var fillBuffer [128 << 10]byte
+
+// serveBulk moves a file's bytes to or from the object the client attached
+// (ADR 0107). The object is mapped for this request only.
+func serveBulk(owner vfs.Owner, request vfs.Request, object handle.ID) vfs.Reply {
+	reply := vfs.Reply{Operation: request.Operation}
+	if request.Operation == vfs.OperationFillExecutable {
+		for reply.Size < uint64(request.Size) && reply.Status == vfs.StatusOK {
+			chunk := min(uint64(len(fillBuffer)), uint64(request.Size)-reply.Size)
+			count, status := service.ReadFile(owner, request.Handle, fillBuffer[:chunk])
+			switch {
+			case status != vfs.StatusOK:
+				reply.Status = status
+			case count == 0:
+				// The file is shorter than the object: it changed size.
+				reply.Status = vfs.StatusInvalidArgument
+			case sys.ExecutableWrite(object, fillBuffer[:count]) != kcall.StatusOK:
+				reply.Status = vfs.StatusPermissionDenied
+			default:
+				reply.Size += uint64(count)
+			}
+		}
+		return reply
+	}
+	base, size, status := sys.MemoryMapAnywhere(object, request.Operation == vfs.OperationReadInto)
+	if status != kcall.StatusOK {
+		reply.Status = vfs.StatusPermissionDenied
+		return reply
+	}
+	end := request.Offset + uint64(request.Size)
+	if size > maxBulkObject || end < request.Offset || end > size {
+		reply.Status = vfs.StatusInvalidArgument
+		sys.VMUnmap(base, size)
+		return reply
+	}
+	memory := sys.Window(base, size)[request.Offset:end]
+	var count int
+	if request.Operation == vfs.OperationReadInto {
+		count, reply.Status = service.ReadFile(owner, request.Handle, memory)
+	} else {
+		count, reply.Status = service.WriteFile(owner, request.Handle, memory)
+	}
+	sys.VMUnmap(base, size)
+	reply.Size = uint64(count)
+	return reply
 }
 
 func send(channel uint64, message ipc.Message) {

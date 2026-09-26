@@ -134,3 +134,9 @@ func vmDiscard(address uint64, length uint64) uint64
 
 //go:linkname vmQuery goos_vm_query
 func vmQuery(address uint64, record unsafe.Pointer) uint64
+
+//go:linkname memoryCreate goos_memory_create
+func memoryCreate(pages uint64, address unsafe.Pointer) uint64
+
+//go:linkname handleDuplicate goos_handle_duplicate
+func handleDuplicate(handle uint64, rights uint64, address unsafe.Pointer) uint64

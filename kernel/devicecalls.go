@@ -166,51 +166,67 @@ func (handler nativeCallHandler) PortWrite(id uint64, specification uint64, valu
 	return kcall.StatusOK
 }
 
+// maxDMAPages bounds one DMA region: enough for the virtio queue and a
+// 128 KiB data area (ADR 0107). The pages are contiguous low memory.
+const maxDMAPages = 64
+
+// defaultDMAPages is the region a driver gets when it asks for no size.
+const defaultDMAPages = 4
+
+// DMAAllocate allocates the DMA region of a device capability's domain at
+// virtual, which must be the DMA window. The descriptor at address carries
+// the size the driver wants in its third word, zero for the default, and
+// receives the physical address, the virtual address, and the size.
 func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
-	if !found || virtual != vm.UserDMAAddress || !owner.Regions().Free(virtual, 4*vm.PageSize) {
+	if !found || virtual != vm.UserDMAAddress {
 		return kcall.StatusInvalidArgument
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
 	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
 		return kcall.StatusPermissionDenied
 	}
-	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
+	if !vm.CopyIn(handler.root, address, dmaWire[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	requested := decodeUint64(dmaWire[16:24])
+	pages := uint64(defaultDMAPages)
+	if requested != 0 {
+		pages = (requested + vm.PageSize - 1) / vm.PageSize
+	}
+	if requested%vm.PageSize != 0 || pages > maxDMAPages || !owner.Regions().Free(virtual, pages*vm.PageSize) {
 		return kcall.StatusInvalidArgument
 	}
 	// The DMA region is kernel memory allocated at the driver's request, so it
 	// is charged to the driver like any other page it causes to be allocated,
 	// together with the page tables its window needs.
-	if owner.Available(process.ResourcePages) < 4+faultTables || !owner.Charge(process.ResourcePages, 4) {
+	if owner.Available(process.ResourcePages) < uint32(pages)+faultTables || !owner.Charge(process.ResourcePages, uint32(pages)) {
 		return kcall.StatusResourceExhausted
 	}
-	physical, allocated := pageAllocator.AllocateContiguous(4)
+	physical, allocated := pageAllocator.AllocateContiguous(pages)
 	if !allocated {
-		owner.Release(process.ResourcePages, 4)
+		owner.Release(process.ResourcePages, uint32(pages))
 		return kcall.StatusResourceExhausted
 	}
-	for index := range kernelCallData {
-		kernelCallData[index] = 0
-	}
-	for page := uint64(0); page < 4; page++ {
-		if !vm.InitializePhysical(physical+page*vm.PageSize, kernelCallData[:]) {
-			for release := uint64(0); release < 4; release++ {
+	for page := uint64(0); page < pages; page++ {
+		if !vm.InitializePhysical(physical+page*vm.PageSize, nil) {
+			for release := uint64(0); release < pages; release++ {
 				pageAllocator.Free(physical + release*vm.PageSize)
 			}
-			owner.Release(process.ResourcePages, 4)
+			owner.Release(process.ResourcePages, uint32(pages))
 			return kcall.StatusResourceExhausted
 		}
 	}
 	// The region is pinned: freeing pages a device may still write into is
 	// the driver's teardown, not an unmap it can ask for.
-	if recordKernelRegion(owner, region.Region{Base: virtual, Length: 4 * vm.PageSize, Protection: region.Read | region.Write, Backing: region.Device, Flags: region.Pinned}) != kcall.StatusOK {
-		for release := uint64(0); release < 4; release++ {
+	if recordKernelRegion(owner, region.Region{Base: virtual, Length: pages * vm.PageSize, Protection: region.Read | region.Write, Backing: region.Device, Flags: region.Pinned}) != kcall.StatusOK {
+		for release := uint64(0); release < pages; release++ {
 			pageAllocator.Free(physical + release*vm.PageSize)
 		}
-		owner.Release(process.ResourcePages, 4)
+		owner.Release(process.ResourcePages, uint32(pages))
 		return kcall.StatusInvalidArgument
 	}
-	for page := uint64(0); page < 4; page++ {
+	for page := uint64(0); page < pages; page++ {
 		tables, mapped := vm.MapUserPageAt(&pageAllocator, handler.root, virtual+page*vm.PageSize, physical+page*vm.PageSize, vm.Permissions{User: true, Writable: true}, true)
 		if tables != 0 {
 			owner.Charge(process.ResourcePages, uint32(tables))
@@ -219,7 +235,7 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 			// Mapped pages are owned and return with the address space, so only
 			// the unmapped remainder is freed here; the charge stays with the
 			// process until its teardown releases the whole account.
-			for release := page; release < 4; release++ {
+			for release := page; release < pages; release++ {
 				pageAllocator.Free(physical + release*vm.PageSize)
 			}
 			return kcall.StatusResourceExhausted
@@ -227,7 +243,7 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	}
 	putUint64(dmaWire[0:8], physical)
 	putUint64(dmaWire[8:16], virtual)
-	putUint64(dmaWire[16:24], 4*vm.PageSize)
+	putUint64(dmaWire[16:24], pages*vm.PageSize)
 	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}

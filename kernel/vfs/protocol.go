@@ -8,8 +8,9 @@ import (
 
 const (
 	ProtocolID = uint64(0x47564631)
-	// Version 3 adds the no-space and corrupt statuses (ADR 0102).
-	ProtocolVersion = uint16(3)
+	// Version 3 adds the no-space and corrupt statuses (ADR 0102); version 4
+	// adds the bulk operations (ADR 0107).
+	ProtocolVersion = uint16(4)
 	protocolHeader  = 32
 	MaxProtocolPath = 192
 	MaxProtocolData = ipc.MaxPayload - protocolHeader - MaxProtocolPath
@@ -32,7 +33,23 @@ const (
 	OperationUnlink
 	OperationStat
 	OperationTruncate
+	// OperationReadInto reads Size bytes from the file's position into the
+	// memory object attached to the request, at byte Offset of it; the
+	// reply's Size is how many it read (ADR 0107). OperationWriteFrom writes
+	// them from the object. OperationFillExecutable reads the file from its
+	// position into the attached executable object until the object seals,
+	// Size bytes, so a launcher never handles the program's bytes itself.
+	OperationReadInto
+	OperationWriteFrom
+	OperationFillExecutable
+	lastOperation = OperationFillExecutable
 )
+
+// Bulk reports whether an operation moves its data through an attached object
+// and so carries exactly one handle.
+func (operation Operation) Bulk() bool {
+	return operation == OperationReadInto || operation == OperationWriteFrom || operation == OperationFillExecutable
+}
 
 type Request struct {
 	Operation Operation
@@ -56,7 +73,7 @@ type Reply struct {
 }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
-	if reply.Operation < OperationOpen || reply.Operation > OperationTruncate || correlation == 0 ||
+	if reply.Operation < OperationOpen || reply.Operation > lastOperation || correlation == 0 ||
 		reply.Status > lastStatus || len(reply.Name) > ramfs.MaxName || len(reply.Data) > MaxReplyData ||
 		replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload {
 		return ipc.Message{}, false
@@ -86,7 +103,7 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 	kind := ramfs.Kind(message.Payload[2])
 	nameSize := int(message.Payload[3])
 	dataSize := int(binary.LittleEndian.Uint16(message.Payload[4:]))
-	if operation < OperationOpen || operation > OperationTruncate || status > lastStatus ||
+	if operation < OperationOpen || operation > lastOperation || status > lastStatus ||
 		kind > ramfs.KindDirectory || nameSize > ramfs.MaxName || dataSize > MaxReplyData ||
 		message.Payload[6] != 0 || message.Payload[7] != 0 || binary.LittleEndian.Uint32(message.Payload[28:]) != 0 ||
 		replyHeader+nameSize+dataSize != int(message.PayloadSize) {
@@ -100,7 +117,7 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if request.Operation < OperationOpen || request.Operation > OperationTruncate || correlation == 0 || len(request.Path) > MaxProtocolPath || len(request.Data) > MaxProtocolData || len(request.Path)+len(request.Data)+protocolHeader > ipc.MaxPayload {
+	if request.Operation < OperationOpen || request.Operation > lastOperation || correlation == 0 || len(request.Path) > MaxProtocolPath || len(request.Data) > MaxProtocolData || len(request.Path)+len(request.Data)+protocolHeader > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: ProtocolVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(protocolHeader + len(request.Path) + len(request.Data))}
@@ -127,7 +144,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	}
 	operation := Operation(message.Payload[0])
 	rights := Rights(message.Payload[1])
-	if operation < OperationOpen || operation > OperationTruncate || rights&^(Read|Write) != 0 {
+	if operation < OperationOpen || operation > lastOperation || rights&^(Read|Write) != 0 {
 		return Request{}, false
 	}
 	return Request{

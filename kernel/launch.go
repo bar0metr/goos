@@ -193,7 +193,11 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
-		if _, derived, _ := spawned.Handles().Describe(installed[index]); !streamRegistry.Placed(grant.Type, derived.Object()) {
+		_, derived, _ := spawned.Handles().Describe(installed[index])
+		if grant.Type == handle.TypeMemory {
+			retainMemory(derived)
+		}
+		if !streamRegistry.Placed(grant.Type, derived.Object()) {
 			// Uncounted, so it is closed without dropping a reference.
 			spawned.Handles().Close(installed[index])
 			abandonSpawn(root, spawned, false)
@@ -289,8 +293,11 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 }
 
 func abandonHandle(typeID handle.Type, cap capability.Capability) {
-	if typeID == handle.TypeStream {
+	switch typeID {
+	case handle.TypeStream:
 		dropStreamCapability(cap)
+	case handle.TypeMemory:
+		releaseMemory(cap)
 	}
 }
 

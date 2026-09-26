@@ -3,6 +3,8 @@
 package main
 
 import (
+	"goos/internal/capability"
+	"goos/kernel/clock"
 	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -12,7 +14,6 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 )
 
@@ -117,33 +118,37 @@ func readSessionExecutable(session handle.ID, path []byte) (supervisor.Executabl
 	return executable, status
 }
 
-// copyExecutable reads an open file of size bytes into a new executable
-// object.
+// copyExecutable fills a new executable object with an open file of size
+// bytes. PID 1 never handles the bytes: it hands the VFS a copy of the
+// object's handle that can only write, and the VFS reads the file into the
+// object in one request (ADR 0107).
 func copyExecutable(session handle.ID, file vfs.Handle, size uint64) (supervisor.Executable, supervisor.LaunchStatus) {
 	object, status := sys.ExecutableCreate(loaderHandle, size)
 	if status != kcall.StatusOK {
 		syslog.Warn("executable object refused", syslog.Uint("status", uint64(status)), syslog.Uint("size", size))
 		return supervisor.Executable{}, supervisor.LaunchResourceExhausted
 	}
-	// Every exchange allocates its request and reply, and a file takes one
-	// exchange per 224 bytes. The previous chunk is in the object by the time
-	// the next is read, so each read gives the last one's memory back.
-	readBase := arena.Current()
-	read := func() ([]byte, bool) {
-		arena.Reset(readBase)
-		reply, ok := callSession(session, vfs.Request{Operation: vfs.OperationRead, Handle: file, Size: uint32(vfs.MaxReplyData)})
-		return reply.Data, ok && reply.Status == vfs.StatusOK
-	}
-	write := func(data []byte) bool { return sys.ExecutableWrite(object, data) == kcall.StatusOK }
-	if copied := execproto.CopyExecutable(size, read, write); copied != execproto.CopyOK {
+	fill, status := sys.HandleDuplicate(object, capability.Write|capability.Transfer)
+	if status != kcall.StatusOK {
 		sys.HandleClose(object)
-		syslog.Warn("executable read failed", syslog.Uint("copy", uint64(copied)))
-		if copied == execproto.CopyReadFailed {
+		return supervisor.Executable{}, supervisor.LaunchResourceExhausted
+	}
+	reply, ok := callSessionAttached(session, vfs.Request{Operation: vfs.OperationFillExecutable, Handle: file, Size: uint32(size)}, fill, fillDeadline(size))
+	if !ok || reply.Status != vfs.StatusOK || reply.Size != size {
+		sys.HandleClose(object)
+		syslog.Warn("executable read failed", syslog.Uint("read", reply.Size), syslog.Uint("size", size))
+		if !ok || reply.Status == vfs.StatusBackendError {
 			return supervisor.Executable{}, supervisor.LaunchProcessFailed
 		}
 		return supervisor.Executable{}, supervisor.LaunchInvalidImage
 	}
 	return supervisor.Executable{Image: object, Size: uint32(size)}, supervisor.LaunchOK
+}
+
+// fillDeadline bounds the wait for a program of size bytes to be read: the
+// ordinary session deadline plus a second for every MiB.
+func fillDeadline(size uint64) uint64 {
+	return vfsSessionDeadline + (size>>20)*clock.TicksPerSecond
 }
 
 // requestLaunch sends one launch request and waits for its reply. The caller

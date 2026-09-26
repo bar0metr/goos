@@ -104,3 +104,9 @@ func vmProtect(address uint64, length uint64, protection uint64) uint64 { return
 func vmDiscard(address uint64, length uint64) uint64 { return unsupported }
 
 func vmQuery(address uint64, record unsafe.Pointer) uint64 { return unsupported }
+
+func memoryCreate(pages uint64, address unsafe.Pointer) uint64 { return unsupported }
+
+func handleDuplicate(handle uint64, rights uint64, address unsafe.Pointer) uint64 {
+	return unsupported
+}

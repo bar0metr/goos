@@ -17,7 +17,12 @@ import (
 
 const (
 	dmaVirtualAddress = vm.UserDMAAddress
-	dmaSize           = uint64(16384)
+	// The first 16 KiB of the DMA region hold the virtqueue, the request
+	// header, and the status byte; the rest is the data area one request
+	// moves at most (ADR 0107).
+	queueArea    = uint64(16384)
+	dataCapacity = uint64(128 << 10)
+	dmaSize      = queueArea + dataCapacity
 	sectorSize        = uint64(512)
 	virtioRead        = uint32(0)
 	virtioWrite       = uint32(1)
@@ -119,9 +124,9 @@ func initializeDevice() bool {
 		return false
 	}
 	usedOffset = align(uint64(16)*uint64(queueSize)+4+uint64(queueSize)*2+2, 4096)
-	dataOffset = align(usedOffset+4+uint64(queueSize)*8+2, 1024)
-	headerOffset, statusOffset = dataOffset+1024, dataOffset+1040
-	if statusOffset >= dmaSize {
+	headerOffset = align(usedOffset+4+uint64(queueSize)*8+2, 16)
+	statusOffset, dataOffset = headerOffset+16, queueArea
+	if statusOffset >= queueArea {
 		write("VIRTIO_BLK_DMA_INIT_FAILED\n")
 		return false
 	}
@@ -160,6 +165,9 @@ func serve() {
 		}
 		request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
 		if !validRequest {
+			for _, attached := range requestMessage.Handles[:requestMessage.HandleCount] {
+				sys.HandleClose(attached)
+			}
 			reject()
 			continue
 		}
@@ -175,7 +183,7 @@ func serve() {
 // stranding the block service until its deadline expires.
 func reject() {
 	operation := blockproto.Operation(requestMessage.Payload[0])
-	if requestMessage.Correlation == 0 || operation < blockproto.OperationInfo || operation > blockproto.OperationFlush {
+	if requestMessage.Correlation == 0 || !operation.Valid() {
 		return
 	}
 	if !blockproto.EncodeReplyInto(blockproto.Reply{Operation: operation, Status: blockproto.StatusInvalidArgument}, requestMessage.Correlation, &replyMessage) {
@@ -225,10 +233,65 @@ func dispatch(request blockproto.Request) blockproto.Reply {
 			write("VIRTIO_BLK_FLUSH_FAILED\n")
 			reply.Status = blockproto.StatusIOError
 		}
+	case blockproto.OperationReadBulk, blockproto.OperationWriteBulk:
+		reply.Status = bulk(request)
+		sys.HandleClose(request.Object)
 	default:
 		reply.Status = blockproto.StatusInvalidArgument
 	}
 	return reply
+}
+
+// bulk moves a bulk request's data between the device and the object the
+// request carries, a data area at a time. The object is mapped for this
+// request only.
+func bulk(request blockproto.Request) blockproto.Status {
+	length := uint64(request.Length)
+	if !rangeValid(request.Offset, length) {
+		return blockproto.StatusOutOfRange
+	}
+	read := request.Operation == blockproto.OperationReadBulk
+	base, size, status := sys.MemoryMapAnywhere(request.Object, read)
+	if status != kcall.StatusOK {
+		return blockproto.StatusInvalidArgument
+	}
+	result := blockproto.StatusOK
+	if end := uint64(request.Buffer) + length; end > size {
+		result = blockproto.StatusInvalidArgument
+	}
+	buffer := sys.Window(base, size)
+	for done := uint64(0); done < length && result == blockproto.StatusOK; {
+		offset := request.Offset + done
+		start := offset % sectorSize
+		chunk := min(length-done, dataCapacity-start)
+		first, count, _ := sectorRange(offset, chunk)
+		part := buffer[uint64(request.Buffer)+done : uint64(request.Buffer)+done+chunk]
+		if read {
+			if !transfer(virtioRead, first, count) {
+				write("VIRTIO_BLK_READ_FAILED\n")
+				result = blockproto.StatusIOError
+				break
+			}
+			copy(part, memory(dataOffset+start, chunk))
+		} else {
+			// A partial first or last sector is read first, so the bytes
+			// around the write survive it.
+			if (start != 0 || chunk%sectorSize != 0) && !transfer(virtioRead, first, count) {
+				write("VIRTIO_BLK_RMW_READ_FAILED\n")
+				result = blockproto.StatusIOError
+				break
+			}
+			copy(memory(dataOffset+start, chunk), part)
+			if !transfer(virtioWrite, first, count) {
+				write("VIRTIO_BLK_WRITE_FAILED\n")
+				result = blockproto.StatusIOError
+				break
+			}
+		}
+		done += chunk
+	}
+	sys.VMUnmap(base, size)
+	return result
 }
 
 func rangeValid(offset, length uint64) bool {

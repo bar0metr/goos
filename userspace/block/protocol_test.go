@@ -150,3 +150,44 @@ func TestSetFilesystemControl(t *testing.T) {
 		t.Fatal("decoded a request with no endpoint")
 	}
 }
+
+func TestBulkRequestsCarryExactlyOneObject(t *testing.T) {
+	request := Request{Operation: OperationReadBulk, Offset: 4096, Length: 65536, Buffer: 8192, Object: 0x100000007}
+	message, ok := EncodeRequest(request, 9)
+	if !ok || message.HandleCount != 1 || message.Handles[0] != request.Object {
+		t.Fatalf("encode: %v %+v", ok, message)
+	}
+	decoded, ok := DecodeRequest(message)
+	if !ok || decoded.Operation != OperationReadBulk || decoded.Offset != 4096 || decoded.Length != 65536 || decoded.Buffer != 8192 || decoded.Object != request.Object {
+		t.Fatalf("decode: %v %+v", ok, decoded)
+	}
+	missing := message
+	missing.HandleCount = 0
+	if _, ok := DecodeRequest(missing); ok {
+		t.Fatal("a bulk request without its object was accepted")
+	}
+	inline, _ := EncodeRequest(Request{Operation: OperationRead, Length: 8}, 10)
+	inline.HandleCount, inline.Handles[0] = 1, 5
+	if _, ok := DecodeRequest(inline); ok {
+		t.Fatal("an inline request carrying a handle was accepted")
+	}
+	inline, _ = EncodeRequest(Request{Operation: OperationRead, Length: 8}, 10)
+	inline.Payload[4] = 1
+	if _, ok := DecodeRequest(inline); ok {
+		t.Fatal("an inline request with a buffer offset was accepted")
+	}
+	for _, bad := range []Request{
+		{Operation: OperationWriteBulk, Length: 0, Object: 1},
+		{Operation: OperationWriteBulk, Length: MaxBulk + 1, Object: 1},
+		{Operation: OperationWriteBulk, Length: 1},
+		{Operation: OperationWriteBulk, Length: 1, Object: 1, Data: []byte{1}},
+	} {
+		if _, ok := EncodeRequest(bad, 11); ok {
+			t.Fatalf("%+v encoded", bad)
+		}
+	}
+	reply, ok := EncodeReply(Reply{Operation: OperationWriteBulk}, 12)
+	if decodedReply, valid := DecodeReply(reply); !ok || !valid || decodedReply.Operation != OperationWriteBulk {
+		t.Fatal("bulk reply")
+	}
+}

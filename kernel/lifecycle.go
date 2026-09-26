@@ -12,7 +12,6 @@ import (
 	"goos/kernel/arch/amd64"
 	"goos/kernel/device"
 	"goos/kernel/diag"
-	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -120,6 +119,9 @@ func releaseExitedProcess(event process.ExitEvent) {
 	}
 	if exited, found := processRegistry.ByID(event.Process); found {
 		releaseProcessHandles(exited)
+		releasingProcess = exited.ID()
+		releaseSharedMappings(exited)
+		releasingProcess = 0
 		before := pageAllocator.Statistics().FreePages
 		if !vm.DestroyUserAddressSpace(&pageAllocator, exited.AddressSpace().Root) {
 			addressSpaceReclaimFailures++
@@ -163,8 +165,8 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 			amd64.QuiesceIRQ11()
 		}
 	}
-	if typeID == handle.TypeMemory && executable.IsObject(cap.Object()) {
-		dropExecutable(cap.Object())
+	if typeID == handle.TypeMemory {
+		releaseMemory(cap)
 		return
 	}
 	if typeID == handle.TypeStream {

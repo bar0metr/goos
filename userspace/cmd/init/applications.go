@@ -180,12 +180,27 @@ func readSessionFile(session handle.ID, path []byte, target []byte) (int, bool) 
 }
 
 func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
+	return callSessionAttached(session, request, 0, vfsSessionDeadline)
+}
+
+// callSessionAttached is callSession with a handle moved to the VFS with the
+// request and a deadline of the caller's choosing.
+func callSessionAttached(session handle.ID, request vfs.Request, attached handle.ID, deadline uint64) (vfs.Reply, bool) {
 	correlation++
 	message, ok := vfs.EncodeRequest(request, correlation)
-	if !ok || !sendMessage(uint64(session), message) {
+	if !ok {
 		return vfs.Reply{}, false
 	}
-	reply, status := receive(uint64(session), vfsSessionDeadline)
+	if attached != 0 {
+		message.HandleCount, message.Handles[0] = 1, attached
+	}
+	if !sendMessage(uint64(session), message) {
+		if attached != 0 {
+			sys.HandleClose(attached)
+		}
+		return vfs.Reply{}, false
+	}
+	reply, status := receive(uint64(session), deadline)
 	if status != ipc.StatusOK || reply.Correlation != correlation {
 		return vfs.Reply{}, false
 	}

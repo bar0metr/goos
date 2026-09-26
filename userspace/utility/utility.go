@@ -286,11 +286,18 @@ const (
 
 // CallVFS sends one request on the command's filesystem session and waits,
 // bounded, for its reply.
-func CallVFS(request vfs.Request) (vfs.Reply, bool) {
+func CallVFS(request vfs.Request) (vfs.Reply, bool) { return callVFS(request, 0) }
+
+// callVFS is CallVFS with a handle attached, for the bulk operations; the
+// handle moves to the VFS with the request.
+func callVFS(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
 	correlation++
 	message, ok := vfs.EncodeRequest(request, correlation)
 	if !ok {
 		return vfs.Reply{}, false
+	}
+	if attached != 0 {
+		message.HandleCount, message.Handles[0] = 1, attached
 	}
 	size, ok := ipc.Encode(message, wire[:])
 	if !ok || sys.IPCSend(handle.ID(vfsHandle), wire[:size]) != 0 {

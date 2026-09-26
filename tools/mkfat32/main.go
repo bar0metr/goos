@@ -41,8 +41,16 @@ func main() {
 		puts = append(puts, value)
 		return nil
 	})
+	var gets []string
+	flag.Func("get", "copy PATH:HOSTFILE from the volume to the host (repeatable)", func(value string) error {
+		if !strings.Contains(value, ":") {
+			return fmt.Errorf("want PATH:HOSTFILE")
+		}
+		gets = append(gets, value)
+		return nil
+	})
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-size MiB] [-cluster-sectors N] [-fats N] [-put HOSTFILE:PATH]... IMAGE")
+		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-size MiB] [-cluster-sectors N] [-fats N] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -54,8 +62,8 @@ func main() {
 	if !valid(path) {
 		create(path, *size, *perCluster, *fats)
 	}
-	if len(puts) != 0 {
-		put(path, puts)
+	if len(puts) != 0 || len(gets) != 0 {
+		transfer(path, puts, gets)
 	}
 }
 
@@ -76,8 +84,9 @@ func create(path string, size uint64, perCluster uint, fats uint) {
 	}
 }
 
-// put mounts the volume at path and copies each HOSTFILE:PATH onto it.
-func put(path string, puts []string) {
+// transfer mounts the volume at path, copies each HOSTFILE:PATH onto it, and
+// then each PATH:HOSTFILE off it.
+func transfer(path string, puts []string, gets []string) {
 	file, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		fail(err)
@@ -98,6 +107,37 @@ func put(path string, puts []string) {
 			fail(err)
 		}
 	}
+	for _, entry := range gets {
+		separator := strings.Index(entry, ":")
+		if err := getFile(&volume, root, entry[:separator], entry[separator+1:]); err != nil {
+			fail(err)
+		}
+	}
+}
+
+// getFile copies the file at path on the volume to the host file target.
+func getFile(volume *fat32.FileSystem, root ramfs.NodeID, path, target string) error {
+	node := root
+	for _, part := range strings.Split(strings.Trim(path, "/"), "/") {
+		name, ok := ramfs.MakeName([]byte(part))
+		if !ok {
+			return fmt.Errorf("invalid name %q in %s", part, path)
+		}
+		next, status := volume.OpenName(node, name)
+		if status != ramfs.StatusOK {
+			return fmt.Errorf("%s: status %d", path, status)
+		}
+		node = next
+	}
+	stat, status := volume.Stat(node)
+	if status != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
+		return fmt.Errorf("%s is not a file", path)
+	}
+	data := make([]byte, stat.Size)
+	if count, status := volume.Read(node, 0, data); status != ramfs.StatusOK || uint64(count) != stat.Size {
+		return fmt.Errorf("%s: read %d of %d bytes, status %d", path, count, stat.Size, status)
+	}
+	return os.WriteFile(target, data, 0o644)
 }
 
 // putFile copies the host file at source to path on the volume, creating the

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/capability"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -37,6 +38,76 @@ func (backend *driverBackend) WriteAt(offset uint64, data []byte) blockproto.Sta
 	}
 	return reply.Status
 }
+// Transfer serves a bulk request through this service's own buffer, which it
+// shares with the driver: the caller's object is mapped for the request, and
+// its bytes are copied to or from the buffer a chunk at a time. A handle that
+// arrived over IPC cannot be passed on — the kernel strips Transfer when a
+// handle moves — so the caller's memory never reaches the driver (ADR 0107).
+func (backend *driverBackend) Transfer(request blockproto.Request) blockproto.Status {
+	read := request.Operation == blockproto.OperationReadBulk
+	base, size, status := sys.MemoryMapAnywhere(request.Object, read)
+	sys.HandleClose(request.Object)
+	if status != kcall.StatusOK {
+		return blockproto.StatusInvalidArgument
+	}
+	result := blockproto.StatusOK
+	length := uint64(request.Length)
+	if uint64(request.Buffer)+length > size || bulkMemory == nil {
+		result = blockproto.StatusInvalidArgument
+	}
+	client := sys.Window(base, size)
+	for done := uint64(0); done < length && result == blockproto.StatusOK; {
+		chunk := min(length-done, uint64(len(bulkMemory)))
+		part := client[uint64(request.Buffer)+done : uint64(request.Buffer)+done+chunk]
+		rights := capability.Read | capability.Transfer
+		if read {
+			rights |= capability.Write
+		} else {
+			copy(bulkMemory[:chunk], part)
+		}
+		duplicate, dupStatus := sys.HandleDuplicate(bulkObject, rights)
+		if dupStatus != kcall.StatusOK {
+			result = blockproto.StatusIOError
+			break
+		}
+		reply, ok := exchange(blockproto.Request{Operation: request.Operation, Offset: request.Offset + done, Length: uint32(chunk), Object: duplicate})
+		switch {
+		case !ok:
+			result = blockproto.StatusIOError
+		case reply.Status != blockproto.StatusOK:
+			result = reply.Status
+		case read:
+			copy(part, bulkMemory[:chunk])
+		}
+		done += chunk
+	}
+	sys.VMUnmap(base, size)
+	return result
+}
+
+// bulkObject is the buffer bulk requests move through on their way to and
+// from the driver; bulkMemory is this service's mapping of it.
+var (
+	bulkObject handle.ID
+	bulkMemory []byte
+)
+
+const bulkPages = 32
+
+func setUpBulk() {
+	object, status := sys.MemoryCreate(bulkPages)
+	if status != kcall.StatusOK {
+		syslog.Warn("bulk buffer unavailable", syslog.Uint("status", uint64(status)))
+		return
+	}
+	base, size, status := sys.MemoryMapAnywhere(object, true)
+	if status != kcall.StatusOK {
+		sys.HandleClose(object)
+		return
+	}
+	bulkObject, bulkMemory = object, sys.Window(base, size)
+}
+
 func (backend *driverBackend) Flush() blockproto.Status {
 	reply, ok := exchange(blockproto.Request{Operation: blockproto.OperationFlush})
 	if !ok {
@@ -103,6 +174,7 @@ func userspaceMain() {
 	if driverLive && !describeDevice() {
 		fatal("BLOCK_DRIVER_INFO_FAILED\n")
 	}
+	setUpBulk()
 	arenaBase = arena.Current()
 	mark("BLOCK_SERVICE_OK\n")
 	syslog.Info("ready")
@@ -201,6 +273,10 @@ func serve(endpoint handle.ID) {
 	describeDevice()
 	request, validRequest := blockproto.DecodeRequestFrom(&requestMessage)
 	if !validRequest {
+		// Whatever handles arrived are this process's now.
+		for _, attached := range requestMessage.Handles[:requestMessage.HandleCount] {
+			sys.HandleClose(attached)
+		}
 		reject(endpoint)
 		return
 	}
@@ -219,7 +295,7 @@ func serve(endpoint handle.ID) {
 // strand the caller until its deadline expires instead of reporting the fault.
 func reject(endpoint handle.ID) {
 	operation := blockproto.Operation(requestMessage.Payload[0])
-	if requestMessage.Correlation == 0 || operation < blockproto.OperationInfo || operation > blockproto.OperationFlush {
+	if requestMessage.Correlation == 0 || !operation.Valid() {
 		return
 	}
 	if !blockproto.EncodeReplyInto(blockproto.Reply{Operation: operation, Status: blockproto.StatusInvalidArgument}, requestMessage.Correlation, &replyMessage) {
@@ -245,16 +321,14 @@ func describeDevice() bool {
 	return ok
 }
 
+// exchange sends a request to the driver and waits for its reply. A bulk
+// request's object moves to the driver with it; if it cannot be sent, the
+// object is closed here instead.
 func exchange(request blockproto.Request) (blockproto.Reply, bool) {
-	if !driverLive {
-		return blockproto.Reply{}, false
-	}
-	correlation++
-	if !blockproto.EncodeRequestInto(request, correlation, &driverRequest) {
-		return blockproto.Reply{}, false
-	}
-	size, ok := ipc.EncodeFrom(&driverRequest, driverWire[:])
-	if !ok || sys.IPCSend(driverHandle, driverWire[:size]) != 0 {
+	if !send(request) {
+		if request.Operation.Bulk() {
+			sys.HandleClose(request.Object)
+		}
 		return blockproto.Reply{}, false
 	}
 	if status := sys.IPCWaitReceive(driverHandle, driverWire[:], blockproto.RequestDeadline); status != 0 {
@@ -271,6 +345,19 @@ func exchange(request blockproto.Request) (blockproto.Reply, bool) {
 	valid := ipc.DecodeInto(driverWire[:ipc.WireHeaderSize+payloadSize+int(driverWire[26])*8], &driverReply)
 	reply, validReply := blockproto.DecodeReplyFrom(&driverReply)
 	return reply, valid && validReply && driverReply.Correlation == correlation
+}
+
+// send sends one request to the driver.
+func send(request blockproto.Request) bool {
+	if !driverLive {
+		return false
+	}
+	correlation++
+	if !blockproto.EncodeRequestInto(request, correlation, &driverRequest) {
+		return false
+	}
+	size, ok := ipc.EncodeFrom(&driverRequest, driverWire[:])
+	return ok && sys.IPCSend(driverHandle, driverWire[:size]) == 0
 }
 
 func mark(message string) {

@@ -48,12 +48,12 @@ func TestEncodeRefusesWhatCannotBeSent(t *testing.T) {
 		{Operation: OperationFlush + 1},
 		{Operation: OperationOpen, Name: []byte("a/b")},
 		{Operation: OperationOpen, Name: []byte("..")},
-		{Operation: OperationRead, Size: PageSize + 1},
+		{Operation: OperationRead, Size: CacheSize + 1},
 		{Operation: OperationRead, Size: 0},
-		{Operation: OperationRead, Offset: 1, Size: PageSize},      // crosses a page
-		{Operation: OperationWrite, Offset: PageSize - 1, Size: 2}, // crosses a page
-		{Operation: OperationWrite, Size: 1, Slot: CachePages},     // no such slot
-		{Operation: OperationStat, Slot: 1},                        // a slot where none is used
+		{Operation: OperationRead, Offset: 1, Size: PageSize, Slot: CachePages - 1},      // past the cache
+		{Operation: OperationWrite, Offset: PageSize - 1, Size: 2, Slot: CachePages - 1}, // past the cache
+		{Operation: OperationWrite, Size: 1, Slot: CachePages},                           // no such slot
+		{Operation: OperationStat, Slot: 1},                                              // a slot where none is used
 	} {
 		if EncodeRequest(request, 1, &message) {
 			t.Fatalf("encoded %#v", request)
@@ -172,8 +172,9 @@ func TestServeReportsWhatTheVolumeCannotDo(t *testing.T) {
 	}
 }
 
-// A transfer moves exactly the bytes at its offset's place in its own slot.
-func TestSlotBytesStayInTheirSlot(t *testing.T) {
+// A transfer moves exactly the bytes at its offset's place in its slot and
+// the slots after it, and never past the cache.
+func TestSlotBytesStayInTheCache(t *testing.T) {
 	cache := make([]byte, CacheSize)
 	bytes, ok := SlotBytes(cache, Request{Operation: OperationWrite, Offset: 3*PageSize + 100, Size: 50, Slot: 2})
 	if !ok || len(bytes) != 50 || &bytes[0] != &cache[2*PageSize+100] {
@@ -181,12 +182,17 @@ func TestSlotBytesStayInTheirSlot(t *testing.T) {
 	}
 	for _, request := range []Request{
 		{Operation: OperationRead, Size: PageSize, Slot: CachePages},
-		{Operation: OperationRead, Offset: PageSize - 1, Size: 2},
+		{Operation: OperationRead, Offset: PageSize - 1, Size: 2, Slot: CachePages - 1},
+		{Operation: OperationRead, Size: CacheSize + 1},
 		{Operation: OperationStat},
 	} {
 		if _, ok := SlotBytes(cache, request); ok {
 			t.Fatalf("accepted %#v", request)
 		}
+	}
+	spanning, ok := SlotBytes(cache, Request{Operation: OperationRead, Offset: 7 * PageSize, Size: 4 * PageSize, Slot: 5})
+	if !ok || len(spanning) != 4*PageSize || &spanning[0] != &cache[5*PageSize] {
+		t.Fatal("a read spanning four slots")
 	}
 	if _, ok := SlotBytes(cache[:PageSize], Request{Operation: OperationRead, Size: 1}); ok {
 		t.Fatal("accepted a cache of the wrong size")

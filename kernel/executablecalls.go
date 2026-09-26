@@ -41,9 +41,10 @@ func executablePage(index uint64) ([]byte, bool) {
 
 // ExecutableCreate creates an empty executable object of size bytes, charged
 // to the caller's page quota, and writes its handle to address. The loader
-// capability authorizes it. The handle carries Write, to fill the object, and
-// Execute, to launch it; it is not transferable, so the object has exactly one
-// holder and is freed with that handle.
+// capability authorizes it. The handle carries Write, to fill the object,
+// Execute, to launch it, and Transfer, so the launcher can hand the VFS a
+// Write-only copy to fill it with (ADR 0107). Every handle and every process
+// started from the object is a reference; the last one frees it.
 func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, address uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
@@ -88,7 +89,7 @@ func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, addres
 			return kcall.StatusResourceExhausted
 		}
 	}
-	created, inserted := owner.Handles().Insert(handle.TypeMemory, capability.New(objectID, capability.Write|capability.Execute))
+	created, inserted := owner.Handles().Insert(handle.TypeMemory, capability.New(objectID, capability.Write|capability.Execute|capability.Transfer))
 	if !inserted {
 		destroyExecutable(objectID)
 		return kcall.StatusResourceExhausted

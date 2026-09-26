@@ -3,6 +3,7 @@ package block
 import "testing"
 
 type memoryBackend struct {
+	transfers int
 	data     [1024]byte
 	readOnly bool
 	flushes  int
@@ -22,6 +23,10 @@ func (backend *memoryBackend) WriteAt(offset uint64, data []byte) Status {
 	return StatusOK
 }
 func (backend *memoryBackend) Flush() Status { backend.flushes++; return StatusOK }
+func (backend *memoryBackend) Transfer(request Request) Status {
+	backend.transfers++
+	return StatusOK
+}
 
 func TestServiceReadWriteFlush(t *testing.T) {
 	backend := &memoryBackend{}

@@ -177,6 +177,16 @@ func (handler *testHandler) VMQuery(address uint64, record uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) MemoryCreate(pages uint64, address uint64) Status {
+	handler.length, handler.address = pages, address
+	return StatusOK
+}
+
+func (handler *testHandler) HandleDuplicate(id uint64, rights uint64, address uint64) Status {
+	handler.channel, handler.length, handler.address = id, rights, address
+	return StatusOK
+}
+
 func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status {
 	handler.address, handler.length = address, length
 	return StatusOK
@@ -448,11 +458,12 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationExecutableCreate != 37 || OperationExecutableWrite != 38 {
 		t.Fatalf("operations %d %d", OperationExecutableCreate, OperationExecutableWrite)
 	}
-	// VMQuery is the last operation, so anything past it is unsupported.
-	if OperationVMMap != 39 || OperationVMQuery != 43 {
-		t.Fatalf("vm operations %d %d", OperationVMMap, OperationVMQuery)
+	// HandleDuplicate is the last operation, so anything past it is
+	// unsupported.
+	if OperationVMMap != 39 || OperationVMQuery != 43 || OperationMemoryCreate != 44 || OperationHandleDuplicate != 45 {
+		t.Fatalf("operations %d %d %d %d", OperationVMMap, OperationVMQuery, OperationMemoryCreate, OperationHandleDuplicate)
 	}
-	if result := Dispatch(Request{Operation: OperationVMQuery + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationHandleDuplicate + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}

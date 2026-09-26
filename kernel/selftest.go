@@ -187,7 +187,7 @@ func runKernelSelfTests(pageTable uint64) {
 	mark("IPC_BOUNDED_OK")
 	mark("IPC_PEER_DEATH_OK")
 
-	sharedObject, sharedCreated := sharedRegistry.Create(&pageAllocator, 2)
+	sharedObject, sharedCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, 2, 0)
 	sharedHandleA, sharedGranted := sharedObject.Grant(processA.Handles(), capability.Read|capability.Write|capability.Transfer)
 	sharedHandleB, sharedTransferred := processA.Handles().Transfer(processB.Handles(), sharedHandleA, handle.TypeMemory, capability.Read)
 	// Process A prints through a console capability like every other process;

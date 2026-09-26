@@ -60,6 +60,10 @@ const (
 	OperationVMProtect
 	OperationVMDiscard
 	OperationVMQuery
+	// OperationMemoryCreate creates a shared-memory object and
+	// OperationHandleDuplicate a narrower copy of a memory handle (ADR 0107).
+	OperationMemoryCreate
+	OperationHandleDuplicate
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -140,6 +144,8 @@ type Handler interface {
 	VMProtect(address uint64, length uint64, protection uint64) Status
 	VMDiscard(address uint64, length uint64) Status
 	VMQuery(address uint64, record uint64) Status
+	MemoryCreate(pages uint64, address uint64) Status
+	HandleDuplicate(handle uint64, rights uint64, address uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -267,6 +273,10 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.VMDiscard(request.Arg0, request.Arg1)}
 	case OperationVMQuery:
 		return Result{Status: handler.VMQuery(request.Arg0, request.Arg1)}
+	case OperationMemoryCreate:
+		return Result{Status: handler.MemoryCreate(request.Arg0, request.Arg1)}
+	case OperationHandleDuplicate:
+		return Result{Status: handler.HandleDuplicate(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationMemoryMap:
 		if request.Arg2&^(MemoryMapWritable|MemoryMapAnywhere) != 0 {
 			return Result{Status: StatusInvalidArgument}

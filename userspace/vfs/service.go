@@ -154,6 +154,18 @@ func (service *Service) Init() bool {
 	return service.namespace.Mount([]byte("/"), &service.fs, root) == vfs.StatusOK
 }
 
+// ReadFile reads from an open file at its position into target, which may be
+// as large as the caller likes, and advances the position. The bulk
+// operations use it with the memory a client attached (ADR 0107).
+func (service *Service) ReadFile(owner vfs.Owner, file vfs.Handle, target []byte) (int, vfs.Status) {
+	return service.namespace.Read(owner, file, target)
+}
+
+// WriteFile writes data to an open file at its position and advances it.
+func (service *Service) WriteFile(owner vfs.Owner, file vfs.Handle, data []byte) (int, vfs.Status) {
+	return service.namespace.Write(owner, file, data)
+}
+
 // CloseSession closes the files a session left open when it went.
 func (service *Service) CloseSession(owner vfs.Owner) int { return service.namespace.CloseOwner(owner) }
 

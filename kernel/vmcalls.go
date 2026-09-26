@@ -242,10 +242,25 @@ func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.St
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
-	if status := regionStatus(owner.Regions().Remove(address, length, false)); status != kcall.StatusOK {
+	// A shared mapping is one reference to its object, so it goes whole or
+	// not at all.
+	regions := owner.Regions()
+	count := regions.Overlapping(address, length, &vmPieces)
+	for index := 0; index < count; index++ {
+		piece := vmPieces[index]
+		if piece.Region.Backing == region.Shared && (piece.Base != piece.Region.Base || piece.Length != piece.Region.Length) {
+			return kcall.StatusInvalidArgument
+		}
+	}
+	if status := regionStatus(regions.Remove(address, length, false)); status != kcall.StatusOK {
 		return status
 	}
 	releasePages(owner, vm.UnmapUserRange(&pageAllocator, handler.root, address, length))
+	for index := 0; index < count; index++ {
+		if vmPieces[index].Region.Backing == region.Shared {
+			dropShared(vmPieces[index].Region.Object)
+		}
+	}
 	return kcall.StatusOK
 }
 
@@ -375,7 +390,7 @@ func (handler nativeCallHandler) MemoryMap(memoryHandle uint64, address uint64, 
 		}
 		return status
 	}
-	if owner.Available(process.ResourcePages) < uint32(faultTables*(object.PageCount()/512+1)) {
+	if owner.Available(process.ResourcePages) < uint32(faultTables*(uint64(object.PageCount())/512+1)) {
 		regions.Remove(target, size, false)
 		return kcall.StatusResourceExhausted
 	}
@@ -388,6 +403,8 @@ func (handler nativeCallHandler) MemoryMap(memoryHandle uint64, address uint64, 
 		regions.Remove(target, size, false)
 		return kcall.StatusInvalidArgument
 	}
+	// The mapping keeps the object alive after every handle has closed.
+	object.Retain()
 	return kcall.StatusOK
 }
 
@@ -411,6 +428,9 @@ func mapPinnedShared(owner *process.Process, object *shmem.Object, memory handle
 		return false
 	}
 	_, mapped := object.Map(&pageAllocator, owner.Handles(), memory, owner.AddressSpace().Root, address, 0, object.PageCount(), true)
+	if mapped {
+		object.Retain()
+	}
 	return mapped
 }
 

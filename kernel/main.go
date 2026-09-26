@@ -44,7 +44,6 @@ var (
 	faultImageData  [1024]byte
 	boundedChannel  ipc.Channel
 	ipcWireData     [ipc.WireMaxSize]byte
-	sharedRegistry  shmem.Registry
 	sharedObjects   shmem.Table
 	dispatchHandler nativeCallHandler
 	// Native calls run one at a time in the kernel exclusion domain, so the
@@ -445,17 +444,16 @@ func bootContinue() {
 	filesystemBlockClientHandle, filesystemBlockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	filesystemBlockServerHandle, filesystemBlockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	systemControlHandle, systemControlInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.SystemControlObject, capability.Write))
-	launchStaging, launchStagingCreated := sharedRegistry.Create(&pageAllocator, 1)
+	launchStaging, launchStagingCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, 1, 0)
 	launchStagingHandle, launchStagingGranted := launchStaging.Grant(initProcess.Handles(), capability.Read|capability.Write)
-	launchStagingMapped := launchStagingCreated && launchStagingGranted && mapPinnedShared(initProcess, &launchStaging, launchStagingHandle, supervisor.StagingAddress)
-	execPage, execPageCreated := sharedRegistry.Create(&pageAllocator, 1)
+	launchStagingMapped := launchStagingCreated && launchStagingGranted && mapPinnedShared(initProcess, launchStaging, launchStagingHandle, supervisor.StagingAddress)
+	execPage, execPageCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, 1, 0)
 	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
 	// The file cache is the memory the VFS and the filesystem service share:
 	// file data moves through it instead of through messages (ADR 0098). PID 1
 	// hands each of them a copy of the right to map it, at every launch.
-	fileCache, fileCacheCreated := sharedRegistry.Create(&pageAllocator, fsproto.CachePages)
-	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && fileCacheCreated &&
-		sharedObjects.Register(launchStaging) && sharedObjects.Register(execPage) && sharedObjects.Register(fileCache)
+	fileCache, fileCacheCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, fsproto.CachePages, 0)
+	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && fileCacheCreated
 	imageObject, imageObjectValid := device.ImageObject(1)
 	// PID 1 maps the image to find executables in it and launches them with
 	// Execute (ADR 0093). It hands the filesystem service a Read-only copy to
