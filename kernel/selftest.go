@@ -75,12 +75,18 @@ func runKernelSelfTests(pageTable uint64) {
 		}
 	}
 	selfTestRootA, selfTestRootB = rootA, rootB
-	processA, validA := process.New(2, process.AddressSpace{Root: rootA})
-	processB, validB := process.New(3, process.AddressSpace{Root: rootB})
-	processA.SetName([]byte("selftest-a"))
-	processB.SetName([]byte("selftest-b"))
-	bootProcessA, bootProcessB = &processA, &processB
-	if !validA || !validB || !processRegistry.Add(&processA) || !processRegistry.Add(&processB) {
+	// Process records are too large for a kernel stack; they live in pages
+	// as every other process's do (ADR 0111).
+	processA, validA := vm.NewObject[process.Process](&pageAllocator)
+	processB, validB := vm.NewObject[process.Process](&pageAllocator)
+	validA = validA && process.Init(processA, 2, process.AddressSpace{Root: rootA})
+	validB = validB && process.Init(processB, 3, process.AddressSpace{Root: rootB})
+	if validA && validB {
+		processA.SetName([]byte("selftest-a"))
+		processB.SetName([]byte("selftest-b"))
+	}
+	bootProcessA, bootProcessB = processA, processB
+	if !validA || !validB || !processRegistry.Add(processA) || !processRegistry.Add(processB) {
 		console.WriteString("PANIC: process model initialization failed\n")
 		for {
 			amd64.Halt()

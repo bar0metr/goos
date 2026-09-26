@@ -259,8 +259,6 @@ func executeExternal(line []byte, background bool) {
 	}
 }
 
-// freeSlot keeps one slot for the foreground, so background jobs never
-// block an interactive command.
 // writeLaunchFailure names the stage PID 1 could not start. The request is
 // still in the job's exec page slot, so the name is read back from it rather
 // than kept for every job.

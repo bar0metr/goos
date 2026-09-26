@@ -21,7 +21,9 @@ import (
 	userwait "goos/userspace/wait"
 )
 
-const maxSessions = 12
+// maxSessions bounds the clients served at once: one WaitAny names the
+// control channel and every session (ADR 0111).
+const maxSessions = userwait.MaxObjects - 1
 
 var (
 	service              vfsservice.Service

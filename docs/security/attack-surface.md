@@ -40,7 +40,7 @@ table with type, generation, and rights checks.
 | 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte from the 256-byte ring the UART interrupt fills | no; no input → `NotFound`; wait with `WaitAny` |
 | 8 | `ClockRead` | — | length exactly 8; `CopyOut` | none | no |
 | 9 | `StartupRead` | registered | length exactly 1024; `CopyIn` of own startup page, `CopyOut` | none | no |
-| 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 24 channels, global; charged to PID 1's channel quota | no |
+| 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 channels, global, three pages each while they live (ADR 0111); charged to PID 1's channel quota | no |
 | 11 | `HandleClose` | own handle | generation and slot; a stream handle drops one reference, refused below zero | none | no; wakes peers when a stream end's last handle closes |
 | 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 64 waiters | yes, tick deadline; 0 → `Timeout` |
 | 13 | `SystemInfo` | registered | length exactly 40; `CopyOut` | none | no |
@@ -48,7 +48,7 @@ table with type, generation, and rights checks.
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
 | 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; 24-byte descriptor `CopyIn`, its size a whole number of pages up to 256 KiB (zero for 16 KiB); the window must be free in the region map | up to 64 contiguous low pages, charged with their page tables to the page quota; a pinned region; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
-| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 64 streams × 4 KiB, global; four per ordinary process, 24 for PID 1 (quota) | no |
+| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 streams of one page each, global; sixteen per ordinary process, 64 for PID 1 (quota, ADR 0111) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
 | 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload; a write that does not fit whole is refused, never split | static 256 B buffer | no; full → `ResourceExhausted` |
 | 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline; a writer wakes when 256 bytes are free |
@@ -67,7 +67,7 @@ table with type, generation, and rights checks.
 | 34 | `ConsoleInterrupt` | device handle, Read, console object | handle lookup only | consumes one pending Ctrl-C flag | no; none pending → `NotFound` |
 | 35 | `ValidationFault` | validation build only (`Unsupported` otherwise); device handle, Write, system-control object (PID 1 only) | handle lookup only | none: overflows the caller's kernel stack on purpose and ends the machine with a double-fault report (ADR 0091) | no |
 | 36 | `SystemPowerOff` | device handle, Write, system-control object (PID 1 only) | handle lookup only; the port and value come from ACPI tables checked at boot (`kernel/acpi`, ADR 0092) | none: one port write that switches the machine off; `Unsupported` without usable tables | no |
-| 37 | `ExecutableCreate` | device handle, Write, loader object (PID 1 only, not transferable) | size 1..256 MiB; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | 16 objects, global; `ceil(size/4096)` zeroed pages and their page-list index pages charged to the page quota, moved to the first process launched from the object; freed with the last reference — the handle or a process started from it (ADR 0097, ADR 0106) | no |
+| 37 | `ExecutableCreate` | device handle, Write, loader object (PID 1 only, not transferable) | size 1..256 MiB; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | 64 objects, global; `ceil(size/4096)` zeroed pages and their page-list index pages charged to the page quota, moved to the first process launched from the object; freed with the last reference — the handle or a process started from it (ADR 0097, ADR 0106) | no |
 | 38 | `ExecutableWrite` | memory handle, Write, executable object | length 1..1 MiB in `Dispatch`; append only, refused whole past the object's end or once sealed; `CopyIn` page by page, the length advanced only after the whole copy | none beyond the object's own pages | no |
 | 39 | `VMMap` | registered | protection read/write only (execute refused); flags: fixed only; 16-byte descriptor `CopyIn`; length page-aligned, nonzero, bounded; a fixed address page-aligned, in the user range, free in the region map | address space only: pages are demand-zero, each charged on first touch with its page tables; 128 regions per process | no |
 | 40 | `VMUnmap` | registered; own map only | range page-aligned, non-wrapping, in the user range; pinned regions refused; a split needs a free region slot, checked before anything changes | frees and uncharges owned pages | no |
@@ -165,7 +165,7 @@ identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
   A drop with nothing counted is refused rather than wrapping.
 - *Waits*: none added. Writers are woken only when a whole 256-byte write fits,
   so a woken writer is not refused again.
-- *Resources*: two 16-bit counters per stream; the registry is 64 streams.
+- *Resources*: two 16-bit counters per stream; the registry is 256 streams, each a page taken when it is created.
 
 ### Resource limits
 

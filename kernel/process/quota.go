@@ -1,5 +1,7 @@
 package process
 
+import "goos/kernel/ipc"
+
 // Capability isolation decides whether a process may use a resource at all. It
 // says nothing about how much of one it may hold, so a process entitled to a
 // resource can still take the system's whole supply of it and deny it to
@@ -32,9 +34,9 @@ const (
 // table rather than the whole of it, so several processes can hold their full
 // quota at once and one cannot starve the rest.
 //
-// Streams are the limit that binds today: a utility that creates them in a loop
-// used to drain the table and break every later pipeline. Four is a share of
-// the sixty-four the registry holds (ADR 0089).
+// Streams were the limit that bound first: a utility that creates them in a
+// loop used to drain the table and break every later pipeline (ADR 0089).
+// Sixteen is a share of the 256 the registry holds (ADR 0111).
 //
 // Pages count every physical page a process's address space holds: its image
 // pages, page tables, and the heap, stack, and anonymous pages it has touched
@@ -43,7 +45,7 @@ const (
 // and multi-megabyte buffers.
 const (
 	defaultChannelLimit = 4
-	defaultStreamLimit  = 4
+	defaultStreamLimit  = 16
 	defaultTaskLimit    = 4
 	defaultPageLimit    = 8192
 )
@@ -55,11 +57,12 @@ const (
 //
 // Only PID 1 can create channels, so its channel share is the whole table. Its
 // stream share covers the most it ever holds at once — four streams for each
-// of the four job slots and the terminal's output stream — with room to spare,
-// and leaves the rest of the registry to everyone else (ADR 0089).
+// of the eight job slots and the terminal's output stream — with room to
+// spare, and leaves the rest of the registry to everyone else (ADR 0089,
+// ADR 0111).
 const (
-	systemChannelLimit = 24
-	systemStreamLimit  = 24
+	systemChannelLimit = ipc.MaxChannels
+	systemStreamLimit  = 64
 	systemTaskLimit    = 8
 	systemPageLimit    = 16384
 )

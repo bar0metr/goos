@@ -88,7 +88,7 @@ startup object before creating the first Task. Services resolve roles rather tha
 order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
-The kernel also grants PID 1 a 256 KiB exec area (handle `0x100000014`,
+The kernel also grants PID 1 a 512 KiB exec area of eight slots (handle `0x100000014`,
 `Read|Write|Transfer`) for the shell exec protocol. It is not mapped at boot;
 PID 1 maps it with `MemoryMap` and passes a derived `Read|Write` handle to the
 shell through the launch manifest (ADR 0063).
@@ -128,7 +128,7 @@ for children already started. This releases stream waits through EOF or peer
 closure. It is not forced cancellation of an arbitrary nonterminating program.
 
 All stages start before process waits. The request then becomes one of up to
-four jobs: PID 1 returns to its loop, which waits on the lifecycle channel, the
+eight jobs (ADR 0111): PID 1 returns to its loop, which waits on the lifecycle channel, the
 exec channel, and the next process of every job, so supervision and further
 requests continue while commands run. PID 1 reaps every started process and
 returns the first nonzero exit code in left-to-right pipeline order. Launch

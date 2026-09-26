@@ -10,6 +10,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/mm/pagelist"
+	"goos/kernel/objects"
 )
 
 const (
@@ -17,8 +18,10 @@ const (
 	// page quota of the creator binds first.
 	MaxPages = pagelist.MaxFrames
 	// MaxObjects bounds the objects in existence at once, an intentional
-	// system limit; each costs a fixed page-list root.
-	MaxObjects = 64
+	// system limit. The table holds a pointer per slot; an object's record,
+	// about 1 KiB with its page-list root, takes a page when the object is
+	// created and returns it when the object is freed (ADR 0111).
+	MaxObjects = 256
 	// MaxObjectsPerProcess bounds the objects one process pays for, so one
 	// process cannot take the whole table from the others.
 	MaxObjectsPerProcess = 16
@@ -39,9 +42,13 @@ type Object struct {
 
 // Table is every shared-memory object in existence.
 type Table struct {
-	objects [MaxObjects]Object
+	objects [MaxObjects]*Object
 	nextID  uint64
+	storage objects.Storage[Object]
 }
+
+// SetStorage installs where object records are allocated; see ipc.Registry.
+func (table *Table) SetStorage(storage objects.Storage[Object]) { table.storage = storage }
 
 // Zero clears one physical page before it is exposed.
 type Zero func(physical uint64) bool
@@ -56,16 +63,21 @@ func (table *Table) Create(frames pagelist.Frames, view pagelist.View, zero Zero
 	if payer != 0 && table.CountFor(payer) >= MaxObjectsPerProcess {
 		return nil, false
 	}
-	var object *Object
-	for index := range table.objects {
-		if table.objects[index].id == 0 {
-			object = &table.objects[index]
+	slot := -1
+	for index := range table.objects[:] {
+		if table.objects[index] == nil {
+			slot = index
 			break
 		}
 	}
-	if object == nil {
+	if slot < 0 {
 		return nil, false
 	}
+	object, allocated := objects.Or(table.storage).New()
+	if !allocated {
+		return nil, false
+	}
+	table.objects[slot] = object
 	table.nextID++
 	object.reset()
 	object.id, object.payer = identityNamespace|table.nextID, payer
@@ -80,7 +92,7 @@ func (table *Table) Create(frames pagelist.Frames, view pagelist.View, zero Zero
 				frames.Free(physical)
 			}
 			object.frames.Release(frames, view)
-			object.reset()
+			table.discard(slot)
 			return nil, false
 		}
 		object.count++
@@ -93,19 +105,27 @@ func (table *Table) Find(id uint64) (*Object, bool) {
 	if table == nil || id&identityNamespace == 0 || id == identityNamespace {
 		return nil, false
 	}
-	for index := range table.objects {
-		if table.objects[index].id == id {
-			return &table.objects[index], true
+	for _, object := range table.objects[:] {
+		if object != nil && object.id == id {
+			return object, true
 		}
 	}
 	return nil, false
 }
 
+// discard frees the record in slot and empties the slot.
+func (table *Table) discard(slot int) {
+	object := table.objects[slot]
+	table.objects[slot] = nil
+	object.reset()
+	objects.Or(table.storage).Free(object)
+}
+
 // CountFor counts the objects payer pays for.
 func (table *Table) CountFor(payer uint64) int {
 	count := 0
-	for index := range table.objects {
-		if table.objects[index].id != 0 && table.objects[index].payer == payer {
+	for _, object := range table.objects[:] {
+		if object != nil && object.payer == payer {
 			count++
 		}
 	}
@@ -115,8 +135,8 @@ func (table *Table) CountFor(payer uint64) int {
 // Live counts the objects in existence.
 func (table *Table) Live() int {
 	count := 0
-	for index := range table.objects {
-		if table.objects[index].id != 0 {
+	for _, object := range table.objects[:] {
+		if object != nil {
 			count++
 		}
 	}
@@ -138,7 +158,12 @@ func (table *Table) Drop(object *Object, frames pagelist.Frames, view pagelist.V
 	}
 	payer, charge := object.payer, object.Charge()
 	object.frames.Release(frames, view)
-	object.reset()
+	for slot := range table.objects[:] {
+		if table.objects[slot] == object {
+			table.discard(slot)
+			break
+		}
+	}
 	return payer, charge, true
 }
 

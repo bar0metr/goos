@@ -2,7 +2,9 @@ package ipc
 
 import "goos/kernel/sched"
 
-const MaxWaiters = 64
+// MaxWaiters is one registration per task slot: a task waits on one thing at
+// a time, so the table can never need more (ADR 0111).
+const MaxWaiters = sched.MaxTasks
 
 type WaitReason uint8
 

@@ -36,8 +36,9 @@ const (
 	// name and a value, and the store is bounded, so the file is too.
 	exportSize = config.MaxEntries * (config.MaxKey + config.MaxText + 8)
 	// maxSessions bounds the clients served at once. Configuration has few
-	// readers, and each costs a channel PID 1 must create.
-	maxSessions = 6
+	// readers, the shell and the services, and each costs a channel PID 1
+	// must create.
+	maxSessions = 16
 )
 
 var (

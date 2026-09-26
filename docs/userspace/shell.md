@@ -96,7 +96,7 @@ A line ending in an unquoted `&` runs as a background job with an empty
 standard input. The shell prints `[N] started`, returns to the prompt, and
 reports `[N] done`, `[N] exit status: C`, or the launch failure when PID 1
 replies. The terminal service takes the line being typed off the screen, writes
-the report, and shows the line again (ADR 0089). Up to three background jobs may run,
+the report, and shows the line again (ADR 0089). Up to seven background jobs may run (ADR 0111),
 and one exec slot stays free for the foreground. Builtins and `;` sequences
 cannot run in the background. A foreground command has no reply time limit
 (ADR 0064).

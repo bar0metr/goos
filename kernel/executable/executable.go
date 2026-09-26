@@ -17,6 +17,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/mm/pagelist"
 	"goos/kernel/mm/vm"
+	"goos/kernel/objects"
 )
 
 const (
@@ -25,8 +26,10 @@ const (
 	MaxSize = uint64(pagelist.MaxFrames) * vm.PageSize
 	// MaxObjects bounds the objects in existence at once: those being filled
 	// and those still read by a running process. It is an intentional system
-	// limit; each object costs a fixed root of page-list entries.
-	MaxObjects = 16
+	// limit: one per process that can run, since only PID 1 creates them and
+	// each process started from a file holds one. A record takes a page when
+	// the object is reserved and returns it when the object goes (ADR 0111).
+	MaxObjects = 64
 	// MaxWrite bounds the bytes one Write copies.
 	MaxWrite = kcall.MaxExecutableWrite
 
@@ -134,9 +137,13 @@ func (object *Object) Drop() bool {
 
 // Table is every executable object in existence.
 type Table struct {
-	objects [MaxObjects]Object
+	objects [MaxObjects]*Object
 	nextID  uint64
+	storage objects.Storage[Object]
 }
+
+// SetStorage installs where object records are allocated; see ipc.Registry.
+func (table *Table) SetStorage(storage objects.Storage[Object]) { table.storage = storage }
 
 // Reserve claims a slot for an object of size bytes, paid for by payer, with
 // the one reference of the handle its creator will hold. The caller adds its
@@ -145,13 +152,19 @@ func (table *Table) Reserve(size uint64, payer uint64) (*Object, bool) {
 	if table == nil || size == 0 || size > MaxSize || table.nextID == idMask {
 		return nil, false
 	}
-	for index := range table.objects {
-		if object := &table.objects[index]; object.id == 0 {
-			table.nextID++
-			object.reset()
-			object.id, object.size, object.refs, object.payer = namespace|table.nextID, size, 1, payer
-			return object, true
+	for index := range table.objects[:] {
+		if table.objects[index] != nil {
+			continue
 		}
+		object, allocated := objects.Or(table.storage).New()
+		if !allocated {
+			return nil, false
+		}
+		table.objects[index] = object
+		table.nextID++
+		object.reset()
+		object.id, object.size, object.refs, object.payer = namespace|table.nextID, size, 1, payer
+		return object, true
 	}
 	return nil, false
 }
@@ -161,21 +174,29 @@ func (table *Table) Find(id uint64) (*Object, bool) {
 	if table == nil || !IsObject(id) {
 		return nil, false
 	}
-	for index := range table.objects {
-		if table.objects[index].id == id {
-			return &table.objects[index], true
+	for _, object := range table.objects[:] {
+		if object != nil && object.id == id {
+			return object, true
 		}
 	}
 	return nil, false
 }
 
-// Remove forgets the object with id. The caller frees its frames first.
+// Remove forgets the object with id and frees its record. The caller frees
+// its frames first and holds no pointer to it afterwards.
 func (table *Table) Remove(id uint64) bool {
-	object, found := table.Find(id)
-	if found {
-		object.reset()
+	if table == nil || !IsObject(id) {
+		return false
 	}
-	return found
+	for index, object := range table.objects[:] {
+		if object != nil && object.id == id {
+			table.objects[index] = nil
+			object.reset()
+			objects.Or(table.storage).Free(object)
+			return true
+		}
+	}
+	return false
 }
 
 // reset empties a slot in place. Assigning an Object literal would build the
@@ -188,8 +209,8 @@ func (object *Object) reset() {
 // Live counts the objects in existence.
 func (table *Table) Live() int {
 	count := 0
-	for index := range table.objects {
-		if table.objects[index].id != 0 {
+	for _, object := range table.objects[:] {
+		if object != nil {
 			count++
 		}
 	}

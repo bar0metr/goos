@@ -35,8 +35,8 @@ end closes only when the last of them does:
 
 So an end can be shared: PID 1 grants the terminal's writing end to the shell
 and to every stage of every pipeline, and a stage exiting closes only its own
-copies. Counts are 16-bit and bounded by the handles that exist (32 processes ×
-128 handles); the bound is checked anyway, before anything is installed, and a
+copies. Counts are 16-bit and bounded by the handles that exist (64 processes ×
+256 handles); the bound is checked anyway, before anything is installed, and a
 count is never decremented below zero. The counting is in `kernel/stream`
 (`Retain`, `Drop`, `Placed`, `CloseHandle`) and host-tested with real handle
 tables and IPC channels.
@@ -47,8 +47,10 @@ reader discards buffered bytes and makes later writes fail with peer closure.
 Process teardown drops every owned stream handle and releases the object after
 both ends close.
 
-The registry holds 64 streams, 256 KiB of static kernel memory. An ordinary
-process may hold four and PID 1 twenty-four (ADR 0072, ADR 0089).
+The registry holds up to 256 streams. Each is one page, a 4080-byte ring and
+its counters, taken from the page allocator when the stream is created and
+returned when it is released (ADR 0111). An ordinary process may hold sixteen
+and PID 1 sixty-four (ADR 0072, ADR 0089, ADR 0111).
 
 The userspace integration probe creates a stream, writes and reads data, closes
 the writer, observes EOF, and closes the reader. The shell uses the same object

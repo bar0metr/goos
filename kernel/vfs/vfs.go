@@ -6,11 +6,13 @@ import (
 )
 
 const (
-	MaxMounts    = 8
-	MaxOpenFiles = 64
+	MaxMounts = 8
+	// MaxOpenFiles is the files open at once in one namespace, a few dozen
+	// bytes each (ADR 0111).
+	MaxOpenFiles = 256
 	// MaxOpenPerOwner bounds the files one owner holds open, so a single
 	// session cannot take the whole table from the others.
-	MaxOpenPerOwner = 16
+	MaxOpenPerOwner = 64
 	// MaxPath is the native path limit (ADR 0110).
 	MaxPath  = limits.PathMax
 	MaxCache = 32
@@ -133,7 +135,8 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 	for index := range namespace.mounts {
 		entry := &namespace.mounts[index]
 		if !entry.used {
-			entry.backend, entry.root, entry.path, entry.size, entry.used = backend, root, *canonical, uint16(size), true
+			entry.backend, entry.root, entry.size, entry.used = backend, root, uint16(size), true
+			copy(entry.path[:], canonical[:size])
 			namespace.invalidate()
 			return StatusOK
 		}

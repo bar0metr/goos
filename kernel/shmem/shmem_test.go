@@ -3,6 +3,7 @@ package shmem
 import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
+	"goos/kernel/objects"
 	"testing"
 )
 
@@ -153,5 +154,46 @@ func BenchmarkSharedPagePayloadAccess(b *testing.B) {
 	for index := 0; index < b.N; index++ {
 		writer[index&4095] = byte(index)
 		sharedBenchmarkSink += reader[(index+1)&4095]
+	}
+}
+
+// TestObjectRecordsComeAndGo covers ADR 0111: an object's record is taken
+// from the storage when the object is created and returned when its last
+// reference goes, and a create without memory for its record is refused.
+func TestObjectRecordsComeAndGo(t *testing.T) {
+	m := newMemory()
+	storage := &objects.Limited[Object]{}
+	var table Table
+	table.SetStorage(storage)
+	created := make([]*Object, 0, MaxObjectsPerProcess)
+	for index := 0; index < MaxObjectsPerProcess; index++ {
+		object, ok := table.Create(m, m.view, zeroed, 1, 7)
+		if !ok {
+			t.Fatalf("create %d refused", index)
+		}
+		object.Retain()
+		created = append(created, object)
+	}
+	if storage.Live != MaxObjectsPerProcess || table.Live() != MaxObjectsPerProcess {
+		t.Fatalf("%d records for %d objects", storage.Live, table.Live())
+	}
+	for _, object := range created {
+		id := object.ID()
+		if _, _, freed := table.Drop(object, m, m.view); !freed {
+			t.Fatal("last reference did not free the object")
+		}
+		if _, found := table.Find(id); found {
+			t.Fatal("a freed object is still found")
+		}
+	}
+	if storage.Live != 0 || table.Live() != 0 || len(m.pages) != 0 {
+		t.Fatalf("%d records, %d objects, %d pages left", storage.Live, table.Live(), len(m.pages))
+	}
+	storage.Limit = 1
+	if _, ok := table.Create(m, m.view, zeroed, 1, 8); !ok {
+		t.Fatal("create refused")
+	}
+	if _, ok := table.Create(m, m.view, zeroed, 1, 8); ok {
+		t.Fatal("create succeeded without memory for its record")
 	}
 }

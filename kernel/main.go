@@ -13,6 +13,7 @@ import (
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
 	"goos/kernel/device"
+	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/initramfs"
 	"goos/kernel/ipc"
@@ -116,7 +117,7 @@ var (
 	initName                    = []byte("init")
 	initImagePath               = []byte("system/init")
 	initProcessSlot             process.Process
-	spawnedProcesses            [process.MaxProcesses]process.Process
+	spawnedProcesses            [process.MaxProcesses]*process.Process
 	nextProcessID               process.ID = 4
 	virtioBlockPort             uint16
 )
@@ -298,6 +299,11 @@ func main() {
 	// The kernel's copies into user memory fault in demand-zero pages the
 	// way the processor's accesses do (ADR 0104).
 	vm.SetFaultResolver(resolveCopyFault)
+	// Registry entries take their pages as they are created (ADR 0111).
+	channelRegistry.SetStorage(pageObjects[ipc.Channel]{})
+	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
+	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
+	executables.SetStorage(pageObjects[executable.Object]{})
 	if !built {
 		console.WriteString("PANIC: page-table construction failed\n")
 		for {

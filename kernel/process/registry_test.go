@@ -58,13 +58,13 @@ func TestCompletionRecordedForEveryProcess(t *testing.T) {
 		if !registry.Add(&owner) {
 			t.Fatalf("registry rejected process %d", index+1)
 		}
-		task, _ := sched.NewTaskID(uint32(index+1), 1)
+		task, _ := sched.NewTaskID(uint32(index), 1)
 		if !registry.BindTask(ID(index+1), task) {
 			t.Fatalf("bind %d failed", index+1)
 		}
 	}
 	for index := range owners {
-		task, _ := sched.NewTaskID(uint32(index+1), 1)
+		task, _ := sched.NewTaskID(uint32(index), 1)
 		if _, report := registry.ReportTaskExit(task, uint64(index)); report != ExitProcessEnded {
 			t.Fatalf("process %d report = %d", index+1, report)
 		}

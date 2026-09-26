@@ -208,7 +208,7 @@ func userspaceMain() {
 				}
 			}
 		}
-		readyMask := uint16(1)
+		readyMask := uint64(1)
 		if lifecycleCount == 0 {
 			// A scheduled restart is a deadline rather than an event. While one
 			// is outstanding the wait is bounded, so the service comes back

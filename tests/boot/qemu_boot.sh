@@ -244,6 +244,16 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 3
 	printf 'touch /tmp/%sx\n' "$long_name"
 	sleep 1
+	# Seven background pipelines at once, two VFS sessions each: more jobs
+	# than the former four exec slots allowed, more sessions than the VFS's
+	# former twelve, and more channels than the kernel's former 24 (ADR 0111).
+	for job in 1 2 3 4 5 6 7; do
+		printf 'sleep 4 | cat /system/motd | write /tmp/bg%s &\n' "$job"
+		sleep 0.3
+	done
+	sleep 6
+	printf 'cat /tmp/bg1 /tmp/bg4 /tmp/bg7\n'
+	sleep 1
 	printf 'readline\n'
 	sleep 1
 	printf 'bounded stdin payload\n'
@@ -747,6 +757,9 @@ require_regex names.ramfs-long-path '^deep-ramfs$' 'a 255-byte name under a 405-
 require_regex names.fat32-long-name "^$long_name\$" 'a 255-byte name listed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
 require_regex names.fat32-rename '^deep-fat32$' 'a long name renamed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
 require_regex names.too-long ': file name too long$' 'a 256-byte name refused as too long' "$log" 'goos> touch /tmp/nnn'
+count_window registries.background-jobs '\[[1-7]\] started$' 7 "$log" 'goos> sleep 4 | cat /system/motd | write /tmp/bg1 &' 'goos> cat /tmp/bg1 /tmp/bg4 /tmp/bg7'
+forbid_window registries.no-exhaustion 'resource limit\|too many background jobs\|cannot start' 'seven pipelines ran without running out of anything' "$log" 'goos> sleep 4 | cat /system/motd | write /tmp/bg1 &' 'goos> readline'
+count_window registries.background-output 'Welcome to GoOS' 3 "$log" 'goos> cat /tmp/bg1 /tmp/bg4 /tmp/bg7' 'goos> readline'
 # A line typed while a command runs is that command's input: it is echoed once
 # and printed once more by readline, and never reaches the shell as a command.
 require_count shell.stdin-output '^bounded stdin payload$' 2 "$log" 'goos> readline'
@@ -989,8 +1002,8 @@ require_marker quota.enforced QUOTA_OK "$log"
 require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quota table header' "$log" 'goos> quota'
 # The shell is an ordinary process: its stream share must be a part of the
 # table rather than all of it, or the quota bounds nothing.
-require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/4$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
-require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/24$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/16$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
+require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/64$' 'PID 1 holding the system share' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 # The shell waits for input instead of retrying the read, so after a session of
 # this length its CPU total stays in three digits. Before it was over seven

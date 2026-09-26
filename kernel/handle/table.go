@@ -2,7 +2,11 @@ package handle
 
 import "goos/internal/capability"
 
-const MaxHandles = 128
+// MaxHandles is the per-process handle limit. A table is 24 bytes a slot and
+// lives in the process record, whose pages are allocated when a process slot
+// is first used (ADR 0111); 256 leaves PID 1, which holds every service's
+// endpoints and each job's streams, room past what it holds at peak.
+const MaxHandles = 256
 
 type ID uint64
 

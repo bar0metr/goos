@@ -7,10 +7,15 @@ import (
 	"goos/kernel/sched"
 )
 
+// MaxProcesses is the system-wide process limit. A process needs at least one
+// of the scheduler's sched.MaxTasks task slots, so more processes than slots
+// could never run; the kernel allocates a process record's pages the first
+// time a slot is used (ADR 0111). MaxExitEvents keeps one exit report per
+// process until PID 1 collects it.
 const (
 	MaxTasksPerProcess = 32
-	MaxProcesses       = 32
-	MaxExitEvents      = 32
+	MaxProcesses       = sched.MaxTasks
+	MaxExitEvents      = MaxProcesses
 )
 
 type ID uint64

@@ -143,7 +143,7 @@ func releaseExitedProcess(event process.ExitEvent) {
 	}
 	processRegistry.Remove(event.Process)
 	for index := range spawnedProcesses {
-		if spawnedProcesses[index].ID() == event.Process {
+		if spawnedProcesses[index] != nil && spawnedProcesses[index].ID() == event.Process {
 			spawnedProcesses[index].Reset()
 			break
 		}

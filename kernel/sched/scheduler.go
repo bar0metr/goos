@@ -1,5 +1,11 @@
 package sched
 
+// MaxTasks is the system-wide task limit, an intentional one: the scheduler's
+// run, dead, and exit-pending sets are single 64-bit masks it scans with one
+// instruction, and its per-slot tables (contexts, roots, FPU areas) are sized
+// by them (ADR 0111). Every process needs a task, so process.MaxProcesses
+// follows it. Raising it means multi-word masks in the assembly scheduler,
+// which the SMP scheduler will need anyway.
 const MaxTasks = 64
 
 type TaskID uint64

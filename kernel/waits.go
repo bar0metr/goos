@@ -333,8 +333,8 @@ func waitEvents(events kcall.WaitEvent) kernelwait.Event {
 	return result
 }
 
-func readyWaitAny(entries []kernelwait.Entry) uint16 {
-	var mask uint16
+func readyWaitAny(entries []kernelwait.Entry) uint64 {
+	var mask uint64
 	for index, entry := range entries {
 		ready := false
 		switch entry.Key.Kind {
@@ -367,8 +367,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint16 {
 	return mask
 }
 
-func writeWaitAnyMask(root, resultAddress uint64, mask uint16) kcall.Status {
-	putUint64(waitMaskWire[:], uint64(mask))
+func writeWaitAnyMask(root, resultAddress uint64, mask uint64) kcall.Status {
+	putUint64(waitMaskWire[:], mask)
 	if !vm.CopyOut(root, resultAddress+8, waitMaskWire[:]) {
 		return kcall.StatusInvalidArgument
 	}

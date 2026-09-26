@@ -158,8 +158,19 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	pid := nextProcessID
 	var spawned *process.Process
 	for index := range spawnedProcesses {
+		// A slot gets its record's pages the first time it is needed and
+		// keeps them for the processes that reuse it: other kernel
+		// structures point at a live record, and reuse never frees one they
+		// might still name (ADR 0111).
+		if spawnedProcesses[index] == nil {
+			allocated, ok := vm.NewObject[process.Process](&pageAllocator)
+			if !ok {
+				break
+			}
+			spawnedProcesses[index] = allocated
+		}
 		if spawnedProcesses[index].ID() == 0 {
-			spawned = &spawnedProcesses[index]
+			spawned = spawnedProcesses[index]
 			break
 		}
 	}

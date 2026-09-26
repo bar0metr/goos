@@ -239,7 +239,7 @@ type Interest struct {
 
 // WaitAny blocks until one of the first count interests is ready or timeout
 // ticks elapse, and returns the mask of ready interests.
-func WaitAny(interests *[kcall.WaitAnyMaxObjects]Interest, count int, timeout uint64) (uint16, kcall.Status) {
+func WaitAny(interests *[kcall.WaitAnyMaxObjects]Interest, count int, timeout uint64) (uint64, kcall.Status) {
 	if interests == nil || count < 0 || count > kcall.WaitAnyMaxObjects {
 		return 0, kcall.StatusInvalidArgument
 	}
@@ -247,5 +247,5 @@ func WaitAny(interests *[kcall.WaitAnyMaxObjects]Interest, count int, timeout ui
 	// SAFETY: Interest is two 8-byte fields with no padding, which is the
 	// kernel's 16-byte interest record, and the array outlives the call.
 	result := status(waitAny(unsafe.Pointer(&interests[0]), uintptr(count), unsafe.Pointer(&waitWire[0])))
-	return uint16(waitWire[1]), result
+	return waitWire[1], result
 }

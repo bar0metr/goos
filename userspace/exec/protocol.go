@@ -25,10 +25,11 @@ const (
 
 // Requests are written to an area shared by the shell and PID 1, one slot per
 // job in flight; the submit message names the slot. A slot is as large as a
-// startup object, which is what a request becomes (ADR 0109).
+// startup object, which is what a request becomes (ADR 0109). Eight slots are
+// seven background jobs and a foreground one (ADR 0111).
 const (
 	AreaAddress = vm.UserSharedAddress + 16<<20
-	Slots       = 4
+	Slots       = 8
 	SlotSize    = startup.MaxSize
 	AreaSize    = uint64(Slots * SlotSize)
 )

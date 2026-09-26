@@ -399,7 +399,7 @@ const MaxStartupSize = 64 << 10
 // object. Userspace performs the typed receive/read/wait operation after the
 // returned ready mask identifies the objects whose state changed.
 const (
-	WaitAnyMaxObjects      = 16
+	WaitAnyMaxObjects      = 64
 	WaitAnyInterestSize    = uint64(16)
 	WaitAnyResultSize      = uint64(16)
 	WaitAnyInfiniteTimeout = ^uint64(0)

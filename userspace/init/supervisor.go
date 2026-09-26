@@ -8,7 +8,9 @@ import (
 )
 
 const (
-	MaxServices     = 16
+	// MaxServices bounds the services PID 1 supervises: the image declares
+	// nine, and each record is a few hundred bytes (ADR 0111).
+	MaxServices     = 32
 	MaxDependencies = 8
 	MaxCapabilities = 7
 	MaxEvents       = 32
