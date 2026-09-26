@@ -38,8 +38,9 @@ block service first describes the device it reads its partition structures with
 - otherwise a FAT, exFAT or NTFS boot sector at LBA 0: the whole disk is the
   volume ("superfloppy");
 - otherwise an MBR: up to four primary entries, each after LBA 0, inside the
-  disk and apart from the others. Extended partitions are listed but their
-  logical partitions are not read.
+  disk and apart from the others. One extended partition is walked through a
+  bounded, validated EBR chain; logical partitions are listed and selected
+  with indices starting at five, while the container itself is not mountable.
 
 A selector then picks the volume: `auto` (the whole disk without a table, the
 first MBR FAT32 partition, the first GPT basic-data partition — never the EFI

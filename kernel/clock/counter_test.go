@@ -96,8 +96,10 @@ func TestRealtimeAdvancesWithMonotonicCounter(t *testing.T) {
 	if !realtime.Init(base, start) {
 		t.Fatal("realtime initialization rejected")
 	}
-	got, ok := realtime.Now(&counter, start+counter.Hz()*2+counter.Hz()/2)
-	if !ok || got != (timekeeping.Time{Seconds: base.Seconds + 3, Nanoseconds: 250_000_000}) {
+	reading := start + counter.Hz()*2 + counter.Hz()/2
+	elapsed, elapsedOK := counter.Elapsed(start, reading)
+	got, ok := realtime.Now(&counter, reading)
+	if !elapsedOK || !ok || got != base.Add(elapsed) {
 		t.Fatalf("realtime = %+v, %v", got, ok)
 	}
 	older, ok := realtime.Now(&counter, start-1)

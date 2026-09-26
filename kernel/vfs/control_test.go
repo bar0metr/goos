@@ -48,6 +48,20 @@ func TestSetFilesystemControlRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUnmountControlRoundTrip(t *testing.T) {
+	message, ok := UnmountRequest(7)
+	if !ok || !IsUnmount(message) || IsSync(message) {
+		t.Fatal("unmount request did not round trip")
+	}
+	message.HandleCount = 1
+	if IsUnmount(message) {
+		t.Fatal("unmount request accepted an attached handle")
+	}
+	if _, ok := UnmountRequest(0); ok {
+		t.Fatal("encoded an uncorrelated unmount")
+	}
+}
+
 func TestSessionNoticeRoundTrip(t *testing.T) {
 	notice, ok := SessionNotice(handle.ID(0x100000009))
 	if !ok {

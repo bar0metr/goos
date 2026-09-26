@@ -69,12 +69,18 @@ func (service *Service) AttachFilesystem(transport Transport) bool {
 	service.persistent.transport = transport
 	root, status := service.persistent.Root()
 	if status != ramfs.StatusOK {
+		service.persistent.transport = nil
 		return false
 	}
 	if service.persistentMounted {
 		return root == service.persistentRoot
 	}
 	if !service.mountPersistent(root) {
+		// Mounting /persist, /home and /state is one operation. None can have
+		// live references before AttachFilesystem returns, so this rollback
+		// cannot be busy.
+		service.namespace.UnmountBackend(&service.persistent)
+		service.persistent.transport = nil
 		return false
 	}
 	service.persistentRoot, service.persistentMounted = root, true
@@ -92,6 +98,26 @@ func (service *Service) AttachCache(memory []byte) bool {
 // in the namespace and answer with I/O errors until a restarted service is
 // attached.
 func (service *Service) DetachFilesystem() { service.persistent.transport = nil }
+
+// UnmountFilesystem flushes and atomically removes every namespace alias of
+// the persistent backend. Open files make the operation busy; a flush failure
+// leaves the namespace and transport intact.
+func (service *Service) UnmountFilesystem() vfs.Status {
+	if !service.persistentMounted {
+		return vfs.StatusNotFound
+	}
+	if !service.persistent.Flush() {
+		return vfs.StatusBackendError
+	}
+	if status := service.namespace.UnmountBackend(&service.persistent); status != vfs.StatusOK {
+		return status
+	}
+	service.persistent.transport = nil
+	service.persistentRoot = 0
+	service.persistentMounted = false
+	service.persistent.forgetAll()
+	return vfs.StatusOK
+}
 
 // PersistentMounted reports whether the persistent volume is in the namespace.
 func (service *Service) PersistentMounted() bool { return service.persistentMounted }

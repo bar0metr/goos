@@ -70,8 +70,8 @@ const (
 	// KindEFI: the EFI system partition, which is FAT but belongs to the
 	// firmware; it is never chosen automatically.
 	KindEFI
-	// KindExtended: an MBR extended partition. Its logical partitions are
-	// not read (ADR 0115).
+	// KindExtended: an MBR extended partition. It is a container rather than
+	// a mountable volume; its logical partitions are separate table entries.
 	KindExtended
 )
 
@@ -90,7 +90,8 @@ const (
 
 // Partition is one used entry of a table. Start and Length are in bytes.
 type Partition struct {
-	// Index is the entry's number, from 1: the MBR slot, or the GPT entry.
+	// Index is the entry's number, from 1: the MBR primary slot or GPT entry;
+	// MBR logical partitions use the conventional sequence starting at 5.
 	Index    uint32
 	Start    uint64
 	Length   uint64
@@ -209,7 +210,10 @@ func (scanner *Scanner) Scan(reader Reader, capacity uint64, blockSize uint32, t
 		table.Scheme = SchemeRaw
 		return StatusOK
 	}
-	return scanMBR(&mbr, table)
+	if status := scanMBR(&mbr, table); status != StatusOK || table.Scheme != SchemeMBR {
+		return status
+	}
+	return scanner.scanExtended(reader, &mbr, table)
 }
 
 // filesystemBootSector recognises a FAT, exFAT or NTFS boot sector at LBA 0.

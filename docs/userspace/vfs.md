@@ -70,6 +70,13 @@ A dead or stalled FAT32 service is an I/O error on those three mounts only; a
 restarted one is attached under the same mounts and open files (ADR 0096). Kernel launch
 grants explicitly identify the client or server side of a channel; neither
 process infers endpoint identity from handle numbers or launch order.
+
+Clean unmount is a distinct PID 1-only control operation (ADR 0116). It flushes
+the filesystem first, refuses while any open VFS handle refers to any alias of
+the backend, then removes `/persist`, `/home` and `/state` atomically and closes
+the service channel. A dead filesystem service is not treated as a clean
+unmount: its mounts remain and return peer errors so supervision can reattach a
+replacement without invalidating namespace identity.
 The freestanding runtime uses a fixed bump allocator. After persistent service
 initialization, VFS records an arena mark and restores it before every request;
 temporary decode and dispatch allocations therefore remain request-bounded.

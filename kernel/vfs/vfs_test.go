@@ -121,6 +121,36 @@ func TestNamespacesKeepIndependentMountTables(t *testing.T) {
 	}
 }
 
+func TestUnmountBackendRejectsLiveFilesAndDetachesAliasesAtomically(t *testing.T) {
+	var filesystem ramfs.FileSystem
+	root := filesystem.Init()
+	file, status := filesystem.Create(root, []byte("file"))
+	if status != ramfs.StatusOK || file == 0 {
+		t.Fatal("file setup failed")
+	}
+	var namespace Namespace
+	if namespace.Mount([]byte("/"), &filesystem, root) != StatusOK ||
+		namespace.Mount([]byte("/alias"), &filesystem, root) != StatusOK {
+		t.Fatal("mount setup failed")
+	}
+	handle, openStatus := namespace.Open(1, []byte("/alias/file"), Read)
+	if openStatus != StatusOK {
+		t.Fatalf("open = %d", openStatus)
+	}
+	if got := namespace.UnmountBackend(&filesystem); got != StatusBusy {
+		t.Fatalf("unmount with live file = %d", got)
+	}
+	if _, _, got := namespace.Resolve([]byte("/alias")); got != StatusOK {
+		t.Fatalf("busy unmount detached part of backend: %d", got)
+	}
+	if namespace.Close(1, handle) != StatusOK || namespace.UnmountBackend(&filesystem) != StatusOK {
+		t.Fatal("clean unmount failed")
+	}
+	if _, _, got := namespace.Resolve([]byte("/alias")); got != StatusNotFound {
+		t.Fatalf("alias remains after unmount: %d", got)
+	}
+}
+
 func BenchmarkCachedResolve(b *testing.B) {
 	namespace, _ := mountedNamespace(b)
 	if namespace.Create([]byte("/cached"), false) != StatusOK {

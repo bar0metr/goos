@@ -116,8 +116,15 @@ func TestMBR(t *testing.T) {
 		{Type: 0x0f, Start: 32768, Count: 1000},
 		{Type: 0x0b, Start: 40000, Count: 1000},
 	})
+	ebr := device.data[32768*512 : 32769*512]
+	putMBREntry(ebr[mbrTable:], MBRPartition{Type: 0x0c, Start: 1, Count: 400})
+	putMBREntry(ebr[mbrTable+mbrEntrySize:], MBRPartition{Type: 0x0f, Start: 500, Count: 500})
+	ebr[510], ebr[511] = 0x55, 0xaa
+	ebr = device.data[33268*512 : 33269*512]
+	putMBREntry(ebr[mbrTable:], MBRPartition{Type: 0x0b, Start: 1, Count: 400})
+	ebr[510], ebr[511] = 0x55, 0xaa
 	table := mustScan(t, device, 512)
-	if table.Scheme != SchemeMBR || table.Count != 4 {
+	if table.Scheme != SchemeMBR || table.Count != 6 {
 		t.Fatalf("scheme %v count %d", table.Scheme, table.Count)
 	}
 	want := []struct {
@@ -125,7 +132,7 @@ func TestMBR(t *testing.T) {
 		start  uint64
 		length uint64
 		kind   Kind
-	}{{1, 2048 * 512, 4096 * 512, KindOther}, {2, 8192 * 512, 16384 * 512, KindData}, {3, 32768 * 512, 1000 * 512, KindExtended}, {4, 40000 * 512, 1000 * 512, KindData}}
+	}{{1, 2048 * 512, 4096 * 512, KindOther}, {2, 8192 * 512, 16384 * 512, KindData}, {3, 32768 * 512, 1000 * 512, KindExtended}, {4, 40000 * 512, 1000 * 512, KindData}, {5, 32769 * 512, 400 * 512, KindData}, {6, 33269 * 512, 400 * 512, KindData}}
 	for i, want := range want {
 		got := table.Partitions[i]
 		if got.Index != want.index || got.Start != want.start || got.Length != want.length || got.Kind != want.kind {
@@ -133,8 +140,8 @@ func TestMBR(t *testing.T) {
 		}
 	}
 	// Auto takes the first FAT32 partition; number 1 is Linux, but a number
-	// takes any type; an extended partition's logical partitions are not
-	// read.
+	// takes any type except the extended container; logical partitions use
+	// Linux-compatible indices starting at five.
 	for _, test := range []struct {
 		selector Selector
 		start    uint64
@@ -143,8 +150,10 @@ func TestMBR(t *testing.T) {
 		{Selector{Kind: SelectAuto}, 8192 * 512, StatusOK},
 		{Selector{Kind: SelectIndex, Index: 1}, 2048 * 512, StatusOK},
 		{Selector{Kind: SelectIndex, Index: 4}, 40000 * 512, StatusOK},
+		{Selector{Kind: SelectIndex, Index: 5}, 32769 * 512, StatusOK},
+		{Selector{Kind: SelectIndex, Index: 6}, 33269 * 512, StatusOK},
 		{Selector{Kind: SelectIndex, Index: 3}, 0, StatusUnsupported},
-		{Selector{Kind: SelectIndex, Index: 5}, 0, StatusNotFound},
+		{Selector{Kind: SelectIndex, Index: 7}, 0, StatusNotFound},
 		{Selector{Kind: SelectGUID, GUID: firstGUID}, 0, StatusNotFound},
 		{Selector{Kind: SelectWhole}, 0, StatusOK},
 	} {
