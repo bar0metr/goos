@@ -78,8 +78,9 @@ block client endpoint, and the block service forwards it to the driver over a
 private channel. The driver performs the virtqueue transfer and waits for
 IRQ 11. Replies unwind in reverse.
 
-Small requests carry their data inline: at most 224 bytes per VFS reply and 32
-bytes per VFS write request. Large ones move it through shared memory instead
+Small requests carry their data inline: at most 224 bytes per VFS reply and per
+VFS write request (GVF1 version 5 moved a rename's target out of the data
+field, which had held write data to 32 bytes). Large ones move it through shared memory instead
 (ADR 0107):
 
 - A client creates a buffer with `MemoryCreate`, maps it, and attaches to each

@@ -402,6 +402,11 @@ func TestMapStatusKeepsTheReason(t *testing.T) {
 		{ramfs.StatusNotEmpty, StatusNotEmpty},
 		{ramfs.StatusInvalidArgument, StatusInvalidArgument},
 		{ramfs.StatusIOError, StatusBackendError},
+		{ramfs.StatusNoSpace, StatusNoSpace},
+		{ramfs.StatusCorrupt, StatusCorrupt},
+		{ramfs.StatusTimeout, StatusTimeout},
+		{ramfs.StatusPeerDied, StatusPeerDied},
+		{ramfs.StatusUnsupported, StatusUnsupported},
 	} {
 		if got := mapStatus(test.backend); got != test.want {
 			t.Fatalf("mapStatus(%d) = %d, want %d", test.backend, got, test.want)

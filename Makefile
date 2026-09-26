@@ -400,6 +400,17 @@ docs:
 	@test -f docs/adr/0099-restartable-vfs.md
 	@test -f docs/adr/0100-config-and-log-service-restart.md
 	@test -f docs/adr/0101-restartable-block-service.md
+	@test -f docs/releases/0.1.3.md
+	@test -f docs/adr/0102-scalable-fat32.md
+	@test -f docs/adr/0103-physical-memory-beyond-the-first-gib.md
+	@test -f docs/adr/0104-native-virtual-memory-regions.md
+	@test -f docs/adr/0105-page-backed-ramfs.md
+	@test -f docs/adr/0106-lazily-loaded-executables.md
+	@test -f docs/adr/0107-bulk-io-through-shared-memory.md
+	@test -f docs/adr/0108-non-blocking-executable-preparation.md
+	@test -f docs/adr/0109-variable-length-startup-object.md
+	@test -f docs/adr/0110-native-name-and-path-limits.md
+	@test -f docs/adr/0111-bounded-dynamic-registries.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

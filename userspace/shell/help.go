@@ -87,6 +87,12 @@ func VFSReason(status vfs.Status, mutation bool) string {
 		return "filesystem is corrupt"
 	case vfs.StatusNameTooLong:
 		return "file name too long"
+	case vfs.StatusTimeout:
+		return "storage did not answer in time"
+	case vfs.StatusPeerDied:
+		return "storage service unavailable"
+	case vfs.StatusUnsupported:
+		return "operation not supported"
 	default:
 		return "filesystem error"
 	}

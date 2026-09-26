@@ -115,6 +115,8 @@ type FileSystem struct {
 	// the recorded one untrustworthy and it is replaced with "unknown".
 	countStale bool
 	mounted    bool
+	// refusal is why the last Mount refused its volume.
+	refusal ramfs.Status
 
 	cache     [cacheSectors]cachedSector
 	clock     uint64
@@ -132,30 +134,48 @@ type FileSystem struct {
 // offset from it. Everything this filesystem computes — where the FATs are,
 // where a cluster is, how far a chain may run — comes from these fields, and
 // the image is untrusted input: a volume that does not fit its own device is
-// refused rather than read.
+// refused rather than read. Refused reports why.
 func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
+	root, status := fs.mount(device)
+	fs.refusal = status
+	return root, status == ramfs.StatusOK
+}
+
+// Refused is why the last Mount refused its volume: an I/O error for a device
+// that could not be read, Unsupported for a FAT volume this service does not
+// implement (FAT12, FAT16, sectors other than 512 bytes), and Corrupt for
+// geometry that contradicts itself or the device.
+func (fs *FileSystem) Refused() ramfs.Status { return fs.refusal }
+
+func (fs *FileSystem) mount(device Device) (ramfs.NodeID, ramfs.Status) {
 	*fs = FileSystem{}
 	var boot [sectorSize]byte
 	if device == nil || !device.ReadAt(0, boot[:]) {
-		return 0, false
+		return 0, ramfs.StatusIOError
 	}
 	capacity := device.Capacity()
 	if capacity < sectorSize || capacity%sectorSize != 0 {
-		return 0, false
+		return 0, ramfs.StatusUnsupported
 	}
-	if boot[510] != 0x55 || boot[511] != 0xaa || uint64(get16(boot[11:13])) != sectorSize {
-		return 0, false
+	if boot[510] != 0x55 || boot[511] != 0xaa {
+		return 0, ramfs.StatusCorrupt
+	}
+	if uint64(get16(boot[11:13])) != sectorSize {
+		return 0, ramfs.StatusUnsupported
 	}
 	perCluster := uint64(boot[13])
 	if perCluster == 0 || perCluster > maxSectorsPerCluster || perCluster&(perCluster-1) != 0 {
-		return 0, false
+		return 0, ramfs.StatusCorrupt
 	}
 	reserved := uint64(get16(boot[14:16]))
 	copies := uint32(boot[16])
+	if reserved == 0 || copies == 0 || copies > maxFATs {
+		return 0, ramfs.StatusCorrupt
+	}
 	// A FAT32 BPB has no fixed root directory and no 16-bit FAT size; a
 	// volume that declares either is FAT12 or FAT16.
-	if reserved == 0 || copies == 0 || copies > maxFATs || get16(boot[17:19]) != 0 || get16(boot[22:24]) != 0 {
-		return 0, false
+	if get16(boot[17:19]) != 0 || get16(boot[22:24]) != 0 {
+		return 0, ramfs.StatusUnsupported
 	}
 	fatSectors := uint64(get32(boot[36:40]))
 	total := uint64(get16(boot[19:21]))
@@ -164,11 +184,11 @@ func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
 	}
 	root := get32(boot[44:48])
 	if fatSectors == 0 || total > capacity/sectorSize {
-		return 0, false
+		return 0, ramfs.StatusCorrupt
 	}
 	metadata := reserved + uint64(copies)*fatSectors
 	if total <= metadata {
-		return 0, false
+		return 0, ramfs.StatusCorrupt
 	}
 	clusters := (total - metadata) / perCluster
 	// Like Linux, a FAT too small for the data region limits the volume to
@@ -178,7 +198,7 @@ func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
 		clusters = described
 	}
 	if clusters == 0 || clusters > maxClusters {
-		return 0, false
+		return 0, ramfs.StatusCorrupt
 	}
 	fs.device, fs.fatStart, fs.fatSize, fs.fatCopies = device, reserved*sectorSize, fatSectors*sectorSize, copies
 	fs.dataStart, fs.clusterSize = metadata*sectorSize, perCluster*sectorSize
@@ -186,17 +206,17 @@ func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
 	if flags := get16(boot[40:42]); flags&extNoMirror != 0 {
 		active := uint32(flags & extActiveMask)
 		if active >= copies {
-			return 0, false
+			return 0, ramfs.StatusCorrupt
 		}
 		fs.fatRead, fs.fatFirst, fs.fatCopies = active, active, 1
 	}
 	if !fs.valid(root) {
-		return 0, false
+		return 0, ramfs.StatusCorrupt
 	}
 	fs.hint = 2
 	fs.readFSInfo(uint64(get16(boot[48:50])), reserved)
 	fs.mounted = true
-	return rootNode, true
+	return rootNode, ramfs.StatusOK
 }
 
 // readFSInfo takes the next-free hint from a valid FSInfo sector. The free

@@ -12,8 +12,9 @@ const (
 	// Version 3 adds the no-space and corrupt statuses (ADR 0102); version 4
 	// adds the bulk operations (ADR 0107); version 5 carries paths of up to
 	// PathMax bytes and names of up to NameMax, the long ones in an attached
-	// object, and gives a rename's target a field of its own (ADR 0110).
-	ProtocolVersion = uint16(5)
+	// object, and gives a rename's target a field of its own (ADR 0110);
+	// version 6 adds the timeout, peer-died, and unsupported statuses.
+	ProtocolVersion = uint16(6)
 	protocolHeader  = 32
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader

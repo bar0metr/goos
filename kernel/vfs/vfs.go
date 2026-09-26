@@ -52,7 +52,14 @@ const (
 	// listing whose next name is too long for a message and that attached no
 	// object to receive it; Size is then the name's length (ADR 0110).
 	StatusNameTooLong
-	lastStatus = StatusNameTooLong
+	// StatusTimeout is a filesystem service that did not answer in time,
+	// StatusPeerDied one that has gone, and StatusUnsupported an operation or
+	// on-disk feature a filesystem does not implement. StatusBackendError
+	// remains the I/O error: a device or a reply that failed.
+	StatusTimeout
+	StatusPeerDied
+	StatusUnsupported
+	lastStatus = StatusUnsupported
 )
 
 type Rights uint8
@@ -658,8 +665,13 @@ func mapStatus(status ramfs.Status) Status {
 		return StatusNoSpace
 	case ramfs.StatusCorrupt:
 		return StatusCorrupt
+	case ramfs.StatusTimeout:
+		return StatusTimeout
+	case ramfs.StatusPeerDied:
+		return StatusPeerDied
+	case ramfs.StatusUnsupported:
+		return StatusUnsupported
 	case ramfs.StatusIOError:
-		// A filesystem service that is gone or stalled is a storage error.
 		return StatusBackendError
 	default:
 		return StatusBackendError

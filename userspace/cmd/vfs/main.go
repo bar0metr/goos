@@ -58,17 +58,17 @@ var (
 // forgotten at once, so later calls fail without waiting.
 type filesystemTransport struct{}
 
-func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	if filesystem == 0 {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusPeerDied
 	}
 	correlation++
 	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest, fileCache) {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	size, ok := ipc.EncodeFrom(&filesystemRequest, filesystemWire[:])
 	if !ok {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	status := sys.IPCSend(filesystem, filesystemWire[:size])
 	// A reply to an earlier request that timed out may still be queued; it is
@@ -79,18 +79,25 @@ func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, boo
 			break
 		}
 		if !ipc.DecodeInto(filesystemWire[:wireSize(filesystemWire[:])], &filesystemReply) {
-			return fsproto.Reply{}, false
+			return fsproto.Reply{}, ramfs.StatusIOError
 		}
 		if filesystemReply.Correlation < correlation {
 			continue
 		}
 		reply, valid := fsproto.DecodeReply(&filesystemReply, fileCache, &filesystemName)
-		return reply, valid && filesystemReply.Correlation == correlation
+		if !valid || filesystemReply.Correlation != correlation {
+			return fsproto.Reply{}, ramfs.StatusIOError
+		}
+		return reply, ramfs.StatusOK
 	}
-	if status == kcall.StatusPeerDied {
+	switch status {
+	case kcall.StatusPeerDied:
 		dropFilesystem()
+		return fsproto.Reply{}, ramfs.StatusPeerDied
+	case kcall.StatusTimeout:
+		return fsproto.Reply{}, ramfs.StatusTimeout
 	}
-	return fsproto.Reply{}, false
+	return fsproto.Reply{}, ramfs.StatusIOError
 }
 
 // dropFilesystem forgets a filesystem service that has gone. Its mounts answer

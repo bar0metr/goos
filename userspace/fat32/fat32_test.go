@@ -244,3 +244,33 @@ func TestRejectedMountLeavesNoUsableFilesystem(t *testing.T) {
 		t.Fatal("a create succeeded on a refused volume")
 	}
 }
+
+// TestMountSaysWhyItRefused covers the typed error model: a volume this
+// service does not implement is unsupported, a contradictory one corrupt, and
+// an unreadable device an I/O error.
+func TestMountSaysWhyItRefused(t *testing.T) {
+	var fs FileSystem
+	for name, test := range map[string]struct {
+		damage func(boot []byte)
+		want   ramfs.Status
+	}{
+		"FAT16 root directory": {func(boot []byte) { put16(boot[17:19], 512) }, ramfs.StatusUnsupported},
+		"FAT16 FAT size":       {func(boot []byte) { put16(boot[22:24], 32) }, ramfs.StatusUnsupported},
+		"4096-byte sectors":    {func(boot []byte) { put16(boot[11:13], 4096) }, ramfs.StatusUnsupported},
+		"no signature":         {func(boot []byte) { boot[510] = 0 }, ramfs.StatusCorrupt},
+		"no FATs":              {func(boot []byte) { boot[16] = 0 }, ramfs.StatusCorrupt},
+		"past the device":      {func(boot []byte) { put32(boot[32:36], 1<<30) }, ramfs.StatusCorrupt},
+	} {
+		device := formattedDevice()
+		test.damage(device.data[:512])
+		if _, ok := fs.Mount(device); ok || fs.Refused() != test.want {
+			t.Errorf("%s: mounted %v, refused with %d, want %d", name, ok, fs.Refused(), test.want)
+		}
+	}
+	if _, ok := fs.Mount(nil); ok || fs.Refused() != ramfs.StatusIOError {
+		t.Errorf("no device refused with %d", fs.Refused())
+	}
+	if _, ok := fs.Mount(formattedDevice()); !ok || fs.Refused() != ramfs.StatusOK {
+		t.Errorf("a good volume refused with %d", fs.Refused())
+	}
+}

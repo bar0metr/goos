@@ -585,6 +585,27 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	done
 	printf 'echo after-vm-faults\n'
 	sleep 1
+	# The same workload three times, the pages in use counted after each: a
+	# path that does not free what it allocated — a channel, a stream, an
+	# executable object, a shared-memory mapping, a startup object, a RAMFS
+	# page, a path page — shows up as growth between the second round and
+	# the third, once the first has warmed the caches (GoOS 0.1.3 §11).
+	for round in 1 2 3; do
+		printf 'echo leak-round-%s\n' "$round"
+		sleep 1
+		printf 'cp /home/tools/bigprobe /tmp/leak.bin; rm /tmp/leak.bin\n'
+		sleep 2
+		printf '/home/demo/args leak-check | readline\n'
+		sleep 1
+		printf 'bench io /tmp/leak.io 256K; rm /tmp/leak.io\n'
+		sleep 2
+		printf 'touch /tmp/%s; ls /tmp > /tmp/leak.ls; rm /tmp/%s /tmp/leak.ls\n' "$long_name" "$long_name"
+		sleep 1
+		printf 'sleep 1 | cat /system/motd | write /tmp/leak.pipe; rm /tmp/leak.pipe\n'
+		sleep 3
+		printf 'mem -p\n'
+		sleep 1
+	done
 	printf 'sleep 1\n'
 	sleep 1
 	printf 'cat /missing\n'
@@ -855,6 +876,15 @@ require_regex vm.guard 'user fault: guard page' 'a stack overflow stopped at the
 require_regex vm.unmapped 'user fault: no mapping' 'an unmapped access retired' "$log" 'goos> vmprobe unmapped'
 require_regex vm.quota 'user fault: page quota exhausted' 'a process past its page quota retired' "$log" 'goos> vmprobe quota'
 require_regex vm.system-survives '^after-vm-faults$' 'the system carries on after the faults' "$log" 'goos> echo after-vm-faults'
+leak_counts=$(sed -n '/goos> echo leak-round-2/,$p' "$log" | grep -a '^pages used: ' | sed -n '1,2s/^pages used: //p')
+leak_second=$(printf '%s\n' "$leak_counts" | sed -n 1p)
+leak_third=$(printf '%s\n' "$leak_counts" | sed -n 2p)
+if [ -n "$leak_second" ] && [ "$leak_second" = "$leak_third" ]; then
+	checks=$((checks + 1))
+else
+	fail_check leaks.steady-state 'the same pages in use after rounds 2 and 3' "${leak_second:-none} then ${leak_third:-none}" "$log" 'goos> echo leak-round-2'
+fi
+count_window leaks.rounds '^pages used: ' 1 "$log" 'goos> echo leak-round-1' 'goos> echo leak-round-2'
 pass_group vm
 
 value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)

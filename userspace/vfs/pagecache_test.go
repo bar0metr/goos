@@ -1,6 +1,7 @@
 package vfsservice
 
 import (
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	"strings"
@@ -160,7 +161,7 @@ func TestPageCacheEvictsTheOldestPage(t *testing.T) {
 // liar is a service that claims to have read more than a page.
 type liar struct{ *loopback }
 
-func (service liar) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+func (service liar) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	reply, ok := service.loopback.Exchange(request)
 	if request.Operation == fsproto.OperationRead {
 		reply.Value = fsproto.PageSize + 1

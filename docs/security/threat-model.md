@@ -188,6 +188,12 @@ The raw disk image is host-provided and persists across boots.
 - Requests that travel through shared memory (launch staging, exec area) are
   copied into private memory once, before validation, so the sender cannot
   change them afterwards (ADR 0062, 0064).
+- The same holds for what 0.1.3 moves through memory: the VFS copies paths out
+  of a client's attached object, the VFS and the FAT32 service copy a long name
+  out of the file cache's name page, and the kernel copies a startup template
+  once, validates the whole `GST4` object, and binds handles in its own copy
+  (ADR 0109, ADR 0110). An attached object is mapped for one request, bounded
+  in size, and never with more rights than its handle carries.
 
 ### Malicious native image
 

@@ -290,10 +290,10 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.2
+GoOS 0.1.3
 
 CPU: x86_64
-Memory: 366 MiB managed
+Memory: 367 MiB managed
 Timer: 100 Hz
 Security: capabilities, NX, W^X
 Scheduler: preemptive round-robin
@@ -440,7 +440,13 @@ confined to `userspace/runtime`, and smaller source files. GoOS 0.1.2
 compatibility: programs run from the persistent volume through executable
 objects, file data between the VFS and FAT32 moves through a shared file cache,
 and every system service restarts on failure without taking its clients down.
-The next milestone is Linux ELF compatibility.
+GoOS 0.1.3 ([docs/releases/0.1.3.md](docs/releases/0.1.3.md)) removes the
+prototype limits under every layer: FAT32 files up to 4 GiB and large
+directories, page-backed RAMFS, physical memory beyond 1 GiB, virtual-memory
+regions with demand-zero memory, lazily loaded programs of up to 256 MiB,
+shared-memory bulk I/O, a byte-bounded startup ABI and 4096-byte command lines,
+255-byte names and 4096-byte paths everywhere, and kernel registries that take
+memory as they grow. The next milestone is Linux ELF compatibility.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors. Background jobs can be

@@ -33,26 +33,29 @@ func newLoopback(device fat32.Device) *loopback {
 	return service
 }
 
-func (service *loopback) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+func (service *loopback) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	if service.fail {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusPeerDied
 	}
 	service.correlation++
 	var message ipc.Message
 	if !fsproto.EncodeRequest(request, service.correlation, &message, testCache) {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	decoded, ok := fsproto.DecodeRequest(&message, testCache, &service.requested)
 	if !ok {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	var answer ipc.Message
 	if !fsproto.EncodeReply(fsproto.Serve(&service.volume, decoded, testCache, &service.name), message.Correlation, &answer, testCache) {
-		return fsproto.Reply{}, false
+		return fsproto.Reply{}, ramfs.StatusIOError
 	}
 	if service.corrupt {
 		answer.Payload[5] = 1
 	}
 	reply, ok := fsproto.DecodeReply(&answer, testCache, &service.replied)
-	return reply, ok && answer.Correlation == service.correlation
+	if !ok || answer.Correlation != service.correlation {
+		return fsproto.Reply{}, ramfs.StatusIOError
+	}
+	return reply, ramfs.StatusOK
 }

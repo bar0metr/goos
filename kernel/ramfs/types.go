@@ -33,9 +33,17 @@ const (
 	// StatusCorrupt is on-disk metadata that fails validation: a cluster
 	// chain that loops, leaves the data area, or ends before the file does.
 	StatusCorrupt
+	// StatusTimeout is a backend served by another process that did not
+	// answer within its deadline; StatusPeerDied one whose process has gone.
+	// Both used to be reported as StatusIOError (GoOS 0.1.3 §12).
+	StatusTimeout
+	StatusPeerDied
+	// StatusUnsupported is an operation or an on-disk feature the backend
+	// does not implement.
+	StatusUnsupported
 	// LastStatus is the highest status a backend may report; decoders refuse
 	// anything above it.
-	LastStatus = StatusCorrupt
+	LastStatus = StatusUnsupported
 )
 
 type Kind uint8

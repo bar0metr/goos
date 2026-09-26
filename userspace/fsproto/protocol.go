@@ -23,8 +23,9 @@ const (
 	// Version 2 moves file data from the messages to the file cache; version
 	// 3 adds the no-space and corrupt statuses (ADR 0102); version 4 lets a
 	// read or write span consecutive slots (ADR 0107); version 5 carries
-	// names of up to 255 bytes, the long ones in the name page (ADR 0110).
-	Version = uint16(5)
+	// names of up to 255 bytes, the long ones in the name page (ADR 0110);
+	// version 6 adds the timeout, peer-died, and unsupported statuses.
+	Version = uint16(6)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported

@@ -10,7 +10,9 @@ Every message names a nonzero protocol ID and version. Request and reply
 messages carry a nonzero correlation ID; notifications carry none. A channel
 tracks outstanding request IDs per endpoint, rejects duplicate requests, and
 rejects replies that do not match an outstanding request. Payloads are limited
-to 256 bytes. Bulk transfer will use shared memory rather than larger messages.
+to 256 bytes. Bulk data travels in shared-memory objects attached to requests
+(ADR 0107), and a path or name too long for a message in an attached object or
+a shared page (ADR 0110), rather than in larger messages.
 
 The stable wire envelope is little-endian and independent of Go structure
 layout. Its 32-byte header contains `GIPC`, protocol ID, version, message kind,

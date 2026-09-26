@@ -1,7 +1,9 @@
 package vfsservice
 
 import (
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
+	"goos/userspace/fsproto"
 	"strings"
 	"testing"
 )
@@ -47,7 +49,7 @@ func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 		{Operation: vfs.OperationReadDir, Path: []byte("/persist")},
 		{Operation: vfs.OperationCreate, Path: []byte("/state/new")},
 	} {
-		if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusBackendError {
+		if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusPeerDied {
 			t.Fatalf("operation %d on a dead service = %d", request.Operation, reply.Status)
 		}
 	}
@@ -61,7 +63,7 @@ func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 		}
 	}
 	service.DetachFilesystem()
-	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home")}); reply.Status != vfs.StatusBackendError {
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/home")}); reply.Status != vfs.StatusPeerDied {
 		t.Fatalf("stat on a detached volume = %d", reply.Status)
 	}
 
@@ -164,5 +166,25 @@ func TestBlockIOErrorIsReportedNotFatal(t *testing.T) {
 	read := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
 	if read.Status != vfs.StatusOK || string(read.Data) != "before the failure" {
 		t.Fatalf("read after the device recovered = %d, %q", read.Status, read.Data)
+	}
+}
+
+// failing reports the same transport failure for every exchange.
+type failing struct{ reason ramfs.Status }
+
+func (transport failing) Exchange(fsproto.Request) (fsproto.Reply, ramfs.Status) {
+	return fsproto.Reply{}, transport.reason
+}
+
+// TestTransportFailuresKeepTheirReason covers the native error model: a
+// stalled service is a timeout, a dead one is a dead peer, and a garbled reply
+// is an I/O error, each its own status rather than one "storage error".
+func TestTransportFailuresKeepTheirReason(t *testing.T) {
+	for _, reason := range []ramfs.Status{ramfs.StatusTimeout, ramfs.StatusPeerDied, ramfs.StatusIOError} {
+		remote := Remote{}
+		remote.transport = failing{reason: reason}
+		if _, status := remote.Stat(1); status != reason {
+			t.Fatalf("backend reported %d for %d", status, reason)
+		}
 	}
 }

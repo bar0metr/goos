@@ -51,7 +51,9 @@ link per cluster rather than a walk from the first cluster per request.
 wraps once. The hint comes from a valid FSInfo sector when the volume has one
 (both signatures checked, the value range-checked) and is otherwise cluster 2;
 the free count FSInfo records is never trusted, and the first change replaces it
-with "unknown", which every checker accepts and recomputes. A write claims every
+with "unknown", the value the specification defines for a count not kept.
+Checkers recompute it; `fsck_msdos` on macOS notes the difference as a warning
+and still exits successfully. A write claims every
 cluster it needs before writing a byte, so a full volume refuses the whole
 request with `no space` and changes nothing; a claim that fails part way frees
 what it took.

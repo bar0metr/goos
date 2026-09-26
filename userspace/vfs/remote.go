@@ -10,14 +10,18 @@ import (
 // be reached, did not answer within its deadline, or answered with something
 // that does not decode; it never waits without bound.
 type Transport interface {
-	Exchange(request fsproto.Request) (fsproto.Reply, bool)
+	// Exchange sends request and returns the reply, or, when none usable
+	// came, why: StatusIOError for a malformed reply, StatusTimeout for none
+	// in time, StatusPeerDied for a service that has gone.
+	Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status)
 }
 
 // Remote is a namespace backend served by another process (ADR 0096). The VFS
 // keeps its node IDs in open files and in its mount table; the filesystem
-// service owns what they mean. A transport failure is an I/O error on this
-// backend's mounts and nothing else: the VFS itself, and every other mount,
-// keep working.
+// service owns what they mean. A transport failure — a timeout, a dead
+// service, a garbled reply — is an error on this backend's mounts and nothing
+// else, and keeps its reason: the VFS itself, and every other mount, keep
+// working.
 type Remote struct {
 	transport Transport
 	name      [ramfs.MaxName]byte
@@ -82,12 +86,15 @@ func (remote *Remote) forgetAll() {
 func (remote *Remote) call(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	if remote.transport == nil {
 		remote.forgetAll()
-		return fsproto.Reply{}, ramfs.StatusIOError
+		return fsproto.Reply{}, ramfs.StatusPeerDied
 	}
-	reply, ok := remote.transport.Exchange(request)
-	if !ok || reply.Operation != request.Operation {
+	reply, failure := remote.transport.Exchange(request)
+	if failure == ramfs.StatusOK && reply.Operation != request.Operation {
+		failure = ramfs.StatusIOError
+	}
+	if failure != ramfs.StatusOK {
 		remote.forgetAll()
-		return fsproto.Reply{}, ramfs.StatusIOError
+		return fsproto.Reply{}, failure
 	}
 	return reply, reply.Status
 }

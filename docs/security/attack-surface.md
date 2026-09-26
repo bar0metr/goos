@@ -37,9 +37,9 @@ table with type, generation, and rights checks.
 | 4 | `IPCReceive` | channel handle, Read | capacity ≥ 320; `CopyOut` | static wire buffer | no; empty → `NotFound` |
 | 5 | `IPCWaitReceive` | channel handle, Read + Wait | 24-byte descriptor `{buffer, capacity, timeout}`; `now + timeout` wrap check | 64 waiters; per-task status slot | yes, tick deadline; 0 → `Timeout` |
 | 6 | `ConsoleWrite` | device handle, Write, console object | length 1..4096; `CopyIn` | static 4 KiB buffer | no |
-| 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte from the 256-byte ring the UART interrupt fills | no; no input → `NotFound`; wait with `WaitAny` |
+| 7 | `ConsoleRead` | device handle, Read, console object | length exactly 1; `CopyOut` | one byte from the 8 KiB ring the UART interrupt fills | no; no input → `NotFound`; wait with `WaitAny` |
 | 8 | `ClockRead` | — | length exactly 8; `CopyOut` | none | no |
-| 9 | `StartupRead` | registered | length exactly 1024; `CopyIn` of own startup page, `CopyOut` | none | no |
+| 9 | `StartupRead` | registered | length 1..64 KiB; `CopyIn` of the caller's own read-only startup pages in 512-byte chunks, zeros past them, `CopyOut` | none | no |
 | 10 | `ChannelCreate` | caller is PID 1 | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 channels, global, three pages each while they live (ADR 0111); charged to PID 1's channel quota | no |
 | 11 | `HandleClose` | own handle | generation and slot; a stream handle drops one reference, refused below zero | none | no; wakes peers when a stream end's last handle closes |
 | 12 | `ProcessWait` | process handle, Wait | result address range (8 B); `now + timeout` wrap check | 64 waiters | yes, tick deadline; 0 → `Timeout` |
@@ -52,7 +52,7 @@ table with type, generation, and rights checks.
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
 | 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload; a write that does not fit whole is refused, never split | static 256 B buffer | no; full → `ResourceExhausted` |
 | 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline; a writer wakes when 256 bytes are free |
-| 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..16, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
+| 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..64, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
 | 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax (failure → `CorruptData`); time and PID are set by the kernel | 64-record ring, oldest overwritten | no |

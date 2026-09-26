@@ -1,6 +1,7 @@
 package vfsservice
 
 import (
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/fsproto"
 	"testing"
@@ -12,7 +13,7 @@ type counting struct {
 	exchanges int
 }
 
-func (transport *counting) Exchange(request fsproto.Request) (fsproto.Reply, bool) {
+func (transport *counting) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
 	transport.exchanges++
 	return transport.inner.Exchange(request)
 }
