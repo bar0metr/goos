@@ -32,6 +32,17 @@ func (volume *Volume) Root() (ramfs.NodeID, ramfs.Status) {
 	return volume.root, ramfs.StatusOK
 }
 
+// Health reports what the mount noticed about the volume it accepted.
+func (volume *Volume) Health() Health { return volume.fs.Health() }
+
+// Metadata reports the times and attributes of a node.
+func (volume *Volume) Metadata(id ramfs.NodeID) (Metadata, ramfs.Status) {
+	if !volume.mounted {
+		return Metadata{}, ramfs.StatusIOError
+	}
+	return volume.fs.Metadata(id)
+}
+
 // Flush makes every completed write durable on the device. It does not need
 // an accepted volume: shutting down flushes the device either way.
 func (volume *Volume) Flush() bool {

@@ -31,7 +31,8 @@ func (device fileDevice) Capacity() uint64 { return device.size }
 
 func main() {
 	size := flag.Uint64("size", 512, "volume size in MiB")
-	perCluster := flag.Uint("cluster-sectors", 8, "512-byte sectors per cluster (power of two, 1-128)")
+	sector := flag.Uint("sector-size", 512, "logical sector size in bytes (512, 1024, 2048 or 4096)")
+	perCluster := flag.Uint("cluster-sectors", 8, "sectors per cluster (power of two, 1-128)")
 	fats := flag.Uint("fats", 2, "number of FAT copies (1 or 2)")
 	var puts []string
 	flag.Func("put", "copy HOSTFILE:PATH onto the volume, creating directories (repeatable)", func(value string) error {
@@ -50,17 +51,17 @@ func main() {
 		return nil
 	})
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-size MiB] [-cluster-sectors N] [-fats N] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
+		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-size MiB] [-sector-size N] [-cluster-sectors N] [-fats N] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if flag.NArg() != 1 || *perCluster == 0 || *perCluster > 128 || *fats == 0 || *fats > 2 {
+	if flag.NArg() != 1 || *perCluster == 0 || *perCluster > 128 || *fats == 0 || *fats > 2 || *sector > 4096 {
 		flag.Usage()
 		os.Exit(2)
 	}
 	path := flag.Arg(0)
 	if !valid(path) {
-		create(path, *size, *perCluster, *fats)
+		create(path, *size, *sector, *perCluster, *fats)
 	}
 	if len(puts) != 0 || len(gets) != 0 {
 		transfer(path, puts, gets)
@@ -68,7 +69,7 @@ func main() {
 }
 
 // create formats a new volume at path.
-func create(path string, size uint64, perCluster uint, fats uint) {
+func create(path string, size uint64, sector, perCluster, fats uint) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
 	if err != nil {
 		fail(err)
@@ -78,7 +79,7 @@ func create(path string, size uint64, perCluster uint, fats uint) {
 	if err = file.Truncate(int64(bytes)); err != nil {
 		fail(err)
 	}
-	layout := fat32.Layout{SectorsPerCluster: uint8(perCluster), FATs: uint8(fats)}
+	layout := fat32.Layout{BytesPerSector: uint16(sector), SectorsPerCluster: uint8(perCluster), FATs: uint8(fats)}
 	if !fat32.Format(fileDevice{file: file, size: bytes}, layout) {
 		fail(fmt.Errorf("cannot format %s as FAT32 (%d MiB, %+v)", path, size, layout))
 	}

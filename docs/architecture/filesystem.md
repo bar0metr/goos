@@ -132,22 +132,26 @@ A path component is at most 255 bytes and a path at most 4096, in every layer
 (`limits.NameMax`, `limits.PathMax`; ADR 0110). Names are bytes other than NUL
 and `/`. A name too long for a message crosses to the VFS in a memory object
 the client attaches, and between the VFS and the FAT32 service in the name
-page of the file cache. FAT32 accepts printable ASCII names, one UTF-16 unit
-per byte, so its 255-unit VFAT limit is the same bound. FAT32 stores a component that fits the 8.3 form — lower case,
-at most eight characters and a three-character extension — in a single
-directory entry, exactly as before. Any other component gets a generated
-`NAME~1` alias plus a VFAT long-name chain in front of it, so case, length, and
-the wider character set survive a round trip (ADR 0066). A chain whose
-ordinals, padding, or checksum do not match is ignored and the alias is used
-instead. Names longer than the bound are rejected with `NameTooLong`, and names holding
-characters the service cannot carry with `InvalidArgument`; an on-disk long
-name holding such characters is shown by its alias.
+page of the file cache. FAT32 names are UTF-8 natively and UTF-16LE on disk;
+a UTF-8 name never has more UTF-16 units than bytes, so VFAT's 255-unit limit
+holds every native name. FAT32 stores a component that fits the 8.3 form, each
+part in one case, in a single directory entry with the Windows NT case flags.
+Any other component gets a generated `NAME~1` alias plus a VFAT long-name chain
+in front of it, so case, length and any Unicode character survive a round trip
+(ADR 0066, ADR 0112). Names are not normalized and are matched
+case-insensitively. A chain whose ordinals, padding, checksum or UTF-16 do not
+match is ignored and the alias is used instead. Names longer than the bound are
+rejected with `NameTooLong`, and invalid UTF-8 or characters FAT reserves with
+`InvalidArgument`; an on-disk long name this system could not open is shown by
+its alias.
 
 ## Limits
 
-FAT32 reads volumes with 512-byte sectors, 512-byte to 64 KiB clusters, and one
-or two FATs. Files reach the FAT32 maximum of 4 GiB − 1, directories the FAT
-maximum of 65536 entries, and every chain walk is bounded by the volume's
-cluster count, so corrupt media ends in a typed error (ADR 0102). There is no
+FAT32 reads volumes with 512, 1024, 2048 or 4096-byte logical sectors, 512-byte
+to 512 KiB clusters, and one or two FATs, mirrored or with one active copy.
+Files reach the FAT32 maximum of 4 GiB − 1, directories the FAT maximum of 65536
+entries, and every chain walk is bounded by the volume's cluster count, so
+corrupt media ends in a typed error (ADR 0102, ADR 0112). A corrupt primary boot
+sector with a valid backup is mounted read-only from the backup. There is no
 journal: changes are ordered so that an interruption leaves only states a
 filesystem checker repairs.

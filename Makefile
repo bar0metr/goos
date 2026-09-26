@@ -103,7 +103,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-fat32 test-fat32-stress test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -296,8 +296,18 @@ test-security:
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
 # the filesystem built.
-test-storage-stress:
-	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -run 'TestRandomOperationsAgainstModel|TestExternalFsckAcceptsVolume|TestFileLargerThanSixteenMiB|TestDeviceFailureIsContained' ./userspace/fat32
+test-storage-stress: test-fat32-stress
+
+# The FAT32 format (ADR 0102, ADR 0112): every geometry, Unicode names,
+# timestamps, the corruption corpus, and interoperability with the host's FAT
+# tools where they exist. The stress variant adds 128-512 KiB clusters, a
+# 1 GiB and a 4 GiB - 1 file on a sparse host file, thousands of seeded
+# corruptions, and a directory of 8000 long names.
+test-fat32:
+	$(BUILD_ENV) go test -count=1 ./userspace/fat32
+
+test-fat32-stress:
+	$(BUILD_ENV) GOOS_STORAGE_STRESS=1 go test -count=1 -timeout 60m ./userspace/fat32
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -411,6 +421,7 @@ docs:
 	@test -f docs/adr/0109-variable-length-startup-object.md
 	@test -f docs/adr/0110-native-name-and-path-limits.md
 	@test -f docs/adr/0111-bounded-dynamic-registries.md
+	@test -f docs/adr/0112-fat32-interoperability.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md
@@ -514,6 +525,8 @@ help:
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
+	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \
+	  '  test-fat32-stress  run them at scale: huge files and clusters, fuzzing' \
 	  '  test-latency    measure command latency in QEMU into build/reports (LATENCY_REPEATS)' \
 	  '  test-microbench measure context switch, IPC, and VFS reads in QEMU (MICROBENCH_REPEATS)' \
 	  '  test-performance run host and in-guest microbenchmarks into build/reports' \

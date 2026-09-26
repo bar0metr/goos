@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Supersedes the geometry and size limits of ADR 0036, ADR 0060 and
-ADR 0066; keeps their on-disk choices (8.3 entries for lower-case short names,
+Accepted; amended by ADR 0112 (sector sizes, FSInfo free count, timestamps).
+Supersedes the geometry and size limits of ADR 0036, ADR 0060 and ADR 0066; keeps their on-disk choices (8.3 entries for lower-case short names,
 VFAT chains otherwise, ".." as cluster 0 for the root).
 
 ## Context

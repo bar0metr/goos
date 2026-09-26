@@ -14,7 +14,7 @@ func mustName(t *testing.T, value string) ramfs.Name {
 	return name
 }
 
-func mounted(t *testing.T, device *memoryDevice) (*FileSystem, ramfs.NodeID) {
+func mounted(t *testing.T, device Device) (*FileSystem, ramfs.NodeID) {
 	t.Helper()
 	fs := &FileSystem{}
 	root, ok := fs.Mount(device)

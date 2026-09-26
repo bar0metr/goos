@@ -34,6 +34,7 @@ func formattedDevice() *memoryDevice {
 	boot[13] = 1
 	put16(boot[14:16], 32)
 	boot[16] = 1
+	boot[21] = 0xf8
 	put32(boot[32:36], 8192)
 	put32(boot[36:40], 64)
 	put32(boot[44:48], 2)
@@ -182,7 +183,10 @@ func TestMountRejectsGeometryItCannotHonour(t *testing.T) {
 		t.Fatal("a well-formed volume was refused")
 	}
 	mountRejects(t, "a missing signature", func(boot []byte, _ *memoryDevice) { boot[510] = 0 })
-	mountRejects(t, "a foreign sector size", func(boot []byte, _ *memoryDevice) { put16(boot[11:13], 1024) })
+	mountRejects(t, "a sector size the device cannot hold", func(boot []byte, _ *memoryDevice) { put16(boot[11:13], 1024) })
+	mountRejects(t, "a sector size that is not a power of two", func(boot []byte, _ *memoryDevice) { put16(boot[11:13], 1000) })
+	mountRejects(t, "a sector size below 512", func(boot []byte, _ *memoryDevice) { put16(boot[11:13], 256) })
+	mountRejects(t, "an invalid media byte", func(boot []byte, _ *memoryDevice) { boot[21] = 0x12 })
 	mountRejects(t, "a zero cluster size", func(boot []byte, _ *memoryDevice) { boot[13] = 0 })
 	mountRejects(t, "a cluster size that is not a power of two", func(boot []byte, _ *memoryDevice) { boot[13] = 3 })
 	mountRejects(t, "no FAT", func(boot []byte, _ *memoryDevice) { boot[16] = 0 })
@@ -243,6 +247,20 @@ func TestRejectedMountLeavesNoUsableFilesystem(t *testing.T) {
 	if _, status := fs.CreateName(rootNode, name); status == ramfs.StatusOK {
 		t.Fatal("a create succeeded on a refused volume")
 	}
+	// Nor may a refused remount leave the previous volume's geometry usable.
+	var again FileSystem
+	if _, ok := again.Mount(formattedDevice()); !ok {
+		t.Fatal("mount failed")
+	}
+	if _, ok := again.Mount(nil); ok {
+		t.Fatal("a missing device was mounted")
+	}
+	if _, _, status := again.ReadDir(rootNode, 0); status == ramfs.StatusOK {
+		t.Fatal("a listing succeeded after a refused remount")
+	}
+	if _, status := again.FreeClusters(); status == ramfs.StatusOK || again.Flush() {
+		t.Fatal("the refused remount still answers for the old volume")
+	}
 }
 
 // TestMountSaysWhyItRefused covers the typed error model: a volume this
@@ -256,7 +274,12 @@ func TestMountSaysWhyItRefused(t *testing.T) {
 	}{
 		"FAT16 root directory": {func(boot []byte) { put16(boot[17:19], 512) }, ramfs.StatusUnsupported},
 		"FAT16 FAT size":       {func(boot []byte) { put16(boot[22:24], 32) }, ramfs.StatusUnsupported},
-		"4096-byte sectors":    {func(boot []byte) { put16(boot[11:13], 4096) }, ramfs.StatusUnsupported},
+		"8192-byte sectors":    {func(boot []byte) { put16(boot[11:13], 8192) }, ramfs.StatusUnsupported},
+		"three FATs":           {func(boot []byte) { boot[16] = 3 }, ramfs.StatusUnsupported},
+		"FAT32 version 1.0":    {func(boot []byte) { boot[43] = 1 }, ramfs.StatusUnsupported},
+		"exFAT":                {func(boot []byte) { copy(boot[3:11], "EXFAT   ") }, ramfs.StatusUnsupported},
+		"NTFS":                 {func(boot []byte) { copy(boot[3:11], "NTFS    ") }, ramfs.StatusUnsupported},
+		"invalid media":        {func(boot []byte) { boot[21] = 0 }, ramfs.StatusCorrupt},
 		"no signature":         {func(boot []byte) { boot[510] = 0 }, ramfs.StatusCorrupt},
 		"no FATs":              {func(boot []byte) { boot[16] = 0 }, ramfs.StatusCorrupt},
 		"past the device":      {func(boot []byte) { put32(boot[32:36], 1<<30) }, ramfs.StatusCorrupt},

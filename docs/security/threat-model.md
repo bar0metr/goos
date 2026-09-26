@@ -161,14 +161,19 @@ authority so that it can grant it to a restarted driver (ADR 0078).
 
 The raw disk image is host-provided and persists across boots.
 
-- The FAT32 backend checks the declared geometry against the device capacity
-  before deriving any offset, walks FAT chains with bounded loops, and supports
-  only a fixed, narrow geometry (ADR 0036, 0077).
+- The FAT32 service validates every BPB field and checks the declared geometry
+  against the device capacity before deriving any offset, checks every FAT link,
+  and walks chains with loops bounded by the cluster count. Long names are
+  decoded from UTF-16 only when valid and only when the result is a name the
+  system accepts; a corrupt primary boot sector is served read-only from a
+  valid backup and never rewritten at mount (ADR 0077, 0102, 0112). A seeded
+  corruption corpus covers each case.
 - A volume that fails the checks is refused, not fatal: the system boots with
   `/persist`, `/home`, and `/state` absent, and the log and config services
   continue without their files (ADR 0077).
-- Parsing runs inside the VFS process, never in the kernel. A parser defect is
-  contained to VFS and its authority above.
+- Parsing runs inside the FAT32 service, never in the kernel or the VFS
+  (ADR 0096). A parser defect is contained to that service: a channel to the
+  VFS and a block endpoint for the one volume.
 - The block service rejects out-of-range and overflowing requests before they
   reach the driver.
 - Crash consistency is not addressed: an interrupted write can leave a volume

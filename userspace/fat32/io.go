@@ -18,7 +18,7 @@ type cachedSector struct {
 	stamp uint64
 	valid bool
 	dirty bool
-	data  [sectorSize]byte
+	data  [unit]byte
 }
 
 // resident returns the cached sector for lba, reading it from the device on a
@@ -44,7 +44,7 @@ func (fs *FileSystem) resident(lba uint64) (*cachedSector, bool) {
 		return nil, false
 	}
 	entry.valid = false
-	if !fs.device.ReadAt(lba*sectorSize, entry.data[:]) {
+	if !fs.device.ReadAt(lba*unit, entry.data[:]) {
 		return nil, false
 	}
 	entry.lba, entry.stamp, entry.valid = lba, fs.clock, true
@@ -64,12 +64,12 @@ func (fs *FileSystem) lookup(lba uint64) *cachedSector {
 // resident sectors.
 func (fs *FileSystem) readMeta(offset uint64, target []byte) bool {
 	for len(target) != 0 {
-		entry, ok := fs.resident(offset / sectorSize)
+		entry, ok := fs.resident(offset / unit)
 		if !ok {
 			return false
 		}
-		within := offset % sectorSize
-		chunk := sectorSize - within
+		within := offset % unit
+		chunk := unit - within
 		if chunk > uint64(len(target)) {
 			chunk = uint64(len(target))
 		}
@@ -96,8 +96,8 @@ func (fs *FileSystem) write(offset uint64, data []byte) bool {
 	end := offset + uint64(len(data))
 	for index := range fs.cache {
 		entry := &fs.cache[index]
-		start := entry.lba * sectorSize
-		if !entry.valid || start >= end || start+sectorSize <= offset {
+		start := entry.lba * unit
+		if !entry.valid || start >= end || start+unit <= offset {
 			continue
 		}
 		if !ok {
@@ -108,8 +108,8 @@ func (fs *FileSystem) write(offset uint64, data []byte) bool {
 		if from < start {
 			from = start
 		}
-		if to > start+sectorSize {
-			to = start + sectorSize
+		if to > start+unit {
+			to = start + unit
 		}
 		copy(entry.data[from-start:to-start], data[from-offset:to-offset])
 	}
@@ -118,7 +118,7 @@ func (fs *FileSystem) write(offset uint64, data []byte) bool {
 
 // writeBack writes a dirty FAT sector to every FAT copy in use.
 func (fs *FileSystem) writeBack(entry *cachedSector) bool {
-	within := entry.lba*sectorSize - fs.fatStart - uint64(fs.fatRead)*fs.fatSize
+	within := entry.lba*unit - fs.fatStart - uint64(fs.fatRead)*fs.fatSize
 	for copy := fs.fatFirst; copy < fs.fatFirst+fs.fatCopies; copy++ {
 		if !fs.device.WriteAt(fs.fatStart+uint64(copy)*fs.fatSize+within, entry.data[:]) {
 			return false

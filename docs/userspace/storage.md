@@ -58,19 +58,30 @@ resets the device and masks the IRQ route before owned DMA pages are reclaimed.
 Everything the FAT32 service computes comes from the boot sector: where the FATs
 begin, where a cluster is, how far a chain may run. The image is on a device the
 system does not control, so the geometry is checked against that device before an
-offset is derived from it (ADR 0077, ADR 0102):
+offset is derived from it (ADR 0077, ADR 0102, ADR 0112):
 
-- the device reports its capacity, which must be a whole number of sectors;
-- sectors are 512 bytes, sectors per cluster a power of two up to 128, and there
-  are one or two FATs; other sector sizes are refused as unsupported;
-- the boot sector must describe FAT32 (no fixed root directory, no 16-bit FAT
-  size), and a FAT named active by the extended flags must exist;
+- the boot sector must carry its signature and describe FAT32: no fixed root
+  directory, no 16-bit FAT size, FAT32 version 0.0; FAT12, FAT16, exFAT and NTFS
+  are refused as unsupported;
+- logical sectors are 512, 1024, 2048 or 4096 bytes, sectors per cluster a
+  power of two up to 128 (clusters of 512 bytes to 512 KiB), and there are one
+  or two FATs; the media byte must be one FAT defines;
 - the declared volume must fit the device and its metadata must fit the volume;
 - a FAT too small for the data region limits the volume to the clusters it can
   describe, as Linux does, and no volume may number more clusters than FAT32
-  addresses;
-- the root cluster must be inside the data area; an FSInfo sector is used only
-  for its next-free hint, and only when both signatures and the value check out.
+  addresses; a FAT32-shaped volume with fewer than 65525 clusters is served as
+  FAT32, as Linux serves it;
+- the root cluster must be inside the data area, a FAT named active by the
+  extended flags must exist, and the FSInfo and backup sectors must lie in the
+  reserved region apart from each other and the boot sector.
+
+The backup boot sector is compared with the primary. When the primary fails
+validation, a backup at logical sector 6 that validates, for any supported
+sector size, is used instead and the volume is mounted read-only: every change
+answers "permission denied" and the damaged primary is left for `fsck.fat` to
+repair. A mount records what it noticed — backup used, backup differing or
+invalid, FSInfo invalid, a short FAT — and the service logs a degraded volume;
+mounting repairs nothing.
 
 A refused volume is not fatal. The filesystem service reports it, prints
 `[WARN] no persistent storage`, and serves the rest of the namespace: the
@@ -93,11 +104,39 @@ directory another mount points at, under either name.
 Files are limited only by FAT32 itself: 4 GiB − 1 bytes, the free space, and the
 caller's memory. Directories are cluster chains of any valid length, up to the
 65536 entries FAT allows, and grow one zeroed cluster at a time; nesting depth
-is bounded only by the VFS path length. Names are printable ASCII of at most
-255 bytes, the native limit (ADR 0066, ADR 0110). A lower-case name that fits the 8.3 form stays a single directory
-entry, carrying the Windows NT lower-case flags; anything longer or mixed case
-gets a VFAT long-name chain and a generated alias — `~1` to `~9`, then a hashed
-form — so any number of similar names fit (ADR 0102).
+is bounded only by the VFS path length.
+
+Names are UTF-8 of at most 255 bytes, the native limit (ADR 0110), stored on
+disk as VFAT UTF-16LE with surrogate pairs outside the Basic Multilingual Plane
+(ADR 0112). Control characters, `" * / : < > ? \ |`, a leading space and a
+trailing space or dot are refused. Names are kept exactly as given — no Unicode
+normalization — and matched case-insensitively through simple case folding of
+Latin, Greek, Cyrillic, Armenian and fullwidth Latin letters. A name whose base
+and extension each fit 8.3 in one case stays a single entry carrying the
+Windows NT case flags (`readme.txt`, `README.TXT`); anything else gets a VFAT
+long-name chain and a generated alias — `~1` to `~9`, then a hashed form, with
+one `_` per non-ASCII character — so any number of similar names fit. An entry
+also answers to its alias. On-disk 8.3 bytes from 0x80 up are read as code page
+437. A long-name chain with broken ordinals, checksum, padding or UTF-16, or
+whose name this system could not open, is shown by its alias; an entry without
+any usable name is not listed.
+
+Timestamps are read and written as UTC (FAT has no zone), clamped to FAT's
+1980–2107 range. Creation records creation, modification and access; a data
+change records modification and the access date and sets ARCHIVE; a create,
+remove or rename in a directory records the directory's modification time; a
+read records nothing. GoOS has no wall clock yet, so the service writes no
+times: new entries have unknown times and existing ones are kept. HIDDEN,
+SYSTEM and undefined attribute bits are preserved; READ_ONLY on a file refuses
+writes and truncation with "permission denied" but not rename or removal.
+Times and attributes are available as native `fat32.Metadata`; the backend
+protocol does not carry them yet.
+
+The first (or active) FAT is the one read, and every change is written to each
+mirrored copy a whole unit at a time. The FSInfo free count is counted from the
+FAT on the first change after mount, kept exact, and written with the next-free
+hint at every sync; an FSInfo sector that fails its signatures is left
+untouched.
 
 Truncation shrinks and grows. Shrinking records the new size, ends the chain
 after the last cluster still needed, and frees the rest; growing, like a write
@@ -120,17 +159,17 @@ by the volume's cluster count.
 There is no journal. Changes are ordered so that an interruption leaves at worst
 lost clusters, a chain longer than its file, or an entry under two names after
 a move — never a chain shared by two files or an entry naming freed clusters.
-Timestamps are not maintained. The boot gate copies `/system/motd` through VFS
+The boot gate copies `/system/motd` through VFS
 and verifies the result in the host-visible disk image, and a second VM boot
 reads it back, proving persistence across a complete guest restart.
 
-A journal, timestamps, dynamic interrupt routing, multiple devices, and block
-payloads larger than the inline IPC limit remain future work.
+A journal, a wall clock for timestamps, dynamic interrupt routing, multiple
+devices, and block payloads larger than the inline IPC limit remain future work.
 
 ## Resident sectors and bounded failure
 
-The FAT32 service keeps a write-through window of sixteen resident metadata
-sectors, replaced least recently used. Directory entries and FAT links are
+The FAT32 service keeps a write-through window of sixteen resident 512-byte
+metadata units, replaced least recently used, whatever the volume's sector size. Directory entries and FAT links are
 packed many to a sector, so a metadata scan costs one sector fetch per sector,
 not one device round trip per entry. Writes reach the device immediately and
 update any resident copy, and a failed device write drops that copy rather than

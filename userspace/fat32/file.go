@@ -135,6 +135,12 @@ func (fs *FileSystem) Read(id ramfs.NodeID, offset uint64, target []byte) (int, 
 // kept, still holds whatever was there before.
 func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, ramfs.Status) {
 	dir, index, entry, status := fs.fileNode(id)
+	if status == ramfs.StatusOK {
+		status = fs.mutable()
+	}
+	if status == ramfs.StatusOK {
+		status = writable(entry)
+	}
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
@@ -169,8 +175,11 @@ func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 		}
 	}
 	done, status := fs.transfer(first, offset, data, length, true)
-	if offset+done > size {
+	grew := offset+done > size
+	if grew {
 		put32(entry[28:32], uint32(offset+done))
+	}
+	if stamped := done != 0 && fs.stampModified(&entry); grew || stamped {
 		if written := fs.writeEntry(&dir, index, entry); status == ramfs.StatusOK {
 			status = written
 		}
@@ -189,6 +198,12 @@ func (fs *FileSystem) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 // never exposed.
 func (fs *FileSystem) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 	dir, index, entry, status := fs.fileNode(id)
+	if status == ramfs.StatusOK {
+		status = fs.mutable()
+	}
+	if status == ramfs.StatusOK {
+		status = writable(entry)
+	}
 	if status != ramfs.StatusOK {
 		return status
 	}
@@ -202,6 +217,7 @@ func (fs *FileSystem) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 	case size < old:
 		keep := fs.clustersFor(size)
 		put32(entry[28:32], uint32(size))
+		fs.stampModified(&entry)
 		if keep == 0 {
 			setEntryCluster(&entry, 0)
 		}
@@ -226,6 +242,7 @@ func (fs *FileSystem) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 			return status
 		}
 		put32(entry[28:32], uint32(size))
+		fs.stampModified(&entry)
 		status = fs.writeEntry(&dir, index, entry)
 	}
 	if synced := fs.sync(); status == ramfs.StatusOK {

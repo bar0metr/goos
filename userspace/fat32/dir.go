@@ -56,6 +56,9 @@ func (fs *FileSystem) openDirectory(key uint32) (directory, ramfs.Status) {
 
 // directoryOf resolves a directory node to its directory.
 func (fs *FileSystem) directoryOf(id ramfs.NodeID) (directory, ramfs.Status) {
+	if !fs.mounted {
+		return directory{}, ramfs.StatusNotFound
+	}
 	if id == rootNode {
 		return fs.openDirectory(0)
 	}
@@ -157,15 +160,36 @@ func (fs *FileSystem) writeEntry(dir *directory, index int, entry [32]byte) ramf
 }
 
 // resolveName writes the name an entry is listed and matched under into
-// fs.name: the long name when its chain is intact, the 8.3 name otherwise. It
-// also returns the first entry of the chain.
-func (fs *FileSystem) resolveName(entry [32]byte, index int) (int, int) {
-	short := shortOf(entry)
-	if fs.scan.complete(short) {
-		copy(fs.name[:], fs.scan.name[:fs.scan.size])
-		return fs.scan.size, fs.scan.start
+// fs.name: the long name when its chain is intact and names something this
+// system can open, the 8.3 name otherwise. It also returns the first entry of
+// the chain and whether the name is a long one. An entry whose 8.3 name holds
+// bytes no name may (a NUL, a control character, a reserved character) and
+// that has no usable long name has no name at all: size is zero, and it is
+// neither listed nor matched, though its slots stay in use.
+func (fs *FileSystem) resolveName(entry [32]byte, index int) (int, int, bool) {
+	if size, ok := fs.scan.complete(shortOf(entry), fs.name[:]); ok {
+		return size, fs.scan.start, true
 	}
-	return decodeShort(short, &fs.name), index
+	size := decodeShort(entry, fs.name[:])
+	if !validLongName(fs.name[:size]) {
+		return 0, index, false
+	}
+	return size, index, false
+}
+
+// matches reports whether the entry just resolved answers to the requested
+// name: under the name it is listed by or, as in Windows and Linux, under its
+// 8.3 alias. Matching the alias also keeps a new 8.3 name from duplicating an
+// alias already in the directory.
+func (fs *FileSystem) matches(entry [32]byte, size int, long bool) bool {
+	if fs.want.same(fs.name[:size]) {
+		return true
+	}
+	if !long {
+		return false
+	}
+	var short [maxShortName]byte
+	return fs.want.same(short[:decodeShort(entry, short[:])])
 }
 
 // search is the result of one pass over a directory: where the requested
@@ -219,8 +243,8 @@ func (fs *FileSystem) find(dir *directory, need int, match bool) (search, ramfs.
 			fs.scan.reset()
 			continue
 		}
-		size, first := fs.resolveName(entry, index)
-		if match && fs.want.same(fs.name[:size]) {
+		size, first, long := fs.resolveName(entry, index)
+		if match && size != 0 && fs.matches(entry, size, long) {
 			result.at, result.entry, result.found = placement{start: first, count: index - first, short: shortOf(entry)}, entry, true
 			return result, ramfs.StatusOK
 		}

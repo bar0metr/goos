@@ -18,12 +18,24 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-stress` boots `STRESS_RUNS` guests (default 4) in parallel
   batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
   through each; `make test-all` includes two runs.
-- `make test-storage-stress` runs the FAT32 host workload at scale: a seeded
-  model-based sequence of creates, writes, truncations, moves, and removals
-  checked against a model and a consistency checker, device-failure injection,
-  a file past 16 MiB, and the host's own FAT checker (`fsck_msdos` or
-  `fsck.fat`, when installed) over volumes the filesystem built (ADR 0102). The
-  default `make test-unit` runs the same tests at a smaller scale.
+- `make test-fat32` runs the FAT32 format tests (ADR 0102, ADR 0112): every
+  logical sector size and cluster size with one and two FATs, BPB validation
+  and backup-boot recovery, the FSInfo free count, FAT mirror comparison,
+  Unicode long names and case folding, timestamps and attributes, 1, 16 and
+  64 MiB files, fragmentation, a directory of long names, a corruption corpus
+  and seeded random corruption, and a model-based workload with device-failure
+  injection. Where the host has FAT tools it also formats volumes with them
+  (`newfs_msdos` or `mkfs.fat`) and mounts, fills and hands them back to the
+  host checker (`fsck_msdos` or `fsck.fat`); on macOS the host's own FAT driver
+  writes files this code reads and reads back files this code writes. Two
+  host-made volumes in `userspace/fat32/testdata` cover foreign volumes on
+  every host; `GOOS_FAT32_FIXTURES=1 go test -run TestMakeForeignFixtures
+  ./userspace/fat32` regenerates them on macOS. Tests that need a host tool
+  skip without it. `make test-unit` includes all of this.
+- `make test-storage-stress` (`make test-fat32-stress`) runs the same tests at
+  scale: 128 KiB to 512 KiB clusters, a 1 GiB and a 4 GiB − 1 file on a sparse
+  host file, thousands of seeded corruptions, a directory of 8000 long names,
+  and a longer model-based workload.
 - `make test-latency` boots one guest and measures command and VFS latency
   into `build/reports/latency-<variant>.md`, where `<variant>` is the build's
   directory under `build/variants/` (`hz100-opt2` by default). It is a
