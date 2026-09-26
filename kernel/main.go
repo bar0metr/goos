@@ -26,9 +26,9 @@ import (
 	"goos/kernel/shmem"
 	"goos/kernel/stream"
 	kernelwait "goos/kernel/wait"
+	execproto "goos/userspace/exec"
 	"goos/userspace/fsproto"
 	supervisor "goos/userspace/init"
-	"goos/userspace/startup"
 )
 
 var (
@@ -65,7 +65,6 @@ var (
 	waitAnyResultWire     [kcall.WaitAnyResultSize]byte
 	waitMaskWire          [8]byte
 	launchTemplate        [supervisor.StagingSlotSize]byte
-	launchBound           [startup.Size]byte
 	channelRegistry       ipc.Registry
 	streamRegistry        stream.Registry
 	streamCallData        [kcall.MaxStreamIO]byte
@@ -444,10 +443,10 @@ func bootContinue() {
 	filesystemBlockClientHandle, filesystemBlockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockClientObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	filesystemBlockServerHandle, filesystemBlockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(filesystemBlockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	systemControlHandle, systemControlInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.SystemControlObject, capability.Write))
-	launchStaging, launchStagingCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, 1, 0)
+	launchStaging, launchStagingCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, supervisor.StagingPages, 0)
 	launchStagingHandle, launchStagingGranted := launchStaging.Grant(initProcess.Handles(), capability.Read|capability.Write)
 	launchStagingMapped := launchStagingCreated && launchStagingGranted && mapPinnedShared(initProcess, launchStaging, launchStagingHandle, supervisor.StagingAddress)
-	execPage, execPageCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, 1, 0)
+	execPage, execPageCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, uint32(execproto.AreaSize/vm.PageSize), 0)
 	execPageHandle, execPageGranted := execPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
 	// The file cache is the memory the VFS and the filesystem service share:
 	// file data moves through it instead of through messages (ADR 0098). PID 1

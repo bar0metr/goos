@@ -27,7 +27,6 @@ var (
 	consoleHandle        handle.ID
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
-	startupWire          [startup.Size]byte
 	wire                 [ipc.WireMaxSize]byte
 	arenaBase            arena.Mark
 	sessions             [maxSessions]uint64
@@ -171,10 +170,7 @@ func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.P
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("VFS_STARTUP_UNAVAILABLE\n")
-	}
-	startupData, validStartup := startup.Decode(startupWire[:])
+	startupData, validStartup := startup.Read()
 	var found bool
 	if !validStartup {
 		fatal("VFS_STARTUP_INVALID\n")

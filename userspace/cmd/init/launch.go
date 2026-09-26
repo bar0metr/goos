@@ -16,12 +16,12 @@ import (
 
 func bootstrapService(supervisor.LaunchSpec) (uint64, bool) { return 3, true }
 
-// stagingSlot returns the next slot of the page shared with the kernel for
+// stagingSlot returns the next slot of the area shared with the kernel for
 // launch startup templates.
-func stagingSlot() (uint8, *[startup.Size]byte) {
+func stagingSlot() (uint8, []byte) {
 	nextStagingSlot = (nextStagingSlot + 1) % supervisor.StagingSlots
 	address := supervisor.StagingAddress + uint64(nextStagingSlot)*supervisor.StagingSlotSize
-	return nextStagingSlot, (*[startup.Size]byte)(sys.MappedAtStart(address, startup.Size))
+	return nextStagingSlot, sys.MappedAtStart(address, supervisor.StagingSlotSize)
 }
 
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
@@ -61,27 +61,32 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		return 0, false
 	}
 	slot, staging := stagingSlot()
-	var vectorWire [startup.VectorSize]byte
-	var bindings [supervisor.MaxCapabilities]startup.Handle
-	for index := 0; index < int(spec.CapabilityCount); index++ {
-		bindings[index].Name = []byte(spec.Capabilities[index].Name)
-	}
 	// A service started again in this boot is told so. What it left behind,
 	// such as the end of the log file, is then its own work to pick up
 	// rather than an earlier boot's (ADR 0100).
-	var variables []startup.Variable
+	restarted := false
 	if snapshot, found := manager.Snapshot(bytesString(spec.Name[:spec.NameSize])); found && snapshot.Restarts != 0 {
-		variables = []startup.Variable{{Name: []byte(startup.RestartVariable), Value: []byte("1")}}
+		restarted = true
 	}
-	arguments, environment, ok := startup.EncodeVectors([][]byte{spec.Name[:spec.NameSize]}, variables, &vectorWire)
+	variables := 0
+	if restarted {
+		variables = 1
+	}
+	writer := startup.NewWriter(staging, 1, variables, int(spec.CapabilityCount))
+	writer.Command(spec.Name[:spec.NameSize])
+	writer.CWD([]byte("/"))
+	writer.Argument(spec.Name[:spec.NameSize])
+	if restarted {
+		writer.Variable([]byte(startup.RestartVariable), []byte("1"))
+	}
+	for index := 0; index < int(spec.CapabilityCount); index++ {
+		writer.Handle([]byte(spec.Capabilities[index].Name), 0)
+	}
+	startupData, ok := writer.Finish()
 	if !ok {
 		return 0, false
 	}
-	startupData, ok := startup.Encode(spec.Name[:spec.NameSize], []byte("/"), arguments, environment, bindings[:spec.CapabilityCount], staging)
-	if !ok {
-		return 0, false
-	}
-	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], slot, len(startupData))
+	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], slot, uint32(len(startupData)))
 	mark("INIT_SERVICE_LAUNCH_OK\n")
 	name := bytesString(spec.Name[:spec.NameSize])
 	// The validation build keeps the driver's process handle so it can inject

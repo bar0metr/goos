@@ -216,12 +216,23 @@ go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/hu
 go run ./tools/mkfat32 -put build/bigprobe:/home/tools/bigprobe -put build/hugeprobe:/home/tools/hugeprobe "$disk"
 rm -f "$log" "$reboot_log"
 
+# A command line of about 3.5 KiB with 700 arguments, and one argument of
+# 3000 bytes: more than a message, the former 128-byte line, or the former
+# eight-argument startup block could carry (ADR 0109).
+many_arguments=$(awk 'BEGIN { for (i = 0; i < 700; i++) printf "%sw%d", (i ? " " : ""), i }')
+long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
 ( sleep 4
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
 	sleep 1
 	printf 'args "alpha beta" escaped\\ value\n'
+	sleep 1
+	printf 'args %s\n' "$many_arguments"
+	sleep 2
+	printf 'echo %s > /tmp/long-argument; stat /tmp/long-argument\n' "$long_argument"
+	sleep 2
+	printf 'touch /tmp/m1 /tmp/m2 /tmp/m3; rm /tmp/m1 /tmp/m2 /tmp/m3; echo many-paths-done\n'
 	sleep 1
 	printf 'readline\n'
 	sleep 1
@@ -718,6 +729,10 @@ done
 require_marker shell.echo-output 'hello structured world' "$log" 'echo "hello structured world"'
 require_marker shell.argv-output 'alpha beta escaped value' "$log" 'args "alpha beta"'
 require_marker shell.path-environment 'PATH=/system/bin' "$log" 'args "alpha beta"'
+require_regex startup.many-arguments '^w0 w1 w2 .* w698 w699$' '700 arguments reach the command in order' "$log" 'goos> args w0'
+require_regex startup.long-argument '^file 2\.93 KiB (3001 bytes)$' 'a 3000-byte argument written whole' "$log" 'goos> echo xxxx'
+require_window startup.many-paths '^many-paths-done$' 'touch and rm take several paths' "$log" 'goos> touch /tmp/m1' 'goos> readline'
+forbid_window startup.many-paths-errors 'not found\|usage:' 'no path was refused' "$log" 'goos> touch /tmp/m1' 'goos> readline'
 # A line typed while a command runs is that command's input: it is echoed once
 # and printed once more by readline, and never reaches the shell as a command.
 require_count shell.stdin-output '^bounded stdin payload$' 2 "$log" 'goos> readline'
@@ -732,7 +747,7 @@ pass_group shell
 
 require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'
 require_marker help.command SHELL_HELP_COMMAND_OK "$log" 'help cat'
-require_regex help.command-usage '^usage: cat FILE$' 'help cat prints the usage' "$log" 'help cat'
+require_regex help.command-usage '^usage: cat FILE\.\.\.$' 'help cat prints the usage' "$log" 'help cat'
 require_regex help.utility-flag '^usage: ls \[PATH\]$' 'ls --help prints the usage' "$log" 'ls --help'
 require_regex help.utility-arity '^usage: cp SOURCE TARGET$' 'cp with one path prints the usage' "$log" 'cp /system/motd'
 require_regex help.builtin-arity '^usage: services$' 'a builtin with arguments prints the usage' "$log" 'services now'

@@ -170,10 +170,11 @@ caller:
 | IPC wire | 320 B | `ipc.WireMaxSize` |
 | stream transfer | 256 B | `kcall.MaxStreamIO` |
 | `WaitAny` interests | 16 × 16 B | `kcall.WaitAnyMaxObjects` |
-| startup block | 1024 B | `kcall.StartupSize`, one read-only page per process |
-| launch staging | 4 × 1024 B | `supervisor.StagingSlots`, copied once per launch |
+| startup object | 64 KiB | `kcall.MaxStartupSize`, read-only pages per process, validated and fuzzed (ADR 0109) |
+| launch staging | 4 × 64 KiB | `supervisor.StagingSlots`, copied once per launch |
+| exec request | 4 × 64 KiB | `exec.Slots`, copied once per job |
 | log record | 181 B encoded, 240 B as text | `kcall.MaxLogRecord`, `kcall.LogText` |
-| console input | 256 B ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
+| console input | 8 KiB ring | filled by the UART interrupt handler; overruns are counted, not stored (ADR 0075) |
 
 Tables are fixed arrays: 128 handles per process, 32 processes, 64 tasks,
 24 channels with 16-message queues, 64 streams with 4 KiB rings, 64 waiters

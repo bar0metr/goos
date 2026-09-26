@@ -52,26 +52,21 @@ func run(data startup.Data) {
 		utility.Check(seek, received, path, false)
 	}
 	if _, inline := data.Arg(pathIndex + 1); inline {
-		var text [startup.MaxVector + 1]byte
+		// The text is the arguments joined by spaces, however long, sent a
+		// buffer at a time.
 		size := 0
 		for index := pathIndex + 1; ; index++ {
 			argument, found := data.Arg(index)
 			if !found {
 				break
 			}
-			if size != 0 {
-				text[size] = ' '
-				size++
+			if index != pathIndex+1 {
+				size = appendText(opened.Handle, path, &buffer, size, space[:])
 			}
-			size += copy(text[size:len(text)-1], argument)
+			size = appendText(opened.Handle, path, &buffer, size, argument)
 		}
-		text[size] = '\n'
-		for written := 0; written <= size; {
-			chunk := copy(buffer[:], text[written:size+1])
-			reply, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: buffer[:chunk]})
-			utility.CheckWritten(reply, ok, path, chunk)
-			written += chunk
-		}
+		size = appendText(opened.Handle, path, &buffer, size, newline[:])
+		writeText(opened.Handle, path, buffer[:size])
 		utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 		utility.Mark("WRITE_PROCESS_OK\n")
 		return
@@ -96,4 +91,32 @@ func run(data startup.Data) {
 	}
 	utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 	utility.Mark("WRITE_PROCESS_OK\n")
+}
+
+var (
+	space   = [1]byte{' '}
+	newline = [1]byte{'\n'}
+)
+
+// appendText adds text to the size bytes buffered, writing each buffer that
+// fills, and returns how many bytes are buffered after it.
+func appendText(file vfs.Handle, path []byte, buffer *[vfs.MaxProtocolData]byte, size int, text []byte) int {
+	for len(text) != 0 {
+		copied := copy(buffer[size:], text)
+		size += copied
+		text = text[copied:]
+		if size == len(buffer) {
+			writeText(file, path, buffer[:size])
+			size = 0
+		}
+	}
+	return size
+}
+
+func writeText(file vfs.Handle, path []byte, text []byte) {
+	if len(text) == 0 {
+		return
+	}
+	reply, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationWrite, Handle: file, Data: text})
+	utility.CheckWritten(reply, ok, path, len(text))
 }

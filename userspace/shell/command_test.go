@@ -18,7 +18,7 @@ func TestParseSequence(t *testing.T) {
 		{`readline < "/tmp/input file" > /tmp/output`, []string{`readline < "/tmp/input file" > /tmp/output`}},
 		{strings.Repeat("pwd;", MaxCommands), []string{"pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd", "pwd"}},
 	} {
-		var scratch [MaxArguments][MaxArgumentSize]byte
+		var scratch Storage
 		commands, count, ok := ParseSequence([]byte(test.line), &scratch)
 		if !ok || count != len(test.want) {
 			t.Fatalf("ParseSequence(%q): count=%d ok=%v", test.line, count, ok)
@@ -38,10 +38,9 @@ func TestParseSequenceRejectsMalformedTail(t *testing.T) {
 		"pwd; a | b | c | d > out", "pwd; a | b | c | d < in", "pwd; a | b | c < in > out",
 		"pwd; cd / > out", "pwd; echo > a b",
 		"pwd; echo x | help", "pwd; echo x | time readline", "pwd; time echo x > out",
-		"pwd; echo " + strings.Repeat("x", MaxArgumentSize+1),
-		"pwd; echo a b c d e f g h", strings.Repeat("pwd;", MaxCommands+1),
+		"pwd; echo " + strings.Repeat("x", MaxLine), strings.Repeat("pwd;", MaxCommands+1),
 	} {
-		var scratch [MaxArguments][MaxArgumentSize]byte
+		var scratch Storage
 		if _, _, ok := ParseSequence([]byte(line), &scratch); ok {
 			t.Fatalf("accepted malformed sequence %q", line)
 		}
@@ -107,13 +106,37 @@ func TestSplitInvocation(t *testing.T) {
 }
 
 func TestParseInvocation(t *testing.T) {
-	var storage [MaxArguments][MaxArgumentSize]byte
+	var storage Storage
 	invocation, ok := ParseInvocation([]byte(`echo "hello world" 'two words' escaped\ value`), &storage)
 	if !ok || invocation.Count != 4 || string(invocation.Arguments[0]) != "echo" || string(invocation.Arguments[1]) != "hello world" || string(invocation.Arguments[2]) != "two words" || string(invocation.Arguments[3]) != "escaped value" {
 		t.Fatalf("invocation = %#v, %v", invocation, ok)
 	}
 	if _, ok := ParseInvocation([]byte(`echo "unterminated`), &storage); ok {
 		t.Fatal("unterminated quote accepted")
+	}
+}
+
+// TestParseInvocationIsBoundedByBytes covers what the eight-word, 127-byte
+// tokenizer refused: a line is limited by its length alone.
+func TestParseInvocationIsBoundedByBytes(t *testing.T) {
+	var storage Storage
+	words := strings.Repeat(" a", MaxLine/2-2)
+	invocation, ok := ParseInvocation([]byte("echo"+words), &storage)
+	if !ok || invocation.Count != MaxLine/2-1 || string(invocation.Arguments[invocation.Count-1]) != "a" {
+		t.Fatalf("count = %d, %v", invocation.Count, ok)
+	}
+	long := "echo " + strings.Repeat("x", MaxLine-5)
+	invocation, ok = ParseInvocation([]byte(long), &storage)
+	if !ok || len(invocation.Arguments[1]) != MaxLine-5 {
+		t.Fatalf("a %d-byte line refused", len(long))
+	}
+	if _, ok := ParseInvocation([]byte(long+"x"), &storage); ok {
+		t.Fatal("a line past MaxLine accepted")
+	}
+	// The densest line fills every word slot.
+	dense := "a" + strings.Repeat(" a", MaxLine/2-1)
+	if invocation, ok := ParseInvocation([]byte(dense), &storage); !ok || invocation.Count != MaxLine/2 {
+		t.Fatalf("dense line: %d words, %v", invocation.Count, ok)
 	}
 }
 
@@ -183,7 +206,7 @@ func TestRedirectionStagesAndSequenceBounds(t *testing.T) {
 	if !ok || redirects.Stages() != 3 {
 		t.Fatalf("redirections = %+v, %v", redirects, ok)
 	}
-	var scratch [MaxArguments][MaxArgumentSize]byte
+	var scratch Storage
 	for _, test := range []struct {
 		line string
 		ok   bool

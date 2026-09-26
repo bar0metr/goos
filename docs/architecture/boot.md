@@ -122,7 +122,7 @@ it then:
 
 In every build it then:
 
-1. maps the exec page and creates the block service's control channel and the
+1. maps the exec area and creates the block service's control channel and the
    channel between the VFS and the FAT32 service;
 2. registers and starts `vfs` (VFS with the RAMFS root and the read-only system
    image at `/system`), restarted on failure with its clients handed new
@@ -150,7 +150,7 @@ executable as an extent of the system image, or a sealed executable object.
 The kernel checks Execute on the image capability and the extent's bounds, or
 Execute on the object and that it is sealed and named whole, validates the
 capability manifest,
-loads the image, installs handles, binds the startup block, and creates the
+loads the image, installs handles, binds the startup object, and creates the
 task (ADR 0024, 0031, 0062, 0093).
 
 ## Build variants

@@ -53,10 +53,10 @@ func (r *pipelineRunnerTest) expect(name string, endpoint, want Endpoint) {
 	}
 }
 
-func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd, env []byte, streams Streams) (uint64, handle.ID, LaunchStatus) {
+func (r *pipelineRunnerTest) Launch(stage execproto.Stage, cwd []byte, env execproto.List, streams Streams) (uint64, handle.ID, LaunchStatus) {
 	i := int(stage.Path[0])
 	r.launched = append(r.launched, i)
-	if string(cwd) != "/system" || !reflect.DeepEqual(env, []byte{0}) {
+	if string(cwd) != "/system" || env.Count() != 0 {
 		r.t.Fatal("startup context changed")
 	}
 	chain := r.chain()
@@ -114,7 +114,7 @@ func TestPipelineOwnershipAndFailures(t *testing.T) {
 		for failCreate := -1; failCreate < count-1; failCreate++ {
 			for failStage := -1; failStage < count; failStage++ {
 				r := &pipelineRunnerTest{t: t, count: count, errorSource: -1, failCreate: failCreate, failStage: failStage, owned: make(map[handle.ID]bool)}
-				request := execproto.Request{Count: uint8(count), CWD: []byte("/system"), Environment: []byte{0}}
+				request := execproto.Request{Count: uint8(count), CWD: []byte("/system")}
 				for i := 0; i < count; i++ {
 					request.Stages[i].Path = []byte{byte(i)}
 				}
@@ -153,7 +153,7 @@ func TestPipelineOwnershipAndFailures(t *testing.T) {
 
 func TestPipelineReturnsFirstFailingStage(t *testing.T) {
 	r := &pipelineRunnerTest{t: t, count: 4, errorSource: -1, failCreate: -1, failStage: -1, owned: make(map[handle.ID]bool), exits: [4]uint64{0, 7, 9, 0}}
-	request := execproto.Request{Count: 4, CWD: []byte("/system"), Environment: []byte{0}}
+	request := execproto.Request{Count: 4, CWD: []byte("/system")}
 	for i := range request.Stages {
 		request.Stages[i].Path = []byte{byte(i)}
 	}
@@ -170,7 +170,7 @@ func TestPipelineErrorSinkOwnershipAndFailures(t *testing.T) {
 			for failCreate := -1; failCreate < count-1; failCreate++ {
 				for failStage := -1; failStage < count; failStage++ {
 					r := &pipelineRunnerTest{t: t, count: count, errorSource: source, failCreate: failCreate, failStage: failStage, owned: make(map[handle.ID]bool)}
-					request := execproto.Request{Count: uint8(count), ErrorSource: uint8(source + 1), CWD: []byte("/system"), Environment: []byte{0}}
+					request := execproto.Request{Count: uint8(count), ErrorSource: uint8(source + 1), CWD: []byte("/system")}
 					for i := 0; i < count; i++ {
 						request.Stages[i].Path = []byte{byte(i)}
 					}
@@ -215,7 +215,7 @@ func TestPipelineRejectsInvalidErrorSource(t *testing.T) {
 		{Count: 3, ErrorSource: 3},
 		{Count: 3, ErrorSource: 4},
 	} {
-		request.CWD, request.Environment = []byte("/system"), []byte{0}
+		request.CWD = []byte("/system")
 		r := &pipelineRunnerTest{t: t, errorSource: -1, failCreate: -1, failStage: -1, owned: make(map[handle.ID]bool)}
 		if _, status, _ := RunPipeline(request, 99, r); status != LaunchInvalidImage || r.created != 0 || len(r.launched) != 0 {
 			t.Fatalf("accepted %+v", request)
@@ -226,7 +226,7 @@ func TestPipelineRejectsInvalidErrorSource(t *testing.T) {
 func TestBackgroundPipelineReadsEmptyInput(t *testing.T) {
 	runner := &pipelineRunnerTest{t: t, count: 3, errorSource: -1, failCreate: -1, failStage: -1, owned: map[handle.ID]bool{}, background: true}
 	runner.exits = [execproto.MaxStages]uint64{0, 4, 7}
-	request := execproto.Request{Count: 3, Background: true, CWD: []byte("/system"), Environment: []byte{0}}
+	request := execproto.Request{Count: 3, Background: true, CWD: []byte("/system")}
 	for index := range request.Stages[:3] {
 		request.Stages[index].Path = []byte{byte(index)}
 	}
@@ -252,7 +252,7 @@ func TestBackgroundPipelineReadsEmptyInput(t *testing.T) {
 func TestPipelineNamesTheStageThatFailedToLaunch(t *testing.T) {
 	for failStage := 0; failStage < execproto.MaxStages; failStage++ {
 		r := &pipelineRunnerTest{t: t, count: execproto.MaxStages, errorSource: -1, failCreate: -1, failStage: failStage, owned: make(map[handle.ID]bool)}
-		request := execproto.Request{Count: execproto.MaxStages, CWD: []byte("/system"), Environment: []byte{0}}
+		request := execproto.Request{Count: execproto.MaxStages, CWD: []byte("/system")}
 		for i := range request.Stages {
 			request.Stages[i].Path = []byte{byte(i)}
 		}
@@ -283,7 +283,7 @@ func TestLaunchStatusReasons(t *testing.T) {
 
 func TestForegroundPipelineHandsOverItsInput(t *testing.T) {
 	runner := &pipelineRunnerTest{t: t, count: 2, errorSource: -1, failCreate: -1, failStage: -1, owned: map[handle.ID]bool{}}
-	request := execproto.Request{Count: 2, CWD: []byte("/system"), Environment: []byte{0}}
+	request := execproto.Request{Count: 2, CWD: []byte("/system")}
 	for index := range request.Stages[:2] {
 		request.Stages[index].Path = []byte{byte(index)}
 	}
@@ -312,7 +312,7 @@ func TestForegroundPipelineHandsOverItsInput(t *testing.T) {
 
 func TestBackgroundPipelineKeepsNoInput(t *testing.T) {
 	runner := &pipelineRunnerTest{t: t, count: 1, errorSource: -1, failCreate: -1, failStage: -1, owned: map[handle.ID]bool{}, background: true}
-	request := execproto.Request{Count: 1, Background: true, CWD: []byte("/system"), Environment: []byte{0}, Stages: [execproto.MaxStages]execproto.Stage{{Path: []byte{0}}}}
+	request := execproto.Request{Count: 1, Background: true, CWD: []byte("/system"), Stages: [execproto.MaxStages]execproto.Stage{{Path: []byte{0}}}}
 	job := StartPipeline(request, 99, runner)
 	if job.TakeInput() != 0 || len(runner.owned) != 0 {
 		t.Fatalf("background job kept input: %v", runner.owned)

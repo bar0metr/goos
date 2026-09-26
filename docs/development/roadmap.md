@@ -26,7 +26,7 @@ The following foundation is already implemented:
 - isolated native `pwd`, `ls`, and `cat` processes;
 - capability-protected process handles, wait, completion records, and process
   resource reclamation;
-- the versioned `GST3` native startup ABI and named startup handles without
+- the versioned native startup ABI (`GST4` since ADR 0109) and named startup handles without
   application dependence on numeric handle slots.
 
 The project has therefore reached the point where additional kernel mechanisms

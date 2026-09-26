@@ -131,7 +131,6 @@ var (
 	// Requests are then refused at once rather than each waiting out a deadline
 	// for a process that is not there.
 	driverLive       = true
-	startupWire      [startup.Size]byte
 	wire             [ipc.WireMaxSize]byte
 	driverWire       [ipc.WireMaxSize]byte
 	requestMessage   ipc.Message
@@ -147,10 +146,7 @@ var (
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("BLOCK_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("BLOCK_STARTUP_UNAVAILABLE\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("BLOCK_STARTUP_INVALID\n")
 	}

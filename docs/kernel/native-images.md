@@ -55,7 +55,8 @@ would change in this format is described in
 compatibility-layer format and does not define this native envelope.
 
 Process startup is a separate versioned ABI described by ADR 0031. The current
-`GST3` block (ADR 0062) is limited to 1024 bytes and carries command, working directory,
-bounded `argv` and environment vectors, and named process-local handle bindings. Keeping startup
+`GST4` object (ADR 0109) is limited to 64 KiB and carries the command, the working
+directory, `argv` and environment bounded by bytes rather than counts, and named
+process-local handle bindings. Keeping startup
 metadata outside the image format allows one immutable image to run under
 different capability manifests.

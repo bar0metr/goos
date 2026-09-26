@@ -15,16 +15,18 @@ import (
 	supervisor "goos/userspace/init"
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
-	"goos/userspace/startup"
 	terminal "goos/userspace/tty"
 	userwait "goos/userspace/wait"
 )
 
-// execSlot is slot of the shared exec page.
-func execSlot(slot int) *[execproto.SlotSize]byte {
-	start := int(slot) * execproto.SlotSize
-	return (*[execproto.SlotSize]byte)(execPage[start : start+execproto.SlotSize])
+// execSlot is slot of the shared exec area.
+func execSlot(slot int) []byte {
+	start := slot * execproto.SlotSize
+	return execPage[start : start+execproto.SlotSize]
 }
+
+// pathVariable is the environment every command receives.
+var pathVariable = []byte("PATH=" + execproto.SearchRoot[:len(execproto.SearchRoot)-1])
 
 // readWholeFile reads path into target and refuses a file that does not fit,
 // rather than using a prefix of it.
@@ -67,29 +69,25 @@ func commandPath(word []byte, target *[execproto.MaxPath]byte) ([]byte, bool) {
 	return execproto.ResolveExecutable(word, target)
 }
 
-// writeSink builds the isolated `write` stage that drains its input stream into
+// writeSink adds the isolated `write` stage that drains its input stream into
 // one VFS path. It reports its own diagnostics and returns false on failure.
-func writeSink(encodedTarget []byte, appendMode bool, index int, environment []startup.Variable) (execproto.Stage, bool) {
+func writeSink(builder *execproto.Builder, encodedTarget []byte, appendMode bool, index int) bool {
 	target, parsed := shellcmd.ParseInvocation(encodedTarget, &argumentStorage)
 	if !parsed || target.Count != 1 {
 		write("exec: invalid redirection\n")
-		return execproto.Stage{}, false
+		return false
 	}
 	writePath, ok := execproto.ResolveExecutable([]byte("write"), &executableBuffers[index])
 	if !ok {
 		write("exec: invalid redirection\n")
-		return execproto.Stage{}, false
+		return false
 	}
 	arguments := [][]byte{[]byte("write"), target.Arguments[0]}
 	if appendMode {
 		arguments = [][]byte{[]byte("write"), []byte("--append"), target.Arguments[0]}
 	}
-	argumentData, _, ok := startup.EncodeVectors(arguments, environment, &vectorWires[index])
-	if !ok {
-		write("exec: redirection target too large\n")
-		return execproto.Stage{}, false
-	}
-	return execproto.Stage{Path: writePath, Arguments: argumentData}, true
+	builder.Stage(writePath, arguments)
+	return true
 }
 
 // awaitInput blocks until the terminal service or PID 1 has something for the
@@ -158,9 +156,16 @@ func executeExternal(line []byte, background bool) {
 		write("exec: invalid redirection\n")
 		return
 	}
+	slot, ok := freeSlot(background)
+	if !ok {
+		write("exec: too many background jobs\n")
+		return
+	}
 	correlation++
-	environment := []startup.Variable{{Name: []byte("PATH"), Value: []byte(execproto.SearchRoot[:len(execproto.SearchRoot)-1])}}
-	requestData := execproto.Request{Count: uint8(count + redirectCount), Background: background, CWD: cwd[:cwdSize]}
+	// Each stage is written to the slot as soon as it is parsed, so the
+	// tokenizer's storage serves every stage in turn.
+	environment := [][]byte{pathVariable}
+	builder := execproto.NewBuilder(execSlot(int(slot)), cwd[:cwdSize], environment, background)
 	stageOffset := 0
 	if len(redirects.Input) != 0 {
 		target, parsed := shellcmd.ParseInvocation(redirects.Input, &argumentStorage)
@@ -169,12 +174,7 @@ func executeExternal(line []byte, background bool) {
 			write("exec: invalid redirection\n")
 			return
 		}
-		argumentData, _, ok := startup.EncodeVectors([][]byte{[]byte("cat"), target.Arguments[0]}, environment, &vectorWires[0])
-		if !ok {
-			write("exec: redirection target too large\n")
-			return
-		}
-		requestData.Stages[0] = execproto.Stage{Path: readPath, Arguments: argumentData}
+		builder.Stage(readPath, [][]byte{[]byte("cat"), target.Arguments[0]})
 		stageOffset = 1
 	}
 	for index := 0; index < count; index++ {
@@ -190,40 +190,24 @@ func executeExternal(line []byte, background bool) {
 			write(": not a command name or a program path\n")
 			return
 		}
-		argumentData, environmentData, ok := startup.EncodeVectors(invocation.Arguments[:invocation.Count], environment, &vectorWires[requestIndex])
-		if !ok {
-			write("exec: arguments too large\n")
-			return
-		}
-		requestData.Stages[requestIndex] = execproto.Stage{Path: executable, Arguments: argumentData}
-		if index == 0 {
-			requestData.Environment = environmentData
-		}
+		builder.Stage(executable, invocation.Arguments)
 	}
 	nextIndex := stageOffset + count
+	errorSource := uint8(0)
 	if len(redirects.Output) != 0 {
-		stage, ok := writeSink(redirects.Output, redirects.Append, nextIndex, environment)
-		if !ok {
+		if !writeSink(&builder, redirects.Output, redirects.Append, nextIndex) {
 			return
 		}
-		requestData.Stages[nextIndex] = stage
 		nextIndex++
 	}
 	if len(redirects.Error) != 0 {
-		stage, ok := writeSink(redirects.Error, redirects.ErrorAppend, nextIndex, environment)
-		if !ok {
+		// The sink reads the stderr of the last user stage, not stdout.
+		if !writeSink(&builder, redirects.Error, redirects.ErrorAppend, nextIndex) {
 			return
 		}
-		// The sink reads the stderr of the last user stage, not stdout.
-		requestData.Stages[nextIndex] = stage
-		requestData.ErrorSource = uint8(stageOffset + count)
+		errorSource = uint8(stageOffset + count)
 	}
-	slot, ok := freeSlot(background)
-	if !ok {
-		write("exec: too many background jobs\n")
-		return
-	}
-	data, ok := execproto.EncodeRequest(requestData, execSlot(int(slot)))
+	data, ok := builder.Finish(errorSource)
 	if !ok {
 		write("exec: command too large\n")
 		return
@@ -267,7 +251,7 @@ func executeExternal(line []byte, background bool) {
 		mark("EXIT_STATUS_PROPAGATION_OK\n")
 	}
 	mark("SHELL_EXEC_OK\n")
-	if requestData.Count > 1 {
+	if count+redirectCount > 1 {
 		mark("PIPELINE_EXEC_OK\n")
 	}
 	if redirectCount != 0 {

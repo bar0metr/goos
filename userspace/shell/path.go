@@ -1,6 +1,9 @@
 package shell
 
-const MaxPath = 192
+import "goos/internal/limits"
+
+// MaxPath is the native path limit (ADR 0110).
+const MaxPath = limits.PathMax
 
 // ResolvePath canonicalizes an absolute or cwd-relative path into target.
 func ResolvePath(cwd []byte, path []byte, target *[MaxPath]byte) ([]byte, bool) {
@@ -46,7 +49,7 @@ func ResolvePath(cwd []byte, path []byte, target *[MaxPath]byte) ([]byte, bool) 
 			}
 			continue
 		}
-		if len(component) > 63 || out+len(component)+1 > len(target) {
+		if len(component) > limits.NameMax || out+len(component)+1 > len(target) {
 			return nil, false
 		}
 		starts[count] = uint16(out)

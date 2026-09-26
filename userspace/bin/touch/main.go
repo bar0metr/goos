@@ -11,10 +11,10 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "touch FILE",
-	Summary: "create an empty file if it does not exist",
+	Usage:   "touch FILE...",
+	Summary: "create empty files that do not exist",
 	MinArgs: 1,
-	MaxArgs: 1,
+	MaxArgs: commands.Unbounded,
 	Grants:  commands.GrantVFS,
 }
 
@@ -24,11 +24,15 @@ func userspaceMain() { utility.Run(manifest, run) }
 func main() {}
 
 func run(data startup.Data) {
-	path := utility.Path(data, 1)
-	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
-	if reply.Status == vfs.StatusAlreadyExists {
-		reply.Status = vfs.StatusOK
+	mark := utility.HeapMark()
+	for index := 1; index <= data.ArgCount(); index++ {
+		utility.HeapReset(mark)
+		path := utility.Path(data, index)
+		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
+		if reply.Status == vfs.StatusAlreadyExists {
+			reply.Status = vfs.StatusOK
+		}
+		utility.Check(reply, received, path, true)
 	}
-	utility.Check(reply, received, path, true)
 	utility.Mark("TOUCH_PROCESS_OK\n")
 }

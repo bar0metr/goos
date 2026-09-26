@@ -27,7 +27,7 @@ type Streams struct {
 type PipelineRunner interface {
 	CreateStream() (handle.ID, handle.ID, bool)
 	Close(handle.ID) bool
-	Launch(stage execproto.Stage, cwd, environment []byte, streams Streams) (uint64, handle.ID, LaunchStatus)
+	Launch(stage execproto.Stage, cwd []byte, environment execproto.List, streams Streams) (uint64, handle.ID, LaunchStatus)
 	Wait(handle.ID) uint64
 }
 

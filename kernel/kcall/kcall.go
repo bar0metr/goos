@@ -181,7 +181,7 @@ func Dispatch(request Request, handler Handler) Result {
 		}
 		return Result{Status: handler.ClockRead(request.Arg0, request.Arg1)}
 	case OperationStartupRead:
-		if request.Arg1 != StartupSize {
+		if request.Arg1 == 0 || request.Arg1 > MaxStartupSize {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.StartupRead(request.Arg0, request.Arg1)}
@@ -389,8 +389,11 @@ const MaxExecutableWrite = uint64(1 << 20)
 // the virtual address the image was mapped at and its length in bytes.
 const ImageDescriptorSize = uint64(16)
 
-// StartupSize is the fixed length of a StartupRead copy.
-const StartupSize = uint64(1024)
+// MaxStartupSize bounds a process's startup object (ADR 0109). 64 KiB holds a
+// PATH_MAX command and working directory and about 56 KiB of arguments and
+// environment, more than a shell line can produce, while PID 1's staging area
+// stays at 256 KiB for its four slots and the kernel's copy at 64 KiB.
+const MaxStartupSize = 64 << 10
 
 // WaitAny is a readiness operation: it never consumes data from a waitable
 // object. Userspace performs the typed receive/read/wait operation after the

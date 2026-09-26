@@ -42,7 +42,7 @@ host (QEMU, OVMF, ISO, disk image file)
 | process ↔ process | typed IPC, streams, handle transfer, shared pages | per-process address spaces, generation-safe handles, non-escalating transfer ([capabilities.md](capabilities.md)); shared image pages are never writable (ADR 0081) |
 | shell, commands → terminal | terminal output stream (write-only copies) | only the terminal service holds a reading end besides PID 1; stream ends are reference counted, so no holder can close the stream for the others (ADR 0089) |
 | PID 1 → kernel launch | lifecycle channel | only PID 1 holds the lifecycle endpoint; the kernel validates every grant against PID 1's table (ADR 0024) and resolves the executable only inside the boot archive |
-| shell → PID 1 | exec channel and exec page | PID 1 copies the request out of the shared page before validating it, accepts only `/system/bin/<name>` paths, and grants a VFS session only when the command's entry in the command index asks for one (ADR 0030, 0064, 0080) |
+| shell → PID 1 | exec channel and exec area | PID 1 copies the request out of the shared page before validating it, accepts only `/system/bin/<name>` paths, and grants a VFS session only when the command's entry in the command index asks for one (ADR 0030, 0064, 0080) |
 | VFS → storage | `GBLK001` IPC | block service validates ranges and overflow; VFS never holds device authority (ADR 0033, 0036) |
 | VFS → system image | `ImageMap` | read-only, non-executable, unowned mapping of the archive; the capability is held only by VFS (ADR 0070) |
 | client → config service | `GCF1` session | scope and rights are fixed by PID 1 when it creates the session (ADR 0074, 0076) |
@@ -185,7 +185,7 @@ The raw disk image is host-provided and persists across boots.
 - Services answer unparsable but attributable requests with an
   invalid-argument reply instead of dropping them (ADR 0048). A request whose
   peer has died is dropped without stopping the service (ADR 0078).
-- Requests that travel through a shared page (launch staging, exec page) are
+- Requests that travel through shared memory (launch staging, exec area) are
   copied into private memory once, before validation, so the sender cannot
   change them afterwards (ADR 0062, 0064).
 

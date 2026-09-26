@@ -53,7 +53,6 @@ var (
 	// ownScope is the service's own view for seeding and exporting. It is not
 	// reachable from any endpoint.
 	ownScope      config.Scope
-	startupWire   [startup.Size]byte
 	wire          [ipc.WireMaxSize]byte
 	vfsWire       [ipc.WireMaxSize]byte
 	descriptor    [3]uint64
@@ -75,10 +74,7 @@ type session struct {
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("CONFIG_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("CONFIG_STARTUP_UNAVAILABLE\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("CONFIG_STARTUP_INVALID\n")
 	}

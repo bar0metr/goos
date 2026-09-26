@@ -72,14 +72,16 @@ operation that consumes and returns the exit code, preserving the existing
 single-object interface.
 
 Before the first Task becomes runnable, the kernel completes the bounded
-versioned `GST3` startup block with the actual generation-safe IDs returned by
+versioned `GST4` startup object with the actual generation-safe IDs returned by
 capability installation. Applications resolve handles by explicit role names
 instead of assuming process-local slot numbers. Startup metadata never grants
 rights; the installed handle-table entry remains authoritative.
 
-The startup block adds bounded length-prefixed `argv` and environment vectors.
-PID 1 passes the template through a shared staging page, and the child
-receives the bound block on a read-only page at `0x40001000` (ADR 0062). The exec
+The startup object also carries the command, the working directory, `argv`,
+and the environment as a table of offsets into a string area, bounded by its
+64 KiB size rather than by counts (ADR 0109). PID 1 passes the template
+through a shared staging area, and the child receives the bound object on
+read-only pages at `vm.UserStartupAddress` (ADR 0062, ADR 0109). The exec
 control protocol returns final child status separately from launch status, so
 PID 1 can report application failure without confusing it with loader or
 capability-installation failure. The read-only `SystemInfo` call exposes a

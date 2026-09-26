@@ -241,7 +241,7 @@ func (nativePipelineRunner) CreateStream() (handle.ID, handle.ID, bool) {
 
 func (nativePipelineRunner) Close(id handle.ID) bool { return sys.HandleClose(id) == 0 }
 
-func (nativePipelineRunner) Launch(stage execproto.Stage, cwd, environment []byte, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
 	// A command of /system/bin is known by its name there, which selects its
 	// grants. The rest of /system holds services, which are not commands; a
 	// program anywhere else is named by its file.

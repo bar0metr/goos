@@ -35,7 +35,6 @@ var (
 	irqHandle      handle.ID
 	dmaHandle      handle.ID
 	serviceHandle  handle.ID
-	startupWire    [startup.Size]byte
 	wire           [ipc.WireMaxSize]byte
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
@@ -68,10 +67,7 @@ func portOut(offset uint16, width uint8, value uint32) bool {
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("VIRTIO_BLK_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("VIRTIO_BLK_STARTUP_FAILED\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("VIRTIO_BLK_STARTUP_INVALID\n")
 	}

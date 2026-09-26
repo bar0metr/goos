@@ -9,10 +9,8 @@ const (
 	UserAddressLimit = uint64(0x00007ffffffff000)
 	KernelImageBase  = uint64(0x400000)
 	UserProbeAddress = uint64(0x40000000)
-	// UserStartupAddress holds a process's read-only startup block.
-	UserStartupAddress = uint64(0x40001000)
-	UserCodeAddress    = uint64(0x40002000)
-	UserDataAddress    = uint64(0x40004000)
+	UserCodeAddress  = uint64(0x40002000)
+	UserDataAddress  = uint64(0x40004000)
 	// UserStackAddress is the stack of the fixed self-test and fault-probe
 	// layout. The 64 KiB below it are its unmapped guard gap (ADR 0083, ADR
 	// 0088); it sits above the self-test's shared-memory pages at 0x40010000
@@ -32,6 +30,9 @@ const (
 	UserImageLimit   = uint64(0x0000082040000000)
 	// UserStagingAddress is where PID 1 maps its launch staging pages.
 	UserStagingAddress = uint64(0x0000083000000000)
+	// UserStartupAddress holds a process's read-only startup object, at most
+	// kcall.MaxStartupSize bytes (ADR 0109).
+	UserStartupAddress = uint64(0x0000084000000000)
 	// [UserMapBase, UserMapLimit) is where the kernel places mappings whose
 	// caller lets it choose the address.
 	UserMapBase  = uint64(0x0000100000000000)

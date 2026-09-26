@@ -63,7 +63,6 @@ var (
 	// every pass, so turning persistence off takes effect at the next one
 	// rather than at the next boot.
 	persisting  = true
-	startupWire [startup.Size]byte
 	wire        [ipc.WireMaxSize]byte
 	descriptor  [3]uint64
 	logLine     [kcall.LogText]byte
@@ -81,10 +80,7 @@ var (
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("LOG_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != 0 {
-		fatal("LOG_STARTUP_UNAVAILABLE\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("LOG_STARTUP_INVALID\n")
 	}

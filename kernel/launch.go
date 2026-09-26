@@ -212,8 +212,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	if len(startupData) != 0 {
-		bound, boundOK := startup.BindHandles(startupData, installed[:len(grants)], &launchBound)
-		if !boundOK || !mapStartup(root, spawned.Regions(), bound) {
+		// The template is the kernel's own copy, so it is bound in place.
+		bound, boundOK := startup.Data{}, startup.BindHandles(startupData, installed[:len(grants)])
+		if boundOK {
+			bound, boundOK = startup.Decode(startupData)
+		}
+		if !boundOK || !mapStartup(root, spawned.Regions(), bound.Bytes()) {
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
@@ -305,40 +309,64 @@ func abandonHandle(typeID handle.Type, cap capability.Capability) {
 // launch runs at a time.
 var launchRegions region.Map
 
-// mapStartup gives a new process its bound startup block as a private
-// read-only page, recorded as a pinned region; it is released with the
+// mapStartup gives a new process its bound startup object as private
+// read-only pages, recorded as a pinned region; they are released with the
 // address space.
 func mapStartup(root uint64, regions *region.Map, bound []byte) bool {
-	if regions.Insert(region.Region{Base: vm.UserStartupAddress, Length: vm.PageSize, Protection: region.Read, Backing: region.Device, Flags: region.Pinned}) != region.OK {
+	pages := (uint64(len(bound)) + vm.PageSize - 1) / vm.PageSize
+	if regions.Insert(region.Region{Base: vm.UserStartupAddress, Length: pages * vm.PageSize, Protection: region.Read, Backing: region.Device, Flags: region.Pinned}) != region.OK {
 		return false
 	}
-	physical, ok := pageAllocator.Allocate()
-	if !ok {
-		return false
-	}
-	if !vm.InitializePhysical(physical, bound) {
-		pageAllocator.Free(physical)
-		return false
-	}
-	if _, mapped := vm.MapUserPageAt(&pageAllocator, root, vm.UserStartupAddress, physical, vm.Permissions{User: true}, true); !mapped {
-		pageAllocator.Free(physical)
-		return false
+	for page := uint64(0); page < pages; page++ {
+		physical, ok := pageAllocator.Allocate()
+		if !ok {
+			return false
+		}
+		end := min((page+1)*vm.PageSize, uint64(len(bound)))
+		if !vm.InitializePhysical(physical, bound[page*vm.PageSize:end]) {
+			pageAllocator.Free(physical)
+			return false
+		}
+		// A page mapped here is owned by the address space, which frees it
+		// if the launch is abandoned after this.
+		if _, mapped := vm.MapUserPageAt(&pageAllocator, root, vm.UserStartupAddress+page*vm.PageSize, physical, vm.Permissions{User: true}, true); !mapped {
+			pageAllocator.Free(physical)
+			return false
+		}
 	}
 	return true
 }
 
-// StartupRead copies the caller's startup page, or zeros for a process that
-// was started without one.
+// startupChunk carries StartupRead's copy from the caller's startup pages to
+// the buffer it named.
+var startupChunk [512]byte
+
+// StartupRead copies the first length bytes of the caller's startup pages to
+// address, or zeros past their end and for a process started without them.
+// A process reads the header, learns the object's size, and then reads the
+// rest or looks at the pages directly (ADR 0109).
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
-	if _, found := processRegistry.ByRoot(handler.root); !found || length != kcall.StartupSize {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found || length == 0 || length > kcall.MaxStartupSize {
 		return kcall.StatusPermissionDenied
 	}
-	clear(launchBound[:])
-	if _, mapped := vm.ResolveUser(handler.root, vm.UserStartupAddress); mapped && !vm.CopyIn(handler.root, vm.UserStartupAddress, launchBound[:]) {
-		return kcall.StatusInvalidArgument
+	available := uint64(0)
+	if entry, mapped := owner.Regions().Find(vm.UserStartupAddress); mapped && entry.Base == vm.UserStartupAddress {
+		available = entry.Length
 	}
-	if !vm.CopyOut(handler.root, address, launchBound[:]) {
-		return kcall.StatusInvalidArgument
+	for done := uint64(0); done < length; {
+		chunk := startupChunk[:min(uint64(len(startupChunk)), length-done)]
+		clear(chunk)
+		if done < available {
+			chunk = chunk[:min(uint64(len(chunk)), available-done)]
+			if !vm.CopyIn(handler.root, vm.UserStartupAddress+done, chunk) {
+				return kcall.StatusInvalidArgument
+			}
+		}
+		if !vm.CopyOut(handler.root, address+done, chunk) {
+			return kcall.StatusInvalidArgument
+		}
+		done += uint64(len(chunk))
 	}
 	return kcall.StatusOK
 }

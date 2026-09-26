@@ -175,8 +175,12 @@ func ProcessInfo(index uint64, target *[kcall.ProcessInfoSize]byte) kcall.Status
 	return status(processInfo(index, unsafe.Pointer(&target[0])))
 }
 
-// StartupRead copies the caller's startup block.
-func StartupRead(target *[kcall.StartupSize]byte) kcall.Status {
+// StartupRead copies the first len(target) bytes of the caller's startup
+// object, zeros past its end.
+func StartupRead(target []byte) kcall.Status {
+	if len(target) == 0 {
+		return kcall.StatusInvalidArgument
+	}
 	return status(startupRead(unsafe.Pointer(&target[0]), uintptr(len(target))))
 }
 

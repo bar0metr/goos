@@ -9,9 +9,10 @@ lines and sends each as one write, flushing before it asks for a line or waits.
 Reading the system log is a separate `log` capability.
 
 The shell resolves its `stdout`, `tty`, `log`, `vfs`, and `exec` handles from
-the versioned startup block and asks the terminal service for each line with
+the versioned startup object and asks the terminal service for each line with
 its prompt. Editing, echo and the control keys belong to the terminal service
-([tty.md](tty.md)); a command line is at most 128 bytes. Runtime allocation
+([tty.md](tty.md)); a command line is at most 4096 bytes, and the number of
+words in it is bounded only by its length (ADR 0109). Runtime allocation
 remains confined to the fixed userspace arena.
 
 The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`,
@@ -59,7 +60,7 @@ or redirection composition substitutes an endpoint (ADR 0089). No command holds 
 console capability. Standard input is always a
 stream: a foreground command's is fed by the shell with the lines typed while it
 runs, and a background command's is at end of input. The bounded `readline`
-utility reads one line from `in`, rejects input beyond 128 bytes, and writes
+utility reads one line from `in`, rejects input beyond 4096 bytes, and writes
 accepted bytes to `stdout`.
 `stat [-b|-k|-m|-g] PATH` prints a path's type and size in KiB by default, or
 in bytes, MiB or GiB, with two decimals and the exact byte count:
@@ -116,7 +117,7 @@ terminal session, exec channel, VFS session and configuration session, and no
 jobs.
 
 Up to eight commands or bounded pipelines may be separated by unquoted `;`
-within the existing 128-byte line limit. A trailing separator is accepted; empty
+within the 4096-byte line limit. A trailing separator is accepted; empty
 intermediate commands are rejected. The entire line is checked for balanced
 quotes, escaping, argument bounds, and pipeline syntax before any command runs.
 Quoted or escaped semicolons remain data. Builtins cannot be pipeline stages.

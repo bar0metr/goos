@@ -92,7 +92,7 @@ User addresses are canonical lower-half addresses in `[1 GiB,
 | `0x40000000` | self-test probe page (validation build) |
 | `0x40001000` | startup page, read-only |
 | `0x40002000` – `2 GiB` | image segments; static small-code-model executables |
-| `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec page) |
+| `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec area) |
 | `0x0000081000000000` | DMA window |
 | `0x0000082000000000` | system image window |
 | `0x0000083000000000` | PID 1 launch staging page |
@@ -198,7 +198,7 @@ decided so far is in the way.
 | Initial stack pointer | `0x00007fffff000000` | `vm.UserStackTop`; the reservation below it comes from the image header |
 | Userspace heap | chosen by the kernel's first-fit search from `0x0000100000000000` | `arena.Init` reserves it with `VMMap` |
 | Kernel-chosen mappings | first fit in `[0x0000100000000000, 0x0000700000000000)` | `vm.UserMapBase`/`UserMapLimit`; `region.Map.FindFree` takes the starting point as a parameter |
-| Shared-memory window | `[0x0000080000000000, 0x0000081000000000)` | `vm.UserSharedAddress`; the file cache at its start, the exec page 16 MiB in (`exec.PageAddress`) |
+| Shared-memory window | `[0x0000080000000000, 0x0000081000000000)` | `vm.UserSharedAddress`; the file cache at its start, the 256 KiB exec area 16 MiB in (`exec.AreaAddress`) |
 | DMA window | `0x0000081000000000`, four pages | `vm.UserDMAAddress`; `DMAAllocate` refuses any other address |
 | PID 1 launch staging page | `0x0000083000000000` | `vm.UserStagingAddress`, mapped by the kernel |
 | System image window | `[0x0000082000000000, 0x0000082040000000)` | `vm.UserImageAddress`/`UserImageLimit`; `ImageMap` refuses any other address |
@@ -296,9 +296,9 @@ behave differently:
 
 No ABI decision blocks randomization. The native-call ABI passes user
 addresses as arguments and returns them, and no startup, IPC, lifecycle, or
-exec wire format carries a pointer: the `GST3` startup block holds lengths,
-bytes, and handle IDs, and the exec and launch staging pages are addressed by
-slot. The fixed values that would have to change are all kernel constants,
+exec wire format carries a pointer: the `GST4` startup object holds offsets
+relative to itself, bytes, and handle IDs, and the exec and launch staging
+areas are addressed by slot. The fixed values that would have to change are all kernel constants,
 the userspace linker script, and the `DMAAllocate`/`ImageMap` address checks,
 and none of them is part of a declared stable ABI.
 

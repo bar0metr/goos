@@ -157,9 +157,9 @@ func fillDeadline(size uint64) uint64 {
 
 // requestLaunch sends one launch request and waits for its reply. The caller
 // has written the startup template into staging slot slot.
-func requestLaunch(executable supervisor.Executable, name string, grants []supervisor.Capability, slot uint8, startupSize int) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
+func requestLaunch(executable supervisor.Executable, name string, grants []supervisor.Capability, slot uint8, startupSize uint32) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
 	correlation++
-	request, ok := supervisor.LaunchRequestWithStartup(1, executable, name, grants, slot, uint16(startupSize), correlation)
+	request, ok := supervisor.LaunchRequestWithStartup(1, executable, name, grants, slot, startupSize, correlation)
 	if !ok {
 		return supervisor.LifecycleEvent{}, supervisor.LaunchInvalidImage
 	}

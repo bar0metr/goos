@@ -11,9 +11,12 @@ import (
 
 const (
 	ProtocolID = uint64(0x4754545932303031)
-	Version    = uint16(1)
-	// MaxLine is the longest line a client receives.
-	MaxLine = 128
+	Version    = uint16(2)
+	// MaxLine is the longest line a client receives: a native path and then
+	// some (ADR 0109). A line longer than one message is delivered in parts.
+	MaxLine = 4096
+	// MaxPart is the most of a line one reply carries.
+	MaxPart = ipc.MaxPayload - 1
 	// MaxPrompt is the longest prompt a client may ask to be shown.
 	MaxPrompt = 64
 )
@@ -37,6 +40,9 @@ const (
 	// service over its control channel, and the client end to the shell over
 	// its exec channel, when the other one has been restarted (ADR 0089).
 	OperationSession
+	// OperationContinue asks for the next part of a line whose previous part
+	// was answered with ResultPart.
+	OperationContinue
 )
 
 // Result says how a read ended.
@@ -51,11 +57,14 @@ const (
 	// ResultRefused answers a malformed request, or a read while one is
 	// already outstanding.
 	ResultRefused
+	// ResultPart carries part of a line; the client asks for the rest with
+	// OperationContinue, and the last part comes as ResultLine.
+	ResultPart
 )
 
 // Request encodes a client request carrying a prompt.
 func Request(operation Operation, prompt []byte, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || operation < OperationReadLine || operation > OperationRedraw || len(prompt) > MaxPrompt || !printable(prompt) {
+	if correlation == 0 || !clientOperation(operation) || len(prompt) > MaxPrompt || !printable(prompt) || operation == OperationContinue && len(prompt) != 0 {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(1 + len(prompt))}
@@ -72,15 +81,23 @@ func DecodeRequest(message *ipc.Message) (Operation, []byte, bool) {
 	}
 	operation := Operation(message.Payload[0])
 	prompt := message.Payload[1:message.PayloadSize]
-	if operation < OperationReadLine || operation > OperationRedraw || !printable(prompt) {
+	if !clientOperation(operation) || !printable(prompt) || operation == OperationContinue && len(prompt) != 0 {
 		return 0, nil, false
 	}
 	return operation, prompt, true
 }
 
-// Reply encodes the answer to a request. Only ResultLine carries data.
+func clientOperation(operation Operation) bool {
+	return operation == OperationReadLine || operation == OperationRedraw || operation == OperationContinue
+}
+
+// CarriesText reports whether a result may carry part of a line.
+func CarriesText(result Result) bool { return result == ResultLine || result == ResultPart }
+
+// Reply encodes the answer to a request. Only ResultLine and ResultPart carry
+// data, at most MaxPart bytes of it.
 func Reply(result Result, line []byte, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || result < ResultLine || result > ResultRefused || len(line) > MaxLine || result != ResultLine && len(line) != 0 {
+	if correlation == 0 || result < ResultLine || result > ResultPart || len(line) > MaxPart || !CarriesText(result) && len(line) != 0 || result == ResultPart && len(line) == 0 {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: uint16(1 + len(line))}
@@ -92,12 +109,12 @@ func Reply(result Result, line []byte, correlation uint64) (ipc.Message, bool) {
 // DecodeReply validates a reply; the line aliases the message.
 func DecodeReply(message *ipc.Message) (Result, []byte, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply ||
-		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize == 0 || message.PayloadSize > 1+MaxLine {
+		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize == 0 || message.PayloadSize > 1+MaxPart {
 		return 0, nil, false
 	}
 	result := Result(message.Payload[0])
 	line := message.Payload[1:message.PayloadSize]
-	if result < ResultLine || result > ResultRefused || result != ResultLine && len(line) != 0 {
+	if result < ResultLine || result > ResultPart || !CarriesText(result) && len(line) != 0 || result == ResultPart && len(line) == 0 {
 		return 0, nil, false
 	}
 	return result, line, true

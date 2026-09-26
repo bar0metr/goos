@@ -78,36 +78,40 @@ Channel capabilities identify their endpoint side. A launch grant may be marked
 consumed, removing PID 1's source handle after successful derivation. This is
 used for per-process VFS clients and prevents accumulation of temporary handles.
 
-PID 1 also supplies a `GST3` startup template with a unique role name for each
-manifest entry. It writes the template into a slot of the launch staging page
-shared with the kernel (handle `0x100000013`), and the launch message names the
-slot (ADR 0062). After installing all capabilities, the kernel writes their
-actual generation-safe IDs into the startup block before creating the first
-Task. Services resolve roles rather than depending on handle-table insertion
+PID 1 also supplies a `GST4` startup template with a unique role name for each
+manifest entry. It writes the template with `startup.Writer` into a 64 KiB
+slot of the launch staging area shared with the kernel (handle `0x100000013`,
+four slots), and the launch message (lifecycle version 8) names the slot and
+the template's size (ADR 0062, ADR 0109). After installing all capabilities,
+the kernel writes their actual generation-safe IDs into its copy of the
+startup object before creating the first Task. Services resolve roles rather than depending on handle-table insertion
 order. Names are descriptive metadata; type and rights enforcement remains in
 the kernel handle table.
 
-The kernel also grants PID 1 a one-page exec page (handle `0x100000014`,
+The kernel also grants PID 1 a 256 KiB exec area (handle `0x100000014`,
 `Read|Write|Transfer`) for the shell exec protocol. It is not mapped at boot;
 PID 1 maps it with `MemoryMap` and passes a derived `Read|Write` handle to the
 shell through the launch manifest (ADR 0063).
 
 Shell exec requests are restricted to simple names below `/system/bin`. A
 request carries one to four invocation records, a shared cwd, and a shared
-environment. The shell writes it into a 1024-byte slot of the exec page it
-shares with PID 1, and the version 7 submit message names the slot and size
-(ADR 0064). The reply to a launch that failed names the stage that could not be
+environment. The shell writes it into a 64 KiB slot of the exec area it
+shares with PID 1, and the version 11 submit message names the slot and size
+(ADR 0064, ADR 0109). The reply to a launch that failed names the stage that could not be
 started, so the shell can report it by name (ADR 0079). PID 1 copies the slot before decoding it. Each record contains
 its own executable path and structured argv. The decoder checks the complete
 request, all lengths, system paths, vector encodings, and trailing bytes before
 any resource operations. Oversized requests are rejected rather than truncated.
 
-The request begins with five bytes: stage count, cwd byte length, environment
-byte length, error source, and flags (bit 0: background, whose first stage
-reads an empty stream). Cwd and environment bytes follow. Each
-stage then stores one-byte path and argv lengths followed by those byte strings.
-Argv and environment use the GST3 vector encoding, up to 255 bytes each. No handles are
-attached to the exec request; PID 1 derives child capabilities from its own table.
+The request begins with twelve bytes: stage count, error source, flags (bit 0:
+background, whose first stage reads an empty stream), a zero byte, the cwd's
+length, and the number of environment variables. The cwd and the variables
+follow; each stage then stores its path, its argument count, and its
+arguments. Every variable, path, and argument is a 32-bit length followed by
+its bytes; variables are `NAME=VALUE`. Arguments are limited by the slot's
+bytes, not by a count, and PID 1 turns them into the startup object; one that
+does not fit fails with "arguments too long". No handles are attached to the
+exec request; PID 1 derives child capabilities from its own table.
 
 For N stages PID 1 creates N-1 streams and starts stages from right to left,
 so a downstream launch failure cannot leave a newly started producer waiting on

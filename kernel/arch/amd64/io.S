@@ -6,9 +6,11 @@
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
 
-// The console ring is a power of two so the wrap is a mask.
-.set GOOS_CONSOLE_RING, 256
-.set GOOS_CONSOLE_RING_MASK, 255
+// The console ring is a power of two so the wrap is a mask. It holds two of
+// the longest lines the terminal accepts (4096 bytes), so a pasted line
+// arrives whole even when the terminal service reads it a tick later.
+.set GOOS_CONSOLE_RING, 8192
+.set GOOS_CONSOLE_RING_MASK, 8191
 
 .section .text
 

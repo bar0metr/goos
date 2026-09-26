@@ -33,7 +33,6 @@ var (
 	consoleHandle  handle.ID
 	vfsHandle      handle.ID
 	blockHandle    handle.ID
-	startupWire    [startup.Size]byte
 	wire           [ipc.WireMaxSize]byte
 	blockWire      [ipc.WireMaxSize]byte
 	requestMessage ipc.Message
@@ -166,10 +165,7 @@ func (blockDevice) Capacity() uint64 {
 func userspaceMain() {
 	arena.Init()
 	arena.OnExhausted(func() { fatal("FAT32_OUT_OF_MEMORY\n") })
-	if sys.StartupRead(&startupWire) != kcall.StatusOK {
-		fatal("FAT32_STARTUP_UNAVAILABLE\n")
-	}
-	data, ok := startup.Decode(startupWire[:])
+	data, ok := startup.Read()
 	if !ok {
 		fatal("FAT32_STARTUP_INVALID\n")
 	}

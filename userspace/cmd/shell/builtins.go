@@ -200,9 +200,9 @@ func printHandles(names bool) {
 }
 
 func capabilityName(id handle.ID) []byte {
-	for index := 0; index < int(startupData.HandleCount); index++ {
-		if startupData.Handles[index].ID == id {
-			return startupData.Handles[index].Name
+	for index := 0; index < startupData.HandleCount(); index++ {
+		if name, bound := startupData.HandleAt(index); bound == id {
+			return name
 		}
 	}
 	return nil
