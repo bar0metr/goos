@@ -4,6 +4,7 @@ Persistent storage is split into capability-isolated layers:
 
 ```text
 VFS -> filesystem service -> block service -> device driver -> device
+                             (partition table, block slice)
 ```
 
 The block service contract is `GBLK001` version 1. It exposes device
@@ -20,6 +21,37 @@ FAT32 filesystem service translate file semantics into block operations
 without acquiring device authority. That service is a process of its own
 between the VFS and the block service (ADR 0096); it restarts on failure, and
 PID 1 hands the block service and the VFS fresh endpoints to the new instance.
+
+## Partitions and block slices
+
+The filesystem service reaches one volume, not the disk (ADR 0115). When the
+block service first describes the device it reads its partition structures with
+`userspace/partition`:
+
+- a GPT behind a protective MBR: both headers and entry arrays are checked —
+  signature, revision, header and array CRC-32, the header's own LBA, and that
+  the usable range, the array and the other header lie inside the device and
+  apart; each used entry must lie in the usable range and overlap no other. The
+  primary governs; a damaged primary falls back to the backup, and a backup
+  that is invalid, differs or is not at the last block is reported. Nothing is
+  rewritten;
+- otherwise a FAT, exFAT or NTFS boot sector at LBA 0: the whole disk is the
+  volume ("superfloppy");
+- otherwise an MBR: up to four primary entries, each after LBA 0, inside the
+  disk and apart from the others. Extended partitions are listed but their
+  logical partitions are not read.
+
+A selector then picks the volume: `auto` (the whole disk without a table, the
+first MBR FAT32 partition, the first GPT basic-data partition — never the EFI
+system partition), a partition number, a GPT unique GUID or name, or the whole
+disk. The filesystem endpoint is served through a block slice of that volume:
+every offset is checked against the slice and moved to it, `Info` reports the
+slice's size, and a read-only slice refuses writes. Without a volume the
+endpoint answers I/O errors and the system boots without persistent storage.
+PID 1 passes the selector — `auto` for now — with every filesystem endpoint it
+hands over (control protocol version 3), and the table is read again each time.
+`tools/mkfat32 -table none|mbr|gpt` builds a disk with the FAT32 volume on the
+whole disk or in one partition from 1 MiB.
 
 The kernel discovers the QEMU legacy virtio-blk PCI function through PCI
 configuration mechanism 1. PID 1 receives three independently typed authorities:

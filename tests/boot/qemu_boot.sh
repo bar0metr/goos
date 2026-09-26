@@ -5,6 +5,7 @@ log=build/logs/boot.log
 reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
 corrupt_log=build/logs/corrupt-volume.log
+partition_log=build/logs/partition-tables.log
 stack_log=build/logs/kernel-stack-overflow.log
 poweroff_log=build/logs/poweroff.log
 poweroff_after_log=build/logs/poweroff-after.log
@@ -224,6 +225,8 @@ long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
 # A 255-byte ASCII name, the FAT32 unit limit, and a 200-byte directory name, so two
 # levels make a path longer than a message (ADR 0110).
 long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
+# One byte past the native name limit, NameMax (ADR 0114).
+too_long_name=$(awk 'BEGIN { for (i = 0; i < 1025; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 ( sleep 8
   printf 'help\n'
@@ -242,7 +245,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 2
 	printf 'mkdir /home/%s; echo deep-fat32 > /home/%s/%s; ls /home/%s; mv /home/%s/%s /home/%s/renamed-%s; cat /home/%s/renamed-%s\n' "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_directory" "$long_directory"
 	sleep 3
-	printf 'touch /tmp/%sx\n' "$long_name"
+	printf 'touch /tmp/%s\n' "$too_long_name"
 	sleep 1
 	# Seven background pipelines at once, two VFS sessions each: more jobs
 	# than the former four exec slots allowed, more sessions than the VFS's
@@ -733,6 +736,10 @@ require_window storage.fat32-volume-served-again '^persistent$' 'the volume read
 # File data moves between the VFS and the FAT32 service through the file cache
 # they share, not through messages (ADR 0098).
 require_marker storage.file-cache FILE_CACHE_OK "$log"
+# The development disk has no partition table: the filesystem service is
+# given the whole disk (ADR 0115). A restarted filesystem service has the
+# volume chosen again from the table.
+require_min_count storage.whole-disk-volume '^BLOCK_VOLUME_WHOLE_OK$' 2 "$log" BLOCK_VOLUME_WHOLE_OK
 count_window storage.vfs-not-restarted '^VFS_SERVICE_OK$' 0 "$log" 'goos> fault fat32' 'goos> fault vfs'
 pass_group storage
 
@@ -777,7 +784,7 @@ forbid_window startup.many-paths-errors 'not found\|usage:' 'no path was refused
 require_regex names.ramfs-long-path '^deep-ramfs$' 'a 255-byte name under a 405-byte path in /tmp' "$log" 'goos> mkdir /tmp/ddd'
 require_regex names.fat32-long-name "^$long_name\$" 'a 255-byte name listed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
 require_regex names.fat32-rename '^deep-fat32$' 'a long name renamed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
-require_regex names.too-long ': file name too long$' 'a 256-byte name refused as too long' "$log" 'goos> touch /tmp/nnn'
+require_regex names.too-long ': file name too long$' 'a 1025-byte name refused as too long' "$log" 'goos> touch /tmp/nnn'
 count_window registries.background-jobs '\[[1-7]\] started$' 7 "$log" 'goos> sleep 4 | cat /system/motd | write /tmp/bg1 &' 'goos> cat /tmp/bg1 /tmp/bg4 /tmp/bg7'
 forbid_window registries.no-exhaustion 'resource limit\|too many background jobs\|cannot start' 'seven pipelines ran without running out of anything' "$log" 'goos> sleep 4 | cat /system/motd | write /tmp/bg1 &' 'goos> readline'
 count_window registries.background-output 'Welcome to GoOS' 3 "$log" 'goos> cat /tmp/bg1 /tmp/bg4 /tmp/bg7' 'goos> readline'
@@ -887,8 +894,11 @@ fi
 count_window leaks.rounds '^pages used: ' 1 "$log" 'goos> echo leak-round-1' 'goos> echo leak-round-2'
 pass_group vm
 
-value=$(dd if="$disk" bs=1 skip=4093 count=6 2>/dev/null)
-[ "$value" = GBLKIO ] || fail_check persistence.block-bytes GBLKIO "$value" "$log" BLOCK_SERVICE_IO_OK
+# PID 1's storage probe writes a pattern across sectors 7 and 8 and puts the
+# original bytes back (ADR 0115): the pattern must be gone from the disk, and
+# the backup FSInfo trail signature it crossed intact.
+value=$(dd if="$disk" bs=1 skip=4092 count=7 2>/dev/null | od -An -tx1 | tr -d ' \n')
+[ "$value" = 000055aa000000 ] || fail_check persistence.block-bytes 'the bytes the probe crossed restored (000055aa000000)' "$value" "$log" BLOCK_SERVICE_IO_OK
 checks=$((checks + 1))
 grep -a -q 'Welcome to GoOS' "$disk" || fail_check persistence.fat32-image 'Welcome to GoOS in disk image' 'content not found' "$log" 'cat /persist/state.txt'
 checks=$((checks + 1))
@@ -1156,6 +1166,42 @@ forbid_window corrupt.persist-absent '^persist/$' 'no persistent mounts listed' 
 require_regex corrupt.usable '^volatile-root-still-works$' 'the system usable without storage' "$corrupt_log" 'goos> echo volatile-root-still-works'
 require_marker corrupt.config CONFIG_GET_OK "$corrupt_log" 'config get system.shell.prompt'
 pass_group corrupt-volume
+
+# A volume inside a partition: the block service reads the MBR or GPT and
+# gives the filesystem service a slice of the disk holding the partition, and
+# nothing else (ADR 0115). A file written in the guest must come back out of
+# the partition on the host, through a table the host still finds valid:
+# nothing — not the filesystem, not PID 1's storage probe — may have written
+# outside the slice or over the table.
+for table_kind in mbr gpt; do
+	table_upper=$(printf '%s' "$table_kind" | tr '[:lower:]' '[:upper:]')
+	partition_disk=build/partition-$table_kind-virtio-blk.img
+	rm -f "$partition_log" "$partition_disk" "build/partition-$table_kind.out"
+	go run ./tools/mkfat32 -size 128 -table "$table_kind" "$partition_disk"
+	( sleep 6
+		printf 'write /persist/partition.txt "inside-%s-partition"\n' "$table_kind"
+		sleep 2
+		printf 'cat /persist/partition.txt\n'
+		sleep 2
+		printf 'config get system.shell.prompt\n'
+	) | qemu-system-x86_64 -machine q35 -m "$memory" \
+		-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+		-drive "if=none,id=goosdisk,format=raw,file=$partition_disk" \
+		-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+		-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$partition_log" 2>&1 &
+	pid=$!
+	wait_for_marker "partition.$table_kind" '^CONFIG_GET_OK$' 60 "$partition_log"
+	cleanup
+	require_marker "partition.$table_kind.chosen" "BLOCK_VOLUME_${table_upper}_OK" "$partition_log"
+	require_marker "partition.$table_kind.mounted" FAT32_MOUNT_OK "$partition_log"
+	require_marker "partition.$table_kind.probe" BLOCK_SERVICE_IO_OK "$partition_log"
+	require_regex "partition.$table_kind.read" "^inside-$table_kind-partition\$" 'the file read back in the guest' "$partition_log" 'goos> cat /persist/partition.txt'
+	go run ./tools/mkfat32 -get "partition.txt:build/partition-$table_kind.out" "$partition_disk"
+	if [ "$(cat "build/partition-$table_kind.out")" != "inside-$table_kind-partition" ]; then
+		fail_check "partition.$table_kind.host" "the guest's file inside the $table_kind partition" "$(cat "build/partition-$table_kind.out")" "$partition_log"
+	fi
+done
+pass_group partition-tables
 
 # A kernel stack that overflows must stop at its guard and be reported, not
 # run into the memory below it or reset the machine without a word. PID 1's

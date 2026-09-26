@@ -2,12 +2,10 @@ package fat32
 
 import (
 	"bytes"
-	"compress/gzip"
-	"encoding/binary"
 	"fmt"
+	"goos/internal/imagefixture"
 	"goos/kernel/ramfs"
 	"hash/crc32"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -400,7 +398,7 @@ func TestMakeForeignFixtures(t *testing.T) {
 		os.WriteFile(filepath.Join(mount, "MANIFEST.TXT"), []byte(manifest.String()), 0o644)
 		unmount()
 		image, _ := os.ReadFile(path)
-		if err := os.WriteFile(filepath.Join("testdata", fixture.name+".img.gz"), packImage(image), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join("testdata", fixture.name+".img.gz"), imagefixture.Pack(image), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -416,7 +414,9 @@ func TestForeignFixtures(t *testing.T) {
 	for _, path := range paths {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			image, file := imageFile(t, 0)
-			unpackImage(t, path, file)
+			if err := imagefixture.Unpack(path, file); err != nil {
+				t.Fatal(err)
+			}
 			file.Close()
 			device := openDevice(t, image)
 			fs, root := mounted(t, device)
@@ -447,68 +447,6 @@ func TestForeignFixtures(t *testing.T) {
 			check(t, device)
 			exercise(t, device)
 		})
-	}
-}
-
-// A fixture is stored sparse, since deflate compresses long runs of zeros
-// only about a thousandfold: gzip of "GOOSFIX1", the image size, then each
-// 4 KiB block that is not all zeros as its offset and its bytes.
-const fixtureBlock = 4096
-
-func packImage(image []byte) []byte {
-	var packed bytes.Buffer
-	writer, _ := gzip.NewWriterLevel(&packed, gzip.BestCompression)
-	var header [16]byte
-	copy(header[:8], "GOOSFIX1")
-	binary.LittleEndian.PutUint64(header[8:], uint64(len(image)))
-	writer.Write(header[:])
-	zero := make([]byte, fixtureBlock)
-	for offset := 0; offset < len(image); offset += fixtureBlock {
-		block := image[offset:min(offset+fixtureBlock, len(image))]
-		if bytes.Equal(block, zero[:len(block)]) {
-			continue
-		}
-		var at [8]byte
-		binary.LittleEndian.PutUint64(at[:], uint64(offset))
-		writer.Write(at[:])
-		writer.Write(append(block, zero[len(block):]...))
-	}
-	writer.Close()
-	return packed.Bytes()
-}
-
-// unpackImage writes the fixture at path into file, which it sizes first.
-func unpackImage(t *testing.T, path string, file *os.File) {
-	t.Helper()
-	source, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer source.Close()
-	reader, err := gzip.NewReader(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var header [16]byte
-	if _, err := io.ReadFull(reader, header[:]); err != nil || string(header[:8]) != "GOOSFIX1" {
-		t.Fatalf("%s is not a fixture: %v", path, err)
-	}
-	size := int64(binary.LittleEndian.Uint64(header[8:]))
-	if err := file.Truncate(size); err != nil {
-		t.Fatal(err)
-	}
-	block := make([]byte, 8+fixtureBlock)
-	for {
-		if _, err := io.ReadFull(reader, block); err == io.EOF {
-			return
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		offset := int64(binary.LittleEndian.Uint64(block[:8]))
-		length := min(int64(fixtureBlock), size-offset)
-		if _, err := file.WriteAt(block[8:8+length], offset); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 

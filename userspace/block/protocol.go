@@ -7,6 +7,7 @@ import (
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/userspace/partition"
 )
 
 const (
@@ -223,30 +224,87 @@ func zero(value []byte) bool {
 // service the new client side. PID 1 holds the only control endpoint, so no
 // other process can redirect where storage requests go.
 const (
-	ControlProtocolID  = uint64(0x47424c4b43)
-	ControlVersion     = uint16(2)
+	ControlProtocolID = uint64(0x47424c4b43)
+	// Version 3 adds the volume selector to SetFilesystem (ADR 0115).
+	ControlVersion     = uint16(3)
 	operationSetDriver = byte(1)
 	// operationSetFilesystem replaces the endpoint the filesystem service
 	// reaches this service over, after that service restarts (ADR 0096).
 	operationSetFilesystem = byte(2)
 )
 
-func SetFilesystemRequest(server handle.ID, correlation uint64) (ipc.Message, bool) {
-	if server == 0 || correlation == 0 {
+// The selector travels in a fixed layout after the operation byte: kind,
+// index, GUID, name length and name. Fields the kind does not use must be
+// zero, so a malformed request cannot be read two ways.
+const (
+	selectorKind     = 1
+	selectorIndex    = 2
+	selectorGUID     = 6
+	selectorNameSize = 22
+	selectorName     = 23
+	selectorSize     = selectorName + partition.MaxName
+)
+
+// SetFilesystemRequest hands the block service the endpoint a filesystem
+// service reaches it over, and says which volume of the device that endpoint
+// may reach (ADR 0096, ADR 0115).
+func SetFilesystemRequest(server handle.ID, selector partition.Selector, correlation uint64) (ipc.Message, bool) {
+	if server == 0 || correlation == 0 || !validSelector(&selector) {
 		return ipc.Message{}, false
 	}
-	return ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
-		Correlation: correlation, Payload: [ipc.MaxPayload]byte{operationSetFilesystem}, PayloadSize: 1,
-		Handles: [ipc.MaxAttachedHandles]handle.ID{server}, HandleCount: 1}, true
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
+		Correlation: correlation, PayloadSize: selectorSize,
+		Handles: [ipc.MaxAttachedHandles]handle.ID{server}, HandleCount: 1}
+	message.Payload[0] = operationSetFilesystem
+	message.Payload[selectorKind] = byte(selector.Kind)
+	binary.LittleEndian.PutUint32(message.Payload[selectorIndex:], selector.Index)
+	copy(message.Payload[selectorGUID:selectorNameSize], selector.GUID[:])
+	message.Payload[selectorNameSize] = selector.NameSize
+	copy(message.Payload[selectorName:], selector.Name[:selector.NameSize])
+	return message, true
 }
 
-func DecodeSetFilesystem(message ipc.Message) (handle.ID, bool) {
+func DecodeSetFilesystem(message ipc.Message) (handle.ID, partition.Selector, bool) {
+	var selector partition.Selector
 	if message.ProtocolID != ControlProtocolID || message.Version != ControlVersion || message.Kind != ipc.KindRequest ||
-		message.Correlation == 0 || message.PayloadSize != 1 || message.Payload[0] != operationSetFilesystem ||
+		message.Correlation == 0 || message.PayloadSize != selectorSize || message.Payload[0] != operationSetFilesystem ||
 		message.HandleCount != 1 || message.Handles[0] == 0 {
-		return 0, false
+		return 0, selector, false
 	}
-	return message.Handles[0], true
+	selector.Kind = partition.SelectorKind(message.Payload[selectorKind])
+	selector.Index = binary.LittleEndian.Uint32(message.Payload[selectorIndex:])
+	copy(selector.GUID[:], message.Payload[selectorGUID:selectorNameSize])
+	selector.NameSize = message.Payload[selectorNameSize]
+	if int(selector.NameSize) > partition.MaxName {
+		return 0, selector, false
+	}
+	copy(selector.Name[:], message.Payload[selectorName:selectorName+int(selector.NameSize)])
+	for _, value := range message.Payload[selectorName+int(selector.NameSize) : selectorSize] {
+		if value != 0 {
+			return 0, selector, false
+		}
+	}
+	if !validSelector(&selector) {
+		return 0, selector, false
+	}
+	return message.Handles[0], selector, true
+}
+
+// validSelector accepts a selector whose kind is defined and whose unused
+// fields are zero.
+func validSelector(selector *partition.Selector) bool {
+	index, guid, name := selector.Index != 0, selector.GUID != partition.GUID{}, selector.NameSize != 0
+	switch selector.Kind {
+	case partition.SelectAuto, partition.SelectWhole:
+		return !index && !guid && !name
+	case partition.SelectIndex:
+		return index && !guid && !name
+	case partition.SelectGUID:
+		return !index && guid && !name
+	case partition.SelectName:
+		return !index && !guid && name && int(selector.NameSize) <= partition.MaxName
+	}
+	return false
 }
 
 func SetDriverRequest(driver handle.ID, correlation uint64) (ipc.Message, bool) {
