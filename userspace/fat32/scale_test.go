@@ -37,7 +37,7 @@ var geometries = []struct {
 // or leaves the data area, a file whose chain does not match its size, a
 // directory whose "." or ".." is wrong, or a cluster marked used that nothing
 // owns.
-func check(t testing.TB, device *memoryDevice) {
+func check(t testing.TB, device Device) {
 	t.Helper()
 	checkVolume(t, device, false)
 }
@@ -46,7 +46,7 @@ func check(t testing.TB, device *memoryDevice) {
 // may leave behind — lost clusters, a chain longer than its file, and FAT
 // copies that were not all updated — while still refusing cross-links, loops,
 // and chains shorter than their files.
-func checkVolume(t testing.TB, device *memoryDevice, interrupted bool) {
+func checkVolume(t testing.TB, device Device, interrupted bool) {
 	t.Helper()
 	var fs FileSystem
 	if _, ok := fs.Mount(device); !ok {
@@ -108,7 +108,7 @@ func checkVolume(t testing.TB, device *memoryDevice, interrupted bool) {
 					t.Fatalf("check: dot entry in the root")
 				case index == 0 && (!sameShort(entry, dotName) || entryCluster(entry) != key):
 					t.Fatalf("check: %s: '.' names %d", path, entryCluster(entry))
-				case index == 1 && (!sameShort(entry, dotDotName) || entryCluster(entry) != parent):
+				case index == 1 && (!sameShort(entry, dotDotName) || entryCluster(entry) != parent && (parent != 0 || entryCluster(entry) != fs.rootCluster)):
 					t.Fatalf("check: %s: '..' names %d, want %d", path, entryCluster(entry), parent)
 				case index > 1:
 					t.Fatalf("check: %s: dot entry at %d", path, index)
@@ -139,12 +139,8 @@ func checkVolume(t testing.TB, device *memoryDevice, interrupted bool) {
 		}
 	}
 	if fs.fatCopies > 1 && !interrupted {
-		first := device.data[fs.fatStart : fs.fatStart+fs.fatSize]
-		for index := uint64(1); index < uint64(fs.fatCopies); index++ {
-			start := fs.fatStart + index*fs.fatSize
-			if !bytes.Equal(first, device.data[start:start+fs.fatSize]) {
-				t.Fatalf("check: FAT copy %d differs from the first", index)
-			}
+		if mismatch, status := fs.CompareFATs(); status != ramfs.StatusOK || mismatch.Entries != 0 {
+			t.Fatalf("check: FAT copy %d differs from the first at cluster %d (%v)", mismatch.Copy, mismatch.First, status)
 		}
 	}
 }
@@ -561,7 +557,8 @@ func TestFSInfoHintIsUsedAndRefreshed(t *testing.T) {
 	if cluster := entryClusterOf(t, fs, id); cluster != 100 {
 		t.Fatalf("allocation started at %d, not the FSInfo hint", cluster)
 	}
-	if get32(info[fsInfoNextFree:]) != 101 || get32(info[fsInfoFreeCount:]) != fsInfoUnknown {
+	free, _ := fs.FreeClusters()
+	if get32(info[fsInfoNextFree:]) != 101 || get32(info[fsInfoFreeCount:]) != free || free != fs.clusters-2 {
 		t.Fatalf("FSInfo after a change: next %d count %#x", get32(info[fsInfoNextFree:]), get32(info[fsInfoFreeCount:]))
 	}
 	// A hint past the volume, or a sector without signatures, is ignored.

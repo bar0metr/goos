@@ -1122,11 +1122,15 @@ pass_group m7-reboot
 # A volume the filesystem refuses must not take the system with it. The image
 # claims far more sectors than the device holds, which is the first geometry
 # check a mount makes, and the machine has to come up to a prompt anyway: that
-# prompt is where the volume gets looked at.
+# prompt is where the volume gets looked at. Both the boot sector and its
+# backup at sector 6 are damaged: with an intact backup the volume would be
+# mounted read-only from it instead (ADR 0112).
 rm -f "$corrupt_log"
 corrupt_disk=build/corrupt-virtio-blk.img
 go run ./tools/mkfat32 "$corrupt_disk"
-printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=32 count=4 conv=notrunc 2>/dev/null
+for boot_sector in 0 6; do
+	printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=$((boot_sector * 512 + 32)) count=4 conv=notrunc 2>/dev/null
+done
 ( sleep 6
 	printf 'ls /\n'
 	sleep 2

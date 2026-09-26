@@ -23,8 +23,12 @@ func (fs *FileSystem) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.No
 		return 0, status
 	}
 	entry[11] = attrArchive
+	fs.stampCreated(&entry)
 	if status = fs.place(&dir, &at, entry, marker); status == ramfs.StatusOK {
-		status = fs.sync()
+		fs.touchDirectory(&dir)
+	}
+	if synced := fs.sync(); status == ramfs.StatusOK {
+		status = synced
 	}
 	if status != ramfs.StatusOK {
 		return 0, status
@@ -44,11 +48,14 @@ func (fs *FileSystem) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Nod
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
-	dot := dotEntry(dotName, cluster)
-	dotDot := dotEntry(dotDotName, dir.key)
-	base := fs.clusterOffset(cluster)
 	entry[11] = attrDirectory
 	setEntryCluster(&entry, cluster)
+	fs.stampCreated(&entry)
+	// "." and ".." carry the new directory's times, as mkfs and Linux write
+	// them.
+	dot := dotEntry(dotName, cluster, entry)
+	dotDot := dotEntry(dotDotName, dir.key, entry)
+	base := fs.clusterOffset(cluster)
 	switch {
 	case !fs.zeroCluster(cluster) || !fs.write(base, dot[:]) || !fs.write(base+entrySize, dotDot[:]):
 		status = ramfs.StatusIOError
@@ -57,8 +64,10 @@ func (fs *FileSystem) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Nod
 	}
 	if status != ramfs.StatusOK {
 		fs.freeChain(cluster)
+		fs.sync()
 		return 0, status
 	}
+	fs.touchDirectory(&dir)
 	if status = fs.sync(); status != ramfs.StatusOK {
 		return 0, status
 	}
@@ -105,7 +114,11 @@ func (fs *FileSystem) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 			fs.scan.reset()
 			continue
 		}
-		size, _ := fs.resolveName(entry, index)
+		size, _, _ := fs.resolveName(entry, index)
+		if size == 0 {
+			fs.scan.reset()
+			continue
+		}
 		result := ramfs.Entry{Stat: entryStat(dir.node(index), entry), Size: uint8(size)}
 		copy(result.Name[:], fs.name[:size])
 		return result, index + 1, ramfs.StatusOK
@@ -121,6 +134,9 @@ func (fs *FileSystem) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 // entry under both names, never under neither. A directory cannot be moved
 // into its own subtree, and an existing target name is refused.
 func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	if status := fs.mutable(); status != ramfs.StatusOK {
+		return status
+	}
 	target, status := fs.parentAndName(parent, name)
 	if status != ramfs.StatusOK {
 		return status
@@ -188,6 +204,12 @@ func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 		if status == ramfs.StatusOK {
 			status = fs.erase(&dir, old, index)
 		}
+		if status == ramfs.StatusOK {
+			fs.touchDirectory(&dir)
+		}
+	}
+	if status == ramfs.StatusOK {
+		fs.touchDirectory(&target)
 	}
 	if synced := fs.sync(); status == ramfs.StatusOK {
 		status = synced
@@ -222,6 +244,9 @@ func (fs *FileSystem) repoint(cluster, parent uint32) ramfs.Status {
 // its clusters after, so an interruption loses clusters rather than leaving
 // an entry that names freed ones.
 func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	if status := fs.mutable(); status != ramfs.StatusOK {
+		return status
+	}
 	dir, status := fs.parentAndName(parent, name)
 	if status != ramfs.StatusOK {
 		return status
@@ -245,6 +270,7 @@ func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 	if fs.valid(cluster) {
 		fs.freeChain(cluster)
 	}
+	fs.touchDirectory(&dir)
 	return fs.sync()
 }
 
@@ -271,6 +297,9 @@ func (fs *FileSystem) parentAndName(parent ramfs.NodeID, name ramfs.Name) (direc
 func (fs *FileSystem) reserve(parent ramfs.NodeID, name ramfs.Name) (directory, placement, [32]byte, int, ramfs.Status) {
 	var entry [32]byte
 	var at placement
+	if status := fs.mutable(); status != ramfs.StatusOK {
+		return directory{}, at, entry, -1, status
+	}
 	dir, status := fs.parentAndName(parent, name)
 	if status != ramfs.StatusOK {
 		return dir, at, entry, -1, status

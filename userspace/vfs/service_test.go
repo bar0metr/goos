@@ -78,6 +78,7 @@ func testFAT32Device() *testBlockDevice {
 	boot := device.data[:512]
 	boot[11], boot[12], boot[13] = 0, 2, 1
 	boot[14], boot[15], boot[16] = 32, 0, 1
+	boot[21] = 0xf8
 	boot[32], boot[33] = 0, 32
 	boot[36], boot[44] = 64, 2
 	boot[510], boot[511] = 0x55, 0xaa

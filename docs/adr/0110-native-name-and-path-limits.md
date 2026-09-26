@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Replaces the name and path bounds of ADR 0066 and the path fields
+Accepted; the FAT32 printable-ASCII rule is replaced by UTF-8 names in ADR
+0112. Replaces the name and path bounds of ADR 0066 and the path fields
 of the `GVF1` protocol; builds on the shared memory of ADR 0107.
 
 ## Context

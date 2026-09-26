@@ -14,15 +14,15 @@ package fat32
 import "goos/kernel/ramfs"
 
 const (
-	// sectorSize is the only logical sector size this implementation reads.
-	// A volume declaring another is refused at mount.
-	sectorSize = uint64(512)
-	rootNode   = ramfs.NodeID(1)
+	// unit is the granularity of the metadata window and of every offset
+	// the window is addressed by. Logical sectors are 512 to 4096 bytes and
+	// every metadata structure starts on a sector, so any logical sector is
+	// a whole number of units, and no FAT or directory entry straddles one:
+	// the window never depends on the volume's sector size.
+	unit     = uint64(512)
+	rootNode = ramfs.NodeID(1)
 	// maxFileSize is the FAT32 limit: the size field is 32 bits wide.
 	maxFileSize = uint64(0xffffffff)
-	// maxClusterSize bounds sectors per cluster at 128, as the BPB field and
-	// every other implementation do.
-	maxSectorsPerCluster = 128
 	// maxFATs is the number of FAT copies a volume may declare. Normal
 	// volumes have two; one is accepted as well.
 	maxFATs = 2
@@ -41,34 +41,25 @@ const (
 	clusterMask = uint32(0x0fffffff)
 	// A FAT32 entry at or above endOfChain ends its chain; badCluster marks a
 	// cluster the formatter found unusable, which no chain may contain.
+	// Values between the highest cluster and badCluster are reserved and are
+	// corruption in a chain, as a link to cluster 1 or past the volume is.
 	badCluster     = uint32(0x0ffffff7)
 	endOfChain     = uint32(0x0ffffff8)
 	endOfChainMark = uint32(0x0fffffff)
 	// maxClusters is the most data clusters a FAT32 volume can number: the
-	// highest cluster must stay below badCluster.
-	maxClusters = uint64(badCluster - 2)
+	// highest cluster must stay below the reserved range.
+	maxClusters = uint64(0x0ffffff0 - 2)
 
-	entryEnd      = byte(0x00)
-	entryDeleted  = byte(0xe5)
-	attrVolume    = byte(0x08)
-	attrDirectory = byte(0x10)
-	attrArchive   = byte(0x20)
-	// caseLowerBase and caseLowerExt are the Windows NT flags in byte 12 of a
-	// short entry that say its 8.3 name is displayed lower case.
-	caseLowerBase = byte(0x08)
-	caseLowerExt  = byte(0x10)
+	entryEnd = byte(0x00)
+	// entryDeleted marks a free entry; entryKanji is how a name whose first
+	// byte really is 0xe5 is stored.
+	entryDeleted = byte(0xe5)
+	entryKanji   = byte(0x05)
 
 	// Extended flags (BPB offset 40): bit 7 disables mirroring, and the low
 	// four bits then name the one active FAT.
 	extNoMirror   = uint16(0x80)
 	extActiveMask = uint16(0x0f)
-
-	fsInfoLead      = uint32(0x41615252)
-	fsInfoStruct    = uint32(0x61417272)
-	fsInfoTrail     = uint32(0xaa550000)
-	fsInfoUnknown   = uint32(0xffffffff)
-	fsInfoFreeCount = uint64(488)
-	fsInfoNextFree  = uint64(492)
 )
 
 var (
@@ -87,15 +78,18 @@ type Device interface {
 }
 
 type FileSystem struct {
-	device    Device
-	fatStart  uint64
-	fatSize   uint64
-	fatCopies uint32
+	device Device
+	// sectorSize is the volume's logical sector size, from the BPB.
+	sectorSize uint64
+	fatStart   uint64
+	fatSize    uint64
+	fatCopies  uint32
 	// fatRead is the copy entries are read from; fatFirst and fatCopies say
 	// which copies a change is written to. With mirroring on, reads come from
 	// the first copy and writes go to all of them.
 	fatRead     uint32
 	fatFirst    uint32
+	fatTotal    uint32
 	dataStart   uint64
 	clusterSize uint64
 	// clusters is the number of data clusters; valid cluster numbers are
@@ -110,13 +104,20 @@ type FileSystem struct {
 	// FSInfo copy of it is stale.
 	hint      uint32
 	hintDirty bool
-	// countStale says the FSInfo free count has not yet been marked unknown.
-	// This implementation does not keep a count, so the first change makes
-	// the recorded one untrustworthy and it is replaced with "unknown".
-	countStale bool
-	mounted    bool
+	// free is the number of free clusters once freeKnown; countDirty says the
+	// FSInfo copy is stale. recordedFree is what FSInfo last said.
+	free         uint32
+	freeKnown    bool
+	countDirty   bool
+	recordedFree uint32
+	health       Health
+	readOnly     bool
+	mounted      bool
 	// refusal is why the last Mount refused its volume.
 	refusal ramfs.Status
+	// now is the wall clock timestamps are taken from; nil, or one that
+	// reports no time, leaves them unrecorded.
+	now Clock
 
 	cache     [cacheSectors]cachedSector
 	clock     uint64
@@ -124,10 +125,11 @@ type FileSystem struct {
 	victim    int
 	// want, scan, and name are the per-operation name buffers. One request is
 	// in flight at a time, so they never need to be allocated.
-	want request
-	scan chainScan
-	name [maxLongName]byte
-	zero [zeroSize]byte
+	want    request
+	scan    chainScan
+	name    [maxLongName]byte
+	zero    [zeroSize]byte
+	scratch [zeroSize]byte
 }
 
 // Mount validates the geometry an image declares before deriving a single
@@ -142,114 +144,84 @@ func (fs *FileSystem) Mount(device Device) (ramfs.NodeID, bool) {
 }
 
 // Refused is why the last Mount refused its volume: an I/O error for a device
-// that could not be read, Unsupported for a FAT volume this service does not
-// implement (FAT12, FAT16, sectors other than 512 bytes), and Corrupt for
-// geometry that contradicts itself or the device.
+// that could not be read, Unsupported for a volume this service does not
+// implement (not FAT32, sectors over 4 KiB, more than two FATs, a FAT32
+// version other than 0.0), and Corrupt for geometry that contradicts itself
+// or the device when no valid backup boot sector could stand in for it.
 func (fs *FileSystem) Refused() ramfs.Status { return fs.refusal }
 
+// Health reports what the last successful mount noticed about the volume.
+func (fs *FileSystem) Health() Health { return fs.health }
+
 func (fs *FileSystem) mount(device Device) (ramfs.NodeID, ramfs.Status) {
-	*fs = FileSystem{}
-	var boot [sectorSize]byte
+	now := fs.now
+	fs.reset()
+	fs.now = now
+	var boot [unit]byte
 	if device == nil || !device.ReadAt(0, boot[:]) {
 		return 0, ramfs.StatusIOError
 	}
 	capacity := device.Capacity()
-	if capacity < sectorSize || capacity%sectorSize != 0 {
+	if capacity < unit {
 		return 0, ramfs.StatusUnsupported
 	}
-	if boot[510] != 0x55 || boot[511] != 0xaa {
-		return 0, ramfs.StatusCorrupt
-	}
-	if uint64(get16(boot[11:13])) != sectorSize {
-		return 0, ramfs.StatusUnsupported
-	}
-	perCluster := uint64(boot[13])
-	if perCluster == 0 || perCluster > maxSectorsPerCluster || perCluster&(perCluster-1) != 0 {
-		return 0, ramfs.StatusCorrupt
-	}
-	reserved := uint64(get16(boot[14:16]))
-	copies := uint32(boot[16])
-	if reserved == 0 || copies == 0 || copies > maxFATs {
-		return 0, ramfs.StatusCorrupt
-	}
-	// A FAT32 BPB has no fixed root directory and no 16-bit FAT size; a
-	// volume that declares either is FAT12 or FAT16.
-	if get16(boot[17:19]) != 0 || get16(boot[22:24]) != 0 {
-		return 0, ramfs.StatusUnsupported
-	}
-	fatSectors := uint64(get32(boot[36:40]))
-	total := uint64(get16(boot[19:21]))
-	if total == 0 {
-		total = uint64(get32(boot[32:36]))
-	}
-	root := get32(boot[44:48])
-	if fatSectors == 0 || total > capacity/sectorSize {
-		return 0, ramfs.StatusCorrupt
-	}
-	metadata := reserved + uint64(copies)*fatSectors
-	if total <= metadata {
-		return 0, ramfs.StatusCorrupt
-	}
-	clusters := (total - metadata) / perCluster
-	// Like Linux, a FAT too small for the data region limits the volume to
-	// the clusters it can describe instead of refusing it: those beyond are
-	// never allocated, so nothing reads an entry past the FAT.
-	if described := fatSectors*sectorSize/4 - 2; clusters > described {
-		clusters = described
-	}
-	if clusters == 0 || clusters > maxClusters {
-		return 0, ramfs.StatusCorrupt
-	}
-	fs.device, fs.fatStart, fs.fatSize, fs.fatCopies = device, reserved*sectorSize, fatSectors*sectorSize, copies
-	fs.dataStart, fs.clusterSize = metadata*sectorSize, perCluster*sectorSize
-	fs.clusters, fs.rootCluster = uint32(clusters), root
-	if flags := get16(boot[40:42]); flags&extNoMirror != 0 {
-		active := uint32(flags & extActiveMask)
-		if active >= copies {
+	geo, status := parseBoot(boot[:], capacity)
+	switch status {
+	case ramfs.StatusOK:
+		fs.health.Backup = checkBackup(device, boot[:], &geo, capacity)
+	case ramfs.StatusCorrupt:
+		// A primary that fails validation may still have a good backup. It
+		// is used for this mount only, read-only; the primary is not
+		// rewritten, since deciding which copy is right is a repair.
+		recovered, ok := recoverBoot(device, capacity, boot[:])
+		if !ok {
 			return 0, ramfs.StatusCorrupt
 		}
+		geo = recovered
+		fs.health.Boot, fs.health.Backup, fs.health.ReadOnly = BootBackup, BackupMatches, true
+	default:
+		return 0, status
+	}
+	fs.device, fs.sectorSize = device, geo.sectorSize
+	fs.fatStart, fs.fatSize = geo.reserved*geo.sectorSize, geo.fatSectors*geo.sectorSize
+	fs.fatCopies, fs.fatTotal = geo.copies, geo.copies
+	fs.dataStart = (geo.reserved + uint64(geo.copies)*geo.fatSectors) * geo.sectorSize
+	fs.clusterSize = geo.perCluster * geo.sectorSize
+	fs.clusters, fs.rootCluster = uint32(geo.clusters), geo.root
+	if geo.flags&extNoMirror != 0 {
+		active := uint32(geo.flags & extActiveMask)
 		fs.fatRead, fs.fatFirst, fs.fatCopies = active, active, 1
 	}
-	if !fs.valid(root) {
-		return 0, ramfs.StatusCorrupt
-	}
+	fs.health.ShortFAT, fs.health.FewClusters = geo.shortFAT, geo.fewClusters
+	fs.readOnly = fs.health.ReadOnly
 	fs.hint = 2
-	fs.readFSInfo(uint64(get16(boot[48:50])), reserved)
+	fs.readFSInfo(&geo)
 	fs.mounted = true
 	return rootNode, ramfs.StatusOK
 }
 
-// readFSInfo takes the next-free hint from a valid FSInfo sector. The free
-// count is never trusted; the hint only decides where a search starts.
-func (fs *FileSystem) readFSInfo(sector, reserved uint64) {
-	if sector == 0 || sector >= reserved {
-		return
+// reset returns the filesystem to its unmounted state field by field: the
+// structure is large, and a composite literal of it would be built on the
+// heap by TinyGo.
+func (fs *FileSystem) reset() {
+	fs.device, fs.mounted, fs.readOnly, fs.health = nil, false, false, Health{}
+	// No cluster is valid until a mount says otherwise, so nothing can
+	// reach the device through geometry a refused mount left behind.
+	fs.clusters, fs.rootCluster = 0, 0
+	fs.fsInfo, fs.hint, fs.hintDirty = 0, 0, false
+	fs.free, fs.freeKnown, fs.countDirty, fs.recordedFree = 0, false, false, 0
+	fs.fatRead, fs.fatFirst = 0, 0
+	for index := range fs.cache {
+		fs.cache[index].valid, fs.cache[index].dirty = false, false
 	}
-	var info [sectorSize]byte
-	if !fs.device.ReadAt(sector*sectorSize, info[:]) ||
-		get32(info[0:4]) != fsInfoLead || get32(info[484:488]) != fsInfoStruct || get32(info[508:512]) != fsInfoTrail {
-		return
-	}
-	fs.fsInfo, fs.countStale = sector*sectorSize, true
-	if next := get32(info[fsInfoNextFree:]); fs.valid(next) {
-		fs.hint = next
-	}
+	fs.forgetPositions()
 }
 
 // sync makes a completed change durable: the FAT sectors it changed, the
-// FSInfo hints, then a device flush.
+// FSInfo count and hint, then a device flush.
 func (fs *FileSystem) sync() ramfs.Status {
-	if !fs.flushFAT() {
+	if !fs.flushFAT() || !fs.writeFSInfo() {
 		return ramfs.StatusIOError
-	}
-	if fs.fsInfo != 0 && (fs.hintDirty || fs.countStale) {
-		var data [8]byte
-		put32(data[0:4], fsInfoUnknown)
-		put32(data[4:8], fs.hint)
-		if !fs.write(fs.fsInfo+fsInfoFreeCount, data[:]) {
-			return ramfs.StatusIOError
-		}
-		fs.hintDirty, fs.countStale = false, false
 	}
 	if !fs.device.Flush() {
 		return ramfs.StatusIOError
@@ -296,11 +268,11 @@ func (fs *FileSystem) setFAT(cluster, value uint32) ramfs.Status {
 		return ramfs.StatusCorrupt
 	}
 	offset := fs.fatStart + uint64(fs.fatRead)*fs.fatSize + uint64(cluster)*4
-	entry, ok := fs.resident(offset / sectorSize)
+	entry, ok := fs.resident(offset / unit)
 	if !ok {
 		return ramfs.StatusIOError
 	}
-	within := offset % sectorSize
+	within := offset % unit
 	data := entry.data[within : within+4]
 	put32(data, get32(data)&^clusterMask|value)
 	entry.dirty = true
@@ -429,6 +401,7 @@ func (fs *FileSystem) allocate() (uint32, ramfs.Status) {
 			if !fs.valid(fs.hint) {
 				fs.hint = 2
 			}
+			fs.claimed()
 			return cluster, ramfs.StatusOK
 		}
 		cluster++
@@ -488,6 +461,7 @@ func (fs *FileSystem) freeChain(cluster uint32) {
 		if status != ramfs.StatusOK || next == 0 || fs.setFAT(cluster, 0) != ramfs.StatusOK {
 			return
 		}
+		fs.released()
 		if cluster < fs.hint {
 			fs.hint, fs.hintDirty = cluster, true
 		}
@@ -538,11 +512,15 @@ func entryStat(id ramfs.NodeID, entry [32]byte) ramfs.Stat {
 	}
 	return ramfs.Stat{ID: id, Kind: ramfs.KindFile, Size: entrySizeOf(entry)}
 }
-func dotEntry(name [11]byte, cluster uint32) [32]byte {
-	var entry [32]byte
+
+// dotEntry is a "." or ".." entry naming cluster, with the times of the
+// directory entry it belongs to.
+func dotEntry(name [11]byte, cluster uint32, times [32]byte) [32]byte {
+	entry := times
 	copy(entry[:11], name[:])
-	entry[11] = attrDirectory
+	entry[11], entry[12] = attrDirectory, 0
 	setEntryCluster(&entry, cluster)
+	put32(entry[28:32], 0)
 	return entry
 }
 

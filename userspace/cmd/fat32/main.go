@@ -198,6 +198,15 @@ func userspaceMain() {
 	if volume.Mount(blockDevice{}) {
 		mark("FAT32_SERVICE_OK\n")
 		syslog.Info("volume mounted", syslog.Uint("capacity-mib", blockCapacity>>20))
+		if health := volume.Health(); health.Degraded() {
+			// Mounting repairs nothing; the fields say what a checker
+			// would find (ADR 0112).
+			syslog.Warn("volume degraded",
+				syslog.Uint("boot-from-backup", uint64(health.Boot)),
+				syslog.Uint("backup-state", uint64(health.Backup)),
+				syslog.Uint("fsinfo-state", uint64(health.FSInfo)),
+				syslog.Uint("read-only", boolValue(health.ReadOnly)))
+		}
 	} else {
 		syslog.Error("volume refused", syslog.Str("reason", "image rejected or device unavailable"))
 	}
@@ -299,6 +308,13 @@ func wireSize(data []byte) int {
 		return len(data)
 	}
 	return size
+}
+
+func boolValue(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func mark(message string) {

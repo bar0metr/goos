@@ -4,11 +4,15 @@ import "goos/kernel/ramfs"
 
 const (
 	// maxLongName is both VFAT's bound, 255 UTF-16 units, and the native
-	// name limit, 255 bytes (ADR 0110): names are printable ASCII, one unit
-	// per byte, so the two agree.
+	// name limit, 255 bytes (ADR 0110). A UTF-8 name never has more UTF-16
+	// units than bytes, so every native name fits a chain; an on-disk name
+	// whose UTF-8 form is longer than 255 bytes is shown by its 8.3 alias.
 	maxLongName    = ramfs.MaxName
 	longChars      = 13
 	maxLongEntries = (maxLongName + longChars - 1) / longChars
+	// maxShortName is the longest UTF-8 form of an 8.3 name: eleven OEM
+	// characters of up to three bytes each and the dot.
+	maxShortName = 11*3 + 1
 	// maxAliasAttempts bounds the hashed aliases tried for one name.
 	maxAliasAttempts = 4096
 
@@ -16,18 +20,22 @@ const (
 	attrMask     = byte(0x3f)
 	longLast     = byte(0x40)
 	longOrdinal  = byte(0x3f)
+	longPad      = uint16(0xffff)
 )
 
-// longSlots holds the offsets of the 5/6/2 UCS-2 characters a long entry
+// longSlots holds the offsets of the 5/6/2 UTF-16 units a long entry
 // carries.
 var longSlots = [longChars]int{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}
 
-// request is a requested name: its raw bytes and the 8.3 form when it fits a
-// single directory entry.
+// request is a requested name: its UTF-8 bytes, its UTF-16 form, and the 8.3
+// form with its case flags when it fits a single directory entry.
 type request struct {
 	raw   [maxLongName]byte
 	size  int
+	units [maxLongName]uint16
+	count int
 	short [11]byte
+	flags byte
 	fits  bool
 }
 
@@ -36,64 +44,83 @@ func (want *request) chain() int {
 	if want.fits {
 		return 0
 	}
-	return (want.size + longChars - 1) / longChars
+	return (want.count + longChars - 1) / longChars
 }
 
+// set decodes and validates a requested name. Its rules are the ones every
+// name read from disk must pass to be listed under its long form, so that
+// every listed name can be opened.
 func (want *request) set(name ramfs.Name) bool {
 	want.size = name.CopyTo(want.raw[:])
-	if want.size == 0 {
+	if !validLongName(want.raw[:want.size]) {
 		return false
 	}
-	for i := 0; i < want.size; i++ {
-		if !longByte(want.raw[i]) {
-			return false
+	want.count = 0
+	for rest := want.raw[:want.size]; len(rest) != 0; {
+		value, size := decodeRune(rest)
+		rest = rest[size:]
+		if value >= 0x10000 {
+			value -= 0x10000
+			want.units[want.count] = uint16(surrogateHigh + value>>10)
+			want.units[want.count+1] = uint16(surrogateLow + value&0x3ff)
+			want.count += 2
+			continue
 		}
+		want.units[want.count] = uint16(value)
+		want.count++
 	}
-	if want.raw[0] == ' ' || want.raw[want.size-1] == ' ' || want.raw[want.size-1] == '.' {
-		return false
-	}
-	want.short, want.fits = shortForm(want.raw[:want.size])
+	want.short, want.flags, want.fits = shortForm(want.raw[:want.size])
 	return true
 }
 
-// caseFlags is byte 12 of the short entry: a name stored in one 8.3 entry is
-// lower case, and the Windows NT flags say so to other systems.
+// validLongName accepts a name VFAT can store and this system can name:
+// valid UTF-8 of 1 to 255 bytes without control characters or the
+// characters FAT reserves (" * / : < > ? \ |), not starting with a space and
+// not ending with a space or a dot, which Windows would strip.
+func validLongName(name []byte) bool {
+	if len(name) == 0 || len(name) > maxLongName || name[0] == ' ' || name[len(name)-1] == ' ' || name[len(name)-1] == '.' {
+		return false
+	}
+	if len(name) <= 2 && name[0] == '.' && (len(name) == 1 || name[1] == '.') {
+		return false
+	}
+	for rest := name; len(rest) != 0; {
+		value, size := decodeRune(rest)
+		if size == 0 || value < 0x20 {
+			return false
+		}
+		switch value {
+		case '"', '*', '/', ':', '<', '>', '?', '\\', '|':
+			return false
+		}
+		rest = rest[size:]
+	}
+	return true
+}
+
+// caseFlags is byte 12 of the short entry of a name stored in one 8.3 entry:
+// the Windows NT flags saying its base or extension is displayed lower case.
 func (want *request) caseFlags() byte {
 	if want.fits {
-		return caseLowerBase | caseLowerExt
+		return want.flags
 	}
 	return 0
 }
 
-// hash folds the name into the sixteen bits a hashed alias carries.
+// hash folds the name into the sixteen bits a hashed alias carries. It hashes
+// the folded name, so names that match each other hash alike.
 func (want *request) hash() uint16 {
 	value := uint32(2166136261)
-	for i := 0; i < want.size; i++ {
-		value = (value ^ uint32(lower(want.raw[i]))) * 16777619
+	for rest := want.raw[:want.size]; len(rest) != 0; {
+		code, size := decodeRune(rest)
+		rest = rest[size:]
+		value = (value ^ uint32(foldRune(code))) * 16777619
 	}
 	return uint16(value ^ value>>16)
 }
 
 func (want *request) same(name []byte) bool {
-	if len(name) != want.size {
-		return false
-	}
-	for i, value := range name {
-		if lower(value) != lower(want.raw[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// longByte accepts the printable ASCII a name may carry. Anything else is a
-// code point this system cannot represent.
-func longByte(value byte) bool {
-	switch value {
-	case '"', '*', '/', ':', '<', '>', '?', '\\', '|':
-		return false
-	}
-	return value >= 0x20 && value < 0x7f
+	return sameFolded(name, want.raw[:want.size])
 }
 
 // placement is a reserved run of directory entries: where its long chain
@@ -107,10 +134,11 @@ type placement struct {
 func (at *placement) index() int { return at.start + at.count }
 
 // chainScan accumulates the long name carried by the entries before a short
-// entry. A chain whose ordinals, padding, or checksum do not match is
-// discarded and the short name is used instead, as other implementations do.
+// entry. A chain whose ordinals, checksums, or padding do not match, whose
+// UTF-16 is not valid, or whose name this system could not open is discarded
+// and the short name is used instead, as other implementations do.
 type chainScan struct {
-	name  [maxLongEntries * longChars]byte
+	units [maxLongEntries * longChars]uint16
 	size  int
 	total int
 	want  byte
@@ -119,11 +147,14 @@ type chainScan struct {
 	start int
 }
 
-func (scan *chainScan) reset() { *scan = chainScan{} }
+func (scan *chainScan) reset() {
+	scan.size, scan.total, scan.want, scan.sum, scan.live, scan.start = 0, 0, 0, 0, false, 0
+}
 
 func (scan *chainScan) long(entry [32]byte, index int) {
 	ordinal := entry[0] & longOrdinal
-	if entry[0]&longLast != 0 {
+	last := entry[0]&longLast != 0
+	if last {
 		scan.reset()
 		if ordinal == 0 || int(ordinal) > maxLongEntries {
 			return
@@ -131,7 +162,9 @@ func (scan *chainScan) long(entry [32]byte, index int) {
 		scan.live, scan.want, scan.sum, scan.start = true, ordinal, entry[13], index
 		scan.size, scan.total = -1, int(ordinal)*longChars
 	}
-	if !scan.live || ordinal != scan.want || entry[13] != scan.sum || entry[12] != 0 {
+	// A long entry has type 0 and no cluster; one that does is not part of
+	// a VFAT name.
+	if !scan.live || ordinal != scan.want || entry[13] != scan.sum || entry[12] != 0 || get16(entry[26:28]) != 0 {
 		scan.live = false
 		return
 	}
@@ -139,29 +172,46 @@ func (scan *chainScan) long(entry [32]byte, index int) {
 	for i := 0; i < longChars; i++ {
 		offset := longSlots[i]
 		code := uint16(entry[offset]) | uint16(entry[offset+1])<<8
-		if code == 0 || code == 0xffff {
-			if scan.size < 0 {
-				scan.size = base + i
+		if scan.size >= 0 && base+i >= scan.size {
+			// Past the terminator only padding may follow.
+			if code != longPad && !(code == 0 && base+i == scan.size) {
+				scan.live = false
+				return
 			}
 			continue
 		}
-		if scan.size >= 0 && base+i > scan.size || code < 0x20 || code >= 0x7f {
-			scan.live = false
-			return
+		if code == 0 || code == longPad {
+			// The name ends only in the entry that holds its last units.
+			if !last {
+				scan.live = false
+				return
+			}
+			scan.size = base + i
+			continue
 		}
-		scan.name[base+i] = byte(code)
+		scan.units[base+i] = code
 	}
 	scan.want--
 }
 
-func (scan *chainScan) complete(short [11]byte) bool {
+// complete checks the gathered chain against the short entry after it and
+// writes the name as UTF-8 into target.
+func (scan *chainScan) complete(short [11]byte, target []byte) (int, bool) {
 	if !scan.live || scan.want != 0 || scan.sum != shortChecksum(short) {
-		return false
+		return 0, false
 	}
-	if scan.size < 0 {
-		scan.size = scan.total
+	units := scan.size
+	if units < 0 {
+		units = scan.total
 	}
-	return scan.size > 0 && scan.size <= maxLongName
+	if units == 0 || units > maxLongName {
+		return 0, false
+	}
+	size, ok := utf16To8(scan.units[:units], target)
+	if !ok || !validLongName(target[:size]) {
+		return 0, false
+	}
+	return size, true
 }
 
 func shortChecksum(short [11]byte) byte {
@@ -192,23 +242,23 @@ func sameShort(entry [32]byte, short [11]byte) bool {
 	return true
 }
 
-// shortForm returns the 8.3 encoding of a name that needs no long entries.
-// Upper case is rejected because the 8.3 form is read back lower case, so a
-// name holding it does not round-trip through a single entry.
-func shortForm(raw []byte) ([11]byte, bool) {
+// shortForm returns the 8.3 encoding of a name that needs no long entries,
+// with the NT case flags it needs to read back unchanged. It fits when it is
+// ASCII from the 8.3 alphabet, has one base of one to eight characters and at
+// most one extension of up to three, and each part is in one case: Windows
+// records "readme.txt" and "README.TXT" this way, and a mixed-case part
+// ("ReadMe.txt") needs a long name.
+func shortForm(raw []byte) ([11]byte, byte, bool) {
 	var out [11]byte
 	for i := range out {
 		out[i] = ' '
 	}
 	n := len(raw)
-	if n == 0 {
-		return out, false
-	}
 	dot := -1
 	for i := 0; i < n; i++ {
 		if raw[i] == '.' {
 			if dot != -1 {
-				return out, false
+				return out, 0, false
 			}
 			dot = i
 		}
@@ -217,34 +267,68 @@ func shortForm(raw []byte) ([11]byte, bool) {
 	if dot >= 0 {
 		base, ext = dot, n-dot-1
 	}
-	if base < 1 || base > 8 || ext > 3 {
-		return out, false
+	if base < 1 || base > 8 || ext > 3 || dot >= 0 && ext == 0 {
+		return out, 0, false
 	}
-	for i := 0; i < base; i++ {
-		value, ok := shortByte(raw[i])
+	baseCase, ok := shortPart(raw[:base], out[:8])
+	if !ok {
+		return out, 0, false
+	}
+	flags := byte(0)
+	if baseCase == caseLower {
+		flags |= caseLowerBase
+	}
+	if dot >= 0 {
+		extCase, ok := shortPart(raw[dot+1:], out[8:])
 		if !ok {
-			return out, false
+			return out, 0, false
 		}
-		out[i] = value
-	}
-	for i := 0; i < ext; i++ {
-		value, ok := shortByte(raw[dot+1+i])
-		if !ok {
-			return out, false
+		if extCase == caseLower {
+			flags |= caseLowerExt
 		}
-		out[8+i] = value
 	}
-	return out, true
+	return out, flags, true
 }
 
-func shortByte(value byte) (byte, bool) {
-	switch {
-	case value >= 'a' && value <= 'z':
-		return value - 32, true
-	case value >= '0' && value <= '9' || value == '_' || value == '-':
-		return value, true
+const (
+	caseNone = iota
+	caseLower
+	caseUpper
+)
+
+// shortPart upper-cases one part of an 8.3 name into target, reporting the
+// case its letters were in, and fails on a character outside the 8.3
+// alphabet or on letters of both cases.
+func shortPart(part []byte, target []byte) (int, bool) {
+	seen := caseNone
+	for i, value := range part {
+		letter := caseNone
+		switch {
+		case value >= 'a' && value <= 'z':
+			letter, value = caseLower, value-0x20
+		case value >= 'A' && value <= 'Z':
+			letter = caseUpper
+		case !shortByte(value):
+			return caseNone, false
+		}
+		if letter != caseNone {
+			if seen != caseNone && seen != letter {
+				return caseNone, false
+			}
+			seen = letter
+		}
+		target[i] = value
 	}
-	return 0, false
+	return seen, true
+}
+
+// shortByte accepts the non-letter characters an 8.3 name may carry.
+func shortByte(value byte) bool {
+	switch value {
+	case '$', '%', '\'', '-', '_', '@', '~', '`', '!', '(', ')', '{', '}', '^', '#', '&':
+		return true
+	}
+	return value >= '0' && value <= '9'
 }
 
 func aliasByte(value byte) byte {
@@ -257,25 +341,38 @@ func aliasByte(value byte) byte {
 	return '_'
 }
 
-func decodeShort(short [11]byte, out *[maxLongName]byte) int {
+// decodeShort writes the name a short entry is listed under: its base, a dot
+// and its extension when it has one, each part lower case when the entry's NT
+// flags say so and as stored otherwise, bytes from 0x80 read as code page 437,
+// and a leading 0x05 read as the 0xe5 it stands for.
+func decodeShort(entry [32]byte, out []byte) int {
 	n := 0
-	for i := 0; i < 8 && short[i] != ' '; i++ {
-		out[n] = lower(short[i])
-		n++
+	for i := 0; i < 8 && entry[i] != ' '; i++ {
+		value := entry[i]
+		if i == 0 && value == entryKanji {
+			value = entryDeleted
+		}
+		n += putShort(out[n:], value, entry[12]&caseLowerBase != 0)
 	}
 	ext := 0
-	for ext < 3 && short[8+ext] != ' ' {
+	for ext < 3 && entry[8+ext] != ' ' {
 		ext++
 	}
 	if ext > 0 {
 		out[n] = '.'
 		n++
 		for i := 0; i < ext; i++ {
-			out[n] = lower(short[8+i])
-			n++
+			n += putShort(out[n:], entry[8+i], entry[12]&caseLowerExt != 0)
 		}
 	}
 	return n
+}
+
+func putShort(out []byte, value byte, lowerCase bool) int {
+	if lowerCase {
+		value = lower(value)
+	}
+	return encodeRune(out, oemRune(value))
 }
 
 // alias builds the short name a long entry is stored under, the way Linux
@@ -300,9 +397,11 @@ func (fs *FileSystem) alias(dir *directory, want *request) ([11]byte, ramfs.Stat
 	if dot >= 0 {
 		stem = dot
 	}
+	// A character outside ASCII becomes one '_': its continuation bytes are
+	// skipped.
 	base := 0
 	for i := 0; i < stem && base < 8; i++ {
-		if want.raw[i] == '.' || want.raw[i] == ' ' {
+		if want.raw[i] == '.' || want.raw[i] == ' ' || want.raw[i]&0xc0 == 0x80 {
 			continue
 		}
 		short[base] = aliasByte(want.raw[i])
@@ -314,7 +413,7 @@ func (fs *FileSystem) alias(dir *directory, want *request) ([11]byte, ramfs.Stat
 	if dot >= 0 {
 		ext := 0
 		for i := dot + 1; i < want.size && ext < 3; i++ {
-			if want.raw[i] == ' ' {
+			if want.raw[i] == ' ' || want.raw[i]&0xc0 == 0x80 {
 				continue
 			}
 			short[8+ext] = aliasByte(want.raw[i])
@@ -324,14 +423,18 @@ func (fs *FileSystem) alias(dir *directory, want *request) ([11]byte, ramfs.Stat
 	if base > 6 {
 		base = 6
 	}
+	for i := base; i < 8; i++ {
+		short[i] = ' '
+	}
+	short[base] = '~'
+	numbers, status := fs.numberedAliases(dir, short, base)
+	if status != ramfs.StatusOK {
+		return short, status
+	}
 	for number := byte(1); number <= 9; number++ {
-		for i := base; i < 8; i++ {
-			short[i] = ' '
-		}
-		short[base], short[base+1] = '~', '0'+number
-		taken, status := fs.taken(dir, short)
-		if status != ramfs.StatusOK || !taken {
-			return short, status
+		if numbers&(1<<number) == 0 {
+			short[base+1] = '0' + number
+			return short, ramfs.StatusOK
 		}
 	}
 	if base > 2 {
@@ -361,6 +464,38 @@ func hexDigit(value byte) byte {
 		return '0' + value
 	}
 	return 'A' + value - 10
+}
+
+// numberedAliases finds, in one pass over dir, which of the aliases
+// base~1 to base~9 with the extension of short are already in use, as a mask
+// of bits 1 to 9.
+func (fs *FileSystem) numberedAliases(dir *directory, short [11]byte, base int) (uint16, ramfs.Status) {
+	numbers := uint16(0)
+	for i := 0; i < fs.entries(dir); i++ {
+		entry, status := fs.readEntry(dir, i)
+		if status != ramfs.StatusOK {
+			return 0, status
+		}
+		if entry[0] == entryEnd {
+			break
+		}
+		if !listed(entry) || entry[base] != '~' || entry[base+1] < '1' || entry[base+1] > '9' {
+			continue
+		}
+		same := true
+		for j := 0; j < 11 && same; j++ {
+			switch {
+			case j < base || j >= 8:
+				same = entry[j] == short[j]
+			case j >= base+2:
+				same = entry[j] == ' '
+			}
+		}
+		if same {
+			numbers |= 1 << (entry[base+1] - '0')
+		}
+	}
+	return numbers, ramfs.StatusOK
 }
 
 // taken reports whether a live entry of dir already has the 8.3 name short.
@@ -396,9 +531,9 @@ func (fs *FileSystem) commit(dir *directory, at *placement, entry [32]byte) ramf
 		for i := 0; i < longChars; i++ {
 			code := uint16(0xffff)
 			switch {
-			case base+i < fs.want.size:
-				code = uint16(fs.want.raw[base+i])
-			case base+i == fs.want.size:
+			case base+i < fs.want.count:
+				code = fs.want.units[base+i]
+			case base+i == fs.want.count:
 				code = 0
 			}
 			long[longSlots[i]] = byte(code)
@@ -447,7 +582,7 @@ func (fs *FileSystem) locate(dir *directory, index int) (int, ramfs.Status) {
 			continue
 		}
 		if i == index {
-			_, start := fs.resolveName(entry, i)
+			_, start, _ := fs.resolveName(entry, i)
 			return start, ramfs.StatusOK
 		}
 		fs.scan.reset()

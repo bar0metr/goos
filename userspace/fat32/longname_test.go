@@ -106,7 +106,7 @@ func TestLongNameChecksumMismatchFallsBackToShortName(t *testing.T) {
 		t.Fatalf("broken chain still matched: %v", status)
 	}
 	names := listNames(t, fs, root)
-	if len(names) != 1 || names[0] != "long-n~1.txt" {
+	if len(names) != 1 || names[0] != "LONG-N~1.TXT" {
 		t.Fatalf("listing %v, want the short alias", names)
 	}
 	if _, status := fs.OpenName(root, mustName(t, "long-n~1.txt")); status != ramfs.StatusOK {
@@ -126,7 +126,7 @@ func TestLongNameOrdinalMismatchFallsBackToShortName(t *testing.T) {
 	if _, status := fs.OpenName(root, mustName(t, "another-long-name.txt")); status != ramfs.StatusNotFound {
 		t.Fatalf("broken ordinals still matched: %v", status)
 	}
-	if names := listNames(t, fs, root); len(names) != 1 || names[0] != "anothe~1.txt" {
+	if names := listNames(t, fs, root); len(names) != 1 || names[0] != "ANOTHE~1.TXT" {
 		t.Fatalf("listing %v, want the short alias", names)
 	}
 }

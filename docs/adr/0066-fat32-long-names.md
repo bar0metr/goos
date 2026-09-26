@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0060.
+Accepted. Extends ADR 0060. Its bounds were replaced by ADR 0102 and ADR 0110,
+and its ASCII-only names by UTF-8 names in ADR 0112.
 
 ## Context
 
