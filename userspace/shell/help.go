@@ -85,6 +85,8 @@ func VFSReason(status vfs.Status, mutation bool) string {
 		return "no space left on device"
 	case vfs.StatusCorrupt:
 		return "filesystem is corrupt"
+	case vfs.StatusNameTooLong:
+		return "file name too long"
 	default:
 		return "filesystem error"
 	}

@@ -58,10 +58,6 @@ func (bulk *Bulk) transfer(operation vfs.Operation, file vfs.Handle, count int, 
 	if status != kcall.StatusOK {
 		return vfs.Reply{}, false
 	}
-	reply, ok := callVFS(vfs.Request{Operation: operation, Handle: file, Size: uint32(count)}, duplicate)
-	if !ok {
-		// A copy that never reached the VFS is still ours to close.
-		sys.HandleClose(duplicate)
-	}
-	return reply, ok
+	// callVFS closes the copy if it never reaches the VFS.
+	return callVFS(vfs.Request{Operation: operation, Handle: file, Size: uint32(count)}, duplicate)
 }

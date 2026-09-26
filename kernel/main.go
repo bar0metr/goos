@@ -451,7 +451,7 @@ func bootContinue() {
 	// The file cache is the memory the VFS and the filesystem service share:
 	// file data moves through it instead of through messages (ADR 0098). PID 1
 	// hands each of them a copy of the right to map it, at every launch.
-	fileCache, fileCacheCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, fsproto.CachePages, 0)
+	fileCache, fileCacheCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, fsproto.CacheSize/fsproto.PageSize, 0)
 	sharedRegistered := launchStagingMapped && execPageCreated && execPageGranted && fileCacheCreated
 	imageObject, imageObjectValid := device.ImageObject(1)
 	// PID 1 maps the image to find executables in it and launches them with

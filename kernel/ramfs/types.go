@@ -1,11 +1,12 @@
 package ramfs
 
+import "goos/internal/limits"
+
 // The types below are the node-ID backend contract every filesystem the VFS
 // mounts speaks, RAMFS and the FAT32 service alike.
 
-const (
-	MaxName = 63
-)
+// MaxName is the native name limit (ADR 0110).
+const MaxName = limits.NameMax
 
 type Status uint8
 

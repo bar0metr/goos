@@ -363,7 +363,7 @@ func rotationBound() uint64 {
 // place rather than losing it.
 func rotate() {
 	callVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: []byte(rotatePath)})
-	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRename, Path: []byte(logPath), Data: []byte(rotatePath)}); !ok || reply.Status != vfs.StatusOK {
+	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationRename, Path: []byte(logPath), Target: []byte(rotatePath)}); !ok || reply.Status != vfs.StatusOK {
 		announce("log rotation failed")
 		return
 	}

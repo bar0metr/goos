@@ -63,3 +63,21 @@ func ResolvePath(cwd []byte, path []byte, target *[MaxPath]byte) ([]byte, bool) 
 	}
 	return target[:out], true
 }
+
+// TooLong reports whether path is refused for its length: longer than
+// MaxPath, or with a component longer than the native name limit.
+func TooLong(path []byte) bool {
+	if len(path) > MaxPath {
+		return true
+	}
+	start := 0
+	for index := 0; index <= len(path); index++ {
+		if index == len(path) || path[index] == '/' {
+			if index-start > limits.NameMax {
+				return true
+			}
+			start = index + 1
+		}
+	}
+	return false
+}

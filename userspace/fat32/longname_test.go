@@ -243,8 +243,10 @@ func TestLongNameChainSpansClusters(t *testing.T) {
 	long := strings.Repeat("s", maxLongName-4) + ".txt"
 	id := writeFile(t, fs, root, long, "spanned")
 	dir, _ := fs.openDirectory(0)
-	if dir.clusters != 2 {
-		t.Fatalf("directory holds %d clusters, want 2", dir.clusters)
+	per := fs.entriesPerCluster()
+	entries := per - 2 + (len(long)+longChars-1)/longChars + 1
+	if want := uint64((entries + per - 1) / per); dir.clusters != want {
+		t.Fatalf("directory holds %d clusters, want %d", dir.clusters, want)
 	}
 	if opened, status := fs.OpenName(root, mustName(t, long)); status != ramfs.StatusOK || opened != id {
 		t.Fatalf("open spanning chain: %v", status)

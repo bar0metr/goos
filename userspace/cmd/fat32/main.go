@@ -38,6 +38,7 @@ var (
 	requestMessage ipc.Message
 	replyMessage   ipc.Message
 	listedName     [ramfs.MaxName]byte
+	requestedName  [ramfs.MaxName]byte
 	// cache is the file cache this service shares with the VFS. A read fills,
 	// and a write takes its bytes from, the slot a request names (ADR 0098).
 	cache         []byte
@@ -244,7 +245,7 @@ func userspaceMain() {
 }
 
 func serve() {
-	request, valid := fsproto.DecodeRequest(&requestMessage)
+	request, valid := fsproto.DecodeRequest(&requestMessage, cache, &requestedName)
 	var reply fsproto.Reply
 	if !valid {
 		// Answer an unusable request rather than drop it: the VFS is waiting
@@ -257,7 +258,7 @@ func serve() {
 	} else {
 		reply = fsproto.Serve(&volume, request, cache, &listedName)
 	}
-	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage) {
+	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage, cache) {
 		fatal("FAT32_REPLY_FAILED\n")
 	}
 	size, ok := ipc.EncodeFrom(&replyMessage, wire[:])

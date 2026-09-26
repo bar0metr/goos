@@ -7,6 +7,7 @@ package main
 import (
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
+	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
 )
 
@@ -15,12 +16,23 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 	if correlation == 0 {
 		correlation++
 	}
-	message, ok := vfs.EncodeRequest(request, correlation)
+	// A path too long for a message goes in the path page (ADR 0110).
+	attached, ok := pathpage.Prepare(&request)
 	if !ok {
 		return vfs.Reply{}, false
 	}
-	size, ok := ipc.Encode(message, wire[:])
+	message, ok := vfs.EncodeRequest(request, correlation)
+	if ok && attached != 0 {
+		message.HandleCount, message.Handles[0] = 1, attached
+	}
+	size := 0
+	if ok {
+		size, ok = ipc.Encode(message, wire[:])
+	}
 	if !ok || sys.IPCSend(vfsHandle, wire[:size]) != 0 {
+		if attached != 0 {
+			sys.HandleClose(attached)
+		}
 		return vfs.Reply{}, false
 	}
 	for {

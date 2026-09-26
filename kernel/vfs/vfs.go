@@ -1,6 +1,9 @@
 package vfs
 
-import "goos/kernel/ramfs"
+import (
+	"goos/internal/limits"
+	"goos/kernel/ramfs"
+)
 
 const (
 	MaxMounts    = 8
@@ -8,8 +11,13 @@ const (
 	// MaxOpenPerOwner bounds the files one owner holds open, so a single
 	// session cannot take the whole table from the others.
 	MaxOpenPerOwner = 16
-	MaxPath         = 255
-	MaxCache        = 32
+	// MaxPath is the native path limit (ADR 0110).
+	MaxPath  = limits.PathMax
+	MaxCache = 32
+	// maxCachedPath bounds the paths the resolution cache remembers. Longer
+	// ones resolve every time; they are rare, and remembering them would
+	// cost the cache a PathMax buffer per entry.
+	maxCachedPath = 256
 	// mountCursor separates the backend phase of a directory scan from the
 	// mount phase. It is above every cursor a backend can return and below the
 	// uint32 the service protocol carries.
@@ -38,7 +46,11 @@ const (
 	StatusNoSpace
 	// StatusCorrupt is a filesystem whose on-disk metadata failed validation.
 	StatusCorrupt
-	lastStatus = StatusCorrupt
+	// StatusNameTooLong refuses a name longer than NameMax, and answers a
+	// listing whose next name is too long for a message and that attached no
+	// object to receive it; Size is then the name's length (ADR 0110).
+	StatusNameTooLong
+	lastStatus = StatusNameTooLong
 )
 
 type Rights uint8
@@ -89,7 +101,7 @@ type openFile struct {
 type cacheEntry struct {
 	node  ramfs.NodeID
 	mount uint8
-	path  [MaxPath]byte
+	path  [maxCachedPath]byte
 	size  uint16
 	used  bool
 }
@@ -494,6 +506,9 @@ func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool) {
 }
 
 func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID) {
+	if len(path) > maxCachedPath {
+		return
+	}
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
 		if !entry.used {
@@ -511,15 +526,14 @@ func (namespace *Namespace) invalidate() {
 }
 
 // canonicalPath writes the canonical form of path into output, which the
-// caller owns.
+// caller owns. A ".." goes back over the last component written, so no table
+// of component starts is needed.
 func canonicalPath(output *[MaxPath]byte, path []byte) (int, bool) {
 	if len(path) == 0 || len(path) > MaxPath || path[0] != '/' {
 		return 0, false
 	}
 	output[0] = '/'
 	size := 1
-	components := [MaxPath]uint16{}
-	count := 0
 	remaining := path[1:]
 	for len(remaining) != 0 {
 		component, rest := nextComponent(remaining)
@@ -528,9 +542,11 @@ func canonicalPath(output *[MaxPath]byte, path []byte) (int, bool) {
 			continue
 		}
 		if len(component) == 2 && component[0] == '.' && component[1] == '.' {
-			if count != 0 {
-				count--
-				size = int(components[count])
+			for size > 1 && output[size-1] != '/' {
+				size--
+			}
+			if size > 1 {
+				size--
 			}
 			continue
 		}
@@ -542,9 +558,10 @@ func canonicalPath(output *[MaxPath]byte, path []byte) (int, bool) {
 				return 0, false
 			}
 		}
-		components[count] = uint16(size)
-		count++
 		if size > 1 {
+			if size == MaxPath {
+				return 0, false
+			}
 			output[size] = '/'
 			size++
 		}

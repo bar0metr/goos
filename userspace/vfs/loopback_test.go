@@ -18,6 +18,8 @@ type loopback struct {
 	volume      fat32.Volume
 	correlation uint64
 	name        [ramfs.MaxName]byte
+	requested   [ramfs.MaxName]byte
+	replied     [ramfs.MaxName]byte
 	// fail, when set, makes every exchange fail from then on, as a service
 	// that has died does.
 	fail bool
@@ -37,20 +39,20 @@ func (service *loopback) Exchange(request fsproto.Request) (fsproto.Reply, bool)
 	}
 	service.correlation++
 	var message ipc.Message
-	if !fsproto.EncodeRequest(request, service.correlation, &message) {
+	if !fsproto.EncodeRequest(request, service.correlation, &message, testCache) {
 		return fsproto.Reply{}, false
 	}
-	decoded, ok := fsproto.DecodeRequest(&message)
+	decoded, ok := fsproto.DecodeRequest(&message, testCache, &service.requested)
 	if !ok {
 		return fsproto.Reply{}, false
 	}
 	var answer ipc.Message
-	if !fsproto.EncodeReply(fsproto.Serve(&service.volume, decoded, testCache, &service.name), message.Correlation, &answer) {
+	if !fsproto.EncodeReply(fsproto.Serve(&service.volume, decoded, testCache, &service.name), message.Correlation, &answer, testCache) {
 		return fsproto.Reply{}, false
 	}
 	if service.corrupt {
 		answer.Payload[5] = 1
 	}
-	reply, ok := fsproto.DecodeReply(&answer)
+	reply, ok := fsproto.DecodeReply(&answer, testCache, &service.replied)
 	return reply, ok && answer.Correlation == service.correlation
 }

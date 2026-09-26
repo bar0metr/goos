@@ -14,6 +14,7 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 )
@@ -207,9 +208,19 @@ func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
 // callSessionAttached is callSession with a handle moved to the VFS with the
 // request and a deadline of the caller's choosing.
 func callSessionAttached(session handle.ID, request vfs.Request, attached handle.ID, deadline uint64) (vfs.Reply, bool) {
+	// A program path too long for a message goes in the path page (ADR 0110).
+	if attached == 0 {
+		var ok bool
+		if attached, ok = pathpage.Prepare(&request); !ok {
+			return vfs.Reply{}, false
+		}
+	}
 	correlation++
 	message, ok := vfs.EncodeRequest(request, correlation)
 	if !ok {
+		if attached != 0 {
+			sys.HandleClose(attached)
+		}
 		return vfs.Reply{}, false
 	}
 	if attached != 0 {

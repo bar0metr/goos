@@ -3,9 +3,9 @@ package fat32
 import "goos/kernel/ramfs"
 
 const (
-	// maxLongName is the VFS name bound. VFAT allows 255 bytes, but no name
-	// wider than ramfs.MaxName survives a path component or a directory reply,
-	// so the smaller bound is the honest one.
+	// maxLongName is both VFAT's bound, 255 UTF-16 units, and the native
+	// name limit, 255 bytes (ADR 0110): names are printable ASCII, one unit
+	// per byte, so the two agree.
 	maxLongName    = ramfs.MaxName
 	longChars      = 13
 	maxLongEntries = (maxLongName + longChars - 1) / longChars

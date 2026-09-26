@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/limits"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -44,6 +45,10 @@ var (
 	filesystemWire    [ipc.WireMaxSize]byte
 	filesystemRequest ipc.Message
 	filesystemReply   ipc.Message
+	// filesystemName holds a name a reply carried in the file cache.
+	filesystemName [ramfs.MaxName]byte
+	// fileCache is the file cache mapping, once PID 1 has handed it over.
+	fileCache []byte
 )
 
 // filesystemTransport carries backend calls to the filesystem service. Each
@@ -56,7 +61,7 @@ func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, boo
 		return fsproto.Reply{}, false
 	}
 	correlation++
-	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest) {
+	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest, fileCache) {
 		return fsproto.Reply{}, false
 	}
 	size, ok := ipc.EncodeFrom(&filesystemRequest, filesystemWire[:])
@@ -77,7 +82,7 @@ func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, boo
 		if filesystemReply.Correlation < correlation {
 			continue
 		}
-		reply, valid := fsproto.DecodeReply(&filesystemReply)
+		reply, valid := fsproto.DecodeReply(&filesystemReply, fileCache, &filesystemName)
 		return reply, valid && filesystemReply.Correlation == correlation
 	}
 	if status == kcall.StatusPeerDied {
@@ -215,6 +220,7 @@ func userspaceMain() {
 	if cache, status := sys.MemoryMap(cacheHandle, vm.UserSharedAddress, fsproto.CacheSize, true); status != kcall.StatusOK || !service.AttachCache(cache) {
 		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
 	} else {
+		fileCache = cache
 		mark("FILE_CACHE_OK\n")
 	}
 	// The persistent volume is not mounted here: it is served by the FAT32
@@ -341,12 +347,18 @@ func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 
 func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	request, ok := vfs.DecodeRequest(message)
-	// A bulk operation carries exactly one handle and nothing else carries
-	// any. Whatever arrived is this process's now and is closed once the
-	// request is answered, so a client cannot fill the handle table.
+	// A bulk operation, and a request whose paths or listed name travel in
+	// memory, carry exactly one handle, and nothing else carries any.
+	// Whatever arrived is this process's now and is closed once the request
+	// is answered, so a client cannot fill the handle table.
 	attached := message.Handles[:message.HandleCount]
-	if ok && request.Operation.Bulk() != (len(attached) == 1) {
+	if ok && request.Attaches() != (len(attached) == 1) {
 		ok = false
+	}
+	var object []byte
+	var base, size uint64
+	if ok && (request.PathsAttached || request.NameReturn) {
+		object, base, size, ok = mapPathObject(&request, attached[0])
 	}
 	if !ok {
 		closeAttached(attached)
@@ -363,15 +375,55 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	var answer vfs.Reply
 	if request.Operation.Bulk() {
 		answer = serveBulk(owner, request, attached[0])
-		closeAttached(attached)
 	} else {
 		answer = service.Dispatch(owner, request)
+		if len(answer.Name) > vfs.MaxInlineName {
+			answer = returnName(answer, request, object)
+		}
 	}
+	if object != nil {
+		sys.VMUnmap(base, size)
+	}
+	closeAttached(attached)
 	reply, ok := vfs.EncodeReply(answer, message.Correlation)
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
 	send(session, reply)
+}
+
+// maxPathObject bounds the object a client may attach for paths or a name.
+const maxPathObject = uint64(64 << 10)
+
+// pathCopy and targetCopy hold the paths a request carried in memory, copied
+// out of it before they are checked (ADR 0110).
+var pathCopy, targetCopy [limits.PathMax]byte
+
+// mapPathObject maps the object a request attached for its paths or a listed
+// name, writable only for the name, and takes the paths out of it.
+func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint64, bool) {
+	base, size, status := sys.MemoryMapAnywhere(object, request.NameReturn)
+	if status != kcall.StatusOK {
+		return nil, 0, 0, false
+	}
+	memory := sys.Window(base, size)
+	if size > maxPathObject || request.NameReturn && size < ramfs.MaxName || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
+		sys.VMUnmap(base, size)
+		return nil, 0, 0, false
+	}
+	return memory, base, size, true
+}
+
+// returnName delivers a listed name too long for the message: in the object
+// the request attached for it, or, without one, as a refusal that tells the
+// client how long it is so it can ask again with one.
+func returnName(answer vfs.Reply, request vfs.Request, object []byte) vfs.Reply {
+	if request.NameReturn && len(object) >= len(answer.Name) {
+		answer.AttachedName = uint8(copy(object, answer.Name))
+		answer.Name = nil
+		return answer
+	}
+	return vfs.Reply{Operation: answer.Operation, Status: vfs.StatusNameTooLong, Size: uint64(len(answer.Name))}
 }
 
 func closeAttached(attached []handle.ID) {

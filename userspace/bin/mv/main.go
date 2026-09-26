@@ -26,7 +26,7 @@ func main() {}
 func run(data startup.Data) {
 	source := utility.Path(data, 1)
 	target := utility.Target(data, 2)
-	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationRename, Path: source, Data: target})
+	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationRename, Path: source, Target: target})
 	if reply.Status == vfs.StatusAlreadyExists {
 		utility.Check(reply, received, target, true)
 	}

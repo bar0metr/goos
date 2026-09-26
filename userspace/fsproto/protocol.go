@@ -7,7 +7,8 @@
 // Every message is one bounded IPC payload, and no message carries file data.
 // The data of a read or a write lies in the file cache, a shared-memory object
 // of CachePages pages both processes map: a request names a slot of it, and the
-// bytes at the request's offset within that page (ADR 0098).
+// bytes at the request's offset within that page (ADR 0098). A name too long
+// for a message travels in the page after the slots, NamePage (ADR 0110).
 package fsproto
 
 import (
@@ -21,8 +22,9 @@ const (
 	ProtocolID = uint64(0x4746535052543031)
 	// Version 2 moves file data from the messages to the file cache; version
 	// 3 adds the no-space and corrupt statuses (ADR 0102); version 4 lets a
-	// read or write span consecutive slots (ADR 0107).
-	Version = uint16(4)
+	// read or write span consecutive slots (ADR 0107); version 5 carries
+	// names of up to 255 bytes, the long ones in the name page (ADR 0110).
+	Version = uint16(5)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -36,8 +38,20 @@ const (
 	PageSize = 4096
 	// CachePages is the number of slots in the file cache.
 	CachePages = 32
-	// CacheSize is the size of the file cache mapping.
-	CacheSize = CachePages * PageSize
+	// NamePage is the page after the slots, which carries a name too long for
+	// a message. One exchange is in flight at a time, so one page serves both
+	// directions: the VFS writes a request's name there before sending it, and
+	// the filesystem service a listed name before answering.
+	NamePage = CachePages
+	// CacheSize is the size of the file cache mapping: the slots and the name
+	// page.
+	CacheSize = (CachePages + 1) * PageSize
+
+	// Names up to these lengths travel in the message.
+	maxRequestName = ipc.MaxPayload - requestHeader
+	maxReplyName   = ipc.MaxPayload - replyHeader
+	// flagNameInCache marks a message whose name is in the name page.
+	flagNameInCache = 1
 )
 
 type Operation uint8
@@ -130,14 +144,21 @@ func validName(name []byte) bool {
 	return ok
 }
 
-func EncodeRequest(request Request, correlation uint64, message *ipc.Message) bool {
+// EncodeRequest encodes request into message. A name too long for the
+// message is written to the name page of cache, which must then be the file
+// cache mapping.
+func EncodeRequest(request Request, correlation uint64, message *ipc.Message, cache []byte) bool {
 	if message == nil || correlation == 0 || !validOperation(request.Operation) || len(request.Name) > ramfs.MaxName ||
-		!validName(request.Name) || requestHeader+len(request.Name) > ipc.MaxPayload || !validTransfer(request) {
+		!validName(request.Name) || !validTransfer(request) {
+		return false
+	}
+	inline := len(request.Name) <= maxRequestName
+	if !inline && !placeName(cache, request.Name) {
 		return false
 	}
 	clearMessage(message)
 	message.ProtocolID, message.Version, message.Kind, message.Correlation = ProtocolID, Version, ipc.KindRequest, correlation
-	message.PayloadSize = uint16(requestHeader + len(request.Name))
+	message.PayloadSize = requestHeader
 	payload := message.Payload[:]
 	payload[0] = byte(request.Operation)
 	payload[1] = byte(len(request.Name))
@@ -146,19 +167,26 @@ func EncodeRequest(request Request, correlation uint64, message *ipc.Message) bo
 	binary.LittleEndian.PutUint64(payload[16:], uint64(request.Parent))
 	binary.LittleEndian.PutUint64(payload[24:], request.Offset)
 	binary.LittleEndian.PutUint32(payload[32:], request.Size)
-	copy(payload[requestHeader:], request.Name)
+	if inline {
+		message.PayloadSize += uint16(copy(payload[requestHeader:], request.Name))
+	} else {
+		payload[2] = flagNameInCache
+	}
 	return true
 }
 
-// DecodeRequest validates a request. The returned slices alias the message.
-func DecodeRequest(message *ipc.Message) (Request, bool) {
+// DecodeRequest validates a request. Its name aliases the message, or, when
+// it came through the name page, a copy of it in name: the page is shared,
+// so what is checked must be what is used.
+func DecodeRequest(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) (Request, bool) {
 	if message == nil || message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindRequest ||
 		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < requestHeader || int(message.PayloadSize) > ipc.MaxPayload {
 		return Request{}, false
 	}
 	payload := message.Payload[:]
 	nameSize := int(payload[1])
-	if !zero(payload[2:4]) || !zero(payload[36:40]) || nameSize > ramfs.MaxName || requestHeader+nameSize != int(message.PayloadSize) {
+	cached := payload[2] == flagNameInCache
+	if payload[2]&^flagNameInCache != 0 || payload[3] != 0 || !zero(payload[36:40]) || nameSize > ramfs.MaxName {
 		return Request{}, false
 	}
 	request := Request{
@@ -168,7 +196,21 @@ func DecodeRequest(message *ipc.Message) (Request, bool) {
 		Parent:    ramfs.NodeID(binary.LittleEndian.Uint64(payload[16:])),
 		Offset:    binary.LittleEndian.Uint64(payload[24:]),
 		Size:      binary.LittleEndian.Uint32(payload[32:]),
-		Name:      payload[requestHeader : requestHeader+nameSize],
+	}
+	switch {
+	case cached:
+		if int(message.PayloadSize) != requestHeader || nameSize <= maxRequestName {
+			return Request{}, false
+		}
+		copied, ok := takeName(cache, nameSize, name)
+		if !ok {
+			return Request{}, false
+		}
+		request.Name = copied
+	case requestHeader+nameSize != int(message.PayloadSize):
+		return Request{}, false
+	default:
+		request.Name = payload[requestHeader : requestHeader+nameSize]
 	}
 	if !validOperation(request.Operation) || !validName(request.Name) || !validTransfer(request) {
 		return Request{}, false
@@ -176,32 +218,44 @@ func DecodeRequest(message *ipc.Message) (Request, bool) {
 	return request, true
 }
 
-func EncodeReply(reply Reply, correlation uint64, message *ipc.Message) bool {
+// EncodeReply encodes reply into message, a long name through the name page
+// of cache.
+func EncodeReply(reply Reply, correlation uint64, message *ipc.Message, cache []byte) bool {
 	if message == nil || correlation == 0 || !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus ||
-		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName || replyHeader+len(reply.Name) > ipc.MaxPayload {
+		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName {
+		return false
+	}
+	inline := len(reply.Name) <= maxReplyName
+	if !inline && !placeName(cache, reply.Name) {
 		return false
 	}
 	clearMessage(message)
 	message.ProtocolID, message.Version, message.Kind, message.Correlation = ProtocolID, Version, ipc.KindReply, correlation
-	message.PayloadSize = uint16(replyHeader + len(reply.Name))
+	message.PayloadSize = replyHeader
 	payload := message.Payload[:]
 	payload[0], payload[1], payload[2], payload[3] = byte(reply.Operation), byte(reply.Status), byte(reply.Kind), byte(len(reply.Name))
 	binary.LittleEndian.PutUint64(payload[8:], uint64(reply.Node))
 	binary.LittleEndian.PutUint64(payload[16:], reply.Value)
 	binary.LittleEndian.PutUint32(payload[24:], reply.Cursor)
-	copy(payload[replyHeader:], reply.Name)
+	if inline {
+		message.PayloadSize += uint16(copy(payload[replyHeader:], reply.Name))
+	} else {
+		payload[4] = flagNameInCache
+	}
 	return true
 }
 
-// DecodeReply validates a reply. The returned slices alias the message.
-func DecodeReply(message *ipc.Message) (Reply, bool) {
+// DecodeReply validates a reply. Its name aliases the message or a copy in
+// name, as DecodeRequest's does.
+func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) (Reply, bool) {
 	if message == nil || message.ProtocolID != ProtocolID || message.Version != Version || message.Kind != ipc.KindReply ||
 		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < replyHeader || int(message.PayloadSize) > ipc.MaxPayload {
 		return Reply{}, false
 	}
 	payload := message.Payload[:]
 	nameSize := int(payload[3])
-	if !zero(payload[4:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName || replyHeader+nameSize != int(message.PayloadSize) {
+	cached := payload[4] == flagNameInCache
+	if payload[4]&^flagNameInCache != 0 || !zero(payload[5:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName {
 		return Reply{}, false
 	}
 	reply := Reply{
@@ -211,12 +265,43 @@ func DecodeReply(message *ipc.Message) (Reply, bool) {
 		Node:      ramfs.NodeID(binary.LittleEndian.Uint64(payload[8:])),
 		Value:     binary.LittleEndian.Uint64(payload[16:]),
 		Cursor:    binary.LittleEndian.Uint32(payload[24:]),
-		Name:      payload[replyHeader : replyHeader+nameSize],
+	}
+	switch {
+	case cached:
+		if int(message.PayloadSize) != replyHeader || nameSize <= maxReplyName {
+			return Reply{}, false
+		}
+		copied, ok := takeName(cache, nameSize, name)
+		if !ok {
+			return Reply{}, false
+		}
+		reply.Name = copied
+	case replyHeader+nameSize != int(message.PayloadSize):
+		return Reply{}, false
+	default:
+		reply.Name = payload[replyHeader : replyHeader+nameSize]
 	}
 	if !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus || reply.Kind > ramfs.KindDirectory {
 		return Reply{}, false
 	}
 	return reply, true
+}
+
+// placeName writes a name to the name page.
+func placeName(cache []byte, name []byte) bool {
+	if len(cache) != CacheSize {
+		return false
+	}
+	copy(cache[NamePage*PageSize:], name)
+	return true
+}
+
+// takeName copies size bytes of the name page into name.
+func takeName(cache []byte, size int, name *[ramfs.MaxName]byte) ([]byte, bool) {
+	if len(cache) != CacheSize || name == nil || size > len(name) {
+		return nil, false
+	}
+	return name[:copy(name[:size], cache[NamePage*PageSize:])], true
 }
 
 // Reserved bytes must reach the peer as zero even when the message still

@@ -221,6 +221,10 @@ rm -f "$log" "$reboot_log"
 # eight-argument startup block could carry (ADR 0109).
 many_arguments=$(awk 'BEGIN { for (i = 0; i < 700; i++) printf "%sw%d", (i ? " " : ""), i }')
 long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
+# A 255-byte name, the native limit, and a 200-byte directory name, so two
+# levels make a path longer than a message (ADR 0110).
+long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
+long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 ( sleep 4
   printf 'help\n'
   sleep 1
@@ -233,6 +237,12 @@ long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
 	printf 'echo %s > /tmp/long-argument; stat /tmp/long-argument\n' "$long_argument"
 	sleep 2
 	printf 'touch /tmp/m1 /tmp/m2 /tmp/m3; rm /tmp/m1 /tmp/m2 /tmp/m3; echo many-paths-done\n'
+	sleep 1
+	printf 'mkdir /tmp/%s /tmp/%s/%s; echo deep-ramfs > /tmp/%s/%s/%s; cat /tmp/%s/%s/%s\n' "$long_directory" "$long_directory" "$long_directory" "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_name"
+	sleep 2
+	printf 'mkdir /home/%s; echo deep-fat32 > /home/%s/%s; ls /home/%s; mv /home/%s/%s /home/%s/renamed-%s; cat /home/%s/renamed-%s\n' "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_name" "$long_directory" "$long_directory" "$long_directory" "$long_directory"
+	sleep 3
+	printf 'touch /tmp/%sx\n' "$long_name"
 	sleep 1
 	printf 'readline\n'
 	sleep 1
@@ -733,6 +743,10 @@ require_regex startup.many-arguments '^w0 w1 w2 .* w698 w699$' '700 arguments re
 require_regex startup.long-argument '^file 2\.93 KiB (3001 bytes)$' 'a 3000-byte argument written whole' "$log" 'goos> echo xxxx'
 require_window startup.many-paths '^many-paths-done$' 'touch and rm take several paths' "$log" 'goos> touch /tmp/m1' 'goos> readline'
 forbid_window startup.many-paths-errors 'not found\|usage:' 'no path was refused' "$log" 'goos> touch /tmp/m1' 'goos> readline'
+require_regex names.ramfs-long-path '^deep-ramfs$' 'a 255-byte name under a 405-byte path in /tmp' "$log" 'goos> mkdir /tmp/ddd'
+require_regex names.fat32-long-name "^$long_name\$" 'a 255-byte name listed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
+require_regex names.fat32-rename '^deep-fat32$' 'a long name renamed on the FAT32 volume' "$log" 'goos> mkdir /home/ddd'
+require_regex names.too-long ': file name too long$' 'a 256-byte name refused as too long' "$log" 'goos> touch /tmp/nnn'
 # A line typed while a command runs is that command's input: it is echoed once
 # and printed once more by readline, and never reaches the shell as a command.
 require_count shell.stdin-output '^bounded stdin payload$' 2 "$log" 'goos> readline'

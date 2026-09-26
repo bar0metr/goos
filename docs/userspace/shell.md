@@ -27,9 +27,10 @@ system log (ADRs 0059 and 0061). `diag`, in a `goos_diag` build, asks PID 1 to
 have the kernel dump its state to the console, since the shell cannot write the
 console itself. `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
 the normal path, and prints the elapsed time from the kernel's nanosecond
-clock as `time: <N> us` (ADR 0054). Commands are split into at most eight arguments with bounded single
-quotes, double quotes, and backslash escaping. The shell owns a fixed 192-byte working-directory buffer matching the
-inline `GVF1` path limit and resolves
+clock as `time: <N> us` (ADR 0054). Commands are split into words bounded only by the line's 4096 bytes, with single
+quotes, double quotes, and backslash escaping (ADR 0109). The shell owns a
+fixed working-directory buffer of the native path limit, 4096 bytes, and
+resolves
 relative paths without heap allocation. `cd` commits a new directory only after
 VFS `Stat` confirms it. Other command names are resolved beneath the fixed
 `/system/bin/` search root; a command word with a slash is a program path,

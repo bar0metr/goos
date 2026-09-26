@@ -2,6 +2,7 @@
 package vfsservice
 
 import (
+	"goos/internal/limits"
 	"goos/kernel/initramfs"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
@@ -173,6 +174,12 @@ func (service *Service) CloseSession(owner vfs.Owner) int { return service.names
 // session's own: another session's handle is not found.
 func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
+	// A path over the native limits is refused as such, not as a malformed
+	// request, so a client can say what is wrong (ADR 0110).
+	if tooLong(request.Path) || tooLong(request.Target) {
+		reply.Status = vfs.StatusNameTooLong
+		return reply
+	}
 	switch request.Operation {
 	case vfs.OperationOpen:
 		reply.Handle, reply.Status = service.namespace.Open(owner, request.Path, request.Rights)
@@ -199,7 +206,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			reply.Kind, reply.Size, reply.Name = entry.Stat.Kind, entry.Stat.Size, entry.Name[:entry.Size]
 		}
 	case vfs.OperationRename:
-		reply.Status = service.namespace.Rename(request.Path, request.Data)
+		reply.Status = service.namespace.Rename(request.Path, request.Target)
 	case vfs.OperationUnlink:
 		reply.Status = service.namespace.Unlink(request.Path)
 	case vfs.OperationStat:
@@ -211,4 +218,22 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.Status = vfs.StatusInvalidArgument
 	}
 	return reply
+}
+
+// tooLong reports whether a path is longer than PathMax or has a component
+// longer than NameMax.
+func tooLong(path []byte) bool {
+	if len(path) > limits.PathMax {
+		return true
+	}
+	start := 0
+	for index := 0; index <= len(path); index++ {
+		if index == len(path) || path[index] == '/' {
+			if index-start > limits.NameMax {
+				return true
+			}
+			start = index + 1
+		}
+	}
+	return false
 }

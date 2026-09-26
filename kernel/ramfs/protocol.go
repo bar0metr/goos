@@ -9,7 +9,9 @@ const (
 	ProtocolID      = uint64(0x47524631)
 	ProtocolVersion = uint16(1)
 	requestHeader   = 32
-	MaxInlineData   = ipc.MaxPayload - requestHeader - MaxName
+	// MaxInlineData bounds a request's data; with its name it fills at most
+	// one message.
+	MaxInlineData = ipc.MaxPayload - requestHeader
 )
 
 type Operation uint8
@@ -38,7 +40,7 @@ type Request struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if request.Operation < OperationCreate || request.Operation > OperationStat || correlation == 0 || request.Offset > uint64(^uint32(0)) || !validProtocolName(request.Name) || len(request.Data) > MaxInlineData {
+	if request.Operation < OperationCreate || request.Operation > OperationStat || correlation == 0 || request.Offset > uint64(^uint32(0)) || !validProtocolName(request.Name) || len(request.Data) > MaxInlineData || requestHeader+len(request.Name)+len(request.Data) > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	payloadSize := requestHeader + len(request.Name) + len(request.Data)

@@ -93,8 +93,8 @@ directory another mount points at, under either name.
 Files are limited only by FAT32 itself: 4 GiB − 1 bytes, the free space, and the
 caller's memory. Directories are cluster chains of any valid length, up to the
 65536 entries FAT allows, and grow one zeroed cluster at a time; nesting depth
-is bounded only by the VFS path length. Names are ASCII of at most 63 bytes
-(ADR 0066). A lower-case name that fits the 8.3 form stays a single directory
+is bounded only by the VFS path length. Names are printable ASCII of at most
+255 bytes, the native limit (ADR 0066, ADR 0110). A lower-case name that fits the 8.3 form stays a single directory
 entry, carrying the Windows NT lower-case flags; anything longer or mixed case
 gets a VFAT long-name chain and a generated alias — `~1` to `~9`, then a hashed
 form — so any number of similar names fit (ADR 0102).

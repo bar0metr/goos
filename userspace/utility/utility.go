@@ -15,6 +15,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
+	"goos/userspace/pathpage"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/shell"
@@ -36,7 +37,8 @@ var inputByte [1]byte
 var (
 	current     commands.Manifest
 	commandName []byte
-	errorBuffer [512]byte
+	// errorBuffer holds a message that names a path of up to PathMax bytes.
+	errorBuffer [shell.MaxPath + 256]byte
 )
 
 // Run starts the command described by manifest and calls main with its startup
@@ -151,7 +153,7 @@ func Target(data startup.Data, index int) []byte {
 	}
 	path, ok := shell.ResolvePath(data.CWD(), argument, &targetBuffer)
 	if !ok {
-		Fail(argument, "invalid path")
+		failPath(argument)
 	}
 	return path
 }
@@ -160,9 +162,18 @@ func Target(data startup.Data, index int) []byte {
 func Resolve(data startup.Data, argument []byte) []byte {
 	path, ok := shell.ResolvePath(data.CWD(), argument, &pathBuffer)
 	if !ok {
-		Fail(argument, "invalid path")
+		failPath(argument)
 	}
 	return path
+}
+
+// failPath reports a path that could not be resolved, saying so when it is
+// the length that is wrong.
+func failPath(argument []byte) {
+	if shell.TooLong(argument) {
+		Fail(argument, "file name too long")
+	}
+	Fail(argument, "invalid path")
 }
 
 // Arguments prints the arguments from start on, separated by spaces, into the
@@ -281,22 +292,43 @@ const (
 )
 
 // CallVFS sends one request on the command's filesystem session and waits,
-// bounded, for its reply.
-func CallVFS(request vfs.Request) (vfs.Reply, bool) { return callVFS(request, 0) }
+// bounded, for its reply. Paths too long for a message go in the path page,
+// and a listed name too long for the reply is asked for again with the page
+// attached to receive it (ADR 0110).
+func CallVFS(request vfs.Request) (vfs.Reply, bool) {
+	reply, ok := callVFS(request, 0)
+	if ok && request.Operation == vfs.OperationReadDir && reply.Status == vfs.StatusNameTooLong {
+		request.NameReturn = true
+		reply, ok = callVFS(request, 0)
+	}
+	if ok && reply.AttachedName != 0 {
+		reply.Name = pathpage.Name(int(reply.AttachedName))
+	}
+	return reply, ok
+}
 
 // callVFS is CallVFS with a handle attached, for the bulk operations; the
 // handle moves to the VFS with the request.
 func callVFS(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
+	if attached == 0 {
+		var ok bool
+		if attached, ok = pathpage.Prepare(&request); !ok {
+			return vfs.Reply{}, false
+		}
+	}
 	correlation++
 	message, ok := vfs.EncodeRequest(request, correlation)
-	if !ok {
-		return vfs.Reply{}, false
-	}
-	if attached != 0 {
+	if ok && attached != 0 {
 		message.HandleCount, message.Handles[0] = 1, attached
 	}
-	size, ok := ipc.Encode(message, wire[:])
+	size := 0
+	if ok {
+		size, ok = ipc.Encode(message, wire[:])
+	}
 	if !ok || sys.IPCSend(handle.ID(vfsHandle), wire[:size]) != 0 {
+		if attached != 0 {
+			sys.HandleClose(attached)
+		}
 		return vfs.Reply{}, false
 	}
 	// Bound the wait: a service that never answers must surface an error rather

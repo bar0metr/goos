@@ -88,7 +88,8 @@ bytes per VFS write request. Large ones move it through shared memory instead
   that request only. `cp` and `bench io` move 64 KiB per exchange this way;
   PID 1 has the VFS fill an executable object with one `FillExecutable`.
 - File data between the VFS and the FAT32 service moves through the file
-  cache, a 128 KiB shared-memory object both map (ADR 0098). A `GFSPRT01` read
+  cache, a shared-memory object both map: 128 KiB of data slots and a page
+  for names too long for a message (ADR 0098, ADR 0110). A `GFSPRT01` read
   or write names a run of up to 16 consecutive slots; the VFS serves later
   reads of a cached page without asking the service, and writes go through to
   the service before they return.
@@ -126,15 +127,20 @@ directory reads, and gathers FAT changes there to write a sector at a time
 
 ## Names
 
-A path component is at most 63 bytes (`ramfs.MaxName`), the width of a VFS
-directory reply. FAT32 stores a component that fits the 8.3 form — lower case,
+A path component is at most 255 bytes and a path at most 4096, in every layer
+(`limits.NameMax`, `limits.PathMax`; ADR 0110). Names are bytes other than NUL
+and `/`. A name too long for a message crosses to the VFS in a memory object
+the client attaches, and between the VFS and the FAT32 service in the name
+page of the file cache. FAT32 accepts printable ASCII names, one UTF-16 unit
+per byte, so its 255-unit VFAT limit is the same bound. FAT32 stores a component that fits the 8.3 form — lower case,
 at most eight characters and a three-character extension — in a single
 directory entry, exactly as before. Any other component gets a generated
 `NAME~1` alias plus a VFAT long-name chain in front of it, so case, length, and
 the wider character set survive a round trip (ADR 0066). A chain whose
 ordinals, padding, or checksum do not match is ignored and the alias is used
-instead. Names longer than the bound, or holding characters the system cannot
-carry, are rejected with `InvalidArgument`.
+instead. Names longer than the bound are rejected with `NameTooLong`, and names holding
+characters the service cannot carry with `InvalidArgument`; an on-disk long
+name holding such characters is shown by its alias.
 
 ## Limits
 
