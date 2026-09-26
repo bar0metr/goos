@@ -445,7 +445,7 @@ prototype limits under every layer: FAT32 files up to 4 GiB and large
 directories, page-backed RAMFS, physical memory beyond 1 GiB, virtual-memory
 regions with demand-zero memory, lazily loaded programs of up to 256 MiB,
 shared-memory bulk I/O, a byte-bounded startup ABI and 4096-byte command lines,
-255-byte names and 4096-byte paths everywhere, and kernel registries that take
+1024-byte native names, full 255-UTF-16-unit VFAT names, 4096-byte paths, and kernel registries that take
 memory as they grow. The next milestone is Linux ELF compatibility.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and

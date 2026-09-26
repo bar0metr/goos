@@ -221,7 +221,7 @@ rm -f "$log" "$reboot_log"
 # eight-argument startup block could carry (ADR 0109).
 many_arguments=$(awk 'BEGIN { for (i = 0; i < 700; i++) printf "%sw%d", (i ? " " : ""), i }')
 long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
-# A 255-byte name, the native limit, and a 200-byte directory name, so two
+# A 255-byte ASCII name, the FAT32 unit limit, and a 200-byte directory name, so two
 # levels make a path longer than a message (ADR 0110).
 long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')

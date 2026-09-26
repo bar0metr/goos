@@ -389,6 +389,6 @@ func (remote *Remote) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 		return ramfs.Entry{}, 0, ramfs.StatusIOError
 	}
 	entry.Stat = ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value}
-	entry.Size = uint8(copy(entry.Name[:], reply.Name))
+	entry.Size = uint16(copy(entry.Name[:], reply.Name))
 	return entry, int(reply.Cursor), ramfs.StatusOK
 }

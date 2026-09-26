@@ -211,7 +211,7 @@ func TestLongNamesTravelThroughTheNamePage(t *testing.T) {
 	long := bytes.Repeat([]byte{'n'}, ramfs.MaxName)
 	var message ipc.Message
 	if !EncodeRequest(Request{Operation: OperationCreate, Parent: 1, Name: long}, 9, &message, cache) {
-		t.Fatal("a 255-byte name was not encoded")
+		t.Fatal("a native maximum name was not encoded")
 	}
 	if message.PayloadSize != requestHeader || !bytes.Equal(cache[NamePage*PageSize:NamePage*PageSize+len(long)], long) {
 		t.Fatalf("payload %d; the name is not in the name page", message.PayloadSize)

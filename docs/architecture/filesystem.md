@@ -21,7 +21,7 @@ utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /
 
 ## Namespace
 
-VFS owns the namespace and all path handling. Paths are absolute, at most 255
+VFS owns the namespace and all path handling. Paths are absolute, at most 4096
 bytes, and canonicalized by VFS (repeated slashes, `.`, `..` clamped at the
 root). Backends see only opaque node IDs and single path components; neither
 the kernel nor RAMFS nor FAT32 parses POSIX paths. Mount selection uses the
@@ -128,22 +128,22 @@ directory reads, and gathers FAT changes there to write a sector at a time
 
 ## Names
 
-A path component is at most 255 bytes and a path at most 4096, in every layer
+A path component is at most 1024 bytes and a path at most 4096, in every layer
 (`limits.NameMax`, `limits.PathMax`; ADR 0110). Names are bytes other than NUL
 and `/`. A name too long for a message crosses to the VFS in a memory object
 the client attaches, and between the VFS and the FAT32 service in the name
 page of the file cache. FAT32 names are UTF-8 natively and UTF-16LE on disk;
-a UTF-8 name never has more UTF-16 units than bytes, so VFAT's 255-unit limit
-holds every native name. FAT32 stores a component that fits the 8.3 form, each
+the filesystem independently enforces VFAT's 255 UTF-16-unit limit. FAT32 stores a component that fits the 8.3 form, each
 part in one case, in a single directory entry with the Windows NT case flags.
 Any other component gets a generated `NAME~1` alias plus a VFAT long-name chain
 in front of it, so case, length and any Unicode character survive a round trip
 (ADR 0066, ADR 0112). Names are not normalized and are matched
-case-insensitively. A chain whose ordinals, padding, checksum or UTF-16 do not
-match is ignored and the alias is used instead. Names longer than the bound are
-rejected with `NameTooLong`, and invalid UTF-8 or characters FAT reserves with
-`InvalidArgument`; an on-disk long name this system could not open is shown by
-its alias.
+case-insensitively through Unicode simple one-to-one uppercase mapping. A chain whose ordinals, padding, checksum or UTF-16 do not
+match is ignored and the alias is used instead. Native components longer than
+1024 bytes are rejected with `NameTooLong`; FAT names over 255 UTF-16 units,
+invalid UTF-8, or reserved characters are `InvalidArgument`. GoOS refuses to
+create trailing-space or trailing-dot FAT names, but valid foreign names of
+that form remain listable and exactly openable, without Win32 trimming.
 
 ## Limits
 

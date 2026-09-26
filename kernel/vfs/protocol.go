@@ -13,8 +13,9 @@ const (
 	// adds the bulk operations (ADR 0107); version 5 carries paths of up to
 	// PathMax bytes and names of up to NameMax, the long ones in an attached
 	// object, and gives a rename's target a field of its own (ADR 0110);
-	// version 6 adds the timeout, peer-died, and unsupported statuses.
-	ProtocolVersion = uint16(6)
+	// version 6 adds the timeout, peer-died, and unsupported statuses; version
+	// 7 widens returned-name lengths for the 1024-byte native name limit.
+	ProtocolVersion = uint16(7)
 	protocolHeader  = 32
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
@@ -99,7 +100,7 @@ type Reply struct {
 	Cursor       uint32
 	Name         []byte
 	Data         []byte
-	AttachedName uint8
+	AttachedName uint16
 }
 
 // FitsInline reports whether a request's path, target, and data fit in one
@@ -139,10 +140,10 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	message.Payload[0] = byte(reply.Operation)
 	message.Payload[1] = byte(reply.Status)
 	message.Payload[2] = byte(reply.Kind)
-	message.Payload[3] = byte(nameSize)
-	binary.LittleEndian.PutUint16(message.Payload[4:], uint16(len(reply.Data)))
+	binary.LittleEndian.PutUint16(message.Payload[3:], uint16(nameSize))
+	binary.LittleEndian.PutUint16(message.Payload[5:], uint16(len(reply.Data)))
 	if reply.AttachedName != 0 {
-		message.Payload[6] = flagNameAttached
+		message.Payload[7] = flagNameAttached
 	}
 	binary.LittleEndian.PutUint64(message.Payload[8:], uint64(reply.Handle))
 	binary.LittleEndian.PutUint64(message.Payload[16:], reply.Size)
@@ -160,16 +161,16 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 	operation := Operation(message.Payload[0])
 	status := Status(message.Payload[1])
 	kind := ramfs.Kind(message.Payload[2])
-	nameSize := int(message.Payload[3])
-	dataSize := int(binary.LittleEndian.Uint16(message.Payload[4:]))
-	attached := message.Payload[6] == flagNameAttached
+	nameSize := int(binary.LittleEndian.Uint16(message.Payload[3:]))
+	dataSize := int(binary.LittleEndian.Uint16(message.Payload[5:]))
+	attached := message.Payload[7] == flagNameAttached
 	inlineName := nameSize
 	if attached {
 		inlineName = 0
 	}
 	if operation < OperationOpen || operation > lastOperation || status > lastStatus ||
 		kind > ramfs.KindDirectory || inlineName > MaxInlineName || dataSize > MaxReplyData ||
-		message.Payload[6]&^flagNameAttached != 0 || message.Payload[7] != 0 || binary.LittleEndian.Uint32(message.Payload[28:]) != 0 ||
+		message.Payload[7]&^flagNameAttached != 0 || binary.LittleEndian.Uint32(message.Payload[28:]) != 0 ||
 		attached && nameSize <= MaxInlineName || replyHeader+inlineName+dataSize != int(message.PayloadSize) {
 		return Reply{}, false
 	}
@@ -179,7 +180,7 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 		Name: message.Payload[replyHeader : replyHeader+inlineName],
 		Data: message.Payload[replyHeader+inlineName : replyHeader+inlineName+dataSize]}
 	if attached {
-		reply.AttachedName = uint8(nameSize)
+		reply.AttachedName = uint16(nameSize)
 	}
 	return reply, true
 }

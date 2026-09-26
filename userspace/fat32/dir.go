@@ -171,7 +171,7 @@ func (fs *FileSystem) resolveName(entry [32]byte, index int) (int, int, bool) {
 		return size, fs.scan.start, true
 	}
 	size := decodeShort(entry, fs.name[:])
-	if !validLongName(fs.name[:size]) {
+	if !validStoredLongName(fs.name[:size]) {
 		return 0, index, false
 	}
 	return size, index, false

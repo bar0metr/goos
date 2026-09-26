@@ -24,8 +24,9 @@ const (
 	// 3 adds the no-space and corrupt statuses (ADR 0102); version 4 lets a
 	// read or write span consecutive slots (ADR 0107); version 5 carries
 	// names of up to 255 bytes, the long ones in the name page (ADR 0110);
-	// version 6 adds the timeout, peer-died, and unsupported statuses.
-	Version = uint16(6)
+	// version 6 adds the timeout, peer-died, and unsupported statuses; version
+	// 7 widens name lengths for the 1024-byte native name limit.
+	Version = uint16(7)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -162,7 +163,7 @@ func EncodeRequest(request Request, correlation uint64, message *ipc.Message, ca
 	message.PayloadSize = requestHeader
 	payload := message.Payload[:]
 	payload[0] = byte(request.Operation)
-	payload[1] = byte(len(request.Name))
+	binary.LittleEndian.PutUint16(payload[1:], uint16(len(request.Name)))
 	binary.LittleEndian.PutUint32(payload[4:], request.Slot)
 	binary.LittleEndian.PutUint64(payload[8:], uint64(request.Node))
 	binary.LittleEndian.PutUint64(payload[16:], uint64(request.Parent))
@@ -171,7 +172,7 @@ func EncodeRequest(request Request, correlation uint64, message *ipc.Message, ca
 	if inline {
 		message.PayloadSize += uint16(copy(payload[requestHeader:], request.Name))
 	} else {
-		payload[2] = flagNameInCache
+		payload[3] = flagNameInCache
 	}
 	return true
 }
@@ -185,9 +186,9 @@ func DecodeRequest(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte
 		return Request{}, false
 	}
 	payload := message.Payload[:]
-	nameSize := int(payload[1])
-	cached := payload[2] == flagNameInCache
-	if payload[2]&^flagNameInCache != 0 || payload[3] != 0 || !zero(payload[36:40]) || nameSize > ramfs.MaxName {
+	nameSize := int(binary.LittleEndian.Uint16(payload[1:]))
+	cached := payload[3] == flagNameInCache
+	if payload[3]&^flagNameInCache != 0 || !zero(payload[36:40]) || nameSize > ramfs.MaxName {
 		return Request{}, false
 	}
 	request := Request{
@@ -234,14 +235,15 @@ func EncodeReply(reply Reply, correlation uint64, message *ipc.Message, cache []
 	message.ProtocolID, message.Version, message.Kind, message.Correlation = ProtocolID, Version, ipc.KindReply, correlation
 	message.PayloadSize = replyHeader
 	payload := message.Payload[:]
-	payload[0], payload[1], payload[2], payload[3] = byte(reply.Operation), byte(reply.Status), byte(reply.Kind), byte(len(reply.Name))
+	payload[0], payload[1], payload[2] = byte(reply.Operation), byte(reply.Status), byte(reply.Kind)
+	binary.LittleEndian.PutUint16(payload[3:], uint16(len(reply.Name)))
 	binary.LittleEndian.PutUint64(payload[8:], uint64(reply.Node))
 	binary.LittleEndian.PutUint64(payload[16:], reply.Value)
 	binary.LittleEndian.PutUint32(payload[24:], reply.Cursor)
 	if inline {
 		message.PayloadSize += uint16(copy(payload[replyHeader:], reply.Name))
 	} else {
-		payload[4] = flagNameInCache
+		payload[5] = flagNameInCache
 	}
 	return true
 }
@@ -254,9 +256,9 @@ func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) 
 		return Reply{}, false
 	}
 	payload := message.Payload[:]
-	nameSize := int(payload[3])
-	cached := payload[4] == flagNameInCache
-	if payload[4]&^flagNameInCache != 0 || !zero(payload[5:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName {
+	nameSize := int(binary.LittleEndian.Uint16(payload[3:]))
+	cached := payload[5] == flagNameInCache
+	if payload[5]&^flagNameInCache != 0 || !zero(payload[6:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName {
 		return Reply{}, false
 	}
 	reply := Reply{

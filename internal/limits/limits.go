@@ -5,7 +5,7 @@ package limits
 
 const (
 	// NameMax is the longest name of one path component, in bytes.
-	NameMax = 255
+	NameMax = 1024
 	// PathMax is the longest absolute path, in bytes.
 	PathMax = 4096
 )

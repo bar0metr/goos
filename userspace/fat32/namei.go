@@ -3,7 +3,7 @@ package fat32
 import "goos/kernel/ramfs"
 
 func (fs *FileSystem) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
-	dir, status := fs.parentAndName(parent, name)
+	dir, status := fs.parentAndName(parent, name, false)
 	if status != ramfs.StatusOK {
 		return 0, status
 	}
@@ -119,7 +119,7 @@ func (fs *FileSystem) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 			fs.scan.reset()
 			continue
 		}
-		result := ramfs.Entry{Stat: entryStat(dir.node(index), entry), Size: uint8(size)}
+		result := ramfs.Entry{Stat: entryStat(dir.node(index), entry), Size: uint16(size)}
 		copy(result.Name[:], fs.name[:size])
 		return result, index + 1, ramfs.StatusOK
 	}
@@ -137,7 +137,7 @@ func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 	if status := fs.mutable(); status != ramfs.StatusOK {
 		return status
 	}
-	target, status := fs.parentAndName(parent, name)
+	target, status := fs.parentAndName(parent, name, true)
 	if status != ramfs.StatusOK {
 		return status
 	}
@@ -247,7 +247,7 @@ func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 	if status := fs.mutable(); status != ramfs.StatusOK {
 		return status
 	}
-	dir, status := fs.parentAndName(parent, name)
+	dir, status := fs.parentAndName(parent, name, false)
 	if status != ramfs.StatusOK {
 		return status
 	}
@@ -276,7 +276,7 @@ func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 
 // parentAndName resolves the parent directory and decodes the requested name
 // into fs.want.
-func (fs *FileSystem) parentAndName(parent ramfs.NodeID, name ramfs.Name) (directory, ramfs.Status) {
+func (fs *FileSystem) parentAndName(parent ramfs.NodeID, name ramfs.Name, creating bool) (directory, ramfs.Status) {
 	if !fs.mounted {
 		return directory{}, ramfs.StatusNotFound
 	}
@@ -284,7 +284,7 @@ func (fs *FileSystem) parentAndName(parent ramfs.NodeID, name ramfs.Name) (direc
 	if status != ramfs.StatusOK {
 		return dir, status
 	}
-	if !fs.want.set(name) {
+	if !fs.want.set(name, creating) {
 		return dir, ramfs.StatusInvalidArgument
 	}
 	return dir, ramfs.StatusOK
@@ -300,7 +300,7 @@ func (fs *FileSystem) reserve(parent ramfs.NodeID, name ramfs.Name) (directory, 
 	if status := fs.mutable(); status != ramfs.StatusOK {
 		return directory{}, at, entry, -1, status
 	}
-	dir, status := fs.parentAndName(parent, name)
+	dir, status := fs.parentAndName(parent, name, true)
 	if status != ramfs.StatusOK {
 		return dir, at, entry, -1, status
 	}

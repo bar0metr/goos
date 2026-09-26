@@ -80,7 +80,7 @@ validation, a backup at logical sector 6 that validates, for any supported
 sector size, is used instead and the volume is mounted read-only: every change
 answers "permission denied" and the damaged primary is left for `fsck.fat` to
 repair. A mount records what it noticed — backup used, backup differing or
-invalid, FSInfo invalid, a short FAT — and the service logs a degraded volume;
+invalid, primary or backup FSInfo invalid or differing, a short FAT — and the service logs a degraded volume;
 mounting repairs nothing.
 
 A refused volume is not fatal. The filesystem service reports it, prints
@@ -106,12 +106,14 @@ caller's memory. Directories are cluster chains of any valid length, up to the
 65536 entries FAT allows, and grow one zeroed cluster at a time; nesting depth
 is bounded only by the VFS path length.
 
-Names are UTF-8 of at most 255 bytes, the native limit (ADR 0110), stored on
+Names are UTF-8 of at most 1024 bytes natively (ADR 0110), stored on
 disk as VFAT UTF-16LE with surrogate pairs outside the Basic Multilingual Plane
 (ADR 0112). Control characters, `" * / : < > ? \ |`, a leading space and a
-trailing space or dot are refused. Names are kept exactly as given — no Unicode
-normalization — and matched case-insensitively through simple case folding of
-Latin, Greek, Cyrillic, Armenian and fullwidth Latin letters. A name whose base
+trailing space or dot are refused for creation, and FAT32 independently limits
+names to 255 UTF-16 units. Valid foreign trailing-space and trailing-dot names
+remain listable and exactly openable without Win32 trimming. Names are kept
+exactly as given — no Unicode normalization — and matched case-insensitively
+through generated, locale-independent Unicode simple uppercase mapping. A name whose base
 and extension each fit 8.3 in one case stays a single entry carrying the
 Windows NT case flags (`readme.txt`, `README.TXT`); anything else gets a VFAT
 long-name chain and a generated alias — `~1` to `~9`, then a hashed form, with
@@ -125,18 +127,22 @@ Timestamps are read and written as UTC (FAT has no zone), clamped to FAT's
 1980–2107 range. Creation records creation, modification and access; a data
 change records modification and the access date and sets ARCHIVE; a create,
 remove or rename in a directory records the directory's modification time; a
-read records nothing. GoOS has no wall clock yet, so the service writes no
-times: new entries have unknown times and existing ones are kept. HIDDEN,
+read records nothing. If native `REALTIME` was not initialized, new entries
+have unknown times and existing ones are kept. HIDDEN,
 SYSTEM and undefined attribute bits are preserved; READ_ONLY on a file refuses
 writes and truncation with "permission denied" but not rename or removal.
-Times and attributes are available as native `fat32.Metadata`; the backend
+The clock is native `REALTIME`; until timezone configuration exists, the
+system timezone and FAT local-calendar interpretation are UTC. Times and
+attributes are available as native `fat32.Metadata`; the backend
 protocol does not carry them yet.
 
 The first (or active) FAT is the one read, and every change is written to each
 mirrored copy a whole unit at a time. The FSInfo free count is counted from the
 FAT on the first change after mount, kept exact, and written with the next-free
-hint at every sync; an FSInfo sector that fails its signatures is left
-untouched.
+hint at every sync. Primary and backup FSInfo are validated and compared; a
+valid backup is the fallback for an invalid primary, mismatch is exposed in
+mount health, and an explicit clean sync makes both copies consistent when at
+least one validated. Mount alone does not repair either copy.
 
 Truncation shrinks and grows. Shrinking records the new size, ends the chain
 after the last cluster still needed, and frees the rest; growing, like a write

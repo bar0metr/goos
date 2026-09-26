@@ -1,8 +1,10 @@
 package fat32
 
+import "unicode"
+
 // Native names are UTF-8; VFAT long names are UTF-16LE; 8.3 names are bytes in
 // an OEM code page. This file converts between them without allocating and
-// without tables larger than the 256-byte OEM map.
+// with the standard library's generated Unicode simple-case tables.
 //
 // Policy (docs/userspace/storage.md):
 //   - A native name must be valid UTF-8 (no surrogates, no overlong forms, no
@@ -10,9 +12,8 @@ package fat32
 //     normalization is applied, so a precomposed and a decomposed spelling are
 //     different names.
 //   - Names are matched case-insensitively, as VFAT requires, through simple
-//     one-to-one upper-case folding of ASCII, Latin-1, Latin Extended-A and
-//     Additional, Greek, Cyrillic, Armenian and fullwidth Latin. Other scripts
-//     compare exactly.
+//     one-to-one Unicode simple upper-case mapping. It is deterministic and
+//     locale-independent; multi-code-point full mappings are not used.
 //   - 8.3 bytes from 0x80 up are read as code page 437, the Linux default.
 
 const (
@@ -122,76 +123,10 @@ func utf16To8(units []uint16, target []byte) (int, bool) {
 	return size, true
 }
 
-// foldRune maps a code point to the one it matches under VFAT's
-// case-insensitive comparison: simple upper case for the scripts listed at
-// the top of this file.
+// foldRune maps a code point through Go's generated, compact Unicode simple
+// upper-case table. This is one-to-one, deterministic and locale-independent.
 func foldRune(value rune) rune {
-	switch {
-	case value < 0x80:
-		if value >= 'a' && value <= 'z' {
-			return value - 0x20
-		}
-	case value >= 0xe0 && value <= 0xfe && value != 0xf7:
-		return value - 0x20
-	case value == 0xff:
-		return 0x178
-	case value >= 0x100 && value <= 0x17f:
-		return foldLatinA(value)
-	case value >= 0x3ac && value <= 0x3ce:
-		return foldGreek(value)
-	case value >= 0x430 && value <= 0x44f:
-		return value - 0x20
-	case value >= 0x450 && value <= 0x45f:
-		return value - 0x50
-	case value >= 0x460 && value <= 0x481, value >= 0x48a && value <= 0x4bf, value >= 0x4d0 && value <= 0x52f:
-		return value &^ 1
-	case value >= 0x4c1 && value <= 0x4ce:
-		if value&1 == 0 {
-			return value - 1
-		}
-	case value == 0x4cf:
-		return 0x4c0
-	case value >= 0x561 && value <= 0x586:
-		return value - 0x30
-	case value >= 0x1e00 && value <= 0x1e95, value >= 0x1ea0 && value <= 0x1eff:
-		return value &^ 1
-	case value >= 0xff41 && value <= 0xff5a:
-		return value - 0x20
-	}
-	return value
-}
-
-// foldLatinA folds Latin Extended-A, where upper and lower case alternate
-// with a change of phase at U+0138 and U+0178. The Turkish dotted and
-// dotless i and the letters without a simple upper case stay as they are.
-func foldLatinA(value rune) rune {
-	switch {
-	case value >= 0x100 && value <= 0x12f, value >= 0x132 && value <= 0x137, value >= 0x14a && value <= 0x177:
-		return value &^ 1
-	case value >= 0x139 && value <= 0x148, value >= 0x179 && value <= 0x17e:
-		if value&1 == 0 {
-			return value - 1
-		}
-	}
-	return value
-}
-
-func foldGreek(value rune) rune {
-	switch {
-	case value == 0x3ac:
-		return 0x386
-	case value >= 0x3ad && value <= 0x3af:
-		return value - 0x25
-	case value >= 0x3b1 && value <= 0x3c1, value >= 0x3c3 && value <= 0x3cb:
-		return value - 0x20
-	case value == 0x3c2:
-		return 0x3a3
-	case value == 0x3cc:
-		return 0x38c
-	case value == 0x3cd || value == 0x3ce:
-		return value - 0x3f
-	}
-	return value
+	return unicode.ToUpper(value)
 }
 
 // sameFolded compares two valid UTF-8 names under foldRune.

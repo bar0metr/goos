@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -45,6 +46,65 @@ func TestUnicodeNamesRoundTrip(t *testing.T) {
 		}
 	}
 	check(t, device)
+}
+
+func TestMaximumVFATNamesRoundTrip(t *testing.T) {
+	names := []string{
+		strings.Repeat("a", 255),
+		strings.Repeat("Ж", 255),
+		strings.Repeat("界", 255),
+		strings.Repeat("😀", 127) + "x",
+		strings.Repeat("AЖ界", 63) + strings.Repeat("😀", 31) + "zxcv",
+	}
+	device := formatted(t, 8<<20, Layout{SectorsPerCluster: 1, FATs: 2})
+	fs, root := mounted(t, device)
+	for index, name := range names {
+		writeFile(t, fs, root, name, fmt.Sprint(index))
+	}
+	fs, root = mounted(t, device)
+	listed := listNames(t, fs, root)
+	if len(listed) != len(names) {
+		t.Fatalf("listed %d names, want %d", len(listed), len(names))
+	}
+	for index, name := range names {
+		id := mustOpen(t, fs, root, name)
+		if got := readFile(t, fs, id); got != fmt.Sprint(index) {
+			t.Fatalf("%d-byte name read %q", len(name), got)
+		}
+	}
+}
+
+func TestUnicodeCaseCollisionOutsideLegacyScriptSubset(t *testing.T) {
+	fs, root := mounted(t, formattedDevice())
+	writeFile(t, fs, root, "\U00010428.txt", "lower")
+	if _, status := fs.CreateName(root, mustName(t, "\U00010400.TXT")); status != ramfs.StatusAlreadyExists {
+		t.Fatalf("Deseret case collision: %v", status)
+	}
+}
+
+func BenchmarkLongUnicodeCreateLookup(b *testing.B) {
+	name := strings.Repeat("界", 255)
+	for i := 0; i < b.N; i++ {
+		fs, root := mounted(b, formattedDevice())
+		id := writeFile(b, fs, root, name, "x")
+		if opened, status := fs.OpenName(root, mustName(b, name)); status != ramfs.StatusOK || opened != id {
+			b.Fatal(status)
+		}
+	}
+}
+
+func BenchmarkCaseInsensitiveLookupInLargeDirectory(b *testing.B) {
+	fs, root := mounted(b, formattedDevice())
+	for i := 0; i < 512; i++ {
+		writeFile(b, fs, root, fmt.Sprintf("Отчёт-%04d-Данные.txt", i), "x")
+	}
+	want := mustName(b, "ОТЧЁТ-0511-ДАННЫЕ.TXT")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, status := fs.OpenName(root, want); status != ramfs.StatusOK {
+			b.Fatal(status)
+		}
+	}
 }
 
 // TestLongNamesAreUTF16OnDisk reads the entries back and decodes them as a
@@ -199,8 +259,7 @@ func TestForeignChainsThatCannotBeNamedFallBackToTheAlias(t *testing.T) {
 		"control character":       {'a', 0x0001},
 		"slash":                   {'a', '/', 'b'},
 		"reserved character":      {'a', '*'},
-		"trailing dot":            {'a', 'b', '.'},
-		"too long in UTF-8":       utf16.Encode([]rune(strings.Repeat("Ж", 200))),
+		"too many UTF-16 units":   utf16.Encode([]rune(strings.Repeat("Ж", maxLongUnits+1))),
 	} {
 		t.Run(name, func(t *testing.T) {
 			fs, root := mounted(t, formattedDevice())
@@ -213,11 +272,21 @@ func TestForeignChainsThatCannotBeNamedFallBackToTheAlias(t *testing.T) {
 			}
 		})
 	}
-	// A valid chain holding a character outside the BMP is shown whole.
-	fs, root := mounted(t, formattedDevice())
-	writeRawChain(t, fs, utf16.Encode([]rune("🎵 notes 🎶.txt")), "_NOTES~1TXT")
-	if got := listNames(t, fs, root); len(got) != 1 || got[0] != "🎵 notes 🎶.txt" {
-		t.Fatalf("listed %q", got)
+	// Valid foreign names, including trailing-dot names and names whose UTF-8
+	// representation exceeds 255 bytes, are listed and can be opened exactly.
+	for suffix, alias := range map[string]string{".": "FOREIG~1TXT", " ": "FOREIG~2TXT"} {
+		fs, root := mounted(t, formattedDevice())
+		foreign := strings.Repeat("Ж", 200) + suffix
+		writeRawChain(t, fs, utf16.Encode([]rune(foreign)), alias)
+		if got := listNames(t, fs, root); len(got) != 1 || got[0] != foreign {
+			t.Fatalf("listed %q", got)
+		}
+		if _, status := fs.OpenName(root, mustName(t, foreign)); status != ramfs.StatusOK {
+			t.Fatalf("open foreign trailing name: %v", status)
+		}
+		if _, status := fs.CreateName(root, mustName(t, "new"+suffix)); status != ramfs.StatusInvalidArgument {
+			t.Fatalf("create trailing %q: %v", suffix, status)
+		}
 	}
 }
 
@@ -436,17 +505,14 @@ func TestUTFConversions(t *testing.T) {
 	if _, ok := utf16To8(utf16.Encode([]rune("ab€")), small[:]); ok {
 		t.Fatal("a name longer than its target was accepted")
 	}
-	// Folding agrees with Go's own simple upper case for the scripts it
-	// covers.
-	for _, block := range [][2]rune{{0x61, 0x7a}, {0xe0, 0xff}, {0x100, 0x17f}, {0x3ac, 0x3ce}, {0x430, 0x52f}, {0x561, 0x586}, {0x1e00, 0x1eff}, {0xff41, 0xff5a}} {
-		for value := block[0]; value <= block[1]; value++ {
-			got := foldRune(value)
-			if got == value {
-				continue
-			}
-			if want := []rune(strings.ToUpper(string(value))); len(want) != 1 || want[0] != got {
-				t.Errorf("%U folds to %U, Go upper-cases it to %U", value, got, want)
-			}
+	// Folding is the generated Unicode simple upper-case mapping for every
+	// scalar value, not a hand-picked set of scripts.
+	for value := rune(0); value <= maxRune; value++ {
+		if value >= surrogateHigh && value < surrogateEnd {
+			continue
+		}
+		if got, want := foldRune(value), unicode.ToUpper(value); got != want {
+			t.Fatalf("%U folds to %U, want %U", value, got, want)
 		}
 	}
 }

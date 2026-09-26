@@ -366,7 +366,7 @@ func (namespace *Namespace) mountedEntry(path []byte, node ramfs.NodeID, owner u
 			// visible even when its backend cannot describe it.
 			stat = ramfs.Stat{ID: mounted.root, Kind: ramfs.KindDirectory}
 		}
-		entry := ramfs.Entry{Stat: stat, Size: uint8(len(component))}
+		entry := ramfs.Entry{Stat: stat, Size: uint16(len(component))}
 		copy(entry.Name[:], component)
 		return entry, mountCursor + index + 1, StatusOK
 	}

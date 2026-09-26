@@ -64,14 +64,14 @@ type Stat struct {
 type Entry struct {
 	Stat Stat
 	Name [MaxName]byte
-	Size uint8
+	Size uint16
 }
 
 // Name is the allocation-free representation used at filesystem boundaries.
 // Its fields are private so every value accepted by a backend is valid.
 type Name struct {
 	data [MaxName]byte
-	size uint8
+	size uint16
 }
 
 func (name Name) CopyTo(target []byte) int {
@@ -87,7 +87,7 @@ func MakeName(value []byte) (Name, bool) {
 		return name, false
 	}
 	copy(name.data[:], value)
-	name.size = uint8(len(value))
+	name.size = uint16(len(value))
 	return name, true
 }
 

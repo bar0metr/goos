@@ -428,7 +428,7 @@ func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint
 // client how long it is so it can ask again with one.
 func returnName(answer vfs.Reply, request vfs.Request, object []byte) vfs.Reply {
 	if request.NameReturn && len(object) >= len(answer.Name) {
-		answer.AttachedName = uint8(copy(object, answer.Name))
+		answer.AttachedName = uint16(copy(object, answer.Name))
 		answer.Name = nil
 		return answer
 	}

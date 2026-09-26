@@ -21,7 +21,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-fat32` runs the FAT32 format tests (ADR 0102, ADR 0112): every
   logical sector size and cluster size with one and two FATs, BPB validation
   and backup-boot recovery, the FSInfo free count, FAT mirror comparison,
-  Unicode long names and case folding, timestamps and attributes, 1, 16 and
+  maximum-length ASCII, Cyrillic, CJK, emoji and mixed Unicode names, complete
+  simple case mapping and collisions, malformed UTF-16, primary/backup FSInfo
+  fallback and reconciliation, timestamps and attributes, 1, 16 and
   64 MiB files, fragmentation, a directory of long names, a corruption corpus
   and seeded random corruption, and a model-based workload with device-failure
   injection. Where the host has FAT tools it also formats volumes with them

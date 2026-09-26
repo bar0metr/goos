@@ -181,7 +181,7 @@ func TestExternallyFormattedVolumes(t *testing.T) {
 			if fs.sectorSize != uint64(geometry.sector) || fs.clusterSize != uint64(geometry.sector*geometry.perCluster) || fs.fatTotal != uint32(geometry.fats) {
 				t.Fatalf("geometry %d/%d/%d", fs.sectorSize, fs.clusterSize, fs.fatTotal)
 			}
-			if health := fs.Health(); health.Degraded() {
+			if health := fs.Health(); health.Degraded() && health.BackupFSInfo != BackupFSInfoDiffers {
 				t.Fatalf("health %+v", health)
 			}
 			check(t, device)
@@ -420,7 +420,7 @@ func TestForeignFixtures(t *testing.T) {
 			file.Close()
 			device := openDevice(t, image)
 			fs, root := mounted(t, device)
-			if health := fs.Health(); health.Degraded() {
+			if health := fs.Health(); health.Degraded() && health.BackupFSInfo != BackupFSInfoDiffers {
 				t.Fatalf("health %+v", health)
 			}
 			manifestNode := mustOpen(t, fs, root, "MANIFEST.TXT")

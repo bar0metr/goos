@@ -83,12 +83,12 @@ func TestLongListedNamesComeAttached(t *testing.T) {
 	if _, ok := EncodeRequest(Request{Operation: OperationStat, Path: []byte("/tmp"), NameReturn: true}, 2); ok {
 		t.Fatal("name return on a stat encoded")
 	}
-	reply, ok := EncodeReply(Reply{Operation: OperationReadDir, AttachedName: 250, Cursor: 4}, 2)
+	reply, ok := EncodeReply(Reply{Operation: OperationReadDir, AttachedName: limits.NameMax, Cursor: 4}, 2)
 	if !ok || reply.PayloadSize != replyHeader {
 		t.Fatal("attached name reply")
 	}
 	decoded, ok := DecodeReply(reply)
-	if !ok || decoded.AttachedName != 250 || len(decoded.Name) != 0 || decoded.Cursor != 4 {
+	if !ok || decoded.AttachedName != limits.NameMax || len(decoded.Name) != 0 || decoded.Cursor != 4 {
 		t.Fatalf("decoded %+v", decoded)
 	}
 	if _, ok := EncodeReply(Reply{Operation: OperationReadDir, AttachedName: 10}, 2); ok {
@@ -102,8 +102,8 @@ func TestLongListedNamesComeAttached(t *testing.T) {
 		t.Fatal("a name past the message encoded inline")
 	}
 	for _, damage := range []func(*ipc.Message){
-		func(m *ipc.Message) { m.Payload[6] = 2 },
-		func(m *ipc.Message) { m.Payload[3] = 10 },
+		func(m *ipc.Message) { m.Payload[7] = 2 },
+		func(m *ipc.Message) { m.Payload[3], m.Payload[4] = 10, 0 },
 	} {
 		corrupt := reply
 		damage(&corrupt)

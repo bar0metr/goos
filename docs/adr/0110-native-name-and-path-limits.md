@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted; the FAT32 printable-ASCII rule is replaced by UTF-8 names in ADR
-0112. Replaces the name and path bounds of ADR 0066 and the path fields
+Accepted; amended by ADR 0114, which raises the native component bound to
+1024 bytes so every legal VFAT UTF-16 name has a native representation. The
+FAT32 printable-ASCII rule is replaced by UTF-8 names in ADR 0112. Replaces the name and path bounds of ADR 0066 and the path fields
 of the `GVF1` protocol; builds on the shared memory of ADR 0107.
 
 ## Context
@@ -19,10 +20,11 @@ open (GoOS 0.1.3 specification §8).
 
 ## Decision
 
-**One contract.** `internal/limits` defines `NameMax = 255` bytes per
+**One contract.** `internal/limits` defines `NameMax = 1024` bytes per
 component and `PathMax = 4096` bytes per absolute path. The shell, the
 tokenizer, the exec protocol, the startup object, the VFS, RAMFS, the backend
-protocol, and FAT32 all use these constants and nothing smaller.
+protocol all use these constants and nothing smaller. FAT32 independently
+applies its format limit of 255 UTF-16 code units.
 
 **Names are bytes.** A name is any bytes except NUL and `/`, other than `.`
 and `..`. There is no encoding at this layer. The FAT32 service additionally
@@ -72,9 +74,8 @@ buffer.
 
 ## Consequences
 
-- A 255-byte name and a path of up to 4096 bytes work in `/tmp` and on the
-  FAT32 volume; the boot test creates, lists, renames, and reads them, and
-  refuses a 256-byte name as too long.
-- RAMFS nodes grow by 192 bytes for the longer name field.
+- A 1024-byte native name and a path of up to 4096 bytes work through RAMFS
+  and the VFS. FAT32 accepts the subset representable in 255 UTF-16 units.
+- RAMFS nodes trade memory for the larger fixed-width name field.
 - A process that uses long paths pays for two pages of shared memory once.
 - The utilities' error messages hold a whole path.

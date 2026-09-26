@@ -3,13 +3,12 @@ package fat32
 import "goos/kernel/ramfs"
 
 const (
-	// maxLongName is both VFAT's bound, 255 UTF-16 units, and the native
-	// name limit, 255 bytes (ADR 0110). A UTF-8 name never has more UTF-16
-	// units than bytes, so every native name fits a chain; an on-disk name
-	// whose UTF-8 form is longer than 255 bytes is shown by its 8.3 alias.
+	// Native names have enough byte capacity for every legal VFAT name, while
+	// VFAT itself limits a long name to 255 UTF-16 code units.
 	maxLongName    = ramfs.MaxName
+	maxLongUnits   = 255
 	longChars      = 13
-	maxLongEntries = (maxLongName + longChars - 1) / longChars
+	maxLongEntries = (maxLongUnits + longChars - 1) / longChars
 	// maxShortName is the longest UTF-8 form of an 8.3 name: eleven OEM
 	// characters of up to three bytes each and the dot.
 	maxShortName = 11*3 + 1
@@ -32,7 +31,7 @@ var longSlots = [longChars]int{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}
 type request struct {
 	raw   [maxLongName]byte
 	size  int
-	units [maxLongName]uint16
+	units [maxLongUnits]uint16
 	count int
 	short [11]byte
 	flags byte
@@ -50,9 +49,9 @@ func (want *request) chain() int {
 // set decodes and validates a requested name. Its rules are the ones every
 // name read from disk must pass to be listed under its long form, so that
 // every listed name can be opened.
-func (want *request) set(name ramfs.Name) bool {
+func (want *request) set(name ramfs.Name, creating bool) bool {
 	want.size = name.CopyTo(want.raw[:])
-	if !validLongName(want.raw[:want.size]) {
+	if !validStoredLongName(want.raw[:want.size]) || creating && !validNewLongName(want.raw[:want.size]) {
 		return false
 	}
 	want.count = 0
@@ -60,11 +59,17 @@ func (want *request) set(name ramfs.Name) bool {
 		value, size := decodeRune(rest)
 		rest = rest[size:]
 		if value >= 0x10000 {
+			if want.count+2 > maxLongUnits {
+				return false
+			}
 			value -= 0x10000
 			want.units[want.count] = uint16(surrogateHigh + value>>10)
 			want.units[want.count+1] = uint16(surrogateLow + value&0x3ff)
 			want.count += 2
 			continue
+		}
+		if want.count == maxLongUnits {
+			return false
 		}
 		want.units[want.count] = uint16(value)
 		want.count++
@@ -73,20 +78,27 @@ func (want *request) set(name ramfs.Name) bool {
 	return true
 }
 
-// validLongName accepts a name VFAT can store and this system can name:
-// valid UTF-8 of 1 to 255 bytes without control characters or the
-// characters FAT reserves (" * / : < > ? \ |), not starting with a space and
-// not ending with a space or a dot, which Windows would strip.
-func validLongName(name []byte) bool {
-	if len(name) == 0 || len(name) > maxLongName || name[0] == ' ' || name[len(name)-1] == ' ' || name[len(name)-1] == '.' {
+// validStoredLongName accepts a name that can be represented by the native
+// API and VFAT. Foreign trailing-dot and trailing-space names remain visible
+// and exactly addressable; creation applies the stricter rule below.
+func validStoredLongName(name []byte) bool {
+	if len(name) == 0 || len(name) > maxLongName || name[0] == ' ' {
 		return false
 	}
 	if len(name) <= 2 && name[0] == '.' && (len(name) == 1 || name[1] == '.') {
 		return false
 	}
+	units := 0
 	for rest := name; len(rest) != 0; {
 		value, size := decodeRune(rest)
 		if size == 0 || value < 0x20 {
+			return false
+		}
+		units++
+		if value >= 0x10000 {
+			units++
+		}
+		if units > maxLongUnits {
 			return false
 		}
 		switch value {
@@ -96,6 +108,10 @@ func validLongName(name []byte) bool {
 		rest = rest[size:]
 	}
 	return true
+}
+
+func validNewLongName(name []byte) bool {
+	return validStoredLongName(name) && name[len(name)-1] != ' ' && name[len(name)-1] != '.'
 }
 
 // caseFlags is byte 12 of the short entry of a name stored in one 8.3 entry:
@@ -204,11 +220,11 @@ func (scan *chainScan) complete(short [11]byte, target []byte) (int, bool) {
 	if units < 0 {
 		units = scan.total
 	}
-	if units == 0 || units > maxLongName {
+	if units == 0 || units > maxLongUnits {
 		return 0, false
 	}
 	size, ok := utf16To8(scan.units[:units], target)
-	if !ok || !validLongName(target[:size]) {
+	if !ok || !validStoredLongName(target[:size]) {
 		return 0, false
 	}
 	return size, true

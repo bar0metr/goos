@@ -123,9 +123,26 @@ func TestNoUsableBackupLeavesCorruptVolumeRefused(t *testing.T) {
 
 func TestFSInfoLocationAndSignatures(t *testing.T) {
 	for name, damage := range map[string]func(data []byte){
-		"lead signature":    func(data []byte) { data[512] = 0 },
-		"struct signature":  func(data []byte) { data[512+fsInfoStructAt] = 0 },
-		"trail signature":   func(data []byte) { data[512+fsInfoTrailAt+3] = 0 },
+		"lead signature":   func(data []byte) { data[512] = 0 },
+		"struct signature": func(data []byte) { data[512+fsInfoStructAt] = 0 },
+		"trail signature":  func(data []byte) { data[512+fsInfoTrailAt+3] = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			device := formatted(t, 8<<20, Layout{SectorsPerCluster: 1, FATs: 2})
+			damage(device.data)
+			fs, root := mounted(t, device)
+			if health := fs.Health(); health.FSInfo != FSInfoInvalid || health.BackupFSInfo != BackupFSInfoMatches || !health.Degraded() || fs.fsInfo != 7*512 {
+				t.Fatalf("health %+v", health)
+			}
+			writeFile(t, fs, root, "file", "data")
+			primary, primaryOK := fs.readFSInfoAt(512)
+			backup, backupOK := fs.readFSInfoAt(7 * 512)
+			if !primaryOK || !backupOK || primary != backup {
+				t.Fatalf("clean sync did not reconcile FSInfo: %+v/%v %+v/%v", primary, primaryOK, backup, backupOK)
+			}
+		})
+	}
+	for name, damage := range map[string]func(data []byte){
 		"past the reserved": func(data []byte) { put16(data[bpbFSInfo:], 32) },
 		"on the backup":     func(data []byte) { put16(data[bpbFSInfo:], 6) },
 	} {
@@ -138,11 +155,8 @@ func TestFSInfoLocationAndSignatures(t *testing.T) {
 				t.Fatalf("health %+v", health)
 			}
 			writeFile(t, fs, root, "file", "data")
-			// Nothing in the reserved region was written: an FSInfo sector
-			// that did not validate is not touched.
-			after := string(device.data[:32*512])
-			if after != before {
-				t.Fatal("an invalid FSInfo sector was written")
+			if after := string(device.data[:32*512]); after != before {
+				t.Fatal("an unaddressable FSInfo sector was written")
 			}
 		})
 	}
@@ -150,6 +164,39 @@ func TestFSInfoLocationAndSignatures(t *testing.T) {
 	put16(device.data[bpbFSInfo:], 0xffff)
 	if fs, _ := mounted(t, device); fs.Health().FSInfo != FSInfoAbsent {
 		t.Fatal("0xffff is 'no FSInfo'")
+	}
+}
+
+func TestBackupFSInfoMismatchIsReportedAndCleanSyncReconciles(t *testing.T) {
+	device := formatted(t, 8<<20, Layout{SectorsPerCluster: 1, FATs: 2})
+	put32(device.data[7*512+fsInfoFreeCount:], 17)
+	put32(device.data[7*512+fsInfoNextFree:], 23)
+	fs, _ := mounted(t, device)
+	if health := fs.Health(); health.BackupFSInfo != BackupFSInfoDiffers || !health.Degraded() {
+		t.Fatalf("mismatch not reported: %+v", health)
+	}
+	if !fs.Flush() {
+		t.Fatal("clean sync")
+	}
+	primary, primaryOK := fs.readFSInfoAt(512)
+	backup, backupOK := fs.readFSInfoAt(7 * 512)
+	if !primaryOK || !backupOK || primary != backup {
+		t.Fatalf("copies differ after sync: %+v/%v %+v/%v", primary, primaryOK, backup, backupOK)
+	}
+}
+
+func TestInvalidBackupFSInfoFallsBackToPrimary(t *testing.T) {
+	device := formatted(t, 8<<20, Layout{SectorsPerCluster: 1, FATs: 2})
+	device.data[7*512] = 0
+	fs, _ := mounted(t, device)
+	if health := fs.Health(); health.FSInfo != FSInfoValid || health.BackupFSInfo != BackupFSInfoInvalid || fs.fsInfo != 512 {
+		t.Fatalf("primary fallback not reported: %+v", health)
+	}
+	if !fs.Flush() {
+		t.Fatal("clean sync")
+	}
+	if _, ok := fs.readFSInfoAt(7 * 512); !ok {
+		t.Fatal("clean sync did not restore backup FSInfo")
 	}
 }
 

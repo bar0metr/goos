@@ -86,13 +86,24 @@ const (
 	FSInfoInvalid
 )
 
+// BackupFSInfoState is the mount-time state of the backup FSInfo sector.
+type BackupFSInfoState uint8
+
+const (
+	BackupFSInfoAbsent BackupFSInfoState = iota
+	BackupFSInfoMatches
+	BackupFSInfoDiffers
+	BackupFSInfoInvalid
+)
+
 // Health is what a mount noticed about a volume it nevertheless accepted.
 // Nothing here is repaired by mounting; it is reported so that the service can
 // log it and a checker can act on it.
 type Health struct {
-	Boot   BootSource
-	Backup BackupState
-	FSInfo FSInfoState
+	Boot         BootSource
+	Backup       BackupState
+	FSInfo       FSInfoState
+	BackupFSInfo BackupFSInfoState
 	// ReadOnly: the mount refuses every change with permission denied,
 	// because the geometry came from backup metadata.
 	ReadOnly bool
@@ -109,7 +120,8 @@ type Health struct {
 // reporting.
 func (health Health) Degraded() bool {
 	return health.Boot != BootPrimary || health.Backup == BackupDiffers || health.Backup == BackupInvalid ||
-		health.FSInfo == FSInfoInvalid || health.ReadOnly
+		health.FSInfo == FSInfoInvalid || health.BackupFSInfo == BackupFSInfoDiffers ||
+		health.BackupFSInfo == BackupFSInfoInvalid || health.ReadOnly
 }
 
 // fat16Clusters is the cluster count from which the FAT specification calls
@@ -119,21 +131,23 @@ const fat16Clusters = 65525
 // geometry is a validated BPB. Sizes are in bytes unless the name says
 // sectors; fsInfo and backup are logical sector numbers, zero when absent.
 type geometry struct {
-	sectorSize  uint64
-	perCluster  uint64
-	reserved    uint64
-	fatSectors  uint64
-	copies      uint32
-	total       uint64
-	clusters    uint64
-	root        uint32
-	flags       uint16
-	fsInfo      uint64
-	backup      uint64
-	badFSInfo   bool
-	badBackup   bool
-	shortFAT    bool
-	fewClusters bool
+	sectorSize      uint64
+	perCluster      uint64
+	reserved        uint64
+	fatSectors      uint64
+	copies          uint32
+	total           uint64
+	clusters        uint64
+	root            uint32
+	flags           uint16
+	fsInfo          uint64
+	backup          uint64
+	backupFSInfo    uint64
+	badFSInfo       bool
+	badBackupFSInfo bool
+	badBackup       bool
+	shortFAT        bool
+	fewClusters     bool
 }
 
 func powerOfTwo(value uint64) bool { return value != 0 && value&(value-1) == 0 }
@@ -221,6 +235,14 @@ func parseBoot(boot []byte, capacity uint64) (geometry, ramfs.Status) {
 	geo.backup, geo.badBackup = reservedSector(get16(boot[bpbBackup:]), geo.reserved)
 	if geo.fsInfo != 0 && geo.fsInfo == geo.backup {
 		geo.fsInfo, geo.badFSInfo = 0, true
+	}
+	if geo.fsInfo != 0 && geo.backup != 0 {
+		geo.backupFSInfo = geo.backup + geo.fsInfo
+		if geo.backupFSInfo >= geo.reserved || geo.backupFSInfo == geo.backup {
+			geo.backupFSInfo, geo.badBackupFSInfo = 0, true
+		}
+	} else if geo.fsInfo != 0 && geo.badBackup {
+		geo.badBackupFSInfo = true
 	}
 	return geo, ramfs.StatusOK
 }

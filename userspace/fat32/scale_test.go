@@ -569,8 +569,8 @@ func TestFSInfoHintIsUsedAndRefreshed(t *testing.T) {
 	}
 	put32(info[0:4], 0)
 	put32(info[fsInfoNextFree:], 200)
-	if fs, _ = mounted(t, device); fs.fsInfo != 0 || fs.hint != 2 {
-		t.Fatal("an FSInfo sector without signatures was trusted")
+	if fs, _ = mounted(t, device); fs.fsInfo != 7*512 || fs.hint != 101 || fs.Health().FSInfo != FSInfoInvalid {
+		t.Fatal("the valid backup FSInfo was not used as fallback")
 	}
 }
 

@@ -155,7 +155,7 @@ func TestAliasNumberingForSharedPrefix(t *testing.T) {
 
 func TestLongNameLengthBound(t *testing.T) {
 	fs, root := mounted(t, formattedDevice())
-	bound := strings.Repeat("b", maxLongName-4) + ".txt"
+	bound := strings.Repeat("b", maxLongUnits-4) + ".txt"
 	id := writeFile(t, fs, root, bound, "at the bound")
 	if opened, status := fs.OpenName(root, mustName(t, bound)); status != ramfs.StatusOK || opened != id {
 		t.Fatalf("open at the bound: %v", status)
@@ -163,8 +163,10 @@ func TestLongNameLengthBound(t *testing.T) {
 	if names := listNames(t, fs, root); len(names) != 1 || names[0] != bound {
 		t.Fatalf("listing %v", names)
 	}
-	if _, ok := ramfs.MakeName([]byte(strings.Repeat("b", maxLongName+1))); ok {
-		t.Fatal("a name past the bound was accepted")
+	if name, ok := ramfs.MakeName([]byte(strings.Repeat("b", maxLongUnits+1))); !ok {
+		t.Fatal("the native layer refused a name above 255 bytes")
+	} else if _, status := fs.CreateName(root, name); status != ramfs.StatusInvalidArgument {
+		t.Fatalf("FAT accepted 256 UTF-16 units: %v", status)
 	}
 	for _, name := range []string{"star*name", "pipe|name", "back\\slash", "trailing dot."} {
 		encoded, ok := ramfs.MakeName([]byte(name))
@@ -240,7 +242,7 @@ func TestLongNameChainSpansClusters(t *testing.T) {
 	for i := 0; i < fs.entriesPerCluster()-2; i++ {
 		writeFile(t, fs, root, string([]byte{'f', byte('0' + i/10), byte('0' + i%10)}), "x")
 	}
-	long := strings.Repeat("s", maxLongName-4) + ".txt"
+	long := strings.Repeat("s", maxLongUnits-4) + ".txt"
 	id := writeFile(t, fs, root, long, "spanned")
 	dir, _ := fs.openDirectory(0)
 	per := fs.entriesPerCluster()

@@ -10,8 +10,8 @@ import (
 )
 
 // TestNativeNameAndPathLimits covers the one naming contract every layer
-// shares (ADR 0110): a 255-byte name and a path near 4096 bytes work in RAMFS
-// and on the FAT32 volume, and anything longer is refused as too long.
+// shares (ADR 0110): the native layer carries 1024-byte names, while FAT32
+// applies its independent 255 UTF-16-unit on-disk limit.
 func TestNativeNameAndPathLimits(t *testing.T) {
 	service := startedService(t, testFAT32Device())
 	for _, root := range []string{"/tmp", "/persist"} {
@@ -19,10 +19,14 @@ func TestNativeNameAndPathLimits(t *testing.T) {
 			t.Helper()
 			return service.Dispatch(testSession, request)
 		}
-		name := strings.Repeat("n", limits.NameMax)
+		nameSize := limits.NameMax
+		if root == "/persist" {
+			nameSize = 255
+		}
+		name := strings.Repeat("n", nameSize)
 		path := []byte(root + "/" + name)
 		if reply := dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: path}); reply.Status != vfs.StatusOK {
-			t.Fatalf("%s: a %d-byte name refused: %d", root, limits.NameMax, reply.Status)
+			t.Fatalf("%s: a %d-byte name refused: %d", root, nameSize, reply.Status)
 		}
 		listed := dispatch(vfs.Request{Operation: vfs.OperationReadDir, Path: []byte(root)})
 		found := false
@@ -33,12 +37,19 @@ func TestNativeNameAndPathLimits(t *testing.T) {
 		if !found {
 			t.Fatalf("%s: the long name is not listed", root)
 		}
-		target := []byte(root + "/" + strings.Repeat("m", limits.NameMax))
+		target := []byte(root + "/" + strings.Repeat("m", nameSize))
 		if reply := dispatch(vfs.Request{Operation: vfs.OperationRename, Path: path, Target: target}); reply.Status != vfs.StatusOK {
 			t.Fatalf("%s: rename to a long name: %d", root, reply.Status)
 		}
 		if reply := dispatch(vfs.Request{Operation: vfs.OperationStat, Path: target}); reply.Status != vfs.StatusOK {
 			t.Fatalf("%s: the renamed file is missing: %d", root, reply.Status)
+		}
+		if root == "/persist" {
+			unicodeName := strings.Repeat("Ж", 255)
+			unicodePath := []byte(root + "/" + unicodeName)
+			if reply := dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: unicodePath}); reply.Status != vfs.StatusOK {
+				t.Fatalf("FAT32 refused %d UTF-16 units in %d UTF-8 bytes: %d", 255, len(unicodeName), reply.Status)
+			}
 		}
 		tooLong := []byte(root + "/" + strings.Repeat("x", limits.NameMax+1))
 		if reply := dispatch(vfs.Request{Operation: vfs.OperationCreate, Path: tooLong}); reply.Status != vfs.StatusNameTooLong {

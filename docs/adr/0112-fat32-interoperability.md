@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Amended by ADR 0113 (the filesystem service now supplies realtime).
+Accepted. Amended by ADR 0113 (the filesystem service now supplies realtime)
+and ADR 0114 (full VFAT name capacity, complete simple case mapping, and
+backup FSInfo handling).
 Amends ADR 0102 (sector size, FSInfo free count, timestamps), ADR
 0066 and ADR 0110 (the printable-ASCII rule for FAT32 names). Everything else
 in those records stands.
@@ -87,32 +89,35 @@ mark are corruption inside a chain; `0x0ffffff8` and above end it. Every walk is
 bounded by the cluster count.
 
 **FSInfo is validated, its hints are untrusted, and its count is kept.** The
-three signatures are checked; an FSInfo that fails them is neither read nor
-written. The next-free hint is used when it names a data cluster. The recorded
+three signatures of both primary and backup FSInfo are checked. The primary
+governs when both validate; the backup is the fallback when the primary does
+not. A missing, invalid, or differing backup is exposed in `Health`. The next-free hint is used when it names a data cluster. The recorded
 free count is never believed: the count is taken from the FAT the first time a
 change (or `FreeClusters`) needs it — one sequential read of the FAT, once per
 mount — kept exact through every allocation and release, and written with the
-hint at every sync. The backup FSInfo sector is written by `Format` and
-otherwise left alone, as Windows and Linux leave it.
+hint at every sync. A clean sync writes consistent primary and backup copies
+when at least one copy validated; mount alone performs no repair.
 
 **Names are UTF-8 natively and UTF-16LE on disk.** A request must be valid UTF-8
-(no surrogates, overlong forms or code points past U+10FFFF) of at most 255
+(no surrogates, overlong forms or code points past U+10FFFF) of at most 1024
 bytes, without control characters or `" * / : < > ? \ |`, not starting with a
 space or ending with a space or dot. It is written as UTF-16LE, with surrogate
-pairs outside the BMP; a UTF-8 name never has more UTF-16 units than bytes, so
-every native name fits VFAT's 255-unit limit. A chain on disk is accepted only
+pairs outside the BMP, and is rejected when it exceeds VFAT's independent
+255 UTF-16-unit limit. A chain on disk is accepted only
 when its ordinals count down from one flagged last, each entry has type 0 and
 cluster 0 and the checksum of the short entry after it, the terminator and
 `0xffff` padding appear only in the last entry, the UTF-16 is valid, and the
-resulting UTF-8 is at most 255 bytes and would itself be accepted as a request.
-Anything else falls back to the 8.3 alias, so every listed name can be opened.
+resulting UTF-8 fits the native 1024-byte representation. Valid foreign names
+ending in a space or dot are listed and opened by exact spelling without
+Win32 trimming, but GoOS refuses to create or rename to such names. Anything
+else falls back to the 8.3 alias, so every listed name can be opened.
 
 **No normalization, simple case folding.** Names are stored exactly as given;
 a precomposed and a decomposed spelling are two names. Matching is
-case-insensitive, as VFAT requires, through simple one-to-one upper-case
-folding of ASCII, Latin-1, Latin Extended-A and Additional, Greek, Cyrillic,
-Armenian and fullwidth Latin; other scripts compare exactly. The fold is
-checked against Go's own upper-case mapping over those blocks.
+case-insensitive, as VFAT requires, through the generated Unicode simple
+one-to-one upper-case table. The mapping is deterministic, locale-independent,
+and checked over every Unicode scalar value. Full multi-code-point folding is
+not performed.
 
 **8.3 names are read as other systems write them.** The NT flags in byte 12
 decide whether the base and extension are shown lower case; without them the

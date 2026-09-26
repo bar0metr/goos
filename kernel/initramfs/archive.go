@@ -125,7 +125,7 @@ func (archive *Archive) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, i
 			if status != ramfs.StatusOK {
 				return ramfs.Entry{}, cursor, status
 			}
-			result := ramfs.Entry{Stat: stat, Size: uint8(len(component))}
+			result := ramfs.Entry{Stat: stat, Size: uint16(len(component))}
 			copy(result.Name[:], component)
 			return result, next, ramfs.StatusOK
 		}

@@ -218,6 +218,7 @@ func userspaceMain() {
 				syslog.Uint("boot-from-backup", uint64(health.Boot)),
 				syslog.Uint("backup-state", uint64(health.Backup)),
 				syslog.Uint("fsinfo-state", uint64(health.FSInfo)),
+				syslog.Uint("backup-fsinfo-state", uint64(health.BackupFSInfo)),
 				syslog.Uint("read-only", boolValue(health.ReadOnly)))
 		}
 	} else {

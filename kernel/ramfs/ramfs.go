@@ -38,7 +38,7 @@ type node struct {
 	generation uint32
 	kind       Kind
 	used       bool
-	nameSize   uint8
+	nameSize   uint16
 	name       [MaxName]byte
 	// firstChild and next link a directory's children in ascending index
 	// order, as index+1; zero ends the list.

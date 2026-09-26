@@ -97,9 +97,11 @@ type FileSystem struct {
 	// volume has clusters must loop.
 	clusters    uint32
 	rootCluster uint32
-	// fsInfo is the byte offset of the FSInfo sector, zero when the volume
-	// has none or it did not validate.
-	fsInfo uint64
+	// fsInfo is the validated copy used at mount. The primary and backup
+	// offsets are retained so an explicit clean sync can keep both copies
+	// consistent when at least one validated.
+	fsInfo, fsInfoPrimary, fsInfoBackup uint64
+	fsInfoSync                          bool
 	// hint is where the next free-cluster search starts; hintDirty says the
 	// FSInfo copy of it is stale.
 	hint      uint32
@@ -208,7 +210,8 @@ func (fs *FileSystem) reset() {
 	// No cluster is valid until a mount says otherwise, so nothing can
 	// reach the device through geometry a refused mount left behind.
 	fs.clusters, fs.rootCluster = 0, 0
-	fs.fsInfo, fs.hint, fs.hintDirty = 0, 0, false
+	fs.fsInfo, fs.fsInfoPrimary, fs.fsInfoBackup, fs.fsInfoSync = 0, 0, 0, false
+	fs.hint, fs.hintDirty = 0, false
 	fs.free, fs.freeKnown, fs.countDirty, fs.recordedFree = 0, false, false, 0
 	fs.fatRead, fs.fatFirst = 0, 0
 	for index := range fs.cache {

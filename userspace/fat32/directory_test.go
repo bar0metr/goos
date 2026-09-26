@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func mustName(t *testing.T, value string) ramfs.Name {
+func mustName(t testing.TB, value string) ramfs.Name {
 	t.Helper()
 	name, ok := ramfs.MakeName([]byte(value))
 	if !ok {
@@ -14,7 +14,7 @@ func mustName(t *testing.T, value string) ramfs.Name {
 	return name
 }
 
-func mounted(t *testing.T, device Device) (*FileSystem, ramfs.NodeID) {
+func mounted(t testing.TB, device Device) (*FileSystem, ramfs.NodeID) {
 	t.Helper()
 	fs := &FileSystem{}
 	root, ok := fs.Mount(device)
@@ -24,7 +24,7 @@ func mounted(t *testing.T, device Device) (*FileSystem, ramfs.NodeID) {
 	return fs, root
 }
 
-func mkdir(t *testing.T, fs *FileSystem, parent ramfs.NodeID, name string) ramfs.NodeID {
+func mkdir(t testing.TB, fs *FileSystem, parent ramfs.NodeID, name string) ramfs.NodeID {
 	t.Helper()
 	id, status := fs.MkdirName(parent, mustName(t, name))
 	if status != ramfs.StatusOK {
@@ -33,7 +33,7 @@ func mkdir(t *testing.T, fs *FileSystem, parent ramfs.NodeID, name string) ramfs
 	return id
 }
 
-func writeFile(t *testing.T, fs *FileSystem, parent ramfs.NodeID, name, payload string) ramfs.NodeID {
+func writeFile(t testing.TB, fs *FileSystem, parent ramfs.NodeID, name, payload string) ramfs.NodeID {
 	t.Helper()
 	id, status := fs.CreateName(parent, mustName(t, name))
 	if status != ramfs.StatusOK {

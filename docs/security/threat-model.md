@@ -164,8 +164,9 @@ The raw disk image is host-provided and persists across boots.
 - The FAT32 service validates every BPB field and checks the declared geometry
   against the device capacity before deriving any offset, checks every FAT link,
   and walks chains with loops bounded by the cluster count. Long names are
-  decoded from UTF-16 only when valid and only when the result is a name the
-  system accepts; a corrupt primary boot sector is served read-only from a
+  decoded from UTF-16 only when valid, bounded to 255 UTF-16 units and a
+  1024-byte native result. Primary and backup FSInfo signatures and values are
+  checked; hints and free counts are never trusted as allocation authority. A corrupt primary boot sector is served read-only from a
   valid backup and never rewritten at mount (ADR 0077, 0102, 0112). A seeded
   corruption corpus covers each case.
 - A volume that fails the checks is refused, not fatal: the system boots with
