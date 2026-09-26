@@ -3,12 +3,15 @@
 // arrive from the kernel itself and from services through a native call.
 package klog
 
-import "goos/internal/logfmt"
+import (
+	"goos/internal/logfmt"
+	"goos/internal/timekeeping"
+)
 
 const Capacity = 64
 
 type entry struct {
-	time          uint64
+	time          timekeeping.Time
 	process       uint64
 	level         logfmt.Level
 	componentSize uint8

@@ -5,6 +5,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
+	"goos/internal/timekeeping"
 	"goos/internal/validation"
 	"goos/internal/version"
 	"goos/kernel/acpi"
@@ -53,6 +54,7 @@ var (
 	processInfoWire       [kcall.ProcessInfoSize]byte
 	clockWire             [8]byte
 	nanosWire             [8]byte
+	timeWire              [kcall.ClockTimeSize]byte
 	consoleByteWire       [1]byte
 	systemInfoWire        [kcall.SystemInfoSize]byte
 	portWire              [4]byte
@@ -120,6 +122,8 @@ var (
 	spawnedProcesses            [process.MaxProcesses]*process.Process
 	nextProcessID               process.ID = 4
 	virtioBlockPort             uint16
+	bootRealtime                timekeeping.Time
+	bootRealtimeCounter         uint64
 )
 
 // userExitAnnounced records that the validation marker for Exit was printed.
@@ -197,8 +201,18 @@ func main() {
 	console.Init()
 	console.WriteString(version.Name + " " + version.Release + "\n\n")
 	console.WriteString("CPU: " + version.Machine + "\n")
+	calendar, status := bootuefi.CalendarTime()
+	bootRealtime, bootRealtimeCounter = calendar, amd64.ReadTSC()
+	if status != 0 {
+		console.WriteString("PANIC: UEFI calendar time invalid: ")
+		console.WriteHex(uint64(status))
+		console.WriteString("\n")
+		for {
+			amd64.Halt()
+		}
+	}
 
-	status := bootuefi.LoadInitramfs(&bootInfo)
+	status = bootuefi.LoadInitramfs(&bootInfo)
 	if status == bootuefi.InitramfsTooLarge {
 		console.WriteString("PANIC: initramfs is larger than the 4 MiB the loader reads\n")
 		for {
@@ -370,6 +384,9 @@ func bootContinue() {
 		amd64.Halt()
 	}
 	calibrateClock()
+	if !realtimeClock.Init(bootRealtime, bootRealtimeCounter) {
+		panicSerial("realtime clock initialization failed")
+	}
 	console.WriteString("Timer: ")
 	console.WriteUint(clock.TicksPerSecond)
 	console.WriteString(" Hz\n")

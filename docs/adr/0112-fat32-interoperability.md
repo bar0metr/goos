@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Amends ADR 0102 (sector size, FSInfo free count, timestamps), ADR
+Accepted. Amended by ADR 0113 (the filesystem service now supplies realtime).
+Amends ADR 0102 (sector size, FSInfo free count, timestamps), ADR
 0066 and ADR 0110 (the printable-ASCII rule for FAT32 names). Everything else
 in those records stands.
 
@@ -136,9 +137,9 @@ records modification and the access date; creating, removing or renaming an
 entry records its directory's modification time, best effort, since the
 change itself is already made; `.` and `..` take the new directory's times; a
 read writes nothing. The time comes from a `Clock` given
-to the filesystem. GoOS has no wall clock yet, so the service gives none: new
-entries get zero, unknown, times and changes leave existing times as they
-were, rather than recording a made-up date. Callers see `Metadata` —
+to the filesystem. ADR 0113 supplies the native UTC realtime clock; without a
+valid clock, new entries still get zero, unknown, times and changes leave
+existing times as they were. Callers see `Metadata` —
 nanoseconds since the Unix epoch and native attribute flags — never DOS
 encodings.
 
@@ -199,6 +200,6 @@ every host. Tests that need a host tool skip without it.
   `SetClock`, the interfaces `fsck.fat` (Phases 4 and 5) will use.
 - The node-ID backend protocol and the VFS do not yet carry timestamps or
   attributes; `Metadata` is available to in-service callers only.
-- Until GoOS has a wall clock, files it creates have unknown times.
+- GoOS-created files receive UTC realtime timestamps when the native clock is available.
 - Directory scans remain linear in the directory's entries; the window is
   still sixteen units.

@@ -8,6 +8,7 @@
 package utility
 
 import (
+	"goos/internal/timekeeping"
 	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
@@ -203,6 +204,15 @@ func Clock() uint64 {
 // ClockNanos reads the calibrated nanosecond clock.
 func ClockNanos() uint64 {
 	value, status := sys.ClockReadNanos()
+	if status != kcall.StatusOK {
+		Fail(nil, "clock unavailable")
+	}
+	return value
+}
+
+// ClockNow reads one of the typed native clocks.
+func ClockNow(clock timekeeping.Clock) timekeeping.Time {
+	value, status := sys.ClockNow(clock)
 	if status != kcall.StatusOK {
 		Fail(nil, "clock unavailable")
 	}

@@ -64,6 +64,8 @@ const (
 	// OperationHandleDuplicate a narrower copy of a memory handle (ADR 0107).
 	OperationMemoryCreate
 	OperationHandleDuplicate
+	OperationClockNow
+	OperationClockSet
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -146,6 +148,8 @@ type Handler interface {
 	VMQuery(address uint64, record uint64) Status
 	MemoryCreate(pages uint64, address uint64) Status
 	HandleDuplicate(handle uint64, rights uint64, address uint64) Status
+	ClockNow(clock uint64, address uint64, length uint64) Status
+	ClockSet(authority uint64, address uint64, length uint64) Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -277,6 +281,16 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.MemoryCreate(request.Arg0, request.Arg1)}
 	case OperationHandleDuplicate:
 		return Result{Status: handler.HandleDuplicate(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationClockNow:
+		if request.Arg2 != ClockTimeSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ClockNow(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationClockSet:
+		if request.Arg2 != ClockTimeSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ClockSet(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationMemoryMap:
 		if request.Arg2&^(MemoryMapWritable|MemoryMapAnywhere) != 0 {
 			return Result{Status: StatusInvalidArgument}
@@ -293,6 +307,10 @@ const SystemInfoSize = uint64(40)
 // SystemInfoPageSize is the size in bytes of the pages SystemInfo counts.
 const SystemInfoPageSize = uint64(4096)
 const MaxStreamIO = uint64(256)
+
+// ClockTimeSize is signed seconds, uint32 nanoseconds, then four reserved
+// zero bytes.
+const ClockTimeSize = uint64(16)
 
 // HandleInfoSize and ProcessInfoSize are the fixed record sizes written by
 // HandleInfo and ProcessInfo.

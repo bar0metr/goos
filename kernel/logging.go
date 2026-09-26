@@ -32,8 +32,8 @@ var (
 )
 
 func logRecord(record logfmt.Record) {
-	if monotonicClock.Calibrated() {
-		record.Time = nowNanos()
+	if value, ok := realtimeClock.Now(&monotonicClock, amd64.ReadTSC()); ok {
+		record.Time = value
 	}
 	systemLog.Append(record)
 	if record.Level >= consoleThreshold {

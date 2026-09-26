@@ -33,6 +33,10 @@ func clockRead(address unsafe.Pointer, size uintptr) uint64 { return unsupported
 
 func clockReadNanos(address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
+func clockNow(clock uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
+
+func clockSet(authority uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
+
 func startupRead(address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
 func channelCreate(address unsafe.Pointer, size uintptr) uint64 { return unsupported }

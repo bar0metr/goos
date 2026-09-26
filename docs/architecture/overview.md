@@ -40,11 +40,15 @@ objects are the non-POSIX foundation for standard-stream redirection and carry
 concurrent shell pipelines of up to four processes, composed with bounded
 sequential execution, bounded stdout truncate/append redirection, and bounded
 file-backed stdin production.
+The kernel exposes independent typed `MONOTONIC` and UTC `REALTIME` clocks;
+the latter is initialized once from UEFI and then advanced only from the
+existing monotonic TSC source (ADR 0113).
 
 ## Further reading
 
 - [boot sequence](boot.md);
 - [filesystem stack](filesystem.md);
+- [timekeeping](timekeeping.md);
 - [Linux compatibility (planned)](linux-compat.md);
 - [threat model](../security/threat-model.md);
 - [capabilities: security view](../security/capabilities.md);

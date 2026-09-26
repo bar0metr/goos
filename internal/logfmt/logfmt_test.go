@@ -1,6 +1,7 @@
 package logfmt
 
 import (
+	"goos/internal/timekeeping"
 	"strings"
 	"testing"
 )
@@ -19,10 +20,10 @@ func TestRoundTripAndFormat(t *testing.T) {
 	if !ok {
 		t.Fatal("decode rejected encoded record")
 	}
-	record.Time, record.Process = 1_234_567_000, 1
+	record.Time, record.Process = timekeeping.Time{Seconds: 1_758_892_831, Nanoseconds: 123_456_000}, 1
 	var text [MaxText]byte
 	line := string(text[:Format(record, text[:])])
-	want := "[    1.234567] INFO  init[1]: service started service=vfs note=\"two words\" pid=7\n"
+	want := "[2025-09-26T13:20:31.123456Z] INFO  init[1]: service started service=vfs note=\"two words\" pid=7\n"
 	if line != want {
 		t.Fatalf("got %q want %q", line, want)
 	}
@@ -77,7 +78,7 @@ func TestBoundsOnEncodeAndFields(t *testing.T) {
 		t.Fatalf("fields grew to %d", len(fields))
 	}
 	var text [MaxText]byte
-	record := Record{Time: ^uint64(0), Process: ^uint64(0), Level: Error, Component: []byte(strings.Repeat("c", MaxComponent)),
+	record := Record{Time: timekeeping.Time{Seconds: 253402300799, Nanoseconds: 999999999}, Process: ^uint64(0), Level: Error, Component: []byte(strings.Repeat("c", MaxComponent)),
 		Message: []byte(strings.Repeat("m", MaxMessage)), Fields: []byte(strings.Repeat("f", MaxFields))}
 	if Format(record, text[:]) == 0 {
 		t.Fatal("largest record does not fit MaxText")
@@ -87,7 +88,7 @@ func TestBoundsOnEncodeAndFields(t *testing.T) {
 // TestFormatDoesNotAllocate guards the kernel, which leaks every allocation
 // and cannot grow its heap after it leaves boot services.
 func TestFormatDoesNotAllocate(t *testing.T) {
-	record := Record{Time: 1234567890, Process: 7, Level: Warn, Component: []byte("kernel"), Message: []byte("launch failed"), Fields: []byte("status=2")}
+	record := Record{Time: timekeeping.Time{Seconds: 1234567890}, Process: 7, Level: Warn, Component: []byte("kernel"), Message: []byte("launch failed"), Fields: []byte("status=2")}
 	var target [MaxText]byte
 	if allocations := testing.AllocsPerRun(100, func() { Format(record, target[:]) }); allocations != 0 {
 		t.Fatalf("Format allocated %v times per run", allocations)
@@ -108,14 +109,15 @@ func TestAppendFieldDoesNotAllocate(t *testing.T) {
 
 func TestTimeOfReadsWhatFormatWrote(t *testing.T) {
 	var line [MaxText]byte
-	for _, nanos := range []uint64{0, 999, 1_500_000_000, 12_345_678_901_234} {
-		size := Format(Record{Time: nanos, Level: Info, Component: []byte("init"), Process: 1, Message: []byte("m")}, line[:])
+	for _, stamp := range []timekeeping.Time{{Seconds: 0}, {Seconds: 1, Nanoseconds: 500_000_000}, {Seconds: 1_758_892_831, Nanoseconds: 123_456_789}} {
+		size := Format(Record{Time: stamp, Level: Info, Component: []byte("init"), Process: 1, Message: []byte("m")}, line[:])
 		got, ok := TimeOf(line[:size])
-		if !ok || got != nanos/1000 {
-			t.Fatalf("time of %q = %d, %v; want %d", line[:size], got, ok, nanos/1000)
+		want := uint64(stamp.Seconds)*1_000_000 + uint64(stamp.Nanoseconds)/1000
+		if !ok || got != want {
+			t.Fatalf("time of %q = %d, %v; want %d", line[:size], got, ok, want)
 		}
 	}
-	for _, text := range []string{"", "[", "[ 1.5] x", "[   .000001] x", "[   1.00000x] x", "hello", "[   1.000001 x"} {
+	for _, text := range []string{"", "[", "[2025-13-01T00:00:00.000000Z]", "[2025-01-01T24:00:00.000000Z]", "hello"} {
 		if _, ok := TimeOf([]byte(text)); ok {
 			t.Fatalf("read a time from %q", text)
 		}

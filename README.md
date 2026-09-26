@@ -473,6 +473,7 @@ Further documentation:
   [memory](docs/architecture/memory.md), [typed IPC](docs/architecture/ipc.md),
   [capabilities and handles](docs/architecture/capabilities.md),
   [filesystem stack](docs/architecture/filesystem.md),
+  [timekeeping](docs/architecture/timekeeping.md),
   [Linux compatibility (planned)](docs/architecture/linux-compat.md).
 - Kernel: [interrupts](docs/kernel/interrupts.md),
   [native images](docs/kernel/native-images.md),

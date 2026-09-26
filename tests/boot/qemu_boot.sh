@@ -225,7 +225,7 @@ long_argument=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "x" }')
 # levels make a path longer than a message (ADR 0110).
 long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
-( sleep 4
+( sleep 8
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
@@ -893,7 +893,7 @@ checks=$((checks + 1))
 grep -a -q 'Welcome to GoOS' "$disk" || fail_check persistence.fat32-image 'Welcome to GoOS in disk image' 'content not found' "$log" 'cat /persist/state.txt'
 checks=$((checks + 1))
 
-( sleep 4
+( sleep 20
 	printf 'cat /persist/state.txt\n'
 	sleep 2
 	printf '/home/demo/args after-reboot\n'
@@ -920,7 +920,7 @@ require_marker persistence.reboot-cat CAT_PROCESS_OK "$reboot_log" 'cat /persist
 forbid_regex persistence.reboot-no-copy CP_PROCESS_OK 'CP_PROCESS_OK absent on reboot' "$reboot_log" CP_PROCESS_OK
 # The rotated file can only have been written before this boot, so reading a
 # record out of it proves the log survived the reset.
-require_window persistence.reboot-log '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
+require_window persistence.reboot-log '^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\.[0-9]*Z\] \(INFO\|WARN\|ERROR\) ' 'a UTC calendar record from the previous session' "$reboot_log" 'goos> cat /state/system.log.1' 'goos> ls /state'
 # The value set in the previous session is restored over the schema default.
 require_regex persistence.reboot-file-exec '^after-reboot$' 'a program on the volume run after the reset' "$reboot_log" 'goos> /home/demo/args after-reboot'
 require_window persistence.reboot-config '^boot-test$' 'a setting restored from the previous session' "$reboot_log" 'goos> config get user.name' 'NO_SUCH_LINE'
@@ -999,7 +999,7 @@ require_marker log.started LOG_SERVICE_OK "$log"
 require_regex log.service-reported '^\[ OK \] log$' 'the log service reported started' "$log" 'Starting services'
 require_regex log.file-listed '^system\.log$' 'system.log on the state volume' "$log" 'goos> ls /state'
 require_regex log.rotated '^system\.log\.1$' 'a rotated log beside it' "$log" 'goos> ls /state'
-require_window log.persisted-record '^\[ *[0-9][0-9]*\.[0-9]*\] \(INFO\|WARN\|ERROR\) ' 'a formatted record read back from the file' "$log" 'goos> cat /state/system.log' 'goos> config'
+require_window log.persisted-record '^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\.[0-9]*Z\] \(INFO\|WARN\|ERROR\) ' 'a UTC calendar record read back from the file' "$log" 'goos> cat /state/system.log' 'goos> config'
 pass_group log
 
 # Configuration is typed and scoped: a value is checked against the declaration

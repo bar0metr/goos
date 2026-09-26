@@ -352,6 +352,22 @@ goos_handle_duplicate:
     ret
 .size goos_handle_duplicate, .-goos_handle_duplicate
 
+.global goos_clock_now
+.type goos_clock_now,@function
+goos_clock_now:
+    movl $46, %eax
+    int $0x80
+    ret
+.size goos_clock_now, .-goos_clock_now
+
+.global goos_clock_set
+.type goos_clock_set,@function
+goos_clock_set:
+    movl $47, %eax
+    int $0x80
+    ret
+.size goos_clock_set, .-goos_clock_set
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

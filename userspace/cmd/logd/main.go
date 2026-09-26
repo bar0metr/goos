@@ -38,7 +38,10 @@ const (
 	// A boot produces a few kilobytes of records, so the validation build uses
 	// a bound a single session crosses. Only the threshold differs; the
 	// rotation the boot test exercises is the one a release build performs.
-	validationLogBytes = uint64(1024)
+	// Calendar timestamps add fifteen bytes per record over the former
+	// monotonic prefix. Keep the validation session to one rotation without
+	// making the post-rotation live file empty.
+	validationLogBytes = uint64(1536)
 	// drainInterval is how long the service sleeps between passes, in timer
 	// ticks. The ring holds 64 records, so a burst larger than that inside one
 	// interval loses the oldest of them, which the service reports rather than

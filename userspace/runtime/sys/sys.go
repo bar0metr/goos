@@ -14,6 +14,7 @@
 package sys
 
 import (
+	"goos/internal/timekeeping"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"unsafe"
@@ -29,6 +30,7 @@ var (
 	imageWire      [2]uint64
 	dmaWire        [3]uint64
 	waitWire       [2]uint64
+	timeWire       [kcall.ClockTimeSize]byte
 	consoleByteBox [1]byte
 )
 
@@ -201,6 +203,31 @@ func ClockReadNanos() (uint64, kcall.Status) {
 	valueWire = 0
 	result := status(clockReadNanos(unsafe.Pointer(&valueWire), 8))
 	return valueWire, result
+}
+
+// ClockNow reads a fixed-width native MONOTONIC or REALTIME timestamp.
+func ClockNow(clock timekeeping.Clock) (timekeeping.Time, kcall.Status) {
+	clear(timeWire[:])
+	result := status(clockNow(uint64(clock), unsafe.Pointer(&timeWire[0]), uintptr(len(timeWire))))
+	if result != kcall.StatusOK {
+		return timekeeping.Time{}, result
+	}
+	return timekeeping.Time{Seconds: int64(le64(timeWire[0:8])), Nanoseconds: uint32(timeWire[8]) | uint32(timeWire[9])<<8 | uint32(timeWire[10])<<16 | uint32(timeWire[11])<<24}, result
+}
+
+// ClockSet is the reserved realtime setter. It requires a handle carrying the
+// dedicated CLOCK_SET right; the current kernel returns Unsupported even to
+// an authorized caller.
+func ClockSet(authority handle.ID, value timekeeping.Time) kcall.Status {
+	clear(timeWire[:])
+	seconds := uint64(value.Seconds)
+	for index := 0; index < 8; index++ {
+		timeWire[index] = byte(seconds >> uint(index*8))
+	}
+	for index := 0; index < 4; index++ {
+		timeWire[8+index] = byte(value.Nanoseconds >> uint(index*8))
+	}
+	return status(clockSet(uint64(authority), unsafe.Pointer(&timeWire[0]), uintptr(len(timeWire))))
 }
 
 // PortRead reads an I/O port the device capability covers. specification is

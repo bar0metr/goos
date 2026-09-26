@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"goos/internal/timekeeping"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
@@ -78,5 +79,11 @@ func TestWrappersReturnTheKernelStatus(t *testing.T) {
 	}
 	if region, status := DMAAllocate(handle.ID(1), 0x401c0000, 16384); status != kcall.StatusUnsupported || region.Memory != nil {
 		t.Fatalf("DMAAllocate = %#v, %d", region, status)
+	}
+	if value, status := ClockNow(timekeeping.Realtime); status != kcall.StatusUnsupported || value != (timekeeping.Time{}) {
+		t.Fatalf("ClockNow = %+v, %d", value, status)
+	}
+	if status := ClockSet(handle.ID(1), timekeeping.Time{Seconds: 1}); status != kcall.StatusUnsupported {
+		t.Fatalf("ClockSet = %d", status)
 	}
 }

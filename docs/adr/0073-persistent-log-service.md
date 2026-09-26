@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0059 and ADR 0071.
+Accepted. Extends ADR 0059 and ADR 0071. Amended by ADR 0113: persisted records
+now carry UTC realtime timestamps.
 
 ## Context
 

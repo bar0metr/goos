@@ -9,6 +9,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/timekeeping"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -162,6 +163,17 @@ func (blockDevice) Capacity() uint64 {
 	return blockCapacity
 }
 
+// realtime supplies FAT with UTC Unix time through the normal native clock
+// API. FAT alone translates it to the local-calendar on-disk fields; the GoOS
+// system timezone is UTC until timezone configuration exists.
+func realtime() (int64, bool) {
+	now, status := sys.ClockNow(timekeeping.Realtime)
+	if status != kcall.StatusOK || now.Seconds < 0 || now.Seconds > 4_354_819_199 {
+		return 0, false
+	}
+	return now.Seconds*1_000_000_000 + int64(now.Nanoseconds), true
+}
+
 //export userspaceMain
 func userspaceMain() {
 	arena.Init()
@@ -192,6 +204,7 @@ func userspaceMain() {
 		syslog.Error("file cache unavailable", syslog.Uint("status", uint64(status)))
 	}
 	setUpBulk()
+	volume.SetClock(realtime)
 	// A volume that is refused is not a reason to stop: the service keeps
 	// answering, with I/O errors, so the VFS reports the volume as absent
 	// rather than the service as crashing in a restart loop (ADR 0077).

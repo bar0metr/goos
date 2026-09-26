@@ -3,10 +3,14 @@
 package main
 
 import (
+	"goos/internal/capability"
 	"goos/internal/logfmt"
+	"goos/internal/timekeeping"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
+	"goos/kernel/device"
 	"goos/kernel/diag"
+	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
 )
@@ -15,7 +19,10 @@ import (
 // that the interrupt-entry jitter at either end is negligible.
 const calibrationTicks = clock.TicksPerSecond / 10
 
-var monotonicClock clock.Counter
+var (
+	monotonicClock clock.Counter
+	realtimeClock  clock.Realtime
+)
 
 // calibrateClock measures the TSC rate across calibrationTicks PIT periods.
 // Both readings follow a tick delivery, so the interrupt latency cancels out.
@@ -51,6 +58,50 @@ func (handler nativeCallHandler) ClockReadNanos(address uint64, length uint64) k
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
+}
+
+// ClockNow is the typed native clock API. Reading time needs no capability.
+func (handler nativeCallHandler) ClockNow(clockID uint64, address uint64, length uint64) kcall.Status {
+	if length != kcall.ClockTimeSize {
+		return kcall.StatusInvalidArgument
+	}
+	if !monotonicClock.Calibrated() {
+		return kcall.StatusUnsupported
+	}
+	var value timekeeping.Time
+	switch timekeeping.Clock(clockID) {
+	case timekeeping.Monotonic:
+		value = timekeeping.FromNanos(nowNanos())
+	case timekeeping.Realtime:
+		var ok bool
+		value, ok = realtimeClock.Now(&monotonicClock, amd64.ReadTSC())
+		if !ok {
+			return kcall.StatusUnsupported
+		}
+	default:
+		return kcall.StatusInvalidArgument
+	}
+	clear(timeWire[:])
+	putUint64(timeWire[0:8], uint64(value.Seconds))
+	putUint32(timeWire[8:12], value.Nanoseconds)
+	if !vm.CopyOut(handler.root, address, timeWire[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}
+
+// ClockSet is reserved for future synchronization and manual setting. The
+// caller must hold the dedicated CLOCK_SET right; setting is not implemented.
+func (handler nativeCallHandler) ClockSet(authorityID uint64, address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(authorityID), handle.TypeDevice, capability.ClockSet)
+	if !allowed || authority.Object() != device.ClockObject {
+		return kcall.StatusPermissionDenied
+	}
+	return kcall.StatusUnsupported
 }
 
 type launchStage uint8

@@ -22,3 +22,10 @@ func TestEmptyRightSetIsRejected(t *testing.T) {
 		t.Fatal("empty derived capability must be rejected")
 	}
 }
+
+func TestClockSetIsExplicitAuthority(t *testing.T) {
+	clock := New(5, ClockSet)
+	if !clock.Allows(ClockSet) || clock.Allows(Write) || New(5, Write).Allows(ClockSet) {
+		t.Fatal("clock-setting authority aliases generic write authority")
+	}
+}

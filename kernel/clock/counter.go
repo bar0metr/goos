@@ -1,5 +1,7 @@
 package clock
 
+import "goos/internal/timekeeping"
+
 const nanosPerSecond = 1_000_000_000
 
 // maxCounterHz keeps the remainder term of Nanos within 64 bits.
@@ -12,6 +14,7 @@ type Counter struct {
 	base   uint64
 	origin uint64
 	hz     uint64
+	last   uint64
 }
 
 // Calibrate derives the counter rate from readings start and end taken a
@@ -25,7 +28,8 @@ func (counter *Counter) Calibrate(startTick, start, end, ticks uint64) bool {
 	if hz == 0 || hz > maxCounterHz {
 		return false
 	}
-	*counter = Counter{base: start, origin: TicksToNanos(startTick), hz: hz}
+	origin := TicksToNanos(startTick)
+	*counter = Counter{base: start, origin: origin, hz: hz, last: origin}
 	return true
 }
 
@@ -40,10 +44,59 @@ func (counter *Counter) Nanos(now uint64) uint64 {
 		return 0
 	}
 	if now < counter.base {
-		return counter.origin
+		return counter.last
 	}
 	delta := now - counter.base
-	return counter.origin + delta/counter.hz*nanosPerSecond + delta%counter.hz*nanosPerSecond/counter.hz
+	value := counter.origin + delta/counter.hz*nanosPerSecond + delta%counter.hz*nanosPerSecond/counter.hz
+	if value < counter.last {
+		return counter.last
+	}
+	counter.last = value
+	return value
+}
+
+// Elapsed returns the non-negative nanoseconds between two counter readings.
+func (counter *Counter) Elapsed(start, end uint64) (uint64, bool) {
+	if counter.hz == 0 || end < start {
+		return 0, false
+	}
+	delta := end - start
+	return delta/counter.hz*nanosPerSecond + delta%counter.hz*nanosPerSecond/counter.hz, true
+}
+
+// Realtime advances one boot-time calendar reading with the calibrated
+// monotonic counter. It never consults firmware after initialization.
+type Realtime struct {
+	base        timekeeping.Time
+	last        timekeeping.Time
+	counterBase uint64
+	ready       bool
+}
+
+func (clock *Realtime) Init(base timekeeping.Time, counterBase uint64) bool {
+	if !base.Valid() {
+		return false
+	}
+	*clock = Realtime{base: base, last: base, counterBase: counterBase, ready: true}
+	return true
+}
+
+func (clock *Realtime) Ready() bool { return clock.ready }
+
+func (clock *Realtime) Now(counter *Counter, reading uint64) (timekeeping.Time, bool) {
+	if !clock.ready {
+		return timekeeping.Time{}, false
+	}
+	elapsed, ok := counter.Elapsed(clock.counterBase, reading)
+	if !ok {
+		return clock.last, counter.Calibrated()
+	}
+	value := clock.base.Add(elapsed)
+	if value.Before(clock.last) {
+		return clock.last, true
+	}
+	clock.last = value
+	return value, true
 }
 
 // TicksToNanos converts PIT ticks at the programmed divisor into nanoseconds.

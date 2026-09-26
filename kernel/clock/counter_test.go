@@ -1,6 +1,9 @@
 package clock
 
-import "testing"
+import (
+	"goos/internal/timekeeping"
+	"testing"
+)
 
 // readings returns counter values ticks PIT periods apart for a counter
 // running at hz.
@@ -66,6 +69,9 @@ func TestCounterIsMonotonicAndDoesNotOverflow(t *testing.T) {
 		}
 		previous = got
 	}
+	if got := counter.Nanos(start + counter.Hz()); got != previous {
+		t.Fatalf("regressing source moved monotonic clock from %d to %d", previous, got)
+	}
 	year := uint64(365 * 24 * 3600)
 	if got := counter.Nanos(start + year*counter.Hz()); got != year*nanosPerSecond {
 		t.Fatalf("one year reads %d ns", got)
@@ -76,5 +82,26 @@ func TestTicksToNanosMatchesProgrammedRate(t *testing.T) {
 	got := TicksToNanos(TicksPerSecond)
 	if got < nanosPerSecond*999/1000 || got > nanosPerSecond*1001/1000 {
 		t.Fatalf("%d ticks read %d ns", TicksPerSecond, got)
+	}
+}
+
+func TestRealtimeAdvancesWithMonotonicCounter(t *testing.T) {
+	var counter Counter
+	start, end := readings(1_000_000_000, 10)
+	if !counter.Calibrate(0, start, end, 10) {
+		t.Fatal("calibration rejected")
+	}
+	base := timekeeping.Time{Seconds: 1_700_000_000, Nanoseconds: 750_000_000}
+	var realtime Realtime
+	if !realtime.Init(base, start) {
+		t.Fatal("realtime initialization rejected")
+	}
+	got, ok := realtime.Now(&counter, start+counter.Hz()*2+counter.Hz()/2)
+	if !ok || got != (timekeeping.Time{Seconds: base.Seconds + 3, Nanoseconds: 250_000_000}) {
+		t.Fatalf("realtime = %+v, %v", got, ok)
+	}
+	older, ok := realtime.Now(&counter, start-1)
+	if !ok || older != got {
+		t.Fatalf("pre-base realtime = %+v, %v", older, ok)
 	}
 }

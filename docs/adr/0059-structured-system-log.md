@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Implements the early backend of spec §27.
+Accepted. Implements the early backend of spec §27. Amended by ADR 0113:
+record timestamps are now UTC realtime rather than time since boot.
 
 ## Context
 
@@ -20,14 +21,14 @@ and `key=value` fields. Its wire form is bounded: 16-byte component, 64-byte
 message, 96 bytes of fields, printable ASCII only. Its text form is:
 
 ```text
-[    0.205971] INFO  vfs[4]: mounted fs=fat32 path=/persist
+[2026-09-26T15:44:31.205971Z] INFO  vfs[4]: mounted fs=fat32 path=/persist
 ```
 
 The kernel keeps the most recent 64 records in `kernel/klog`. Two native
 operations use it:
 
-- `LogWrite` (25) validates an encoded record and stamps it with the time from
-  the TSC clock and the caller's process ID, so neither can be forged.
+- `LogWrite` (25) validates an encoded record and stamps it with the UTC
+  realtime clock and the caller's process ID, so neither can be forged.
 - `LogRead` (26) returns the index-th retained record as text.
 
 Both require the console device capability: write rights to log, read rights

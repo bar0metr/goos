@@ -388,7 +388,9 @@ virtual-memory regions and demand-zero memory (ADR 0104), page-backed RAMFS
 (ADR 0105), lazily loaded executables (ADR 0106), shared-memory bulk I/O
 (ADR 0107), non-blocking program preparation in PID 1 (ADR 0108), a
 variable-length startup object (ADR 0109), one name and path contract
-(ADR 0110), and bounded dynamic kernel registries (ADR 0111). The next
+(ADR 0110), bounded dynamic kernel registries (ADR 0111), interoperable FAT32
+metadata (ADR 0112), and independent monotonic and realtime clocks initialized
+from UEFI (ADR 0113). The next
 milestone is Priority 5, Linux ELF compatibility.
 
 Known gaps left by ADR 0089: the system services that start before the terminal

@@ -8,6 +8,9 @@ const (
 	Execute
 	Transfer
 	Wait
+	// ClockSet authorizes changing the system realtime clock. No process is
+	// granted it yet; it is distinct from generic device Write authority.
+	ClockSet
 )
 
 type Capability struct {

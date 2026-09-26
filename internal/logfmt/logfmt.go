@@ -2,6 +2,8 @@
 // and userspace: its bounded wire encoding and its console text form.
 package logfmt
 
+import "goos/internal/timekeeping"
+
 type Level uint8
 
 const (
@@ -12,17 +14,15 @@ const (
 )
 
 const (
-	Version         = 1
-	MaxComponent    = 16
-	MaxMessage      = 64
-	MaxFields       = 96
-	headerSize      = 5
-	MaxWire         = headerSize + MaxComponent + MaxMessage + MaxFields
-	MaxText         = 240
-	nanosPerSecond  = 1_000_000_000
-	nanosPerMicro   = 1_000
-	fractionDigits  = 6
-	secondsMinWidth = 5
+	Version        = 1
+	MaxComponent   = 16
+	MaxMessage     = 64
+	MaxFields      = 96
+	headerSize     = 5
+	MaxWire        = headerSize + MaxComponent + MaxMessage + MaxFields
+	MaxText        = 240
+	nanosPerMicro  = 1_000
+	fractionDigits = 6
 )
 
 var levelNames = [...]string{Debug: "DEBUG", Info: "INFO ", Warn: "WARN ", Error: "ERROR"}
@@ -39,7 +39,7 @@ func (level Level) String() string {
 // Record is one structured event. Fields holds `key=value` pairs separated by
 // single spaces, already validated.
 type Record struct {
-	Time      uint64
+	Time      timekeeping.Time
 	Process   uint64
 	Level     Level
 	Component []byte
@@ -85,7 +85,7 @@ func Decode(data []byte) (Record, bool) {
 	return Record{Level: level, Component: component, Message: message, Fields: fields}, true
 }
 
-// Format renders `[seconds.micros] LEVEL component[pid]: message fields`.
+// Format renders an UTC calendar timestamp followed by the structured event.
 func Format(record Record, target []byte) int {
 	if len(target) < MaxText {
 		return 0
@@ -93,13 +93,27 @@ func Format(record Record, target []byte) int {
 	size := 0
 	target[size] = '['
 	size++
-	seconds := record.Time / nanosPerSecond
-	micros := record.Time % nanosPerSecond / nanosPerMicro
-	size += putPadded(target[size:], seconds, secondsMinWidth, ' ')
+	year, month, day, hour, minute, second := timekeeping.CivilUTC(record.Time.Seconds)
+	size += putPadded(target[size:], uint64(year), 4, '0')
+	target[size] = '-'
+	size++
+	size += putPadded(target[size:], uint64(month), 2, '0')
+	target[size] = '-'
+	size++
+	size += putPadded(target[size:], uint64(day), 2, '0')
+	target[size] = 'T'
+	size++
+	size += putPadded(target[size:], uint64(hour), 2, '0')
+	target[size] = ':'
+	size++
+	size += putPadded(target[size:], uint64(minute), 2, '0')
+	target[size] = ':'
+	size++
+	size += putPadded(target[size:], uint64(second), 2, '0')
 	target[size] = '.'
 	size++
-	size += putPadded(target[size:], micros, fractionDigits, '0')
-	size += copy(target[size:], "] ")
+	size += putPadded(target[size:], uint64(record.Time.Nanoseconds)/nanosPerMicro, fractionDigits, '0')
+	size += copy(target[size:], "Z] ")
 	size += copy(target[size:], record.Level.String())
 	target[size] = ' '
 	size++
@@ -244,36 +258,35 @@ func validFields(fields []byte) bool {
 	return true
 }
 
-// TimeOf returns the time of a line Format rendered, in microseconds since
-// boot, read from its `[seconds.micros]` prefix.
+// TimeOf returns the Unix time of a line Format rendered, in microseconds.
 func TimeOf(line []byte) (uint64, bool) {
-	if len(line) < 2 || line[0] != '[' {
+	if len(line) < 29 || line[0] != '[' || line[5] != '-' || line[8] != '-' || line[11] != 'T' ||
+		line[14] != ':' || line[17] != ':' || line[20] != '.' || line[27] != 'Z' || line[28] != ']' {
 		return 0, false
 	}
-	index := 1
-	for index < len(line) && line[index] == ' ' {
-		index++
-	}
-	seconds, digits := uint64(0), 0
-	for ; index < len(line) && line[index] >= '0' && line[index] <= '9'; index++ {
-		if digits == 12 {
-			return 0, false
+	decimal := func(start, length int) (uint64, bool) {
+		value := uint64(0)
+		for _, digit := range line[start : start+length] {
+			if digit < '0' || digit > '9' {
+				return 0, false
+			}
+			value = value*10 + uint64(digit-'0')
 		}
-		seconds = seconds*10 + uint64(line[index]-'0')
-		digits++
+		return value, true
 	}
-	if digits == 0 || index+fractionDigits+1 >= len(line) || line[index] != '.' {
+	year, okYear := decimal(1, 4)
+	month, okMonth := decimal(6, 2)
+	day, okDay := decimal(9, 2)
+	hour, okHour := decimal(12, 2)
+	minute, okMinute := decimal(15, 2)
+	second, okSecond := decimal(18, 2)
+	micros, okMicros := decimal(21, 6)
+	if !okYear || !okMonth || !okDay || !okHour || !okMinute || !okSecond || !okMicros {
 		return 0, false
 	}
-	micros := uint64(0)
-	for _, value := range line[index+1 : index+1+fractionDigits] {
-		if value < '0' || value > '9' {
-			return 0, false
-		}
-		micros = micros*10 + uint64(value-'0')
-	}
-	if line[index+1+fractionDigits] != ']' {
+	stamp, ok := timekeeping.Unix(int64(year), uint8(month), uint8(day), uint8(hour), uint8(minute), uint8(second), uint32(micros)*nanosPerMicro, 0)
+	if !ok || stamp.Seconds < 0 {
 		return 0, false
 	}
-	return seconds*1_000_000 + micros, true
+	return uint64(stamp.Seconds)*1_000_000 + micros, true
 }

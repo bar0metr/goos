@@ -2,8 +2,9 @@
 
 Structured events share one record format (`internal/logfmt`): level,
 component, message, and `key=value` fields, bounded to 181 encoded bytes and
-printable ASCII. The kernel assigns the time (nanoseconds since the timer
-started) and the process ID when it accepts a record.
+printable ASCII. The kernel assigns the UTC `REALTIME` timestamp and the
+process ID when it accepts a record. Ordering and deadlines continue to use
+the independent `MONOTONIC` clock.
 
 `kernel/klog` retains the most recent 64 records. Native operation 25,
 `LogWrite(console, record, length)`, appends a record and needs the console
@@ -18,9 +19,9 @@ fields. Services call `Init` once with their startup console handle. The
 shell's `log` builtin prints the ring, oldest record first:
 
 ```text
-[    0.152328] INFO  kernel[0]: kernel initialized free-pages=93568
-[    0.188156] INFO  init[1]: service started service=vfs pid=4
-[    0.205971] INFO  vfs[4]: mounted fs=fat32 path=/persist
+[2026-09-26T15:44:31.152328Z] INFO  kernel[0]: kernel initialized free-pages=93568
+[2026-09-26T15:44:31.188156Z] INFO  init[1]: service started service=vfs pid=4
+[2026-09-26T15:44:31.205971Z] INFO  vfs[4]: mounted fs=fat32 path=/persist
 ```
 
 Operation 33, `LogBounds(console, buffer)`, writes the sequence number of the

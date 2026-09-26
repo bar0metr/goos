@@ -14,6 +14,9 @@ type Volume struct {
 	mounted bool
 }
 
+// SetClock gives the mounted filesystem its UTC wall clock.
+func (volume *Volume) SetClock(clock Clock) { volume.fs.SetClock(clock) }
+
 // Mount checks the volume on device and remembers the result.
 func (volume *Volume) Mount(device Device) bool {
 	volume.device = device

@@ -13,6 +13,9 @@ const (
 	// name instead of an extent of the system image (ADR 0097). Only PID 1
 	// holds it; it is not transferable.
 	LoaderObject = uint64(4)
+	// ClockObject is the future realtime-setting authority. Reading either
+	// clock needs no handle; no ClockObject handle is issued yet.
+	ClockObject = uint64(5)
 )
 
 const (

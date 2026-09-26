@@ -192,6 +192,16 @@ func (handler *testHandler) ClockReadNanos(address uint64, length uint64) Status
 	return StatusOK
 }
 
+func (handler *testHandler) ClockNow(clock uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = clock, address, length
+	return StatusOK
+}
+
+func (handler *testHandler) ClockSet(authority uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = authority, address, length
+	return StatusPermissionDenied
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -458,12 +468,10 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationExecutableCreate != 37 || OperationExecutableWrite != 38 {
 		t.Fatalf("operations %d %d", OperationExecutableCreate, OperationExecutableWrite)
 	}
-	// HandleDuplicate is the last operation, so anything past it is
-	// unsupported.
-	if OperationVMMap != 39 || OperationVMQuery != 43 || OperationMemoryCreate != 44 || OperationHandleDuplicate != 45 {
+	if OperationVMMap != 39 || OperationVMQuery != 43 || OperationMemoryCreate != 44 || OperationHandleDuplicate != 45 || OperationClockNow != 46 || OperationClockSet != 47 {
 		t.Fatalf("operations %d %d %d %d", OperationVMMap, OperationVMQuery, OperationMemoryCreate, OperationHandleDuplicate)
 	}
-	if result := Dispatch(Request{Operation: OperationHandleDuplicate + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationClockSet + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -481,6 +489,25 @@ func TestDispatchExecutableCalls(t *testing.T) {
 		result = Dispatch(Request{Operation: OperationExecutableWrite, Arg0: 5, Arg1: 0x3000, Arg2: length}, handler)
 		if result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
 			t.Fatalf("write of %d reached the handler: %#v", length, result)
+		}
+	}
+}
+
+func TestDispatchClockOperations(t *testing.T) {
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationClockNow, Arg0: 2, Arg1: 0x1000, Arg2: ClockTimeSize}, handler)
+	if result.Status != StatusOK || handler.channel != 2 || handler.address != 0x1000 || handler.length != ClockTimeSize {
+		t.Fatalf("clock now: %#v, %#v", result, handler)
+	}
+	handler = &testHandler{}
+	result = Dispatch(Request{Operation: OperationClockSet, Arg0: 9, Arg1: 0x2000, Arg2: ClockTimeSize}, handler)
+	if result.Status != StatusPermissionDenied || handler.channel != 9 {
+		t.Fatalf("clock set: %#v, %#v", result, handler)
+	}
+	for _, operation := range []Operation{OperationClockNow, OperationClockSet} {
+		handler = &testHandler{}
+		if result = Dispatch(Request{Operation: operation, Arg2: ClockTimeSize - 1}, handler); result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
+			t.Fatalf("invalid clock record reached handler: %#v, %#v", result, handler)
 		}
 	}
 }

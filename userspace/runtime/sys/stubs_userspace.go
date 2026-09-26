@@ -36,6 +36,12 @@ func clockRead(address unsafe.Pointer, size uintptr) uint64
 //go:linkname clockReadNanos goos_clock_read_nanos
 func clockReadNanos(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname clockNow goos_clock_now
+func clockNow(clock uint64, address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname clockSet goos_clock_set
+func clockSet(authority uint64, address unsafe.Pointer, size uintptr) uint64
+
 //go:linkname startupRead goos_startup_read
 func startupRead(address unsafe.Pointer, size uintptr) uint64
 
