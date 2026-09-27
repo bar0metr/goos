@@ -36,7 +36,7 @@ func TestLifecycleProtocol(t *testing.T) {
 	}
 	event, ok = DecodeLifecycle(launch)
 	if !ok || event.Operation != LifecycleLaunch || event.Process != 3 || event.Executable != probe || string(event.ProcessName()) != "fault-probe" ||
-		event.CapabilityCount != 1 || event.Capabilities[0] != grants[0] {
+		event.CapabilityCount != 1 || event.Capabilities[0] != grants[0] || event.ResourceProfile != ProfileNormal {
 		t.Fatalf("launch event = %#v", event)
 	}
 	launch.Version++
@@ -101,24 +101,37 @@ func TestLifecycleProtocol(t *testing.T) {
 	if !ok || endpointEvent.Capabilities[0] != endpointGrant[0] {
 		t.Fatalf("endpoint grant = %#v", endpointEvent)
 	}
-	startupLaunch, ok := LaunchRequestWithStartup(4, probe, "cat", endpointGrant, 3, StagingSlotSize, 11)
+	startupLaunch, ok := LaunchRequestWithStartup(4, probe, "cat", endpointGrant, ProfileLarge, 3, StagingSlotSize, 11)
 	if !ok {
 		t.Fatal("startup launch encode failed")
 	}
 	startupEvent, ok := DecodeLifecycle(startupLaunch)
-	if !ok || startupEvent.StartupSlot != 3 || startupEvent.StartupSize != StagingSlotSize {
+	if !ok || startupEvent.StartupSlot != 3 || startupEvent.StartupSize != StagingSlotSize || startupEvent.ResourceProfile != ProfileLarge {
 		t.Fatalf("startup = %#v", startupEvent)
 	}
-	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, 0, StagingSlotSize+1, 12); ok {
+	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, ProfileTiny, 0, StagingSlotSize+1, 12); ok {
 		t.Fatal("oversized startup accepted")
 	}
-	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, StagingSlots, 8, 12); ok {
+	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, ProfileTiny, StagingSlots, 8, 12); ok {
 		t.Fatal("out-of-range staging slot accepted")
 	}
 	corrupt := startupLaunch
 	corrupt.Payload[11] = StagingSlots
 	if _, ok := DecodeLifecycle(corrupt); ok {
 		t.Fatal("decoded out-of-range staging slot")
+	}
+	corrupt = startupLaunch
+	corrupt.Payload[32] = 0
+	if _, ok := DecodeLifecycle(corrupt); ok {
+		t.Fatal("decoded unknown resource profile")
+	}
+	corrupt = startupLaunch
+	corrupt.Payload[33] = 1
+	if _, ok := DecodeLifecycle(corrupt); ok {
+		t.Fatal("decoded nonzero launch reserved byte")
+	}
+	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, 0, 0, 0, 12); ok {
+		t.Fatal("encoded unknown resource profile")
 	}
 	tooMany := make([]Capability, MaxCapabilities+1)
 	for index := range tooMany {

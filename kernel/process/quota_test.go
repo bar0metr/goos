@@ -59,7 +59,7 @@ func TestSystemQuotaIsPID1Only(t *testing.T) {
 	if ordinary.GrantSystemQuota() {
 		t.Fatal("an ordinary process raised its own quota")
 	}
-	if _, limits := ordinary.Quota(); limits[ResourceStreams] != defaultStreamLimit {
+	if _, limits := ordinary.Quota(); limits[ResourceStreams] != normalStreamLimit {
 		t.Fatalf("ordinary stream limit = %d", limits[ResourceStreams])
 	}
 	pid1, _ := New(1, AddressSpace{Root: 0x1000})
@@ -89,11 +89,33 @@ func TestQuotaDoesNotSurviveSlotReuse(t *testing.T) {
 	if used[ResourcePages] != 0 {
 		t.Fatalf("reused slot still holds %d pages", used[ResourcePages])
 	}
-	if limits[ResourceStreams] != defaultStreamLimit {
+	if limits[ResourceStreams] != normalStreamLimit {
 		t.Fatalf("reused slot kept the system quota: %d", limits[ResourceStreams])
 	}
 	if slot.CPUTicks() != 0 {
 		t.Fatalf("reused slot kept %d CPU ticks", slot.CPUTicks())
+	}
+}
+
+func TestLaunchProfilesAreDistinctAndBounded(t *testing.T) {
+	profiles := []ResourceProfile{ProfileTiny, ProfileNormal, ProfileLarge}
+	previous := [4]uint32{}
+	for index, profile := range profiles {
+		var target Process
+		if !InitWithProfile(&target, ID(index+1), AddressSpace{Root: uint64(index + 1)}, profile) {
+			t.Fatalf("profile %d refused", profile)
+		}
+		_, limits := target.Quota()
+		for resource, limit := range limits {
+			if limit == 0 || index != 0 && limit < previous[resource] {
+				t.Fatalf("profile %d resource %d limit %d after %d", profile, resource, limit, previous[resource])
+			}
+		}
+		previous = limits
+	}
+	var target Process
+	if InitWithProfile(&target, 4, AddressSpace{Root: 4}, 0) || InitWithProfile(&target, 4, AddressSpace{Root: 4}, ProfileLarge+1) {
+		t.Fatal("unknown resource profile accepted")
 	}
 }
 

@@ -49,8 +49,9 @@ both ends close.
 
 The registry holds up to 256 streams. Each is one page, a 4080-byte ring and
 its counters, taken from the page allocator when the stream is created and
-returned when it is released (ADR 0111). An ordinary process may hold sixteen
-and PID 1 sixty-four (ADR 0072, ADR 0089, ADR 0111).
+returned when it is released (ADR 0111). Launch profiles allow eight, sixteen,
+or thirty-two streams; PID 1 may hold sixty-four (ADR 0072, ADR 0089, ADR
+0111, ADR 0122).
 
 The userspace integration probe creates a stream, writes and reads data, closes
 the writer, observes EOF, and closes the reader. The shell uses the same object

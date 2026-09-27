@@ -86,7 +86,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], slot, uint32(len(startupData)))
+	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], spec.Profile, slot, uint32(len(startupData)))
 	mark("INIT_SERVICE_LAUNCH_OK\n")
 	name := bytesString(spec.Name[:spec.NameSize])
 	// The validation build keeps the driver's process handle so it can inject

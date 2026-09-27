@@ -1078,6 +1078,7 @@ require_regex quota.header '^PID   COMMAND           RESOURCE  HELD/LIMIT$' 'quo
 # table rather than all of it, or the quota bounds nothing.
 require_regex quota.shell-streams '^[0-9][0-9]*  *shell  *strm  *[0-9]*/16$' 'the shell holding an ordinary stream share' "$log" 'goos> quota'
 require_regex quota.init-streams '^1  *init  *strm  *[0-9]*/64$' 'PID 1 holding the system share' "$log" 'goos> quota'
+require_regex quota.command-streams '^[0-9][0-9]*  *quota  *strm  *[0-9]*/8$' 'a command running with the tiny profile' "$log" 'goos> quota'
 require_regex release.ps-init '^1     native   [a-z]* *[0-9][0-9]*  *[0-9][0-9]*  *init$' 'PID 1 listed as init' "$log" 'goos> ps'
 # The shell waits for input instead of retrying the read, so after a session of
 # this length its CPU total stays in three digits. Before it was over seven

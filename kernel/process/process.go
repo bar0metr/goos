@@ -45,13 +45,23 @@ type Process struct {
 // Process by value instead would build the whole handle table as a temporary,
 // which the kernel's leaking heap never frees.
 func Init(target *Process, id ID, addressSpace AddressSpace) bool {
+	return InitWithProfile(target, id, addressSpace, ProfileNormal)
+}
+
+// InitWithProfile prepares a process with one of the kernel's bounded quota
+// sets. Callers select a profile, never individual limits.
+func InitWithProfile(target *Process, id ID, addressSpace AddressSpace, profile ResourceProfile) bool {
 	if target == nil || id == 0 || addressSpace.Root == 0 {
+		return false
+	}
+	quota, ok := quotaForProfile(profile)
+	if !ok {
 		return false
 	}
 	target.Reset()
 	target.id = id
 	target.addressSpace = addressSpace
-	target.quota = defaultQuota()
+	target.quota = quota
 	target.regions.Init(vm.UserAddressStart, vm.UserAddressLimit)
 	return true
 }

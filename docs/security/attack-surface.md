@@ -48,7 +48,7 @@ table with type, generation, and rights checks.
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
 | 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; 24-byte descriptor `CopyIn`, its size a whole number of pages up to 256 KiB (zero for 16 KiB); the window must be free in the region map | up to 64 contiguous low pages, charged with their page tables to the page quota; a pinned region; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
-| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 streams of one page each, global; sixteen per ordinary process, 64 for PID 1 (quota, ADR 0111) | no |
+| 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 streams of one page each, global; 8/16/32 by launch profile, 64 for PID 1 (ADR 0111, 0122) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
 | 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload; a write that does not fit whole is refused, never split | static 256 B buffer | no; full → `ResourceExhausted` |
 | 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline; a writer wakes when 256 bytes are free |
@@ -172,13 +172,12 @@ identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
 
 ### Resource limits
 
-Global fixed arrays bound the system; per-process quotas bound each process's
-share of them (ADR 0072). Channels, streams, tasks and pages are charged to the
-process that causes them to exist and released when it does. An ordinary process
-holds at most four channels, four streams, four tasks and 192 pages; PID 1, which
-creates the endpoints every other process communicates through, holds at most
-twenty-four, twenty-four, eight and 512, and is refused past that like anything
-else (ADR 0089).
+Global fixed arrays bound the system; launch profiles bound each process's
+share of them (ADR 0072, ADR 0122). A `tiny` command receives limits of two
+channels, eight streams, one task and 2048 pages. A `normal` service receives
+4, 16, 4 and 8192; `large` receives 8, 32, 8 and 16384. PID 1 chooses among
+those names, while the kernel owns the numeric limits. PID 1 keeps a separate
+bounded system quota of 256 channels, 64 streams, eight tasks and 16384 pages.
 
 The shared image cache (ADR 0081) is not charged to any process. It grows only
 when PID 1 launches an image from the immutable system image, it is keyed by
@@ -190,9 +189,9 @@ path (ADR 0093).
 
 `StreamCreate` still needs no capability, because a stream is a primitive any
 process may need, but a process calling it in a loop is refused at its share and
-leaves the rest of the registry for everyone else. A launch whose address space
+leaves the rest of the registry for other processes. A launch whose address space
 would exceed the page quota fails rather than running over. A process can still
-fill its own 128-entry handle table, which costs only itself.
+fill its own 256-entry handle table, which costs only itself.
 
 A component holding the console capability can fill the 64-record log ring and,
 with warning-level records, the console; logging is bounded by record size, not

@@ -89,9 +89,9 @@ func fillDeadline(size uint64) uint64 {
 
 // requestLaunch sends one launch request and waits for its reply. The caller
 // has written the startup template into staging slot slot.
-func requestLaunch(executable supervisor.Executable, name string, grants []supervisor.Capability, slot uint8, startupSize uint32) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
+func requestLaunch(executable supervisor.Executable, name string, grants []supervisor.Capability, profile supervisor.ResourceProfile, slot uint8, startupSize uint32) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
 	correlation++
-	request, ok := supervisor.LaunchRequestWithStartup(1, executable, name, grants, slot, startupSize, correlation)
+	request, ok := supervisor.LaunchRequestWithStartup(1, executable, name, grants, profile, slot, startupSize, correlation)
 	if !ok {
 		return supervisor.LifecycleEvent{}, supervisor.LaunchInvalidImage
 	}
@@ -132,7 +132,7 @@ func probeLaunchAuthority() bool {
 		{supervisor.Executable{Image: systemImageHandle, Offset: valid.Offset, Size: valid.Size / 2}, supervisor.LaunchInvalidImage},
 	}
 	for _, probe := range cases {
-		event, status := requestLaunch(probe.executable, "probe", nil, 0, 0)
+		event, status := requestLaunch(probe.executable, "probe", nil, supervisor.ProfileTiny, 0, 0)
 		if status != probe.want || event.Process != 0 {
 			return false
 		}
@@ -204,7 +204,7 @@ func launchesRefused(cases []struct {
 	want       supervisor.LaunchStatus
 }) bool {
 	for _, probe := range cases {
-		event, status := requestLaunch(probe.executable, "probe", nil, 0, 0)
+		event, status := requestLaunch(probe.executable, "probe", nil, supervisor.ProfileTiny, 0, 0)
 		if status != probe.want || event.Process != 0 {
 			return false
 		}

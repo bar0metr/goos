@@ -51,7 +51,8 @@ authorizes executing from it, and carries at most seven grants of
 resolves no path: PID 1 found the executable in its own read-only mapping of
 the system image, or opened a stable VFS object and converted its sealed header
 object into a file-backed source using the non-transferable loader capability
-(ADR 0121).
+(ADR 0121). The request also names one kernel-defined resource profile; PID 1
+cannot submit numeric limits (ADR 0122).
 
 Before creating the address space the kernel:
 

@@ -41,7 +41,7 @@ host (QEMU, OVMF, ISO, disk image file)
 | user → kernel | `int 0x80` native calls, CPU faults | bounded `kcall` contract, handle lookup with type and rights, `CopyIn`/`CopyOut` ([attack-surface.md](attack-surface.md)) |
 | process ↔ process | typed IPC, streams, handle transfer, shared pages | per-process address spaces, generation-safe handles, non-escalating transfer ([capabilities.md](capabilities.md)); shared image pages are never writable (ADR 0081) |
 | shell, commands → terminal | terminal output stream (write-only copies) | only the terminal service holds a reading end besides PID 1; stream ends are reference counted, so no holder can close the stream for the others (ADR 0089) |
-| PID 1 → kernel launch | lifecycle channel | only PID 1 holds the lifecycle endpoint; the kernel validates every grant against PID 1's table (ADR 0024) and resolves the executable only inside the boot archive |
+| PID 1 → kernel launch | lifecycle channel | only PID 1 holds the lifecycle endpoint; the kernel validates every grant against PID 1's table and accepts only a kernel-defined resource profile; executables come from a system-image extent or a file-backed source (ADR 0024, 0121, 0122) |
 | shell → PID 1 | exec channel and exec area | PID 1 copies the request out of the shared page before validating it, accepts only `/system/bin/<name>` paths, and grants a VFS session only when the command's entry in the command index asks for one (ADR 0030, 0064, 0080) |
 | VFS → storage | `GBLK001` IPC | block service validates ranges and overflow; VFS never holds device authority (ADR 0033, 0036) |
 | VFS → system image | `ImageMap` | read-only, non-executable, unowned mapping of the archive; the capability is held only by VFS (ADR 0070) |
@@ -82,7 +82,7 @@ A program launched from the shell, for example a compromised command image in
   another process (ADR 0030, docs/userspace/vfs.md).
 - A fault terminates only its task; exit closes its handles, so peers see
   `PeerDied`/EOF instead of hanging (ADR 0050).
-- Residual risks: it can create up to four streams, its per-process quota,
+- Residual risks: it can create up to eight streams under the `tiny` launch profile,
   which leaves the rest of the registry to everyone else (ADR 0072); it can
   read the high-resolution clock (ADR 0054) and the process list with each
   process's CPU and resource use (`ProcessInfo`); it can run without yielding,
@@ -201,7 +201,7 @@ The raw disk image is host-provided and persists across boots.
 - Requests that travel through shared memory (launch staging, exec area) are
   copied into private memory once, before validation, so the sender cannot
   change them afterwards (ADR 0062, 0064).
-- The same holds for what 0.1.3 moves through memory: the VFS copies paths out
+- The same holds for data moved through shared memory: the VFS copies paths out
   of a client's attached object, the VFS and the FAT32 service copy a long name
   out of the file cache's name page, and the kernel copies a startup template
   once, validates the whole `GST4` object, and binds handles in its own copy
@@ -233,7 +233,7 @@ controls the system ([boot-chain.md](boot-chain.md)).
 | forged or stale handle | generation + type + rights check in `handle.Table.Lookup` |
 | authority escalation | `Derive` refuses added rights; IPC transfer strips Transfer |
 | peer death | channel and stream close on teardown; waiters woken with `PeerDied` |
-| resource exhaustion | fixed-size tables everywhere, plus per-process quotas on channels, streams, tasks and pages (ADR 0072); failure is a status, not a panic |
+| resource exhaustion | fixed-size tables and bounded launch profiles for channels, streams, tasks and pages (ADR 0072, 0122); failure is a status, not a panic |
 | one process starving the rest | each process holds a share of each table, not the table; a refused charge reaches no global structure |
 | runaway command | Ctrl-C or `kill` makes PID 1 stop the job through `ProcessKill`, which runs the ordinary teardown (ADR 0067) |
 | crash loop | bounded restart count and backoff in the PID 1 supervisor (ADR 0019) |

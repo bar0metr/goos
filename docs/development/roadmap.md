@@ -390,8 +390,14 @@ virtual-memory regions and demand-zero memory (ADR 0104), page-backed RAMFS
 variable-length startup object (ADR 0109), one name and path contract
 (ADR 0110), bounded dynamic kernel registries (ADR 0111), interoperable FAT32
 metadata (ADR 0112), and independent monotonic and realtime clocks initialized
-from UEFI (ADR 0113). The next
-milestone is Priority 5, Linux ELF compatibility.
+from UEFI (ADR 0113).
+
+GoOS 0.1.4 (docs/releases/0.1.4.md) completes the native storage and execution
+base for Linux compatibility. It adds foreign FAT32 geometry and metadata,
+raw/MBR/GPT block slices, dynamic mounts, native FAT checking and repair,
+stable open-file identity, high-half kernel entry trampolines, file-backed
+executable pages, and bounded launch resource profiles (ADR 0112 through
+0122). Priority 5, Linux ELF compatibility, follows this release.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
