@@ -140,6 +140,48 @@ func TestServicePersistentFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestPersistentOpenObjectSurvivesMoveAndBlocksUnlink(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	for _, path := range []string{"/persist/a", "/persist/b"} {
+		if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationMkdir, Path: []byte(path)}); reply.Status != vfs.StatusOK {
+			t.Fatalf("mkdir %s = %d", path, reply.Status)
+		}
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/a/file")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("create = %d", reply.Status)
+	}
+	writeAt(t, service, "/persist/a/file", 0, "payload")
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/persist/a/file")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open = %d", opened.Status)
+	}
+	second := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte("/persist/a/file")})
+	if second.Status != vfs.StatusOK {
+		t.Fatalf("second open = %d", second.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationWrite, Handle: second.Handle, Data: []byte("P")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("write through second handle = %d", reply.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: second.Handle}); reply.Status != vfs.StatusOK {
+		t.Fatalf("close second handle = %d", reply.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/persist/a/file"), Target: []byte("/persist/b/moved")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("rename = %d", reply.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 16}); reply.Status != vfs.StatusOK || string(reply.Data) != "Payload" {
+		t.Fatalf("read moved open file = %d, %q", reply.Status, reply.Data)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/persist/b/moved")}); reply.Status != vfs.StatusPermissionDenied {
+		t.Fatalf("unlink open file = %d", reply.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle}); reply.Status != vfs.StatusOK {
+		t.Fatalf("close = %d", reply.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationUnlink, Path: []byte("/persist/b/moved")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("unlink closed file = %d", reply.Status)
+	}
+}
+
 func TestServicePersistentSubdirectoryLifecycle(t *testing.T) {
 	device := testFAT32Device()
 	service := startedService(t, device)

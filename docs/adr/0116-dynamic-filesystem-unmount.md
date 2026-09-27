@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Completes GoOS 0.1.4 Phase 3 and extends ADR 0096 and ADR 0115.
+Accepted. Extends ADR 0096 and ADR 0115.
 
 ## Context
 
@@ -45,5 +45,5 @@ filesystem still receives only the selected block slice and never parses MBR.
   administrative unmount.
 - Logical FAT32 partitions inside an extended MBR partition can be selected by
   index and by the automatic FAT32 policy.
-- Forced unmount is intentionally absent; it would require explicit stale-handle
-  semantics and is not needed for Phase 3.
+- Forced unmount remains out of scope because it requires explicit
+  stale-handle semantics.

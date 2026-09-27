@@ -7,10 +7,9 @@ Accepted. Extends ADR 0033 (block service), ADR 0096 (FAT32 service) and ADR
 
 ## Context
 
-The FAT32 service was handed a channel to the whole disk and expected its boot
-sector at byte 0. A disk made by any current tool puts FAT32 inside a
-partition, behind an MBR or a GPT, so such a disk could not be used at all
-(GoOS 0.1.4 specification, Phase 2). Teaching the FAT32 parser to read
+The FAT32 service received a channel to the whole disk and expected its boot
+sector at byte 0. Current disk tools put FAT32 inside a partition behind an MBR
+or GPT, so GoOS could not use those disks. Teaching the FAT32 parser to read
 partition tables would have mixed two formats in one parser and still given it
 authority over the whole disk: a defect in it could reach the other
 partitions. The specification asks instead for a separate partition layer and
@@ -72,8 +71,8 @@ holds neither.** The block service already has the whole device, so reading the
 table there gives the parser no authority it lacks, and the process that reads
 the table is the one that enforces the result. When it first describes the
 device it reads the table (through its bulk buffer) and resolves the filesystem
-endpoint's selector to a slice; every request on that endpoint is served
-through the slice, and without one it is answered with I/O errors, so the
+endpoint's selector to a slice; the service routes every request through the
+slice. Without a valid slice, it returns I/O errors, so the
 FAT32 service reports its volume refused and the system boots without
 persistent storage (ADR 0077). The FAT32 service addresses its volume from zero
 and cannot name a byte outside it. What was found is logged: the table, the
@@ -81,10 +80,10 @@ partition chosen, and any degradation.
 
 **PID 1 says which volume.** The control request that hands the block service
 a filesystem endpoint (`GBLKC`, version 3) carries a selector in a fixed layout
-whose unused fields must be zero. PID 1 sends `auto`; choosing another volume
-belongs to mounting (Phase 3). The table is read again whenever an endpoint is
-handed over, so a restarted filesystem service gets the volume the table
-describes now.
+whose unused fields must be zero. PID 1 sends `auto`; runtime mount policy can
+pass another selector. The block service reads the table whenever PID 1 hands
+over an endpoint, so a restarted filesystem service receives the volume that
+the current table describes.
 
 **Nothing in the running system writes a table.** `WriteMBR` and `WriteGPT`
 exist for `tools/mkfat32 -table none|mbr|gpt` and for tests. The images they
@@ -112,8 +111,8 @@ request now closes its object.
 - **Trusting the GPT backup only when the primary header is intact.** Linux
   and firmware fall back to the backup; refusing a disk whose primary sector is
   damaged loses data the backup still describes.
-- **Leaving MBR logical partitions unsupported.** Phase 3 needs selectable
-  volumes found on ordinary MBR disks; the bounded EBR walk is contained in
+- **Leaving MBR logical partitions unsupported.** Ordinary MBR disks place
+  selectable volumes in logical partitions. The bounded EBR walk stays inside
   the partition parser and does not widen filesystem authority.
 
 ## Consequences

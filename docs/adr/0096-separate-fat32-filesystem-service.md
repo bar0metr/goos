@@ -4,7 +4,7 @@
 
 Accepted. Amends ADR 0036, ADR 0071, ADR 0077 and ADR 0078. Its data path is
 amended by ADR 0098: file data moves through a shared file cache instead of
-message payloads.
+message payloads. Its handle-restart semantics are amended by ADR 0119.
 
 ## Context
 
@@ -59,8 +59,9 @@ restart PID 1 creates a fresh channel to the VFS and a fresh one to the block
 service, hands the block service its end through a new block control
 operation, `SetFilesystem` (block control version 2), and hands the VFS its end
 as at first start. The VFS checks that the new instance serves the same root
-and keeps its mounts and open files: a handle opened before the crash reads
-through the restarted service. The block service drops a filesystem endpoint
+and keeps its mounts. ADR 0119 replaces directory-entry locations with
+service-lifetime stable object cookies, so handles opened before the crash
+must be reopened after restart. The block service drops a filesystem endpoint
 whose peer has died instead of waking on it forever.
 
 ## Alternatives
@@ -116,7 +117,8 @@ file on `/home` to be read again through the restarted service.
 Host tests cover the protocol's encoding and rejection of damaged messages,
 the dispatcher against a volume that misreports, and in the VFS: service
 death, malformed replies, a restarted service with a different volume, large
-transfers across several exchanges, and handles surviving a restart.
+transfers across several exchanges, and pathname access recovering after a
+restart while old service object cookies are rejected.
 
 What is not recovered: a write in flight when the service dies is reported as
 an I/O error and may be partly applied, as it would be on a power cut; FAT32

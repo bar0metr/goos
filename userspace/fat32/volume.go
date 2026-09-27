@@ -62,6 +62,20 @@ func (volume *Volume) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Node
 	return volume.fs.OpenName(parent, name)
 }
 
+func (volume *Volume) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	if !volume.mounted {
+		return 0, ramfs.StatusIOError
+	}
+	return volume.fs.AcquireObject(id)
+}
+
+func (volume *Volume) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	if !volume.mounted {
+		return 0, ramfs.StatusIOError
+	}
+	return volume.fs.ReleaseObject(id)
+}
+
 func (volume *Volume) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
 	if !volume.mounted {
 		return 0, ramfs.StatusIOError

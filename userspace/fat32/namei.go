@@ -141,7 +141,11 @@ func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 	if status != ramfs.StatusOK {
 		return status
 	}
-	dir, index, entry, status := fs.node(id)
+	source, status := fs.objectLocation(id)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	dir, index, entry, status := fs.node(source)
 	if status != ramfs.StatusOK {
 		return status
 	}
@@ -209,6 +213,7 @@ func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 		}
 	}
 	if status == ramfs.StatusOK {
+		fs.moveObjects(source, target.node(at.start+count))
 		fs.touchDirectory(&target)
 	}
 	if synced := fs.sync(); status == ramfs.StatusOK {
@@ -257,6 +262,11 @@ func (fs *FileSystem) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Sta
 	}
 	if !result.found {
 		return ramfs.StatusNotFound
+	}
+	if fs.objectOpen(dir.node(result.at.index())) {
+		// GoOS does not implement delete-while-open. The directory entry and
+		// cluster chain remain intact until every handle is closed.
+		return ramfs.StatusPermissionDenied
 	}
 	cluster := entryCluster(result.entry)
 	if isDirectory(result.entry) {

@@ -163,6 +163,18 @@ func (cache *PageCache) Forget(node ramfs.NodeID) {
 	}
 }
 
+// Rebind changes the identity used to index every cached page of a file.
+func (cache *PageCache) Rebind(from, to ramfs.NodeID) {
+	if from == 0 || to == 0 || from == to {
+		return
+	}
+	for slot := range cache.pages {
+		if entry := &cache.pages[slot]; entry.used && entry.node == from {
+			entry.node = to
+		}
+	}
+}
+
 // ForgetAll drops every page: after a rename or unlink, which can move node
 // IDs, after any transport failure, and when a service is attached.
 func (cache *PageCache) ForgetAll() {

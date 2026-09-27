@@ -19,6 +19,11 @@ type Volume interface {
 	Flush() bool
 }
 
+type objectVolume interface {
+	AcquireObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
+	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
+}
+
 // Serve performs one decoded request on volume. A read fills, and a write
 // takes its bytes from, the request's slot of cache, the file cache mapping;
 // a listed name is placed in name, which the reply aliases until the caller
@@ -73,6 +78,20 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		reply.Value = uint64(count)
 	case OperationTruncate:
 		reply.Status = volume.Truncate(request.Node, request.Offset)
+	case OperationAcquire:
+		objects, ok := volume.(objectVolume)
+		if !ok {
+			reply.Status = ramfs.StatusUnsupported
+			break
+		}
+		reply.Node, reply.Status = objects.AcquireObject(request.Node)
+	case OperationRelease:
+		objects, ok := volume.(objectVolume)
+		if !ok {
+			reply.Status = ramfs.StatusUnsupported
+			break
+		}
+		reply.Node, reply.Status = objects.ReleaseObject(request.Node)
 	case OperationStat:
 		stat, status := volume.Stat(request.Node)
 		reply.Status, reply.Node, reply.Kind, reply.Value = status, stat.ID, stat.Kind, stat.Size

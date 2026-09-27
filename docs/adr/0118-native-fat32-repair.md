@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Completes GoOS 0.1.4 Phase 5.
+Accepted.
 
 ## Context
 
