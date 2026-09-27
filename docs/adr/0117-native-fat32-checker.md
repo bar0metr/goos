@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Completes GoOS 0.1.4 Phase 4. Repair remains Phase 5.
+Accepted. Completes GoOS 0.1.4 Phase 4. Explicit repair mode is ADR 0118.
 
 ## Context
 
@@ -41,4 +41,4 @@ failure exits non-zero. A clean volume exits zero. Check mode never repairs.
 - Mount failure and checker findings are distinguished by typed status/codes.
 - The production checker replaces the older test-only fsck-style traversal;
   tests inject cross-links, lost clusters and malformed LFN chains directly.
-- Repair decisions, write ordering and idempotence are deferred to Phase 5.
+- Repair decisions, write ordering and idempotence are defined by ADR 0118.

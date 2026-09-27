@@ -1,7 +1,7 @@
 //go:build goos_userspace
 
-// Command fsck-fat checks an unmounted FAT32 volume through an exclusive
-// block-slice capability. It never writes; repair is a separate phase.
+// Command fsck-fat checks or explicitly repairs an unmounted FAT32 volume
+// through an exclusive block-slice capability.
 package main
 
 import (
@@ -17,8 +17,8 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "fsck-fat --check auto",
-	Summary: "check an unmounted FAT32 volume without modifying it",
+	Usage:   "fsck-fat (--check|--repair) auto",
+	Summary: "check or explicitly repair an unmounted FAT32 volume",
 	MinArgs: 2,
 	MaxArgs: 2,
 	Grants:  commands.GrantBlockCheck,
@@ -33,9 +33,11 @@ var (
 
 type blockDevice struct{ capacity uint64 }
 
-func (device *blockDevice) Capacity() uint64     { return device.capacity }
-func (*blockDevice) WriteAt(uint64, []byte) bool { return false }
-func (*blockDevice) Flush() bool                 { return true }
+func (device *blockDevice) Capacity() uint64 { return device.capacity }
+func (*blockDevice) Flush() bool {
+	reply, ok := exchange(block.Request{Operation: block.OperationFlush})
+	return ok && reply.Status == block.StatusOK
+}
 
 func (device *blockDevice) ReadAt(offset uint64, target []byte) bool {
 	for done := 0; done < len(target); {
@@ -48,6 +50,21 @@ func (device *blockDevice) ReadAt(offset uint64, target []byte) bool {
 			return false
 		}
 		copy(target[done:], reply.Data)
+		done += chunk
+	}
+	return true
+}
+
+func (device *blockDevice) WriteAt(offset uint64, data []byte) bool {
+	for done := 0; done < len(data); {
+		chunk := len(data) - done
+		if chunk > block.MaxData {
+			chunk = block.MaxData
+		}
+		reply, ok := exchange(block.Request{Operation: block.OperationWrite, Offset: offset + uint64(done), Data: data[done : done+chunk]})
+		if !ok || reply.Status != block.StatusOK {
+			return false
+		}
 		done += chunk
 	}
 	return true
@@ -68,6 +85,19 @@ func (printer) Issue(issue fat32.CheckIssue) {
 	utility.EndLine()
 }
 
+func (printer) Repair(action fat32.RepairAction) {
+	text := append(line[:0], "repair "...)
+	text = append(text, action.Code.String()...)
+	text = append(text, " cluster="...)
+	text = utility.AppendUint(text, uint64(action.Cluster))
+	text = append(text, " entry="...)
+	text = utility.AppendUint(text, uint64(action.Entry))
+	text = append(text, " value="...)
+	text = utility.AppendUint(text, uint64(action.Value))
+	utility.Print(text)
+	utility.EndLine()
+}
+
 //export userspaceMain
 func userspaceMain() { utility.Run(manifest, run) }
 func main()          {}
@@ -75,7 +105,8 @@ func main()          {}
 func run(data startup.Data) {
 	mode, _ := data.Arg(1)
 	volume, _ := data.Arg(2)
-	if !utility.Equal(mode, "--check") || !utility.Equal(volume, "auto") {
+	checking, repairing := utility.Equal(mode, "--check"), utility.Equal(mode, "--repair")
+	if (!checking && !repairing) || !utility.Equal(volume, "auto") {
 		utility.Usage()
 	}
 	var ok bool
@@ -88,7 +119,17 @@ func run(data startup.Data) {
 		utility.Fail(nil, "block slice unavailable")
 	}
 	device := blockDevice{capacity: info.Capacity}
-	report := fat32.Check(&device, printer{})
+	var report fat32.CheckReport
+	repaired := uint32(0)
+	if repairing {
+		result := fat32.Repair(&device, printer{}, printer{})
+		report, repaired = result.After, result.Repaired
+		if result.Status != 0 {
+			report.Status = result.Status
+		}
+	} else {
+		report = fat32.Check(&device, printer{})
+	}
 	text := append(line[:0], "files="...)
 	text = utility.AppendUint(text, uint64(report.Files))
 	text = append(text, " directories="...)
@@ -99,12 +140,20 @@ func run(data startup.Data) {
 	text = utility.AppendUint(text, uint64(report.FreeClusters))
 	text = append(text, " errors="...)
 	text = utility.AppendUint(text, uint64(report.Issues))
+	if repairing {
+		text = append(text, " repaired="...)
+		text = utility.AppendUint(text, uint64(repaired))
+	}
 	utility.Print(text)
 	utility.EndLine()
 	if report.Status != 0 || report.Issues != 0 {
 		utility.Exit(1)
 	}
-	utility.Mark("FSCK_FAT_CHECK_OK\n")
+	if repairing {
+		utility.Mark("FSCK_FAT_REPAIR_OK\n")
+	} else {
+		utility.Mark("FSCK_FAT_CHECK_OK\n")
+	}
 }
 
 func exchange(request block.Request) (block.Reply, bool) {
