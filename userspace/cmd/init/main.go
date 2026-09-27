@@ -261,8 +261,19 @@ func userspaceMain() {
 			continue
 		}
 		supervisionTicks += supervisor.RestartBackoff
+		checkerDone := event.Process == filesystemChecker
+		if checkerDone {
+			filesystemChecker = 0
+			filesystemCheckComplete = true
+		}
 		shell, _ := manager.Snapshot("shell")
-		if manager.Exit(event.Process, event.Code, supervisionTicks) == supervisor.StatusNotFound {
+		exitStatus := manager.Exit(event.Process, event.Code, supervisionTicks)
+		if filesystemCheckComplete && manager.Resume(filesystemName, supervisionTicks) == supervisor.StatusOK {
+			filesystemCheckComplete = false
+			manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
+			refreshMountedClients()
+		}
+		if exitStatus == supervisor.StatusNotFound {
 			continue
 		}
 		if shell.State == supervisor.StateRunning && shell.PID == event.Process {

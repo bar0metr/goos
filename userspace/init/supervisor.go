@@ -118,6 +118,7 @@ type service struct {
 	launch          LaunchSpec
 	dependencies    [MaxDependencies]uint8
 	dependencyCount uint8
+	plannedStop     bool
 	restart         RestartPolicy
 	state           State
 	health          Health
@@ -225,6 +226,12 @@ func (manager *Manager) Exit(pid uint64, code uint64, now uint64) Status {
 		if entry.state == StateRunning && entry.pid == pid {
 			manager.record(Event{Kind: EventExited, Service: uint8(index + 1), PID: pid, Detail: code, Tick: now})
 			entry.pid = 0
+			if entry.plannedStop {
+				entry.plannedStop = false
+				entry.state, entry.health = StateStopped, HealthStopped
+				manager.refreshRunningHealth(now)
+				return StatusOK
+			}
 			if code == 0 && entry.restart != RestartAlways {
 				entry.state, entry.health = StateStopped, HealthStopped
 				manager.refreshRunningHealth(now)
@@ -241,6 +248,48 @@ func (manager *Manager) Exit(pid uint64, code uint64, now uint64) Status {
 		}
 	}
 	return StatusNotFound
+}
+
+// PlanStop marks the next exit of a running service as administrative rather
+// than a failure. Resume explicitly makes the stopped service startable again.
+func (manager *Manager) PlanStop(name string) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	index := int(position)
+	if manager.services[index].state != StateRunning {
+		return StatusNotFound
+	}
+	manager.services[index].plannedStop = true
+	return StatusOK
+}
+
+func (manager *Manager) CancelStop(name string) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	entry := &manager.services[int(position)]
+	if !entry.plannedStop || entry.state != StateRunning {
+		return StatusNotFound
+	}
+	entry.plannedStop = false
+	return StatusOK
+}
+
+func (manager *Manager) Resume(name string, now uint64) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	index := int(position)
+	if manager.services[index].state != StateStopped {
+		return StatusNotFound
+	}
+	entry := &manager.services[index]
+	entry.state, entry.health, entry.nextStart = StateRegistered, HealthStarting, now
+	return StatusOK
 }
 
 // RestartPending reports whether any service is waiting to be started. A

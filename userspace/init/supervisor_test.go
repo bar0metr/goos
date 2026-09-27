@@ -240,3 +240,30 @@ func TestScheduledRestartIsVisibleAsPending(t *testing.T) {
 		t.Fatal("a failed service is still pending")
 	}
 }
+
+func TestPlannedStopRequiresExplicitResume(t *testing.T) {
+	var manager Manager
+	manager.Register(Definition{Name: "fat32", Executable: "/system/fat32", Restart: RestartOnFailure})
+	manager.StartReady(0, func(LaunchSpec) (uint64, bool) { return 7, true })
+	if manager.PlanStop("fat32") != StatusOK || manager.Exit(7, 2, 1) != StatusOK {
+		t.Fatal("planned stop failed")
+	}
+	if snapshot, _ := manager.Snapshot("fat32"); snapshot.State != StateStopped || manager.RestartPending() {
+		t.Fatalf("planned stop scheduled a restart: %+v", snapshot)
+	}
+	if manager.Resume("fat32", 2) != StatusOK || manager.StartReady(2, func(LaunchSpec) (uint64, bool) { return 8, true }) != 1 {
+		t.Fatal("resume failed")
+	}
+}
+
+func TestCancelledStopKeepsFailureRestartPolicy(t *testing.T) {
+	var manager Manager
+	manager.Register(Definition{Name: "fat32", Executable: "/system/fat32", Restart: RestartOnFailure})
+	manager.StartReady(0, func(LaunchSpec) (uint64, bool) { return 7, true })
+	if manager.PlanStop("fat32") != StatusOK || manager.CancelStop("fat32") != StatusOK || manager.Exit(7, 2, 1) != StatusOK {
+		t.Fatal("cancelled stop failed")
+	}
+	if !manager.RestartPending() {
+		t.Fatal("cancelled stop suppressed a real failure")
+	}
+}

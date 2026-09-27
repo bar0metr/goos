@@ -10,10 +10,12 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
+	blockproto "goos/userspace/block"
 	"goos/userspace/commands"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/partition"
 	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
@@ -81,7 +83,21 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		return 0, 0, located
 	}
 	var pair [2]uint64
-	useVFS := grantable && commandGrants(command)&commands.GrantVFS != 0
+	grantsRequested := commands.Grant(0)
+	if grantable {
+		grantsRequested = commandGrants(command)
+	}
+	useVFS := grantable && grantsRequested&commands.GrantVFS != 0
+	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
+	var checkBlock handle.ID
+	if useBlockCheck {
+		var reason string
+		checkBlock, reason = openCheckBlock()
+		if reason != "" {
+			syslog.Error(reason)
+			return 0, 0, supervisor.LaunchCapabilityInstallFailed
+		}
+	}
 	if useVFS {
 		session, reason := openVFSSession()
 		if reason != "" {
@@ -97,6 +113,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	slot, staging := stagingSlot()
 	handles := 3
 	if useVFS {
+		handles++
+	}
+	if useBlockCheck {
 		handles++
 	}
 	writer := startup.NewWriter(staging, arguments.Count(), environment.Count(), handles)
@@ -118,12 +137,19 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useVFS {
 		writer.Handle([]byte("vfs"), 0)
 	}
+	if useBlockCheck {
+		writer.Handle([]byte("block"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		sys.HandleClose(handle.ID(pair[0]))
+		sys.HandleClose(checkBlock)
+		if useBlockCheck {
+			manager.CancelStop(filesystemName)
+		}
 		return 0, 0, supervisor.LaunchArgumentsTooLong
 	}
 	grants := []supervisor.Capability{
@@ -134,15 +160,66 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	if useBlockCheck {
+		grants = append(grants, supervisor.Capability{Name: "block", Handle: checkBlock, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	event, launched := requestLaunch(executable, processName, grants, slot, uint32(len(startupData)))
 	if launched != supervisor.LaunchOK {
 		if launched == supervisor.LaunchProcessFailed && event.Operation == 0 {
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
 		}
 		sys.HandleClose(handle.ID(pair[0]))
+		sys.HandleClose(checkBlock)
+		if useBlockCheck {
+			manager.CancelStop(filesystemName)
+		}
 		return 0, 0, launched
 	}
+	if useBlockCheck {
+		filesystemChecker = event.Process
+	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchOK
+}
+
+// openCheckBlock detaches the mounted filesystem and replaces its block
+// endpoint with a private read-only checker endpoint. Closing it lets the
+// supervised FAT32 service restart and mount the volume again.
+func openCheckBlock() (handle.ID, string) {
+	if manager.PlanStop(filesystemName) != supervisor.StatusOK {
+		return 0, "APP_FSCK_FILESYSTEM_NOT_RUNNING"
+	}
+	correlation++
+	request, ok := vfs.UnmountRequest(correlation)
+	if !ok || !sendMessage(vfsControlHandle, request) {
+		manager.CancelStop(filesystemName)
+		return 0, "APP_FSCK_UNMOUNT_SEND_FAILED"
+	}
+	reply, received := receive(vfsControlHandle, vfsSessionDeadline)
+	status, valid := vfs.DecodeAddSessionReply(reply)
+	if received != ipc.StatusOK || !valid || status != vfs.StatusOK {
+		manager.CancelStop(filesystemName)
+		return 0, "APP_FSCK_UNMOUNT_REFUSED"
+	}
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		manager.CancelStop(filesystemName)
+		return 0, "APP_FSCK_CHANNEL_CREATE_FAILED"
+	}
+	correlation++
+	control, ok := blockproto.SetFilesystemRequest(handle.ID(pair[1]), partition.Selector{Kind: partition.SelectAuto}, correlation)
+	if !ok || !sendMessage(uint64(blockControl[0]), control) {
+		manager.CancelStop(filesystemName)
+		closePair(pair)
+		return 0, "APP_FSCK_BLOCK_SEND_FAILED"
+	}
+	blockReply, receiveStatus := receive(uint64(blockControl[0]), vfsSessionDeadline)
+	blockStatus, valid := blockproto.DecodeSetDriverReply(blockReply)
+	if receiveStatus != ipc.StatusOK || !valid || blockStatus != blockproto.StatusOK {
+		manager.CancelStop(filesystemName)
+		sys.HandleClose(handle.ID(pair[0]))
+		return 0, "APP_FSCK_BLOCK_REFUSED"
+	}
+	return handle.ID(pair[0]), ""
 }
 
 func commandGrants(command []byte) commands.Grant {

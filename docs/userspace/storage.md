@@ -205,6 +205,18 @@ reads it back, proving persistence across a complete guest restart.
 A journal, a wall clock for timestamps, dynamic interrupt routing, multiple
 devices, and block payloads larger than the inline IPC limit remain future work.
 
+## Checking an unmounted FAT32 volume
+
+`fsck-fat --check auto` performs the native read-only consistency pass (ADR
+0117). PID 1 owns the authority transition: VFS must flush and atomically
+unmount `/persist`, `/home` and `/state`, after which the block service gives
+the command an exclusive slice of the selected partition. Open files make the
+operation fail as busy. The checker reports BPB/backup/FSInfo health, FAT-copy
+mismatches, invalid, looped, cross-linked, short, long and lost chains,
+directory and dot-entry faults, malformed or orphan LFN chains, duplicate
+aliases and impossible volume-label metadata. It prints a stable summary and
+returns non-zero when it finds any error. It never writes or repairs.
+
 ## Resident sectors and bounded failure
 
 The FAT32 service keeps a write-through window of sixteen resident 512-byte
