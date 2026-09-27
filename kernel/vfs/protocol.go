@@ -14,8 +14,9 @@ const (
 	// PathMax bytes and names of up to NameMax, the long ones in an attached
 	// object, and gives a rename's target a field of its own (ADR 0110);
 	// version 6 adds the timeout, peer-died, and unsupported statuses; version
-	// 7 widens returned-name lengths for the 1024-byte native name limit.
-	ProtocolVersion = uint16(7)
+	// 7 widens returned-name lengths for the 1024-byte native name limit;
+	// version 8 adds immutable executable preparation and page reads.
+	ProtocolVersion = uint16(8)
 	protocolHeader  = 32
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
@@ -58,13 +59,19 @@ const (
 	OperationReadInto
 	OperationWriteFrom
 	OperationFillExecutable
-	lastOperation = OperationFillExecutable
+	// OperationPrepareExecutable pins an open file against mutation and reads
+	// its first Size bytes into an attached header object.
+	// OperationReadExecutable reads Size bytes at Offset without changing the
+	// open file's position and uses the VFS/kernel transport slot.
+	OperationPrepareExecutable
+	OperationReadExecutable
+	lastOperation = OperationReadExecutable
 )
 
 // Bulk reports whether an operation moves its data through an attached object
 // and so carries exactly one handle.
 func (operation Operation) Bulk() bool {
-	return operation == OperationReadInto || operation == OperationWriteFrom || operation == OperationFillExecutable
+	return operation == OperationReadInto || operation == OperationWriteFrom || operation == OperationFillExecutable || operation == OperationPrepareExecutable
 }
 
 // Request is one client call. Path names what it acts on, Target where a
@@ -154,6 +161,16 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 }
 
 func DecodeReply(message ipc.Message) (Reply, bool) {
+	return DecodeReplyFrom(&message)
+}
+
+// DecodeReplyFrom validates a message without copying it. Kernel fault paths
+// use the pointer form so reply slices refer to fixed storage rather than a
+// heap-escaped parameter copy.
+func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
+	if message == nil {
+		return Reply{}, false
+	}
 	if message.ProtocolID != ProtocolID || message.Version != ProtocolVersion || message.Kind != ipc.KindReply ||
 		message.Correlation == 0 || message.PayloadSize < replyHeader {
 		return Reply{}, false

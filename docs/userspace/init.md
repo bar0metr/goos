@@ -43,21 +43,22 @@ that the extent lies inside the image, validates the native image, assigns a
 fresh process identifier from a bounded pool, and creates a new address space
 and initial task (ADR 0093).
 
-A command path outside `/system` is a program on a filesystem. PID 1 reads it
-through a VFS session of its own into an executable object: it creates the
-object with its loader capability (handle `0x100000017`) at the file's size,
-asks the VFS to fill it with one `FillExecutable` request (ADR 0107), and names
-the whole sealed object in the launch request instead of an image extent. The
-fill runs without blocking PID 1: the VFS answers on the job's own session,
+A command path outside `/system` is a program on a filesystem. PID 1 opens it
+through a VFS session of its own, creates a one-page executable object for the
+native header, and asks VFS to pin the stable open object and fill that page.
+`ExecutableSource` consumes the session and turns the sealed header object into
+a source for the complete file (ADR 0121). Preparation does not block PID 1:
+VFS answers on the job's own session,
 which PID 1 waits on with its other channels, and lifecycle events, other jobs,
 and restarts are served meanwhile. A job stopped while its programs are being
 read ends with the launch status "stopped before it started" (ADR 0108). A file that is not a regular file, is
-larger than PID 1's page quota allows, or whose size changes while it is read,
-is refused. The launched process copies the object's pages in as it touches
-them and holds a reference that keeps the object alive while it runs, and the
-object's pages are charged to it rather than to PID 1 (ADR 0106). Such a program
-receives its standard streams and no other grant, and PID 1 closes the object
-once the kernel has answered (ADR 0097). Services are launched only from the
+larger than the executable-source limit, or whose header cannot be read in
+full, is refused. The launched process reads payload pages by offset when it
+touches them and holds the source open while it runs. Those private pages are
+charged to the process; the source itself retains only the header page
+(ADR 0106, ADR 0121). Such a program receives its standard streams and no
+other grant, and PID 1 closes its source handle once the kernel has answered.
+Services are launched only from the
 image, and paths in `/system` outside `/system/bin` are not commands.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small

@@ -48,10 +48,10 @@ not *loaded* through VFS: PID 1 maps the same archive read-only, resolves the
 path there, and asks the kernel to launch the extent it found under an image
 capability with Execute. The filesystem service maps the archive through a
 Read-only copy of that capability, which cannot launch anything (ADR 0070,
-ADR 0093). A program anywhere else in the namespace is read through the VFS,
-by PID 1, into an executable object the kernel launches once it has sealed;
-the process copies the object's pages in as it touches them (ADR 0097,
-ADR 0106).
+ADR 0093). For a program elsewhere, PID 1 opens a private VFS session and has
+VFS pin the stable open object against mutation. The kernel retains one header
+page and requests later pages by offset as the process faults them in. The
+source capability contains no path (ADR 0106, ADR 0119, ADR 0121).
 
 `/persist` names the whole volume and `/home` and `/state` name directories on
 it, so `/persist/home` and `/home` are one directory under two names, backed by
@@ -86,8 +86,10 @@ field, which had held write data to 32 bytes). Large ones move it through shared
 - A client creates a buffer with `MemoryCreate`, maps it, and attaches to each
   `GVF1` `ReadInto` or `WriteFrom` a copy of its handle narrowed with
   `HandleDuplicate` to the rights the VFS needs. The VFS maps the buffer for
-  that request only. `cp` and `bench io` move 64 KiB per exchange this way;
-  PID 1 has the VFS fill an executable object with one `FillExecutable`.
+  that request only. `cp` and `bench io` move 64 KiB per exchange this way.
+- Executable preparation fills only a one-page sealed header object. Later
+  page faults use bounded offset reads through the source's private VFS
+  session and the shared file-cache transport page (ADR 0121).
 - File data between the VFS and the FAT32 service moves through the file
   cache, a shared-memory object both map: 128 KiB of data slots and a page
   for names too long for a message (ADR 0098, ADR 0110). A `GFSPRT01` read

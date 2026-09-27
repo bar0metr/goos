@@ -126,6 +126,9 @@ func executableCreate(loader uint64, size uint64, address unsafe.Pointer) uint64
 //go:linkname executableWrite goos_executable_write
 func executableWrite(executable uint64, address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname executableSource goos_executable_source
+func executableSource(loader uint64, session uint64, descriptor unsafe.Pointer) uint64
+
 //go:linkname vmMap goos_vm_map
 func vmMap(descriptor unsafe.Pointer, protection uint64, flags uint64) uint64
 

@@ -2,8 +2,8 @@
 
 package main
 
-// Executable objects: kernel memory PID 1 fills with a program it read from a
-// filesystem, and launches once the object has sealed (ADR 0097).
+// Executable sources: sealed snapshots and immutable VFS-backed open objects
+// used without pathname lookup in the kernel (ADR 0097, ADR 0121).
 
 import (
 	"goos/internal/capability"
@@ -11,6 +11,7 @@ import (
 	"goos/kernel/device"
 	"goos/kernel/executable"
 	"goos/kernel/handle"
+	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
 	"goos/kernel/mm/vm"
@@ -19,8 +20,9 @@ import (
 )
 
 var (
-	executables    executable.Table
-	executableWire [8]byte
+	executables          executable.Table
+	executableWire       [8]byte
+	executableSourceWire [32]byte
 	// launchObject is the object a launch is reading, for executablePage.
 	// Launches run one at a time in the kernel exclusion domain.
 	launchObject *executable.Object
@@ -37,6 +39,53 @@ func executablePage(index uint64) ([]byte, bool) {
 		return nil, false
 	}
 	return vm.PhysicalPage(frame)
+}
+
+// ExecutableSource consumes a prepared VFS session and creates a sealed
+// executable source. descriptor contains the file handle, file size, and the
+// sealed header object, then receives that object's handle as the source.
+func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, descriptor uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
+	if !allowed || authority.Object() != device.LoaderObject {
+		return kcall.StatusPermissionDenied
+	}
+	endpointCap, allowed := owner.Handles().Lookup(handle.ID(session), handle.TypeChannel, capability.Read|capability.Write|capability.Wait)
+	channelID, side, valid := ipc.DecodeEndpointObject(endpointCap.Object())
+	channel, live := channelRegistry.Lookup(channelID)
+	if !allowed || !valid || !live || !channel.Alive(side) {
+		return kcall.StatusPermissionDenied
+	}
+	clear(executableSourceWire[:])
+	if !vm.CopyIn(handler.root, descriptor, executableSourceWire[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	if !vm.CopyOut(handler.root, descriptor, executableSourceWire[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	file := decodeUint64(executableSourceWire[0:8])
+	size := decodeUint64(executableSourceWire[8:16])
+	headerHandle := handle.ID(decodeUint64(executableSourceWire[16:24]))
+	headerCap, allowed := owner.Handles().Lookup(headerHandle, handle.TypeMemory, capability.Execute|capability.Write)
+	object, known := executables.Find(headerCap.Object())
+	headerSize := min(size, uint64(vm.PageSize))
+	if file == 0 || size == 0 || size > executable.MaxSize || !allowed || !known || !object.Sealed() || object.FileBacked() || object.Size() != headerSize {
+		return kcall.StatusInvalidArgument
+	}
+	if !object.SetSource(size, channelID, side, file) {
+		return kcall.StatusInvalidArgument
+	}
+	// Ownership moves into the source. The same object handle now names the
+	// full file-backed image and cannot accept further writes.
+	owner.Handles().Close(handle.ID(session))
+	putUint64(executableSourceWire[24:32], uint64(headerHandle))
+	if !vm.CopyOut(handler.root, descriptor, executableSourceWire[:]) {
+		panicSerial("executable source descriptor changed after validation")
+	}
+	return kcall.StatusOK
 }
 
 // ExecutableCreate creates an empty executable object of size bytes, charged
@@ -146,6 +195,12 @@ func destroyExecutable(id uint64) {
 	if !found {
 		return
 	}
+	if channelID, side, _, fileBacked := object.Source(); fileBacked {
+		if channel, live := channelRegistry.Lookup(channelID); live && channel.Close(side) {
+			wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
+			releaseChannelSlot(channelID)
+		}
+	}
 	object.ReleaseFrames(&pageAllocator, vm.PhysicalPage)
 	if payer := process.ID(object.Payer()); payer != releasingProcess {
 		if holder, alive := processRegistry.ByID(payer); alive {
@@ -198,9 +253,9 @@ func adoptExecutable(spawned *process.Process, id uint64) bool {
 
 // launchSource returns the bytes a launch names and their origin. Execute on
 // the handle is the authority: on the system image object, for an extent of
-// the image (ADR 0093), or on a sealed executable object, for the whole object
-// (ADR 0097). An object's pages are copied into the process as it touches
-// them and never shared: its identity is not the identity of its bytes.
+// the image (ADR 0093), or on a sealed executable source for the whole file
+// (ADR 0121). Pages are copied into the process as it touches them and never
+// shared: source identity is not process-page identity.
 func launchSource(named supervisor.Executable) (loader.Source, loader.Origin, supervisor.LaunchStatus) {
 	handles := bootInitProcess.Handles()
 	if authority, allowed := handles.Lookup(named.Image, handle.TypeDevice, capability.Execute); allowed {

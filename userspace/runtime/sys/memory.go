@@ -4,6 +4,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
+	"goos/kernel/vfs"
 	"unsafe"
 )
 
@@ -128,4 +129,17 @@ func ExecutableCreate(loader handle.ID, size uint64) (handle.ID, kcall.Status) {
 // executable object. The object seals when its last byte is written.
 func ExecutableWrite(executable handle.ID, data []byte) kcall.Status {
 	return status(executableWrite(uint64(executable), address(data), uintptr(len(data))))
+}
+
+// ExecutableSource consumes session and creates an immutable executable source
+// for file. header is the number of prepared bytes in the shared transport
+// page; size is the stable file size.
+func ExecutableSource(loader, session handle.ID, file vfs.Handle, object handle.ID, size uint64) (handle.ID, kcall.Status) {
+	var descriptor [4]uint64
+	descriptor[0], descriptor[1], descriptor[2] = uint64(file), size, uint64(object)
+	result := status(executableSource(uint64(loader), uint64(session), unsafe.Pointer(&descriptor[0])))
+	if result != kcall.StatusOK {
+		return 0, result
+	}
+	return handle.ID(descriptor[3]), kcall.StatusOK
 }

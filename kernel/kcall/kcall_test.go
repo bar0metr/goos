@@ -152,6 +152,11 @@ func (handler *testHandler) ExecutableWrite(executable uint64, address uint64, l
 	return StatusOK
 }
 
+func (handler *testHandler) ExecutableSource(device uint64, session uint64, descriptor uint64) Status {
+	handler.channel, handler.length, handler.address = device, session, descriptor
+	return StatusOK
+}
+
 func (handler *testHandler) VMMap(descriptor uint64, protection uint64, flags uint64) Status {
 	handler.address, handler.length, handler.channel = descriptor, protection, flags
 	return StatusOK
@@ -471,7 +476,10 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationVMMap != 39 || OperationVMQuery != 43 || OperationMemoryCreate != 44 || OperationHandleDuplicate != 45 || OperationClockNow != 46 || OperationClockSet != 47 {
 		t.Fatalf("operations %d %d %d %d", OperationVMMap, OperationVMQuery, OperationMemoryCreate, OperationHandleDuplicate)
 	}
-	if result := Dispatch(Request{Operation: OperationClockSet + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if OperationExecutableSource != 48 {
+		t.Fatalf("source operation %d", OperationExecutableSource)
+	}
+	if result := Dispatch(Request{Operation: OperationExecutableSource + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -490,6 +498,11 @@ func TestDispatchExecutableCalls(t *testing.T) {
 		if result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
 			t.Fatalf("write of %d reached the handler: %#v", length, result)
 		}
+	}
+	handler = &testHandler{}
+	result = Dispatch(Request{Operation: OperationExecutableSource, Arg0: 7, Arg1: 8, Arg2: 9}, handler)
+	if result.Status != StatusOK || handler.channel != 7 || handler.length != 8 || handler.address != 9 {
+		t.Fatalf("source: %#v, handler: %#v", result, handler)
 	}
 }
 

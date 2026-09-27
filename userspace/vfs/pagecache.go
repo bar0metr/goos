@@ -10,6 +10,10 @@ import (
 // no read of the page first.
 const scratchSlot = fsproto.CachePages - 1
 
+// ExecutableSlot is not indexed as cached file data. An executable page reply
+// remains there until the kernel consumes the reply in the sending call.
+const ExecutableSlot = scratchSlot
+
 // cachedPage is one page of a file held in a slot of the file cache. length
 // is how many of its bytes are file data; a page shorter than PageSize is the
 // last page of its file.

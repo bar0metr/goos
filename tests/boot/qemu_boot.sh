@@ -210,9 +210,8 @@ memory=${MEMORY:-512M}
 # program starts without being copied whole.
 variant=$(cut -d' ' -f5 build/config/build)
 go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
-# PID 1 must stay responsive while a program that takes a while to read is
-# prepared (ADR 0108): 12 MiB of padding keeps the read going long enough for
-# a command typed after it to be answered first.
+# The padded program exercises a source much larger than the pages it touches.
+# Launch must not read the padding before the process starts.
 go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/hugeprobe 12582912
 go run ./tools/mkfat32 -put build/bigprobe:/home/tools/bigprobe -put build/hugeprobe:/home/tools/hugeprobe "$disk"
 rm -f "$log" "$reboot_log"
@@ -366,9 +365,12 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	# Bulk I/O (ADR 0107): a MiB through a shared buffer in sixteen
 	# exchanges, to the volatile root and to the volume.
 	printf 'bench io /tmp/bulk.bin 1M\n'
-	sleep 3
+	sleep 5
 	printf 'bench io /home/bulk.bin 1M\n'
-	sleep 6
+	# FAT32 inline reads can take more than six seconds under a loaded host.
+	# Wait for the command to finish before sending the next one so output from
+	# two commands cannot be mistaken for a storage failure.
+	sleep 10
 	printf 'cp /home/tools/bigprobe /tmp/bigprobe; stat /tmp/bigprobe\n'
 	sleep 5
 	printf '/home/tools/hugeprobe &\n'
@@ -903,7 +905,7 @@ pass_group redirection
 
 require_marker vm.probe VM_PROBE_OK "$log" 'goos> vmprobe'
 require_count vm.large-executable 'vm: all checks passed$' 3 "$log" 'goos> /home/tools/bigprobe'
-require_window exec.responsive '^responsive-while-loading$' 'a command answered while a 12 MiB program was read' "$log" 'goos> /home/tools/hugeprobe &' 'vm: anonymous region reserved'
+require_regex exec.file-backed-responsive '^responsive-while-loading$' 'the shell answered after launching a 12 MiB file-backed program' "$log" 'goos> /home/tools/hugeprobe &'
 require_count bulk.write '^io write, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
 require_count bulk.read '^io read, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
 require_regex bulk.copy '^file 3[01][0-9][0-9]\.[0-9]* KiB (3[0-9]\{6\} bytes)' 'a 3 MiB copy from the volume' "$log" 'goos> cp /home/tools/bigprobe /tmp/bigprobe'

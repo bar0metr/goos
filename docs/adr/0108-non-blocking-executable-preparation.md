@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0097 (programs from files), ADR 0106 (lazy executables),
-and ADR 0107 (bulk I/O).
+Accepted. Amended by ADR 0121, which keeps the asynchronous state machine but
+replaces whole-file fills with one-page source preparation.
 
 ## Context
 
@@ -17,10 +17,11 @@ slow or stuck filesystem service could still hold PID 1 hostage.
 
 **Preparation is a job state.** A job whose stages name programs outside
 `/system` is first prepared: for each such stage, PID 1 opens a VFS session of
-the job's own, checks the file, creates the executable object, sends one
-`FillExecutable` request with a Write-only duplicate of the object handle, and
+the job's own, checks the file, creates a one-page header object, sends one
+`PrepareExecutable` request with a Write-only duplicate of that object, and
 returns to its loop. The session is one more channel in PID 1's `WaitAny`
-set; its answer seals the stage's object or records why it failed, and the
+set; its answer seals the header. PID 1 converts it into a file-backed source
+that consumes the session, or records why preparation failed, and the
 next stage starts. When no stage is left, the pipeline starts as before and
 takes the prepared objects in stage order.
 
@@ -51,8 +52,8 @@ way.
 
 ## Consequences
 
-- PID 1 stays responsive while a large program loads: the boot test starts a
-  12 MiB program in the background and runs a command while it loads.
+- PID 1 reads only one header page during preparation. A 12 MiB padded program
+  starts without waiting for or allocating its untouched padding.
 - Stopping a job during preparation leaks nothing: its objects are closed, and
   their pages return to PID 1's quota.
 - A job's state now includes its preparation; `execJob` holds the prepared

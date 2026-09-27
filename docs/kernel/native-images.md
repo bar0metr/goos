@@ -38,7 +38,7 @@ BSS is not part of the file.
 
 Each segment becomes a pinned image region of the process (ADR 0104) that
 records where its bytes come from: an extent of the system image or an
-executable object (ADR 0106). No private page is loaded at launch. When the
+executable source (ADR 0106, ADR 0121). No private page is loaded at launch. When the
 process first touches a page, the kernel copies it from that origin, or zeroes
 it past the segment's file bytes, before mapping it with the segment's final
 permissions, which preserves W^X. A large program therefore starts in the
@@ -46,7 +46,9 @@ time a small one does and costs only the pages it uses.
 
 Read-only segments of images from the system image are loaded once and their
 frames shared by every process running the image (ADR 0081). An executable
-object stays alive while any process started from it runs.
+source stays alive while any process started from it runs. A VFS-backed source
+retains only its header page; other pages are read from its stable open object
+on demand.
 
 Relocations and executable ASLR remain future work. Images are static
 `ET_EXEC` programs linked at `0x40002000`; what randomizing their placement

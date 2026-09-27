@@ -1,11 +1,11 @@
-// Package executable holds executable objects: kernel memory a launcher fills
-// with the bytes of one program. An object seals itself when its last byte is
-// written; from then on it can be launched and never changed (ADR 0097).
+// Package executable holds sealed launch sources. A snapshot object contains
+// all program bytes. A file-backed object retains one header page and a stable
+// VFS endpoint that supplies later pages by offset (ADR 0097, ADR 0121).
 //
 // The object is never mapped writable into any process. Its bytes enter only
 // through Write and leave only through the loader, which copies a page into a
-// process when the process first touches it (ADR 0106), so a sealed object is
-// immutable and the bytes the loader validates are the bytes it loads.
+// process when the process first touches it (ADR 0106). VFS pins a file-backed
+// object's open identity against mutation for the same guarantee.
 //
 // Its frames are kept in a page list, so an object is bounded by the page
 // quota of whoever pays for it rather than by a fixed array. It is reference
@@ -53,8 +53,12 @@ type Object struct {
 	// payer is the process the object's pages are charged to: the launcher
 	// that created it, until the first process started from it takes the
 	// charge over.
-	payer    uint64
-	launched bool
+	payer       uint64
+	launched    bool
+	fileBacked  bool
+	channelID   uint64
+	channelSide uint8
+	file        uint64
 }
 
 func (object *Object) ID() uint64 { return object.id }
@@ -62,7 +66,28 @@ func (object *Object) ID() uint64 { return object.id }
 func (object *Object) Size() uint64 { return object.size }
 
 // Sealed reports whether every byte has been written.
-func (object *Object) Sealed() bool { return object.id != 0 && object.filled == object.size }
+func (object *Object) Sealed() bool {
+	return object.id != 0 && (object.fileBacked || object.filled == object.size)
+}
+
+// FileBacked reports whether bytes after the retained header page come from a
+// pinned VFS open object.
+func (object *Object) FileBacked() bool { return object.fileBacked }
+
+// Source identifies the endpoint and VFS open handle that serve random reads.
+func (object *Object) Source() (uint64, uint8, uint64, bool) {
+	return object.channelID, object.channelSide, object.file, object.fileBacked
+}
+
+// SetSource turns a sealed header object with one retained page into a file-backed
+// source. The endpoint is owned by the object from this point.
+func (object *Object) SetSource(size uint64, channelID uint64, side uint8, file uint64) bool {
+	if object.id == 0 || !object.Sealed() || object.frames.Len() != 1 || size < object.size || size > MaxSize || channelID == 0 || side > 1 || file == 0 {
+		return false
+	}
+	object.size, object.fileBacked, object.channelID, object.channelSide, object.file = size, true, channelID, side, file
+	return true
+}
 
 // Pages is the number of data pages the object needs for its size.
 func (object *Object) Pages() int { return int((object.size + vm.PageSize - 1) / vm.PageSize) }
@@ -70,6 +95,9 @@ func (object *Object) Pages() int { return int((object.size + vm.PageSize - 1) /
 // Charge is every page the object costs: its data pages and the index pages
 // that list them.
 func (object *Object) Charge() uint32 {
+	if object.fileBacked {
+		return uint32(1 + pagelist.IndexPagesFor(1))
+	}
 	return uint32(uint64(object.Pages()) + pagelist.IndexPagesFor(uint64(object.Pages())))
 }
 
@@ -106,6 +134,9 @@ func (object *Object) ReleaseFrames(frames pagelist.Frames, view pagelist.View) 
 
 // Complete reports whether every page the object needs has been added.
 func (object *Object) Complete() bool {
+	if object.fileBacked {
+		return object.frames.Len() == 1
+	}
 	return object.id != 0 && object.frames.Len() == uint64(object.Pages())
 }
 
@@ -113,7 +144,7 @@ func (object *Object) Complete() bool {
 // append: a caller cannot go back and change bytes it wrote, and an object
 // cannot be written past its size or once sealed.
 func (object *Object) NextWrite(length uint64) (uint64, bool) {
-	if !object.Complete() || length == 0 || length > MaxWrite || length > object.size-object.filled {
+	if object.fileBacked || !object.Complete() || length == 0 || length > MaxWrite || length > object.size-object.filled {
 		return 0, false
 	}
 	return object.filled, true
@@ -203,6 +234,7 @@ func (table *Table) Remove(id uint64) bool {
 // whole page-list root as a temporary, which the kernel's heap never frees.
 func (object *Object) reset() {
 	object.id, object.size, object.filled, object.refs, object.payer, object.launched = 0, 0, 0, 0, 0, false
+	object.fileBacked, object.channelID, object.channelSide, object.file = false, 0, 0, 0
 	object.frames.Reset()
 }
 

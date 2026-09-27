@@ -99,6 +99,10 @@ func executableWrite(executable uint64, address unsafe.Pointer, size uintptr) ui
 	return unsupported
 }
 
+func executableSource(loader uint64, session uint64, descriptor unsafe.Pointer) uint64 {
+	return unsupported
+}
+
 func vmMap(descriptor unsafe.Pointer, protection uint64, flags uint64) uint64 { return unsupported }
 
 func vmUnmap(address uint64, length uint64) uint64 { return unsupported }

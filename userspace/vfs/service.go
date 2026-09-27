@@ -188,6 +188,17 @@ func (service *Service) ReadFile(owner vfs.Owner, file vfs.Handle, target []byte
 	return service.namespace.Read(owner, file, target)
 }
 
+// PrepareExecutable pins file against writes and truncation. The pin follows
+// the stable open object across rename and ends when its session closes.
+func (service *Service) PrepareExecutable(owner vfs.Owner, file vfs.Handle) vfs.Status {
+	return service.namespace.PrepareExecutable(owner, file)
+}
+
+// ReadFileAt reads source bytes without disturbing the ordinary file cursor.
+func (service *Service) ReadFileAt(owner vfs.Owner, file vfs.Handle, offset uint64, target []byte) (int, vfs.Status) {
+	return service.namespace.ReadAt(owner, file, offset, target)
+}
+
 // WriteFile writes data to an open file at its position and advances it.
 func (service *Service) WriteFile(owner vfs.Owner, file vfs.Handle, data []byte) (int, vfs.Status) {
 	return service.namespace.Write(owner, file, data)
