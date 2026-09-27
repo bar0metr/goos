@@ -217,6 +217,15 @@ directory and dot-entry faults, malformed or orphan LFN chains, duplicate
 aliases and impossible volume-label metadata. It prints a stable summary and
 returns non-zero when it finds any error. It never writes or repairs.
 
+`fsck-fat --repair auto` explicitly enables the safe repair pass (ADR 0118)
+through the same exclusive unmounted slice. It restores boot/backup metadata
+from the valid peer, synchronizes mirrored FAT copies, removes broken orphan
+LFN slots, trims chains beyond logical EOF, reclaims clusters only after a
+complete unambiguous ownership walk, and recalculates both FSInfo copies.
+Cross-linked live files and other ambiguous damage remain reported and make the
+command fail. Repair output distinguishes applied corrections from residual
+errors, and repeating a successful repair is a zero-change operation.
+
 ## Resident sectors and bounded failure
 
 The FAT32 service keeps a write-through window of sixteen resident 512-byte

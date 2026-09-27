@@ -545,6 +545,19 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 2
 	printf 'cat /home/demo/message.txt; echo after-fsck\n'
 	sleep 3
+	# Phase 5: repair is explicit, gets the same exclusive slice, reports an
+	# idempotent zero-change pass on the clean image, and remounts it again.
+	printf 'fsck-fat --repair auto\n'
+	waited=0
+	while [ "$waited" -lt 60 ]; do
+		renewed=$(grep -c 'LOG_SESSION_RENEWED_OK' "$log" 2>/dev/null || true)
+		[ "$renewed" -ge 2 ] && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	sleep 2
+	printf 'cat /home/demo/message.txt; echo after-fsck-repair\n'
+	sleep 3
 	# The FAT32 service parses the volume in a process of its own (ADR 0096).
 	# Killing it leaves the rest of the namespace working, and its restart
 	# serves the same volume under the mounts and handles the VFS kept.
@@ -747,6 +760,9 @@ require_marker storage.fat32-restarted FAT32_RESTARTED_OK "$log" 'fault fat32'
 require_marker storage.fsck-check FSCK_FAT_CHECK_OK "$log" 'fsck-fat --check auto'
 require_regex storage.fsck-summary '^files=[0-9][0-9]* directories=[1-9][0-9]* used-clusters=[0-9][0-9]* free-clusters=[0-9][0-9]* errors=0$' 'clean fsck summary' "$log" 'fsck-fat --check auto'
 require_window storage.fsck-remounted '^persistent$' 'persistent volume remounted after fsck' "$log" 'FSCK_FAT_CHECK_OK' 'ECHO_PROCESS_OK'
+require_marker storage.fsck-repair FSCK_FAT_REPAIR_OK "$log" 'fsck-fat --repair auto'
+require_regex storage.fsck-repair-summary '^files=[0-9][0-9]* directories=[1-9][0-9]* used-clusters=[0-9][0-9]* free-clusters=[0-9][0-9]* errors=0 repaired=0$' 'idempotent clean repair summary' "$log" 'fsck-fat --repair auto'
+require_window storage.fsck-repair-remounted '^persistent$' 'persistent volume remounted after repair' "$log" 'FSCK_FAT_REPAIR_OK' 'ECHO_PROCESS_OK'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
 # File data moves between the VFS and the FAT32 service through the file cache
