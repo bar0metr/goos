@@ -70,9 +70,16 @@ func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 	if !service.AttachFilesystem(newLoopback(device)) {
 		t.Fatal("restarted service refused")
 	}
+	// Stable object cookies belong to one filesystem-service lifetime. A
+	// service restart invalidates its old open objects; pathname lookup on the
+	// newly mounted service remains usable.
 	read := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
-	if read.Status != vfs.StatusOK || string(read.Data) != "survives a restart" {
+	if read.Status != vfs.StatusNotFound || len(read.Data) != 0 {
 		t.Fatalf("read through a handle opened before the restart = %d, %q", read.Status, read.Data)
+	}
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	if got := readAll(t, service, "/home/note.txt"); got != "survives a restart" {
+		t.Fatalf("read after reopening on restarted service = %q", got)
 	}
 	if !service.Sync() {
 		t.Fatal("sync failed after the restart")

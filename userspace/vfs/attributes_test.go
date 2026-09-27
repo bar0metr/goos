@@ -38,14 +38,16 @@ func TestAttributeCacheSavesExchanges(t *testing.T) {
 		t.Fatalf("create = %d", reply.Status)
 	}
 	opened, exchanges := dispatchCounted(t, service, transport, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read | vfs.Write, Path: path})
-	if opened.Status != vfs.StatusOK || exchanges > 1 {
+	// Opening a persistent file looks up its attributes and acquires its
+	// stable filesystem object.
+	if opened.Status != vfs.StatusOK || exchanges > 2 {
 		t.Fatalf("open = %d with %d exchanges", opened.Status, exchanges)
 	}
 	if reply, _ := dispatchCounted(t, service, transport, vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte("twelve bytes")}); reply.Status != vfs.StatusOK {
 		t.Fatalf("write = %d", reply.Status)
 	}
 	stat, exchanges := dispatchCounted(t, service, transport, vfs.Request{Operation: vfs.OperationStat, Path: path})
-	if stat.Status != vfs.StatusOK || stat.Size != 12 || exchanges != 0 {
+	if stat.Status != vfs.StatusOK || stat.Size != 12 || exchanges != 1 {
 		t.Fatalf("stat after write = %d, size %d, %d exchanges", stat.Status, stat.Size, exchanges)
 	}
 	// The handle's offset is at the end after the write: the read is known to

@@ -22,7 +22,12 @@ opaque backend node operations. Kernel APIs and RAMFS never parse POSIX paths.
 
 Open-file handles carry generations, backend/mount identity, independent
 offsets, and explicit read/write rights. Closing a handle increments its
-generation. Reads and writes advance only that open object's offset.
+generation. Reads and writes advance only that open object's offset. A backend
+that provides stable open objects replaces the pathname lookup node with an
+opaque live-object cookie for the handle lifetime (ADR 0119). FAT32 moves that
+object with its directory entry, so an open handle survives rename across
+directories. Unlink of an open FAT32 file is refused until its last handle is
+closed; delete-while-open is not part of the native 0.1.4 contract.
 
 Every open file belongs to the session that opened it. A handle is valid only
 on that session: another session's handle is answered as not found, so one
@@ -67,7 +72,9 @@ with a session notice over channels they already hold; the FAT32 service
 restarts behind it and is mounted again. `/tmp` starts empty, and files open
 in the old instance are gone.
 A dead or stalled FAT32 service is an I/O error on those three mounts only; a
-restarted one is attached under the same mounts and open files (ADR 0096). Kernel launch
+restarted one is attached under the same mounts. Stable FAT32 object cookies
+belong to the service instance that issued them, so callers must reopen old
+handles after a FAT32 service restart (ADR 0119). Kernel launch
 grants explicitly identify the client or server side of a channel; neither
 process infers endpoint identity from handle numbers or launch order.
 

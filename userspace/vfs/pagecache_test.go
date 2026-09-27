@@ -46,6 +46,9 @@ func readAll(t *testing.T, service *Service, path string) string {
 func writeAt(t *testing.T, service *Service, path string, offset uint64, data string) {
 	t.Helper()
 	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(path)})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open %s for write = %d", path, opened.Status)
+	}
 	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationSeek, Handle: opened.Handle, Offset: offset})
 	for len(data) != 0 {
 		chunk := min(len(data), vfs.MaxProtocolData)
@@ -79,15 +82,18 @@ func TestPageCacheServesRepeatedReads(t *testing.T) {
 	if readAll(t, service, "/persist/big") != payload {
 		t.Fatal("first read changed the file")
 	}
-	// Four pages and the lookups of the open; a chunked read took 74.
-	if cold := transport.exchanges - before; cold > 6 {
+	// Four pages, pathname lookup, object acquire, and object release; a
+	// chunked read took 74 exchanges.
+	if cold := transport.exchanges - before; cold > 8 {
 		t.Fatalf("cold read took %d exchanges", cold)
 	}
 	before = transport.exchanges
 	if readAll(t, service, "/persist/big") != payload {
 		t.Fatal("cached read changed the file")
 	}
-	if warm := transport.exchanges - before; warm != 0 {
+	// Cached file data avoids reads; acquire and release still establish and
+	// end the stable open-object lifetime.
+	if warm := transport.exchanges - before; warm != 2 {
 		t.Fatalf("cached read took %d exchanges", warm)
 	}
 }

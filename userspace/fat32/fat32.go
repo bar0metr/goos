@@ -30,6 +30,10 @@ const (
 	entrySize = uint64(32)
 	// maxDirEntries is the FAT limit on one directory: 65536 entries, 2 MiB.
 	maxDirEntries = 65536
+	// liveObjectSlots matches the namespace-wide open-file bound. Cookies use
+	// the high bit, outside the directory-location NodeID range.
+	liveObjectSlots = 256
+	liveObjectFlag  = uint64(1) << 63
 
 	// A NodeID packs the directory key (0 for the root, otherwise the first
 	// cluster of the directory) above slotBits and the entry index plus
@@ -124,6 +128,7 @@ type FileSystem struct {
 	cache     [cacheSectors]cachedSector
 	clock     uint64
 	positions [positionSlots]position
+	objects   [liveObjectSlots]liveObject
 	victim    int
 	// want, scan, and name are the per-operation name buffers. One request is
 	// in flight at a time, so they never need to be allocated.
@@ -217,6 +222,7 @@ func (fs *FileSystem) reset() {
 	for index := range fs.cache {
 		fs.cache[index].valid, fs.cache[index].dirty = false, false
 	}
+	fs.resetObjects()
 	fs.forgetPositions()
 }
 

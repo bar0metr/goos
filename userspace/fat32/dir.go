@@ -81,6 +81,11 @@ func (fs *FileSystem) directoryOf(id ramfs.NodeID) (directory, ramfs.Status) {
 // reported as such.
 func (fs *FileSystem) node(id ramfs.NodeID) (directory, int, [32]byte, ramfs.Status) {
 	var entry [32]byte
+	var status ramfs.Status
+	id, status = fs.objectLocation(id)
+	if status != ramfs.StatusOK {
+		return directory{}, 0, entry, status
+	}
 	key, slot := uint64(id)>>slotBits, uint64(id)&slotMask
 	if !fs.mounted || slot < slotBase || slot >= maxDirEntries+slotBase || key > uint64(clusterMask) || key != 0 && !fs.valid(uint32(key)) {
 		return directory{}, 0, entry, ramfs.StatusNotFound

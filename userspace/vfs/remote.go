@@ -133,6 +133,47 @@ func (remote *Remote) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Node
 	return remote.looked(remote.named(fsproto.OperationOpen, 0, parent, name))
 }
 
+func (remote *Remote) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationAcquire, Node: id})
+	if status == ramfs.StatusOK && reply.Node == 0 {
+		remote.forgetAll()
+		return 0, ramfs.StatusIOError
+	}
+	if status == ramfs.StatusOK {
+		if stat, known := remote.cached(id); known {
+			stat.ID = reply.Node
+			remote.remember(stat)
+		}
+		remote.pages.Rebind(id, reply.Node)
+		// Mutations through the stable object update its cookie's attributes.
+		// Do not leave a second, path-location keyed copy behind to go stale.
+		remote.forget(id)
+	}
+	return reply.Node, status
+}
+
+func (remote *Remote) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationRelease, Node: id})
+	if status != ramfs.StatusOK || reply.Node == 0 {
+		remote.forget(id)
+		remote.pages.Forget(id)
+		if status == ramfs.StatusOK {
+			status = ramfs.StatusIOError
+		}
+		return 0, status
+	}
+	if reply.Node == id {
+		return id, status
+	}
+	if stat, known := remote.cached(id); known {
+		stat.ID = reply.Node
+		remote.remember(stat)
+	}
+	remote.forget(id)
+	remote.pages.Rebind(id, reply.Node)
+	return reply.Node, status
+}
+
 func (remote *Remote) CreateName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
 	// The parent's own entry may change with what it contains.
 	remote.forget(parent)

@@ -16,6 +16,51 @@ func mountedNamespace(t testing.TB) (*Namespace, *ramfs.FileSystem) {
 	return namespace, fs
 }
 
+type trackedObjectBackend struct {
+	*ramfs.FileSystem
+	acquired int
+	released int
+}
+
+func (backend *trackedObjectBackend) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	backend.acquired++
+	return id, ramfs.StatusOK
+}
+
+func (backend *trackedObjectBackend) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	backend.released++
+	return id, ramfs.StatusOK
+}
+
+func TestObjectBackendLifetimeFollowsHandlesAndOwner(t *testing.T) {
+	filesystem := &ramfs.FileSystem{}
+	root := filesystem.Init()
+	if _, status := filesystem.Create(root, []byte("file")); status != ramfs.StatusOK {
+		t.Fatal(status)
+	}
+	backend := &trackedObjectBackend{FileSystem: filesystem}
+	namespace := &Namespace{}
+	if status := namespace.Mount([]byte("/"), backend, root); status != StatusOK {
+		t.Fatal(status)
+	}
+	first, status := namespace.Open(1, []byte("/file"), Read)
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	if _, status = namespace.Open(1, []byte("/file"), Read); status != StatusOK {
+		t.Fatal(status)
+	}
+	if backend.acquired != 2 {
+		t.Fatalf("acquired=%d", backend.acquired)
+	}
+	if status = namespace.Close(1, first); status != StatusOK || backend.released != 1 {
+		t.Fatalf("close=%d released=%d", status, backend.released)
+	}
+	if closed := namespace.CloseOwner(1); closed != 1 || backend.released != 2 {
+		t.Fatalf("closed=%d released=%d", closed, backend.released)
+	}
+}
+
 func TestPathAndOpenFileLifecycle(t *testing.T) {
 	namespace, _ := mountedNamespace(t)
 	if namespace.Create([]byte("/etc"), true) != StatusOK || namespace.Create([]byte("/etc/motd"), false) != StatusOK {

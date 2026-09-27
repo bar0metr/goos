@@ -89,6 +89,13 @@ type Backend interface {
 	UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+// ObjectBackend gives an opened file identity independent of pathname lookup.
+// Backends whose node IDs are already stable need not implement it.
+type ObjectBackend interface {
+	AcquireObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
+	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
+}
+
 type mount struct {
 	backend Backend
 	root    ramfs.NodeID
@@ -221,6 +228,16 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	if namespace.OpenBy(owner) >= MaxOpenPerOwner {
 		return 0, StatusResourceExhausted
 	}
+	free := -1
+	for index := range namespace.files {
+		if !namespace.files[index].used {
+			free = index
+			break
+		}
+	}
+	if free < 0 {
+		return 0, StatusResourceExhausted
+	}
 	mountIndex, node, status := namespace.Resolve(path)
 	if status != StatusOK {
 		return 0, status
@@ -229,17 +246,22 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	if backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
 		return 0, StatusBackendError
 	}
-	for index := range namespace.files {
-		entry := &namespace.files[index]
-		if !entry.used {
-			if entry.generation == 0 {
-				entry.generation = 1
+	backend := namespace.mounts[mountIndex].backend
+	if objects, ok := backend.(ObjectBackend); ok {
+		node, backendStatus = objects.AcquireObject(node)
+		if backendStatus != ramfs.StatusOK || node == 0 {
+			if backendStatus == ramfs.StatusOK {
+				backendStatus = ramfs.StatusIOError
 			}
-			entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
-			return encodeHandle(index, entry.generation), StatusOK
+			return 0, mapStatus(backendStatus)
 		}
 	}
-	return 0, StatusResourceExhausted
+	entry := &namespace.files[free]
+	if entry.generation == 0 {
+		entry.generation = 1
+	}
+	entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
+	return encodeHandle(free, entry.generation), StatusOK
 }
 
 func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
@@ -247,8 +269,7 @@ func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
 	if status != StatusOK {
 		return status
 	}
-	entry.release()
-	return StatusOK
+	return namespace.release(entry)
 }
 
 // CloseOwner closes every file owner holds, when the session it names has
@@ -257,11 +278,21 @@ func (namespace *Namespace) CloseOwner(owner Owner) int {
 	closed := 0
 	for index := range namespace.files {
 		if entry := &namespace.files[index]; owner != 0 && entry.used && entry.owner == owner {
-			entry.release()
+			namespace.release(entry)
 			closed++
 		}
 	}
 	return closed
+}
+
+func (namespace *Namespace) release(entry *openFile) Status {
+	status := StatusOK
+	if objects, ok := namespace.mounts[entry.mount].backend.(ObjectBackend); ok {
+		_, backendStatus := objects.ReleaseObject(entry.node)
+		status = mapStatus(backendStatus)
+	}
+	entry.release()
+	return status
 }
 
 // OpenBy counts the files owner holds open.

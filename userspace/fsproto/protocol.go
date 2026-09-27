@@ -25,8 +25,9 @@ const (
 	// read or write span consecutive slots (ADR 0107); version 5 carries
 	// names of up to 255 bytes, the long ones in the name page (ADR 0110);
 	// version 6 adds the timeout, peer-died, and unsupported statuses; version
-	// 7 widens name lengths for the 1024-byte native name limit.
-	Version = uint16(7)
+	// 7 widens name lengths for the 1024-byte native name limit; version 8
+	// adds stable open-object acquire/release operations (ADR 0119).
+	Version = uint16(8)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -72,6 +73,8 @@ const (
 	OperationReadDir
 	OperationRename
 	OperationUnlink
+	OperationAcquire
+	OperationRelease
 	// OperationFlush makes every completed write durable on the device.
 	OperationFlush
 )
