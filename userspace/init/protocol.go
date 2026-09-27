@@ -11,12 +11,12 @@ import (
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(8)
+	LifecycleVersion    = uint16(9)
 	// MaxProcessName bounds the display name a launch carries. The kernel
 	// records it for ps and resolves nothing from it.
 	MaxProcessName   = 16
 	launchGrantSize  = 16
-	launchHeaderSize = 32
+	launchHeaderSize = 40
 )
 
 // Startup blocks travel through a page shared by PID 1 and the kernel instead
@@ -31,6 +31,16 @@ const (
 type LifecycleOperation uint8
 
 type LaunchStatus uint64
+
+// ResourceProfile names a bounded kernel quota set. PID 1 chooses one at
+// launch; a child receives no operation that can change it.
+type ResourceProfile uint8
+
+const (
+	ProfileTiny ResourceProfile = iota + 1
+	ProfileNormal
+	ProfileLarge
+)
 
 const (
 	LifecycleProcessExited LifecycleOperation = iota + 1
@@ -114,6 +124,7 @@ type LifecycleEvent struct {
 	CapabilityCount uint8
 	StartupSlot     uint8
 	StartupSize     uint32
+	ResourceProfile ResourceProfile
 }
 
 func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
@@ -128,13 +139,13 @@ func ProcessExited(process uint64, code uint64) (ipc.Message, bool) {
 }
 
 func LaunchRequest(service uint64, executable Executable, name string, capabilities []Capability, correlation uint64) (ipc.Message, bool) {
-	return LaunchRequestWithStartup(service, executable, name, capabilities, 0, 0, correlation)
+	return LaunchRequestWithStartup(service, executable, name, capabilities, ProfileNormal, 0, 0, correlation)
 }
 
 // LaunchRequestWithStartup names a startup template of startupSize bytes that
 // the caller has written to staging slot startupSlot.
-func LaunchRequestWithStartup(service uint64, executable Executable, name string, capabilities []Capability, startupSlot uint8, startupSize uint32, correlation uint64) (ipc.Message, bool) {
-	if service == 0 || correlation == 0 || !validExtent(executable) || !validProcessName(name) || len(capabilities) > MaxCapabilities || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || launchHeaderSize+len(name)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
+func LaunchRequestWithStartup(service uint64, executable Executable, name string, capabilities []Capability, profile ResourceProfile, startupSlot uint8, startupSize uint32, correlation uint64) (ipc.Message, bool) {
+	if service == 0 || correlation == 0 || !validExtent(executable) || !validProcessName(name) || !validResourceProfile(profile) || len(capabilities) > MaxCapabilities || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || launchHeaderSize+len(name)+len(capabilities)*launchGrantSize > ipc.MaxPayload {
 		return ipc.Message{}, false
 	}
 	for _, grant := range capabilities {
@@ -158,6 +169,10 @@ func LaunchRequestWithStartup(service uint64, executable Executable, name string
 	binary.LittleEndian.PutUint64(message.Payload[16:24], uint64(executable.Image))
 	binary.LittleEndian.PutUint32(message.Payload[24:28], executable.Offset)
 	binary.LittleEndian.PutUint32(message.Payload[28:32], executable.Size)
+	message.Payload[32] = byte(profile)
+	for index := 33; index < launchHeaderSize; index++ {
+		message.Payload[index] = 0
+	}
 	copy(message.Payload[launchHeaderSize:], name)
 	offset := launchHeaderSize + len(name)
 	for _, grant := range capabilities {
@@ -213,13 +228,18 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 			Offset: binary.LittleEndian.Uint32(message.Payload[24:28]),
 			Size:   binary.LittleEndian.Uint32(message.Payload[28:32]),
 		}
-		if service == 0 || size == 0 || size > MaxProcessName || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
+		profile := ResourceProfile(message.Payload[32])
+		reserved := byte(0)
+		for index := 33; index < launchHeaderSize; index++ {
+			reserved |= message.Payload[index]
+		}
+		if service == 0 || size == 0 || size > MaxProcessName || !validResourceProfile(profile) || reserved != 0 || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
 			return LifecycleEvent{}, false
 		}
 		if !validExtent(executable) || !validProcessNameBytes(message.Payload[launchHeaderSize:launchHeaderSize+size]) {
 			return LifecycleEvent{}, false
 		}
-		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, Executable: executable, NameSize: uint8(size), CapabilityCount: uint8(capabilityCount), StartupSlot: startupSlot, StartupSize: startupSize}
+		event := LifecycleEvent{Operation: LifecycleLaunch, Process: service, Executable: executable, NameSize: uint8(size), CapabilityCount: uint8(capabilityCount), StartupSlot: startupSlot, StartupSize: startupSize, ResourceProfile: profile}
 		copy(event.Name[:], message.Payload[launchHeaderSize:launchHeaderSize+size])
 		offset := launchHeaderSize + size
 		for index := 0; index < capabilityCount; index++ {
@@ -250,6 +270,10 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 	default:
 		return LifecycleEvent{}, false
 	}
+}
+
+func validResourceProfile(profile ResourceProfile) bool {
+	return profile >= ProfileTiny && profile <= ProfileLarge
 }
 
 func validCapability(grant Capability) bool {

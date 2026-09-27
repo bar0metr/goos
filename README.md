@@ -150,8 +150,8 @@ The native kernel and the first isolated services are implemented:
 - a bounded generation-safe RAMFS core and versioned service protocol;
 - namespace-scoped VFS mounts, path resolution, open handles, and caches, with
   every mount listed in its parent directory and protected from removal;
-- per-process quotas on channels, streams, tasks, and pages, plus per-process
-  CPU accounting, so one process cannot take a whole kernel table;
+- bounded `tiny`, `normal`, and `large` launch profiles for channels, streams,
+  tasks, and pages, plus per-process CPU accounting;
 - an interrupt-driven console whose input is a waitable object, so a reader
   blocks instead of holding a CPU while it waits to be typed at;
 - a FAT32 mount that checks the geometry an image declares against the device it
@@ -290,7 +290,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.3
+GoOS 0.1.4
 
 CPU: x86_64
 Memory: 367 MiB managed
@@ -425,9 +425,9 @@ sequential execution, bounded stdout `>`/`>>` redirection, bounded stdin `<`
 redirection, and bounded stderr `2>`/`2>>` redirection all work through explicit
 typed handles. The namespace now describes the system it serves: mounts are
 discoverable and protected, `/system` is the read-only boot image, and `/home`
-and `/state` separate user data from mutable system state. Per-process resource
-quotas bound each process's share of every kernel table, and `ps` and `quota`
-report what each process holds. A supervised log service persists the kernel
+and `/state` separate user data from mutable system state. Launch resource
+profiles bound each process's share of kernel tables, and `ps` and `quota`
+report the applied limits and current use. A supervised log service persists the kernel
 ring to `/state`, so records survive a reboot, and a typed configuration service
 holds the system's settings, which the shell and the log service consult.
 GoOS 0.1.0 is released; [docs/releases/0.1.0.md](docs/releases/0.1.0.md)
@@ -446,7 +446,13 @@ directories, page-backed RAMFS, physical memory beyond 1 GiB, virtual-memory
 regions with demand-zero memory, lazily loaded programs of up to 256 MiB,
 shared-memory bulk I/O, a byte-bounded startup ABI and 4096-byte command lines,
 1024-byte native names, full 255-UTF-16-unit VFAT names, 4096-byte paths, and kernel registries that take
-memory as they grow. The next milestone is Linux ELF compatibility.
+memory as they grow. GoOS 0.1.4
+([docs/releases/0.1.4.md](docs/releases/0.1.4.md)) completes the storage and
+memory contract needed by the next milestone: foreign FAT32 geometry and
+metadata, raw/MBR/GPT block slices, dynamic mounts, native FAT repair, stable
+open-file identity, high-half kernel entry trampolines, file-backed executable
+pages, and bounded launch resource profiles. The next milestone is Linux ELF
+compatibility.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors. Background jobs can be

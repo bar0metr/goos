@@ -70,8 +70,10 @@ GoOS native image envelope.
 
 The Manager, service table, exit handling, restart decisions, backoff, and rate
 limit execute in PID 1. The kernel only delivers process deaths and performs
-authorized image loading and process creation. Each launch request also carries
-the service's bounded capability manifest. Entries reference existing PID 1
+authorized image loading and process creation. Each launch request carries the
+service's bounded capability manifest and a `tiny`, `normal`, or `large`
+resource profile. PID 1 chooses the profile, while the kernel owns its numeric
+limits (ADR 0122). Manifest entries reference existing PID 1
 handles and request an exact derived rights mask; the kernel requires Transfer
 authority, prevents escalation, and installs the derived handles into the new
 process before its first Task is created.
@@ -82,7 +84,7 @@ used for per-process VFS clients and prevents accumulation of temporary handles.
 PID 1 also supplies a `GST4` startup template with a unique role name for each
 manifest entry. It writes the template with `startup.Writer` into a 64 KiB
 slot of the launch staging area shared with the kernel (handle `0x100000013`,
-four slots), and the launch message (lifecycle version 8) names the slot and
+four slots), and the launch message (lifecycle version 9) names the slot and
 the template's size (ADR 0062, ADR 0109). After installing all capabilities,
 the kernel writes their actual generation-safe IDs into its copy of the
 startup object before creating the first Task. Services resolve roles rather than depending on handle-table insertion

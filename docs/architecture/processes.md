@@ -110,19 +110,25 @@ yet are retained and retried by the kernel loop instead of being dropped.
 
 ## Resource accounting
 
-A process has a typed resource account alongside its handle table (ADR 0072).
+A process has a typed resource account alongside its handle table (ADR 0072,
+0122).
 Channels, streams, tasks and pages are charged to the process that causes them
 to exist and released when they cease to; a charge that would exceed the quota
 is refused and changes nothing, so a refused request never reaches the global
 table. A quota is not a capability: it cannot be transferred, and no process can
 raise its own or another's.
 
-| Resource | Ordinary | PID 1 | Charged at |
-| --- | ---: | ---: | --- |
-| channels | 4 | 16 | `ChannelCreate`, released when the registry frees the channel |
-| streams | 4 | 16 | `StreamCreate`, released when the registry frees the stream |
-| tasks | 4 | 8 | task binding, released when the task exits |
-| pages | 8192 | 16384 | launch, demand-zero faults and the page tables they need, `MemoryMap`, `DMAAllocate`, `ImageMap`; released by `VMUnmap`, `VMDiscard`, and teardown |
+| Resource | `tiny` | `normal` | `large` | PID 1 | Charged at |
+| --- | ---: | ---: | ---: | ---: | --- |
+| channels | 2 | 4 | 8 | 256 | `ChannelCreate`, released when the registry frees the channel |
+| streams | 8 | 16 | 32 | 64 | `StreamCreate`, released when the registry frees the stream |
+| tasks | 1 | 4 | 8 | 8 | task binding, released when the task exits |
+| pages | 2048 | 8192 | 16384 | 16384 | launch, demand-zero faults and the page tables they need, `MemoryMap`, `DMAAllocate`, `ImageMap`; released by `VMUnmap`, `VMDiscard`, and teardown |
+
+PID 1 chooses a profile in each launch request. Commands and services default
+to `normal`, `quota` uses `tiny`, and `fsck-fat` and `vmprobe` use `large`.
+The kernel maps the profile to the table above; the request carries no numeric
+limits.
 
 PID 1 holds the larger share because it creates the endpoints every other
 process communicates through. The share is granted once, at boot, and
@@ -140,4 +146,4 @@ when it touches a new page is retired with a logged `page quota exhausted`.
 CPU is sampled rather than measured: the timer charges a tick to the task it
 interrupted, and a task's count folds into its process when it exits. `ps`
 reports memory and CPU per process, and `quota` prints each process's held and
-permitted share of every resource.
+permitted share of every resource, which makes the applied profile inspectable.

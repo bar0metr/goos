@@ -90,6 +90,7 @@ func TestRejectsInvalidConfigurationAndDuplicatePID(t *testing.T) {
 	if manager.Register(Definition{Name: "bad/name", Executable: "/bad"}) != StatusInvalidArgument ||
 		manager.Register(Definition{Name: "bad", Executable: "relative"}) != StatusInvalidArgument ||
 		manager.Register(Definition{Name: "bad", Executable: "/bad", Capabilities: []Capability{{}}}) != StatusInvalidArgument ||
+		manager.Register(Definition{Name: "bad", Executable: "/bad", Profile: ProfileLarge + 1}) != StatusInvalidArgument ||
 		manager.Register(Definition{Name: "child", Executable: "/child", Dependencies: []string{"missing"}}) != StatusInvalidConfiguration ||
 		manager.Register(Definition{Name: "root", Executable: "/root"}) != StatusOK ||
 		manager.Register(Definition{Name: "root", Executable: "/other"}) != StatusAlreadyExists {
@@ -169,7 +170,7 @@ func TestAtListsRegisteredServicesInOrder(t *testing.T) {
 
 func TestSetCapabilityRefreshesOneHandle(t *testing.T) {
 	var manager Manager
-	if manager.Register(Definition{Name: "driver", Executable: "/system/driver",
+	if manager.Register(Definition{Name: "driver", Executable: "/system/driver", Profile: ProfileLarge,
 		Capabilities: []Capability{
 			{Name: "ports", Handle: 1, Type: handle.TypeDevice, Rights: capability.Read},
 			{Name: "service", Handle: 2, Type: handle.TypeChannel, Rights: capability.Read | capability.Write},
@@ -188,6 +189,9 @@ func TestSetCapabilityRefreshesOneHandle(t *testing.T) {
 	}
 	if launched.Capabilities[1].Handle != 9 {
 		t.Fatalf("stale handle launched: %d", launched.Capabilities[1].Handle)
+	}
+	if launched.Profile != ProfileLarge {
+		t.Fatalf("profile = %d", launched.Profile)
 	}
 	// The other capabilities are untouched.
 	if launched.Capabilities[0].Handle != 1 {

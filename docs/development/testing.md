@@ -155,7 +155,7 @@ the interrupt-driven console: before it, the shell was charged over seven
 thousand ticks in a session.
 
 The release-shell group asserts the resource accounting: that `ps` reports
-non-zero pages for PID 1, that `quota` shows an ordinary process holding a share
+non-zero pages for PID 1, that `quota` shows its own `tiny` share
 of the stream table rather than all of it, and that PID 1 holds the system
 share. The `QUOTA_OK` marker comes from a validation-build check that drives the
 same charge-then-create order `StreamCreate` uses and requires the refusal to

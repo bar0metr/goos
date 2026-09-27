@@ -163,7 +163,14 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useBlockCheck {
 		grants = append(grants, supervisor.Capability{Name: "block", Handle: checkBlock, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	event, launched := requestLaunch(executable, processName, grants, slot, uint32(len(startupData)))
+	profile := supervisor.ProfileNormal
+	if grantable && equalBytes(command, "quota") {
+		profile = supervisor.ProfileTiny
+	}
+	if grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe")) {
+		profile = supervisor.ProfileLarge
+	}
+	event, launched := requestLaunch(executable, processName, grants, profile, slot, uint32(len(startupData)))
 	if launched != supervisor.LaunchOK {
 		if launched == supervisor.LaunchProcessFailed && event.Operation == 0 {
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")

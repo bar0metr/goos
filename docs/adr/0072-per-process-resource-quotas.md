@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Extends ADR 0007 and ADR 0040.
+Accepted. Extends ADR 0007 and ADR 0040. ADR 0122 replaces the single ordinary
+launch quota with bounded `tiny`, `normal`, and `large` profiles.
 
 ## Context
 

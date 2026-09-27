@@ -44,10 +44,28 @@ const (
 // memory actually used: 32 MiB, room for a full default stack, a large heap,
 // and multi-megabyte buffers.
 const (
-	defaultChannelLimit = 4
-	defaultStreamLimit  = 16
-	defaultTaskLimit    = 4
-	defaultPageLimit    = 8192
+	tinyChannelLimit   = 2
+	tinyStreamLimit    = 8
+	tinyTaskLimit      = 1
+	tinyPageLimit      = 2048
+	normalChannelLimit = 4
+	normalStreamLimit  = 16
+	normalTaskLimit    = 4
+	normalPageLimit    = 8192
+	largeChannelLimit  = 8
+	largeStreamLimit   = 32
+	largeTaskLimit     = 8
+	largePageLimit     = 16384
+)
+
+// ResourceProfile selects one of the bounded quota sets PID 1 may request at
+// launch. The kernel accepts no caller-supplied numeric limits.
+type ResourceProfile uint8
+
+const (
+	ProfileTiny ResourceProfile = iota + 1
+	ProfileNormal
+	ProfileLarge
 )
 
 // PID 1 multiplexes on behalf of every other process: it creates the channel
@@ -75,13 +93,19 @@ type Quota struct {
 	used   [resourceCount]uint32
 }
 
-func defaultQuota() Quota {
+func quotaForProfile(profile ResourceProfile) (Quota, bool) {
 	var quota Quota
-	quota.limits[ResourceChannels] = defaultChannelLimit
-	quota.limits[ResourceStreams] = defaultStreamLimit
-	quota.limits[ResourceTasks] = defaultTaskLimit
-	quota.limits[ResourcePages] = defaultPageLimit
-	return quota
+	switch profile {
+	case ProfileTiny:
+		quota.limits = [resourceCount]uint32{tinyChannelLimit, tinyStreamLimit, tinyTaskLimit, tinyPageLimit}
+	case ProfileNormal:
+		quota.limits = [resourceCount]uint32{normalChannelLimit, normalStreamLimit, normalTaskLimit, normalPageLimit}
+	case ProfileLarge:
+		quota.limits = [resourceCount]uint32{largeChannelLimit, largeStreamLimit, largeTaskLimit, largePageLimit}
+	default:
+		return Quota{}, false
+	}
+	return quota, true
 }
 
 // Quota exposes the account for reporting. Charging goes through the process so

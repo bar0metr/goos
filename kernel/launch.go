@@ -89,7 +89,7 @@ func consumeInitControl() {
 	staged := launchTemplate[:event.StartupSize]
 	pid, processHandle, launchStatus := process.ID(0), handle.ID(0), supervisor.LaunchInvalidImage
 	if len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged) {
-		pid, processHandle, launchStatus = spawnExecutable(event.Executable, event.ProcessName(), event.Capabilities[:event.CapabilityCount], staged)
+		pid, processHandle, launchStatus = spawnExecutable(event.Executable, event.ProcessName(), event.Capabilities[:event.CapabilityCount], event.ResourceProfile, staged)
 	}
 	if launchStatus != supervisor.LaunchOK {
 		level := logfmt.Warn
@@ -110,7 +110,7 @@ func consumeInitControl() {
 // executable object it filled, together with the handle that authorizes
 // executing from it (ADR 0093, ADR 0097). The only name the
 // kernel knows at launch is the bootstrap program's, in bootContinue.
-func spawnExecutable(executable supervisor.Executable, name []byte, grants []supervisor.Capability, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+func spawnExecutable(executable supervisor.Executable, name []byte, grants []supervisor.Capability, resourceProfile supervisor.ResourceProfile, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -190,7 +190,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			}
 		}
 	}
-	ok = process.Init(spawned, pid, process.AddressSpace{Root: root})
+	profile, validProfile := launchResourceProfile(resourceProfile)
+	if !validProfile {
+		abandonSpawn(root, spawned, false)
+		return 0, 0, supervisor.LaunchCapabilityDenied
+	}
+	ok = process.InitWithProfile(spawned, pid, process.AddressSpace{Root: root}, profile)
 	*spawned.Regions() = launchRegions
 	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {
@@ -288,6 +293,21 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	return pid, processHandle, supervisor.LaunchOK
+}
+
+// launchResourceProfile maps the lifecycle ABI to kernel-owned quota sets.
+// PID 1 chooses among these sets and cannot submit numeric limits.
+func launchResourceProfile(profile supervisor.ResourceProfile) (process.ResourceProfile, bool) {
+	switch profile {
+	case supervisor.ProfileTiny:
+		return process.ProfileTiny, true
+	case supervisor.ProfileNormal:
+		return process.ProfileNormal, true
+	case supervisor.ProfileLarge:
+		return process.ProfileLarge, true
+	default:
+		return 0, false
+	}
 }
 
 // abandonSpawn releases a launch that failed before its task existed: the

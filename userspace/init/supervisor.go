@@ -76,6 +76,7 @@ type Definition struct {
 	Dependencies []string
 	Capabilities []Capability
 	Restart      RestartPolicy
+	Profile      ResourceProfile
 }
 
 type LaunchSpec struct {
@@ -85,6 +86,7 @@ type LaunchSpec struct {
 	ExecutableSize  uint8
 	Capabilities    [MaxCapabilities]Capability
 	CapabilityCount uint8
+	Profile         ResourceProfile
 }
 
 type EventKind uint8
@@ -138,8 +140,11 @@ type Manager struct {
 }
 
 func (manager *Manager) Register(definition Definition) Status {
+	if definition.Profile == 0 {
+		definition.Profile = ProfileNormal
+	}
 	if !validName(definition.Name) || !validExecutable(definition.Executable) ||
-		len(definition.Dependencies) > MaxDependencies || len(definition.Capabilities) > MaxCapabilities || definition.Restart > RestartAlways {
+		len(definition.Dependencies) > MaxDependencies || len(definition.Capabilities) > MaxCapabilities || definition.Restart > RestartAlways || !validResourceProfile(definition.Profile) {
 		return StatusInvalidArgument
 	}
 	for index, grant := range definition.Capabilities {
@@ -165,6 +170,7 @@ func (manager *Manager) Register(definition Definition) Status {
 	entry.launch.NameSize = uint8(copy(entry.launch.Name[:], definition.Name))
 	entry.launch.ExecutableSize = uint8(copy(entry.launch.Executable[:], definition.Executable))
 	entry.launch.CapabilityCount = uint8(copy(entry.launch.Capabilities[:], definition.Capabilities))
+	entry.launch.Profile = definition.Profile
 	for index, dependency := range definition.Dependencies {
 		dependencyIndex, found := manager.index(dependency)
 		if !found || dependency == definition.Name {
