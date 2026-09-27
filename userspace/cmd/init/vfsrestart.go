@@ -98,6 +98,23 @@ func renewVFSClients() {
 	}
 }
 
+// refreshMountedClients replaces sessions whose handles into the persistent
+// mount were invalidated by an intentional unmount. The VFS process itself
+// survives, so this is separate from the VFS-restart path above.
+func refreshMountedClients() {
+	for _, channel := range []uint64{execServer, uint64(configControlHandle), uint64(logControl)} {
+		if channel == 0 {
+			continue
+		}
+		session, reason := openVFSSession()
+		if reason != "" {
+			syslog.Warn("client not given a refreshed filesystem session", syslog.Str("reason", reason))
+			continue
+		}
+		offerFiles(channel, session)
+	}
+}
+
 // offerFiles hands one filesystem session to a client over a channel it
 // holds with PID 1. A client that is gone gets nothing, and the session is
 // closed.

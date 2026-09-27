@@ -12,8 +12,11 @@ type Grant uint8
 const (
 	// GrantVFS asks for a private session with the filesystem service.
 	GrantVFS Grant = 1 << iota
+	// GrantBlockCheck asks PID 1 for an exclusive, read-only storage slice.
+	// PID 1 grants it only after a clean VFS unmount.
+	GrantBlockCheck
 
-	knownGrants = GrantVFS
+	knownGrants = GrantVFS | GrantBlockCheck
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.

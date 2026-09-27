@@ -38,6 +38,12 @@ var (
 	// filesystemProcessHandle is kept only by the validation build, to inject
 	// the fault that proves a crashed filesystem service is replaced.
 	filesystemProcessHandle handle.ID
+	// filesystemChecker is the one application temporarily holding the
+	// exclusive filesystem block slice.
+	filesystemChecker uint64
+	// filesystemCheckComplete keeps the checker exit across either ordering
+	// of its lifecycle event and the old filesystem service's exit event.
+	filesystemCheckComplete bool
 	// filesystemVolume says which volume of the disk the filesystem service
 	// may reach: automatically chosen, as at boot (ADR 0115). Choosing
 	// another belongs to mounting (GoOS 0.1.4 specification, Phase 3).

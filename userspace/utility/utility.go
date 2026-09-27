@@ -423,6 +423,9 @@ func PrintUint(value uint64) int {
 	return len(digits) - position
 }
 
+// AppendUint appends value in decimal without allocating.
+func AppendUint(target []byte, value uint64) []byte { return appendUint(target, value) }
+
 // Pad appends spaces from column until width.
 func Pad(column int, width int) {
 	for ; column < width; column++ {
