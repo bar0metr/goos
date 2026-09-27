@@ -5,6 +5,7 @@
 .set GOOS_YIELD_VECTOR, 0x81
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
+.set GOOS_KERNEL_LOW_BASE, 0xffffc00000000000
 
 // The console ring is a power of two so the wrap is a mask. It holds two of
 // the longest lines the terminal accepts (4096 bytes), so a pasted line
@@ -193,6 +194,11 @@ goos_load_cr3:
     movq %rcx, %cr3
     retq
 
+.global goos_set_kernel_root
+goos_set_kernel_root:
+    movq %rcx, goos_kernel_root(%rip)
+    retq
+
 .global goos_read_rsp
 goos_read_rsp:
     movq %rsp, %rax
@@ -225,14 +231,25 @@ goos_read_tsc:
 goos_probe_address_spaces:
     pushfq
     cli
+    movabsq $GOOS_KERNEL_LOW_BASE, %rax
+    addq %rax, %rsp
+    leaq .probe_address_spaces_high(%rip), %r10
+    addq %rax, %r10
+    jmp *%r10
+.probe_address_spaces_high:
     movq %rcx, %cr3
-    movzbq (%r9), %r10
+    movzbq (%r9), %rcx
     movq %rdx, %cr3
     movzbq (%r9), %r11
     movq %r8, %cr3
+    subq %rax, %rsp
+    leaq .probe_address_spaces_low(%rip), %r10
+    subq %rax, %r10
+    jmp *%r10
+.probe_address_spaces_low:
     movq %r11, %rax
     shlq $8, %rax
-    orq %r10, %rax
+    orq %rcx, %rax
     popfq
     retq
 
@@ -270,9 +287,50 @@ goos_trigger_breakpoint:
     int3
     retq
 
+// IDT gates use the higher-half alias of each entry label. This prefix uses
+// assembly only, installs the kernel root, and returns to the handler's low
+// link-time address with every interrupted register intact.
+.macro GOOS_ENTER_LOW target
+    pushq %rax
+    movq goos_kernel_root(%rip), %rax
+    movq %rax, %cr3
+    popq %rax
+    pushq %r11
+    movabsq $\target, %r11
+    xchgq %r11, (%rsp)
+    retq
+.endm
+
+// User returns enter this prefix while the kernel root is active. The prefix
+// changes CR3 only after control reaches its shared higher-half address.
+.macro GOOS_RETURN_USER
+    cmpq $0x23, 8(%rsp)
+    jne 991f
+    pushq %rax
+    pushq %rcx
+    movq goos_current_task(%rip), %rax
+    leaq goos_task_roots(%rip), %rcx
+    movq (%rcx,%rax,8), %rax
+    pushq %rax
+    pushq %r11
+    movabsq $(GOOS_KERNEL_LOW_BASE + goos_return_high), %r11
+    xchgq %r11, (%rsp)
+    retq
+991:
+.endm
+
+goos_return_high:
+    popq %rax
+    movq %rax, %cr3
+    popq %rcx
+    popq %rax
+    iretq
+
 .macro GOOS_FATAL_NOERR vector
 .global goos_exception_\vector
 goos_exception_\vector:
+    GOOS_ENTER_LOW .L_exception_\vector
+.L_exception_\vector:
     cli
     pushq $0
     pushq $\vector
@@ -282,6 +340,8 @@ goos_exception_\vector:
 .macro GOOS_FATAL_ERR vector
 .global goos_exception_\vector
 goos_exception_\vector:
+    GOOS_ENTER_LOW .L_exception_\vector
+.L_exception_\vector:
     cli
     pushq $\vector
     jmp goos_exception_fatal
@@ -293,6 +353,8 @@ GOOS_FATAL_NOERR 2
 
 .global goos_exception_3
 goos_exception_3:
+    GOOS_ENTER_LOW .L_exception_3
+.L_exception_3:
     pushq %rax
     pushq %rdx
     pushq %rsi
@@ -316,6 +378,7 @@ goos_exception_3:
     popq %rsi
     popq %rdx
     popq %rax
+    GOOS_RETURN_USER
     iretq
 
 GOOS_FATAL_NOERR 4
@@ -487,6 +550,7 @@ goos_exception_fatal:
     popq %r15
     jz .terminate_user_fault
     addq $16, %rsp
+    GOOS_RETURN_USER
     iretq
 
 .terminate_user_fault:
@@ -548,9 +612,36 @@ goos_interrupt_table:
     .quad goos_irq_yield
     .quad goos_irq_serial
 
+.global goos_entry_mapping_table
+goos_entry_mapping_table:
+    .quad goos_return_high
+    .quad goos_kernel_root
+    .quad goos_probe_address_spaces
+
 .section .text
 .global goos_user_call
 goos_user_call:
+    GOOS_ENTER_LOW .L_user_call
+.L_user_call:
+    incq goos_user_call_entries(%rip)
+    pushq %rax
+    pushq %rdx
+    pushq %r8
+    movq goos_current_task(%rip), %rax
+    leaq 24(%rsp), %rdx
+    leaq goos_user_call_rsp_baselines(%rip), %r8
+    cmpq $0, (%r8,%rax,8)
+    jne .L_user_call_compare_rsp
+    movq %rdx, (%r8,%rax,8)
+    jmp .L_user_call_rsp_recorded
+.L_user_call_compare_rsp:
+    cmpq (%r8,%rax,8), %rdx
+    je .L_user_call_rsp_recorded
+    incq goos_user_call_rsp_drift(%rip)
+.L_user_call_rsp_recorded:
+    popq %r8
+    popq %rdx
+    popq %rax
     cmpq $0x23, 8(%rsp)
     jne goos_exception_fatal
 	 pushq %r15
@@ -666,6 +757,7 @@ goos_user_call:
 	 popq %r13
 	 popq %r14
 	 popq %r15
+	 GOOS_RETURN_USER
 	 iretq
 .user_yield:
 	 movq 48(%rsp), %rax
@@ -748,6 +840,8 @@ goos_user_call:
 .section .text
 .global goos_irq_timer
 goos_irq_timer:
+    GOOS_ENTER_LOW .L_irq_timer
+.L_irq_timer:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -793,13 +887,6 @@ goos_irq_timer:
     leaq goos_task_fpu(%rip), %r10
     fxrstor64 (%r10,%r9)
     movq %rax, goos_current_task(%rip)
-    leaq goos_task_roots(%rip), %r10
-    movq (%r10,%rax,8), %r11
-    movq %cr3, %r10
-    cmpq %r10, %r11
-    je .switch_rsp0
-    movq %r11, %cr3
-.switch_rsp0:
     leaq goos_task_rsp0(%rip), %r10
     movq (%r10,%rax,8), %r11
     testq %r11, %r11
@@ -825,12 +912,15 @@ goos_irq_timer:
     popq %rcx
     popq %rbx
     popq %rax
+    GOOS_RETURN_USER
     iretq
 
 // goos_irq_yield switches away from a kernel task without advancing time.
 // Its vector is not callable from ring 3.
 .global goos_irq_yield
 goos_irq_yield:
+    GOOS_ENTER_LOW .L_irq_yield
+.L_irq_yield:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -878,6 +968,8 @@ goos_select_next:
 // through the ordinary wait table, so one path publishes readiness.
 .global goos_irq_serial
 goos_irq_serial:
+    GOOS_ENTER_LOW .L_irq_serial
+.L_irq_serial:
     pushq %rax
     pushq %rcx
     pushq %rdx
@@ -915,10 +1007,13 @@ goos_irq_serial:
     popq %rdx
     popq %rcx
     popq %rax
+    GOOS_RETURN_USER
     iretq
 
 .global goos_irq_11
 goos_irq_11:
+    GOOS_ENTER_LOW .L_irq_11
+.L_irq_11:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -971,6 +1066,7 @@ goos_irq_11:
     popq %rcx
     popq %rbx
     popq %rax
+    GOOS_RETURN_USER
     iretq
 
 .global goos_start_bootstrap_timer
@@ -1031,6 +1127,20 @@ goos_task_fault_address_take:
     movq (%rdx,%rcx,8), %rax
     movq $0, (%rdx,%rcx,8)
 .task_fault_address_done:
+    retq
+
+// goos_user_call_entry_count reports how many native calls reached the low
+// handler after the high trampoline switched to the kernel page table.
+.global goos_user_call_entry_count
+goos_user_call_entry_count:
+    movq goos_user_call_entries(%rip), %rax
+    retq
+
+// goos_user_call_entry_drift reports how often a task reached the low handler
+// with an RSP different from that task's first observed entry RSP.
+.global goos_user_call_entry_drift
+goos_user_call_entry_drift:
+    movq goos_user_call_rsp_drift(%rip), %rax
     retq
 
 // goos_task_ticks_clear resets one slot's counter, so a slot reused by a new
@@ -1100,6 +1210,8 @@ goos_scheduler_install_user:
 	 jnz .install_user_generation_ready
 	 incq (%r11,%r10,8)
 .install_user_generation_ready:
+    leaq goos_user_call_rsp_baselines(%rip), %r11
+    movq $0, (%r11,%r10,8)
     leaq goos_task_contexts(%rip), %r11
     movq %rcx, (%r11,%r10,8)
     leaq goos_task_roots(%rip), %r11
@@ -1299,13 +1411,12 @@ goos_reclaim_exited_task:
 	 movq (%rdx,%r8,8), %rax
     testq %rax, %rax
     jz .reclaim_exited_done
-    addq $64, %rax
-    subq $24576, %rax  // (kernelStackPages + stackGuardPages) * 4096; stack_test.go
 	 movq $0, (%rdx,%r8,8)
     leaq goos_task_contexts(%rip), %rdx
 	 movq $0, (%rdx,%r8,8)
     leaq goos_task_roots(%rip), %rdx
 	 movq $0, (%rdx,%r8,8)
+	 movq $1, %rax
 .reclaim_exited_done:
     retq
 
@@ -1322,7 +1433,15 @@ goos_user_preemptions:
     .quad 0
 goos_user_faults:
     .quad 0
+goos_user_call_entries:
+    .quad 0
+goos_user_call_rsp_drift:
+    .quad 0
+goos_user_call_rsp_baselines:
+    .zero 512
 goos_current_task:
+    .quad 0
+goos_kernel_root:
     .quad 0
 goos_task_count:
     .quad 1

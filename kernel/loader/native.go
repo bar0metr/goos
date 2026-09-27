@@ -194,9 +194,9 @@ func (image Image) stackIsGuarded(pageSize uint64, userStart uint64) bool {
 }
 
 // KernelMapsUserRange reports whether the kernel may map any page of
-// [start, end) into a process after its image is loaded: the probe and startup
-// pages below the image. The windows it maps on request lie far above the
-// image area (ADR 0104). A stack guard must avoid them (ADR 0083, ADR 0088).
+// [start, end) into a process after its image is loaded. The validation probe
+// is the only fixed mapping in the low image area. A stack guard must avoid it
+// (ADR 0083, ADR 0088, ADR 0120).
 func KernelMapsUserRange(start uint64, end uint64) bool {
-	return start < vm.UserCodeAddress && end > vm.UserProbeAddress
+	return start < vm.UserProbeAddress+vm.PageSize && end > vm.UserProbeAddress
 }

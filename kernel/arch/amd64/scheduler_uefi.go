@@ -23,10 +23,24 @@ var taskEntryTable [3]uintptr
 //go:extern goos_task_fpu
 var taskFPU [64][FPUAreaSize]byte
 
+type taskKernelStack struct {
+	physical uint64
+	virtual  uint64
+	top      uint64
+}
+
+var taskKernelStacks [64]taskKernelStack
+
+//go:extern goos_entry_mapping_table
+var entryMappingTable [3]uintptr
+
+var activeKernelRoot uint64
+
 // SetupBootstrapScheduler creates contexts for two demonstration tasks and one
 // idle task. The currently executing boot task becomes slot zero on the first
 // timer interrupt.
 func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
+	activeKernelRoot = pageTable
 	for slot := range taskFPU {
 		InitialFPUArea(&taskFPU[slot])
 	}
@@ -57,13 +71,74 @@ func AddUserTask(allocator *pmm.Allocator, pageTable uint64, entry uint64, userS
 		return 0, false
 	}
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
-	if !ok || !unmapGuardPages(pageTable, allocation) {
+	if !ok || activeKernelRoot == 0 || !unmapGuardPages(activeKernelRoot, allocation) {
 		return 0, false
 	}
 	stackStart := allocation + stackGuardPages*pmm.PageSize
-	kernelStackTop := stackStart + kernelStackPages*pmm.PageSize - 64
-	taskID := installUserTask(initialUserContext(stackStart, entry, userStack), pageTable, kernelStackTop)
-	return taskID, taskID != 0
+	virtualStart, aliasOK := vm.KernelAlias(stackStart)
+	if !aliasOK {
+		return 0, false
+	}
+	if !mapProcessEntryState(allocator, pageTable) {
+		return 0, false
+	}
+	for page := uint64(0); page < kernelStackPages; page++ {
+		physical := stackStart + page*pmm.PageSize
+		virtual := virtualStart + page*pmm.PageSize
+		if !vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, true, false) {
+			return 0, false
+		}
+	}
+	guard, _ := vm.KernelAlias(allocation)
+	if vm.IsMapped(activeKernelRoot, guard) || vm.IsMapped(pageTable, guard) {
+		return 0, false
+	}
+	kernelStackTop := virtualStart + kernelStackPages*pmm.PageSize - 64
+	context := initialUserContext(stackStart, entry, userStack)
+	taskID := installUserTask(context, pageTable, kernelStackTop)
+	if taskID == 0 {
+		return 0, false
+	}
+	taskKernelStacks[uint32(taskID)-1] = taskKernelStack{physical: allocation, virtual: virtualStart, top: kernelStackTop}
+	return taskID, true
+}
+
+func mapProcessEntryState(allocator *pmm.Allocator, pageTable uint64) bool {
+	for _, handler := range interruptTable {
+		if handler == 0 || !mapProcessAliasRange(allocator, pageTable, uint64(handler), 64, false, true) {
+			return false
+		}
+	}
+	if !mapProcessAliasRange(allocator, pageTable, uint64(entryMappingTable[0]), 32, false, true) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(entryMappingTable[1]), 8, true, false) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(entryMappingTable[2]), 128, false, true) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&idt[0]))), uint64(len(idt))*16, true, false) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&gdt[0]))), uint64(len(gdt))*8, true, false) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&tss[0]))), uint64(len(tss)), true, false) {
+		return false
+	}
+	return true
+}
+
+// PrepareUserAddressSpace installs the supervisor-only pages needed while a
+// process root is active before the task itself exists.
+func PrepareUserAddressSpace(allocator *pmm.Allocator, pageTable uint64) bool {
+	return mapProcessEntryState(allocator, pageTable)
+}
+
+func mapProcessAliasRange(allocator *pmm.Allocator, pageTable, address, size uint64, writable, executable bool) bool {
+	start := address &^ (vm.PageSize - 1)
+	end := (address + size + vm.PageSize - 1) &^ (vm.PageSize - 1)
+	if size == 0 || end < address {
+		return false
+	}
+	for physical := start; physical < end; physical += vm.PageSize {
+		virtual, ok := vm.KernelAlias(physical)
+		if !ok || !vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, writable, executable) {
+			return false
+		}
+	}
+	return true
 }
 
 func initialContext(stackStart uint64, entry uintptr) uint64 {
@@ -89,7 +164,7 @@ func initialContext(stackStart uint64, entry uintptr) uint64 {
 func initialUserContext(stackStart uint64, entry uint64, userStack uint64) uint64 {
 	stackEnd := stackStart + kernelStackPages*pmm.PageSize
 	contextAddress := stackEnd - 64 - contextWords*8
-	// SAFETY: the guarded allocation owns four mapped kernel-stack pages. The
+	// SAFETY: the guarded allocation owns the mapped kernel-stack pages. The
 	// synthetic context lies wholly below the reserved interrupt-entry top.
 	context := (*[contextWords]uint64)(unsafe.Pointer(uintptr(contextAddress)))
 	for index := range context {
@@ -100,7 +175,8 @@ func initialUserContext(stackStart uint64, entry uint64, userStack uint64) uint6
 	context[17] = initialRFlags
 	context[18] = userStack
 	context[19] = uint64(userDataSelector)
-	return contextAddress
+	contextAlias, _ := vm.KernelAlias(contextAddress)
+	return contextAlias
 }
 
 //export goos_scheduler_install
@@ -208,19 +284,26 @@ func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64)
 	if allocator == nil || kernelRoot == 0 {
 		return false
 	}
-	if slot := uint32(task); slot != 0 && int(slot) <= len(taskFPU) {
-		InitialFPUArea(&taskFPU[slot-1])
-	}
-	allocation := reclaimExitedTask(task)
-	if allocation == 0 {
+	slot := uint32(task)
+	if slot == 0 || int(slot) > len(taskFPU) {
 		return false
 	}
+	InitialFPUArea(&taskFPU[slot-1])
+	stack := taskKernelStacks[slot-1]
+	if stack.physical == 0 || reclaimExitedTask(task) == 0 {
+		return false
+	}
+	taskKernelStacks[slot-1] = taskKernelStack{}
+	allocation := stack.physical
 	for page := uint64(0); page < stackGuardPages; page++ {
 		guard := allocation + page*pmm.PageSize
 		if !vm.MapKernelPage(kernelRoot, guard) {
 			return false
 		}
 		invalidatePage(guard)
+		if alias, mapped := vm.KernelAlias(guard); mapped {
+			invalidatePage(alias)
+		}
 	}
 	ok := true
 	for page := uint64(0); page < kernelStackPages+stackGuardPages; page++ {

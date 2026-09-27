@@ -9,8 +9,8 @@ const (
 	// native-call handlers are inlined (ADR 0088).
 	KernelStackGuardSize = 2 * 4096
 	// kernelStackPages is the usable size of every kernel stack. The
-	// allocation is these pages plus the guard; goos_reclaim_exited_task in
-	// io.S recomputes its start from the stack top.
+	// allocation is these pages plus the guard. Scheduler metadata records the
+	// physical allocation separately from its higher-half virtual address.
 	kernelStackPages = uint64(4)
 	// BootStackSize is the stack the boot task runs on once paging is up: the
 	// rest of boot, the validation self-tests, and the service loop. It

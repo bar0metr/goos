@@ -120,7 +120,7 @@ existing site follows this yet: the UEFI protocol calls in
 The kernel never dereferences a user virtual address. Native calls use
 `vm.CopyIn`, `vm.CopyOut`, `vm.CanCopyOut`, and `vm.ValidateUserRange`:
 
-- the range must lie within `[1 GiB, 2 GiB)` and must not wrap;
+- the range must lie within `[0x1000, 0x00007ffffffff000)` and must not wrap;
 - every page crossed must be present and user-accessible at all four levels;
 - `CopyOut` additionally requires a writable leaf;
 - data moves through the kernel identity map or direct map after validation;

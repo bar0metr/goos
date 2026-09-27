@@ -66,7 +66,7 @@ type Origin struct {
 func LoadImage(allocator *pmm.Allocator, root uint64, source Source, shared *SharedPages, origin Origin, regions *region.Map) (LoadedImage, bool) {
 	key := origin.Key
 	lazy := regions != nil && (origin.Key != 0 || origin.Object != 0)
-	image, ok := ParseSource(source, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit)
+	image, ok := ParseSource(source, vm.PageSize, vm.UserAddressStart, vm.UserImageAreaLimit)
 	if !ok || root == 0 || image.StackTop == 0 && regions == nil {
 		return LoadedImage{}, false
 	}

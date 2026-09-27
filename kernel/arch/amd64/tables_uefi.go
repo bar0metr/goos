@@ -45,6 +45,13 @@ var (
 //go:extern goos_interrupt_table
 var interruptTable [exceptionCount + 5]uintptr
 
+// EntryProbeAddress returns one mapped higher-half trampoline address for
+// supervisor-isolation validation.
+func EntryProbeAddress() uint64 {
+	address, _ := vm.KernelAlias(uint64(interruptTable[exceptionCount+1]))
+	return address
+}
+
 // InstallDescriptorTables replaces firmware GDT/IDT state. All architectural
 // exception vectors receive a gate; vector 3 is deliberately callable from
 // ring 3 for debugger-compatible breakpoints.
@@ -57,34 +64,61 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 		if interruptTable[vector] == 0 {
 			return false
 		}
-		idt[vector] = NewIDTEntry(interruptTable[vector], attributes)
+		handler, ok := vm.KernelAlias(uint64(interruptTable[vector]))
+		if !ok {
+			return false
+		}
+		idt[vector] = NewIDTEntry(uintptr(handler), attributes)
 	}
 	if interruptTable[timerVector] == 0 {
 		return false
 	}
-	idt[timerVector] = NewIDTEntry(interruptTable[timerVector], interruptGate)
+	timer, ok := vm.KernelAlias(uint64(interruptTable[timerVector]))
+	if !ok {
+		return false
+	}
+	idt[timerVector] = NewIDTEntry(uintptr(timer), interruptGate)
 	if interruptTable[exceptionCount+2] == 0 {
 		return false
 	}
-	idt[virtioIRQVector] = NewIDTEntry(interruptTable[exceptionCount+2], interruptGate)
+	virtio, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+2]))
+	if !ok {
+		return false
+	}
+	idt[virtioIRQVector] = NewIDTEntry(uintptr(virtio), interruptGate)
 	if interruptTable[exceptionCount+1] == 0 {
 		return false
 	}
-	idt[userCallVector] = NewIDTEntry(interruptTable[exceptionCount+1], userCallGate)
+	userCall, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+1]))
+	if !ok {
+		return false
+	}
+	idt[userCallVector] = NewIDTEntry(uintptr(userCall), userCallGate)
 	if interruptTable[exceptionCount+3] == 0 {
 		return false
 	}
-	idt[yieldVector] = NewIDTEntry(interruptTable[exceptionCount+3], interruptGate)
+	yield, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+3]))
+	if !ok {
+		return false
+	}
+	idt[yieldVector] = NewIDTEntry(uintptr(yield), interruptGate)
 	if interruptTable[exceptionCount+4] == 0 {
 		return false
 	}
-	idt[serialIRQVector] = NewIDTEntry(interruptTable[exceptionCount+4], interruptGate)
+	serial, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+4]))
+	if !ok {
+		return false
+	}
+	idt[serialIRQVector] = NewIDTEntry(uintptr(serial), interruptGate)
 
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
 	if !ok || !unmapGuardPages(pageTable, allocation) {
 		return false
 	}
-	rsp0 := allocation + (kernelStackPages+stackGuardPages)*pmm.PageSize - 64
+	rsp0, ok := vm.KernelAlias(allocation + (kernelStackPages+stackGuardPages)*pmm.PageSize - 64)
+	if !ok {
+		return false
+	}
 	putUint64(tss[4:12], rsp0)
 	// A double fault switches to the TSS's first interrupt stack, so it can be
 	// reported when the stack that faulted has run into its guard (ADR 0091).
@@ -92,15 +126,26 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	if !ok || !unmapGuardPages(pageTable, fault) {
 		return false
 	}
-	putUint64(tss[tssIST1:tssIST1+8], fault+(faultStackPages+stackGuardPages)*pmm.PageSize-64)
+	faultTop, ok := vm.KernelAlias(fault + (faultStackPages+stackGuardPages)*pmm.PageSize - 64)
+	if !ok {
+		return false
+	}
+	putUint64(tss[tssIST1:tssIST1+8], faultTop)
 	idt[doubleFaultVector].IST = 1
-	setTSSStackAddress(&tss[4])
+	tssBase, ok := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&tss[0]))))
+	if !ok {
+		return false
+	}
+	setTSSStackAddress((*byte)(unsafe.Pointer(uintptr(tssBase + 4))))
 	tss[102], tss[103] = byte(tssBytes), 0
-	// SAFETY: tss is static kernel storage with a stable address for the entire
-	// lifetime of the loaded task-register descriptor.
-	gdt[5], gdt[6] = tssDescriptor(uintptr(unsafe.Pointer(&tss[0])), tssBytes-1)
-	loadGDT(&gdt[0], uint16(len(gdt)*8-1))
-	loadIDT(&idt[0], uint16(len(idt)*16-1))
+	gdt[5], gdt[6] = tssDescriptor(uintptr(tssBase), tssBytes-1)
+	gdtBase, gdtOK := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&gdt[0]))))
+	idtBase, idtOK := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&idt[0]))))
+	if !gdtOK || !idtOK {
+		return false
+	}
+	loadGDT((*uint64)(unsafe.Pointer(uintptr(gdtBase))), uint16(len(gdt)*8-1))
+	loadIDT((*IDTEntry)(unsafe.Pointer(uintptr(idtBase))), uint16(len(idt)*16-1))
 	return true
 }
 

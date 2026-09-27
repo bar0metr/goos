@@ -4,16 +4,17 @@ package amd64
 
 import "goos/kernel/mm/vm"
 
-// unmapGuardPages removes the identity mapping of the stackGuardPages pages
-// at address, the guard below a kernel stack.
+// unmapGuardPages removes the higher-half aliases below a kernel stack.
 func unmapGuardPages(pageTable uint64, address uint64) bool {
 	for page := uint64(0); page < stackGuardPages; page++ {
 		guard := address + page*vm.PageSize
-		if !vm.UnmapPage(pageTable, guard) {
+		alias, ok := vm.KernelAlias(guard)
+		if !ok || !vm.UnmapPage(pageTable, alias) {
 			return false
 		}
 		invalidatePage(guard)
-		if vm.IsMapped(pageTable, guard) {
+		invalidatePage(alias)
+		if vm.IsMapped(pageTable, alias) {
 			return false
 		}
 	}

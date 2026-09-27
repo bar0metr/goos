@@ -415,7 +415,7 @@ func memoryMapRejectsInvalid(root uint64, device handle.ID, memory handle.ID) bo
 	return caller.MemoryMap(uint64(device), vm.UserSharedAddress, 0) == kcall.StatusPermissionDenied &&
 		caller.MemoryMap(uint64(memory), vm.UserSharedAddress+1, 0) == kcall.StatusInvalidArgument &&
 		caller.MemoryMap(uint64(memory), vm.UserAddressLimit, kcall.MemoryMapWritable) == kcall.StatusInvalidArgument &&
-		caller.MemoryMap(uint64(memory), vm.PageSize, 0) == kcall.StatusInvalidArgument
+		caller.MemoryMap(uint64(memory), 0, 0) == kcall.StatusInvalidArgument
 }
 
 // mapPinnedShared maps a shared-memory object into a process at a fixed

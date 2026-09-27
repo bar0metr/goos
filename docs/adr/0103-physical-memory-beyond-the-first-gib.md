@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Replaces the one-GiB limit of ADR 0002 and extends ADR 0003.
+Accepted. Replaces the one-GiB limit of ADR 0002 and extends ADR 0003. ADR
+0120 supersedes the process-root inheritance and low kernel-stack parts of
+this decision; the allocator and direct-map design remain current.
 
 ## Context
 

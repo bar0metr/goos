@@ -170,6 +170,24 @@ func SystemReset()
 //export goos_load_cr3
 func LoadPageTable(address uint64)
 
+// SetKernelPageTable gives interrupt entry code the root to install before it
+// touches kernel state while returning from ring 3.
+//
+//export goos_set_kernel_root
+func SetKernelPageTable(address uint64)
+
+// UserCallEntryCount reports the number of ring-3 native calls observed by
+// the low handler after the entry trampoline changed CR3.
+//
+//export goos_user_call_entry_count
+func UserCallEntryCount() uint64
+
+// UserCallEntryDrift reports how often a task entered the low native-call
+// handler with an RSP different from its first observed entry.
+//
+//export goos_user_call_entry_drift
+func UserCallEntryDrift() uint64
+
 // StackPointer returns the current stack pointer for bootstrap validation.
 //
 //export goos_read_rsp
