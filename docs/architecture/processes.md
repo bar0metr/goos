@@ -15,13 +15,14 @@ page tables to the physical allocator. Shared-memory leaves remain non-owning.
 
 ## Address-space isolation
 
-Each process receives a distinct PML4 and PDPT. Supervisor-only kernel mappings
-are shared, while user mappings use process-owned lower-level tables. The user
-bit is present only along the user mapping path; shared kernel leaves remain
-supervisor-only even though both address spaces can execute kernel code.
+Each process receives a distinct PML4. It shares the supervisor-only direct-map
+slot but does not map the low kernel image. Private supervisor branches map the
+high assembly trampolines, descriptor state, and the active task's high kernel
+stack. User mappings use process-owned lower-level tables and carry the user
+bit at every level. Ring 3 cannot read or execute the transition mappings.
 
 The live isolation test allocates two physical pages, writes different sentinel
-bytes, and maps each page at virtual address `0x40000000` in a different process
+bytes, and maps each page at virtual address `0x00400000` in a different process
 root. With interrupts disabled, assembly switches CR3 to process A, reads the
 byte, switches to process B, reads again, and restores the kernel CR3. Boot
 requires both distinct values before emitting `PROCESS_ISOLATION_OK`.
@@ -35,18 +36,23 @@ message through `ConsoleWrite` with the console capability it was given, and
 finally requests Exit through interrupt vector `0x80` (ADR 0094). Code is copied into a zeroed
 physical page before that page becomes executable, preserving W^X.
 
-The scheduler loads the process CR3 and enters CPL 3 through a complete `IRETQ`
-frame. Timer IRQs save the user context on a task-local guarded RSP0 stack and
-may select a kernel task or another process root. The native-call entry verifies
-the saved user CS and invokes the architecture-independent dispatcher. Exit
-marks the current slot non-runnable and immediately schedules its successor.
+The scheduler restores contexts under the kernel CR3. To enter CPL 3, it moves
+to the high return prefix, loads the process CR3, and executes `iretq`. A user
+interrupt first lands on a task-local guarded high RSP0 stack. Its high assembly
+trampoline loads the kernel CR3 before transferring to the low-linked handler.
+Timer IRQs may then select a kernel task or another process. The native-call
+handler verifies the saved user CS and invokes the architecture-independent
+dispatcher. Exit marks the current slot non-runnable and immediately schedules
+its successor (ADR 0120).
 
 PID 1 is discovered in the UEFI-loaded initramfs and loaded into an independent
 address space. Both bootstrap test processes are also loaded through the
 versioned native image loader.
-The second deliberately raises an invalid-opcode exception; the kernel removes
-only that userspace task and continues. Kernel-originated exceptions remain
-fatal. Initramfs discovery and bounded resource reclamation are complete.
+The second deliberately reads a supervisor-only high trampoline mapping. The
+resulting page fault removes only that userspace task and proves that the
+transition mapping remains inaccessible from ring 3. Kernel-originated
+exceptions remain fatal. Initramfs discovery and bounded resource reclamation
+are complete.
 The registry retains a bounded completion record after lifecycle delivery and
 resource teardown, allowing waiters to distinguish running, exited, and unknown
 processes without retaining reclaimed objects.

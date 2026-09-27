@@ -3,7 +3,8 @@
 ## Status
 
 Accepted. Replaces the bootstrap user layout of ADR 0003 and ADR 0063 and the
-image-resident stack and heap of ADR 0083 and ADR 0095.
+image-resident stack and heap of ADR 0083 and ADR 0095. ADR 0120 supersedes
+the lower bound and the process-root kernel mapping described here.
 
 ## Context
 

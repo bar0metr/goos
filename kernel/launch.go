@@ -148,7 +148,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	}
 	// The region map is built while the image loads and moves into the
 	// process slot once there is one (ADR 0104).
-	launchRegions.Init(vm.IdentityMapLimit, vm.UserAddressLimit)
+	launchRegions.Init(vm.UserAddressStart, vm.UserAddressLimit)
 	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, origin, &launchRegions)
 	began = launchStageDone(launchLoad, began)
 	if !ok {

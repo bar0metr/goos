@@ -60,11 +60,19 @@ func runKernelSelfTests(pageTable uint64) {
 	}
 	rootA, addressSpaceA := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
 	rootB, addressSpaceB := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
+	addressSpaceA = addressSpaceA && amd64.PrepareUserAddressSpace(&pageAllocator, rootA)
+	addressSpaceB = addressSpaceB && amd64.PrepareUserAddressSpace(&pageAllocator, rootB)
+	if _, mapped := vm.Resolve(rootA, vm.KernelImageBase); mapped {
+		panicSerial("process root retained the low kernel image")
+	}
+	if _, mapped := vm.Resolve(rootA, vm.KernelLowBase+vm.KernelImageBase); mapped {
+		panicSerial("process root retained the complete kernel alias")
+	}
 	if addressSpaceA {
-		addressSpaceA = vm.MapUserPage(rootA, vm.UserProbeAddress, physicalA, vm.Permissions{User: true, Writable: true})
+		_, addressSpaceA = vm.MapUserPageAt(&pageAllocator, rootA, vm.UserProbeAddress, physicalA, vm.Permissions{User: true, Writable: true}, false)
 	}
 	if addressSpaceB {
-		addressSpaceB = vm.MapUserPage(rootB, vm.UserProbeAddress, physicalB, vm.Permissions{User: true, Writable: true})
+		_, addressSpaceB = vm.MapUserPageAt(&pageAllocator, rootB, vm.UserProbeAddress, physicalB, vm.Permissions{User: true, Writable: true}, false)
 	}
 	resolvedA, resolvesA := vm.Resolve(rootA, vm.UserProbeAddress)
 	resolvedB, resolvesB := vm.Resolve(rootB, vm.UserProbeAddress)
@@ -245,19 +253,22 @@ func runKernelSelfTests(pageTable uint64) {
 	userProgram := [...]byte{
 		0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5: IPCWaitReceive.
 		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
-		0x48, 0xbe, 0x44, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+68.
+		0x48, 0xbe, 0x44, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rsi, selfTestUserDataAddress+68.
 		0xba, 0x18, 0x00, 0x00, 0x00, // mov edx, descriptor size: time out after the peer's shorter wait.
 		0xcd, 0x80,
 		0xb9, 0x00, 0x00, 0x00, 0x01, // mov ecx, 0x01000000: remain preemptible.
 		0xff, 0xc9, // dec ecx.
 		0x75, 0xfc, // jnz dec ecx.
-		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: the retired DebugWrite.
-		0x48, 0xbf, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rdi, UserDataAddress.
+		0x48, 0xbf, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rdi, selfTestUserDataAddress.
 		0xbe, 0x14, 0x00, 0x00, 0x00, // mov esi, 20.
+		0x41, 0xbc, 0xd0, 0x07, 0x00, 0x00, // mov r12d, 2000: entry-stack regression iterations.
+		0xb8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2: the retired DebugWrite.
 		0xcd, 0x80,
 		0x83, 0xf8, 0x08, // cmp eax, Unsupported: no identity-authorized console path.
 		0x74, 0x02,
 		0x0f, 0x0b,
+		0x41, 0xff, 0xcc, // dec r12d.
+		0x75, 0xed, // jnz to mov eax.
 		0xb8, 0x06, 0x00, 0x00, 0x00, // mov eax, 6: ConsoleWrite.
 		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, console capability.
 		0x48, 0xbe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rsi, 0: invalid pointer.
@@ -268,7 +279,7 @@ func runKernelSelfTests(pageTable uint64) {
 		0x0f, 0x0b,
 		0xb8, 0x06, 0x00, 0x00, 0x00, // mov eax, 6: ConsoleWrite.
 		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, console capability.
-		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress.
+		0x48, 0xbe, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rsi, selfTestUserDataAddress.
 		0xba, 0x14, 0x00, 0x00, 0x00, // mov edx, 20.
 		0xcd, 0x80,
 		0x85, 0xc0, // test eax, eax.
@@ -276,7 +287,7 @@ func runKernelSelfTests(pageTable uint64) {
 		0x0f, 0x0b,
 		0xb8, 0x06, 0x00, 0x00, 0x00, // mov eax, 6: ConsoleWrite.
 		0x48, 0xbf, 0x04, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // the console slot with a forged generation.
-		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0xba, 0x01, 0x00, 0x00, 0x00,
 		0xcd, 0x80,
 		0x83, 0xf8, 0x02, // cmp eax, PermissionDenied.
@@ -284,7 +295,7 @@ func runKernelSelfTests(pageTable uint64) {
 		0x0f, 0x0b,
 		0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax, 3: IPCSend.
 		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdi, channelA.
-		0x48, 0xbe, 0x14, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rsi, UserDataAddress+20.
+		0x48, 0xbe, 0x14, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rsi, selfTestUserDataAddress+20.
 		0xba, 0x30, 0x00, 0x00, 0x00, // mov edx, TTY wire size.
 		0xcd, 0x80,
 		0x85, 0xc0,
@@ -306,7 +317,7 @@ func runKernelSelfTests(pageTable uint64) {
 	faultProgram := []byte{
 		0xb8, 0x05, 0x00, 0x00, 0x00,
 		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0xba, 0x18, 0x00, 0x00, 0x00,
 		0xcd, 0x80,
 		0x83, 0xf8, 0x06,
@@ -314,7 +325,7 @@ func runKernelSelfTests(pageTable uint64) {
 		0x0f, 0x0b,
 		0xb8, 0x05, 0x00, 0x00, 0x00,
 		0x48, 0xbf, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-		0x48, 0xbe, 0x18, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+		0x48, 0xbe, 0x18, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0xba, 0x18, 0x00, 0x00, 0x00,
 		0xcd, 0x80,
 		0x85, 0xc0,
@@ -328,8 +339,11 @@ func runKernelSelfTests(pageTable uint64) {
 		0x85, 0xc0,
 		0x74, 0x02,
 		0x0f, 0x0b,
-		0x0f, 0x0b, // ud2: the fault this process exists to take.
+		0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, high entry trampoline.
+		0x48, 0x8b, 0x00, // mov rax, [rax]: supervisor mapping must fault.
+		0x0f, 0x0b,
 	}
+	putUint64(faultProgram[len(faultProgram)-13:len(faultProgram)-5], amd64.EntryProbeAddress())
 	faultData := [48]byte{}
 	putUint64(faultData[0:8], vm.UserStackAddress)
 	putUint64(faultData[8:16], ipc.WireMaxSize)
@@ -338,21 +352,21 @@ func runKernelSelfTests(pageTable uint64) {
 	putUint64(faultData[32:40], ipc.WireMaxSize)
 	putUint64(faultData[40:48], 1000)
 	nativeBytes, nativeEncoded := loader.EncodeNative(nativeImageData[:], loader.ImageSource{
-		Entry:    vm.UserCodeAddress,
+		Entry:    selfTestUserCodeAddress,
 		StackTop: vm.UserStackAddress + vm.PageSize - 16,
 		Segments: []loader.SegmentSource{
-			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(userProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: userProgram[:]},
+			{VirtualAddress: selfTestUserCodeAddress, MemorySize: uint32(len(userProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: userProgram[:]},
 			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
-			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(userData)), Flags: loader.SegmentReadable, Data: userData[:]},
+			{VirtualAddress: selfTestUserDataAddress, MemorySize: uint32(len(userData)), Flags: loader.SegmentReadable, Data: userData[:]},
 		},
 	})
 	faultBytes, faultEncoded := loader.EncodeNative(faultImageData[:], loader.ImageSource{
-		Entry:    vm.UserCodeAddress,
+		Entry:    selfTestUserCodeAddress,
 		StackTop: vm.UserStackAddress + vm.PageSize - 16,
 		Segments: []loader.SegmentSource{
-			{VirtualAddress: vm.UserCodeAddress, MemorySize: uint32(len(faultProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: faultProgram},
+			{VirtualAddress: selfTestUserCodeAddress, MemorySize: uint32(len(faultProgram)), Flags: loader.SegmentReadable | loader.SegmentExecutable, Data: faultProgram},
 			{VirtualAddress: vm.UserStackAddress, MemorySize: uint32(vm.PageSize), Flags: loader.SegmentReadable | loader.SegmentWritable},
-			{VirtualAddress: vm.UserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
+			{VirtualAddress: selfTestUserDataAddress, MemorySize: uint32(len(faultData)), Flags: loader.SegmentReadable, Data: faultData[:]},
 		},
 	})
 	loadedA, loadedImageA := loader.LoadNative(&pageAllocator, rootA, nativeBytes)
@@ -366,7 +380,7 @@ func runKernelSelfTests(pageTable uint64) {
 	mark("USER_RX_OK")
 	mark("USER_STACK_NX_OK")
 	copyOutProbe := []byte{0x5a}
-	if vm.CopyOut(rootA, vm.UserDataAddress, copyOutProbe) || !vm.CopyOut(rootA, vm.UserStackAddress, copyOutProbe) {
+	if vm.CopyOut(rootA, selfTestUserDataAddress, copyOutProbe) || !vm.CopyOut(rootA, vm.UserStackAddress, copyOutProbe) {
 		console.WriteString("PANIC: user copyout validation failed\n")
 		for {
 			amd64.Halt()
@@ -382,14 +396,28 @@ func runKernelSelfTests(pageTable uint64) {
 func startSelfTestTasks() {
 	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootA, selfTestLoadedA.Entry, selfTestLoadedA.StackTop)
 	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootB, selfTestLoadedB.Entry, selfTestLoadedB.StackTop)
-	if !userTaskAdded || !faultTaskAdded || !processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) {
-		panicSerial("self-test task scheduling failed")
+	if !userTaskAdded {
+		panicSerial("self-test user task installation failed")
+	}
+	if !faultTaskAdded {
+		panicSerial("self-test fault task installation failed")
+	}
+	userSlot, _, validTask := sched.TaskID(userTaskID).Parts()
+	stackTop := amd64.TaskStackTop(uint64(userSlot))
+	stackPermissions, stackUser, stackMapped := vm.MappingPermissions(selfTestRootA, stackTop-1)
+	guardLow, guardHigh, guardFound := amd64.KernelStackGuard(stackTop - 1)
+	if !validTask || stackTop < vm.KernelLowBase || !stackMapped || stackUser || !stackPermissions.Writable || stackPermissions.Executable ||
+		!guardFound || guardHigh == 0 || guardLow >= guardHigh || vm.IsMapped(selfTestRootA, guardHigh-vm.PageSize) || vm.IsMapped(kernelPageTable, guardHigh-vm.PageSize) {
+		panicSerial("self-test kernel-entry stack mapping invalid")
+	}
+	if !processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) {
+		panicSerial("self-test task binding failed")
 	}
 }
 
 func awaitValidationBoot() {
 	console := amd64.NewCOM1()
-	for userExited == 0 || amd64.UserFaults() == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || highKernelAccessFaults == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
 		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")
@@ -455,6 +483,15 @@ func awaitValidationBoot() {
 	mark("USER_PREEMPT_OK")
 	mark("PROCESS_CR3_SCHED_OK")
 	mark("USER_FAULT_ISOLATION_OK")
+	mark("KERNEL_HIGH_ISOLATION_OK")
+	if amd64.UserCallEntryCount() < 2000 || amd64.UserCallEntryDrift() != 0 {
+		console.WriteString("PANIC: user entry stack pointer drifted\n")
+		for {
+			amd64.Halt()
+		}
+	}
+	mark("USER_ENTRY_STACK_BOUNDED_OK")
+	mark("USER_LOW_ADDRESS_EXEC_OK")
 	mark("USER_STACK_GUARD_OK")
 	mark("USER_RING3_OK")
 	mark("NATIVE_PROCESS_OK")
@@ -465,14 +502,18 @@ func awaitValidationBoot() {
 
 // pageFaultExit is the exit code of a task retired by a user page fault: the
 // fault bit and vector 14.
-const pageFaultExit = uint64(1)<<63 | 14
+const (
+	pageFaultExit           = uint64(1)<<63 | 14
+	selfTestUserCodeAddress = vm.UserProbeAddress + 2*vm.PageSize
+	selfTestUserDataAddress = vm.UserProbeAddress + 4*vm.PageSize
+)
 
 // stackGuardFaults counts fault-probe runs that overflowed their stack into
 // the unmapped gap below it. stackGuardDeepFaults counts those among them that
 // faulted more than a page below the stack, where ADR 0083's single guard page
 // ended: the probe allocates a 12 KiB frame, so its overflow proves that a
 // frame larger than a page still lands in the gap (ADR 0083, ADR 0088).
-var stackGuardFaults, stackGuardDeepFaults uint64
+var stackGuardFaults, stackGuardDeepFaults, highKernelAccessFaults uint64
 
 // noteStackGuardFault counts an exit as a stack guard fault when the task died
 // of a page fault anywhere in the gap below the probe layout's stack and the
@@ -485,6 +526,13 @@ func noteStackGuardFault(taskID sched.TaskID, code uint64) {
 	}
 	address := amd64.TakeTaskFaultAddress(uint64(slot))
 	owner, found := processRegistry.ByTask(taskID)
+	if found && owner.ID() == 3 && code == pageFaultExit {
+		probe := amd64.EntryProbeAddress()
+		if address&^(vm.PageSize-1) == probe&^(vm.PageSize-1) {
+			highKernelAccessFaults++
+			mark("KERNEL_HIGH_ACCESS_FAULT_OK")
+		}
+	}
 	if !found || code != pageFaultExit || address < vm.UserStackAddress-loader.StackGuardSize || address >= vm.UserStackAddress {
 		return
 	}
@@ -514,21 +562,21 @@ func checkSharedImagePages(image []byte) {
 	}
 	_, firstLoaded := loader.LoadImage(&pageAllocator, first, loader.Contiguous(image), &selfTestShared, loader.Origin{Key: 1}, nil)
 	_, secondLoaded := loader.LoadImage(&pageAllocator, second, loader.Contiguous(image), &selfTestShared, loader.Origin{Key: 1}, nil)
-	firstCode, firstCodeOK := vm.ResolveUser(first, vm.UserCodeAddress)
-	secondCode, secondCodeOK := vm.ResolveUser(second, vm.UserCodeAddress)
+	firstCode, firstCodeOK := vm.ResolveUser(first, selfTestUserCodeAddress)
+	secondCode, secondCodeOK := vm.ResolveUser(second, selfTestUserCodeAddress)
 	firstStack, _ := vm.ResolveUser(first, vm.UserStackAddress)
 	secondStack, _ := vm.ResolveUser(second, vm.UserStackAddress)
 	if !firstLoaded || !secondLoaded || !firstCodeOK || !secondCodeOK || firstCode != secondCode || firstStack == secondStack || selfTestShared.Hits() != 2 {
 		panicSerial("image code was not shared, or its stack was")
 	}
 	probe := []byte{0xcc}
-	if vm.CopyOut(first, vm.UserCodeAddress, probe) || vm.CanCopyOut(second, vm.UserCodeAddress, 1) || vm.CopyOut(second, vm.UserDataAddress, probe) {
+	if vm.CopyOut(first, selfTestUserCodeAddress, probe) || vm.CanCopyOut(second, selfTestUserCodeAddress, 1) || vm.CopyOut(second, selfTestUserDataAddress, probe) {
 		panicSerial("a shared image page accepted a kernel write")
 	}
 	if !vm.DestroyUserAddressSpace(&pageAllocator, first) || !pageAllocator.IsAllocated(secondCode) {
 		panicSerial("teardown released a shared image page")
 	}
-	if code, ok := vm.ResolveUser(second, vm.UserCodeAddress); !ok || code != secondCode || !vm.DestroyUserAddressSpace(&pageAllocator, second) {
+	if code, ok := vm.ResolveUser(second, selfTestUserCodeAddress); !ok || code != secondCode || !vm.DestroyUserAddressSpace(&pageAllocator, second) {
 		panicSerial("teardown disturbed the other process's code")
 	}
 	mark("IMAGE_PAGES_ISOLATED_OK")
@@ -558,7 +606,8 @@ func checkHighMemory(pageTable uint64) {
 		page[index] = byte(index * 7)
 	}
 	root, created := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
-	mapped := created && vm.MapUserPage(root, vm.UserProbeAddress, physical, vm.Permissions{User: true, Writable: true})
+	_, mapped := vm.MapUserPageAt(&pageAllocator, root, vm.UserProbeAddress, physical, vm.Permissions{User: true, Writable: true}, false)
+	mapped = created && mapped
 	tail := vm.UserProbeAddress + vm.PageSize - uint64(len(highMemoryProbe))
 	if !mapped || !vm.CopyIn(root, tail, highMemoryProbe[:]) {
 		panicSerial("high page could not be read through a process mapping")

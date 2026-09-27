@@ -100,6 +100,9 @@ func BuildIdentity(allocator *pmm.Allocator, image Image) (uint64, bool) {
 	if !buildDirectMap(allocator, root) {
 		return 0, false
 	}
+	// The same 4 KiB hierarchy supplies the higher-half kernel alias. Permission
+	// changes and guard pages therefore stay identical in both views.
+	root[kernelLowSlot] = root[0]
 	return rootAddress, true
 }
 
@@ -134,10 +137,8 @@ func buildDirectMap(allocator *pmm.Allocator, root *table) bool {
 // above IdentityMapLimit. The firmware places the TinyGo heap and stack at the
 // top of low RAM, so on a machine with more than a GiB they lie above the
 // kernel identity map, and the kernel keeps using them at their physical
-// address. The mapping lives in the kernel's first PML4 slot; the part inside
-// the user GiB reaches every process as supervisor-only directory entries
-// copied by CreateUserAddressSpace (ADR 0103). Loader memory that overlaps the
-// fixed user windows, or lies beyond the first PML4 slot, is refused.
+// address. Loader memory that overlaps the fixed user windows, or lies beyond
+// the first PML4 slot, is refused. Process roots do not inherit these mappings.
 func MapLoaderMemory(allocator *pmm.Allocator, rootAddress uint64, regions []boot.MemoryRegion) bool {
 	if allocator == nil || rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
 		return false
@@ -196,9 +197,10 @@ func kernelTable(allocator *pmm.Allocator, parent *table, index uint64) (*table,
 	return (*table)(unsafe.Pointer(uintptr(entry & addressMask))), true
 }
 
-// UnmapPage removes one aligned leaf from a kernel-owned bootstrap table.
+// UnmapPage removes one aligned bootstrap leaf through its low or higher-half
+// address.
 func UnmapPage(rootAddress uint64, address uint64) bool {
-	if rootAddress%PageSize != 0 || address%PageSize != 0 || address >= IdentityMapLimit {
+	if rootAddress%PageSize != 0 || address%PageSize != 0 || !bootstrapAddress(address) {
 		return false
 	}
 	// SAFETY: rootAddress is the exclusively owned PML4 returned by
@@ -254,7 +256,7 @@ func MapKernelDevicePage(rootAddress uint64, virtual uint64, physical uint64) bo
 
 // IsMapped reports whether a bootstrap leaf is present.
 func IsMapped(rootAddress uint64, address uint64) bool {
-	if rootAddress%PageSize != 0 || address >= IdentityMapLimit {
+	if rootAddress%PageSize != 0 || !bootstrapAddress(address) {
 		return false
 	}
 	// SAFETY: rootAddress follows the same BuildIdentity ownership invariant as
@@ -262,6 +264,64 @@ func IsMapped(rootAddress uint64, address uint64) bool {
 	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
 	entry := leafEntry(root, address)
 	return entry != nil && *entry&entryPresent != 0
+}
+
+// MappingPermissions reports the effective leaf permissions used by focused
+// entry-mapping validation.
+func MappingPermissions(rootAddress, address uint64) (Permissions, bool, bool) {
+	if rootAddress%PageSize != 0 {
+		return Permissions{}, false, false
+	}
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, address&^(PageSize-1))
+	if entry == nil || *entry&entryPresent == 0 {
+		return Permissions{}, false, false
+	}
+	return Permissions{Writable: *entry&entryWritable != 0, Executable: *entry&entryNX == 0, User: *entry&entryUser != 0}, *entry&entryUser != 0, true
+}
+
+// MapProcessKernelPage installs one supervisor-only higher-half mapping in a
+// process root. Entry code uses executable read-only pages; stacks and entry
+// metadata use writable NX pages.
+func MapProcessKernelPage(allocator *pmm.Allocator, rootAddress, virtual, physical uint64, writable, executable bool) bool {
+	if allocator == nil || rootAddress%PageSize != 0 || virtual%PageSize != 0 || physical%PageSize != 0 {
+		return false
+	}
+	aliasPhysical, ok := KernelPhysical(virtual)
+	if !ok || aliasPhysical != physical {
+		return false
+	}
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	pdpt, ok := kernelTable(allocator, root, (virtual>>39)&0x1ff)
+	if !ok {
+		return false
+	}
+	pd, ok := kernelTable(allocator, pdpt, (virtual>>30)&0x1ff)
+	if !ok {
+		return false
+	}
+	pt, ok := kernelTable(allocator, pd, (virtual>>21)&0x1ff)
+	if !ok {
+		return false
+	}
+	entry := &pt[(virtual>>12)&0x1ff]
+	value, ok := pageEntry(physical, Permissions{Writable: writable, Executable: executable})
+	if !ok {
+		return false
+	}
+	if *entry&entryPresent != 0 {
+		return *entry&^(entryAccessed|entryDirty) == value
+	}
+	*entry = value
+	return true
+}
+
+func bootstrapAddress(address uint64) bool {
+	if address < IdentityMapLimit {
+		return true
+	}
+	_, ok := KernelPhysical(address)
+	return ok
 }
 
 // CreateUserAddressSpace creates a new PML4 that shares supervisor-only kernel
@@ -274,56 +334,14 @@ func CreateUserAddressSpace(allocator *pmm.Allocator, kernelRootAddress uint64) 
 	if !ok {
 		return 0, false
 	}
-	pdptAddress, pdpt, ok := allocateTable(allocator)
-	if !ok {
-		return 0, false
-	}
-	// SAFETY: kernelRootAddress is the live PML4 returned by BuildIdentity. Its
-	// first entry names the identity-mapped kernel PDPT.
+	// SAFETY: kernelRootAddress is the live PML4 returned by BuildIdentity.
 	kernelRoot := (*table)(unsafe.Pointer(uintptr(kernelRootAddress)))
-	kernelPDPTEntry := kernelRoot[0]
-	if kernelPDPTEntry&entryPresent == 0 {
+	if kernelRoot[kernelLowSlot]&entryPresent == 0 || kernelRoot[directMapSlot]&entryPresent == 0 {
 		return 0, false
 	}
-	// SAFETY: the present non-leaf entry was created by BuildIdentity and points
-	// to an identity-mapped page-table page.
-	kernelPDPT := (*table)(unsafe.Pointer(uintptr(kernelPDPTEntry & addressMask)))
-	for index := range pdpt {
-		pdpt[index] = kernelPDPT[index]
-	}
-	root[0] = pdptAddress | entryPresent | entryWritable | entryUser
-	// Every address space shares the kernel's direct map. The entry carries
-	// no user bit, so user code cannot reach it and teardown never frees it.
+	// Entry code, descriptor metadata and the task's kernel stack are mapped
+	// later as private supervisor leaves. The lower half starts empty.
 	root[directMapSlot] = kernelRoot[directMapSlot]
-
-	pdAddress, pd, ok := allocateTable(allocator)
-	if !ok {
-		return 0, false
-	}
-	// Loader memory in the user GiB (MapLoaderMemory) stays reachable to the
-	// kernel in every address space through the kernel's supervisor-only
-	// directory entries. They carry no user bit, so user access faults,
-	// CopyIn and CopyOut refuse them, no user leaf is placed under them, and
-	// teardown leaves their tables alone.
-	userSlot := (UserProbeAddress >> 30) & 0x1ff
-	if kernelUserEntry := kernelPDPT[userSlot]; kernelUserEntry&entryPresent != 0 {
-		// SAFETY: the entry is a kernel directory built by MapLoaderMemory from
-		// an allocateTable page inside the identity map.
-		kernelPD := (*table)(unsafe.Pointer(uintptr(kernelUserEntry & addressMask)))
-		for index := range pd {
-			pd[index] = kernelPD[index]
-		}
-	}
-	probeSlot := (UserProbeAddress >> 21) & 0x1ff
-	if pd[probeSlot]&entryPresent != 0 {
-		return 0, false
-	}
-	ptAddress, _, ok := allocateTable(allocator)
-	if !ok {
-		return 0, false
-	}
-	pdpt[userSlot] = pdAddress | entryPresent | entryWritable | entryUser
-	pd[probeSlot] = ptAddress | entryPresent | entryWritable | entryUser
 	return rootAddress, true
 }
 
@@ -335,7 +353,7 @@ func MapUserPage(rootAddress uint64, virtual uint64, physical uint64, permission
 
 func mapUserPage(rootAddress uint64, virtual uint64, physical uint64, permissions Permissions, owned bool) bool {
 	if rootAddress%PageSize != 0 || virtual%PageSize != 0 || physical%PageSize != 0 ||
-		virtual < IdentityMapLimit || virtual >= UserAddressLimit || !permissions.User {
+		!ValidateUserRange(virtual, PageSize) || !permissions.User {
 		return false
 	}
 	// SAFETY: rootAddress names a process PML4 created by this package and its
@@ -357,7 +375,9 @@ func mapUserPage(rootAddress uint64, virtual uint64, physical uint64, permission
 }
 
 // DestroyUserAddressSpace releases private user leaves and every process-owned
-// page-table page. Kernel branches and shared-memory backing remain allocated.
+// page-table page. The direct-map branch and shared-memory backing remain
+// allocated. Supervisor entry leaves and stack leaves name kernel-owned pages,
+// so teardown frees their private tables but not the mapped pages.
 func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool {
 	if allocator == nil || rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit {
 		return false
@@ -368,28 +388,38 @@ func DestroyUserAddressSpace(allocator *pmm.Allocator, rootAddress uint64) bool 
 	ok := true
 	for rootIndex := range root {
 		rootEntry := root[rootIndex]
-		if rootEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+		if rootEntry&entryPresent == 0 || uint64(rootIndex) == directMapSlot {
 			continue
+		}
+		userBranch := rootEntry&entryUser != 0
+		if !userBranch && uint64(rootIndex) != kernelLowSlot {
+			return false
 		}
 		pdptAddress := rootEntry & addressMask
 		pdpt := (*table)(unsafe.Pointer(uintptr(pdptAddress)))
 		for pdptIndex := range pdpt {
 			pdptEntry := pdpt[pdptIndex]
-			if pdptEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+			if pdptEntry&entryPresent == 0 {
 				continue
+			}
+			if pdptEntry&entryLarge != 0 || (pdptEntry&entryUser != 0) != userBranch {
+				return false
 			}
 			pdAddress := pdptEntry & addressMask
 			pd := (*table)(unsafe.Pointer(uintptr(pdAddress)))
 			for pdIndex := range pd {
 				pdEntry := pd[pdIndex]
-				if pdEntry&(entryPresent|entryUser) != entryPresent|entryUser {
+				if pdEntry&entryPresent == 0 {
 					continue
+				}
+				if pdEntry&entryLarge != 0 || (pdEntry&entryUser != 0) != userBranch {
+					return false
 				}
 				ptAddress := pdEntry & addressMask
 				pt := (*table)(unsafe.Pointer(uintptr(ptAddress)))
 				for leafIndex := range pt {
 					leaf := pt[leafIndex]
-					if leaf&(entryPresent|entryOwned) == entryPresent|entryOwned {
+					if userBranch && leaf&(entryPresent|entryOwned) == entryPresent|entryOwned {
 						ok = allocator.Free(leaf&addressMask) && ok
 					}
 					pt[leafIndex] = 0

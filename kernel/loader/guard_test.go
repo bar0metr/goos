@@ -79,9 +79,9 @@ func TestKernelMapsUserRange(t *testing.T) {
 		mapped     bool
 	}{
 		{name: "probe page", start: vm.UserProbeAddress, end: vm.UserProbeAddress + 0x1000, mapped: true},
-		{name: "startup page at the top of a gap", start: vm.UserCodeAddress - StackGuardSize, end: vm.UserCodeAddress, mapped: true},
+		{name: "probe page inside a wider range", start: vm.UserProbeAddress - 0x1000, end: vm.UserProbeAddress + 0x2000, mapped: true},
 		{name: "ends at the probe page", start: vm.UserProbeAddress - StackGuardSize, end: vm.UserProbeAddress},
-		{name: "starts above the startup page", start: vm.UserCodeAddress, end: vm.UserCodeAddress + StackGuardSize},
+		{name: "starts above the probe page", start: vm.UserProbeAddress + vm.PageSize, end: vm.UserProbeAddress + vm.PageSize + StackGuardSize},
 		{name: "the rest of the image area", start: vm.UserImageAreaLimit - StackGuardSize, end: vm.UserImageAreaLimit},
 	}
 	for _, test := range tests {

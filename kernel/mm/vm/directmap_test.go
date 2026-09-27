@@ -9,12 +9,36 @@ func TestDirectMapLayout(t *testing.T) {
 	if directMapSlot != 256 || DirectMapBase>>47 != 0x1ffff {
 		t.Fatalf("direct map at %#x is not the first upper-half PML4 slot", DirectMapBase)
 	}
+	if kernelLowSlot == directMapSlot || KernelLowBase>>47 != 0x1ffff {
+		t.Fatalf("kernel low alias at %#x overlaps the direct map", KernelLowBase)
+	}
 	// The whole managed range fits in the one slot every address space shares.
 	if pmm.MaxPhysical > 1<<39 {
 		t.Fatalf("managed limit %#x exceeds one PML4 slot", pmm.MaxPhysical)
 	}
 	if pmm.LowLimit != IdentityMapLimit {
 		t.Fatalf("low allocation limit %#x differs from the identity map %#x", pmm.LowLimit, IdentityMapLimit)
+	}
+}
+
+func TestKernelAlias(t *testing.T) {
+	address, ok := KernelAlias(KernelImageBase)
+	if !ok || address != KernelLowBase+KernelImageBase {
+		t.Fatalf("kernel image alias = %#x, %v", address, ok)
+	}
+	physical, ok := KernelPhysical(address)
+	if !ok || physical != KernelImageBase {
+		t.Fatalf("kernel image physical address = %#x, %v", physical, ok)
+	}
+	for _, invalid := range []uint64{0, identityMapStart - 1, IdentityMapLimit} {
+		if _, ok := KernelAlias(invalid); ok {
+			t.Fatalf("aliased invalid address %#x", invalid)
+		}
+	}
+	for _, invalid := range []uint64{0, KernelLowBase + identityMapStart - 1, KernelLowBase + IdentityMapLimit} {
+		if _, ok := KernelPhysical(invalid); ok {
+			t.Fatalf("resolved invalid alias %#x", invalid)
+		}
 	}
 }
 

@@ -55,10 +55,9 @@ bit, and teardown never frees it. The kernel reaches an arbitrary physical
 page through one accessor: pages in `[1 MiB, 1 GiB)` at their physical
 address, managed pages above that through the direct map. On a machine with
 more than about a GiB, the firmware places the loader memory that holds the
-kernel heap above 1 GiB; `vm.MapLoaderMemory` maps it at its physical address,
-supervisor-only, and every process shares those directory entries. No user
-leaf can be placed under them, so the few MiB they cover at the top of the
-image area are simply unavailable to images (ADR 0103, ADR 0104).
+kernel heap above 1 GiB; `vm.MapLoaderMemory` maps it at its physical address
+in the kernel root. Process roots do not inherit those low mappings (ADR 0103,
+ADR 0104, ADR 0120).
 
 Ordinary identity-mapped pages are writable and non-executable. The loaded PE
 image is validated in memory and its section flags are translated into leaf
@@ -66,10 +65,14 @@ permissions. Executable sections are read-only; writable sections are NX. A PE
 section requesting write and execute simultaneously is rejected. EFER.NXE and
 CR0.WP are enabled before the kernel installs its PML4 through CR3.
 
-Process roots clone the supervisor-only kernel PDPT path and share the direct
-map; every user page-table level below them is private and created on demand.
-User leaves require the user bit at every parent, reject W+X, and are zeroed
-before exposure.
+Process roots share the direct map but not the low kernel image. They privately
+map only the high assembly entry and return pages, descriptor metadata, and
+the current task's high kernel stack. Those mappings remain supervisor-only.
+Entry code changes to the kernel CR3 before it transfers to low-linked TinyGo
+code; the high return prefix changes back to the process CR3 immediately
+before `iretq` (ADR 0120). Every user page-table level is private and created
+on demand. User leaves require the user bit at every parent, reject W+X, and
+are zeroed before exposure.
 
 Kernel APIs do not directly dereference user virtual addresses. `CopyIn` and
 `CopyOut` reject arithmetic wraparound and addresses outside the user range,
@@ -84,18 +87,20 @@ level, so a kernel table shared between address spaces never receives one.
 
 ## User address space and regions
 
-User addresses are canonical lower-half addresses in `[1 GiB,
+User addresses are canonical lower-half addresses in `[0x1000,
 0x00007ffffffff000)` (ADR 0104):
 
 | Range | Use |
 | --- | --- |
-| `0x40000000` | self-test probe page (validation build) |
-| `0x40001000` | startup page, read-only |
+| `0x00400000` | self-test probe page (validation build) |
+| `0x00402000` | low-address self-test code (validation build) |
+| `0x00404000` | low-address self-test data (validation build) |
 | `0x40002000` – `2 GiB` | image segments; static small-code-model executables |
 | `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec area) |
 | `0x0000081000000000` | DMA window |
 | `0x0000082000000000` | system image window |
 | `0x0000083000000000` | PID 1 launch staging page |
+| `0x0000084000000000` | process startup object, read-only |
 | `0x0000100000000000` – `0x0000700000000000` | addresses the kernel chooses: heap, anonymous maps, shared maps |
 | below `0x00007fffff000000` | stack reservation, guard below it |
 
@@ -171,8 +176,10 @@ only in process B. A payload crossing the page boundary is written through A,
 read through B, and verified to resolve to identical physical pages. A write
 through B is rejected.
 
-The kernel still occupies the first GiB of every address space, identity
-mapped and supervisor-only. A higher-half kernel and ASLR remain later work.
+The kernel root retains the low linked image and its higher-half alias.
+Process roots omit the low kernel image and map only the high transition state
+described in ADR 0120. A relocatable higher-half kernel and ASLR remain later
+work.
 
 ## ASLR readiness
 
@@ -188,12 +195,13 @@ decided so far is in the way.
 | Region | Address | Fixed by |
 | --- | --- | --- |
 | Kernel PE image | `0x400000` | TinyGo's `uefi-amd64` target links with `--image-base 0x400000 --no-dynamicbase`; `vm.KernelImageBase` reads the PE header there |
-| Kernel identity map | physical = virtual for `[1 MiB, 1 GiB)` | `vm.BuildIdentity`; kernel stacks, heap arena, page tables, and the boot archive are all reached at their physical address |
+| Kernel identity map | physical = virtual for `[1 MiB, 1 GiB)` | `vm.BuildIdentity`; linked kernel code, the heap arena, page tables, stack backing, and the boot archive remain addressable at their physical address |
 | Loader memory above 1 GiB | physical = virtual, supervisor-only | `vm.MapLoaderMemory`; where OVMF puts the heap arena on machines with more than about a GiB |
 | Direct map | `0xffff800000000000` + physical | `vm.DirectMapBase`; every managed page, shared by all address spaces |
-| User pointer range | `[0x40000000, 0x00007ffffffff000)` | `vm.ValidateUserRange` (`IdentityMapLimit`..`UserAddressLimit`) |
+| Process entry mapping | minimal supervisor-only pages at `0xffffc00000000000` + linked address | ADR 0120; assembly trampolines, descriptor state, and the active kernel stack |
+| User pointer range | `[0x1000, 0x00007ffffffff000)` | `vm.ValidateUserRange` (`UserAddressStart`..`UserAddressLimit`) |
 | User page tables | created on demand at every level | `vm.MapUserPageAt` |
-| Startup page | `0x40001000` | `vm.UserStartupAddress`; read only through `StartupRead` |
+| Startup object | `0x0000084000000000` | `vm.UserStartupAddress`; read only through `StartupRead` |
 | Image base (code, then rodata, data, bss) | `0x40002000` | `userspace/runtime/amd64.ld`; images are static `ET_EXEC` files below 2 GiB |
 | Initial stack pointer | `0x00007fffff000000` | `vm.UserStackTop`; the reservation below it comes from the image header |
 | Userspace heap | chosen by the kernel's first-fit search from `0x0000100000000000` | `arena.Init` reserves it with `VMMap` |
@@ -220,23 +228,24 @@ needs its entropy even earlier, in the loader stage that picks the slide.
 
 **Kernel ASLR.** This is the largest change. The kernel is linked at a fixed
 base, marked non-relocatable (the PE has a `.reloc` section but not
-`DYNAMIC_BASE`), and runs identity-mapped in the same low GiB that every
-process shares through its cloned kernel PDPT entry. Randomizing it needs:
+`DYNAMIC_BASE`), and executes normal TinyGo code through the kernel root's low
+mapping. Process roots map only the fixed high transition subset. Randomizing
+it needs:
 
 - a relocatable kernel: keep base relocations and set `DYNAMIC_BASE`, or have
   the kernel apply its own relocations, and stop reading its header at the
   constant `vm.KernelImageBase` (the loaded-image protocol reports the real
   base);
-- a higher-half kernel mapped at a random slide, with the physical-memory map
-  moved out of the identity range and placed at its own random offset, so that
-  kernel pointers stop being physical addresses;
+- a higher-half kernel mapped at a random slide, replacing the fixed transition
+  alias and the low-linked execution model, so kernel pointers stop being
+  physical addresses;
 - no kernel addresses leaked to userspace. `DMAAllocate` returns a physical
   address to the driver, which a device needs; `Diagnostics` in the
   `goos_diag` build prints physical addresses. Nothing else in the native ABI
   returns a kernel address;
-- separation of kernel and user page tables (KPTI or equivalent) before the
-  slide is worth much, because timing side channels can recover a kernel
-  mapped in every address space.
+- a decision on stronger page-table separation. Process roots already omit the
+  low kernel image, but they retain the minimal high transition mappings and
+  the shared direct map required by the current entry design.
 
 **Executable ASLR.** Programs are static non-PIE executables. `elf2native`
 accepts only `ET_EXEC` and refuses `PT_DYNAMIC`, and the `GOOSNAT` format

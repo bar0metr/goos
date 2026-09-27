@@ -75,7 +75,7 @@ func main() {
 	if !ok {
 		fail(fmt.Errorf("native image encoding failed"))
 	}
-	if _, ok := loader.ParseNative(image, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit); !ok {
+	if _, ok := loader.ParseNative(image, vm.PageSize, vm.UserAddressStart, vm.UserImageAreaLimit); !ok {
 		fail(fmt.Errorf("ELF load layout is not a valid native image"))
 	}
 	if err := os.WriteFile(os.Args[2], image, 0o644); err != nil {

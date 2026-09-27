@@ -39,10 +39,11 @@ func TestValidateUserRange(t *testing.T) {
 		length  uint64
 		valid   bool
 	}{
-		{name: "one byte", address: IdentityMapLimit, length: 1, valid: true},
+		{name: "normal ELF base", address: 0x00400000, length: PageSize, valid: true},
+		{name: "first user byte", address: UserAddressStart, length: 1, valid: true},
 		{name: "last byte", address: UserAddressLimit - 1, length: 1, valid: true},
-		{name: "zero length", address: IdentityMapLimit, valid: true},
-		{name: "kernel address", address: IdentityMapLimit - 1, length: 1},
+		{name: "zero length", address: UserAddressStart, valid: true},
+		{name: "null page", address: 0, length: PageSize},
 		{name: "past limit", address: UserAddressLimit, length: 1},
 		{name: "crosses limit", address: UserAddressLimit - 1, length: 2},
 		{name: "overflow", address: ^uint64(0) - 1, length: 4},

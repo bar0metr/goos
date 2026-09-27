@@ -3,14 +3,19 @@ package vm
 const (
 	PageSize         = uint64(4096)
 	IdentityMapLimit = uint64(1 << 30)
+	// UserAddressStart leaves the null page unmapped while allowing ordinary
+	// low ELF addresses such as 0x00400000.
+	UserAddressStart = PageSize
 	// UserAddressLimit ends the user range: the canonical lower half, less its
 	// last page, so no user mapping ends at the non-canonical boundary
 	// (ADR 0104).
 	UserAddressLimit = uint64(0x00007ffffffff000)
 	KernelImageBase  = uint64(0x400000)
-	UserProbeAddress = uint64(0x40000000)
-	UserCodeAddress  = uint64(0x40002000)
-	UserDataAddress  = uint64(0x40004000)
+	UserProbeAddress = uint64(0x00400000)
+	// UserCodeAddress and UserDataAddress are the fixed base used by the
+	// current native linker. The loader also accepts images at lower addresses.
+	UserCodeAddress = uint64(0x40002000)
+	UserDataAddress = uint64(0x40004000)
 	// UserStackAddress is the stack of the fixed self-test and fault-probe
 	// layout. The 64 KiB below it are its unmapped guard gap (ADR 0083, ADR
 	// 0088); it sits above the self-test's shared-memory pages at 0x40010000
@@ -46,6 +51,8 @@ const (
 	entryPresent  = uint64(1 << 0)
 	entryWritable = uint64(1 << 1)
 	entryUser     = uint64(1 << 2)
+	entryAccessed = uint64(1 << 5)
+	entryDirty    = uint64(1 << 6)
 	// entryOwned uses an x86_64 software-available PTE bit. It marks private
 	// process pages whose physical storage is reclaimed with the address space.
 	entryOwned  = uint64(1 << 9)
@@ -54,13 +61,13 @@ const (
 )
 
 // ValidateUserRange rejects wraparound and confines native user pointers to
-// the user range, [1 GiB, UserAddressLimit).
+// the lower canonical half above the null page.
 func ValidateUserRange(address uint64, length uint64) bool {
 	if length == 0 {
-		return address >= IdentityMapLimit && address < UserAddressLimit
+		return address >= UserAddressStart && address < UserAddressLimit
 	}
 	end := address + length
-	return address >= IdentityMapLimit && address < UserAddressLimit && end >= address && end <= UserAddressLimit
+	return address >= UserAddressStart && address < UserAddressLimit && end >= address && end <= UserAddressLimit
 }
 
 type Permissions struct {

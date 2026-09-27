@@ -127,7 +127,8 @@ side effects.
 ### Integer overflow
 
 - User ranges: `vm.ValidateUserRange` and the copy helpers reject
-  `address + length` wraparound and anything outside `[1 GiB, 2 GiB)`.
+  `address + length` wraparound and anything outside
+  `[0x1000, 0x00007ffffffff000)`.
 - Deadlines: `now + timeout < now` fails (`ResourceExhausted` for the
   one-object waits, `InvalidArgument` for `WaitAny`).
 - Ports: `offset + width` is computed in 32 bits against a 16-bit BAR size.

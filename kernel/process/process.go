@@ -52,7 +52,7 @@ func Init(target *Process, id ID, addressSpace AddressSpace) bool {
 	target.id = id
 	target.addressSpace = addressSpace
 	target.quota = defaultQuota()
-	target.regions.Init(vm.IdentityMapLimit, vm.UserAddressLimit)
+	target.regions.Init(vm.UserAddressStart, vm.UserAddressLimit)
 	return true
 }
 

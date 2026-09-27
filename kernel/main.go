@@ -327,6 +327,7 @@ func main() {
 	kernelPageTable = pageTable
 	amd64.EnableNXAndWriteProtect()
 	amd64.LoadPageTable(pageTable)
+	amd64.SetKernelPageTable(pageTable)
 	mark("NX_WX_OK")
 	mark("VM_OK")
 

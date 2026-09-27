@@ -25,7 +25,7 @@ func main() {
 	if err != nil || size == 0 {
 		fail(fmt.Errorf("invalid size %q", os.Args[3]))
 	}
-	image, ok := loader.ParseNative(data, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit)
+	image, ok := loader.ParseNative(data, vm.PageSize, vm.UserAddressStart, vm.UserImageAreaLimit)
 	if !ok || image.SegmentCount == loader.MaxSegments {
 		fail(fmt.Errorf("%s is not a native image with room for a segment", os.Args[1]))
 	}
@@ -56,7 +56,7 @@ func main() {
 	if !ok {
 		fail(fmt.Errorf("encoding the padded image failed"))
 	}
-	if _, ok := loader.ParseNative(padded, vm.PageSize, vm.UserCodeAddress, vm.UserImageAreaLimit); !ok {
+	if _, ok := loader.ParseNative(padded, vm.PageSize, vm.UserAddressStart, vm.UserImageAreaLimit); !ok {
 		fail(fmt.Errorf("the padded image does not validate"))
 	}
 	if err := os.WriteFile(os.Args[2], padded, 0o644); err != nil {
