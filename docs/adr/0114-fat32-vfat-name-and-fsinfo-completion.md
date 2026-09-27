@@ -2,8 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR 0110 and ADR 0112. This is the GoOS 0.1.4 Phase 1.5
-completion boundary; it introduces no Phase 2 filesystem or Linux syscall work.
+Accepted. Amends ADR 0110 and ADR 0112.
 
 ## Context
 
@@ -47,5 +46,5 @@ has no timezone configuration. Conversion remains inside FAT32.
 - Foreign trailing names are interoperable without adopting Win32 trimming.
 - A clean sync can reconcile FSInfo copies; mount-time diagnostics preserve
   evidence of the state originally observed.
-- Phase 2 work, Linux time syscalls, NTP, timezone databases, DST, and fsck
-  repair policy remain out of scope.
+- Linux time syscalls, NTP, timezone databases, DST, partition handling and
+  fsck repair policy remain out of scope.

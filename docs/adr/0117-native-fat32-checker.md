@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Completes GoOS 0.1.4 Phase 4. Explicit repair mode is ADR 0118.
+Accepted. ADR 0118 defines explicit repair mode.
 
 ## Context
 

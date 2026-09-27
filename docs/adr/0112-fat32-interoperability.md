@@ -11,9 +11,8 @@ in those records stands.
 
 ## Context
 
-After ADR 0102 the FAT32 service handled any cluster size and file size, but a
-volume made elsewhere still met GoOS-specific assumptions (GoOS 0.1.4
-specification, Phase 1):
+After ADR 0102 the FAT32 service handled any cluster size and file size, but
+GoOS still imposed its own assumptions on volumes created elsewhere:
 
 - only 512-byte logical sectors were accepted; 1024, 2048 and 4096-byte
   sectors, which formatters use on large-sector media, were refused;
@@ -202,7 +201,7 @@ every host. Tests that need a host tool skip without it.
   `-sector-size`. `Format` zeroes the reserved region and writes a backup
   FSInfo, as other formatters do.
 - `FileSystem` gains `Health`, `Metadata`, `FreeClusters`, `CompareFATs` and
-  `SetClock`, the interfaces `fsck.fat` (Phases 4 and 5) will use.
+  `SetClock`; `fsck.fat` uses these interfaces for checking and repair.
 - The node-ID backend protocol and the VFS do not yet carry timestamps or
   attributes; `Metadata` is available to in-service callers only.
 - GoOS-created files receive UTC realtime timestamps when the native clock is available.
