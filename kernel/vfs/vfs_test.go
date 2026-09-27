@@ -145,6 +145,49 @@ func TestRightsAndInvalidPaths(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutableIsImmutableAndReadAtKeepsCursor(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	if namespace.Create([]byte("/program"), false) != StatusOK {
+		t.Fatal("create failed")
+	}
+	writer, status := namespace.Open(1, []byte("/program"), Read|Write)
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	if count, got := namespace.Write(1, writer, []byte("abcdef")); got != StatusOK || count != 6 {
+		t.Fatalf("write=%d status=%d", count, got)
+	}
+	reader, status := namespace.Open(2, []byte("/program"), Read)
+	if status != StatusOK || namespace.PrepareExecutable(2, reader) != StatusOK {
+		t.Fatalf("prepare=%d", status)
+	}
+	data := make([]byte, 2)
+	if count, got := namespace.ReadAt(2, reader, 2, data); got != StatusOK || count != 2 || string(data) != "cd" {
+		t.Fatalf("read-at=%d status=%d data=%q", count, got, data)
+	}
+	if count, got := namespace.Read(2, reader, data); got != StatusOK || count != 2 || string(data) != "ab" {
+		t.Fatalf("cursor changed: read=%d status=%d data=%q", count, got, data)
+	}
+	if _, got := namespace.Write(1, writer, []byte("x")); got != StatusPermissionDenied {
+		t.Fatalf("write to prepared executable=%d", got)
+	}
+	if got := namespace.Truncate([]byte("/program"), 1); got != StatusPermissionDenied {
+		t.Fatalf("truncate prepared executable=%d", got)
+	}
+	if got := namespace.Rename([]byte("/program"), []byte("/renamed")); got != StatusOK {
+		t.Fatalf("rename prepared executable=%d", got)
+	}
+	if got := namespace.Unlink([]byte("/renamed")); got != StatusPermissionDenied {
+		t.Fatalf("unlink prepared executable=%d", got)
+	}
+	if namespace.Close(2, reader) != StatusOK {
+		t.Fatal("close failed")
+	}
+	if count, got := namespace.Write(1, writer, []byte("x")); got != StatusOK || count != 1 {
+		t.Fatalf("write after close=%d status=%d", count, got)
+	}
+}
+
 func TestNamespacesKeepIndependentMountTables(t *testing.T) {
 	shared := &ramfs.FileSystem{}
 	root := shared.Init()

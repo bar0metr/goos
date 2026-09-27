@@ -219,8 +219,8 @@ The native kernel and the first isolated services are implemented:
 PID 1 runs the supervision policy and resolves every service and system
 command in its own read-only mapping of the system image; the kernel launches
 an extent of that image under an image capability with Execute, or a sealed
-executable object PID 1 filled from a program file elsewhere, and knows no path
-but the bootstrap `system/init` (ADR 0093, 0097). The shell resolves native
+file-backed source holding a stable VFS open object, and knows no path but the
+bootstrap `system/init` (ADR 0093, ADR 0121). The shell resolves native
 executables beneath `/system/bin`, runs program paths such as `./args`, with
 bounded quoting and structured arguments, runs
 pipelines of up to four processes, `;` sequences, and background jobs, and

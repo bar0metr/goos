@@ -51,8 +51,8 @@ const systemImageHandle = handle.ID(0x0000000100000015)
 // the log service and the shell can read the log without the console's input.
 const logDeviceHandle = handle.ID(0x0000000100000016)
 
-// loaderHandle authorizes creating executable objects, which PID 1 fills with
-// programs it reads from a filesystem (ADR 0097).
+// loaderHandle authorizes executable header objects and VFS-backed sources
+// (ADR 0121).
 const loaderHandle = handle.ID(0x0000000100000017)
 
 // fileCacheHandle is the file cache, the memory the VFS and the filesystem

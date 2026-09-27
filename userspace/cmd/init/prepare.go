@@ -3,12 +3,10 @@
 package main
 
 // Programs read from a file are prepared without blocking PID 1 (ADR 0108).
-// A job whose stages name programs outside /system first has each of them read
-// into an executable object: PID 1 opens the file, creates the object, and
-// asks the VFS to fill it, and then goes back to its loop. The VFS answers on
-// a session of the job's own, which the loop watches with everything else;
-// when every program is in its object the job's pipeline starts. Lifecycle
-// events, other jobs, restarts, and shutdown are served meanwhile.
+// For a stage outside /system, PID 1 opens the file and asks VFS to pin it and
+// return its header page. The resulting executable source owns that session.
+// Preparation stays asynchronous, so PID 1 continues serving lifecycle events,
+// other jobs, restarts, and shutdown.
 
 import (
 	"goos/internal/capability"
@@ -16,6 +14,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	execproto "goos/userspace/exec"
@@ -117,28 +116,32 @@ func startFill(job *execJob, index uint8) bool {
 		sys.HandleClose(session)
 		return false
 	}
-	object, status := sys.ExecutableCreate(loaderHandle, stat.Size)
+	correlation++
+	header := min(stat.Size, uint64(vm.PageSize))
+	object, status := sys.ExecutableCreate(loaderHandle, header)
 	if status != kcall.StatusOK {
-		syslog.Warn("executable object refused", syslog.Uint("status", uint64(status)), syslog.Uint("size", stat.Size))
 		entry.status = supervisor.LaunchResourceExhausted
 		closeFile(session, opened.Handle)
 		return false
 	}
 	fill, status := sys.HandleDuplicate(object, capability.Write|capability.Transfer)
-	if status == kcall.StatusOK {
-		correlation++
-		message, encoded := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationFillExecutable, Handle: opened.Handle, Size: uint32(stat.Size)}, correlation)
-		if encoded {
-			message.HandleCount, message.Handles[0] = 1, fill
-		}
-		if encoded && sendMessage(uint64(session), message) {
-			now, _ := sys.ClockRead()
-			entry.ready = false
-			job.fill = pendingFill{session: session, file: opened.Handle, object: object, size: stat.Size, correlation: correlation, deadline: now + fillDeadline(stat.Size)}
-			return true
-		}
-		sys.HandleClose(fill)
+	if status != kcall.StatusOK {
+		sys.HandleClose(object)
+		entry.status = supervisor.LaunchResourceExhausted
+		closeFile(session, opened.Handle)
+		return false
 	}
+	message, encoded := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationPrepareExecutable, Handle: opened.Handle, Size: uint32(header)}, correlation)
+	if encoded {
+		message.HandleCount, message.Handles[0] = 1, fill
+	}
+	if encoded && sendMessage(uint64(session), message) {
+		now, _ := sys.ClockRead()
+		entry.ready = false
+		job.fill = pendingFill{session: session, file: opened.Handle, object: object, size: stat.Size, correlation: correlation, deadline: now + fillDeadline(header)}
+		return true
+	}
+	sys.HandleClose(fill)
 	sys.HandleClose(object)
 	entry.status = supervisor.LaunchResourceExhausted
 	closeFile(session, opened.Handle)
@@ -158,9 +161,17 @@ func completeFill(job *execJob) {
 	if status == ipc.StatusOK && message.Correlation == pending.correlation {
 		reply, valid = vfs.DecodeReply(message)
 	}
+	consumed := false
 	switch {
-	case valid && reply.Operation == vfs.OperationFillExecutable && reply.Status == vfs.StatusOK && reply.Size == pending.size:
-		entry.executable, entry.status = supervisor.Executable{Image: pending.object, Size: uint32(pending.size)}, supervisor.LaunchOK
+	case valid && reply.Operation == vfs.OperationPrepareExecutable && reply.Status == vfs.StatusOK && reply.Size == min(pending.size, uint64(vm.PageSize)):
+		object, createStatus := sys.ExecutableSource(loaderHandle, pending.session, pending.file, pending.object, pending.size)
+		if createStatus == kcall.StatusOK {
+			entry.executable, entry.status = supervisor.Executable{Image: object, Size: uint32(pending.size)}, supervisor.LaunchOK
+			consumed = true
+			break
+		}
+		entry.status = supervisor.LaunchResourceExhausted
+		fallthrough
 	case valid && reply.Status != vfs.StatusBackendError:
 		entry.status = supervisor.LaunchInvalidImage
 		fallthrough
@@ -168,7 +179,9 @@ func completeFill(job *execJob) {
 		syslog.Warn("executable read failed", syslog.Uint("read", reply.Size), syslog.Uint("size", pending.size))
 		sys.HandleClose(pending.object)
 	}
-	if status == ipc.StatusPeerDied {
+	if consumed {
+		// The source owns the session and its open file.
+	} else if status == ipc.StatusPeerDied {
 		// The VFS is gone; so is the file it had open.
 		sys.HandleClose(pending.session)
 	} else {

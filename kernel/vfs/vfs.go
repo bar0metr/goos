@@ -112,6 +112,7 @@ type openFile struct {
 	mount      uint8
 	rights     Rights
 	used       bool
+	executable bool
 }
 
 type cacheEntry struct {
@@ -328,10 +329,69 @@ func (namespace *Namespace) Read(owner Owner, handle Handle, target []byte) (int
 	return count, mapStatus(backendStatus)
 }
 
+// ReadAt reads an open file without changing its position. Executable page
+// requests use it because faults from several processes may name one source.
+func (namespace *Namespace) ReadAt(owner Owner, handle Handle, offset uint64, target []byte) (int, Status) {
+	entry, status := namespace.file(owner, handle, Read)
+	if status != StatusOK {
+		return 0, status
+	}
+	count, backendStatus := namespace.mounts[entry.mount].backend.Read(entry.node, offset, target)
+	return count, mapStatus(backendStatus)
+}
+
+// PrepareExecutable makes a readable open file immutable until the handle is
+// closed. Rename remains valid because the open object, not its path, is the
+// identity held by the executable source.
+func (namespace *Namespace) PrepareExecutable(owner Owner, handle Handle) Status {
+	entry, status := namespace.file(owner, handle, Read)
+	if status == StatusOK {
+		entry.executable = true
+	}
+	return status
+}
+
+func (namespace *Namespace) executablePinned(mount uint8, node ramfs.NodeID) bool {
+	return namespace.executablePinnedDirect(mount, node) || namespace.executablePinnedLocation(mount, node)
+}
+
+func (namespace *Namespace) executablePinnedDirect(mount uint8, node ramfs.NodeID) bool {
+	for index := range namespace.files {
+		entry := &namespace.files[index]
+		if entry.used && entry.executable && entry.mount == mount && entry.node == node {
+			return true
+		}
+	}
+	return false
+}
+
+// executablePinnedLocation compares a pathname node with stable open-object
+// cookies. AcquireObject returns the existing cookie for a live file; the
+// temporary reference is released before this call returns.
+func (namespace *Namespace) executablePinnedLocation(mount uint8, node ramfs.NodeID) bool {
+	if int(mount) >= len(namespace.mounts) {
+		return false
+	}
+	objects, ok := namespace.mounts[mount].backend.(ObjectBackend)
+	if !ok {
+		return false
+	}
+	object, status := objects.AcquireObject(node)
+	if status != ramfs.StatusOK || object == 0 {
+		return false
+	}
+	pinned := namespace.executablePinnedDirect(mount, object)
+	objects.ReleaseObject(object)
+	return pinned
+}
+
 func (namespace *Namespace) Write(owner Owner, handle Handle, data []byte) (int, Status) {
 	entry, status := namespace.file(owner, handle, Write)
 	if status != StatusOK {
 		return 0, status
+	}
+	if namespace.executablePinned(entry.mount, entry.node) {
+		return 0, StatusPermissionDenied
 	}
 	count, backendStatus := namespace.mounts[entry.mount].backend.Write(entry.node, entry.offset, data)
 	if backendStatus == ramfs.StatusOK {
@@ -440,12 +500,18 @@ func (namespace *Namespace) Truncate(path []byte, size uint64) Status {
 	if status != StatusOK {
 		return status
 	}
+	if namespace.executablePinned(mountIndex, node) {
+		return StatusPermissionDenied
+	}
 	return mapStatus(namespace.mounts[mountIndex].backend.Truncate(node, size))
 }
 
 func (namespace *Namespace) Unlink(path []byte) Status {
 	if namespace.carriesMount(path) {
 		return StatusBusy
+	}
+	if mount, node, resolved := namespace.Resolve(path); resolved == StatusOK && namespace.executablePinned(mount, node) {
+		return StatusPermissionDenied
 	}
 	mountIndex, parent, name, status := namespace.resolveParent(path)
 	if status != StatusOK {

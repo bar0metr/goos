@@ -111,6 +111,17 @@ func demandFault(root uint64, page uint64, write bool, fetch bool) (bool, uint64
 	if owner.Available(process.ResourcePages) < 1+faultTables {
 		return false, faultQuota
 	}
+	if entry.Backing == region.Image && entry.Flags&region.FromObject != 0 {
+		if object, found := executables.Find(entry.Object); found && object.FileBacked() {
+			pending, failed := requestExecutablePage(owner, entry, page)
+			if pending {
+				return true, 0
+			}
+			if failed {
+				return false, faultInvalid
+			}
+		}
+	}
 	physical, allocated := pageAllocator.Allocate()
 	if !allocated {
 		return false, faultQuota
@@ -151,11 +162,9 @@ func objectPage(index uint64) ([]byte, bool) {
 }
 
 // fillFromOrigin copies into the zeroed page at physical the bytes an image
-// region's page holds in its origin: an extent of the system image or an
-// executable object (ADR 0106). A page past the segment's file bytes stays
-// zero. The origin is immutable — the system image for the whole boot, a
-// sealed object for as long as the process holds its reference — so a page
-// read now is the page the loader validated at launch.
+// region's page holds in its origin: an extent of the system image or a sealed
+// snapshot object (ADR 0106). File-backed sources are requested asynchronously
+// before this path. A page past the segment's file bytes stays zero.
 func fillFromOrigin(entry region.Region, page uint64, physical uint64) bool {
 	within := page - entry.Base
 	if within >= entry.Data {

@@ -76,6 +76,9 @@ table with type, generation, and rights checks.
 | 43 | `VMQuery` | registered; own map only | 24-byte `CopyOut` of the region at an address | none | no |
 | 44 | `MemoryCreate` | registered | page count 1..65536; 8-byte result probed with `CopyOut` before anything is allocated; a free handle slot | pages plus page-list index pages charged to the page quota before allocation; 64 objects system-wide, 16 per payer; freed with the last handle or mapping (ADR 0107) | no |
 | 45 | `HandleDuplicate` | a memory handle; rights must be a subset of the original's | handle lookup; rights derivation; 8-byte result probed before insertion; a free handle slot | one handle-table slot; one reference to the object | no |
+| 46 | `ClockNow` | registered | clock ID; 16-byte result; monotonic or realtime only | none | no |
+| 47 | `ClockSet` | device handle, Write, system-control object | realtime value and validity bounds | none | changes the realtime offset |
+| 48 | `ExecutableSource` | loader device with Write; prepared VFS channel with Read, Write, Wait; sealed executable header object with Execute and Write | 32-byte descriptor; file handle nonzero; file size 1..256 MiB; header object size `min(file size, 4096)`; live channel endpoint | consumes the channel; converts the existing one-page object without allocating payload pages; later faults allocate and charge one process page at a time | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -99,10 +102,10 @@ compiles away.
 - `ImageMap` maps the firmware-reserved boot archive, which only the kernel can
   name; serving it through VFS keeps the archive parser in userspace
   (ADR 0070).
-- `ExecutableCreate` and `ExecutableWrite` fill kernel memory that no process
-  maps, so a launch can name a program read from a filesystem without the
-  kernel reading any filesystem, and the bytes validated at launch cannot
-  change before they are loaded (ADR 0097).
+- `ExecutableCreate` and `ExecutableWrite` build the sealed header object.
+  `ExecutableSource` binds it to a stable VFS open object and consumes the
+  private endpoint. The kernel requests bytes by offset and never resolves a
+  path; VFS refuses mutation until the source closes (ADR 0121).
 - `LogWrite`, `LogRead`, and `LogBounds` serve the kernel log ring, which must
   work before any service exists (ADR 0059, 0073).
 - `SystemInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters and
@@ -112,9 +115,8 @@ compiles away.
   names an extent of the system image and a handle; the kernel requires Execute
   on the image object, checks the extent against the image length without
   overflow (`loader.ImageExtent`), and validates the bytes as a native image.
-  A request may instead name a sealed executable object with Execute, whole:
-  offset zero and the object's length (ADR 0097). It resolves no path
-  (ADR 0093).
+  A request may instead name a sealed executable source with Execute, whole:
+  offset zero and the source length. It resolves no path (ADR 0093, ADR 0121).
 
 ### Untrusted data and validation
 

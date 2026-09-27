@@ -368,6 +368,14 @@ goos_clock_set:
     ret
 .size goos_clock_set, .-goos_clock_set
 
+.global goos_executable_source
+.type goos_executable_source,@function
+goos_executable_source:
+    movl $48, %eax
+    int $0x80
+    ret
+.size goos_executable_source, .-goos_executable_source
+
 .global goos_exit
 .type goos_exit,@function
 goos_exit:

@@ -66,6 +66,9 @@ const (
 	OperationHandleDuplicate
 	OperationClockNow
 	OperationClockSet
+	// OperationExecutableSource creates a pathname-independent executable
+	// source from a prepared VFS session described at Arg2.
+	OperationExecutableSource
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -141,6 +144,7 @@ type Handler interface {
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
 	ExecutableWrite(executable uint64, address uint64, length uint64) Status
+	ExecutableSource(device uint64, session uint64, descriptor uint64) Status
 	VMMap(descriptor uint64, protection uint64, flags uint64) Status
 	VMUnmap(address uint64, length uint64) Status
 	VMProtect(address uint64, length uint64, protection uint64) Status
@@ -261,6 +265,8 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.ExecutableWrite(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationExecutableSource:
+		return Result{Status: handler.ExecutableSource(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationVMMap:
 		if request.Arg1&^VMProtectionMask != 0 || request.Arg2&^VMMapFixed != 0 {
 			return Result{Status: StatusInvalidArgument}

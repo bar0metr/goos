@@ -112,6 +112,34 @@ func TestIncompleteObjectAcceptsNoWrites(t *testing.T) {
 	}
 }
 
+func TestFileBackedObjectKeepsOnlyHeaderPage(t *testing.T) {
+	var table Table
+	memory := newMemory()
+	object, ok := table.Reserve(vm.PageSize, 1)
+	if !ok {
+		t.Fatal("reserve failed")
+	}
+	header, _ := memory.Allocate()
+	if !object.AddFrame(memory, memory.view, header) {
+		t.Fatal("header setup failed")
+	}
+	object.Advance(vm.PageSize)
+	if !object.SetSource(32<<20, 17, 1, 23) {
+		t.Fatal("source setup failed")
+	}
+	channel, side, file, source := object.Source()
+	if !source || !object.FileBacked() || !object.Sealed() || !object.Complete() || object.Charge() != 2 ||
+		channel != 17 || side != 1 || file != 23 {
+		t.Fatalf("source=%v sealed=%v complete=%v charge=%d endpoint=%d/%d file=%d", source, object.Sealed(), object.Complete(), object.Charge(), channel, side, file)
+	}
+	if _, found := object.Frame(memory.view, 1); found {
+		t.Fatal("file-backed object allocated a payload page")
+	}
+	if _, writable := object.NextWrite(1); writable {
+		t.Fatal("file-backed object accepted a write")
+	}
+}
+
 // TestLargeObjectsAreIndexedNotArrayed builds an object past the old 1 MiB
 // bound, reads its frames back, and returns them all.
 func TestLargeObjectsAreIndexedNotArrayed(t *testing.T) {

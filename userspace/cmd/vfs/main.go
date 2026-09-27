@@ -388,7 +388,7 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		// Answer unusable requests: a silent drop strands the caller, which is
 		// waiting for exactly this correlation.
 		operation := vfs.Operation(message.Payload[0])
-		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationFillExecutable {
+		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationReadExecutable {
 			if reply, encoded := vfs.EncodeReply(vfs.Reply{Operation: operation, Status: vfs.StatusInvalidArgument}, message.Correlation); encoded {
 				send(session, reply)
 			}
@@ -398,6 +398,8 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	var answer vfs.Reply
 	if request.Operation.Bulk() {
 		answer = serveBulk(owner, request, attached[0])
+	} else if request.Operation == vfs.OperationReadExecutable {
+		answer = serveExecutable(owner, request)
 	} else {
 		answer = service.Dispatch(owner, request)
 		if len(answer.Name) > vfs.MaxInlineName {
@@ -413,6 +415,22 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		fatal("VFS_REPLY_FAILED\n")
 	}
 	send(session, reply)
+}
+
+// serveExecutable pins a source on its first request and reads one bounded
+// range into the cache slot reserved from ordinary cached data. The kernel
+// consumes the slot while handling this reply's send.
+func serveExecutable(owner vfs.Owner, request vfs.Request) vfs.Reply {
+	reply := vfs.Reply{Operation: request.Operation}
+	if request.Size == 0 || request.Size > fsproto.PageSize || request.Offset+uint64(request.Size) < request.Offset {
+		reply.Status = vfs.StatusInvalidArgument
+		return reply
+	}
+	start := vfsservice.ExecutableSlot * fsproto.PageSize
+	target := fileCache[start : start+int(request.Size)]
+	count, status := service.ReadFileAt(owner, request.Handle, request.Offset, target)
+	reply.Status, reply.Size = status, uint64(count)
+	return reply
 }
 
 // maxPathObject bounds the object a client may attach for paths or a name.
@@ -467,6 +485,21 @@ var fillBuffer [128 << 10]byte
 // (ADR 0107). The object is mapped for this request only.
 func serveBulk(owner vfs.Owner, request vfs.Request, object handle.ID) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
+	if request.Operation == vfs.OperationPrepareExecutable {
+		if request.Offset != 0 || request.Size == 0 || request.Size > fsproto.PageSize {
+			reply.Status = vfs.StatusInvalidArgument
+			return reply
+		}
+		if reply.Status = service.PrepareExecutable(owner, request.Handle); reply.Status != vfs.StatusOK {
+			return reply
+		}
+		count, status := service.ReadFileAt(owner, request.Handle, 0, fillBuffer[:request.Size])
+		reply.Status, reply.Size = status, uint64(count)
+		if status == vfs.StatusOK && (count != int(request.Size) || sys.ExecutableWrite(object, fillBuffer[:count]) != kcall.StatusOK) {
+			reply.Status = vfs.StatusInvalidArgument
+		}
+		return reply
+	}
 	if request.Operation == vfs.OperationFillExecutable {
 		for reply.Size < uint64(request.Size) && reply.Status == vfs.StatusOK {
 			chunk := min(uint64(len(fillBuffer)), uint64(request.Size)-reply.Size)

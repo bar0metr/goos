@@ -216,7 +216,9 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		channelCapability, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Write)
 		if found {
 			channelID, _, _ := ipc.DecodeEndpointObject(channelCapability.Object())
-			wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
+			if !completeExecutablePage(channelID, side^1) {
+				wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
+			}
 		}
 		for index := 0; index < transferCount; index++ {
 			if diag.Enabled && peer != nil {
