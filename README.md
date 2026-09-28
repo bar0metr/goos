@@ -230,8 +230,10 @@ and, if its manifest asks, one VFS session: the native application environment
 of specification milestone 6 is complete. `gfm`, a two-pane file manager, is
 the first full-screen program: the shell puts the terminal in raw mode for it
 because its manifest asks, and it draws with cursor addressing and 16 ANSI
-colours on the framebuffer and COM1 alike, with no authority beyond its VFS
-session ([file manager](docs/userspace/file-manager.md)). The storage path reaches a
+colours, with no authority beyond its VFS session
+([file manager](docs/userspace/file-manager.md)). COM1 and the framebuffer are
+separate consoles, each with its own terminal service and shell, so `gfm`
+fills whichever screen you start it on (ADR 0125). The storage path reaches a
 persistent QEMU block device through an isolated driver, block service, and
 FAT32 filesystem service, and native utilities use `/persist`, `/home` and
 `/state` through VFS.
@@ -402,7 +404,9 @@ markers that the boot test asserts.
 `make run` is headless and attaches COM1 to the current terminal. `make
 run-gui` opens QEMU's GOP-compatible VGA display while keeping COM1 on the
 terminal. The graphical console uses a 1280x800 preferred GOP mode and accepts
-US-layout PS/2 keyboard input, while serial input remains active. Cocoa is the
+US-layout PS/2 keyboard input. It runs its own shell: what you type in the
+QEMU window reaches that shell, and what you type in the terminal reaches the
+COM1 shell. Cocoa is the
 default display backend; other hosts can run, for example, `make run-gui
 QEMU_DISPLAY=gtk`. `make
 run-debug` starts QEMU paused with a GDB server on TCP port
@@ -479,7 +483,8 @@ PS/2 input, `make run-gui`, and headless pixel and keyboard validation. GoOS
 0.1.6 ([docs/releases/0.1.6.md](docs/releases/0.1.6.md)) adds the `gfm`
 two-pane file manager and what a full-screen program needs under it: F1-F12
 and navigation key sequences, cursor addressing and 16-colour SGR in the
-framebuffer terminal, scoped raw terminal mode granted by the shell, and
+framebuffer terminal, scoped raw terminal mode granted by the shell, a
+separate terminal service and shell for COM1 and for the framebuffer, and
 reusable terminal and non-fatal filesystem helpers. GoOS is
 licensed under GPL-3.0-only; third-party components retain their documented
 licenses.

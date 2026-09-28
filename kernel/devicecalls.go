@@ -25,7 +25,7 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 		return kcall.StatusPermissionDenied
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
-	if !ok || cap.Object() != device.ConsoleObject || length == 0 || length > kcall.MaxConsoleWrite {
+	if !ok || !device.IsConsole(cap.Object()) || length == 0 || length > kcall.MaxConsoleWrite {
 		return kcall.StatusPermissionDenied
 	}
 	data := kernelCallData[:int(length)]
@@ -35,8 +35,15 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 		}
 		return kcall.StatusInvalidArgument
 	}
-	console := kernelconsole.New()
-	console.Write(data)
+	switch cap.Object() {
+	case device.SerialConsoleObject:
+		kernelconsole.WriteSerial(data)
+	case device.GraphicalConsoleObject:
+		kernelconsole.WriteGraphical(data)
+	default:
+		console := kernelconsole.New()
+		console.Write(data)
+	}
 	// Validation bookkeeping, not authority: the boot sequence waits until
 	// PID 1 has printed and its supervisor has reported. The write itself was
 	// authorized by the capability above like any other process's.
@@ -49,18 +56,19 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 	return kcall.StatusOK
 }
 
-func (handler nativeCallHandler) ConsoleRead(device uint64, address uint64, length uint64) kcall.Status {
+func (handler nativeCallHandler) ConsoleRead(id uint64, address uint64, length uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || length != 1 {
 		return kcall.StatusPermissionDenied
 	}
-	cap, ok := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Read)
-	if !ok || cap.Object() != 1 {
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
+	input, terminal := consoleInput(cap.Object())
+	if !ok || !terminal {
 		return kcall.StatusPermissionDenied
 	}
-	// The byte comes from the ring the serial interrupt fills, not from the
-	// UART: polling the device here is what made a reader spin.
-	taken := amd64.ConsoleTake()
+	// The byte comes from the ring the console's interrupt fills, not from
+	// the device: polling it here is what made a reader spin.
+	taken := amd64.InputTake(input)
 	if taken == 0 {
 		return kcall.StatusNotFound
 	}
@@ -75,16 +83,17 @@ func (handler nativeCallHandler) ConsoleRead(device uint64, address uint64, leng
 // so a shell can watch for an interrupt while a command owns the console: the
 // alternative, reading bytes and discarding the ones that are not Ctrl-C, takes
 // input away from the process the user is typing to.
-func (handler nativeCallHandler) ConsoleInterrupt(device uint64) kcall.Status {
+func (handler nativeCallHandler) ConsoleInterrupt(id uint64) kcall.Status {
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
-	cap, ok := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Read)
-	if !ok || cap.Object() != deviceConsoleObject {
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
+	input, terminal := consoleInput(cap.Object())
+	if !ok || !terminal {
 		return kcall.StatusPermissionDenied
 	}
-	if !amd64.ConsoleTakeInterrupt() {
+	if !amd64.InputTakeInterrupt(input) {
 		return kcall.StatusNotFound
 	}
 	return kcall.StatusOK
@@ -101,18 +110,30 @@ func (handler nativeCallHandler) ConsoleInfo(id uint64, address uint64, length u
 		return kcall.StatusInvalidArgument
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
-	if !ok || cap.Object() != device.ConsoleObject {
+	if !ok || !device.IsConsole(cap.Object()) {
 		return kcall.StatusPermissionDenied
 	}
+	// The logical console describes both devices; each terminal console only
+	// itself. A serial console's 80x25 is a fallback: the terminal at its far
+	// end has a size the kernel cannot know.
+	object := cap.Object()
 	columns, rows := uint32(80), uint32(25)
-	flags := kcall.ConsoleFlagSerial
-	if graphicalConsoleAvailable {
-		columns = uint32(graphicalFramebuffer.Width() / kernelframebuffer.GlyphWidth)
-		rows = uint32(graphicalFramebuffer.Height() / kernelframebuffer.GlyphHeight)
-		flags |= kcall.ConsoleFlagFramebuffer
+	flags := uint32(0)
+	if object != device.GraphicalConsoleObject {
+		flags |= kcall.ConsoleFlagSerial
 	}
-	if ps2KeyboardAvailable {
-		flags |= kcall.ConsoleFlagKeyboard
+	if object != device.SerialConsoleObject {
+		if !graphicalConsoleAvailable && object == device.GraphicalConsoleObject {
+			return kcall.StatusNotFound
+		}
+		if graphicalConsoleAvailable {
+			columns = uint32(graphicalFramebuffer.Width() / kernelframebuffer.GlyphWidth)
+			rows = uint32(graphicalFramebuffer.Height() / kernelframebuffer.GlyphHeight)
+			flags |= kcall.ConsoleFlagFramebuffer
+		}
+		if ps2KeyboardAvailable {
+			flags |= kcall.ConsoleFlagKeyboard
+		}
 	}
 	clear(consoleInfoWire[:])
 	putUint32(consoleInfoWire[0:4], columns)
@@ -282,4 +303,15 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
+}
+
+// consoleInput returns the input ring of a terminal console object.
+func consoleInput(object uint64) (uint64, bool) {
+	switch object {
+	case device.SerialConsoleObject:
+		return amd64.InputSerial, true
+	case device.GraphicalConsoleObject:
+		return amd64.InputKeyboard, true
+	}
+	return 0, false
 }

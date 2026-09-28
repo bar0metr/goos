@@ -1,7 +1,8 @@
 //go:build goos_userspace
 
-// The terminal service owns the console (ADR 0082, ADR 0089). It is the only
-// process holding the right to read the console: it edits the line being
+// The terminal service owns a console (ADR 0082, ADR 0089): one instance runs
+// for COM1 and one for the framebuffer and its keyboard (ADR 0125). It is the
+// only process holding the right to read its console: it edits the line being
 // typed, echoes it, and turns Ctrl-C and Ctrl-D into events, and a client gets
 // finished lines by asking for them over its session.
 //
@@ -46,8 +47,14 @@ var (
 	rawReported bool
 	rawBuffer   [tty.MaxPart]byte
 	// display is set when the geometry is the framebuffer's, a fixed size;
-	// a serial-only console's is only a fallback.
+	// a serial console's is only a fallback.
 	display bool
+	// mirrorHandle is a second console the validation build lets the
+	// framebuffer's terminal copy its output to, COM1, which is all the QEMU
+	// tests read. Copying starts with the first key typed here, so a boot
+	// that never uses the keyboard shows only the serial session on COM1.
+	mirrorHandle handle.ID
+	mirroring    bool
 	// reading is the correlation of the client's outstanding read, or zero.
 	reading uint64
 	// sent is how much of the completed line earlier parts delivered.
@@ -102,6 +109,7 @@ func userspaceMain() {
 	if !ok {
 		fatal("TTY_CONTROL_MISSING\n")
 	}
+	mirrorHandle, _ = data.Handle("mirror")
 	mark("TTY_TERMINAL_OK\n")
 	base := arena.Current()
 	for {
@@ -161,6 +169,7 @@ func serveControl() {
 // reading is stopped.
 func serveConsole() {
 	if sys.ConsoleInterrupt(consoleHandle) == kcall.StatusOK {
+		mirroring = mirrorHandle != 0
 		if raw {
 			sent = 0
 			if !answer(tty.ResultInterrupt) {
@@ -175,6 +184,7 @@ func serveConsole() {
 		if status != kcall.StatusOK {
 			break
 		}
+		mirroring = mirrorHandle != 0
 		if raw {
 			rawInput.Feed(input)
 			continue
@@ -548,13 +558,14 @@ func mark(message string) {
 	}
 }
 
-func write(message string) {
-	sys.ConsoleWriteString(consoleHandle, message)
-}
+func write(message string) { writeBytes(sys.Bytes(message)) }
 
 func writeBytes(value []byte) {
 	if len(value) != 0 {
 		sys.ConsoleWrite(consoleHandle, value[:])
+		if mirroring {
+			sys.ConsoleWrite(mirrorHandle, value[:])
+		}
 	}
 }
 

@@ -123,6 +123,10 @@ type step struct {
 
 var belowStackPointer = regexp.MustCompile(`(-0x[0-9a-f]+)\(SP\)`)
 
+// stackPointerOffset matches a memory operand that is SP plus a constant and
+// nothing else.
+var stackPointerOffset = regexp.MustCompile(`^(-?0x[0-9a-f]+|-?[0-9]+)\(SP\)$`)
+
 func decode(text string) step {
 	mnemonic, rest, _ := strings.Cut(text, " ")
 	var operands []string
@@ -223,12 +227,23 @@ func writesStackPointer(mnemonic string, operands []string) bool {
 	return true
 }
 
-// adjustment accepts the three ways compiled code moves SP by itself:
+// adjustment accepts the four ways compiled code moves SP by itself:
 // SUBQ $n, SP and ADDQ $n, SP by a constant (a negative constant moves the
-// other way), and ANDQ $-n, SP to realign it. Anything else - a register, a
-// load, LEAQ, LEAVE - makes the depth depend on run-time values.
+// other way), LEAQ n(SP), SP, which LLVM uses to release a frame before a tail
+// call without touching the flags, and ANDQ $-n, SP to realign it. Anything
+// else - a register, a load, LEAQ from another base or with an index, LEAVE -
+// makes the depth depend on run-time values.
 func adjustment(text, mnemonic string, operands []string) step {
 	dynamic := step{problem: fmt.Sprintf("%q changes SP by an amount only known at run time", text)}
+	if mnemonic == "LEAQ" && len(operands) == 2 {
+		if match := stackPointerOffset.FindStringSubmatch(operands[0]); match != nil {
+			value, err := strconv.ParseInt(match[1], 0, 64)
+			if err == nil {
+				return step{delta: -value}
+			}
+		}
+		return dynamic
+	}
 	if len(operands) != 2 || !strings.HasPrefix(operands[0], "$") {
 		return dynamic
 	}

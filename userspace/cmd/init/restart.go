@@ -98,27 +98,27 @@ func offerSession(channel uint64, session handle.ID) bool {
 // shell is given the client end of the session over its exec channel. The
 // output stream needs nothing: PID 1 holds both of its ends, so what was
 // written while the terminal was down is waiting in it.
-func renewTerminalSession(spec *supervisor.LaunchSpec) bool {
-	var session, control [2]uint64
-	if !createChannel(&session) {
+func renewTerminalSession(session *terminalSession, spec *supervisor.LaunchSpec) bool {
+	var pair, control [2]uint64
+	if !createChannel(&pair) {
 		syslog.Error("terminal session unavailable")
 		return false
 	}
 	if !createChannel(&control) {
-		closePair(session)
+		closePair(pair)
 		syslog.Error("terminal control unavailable")
 		return false
 	}
-	if !renewGrant(spec, "tty", "session", handle.ID(session[1])) || !renewGrant(spec, "tty", "control", handle.ID(control[1])) {
-		closePair(session)
+	if !renewGrant(spec, session.tty, "session", handle.ID(pair[1])) || !renewGrant(spec, session.tty, "control", handle.ID(control[1])) {
+		closePair(pair)
 		closePair(control)
 		return false
 	}
-	if ttyControl != 0 {
-		sys.HandleClose(ttyControl)
+	if session.ttyControl != 0 {
+		sys.HandleClose(session.ttyControl)
 	}
-	ttyControl = handle.ID(control[0])
-	if offerSession(execServer, handle.ID(session[0])) {
+	session.ttyControl = handle.ID(control[0])
+	if offerSession(session.execServer, handle.ID(pair[0])) {
 		mark("TTY_SESSION_OFFERED_OK\n")
 	}
 	return true
@@ -128,7 +128,7 @@ func renewTerminalSession(spec *supervisor.LaunchSpec) bool {
 // shell held died with it: it gets a new terminal session, whose server end is
 // handed to the running terminal service, a new exec channel, whose server end
 // PID 1 keeps, and new filesystem and configuration sessions.
-func renewShellSession(spec *supervisor.LaunchSpec) bool {
+func renewShellSession(terminal *terminalSession, spec *supervisor.LaunchSpec) bool {
 	var session, exec [2]uint64
 	if !createChannel(&session) {
 		syslog.Error("shell session unavailable")
@@ -146,8 +146,8 @@ func renewShellSession(spec *supervisor.LaunchSpec) bool {
 		syslog.Error("shell filesystem session unavailable", syslog.Str("reason", reason))
 		return false
 	}
-	if !renewGrant(spec, "shell", "tty", handle.ID(session[0])) || !renewGrant(spec, "shell", "exec", handle.ID(exec[0])) ||
-		!renewGrant(spec, "shell", "vfs", files) {
+	if !renewGrant(spec, terminal.shell, "tty", handle.ID(session[0])) || !renewGrant(spec, terminal.shell, "exec", handle.ID(exec[0])) ||
+		!renewGrant(spec, terminal.shell, "vfs", files) {
 		closePair(session)
 		closePair(exec)
 		sys.HandleClose(files)
@@ -155,24 +155,24 @@ func renewShellSession(spec *supervisor.LaunchSpec) bool {
 	}
 	// Configuration is optional, as it is at boot: a shell without a session
 	// keeps its built-in prompt rather than failing to start.
-	if _, granted := manager.Capability("shell", "config"); granted {
+	if _, granted := manager.Capability(terminal.shell, "config"); granted {
 		settings, ok := openConfigSession("", configproto.Read|configproto.Write)
-		if !ok || !renewGrant(spec, "shell", "config", settings) {
+		if !ok || !renewGrant(spec, terminal.shell, "config", settings) {
 			if ok {
 				sys.HandleClose(settings)
 			}
-			if previous, found := manager.Capability("shell", "config"); found {
+			if previous, found := manager.Capability(terminal.shell, "config"); found {
 				sys.HandleClose(previous)
 			}
-			manager.RemoveCapability("shell", "config")
+			manager.RemoveCapability(terminal.shell, "config")
 			supervisor.RemoveGrant(spec, "config")
 		}
 	}
-	if execServer != 0 {
-		sys.HandleClose(handle.ID(execServer))
+	if terminal.execServer != 0 {
+		sys.HandleClose(handle.ID(terminal.execServer))
 	}
-	execServer = exec[1]
-	if offerSession(uint64(ttyControl), handle.ID(session[1])) {
+	terminal.execServer = exec[1]
+	if offerSession(uint64(terminal.ttyControl), handle.ID(session[1])) {
 		mark("SHELL_SESSION_OFFERED_OK\n")
 	}
 	return true
@@ -185,11 +185,11 @@ func renewShellSession(spec *supervisor.LaunchSpec) bool {
 // with each stage's teardown — so nothing is left behind (ADR 0089). The exec
 // channel's other end is gone, so it is closed and not waited on until a new
 // shell brings a new one.
-func endShellSession() {
+func endShellSession(session *terminalSession) {
 	stopped := false
 	for index := range execJobs {
 		job := &execJobs[index]
-		if !job.active {
+		if !job.active || job.session != session {
 			continue
 		}
 		job.orphaned = true
@@ -206,16 +206,16 @@ func endShellSession() {
 		syslog.Info("session jobs stopped")
 		mark("SESSION_JOBS_STOPPED_OK\n")
 	}
-	if execServer != 0 {
-		sys.HandleClose(handle.ID(execServer))
-		execServer = 0
+	if session.execServer != 0 {
+		sys.HandleClose(handle.ID(session.execServer))
+		session.execServer = 0
 	}
 }
 
-// injectSessionFault kills the terminal service or the shell, in the validation
-// build only, so that each is seen to restart on its own while the other keeps
-// working (ADR 0089).
-func injectSessionFault(target uint8) execproto.ControlStatus {
+// injectSessionFault kills the terminal service or the shell of the session
+// that asked, in the validation build only, so that each is seen to restart on
+// its own while the other keeps working (ADR 0089).
+func injectSessionFault(session *terminalSession, target uint8) execproto.ControlStatus {
 	if !validation.Enabled {
 		return execproto.ControlInvalid
 	}
@@ -226,10 +226,10 @@ func injectSessionFault(target uint8) execproto.ControlStatus {
 		sys.ValidationFault(handle.ID(systemControlHandle))
 		return execproto.ControlInvalid
 	}
-	process := &ttyProcessHandle
+	process := &session.ttyProcess
 	name := "TTY_FAULT_INJECTED\n"
 	if target == execproto.FaultShell {
-		process, name = &shellProcessHandle, "SHELL_FAULT_INJECTED\n"
+		process, name = &session.shellProcess, "SHELL_FAULT_INJECTED\n"
 	}
 	if *process == 0 || sys.ProcessKill(*process) != 0 {
 		return execproto.ControlNotFound

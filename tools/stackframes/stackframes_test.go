@@ -148,8 +148,8 @@ func TestDynamicStackPointerChangesAreRejected(t *testing.T) {
 		"SUBQ AX, SP",
 		"ADDQ CX, SP",
 		"MOVQ AX, SP",
-		"LEAQ -0x10(SP), SP",
 		"LEAQ 0x10(BP), SP",
+		"LEAQ 0x8(SP)(AX*1), SP",
 		"LEAVEQ",
 		"POPQ SP",
 		"XCHGQ AX, SP",
@@ -295,5 +295,21 @@ func TestCheckKernelFrames(t *testing.T) {
 	}
 	if owner(symbols, 0x0fff) != "0xfff" || owner(symbols, 0x2fff) != "main.serviceKernel" {
 		t.Fatal("owner lookup")
+	}
+}
+
+func TestConstantLEAQMovesTheStackPointer(t *testing.T) {
+	// LLVM releases a frame before a tail call with LEAQ, which leaves the
+	// flags a conditional tail jump still needs.
+	frame, problems := analyzeListing(t, listing("main.tail", 0x1000,
+		"PUSHQ AX",
+		"LEAQ -0x20(SP), SP",
+		"CMPQ $0x0, AX",
+		"LEAQ 0x20(SP), SP",
+		"LEAQ 0x8(SP), SP",
+		"RET",
+	))
+	if len(problems) != 0 || frame != 0x28 {
+		t.Fatalf("frame = %#x, problems = %v", frame, problems)
 	}
 }

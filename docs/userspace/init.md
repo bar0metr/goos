@@ -157,7 +157,9 @@ it through the VFS control endpoint and waits for the persistent volume to be
 mounted, so the services started next find `/state` (ADR 0096). `fat32`
 restarts on failure; PID 1 then gives the new instance fresh channels to the
 VFS and the block service and hands their other ends over as at first start. The second starts the
-log service and then the shell.
+log service and then one terminal session per console: `tty` and `shell` on
+COM1, then `tty-fb` and `shell-fb` on the framebuffer when the machine has one
+(ADR 0125).
 
 The split exists because the log service's VFS session cannot be handed over at
 boot: it has to be asked for, through the VFS control endpoint, the same way an
@@ -186,28 +188,33 @@ The validation build kills the driver once, after the system is up, so the path
 a crashed driver takes is exercised on every boot rather than only when hardware
 misbehaves.
 
-The terminal service and the shell are the other two (ADR 0089). Both are
-`restart: always`, and the session between them is renewed on either's restart.
+The terminal services and the shells are the other two (ADR 0089). They run in
+pairs, one per console (ADR 0125), and PID 1 keeps a `terminalSession` for each
+pair: its console, output stream, terminal control channel, exec channel and
+exec page. All are `restart: always`, and the session between a terminal
+service and its shell is renewed on either's restart, within that pair.
 The VFS, the configuration and log services and the block service renew what
 they held the same way, and their clients are handed new sessions instead of being restarted
 (ADR 0099, 0100, 0101):
 
 | Restarting | Launched with | Handed to the survivor |
 | --- | --- | --- |
-| `tty` | a new session (server end) and a new control channel | the session's client end, to the shell over its exec channel |
-| `shell` | a new session (client end), exec channel, VFS session and configuration session | the session's server end, to the terminal over its control channel |
-| `vfs` | a new control channel (client end kept) and first session | the session's client end to the shell, and new VFS sessions to the config and log services once `fat32` is attached, as session notices (ADR 0099) |
-| `config` | a new VFS session and control channel (client end kept) | new configuration sessions to the shell and the log service, as session notices (ADR 0100) |
+| `tty`, `tty-fb` | a new session (server end) and a new control channel | the session's client end, to its shell over its exec channel |
+| `shell`, `shell-fb` | a new session (client end), exec channel, VFS session and configuration session | the session's server end, to its terminal over its control channel |
+| `vfs` | a new control channel (client end kept) and first session | the first session's client end to `shell`, and new VFS sessions to the other shells and the config and log services once `fat32` is attached, as session notices (ADR 0099) |
+| `config` | a new VFS session and control channel (client end kept) | new configuration sessions to every shell and the log service, as session notices (ADR 0100) |
 | `log` | a new VFS session, configuration session and control channel (client end kept) | nothing; it starts with `RESTART=1` and resumes after the last record in the file (ADR 0100) |
 | `block` | a new control channel (client end kept) and public endpoint, no driver or filesystem endpoint | nothing; the driver and `fat32` exit, restart after it, and hand it their endpoints over the control channel (ADR 0101) |
 
 A handle renewed for a launch that then fails is closed at the next renewal, so
-failures cannot fill PID 1's table. When the shell exits, PID 1 stops every
-stage of its running jobs; they are reaped as usual and answered to no one, and
+failures cannot fill PID 1's table. Each shell numbers the slots of its own
+exec page, and PID 1 tags every job with the shell that submitted it. When a
+shell exits, PID 1 stops every stage of that shell's running jobs; they are reaped as usual and answered to no one, and
 their streams close with them. The exec channel is not waited on until the next
 shell brings a new one. After boot, a restarted service is recorded in the log
 rather than printed as an `[ OK ]` line, which would land in the line being
-typed. The validation build's `fault tty`, `fault shell`, `fault fat32`,
+typed. The validation build's `fault tty` and `fault shell` kill the pair of
+the shell that asks; `fault fat32`,
 `fault vfs`, `fault config`, `fault log` and `fault block` (exec control
 `ControlFault`) kill
 each once during the boot test.

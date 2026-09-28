@@ -117,23 +117,30 @@ serial output, and waits for `FRAMEBUFFER_VALIDATION_PATTERN_OK`. It then sends
 `screendump` over a private QEMU monitor socket and verifies the exact
 magenta/cyan 16x16 checkerboard in the lower-right corner of the resulting PPM.
 The test then resumes the guest and injects editing keys plus the mandatory
-`echo graphical-keyboard-ok` command through the private QEMU monitor. COM1 is
-a file sink, so the `PS2_KEYBOARD_OK` marker and exact command output prove the
-input traversed IRQ1, the decoder, logical console, TTY, and shell. The test
+`echo graphical-keyboard-ok` command through the private QEMU monitor. The
+keys reach the framebuffer console's session, `tty-fb` and `shell-fb`
+(ADR 0125). COM1 is a file sink; the validation build lets `tty-fb` copy its
+output there from the first key, so the `PS2_KEYBOARD_OK` marker and exact
+command output prove the input traversed IRQ1, the decoder, the keyboard ring,
+`tty-fb`, and `shell-fb`. The test
 also requires `FRAMEBUFFER_USER_ISOLATION_OK`; it does not inspect text or
 require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
 
 The same run then drives the file manager through IRQ1 only (ADR 0124): `cd
 /tmp`, `gfm`, F1 and Escape, Tab, arrows, Home, End, PageDown, PageUp, F7 with
-a typed name, and F10. `gfm`'s screen is ANSI output mirrored to COM1, so the
-log shows its key bar, help and status text; after it exits, `GFM_EXIT_OK`,
+a typed name, and F10. `tty-fb` copies `gfm`'s ANSI output to COM1, so the log
+shows its key bar, help and status text; after it exits, `GFM_EXIT_OK`,
 `GFM_RAW_INPUT_OK`, `GFM_FUNCTION_KEYS_OK`, `GFM_MKDIR_OK`, `TTY_RAW_MODE_OK`
 and `SHELL_TERMINAL_RESTORED_OK` prove the path from PS/2 through the decoder,
 the ring, raw mode, the shell and the key parser, and `ls /tmp` listing
 `fmtest/` proves the shell reads lines again. A second `gfm` is stopped with
 Ctrl-C, and `echo after-gfm-ok` must still run. A screendump of the manager is
 kept as `build/reports/gfm.ppm` for review.
+
+The boot test drives the COM1 session and never types at the keyboard, so
+`tty-fb` copies nothing to COM1 and the test's marker counts see the COM1
+session alone.
 
 Host tests cover the rest of the stack: every F key's make and break codes and
 exact sequence, the E0 navigation keys and the eight-byte bound

@@ -16,7 +16,26 @@ const (
 	// ClockObject is the future realtime-setting authority. Reading either
 	// clock needs no handle; no ClockObject handle is issued yet.
 	ClockObject = uint64(5)
+	// SerialConsoleObject and GraphicalConsoleObject are the two terminal
+	// consoles (ADR 0125): COM1, and the framebuffer with the PS/2 keyboard.
+	// Each is written, read, waited on and sized on its own, so each has its
+	// own terminal service. ConsoleObject stays the logical console, whose
+	// writes reach both: the kernel, PID 1 and the system services report
+	// there, and it has no input.
+	SerialConsoleObject    = uint64(6)
+	GraphicalConsoleObject = uint64(7)
 )
+
+// IsConsole reports whether object is the logical console or a terminal
+// console; any of them authorizes writing kernel log records.
+func IsConsole(object uint64) bool {
+	return object == ConsoleObject || IsTerminalConsole(object)
+}
+
+// IsTerminalConsole reports whether object is a console with input of its own.
+func IsTerminalConsole(object uint64) bool {
+	return object == SerialConsoleObject || object == GraphicalConsoleObject
+}
 
 const (
 	kindPort  = uint64(1)

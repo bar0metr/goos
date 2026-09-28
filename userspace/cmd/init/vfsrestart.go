@@ -65,11 +65,12 @@ func renewVFSChannels(spec *supervisor.LaunchSpec) bool {
 	return true
 }
 
-// vfsRestarted runs once a restarted VFS is running. The shell gets its
-// session now, since its commands need the namespace at once; the config and
-// log services get theirs when the filesystem service is back.
+// vfsRestarted runs once a restarted VFS is running. The first session's
+// shell gets its session now, since its commands need the namespace at once;
+// the other shells and the config and log services get theirs when the
+// filesystem service is back.
 func vfsRestarted() {
-	if !offerFiles(execServer, shellFiles) {
+	if !offerFiles(sessions[0].execServer, shellFiles) {
 		syslog.Warn("shell not given a filesystem session")
 	}
 	shellFiles = 0
@@ -85,7 +86,7 @@ func renewVFSClients() {
 		return
 	}
 	vfsClientsPending = false
-	for _, channel := range []uint64{uint64(configControlHandle), uint64(logControl)} {
+	for _, channel := range append(otherShells(), uint64(configControlHandle), uint64(logControl)) {
 		if channel == 0 {
 			continue
 		}
@@ -102,7 +103,7 @@ func renewVFSClients() {
 // mount were invalidated by an intentional unmount. The VFS process itself
 // survives, so this is separate from the VFS-restart path above.
 func refreshMountedClients() {
-	for _, channel := range []uint64{execServer, uint64(configControlHandle), uint64(logControl)} {
+	for _, channel := range append(otherShells(), sessions[0].execServer, uint64(configControlHandle), uint64(logControl)) {
 		if channel == 0 {
 			continue
 		}
@@ -141,4 +142,17 @@ func injectVFSFault() bool {
 	syslog.Warn("vfs fault injected")
 	mark("VFS_FAULT_INJECTED\n")
 	return true
+}
+
+// otherShells returns the exec channels of the shells after the first, which
+// are handed a session opened for them rather than the one a restarted VFS
+// starts with.
+func otherShells() []uint64 {
+	var channels []uint64
+	for index := 1; index < len(sessions); index++ {
+		if sessions[index].active {
+			channels = append(channels, sessions[index].execServer)
+		}
+	}
+	return channels
 }

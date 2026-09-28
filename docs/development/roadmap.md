@@ -434,8 +434,9 @@ the first full-screen program, and the terminal support under it: F1-F12 and
 navigation key sequences through an eight-byte decoder with whole-sequence
 enqueue, multi-parameter CSI with cursor addressing and 16-colour SGR in the
 framebuffer terminal, scoped raw terminal mode that the shell grants to
-manifests declaring `GrantTerminal` and ends with the job (ADR 0124), and the
-reusable `userspace/terminal` package. A viewer, an editor, recursive copy and
+manifests declaring `GrantTerminal` and ends with the job (ADR 0124), separate
+COM1 and framebuffer consoles with a terminal service and shell each
+(ADR 0125), and the reusable `userspace/terminal` package. A viewer, an editor, recursive copy and
 cross-filesystem move are left for later releases.
 
 Known gaps left by ADR 0089: the system services that start before the terminal

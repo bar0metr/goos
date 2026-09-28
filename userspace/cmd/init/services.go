@@ -10,7 +10,6 @@ import (
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
-	"goos/kernel/kcall"
 	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
@@ -22,10 +21,12 @@ import (
 // startServices registers the system services and launches them in
 // dependency order, reporting each on the console.
 func startServices(ticks uint64) {
-	page, pageStatus := sys.MemoryMap(execPageHandle, execproto.AreaAddress, execproto.AreaSize, true)
-	execPage = page
-	if pageStatus != kcall.StatusOK {
-		fatal("INIT_EXEC_PAGE_FAILED\n")
+	sessions[0].active = true
+	sessions[1].active = graphicalConsolePresent()
+	for index := range sessions {
+		if sessions[index].active && !mapSessionPage(&sessions[index], index == 0, execproto.AreaAddress, execproto.AreaSize) {
+			fatal("INIT_EXEC_PAGE_FAILED\n")
+		}
 	}
 	write("\nStarting services...\n")
 	// The block service's control endpoint, over which a restarted driver's
@@ -106,31 +107,10 @@ func startServices(ticks uint64) {
 	// answering before anything that reads a setting starts.
 	startConfigService(ticks)
 	startLogService(ticks)
-	terminal := startTerminalService(ticks)
-	// The shell administers configuration, so its session is the whole
-	// namespace and may write. Every other client gets less.
-	configClient, _ := openConfigSession("", configproto.Read|configproto.Write)
-	// The shell holds no console capability: what is typed reaches it as
-	// lines from the terminal service, and what it prints goes back through
-	// that service on a copy of the terminal's writing end.
-	shellCapabilities := []supervisor.Capability{
-		{Name: "stdout", Handle: handle.ID(terminalOutput[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
-		{Name: "tty", Handle: terminal, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
-		{Name: "vfs", Handle: vfsChannelHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		{Name: "exec", Handle: execClientHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		{Name: "execpage", Handle: execPageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
-	}
-	if configClient != 0 {
-		shellCapabilities = append(shellCapabilities, supervisor.Capability{Name: "config", Handle: configClient,
-			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
-	}
-	if manager.Register(supervisor.Definition{Name: "shell", Executable: "/system/shell", Dependencies: []string{"vfs", "tty"},
-		Capabilities: shellCapabilities, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
-		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
-	}
-	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
-		fatal("SHELL_LAUNCH_FAILED\n")
+	for index := range sessions {
+		if sessions[index].active {
+			startSession(&sessions[index], ticks)
+		}
 	}
 	// The fault goes in last, once the filesystem has mounted and the system is
 	// up: the point is that a driver crashing under a working system is
@@ -140,33 +120,89 @@ func startServices(ticks uint64) {
 	arenaBase = arena.Current()
 }
 
-// startTerminalService starts the terminal service and returns the client end
-// of the session the shell reads its lines over. The service is the only
-// process given the right to read the console (ADR 0082), and the only one
-// that reads what the shell and its commands print (ADR 0089).
+// startSession starts a console's terminal service and then its shell.
+func startSession(session *terminalSession, ticks uint64) {
+	terminal := startTerminalService(session, ticks)
+	if session.execClient == 0 {
+		// The first session's exec channel was made by the kernel at boot;
+		// the others' are made here, the server end kept, as for a restart.
+		var exec [2]uint64
+		if !createChannel(&exec) {
+			fatal("INIT_EXEC_CHANNEL_FAILED\n")
+		}
+		session.execClient, session.execServer = handle.ID(exec[0]), exec[1]
+	}
+	// The shell administers configuration, so its session is the whole
+	// namespace and may write. Every other client gets less.
+	configClient, _ := openConfigSession("", configproto.Read|configproto.Write)
+	// Each shell gets a filesystem session of its own; the kernel made the
+	// first one at boot.
+	files := vfsChannelHandle
+	if session != &sessions[0] {
+		var reason string
+		if files, reason = openVFSSession(); reason != "" {
+			syslog.Error("shell filesystem session unavailable", syslog.Str("reason", reason))
+			fatal("INIT_SHELL_VFS_FAILED\n")
+		}
+	}
+	// The shell holds no console capability: what is typed reaches it as
+	// lines from the terminal service, and what it prints goes back through
+	// that service on a copy of the terminal's writing end.
+	shellCapabilities := []supervisor.Capability{
+		{Name: "stdout", Handle: handle.ID(session.output[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
+		{Name: "tty", Handle: terminal, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
+		{Name: "vfs", Handle: files, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "exec", Handle: session.execClient, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "execpage", Handle: session.pageHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
+	}
+	if configClient != 0 {
+		shellCapabilities = append(shellCapabilities, supervisor.Capability{Name: "config", Handle: configClient,
+			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
+	if manager.Register(supervisor.Definition{Name: session.shell, Executable: "/system/shell", Dependencies: []string{"vfs", session.tty},
+		Capabilities: shellCapabilities, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
+		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
+	}
+	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
+		fatal("SHELL_LAUNCH_FAILED\n")
+	}
+}
+
+// startTerminalService starts a session's terminal service and returns the
+// client end of the session its shell reads lines over. The service is the
+// only process given the right to read its console (ADR 0082), and the only
+// one that reads what its shell and their commands print (ADR 0089).
 //
 // The terminal and the shell restart independently. The session between them
 // is a channel, which dies with either, so whichever restarts is launched with
 // a fresh one and the survivor is handed the other end: the shell over its
 // exec channel, the terminal over the control channel created here.
-func startTerminalService(ticks uint64) handle.ID {
+func startTerminalService(session *terminalSession, ticks uint64) handle.ID {
 	var pair, control [2]uint64
-	if !createStream(&terminalOutput) {
+	if !createStream(&session.output) {
 		fatal("INIT_TTY_OUTPUT_FAILED\n")
 	}
 	if !createChannel(&pair) || !createChannel(&control) {
 		fatal("INIT_TTY_CHANNEL_FAILED\n")
 	}
-	ttyControl = handle.ID(control[0])
+	session.ttyControl = handle.ID(control[0])
+	capabilities := []supervisor.Capability{
+		{Name: "console", Handle: session.console, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
+		{Name: "output", Handle: handle.ID(session.output[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait},
+		{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "control", Handle: handle.ID(control[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+	}
+	if validation.Enabled && session.console != serialConsoleHandle {
+		// The QEMU tests read only COM1. The validation build lets the
+		// framebuffer's terminal copy what it writes there once someone
+		// types at it, so a test that drives the keyboard sees the result.
+		capabilities = append(capabilities, supervisor.Capability{Name: "mirror", Handle: serialConsoleHandle, Type: handle.TypeDevice, Rights: capability.Write})
+	}
 	// Always, not on failure: a terminal that exits, even cleanly, leaves a
 	// console no one can type at. The restart limit still ends a crash loop.
-	if manager.Register(supervisor.Definition{Name: "tty", Executable: "/system/tty",
-		Capabilities: []supervisor.Capability{
-			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
-			{Name: "output", Handle: handle.ID(terminalOutput[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait},
-			{Name: "session", Handle: handle.ID(pair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			{Name: "control", Handle: handle.ID(control[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		}, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
+	if manager.Register(supervisor.Definition{Name: session.tty, Executable: "/system/tty",
+		Capabilities: capabilities, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {

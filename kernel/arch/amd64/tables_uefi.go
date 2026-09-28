@@ -227,29 +227,36 @@ func TimerTicks() uint64
 //export goos_kernel_call_arg2_read
 func KernelCallArg2() uint64
 
-// ConsoleTake removes one byte from the console input ring. The result carries
-// the byte in its low eight bits with bit eight set, or zero when the ring is
-// empty, so one return value distinguishes an empty ring from a NUL byte.
-//
-//export goos_console_take
-func ConsoleTake() uint64
+// The input rings: COM1's and the PS/2 keyboard's, one per console
+// (ADR 0125).
+const (
+	InputSerial   = uint64(0)
+	InputKeyboard = uint64(1)
+)
 
-// ConsolePending reports whether the console ring holds a byte.
+// InputTake removes one byte from an input ring. The result carries the byte
+// in its low eight bits with bit eight set, or zero when the ring is empty, so
+// one return value distinguishes an empty ring from a NUL byte.
 //
-//export goos_console_pending
-func ConsolePending() bool
+//export goos_input_take
+func InputTake(input uint64) uint64
 
-// ConsoleTakeInterrupt consumes a pending console interrupt. Ctrl-C never
-// enters the input ring, so asking whether it was typed does not consume the
-// bytes a running command is owed.
+// InputPending reports whether an input ring holds a byte or an interrupt.
 //
-//export goos_console_take_interrupt
-func ConsoleTakeInterrupt() bool
+//export goos_input_pending
+func InputPending(input uint64) bool
 
-// ConsoleDropped counts bytes that arrived with the ring already full.
+// InputTakeInterrupt consumes a ring's pending interrupt. Ctrl-C never enters
+// the ring, so asking whether it was typed does not consume the bytes a
+// running command is owed.
 //
-//export goos_console_dropped_read
-func ConsoleDropped() uint64
+//export goos_input_take_interrupt
+func InputTakeInterrupt(input uint64) bool
+
+// InputDropped counts bytes that arrived with a ring already full.
+//
+//export goos_input_dropped
+func InputDropped(input uint64) uint64
 
 // PS2KeyboardEventTake consumes the validation indication set only after an
 // IRQ1 byte or interrupt has entered the logical console path.
