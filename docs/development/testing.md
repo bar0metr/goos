@@ -102,7 +102,10 @@ reboot persistence.
 
 `make run-gui` is a manual target and is never invoked by the automated test
 hierarchy. It opens a host window, while `make test-boot` remains headless and
-asserts the serial `FRAMEBUFFER_TERMINAL_OK` initialization marker.
+asserts the serial `FRAMEBUFFER_TERMINAL_OK` initialization marker. It also
+requires `PS2_KEYBOARD_OK`, proving QEMU acknowledged the bounded i8042
+initialization before userspace starts. Keystroke behavior remains a manual
+`make run-gui` check because the automated boot target has no graphical input.
 
 The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace

@@ -14,8 +14,9 @@ const (
 )
 
 const (
-	exceptionCount = 32
-	timerVector    = 32
+	exceptionCount    = 32
+	timerVector       = 32
+	keyboardIRQVector = 33
 	// GSI 4 is the legacy UART line. Vector numbering follows the IOAPIC
 	// convention this bootstrap already uses for GSI 11.
 	serialIRQVector = 36
@@ -43,7 +44,7 @@ var (
 )
 
 //go:extern goos_interrupt_table
-var interruptTable [exceptionCount + 5]uintptr
+var interruptTable [exceptionCount + 6]uintptr
 
 // EntryProbeAddress returns one mapped higher-half trampoline address for
 // supervisor-isolation validation.
@@ -110,6 +111,14 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 		return false
 	}
 	idt[serialIRQVector] = NewIDTEntry(uintptr(serial), interruptGate)
+	if interruptTable[exceptionCount+5] == 0 {
+		return false
+	}
+	keyboard, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+5]))
+	if !ok {
+		return false
+	}
+	idt[keyboardIRQVector] = NewIDTEntry(uintptr(keyboard), interruptGate)
 
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
 	if !ok || !unmapGuardPages(pageTable, allocation) {
@@ -149,10 +158,8 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	return true
 }
 
-// ConfigureDeviceIRQs maps the architectural APIC pages and routes the two
-// device lines this system uses on bootstrap CPU 0: GSI 11 for virtio, as an
-// active-low level-triggered interrupt, and GSI 4 for the console UART, which
-// the ISA convention makes active-high and edge-triggered.
+// ConfigureDeviceIRQs maps the architectural APIC pages and routes virtio and
+// both legacy console-input lines on bootstrap CPU 0.
 func ConfigureDeviceIRQs(pageTable uint64) bool {
 	if !vm.MapKernelDevicePage(pageTable, uint64(lapicVirtual), 0xfee00000) ||
 		!vm.MapKernelDevicePage(pageTable, uint64(ioapicVirtual), 0xfec00000) {
@@ -165,6 +172,8 @@ func ConfigureDeviceIRQs(pageTable uint64) bool {
 	ioapicWrite(0x10+2*11, uint32(virtioIRQVector)|1<<13|1<<15)
 	ioapicWrite(0x10+2*4+1, 0)
 	ioapicWrite(0x10+2*4, uint32(serialIRQVector))
+	ioapicWrite(0x10+2*1+1, 0)
+	ioapicWrite(0x10+2*1, uint32(keyboardIRQVector))
 	return true
 }
 

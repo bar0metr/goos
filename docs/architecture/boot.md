@@ -63,7 +63,7 @@ Any failure in this phase prints a panic line and halts.
 | PCI discovery | Find the legacy virtio-blk function through configuration mechanism 1; require IRQ line 11; enable I/O decoding, bus mastering, and INTx | ADR 0034 |
 | PMM | Build one bitmap segment per run of conventional memory, carving the bitmaps from low memory; allocate and free one page as a self-test | ADR 0002, 0103 |
 | VM | Require NX and PAT; build the kernel identity map with PE section permissions and the direct map of managed memory; map loader memory above 1 GiB; program a known PAT layout; map the validated GOP framebuffer in its kernel-only UC window; enable `EFER.NXE` and `CR0.WP`; load CR3; fill the screen with the framebuffer milestone pattern | ADR 0003, 0103, 0123 |
-| GDT, IDT, TSS | Install descriptor tables and the user native-call gate; map LAPIC/IOAPIC; route GSI 11 to the virtio vector and GSI 4 to the console vector, then enable the UART receive interrupt; test a breakpoint trap (validation build) | ADR 0004, 0035, 0075 |
+| GDT, IDT, TSS | Install descriptor tables and the user native-call gate; map LAPIC/IOAPIC; route GSI 11 to virtio, GSI 4 to UART, and GSI 1 to PS/2; enable UART receive and perform bounded i8042 initialization; test a breakpoint trap (validation build) | ADR 0004, 0035, 0075, 0123 |
 | Timer | Program the PIT at the build-time rate (`HZ`); wait for three ticks; calibrate the TSC over about 100 ms | ADR 0005, 0052, 0054 |
 | Scheduler | Allocate guarded kernel stacks; reset per-slot FXSAVE areas; start kernel tasks: housekeeping (slot 0), two demo tasks that sleep at once in a normal build, idle | ADR 0006, 0055, 0056, 0058 |
 

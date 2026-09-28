@@ -397,7 +397,9 @@ markers that the boot test asserts.
 
 `make run` is headless and attaches COM1 to the current terminal. `make
 run-gui` opens QEMU's GOP-compatible VGA display while keeping COM1 on the
-terminal. `make run-debug` starts QEMU paused with a GDB server on TCP port
+terminal. The graphical console uses a 1280x800 preferred GOP mode and accepts
+US-layout PS/2 keyboard input, while serial input remains active. `make
+run-debug` starts QEMU paused with a GDB server on TCP port
 1234. `make test-performance` stores
 benchmark results under `build/reports/`: host benchmarks of the kernel data
 structures and, through `make test-microbench`, context switch, IPC, VFS read,
