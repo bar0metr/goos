@@ -18,8 +18,9 @@ func TestOutputSequences(t *testing.T) {
 	output.SetForeground(Default)
 	output.SetBackground(BrightBlack)
 	output.ResetStyle()
+	output.RequestSize()
 	output.Flush()
-	want := "\x1b[1;1H\x1b[33;106H\x1b[2K\x1b[K\x1b[93;44m\x1b[39m\x1b[100m\x1b[0m"
+	want := "\x1b[1;1H\x1b[33;106H\x1b[2K\x1b[K\x1b[93;44m\x1b[39m\x1b[100m\x1b[0m\x1b[999;999H\x1b[6n"
 	if string(*written) != want {
 		t.Fatalf("output = %q, want %q", *written, want)
 	}

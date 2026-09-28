@@ -116,9 +116,29 @@ stops the job. That is the way out of a full-screen program that has stopped
 reading, and it needs no key reserved from the program. A program therefore
 cannot use Ctrl-C itself; Escape is its cancel key.
 
-The shell asks for the geometry when it gets a session and passes it to every
-command as `COLUMNS` and `LINES`; `utility.TerminalSize` reads them. No console
-capability reaches a command.
+The shell asks for the geometry when it gets a session and, when it is the
+framebuffer's, passes it to every command as `COLUMNS` and `LINES`;
+`utility.TerminalSize` reads them. A serial-only console has no size of its
+own, so the shell passes none. No console capability reaches a command.
+
+### The terminal on COM1 has a size of its own
+
+The framebuffer and COM1 show one byte stream, but a host terminal on COM1 can
+be any size and is resized without anything reaching the serial line. A
+full-screen program therefore asks it: `terminal.Output.RequestSize` moves the
+cursor to `ESC[999;999H`, where every terminal clamps it to its bottom-right
+corner, and sends DSR 6 (`ESC[6n`). A host terminal answers with a cursor
+position report, `ESC[rows;columnsR`, which arrives as input like a key; the
+parser returns it as `KeyPosition`. The framebuffer terminal does not answer.
+
+`gfm` asks when it starts, on F2, and whenever a second passes without input,
+so it follows a resized terminal within about a second. It lays itself out on
+the framebuffer's size when only that is known, on the host terminal's when
+only that is, and on the smaller of the two in each dimension when both are:
+then neither console wraps or scrolls. A host terminal larger than the
+framebuffer does not enlarge the layout while the framebuffer shows the same
+screen. `ESC [ 1 ; m R` stays a modified F3; a report is taken only for a row
+above 1, which a corner of a usable screen always is.
 
 `GrantTerminal` carries no handle. A command that has it still holds only its
 standard streams and its declared grants; it cannot read the console, reach
@@ -141,3 +161,5 @@ the keyboard, map the framebuffer or take raw mode from another job.
   parameters), but it is not a terminfo implementation.
 - The kernel terminal wraps as soon as the last column is written, so a
   full-screen program never writes the bottom-right cell.
+- An idle full-screen program writes a size query once a second; with a host
+  terminal attached, its answer comes back once a second too.

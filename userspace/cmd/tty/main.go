@@ -45,6 +45,9 @@ var (
 	rawInput    tty.RawInput
 	rawReported bool
 	rawBuffer   [tty.MaxPart]byte
+	// display is set when the geometry is the framebuffer's, a fixed size;
+	// a serial-only console's is only a fallback.
+	display bool
 	// reading is the correlation of the client's outstanding read, or zero.
 	reading uint64
 	// sent is how much of the completed line earlier parts delivered.
@@ -83,6 +86,7 @@ func userspaceMain() {
 	info, status := sys.ConsoleInformation(consoleHandle)
 	if status == kcall.StatusOK && info.Columns != 0 && info.Rows != 0 {
 		screen.SetGeometry(int(info.Columns), int(info.Rows))
+		display = info.Flags&kcall.ConsoleFlagFramebuffer != 0
 	} else {
 		screen.SetGeometry(tty.DefaultColumns, tty.DefaultRows)
 	}
@@ -408,7 +412,7 @@ func serveSession() {
 			accept(message.Correlation)
 		case tty.OperationGeometry:
 			columns, rows := screen.Geometry()
-			if geometry, ok := tty.GeometryReply(columns, rows, message.Correlation); ok {
+			if geometry, ok := tty.GeometryReply(columns, rows, display, message.Correlation); ok {
 				send(geometry)
 			}
 		}

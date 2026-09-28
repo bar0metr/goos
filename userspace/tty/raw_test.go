@@ -119,24 +119,32 @@ func TestRawAndGeometryReplies(t *testing.T) {
 	if _, ok := Reply(ResultRaw, make([]byte, MaxPart+1), 9); ok {
 		t.Fatal("oversized raw reply accepted")
 	}
-	message, ok = GeometryReply(106, 33, 9)
+	message, ok = GeometryReply(106, 33, true, 9)
 	if !ok {
 		t.Fatal("geometry reply refused")
 	}
 	result, data, ok = DecodeReply(&message)
-	columns, rows, valid := DecodeGeometry(data)
-	if !ok || result != ResultGeometry || !valid || columns != 106 || rows != 33 {
-		t.Fatalf("geometry = %d %dx%d", result, columns, rows)
+	columns, rows, display, valid := DecodeGeometry(data)
+	if !ok || result != ResultGeometry || !valid || columns != 106 || rows != 33 || !display {
+		t.Fatalf("geometry = %d %dx%d display %v", result, columns, rows, display)
 	}
-	for _, payload := range [][]byte{nil, {1, 0, 2}, {1, 0, 2, 0, 0}} {
+	message, _ = GeometryReply(80, 25, false, 9)
+	_, data, _ = DecodeReply(&message)
+	if _, _, display, valid := DecodeGeometry(data); !valid || display {
+		t.Fatal("serial geometry claimed a display")
+	}
+	if _, _, _, valid := DecodeGeometry([]byte{80, 0, 25, 0, 2}); valid {
+		t.Fatal("unknown geometry flag accepted")
+	}
+	for _, payload := range [][]byte{nil, {1, 0, 2}, {1, 0, 2, 0}, {1, 0, 2, 0, 0, 0}} {
 		if _, ok := Reply(ResultGeometry, payload, 9); ok {
 			t.Fatalf("geometry payload %v accepted", payload)
 		}
 	}
-	if _, _, ok := DecodeGeometry([]byte{0, 0, 5, 0}); ok {
+	if _, _, _, ok := DecodeGeometry([]byte{0, 0, 5, 0, 0}); ok {
 		t.Fatal("zero columns accepted")
 	}
-	if _, ok := GeometryReply(0x10000, 1, 9); ok {
+	if _, ok := GeometryReply(0x10000, 1, false, 9); ok {
 		t.Fatal("oversized geometry accepted")
 	}
 	if _, ok := Reply(ResultAccepted, []byte("x"), 9); ok {

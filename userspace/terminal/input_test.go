@@ -140,3 +140,31 @@ func TestParserAllocatesNothing(t *testing.T) {
 		t.Fatalf("parser allocated %.1f objects", allocations)
 	}
 }
+
+func TestParserCursorPositionReport(t *testing.T) {
+	var parser Parser
+	events := feed(&parser, "\x1b[43;86R\x1b[1;2R\x1b[33;106Ra")
+	if len(events) != 4 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[0] != (Event{Key: KeyPosition, Row: 43, Column: 86}) {
+		t.Fatalf("report = %#v", events[0])
+	}
+	if events[1].Key != KeyF3 || events[2].Row != 33 || events[2].Column != 106 || events[3].Rune != 'a' {
+		t.Fatalf("events = %#v", events)
+	}
+	// A report split across reads still decodes once.
+	for _, part := range []string{"\x1b[", "24", ";8", "0", "R"} {
+		for index := 0; index < len(part); index++ {
+			if event, ok := parser.Feed(part[index]); ok {
+				events = append(events[:0], event)
+			}
+		}
+		if event, ok := parser.Flush(); ok {
+			t.Fatalf("flush in a report = %#v", event)
+		}
+	}
+	if events[0] != (Event{Key: KeyPosition, Row: 24, Column: 80}) {
+		t.Fatalf("split report = %#v", events[0])
+	}
+}

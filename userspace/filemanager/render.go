@@ -88,7 +88,7 @@ func (app *App) composeRow(out *terminal.Output, row int) {
 	if app.tooSmall {
 		app.style(out, colorText, colorGround)
 		if row == 0 {
-			out.TextString("gfm: terminal too small (need at least 80x24); press any key", app.columns-1)
+			out.TextString("gfm: terminal too small (need at least 80x24); F10 quits", app.columns-1)
 		}
 		return
 	}

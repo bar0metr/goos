@@ -47,9 +47,11 @@ func requestLine(prompt []byte) {
 	reading = correlation
 }
 
-// The terminal's size, as the service reports it, reaches every command as
-// COLUMNS and LINES: a full-screen program lays itself out by them without
-// holding any console capability (ADR 0124).
+// The size of the framebuffer console, as the service reports it, reaches
+// every command as COLUMNS and LINES: a full-screen program lays itself out
+// within it without holding any console capability (ADR 0124). A serial-only
+// console has no size of its own to report; the terminal at its far end is
+// asked by the program itself.
 var (
 	columnsVariable [16]byte
 	columnsSize     int
@@ -77,8 +79,9 @@ func requestGeometry() {
 }
 
 func storeGeometry(payload []byte) {
-	columns, rows, ok := terminal.DecodeGeometry(payload)
-	if !ok {
+	columns, rows, display, ok := terminal.DecodeGeometry(payload)
+	if !ok || !display {
+		columnsSize, linesSize = 0, 0
 		return
 	}
 	columnsSize = len(appendVariable(columnsVariable[:0], "COLUMNS=", uint64(columns)))

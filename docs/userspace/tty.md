@@ -51,8 +51,11 @@ shell. A client sends:
 - `Continue`: ask for the next part of a line (ADR 0109).
 - `RawMode`, `LineMode`: switch the session to raw mode and back (below).
 - `Geometry`: ask for the terminal's columns and rows, answered with
-  `ResultGeometry`. The shell asks once per session and passes the answer to
-  every command as `COLUMNS` and `LINES`.
+  `ResultGeometry`, whose flags byte says whether they are the framebuffer's.
+  The shell asks once per session and, for a framebuffer, passes the answer to
+  every command as `COLUMNS` and `LINES`; a serial-only console's 80x25 is a
+  fallback, not a size, and is not passed. A full-screen program asks a host
+  terminal on COM1 for its own size (ADR 0124).
 
 Prompts are at most 64 bytes of printable ASCII, so a client cannot use the
 service to send control sequences. A reply carries at most 255 bytes of a

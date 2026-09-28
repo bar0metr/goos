@@ -126,6 +126,14 @@ func (output *Output) ClearScreen() { output.WriteString("\x1b[2J\x1b[H") }
 func (output *Output) EraseLine()  { output.WriteString("\x1b[2K") }
 func (output *Output) EraseToEnd() { output.WriteString("\x1b[K") }
 
+// RequestSize asks the terminal how large it is: the cursor goes to the
+// bottom-right corner, where the terminal clamps it, and DSR 6 asks where it
+// is. A terminal that answers sends ESC [ rows ; columns R, which Parser
+// returns as a KeyPosition event; the framebuffer console does not answer.
+// The cursor is left in the corner, so nothing may be written after it
+// before the next MoveTo.
+func (output *Output) RequestSize() { output.WriteString("\x1b[999;999H\x1b[6n") }
+
 // HideCursor and ShowCursor are ignored by consoles without a visible cursor.
 func (output *Output) HideCursor() { output.WriteString("\x1b[?25l") }
 func (output *Output) ShowCursor() { output.WriteString("\x1b[?25h") }

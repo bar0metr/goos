@@ -250,9 +250,15 @@ func ReadByte() (byte, uint64) {
 // StatusNotFound and StatusResourceExhausted mean nothing arrived yet and the
 // caller should retry; StatusPeerDied means end of input.
 func ReadInput(target []byte) (uint64, int) {
+	return ReadInputWithin(target, streamWaitDeadline)
+}
+
+// ReadInputWithin is ReadInput waiting at most deadline ticks for input to
+// arrive; StatusResourceExhausted then means the wait ran out.
+func ReadInputWithin(target []byte, deadline uint64) (uint64, int) {
 	count, status := sys.StreamRead(handle.ID(stdinHandle), target)
 	if status == kcall.StatusResourceExhausted {
-		waitStatus := sys.StreamWait(handle.ID(stdinHandle), streamWaitDeadline)
+		waitStatus := sys.StreamWait(handle.ID(stdinHandle), deadline)
 		if waitStatus == kcall.StatusTimeout {
 			return uint64(kcall.StatusResourceExhausted), 0
 		}

@@ -79,12 +79,17 @@ const (
 	// ResultRaw carries 1 to MaxPart bytes typed in raw mode.
 	ResultRaw
 	// ResultGeometry carries the terminal's columns and rows, each as a
-	// little-endian uint16.
+	// little-endian uint16, and a flags byte: GeometryDisplay when they are
+	// the size of a display of fixed size, the framebuffer, rather than the
+	// fallback of a serial-only console, whose far end has a size of its own.
 	ResultGeometry
 )
 
 // GeometrySize is the length of a ResultGeometry payload.
-const GeometrySize = 4
+const GeometrySize = 5
+
+// GeometryDisplay marks a geometry that is a fixed display's.
+const GeometryDisplay = byte(1)
 
 // Request encodes a client request carrying a prompt.
 func Request(operation Operation, prompt []byte, correlation uint64) (ipc.Message, bool) {
@@ -145,21 +150,24 @@ func validPayload(result Result, line []byte) bool {
 }
 
 // GeometryReply encodes the answer to OperationGeometry.
-func GeometryReply(columns, rows int, correlation uint64) (ipc.Message, bool) {
+func GeometryReply(columns, rows int, display bool, correlation uint64) (ipc.Message, bool) {
 	if columns <= 0 || rows <= 0 || columns > 0xffff || rows > 0xffff {
 		return ipc.Message{}, false
 	}
 	payload := [GeometrySize]byte{byte(columns), byte(columns >> 8), byte(rows), byte(rows >> 8)}
+	if display {
+		payload[4] = GeometryDisplay
+	}
 	return Reply(ResultGeometry, payload[:], correlation)
 }
 
 // DecodeGeometry reads a ResultGeometry payload.
-func DecodeGeometry(payload []byte) (columns, rows int, ok bool) {
-	if len(payload) != GeometrySize {
-		return 0, 0, false
+func DecodeGeometry(payload []byte) (columns, rows int, display bool, ok bool) {
+	if len(payload) != GeometrySize || payload[4]&^GeometryDisplay != 0 {
+		return 0, 0, false, false
 	}
 	columns, rows = int(payload[0])|int(payload[1])<<8, int(payload[2])|int(payload[3])<<8
-	return columns, rows, columns != 0 && rows != 0
+	return columns, rows, payload[4] == GeometryDisplay, columns != 0 && rows != 0
 }
 
 // Reply encodes the answer to a request. Only ResultLine and ResultPart carry
