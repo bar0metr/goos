@@ -103,7 +103,7 @@ system services' own reports still reach the logical console directly
 ([ADR 0089](../adr/0089-terminal-output-and-session-restart.md)).
 
 The kernel framebuffer terminal only renders the byte stream. It tracks the
-cursor, incremental UTF-8, fixed 8x16 glyphs, scrolling, and the bounded
+cursor, incremental UTF-8, fixed Spleen 12x24 glyphs, scrolling, and the bounded
 `ESC[2J`, `ESC[H`, `ESC[K`, and `ESC[nA/B/C/D` subset used by `Screen`. Line editing,
 session ownership, foreground jobs, prompts, and Ctrl-C policy remain here in
 the userspace TTY. COM1 is written first and remains available when GOP is

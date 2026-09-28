@@ -1,17 +1,20 @@
 package framebuffer
 
 const (
-	GlyphWidth  = 8
-	GlyphHeight = 16
+	GlyphWidth  = 12
+	GlyphHeight = 24
 
-	ReplacementCharacter  = '\uFFFD'
-	replacementGlyphIndex = 511
+	ReplacementCharacter   = '\uFFFD'
+	asciiGlyphCount        = 0x7f - 0x20
+	cyrillicGlyphIndex     = asciiGlyphCount
+	cyrillicCapitalYoIndex = cyrillicGlyphIndex + (0x0450 - 0x0410)
+	cyrillicSmallYoIndex   = cyrillicCapitalYoIndex + 1
+	replacementGlyphIndex  = cyrillicSmallYoIndex + 1
 )
 
-// Glyph is one fixed-width bitmap cell. Bit 7 is the leftmost pixel. Each
-// source row is doubled vertically to produce an 8x16 cell without rendering
-// allocation or runtime font loading.
-type Glyph [GlyphHeight]uint8
+// Glyph is one fixed-width Spleen bitmap cell. Bit 15 is the leftmost pixel;
+// the low four bits are unused because the source cell is 12 pixels wide.
+type Glyph [GlyphHeight]uint16
 
 // GlyphFor returns the built-in glyph for scalar. Unsupported scalars use the
 // visible replacement glyph.
@@ -19,20 +22,15 @@ func GlyphFor(scalar rune) Glyph {
 	index := replacementGlyphIndex
 	switch {
 	case scalar >= 0x20 && scalar <= 0x7e:
-		index = int(scalar)
+		index = int(scalar - 0x20)
 	case scalar >= 0x0410 && scalar <= 0x044f:
-		index = int(cyrillicIndices[scalar-0x0410])
+		index = cyrillicGlyphIndex + int(scalar-0x0410)
 	case scalar == 0x0401:
 		index = cyrillicCapitalYoIndex
 	case scalar == 0x0451:
 		index = cyrillicSmallYoIndex
 	}
-	var glyph Glyph
-	for row, bits := range fontData[index] {
-		glyph[row*2] = bits
-		glyph[row*2+1] = bits
-	}
-	return glyph
+	return fontData[index]
 }
 
 // DrawGlyph paints one complete cell. Buffer clipping keeps partially visible
@@ -44,7 +42,7 @@ func (buffer *Buffer) DrawGlyph(x, y int, glyph Glyph, foreground, background ui
 	for row, bits := range glyph {
 		for column := 0; column < GlyphWidth; column++ {
 			pixel := background
-			if bits&(0x80>>column) != 0 {
+			if bits&(uint16(0x8000)>>column) != 0 {
 				pixel = foreground
 			}
 			buffer.PutPixel(x+column, y+row, pixel)

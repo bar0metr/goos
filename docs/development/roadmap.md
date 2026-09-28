@@ -232,6 +232,9 @@ sink, and exact shell output proves end-to-end keyboard delivery.
 The TTY now reads capability-checked console geometry, falls back to 80x25 on
 serial-only boots, and erases and restores every row of wrapped edited input
 when asynchronous output arrives.
+The graphical console uses Spleen 12x24 cells, yielding approximately 106x33
+cells at the preferred 1280x800 GOP mode and making manual QEMU output readable
+without reducing framebuffer resolution.
 Framebuffer, GOP, and PS/2 regression coverage now includes hostile GOP
 metadata, framebuffer guard words, the complete required key translation set,
 and an in-guest assertion that process page tables do not inherit the kernel
