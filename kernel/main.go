@@ -228,6 +228,18 @@ func main() {
 			amd64.Halt()
 		}
 	}
+	status = bootuefi.DiscoverFramebuffer(&bootInfo)
+	if status != 0 {
+		console.WriteString("Graphics: GOP unavailable, using serial console: ")
+		console.WriteHex(uint64(status))
+		console.WriteString("\n")
+	} else {
+		console.WriteString("Graphics: GOP ")
+		console.WriteUint(uint64(bootInfo.Framebuffer.Width))
+		console.WriteString("x")
+		console.WriteUint(uint64(bootInfo.Framebuffer.Height))
+		console.WriteString("x32\n")
+	}
 	bootuefi.FindACPIRoot(&bootInfo)
 	status = bootuefi.CaptureAndExit(&bootInfo)
 	if status != 0 {
