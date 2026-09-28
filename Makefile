@@ -536,7 +536,7 @@ help:
 	  '  run-gui         boot with QEMU graphical display and serial on this terminal' \
 	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
-	  '  test-console-gui validate framebuffer pixels through a headless screendump' \
+	  '  test-console-gui validate framebuffer pixels and PS/2 input headlessly' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \

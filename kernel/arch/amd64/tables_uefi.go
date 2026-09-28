@@ -251,6 +251,12 @@ func ConsoleTakeInterrupt() bool
 //export goos_console_dropped_read
 func ConsoleDropped() uint64
 
+// PS2KeyboardEventTake consumes the validation indication set only after an
+// IRQ1 byte or interrupt has entered the logical console path.
+//
+//export goos_ps2_keyboard_event_take
+func PS2KeyboardEventTake() bool
+
 // EnableConsoleInterrupt turns on the UART's received-data-available interrupt.
 // It must run after the IDT gate for the serial vector exists, or the first
 // byte would arrive with no handler installed.

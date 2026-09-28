@@ -105,16 +105,19 @@ hierarchy. It opens a host window, while `make test-boot` remains headless and
 does not require Cocoa, GTK, SDL, or another host display backend. The manual
 target defaults to `QEMU_DISPLAY=cocoa` and permits a host-specific override.
 The boot test asserts the serial `FRAMEBUFFER_TERMINAL_OK` initialization marker. It also
-requires `PS2_KEYBOARD_OK`, proving QEMU acknowledged the bounded i8042
-initialization before userspace starts. Keystroke behavior remains a manual
-`make run-gui` check because the automated boot target has no graphical input.
+requires `PS2_KEYBOARD_READY`, proving QEMU acknowledged the bounded i8042
+initialization before userspace starts.
 
 `make test-console-gui` is the automated framebuffer test. It creates a fresh
 disk, boots the validation ISO with standard VGA and `-display none`, captures
 serial output, and waits for `FRAMEBUFFER_VALIDATION_PATTERN_OK`. It then sends
 `screendump` over a private QEMU monitor socket and verifies the exact
 magenta/cyan 16x16 checkerboard in the lower-right corner of the resulting PPM.
-The test does not inspect text or require OCR. Its log and image are retained as
+The test then resumes the guest and injects editing keys plus the mandatory
+`echo graphical-keyboard-ok` command through the private QEMU monitor. COM1 is
+a file sink, so the `PS2_KEYBOARD_OK` marker and exact command output prove the
+input traversed IRQ1, the decoder, logical console, TTY, and shell. The test
+does not inspect text or require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
 
 The main phase has a 180-second bound. It validates kernel initialization,

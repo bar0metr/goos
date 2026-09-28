@@ -226,7 +226,9 @@ sequences, and the shared Ctrl-C path do not change the userspace TTY ABI. The
 GUI target explicitly selects a configurable display backend while automated
 and ordinary runs remain headless. Automated framebuffer validation uses a
 QEMU monitor screendump and exact validation-only checkerboard pixels, without
-OCR or a host window.
+OCR or a host window. The same headless harness injects editing keys and
+`echo graphical-keyboard-ok` through QEMU's PS/2 path; COM1 remains a file
+sink, and exact shell output proves end-to-end keyboard delivery.
 
 Current progress: ADR 0058 splits the build into a normal and a validation
 variant. A normal build boots quietly to a banner, `Starting services...`, one

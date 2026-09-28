@@ -24,6 +24,27 @@ fail() {
 	exit 1
 }
 
+monitor_command() {
+	(printf '%s\n' "$1"; sleep 0.1) | nc -U "$monitor" >/dev/null 2>&1
+}
+
+send_key() {
+	monitor_command "sendkey $1" || fail "QEMU rejected key $1"
+}
+
+wait_for_log() {
+	pattern=$1
+	description=$2
+	limit=${3:-90}
+	elapsed=0
+	while ! grep -q "$pattern" "$log" 2>/dev/null; do
+		kill -0 "$pid" 2>/dev/null || fail "QEMU exited before $description"
+		[ "$elapsed" -lt "$limit" ] || fail "$description timeout"
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+}
+
 trap cleanup EXIT
 trap 'cleanup; exit 130' HUP INT TERM
 mkdir -p build/logs build/reports
@@ -45,15 +66,12 @@ while [ ! -S "$monitor" ] && [ "$elapsed" -lt 100 ]; do
 done
 [ -S "$monitor" ] || fail "QEMU monitor socket was not created"
 
-elapsed=0
-while ! grep -q 'FRAMEBUFFER_VALIDATION_PATTERN_OK' "$log" 2>/dev/null; do
-	kill -0 "$pid" 2>/dev/null || fail "QEMU exited before framebuffer marker"
-	[ "$elapsed" -lt 90 ] || fail "framebuffer marker timeout"
-	sleep 1
-	elapsed=$((elapsed + 1))
-done
+wait_for_log 'FRAMEBUFFER_VALIDATION_PATTERN_OK' 'framebuffer marker'
+wait_for_log '^goos> ' 'shell prompt' 180
+wait_for_log '^BOOT_OK' 'completed validation boot' 180
+sleep 1
 
-(printf 'stop\nscreendump %s\n' "$dump"; sleep 0.2) | nc -U "$monitor" >/dev/null 2>&1 || fail "QEMU screendump command failed"
+monitor_command "screendump $dump" || fail "QEMU screendump command failed"
 elapsed=0
 while [ ! -s "$dump" ] && [ "$elapsed" -lt 50 ]; do
 	sleep 0.1
@@ -64,3 +82,22 @@ done
 GOTOOLCHAIN=local GOCACHE="$(pwd)/build/cache/go" XDG_CACHE_HOME="$(pwd)/build/cache" \
 	go run ./tools/ppmcheck "$dump" || fail "validation pixels did not match"
 printf 'PASS console-gui\n'
+
+# Exercise editing and modifier paths before entering the mandatory command.
+# COM1 is a file sink, so all input below can only arrive through IRQ1.
+send_key shift-x
+send_key backspace
+for key in d i s c a r d; do
+	send_key "$key"
+done
+send_key ctrl-u
+send_key ctrl-l
+send_key up
+for key in e c h o spc g r a p h i c a l minus k e y b o a r d minus o k; do
+	send_key "$key"
+done
+send_key ret
+
+wait_for_log '^PS2_KEYBOARD_OK' 'PS/2 input marker'
+wait_for_log '^graphical-keyboard-ok' 'graphical keyboard command output'
+printf 'PASS console-keyboard\n'
