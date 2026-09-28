@@ -11,6 +11,9 @@ COM1 remains the authoritative diagnostic output. After the permanent GOP
 mapping is installed, the kernel mirrors the logical console byte stream to
 the framebuffer terminal. `make run` stays headless; `make run-gui` opens the
 graphical window and still attaches COM1 to the terminal.
+The display backend is configurable, for example `make run-gui
+QEMU_DISPLAY=gtk`; changing it does not alter the emulated standard VGA device
+or the GOP mode exposed by OVMF.
 
 | Source | Log |
 | --- | --- |

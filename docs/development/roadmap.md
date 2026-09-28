@@ -222,7 +222,9 @@ adds `make run-gui` for manual graphical-console validation. Both targets boot
 the same ISO and persistent disk and retain COM1 output. The preferred GOP mode
 is 1280x800 with bounded fallbacks. IRQ-driven PS/2 input now joins COM1 in the
 existing console queue; scan-code decoding, US layout translation, arrow CSI
-sequences, and the shared Ctrl-C path do not change the userspace TTY ABI.
+sequences, and the shared Ctrl-C path do not change the userspace TTY ABI. The
+GUI target explicitly selects a configurable display backend while automated
+and ordinary runs remain headless.
 
 Current progress: ADR 0058 splits the build into a normal and a validation
 variant. A normal build boots quietly to a banner, `Starting services...`, one
