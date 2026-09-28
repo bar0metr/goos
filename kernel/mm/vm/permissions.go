@@ -48,11 +48,13 @@ const (
 	// LeafTableSpan is the address range one leaf page table covers.
 	LeafTableSpan = uint64(2 << 20)
 
-	entryPresent  = uint64(1 << 0)
-	entryWritable = uint64(1 << 1)
-	entryUser     = uint64(1 << 2)
-	entryAccessed = uint64(1 << 5)
-	entryDirty    = uint64(1 << 6)
+	entryPresent      = uint64(1 << 0)
+	entryWritable     = uint64(1 << 1)
+	entryUser         = uint64(1 << 2)
+	entryWriteThrough = uint64(1 << 3)
+	entryCacheDisable = uint64(1 << 4)
+	entryAccessed     = uint64(1 << 5)
+	entryDirty        = uint64(1 << 6)
 	// entryOwned uses an x86_64 software-available PTE bit. It marks private
 	// process pages whose physical storage is reclaimed with the address space.
 	entryOwned  = uint64(1 << 9)
@@ -95,4 +97,15 @@ func pageEntry(physical uint64, permissions Permissions) (uint64, bool) {
 		entry |= entryNX
 	}
 	return entry, true
+}
+
+// uncachedPageEntry uses the architectural PCD+PWT combination. With the x86
+// reset PAT this selects the UC memory type for device memory. The mapping is
+// supervisor-only, writable and NX.
+func uncachedPageEntry(physical uint64) (uint64, bool) {
+	entry, ok := pageEntry(physical, Permissions{Writable: true})
+	if !ok || physical&^addressMask != 0 {
+		return 0, false
+	}
+	return entry | entryWriteThrough | entryCacheDisable, true
 }

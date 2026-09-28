@@ -15,6 +15,7 @@ import (
 	"goos/kernel/clock"
 	"goos/kernel/device"
 	"goos/kernel/executable"
+	kernelframebuffer "goos/kernel/framebuffer"
 	"goos/kernel/handle"
 	"goos/kernel/initramfs"
 	"goos/kernel/ipc"
@@ -117,6 +118,8 @@ var (
 	initExitObserved            uint64
 	initExitCode                uint64
 	kernelPageTable             uint64
+	framebufferVirtual          uint64
+	graphicalFramebuffer        kernelframebuffer.Buffer
 	initName                    = []byte("init")
 	initImagePath               = []byte("system/init")
 	initProcessSlot             process.Process
@@ -251,6 +254,10 @@ func main() {
 		}
 	}
 	mark("BOOT_SERVICES_EXITED")
+	if bootInfo.Framebuffer.Available && bootInfo.Framebuffer.OverlapsUsable(bootInfo.MemoryRegions()) {
+		console.WriteString("Graphics: framebuffer overlaps usable RAM, using serial console\n")
+		bootInfo.Framebuffer = boot.FramebufferInfo{}
+	}
 	// ACPI says how to switch the machine off. The tables are read once, here,
 	// as untrusted firmware input; a machine without them simply cannot power
 	// off (ADR 0092). The firmware's page tables are still loaded and
@@ -323,6 +330,27 @@ func main() {
 	if built {
 		built = vm.MapLoaderMemory(&pageAllocator, pageTable, bootInfo.MemoryRegions())
 	}
+	if built && bootInfo.Framebuffer.Available && !amd64.HasPAT() {
+		console.WriteString("Graphics: CPU has no PAT, using serial console\n")
+		bootInfo.Framebuffer = boot.FramebufferInfo{}
+	}
+	if built && bootInfo.Framebuffer.Available {
+		if !amd64.ConfigurePAT() {
+			console.WriteString("Graphics: PAT configuration failed, using serial console\n")
+			bootInfo.Framebuffer = boot.FramebufferInfo{}
+		} else {
+			mark("PAT_CONFIGURED")
+		}
+	}
+	if built && bootInfo.Framebuffer.Available {
+		var mapped bool
+		framebufferVirtual, mapped = vm.MapFramebuffer(&pageAllocator, pageTable, bootInfo.Framebuffer)
+		if !mapped {
+			console.WriteString("Graphics: framebuffer mapping failed, using serial console\n")
+			framebufferVirtual = 0
+			bootInfo.Framebuffer = boot.FramebufferInfo{}
+		}
+	}
 	// The kernel's copies into user memory fault in demand-zero pages the
 	// way the processor's accesses do (ADR 0104).
 	vm.SetFaultResolver(resolveCopyFault)
@@ -341,6 +369,28 @@ func main() {
 	amd64.EnableNXAndWriteProtect()
 	amd64.LoadPageTable(pageTable)
 	amd64.SetKernelPageTable(pageTable)
+	if framebufferVirtual != 0 {
+		physical, mapped := vm.Resolve(pageTable, framebufferVirtual)
+		permissions, user, present := vm.MappingPermissions(pageTable, framebufferVirtual)
+		if !mapped || physical != bootInfo.Framebuffer.Address || !present || user ||
+			!permissions.Writable || permissions.Executable {
+			console.WriteString("Graphics: framebuffer mapping validation failed, using serial console\n")
+			framebufferVirtual = 0
+			bootInfo.Framebuffer = boot.FramebufferInfo{}
+		} else {
+			mark("FRAMEBUFFER_MAPPING_OK")
+			var ready bool
+			graphicalFramebuffer, ready = kernelframebuffer.New(framebufferVirtual, bootInfo.Framebuffer)
+			if !ready {
+				console.WriteString("Graphics: framebuffer construction failed, using serial console\n")
+				framebufferVirtual = 0
+				bootInfo.Framebuffer = boot.FramebufferInfo{}
+			} else {
+				drawFramebufferMilestone(&graphicalFramebuffer)
+				mark("FRAMEBUFFER_PRIMITIVES_OK")
+			}
+		}
+	}
 	mark("NX_WX_OK")
 	mark("VM_OK")
 
@@ -564,6 +614,26 @@ func bootContinue() {
 			}
 		}
 	}
+}
+
+func drawFramebufferMilestone(buffer *kernelframebuffer.Buffer) {
+	width, height := buffer.Width(), buffer.Height()
+	background := buffer.Color(8, 18, 40)
+	white := buffer.Color(235, 240, 248)
+	red := buffer.Color(220, 55, 55)
+	green := buffer.Color(55, 200, 110)
+	blue := buffer.Color(60, 120, 230)
+	buffer.Clear(background)
+	band := height / 8
+	if band < 16 {
+		band = 16
+	}
+	buffer.FillRect(0, 0, width, band, white)
+	marginX, marginY := width/8, height/3
+	barWidth, barHeight := (width-2*marginX)/3, height/3
+	buffer.FillRect(marginX, marginY, barWidth, barHeight, red)
+	buffer.FillRect(marginX+barWidth, marginY, barWidth, barHeight, green)
+	buffer.FillRect(marginX+2*barWidth, marginY, width-marginX-(marginX+2*barWidth), barHeight, blue)
 }
 
 // mark prints a validation marker. Normal builds print none.

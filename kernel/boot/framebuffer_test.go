@@ -87,3 +87,38 @@ func TestFramebufferInfoAcceptsNonOverlappingBitMasks(t *testing.T) {
 		t.Fatal("valid 10:10:10:2 masks rejected")
 	}
 }
+
+func TestFramebufferMappingRangeCoversUnalignedVisibleBytes(t *testing.T) {
+	framebuffer := validFramebuffer()
+	framebuffer.Address += 123
+	framebuffer.Size += 123
+	start, end, ok := framebuffer.MappingRange()
+	if !ok {
+		t.Fatal("valid unaligned framebuffer range rejected")
+	}
+	if start != 0x80000000 || end != 0x80301000 {
+		t.Fatalf("mapping range = [%#x, %#x), want [0x80000000, 0x80301000)", start, end)
+	}
+}
+
+func TestFramebufferUsableMemoryOverlap(t *testing.T) {
+	framebuffer := validFramebuffer()
+	start, end, _ := framebuffer.MappingRange()
+	tests := []struct {
+		name    string
+		regions []MemoryRegion
+		overlap bool
+	}{
+		{"reserved owner", []MemoryRegion{{Start: start, Pages: (end - start) / PageSize, Kind: MemoryReserved}}, false},
+		{"usable first page", []MemoryRegion{{Start: start, Pages: 1, Kind: MemoryUsable}}, true},
+		{"usable last page", []MemoryRegion{{Start: end - PageSize, Pages: 1, Kind: MemoryUsable}}, true},
+		{"usable after", []MemoryRegion{{Start: end, Pages: 1, Kind: MemoryUsable}}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := framebuffer.OverlapsUsable(test.regions); got != test.overlap {
+				t.Fatalf("overlap = %t, want %t", got, test.overlap)
+			}
+		})
+	}
+}

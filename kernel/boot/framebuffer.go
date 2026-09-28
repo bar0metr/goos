@@ -47,6 +47,41 @@ func (framebuffer FramebufferInfo) VisibleBytes() uint64 {
 	return visible
 }
 
+// MappingRange returns the page-aligned physical range that covers the visible
+// framebuffer, including scan-line padding but excluding unused reported tail
+// storage.
+func (framebuffer FramebufferInfo) MappingRange() (uint64, uint64, bool) {
+	if !framebuffer.Valid() {
+		return 0, 0, false
+	}
+	start := framebuffer.Address &^ (PageSize - 1)
+	end := framebuffer.Address + framebuffer.VisibleBytes()
+	if end < framebuffer.Address || end > ^uint64(0)-(PageSize-1) {
+		return 0, 0, false
+	}
+	end = (end + PageSize - 1) &^ (PageSize - 1)
+	if start >= end {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// OverlapsUsable reports whether any page needed by the framebuffer is also
+// advertised as ordinary usable RAM. Such a descriptor cannot be mapped as a
+// device because the PMM would otherwise be allowed to allocate the page.
+func (framebuffer FramebufferInfo) OverlapsUsable(regions []MemoryRegion) bool {
+	start, end, ok := framebuffer.MappingRange()
+	if !ok {
+		return true
+	}
+	for _, region := range regions {
+		if region.Kind == MemoryUsable && region.Start < end && region.End() > start {
+			return true
+		}
+	}
+	return false
+}
+
 // Valid treats every field as untrusted firmware input. It is deliberately
 // stricter than the drawing code needs so later boot stages can trust the
 // descriptor without retaining any UEFI object.

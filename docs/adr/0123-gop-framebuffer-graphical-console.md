@@ -66,9 +66,23 @@ The firmware boundary grows by one bounded discovery step and one immutable
 descriptor. Graphics cannot prevent boot merely by being absent or malformed.
 Mode selection is deterministic without depending on an OVMF mode number.
 
-The framebuffer is not usable after the kernel replaces firmware page tables
-until the next phase installs its permanent mapping. This ADR does not permit
-using firmware identity mappings as the steady-state graphical console.
+The kernel maps the framebuffer permanently at `0xffff808000000000` in PML4
+slot 257, separate from the direct map and high entry mappings. Only the
+page-aligned visible stride range is present. Leaves are supervisor-only,
+writable, NX, and uncached through PCD+PWT. Process roots do not inherit the
+slot. Graphics is disabled before PMM initialization if the range overlaps
+UEFI conventional memory, preventing framebuffer pages from entering the free
+pool. The kernel establishes the architectural PAT layout with caches disabled
+and flushed before activating the mapping, so UC does not depend on firmware
+PAT state. Firmware identity mappings are never the steady-state graphics path.
+
+The low-level `kernel/framebuffer` package owns the only unsafe conversion from
+the mapped address to pixels. Construction revalidates geometry and backing
+length. Pixel, clear, and rectangle operations clip to visible width and
+height, never touch stride padding, and allocate nothing. The first graphical
+milestone clears the screen to dark blue and draws a white band plus red,
+green, and blue bars after CR3 replacement. Fonts and terminal parsing remain
+later phases.
 
 The release will contain one graphical text console, not a general graphics
 API. A future userspace graphics system would require a separate memory and
