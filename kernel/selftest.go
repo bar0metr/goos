@@ -69,6 +69,15 @@ func runKernelSelfTests(pageTable uint64) {
 	if _, mapped := vm.Resolve(rootA, vm.KernelLowBase+vm.KernelImageBase); mapped {
 		panicSerial("process root retained the complete kernel alias")
 	}
+	if framebufferVirtual != 0 {
+		if _, mapped := vm.Resolve(rootA, framebufferVirtual); mapped {
+			panicSerial("process root retained the framebuffer mapping")
+		}
+		if _, mapped := vm.Resolve(rootB, framebufferVirtual); mapped {
+			panicSerial("process root retained the framebuffer mapping")
+		}
+		mark("FRAMEBUFFER_USER_ISOLATION_OK")
+	}
 	if addressSpaceA {
 		_, addressSpaceA = vm.MapUserPageAt(&pageAllocator, rootA, vm.UserProbeAddress, physicalA, vm.Permissions{User: true, Writable: true}, false)
 	}

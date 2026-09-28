@@ -114,3 +114,27 @@ func TestFramebufferFromGOPValidatesBitMasksAndSize(t *testing.T) {
 		t.Fatal("truncated framebuffer accepted")
 	}
 }
+
+func TestFramebufferFromGOPRejectsInvalidFirmwareMetadata(t *testing.T) {
+	valid := testGOPMode(1024, 768)
+	tests := []struct {
+		name    string
+		mode    gopModeInformation
+		address uint64
+		size    uint64
+	}{
+		{name: "zero address", mode: valid, size: 1024 * 768 * 4},
+		{name: "zero size", mode: valid, address: 0x80000000},
+		{name: "short stride", mode: func() gopModeInformation { mode := valid; mode.pixelsPerScanLine = 1023; return mode }(), address: 0x80000000, size: 1024 * 768 * 4},
+		{name: "oversized allocation", mode: valid, address: 0x80000000, size: boot.MaxFramebufferSize + 1},
+		{name: "address overflow", mode: valid, address: ^uint64(0) - 1024, size: 1024 * 768 * 4},
+		{name: "unsupported format", mode: func() gopModeInformation { mode := valid; mode.pixelFormat = gopPixelBltOnly; return mode }(), address: 0x80000000, size: 1024 * 768 * 4},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, ok := framebufferFromGOP(test.mode, test.address, test.size); ok {
+				t.Fatal("invalid firmware metadata accepted")
+			}
+		})
+	}
+}

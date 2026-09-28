@@ -102,3 +102,39 @@ func TestNewBufferRejectsInvalidGeometry(t *testing.T) {
 		t.Fatal("short backing memory accepted")
 	}
 }
+
+func TestDrawingPreservesFramebufferGuardWords(t *testing.T) {
+	const (
+		width  = 640
+		height = 400
+		stride = 643
+		guard  = uint32(0xa55a3cc3)
+	)
+	storage := make([]uint32, stride*height+4)
+	for index := range storage {
+		storage[index] = guard
+	}
+	pixels := storage[2 : len(storage)-2]
+	for index := range pixels {
+		pixels[index] = 0
+	}
+	info := boot.FramebufferInfo{
+		Address: 0x80000000, Size: uint64(len(pixels) * 4),
+		Width: width, Height: height, PixelsPerScan: stride, BytesPerPixel: 4,
+		Format: boot.PixelFormatRGBX8888, RedMask: 0xff, GreenMask: 0xff00,
+		BlueMask: 0xff0000, ReservedMask: 0xff000000, Available: true,
+	}
+	buffer, ok := newBuffer(pixels, info)
+	if !ok {
+		t.Fatal("guarded buffer rejected")
+	}
+	buffer.Clear(1)
+	buffer.FillRect(-32, -32, width+64, height+64, 2)
+	buffer.PutPixel(-1, 0, 3)
+	buffer.PutPixel(width, height-1, 3)
+	for _, index := range []int{0, 1, len(storage) - 2, len(storage) - 1} {
+		if storage[index] != guard {
+			t.Fatalf("guard word %d changed to %#x", index, storage[index])
+		}
+	}
+}
