@@ -78,7 +78,7 @@ func advancePreparation(job *execJob) {
 		// Nothing was started, so the job ends here, as a stopped one does.
 		job.active = false
 		if !job.orphaned {
-			sendExecReply(job.correlation, 0, uint64(supervisor.LaunchStopped), 0, 0)
+			sendExecReply(job.session, job.correlation, 0, uint64(supervisor.LaunchStopped), 0, 0)
 		}
 		job.orphaned = false
 		return

@@ -10,6 +10,7 @@ import (
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	kernelconsole "goos/kernel/console"
+	"goos/kernel/device"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -288,9 +289,9 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 		}
 		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindStream, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK, 0
 	case handle.TypeDevice:
-		// Only the console device is waitable. Read authority is what a reader
-		// already needs to take a byte, so waiting for one needs no more.
-		if authority.Object() != deviceConsoleObject {
+		// Only the terminal consoles are waitable. Read authority is what a
+		// reader already needs to take a byte, so waiting for one needs no more.
+		if _, terminal := consoleInput(authority.Object()); !terminal {
 			return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyObject
 		}
 		if events == 0 || events & ^kcall.WaitReadable != 0 {
@@ -299,7 +300,7 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 		if !authority.Allows(capability.Read) {
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
-		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindConsole, Object: deviceConsoleObject}, Events: kernelwait.Readable}, kcall.StatusOK, 0
+		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindConsole, Object: authority.Object()}, Events: kernelwait.Readable}, kcall.StatusOK, 0
 	case handle.TypeProcess:
 		if events != kcall.WaitCompleted {
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
@@ -359,7 +360,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 			_, status := processRegistry.Wait(process.ID(entry.Key.Object))
 			ready = status != process.WaitRunning
 		case kernelwait.KindConsole:
-			ready = amd64.ConsolePending()
+			input, _ := consoleInput(entry.Key.Object)
+			ready = amd64.InputPending(input)
 		}
 		if ready {
 			mask |= 1 << index
@@ -395,14 +397,16 @@ func wakeConsoleWaiters() {
 	// Input arriving faster than it is read overruns the ring. Nothing can
 	// recover the bytes, so the loss is reported rather than hidden; once is
 	// enough, because a reader that has fallen behind will keep falling behind.
-	if dropped := amd64.ConsoleDropped(); dropped != 0 && !consoleOverrunReported {
-		consoleOverrunReported = true
-		kernelLogUint(logfmt.Warn, "console input dropped", "bytes", dropped)
+	for _, object := range [...]uint64{device.SerialConsoleObject, device.GraphicalConsoleObject} {
+		input, _ := consoleInput(object)
+		if dropped := amd64.InputDropped(input); dropped != 0 && !consoleOverrunReported {
+			consoleOverrunReported = true
+			kernelLogUint(logfmt.Warn, "console input dropped", "bytes", dropped)
+		}
+		if amd64.InputPending(input) {
+			publishWaitAny(kernelwait.Key{Kind: kernelwait.KindConsole, Object: object}, kernelwait.Readable)
+		}
 	}
-	if !amd64.ConsolePending() {
-		return
-	}
-	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindConsole, Object: deviceConsoleObject}, kernelwait.Readable)
 }
 
 func expireWaitAny() {

@@ -444,6 +444,7 @@ docs:
 	@test -f docs/adr/0112-fat32-interoperability.md
 	@test -f docs/adr/0115-partition-layer-and-block-slices.md
 	@test -f docs/adr/0124-foreground-raw-terminal-mode-and-tui-input.md
+	@test -f docs/adr/0125-independent-serial-and-framebuffer-consoles.md
 	@test -f docs/userspace/file-manager.md
 	@test -f docs/releases/0.1.6.md
 	@test -f docs/development/adding-command.md

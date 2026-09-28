@@ -10,8 +10,17 @@
 // The console ring is a power of two so the wrap is a mask. It holds two of
 // the longest lines the terminal accepts (4096 bytes), so a pasted line
 // arrives whole even when the terminal service reads it a tick later.
-.set GOOS_CONSOLE_RING, 8192
-.set GOOS_CONSOLE_RING_MASK, 8191
+// Two input rings: 0 is COM1's, 1 the PS/2 keyboard's. Each console reads
+// its own (ADR 0125). A ring is a header of four quads and its data.
+.set GOOS_INPUT_RING, 8192
+.set GOOS_INPUT_RING_MASK, 8191
+.set GOOS_INPUT_HEAD, 0
+.set GOOS_INPUT_TAIL, 8
+.set GOOS_INPUT_DROPPED, 16
+.set GOOS_INPUT_INTERRUPT, 24
+.set GOOS_INPUT_DATA, 32
+.set GOOS_INPUT_STRIDE, 8224
+.set GOOS_INPUT_COUNT, 2
 .set GOOS_KEYBOARD_BYTES, 8
 
 .section .text
@@ -1016,6 +1025,8 @@ goos_irq_serial:
     pushq %rcx
     pushq %rdx
     pushq %rsi
+    pushq %rdi
+    leaq goos_input_rings(%rip), %rdi
 .serial_drain:
     movw $0x3fd, %dx
     inb %dx, %al
@@ -1025,15 +1036,16 @@ goos_irq_serial:
     inb %dx, %al
     cmpb $3, %al
     jne .serial_store
-    incq goos_console_interrupt(%rip)
+    incq GOOS_INPUT_INTERRUPT(%rdi)
     jmp .serial_drain
 .serial_store:
-    callq .console_enqueue
+    callq .input_enqueue
     jmp .serial_drain
 .serial_eoi:
     movl $0, 0x3fffD0b0
     movb $0x20, %al
     outb %al, $0x20
+    popq %rdi
     popq %rsi
     popq %rdx
     popq %rcx
@@ -1077,32 +1089,34 @@ goos_irq_keyboard:
     subq $32, %rsp
     callq goos_keyboard_feed
     addq $32, %rsp
-    movq %rax, %rdi
-    btq $32, %rdi
+    movq %rax, %rbx
+    leaq goos_input_rings(%rip), %rdi
+    addq $GOOS_INPUT_STRIDE, %rdi
+    btq $32, %rbx
     jnc .keyboard_bytes
-    incq goos_console_interrupt(%rip)
+    incq GOOS_INPUT_INTERRUPT(%rdi)
     movq $1, goos_ps2_keyboard_event_pending(%rip)
 .keyboard_bytes:
-    movq %rdi, %r8
+    movq %rbx, %r8
     andq $0xff, %r8
     jz .keyboard_eoi
     cmpq $GOOS_KEYBOARD_BYTES, %r8
     ja .keyboard_eoi
     // Free slots are (tail - head - 1) mod size; one slot stays empty so a
     // full ring is distinguishable from an empty one.
-    movq goos_console_tail(%rip), %rax
-    subq goos_console_head(%rip), %rax
+    movq GOOS_INPUT_TAIL(%rdi), %rax
+    subq GOOS_INPUT_HEAD(%rdi), %rax
     decq %rax
-    andq $GOOS_CONSOLE_RING_MASK, %rax
+    andq $GOOS_INPUT_RING_MASK, %rax
     cmpq %r8, %rax
     jae .keyboard_fits
-    addq %r8, goos_console_dropped(%rip)
+    addq %r8, GOOS_INPUT_DROPPED(%rdi)
     jmp .keyboard_eoi
 .keyboard_fits:
     leaq goos_keyboard_bytes(%rip), %r9
 .keyboard_byte_loop:
     movzbq (%r9), %rax
-    callq .console_enqueue
+    callq .input_enqueue
     testq %rax, %rax
     jz .keyboard_byte_next
     movq $1, goos_ps2_keyboard_event_pending(%rip)
@@ -1132,23 +1146,22 @@ goos_irq_keyboard:
     GOOS_RETURN_USER
     iretq
 
-// .console_enqueue appends AL to the unified bounded input ring and returns
-// one on success or zero when full. It clobbers RAX, RCX, RSI and RDX;
-// interrupt entries preserve those registers.
-.console_enqueue:
-    movq goos_console_head(%rip), %rcx
+// .input_enqueue appends AL to the input ring at RDI and returns one on
+// success or zero when full. It clobbers RAX, RCX, RSI and RDX; interrupt
+// entries preserve those registers.
+.input_enqueue:
+    movq GOOS_INPUT_HEAD(%rdi), %rcx
     movq %rcx, %rsi
     incq %rsi
-    andq $GOOS_CONSOLE_RING_MASK, %rsi
-    cmpq goos_console_tail(%rip), %rsi
-    je .console_enqueue_drop
-    leaq goos_console_ring(%rip), %rdx
-    movb %al, (%rdx,%rcx,1)
-    movq %rsi, goos_console_head(%rip)
+    andq $GOOS_INPUT_RING_MASK, %rsi
+    cmpq GOOS_INPUT_TAIL(%rdi), %rsi
+    je .input_enqueue_drop
+    movb %al, GOOS_INPUT_DATA(%rdi,%rcx,1)
+    movq %rsi, GOOS_INPUT_HEAD(%rdi)
     movq $1, %rax
     retq
-.console_enqueue_drop:
-    incq goos_console_dropped(%rip)
+.input_enqueue_drop:
+    incq GOOS_INPUT_DROPPED(%rdi)
     xorq %rax, %rax
     retq
 
@@ -1628,76 +1641,85 @@ goos_irq_11_pending:
     .quad 0
 goos_irq_11_waiter:
     .quad 0
-// Console input arrives faster than a tick, so the interrupt drains the UART
-// FIFO into this ring immediately and the kernel loop wakes readers from it.
-// Draining in the handler is what keeps pasted input from being lost; the wake
-// can wait for the next tick because the bytes are already safe.
-goos_console_head:
-    .quad 0
-goos_console_tail:
-    .quad 0
-goos_console_dropped:
-    .quad 0
 goos_ps2_keyboard_event_pending:
     .quad 0
-// Ctrl-C is a signal, not input. The handler diverts it here so the shell can
-// see it without reading, and consuming, the bytes a running command is owed.
-goos_console_interrupt:
-    .quad 0
-goos_console_ring:
-    .zero GOOS_CONSOLE_RING
+// Console input arrives faster than a tick, so each interrupt drains its
+// device into its ring immediately and the kernel loop wakes readers from it.
+// Draining in the handler is what keeps pasted input from being lost; the wake
+// can wait for the next tick because the bytes are already safe. Ctrl-C is a
+// signal, not input: the handler counts it in the ring's interrupt field so
+// the terminal can see it without consuming the bytes a command is owed.
+.align 16
+goos_input_rings:
+    .zero GOOS_INPUT_STRIDE * GOOS_INPUT_COUNT
 // goos_keyboard_bytes receives the decoder's key sequence. Only IRQ1 uses it,
 // with interrupts disabled, so it needs no lock.
 goos_keyboard_bytes:
     .zero GOOS_KEYBOARD_BYTES
 
 .section .text
-// goos_console_take removes one byte, returning it with bit 8 set, or zero when
+// The input ring functions take the ring's index in RCX and leave its base in
+// RDX; an index out of range answers as an empty ring.
+.macro GOOS_INPUT_BASE empty
+    cmpq $GOOS_INPUT_COUNT, %rcx
+    jae \empty
+    imulq $GOOS_INPUT_STRIDE, %rcx, %rcx
+    leaq goos_input_rings(%rip), %rdx
+    addq %rcx, %rdx
+.endm
+
+// goos_input_take removes one byte, returning it with bit 8 set, or zero when
 // the ring is empty.
-.global goos_console_take
-goos_console_take:
+.global goos_input_take
+goos_input_take:
     xorq %rax, %rax
-    movq goos_console_tail(%rip), %rcx
-    cmpq goos_console_head(%rip), %rcx
-    je .console_take_done
-    leaq goos_console_ring(%rip), %rdx
-    movzbq (%rdx,%rcx,1), %rax
+    GOOS_INPUT_BASE .input_take_done
+    movq GOOS_INPUT_TAIL(%rdx), %rcx
+    cmpq GOOS_INPUT_HEAD(%rdx), %rcx
+    je .input_take_done
+    movzbq GOOS_INPUT_DATA(%rdx,%rcx,1), %rax
     orq $0x100, %rax
     incq %rcx
-    andq $GOOS_CONSOLE_RING_MASK, %rcx
-    movq %rcx, goos_console_tail(%rip)
-.console_take_done:
+    andq $GOOS_INPUT_RING_MASK, %rcx
+    movq %rcx, GOOS_INPUT_TAIL(%rdx)
+.input_take_done:
     retq
 
-// goos_console_pending reports whether the console has anything for a reader:
-// a byte in the ring, or an interrupt to deliver.
-.global goos_console_pending
-goos_console_pending:
-    movq $1, %rax
-    cmpq $0, goos_console_interrupt(%rip)
-    jne .console_pending_done
-    movq goos_console_tail(%rip), %rcx
-    cmpq goos_console_head(%rip), %rcx
-    jne .console_pending_done
+// goos_input_pending reports whether a ring has anything for a reader: a
+// byte, or an interrupt to deliver.
+.global goos_input_pending
+goos_input_pending:
     xorq %rax, %rax
-.console_pending_done:
-    retq
-
-// goos_console_take_interrupt consumes one pending interrupt.
-.global goos_console_take_interrupt
-goos_console_take_interrupt:
-    xorq %rax, %rax
-    cmpq $0, goos_console_interrupt(%rip)
-    je .console_interrupt_done
-    movq $0, goos_console_interrupt(%rip)
+    GOOS_INPUT_BASE .input_pending_done
     movq $1, %rax
-.console_interrupt_done:
+    cmpq $0, GOOS_INPUT_INTERRUPT(%rdx)
+    jne .input_pending_done
+    movq GOOS_INPUT_TAIL(%rdx), %rcx
+    cmpq GOOS_INPUT_HEAD(%rdx), %rcx
+    jne .input_pending_done
+    xorq %rax, %rax
+.input_pending_done:
     retq
 
-// goos_console_dropped_read returns how many bytes arrived with the ring full.
-.global goos_console_dropped_read
-goos_console_dropped_read:
-    movq goos_console_dropped(%rip), %rax
+// goos_input_take_interrupt consumes a ring's pending interrupt.
+.global goos_input_take_interrupt
+goos_input_take_interrupt:
+    xorq %rax, %rax
+    GOOS_INPUT_BASE .input_interrupt_done
+    cmpq $0, GOOS_INPUT_INTERRUPT(%rdx)
+    je .input_interrupt_done
+    movq $0, GOOS_INPUT_INTERRUPT(%rdx)
+    movq $1, %rax
+.input_interrupt_done:
+    retq
+
+// goos_input_dropped returns how many bytes arrived with a ring full.
+.global goos_input_dropped
+goos_input_dropped:
+    xorq %rax, %rax
+    GOOS_INPUT_BASE .input_dropped_done
+    movq GOOS_INPUT_DROPPED(%rdx), %rax
+.input_dropped_done:
     retq
 
 // goos_ps2_keyboard_event_take returns and clears the indication that IRQ1

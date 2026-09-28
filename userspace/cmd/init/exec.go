@@ -17,17 +17,19 @@ import (
 	userwait "goos/userspace/wait"
 )
 
-func pollExec() {
+// pollExec takes one request from a session's shell.
+func pollExec(session *terminalSession) {
 	arena.Reset(arenaBase)
-	status := ipc.Status(sys.IPCReceive(handle.ID(execServer), wire[:]))
+	replying = session
+	status := ipc.Status(sys.IPCReceive(handle.ID(session.execServer), wire[:]))
 	if status == ipc.StatusNotFound {
 		return
 	}
 	if status == ipc.StatusPeerDied {
 		// The shell is gone; its exit event ends the session, and its
 		// replacement brings a new channel.
-		sys.HandleClose(handle.ID(execServer))
-		execServer = 0
+		sys.HandleClose(handle.ID(session.execServer))
+		session.execServer = 0
 		return
 	}
 	if status != ipc.StatusOK {
@@ -45,21 +47,22 @@ func pollExec() {
 	}
 	slot, size, ok := execproto.DecodeSubmit(message)
 	if !ok {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
+		sendExecReply(session, message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
-	job := freeJob(slot)
+	job := freeJob(session, slot)
 	if job == nil {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0, 0)
+		sendExecReply(session, message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0, 0)
 		return
 	}
 	start := int(slot) * execproto.SlotSize
-	copy(job.data[:size], execPage[start:start+size])
+	copy(job.data[:size], session.page[start:start+size])
 	request, ok := execproto.DecodeRequest(job.data[:size])
 	if !ok {
-		sendExecReply(message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
+		sendExecReply(session, message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
+	job.session = session
 	job.active, job.orphaned, job.slot, job.correlation, job.request = true, false, slot, message.Correlation, request
 	beginJob(job)
 }
@@ -67,7 +70,7 @@ func pollExec() {
 // startPipeline starts a job whose programs are ready.
 func startPipeline(job *execJob) {
 	launchingJob = job
-	job.job = supervisor.StartPipeline(job.request, handle.ID(terminalOutput[1]), nativePipelineRunner{})
+	job.job = supervisor.StartPipeline(job.request, handle.ID(job.session.output[1]), nativePipelineRunner{})
 	launchingJob = nil
 	releasePrepared(job)
 	// A foreground job's input is fed by the shell, which receives the writing
@@ -75,19 +78,19 @@ func startPipeline(job *execJob) {
 	// the job end of input instead of a stream no one will ever write.
 	if input := job.job.TakeInput(); input != 0 {
 		started, ok := execproto.EncodeStarted(job.slot, input, job.correlation)
-		if !ok || !sendMessage(execServer, started) {
+		if !ok || !sendMessage(job.session.execServer, started) {
 			sys.HandleClose(input)
 		}
 	}
 	finishJob(job)
 }
 
-// freeJob returns an unused job record, or nil when the slot is still owned
-// by a running job or every record is busy.
-func freeJob(slot uint8) *execJob {
+// freeJob returns an unused job record, or nil when the session's slot is
+// still owned by a running job or every record is busy.
+func freeJob(session *terminalSession, slot uint8) *execJob {
 	var free *execJob
 	for index := range execJobs {
-		if execJobs[index].active && execJobs[index].slot == slot {
+		if execJobs[index].active && execJobs[index].session == session && execJobs[index].slot == slot {
 			return nil
 		}
 		if !execJobs[index].active && free == nil {
@@ -120,7 +123,7 @@ func finishJob(job *execJob) {
 	if launchStatus != supervisor.LaunchOK {
 		stage = job.job.FailedStage()
 	}
-	sendExecReply(job.correlation, pid, uint64(launchStatus), exitCode, stage)
+	sendExecReply(job.session, job.correlation, pid, uint64(launchStatus), exitCode, stage)
 }
 
 // handleControl answers the shell's requests that launch nothing.
@@ -130,7 +133,7 @@ func handleControl(message ipc.Message) {
 	case !ok:
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)
 	case operation == execproto.ControlKill:
-		sendControlStatus(killJob(argument), message.Correlation)
+		sendControlStatus(killJob(replying, argument), message.Correlation)
 	case operation == execproto.ControlFault && (argument == execproto.FaultConfig || argument == execproto.FaultLog):
 		process, marker := &configProcessHandle, "CONFIG_FAULT_INJECTED\n"
 		if argument == execproto.FaultLog {
@@ -160,7 +163,7 @@ func handleControl(message ipc.Message) {
 		}
 		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault:
-		status := injectSessionFault(argument)
+		status := injectSessionFault(replying, argument)
 		// A shell that was stopped is not there to be answered.
 		if argument != execproto.FaultShell || status != execproto.ControlOK {
 			sendControlStatus(status, message.Correlation)
@@ -187,19 +190,20 @@ func handleControl(message ipc.Message) {
 			count++
 		}
 		if reply, encoded := execproto.EncodeServices(entries[:count], message.Correlation); encoded {
-			sendMessage(execServer, reply)
+			sendMessage(replying.execServer, reply)
 		}
 	case operation == execproto.ControlReboot, operation == execproto.ControlPowerOff:
 		shutDown(operation == execproto.ControlPowerOff, message.Correlation)
 	}
 }
 
-// killJob stops every stage of the job in one slot. The kernel retires their
-// tasks, so the reply to the job itself still arrives through the normal path.
-func killJob(slot uint8) execproto.ControlStatus {
+// killJob stops every stage of the job in one of a session's slots. The
+// kernel retires their tasks, so the reply to the job itself still arrives
+// through the normal path.
+func killJob(session *terminalSession, slot uint8) execproto.ControlStatus {
 	for index := range execJobs {
 		job := &execJobs[index]
-		if !job.active || job.slot != slot {
+		if !job.active || job.session != session || job.slot != slot {
 			continue
 		}
 		if cancelPreparation(job) {
@@ -221,9 +225,10 @@ func killJob(slot uint8) execproto.ControlStatus {
 	return execproto.ControlNotFound
 }
 
+// sendControlStatus answers the shell whose request is being handled.
 func sendControlStatus(status execproto.ControlStatus, correlation uint64) {
 	if reply, encoded := execproto.EncodeControlStatus(status, correlation); encoded {
-		sendMessage(execServer, reply)
+		sendMessage(replying.execServer, reply)
 	}
 }
 
@@ -284,15 +289,15 @@ func waitApplicationExit(processHandle handle.ID) uint64 {
 	}
 }
 
-// sendExecReply answers the shell. A reply that cannot be encoded is PID 1's
-// own fault; one that cannot be delivered means the shell has just gone, and
-// its restart does not want the answer.
-func sendExecReply(correlation, pid, status, exitCode uint64, stage uint8) {
+// sendExecReply answers a session's shell. A reply that cannot be encoded is
+// PID 1's own fault; one that cannot be delivered means the shell has just
+// gone, and its restart does not want the answer.
+func sendExecReply(session *terminalSession, correlation, pid, status, exitCode uint64, stage uint8) {
 	reply, ok := execproto.EncodeReply(execproto.Reply{Process: pid, LaunchStatus: status, ExitCode: exitCode, Stage: stage}, correlation)
 	if !ok {
 		fatal("INIT_EXEC_REPLY_FAILED\n")
 	}
-	if execServer == 0 || !sendMessage(execServer, reply) {
+	if session.execServer == 0 || !sendMessage(session.execServer, reply) {
 		syslog.Warn("exec reply undelivered")
 	}
 }

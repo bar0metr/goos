@@ -82,6 +82,21 @@ func Panic(message string) {
 	}
 }
 
+// WriteSerial writes to COM1 alone: the serial terminal console (ADR 0125).
+func WriteSerial(value []byte) {
+	for _, item := range value {
+		serial.WriteByte(item)
+	}
+}
+
+// WriteGraphical writes to the framebuffer terminal alone, if there is one.
+func WriteGraphical(value []byte) {
+	if graphicsLive {
+		graphical.Write(value)
+		graphical.RefreshValidationMarker()
+	}
+}
+
 func (writer Writer) WriteUint(value uint64) {
 	var digits [20]byte
 	position := len(digits)

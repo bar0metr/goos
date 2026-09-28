@@ -1,20 +1,24 @@
 # Terminal
 
-The terminal service, `/system/tty`, owns the console (ADR 0082, ADR 0089). It
-is the only process that holds the right to read the console, so nothing else
-can see what is typed. It edits the line, echoes it, recognises the control
+The terminal service, `/system/tty`, owns a console (ADR 0082, ADR 0089). Two
+instances run, each with a shell of its own (ADR 0125): `tty` on COM1 and
+`tty-fb` on the framebuffer with the PS/2 keyboard. Each is the only process
+that holds the right to read its console, so nothing else can see what is
+typed there. It edits the line, echoes it, recognises the control
 keys, and hands finished lines to its client, the shell, over a typed session.
 It is also the only process that reads what the shell and its commands print,
 and it writes that to the console around the line being typed.
 
 ```text
-COM1 UART ─┐
-           ├──▶ kernel ring ──ConsoleRead──▶ tty ──GTTY lines──▶ shell
-PS/2 IRQ1 ─┘                                  ▲                    │
-                                              │  command input ◀───┘
-shell, commands ──terminal output stream─────────┘──ConsoleWrite──▶ logical console
-                                                                  ├──▶ COM1
-                                                                  └──▶ framebuffer
+COM1 UART ──▶ ring 0 ──ConsoleRead──▶ tty ──GTTY──▶ shell
+                                       ▲              │ command input
+shell, commands ──output stream────────┘──ConsoleWrite──▶ COM1
+
+PS/2 IRQ1 ──▶ ring 1 ──ConsoleRead──▶ tty-fb ──GTTY──▶ shell-fb
+                                       ▲              │ command input
+shell-fb, commands ──output stream─────┘──ConsoleWrite──▶ framebuffer
+
+kernel, PID 1, services ──logical console──▶ COM1 and framebuffer
 ```
 
 ## Line discipline
@@ -52,10 +56,10 @@ shell. A client sends:
 - `RawMode`, `LineMode`: switch the session to raw mode and back (below).
 - `Geometry`: ask for the terminal's columns and rows, answered with
   `ResultGeometry`, whose flags byte says whether they are the framebuffer's.
-  The shell asks once per session and, for a framebuffer, passes the answer to
-  every command as `COLUMNS` and `LINES`; a serial-only console's 80x25 is a
-  fallback, not a size, and is not passed. A full-screen program asks a host
-  terminal on COM1 for its own size (ADR 0124).
+  The shell asks once per session and, on the framebuffer console, passes the
+  answer to every command as `COLUMNS` and `LINES`. COM1's 80x25 is a fallback
+  the kernel reports without knowing the far end, and the shell passes nothing;
+  a full-screen program asks the host terminal for its size (ADR 0124).
 
 Prompts are at most 64 bytes of printable ASCII, so a client cannot use the
 service to send control sequences. A reply carries at most 255 bytes of a
@@ -153,17 +157,18 @@ session ownership, foreground jobs, prompts, and Ctrl-C policy remain here in
 the userspace TTY. COM1 is written first and remains available when GOP is
 absent or framebuffer initialization fails.
 
-COM1 and the PS/2 keyboard feed the same bounded kernel input ring. The IRQ1
-path decodes scan-code set 1 with a fixed US layout before enqueueing terminal
-bytes: arrows, Home, End, Insert, Delete, PageUp, PageDown and F1-F12 become the
+COM1 and the PS/2 keyboard feed separate bounded kernel input rings, each read
+through its own console object. The IRQ1 path decodes scan-code set 1 with a
+fixed US layout before enqueueing terminal bytes: arrows, Home, End, Insert, Delete, PageUp, PageDown and F1-F12 become the
 xterm sequences listed in ADR 0124, each enqueued whole or dropped whole.
 Missing i8042 hardware leaves this path disabled without changing serial
 input, `ConsoleRead`, `WaitAny`, or the TTY protocol.
 
 ## Supervision
 
-The service and the shell restart independently, both `restart: always`
-(ADR 0089). A session is a channel, which dies with either end, so whichever
+Within each pair, the service and the shell restart independently, both
+`restart: always` (ADR 0089). A session is a channel, which dies with either
+end, so whichever
 restarts is launched with a fresh one and the survivor is handed the other end
 as a `GTTY` session notice — a notification carrying exactly one handle:
 
@@ -178,7 +183,13 @@ as a `GTTY` session notice — a notification carrying exactly one handle:
 
 The control channel carries nothing but session notices, and only PID 1 holds
 its other end; anything else arriving on it is dropped and its handles closed.
-The validation build kills each once (`fault tty`, `fault shell`) to prove it.
+The validation build kills each of the COM1 pair once (`fault tty`, `fault
+shell`) to prove it.
+
+The QEMU tests read COM1 alone. In the validation build PID 1 grants `tty-fb` a
+write-only copy of the serial console, `mirror`, and `tty-fb` copies its output
+there from the first key typed at the framebuffer console. A boot test that
+never types there sees only the COM1 session.
 
 ## The bootstrap TTY demonstration
 

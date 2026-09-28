@@ -67,28 +67,34 @@ The virtio line is masked by its handler and rearmed by the driver's next wait,
 so an unserviced device cannot storm. The console line is not: every byte
 matters and the handler consumes the condition by reading the device.
 
-The console handler drains every byte the UART has into a 256-byte ring and
-returns. It takes no scheduling decision. The kernel loop sees the ring and
-publishes readability through the ordinary wait table, so one mechanism
-completes a wait and a reader blocks on the console the way it blocks on a
-channel (ADR 0075). Draining in the handler is what keeps input from being lost;
-the wake can wait for the next tick because the bytes are already safe.
+The kernel keeps two 8 KiB input rings, one per terminal console (ADR 0125):
+the serial ring, which the COM1 handler fills and the serial console object
+reads, and the keyboard ring, which the PS/2 handler fills and the graphical
+console object reads. Each ring has its own head, tail, drop count and Ctrl-C
+count, and one set of assembly routines serves both by index.
 
-Byte three is diverted into an interrupt flag rather than the ring. Ctrl-C is a
-signal, so a shell can ask whether it was typed without consuming the input a
+The COM1 handler drains every byte the UART has into the serial ring and
+returns. It takes no scheduling decision. The kernel loop sees a ring holding
+input and publishes readability for its console through the ordinary wait
+table, so one mechanism completes a wait and a reader blocks on a console the
+way it blocks on a channel (ADR 0075). Draining in the handler keeps input from
+being lost; the wake can wait for the next tick because the bytes are already
+safe.
+
+Byte three is diverted into the ring's interrupt count. Ctrl-C is a signal, so
+a terminal service can ask whether it was typed without consuming the input a
 running command is being given.
 
 The keyboard handler reads one i8042 byte and passes it to a bounded scan-code
-set 1 decoder together with an eight-byte buffer the handler owns. Completed
-US-layout keys enter the same console ring as UART bytes. Arrows, Home, End,
-Insert, Delete, PageUp, PageDown and F1-F12 become xterm sequences of up to
-five bytes (ADR 0124); break codes produce nothing, and modifiers do not change
-a navigation or function key. The decoder returns the sequence length and the
-interrupt flag, and the handler checks the ring's free space before copying: a
-sequence goes in whole, or the key is dropped and counted, so a reader never
-sees a truncated prefix such as `ESC [ 1`. Keyboard Ctrl-C increments the same
-interrupt flag. Controller waits exist only during bounded initialization;
-steady-state input is interrupt-driven.
+set 1 decoder together with an eight-byte buffer the handler owns. Arrows,
+Home, End, Insert, Delete, PageUp, PageDown and F1-F12 become xterm sequences
+of up to five bytes (ADR 0124); break codes produce nothing, and modifiers do
+not change a navigation or function key. The decoder returns the sequence
+length and the interrupt flag, and the handler checks the keyboard ring's free
+space before copying: a sequence goes in whole, or the handler drops and counts
+the key, so a reader never sees a truncated prefix such as `ESC [ 1`. Keyboard
+Ctrl-C increments the keyboard ring's interrupt count. Controller waits exist
+only during bounded initialization; steady-state input is interrupt-driven.
 
 Memory-mapped device registers are reached through assembly helpers. As Go they
 were ordinary loads and stores that the optimiser could reorder, merge or

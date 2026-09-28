@@ -30,12 +30,13 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if driverStarted && bytesString(spec.Name[:spec.NameSize]) == driverName && !replaceDriverChannel(&spec) {
 		return 0, false
 	}
-	// So do the terminal and the shell, and so does the peer that survived.
-	if ttyStarted && bytesString(spec.Name[:spec.NameSize]) == "tty" && !renewTerminalSession(&spec) {
-		return 0, false
-	}
-	if shellStarted && bytesString(spec.Name[:spec.NameSize]) == "shell" && !renewShellSession(&spec) {
-		return 0, false
+	// So do a terminal service and a shell, and so does the peer of the same
+	// session that survived.
+	if session, tty, found := sessionOfService(bytesString(spec.Name[:spec.NameSize])); found {
+		if tty && session.ttyStarted && !renewTerminalSession(session, &spec) ||
+			!tty && session.shellStarted && !renewShellSession(session, &spec) {
+			return 0, false
+		}
 	}
 	if filesystemStarted && bytesString(spec.Name[:spec.NameSize]) == filesystemName && !renewFilesystemChannels(&spec) {
 		return 0, false
@@ -92,15 +93,18 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	// The validation build keeps the driver's process handle so it can inject
 	// the fault that proves a crashed driver is replaced. Every other service's
 	// handle is closed: PID 1 supervises through lifecycle events, not handles.
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || name == "tty" || name == "shell" || name == filesystemName || name == "vfs" || name == "config" || name == "log" || name == "block")
+	session, tty, interactive := sessionOfService(name)
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == filesystemName || name == "vfs" || name == "config" || name == "log" || name == "block")
 	if keep && launched == supervisor.LaunchOK {
+		switch {
+		case interactive && tty:
+			session.ttyProcess = keepProcess(session.ttyProcess, event.ProcessHandle)
+		case interactive:
+			session.shellProcess = keepProcess(session.shellProcess, event.ProcessHandle)
+		}
 		switch name {
 		case driverName:
 			driverProcessHandle = event.ProcessHandle
-		case "tty":
-			ttyProcessHandle = keepProcess(ttyProcessHandle, event.ProcessHandle)
-		case "shell":
-			shellProcessHandle = keepProcess(shellProcessHandle, event.ProcessHandle)
 		case filesystemName:
 			filesystemProcessHandle = keepProcess(filesystemProcessHandle, event.ProcessHandle)
 		case "vfs":
@@ -161,17 +165,17 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		filesystemStarted = true
 		renewVFSClients()
 	}
-	if name == "tty" {
-		if ttyStarted {
+	if interactive && tty {
+		if session.ttyStarted {
 			mark("TTY_RESTARTED_OK\n")
 		}
-		ttyStarted = true
+		session.ttyStarted = true
 	}
-	if name == "shell" {
-		if shellStarted {
+	if interactive && !tty {
+		if session.shellStarted {
 			mark("SHELL_RESTARTED_OK\n")
 		}
-		shellStarted = true
+		session.shellStarted = true
 	}
 	return event.Process, true
 }

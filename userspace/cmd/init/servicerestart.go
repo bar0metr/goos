@@ -87,7 +87,11 @@ func renewConfigGrants(spec *supervisor.LaunchSpec) bool {
 // sessions the shell and the log service held died with the old instance;
 // each is handed a new one, limited as before, over its channel with PID 1.
 func configRestarted() {
-	offerSettings(execServer, "", configproto.Read|configproto.Write)
+	for index := range sessions {
+		if sessions[index].active {
+			offerSettings(sessions[index].execServer, "", configproto.Read|configproto.Write)
+		}
+	}
 	offerSettings(uint64(logControl), logConfigScope, configproto.Read)
 	syslog.Info("config restarted")
 	mark("CONFIG_RESTARTED_OK\n")

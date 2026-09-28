@@ -77,7 +77,7 @@ func (handler nativeCallHandler) consoleAuthority(id uint64, rights capability.R
 		return nil, false
 	}
 	authority, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, rights)
-	return owner, allowed && authority.Object() == device.ConsoleObject
+	return owner, allowed && device.IsConsole(authority.Object())
 }
 
 func (handler nativeCallHandler) LogWrite(device uint64, address uint64, length uint64) kcall.Status {

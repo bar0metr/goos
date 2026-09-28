@@ -66,7 +66,8 @@ func run(data startup.Data) {
 
 // idleTicks is how long gfm waits for a key before asking the terminal for
 // its size again. A terminal on COM1 is resized without telling anyone, so
-// this is how the manager follows it.
+// this is how the manager follows it; the framebuffer console's size is
+// fixed and never asked.
 const idleTicks = clock.TicksPerSecond
 
 // readKeys waits for input and applies every key it holds, asking the
@@ -77,7 +78,9 @@ func readKeys(output *terminal.Output) bool {
 		status, count := utility.ReadInputWithin(inputStorage[:], idleTicks)
 		if count == 0 {
 			if status == uint64(kcall.StatusResourceExhausted) {
-				requestSize(output)
+				if app.FollowsTerminal() {
+					requestSize(output)
+				}
 				continue
 			}
 			if utility.Retry(status) {
@@ -99,9 +102,9 @@ func readKeys(output *terminal.Output) bool {
 	}
 }
 
-// requestSize asks the terminal on COM1 for its size. The framebuffer does
-// not answer; a host terminal's answer arrives as a key event. The query
-// leaves the cursor in the corner, and every frame starts with a MoveTo.
+// requestSize asks the terminal on COM1 for its size; its answer arrives as
+// a key event. The query leaves the cursor in the corner, and every frame
+// starts with a MoveTo.
 func requestSize(output *terminal.Output) {
 	output.RequestSize()
 	output.Flush()

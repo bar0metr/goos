@@ -129,7 +129,4 @@ func (handler nativeCallHandler) SystemPowerOff(device uint64) kcall.Status {
 	return kcall.StatusIOError
 }
 
-const (
-	deviceSystemControl = device.SystemControlObject
-	deviceConsoleObject = device.ConsoleObject
-)
+const deviceSystemControl = device.SystemControlObject

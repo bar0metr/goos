@@ -29,9 +29,9 @@ var vfsControlHandle = uint64(0x0000000100000005)
 
 const vfsControlServerHandle = handle.ID(0x0000000100000006)
 
-// execServerBoot is the server end of the exec channel created at boot. A
-// restarted shell is given a fresh channel, so the end PID 1 serves is the
-// variable execServer (ADR 0089).
+// execServerBoot is the server end of the exec channel created at boot for
+// the first session's shell. A restarted shell is given a fresh channel, so
+// the end PID 1 serves is its session's execServer (ADR 0089).
 const execServerBoot = uint64(0x0000000100000007)
 const execClientHandle = handle.ID(0x0000000100000008)
 const blockClientHandle = uint64(0x0000000100000009)
@@ -73,24 +73,14 @@ var (
 	// driverProcessHandle is kept only by the validation build, to inject the
 	// fault that proves a crashed driver is replaced.
 	driverProcessHandle handle.ID
-	// execServer is the end of the shell's exec channel PID 1 serves, or zero
-	// while the shell is gone.
-	execServer = execServerBoot
-	// ttyControl is PID 1's end of the terminal service's control channel,
-	// over which a restarted shell's session is handed to a running terminal.
-	ttyControl handle.ID
-	// ttyStarted and shellStarted mark the first launches, which use the
-	// endpoints created at boot; every later launch renews them.
-	ttyStarted, shellStarted bool
-	// The validation build keeps the interactive services' process handles to
-	// inject the faults that prove each restarts on its own.
-	ttyProcessHandle, shellProcessHandle handle.ID
 )
 
 // execJob is one shell request in flight. The request is copied out of the
 // shared page, so the shell cannot change it while it runs.
 type execJob struct {
-	active bool
+	// session is the terminal session whose shell asked for the job.
+	session *terminalSession
+	active  bool
 	// orphaned marks a job whose shell has gone. Its stages are stopped with
 	// the session and reaped as usual, but no one is left to answer.
 	orphaned    bool
@@ -122,22 +112,15 @@ var (
 	supervisionComplete  bool
 	processWaitAnnounced bool
 	nextStagingSlot      uint8
-	execJobs             [execproto.Slots]execJob
-	// execPage is the page shared with the shell that carries its exec
-	// requests, one slot per job (ADR 0064).
-	execPage         []byte
+	// execJobs holds every shell's jobs; each shell numbers its own slots
+	// of its own exec page (ADR 0064).
+	execJobs         [execproto.Slots * len(sessions)]execJob
 	lifecyclePending [16]ipc.Message
 	lifecycleHead    uint8
 	lifecycleCount   uint8
 	streamPair       [2]uint64
 	streamDescriptor [3]uint64
 	streamReadback   [16]byte
-	// terminalOutput is the stream the shell and every command write to and
-	// the terminal service reads (ADR 0089). PID 1 keeps both ends for as
-	// long as it runs and grants copies: the service's reader survives the
-	// service, so output written while it restarts waits in the stream, and
-	// the writer is shared by every process that prints.
-	terminalOutput [2]uint64
 )
 
 //export userspaceMain
@@ -181,15 +164,18 @@ func userspaceMain() {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		var jobs, fills [execproto.Slots]int
-		execBit, firstJob, firstFill := 0, 1, 1
+		var jobs, fills [len(execJobs)]int
+		var execBits [len(sessions)]int
+		firstJob, firstFill := 1, 1
 		if supervisionComplete {
-			// While the shell is gone there is no exec channel to wait on; its
+			// While a shell is gone there is no exec channel to wait on; its
 			// replacement brings a new one.
-			if execServer != 0 {
-				interests[count] = userwait.Interest{Handle: handle.ID(execServer), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-				execBit = count
-				count++
+			for index := range sessions {
+				if sessions[index].execServer != 0 {
+					interests[count] = userwait.Interest{Handle: handle.ID(sessions[index].execServer), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+					execBits[index] = count
+					count++
+				}
 			}
 			firstJob = count
 			for index := range execJobs {
@@ -247,8 +233,10 @@ func userspaceMain() {
 			}
 		}
 		if readyMask&1 == 0 {
-			if execBit != 0 && readyMask&(1<<execBit) != 0 {
-				pollExec()
+			for index := range sessions {
+				if execBits[index] != 0 && readyMask&(1<<execBits[index]) != 0 {
+					pollExec(&sessions[index])
+				}
 			}
 			continue
 		}
@@ -266,7 +254,10 @@ func userspaceMain() {
 			filesystemChecker = 0
 			filesystemCheckComplete = true
 		}
-		shell, _ := manager.Snapshot("shell")
+		var shells [len(sessions)]supervisor.Snapshot
+		for index := range sessions {
+			shells[index], _ = manager.Snapshot(sessions[index].shell)
+		}
 		exitStatus := manager.Exit(event.Process, event.Code, supervisionTicks)
 		if filesystemCheckComplete && manager.Resume(filesystemName, supervisionTicks) == supervisor.StatusOK {
 			filesystemCheckComplete = false
@@ -276,8 +267,10 @@ func userspaceMain() {
 		if exitStatus == supervisor.StatusNotFound {
 			continue
 		}
-		if shell.State == supervisor.StateRunning && shell.PID == event.Process {
-			endShellSession()
+		for index := range sessions {
+			if sessions[index].active && shells[index].State == supervisor.StateRunning && shells[index].PID == event.Process {
+				endShellSession(&sessions[index])
+			}
 		}
 		syslog.Warn("service exited", syslog.Uint("pid", event.Process), syslog.Uint("code", event.Code))
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)

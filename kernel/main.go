@@ -572,6 +572,20 @@ func bootContinue() {
 	// (ADR 0121). The right stays with PID 1.
 	loaderHandle, loaderInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LoaderObject, capability.Write))
 	fileCacheHandle, fileCacheGranted := bootFileCache.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
+	// The two terminal consoles, each with its own input, and the exec page of
+	// the second shell: one terminal service and shell per console (ADR 0125).
+	serialConsoleHandle, serialConsoleInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.SerialConsoleObject, capability.Read|capability.Write|capability.Transfer))
+	graphicalConsoleHandle, graphicalConsoleInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.GraphicalConsoleObject, capability.Read|capability.Write|capability.Transfer))
+	secondExecPage, secondExecPageCreated := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, uint32(execproto.AreaSize/vm.PageSize), 0)
+	secondExecPageGranted := false
+	var secondExecPageHandle handle.ID
+	if secondExecPageCreated {
+		secondExecPageHandle, secondExecPageGranted = secondExecPage.Grant(initProcess.Handles(), capability.Read|capability.Write|capability.Transfer)
+	}
+	if !serialConsoleInstalled || !graphicalConsoleInstalled || !secondExecPageGranted || serialConsoleHandle != handle.ID(0x0000000100000019) ||
+		graphicalConsoleHandle != handle.ID(0x000000010000001a) || secondExecPageHandle != handle.ID(0x000000010000001b) {
+		panicSerial("terminal console handles unavailable")
+	}
 	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !imageObjectValid || !systemImageInstalled || !logDeviceInstalled || !loaderInstalled || !fileCacheGranted || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
 		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) || systemImageHandle != handle.ID(0x0000000100000015) || logDeviceHandle != handle.ID(0x0000000100000016) || loaderHandle != handle.ID(0x0000000100000017) || fileCacheHandle != handle.ID(0x0000000100000018) {
 		panicSerial("PID 1 capability layout failed")

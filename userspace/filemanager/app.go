@@ -33,9 +33,8 @@ type App struct {
 	rows       int
 	tooSmall   bool
 	quit       bool
-	// The screen is the framebuffer's size when there is one, the size the
-	// terminal on COM1 reports when it answers, and the smaller of the two
-	// when both exist: the same bytes are drawn on each.
+	// The screen is the framebuffer's size on the framebuffer console, and on
+	// COM1 the size the terminal at the far end reports (ADR 0125).
 	display        bool
 	displayColumns int
 	displayRows    int
@@ -67,9 +66,9 @@ type App struct {
 }
 
 // Init opens both panels on cwd. columns and rows are the framebuffer's
-// size when display is set; otherwise the screen is 80x24 until a terminal
-// reports its size. A screen smaller than MinColumns x MinRows gets a message
-// instead of the panels until it grows.
+// size when display is set; otherwise the screen is 80x24 until the terminal
+// reports its size, and follows it from then on. A screen smaller than
+// MinColumns x MinRows gets a message instead of the panels until it grows.
 func (app *App) Init(filesystem FileSystem, cwd []byte, columns, rows int, display bool) {
 	app.filesystem = filesystem
 	app.display, app.displayColumns, app.displayRows = display, columns, rows
@@ -79,21 +78,22 @@ func (app *App) Init(filesystem FileSystem, cwd []byte, columns, rows int, displ
 		}
 	}
 	app.resize()
-	app.sizeWanted = true
+	app.sizeWanted = !display
 }
+
+// FollowsTerminal reports whether the screen is the size a terminal reports,
+// which the program has to keep asking for, rather than a display's.
+func (app *App) FollowsTerminal() bool { return !app.display }
 
 // geometry returns the screen the manager lays itself out on.
 func (app *App) geometry() (int, int) {
-	columns, rows := MinColumns, MinRows
 	switch {
-	case app.display && app.hostColumns != 0:
-		columns, rows = min(app.displayColumns, app.hostColumns), min(app.displayRows, app.hostRows)
 	case app.display:
-		columns, rows = app.displayColumns, app.displayRows
+		return app.displayColumns, app.displayRows
 	case app.hostColumns != 0:
-		columns, rows = app.hostColumns, app.hostRows
+		return app.hostColumns, app.hostRows
 	}
-	return columns, rows
+	return MinColumns, MinRows
 }
 
 // resize lays the manager out again when the screen changed size: the whole
@@ -151,9 +151,11 @@ func (app *App) listRows() int { return app.rows - chromeRows }
 func (app *App) Handle(event terminal.Event) {
 	if event.Key == terminal.KeyPosition {
 		// The terminal answered RequestSize: its size is where the cursor
-		// was clamped.
-		app.hostColumns, app.hostRows = event.Column, event.Row
-		app.resize()
+		// was clamped. A display's size is fixed and needs no answer.
+		if !app.display {
+			app.hostColumns, app.hostRows = event.Column, event.Row
+			app.resize()
+		}
 		return
 	}
 	app.Keys++
@@ -303,14 +305,14 @@ func (app *App) reload(panel *Panel) {
 }
 
 // reread lists both panels again, repaints the whole screen, which also
-// repairs it after output from elsewhere landed on it, and asks the terminal
+// repairs it after output from elsewhere landed on it, and asks a terminal
 // for its size again.
 func (app *App) reread() {
 	app.reload(&app.panels[0])
 	app.reload(&app.panels[1])
 	app.screen.invalidate()
 	app.statusSize = 0
-	app.sizeWanted = true
+	app.sizeWanted = !app.display
 }
 
 // afterChange lists again every panel showing directory. It works on its own
