@@ -42,6 +42,7 @@ type Info struct {
 	FirmwareName     string
 	InitramfsAddress uint64
 	InitramfsSize    uint64
+	Framebuffer      FramebufferInfo
 	// ACPIRoot is the physical address of the firmware's RSDP, or zero.
 	ACPIRoot uint64
 }

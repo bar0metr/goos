@@ -37,7 +37,13 @@ is described in [boot-chain.md](../security/boot-chain.md).
    with `PANIC: initramfs is larger than the 4 MiB the loader reads` instead of
    being used cut short, and `tools/initramfs` refuses to build one. The pages
    past the archive go back to the firmware.
-3. **Memory map and exit.** The kernel captures the final UEFI memory map into
+3. **Graphics discovery.** The kernel locates GOP, queries at most 256 modes,
+   chooses a directly writable 32-bit mode by the resolution policy in ADR
+   0123, and copies only validated address, size, geometry, stride, pixel
+   format, and masks into `boot.Info`. Invalid or absent graphics prints a
+   warning and leaves the boot serial-only. No GOP pointer or firmware-owned
+   mode record crosses the boot boundary.
+4. **Memory map and exit.** The kernel captures the final UEFI memory map into
    a fixed buffer, normalizes region types, and calls `ExitBootServices` with
    the matching key, retrying on a stale key without allocating in between
    (ADR 0002, [memory.md](memory.md)). No firmware service is called after
