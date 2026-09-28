@@ -24,12 +24,12 @@ func TestFontCoversRequiredScalars(t *testing.T) {
 	}
 }
 
-func TestGlyphRowsAreDoubledToEightBySixteen(t *testing.T) {
-	glyph := GlyphFor('A')
-	for row := 0; row < GlyphHeight; row += 2 {
-		if glyph[row] != glyph[row+1] {
-			t.Fatalf("rows %d and %d differ", row, row+1)
-		}
+func TestSpleenFontGeometry(t *testing.T) {
+	if GlyphWidth != 12 || GlyphHeight != 24 {
+		t.Fatalf("glyph geometry = %dx%d, want 12x24", GlyphWidth, GlyphHeight)
+	}
+	if glyph := GlyphFor('A'); glyph[4] != 0x1f80 || glyph[18] != 0x6060 {
+		t.Fatalf("Spleen A signature changed: %#v", glyph)
 	}
 }
 
