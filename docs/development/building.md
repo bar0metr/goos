@@ -71,8 +71,10 @@ every frame (ADR 0088).
 `make run` boots the ISO headlessly with 512 MiB in QEMU and attaches COM1 to
 the current terminal. `make run-gui` uses the same OVMF, ISO, persistent disk,
 q35 machine, and COM1 connection, but also opens QEMU's VGA window for manual
-framebuffer-console validation. `MEMORY=4G` gives the guest more RAM and
-applies to either target and every QEMU test. `make run-debug` adds `-s -S`:
+framebuffer-console validation. It uses the native macOS Cocoa backend by
+default; set `QEMU_DISPLAY=gtk`, `QEMU_DISPLAY=sdl`, or another backend
+available in the local QEMU build on other hosts. `MEMORY=4G` gives the guest
+more RAM and applies to either target and every QEMU test. `make run-debug` adds `-s -S`:
 QEMU waits for a debugger on TCP port 1234 before executing the first
 instruction.
 

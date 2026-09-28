@@ -54,9 +54,13 @@ OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
 # Guest RAM for run and the QEMU tests, in QEMU -m syntax. q35 places RAM
 # above 4 GiB once the guest has more than 2.75 GiB (ADR 0103).
 MEMORY ?= 512M
+# Cocoa is the native QEMU display backend on the primary macOS development
+# host. Other hosts can select an available backend without changing targets,
+# for example QEMU_DISPLAY=gtk or QEMU_DISPLAY=sdl.
+QEMU_DISPLAY ?= cocoa
 QEMU_COMMON_FLAGS := -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -no-reboot
 QEMU_FLAGS := $(QEMU_COMMON_FLAGS) -display none
-QEMU_GUI_FLAGS := $(QEMU_COMMON_FLAGS) -device VGA
+QEMU_GUI_FLAGS := $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
 SOURCE_DATE_EPOCH ?= 0
 HZ ?= 100
 ifeq ($(filter $(HZ),100 250 1000),)
@@ -522,6 +526,7 @@ help:
 	  '  kernel          build the UEFI kernel' \
 	  '  run             boot with QEMU and serial on this terminal' \
 	  '  run-gui         boot with QEMU graphical display and serial on this terminal' \
+	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
