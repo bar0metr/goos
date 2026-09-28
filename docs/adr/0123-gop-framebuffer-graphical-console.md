@@ -103,7 +103,12 @@ visible corner after the terminal is attached. `make test-console-gui` boots a
 standard VGA device without a host display, waits for the serial readiness
 marker, asks the QEMU monitor for a PPM screendump, and checks all 256 marker
 pixels exactly. It uses no OCR and the checkerboard call is compiled out of
-normal builds.
+normal builds. The same harness resumes the guest and uses QEMU monitor
+`sendkey` commands to exercise editing keys and execute
+`echo graphical-keyboard-ok`. Because COM1 is output-only in this harness, the
+command output proves input crossed IRQ1, the unified console queue, TTY, and
+shell. `PS2_KEYBOARD_OK` is emitted once, only after IRQ1 has successfully
+published keyboard input to the logical console.
 
 The preferred 1280x800 mode gives the manual QEMU console more usable screen
 area while retaining deterministic fallbacks for firmware that lacks it.

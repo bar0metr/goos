@@ -121,6 +121,7 @@ var (
 	kernelPageTable             uint64
 	framebufferVirtual          uint64
 	graphicalFramebuffer        kernelframebuffer.Buffer
+	ps2KeyboardValidated        bool
 	initName                    = []byte("init")
 	initImagePath               = []byte("system/init")
 	initProcessSlot             process.Process
@@ -446,7 +447,7 @@ func bootContinue() {
 	// byte to arrive has a handler to drain it.
 	amd64.EnableConsoleInterrupt()
 	if amd64.InitPS2Keyboard() {
-		mark("PS2_KEYBOARD_OK")
+		mark("PS2_KEYBOARD_READY")
 	} else {
 		console.WriteString("WARNING: PS/2 keyboard unavailable; serial input remains active\n")
 	}
@@ -667,6 +668,10 @@ func mark(marker string) {
 func serviceKernel() {
 	flags := amd64.DisableInterrupts()
 	if validation.Enabled {
+		if !ps2KeyboardValidated && amd64.PS2KeyboardEventTake() {
+			ps2KeyboardValidated = true
+			mark("PS2_KEYBOARD_OK")
+		}
 		kernelframebuffer.DrawValidationMarker(&graphicalFramebuffer)
 	}
 	expireWaitDeadlines()

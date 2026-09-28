@@ -1076,6 +1076,7 @@ goos_irq_keyboard:
     btq $32, %rdi
     jnc .keyboard_bytes
     incq goos_console_interrupt(%rip)
+    movq $1, goos_ps2_keyboard_event_pending(%rip)
 .keyboard_bytes:
     movq %rdi, %r8
     shrq $24, %r8
@@ -1085,6 +1086,10 @@ goos_irq_keyboard:
     jz .keyboard_eoi
     movq %rdi, %rax
     callq .console_enqueue
+    testq %rax, %rax
+    jz .keyboard_byte_next
+    movq $1, goos_ps2_keyboard_event_pending(%rip)
+.keyboard_byte_next:
     shrq $8, %rdi
     decq %r8
     jmp .keyboard_byte_loop
@@ -1110,8 +1115,9 @@ goos_irq_keyboard:
     GOOS_RETURN_USER
     iretq
 
-// .console_enqueue appends AL to the unified bounded input ring. It clobbers
-// RAX, RCX, RSI and RDX; interrupt entries preserve those registers.
+// .console_enqueue appends AL to the unified bounded input ring and returns
+// one on success or zero when full. It clobbers RAX, RCX, RSI and RDX;
+// interrupt entries preserve those registers.
 .console_enqueue:
     movq goos_console_head(%rip), %rcx
     movq %rcx, %rsi
@@ -1122,9 +1128,11 @@ goos_irq_keyboard:
     leaq goos_console_ring(%rip), %rdx
     movb %al, (%rdx,%rcx,1)
     movq %rsi, goos_console_head(%rip)
+    movq $1, %rax
     retq
 .console_enqueue_drop:
     incq goos_console_dropped(%rip)
+    xorq %rax, %rax
     retq
 
 .global goos_irq_11
@@ -1613,6 +1621,8 @@ goos_console_tail:
     .quad 0
 goos_console_dropped:
     .quad 0
+goos_ps2_keyboard_event_pending:
+    .quad 0
 // Ctrl-C is a signal, not input. The handler diverts it here so the shell can
 // see it without reading, and consuming, the bytes a running command is owed.
 goos_console_interrupt:
@@ -1667,6 +1677,18 @@ goos_console_take_interrupt:
 .global goos_console_dropped_read
 goos_console_dropped_read:
     movq goos_console_dropped(%rip), %rax
+    retq
+
+// goos_ps2_keyboard_event_take returns and clears the indication that IRQ1
+// successfully published keyboard input to the logical console.
+.global goos_ps2_keyboard_event_take
+goos_ps2_keyboard_event_take:
+    xorq %rax, %rax
+    cmpq $0, goos_ps2_keyboard_event_pending(%rip)
+    je .ps2_keyboard_event_done
+    movq $0, goos_ps2_keyboard_event_pending(%rip)
+    movq $1, %rax
+.ps2_keyboard_event_done:
     retq
 
 // goos_enable_console_interrupt sets the UART's received-data-available bit.
