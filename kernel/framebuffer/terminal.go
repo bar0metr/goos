@@ -11,17 +11,18 @@ const terminalTabWidth = 8
 // Terminal renders the bounded console control subset used by GoOS. It owns
 // no history buffer and allocates no memory while consuming output.
 type Terminal struct {
-	buffer     Buffer
-	columns    int
-	rows       int
-	column     int
-	row        int
-	foreground uint32
-	background uint32
-	utf8       UTF8Decoder
-	state      uint8
-	parameter  uint16
-	digits     uint8
+	buffer           Buffer
+	columns          int
+	rows             int
+	column           int
+	row              int
+	foreground       uint32
+	background       uint32
+	utf8             UTF8Decoder
+	state            uint8
+	parameter        uint16
+	digits           uint8
+	validationMarker bool
 }
 
 func NewTerminal(buffer Buffer) (Terminal, bool) {
@@ -46,6 +47,23 @@ func (terminal *Terminal) Write(data []byte) {
 func (terminal *Terminal) WriteString(data string) {
 	for index := 0; index < len(data); index++ {
 		terminal.ConsumeByte(data[index])
+	}
+}
+
+// EnableValidationMarker pins the validation-only checkerboard across terminal
+// scrolling. Release builds never call this method.
+func (terminal *Terminal) EnableValidationMarker() bool {
+	if terminal == nil {
+		return false
+	}
+	terminal.validationMarker = DrawValidationMarker(&terminal.buffer)
+	return terminal.validationMarker
+}
+
+// RefreshValidationMarker restores the overlay after a complete output batch.
+func (terminal *Terminal) RefreshValidationMarker() {
+	if terminal != nil && terminal.validationMarker {
+		DrawValidationMarker(&terminal.buffer)
 	}
 }
 
@@ -93,6 +111,9 @@ func (terminal *Terminal) consumeScalar(scalar rune) {
 		}
 		terminal.buffer.DrawGlyph(terminal.column*GlyphWidth, terminal.row*GlyphHeight,
 			GlyphFor(scalar), terminal.foreground, terminal.background)
+		if terminal.validationMarker && terminal.row == terminal.rows-1 && terminal.column >= terminal.columns-2 {
+			DrawValidationMarker(&terminal.buffer)
+		}
 		terminal.column++
 		if terminal.column == terminal.columns {
 			terminal.column = 0
@@ -123,6 +144,9 @@ func (terminal *Terminal) consumeEscape(value byte) {
 	case 'J':
 		if terminal.digits == 1 && terminal.parameter == 2 {
 			terminal.buffer.Clear(terminal.background)
+			if terminal.validationMarker {
+				DrawValidationMarker(&terminal.buffer)
+			}
 		}
 	case 'H':
 		if terminal.digits == 0 || terminal.parameter == 0 {
@@ -132,6 +156,9 @@ func (terminal *Terminal) consumeEscape(value byte) {
 		if terminal.digits == 0 || terminal.parameter == 0 {
 			terminal.buffer.FillRect(terminal.column*GlyphWidth, terminal.row*GlyphHeight,
 				(terminal.columns-terminal.column)*GlyphWidth, GlyphHeight, terminal.background)
+			if terminal.validationMarker && terminal.row == terminal.rows-1 {
+				DrawValidationMarker(&terminal.buffer)
+			}
 		}
 	case 'D':
 		amount := int(terminal.parameter)
@@ -155,7 +182,19 @@ func (terminal *Terminal) nextRow() {
 	if terminal.row < terminal.rows {
 		return
 	}
+	if terminal.validationMarker {
+		terminal.buffer.FillRect(
+			terminal.buffer.Width()-ValidationMarkerSize,
+			terminal.buffer.Height()-ValidationMarkerSize,
+			ValidationMarkerSize,
+			ValidationMarkerSize,
+			terminal.background,
+		)
+	}
 	terminal.buffer.scrollUp(GlyphHeight, terminal.background)
+	if terminal.validationMarker {
+		DrawValidationMarker(&terminal.buffer)
+	}
 	terminal.row = terminal.rows - 1
 }
 

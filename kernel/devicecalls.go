@@ -35,9 +35,7 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 		return kcall.StatusInvalidArgument
 	}
 	console := kernelconsole.New()
-	for _, value := range data {
-		console.WriteByte(value)
-	}
+	console.Write(data)
 	// Validation bookkeeping, not authority: the boot sequence waits until
 	// PID 1 has printed and its supervisor has reported. The write itself was
 	// authorized by the capability above like any other process's.

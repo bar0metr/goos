@@ -109,7 +109,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -273,6 +273,7 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-boot
+	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
 
 # The release gate (0.1.1 specification §7). The reproducible-build test runs
@@ -288,6 +289,7 @@ release-check:
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
+	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 
@@ -326,6 +328,12 @@ test-boot:
 	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
 	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+
+test-console-gui:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@rm -f $(BUILD_DIR)/console-gui-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/console-gui-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/console_gui.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/console-gui-virtio-blk.img
 
 STRESS_RUNS ?= 4
 STRESS_JOBS ?= 4
@@ -528,6 +536,7 @@ help:
 	  '  run-gui         boot with QEMU graphical display and serial on this terminal' \
 	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
+	  '  test-console-gui validate framebuffer pixels through a headless screendump' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \

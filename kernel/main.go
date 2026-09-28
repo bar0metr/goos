@@ -388,6 +388,9 @@ func main() {
 				mark("FRAMEBUFFER_PRIMITIVES_OK")
 				if kernelconsole.AttachFramebuffer(graphicalFramebuffer) {
 					mark("FRAMEBUFFER_TERMINAL_OK")
+					if validation.Enabled && kernelconsole.EnableValidationMarker() {
+						mark("FRAMEBUFFER_VALIDATION_PATTERN_OK")
+					}
 				} else {
 					console.WriteString("Graphics: terminal construction failed, using serial console\n")
 					framebufferVirtual = 0
@@ -663,6 +666,9 @@ func mark(marker string) {
 // and the sleep.
 func serviceKernel() {
 	flags := amd64.DisableInterrupts()
+	if validation.Enabled {
+		kernelframebuffer.DrawValidationMarker(&graphicalFramebuffer)
+	}
 	expireWaitDeadlines()
 	flushLifecycle()
 	deliverProcessExits()

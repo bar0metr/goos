@@ -98,6 +98,13 @@ userspace TTY, and scrolls visible pixel rows in place. The internal logical
 console writes COM1 first and then mirrors to the framebuffer when attached;
 the capability-protected `ConsoleWrite` ABI is unchanged.
 
+Validation builds paint a 16x16 magenta/cyan checkerboard in the lower-right
+visible corner after the terminal is attached. `make test-console-gui` boots a
+standard VGA device without a host display, waits for the serial readiness
+marker, asks the QEMU monitor for a PPM screendump, and checks all 256 marker
+pixels exactly. It uses no OCR and the checkerboard call is compiled out of
+normal builds.
+
 The preferred 1280x800 mode gives the manual QEMU console more usable screen
 area while retaining deterministic fallbacks for firmware that lacks it.
 
