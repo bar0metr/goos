@@ -97,8 +97,12 @@ used a page above 1 GiB from 2 GiB, and one above 4 GiB from 3 GiB (ADR 0103).
 
 The target creates a fresh `build/boot-test-virtio-blk.img` for each run. Tests
 therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
-used by `make run`; both QEMU phases share the fresh test image to validate
+used by `make run` and `make run-gui`; both QEMU phases share the fresh test image to validate
 reboot persistence.
+
+`make run-gui` is a manual target and is never invoked by the automated test
+hierarchy. It opens a host window, while `make test-boot` remains headless and
+asserts the serial `FRAMEBUFFER_TERMINAL_OK` initialization marker.
 
 The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace

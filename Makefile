@@ -54,7 +54,9 @@ OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
 # Guest RAM for run and the QEMU tests, in QEMU -m syntax. q35 places RAM
 # above 4 GiB once the guest has more than 2.75 GiB (ADR 0103).
 MEMORY ?= 512M
-QEMU_FLAGS := -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -display none -no-reboot
+QEMU_COMMON_FLAGS := -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -no-reboot
+QEMU_FLAGS := $(QEMU_COMMON_FLAGS) -display none
+QEMU_GUI_FLAGS := $(QEMU_COMMON_FLAGS) -device VGA
 SOURCE_DATE_EPOCH ?= 0
 HZ ?= 100
 ifeq ($(filter $(HZ),100 250 1000),)
@@ -103,7 +105,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
 
 all: iso
 
@@ -253,6 +255,9 @@ $(ISO): $(VARIANT_ISO) FORCE
 
 run: iso $(BUILD_DIR)/virtio-blk.img
 	$(QEMU) $(QEMU_FLAGS) -cdrom $(ISO)
+
+run-gui: iso $(BUILD_DIR)/virtio-blk.img
+	$(QEMU) $(QEMU_GUI_FLAGS) -cdrom $(ISO)
 
 run-debug: iso $(BUILD_DIR)/virtio-blk.img
 	$(QEMU) $(QEMU_FLAGS) -s -S -cdrom $(ISO)
@@ -516,6 +521,7 @@ help:
 	  '  all/iso          build the bootable x86_64 ISO' \
 	  '  kernel          build the UEFI kernel' \
 	  '  run             boot with QEMU and serial on this terminal' \
+	  '  run-gui         boot with QEMU graphical display and serial on this terminal' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \

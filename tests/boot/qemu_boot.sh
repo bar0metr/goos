@@ -716,7 +716,7 @@ require_regex version.banner "^GoOS $release_pattern[[:cntrl:]]*\$" "GoOS $relea
 require_regex version.uname "^GoOS $release_pattern x86_64[[:cntrl:]]*\$" "GoOS $release x86_64" "$log" uname
 pass_group version
 
-for marker in PMM_OK VM_OK NX_WX_OK PAT_CONFIGURED FRAMEBUFFER_MAPPING_OK FRAMEBUFFER_PRIMITIVES_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK KERNEL_HIGH_ACCESS_FAULT_OK KERNEL_HIGH_ISOLATION_OK USER_ENTRY_STACK_BOUNDED_OK USER_LOW_ADDRESS_EXEC_OK USER_STACK_GUARD_OK BOOT_STACK_GUARD_OK; do
+for marker in PMM_OK VM_OK NX_WX_OK PAT_CONFIGURED FRAMEBUFFER_MAPPING_OK FRAMEBUFFER_PRIMITIVES_OK FRAMEBUFFER_TERMINAL_OK STACK_GUARDS_OK ADDRESS_SPACE_A_OK ADDRESS_SPACE_B_OK PROCESS_ISOLATION_OK USER_RX_OK USER_STACK_NX_OK USER_COPYOUT_OK USER_COPYIN_OK USER_FAULT_ISOLATION_OK KERNEL_HIGH_ACCESS_FAULT_OK KERNEL_HIGH_ISOLATION_OK USER_ENTRY_STACK_BOUNDED_OK USER_LOW_ADDRESS_EXEC_OK USER_STACK_GUARD_OK BOOT_STACK_GUARD_OK; do
 	require_marker "memory-security.$marker" "$marker" "$log"
 done
 pass_group memory-security
@@ -1037,7 +1037,7 @@ require_window block-restart.driver-again '^VIRTIO_BLK_DRIVER_OK$' 'a driver sta
 require_window block-restart.driver-installed '^BLOCK_DRIVER_REPLACED_OK$' 'the new driver handed to the block service' "$log" 'goos> fault block' 'after-block-restart'
 require_window block-restart.filesystem-installed '^BLOCK_FILESYSTEM_REPLACED_OK$' 'the new FAT32 service handed to the block service' "$log" 'goos> fault block' 'after-block-restart'
 require_window block-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 'the FAT32 service attached again' "$log" 'goos> fault block' 'after-block-restart'
-require_window block-restart.volume-read '^persistent$' 'the volume read through the new block service' "$log" 'goos> cat /home/demo/message.txt; echo after-block-restart' 'after-block-restart'
+require_window block-restart.volume-read '^persistent$' 'the volume read through the new block service' "$log" 'cat /home/demo/message.txt; echo after-block-restart' 'after-block-restart'
 require_regex block-restart.volume-written '^block-restart-write$' 'a file written and read back through the new block service' "$log" 'after-block.txt'
 pass_group block-restart
 

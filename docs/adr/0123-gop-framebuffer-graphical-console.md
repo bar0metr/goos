@@ -85,8 +85,11 @@ green, and blue bars after CR3 replacement. The same package embeds a fixed
 8x16 bitmap font with printable ASCII, Russian Cyrillic, and a visible
 replacement glyph. Its incremental UTF-8 decoder preserves partial sequences
 between writes and recovers from malformed input. Font provenance is recorded
-in `docs/third-party-font.md`. Terminal layout and escape parsing remain later
-phases.
+in `docs/third-party-font.md`. A bounded framebuffer terminal renders that
+stream, handles plain cursor controls and the four sequences required by the
+userspace TTY, and scrolls visible pixel rows in place. The internal logical
+console writes COM1 first and then mirrors to the framebuffer when attached;
+the capability-protected `ConsoleWrite` ABI is unchanged.
 
 The release will contain one graphical text console, not a general graphics
 API. A future userspace graphics system would require a separate memory and

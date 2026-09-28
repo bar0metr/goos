@@ -277,6 +277,7 @@ make
 make test
 make test-all
 make run
+make run-gui
 ```
 
 The resulting image is written to `build/goos-x86_64.iso`. All intermediate
@@ -394,8 +395,10 @@ was found running on.
 runs the kernel self-tests and fault-injection scenarios and prints the `*_OK`
 markers that the boot test asserts.
 
-`make run` attaches COM1 to the current terminal. `make run-debug` starts QEMU
-paused with a GDB server on TCP port 1234. `make test-performance` stores
+`make run` is headless and attaches COM1 to the current terminal. `make
+run-gui` opens QEMU's GOP-compatible VGA display while keeping COM1 on the
+terminal. `make run-debug` starts QEMU paused with a GDB server on TCP port
+1234. `make test-performance` stores
 benchmark results under `build/reports/`: host benchmarks of the kernel data
 structures and, through `make test-microbench`, context switch, IPC, VFS read,
 and RAMFS metadata costs measured in a booted guest.

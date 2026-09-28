@@ -20,7 +20,9 @@ contains:
 
 The ESP is the ISO's El Torito boot image, an 8 MiB FAT volume
 (`tools/mkiso`, ADR 0086). QEMU runs q35 with OVMF, 512 MiB RAM (`MEMORY`), COM1 on
-stdio, and a legacy virtio-blk disk (`Makefile`, `QEMU_FLAGS`).
+stdio, and a legacy virtio-blk disk (`Makefile`, `QEMU_COMMON_FLAGS`). `make
+run` adds a headless display, while `make run-gui` exposes the emulated VGA
+device and GOP framebuffer in a host window.
 
 Nothing in this chain is signed or verified. How firmware, kernel, system
 image, and services would be verified, with keys the machine owner controls,

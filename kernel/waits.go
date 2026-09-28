@@ -9,6 +9,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -76,7 +77,7 @@ func wakeProcessWaiters(pid process.ID) {
 	count := processWaitSet.Wake(pid, processWakeResults[:])
 	for index := 0; index < count; index++ {
 		if !amd64.WakeTaskID(uint64(processWakeResults[index].Task)) {
-			console := amd64.NewCOM1()
+			console := kernelconsole.New()
 			console.WriteString("PANIC: stale process wake task\n")
 			for {
 				amd64.Halt()
@@ -96,7 +97,7 @@ func expireProcessWaiters() {
 		}
 		processWaitStatus[task] = kcall.StatusTimeout
 		if !amd64.WakeTaskID(uint64(processWakeResults[index].Task)) {
-			console := amd64.NewCOM1()
+			console := kernelconsole.New()
 			console.WriteString("PANIC: stale process timeout task\n")
 			for {
 				amd64.Halt()

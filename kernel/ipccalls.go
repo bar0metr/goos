@@ -8,6 +8,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -339,7 +340,7 @@ func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 			ipcWaitStatus[task] = kcall.StatusPeerDied
 		}
 		if !amd64.WakeTaskID(uint64(ipcWakeResults[index].Task)) {
-			console := amd64.NewCOM1()
+			console := kernelconsole.New()
 			console.WriteString("PANIC: stale IPC wake task\n")
 			for {
 				amd64.Halt()
@@ -359,7 +360,7 @@ func expireIPCWaiters() {
 		}
 		ipcWaitStatus[task] = kcall.StatusTimeout
 		if !amd64.WakeTaskID(uint64(ipcWakeResults[index].Task)) {
-			console := amd64.NewCOM1()
+			console := kernelconsole.New()
 			console.WriteString("PANIC: stale IPC timeout task\n")
 			for {
 				amd64.Halt()

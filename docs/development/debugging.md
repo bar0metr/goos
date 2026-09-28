@@ -5,13 +5,17 @@ explain the failure, and attach a debugger only when you need instruction-level
 state. Build flags are described in [building.md](building.md); test harnesses
 in [testing.md](testing.md).
 
-## Serial output
+## Console output
 
-COM1 is the only output channel. `make run` attaches it to the terminal.
+COM1 remains the authoritative diagnostic output. After the permanent GOP
+mapping is installed, the kernel mirrors the logical console byte stream to
+the framebuffer terminal. `make run` stays headless; `make run-gui` opens the
+graphical window and still attaches COM1 to the terminal.
 
 | Source | Log |
 | --- | --- |
 | `make run` | terminal only; redirect if needed: `make run 2>&1 \| tee build/logs/run.log` |
+| `make run-gui` | graphical window plus COM1 in the terminal |
 | `make test-boot` | `build/logs/boot.log`, `build/logs/reboot.log` |
 | `make test-stress` | one log per guest under `build/stress/hz<rate>/` |
 | `make test-latency` | `build/logs/latency-hz<rate>.log` |

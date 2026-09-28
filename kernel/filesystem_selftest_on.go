@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 )
@@ -20,7 +21,7 @@ var (
 	vfsReadback   [16]byte
 )
 
-func runFilesystemSelfTests(console amd64.COM1) {
+func runFilesystemSelfTests(console kernelconsole.Writer) {
 	ramfsRoot := bootRAMFS.Init()
 	ramfsDirectory, ramfsDirectoryCreated := bootRAMFS.Mkdir(ramfsRoot, []byte("etc"))
 	ramfsFile, ramfsFileCreated := bootRAMFS.Create(ramfsDirectory, []byte("motd"))
