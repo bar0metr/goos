@@ -585,3 +585,23 @@ func TestOneOwnerCannotTakeTheWholeTable(t *testing.T) {
 		t.Fatalf("another owner refused: %d", status)
 	}
 }
+
+func TestRenameAcrossMountsIsUnsupported(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	persistent := &ramfs.FileSystem{}
+	if namespace.Mount([]byte("/persist"), persistent, persistent.Init()) != StatusOK {
+		t.Fatal("mount failed")
+	}
+	if namespace.Create([]byte("/file"), false) != StatusOK {
+		t.Fatal("create failed")
+	}
+	if status := namespace.Rename([]byte("/file"), []byte("/persist/file")); status != StatusUnsupported {
+		t.Fatalf("cross-mount rename = %d", status)
+	}
+	if _, _, status := namespace.Resolve([]byte("/file")); status != StatusOK {
+		t.Fatal("refused rename lost the source")
+	}
+	if status := namespace.Rename([]byte("/file"), []byte("/missing/file")); status != StatusNotFound {
+		t.Fatalf("rename into a missing directory = %d", status)
+	}
+}

@@ -136,6 +136,7 @@ func userspaceMain() {
 		checkNoLoaderAuthority()
 	}
 	loadPrompt()
+	requestGeometry()
 	write("\n")
 	for {
 		showPrompt()

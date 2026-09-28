@@ -79,8 +79,14 @@ signal, so a shell can ask whether it was typed without consuming the input a
 running command is being given.
 
 The keyboard handler reads one i8042 byte and passes it to a bounded scan-code
-set 1 decoder. Completed US-layout keys enter the same console ring as UART
-bytes. Arrow keys become CSI sequences; keyboard Ctrl-C increments the same
+set 1 decoder together with an eight-byte buffer the handler owns. Completed
+US-layout keys enter the same console ring as UART bytes. Arrows, Home, End,
+Insert, Delete, PageUp, PageDown and F1-F12 become xterm sequences of up to
+five bytes (ADR 0124); break codes produce nothing, and modifiers do not change
+a navigation or function key. The decoder returns the sequence length and the
+interrupt flag, and the handler checks the ring's free space before copying: a
+sequence goes in whole, or the key is dropped and counted, so a reader never
+sees a truncated prefix such as `ESC [ 1`. Keyboard Ctrl-C increments the same
 interrupt flag. Controller waits exist only during bounded initialization;
 steady-state input is interrupt-driven.
 

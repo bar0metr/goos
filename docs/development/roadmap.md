@@ -429,6 +429,15 @@ headless pixel and keyboard validation while retaining COM1 as the primary
 diagnostic and fallback path. Priority 5, Linux ELF compatibility, follows
 this release.
 
+GoOS 0.1.6 (docs/releases/0.1.6.md) adds `gfm`, a two-pane file manager, as
+the first full-screen program, and the terminal support under it: F1-F12 and
+navigation key sequences through an eight-byte decoder with whole-sequence
+enqueue, multi-parameter CSI with cursor addressing and 16-colour SGR in the
+framebuffer terminal, scoped raw terminal mode that the shell grants to
+manifests declaring `GrantTerminal` and ends with the job (ADR 0124), and the
+reusable `userspace/terminal` package. A viewer, an editor, recursive copy and
+cross-filesystem move are left for later releases.
+
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
 can land in a line being typed; and what was typed but not finished is lost if

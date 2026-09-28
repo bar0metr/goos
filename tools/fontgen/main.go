@@ -100,15 +100,21 @@ func parseBDF(path string) (map[rune][]uint16, error) {
 }
 
 func requiredScalars() []rune {
-	scalars := make([]rune, 0, 162)
+	scalars := make([]rune, 0, 162+len(boxDrawing))
 	for scalar := rune(0x20); scalar <= 0x7e; scalar++ {
 		scalars = append(scalars, scalar)
 	}
 	for scalar := rune(0x0410); scalar <= 0x044f; scalar++ {
 		scalars = append(scalars, scalar)
 	}
-	return append(scalars, 0x0401, 0x0451, 0x25a1)
+	scalars = append(scalars, 0x0401, 0x0451, 0x25a1)
+	return append(scalars, boxDrawing...)
 }
+
+// boxDrawing is the light single-line subset of U+2500..U+257F that
+// full-screen terminal programs draw frames with. Its order is the order
+// kernel/framebuffer.GlyphFor indexes.
+var boxDrawing = []rune{0x2500, 0x2502, 0x250c, 0x2510, 0x2514, 0x2518, 0x251c, 0x2524, 0x252c, 0x2534, 0x253c}
 
 func fatal(format string, values ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", values...)

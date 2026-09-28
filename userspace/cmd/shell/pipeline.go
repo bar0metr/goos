@@ -141,6 +141,7 @@ func writeStream(stream handle.ID, data []byte, deadline uint64) bool {
 }
 
 func executeExternal(line []byte, background bool) {
+	rawJob = false
 	redirects, validRedirect := shellcmd.SplitRedirections(line)
 	if !validRedirect {
 		write("exec: invalid redirection\n")
@@ -165,6 +166,9 @@ func executeExternal(line []byte, background bool) {
 	// Each stage is written to the slot as soon as it is parsed, so the
 	// tokenizer's storage serves every stage in turn.
 	environment := [][]byte{pathVariable}
+	if columnsSize != 0 && linesSize != 0 {
+		environment = append(environment, columnsVariable[:columnsSize], linesVariable[:linesSize])
+	}
 	builder := execproto.NewBuilder(execSlot(int(slot)), cwd[:cwdSize], environment, background)
 	stageOffset := 0
 	if len(redirects.Input) != 0 {
@@ -191,6 +195,9 @@ func executeExternal(line []byte, background bool) {
 			return
 		}
 		builder.Stage(executable, invocation.Arguments)
+		if count == 1 && !background && stageOffset == 0 && redirectCount == 0 {
+			rawJob = wantsRawTerminal(invocation.Arguments[0])
+		}
 	}
 	nextIndex := stageOffset + count
 	errorSource := uint8(0)
@@ -229,6 +236,7 @@ func executeExternal(line []byte, background bool) {
 		return
 	}
 	message, received := awaitReply(correlation, int(slot))
+	endRawJob()
 	jobs[slot].active = false
 	reply, validReply := execproto.DecodeReply(message)
 	if !received {

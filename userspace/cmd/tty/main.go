@@ -5,6 +5,11 @@
 // typed, echoes it, and turns Ctrl-C and Ctrl-D into events, and a client gets
 // finished lines by asking for them over its session.
 //
+// A client may switch the session to raw mode for a full-screen program: then
+// every typed byte is handed over at once, unedited and unechoed, and output
+// is relayed as it comes. Raw mode ends when the client asks, or with the
+// session, and ending it resets the terminal (ADR 0124).
+//
 // Output passes through it too. The shell and every command write to a shared
 // stream whose reading end only this service holds; it writes what arrives to
 // the console, taking the line being typed off the screen first and putting it
@@ -34,6 +39,12 @@ var (
 	wire          [ipc.WireMaxSize]byte
 	line          tty.Discipline
 	screen        tty.Screen
+	// raw is set while the session is in raw mode; rawInput holds what was
+	// typed then until a read takes it.
+	raw         bool
+	rawInput    tty.RawInput
+	rawReported bool
+	rawBuffer   [tty.MaxPart]byte
 	// reading is the correlation of the client's outstanding read, or zero.
 	reading uint64
 	// sent is how much of the completed line earlier parts delivered.
@@ -131,22 +142,82 @@ func serveControl() {
 		}
 		sessionHandle, sessionClosed = session, false
 		reading, sent, interruptQueued, endQueued = 0, 0, false, false
+		// Raw mode belonged to the old client's foreground program.
+		leaveRaw()
 		mark("TTY_SESSION_REPLACED_OK\n")
 	}
 }
 
 // serveConsole applies everything the console has: the interrupt first, which
 // the kernel keeps out of the input ring, then each byte.
+//
+// In raw mode the bytes are queued for the client instead, and Ctrl-C, which
+// the kernel delivers as an interrupt rather than a byte, still ends the read
+// with an interrupt: that is how a foreground program that has stopped
+// reading is stopped.
 func serveConsole() {
 	if sys.ConsoleInterrupt(consoleHandle) == kcall.StatusOK {
-		apply(line.Feed(0x03))
+		if raw {
+			sent = 0
+			if !answer(tty.ResultInterrupt) {
+				interruptQueued, endQueued = true, false
+			}
+		} else {
+			apply(line.Feed(0x03))
+		}
 	}
 	for {
 		input, status := sys.ConsoleRead(consoleHandle)
 		if status != kcall.StatusOK {
 			break
 		}
+		if raw {
+			rawInput.Feed(input)
+			continue
+		}
 		apply(line.Feed(input))
+	}
+	deliverRaw()
+}
+
+// deliverRaw answers the outstanding read with what was typed in raw mode.
+func deliverRaw() {
+	if !raw || reading == 0 || rawInput.Len() == 0 {
+		return
+	}
+	count := rawInput.Take(rawBuffer[:])
+	reply(tty.ResultRaw, rawBuffer[:count])
+	reading = 0
+}
+
+// enterRaw switches the session to raw mode. The edited line, if one is
+// shown, is taken off the screen first; it is kept for line mode.
+func enterRaw() {
+	if raw {
+		return
+	}
+	writeBytes(screen.Hide())
+	raw = true
+	rawInput.Reset()
+}
+
+// leaveRaw returns to line mode. What the program left on the terminal —
+// colours, a hidden cursor, a full screen — is reset, so a program that
+// ended without cleaning up, or was stopped, leaves a usable terminal.
+func leaveRaw() {
+	if !raw {
+		return
+	}
+	raw = false
+	rawInput.Reset()
+	write(tty.ResetSequence)
+	screen.Cleared()
+	if !rawReported {
+		rawReported = true
+		mark("TTY_RAW_MODE_OK\n")
+	}
+	if reading != 0 {
+		showLine()
 	}
 }
 
@@ -155,6 +226,10 @@ func serveConsole() {
 // after the last, so a background job's report or a command's output never
 // lands inside it.
 func serveOutput() {
+	if raw {
+		relayRaw()
+		return
+	}
 	relayed := false
 	for batch := 0; batch < outputBatch && !outputClosed; batch++ {
 		count, status := sys.StreamRead(outputHandle, outputBuffer[:])
@@ -183,6 +258,23 @@ func serveOutput() {
 			outputReported = true
 			mark("TTY_OUTPUT_OK\n")
 		}
+	}
+}
+
+// relayRaw writes output as it comes: a full-screen program positions every
+// byte itself, and there is no edited line to keep clear of it.
+func relayRaw() {
+	for batch := 0; batch < outputBatch && !outputClosed; batch++ {
+		count, status := sys.StreamRead(outputHandle, outputBuffer[:])
+		if status == kcall.StatusResourceExhausted {
+			return
+		}
+		if status != kcall.StatusOK || count == 0 || count > len(outputBuffer) {
+			outputClosed = true
+			syslog.Warn("output stream closed")
+			return
+		}
+		writeBytes(outputBuffer[:count])
 	}
 }
 
@@ -303,21 +395,39 @@ func serveSession() {
 			continueRead(message.Correlation)
 		case tty.OperationRedraw:
 			promptSize = copy(prompt[:], text)
-			if reading != 0 {
+			if reading != 0 && !raw {
 				showLine()
 			}
-			if accepted, ok := tty.Reply(tty.ResultAccepted, nil, message.Correlation); ok {
-				send(accepted)
+			accept(message.Correlation)
+		case tty.OperationRawMode:
+			enterRaw()
+			accept(message.Correlation)
+			deliverRaw()
+		case tty.OperationLineMode:
+			leaveRaw()
+			accept(message.Correlation)
+		case tty.OperationGeometry:
+			columns, rows := screen.Geometry()
+			if geometry, ok := tty.GeometryReply(columns, rows, message.Correlation); ok {
+				send(geometry)
 			}
 		}
 	}
 }
 
+func accept(correlation uint64) {
+	if accepted, ok := tty.Reply(tty.ResultAccepted, nil, correlation); ok {
+		send(accepted)
+	}
+}
+
 // closeSession forgets a session whose client has gone, closing its endpoint
-// so the channel is released rather than left half open.
+// so the channel is released rather than left half open. Its raw mode, if it
+// had one, ends with it.
 func closeSession() {
 	sessionClosed = true
 	reading, sent = 0, 0
+	leaveRaw()
 	if sessionHandle != 0 {
 		sys.HandleClose(sessionHandle)
 		sessionHandle = 0
@@ -335,6 +445,15 @@ func startRead(text []byte, correlation uint64) {
 	}
 	reading = correlation
 	promptSize = copy(prompt[:], text)
+	if raw {
+		if interruptQueued {
+			interruptQueued = false
+			answer(tty.ResultInterrupt)
+			return
+		}
+		deliverRaw()
+		return
+	}
 	switch {
 	case interruptQueued:
 		interruptQueued = false
@@ -413,8 +532,11 @@ func decodeWire() (ipc.Message, bool) {
 
 // mark writes a validation marker on a row of its own: it goes around the line
 // being typed the way relayed output does.
+//
+// While a program owns the screen in raw mode no marker is written: it would
+// land in the middle of that program's display.
 func mark(message string) {
-	if validation.Enabled {
+	if validation.Enabled && !raw {
 		writeBytes(screen.Hide())
 		write(message)
 		screen.Output(newline[:])

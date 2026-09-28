@@ -40,3 +40,35 @@ func TestResolvePathNativeLimits(t *testing.T) {
 		t.Fatal("a path past PathMax accepted")
 	}
 }
+
+func TestJoinNameParentAndBaseName(t *testing.T) {
+	var target [MaxPath]byte
+	if path, ok := JoinName([]byte("/"), []byte("tmp"), &target); !ok || string(path) != "/tmp" {
+		t.Fatalf("join root = %q %v", path, ok)
+	}
+	if path, ok := JoinName([]byte("/tmp/dir"), []byte("Файл.txt"), &target); !ok || string(path) != "/tmp/dir/Файл.txt" {
+		t.Fatalf("join = %q %v", path, ok)
+	}
+	for _, name := range []string{"", ".", "..", "a/b", "a\x00b", strings.Repeat("n", limits.NameMax+1)} {
+		if _, ok := JoinName([]byte("/tmp"), []byte(name), &target); ok {
+			t.Fatalf("joined invalid name %q", name)
+		}
+	}
+	long := "/" + strings.Repeat("d", MaxPath-3)
+	if _, ok := JoinName([]byte(long), []byte("xy"), &target); ok {
+		t.Fatal("joined past PathMax")
+	}
+	if path, ok := JoinName([]byte(long), []byte("x"), &target); !ok || len(path) != MaxPath {
+		t.Fatalf("join at PathMax = %d %v", len(path), ok)
+	}
+	for path, want := range map[string]string{"/": "/", "/tmp": "/", "/tmp/a": "/tmp", "/a/b/c": "/a/b"} {
+		if got := Parent([]byte(path), &target); string(got) != want {
+			t.Fatalf("parent %q = %q", path, got)
+		}
+	}
+	for path, want := range map[string]string{"/": "/", "/tmp": "tmp", "/a/Ёж": "Ёж"} {
+		if got := BaseName([]byte(path)); string(got) != want {
+			t.Fatalf("base %q = %q", path, got)
+		}
+	}
+}

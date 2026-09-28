@@ -6,17 +6,16 @@ import "goos/kernel/keyboard"
 
 var consoleKeyboard keyboard.Decoder
 
-// keyboardFeed returns up to three terminal bytes in bits 0..23, their count
-// in bits 24..25, and the logical console-interrupt flag in bit 32. It is
-// allocation-free and is called with interrupts disabled by the IRQ1 entry.
+// keyboardFeed decodes one scan-code byte, stores the terminal bytes it
+// produces in target, and returns their count in bits 0..7 and the logical
+// console-interrupt flag in bit 32. It is allocation-free and is called with
+// interrupts disabled by the IRQ1 entry, which owns target.
 //
 //export goos_keyboard_feed
-func keyboardFeed(scanCode byte) uint64 {
+func keyboardFeed(scanCode byte, target *[keyboard.MaxBytes]byte) uint64 {
 	output := consoleKeyboard.Feed(scanCode)
-	result := uint64(output.Bytes[0]) |
-		uint64(output.Bytes[1])<<8 |
-		uint64(output.Bytes[2])<<16 |
-		uint64(output.Length)<<24
+	*target = output.Bytes
+	result := uint64(output.Length)
 	if output.Interrupt {
 		result |= 1 << 32
 	}

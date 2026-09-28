@@ -8,8 +8,22 @@ commit `57f9219328c9f5873085320fe8bc8f7dd34b8791`:
 Spleen is Copyright (c) 2018-2026, Frederic Cambus and is distributed under
 the BSD 2-Clause license. GoOS stores the generated bitmap table in
 `kernel/framebuffer/font_data.go`. The embedded subset contains printable
-ASCII, Russian Cyrillic letters including `Ё` and `ё`, and the upstream white
-square glyph used as the visible replacement character.
+ASCII, Russian Cyrillic letters including `Ё` and `ё`, the upstream white
+square glyph used as the visible replacement character, and the light
+box-drawing glyphs `─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼` (U+2500, U+2502, U+250C, U+2510,
+U+2514, U+2518, U+251C, U+2524, U+252C, U+2534, U+253C) that full-screen
+programs draw frames with.
+
+`tools/fontgen` generates the table from the upstream `spleen-12x24.bdf` at the
+commit above:
+
+```sh
+go run ./tools/fontgen -input spleen-12x24.bdf \
+    -output kernel/framebuffer/font_data.go \
+    -commit 57f9219328c9f5873085320fe8bc8f7dd34b8791
+```
+
+No glyph is drawn by hand.
 
 ## BSD 2-Clause License
 

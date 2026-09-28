@@ -6,22 +6,54 @@ const (
 	terminalCSI
 )
 
-const terminalTabWidth = 8
+const (
+	terminalTabWidth = 8
+	// A control sequence holds at most this many parameters of at most this
+	// many digits; anything longer is malformed and abandoned.
+	terminalMaxParameters = 8
+	terminalMaxDigits     = 3
+	// terminalDefaultColor selects the terminal's own foreground or
+	// background instead of a palette entry.
+	terminalDefaultColor = -1
+)
+
+// terminalPalette is the standard 16-colour ANSI palette: colours 0-7 are the
+// normal ones SGR 30-37 and 40-47 select, 8-15 the bright ones SGR 90-97 and
+// 100-107 select. The ANSI numbers are the contract; these RGB values are an
+// implementation detail tuned for a calm dark console.
+var terminalPalette = [16][3]uint8{
+	{0x0b, 0x12, 0x1c}, {0x9b, 0x4d, 0x57}, {0x5f, 0x87, 0x5f}, {0xa5, 0x8b, 0x4a},
+	{0x3e, 0x5c, 0x80}, {0x80, 0x60, 0x80}, {0x3f, 0x7a, 0x80}, {0xc6, 0xc8, 0xca},
+	{0x4c, 0x55, 0x63}, {0xd1, 0x6d, 0x78}, {0x8f, 0xbf, 0x7f}, {0xd6, 0xb9, 0x6b},
+	{0x7f, 0xa4, 0xc8}, {0xa9, 0x87, 0xb0}, {0x7f, 0xc4, 0xcc}, {0xe6, 0xe8, 0xea},
+}
 
 // Terminal renders the bounded console control subset used by GoOS. It owns
 // no history buffer and allocates no memory while consuming output.
 type Terminal struct {
-	buffer           Buffer
-	columns          int
-	rows             int
-	column           int
-	row              int
-	foreground       uint32
-	background       uint32
-	utf8             UTF8Decoder
-	state            uint8
-	parameter        uint16
+	buffer            Buffer
+	columns           int
+	rows              int
+	column            int
+	row               int
+	foreground        uint32
+	background        uint32
+	defaultForeground uint32
+	defaultBackground uint32
+	palette           [16]uint32
+	// foregroundIndex and backgroundIndex are the palette entries SGR chose,
+	// or terminalDefaultColor; bold brightens a normal foreground.
+	foregroundIndex int8
+	backgroundIndex int8
+	bold            bool
+	utf8            UTF8Decoder
+	state           uint8
+	// parameters counts the parameters of the sequence being parsed, digits
+	// those of its last one; private marks a sequence begun with '?'.
+	parameter        [terminalMaxParameters]uint16
+	parameters       uint8
 	digits           uint8
+	private          bool
 	validationMarker bool
 }
 
@@ -32,8 +64,13 @@ func NewTerminal(buffer Buffer) (Terminal, bool) {
 	}
 	terminal := Terminal{
 		buffer: buffer, columns: columns, rows: rows,
-		foreground: buffer.Color(224, 224, 224), background: buffer.Color(0, 0, 0),
+		defaultForeground: buffer.Color(224, 224, 224), defaultBackground: buffer.Color(0, 0, 0),
 	}
+	for index := range terminalPalette {
+		color := &terminalPalette[index]
+		terminal.palette[index] = buffer.Color(color[0], color[1], color[2])
+	}
+	terminal.resetStyle()
 	terminal.buffer.Clear(terminal.background)
 	return terminal, true
 }
@@ -128,83 +165,206 @@ func (terminal *Terminal) consumeScalar(scalar rune) {
 func (terminal *Terminal) consumeEscape(value byte) {
 	if terminal.state == terminalEscape {
 		if value == '[' {
-			terminal.state, terminal.parameter, terminal.digits = terminalCSI, 0, 0
+			terminal.state = terminalCSI
+			terminal.parameters, terminal.digits, terminal.private = 0, 0, false
+			clear(terminal.parameter[:])
 		} else {
 			terminal.resetEscape()
 		}
 		return
 	}
-	if value >= '0' && value <= '9' {
-		if terminal.digits == 3 {
+	switch {
+	case value >= '0' && value <= '9':
+		if terminal.parameters == 0 {
+			terminal.parameters = 1
+		}
+		if terminal.digits == terminalMaxDigits {
 			terminal.resetEscape()
 			return
 		}
-		terminal.parameter = terminal.parameter*10 + uint16(value-'0')
+		last := &terminal.parameter[terminal.parameters-1]
+		*last = *last*10 + uint16(value-'0')
 		terminal.digits++
 		return
+	case value == ';':
+		if terminal.parameters == 0 {
+			terminal.parameters = 1
+		}
+		if terminal.parameters == terminalMaxParameters {
+			terminal.resetEscape()
+			return
+		}
+		terminal.parameters++
+		terminal.digits = 0
+		return
+	case value == '?' && terminal.parameters == 0 && !terminal.private:
+		terminal.private = true
+		return
+	case value < '@' || value > '~':
+		// Intermediate bytes and stray controls are outside the subset.
+		terminal.resetEscape()
+		return
 	}
-	switch value {
-	case 'J':
-		if terminal.digits == 1 && terminal.parameter == 2 {
-			terminal.buffer.Clear(terminal.background)
-			if terminal.validationMarker {
-				DrawValidationMarker(&terminal.buffer)
-			}
-		}
-	case 'H':
-		if terminal.digits == 0 || terminal.parameter == 0 {
-			terminal.column, terminal.row = 0, 0
-		}
-	case 'K':
-		if terminal.digits == 0 || terminal.parameter == 0 {
-			terminal.buffer.FillRect(terminal.column*GlyphWidth, terminal.row*GlyphHeight,
-				(terminal.columns-terminal.column)*GlyphWidth, GlyphHeight, terminal.background)
-			if terminal.validationMarker && terminal.row == terminal.rows-1 {
-				DrawValidationMarker(&terminal.buffer)
-			}
-		}
-	case 'D':
-		amount := int(terminal.parameter)
-		if terminal.digits == 0 || amount == 0 {
-			amount = 1
-		}
-		if amount > terminal.column {
-			amount = terminal.column
-		}
-		terminal.column -= amount
-	case 'C':
-		amount := int(terminal.parameter)
-		if terminal.digits == 0 || amount == 0 {
-			amount = 1
-		}
-		terminal.column += amount
-		if terminal.column >= terminal.columns {
-			terminal.column = terminal.columns - 1
-		}
-	case 'A':
-		amount := int(terminal.parameter)
-		if terminal.digits == 0 || amount == 0 {
-			amount = 1
-		}
-		terminal.row -= amount
-		if terminal.row < 0 {
-			terminal.row = 0
-		}
-	case 'B':
-		amount := int(terminal.parameter)
-		if terminal.digits == 0 || amount == 0 {
-			amount = 1
-		}
-		terminal.row += amount
-		if terminal.row >= terminal.rows {
-			terminal.row = terminal.rows - 1
-		}
+	if !terminal.private {
+		terminal.dispatch(value)
 	}
 	terminal.resetEscape()
 }
 
+// argument returns parameter index, or fallback when it is absent or zero.
+func (terminal *Terminal) argument(index int, fallback int) int {
+	if index >= int(terminal.parameters) || terminal.parameter[index] == 0 {
+		return fallback
+	}
+	return int(terminal.parameter[index])
+}
+
+func (terminal *Terminal) dispatch(final byte) {
+	switch final {
+	case 'A':
+		terminal.row = clampCell(terminal.row-terminal.argument(0, 1), terminal.rows)
+	case 'B':
+		terminal.row = clampCell(terminal.row+terminal.argument(0, 1), terminal.rows)
+	case 'C':
+		terminal.column = clampCell(terminal.column+terminal.argument(0, 1), terminal.columns)
+	case 'D':
+		terminal.column = clampCell(terminal.column-terminal.argument(0, 1), terminal.columns)
+	case 'G':
+		terminal.column = clampCell(terminal.argument(0, 1)-1, terminal.columns)
+	case 'H', 'f':
+		terminal.row = clampCell(terminal.argument(0, 1)-1, terminal.rows)
+		terminal.column = clampCell(terminal.argument(1, 1)-1, terminal.columns)
+	case 'J':
+		terminal.eraseDisplay(terminal.argument(0, 0))
+	case 'K':
+		terminal.eraseLine(terminal.argument(0, 0))
+	case 'm':
+		terminal.selectGraphicRendition()
+	}
+}
+
+func clampCell(value, limit int) int {
+	if value < 0 {
+		return 0
+	}
+	if value >= limit {
+		return limit - 1
+	}
+	return value
+}
+
+// eraseDisplay clears from the cursor to the end (0), from the start to the
+// cursor (1), or everything (2), in the current background. The cursor stays.
+func (terminal *Terminal) eraseDisplay(mode int) {
+	switch mode {
+	case 0:
+		terminal.eraseLine(0)
+		terminal.fillRows(terminal.row+1, terminal.rows)
+	case 1:
+		terminal.fillRows(0, terminal.row)
+		terminal.eraseLine(1)
+	case 2:
+		terminal.buffer.Clear(terminal.background)
+		if terminal.validationMarker {
+			DrawValidationMarker(&terminal.buffer)
+		}
+	}
+}
+
+// eraseLine clears the cursor's row from the cursor to the end (0), from the
+// start to the cursor inclusive (1), or entirely (2).
+func (terminal *Terminal) eraseLine(mode int) {
+	first, last := terminal.column, terminal.columns
+	switch mode {
+	case 1:
+		first, last = 0, terminal.column+1
+	case 2:
+		first = 0
+	case 0:
+	default:
+		return
+	}
+	terminal.buffer.FillRect(first*GlyphWidth, terminal.row*GlyphHeight,
+		(last-first)*GlyphWidth, GlyphHeight, terminal.background)
+	if terminal.validationMarker && terminal.row == terminal.rows-1 {
+		DrawValidationMarker(&terminal.buffer)
+	}
+}
+
+func (terminal *Terminal) fillRows(first, last int) {
+	if first >= last {
+		return
+	}
+	terminal.buffer.FillRect(0, first*GlyphHeight, terminal.buffer.Width(), (last-first)*GlyphHeight, terminal.background)
+	if terminal.validationMarker && last == terminal.rows {
+		DrawValidationMarker(&terminal.buffer)
+	}
+}
+
+// selectGraphicRendition applies SGR parameters in order. Unsupported ones
+// are ignored; the extended colour forms 38 and 48 have their operands
+// skipped so they are not read as other attributes.
+func (terminal *Terminal) selectGraphicRendition() {
+	count := int(terminal.parameters)
+	if count == 0 {
+		count = 1
+	}
+	for index := 0; index < count; index++ {
+		value := int(terminal.parameter[index])
+		switch {
+		case value == 0:
+			terminal.resetStyle()
+			continue
+		case value == 1:
+			terminal.bold = true
+		case value == 22:
+			terminal.bold = false
+		case value >= 30 && value <= 37:
+			terminal.foregroundIndex = int8(value - 30)
+		case value == 39:
+			terminal.foregroundIndex = terminalDefaultColor
+		case value >= 40 && value <= 47:
+			terminal.backgroundIndex = int8(value - 40)
+		case value == 49:
+			terminal.backgroundIndex = terminalDefaultColor
+		case value >= 90 && value <= 97:
+			terminal.foregroundIndex = int8(value - 90 + 8)
+		case value >= 100 && value <= 107:
+			terminal.backgroundIndex = int8(value - 100 + 8)
+		case value == 38 || value == 48:
+			if index+1 < count && terminal.parameter[index+1] == 5 {
+				index += 2
+			} else if index+1 < count && terminal.parameter[index+1] == 2 {
+				index += 4
+			} else {
+				index = count
+			}
+		}
+	}
+	terminal.applyStyle()
+}
+
+func (terminal *Terminal) resetStyle() {
+	terminal.foregroundIndex, terminal.backgroundIndex, terminal.bold = terminalDefaultColor, terminalDefaultColor, false
+	terminal.applyStyle()
+}
+
+func (terminal *Terminal) applyStyle() {
+	terminal.foreground = terminal.defaultForeground
+	if index := terminal.foregroundIndex; index != terminalDefaultColor {
+		if terminal.bold && index < 8 {
+			index += 8
+		}
+		terminal.foreground = terminal.palette[index]
+	}
+	terminal.background = terminal.defaultBackground
+	if terminal.backgroundIndex != terminalDefaultColor {
+		terminal.background = terminal.palette[terminal.backgroundIndex]
+	}
+}
+
 func (terminal *Terminal) resetEscape() {
-	terminal.state, terminal.parameter, terminal.digits = terminalGround, 0, 0
+	terminal.state, terminal.parameters, terminal.digits, terminal.private = terminalGround, 0, 0, false
 }
 
 func (terminal *Terminal) nextRow() {

@@ -10,6 +10,7 @@ const (
 	cyrillicCapitalYoIndex = cyrillicGlyphIndex + (0x0450 - 0x0410)
 	cyrillicSmallYoIndex   = cyrillicCapitalYoIndex + 1
 	replacementGlyphIndex  = cyrillicSmallYoIndex + 1
+	boxDrawingGlyphIndex   = replacementGlyphIndex + 1
 )
 
 // Glyph is one fixed-width Spleen bitmap cell. Bit 15 is the leftmost pixel;
@@ -29,8 +30,19 @@ func GlyphFor(scalar rune) Glyph {
 		index = cyrillicCapitalYoIndex
 	case scalar == 0x0451:
 		index = cyrillicSmallYoIndex
+	case scalar >= 0x2500 && scalar <= 0x253c:
+		if slot := boxDrawingSlots[scalar-0x2500]; slot != 0 {
+			index = boxDrawingGlyphIndex + int(slot) - 1
+		}
 	}
 	return fontData[index]
+}
+
+// boxDrawingSlots maps U+2500..U+253C to one plus the position of the glyph
+// in the embedded light box-drawing subset, or zero when it is not embedded:
+// ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼.
+var boxDrawingSlots = [0x253c - 0x2500 + 1]uint8{
+	0x00: 1, 0x02: 2, 0x0c: 3, 0x10: 4, 0x14: 5, 0x18: 6, 0x1c: 7, 0x24: 8, 0x2c: 9, 0x34: 10, 0x3c: 11,
 }
 
 // DrawGlyph paints one complete cell. Buffer clipping keeps partially visible
