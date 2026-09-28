@@ -66,6 +66,10 @@ existing site follows this yet: the UEFI protocol calls in
 - Identity-mapped memory outside the image is writable and NX. The first MiB
   is unmapped. The direct map of managed memory is supervisor-only, writable,
   and NX (ADR 0103).
+- The framebuffer occupies a dedicated kernel PML4 slot. Its leaves are
+  supervisor-only, writable, NX, and uncached; validation boot constructs two
+  process roots and requires both to leave the framebuffer virtual address
+  unmapped before emitting `FRAMEBUFFER_USER_ISOLATION_OK` (ADR 0123).
 - User leaves reject W+X at map time. The native loader rejects writable
   executable segments and fills pages through the kernel's physical view before
   installing the final user mappings (docs/kernel/native-images.md).

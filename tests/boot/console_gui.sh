@@ -67,6 +67,7 @@ done
 [ -S "$monitor" ] || fail "QEMU monitor socket was not created"
 
 wait_for_log 'FRAMEBUFFER_VALIDATION_PATTERN_OK' 'framebuffer marker'
+wait_for_log 'FRAMEBUFFER_USER_ISOLATION_OK' 'framebuffer process-isolation marker'
 wait_for_log '^goos> ' 'shell prompt' 180
 wait_for_log '^BOOT_OK' 'completed validation boot' 180
 

@@ -232,6 +232,10 @@ sink, and exact shell output proves end-to-end keyboard delivery.
 The TTY now reads capability-checked console geometry, falls back to 80x25 on
 serial-only boots, and erases and restores every row of wrapped edited input
 when asynchronous output arrives.
+Framebuffer, GOP, and PS/2 regression coverage now includes hostile GOP
+metadata, framebuffer guard words, the complete required key translation set,
+and an in-guest assertion that process page tables do not inherit the kernel
+framebuffer mapping.
 
 Current progress: ADR 0058 splits the build into a normal and a validation
 variant. A normal build boots quietly to a banner, `Starting services...`, one
