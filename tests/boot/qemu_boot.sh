@@ -174,6 +174,22 @@ wait_for_marker() {
 	fail_check "timeout.$phase" "$marker within ${timeout}s" "timeout after ${elapsed}s" "$file" "$marker"
 }
 
+wait_for_count() {
+	phase=$1
+	pattern=$2
+	expected=$3
+	timeout=$4
+	file=$5
+	elapsed=0
+	while [ "$elapsed" -lt "$timeout" ]; do
+		observed=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+		[ "$observed" -ge "$expected" ] && return
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	fail_check "timeout.$phase" "$expected matches within ${timeout}s" "$observed matches after ${elapsed}s" "$file" "$pattern"
+}
+
 pass_group() { printf 'PASS %s\n' "$1"; }
 
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
@@ -364,13 +380,15 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 25
 	# Bulk I/O (ADR 0107): a MiB through a shared buffer in sixteen
 	# exchanges, to the volatile root and to the volume.
+	bench_count=$(grep -c '^BENCH_PROCESS_OK$' "$log" 2>/dev/null || true)
 	printf 'bench io /tmp/bulk.bin 1M\n'
-	sleep 5
+	bench_count=$((bench_count + 1))
+	wait_for_count bulk.tmp '^BENCH_PROCESS_OK$' "$bench_count" 60 "$log"
 	printf 'bench io /home/bulk.bin 1M\n'
-	# FAT32 inline reads can take more than six seconds under a loaded host.
-	# Wait for the command to finish before sending the next one so output from
-	# two commands cannot be mistaken for a storage failure.
-	sleep 10
+	bench_count=$((bench_count + 1))
+	# FAT32 I/O duration depends on host load. Synchronize on completion instead
+	# of queuing the next command after an assumed fixed delay.
+	wait_for_count bulk.home '^BENCH_PROCESS_OK$' "$bench_count" 60 "$log"
 	printf 'cp /home/tools/bigprobe /tmp/bigprobe; stat /tmp/bigprobe\n'
 	sleep 5
 	printf '/home/tools/hugeprobe &\n'
@@ -906,8 +924,10 @@ pass_group redirection
 require_marker vm.probe VM_PROBE_OK "$log" 'goos> vmprobe'
 require_count vm.large-executable 'vm: all checks passed$' 3 "$log" 'goos> /home/tools/bigprobe'
 require_regex exec.file-backed-responsive '^responsive-while-loading$' 'the shell answered after launching a 12 MiB file-backed program' "$log" 'goos> /home/tools/hugeprobe &'
-require_count bulk.write '^io write, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
-require_count bulk.read '^io read, 1048576 bytes, 16 exchanges' 2 "$log" 'goos> bench io'
+require_window bulk.tmp-write '^io write, 1048576 bytes, 16 exchanges' 'volatile bulk write completed' "$log" 'goos> bench io /tmp/bulk.bin 1M' 'goos> bench io /home/bulk.bin 1M'
+require_window bulk.tmp-read '^io read, 1048576 bytes, 16 exchanges' 'volatile bulk read completed' "$log" 'goos> bench io /tmp/bulk.bin 1M' 'goos> bench io /home/bulk.bin 1M'
+require_window bulk.home-write '^io write, 1048576 bytes, 16 exchanges' 'FAT32 bulk write completed' "$log" 'goos> bench io /home/bulk.bin 1M' 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
+require_window bulk.home-read '^io read, 1048576 bytes, 16 exchanges' 'FAT32 bulk read completed' "$log" 'goos> bench io /home/bulk.bin 1M' 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 require_regex bulk.copy '^file 3[01][0-9][0-9]\.[0-9]* KiB (3[0-9]\{6\} bytes)' 'a 3 MiB copy from the volume' "$log" 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
 	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
