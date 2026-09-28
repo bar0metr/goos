@@ -8,9 +8,9 @@
 //
 //	var manifest = commands.Manifest{...}
 //
-// whose fields are literals, commands.Unbounded or commands.GrantVFS. Reading
-// the declaration from the syntax tree keeps the source the only place a
-// command is described, without compiling it for the host.
+// whose fields are literals, commands.Unbounded or commands grants joined by
+// |. Reading the declaration from the syntax tree keeps the source the only
+// place a command is described, without compiling it for the host.
 package main
 
 import (
@@ -176,11 +176,21 @@ func intValue(expression ast.Expr) (int, error) {
 }
 
 func grantValue(expression ast.Expr) (commands.Grant, error) {
+	if binary, ok := expression.(*ast.BinaryExpr); ok && binary.Op == token.OR {
+		left, err := grantValue(binary.X)
+		if err != nil {
+			return 0, err
+		}
+		right, err := grantValue(binary.Y)
+		return left | right, err
+	}
 	switch {
 	case isSelector(expression, "commands", "GrantVFS"):
 		return commands.GrantVFS, nil
 	case isSelector(expression, "commands", "GrantBlockCheck"):
 		return commands.GrantBlockCheck, nil
+	case isSelector(expression, "commands", "GrantTerminal"):
+		return commands.GrantTerminal, nil
 	default:
 		return 0, fmt.Errorf("want a commands grant")
 	}

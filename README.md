@@ -227,7 +227,11 @@ pipelines of up to four processes, `;` sequences, and background jobs, and
 redirects stdin with `<`, stdout with `>`/`>>`, and stderr with `2>`/`2>>`.
 Every command is a separate process that receives only its standard streams
 and, if its manifest asks, one VFS session: the native application environment
-of specification milestone 6 is complete. The storage path reaches a
+of specification milestone 6 is complete. `gfm`, a two-pane file manager, is
+the first full-screen program: the shell puts the terminal in raw mode for it
+because its manifest asks, and it draws with cursor addressing and 16 ANSI
+colours on the framebuffer and COM1 alike, with no authority beyond its VFS
+session ([file manager](docs/userspace/file-manager.md)). The storage path reaches a
 persistent QEMU block device through an isolated driver, block service, and
 FAT32 filesystem service, and native utilities use `/persist`, `/home` and
 `/state` through VFS.
@@ -258,7 +262,7 @@ shell, and reading back runs inside one VM in the boot test, through `/home`.
 The namespace describes itself. `ls /` names `system`, `tmp`, `persist`, `home`
 and `state` because a mount is listed in the directory it is mounted on (ADR
 0069). `/system` is the boot archive itself, mounted read-only (ADR 0070), so
-the twenty utilities under `/system/bin` are visible and `mkdir /system/backdoor`
+the utilities under `/system/bin` are visible and `mkdir /system/backdoor`
 answers "read-only filesystem". `/home` and `/state` name user data and mutable
 system state on the persistent volume (ADR 0071).
 
@@ -407,8 +411,11 @@ benchmark results under `build/reports/`: host benchmarks of the kernel data
 structures and, through `make test-microbench`, context switch, IPC, VFS read,
 and RAMFS metadata costs measured in a booted guest.
 `make test-console-gui` validates actual framebuffer pixels and injects a shell
-command through QEMU's PS/2 keyboard path in a headless guest. It does not
-require a graphical host session or OCR.
+command through QEMU's PS/2 keyboard path in a headless guest, then drives
+`gfm` with arrows and function keys, quits it, stops a second one with Ctrl-C
+and checks the shell afterwards. It does not require a graphical host session
+or OCR. In `make run-gui`, type `gfm` in the QEMU window to use the file
+manager.
 `make test` is the fast host-side validation set. `make test-all` is the
 canonical complete gate and includes lint, documentation checks, ISO creation,
 and the two-phase QEMU boot/persistence test. Complete serial logs remain in
@@ -468,7 +475,12 @@ GoOS 0.1.5
 ([docs/releases/0.1.5.md](docs/releases/0.1.5.md)) adds an interactive UEFI GOP
 text console without replacing COM1: a permanent supervisor-only framebuffer,
 Spleen 12x24 rendering, capability-checked terminal geometry, interrupt-driven
-PS/2 input, `make run-gui`, and headless pixel and keyboard validation. GoOS is
+PS/2 input, `make run-gui`, and headless pixel and keyboard validation. GoOS
+0.1.6 ([docs/releases/0.1.6.md](docs/releases/0.1.6.md)) adds the `gfm`
+two-pane file manager and what a full-screen program needs under it: F1-F12
+and navigation key sequences, cursor addressing and 16-colour SGR in the
+framebuffer terminal, scoped raw terminal mode granted by the shell, and
+reusable terminal and non-fatal filesystem helpers. GoOS is
 licensed under GPL-3.0-only; third-party components retain their documented
 licenses.
 

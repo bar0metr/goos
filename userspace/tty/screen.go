@@ -221,3 +221,6 @@ func (screen *Screen) observe(data []byte) {
 		}
 	}
 }
+
+// Geometry returns the terminal's columns and rows.
+func (screen *Screen) Geometry() (int, int) { return screen.width(), screen.height() }

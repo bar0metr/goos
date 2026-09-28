@@ -1,8 +1,14 @@
 package keyboard
 
-// Output is the bounded terminal-byte result of one scan-code byte.
+// MaxBytes bounds the terminal bytes one scan-code byte may produce. The
+// longest sequence the decoder emits is a function key, ESC [ 2 4 ~.
+const MaxBytes = 8
+
+// Output is the bounded terminal-byte result of one scan-code byte. A key's
+// sequence is produced whole by one Feed, so the IRQ path can enqueue it all
+// or drop it all.
 type Output struct {
-	Bytes     [3]byte
+	Bytes     [MaxBytes]byte
 	Length    uint8
 	Interrupt bool
 }
@@ -62,6 +68,18 @@ func (decoder *Decoder) Feed(value byte) Output {
 			if !released {
 				return sequence('D')
 			}
+		case 0x47:
+			if !released {
+				return sequence('H')
+			}
+		case 0x4f:
+			if !released {
+				return sequence('F')
+			}
+		case 0x52, 0x53, 0x49, 0x51:
+			if !released {
+				return tilde(editingKeys[code-0x49])
+			}
 		}
 		return Output{}
 	}
@@ -88,6 +106,10 @@ func (decoder *Decoder) Feed(value byte) Output {
 	if released {
 		return Output{}
 	}
+	if number := functionKey(code); number != 0 {
+		// Modifiers do not change a function key's sequence.
+		return tilde(number)
+	}
 
 	shift := decoder.leftShift || decoder.rightShift
 	value, letter := translateUS(code, shift)
@@ -113,11 +135,44 @@ func (decoder *Decoder) Feed(value byte) Output {
 			}
 		}
 	}
-	return Output{Bytes: [3]byte{value}, Length: 1}
+	return Output{Bytes: [MaxBytes]byte{value}, Length: 1}
 }
 
 func sequence(final byte) Output {
-	return Output{Bytes: [3]byte{0x1b, '[', final}, Length: 3}
+	return Output{Bytes: [MaxBytes]byte{0x1b, '[', final}, Length: 3}
+}
+
+// tilde encodes the xterm key sequence ESC [ number ~.
+func tilde(number byte) Output {
+	output := Output{Bytes: [MaxBytes]byte{0x1b, '['}, Length: 2}
+	if number >= 10 {
+		output.Bytes[output.Length] = '0' + number/10
+		output.Length++
+	}
+	output.Bytes[output.Length] = '0' + number%10
+	output.Bytes[output.Length+1] = '~'
+	output.Length += 2
+	return output
+}
+
+// editingKeys maps the extended codes 0x49..0x53 to their xterm numbers:
+// PageUp 5, PageDown 6, Insert 2, Delete 3. Other slots are unused.
+var editingKeys = [0x53 - 0x49 + 1]byte{0x49 - 0x49: 5, 0x51 - 0x49: 6, 0x52 - 0x49: 2, 0x53 - 0x49: 3}
+
+// functionKey returns the xterm number of the F key with make code code, or
+// zero: F1..F12 are ESC [ 11 ~ .. ESC [ 24 ~, skipping 16 and 22.
+func functionKey(code byte) byte {
+	switch {
+	case code >= 0x3b && code <= 0x3f:
+		return 11 + code - 0x3b
+	case code >= 0x40 && code <= 0x44:
+		return 17 + code - 0x40
+	case code == 0x57:
+		return 23
+	case code == 0x58:
+		return 24
+	}
+	return 0
 }
 
 func translateUS(code byte, shift bool) (byte, bool) {

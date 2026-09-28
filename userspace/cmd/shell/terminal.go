@@ -10,6 +10,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/userspace/commands"
 	"goos/userspace/config"
 	"goos/userspace/runtime/sys"
 	terminal "goos/userspace/tty"
@@ -46,6 +47,116 @@ func requestLine(prompt []byte) {
 	reading = correlation
 }
 
+// The terminal's size, as the service reports it, reaches every command as
+// COLUMNS and LINES: a full-screen program lays itself out by them without
+// holding any console capability (ADR 0124).
+var (
+	columnsVariable [16]byte
+	columnsSize     int
+	linesVariable   [16]byte
+	linesSize       int
+	geometryRequest uint64
+)
+
+// requestGeometry asks the terminal service for its size; the answer is taken
+// with the other replies in takeLine.
+func requestGeometry() {
+	if ttyHandle == 0 {
+		return
+	}
+	correlation++
+	request, ok := terminal.Request(terminal.OperationGeometry, nil, correlation)
+	if !ok {
+		return
+	}
+	if !sendTerminal(request) {
+		terminalLost()
+		return
+	}
+	geometryRequest = correlation
+}
+
+func storeGeometry(payload []byte) {
+	columns, rows, ok := terminal.DecodeGeometry(payload)
+	if !ok {
+		return
+	}
+	columnsSize = len(appendVariable(columnsVariable[:0], "COLUMNS=", uint64(columns)))
+	linesSize = len(appendVariable(linesVariable[:0], "LINES=", uint64(rows)))
+}
+
+func appendVariable(target []byte, name string, value uint64) []byte {
+	target = append(target, name...)
+	var digits [20]byte
+	position := len(digits)
+	for {
+		position--
+		digits[position] = byte(value%10) + '0'
+		value /= 10
+		if value == 0 {
+			break
+		}
+	}
+	return append(target, digits[position:]...)
+}
+
+// Raw terminal mode for a full-screen foreground command (ADR 0124). The
+// shell holds the only session with the terminal service, so it is the one
+// that asks: for the foreground job of a system command whose manifest
+// declares GrantTerminal, once PID 1 reports the job started, and back to
+// line mode as soon as the job has ended — whether it exited, crashed, or was
+// stopped.
+var (
+	rawJob    bool
+	rawActive bool
+)
+
+func setTerminalMode(operation terminal.Operation) {
+	if ttyHandle == 0 {
+		return
+	}
+	correlation++
+	if request, ok := terminal.Request(operation, nil, correlation); ok && !sendTerminal(request) {
+		terminalLost()
+	}
+}
+
+// startRawJob switches the terminal to raw mode for the foreground job.
+func startRawJob() {
+	if rawJob && !rawActive {
+		rawActive = true
+		setTerminalMode(terminal.OperationRawMode)
+	}
+}
+
+// endRawJob returns the terminal to line mode after the job, which also
+// resets whatever the program left on the screen.
+func endRawJob() {
+	rawJob = false
+	if rawActive {
+		rawActive = false
+		setTerminalMode(terminal.OperationLineMode)
+		mark("SHELL_TERMINAL_RESTORED_OK\n")
+	}
+}
+
+// wantsRawTerminal reports whether word names a system command that asks for
+// raw terminal mode. A program path never does: only the immutable system
+// image's manifests are trusted, as PID 1 trusts them for grants.
+func wantsRawTerminal(word []byte) bool {
+	for _, value := range word {
+		if value == '/' {
+			return false
+		}
+	}
+	index, ok := systemCommands()
+	if !ok {
+		return false
+	}
+	entry, found := commands.Lookup(index, word)
+	return found && entry.Grants&commands.GrantTerminal != 0
+}
+
 func redraw(prompt []byte) {
 	if ttyHandle == 0 {
 		return
@@ -75,6 +186,12 @@ func installTerminal(session handle.ID) {
 	}
 	ttyHandle, reading, typedSize = session, 0, 0
 	mark("SHELL_TERMINAL_REPLACED_OK\n")
+	requestGeometry()
+	// A restarted service starts in line mode; a full-screen job still
+	// running needs raw mode again.
+	if rawActive {
+		setTerminalMode(terminal.OperationRawMode)
+	}
 }
 
 // installFilesystem takes the filesystem session PID 1 hands over after the
@@ -106,8 +223,10 @@ func sendTerminal(message ipc.Message) bool {
 	return ok && sys.IPCSend(ttyHandle, ttyWire[:size]) == 0
 }
 
-// takeLine returns the answer to the outstanding read if it has arrived. The
-// terminal service's other replies, acknowledgements of redraws, are consumed.
+// takeLine returns the answer to the outstanding read if it has arrived: a
+// line, raw bytes in raw mode, an interrupt or end of input. The terminal
+// service's other replies, acknowledgements and the terminal's size, are
+// consumed.
 // The returned text aliases a buffer the next call reuses.
 func takeLine() (terminal.Result, []byte, bool) {
 	for ttyHandle != 0 {
@@ -125,11 +244,15 @@ func takeLine() (terminal.Result, []byte, bool) {
 			continue
 		}
 		message, valid := ipc.Decode(ttyWire[:size])
-		if !valid || reading == 0 || message.Correlation != reading {
+		if !valid {
 			continue
 		}
 		result, text, valid := terminal.DecodeReply(&message)
-		if !valid {
+		if valid && result == terminal.ResultGeometry && message.Correlation == geometryRequest {
+			storeGeometry(text)
+			continue
+		}
+		if !valid || reading == 0 || message.Correlation != reading {
 			continue
 		}
 		reading = 0

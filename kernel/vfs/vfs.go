@@ -559,11 +559,13 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		return status
 	}
 	targetMount, parent, name, status := namespace.resolveParent(target)
-	if status != StatusOK || sourceMount != targetMount {
-		if status != StatusOK {
-			return status
-		}
-		return StatusInvalidArgument
+	if status != StatusOK {
+		return status
+	}
+	if sourceMount != targetMount {
+		// A rename moves a name within one filesystem; moving between two is
+		// a copy, which is the caller's to make.
+		return StatusUnsupported
 	}
 	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
 	if status == StatusOK {

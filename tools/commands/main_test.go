@@ -39,6 +39,20 @@ var manifest = commands.Manifest{Usage: "aa FILE", Summary: "first", MinArgs: 1,
 	}
 }
 
+func TestBuildJoinsGrants(t *testing.T) {
+	root := t.TempDir()
+	writeCommand(t, root, "tui", `package main
+var manifest = commands.Manifest{Usage: "tui", Summary: "full screen", Grants: commands.GrantVFS | commands.GrantTerminal}`)
+	index, err := build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, _, ok := commands.Next(index, 0)
+	if !ok || entry.Grants != commands.GrantVFS|commands.GrantTerminal {
+		t.Fatalf("entry = %+v", entry)
+	}
+}
+
 func TestBuildRefusesBadManifests(t *testing.T) {
 	for reason, source := range map[string]string{
 		"missing": `package main`,
@@ -51,6 +65,10 @@ var manifest = other.Manifest{Usage: "cmd", Summary: "x"}`,
 var manifest = commands.Manifest{Usage: "cmd", Summary: "x", Root: true}`,
 		"unknown grant": `package main
 var manifest = commands.Manifest{Usage: "cmd", Summary: "x", Grants: commands.GrantEverything}`,
+		"unknown joined grant": `package main
+var manifest = commands.Manifest{Usage: "cmd", Summary: "x", Grants: commands.GrantVFS | commands.GrantEverything}`,
+		"added grants": `package main
+var manifest = commands.Manifest{Usage: "cmd", Summary: "x", Grants: commands.GrantVFS + commands.GrantTerminal}`,
 		"foreign usage": `package main
 var manifest = commands.Manifest{Usage: "other", Summary: "x"}`,
 		"bad range": `package main

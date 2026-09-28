@@ -117,3 +117,61 @@ send_key ret
 wait_for_log '^PS2_KEYBOARD_OK' 'PS/2 input marker'
 wait_for_log '^graphical-keyboard-ok' 'graphical keyboard command output'
 printf 'PASS console-keyboard\n'
+
+# The file manager, driven only through IRQ1 (ADR 0124). Its screen is ANSI
+# output mirrored to COM1, so the serial log shows what it drew; the markers
+# it and the terminal write after raw mode ends prove the rest.
+count_in_log() {
+	grep -c "$1" "$log" 2>/dev/null || true
+}
+
+wait_for_count() {
+	pattern=$1
+	want=$2
+	description=$3
+	elapsed=0
+	while [ "$(count_in_log "$pattern")" -lt "$want" ]; do
+		kill -0 "$pid" 2>/dev/null || fail "QEMU exited before $description"
+		[ "$elapsed" -lt 60 ] || fail "$description timeout"
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+}
+
+type_word() {
+	for key in "$@"; do
+		send_key "$key"
+	done
+}
+
+type_word c d spc slash t m p ret
+type_word g f m ret
+wait_for_count 'F10.* Quit' 1 'file manager screen'
+send_key f1
+wait_for_log 'gfm keys' 'file manager help'
+send_key esc
+type_word tab down up home end pgdn pgup tab
+send_key f7
+wait_for_log 'Create directory' 'mkdir dialog'
+type_word f m t e s t ret
+wait_for_log 'Created "fmtest"' 'file manager mkdir'
+monitor_command "screendump build/reports/gfm.ppm" || true
+send_key f10
+wait_for_log 'GFM_EXIT_OK' 'file manager exit'
+wait_for_log 'GFM_RAW_INPUT_OK' 'raw keys reaching the file manager'
+wait_for_log 'GFM_FUNCTION_KEYS_OK' 'function keys reaching the file manager'
+wait_for_log 'GFM_MKDIR_OK' 'file manager mkdir marker'
+wait_for_log 'TTY_RAW_MODE_OK' 'terminal leaving raw mode'
+wait_for_count 'SHELL_TERMINAL_RESTORED_OK' 1 'shell restoring line mode'
+type_word l s spc slash t m p ret
+wait_for_log '^fmtest/' 'shell input after the file manager'
+printf 'PASS console-file-manager\n'
+
+# A file manager stopped with Ctrl-C leaves a usable terminal too.
+type_word g f m ret
+wait_for_count 'F10.* Quit' 2 'second file manager screen'
+send_key ctrl-c
+wait_for_count 'SHELL_TERMINAL_RESTORED_OK' 2 'line mode after Ctrl-C'
+type_word e c h o spc a f t e r minus g f m minus o k ret
+wait_for_log '^after-gfm-ok' 'shell input after a stopped file manager'
+printf 'PASS console-file-manager-interrupt\n'

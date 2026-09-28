@@ -41,3 +41,27 @@ func TestUnsupportedScalarUsesReplacement(t *testing.T) {
 		}
 	}
 }
+
+func TestFontCoversLightBoxDrawing(t *testing.T) {
+	replacement := GlyphFor(ReplacementCharacter)
+	seen := map[Glyph]rune{}
+	for _, scalar := range []rune{'─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'} {
+		glyph := GlyphFor(scalar)
+		if glyph == (Glyph{}) || glyph == replacement {
+			t.Fatalf("box drawing U+%04X is not embedded", scalar)
+		}
+		if previous, found := seen[glyph]; found {
+			t.Fatalf("U+%04X and U+%04X share a glyph", previous, scalar)
+		}
+		seen[glyph] = scalar
+	}
+	// The horizontal line spans the whole cell so frames join without gaps.
+	if horizontal := GlyphFor('─'); horizontal[11] != 0xfff0 {
+		t.Fatalf("Spleen ─ signature changed: %#v", horizontal)
+	}
+	for _, scalar := range []rune{'═', '╔', '┄', 0x2501, 0x253d} {
+		if GlyphFor(scalar) != replacement {
+			t.Fatalf("U+%04X should use the replacement glyph", scalar)
+		}
+	}
+}

@@ -124,6 +124,29 @@ also requires `FRAMEBUFFER_USER_ISOLATION_OK`; it does not inspect text or
 require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
 
+The same run then drives the file manager through IRQ1 only (ADR 0124): `cd
+/tmp`, `gfm`, F1 and Escape, Tab, arrows, Home, End, PageDown, PageUp, F7 with
+a typed name, and F10. `gfm`'s screen is ANSI output mirrored to COM1, so the
+log shows its key bar, help and status text; after it exits, `GFM_EXIT_OK`,
+`GFM_RAW_INPUT_OK`, `GFM_FUNCTION_KEYS_OK`, `GFM_MKDIR_OK`, `TTY_RAW_MODE_OK`
+and `SHELL_TERMINAL_RESTORED_OK` prove the path from PS/2 through the decoder,
+the ring, raw mode, the shell and the key parser, and `ls /tmp` listing
+`fmtest/` proves the shell reads lines again. A second `gfm` is stopped with
+Ctrl-C, and `echo after-gfm-ok` must still run. A screendump of the manager is
+kept as `build/reports/gfm.ppm` for review.
+
+Host tests cover the rest of the stack: every F key's make and break codes and
+exact sequence, the E0 navigation keys and the eight-byte bound
+(`kernel/keyboard`); multi-parameter CSI, CUP, CHA, erase variants, all SGR
+colours, split and malformed sequences, and padding guards
+(`kernel/framebuffer`); the key parser, output builder and width helpers
+(`userspace/terminal`); the raw-mode protocol, raw input buffer and reset
+sequence (`userspace/tty`); and the manager's sorting, movement, scrolling,
+refresh, dialogs, copy, move, mkdir and delete, error paths, layout at several
+geometries and allocation-free rendering, against a model filesystem and a
+model terminal that fails on any write past a row or into the scrolling corner
+(`userspace/filemanager`).
+
 The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace
 services, storage, filesystems, shell commands, pipelines, failure recovery,

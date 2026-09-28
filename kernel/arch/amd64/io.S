@@ -12,6 +12,7 @@
 // arrives whole even when the terminal service reads it a tick later.
 .set GOOS_CONSOLE_RING, 8192
 .set GOOS_CONSOLE_RING_MASK, 8191
+.set GOOS_KEYBOARD_BYTES, 8
 
 .section .text
 
@@ -1041,8 +1042,11 @@ goos_irq_serial:
     iretq
 
 // IRQ1 reads exactly one i8042 data byte. The bounded decoder returns at most
-// one terminal escape sequence, which is appended to the same ring as UART
-// input. Arrival order is therefore the order in which IRQ handlers run.
+// one terminal key sequence (up to eight bytes, an F key is five), which is
+// appended to the same ring as UART input. Arrival order is therefore the
+// order in which IRQ handlers run. A sequence goes in whole or not at all: a
+// ring without room for all of it drops the key rather than enqueue a prefix
+// such as ESC [ 1 that would read as other keys.
 .global goos_irq_keyboard
 goos_irq_keyboard:
     GOOS_ENTER_LOW .L_irq_keyboard
@@ -1069,6 +1073,7 @@ goos_irq_keyboard:
     movw $0x60, %dx
     inb %dx, %al
     movzbq %al, %rcx
+    leaq goos_keyboard_bytes(%rip), %rdx
     subq $32, %rsp
     callq goos_keyboard_feed
     addq $32, %rsp
@@ -1079,20 +1084,32 @@ goos_irq_keyboard:
     movq $1, goos_ps2_keyboard_event_pending(%rip)
 .keyboard_bytes:
     movq %rdi, %r8
-    shrq $24, %r8
-    andq $3, %r8
-.keyboard_byte_loop:
-    testq %r8, %r8
+    andq $0xff, %r8
     jz .keyboard_eoi
-    movq %rdi, %rax
+    cmpq $GOOS_KEYBOARD_BYTES, %r8
+    ja .keyboard_eoi
+    // Free slots are (tail - head - 1) mod size; one slot stays empty so a
+    // full ring is distinguishable from an empty one.
+    movq goos_console_tail(%rip), %rax
+    subq goos_console_head(%rip), %rax
+    decq %rax
+    andq $GOOS_CONSOLE_RING_MASK, %rax
+    cmpq %r8, %rax
+    jae .keyboard_fits
+    addq %r8, goos_console_dropped(%rip)
+    jmp .keyboard_eoi
+.keyboard_fits:
+    leaq goos_keyboard_bytes(%rip), %r9
+.keyboard_byte_loop:
+    movzbq (%r9), %rax
     callq .console_enqueue
     testq %rax, %rax
     jz .keyboard_byte_next
     movq $1, goos_ps2_keyboard_event_pending(%rip)
 .keyboard_byte_next:
-    shrq $8, %rdi
+    incq %r9
     decq %r8
-    jmp .keyboard_byte_loop
+    jnz .keyboard_byte_loop
 .keyboard_eoi:
     movl $0, 0x3fffD0b0
     movb $0x20, %al
@@ -1629,6 +1646,10 @@ goos_console_interrupt:
     .quad 0
 goos_console_ring:
     .zero GOOS_CONSOLE_RING
+// goos_keyboard_bytes receives the decoder's key sequence. Only IRQ1 uses it,
+// with interrupts disabled, so it needs no lock.
+goos_keyboard_bytes:
+    .zero GOOS_KEYBOARD_BYTES
 
 .section .text
 // goos_console_take removes one byte, returning it with bit 8 set, or zero when

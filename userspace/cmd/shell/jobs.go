@@ -82,7 +82,9 @@ func freeSlot(background bool) (uint8, bool) {
 // While a foreground job runs (foreground is its slot), a read stays
 // outstanding at the terminal service: a typed line is written to the job's
 // standard input, Ctrl-C stops the job, and Ctrl-D ends its input. The job's
-// input arrives from PID 1 in a started message before its reply.
+// input arrives from PID 1 in a started message before its reply. A job that
+// asked for raw terminal mode gets it then, and what is typed reaches it byte
+// by byte instead of a line at a time.
 func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 	var input handle.ID
 	for {
@@ -99,6 +101,10 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 				switch result {
 				case terminal.ResultLine:
 					if input != 0 && !feedInput(input, text) {
+						closeInput(&input)
+					}
+				case terminal.ResultRaw:
+					if input != 0 && !writeStream(input, text, inputDeadline) {
 						closeInput(&input)
 					}
 				case terminal.ResultInterrupt:
@@ -140,6 +146,7 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 		if _, started, job, ok := execproto.DecodeStarted(message); ok {
 			if job == correlation && input == 0 {
 				input = started
+				startRawJob()
 			} else {
 				sys.HandleClose(started)
 			}

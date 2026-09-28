@@ -15,8 +15,13 @@ const (
 	// GrantBlockCheck asks PID 1 for an exclusive, read-only storage slice.
 	// PID 1 grants it only after a clean VFS unmount.
 	GrantBlockCheck
+	// GrantTerminal asks the shell to put the terminal in raw mode while the
+	// command runs in the foreground, for a full-screen program (ADR 0124).
+	// It carries no handle: the command still reads its standard input and
+	// writes its standard output, and gets no console authority.
+	GrantTerminal
 
-	knownGrants = GrantVFS | GrantBlockCheck
+	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
