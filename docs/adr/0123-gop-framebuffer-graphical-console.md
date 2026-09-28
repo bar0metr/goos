@@ -81,8 +81,12 @@ the mapped address to pixels. Construction revalidates geometry and backing
 length. Pixel, clear, and rectangle operations clip to visible width and
 height, never touch stride padding, and allocate nothing. The first graphical
 milestone clears the screen to dark blue and draws a white band plus red,
-green, and blue bars after CR3 replacement. Fonts and terminal parsing remain
-later phases.
+green, and blue bars after CR3 replacement. The same package embeds a fixed
+8x16 bitmap font with printable ASCII, Russian Cyrillic, and a visible
+replacement glyph. Its incremental UTF-8 decoder preserves partial sequences
+between writes and recovers from malformed input. Font provenance is recorded
+in `docs/third-party-font.md`. Terminal layout and escape parsing remain later
+phases.
 
 The release will contain one graphical text console, not a general graphics
 API. A future userspace graphics system would require a separate memory and
