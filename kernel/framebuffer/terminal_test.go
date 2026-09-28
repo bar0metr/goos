@@ -98,3 +98,38 @@ func TestTerminalMalformedCSIResetsBoundedParser(t *testing.T) {
 		t.Fatalf("parser state %d cursor %d", terminal.state, terminal.column)
 	}
 }
+
+func TestTerminalValidationMarkerRemainsPinnedAcrossScroll(t *testing.T) {
+	terminal, pixels := testTerminal(t, 80, 25, 0)
+	if !terminal.EnableValidationMarker() {
+		t.Fatal("validation marker was not enabled")
+	}
+	for row := 0; row < terminal.rows+3; row++ {
+		terminal.WriteString("scroll\n")
+	}
+	for column := 0; column < terminal.columns; column++ {
+		terminal.ConsumeByte('X')
+	}
+	terminal.WriteString("\x1b[2J\x1b[K")
+	terminal.buffer.FillRect(terminal.buffer.Width()-ValidationMarkerSize,
+		terminal.buffer.Height()-ValidationMarkerSize, ValidationMarkerSize, ValidationMarkerSize, terminal.background)
+	terminal.RefreshValidationMarker()
+	magenta := terminal.buffer.Color(255, 0, 255)
+	cyan := terminal.buffer.Color(0, 255, 255)
+	markerPixels := 0
+	for y := 0; y < terminal.buffer.Height(); y++ {
+		for x := 0; x < terminal.buffer.Width(); x++ {
+			pixel := pixels[y*terminal.buffer.stride+x]
+			if pixel != magenta && pixel != cyan {
+				continue
+			}
+			markerPixels++
+			if x < terminal.buffer.Width()-ValidationMarkerSize || y < terminal.buffer.Height()-ValidationMarkerSize {
+				t.Fatalf("validation marker trail at (%d,%d)", x, y)
+			}
+		}
+	}
+	if markerPixels != ValidationMarkerSize*ValidationMarkerSize {
+		t.Fatalf("validation marker has %d pixels", markerPixels)
+	}
+}

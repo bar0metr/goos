@@ -78,6 +78,10 @@ more RAM and applies to either target and every QEMU test. `make run-debug` adds
 QEMU waits for a debugger on TCP port 1234 before executing the first
 instruction.
 
+`make test-console-gui` performs the non-interactive counterpart: it keeps the
+VGA device but uses `-display none`, captures a QEMU monitor screendump, and
+checks a validation-only framebuffer marker pixel-for-pixel.
+
 `make test` runs the fast host unit, artifact-integration, and security targets
 without starting QEMU. `make test-boot` performs the bounded two-phase QEMU boot
 and persistence validation. It keeps the complete serial transcripts in

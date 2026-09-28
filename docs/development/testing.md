@@ -104,10 +104,18 @@ reboot persistence.
 hierarchy. It opens a host window, while `make test-boot` remains headless and
 does not require Cocoa, GTK, SDL, or another host display backend. The manual
 target defaults to `QEMU_DISPLAY=cocoa` and permits a host-specific override.
-It asserts the serial `FRAMEBUFFER_TERMINAL_OK` initialization marker. It also
+The boot test asserts the serial `FRAMEBUFFER_TERMINAL_OK` initialization marker. It also
 requires `PS2_KEYBOARD_OK`, proving QEMU acknowledged the bounded i8042
 initialization before userspace starts. Keystroke behavior remains a manual
 `make run-gui` check because the automated boot target has no graphical input.
+
+`make test-console-gui` is the automated framebuffer test. It creates a fresh
+disk, boots the validation ISO with standard VGA and `-display none`, captures
+serial output, and waits for `FRAMEBUFFER_VALIDATION_PATTERN_OK`. It then sends
+`screendump` over a private QEMU monitor socket and verifies the exact
+magenta/cyan 16x16 checkerboard in the lower-right corner of the resulting PPM.
+The test does not inspect text or require OCR. Its log and image are retained as
+`build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
 
 The main phase has a 180-second bound. It validates kernel initialization,
 memory isolation, scheduler/process behavior, IPC and capabilities, userspace

@@ -33,10 +33,28 @@ func AttachFramebuffer(buffer framebuffer.Buffer) bool {
 	return true
 }
 
+// EnableValidationMarker pins the validation-only framebuffer checkerboard.
+func EnableValidationMarker() bool {
+	return graphicsLive && graphical.EnableValidationMarker()
+}
+
 func (Writer) WriteByte(value byte) {
 	serial.WriteByte(value)
 	if graphicsLive {
 		graphical.ConsumeByte(value)
+		graphical.RefreshValidationMarker()
+	}
+}
+
+// Write preserves the byte-exact ConsoleWrite ABI and refreshes validation
+// overlays once after the complete batch.
+func (Writer) Write(value []byte) {
+	for _, item := range value {
+		serial.WriteByte(item)
+	}
+	if graphicsLive {
+		graphical.Write(value)
+		graphical.RefreshValidationMarker()
 	}
 }
 
@@ -48,6 +66,7 @@ func (Writer) WriteString(value string) {
 	for index := 0; index < len(value); index++ {
 		graphical.ConsumeByte(value[index])
 	}
+	graphical.RefreshValidationMarker()
 }
 
 // Panic writes the complete diagnostic to serial before attempting graphics.
@@ -59,6 +78,7 @@ func Panic(message string) {
 		graphical.WriteString("PANIC: ")
 		graphical.WriteString(message)
 		graphical.WriteString("\n")
+		graphical.RefreshValidationMarker()
 	}
 }
 

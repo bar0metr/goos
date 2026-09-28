@@ -406,6 +406,8 @@ run-debug` starts QEMU paused with a GDB server on TCP port
 benchmark results under `build/reports/`: host benchmarks of the kernel data
 structures and, through `make test-microbench`, context switch, IPC, VFS read,
 and RAMFS metadata costs measured in a booted guest.
+`make test-console-gui` validates actual framebuffer pixels from a headless QEMU
+screendump; it does not require a graphical host session or OCR.
 `make test` is the fast host-side validation set. `make test-all` is the
 canonical complete gate and includes lint, documentation checks, ISO creation,
 and the two-phase QEMU boot/persistence test. Complete serial logs remain in

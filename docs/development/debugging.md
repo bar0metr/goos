@@ -20,6 +20,7 @@ or the GOP mode exposed by OVMF.
 | `make run` | terminal only; redirect if needed: `make run 2>&1 \| tee build/logs/run.log` |
 | `make run-gui` | graphical window plus COM1 in the terminal |
 | `make test-boot` | `build/logs/boot.log`, `build/logs/reboot.log` |
+| `make test-console-gui` | `build/logs/console-gui.log`, `build/reports/console-gui.ppm` |
 | `make test-stress` | one log per guest under `build/stress/hz<rate>/` |
 | `make test-latency` | `build/logs/latency-hz<rate>.log` |
 
