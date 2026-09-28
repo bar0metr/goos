@@ -217,6 +217,10 @@ goos>
 
 Boot and integration tests remain mandatory; only their placement changes.
 
+The 0.1.5 framebuffer work keeps `make run` headless for serial automation and
+adds `make run-gui` for manual graphical-console validation. Both targets boot
+the same ISO and persistent disk and retain COM1 output.
+
 Current progress: ADR 0058 splits the build into a normal and a validation
 variant. A normal build boots quietly to a banner, `Starting services...`, one
 `[ OK ]` line per service, and the prompt. `VALIDATION=1` keeps the kernel

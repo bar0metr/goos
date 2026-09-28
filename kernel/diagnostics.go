@@ -6,6 +6,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -34,7 +35,7 @@ func traceWaitKey(kind diag.Kind, pid process.ID, task sched.TaskID, key kernelw
 // else can reach that physical page, so memory aliasing can be told apart from
 // a genuinely stale handle.
 func traceDeniedInterests(root, address, count uint64) {
-	out := diagWriter{console: amd64.NewCOM1()}
+	out := diagWriter{console: kernelconsole.New()}
 	out.text("DIAG denied wire=")
 	for index := uint64(0); index < count*kcall.WaitAnyInterestSize && index < uint64(len(waitAnyWire)); index += 8 {
 		out.console.WriteHex(decodeUint64(waitAnyWire[index : index+8]))
@@ -171,12 +172,12 @@ func (handler nativeCallHandler) Diagnostics(device uint64, address uint64) kcal
 	}
 	dumpDiagnostics(owner.ID())
 	if address != 0 {
-		traceAddress(diagWriter{console: amd64.NewCOM1()}, handler.root, address)
+		traceAddress(diagWriter{console: kernelconsole.New()}, handler.root, address)
 	}
 	return kcall.StatusOK
 }
 
-type diagWriter struct{ console amd64.COM1 }
+type diagWriter struct{ console kernelconsole.Writer }
 
 func (writer diagWriter) text(value string) { writer.console.WriteString(value) }
 
@@ -206,7 +207,7 @@ func (writer diagWriter) end() { writer.console.WriteString("\n") }
 var handleTypeNames = [...]string{"invalid", "process", "task", "memory", "channel", "device", "irq", "stream"}
 
 func dumpDiagnostics(requester process.ID) {
-	out := diagWriter{console: amd64.NewCOM1()}
+	out := diagWriter{console: kernelconsole.New()}
 	state := amd64.ReadSchedulerState()
 	out.text("DIAG begin")
 	out.uint("tick", amd64.TimerTicks())

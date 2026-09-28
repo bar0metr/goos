@@ -6,6 +6,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
@@ -38,7 +39,7 @@ func logRecord(record logfmt.Record) {
 	systemLog.Append(record)
 	if record.Level >= consoleThreshold {
 		size := logfmt.Format(record, logText[:])
-		console := amd64.NewCOM1()
+		console := kernelconsole.New()
 		for _, character := range logText[:size] {
 			console.WriteByte(character)
 		}

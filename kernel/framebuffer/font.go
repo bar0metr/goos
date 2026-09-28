@@ -34,3 +34,20 @@ func GlyphFor(scalar rune) Glyph {
 	}
 	return glyph
 }
+
+// DrawGlyph paints one complete cell. Buffer clipping keeps partially visible
+// cells inside the framebuffer and the operation allocates no memory.
+func (buffer *Buffer) DrawGlyph(x, y int, glyph Glyph, foreground, background uint32) {
+	if buffer == nil {
+		return
+	}
+	for row, bits := range glyph {
+		for column := 0; column < GlyphWidth; column++ {
+			pixel := background
+			if bits&(0x80>>column) != 0 {
+				pixel = foreground
+			}
+			buffer.PutPixel(x+column, y+row, pixel)
+		}
+	}
+}

@@ -68,9 +68,13 @@ is linked, against the kernel stacks' 8 KiB guard. Each check prints the
 largest frame of the binary; `go run ./tools/stackframes -v BINARY` lists
 every frame (ADR 0088).
 
-`make run` boots the ISO with 512 MiB in QEMU and attaches COM1 to the current
-terminal; `MEMORY=4G` gives the guest more RAM, and applies to every QEMU test. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP port
-1234 before executing the first instruction.
+`make run` boots the ISO headlessly with 512 MiB in QEMU and attaches COM1 to
+the current terminal. `make run-gui` uses the same OVMF, ISO, persistent disk,
+q35 machine, and COM1 connection, but also opens QEMU's VGA window for manual
+framebuffer-console validation. `MEMORY=4G` gives the guest more RAM and
+applies to either target and every QEMU test. `make run-debug` adds `-s -S`:
+QEMU waits for a debugger on TCP port 1234 before executing the first
+instruction.
 
 `make test` runs the fast host unit, artifact-integration, and security targets
 without starting QEMU. `make test-boot` performs the bounded two-phase QEMU boot
@@ -80,7 +84,7 @@ PASS lines or a bounded diagnostic for the first failed named check. `make
 test-all` is the canonical complete Definition-of-Done gate and includes host
 tests, lint, documentation checks, ISO construction, and QEMU validation. See
 `docs/development/testing.md` for the target hierarchy and harness details.
-Boot tests use a disposable test disk; `make run` retains
+Boot tests use a disposable test disk; `make run` and `make run-gui` retain
 `build/virtio-blk.img` across interactive boots.
 `make test-performance` writes the host benchmarks, such as
 `build/reports/page-allocation.txt`, and the in-guest microbenchmarks of

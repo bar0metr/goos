@@ -6,6 +6,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 )
@@ -32,7 +33,7 @@ func (handler nativeCallHandler) ValidationFault(device uint64) kcall.Status {
 	if !ok {
 		return kcall.StatusNotFound
 	}
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	console.WriteString("KERNEL_STACK_GUARD ")
 	console.WriteHex(low)
 	console.WriteString(" ")

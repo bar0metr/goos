@@ -13,6 +13,7 @@ import (
 	"goos/kernel/boot"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
 	"goos/kernel/executable"
 	kernelframebuffer "goos/kernel/framebuffer"
@@ -174,10 +175,7 @@ func putUint32(data []byte, value uint32) {
 }
 
 func panicSerial(message string) {
-	console := amd64.NewCOM1()
-	console.WriteString("PANIC: ")
-	console.WriteString(message)
-	console.WriteString("\n")
+	kernelconsole.Panic(message)
 	for {
 		amd64.Halt()
 	}
@@ -201,7 +199,7 @@ func inLoaderMemory(address uint64) bool {
 var consoleOverrunReported bool
 
 func main() {
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	console.Init()
 	console.WriteString(version.Name + " " + version.Release + "\n\n")
 	console.WriteString("CPU: " + version.Machine + "\n")
@@ -388,6 +386,13 @@ func main() {
 			} else {
 				drawFramebufferMilestone(&graphicalFramebuffer)
 				mark("FRAMEBUFFER_PRIMITIVES_OK")
+				if kernelconsole.AttachFramebuffer(graphicalFramebuffer) {
+					mark("FRAMEBUFFER_TERMINAL_OK")
+				} else {
+					console.WriteString("Graphics: terminal construction failed, using serial console\n")
+					framebufferVirtual = 0
+					bootInfo.Framebuffer = boot.FramebufferInfo{}
+				}
 			}
 		}
 	}
@@ -414,7 +419,7 @@ var bootVirtioBlock pci.Device
 //
 //export goos_boot_continue
 func bootContinue() {
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	pageTable := kernelPageTable
 	virtioBlock := bootVirtioBlock
 	if validation.Enabled && !amd64.BootStackGuarded(pageTable) {
@@ -639,7 +644,7 @@ func drawFramebufferMilestone(buffer *kernelframebuffer.Buffer) {
 // mark prints a validation marker. Normal builds print none.
 func mark(marker string) {
 	if validation.Enabled {
-		port := amd64.NewCOM1()
+		port := kernelconsole.New()
 		port.WriteString(marker)
 		port.WriteString("\n")
 	}

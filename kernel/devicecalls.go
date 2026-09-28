@@ -9,6 +9,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
@@ -33,7 +34,7 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 		}
 		return kcall.StatusInvalidArgument
 	}
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	for _, value := range data {
 		console.WriteByte(value)
 	}

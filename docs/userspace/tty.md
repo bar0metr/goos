@@ -11,7 +11,9 @@ and it writes that to the console around the line being typed.
 keyboard ──UART──▶ kernel ring ──ConsoleRead──▶ tty ──GTTY lines──▶ shell
                                                  ▲                    │
                                                  │  command input ◀───┘
-shell, commands ──terminal output stream─────────┘──ConsoleWrite──▶ console
+shell, commands ──terminal output stream─────────┘──ConsoleWrite──▶ logical console
+                                                                  ├──▶ COM1
+                                                                  └──▶ framebuffer
 ```
 
 ## Line discipline
@@ -93,8 +95,15 @@ two seconds per flush, then it drops that output; a command five seconds, then
 it exits with status 2).
 
 The kernel's warning echo, panics and early console, PID 1's boot lines, and the
-system services' own reports still reach the console directly
+system services' own reports still reach the logical console directly
 ([ADR 0089](../adr/0089-terminal-output-and-session-restart.md)).
+
+The kernel framebuffer terminal only renders the byte stream. It tracks the
+cursor, incremental UTF-8, fixed 8x16 glyphs, scrolling, and the bounded
+`ESC[2J`, `ESC[H`, `ESC[K`, and `ESC[nD` subset used by `Screen`. Line editing,
+session ownership, foreground jobs, prompts, and Ctrl-C policy remain here in
+the userspace TTY. COM1 is written first and remains available when GOP is
+absent or framebuffer initialization fails.
 
 ## Supervision
 

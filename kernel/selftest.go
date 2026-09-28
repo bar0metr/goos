@@ -5,6 +5,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
+	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -47,7 +48,7 @@ func awaitSchedulerSelfTest() {
 
 func runKernelSelfTests(pageTable uint64) {
 	checkHighMemory(pageTable)
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	physicalA, allocatedA := pageAllocator.Allocate()
 	physicalB, allocatedB := pageAllocator.Allocate()
 	if !allocatedA || !allocatedB ||
@@ -416,7 +417,7 @@ func startSelfTestTasks() {
 }
 
 func awaitValidationBoot() {
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	for userExited == 0 || amd64.UserFaults() == 0 || highKernelAccessFaults == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
 		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
@@ -629,7 +630,7 @@ func checkHighMemory(pageTable uint64) {
 	if after := pageAllocator.Statistics(); after.FreePages != before.FreePages {
 		panicSerial("high memory check leaked pages")
 	}
-	console := amd64.NewCOM1()
+	console := kernelconsole.New()
 	console.WriteString("PMM high page: ")
 	console.WriteHex(physical)
 	console.WriteString("\n")

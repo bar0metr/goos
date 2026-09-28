@@ -71,6 +71,9 @@ The slot exists only in the kernel root; process roots do not copy it. Before
 the PMM is initialized, boot rejects graphics when any mapped framebuffer page
 overlaps a UEFI conventional-memory region, so device pages can never enter
 the allocator's free pool (ADR 0123).
+The framebuffer terminal keeps only cursor, UTF-8, and bounded escape-parser
+state. Glyph rendering writes the mapped pixels directly, and scrolling uses
+overlap-safe in-place copies; it allocates no shadow framebuffer or history.
 
 Ordinary identity-mapped pages are writable and non-executable. The loaded PE
 image is validated in memory and its section flags are translated into leaf
