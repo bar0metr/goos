@@ -426,8 +426,7 @@ GoOS 0.1.5 (docs/releases/0.1.5.md) adds the UEFI GOP framebuffer console,
 Spleen 12x24 text rendering, unified interrupt-driven PS/2 and serial input,
 geometry-aware wrapped-line redraw, a manual graphical QEMU target, and
 headless pixel and keyboard validation while retaining COM1 as the primary
-diagnostic and fallback path. Priority 5, Linux ELF compatibility, follows
-this release.
+diagnostic and fallback path.
 
 GoOS 0.1.6 (docs/releases/0.1.6.md) adds `gfm`, a two-pane file manager, as
 the first full-screen program, and the terminal support under it: F1-F12 and
