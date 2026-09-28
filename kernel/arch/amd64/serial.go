@@ -152,6 +152,18 @@ func Halt()
 //export goos_has_nx
 func HasNX() bool
 
+// HasPAT reports whether IA32_PAT is available.
+//
+//export goos_has_pat
+func HasPAT() bool
+
+// ConfigurePAT installs the architectural WB, WT, UC-, UC layout while
+// caching is disabled, verifies the MSR, and preserves the caller's CR0 and
+// interrupt state.
+//
+//export goos_configure_pat
+func ConfigurePAT() bool
+
 // EnableNXAndWriteProtect enables EFER.NXE, CR0.WP, and CR4.OSFXSR/OSXMMEXCPT.
 // After this call the CPU enforces non-executable and supervisor read-only
 // mappings, and FXSAVE covers the SSE registers the scheduler switches.

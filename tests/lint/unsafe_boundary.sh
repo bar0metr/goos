@@ -1,7 +1,8 @@
 #!/bin/sh
 # Checks that unsafe code stays inside its audited packages (ADR 0095).
 #
-#   kernel, internal: "unsafe" only under the uefi, vm, and amd64 directories.
+#   kernel, internal: "unsafe" only under the uefi, vm, amd64, and framebuffer
+#   directories.
 #   userspace: "unsafe", //go:linkname, and //go:extern only under
 #   userspace/runtime, the layer that owns the native ABI and the allocator.
 #
@@ -13,7 +14,7 @@ check() {
 	root=$1
 	status=0
 	kernel=$(cd "$root" && grep -R --include='*.go' -ln '"unsafe"' kernel internal \
-		--exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 2>/dev/null || true)
+		--exclude-dir=uefi --exclude-dir=vm --exclude-dir=amd64 --exclude-dir=framebuffer 2>/dev/null || true)
 	userspace=$(cd "$root" && grep -R --include='*.go' -lE '"unsafe"|^//go:linkname|^//go:extern' userspace 2>/dev/null |
 		grep -v '^userspace/runtime/' || true)
 	for file in $kernel $userspace; do
@@ -26,7 +27,8 @@ check() {
 if [ "${1:-}" = "--self-test" ]; then
 	scratch=$(mktemp -d)
 	trap 'rm -rf "$scratch"' EXIT
-	mkdir -p "$scratch/kernel/ok" "$scratch/userspace/runtime/sys" "$scratch/userspace/cmd/app" "$scratch/internal"
+	mkdir -p "$scratch/kernel/ok" "$scratch/kernel/framebuffer" "$scratch/userspace/runtime/sys" "$scratch/userspace/cmd/app" "$scratch/internal"
+	printf 'package framebuffer\n\nimport "unsafe"\n' > "$scratch/kernel/framebuffer/framebuffer.go"
 	printf 'package sys\n\nimport "unsafe"\n' > "$scratch/userspace/runtime/sys/sys.go"
 	printf 'package main\n' > "$scratch/userspace/cmd/app/main.go"
 	check "$scratch" 2>/dev/null || { echo "unsafe boundary self-test: a clean tree was refused" >&2; exit 1; }

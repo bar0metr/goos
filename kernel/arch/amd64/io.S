@@ -175,6 +175,46 @@ goos_has_nx:
     popq %rbx
     retq
 
+.global goos_has_pat
+goos_has_pat:
+    pushq %rbx
+    movl $1, %eax
+    cpuid
+    btl $16, %edx
+    setc %al
+    popq %rbx
+    retq
+
+.global goos_configure_pat
+goos_configure_pat:
+    pushfq
+    cli
+    movq %cr0, %r8
+    movq %r8, %rax
+    orq $0x40000000, %rax
+    andq $~0x20000000, %rax
+    movq %rax, %cr0
+    wbinvd
+    movq %cr3, %rax
+    movq %rax, %cr3
+    movl $0x277, %ecx
+    movl $0x00070406, %eax
+    movl $0x00070406, %edx
+    wrmsr
+    wbinvd
+    movq %r8, %cr0
+    movq %cr3, %rax
+    movq %rax, %cr3
+    movl $0x277, %ecx
+    rdmsr
+    xorl $0x00070406, %eax
+    xorl $0x00070406, %edx
+    orl %edx, %eax
+    sete %al
+    movzbl %al, %eax
+    popfq
+    retq
+
 .global goos_enable_nx_wp
 goos_enable_nx_wp:
     movl $0xc0000080, %ecx

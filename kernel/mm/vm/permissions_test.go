@@ -22,6 +22,20 @@ func TestPageEntryRejectsUnalignedAddress(t *testing.T) {
 	}
 }
 
+func TestUncachedPageEntryIsSupervisorWritableNX(t *testing.T) {
+	entry, ok := uncachedPageEntry(0x12345000)
+	if !ok {
+		t.Fatal("valid device page rejected")
+	}
+	want := uint64(0x12345000) | entryPresent | entryWritable | entryWriteThrough | entryCacheDisable | entryNX
+	if entry != want || entry&entryUser != 0 {
+		t.Fatalf("uncached entry = %#x, want %#x", entry, want)
+	}
+	if _, ok := uncachedPageEntry(^uint64(0) &^ (PageSize - 1)); ok {
+		t.Fatal("physical address outside the x86 address mask accepted")
+	}
+}
+
 func TestUserPagePermissions(t *testing.T) {
 	entry, ok := pageEntry(0x5000, Permissions{User: true, Writable: true})
 	if !ok || entry&entryUser == 0 || entry&entryWritable == 0 || entry&entryNX == 0 {

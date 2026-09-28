@@ -59,6 +59,19 @@ kernel heap above 1 GiB; `vm.MapLoaderMemory` maps it at its physical address
 in the kernel root. Process roots do not inherit those low mappings (ADR 0103,
 ADR 0104, ADR 0120).
 
+The GOP framebuffer uses a separate 512 MiB kernel window beginning at
+`0xffff808000000000` (PML4 slot 257), immediately after the direct-map slot.
+Only the page-aligned physical range required by stride times height is mapped.
+Its leaves are supervisor-only, writable, NX, and uncached through PCD+PWT.
+Before the mapping becomes active, the kernel programs `IA32_PAT` to the
+architectural `WB, WT, UC-, UC, WB, WT, UC-, UC` layout while caching is
+disabled and flushes caches and TLBs. PCD+PWT therefore selects a known UC
+entry rather than depending on firmware PAT state.
+The slot exists only in the kernel root; process roots do not copy it. Before
+the PMM is initialized, boot rejects graphics when any mapped framebuffer page
+overlaps a UEFI conventional-memory region, so device pages can never enter
+the allocator's free pool (ADR 0123).
+
 Ordinary identity-mapped pages are writable and non-executable. The loaded PE
 image is validated in memory and its section flags are translated into leaf
 permissions. Executable sections are read-only; writable sections are NX. A PE
@@ -198,6 +211,7 @@ decided so far is in the way.
 | Kernel identity map | physical = virtual for `[1 MiB, 1 GiB)` | `vm.BuildIdentity`; linked kernel code, the heap arena, page tables, stack backing, and the boot archive remain addressable at their physical address |
 | Loader memory above 1 GiB | physical = virtual, supervisor-only | `vm.MapLoaderMemory`; where OVMF puts the heap arena on machines with more than about a GiB |
 | Direct map | `0xffff800000000000` + physical | `vm.DirectMapBase`; every managed page, shared by all address spaces |
+| GOP framebuffer | `0xffff808000000000` + page offset | Dedicated 512 MiB kernel-only RW+NX+UC window; mapped visible stride range only |
 | Process entry mapping | minimal supervisor-only pages at `0xffffc00000000000` + linked address | ADR 0120; assembly trampolines, descriptor state, and the active kernel stack |
 | User pointer range | `[0x1000, 0x00007ffffffff000)` | `vm.ValidateUserRange` (`UserAddressStart`..`UserAddressLimit`) |
 | User page tables | created on demand at every level | `vm.MapUserPageAt` |
