@@ -469,10 +469,10 @@ stream primitives without adding POSIX file descriptors. Background jobs can be
 listed and stopped; stream merging such as `2>&1` and POSIX job control
 (suspending a job, `fg`/`bg`) are deliberately out of scope for now.
 
-The terminal service relays all shell and command output, but the kernel's
+The terminal service relays all shell and command output and uses the active
+console geometry to redraw edited lines that wrap across rows. The kernel's
 warning echo and the system services that start before it still write the
-console directly and can land in a line being typed, and its redraw assumes the
-edited line fits one row (ADR 0089).
+console directly and can land in a line being typed (ADR 0089).
 
 Linux ABI compatibility remains a later compatibility layer. It must translate
 into the same GoOS process, VFS, IPC, handle, and capability model rather than

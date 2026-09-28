@@ -69,6 +69,12 @@ func userspaceMain() {
 	if !ok {
 		fatal("TTY_CONSOLE_MISSING\n")
 	}
+	info, status := sys.ConsoleInformation(consoleHandle)
+	if status == kcall.StatusOK && info.Columns != 0 && info.Rows != 0 {
+		screen.SetGeometry(int(info.Columns), int(info.Rows))
+	} else {
+		screen.SetGeometry(tty.DefaultColumns, tty.DefaultRows)
+	}
 	outputHandle, ok = data.Handle("output")
 	if !ok {
 		fatal("TTY_OUTPUT_MISSING\n")

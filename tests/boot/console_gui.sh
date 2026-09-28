@@ -69,18 +69,33 @@ done
 wait_for_log 'FRAMEBUFFER_VALIDATION_PATTERN_OK' 'framebuffer marker'
 wait_for_log '^goos> ' 'shell prompt' 180
 wait_for_log '^BOOT_OK' 'completed validation boot' 180
-sleep 1
 
-monitor_command "screendump $dump" || fail "QEMU screendump command failed"
-elapsed=0
-while [ ! -s "$dump" ] && [ "$elapsed" -lt 50 ]; do
-	sleep 0.1
-	elapsed=$((elapsed + 1))
+# Validation output can scroll the overlay between BOOT_OK and the next kernel
+# service pass. Sample the live display until that bounded pass restores it.
+pixels_ok=false
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+	rm -f "$dump"
+	monitor_command "screendump $dump" || fail "QEMU screendump command failed"
+	elapsed=0
+	while [ ! -s "$dump" ] && [ "$elapsed" -lt 50 ]; do
+		sleep 0.1
+		elapsed=$((elapsed + 1))
+	done
+	[ -s "$dump" ] || fail "QEMU did not create the screendump"
+	if GOTOOLCHAIN=local GOCACHE="$(pwd)/build/cache/go" XDG_CACHE_HOME="$(pwd)/build/cache" \
+		go run ./tools/ppmcheck "$dump" >/dev/null 2>&1; then
+		pixels_ok=true
+		break
+	fi
+	sleep 0.25
+	attempt=$((attempt + 1))
 done
-[ -s "$dump" ] || fail "QEMU did not create the screendump"
-
-GOTOOLCHAIN=local GOCACHE="$(pwd)/build/cache/go" XDG_CACHE_HOME="$(pwd)/build/cache" \
-	go run ./tools/ppmcheck "$dump" || fail "validation pixels did not match"
+if [ "$pixels_ok" != true ]; then
+	GOTOOLCHAIN=local GOCACHE="$(pwd)/build/cache/go" XDG_CACHE_HOME="$(pwd)/build/cache" \
+		go run ./tools/ppmcheck "$dump" || true
+	fail "validation pixels did not match"
+fi
 printf 'PASS console-gui\n'
 
 # Exercise editing and modifier paths before entering the mandatory command.

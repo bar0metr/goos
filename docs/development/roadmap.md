@@ -229,6 +229,9 @@ QEMU monitor screendump and exact validation-only checkerboard pixels, without
 OCR or a host window. The same headless harness injects editing keys and
 `echo graphical-keyboard-ok` through QEMU's PS/2 path; COM1 remains a file
 sink, and exact shell output proves end-to-end keyboard delivery.
+The TTY now reads capability-checked console geometry, falls back to 80x25 on
+serial-only boots, and erases and restores every row of wrapped edited input
+when asynchronous output arrives.
 
 Current progress: ADR 0058 splits the build into a normal and a validation
 variant. A normal build boots quietly to a banner, `Starting services...`, one
@@ -414,9 +417,8 @@ executable pages, and bounded launch resource profiles (ADR 0112 through
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
-can land in a line being typed; the terminal's redraw assumes the edited line
-fits one row; and what was typed but not finished is lost if the terminal
-service dies.
+can land in a line being typed; and what was typed but not finished is lost if
+the terminal service dies. ADR 0123 removes the one-row redraw limitation.
 
 ## Priority 5 — Linux ABI compatibility
 

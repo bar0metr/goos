@@ -313,10 +313,10 @@ Output written while the terminal service is down waits in its stream, up to
 4 KiB; beyond that writers wait and then give up as described. What had been
 typed but not finished when the terminal service died is lost with it.
 
-The terminal's model of the screen assumes the line being edited fits one row.
-A prompt and typed text longer than the console is wide are erased only from
-their last row. The kernel's warning echo still writes directly and can land in
-a line being typed; it is the one ordinary event that does.
+ADR 0123 removes the one-row limitation: the terminal reads console geometry
+and erases and restores every row occupied by wrapped edited input. The
+kernel's warning echo still writes directly and can land in a line being typed;
+it is the one ordinary event that does.
 
 Stream memory grows by 192 KiB and channel memory by about 80 KiB of static
 kernel data.

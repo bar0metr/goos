@@ -79,6 +79,7 @@ table with type, generation, and rights checks.
 | 46 | `ClockNow` | registered | clock ID; 16-byte result; monotonic or realtime only | none | no |
 | 47 | `ClockSet` | device handle, Write, system-control object | realtime value and validity bounds | none | changes the realtime offset |
 | 48 | `ExecutableSource` | loader device with Write; prepared VFS channel with Read, Write, Wait; sealed executable header object with Execute and Write | 32-byte descriptor; file handle nonzero; file size 1..256 MiB; header object size `min(file size, 4096)`; live channel endpoint | consumes the channel; converts the existing one-page object without allocating payload pages; later faults allocate and charge one process page at a time | no |
+| 49 | `ConsoleInfo` | device handle, Read, console object | length exactly 16; `CopyOut` | columns, rows, availability flags, and a zero reserved word; no hardware address | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording

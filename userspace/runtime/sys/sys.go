@@ -22,17 +22,24 @@ import (
 
 // Scratch descriptors. See the package comment for why package state is safe.
 var (
-	pairWire       [2]uint64
-	transferWire   [3]uint64
-	receiveWire    [3]uint64
-	valueWire      uint64
-	boundsWire     [2]uint64
-	imageWire      [2]uint64
-	dmaWire        [3]uint64
-	waitWire       [2]uint64
-	timeWire       [kcall.ClockTimeSize]byte
-	consoleByteBox [1]byte
+	pairWire        [2]uint64
+	transferWire    [3]uint64
+	receiveWire     [3]uint64
+	valueWire       uint64
+	boundsWire      [2]uint64
+	imageWire       [2]uint64
+	dmaWire         [3]uint64
+	waitWire        [2]uint64
+	timeWire        [kcall.ClockTimeSize]byte
+	consoleByteBox  [1]byte
+	consoleInfoWire [kcall.ConsoleInfoSize]byte
 )
+
+type ConsoleInfo struct {
+	Columns uint32
+	Rows    uint32
+	Flags   uint32
+}
 
 func status(value uint64) kcall.Status { return kcall.Status(value) }
 
@@ -68,6 +75,17 @@ func ConsoleRead(device handle.ID) (byte, kcall.Status) {
 // ConsoleInterrupt reports and consumes a pending Ctrl-C.
 func ConsoleInterrupt(device handle.ID) kcall.Status {
 	return status(consoleInterrupt(uint64(device)))
+}
+
+// ConsoleInformation returns terminal geometry and availability flags.
+func ConsoleInformation(device handle.ID) (ConsoleInfo, kcall.Status) {
+	clear(consoleInfoWire[:])
+	result := status(consoleInfo(uint64(device), unsafe.Pointer(&consoleInfoWire[0]), uintptr(len(consoleInfoWire))))
+	return ConsoleInfo{
+		Columns: uint32(consoleInfoWire[0]) | uint32(consoleInfoWire[1])<<8 | uint32(consoleInfoWire[2])<<16 | uint32(consoleInfoWire[3])<<24,
+		Rows:    uint32(consoleInfoWire[4]) | uint32(consoleInfoWire[5])<<8 | uint32(consoleInfoWire[6])<<16 | uint32(consoleInfoWire[7])<<24,
+		Flags:   uint32(consoleInfoWire[8]) | uint32(consoleInfoWire[9])<<8 | uint32(consoleInfoWire[10])<<16 | uint32(consoleInfoWire[11])<<24,
+	}, result
 }
 
 // LogWrite appends one encoded record to the kernel log.

@@ -96,6 +96,9 @@ func (terminal *Terminal) consumeScalar(scalar rune) {
 	case '\b':
 		if terminal.column > 0 {
 			terminal.column--
+		} else if terminal.row > 0 {
+			terminal.row--
+			terminal.column = terminal.columns - 1
 		}
 	case '\t':
 		next := (terminal.column/terminalTabWidth + 1) * terminalTabWidth
@@ -169,6 +172,33 @@ func (terminal *Terminal) consumeEscape(value byte) {
 			amount = terminal.column
 		}
 		terminal.column -= amount
+	case 'C':
+		amount := int(terminal.parameter)
+		if terminal.digits == 0 || amount == 0 {
+			amount = 1
+		}
+		terminal.column += amount
+		if terminal.column >= terminal.columns {
+			terminal.column = terminal.columns - 1
+		}
+	case 'A':
+		amount := int(terminal.parameter)
+		if terminal.digits == 0 || amount == 0 {
+			amount = 1
+		}
+		terminal.row -= amount
+		if terminal.row < 0 {
+			terminal.row = 0
+		}
+	case 'B':
+		amount := int(terminal.parameter)
+		if terminal.digits == 0 || amount == 0 {
+			amount = 1
+		}
+		terminal.row += amount
+		if terminal.row >= terminal.rows {
+			terminal.row = terminal.rows - 1
+		}
 	}
 	terminal.resetEscape()
 }

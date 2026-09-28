@@ -67,6 +67,34 @@ func TestTerminalIncrementalCSI(t *testing.T) {
 	}
 }
 
+func TestTerminalMovesAcrossRowsForWrappedRedraw(t *testing.T) {
+	terminal, _ := testTerminal(t, 16, 4, 0)
+	terminal.Write([]byte("abcdefghijklmnopq"))
+	if terminal.column != 1 || terminal.row != 1 {
+		t.Fatalf("wrapped cursor = %d,%d", terminal.column, terminal.row)
+	}
+	terminal.Write([]byte("\x1b[1A\r\x1b[6C"))
+	if terminal.column != 6 || terminal.row != 0 {
+		t.Fatalf("cursor after up/right = %d,%d", terminal.column, terminal.row)
+	}
+	terminal.Write([]byte("\x1b[2B\x1b[99C\x1b[9A"))
+	if terminal.column != 15 || terminal.row != 0 {
+		t.Fatalf("clamped cursor = %d,%d", terminal.column, terminal.row)
+	}
+}
+
+func TestTerminalBackspaceCrossesAWrappedRow(t *testing.T) {
+	terminal, _ := testTerminal(t, 16, 3, 0)
+	terminal.Write([]byte("abcdefghijklmnop"))
+	if terminal.column != 0 || terminal.row != 1 {
+		t.Fatalf("wrapped cursor = %d,%d", terminal.column, terminal.row)
+	}
+	terminal.Write([]byte("\b \b"))
+	if terminal.column != 15 || terminal.row != 0 {
+		t.Fatalf("cursor after wrapped erase = %d,%d", terminal.column, terminal.row)
+	}
+}
+
 func TestTerminalScrollsWithoutTouchingPadding(t *testing.T) {
 	terminal, pixels := testTerminal(t, 2, 2, 2)
 	stride := terminal.buffer.stride

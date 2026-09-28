@@ -170,6 +170,44 @@ func TestReportInsideABurstKeepsThePrompt(t *testing.T) {
 	}
 }
 
+func TestOutputRedrawsAWrappedEditedLine(t *testing.T) {
+	var c console
+	c.screen.SetColumns(16)
+	c.show("goos> ")
+	c.typed("abcdefghijklmnopqrst")
+	c.written = ""
+	c.output("[1] done\n", "goos> ")
+	want := "\x1b[1A\r\x1b[K\x1b[1B\r\x1b[K\x1b[1A\r[1] done\ngoos> abcdefghijklmnopqrst"
+	if c.written != want {
+		t.Fatalf("written %q, want %q", c.written, want)
+	}
+}
+
+func TestWrappedLineStartingAfterOutputReturnsToItsColumn(t *testing.T) {
+	var c console
+	c.screen.SetColumns(16)
+	c.show("")
+	c.output("name: ", "")
+	c.typed("abcdefghijklmnop")
+	c.written = ""
+	c.output("!\n", "")
+	want := "\x1b[1A\r\x1b[6C\x1b[K\x1b[1B\r\x1b[K\x1b[1A\r\x1b[6C!\nabcdefghijklmnop"
+	if c.written != want {
+		t.Fatalf("written %q, want %q", c.written, want)
+	}
+}
+
+func TestWrappedLineEraseIsBoundedByVisibleRows(t *testing.T) {
+	var screen Screen
+	screen.SetGeometry(16, 2)
+	screen.Show([]byte("goos> "), []byte("abcdefghijklmnopqrstuvwxyz0123456789"))
+	hidden := string(screen.Hide())
+	want := "\x1b[1A\r\x1b[K\x1b[1B\r\x1b[K\x1b[1A\r"
+	if hidden != want {
+		t.Fatalf("hidden %q, want %q", hidden, want)
+	}
+}
+
 func TestClearingForgetsTheLine(t *testing.T) {
 	var c console
 	c.show("goos> ")
