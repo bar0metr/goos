@@ -651,6 +651,7 @@ goos_interrupt_table:
     .quad goos_irq_11
     .quad goos_irq_yield
     .quad goos_irq_serial
+    .quad goos_irq_keyboard
 
 .global goos_entry_mapping_table
 goos_entry_mapping_table:
@@ -1026,18 +1027,7 @@ goos_irq_serial:
     incq goos_console_interrupt(%rip)
     jmp .serial_drain
 .serial_store:
-    movq goos_console_head(%rip), %rcx
-    movq %rcx, %rsi
-    incq %rsi
-    andq $GOOS_CONSOLE_RING_MASK, %rsi
-    cmpq goos_console_tail(%rip), %rsi
-    je .serial_drop
-    leaq goos_console_ring(%rip), %rdx
-    movb %al, (%rdx,%rcx,1)
-    movq %rsi, goos_console_head(%rip)
-    jmp .serial_drain
-.serial_drop:
-    incq goos_console_dropped(%rip)
+    callq .console_enqueue
     jmp .serial_drain
 .serial_eoi:
     movl $0, 0x3fffD0b0
@@ -1049,6 +1039,93 @@ goos_irq_serial:
     popq %rax
     GOOS_RETURN_USER
     iretq
+
+// IRQ1 reads exactly one i8042 data byte. The bounded decoder returns at most
+// one terminal escape sequence, which is appended to the same ring as UART
+// input. Arrival order is therefore the order in which IRQ handlers run.
+.global goos_irq_keyboard
+goos_irq_keyboard:
+    GOOS_ENTER_LOW .L_irq_keyboard
+.L_irq_keyboard:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movw $0x64, %dx
+    inb %dx, %al
+    testb $0x01, %al
+    jz .keyboard_eoi
+    movw $0x60, %dx
+    inb %dx, %al
+    movzbq %al, %rcx
+    subq $32, %rsp
+    callq goos_keyboard_feed
+    addq $32, %rsp
+    movq %rax, %rdi
+    btq $32, %rdi
+    jnc .keyboard_bytes
+    incq goos_console_interrupt(%rip)
+.keyboard_bytes:
+    movq %rdi, %r8
+    shrq $24, %r8
+    andq $3, %r8
+.keyboard_byte_loop:
+    testq %r8, %r8
+    jz .keyboard_eoi
+    movq %rdi, %rax
+    callq .console_enqueue
+    shrq $8, %rdi
+    decq %r8
+    jmp .keyboard_byte_loop
+.keyboard_eoi:
+    movl $0, 0x3fffD0b0
+    movb $0x20, %al
+    outb %al, $0x20
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    GOOS_RETURN_USER
+    iretq
+
+// .console_enqueue appends AL to the unified bounded input ring. It clobbers
+// RAX, RCX, RSI and RDX; interrupt entries preserve those registers.
+.console_enqueue:
+    movq goos_console_head(%rip), %rcx
+    movq %rcx, %rsi
+    incq %rsi
+    andq $GOOS_CONSOLE_RING_MASK, %rsi
+    cmpq goos_console_tail(%rip), %rsi
+    je .console_enqueue_drop
+    leaq goos_console_ring(%rip), %rdx
+    movb %al, (%rdx,%rcx,1)
+    movq %rsi, goos_console_head(%rip)
+    retq
+.console_enqueue_drop:
+    incq goos_console_dropped(%rip)
+    retq
 
 .global goos_irq_11
 goos_irq_11:

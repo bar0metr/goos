@@ -62,11 +62,11 @@ func chooseGOPMode(best gopModeChoice, number, current uint32, info gopModeInfor
 
 func gopModeRank(width, height uint32, current bool) uint8 {
 	switch {
-	case width == 1024 && height == 768:
+	case width == 1280 && height == 800:
 		return 0
 	case width == 1280 && height == 720:
 		return 1
-	case width == 1280 && height == 800:
+	case width == 1024 && height == 768:
 		return 2
 	case width == 800 && height == 600:
 		return 3

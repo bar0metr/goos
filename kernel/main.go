@@ -442,6 +442,11 @@ func bootContinue() {
 	// The UART interrupt is enabled only now: its gate exists, so the first
 	// byte to arrive has a handler to drain it.
 	amd64.EnableConsoleInterrupt()
+	if amd64.InitPS2Keyboard() {
+		mark("PS2_KEYBOARD_OK")
+	} else {
+		console.WriteString("WARNING: PS/2 keyboard unavailable; serial input remains active\n")
+	}
 	if validation.Enabled {
 		amd64.TriggerBreakpoint()
 	}

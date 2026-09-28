@@ -219,7 +219,10 @@ Boot and integration tests remain mandatory; only their placement changes.
 
 The 0.1.5 framebuffer work keeps `make run` headless for serial automation and
 adds `make run-gui` for manual graphical-console validation. Both targets boot
-the same ISO and persistent disk and retain COM1 output.
+the same ISO and persistent disk and retain COM1 output. The preferred GOP mode
+is 1280x800 with bounded fallbacks. IRQ-driven PS/2 input now joins COM1 in the
+existing console queue; scan-code decoding, US layout translation, arrow CSI
+sequences, and the shared Ctrl-C path do not change the userspace TTY ABI.
 
 Current progress: ADR 0058 splits the build into a normal and a validation
 variant. A normal build boots quietly to a banner, `Starting services...`, one

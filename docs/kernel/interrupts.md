@@ -55,12 +55,13 @@ future `SYSCALL/SYSRET` support must preserve the same native call contract.
 
 ## Device interrupts
 
-Two device lines are routed through the IOAPIC on bootstrap CPU 0:
+Three device lines are routed through the IOAPIC on bootstrap CPU 0:
 
 | Line | Vector | Trigger | Owner |
 | --- | ---: | --- | --- |
 | GSI 11 | 43 | active-low, level | the userspace virtio-blk driver, through `IRQWait` |
 | GSI 4 | 36 | active-high, edge | the console UART, handled in the kernel |
+| GSI 1 | 33 | active-high, edge | the PS/2 keyboard, handled in the kernel |
 
 The virtio line is masked by its handler and rearmed by the driver's next wait,
 so an unserviced device cannot storm. The console line is not: every byte
@@ -76,6 +77,12 @@ the wake can wait for the next tick because the bytes are already safe.
 Byte three is diverted into an interrupt flag rather than the ring. Ctrl-C is a
 signal, so a shell can ask whether it was typed without consuming the input a
 running command is being given.
+
+The keyboard handler reads one i8042 byte and passes it to a bounded scan-code
+set 1 decoder. Completed US-layout keys enter the same console ring as UART
+bytes. Arrow keys become CSI sequences; keyboard Ctrl-C increments the same
+interrupt flag. Controller waits exist only during bounded initialization;
+steady-state input is interrupt-driven.
 
 Memory-mapped device registers are reached through assembly helpers. As Go they
 were ordinary loads and stores that the optimiser could reorder, merge or

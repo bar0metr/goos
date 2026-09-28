@@ -25,7 +25,7 @@ available and is sufficient for the single keyboard required by this release.
 ## Decision
 
 The UEFI boot boundary locates GOP, queries every bounded mode, and selects the
-first usable mode in this order: 1024x768, 1280x720, 1280x800, 800x600, the
+first usable mode in this order: 1280x800, 1280x720, 1024x768, 800x600, the
 current valid mode, then another valid mode. A mode must expose a directly
 writable 32-bit linear framebuffer. `PixelBltOnly`, invalid geometry,
 overlapping masks, overflowing ranges, and framebuffer storage beyond the
@@ -53,6 +53,13 @@ QEMU keyboard input uses an interrupt-driven PS/2/i8042 driver. USB HID,
 virtio-input, and keyboard-layout configuration remain outside this release.
 Decoded bytes join the same logical console input queue as COM1, so the TTY
 retains one input interface and one line discipline.
+
+The i8042 setup is bounded and enables first-port IRQ1, translation to scan-code
+set 1, and keyboard scanning. IRQ1 reads one byte, feeds a fixed-state decoder,
+and appends at most one three-byte terminal sequence to the existing console
+ring. The decoder tracks extended codes, make/break state, both Shift, Ctrl and
+Alt keys, and Caps Lock. A fixed US layout emits ordinary terminal bytes;
+arrows emit CSI sequences and Ctrl-C uses the existing console-interrupt flag.
 
 COM1 remains initialized first and remains independent. Normal console output
 will be mirrored to serial and framebuffer, while early failures, panic,
@@ -90,6 +97,9 @@ stream, handles plain cursor controls and the four sequences required by the
 userspace TTY, and scrolls visible pixel rows in place. The internal logical
 console writes COM1 first and then mirrors to the framebuffer when attached;
 the capability-protected `ConsoleWrite` ABI is unchanged.
+
+The preferred 1280x800 mode gives the manual QEMU console more usable screen
+area while retaining deterministic fallbacks for firmware that lacks it.
 
 The release will contain one graphical text console, not a general graphics
 API. A future userspace graphics system would require a separate memory and

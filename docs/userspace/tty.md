@@ -8,9 +8,10 @@ It is also the only process that reads what the shell and its commands print,
 and it writes that to the console around the line being typed.
 
 ```text
-keyboard ──UART──▶ kernel ring ──ConsoleRead──▶ tty ──GTTY lines──▶ shell
-                                                 ▲                    │
-                                                 │  command input ◀───┘
+COM1 UART ─┐
+           ├──▶ kernel ring ──ConsoleRead──▶ tty ──GTTY lines──▶ shell
+PS/2 IRQ1 ─┘                                  ▲                    │
+                                              │  command input ◀───┘
 shell, commands ──terminal output stream─────────┘──ConsoleWrite──▶ logical console
                                                                   ├──▶ COM1
                                                                   └──▶ framebuffer
@@ -104,6 +105,11 @@ cursor, incremental UTF-8, fixed 8x16 glyphs, scrolling, and the bounded
 session ownership, foreground jobs, prompts, and Ctrl-C policy remain here in
 the userspace TTY. COM1 is written first and remains available when GOP is
 absent or framebuffer initialization fails.
+
+COM1 and the PS/2 keyboard feed the same bounded kernel input ring. The IRQ1
+path decodes scan-code set 1 with a fixed US layout before enqueueing terminal
+bytes. Missing i8042 hardware leaves this path disabled without changing serial
+input, `ConsoleRead`, `WaitAny`, or the TTY protocol.
 
 ## Supervision
 

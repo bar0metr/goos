@@ -35,7 +35,7 @@ func TestGOPModeSelectionUsesSpecifiedPreferenceOrder(t *testing.T) {
 	choice = chooseGOPMode(choice, 5, current, testGOPMode(1280, 800))
 	choice = chooseGOPMode(choice, 4, current, testGOPMode(1280, 720))
 	choice = chooseGOPMode(choice, 3, current, testGOPMode(1024, 768))
-	if !choice.valid || choice.number != 3 || choice.rank != 0 {
+	if !choice.valid || choice.number != 5 || choice.rank != 0 {
 		t.Fatalf("unexpected choice: %#v", choice)
 	}
 }
