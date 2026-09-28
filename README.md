@@ -297,9 +297,10 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.5
+GoOS 0.1.6
 
 CPU: x86_64
+Graphics: GOP 1280x800x32
 Memory: 367 MiB managed
 Timer: 100 Hz
 Security: capabilities, NX, W^X
@@ -315,6 +316,8 @@ Starting services...
 [ OK ] log
 [ OK ] tty
 [ OK ] shell
+[ OK ] tty-fb
+[ OK ] shell-fb
 
 goos>
 ```
@@ -348,6 +351,8 @@ bench
 cat
 cp
 echo
+fsck-fat
+gfm
 ls
 mem
 mkdir
@@ -362,6 +367,7 @@ stat
 touch
 uname
 uptime
+vmprobe
 write
 goos> mkdir /system/backdoor
 mkdir: /system/backdoor: read-only filesystem
@@ -530,6 +536,7 @@ Further documentation:
   [byte streams](docs/kernel/streams.md).
 - Userspace: [init and service supervision](docs/userspace/init.md),
   [terminal](docs/userspace/tty.md), [shell](docs/userspace/shell.md),
+  [file manager](docs/userspace/file-manager.md),
   [VFS](docs/userspace/vfs.md), [RAMFS](docs/userspace/ramfs.md),
   [storage](docs/userspace/storage.md),
   [configuration](docs/userspace/configuration.md),
