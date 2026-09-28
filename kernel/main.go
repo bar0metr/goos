@@ -60,6 +60,7 @@ var (
 	timeWire              [kcall.ClockTimeSize]byte
 	consoleByteWire       [1]byte
 	systemInfoWire        [kcall.SystemInfoSize]byte
+	consoleInfoWire       [kcall.ConsoleInfoSize]byte
 	portWire              [4]byte
 	dmaWire               [24]byte
 	channelWire           [16]byte
@@ -121,7 +122,9 @@ var (
 	kernelPageTable             uint64
 	framebufferVirtual          uint64
 	graphicalFramebuffer        kernelframebuffer.Buffer
+	graphicalConsoleAvailable   bool
 	ps2KeyboardValidated        bool
+	ps2KeyboardAvailable        bool
 	initName                    = []byte("init")
 	initImagePath               = []byte("system/init")
 	initProcessSlot             process.Process
@@ -388,6 +391,7 @@ func main() {
 				drawFramebufferMilestone(&graphicalFramebuffer)
 				mark("FRAMEBUFFER_PRIMITIVES_OK")
 				if kernelconsole.AttachFramebuffer(graphicalFramebuffer) {
+					graphicalConsoleAvailable = true
 					mark("FRAMEBUFFER_TERMINAL_OK")
 					if validation.Enabled && kernelconsole.EnableValidationMarker() {
 						mark("FRAMEBUFFER_VALIDATION_PATTERN_OK")
@@ -447,6 +451,7 @@ func bootContinue() {
 	// byte to arrive has a handler to drain it.
 	amd64.EnableConsoleInterrupt()
 	if amd64.InitPS2Keyboard() {
+		ps2KeyboardAvailable = true
 		mark("PS2_KEYBOARD_READY")
 	} else {
 		console.WriteString("WARNING: PS/2 keyboard unavailable; serial input remains active\n")

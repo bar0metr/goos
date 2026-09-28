@@ -132,6 +132,11 @@ func (handler *testHandler) ConsoleInterrupt(device uint64) Status {
 	return StatusNotFound
 }
 
+func (handler *testHandler) ConsoleInfo(device uint64, address uint64, length uint64) Status {
+	handler.channel, handler.address, handler.length = device, address, length
+	return StatusOK
+}
+
 func (handler *testHandler) ValidationFault(device uint64) Status {
 	handler.channel = device
 	return StatusUnsupported
@@ -479,7 +484,10 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationExecutableSource != 48 {
 		t.Fatalf("source operation %d", OperationExecutableSource)
 	}
-	if result := Dispatch(Request{Operation: OperationExecutableSource + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if OperationConsoleInfo != 49 {
+		t.Fatalf("console info operation %d", OperationConsoleInfo)
+	}
+	if result := Dispatch(Request{Operation: OperationConsoleInfo + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -503,6 +511,19 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	result = Dispatch(Request{Operation: OperationExecutableSource, Arg0: 7, Arg1: 8, Arg2: 9}, handler)
 	if result.Status != StatusOK || handler.channel != 7 || handler.length != 8 || handler.address != 9 {
 		t.Fatalf("source: %#v, handler: %#v", result, handler)
+	}
+}
+
+func TestDispatchConsoleInfo(t *testing.T) {
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationConsoleInfo, Arg0: 2, Arg1: 0x4000, Arg2: ConsoleInfoSize}, handler)
+	if result.Status != StatusOK || handler.channel != 2 || handler.address != 0x4000 || handler.length != ConsoleInfoSize {
+		t.Fatalf("console info: %#v, handler: %#v", result, handler)
+	}
+	handler = &testHandler{}
+	result = Dispatch(Request{Operation: OperationConsoleInfo, Arg0: 2, Arg1: 0x4000, Arg2: ConsoleInfoSize - 1}, handler)
+	if result.Status != StatusInvalidArgument || *handler != (testHandler{}) {
+		t.Fatalf("invalid console info reached handler: %#v, %#v", result, handler)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"goos/kernel/arch/amd64"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
+	kernelframebuffer "goos/kernel/framebuffer"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/region"
@@ -85,6 +86,40 @@ func (handler nativeCallHandler) ConsoleInterrupt(device uint64) kcall.Status {
 	}
 	if !amd64.ConsoleTakeInterrupt() {
 		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
+}
+
+// ConsoleInfo returns logical terminal geometry without exposing framebuffer
+// addresses or granting any new hardware authority.
+func (handler nativeCallHandler) ConsoleInfo(id uint64, address uint64, length uint64) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	if length != kcall.ConsoleInfoSize {
+		return kcall.StatusInvalidArgument
+	}
+	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
+	if !ok || cap.Object() != device.ConsoleObject {
+		return kcall.StatusPermissionDenied
+	}
+	columns, rows := uint32(80), uint32(25)
+	flags := kcall.ConsoleFlagSerial
+	if graphicalConsoleAvailable {
+		columns = uint32(graphicalFramebuffer.Width() / kernelframebuffer.GlyphWidth)
+		rows = uint32(graphicalFramebuffer.Height() / kernelframebuffer.GlyphHeight)
+		flags |= kcall.ConsoleFlagFramebuffer
+	}
+	if ps2KeyboardAvailable {
+		flags |= kcall.ConsoleFlagKeyboard
+	}
+	clear(consoleInfoWire[:])
+	putUint32(consoleInfoWire[0:4], columns)
+	putUint32(consoleInfoWire[4:8], rows)
+	putUint32(consoleInfoWire[8:12], flags)
+	if !vm.CopyOut(handler.root, address, consoleInfoWire[:]) {
+		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }

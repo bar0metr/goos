@@ -29,6 +29,8 @@ func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64 { r
 
 func consoleInterrupt(device uint64) uint64 { return unsupported }
 
+func consoleInfo(device uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
+
 func clockRead(address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
 func clockReadNanos(address unsafe.Pointer, size uintptr) uint64 { return unsupported }

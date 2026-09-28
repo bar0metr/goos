@@ -49,6 +49,11 @@ move into the kernel. Existing applications continue to use the capability-
 protected `ConsoleWrite` and `ConsoleRead` operations without a framebuffer-
 specific ABI.
 
+The capability-checked `ConsoleInfo` call exposes only columns, rows, and
+serial/framebuffer/keyboard availability flags. The TTY uses that geometry,
+with an 80x25 serial fallback, to erase and restore every row occupied by
+wrapped edited input. Framebuffer addresses and mappings remain kernel-only.
+
 QEMU keyboard input uses an interrupt-driven PS/2/i8042 driver. USB HID,
 virtio-input, and keyboard-layout configuration remain outside this release.
 Decoded bytes join the same logical console input queue as COM1, so the TTY
@@ -93,8 +98,9 @@ green, and blue bars after CR3 replacement. The same package embeds a fixed
 replacement glyph. Its incremental UTF-8 decoder preserves partial sequences
 between writes and recovers from malformed input. Font provenance is recorded
 in `docs/third-party-font.md`. A bounded framebuffer terminal renders that
-stream, handles plain cursor controls and the four sequences required by the
-userspace TTY, and scrolls visible pixel rows in place. The internal logical
+stream, handles plain cursor controls and the cursor movement and erase
+sequences required by the geometry-aware userspace TTY, and scrolls visible
+pixel rows in place. The internal logical
 console writes COM1 first and then mirrors to the framebuffer when attached;
 the capability-protected `ConsoleWrite` ABI is unchanged.
 

@@ -197,7 +197,7 @@ Four further device objects are not tied to hardware discovery:
 
 - **Console**: COM1. Write authorizes `ConsoleWrite`, `LogWrite` and, in a
   `goos_diag` build, `Diagnostics`; Read authorizes `ConsoleRead`,
-  `ConsoleInterrupt`, and waiting on console input with `WaitAny` (ADR 0059,
+  `ConsoleInterrupt`, the read-only `ConsoleInfo`, and waiting on console input with `WaitAny` (ADR 0059,
   0075). Only the terminal service is given Read (ADR 0082). Write goes to the
   terminal service and to the system services that start before it and report
   through the log; the shell and commands print through the terminal's output

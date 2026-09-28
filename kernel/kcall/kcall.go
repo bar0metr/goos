@@ -69,6 +69,9 @@ const (
 	// OperationExecutableSource creates a pathname-independent executable
 	// source from a prepared VFS session described at Arg2.
 	OperationExecutableSource
+	// OperationConsoleInfo returns read-only terminal geometry and availability
+	// flags through an existing console capability.
+	OperationConsoleInfo
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -140,6 +143,7 @@ type Handler interface {
 	ImageMap(device uint64, virtual uint64, address uint64) Status
 	LogBounds(device uint64, address uint64) Status
 	ConsoleInterrupt(device uint64) Status
+	ConsoleInfo(device uint64, address uint64, length uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
@@ -254,6 +258,11 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.LogBounds(request.Arg0, request.Arg1)}
 	case OperationConsoleInterrupt:
 		return Result{Status: handler.ConsoleInterrupt(request.Arg0)}
+	case OperationConsoleInfo:
+		if request.Arg2 != ConsoleInfoSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ConsoleInfo(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationValidationFault:
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:
@@ -309,6 +318,15 @@ func Dispatch(request Request, handler Handler) Result {
 
 const MaxIPCMessage = uint64(320)
 const SystemInfoSize = uint64(40)
+
+// ConsoleInfoSize is columns, rows, flags, then one reserved uint32.
+const ConsoleInfoSize = uint64(16)
+
+const (
+	ConsoleFlagSerial      = uint32(1 << 0)
+	ConsoleFlagFramebuffer = uint32(1 << 1)
+	ConsoleFlagKeyboard    = uint32(1 << 2)
+)
 
 // SystemInfoPageSize is the size in bytes of the pages SystemInfo counts.
 const SystemInfoPageSize = uint64(4096)

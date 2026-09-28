@@ -30,6 +30,9 @@ func consoleRead(device uint64, address unsafe.Pointer, size uintptr) uint64
 //go:linkname consoleInterrupt goos_console_interrupt
 func consoleInterrupt(device uint64) uint64
 
+//go:linkname consoleInfo goos_console_info
+func consoleInfo(device uint64, address unsafe.Pointer, size uintptr) uint64
+
 //go:linkname clockRead goos_clock_read
 func clockRead(address unsafe.Pointer, size uintptr) uint64
 

@@ -78,11 +78,14 @@ every command stage that is not piped or redirected. Stream ends are reference
 counted, so a stage exiting closes only its own copies ([streams](../kernel/streams.md)).
 
 The service relays what arrives. It keeps a model of the screen
-(`userspace/tty.Screen`): what the prompt and the typed text occupy, and whether
-the cursor is at the start of a row. Before relaying a batch of output it takes
-the line being typed off the screen — `\r\x1b[K` when the line began a row,
-otherwise back over exactly its columns — and after the batch it shows the
-prompt and the typed text again, on a new row if the output ended mid-row. A
+(`userspace/tty.Screen`): the terminal width, current cursor column, and every
+row occupied by the prompt and typed text. At startup the service reads a
+16-byte `ConsoleInfo` record through its console capability. A graphical
+console reports `framebuffer width / 8` columns and `height / 16` rows; a
+serial-only console reports 80x25. No framebuffer address crosses this API.
+Before relaying a batch of output the service clears every row occupied by the
+edited line and returns to its exact starting column. After the batch it shows
+the prompt and typed text again, on a new row if output ended mid-row. A
 foreground command's output, arriving while the read has no prompt and nothing
 is typed, is written exactly as it came. A line finished before the shell asked
 for it was echoed without a prompt; when the read arrives the service shows it
@@ -101,7 +104,7 @@ system services' own reports still reach the logical console directly
 
 The kernel framebuffer terminal only renders the byte stream. It tracks the
 cursor, incremental UTF-8, fixed 8x16 glyphs, scrolling, and the bounded
-`ESC[2J`, `ESC[H`, `ESC[K`, and `ESC[nD` subset used by `Screen`. Line editing,
+`ESC[2J`, `ESC[H`, `ESC[K`, and `ESC[nA/B/C/D` subset used by `Screen`. Line editing,
 session ownership, foreground jobs, prompts, and Ctrl-C policy remain here in
 the userspace TTY. COM1 is written first and remains available when GOP is
 absent or framebuffer initialization fails.
