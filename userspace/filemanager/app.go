@@ -33,11 +33,21 @@ type App struct {
 	rows       int
 	tooSmall   bool
 	quit       bool
-	status     [256]byte
-	statusSize int
-	statusBad  bool
-	dialog     dialog
-	screen     screen
+	// The screen is the framebuffer's size when there is one, the size the
+	// terminal on COM1 reports when it answers, and the smaller of the two
+	// when both exist: the same bytes are drawn on each.
+	display        bool
+	displayColumns int
+	displayRows    int
+	hostColumns    int
+	hostRows       int
+	loaded         bool
+	sizeWanted     bool
+	status         [256]byte
+	statusSize     int
+	statusBad      bool
+	dialog         dialog
+	screen         screen
 	// source and target hold the paths of an operation waiting for
 	// confirmation; scratch any path being worked out; keep a name to select
 	// again after a listing changes.
@@ -56,24 +66,69 @@ type App struct {
 	Copies       int
 }
 
-// Init opens both panels on cwd and lays them out for a terminal of the given
-// size. A terminal smaller than MinColumns x MinRows gets a message instead,
-// and any key then ends the program.
-func (app *App) Init(filesystem FileSystem, cwd []byte, columns, rows int) {
+// Init opens both panels on cwd. columns and rows are the framebuffer's
+// size when display is set; otherwise the screen is 80x24 until a terminal
+// reports its size. A screen smaller than MinColumns x MinRows gets a message
+// instead of the panels until it grows.
+func (app *App) Init(filesystem FileSystem, cwd []byte, columns, rows int, display bool) {
 	app.filesystem = filesystem
-	app.columns, app.rows = min(columns, maxColumns), min(rows, maxRows)
+	app.display, app.displayColumns, app.displayRows = display, columns, rows
+	for index := range app.panels {
+		if !app.panels[index].SetPath(cwd) {
+			app.panels[index].SetPath([]byte("/"))
+		}
+	}
+	app.resize()
+	app.sizeWanted = true
+}
+
+// geometry returns the screen the manager lays itself out on.
+func (app *App) geometry() (int, int) {
+	columns, rows := MinColumns, MinRows
+	switch {
+	case app.display && app.hostColumns != 0:
+		columns, rows = min(app.displayColumns, app.hostColumns), min(app.displayRows, app.hostRows)
+	case app.display:
+		columns, rows = app.displayColumns, app.displayRows
+	case app.hostColumns != 0:
+		columns, rows = app.hostColumns, app.hostRows
+	}
+	return columns, rows
+}
+
+// resize lays the manager out again when the screen changed size: the whole
+// screen is cleared and drawn, and each selection kept in view.
+func (app *App) resize() {
+	columns, rows := app.geometry()
 	app.tooSmall = columns < MinColumns || rows < MinRows
+	columns, rows = min(columns, maxColumns), min(rows, maxRows)
+	if columns == app.columns && rows == app.rows {
+		return
+	}
+	app.columns, app.rows = columns, rows
 	app.screen.invalidate()
 	if app.tooSmall {
 		return
 	}
+	if !app.loaded {
+		app.loaded = true
+		for index := range app.panels {
+			app.load(&app.panels[index], nil)
+		}
+		return
+	}
 	for index := range app.panels {
 		panel := &app.panels[index]
-		if !panel.SetPath(cwd) {
-			panel.SetPath([]byte("/"))
-		}
-		app.load(panel, nil)
+		panel.Select(panel.selected, app.listRows())
 	}
+}
+
+// SizeWanted reports, once, that the terminal should be asked for its size
+// with terminal.Output.RequestSize: at start and after F2.
+func (app *App) SizeWanted() bool {
+	wanted := app.sizeWanted
+	app.sizeWanted = false
+	return wanted
 }
 
 // Quit reports whether the user asked to leave.
@@ -94,12 +149,22 @@ func (app *App) listRows() int { return app.rows - chromeRows }
 
 // Handle applies one key.
 func (app *App) Handle(event terminal.Event) {
+	if event.Key == terminal.KeyPosition {
+		// The terminal answered RequestSize: its size is where the cursor
+		// was clamped.
+		app.hostColumns, app.hostRows = event.Column, event.Row
+		app.resize()
+		return
+	}
 	app.Keys++
 	if event.Key >= terminal.KeyF1 && event.Key <= terminal.KeyF12 {
 		app.FunctionKeys++
 	}
 	if app.tooSmall {
-		app.quit = true
+		if event.Key == terminal.KeyF10 || event.Key == terminal.KeyEscape ||
+			event.Key == terminal.KeyRune && !event.Ctrl && (event.Rune == 'q' || event.Rune == 'Q') {
+			app.quit = true
+		}
 		return
 	}
 	if app.dialog.kind != dialogNone {
@@ -237,13 +302,15 @@ func (app *App) reload(panel *Panel) {
 	app.load(panel, keep)
 }
 
-// reread lists both panels again and repaints the whole screen, which also
-// repairs it after output from elsewhere landed on it.
+// reread lists both panels again, repaints the whole screen, which also
+// repairs it after output from elsewhere landed on it, and asks the terminal
+// for its size again.
 func (app *App) reread() {
 	app.reload(&app.panels[0])
 	app.reload(&app.panels[1])
 	app.screen.invalidate()
 	app.statusSize = 0
+	app.sizeWanted = true
 }
 
 // afterChange lists again every panel showing directory. It works on its own

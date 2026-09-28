@@ -8,6 +8,8 @@
 package main
 
 import (
+	"goos/kernel/clock"
+	"goos/kernel/kcall"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
@@ -41,16 +43,19 @@ func run(data startup.Data) {
 	if bulk, ok = utility.NewBulk(utility.BulkSize); !ok {
 		utility.Fail(nil, "no memory for copying")
 	}
-	columns, rows := utility.TerminalSize(data)
+	columns, rows, display := utility.TerminalSize(data)
 	output := terminal.NewOutput(outputStorage[:], utility.Write)
-	app.Init(files{}, data.CWD(), columns, rows)
+	app.Init(files{}, data.CWD(), columns, rows, display)
 	// Everything the manager keeps is static, so what one key allocated is
 	// discarded before the next: it can run for as long as it is used.
 	mark := utility.HeapMark()
 	for !app.Quit() {
 		app.Render(&output)
 		utility.HeapReset(mark)
-		if !readKeys() {
+		if app.SizeWanted() {
+			requestSize(&output)
+		}
+		if !readKeys(&output) {
 			break
 		}
 	}
@@ -59,12 +64,22 @@ func run(data startup.Data) {
 	report()
 }
 
-// readKeys waits for input and applies every key it holds. It returns false
-// at the end of input, which means the shell has gone.
-func readKeys() bool {
+// idleTicks is how long gfm waits for a key before asking the terminal for
+// its size again. A terminal on COM1 is resized without telling anyone, so
+// this is how the manager follows it.
+const idleTicks = clock.TicksPerSecond
+
+// readKeys waits for input and applies every key it holds, asking the
+// terminal for its size while nothing is typed. It returns false at the end
+// of input, which means the shell has gone.
+func readKeys(output *terminal.Output) bool {
 	for {
-		status, count := utility.ReadInput(inputStorage[:])
+		status, count := utility.ReadInputWithin(inputStorage[:], idleTicks)
 		if count == 0 {
+			if status == uint64(kcall.StatusResourceExhausted) {
+				requestSize(output)
+				continue
+			}
 			if utility.Retry(status) {
 				continue
 			}
@@ -82,6 +97,14 @@ func readKeys() bool {
 		}
 		return true
 	}
+}
+
+// requestSize asks the terminal on COM1 for its size. The framebuffer does
+// not answer; a host terminal's answer arrives as a key event. The query
+// leaves the cursor in the corner, and every frame starts with a MoveTo.
+func requestSize(output *terminal.Output) {
+	output.RequestSize()
+	output.Flush()
 }
 
 // report writes the validation build's markers once the screen is reset.

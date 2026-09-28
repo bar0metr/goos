@@ -78,10 +78,18 @@ nearest parent that can be listed.
 
 ## Display
 
-The layout follows the terminal size the shell passes in `COLUMNS` and
-`LINES`: at 1280x800 with the 12x24 font that is 106x33 cells, on a COM1-only
-console 80x25. Below 80x24 `gfm` shows `terminal too small (need at least
-80x24)` and ends at the next key. Each panel lists at most 1024 entries holding
+The same screen is drawn on the framebuffer and on the terminal attached to
+COM1, so `gfm` lays itself out on a size both can show. The framebuffer's size
+comes from the shell in `COLUMNS` and `LINES` (106x33 cells at 1280x800 with
+the 12x24 font). A host terminal on COM1 is asked for its size with a cursor
+position report (`ESC[6n`) when `gfm` starts, on F2, and every second while
+nothing is typed, so resizing that window re-lays the panels within about a
+second. With both, the screen is the smaller of the two in each dimension: a
+host terminal smaller than the framebuffer shrinks the panels on both, a larger
+one cannot grow them past the framebuffer. On a serial-only console the host
+terminal's size is used as it is; if it does not answer, 80x24. Below 80x24
+`gfm` shows `terminal too small (need at least 80x24); F10 quits` until the
+screen grows again. Each panel lists at most 1024 entries holding
 64 KiB of names; a larger directory is shown with `+ entries, list truncated`
 in amber on its bottom frame, never cut silently. Names are sorted with `..`
 first, directories before files, ASCII letters compared case-insensitively and

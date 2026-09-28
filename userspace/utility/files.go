@@ -188,19 +188,20 @@ func sameBytes(left, right []byte) bool {
 	return true
 }
 
-// TerminalSize returns the terminal's columns and rows as the shell passes
-// them in COLUMNS and LINES, or 80x25 when it did not.
-func TerminalSize(data startup.Data) (int, int) {
-	columns, rows := uint64(80), uint64(25)
-	if value, found := data.Env("COLUMNS"); found {
-		if parsed, ok := parseUint(value); ok && parsed > 0 && parsed <= 0xffff {
-			columns = parsed
-		}
+// TerminalSize returns the size of the framebuffer console as the shell
+// passes it in COLUMNS and LINES, and whether it did: a serial-only console
+// has no size of its own, and a full-screen program asks the terminal at its
+// far end instead (terminal.Output.RequestSize).
+func TerminalSize(data startup.Data) (int, int, bool) {
+	columnsText, columnsFound := data.Env("COLUMNS")
+	linesText, linesFound := data.Env("LINES")
+	if !columnsFound || !linesFound {
+		return 0, 0, false
 	}
-	if value, found := data.Env("LINES"); found {
-		if parsed, ok := parseUint(value); ok && parsed > 0 && parsed <= 0xffff {
-			rows = parsed
-		}
+	columns, columnsOK := parseUint(columnsText)
+	rows, rowsOK := parseUint(linesText)
+	if !columnsOK || !rowsOK || columns == 0 || rows == 0 || columns > 0xffff || rows > 0xffff {
+		return 0, 0, false
 	}
-	return int(columns), int(rows)
+	return int(columns), int(rows), true
 }

@@ -33,14 +33,19 @@ const (
 	KeyF10
 	KeyF11
 	KeyF12
+	// KeyPosition is not a key but a terminal's cursor position report,
+	// the answer to Output.RequestSize: Event.Row and Event.Column, from 1.
+	KeyPosition
 )
 
 // Event is one decoded key press.
 type Event struct {
-	Key  Key
-	Rune rune
-	Ctrl bool
-	Alt  bool
+	Key    Key
+	Rune   rune
+	Ctrl   bool
+	Alt    bool
+	Row    int
+	Column int
 }
 
 const (
@@ -206,7 +211,15 @@ func (parser *Parser) csi(value byte) (Event, bool) {
 		return Event{Key: KeyHome}, true
 	case 'F':
 		return Event{Key: KeyEnd}, true
-	case 'P', 'Q', 'R', 'S':
+	case 'R':
+		// ESC [ rows ; columns R reports the cursor; ESC [ 1 ; m R is a
+		// modified F3. A report of row 1 cannot be told from the key, and
+		// RequestSize's corner is never on row 1 of a usable screen.
+		if parser.parameters == 2 && parser.parameter[0] > 1 && parser.parameter[1] != 0 {
+			return Event{Key: KeyPosition, Row: int(parser.parameter[0]), Column: int(parser.parameter[1])}, true
+		}
+		return Event{Key: KeyF3}, true
+	case 'P', 'Q', 'S':
 		// ESC [ 1 ; m P: a modified F1-F4.
 		return Event{Key: KeyF1 + Key(value-'P')}, true
 	case '~':

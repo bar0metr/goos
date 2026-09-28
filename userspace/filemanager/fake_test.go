@@ -260,9 +260,17 @@ func newHarness(t *testing.T, filesystem *memoryFS, cwd string, columns, rows in
 	// A frame arrives in pieces that may split a sequence; the model reads it
 	// whole.
 	h.output = terminal.NewOutput(make([]byte, 1024), func(value []byte) { h.frame = append(h.frame, value...) })
-	h.app.Init(filesystem, []byte(cwd), columns, rows)
+	h.app.Init(filesystem, []byte(cwd), columns, rows, true)
 	h.render()
 	return h
+}
+
+// report delivers a terminal's size report and redraws on a model of the
+// screen the manager then uses.
+func (h *harness) report(columns, rows int) {
+	h.app.Handle(terminal.Event{Key: terminal.KeyPosition, Row: rows, Column: columns})
+	h.screen = newCells(h.t, h.app.columns, h.app.rows)
+	h.render()
 }
 
 func (h *harness) render() {

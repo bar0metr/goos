@@ -360,9 +360,75 @@ func TestTooSmallTerminal(t *testing.T) {
 	if !h.app.TooSmall() || !strings.Contains(h.screen.line(0), "terminal too small (need at least 80x24)") {
 		t.Fatalf("too small:\n%s", h.screen.text())
 	}
-	h.keys(terminal.KeyEnter)
+	h.keys(terminal.KeyEnter, terminal.KeyDown)
+	if h.app.Quit() {
+		t.Fatal("an ordinary key ended it")
+	}
+	h.keys(terminal.KeyF10)
 	if !h.app.Quit() {
-		t.Fatal("a key did not end it")
+		t.Fatal("F10 did not end it")
+	}
+}
+
+func TestHostTerminalSizeBoundsTheScreen(t *testing.T) {
+	h := newHarness(t, newMemoryFS("/d/", "/d/file"), "/d", 106, 33)
+	if !h.app.SizeWanted() || h.app.SizeWanted() {
+		t.Fatal("the terminal was not asked for its size exactly once")
+	}
+	// A smaller terminal on COM1 shrinks the layout for both consoles.
+	h.report(86, 43)
+	if h.app.columns != 86 || h.app.rows != 33 {
+		t.Fatalf("geometry = %dx%d", h.app.columns, h.app.rows)
+	}
+	if !strings.HasPrefix(h.screen.line(h.app.rows-1), "F1 Help") || !strings.Contains(h.screen.line(0), "┐┌─ /d") {
+		t.Fatalf("layout at 86x33:\n%s", h.screen.text())
+	}
+	// A larger one cannot grow it past the framebuffer.
+	h.report(200, 60)
+	if h.app.columns != 106 || h.app.rows != 33 {
+		t.Fatalf("geometry = %dx%d", h.app.columns, h.app.rows)
+	}
+	// Too small shows the message; growing again restores the panels.
+	h.report(70, 20)
+	if !h.app.TooSmall() || !strings.Contains(h.screen.line(0), "too small") {
+		t.Fatalf("too small:\n%s", h.screen.text())
+	}
+	h.report(90, 30)
+	if h.app.TooSmall() || h.app.columns != 90 || h.app.rows != 30 || h.selected() != ".." {
+		t.Fatalf("regrown: %dx%d small %v", h.app.columns, h.app.rows, h.app.TooSmall())
+	}
+	if h.app.Keys != 0 {
+		t.Fatal("size reports counted as keys")
+	}
+	h.keys(terminal.KeyF2)
+	if !h.app.SizeWanted() {
+		t.Fatal("F2 did not ask for the size again")
+	}
+}
+
+func TestSerialOnlyConsoleFollowsTheTerminal(t *testing.T) {
+	h := new(harness)
+	h.t, h.app, h.fs = t, new(App), newMemoryFS("/d/")
+	h.output = terminal.NewOutput(make([]byte, 1024), func(value []byte) { h.frame = append(h.frame, value...) })
+	h.app.Init(h.fs, []byte("/d"), 80, 25, false)
+	if h.app.columns != 80 || h.app.rows != 24 {
+		t.Fatalf("before a report = %dx%d", h.app.columns, h.app.rows)
+	}
+	h.report(130, 43)
+	if h.app.columns != 130 || h.app.rows != 43 || string(h.app.Active().Path()) != "/d" {
+		t.Fatalf("after a report = %dx%d", h.app.columns, h.app.rows)
+	}
+	// A framebuffer too small from the start lists the panels once the
+	// screen grows.
+	small := new(App)
+	small.Init(h.fs, []byte("/d"), 66, 25, true)
+	if !small.TooSmall() || small.Active().Count() != 0 {
+		t.Fatal("a too small screen listed the panels")
+	}
+	small.displayColumns = 100
+	small.Handle(terminal.Event{Key: terminal.KeyPosition, Row: 30, Column: 100})
+	if small.TooSmall() || small.Active().Count() != 1 {
+		t.Fatalf("grown: small %v count %d", small.TooSmall(), small.Active().Count())
 	}
 }
 
