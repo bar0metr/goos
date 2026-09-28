@@ -6,6 +6,8 @@
 #   - the normal build carries no validation-only code: no validation marker
 #     and no fault-injection report in any normal image (ADR 0058), and no
 #     identity-authorized console call anywhere (ADR 0094);
+#   - the root license and copyright notice declare GPL-3.0-only and the
+#     release author;
 #   - every generated file is under build/: nothing outside it is untracked
 #     or ignored.
 #
@@ -25,6 +27,10 @@ release=$(sed -n 's/^[[:space:]]*Release[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' 
 [ -f "docs/releases/$release.md" ] || complain "no release notes for $release"
 grep -a -q "GoOS $release" "$variant/kernel/goos.efi" || complain "the kernel does not report $release"
 [ -s "$iso" ] || complain "no ISO at $iso"
+grep -q '^GNU GENERAL PUBLIC LICENSE$' LICENSE || complain 'LICENSE is not GNU GPL'
+grep -q '^Version 3, 29 June 2007$' LICENSE || complain 'LICENSE is not GPL version 3'
+grep -q '^The SPDX identifier is GPL-3.0-only\.' NOTICE || complain 'NOTICE does not declare GPL-3.0-only'
+grep -q '^Copyright (C) 2026 Nikita Parfenovich (aka bar0metr)$' NOTICE || complain 'NOTICE has the wrong copyright holder'
 
 for image in "$variant/kernel/goos.efi" "$variant"/userspace/* "$variant"/userspace/bin/*; do
 	[ -f "$image" ] || continue
@@ -36,10 +42,10 @@ if grep -R -n 'goos_debug_write' userspace kernel >/dev/null 2>&1; then
 	complain 'the retired DebugWrite stub is still present'
 fi
 
-stray=$(git ls-files --others --exclude-standard; git ls-files --others --ignored --exclude-standard | grep -v -e '^build/' -e '^\.claude/' || true)
+stray=$(git ls-files --others --exclude-standard; git ls-files --others --ignored --exclude-standard | grep -v '^build/' || true)
 # Finder's .DS_Store files are host metadata the repository ignores, not
 # build output.
-stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '^\.claude/' -e '\(^\|/\)\.DS_Store$' || true)
+stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '\(^\|/\)\.DS_Store$' || true)
 [ -z "$stray" ] || complain "files outside build/ that are not in the repository: $(printf '%s' "$stray" | tr '\n' ' ')"
 
 [ "$status" -eq 0 ] && printf 'PASS release checks (%s)\n' "$release"

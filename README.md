@@ -291,7 +291,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.4
+GoOS 0.1.5
 
 CPU: x86_64
 Memory: 367 MiB managed
@@ -464,6 +464,14 @@ open-file identity, high-half kernel entry trampolines, file-backed executable
 pages, and bounded launch resource profiles. The next milestone is Linux ELF
 compatibility.
 
+GoOS 0.1.5
+([docs/releases/0.1.5.md](docs/releases/0.1.5.md)) adds an interactive UEFI GOP
+text console without replacing COM1: a permanent supervisor-only framebuffer,
+Spleen 12x24 rendering, capability-checked terminal geometry, interrupt-driven
+PS/2 input, `make run-gui`, and headless pixel and keyboard validation. GoOS is
+licensed under GPL-3.0-only; third-party components retain their documented
+licenses.
+
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors. Background jobs can be
 listed and stopped; stream merging such as `2>&1` and POSIX job control
@@ -479,6 +487,15 @@ into the same GoOS process, VFS, IPC, handle, and capability model rather than
 weakening the native architecture for POSIX compatibility.
 
 See [roadmap](docs/development/roadmap.md) for the current implementation order.
+
+## License
+
+Copyright (C) 2026 Nikita Parfenovich (aka bar0metr).
+
+GoOS is licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`). See [LICENSE](LICENSE) and [NOTICE](NOTICE). Embedded
+third-party data retains its own license; see
+[font provenance](docs/third-party-font.md).
 
 Further documentation:
 

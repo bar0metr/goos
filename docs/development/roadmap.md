@@ -420,7 +420,14 @@ base for Linux compatibility. It adds foreign FAT32 geometry and metadata,
 raw/MBR/GPT block slices, dynamic mounts, native FAT checking and repair,
 stable open-file identity, high-half kernel entry trampolines, file-backed
 executable pages, and bounded launch resource profiles (ADR 0112 through
-0122). Priority 5, Linux ELF compatibility, follows this release.
+0122).
+
+GoOS 0.1.5 (docs/releases/0.1.5.md) adds the UEFI GOP framebuffer console,
+Spleen 12x24 text rendering, unified interrupt-driven PS/2 and serial input,
+geometry-aware wrapped-line redraw, a manual graphical QEMU target, and
+headless pixel and keyboard validation while retaining COM1 as the primary
+diagnostic and fallback path. Priority 5, Linux ELF compatibility, follows
+this release.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

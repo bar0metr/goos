@@ -1,0 +1,8 @@
+GoOS
+Copyright (C) 2026 Nikita Parfenovich (aka bar0metr)
+
+GoOS is licensed under the GNU General Public License, version 3 only.
+The SPDX identifier is GPL-3.0-only. See LICENSE for the complete terms.
+
+Third-party components retain their own copyright and license notices. See
+docs/third-party-font.md for the embedded Spleen font subset.
