@@ -5,10 +5,18 @@ import (
 	"strings"
 	"testing"
 
+	"goos/internal/timekeeping"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
+	supervisor "goos/userspace/init"
 	"goos/userspace/terminal"
 )
+
+// fixtureTime is when every model file was last changed: 29 Sep 2026 11:42 UTC.
+var fixtureTime = func() ramfs.Timestamp {
+	value, _ := timekeeping.Unix(2026, 9, 29, 11, 42, 0, 0, 0)
+	return ramfs.Timestamp{Seconds: value.Seconds, Available: true}
+}()
 
 // memoryFS is a model filesystem: paths to files and directories. Paths
 // under /ro refuse changes, and anything under /other is another filesystem.
@@ -17,6 +25,7 @@ type memoryFS struct {
 	directories map[string]bool
 	calls       []string
 	failCopy    vfs.Status
+	infoCalls   int
 }
 
 func newMemoryFS(paths ...string) *memoryFS {
@@ -58,11 +67,11 @@ func (filesystem *memoryFS) ReadDir(path []byte, visitor Visitor) vfs.Status {
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	for _, child := range names {
 		name := child[strings.LastIndex(child, "/")+1:]
-		kind, size := ramfs.KindFile, uint64(len(filesystem.files[child]))
+		kind, size, modified := ramfs.KindFile, uint64(len(filesystem.files[child])), fixtureTime
 		if filesystem.directories[child] {
-			kind, size = ramfs.KindDirectory, 0
+			kind, size, modified = ramfs.KindDirectory, 0, ramfs.Timestamp{}
 		}
-		if !visitor.Visit([]byte(name), kind, size) {
+		if !visitor.Visit([]byte(name), kind, size, modified) {
 			break
 		}
 	}
@@ -166,6 +175,34 @@ func (filesystem *memoryFS) CopyFile(source, target []byte, overwrite bool) (vfs
 	}
 	filesystem.files[string(target)] = append([]byte(nil), data...)
 	return vfs.StatusOK, false
+}
+
+// FilesystemInfo reports /ro as a read-only image and everything else as a
+// FAT32 volume with 18.3G of 32G free.
+func (filesystem *memoryFS) FilesystemInfo(path []byte) (ramfs.FilesystemInfo, vfs.MountID, vfs.Status) {
+	filesystem.infoCalls++
+	if strings.HasPrefix(string(path), "/ro") {
+		return ramfs.FilesystemInfo{Type: ramfs.FilesystemSystemImage, TotalBytes: 1 << 20, ReadOnly: true, CapacityAvailable: true}, 2, vfs.StatusOK
+	}
+	free := uint64(183) << 30 / 10
+	return ramfs.FilesystemInfo{Type: ramfs.FilesystemFAT32, TotalBytes: 32 << 30, FreeBytes: free, AvailableBytes: free, CapacityAvailable: true}, 1, vfs.StatusOK
+}
+
+// programs records what the manager starts and answers with status and
+// code; run, when set, stands in for what the program does.
+type programs struct {
+	calls  []string
+	status supervisor.LaunchStatus
+	code   uint64
+	run    func()
+}
+
+func (programs *programs) Run(command, path, dir []byte) (supervisor.LaunchStatus, uint64) {
+	programs.calls = append(programs.calls, string(command)+" "+string(path)+" in "+string(dir))
+	if programs.run != nil {
+		programs.run()
+	}
+	return programs.status, programs.code
 }
 
 // cells is a model terminal: it applies CUP, erase and text, and fails the

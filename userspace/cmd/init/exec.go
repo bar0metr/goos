@@ -114,6 +114,7 @@ func finishJob(job *execJob) {
 		return
 	}
 	pid, launchStatus, exitCode := job.job.Result()
+	closeLauncher(&job.launcher)
 	job.active = false
 	if job.orphaned {
 		job.orphaned = false
@@ -210,6 +211,7 @@ func killJob(session *terminalSession, slot uint8) execproto.ControlStatus {
 			syslog.Info("job stopped", syslog.Uint("slot", uint64(slot)))
 			return execproto.ControlOK
 		}
+		stopChild(&job.launcher)
 		stopped := false
 		for _, process := range job.job.Processes() {
 			if process != 0 && sys.ProcessKill(process) == 0 {
@@ -257,7 +259,11 @@ func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environmen
 		}
 		command = execproto.ExecutableName(stage.Path)
 	}
-	return launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams)
+	var launch *launcher
+	if job := launchingJob; fromSearchPath && job != nil && supervisor.LaunchesChildren(job.request, commandGrants(command)) {
+		launch = &job.launcher
+	}
+	return launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams, launch)
 }
 
 func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicationExit(process) }

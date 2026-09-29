@@ -20,8 +20,13 @@ const (
 	// It carries no handle: the command still reads its standard input and
 	// writes its standard output, and gets no console authority.
 	GrantTerminal
+	// GrantLaunch asks PID 1 for a launch channel, over which the command can
+	// run one full-screen command of /system/bin in its place and wait for it
+	// (ADR 0130). PID 1 grants it only to the single stage of a foreground
+	// job, and never to a command launched that way.
+	GrantLaunch
 
-	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal
+	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.

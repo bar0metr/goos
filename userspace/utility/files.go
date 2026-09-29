@@ -44,8 +44,9 @@ func Stat(path []byte) (ramfs.Kind, uint64, vfs.Status) {
 
 // DirVisitor receives the entries of a directory listing. Visit returns
 // false to end the listing early; the name is only valid during the call.
+// modified is unavailable when the filesystem records no time.
 type DirVisitor interface {
-	Visit(name []byte, kind ramfs.Kind, size uint64) bool
+	Visit(name []byte, kind ramfs.Kind, size uint64, modified ramfs.Timestamp) bool
 }
 
 // ReadDir gives visitor each entry of the directory at path, in the order the
@@ -69,11 +70,17 @@ func ReadDir(path []byte, visitor DirVisitor) vfs.Status {
 		if status != vfs.StatusOK {
 			return status
 		}
-		if !visitor.Visit(reply.Name, reply.Kind, reply.Size) {
+		if !visitor.Visit(reply.Name, reply.Kind, reply.Size, reply.Modified) {
 			return vfs.StatusOK
 		}
 		cursor = reply.Cursor
 	}
+}
+
+// FilesystemInfo describes the filesystem path is on and names its mount.
+func FilesystemInfo(path []byte) (ramfs.FilesystemInfo, vfs.MountID, vfs.Status) {
+	reply, status := Request(vfs.Request{Operation: vfs.OperationFilesystemInfo, Path: path})
+	return reply.Filesystem, reply.MountID, status
 }
 
 // Mkdir creates a directory.

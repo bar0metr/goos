@@ -97,6 +97,8 @@ type execJob struct {
 	nextStage uint8
 	prepared  [execproto.MaxStages]prepared
 	fill      pendingFill
+	// launcher serves the job's launch channel, when its command has one.
+	launcher launcher
 }
 
 // launchingJob is the job whose pipeline is starting, whose prepared
@@ -164,9 +166,9 @@ func userspaceMain() {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		var jobs, fills [len(execJobs)]int
+		var jobs, fills, launches [len(execJobs)]int
 		var execBits [len(sessions)]int
-		firstJob, firstFill := 1, 1
+		firstJob, firstFill, firstLaunch := 1, 1, 1
 		if supervisionComplete {
 			// While a shell is gone there is no exec channel to wait on; its
 			// replacement brings a new one.
@@ -190,6 +192,14 @@ func userspaceMain() {
 				if execJobs[index].active && execJobs[index].fill.session != 0 {
 					interests[count] = userwait.Interest{Handle: execJobs[index].fill.session, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 					fills[count-firstFill] = index
+					count++
+				}
+			}
+			firstLaunch = count
+			for index := range execJobs {
+				if interest, waiting := execJobs[index].launcher.interest(); execJobs[index].active && waiting {
+					interests[count] = interest
+					launches[count-firstLaunch] = index
 					count++
 				}
 			}
@@ -227,9 +237,14 @@ func userspaceMain() {
 				advanceJob(jobs[bit-firstJob])
 			}
 		}
-		for bit := firstFill; bit < count; bit++ {
+		for bit := firstFill; bit < firstLaunch; bit++ {
 			if readyMask&(1<<bit) != 0 {
 				completeFill(&execJobs[fills[bit-firstFill]])
+			}
+		}
+		for bit := firstLaunch; bit < count; bit++ {
+			if readyMask&(1<<bit) != 0 {
+				pollLauncher(&execJobs[launches[bit-firstLaunch]])
 			}
 		}
 		if readyMask&1 == 0 {
