@@ -203,6 +203,12 @@ func (remote *Remote) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 	return status
 }
 
+func (remote *Remote) ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	remote.forgetAll()
+	_, status := remote.named(fsproto.OperationReplace, id, parent, name)
+	return status
+}
+
 func (remote *Remote) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
 	remote.forgetAll()
 	_, status := remote.named(fsproto.OperationUnlink, 0, parent, name)

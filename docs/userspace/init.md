@@ -148,6 +148,21 @@ The VFS control protocol version 2 identifies the add-session operation with an
 explicit payload byte, preventing an unrelated control-shaped message from
 being accepted as a session request.
 
+## Application launch
+
+A command whose manifest declares `GrantLaunch` and that runs as the only stage
+of a foreground job also gets a `launch` channel (ADR 0130). PID 1 grants that
+stage a counted copy of its standard input and keeps the reader. `gfm` uses
+the channel to run `gview` and `edit`: it writes one exec-style stage into a
+memory object of its own, attaches it to a `GLNCH001` request and waits. PID 1
+copies the request out, accepts only a `/system/bin` command whose manifest
+declares `GrantTerminal`, and launches it with its own manifest's grants, a new
+VFS session, PID 1's copy of the caller's input and the session's terminal for
+output. The child never gets `GrantLaunch`. PID 1 waits on the child in its
+main loop and answers with the exit code or the launch status. A job that ends
+while its child runs has the child stopped and reaped before the shell hears
+of it.
+
 ## Startup phases
 
 Services start in two phases. The first registers and launches `vfs`, `block`,

@@ -252,6 +252,8 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		}
 	case vfs.OperationRename:
 		reply.Status = service.namespace.Rename(request.Path, request.Target)
+	case vfs.OperationReplace:
+		reply.Status = service.namespace.Replace(request.Path, request.Target)
 	case vfs.OperationUnlink:
 		reply.Status = service.namespace.Unlink(request.Path)
 	case vfs.OperationStat:

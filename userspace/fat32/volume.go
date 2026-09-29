@@ -141,6 +141,13 @@ func (volume *Volume) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 	return volume.fs.RenameName(id, parent, name)
 }
 
+func (volume *Volume) ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	if !volume.mounted {
+		return ramfs.StatusIOError
+	}
+	return volume.fs.ReplaceName(id, parent, name)
+}
+
 func (volume *Volume) UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
 	if !volume.mounted {
 		return ramfs.StatusIOError

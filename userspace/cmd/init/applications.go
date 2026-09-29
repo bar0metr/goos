@@ -54,7 +54,9 @@ func openVFSSession() (handle.ID, string) {
 	return handle.ID(pair[0]), ""
 }
 
-func launchApplication(path, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+// launch, when not nil, is the record of a job whose only stage may be given a
+// launch channel (ADR 0130); a child launched through one gets none.
+func launchApplication(path, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams, launch *launcher) (uint64, handle.ID, supervisor.LaunchStatus) {
 	// A command that cannot be found or read is reported before a session or
 	// a stream is committed to it.
 	executable, processName, located := openExecutable(path)
@@ -63,7 +65,7 @@ func launchApplication(path, command, cwd []byte, arguments, environment execpro
 	// is called (ADR 0097).
 	_, searchPath := execproto.CommandFromSystemPath(path)
 	grantable := searchPath && executable.Image == systemImageHandle
-	process, processHandle, launched := launchExecutable(executable, processName, located, grantable, command, cwd, arguments, environment, streams)
+	process, processHandle, launched := launchExecutable(executable, processName, located, grantable, command, cwd, arguments, environment, streams, launch)
 	closeExecutable(executable)
 	if launched == supervisor.LaunchOK && executable.Image != systemImageHandle {
 		mark("FILE_EXEC_OK\n")
@@ -71,7 +73,7 @@ func launchApplication(path, command, cwd []byte, arguments, environment execpro
 	return process, processHandle, launched
 }
 
-func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams, launch *launcher) (uint64, handle.ID, supervisor.LaunchStatus) {
 	if located != supervisor.LaunchOK {
 		// The kernel used to record this when it did the lookup; the record
 		// moved with the lookup, so a failed command still leaves a trace.
@@ -89,6 +91,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	useVFS := grantable && grantsRequested&commands.GrantVFS != 0
 	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
+	useLaunch := grantable && launch != nil && grantsRequested&commands.GrantLaunch != 0 && streams.Input.Type == handle.TypeStream
 	var checkBlock handle.ID
 	if useBlockCheck {
 		var reason string
@@ -110,12 +113,29 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		}
 		pair[0] = uint64(session)
 	}
+	// A launcher's input is granted as a copy, so PID 1 keeps the reader
+	// to give its children.
+	var launchPair [2]uint64
+	if useLaunch {
+		if !createChannel(&launchPair) {
+			sys.HandleClose(handle.ID(pair[0]))
+			sys.HandleClose(checkBlock)
+			if useBlockCheck {
+				manager.CancelStop(filesystemName)
+			}
+			return 0, 0, supervisor.LaunchResourceExhausted
+		}
+		streams.Input.Shared = true
+	}
 	slot, staging := stagingSlot()
 	handles := 3
 	if useVFS {
 		handles++
 	}
 	if useBlockCheck {
+		handles++
+	}
+	if useLaunch {
 		handles++
 	}
 	writer := startup.NewWriter(staging, arguments.Count(), environment.Count(), handles)
@@ -140,11 +160,15 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useBlockCheck {
 		writer.Handle([]byte("block"), 0)
 	}
+	if useLaunch {
+		writer.Handle([]byte("launch"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
+		closePair(launchPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -163,6 +187,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useBlockCheck {
 		grants = append(grants, supervisor.Capability{Name: "block", Handle: checkBlock, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	if useLaunch {
+		grants = append(grants, supervisor.Capability{Name: "launch", Handle: handle.ID(launchPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
@@ -175,6 +202,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if launched == supervisor.LaunchProcessFailed && event.Operation == 0 {
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
 		}
+		closePair(launchPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -184,6 +212,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useBlockCheck {
 		filesystemChecker = event.Process
+	}
+	if useLaunch {
+		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID
 	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchOK
 }

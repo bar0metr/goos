@@ -28,8 +28,9 @@ const (
 	// 7 widens name lengths for the 1024-byte native name limit; version 8
 	// adds stable open-object acquire/release operations (ADR 0119); version 9
 	// carries fixed-width native timestamps and attributes; version 10 adds
-	// filesystem capacity and read-only state.
-	Version = uint16(10)
+	// filesystem capacity and read-only state; version 11 adds whole-file
+	// replacement (ADR 0129).
+	Version = uint16(11)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -80,6 +81,9 @@ const (
 	// OperationFlush makes every completed write durable on the device.
 	OperationFlush
 	OperationFilesystemInfo
+	// OperationReplace gives Node the name of the existing file Name in
+	// Parent and removes that file.
+	OperationReplace
 )
 
 // Request is one backend call. Node, Parent, Offset, Size, Slot and Name are
@@ -144,7 +148,7 @@ func SlotBytes(cache []byte, request Request) ([]byte, bool) {
 }
 
 func validOperation(operation Operation) bool {
-	return operation >= OperationMount && operation <= OperationFilesystemInfo
+	return operation >= OperationMount && operation <= OperationReplace
 }
 
 // validName accepts an empty name, for operations that take none, or one a

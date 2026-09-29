@@ -54,6 +54,17 @@ into an invalid argument (ADR 0079). Version 4 moves bulk file data through
 an attached memory object (ADR 0107). Version 5 lets paths too long for a
 message travel in an attached object the client owns, and returns a listed
 name longer than 224 bytes in one when the client attaches it (ADR 0110).
+Versions 9 and 10 add file metadata, filesystem capacity and mount enumeration
+(ADR 0126, 0127).
+
+Version 11 adds `Replace`, which moves a regular file onto an existing one of
+the same filesystem and removes the old one (ADR 0129). Rename still refuses an
+existing target. The VFS refuses to replace a file any session holds open, a
+directory or a mount root; a missing target makes `Replace` a rename. Editors
+save through it: they write the new contents to `.<name>.~save` beside the file
+and replace only when that file is complete, so a failed save leaves the
+original as it was. On FAT32 the replacement ends in a device flush and never
+leaves the target holding part of either version.
 
 PID 1 supervises `/system/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address

@@ -61,6 +61,7 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	stderr, stderrFound := data.Handle("stderr")
 	vfsEndpoint, vfsFound := data.Handle("vfs")
 	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
+	launchHandle, _ = data.Handle("launch")
 	commandName, current = data.Command(), manifest
 	if !stdinFound || !stdoutFound || !stderrFound {
 		finish(1, "startup handles unavailable\n")

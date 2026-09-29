@@ -60,7 +60,7 @@ func TestNextRejectsMalformedLines(t *testing.T) {
 		"ls\t1\t0\t1\tls\tlist",          // no newline
 		"ls\t1\t0\t1\tls\n",              // missing field
 		"ls\t1\t0\t1\tls\tlist\textra\n", // extra field
-		"ls\t9\t0\t1\tls\tlist\n",        // unknown grant
+		"ls\t16\t0\t1\tls\tlist\n",       // unknown grant
 		"ls\t1\t2\t1\tls\tlist\n",        // max below min
 		"ls\t1\t-1\t1\tls\tlist\n",       // negative
 		"ls\t1\t0\t1000\tls\tlist\n",     // over bound

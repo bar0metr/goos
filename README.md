@@ -236,7 +236,10 @@ separate consoles, each with its own terminal service and shell, so `gfm`
 fills whichever screen you start it on (ADR 0125). The storage path reaches a
 persistent QEMU block device through an isolated driver, block service, and
 FAT32 filesystem service, and native utilities use `/persist`, `/home` and
-`/state` through VFS.
+`/state` through VFS. `gfm` views a file with `gview` and edits it with
+`edit`, which PID 1 starts on its behalf with the child's own manifest grants
+(ADR 0130); `edit` saves through a temporary file and a whole-file replacement
+that leaves the original intact when a save fails (ADR 0129).
 
 PID 1, VFS, and the block service use event-driven multi-object waits for their
 independent control and client endpoints. A wake marks the task runnable and the
@@ -350,12 +353,16 @@ args
 bench
 cat
 cp
+df
 echo
+edit
 fsck-fat
 gfm
+gview
 ls
 mem
 mkdir
+mount
 mv
 ps
 pwd
@@ -423,7 +430,8 @@ and RAMFS metadata costs measured in a booted guest.
 `make test-console-gui` validates actual framebuffer pixels and injects a shell
 command through QEMU's PS/2 keyboard path in a headless guest, then drives
 `gfm` with arrows and function keys, quits it, stops a second one with Ctrl-C
-and checks the shell afterwards. It does not require a graphical host session
+and checks the shell afterwards. It then views and edits a file from `gfm` and
+reads the saved result back in the shell. It does not require a graphical host session
 or OCR. In `make run-gui`, type `gfm` in the QEMU window to use the file
 manager.
 `make test` is the fast host-side validation set. `make test-all` is the
@@ -501,7 +509,12 @@ information without device authority. A bounded `userspace/tui` layer adds
 caller-owned terminal-cell screens, checked geometry, dirty-row rendering and
 text/list viewports. Native `gview` uses that layer and a fixed file window to
 view text files of arbitrary size without loading them whole; control and binary
-content cannot become terminal commands (ADR 0126, ADR 0127, ADR 0128). GoOS is
+content cannot become terminal commands (ADR 0126, ADR 0127, ADR 0128). A new
+`Replace` operation and `userspace/safesave` save a file without ever
+truncating the original (ADR 0129). `gfm` starts `gview` and the new `edit`
+editor through a capability-bounded launch channel to PID 1 (ADR 0130), shows
+modification times and free space, and keeps its selection across edits.
+`edit` holds up to 1 MiB in a gap buffer (ADR 0131). GoOS is
 licensed under GPL-3.0-only; third-party components retain their documented
 licenses.
 

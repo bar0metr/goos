@@ -447,8 +447,12 @@ read-only `df` and `mount` commands expose it without device authority.
 The bounded `userspace/tui` layer now provides caller-owned screens, checked
 geometry, dirty rows, dialogs and text/list viewports (ADR 0128). Native `gview`
 uses a fixed read window for large-file navigation, clips long lines and
-sanitizes file controls before terminal rendering. Editor work, safe replacement
-and nested application launch remain later 0.1.7 phases.
+sanitizes file controls before terminal rendering. Version 11 of both protocols
+adds whole-file `Replace` (ADR 0129), through which the new gap-buffer editor
+`edit` saves without truncating the original (ADR 0131). `gfm` starts `gview`
+and `edit` through a launch channel PID 1 grants by manifest, with the child's
+own grants and the caller's input (ADR 0130), and shows modification times and
+free space.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

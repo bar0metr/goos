@@ -8,12 +8,15 @@
 package main
 
 import (
+	"goos/internal/timekeeping"
 	"goos/kernel/clock"
 	"goos/kernel/kcall"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
 	"goos/userspace/filemanager"
+	supervisor "goos/userspace/init"
+	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	"goos/userspace/terminal"
 	"goos/userspace/utility"
@@ -22,7 +25,7 @@ import (
 var manifest = commands.Manifest{
 	Usage:   "gfm",
 	Summary: "two-pane file manager",
-	Grants:  commands.GrantVFS | commands.GrantTerminal,
+	Grants:  commands.GrantVFS | commands.GrantTerminal | commands.GrantLaunch,
 }
 
 var (
@@ -46,6 +49,11 @@ func run(data startup.Data) {
 	columns, rows, display := utility.TerminalSize(data)
 	output := terminal.NewOutput(outputStorage[:], utility.Write)
 	app.Init(files{}, data.CWD(), columns, rows, display)
+	app.SetPrograms(programs{data: data})
+	if now, status := sys.ClockNow(timekeeping.Realtime); status == kcall.StatusOK {
+		year, _, _, _, _, _ := timekeeping.CivilUTC(now.Seconds)
+		app.SetYear(year)
+	}
 	// Everything the manager keeps is static, so what one key allocated is
 	// discarded before the next: it can run for as long as it is used.
 	mark := utility.HeapMark()
@@ -124,6 +132,9 @@ func report() {
 	if app.Copies != 0 {
 		utility.Mark("GFM_COPY_OK\n")
 	}
+	if app.Launches != 0 {
+		utility.Mark("GFM_LAUNCH_OK\n")
+	}
 	utility.Mark("GFM_EXIT_OK\n")
 }
 
@@ -142,4 +153,32 @@ func (files) Unlink(path []byte) vfs.Status                     { return utility
 func (files) CopyFile(source, target []byte, overwrite bool) (vfs.Status, bool) {
 	status, failure := utility.CopyFile(source, target, &bulk, overwrite)
 	return status, failure == utility.CopyTarget
+}
+
+func (files) FilesystemInfo(path []byte) (ramfs.FilesystemInfo, vfs.MountID, vfs.Status) {
+	return utility.FilesystemInfo(path)
+}
+
+// programs starts the viewer and the editor through PID 1 (ADR 0130). They
+// read gfm's input and draw on its terminal while gfm waits, and get the
+// framebuffer's size the way gfm got it.
+type programs struct{ data startup.Data }
+
+var (
+	programArgs [2][]byte
+	programEnv  [2][]byte
+	columnsVar  [16 + 8]byte
+	linesVar    [16 + 8]byte
+)
+
+func (runner programs) Run(command, path, dir []byte) (supervisor.LaunchStatus, uint64) {
+	programArgs[0], programArgs[1] = command, path
+	environment := programEnv[:0]
+	if value, found := runner.data.Env("COLUMNS"); found && len(value) <= 16 {
+		environment = append(environment, append(append(columnsVar[:0], "COLUMNS="...), value...))
+	}
+	if value, found := runner.data.Env("LINES"); found && len(value) <= 16 {
+		environment = append(environment, append(append(linesVar[:0], "LINES="...), value...))
+	}
+	return utility.Launch(command, programArgs[:], dir, environment)
 }

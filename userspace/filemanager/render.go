@@ -1,7 +1,9 @@
 package filemanager
 
 import (
+	"goos/internal/timekeeping"
 	"goos/kernel/ramfs"
+	"goos/userspace/fsdisplay"
 	"goos/userspace/terminal"
 )
 
@@ -31,8 +33,18 @@ const (
 	colorFieldBg        = terminal.Black
 )
 
-// sizeWidth is the width of the size column, a space on each side included.
-const sizeWidth = 10
+// sizeWidth is the width of the size column, a space on each side included,
+// and dateWidth that of the modification-time column. The date column is
+// shown only while the name column keeps minNameWidth: at 80 columns the
+// information line carries the time instead.
+const (
+	sizeWidth    = 10
+	dateWidth    = 14
+	minNameWidth = 20
+)
+
+// datesShown reports whether a panel inner columns wide has a date column.
+func datesShown(inner int) bool { return inner-1-sizeWidth-1-dateWidth >= minNameWidth }
 
 // rowStorage bounds one composed row: every cell as a three-byte box glyph
 // or a UTF-8 character, plus the colour changes along it.
@@ -136,6 +148,10 @@ func (app *App) composePanelRow(out *terminal.Output, index, row, width int) {
 	}
 	inner := width - 2
 	nameWidth := inner - 1 - sizeWidth
+	dates := datesShown(inner)
+	if dates {
+		nameWidth -= 1 + dateWidth
+	}
 	list := app.listRows()
 	switch {
 	case row == 0:
@@ -151,16 +167,26 @@ func (app *App) composePanelRow(out *terminal.Output, index, row, width int) {
 		app.style(out, colorHeader, colorGround)
 		out.Pad(sizeWidth - 5)
 		out.WriteString("Size ")
+		if dates {
+			app.style(out, frame, colorGround)
+			out.WriteString("│")
+			app.style(out, colorHeader, colorGround)
+			out.TextString(" Modified", dateWidth)
+		}
 	case row < 2+list:
 		app.style(out, frame, colorGround)
 		out.WriteString("│")
-		app.composeEntry(out, panel, active, panel.top+row-2, nameWidth, frame)
+		app.composeEntry(out, panel, active, panel.top+row-2, nameWidth, dates, frame)
 	case row == 2+list:
 		app.style(out, frame, colorGround)
 		out.WriteString("├")
 		out.Repeat("─", nameWidth)
 		out.WriteString("┴")
 		out.Repeat("─", sizeWidth)
+		if dates {
+			out.WriteString("┴")
+			out.Repeat("─", dateWidth)
+		}
 		out.WriteString("┤")
 		return
 	case row == 3+list:
@@ -202,7 +228,7 @@ func (app *App) composeTitle(out *terminal.Output, panel *Panel, active bool, fr
 	out.WriteString("┐")
 }
 
-func (app *App) composeEntry(out *terminal.Output, panel *Panel, active bool, index, nameWidth int, frame terminal.Color) {
+func (app *App) composeEntry(out *terminal.Output, panel *Panel, active bool, index, nameWidth int, dates bool, frame terminal.Color) {
 	if index >= panel.count {
 		app.style(out, colorText, colorGround)
 		out.Pad(nameWidth)
@@ -210,6 +236,12 @@ func (app *App) composeEntry(out *terminal.Output, panel *Panel, active bool, in
 		out.WriteString("│")
 		app.style(out, colorText, colorGround)
 		out.Pad(sizeWidth)
+		if dates {
+			app.style(out, frame, colorGround)
+			out.WriteString("│")
+			app.style(out, colorText, colorGround)
+			out.Pad(dateWidth)
+		}
 		return
 	}
 	entry, name := panel.Entry(index)
@@ -239,6 +271,19 @@ func (app *App) composeEntry(out *terminal.Output, panel *Panel, active bool, in
 	out.Pad(sizeWidth - 1 - len(text))
 	out.Write(text)
 	out.WriteString(" ")
+	if dates {
+		app.style(out, separator, background)
+		out.WriteString("│")
+		app.style(out, foreground, background)
+		var date [24]byte
+		text = date[:0]
+		if !IsParent(name) {
+			text = appendDate(text, entry.Modified, app.year)
+		}
+		out.WriteString(" ")
+		out.Write(text)
+		out.Pad(dateWidth - 1 - len(text))
+	}
 }
 
 // writeName writes a name in width columns, with a slash after a directory
@@ -267,8 +312,11 @@ func (app *App) composeInformation(out *terminal.Output, panel *Panel, inner int
 		out.Pad(inner)
 		return
 	}
-	var size [24]byte
+	var size [48]byte
 	text := entrySize(size[:0], entry, name)
+	if !IsParent(name) && entry.Modified.Available {
+		text = appendDate(append(text, "  "...), entry.Modified, app.year)
+	}
 	out.WriteString(" ")
 	app.writeName(out, name, entry.Kind == ramfs.KindDirectory && !IsParent(name), inner-2-len(text)-1)
 	out.WriteString(" ")
@@ -293,7 +341,17 @@ func (app *App) composeBottom(out *terminal.Output, panel *Panel, frame terminal
 	}
 	app.style(out, frame, colorGround)
 	out.WriteString("└")
-	out.Repeat("─", inner-len(text)-1)
+	var described [64]byte
+	capacity := capacityText(described[:0], panel, inner-len(text)-3)
+	if len(capacity) != 0 {
+		out.WriteString("─")
+		app.style(out, colorText, colorGround)
+		out.Write(capacity)
+		app.style(out, frame, colorGround)
+		out.Repeat("─", inner-len(text)-2-len(capacity))
+	} else {
+		out.Repeat("─", inner-len(text)-1)
+	}
 	if panel.truncated {
 		app.style(out, colorWarning, colorGround)
 	}
@@ -333,26 +391,36 @@ func (app *App) composeStatus(out *terminal.Output) {
 }
 
 var keyBar = [...]struct{ number, label string }{
-	{"F1", "Help"}, {"F2", "Reread"}, {"F5", "Copy"}, {"F6", "Move"},
-	{"F7", "Mkdir"}, {"F8", "Delete"}, {"F10", "Quit"},
+	{"F1", "Help"}, {"F2", "Reread"}, {"F3", "View"}, {"F4", "Edit"}, {"F5", "Copy"},
+	{"F6", "Move"}, {"F7", "Mkdir"}, {"F8", "Delete"}, {"F10", "Quit"},
 }
 
-// composeKeyBar writes the function keys along the last row. It stops one
-// column short of the corner: writing there would scroll the screen.
+// composeKeyBar writes the function keys along the last row, each as wide as
+// its label, with what is left over shared between them. It stops one column
+// short of the corner: writing there would scroll the screen.
 func (app *App) composeKeyBar(out *terminal.Output) {
 	width := app.columns - 1
-	slot := width / len(keyBar)
+	natural := 0
+	for _, key := range keyBar {
+		natural += len(key.number) + len(key.label) + 2
+	}
+	spare := max(width-natural, 0) / len(keyBar)
 	used := 0
 	for _, key := range keyBar {
+		room := len(key.number) + len(key.label) + 2 + spare
+		if used+room > width {
+			break
+		}
 		app.style(out, colorKeyNumber, colorGround)
 		out.WriteString(key.number)
 		app.style(out, colorKeyLabelFg, colorKeyLabelBg)
 		out.WriteString(" ")
-		out.TextString(key.label, slot-len(key.number)-2)
+		out.TextString(key.label, room-len(key.number)-2)
 		app.style(out, colorText, colorGround)
 		out.WriteString(" ")
-		used += slot
+		used += room
 	}
+	app.style(out, colorText, colorGround)
 	out.Pad(width - used)
 }
 
@@ -373,10 +441,11 @@ var helpLines = [...]string{
 	"Up, Down        move the selection",
 	"PgUp, PgDn      move by a page",
 	"Home, End       first or last entry",
-	"Enter           open the selected directory",
+	"Enter           open a directory, view a file",
 	"Backspace       go to the parent directory",
 	"Tab             switch panels",
 	"F2              read both directories again",
+	"F3, F4          view or edit the selected file",
 	"F5              copy the file to the other panel",
 	"F6              move or rename",
 	"F7              create a directory",
@@ -496,6 +565,78 @@ func (app *App) composeDialogLine(out *terminal.Output, line, width int) {
 		}
 	}
 	out.Pad(width)
+}
+
+var monthNames = [...]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+
+// appendDate formats a modification time, in UTC, in twelve columns: the time
+// of day for a date in the current year, the year otherwise, and a dash when
+// the filesystem recorded none.
+func appendDate(target []byte, stamp ramfs.Timestamp, current int64) []byte {
+	if !stamp.Available {
+		return append(target, '-')
+	}
+	year, month, day, hour, minute, _ := timekeeping.CivilUTC(stamp.Seconds)
+	if month < 1 || month > 12 {
+		return append(target, '-')
+	}
+	target = appendTwo(target, day, ' ')
+	target = append(append(append(target, ' '), monthNames[month-1]...), ' ')
+	if current == 0 || year == current {
+		target = appendTwo(target, hour, '0')
+		return appendTwo(append(target, ':'), minute, '0')
+	}
+	if year < 0 || year > 9999 {
+		return append(target, " ????"...)
+	}
+	target = append(target, ' ')
+	for divisor := int64(1000); divisor > 0; divisor /= 10 {
+		target = append(target, byte('0'+year/divisor%10))
+	}
+	return target
+}
+
+// appendTwo writes a value below 100 in two columns, padded with pad.
+func appendTwo(target []byte, value uint8, pad byte) []byte {
+	if value < 10 {
+		return append(target, pad, '0'+value)
+	}
+	return append(target, '0'+value/10, '0'+value%10)
+}
+
+// capacityText describes the filesystem of a panel in at most room columns:
+// its type and free and total space, only the free space when that is all
+// that fits, and nothing when not even that does. A read-only filesystem says
+// so instead of reporting free space it cannot use.
+func capacityText(target []byte, panel *Panel, room int) []byte {
+	info, _, known := panel.Filesystem()
+	if !known {
+		return target
+	}
+	full := append(target, ' ')
+	full = append(full, fsdisplay.TypeName(info.Type)...)
+	switch {
+	case info.ReadOnly:
+		full = append(full, " ro"...)
+	case info.CapacityAvailable:
+		full = append(full, ' ')
+		full = fsdisplay.AppendSize(full, info.AvailableBytes, true)
+		full = append(full, " free / "...)
+		full = fsdisplay.AppendSize(full, info.TotalBytes, true)
+	}
+	full = append(full, ' ')
+	if len(full) <= room {
+		return full
+	}
+	if info.ReadOnly || !info.CapacityAvailable {
+		return target
+	}
+	short := fsdisplay.AppendSize(append(target, ' '), info.AvailableBytes, true)
+	short = append(short, " free "...)
+	if len(short) <= room {
+		return short
+	}
+	return target
 }
 
 // entrySize formats the size column: <UP> for "..", <DIR> for a directory,

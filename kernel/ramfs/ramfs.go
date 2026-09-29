@@ -383,6 +383,46 @@ func (fs *FileSystem) RenameName(id NodeID, parent NodeID, name Name) Status {
 	return StatusOK
 }
 
+// ReplaceName gives the file id the name of the file already called name in
+// parent and removes that file in the same call, keeping its creation time
+// (ADR 0129). Nothing else runs in between, so no reader sees neither file.
+// With no such file it is a rename.
+func (fs *FileSystem) ReplaceName(id NodeID, parent NodeID, name Name) Status {
+	if !name.valid() {
+		return StatusInvalidArgument
+	}
+	entry, status := fs.lookup(id)
+	if status != StatusOK {
+		return status
+	}
+	if entry.kind != KindFile {
+		return StatusIsDirectory
+	}
+	directory, status := fs.directory(parent)
+	if status != StatusOK {
+		return status
+	}
+	index, found := fs.child(directory, name)
+	if !found {
+		return fs.RenameName(id, parent, name)
+	}
+	target := fs.at(index)
+	if target.kind != KindFile {
+		return StatusIsDirectory
+	}
+	if fs.id(index) == id {
+		return StatusInvalidArgument
+	}
+	created := target.created
+	if status = fs.UnlinkName(parent, name); status != StatusOK {
+		return status
+	}
+	if status = fs.RenameName(id, parent, name); status == StatusOK {
+		entry.created = created
+	}
+	return status
+}
+
 func (fs *FileSystem) Unlink(parent NodeID, name []byte) Status {
 	value, ok := MakeName(name)
 	if !ok {

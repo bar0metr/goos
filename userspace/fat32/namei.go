@@ -222,6 +222,87 @@ func (fs *FileSystem) RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramf
 	return status
 }
 
+// ReplaceName gives the file id the name of the existing file name in parent
+// and removes that file (ADR 0129). The target keeps its name, creation time
+// and attributes and takes id's chain, size and modification time. With no
+// file called name it is a rename.
+//
+// Every step ends in a device flush, in an order that never lets two entries
+// share a chain: id's data and FAT links first, then id's entry is erased,
+// then the target's short entry is rewritten in place, and the old chain is
+// freed last. An interruption before the rewrite leaves the old file and at
+// worst the new chain as lost clusters; one after it leaves the new file and
+// at worst the old chain as lost clusters. The target never holds part of
+// either.
+func (fs *FileSystem) ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status {
+	if status := fs.mutable(); status != ramfs.StatusOK {
+		return status
+	}
+	sourceDir, sourceIndex, source, status := fs.fileNode(id)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	target, status := fs.parentAndName(parent, name, false)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	result, status := fs.find(&target, 0, true)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if !result.found {
+		return fs.RenameName(id, parent, name)
+	}
+	targetIndex, entry := result.at.index(), result.entry
+	switch {
+	case sourceDir.key == target.key && sourceIndex == targetIndex:
+		return ramfs.StatusInvalidArgument
+	case isDirectory(entry):
+		return ramfs.StatusIsDirectory
+	case fs.objectOpen(target.node(targetIndex)):
+		return ramfs.StatusPermissionDenied
+	}
+	if status = writable(entry); status != ramfs.StatusOK {
+		return status
+	}
+	start, status := fs.locate(&sourceDir, sourceIndex)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if status = fs.sync(); status != ramfs.StatusOK {
+		return status
+	}
+	if status = fs.erase(&sourceDir, start, sourceIndex); status != ramfs.StatusOK {
+		return status
+	}
+	if status = fs.sync(); status != ramfs.StatusOK {
+		return status
+	}
+	old := entryCluster(entry)
+	setEntryCluster(&entry, entryCluster(source))
+	copy(entry[28:32], source[28:32])
+	copy(entry[fieldWriteTime:fieldWriteTime+2], source[fieldWriteTime:fieldWriteTime+2])
+	copy(entry[fieldWriteDate:fieldWriteDate+2], source[fieldWriteDate:fieldWriteDate+2])
+	copy(entry[fieldAccessDate:fieldAccessDate+2], source[fieldAccessDate:fieldAccessDate+2])
+	entry[11] |= attrArchive
+	if status = fs.writeEntry(&target, targetIndex, entry); status != ramfs.StatusOK {
+		return status
+	}
+	if status = fs.sync(); status != ramfs.StatusOK {
+		return status
+	}
+	if fs.valid(old) {
+		fs.freeChain(old)
+	}
+	fs.forgetPositions()
+	fs.moveObjects(sourceDir.node(sourceIndex), target.node(targetIndex))
+	fs.touchDirectory(&sourceDir)
+	if sourceDir.key != target.key {
+		fs.touchDirectory(&target)
+	}
+	return fs.sync()
+}
+
 // repoint sets the ".." entry of the directory at cluster to parent.
 func (fs *FileSystem) repoint(cluster, parent uint32) ramfs.Status {
 	if !fs.valid(cluster) {

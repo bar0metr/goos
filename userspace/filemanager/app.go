@@ -4,6 +4,7 @@ import (
 	"goos/internal/limits"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
+	supervisor "goos/userspace/init"
 	"goos/userspace/shell"
 	"goos/userspace/terminal"
 )
@@ -27,12 +28,16 @@ const (
 // status line says, and the dialog in front, if any.
 type App struct {
 	filesystem FileSystem
-	panels     [2]Panel
-	active     int
-	columns    int
-	rows       int
-	tooSmall   bool
-	quit       bool
+	programs   Programs
+	// year is the current UTC year, when known: a date in it shows its time,
+	// one in another year shows the year instead.
+	year     int64
+	panels   [2]Panel
+	active   int
+	columns  int
+	rows     int
+	tooSmall bool
+	quit     bool
 	// The screen is the framebuffer's size on the framebuffer console, and on
 	// COM1 the size the terminal at the far end reports (ADR 0125).
 	display        bool
@@ -63,7 +68,15 @@ type App struct {
 	FunctionKeys int
 	Directories  int
 	Copies       int
+	Launches     int
 }
+
+// SetPrograms gives the manager the viewer and editor it starts on F3 and F4.
+// Without it those keys say they are unavailable.
+func (app *App) SetPrograms(programs Programs) { app.programs = programs }
+
+// SetYear tells the manager the current UTC year.
+func (app *App) SetYear(year int64) { app.year = year }
 
 // Init opens both panels on cwd. columns and rows are the framebuffer's
 // size when display is set; otherwise the screen is 80x24 until the terminal
@@ -202,10 +215,10 @@ func (app *App) Handle(event terminal.Event) {
 		app.reread()
 		return
 	case terminal.KeyF3:
-		app.fail("Viewer is not available in GoOS 0.1.6", nil, "")
+		app.run(viewerCommand)
 		return
 	case terminal.KeyF4:
-		app.fail("Editor is not available in GoOS 0.1.6", nil, "")
+		app.run(editorCommand)
 		return
 	case terminal.KeyF5:
 		app.copy()
@@ -241,7 +254,7 @@ func (app *App) open() {
 		return
 	}
 	if entry.Kind != ramfs.KindDirectory {
-		app.fail("Viewer is not available in GoOS 0.1.6", nil, "")
+		app.run(viewerCommand)
 		return
 	}
 	path, ok := shell.JoinName(panel.Path(), name, &app.scratch)
@@ -251,6 +264,42 @@ func (app *App) open() {
 	}
 	app.statusSize = 0
 	app.enter(panel, path, nil)
+}
+
+const (
+	viewerCommand = "gview"
+	editorCommand = "edit"
+)
+
+// run starts the viewer or the editor on the selected file and waits for it.
+// The program draws on the whole terminal, so every row is drawn again when
+// it returns, and the listings are read again: an edit changes a size and a
+// time, and a save can change free space.
+func (app *App) run(command string) {
+	entry, _, path, ok := app.selection()
+	if !ok || entry.Kind != ramfs.KindFile {
+		app.fail("Select a file to open with "+command, nil, "")
+		return
+	}
+	if app.programs == nil {
+		app.fail("Cannot start "+command+": not available", nil, "")
+		return
+	}
+	app.Launches++
+	status, code := app.programs.Run([]byte(command), path, app.Active().Path())
+	app.reload(&app.panels[0])
+	app.reload(&app.panels[1])
+	app.screen.invalidate()
+	app.sizeWanted = !app.display
+	switch {
+	case status != supervisor.LaunchOK:
+		app.fail("Cannot start "+command+": "+status.Reason(), nil, "")
+	case code != 0:
+		var digits [20]byte
+		app.fail(command+" ended with status ", nil, string(appendDecimal(digits[:0], code)))
+	default:
+		app.statusSize = 0
+	}
 }
 
 // parent goes up one directory and selects the one it came from.
@@ -428,6 +477,11 @@ func (app *App) finishMove(text []byte) {
 	from := shell.Parent(source, &app.directory)
 	switch status := app.filesystem.Rename(source, target); status {
 	case vfs.StatusOK:
+		if panel := app.Active(); equalBytes(shell.Parent(target, &app.scratch), panel.Path()) {
+			// A rename in place keeps the entry selected under its new name.
+			keep := app.keep[:copy(app.keep[:], shell.BaseName(target))]
+			app.load(panel, keep)
+		}
 		app.afterChange(from)
 		app.afterChange(shell.Parent(target, &app.scratch))
 		app.say("Moved to ", target, "")

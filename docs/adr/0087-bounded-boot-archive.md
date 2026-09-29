@@ -62,3 +62,18 @@ table it allocates to the caller's page quota. A host test in `kernel/mm/vm`
 fails if the window is ever smaller than `boot.MaxInitramfs` again. The loader
 already refused segments inside `[UserSharedAddress, UserImageLimit)`, so no
 native image can overlap the larger window.
+
+## Addendum: a 6 MiB bound and a size check that looked at the wrong file
+
+GoOS 0.1.7 adds `edit` and grows `gfm` and PID 1, and the validation build's
+archive reached 4.03 MiB. The kernel halted with the panic above, as designed,
+but the build had not refused the archive first: `tools/initramfs` checked the
+size of its twelfth argument, the command index, instead of the archive it had
+just written, and on failure would have deleted the index. It now checks and
+removes the archive.
+
+The bound is now 6 MiB. The kernel and the archive share the 8 MiB EFI system
+partition, where the kernel takes under 1 MiB, so 6 MiB leaves room for both
+without changing the partition. The system image window has been 1 GiB since
+the layout moved to `[UserImageAddress, UserImageLimit)`, and its host test
+still ties it to this constant.

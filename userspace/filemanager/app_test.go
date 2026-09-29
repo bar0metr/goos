@@ -315,7 +315,7 @@ func TestHelpQuitAndUnavailableKeys(t *testing.T) {
 		t.Fatal("closing help quit, or left it on the screen")
 	}
 	h.keys(terminal.KeyF3)
-	if !strings.Contains(h.status(), "Viewer is not available") {
+	if !strings.Contains(h.status(), "Cannot start gview: not available") {
 		t.Fatalf("F3: %q", h.status())
 	}
 	h.keys(terminal.KeyDown)
@@ -481,7 +481,7 @@ func TestSizesAndTruncatedListing(t *testing.T) {
 	var panel Panel
 	panel.SetPath([]byte("/"))
 	for index := 0; index < MaxEntries+5; index++ {
-		panel.Visit([]byte(fmt.Sprintf("n%04d", index)), ramfs.KindFile, 1)
+		panel.Visit([]byte(fmt.Sprintf("n%04d", index)), ramfs.KindFile, 1, ramfs.Timestamp{})
 	}
 	if panel.Count() != MaxEntries || !panel.Truncated() {
 		t.Fatalf("count %d truncated %v", panel.Count(), panel.Truncated())
@@ -489,7 +489,7 @@ func TestSizesAndTruncatedListing(t *testing.T) {
 	var pool Panel
 	long := make([]byte, 1024)
 	for index := 0; index < 100; index++ {
-		pool.Visit(long, ramfs.KindFile, 1)
+		pool.Visit(long, ramfs.KindFile, 1, ramfs.Timestamp{})
 	}
 	if !pool.Truncated() || pool.Count() != namePoolSize/1024 {
 		t.Fatalf("name pool: count %d truncated %v", pool.Count(), pool.Truncated())

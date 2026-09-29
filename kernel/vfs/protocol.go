@@ -17,8 +17,9 @@ const (
 	// 7 widens returned-name lengths for the 1024-byte native name limit;
 	// version 8 adds immutable executable preparation and page reads; version
 	// 9 adds fixed-width timestamps, native attributes and mount identity;
-	// version 10 adds filesystem capacity and bounded mount enumeration.
-	ProtocolVersion = uint16(10)
+	// version 10 adds filesystem capacity and bounded mount enumeration;
+	// version 11 adds whole-file replacement (ADR 0129).
+	ProtocolVersion = uint16(11)
 	protocolHeader  = 40
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
@@ -69,7 +70,10 @@ const (
 	OperationReadExecutable
 	OperationFilesystemInfo
 	OperationReadMount
-	lastOperation = OperationReadMount
+	// OperationReplace moves the regular file Path onto Target, removing the
+	// file Target named in the same step, or renames it when there was none.
+	OperationReplace
+	lastOperation = OperationReplace
 )
 
 // Bulk reports whether an operation moves its data through an attached object

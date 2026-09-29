@@ -20,6 +20,7 @@ type Entry struct {
 	nameSize   uint16
 	Kind       ramfs.Kind
 	Size       uint64
+	Modified   ramfs.Timestamp
 }
 
 var parentName = []byte("..")
@@ -37,6 +38,11 @@ type Panel struct {
 	truncated bool
 	selected  int
 	top       int
+	// filesystem describes the filesystem the directory is on, as of the last
+	// listing; it is asked again only when the listing is, never per key.
+	filesystem ramfs.FilesystemInfo
+	mount      vfs.MountID
+	described  bool
 }
 
 // Path returns the directory the panel shows.
@@ -82,12 +88,12 @@ func (panel *Panel) Current() (Entry, []byte, bool) {
 func IsParent(name []byte) bool { return len(name) == 2 && name[0] == '.' && name[1] == '.' }
 
 // Visit adds one entry to the listing.
-func (panel *Panel) Visit(name []byte, kind ramfs.Kind, size uint64) bool {
+func (panel *Panel) Visit(name []byte, kind ramfs.Kind, size uint64, modified ramfs.Timestamp) bool {
 	if panel.count == len(panel.entries) || len(name) > len(panel.names)-panel.namesSize || len(name) > 0xffff {
 		panel.truncated = true
 		return false
 	}
-	panel.entries[panel.count] = Entry{nameOffset: uint32(panel.namesSize), nameSize: uint16(len(name)), Kind: kind, Size: size}
+	panel.entries[panel.count] = Entry{nameOffset: uint32(panel.namesSize), nameSize: uint16(len(name)), Kind: kind, Size: size, Modified: modified}
 	panel.namesSize += copy(panel.names[panel.namesSize:], name)
 	panel.count++
 	return true
@@ -99,7 +105,7 @@ func (panel *Panel) Visit(name []byte, kind ramfs.Kind, size uint64) bool {
 func (panel *Panel) Load(filesystem FileSystem, keep []byte, visible int) vfs.Status {
 	panel.count, panel.namesSize, panel.truncated = 0, 0, false
 	if panel.pathSize > 1 {
-		panel.Visit(parentName, ramfs.KindDirectory, 0)
+		panel.Visit(parentName, ramfs.KindDirectory, 0, ramfs.Timestamp{})
 	}
 	first := panel.count
 	status := filesystem.ReadDir(panel.Path(), panel)
@@ -116,7 +122,18 @@ func (panel *Panel) Load(filesystem FileSystem, keep []byte, visible int) vfs.St
 		}
 	}
 	panel.Select(panel.selected, visible)
+	panel.filesystem, panel.mount, panel.described = ramfs.FilesystemInfo{}, 0, false
+	if status == vfs.StatusOK {
+		info, mount, infoStatus := filesystem.FilesystemInfo(panel.Path())
+		panel.filesystem, panel.mount, panel.described = info, mount, infoStatus == vfs.StatusOK
+	}
 	return status
+}
+
+// Filesystem returns what the last listing learned about the filesystem the
+// directory is on, and false when it could not be asked.
+func (panel *Panel) Filesystem() (ramfs.FilesystemInfo, vfs.MountID, bool) {
+	return panel.filesystem, panel.mount, panel.described
 }
 
 // Select moves the selection to index, kept within the listing, and scrolls

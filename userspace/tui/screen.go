@@ -17,6 +17,9 @@ const (
 	RoleDialog
 	RoleInput
 	RoleCursor
+	// RoleWarning shows an error message, in amber on the ground colour as
+	// gfm shows its warnings.
+	RoleWarning
 	RoleCount
 )
 
@@ -36,6 +39,7 @@ var DefaultTheme = Theme{
 	RoleDialog:    {Foreground: terminal.BrightWhite, Background: terminal.BrightBlack},
 	RoleInput:     {Foreground: terminal.BrightWhite, Background: terminal.Black},
 	RoleCursor:    {Foreground: terminal.Black, Background: terminal.BrightWhite},
+	RoleWarning:   {Foreground: terminal.BrightYellow, Background: terminal.Black},
 }
 
 // Cell is one terminal cell. GoOS renders every supported UTF-8 sequence in
@@ -72,6 +76,15 @@ func NewScreen(columns, rows int, cells []Cell, dirty []bool, theme Theme) (Scre
 func (screen *Screen) Columns() int { return screen.columns }
 func (screen *Screen) Rows() int    { return screen.rows }
 func (screen *Screen) Bounds() Rect { return Rect{Width: screen.columns, Height: screen.rows} }
+
+// Cell returns the desired cell at column and row, and whether they are on
+// the screen. Tests of applications read frames back through it.
+func (screen *Screen) Cell(column, row int) (Cell, bool) {
+	if column < 0 || row < 0 || column >= screen.columns || row >= screen.rows {
+		return Cell{}, false
+	}
+	return screen.cells[row*screen.columns+column], true
+}
 
 // Invalidate makes the next Flush send every row.
 func (screen *Screen) Invalidate() {

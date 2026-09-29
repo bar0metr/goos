@@ -193,3 +193,35 @@ wait_for_count 'SHELL_TERMINAL_RESTORED_OK' 3 'line mode after viewer'
 type_word e c h o spc a f t e r minus g v i e w minus o k ret
 wait_for_log '^after-gview-ok' 'shell input after viewer'
 printf 'PASS console-viewer\n'
+
+# gfm starts the viewer and the editor on the selected file through PID 1
+# (ADR 0130); each takes the keys until it exits and gfm draws itself again.
+# The edit is saved through a temporary file and a replacement (ADR 0129).
+type_word m k d i r spc slash h o m e slash g v ret
+type_word w r i t e spc slash h o m e slash g v slash n o t e spc h e l l o ret
+type_word c d spc slash h o m e slash g v ret
+managers=$(count_in_log 'F4.*Edit')
+type_word g f m ret
+wait_for_count 'F4.*Edit' $((managers + 1)) 'file manager with viewer and editor keys'
+type_word home down f3
+wait_for_log '/home/gv/note.*size' 'viewer started from the file manager'
+views=$(count_in_log 'GVIEW_EXIT_OK')
+type_word pgdn f10
+wait_for_count 'GVIEW_EXIT_OK' $((views + 1)) 'viewer returning to the file manager'
+editors=$(count_in_log 'F3 Save As')
+send_key f4
+wait_for_count 'F3 Save As' $((editors + 1)) 'editor started from the file manager'
+type_word shift-x f2
+wait_for_log 'Saved [0-9]* bytes' 'editor save'
+managers=$(count_in_log 'F4.*Edit')
+send_key f10
+wait_for_log 'EDIT_EXIT_OK' 'editor exit'
+wait_for_log 'EDIT_SAVE_OK' 'editor save marker'
+wait_for_count 'F4.*Edit' $((managers + 1)) 'file manager repainted after the editor'
+restored=$(count_in_log 'SHELL_TERMINAL_RESTORED_OK')
+send_key f10
+wait_for_log 'GFM_LAUNCH_OK' 'file manager launch marker'
+wait_for_count 'SHELL_TERMINAL_RESTORED_OK' $((restored + 1)) 'line mode after the file manager'
+type_word c a t spc slash h o m e slash g v slash n o t e ret
+wait_for_log '^Xhello' 'edited file read back by the shell'
+printf 'PASS console-nested-launch\n'
