@@ -46,7 +46,7 @@ var (
 	filesystemCheckComplete bool
 	// filesystemVolume says which volume of the disk the filesystem service
 	// may reach: automatically chosen, as at boot (ADR 0115). Choosing
-	// another belongs to mounting (GoOS 0.1.4 specification, Phase 3).
+	// another belongs to mounting (GoOS 0.1.4 specification).
 	filesystemVolume partition.Selector
 )
 

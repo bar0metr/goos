@@ -12,6 +12,25 @@ type Request struct {
 	Arguments [6]uint64
 }
 
+type Result struct {
+	Value  uint64
+	Errno  abi.Errno
+	Action uint64
+}
+
+func (result Result) Register() uint64 {
+	if result.Errno != 0 {
+		return abi.Negative(result.Errno)
+	}
+	return result.Value
+}
+
+type Handler interface {
+	Read(Request) Result
+	Write(Request) Result
+	Exit(Request, bool) Result
+}
+
 type UnsupportedDiagnostics struct {
 	Count   uint64
 	Numbers [unsupportedHistorySize]abi.Syscall
@@ -27,16 +46,28 @@ func decode(frame *abi.Frame) (Request, bool) {
 	return Request{Number: abi.Syscall(frame.Number), Arguments: [6]uint64{frame.Arg1, frame.Arg2, frame.Arg3, frame.Arg4, frame.Arg5, frame.Arg6}}, true
 }
 
-// Dispatch is the bounded Linux syscall translation boundary. Phase 7 owns
-// number decoding and unsupported-call diagnostics. Semantic handlers replace
-// ENOSYS in their own phases without entering the native kcall namespace.
-func Dispatch(frame *abi.Frame) uint64 {
+// Dispatch is the bounded Linux syscall translation boundary. Implemented
+// calls remain separate from the native kcall namespace; unsupported calls
+// are recorded without emitting one log entry per invocation.
+func Dispatch(frame *abi.Frame, handler Handler) Result {
 	request, ok := decode(frame)
 	if !ok {
-		return abi.Negative(abi.EINVAL)
+		return Result{Errno: abi.EINVAL}
+	}
+	if handler != nil {
+		switch request.Number {
+		case abi.SysRead:
+			return handler.Read(request)
+		case abi.SysWrite:
+			return handler.Write(request)
+		case abi.SysExit:
+			return handler.Exit(request, false)
+		case abi.SysExitGroup:
+			return handler.Exit(request, true)
+		}
 	}
 	noteUnsupported(request.Number)
-	return abi.Negative(abi.ENOSYS)
+	return Result{Errno: abi.ENOSYS}
 }
 
 func noteUnsupported(number abi.Syscall) {

@@ -16,7 +16,7 @@ func New(address uint64, info boot.FramebufferInfo) (Buffer, bool) {
 	if count == 0 || count > uint64(^uint(0)>>1) {
 		return Buffer{}, false
 	}
-	// SAFETY: Phase 2 mapped count writable uint32 pixels at address with
+	// SAFETY: initialization mapped count writable uint32 pixels at address with
 	// supervisor-only RW+NX permissions. The slice never leaves this package.
 	pixels := unsafe.Slice((*uint32)(unsafe.Pointer(uintptr(address))), int(count))
 	return newBuffer(pixels, info)

@@ -8,7 +8,7 @@ import (
 
 const (
 	// DefaultStackReserve is the fixed initial Linux stack reservation. Pages
-	// are supplied on demand; Phase 5 will populate the initial stack.
+	// are supplied on demand; the stack installer populates the initial image.
 	DefaultStackReserve = uint64(8 << 20)
 	StackGuardSize      = uint64(64 << 10)
 )

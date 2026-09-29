@@ -3,6 +3,7 @@ package linux
 import (
 	"testing"
 
+	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
 	"goos/kernel/process"
 	"goos/userspace/startup"
@@ -17,6 +18,11 @@ func TestProcessStateRetainsLaunchAuthority(t *testing.T) {
 	state, found := FindProcess(0x4000)
 	if !found || state.Input != 11 || state.Output != 12 || state.Error != 13 || state.VFS != 14 || string(state.CWD()) != "/persist/work" {
 		t.Fatalf("state = %#v cwd=%q", state, state.CWD())
+	}
+	for fd := 0; fd <= 2; fd++ {
+		if _, found := LookupFD(0x4000, fd); !found {
+			t.Fatalf("startup fd %d missing", fd)
+		}
 	}
 	if !RemoveProcess(0x4000) {
 		t.Fatal("state removal failed")
@@ -36,6 +42,23 @@ func TestProcessStateIsBounded(t *testing.T) {
 	}
 	if InstallProcess(uint64(len(processStates)+1), data) {
 		t.Fatal("over-capacity state installed")
+	}
+}
+
+func TestProcessFDExhaustionIsEMFILE(t *testing.T) {
+	processStates = [process.MaxProcesses]ProcessState{}
+	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
+	if !InstallProcess(0x5000, data) {
+		t.Fatal("install failed")
+	}
+	for fd := 3; fd < LinuxMaxFD; fd++ {
+		allocated, errno := AllocateFD(0x5000, FileDescription{Kind: FDVFSFile, Object: uint64(fd + 100)}, false)
+		if errno != 0 || allocated != fd {
+			t.Fatalf("fd %d = %d errno=%d", fd, allocated, errno)
+		}
+	}
+	if fd, errno := AllocateFD(0x5000, FileDescription{Kind: FDVFSFile, Object: 999}, false); fd != -1 || errno != abi.EMFILE {
+		t.Fatalf("full table = fd %d errno %d", fd, errno)
 	}
 }
 

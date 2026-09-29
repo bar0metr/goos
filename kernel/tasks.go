@@ -66,7 +66,11 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		return
 	}
 	linuxSyscallEntries++
-	frame.Return = linuxcompat.Dispatch(frame)
+	state := amd64.ReadSchedulerState()
+	linuxHandler.root = frame.Root
+	linuxHandler.task = sched.TaskID(amd64.TaskIDForSlot(state.Current))
+	result := linuxcompat.Dispatch(frame, &linuxHandler)
+	frame.Return, frame.Action = result.Register(), result.Action
 	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
 		linuxSyscallFrameRejections++
 		amd64.SetCurrentTaskExitCode(uint64(1)<<63 | 13)

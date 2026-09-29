@@ -14,7 +14,7 @@ to follow the same rule. It cannot size a heap object from the file, since a
 large file would then end the process with `page quota exhausted` in the
 middle of an edit.
 
-`gview` (Phase 5) already views files of any size through a 4 KiB window. An
+`gview` already views files of any size through a 4 KiB window. An
 editor has to hold the whole document, because a save writes every byte of it
 through the safe replacement path (ADR 0129) and never patches the original
 in place.

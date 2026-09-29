@@ -1,17 +1,11 @@
 # Linux compatibility
 
-**Status: GoOS 0.2.0 foundations in progress.** Phase 0 decisions are recorded
-in ADRs 0132 through 0137. Phase 1 implements immutable Process ABI identity.
-Phase 2 implements the dedicated Linux x86_64 `SYSCALL`/IRETQ entry and rejects
-wrong-ABI entry at both gates. Phase 3 implements the bounded static ELF64
-parser and load-plan validation. Phase 4 records validated `PT_LOAD` ranges in
-the common lazy executable region model and reserves the guarded Linux stack.
-Phase 5 builds and installs the bounded Linux System V initial stack. Phase 6
-connects static ELF to PID 1 launch under a kernel-enforced minimal authority
-policy. Phase 7 installs the explicit Linux syscall-number decoder and bounded
-unsupported-call diagnostics. Phase 8 adds bounded, generation-safe per-task
-continuations and a scheduler block/resume contract. Semantic syscall handlers
-are not implemented yet.
+**Status: GoOS 0.2.0 foundations in progress.** The kernel has immutable native
+and Linux process identities, a dedicated x86_64 `SYSCALL`/IRETQ entry, bounded
+static ELF loading, a System V initial stack, and a constrained PID 1 launch
+policy. The syscall layer has a distinct Linux number and errno namespace,
+bounded diagnostics, generation-safe blocking continuations, a 64-entry fd
+table, and raw stream `read`/`write` plus `exit`/`exit_group`.
 
 ## Principles
 
@@ -30,8 +24,7 @@ are not implemented yet.
 ### ELF loader and mapper
 
 Linux ELF is a distinct format from the native envelope
-([native-images.md](../kernel/native-images.md)). The implemented Phase 3
-parser:
+([native-images.md](../kernel/native-images.md)). The implemented parser:
 
 1. accepts ELF64 little-endian x86_64 `ET_EXEC` only;
 2. bounds the table at 64 program headers and 16 `PT_LOAD` segments;
@@ -42,7 +35,7 @@ parser:
 5. records validated `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO`
    metadata from the existing stable executable source.
 
-Phase 4 maps that plan as pinned `region.Image` reservations backed by the same
+The mapper records that plan as pinned `region.Image` reservations backed by the same
 stable system-image extent or executable object as native images. Pages remain
 absent until touched. The common fault path reads the file-backed prefix,
 zero-fills BSS, enforces final `R--`/`RW-`/`R-X` permissions, and charges every
@@ -55,14 +48,14 @@ collisions, and accepts conventional low addresses such as `0x400000` while
 keeping loads below the fixed GoOS user windows. It also reserves an 8 MiB NX
 demand-zero stack with a 64 KiB guard. `ET_DYN` remains P2 scope.
 
-Phase 5 converts the kernel's validated startup view into a Linux stack image,
+The stack builder converts the kernel's validated startup view into a Linux stack image,
 not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
 and the static-ELF auxv required by the release specification. The complete
 image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
 RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
 `AT_PLATFORM` is `x86_64`; `AT_RANDOM` is absent until trustworthy entropy is
 available. Only occupied stack pages are installed; the remaining reservation
-stays demand-zero. Phase 6 connects this path to process launch.
+stays demand-zero. The common launch path installs this state before scheduling.
 
 ### Syscall entry
 
@@ -82,7 +75,7 @@ whose number type is distinct from native `kcall.Operation`. Known but not yet
 implemented calls and unknown calls both return `-ENOSYS`; an eight-entry ring
 and saturating counter retain bounded diagnostics without per-call logging.
 
-Handlers added in later phases must validate flags and lengths before copying
+Every handler must validate flags and lengths before copying
 through `vm.CopyIn`/`vm.CopyOut`. They may never retain or directly dereference
 an arbitrary user pointer. Copied strings must fit their operation-specific
 bound and contain a terminating NUL in user memory.
@@ -117,8 +110,8 @@ Wake accepts only the exact task generation and correlation. The resumed task
 retries the two-byte `SYSCALL`; the stage and issued bit prevent a duplicated
 effect. Kill, fault, and process teardown cancel the slot. VFS peer death is
 retained as a correlation-checked wake reason so the handler can return an
-error, then completion clears the slot. No implemented syscall uses this
-machinery until its semantic phase.
+error, then completion clears the slot. Stream `read` and backpressured stream
+`write` use this path without polling.
 
 ### File descriptors
 
@@ -127,6 +120,16 @@ compatibility entries plus per-fd state. An fd is never a native handle.
 Descriptors 0, 1, and 2 bind to the supplied `in`, `stdout`, and `stderr`
 streams. Files are reached only through the process's explicit VFS session
 (ADR 0135).
+
+The table has 64 entries and separate shared open-file descriptions carrying
+kind, status flags, offset, object reference, and reference count. Exhaustion is
+`EMFILE`; teardown invalidates every descriptor and reports each final
+description once.
+
+Errno conversion is operation-specific. VFS permission denial becomes `EACCES`
+or `EROFS` only with caller context, VFS resource exhaustion requires the
+caller to identify the exhausted resource, stream EOF is successful for reads,
+and a write to a closed reader returns `EPIPE`.
 
 ### Namespace view
 

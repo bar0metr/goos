@@ -3,7 +3,7 @@ package fat32
 import "goos/kernel/ramfs"
 
 // CheckCode identifies one class of filesystem inconsistency. Check never
-// changes the device; repair policy belongs to Phase 5.
+// changes the device; repair policy is deliberately separate.
 type CheckCode uint8
 
 const (

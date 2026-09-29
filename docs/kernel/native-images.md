@@ -57,13 +57,12 @@ would change in this format is described in
 compatibility-layer format and does not define this native envelope.
 Successful validation selects the immutable `Native` Process ABI. Linux ELF
 launch is separate and selects `LinuxX8664`; neither path changes
-personality after process initialization (ADR 0132, ADR 0133). The Phase 3
-Linux parser validates a bounded static ELF64 load plan through the same stable
-executable-source abstraction. Phase 4 records its loads in the same lazy image
-region model, including file-backed faults, demand-zero BSS, accounting, and
-W^X. Phase 5 builds the separate Linux System V initial stack without exposing
-`GST4`; Phase 6 connects it to the common launch path under the constrained
-Linux authority policy.
+personality after process initialization (ADR 0132, ADR 0133). The Linux parser
+validates a bounded static ELF64 load plan through the same stable
+executable-source abstraction. Its loads use the same lazy image region model,
+including file-backed faults, demand-zero BSS, accounting, and W^X. Linux gets
+a separate System V initial stack without exposing `GST4`; the common launch
+path applies the constrained Linux authority policy.
 
 Process startup is a separate versioned ABI described by ADR 0031. The current
 `GST4` object (ADR 0109) is limited to 64 KiB and carries the command, the working

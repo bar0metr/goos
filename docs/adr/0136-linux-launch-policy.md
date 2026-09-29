@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted and implemented through Phase 6 for GoOS 0.2.0.
+Accepted.
 
 ## Context
 

@@ -2,10 +2,7 @@
 
 ## Status
 
-Accepted for GoOS 0.2.0. The bounded ELF64 parser and load-plan validation are
-implemented in Phase 3. Phase 4 maps validated loads through the common lazy
-executable-source path and reserves the Linux stack. Phase 5 implements the
-bounded System V initial-stack image and its page installer.
+Accepted.
 
 ## Context
 
@@ -44,7 +41,7 @@ overwritten. Existing regions are collision checked before the map changes.
 
 Linux receives an 8 MiB writable, non-executable, demand-zero stack
 reservation below `vm.UserStackTop`, with a pinned 64 KiB guard below it.
-Phase 4 maps no initial stack page and writes no Linux startup data.
+Mapping the ELF loads does not map an initial stack page or write startup data.
 
 The Linux initial stack contains `argc`, `argv`, `envp`, and a bounded auxv.
 It does not expose `GST4`. Resolved GoOS handles remain kernel-side compatibility
@@ -62,7 +59,7 @@ emits NUL-terminated vectors, and aligns initial RSP to 16 bytes. Auxv contains
 Only pages covering the built image are materialized writable and NX. Launch
 page accounting includes those owned pages and page tables; the unused stack
 reservation still grows by demand-zero faults. PID 1 classification and Linux
-process creation remain Phase 6.
+process creation remain launch-policy responsibilities.
 
 ## Consequences
 
