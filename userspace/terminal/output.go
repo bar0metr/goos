@@ -193,21 +193,16 @@ func BackgroundCode(color Color) int {
 }
 
 // Text writes value in exactly width columns: cut at a character boundary
-// when longer, padded with spaces when shorter. Control bytes are shown as
-// '?', so a file name cannot carry escape sequences to the terminal. It
-// returns the columns the text itself took.
+// when longer, padded with spaces when shorter. Controls are shown as '?'
+// (Printable), so a file name cannot carry escape sequences to the terminal.
+// It returns the columns the text itself took.
 func (output *Output) Text(value []byte, width int) int {
 	used := 0
 	for index := 0; index < len(value) && used < width; {
-		size := characterSize(value, index)
-		character := value[index : index+size]
-		if size == 1 && (character[0] < 0x20 || character[0] == 0x7f) {
-			output.writeByte('?')
-		} else {
-			output.Write(character)
-		}
+		var character []byte
+		character, index = Printable(value, index)
+		output.Write(character)
 		used++
-		index += size
 	}
 	output.Pad(width - used)
 	return used

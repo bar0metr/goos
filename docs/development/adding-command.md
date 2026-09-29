@@ -68,7 +68,7 @@ source without compiling it, so every field must be a literal:
 | `Usage` | Synopsis; must start with the command name. Printable ASCII, at most 96 bytes. |
 | `Summary` | One line for `help`. Printable ASCII, at most 96 bytes. |
 | `MinArgs`, `MaxArgs` | Arguments after the name. `commands.Unbounded` for no limit. |
-| `Grants` | `commands.GrantVFS` if the command uses the filesystem, `commands.GrantTerminal` if it is full-screen; join several with `\|`; omit otherwise. |
+| `Grants` | `commands.GrantVFS` if the command uses the filesystem, `commands.GrantTerminal` if it is full-screen, `commands.GrantLaunch` if it starts other full-screen commands; join several with `\|`; omit otherwise. |
 
 `Grants` is a request, not authority. PID 1 grants only roles it knows, to
 images in the immutable system image. A command without `GrantVFS` gets its
@@ -76,11 +76,20 @@ standard streams and nothing else, which is what most commands need: `pwd`
 reads its working directory from the startup data and has no filesystem
 session.
 
-`GrantTerminal` is read by the shell, not PID 1: it runs such a command in the
+The shell reads `GrantTerminal`: it runs such a command in the
 foreground with the terminal in raw mode, so standard input carries each key's
 bytes as typed and nothing is echoed ([ADR 0124](../adr/0124-foreground-raw-terminal-mode-and-tui-input.md)).
-It carries no handle. Such a command draws with `userspace/terminal`, parses
-keys with its `Parser`, and reads its size with `utility.TerminalSize`.
+It carries no handle. Such a command draws with `userspace/terminal` or
+`userspace/tui`, parses keys with its `Parser`, and reads its size with
+`utility.TerminalSize`. PID 1 reads it too: only a command that declares it may
+be started by another application.
+
+`GrantLaunch` gives the command a launch channel to PID 1 when it runs as the
+only stage of a foreground job ([ADR 0130](../adr/0130-application-launch-and-nested-foreground.md)).
+`utility.Launch` runs a `GrantTerminal` command of `/system/bin` on the
+caller's terminal and returns its exit code; the caller must not read input
+until it returns. `gfm` uses it for F3 and F4. A command started this way
+never gets `GrantLaunch` itself.
 
 A malformed manifest fails the build with the command's name and the reason.
 

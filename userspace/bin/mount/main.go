@@ -31,7 +31,7 @@ func run(startup.Data) {
 			break
 		}
 		utility.Check(reply, received, nil, false)
-		utility.Print(reply.Name)
+		utility.PrintName(reply.Name)
 		utility.Pad(len(reply.Name), 12)
 		name := fsdisplay.TypeName(reply.Filesystem.Type)
 		utility.PrintText(name)

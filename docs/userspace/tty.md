@@ -111,6 +111,14 @@ stream as it is, and returns to line mode as soon as the job's reply arrives,
 whether it exited, crashed or was stopped. A command has no session, so no
 command can ask for raw mode itself or take it from the foreground job.
 
+A foreground command with `GrantLaunch`, such as `gfm`, can have PID 1 run a
+full-screen command in its place (ADR 0130). The raw session and the job stay
+as they are: the child reads the same input stream while the caller waits, and
+the shell keeps raw mode until the caller's job ends. If the terminal service
+restarts meanwhile, the shell puts the new session in raw mode again, so the
+program keeps receiving keys. What it drew before may be stale until it
+redraws; `gfm` and `gview` repaint the whole screen on F2.
+
 ## Output
 
 The shell and every command print to one stream whose reading end only the

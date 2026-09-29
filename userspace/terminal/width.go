@@ -50,3 +50,24 @@ func characterSize[T ~string | ~[]byte](value T, index int) int {
 	}
 	return size
 }
+
+// questionMark stands in for a character a terminal could obey.
+var questionMark = []byte{'?'}
+
+// Printable returns the character of value at index as it may be shown, and
+// the index of the next one. C0 controls, DEL, the C1 controls U+0080 to
+// U+009F and bytes that start no valid UTF-8 character come back as '?':
+// some terminals obey a C1 control or a lone 0x9b as CSI, so text from a file
+// name or a volume label must reach them as data only.
+func Printable(value []byte, index int) ([]byte, int) {
+	size := characterSize(value, index)
+	character := value[index : index+size]
+	lead := character[0]
+	switch {
+	case size == 1 && (lead < 0x20 || lead >= 0x7f):
+		return questionMark, index + 1
+	case size == 2 && lead == 0xc2 && character[1] < 0xa0:
+		return questionMark, index + 2
+	}
+	return character, index + size
+}

@@ -52,7 +52,7 @@ func run(startup.Data) {
 }
 
 func printField(value []byte, width int) {
-	utility.Print(value)
+	utility.PrintName(value)
 	utility.Pad(len(value), width)
 }
 
