@@ -172,6 +172,10 @@ func (*Archive) RenameName(ramfs.NodeID, ramfs.NodeID, ramfs.Name) ramfs.Status 
 	return ramfs.StatusPermissionDenied
 }
 
+func (*Archive) ReplaceName(ramfs.NodeID, ramfs.NodeID, ramfs.Name) ramfs.Status {
+	return ramfs.StatusPermissionDenied
+}
+
 func (*Archive) UnlinkName(ramfs.NodeID, ramfs.Name) ramfs.Status {
 	return ramfs.StatusPermissionDenied
 }

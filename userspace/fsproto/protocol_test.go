@@ -15,6 +15,7 @@ func TestRequestRoundTrip(t *testing.T) {
 		{Operation: OperationRead, Node: 9, Offset: 1 << 20, Size: PageSize, Slot: CachePages - 1},
 		{Operation: OperationWrite, Node: 9, Offset: 4, Size: PageSize - 4, Slot: 3},
 		{Operation: OperationRename, Node: 9, Parent: 3, Name: []byte("renamed")},
+		{Operation: OperationReplace, Node: 9, Parent: 3, Name: []byte("replaced")},
 		{Operation: OperationReadDir, Parent: 1, Size: 12},
 		{Operation: OperationFlush},
 	}
@@ -50,7 +51,7 @@ func TestEncodeRefusesWhatCannotBeSent(t *testing.T) {
 	var message ipc.Message
 	for _, request := range []Request{
 		{},
-		{Operation: OperationFilesystemInfo + 1},
+		{Operation: OperationReplace + 1},
 		{Operation: OperationOpen, Name: []byte("a/b")},
 		{Operation: OperationOpen, Name: []byte("..")},
 		{Operation: OperationRead, Size: CacheSize + 1},
@@ -86,7 +87,7 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		func(m *ipc.Message) { m.Correlation = 0 },
 		func(m *ipc.Message) { m.HandleCount = 1 },
 		func(m *ipc.Message) { m.Payload[0] = 0 },
-		func(m *ipc.Message) { m.Payload[0] = byte(OperationFilesystemInfo + 1) },
+		func(m *ipc.Message) { m.Payload[0] = byte(OperationReplace + 1) },
 		func(m *ipc.Message) { m.Payload[1] = 200 },
 		func(m *ipc.Message) { m.Payload[3] = 1 },
 		func(m *ipc.Message) { m.Payload[2] = 1 }, // a name in the page, with no page

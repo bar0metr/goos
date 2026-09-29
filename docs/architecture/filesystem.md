@@ -104,6 +104,22 @@ mount enumeration followed by an information query for current capacity;
 Formatting uses integer binary units, and explicitly prints `-` when capacity
 is unavailable.
 
+## Replacing a file
+
+`Replace(source, target)` moves a regular file onto an existing regular file
+of the same filesystem and removes the old one (ADR 0129). Interactive
+programs save through `userspace/safesave`: write `.<name>.~save` in the
+target's directory, close it, replace. The original keeps its contents until
+the replacement succeeds, so a full volume, a read-only mount, a dead service
+or a refused replacement costs the new text and never the old one.
+
+RAMFS replaces inside one request. FAT32 flushes the new file, erases its
+entry, rewrites the target's short entry in place and frees the old chain,
+flushing the device after each step. After a power loss the target holds one
+whole version and the volume can have lost clusters, which `fsck-fat` reports
+and repairs. FAT32 has no journal and GoOS does not claim one: the guarantee
+rests on write order and whole-sector writes.
+
 ## Request path
 
 A `cat /persist/a.txt` stage issues `GVF1` open, read, and close requests on its

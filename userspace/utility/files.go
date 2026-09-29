@@ -7,6 +7,7 @@ import (
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/runtime/arena"
+	"goos/userspace/safesave"
 	"goos/userspace/startup"
 )
 
@@ -92,6 +93,54 @@ func CreateFile(path []byte) vfs.Status {
 func Rename(source, target []byte) vfs.Status {
 	_, status := Request(vfs.Request{Operation: vfs.OperationRename, Path: source, Target: target})
 	return status
+}
+
+// Replace moves the regular file source onto target within one filesystem,
+// removing the file target named, or renames it when there was none
+// (ADR 0129).
+func Replace(source, target []byte) vfs.Status {
+	_, status := Request(vfs.Request{Operation: vfs.OperationReplace, Path: source, Target: target})
+	return status
+}
+
+// savePath holds the temporary path of the save in progress.
+var savePath [limits.PathMax]byte
+
+// SaveFile replaces target with what source produces, writing it through bulk
+// to a temporary file beside target first, so target keeps its old contents
+// until the new ones are complete (ADR 0129).
+func SaveFile(target []byte, bulk *Bulk, source safesave.Source) (vfs.Status, safesave.Stage) {
+	return safesave.Save(saveFiles{bulk}, target, bulk.Memory, source, &savePath)
+}
+
+// saveFiles is the VFS a save goes through. Save fills bulk's memory, so a
+// write sends a prefix of it.
+type saveFiles struct{ bulk *Bulk }
+
+func (saveFiles) Create(path []byte) vfs.Status { return CreateFile(path) }
+func (saveFiles) Unlink(path []byte) vfs.Status { return Unlink(path) }
+func (saveFiles) Replace(source, target []byte) vfs.Status {
+	return Replace(source, target)
+}
+
+func (saveFiles) OpenWrite(path []byte) (vfs.Handle, vfs.Status) {
+	reply, status := Request(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: path})
+	return reply.Handle, status
+}
+
+func (saveFiles) Close(file vfs.Handle) vfs.Status {
+	_, status := Request(vfs.Request{Operation: vfs.OperationClose, Handle: file})
+	return status
+}
+
+func (files saveFiles) Write(file vfs.Handle, data []byte) (int, vfs.Status) {
+	mark := arena.Current()
+	reply, received := files.bulk.WriteFile(file, len(data))
+	arena.Reset(mark)
+	if !received {
+		return 0, vfs.StatusPeerDied
+	}
+	return int(reply.Size), reply.Status
 }
 
 // Unlink removes a file or an empty directory.

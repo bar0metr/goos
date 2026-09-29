@@ -98,6 +98,14 @@ type filesystemBackend interface {
 	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
 }
 
+// ReplaceBackend replaces an existing regular file with another one of the
+// same filesystem: name in parent takes id's contents and id's own name goes
+// (ADR 0129). A backend states in its documentation what an interruption can
+// leave behind.
+type ReplaceBackend interface {
+	ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
 // ObjectBackend gives an opened file identity independent of pathname lookup.
 // Backends whose node IDs are already stable need not implement it.
 type ObjectBackend interface {
@@ -385,23 +393,29 @@ func (namespace *Namespace) PrepareExecutable(owner Owner, handle Handle) Status
 }
 
 func (namespace *Namespace) executablePinned(mount uint8, node ramfs.NodeID) bool {
-	return namespace.executablePinnedDirect(mount, node) || namespace.executablePinnedLocation(mount, node)
+	return namespace.held(mount, node, true)
 }
 
-func (namespace *Namespace) executablePinnedDirect(mount uint8, node ramfs.NodeID) bool {
+// held reports whether a session holds the file at node open, or, with
+// executableOnly, open as a prepared executable.
+func (namespace *Namespace) held(mount uint8, node ramfs.NodeID, executableOnly bool) bool {
+	return namespace.heldDirect(mount, node, executableOnly) || namespace.heldLocation(mount, node, executableOnly)
+}
+
+func (namespace *Namespace) heldDirect(mount uint8, node ramfs.NodeID, executableOnly bool) bool {
 	for index := range namespace.files {
 		entry := &namespace.files[index]
-		if entry.used && entry.executable && entry.mount == mount && entry.node == node {
+		if entry.used && (entry.executable || !executableOnly) && entry.mount == mount && entry.node == node {
 			return true
 		}
 	}
 	return false
 }
 
-// executablePinnedLocation compares a pathname node with stable open-object
-// cookies. AcquireObject returns the existing cookie for a live file; the
-// temporary reference is released before this call returns.
-func (namespace *Namespace) executablePinnedLocation(mount uint8, node ramfs.NodeID) bool {
+// heldLocation compares a pathname node with stable open-object cookies.
+// AcquireObject returns the existing cookie for a live file; the temporary
+// reference is released before this call returns.
+func (namespace *Namespace) heldLocation(mount uint8, node ramfs.NodeID, executableOnly bool) bool {
 	if int(mount) >= len(namespace.mounts) {
 		return false
 	}
@@ -413,9 +427,9 @@ func (namespace *Namespace) executablePinnedLocation(mount uint8, node ramfs.Nod
 	if status != ramfs.StatusOK || object == 0 {
 		return false
 	}
-	pinned := namespace.executablePinnedDirect(mount, object)
+	held := namespace.heldDirect(mount, object, executableOnly)
 	objects.ReleaseObject(object)
-	return pinned
+	return held
 }
 
 func (namespace *Namespace) Write(owner Owner, handle Handle, data []byte) (int, Status) {
@@ -694,6 +708,60 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 	if status == StatusOK {
 		namespace.invalidate()
 	}
+	return status
+}
+
+// Replace moves the regular file path onto target within one filesystem
+// (ADR 0129). An existing target must be a regular file that no session holds
+// open; it is removed as path takes its name, and the backend decides what an
+// interruption can leave. With no target this is a rename.
+func (namespace *Namespace) Replace(path []byte, target []byte) Status {
+	if namespace.carriesMount(path) || namespace.carriesMount(target) {
+		return StatusBusy
+	}
+	sourceMount, node, status := namespace.Resolve(path)
+	if status != StatusOK {
+		return status
+	}
+	backend := namespace.mounts[sourceMount].backend
+	if stat, backendStatus := backend.Stat(node); backendStatus != ramfs.StatusOK {
+		return mapStatus(backendStatus)
+	} else if stat.Kind != ramfs.KindFile {
+		return StatusIsDirectory
+	}
+	targetMount, targetNode, status := namespace.Resolve(target)
+	if status == StatusNotFound {
+		return namespace.Rename(path, target)
+	}
+	if status != StatusOK {
+		return status
+	}
+	if targetMount != sourceMount {
+		return StatusUnsupported
+	}
+	if targetNode == node {
+		return StatusInvalidArgument
+	}
+	if stat, backendStatus := backend.Stat(targetNode); backendStatus != ramfs.StatusOK {
+		return mapStatus(backendStatus)
+	} else if stat.Kind != ramfs.KindFile {
+		return StatusIsDirectory
+	}
+	// Removing a file that is open is refused everywhere else too: FAT32 has
+	// no delete-while-open, and a handle must not start naming new contents.
+	if namespace.held(targetMount, targetNode, false) {
+		return StatusBusy
+	}
+	replacer, ok := backend.(ReplaceBackend)
+	if !ok {
+		return StatusUnsupported
+	}
+	_, parent, name, status := namespace.resolveParent(target)
+	if status != StatusOK {
+		return status
+	}
+	status = mapStatus(replacer.ReplaceName(node, parent, name))
+	namespace.invalidate()
 	return status
 }
 

@@ -28,6 +28,10 @@ type filesystemVolume interface {
 	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
 }
 
+type replaceVolume interface {
+	ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+}
+
 // Serve performs one decoded request on volume. A read fills, and a write
 // takes its bytes from, the request's slot of cache, the file cache mapping;
 // a listed name is placed in name, which the reply aliases until the caller
@@ -38,12 +42,18 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 	switch request.Operation {
 	case OperationMount:
 		reply.Node, reply.Status = volume.Root()
-	case OperationOpen, OperationCreate, OperationMkdir, OperationRename, OperationUnlink:
+	case OperationOpen, OperationCreate, OperationMkdir, OperationRename, OperationReplace, OperationUnlink:
 		if !named {
 			reply.Status = ramfs.StatusInvalidArgument
 			break
 		}
 		switch request.Operation {
+		case OperationReplace:
+			if replacer, ok := volume.(replaceVolume); ok {
+				reply.Status = replacer.ReplaceName(request.Node, request.Parent, requested)
+			} else {
+				reply.Status = ramfs.StatusUnsupported
+			}
 		case OperationOpen:
 			reply.Node, reply.Status = volume.OpenName(request.Parent, requested)
 		case OperationCreate:
