@@ -350,6 +350,13 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'df\n'
 	sleep 1
+	printf 'gview /system/motd\n'
+	sleep 1
+	# PageDown, PageUp, Home, End, then F10 through the COM1 raw session.
+	printf '\033[6~\033[5~\033[H\033[F\033[21~'
+	sleep 1
+	printf 'echo after-gview-serial\n'
+	sleep 1
 	printf 'stat /system/bin/ls\n'
 	sleep 1
 	printf 'stat /system/bin\n'
@@ -812,7 +819,7 @@ done
 # /system is the boot image itself: the executables the launch path resolves are
 # the ones a listing shows, and nothing can write to them.
 require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" 'ls system'
-for entry in ls cat write; do
+for entry in ls cat write gview; do
 	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
 done
 # Commands are separate images described by a generated index; there is no
@@ -827,7 +834,7 @@ require_regex filesystem.home-content '^persistent$' 'persistent through /home' 
 require_regex filesystem.home-alias '^persistent$' 'persistent through /persist/home' "$log" 'cat /persist/home/demo/message.txt'
 pass_group filesystem
 
-for marker in SHELL_PROCESS_OK SHELL_VFS_CONNECTED_OK SHELL_HELP_OK ECHO_PROCESS_OK ARGS_PROCESS_OK ARGV_ENV_PROCESS_OK STDIN_HANDLE_OK STDERR_HANDLE_OK STDIN_READ_OK SHELL_CLEAR_OK UPTIME_PROCESS_OK PWD_PROCESS_OK LS_PROCESS_OK MOUNT_PROCESS_OK DF_PROCESS_OK SHELL_CD_OK CAT_PROCESS_OK MKDIR_PROCESS_OK TOUCH_PROCESS_OK STAT_PROCESS_OK CP_PROCESS_OK MV_PROCESS_OK RM_PROCESS_OK UNAME_PROCESS_OK PS_PROCESS_OK MEM_PROCESS_OK SLEEP_PROCESS_OK EXIT_STATUS_PROPAGATION_OK; do
+for marker in SHELL_PROCESS_OK SHELL_VFS_CONNECTED_OK SHELL_HELP_OK ECHO_PROCESS_OK ARGS_PROCESS_OK ARGV_ENV_PROCESS_OK STDIN_HANDLE_OK STDERR_HANDLE_OK STDIN_READ_OK SHELL_CLEAR_OK UPTIME_PROCESS_OK PWD_PROCESS_OK LS_PROCESS_OK MOUNT_PROCESS_OK DF_PROCESS_OK GVIEW_EXIT_OK SHELL_CD_OK CAT_PROCESS_OK MKDIR_PROCESS_OK TOUCH_PROCESS_OK STAT_PROCESS_OK CP_PROCESS_OK MV_PROCESS_OK RM_PROCESS_OK UNAME_PROCESS_OK PS_PROCESS_OK MEM_PROCESS_OK SLEEP_PROCESS_OK EXIT_STATUS_PROPAGATION_OK; do
 	require_marker "shell.$marker" "$marker" "$log"
 done
 require_marker shell.echo-output 'hello structured world' "$log" 'echo "hello structured world"'
@@ -859,6 +866,7 @@ require_window mount.persist '^/persist  *fat32  *rw$' 'persistent volume in mou
 require_window df.header '^Filesystem  *Mount  *Size  *Used  *Free  *Flags$' 'df column header' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_window df.system '^image  */system  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only image capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_window df.persist '^fat32  */persist  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *rw$' 'persistent capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
+require_regex gview.serial-return '^after-gview-serial$' 'shell input after gview on COM1' "$log" 'gview /system/motd'
 pass_group shell
 
 require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'

@@ -445,8 +445,10 @@ attributes, checked 64-bit capacity, read-only state and a non-authorizing,
 generation-safe VFS mount ID. VFS provides bounded mount enumeration, while the
 read-only `df` and `mount` commands expose it without device authority.
 The bounded `userspace/tui` layer now provides caller-owned screens, checked
-geometry, dirty rows, dialogs and text/list viewports (ADR 0128). Viewer/editor
-work and nested application launch remain later 0.1.7 phases.
+geometry, dirty rows, dialogs and text/list viewports (ADR 0128). Native `gview`
+uses a fixed read window for large-file navigation, clips long lines and
+sanitizes file controls before terminal rendering. Editor work, safe replacement
+and nested application launch remain later 0.1.7 phases.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

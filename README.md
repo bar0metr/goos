@@ -499,8 +499,9 @@ non-authorizing mount identity through version 10 of the VFS and
 filesystem-service protocols. Native `df` and read-only `mount` expose that
 information without device authority. A bounded `userspace/tui` layer adds
 caller-owned terminal-cell screens, checked geometry, dirty-row rendering and
-text/list viewports for the next full-screen applications (ADR 0126, ADR 0127,
-ADR 0128). GoOS is
+text/list viewports. Native `gview` uses that layer and a fixed file window to
+view text files of arbitrary size without loading them whole; control and binary
+content cannot become terminal commands (ADR 0126, ADR 0127, ADR 0128). GoOS is
 licensed under GPL-3.0-only; third-party components retain their documented
 licenses.
 
@@ -546,7 +547,7 @@ Further documentation:
 - Userspace: [init and service supervision](docs/userspace/init.md),
   [terminal](docs/userspace/tty.md), [shell](docs/userspace/shell.md),
   [file manager](docs/userspace/file-manager.md),
-  [terminal-cell TUI](docs/userspace/tui.md),
+  [terminal-cell TUI](docs/userspace/tui.md), [text viewer](docs/userspace/viewer.md),
   [VFS](docs/userspace/vfs.md), [RAMFS](docs/userspace/ramfs.md),
   [storage](docs/userspace/storage.md),
   [configuration](docs/userspace/configuration.md),
