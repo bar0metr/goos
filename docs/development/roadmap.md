@@ -470,15 +470,18 @@ process-scoped capabilities and VFS service. Phase 0 is complete in ADRs 0132
 through 0137. Phase 1 adds immutable `Native`/`LinuxX8664` Process identity.
 Phase 2 installs a guarded x86_64 `SYSCALL`/IRETQ path, rejects wrong-ABI entry
 at both gates, and returns `-ENOSYS` for every syscall pending semantic
-implementation. Linux ELF loading is not implemented yet.
+implementation. Phase 3 adds a pure bounded ELF64 little-endian x86_64
+`ET_EXEC` parser and validated load plan; it does not map or launch ELF yet.
 
 Order for the remaining release work:
 
-1. bounded static ELF64 loader and Linux initial stack;
-2. raw Linux `write` plus `exit_group` hello world;
-3. memory, FS-base/TLS, and static musl startup;
-4. bounded fd table and VFS file/directory probes;
-5. selected static BusyBox applets as measured P1 interoperability.
+1. map validated `PT_LOAD` ranges with lazy source backing and demand-zero BSS;
+2. build the Linux initial stack and bounded auxv;
+3. add PID 1 classification and constrained Linux launch policy;
+4. raw Linux `write` plus `exit_group` hello world;
+5. memory, FS-base/TLS, and static musl startup;
+6. bounded fd table and VFS file/directory probes;
+7. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

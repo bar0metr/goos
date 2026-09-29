@@ -56,8 +56,11 @@ would change in this format is described in
 [memory.md](../architecture/memory.md#aslr-readiness). Linux ELF is a separate
 compatibility-layer format and does not define this native envelope.
 Successful validation selects the immutable `Native` Process ABI. Future Linux
-ELF validation is separate and will select `LinuxX8664`; neither path changes
-personality after process initialization (ADR 0132, ADR 0133).
+ELF launch is separate and will select `LinuxX8664`; neither path changes
+personality after process initialization (ADR 0132, ADR 0133). The Phase 3
+Linux parser already validates a bounded static ELF64 load plan through the
+same stable executable-source abstraction, but it does not yet map pages or
+participate in launch.
 
 Process startup is a separate versioned ABI described by ADR 0031. The current
 `GST4` object (ADR 0109) is limited to 64 KiB and carries the command, the working
