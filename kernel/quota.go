@@ -24,7 +24,7 @@ const (
 // It runs in the validation build only, and leaves the registry as it found it.
 func quotaBoundsStreamRegistry() bool {
 	var scratch process.Process
-	if !process.Init(&scratch, quotaProbeID, process.AddressSpace{Root: quotaProbeRoot}) {
+	if !process.Init(&scratch, quotaProbeID, process.ABINative, process.AddressSpace{Root: quotaProbeRoot}) {
 		return false
 	}
 	_, limits := scratch.Quota()

@@ -52,7 +52,7 @@ image load is in flight at a time.
 **In-place `Reset` and `Init` instead of returning big structures by value.**
 A constructor that returns a `Process`, a `Channel`, a `Stream`, or a RAMFS
 node builds the whole value as a temporary before the caller can store it.
-`process.Init(target, id, space)`, `(*ipc.Channel).Reset`,
+`process.Init(target, id, abi, space)`, `(*ipc.Channel).Reset`,
 `(*stream.Stream).Reset`, and the RAMFS node's `reset` prepare a slot through
 its pointer instead. Zeroing in place — `*slot = T{}` — compiles to a memset
 and is free; a composite literal with non-constant fields is not, so a `Reset`

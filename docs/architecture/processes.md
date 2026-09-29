@@ -1,9 +1,16 @@
 # Processes and address spaces
 
 GoOS separates resource ownership from execution. A Process owns an address
-space, a process-local handle table, metadata, and a bounded collection of Task
-identities. A Task is the schedulable CPU context. This avoids treating a
-process and a thread as interchangeable kernel objects.
+space, a process-local handle table, immutable userspace ABI identity,
+metadata, and a bounded collection of Task identities. A Task is the
+schedulable CPU context. This avoids treating a process and a thread as
+interchangeable kernel objects.
+
+The ABI is set by the kernel when it initializes a process from a validated
+executable and has no runtime setter. Current launches are `Native`; the Linux
+ELF validator will select `LinuxX8664`. All tasks in a process share the ABI.
+Entry gates authorize this field explicitly and never infer an ABI from a call
+number (ADR 0132).
 
 Process IDs and Task IDs reject zero. Each Process currently supports up to 32
 Tasks and rejects duplicate ownership. A bounded registry maps architecture
@@ -41,9 +48,9 @@ to the high return prefix, loads the process CR3, and executes `iretq`. A user
 interrupt first lands on a task-local guarded high RSP0 stack. Its high assembly
 trampoline loads the kernel CR3 before transferring to the low-linked handler.
 Timer IRQs may then select a kernel task or another process. The native-call
-handler verifies the saved user CS and invokes the architecture-independent
-dispatcher. Exit marks the current slot non-runnable and immediately schedules
-its successor (ADR 0120).
+handler verifies the saved user CS and the owning Process's `Native` ABI before
+invoking any normal or blocking native dispatcher. Exit marks the current slot
+non-runnable and immediately schedules its successor (ADR 0120, ADR 0132).
 
 PID 1 is discovered in the UEFI-loaded initramfs and loaded into an independent
 address space. Both bootstrap test processes are also loaded through the

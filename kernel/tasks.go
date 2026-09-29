@@ -5,10 +5,30 @@ package main
 // Kernel-side tasks and the dispatch entry points the scheduler calls.
 
 import (
+	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/kcall"
+	"goos/kernel/process"
 )
+
+var nativeCallABIRejections uint64
+
+// authorizeNativeCall rejects the native gate before any operation-specific
+// dispatcher observes registers belonging to another process ABI. The first
+// rejection is logged and the counter remains bounded to one machine word.
+//
+//export goos_authorize_native_call
+func authorizeNativeCall(root uint64) uint64 {
+	if processRegistry.AllowsABI(root, process.ABINative) {
+		return uint64(kcall.StatusOK)
+	}
+	nativeCallABIRejections++
+	if nativeCallABIRejections == 1 {
+		kernelLogUint(logfmt.Warn, "native call ABI rejected", "root", root)
+	}
+	return uint64(kcall.StatusPermissionDenied)
+}
 
 // dispatchKernelCall is the architecture-neutral native-call boundary. The
 // packed return keeps the assembly bridge simple: action occupies the upper

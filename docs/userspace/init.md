@@ -61,6 +61,14 @@ other grant, and PID 1 closes its source handle once the kernel has answered.
 Services are launched only from the
 image, and paths in `/system` outside `/system/bin` are not commands.
 
+Every current path above validates a GoOS native image before the kernel
+initializes the Process with immutable `Native` ABI. GoOS 0.2.0 will let PID 1
+classify ELF magic as a Linux launch candidate, but the kernel will validate
+the Linux ELF independently and only then initialize `LinuxX8664`. That launch
+will receive only its standard streams, one fresh VFS session, argv,
+environment, cwd, and its resource profile; services remain native-only
+(ADR 0132, ADR 0136).
+
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
 assembly entry supplies the native kernel-call ABI; its stack and heap are
 reservations the kernel supplies pages for as they are touched (ADR 0104),

@@ -495,7 +495,7 @@ func bootContinue() {
 		panicSerial("PID 1 address-space construction failed")
 	}
 	initProcess := &initProcessSlot
-	validInit := process.Init(initProcess, 1, process.AddressSpace{Root: rootInit})
+	validInit := process.Init(initProcess, 1, process.ABINative, process.AddressSpace{Root: rootInit})
 	initProcess.SetName(initName)
 	bootInitProcess = initProcess
 	if !validInit || !processRegistry.Add(initProcess) {

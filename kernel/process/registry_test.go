@@ -6,8 +6,8 @@ import (
 )
 
 func TestRegistryDeliversOwnedTaskExit(t *testing.T) {
-	first, _ := New(1, AddressSpace{Root: 0x1000})
-	second, _ := New(2, AddressSpace{Root: 0x2000})
+	first, _ := New(1, ABINative, AddressSpace{Root: 0x1000})
+	second, _ := New(2, ABINative, AddressSpace{Root: 0x2000})
 	task, _ := sched.NewTaskID(6, 1)
 	var registry Registry
 	if !registry.Add(&first) || !registry.Add(&second) || registry.Add(&first) ||
@@ -27,7 +27,7 @@ func TestRegistryDeliversOwnedTaskExit(t *testing.T) {
 }
 
 func TestRegistryWaitsForLastTask(t *testing.T) {
-	owner, _ := New(1, AddressSpace{Root: 0x1000})
+	owner, _ := New(1, ABINative, AddressSpace{Root: 0x1000})
 	var registry Registry
 	registry.Add(&owner)
 	first, _ := sched.NewTaskID(3, 1)
@@ -53,7 +53,7 @@ func TestCompletionRecordedForEveryProcess(t *testing.T) {
 	var registry Registry
 	owners := make([]*Process, MaxExitEvents)
 	for index := range owners {
-		owner, _ := New(ID(index+1), AddressSpace{Root: uint64(index+1) * 0x1000})
+		owner, _ := New(ID(index+1), ABINative, AddressSpace{Root: uint64(index+1) * 0x1000})
 		owners[index] = &owner
 		if !registry.Add(&owner) {
 			t.Fatalf("registry rejected process %d", index+1)
@@ -79,7 +79,7 @@ func TestCompletionRecordedForEveryProcess(t *testing.T) {
 
 func TestRegistryWaitSurvivesExitDeliveryAndRemoval(t *testing.T) {
 	var registry Registry
-	process, _ := New(9, AddressSpace{Root: 0x9000})
+	process, _ := New(9, ABINative, AddressSpace{Root: 0x9000})
 	registry.Add(&process)
 	task, _ := sched.NewTaskID(3, 5)
 	registry.BindTask(9, task)
@@ -106,8 +106,8 @@ func TestRegistryWaitSurvivesExitDeliveryAndRemoval(t *testing.T) {
 }
 
 func TestRegistryRemovesProcessSlot(t *testing.T) {
-	first, _ := New(10, AddressSpace{Root: 0x1000})
-	second, _ := New(11, AddressSpace{Root: 0x2000})
+	first, _ := New(10, ABINative, AddressSpace{Root: 0x1000})
+	second, _ := New(11, ABINative, AddressSpace{Root: 0x2000})
 	var registry Registry
 	if !registry.Add(&first) || !registry.Remove(10) || !registry.Add(&second) {
 		t.Fatal("registry slot was not reusable")
@@ -122,7 +122,7 @@ func TestRegistryRemovesProcessSlot(t *testing.T) {
 
 func TestRegistryAtListsProcessesAndTasks(t *testing.T) {
 	var registry Registry
-	first, _ := New(1, AddressSpace{Root: 0x1000})
+	first, _ := New(1, ABINative, AddressSpace{Root: 0x1000})
 	registry.Add(&first)
 	task, _ := sched.NewTaskID(3, 1)
 	registry.BindTask(1, task)
@@ -136,9 +136,26 @@ func TestRegistryAtListsProcessesAndTasks(t *testing.T) {
 }
 
 func TestProcessNameIsBounded(t *testing.T) {
-	process, _ := New(4, AddressSpace{Root: 0x1000})
+	process, _ := New(4, ABINative, AddressSpace{Root: 0x1000})
 	process.SetName([]byte("a-very-long-executable-name"))
 	if string(process.Name()) != "a-very-long-exec" {
 		t.Fatalf("name %q", process.Name())
+	}
+}
+
+func TestRegistryAuthorizesOnlyTheProcessABI(t *testing.T) {
+	var registry Registry
+	native, _ := New(1, ABINative, AddressSpace{Root: 0x1000})
+	linux, _ := New(2, ABILinuxX8664, AddressSpace{Root: 0x2000})
+	registry.Add(&native)
+	registry.Add(&linux)
+	if !registry.AllowsABI(0x1000, ABINative) || registry.AllowsABI(0x1000, ABILinuxX8664) {
+		t.Fatal("native process ABI authorization is wrong")
+	}
+	if !registry.AllowsABI(0x2000, ABILinuxX8664) || registry.AllowsABI(0x2000, ABINative) {
+		t.Fatal("Linux process ABI authorization is wrong")
+	}
+	if registry.AllowsABI(0x3000, ABINative) || registry.AllowsABI(0x1000, ABIInvalid) {
+		t.Fatal("missing process or invalid ABI authorized")
 	}
 }

@@ -55,6 +55,9 @@ Relocations and executable ASLR remain future work. Images are static
 would change in this format is described in
 [memory.md](../architecture/memory.md#aslr-readiness). Linux ELF is a separate
 compatibility-layer format and does not define this native envelope.
+Successful validation selects the immutable `Native` Process ABI. Future Linux
+ELF validation is separate and will select `LinuxX8664`; neither path changes
+personality after process initialization (ADR 0132, ADR 0133).
 
 Process startup is a separate versioned ABI described by ADR 0031. The current
 `GST4` object (ADR 0109) is limited to 64 KiB and carries the command, the working
