@@ -3,7 +3,9 @@
 ## Status
 
 Accepted for GoOS 0.2.0. The bounded ELF64 parser and load-plan validation are
-implemented in Phase 3; mapping and the initial stack remain later phases.
+implemented in Phase 3. Phase 4 maps validated loads through the common lazy
+executable-source path and reserves the Linux stack; initial-stack contents
+remain Phase 5.
 
 ## Context
 
@@ -32,6 +34,17 @@ Validated `PT_LOAD` regions reuse the existing stable executable source, lazy
 file-backed faults, demand-zero BSS, page accounting, and W^X enforcement. The
 format-specific validator supplies `LinuxX8664` only after the complete launch
 plan is valid.
+
+The mapper preserves ELF page congruence: a non-page-aligned `p_vaddr` records
+the page-aligned source offset and includes the leading file bytes in that
+page. Bytes through `p_filesz` come from the executable source; the remainder
+of `p_memsz` is demand-zero. Loads are confined to the low image area, so
+ordinary `0x400000` executables work while fixed GoOS user windows cannot be
+overwritten. Existing regions are collision checked before the map changes.
+
+Linux receives an 8 MiB writable, non-executable, demand-zero stack
+reservation below `vm.UserStackTop`, with a pinned 64 KiB guard below it.
+Phase 4 maps no initial stack page and writes no Linux startup data.
 
 The Linux initial stack contains `argc`, `argv`, `envp`, and a bounded auxv.
 It does not expose `GST4`. Resolved GoOS handles remain kernel-side compatibility

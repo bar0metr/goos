@@ -29,15 +29,6 @@ func LoadNative(allocator *pmm.Allocator, root uint64, data []byte) (LoadedImage
 	return LoadImage(allocator, root, Contiguous(data), nil, Origin{}, nil)
 }
 
-// Origin names where an image's bytes live, so a page can be read from there
-// when a process first touches it (ADR 0106): an extent of the system image,
-// by its key, or an executable object, by its identity. The zero Origin is
-// bytes that do not outlive the load, which are loaded whole.
-type Origin struct {
-	Key    uint64
-	Object uint64
-}
-
 // LoadImage validates an image and maps it into an empty process address
 // space. All payload bytes are copied before executable permission is
 // exposed.
