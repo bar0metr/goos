@@ -94,7 +94,8 @@ Syscalls map onto native primitives:
 | `clock_gettime` | `ClockReadNanos` |
 | `execve`, `wait4` | exec request to PID 1, process handle wait |
 | `ppoll`, `poll` | `WaitAny` |
-| `brk`, `mmap` (anonymous) | a bounded per-process region; no file mappings at first |
+| `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
+| `arch_prctl` | task-local FS base; GS remains architecture-owned |
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -160,12 +161,13 @@ the `large` profile and exactly four grants named `in`, `stdout`, `stderr`, and
 `vfs`, with stream/channel types and rights fixed by the kernel. Resolved handle
 IDs and cwd remain in a bounded kernel compatibility table; only argv, envp,
 and auxv enter the Linux stack. The validation image
-`/system/linux/phase6-probe` exercises classification, policy, mapping, stack
-installation, task creation, kill, wait, and teardown without claiming Linux
-`exit` support.
+`/system/linux/raw-probe` exercises classification, policy, mapping, stack
+installation, task creation, raw memory and stdio syscalls, FS-relative TLS,
+wait, exit, and teardown. PID 1 runs two instances with distinct FS bases and
+holds back their remaining input until both have installed TLS and blocked.
 
-FS base will be task context and will be saved and restored on every context
-switch. Only `ARCH_SET_FS` is planned for 0.2.0; `ARCH_SET_GS` is rejected and
+FS base is task context and is saved and restored on every context switch.
+`ARCH_SET_FS` and `ARCH_GET_FS` are implemented. GS operations are rejected and
 kernel GS remains architecture-owned (ADR 0137).
 
 ## Iterative targets

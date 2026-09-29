@@ -481,9 +481,15 @@ initial descriptors refer privately to its supplied streams. Raw `read`,
 `write`, `exit`, and `exit_group` are implemented; a static validation ELF
 proves stdin, stdout, blocking wakeup, signed returns, and teardown.
 
+The same ELF exercises a bounded 64 MiB `brk`, anonymous private `mmap`, safe
+`mprotect`, `munmap`, `MADV_DONTNEED`, and FS-only `arch_prctl`. FS base is
+saved in generation-safe task state and restored on every switch. Two concurrent
+Linux instances block with distinct bases, resume, verify FS-relative memory,
+and exit normally.
+
 Order for the remaining release work:
 
-1. memory, FS-base/TLS, and static musl startup;
+1. pinned static musl startup and measured startup-call coverage;
 2. VFS file/directory descriptors using continuations;
 3. selected static BusyBox applets as measured P1 interoperability.
 

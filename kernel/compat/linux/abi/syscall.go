@@ -55,6 +55,23 @@ const (
 	SysStatx         Syscall = 332
 )
 
+const (
+	ProtNone  = uint64(0)
+	ProtRead  = uint64(1)
+	ProtWrite = uint64(2)
+	ProtExec  = uint64(4)
+
+	MapPrivate   = uint64(0x02)
+	MapAnonymous = uint64(0x20)
+
+	MadvDontNeed = uint64(4)
+
+	ArchSetGS = uint64(0x1001)
+	ArchSetFS = uint64(0x1002)
+	ArchGetFS = uint64(0x1003)
+	ArchGetGS = uint64(0x1004)
+)
+
 // Known reports whether number belongs to the bounded planning namespace.
 // Known does not mean implemented or release-scoped: an absent handler still
 // returns ENOSYS.

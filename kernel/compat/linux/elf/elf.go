@@ -150,6 +150,20 @@ type Image struct {
 	relroFileSize        uint64
 }
 
+// LoadEnd returns the first page after the highest load segment.
+func (image Image) LoadEnd() uint64 {
+	if image.SegmentCount < 0 || image.SegmentCount > len(image.Segments) {
+		return 0
+	}
+	var end uint64
+	for index := 0; index < image.SegmentCount; index++ {
+		if image.Segments[index].MapEnd > end {
+			end = image.Segments[index].MapEnd
+		}
+	}
+	return end
+}
+
 type programHeader struct {
 	typeValue  uint32
 	flags      uint32

@@ -1219,11 +1219,30 @@ goos_irq_timer:
     fxsave64 (%r10,%r9)
     callq goos_select_next
 .switch_to:
+	// FS base is schedulable user state. Save the outgoing value before RAX
+	// changes from the incoming slot to the MSR halves.
+	movq %rax, %r8
+	movq goos_current_task(%rip), %r9
+	movl $0xc0000100, %ecx
+	rdmsr
+	shlq $32, %rdx
+	orq %rdx, %rax
+	leaq goos_task_fs_bases(%rip), %r10
+	movq %rax, (%r10,%r9,8)
+	movq %r8, %rax
     movq %rax, %r9
     shlq $GOOS_FPU_AREA_SHIFT, %r9
     leaq goos_task_fpu(%rip), %r10
     fxrstor64 (%r10,%r9)
     movq %rax, goos_current_task(%rip)
+	movq %rax, %r8
+	leaq goos_task_fs_bases(%rip), %r10
+	movq (%r10,%r8,8), %rax
+	movq %rax, %rdx
+	shrq $32, %rdx
+	movl $0xc0000100, %ecx
+	wrmsr
+	movq %r8, %rax
     leaq goos_task_rsp0(%rip), %r10
     movq (%r10,%rax,8), %r11
     leaq goos_task_roots(%rip), %r9
@@ -1657,6 +1676,8 @@ goos_scheduler_install_user:
 .install_user_generation_ready:
     leaq goos_user_call_rsp_baselines(%rip), %r11
     movq $0, (%r11,%r10,8)
+	leaq goos_task_fs_bases(%rip), %r11
+	movq $0, (%r11,%r10,8)
     leaq goos_task_contexts(%rip), %r11
     movq %rcx, (%r11,%r10,8)
     leaq goos_task_roots(%rip), %r11
@@ -1676,6 +1697,62 @@ goos_scheduler_install_user:
 goos_set_tss_stack_address:
     movq %rcx, goos_tss_rsp0_address(%rip)
     retq
+
+.global goos_task_fs_base_set
+goos_task_fs_base_set:
+	xorq %rax, %rax
+	movl %ecx, %r8d
+	testl %r8d, %r8d
+	jz .task_fs_base_set_done
+	cmpl $64, %r8d
+	ja .task_fs_base_set_done
+	decl %r8d
+	movq %rcx, %r9
+	shrq $32, %r9
+	leaq goos_task_generations(%rip), %r10
+	cmpq (%r10,%r8,8), %r9
+	jne .task_fs_base_set_done
+	btq %r8, goos_task_dead_mask(%rip)
+	jc .task_fs_base_set_done
+	pushfq
+	cli
+	leaq goos_task_fs_bases(%rip), %r10
+	movq %rdx, (%r10,%r8,8)
+	cmpq goos_current_task(%rip), %r8
+	jne .task_fs_base_set_success
+	movq %rdx, %r11
+	movq %r11, %rax
+	shrq $32, %rdx
+	movl $0xc0000100, %ecx
+	wrmsr
+.task_fs_base_set_success:
+	popfq
+	movq $1, %rax
+.task_fs_base_set_done:
+	retq
+
+.global goos_task_fs_base_read
+goos_task_fs_base_read:
+	xorq %rax, %rax
+	movl %ecx, %r8d
+	testl %r8d, %r8d
+	jz .task_fs_base_read_done
+	cmpl $64, %r8d
+	ja .task_fs_base_read_done
+	decl %r8d
+	movq %rcx, %r9
+	shrq $32, %r9
+	leaq goos_task_generations(%rip), %r10
+	cmpq (%r10,%r8,8), %r9
+	jne .task_fs_base_read_done
+	btq %r8, goos_task_dead_mask(%rip)
+	jc .task_fs_base_read_done
+	leaq goos_task_fs_bases(%rip), %r10
+	movq (%r10,%r8,8), %r11
+	movq %r11, (%rdx)
+	movq $1, %rax
+.task_fs_base_read_done:
+	retq
 
 .global goos_block_current_task
 goos_block_current_task:
@@ -1859,9 +1936,11 @@ goos_reclaim_exited_task:
 	 movq $0, (%rdx,%r8,8)
     leaq goos_task_contexts(%rip), %rdx
 	 movq $0, (%rdx,%r8,8)
-    leaq goos_task_roots(%rip), %rdx
-	 movq $0, (%rdx,%r8,8)
-	 movq $1, %rax
+	leaq goos_task_roots(%rip), %rdx
+	movq $0, (%rdx,%r8,8)
+	leaq goos_task_fs_bases(%rip), %rdx
+	movq $0, (%rdx,%r8,8)
+	movq $1, %rax
 .reclaim_exited_done:
     retq
 
@@ -1894,6 +1973,8 @@ goos_task_contexts:
     .zero 512
 goos_task_roots:
     .zero 512
+goos_task_fs_bases:
+	.zero 512
 goos_task_rsp0:
     .zero 512
 goos_task_generations:

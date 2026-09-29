@@ -265,7 +265,8 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 		if processABI == process.ABILinuxX8664 {
 			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound)
-			if stackStatus != linuxabi.StackOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, bound) {
+			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
+			if stackStatus != linuxabi.StackOK || !brkOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, bound, brkBase, brkLimit) {
 				abandonSpawn(root, spawned, false)
 				return 0, 0, supervisor.LaunchInvalidImage
 			}

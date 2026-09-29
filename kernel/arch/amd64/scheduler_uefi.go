@@ -5,6 +5,7 @@ package amd64
 import (
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
+	"goos/kernel/sched"
 	"unsafe"
 )
 
@@ -189,6 +190,22 @@ func installScheduler(taskA uint64, taskB uint64, idle uint64, kernelRoot uint64
 
 //export goos_scheduler_install_user
 func installUserTask(context uint64, pageTable uint64, kernelStackTop uint64) uint64
+
+// SetTaskFSBase changes the saved FS base of one live task and updates the CPU
+// immediately when it is the current task.
+//
+//export goos_task_fs_base_set
+func SetTaskFSBase(task sched.TaskID, base uint64) bool
+
+//export goos_task_fs_base_read
+func readTaskFSBase(task sched.TaskID, base *uint64) bool
+
+// TaskFSBase reads the saved FS base of one live task.
+func TaskFSBase(task sched.TaskID) (uint64, bool) {
+	var base uint64
+	ok := readTaskFSBase(task, &base)
+	return base, ok
+}
 
 //export goos_user_preemptions_read
 func UserPreemptions() uint64

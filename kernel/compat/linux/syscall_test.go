@@ -16,6 +16,16 @@ func (handler *testHandler) Write(request Request) Result {
 	handler.called = request.Number
 	return Result{Errno: abi.EPIPE}
 }
+func (handler *testHandler) Brk(request Request) Result       { return handler.memory(request) }
+func (handler *testHandler) Mmap(request Request) Result      { return handler.memory(request) }
+func (handler *testHandler) Munmap(request Request) Result    { return handler.memory(request) }
+func (handler *testHandler) Mprotect(request Request) Result  { return handler.memory(request) }
+func (handler *testHandler) Madvise(request Request) Result   { return handler.memory(request) }
+func (handler *testHandler) ArchPrctl(request Request) Result { return handler.memory(request) }
+func (handler *testHandler) memory(request Request) Result {
+	handler.called = request.Number
+	return Result{}
+}
 func (handler *testHandler) Exit(request Request, group bool) Result {
 	handler.called = request.Number
 	return Result{Action: abi.ActionExit}
@@ -62,7 +72,10 @@ func TestUnsupportedDiagnosticsStayBounded(t *testing.T) {
 
 func TestDispatchRoutesImplementedCalls(t *testing.T) {
 	handler := &testHandler{}
-	for _, syscall := range []abi.Syscall{abi.SysRead, abi.SysWrite, abi.SysExit, abi.SysExitGroup} {
+	for _, syscall := range []abi.Syscall{
+		abi.SysRead, abi.SysWrite, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
+		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
+	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)
 		if handler.called != syscall {
 			t.Fatalf("syscall %d routed as %d", syscall, handler.called)

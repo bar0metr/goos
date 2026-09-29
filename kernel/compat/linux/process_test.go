@@ -12,11 +12,12 @@ import (
 func TestProcessStateRetainsLaunchAuthority(t *testing.T) {
 	processStates = [process.MaxProcesses]ProcessState{}
 	data := linuxStartup(t, "/persist/work", [4]handle.ID{11, 12, 13, 14})
-	if !InstallProcess(0x4000, data) || InstallProcess(0x4000, data) {
+	if !InstallProcess(0x4000, data, 0x600000, 0x4600000) || InstallProcess(0x4000, data, 0x600000, 0x4600000) {
 		t.Fatal("state install did not enforce unique root")
 	}
 	state, found := FindProcess(0x4000)
-	if !found || state.Input != 11 || state.Output != 12 || state.Error != 13 || state.VFS != 14 || string(state.CWD()) != "/persist/work" {
+	if !found || state.Input != 11 || state.Output != 12 || state.Error != 13 || state.VFS != 14 ||
+		state.BrkBase != 0x600000 || state.BrkCurrent != 0x600000 || state.BrkLimit != 0x4600000 || string(state.CWD()) != "/persist/work" {
 		t.Fatalf("state = %#v cwd=%q", state, state.CWD())
 	}
 	for fd := 0; fd <= 2; fd++ {
@@ -36,11 +37,11 @@ func TestProcessStateIsBounded(t *testing.T) {
 	processStates = [process.MaxProcesses]ProcessState{}
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
 	for index := range processStates {
-		if !InstallProcess(uint64(index+1), data) {
+		if !InstallProcess(uint64(index+1), data, 0x600000, 0x4600000) {
 			t.Fatalf("install %d failed", index)
 		}
 	}
-	if InstallProcess(uint64(len(processStates)+1), data) {
+	if InstallProcess(uint64(len(processStates)+1), data, 0x600000, 0x4600000) {
 		t.Fatal("over-capacity state installed")
 	}
 }
@@ -48,7 +49,7 @@ func TestProcessStateIsBounded(t *testing.T) {
 func TestProcessFDExhaustionIsEMFILE(t *testing.T) {
 	processStates = [process.MaxProcesses]ProcessState{}
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
-	if !InstallProcess(0x5000, data) {
+	if !InstallProcess(0x5000, data, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	for fd := 3; fd < LinuxMaxFD; fd++ {
