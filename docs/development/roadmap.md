@@ -473,17 +473,18 @@ at both gates, and returns `-ENOSYS` for every syscall pending semantic
 implementation. Phase 3 adds a pure bounded ELF64 little-endian x86_64
 `ET_EXEC` parser and validated load plan. Phase 4 maps that plan through the
 common lazy executable-source regions, preserves demand-zero BSS and page
-accounting, and reserves an 8 MiB NX stack with a 64 KiB guard. It does not
-build startup data or launch ELF yet.
+accounting, and reserves an 8 MiB NX stack with a 64 KiB guard. Phase 5 builds
+the bounded, 16-byte-aligned Linux initial stack with argv, environment, and
+the required static-ELF auxv, then materializes only its occupied pages. It
+does not launch ELF yet.
 
 Order for the remaining release work:
 
-1. build the Linux initial stack and bounded auxv;
-2. add PID 1 classification and constrained Linux launch policy;
-3. raw Linux `write` plus `exit_group` hello world;
-4. memory, FS-base/TLS, and static musl startup;
-5. bounded fd table and VFS file/directory probes;
-6. selected static BusyBox applets as measured P1 interoperability.
+1. add PID 1 classification and constrained Linux launch policy;
+2. raw Linux `write` plus `exit_group` hello world;
+3. memory, FS-base/TLS, and static musl startup;
+4. bounded fd table and VFS file/directory probes;
+5. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

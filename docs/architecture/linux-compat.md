@@ -6,8 +6,8 @@ Phase 2 implements the dedicated Linux x86_64 `SYSCALL`/IRETQ entry and rejects
 wrong-ABI entry at both gates. Phase 3 implements the bounded static ELF64
 parser and load-plan validation. Phase 4 records validated `PT_LOAD` ranges in
 the common lazy executable region model and reserves the guarded Linux stack.
-Linux initial-stack contents, launch, and semantic syscall translation are not
-implemented yet.
+Phase 5 builds and installs the bounded Linux System V initial stack. Linux
+launch and semantic syscall translation are not implemented yet.
 
 ## Principles
 
@@ -49,8 +49,16 @@ Congruent non-page-aligned loads retain their aligned file window. The mapper
 revalidates the exported plan and current source length, preflights all region
 collisions, and accepts conventional low addresses such as `0x400000` while
 keeping loads below the fixed GoOS user windows. It also reserves an 8 MiB NX
-demand-zero stack with a 64 KiB guard. Phase 5 will write `argc`, `argv`,
-`envp`, and auxv; Phase 4 does not launch a process. `ET_DYN` remains P2 scope.
+demand-zero stack with a 64 KiB guard. `ET_DYN` remains P2 scope.
+
+Phase 5 converts the kernel's validated startup view into a Linux stack image,
+not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
+and the static-ELF auxv required by the release specification. The complete
+image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
+RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
+`AT_PLATFORM` is `x86_64`; `AT_RANDOM` is absent until trustworthy entropy is
+available. Only occupied stack pages are installed; the remaining reservation
+stays demand-zero. Phase 6 will connect this path to process launch.
 
 ### Syscall entry
 

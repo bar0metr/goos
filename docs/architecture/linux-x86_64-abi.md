@@ -47,8 +47,32 @@ The mapping boundary rechecks source length, range arithmetic, overlap, entry
 placement, and protections. Linux `ET_EXEC` may start at `0x400000`; load pages
 must remain below 2 GiB, away from fixed GoOS user windows. The Linux stack is
 reserved as 8 MiB RW/NX demand-zero memory below `vm.UserStackTop`, with a
-64 KiB guard. No initial stack page or System V startup vector exists until
-Phase 5, and the mapper is not connected to PID 1 launch until Phase 6.
+64 KiB guard. The mapper is not connected to PID 1 launch until Phase 6.
+
+## Initial stack after Phase 5
+
+The bounded builder emits the Linux x86_64 entry layout:
+
+```text
+argc
+argv pointers, NULL
+envp pointers, NULL
+auxv type/value pairs, AT_NULL
+NUL-terminated strings
+```
+
+Initial RSP is 16-byte aligned. The complete occupied image is limited to
+64 KiB, with at most 256 arguments and 256 environment entries. It contains
+`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_ENTRY`, `AT_EXECFN`,
+`AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE`, `AT_CLKTCK`,
+`AT_PLATFORM="x86_64"`, and `AT_NULL`. UID/GID are 1000 and `AT_CLKTCK` is
+100. `AT_RANDOM` is deliberately absent; no deterministic bytes are presented
+as entropy.
+
+The installer maps only pages occupied by this image as user RW/NX owned
+pages. Normal launch accounting will charge them before the task becomes
+runnable. The remaining 8 MiB reservation stays absent and demand-zero. The
+builder and installer exist, but no Linux ELF is launchable until Phase 6.
 
 ## Validation
 

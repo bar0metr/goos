@@ -144,7 +144,9 @@ pinned image region whose source offset and byte count cover the ELF-aligned
 file window. First touch reads bytes through `p_filesz`; the remainder of the
 page-rounded `p_memsz` range is zero-filled. The Linux stack is an 8 MiB
 anonymous RW/NX reservation ending at `UserStackTop`, with a 64 KiB guard, and
-also grows through demand-zero faults.
+also grows through demand-zero faults. Its initial System V image is capped at
+64 KiB; only pages holding `argc`, vectors, auxv, and strings are populated at
+launch, while the rest remains absent.
 
 **Native calls.** `VMMap` reserves anonymous memory at a free address the
 caller names or one the kernel chooses; `VMUnmap` removes a range and frees the
