@@ -313,8 +313,10 @@ nothing in the ABI but gives little entropy while the stack sits at a fixed
 place in the image. Real stack randomization comes with executable ASLR or
 with the kernel allocating the stack as its own region at a random address.
 
-**mmap randomization.** There is no general `mmap`. The three mapping calls
-behave differently:
+**mmap randomization.** Native userspace has no general `mmap`; Linux
+compatibility has bounded anonymous private `mmap` with deterministic first-fit
+placement. Randomizing that placement can change the starting search address
+without changing its ABI. The three native mapping calls behave differently:
 
 - `MemoryMap` already takes its address from the caller. A process could
   choose a random address inside the shared window today; a randomized or

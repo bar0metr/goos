@@ -14,14 +14,17 @@ import (
 // directory used by Linux syscall translation. Native handle
 // IDs never enter the Linux initial stack.
 type ProcessState struct {
-	Root   uint64
-	Input  handle.ID
-	Output handle.ID
-	Error  handle.ID
-	VFS    handle.ID
-	FDs    FDTable
-	cwd    [limits.PathMax]byte
-	cwdLen uint16
+	Root       uint64
+	Input      handle.ID
+	Output     handle.ID
+	Error      handle.ID
+	VFS        handle.ID
+	FDs        FDTable
+	BrkBase    uint64
+	BrkCurrent uint64
+	BrkLimit   uint64
+	cwd        [limits.PathMax]byte
+	cwdLen     uint16
 }
 
 func (state *ProcessState) CWD() []byte { return state.cwd[:state.cwdLen] }
@@ -30,8 +33,9 @@ var processStates [process.MaxProcesses]ProcessState
 
 // InstallProcess records one validated, bound Linux launch. The caller owns
 // teardown if a later launch step fails.
-func InstallProcess(root uint64, data startup.Data) bool {
-	if root == 0 || data.HandleCount() != 4 || len(data.CWD()) == 0 || len(data.CWD()) > limits.PathMax {
+func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uint64) bool {
+	if root == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
+		data.HandleCount() != 4 || len(data.CWD()) == 0 || len(data.CWD()) > limits.PathMax {
 		return false
 	}
 	input, inputOK := data.Handle("in")
@@ -57,6 +61,7 @@ func InstallProcess(root uint64, data startup.Data) bool {
 	*state = ProcessState{}
 	state.Root, state.Input, state.Output = root, input, output
 	state.Error, state.VFS, state.cwdLen = errorOutput, vfsHandle, uint16(len(data.CWD()))
+	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	if !state.FDs.Initialize(input, output, errorOutput) {
 		*state = ProcessState{}
 		return false

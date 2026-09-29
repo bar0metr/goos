@@ -22,8 +22,9 @@ is not part of the 0.2.0 Linux contract. The syscall entry implementation must
 document `SWAPGS`, nested interrupt, exception, and all return-path rules before
 enabling `SYSCALL`.
 
-Process teardown and task-slot reuse clear saved FS state. Tests must preempt
-between at least two Linux tasks with different bases and prove isolation.
+Process teardown and task-slot reuse clear saved FS state. Validation runs two
+Linux tasks with different bases, blocks both after TLS installation, and
+checks FS-relative memory after resumption.
 
 ## Consequences
 

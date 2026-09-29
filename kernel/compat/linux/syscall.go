@@ -28,6 +28,12 @@ func (result Result) Register() uint64 {
 type Handler interface {
 	Read(Request) Result
 	Write(Request) Result
+	Brk(Request) Result
+	Mmap(Request) Result
+	Munmap(Request) Result
+	Mprotect(Request) Result
+	Madvise(Request) Result
+	ArchPrctl(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -60,6 +66,18 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 			return handler.Read(request)
 		case abi.SysWrite:
 			return handler.Write(request)
+		case abi.SysBrk:
+			return handler.Brk(request)
+		case abi.SysMmap:
+			return handler.Mmap(request)
+		case abi.SysMunmap:
+			return handler.Munmap(request)
+		case abi.SysMprotect:
+			return handler.Mprotect(request)
+		case abi.SysMadvise:
+			return handler.Madvise(request)
+		case abi.SysArchPrctl:
+			return handler.ArchPrctl(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

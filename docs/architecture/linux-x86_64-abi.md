@@ -20,6 +20,12 @@ It describes current code, not the final release target.
 | --- | --- | --- |
 | `read(0)` | implemented | fd 0 stream, blocking without polling |
 | `write(1)` | implemented | fd 1/2 streams, bounded chunks and partial writes |
+| `mmap(9)` | partial | kernel-chosen anonymous private mappings; no executable or file-backed mappings |
+| `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
+| `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
+| `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
+| `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
+| `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations rejected |
 | `exit(60)` | implemented | exits the calling task |
 | `exit_group(231)` | implemented | retires every task in the process |
 | other declared numbers | `ENOSYS` | decoded and typed; no fake success |
@@ -94,6 +100,19 @@ pages. Normal launch accounting will charge them before the task becomes
 runnable. The remaining 8 MiB reservation stays absent and demand-zero. The
 builder and installer are used for every accepted Linux launch.
 
+The compatibility record also owns a 64 MiB `brk` interval beginning at the
+first page after the highest load segment. Anonymous `mmap` uses deterministic
+first-fit addresses in the ordinary kernel-selected mapping window. Both paths
+reuse the native region table, demand-zero faults, physical-page quota, unmap,
+discard, and protection machinery. Anonymous executable mappings, W+X,
+file-backed mappings, fixed mappings, and unsupported flags fail explicitly.
+
+FS base is saved per generation-safe scheduler slot and restored with the FPU
+and address-space context on every switch. `ARCH_SET_FS` accepts only lower-half
+user addresses; `ARCH_GET_FS` copies the saved value through checked user
+memory. Task installation and slot reclamation clear the saved base. GS remains
+owned by the syscall entry mechanism.
+
 ## Launch status
 
 PID 1 classifies `GOOSNAT\0` and ELF magic and carries that candidate in
@@ -119,7 +138,10 @@ live gate emits `LINUX_SYSCALL_OK`, `LINUX_ABI_ISOLATION_OK`, and
 
 The validation initramfs also contains `/system/linux/raw-probe`, a static ELF.
 PID 1 proves that a false format hint, a non-large profile, and an extra grant
-are refused. It then launches the ELF with minimal authority; the program reads
-stdin, echoes it through `write`, writes `LINUX_RAW_SYSCALL_OK`, and terminates
-through `exit_group`. PID 1 observes its output and teardown before publishing
-`LINUX_PID1_LAUNCH_OK` and `LINUX_RAW_SYSCALL_OK`.
+are refused. It then launches two instances concurrently. Each instance grows
+and shrinks `brk`, creates, reprotects, discards, and removes anonymous memory,
+then selects a distinct FS base from its input. Both block with TLS installed,
+resume, verify `ARCH_GET_FS` and an actual FS-relative load, exercise stdio,
+and terminate through `exit_group`. PID 1 observes both outputs and teardown
+before publishing `LINUX_MEMORY_TLS_OK`, `LINUX_PID1_LAUNCH_OK`, and
+`LINUX_RAW_SYSCALL_OK`.

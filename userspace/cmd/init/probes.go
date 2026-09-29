@@ -15,8 +15,8 @@ import (
 	"goos/userspace/startup"
 )
 
-var linuxProbeStreams [3][2]uint64
-var linuxProbeGrants [5]supervisor.Capability
+var linuxProbeStreams [2][3][2]uint64
+var linuxProbeGrants [2][5]supervisor.Capability
 
 // probeLinuxLaunch exercises policy, mapping, stdin/stdout and process exit
 // with a static Linux ELF using raw syscalls.
@@ -27,27 +27,10 @@ func probeLinuxLaunch() bool {
 	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
 		return false
 	}
-	streams := &linuxProbeStreams
-	*streams = [3][2]uint64{}
-	for index := range streams {
-		if !createStream(&streams[index]) {
-			closeProbeStreams(streams, false)
-			return false
-		}
-	}
-	vfsHandle, reason := openVFSSession()
-	if reason != "" {
-		closeProbeStreams(streams, false)
+	streams, grants, vfsHandle, prepared := prepareLinuxProbe(0)
+	if !prepared {
 		return false
 	}
-	linuxProbeGrants = [5]supervisor.Capability{
-		{Name: "in", Handle: handle.ID(streams[0][0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true},
-		{Name: "stdout", Handle: handle.ID(streams[1][1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
-		{Name: "stderr", Handle: handle.ID(streams[2][1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
-		{Name: "vfs", Handle: vfsHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
-	}
-	grants := linuxProbeGrants[:4]
 	// A false classifier hint must not select the native loader.
 	claimedNative := executable
 	claimedNative.Format = supervisor.ExecutableNative
@@ -76,7 +59,7 @@ func probeLinuxLaunch() bool {
 		return false
 	}
 	slot, data, ok = linuxProbeStartup(true)
-	extra := linuxProbeGrants[:5]
+	extra := linuxProbeGrants[0][:5]
 	if !ok {
 		closeProbeStreams(streams, false)
 		sys.HandleClose(vfsHandle)
@@ -93,27 +76,103 @@ func probeLinuxLaunch() bool {
 		sys.HandleClose(vfsHandle)
 		return false
 	}
-	event, status := requestLaunch(executable, name, grants, supervisor.ProfileLarge, slot, uint32(len(data)))
-	if status != supervisor.LaunchOK || event.Process == 0 || event.ProcessHandle == 0 {
+	first, status := requestLaunch(executable, name, grants, supervisor.ProfileLarge, slot, uint32(len(data)))
+	if status != supervisor.LaunchOK || first.Process == 0 || first.ProcessHandle == 0 {
 		closeProbeStreams(streams, false)
 		sys.HandleClose(vfsHandle)
 		return false
 	}
-	const input = "in\n"
-	if written, result := sys.StreamWrite(handle.ID(streams[0][1]), sys.Bytes(input)); result != kcall.StatusOK || written != len(input) {
+	secondStreams, secondGrants, secondVFS, prepared := prepareLinuxProbe(1)
+	if !prepared {
+		return false
+	}
+	slot, data, ok = linuxProbeStartup(false)
+	if !ok {
+		closeProbeStreams(secondStreams, false)
+		sys.HandleClose(secondVFS)
+		return false
+	}
+	second, status := requestLaunch(executable, name, secondGrants, supervisor.ProfileLarge, slot, uint32(len(data)))
+	if status != supervisor.LaunchOK || second.Process == 0 || second.ProcessHandle == 0 {
+		closeProbeStreams(secondStreams, false)
+		sys.HandleClose(secondVFS)
+		return false
+	}
+	inputs := [2]string{"in\n", "on\n"}
+	for index, endpoints := range []*[3][2]uint64{streams, secondStreams} {
+		if !linuxProbeWrite(endpoints[0][1], inputs[index][:1]) {
+			return false
+		}
+	}
+	for _, endpoints := range []*[3][2]uint64{streams, secondStreams} {
+		if !linuxProbeRead(endpoints[1][0], "L") {
+			return false
+		}
+	}
+	for index, endpoints := range []*[3][2]uint64{streams, secondStreams} {
+		if !linuxProbeWrite(endpoints[0][1], inputs[index][1:]) {
+			return false
+		}
+		sys.HandleClose(handle.ID(endpoints[0][1]))
+		sys.HandleClose(handle.ID(endpoints[2][0]))
+	}
+	for index, endpoints := range []*[3][2]uint64{streams, secondStreams} {
+		if !linuxProbeRead(endpoints[1][0], inputs[index]+"LINUX_MEMORY_TLS_OK\n") {
+			return false
+		}
+		sys.HandleClose(handle.ID(endpoints[1][0]))
+	}
+	waitApplicationExit(first.ProcessHandle)
+	waitApplicationExit(second.ProcessHandle)
+	mark("LINUX_MEMORY_TLS_OK\n")
+	mark("LINUX_RAW_SYSCALL_OK\n")
+	return true
+}
+
+func prepareLinuxProbe(index int) (*[3][2]uint64, []supervisor.Capability, handle.ID, bool) {
+	if index < 0 || index >= len(linuxProbeStreams) {
+		return nil, nil, 0, false
+	}
+	streams := &linuxProbeStreams[index]
+	*streams = [3][2]uint64{}
+	for streamIndex := range streams {
+		if !createStream(&streams[streamIndex]) {
+			closeProbeStreams(streams, false)
+			return nil, nil, 0, false
+		}
+	}
+	vfsHandle, reason := openVFSSession()
+	if reason != "" {
+		closeProbeStreams(streams, false)
+		return nil, nil, 0, false
+	}
+	linuxProbeGrants[index] = [5]supervisor.Capability{
+		{Name: "in", Handle: handle.ID(streams[0][0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true},
+		{Name: "stdout", Handle: handle.ID(streams[1][1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
+		{Name: "stderr", Handle: handle.ID(streams[2][1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
+		{Name: "vfs", Handle: vfsHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+		{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
+	}
+	return streams, linuxProbeGrants[index][:4], vfsHandle, true
+}
+
+func linuxProbeWrite(endpoint uint64, data string) bool {
+	written, result := sys.StreamWrite(handle.ID(endpoint), sys.Bytes(data))
+	if result != kcall.StatusOK || written != len(data) {
 		mark("LINUX_RAW_INPUT_FAILED\n")
 		return false
 	}
-	sys.HandleClose(handle.ID(streams[0][1]))
-	sys.HandleClose(handle.ID(streams[2][0]))
-	const expected = "in\nLINUX_RAW_SYSCALL_OK\n"
+	return true
+}
+
+func linuxProbeRead(endpoint uint64, expected string) bool {
 	received := 0
 	for received < len(expected) {
-		if sys.StreamWait(handle.ID(streams[1][0]), 200) != kcall.StatusOK {
+		if sys.StreamWait(handle.ID(endpoint), 200) != kcall.StatusOK {
 			mark("LINUX_RAW_WAIT_FAILED\n")
 			return false
 		}
-		read, result := sys.StreamRead(handle.ID(streams[1][0]), streamReadback[received:len(expected)])
+		read, result := sys.StreamRead(handle.ID(endpoint), streamReadback[received:len(expected)])
 		if result != kcall.StatusOK || read == 0 {
 			mark("LINUX_RAW_OUTPUT_FAILED\n")
 			return false
@@ -124,9 +183,6 @@ func probeLinuxLaunch() bool {
 		mark("LINUX_RAW_OUTPUT_FAILED\n")
 		return false
 	}
-	sys.HandleClose(handle.ID(streams[1][0]))
-	waitApplicationExit(event.ProcessHandle)
-	mark("LINUX_RAW_SYSCALL_OK\n")
 	return true
 }
 
