@@ -20,12 +20,24 @@ const (
 
 type ID uint64
 
+// ABI identifies the userspace contract a process is allowed to enter. It is
+// kernel-owned and fixed when the process slot is initialized from a validated
+// executable.
+type ABI uint8
+
+const (
+	ABIInvalid ABI = iota
+	ABINative
+	ABILinuxX8664
+)
+
 type AddressSpace struct {
 	Root uint64
 }
 
 type Process struct {
 	id           ID
+	abi          ABI
 	addressSpace AddressSpace
 	handles      handle.Table
 	tasks        [MaxTasksPerProcess]sched.TaskID
@@ -44,14 +56,14 @@ type Process struct {
 // Init prepares a process slot in place; see stream.Stream.Reset. Returning a
 // Process by value instead would build the whole handle table as a temporary,
 // which the kernel's leaking heap never frees.
-func Init(target *Process, id ID, addressSpace AddressSpace) bool {
-	return InitWithProfile(target, id, addressSpace, ProfileNormal)
+func Init(target *Process, id ID, abi ABI, addressSpace AddressSpace) bool {
+	return InitWithProfile(target, id, abi, addressSpace, ProfileNormal)
 }
 
 // InitWithProfile prepares a process with one of the kernel's bounded quota
 // sets. Callers select a profile, never individual limits.
-func InitWithProfile(target *Process, id ID, addressSpace AddressSpace, profile ResourceProfile) bool {
-	if target == nil || id == 0 || addressSpace.Root == 0 {
+func InitWithProfile(target *Process, id ID, abi ABI, addressSpace AddressSpace, profile ResourceProfile) bool {
+	if target == nil || id == 0 || !abi.Valid() || addressSpace.Root == 0 {
 		return false
 	}
 	quota, ok := quotaForProfile(profile)
@@ -60,19 +72,25 @@ func InitWithProfile(target *Process, id ID, addressSpace AddressSpace, profile 
 	}
 	target.Reset()
 	target.id = id
+	target.abi = abi
 	target.addressSpace = addressSpace
 	target.quota = quota
 	target.regions.Init(vm.UserAddressStart, vm.UserAddressLimit)
 	return true
 }
 
-func New(id ID, addressSpace AddressSpace) (Process, bool) {
+func New(id ID, abi ABI, addressSpace AddressSpace) (Process, bool) {
 	var created Process
-	ok := Init(&created, id, addressSpace)
+	ok := Init(&created, id, abi, addressSpace)
 	return created, ok
 }
 
 func (process *Process) ID() ID { return process.id }
+
+// ABI reports the immutable userspace ABI selected at validated launch.
+func (process *Process) ABI() ABI { return process.abi }
+
+func (abi ABI) Valid() bool { return abi == ABINative || abi == ABILinuxX8664 }
 
 // SetName records a display name, truncated to 16 bytes. It takes bytes
 // because the launch path names a process from the requested path, which the
@@ -267,6 +285,13 @@ func (registry *Registry) ByRoot(root uint64) (*Process, bool) {
 		}
 	}
 	return nil, false
+}
+
+// AllowsABI reports whether root belongs to a live process with the requested
+// userspace ABI. Entry gates use it before decoding any ABI-specific request.
+func (registry *Registry) AllowsABI(root uint64, abi ABI) bool {
+	process, found := registry.ByRoot(root)
+	return found && abi.Valid() && process.ABI() == abi
 }
 
 func (registry *Registry) ByCapabilityObject(typeID handle.Type, object uint64) (*Process, bool) {

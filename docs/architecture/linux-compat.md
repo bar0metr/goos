@@ -1,13 +1,13 @@
-# Linux compatibility (planned)
+# Linux compatibility
 
-**Status: not implemented.** No Linux ELF loading, Linux syscall entry, or
-translation code exists in the tree. This document records the intended
-design so that native work does not close off the path. It follows roadmap
-Priority 5 and will be refined by an ADR before implementation starts.
+**Status: GoOS 0.2.0 foundations in progress.** Phase 0 decisions are recorded
+in ADRs 0132 through 0137. Phase 1 implements immutable Process ABI identity
+and rejects non-native callers at `int 0x80`. Linux ELF loading, the Linux
+`SYSCALL` entry, and syscall translation are not implemented yet.
 
 ## Principles
 
-- Compatibility is a separate layer, planned under `compat/linux`. The native
+- Compatibility is a separate kernel subsystem. The native
   kernel ABI, handle model, and IPC protocols do not change to fit POSIX.
 - Linux programs get no authority that a native program with the same
   manifest would not get. Translation must not bypass VFS, IPC, handles, or
@@ -37,7 +37,9 @@ Linux ELF is a distinct format from the native envelope
 Linux programs use the `syscall` instruction with the Linux register
 convention. That entry path is distinct from the native `int 0x80` gate, so
 a process is either native or Linux and the kernel never guesses which ABI a
-call uses.
+call uses. Process identity is kernel-owned and immutable. The native gate
+already authorizes only `Native`; Phase 2 will add and authorize the
+`LinuxX8664` gate (ADR 0132).
 
 ### Translation
 
@@ -55,17 +57,18 @@ Syscalls map onto native primitives:
 | `ppoll`, `poll` | `WaitAny` |
 | `brk`, `mmap` (anonymous) | a bounded per-process region; no file mappings at first |
 
-Whether translation runs in the kernel, in a per-process userspace shim, or
-in a compatibility service is an open decision for the ADR. The constraint is
-that authority comes only from the process's handle table.
+Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
+may access caller memory after the ordinary address-space checks, but authority
+still comes only from process-owned resources. It cannot call filesystem or
+device implementations directly (ADR 0134).
 
 ### File descriptors
 
-Each Linux process has a bounded fd table mapping small integers to native
-handles plus per-fd state (VFS open-file ID, offset, flags). Descriptors 0, 1,
-and 2 bind to the `in`, `stdout`, and `stderr` startup roles. `dup`, `dup2`,
-and `fcntl` operate on this table; closing the last reference closes the
-handle.
+Each Linux process has a bounded fd table mapping small integers to private
+compatibility entries plus per-fd state. An fd is never a native handle.
+Descriptors 0, 1, and 2 bind to the supplied `in`, `stdout`, and `stderr`
+streams. Files are reached only through the process's explicit VFS session
+(ADR 0135).
 
 ### Namespace view
 
@@ -76,17 +79,32 @@ for early targets:
 - `/dev/null`, `/dev/tty` provided by the compatibility layer or a service;
 - `/proc` and `/sys` absent until a program needs a specific file.
 
+## Launch and security boundary
+
+PID 1 may classify native magic versus ELF magic, but the kernel independently
+validates the selected format. A Linux launch receives only supplied standard
+streams, one fresh VFS session, argv, environment, cwd, and a resource profile.
+It receives no device, loader, system-image, PID 1 launch, DMA, IRQ, port,
+framebuffer, raw-keyboard, or kernel-log authority (ADR 0136).
+
+The common launch path retains executable-source lifetime, address-space
+creation, accounting, task creation, waits, and teardown. Format-specific code
+owns validation, mappings, entry state, and startup layout. Linux programs do
+not receive the native `GST4` startup object (ADR 0133).
+
+FS base will be task context and will be saved and restored on every context
+switch. Only `ARCH_SET_FS` is planned for 0.2.0; `ARCH_SET_GS` is rejected and
+kernel GS remains architecture-owned (ADR 0137).
+
 ## Iterative targets
 
 | Step | Target | Needs |
 | --- | --- | --- |
 | 1 | static x86_64 "hello world" | ELF loader, `write`, `exit` |
-| 2 | minimal syscall translation | fd table, file I/O through VFS |
-| 3 | static musl program | `brk`/`mmap`, `arch_prctl`, TLS, auxv |
-| 4 | BusyBox | `execve`, `wait4`, pipes, directories, environment |
-| 5 | termios, signals, polling | TTY service, signal delivery, `poll` |
-| 6 | `nano` | all of the above, terminal control |
+| 2 | static musl program | `brk`/`mmap`, `arch_prctl`, TLS, auxv |
+| 3 | VFS probes | fd table, file I/O and directories through VFS |
+| 4 | selected BusyBox applets | measured P1 syscalls; no shell |
 
 Each step is gated on host tests and a QEMU check, like native features.
-Dynamic linking, glibc, threads, networking, and broad ABI coverage are not
-planned for these steps.
+Dynamic linking, glibc, `fork`/`clone`, Linux `execve`, threads, full signals,
+networking, BusyBox shell, and `nano` are outside GoOS 0.2.0.

@@ -45,13 +45,16 @@ The GDT also contains ring 3 code and data descriptors plus a 64-bit TSS. RSP0
 points into a dedicated four-page kernel stack with two unmapped guard pages. The
 task register is loaded only after the TSS descriptor and stack are complete.
 
-IDT vector `0x80` is a DPL 3 interrupt gate used by the bootstrap native call.
+IDT vector `0x80` is a DPL 3 interrupt gate used by the native ABI.
 On entry the CPU switches from the user stack to TSS.RSP0. The handler validates
-the saved user CS, preserves all general-purpose registers, and invokes the
-architecture-independent dispatcher. Returning operations resume with `IRETQ`;
-Exit marks the task non-runnable and schedules its successor. The gate is a
-temporary transport;
-future `SYSCALL/SYSRET` support must preserve the same native call contract.
+the saved user CS, preserves all general-purpose registers, and verifies that
+the current task belongs to a Process with immutable `Native` ABI before any
+normal or blocking operation is decoded. A wrong-ABI entry returns
+`PermissionDenied`, counts the rejection, and logs its first occurrence.
+Returning operations resume with `IRETQ`;
+Exit marks the task non-runnable and schedules its successor. The gate is
+native-only. Linux x86_64 will use a distinct `SYSCALL` entry and IRETQ return;
+that Phase 2 entry is not installed yet (ADR 0132).
 
 ## Device interrupts
 

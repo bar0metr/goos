@@ -465,18 +465,27 @@ the terminal service dies. ADR 0123 removes the one-row redraw limitation.
 Begin Linux compatibility only after native process startup, persistent storage,
 and basic shell composition are stable.
 
-Order:
+GoOS 0.2.0 uses a kernel-resident ABI adapter backed by the existing
+process-scoped capabilities and VFS service. Phase 0 is complete in ADRs 0132
+through 0137. Phase 1 adds immutable `Native`/`LinuxX8664` Process identity and
+rejects wrong-ABI native-gate entry before dispatch. Linux `SYSCALL` entry and
+ELF loading are not implemented yet.
 
-1. static Linux x86_64 hello world;
-2. minimal Linux syscall translation;
-3. static musl program;
-4. BusyBox;
-5. termios/signals/polling;
-6. `nano`.
+Order for the remaining release work:
+
+1. dedicated x86_64 `SYSCALL` entry;
+2. bounded static ELF64 loader and Linux initial stack;
+3. raw Linux `write` plus `exit_group` hello world;
+4. memory, FS-base/TLS, and static musl startup;
+5. bounded fd table and VFS file/directory probes;
+6. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or
 capabilities.
+
+Dynamic linking, glibc, `fork`/`clone`, Linux `execve`, threads, full signals,
+networking, BusyBox shell, and `nano` are outside 0.2.0.
 
 ## Priority 6 — In-system compilation experiment
 

@@ -195,7 +195,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		abandonSpawn(root, spawned, false)
 		return 0, 0, supervisor.LaunchCapabilityDenied
 	}
-	ok = process.InitWithProfile(spawned, pid, process.AddressSpace{Root: root}, profile)
+	ok = process.InitWithProfile(spawned, pid, process.ABINative, process.AddressSpace{Root: root}, profile)
 	*spawned.Regions() = launchRegions
 	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {

@@ -97,8 +97,8 @@ func runKernelSelfTests(pageTable uint64) {
 	// as every other process's do (ADR 0111).
 	processA, validA := vm.NewObject[process.Process](&pageAllocator)
 	processB, validB := vm.NewObject[process.Process](&pageAllocator)
-	validA = validA && process.Init(processA, 2, process.AddressSpace{Root: rootA})
-	validB = validB && process.Init(processB, 3, process.AddressSpace{Root: rootB})
+	validA = validA && process.Init(processA, 2, process.ABINative, process.AddressSpace{Root: rootA})
+	validB = validB && process.Init(processB, 3, process.ABINative, process.AddressSpace{Root: rootB})
 	if validA && validB {
 		processA.SetName([]byte("selftest-a"))
 		processB.SetName([]byte("selftest-b"))

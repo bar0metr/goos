@@ -6,7 +6,7 @@ import (
 )
 
 func TestQuotaRefusesPastItsLimitAndChangesNothing(t *testing.T) {
-	process, _ := New(2, AddressSpace{Root: 0x1000})
+	process, _ := New(2, ABINative, AddressSpace{Root: 0x1000})
 	_, limits := process.Quota()
 	limit := limits[ResourceStreams]
 	if limit == 0 {
@@ -31,7 +31,7 @@ func TestQuotaRefusesPastItsLimitAndChangesNothing(t *testing.T) {
 }
 
 func TestQuotaReleaseNeitherWrapsNorHides(t *testing.T) {
-	process, _ := New(2, AddressSpace{Root: 0x1000})
+	process, _ := New(2, ABINative, AddressSpace{Root: 0x1000})
 	if !process.Charge(ResourcePages, 3) || !process.Release(ResourcePages, 2) {
 		t.Fatal("ordinary charge and release refused")
 	}
@@ -55,14 +55,14 @@ func TestQuotaReleaseNeitherWrapsNorHides(t *testing.T) {
 }
 
 func TestSystemQuotaIsPID1Only(t *testing.T) {
-	ordinary, _ := New(2, AddressSpace{Root: 0x2000})
+	ordinary, _ := New(2, ABINative, AddressSpace{Root: 0x2000})
 	if ordinary.GrantSystemQuota() {
 		t.Fatal("an ordinary process raised its own quota")
 	}
 	if _, limits := ordinary.Quota(); limits[ResourceStreams] != normalStreamLimit {
 		t.Fatalf("ordinary stream limit = %d", limits[ResourceStreams])
 	}
-	pid1, _ := New(1, AddressSpace{Root: 0x1000})
+	pid1, _ := New(1, ABINative, AddressSpace{Root: 0x1000})
 	if !pid1.GrantSystemQuota() {
 		t.Fatal("PID 1 refused the system quota")
 	}
@@ -78,11 +78,11 @@ func TestSystemQuotaIsPID1Only(t *testing.T) {
 
 func TestQuotaDoesNotSurviveSlotReuse(t *testing.T) {
 	var slot Process
-	if !Init(&slot, 1, AddressSpace{Root: 0x1000}) || !slot.GrantSystemQuota() || !slot.Charge(ResourcePages, 10) {
+	if !Init(&slot, 1, ABINative, AddressSpace{Root: 0x1000}) || !slot.GrantSystemQuota() || !slot.Charge(ResourcePages, 10) {
 		t.Fatal("setup failed")
 	}
 	slot.AccountCPU(7)
-	if !Init(&slot, 2, AddressSpace{Root: 0x2000}) {
+	if !Init(&slot, 2, ABINative, AddressSpace{Root: 0x2000}) {
 		t.Fatal("slot reuse refused")
 	}
 	used, limits := slot.Quota()
@@ -102,7 +102,7 @@ func TestLaunchProfilesAreDistinctAndBounded(t *testing.T) {
 	previous := [4]uint32{}
 	for index, profile := range profiles {
 		var target Process
-		if !InitWithProfile(&target, ID(index+1), AddressSpace{Root: uint64(index + 1)}, profile) {
+		if !InitWithProfile(&target, ID(index+1), ABINative, AddressSpace{Root: uint64(index + 1)}, profile) {
 			t.Fatalf("profile %d refused", profile)
 		}
 		_, limits := target.Quota()
@@ -114,13 +114,13 @@ func TestLaunchProfilesAreDistinctAndBounded(t *testing.T) {
 		previous = limits
 	}
 	var target Process
-	if InitWithProfile(&target, 4, AddressSpace{Root: 4}, 0) || InitWithProfile(&target, 4, AddressSpace{Root: 4}, ProfileLarge+1) {
+	if InitWithProfile(&target, 4, ABINative, AddressSpace{Root: 4}, 0) || InitWithProfile(&target, 4, ABINative, AddressSpace{Root: 4}, ProfileLarge+1) {
 		t.Fatal("unknown resource profile accepted")
 	}
 }
 
 func TestReleaseAllClearsEveryReservation(t *testing.T) {
-	process, _ := New(2, AddressSpace{Root: 0x1000})
+	process, _ := New(2, ABINative, AddressSpace{Root: 0x1000})
 	task, _ := sched.NewTaskID(1, 1)
 	if !process.Charge(ResourcePages, 5) || !process.Charge(ResourceStreams, 1) || !process.AddTask(task) {
 		t.Fatal("setup failed")
@@ -136,7 +136,7 @@ func TestReleaseAllClearsEveryReservation(t *testing.T) {
 
 func TestRegistryChargesAndReleasesByProcessID(t *testing.T) {
 	var registry Registry
-	process, _ := New(3, AddressSpace{Root: 0x3000})
+	process, _ := New(3, ABINative, AddressSpace{Root: 0x3000})
 	if !registry.Add(&process) {
 		t.Fatal("add failed")
 	}
@@ -156,7 +156,7 @@ func TestRegistryChargesAndReleasesByProcessID(t *testing.T) {
 }
 
 func TestCPUAccountingAccumulates(t *testing.T) {
-	process, _ := New(2, AddressSpace{Root: 0x1000})
+	process, _ := New(2, ABINative, AddressSpace{Root: 0x1000})
 	if process.CPUTicks() != 0 {
 		t.Fatal("a new process already used CPU")
 	}

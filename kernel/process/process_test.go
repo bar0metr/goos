@@ -6,8 +6,8 @@ import (
 )
 
 func TestProcessOwnsAddressSpaceAndTasks(t *testing.T) {
-	process, ok := New(1, AddressSpace{Root: 0x1000})
-	if !ok || process.ID() != 1 || process.AddressSpace().Root != 0x1000 {
+	process, ok := New(1, ABINative, AddressSpace{Root: 0x1000})
+	if !ok || process.ID() != 1 || process.ABI() != ABINative || process.AddressSpace().Root != 0x1000 {
 		t.Fatal("valid process rejected")
 	}
 	task, _ := sched.NewTaskID(0, 1)
@@ -20,18 +20,35 @@ func TestProcessOwnsAddressSpaceAndTasks(t *testing.T) {
 }
 
 func TestProcessRejectsInvalidIdentity(t *testing.T) {
-	if _, ok := New(0, AddressSpace{Root: 0x1000}); ok {
+	if _, ok := New(0, ABINative, AddressSpace{Root: 0x1000}); ok {
 		t.Fatal("zero process ID accepted")
 	}
-	if _, ok := New(1, AddressSpace{}); ok {
+	if _, ok := New(1, ABINative, AddressSpace{}); ok {
 		t.Fatal("zero address-space root accepted")
+	}
+	if _, ok := New(1, ABIInvalid, AddressSpace{Root: 0x1000}); ok {
+		t.Fatal("invalid process ABI accepted")
+	}
+	if _, ok := New(1, ABI(255), AddressSpace{Root: 0x1000}); ok {
+		t.Fatal("unknown process ABI accepted")
+	}
+}
+
+func TestProcessABIIsFixedAtInitialization(t *testing.T) {
+	native, nativeOK := New(1, ABINative, AddressSpace{Root: 0x1000})
+	linux, linuxOK := New(2, ABILinuxX8664, AddressSpace{Root: 0x2000})
+	if !nativeOK || !linuxOK {
+		t.Fatal("valid process ABI rejected")
+	}
+	if native.ABI() != ABINative || linux.ABI() != ABILinuxX8664 {
+		t.Fatalf("process ABIs = %d, %d", native.ABI(), linux.ABI())
 	}
 }
 
 // The task quota binds before the table does, which is the point: the table
 // size is a structural bound and the quota is the policy one.
 func TestProcessTaskCapacityIsBounded(t *testing.T) {
-	process, _ := New(2, AddressSpace{Root: 0x1000})
+	process, _ := New(2, ABINative, AddressSpace{Root: 0x1000})
 	_, limits := process.Quota()
 	limit := int(limits[ResourceTasks])
 	if limit >= MaxTasksPerProcess {
@@ -55,16 +72,16 @@ func TestProcessTaskCapacityIsBounded(t *testing.T) {
 func TestInitPreparesSlotInPlace(t *testing.T) {
 	var slot Process
 	task, _ := sched.NewTaskID(0, 1)
-	if !Init(&slot, 1, AddressSpace{Root: 0x1000}) || !slot.AddTask(task) {
+	if !Init(&slot, 1, ABINative, AddressSpace{Root: 0x1000}) || !slot.AddTask(task) {
 		t.Fatal("valid process rejected")
 	}
-	if !Init(&slot, 2, AddressSpace{Root: 0x2000}) {
+	if !Init(&slot, 2, ABILinuxX8664, AddressSpace{Root: 0x2000}) {
 		t.Fatal("slot reuse rejected")
 	}
-	if slot.ID() != 2 || slot.AddressSpace().Root != 0x2000 || slot.TaskCount() != 0 {
+	if slot.ID() != 2 || slot.ABI() != ABILinuxX8664 || slot.AddressSpace().Root != 0x2000 || slot.TaskCount() != 0 {
 		t.Fatalf("slot not reinitialized: id=%d root=%#x tasks=%d", slot.ID(), slot.AddressSpace().Root, slot.TaskCount())
 	}
-	if Init(nil, 1, AddressSpace{Root: 0x1000}) || Init(&slot, 0, AddressSpace{Root: 0x1000}) || Init(&slot, 1, AddressSpace{}) {
+	if Init(nil, 1, ABINative, AddressSpace{Root: 0x1000}) || Init(&slot, 0, ABINative, AddressSpace{Root: 0x1000}) || Init(&slot, 1, ABIInvalid, AddressSpace{Root: 0x1000}) || Init(&slot, 1, ABINative, AddressSpace{}) {
 		t.Fatal("invalid identity accepted")
 	}
 }
@@ -73,7 +90,7 @@ func TestInitPreparesSlotInPlace(t *testing.T) {
 // cannot grow its heap after it leaves boot services.
 func TestInitDoesNotAllocate(t *testing.T) {
 	var slot Process
-	if allocations := testing.AllocsPerRun(100, func() { Init(&slot, 1, AddressSpace{Root: 0x1000}) }); allocations != 0 {
+	if allocations := testing.AllocsPerRun(100, func() { Init(&slot, 1, ABINative, AddressSpace{Root: 0x1000}) }); allocations != 0 {
 		t.Fatalf("Init allocated %v times per run", allocations)
 	}
 }

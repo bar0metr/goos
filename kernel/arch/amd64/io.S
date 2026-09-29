@@ -713,6 +713,12 @@ goos_user_call:
 	 subq $48, %rsp
 	 movq 48(%rsp), %rax
 	 movq %rax, 40(%rsp)
+	 movq goos_current_task(%rip), %rax
+	 leaq goos_task_roots(%rip), %rcx
+	 movq (%rcx,%rax,8), %rcx
+	 callq goos_authorize_native_call
+	 testq %rax, %rax
+	 jnz .user_call_result
 	 cmpq $5, 48(%rsp)
 	 je .user_call_wait
 	 cmpq $12, 48(%rsp)
