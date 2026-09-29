@@ -181,3 +181,15 @@ wait_for_count 'SHELL_TERMINAL_RESTORED_OK' 2 'line mode after Ctrl-C'
 type_word e c h o spc a f t e r minus g f m minus o k ret
 wait_for_log '^after-gfm-ok' 'shell input after a stopped file manager'
 printf 'PASS console-file-manager-interrupt\n'
+
+# The viewer uses the same framebuffer terminal session and returns it to the
+# shell after navigation and a normal F10 exit.
+type_word g v i e w spc slash s y s t e m slash m o t d ret
+wait_for_log '/system/motd.*size' 'viewer screen on framebuffer shell'
+type_word pgdn pgup right left home end
+send_key f10
+wait_for_log 'GVIEW_EXIT_OK' 'viewer exit'
+wait_for_count 'SHELL_TERMINAL_RESTORED_OK' 3 'line mode after viewer'
+type_word e c h o spc a f t e r minus g v i e w minus o k ret
+wait_for_log '^after-gview-ok' 'shell input after viewer'
+printf 'PASS console-viewer\n'

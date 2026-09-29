@@ -136,6 +136,13 @@ suppression, list/dialog layout at 80x24, text scrolling and overlays, rejected
 dimension overflow, and zero allocations while changed steady-state frames are
 rendered and flushed.
 
+`go test ./userspace/viewer` uses in-memory and synthetic readers without a
+filesystem-sized allocation. It covers line/page/Home/End navigation, a 1 GiB
+synthetic file, lines larger than the 4 KiB read window, horizontal clipping,
+binary detection, C0/ESC sanitization, invalid UTF-8, read failure, status-path
+truncation and allocation-free changed frames. The TinyGo `gview` image is also
+built through the normal command target.
+
 The same run then drives the file manager through IRQ1 only (ADR 0124): `cd
 /tmp`, `gfm`, F1 and Escape, Tab, arrows, Home, End, PageDown, PageUp, F7 with
 a typed name, and F10. `tty-fb` copies `gfm`'s ANSI output to COM1, so the log
@@ -146,6 +153,13 @@ the ring, raw mode, the shell and the key parser, and `ls /tmp` listing
 `fmtest/` proves the shell reads lines again. A second `gfm` is stopped with
 Ctrl-C, and `echo after-gfm-ok` must still run. A screendump of the manager is
 kept as `build/reports/gfm.ppm` for review.
+
+The graphical scenario then opens `/system/motd` in `gview`, sends page,
+horizontal, Home and End keys, exits with F10 and verifies line-mode shell input
+afterwards. The COM1 boot scenario opens the same file, sends navigation and F10
+as raw ANSI input, and likewise verifies the restored shell. These are the two
+terminal-session acceptance paths; no viewer-specific framebuffer or keyboard
+path exists.
 
 The boot test drives the COM1 session and never types at the keyboard, so
 `tty-fb` copies nothing to COM1 and the test's marker counts see the COM1
