@@ -44,6 +44,7 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
 		taskID := sched.TaskID(task)
+		linuxcompat.SyscallContinuations.Cancel(taskID)
 		if waitAnyTable.Cancel(taskID) && diag.Enabled {
 			trace(diag.WaitCancelExit, pidOfTask(taskID), task, 0, 0)
 		}

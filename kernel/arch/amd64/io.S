@@ -24,6 +24,7 @@
 .set GOOS_LINUX_SAVED_R11, GOOS_LINUX_FRAME_RESERVE + 80
 .set GOOS_LINUX_IRET_BASE, GOOS_LINUX_FRAME_RESERVE + 120
 .set GOOS_LINUX_ACTION_EXIT, 1
+.set GOOS_LINUX_ACTION_BLOCK, 2
 
 // The console ring is a power of two so the wrap is a mask. It holds two of
 // the longest lines the terminal accepts (4096 bytes), so a pasted line
@@ -847,6 +848,8 @@ goos_linux_syscall_entry:
     callq goos_dispatch_linux_syscall
     cmpq $GOOS_LINUX_ACTION_EXIT, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
     je .linux_user_exit
+    cmpq $GOOS_LINUX_ACTION_BLOCK, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
+    je .linux_user_block
     movq GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_RETURN(%rsp), %rax
     movq %rax, GOOS_LINUX_SAVED_RAX(%rsp)
     movq GOOS_LINUX_SAVED_RCX(%rsp), %rax
@@ -877,6 +880,65 @@ goos_linux_syscall_entry:
     popq %r15
     GOOS_RETURN_LINUX
     iretq
+.linux_user_block:
+    // Save an ordinary scheduler context that retries the two-byte SYSCALL
+    // instruction after its continuation is woken. The continuation's Issued
+    // bit prevents the retried dispatcher from duplicating side effects.
+    movq %rsp, %r10
+    subq $160, %rsp
+    movq 248(%r10), %rax
+    movq %rax, 0(%rsp)
+    movq 240(%r10), %rax
+    movq %rax, 8(%rsp)
+    movq 232(%r10), %rax
+    movq %rax, 16(%rsp)
+    movq 224(%r10), %rax
+    movq %rax, 24(%rsp)
+    movq 216(%r10), %rax
+    movq %rax, 32(%rsp)
+    movq 208(%r10), %rax
+    movq %rax, 40(%rsp)
+    movq 200(%r10), %rax
+    movq %rax, 48(%rsp)
+    movq 192(%r10), %rax
+    movq %rax, 56(%rsp)
+    movq 184(%r10), %rax
+    movq %rax, 64(%rsp)
+    movq 176(%r10), %rax
+    movq %rax, 72(%rsp)
+    movq 168(%r10), %rax
+    movq %rax, 80(%rsp)
+    movq 152(%r10), %rax
+    movq %rax, 88(%rsp)
+    movq 144(%r10), %rax
+    movq %rax, 96(%rsp)
+    movq 160(%r10), %rax
+    movq %rax, 104(%rsp)
+    movq 136(%r10), %rax
+    movq %rax, 112(%rsp)
+    movq 88(%r10), %rax
+    subq $2, %rax
+    movq %rax, 120(%rsp)
+    movq $0x23, 128(%rsp)
+    movq 96(%r10), %rax
+    andq $~0x77700, %rax
+    orq $0x202, %rax
+    movq %rax, 136(%rsp)
+    movq 104(%r10), %rax
+    movq %rax, 144(%rsp)
+    movq $0x1b, 152(%rsp)
+    movq goos_current_task(%rip), %rcx
+    leaq goos_task_contexts(%rip), %rdx
+    movq %rsp, (%rdx,%rcx,8)
+    movq %rcx, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxsave64 (%r10,%r9)
+    btrq %rcx, goos_runnable_mask(%rip)
+    swapgs
+    movq %rcx, %rax
+    callq goos_select_next
+    jmp .switch_to
 .linux_user_exit:
     movq goos_current_task(%rip), %rcx
     btsq %rcx, goos_task_exit_pending(%rip)

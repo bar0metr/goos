@@ -111,6 +111,11 @@ task runs; the rest of the Linux stack reservation remains demand-zero.
 Phase 6 binds this state to a `LinuxX8664` Process only after independent ELF
 validation and removes it on failed launch or process teardown.
 
+Each Linux task also has at most one fixed continuation slot for an asynchronous
+syscall. The slot is keyed by the full generation-safe Task ID, not the reusable
+scheduler index. Kill, fault, and process teardown cancel it before task-slot
+reclamation, so a late VFS reply cannot wake a replacement task.
+
 ## Teardown liveness
 
 Process teardown separates what other parties observe from what merely reclaims

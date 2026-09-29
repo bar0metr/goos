@@ -49,7 +49,7 @@ existing monotonic TSC source (ADR 0113).
 - [boot sequence](boot.md);
 - [filesystem stack](filesystem.md);
 - [timekeeping](timekeeping.md);
-- [Linux compatibility (planned)](linux-compat.md);
+- [Linux compatibility](linux-compat.md);
 - [threat model](../security/threat-model.md);
 - [capabilities: security view](../security/capabilities.md);
 - [memory safety](../security/memory-safety.md);

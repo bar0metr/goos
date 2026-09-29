@@ -5,6 +5,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/process"
@@ -44,6 +45,7 @@ func (handler nativeCallHandler) ProcessKill(processHandle uint64) kcall.Status 
 // cancelTaskWaits removes every registration a task may be blocked on, so no
 // later wake refers to a slot that has been retired.
 func cancelTaskWaits(taskID sched.TaskID) {
+	linuxcompat.SyscallContinuations.Cancel(taskID)
 	ipcWaitSet.Cancel(taskID)
 	streamWaitSet.Cancel(taskID)
 	processWaitSet.Cancel(taskID)

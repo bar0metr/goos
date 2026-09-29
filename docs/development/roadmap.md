@@ -479,13 +479,18 @@ the required static-ELF auxv, then materializes only its occupied pages. It
 does not expose GST4 to the Linux process. Phase 6 is complete: PID 1 classifies
 native versus ELF candidates, while the kernel independently validates the
 stable source and enforces a four-handle Linux launch boundary with the large
-resource profile.
+resource profile. Phase 7 is complete: Linux syscall numbers occupy a distinct,
+canonical x86_64 namespace, all scalar arguments are decoded, unsupported calls
+return `-ENOSYS`, and diagnostics stay bounded. Phase 8 is complete: one fixed
+continuation slot per generation-safe task persists stages, copied path data,
+correlation, and partial progress; the architecture can block without polling
+and resume the exact `SYSCALL` stage without repeating an issued effect.
 
 Order for the remaining release work:
 
-1. raw Linux `write` plus `exit_group` hello world;
+1. Linux errno translation and raw `write` plus `exit_group` hello world;
 2. memory, FS-base/TLS, and static musl startup;
-3. bounded fd table and VFS file/directory probes;
+3. bounded fd table and VFS file/directory probes using continuations;
 4. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
