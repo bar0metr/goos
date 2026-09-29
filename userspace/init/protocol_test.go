@@ -17,7 +17,7 @@ func TestLifecycleProtocol(t *testing.T) {
 		t.Fatalf("exit event = %#v", event)
 	}
 	grants := []Capability{{Handle: 0x100000002, Type: handle.TypeDevice, Rights: capability.Write}}
-	probe := Executable{Image: 0x100000015, Offset: 0x2200, Size: 0x3000}
+	probe := Executable{Image: 0x100000015, Offset: 0x2200, Size: 0x3000, Format: ExecutableLinuxX8664}
 	launch, ok := LaunchRequest(3, probe, "fault-probe", grants, 9)
 	if !ok {
 		t.Fatal("launch encode failed")
@@ -126,9 +126,14 @@ func TestLifecycleProtocol(t *testing.T) {
 		t.Fatal("decoded unknown resource profile")
 	}
 	corrupt = startupLaunch
-	corrupt.Payload[33] = 1
+	corrupt.Payload[34] = 1
 	if _, ok := DecodeLifecycle(corrupt); ok {
 		t.Fatal("decoded nonzero launch reserved byte")
+	}
+	corrupt = startupLaunch
+	corrupt.Payload[33] = byte(ExecutableLinuxX8664 + 1)
+	if _, ok := DecodeLifecycle(corrupt); ok {
+		t.Fatal("decoded unknown executable format")
 	}
 	if _, ok := LaunchRequestWithStartup(4, probe, "x", nil, 0, 0, 0, 12); ok {
 		t.Fatal("encoded unknown resource profile")
@@ -139,5 +144,19 @@ func TestLifecycleProtocol(t *testing.T) {
 	}
 	if _, ok := LaunchRequest(3, probe, "init", tooMany, 9); ok {
 		t.Fatal("oversized capability manifest accepted")
+	}
+}
+
+func TestClassifyExecutable(t *testing.T) {
+	if got := ClassifyExecutable([]byte{'G', 'O', 'O', 'S', 'N', 'A', 'T', 0}); got != ExecutableNative {
+		t.Fatalf("native format = %d", got)
+	}
+	if got := ClassifyExecutable([]byte{0x7f, 'E', 'L', 'F'}); got != ExecutableLinuxX8664 {
+		t.Fatalf("Linux format = %d", got)
+	}
+	for _, header := range [][]byte{nil, []byte("GOOSNAT"), []byte("not executable")} {
+		if got := ClassifyExecutable(header); got != ExecutableUnknown {
+			t.Fatalf("unknown header classified as %d", got)
+		}
 	}
 }

@@ -275,6 +275,17 @@ func TestResolveExecutableUsesBoundedSystemPath(t *testing.T) {
 	}
 }
 
+func TestLinuxSystemPath(t *testing.T) {
+	if !LinuxSystemPath([]byte("/system/linux/hello")) {
+		t.Fatal("Linux fixture path rejected")
+	}
+	for _, path := range []string{"/system/linux/", "/system/linux/a/b", "/system/bin/hello", "/system/init"} {
+		if LinuxSystemPath([]byte(path)) {
+			t.Fatalf("path %q accepted as a Linux fixture", path)
+		}
+	}
+}
+
 func TestAreaInsideSharedWindow(t *testing.T) {
 	if AreaAddress%vm.PageSize != 0 || AreaSize%vm.PageSize != 0 || AreaAddress < vm.UserSharedAddress || AreaAddress+AreaSize > vm.UserSharedLimit {
 		t.Fatalf("exec area %#x outside [%#x, %#x)", AreaAddress, vm.UserSharedAddress, vm.UserSharedLimit)

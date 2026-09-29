@@ -85,11 +85,12 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		return 0, 0, located
 	}
 	var pair [2]uint64
+	linuxProcess := executable.Format == supervisor.ExecutableLinuxX8664
 	grantsRequested := commands.Grant(0)
-	if grantable {
+	if grantable && !linuxProcess {
 		grantsRequested = commandGrants(command)
 	}
-	useVFS := grantable && grantsRequested&commands.GrantVFS != 0
+	useVFS := linuxProcess || grantable && grantsRequested&commands.GrantVFS != 0
 	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
 	useLaunch := grantable && launch != nil && grantsRequested&commands.GrantLaunch != 0 && streams.Input.Type == handle.TypeStream
 	var checkBlock handle.ID
@@ -191,10 +192,13 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		grants = append(grants, supervisor.Capability{Name: "launch", Handle: handle.ID(launchPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	profile := supervisor.ProfileNormal
-	if grantable && equalBytes(command, "quota") {
+	if linuxProcess {
+		profile = supervisor.ProfileLarge
+	}
+	if !linuxProcess && grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
 	}
-	if grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe")) {
+	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe")) {
 		profile = supervisor.ProfileLarge
 	}
 	event, launched := requestLaunch(executable, processName, grants, profile, slot, uint32(len(startupData)))

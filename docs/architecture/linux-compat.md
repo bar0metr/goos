@@ -6,8 +6,9 @@ Phase 2 implements the dedicated Linux x86_64 `SYSCALL`/IRETQ entry and rejects
 wrong-ABI entry at both gates. Phase 3 implements the bounded static ELF64
 parser and load-plan validation. Phase 4 records validated `PT_LOAD` ranges in
 the common lazy executable region model and reserves the guarded Linux stack.
-Phase 5 builds and installs the bounded Linux System V initial stack. Linux
-launch and semantic syscall translation are not implemented yet.
+Phase 5 builds and installs the bounded Linux System V initial stack. Phase 6
+connects static ELF to PID 1 launch under a kernel-enforced minimal authority
+policy. Semantic syscall translation is not implemented yet.
 
 ## Principles
 
@@ -58,7 +59,7 @@ image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
 RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
 `AT_PLATFORM` is `x86_64`; `AT_RANDOM` is absent until trustworthy entropy is
 available. Only occupied stack pages are installed; the remaining reservation
-stays demand-zero. Phase 6 will connect this path to process launch.
+stays demand-zero. Phase 6 connects this path to process launch.
 
 ### Syscall entry
 
@@ -125,6 +126,17 @@ The common launch path retains executable-source lifetime, address-space
 creation, accounting, task creation, waits, and teardown. Format-specific code
 owns validation, mappings, entry state, and startup layout. Linux programs do
 not receive the native `GST4` startup object (ADR 0133).
+
+The lifecycle protocol carries PID 1's bounded format candidate. The kernel
+re-reads the stable source header, rejects mismatches, runs the selected loader,
+and initializes `LinuxX8664` only after ELF validation. Linux launches require
+the `large` profile and exactly four grants named `in`, `stdout`, `stderr`, and
+`vfs`, with stream/channel types and rights fixed by the kernel. Resolved handle
+IDs and cwd remain in a bounded kernel compatibility table; only argv, envp,
+and auxv enter the Linux stack. The validation image
+`/system/linux/phase6-probe` exercises classification, policy, mapping, stack
+installation, task creation, kill, wait, and teardown without claiming Linux
+`exit` support.
 
 FS base will be task context and will be saved and restored on every context
 switch. Only `ARCH_SET_FS` is planned for 0.2.0; `ARCH_SET_GS` is rejected and

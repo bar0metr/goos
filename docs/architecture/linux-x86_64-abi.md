@@ -47,7 +47,7 @@ The mapping boundary rechecks source length, range arithmetic, overlap, entry
 placement, and protections. Linux `ET_EXEC` may start at `0x400000`; load pages
 must remain below 2 GiB, away from fixed GoOS user windows. The Linux stack is
 reserved as 8 MiB RW/NX demand-zero memory below `vm.UserStackTop`, with a
-64 KiB guard. The mapper is not connected to PID 1 launch until Phase 6.
+64 KiB guard. Phase 6 connects the mapper to PID 1 launch.
 
 ## Initial stack after Phase 5
 
@@ -72,7 +72,21 @@ as entropy.
 The installer maps only pages occupied by this image as user RW/NX owned
 pages. Normal launch accounting will charge them before the task becomes
 runnable. The remaining 8 MiB reservation stays absent and demand-zero. The
-builder and installer exist, but no Linux ELF is launchable until Phase 6.
+builder and installer are used for every accepted Linux launch.
+
+## Launch status after Phase 6
+
+PID 1 classifies `GOOSNAT\0` and ELF magic and carries that candidate in
+lifecycle protocol version 10. The kernel re-reads the stable executable source
+and refuses a mismatch before selecting the native or Linux loader. A validated
+Linux ELF creates a `LinuxX8664` Process through the common accounting,
+executable-lifetime, task, wait, and teardown path.
+
+The only accepted grants are `in` with Read/Wait, `stdout` and `stderr` with
+Write/Wait, and one fresh `vfs` channel with Read/Write/Wait. The profile must
+be `large`; extra grants, device authority, launch authority, and weaker
+profiles are refused. Handle IDs and cwd stay in a bounded kernel-side
+compatibility record. Linux user memory receives only the System V stack.
 
 ## Validation
 
@@ -83,5 +97,10 @@ retired rather than returned to. A native task checks Linux-gate rejection. The
 live gate emits `LINUX_SYSCALL_OK`, `LINUX_ABI_ISOLATION_OK`, and
 `LINUX_RETURN_FRAME_GUARD_OK`.
 
-An ELF-based `write`/`exit_group` program is not yet claimed: it requires the
-mapping, startup, launch-policy, and semantic-syscall phases.
+The validation initramfs also contains `/system/linux/phase6-probe`, a static
+ELF whose entry loops. PID 1 proves that a false format hint, a non-large
+profile, and an extra grant are refused, launches it with the minimal policy,
+kills it, waits for teardown, and emits `LINUX_PID1_LAUNCH_OK`.
+
+An ELF-based `write`/`exit_group` program is not yet claimed: semantic syscall
+support begins in the next phase.

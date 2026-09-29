@@ -10,6 +10,7 @@ import (
 	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
 	"goos/kernel/device"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
@@ -118,6 +119,7 @@ func releaseExitedProcess(event process.ExitEvent) {
 		}
 	}
 	if exited, found := processRegistry.ByID(event.Process); found {
+		linuxcompat.RemoveProcess(exited.AddressSpace().Root)
 		releaseProcessHandles(exited)
 		releasingProcess = exited.ID()
 		releaseSharedMappings(exited)

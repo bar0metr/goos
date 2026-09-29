@@ -39,6 +39,7 @@ type pendingFill struct {
 	size        uint64
 	correlation uint64
 	deadline    uint64
+	format      supervisor.ExecutableFormat
 }
 
 // needsPreparation reports whether a stage names a program to be read from a
@@ -116,6 +117,13 @@ func startFill(job *execJob, index uint8) bool {
 		sys.HandleClose(session)
 		return false
 	}
+	headerReply, ok := callSession(session, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 8})
+	format := supervisor.ClassifyExecutable(headerReply.Data)
+	if !ok || headerReply.Status != vfs.StatusOK || len(headerReply.Data) != 8 || format == supervisor.ExecutableUnknown {
+		entry.status = supervisor.LaunchInvalidImage
+		closeFile(session, opened.Handle)
+		return false
+	}
 	correlation++
 	header := min(stat.Size, uint64(vm.PageSize))
 	object, status := sys.ExecutableCreate(loaderHandle, header)
@@ -138,7 +146,7 @@ func startFill(job *execJob, index uint8) bool {
 	if encoded && sendMessage(uint64(session), message) {
 		now, _ := sys.ClockRead()
 		entry.ready = false
-		job.fill = pendingFill{session: session, file: opened.Handle, object: object, size: stat.Size, correlation: correlation, deadline: now + fillDeadline(header)}
+		job.fill = pendingFill{session: session, file: opened.Handle, object: object, size: stat.Size, correlation: correlation, deadline: now + fillDeadline(header), format: format}
 		return true
 	}
 	sys.HandleClose(fill)
@@ -166,7 +174,7 @@ func completeFill(job *execJob) {
 	case valid && reply.Operation == vfs.OperationPrepareExecutable && reply.Status == vfs.StatusOK && reply.Size == min(pending.size, uint64(vm.PageSize)):
 		object, createStatus := sys.ExecutableSource(loaderHandle, pending.session, pending.file, pending.object, pending.size)
 		if createStatus == kcall.StatusOK {
-			entry.executable, entry.status = supervisor.Executable{Image: object, Size: uint32(pending.size)}, supervisor.LaunchOK
+			entry.executable, entry.status = supervisor.Executable{Image: object, Size: uint32(pending.size), Format: pending.format}, supervisor.LaunchOK
 			consumed = true
 			break
 		}

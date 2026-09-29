@@ -5,12 +5,135 @@ package main
 // Validation-build probes of kernel mechanisms PID 1 relies on.
 
 import (
+	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	blockproto "goos/userspace/block"
+	supervisor "goos/userspace/init"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/startup"
 )
+
+// probeLinuxLaunch exercises the complete PID 1 launch route with a static
+// ELF that loops until killed. Semantic Linux exit is a later phase.
+func probeLinuxLaunch() bool {
+	executable, name, located := locateExecutable([]byte("/system/linux/phase6-probe"))
+	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
+		return false
+	}
+	var streams [3][2]uint64
+	for index := range streams {
+		if !createStream(&streams[index]) {
+			closeProbeStreams(&streams, false)
+			return false
+		}
+	}
+	vfsHandle, reason := openVFSSession()
+	if reason != "" {
+		closeProbeStreams(&streams, false)
+		return false
+	}
+	grants := []supervisor.Capability{
+		{Name: "in", Handle: handle.ID(streams[0][0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true},
+		{Name: "stdout", Handle: handle.ID(streams[1][1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
+		{Name: "stderr", Handle: handle.ID(streams[2][1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
+		{Name: "vfs", Handle: vfsHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+	}
+	// A false classifier hint must not select the native loader.
+	claimedNative := executable
+	claimedNative.Format = supervisor.ExecutableNative
+	slot, data, ok := linuxProbeStartup(false)
+	if !ok {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	if event, status := requestLaunch(claimedNative, name, grants, supervisor.ProfileLarge, slot, uint32(len(data))); status != supervisor.LaunchInvalidImage || event.Process != 0 {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	// The kernel fixes the initial Linux profile at large and refuses any
+	// additional authority, even when PID 1 submits a valid handle for it.
+	slot, data, ok = linuxProbeStartup(false)
+	if !ok {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	if event, status := requestLaunch(executable, name, grants, supervisor.ProfileNormal, slot, uint32(len(data))); status != supervisor.LaunchCapabilityDenied || event.Process != 0 {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	slot, data, ok = linuxProbeStartup(true)
+	extra := append(grants, supervisor.Capability{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write})
+	if !ok {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	if event, status := requestLaunch(executable, name, extra, supervisor.ProfileLarge, slot, uint32(len(data))); status != supervisor.LaunchCapabilityDenied || event.Process != 0 {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	slot, data, ok = linuxProbeStartup(false)
+	if !ok {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	event, status := requestLaunch(executable, name, grants, supervisor.ProfileLarge, slot, uint32(len(data)))
+	if status != supervisor.LaunchOK || event.Process == 0 || event.ProcessHandle == 0 {
+		closeProbeStreams(&streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	closeProbeStreams(&streams, true)
+	if sys.ProcessKill(event.ProcessHandle) != kcall.StatusOK {
+		return false
+	}
+	waitApplicationExit(event.ProcessHandle)
+	return true
+}
+
+func linuxProbeStartup(extra bool) (uint8, []byte, bool) {
+	slot, staging := stagingSlot()
+	handles := 4
+	if extra {
+		handles++
+	}
+	writer := startup.NewWriter(staging, 1, 0, handles)
+	path := []byte("/system/linux/phase6-probe")
+	writer.Command(path)
+	writer.CWD([]byte("/"))
+	writer.Argument(path)
+	writer.Handle([]byte("in"), 0)
+	writer.Handle([]byte("stdout"), 0)
+	writer.Handle([]byte("stderr"), 0)
+	writer.Handle([]byte("vfs"), 0)
+	if extra {
+		writer.Handle([]byte("console"), 0)
+	}
+	data, ok := writer.Finish()
+	return slot, data, ok
+}
+
+func closeProbeStreams(streams *[3][2]uint64, launched bool) {
+	for index := range streams {
+		if launched {
+			peer := 0
+			if index == 0 {
+				peer = 1
+			}
+			sys.HandleClose(handle.ID(streams[index][peer]))
+			continue
+		}
+		closePair(streams[index])
+	}
+}
 
 func probeStreamEndpoint() bool {
 	if !createStream(&streamPair) {
