@@ -9,6 +9,9 @@ import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
+	linuxabi "goos/kernel/compat/linux/abi"
+	linuxelf "goos/kernel/compat/linux/elf"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -104,7 +107,7 @@ func consumeInitControl() {
 	}
 }
 
-// spawnExecutable starts the native image that executable names. The kernel
+// spawnExecutable starts the native or Linux image that executable names. The kernel
 // resolves no path here: PID 1 has already found the image under its own
 // search policy, and names it by an extent of the system image or by an
 // executable object it filled, together with the handle that authorizes
@@ -137,6 +140,23 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	if sourceStatus != supervisor.LaunchOK {
 		return 0, 0, sourceStatus
 	}
+	actualFormat := classifyExecutable(image)
+	if actualFormat == supervisor.ExecutableUnknown || executable.Format != actualFormat {
+		return 0, 0, supervisor.LaunchInvalidImage
+	}
+	processABI := process.ABINative
+	var linuxImage linuxelf.Image
+	if actualFormat == supervisor.ExecutableLinuxX8664 {
+		if !validLinuxLaunch(grants, resourceProfile, startupData) {
+			return 0, 0, supervisor.LaunchCapabilityDenied
+		}
+		var parseFailure linuxelf.Error
+		linuxImage, parseFailure = linuxelf.ParseSource(image, linuxelf.GoOSConfig())
+		if parseFailure != linuxelf.OK {
+			return 0, 0, supervisor.LaunchInvalidImage
+		}
+		processABI = process.ABILinuxX8664
+	}
 	// The pages a launch allocates are counted from the allocator rather than
 	// threaded through the loader: the difference is exactly what this address
 	// space owns, and it is charged to the new process below.
@@ -149,7 +169,13 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// The region map is built while the image loads and moves into the
 	// process slot once there is one (ADR 0104).
 	launchRegions.Init(vm.UserAddressStart, vm.UserAddressLimit)
-	loaded, ok := loader.LoadImage(&pageAllocator, root, image, &imagePages, origin, &launchRegions)
+	loaded := loader.LoadedImage{}
+	if processABI == process.ABINative {
+		loaded, ok = loader.LoadImage(&pageAllocator, root, image, &imagePages, origin, &launchRegions)
+	} else {
+		layout, mapped := linuxelf.MapImage(linuxImage, image, origin, &launchRegions)
+		loaded.Entry, loaded.StackTop, ok = layout.Entry, layout.StackTop, mapped
+	}
 	began = launchStageDone(launchLoad, began)
 	if !ok {
 		abandonSpawn(root, nil, false)
@@ -195,7 +221,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		abandonSpawn(root, spawned, false)
 		return 0, 0, supervisor.LaunchCapabilityDenied
 	}
-	ok = process.InitWithProfile(spawned, pid, process.ABINative, process.AddressSpace{Root: root}, profile)
+	ok = process.InitWithProfile(spawned, pid, processABI, process.AddressSpace{Root: root}, profile)
 	*spawned.Regions() = launchRegions
 	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {
@@ -233,11 +259,24 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		if boundOK {
 			bound, boundOK = startup.Decode(startupData)
 		}
-		if !boundOK || !mapStartup(root, spawned.Regions(), bound.Bytes()) {
+		if !boundOK {
 			abandonSpawn(root, spawned, false)
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
-		startupABIConfirmed = 1
+		if processABI == process.ABILinuxX8664 {
+			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound)
+			if stackStatus != linuxabi.StackOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, bound) {
+				abandonSpawn(root, spawned, false)
+				return 0, 0, supervisor.LaunchInvalidImage
+			}
+			loaded.StackTop = stack.Pointer
+		} else {
+			if !mapStartup(root, spawned.Regions(), bound.Bytes()) {
+				abandonSpawn(root, spawned, false)
+				return 0, 0, supervisor.LaunchInvalidImage
+			}
+			startupABIConfirmed = 1
+		}
 	}
 	if !processRegistry.Add(spawned) {
 		abandonSpawn(root, spawned, false)
@@ -313,6 +352,7 @@ func launchResourceProfile(profile supervisor.ResourceProfile) (process.Resource
 // abandonSpawn releases a launch that failed before its task existed: the
 // derived handles, the registry entry, the process slot, and the address space.
 func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
+	linuxcompat.RemoveProcess(root)
 	if spawned != nil {
 		// Only stream handles were counted when installed; the source handles
 		// stay with PID 1, so no end can close here.
@@ -339,6 +379,60 @@ func abandonHandle(typeID handle.Type, cap capability.Capability) {
 // launchRegions is the region map of the process being launched. Only one
 // launch runs at a time.
 var launchRegions region.Map
+
+// linuxInitialStack is shared launch scratch. Launches are serialized by PID 1
+// and the final bytes are copied into private process pages before task start.
+var linuxInitialStack [linuxabi.MaxInitialStackSize]byte
+
+func classifyExecutable(source loader.Source) supervisor.ExecutableFormat {
+	length := min(source.Len(), uint64(8))
+	var scratch [8]byte
+	header, ok := source.Read(0, length, scratch[:])
+	if !ok {
+		return supervisor.ExecutableUnknown
+	}
+	return supervisor.ClassifyExecutable(header)
+}
+
+// validLinuxLaunch is the kernel-side capability boundary. Handle names in
+// the startup template bind each grant to its role; no device or management
+// authority can be smuggled into a Linux process as an extra grant.
+func validLinuxLaunch(grants []supervisor.Capability, profile supervisor.ResourceProfile, template []byte) bool {
+	if profile != supervisor.ProfileLarge || len(grants) != 4 || len(template) == 0 {
+		return false
+	}
+	data, ok := startup.DecodeTemplate(template)
+	if !ok || data.HandleCount() != 4 {
+		return false
+	}
+	names := [...]string{"in", "stdout", "stderr", "vfs"}
+	types := [...]handle.Type{handle.TypeStream, handle.TypeStream, handle.TypeStream, handle.TypeChannel}
+	rights := [...]capability.Rights{
+		capability.Read | capability.Wait,
+		capability.Write | capability.Wait,
+		capability.Write | capability.Wait,
+		capability.Read | capability.Write | capability.Wait,
+	}
+	for index := range grants {
+		name, id := data.HandleAt(index)
+		if id != 0 || !equalLaunchName(name, names[index]) || grants[index].Type != types[index] || grants[index].Rights != rights[index] {
+			return false
+		}
+	}
+	return grants[3].Consume
+}
+
+func equalLaunchName(name []byte, expected string) bool {
+	if len(name) != len(expected) {
+		return false
+	}
+	for index := range name {
+		if name[index] != expected[index] {
+			return false
+		}
+	}
+	return true
+}
 
 // mapStartup gives a new process its bound startup object as private
 // read-only pages, recorded as a pinned region; they are released with the

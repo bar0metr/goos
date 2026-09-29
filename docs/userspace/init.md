@@ -61,13 +61,13 @@ other grant, and PID 1 closes its source handle once the kernel has answered.
 Services are launched only from the
 image, and paths in `/system` outside `/system/bin` are not commands.
 
-Every current path above validates a GoOS native image before the kernel
-initializes the Process with immutable `Native` ABI. GoOS 0.2.0 will let PID 1
-classify ELF magic as a Linux launch candidate, but the kernel will validate
-the Linux ELF independently and only then initialize `LinuxX8664`. That launch
-will receive only its standard streams, one fresh VFS session, argv,
-environment, cwd, and its resource profile; services remain native-only
-(ADR 0132, ADR 0136).
+PID 1 classifies GoOS native magic and ELF magic, but the kernel re-reads the
+stable source and independently validates the selected format before assigning
+the immutable `Native` or `LinuxX8664` Process ABI. A Linux launch receives
+exactly its standard streams and one fresh VFS session, uses the `large`
+resource profile, and carries argv/environment on its System V stack. Cwd and
+resolved handles stay in bounded kernel compatibility state. Services remain
+native-only (ADR 0132, ADR 0136).
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
 assembly entry supplies the native kernel-call ABI; its stack and heap are
@@ -92,7 +92,7 @@ used for per-process VFS clients and prevents accumulation of temporary handles.
 PID 1 also supplies a `GST4` startup template with a unique role name for each
 manifest entry. It writes the template with `startup.Writer` into a 64 KiB
 slot of the launch staging area shared with the kernel (handle `0x100000013`,
-four slots), and the launch message (lifecycle version 9) names the slot and
+four slots), and the launch message (lifecycle version 10) names the slot and
 the template's size (ADR 0062, ADR 0109). After installing all capabilities,
 the kernel writes their actual generation-safe IDs into its copy of the
 startup object before creating the first Task. Services resolve roles rather than depending on handle-table insertion

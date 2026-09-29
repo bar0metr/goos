@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted design for GoOS 0.2.0.
+Accepted and implemented through Phase 6 for GoOS 0.2.0.
 
 ## Context
 
@@ -31,3 +31,11 @@ classification or validator never creates a Linux Process.
 
 Shell and PID 1 stay the policy boundary, while the kernel remains the format
 and isolation authority. Native launch manifests and `GST4` remain unchanged.
+
+Lifecycle protocol version 10 carries the candidate format. PID 1 permits
+direct children of `/system/linux` in addition to ordinary `/system/bin`
+commands and gives every Linux launch exactly three stream endpoints and one
+fresh VFS session under the `large` resource profile. The kernel reclassifies
+the stable source, requires those four named grants with exact rights, builds
+the System V stack, and retains cwd plus resolved handle roles in a bounded
+compatibility table. Failed launches and process teardown remove that state.

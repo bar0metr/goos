@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"goos/kernel/boot"
+	linuxelf "goos/kernel/compat/linux/elf"
 )
 
 func TestArchiveSizeIsBoundedByTheKernelLoader(t *testing.T) {
@@ -15,5 +16,12 @@ func TestArchiveSizeIsBoundedByTheKernelLoader(t *testing.T) {
 	}
 	if checkSize(0) == nil {
 		t.Fatal("an empty archive was accepted")
+	}
+}
+
+func TestLinuxProbeIsAcceptedStaticELF(t *testing.T) {
+	image, failure := linuxelf.Parse(linuxProbe(), linuxelf.GoOSConfig())
+	if failure != linuxelf.OK || image.Entry != 0x400078 || image.SegmentCount != 1 {
+		t.Fatalf("probe ELF: failure=%d image=%#v", failure, image)
 	}
 }

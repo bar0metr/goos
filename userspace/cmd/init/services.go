@@ -100,6 +100,12 @@ func startServices(ticks uint64) {
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 4 || validation.Enabled && !probeBlockService() {
 		fatal("SHELL_LAUNCH_FAILED\n")
 	}
+	if validation.Enabled {
+		if !probeLinuxLaunch() {
+			fatal("LINUX_PID1_LAUNCH_FAILED\n")
+		}
+		mark("LINUX_PID1_LAUNCH_OK\n")
+	}
 	// The log service comes after the filesystem and before the shell: its
 	// session has to be asked for rather than handed over at boot, and it
 	// should be persisting records by the time a prompt appears.

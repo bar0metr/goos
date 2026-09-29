@@ -476,15 +476,17 @@ common lazy executable-source regions, preserves demand-zero BSS and page
 accounting, and reserves an 8 MiB NX stack with a 64 KiB guard. Phase 5 builds
 the bounded, 16-byte-aligned Linux initial stack with argv, environment, and
 the required static-ELF auxv, then materializes only its occupied pages. It
-does not launch ELF yet.
+does not expose GST4 to the Linux process. Phase 6 is complete: PID 1 classifies
+native versus ELF candidates, while the kernel independently validates the
+stable source and enforces a four-handle Linux launch boundary with the large
+resource profile.
 
 Order for the remaining release work:
 
-1. add PID 1 classification and constrained Linux launch policy;
-2. raw Linux `write` plus `exit_group` hello world;
-3. memory, FS-base/TLS, and static musl startup;
-4. bounded fd table and VFS file/directory probes;
-5. selected static BusyBox applets as measured P1 interoperability.
+1. raw Linux `write` plus `exit_group` hello world;
+2. memory, FS-base/TLS, and static musl startup;
+3. bounded fd table and VFS file/directory probes;
+4. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

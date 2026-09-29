@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,8 @@ func main() {
 	members := []member{
 		directory("system/"),
 		directory("system/bin/"),
+		directory("system/linux/"),
+		file("system/linux/phase6-probe", 0o555, linuxProbe()),
 		// The message of the day belongs to the immutable system image rather
 		// than to the volatile root, because /system is a read-only mount of
 		// this archive.
@@ -73,6 +76,37 @@ func main() {
 		os.Remove(os.Args[13])
 		fail(err)
 	}
+}
+
+// linuxProbe is a static ELF64 ET_EXEC whose entry loops forever. Validation
+// launches and kills it to exercise policy, mapping and initial-stack setup
+// before semantic Linux exit support exists.
+func linuxProbe() []byte {
+	const (
+		base       = uint64(0x400000)
+		headerSize = 64
+		phdrSize   = 56
+	)
+	image := make([]byte, headerSize+phdrSize+2)
+	copy(image[:], []byte{0x7f, 'E', 'L', 'F', 2, 1, 1})
+	binary.LittleEndian.PutUint16(image[16:], 2)
+	binary.LittleEndian.PutUint16(image[18:], 62)
+	binary.LittleEndian.PutUint32(image[20:], 1)
+	binary.LittleEndian.PutUint64(image[24:], base+headerSize+phdrSize)
+	binary.LittleEndian.PutUint64(image[32:], headerSize)
+	binary.LittleEndian.PutUint16(image[52:], headerSize)
+	binary.LittleEndian.PutUint16(image[54:], phdrSize)
+	binary.LittleEndian.PutUint16(image[56:], 1)
+	program := image[headerSize:]
+	binary.LittleEndian.PutUint32(program[0:], 1)
+	binary.LittleEndian.PutUint32(program[4:], 5)
+	binary.LittleEndian.PutUint64(program[16:], base)
+	binary.LittleEndian.PutUint64(program[24:], base)
+	binary.LittleEndian.PutUint64(program[32:], uint64(len(image)))
+	binary.LittleEndian.PutUint64(program[40:], uint64(len(image)))
+	binary.LittleEndian.PutUint64(program[48:], 0x1000)
+	copy(image[headerSize+phdrSize:], []byte{0xeb, 0xfe})
+	return image
 }
 
 func checkSize(size int64) error {

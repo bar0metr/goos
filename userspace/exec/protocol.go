@@ -21,6 +21,7 @@ const (
 	startedSize = 9
 	headerSize  = 12
 	SearchRoot  = "/system/bin/"
+	LinuxRoot   = "/system/linux/"
 )
 
 // Requests are written to an area shared by the shell and PID 1, one slot per
@@ -75,6 +76,26 @@ func CommandFromSystemPath(path []byte) ([]byte, bool) {
 		return nil, false
 	}
 	return command, true
+}
+
+// LinuxSystemPath reports whether path names a direct child of the immutable
+// Linux fixture directory. Native services elsewhere under /system remain
+// unavailable to shell launch requests.
+func LinuxSystemPath(path []byte) bool {
+	if len(path) <= len(LinuxRoot) {
+		return false
+	}
+	for index := range LinuxRoot {
+		if path[index] != LinuxRoot[index] {
+			return false
+		}
+	}
+	for _, value := range path[len(LinuxRoot):] {
+		if value == 0 || value == '/' {
+			return false
+		}
+	}
+	return true
 }
 
 // List is a validated sequence of strings as a request carries them: each is

@@ -254,7 +254,7 @@ func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environmen
 	// program anywhere else is named by its file.
 	command, fromSearchPath := execproto.CommandFromSystemPath(stage.Path)
 	if !fromSearchPath {
-		if execproto.InSystem(stage.Path) {
+		if execproto.InSystem(stage.Path) && !execproto.LinuxSystemPath(stage.Path) {
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 		command = execproto.ExecutableName(stage.Path)

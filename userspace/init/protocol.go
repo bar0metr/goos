@@ -11,7 +11,7 @@ import (
 
 const (
 	LifecycleProtocolID = uint64(0x47494e49544c4946)
-	LifecycleVersion    = uint16(9)
+	LifecycleVersion    = uint16(10)
 	// MaxProcessName bounds the display name a launch carries. The kernel
 	// records it for ps and resolves nothing from it.
 	MaxProcessName   = 16
@@ -35,6 +35,17 @@ type LaunchStatus uint64
 // ResourceProfile names a bounded kernel quota set. PID 1 chooses one at
 // launch; a child receives no operation that can change it.
 type ResourceProfile uint8
+
+// ExecutableFormat is PID 1's bounded classification of an executable
+// header. The kernel re-reads the stable source and validates the format
+// independently before selecting a loader.
+type ExecutableFormat uint8
+
+const (
+	ExecutableUnknown ExecutableFormat = iota
+	ExecutableNative
+	ExecutableLinuxX8664
+)
 
 const (
 	ProfileTiny ResourceProfile = iota + 1
@@ -102,7 +113,7 @@ func (status LaunchStatus) NamesExecutable() bool {
 	return status == LaunchNotFound || status == LaunchInvalidImage || status == LaunchCapabilityDenied
 }
 
-// Executable names the bytes of one native image inside an image object. The
+// Executable names the bytes of one native or Linux image inside an image object. The
 // launch request carries this rather than a path: the caller resolves the path
 // under its own policy, and the kernel checks only that the handle authorizes
 // executing from the image and that the extent lies inside it (ADR 0093).
@@ -110,6 +121,20 @@ type Executable struct {
 	Image  handle.ID
 	Offset uint32
 	Size   uint32
+	Format ExecutableFormat
+}
+
+// ClassifyExecutable recognizes only the two launch formats. It deliberately
+// does not validate either image; the selected kernel loader owns that check.
+func ClassifyExecutable(header []byte) ExecutableFormat {
+	if len(header) >= 8 && header[0] == 'G' && header[1] == 'O' && header[2] == 'O' && header[3] == 'S' &&
+		header[4] == 'N' && header[5] == 'A' && header[6] == 'T' && header[7] == 0 {
+		return ExecutableNative
+	}
+	if len(header) >= 4 && header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' {
+		return ExecutableLinuxX8664
+	}
+	return ExecutableUnknown
 }
 
 type LifecycleEvent struct {
@@ -170,7 +195,8 @@ func LaunchRequestWithStartup(service uint64, executable Executable, name string
 	binary.LittleEndian.PutUint32(message.Payload[24:28], executable.Offset)
 	binary.LittleEndian.PutUint32(message.Payload[28:32], executable.Size)
 	message.Payload[32] = byte(profile)
-	for index := 33; index < launchHeaderSize; index++ {
+	message.Payload[33] = byte(executable.Format)
+	for index := 34; index < launchHeaderSize; index++ {
 		message.Payload[index] = 0
 	}
 	copy(message.Payload[launchHeaderSize:], name)
@@ -227,13 +253,14 @@ func DecodeLifecycle(message ipc.Message) (LifecycleEvent, bool) {
 			Image:  handle.ID(binary.LittleEndian.Uint64(message.Payload[16:24])),
 			Offset: binary.LittleEndian.Uint32(message.Payload[24:28]),
 			Size:   binary.LittleEndian.Uint32(message.Payload[28:32]),
+			Format: ExecutableFormat(message.Payload[33]),
 		}
 		profile := ResourceProfile(message.Payload[32])
 		reserved := byte(0)
-		for index := 33; index < launchHeaderSize; index++ {
+		for index := 34; index < launchHeaderSize; index++ {
 			reserved |= message.Payload[index]
 		}
-		if service == 0 || size == 0 || size > MaxProcessName || !validResourceProfile(profile) || reserved != 0 || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
+		if service == 0 || size == 0 || size > MaxProcessName || !validResourceProfile(profile) || executable.Format > ExecutableLinuxX8664 || reserved != 0 || startupSlot >= StagingSlots || startupSize > uint32(StagingSlotSize) || capabilityCount > MaxCapabilities || int(message.PayloadSize) != launchHeaderSize+size+capabilityCount*launchGrantSize {
 			return LifecycleEvent{}, false
 		}
 		if !validExtent(executable) || !validProcessNameBytes(message.Payload[launchHeaderSize:launchHeaderSize+size]) {

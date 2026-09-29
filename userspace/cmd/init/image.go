@@ -45,7 +45,8 @@ func locateExecutable(path []byte) (supervisor.Executable, string, supervisor.La
 	default:
 		return supervisor.Executable{}, "", supervisor.LaunchInvalidImage
 	}
-	return supervisor.Executable{Image: systemImageHandle, Offset: offset, Size: size}, processName(path), supervisor.LaunchOK
+	header := systemImage[offset : offset+min(size, 8)]
+	return supervisor.Executable{Image: systemImageHandle, Offset: offset, Size: size, Format: supervisor.ClassifyExecutable(header)}, processName(path), supervisor.LaunchOK
 }
 
 // openExecutable resolves a command: in the system image when the path is
@@ -155,7 +156,7 @@ func probeExecutableObjects(valid, motd supervisor.Executable) bool {
 	if status != kcall.StatusOK || !fillObject(object, program[:len(program)/2]) {
 		return false
 	}
-	whole := supervisor.Executable{Image: object, Size: valid.Size}
+	whole := supervisor.Executable{Image: object, Size: valid.Size, Format: valid.Format}
 	cases := []struct {
 		executable supervisor.Executable
 		want       supervisor.LaunchStatus
@@ -172,8 +173,8 @@ func probeExecutableObjects(valid, motd supervisor.Executable) bool {
 		want       supervisor.LaunchStatus
 	}{
 		// Sealed, but named in part.
-		{supervisor.Executable{Image: object, Offset: 1, Size: valid.Size - 1}, supervisor.LaunchInvalidImage},
-		{supervisor.Executable{Image: object, Size: valid.Size - 1}, supervisor.LaunchInvalidImage},
+		{supervisor.Executable{Image: object, Offset: 1, Size: valid.Size - 1, Format: valid.Format}, supervisor.LaunchInvalidImage},
+		{supervisor.Executable{Image: object, Size: valid.Size - 1, Format: valid.Format}, supervisor.LaunchInvalidImage},
 	}
 	refused := launchesRefused(cases) && sys.ExecutableWrite(object, program[:1]) == kcall.StatusInvalidArgument
 	if sys.HandleClose(object) != kcall.StatusOK || !refused {
