@@ -4,8 +4,8 @@
 
 Accepted for GoOS 0.2.0. The bounded ELF64 parser and load-plan validation are
 implemented in Phase 3. Phase 4 maps validated loads through the common lazy
-executable-source path and reserves the Linux stack; initial-stack contents
-remain Phase 5.
+executable-source path and reserves the Linux stack. Phase 5 implements the
+bounded System V initial-stack image and its page installer.
 
 ## Context
 
@@ -50,6 +50,19 @@ The Linux initial stack contains `argc`, `argv`, `envp`, and a bounded auxv.
 It does not expose `GST4`. Resolved GoOS handles remain kernel-side compatibility
 state. `AT_RANDOM` is omitted until trustworthy entropy exists; a deterministic
 value is forbidden.
+
+The builder accepts at most 256 arguments, 256 environment entries, and 64 KiB
+for the complete occupied stack image. It validates every NUL-free string,
+emits NUL-terminated vectors, and aligns initial RSP to 16 bytes. Auxv contains
+`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_ENTRY`, `AT_EXECFN`,
+`AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE`, `AT_CLKTCK`, optional
+`AT_PLATFORM`, and `AT_NULL`. UID and GID are the synthetic unprivileged value
+1000; `AT_CLKTCK` is 100.
+
+Only pages covering the built image are materialized writable and NX. Launch
+page accounting includes those owned pages and page tables; the unused stack
+reservation still grows by demand-zero faults. PID 1 classification and Linux
+process creation remain Phase 6.
 
 ## Consequences
 

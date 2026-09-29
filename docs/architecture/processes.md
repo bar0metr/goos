@@ -101,6 +101,14 @@ capability-installation failure. The read-only `SystemInfo` call exposes a
 fixed-size snapshot for native `ps` and `mem` without granting access to kernel
 structures.
 
+`GST4` remains the kernel-side source of validated launch inputs for a future
+Linux launch, but it is not exposed as the Linux application ABI. The Phase 5
+builder copies its command, arguments, and environment into a bounded System V
+stack containing `argc`, pointer vectors, auxv, and NUL-terminated strings.
+Resolved GoOS handles and the working directory remain kernel-side
+compatibility state. Only occupied initial-stack pages are mapped before the
+task runs; the rest of the Linux stack reservation remains demand-zero.
+
 ## Teardown liveness
 
 Process teardown separates what other parties observe from what merely reclaims
