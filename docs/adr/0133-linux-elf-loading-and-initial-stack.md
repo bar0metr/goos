@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted design for GoOS 0.2.0; implementation begins after the syscall-entry
-phase.
+Accepted for GoOS 0.2.0. The bounded ELF64 parser and load-plan validation are
+implemented in Phase 3; mapping and the initial stack remain later phases.
 
 ## Context
 
@@ -19,6 +19,14 @@ Linux ELF has a separate bounded validator and load-plan builder. The first
 release accepts little-endian x86_64 `ET_EXEC`, rejects `PT_INTERP`, executable
 stacks, W+X, overlaps, reserved mappings, malformed arithmetic, and unsupported
 headers, and limits program headers and load segments.
+
+The parser reads the existing stable executable-source abstraction, caps the
+program-header table at 64 entries and `PT_LOAD` at 16 segments, and records
+`PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO` metadata. Load ranges
+must be page-congruent, remain in the configured user range, avoid configured
+reserved pages, and contain both the program-header table and executable entry
+where required. It performs no mapping and cannot select a Process ABI by
+itself.
 
 Validated `PT_LOAD` regions reuse the existing stable executable source, lazy
 file-backed faults, demand-zero BSS, page accounting, and W^X enforcement. The

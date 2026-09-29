@@ -3,8 +3,9 @@
 **Status: GoOS 0.2.0 foundations in progress.** Phase 0 decisions are recorded
 in ADRs 0132 through 0137. Phase 1 implements immutable Process ABI identity.
 Phase 2 implements the dedicated Linux x86_64 `SYSCALL`/IRETQ entry and rejects
-wrong-ABI entry at both gates. Linux ELF loading and semantic syscall
-translation are not implemented yet.
+wrong-ABI entry at both gates. Phase 3 implements the bounded static ELF64
+parser and load-plan validation. Linux ELF mapping, startup, launch, and
+semantic syscall translation are not implemented yet.
 
 ## Principles
 
@@ -23,15 +24,21 @@ translation are not implemented yet.
 ### ELF loader
 
 Linux ELF is a distinct format from the native envelope
-([native-images.md](../kernel/native-images.md)). Planned stages:
+([native-images.md](../kernel/native-images.md)). The implemented Phase 3
+parser:
 
-1. validate the ELF64 header (x86_64, `ET_EXEC`, then `ET_DYN` for static PIE);
-2. validate program headers: bounded count, page-aligned `PT_LOAD` segments in
-   the user range, no overlap, no W+X, file ranges inside the image;
-3. reject `PT_INTERP` until a dynamic loader exists;
-4. map and zero-fill segments with the same rules as the native loader;
-5. build the Linux initial stack: `argc`, `argv`, `envp`, and a minimal auxv
-   (`AT_PAGESZ`, `AT_PHDR`, `AT_PHNUM`, `AT_ENTRY`, `AT_RANDOM`).
+1. accepts ELF64 little-endian x86_64 `ET_EXEC` only;
+2. bounds the table at 64 program headers and 16 `PT_LOAD` segments;
+3. validates file/memory arithmetic, page congruence, user and reserved ranges,
+   page-rounded overlap, entry location, and `R--`/`RW-`/`R-X` protections;
+4. rejects `PT_INTERP`, `PT_DYNAMIC`, W+X, executable stack, and unsupported
+   program-header kinds;
+5. records validated `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO`
+   metadata from the existing stable executable source.
+
+It does not map pages or launch a process. Later phases will reuse the native
+loader's lazy source backing and demand-zero path, then build `argc`, `argv`,
+`envp`, and auxv on a Linux initial stack. `ET_DYN` remains P2 scope.
 
 ### Syscall entry
 
