@@ -346,6 +346,10 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'ls /system/bin\n'
 	sleep 1
+	printf 'mount\n'
+	sleep 1
+	printf 'df\n'
+	sleep 1
 	printf 'stat /system/bin/ls\n'
 	sleep 1
 	printf 'stat /system/bin\n'
@@ -823,7 +827,7 @@ require_regex filesystem.home-content '^persistent$' 'persistent through /home' 
 require_regex filesystem.home-alias '^persistent$' 'persistent through /persist/home' "$log" 'cat /persist/home/demo/message.txt'
 pass_group filesystem
 
-for marker in SHELL_PROCESS_OK SHELL_VFS_CONNECTED_OK SHELL_HELP_OK ECHO_PROCESS_OK ARGS_PROCESS_OK ARGV_ENV_PROCESS_OK STDIN_HANDLE_OK STDERR_HANDLE_OK STDIN_READ_OK SHELL_CLEAR_OK UPTIME_PROCESS_OK PWD_PROCESS_OK LS_PROCESS_OK SHELL_CD_OK CAT_PROCESS_OK MKDIR_PROCESS_OK TOUCH_PROCESS_OK STAT_PROCESS_OK CP_PROCESS_OK MV_PROCESS_OK RM_PROCESS_OK UNAME_PROCESS_OK PS_PROCESS_OK MEM_PROCESS_OK SLEEP_PROCESS_OK EXIT_STATUS_PROPAGATION_OK; do
+for marker in SHELL_PROCESS_OK SHELL_VFS_CONNECTED_OK SHELL_HELP_OK ECHO_PROCESS_OK ARGS_PROCESS_OK ARGV_ENV_PROCESS_OK STDIN_HANDLE_OK STDERR_HANDLE_OK STDIN_READ_OK SHELL_CLEAR_OK UPTIME_PROCESS_OK PWD_PROCESS_OK LS_PROCESS_OK MOUNT_PROCESS_OK DF_PROCESS_OK SHELL_CD_OK CAT_PROCESS_OK MKDIR_PROCESS_OK TOUCH_PROCESS_OK STAT_PROCESS_OK CP_PROCESS_OK MV_PROCESS_OK RM_PROCESS_OK UNAME_PROCESS_OK PS_PROCESS_OK MEM_PROCESS_OK SLEEP_PROCESS_OK EXIT_STATUS_PROPAGATION_OK; do
 	require_marker "shell.$marker" "$marker" "$log"
 done
 require_marker shell.echo-output 'hello structured world' "$log" 'echo "hello structured world"'
@@ -850,6 +854,11 @@ require_regex stat.directory-size '^directory [1-9][0-9]*\.[0-9][0-9] KiB ([1-9]
 require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 1 directory$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
 require_regex stat.bytes '^file 16 bytes$' 'stat -b prints exact bytes' "$log" 'goos> stat -b /system/motd'
 require_regex stat.bad-flag '^usage: stat \[-b|-k|-m|-g\] PATH$' 'an unknown unit flag is a usage error' "$log" 'goos> stat -x /system'
+require_window mount.system '^/system  *image  *ro$' 'system image in mount output' "$log" 'goos> mount' 'goos> df'
+require_window mount.persist '^/persist  *fat32  *rw$' 'persistent volume in mount output' "$log" 'goos> mount' 'goos> df'
+require_window df.header '^Filesystem  *Mount  *Size  *Used  *Free  *Flags$' 'df column header' "$log" 'goos> df' 'goos> stat /system/bin/ls'
+require_window df.system '^image  */system  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only image capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
+require_window df.persist '^fat32  */persist  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *rw$' 'persistent capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 pass_group shell
 
 require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'

@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/limits"
+	"goos/internal/timekeeping"
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -169,6 +170,14 @@ const (
 // ramfsPages is the memory of the volatile root.
 var ramfsPages pages.Pool
 
+func ramfsRealtime() (ramfs.Timestamp, bool) {
+	now, status := sys.ClockNow(timekeeping.Realtime)
+	if status != kcall.StatusOK || !now.Valid() {
+		return ramfs.Timestamp{}, false
+	}
+	return ramfs.Timestamp{Seconds: now.Seconds, Nanoseconds: now.Nanoseconds, Available: true}, true
+}
+
 // ramfsStore gives the volatile root its pages from ramfsPages.
 type ramfsStore struct{}
 
@@ -217,6 +226,7 @@ func userspaceMain() {
 	if !ramfsPages.Init(ramfsReserve) || !service.ConfigureRAMFS(ramfsStore{}, ramfs.Limits{Nodes: ramfsNodes, Pages: ramfsPageLimit}) {
 		fatal("VFS_RAMFS_UNAVAILABLE\n")
 	}
+	service.SetRAMFSClock(ramfsRealtime)
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
@@ -388,7 +398,7 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		// Answer unusable requests: a silent drop strands the caller, which is
 		// waiting for exactly this correlation.
 		operation := vfs.Operation(message.Payload[0])
-		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationReadExecutable {
+		if message.Correlation != 0 && operation >= vfs.OperationOpen && operation <= vfs.OperationReadMount {
 			if reply, encoded := vfs.EncodeReply(vfs.Reply{Operation: operation, Status: vfs.StatusInvalidArgument}, message.Correlation); encoded {
 				send(session, reply)
 			}
@@ -448,7 +458,11 @@ func mapPathObject(request *vfs.Request, object handle.ID) ([]byte, uint64, uint
 		return nil, 0, 0, false
 	}
 	memory := sys.Window(base, size)
-	if size > maxPathObject || request.NameReturn && size < ramfs.MaxName || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
+	minimum := uint64(ramfs.MaxName)
+	if request.Operation == vfs.OperationReadMount {
+		minimum = limits.PathMax
+	}
+	if size > maxPathObject || request.NameReturn && size < minimum || request.PathsAttached && !request.TakePaths(memory, &pathCopy, &targetCopy) {
 		sys.VMUnmap(base, size)
 		return nil, 0, 0, false
 	}

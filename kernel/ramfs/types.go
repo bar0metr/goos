@@ -8,6 +8,62 @@ import "goos/internal/limits"
 // MaxName is the native name limit (ADR 0110).
 const MaxName = limits.NameMax
 
+// MaxVolumeName bounds the optional human-readable filesystem label carried
+// across native protocols.
+const MaxVolumeName = 64
+
+// FilesystemType is a stable native filesystem identity, not an on-disk magic
+// value.
+type FilesystemType uint8
+
+const (
+	FilesystemRAMFS FilesystemType = iota + 1
+	FilesystemSystemImage
+	FilesystemFAT32
+	LastFilesystemType = FilesystemFAT32
+)
+
+// FilesystemInfo describes one mounted backend. CapacityAvailable separates a
+// backend with no capacity model from an empty filesystem.
+type FilesystemInfo struct {
+	Type              FilesystemType
+	TotalBytes        uint64
+	FreeBytes         uint64
+	AvailableBytes    uint64
+	ReadOnly          bool
+	CapacityAvailable bool
+	VolumeName        [MaxVolumeName]byte
+	VolumeNameSize    uint8
+}
+
+func (info FilesystemInfo) Valid() bool {
+	if info.Type == 0 {
+		return info.TotalBytes == 0 && info.FreeBytes == 0 && info.AvailableBytes == 0 &&
+			!info.ReadOnly && !info.CapacityAvailable && info.VolumeNameSize == 0
+	}
+	if info.Type < FilesystemRAMFS || info.Type > LastFilesystemType || info.VolumeNameSize > MaxVolumeName {
+		return false
+	}
+	if !info.CapacityAvailable {
+		return info.TotalBytes == 0 && info.FreeBytes == 0 && info.AvailableBytes == 0
+	}
+	return info.FreeBytes <= info.TotalBytes && info.AvailableBytes <= info.FreeBytes
+}
+
+func (info *FilesystemInfo) SetVolumeName(name []byte) bool {
+	if info == nil || len(name) > MaxVolumeName {
+		return false
+	}
+	for index := range info.VolumeName {
+		info.VolumeName[index] = 0
+	}
+	copy(info.VolumeName[:], name)
+	info.VolumeNameSize = uint8(len(name))
+	return true
+}
+
+func (info FilesystemInfo) Name() []byte { return info.VolumeName[:info.VolumeNameSize] }
+
 type Status uint8
 
 const (
@@ -55,10 +111,47 @@ const (
 
 type NodeID uint64
 
+// Timestamp is a native UTC timestamp. Available distinguishes a missing
+// filesystem field from the Unix epoch; unavailable timestamps must be zero.
+type Timestamp struct {
+	Seconds     int64
+	Nanoseconds uint32
+	Available   bool
+}
+
+func (stamp Timestamp) Valid() bool {
+	return stamp.Available && stamp.Nanoseconds < 1_000_000_000 ||
+		!stamp.Available && stamp.Seconds == 0 && stamp.Nanoseconds == 0
+}
+
+// Attributes are stable native object properties, not raw filesystem bits.
+type Attributes uint8
+
+const (
+	AttrDirectory Attributes = 1 << iota
+	AttrReadOnly
+	AttrHidden
+	AttrSystem
+	AttrArchive
+	LastAttribute = AttrArchive
+)
+
 type Stat struct {
-	ID   NodeID
-	Kind Kind
-	Size uint64
+	ID                  NodeID
+	Kind                Kind
+	Size                uint64
+	Created             Timestamp
+	Modified            Timestamp
+	Attributes          Attributes
+	AttributesAvailable bool
+	// MountID is assigned by VFS. Backends and the filesystem-service wire
+	// protocol leave it zero because it describes namespace placement.
+	MountID uint64
+}
+
+func (stat Stat) Valid() bool {
+	return stat.Kind >= KindFile && stat.Kind <= KindDirectory && stat.Created.Valid() && stat.Modified.Valid() &&
+		stat.Attributes <= (LastAttribute*2-1) && (stat.AttributesAvailable || stat.Attributes == 0)
 }
 
 type Entry struct {

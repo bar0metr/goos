@@ -516,10 +516,44 @@ func listed(entry [32]byte) bool {
 	return entry[0] != entryEnd && entry[0] != entryDeleted && entry[0] != '.' && entry[11]&attrVolume == 0
 }
 func entryStat(id ramfs.NodeID, entry [32]byte) ramfs.Stat {
+	metadata := metadataOf(entry)
+	attributes := ramfs.Attributes(0)
 	if isDirectory(entry) {
-		return ramfs.Stat{ID: id, Kind: ramfs.KindDirectory}
+		attributes |= ramfs.AttrDirectory
 	}
-	return ramfs.Stat{ID: id, Kind: ramfs.KindFile, Size: entrySizeOf(entry)}
+	if metadata.Attributes&AttrReadOnly != 0 {
+		attributes |= ramfs.AttrReadOnly
+	}
+	if metadata.Attributes&AttrHidden != 0 {
+		attributes |= ramfs.AttrHidden
+	}
+	if metadata.Attributes&AttrSystem != 0 {
+		attributes |= ramfs.AttrSystem
+	}
+	if metadata.Attributes&AttrArchive != 0 {
+		attributes |= ramfs.AttrArchive
+	}
+	stat := ramfs.Stat{ID: id, Created: nativeTimestamp(metadata.Created), Modified: nativeTimestamp(metadata.Modified),
+		Attributes: attributes, AttributesAvailable: true}
+	if isDirectory(entry) {
+		stat.Kind = ramfs.KindDirectory
+		return stat
+	}
+	stat.Kind, stat.Size = ramfs.KindFile, entrySizeOf(entry)
+	return stat
+}
+
+func nativeTimestamp(value Time) ramfs.Timestamp {
+	if !value.Known {
+		return ramfs.Timestamp{}
+	}
+	seconds := value.UnixNanos / nanosPerSecond
+	nanoseconds := value.UnixNanos % nanosPerSecond
+	if nanoseconds < 0 {
+		seconds--
+		nanoseconds += nanosPerSecond
+	}
+	return ramfs.Timestamp{Seconds: seconds, Nanoseconds: uint32(nanoseconds), Available: true}
 }
 
 // dotEntry is a "." or ".." entry naming cluster, with the times of the

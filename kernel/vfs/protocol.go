@@ -15,12 +15,14 @@ const (
 	// object, and gives a rename's target a field of its own (ADR 0110);
 	// version 6 adds the timeout, peer-died, and unsupported statuses; version
 	// 7 widens returned-name lengths for the 1024-byte native name limit;
-	// version 8 adds immutable executable preparation and page reads.
-	ProtocolVersion = uint16(8)
-	protocolHeader  = 32
+	// version 8 adds immutable executable preparation and page reads; version
+	// 9 adds fixed-width timestamps, native attributes and mount identity;
+	// version 10 adds filesystem capacity and bounded mount enumeration.
+	ProtocolVersion = uint16(10)
+	protocolHeader  = 40
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
-	replyHeader     = 32
+	replyHeader     = 104
 	MaxReplyData    = ipc.MaxPayload - replyHeader
 	// MaxInlineName is the longest name a reply carries in the message.
 	MaxInlineName = ipc.MaxPayload - replyHeader
@@ -65,7 +67,9 @@ const (
 	// open file's position and uses the VFS/kernel transport slot.
 	OperationPrepareExecutable
 	OperationReadExecutable
-	lastOperation = OperationReadExecutable
+	OperationFilesystemInfo
+	OperationReadMount
+	lastOperation = OperationReadMount
 )
 
 // Bulk reports whether an operation moves its data through an attached object
@@ -92,6 +96,7 @@ type Request struct {
 	Data          []byte
 	PathsAttached bool
 	NameReturn    bool
+	MountID       MountID
 	pathSize      int
 	targetSize    int
 }
@@ -108,6 +113,14 @@ type Reply struct {
 	Name         []byte
 	Data         []byte
 	AttachedName uint16
+	Created      ramfs.Timestamp
+	Modified     ramfs.Timestamp
+	Attributes   ramfs.Attributes
+	// AttributesAvailable distinguishes a filesystem with no attribute model
+	// from one whose native attribute set is empty.
+	AttributesAvailable bool
+	MountID             MountID
+	Filesystem          ramfs.FilesystemInfo
 }
 
 // FitsInline reports whether a request's path, target, and data fit in one
@@ -137,9 +150,17 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	if reply.AttachedName != 0 {
 		nameSize = int(reply.AttachedName)
 	}
+	maxName := ramfs.MaxName
+	if reply.Operation == OperationReadMount {
+		maxName = limits.PathMax
+	} else if reply.Operation == OperationFilesystemInfo {
+		maxName = ramfs.MaxVolumeName
+	}
 	if reply.Operation < OperationOpen || reply.Operation > lastOperation || correlation == 0 ||
-		reply.Status > lastStatus || len(reply.Name) > MaxInlineName || nameSize > ramfs.MaxName || len(reply.Data) > MaxReplyData ||
-		replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload || reply.AttachedName != 0 && (len(reply.Name) != 0 || int(reply.AttachedName) <= MaxInlineName) {
+		reply.Status > lastStatus || len(reply.Name) > MaxInlineName || nameSize > maxName || len(reply.Data) > MaxReplyData ||
+		replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload || reply.AttachedName != 0 && (len(reply.Name) != 0 || int(reply.AttachedName) <= MaxInlineName) ||
+		!reply.Created.Valid() || !reply.Modified.Valid() || reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
+		reply.Status == StatusOK && (reply.Operation == OperationFilesystemInfo || reply.Operation == OperationReadMount) && reply.Filesystem.Type == 0 {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ProtocolID, Version: ProtocolVersion, Kind: ipc.KindReply, Correlation: correlation,
@@ -155,6 +176,32 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	binary.LittleEndian.PutUint64(message.Payload[8:], uint64(reply.Handle))
 	binary.LittleEndian.PutUint64(message.Payload[16:], reply.Size)
 	binary.LittleEndian.PutUint32(message.Payload[24:], reply.Cursor)
+	binary.LittleEndian.PutUint32(message.Payload[28:], 0)
+	binary.LittleEndian.PutUint64(message.Payload[32:], uint64(reply.Created.Seconds))
+	binary.LittleEndian.PutUint64(message.Payload[40:], uint64(reply.Modified.Seconds))
+	binary.LittleEndian.PutUint32(message.Payload[48:], reply.Created.Nanoseconds)
+	binary.LittleEndian.PutUint32(message.Payload[52:], reply.Modified.Nanoseconds)
+	message.Payload[56] = byte(reply.Attributes)
+	if reply.Created.Available {
+		message.Payload[57] |= 1
+	}
+	if reply.Modified.Available {
+		message.Payload[57] |= 2
+	}
+	if reply.AttributesAvailable {
+		message.Payload[57] |= 4
+	}
+	binary.LittleEndian.PutUint64(message.Payload[64:], uint64(reply.MountID))
+	binary.LittleEndian.PutUint64(message.Payload[72:], reply.Filesystem.TotalBytes)
+	binary.LittleEndian.PutUint64(message.Payload[80:], reply.Filesystem.FreeBytes)
+	binary.LittleEndian.PutUint64(message.Payload[88:], reply.Filesystem.AvailableBytes)
+	message.Payload[96] = byte(reply.Filesystem.Type)
+	if reply.Filesystem.ReadOnly {
+		message.Payload[97] |= 1
+	}
+	if reply.Filesystem.CapacityAvailable {
+		message.Payload[97] |= 2
+	}
 	copy(message.Payload[replyHeader:], reply.Name)
 	copy(message.Payload[replyHeader+len(reply.Name):], reply.Data)
 	return message, true
@@ -185,19 +232,38 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 	if attached {
 		inlineName = 0
 	}
+	maxName := ramfs.MaxName
+	if operation == OperationReadMount {
+		maxName = limits.PathMax
+	} else if operation == OperationFilesystemInfo {
+		maxName = ramfs.MaxVolumeName
+	}
 	if operation < OperationOpen || operation > lastOperation || status > lastStatus ||
 		kind > ramfs.KindDirectory || inlineName > MaxInlineName || dataSize > MaxReplyData ||
-		message.Payload[7]&^flagNameAttached != 0 || binary.LittleEndian.Uint32(message.Payload[28:]) != 0 ||
-		attached && nameSize <= MaxInlineName || replyHeader+inlineName+dataSize != int(message.PayloadSize) {
+		nameSize > maxName || message.Payload[7]&^flagNameAttached != 0 || message.Payload[57]&^byte(7) != 0 || binary.LittleEndian.Uint16(message.Payload[58:]) != 0 || binary.LittleEndian.Uint32(message.Payload[60:]) != 0 ||
+		message.Payload[97]&^byte(3) != 0 || binary.LittleEndian.Uint16(message.Payload[98:]) != 0 || binary.LittleEndian.Uint32(message.Payload[100:]) != 0 || attached && nameSize <= MaxInlineName || replyHeader+inlineName+dataSize != int(message.PayloadSize) {
 		return Reply{}, false
 	}
+	metadata := message.Payload[57]
 	reply := Reply{Operation: operation, Status: status, Kind: kind,
 		Handle: Handle(binary.LittleEndian.Uint64(message.Payload[8:])),
 		Size:   binary.LittleEndian.Uint64(message.Payload[16:]), Cursor: binary.LittleEndian.Uint32(message.Payload[24:]),
-		Name: message.Payload[replyHeader : replyHeader+inlineName],
-		Data: message.Payload[replyHeader+inlineName : replyHeader+inlineName+dataSize]}
+		MountID:    MountID(binary.LittleEndian.Uint64(message.Payload[64:])),
+		Created:    ramfs.Timestamp{Seconds: int64(binary.LittleEndian.Uint64(message.Payload[32:])), Nanoseconds: binary.LittleEndian.Uint32(message.Payload[48:]), Available: metadata&1 != 0},
+		Modified:   ramfs.Timestamp{Seconds: int64(binary.LittleEndian.Uint64(message.Payload[40:])), Nanoseconds: binary.LittleEndian.Uint32(message.Payload[52:]), Available: metadata&2 != 0},
+		Attributes: ramfs.Attributes(message.Payload[56]), AttributesAvailable: metadata&4 != 0,
+		Filesystem: ramfs.FilesystemInfo{Type: ramfs.FilesystemType(message.Payload[96]), TotalBytes: binary.LittleEndian.Uint64(message.Payload[72:]), FreeBytes: binary.LittleEndian.Uint64(message.Payload[80:]), AvailableBytes: binary.LittleEndian.Uint64(message.Payload[88:]), ReadOnly: message.Payload[97]&1 != 0, CapacityAvailable: message.Payload[97]&2 != 0},
+		Name:       message.Payload[replyHeader : replyHeader+inlineName],
+		Data:       message.Payload[replyHeader+inlineName : replyHeader+inlineName+dataSize]}
 	if attached {
 		reply.AttachedName = uint16(nameSize)
+	}
+	if reply.Operation == OperationFilesystemInfo && !reply.Filesystem.SetVolumeName(reply.Name) {
+		return Reply{}, false
+	}
+	if !reply.Created.Valid() || !reply.Modified.Valid() || reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
+		reply.Status == StatusOK && (reply.Operation == OperationFilesystemInfo || reply.Operation == OperationReadMount) && reply.Filesystem.Type == 0 {
+		return Reply{}, false
 	}
 	return reply, true
 }
@@ -208,7 +274,7 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.Operation < OperationOpen || request.Operation > lastOperation || correlation == 0 ||
 		len(request.Path) > limits.PathMax || len(request.Target) > limits.PathMax || len(request.Data) > MaxProtocolData ||
-		request.NameReturn && request.Operation != OperationReadDir || request.PathsAttached && request.Operation.Bulk() {
+		request.NameReturn && request.Operation != OperationReadDir && request.Operation != OperationReadMount || request.PathsAttached && request.Operation.Bulk() {
 		return ipc.Message{}, false
 	}
 	inline := len(request.Path) + len(request.Target)
@@ -232,6 +298,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	binary.LittleEndian.PutUint64(message.Payload[16:], request.Offset)
 	binary.LittleEndian.PutUint32(message.Payload[24:], request.Size)
 	binary.LittleEndian.PutUint32(message.Payload[28:], flags)
+	binary.LittleEndian.PutUint64(message.Payload[32:], uint64(request.MountID))
 	offset := protocolHeader
 	if !request.PathsAttached {
 		offset += copy(message.Payload[offset:], request.Path)
@@ -262,7 +329,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	}
 	operation := Operation(message.Payload[0])
 	rights := Rights(message.Payload[1])
-	if operation < OperationOpen || operation > lastOperation || rights&^(Read|Write) != 0 || flags&flagNameReturn != 0 && operation != OperationReadDir || attached && operation.Bulk() {
+	if operation < OperationOpen || operation > lastOperation || rights&^(Read|Write) != 0 || flags&flagNameReturn != 0 && operation != OperationReadDir && operation != OperationReadMount || attached && operation.Bulk() {
 		return Request{}, false
 	}
 	request := Request{
@@ -271,6 +338,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		Handle:        Handle(binary.LittleEndian.Uint64(message.Payload[8:])),
 		Offset:        binary.LittleEndian.Uint64(message.Payload[16:]),
 		Size:          binary.LittleEndian.Uint32(message.Payload[24:]),
+		MountID:       MountID(binary.LittleEndian.Uint64(message.Payload[32:])),
 		PathsAttached: attached,
 		NameReturn:    flags&flagNameReturn != 0,
 		pathSize:      pathSize,

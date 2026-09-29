@@ -68,6 +68,42 @@ one `WaitAny` loop and closes a session when its peer dies.
 Open-file handles inside VFS are generation-safe, carry their own rights and
 offset, and are per session.
 
+## Native metadata
+
+VFS `stat` and directory replies use one native fixed-width metadata model
+(ADR 0126): object kind, 64-bit size, optional UTC creation and modification
+timestamps, stable attributes, and a namespace mount ID. Availability bits
+distinguish absent timestamps or attributes from real zero values. The
+attributes are directory, read-only, hidden, system and archive; no FAT raw
+byte or invented Unix ownership/mode field crosses the boundary.
+
+FAT32 translates its directory-entry fields in the filesystem service. RAMFS
+uses the native realtime clock for creation and modification events. The
+system image reports its read-only state and explicitly leaves timestamps
+unavailable. Mount IDs are descriptions assigned by VFS, not handles and not
+authority.
+
+## Capacity and mounts
+
+`FilesystemInfo` reports a stable filesystem type, 64-bit total, free and
+available byte counts, read-only state, explicit capacity availability and an
+optional bounded volume label (ADR 0127). A client selects the mounted
+filesystem by canonical path or generation-safe mount ID. The fixed VFS mount
+table is enumerated with a bounded cursor; entries expose only descriptive IDs,
+paths and filesystem properties, never backend handles or endpoints.
+
+RAMFS derives capacity from its configured page quota and current page use.
+The immutable system image reports its archive length and zero reusable bytes.
+FAT32 derives total bytes from validated cluster geometry with checked 64-bit
+arithmetic and refreshes an unknown free count from the FAT rather than trusting
+the advisory FSInfo sector.
+
+The `df` and `mount` commands receive only an ordinary VFS session. `df` uses
+mount enumeration followed by an information query for current capacity;
+`mount` prints the bounded descriptive entries and has no mutation mode.
+Formatting uses integer binary units, and explicitly prints `-` when capacity
+is unavailable.
+
 ## Request path
 
 A `cat /persist/a.txt` stage issues `GVF1` open, read, and close requests on its
@@ -78,9 +114,11 @@ block client endpoint, and the block service forwards it to the driver over a
 private channel. The driver performs the virtqueue transfer and waits for
 IRQ 11. Replies unwind in reverse.
 
-Small requests carry their data inline: at most 224 bytes per VFS reply and per
-VFS write request (GVF1 version 5 moved a rename's target out of the data
-field, which had held write data to 32 bytes). Large ones move it through shared memory instead
+Small requests carry their data inline. Metadata and capacity replies use the
+GVF1 version 10 fixed header; long names and mount paths continue through an
+attached object. Write
+requests retain their existing bounded transport. Large transfers move through
+shared memory instead
 (ADR 0107):
 
 - A client creates a buffer with `MemoryCreate`, maps it, and attaches to each

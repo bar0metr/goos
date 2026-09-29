@@ -76,7 +76,7 @@ func (fs *FileSystem) MkdirName(parent ramfs.NodeID, name ramfs.Name) (ramfs.Nod
 
 func (fs *FileSystem) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if id == rootNode && fs.mounted {
-		return ramfs.Stat{ID: id, Kind: ramfs.KindDirectory}, ramfs.StatusOK
+		return ramfs.Stat{ID: id, Kind: ramfs.KindDirectory, Attributes: ramfs.AttrDirectory, AttributesAvailable: true}, ramfs.StatusOK
 	}
 	_, _, entry, status := fs.node(id)
 	if status != ramfs.StatusOK {

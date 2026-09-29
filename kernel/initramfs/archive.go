@@ -48,6 +48,16 @@ func (archive *Archive) Init(data []byte) bool {
 
 func (archive *Archive) Root() ramfs.NodeID { return rootNode }
 
+// FilesystemInfo reports the immutable archive bytes. They cannot be reused,
+// so free and available space are both zero.
+func (archive *Archive) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
+	if len(archive.data) == 0 {
+		return ramfs.FilesystemInfo{}, ramfs.StatusIOError
+	}
+	return ramfs.FilesystemInfo{Type: ramfs.FilesystemSystemImage, TotalBytes: uint64(len(archive.data)),
+		ReadOnly: true, CapacityAvailable: true}, ramfs.StatusOK
+}
+
 func (archive *Archive) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
 	prefix, status := archive.directoryPath(parent)
 	if status != ramfs.StatusOK {
@@ -90,20 +100,28 @@ func (archive *Archive) Read(id ramfs.NodeID, offset uint64, target []byte) (int
 
 func (archive *Archive) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if id == rootNode {
-		return ramfs.Stat{ID: rootNode, Kind: ramfs.KindDirectory}, ramfs.StatusOK
+		return imageStat(rootNode, ramfs.KindDirectory, 0), ramfs.StatusOK
 	}
 	entry, ok := archive.member(id)
 	if !ok {
 		return ramfs.Stat{}, ramfs.StatusNotFound
 	}
 	if entry.typeFlag == typeDirectory {
-		return ramfs.Stat{ID: id, Kind: ramfs.KindDirectory}, ramfs.StatusOK
+		return imageStat(id, ramfs.KindDirectory, 0), ramfs.StatusOK
 	}
 	data, resolved := archive.content(entry)
 	if !resolved {
 		return ramfs.Stat{}, ramfs.StatusNotFound
 	}
-	return ramfs.Stat{ID: id, Kind: ramfs.KindFile, Size: uint64(len(data))}, ramfs.StatusOK
+	return imageStat(id, ramfs.KindFile, uint64(len(data))), ramfs.StatusOK
+}
+
+func imageStat(id ramfs.NodeID, kind ramfs.Kind, size uint64) ramfs.Stat {
+	attributes := ramfs.AttrReadOnly
+	if kind == ramfs.KindDirectory {
+		attributes |= ramfs.AttrDirectory
+	}
+	return ramfs.Stat{ID: id, Kind: kind, Size: size, Attributes: attributes, AttributesAvailable: true}
 }
 
 func (archive *Archive) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int, ramfs.Status) {

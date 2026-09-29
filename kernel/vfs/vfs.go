@@ -71,6 +71,11 @@ const (
 
 type Handle uint64
 
+// MountID is a descriptive namespace identity. Its generation prevents a
+// stale enumeration result from naming a later occupant of the same slot.
+// It grants no file-operation authority.
+type MountID uint64
+
 // Owner is who opened a file: the VFS passes the session a request arrived
 // on. A handle is valid only for its owner, and an owner's files are closed
 // together when it goes. Zero is no owner.
@@ -89,6 +94,10 @@ type Backend interface {
 	UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+type filesystemBackend interface {
+	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
+}
+
 // ObjectBackend gives an opened file identity independent of pathname lookup.
 // Backends whose node IDs are already stable need not implement it.
 type ObjectBackend interface {
@@ -97,11 +106,22 @@ type ObjectBackend interface {
 }
 
 type mount struct {
-	backend Backend
-	root    ramfs.NodeID
-	path    [MaxPath]byte
-	size    uint16
-	used    bool
+	backend        Backend
+	root           ramfs.NodeID
+	path           [MaxPath]byte
+	size           uint16
+	generation     uint32
+	filesystemType ramfs.FilesystemType
+	readOnly       bool
+	used           bool
+}
+
+// MountInfo is one bounded mount-table entry.
+type MountInfo struct {
+	ID         MountID
+	Path       [MaxPath]byte
+	PathSize   uint16
+	Filesystem ramfs.FilesystemInfo
 }
 
 type openFile struct {
@@ -150,7 +170,15 @@ func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeI
 	for index := range namespace.mounts {
 		entry := &namespace.mounts[index]
 		if !entry.used {
+			if entry.generation == 0 {
+				entry.generation = 1
+			}
 			entry.backend, entry.root, entry.size, entry.used = backend, root, uint16(size), true
+			if filesystem, supported := backend.(filesystemBackend); supported {
+				if info, status := filesystem.FilesystemInfo(); status == ramfs.StatusOK && info.Valid() && info.Type != 0 {
+					entry.filesystemType, entry.readOnly = info.Type, info.ReadOnly
+				}
+			}
 			copy(entry.path[:], canonical[:size])
 			namespace.invalidate()
 			return StatusOK
@@ -183,7 +211,12 @@ func (namespace *Namespace) UnmountBackend(backend Backend) Status {
 	}
 	for index := range namespace.mounts {
 		if namespace.mounts[index].used && namespace.mounts[index].backend == backend {
-			namespace.mounts[index] = mount{}
+			entry := &namespace.mounts[index]
+			generation := entry.generation + 1
+			if generation == 0 {
+				generation = 1
+			}
+			*entry = mount{generation: generation}
 		}
 	}
 	namespace.invalidate()
@@ -431,6 +464,9 @@ func (namespace *Namespace) Stat(path []byte) (ramfs.Stat, Status) {
 		return ramfs.Stat{}, status
 	}
 	stat, backendStatus := namespace.mounts[mountIndex].backend.Stat(node)
+	if backendStatus == ramfs.StatusOK {
+		stat.MountID = uint64(namespace.mountID(int(mountIndex)))
+	}
 	return stat, mapStatus(backendStatus)
 }
 
@@ -451,6 +487,9 @@ func (namespace *Namespace) ReadDir(path []byte, cursor int) (ramfs.Entry, int, 
 	if cursor < mountCursor {
 		entry, next, backendStatus := namespace.mounts[mountIndex].backend.ReadDir(node, cursor)
 		if backendStatus != ramfs.StatusNotFound {
+			if backendStatus == ramfs.StatusOK {
+				entry.Stat.MountID = uint64(namespace.mountID(int(mountIndex)))
+			}
 			return entry, next, mapStatus(backendStatus)
 		}
 		cursor = mountCursor
@@ -489,10 +528,94 @@ func (namespace *Namespace) mountedEntry(path []byte, node ramfs.NodeID, owner u
 			stat = ramfs.Stat{ID: mounted.root, Kind: ramfs.KindDirectory}
 		}
 		entry := ramfs.Entry{Stat: stat, Size: uint16(len(component))}
+		entry.Stat.MountID = uint64(namespace.mountID(index))
 		copy(entry.Name[:], component)
 		return entry, mountCursor + index + 1, StatusOK
 	}
 	return ramfs.Entry{}, mountCursor + len(namespace.mounts), StatusNotFound
+}
+
+// FilesystemInfo reports the mount selected by path, or the exact mount named
+// by id. Exactly one selector must be supplied.
+func (namespace *Namespace) FilesystemInfo(path []byte, id MountID) (ramfs.FilesystemInfo, MountID, Status) {
+	if (len(path) == 0) == (id == 0) {
+		return ramfs.FilesystemInfo{}, 0, StatusInvalidArgument
+	}
+	index := -1
+	if id != 0 {
+		var ok bool
+		index, ok = namespace.mountIndex(id)
+		if !ok {
+			return ramfs.FilesystemInfo{}, 0, StatusNotFound
+		}
+	} else {
+		resolved, _, status := namespace.Resolve(path)
+		if status != StatusOK {
+			return ramfs.FilesystemInfo{}, 0, status
+		}
+		index = int(resolved)
+	}
+	backend, ok := namespace.mounts[index].backend.(filesystemBackend)
+	if !ok {
+		return ramfs.FilesystemInfo{}, 0, StatusUnsupported
+	}
+	info, backendStatus := backend.FilesystemInfo()
+	if backendStatus != ramfs.StatusOK || !info.Valid() {
+		if backendStatus == ramfs.StatusOK {
+			backendStatus = ramfs.StatusIOError
+		}
+		return ramfs.FilesystemInfo{}, 0, mapStatus(backendStatus)
+	}
+	return info, namespace.mountID(index), StatusOK
+}
+
+// ReadMount returns the next used slot at or after cursor. The fixed table
+// makes enumeration bounded and stable while it is unchanged.
+func (namespace *Namespace) ReadMount(cursor int) (MountInfo, int, Status) {
+	if cursor < 0 || cursor > len(namespace.mounts) {
+		return MountInfo{}, cursor, StatusInvalidArgument
+	}
+	for index := cursor; index < len(namespace.mounts); index++ {
+		entry := &namespace.mounts[index]
+		if !entry.used {
+			continue
+		}
+		info := ramfs.FilesystemInfo{Type: entry.filesystemType, ReadOnly: entry.readOnly}
+		if info.Type == 0 {
+			filesystem, supported := entry.backend.(filesystemBackend)
+			if !supported {
+				return MountInfo{}, index, StatusUnsupported
+			}
+			var backendStatus ramfs.Status
+			info, backendStatus = filesystem.FilesystemInfo()
+			if backendStatus != ramfs.StatusOK || !info.Valid() || info.Type == 0 {
+				if backendStatus == ramfs.StatusOK {
+					backendStatus = ramfs.StatusIOError
+				}
+				return MountInfo{}, index, mapStatus(backendStatus)
+			}
+			entry.filesystemType, entry.readOnly = info.Type, info.ReadOnly
+		}
+		info = ramfs.FilesystemInfo{Type: entry.filesystemType, ReadOnly: entry.readOnly}
+		result := MountInfo{ID: namespace.mountID(index), PathSize: entry.size, Filesystem: info}
+		copy(result.Path[:], entry.path[:entry.size])
+		return result, index + 1, StatusOK
+	}
+	return MountInfo{}, len(namespace.mounts), StatusNotFound
+}
+
+func (namespace *Namespace) mountID(index int) MountID {
+	entry := &namespace.mounts[index]
+	return MountID(uint64(entry.generation)<<32 | uint64(index+1))
+}
+
+func (namespace *Namespace) mountIndex(id MountID) (int, bool) {
+	index := int(uint32(id)) - 1
+	if index < 0 || index >= len(namespace.mounts) {
+		return 0, false
+	}
+	entry := &namespace.mounts[index]
+	return index, entry.used && uint32(uint64(id)>>32) == entry.generation
 }
 
 func (namespace *Namespace) Truncate(path []byte, size uint64) Status {

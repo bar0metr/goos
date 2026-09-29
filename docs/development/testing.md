@@ -123,6 +123,9 @@ keys reach the framebuffer console's session, `tty-fb` and `shell-fb`
 output there from the first key, so the `PS2_KEYBOARD_OK` marker and exact
 command output prove the input traversed IRQ1, the decoder, the keyboard ring,
 `tty-fb`, and `shell-fb`. The test
+also runs `mount` and `df` through that framebuffer session and requires their
+validation markers, proving the filesystem-information commands use the same
+terminal-independent command path. The test
 also requires `FRAMEBUFFER_USER_ISOLATION_OK`; it does not inspect text or
 require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
@@ -229,10 +232,11 @@ twice and checking that the end stays open until both copies close, and that
 closed and wrong-direction handles are refused.
 
 The filesystem group also asserts the namespace layout: that `ls /` names every
-mount, that `/system` is the boot image with its twenty utilities listed under
+mount, that `/system` is the boot image with its utilities listed under
 `/system/bin`, that `mkdir /system/backdoor` is refused with "read-only
 filesystem", and that a file written through `/home` reads back through
-`/persist/home` as the same bytes.
+`/persist/home` as the same bytes. It executes `mount` and `df`, checks the
+system-image and persistent-volume rows, and verifies the capacity columns.
 
 The main phase also reads `runtime.heapptr` through the QEMU monitor at the
 first prompt and again at the end, and fails if it moved: the kernel leaks every

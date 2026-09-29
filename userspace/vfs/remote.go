@@ -102,7 +102,7 @@ func (remote *Remote) call(request fsproto.Request) (fsproto.Reply, ramfs.Status
 // looked records the attributes a lookup reply carried.
 func (remote *Remote) looked(reply fsproto.Reply, status ramfs.Status) (ramfs.NodeID, ramfs.Status) {
 	if status == ramfs.StatusOK {
-		remote.remember(ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value})
+		remote.remember(statOf(reply))
 	}
 	return reply.Node, status
 }
@@ -127,6 +127,17 @@ func (remote *Remote) Root() (ramfs.NodeID, ramfs.Status) {
 func (remote *Remote) Flush() bool {
 	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationFlush})
 	return status == ramfs.StatusOK
+}
+
+func (remote *Remote) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
+	reply, status := remote.call(fsproto.Request{Operation: fsproto.OperationFilesystemInfo})
+	if status != ramfs.StatusOK {
+		return ramfs.FilesystemInfo{}, status
+	}
+	if reply.Filesystem.Type == 0 || !reply.Filesystem.Valid() {
+		return ramfs.FilesystemInfo{}, ramfs.StatusIOError
+	}
+	return reply.Filesystem, ramfs.StatusOK
 }
 
 func (remote *Remote) OpenName(parent ramfs.NodeID, name ramfs.Name) (ramfs.NodeID, ramfs.Status) {
@@ -347,10 +358,17 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 			break
 		}
 	}
-	// A write past the end extends the file to where it stopped.
-	if stat, known := remote.cached(id); known && offset+uint64(total) > stat.Size {
-		stat.Size = offset + uint64(total)
-		remote.remember(stat)
+	// Keep the known size so an open handle can still recognize EOF. The
+	// service owns the new modification time, so mark only that field unknown;
+	// a later path stat obtains the authoritative value.
+	if total != 0 {
+		if stat, known := remote.cached(id); known {
+			if end := offset + uint64(total); end > stat.Size {
+				stat.Size = end
+			}
+			stat.Modified = ramfs.Timestamp{}
+			remote.remember(stat)
+		}
 	}
 	return total, ramfs.StatusOK
 }
@@ -383,24 +401,13 @@ func (remote *Remote) writeRun(id ramfs.NodeID, position uint64, data []byte) (i
 		}
 	}
 	remote.pages.DropPartial(id, -1)
-	if stat, known := remote.cached(id); known && position+reply.Value > stat.Size {
-		stat.Size = position + reply.Value
-		remote.remember(stat)
-	}
 	return int(reply.Value), ramfs.StatusOK
 }
 
 func (remote *Remote) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 	remote.pages.Forget(id)
 	_, status := remote.call(fsproto.Request{Operation: fsproto.OperationTruncate, Node: id, Offset: size})
-	stat, known := remote.cached(id)
-	switch {
-	case status == ramfs.StatusOK && known:
-		stat.Size = size
-		remote.remember(stat)
-	case status != ramfs.StatusOK:
-		remote.forget(id)
-	}
+	remote.forget(id)
 	return status
 }
 
@@ -412,7 +419,7 @@ func (remote *Remote) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if status != ramfs.StatusOK {
 		return ramfs.Stat{}, status
 	}
-	stat := ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value}
+	stat := statOf(reply)
 	remote.remember(stat)
 	return stat, ramfs.StatusOK
 }
@@ -429,7 +436,13 @@ func (remote *Remote) ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int
 	if len(reply.Name) == 0 || len(reply.Name) > len(entry.Name) {
 		return ramfs.Entry{}, 0, ramfs.StatusIOError
 	}
-	entry.Stat = ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value}
+	entry.Stat = statOf(reply)
 	entry.Size = uint16(copy(entry.Name[:], reply.Name))
 	return entry, int(reply.Cursor), ramfs.StatusOK
+}
+
+func statOf(reply fsproto.Reply) ramfs.Stat {
+	return ramfs.Stat{ID: reply.Node, Kind: reply.Kind, Size: reply.Value,
+		Created: reply.Created, Modified: reply.Modified, Attributes: reply.Attributes,
+		AttributesAvailable: reply.AttributesAvailable}
 }

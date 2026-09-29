@@ -24,6 +24,10 @@ type objectVolume interface {
 	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
 }
 
+type filesystemVolume interface {
+	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
+}
+
 // Serve performs one decoded request on volume. A read fills, and a write
 // takes its bytes from, the request's slot of cache, the file cache mapping;
 // a listed name is placed in name, which the reply aliases until the caller
@@ -56,7 +60,7 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		// it a round trip (ADR 0096).
 		if reply.Status == ramfs.StatusOK && reply.Node != 0 {
 			if stat, status := volume.Stat(reply.Node); status == ramfs.StatusOK && stat.ID == reply.Node {
-				reply.Kind, reply.Value = stat.Kind, stat.Size
+				reply.setStat(stat)
 			}
 		}
 	case OperationRead, OperationWrite:
@@ -94,7 +98,8 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		reply.Node, reply.Status = objects.ReleaseObject(request.Node)
 	case OperationStat:
 		stat, status := volume.Stat(request.Node)
-		reply.Status, reply.Node, reply.Kind, reply.Value = status, stat.ID, stat.Kind, stat.Size
+		reply.Status = status
+		reply.setStat(stat)
 	case OperationReadDir:
 		entry, cursor, status := volume.ReadDir(request.Parent, int(request.Size))
 		reply.Status = status
@@ -103,7 +108,8 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 				reply.Status = ramfs.StatusIOError
 				break
 			}
-			reply.Node, reply.Kind, reply.Value, reply.Cursor = entry.Stat.ID, entry.Stat.Kind, entry.Stat.Size, uint32(cursor)
+			reply.setStat(entry.Stat)
+			reply.Cursor = uint32(cursor)
 			// The name is copied out: entry is a local, and the reply must
 			// not alias memory that is gone once Serve returns.
 			reply.Name = name[:copy(name[:], entry.Name[:entry.Size])]
@@ -112,8 +118,29 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		if !volume.Flush() {
 			reply.Status = ramfs.StatusIOError
 		}
+	case OperationFilesystemInfo:
+		filesystem, ok := volume.(filesystemVolume)
+		if !ok {
+			reply.Status = ramfs.StatusUnsupported
+			break
+		}
+		reply.Filesystem, reply.Status = filesystem.FilesystemInfo()
+		if reply.Status == ramfs.StatusOK {
+			if !reply.Filesystem.Valid() {
+				reply.Filesystem = ramfs.FilesystemInfo{}
+				reply.Status = ramfs.StatusIOError
+				break
+			}
+			reply.Name = name[:copy(name[:], reply.Filesystem.Name())]
+		}
 	default:
 		reply.Status = ramfs.StatusUnsupported
 	}
 	return reply
+}
+
+func (reply *Reply) setStat(stat ramfs.Stat) {
+	reply.Node, reply.Kind, reply.Value = stat.ID, stat.Kind, stat.Size
+	reply.Created, reply.Modified = stat.Created, stat.Modified
+	reply.Attributes, reply.AttributesAvailable = stat.Attributes, stat.AttributesAvailable
 }

@@ -492,6 +492,12 @@ and navigation key sequences, cursor addressing and 16-colour SGR in the
 framebuffer terminal, scoped raw terminal mode granted by the shell, a
 separate terminal service and shell for COM1 and for the framebuffer, and
 reusable terminal and non-fatal filesystem helpers. GoOS is
+developing 0.1.7 ([docs/releases/0.1.7.md](docs/releases/0.1.7.md)); its first
+two phases add typed file timestamps, stable native attributes, checked 64-bit
+filesystem capacity, bounded mount enumeration and generation-safe,
+non-authorizing mount identity through version 10 of the VFS and
+filesystem-service protocols. Native `df` and read-only `mount` expose that
+information without device authority (ADR 0126, ADR 0127). GoOS is
 licensed under GPL-3.0-only; third-party components retain their documented
 licenses.
 

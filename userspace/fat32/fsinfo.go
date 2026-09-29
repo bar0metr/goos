@@ -151,6 +151,33 @@ func (fs *FileSystem) FreeClusters() (uint32, ramfs.Status) {
 	return fs.free, ramfs.StatusOK
 }
 
+// FilesystemInfo derives capacity from validated geometry and the live free
+// cluster count. It never treats the advisory on-disk FSInfo count as
+// authoritative.
+func (fs *FileSystem) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
+	freeClusters, status := fs.FreeClusters()
+	if status != ramfs.StatusOK {
+		return ramfs.FilesystemInfo{}, status
+	}
+	total, ok := checkedCapacity(uint64(fs.clusters), fs.clusterSize)
+	if !ok {
+		return ramfs.FilesystemInfo{}, ramfs.StatusCorrupt
+	}
+	free, ok := checkedCapacity(uint64(freeClusters), fs.clusterSize)
+	if !ok || free > total {
+		return ramfs.FilesystemInfo{}, ramfs.StatusCorrupt
+	}
+	return ramfs.FilesystemInfo{Type: ramfs.FilesystemFAT32, TotalBytes: total, FreeBytes: free,
+		AvailableBytes: free, ReadOnly: fs.readOnly, CapacityAvailable: true}, ramfs.StatusOK
+}
+
+func checkedCapacity(count, size uint64) (uint64, bool) {
+	if size != 0 && count > ^uint64(0)/size {
+		return 0, false
+	}
+	return count * size, true
+}
+
 // claimed and released keep the count exact once it is known.
 func (fs *FileSystem) claimed() {
 	if fs.freeKnown {

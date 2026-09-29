@@ -32,6 +32,40 @@ func TestFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestMetadataUsesClockAndMarksUnavailableTime(t *testing.T) {
+	var fs FileSystem
+	current := Timestamp{Seconds: 100, Nanoseconds: 20, Available: true}
+	fs.SetClock(func() (Timestamp, bool) { return current, true })
+	root := fs.Init()
+	file, status := fs.Create(root, []byte("metadata"))
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	stat, _ := fs.Stat(file)
+	if stat.Created != current || stat.Modified != current || !stat.AttributesAvailable || stat.Attributes != 0 {
+		t.Fatalf("created metadata = %+v", stat)
+	}
+	current = Timestamp{Seconds: 200, Available: true}
+	if _, status := fs.Write(file, 0, []byte("x")); status != StatusOK {
+		t.Fatal(status)
+	}
+	stat, _ = fs.Stat(file)
+	if stat.Created.Seconds != 100 || stat.Modified != current {
+		t.Fatalf("updated metadata = %+v", stat)
+	}
+	rootStat, _ := fs.Stat(root)
+	if rootStat.Attributes != AttrDirectory || !rootStat.AttributesAvailable || rootStat.Modified.Seconds != 100 {
+		t.Fatalf("root metadata = %+v", rootStat)
+	}
+
+	var noClock FileSystem
+	plain, _ := noClock.Create(noClock.Init(), []byte("plain"))
+	stat, _ = noClock.Stat(plain)
+	if stat.Created.Available || stat.Modified.Available || !stat.Created.Valid() || !stat.Modified.Valid() {
+		t.Fatalf("unavailable timestamps = %+v", stat)
+	}
+}
+
 func TestDirectoryRenameAndUnlink(t *testing.T) {
 	var fs FileSystem
 	root := fs.Init()
@@ -110,6 +144,26 @@ func TestStructuredNameRejectsZeroValue(t *testing.T) {
 	}
 	if status := fs.RenameName(root, root, Name{}); status != StatusInvalidArgument {
 		t.Fatalf("zero name accepted by RenameName: %d", status)
+	}
+}
+
+func TestFilesystemInfoTracksPageQuota(t *testing.T) {
+	fs := &FileSystem{}
+	root := fs.Init()
+	before, status := fs.FilesystemInfo()
+	if status != StatusOK || before.Type != FilesystemRAMFS || before.ReadOnly || !before.CapacityAvailable || before.TotalBytes != DefaultPages*PageSize || before.FreeBytes != before.TotalBytes {
+		t.Fatalf("initial info: %+v status=%d", before, status)
+	}
+	file, status := fs.Create(root, []byte("page"))
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	if _, status = fs.Write(file, 0, []byte{1}); status != StatusOK {
+		t.Fatal(status)
+	}
+	after, status := fs.FilesystemInfo()
+	if status != StatusOK || after.FreeBytes != before.FreeBytes-PageSize || after.AvailableBytes != after.FreeBytes {
+		t.Fatalf("allocated info: %+v status=%d", after, status)
 	}
 }
 

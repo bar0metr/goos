@@ -78,6 +78,23 @@ func TestTimeEncodingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStatTranslatesMetadataToNativeTypes(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 9, 29, 12, 34, 57, 120000000, time.UTC), known: true}
+	fs, root := clocked(t, formattedDevice(), clock)
+	name, _ := ramfs.MakeName([]byte("native.txt"))
+	file, status := fs.CreateName(root, name)
+	if status != ramfs.StatusOK {
+		t.Fatal(status)
+	}
+	stat, status := fs.Stat(file)
+	if status != ramfs.StatusOK || !stat.Created.Available || !stat.Modified.Available || !stat.AttributesAvailable || stat.Attributes != ramfs.AttrArchive {
+		t.Fatalf("native stat = %+v, %d", stat, status)
+	}
+	if stat.Created.Seconds != clock.now.Unix() || stat.Created.Nanoseconds != 120000000 || stat.Modified.Seconds != clock.now.Unix()-1 || stat.Modified.Nanoseconds != 0 {
+		t.Fatalf("native timestamps = created %+v modified %+v", stat.Created, stat.Modified)
+	}
+}
+
 func TestInvalidTimesAreUnknown(t *testing.T) {
 	valid := encodeTime(time.Date(2020, 5, 17, 10, 20, 30, 0, time.UTC).UnixNano())
 	for name, test := range map[string]struct {
@@ -327,5 +344,30 @@ func TestDirectoryTimeIsBestEffort(t *testing.T) {
 	fs, root = clocked(t, device, clock)
 	if _, status := fs.CreateName(mustOpen(t, fs, root, "dir"), mustName(t, "inside")); status != ramfs.StatusOK {
 		t.Fatalf("create under a damaged '..': %v", status)
+	}
+}
+
+func TestFilesystemInfoUses64BitCapacityAndLiveFreeCount(t *testing.T) {
+	fs := &FileSystem{mounted: true, freeKnown: true, clusters: 2_000_000, free: 1_500_000, clusterSize: 4096, readOnly: true}
+	info, status := fs.FilesystemInfo()
+	if status != ramfs.StatusOK || info.Type != ramfs.FilesystemFAT32 || info.TotalBytes != 8_192_000_000 || info.FreeBytes != 6_144_000_000 || info.AvailableBytes != info.FreeBytes || !info.ReadOnly {
+		t.Fatalf("info=%+v status=%v", info, status)
+	}
+	if _, ok := checkedCapacity(^uint64(0), 2); ok {
+		t.Fatal("overflowing capacity accepted")
+	}
+}
+
+func TestVolumeExposesFilesystemInfo(t *testing.T) {
+	volume := &Volume{}
+	if info, status := volume.FilesystemInfo(); status != ramfs.StatusIOError || info.Type != 0 {
+		t.Fatalf("unmounted info=%+v status=%v", info, status)
+	}
+	if !volume.Mount(formattedDevice()) {
+		t.Fatal("mount")
+	}
+	info, status := volume.FilesystemInfo()
+	if status != ramfs.StatusOK || info.Type != ramfs.FilesystemFAT32 || info.TotalBytes == 0 || !info.CapacityAvailable {
+		t.Fatalf("mounted info=%+v status=%v", info, status)
 	}
 }

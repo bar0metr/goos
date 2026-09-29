@@ -144,6 +144,12 @@ type_word() {
 	done
 }
 
+type_word m o u n t ret
+wait_for_log 'MOUNT_PROCESS_OK' 'mount command on framebuffer shell'
+type_word d f ret
+wait_for_log 'DF_PROCESS_OK' 'df command on framebuffer shell'
+printf 'PASS console-filesystem-info\n'
+
 type_word c d spc slash t m p ret
 type_word g f m ret
 wait_for_count 'F10.* Quit' 1 'file manager screen'
