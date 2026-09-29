@@ -178,6 +178,9 @@ func (*refusedVolume) ReadDir(ramfs.NodeID, int) (ramfs.Entry, int, ramfs.Status
 func (*refusedVolume) RenameName(ramfs.NodeID, ramfs.NodeID, ramfs.Name) ramfs.Status {
 	return ramfs.StatusIOError
 }
+func (*refusedVolume) ReplaceName(ramfs.NodeID, ramfs.NodeID, ramfs.Name) ramfs.Status {
+	return ramfs.StatusPermissionDenied
+}
 func (*refusedVolume) UnlinkName(ramfs.NodeID, ramfs.Name) ramfs.Status { return ramfs.StatusIOError }
 func (volume *refusedVolume) Flush() bool                               { volume.flushed = true; return true }
 
@@ -199,6 +202,9 @@ func TestServeReportsWhatTheVolumeCannotDo(t *testing.T) {
 	}
 	if reply := Serve(volume, Request{Operation: OperationOpen}, cache, &name); reply.Status != ramfs.StatusInvalidArgument {
 		t.Fatalf("open without a name = %d", reply.Status)
+	}
+	if reply := Serve(volume, Request{Operation: OperationReplace, Node: 5, Parent: 1, Name: []byte("doc")}, cache, &name); reply.Status != ramfs.StatusPermissionDenied {
+		t.Fatalf("replace did not reach the volume: %d", reply.Status)
 	}
 	if reply := Serve(volume, Request{Operation: OperationFlush}, cache, &name); reply.Status != ramfs.StatusOK || !volume.flushed {
 		t.Fatal("flush did not reach the device")

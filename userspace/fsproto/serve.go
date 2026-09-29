@@ -15,6 +15,9 @@ type Volume interface {
 	Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status)
 	ReadDir(parent ramfs.NodeID, cursor int) (ramfs.Entry, int, ramfs.Status)
 	RenameName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
+	// ReplaceName gives id the name of the existing file name in parent and
+	// removes that file (ADR 0129).
+	ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 	UnlinkName(parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 	Flush() bool
 }
@@ -26,10 +29,6 @@ type objectVolume interface {
 
 type filesystemVolume interface {
 	FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status)
-}
-
-type replaceVolume interface {
-	ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
 // Serve performs one decoded request on volume. A read fills, and a write
@@ -49,11 +48,7 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		}
 		switch request.Operation {
 		case OperationReplace:
-			if replacer, ok := volume.(replaceVolume); ok {
-				reply.Status = replacer.ReplaceName(request.Node, request.Parent, requested)
-			} else {
-				reply.Status = ramfs.StatusUnsupported
-			}
+			reply.Status = volume.ReplaceName(request.Node, request.Parent, requested)
 		case OperationOpen:
 			reply.Node, reply.Status = volume.OpenName(request.Parent, requested)
 		case OperationCreate:

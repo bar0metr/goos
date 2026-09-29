@@ -36,9 +36,9 @@ is described in [boot-chain.md](../security/boot-chain.md).
    reported.
 2. **Initramfs load.** Using the loaded-image and simple-file-system
    protocols, the kernel opens `\initramfs.tar` on its boot volume and reads it
-   into at most `boot.MaxInitramfs` (4 MiB) of `EfiLoaderData`
+   into at most `boot.MaxInitramfs` (6 MiB) of `EfiLoaderData`
    (`kernel/boot/uefi/initramfs.go`, ADR 0020). A larger archive stops the boot
-   with `PANIC: initramfs is larger than the 4 MiB the loader reads` instead of
+   with `PANIC: initramfs is larger than the 6 MiB the loader reads` instead of
    being used cut short, and `tools/initramfs` refuses to build one. The pages
    past the archive go back to the firmware.
 3. **Graphics discovery.** The kernel locates GOP, queries at most 256 modes,

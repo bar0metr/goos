@@ -220,7 +220,7 @@ func main() {
 
 	status = bootuefi.LoadInitramfs(&bootInfo)
 	if status == bootuefi.InitramfsTooLarge {
-		console.WriteString("PANIC: initramfs is larger than the 4 MiB the loader reads\n")
+		console.WriteString("PANIC: initramfs is larger than the 6 MiB the loader reads\n")
 		for {
 			amd64.Halt()
 		}

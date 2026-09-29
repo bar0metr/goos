@@ -65,12 +65,12 @@ func main() {
 	}
 	// The kernel reads at most boot.MaxInitramfs and refuses to boot from a
 	// larger archive, so the build refuses to produce one.
-	written, err := os.Stat(os.Args[12])
+	written, err := os.Stat(os.Args[13])
 	if err != nil {
 		fail(err)
 	}
 	if err := checkSize(written.Size()); err != nil {
-		os.Remove(os.Args[12])
+		os.Remove(os.Args[13])
 		fail(err)
 	}
 }
