@@ -1,6 +1,6 @@
-// Package elf validates the bounded static ELF64 subset accepted by the GoOS
-// Linux x86_64 compatibility layer. It produces metadata only; mapping the
-// validated plan belongs to the later Linux loader phase.
+// Package elf validates and maps the bounded static ELF64 subset accepted by
+// the GoOS Linux x86_64 compatibility layer. Parsing remains pure; MapImage
+// records a validated plan in the common lazy executable region model.
 package elf
 
 import "encoding/binary"
@@ -166,7 +166,7 @@ func Parse(data []byte, config Config) (Image, Error) {
 }
 
 // ParseSource reads only the ELF header and bounded program-header table.
-// Segment contents remain in the stable source for the later mapping phase.
+// Segment contents remain in the stable source for lazy mapping by MapImage.
 func ParseSource(source Source, config Config) (Image, Error) {
 	var image Image
 	if !config.valid() {

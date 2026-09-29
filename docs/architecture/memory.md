@@ -111,7 +111,7 @@ User addresses are canonical lower-half addresses in `[0x1000,
 | `0x00400000` | self-test probe page (validation build) |
 | `0x00402000` | low-address self-test code (validation build) |
 | `0x00404000` | low-address self-test data (validation build) |
-| `0x40002000` – `2 GiB` | image segments; static small-code-model executables |
+| `0x1000` – `2 GiB` | image segments; native images normally start at `0x40002000`, Linux `ET_EXEC` may use conventional low addresses such as `0x400000` |
 | `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec area) |
 | `0x0000081000000000` | DMA window |
 | `0x0000082000000000` | system image window |
@@ -138,6 +138,13 @@ protection refuses, an address in no region, a spent page quota — retires the
 process and logs which it was (`user fault: guard page`, `access not
 permitted`, `no mapping`, `page quota exhausted`). A fault in kernel mode is
 still fatal.
+
+Linux ELF mappings use the same mechanism. A validated `PT_LOAD` becomes a
+pinned image region whose source offset and byte count cover the ELF-aligned
+file window. First touch reads bytes through `p_filesz`; the remainder of the
+page-rounded `p_memsz` range is zero-filled. The Linux stack is an 8 MiB
+anonymous RW/NX reservation ending at `UserStackTop`, with a 64 KiB guard, and
+also grows through demand-zero faults.
 
 **Native calls.** `VMMap` reserves anonymous memory at a free address the
 caller names or one the kernel chooses; `VMUnmap` removes a range and frees the

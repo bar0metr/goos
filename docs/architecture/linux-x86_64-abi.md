@@ -35,6 +35,21 @@ against their containing loads. `PT_INTERP`, `PT_DYNAMIC`, executable stack,
 W+X, unknown program-header kinds, and malformed arithmetic are rejected.
 Static PIE (`ET_DYN`) remains P2. Phase 3 does not map or execute ELF images.
 
+## Mapping status after Phase 4
+
+Validated loads become pinned image regions backed by the existing stable
+executable source. Each region retains the page-aligned virtual range, aligned
+file offset, file-backed byte count, final protection, and source identity.
+The shared page-fault path reads file bytes on first touch and supplies zeroes
+after `p_filesz`; its existing quota accounting and W^X checks remain in force.
+
+The mapping boundary rechecks source length, range arithmetic, overlap, entry
+placement, and protections. Linux `ET_EXEC` may start at `0x400000`; load pages
+must remain below 2 GiB, away from fixed GoOS user windows. The Linux stack is
+reserved as 8 MiB RW/NX demand-zero memory below `vm.UserStackTop`, with a
+64 KiB guard. No initial stack page or System V startup vector exists until
+Phase 5, and the mapper is not connected to PID 1 launch until Phase 6.
+
 ## Validation
 
 The validation kernel runs a synthetic `LinuxX8664` ring-3 task through two

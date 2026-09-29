@@ -1,5 +1,17 @@
 package loader
 
+// Origin names where an image's bytes live, so a page can be read from there
+// when a process first touches it (ADR 0106): an extent of the system image,
+// by its key, or an executable object, by its identity. Exactly one field is
+// set for a lazy image.
+type Origin struct {
+	Key    uint64
+	Object uint64
+}
+
+// Valid reports whether the origin names one unambiguous lazy source.
+func (origin Origin) Valid() bool { return (origin.Key == 0) != (origin.Object == 0) }
+
 // MaxImageExtent bounds the offset and the length of an executable named
 // inside an image object. Both must fit in 32 bits so that together they form
 // one shared-page cache key; the system image itself is far smaller (ADR 0087).

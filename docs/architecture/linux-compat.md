@@ -4,8 +4,10 @@
 in ADRs 0132 through 0137. Phase 1 implements immutable Process ABI identity.
 Phase 2 implements the dedicated Linux x86_64 `SYSCALL`/IRETQ entry and rejects
 wrong-ABI entry at both gates. Phase 3 implements the bounded static ELF64
-parser and load-plan validation. Linux ELF mapping, startup, launch, and
-semantic syscall translation are not implemented yet.
+parser and load-plan validation. Phase 4 records validated `PT_LOAD` ranges in
+the common lazy executable region model and reserves the guarded Linux stack.
+Linux initial-stack contents, launch, and semantic syscall translation are not
+implemented yet.
 
 ## Principles
 
@@ -21,7 +23,7 @@ semantic syscall translation are not implemented yet.
 
 ## Components
 
-### ELF loader
+### ELF loader and mapper
 
 Linux ELF is a distinct format from the native envelope
 ([native-images.md](../kernel/native-images.md)). The implemented Phase 3
@@ -36,9 +38,19 @@ parser:
 5. records validated `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO`
    metadata from the existing stable executable source.
 
-It does not map pages or launch a process. Later phases will reuse the native
-loader's lazy source backing and demand-zero path, then build `argc`, `argv`,
-`envp`, and auxv on a Linux initial stack. `ET_DYN` remains P2 scope.
+Phase 4 maps that plan as pinned `region.Image` reservations backed by the same
+stable system-image extent or executable object as native images. Pages remain
+absent until touched. The common fault path reads the file-backed prefix,
+zero-fills BSS, enforces final `R--`/`RW-`/`R-X` permissions, and charges every
+private frame and new page table to the process. A fault outside a reserved
+load remains an ordinary unmapped fault.
+
+Congruent non-page-aligned loads retain their aligned file window. The mapper
+revalidates the exported plan and current source length, preflights all region
+collisions, and accepts conventional low addresses such as `0x400000` while
+keeping loads below the fixed GoOS user windows. It also reserves an 8 MiB NX
+demand-zero stack with a 64 KiB guard. Phase 5 will write `argc`, `argv`,
+`envp`, and auxv; Phase 4 does not launch a process. `ET_DYN` remains P2 scope.
 
 ### Syscall entry
 
