@@ -20,7 +20,7 @@ func userspaceMain() { utility.Run(manifest, run) }
 func main() {}
 
 func run(data startup.Data) {
-	utility.Print(data.CWD())
+	utility.PrintName(data.CWD())
 	utility.EndLine()
 	utility.Mark("PWD_PROCESS_OK\n")
 }

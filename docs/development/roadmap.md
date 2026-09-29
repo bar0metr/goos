@@ -452,7 +452,8 @@ adds whole-file `Replace` (ADR 0129), through which the new gap-buffer editor
 `edit` saves without truncating the original (ADR 0131). `gfm` starts `gview`
 and `edit` through a launch channel PID 1 grants by manifest, with the child's
 own grants and the caller's input (ADR 0130), and shows modification times and
-free space.
+free space. GoOS 0.1.7 is released (docs/releases/0.1.7.md); Linux ABI
+compatibility (Priority 5) is the next milestone.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

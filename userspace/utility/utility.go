@@ -21,6 +21,7 @@ import (
 	"goos/userspace/runtime/sys"
 	"goos/userspace/shell"
 	"goos/userspace/startup"
+	"goos/userspace/terminal"
 )
 
 var wire [ipc.WireMaxSize]byte
@@ -108,7 +109,13 @@ func Fail(path []byte, reason string) {
 	size := copy(errorBuffer[:limit], commandName)
 	size += copy(errorBuffer[size:limit], ": ")
 	if path != nil {
-		size += copy(errorBuffer[size:limit], path)
+		// The path may have come from a directory listing: its controls are
+		// shown, not sent.
+		for index := 0; index < len(path) && size < limit; {
+			var character []byte
+			character, index = terminal.Printable(path, index)
+			size += copy(errorBuffer[size:limit], character)
+		}
 		size += copy(errorBuffer[size:limit], ": ")
 	}
 	size += copy(errorBuffer[size:limit], reason)
@@ -406,6 +413,18 @@ func Print(value []byte) {
 		copied := copy(lineBuffer[lineSize:], value)
 		lineSize += copied
 		value = value[copied:]
+	}
+}
+
+// PrintName appends a name that came from a filesystem, a path or a label,
+// with every character a terminal could obey shown as '?'
+// (terminal.Printable). File names are data and must not reach the terminal
+// as commands.
+func PrintName(value []byte) {
+	for index := 0; index < len(value); {
+		var character []byte
+		character, index = terminal.Printable(value, index)
+		Print(character)
 	}
 }
 

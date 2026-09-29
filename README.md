@@ -300,7 +300,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.6
+GoOS 0.1.7
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
@@ -499,9 +499,9 @@ two-pane file manager and what a full-screen program needs under it: F1-F12
 and navigation key sequences, cursor addressing and 16-colour SGR in the
 framebuffer terminal, scoped raw terminal mode granted by the shell, a
 separate terminal service and shell for COM1 and for the framebuffer, and
-reusable terminal and non-fatal filesystem helpers. GoOS is
-developing 0.1.7 ([docs/releases/0.1.7.md](docs/releases/0.1.7.md)); its first
-two phases add typed file timestamps, stable native attributes, checked 64-bit
+reusable terminal and non-fatal filesystem helpers. GoOS 0.1.7
+([docs/releases/0.1.7.md](docs/releases/0.1.7.md)) completes the native
+environment the Linux compatibility layer will build on. It adds typed file timestamps, stable native attributes, checked 64-bit
 filesystem capacity, bounded mount enumeration and generation-safe,
 non-authorizing mount identity through version 10 of the VFS and
 filesystem-service protocols. Native `df` and read-only `mount` expose that
@@ -514,7 +514,8 @@ content cannot become terminal commands (ADR 0126, ADR 0127, ADR 0128). A new
 truncating the original (ADR 0129). `gfm` starts `gview` and the new `edit`
 editor through a capability-bounded launch channel to PID 1 (ADR 0130), shows
 modification times and free space, and keeps its selection across edits.
-`edit` holds up to 1 MiB in a gap buffer (ADR 0131). GoOS is
+`edit` holds up to 1 MiB in a gap buffer (ADR 0131). Line commands show
+control characters in file names as `?`. GoOS is
 licensed under GPL-3.0-only; third-party components retain their documented
 licenses.
 

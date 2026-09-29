@@ -89,3 +89,16 @@ func TestOutputAllocatesNothing(t *testing.T) {
 		t.Fatalf("output allocated %.1f objects", allocations)
 	}
 }
+
+func TestPrintableHidesEveryControl(t *testing.T) {
+	input := []byte("a\x1b[2Jb\x7f\xc2\x9b\x9bé\xc2\xa0")
+	var shown []byte
+	for index := 0; index < len(input); {
+		var character []byte
+		character, index = Printable(input, index)
+		shown = append(shown, character...)
+	}
+	if string(shown) != "a?[2Jb???é\u00a0" {
+		t.Fatalf("shown %q", shown)
+	}
+}

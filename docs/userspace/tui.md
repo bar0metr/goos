@@ -21,7 +21,9 @@ cell is written, so applications get a stable full-screen surface of
 `Rect` uses checked half-open geometry and intersection for clipping. Every
 primitive clips to both its rectangle and the screen. Semantic roles select a
 pair from a `Theme`; the default theme uses only the existing sixteen ANSI
-colours.
+colours. The roles are ground, text, border, status, selection, dialog, input,
+cursor and warning, which draws error messages in amber like `gfm`'s status
+line.
 
 Borders use the light box-drawing glyphs supported by GoOS, with an explicit
 ASCII fallback. Text width and invalid UTF-8 handling follow
@@ -36,6 +38,9 @@ ASCII fallback. Text width and invalid UTF-8 handling follow
 - `ListViewport` keeps a selected item visible without owning the items.
 - `TextViewport` maps caller-owned text lines to rows, clips horizontally,
   scrolls, and overlays a selection and cursor.
+
+`gview` and `edit` draw through this package. `gfm` keeps its own renderer, and
+`Screen.Cell` lets host tests read a frame back.
 
 The package deliberately has no event bus, layout framework, menus, mouse
 routing or retained widget graph.

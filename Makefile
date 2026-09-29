@@ -447,6 +447,16 @@ docs:
 	@test -f docs/adr/0125-independent-serial-and-framebuffer-consoles.md
 	@test -f docs/userspace/file-manager.md
 	@test -f docs/releases/0.1.6.md
+	@test -f docs/adr/0126-native-filesystem-metadata.md
+	@test -f docs/adr/0127-filesystem-capacity-and-mount-enumeration.md
+	@test -f docs/adr/0128-bounded-terminal-cell-tui.md
+	@test -f docs/adr/0129-safe-native-file-replacement.md
+	@test -f docs/adr/0130-application-launch-and-nested-foreground.md
+	@test -f docs/adr/0131-bounded-native-text-editor.md
+	@test -f docs/userspace/tui.md
+	@test -f docs/userspace/viewer.md
+	@test -f docs/userspace/editor.md
+	@test -f docs/releases/0.1.7.md
 	@test -f docs/development/adding-command.md
 	@test -f docs/adr/0069-discoverable-mounts.md
 	@test -f docs/adr/0070-read-only-system-image-mount.md

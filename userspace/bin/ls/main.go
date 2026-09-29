@@ -32,7 +32,7 @@ func run(data startup.Data) {
 	stat, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationStat, Path: path})
 	utility.Check(stat, ok, path, false)
 	if stat.Kind == ramfs.KindFile {
-		utility.Print(baseName(path))
+		utility.PrintName(baseName(path))
 		utility.EndLine()
 		utility.Mark("LS_PROCESS_OK\n")
 		return
@@ -48,7 +48,7 @@ func run(data startup.Data) {
 			break
 		}
 		utility.Check(reply, received, path, false)
-		utility.Print(reply.Name)
+		utility.PrintName(reply.Name)
 		if reply.Kind == ramfs.KindDirectory {
 			utility.PrintText("/")
 		}

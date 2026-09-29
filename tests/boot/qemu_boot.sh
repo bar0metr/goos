@@ -581,6 +581,14 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 2
 	printf 'echo after-terminal-restart\n'
 	sleep 1
+	# A full-screen program on the restarted terminal service gets raw mode
+	# from the new session and leaves the shell usable.
+	printf 'gview /system/motd\n'
+	sleep 2
+	printf '\033[21~'
+	sleep 2
+	printf 'echo after-restarted-terminal-gview\n'
+	sleep 1
 	printf 'sleep 30 &\n'
 	sleep 1
 	printf 'fault shell\n'
@@ -643,6 +651,25 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	printf 'cat /home/demo/message.txt; echo after-vfs-restart\n'
 	sleep 2
 	printf 'jobs\n'
+	sleep 1
+	# After the VFS restart gfm and the viewer it starts get sessions from the
+	# new VFS (ADR 0130). Ctrl-C while gfm waits for the editor stops both,
+	# and the shell reads lines again.
+	printf 'cd /home/fm\n'
+	sleep 1
+	printf 'gfm\n'
+	sleep 2
+	printf '\033[H\033[B\033[13~'
+	sleep 2
+	printf '\033[21~'
+	sleep 2
+	printf '\033[14~'
+	sleep 2
+	printf '\003'
+	sleep 2
+	printf 'echo after-nested-interrupt; ps\n'
+	sleep 2
+	printf 'cd /\n'
 	sleep 1
 	# The configuration and log services restart on their own (ADR 0100):
 	# each gets the sessions its first launch consumed, and the shell and the
@@ -902,6 +929,11 @@ require_window df.system '^image  */system  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.
 require_window df.persist '^fat32  */persist  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *rw$' 'persistent capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_regex gview.serial-return '^after-gview-serial$' 'shell input after gview on COM1' "$log" 'gview /system/motd'
 require_marker launch.gfm GFM_LAUNCH_OK "$log"
+require_min_count launch.viewer-after-vfs-restart 'GVIEW_EXIT_OK' 4 "$log" 'echo after-nested-interrupt'
+require_regex launch.terminal-restart '^after-restarted-terminal-gview$' 'shell input after gview on a restarted terminal service' "$log" 'gview /system/motd'
+require_regex launch.nested-interrupt '^after-nested-interrupt$' 'shell input after Ctrl-C stopped gfm and its editor' "$log" 'echo after-nested-interrupt'
+forbid_window launch.nested-stopped ' \(gfm\|edit\)$' 'gfm and its editor stopped by Ctrl-C' "$log" 'goos> echo after-nested-interrupt' 'goos> cd /'
+
 require_marker launch.edit-exit EDIT_EXIT_OK "$log"
 require_marker launch.edit-save EDIT_SAVE_OK "$log"
 require_min_count launch.viewer-returns 'GVIEW_EXIT_OK' 2 "$log" 'gview /system/motd'
