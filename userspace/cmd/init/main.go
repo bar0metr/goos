@@ -122,7 +122,7 @@ var (
 	lifecycleCount   uint8
 	streamPair       [2]uint64
 	streamDescriptor [3]uint64
-	streamReadback   [16]byte
+	streamReadback   [256]byte
 )
 
 //export userspaceMain

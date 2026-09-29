@@ -56,8 +56,8 @@ const (
 )
 
 // Known reports whether number belongs to the bounded planning namespace.
-// Known does not mean implemented or release-scoped: every call still returns
-// ENOSYS until its semantic phase lands.
+// Known does not mean implemented or release-scoped: an absent handler still
+// returns ENOSYS.
 func (number Syscall) Known() bool {
 	switch number {
 	case SysRead, SysWrite, SysClose, SysFstat, SysPoll, SysLseek, SysMmap,

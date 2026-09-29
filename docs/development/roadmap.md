@@ -466,32 +466,26 @@ Begin Linux compatibility only after native process startup, persistent storage,
 and basic shell composition are stable.
 
 GoOS 0.2.0 uses a kernel-resident ABI adapter backed by the existing
-process-scoped capabilities and VFS service. Phase 0 is complete in ADRs 0132
-through 0137. Phase 1 adds immutable `Native`/`LinuxX8664` Process identity.
-Phase 2 installs a guarded x86_64 `SYSCALL`/IRETQ path, rejects wrong-ABI entry
-at both gates, and returns `-ENOSYS` for every syscall pending semantic
-implementation. Phase 3 adds a pure bounded ELF64 little-endian x86_64
-`ET_EXEC` parser and validated load plan. Phase 4 maps that plan through the
-common lazy executable-source regions, preserves demand-zero BSS and page
-accounting, and reserves an 8 MiB NX stack with a 64 KiB guard. Phase 5 builds
-the bounded, 16-byte-aligned Linux initial stack with argv, environment, and
-the required static-ELF auxv, then materializes only its occupied pages. It
-does not expose GST4 to the Linux process. Phase 6 is complete: PID 1 classifies
-native versus ELF candidates, while the kernel independently validates the
-stable source and enforces a four-handle Linux launch boundary with the large
-resource profile. Phase 7 is complete: Linux syscall numbers occupy a distinct,
-canonical x86_64 namespace, all scalar arguments are decoded, unsupported calls
-return `-ENOSYS`, and diagnostics stay bounded. Phase 8 is complete: one fixed
-continuation slot per generation-safe task persists stages, copied path data,
-correlation, and partial progress; the architecture can block without polling
-and resume the exact `SYSCALL` stage without repeating an issued effect.
+process-scoped capabilities and VFS service. Processes have immutable
+`Native`/`LinuxX8664` identity and distinct entry gates. Static ELF64 `ET_EXEC`
+is validated, lazily mapped with demand-zero BSS, and started on a bounded
+System V stack without exposing GST4. PID 1 classifies candidates while the
+kernel independently validates the stable source and enforces a four-handle
+Linux launch boundary with the large resource profile.
+
+Linux syscall numbers and errno values occupy distinct canonical namespaces.
+Unsupported calls return `-ENOSYS` with bounded diagnostics. One continuation
+slot per generation-safe task supports exact correlated blocking without
+polling or duplicated effects. Each Linux process has a 64-entry fd table whose
+initial descriptors refer privately to its supplied streams. Raw `read`,
+`write`, `exit`, and `exit_group` are implemented; a static validation ELF
+proves stdin, stdout, blocking wakeup, signed returns, and teardown.
 
 Order for the remaining release work:
 
-1. Linux errno translation and raw `write` plus `exit_group` hello world;
-2. memory, FS-base/TLS, and static musl startup;
-3. bounded fd table and VFS file/directory probes using continuations;
-4. selected static BusyBox applets as measured P1 interoperability.
+1. memory, FS-base/TLS, and static musl startup;
+2. VFS file/directory descriptors using continuations;
+3. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or
@@ -515,7 +509,7 @@ Hello GoOS
 
 Only after that milestone should a larger Go/TinyGo toolchain be evaluated.
 
-## Explicit non-priorities for the current phase
+## Explicit non-priorities
 
 Do not move these ahead of the native application and storage milestones unless
 a concrete blocker requires them:

@@ -2,8 +2,7 @@
 
 ## Status
 
-Accepted design for GoOS 0.2.0; implementation is deferred to the memory/TLS
-phase.
+Accepted.
 
 ## Context
 
@@ -19,7 +18,7 @@ and restored on every context switch. `ARCH_SET_FS` is the only supported Linux
 `arch_prctl` mutation in 0.2.0. `ARCH_SET_GS` is rejected.
 
 Kernel GS ownership is reserved for the architecture entry mechanism. User GS
-is not part of the 0.2.0 Linux contract. The Phase 2 entry implementation must
+is not part of the 0.2.0 Linux contract. The syscall entry implementation must
 document `SWAPGS`, nested interrupt, exception, and all return-path rules before
 enabling `SYSCALL`.
 

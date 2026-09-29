@@ -7,6 +7,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -209,6 +210,18 @@ func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
 	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindStream, Object: streamID, Side: side}, event)
 	count := streamWaitSet.Wake(streamID, side, reason, streamWakeResults[:])
 	for index := 0; index < count; index++ {
+		if state, found := linuxcompat.SyscallContinuations.Lookup(streamWakeResults[index].Task); found {
+			wake := linuxcompat.WakeMessage
+			if reason == ipc.WaitPeerDied {
+				wake = linuxcompat.WakePeerDied
+			}
+			if state.Correlation != streamID || !resumeLinuxSyscall(streamWakeResults[index].Task, streamID, wake) {
+				cancelTaskWaits(streamWakeResults[index].Task)
+				amd64.TerminateTask(uint64(streamWakeResults[index].Task), uint64(1)<<63|5)
+			}
+			streamWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
 		task, _, valid := streamWakeResults[index].Task.Parts()
 		if !valid {
 			streamWakeResults[index] = ipc.WaitResult{}

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted and implemented through Phase 2 for GoOS 0.2.0.
+Accepted.
 
 ## Context
 
@@ -41,8 +41,8 @@ The GS entry record carries the current process root for ABI authorization;
 the protected entry mapping supplies the kernel root used before dispatch.
 The compatibility dispatcher validates the saved user RIP and RSP before
 IRETQ. A malformed return frame retires the task instead of faulting in the
-kernel. Unknown syscalls return `-ENOSYS`; Phase 2 intentionally implements no
-semantic syscall. Neither gate infers personality from a request number.
+kernel. Unknown syscalls return `-ENOSYS`. Neither gate infers personality from
+a request number.
 
 ## Consequences
 

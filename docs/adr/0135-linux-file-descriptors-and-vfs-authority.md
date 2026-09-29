@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted design for GoOS 0.2.0.
+Accepted.
 
 ## Context
 
@@ -12,7 +12,7 @@ values as file descriptors would leak the native ABI and its authority model.
 
 ## Decision
 
-Each Linux Process owns a bounded compatibility fd table. An fd is an index
+Each Linux Process owns a 64-entry compatibility fd table. An fd is an index
 into compatibility state, never a GoOS handle. Entries refer to supplied stream
 capabilities or to open files reached through exactly one process-owned VFS
 session, with bounded flags and offset state. Descriptors 0, 1, and 2 bind only
@@ -21,8 +21,8 @@ to the streams supplied by launch policy.
 Path operations issue VFS IPC through that session. They never call a backend
 or filesystem implementation directly. Teardown closes every fd and the VFS
 session; peer death produces a Linux error and cannot trigger a privileged
-fallback. Duplication, when implemented, shares an open-file description and
-offset while retaining per-fd flags such as close-on-exec.
+fallback. Duplication shares an open-file description and offset while
+retaining per-fd flags such as close-on-exec.
 
 ## Consequences
 

@@ -27,7 +27,7 @@ func main() {
 		directory("system/"),
 		directory("system/bin/"),
 		directory("system/linux/"),
-		file("system/linux/phase6-probe", 0o555, linuxProbe()),
+		file("system/linux/raw-probe", 0o555, linuxProbe()),
 		// The message of the day belongs to the immutable system image rather
 		// than to the volatile root, because /system is a read-only mount of
 		// this archive.
@@ -78,34 +78,64 @@ func main() {
 	}
 }
 
-// linuxProbe is a static ELF64 ET_EXEC whose entry loops forever. Validation
-// launches and kills it to exercise policy, mapping and initial-stack setup
-// before semantic Linux exit support exists.
+// linuxProbe is a static ELF64 ET_EXEC that reads stdin, writes the bytes and
+// a marker to stdout, then exits through exit_group.
 func linuxProbe() []byte {
 	const (
 		base       = uint64(0x400000)
 		headerSize = 64
 		phdrSize   = 56
+		phdrCount  = 2
+		entry      = headerSize + phdrCount*phdrSize
+		dataOffset = 0x1000
+		data       = uint32(base + dataOffset)
+		marker     = uint32(base + entry + 100)
 	)
-	image := make([]byte, headerSize+phdrSize+2)
+	image := make([]byte, dataOffset)
 	copy(image[:], []byte{0x7f, 'E', 'L', 'F', 2, 1, 1})
 	binary.LittleEndian.PutUint16(image[16:], 2)
 	binary.LittleEndian.PutUint16(image[18:], 62)
 	binary.LittleEndian.PutUint32(image[20:], 1)
-	binary.LittleEndian.PutUint64(image[24:], base+headerSize+phdrSize)
+	binary.LittleEndian.PutUint64(image[24:], base+entry)
 	binary.LittleEndian.PutUint64(image[32:], headerSize)
 	binary.LittleEndian.PutUint16(image[52:], headerSize)
 	binary.LittleEndian.PutUint16(image[54:], phdrSize)
-	binary.LittleEndian.PutUint16(image[56:], 1)
+	binary.LittleEndian.PutUint16(image[56:], phdrCount)
 	program := image[headerSize:]
 	binary.LittleEndian.PutUint32(program[0:], 1)
 	binary.LittleEndian.PutUint32(program[4:], 5)
 	binary.LittleEndian.PutUint64(program[16:], base)
 	binary.LittleEndian.PutUint64(program[24:], base)
-	binary.LittleEndian.PutUint64(program[32:], uint64(len(image)))
-	binary.LittleEndian.PutUint64(program[40:], uint64(len(image)))
+	binary.LittleEndian.PutUint64(program[32:], uint64(entry+121))
+	binary.LittleEndian.PutUint64(program[40:], uint64(entry+121))
 	binary.LittleEndian.PutUint64(program[48:], 0x1000)
-	copy(image[headerSize+phdrSize:], []byte{0xeb, 0xfe})
+	dataProgram := program[phdrSize:]
+	binary.LittleEndian.PutUint32(dataProgram[0:], 1)
+	binary.LittleEndian.PutUint32(dataProgram[4:], 6)
+	binary.LittleEndian.PutUint64(dataProgram[8:], dataOffset)
+	binary.LittleEndian.PutUint64(dataProgram[16:], uint64(data))
+	binary.LittleEndian.PutUint64(dataProgram[24:], uint64(data))
+	binary.LittleEndian.PutUint64(dataProgram[40:], 256)
+	binary.LittleEndian.PutUint64(dataProgram[48:], 0x1000)
+	code := image[entry:]
+	copy(code, []byte{
+		0x31, 0xc0, // xor eax,eax: read
+		0x31, 0xff, // xor edi,edi: fd 0
+		0xbe, byte(data & 0xff), byte(data >> 8 & 0xff), byte(data >> 16 & 0xff), byte(data >> 24 & 0xff),
+		0xba, 3, 0, 0, 0, 0x0f, 0x05,
+		0x83, 0xf8, 3, 0x75, 0x41,
+		0xb8, 1, 0, 0, 0, 0xbf, 1, 0, 0, 0,
+		0xbe, byte(data & 0xff), byte(data >> 8 & 0xff), byte(data >> 16 & 0xff), byte(data >> 24 & 0xff),
+		0xba, 3, 0, 0, 0, 0x0f, 0x05,
+		0x83, 0xf8, 3, 0x75, 0x26,
+		0xb8, 1, 0, 0, 0, 0xbf, 1, 0, 0, 0,
+		0xbe, byte(marker & 0xff), byte(marker >> 8 & 0xff), byte(marker >> 16 & 0xff), byte(marker >> 24 & 0xff),
+		0xba, 21, 0, 0, 0, 0x0f, 0x05,
+		0x83, 0xf8, 21, 0x75, 0x0b,
+		0xb8, 231, 0, 0, 0, 0x31, 0xff, 0x0f, 0x05, 0x0f, 0x0b,
+		0xb8, 231, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0x0f, 0x05, 0x0f, 0x0b,
+	})
+	copy(code[100:], []byte("LINUX_RAW_SYSCALL_OK\n"))
 	return image
 }
 

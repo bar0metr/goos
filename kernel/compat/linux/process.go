@@ -4,13 +4,14 @@ package linux
 
 import (
 	"goos/internal/limits"
+	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
 	"goos/kernel/process"
 	"goos/userspace/startup"
 )
 
-// ProcessState retains the launch authority and working directory that later
-// syscall phases will translate into Linux fds and VFS requests. Native handle
+// ProcessState retains launch authority, descriptor state, and the working
+// directory used by Linux syscall translation. Native handle
 // IDs never enter the Linux initial stack.
 type ProcessState struct {
 	Root   uint64
@@ -18,6 +19,7 @@ type ProcessState struct {
 	Output handle.ID
 	Error  handle.ID
 	VFS    handle.ID
+	FDs    FDTable
 	cwd    [limits.PathMax]byte
 	cwdLen uint16
 }
@@ -51,27 +53,60 @@ func InstallProcess(root uint64, data startup.Data) bool {
 	if free == -1 {
 		return false
 	}
-	state := ProcessState{Root: root, Input: input, Output: output, Error: errorOutput, VFS: vfsHandle, cwdLen: uint16(len(data.CWD()))}
+	state := &processStates[free]
+	*state = ProcessState{}
+	state.Root, state.Input, state.Output = root, input, output
+	state.Error, state.VFS, state.cwdLen = errorOutput, vfsHandle, uint16(len(data.CWD()))
+	if !state.FDs.Initialize(input, output, errorOutput) {
+		*state = ProcessState{}
+		return false
+	}
 	copy(state.cwd[:], data.CWD())
-	processStates[free] = state
 	return true
 }
 
-func FindProcess(root uint64) (ProcessState, bool) {
+func LookupFD(root uint64, fd int) (FileDescription, bool) {
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root == root {
-				return processStates[index], true
+				return processStates[index].FDs.Lookup(fd)
 			}
 		}
 	}
-	return ProcessState{}, false
+	return FileDescription{}, false
+}
+
+func AllocateFD(root uint64, description FileDescription, closeOnExec bool) (int, abi.Errno) {
+	if root != 0 {
+		for index := range processStates {
+			if processStates[index].Root != root {
+				continue
+			}
+			if fd, ok := processStates[index].FDs.Allocate(description, closeOnExec); ok {
+				return fd, 0
+			}
+			return -1, abi.EMFILE
+		}
+	}
+	return -1, abi.EBADF
+}
+
+func FindProcess(root uint64) (*ProcessState, bool) {
+	if root != 0 {
+		for index := range processStates {
+			if processStates[index].Root == root {
+				return &processStates[index], true
+			}
+		}
+	}
+	return nil, false
 }
 
 func RemoveProcess(root uint64) bool {
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root == root {
+				processStates[index].FDs.CloseAll(nil)
 				processStates[index] = ProcessState{}
 				return true
 			}

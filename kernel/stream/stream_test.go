@@ -56,6 +56,17 @@ func TestWriteStatusReportsClosedReader(t *testing.T) {
 	}
 }
 
+func TestWriteStatusForUsesRequestedAtomicSize(t *testing.T) {
+	value := New()
+	payload := make([]byte, Capacity-7)
+	if count, status := value.Write(payload); status != StatusOK || count != len(payload) {
+		t.Fatalf("fill = %d status=%d", count, status)
+	}
+	if value.WriteStatusFor(7) != StatusOK || value.WriteStatusFor(8) != StatusWouldBlock {
+		t.Fatal("requested write size was not respected")
+	}
+}
+
 func TestRegistryEndpointIdentity(t *testing.T) {
 	var registry Registry
 	_, id, ok := registry.Create(7)

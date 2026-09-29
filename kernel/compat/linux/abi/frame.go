@@ -42,12 +42,6 @@ const (
 
 type Errno uint64
 
-const (
-	EPERM  Errno = 1
-	EINVAL Errno = 22
-	ENOSYS Errno = 38
-)
-
 // Negative returns the Linux x86_64 failure convention as an unsigned register
 // value. Errno zero is not a failure and is rejected rather than encoded.
 func Negative(errno Errno) uint64 {

@@ -199,15 +199,21 @@ func (stream *Stream) ReadStatus() Status {
 }
 
 func (stream *Stream) WriteStatus() Status {
+	return stream.WriteStatusFor(AtomicWrite)
+}
+
+// WriteStatusFor reports whether one bounded write can be accepted whole.
+func (stream *Stream) WriteStatusFor(size int) Status {
 	if stream == nil || !stream.writerOpen {
+		return StatusInvalidEndpoint
+	}
+	if size <= 0 || size > AtomicWrite {
 		return StatusInvalidEndpoint
 	}
 	if !stream.readerOpen {
 		return StatusPeerClosed
 	}
-	// Writable means a whole atomic write fits. A writer woken for less would
-	// find its write refused and wait again, which is a spin.
-	if Capacity-int(stream.count) < AtomicWrite {
+	if Capacity-int(stream.count) < size {
 		return StatusWouldBlock
 	}
 	return StatusOK

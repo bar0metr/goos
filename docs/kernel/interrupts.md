@@ -54,7 +54,7 @@ normal or blocking operation is decoded. A wrong-ABI entry returns
 Returning operations resume with `IRETQ`;
 Exit marks the task non-runnable and schedules its successor. The gate is
 native-only. Linux x86_64 will use a distinct `SYSCALL` entry and IRETQ return;
-that Phase 2 entry is installed through `IA32_LSTAR` (ADR 0132).
+that entry is installed through `IA32_LSTAR` (ADR 0132).
 
 `IA32_EFER.SCE`, `STAR`, `LSTAR`, and `FMASK` are configured before userspace.
 On Linux entry, SWAPGS exposes only a supervisor mapping containing the current
