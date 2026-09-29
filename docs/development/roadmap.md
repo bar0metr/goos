@@ -444,7 +444,9 @@ version 10 of both filesystem protocols: explicit UTC timestamps, stable
 attributes, checked 64-bit capacity, read-only state and a non-authorizing,
 generation-safe VFS mount ID. VFS provides bounded mount enumeration, while the
 read-only `df` and `mount` commands expose it without device authority.
-Viewer/editor work and nested application launch remain later 0.1.7 phases.
+The bounded `userspace/tui` layer now provides caller-owned screens, checked
+geometry, dirty rows, dialogs and text/list viewports (ADR 0128). Viewer/editor
+work and nested application launch remain later 0.1.7 phases.
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either

@@ -130,6 +130,12 @@ also requires `FRAMEBUFFER_USER_ISOLATION_OK`; it does not inspect text or
 require OCR. Its log and image are retained as
 `build/logs/console-gui.log` and `build/reports/console-gui.ppm`.
 
+`go test ./userspace/tui` drives the reusable TUI layer with a host model
+terminal. It checks clipped geometry, the protected bottom-right cell, dirty-row
+suppression, list/dialog layout at 80x24, text scrolling and overlays, rejected
+dimension overflow, and zero allocations while changed steady-state frames are
+rendered and flushed.
+
 The same run then drives the file manager through IRQ1 only (ADR 0124): `cd
 /tmp`, `gfm`, F1 and Escape, Tab, arrows, Home, End, PageDown, PageUp, F7 with
 a typed name, and F10. `tty-fb` copies `gfm`'s ANSI output to COM1, so the log
