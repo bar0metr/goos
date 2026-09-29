@@ -9,6 +9,8 @@ const (
 	interruptGate      = uint8(0x8e)
 	breakpointGate     = uint8(0xee)
 	userCallGate       = uint8(0xee)
+	linuxSTAR          = uint64(0x0013000800000000)
+	linuxFMASK         = uint64(1<<9 | 1<<10 | 1<<8 | 1<<18)
 )
 
 type IDTEntry struct {

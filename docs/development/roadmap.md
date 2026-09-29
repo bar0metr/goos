@@ -467,18 +467,18 @@ and basic shell composition are stable.
 
 GoOS 0.2.0 uses a kernel-resident ABI adapter backed by the existing
 process-scoped capabilities and VFS service. Phase 0 is complete in ADRs 0132
-through 0137. Phase 1 adds immutable `Native`/`LinuxX8664` Process identity and
-rejects wrong-ABI native-gate entry before dispatch. Linux `SYSCALL` entry and
-ELF loading are not implemented yet.
+through 0137. Phase 1 adds immutable `Native`/`LinuxX8664` Process identity.
+Phase 2 installs a guarded x86_64 `SYSCALL`/IRETQ path, rejects wrong-ABI entry
+at both gates, and returns `-ENOSYS` for every syscall pending semantic
+implementation. Linux ELF loading is not implemented yet.
 
 Order for the remaining release work:
 
-1. dedicated x86_64 `SYSCALL` entry;
-2. bounded static ELF64 loader and Linux initial stack;
-3. raw Linux `write` plus `exit_group` hello world;
-4. memory, FS-base/TLS, and static musl startup;
-5. bounded fd table and VFS file/directory probes;
-6. selected static BusyBox applets as measured P1 interoperability.
+1. bounded static ELF64 loader and Linux initial stack;
+2. raw Linux `write` plus `exit_group` hello world;
+3. memory, FS-base/TLS, and static musl startup;
+4. bounded fd table and VFS file/directory probes;
+5. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

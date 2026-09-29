@@ -46,6 +46,9 @@ var (
 //go:extern goos_interrupt_table
 var interruptTable [exceptionCount + 6]uintptr
 
+//go:extern goos_linux_entry_mapping_table
+var linuxEntryMappingTable [3]uintptr
+
 // EntryProbeAddress returns one mapped higher-half trampoline address for
 // supervisor-isolation validation.
 func EntryProbeAddress() uint64 {
@@ -157,6 +160,21 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	loadIDT((*IDTEntry)(unsafe.Pointer(uintptr(idtBase))), uint16(len(idt)*16-1))
 	return true
 }
+
+// InstallLinuxSyscallEntry enables the x86_64 SYSCALL instruction and binds it
+// to the supervisor-only higher-half trampoline. User GS stays zero; SWAPGS
+// selects the mapped entry-data page until the IRETQ return prefix swaps back.
+func InstallLinuxSyscallEntry() bool {
+	if linuxEntryMappingTable[0] == 0 || linuxEntryMappingTable[1] == 0 || linuxEntryMappingTable[2] == 0 {
+		return false
+	}
+	entry, entryOK := vm.KernelAlias(uint64(linuxEntryMappingTable[0]))
+	data, dataOK := vm.KernelAlias(uint64(linuxEntryMappingTable[2]))
+	return entryOK && dataOK && installLinuxSyscall(entry, data, linuxSTAR, linuxFMASK)
+}
+
+//export goos_install_linux_syscall
+func installLinuxSyscall(entry uint64, entryData uint64, star uint64, fmask uint64) bool
 
 // ConfigureDeviceIRQs maps the architectural APIC pages and routes virtio and
 // both legacy console-input lines on bootstrap CPU 0.

@@ -1,9 +1,10 @@
 # Linux compatibility
 
 **Status: GoOS 0.2.0 foundations in progress.** Phase 0 decisions are recorded
-in ADRs 0132 through 0137. Phase 1 implements immutable Process ABI identity
-and rejects non-native callers at `int 0x80`. Linux ELF loading, the Linux
-`SYSCALL` entry, and syscall translation are not implemented yet.
+in ADRs 0132 through 0137. Phase 1 implements immutable Process ABI identity.
+Phase 2 implements the dedicated Linux x86_64 `SYSCALL`/IRETQ entry and rejects
+wrong-ABI entry at both gates. Linux ELF loading and semantic syscall
+translation are not implemented yet.
 
 ## Principles
 
@@ -38,8 +39,14 @@ Linux programs use the `syscall` instruction with the Linux register
 convention. That entry path is distinct from the native `int 0x80` gate, so
 a process is either native or Linux and the kernel never guesses which ABI a
 call uses. Process identity is kernel-owned and immutable. The native gate
-already authorizes only `Native`; Phase 2 will add and authorize the
-`LinuxX8664` gate (ADR 0132).
+authorizes only `Native`; the MSR-backed Linux gate authorizes only
+`LinuxX8664` (ADR 0132).
+
+The Linux gate switches from the untrusted user RSP to the current task's
+guarded kernel-entry stack through supervisor-only GS data before using the
+stack or entering Go. It then installs the kernel CR3, snapshots the Linux
+register ABI into a fixed frame, and returns through a higher-half IRETQ
+prefix. Unknown syscalls currently return `-ENOSYS`.
 
 ### Translation
 

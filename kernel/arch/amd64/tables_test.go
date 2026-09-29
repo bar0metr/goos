@@ -22,6 +22,16 @@ func TestBreakpointGateIsUserCallable(t *testing.T) {
 	}
 }
 
+func TestLinuxSyscallSelectorsAndFlagMask(t *testing.T) {
+	if uint16((linuxSTAR>>32)&0xffff) != kernelCodeSelector || uint16((linuxSTAR>>48)&0xffff) != userDataSelector-8 {
+		t.Fatalf("STAR = %#x", linuxSTAR)
+	}
+	const required = uint64(1<<9 | 1<<10 | 1<<8 | 1<<18)
+	if linuxFMASK != required {
+		t.Fatalf("FMASK = %#x", linuxFMASK)
+	}
+}
+
 func TestTSSDescriptorEncodesBaseAndLimit(t *testing.T) {
 	const base = uintptr(0x123456789abc)
 	low, high := tssDescriptor(base, 103)

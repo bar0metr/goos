@@ -6,6 +6,24 @@
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
 .set GOOS_KERNEL_LOW_BASE, 0xffffc00000000000
+.set GOOS_LINUX_ENTRY_PROCESS_ROOT, 0
+.set GOOS_LINUX_ENTRY_STACK, 8
+.set GOOS_LINUX_ENTRY_USER_RSP, 16
+.set GOOS_LINUX_FRAME_BASE, 32
+.set GOOS_LINUX_FRAME_RETURN, 88
+.set GOOS_LINUX_FRAME_ACTION, 96
+.set GOOS_LINUX_FRAME_RESERVE, 136
+.set GOOS_LINUX_SAVED_RAX, GOOS_LINUX_FRAME_RESERVE + 0
+.set GOOS_LINUX_SAVED_RCX, GOOS_LINUX_FRAME_RESERVE + 8
+.set GOOS_LINUX_SAVED_RDX, GOOS_LINUX_FRAME_RESERVE + 16
+.set GOOS_LINUX_SAVED_RSI, GOOS_LINUX_FRAME_RESERVE + 40
+.set GOOS_LINUX_SAVED_RDI, GOOS_LINUX_FRAME_RESERVE + 48
+.set GOOS_LINUX_SAVED_R8, GOOS_LINUX_FRAME_RESERVE + 56
+.set GOOS_LINUX_SAVED_R9, GOOS_LINUX_FRAME_RESERVE + 64
+.set GOOS_LINUX_SAVED_R10, GOOS_LINUX_FRAME_RESERVE + 72
+.set GOOS_LINUX_SAVED_R11, GOOS_LINUX_FRAME_RESERVE + 80
+.set GOOS_LINUX_IRET_BASE, GOOS_LINUX_FRAME_RESERVE + 120
+.set GOOS_LINUX_ACTION_EXIT, 1
 
 // The console ring is a power of two so the wrap is a mask. It holds two of
 // the longest lines the terminal accepts (4096 bytes), so a pasted line
@@ -239,6 +257,80 @@ goos_enable_nx_wp:
     movq %rax, %cr4
     retq
 
+// goos_install_linux_syscall enables SYSCALL and verifies every MSR used by
+// the entry contract. GS_BASE remains user-owned zero; SWAPGS selects the
+// supervisor entry-data mapping named by KERNEL_GS_BASE.
+.global goos_install_linux_syscall
+goos_install_linux_syscall:
+    pushfq
+    cli
+    movq %rcx, %r10
+    movq %rdx, %r11
+
+    movl $0xc0000080, %ecx
+    rdmsr
+    orl $1, %eax
+    wrmsr
+
+    movq %r8, %rax
+    movq %r8, %rdx
+    shrq $32, %rdx
+    movl $0xc0000081, %ecx
+    wrmsr
+
+    movq %r10, %rax
+    movq %r10, %rdx
+    shrq $32, %rdx
+    movl $0xc0000082, %ecx
+    wrmsr
+
+    movq %r9, %rax
+    movq %r9, %rdx
+    shrq $32, %rdx
+    movl $0xc0000084, %ecx
+    wrmsr
+
+    xorl %eax, %eax
+    xorl %edx, %edx
+    movl $0xc0000101, %ecx
+    wrmsr
+
+    movq %r11, %rax
+    movq %r11, %rdx
+    shrq $32, %rdx
+    movl $0xc0000102, %ecx
+    wrmsr
+
+    movl $0xc0000080, %ecx
+    rdmsr
+    testl $1, %eax
+    jz .linux_syscall_install_failed
+    movl $0xc0000082, %ecx
+    rdmsr
+    shlq $32, %rdx
+    orq %rdx, %rax
+    cmpq %r10, %rax
+    jne .linux_syscall_install_failed
+    movl $0xc0000084, %ecx
+    rdmsr
+    shlq $32, %rdx
+    orq %rdx, %rax
+    cmpq %r9, %rax
+    jne .linux_syscall_install_failed
+    movl $0xc0000102, %ecx
+    rdmsr
+    shlq $32, %rdx
+    orq %rdx, %rax
+    cmpq %r11, %rax
+    jne .linux_syscall_install_failed
+    movl $1, %eax
+    jmp .linux_syscall_install_done
+.linux_syscall_install_failed:
+    xorl %eax, %eax
+.linux_syscall_install_done:
+    popfq
+    retq
+
 .global goos_load_cr3
 goos_load_cr3:
     movq %rcx, %cr3
@@ -369,11 +461,37 @@ goos_trigger_breakpoint:
 991:
 .endm
 
+// Linux SYSCALL entry owns kernel GS until this prefix has installed the
+// process CR3. Interrupts stay masked throughout the compatibility call.
+.macro GOOS_RETURN_LINUX
+    cmpq $0x23, 8(%rsp)
+    jne 991f
+    pushq %rax
+    pushq %rcx
+    movq goos_current_task(%rip), %rax
+    leaq goos_task_roots(%rip), %rcx
+    movq (%rcx,%rax,8), %rax
+    pushq %rax
+    pushq %r11
+    movabsq $(GOOS_KERNEL_LOW_BASE + goos_linux_return_high), %r11
+    xchgq %r11, (%rsp)
+    retq
+991:
+.endm
+
 goos_return_high:
     popq %rax
     movq %rax, %cr3
     popq %rcx
     popq %rax
+    iretq
+
+goos_linux_return_high:
+    popq %rax
+    movq %rax, %cr3
+    popq %rcx
+    popq %rax
+    swapgs
     iretq
 
 .macro GOOS_FATAL_NOERR vector
@@ -669,7 +787,107 @@ goos_entry_mapping_table:
     .quad goos_kernel_root
     .quad goos_probe_address_spaces
 
+.global goos_linux_entry_mapping_table
+goos_linux_entry_mapping_table:
+    .quad goos_linux_syscall_entry
+    .quad goos_linux_return_high
+    .quad goos_linux_entry_data
+
 .section .text
+.global goos_linux_syscall_entry
+goos_linux_syscall_entry:
+    swapgs
+    movq %rsp, %gs:GOOS_LINUX_ENTRY_USER_RSP
+    movq %gs:GOOS_LINUX_ENTRY_STACK, %rsp
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+    movq goos_kernel_root(%rip), %r10
+    movq %r10, %cr3
+    cld
+    movabsq $.L_linux_syscall_low, %r10
+    jmp *%r10
+.L_linux_syscall_low:
+    subq $GOOS_LINUX_FRAME_RESERVE, %rsp
+    movq GOOS_LINUX_SAVED_RAX(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+0(%rsp)
+    movq GOOS_LINUX_SAVED_RDI(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+8(%rsp)
+    movq GOOS_LINUX_SAVED_RSI(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+16(%rsp)
+    movq GOOS_LINUX_SAVED_RDX(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+24(%rsp)
+    movq GOOS_LINUX_SAVED_R10(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+32(%rsp)
+    movq GOOS_LINUX_SAVED_R8(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+40(%rsp)
+    movq GOOS_LINUX_SAVED_R9(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+48(%rsp)
+    movq GOOS_LINUX_SAVED_RCX(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+56(%rsp)
+    movq GOOS_LINUX_SAVED_R11(%rsp), %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+64(%rsp)
+    movq %gs:GOOS_LINUX_ENTRY_USER_RSP, %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+72(%rsp)
+    movq %gs:GOOS_LINUX_ENTRY_PROCESS_ROOT, %rax
+    movq %rax, GOOS_LINUX_FRAME_BASE+80(%rsp)
+    leaq GOOS_LINUX_FRAME_BASE(%rsp), %rcx
+    callq goos_dispatch_linux_syscall
+    cmpq $GOOS_LINUX_ACTION_EXIT, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
+    je .linux_user_exit
+    movq GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_RETURN(%rsp), %rax
+    movq %rax, GOOS_LINUX_SAVED_RAX(%rsp)
+    movq GOOS_LINUX_SAVED_RCX(%rsp), %rax
+    movq %rax, GOOS_LINUX_IRET_BASE+0(%rsp)
+    movq $0x23, GOOS_LINUX_IRET_BASE+8(%rsp)
+    movq GOOS_LINUX_SAVED_R11(%rsp), %rax
+    andq $~0x77700, %rax
+    orq $0x202, %rax
+    movq %rax, GOOS_LINUX_IRET_BASE+16(%rsp)
+    movq GOOS_LINUX_FRAME_BASE+72(%rsp), %rax
+    movq %rax, GOOS_LINUX_IRET_BASE+24(%rsp)
+    movq $0x1b, GOOS_LINUX_IRET_BASE+32(%rsp)
+    addq $GOOS_LINUX_FRAME_RESERVE, %rsp
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+    GOOS_RETURN_LINUX
+    iretq
+.linux_user_exit:
+    movq goos_current_task(%rip), %rcx
+    btsq %rcx, goos_task_exit_pending(%rip)
+    btrq %rcx, goos_runnable_mask(%rip)
+    btsq %rcx, goos_task_dead_mask(%rip)
+    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
+    swapgs
+    movq %rcx, %rax
+    callq goos_select_next
+    jmp .switch_to
+
 .global goos_user_call
 goos_user_call:
     GOOS_ENTER_LOW .L_user_call
@@ -946,6 +1164,10 @@ goos_irq_timer:
     movq %rax, goos_current_task(%rip)
     leaq goos_task_rsp0(%rip), %r10
     movq (%r10,%rax,8), %r11
+    leaq goos_task_roots(%rip), %r9
+    movq (%r9,%rax,8), %r9
+    movq %r9, goos_linux_entry_data+GOOS_LINUX_ENTRY_PROCESS_ROOT(%rip)
+    movq %r11, goos_linux_entry_data+GOOS_LINUX_ENTRY_STACK(%rip)
     testq %r11, %r11
     jz .switch_load
     movq goos_tss_rsp0_address(%rip), %r10
@@ -1642,6 +1864,12 @@ goos_scheduler_enabled:
 goos_tss_rsp0_address:
     .quad 0
 goos_kernel_call_arg2:
+    .quad 0
+.align 32
+goos_linux_entry_data:
+    .quad 0
+    .quad 0
+    .quad 0
     .quad 0
 goos_irq_11_pending:
     .quad 0

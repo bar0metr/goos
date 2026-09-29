@@ -441,6 +441,9 @@ func bootContinue() {
 			amd64.Halt()
 		}
 	}
+	if !amd64.InstallLinuxSyscallEntry() {
+		panicSerial("Linux SYSCALL entry installation failed")
+	}
 	if !amd64.ConfigureDeviceIRQs(pageTable) {
 		console.WriteString("PANIC: device IRQ routing failed\n")
 		for {
