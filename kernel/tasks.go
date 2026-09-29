@@ -8,11 +8,17 @@ import (
 	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
+	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 )
 
 var nativeCallABIRejections uint64
+var linuxSyscallEntries uint64
+var linuxSyscallABIRejections uint64
+var linuxSyscallFrameRejections uint64
 
 // authorizeNativeCall rejects the native gate before any operation-specific
 // dispatcher observes registers belonging to another process ABI. The first
@@ -28,6 +34,38 @@ func authorizeNativeCall(root uint64) uint64 {
 		kernelLogUint(logfmt.Warn, "native call ABI rejected", "root", root)
 	}
 	return uint64(kcall.StatusPermissionDenied)
+}
+
+// dispatchLinuxSyscall validates the architectural return state and Process
+// personality before the compatibility subsystem observes the request. The
+// assembly caller owns frame on the current task's guarded kernel stack.
+//
+//export goos_dispatch_linux_syscall
+func dispatchLinuxSyscall(frame *linuxabi.Frame) {
+	if frame == nil {
+		return
+	}
+	frame.Return = linuxabi.Negative(linuxabi.EINVAL)
+	frame.Action = linuxabi.ActionReturn
+	if !vm.ValidateUserRange(frame.UserIP, 1) || !vm.ValidateUserRange(frame.UserStack, 0) {
+		linuxSyscallFrameRejections++
+		if linuxSyscallFrameRejections == 1 {
+			kernelLogUint(logfmt.Warn, "Linux syscall frame rejected", "ip", frame.UserIP)
+		}
+		amd64.SetCurrentTaskExitCode(uint64(1)<<63 | 13)
+		frame.Action = linuxabi.ActionExit
+		return
+	}
+	if !processRegistry.AllowsABI(frame.Root, process.ABILinuxX8664) {
+		linuxSyscallABIRejections++
+		if linuxSyscallABIRejections == 1 {
+			kernelLogUint(logfmt.Warn, "Linux syscall ABI rejected", "root", frame.Root)
+		}
+		frame.Return = linuxabi.Negative(linuxabi.EPERM)
+		return
+	}
+	linuxSyscallEntries++
+	frame.Return = linuxcompat.Dispatch(frame)
 }
 
 // dispatchKernelCall is the architecture-neutral native-call boundary. The

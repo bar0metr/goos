@@ -27,11 +27,16 @@ import (
 // validation builds, so the normal kernel does not link a filesystem (ADR 0084).
 
 var (
-	selfTestRootA   uint64
-	selfTestRootB   uint64
-	selfTestLoadedA loader.LoadedImage
-	selfTestLoadedB loader.LoadedImage
+	selfTestRootA      uint64
+	selfTestRootB      uint64
+	selfTestRootLinux  uint64
+	selfTestLinuxEntry uint64
+	selfTestLinuxStack uint64
+	selfTestLoadedA    loader.LoadedImage
+	selfTestLoadedB    loader.LoadedImage
 )
+
+const selfTestLinuxProcessID = process.ID(0x7fff0001)
 
 func awaitSchedulerSelfTest() {
 	for demoTaskA < 4 || demoTaskB < 6 || demoABlocked == 0 || demoAResumed == 0 {
@@ -97,14 +102,21 @@ func runKernelSelfTests(pageTable uint64) {
 	// as every other process's do (ADR 0111).
 	processA, validA := vm.NewObject[process.Process](&pageAllocator)
 	processB, validB := vm.NewObject[process.Process](&pageAllocator)
+	linuxProcess, validLinux := vm.NewObject[process.Process](&pageAllocator)
 	validA = validA && process.Init(processA, 2, process.ABINative, process.AddressSpace{Root: rootA})
 	validB = validB && process.Init(processB, 3, process.ABINative, process.AddressSpace{Root: rootB})
+	rootLinux, addressSpaceLinux := vm.CreateUserAddressSpace(&pageAllocator, pageTable)
+	addressSpaceLinux = addressSpaceLinux && amd64.PrepareUserAddressSpace(&pageAllocator, rootLinux)
+	validLinux = validLinux && process.Init(linuxProcess, selfTestLinuxProcessID, process.ABILinuxX8664, process.AddressSpace{Root: rootLinux})
 	if validA && validB {
 		processA.SetName([]byte("selftest-a"))
 		processB.SetName([]byte("selftest-b"))
 	}
+	if validLinux {
+		linuxProcess.SetName([]byte("linux-entry"))
+	}
 	bootProcessA, bootProcessB = processA, processB
-	if !validA || !validB || !processRegistry.Add(processA) || !processRegistry.Add(processB) {
+	if !validA || !validB || !addressSpaceLinux || !processRegistry.Add(processA) || !processRegistry.Add(processB) || !processRegistry.Add(linuxProcess) {
 		console.WriteString("PANIC: process model initialization failed\n")
 		for {
 			amd64.Halt()
@@ -266,6 +278,11 @@ func runKernelSelfTests(pageTable uint64) {
 		0x48, 0xbe, 0x44, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rsi, selfTestUserDataAddress+68.
 		0xba, 0x18, 0x00, 0x00, 0x00, // mov edx, descriptor size: time out after the peer's shorter wait.
 		0xcd, 0x80,
+		0xb8, 0xff, 0xff, 0xff, 0x7f, // mov eax, 0x7fffffff: wrong-ABI Linux entry.
+		0x0f, 0x05, // syscall.
+		0x48, 0x83, 0xf8, 0xff, // cmp rax, -EPERM.
+		0x74, 0x02,
+		0x0f, 0x0b,
 		0xb9, 0x00, 0x00, 0x00, 0x01, // mov ecx, 0x01000000: remain preemptible.
 		0xff, 0xc9, // dec ecx.
 		0x75, 0xfc, // jnz dec ecx.
@@ -316,6 +333,50 @@ func runKernelSelfTests(pageTable uint64) {
 		0xcd, 0x80,
 		0x0f, 0x0b, // ud2: returning to exited user code is always a bug.
 	}
+	linuxProgram := []byte{
+		0xb8, 0xff, 0xff, 0xff, 0x7f, // mov eax, unsupported syscall.
+		0xfd,       // std: FMASK and CLD must keep DF out of kernel and return state.
+		0x0f, 0x05, // syscall.
+		0x48, 0x83, 0xf8, 0xda, // cmp rax, -ENOSYS.
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0x9c, 0x5b, // pushfq; pop rbx.
+		0xf7, 0xc3, 0x00, 0x04, 0x00, 0x00, // test ebx, DF.
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0xf7, 0xc3, 0x00, 0x02, 0x00, 0x00, // test ebx, IF.
+		0x75, 0x02,
+		0x0f, 0x0b,
+		0xb8, 0xff, 0xff, 0xff, 0x7f,
+		0x0f, 0x05,
+		0x48, 0x83, 0xf8, 0xda,
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0xb8, 0x01, 0x00, 0x00, 0x00, // native Exit number must be rejected.
+		0xcd, 0x80,
+		0x83, 0xf8, 0x02, // cmp eax, native PermissionDenied.
+		0x74, 0x02,
+		0x0f, 0x0b,
+		0x48, 0x31, 0xe4, // xor rsp, rsp: malformed return state must retire the task.
+		0xb8, 0xff, 0xff, 0xff, 0x7f,
+		0x0f, 0x05,
+		0x0f, 0x0b, // ud2: an invalid return frame must never return.
+	}
+	linuxCodePage, linuxCodeAllocated := pageAllocator.Allocate()
+	linuxStackPage, linuxStackAllocated := pageAllocator.Allocate()
+	if !linuxCodeAllocated || !linuxStackAllocated {
+		panicSerial("Linux SYSCALL self-test allocation failed")
+	}
+	linuxCodeReady := linuxCodeAllocated && vm.InitializePhysical(linuxCodePage, linuxProgram)
+	linuxStackReady := linuxStackAllocated && vm.InitializePhysical(linuxStackPage, nil)
+	linuxEntry := uint64(0x00400000)
+	linuxStack := uint64(0x00501000)
+	_, linuxCodeMapped := vm.MapUserPageAt(&pageAllocator, rootLinux, linuxEntry, linuxCodePage, vm.Permissions{User: true, Executable: true}, true)
+	_, linuxStackMapped := vm.MapUserPageAt(&pageAllocator, rootLinux, linuxStack-vm.PageSize, linuxStackPage, vm.Permissions{User: true, Writable: true}, true)
+	if !linuxCodeReady || !linuxStackReady || !linuxCodeMapped || !linuxStackMapped {
+		panicSerial("Linux SYSCALL self-test mapping failed")
+	}
+	selfTestRootLinux, selfTestLinuxEntry, selfTestLinuxStack = rootLinux, linuxEntry, linuxStack-16
 	userMessage := []byte("USER_CONSOLE_CAP_OK\n")
 	userData := [20 + ipc.WireHeaderSize + 16 + 24]byte{}
 	copy(userData[:], userMessage)
@@ -406,11 +467,15 @@ func runKernelSelfTests(pageTable uint64) {
 func startSelfTestTasks() {
 	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootA, selfTestLoadedA.Entry, selfTestLoadedA.StackTop)
 	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootB, selfTestLoadedB.Entry, selfTestLoadedB.StackTop)
+	linuxTaskID, linuxTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootLinux, selfTestLinuxEntry, selfTestLinuxStack)
 	if !userTaskAdded {
 		panicSerial("self-test user task installation failed")
 	}
 	if !faultTaskAdded {
 		panicSerial("self-test fault task installation failed")
+	}
+	if !linuxTaskAdded {
+		panicSerial("Linux SYSCALL self-test task installation failed")
 	}
 	userSlot, _, validTask := sched.TaskID(userTaskID).Parts()
 	stackTop := amd64.TaskStackTop(uint64(userSlot))
@@ -420,14 +485,14 @@ func startSelfTestTasks() {
 		!guardFound || guardHigh == 0 || guardLow >= guardHigh || vm.IsMapped(selfTestRootA, guardHigh-vm.PageSize) || vm.IsMapped(kernelPageTable, guardHigh-vm.PageSize) {
 		panicSerial("self-test kernel-entry stack mapping invalid")
 	}
-	if !processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) {
+	if !processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) || !processRegistry.BindTask(selfTestLinuxProcessID, sched.TaskID(linuxTaskID)) {
 		panicSerial("self-test task binding failed")
 	}
 }
 
 func awaitValidationBoot() {
 	console := kernelconsole.New()
-	for userExited == 0 || amd64.UserFaults() == 0 || highKernelAccessFaults == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || highKernelAccessFaults == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 || linuxSyscallEntries < 2 || linuxSyscallABIRejections == 0 || linuxSyscallFrameRejections == 0 || nativeCallABIRejections == 0 {
 		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")
@@ -501,6 +566,9 @@ func awaitValidationBoot() {
 		}
 	}
 	mark("USER_ENTRY_STACK_BOUNDED_OK")
+	mark("LINUX_SYSCALL_OK")
+	mark("LINUX_ABI_ISOLATION_OK")
+	mark("LINUX_RETURN_FRAME_GUARD_OK")
 	mark("USER_LOW_ADDRESS_EXEC_OK")
 	mark("USER_STACK_GUARD_OK")
 	mark("USER_RING3_OK")

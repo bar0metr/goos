@@ -117,6 +117,11 @@ func mapProcessEntryState(allocator *pmm.Allocator, pageTable uint64) bool {
 		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&tss[0]))), uint64(len(tss)), true, false) {
 		return false
 	}
+	if !mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[0]), vm.PageSize, false, true) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[1]), vm.PageSize, false, true) ||
+		!mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[2]), 32, true, false) {
+		return false
+	}
 	return true
 }
 
