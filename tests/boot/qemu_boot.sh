@@ -357,6 +357,40 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'echo after-gview-serial\n'
 	sleep 1
+	# gfm runs gview and edit on the selected file through PID 1 (ADR 0130):
+	# Home and Down select the file, F3 views it, PageDown and F10 return, F4
+	# edits it, X is typed at its start, F2 saves through a replacement
+	# (ADR 0129), and F10 twice leaves the editor and the manager.
+	printf 'mkdir /home/fm\n'
+	sleep 1
+	printf 'write /home/fm/note.txt saved text\n'
+	sleep 1
+	printf 'cd /home/fm\n'
+	sleep 1
+	printf 'gfm\n'
+	sleep 2
+	printf '\033[H\033[B'
+	sleep 1
+	printf '\033[13~'
+	sleep 2
+	printf '\033[6~\033[21~'
+	sleep 2
+	printf '\033[14~'
+	sleep 2
+	printf 'X'
+	sleep 1
+	printf '\033[12~'
+	sleep 2
+	printf '\033[21~'
+	sleep 2
+	printf '\033[21~'
+	sleep 2
+	printf 'cat /home/fm/note.txt\n'
+	sleep 1
+	printf 'ls /home/fm\n'
+	sleep 1
+	printf 'cd /\n'
+	sleep 1
 	printf 'stat /system/bin/ls\n'
 	sleep 1
 	printf 'stat /system/bin\n'
@@ -819,7 +853,7 @@ done
 # /system is the boot image itself: the executables the launch path resolves are
 # the ones a listing shows, and nothing can write to them.
 require_regex filesystem.system-lists-bin '^bin/$' 'bin/ under /system' "$log" 'ls system'
-for entry in ls cat write gview; do
+for entry in ls cat write gview edit gfm; do
 	require_regex "filesystem.system-bin-lists-$entry" "^$entry\$" "$entry in /system/bin" "$log" 'ls /system/bin'
 done
 # Commands are separate images described by a generated index; there is no
@@ -867,6 +901,12 @@ require_window df.header '^Filesystem  *Mount  *Size  *Used  *Free  *Flags$' 'df
 require_window df.system '^image  */system  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only image capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_window df.persist '^fat32  */persist  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *rw$' 'persistent capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_regex gview.serial-return '^after-gview-serial$' 'shell input after gview on COM1' "$log" 'gview /system/motd'
+require_marker launch.gfm GFM_LAUNCH_OK "$log"
+require_marker launch.edit-exit EDIT_EXIT_OK "$log"
+require_marker launch.edit-save EDIT_SAVE_OK "$log"
+require_min_count launch.viewer-returns 'GVIEW_EXIT_OK' 2 "$log" 'gview /system/motd'
+require_regex launch.saved-contents '^Xsaved text$' 'the edit saved through a replacement' "$log" 'cat /home/fm/note.txt'
+forbid_window launch.no-temporary '\.note\.txt\.~save' 'no temporary file left by the save' "$log" 'goos> ls /home/fm' 'goos> cd /'
 pass_group shell
 
 require_regex help.list '^Commands in /system/bin:$' 'help lists the executables' "$log" 'goos> help'

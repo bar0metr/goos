@@ -161,6 +161,25 @@ as raw ANSI input, and likewise verifies the restored shell. These are the two
 terminal-session acceptance paths; no viewer-specific framebuffer or keyboard
 path exists.
 
+Both scenarios then run the 0.1.7 workflow end to end. On the framebuffer the
+test creates `/home/gv/note`, starts `gfm` there, views the file with F3,
+returns with F10, edits it with F4, types `X`, saves with F2 and leaves the
+editor and the manager with F10; `cat` must print `Xhello`. `GVIEW_EXIT_OK`,
+`EDIT_SAVE_OK`, `EDIT_EXIT_OK`, `GFM_LAUNCH_OK` and a new
+`SHELL_TERMINAL_RESTORED_OK` prove each step reached the program that owned the
+keys. The COM1 boot test sends the same keys as raw ANSI on `/home/fm/note.txt`,
+checks `Xsaved text` and checks that `ls` shows no `.note.txt.~save` left by
+the save.
+
+`go test ./userspace/safesave ./userspace/fat32 ./kernel/vfs` covers safe
+replacement: every save step fails in turn and the original survives, and a
+FAT32 replacement is cut at each of its device writes, remounted and checked to
+hold one whole version with at worst lost clusters (ADR 0129).
+`go test ./userspace/exec ./userspace/init` covers the launch protocol and
+PID 1's policy for launched children (ADR 0130), and `go test
+./userspace/editor ./userspace/filemanager` the editor model and `gfm`'s
+viewer, editor, date and capacity handling on model terminals.
+
 The boot test drives the COM1 session and never types at the keyboard, so
 `tty-fb` copies nothing to COM1 and the test's marker counts see the COM1
 session alone.
