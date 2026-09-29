@@ -8,7 +8,10 @@ parser and load-plan validation. Phase 4 records validated `PT_LOAD` ranges in
 the common lazy executable region model and reserves the guarded Linux stack.
 Phase 5 builds and installs the bounded Linux System V initial stack. Phase 6
 connects static ELF to PID 1 launch under a kernel-enforced minimal authority
-policy. Semantic syscall translation is not implemented yet.
+policy. Phase 7 installs the explicit Linux syscall-number decoder and bounded
+unsupported-call diagnostics. Phase 8 adds bounded, generation-safe per-task
+continuations and a scheduler block/resume contract. Semantic syscall handlers
+are not implemented yet.
 
 ## Principles
 
@@ -74,7 +77,15 @@ The Linux gate switches from the untrusted user RSP to the current task's
 guarded kernel-entry stack through supervisor-only GS data before using the
 stack or entering Go. It then installs the kernel CR3, snapshots the Linux
 register ABI into a fixed frame, and returns through a higher-half IRETQ
-prefix. Unknown syscalls currently return `-ENOSYS`.
+prefix. The dispatcher snapshots all six scalar arguments into a Linux request
+whose number type is distinct from native `kcall.Operation`. Known but not yet
+implemented calls and unknown calls both return `-ENOSYS`; an eight-entry ring
+and saturating counter retain bounded diagnostics without per-call logging.
+
+Handlers added in later phases must validate flags and lengths before copying
+through `vm.CopyIn`/`vm.CopyOut`. They may never retain or directly dereference
+an arbitrary user pointer. Copied strings must fit their operation-specific
+bound and contain a terminating NUL in user memory.
 
 ### Translation
 
@@ -96,6 +107,18 @@ Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
 still comes only from process-owned resources. It cannot call filesystem or
 device implementations directly (ADR 0134).
+
+Blocking translations use one fixed continuation slot per scheduler task. A
+slot contains the generation-safe task ID, syscall number, stage, validated
+scalar arguments, one bounded copied path, correlation, and partial progress.
+The request is marked issued before an external effect, then persisted as
+waiting before the architecture path removes the task from the runnable set.
+Wake accepts only the exact task generation and correlation. The resumed task
+retries the two-byte `SYSCALL`; the stage and issued bit prevent a duplicated
+effect. Kill, fault, and process teardown cancel the slot. VFS peer death is
+retained as a correlation-checked wake reason so the handler can return an
+error, then completion clears the slot. No implemented syscall uses this
+machinery until its semantic phase.
 
 ### File descriptors
 

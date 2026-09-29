@@ -13,6 +13,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
+	"goos/kernel/sched"
 )
 
 var nativeCallABIRejections uint64
@@ -66,6 +67,24 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	}
 	linuxSyscallEntries++
 	frame.Return = linuxcompat.Dispatch(frame)
+	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
+		linuxSyscallFrameRejections++
+		amd64.SetCurrentTaskExitCode(uint64(1)<<63 | 13)
+		frame.Action = linuxabi.ActionExit
+	}
+}
+
+// resumeLinuxSyscall accepts the exact continuation correlation before waking
+// its task. A stale reply therefore cannot make a reused task slot runnable.
+func resumeLinuxSyscall(task sched.TaskID, correlation uint64, reason linuxcompat.WakeReason) bool {
+	if !linuxcompat.SyscallContinuations.Resume(task, correlation, reason) {
+		return false
+	}
+	if amd64.WakeTaskID(uint64(task)) {
+		return true
+	}
+	linuxcompat.SyscallContinuations.Cancel(task)
+	return false
 }
 
 // dispatchKernelCall is the architecture-neutral native-call boundary. The

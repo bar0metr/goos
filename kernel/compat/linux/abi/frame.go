@@ -37,6 +37,7 @@ const (
 
 	ActionReturn = uint64(0)
 	ActionExit   = uint64(1)
+	ActionBlock  = uint64(2)
 )
 
 type Errno uint64

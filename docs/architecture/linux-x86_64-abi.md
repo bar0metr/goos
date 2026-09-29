@@ -14,14 +14,30 @@ It describes current code, not the final release target.
 - Return uses IRETQ, not SYSRETQ.
 - User GS is zero; `ARCH_SET_GS` is unsupported.
 
-## Syscall status after Phase 2
+## Syscall status after Phase 8
 
 | Syscall | Status | Notes |
 | --- | --- | --- |
-| every number | `ENOSYS` | entry transport only; no fake success |
+| declared namespace | `ENOSYS` | decoded and typed; semantic handlers are later phases |
+| every other number | `ENOSYS` | bounded diagnostics; no fake success |
 
 Wrong-ABI Linux entry returns `-EPERM`. A noncanonical or non-user return RIP
 or RSP retires the task rather than attempting an unsafe IRETQ.
+
+The declared planning namespace uses canonical x86_64 Linux numbers and is
+separate from native kernel-call operations. It is bounded through `statx(332)`
+and includes later candidates; membership claims neither implementation nor
+0.2.0 release scope. The decoder snapshots RDI, RSI, RDX, R10, R8, and R9 as
+scalars. Pointer interpretation remains the responsibility of a syscall handler
+using checked copyin/copyout.
+
+A blocking handler may persist one continuation per generation-safe Task ID.
+Continuation storage is fixed at the 64 scheduler slots and rejects a second
+active call, stale task generations, correlation mismatches, repeated issue or
+advance, embedded NUL in copied path data, and paths above `PathMax`. Blocking
+clears the runnable bit and switches tasks; wake resumes the exact stage without
+busy-waiting. Lifecycle and kill paths remove the continuation before a task
+slot can be reused.
 
 ## ELF status after Phase 3
 
@@ -102,5 +118,6 @@ ELF whose entry loops. PID 1 proves that a false format hint, a non-large
 profile, and an extra grant are refused, launches it with the minimal policy,
 kills it, waits for teardown, and emits `LINUX_PID1_LAUNCH_OK`.
 
-An ELF-based `write`/`exit_group` program is not yet claimed: semantic syscall
-support begins in the next phase.
+An ELF-based `write`/`exit_group` program is not yet claimed. Phases 7 and 8
+provide dispatcher and blocking infrastructure only; semantic syscall support
+begins in Phase 9 and its operation-specific successors.
