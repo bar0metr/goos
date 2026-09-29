@@ -2,6 +2,7 @@ package fsproto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"goos/kernel/ipc"
 	"goos/kernel/ramfs"
 	"testing"
@@ -31,13 +32,16 @@ func TestRequestRoundTrip(t *testing.T) {
 }
 
 func TestReplyRoundTrip(t *testing.T) {
-	reply := Reply{Operation: OperationReadDir, Status: ramfs.StatusOK, Kind: ramfs.KindDirectory, Node: 0x1_0000_0002, Value: 4096, Cursor: 3, Name: []byte("home")}
+	reply := Reply{Operation: OperationReadDir, Status: ramfs.StatusOK, Kind: ramfs.KindDirectory, Node: 0x1_0000_0002, Value: 4096, Cursor: 3, Name: []byte("home"),
+		Created: ramfs.Timestamp{Seconds: 11, Nanoseconds: 12, Available: true}, Modified: ramfs.Timestamp{Seconds: 13, Nanoseconds: 14, Available: true},
+		Attributes: ramfs.AttrDirectory | ramfs.AttrHidden, AttributesAvailable: true}
 	var message ipc.Message
 	if !EncodeReply(reply, 5, &message, nil) {
 		t.Fatal("encode")
 	}
 	decoded, ok := DecodeReply(&message, nil, nil)
-	if !ok || decoded.Node != reply.Node || decoded.Kind != reply.Kind || decoded.Value != reply.Value || decoded.Cursor != reply.Cursor || string(decoded.Name) != "home" {
+	if !ok || decoded.Node != reply.Node || decoded.Kind != reply.Kind || decoded.Value != reply.Value || decoded.Cursor != reply.Cursor || string(decoded.Name) != "home" ||
+		decoded.Created != reply.Created || decoded.Modified != reply.Modified || decoded.Attributes != reply.Attributes || !decoded.AttributesAvailable {
 		t.Fatalf("round trip = %#v, %v", decoded, ok)
 	}
 }
@@ -46,7 +50,7 @@ func TestEncodeRefusesWhatCannotBeSent(t *testing.T) {
 	var message ipc.Message
 	for _, request := range []Request{
 		{},
-		{Operation: OperationFlush + 1},
+		{Operation: OperationFilesystemInfo + 1},
 		{Operation: OperationOpen, Name: []byte("a/b")},
 		{Operation: OperationOpen, Name: []byte("..")},
 		{Operation: OperationRead, Size: CacheSize + 1},
@@ -82,7 +86,7 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		func(m *ipc.Message) { m.Correlation = 0 },
 		func(m *ipc.Message) { m.HandleCount = 1 },
 		func(m *ipc.Message) { m.Payload[0] = 0 },
-		func(m *ipc.Message) { m.Payload[0] = byte(OperationFlush + 1) },
+		func(m *ipc.Message) { m.Payload[0] = byte(OperationFilesystemInfo + 1) },
 		func(m *ipc.Message) { m.Payload[1] = 200 },
 		func(m *ipc.Message) { m.Payload[3] = 1 },
 		func(m *ipc.Message) { m.Payload[2] = 1 }, // a name in the page, with no page
@@ -108,6 +112,8 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		func(m *ipc.Message) { m.Payload[1] = byte(ramfs.LastStatus + 1) },
 		func(m *ipc.Message) { m.Payload[2] = byte(ramfs.KindDirectory + 1) },
 		func(m *ipc.Message) { m.Payload[5] = 1 },
+		func(m *ipc.Message) { m.Payload[30] = 1 },
+		func(m *ipc.Message) { m.Payload[52], m.Payload[53], m.Payload[54], m.Payload[55] = 0, 202, 154, 59 },
 		func(m *ipc.Message) { m.Kind = ipc.KindRequest },
 		func(m *ipc.Message) { m.PayloadSize-- },
 	} {
@@ -116,6 +122,29 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		if _, ok := DecodeReply(&message, nil, nil); ok {
 			t.Fatalf("reply damage %d accepted", index)
 		}
+	}
+}
+
+func TestFilesystemInfoRoundTripAndValidation(t *testing.T) {
+	info := ramfs.FilesystemInfo{Type: ramfs.FilesystemFAT32, TotalBytes: 12 << 30, FreeBytes: 7 << 30, AvailableBytes: 6 << 30, CapacityAvailable: true}
+	info.SetVolumeName([]byte("PERSIST"))
+	var message ipc.Message
+	if !EncodeReply(Reply{Operation: OperationFilesystemInfo, Status: ramfs.StatusOK, Filesystem: info, Name: info.Name()}, 8, &message, nil) {
+		t.Fatal("encode")
+	}
+	decoded, ok := DecodeReply(&message, nil, new([ramfs.MaxName]byte))
+	if !ok || decoded.Filesystem != info || string(decoded.Name) != "PERSIST" {
+		t.Fatalf("decoded=%+v ok=%v", decoded, ok)
+	}
+	bad := message
+	binary.LittleEndian.PutUint64(bad.Payload[64:], info.TotalBytes+1)
+	if _, ok := DecodeReply(&bad, nil, new([ramfs.MaxName]byte)); ok {
+		t.Fatal("invalid capacity accepted")
+	}
+	bad = message
+	bad.Payload[82] = 1
+	if _, ok := DecodeReply(&bad, nil, new([ramfs.MaxName]byte)); ok {
+		t.Fatal("nonzero reserved byte accepted")
 	}
 }
 

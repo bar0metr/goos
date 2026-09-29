@@ -107,6 +107,54 @@ func TestMountRoutingUsesComponentBoundary(t *testing.T) {
 	}
 }
 
+func TestFilesystemInfoAndBoundedMountEnumeration(t *testing.T) {
+	namespace, _ := mountedNamespace(t)
+	if namespace.Create([]byte("/data"), true) != StatusOK {
+		t.Fatal("create mount point")
+	}
+	dataFS := &ramfs.FileSystem{}
+	dataRoot := dataFS.Init()
+	if namespace.Mount([]byte("/data"), dataFS, dataRoot) != StatusOK {
+		t.Fatal("mount data")
+	}
+	first, cursor, status := namespace.ReadMount(0)
+	if status != StatusOK || string(first.Path[:first.PathSize]) != "/" || first.ID == 0 || cursor != 1 {
+		t.Fatalf("first=%+v cursor=%d status=%d", first, cursor, status)
+	}
+	second, cursor, status := namespace.ReadMount(cursor)
+	if status != StatusOK || string(second.Path[:second.PathSize]) != "/data" || second.ID == first.ID || cursor != 2 {
+		t.Fatalf("second=%+v cursor=%d status=%d", second, cursor, status)
+	}
+	if _, end, status := namespace.ReadMount(cursor); status != StatusNotFound || end != MaxMounts {
+		t.Fatalf("end=%d status=%d", end, status)
+	}
+	byPath, pathID, status := namespace.FilesystemInfo([]byte("/data"), 0)
+	if status != StatusOK || pathID != second.ID || byPath.Type != ramfs.FilesystemRAMFS {
+		t.Fatalf("path info=%+v id=%x status=%d", byPath, pathID, status)
+	}
+	byID, id, status := namespace.FilesystemInfo(nil, second.ID)
+	if status != StatusOK || id != second.ID || byID != byPath {
+		t.Fatalf("id info=%+v id=%x status=%d", byID, id, status)
+	}
+	if _, _, status := namespace.FilesystemInfo([]byte("/data"), second.ID); status != StatusInvalidArgument {
+		t.Fatal("two selectors accepted")
+	}
+	if status := namespace.UnmountBackend(dataFS); status != StatusOK {
+		t.Fatal(status)
+	}
+	replacement := &ramfs.FileSystem{}
+	if namespace.Mount([]byte("/data"), replacement, replacement.Init()) != StatusOK {
+		t.Fatal("replacement mount")
+	}
+	if _, _, status := namespace.FilesystemInfo(nil, second.ID); status != StatusNotFound {
+		t.Fatal("stale mount id accepted")
+	}
+	current, _, status := namespace.ReadMount(1)
+	if status != StatusOK || current.ID == second.ID {
+		t.Fatal("mount generation did not advance")
+	}
+}
+
 func TestMutationsInvalidateResolutionCache(t *testing.T) {
 	namespace, _ := mountedNamespace(t)
 	if namespace.Create([]byte("/old"), false) != StatusOK {
@@ -206,6 +254,22 @@ func TestNamespacesKeepIndependentMountTables(t *testing.T) {
 	}
 	if _, _, status := second.Resolve([]byte("/private")); status != StatusNotFound {
 		t.Fatal("private mount leaked into another namespace")
+	}
+}
+
+func TestStatReportsNamespaceMountIdentity(t *testing.T) {
+	var rootFS, mountedFS ramfs.FileSystem
+	var namespace Namespace
+	if namespace.Mount([]byte("/"), &rootFS, rootFS.Init()) != StatusOK || namespace.Mount([]byte("/data"), &mountedFS, mountedFS.Init()) != StatusOK {
+		t.Fatal("mount")
+	}
+	root, status := namespace.Stat([]byte("/"))
+	if status != StatusOK || root.MountID == 0 {
+		t.Fatalf("root stat = %+v, %d", root, status)
+	}
+	data, status := namespace.Stat([]byte("/data"))
+	if status != StatusOK || data.MountID == 0 || data.MountID == root.MountID {
+		t.Fatalf("mounted stat = %+v, %d", data, status)
 	}
 }
 
@@ -312,18 +376,27 @@ func TestProtocolRoundTripAndReservedFields(t *testing.T) {
 
 func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 	message, ok := EncodeReply(Reply{Operation: OperationReadDir, Status: StatusOK, Kind: ramfs.KindFile,
-		Handle: 7, Size: 4, Cursor: 3, Name: []byte("motd"), Data: []byte("data")}, 11)
+		Handle: 7, Size: 4, Cursor: 3, Name: []byte("motd"), Data: []byte("data"), MountID: 4,
+		Created:    ramfs.Timestamp{Seconds: 10, Nanoseconds: 20, Available: true},
+		Modified:   ramfs.Timestamp{Seconds: 30, Nanoseconds: 40, Available: true},
+		Attributes: ramfs.AttrArchive, AttributesAvailable: true}, 11)
 	if !ok {
 		t.Fatal("reply encode failed")
 	}
 	reply, ok := DecodeReply(message)
 	if !ok || reply.Operation != OperationReadDir || reply.Kind != ramfs.KindFile || reply.Handle != 7 ||
-		reply.Size != 4 || reply.Cursor != 3 || string(reply.Name) != "motd" || string(reply.Data) != "data" {
+		reply.Size != 4 || reply.Cursor != 3 || string(reply.Name) != "motd" || string(reply.Data) != "data" || reply.MountID != 4 ||
+		reply.Created.Seconds != 10 || reply.Modified.Nanoseconds != 40 || reply.Attributes != ramfs.AttrArchive || !reply.AttributesAvailable {
 		t.Fatalf("unexpected reply: %#v", reply)
 	}
-	message.Payload[28] = 1
+	message.Payload[60] = 1
 	if _, ok := DecodeReply(message); ok {
 		t.Fatal("nonzero reply reserved field accepted")
+	}
+	message, _ = EncodeReply(Reply{Operation: OperationStat, Modified: ramfs.Timestamp{Available: true}}, 14)
+	message.Payload[52], message.Payload[53], message.Payload[54], message.Payload[55] = 0, 202, 154, 59 // 1,000,000,000 ns
+	if _, ok := DecodeReply(message); ok {
+		t.Fatal("out-of-range timestamp accepted")
 	}
 	busy, ok := EncodeReply(Reply{Operation: OperationUnlink, Status: StatusBusy}, 12)
 	if reply, valid := DecodeReply(busy); !ok || !valid || reply.Status != StatusBusy {

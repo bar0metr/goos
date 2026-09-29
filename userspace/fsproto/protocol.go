@@ -26,8 +26,10 @@ const (
 	// names of up to 255 bytes, the long ones in the name page (ADR 0110);
 	// version 6 adds the timeout, peer-died, and unsupported statuses; version
 	// 7 widens name lengths for the 1024-byte native name limit; version 8
-	// adds stable open-object acquire/release operations (ADR 0119).
-	Version = uint16(8)
+	// adds stable open-object acquire/release operations (ADR 0119); version 9
+	// carries fixed-width native timestamps and attributes; version 10 adds
+	// filesystem capacity and read-only state.
+	Version = uint16(10)
 	// RequestDeadline bounds one exchange. A filesystem service that stalls
 	// surfaces as an I/O error on its mounts rather than a hung namespace. It
 	// is above the block protocol's own deadline, so a slow device is reported
@@ -35,7 +37,7 @@ const (
 	RequestDeadline = 6 * clock.TicksPerSecond
 
 	requestHeader = 40
-	replyHeader   = 32
+	replyHeader   = 88
 
 	// PageSize is the size of one file-cache slot.
 	PageSize = 4096
@@ -77,6 +79,7 @@ const (
 	OperationRelease
 	// OperationFlush makes every completed write durable on the device.
 	OperationFlush
+	OperationFilesystemInfo
 )
 
 // Request is one backend call. Node, Parent, Offset, Size, Slot and Name are
@@ -111,8 +114,13 @@ type Reply struct {
 	// sent. For a read or a write, Value is the bytes it moved.
 	Value uint64
 	// Cursor is the position of the next directory entry.
-	Cursor uint32
-	Name   []byte
+	Cursor              uint32
+	Name                []byte
+	Created             ramfs.Timestamp
+	Modified            ramfs.Timestamp
+	Attributes          ramfs.Attributes
+	AttributesAvailable bool
+	Filesystem          ramfs.FilesystemInfo
 }
 
 // validTransfer reports whether a read or write names a slot and stays within
@@ -136,7 +144,7 @@ func SlotBytes(cache []byte, request Request) ([]byte, bool) {
 }
 
 func validOperation(operation Operation) bool {
-	return operation >= OperationMount && operation <= OperationFlush
+	return operation >= OperationMount && operation <= OperationFilesystemInfo
 }
 
 // validName accepts an empty name, for operations that take none, or one a
@@ -227,7 +235,9 @@ func DecodeRequest(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte
 // of cache.
 func EncodeReply(reply Reply, correlation uint64, message *ipc.Message, cache []byte) bool {
 	if message == nil || correlation == 0 || !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus ||
-		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName {
+		reply.Kind > ramfs.KindDirectory || len(reply.Name) > ramfs.MaxName || !reply.Created.Valid() || !reply.Modified.Valid() ||
+		reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
+		reply.Operation == OperationFilesystemInfo && len(reply.Name) > ramfs.MaxVolumeName || reply.Status == ramfs.StatusOK && reply.Operation == OperationFilesystemInfo && reply.Filesystem.Type == 0 {
 		return false
 	}
 	inline := len(reply.Name) <= maxReplyName
@@ -243,6 +253,30 @@ func EncodeReply(reply Reply, correlation uint64, message *ipc.Message, cache []
 	binary.LittleEndian.PutUint64(payload[8:], uint64(reply.Node))
 	binary.LittleEndian.PutUint64(payload[16:], reply.Value)
 	binary.LittleEndian.PutUint32(payload[24:], reply.Cursor)
+	payload[28] = byte(reply.Attributes)
+	if reply.Created.Available {
+		payload[29] |= 1
+	}
+	if reply.Modified.Available {
+		payload[29] |= 2
+	}
+	if reply.AttributesAvailable {
+		payload[29] |= 4
+	}
+	binary.LittleEndian.PutUint64(payload[32:], uint64(reply.Created.Seconds))
+	binary.LittleEndian.PutUint64(payload[40:], uint64(reply.Modified.Seconds))
+	binary.LittleEndian.PutUint32(payload[48:], reply.Created.Nanoseconds)
+	binary.LittleEndian.PutUint32(payload[52:], reply.Modified.Nanoseconds)
+	binary.LittleEndian.PutUint64(payload[56:], reply.Filesystem.TotalBytes)
+	binary.LittleEndian.PutUint64(payload[64:], reply.Filesystem.FreeBytes)
+	binary.LittleEndian.PutUint64(payload[72:], reply.Filesystem.AvailableBytes)
+	payload[80] = byte(reply.Filesystem.Type)
+	if reply.Filesystem.ReadOnly {
+		payload[81] |= 1
+	}
+	if reply.Filesystem.CapacityAvailable {
+		payload[81] |= 2
+	}
 	if inline {
 		message.PayloadSize += uint16(copy(payload[replyHeader:], reply.Name))
 	} else {
@@ -261,16 +295,22 @@ func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) 
 	payload := message.Payload[:]
 	nameSize := int(binary.LittleEndian.Uint16(payload[3:]))
 	cached := payload[5] == flagNameInCache
-	if payload[5]&^flagNameInCache != 0 || !zero(payload[6:8]) || !zero(payload[28:32]) || nameSize > ramfs.MaxName {
+	if payload[5]&^flagNameInCache != 0 || !zero(payload[6:8]) || payload[29]&^byte(7) != 0 || !zero(payload[30:32]) ||
+		payload[81]&^byte(3) != 0 || !zero(payload[82:88]) || nameSize > ramfs.MaxName {
 		return Reply{}, false
 	}
 	reply := Reply{
-		Operation: Operation(payload[0]),
-		Status:    ramfs.Status(payload[1]),
-		Kind:      ramfs.Kind(payload[2]),
-		Node:      ramfs.NodeID(binary.LittleEndian.Uint64(payload[8:])),
-		Value:     binary.LittleEndian.Uint64(payload[16:]),
-		Cursor:    binary.LittleEndian.Uint32(payload[24:]),
+		Operation:           Operation(payload[0]),
+		Status:              ramfs.Status(payload[1]),
+		Kind:                ramfs.Kind(payload[2]),
+		Node:                ramfs.NodeID(binary.LittleEndian.Uint64(payload[8:])),
+		Value:               binary.LittleEndian.Uint64(payload[16:]),
+		Cursor:              binary.LittleEndian.Uint32(payload[24:]),
+		Attributes:          ramfs.Attributes(payload[28]),
+		AttributesAvailable: payload[29]&4 != 0,
+		Created:             ramfs.Timestamp{Seconds: int64(binary.LittleEndian.Uint64(payload[32:])), Nanoseconds: binary.LittleEndian.Uint32(payload[48:]), Available: payload[29]&1 != 0},
+		Modified:            ramfs.Timestamp{Seconds: int64(binary.LittleEndian.Uint64(payload[40:])), Nanoseconds: binary.LittleEndian.Uint32(payload[52:]), Available: payload[29]&2 != 0},
+		Filesystem:          ramfs.FilesystemInfo{Type: ramfs.FilesystemType(payload[80]), TotalBytes: binary.LittleEndian.Uint64(payload[56:]), FreeBytes: binary.LittleEndian.Uint64(payload[64:]), AvailableBytes: binary.LittleEndian.Uint64(payload[72:]), ReadOnly: payload[81]&1 != 0, CapacityAvailable: payload[81]&2 != 0},
 	}
 	switch {
 	case cached:
@@ -287,7 +327,12 @@ func DecodeReply(message *ipc.Message, cache []byte, name *[ramfs.MaxName]byte) 
 	default:
 		reply.Name = payload[replyHeader : replyHeader+nameSize]
 	}
-	if !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus || reply.Kind > ramfs.KindDirectory {
+	if reply.Operation == OperationFilesystemInfo && !reply.Filesystem.SetVolumeName(reply.Name) {
+		return Reply{}, false
+	}
+	if !validOperation(reply.Operation) || reply.Status > ramfs.LastStatus || reply.Kind > ramfs.KindDirectory ||
+		!reply.Created.Valid() || !reply.Modified.Valid() || reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
+		reply.Status == ramfs.StatusOK && reply.Operation == OperationFilesystemInfo && reply.Filesystem.Type == 0 {
 		return Reply{}, false
 	}
 	return reply, true

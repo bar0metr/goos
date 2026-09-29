@@ -38,6 +38,8 @@ type node struct {
 	generation uint32
 	kind       Kind
 	used       bool
+	created    Timestamp
+	modified   Timestamp
 	nameSize   uint16
 	name       [MaxName]byte
 	// firstChild and next link a directory's children in ascending index
@@ -73,6 +75,28 @@ type FileSystem struct {
 	pages     uint64
 	hint      int
 	ready     bool
+	now       func() (Timestamp, bool)
+}
+
+// SetClock supplies UTC time for metadata. It may be set before or after Init;
+// existing unavailable timestamps are not fabricated retroactively.
+func (fs *FileSystem) SetClock(clock func() (Timestamp, bool)) { fs.now = clock }
+
+func (fs *FileSystem) timestamp() Timestamp {
+	if fs.now == nil {
+		return Timestamp{}
+	}
+	stamp, ok := fs.now()
+	if !ok || !stamp.Available || !stamp.Valid() {
+		return Timestamp{}
+	}
+	return stamp
+}
+
+func touch(entry *node, stamp Timestamp) {
+	if stamp.Available {
+		entry.modified = stamp
+	}
 }
 
 // Configure sets the store and limits of an instance that has not been
@@ -103,7 +127,8 @@ func (fs *FileSystem) Init() NodeID {
 	}
 	fs.chunks[0], fs.allocated = chunk, 1
 	root := fs.at(0)
-	root.generation, root.kind, root.used = 1, KindDirectory, true
+	stamp := fs.timestamp()
+	root.generation, root.kind, root.used, root.created, root.modified = 1, KindDirectory, true, stamp, stamp
 	fs.nodes, fs.ready = 1, true
 	return fs.id(0)
 }
@@ -118,6 +143,19 @@ func (fs *FileSystem) Root() NodeID {
 // Usage reports what the instance holds.
 func (fs *FileSystem) Usage() Usage {
 	return Usage{Nodes: fs.nodes, MaxNodes: fs.limits.Nodes, Pages: fs.pages, MaxPages: fs.limits.Pages}
+}
+
+// FilesystemInfo reports the configured page quota. Node limits bound metadata
+// objects, while the page quota is the byte-allocation limit visible as
+// filesystem capacity.
+func (fs *FileSystem) FilesystemInfo() (FilesystemInfo, Status) {
+	if !fs.ready || fs.pages > fs.limits.Pages {
+		return FilesystemInfo{}, StatusIOError
+	}
+	total := uint64(fs.limits.Pages) * PageSize
+	free := uint64(fs.limits.Pages-fs.pages) * PageSize
+	return FilesystemInfo{Type: FilesystemRAMFS, TotalBytes: total, FreeBytes: free,
+		AvailableBytes: free, CapacityAvailable: true}, StatusOK
 }
 
 func (fs *FileSystem) Create(parent NodeID, name []byte) (NodeID, Status) {
@@ -243,6 +281,7 @@ func (fs *FileSystem) Write(id NodeID, offset uint64, data []byte) (int, Status)
 		// The store ran out below the instance's own limit.
 		return int(done), StatusNoSpace
 	}
+	touch(entry, fs.timestamp())
 	return int(done), StatusOK
 }
 
@@ -267,6 +306,7 @@ func (fs *FileSystem) Truncate(id NodeID, size uint64) Status {
 		}
 	}
 	entry.size = size
+	touch(entry, fs.timestamp())
 	return StatusOK
 }
 
@@ -337,6 +377,9 @@ func (fs *FileSystem) RenameName(id NodeID, parent NodeID, name Name) Status {
 	entry.name = name.data
 	entry.nameSize = name.size
 	fs.link(directory, index)
+	stamp := fs.timestamp()
+	touch(old, stamp)
+	touch(directory, stamp)
 	return StatusOK
 }
 
@@ -367,6 +410,7 @@ func (fs *FileSystem) UnlinkName(parent NodeID, name Name) Status {
 	}
 	fs.release(entry, 0)
 	fs.unlink(directory, index)
+	touch(directory, fs.timestamp())
 	generation := entry.generation + 1
 	if generation == 0 {
 		generation = 1
@@ -399,8 +443,10 @@ func (fs *FileSystem) createName(parent NodeID, name Name, kind Kind) (NodeID, S
 	if generation == 0 {
 		generation = 1
 	}
-	*entry = node{parent: parent, generation: generation, kind: kind, used: true, name: name.data, nameSize: name.size}
+	stamp := fs.timestamp()
+	*entry = node{parent: parent, generation: generation, kind: kind, used: true, name: name.data, nameSize: name.size, created: stamp, modified: stamp}
 	fs.link(directory, index)
+	touch(directory, stamp)
 	fs.nodes++
 	return fs.id(index), StatusOK
 }
@@ -438,7 +484,12 @@ func (fs *FileSystem) id(index int) NodeID {
 }
 
 func (fs *FileSystem) stat(id NodeID, entry *node) Stat {
-	return Stat{ID: id, Kind: entry.kind, Size: entry.size}
+	attributes := Attributes(0)
+	if entry.kind == KindDirectory {
+		attributes = AttrDirectory
+	}
+	return Stat{ID: id, Kind: entry.kind, Size: entry.size, Created: entry.created, Modified: entry.modified,
+		Attributes: attributes, AttributesAvailable: true}
 }
 
 func (fs *FileSystem) lookup(id NodeID) (*node, Status) {

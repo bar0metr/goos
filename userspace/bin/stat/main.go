@@ -5,6 +5,7 @@
 package main
 
 import (
+	"goos/internal/timekeeping"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
@@ -56,6 +57,7 @@ func run(data startup.Data) {
 	if reply.Kind != ramfs.KindDirectory {
 		utility.Print(utility.AppendSize(append(line[:0], "file "...), reply.Size, unit))
 		utility.EndLine()
+		printMetadata(reply)
 		utility.Mark("STAT_PROCESS_OK\n")
 		return
 	}
@@ -66,7 +68,71 @@ func run(data startup.Data) {
 	text = utility.AppendCount(append(text, ", "...), directories, "directory", "directories")
 	utility.Print(text)
 	utility.EndLine()
+	printMetadata(reply)
 	utility.Mark("STAT_PROCESS_OK\n")
+}
+
+func printMetadata(reply vfs.Reply) {
+	text := append(line[:0], "modified="...)
+	if reply.Modified.Available {
+		year, month, day, hour, minute, second := timekeeping.CivilUTC(reply.Modified.Seconds)
+		text = appendPadded(text, uint64(year), 4)
+		text = append(text, '-')
+		text = appendPadded(text, uint64(month), 2)
+		text = append(text, '-')
+		text = appendPadded(text, uint64(day), 2)
+		text = append(text, 'T')
+		text = appendPadded(text, uint64(hour), 2)
+		text = append(text, ':')
+		text = appendPadded(text, uint64(minute), 2)
+		text = append(text, ':')
+		text = appendPadded(text, uint64(second), 2)
+		text = append(text, 'Z')
+	} else {
+		text = append(text, "unavailable"...)
+	}
+	text = append(text, " attributes="...)
+	if !reply.AttributesAvailable {
+		text = append(text, "unavailable"...)
+	} else if reply.Attributes == 0 {
+		text = append(text, '-')
+	} else {
+		first := true
+		for _, attribute := range []struct {
+			flag ramfs.Attributes
+			name string
+		}{{ramfs.AttrDirectory, "directory"}, {ramfs.AttrReadOnly, "read-only"}, {ramfs.AttrHidden, "hidden"}, {ramfs.AttrSystem, "system"}, {ramfs.AttrArchive, "archive"}} {
+			if reply.Attributes&attribute.flag == 0 {
+				continue
+			}
+			if !first {
+				text = append(text, ',')
+			}
+			text = append(text, attribute.name...)
+			first = false
+		}
+	}
+	text = append(text, " mount="...)
+	text = utility.AppendUint(text, uint64(reply.MountID))
+	utility.Print(text)
+	utility.EndLine()
+}
+
+func appendPadded(target []byte, value uint64, width int) []byte {
+	var digits [20]byte
+	index := len(digits)
+	for {
+		index--
+		digits[index] = byte(value%10) + '0'
+		value /= 10
+		if value == 0 {
+			break
+		}
+	}
+	for padding := width - (len(digits) - index); padding > 0; padding-- {
+		target = append(target, '0')
+	}
+	return append(target, digits[index:]...)
 }
 
 // walk adds up the directory at walkPath[:length] and everything below it.

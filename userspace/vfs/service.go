@@ -167,6 +167,11 @@ func (service *Service) ConfigureRAMFS(store ramfs.Store, limits ramfs.Limits) b
 	return service.fs.Configure(store, limits)
 }
 
+// SetRAMFSClock supplies the native realtime clock used for volatile metadata.
+func (service *Service) SetRAMFSClock(clock func() (ramfs.Timestamp, bool)) {
+	service.fs.SetClock(clock)
+}
+
 // RAMFSUsage reports what the volatile root holds against its limits.
 func (service *Service) RAMFSUsage() ramfs.Usage { return service.fs.Usage() }
 
@@ -241,6 +246,9 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.Status, reply.Cursor = status, uint32(cursor)
 		if status == vfs.StatusOK {
 			reply.Kind, reply.Size, reply.Name = entry.Stat.Kind, entry.Stat.Size, entry.Name[:entry.Size]
+			reply.Created, reply.Modified = entry.Stat.Created, entry.Stat.Modified
+			reply.Attributes, reply.AttributesAvailable = entry.Stat.Attributes, entry.Stat.AttributesAvailable
+			reply.MountID = vfs.MountID(entry.Stat.MountID)
 		}
 	case vfs.OperationRename:
 		reply.Status = service.namespace.Rename(request.Path, request.Target)
@@ -249,8 +257,24 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	case vfs.OperationStat:
 		stat, status := service.namespace.Stat(request.Path)
 		reply.Status, reply.Kind, reply.Size = status, stat.Kind, stat.Size
+		reply.Created, reply.Modified = stat.Created, stat.Modified
+		reply.Attributes, reply.AttributesAvailable = stat.Attributes, stat.AttributesAvailable
+		reply.MountID = vfs.MountID(stat.MountID)
 	case vfs.OperationTruncate:
 		reply.Status = service.namespace.Truncate(request.Path, request.Offset)
+	case vfs.OperationFilesystemInfo:
+		info, mountID, status := service.namespace.FilesystemInfo(request.Path, request.MountID)
+		reply.Status, reply.MountID, reply.Filesystem = status, mountID, info
+		if status == vfs.StatusOK {
+			reply.Name = info.Name()
+		}
+	case vfs.OperationReadMount:
+		mount, cursor, status := service.namespace.ReadMount(int(request.Offset))
+		reply.Status, reply.Cursor = status, uint32(cursor)
+		if status == vfs.StatusOK {
+			reply.MountID, reply.Filesystem = mount.ID, mount.Filesystem
+			reply.Name = mount.Path[:mount.PathSize]
+		}
 	default:
 		reply.Status = vfs.StatusInvalidArgument
 	}

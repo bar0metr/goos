@@ -38,6 +38,15 @@ func (volume *Volume) Root() (ramfs.NodeID, ramfs.Status) {
 // Health reports what the mount noticed about the volume it accepted.
 func (volume *Volume) Health() Health { return volume.fs.Health() }
 
+// FilesystemInfo reports the accepted volume's live capacity and mutation
+// state through the filesystem-service boundary.
+func (volume *Volume) FilesystemInfo() (ramfs.FilesystemInfo, ramfs.Status) {
+	if !volume.mounted {
+		return ramfs.FilesystemInfo{}, ramfs.StatusIOError
+	}
+	return volume.fs.FilesystemInfo()
+}
+
 // Metadata reports the times and attributes of a node.
 func (volume *Volume) Metadata(id ramfs.NodeID) (Metadata, ramfs.Status) {
 	if !volume.mounted {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"goos/internal/limits"
 	"goos/kernel/ipc"
+	"goos/kernel/ramfs"
 	"testing"
 )
 
@@ -115,5 +116,24 @@ func TestLongListedNamesComeAttached(t *testing.T) {
 	request.Payload[28] = 4
 	if _, ok := DecodeRequest(request); ok {
 		t.Fatal("unknown request flag accepted")
+	}
+}
+
+func TestFilesystemInfoProtocolRoundTrip(t *testing.T) {
+	requestMessage, ok := EncodeRequest(Request{Operation: OperationFilesystemInfo, MountID: MountID(7)<<32 | 2}, 9)
+	request, decoded := DecodeRequest(requestMessage)
+	if !ok || !decoded || request.MountID != MountID(7)<<32|2 {
+		t.Fatalf("request=%+v encoded=%v decoded=%v", request, ok, decoded)
+	}
+	info := ramfs.FilesystemInfo{Type: ramfs.FilesystemFAT32, TotalBytes: 9 << 30, FreeBytes: 5 << 30, AvailableBytes: 4 << 30, ReadOnly: true, CapacityAvailable: true}
+	info.SetVolumeName([]byte("DATA"))
+	replyMessage, ok := EncodeReply(Reply{Operation: OperationFilesystemInfo, Status: StatusOK, MountID: request.MountID, Filesystem: info, Name: info.Name()}, 9)
+	reply, decoded := DecodeReply(replyMessage)
+	if !ok || !decoded || reply.MountID != request.MountID || reply.Filesystem != info || string(reply.Name) != "DATA" {
+		t.Fatalf("reply=%+v encoded=%v decoded=%v", reply, ok, decoded)
+	}
+	replyMessage.Payload[97] |= 4
+	if _, ok := DecodeReply(replyMessage); ok {
+		t.Fatal("unknown filesystem flag accepted")
 	}
 }

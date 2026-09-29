@@ -313,7 +313,7 @@ const (
 // attached to receive it (ADR 0110).
 func CallVFS(request vfs.Request) (vfs.Reply, bool) {
 	reply, ok := callVFS(request, 0)
-	if ok && request.Operation == vfs.OperationReadDir && reply.Status == vfs.StatusNameTooLong {
+	if ok && (request.Operation == vfs.OperationReadDir || request.Operation == vfs.OperationReadMount) && reply.Status == vfs.StatusNameTooLong {
 		request.NameReturn = true
 		reply, ok = callVFS(request, 0)
 	}
