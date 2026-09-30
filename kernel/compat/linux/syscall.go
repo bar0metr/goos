@@ -62,6 +62,7 @@ type Handler interface {
 	Madvise(Request) Result
 	ArchPrctl(Request) Result
 	Execve(Request) Result
+	Fork(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -166,6 +167,8 @@ func route(request Request, handler Handler) Result {
 			return handler.ArchPrctl(request)
 		case abi.SysExecve:
 			return handler.Execve(request)
+		case abi.SysFork:
+			return handler.Fork(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

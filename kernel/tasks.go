@@ -68,6 +68,7 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	linuxSyscallEntries++
 	state := amd64.ReadSchedulerState()
 	linuxHandler.root = frame.Root
+	linuxHandler.frame = frame
 	linuxHandler.task = sched.TaskID(amd64.TaskIDForSlot(state.Current))
 	result := linuxcompat.Dispatch(frame, &linuxHandler)
 	if result.Errno == linuxabi.EFAULT {

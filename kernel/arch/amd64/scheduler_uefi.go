@@ -64,11 +64,47 @@ func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
 	return true
 }
 
+// UserRegisters is the ring 3 state a new user task starts with.
+type UserRegisters struct {
+	RAX, RBX, RCX, RDX, RSI, RDI, RBP uint64
+	R8, R9, R10, R11, R12, R13, R14   uint64
+	R15                               uint64
+	RIP, RFlags, RSP                  uint64
+}
+
+// LinuxCallRegisters returns the general-purpose registers the current task
+// pushed on entry to the Linux system call it is making. The entry path pushes
+// them at the top of the task's kernel stack, RAX lowest and R15 highest.
+func LinuxCallRegisters(task sched.TaskID) (UserRegisters, bool) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(taskKernelStacks) || TaskIDForSlot(uint64(slot)) != uint64(task) || taskKernelStacks[slot].top == 0 {
+		return UserRegisters{}, false
+	}
+	// SAFETY: the task's kernel stack is mapped for its whole life, and the
+	// fifteen pushed words lie directly below its entry top.
+	saved := (*[15]uint64)(unsafe.Pointer(uintptr(taskKernelStacks[slot].top - 15*8)))
+	return UserRegisters{
+		RAX: saved[0], RCX: saved[1], RDX: saved[2], RBX: saved[3], RBP: saved[4], RSI: saved[5], RDI: saved[6],
+		R8: saved[7], R9: saved[8], R10: saved[9], R11: saved[10], R12: saved[11], R13: saved[12], R14: saved[13], R15: saved[14],
+	}, true
+}
+
+// userFlagsCleared are the RFLAGS bits a user task never resumes with: TF,
+// DF, IOPL, NT, RF, VM, and AC. IF is always set.
+const userFlagsCleared = uint64(0x77700)
+
 // AddUserTask installs a runnable ring 3 context with its own address-space
 // root and guarded kernel-entry stack. The scheduler updates TSS.RSP0 before
 // selecting this task, so userspace interrupt frames remain task-local.
 func AddUserTask(allocator *pmm.Allocator, pageTable uint64, entry uint64, userStack uint64) (uint64, bool) {
-	if pageTable == 0 || entry == 0 || userStack == 0 {
+	return AddUserTaskWithRegisters(allocator, pageTable, UserRegisters{RIP: entry, RSP: userStack, RFlags: initialRFlags})
+}
+
+// AddUserTaskWithRegisters is AddUserTask for a task that resumes with every
+// general-purpose register given, as a forked child resumes where its parent
+// made the call.
+func AddUserTaskWithRegisters(allocator *pmm.Allocator, pageTable uint64, registers UserRegisters) (uint64, bool) {
+	if pageTable == 0 || registers.RIP == 0 || registers.RSP == 0 {
 		return 0, false
 	}
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
@@ -95,7 +131,7 @@ func AddUserTask(allocator *pmm.Allocator, pageTable uint64, entry uint64, userS
 		return 0, false
 	}
 	kernelStackTop := virtualStart + kernelStackPages*pmm.PageSize - 64
-	context := initialUserContext(stackStart, entry, userStack)
+	context := initialUserContext(stackStart, &registers)
 	taskID := installUserTask(context, pageTable, kernelStackTop)
 	if taskID == 0 {
 		return 0, false
@@ -196,19 +232,22 @@ func initialContext(stackStart uint64, entry uintptr) uint64 {
 	return contextAddress
 }
 
-func initialUserContext(stackStart uint64, entry uint64, userStack uint64) uint64 {
+// initialUserContext writes the frame the scheduler restores: fifteen
+// general-purpose registers in its pop order, then the IRETQ frame.
+func initialUserContext(stackStart uint64, registers *UserRegisters) uint64 {
 	stackEnd := stackStart + kernelStackPages*pmm.PageSize
 	contextAddress := stackEnd - 64 - contextWords*8
 	// SAFETY: the guarded allocation owns the mapped kernel-stack pages. The
 	// synthetic context lies wholly below the reserved interrupt-entry top.
 	context := (*[contextWords]uint64)(unsafe.Pointer(uintptr(contextAddress)))
-	for index := range context {
-		context[index] = 0
-	}
-	context[15] = entry
+	context[0], context[1], context[2], context[3] = registers.R15, registers.R14, registers.R13, registers.R12
+	context[4], context[5], context[6], context[7] = registers.R11, registers.R10, registers.R9, registers.R8
+	context[8], context[9], context[10] = registers.RDI, registers.RSI, registers.RBP
+	context[11], context[12], context[13], context[14] = registers.RDX, registers.RCX, registers.RBX, registers.RAX
+	context[15] = registers.RIP
 	context[16] = uint64(userCodeSelector)
-	context[17] = initialRFlags
-	context[18] = userStack
+	context[17] = registers.RFlags&^userFlagsCleared | initialRFlags
+	context[18] = registers.RSP
 	context[19] = uint64(userDataSelector)
 	contextAlias, _ := vm.KernelAlias(contextAddress)
 	return contextAlias

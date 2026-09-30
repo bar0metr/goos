@@ -79,6 +79,23 @@ func InitWithProfile(target *Process, id ID, abi ABI, addressSpace AddressSpace,
 	return true
 }
 
+// InitChild prepares target as a fork of parent. The child keeps the parent's
+// ABI, quota limits, region map, and name. It gets its own identity and
+// address space, an empty handle table, and an account with nothing charged.
+func InitChild(target *Process, id ID, parent *Process, addressSpace AddressSpace) bool {
+	if target == nil || parent == nil || target == parent || id == 0 || parent.id == 0 || addressSpace.Root == 0 {
+		return false
+	}
+	target.Reset()
+	target.id = id
+	target.abi = parent.abi
+	target.addressSpace = addressSpace
+	target.quota.limits = parent.quota.limits
+	target.regions.CopyFrom(&parent.regions)
+	target.name, target.nameSize = parent.name, parent.nameSize
+	return true
+}
+
 func New(id ID, abi ABI, addressSpace AddressSpace) (Process, bool) {
 	var created Process
 	ok := Init(&created, id, abi, addressSpace)
@@ -110,7 +127,7 @@ func (process *Process) ReplaceAddressSpace(addressSpace AddressSpace, regions *
 		return false
 	}
 	process.addressSpace = addressSpace
-	process.regions = *regions
+	process.regions.CopyFrom(regions)
 	return true
 }
 

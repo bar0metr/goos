@@ -42,7 +42,8 @@ an errno; nothing is accepted and ignored.
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; no signal interrupts it |
-| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is 1 |
+| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is the forking process, or 1 for a launched or orphaned one |
+| `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
@@ -72,7 +73,7 @@ BusyBox does about it:
 | `kill(62)`, `tkill(200)`, `tgkill(234)`, `rt_sigreturn(15)`, `sigaltstack(131)` | no signal is sent or delivered; `raise` and `abort` see the refusal |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `fork(57)`, `vfork(58)`, `clone(56)`, `wait4(61)` | no Linux process starts another |
+| `vfork(58)`, `clone(56)`, `wait4(61)` | a child is created only through `fork` and nothing reaps it; a zombie goes when its parent exits |
 | `pipe(22)`, `pipe2(293)`, `poll(7)`, `ppoll(271)`, `futex(202)` | no pipes, polling, or threads inside a process |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
@@ -138,6 +139,22 @@ directory, which the launch supplies. The resolver removes empty, `.`, and
 
 A resolved path over 216 bytes reaches the VFS in a memory object attached to
 the request.
+
+## Process creation
+
+`fork()` returns the child PID to the parent and zero to the child. Both
+resume after the call with the same general-purpose registers, stack, and FS
+base. The child owns a copy of every page the parent had touched; untouched
+anonymous and brk pages stay demand-zero in both. The region map, protections,
+stack guard, brk range, cwd, signal dispositions, and blocked mask are copied.
+Every descriptor refers to the parent's open-file description, so both
+processes move one file position and see one set of status flags. Close-on-exec
+bits are copied and stay per descriptor.
+
+The child does not inherit pending signals, a syscall in progress, or the
+address `set_tid_address` recorded. A full family or global process budget is
+`EAGAIN`. A copy the child quota or physical memory cannot hold is `ENOMEM`,
+and no child exists afterwards (ADR 0158).
 
 ## Image replacement
 
@@ -515,8 +532,8 @@ Results a correct Linux program can observe to differ:
 ## Release limits
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
-or not. It has no `PT_INTERP`, dynamic linker, or glibc; no `fork`, `vfork`,
-`clone`, or `execve`; no threads or `futex`; no signal delivery; no pipes
+or not. It has no `PT_INTERP`, dynamic linker, or glibc; no `vfork`, `clone`,
+or `wait4`; no threads or `futex`; no signal delivery; no pipes
 created by a Linux process; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs
@@ -536,6 +553,8 @@ builtins and redirections but cannot run a program. `nano` does not run.
 | one `execve` string | 32 KiB |
 | copied `execve` strings | 64 KiB including terminators |
 | concurrent `execve` preparation | 4 system-wide |
+| Linux processes per family | 16, zombies included |
+| Linux processes, all families | 48 |
 | stack reservation | 8 MiB, 64 KiB guard |
 | static PIE load base | `0x40000000` |
 | `brk` heap | 64 MiB |

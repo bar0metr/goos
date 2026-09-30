@@ -36,6 +36,33 @@ func TestReplaceAddressSpacePreservesProcessIdentity(t *testing.T) {
 	}
 }
 
+func TestInitChildCopiesLimitsRegionsAndName(t *testing.T) {
+	var parent, child Process
+	if !InitWithProfile(&parent, 3, ABILinuxX8664, AddressSpace{Root: 0x1000}, ProfileLarge) {
+		t.Fatal("parent init failed")
+	}
+	parent.SetName([]byte("busybox"))
+	if parent.Regions().Insert(region.Region{Base: 0x400000, Length: 0x2000, Protection: region.Read | region.Write, Backing: region.Anonymous}) != region.OK ||
+		!parent.Charge(ResourcePages, 5) {
+		t.Fatal("parent setup failed")
+	}
+	task, _ := sched.NewTaskID(0, 1)
+	parent.AddTask(task)
+	if InitChild(&child, 4, &parent, AddressSpace{}) || InitChild(&parent, 4, &parent, AddressSpace{Root: 0x2000}) {
+		t.Fatal("invalid child accepted")
+	}
+	if !InitChild(&child, 4, &parent, AddressSpace{Root: 0x2000}) {
+		t.Fatal("child init failed")
+	}
+	used, limits := child.Quota()
+	_, parentLimits := parent.Quota()
+	if child.ID() != 4 || child.ABI() != ABILinuxX8664 || child.AddressSpace().Root != 0x2000 || string(child.Name()) != "busybox" ||
+		child.Regions().Count() != 1 || child.TaskCount() != 0 || used != [4]uint32{} || limits != parentLimits {
+		t.Fatalf("child = id %d abi %d root %#x name %q regions %d tasks %d used %v limits %v",
+			child.ID(), child.ABI(), child.AddressSpace().Root, child.Name(), child.Regions().Count(), child.TaskCount(), used, limits)
+	}
+}
+
 func TestProcessRejectsInvalidIdentity(t *testing.T) {
 	if _, ok := New(0, ABINative, AddressSpace{Root: 0x1000}); ok {
 		t.Fatal("zero process ID accepted")

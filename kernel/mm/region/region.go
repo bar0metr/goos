@@ -137,6 +137,13 @@ func (m *Map) Init(lower, upper uint64) bool {
 	return true
 }
 
+// CopyFrom makes m a copy of source in place. Assigning a whole Map builds a
+// temporary, which the kernel's leaking heap never frees.
+func (m *Map) CopyFrom(source *Map) {
+	m.lower, m.upper, m.count = source.lower, source.upper, source.count
+	copy(m.regions[:], source.regions[:])
+}
+
 // Count is the number of regions.
 func (m *Map) Count() int { return m.count }
 

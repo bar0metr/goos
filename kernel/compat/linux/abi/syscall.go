@@ -36,6 +36,7 @@ const (
 	SysDup2          Syscall = 33
 	SysNanosleep     Syscall = 35
 	SysGetpid        Syscall = 39
+	SysFork          Syscall = 57
 	SysExecve        Syscall = 59
 	SysExit          Syscall = 60
 	SysUname         Syscall = 63
@@ -206,7 +207,7 @@ func (number Syscall) Known() bool {
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,
-		SysNanosleep, SysGetpid, SysExecve, SysExit, SysUname, SysGetcwd, SysChdir,
+		SysNanosleep, SysGetpid, SysFork, SysExecve, SysExit, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
 		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,

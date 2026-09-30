@@ -140,6 +140,13 @@ compatibility root, brk bounds, and entry state without changing Process ID,
 task ownership, family identity, quotas, handles, or cwd. The old address space
 is inactive before reclamation begins.
 
+A Linux `fork` creates an ordinary Process in the native registry
+(ADR 0158). It copies the parent's ABI, quota limits, region map, and every
+touched page into a new address space, and receives only the parent's VFS
+channel capability. Its task starts with the parent's registers. PID 1 holds
+no handle to it and gets no lifecycle message when it exits. The family VFS
+context keeps the shared channel endpoint open until the last member exits.
+
 ## Teardown liveness
 
 Process teardown separates what other parties observe from what merely reclaims

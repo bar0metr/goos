@@ -227,6 +227,11 @@ run '/system/linux/abi-probe exec'
 expect '^exec ok pid [0-9]*$' 'in-place Linux image replacement'
 clean 'in-place Linux image replacement'
 
+run '/system/linux/abi-probe fork'
+expect '^fork child ok$' 'forked Linux child'
+expect '^fork parent ok$' 'forked Linux parent'
+clean 'forked Linux parent'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'

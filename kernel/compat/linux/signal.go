@@ -23,6 +23,12 @@ type SignalState struct {
 	actions [abi.SignalCount][SignalActionSize]byte
 }
 
+// CopyFrom gives state the mask and dispositions of source, as fork does.
+func (state *SignalState) CopyFrom(source *SignalState) {
+	state.mask = source.mask
+	copy(state.actions[:], source.actions[:])
+}
+
 // ResetForExec restores caught signals to their default disposition. Ignored
 // signals and the blocked mask survive image replacement.
 func (state *SignalState) ResetForExec() {

@@ -261,3 +261,19 @@ func TestSplitsKeepSourceBytes(t *testing.T) {
 		t.Fatalf("a piece past the source bytes %+v", last)
 	}
 }
+
+func TestCopyFromDuplicatesTheTable(t *testing.T) {
+	var source, target Map
+	source.Init(0x1000, 0x100000)
+	if source.Insert(Region{Base: 0x2000, Length: 0x1000, Protection: Read, Backing: Anonymous}) != OK {
+		t.Fatal("insert failed")
+	}
+	target.Init(0x5000, 0x6000)
+	target.CopyFrom(&source)
+	if lower, upper := target.Bounds(); lower != 0x1000 || upper != 0x100000 || target.Count() != 1 {
+		t.Fatalf("copy = [%#x, %#x) with %d regions", lower, upper, target.Count())
+	}
+	if source.Remove(0x2000, 0x1000, false) != OK || target.Count() != 1 {
+		t.Fatal("the copy shares state with its source")
+	}
+}
