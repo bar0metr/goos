@@ -232,6 +232,11 @@ expect '^fork child ok$' 'forked Linux child'
 expect '^fork parent ok$' 'forked Linux parent'
 clean 'forked Linux parent'
 
+run '/system/linux/abi-probe vfork'
+expect '^vfork ok$' 'vfork suspends the parent until the child exits'
+expect '^clone ok$' 'clone process form and thread refusal'
+clean 'clone process form and thread refusal'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'

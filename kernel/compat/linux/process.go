@@ -7,6 +7,7 @@ import (
 	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
 	"goos/kernel/process"
+	"goos/kernel/sched"
 	"goos/userspace/startup"
 )
 
@@ -38,8 +39,24 @@ type ProcessState struct {
 	// Forked marks a process created by fork rather than launched by PID 1,
 	// which holds no handle to it and hears nothing of its exit.
 	Forked bool
-	cwd    [limits.PathMax]byte
-	cwdLen uint16
+	// vforkParent is the task a vfork suspended until this process replaces
+	// its image or exits.
+	vforkParent sched.TaskID
+	cwd         [limits.PathMax]byte
+	cwdLen      uint16
+}
+
+// HoldVforkParent records the task a vfork suspended for this child.
+func (state *ProcessState) HoldVforkParent(task sched.TaskID) {
+	state.vforkParent = task
+}
+
+// ReleaseVforkParent returns the suspended parent task, if any, and forgets
+// it, so image replacement and exit release the parent once.
+func (state *ProcessState) ReleaseVforkParent() sched.TaskID {
+	task := state.vforkParent
+	state.vforkParent = 0
+	return task
 }
 
 type StandardStreams struct {

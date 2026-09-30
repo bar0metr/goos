@@ -36,7 +36,9 @@ const (
 	SysDup2          Syscall = 33
 	SysNanosleep     Syscall = 35
 	SysGetpid        Syscall = 39
+	SysClone         Syscall = 56
 	SysFork          Syscall = 57
+	SysVfork         Syscall = 58
 	SysExecve        Syscall = 59
 	SysExit          Syscall = 60
 	SysUname         Syscall = 63
@@ -176,8 +178,15 @@ const (
 	SignalUnblock = uint64(1)
 	SignalSetMask = uint64(2)
 	SignalKill    = uint64(9)
+	SignalChild   = uint64(17)
 	SignalStop    = uint64(19)
 	SignalCount   = uint64(64)
+
+	// clone flags a process-creating call may carry. The low byte of the
+	// flags is the signal the parent receives when the child ends.
+	CloneVM         = uint64(0x100)
+	CloneVfork      = uint64(0x4000)
+	CloneSignalMask = uint64(0xff)
 
 	// File type and permission bits of st_mode.
 	ModeFIFO      = uint32(0o010000)
@@ -207,7 +216,7 @@ func (number Syscall) Known() bool {
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,
-		SysNanosleep, SysGetpid, SysFork, SysExecve, SysExit, SysUname, SysGetcwd, SysChdir,
+		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
 		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,
