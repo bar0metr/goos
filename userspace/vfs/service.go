@@ -246,6 +246,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.Status, reply.Cursor = status, uint32(cursor)
 		if status == vfs.StatusOK {
 			reply.Kind, reply.Size, reply.Name = entry.Stat.Kind, entry.Stat.Size, entry.Name[:entry.Size]
+			reply.Node = uint64(entry.Stat.ID)
 			reply.Created, reply.Modified = entry.Stat.Created, entry.Stat.Modified
 			reply.Attributes, reply.AttributesAvailable = entry.Stat.Attributes, entry.Stat.AttributesAvailable
 			reply.MountID = vfs.MountID(entry.Stat.MountID)
@@ -266,6 +267,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 			stat, status = service.namespace.Stat(request.Path)
 		}
 		reply.Status, reply.Kind, reply.Size = status, stat.Kind, stat.Size
+		reply.Node = uint64(stat.ID)
 		reply.Created, reply.Modified = stat.Created, stat.Modified
 		reply.Attributes, reply.AttributesAvailable = stat.Attributes, stat.AttributesAvailable
 		reply.MountID = vfs.MountID(stat.MountID)

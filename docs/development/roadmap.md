@@ -505,13 +505,17 @@ truncation, append, and directory descriptors; file `read`, `write`, and
 musl's legacy numbers. The musl fixture runs the same checks on Linux and on
 GoOS and prints the same result.
 
+`stat`, `lstat`, `fstat`, and `newfstatat` fill a hand-laid-out `struct stat`
+with synthetic mode, owner, and link count and with the VFS mount and node
+identity as `st_dev` and `st_ino`. `readv` serves streams and files, so musl
+stdio reads files. The boot test runs a Linux program through a VFS restart
+and through a VFS that answers late.
+
 Order for the remaining release work:
 
-1. `stat` translation: `fstat`, `newfstatat`, and the legacy `stat` and
-   `lstat` numbers;
-2. `getdents64` on directory descriptors;
-3. `readv`, which musl stdio needs to read a file;
-4. selected static BusyBox applets as measured P1 interoperability.
+1. `getdents64` on directory descriptors;
+2. identity, time, and terminal calls BusyBox applets need, as measured;
+3. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

@@ -640,6 +640,11 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
 	sleep 2
+	# The validation VFS answers one name late. A Linux program that opens
+	# it waits out the bridge's eight-second deadline, gets ETIMEDOUT, and on
+	# its next request must discard the late reply and carry on.
+	printf '/system/linux/musl-hello session-timeout\n'
+	sleep 11
 	# The VFS restarts too (ADR 0099): its clients are handed new sessions,
 	# the FAT32 service restarts behind it, and the shell keeps its jobs.
 	printf 'sleep 25 &\n'
@@ -828,7 +833,7 @@ for marker in HANDLE_TABLE_OK KCALL_ABI_OK IPC_WIRE_OK IPC_REQUEST_REPLY_OK IPC_
 done
 pass_group ipc-capabilities
 
-for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK LAUNCH_AUTHORITY_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK LINUX_PID1_LAUNCH_OK LINUX_MUSL_OK LINUX_VFS_SESSION_OK LINUX_PATH_OK LINUX_FILE_IO_OK USER_CONSOLE_CAP_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
+for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK LAUNCH_AUTHORITY_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK LINUX_PID1_LAUNCH_OK LINUX_MUSL_OK LINUX_VFS_SESSION_OK LINUX_PATH_OK LINUX_FILE_IO_OK LINUX_STAT_OK USER_CONSOLE_CAP_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
 	require_marker "userspace.$marker" "$marker" "$log"
 done
 pass_group userspace
@@ -1101,6 +1106,7 @@ require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'f
 require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'goos> ls /tmp; echo after-vfs-fault'
 forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
 require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
+require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/musl-hello session-timeout'
 require_regex vfs-restart.linux-session-dead 'session lost: EIO$' 'a Linux process keeps a dead session after the VFS restarts' "$log" 'goos> fault vfs'
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
 require_regex vfs-restart.jobs-kept '^\[[0-9]\] running  sleep 25$' 'the shell kept its job across the restart' "$log" 'fault vfs'
@@ -1130,7 +1136,9 @@ pass_group service-restart
 # its endpoint, and the volume is mounted, read and written again.
 require_marker block-restart.injected BLOCK_FAULT_INJECTED "$log" 'fault block'
 require_marker block-restart.restarted BLOCK_RESTARTED_OK "$log" 'fault block'
-require_count block-restart.service-started-twice '^BLOCK_SERVICE_OK$' 2 "$log" 'fault block'
+# The restarted service may print its marker on the line where the shell
+# has just redrawn its prompt, so the count matches the marker at a line's end.
+require_count block-restart.service-started-twice 'BLOCK_SERVICE_OK$' 2 "$log" 'fault block'
 require_window block-restart.driver-again '^VIRTIO_BLK_DRIVER_OK$' 'a driver started for the new block service' "$log" 'goos> fault block' 'after-block-restart'
 require_window block-restart.driver-installed '^BLOCK_DRIVER_REPLACED_OK$' 'the new driver handed to the block service' "$log" 'goos> fault block' 'after-block-restart'
 require_window block-restart.filesystem-installed '^BLOCK_FILESYSTEM_REPLACED_OK$' 'the new FAT32 service handed to the block service' "$log" 'goos> fault block' 'after-block-restart'

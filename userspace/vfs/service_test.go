@@ -484,8 +484,19 @@ func TestServiceStatByHandleFollowsTheOpenFile(t *testing.T) {
 		t.Fatalf("open = %d", opened.Status)
 	}
 	byHandle := vfs.Request{Operation: vfs.OperationStat, Handle: opened.Handle}
-	if stat := service.Dispatch(testSession, byHandle); stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 0 {
+	byPath := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: path})
+	stat := service.Dispatch(testSession, byHandle)
+	if stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 0 {
 		t.Fatalf("empty file = %+v", stat)
+	}
+	// Both answers describe one file, so they carry one identity, and a
+	// second file of the mount carries another.
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/tmp/other")})
+	other := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/tmp/other")})
+	listed := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/tmp")})
+	if stat.Node == 0 || stat.Node != byPath.Node || other.Node == stat.Node || other.MountID != stat.MountID ||
+		listed.Status != vfs.StatusOK || listed.Node != stat.Node && listed.Node != other.Node {
+		t.Fatalf("identity: handle=%d path=%d other=%d listed=%d", stat.Node, byPath.Node, other.Node, listed.Node)
 	}
 	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte("seven b")})
 	if renamed := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: path, Target: []byte("/tmp/renamed")}); renamed.Status != vfs.StatusOK {
@@ -503,5 +514,24 @@ func TestServiceStatByHandleFollowsTheOpenFile(t *testing.T) {
 	}
 	if empty := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat}); empty.Status == vfs.StatusOK {
 		t.Fatal("stat with neither path nor handle succeeded")
+	}
+}
+
+// FAT32 names an open file by a cookie and a path by a directory location.
+// The identity a stat reports must still be one value for both.
+func TestServiceIdentityAgreesOnFAT32(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	path := []byte("/persist/identity.txt")
+	if created := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: path}); created.Status != vfs.StatusOK {
+		t.Fatalf("create = %d", created.Status)
+	}
+	before := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: path})
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read | vfs.Write, Path: path})
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte("x")})
+	byHandle := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Handle: opened.Handle})
+	whileOpen := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: path})
+	if opened.Status != vfs.StatusOK || byHandle.Status != vfs.StatusOK || before.Node == 0 ||
+		byHandle.Node != before.Node || whileOpen.Node != before.Node || byHandle.Size != 1 || byHandle.MountID != before.MountID {
+		t.Fatalf("identity: before=%d handle=%d while open=%d size=%d", before.Node, byHandle.Node, whileOpen.Node, byHandle.Size)
 	}
 }

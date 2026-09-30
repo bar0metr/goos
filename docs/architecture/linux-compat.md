@@ -90,9 +90,10 @@ Syscalls map onto native primitives:
 
 | Linux | Native mechanism |
 | --- | --- |
-| `read`, `write`, `writev` on files | VFS bulk requests through the process's I/O object |
-| `read`, `write`, `writev` on stdio and pipes | stream endpoints |
-| `open`, `openat`, `close`, `lseek`, `fstat`, `getdents64` | VFS session requests plus the fd table |
+| `read`, `readv`, `write`, `writev` on files | VFS bulk requests through the process's I/O object |
+| `read`, `readv`, `write`, `writev` on stdio and pipes | stream endpoints |
+| `open`, `openat`, `close`, `lseek`, `getdents64` | VFS session requests plus the fd table |
+| `stat`, `lstat`, `fstat`, `newfstatat` | VFS stat by path or by handle; a synthetic record for streams |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
@@ -154,7 +155,9 @@ and operation match, drops replies to calls that gave up earlier, and fails
 the call with `EIO` on anything else. It closes handles a message attached.
 
 Peer death returns `EIO` and marks the session failed; later requests fail the
-same way. The bridge opens no new session for a running process, so a VFS
+same way. The boot test proves both ends of this in the VM: a program whose
+VFS restarted gets `EIO`, and one whose request went unanswered gets
+`ETIMEDOUT` and then keeps using its session. The bridge opens no new session for a running process, so a VFS
 restart cannot hand a process authority PID 1 did not grant. A deadline expiry
 returns `ETIMEDOUT`.
 
@@ -188,8 +191,14 @@ The flags an open accepts and the errno of each refusal are in
 refused write is `EROFS`. Removing or replacing a file some session holds open
 is `EBUSY`, and a directory moves only onto a free name.
 
-`fstat`, `newfstatat`, `getdents64`, `readv`, `ftruncate`, and `fsync` are not
-implemented.
+- `stat`, `lstat`, `fstat`, and `newfstatat` translate a VFS stat into a
+  hand-laid-out `struct stat` (ADR 0142). Mode, owner, and link count are
+  synthetic presentation. `st_dev` and `st_ino` come from the VFS mount and
+  node identity, so two names of one file compare equal.
+- `readv` reads once and fills its elements in order, from a stream or a
+  file.
+
+`getdents64`, `ftruncate`, `fsync`, and `statx` are not implemented.
 
 ### Path model
 
@@ -258,15 +267,16 @@ pinned musl (ADR 0139). `userspace/linux/README.md` records the toolchain, the
 build recipe, the checksum, and the syscall trace. PID 1 launches it in
 `/system/linux` with two arguments and two environment variables, reads its
 complete output, and requires exit status zero before it publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, and
-`LINUX_FILE_IO_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
+`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
+and `LINUX_STAT_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
 a Linux kernel, where it prints the same lines.
 
 The program reaches `main` through `__libc_start_main`. It checks `argv` and
 `envp`, a TLS image with initialized and zero-filled data behind FS, `malloc`
 through both `brk` and `mmap`, buffered stdio flushed at exit, an open/close
 round trip on its VFS session, its own image under several relative
-spellings, and file I/O and naming in a scratch directory under `/tmp`. musl startup needs `arch_prctl`,
+spellings, and in a scratch directory under `/tmp` file I/O, file status,
+stdio, and naming. musl startup needs `arch_prctl`,
 `set_tid_address`, and `writev`. Its terminal probe, `ioctl(TIOCGWINSZ)`, gets
 `ENOSYS`, which musl reads as "no terminal".
 

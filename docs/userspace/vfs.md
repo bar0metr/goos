@@ -71,6 +71,17 @@ Version 12 lets a `Stat` with a handle and no path describe that open file
 the length of its open file without keeping the path. The Linux compatibility
 layer uses it for `lseek` from the end and for appending writes.
 
+Version 13 returns a node's identity with a `Stat` and with a directory entry,
+in the reply field an `Open` uses for its handle (ADR 0142). Two answers about
+one file of a mount carry the same value. An open file keeps the identity its
+path had when it was opened, so a stat by handle and a stat by path agree on
+filesystems that name open files by a cookie.
+
+The validation build answers one name late: a request for
+`/tmp/.validation-vfs-stall` gets its reply only when the same session sends
+its next request. The boot test uses it to watch a client's deadline expire.
+The normal build has no such name.
+
 PID 1 supervises `/system/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address
 space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archive at

@@ -8,17 +8,19 @@
  * directory in several spellings to check path resolution.
  *
  * Last it works in a scratch directory under /tmp: it creates, writes,
- * seeks, reads, appends to, truncates, renames, and removes files and
- * directories, and checks the errno of each refusal.
+ * seeks, reads, appends to, truncates, stats, renames, and removes files and
+ * directories, reads and writes one through stdio, and checks the errno of
+ * each refusal.
  *
  * GoOS starts it as /system/linux/musl-hello with /system/linux as the
  * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
  * path is too long for one request message; GoOS alone sets it, so it also
  * marks the run whose program image sits on a read-only mount.
  *
- * "musl-hello session-loss" is a second mode for the GoOS boot test. It
- * waits for end of input, then reports whether its VFS session still opens
- * files.
+ * Two more modes serve the GoOS boot test. "musl-hello session-loss" waits
+ * for end of input, then reports whether its VFS session still opens files.
+ * "musl-hello session-timeout" opens a name the validation VFS answers late
+ * and expects the wait to end with ETIMEDOUT and the session to keep working.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -26,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -180,6 +183,83 @@ static int data_ok(void)
 	       !memcmp(back, "abcde", 5) && close(fd) == 0;
 }
 
+/* The bundled musl has no stat wrappers either; the calls below are the ones
+ * its stat(), lstat(), fstat(), and fstatat() make on x86_64. */
+static int status_ok(const char *self, int read_only_image)
+{
+	struct stat by_path, by_fd, other, directory, image;
+	int dirfd, fd = open("data", O_RDONLY);
+
+	if (fd != 3 || syscall(SYS_stat, "data", &by_path) != 0 ||
+	    syscall(SYS_fstat, fd, &by_fd) != 0 || close(fd) != 0)
+		return 0;
+	/* One file has one identity, by name and by descriptor. */
+	if (!S_ISREG(by_path.st_mode) || (by_path.st_mode & 0777) != 0644 ||
+	    by_path.st_size != 5 || by_fd.st_size != 5 ||
+	    by_path.st_nlink != 1 || by_path.st_blksize <= 0 ||
+	    by_path.st_ino == 0 || by_path.st_ino != by_fd.st_ino ||
+	    by_path.st_dev != by_fd.st_dev)
+		return 0;
+	if (syscall(SYS_lstat, "data", &other) != 0 ||
+	    other.st_ino != by_path.st_ino ||
+	    syscall(SYS_newfstatat, AT_FDCWD, "./data", &other, AT_SYMLINK_NOFOLLOW) != 0 ||
+	    other.st_ino != by_path.st_ino || other.st_size != 5)
+		return 0;
+	/* The directory is another node of the same filesystem. */
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (dirfd != 3 || syscall(SYS_stat, ".", &directory) != 0 ||
+	    !S_ISDIR(directory.st_mode) || directory.st_nlink < 1 ||
+	    directory.st_dev != by_path.st_dev ||
+	    directory.st_ino == by_path.st_ino ||
+	    syscall(SYS_newfstatat, dirfd, "", &other, AT_EMPTY_PATH) != 0 ||
+	    !S_ISDIR(other.st_mode) || other.st_ino != directory.st_ino ||
+	    syscall(SYS_fstat, dirfd, &other) != 0 ||
+	    other.st_ino != directory.st_ino ||
+	    syscall(SYS_newfstatat, dirfd, "data", &other, 0) != 0 ||
+	    other.st_ino != by_path.st_ino || close(dirfd) != 0)
+		return 0;
+	/* The program image is a different file. Standard output is a pipe
+	 * here and may be a terminal elsewhere. */
+	if (syscall(SYS_stat, self, &image) != 0 || !S_ISREG(image.st_mode) ||
+	    image.st_size <= 0 ||
+	    (image.st_dev == by_path.st_dev && image.st_ino == by_path.st_ino) ||
+	    (read_only_image && (image.st_mode & 0222)) ||
+	    syscall(SYS_fstat, 1, &other) != 0 ||
+	    (!S_ISFIFO(other.st_mode) && !S_ISCHR(other.st_mode)))
+		return 0;
+	errno = 0;
+	return fails(syscall(SYS_stat, "missing", &other), ENOENT) &&
+	       fails(syscall(SYS_stat, "data/", &other), ENOTDIR) &&
+	       fails(syscall(SYS_fstat, 42, &other), EBADF) &&
+	       fails(syscall(SYS_fstat, AT_FDCWD, &other), EBADF) &&
+	       fails(syscall(SYS_newfstatat, AT_FDCWD, "data", &other, 0x10000000), EINVAL) &&
+	       fails(syscall(SYS_stat, "data", (void *)8), EFAULT);
+}
+
+/* musl stdio writes with writev. It fills its buffer with read, and reads a
+ * larger request with readv: the caller's memory first, its buffer second. */
+static int stdio_ok(void)
+{
+	static const char text[] = "first\nsecond 2\n";
+	char line[32];
+	FILE *file = fopen("lines", "w");
+
+	if (!file || fprintf(file, "first\nsecond %d\n", 2) < 0 || fclose(file) != 0)
+		return 0;
+	file = fopen("lines", "r");
+	if (!file || !fgets(line, sizeof line, file) || strcmp(line, "first\n") ||
+	    !fgets(line, sizeof line, file) || strcmp(line, "second 2\n") ||
+	    fgets(line, sizeof line, file) || !feof(file))
+		return 0;
+	rewind(file);
+	if (fread(line, 1, sizeof line, file) != sizeof text - 1 ||
+	    memcmp(line, text, sizeof text - 1) || fclose(file) != 0)
+		return 0;
+	/* Standard input is at its end in every run of this mode. */
+	return fread(line, 1, sizeof line, stdin) == 0 && feof(stdin) &&
+	       unlink("lines") == 0;
+}
+
 static int names_ok(int read_only_image)
 {
 	char back[1];
@@ -202,11 +282,19 @@ static int names_ok(int read_only_image)
 	return !read_only_image || fails(make_directory(AT_FDCWD, IMAGE "-dir"), EROFS);
 }
 
-static int files_ok(const char *self)
+static int report(const char *what, int ok)
+{
+	printf("%s %s\n", what, ok ? "ok" : "failed");
+	return !ok;
+}
+
+/* Returns how many of its checks failed. */
+static int scratch_checks(const char *self)
 {
 	const char *scratch = "/tmp/linux-files";
+	int read_only_image = getenv("GOOS_LINUX_LONG") != NULL;
 	char cwd[64];
-	int ok;
+	int failed;
 
 	errno = 0;
 	if (make_directory(AT_FDCWD, scratch) != 0 ||
@@ -214,9 +302,14 @@ static int files_ok(const char *self)
 	    !fails(chdir(self), ENOTDIR) || chdir(scratch) != 0 ||
 	    !getcwd(cwd, sizeof cwd) || strcmp(cwd, scratch) ||
 	    getcwd(cwd, 4) || !fails(-1, ERANGE))
-		return 0;
-	ok = data_ok() && names_ok(getenv("GOOS_LINUX_LONG") != NULL);
-	return chdir("/system/linux") == 0 && rmdir(scratch) == 0 && ok;
+		return report("scratch directory", 0);
+	failed = report("files", data_ok());
+	failed += report("status", status_ok(self, read_only_image));
+	failed += report("stdio", stdio_ok());
+	failed += report("names", names_ok(read_only_image));
+	if (chdir("/system/linux") != 0 || rmdir(scratch) != 0)
+		failed += report("scratch cleanup", 0);
+	return failed;
 }
 
 static int session_loss(void)
@@ -235,6 +328,26 @@ static int session_loss(void)
 	return 0;
 }
 
+static int session_timeout(void)
+{
+	int fd;
+
+	errno = 0;
+	fd = open("/tmp/.validation-vfs-stall", O_RDONLY);
+	if (fd != -1 || errno != ETIMEDOUT) {
+		printf("stalled open: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	/* The late reply arrives with this request and must be discarded. */
+	fd = open(IMAGE, O_RDONLY);
+	if (fd != 3 || close(fd) != 0) {
+		printf("open after timeout: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	puts("session timeout: ETIMEDOUT, then ok");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -242,6 +355,8 @@ int main(int argc, char **argv)
 
 	if (argc == 2 && !strcmp(argv[1], "session-loss"))
 		return session_loss();
+	if (argc == 2 && !strcmp(argv[1], "session-timeout"))
+		return session_timeout();
 	printf("argc=%d\n", argc);
 	for (int index = 1; index < argc; index++)
 		printf("argv[%d]=%s\n", index, argv[index]);
@@ -273,12 +388,7 @@ int main(int argc, char **argv)
 		puts("paths failed");
 		failed = 1;
 	}
-	if (files_ok(argv[0])) {
-		puts("files ok");
-	} else {
-		puts("files failed");
-		failed = 1;
-	}
+	failed += scratch_checks(argv[0]);
 	if (!failed)
 		puts("hello from musl");
 	return failed;

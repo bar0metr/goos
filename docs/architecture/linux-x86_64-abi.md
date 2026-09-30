@@ -22,11 +22,13 @@ It describes current code, not the final release target.
 | `write(1)` | implemented | streams in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call |
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
+| `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | kernel-chosen anonymous private mappings; no executable or file-backed mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
+| `readv(19)` | implemented | streams and files; at most 16 elements; one read fills the elements in order |
 | `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call, short count when the stream fills |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations rejected |
@@ -146,8 +148,32 @@ against another writer.
 | `rmdir` | `ENOTDIR` for a file, `ENOTEMPTY`, `EBUSY` for a mount point |
 | `rename` | `EISDIR` for a file onto a directory, `EEXIST` for a directory onto an existing name, `EBUSY` for an open target, `EXDEV` across mounts |
 
-`fstat`, `newfstatat`, `getdents64`, `readv`, `ftruncate`, and `fsync` return
-`ENOSYS`.
+`getdents64`, `ftruncate`, `fsync`, and `statx` return `ENOSYS`.
+
+## File status
+
+`stat`, `lstat`, `fstat`, and `newfstatat` fill a 144-byte `struct stat`
+written out from the Linux x86_64 header (ADR 0142).
+
+| Field | Value |
+| --- | --- |
+| `st_mode` | `S_IFREG\|0644` or `S_IFDIR\|0755`; no write bits for a read-only file or mount; `S_IFIFO\|0600` for a stream |
+| `st_uid`, `st_gid` | 1000 |
+| `st_nlink` | 1 |
+| `st_dev`, `st_ino` | the VFS mount identity and node identity; equal for two names of one file |
+| `st_size`, `st_blocks`, `st_blksize` | the VFS size, that size in 512-byte units rounded up, 4096 |
+| `st_atime`, `st_mtime`, `st_ctime` | one time: modification, else creation, else zero |
+
+A file descriptor is stat-ed through its VFS handle, a directory descriptor by
+the path it keeps, a stream without the VFS. `fstat` of a closed descriptor is
+`EBADF`. A path that names a file and ends in a slash is `ENOTDIR`. An
+unwritable buffer is `EFAULT`, checked before the VFS is asked. An unknown
+`newfstatat` flag is `EINVAL`.
+
+`readv` reads once and fills the vector's elements in order. Every element is
+checked for writability before any byte leaves its source. A stream delivers
+at most 256 bytes per call and a file at most 64 KiB; musl stdio reads a file
+through it.
 
 ## ELF status
 
@@ -270,20 +296,32 @@ errno of each refusal on the way: `EEXIST`, `EINVAL`, `EBADF`, `ESPIPE`,
 `EISDIR`, `ENOTDIR`, `ENOENT`, `ENOTEMPTY`, `ERANGE`, and `EROFS` for the
 system image.
 
+It stats the file by name, by descriptor, through `lstat`, and through
+`newfstatat` with and without `AT_EMPTY_PATH`, and requires one identity for
+all of them, a different one for the directory and for the program image, the
+expected type, size, link count, and mode, and `ENOENT`, `ENOTDIR`, `EBADF`,
+`EINVAL`, and `EFAULT` for the bad calls. It writes a file through `fprintf`
+and reads it back through `fgets` and `fread`, which is `readv`, and reads end
+of input from standard input the same way.
+
 PID 1 compares the whole output, requires exit status zero, and publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, and
-`LINUX_FILE_IO_OK`. The same binary prints the same lines on Linux;
+`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
+and `LINUX_STAT_OK`. The same binary prints the same lines on Linux;
 `userspace/linux/README.md` holds that trace and the three calls whose results
 differ.
 
-The boot test also starts `musl-hello session-loss` from the shell behind a
-pipeline, restarts the VFS, and requires the program to report `EIO` from its
-next open: a Linux process keeps the session it was launched with and gets no
-new one.
+The boot test also runs two session checks from the shell. `musl-hello
+session-timeout` opens the name the validation VFS answers late: the open must
+end with `ETIMEDOUT` after the eight-second deadline, and the next open must
+succeed, which requires the bridge to discard the late reply that arrives
+with it. `musl-hello session-loss` starts behind a pipeline, the VFS restarts,
+and the program must report `EIO` from its next open: a Linux process keeps
+the session it was launched with and gets no new one.
 
 Host tests cover the pieces that need no CPU: reply classification, session
 correlation and failure, open flags and the open plan, seek arithmetic,
-removal checks, directory records, two-path continuations, path resolution
+removal checks, directory records, two-path continuations, the `struct stat`
+layout with a fuzz target, the VFS-to-status translation, path resolution
 with its bounds and a fuzz target, vector validation,
 compatibility PID allocation, descriptor close, and the fixture's checksum and
 ELF acceptance.

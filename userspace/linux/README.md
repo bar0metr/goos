@@ -6,7 +6,7 @@ them to the native image format.
 
 | Fixture | Source | Checks |
 | --- | --- | --- |
-| `musl-hello` | [musl-hello/main.c](musl-hello/main.c) | libc startup, `argv`, `envp`, TLS, heap, stdio, VFS session exchanges, path resolution, file I/O and naming |
+| `musl-hello` | [musl-hello/main.c](musl-hello/main.c) | libc startup, `argv`, `envp`, TLS, heap, stdio, VFS session exchanges, path resolution, file I/O, file status, and naming |
 
 `/system/linux/raw-probe` is a second fixture with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -68,7 +68,7 @@ Linker flags:
 
 | File | SHA-256 |
 | --- | --- |
-| `prebuilt/musl-hello` | `442a6f1ddd0b5b0f6cf1c6ae69398d1f2f308df86c6dff9f658f78e32ee66768` |
+| `prebuilt/musl-hello` | `359a65bf92fa92e2a5a213976d3bbe73ba90775037c2360df0e424956ecf1300` |
 
 `fixtures.go` embeds the binary and repeats the checksum. `go test
 ./userspace/linux` fails when the two disagree, and when the kernel ELF parser
@@ -77,12 +77,12 @@ constant, and this table in one commit.
 
 The image has four `PT_LOAD` segments (`R`, `R-X`, and two `RW-`), `PT_PHDR`,
 `PT_TLS`, `PT_GNU_RELRO`, and a non-executable `PT_GNU_STACK`. Its entry is
-`0x2022d0`.
+`0x2023f0`.
 
 ## Syscall trace
 
 [musl-hello/linux.trace](musl-hello/linux.trace) is the sequence the committed
-binary makes on Linux 6.8, 90 calls from `arch_prctl` to `exit_group`. To
+binary makes on Linux 6.8, 127 calls from `arch_prctl` to `exit_group`. To
 record it again:
 
 ```sh
@@ -95,7 +95,7 @@ QEMU user-mode emulation. `ptrace` does not work there and `strace` cannot
 attach; the trace is QEMU's own call log (`QEMU_STRACE`). Every call still
 reaches the Linux kernel, which produces the results shown.
 
-The program checks each result itself and prints the same seven lines on
+The program checks each result itself and prints the same ten lines on
 Linux and on GoOS. Three calls it does not check differ:
 
 | Call | Linux | GoOS |
@@ -120,9 +120,15 @@ What the startup calls are for:
 | last `writev(1)`, `exit_group` | the stdio flush in `exit`, then `_Exit` |
 
 musl reaches the kernel through the legacy numbers where x86_64 has them:
-`open`, `rename`, `rmdir`, `unlink`, `chdir`, and `getcwd`. The fixture calls
-`mkdirat` directly because the musl sources TinyGo ships leave out the
-directory that holds `mkdir`.
+`open`, `stat`, `lstat`, `rename`, `rmdir`, `unlink`, `chdir`, and `getcwd`.
+The musl sources TinyGo ships leave out the directory that holds `mkdir` and
+the stat wrappers, so the fixture makes those calls through `syscall()` with
+the numbers musl's wrappers use.
+
+Fields of `struct stat` differ between the two systems where the fixture does
+not compare them: GoOS reports owner 1000, link count 1 for a directory, and
+`st_blocks` from the size alone. `ioctl(TIOCGWINSZ)` on the file stdio opens
+fails on both.
 
 ## License
 

@@ -12,7 +12,9 @@ const (
 	SysWrite         Syscall = 1
 	SysOpen          Syscall = 2
 	SysClose         Syscall = 3
+	SysStat          Syscall = 4
 	SysFstat         Syscall = 5
+	SysLstat         Syscall = 6
 	SysPoll          Syscall = 7
 	SysLseek         Syscall = 8
 	SysMmap          Syscall = 9
@@ -100,6 +102,16 @@ const (
 	// AtRemoveDir makes unlinkat remove a directory.
 	AtRemoveDir = uint64(0x200)
 
+	// Flags of newfstatat.
+	AtSymlinkNoFollow = uint64(0x100)
+	AtNoAutomount     = uint64(0x800)
+	AtEmptyPath       = uint64(0x1000)
+
+	// File type and permission bits of st_mode.
+	ModeFIFO      = uint32(0o010000)
+	ModeDirectory = uint32(0o040000)
+	ModeRegular   = uint32(0o100000)
+
 	SeekSet = uint64(0)
 	SeekCur = uint64(1)
 	SeekEnd = uint64(2)
@@ -117,7 +129,7 @@ const (
 // returns ENOSYS.
 func (number Syscall) Known() bool {
 	switch number {
-	case SysRead, SysWrite, SysOpen, SysClose, SysFstat, SysPoll, SysLseek, SysMmap,
+	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
 		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,

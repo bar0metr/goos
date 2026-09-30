@@ -133,7 +133,12 @@ type MountInfo struct {
 }
 
 type openFile struct {
-	node       ramfs.NodeID
+	node ramfs.NodeID
+	// identity is the node the path named when the file was opened. A
+	// backend with open objects hands out a cookie for node, which differs
+	// from what a stat of the path reports; identity is the value both
+	// agree on for as long as the file keeps its name.
+	identity   ramfs.NodeID
 	offset     uint64
 	generation uint32
 	owner      Owner
@@ -288,6 +293,7 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	if backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
 		return 0, StatusBackendError
 	}
+	identity := node
 	backend := namespace.mounts[mountIndex].backend
 	if objects, ok := backend.(ObjectBackend); ok {
 		node, backendStatus = objects.AcquireObject(node)
@@ -303,6 +309,7 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 		entry.generation = 1
 	}
 	entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
+	entry.identity = identity
 	return encodeHandle(free, entry.generation), StatusOK
 }
 
@@ -486,7 +493,8 @@ func (namespace *Namespace) Stat(path []byte) (ramfs.Stat, Status) {
 
 // StatOpen describes the file an open handle names. It follows the handle,
 // not a path, so the answer stays right after the file is renamed, and a
-// client needs no path to learn how long its open file is.
+// client needs no path to learn how long its open file is. Its ID is the one
+// a stat of the path gave when the file was opened.
 func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, Status) {
 	entry, status := namespace.file(owner, handle, 0)
 	if status != StatusOK {
@@ -495,6 +503,7 @@ func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, St
 	stat, backendStatus := namespace.mounts[entry.mount].backend.Stat(entry.node)
 	if backendStatus == ramfs.StatusOK {
 		stat.MountID = uint64(namespace.mountID(int(entry.mount)))
+		stat.ID = entry.identity
 	}
 	return stat, mapStatus(backendStatus)
 }

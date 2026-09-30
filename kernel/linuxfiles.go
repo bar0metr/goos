@@ -231,30 +231,26 @@ func (handler *linuxCallHandler) Close(request linuxcompat.Request) linuxcompat.
 
 // readFile reads at the file position through the I/O buffer. The VFS fills
 // the buffer and advances the position; the bytes reach user memory after
-// the reply.
-func (handler *linuxCallHandler) readFile(request linuxcompat.Request, description *linuxcompat.FileDescription) linuxcompat.Result {
-	_, active, errno := handler.vfsStage(request)
+// the reply, at one address or across a readv vector.
+func (handler *linuxCallHandler) readFile(request linuxcompat.Request, description *linuxcompat.FileDescription, vector bool) linuxcompat.Result {
+	pending, active, errno := handler.vfsStage(request)
 	if errno != 0 {
 		return linuxErrno(errno)
 	}
-	address, limit := request.Arguments[1], request.Arguments[2]
-	if limit > linuxIOBytes {
-		limit = linuxIOBytes
-	}
 	if !active {
-		switch {
-		case description.Flags&linuxabi.OpenAccess == linuxabi.OpenWriteOnly:
+		if description.Flags&linuxabi.OpenAccess == linuxabi.OpenWriteOnly {
 			return linuxErrno(linuxabi.EBADF)
-		case limit == 0:
-			return linuxcompat.Result{}
-		case !vm.CanCopyOut(handler.root, address, limit):
-			return linuxErrno(linuxabi.EFAULT)
 		}
-		if errno := handler.vfsBegin(request, nil, nil, 0); errno != 0 {
+		limit, errno := handler.readLimit(request, vector, linuxIOBytes)
+		if errno != 0 || limit == 0 {
 			return linuxErrno(errno)
 		}
+		if errno := handler.vfsBegin(request, nil, nil, limit); errno != 0 {
+			return linuxErrno(errno)
+		}
+		pending.Note = limit
 	}
-	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadInto, Handle: vfs.Handle(description.Object), Size: uint32(limit)}, attachSink)
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadInto, Handle: vfs.Handle(description.Object), Size: uint32(pending.Note)}, attachSink)
 	if blocked {
 		return linuxBlocked
 	}
@@ -267,7 +263,7 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 	}
 	state, _ := linuxcompat.FindProcess(handler.root)
 	owner, owned := processRegistry.ByRoot(handler.root)
-	if reply.Size > limit || state == nil || !owned {
+	if reply.Size > pending.Note || state == nil || !owned {
 		return linuxErrno(linuxabi.EIO)
 	}
 	object, found := ioBuffer(state, owner)
@@ -276,7 +272,7 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 	}
 	// The position moved in the VFS whether or not the copy succeeds.
 	description.Offset += reply.Size
-	if !handler.ioTransfer(object, 0, address, reply.Size, true) {
+	if !handler.deliverRead(request, vector, nil, object, reply.Size) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{Value: reply.Size}
@@ -397,18 +393,8 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 		}
 		return length, 0
 	}
-	count := request.Arguments[2]
-	if count > linuxcompat.MaxIOVec {
-		return 0, linuxabi.EINVAL
-	}
-	if count == 0 {
-		return 0, 0
-	}
-	wire := linuxIOVecWire[:count*linuxabi.IOVecSize]
-	if !vm.CopyIn(handler.root, request.Arguments[1], wire) {
-		return 0, linuxabi.EFAULT
-	}
-	if errno := linuxcompat.ValidateIOVec(wire, vm.UserAddressLimit); errno != 0 {
+	wire, errno := handler.copyIOVec(request)
+	if errno != 0 || len(wire) == 0 {
 		return 0, errno
 	}
 	object, ready := ioBuffer(state, owner)
@@ -416,7 +402,7 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 		return 0, linuxabi.ENOMEM
 	}
 	total := uint64(0)
-	for index := 0; index < int(count) && total < linuxIOBytes; index++ {
+	for index := 0; index < len(wire)/linuxabi.IOVecSize && total < linuxIOBytes; index++ {
 		base, length := linuxcompat.IOVecEntry(wire, index)
 		if length > linuxIOBytes-total {
 			length = linuxIOBytes - total
@@ -440,6 +426,12 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxcompat.Result {
 	arguments := &request.Arguments
 	switch request.Number {
+	case linuxabi.SysStat, linuxabi.SysLstat:
+		return handler.status(request, linuxabi.AtFDCWD, arguments[0], arguments[1], 0, false)
+	case linuxabi.SysFstat:
+		return handler.status(request, int32(arguments[0]), 0, arguments[1], 0, true)
+	case linuxabi.SysNewfstatat:
+		return handler.status(request, int32(arguments[0]), arguments[1], arguments[2], arguments[3], false)
 	case linuxabi.SysLseek:
 		return handler.seek(request)
 	case linuxabi.SysGetcwd:
@@ -472,6 +464,122 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		return handler.rename(request, int32(arguments[0]), arguments[1], int32(arguments[2]), arguments[3])
 	}
 	return linuxErrno(linuxabi.ENOSYS)
+}
+
+var linuxStat [linuxcompat.StatSize]byte
+
+// status serves stat, lstat, fstat, and newfstatat. lstat is stat: GoOS has
+// no symbolic links to stop at. A path is stat-ed by name. A descriptor is
+// stat-ed by what it holds: a file by its VFS handle, which follows the file
+// through a rename; a directory by the path its description keeps; a stream
+// by a synthetic FIFO record with no VFS exchange.
+func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32, pathAddress uint64, buffer uint64, flags uint64, descriptor bool) linuxcompat.Result {
+	_, active, errno := handler.vfsStage(request)
+	state, found := linuxcompat.FindProcess(handler.root)
+	if errno == 0 && !found {
+		errno = linuxabi.EIO
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if !active {
+		emptyPath, errno := linuxcompat.StatFlags(flags)
+		if errno == 0 && !vm.CanCopyOut(handler.root, buffer, linuxcompat.StatSize) {
+			errno = linuxabi.EFAULT
+		}
+		if errno == 0 && !descriptor && emptyPath {
+			// AT_EMPTY_PATH with an empty path names dirfd itself.
+			var raw []byte
+			raw, errno = handler.copyPath(pathAddress)
+			descriptor = errno == 0 && len(raw) == 0
+		}
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+		if descriptor {
+			// Only newfstatat may name the working directory this way; fstat
+			// of AT_FDCWD is a bad descriptor.
+			if result, done := handler.beginDescriptorStatus(request, state, dirfd, buffer, emptyPath); done {
+				return result
+			}
+		} else {
+			path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &linuxResolved)
+			note := uint64(0)
+			if trailing {
+				note = noteTrailing
+			}
+			if errno == 0 {
+				errno = handler.vfsBegin(request, path, nil, note)
+			}
+			if errno != 0 {
+				return linuxErrno(errno)
+			}
+		}
+	}
+	// A call with a path stats it and keeps flags in its note. A call
+	// without one stats the open file whose VFS handle the note holds.
+	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	operation := vfs.Request{Operation: vfs.OperationStat, Path: path}
+	trailing := pending.Note&noteTrailing != 0
+	if len(path) == 0 {
+		operation.Handle, trailing = vfs.Handle(pending.Note), false
+	}
+	reply, errno, blocked := handler.vfsExchange(operation, attachPaths)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	handler.vfsFinish()
+	if reply.Status != vfs.StatusOK {
+		return linuxErrno(linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
+	}
+	if trailing && reply.Kind != ramfs.KindDirectory {
+		return linuxErrno(linuxabi.ENOTDIR)
+	}
+	described, errno := linuxcompat.StatusOfReply(&reply)
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	return handler.deliverStatus(buffer, described)
+}
+
+// beginDescriptorStatus starts the stat of what a descriptor holds. done
+// reports that result is final: an error, or a stream, which needs no VFS.
+func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Request, state *linuxcompat.ProcessState, fd int32, buffer uint64, workingDirectory bool) (linuxcompat.Result, bool) {
+	if fd == linuxabi.AtFDCWD && workingDirectory {
+		errno := handler.vfsBegin(request, state.CWD(), nil, 0)
+		return linuxErrno(errno), errno != 0
+	}
+	description, open := state.FDs.Lookup(int(fd))
+	index, _ := state.FDs.DescriptionIndex(int(fd))
+	if !open {
+		return linuxErrno(linuxabi.EBADF), true
+	}
+	errno := linuxabi.Errno(0)
+	switch description.Kind {
+	case linuxcompat.FDVFSFile:
+		errno = handler.vfsBegin(request, nil, nil, description.Object)
+	case linuxcompat.FDVFSDirectory:
+		path, named := linuxcompat.DirectoryPath(handler.root, description.Object)
+		if !named {
+			return linuxErrno(linuxabi.EBADF), true
+		}
+		errno = handler.vfsBegin(request, path, nil, 0)
+	default:
+		return handler.deliverStatus(buffer, linuxcompat.StreamStatus(index)), true
+	}
+	return linuxErrno(errno), errno != 0
+}
+
+func (handler *linuxCallHandler) deliverStatus(buffer uint64, described linuxcompat.FileStatus) linuxcompat.Result {
+	linuxcompat.EncodeStat(&linuxStat, described)
+	if !vm.CopyOut(handler.root, buffer, linuxStat[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{}
 }
 
 // A seek from the end is two exchanges: the file length, then the seek.

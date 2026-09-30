@@ -19,8 +19,10 @@ const (
 	// 9 adds fixed-width timestamps, native attributes and mount identity;
 	// version 10 adds filesystem capacity and bounded mount enumeration;
 	// version 11 adds whole-file replacement (ADR 0129); version 12 lets a
-	// stat with no path name an open file by its handle (ADR 0141).
-	ProtocolVersion = uint16(12)
+	// stat with no path name an open file by its handle (ADR 0141); version
+	// 13 returns a node's identity with a stat or a directory entry
+	// (ADR 0142).
+	ProtocolVersion = uint16(13)
 	protocolHeader  = 40
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
@@ -77,6 +79,12 @@ const (
 	lastOperation = OperationReplace
 )
 
+// describesNode reports whether a reply to the operation carries a node's
+// identity where an open reply carries a handle.
+func (operation Operation) describesNode() bool {
+	return operation == OperationStat || operation == OperationReadDir
+}
+
 // Bulk reports whether an operation moves its data through an attached object
 // and so carries exactly one handle.
 func (operation Operation) Bulk() bool {
@@ -109,10 +117,14 @@ type Request struct {
 // Reply answers a request. A listed name too long for the message is in the
 // object the request attached, and AttachedName is its length.
 type Reply struct {
-	Operation    Operation
-	Status       Status
-	Kind         ramfs.Kind
-	Handle       Handle
+	Operation Operation
+	Status    Status
+	Kind      ramfs.Kind
+	Handle    Handle
+	// Node identifies what a stat or a directory entry describes: equal for
+	// two answers about one file of a mount, and different for two files.
+	// It travels in the field an open reply uses for its handle.
+	Node         uint64
 	Size         uint64
 	Cursor       uint32
 	Name         []byte
@@ -161,8 +173,14 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	} else if reply.Operation == OperationFilesystemInfo {
 		maxName = ramfs.MaxVolumeName
 	}
+	identity := uint64(reply.Handle)
+	if reply.Operation.describesNode() {
+		identity = reply.Node
+	} else if reply.Node != 0 {
+		return ipc.Message{}, false
+	}
 	if reply.Operation < OperationOpen || reply.Operation > lastOperation || correlation == 0 ||
-		reply.Status > lastStatus || len(reply.Name) > MaxInlineName || nameSize > maxName || len(reply.Data) > MaxReplyData ||
+		reply.Operation.describesNode() && reply.Handle != 0 || reply.Status > lastStatus || len(reply.Name) > MaxInlineName || nameSize > maxName || len(reply.Data) > MaxReplyData ||
 		replyHeader+len(reply.Name)+len(reply.Data) > ipc.MaxPayload || reply.AttachedName != 0 && (len(reply.Name) != 0 || int(reply.AttachedName) <= MaxInlineName) ||
 		!reply.Created.Valid() || !reply.Modified.Valid() || reply.Attributes > (ramfs.LastAttribute*2-1) || !reply.AttributesAvailable && reply.Attributes != 0 || !reply.Filesystem.Valid() ||
 		reply.Status == StatusOK && (reply.Operation == OperationFilesystemInfo || reply.Operation == OperationReadMount) && reply.Filesystem.Type == 0 {
@@ -178,7 +196,7 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 	if reply.AttachedName != 0 {
 		message.Payload[7] = flagNameAttached
 	}
-	binary.LittleEndian.PutUint64(message.Payload[8:], uint64(reply.Handle))
+	binary.LittleEndian.PutUint64(message.Payload[8:], identity)
 	binary.LittleEndian.PutUint64(message.Payload[16:], reply.Size)
 	binary.LittleEndian.PutUint32(message.Payload[24:], reply.Cursor)
 	binary.LittleEndian.PutUint32(message.Payload[28:], 0)
@@ -262,6 +280,9 @@ func DecodeReplyFrom(message *ipc.Message) (Reply, bool) {
 		Data:       message.Payload[replyHeader+inlineName : replyHeader+inlineName+dataSize]}
 	if attached {
 		reply.AttachedName = uint16(nameSize)
+	}
+	if operation.describesNode() {
+		reply.Node, reply.Handle = uint64(reply.Handle), 0
 	}
 	if reply.Operation == OperationFilesystemInfo && !reply.Filesystem.SetVolumeName(reply.Name) {
 		return Reply{}, false

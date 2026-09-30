@@ -1,10 +1,10 @@
-arch_prctl(4098,2153472,0,8388608,0,131072) = 0
-set_tid_address(2153384,2153472,0,8388608,0,131072) = 17
+arch_prctl(4098,2158752,0,8388608,0,131072) = 0
+set_tid_address(2158664,2158752,0,8388608,0,131072) = 17
 ioctl(1,TIOCGWINSZ,0x00000040007fea88) = -1 errno=25 (Not a tty)
 writev(1,0x40007fea20,0x2) = 7
-brk(NULL) = 0x000000000020f000
-brk(0x0000000000211000) = 0x0000000000211000
-mmap(0x000000000020f000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x000000000020f000
+brk(NULL) = 0x0000000000210000
+brk(0x0000000000212000) = 0x0000000000212000
+mmap(0x0000000000210000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x0000000000210000
 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000803000
 mmap(NULL,1048596,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000804000
 munmap(0x0000004000804000,1052672) = 0
@@ -39,7 +39,7 @@ getcwd(0x4000800cb0,64) = 17
 getcwd(0x4000800cb0,4) = -1 errno=34 (Result not representable)
 open("data",O_RDWR|O_CREAT|O_EXCL|O_LARGEFILE,0644) = 3
 open("data",O_WRONLY|O_CREAT|O_EXCL|O_LARGEFILE,0644) = -1 errno=17 (File exists)
-write(3,0x20bba0,8192) = 8192
+write(3,0x20d040,8192) = 8192
 lseek(3,0,SEEK_CUR) = 8192
 lseek(3,-4096,SEEK_END) = 4096
 lseek(3,100,SEEK_SET) = 100
@@ -53,13 +53,13 @@ read(3,0x800b60,300) = 0
 close(3) = 0
 open("data",O_WRONLY|O_APPEND|O_LARGEFILE) = 3
 read(3,0x800b60,1) = -1 errno=9 (Bad file descriptor)
-write(3,0x20042e,4) = 4
+write(3,0x200470,4) = 4
 lseek(3,0,SEEK_CUR) = 8196
 close(3) = 0
 open("data",O_RDONLY|O_LARGEFILE) = 3
 lseek(3,-4,SEEK_END) = 8192
 read(3,0x800b60,300) = 4
-write(3,0x200433,1) = -1 errno=9 (Bad file descriptor)
+write(3,0x200475,1) = -1 errno=9 (Bad file descriptor)
 close(3) = 0
 open("data",O_WRONLY|O_LARGEFILE|O_TRUNC) = 3
 lseek(3,0,SEEK_END) = 0
@@ -68,6 +68,43 @@ close(3) = 0
 open("data",O_RDONLY|O_LARGEFILE) = 3
 read(3,0x800b60,300) = 5
 close(3) = 0
+open("data",O_RDONLY|O_LARGEFILE) = 3
+stat("data",0x0000004000800a50) = 0
+fstat(3,0x0000004000800c00) = 0
+close(3) = 0
+lstat("data",0x00000040008009c0) = 0
+newfstatat(-100,"./data",0x00000040008009c0,AT_SYMLINK_NOFOLLOW) = 0
+open(".",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = 3
+stat(".",0x0000004000800ae0) = 0
+newfstatat(3,"",0x00000040008009c0,0x1000) = 0
+fstat(3,0x00000040008009c0) = 0
+newfstatat(3,"data",0x00000040008009c0,0) = 0
+close(3) = 0
+stat("/system/linux/musl-hello",0x0000004000800b70) = 0
+fstat(1,0x00000040008009c0) = 0
+stat("missing",0x00000040008009c0) = -1 errno=2 (No such file or directory)
+stat("data/",0x00000040008009c0) = -1 errno=20 (Not a directory)
+fstat(42,0x00000040008009c0) = -1 errno=9 (Bad file descriptor)
+fstat(-100,0x00000040008009c0) = -1 errno=9 (Bad file descriptor)
+newfstatat(-100,"data",0x00000040008009c0,0x10000000) = -1 errno=22 (Invalid argument)
+stat("data",0x0000000000000008) = -1 errno=14 (Bad address)
+open("lines",O_WRONLY|O_CREAT|O_LARGEFILE|O_TRUNC,0666) = 3
+mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000905000
+ioctl(3,TIOCGWINSZ,0x0000004000800c28) = -1 errno=25 (Not a tty)
+writev(3,0x4000800bc0,0x2) = 15
+close(3) = 0
+munmap(0x0000004000905000,4096) = 0
+open("lines",O_RDONLY|O_LARGEFILE) = 3
+mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000906000
+read(3,0x906140,1024) = 15
+read(3,0x906140,1024) = 0
+lseek(3,0,SEEK_SET) = 0
+readv(3,274886298592,2,1,274887368704,1) = 15
+readv(3,274886298592,2,1,274887368704,1) = 0
+close(3) = 0
+munmap(0x0000004000906000,4096) = 0
+readv(0,274886298592,2,1344,6,2) = 0
+unlink("lines") = 0
 open(".",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = 3
 open("data",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = -1 errno=20 (Not a directory)
 open(".",O_WRONLY|O_LARGEFILE) = -1 errno=21 (Is a directory)
@@ -86,5 +123,5 @@ unlink("moved") = 0
 close(3) = 0
 chdir("/system/linux") = 0
 rmdir("/tmp/linux-files",) = 0
-writev(1,0x4000800cb0,0x2) = 73
+writev(1,0x4000800cb0,0x2) = 101
 exit_group(0)
