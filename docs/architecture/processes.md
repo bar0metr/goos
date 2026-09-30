@@ -7,8 +7,8 @@ schedulable CPU context. This avoids treating a process and a thread as
 interchangeable kernel objects.
 
 The ABI is set by the kernel when it initializes a process from a validated
-executable and has no runtime setter. Current launches are `Native`; the Linux
-ELF validator will select `LinuxX8664`. All tasks in a process share the ABI.
+executable and has no runtime setter. A native image selects `Native` and a
+validated Linux ELF selects `LinuxX8664`. All tasks in a process share the ABI.
 Entry gates authorize this field explicitly and never infer an ABI from a call
 number (ADR 0132).
 

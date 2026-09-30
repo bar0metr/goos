@@ -315,7 +315,9 @@ with the kernel allocating the stack as its own region at a random address.
 
 **mmap randomization.** Native userspace has no general `mmap`; Linux
 compatibility has bounded anonymous private `mmap` with deterministic first-fit
-placement. Randomizing that placement can change the starting search address
+placement. It refuses a mapping larger than the pages the process quota has
+left, so a Linux program meets `ENOMEM` at the call and not a fault at the
+first touch (ADR 0147). Randomizing that placement can change the starting search address
 without changing its ABI. The three native mapping calls behave differently:
 
 - `MemoryMap` already takes its address from the caller. A process could

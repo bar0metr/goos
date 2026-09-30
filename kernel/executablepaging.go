@@ -92,6 +92,17 @@ func requestExecutablePage(owner *process.Process, entry region.Region, page uin
 	return true, false
 }
 
+// executablePagePending reports whether task waits for a page of its image
+// that a copy or a fault requested and that has neither arrived nor failed.
+func executablePagePending(task sched.TaskID) bool {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(executableFaults) {
+		return false
+	}
+	fault := &executableFaults[slot]
+	return fault.task == task && !fault.failed
+}
+
 // completeExecutablePage consumes a VFS reply before another request can
 // reuse the transport slot. It returns true when it consumed the endpoint's
 // queued message.

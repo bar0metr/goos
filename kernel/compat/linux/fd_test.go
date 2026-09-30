@@ -83,3 +83,53 @@ func TestFDTableCloseAllReleasesDescriptionsOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestDuplicateAtAndDescriptorFlags(t *testing.T) {
+	var table FDTable
+	if !table.Initialize(1, 2, 3) {
+		t.Fatal("initialize failed")
+	}
+	if fd, ok := table.Duplicate(9, 0, false); ok || fd != -2 {
+		t.Fatalf("duplicate of a closed descriptor = %d", fd)
+	}
+	if !table.DuplicateAt(1, 10, true) || table.DuplicateAt(1, 10, false) || table.DuplicateAt(40, 11, false) ||
+		table.DuplicateAt(1, LinuxMaxFD, false) || table.DuplicateAt(1, -1, false) {
+		t.Fatal("DuplicateAt did not require an open source and a free target")
+	}
+	first, _ := table.DescriptionIndex(1)
+	second, _ := table.DescriptionIndex(10)
+	if first != second {
+		t.Fatal("the duplicate has its own description")
+	}
+	// The flag belongs to the integer.
+	if flag, ok := table.CloseOnExec(10); !ok || !flag {
+		t.Fatal("close-on-exec was not set on the duplicate")
+	}
+	if flag, ok := table.CloseOnExec(1); !ok || flag {
+		t.Fatal("close-on-exec leaked to the original")
+	}
+	if !table.SetCloseOnExec(1, true) || table.SetCloseOnExec(40, true) {
+		t.Fatal("SetCloseOnExec accepted a closed descriptor")
+	}
+	if _, ok := table.CloseOnExec(40); ok {
+		t.Fatal("a closed descriptor has a flag")
+	}
+	if _, last, ok := table.Close(1); !ok || last {
+		t.Fatal("closing one of two descriptors released the description")
+	}
+	if _, last, ok := table.Close(10); !ok || !last {
+		t.Fatal("closing the last descriptor kept the description")
+	}
+	for fd := 3; fd < LinuxMaxFD; fd++ {
+		table.Duplicate(0, fd, false)
+	}
+	if fd, ok := table.Duplicate(0, 0, false); !ok || fd != 1 {
+		t.Fatalf("lowest free descriptor = %d", fd)
+	}
+	if table.DuplicateAt(0, 10, false) {
+		t.Fatal("DuplicateAt replaced an open target")
+	}
+	if fd, ok := table.Duplicate(0, 0, false); ok || fd != -1 {
+		t.Fatalf("duplicate into a full table = %d", fd)
+	}
+}

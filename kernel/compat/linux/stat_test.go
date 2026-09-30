@@ -156,3 +156,26 @@ func FuzzEncodeStat(fuzz *testing.F) {
 		}
 	})
 }
+
+func TestAccessErrno(t *testing.T) {
+	cases := []struct {
+		requested uint64
+		mode      uint32
+		want      abi.Errno
+	}{
+		{0, 0o100644, 0},
+		{4, 0o100644, 0},
+		{6, 0o100644, 0},
+		{1, 0o100644, abi.EACCES}, // a file has no execute bit
+		{7, 0o040755, 0},
+		{2, 0o100444, abi.EACCES}, // read-only
+		{2, 0o040555, abi.EACCES},
+		{5, 0o040555, 0},
+		{8, 0o100644, abi.EINVAL},
+	}
+	for _, test := range cases {
+		if got := AccessErrno(test.requested, test.mode); got != test.want {
+			t.Errorf("access %d on %#o: errno %d, want %d", test.requested, test.mode, got, test.want)
+		}
+	}
+}

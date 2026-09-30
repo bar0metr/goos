@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rebuilds the static musl Linux fixtures from C source.
+# Rebuilds the static Linux fixtures from their assembly and C sources.
 #
 # The compiler, the linker, and the musl sources all come from one TinyGo
 # release, so the recipe needs no network access and no separate
@@ -78,7 +78,12 @@ tinygo clang $cflags -DCRT -c "$musl/crt/crt1.c" -o "$work/crt1.o"
 
 library=$(sed -e 's|/|_|g' -e "s|^|$obj/|" -e 's|$|.o|' "$sources")
 
-for fixture in musl-hello; do
+# hello has no libc: one assembly file and the linker.
+tinygo clang --target=x86_64-unknown-linux-musl -c "$here/hello/hello.S" -o "$work/hello.o"
+tinygo ld.lld -static -nostdlib --no-pie --strip-all --build-id=none \
+	-z noexecstack -z max-page-size=4096 -e _start -o "$out/hello" "$work/hello.o"
+
+for fixture in musl-hello fsprobe dirprobe abi-probe; do
 	# shellcheck disable=SC2086
 	tinygo clang $cflags -c "$here/$fixture/main.c" -o "$work/$fixture.o"
 	# shellcheck disable=SC2086
@@ -88,4 +93,4 @@ for fixture in musl-hello; do
 		--start-lib $library --end-lib
 done
 
-(cd "$out" && shasum -a 256 musl-hello)
+(cd "$out" && shasum -a 256 hello musl-hello fsprobe dirprobe abi-probe)

@@ -24,6 +24,7 @@ func (handler *testHandler) Openat(request Request) Result        { return handl
 func (handler *testHandler) SetTidAddress(request Request) Result { return handler.memory(request) }
 func (handler *testHandler) Filesystem(request Request) Result    { return handler.memory(request) }
 func (handler *testHandler) System(request Request) Result        { return handler.memory(request) }
+func (handler *testHandler) Descriptor(request Request) Result    { return handler.memory(request) }
 func (handler *testHandler) Brk(request Request) Result           { return handler.memory(request) }
 func (handler *testHandler) Mmap(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) Munmap(request Request) Result        { return handler.memory(request) }
@@ -74,6 +75,20 @@ func TestUnsupportedDiagnosticsStayBounded(t *testing.T) {
 	if diagnostics.Last() != unsupportedHistorySize+2 || (UnsupportedDiagnostics{}).Last() != 0 {
 		t.Fatalf("last unsupported = %d", diagnostics.Last())
 	}
+	// The history reads oldest first and ends at the newest.
+	for index := 0; index < unsupportedHistorySize; index++ {
+		if got := diagnostics.Recent(index); got != abi.Syscall(3+index) {
+			t.Fatalf("recent %d = %d", index, got)
+		}
+	}
+	if diagnostics.Recent(-1) != 0 || diagnostics.Recent(unsupportedHistorySize) != 0 {
+		t.Fatal("an index outside the history returned a number")
+	}
+	// The refused set keeps the numbers the history already dropped.
+	if !diagnostics.WasRefused(0) || !diagnostics.WasRefused(unsupportedHistorySize+2) ||
+		diagnostics.WasRefused(unsupportedHistorySize+3) || diagnostics.WasRefused(RefusedNumbers) || diagnostics.WasRefused(^abi.Syscall(0)) {
+		t.Fatalf("refused set = %#x", diagnostics.Refused)
+	}
 	for number := abi.Syscall(3); number < unsupportedHistorySize+3; number++ {
 		if diagnostics.Numbers[number%unsupportedHistorySize] != number {
 			t.Fatalf("number %d was not retained: %#v", number, diagnostics.Numbers)
@@ -90,7 +105,9 @@ func TestDispatchRoutesImplementedCalls(t *testing.T) {
 		abi.SysMkdir, abi.SysRmdir, abi.SysUnlink, abi.SysMkdirat, abi.SysUnlinkat,
 		abi.SysRenameat, abi.SysRenameat2, abi.SysGetdents64, abi.SysGetpid, abi.SysGettid,
 		abi.SysGetppid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid, abi.SysUname,
-		abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
+		abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64, abi.SysDup, abi.SysDup2,
+		abi.SysDup3, abi.SysFcntl, abi.SysIoctl, abi.SysAccess, abi.SysFaccessat, abi.SysSetuid,
+		abi.SysSetgid, abi.SysGetgroups, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
 	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)
@@ -104,4 +121,18 @@ func TestDispatchRoutesImplementedCalls(t *testing.T) {
 			t.Fatalf("write result = %d", int64(result.Register()))
 		}
 	}
+}
+
+func TestBadPointerCounterSaturates(t *testing.T) {
+	badPointers, lastBadPointer = 0, 0
+	NoteBadPointer(abi.SysRead)
+	if count, last := BadPointers(); count != 1 || last != abi.SysRead {
+		t.Fatalf("bad pointers = %d, last call %d", count, last)
+	}
+	badPointers = ^uint64(0)
+	NoteBadPointer(abi.SysWritev)
+	if count, last := BadPointers(); count != ^uint64(0) || last != abi.SysWritev {
+		t.Fatalf("the counter wrapped: %d, last call %d", count, last)
+	}
+	badPointers, lastBadPointer = 0, 0
 }

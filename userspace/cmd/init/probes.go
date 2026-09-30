@@ -130,13 +130,13 @@ func probeLinuxLaunch() bool {
 	return true
 }
 
-// linuxLongPath names a file PID 1 creates for the musl probe. At 235 bytes
+// linuxLongPath names a file PID 1 creates for the conformance probe. At 235 bytes
 // the path is too long for one VFS request message, so opening it proves the
 // Linux bridge can attach a path the way native clients do.
 var linuxLongPath [235]byte
 
-// probeLinuxMusl runs the static musl fixture through libc startup. The
-// fixture checks its arguments, environment, TLS, heap, VFS session, path
+// probeLinuxMusl runs the conformance probe, a static musl program, through
+// libc startup. It checks its arguments, environment, TLS, heap, VFS session, path
 // resolution from its working directory, and in a scratch directory under
 // /tmp file I/O, file status, stdio, directory listing, vector I/O, and
 // naming, then its identity, the clocks, and a sleep. It prints one line per
@@ -145,7 +145,7 @@ var linuxLongPath [235]byte
 //
 //go:noinline
 func probeLinuxMusl() bool {
-	path := []byte("/system/linux/musl-hello")
+	path := []byte("/system/linux/abi-probe")
 	executable, name, located := locateExecutable(path)
 	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
 		return false
@@ -200,7 +200,7 @@ func runLinuxMusl(executable supervisor.Executable, name string, path []byte) bo
 	}
 	sys.HandleClose(handle.ID(streams[0][1]))
 	sys.HandleClose(handle.ID(streams[2][0]))
-	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nstatus ok\nstdio ok\nlisting ok\nvectors ok\nnames ok\nsystem ok\nhello from musl\n")
+	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nstatus ok\nstdio ok\nlisting ok\nvectors ok\ndescriptors ok\nnames ok\nsystem ok\nabi-probe ok\n")
 	sys.HandleClose(handle.ID(streams[1][0]))
 	return waitApplicationExit(launched.ProcessHandle) == 0 && printed
 }

@@ -109,7 +109,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench
 
 all: iso
 
@@ -234,7 +234,7 @@ initramfs: userspace
 	@# A command whose directory was removed leaves its image behind; the
 	@# archive takes only the commands the tree still has.
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
 
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
@@ -273,6 +273,7 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-boot
+	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
 
@@ -289,6 +290,7 @@ release-check:
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
+	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
@@ -536,6 +538,46 @@ docs:
 linux-fixtures:
 	@userspace/linux/build.sh
 
+# Linux ABI tests (docs/architecture/linux-x86_64-abi.md). The first two
+# run on the host: the ELF parser against hostile and real images, and the
+# pure translation code with the VFS protocol it speaks.
+test-linux-elf:
+	$(BUILD_ENV) go test ./kernel/compat/linux/elf ./userspace/linux ./tools/initramfs
+
+test-linux-abi:
+	$(BUILD_ENV) go test ./kernel/compat/linux ./kernel/compat/linux/abi ./kernel/vfs ./userspace/vfs
+
+# One validation boot runs the release proofs, the hardening modes, two Linux
+# processes at once, and Ctrl-C on a blocked Linux process. The musl, VFS, and
+# security gates are parts of that one run, so their targets are the same.
+test-linux-boot:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@rm -f $(BUILD_DIR)/linux-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/linux-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/linux.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-virtio-blk.img
+
+test-linux-musl test-linux-vfs test-linux-security: test-linux-boot
+
+test-linux-all: test-linux-elf test-linux-abi test-linux-boot
+
+# Interoperability with a static x86_64 BusyBox the caller supplies. The
+# repository carries no BusyBox, so this is no part of test-all.
+#   make test-linux-busybox BUSYBOX=/path/to/busybox
+LINUX_EXTRA ?=
+test-linux-busybox:
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@$(MAKE) --no-print-directory iso VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX))
+	@rm -f $(BUILD_DIR)/linux-busybox-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/linux-busybox-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/linux_busybox.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-busybox-virtio-blk.img $(notdir $(BUSYBOX))
+
+# Times four Linux calls beside their native counterparts in one guest and
+# writes build/reports/linux-abi-<variant>.md. The numbers depend on the host.
+test-linux-bench: iso
+	@rm -f $(BUILD_DIR)/linux-bench-virtio-blk.img
+	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/linux-bench-virtio-blk.img
+	@MEMORY=$(MEMORY) tests/boot/linux_bench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-bench-virtio-blk.img
+
 # Runs the committed Linux fixtures on a Linux kernel in an amd64 container
 # and requires the exit status GoOS must reproduce. It needs Docker, so it is
 # a reference check and no part of test-all.
@@ -570,6 +612,9 @@ help:
 	  '  version         print the release from internal/version/version.go' \
 	  '  linux-fixtures  rebuild the static Linux test fixtures under userspace/linux' \
 	  '  test-linux-reference run those fixtures on a Linux kernel in Docker' \
+	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
+	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
+	  '  test-linux-bench time Linux calls beside native ones into build/reports' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
 	  '  test-all        run the complete validation gate, including QEMU' \

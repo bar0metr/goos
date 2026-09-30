@@ -24,15 +24,19 @@ const (
 	SysRtSigaction   Syscall = 13
 	SysRtSigprocmask Syscall = 14
 	SysIoctl         Syscall = 16
+	SysAccess        Syscall = 21
 	SysReadv         Syscall = 19
 	SysWritev        Syscall = 20
 	SysPipe          Syscall = 22
 	SysSchedYield    Syscall = 24
 	SysMadvise       Syscall = 28
+	SysDup           Syscall = 32
+	SysDup2          Syscall = 33
 	SysNanosleep     Syscall = 35
 	SysGetpid        Syscall = 39
 	SysExit          Syscall = 60
 	SysUname         Syscall = 63
+	SysFcntl         Syscall = 72
 	SysGetcwd        Syscall = 79
 	SysChdir         Syscall = 80
 	SysRename        Syscall = 82
@@ -42,9 +46,12 @@ const (
 	SysReadlink      Syscall = 89
 	SysGetuid        Syscall = 102
 	SysGetgid        Syscall = 104
+	SysSetuid        Syscall = 105
+	SysSetgid        Syscall = 106
 	SysGeteuid       Syscall = 107
 	SysGetegid       Syscall = 108
 	SysGetppid       Syscall = 110
+	SysGetgroups     Syscall = 115
 	SysArchPrctl     Syscall = 158
 	SysGettid        Syscall = 186
 	SysFutex         Syscall = 202
@@ -58,8 +65,10 @@ const (
 	SysUnlinkat      Syscall = 263
 	SysRenameat      Syscall = 264
 	SysReadlinkat    Syscall = 267
+	SysFaccessat     Syscall = 269
 	SysPpoll         Syscall = 271
 	SysSetRobustList Syscall = 273
+	SysDup3          Syscall = 292
 	SysPipe2         Syscall = 293
 	SysPrlimit64     Syscall = 302
 	SysRenameat2     Syscall = 316
@@ -108,6 +117,22 @@ const (
 	AtNoAutomount     = uint64(0x800)
 	AtEmptyPath       = uint64(0x1000)
 
+	// Commands of fcntl and the one descriptor flag.
+	FcntlDupFD        = uint64(0)
+	FcntlGetFD        = uint64(1)
+	FcntlSetFD        = uint64(2)
+	FcntlGetFL        = uint64(3)
+	FcntlSetFL        = uint64(4)
+	FcntlDupFDCloExec = uint64(1030)
+	DescriptorCloExec = uint64(1)
+
+	// Status flags F_SETFL can change on Linux besides O_APPEND. GoOS has
+	// no behavior behind any of them.
+	OpenNonBlock = uint32(0o4000)
+	OpenAsync    = uint32(0o20000)
+	OpenDirect   = uint32(0o40000)
+	OpenNoATime  = uint32(0o1000000)
+
 	// d_type values of a directory entry.
 	DirentDirectory = uint8(4)
 	DirentRegular   = uint8(8)
@@ -155,6 +180,8 @@ func (number Syscall) Known() bool {
 	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
 		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
+		SysDup, SysDup2, SysFcntl, SysDup3, SysAccess, SysSetuid, SysSetgid,
+		SysGetgroups, SysFaccessat,
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,

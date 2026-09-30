@@ -292,6 +292,31 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("syscalls", linuxSyscallEntries)
 	out.uint("unsupported", unsupported.Count)
 	out.uint("last-unsupported", uint64(unsupported.Last()))
+	// The numbers most recently refused, newest last, so a run shows which
+	// calls a program missed and not only the final one.
+	out.console.WriteString(" recent-unsupported=")
+	for index := 0; index < int(unsupported.Stored); index++ {
+		if index != 0 {
+			out.console.WriteString(",")
+		}
+		out.console.WriteUint(uint64(unsupported.Recent(index)))
+	}
+	// Every call number ever refused, in ascending order.
+	out.console.WriteString(" refused=")
+	first := true
+	for number := uint64(0); number < linuxcompat.RefusedNumbers; number++ {
+		if unsupported.Refused[number/64]&(1<<(number%64)) == 0 {
+			continue
+		}
+		if !first {
+			out.console.WriteString(",")
+		}
+		out.console.WriteUint(number)
+		first = false
+	}
+	faults, faulted := linuxcompat.BadPointers()
+	out.uint("bad-pointers", faults)
+	out.uint("last-bad-pointer", uint64(faulted))
 	out.uint("vfs-requests", sessions.Requests)
 	out.uint("vfs-failures", sessions.Failures)
 	out.uint("vfs-stale", sessions.Stale)

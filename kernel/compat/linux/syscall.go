@@ -49,6 +49,8 @@ type Handler interface {
 	// System serves the identity, time, and limit calls, which answer from
 	// kernel state without asking a service.
 	System(Request) Result
+	// Descriptor serves dup, dup2, dup3, fcntl, and ioctl.
+	Descriptor(Request) Result
 	Brk(Request) Result
 	Mmap(Request) Result
 	Munmap(Request) Result
@@ -62,9 +64,32 @@ type UnsupportedDiagnostics struct {
 	Count   uint64
 	Numbers [unsupportedHistorySize]abi.Syscall
 	Stored  uint8
+	// Refused has one bit per call number below RefusedNumbers that was
+	// ever refused, so a run shows every call a program missed however
+	// many times it asked.
+	Refused [RefusedNumbers / 64]uint64
+}
+
+// RefusedNumbers bounds the call numbers the refused set records. The
+// x86_64 table ends below it.
+const RefusedNumbers = 512
+
+// WasRefused reports whether number was ever refused.
+func (diagnostics UnsupportedDiagnostics) WasRefused(number abi.Syscall) bool {
+	return number < RefusedNumbers && diagnostics.Refused[number/64]&(1<<(number%64)) != 0
 }
 
 var unsupportedDiagnostics UnsupportedDiagnostics
+
+// badPointers counts calls that ended in EFAULT: a program handed the kernel
+// memory it could not use. The counter saturates.
+var badPointers uint64
+
+// lastBadPointer is the number of the most recent such call.
+var lastBadPointer abi.Syscall
+
+// BadPointers returns the count and the number of the latest call.
+func BadPointers() (uint64, abi.Syscall) { return badPointers, lastBadPointer }
 
 func decode(frame *abi.Frame) (Request, bool) {
 	if frame == nil {
@@ -81,6 +106,19 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 	if !ok {
 		return Result{Errno: abi.EINVAL}
 	}
+	return route(request, handler)
+}
+
+// NoteBadPointer counts a call that ended in EFAULT. The kernel calls it
+// once the result is final: a copy that only has to wait for a page of the
+// program's own image is retried and is no bad pointer.
+func NoteBadPointer(number abi.Syscall) {
+	saturate(&badPointers)
+	lastBadPointer = number
+}
+
+// route sends a request to the handler method that implements its number.
+func route(request Request, handler Handler) Result {
 	if handler != nil {
 		switch request.Number {
 		case abi.SysRead:
@@ -99,10 +137,13 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 			return handler.Openat(request)
 		case abi.SysSetTidAddress:
 			return handler.SetTidAddress(request)
+		case abi.SysDup, abi.SysDup2, abi.SysDup3, abi.SysFcntl, abi.SysIoctl:
+			return handler.Descriptor(request)
 		case abi.SysGetpid, abi.SysGettid, abi.SysGetppid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid,
+			abi.SysSetuid, abi.SysSetgid, abi.SysGetgroups,
 			abi.SysUname, abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64:
 			return handler.System(request)
-		case abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
+		case abi.SysAccess, abi.SysFaccessat, abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
 			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2:
 			return handler.Filesystem(request)
 		case abi.SysBrk:
@@ -136,12 +177,27 @@ func noteUnsupported(number abi.Syscall) {
 		index %= unsupportedHistorySize
 	}
 	unsupportedDiagnostics.Numbers[index] = number
+	if number < RefusedNumbers {
+		unsupportedDiagnostics.Refused[number/64] |= 1 << (number % 64)
+	}
 	if unsupportedDiagnostics.Stored < unsupportedHistorySize {
 		unsupportedDiagnostics.Stored++
 	}
 }
 
 func Unsupported() UnsupportedDiagnostics { return unsupportedDiagnostics }
+
+// Recent returns the index-th retained number, oldest first.
+func (diagnostics UnsupportedDiagnostics) Recent(index int) abi.Syscall {
+	if index < 0 || index >= int(diagnostics.Stored) {
+		return 0
+	}
+	oldest := uint64(0)
+	if diagnostics.Count > unsupportedHistorySize {
+		oldest = diagnostics.Count % unsupportedHistorySize
+	}
+	return diagnostics.Numbers[(oldest+uint64(index))%unsupportedHistorySize]
+}
 
 // Last returns the most recent unsupported number, or zero before the first.
 func (diagnostics UnsupportedDiagnostics) Last() abi.Syscall {

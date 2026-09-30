@@ -1,0 +1,1011 @@
+/*
+ * Linux ABI conformance probe. One static musl program that checks what a
+ * GoOS Linux process gets, result by result, and prints a line for each
+ * group. The same binary runs on a Linux kernel, where it must print the
+ * same lines: that run is the reference the GoOS results are held to.
+ *
+ * With two ordinary arguments it checks, in order: arguments and
+ * environment, TLS, the heaps, the VFS session, path resolution, and then in
+ * a scratch directory under /tmp file I/O, file status, stdio, directory
+ * listing, vectors, descriptors, and naming. Last come identity, the system
+ * name, the clocks, a limit, and a sleep.
+ *
+ * GoOS starts it as /system/linux/abi-probe with /system/linux as the
+ * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
+ * path is too long for one request message. A few results differ on GoOS by
+ * design; the program tells GoOS from Linux by the version field of uname.
+ *
+ * A first argument selects another mode:
+ *
+ *   hostile          bad pointers, lengths, and descriptors for every call
+ *   exhaust          descriptor table and page quota run out and recover
+ *   isolation        the native GoOS call gate refuses a Linux process
+ *   port-io          an I/O port access ends the process
+ *   pair NAME [drain] two instances keep separate state in one pipeline
+ *   block            wait on standard input until it ends
+ *   sleep            sleep for a minute
+ *   bench            time four calls and print nanoseconds per call
+ *   session-loss     report whether the VFS session survives a VFS restart
+ *   session-timeout  open a name the validation VFS answers late
+ *
+ * exhaust, isolation, and port-io make sense on GoOS only.
+ */
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <sys/utsname.h>
+#include <time.h>
+#include <unistd.h>
+
+#define IMAGE "/system/linux/abi-probe"
+
+/* GoOS names itself in the version field of uname. A few results differ
+ * there by design, and the checks that expect them ask this first. */
+static int on_goos(void)
+{
+	struct utsname name;
+
+	return uname(&name) == 0 && !strncmp(name.version, "GoOS ", 5);
+}
+
+/* The scratch directory of this instance; enter_scratch names it. */
+static char scratch[48];
+
+static _Thread_local int tls_data = 40;
+static _Thread_local int tls_zero;
+
+static int heap_ok(void)
+{
+	size_t large_size = 1 << 20;
+	char *small = malloc(64);
+	char *large = malloc(large_size);
+	int ok = small && large;
+
+	if (ok) {
+		memset(small, 0x5a, 64);
+		memset(large, 0xa5, large_size);
+		ok = small[63] == 0x5a && (unsigned char)large[large_size - 1] == 0xa5;
+	}
+	free(large);
+	free(small);
+	return ok;
+}
+
+static int session_ok(const char *self)
+{
+	for (int round = 0; round < 2; round++) {
+		int fd = openat(AT_FDCWD, self, O_RDONLY | O_CLOEXEC);
+
+		/* Descriptors 0 to 2 are the standard streams; 3 is free again
+		 * after each close. */
+		if (fd != 3 || close(fd) != 0)
+			return 0;
+		errno = 0;
+		if (close(fd) != -1 || errno != EBADF)
+			return 0;
+	}
+	errno = 0;
+	return openat(AT_FDCWD, "/system/linux/absent", O_RDONLY) == -1 && errno == ENOENT;
+}
+
+static int opens(int dirfd, const char *path)
+{
+	int fd = openat(dirfd, path, O_RDONLY);
+
+	return fd == 3 && close(fd) == 0;
+}
+
+static int refuses(int dirfd, const char *path, int reason)
+{
+	errno = 0;
+	return openat(dirfd, path, O_RDONLY) == -1 && errno == reason;
+}
+
+static int paths_ok(void)
+{
+	static char name[1200];
+	const char *existing = getenv("GOOS_LINUX_LONG");
+	/* musl's open() is the legacy open call on x86_64, not openat. */
+	int fd = open("abi-probe", O_RDONLY);
+
+	if (fd != 3 || close(fd) != 0)
+		return 0;
+	if (!opens(AT_FDCWD, "./abi-probe") ||
+	    !opens(AT_FDCWD, "..//linux/./abi-probe") ||
+	    !opens(AT_FDCWD, "../../../system/linux/abi-probe") ||
+	    !opens(1, IMAGE))
+		return 0;
+	if (!refuses(AT_FDCWD, "", ENOENT) ||
+	    !refuses(1, "abi-probe", ENOTDIR) ||
+	    !refuses(42, "abi-probe", EBADF))
+		return 0;
+	if (existing && !opens(AT_FDCWD, existing))
+		return 0;
+	/* A 250-byte name is legal on Linux and on GoOS, and with its
+	 * directory it is too long for one request message. 1100 bytes are
+	 * over both name limits. */
+	memset(name, 'n', sizeof name - 1);
+	name[250] = 0;
+	if (!refuses(AT_FDCWD, name, ENOENT))
+		return 0;
+	name[250] = 'n';
+	name[1100] = 0;
+	return refuses(AT_FDCWD, name, ENAMETOOLONG);
+}
+
+/* The bundled musl has no stat directory, which is where mkdir lives. */
+static int make_directory(int dirfd, const char *path)
+{
+	return syscall(SYS_mkdirat, dirfd, path, 0755);
+}
+
+static int fails(long result, int reason)
+{
+	int failed = result == -1 && errno == reason;
+
+	errno = 0;
+	return failed;
+}
+
+static int position_ok(int fd, off_t offset, int whence, off_t want)
+{
+	return lseek(fd, offset, whence) == want;
+}
+
+static int data_ok(void)
+{
+	static char pattern[8192];
+	char back[300];
+	struct iovec pieces[2] = {{"ab", 2}, {"cde", 3}};
+	int fd = open("data", O_RDWR | O_CREAT | O_EXCL, 0644);
+
+	if (fd != 3 || !fails(open("data", O_WRONLY | O_CREAT | O_EXCL, 0644), EEXIST))
+		return 0;
+	for (size_t index = 0; index < sizeof pattern; index++)
+		pattern[index] = (char)(index * 7 + 3);
+	if (write(fd, pattern, sizeof pattern) != sizeof pattern ||
+	    !position_ok(fd, 0, SEEK_CUR, 8192) ||
+	    !position_ok(fd, -4096, SEEK_END, 4096) ||
+	    !position_ok(fd, 100, SEEK_SET, 100) ||
+	    !fails(lseek(fd, -1, SEEK_SET), EINVAL) ||
+	    !fails(lseek(1, 0, SEEK_CUR), ESPIPE))
+		return 0;
+	if (read(fd, back, sizeof back) != sizeof back ||
+	    memcmp(back, pattern + 100, sizeof back) ||
+	    !position_ok(fd, 0, SEEK_CUR, 400) ||
+	    !position_ok(fd, 8000, SEEK_SET, 8000) ||
+	    read(fd, back, sizeof back) != 192 ||
+	    memcmp(back, pattern + 8000, 192) ||
+	    read(fd, back, sizeof back) != 0 || close(fd) != 0)
+		return 0;
+
+	fd = open("data", O_WRONLY | O_APPEND);
+	if (fd != 3 || !fails(read(fd, back, 1), EBADF) ||
+	    write(fd, "tail", 4) != 4 || !position_ok(fd, 0, SEEK_CUR, 8196) ||
+	    close(fd) != 0)
+		return 0;
+	fd = open("data", O_RDONLY);
+	if (fd != 3 || !position_ok(fd, -4, SEEK_END, 8192) ||
+	    read(fd, back, sizeof back) != 4 || memcmp(back, "tail", 4) ||
+	    !fails(write(fd, "x", 1), EBADF) || close(fd) != 0)
+		return 0;
+
+	fd = open("data", O_WRONLY | O_TRUNC);
+	if (fd != 3 || !position_ok(fd, 0, SEEK_END, 0) ||
+	    writev(fd, pieces, 2) != 5 || close(fd) != 0)
+		return 0;
+	fd = open("data", O_RDONLY);
+	return fd == 3 && read(fd, back, sizeof back) == 5 &&
+	       !memcmp(back, "abcde", 5) && close(fd) == 0;
+}
+
+/* The bundled musl has no stat wrappers either; the calls below are the ones
+ * its stat(), lstat(), fstat(), and fstatat() make on x86_64. */
+static int status_ok(const char *self, int read_only_image)
+{
+	struct stat by_path, by_fd, other, directory, image;
+	int dirfd, fd = open("data", O_RDONLY);
+
+	if (fd != 3 || syscall(SYS_stat, "data", &by_path) != 0 ||
+	    syscall(SYS_fstat, fd, &by_fd) != 0 || close(fd) != 0)
+		return 0;
+	/* One file has one identity, by name and by descriptor. */
+	if (!S_ISREG(by_path.st_mode) || (by_path.st_mode & 0777) != 0644 ||
+	    by_path.st_size != 5 || by_fd.st_size != 5 ||
+	    by_path.st_nlink != 1 || by_path.st_blksize <= 0 ||
+	    by_path.st_ino == 0 || by_path.st_ino != by_fd.st_ino ||
+	    by_path.st_dev != by_fd.st_dev)
+		return 0;
+	if (syscall(SYS_lstat, "data", &other) != 0 ||
+	    other.st_ino != by_path.st_ino ||
+	    syscall(SYS_newfstatat, AT_FDCWD, "./data", &other, AT_SYMLINK_NOFOLLOW) != 0 ||
+	    other.st_ino != by_path.st_ino || other.st_size != 5)
+		return 0;
+	/* The directory is another node of the same filesystem. */
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (dirfd != 3 || syscall(SYS_stat, ".", &directory) != 0 ||
+	    !S_ISDIR(directory.st_mode) || directory.st_nlink < 1 ||
+	    directory.st_dev != by_path.st_dev ||
+	    directory.st_ino == by_path.st_ino ||
+	    syscall(SYS_newfstatat, dirfd, "", &other, AT_EMPTY_PATH) != 0 ||
+	    !S_ISDIR(other.st_mode) || other.st_ino != directory.st_ino ||
+	    syscall(SYS_fstat, dirfd, &other) != 0 ||
+	    other.st_ino != directory.st_ino ||
+	    syscall(SYS_newfstatat, dirfd, "data", &other, 0) != 0 ||
+	    other.st_ino != by_path.st_ino || close(dirfd) != 0)
+		return 0;
+	/* The program image is a different file. Standard output is a pipe
+	 * here and may be a terminal elsewhere. */
+	if (syscall(SYS_stat, self, &image) != 0 || !S_ISREG(image.st_mode) ||
+	    image.st_size <= 0 ||
+	    (image.st_dev == by_path.st_dev && image.st_ino == by_path.st_ino) ||
+	    (read_only_image && (image.st_mode & 0222)) ||
+	    syscall(SYS_fstat, 1, &other) != 0 ||
+	    (!S_ISFIFO(other.st_mode) && !S_ISCHR(other.st_mode)))
+		return 0;
+	/* access answers from the same mode. */
+	if (access("data", F_OK) != 0 || access("data", R_OK | W_OK) != 0 ||
+	    access(".", R_OK | X_OK) != 0 || !fails(access("missing", F_OK), ENOENT) ||
+	    !fails(access("data/", F_OK), ENOTDIR) ||
+	    (read_only_image && !fails(access(self, W_OK), EACCES)))
+		return 0;
+	errno = 0;
+	return fails(syscall(SYS_stat, "missing", &other), ENOENT) &&
+	       fails(syscall(SYS_stat, "data/", &other), ENOTDIR) &&
+	       fails(syscall(SYS_fstat, 42, &other), EBADF) &&
+	       fails(syscall(SYS_fstat, AT_FDCWD, &other), EBADF) &&
+	       fails(syscall(SYS_newfstatat, AT_FDCWD, "data", &other, 0x10000000), EINVAL) &&
+	       fails(syscall(SYS_stat, "data", (void *)8), EFAULT);
+}
+
+/* musl stdio writes with writev. It fills its buffer with read, and reads a
+ * larger request with readv: the caller's memory first, its buffer second. */
+static int stdio_ok(void)
+{
+	static const char text[] = "first\nsecond 2\n";
+	char line[32];
+	FILE *file = fopen("lines", "w");
+
+	if (!file || fprintf(file, "first\nsecond %d\n", 2) < 0 || fclose(file) != 0)
+		return 0;
+	file = fopen("lines", "r");
+	if (!file || !fgets(line, sizeof line, file) || strcmp(line, "first\n") ||
+	    !fgets(line, sizeof line, file) || strcmp(line, "second 2\n") ||
+	    fgets(line, sizeof line, file) || !feof(file))
+		return 0;
+	rewind(file);
+	if (fread(line, 1, sizeof line, file) != sizeof text - 1 ||
+	    memcmp(line, text, sizeof text - 1) || fclose(file) != 0)
+		return 0;
+	/* Standard input is at its end in every run of this mode. */
+	return fread(line, 1, sizeof line, stdin) == 0 && feof(stdin) &&
+	       unlink("lines") == 0;
+}
+
+/* The record getdents64 fills. The bundled musl has no readdir. */
+struct listed {
+	unsigned long long inode;
+	long long next;
+	unsigned short length;
+	unsigned char type;
+	char name[];
+};
+
+static int touch(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT, 0644);
+
+	return fd == 3 && close(fd) == 0;
+}
+
+static int listing_ok(void)
+{
+	static char long_name[201], buffer[512];
+	struct stat first;
+	int fd, dirfd, ok = 1;
+	long got;
+
+	/* 200 bytes fit a Linux name and no VFS reply message. */
+	memset(long_name, 'L', sizeof long_name - 1);
+	if (make_directory(AT_FDCWD, "list") != 0 || chdir("list") != 0 ||
+	    !touch("a") || !touch("b") || !touch(long_name) ||
+	    make_directory(AT_FDCWD, "d") != 0 ||
+	    syscall(SYS_stat, "a", &first) != 0)
+		return 0;
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (dirfd != 3)
+		return 0;
+	/* A 256-byte buffer holds the long name and little else, so one
+	 * listing takes several calls. The second pass follows a rewind. */
+	for (int pass = 0; pass < 2 && ok; pass++) {
+		int count = 0, found = 0;
+
+		while ((got = syscall(SYS_getdents64, dirfd, buffer, 256)) > 0) {
+			for (long at = 0; at < got;) {
+				struct listed *entry = (void *)(buffer + at);
+
+				if (entry->length < 24 || entry->length % 8 ||
+				    at + entry->length > got || entry->inode == 0)
+					return 0;
+				at += entry->length;
+				if (!strcmp(entry->name, ".") || !strcmp(entry->name, ".."))
+					continue;
+				count++;
+				if (!strcmp(entry->name, "a"))
+					found |= entry->type == DT_REG && entry->inode == first.st_ino;
+				else if (!strcmp(entry->name, "b"))
+					found |= (entry->type == DT_REG) << 1;
+				else if (!strcmp(entry->name, "d"))
+					found |= (entry->type == DT_DIR) << 2;
+				else if (!strcmp(entry->name, long_name))
+					found |= (entry->type == DT_REG) << 3;
+			}
+		}
+		ok = got == 0 && count == 4 && found == 15 &&
+		     lseek(dirfd, 0, SEEK_SET) == 0;
+	}
+	errno = 0;
+	fd = open("a", O_RDONLY);
+	ok = ok && fd == 4 &&
+	     fails(syscall(SYS_getdents64, dirfd, buffer, 16), EINVAL) &&
+	     fails(syscall(SYS_getdents64, dirfd, (void *)8, 256), EFAULT) &&
+	     fails(syscall(SYS_getdents64, fd, buffer, 256), ENOTDIR) &&
+	     fails(syscall(SYS_getdents64, 42, buffer, 256), EBADF) &&
+	     close(fd) == 0 && close(dirfd) == 0;
+	return unlink("a") == 0 && unlink("b") == 0 && unlink(long_name) == 0 &&
+	       rmdir("d") == 0 && chdir("..") == 0 && rmdir("list") == 0 && ok;
+}
+
+static int vectors_ok(int goos)
+{
+	static struct iovec many[17];
+	char first[4], second[8];
+	struct iovec out[3] = {{"vec", 3}, {"", 0}, {"tors!", 5}};
+	struct iovec in[2] = {{first, sizeof first}, {second, sizeof second}};
+	int fd = open("vector", O_RDWR | O_CREAT | O_TRUNC, 0644);
+
+	if (fd != 3 || writev(fd, out, 3) != 8 || lseek(fd, 0, SEEK_SET) != 0 ||
+	    readv(fd, in, 2) != 8 || memcmp(first, "vect", 4) ||
+	    memcmp(second, "ors!", 4) || readv(fd, in, 2) != 0)
+		return 0;
+	errno = 0;
+	if (!fails(readv(fd, in, -1), EINVAL) ||
+	    !fails(writev(fd, (void *)8, 1), EFAULT) ||
+	    !fails(readv(42, in, 2), EBADF))
+		return 0;
+	/* Linux takes 1024 elements; GoOS bounds a vector at 16. */
+	if (goos && !fails(writev(fd, many, 17), EINVAL))
+		return 0;
+	return close(fd) == 0 && unlink("vector") == 0;
+}
+
+static int system_ok(void)
+{
+	struct timespec wall, before, after, nap = {0, 20000000}, bad = {0, 1000000000};
+	struct utsname name;
+	struct rlimit files;
+	long long elapsed;
+	pid_t pid = getpid();
+
+	if (pid <= 0 || syscall(SYS_gettid) != pid || getppid() <= 0 ||
+	    getuid() != geteuid() || getgid() != getegid() ||
+	    setuid(getuid()) != 0 || setgid(getgid()) != 0 ||
+	    getgroups(0, NULL) < 0)
+		return 0;
+	if (uname(&name) != 0 || strcmp(name.sysname, "Linux") ||
+	    strcmp(name.machine, "x86_64") || !name.release[0] || !name.nodename[0])
+		return 0;
+	/* The sleep may run long; it must not end early. */
+	if (clock_gettime(CLOCK_REALTIME, &wall) != 0 || wall.tv_sec < 1000000000 ||
+	    time(NULL) < wall.tv_sec ||
+	    clock_gettime(CLOCK_MONOTONIC, &before) != 0 ||
+	    nanosleep(&nap, NULL) != 0 ||
+	    clock_gettime(CLOCK_MONOTONIC, &after) != 0)
+		return 0;
+	elapsed = (after.tv_sec - before.tv_sec) * 1000000000LL + after.tv_nsec - before.tv_nsec;
+	if (elapsed < nap.tv_nsec || elapsed > 5000000000LL)
+		return 0;
+	errno = 0;
+	return fails(clock_gettime(99, &wall), EINVAL) &&
+	       fails(nanosleep(&bad, NULL), EINVAL) &&
+	       getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur > 0 &&
+	       files.rlim_cur <= files.rlim_max;
+}
+
+static int names_ok(int read_only_image)
+{
+	char back[1];
+	int fd, dirfd = open(".", O_RDONLY | O_DIRECTORY);
+
+	if (dirfd != 3 || !fails(open("data", O_RDONLY | O_DIRECTORY), ENOTDIR) ||
+	    !fails(open(".", O_WRONLY), EISDIR) ||
+	    !fails(read(dirfd, back, 1), EISDIR))
+		return 0;
+	fd = openat(dirfd, "data", O_RDONLY);
+	if (fd != 4 || close(fd) != 0)
+		return 0;
+	if (rename("data", "moved") != 0 || !fails(open("data", O_RDONLY), ENOENT) ||
+	    make_directory(dirfd, "sub") != 0 || rename("sub", "sub2") != 0 ||
+	    !fails(unlink("sub2"), EISDIR) || !fails(rmdir("moved"), ENOTDIR) ||
+	    unlinkat(dirfd, "sub2", AT_REMOVEDIR) != 0 ||
+	    !fails(rmdir(scratch), ENOTEMPTY) ||
+	    unlink("moved") != 0 || close(dirfd) != 0)
+		return 0;
+	return !read_only_image || fails(make_directory(AT_FDCWD, IMAGE "-dir"), EROFS);
+}
+
+static int report(const char *what, int ok)
+{
+	printf("%s %s\n", what, ok ? "ok" : "failed");
+	return !ok;
+}
+
+/* Returns how many of its checks failed. */
+/* dup, dup2, dup3, fcntl, and ioctl. Duplicates share one file position;
+ * the close-on-exec flag belongs to each descriptor. */
+static int descriptors_ok(void)
+{
+	struct winsize window;
+	int flags, other, fd = open("dup", O_RDWR | O_CREAT | O_TRUNC, 0644);
+
+	if (fd != 3 || dup(fd) != 4 || write(fd, "abc", 3) != 3 ||
+	    !position_ok(4, 0, SEEK_CUR, 3))
+		return 0;
+	if (dup2(fd, 10) != 10 || dup2(fd, fd) != fd ||
+	    dup3(fd, 11, O_CLOEXEC) != 11 ||
+	    fcntl(11, F_GETFD) != FD_CLOEXEC || fcntl(10, F_GETFD) != 0 ||
+	    fcntl(10, F_SETFD, FD_CLOEXEC) != 0 || fcntl(10, F_GETFD) != FD_CLOEXEC ||
+	    fcntl(fd, F_GETFD) != 0)
+		return 0;
+	if (fcntl(fd, F_DUPFD, 20) != 20 || fcntl(fd, F_DUPFD_CLOEXEC, 20) != 21 ||
+	    fcntl(21, F_GETFD) != FD_CLOEXEC || fcntl(20, F_GETFD) != 0)
+		return 0;
+	flags = fcntl(fd, F_GETFL);
+	if (flags < 0 || (flags & O_ACCMODE) != O_RDWR || (flags & O_APPEND) ||
+	    fcntl(fd, F_SETFL, flags | O_APPEND) != 0 ||
+	    !(fcntl(10, F_GETFL) & O_APPEND) ||
+	    lseek(fd, 0, SEEK_SET) != 0 || write(fd, "de", 2) != 2 ||
+	    !position_ok(20, 0, SEEK_CUR, 5) ||
+	    fcntl(fd, F_SETFL, flags) != 0 || (fcntl(fd, F_GETFL) & O_APPEND))
+		return 0;
+	/* dup2 onto an open file closes that file first. */
+	other = open("other", O_RDWR | O_CREAT, 0644);
+	if (other != 5 || dup2(fd, other) != other ||
+	    !position_ok(other, 0, SEEK_CUR, 5))
+		return 0;
+	errno = 0;
+	if (!fails(dup(42), EBADF) || !fails(dup2(42, 6), EBADF) ||
+	    !fails(dup2(fd, 1 << 30), EBADF) || !fails(dup3(fd, fd, 0), EINVAL) ||
+	    !fails(syscall(SYS_dup3, fd, 12, 1), EINVAL) ||
+	    !fails(fcntl(42, F_GETFD), EBADF) ||
+	    !fails(fcntl(fd, F_DUPFD, 1 << 30), EINVAL) ||
+	    !fails(ioctl(fd, TIOCGWINSZ, &window), ENOTTY) ||
+	    !fails(ioctl(42, TIOCGWINSZ, &window), EBADF) ||
+	    isatty(fd))
+		return 0;
+	for (int index = 3; index <= 21; index++)
+		close(index);
+	errno = 0;
+	return fails(close(fd), EBADF) && unlink("dup") == 0 && unlink("other") == 0;
+}
+
+/* Every instance works in a directory of its own, named by its PID. */
+static int enter_scratch(void)
+{
+	snprintf(scratch, sizeof scratch, "/tmp/abi-%d", (int)getpid());
+	return make_directory(AT_FDCWD, scratch) == 0 && chdir(scratch) == 0;
+}
+
+static int leave_scratch(void)
+{
+	return chdir("/system/linux") == 0 && rmdir(scratch) == 0;
+}
+
+/* Returns how many of its checks failed. */
+static int scratch_checks(const char *self)
+{
+	int read_only_image = on_goos();
+	char cwd[64];
+	int failed;
+
+	errno = 0;
+	if (!enter_scratch() ||
+	    !fails(make_directory(AT_FDCWD, scratch), EEXIST) ||
+	    !fails(chdir(self), ENOTDIR) ||
+	    !getcwd(cwd, sizeof cwd) || strcmp(cwd, scratch) ||
+	    getcwd(cwd, 4) || !fails(-1, ERANGE))
+		return report("scratch directory", 0);
+	failed = report("files", data_ok());
+	failed += report("status", status_ok(self, read_only_image));
+	failed += report("stdio", stdio_ok());
+	failed += report("listing", listing_ok());
+	failed += report("vectors", vectors_ok(read_only_image));
+	failed += report("descriptors", descriptors_ok());
+	failed += report("names", names_ok(read_only_image));
+	if (!leave_scratch())
+		failed += report("scratch cleanup", 0);
+	return failed;
+}
+
+/* Pointers no process can use: null, a noncanonical address, and an address
+ * in the kernel half. */
+static void *const unusable[] = {
+	NULL, (void *)0x8000000000000000ULL, (void *)0xffff800000000000ULL,
+};
+
+/* The reference run leaves out nanosleep: the emulator it runs under sleeps
+ * on whatever the bad pointer holds instead of refusing it. */
+static int bad_pointers(int fd, int dirfd, int goos)
+{
+	struct stat status;
+	struct rlimit limit;
+
+	for (int index = 0; index < 3; index++) {
+		void *bad = unusable[index];
+
+		errno = 0;
+		if (!fails(read(fd, bad, 16), EFAULT) ||
+		    !fails(write(fd, bad, 16), EFAULT) ||
+		    !fails(readv(fd, bad, 1), EFAULT) ||
+		    !fails(writev(fd, bad, 1), EFAULT) ||
+		    !fails(open(bad, O_RDONLY), EFAULT) ||
+		    !fails(syscall(SYS_stat, bad, &status), EFAULT) ||
+		    !fails(syscall(SYS_stat, "/", bad), EFAULT) ||
+		    !fails(syscall(SYS_fstat, fd, bad), EFAULT) ||
+		    !fails(syscall(SYS_getcwd, bad, 64), EFAULT) ||
+		    !fails(syscall(SYS_uname, bad), EFAULT) ||
+		    !fails(syscall(SYS_clock_gettime, CLOCK_MONOTONIC, bad), EFAULT) ||
+		    (goos && !fails(syscall(SYS_nanosleep, bad, 0), EFAULT)) ||
+		    !fails(syscall(SYS_arch_prctl, 0x1003, bad), EFAULT) ||
+		    lseek(dirfd, 0, SEEK_SET) != 0 ||
+		    !fails(syscall(SYS_getdents64, dirfd, bad, 256), EFAULT) ||
+		    !fails(chdir(bad), EFAULT) || !fails(unlink(bad), EFAULT) ||
+		    !fails(rename(bad, "x"), EFAULT) || !fails(rename("data", bad), EFAULT) ||
+		    !fails(make_directory(AT_FDCWD, bad), EFAULT))
+			return 0;
+		/* A null old-limit pointer means "do not report", so only the
+		 * other two are bad here. */
+		if (bad && !fails(syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, 0, bad), EFAULT))
+			return 0;
+	}
+	(void)limit;
+	return 1;
+}
+
+/* A buffer that runs off the end of a mapping. Linux moves the bytes before
+ * the fault and reports them; an emulator that checks the whole range first
+ * reports EFAULT, and the reference run accepts that too. */
+static int short_or_fault(long result, long moved, int goos)
+{
+	int fault = result == -1 && errno == EFAULT;
+
+	errno = 0;
+	return result == moved || (!goos && fault);
+}
+
+static int mapping_edges(int fd, int goos)
+{
+	struct stat *straddling;
+	char *region = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	char *edge;
+
+	if (region == MAP_FAILED || munmap(region + 4096, 4096) != 0)
+		return 0;
+	edge = region + 4096 - 8;
+	memset(edge, 'e', 8);
+	errno = 0;
+	if (lseek(fd, 0, SEEK_SET) != 0 || !short_or_fault(write(fd, edge, 16), 8, goos) ||
+	    lseek(fd, 0, SEEK_SET) != 0 || !short_or_fault(read(fd, edge, 16), 8, goos))
+		return 0;
+	/* The longest possible lengths. The reference run skips them: the
+	 * emulator it runs under walks the whole range before it answers. */
+	if (goos && (!short_or_fault(write(fd, edge, (size_t)-1), 8, goos) ||
+		     mmap(NULL, (size_t)-1, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED ||
+		     !fails(-1, ENOMEM)))
+		return 0;
+	/* A path with no terminator before the mapping ends, and a stat
+	 * buffer that straddles the end. */
+	memset(edge, 'p', 8);
+	straddling = (struct stat *)(region + 4096 - 64);
+	if (!fails(open(edge, O_RDONLY), EFAULT) ||
+	    !fails(syscall(SYS_stat, "/", straddling), EFAULT))
+		return 0;
+	/* Lengths and addresses no mapping call can take. */
+	if (mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED ||
+	    !fails(-1, EINVAL) ||
+	    !fails(munmap(region, 0), EINVAL) ||
+	    !fails(munmap(region + 1, 4096), EINVAL) ||
+	    !fails(syscall(SYS_mprotect, region + 1, 4096, PROT_READ), EINVAL) ||
+	    !fails(mprotect(region, 8192, PROT_READ), ENOMEM))
+		return 0;
+	return munmap(region, 4096) == 0;
+}
+
+/* Transfers longer than one call moves. The program loops, as POSIX asks. */
+static int long_transfers(int fd)
+{
+	static unsigned char sent[100000], received[100000];
+	size_t done = 0;
+	long moved;
+
+	for (size_t index = 0; index < sizeof sent; index++)
+		sent[index] = (unsigned char)(index * 31 + 7);
+	if (lseek(fd, 0, SEEK_SET) != 0)
+		return 0;
+	while (done < sizeof sent && (moved = write(fd, sent + done, sizeof sent - done)) > 0)
+		done += moved;
+	if (done != sizeof sent || lseek(fd, 0, SEEK_SET) != 0)
+		return 0;
+	done = 0;
+	while (done < sizeof received && (moved = read(fd, received + done, sizeof received - done)) > 0)
+		done += moved;
+	return done == sizeof received && !memcmp(sent, received, sizeof sent) &&
+	       read(fd, received, 1) == 0;
+}
+
+static int stale_descriptors(int fd, int dirfd)
+{
+	struct winsize window;
+	struct stat status;
+	char byte;
+
+	if (close(fd) != 0 || close(dirfd) != 0)
+		return 0;
+	errno = 0;
+	return fails(read(fd, &byte, 1), EBADF) && fails(write(fd, &byte, 1), EBADF) &&
+	       fails(lseek(fd, 0, SEEK_SET), EBADF) &&
+	       fails(syscall(SYS_fstat, fd, &status), EBADF) &&
+	       fails(syscall(SYS_getdents64, dirfd, &status, sizeof status), EBADF) &&
+	       fails(dup(fd), EBADF) && fails(fcntl(fd, F_GETFL), EBADF) &&
+	       fails(ioctl(fd, TIOCGWINSZ, &window), EBADF) &&
+	       fails(syscall(SYS_newfstatat, dirfd, "data", &status, 0), EBADF) &&
+	       fails(openat(dirfd, "data", O_RDONLY), EBADF);
+}
+
+/* GoOS only. Anonymous memory is never executable: a mapping cannot ask for
+ * it and an existing mapping cannot gain it. Linux allows both. */
+static int no_executable_memory(void)
+{
+	char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	int ok = page != MAP_FAILED &&
+		 mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED &&
+		 mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED &&
+		 mprotect(page, 4096, PROT_READ | PROT_EXEC) == -1 &&
+		 mprotect(page, 4096, PROT_READ | PROT_WRITE | PROT_EXEC) == -1;
+
+	errno = 0;
+	return ok && munmap(page, 4096) == 0;
+}
+
+static int hostile(void)
+{
+	int goos = on_goos();
+	int failed, fd, dirfd;
+	char byte;
+
+	if (!enter_scratch())
+		return report("scratch directory", 0);
+	fd = open("data", O_RDWR | O_CREAT | O_TRUNC, 0644);
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (fd != 3 || dirfd != 4 || write(fd, "0123456789abcdef", 16) != 16 ||
+	    lseek(fd, 0, SEEK_SET) != 0)
+		return report("scratch file", 0);
+	failed = report("bad pointers", bad_pointers(fd, dirfd, goos));
+	failed += report("mapping edges", mapping_edges(fd, goos));
+	failed += report("long transfers", long_transfers(fd));
+	errno = 0;
+	failed += report("arguments",
+			 read(fd, NULL, 0) == 0 && write(fd, NULL, 0) == 0 &&
+			 fails(lseek(fd, 0, 99), EINVAL) &&
+			 fails(syscall(9999), ENOSYS) &&
+			 fails(syscall(SYS_getdents64, fd, &byte, 256), ENOTDIR) &&
+			 fails(lseek(1, 0, SEEK_SET), ESPIPE) &&
+			 (!goos || fails(open("data", O_RDONLY | O_NONBLOCK), EOPNOTSUPP)) &&
+			 (!goos || no_executable_memory()));
+	failed += report("stale descriptors", stale_descriptors(fd, dirfd));
+	if (unlink("data") != 0 || !leave_scratch())
+		failed += report("scratch cleanup", 0);
+	if (!failed)
+		puts("hostile ok");
+	return failed;
+}
+
+/* GoOS only. The descriptor table holds 64 and the page quota a fixed
+ * number of pages. Both must refuse the call that overruns them, and both
+ * must work again once something is released. */
+static int exhaust(void)
+{
+	enum { chunk = 1 << 20, most = 128 };
+	static char *mapped[most];
+	int count = 0, chunks = 0, fd;
+	char *small;
+
+	errno = 0;
+	while ((fd = open(IMAGE, O_RDONLY)) >= 0)
+		count++;
+	if (errno != EMFILE || count != 61 || !fails(dup(0), EMFILE) ||
+	    !fails(open("/tmp", O_RDONLY | O_DIRECTORY), EMFILE))
+		return report("descriptor table", 0);
+	for (fd = 3; fd < 64; fd++)
+		if (close(fd) != 0)
+			return report("descriptor table", 0);
+	if (open(IMAGE, O_RDONLY) != 3 || close(3) != 0)
+		return report("descriptor table", 0);
+	puts("descriptor table ok");
+
+	/* Every mapped page is touched, so the quota is what runs out. */
+	while (chunks < most) {
+		char *memory = mmap(NULL, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+		if (memory == MAP_FAILED)
+			break;
+		memset(memory, 0x77, chunk);
+		mapped[chunks++] = memory;
+	}
+	if (chunks == most || chunks < 8 || errno != ENOMEM || malloc(chunk) != NULL)
+		return report("page quota", 0);
+	for (int index = 0; index < chunks; index++)
+		if (munmap(mapped[index], chunk) != 0)
+			return report("page quota", 0);
+	small = malloc(chunk);
+	if (!small)
+		return report("page quota", 0);
+	memset(small, 1, chunk);
+	free(small);
+	printf("page quota ok: %d MiB mapped before ENOMEM\n", chunks);
+	puts("exhaust ok");
+	return 0;
+}
+
+/* GoOS only. A native GoOS program enters the kernel with int $0x80. A
+ * Linux process that tries it must get the same refusal for every call
+ * number and must not have run any of them: several of those numbers would
+ * end the process or write to the console if the gate were open. */
+static int isolation(void)
+{
+	long refusal = 0;
+	char byte;
+
+	for (long number = 0; number < 128; number++) {
+		long result;
+
+		__asm__ volatile("int $0x80"
+				 : "=a"(result)
+				 : "a"(number), "D"(1L), "S"(0L), "d"(0L)
+				 : "rcx", "r11", "memory");
+		if (number == 0)
+			refusal = result;
+		if (result != refusal || result == 0)
+			return report("native gate", 0);
+	}
+	puts("native gate ok");
+	/* A native handle is a generation and an index. No such number is a
+	 * Linux descriptor. */
+	errno = 0;
+	if (!fails(syscall(SYS_read, 0x100000001UL, &byte, 1), EBADF) ||
+	    !fails(syscall(SYS_write, 0x100000002UL, &byte, 1), EBADF) ||
+	    !fails(syscall(SYS_close, 0x100000003UL), EBADF))
+		return report("handle guesses", 0);
+	puts("handle guesses ok");
+	puts("isolation ok");
+	return 0;
+}
+
+/* GoOS only. A Linux process holds no port authority, so the instruction
+ * faults and the kernel ends the process before the line below. */
+static int port_io(void)
+{
+	puts("port-io: writing to an I/O port");
+	fflush(stdout);
+	__asm__ volatile("outb %%al, $0x80" : : "a"(0));
+	puts("port-io survived");
+	return 1;
+}
+
+/* Two instances run at once in one pipeline. Each keeps a working
+ * directory, an open file, a TLS value, and heap data of its own, sleeps so
+ * that the other runs in between, and checks that nothing changed. */
+static int pair(const char *name, int drain)
+{
+	char cwd[64], back[16], line[128];
+	size_t length = strlen(name);
+	char *heap = malloc(4096);
+	int fd, ok;
+
+	if (!heap || length == 0 || length >= sizeof back || !enter_scratch())
+		return report("pair setup", 0);
+	fd = open("mine", O_RDWR | O_CREAT | O_TRUNC, 0644);
+	tls_data = (int)getpid();
+	memset(heap, name[0], 4096);
+	ok = fd == 3 && write(fd, name, length) == (ssize_t)length;
+	for (int round = 0; round < 5 && ok; round++) {
+		struct timespec nap = {0, 30000000};
+
+		nanosleep(&nap, NULL);
+		ok = getcwd(cwd, sizeof cwd) && !strcmp(cwd, scratch) &&
+		     lseek(fd, 0, SEEK_SET) == 0 &&
+		     read(fd, back, sizeof back) == (ssize_t)length &&
+		     !memcmp(back, name, length) &&
+		     tls_data == (int)getpid() && heap[4095] == name[0];
+	}
+	ok = ok && close(fd) == 0 && unlink("mine") == 0 && leave_scratch();
+	printf("pair %s %s pid %d\n", name, ok ? "ok" : "failed", (int)getpid());
+	fflush(stdout);
+	/* The last stage passes on what the stage before it printed. */
+	while (drain && fgets(line, sizeof line, stdin))
+		fputs(line, stdout);
+	return !ok;
+}
+
+static long long monotonic(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return now.tv_sec * 1000000000LL + now.tv_nsec;
+}
+
+/* Times four calls and prints nanoseconds per call on standard error, so
+ * standard output is free to be the stream under test. */
+static int bench(void)
+{
+	enum { calls = 20000, writes = 2000, reads = 2000 };
+	static char block[4096];
+	struct timespec sample;
+	long long began;
+	int fd;
+
+	began = monotonic();
+	for (int index = 0; index < calls; index++)
+		syscall(SYS_getpid);
+	fprintf(stderr, "linux-bench getpid %lld ns/call\n", (monotonic() - began) / calls);
+
+	began = monotonic();
+	for (int index = 0; index < calls; index++)
+		syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &sample);
+	fprintf(stderr, "linux-bench clock_gettime %lld ns/call\n", (monotonic() - began) / calls);
+
+	memset(block, '.', 63);
+	block[63] = '\n';
+	began = monotonic();
+	for (int index = 0; index < writes; index++)
+		if (write(1, block, 64) != 64)
+			return 1;
+	fprintf(stderr, "linux-bench stdout-write-64 %lld ns/call\n", (monotonic() - began) / writes);
+
+	fd = open(IMAGE, O_RDONLY);
+	if (fd < 0)
+		return 1;
+	began = monotonic();
+	for (int index = 0; index < reads; index++)
+		if (read(fd, block, sizeof block) <= 0 && lseek(fd, 0, SEEK_SET) != 0)
+			return 1;
+	fprintf(stderr, "linux-bench vfs-read-4k %lld ns/call\n", (monotonic() - began) / reads);
+	return close(fd) != 0;
+}
+
+static int session_loss(void)
+{
+	char byte;
+	int fd;
+
+	while (read(0, &byte, 1) > 0)
+		;
+	errno = 0;
+	fd = open(IMAGE, O_RDONLY);
+	if (fd == -1 && errno == EIO)
+		puts("session lost: EIO");
+	else
+		printf("session kept: fd=%d errno=%d\n", fd, errno);
+	return 0;
+}
+
+static int session_timeout(void)
+{
+	int fd;
+
+	errno = 0;
+	fd = open("/tmp/.validation-vfs-stall", O_RDONLY);
+	if (fd != -1 || errno != ETIMEDOUT) {
+		printf("stalled open: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	/* The late reply arrives with this request and must be discarded. */
+	fd = open(IMAGE, O_RDONLY);
+	if (fd != 3 || close(fd) != 0) {
+		printf("open after timeout: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	puts("session timeout: ETIMEDOUT, then ok");
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	const char *mode = getenv("GOOS_LINUX_PROBE");
+	int failed = 0;
+
+	if (argc >= 2) {
+		struct timespec minute = {60, 0};
+		char byte;
+
+		if (!strcmp(argv[1], "hostile"))
+			return hostile();
+		if (!strcmp(argv[1], "exhaust"))
+			return exhaust();
+		if (!strcmp(argv[1], "isolation"))
+			return isolation();
+		if (!strcmp(argv[1], "port-io"))
+			return port_io();
+		if (!strcmp(argv[1], "pair") && argc >= 3)
+			return pair(argv[2], argc > 3);
+		if (!strcmp(argv[1], "bench"))
+			return bench();
+		if (!strcmp(argv[1], "session-loss"))
+			return session_loss();
+		if (!strcmp(argv[1], "session-timeout"))
+			return session_timeout();
+		if (!strcmp(argv[1], "block")) {
+			puts("blocking on standard input");
+			fflush(stdout);
+			while (read(0, &byte, 1) > 0)
+				;
+			puts("standard input ended");
+			return 0;
+		}
+		if (!strcmp(argv[1], "sleep")) {
+			puts("sleeping");
+			fflush(stdout);
+			nanosleep(&minute, NULL);
+			puts("sleep ended");
+			return 0;
+		}
+	}
+	printf("argc=%d\n", argc);
+	for (int index = 1; index < argc; index++)
+		printf("argv[%d]=%s\n", index, argv[index]);
+	if (argv[argc] != NULL || !mode || strcmp(mode, "musl")) {
+		puts("env failed");
+		failed = 1;
+	}
+
+	tls_data += 2;
+	tls_zero += 7;
+	errno = ENOENT;
+	if (tls_data != 42 || tls_zero != 7 || errno != ENOENT) {
+		puts("tls failed");
+		failed = 1;
+	}
+	if (!heap_ok()) {
+		puts("heap failed");
+		failed = 1;
+	}
+	if (session_ok(argv[0])) {
+		puts("vfs session ok");
+	} else {
+		puts("vfs session failed");
+		failed = 1;
+	}
+	if (paths_ok()) {
+		puts("paths ok");
+	} else {
+		puts("paths failed");
+		failed = 1;
+	}
+	failed += scratch_checks(argv[0]);
+	failed += report("system", system_ok());
+	if (!failed)
+		puts("abi-probe ok");
+	return failed;
+}

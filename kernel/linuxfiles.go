@@ -196,25 +196,15 @@ func (handler *linuxCallHandler) Close(request linuxcompat.Request) linuxcompat.
 		if errno != 0 || !last {
 			return linuxErrno(errno)
 		}
-		switch released.Kind {
-		case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter:
-			// The native handle goes with the last descriptor, so the peer
-			// sees end of input or a closed reader.
-			nativeCallHandler{root: handler.root}.HandleClose(released.Object)
-			return linuxcompat.Result{}
-		case linuxcompat.FDVFSDirectory:
-			linuxcompat.ReleaseDirectory(handler.root, released.Object)
-			return linuxcompat.Result{}
-		case linuxcompat.FDVFSFile:
-			// The description is gone; the note carries its VFS handle to
-			// the retry.
-			if errno := handler.vfsBegin(request, nil, nil, released.Object); errno != 0 {
-				return linuxErrno(errno)
-			}
-			pending.Note = released.Object
-		default:
+		if !handler.releaseDescription(released) {
 			return linuxcompat.Result{}
 		}
+		// The description is gone; the note carries its VFS handle to the
+		// retry.
+		if errno := handler.vfsBegin(request, nil, nil, released.Object); errno != 0 {
+			return linuxErrno(errno)
+		}
+		pending.Note = released.Object
 	}
 	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationClose, Handle: vfs.Handle(pending.Note)}, attachPaths)
 	if blocked {
@@ -397,7 +387,7 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 		if !ready {
 			return 0, linuxabi.ENOMEM
 		}
-		if !vm.ValidateUserRange(address, length) || !handler.ioTransfer(object, 0, address, length, false) {
+		if length = handler.accessible(address, length, false); length == 0 || !handler.ioTransfer(object, 0, address, length, false) {
 			return 0, linuxabi.EFAULT
 		}
 		return length, 0
@@ -419,13 +409,17 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 		if length == 0 {
 			continue
 		}
-		if !handler.ioTransfer(object, total, base, length, false) {
+		readable := handler.accessible(base, length, false)
+		if readable == 0 || !handler.ioTransfer(object, total, base, readable, false) {
 			if total == 0 {
 				return 0, linuxabi.EFAULT
 			}
 			break
 		}
-		total += length
+		total += readable
+		if readable < length {
+			break
+		}
 	}
 	return total, 0
 }
@@ -435,6 +429,10 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxcompat.Result {
 	arguments := &request.Arguments
 	switch request.Number {
+	case linuxabi.SysAccess:
+		return handler.access(request, linuxabi.AtFDCWD, arguments[0], arguments[1])
+	case linuxabi.SysFaccessat:
+		return handler.access(request, int32(arguments[0]), arguments[1], arguments[2])
 	case linuxabi.SysStat, linuxabi.SysLstat:
 		return handler.status(request, linuxabi.AtFDCWD, arguments[0], arguments[1], 0, false)
 	case linuxabi.SysFstat:
@@ -552,6 +550,56 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 		return linuxErrno(errno)
 	}
 	return handler.deliverStatus(buffer, described)
+}
+
+// access answers from the mode a stat of the path would report, so the two
+// calls cannot disagree.
+func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32, pathAddress uint64, requested uint64) linuxcompat.Result {
+	_, active, errno := handler.vfsStage(request)
+	state, found := linuxcompat.FindProcess(handler.root)
+	if errno == 0 && !found {
+		errno = linuxabi.EIO
+	}
+	if errno == 0 {
+		errno = linuxcompat.AccessErrno(requested, 0o777)
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if !active {
+		path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &linuxResolved)
+		note := uint64(0)
+		if trailing {
+			note = noteTrailing
+		}
+		if errno == 0 {
+			errno = handler.vfsBegin(request, path, nil, note)
+		}
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+	}
+	pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationStat, Path: path}, attachPaths)
+	if blocked {
+		return linuxBlocked
+	}
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	handler.vfsFinish()
+	if reply.Status != vfs.StatusOK {
+		return linuxErrno(linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
+	}
+	if pending.Note&noteTrailing != 0 && reply.Kind != ramfs.KindDirectory {
+		return linuxErrno(linuxabi.ENOTDIR)
+	}
+	described, errno := linuxcompat.StatusOfReply(&reply)
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	return linuxErrno(linuxcompat.AccessErrno(requested, described.Mode))
 }
 
 // beginDescriptorStatus starts the stat of what a descriptor holds. done

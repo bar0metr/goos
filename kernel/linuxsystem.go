@@ -46,6 +46,25 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return linuxcompat.Result{Value: uint64(linuxcompat.StatUID)}
 	case linuxabi.SysGetgid, linuxabi.SysGetegid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.StatGID)}
+	case linuxabi.SysSetuid:
+		// A process may set the identity it already has. It has no other to
+		// switch to and no privilege that would let it.
+		if arguments[0] != uint64(linuxcompat.StatUID) {
+			return linuxErrno(linuxabi.EPERM)
+		}
+		return linuxcompat.Result{}
+	case linuxabi.SysSetgid:
+		if arguments[0] != uint64(linuxcompat.StatGID) {
+			return linuxErrno(linuxabi.EPERM)
+		}
+		return linuxcompat.Result{}
+	case linuxabi.SysGetgroups:
+		// No supplementary groups exist. A negative size is the one bad
+		// argument left.
+		if int32(arguments[0]) < 0 {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		return linuxcompat.Result{}
 	case linuxabi.SysUname:
 		linuxcompat.EncodeUname(&linuxUname, version.Release)
 		if !vm.CopyOut(handler.root, arguments[0], linuxUname[:]) {

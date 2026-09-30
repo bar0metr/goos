@@ -1,7 +1,9 @@
 # Linux x86_64 ABI matrix
 
-This document records the implemented GoOS 0.2.0 Linux compatibility contract.
-It describes current code, not the final release target.
+This document is the GoOS 0.2.0 Linux compatibility contract: what a static
+Linux x86_64 program can call, what each call does, and where the answer
+differs from Linux. [linux-compat.md](linux-compat.md) describes how the
+layer is built.
 
 ## Entry contract
 
@@ -16,6 +18,9 @@ It describes current code, not the final release target.
 
 ## Syscall status
 
+"Partial" means the call works for the uses listed and refuses the rest with
+an errno; nothing is accepted and ignored.
+
 | Syscall | Status | Notes |
 | --- | --- | --- |
 | `read(0)` | implemented | streams block without polling; files read at their position, at most 64 KiB per call; a directory is `EISDIR` |
@@ -24,32 +29,47 @@ It describes current code, not the final release target.
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; no `SEEK_DATA` or `SEEK_HOLE` |
-| `mmap(9)` | partial | kernel-chosen anonymous private mappings; no executable or file-backed mappings |
-| `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
+| `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address; no fixed, file-backed, or executable mappings |
+| `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `readv(19)` | implemented | streams and files; at most 16 elements and 64 KiB per call, filled in order |
-| `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call, short count when the stream fills |
+| `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
+| `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call |
+| `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
-| `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations rejected |
-| `exit(60)` | implemented | exits the calling task |
-| `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
-| `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
-| `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
-| `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
-| `exit_group(231)` | implemented | retires every task in the process |
+| `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `nanosleep(35)` | implemented | a timer deadline, never early; no signal interrupts it |
-| `getpid(39)`, `gettid(186)`, `getppid(110)` | implemented | the compatibility PID; the parent is 1 |
+| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is 1 |
+| `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
+| `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND`; others `EINVAL` |
 | `getcwd(79)`, `chdir(80)` | implemented | the working directory; `chdir` requires an existing directory |
-| `getuid(102)`, `getgid(104)`, `geteuid(107)`, `getegid(108)` | implemented | 1000 |
 | `rename(82)`, `renameat(264)`, `renameat2(316)` | partial | files replace an existing target, directories need a free name; `renameat2` takes no flags |
 | `mkdir(83)`, `mkdirat(258)` | implemented | the mode is ignored |
 | `rmdir(84)`, `unlink(87)`, `unlinkat(263)` | implemented | a name some session holds open is `EBUSY` |
+| `getuid(102)`, `getgid(104)`, `geteuid(107)`, `getegid(108)` | implemented | 1000 |
+| `setuid(105)`, `setgid(106)` | partial | succeed for 1000, `EPERM` otherwise |
+| `getgroups(115)` | implemented | no supplementary groups |
+| `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
+| `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
+| `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
+| `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
 | `openat(257)` | implemented | files and directories; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
-| `ioctl(16)` | `ENOSYS` | musl reads the failure as "no terminal" |
-| other declared numbers | `ENOSYS` | decoded and typed; no fake success |
-| every other number | `ENOSYS` | bounded diagnostics; no fake success |
+| `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
+| every other number | `ENOSYS` | counted and recorded; nothing is faked |
+
+Calls programs commonly make that stay `ENOSYS` in 0.2.0, with what musl or
+BusyBox does about it:
+
+| Syscall | Effect of `ENOSYS` |
+| --- | --- |
+| `rt_sigaction(13)`, `rt_sigprocmask(14)` | no signal exists to handle or block; BusyBox applets carry on |
+| `sendfile(40)` | BusyBox `cat` falls back to `read` and `write` |
+| `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
+| `fork(57)`, `vfork(58)`, `clone(56)`, `execve(59)`, `wait4(61)` | no Linux process starts another |
+| `pipe(22)`, `pipe2(293)`, `poll(7)`, `ppoll(271)`, `futex(202)` | no pipes, polling, or threads inside a process |
+| `ftruncate(77)`, `fsync(74)`, `statx(332)`, `statfs(137)`, `getrandom(318)` | not implemented |
+| `socket(41)` and the network calls | no networking |
 
 Wrong-ABI Linux entry returns `-EPERM`. A noncanonical or non-user return RIP
 or RSP retires the task rather than attempting an unsafe IRETQ.
@@ -214,6 +234,8 @@ These calls answer from kernel state and ask no service (ADR 0145).
 | `getpid`, `gettid` | the compatibility PID, 2 to 32767 |
 | `getppid` | 1 |
 | `getuid`, `geteuid`, `getgid`, `getegid` | 1000 |
+| `setuid`, `setgid` | succeed for 1000, `EPERM` for any other value |
+| `getgroups` | no supplementary groups |
 | `uname` | `Linux`, `goos`, `6.0.0-goos`, `GoOS <release> Linux ABI`, `x86_64`, `(none)` |
 | `clock_gettime` | clocks 0 and 5 read realtime; 1, 4, 6, and 7 read monotonic; others `EINVAL` |
 | `nanosleep` | sleeps whole ticks, rounded up plus one; returns 0; bad fields `EINVAL` |
@@ -232,7 +254,7 @@ alignment/congruence, overlap, protections, and the executable entry.
 `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO` are recorded and checked
 against their containing loads. `PT_INTERP`, `PT_DYNAMIC`, executable stack,
 W+X, unknown program-header kinds, and malformed arithmetic are rejected.
-Static PIE (`ET_DYN`) remains P2. Parsing itself does not map or execute images.
+`ET_DYN`, static PIE included, is refused. Parsing itself does not map or execute images.
 
 ## Mapping status
 
@@ -300,84 +322,182 @@ be `large`; extra grants, device authority, launch authority, and weaker
 profiles are refused. Handle IDs and cwd stay in a bounded kernel-side
 compatibility record. Linux user memory receives only the System V stack.
 
+## Descriptors
+
+`dup`, `dup2`, `dup3`, and the two `fcntl` duplication commands add a
+descriptor for an existing description (ADR 0146). Duplicates share the file
+position and status flags and keep separate close-on-exec flags. `dup2` onto
+an open descriptor closes it first. The table holds 64 descriptors; the next
+is `EMFILE`.
+
+`fcntl(F_GETFL)` reports the access mode, `O_APPEND`, and `O_LARGEFILE` for a
+file, adds `O_DIRECTORY` for a directory, and reports the direction alone for
+a stream. `F_SETFL` changes `O_APPEND` on a file and refuses `O_NONBLOCK`,
+`O_ASYNC`, `O_DIRECT`, and `O_NOATIME` with `EINVAL`.
+
+`ioctl` returns `ENOTTY` on an open descriptor and `EBADF` on a closed one.
+The standard streams are FIFOs to `fstat` and no terminal to `ioctl`, whatever
+is at their other end. musl's `isatty` is false and its stdio buffers output
+until the buffer fills or the program exits.
+
+## Memory and pointers
+
+`mmap` and `brk` refuse, with `ENOMEM` and an unchanged break, a request
+larger than the page quota has left (ADR 0147). The quota of a Linux process
+is 16384 pages, 64 MiB. Anonymous memory is never executable: `PROT_EXEC` is
+`EINVAL` at `mmap` and at `mprotect`.
+
+Every pointer argument is copied through the checked user-memory helpers. A
+null, noncanonical, kernel-half, or unmapped pointer is `EFAULT`. A read or
+write whose buffer runs off the end of a mapping moves the bytes before the
+end and reports them; one whose buffer starts outside any mapping is
+`EFAULT`. A zero length succeeds without touching the pointer. A call whose
+argument lies in a page of the program's own image that is still loading from
+its file waits for the page and runs again.
+
+## Differences from Linux
+
+Results a correct Linux program can observe to differ:
+
+| Area | GoOS 0.2.0 | Linux |
+| --- | --- | --- |
+| terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
+| signals | none; Ctrl-C ends the process; `nanosleep` never returns `EINTR` | delivered, handled, masked |
+| users | every file and process is 1000:1000; mode bits are presentation | enforced ownership and permissions |
+| directory listing | no `.` and `..`; a directory removed while open lists as empty | both entries; `ENOENT` |
+| link count | 1 for files and directories | directories count their subdirectories |
+| times | one time per file for all three fields | three times |
+| open files | removing or replacing a file some session holds open is `EBUSY` | allowed; the file lives until closed |
+| rename | a directory moves only onto a free name | an empty directory may be replaced |
+| append | three exchanges; two writers can interleave | atomic |
+| path text | `missing/../file` opens `file` | `ENOENT` |
+| vectors | at most 16 elements | 1024 |
+| transfers | at most 64 KiB per call, then a short count | 2 GiB |
+| memory | no executable anonymous memory, no fixed or file-backed mappings | all three |
+| limits | 64 descriptors, 64 MiB of pages, fixed | adjustable |
+| open flags | `O_NONBLOCK` and the others outside the accepted set are `EOPNOTSUPP` | accepted |
+| name length | 1024 bytes per component | 255 |
+
+## Release limits
+
+GoOS 0.2.0 runs x86_64, statically linked, non-PIE ELF programs. It has no
+`PT_INTERP`, dynamic linker, or glibc; no `fork`, `vfork`, `clone`, or
+`execve`; no threads or `futex`; no signals; no pipes created by a Linux
+process; no networking; no `/proc`, `/sys`, or `/dev`; no file-backed `mmap`;
+no ownership or permission enforcement; no root; no termios. BusyBox `sh`
+starts but cannot run a program. `nano` does not run.
+
+## Bounds
+
+| Resource | Bound |
+| --- | ---: |
+| ELF program headers | 64 |
+| `PT_LOAD` segments | 16 |
+| descriptors per process | 64 |
+| directory descriptions, all processes | 32 |
+| path | 4096 bytes |
+| path component | 1024 bytes |
+| initial stack image | 64 KiB, 256 arguments, 256 environment entries |
+| stack reservation | 8 MiB, 64 KiB guard |
+| `brk` heap | 64 MiB |
+| page quota | 16384 pages |
+| continuations | 1 per task |
+| VFS exchanges per `getdents64` | 128 |
+| vector elements | 16 |
+| bytes per read or write | 64 KiB |
+| wait for a VFS reply | 8 seconds |
+| compatibility PIDs | 2 to 32767 |
+| refused-call record | 8 recent numbers and a 512-bit set |
+
+## Diagnostics
+
+The kernel counts Linux call entries, refused calls, calls that ended in
+`EFAULT` with the number of the latest, and VFS bridge requests, failures,
+and dropped late replies. It keeps the eight most recently refused call
+numbers and the set of every number ever refused. A diagnostic build prints them as the `DIAG linux` line
+of the `diag` dump. A normal build logs no Linux call.
+
 ## Validation
 
-The validation kernel runs a synthetic `LinuxX8664` ring-3 task through two
-entry/return cycles and checks `-ENOSYS`, IF restoration, DF clearing, and
-native-gate rejection. It then supplies an invalid return RSP and must be
-retired rather than returned to. A native task checks Linux-gate rejection. The
-live gate emits `LINUX_SYSCALL_OK`, `LINUX_ABI_ISOLATION_OK`, and
-`LINUX_RETURN_FRAME_GUARD_OK`.
+**Kernel self-test.** A synthetic `LinuxX8664` task runs two entry and return
+cycles and checks `-ENOSYS`, IF restoration, DF clearing, and native-gate
+refusal; an invalid return RSP must retire the task; a native task must be
+refused at the Linux gate. Markers: `LINUX_SYSCALL_OK`,
+`LINUX_ABI_ISOLATION_OK`, `LINUX_RETURN_FRAME_GUARD_OK`.
 
-The validation initramfs also contains `/system/linux/raw-probe`, a static ELF.
-PID 1 proves that a false format hint, a non-large profile, and an extra grant
-are refused. It then launches two instances concurrently. Each instance grows
-and shrinks `brk`, creates, reprotects, discards, and removes anonymous memory,
-then selects a distinct FS base from its input. Both block with TLS installed,
-resume, verify `ARCH_GET_FS` and an actual FS-relative load, exercise stdio,
-and terminate through `exit_group`. PID 1 observes both outputs and teardown
-before publishing `LINUX_MEMORY_TLS_OK`, `LINUX_PID1_LAUNCH_OK`, and
-`LINUX_RAW_SYSCALL_OK`.
+**PID 1 probes.** `/system/linux/raw-probe` is an ELF assembled byte by byte.
+PID 1 proves that a false format hint, a smaller profile, and an extra grant
+are refused, then runs two instances at once. Each moves `brk`, maps,
+reprotects, discards, and unmaps memory, and installs its own FS base; both
+block, resume, and check FS-relative memory. Markers: `LINUX_PID1_LAUNCH_OK`,
+`LINUX_RAW_SYSCALL_OK`, `LINUX_MEMORY_TLS_OK`.
 
-PID 1 then runs `/system/linux/musl-hello one two` in `/system/linux` with
-`GOOS_LINUX_PROBE=musl`. The static musl program prints its argument count and
-arguments, checks the environment, TLS, and both heaps, opens and closes its
-own image twice through the VFS session, and confirms `EBADF` for a closed
-descriptor and `ENOENT` for a missing path.
+PID 1 then runs `/system/linux/abi-probe one two` in `/system/linux`. The
+probe checks every result itself and prints one line per group: arguments
+and environment, TLS and heaps, the VFS session, path resolution, file I/O,
+file status, stdio, directory listing, vectors, descriptors, naming, and
+identity, clocks, limits, and sleep. PID 1 requires the whole output and exit
+status zero. Markers: `LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`,
+`LINUX_PATH_OK`, `LINUX_FILE_IO_OK`, `LINUX_STAT_OK`, `LINUX_DIRENT_OK`,
+`LINUX_SYSTEM_OK`.
 
-It then names the same image as `musl-hello` through `open`, and as
-`./musl-hello`, `..//linux/./musl-hello`, and
-`../../../system/linux/musl-hello` through `openat`. It expects `ENOENT` for an
-empty path, `ENOTDIR` and `EBADF` for a relative path under a stream and a
-closed `dirfd`, `ENOENT` for a missing 300-byte name, and `ENAMETOOLONG` for a
-1100-byte one. PID 1 also creates a file with a 235-byte path under `/tmp` and passes it
-in `GOOS_LINUX_LONG`; the program must open it, which needs the attached path
-object.
+**Reference.** The same `abi-probe` binary prints the same lines on a Linux
+kernel (`make test-linux-reference`). `userspace/linux/README.md` holds the
+recorded call trace and the results that differ.
 
-Last it works in `/tmp/linux-files`. It creates a file with
-`O_CREAT|O_EXCL`, writes 8192 bytes, seeks by all three origins, reads back a
-range and the short tail, appends through `O_APPEND`, truncates with
-`O_TRUNC`, writes with `writev`, opens the directory and a file under it by
-`dirfd`, renames a file and a directory, and removes everything. It checks the
-errno of each refusal on the way: `EEXIST`, `EINVAL`, `EBADF`, `ESPIPE`,
-`EISDIR`, `ENOTDIR`, `ENOENT`, `ENOTEMPTY`, `ERANGE`, and `EROFS` for the
-system image.
+**Linux boot.** `make test-linux-boot` runs from the shell of one validation
+boot:
 
-It stats the file by name, by descriptor, through `lstat`, and through
-`newfstatat` with and without `AT_EMPTY_PATH`, and requires one identity for
-all of them, a different one for the directory and for the program image, the
-expected type, size, link count, and mode, and `ENOENT`, `ENOTDIR`, `EBADF`,
-`EINVAL`, and `EFAULT` for the bad calls. It writes a file through `fprintf`
-and reads it back through `fgets` and `fread`, which is `readv`, and reads end
-of input from standard input the same way.
+| Step | Requires |
+| --- | --- |
+| `hello` | `hello from Linux ABI`, status 0 |
+| `musl-hello alpha beta` | `argc=3`, `hello from musl` |
+| `fsprobe` on `/tmp` and on `/persist` | `write ok`, `read ok`, `stat ok`; native `cat` reads the file |
+| `dirprobe` on `/tmp` and on `/persist` | every name, directories marked, the count |
+| `musl-hello` and `abi-probe hostile` copied to `/persist` and run from there | the same results from an image paged in from FAT32 |
+| Linux program on each side of a native pipeline | the bytes arrive |
+| two `abi-probe pair` instances in one pipeline | both keep their own descriptors, working directory, TLS, heap, and files; different PIDs |
+| `abi-probe hostile` | `EFAULT` for bad pointers in every call, short transfers at a mapping's end, 100000-byte transfers, stale descriptors |
+| `abi-probe exhaust` | `EMFILE` at 64 descriptors, `ENOMEM` at the page quota, and recovery from both |
+| `abi-probe isolation` | the native call gate refuses all 128 call numbers; native handle values are `EBADF` |
+| `abi-probe port-io` | the process ends with a fault status and the shell continues |
+| Ctrl-C on a blocked read, a sleep, and a VFS wait | the process ends, the shell reads the next line, later runs pass |
 
-It lists a directory of three files and a subdirectory through `getdents64`
-with a 256-byte buffer, twice with a rewind between, and requires every name,
-each type, a 200-byte name, and `d_ino` equal to `st_ino`. It writes a file
-with a three-element `writev` and reads it back with a two-element `readv`.
-It reads its PID, thread, parent, and user identity, the system name, both
-clocks, and a limit, and sleeps 20 ms, which the monotonic clock must show.
+**General boot test.** `make test-boot` also restarts the VFS under a Linux
+process, which must then get `EIO` and no new session, and makes the VFS
+answer one request late, which must end in `ETIMEDOUT` with the session still
+usable.
 
-PID 1 compares the whole output, requires exit status zero, and publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
-`LINUX_STAT_OK`, `LINUX_DIRENT_OK`, and `LINUX_SYSTEM_OK`. The same binary prints the same lines on Linux;
-`userspace/linux/README.md` holds that trace and the three calls whose results
-differ.
+**BusyBox.** `make test-linux-busybox BUSYBOX=path` requires `echo`, `pwd`,
+`cat`, `ls`, `mkdir`, and `rm` of a static BusyBox the caller supplies
+(ADR 0148). With BusyBox 1.35.0 built against musl these also run: `uname`,
+`date`, `sleep`, `cp`, `mv`, `head`, `wc`, `stat`, `ls -l`, `rmdir`, `true`,
+`basename`, `env`, `id`, and `sh -c true`. `touch` fails on the missing
+`utimensat` and `df` on the missing `/proc/mounts`.
 
-The boot test also runs two session checks from the shell. `musl-hello
-session-timeout` opens the name the validation VFS answers late: the open must
-end with `ETIMEDOUT` after the eight-second deadline, and the next open must
-succeed, which requires the bridge to discard the late reply that arrives
-with it. `musl-hello session-loss` starts behind a pipeline, the VFS restarts,
-and the program must report `EIO` from its next open: a Linux process keeps
-the session it was launched with and gets no new one.
+**Host tests.** `make test-linux-elf` parses hostile and real images and
+checks every fixture against its checksum and the kernel ELF parser.
+`make test-linux-abi` covers the pure translation code: reply
+classification, session state, open planning, seek arithmetic, path
+resolution, the `struct stat` and `linux_dirent64` layouts, vectors, status
+flags, clocks, sleep rounding, limits, PIDs, and the descriptor table. Fuzz
+targets cover the ELF parser, the initial stack, path resolution, and both
+record encoders.
 
-Host tests cover the pieces that need no CPU: reply classification, session
-correlation and failure, open flags and the open plan, seek arithmetic,
-removal checks, directory records, two-path continuations, the `struct stat`
-layout with a fuzz target, the VFS-to-status translation, directory records
-with a fuzz target, vector positions, clock mapping, sleep rounding, the
-system name, resource limits, path resolution
-with its bounds and a fuzz target, vector validation,
-compatibility PID allocation, descriptor close, and the fixture's checksum and
-ELF acceptance.
+## Timing baseline
+
+`make test-linux-bench` writes `build/reports/linux-abi-<variant>.md`. On the
+development host, an arm64 machine running the guest under QEMU TCG at
+100 Hz and `-opt=2`, the lowest averages of three runs were:
+
+| Linux call | ns per call |
+| --- | ---: |
+| `getpid` | 25661 |
+| `clock_gettime` | 32715 |
+| `write` of 64 bytes to a pipe | 173662 |
+| `read` of 4 KiB from a file | 749878 |
+
+In the same boot a native VFS round trip took 212903 ns and a native
+64-byte stream call 62757 ns. Under TCG every entry pays two address-space
+switches in translated code, which is most of the `getpid` time. The numbers
+are a baseline for comparing changes on one host.

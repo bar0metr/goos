@@ -20,6 +20,7 @@ const (
 	EINVAL       Errno = 22
 	ENFILE       Errno = 23
 	EMFILE       Errno = 24
+	ENOTTY       Errno = 25
 	ENOSPC       Errno = 28
 	ESPIPE       Errno = 29
 	EROFS        Errno = 30

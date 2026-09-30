@@ -105,10 +105,12 @@ func (table *FDTable) DescriptionIndex(fd int) (int, bool) {
 	return int(table.entries[fd].description), true
 }
 
-// Duplicate adds another integer referring to the same open-file description.
+// Duplicate adds another integer, the lowest free one at or above minimum,
+// for the same open-file description. It returns -2 when fd names nothing
+// and -1 when no integer is free, so a caller can tell EBADF from EMFILE.
 func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, bool) {
 	if table == nil || minimum < 0 || minimum >= LinuxMaxFD || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
-		return -1, false
+		return -2, false
 	}
 	descriptionIndex := table.entries[fd].description
 	description := &table.descriptions[descriptionIndex]
@@ -124,6 +126,41 @@ func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, boo
 		return target, true
 	}
 	return -1, false
+}
+
+// DuplicateAt makes target, which must be free, another integer for the
+// description behind fd.
+func (table *FDTable) DuplicateAt(fd int, target int, closeOnExec bool) bool {
+	if table == nil || target < 0 || target >= LinuxMaxFD || fd < 0 || fd >= LinuxMaxFD ||
+		!table.entries[fd].open || table.entries[target].open {
+		return false
+	}
+	descriptionIndex := table.entries[fd].description
+	description := &table.descriptions[descriptionIndex]
+	if !description.valid() || description.References >= LinuxMaxFD {
+		return false
+	}
+	description.References++
+	table.entries[target] = FDEntry{description: descriptionIndex, CloseOnExec: closeOnExec, open: true}
+	return true
+}
+
+// CloseOnExec reports the close-on-exec flag of one descriptor. The flag
+// belongs to the integer; descriptors that share a description keep their
+// own.
+func (table *FDTable) CloseOnExec(fd int) (bool, bool) {
+	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
+		return false, false
+	}
+	return table.entries[fd].CloseOnExec, true
+}
+
+func (table *FDTable) SetCloseOnExec(fd int, closeOnExec bool) bool {
+	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
+		return false
+	}
+	table.entries[fd].CloseOnExec = closeOnExec
+	return true
 }
 
 // Close invalidates one Linux integer and reports the description only when

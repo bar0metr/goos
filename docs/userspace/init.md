@@ -67,7 +67,14 @@ the immutable `Native` or `LinuxX8664` Process ABI. A Linux launch receives
 exactly its standard streams and one fresh VFS session, uses the `large`
 resource profile, and carries argv/environment on its System V stack. Cwd and
 resolved handles stay in bounded kernel compatibility state. Services remain
-native-only (ADR 0132, ADR 0136).
+native-only (ADR 0132, ADR 0136). A Linux program under `/system/linux` or on
+a writable volume starts from the shell like a native one, alone or as a
+pipeline stage.
+
+In validation builds PID 1 runs the Linux probes before it starts the shell:
+two raw-syscall programs at once, then `/system/linux/abi-probe`, whose whole
+output and exit status it checks. It creates one file with a 235-byte path
+for the probe first and removes it afterwards.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
 assembly entry supplies the native kernel-call ABI; its stack and heap are

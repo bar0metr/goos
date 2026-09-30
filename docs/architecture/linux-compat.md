@@ -1,15 +1,14 @@
 # Linux compatibility
 
-**Status: GoOS 0.2.0 foundations in progress.** The kernel has immutable native
-and Linux process identities, a dedicated x86_64 `SYSCALL`/IRETQ entry, bounded
-static ELF loading, a System V initial stack, and a constrained PID 1 launch
-policy. The syscall layer has a distinct Linux number and errno namespace,
-bounded diagnostics, generation-safe blocking continuations, a 64-entry fd
-table, stream `read`/`write`/`writev`, the memory and TLS calls, and
-`exit`/`exit_group`. A pinned static musl program starts through its normal
-libc entry. Through its VFS session a program opens, creates, reads, writes,
-seeks, renames, and removes files and directories, by absolute path or
-relative to a working directory it can change.
+**Status: implemented in GoOS 0.2.0.** Unmodified, statically linked Linux
+x86_64 programs run as GoOS processes. The kernel has immutable native and
+Linux process identities, a dedicated `SYSCALL`/IRETQ entry, bounded static
+ELF loading, a System V initial stack, and a constrained PID 1 launch policy.
+A translation layer in the kernel turns Linux calls into the primitives a
+native process uses: VM regions, byte streams, the kernel clocks, and one VFS
+session per process. Static musl programs and BusyBox applets run on it.
+[linux-x86_64-abi.md](linux-x86_64-abi.md) is the contract: every call, its
+status, and each difference from Linux.
 
 ## Principles
 
@@ -21,7 +20,8 @@ relative to a working directory it can change.
 - Each translated syscall is bounded like a native call: validated lengths,
   bounded buffers, deadlines on blocking paths.
 - Unsupported syscalls fail with `-ENOSYS` and are counted, rather than being
-  approximated silently.
+  approximated silently. A call is added when a measured program or the
+  release scope needs it, with real semantics.
 
 ## Components
 
@@ -50,7 +50,7 @@ Congruent non-page-aligned loads retain their aligned file window. The mapper
 revalidates the exported plan and current source length, preflights all region
 collisions, and accepts conventional low addresses such as `0x400000` while
 keeping loads below the fixed GoOS user windows. It also reserves an 8 MiB NX
-demand-zero stack with a 64 KiB guard. `ET_DYN` remains P2 scope.
+demand-zero stack with a 64 KiB guard. `ET_DYN`, static PIE included, is refused.
 
 The stack builder converts the kernel's validated startup view into a Linux stack image,
 not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
@@ -76,8 +76,9 @@ stack or entering Go. It then installs the kernel CR3, snapshots the Linux
 register ABI into a fixed frame, and returns through a higher-half IRETQ
 prefix. The dispatcher snapshots all six scalar arguments into a Linux request
 whose number type is distinct from native `kcall.Operation`. Known but not yet
-implemented calls and unknown calls both return `-ENOSYS`; an eight-entry ring
-and saturating counter retain bounded diagnostics without per-call logging.
+implemented calls and unknown calls both return `-ENOSYS`. Saturating
+counters, an eight-entry ring, and a set of every refused number retain
+bounded diagnostics without per-call logging.
 
 Every handler must validate flags and lengths before copying
 through `vm.CopyIn`/`vm.CopyOut`. They may never retain or directly dereference
@@ -98,14 +99,16 @@ Syscalls map onto native primitives:
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
-| `pipe2` | `StreamCreate` |
 | `exit`, `exit_group` | `Exit` |
 | `clock_gettime`, `nanosleep` | the kernel realtime and monotonic clocks; a timer deadline |
 | `getpid`, `getuid`, `uname`, `prlimit64` and their relatives | compatibility state and fixed bounds |
-| `execve`, `wait4` | exec request to PID 1, process handle wait |
-| `ppoll`, `poll` | `WaitAny` |
+| `dup`, `dup2`, `dup3`, `fcntl` | the descriptor table; no native call |
+| `access`, `faccessat` | a VFS stat, answered from the mode `stat` reports |
 | `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
 | `arch_prctl` | task-local FS base; GS remains architecture-owned |
+
+The next milestone plans `pipe2` on `StreamCreate`, `execve` and `wait4` on
+an exec request to PID 1 and a process-handle wait, and `poll` on `WaitAny`.
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -244,11 +247,17 @@ the VFS with the request, as native clients do.
 
 ### Namespace view
 
-The expected layout for early targets:
+A Linux process sees the GoOS VFS namespace: `/system`, `/tmp`, `/persist`,
+`/home`, `/state`, and whatever else is mounted. Nothing is added for it.
+`/dev`, `/proc`, and `/sys` do not exist, and a program that opens
+`/dev/null` or `/proc/mounts` gets `ENOENT`.
 
-- `/persist`, `/tmp`, and `/system` as today;
-- `/dev/null`, `/dev/tty` provided by the compatibility layer or a service;
-- `/proc` and `/sys` absent until a program needs a specific file.
+### Descriptors and the terminal
+
+`dup`, `dup2`, `dup3`, and `fcntl` rearrange descriptors over shared
+descriptions (ADR 0146). `ioctl` answers `ENOTTY`: the standard streams are
+byte streams, and no descriptor is a terminal even when the terminal service
+is at the other end. libc therefore buffers output in blocks.
 
 ## Launch and security boundary
 
@@ -279,36 +288,40 @@ FS base is task context and is saved and restored on every context switch.
 `ARCH_SET_FS` and `ARCH_GET_FS` are implemented. GS operations are rejected and
 kernel GS remains architecture-owned (ADR 0137).
 
-### musl startup
+### Programs in the image
 
-`/system/linux/musl-hello` is a static, non-PIE C program linked against a
-pinned musl (ADR 0139). `userspace/linux/README.md` records the toolchain, the
-build recipe, the checksum, and the syscall trace. PID 1 launches it in
-`/system/linux` with two arguments and two environment variables, reads its
-complete output, and requires exit status zero before it publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
-`LINUX_STAT_OK`, `LINUX_DIRENT_OK`, and `LINUX_SYSTEM_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
-a Linux kernel, where it prints the same lines.
+`/system/linux` holds five prebuilt static programs, pinned by checksum and
+built by one offline recipe (ADR 0139, ADR 0148): `hello` with no libc,
+`musl-hello` for libc startup, `fsprobe` and `dirprobe` for files and
+directories, and `abi-probe`, the conformance suite. `userspace/linux/README.md`
+records the toolchain, the checksums, and the Linux call trace.
 
-The program reaches `main` through `__libc_start_main`. It checks `argv` and
-`envp`, a TLS image with initialized and zero-filled data behind FS, `malloc`
-through both `brk` and `mmap`, buffered stdio flushed at exit, an open/close
-round trip on its VFS session, its own image under several relative
-spellings, and in a scratch directory under `/tmp` file I/O, file status,
-stdio, directory listing, vector I/O, and naming. Last it checks its identity,
-the system name, the clocks, a limit, and a sleep. musl startup needs `arch_prctl`,
-`set_tid_address`, and `writev`. Its terminal probe, `ioctl(TIOCGWINSZ)`, gets
-`ENOSYS`, which musl reads as "no terminal".
+`abi-probe` checks each result it gets and prints one line per group. PID 1
+runs it at every validation boot and requires the whole output. The same
+binary runs on a Linux kernel in a container and must print the same lines,
+so an expectation is wrong on Linux before it can mislead the kernel. Its
+other modes pass bad pointers and lengths to every call, exhaust the
+descriptor table and the page quota, try the native call gate, and touch an
+I/O port.
 
-## Iterative targets
+musl startup needs `arch_prctl`, `set_tid_address`, and `writev`. Its
+terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY`.
 
-| Step | Target | Needs |
-| --- | --- | --- |
-| 1 | static x86_64 "hello world" | ELF loader, `write`, `exit` |
-| 2 | static musl program | `brk`/`mmap`, `arch_prctl`, TLS, auxv |
-| 3 | VFS probes | fd table, file I/O and directories through VFS |
-| 4 | selected BusyBox applets | measured P1 syscalls; no shell |
+### Hardening
 
-Each step is gated on host tests and a QEMU check, like native features.
-Dynamic linking, glibc, `fork`/`clone`, Linux `execve`, threads, full signals,
-networking, BusyBox shell, and `nano` are outside GoOS 0.2.0.
+A pointer from a Linux program reaches kernel code only through the checked
+copy helpers. A read or write across the end of a mapping is short, as on
+Linux, and one that starts outside a mapping is `EFAULT` (ADR 0147). `mmap`
+and `brk` refuse what the page quota cannot back, so exhaustion is `ENOMEM`
+at the call. A full descriptor table is `EMFILE`. Ctrl-C ends a Linux process
+through the native kill path: its continuation, its waits, its descriptors,
+and its VFS session go with it, and no Linux signal is delivered.
+
+## Scope
+
+GoOS 0.2.0 runs static, non-PIE x86_64 programs. Dynamic linking, glibc,
+`fork`, `clone`, `execve`, threads, signals, pipes created by a Linux
+process, networking, `/proc`, termios, and file-backed `mmap` are outside it.
+BusyBox `sh` starts and runs builtins but cannot start a program, and `nano`
+does not run. The next Linux milestone is process composition: `execve`,
+`pipe2`, `wait4`, a chosen `fork` semantics, minimal signals, and `poll`.

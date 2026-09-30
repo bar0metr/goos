@@ -132,3 +132,17 @@ func StatFlags(flags uint64) (emptyPath bool, errno abi.Errno) {
 	}
 	return flags&abi.AtEmptyPath != 0, 0
 }
+
+// AccessErrno answers access and faccessat from the mode stat reports, as
+// the file's owner, which every Linux process here is. The answer therefore
+// always agrees with st_mode. requested is a mask of R_OK (4), W_OK (2), and
+// X_OK (1); zero asks only whether the file exists.
+func AccessErrno(requested uint64, mode uint32) abi.Errno {
+	if requested&^7 != 0 {
+		return abi.EINVAL
+	}
+	if uint32(requested)&^(mode>>6&7) != 0 {
+		return abi.EACCES
+	}
+	return 0
+}

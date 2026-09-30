@@ -13,8 +13,29 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
-  the fast tests, lint, documentation checks, the ISO build, and the real QEMU
-  boot/persistence test in sequence so host builds cannot contend with QEMU.
+  the fast tests, lint, documentation checks, the ISO build, the real QEMU
+  boot/persistence test, and the Linux end-to-end boot in sequence so host
+  builds cannot contend with QEMU.
+- `make test-linux-elf` and `make test-linux-abi` run the Linux host tests:
+  the ELF parser against hostile and real images with every fixture's
+  checksum, and the pure translation code with the VFS protocol it speaks.
+- `make test-linux-boot` builds the validation ISO and runs
+  `tests/boot/linux.sh`: one boot in which PID 1's Linux probes run, then the
+  shell runs the release proofs, the conformance probe's hardening modes, two
+  Linux processes at once, and Ctrl-C on a blocked Linux process.
+  `test-linux-musl`, `test-linux-vfs`, and `test-linux-security` are the same
+  run. `make test-linux-all` adds the two host targets. `make test-all`
+  includes the boot.
+- `make test-linux-reference` runs the conformance probe on a Linux kernel in
+  an amd64 container and requires exit status zero. It needs Docker and is no
+  part of `test-all`.
+- `make test-linux-busybox BUSYBOX=/path/to/busybox` places a static x86_64
+  BusyBox in the validation image and requires `echo`, `pwd`, `cat`, `ls`,
+  `mkdir`, and `rm`; it reports on further applets without requiring them.
+  With `DIAG=1` it also prints the kernel's record of refused calls. The
+  repository carries no BusyBox.
+- `make test-linux-bench` times four Linux calls beside native `bench` cases
+  into `build/reports/linux-abi-<variant>.md`.
 - `make test-stress` boots `STRESS_RUNS` guests (default 4) in parallel
   batches of `STRESS_JOBS` and drives `STRESS_ROUNDS` rounds of commands
   through each; `make test-all` includes two runs.

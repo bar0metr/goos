@@ -179,3 +179,33 @@ func RemovalErrno(removeDirectory bool, trailing bool, kind ramfs.Kind) abi.Errn
 func MutationErrno(status vfs.Status) abi.Errno {
 	return VFSErrno(status, VFSPermissionReadOnly, abi.ENOSPC)
 }
+
+// StatusFlagsOf is what F_GETFL reports for a description. A regular file or
+// a directory shows O_LARGEFILE, which every x86_64 open carries; a directory
+// also shows O_DIRECTORY. A stream shows its direction alone.
+func StatusFlagsOf(description FileDescription) uint32 {
+	switch description.Kind {
+	case FDStreamReader:
+		return abi.OpenReadOnly
+	case FDStreamWriter:
+		return abi.OpenWriteOnly
+	case FDVFSDirectory:
+		return description.Flags | abi.OpenLargeFile | abi.OpenDirectory
+	}
+	return description.Flags | abi.OpenLargeFile
+}
+
+// SetStatusFlags applies F_SETFL. Linux lets it change O_APPEND and four
+// flags GoOS has no behavior for; asking for one of those is refused, and
+// every other bit is ignored as Linux ignores it. O_APPEND takes effect on a
+// regular file, the one kind of description a write consults it for.
+func SetStatusFlags(description *FileDescription, flags uint64) abi.Errno {
+	value := uint32(flags)
+	if value&(abi.OpenNonBlock|abi.OpenAsync|abi.OpenDirect|abi.OpenNoATime) != 0 {
+		return abi.EINVAL
+	}
+	if description.Kind == FDVFSFile {
+		description.Flags = description.Flags&^abi.OpenAppend | value&abi.OpenAppend
+	}
+	return 0
+}

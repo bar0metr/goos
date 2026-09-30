@@ -11,7 +11,7 @@
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-fixture=${1:-musl-hello}
+fixture=${1:-abi-probe}
 [ $# -gt 0 ] && shift
 [ $# -gt 0 ] || set -- one two
 image=${IMAGE:-alpine:3.22}

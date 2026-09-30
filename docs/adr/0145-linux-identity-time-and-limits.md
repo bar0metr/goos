@@ -18,7 +18,10 @@ and must promise nothing GoOS does not provide.
 a process has one task, so they are equal. `getppid` returns 1: PID 1 launches
 every Linux process, and no Linux process tree exists. `getuid`, `geteuid`,
 `getgid`, and `getegid` return 1000, the value in the initial stack and in
-`st_uid`. The number grants nothing and no call changes it.
+`st_uid`. The number grants nothing. `setuid` and `setgid` succeed for the
+identity the process already has and are `EPERM` for any other: there is no
+other identity and no privilege to take one. `getgroups` reports no
+supplementary groups.
 
 **System name.** `uname` reports:
 

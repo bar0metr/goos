@@ -232,6 +232,27 @@ process can hold (ADR 0072). `ProcessInfo` names no kernel object and reveals
 only process names, states, and accounting. The full list is in
 [attack-surface.md](attack-surface.md).
 
+## Linux processes
+
+A Linux process is a GoOS process with a different call ABI and the same
+authority model (ADR 0134, ADR 0136). The kernel accepts a Linux launch only
+with exactly four grants: `in` with Read and Wait, `stdout` and `stderr` with
+Write and Wait, and one `vfs` channel with Read, Write, and Wait. An extra
+grant, a device, or a smaller resource profile refuses the launch.
+
+| Claim | Proof |
+| --- | --- |
+| a Linux process cannot use the native call gate | `abi-probe isolation` executes `int 0x80` with all 128 call numbers and gets one refusal; the kernel self-test does the same from a synthetic task |
+| a Linux descriptor is no native handle | descriptors index a compatibility table; handle-shaped values are `EBADF` |
+| a guessed native handle is useless | with the native gate closed, no call takes one |
+| file access needs the VFS session | a session without its handle or rights issues no request; after the VFS dies every file call is `EIO` |
+| no device authority | the launch takes four stream and channel grants and refuses a fifth; an I/O port instruction faults and ends the process |
+| no framebuffer, DMA, IRQ, or kernel log | each needs a native call or a device handle, and a Linux process has neither |
+| no PID 1 launch authority | no launch channel is among the four grants |
+
+Linux user and group numbers, mode bits, and PIDs are presentation. No GoOS
+check reads them.
+
 ## Tests
 
 `make test-security` runs host tests for wrong types, missing rights, stale
@@ -241,4 +262,5 @@ held open by every holder, moves that keep the count, copies that add to it,
 double closes and forged endpoints refused, the bound), and the shared-memory
 and image mapping checks (`internal/capability`, `kernel/handle`, `kernel/ipc`, `kernel/stream`,
 `kernel/shmem`, `kernel/loader`, `userspace/init`, and others). Quota charging
-and release are tested in `kernel/process`.
+and release are tested in `kernel/process`. `make test-linux-boot` runs the
+Linux proofs in the table above in a booted system.

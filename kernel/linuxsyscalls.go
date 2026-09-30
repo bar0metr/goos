@@ -108,7 +108,10 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 		if limit > bound {
 			limit = bound
 		}
-		if limit != 0 && !vm.CanCopyOut(handler.root, address, limit) {
+		if limit == 0 {
+			return 0, nil, 0
+		}
+		if limit = handler.accessible(address, limit, true); limit == 0 {
 			return 0, nil, linuxabi.EFAULT
 		}
 		return limit, nil, 0
@@ -123,12 +126,47 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 		if length > bound-total {
 			length = bound - total
 		}
-		if length != 0 && !vm.CanCopyOut(handler.root, base, length) {
-			return 0, nil, linuxabi.EFAULT
+		if length == 0 {
+			continue
 		}
-		total += length
+		writable := handler.accessible(base, length, true)
+		total += writable
+		if writable < length {
+			// The read ends where the destination does.
+			if total == 0 {
+				return 0, nil, linuxabi.EFAULT
+			}
+			break
+		}
 	}
 	return total, wire, 0
+}
+
+var linuxProbe [1]byte
+
+// accessible returns how many of length bytes at address the process can
+// read, or write when write is set, counted from the first byte to the first
+// page it cannot use. Linux moves bytes up to a fault and reports what it
+// moved, so a transfer that runs off the end of a mapping is short, and one
+// that starts outside any is EFAULT. Probing a page faults it in through the
+// ordinary demand-paging path.
+func (handler *linuxCallHandler) accessible(address uint64, length uint64, write bool) uint64 {
+	if length == 0 || !vm.ValidateUserRange(address, length) {
+		return 0
+	}
+	reached := uint64(0)
+	for reached < length {
+		chunk := vm.PageSize - (address+reached)%vm.PageSize
+		if chunk > length-reached {
+			chunk = length - reached
+		}
+		if write && !vm.CanCopyOut(handler.root, address+reached, chunk) ||
+			!write && !vm.CopyIn(handler.root, address+reached, linuxProbe[:]) {
+			break
+		}
+		reached += chunk
+	}
+	return reached
 }
 
 // copyIOVec copies and validates the vector of a readv or writev.
@@ -198,7 +236,7 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 	if limit > stream.Capacity {
 		limit = stream.Capacity
 	}
-	if !vm.ValidateUserRange(address, limit) {
+	if limit = handler.accessible(address, limit, false); limit == 0 {
 		return linuxcompat.Result{Errno: linuxabi.EFAULT}
 	}
 	written, result, final := handler.writeRange(request, endpoint, streamID, address, limit, false)
@@ -284,7 +322,14 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 		if length == 0 {
 			continue
 		}
-		written, result, final := handler.writeRange(request, endpoint, streamID, base, length, total != 0)
+		readable := handler.accessible(base, length, false)
+		if readable == 0 {
+			if total == 0 {
+				return linuxcompat.Result{Errno: linuxabi.EFAULT}
+			}
+			break
+		}
+		written, result, final := handler.writeRange(request, endpoint, streamID, base, readable, total != 0)
 		if final {
 			return result
 		}
