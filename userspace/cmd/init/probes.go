@@ -6,6 +6,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -130,22 +131,23 @@ func probeLinuxLaunch() bool {
 	return true
 }
 
-// linuxLongPath names a file PID 1 creates for the musl probe. At 235 bytes
+// linuxLongPath names a file PID 1 creates for the conformance probe. At 235 bytes
 // the path is too long for one VFS request message, so opening it proves the
 // Linux bridge can attach a path the way native clients do.
 var linuxLongPath [235]byte
 
-// probeLinuxMusl runs the static musl fixture through libc startup. The
-// fixture checks its arguments, environment, TLS, heap, VFS session, path
+// probeLinuxMusl runs the conformance probe, a static musl program, through
+// libc startup. It checks its arguments, environment, TLS, heap, VFS session, path
 // resolution from its working directory, and in a scratch directory under
-// /tmp file I/O, file status, stdio, directory listing, vector I/O, and
-// naming, then its identity, the clocks, and a sleep. It prints one line per
-// result. PID 1 accepts only the complete
+// /tmp file I/O, file status in both forms, positioned I/O, stdio, directory
+// listing, vector I/O, and naming, then the devices, its identity, the
+// clocks, a sleep, the signal state, and random bytes. It prints one line
+// per result. PID 1 accepts only the complete
 // expected output and a zero exit status.
 //
 //go:noinline
 func probeLinuxMusl() bool {
-	path := []byte("/system/linux/musl-hello")
+	path := []byte("/system/linux/abi-probe")
 	executable, name, located := locateExecutable(path)
 	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
 		return false
@@ -200,7 +202,7 @@ func runLinuxMusl(executable supervisor.Executable, name string, path []byte) bo
 	}
 	sys.HandleClose(handle.ID(streams[0][1]))
 	sys.HandleClose(handle.ID(streams[2][0]))
-	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nstatus ok\nstdio ok\nlisting ok\nvectors ok\nnames ok\nsystem ok\nhello from musl\n")
+	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nstatus ok\nstatx ok\npositions ok\nstdio ok\nlisting ok\nvectors ok\ndescriptors ok\nnames ok\ndevices ok\nsystem ok\nsignals ok\nrandom ok\nabi-probe ok\n")
 	sys.HandleClose(handle.ID(streams[1][0]))
 	return waitApplicationExit(launched.ProcessHandle) == 0 && printed
 }
@@ -246,20 +248,34 @@ func linuxProbeRead(endpoint uint64, expected string) bool {
 	for received < len(expected) {
 		if sys.StreamWait(handle.ID(endpoint), 200) != kcall.StatusOK {
 			mark("LINUX_RAW_WAIT_FAILED\n")
+			linuxProbeShow(received)
 			return false
 		}
 		read, result := sys.StreamRead(handle.ID(endpoint), streamReadback[received:len(expected)])
 		if result != kcall.StatusOK || read == 0 {
 			mark("LINUX_RAW_OUTPUT_FAILED\n")
+			linuxProbeShow(received)
 			return false
 		}
 		received += read
 	}
 	if !equalBytes(streamReadback[:received], expected) {
 		mark("LINUX_RAW_OUTPUT_FAILED\n")
+		linuxProbeShow(received)
 		return false
 	}
 	return true
+}
+
+// linuxProbeShow prints what a Linux probe wrote before PID 1 gave up on it.
+// The probe names the check that failed, and without this the boot log would
+// say only that some check did.
+func linuxProbeShow(received int) {
+	if validation.Enabled && received != 0 {
+		write("LINUX_PROBE_OUTPUT_BEGIN\n")
+		sys.ConsoleWrite(serviceDeviceHandle, streamReadback[:received])
+		write("LINUX_PROBE_OUTPUT_END\n")
+	}
 }
 
 func linuxProbeStartup(extra bool) (uint8, []byte, bool) {

@@ -208,6 +208,7 @@ func TestRejectsUnsupportedProgramHeaders(t *testing.T) {
 		{"interpreter", programInterp, InterpreterPresent},
 		{"dynamic", programDynamic, DynamicLinkingPresent},
 		{"unknown", 0x70000001, UnsupportedProgramHeader},
+		{"shared library list", 5, UnsupportedProgramHeader},
 	}
 	for _, test := range tests {
 		data := validELF(t)
@@ -352,5 +353,160 @@ func FuzzParse(fuzz *testing.F) {
 	fuzz.Add([]byte{0x7f, 'E', 'L', 'F'})
 	fuzz.Fuzz(func(t *testing.T, data []byte) {
 		Parse(data, testConfig())
+	})
+}
+
+// pieELF is a static position-independent image: ET_DYN, addresses from
+// zero, a dynamic section in the data segment, and the descriptive headers
+// common toolchains add.
+func pieELF(t testing.TB) []byte {
+	const count = 11
+	tableSize := uint64(count) * ProgramHeaderSize
+	data := buildELF(t, 0x1020, []testProgramHeader{
+		{programPHDR, FlagReadable, HeaderSize, HeaderSize, tableSize, tableSize, 8},
+		{programLoad, FlagReadable, 0, 0, 0x1000, 0x1000, 0x1000},
+		{programLoad, FlagReadable | FlagExecutable, 0x1000, 0x1000, 0x200, 0x200, 0x1000},
+		{programLoad, FlagReadable | FlagWritable, 0x2000, 0x2000, 0x200, 0x400, 0x1000},
+		{programTLS, FlagReadable | FlagWritable, 0x2080, 0x2080, 0x20, 0x40, 0x10},
+		{programGNUStack, FlagReadable | FlagWritable, 0, 0, 0, 0, 16},
+		{programGNURelro, FlagReadable, 0x2000, 0x2000, 0x200, 0x200, 1},
+		{programDynamic, FlagReadable | FlagWritable, 0x2100, 0x2100, 0x100, 0x100, 8},
+		{programNote, FlagReadable, 0x300, 0x300, 0x20, 0x20, 4},
+		{programGNUProp, FlagReadable, 0x300, 0x300, 0x20, 0x20, 8},
+		{programGNUFrame, FlagReadable, 0x320, 0x320, 0x20, 0x20, 4},
+	}, 0x3000)
+	binary.LittleEndian.PutUint16(data[16:], typeDyn)
+	return data
+}
+
+const pieDynamic = 7
+
+func pieConfig() Config {
+	config := testConfig()
+	config.PIEBase = 0x40000000
+	return config
+}
+
+func TestParseStaticPIEMovesEveryAddress(t *testing.T) {
+	image, failure := Parse(pieELF(t), pieConfig())
+	if failure != OK {
+		t.Fatalf("static PIE rejected: %d", failure)
+	}
+	const base = 0x40000000
+	if image.Base != base || image.Entry != base+0x1020 || image.ProgramHeaderAddress != base+HeaderSize || image.SegmentCount != 3 {
+		t.Fatalf("unexpected load plan: %+v", image)
+	}
+	for index, want := range []uint64{base, base + 0x1000, base + 0x2000} {
+		segment := image.Segments[index]
+		if segment.VirtualAddress != want || segment.MapStart != want || segment.FileMapOffset != want-base {
+			t.Errorf("segment %d: %+v", index, segment)
+		}
+	}
+	if image.TLS.VirtualAddress != base+0x2080 || image.RELRO.Start != base+0x2000 || image.RELRO.End != base+0x2200 ||
+		!image.DynamicPresent || image.Dynamic.Start != base+0x2100 || image.Dynamic.End != base+0x2200 {
+		t.Fatalf("metadata did not move: %+v", image)
+	}
+	if image.LoadEnd() != base+0x3000 {
+		t.Fatalf("load end = %#x", image.LoadEnd())
+	}
+}
+
+func TestStaticPIENeedsABase(t *testing.T) {
+	if _, failure := Parse(pieELF(t), testConfig()); failure != UnsupportedType {
+		t.Fatalf("PIE without a base: failure %d", failure)
+	}
+	for _, base := range []uint64{0x40000001, testUserEnd, 0x800} {
+		config := testConfig()
+		config.PIEBase = base
+		if _, failure := Parse(pieELF(t), config); failure != InvalidConfig {
+			t.Errorf("base %#x: failure %d", base, failure)
+		}
+	}
+}
+
+func TestStaticPIERejections(t *testing.T) {
+	tests := []struct {
+		name string
+		want Error
+		edit func([]byte)
+	}{
+		{"interpreter", InterpreterPresent, func(data []byte) {
+			binary.LittleEndian.PutUint32(programHeaderAt(data, 8), programInterp)
+		}},
+		{"second dynamic section", DuplicateProgramHeader, func(data []byte) {
+			copy(programHeaderAt(data, 8), programHeaderAt(data, pieDynamic))
+		}},
+		{"dynamic section outside any load", MalformedDynamic, func(data []byte) {
+			binary.LittleEndian.PutUint64(programHeaderAt(data, pieDynamic)[16:], 0x5100)
+		}},
+		{"dynamic section past its segment's file bytes", MalformedDynamic, func(data []byte) {
+			binary.LittleEndian.PutUint64(programHeaderAt(data, pieDynamic)[8:], 0x2180)
+			binary.LittleEndian.PutUint64(programHeaderAt(data, pieDynamic)[16:], 0x2180)
+		}},
+		{"executable dynamic section", MalformedDynamic, func(data []byte) {
+			binary.LittleEndian.PutUint32(programHeaderAt(data, pieDynamic)[4:], FlagReadable|FlagExecutable)
+		}},
+		{"empty dynamic section", MalformedDynamic, func(data []byte) {
+			binary.LittleEndian.PutUint64(programHeaderAt(data, pieDynamic)[40:], 0)
+			binary.LittleEndian.PutUint64(programHeaderAt(data, pieDynamic)[32:], 0)
+		}},
+		{"address that wraps", BadMemoryRange, func(data []byte) {
+			binary.LittleEndian.PutUint64(programHeaderAt(data, validData)[16:], math.MaxUint64-0xfff)
+		}},
+		{"entry that wraps", EntryNotExecutable, func(data []byte) {
+			binary.LittleEndian.PutUint64(data[24:], math.MaxUint64)
+		}},
+		{"entry outside the image", EntryNotExecutable, func(data []byte) {
+			binary.LittleEndian.PutUint64(data[24:], 0)
+		}},
+		{"note past the file", MalformedProgramHeader, func(data []byte) {
+			binary.LittleEndian.PutUint64(programHeaderAt(data, 8)[8:], 0x2ff0)
+		}},
+		{"image above the limit", BadMemoryRange, func(data []byte) {
+			binary.LittleEndian.PutUint64(programHeaderAt(data, validData)[16:], testUserEnd)
+			binary.LittleEndian.PutUint64(programHeaderAt(data, validData)[8:], 0x2000)
+		}},
+	}
+	for _, test := range tests {
+		data := pieELF(t)
+		test.edit(data)
+		if _, failure := Parse(data, pieConfig()); failure != test.want {
+			t.Errorf("%s: failure %d, want %d", test.name, failure, test.want)
+		}
+	}
+}
+
+func TestDescriptiveHeadersAreIgnoredInAnExecutable(t *testing.T) {
+	data := validELF(t)
+	// The TLS header becomes a note; the RELRO header a property note.
+	binary.LittleEndian.PutUint32(programHeaderAt(data, validTLS), programNote)
+	binary.LittleEndian.PutUint32(programHeaderAt(data, validRELRO), programGNUProp)
+	image, failure := Parse(data, testConfig())
+	if failure != OK || image.TLS.Present || image.RELROPresent || image.SegmentCount != 3 || image.Base != 0 {
+		t.Fatalf("failure=%d image=%+v", failure, image)
+	}
+}
+
+func FuzzParseStaticPIE(fuzz *testing.F) {
+	fuzz.Add(pieELF(fuzz))
+	fuzz.Fuzz(func(t *testing.T, data []byte) {
+		image, failure := Parse(data, pieConfig())
+		if failure != OK {
+			return
+		}
+		// Whatever the parser accepts lies inside the user range and keeps
+		// its entry in an executable segment.
+		for index := 0; index < image.SegmentCount; index++ {
+			segment := image.Segments[index]
+			if segment.MapStart < testPageSize || segment.MapEnd > testUserEnd || segment.MapStart >= segment.MapEnd {
+				t.Fatalf("segment %d escapes: %+v", index, segment)
+			}
+			if image.Base != 0 && segment.MapStart < image.Base {
+				t.Fatalf("segment %d below the base: %+v", index, segment)
+			}
+		}
+		if !image.entryExecutable() {
+			t.Fatal("accepted image has no executable entry")
+		}
 	})
 }

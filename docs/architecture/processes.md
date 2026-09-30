@@ -7,8 +7,8 @@ schedulable CPU context. This avoids treating a process and a thread as
 interchangeable kernel objects.
 
 The ABI is set by the kernel when it initializes a process from a validated
-executable and has no runtime setter. Current launches are `Native`; the Linux
-ELF validator will select `LinuxX8664`. All tasks in a process share the ABI.
+executable and has no runtime setter. A native image selects `Native` and a
+validated Linux ELF selects `LinuxX8664`. All tasks in a process share the ABI.
 Entry gates authorize this field explicitly and never infer an ABI from a call
 number (ADR 0132).
 
@@ -104,7 +104,8 @@ structures.
 `GST4` remains the kernel-side source of validated launch inputs for a Linux
 launch, but it is not exposed as the Linux application ABI. The stack builder
 copies its command, arguments, and environment into a bounded System V
-stack containing `argc`, pointer vectors, auxv, and NUL-terminated strings.
+stack containing `argc`, pointer vectors, auxv, NUL-terminated strings, and
+16 random bytes when the CPU has a generator.
 Resolved GoOS handles and the working directory remain kernel-side
 compatibility state. Only occupied initial-stack pages are mapped before the
 task runs; the rest of the Linux stack reservation remains demand-zero.
@@ -124,7 +125,8 @@ processes. Linux programs never see a native process or task ID. The working
 directory starts as the one the launch supplied, held in canonical form as
 the base for relative paths (ADR 0140), and `chdir` replaces it. The state
 also names the process's file I/O memory object, created at its first file
-read or write (ADR 0141).
+read or write (ADR 0141), and holds the signal dispositions and blocked mask
+the program registered, which nothing acts on (ADR 0151).
 
 ## Teardown liveness
 

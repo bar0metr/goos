@@ -136,3 +136,25 @@ it` — and exits with status 2. A command PID 1 cannot start is reported by the
 name of the stage that failed, `NAME: command not found`, even inside a pipeline
 (ADR 0079). `uptime` prints `up H:MM:SS` and `mem` prints total, used and free
 memory in binary units.
+
+## Linux programs
+
+A path that names a static Linux x86_64 ELF runs like a native program: PID 1
+recognizes the format, the kernel validates it, and the process starts with
+the shell's working directory, its arguments and environment, the command's
+standard streams, and a VFS session of its own. It can be a pipeline stage on
+either side of a native program, a background job, and the target of Ctrl-C
+and `kill`. Programs under `/system/linux` ship with the image; others run
+from any volume.
+
+```text
+goos> /system/linux/hello
+hello from Linux ABI
+goos> /system/linux/musl-hello | write /tmp/out
+goos> /system/linux/dirprobe /persist
+```
+
+A Linux program has no terminal: its libc buffers output in blocks, so lines
+appear when the buffer fills or the program exits. Ctrl-C ends the process; no
+signal reaches it. [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md)
+lists what such a program can call.

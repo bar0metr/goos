@@ -7,6 +7,7 @@ const (
 	ENOENT       Errno = 2
 	ESRCH        Errno = 3
 	EIO          Errno = 5
+	ENXIO        Errno = 6
 	EBADF        Errno = 9
 	EAGAIN       Errno = 11
 	ENOMEM       Errno = 12
@@ -20,6 +21,7 @@ const (
 	EINVAL       Errno = 22
 	ENFILE       Errno = 23
 	EMFILE       Errno = 24
+	ENOTTY       Errno = 25
 	ENOSPC       Errno = 28
 	ESPIPE       Errno = 29
 	EROFS        Errno = 30

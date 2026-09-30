@@ -53,8 +53,10 @@ normal or blocking operation is decoded. A wrong-ABI entry returns
 `PermissionDenied`, counts the rejection, and logs its first occurrence.
 Returning operations resume with `IRETQ`;
 Exit marks the task non-runnable and schedules its successor. The gate is
-native-only. Linux x86_64 will use a distinct `SYSCALL` entry and IRETQ return;
-that entry is installed through `IA32_LSTAR` (ADR 0132).
+native-only. Linux x86_64 uses a distinct `SYSCALL` entry and IRETQ return,
+installed through `IA32_LSTAR` (ADR 0132). A Linux process that executes
+`int 0x80` gets `PermissionDenied` for every call number, and the boot test
+tries all 128.
 
 `IA32_EFER.SCE`, `STAR`, `LSTAR`, and `FMASK` are configured before userspace.
 On Linux entry, SWAPGS exposes only a supervisor mapping containing the current

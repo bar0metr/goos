@@ -66,6 +66,34 @@ func SleepTicks(wire *[TimespecSize]byte, ticksPerSecond uint64, maximum uint64)
 	return ticks, 0
 }
 
+// SleepNanos is the duration a validated timespec asks for, saturated at the
+// largest value.
+func SleepNanos(wire *[TimespecSize]byte) uint64 {
+	seconds := binary.LittleEndian.Uint64(wire[0:])
+	nanoseconds := binary.LittleEndian.Uint64(wire[8:])
+	if seconds > (^uint64(0)-nanoseconds)/uint64(timekeeping.NanosPerSecond) {
+		return ^uint64(0)
+	}
+	return seconds*uint64(timekeeping.NanosPerSecond) + nanoseconds
+}
+
+// RemainingTicks is the number of whole ticks that covers what is left of a
+// sleep, at least one and at most maximum.
+func RemainingTicks(nanos uint64, ticksPerSecond uint64, maximum uint64) uint64 {
+	if ticksPerSecond == 0 {
+		return 1
+	}
+	tickNanos := uint64(timekeeping.NanosPerSecond) / ticksPerSecond
+	ticks := nanos / tickNanos
+	if nanos%tickNanos != 0 || ticks == 0 {
+		ticks++
+	}
+	if ticks > maximum {
+		ticks = maximum
+	}
+	return ticks
+}
+
 // EncodeUname writes a struct utsname. The system name is Linux because that
 // is the ABI a program built for Linux runs against here; the node, release,
 // and version say what implements it. release is the GoOS release.
@@ -108,4 +136,20 @@ func ResourceLimit(resource uint64, stackBytes uint64) (uint64, abi.Errno) {
 		return 0, abi.EINVAL
 	}
 	return abi.ResourceInfinity, 0
+}
+
+// MaxRandomBytes bounds what one getrandom call returns. Linux promises
+// that a request of up to 256 bytes is filled whole; a longer one may come
+// back short, and here it does.
+const MaxRandomBytes = 256
+
+// RandomFlags checks the flags of getrandom. GoOS has one source, so the
+// pool and blocking choices change nothing. GRND_INSECURE with GRND_RANDOM
+// is the one combination Linux refuses among its defined flags.
+func RandomFlags(flags uint64) abi.Errno {
+	if flags&^(abi.RandomNonBlock|abi.RandomRandom|abi.RandomInsecure) != 0 ||
+		flags&(abi.RandomRandom|abi.RandomInsecure) == abi.RandomRandom|abi.RandomInsecure {
+		return abi.EINVAL
+	}
+	return 0
 }

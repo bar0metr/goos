@@ -111,7 +111,7 @@ User addresses are canonical lower-half addresses in `[0x1000,
 | `0x00400000` | self-test probe page (validation build) |
 | `0x00402000` | low-address self-test code (validation build) |
 | `0x00404000` | low-address self-test data (validation build) |
-| `0x1000` – `2 GiB` | image segments; native images normally start at `0x40002000`, Linux `ET_EXEC` may use conventional low addresses such as `0x400000` |
+| `0x1000` – `2 GiB` | image segments; native images normally start at `0x40002000`, Linux `ET_EXEC` may use conventional low addresses such as `0x400000`, a Linux static PIE loads at `0x40000000` |
 | `0x0000080000000000` | shared-memory window for callers that pass a fixed address (file cache, exec area) |
 | `0x0000081000000000` | DMA window |
 | `0x0000082000000000` | system image window |
@@ -315,7 +315,9 @@ with the kernel allocating the stack as its own region at a random address.
 
 **mmap randomization.** Native userspace has no general `mmap`; Linux
 compatibility has bounded anonymous private `mmap` with deterministic first-fit
-placement. Randomizing that placement can change the starting search address
+placement. It refuses a mapping larger than the pages the process quota has
+left, so a Linux program meets `ENOMEM` at the call and not a fault at the
+first touch (ADR 0147). Randomizing that placement can change the starting search address
 without changing its ABI. The three native mapping calls behave differently:
 
 - `MemoryMap` already takes its address from the caller. A process could

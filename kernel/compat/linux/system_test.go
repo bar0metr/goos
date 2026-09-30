@@ -216,3 +216,38 @@ func TestResourceLimit(t *testing.T) {
 		t.Fatalf("resource 16: errno=%d", errno)
 	}
 }
+
+func TestRandomFlags(t *testing.T) {
+	for flags, want := range map[uint64]abi.Errno{
+		0: 0, abi.RandomNonBlock: 0, abi.RandomRandom: 0, abi.RandomInsecure: 0,
+		abi.RandomNonBlock | abi.RandomRandom: 0, abi.RandomNonBlock | abi.RandomInsecure: 0,
+		abi.RandomRandom | abi.RandomInsecure: abi.EINVAL, 8: abi.EINVAL, ^uint64(0): abi.EINVAL,
+	} {
+		if errno := RandomFlags(flags); errno != want {
+			t.Errorf("flags %#x: errno=%d, want %d", flags, errno, want)
+		}
+	}
+}
+
+func TestSleepNanosAndRemainingTicks(t *testing.T) {
+	var wire [TimespecSize]byte
+	binary.LittleEndian.PutUint64(wire[0:], 2)
+	binary.LittleEndian.PutUint64(wire[8:], 500_000_000)
+	if got := SleepNanos(&wire); got != 2_500_000_000 {
+		t.Fatalf("2.5 s = %d ns", got)
+	}
+	binary.LittleEndian.PutUint64(wire[0:], ^uint64(0)>>1)
+	if got := SleepNanos(&wire); got != ^uint64(0) {
+		t.Fatalf("a huge sleep did not saturate: %d", got)
+	}
+	for _, test := range []struct{ nanos, want uint64 }{
+		{0, 1}, {1, 1}, {9_999_999, 1}, {10_000_000, 1}, {10_000_001, 2}, {25_000_000, 3}, {1 << 62, 50},
+	} {
+		if got := RemainingTicks(test.nanos, 100, 50); got != test.want {
+			t.Errorf("%d ns: %d ticks, want %d", test.nanos, got, test.want)
+		}
+	}
+	if RemainingTicks(1, 0, 50) != 1 {
+		t.Fatal("a zero tick rate must still wait one tick")
+	}
+}

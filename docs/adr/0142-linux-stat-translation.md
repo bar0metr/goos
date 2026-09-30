@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Extended by ADR 0150, which adds `statx` and character devices.
 
 ## Context
 
@@ -59,6 +59,10 @@ descriptor gets a synthetic record with no VFS exchange: a FIFO with mode
 `AT_EMPTY_PATH`, which makes an empty path name `dirfd` itself; other flags
 are `EINVAL`. The buffer is written after the VFS answers, so errors come in
 the Linux order: a missing path is `ENOENT` even when the buffer is bad too.
+
+**access.** `access` and `faccessat` stat the path and answer from the
+owner bits of the mode above, so the two calls cannot disagree. A write check
+on a read-only file is `EACCES`.
 
 ## Consequences
 

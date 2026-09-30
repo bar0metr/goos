@@ -452,8 +452,8 @@ adds whole-file `Replace` (ADR 0129), through which the new gap-buffer editor
 `edit` saves without truncating the original (ADR 0131). `gfm` starts `gview`
 and `edit` through a launch channel PID 1 grants by manifest, with the child's
 own grants and the caller's input (ADR 0130), and shows modification times and
-free space. GoOS 0.1.7 is released (docs/releases/0.1.7.md); Linux ABI
-compatibility (Priority 5) is the next milestone.
+free space. GoOS 0.1.7 is released (docs/releases/0.1.7.md). GoOS 0.2.0
+follows it with Linux ABI compatibility (Priority 5).
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
@@ -462,74 +462,55 @@ the terminal service dies. ADR 0123 removes the one-row redraw limitation.
 
 ## Priority 5 — Linux ABI compatibility
 
-Begin Linux compatibility only after native process startup, persistent storage,
-and basic shell composition are stable.
+GoOS 0.2.0 ([docs/releases/0.2.0.md](../releases/0.2.0.md)) is the first
+Linux ABI release. Unmodified, statically linked Linux x86_64 programs run as
+GoOS processes through a kernel-resident ABI adapter backed by the
+process-scoped capabilities and the VFS service.
 
-GoOS 0.2.0 uses a kernel-resident ABI adapter backed by the existing
-process-scoped capabilities and VFS service. Processes have immutable
-`Native`/`LinuxX8664` identity and distinct entry gates. Static ELF64 `ET_EXEC`
-is validated, lazily mapped with demand-zero BSS, and started on a bounded
-System V stack without exposing GST4. PID 1 classifies candidates while the
-kernel independently validates the stable source and enforces a four-handle
-Linux launch boundary with the large resource profile.
+What it contains:
 
-Linux syscall numbers and errno values occupy distinct canonical namespaces.
-Unsupported calls return `-ENOSYS` with bounded diagnostics. One continuation
-slot per generation-safe task supports exact correlated blocking without
-polling or duplicated effects. Each Linux process has a 64-entry fd table whose
-initial descriptors refer privately to its supplied streams. Raw `read`,
-`write`, `exit`, and `exit_group` are implemented; a static validation ELF
-proves stdin, stdout, blocking wakeup, signed returns, and teardown.
+- immutable `Native`/`LinuxX8664` process identity and a dedicated
+  `SYSCALL` entry that the native gate and the Linux gate each refuse to the
+  other;
+- a bounded static ELF64 loader for `ET_EXEC` and static PIE images with lazy
+  file-backed pages, and a System V initial stack that exposes no native
+  startup object;
+- a PID 1 launch policy of three streams and one VFS session, enforced again
+  by the kernel;
+- a syscall layer with its own number and errno namespaces, continuations for
+  calls that block, a 64-entry descriptor table, anonymous memory, FS-base
+  TLS, and files, directories, status, and naming through the VFS session;
+- identity, clocks, sleep, limits, and signal state answered from kernel
+  state, and random bytes from the CPU's generator;
+- `/dev/null` and `/dev/zero`, positioned I/O, and `statx`;
+- six pinned fixtures, a conformance probe that prints the same lines on
+  Linux and on GoOS, a strict reference run on a real Linux kernel, a Linux
+  boot gate, and a BusyBox harness.
 
-The same ELF exercises a bounded 64 MiB `brk`, anonymous private `mmap`, safe
-`mprotect`, `munmap`, `MADV_DONTNEED`, and FS-only `arch_prctl`. FS base is
-saved in generation-safe task state and restored on every switch. Two concurrent
-Linux instances block with distinct bases, resume, verify FS-relative memory,
-and exit normally.
+[linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md) is the contract,
+with every call, each difference from Linux, and the release limits.
 
-A pinned static musl program now starts through `__libc_start_main`, with
-`set_tid_address` and a bounded `writev` added for it. `open`, `openat`, and
-`close` run on the VFS bridge: one correlated request per call on the session
-PID 1 granted, a deadline on every wait, and `EIO` after VFS death with no
-reconnection.
+### Next: process composition
 
-Linux paths resolve in the VFS namespace from a per-process working directory.
-One bounded pass removes `.` and `..`, refuses what exceeds the native path and
-name limits, and reports a directory demand to the caller. Paths too long for
-a request message travel in an attached memory object.
+The next Linux milestone lets one Linux program run another, which BusyBox
+`sh` needs:
 
-File calls run as staged exchanges on the bridge: `open` with creation,
-truncation, append, and directory descriptors; file `read`, `write`, and
-`writev` through a 64 KiB per-process memory object; `lseek`; `getcwd` and
-`chdir`; `mkdir`, `unlink`, `rmdir`, and `rename` with their `*at` forms and
-musl's legacy numbers. The musl fixture runs the same checks on Linux and on
-GoOS and prints the same result.
+1. `execve` through PID 1's launch path, with close-on-exec honored;
+2. `pipe2` on native streams;
+3. `wait4` on process handles, and a documented process-tree policy;
+4. a deliberately chosen `fork` semantics;
+5. signal delivery for `SIGINT`, `SIGCHLD`, and `SIGPIPE`, on the
+   dispositions and masks the kernel already records;
+6. `poll` and `ppoll` on `WaitAny`.
 
-`stat`, `lstat`, `fstat`, and `newfstatat` fill a hand-laid-out `struct stat`
-with synthetic mode, owner, and link count and with the VFS mount and node
-identity as `st_dev` and `st_ino`. `readv` serves streams and files, so musl
-stdio reads files. The boot test runs a Linux program through a VFS restart
-and through a VFS that answers late.
-
-`getdents64` lists directory descriptors in whole `linux_dirent64` records.
-`readv` and `writev` have fixed bounds of 16 elements and 64 KiB. `getpid`
-and its relatives, `uname`, `clock_gettime`, `nanosleep`, and `prlimit64`
-answer from kernel state.
-
-Order for the remaining release work:
-
-1. the terminal `ioctl` subset and `dup`/`fcntl`, as BusyBox applets measure
-   the need;
-2. selected static BusyBox applets as measured P1 interoperability;
-3. hardening: quota exhaustion, kill while blocked, concurrent processes,
-   and latency measurements.
+Later: `futex` and threads, richer signals, termios and a terminal
+descriptor, interactive programs, `nano`. A random source for CPUs without
+RDRAND and a randomized load base are independent steps. Dynamic linking and
+glibc stay separate work.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or
 capabilities.
-
-Dynamic linking, glibc, `fork`/`clone`, Linux `execve`, threads, full signals,
-networking, BusyBox shell, and `nano` are outside 0.2.0.
 
 ## Priority 6 — In-system compilation experiment
 

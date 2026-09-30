@@ -11,6 +11,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
+	"goos/kernel/process"
 )
 
 var linuxFSBaseResult [8]byte
@@ -31,6 +32,11 @@ func (handler *linuxCallHandler) Brk(request linuxcompat.Request) linuxcompat.Re
 	oldPage := pageCeiling(state.BrkCurrent)
 	newPage := pageCeiling(requested)
 	if newPage > oldPage {
+		// As for mmap: growth the page quota cannot back is refused, which
+		// brk reports by leaving the break where it was.
+		if (newPage-oldPage)/vm.PageSize+faultTables > uint64(owner.Available(process.ResourcePages)) {
+			return linuxcompat.Result{Value: state.BrkCurrent}
+		}
 		entry := region.Region{Base: oldPage, Length: newPage - oldPage, Protection: region.Read | region.Write, Backing: region.Anonymous}
 		if owner.Regions().Insert(entry) != region.OK {
 			return linuxcompat.Result{Value: state.BrkCurrent}
@@ -52,6 +58,12 @@ func (handler *linuxCallHandler) Mmap(request linuxcompat.Request) linuxcompat.R
 	}
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
+		return linuxcompat.Result{Errno: linuxabi.ENOMEM}
+	}
+	// A mapping is lazy, and a page the quota cannot pay for would kill the
+	// process when it is touched. A mapping larger than what the quota has
+	// left is refused here instead, where the program can handle it.
+	if length/vm.PageSize+faultTables > uint64(owner.Available(process.ResourcePages)) {
 		return linuxcompat.Result{Errno: linuxabi.ENOMEM}
 	}
 	address, free := owner.Regions().FindFree(length, vm.UserMapBase, vm.UserMapLimit)

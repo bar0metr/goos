@@ -24,17 +24,11 @@ var linuxHandler linuxCallHandler
 var linuxIOBuffer [stream.AtomicWrite]byte
 var linuxIOVecWire [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
 
-// fileDescription returns the description behind fd when it names a VFS
-// file or directory. Stream descriptors keep their own path through endpoint.
-func (handler *linuxCallHandler) fileDescription(fd uint64) (*linuxcompat.FileDescription, bool) {
-	description, found := linuxcompat.DescriptionOf(handler.root, fd)
-	if !found || description.Kind != linuxcompat.FDVFSFile && description.Kind != linuxcompat.FDVFSDirectory {
-		return nil, false
-	}
-	return description, true
-}
-
+// Read serves read and pread64.
 func (handler *linuxCallHandler) Read(request linuxcompat.Request) linuxcompat.Result {
+	if request.Number == linuxabi.SysPread64 {
+		return handler.positioned(request, false)
+	}
 	return handler.read(request, false)
 }
 
@@ -44,12 +38,18 @@ func (handler *linuxCallHandler) Readv(request linuxcompat.Request) linuxcompat.
 	return handler.read(request, true)
 }
 
+// read sends a descriptor to what serves its kind: the VFS for a file, the
+// kernel itself for a device, and the stream code below for everything else.
 func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) linuxcompat.Result {
-	if description, file := handler.fileDescription(request.Arguments[0]); file {
-		if description.Kind == linuxcompat.FDVFSDirectory {
+	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
+		switch description.Kind {
+		case linuxcompat.FDVFSFile:
+			return handler.readFile(request, description, vector)
+		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EISDIR}
+		case linuxcompat.FDSynthetic:
+			return handler.deviceRead(request, *description, vector)
 		}
-		return handler.readFile(request, description, vector)
 	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
@@ -105,10 +105,16 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector bool, bound uint64) (uint64, []byte, linuxabi.Errno) {
 	if !vector {
 		address, limit := request.Arguments[1], request.Arguments[2]
+		if !userRange(address, limit) {
+			return 0, nil, linuxabi.EFAULT
+		}
 		if limit > bound {
 			limit = bound
 		}
-		if limit != 0 && !vm.CanCopyOut(handler.root, address, limit) {
+		if limit == 0 {
+			return 0, nil, 0
+		}
+		if limit = handler.accessible(address, limit, true); limit == 0 {
 			return 0, nil, linuxabi.EFAULT
 		}
 		return limit, nil, 0
@@ -123,12 +129,57 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 		if length > bound-total {
 			length = bound - total
 		}
-		if length != 0 && !vm.CanCopyOut(handler.root, base, length) {
-			return 0, nil, linuxabi.EFAULT
+		if length == 0 {
+			continue
 		}
-		total += length
+		writable := handler.accessible(base, length, true)
+		total += writable
+		if writable < length {
+			// The read ends where the destination does.
+			if total == 0 {
+				return 0, nil, linuxabi.EFAULT
+			}
+			break
+		}
 	}
 	return total, wire, 0
+}
+
+var linuxProbe [1]byte
+
+// userRange is the check Linux makes on a read or write before anything
+// else: the whole requested range lies in the user half and does not wrap.
+// It looks at the length the program asked for, so a length that runs past
+// the user half is EFAULT even when the first bytes are mapped and the call
+// would have moved only those.
+func userRange(address uint64, length uint64) bool {
+	end := address + length
+	return end >= address && end <= vm.UserAddressLimit
+}
+
+// accessible returns how many of length bytes at address the process can
+// read, or write when write is set, counted from the first byte to the first
+// page it cannot use. Linux moves bytes up to a fault and reports what it
+// moved, so a transfer that runs off the end of a mapping is short, and one
+// that starts outside any is EFAULT. Probing a page faults it in through the
+// ordinary demand-paging path.
+func (handler *linuxCallHandler) accessible(address uint64, length uint64, write bool) uint64 {
+	if length == 0 || !vm.ValidateUserRange(address, length) {
+		return 0
+	}
+	reached := uint64(0)
+	for reached < length {
+		chunk := vm.PageSize - (address+reached)%vm.PageSize
+		if chunk > length-reached {
+			chunk = length - reached
+		}
+		if write && !vm.CanCopyOut(handler.root, address+reached, chunk) ||
+			!write && !vm.CopyIn(handler.root, address+reached, linuxProbe[:]) {
+			break
+		}
+		reached += chunk
+	}
+	return reached
 }
 
 // copyIOVec copies and validates the vector of a readv or writev.
@@ -176,12 +227,20 @@ func (handler *linuxCallHandler) deliver(request linuxcompat.Request, wire []byt
 	return true
 }
 
+// Write serves write and pwrite64.
 func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.Result {
-	if description, file := handler.fileDescription(request.Arguments[0]); file {
-		if description.Kind == linuxcompat.FDVFSDirectory {
+	if request.Number == linuxabi.SysPwrite64 {
+		return handler.positioned(request, true)
+	}
+	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
+		switch description.Kind {
+		case linuxcompat.FDVFSFile:
+			return handler.writeFile(request, description, false)
+		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EBADF}
+		case linuxcompat.FDSynthetic:
+			return handler.deviceWrite(request, *description, false)
 		}
-		return handler.writeFile(request, description, false)
 	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
@@ -191,6 +250,9 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 		return linuxcompat.Result{Errno: errno}
 	}
 	address, requested := request.Arguments[1], request.Arguments[2]
+	if !userRange(address, requested) {
+		return linuxcompat.Result{Errno: linuxabi.EFAULT}
+	}
 	if requested == 0 {
 		return linuxcompat.Result{}
 	}
@@ -198,7 +260,7 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 	if limit > stream.Capacity {
 		limit = stream.Capacity
 	}
-	if !vm.ValidateUserRange(address, limit) {
+	if limit = handler.accessible(address, limit, false); limit == 0 {
 		return linuxcompat.Result{Errno: linuxabi.EFAULT}
 	}
 	written, result, final := handler.writeRange(request, endpoint, streamID, address, limit, false)
@@ -248,11 +310,15 @@ func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoin
 // oversized vector returns the bytes already written; the caller continues
 // from there.
 func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat.Result {
-	if description, file := handler.fileDescription(request.Arguments[0]); file {
-		if description.Kind == linuxcompat.FDVFSDirectory {
+	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
+		switch description.Kind {
+		case linuxcompat.FDVFSFile:
+			return handler.writeFile(request, description, true)
+		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EBADF}
+		case linuxcompat.FDSynthetic:
+			return handler.deviceWrite(request, *description, true)
 		}
-		return handler.writeFile(request, description, true)
 	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
@@ -284,7 +350,14 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 		if length == 0 {
 			continue
 		}
-		written, result, final := handler.writeRange(request, endpoint, streamID, base, length, total != 0)
+		readable := handler.accessible(base, length, false)
+		if readable == 0 {
+			if total == 0 {
+				return linuxcompat.Result{Errno: linuxabi.EFAULT}
+			}
+			break
+		}
+		written, result, final := handler.writeRange(request, endpoint, streamID, base, readable, total != 0)
 		if final {
 			return result
 		}

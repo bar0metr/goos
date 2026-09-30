@@ -272,3 +272,37 @@ func TestContinuationKeepsTwoPathsAndANote(t *testing.T) {
 		t.Fatal("finished call kept its paths")
 	}
 }
+
+func TestStatusFlags(t *testing.T) {
+	file := FileDescription{Kind: FDVFSFile, Flags: abi.OpenReadWrite, Object: 1}
+	cases := []struct {
+		description FileDescription
+		want        uint32
+	}{
+		{file, 0o100002},
+		{FileDescription{Kind: FDVFSFile, Flags: abi.OpenWriteOnly | abi.OpenAppend, Object: 1}, 0o102001},
+		{FileDescription{Kind: FDVFSDirectory, Object: 1}, 0o300000},
+		{FileDescription{Kind: FDStreamReader, Object: 1}, 0},
+		{FileDescription{Kind: FDStreamWriter, Object: 1}, 1},
+	}
+	for _, test := range cases {
+		if got := StatusFlagsOf(test.description); got != test.want {
+			t.Errorf("kind %d flags %#o: %#o, want %#o", test.description.Kind, test.description.Flags, got, test.want)
+		}
+	}
+	if errno := SetStatusFlags(&file, uint64(abi.OpenAppend|abi.OpenReadOnly|abi.OpenCreate)); errno != 0 || file.Flags != abi.OpenReadWrite|abi.OpenAppend {
+		t.Fatalf("set append: errno=%d flags=%#o", errno, file.Flags)
+	}
+	if errno := SetStatusFlags(&file, 0); errno != 0 || file.Flags != abi.OpenReadWrite {
+		t.Fatalf("clear append: errno=%d flags=%#o", errno, file.Flags)
+	}
+	for _, refused := range []uint32{abi.OpenNonBlock, abi.OpenAsync, abi.OpenDirect, abi.OpenNoATime} {
+		if errno := SetStatusFlags(&file, uint64(refused|abi.OpenAppend)); errno != abi.EINVAL || file.Flags != abi.OpenReadWrite {
+			t.Fatalf("flag %#o: errno=%d flags=%#o", refused, errno, file.Flags)
+		}
+	}
+	stream := FileDescription{Kind: FDStreamWriter, Object: 1}
+	if errno := SetStatusFlags(&stream, uint64(abi.OpenAppend)); errno != 0 || stream.Flags != 0 {
+		t.Fatalf("append on a stream: errno=%d flags=%#o", errno, stream.Flags)
+	}
+}

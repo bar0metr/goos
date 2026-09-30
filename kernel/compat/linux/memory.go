@@ -45,15 +45,17 @@ func AnonymousMapping(arguments [6]uint64, pageSize uint64) (uint64, uint64, abi
 	return rounded, protection, 0
 }
 
+// roundLength rounds a mapping length up to whole pages. Linux answers a
+// zero length with EINVAL and a length that no address space could hold
+// with ENOMEM.
 func roundLength(length uint64, pageSize uint64) (uint64, abi.Errno) {
-	if pageSize == 0 || pageSize&(pageSize-1) != 0 || length == 0 || length > ^uint64(0)-(pageSize-1) {
+	if pageSize == 0 || pageSize&(pageSize-1) != 0 || length == 0 {
 		return 0, abi.EINVAL
 	}
-	rounded := (length + pageSize - 1) &^ (pageSize - 1)
-	if rounded == 0 {
-		return 0, abi.EINVAL
+	if length > ^uint64(0)-(pageSize-1) {
+		return 0, abi.ENOMEM
 	}
-	return rounded, 0
+	return (length + pageSize - 1) &^ (pageSize - 1), 0
 }
 
 func MemoryProtection(protection uint64) (uint8, abi.Errno) {

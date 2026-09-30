@@ -29,11 +29,21 @@ func main() {
 		directory("system/bin/"),
 		directory("system/linux/"),
 		file("system/linux/raw-probe", 0o555, linuxProbe()),
-		file("system/linux/musl-hello", 0o555, linuxfixtures.MuslHello),
 		// The message of the day belongs to the immutable system image rather
 		// than to the volatile root, because /system is a read-only mount of
 		// this archive.
 		file("system/motd", 0o444, []byte("Welcome to GoOS\n")),
+	}
+	for _, fixture := range linuxfixtures.All() {
+		members = append(members, file("system/linux/"+fixture.Name, 0o555, fixture.Image))
+	}
+	// LINUX_EXTRA adds Linux programs the repository does not carry, such as
+	// a BusyBox the interoperability test was given, each under its own
+	// name. Several paths are separated as in PATH.
+	for _, extra := range filepath.SplitList(os.Getenv("LINUX_EXTRA")) {
+		if extra != "" {
+			members = append(members, file("system/linux/"+filepath.Base(extra), 0o555, read(extra)))
+		}
 	}
 	for index, name := range []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "log", "config", "tty", "fat32"} {
 		members = append(members, file("system/"+name, 0o555, read(os.Args[1+index])))

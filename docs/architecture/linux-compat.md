@@ -1,15 +1,14 @@
 # Linux compatibility
 
-**Status: GoOS 0.2.0 foundations in progress.** The kernel has immutable native
-and Linux process identities, a dedicated x86_64 `SYSCALL`/IRETQ entry, bounded
-static ELF loading, a System V initial stack, and a constrained PID 1 launch
-policy. The syscall layer has a distinct Linux number and errno namespace,
-bounded diagnostics, generation-safe blocking continuations, a 64-entry fd
-table, stream `read`/`write`/`writev`, the memory and TLS calls, and
-`exit`/`exit_group`. A pinned static musl program starts through its normal
-libc entry. Through its VFS session a program opens, creates, reads, writes,
-seeks, renames, and removes files and directories, by absolute path or
-relative to a working directory it can change.
+**Status: implemented in GoOS 0.2.0.** Unmodified, statically linked Linux
+x86_64 programs run as GoOS processes. The kernel has immutable native and
+Linux process identities, a dedicated `SYSCALL`/IRETQ entry, bounded static
+ELF loading, a System V initial stack, and a constrained PID 1 launch policy.
+A translation layer in the kernel turns Linux calls into the primitives a
+native process uses: VM regions, byte streams, the kernel clocks, and one VFS
+session per process. Static musl programs and BusyBox applets run on it.
+[linux-x86_64-abi.md](linux-x86_64-abi.md) is the contract: every call, its
+status, and each difference from Linux.
 
 ## Principles
 
@@ -21,7 +20,8 @@ relative to a working directory it can change.
 - Each translated syscall is bounded like a native call: validated lengths,
   bounded buffers, deadlines on blocking paths.
 - Unsupported syscalls fail with `-ENOSYS` and are counted, rather than being
-  approximated silently.
+  approximated silently. A call is added when a measured program or the
+  release scope needs it, with real semantics.
 
 ## Components
 
@@ -30,14 +30,23 @@ relative to a working directory it can change.
 Linux ELF is a distinct format from the native envelope
 ([native-images.md](../kernel/native-images.md)). The implemented parser:
 
-1. accepts ELF64 little-endian x86_64 `ET_EXEC` only;
+1. accepts ELF64 little-endian x86_64 `ET_EXEC`, and `ET_DYN` with no
+   interpreter, which is a static position-independent executable
+   (ADR 0149);
 2. bounds the table at 64 program headers and 16 `PT_LOAD` segments;
 3. validates file/memory arithmetic, page congruence, user and reserved ranges,
    page-rounded overlap, entry location, and `R--`/`RW-`/`R-X` protections;
-4. rejects `PT_INTERP`, `PT_DYNAMIC`, W+X, executable stack, and unsupported
-   program-header kinds;
+4. rejects `PT_INTERP`, W+X, executable stack, `PT_DYNAMIC` in an `ET_EXEC`
+   image, and unsupported program-header kinds;
 5. records validated `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO`
-   metadata from the existing stable executable source.
+   metadata from the existing stable executable source;
+6. checks the file range of `PT_NOTE`, `PT_GNU_EH_FRAME`, and
+   `PT_GNU_PROPERTY` and otherwise ignores them.
+
+A static PIE loads at one fixed base, `0x40000000`. The parser adds the base
+to every address the image names before it validates them, so the mapper and
+the fault path see an ordinary plan. The kernel applies no relocation; the
+program's startup code relocates itself from `AT_PHDR`.
 
 The mapper records that plan as pinned `region.Image` reservations backed by the same
 stable system-image extent or executable object as native images. Pages remain
@@ -50,15 +59,16 @@ Congruent non-page-aligned loads retain their aligned file window. The mapper
 revalidates the exported plan and current source length, preflights all region
 collisions, and accepts conventional low addresses such as `0x400000` while
 keeping loads below the fixed GoOS user windows. It also reserves an 8 MiB NX
-demand-zero stack with a 64 KiB guard. `ET_DYN` remains P2 scope.
+demand-zero stack with a 64 KiB guard.
 
 The stack builder converts the kernel's validated startup view into a Linux stack image,
 not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
 and the static-ELF auxv required by the release specification. The complete
 image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
 RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
-`AT_PLATFORM` is `x86_64`; `AT_RANDOM` is absent until trustworthy entropy is
-available. Only occupied stack pages are installed; the remaining reservation
+`AT_PLATFORM` is `x86_64`. `AT_RANDOM` points at 16 bytes from the CPU's
+RDRAND generator and is absent on a CPU without one (ADR 0151). Only occupied
+stack pages are installed; the remaining reservation
 stays demand-zero. The common launch path installs this state before scheduling.
 
 ### Syscall entry
@@ -76,8 +86,9 @@ stack or entering Go. It then installs the kernel CR3, snapshots the Linux
 register ABI into a fixed frame, and returns through a higher-half IRETQ
 prefix. The dispatcher snapshots all six scalar arguments into a Linux request
 whose number type is distinct from native `kcall.Operation`. Known but not yet
-implemented calls and unknown calls both return `-ENOSYS`; an eight-entry ring
-and saturating counter retain bounded diagnostics without per-call logging.
+implemented calls and unknown calls both return `-ENOSYS`. Saturating
+counters, an eight-entry ring, and a set of every refused number retain
+bounded diagnostics without per-call logging.
 
 Every handler must validate flags and lengths before copying
 through `vm.CopyIn`/`vm.CopyOut`. They may never retain or directly dereference
@@ -94,18 +105,24 @@ Syscalls map onto native primitives:
 | `read`, `readv`, `write`, `writev` on stdio and pipes | stream endpoints |
 | `open`, `openat`, `close`, `lseek` | VFS session requests plus the fd table |
 | `getdents64` | VFS directory entries by the path a directory descriptor keeps |
-| `stat`, `lstat`, `fstat`, `newfstatat` | VFS stat by path or by handle; a synthetic record for streams |
+| `stat`, `lstat`, `fstat`, `newfstatat`, `statx` | VFS stat by path or by handle; a synthetic record for streams and devices |
+| `pread64`, `pwrite64` | a VFS seek, a bulk request, and a seek back |
+| `open`, `read`, `write` on `/dev/null` and `/dev/zero` | the kernel itself; no VFS exchange |
+| `rt_sigaction`, `rt_sigprocmask` | compatibility state; nothing is delivered |
+| `getrandom` | the CPU's RDRAND generator |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
-| `pipe2` | `StreamCreate` |
 | `exit`, `exit_group` | `Exit` |
 | `clock_gettime`, `nanosleep` | the kernel realtime and monotonic clocks; a timer deadline |
 | `getpid`, `getuid`, `uname`, `prlimit64` and their relatives | compatibility state and fixed bounds |
-| `execve`, `wait4` | exec request to PID 1, process handle wait |
-| `ppoll`, `poll` | `WaitAny` |
+| `dup`, `dup2`, `dup3`, `fcntl` | the descriptor table; no native call |
+| `access`, `faccessat` | a VFS stat, answered from the mode `stat` reports |
 | `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
 | `arch_prctl` | task-local FS base; GS remains architecture-owned |
+
+The next milestone plans `pipe2` on `StreamCreate`, `execve` and `wait4` on
+an exec request to PID 1 and a process-handle wait, and `poll` on `WaitAny`.
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -205,8 +222,35 @@ is `EBUSY`, and a directory moves only onto a free name.
   the VFS cursor in the directory's description.
 - `readv` and `writev` take 16 elements and 64 KiB per call, with every
   element checked before a byte moves (ADR 0144).
+- `statx` runs the same stat and writes the 256-byte `struct statx`, with a
+  birth time when the filesystem has one (ADR 0150).
+- `pread64` and `pwrite64` seek the VFS position to the offset, transfer, and
+  seek back, because the VFS reads and writes only at the position it keeps.
+  The description's position never changes.
 
-`ftruncate`, `fsync`, and `statx` are not implemented.
+`ftruncate` and `fsync` are not implemented.
+
+### Devices
+
+The kernel compares a resolved path with `/dev/null`, `/dev/zero`, and
+`/dev/tty` before it asks the VFS (ADR 0150). The first two open as
+descriptors of a synthetic kind: a read of `/dev/null` is at its end, a read
+of `/dev/zero` returns zeros, and both discard writes. `/dev/tty` has a
+status and opens with `ENXIO`, because a GoOS Linux process has no
+controlling terminal. All three stat as character devices. No VFS node
+stands behind them, so native programs and directory listings do not show
+them, and the names cannot be removed or renamed.
+
+### Signal state and random bytes
+
+`rt_sigaction` and `rt_sigprocmask` store dispositions and the blocked mask
+in the process's compatibility state and report them back (ADR 0151).
+Nothing delivers a signal from that state. The calls that would send one
+stay `ENOSYS`.
+
+`getrandom` returns bytes from RDRAND, 256 per call at most, and `ENOSYS` on
+a CPU without the instruction. The kernel has no other source and makes none
+up.
 
 ### Identity and time
 
@@ -216,7 +260,9 @@ service (ADR 0145). The PID is the compatibility PID, the parent is 1, and the
 user and group are 1000; none of them is GoOS authority. `uname` names the
 Linux ABI and the GoOS release that implements it. `clock_gettime` reads the
 GoOS realtime and monotonic clocks. `nanosleep` blocks on a timer deadline
-through the syscall continuation and never ends early. `prlimit64` reports
+through the syscall continuation and never ends early: a deadline that
+passes before the monotonic clock has advanced by the request waits again
+(ADR 0153). `prlimit64` reports
 the descriptor table, stack, and `brk` bounds and accepts no change.
 
 ### Path model
@@ -244,11 +290,18 @@ the VFS with the request, as native clients do.
 
 ### Namespace view
 
-The expected layout for early targets:
+A Linux process sees the GoOS VFS namespace: `/system`, `/tmp`, `/persist`,
+`/home`, `/state`, and whatever else is mounted. Nothing is added for it.
+`/proc` and `/sys` do not exist, and a program that opens `/proc/mounts`
+gets `ENOENT`. Of `/dev` the kernel serves three names to Linux processes;
+`/dev` itself is no directory.
 
-- `/persist`, `/tmp`, and `/system` as today;
-- `/dev/null`, `/dev/tty` provided by the compatibility layer or a service;
-- `/proc` and `/sys` absent until a program needs a specific file.
+### Descriptors and the terminal
+
+`dup`, `dup2`, `dup3`, and `fcntl` rearrange descriptors over shared
+descriptions (ADR 0146). `ioctl` answers `ENOTTY`: the standard streams are
+byte streams, and no descriptor is a terminal even when the terminal service
+is at the other end. libc therefore buffers output in blocks.
 
 ## Launch and security boundary
 
@@ -279,36 +332,45 @@ FS base is task context and is saved and restored on every context switch.
 `ARCH_SET_FS` and `ARCH_GET_FS` are implemented. GS operations are rejected and
 kernel GS remains architecture-owned (ADR 0137).
 
-### musl startup
+### Programs in the image
 
-`/system/linux/musl-hello` is a static, non-PIE C program linked against a
-pinned musl (ADR 0139). `userspace/linux/README.md` records the toolchain, the
-build recipe, the checksum, and the syscall trace. PID 1 launches it in
-`/system/linux` with two arguments and two environment variables, reads its
-complete output, and requires exit status zero before it publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
-`LINUX_STAT_OK`, `LINUX_DIRENT_OK`, and `LINUX_SYSTEM_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
-a Linux kernel, where it prints the same lines.
+`/system/linux` holds six prebuilt static programs, pinned by checksum and
+built by one offline recipe (ADR 0139, ADR 0148): `hello` with no libc,
+`hello-pie`, the same linked position-independent, `musl-hello` for libc
+startup, `fsprobe` and `dirprobe` for files and directories, and `abi-probe`,
+the conformance suite. `userspace/linux/README.md` records the toolchain,
+the checksums, and the Linux call trace.
 
-The program reaches `main` through `__libc_start_main`. It checks `argv` and
-`envp`, a TLS image with initialized and zero-filled data behind FS, `malloc`
-through both `brk` and `mmap`, buffered stdio flushed at exit, an open/close
-round trip on its VFS session, its own image under several relative
-spellings, and in a scratch directory under `/tmp` file I/O, file status,
-stdio, directory listing, vector I/O, and naming. Last it checks its identity,
-the system name, the clocks, a limit, and a sleep. musl startup needs `arch_prctl`,
-`set_tid_address`, and `writev`. Its terminal probe, `ioctl(TIOCGWINSZ)`, gets
-`ENOSYS`, which musl reads as "no terminal".
+`abi-probe` checks each result it gets and prints one line per group. PID 1
+runs it at every validation boot and requires the whole output. The same
+binary runs on a Linux kernel and must print the same lines, so an
+expectation is wrong on Linux before it can mislead the kernel. One
+reference run uses a container; a second boots a real Linux kernel in QEMU
+and holds the probe to the exact Linux result in every check (ADR 0152). Its
+other modes pass bad pointers and lengths to every call, exhaust the
+descriptor table and the page quota, try the native call gate, touch an
+I/O port, and recurse into the stack guard.
 
-## Iterative targets
+musl startup needs `arch_prctl`, `set_tid_address`, and `writev`. Its
+terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY`.
 
-| Step | Target | Needs |
-| --- | --- | --- |
-| 1 | static x86_64 "hello world" | ELF loader, `write`, `exit` |
-| 2 | static musl program | `brk`/`mmap`, `arch_prctl`, TLS, auxv |
-| 3 | VFS probes | fd table, file I/O and directories through VFS |
-| 4 | selected BusyBox applets | measured P1 syscalls; no shell |
+### Hardening
 
-Each step is gated on host tests and a QEMU check, like native features.
-Dynamic linking, glibc, `fork`/`clone`, Linux `execve`, threads, full signals,
-networking, BusyBox shell, and `nano` are outside GoOS 0.2.0.
+A pointer from a Linux program reaches kernel code only through the checked
+copy helpers. A read or write across the end of a mapping is short, as on
+Linux, and one that starts outside a mapping, or whose length leaves the
+user half, is `EFAULT` (ADR 0147, ADR 0150). `mmap`
+and `brk` refuse what the page quota cannot back, so exhaustion is `ENOMEM`
+at the call. A full descriptor table is `EMFILE`. Ctrl-C ends a Linux process
+through the native kill path: its continuation, its waits, its descriptors,
+and its VFS session go with it, and no Linux signal is delivered.
+
+## Scope
+
+GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
+Dynamic linking, glibc, `fork`, `clone`, `execve`, threads, signal delivery,
+pipes created by a Linux process, networking, `/proc`, termios, file-backed
+`mmap`, and address-space randomization are outside it. BusyBox `sh` runs
+builtins and redirections but cannot start a program, and `nano` does not
+run. The next Linux milestone is process composition: `execve`,
+`pipe2`, `wait4`, a chosen `fork` semantics, minimal signals, and `poll`.

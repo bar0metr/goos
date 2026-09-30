@@ -57,7 +57,7 @@ func stackString(t *testing.T, stack InitialStack, address uint64) string {
 
 func TestBuildInitialStackLayout(t *testing.T) {
 	var target [MaxInitialStackSize]byte
-	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t))
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t), nil)
 	if failure != StackOK || stack.Pointer%16 != 0 || stack.Top != vm.UserStackTop || len(stack.Data) != int(stack.Top-stack.Pointer) {
 		t.Fatalf("stack failure=%d layout=%+v", failure, stack)
 	}
@@ -114,6 +114,41 @@ func TestBuildInitialStackLayout(t *testing.T) {
 	}
 }
 
+func TestBuildInitialStackCarriesRandomBytes(t *testing.T) {
+	var target, plain [MaxInitialStackSize]byte
+	random := [RandomSize]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), testStartup(t), &random)
+	without, _ := BuildInitialStack(plain[:], vm.UserStackTop, testImage(), testStartup(t), nil)
+	if failure != StackOK || stack.Pointer%16 != 0 || stack.Pointer >= without.Pointer {
+		t.Fatalf("failure=%d pointer=%#x, without %#x", failure, stack.Pointer, without.Pointer)
+	}
+	word := func(offset int) uint64 { return binary.LittleEndian.Uint64(stack.Data[offset:]) }
+	auxvAt := 8 + 4*8 + 3*8
+	var address, entries uint64
+	terminated := false
+	for at := auxvAt; at+16 <= len(stack.Data); at += 16 {
+		entries++
+		if word(at) == auxRandom {
+			address = word(at + 8)
+		}
+		if word(at) == auxNull {
+			terminated = true
+			break
+		}
+	}
+	if !terminated || entries != auxiliaryCount+1 {
+		t.Fatalf("auxv has %d entries, terminated=%v", entries, terminated)
+	}
+	at := stackOffset(t, stack, address)
+	if at+RandomSize > len(stack.Data) || string(stack.Data[at:at+RandomSize]) != string(random[:]) {
+		t.Fatalf("AT_RANDOM at %#x does not hold the bytes", address)
+	}
+	// The strings are where the pointers say, random block or not.
+	if got := stackString(t, stack, word(8)); got != "probe" {
+		t.Fatalf("argv[0] = %q", got)
+	}
+}
+
 type badStartup struct {
 	args int
 	envs int
@@ -139,11 +174,11 @@ func TestBuildInitialStackRejectsInvalidAndOversizedInput(t *testing.T) {
 		{name: "NUL argument", input: badStartup{args: 1, arg: []byte{'x', 0}}, want: StackStringInvalid},
 	}
 	for _, test := range tests {
-		if _, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), test.input); failure != test.want {
+		if _, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), test.input, nil); failure != test.want {
 			t.Errorf("%s: failure %d, want %d", test.name, failure, test.want)
 		}
 	}
-	if _, failure := BuildInitialStack(target[:128], vm.UserStackTop, testImage(), testStartup(t)); failure != StackTooLarge {
+	if _, failure := BuildInitialStack(target[:128], vm.UserStackTop, testImage(), testStartup(t), nil); failure != StackTooLarge {
 		t.Fatalf("small target failure = %d", failure)
 	}
 }
@@ -157,9 +192,14 @@ func FuzzBuildInitialStack(fuzz *testing.F) {
 		}
 		input := fuzzStartup{argument: argument, value: value}
 		var target [MaxInitialStackSize]byte
-		stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input)
-		if failure == StackOK && (stack.Pointer%16 != 0 || stack.Pointer < vm.UserStackTop-elf.DefaultStackReserve || stack.Top != vm.UserStackTop) {
-			t.Fatalf("invalid successful layout: %+v", stack)
+		// Both shapes of the stack are built: with the random block and
+		// without it.
+		random := [RandomSize]byte{0xa5}
+		for _, source := range []*[RandomSize]byte{nil, &random} {
+			stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input, source)
+			if failure == StackOK && (stack.Pointer%16 != 0 || stack.Pointer < vm.UserStackTop-elf.DefaultStackReserve || stack.Top != vm.UserStackTop) {
+				t.Fatalf("invalid successful layout: %+v", stack)
+			}
 		}
 	})
 }

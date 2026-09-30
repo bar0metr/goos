@@ -70,6 +70,19 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	linuxHandler.root = frame.Root
 	linuxHandler.task = sched.TaskID(amd64.TaskIDForSlot(state.Current))
 	result := linuxcompat.Dispatch(frame, &linuxHandler)
+	if result.Errno == linuxabi.EFAULT {
+		if executablePagePending(linuxHandler.task) {
+			// The copy touched a page of the program's own image that is
+			// still on its way from the VFS. The fault path asked for it
+			// and parked the task; the call is retried when it arrives,
+			// before it has changed anything.
+			linuxcompat.SyscallContinuations.Cancel(linuxHandler.task)
+			ipcWaitSet.Cancel(linuxHandler.task)
+			result = linuxcompat.Result{Action: linuxabi.ActionBlock}
+		} else {
+			linuxcompat.NoteBadPointer(linuxabi.Syscall(frame.Number))
+		}
+	}
 	frame.Return, frame.Action = result.Register(), result.Action
 	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
 		linuxSyscallFrameRejections++

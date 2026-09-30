@@ -300,7 +300,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.1.7
+GoOS 0.2.0
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
@@ -529,9 +529,22 @@ console geometry to redraw edited lines that wrap across rows. The kernel's
 warning echo and the system services that start before it still write the
 console directly and can land in a line being typed (ADR 0089).
 
-Linux ABI compatibility remains a later compatibility layer. It must translate
-into the same GoOS process, VFS, IPC, handle, and capability model rather than
-weakening the native architecture for POSIX compatibility.
+GoOS 0.2.0 ([docs/releases/0.2.0.md](docs/releases/0.2.0.md)) is the first
+Linux ABI release. Unmodified, statically linked Linux x86_64 programs run as
+GoOS processes: `/system/linux/hello`, a static musl program, file and
+directory probes, and applets of a static BusyBox the user supplies. A
+bounded layer in the kernel translates 59 Linux syscall numbers, to the documented contract, into the VM,
+stream, clock, and VFS primitives a native process uses. Static
+position-independent executables load too. A Linux process gets
+its standard streams and one VFS session, cannot enter the native call gate,
+and holds no device authority. The
+[ABI document](docs/architecture/linux-x86_64-abi.md) lists every call and
+each difference from Linux. Dynamic linking, `fork`, `execve`, threads,
+signal delivery, and networking are outside this release.
+
+Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
+and capability model and does not weaken the native architecture for POSIX
+compatibility.
 
 See [roadmap](docs/development/roadmap.md) for the current implementation order.
 
@@ -554,7 +567,8 @@ Further documentation:
   [capabilities and handles](docs/architecture/capabilities.md),
   [filesystem stack](docs/architecture/filesystem.md),
   [timekeeping](docs/architecture/timekeeping.md),
-  [Linux compatibility (planned)](docs/architecture/linux-compat.md).
+  [Linux compatibility](docs/architecture/linux-compat.md),
+  [Linux x86_64 ABI](docs/architecture/linux-x86_64-abi.md).
 - Kernel: [interrupts](docs/kernel/interrupts.md),
   [native images](docs/kernel/native-images.md),
   [byte streams](docs/kernel/streams.md).
