@@ -87,8 +87,8 @@ flags.
 
 ## Consequences
 
-`getdents64` can build on the directory records without new transport.
-ADR 0142 adds the stat calls on the stat exchange. `readv` reads a file
+ADR 0142 adds the stat calls on the stat exchange and ADR 0143 `getdents64`
+on the directory records. `readv` reads a file
 through the same memory object: one read, delivered across the vector's
 elements in order. `ftruncate` and `fsync` are not implemented and return
 `ENOSYS`.

@@ -44,6 +44,7 @@ const (
 	SysGetgid        Syscall = 104
 	SysGeteuid       Syscall = 107
 	SysGetegid       Syscall = 108
+	SysGetppid       Syscall = 110
 	SysArchPrctl     Syscall = 158
 	SysGettid        Syscall = 186
 	SysFutex         Syscall = 202
@@ -107,6 +108,28 @@ const (
 	AtNoAutomount     = uint64(0x800)
 	AtEmptyPath       = uint64(0x1000)
 
+	// d_type values of a directory entry.
+	DirentDirectory = uint8(4)
+	DirentRegular   = uint8(8)
+
+	// Clock identifiers of clock_gettime.
+	ClockRealtime        = uint64(0)
+	ClockMonotonic       = uint64(1)
+	ClockMonotonicRaw    = uint64(4)
+	ClockRealtimeCoarse  = uint64(5)
+	ClockMonotonicCoarse = uint64(6)
+	ClockBoottime        = uint64(7)
+
+	// Resources of prlimit64 and the value that means no limit.
+	ResourceCPU       = uint64(0)
+	ResourceFileSize  = uint64(1)
+	ResourceData      = uint64(2)
+	ResourceStack     = uint64(3)
+	ResourceCore      = uint64(4)
+	ResourceOpenFiles = uint64(7)
+	ResourceCount     = uint64(16)
+	ResourceInfinity  = ^uint64(0)
+
 	// File type and permission bits of st_mode.
 	ModeFIFO      = uint32(0o010000)
 	ModeDirectory = uint32(0o040000)
@@ -135,7 +158,7 @@ func (number Syscall) Known() bool {
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
-		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid,
+		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,
 		SysArchPrctl, SysGettid, SysFutex, SysGetdents64, SysSetTidAddress,
 		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,

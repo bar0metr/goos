@@ -113,6 +113,8 @@ func startServices(ticks uint64) {
 		mark("LINUX_PATH_OK\n")
 		mark("LINUX_FILE_IO_OK\n")
 		mark("LINUX_STAT_OK\n")
+		mark("LINUX_DIRENT_OK\n")
+		mark("LINUX_SYSTEM_OK\n")
 	}
 	// The log service comes after the filesystem and before the shell: its
 	// session has to be asked for rather than handed over at boot, and it

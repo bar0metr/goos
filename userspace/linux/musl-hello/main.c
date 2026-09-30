@@ -7,10 +7,11 @@
  * on the VFS session PID 1 granted, and names that image through the working
  * directory in several spellings to check path resolution.
  *
- * Last it works in a scratch directory under /tmp: it creates, writes,
- * seeks, reads, appends to, truncates, stats, renames, and removes files and
- * directories, reads and writes one through stdio, and checks the errno of
- * each refusal.
+ * It works in a scratch directory under /tmp: it creates, writes, seeks,
+ * reads, appends to, truncates, stats, lists, renames, and removes files and
+ * directories, reads and writes them through stdio and through vectors, and
+ * checks the errno of each refusal. Last it reads its identity, the system
+ * name, the clocks, and a limit, and sleeps.
  *
  * GoOS starts it as /system/linux/musl-hello with /system/linux as the
  * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
@@ -23,14 +24,18 @@
  * and expects the wait to end with ETIMEDOUT and the session to keep working.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 #define IMAGE "/system/linux/musl-hello"
@@ -260,6 +265,134 @@ static int stdio_ok(void)
 	       unlink("lines") == 0;
 }
 
+/* The record getdents64 fills. The bundled musl has no readdir. */
+struct listed {
+	unsigned long long inode;
+	long long next;
+	unsigned short length;
+	unsigned char type;
+	char name[];
+};
+
+static int touch(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT, 0644);
+
+	return fd == 3 && close(fd) == 0;
+}
+
+static int listing_ok(void)
+{
+	static char long_name[201], buffer[512];
+	struct stat first;
+	int fd, dirfd, ok = 1;
+	long got;
+
+	/* 200 bytes fit a Linux name and no VFS reply message. */
+	memset(long_name, 'L', sizeof long_name - 1);
+	if (make_directory(AT_FDCWD, "list") != 0 || chdir("list") != 0 ||
+	    !touch("a") || !touch("b") || !touch(long_name) ||
+	    make_directory(AT_FDCWD, "d") != 0 ||
+	    syscall(SYS_stat, "a", &first) != 0)
+		return 0;
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (dirfd != 3)
+		return 0;
+	/* A 256-byte buffer holds the long name and little else, so one
+	 * listing takes several calls. The second pass follows a rewind. */
+	for (int pass = 0; pass < 2 && ok; pass++) {
+		int count = 0, found = 0;
+
+		while ((got = syscall(SYS_getdents64, dirfd, buffer, 256)) > 0) {
+			for (long at = 0; at < got;) {
+				struct listed *entry = (void *)(buffer + at);
+
+				if (entry->length < 24 || entry->length % 8 ||
+				    at + entry->length > got || entry->inode == 0)
+					return 0;
+				at += entry->length;
+				if (!strcmp(entry->name, ".") || !strcmp(entry->name, ".."))
+					continue;
+				count++;
+				if (!strcmp(entry->name, "a"))
+					found |= entry->type == DT_REG && entry->inode == first.st_ino;
+				else if (!strcmp(entry->name, "b"))
+					found |= (entry->type == DT_REG) << 1;
+				else if (!strcmp(entry->name, "d"))
+					found |= (entry->type == DT_DIR) << 2;
+				else if (!strcmp(entry->name, long_name))
+					found |= (entry->type == DT_REG) << 3;
+			}
+		}
+		ok = got == 0 && count == 4 && found == 15 &&
+		     lseek(dirfd, 0, SEEK_SET) == 0;
+	}
+	errno = 0;
+	fd = open("a", O_RDONLY);
+	ok = ok && fd == 4 &&
+	     fails(syscall(SYS_getdents64, dirfd, buffer, 16), EINVAL) &&
+	     fails(syscall(SYS_getdents64, dirfd, (void *)8, 256), EFAULT) &&
+	     fails(syscall(SYS_getdents64, fd, buffer, 256), ENOTDIR) &&
+	     fails(syscall(SYS_getdents64, 42, buffer, 256), EBADF) &&
+	     close(fd) == 0 && close(dirfd) == 0;
+	return unlink("a") == 0 && unlink("b") == 0 && unlink(long_name) == 0 &&
+	       rmdir("d") == 0 && chdir("..") == 0 && rmdir("list") == 0 && ok;
+}
+
+static int vectors_ok(int goos)
+{
+	static struct iovec many[17];
+	char first[4], second[8];
+	struct iovec out[3] = {{"vec", 3}, {"", 0}, {"tors!", 5}};
+	struct iovec in[2] = {{first, sizeof first}, {second, sizeof second}};
+	int fd = open("vector", O_RDWR | O_CREAT | O_TRUNC, 0644);
+
+	if (fd != 3 || writev(fd, out, 3) != 8 || lseek(fd, 0, SEEK_SET) != 0 ||
+	    readv(fd, in, 2) != 8 || memcmp(first, "vect", 4) ||
+	    memcmp(second, "ors!", 4) || readv(fd, in, 2) != 0)
+		return 0;
+	errno = 0;
+	if (!fails(readv(fd, in, -1), EINVAL) ||
+	    !fails(writev(fd, (void *)8, 1), EFAULT) ||
+	    !fails(readv(42, in, 2), EBADF))
+		return 0;
+	/* Linux takes 1024 elements; GoOS bounds a vector at 16. */
+	if (goos && !fails(writev(fd, many, 17), EINVAL))
+		return 0;
+	return close(fd) == 0 && unlink("vector") == 0;
+}
+
+static int system_ok(void)
+{
+	struct timespec wall, before, after, nap = {0, 20000000}, bad = {0, 1000000000};
+	struct utsname name;
+	struct rlimit files;
+	long long elapsed;
+	pid_t pid = getpid();
+
+	if (pid <= 0 || syscall(SYS_gettid) != pid || getppid() <= 0 ||
+	    getuid() != geteuid() || getgid() != getegid())
+		return 0;
+	if (uname(&name) != 0 || strcmp(name.sysname, "Linux") ||
+	    strcmp(name.machine, "x86_64") || !name.release[0] || !name.nodename[0])
+		return 0;
+	/* The sleep may run long; it must not end early. */
+	if (clock_gettime(CLOCK_REALTIME, &wall) != 0 || wall.tv_sec < 1000000000 ||
+	    time(NULL) < wall.tv_sec ||
+	    clock_gettime(CLOCK_MONOTONIC, &before) != 0 ||
+	    nanosleep(&nap, NULL) != 0 ||
+	    clock_gettime(CLOCK_MONOTONIC, &after) != 0)
+		return 0;
+	elapsed = (after.tv_sec - before.tv_sec) * 1000000000LL + after.tv_nsec - before.tv_nsec;
+	if (elapsed < nap.tv_nsec || elapsed > 5000000000LL)
+		return 0;
+	errno = 0;
+	return fails(clock_gettime(99, &wall), EINVAL) &&
+	       fails(nanosleep(&bad, NULL), EINVAL) &&
+	       getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur > 0 &&
+	       files.rlim_cur <= files.rlim_max;
+}
+
 static int names_ok(int read_only_image)
 {
 	char back[1];
@@ -306,6 +439,8 @@ static int scratch_checks(const char *self)
 	failed = report("files", data_ok());
 	failed += report("status", status_ok(self, read_only_image));
 	failed += report("stdio", stdio_ok());
+	failed += report("listing", listing_ok());
+	failed += report("vectors", vectors_ok(read_only_image));
 	failed += report("names", names_ok(read_only_image));
 	if (chdir("/system/linux") != 0 || rmdir(scratch) != 0)
 		failed += report("scratch cleanup", 0);
@@ -389,6 +524,7 @@ int main(int argc, char **argv)
 		failed = 1;
 	}
 	failed += scratch_checks(argv[0]);
+	failed += report("system", system_ok());
 	if (!failed)
 		puts("hello from musl");
 	return failed;

@@ -41,10 +41,11 @@ subdirectories from it to look instead.
 **Identity.** VFS protocol version 13 returns a node's identity with a stat
 and with a directory entry, in the field an open reply uses for its handle.
 Two answers about one file of a mount carry one value, and two files carry
-two. For an open file the VFS keeps the identity the path had at open time,
-so a stat by handle and a stat by path agree on FAT32, where an open file is
-known by a cookie and a path by a directory location. The values are
-filesystem node numbers, never kernel addresses.
+two. For an open file the VFS keeps the identity of the path it was opened
+by and moves it when the file is renamed. A stat by handle and a stat by path
+therefore agree on FAT32, where an open file is known by a cookie and a path
+by a directory location that a rename changes. The values are filesystem node
+numbers, never kernel addresses.
 
 **What is stat-ed.** A path is stat-ed by name after ADR 0140 resolution; a
 path that demands a directory and names a file is `ENOTDIR`. A file
@@ -56,18 +57,16 @@ descriptor gets a synthetic record with no VFS exchange: a FIFO with mode
 **Calls.** `lstat` is `stat`: GoOS has no symbolic links. `newfstatat` accepts
 `AT_SYMLINK_NOFOLLOW` and `AT_NO_AUTOMOUNT`, which change nothing, and
 `AT_EMPTY_PATH`, which makes an empty path name `dirfd` itself; other flags
-are `EINVAL`. The buffer is checked before the VFS is asked, so a bad pointer
-is `EFAULT` without an exchange.
+are `EINVAL`. The buffer is written after the VFS answers, so errors come in
+the Linux order: a missing path is `ENOENT` even when the buffer is bad too.
 
 ## Consequences
 
 Programs can tell files from directories, read sizes, and detect that two
 names are one file, including two spellings of one name on case-insensitive
-FAT32. Three limits follow from what the filesystems record. After an open
-file is renamed, its descriptor still reports the identity of the old name
-while the new path reports a new one on FAT32. A program that trusts
-`st_mode` to predict access is told 0644 where a later write may still fail.
-All three times are one time.
+FAT32. Two limits follow from what the filesystems record. A program that
+trusts `st_mode` to predict access is told 0644 where a later write may still
+fail. All three times are one time.
 
-`statx` is not implemented. `getdents64` can report `d_ino` from the same
-identity.
+`statx` is not implemented. `getdents64` reports `d_ino` from the same
+identity (ADR 0143).

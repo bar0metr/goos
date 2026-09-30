@@ -534,4 +534,15 @@ func TestServiceIdentityAgreesOnFAT32(t *testing.T) {
 		byHandle.Node != before.Node || whileOpen.Node != before.Node || byHandle.Size != 1 || byHandle.MountID != before.MountID {
 		t.Fatalf("identity: before=%d handle=%d while open=%d size=%d", before.Node, byHandle.Node, whileOpen.Node, byHandle.Size)
 	}
+	// A rename moves the directory entry, and with it the identity a stat
+	// of the path reports. The open file follows.
+	moved := []byte("/persist/identity-moved.txt")
+	if renamed := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: path, Target: moved}); renamed.Status != vfs.StatusOK {
+		t.Fatalf("rename = %d", renamed.Status)
+	}
+	afterPath := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: moved})
+	afterHandle := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Handle: opened.Handle})
+	if afterPath.Status != vfs.StatusOK || afterHandle.Status != vfs.StatusOK || afterPath.Node == 0 || afterHandle.Node != afterPath.Node || afterHandle.Size != 1 {
+		t.Fatalf("identity after rename: path=%d handle=%d (was %d)", afterPath.Node, afterHandle.Node, before.Node)
+	}
 }

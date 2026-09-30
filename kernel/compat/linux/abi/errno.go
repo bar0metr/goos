@@ -5,6 +5,7 @@ package abi
 const (
 	EPERM        Errno = 1
 	ENOENT       Errno = 2
+	ESRCH        Errno = 3
 	EIO          Errno = 5
 	EBADF        Errno = 9
 	EAGAIN       Errno = 11

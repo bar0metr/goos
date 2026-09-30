@@ -8,6 +8,7 @@ package main
 // from the continuation and keeps nothing in locals across an exchange.
 
 import (
+	"goos/internal/limits"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/mm/vm"
@@ -241,7 +242,7 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 		if description.Flags&linuxabi.OpenAccess == linuxabi.OpenWriteOnly {
 			return linuxErrno(linuxabi.EBADF)
 		}
-		limit, errno := handler.readLimit(request, vector, linuxIOBytes)
+		limit, _, errno := handler.readLimit(request, vector, linuxIOBytes)
 		if errno != 0 || limit == 0 {
 			return linuxErrno(errno)
 		}
@@ -272,7 +273,15 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 	}
 	// The position moved in the VFS whether or not the copy succeeds.
 	description.Offset += reply.Size
-	if !handler.deliverRead(request, vector, nil, object, reply.Size) {
+	var wire []byte
+	if vector {
+		// The vector is read again: the copy made before the wait shared
+		// its scratch with nothing, but the wait ended this entry.
+		if wire, errno = handler.copyIOVec(request); errno != 0 {
+			return linuxErrno(errno)
+		}
+	}
+	if !handler.deliver(request, wire, 0, nil, object, reply.Size) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{Value: reply.Size}
@@ -432,6 +441,8 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		return handler.status(request, int32(arguments[0]), 0, arguments[1], 0, true)
 	case linuxabi.SysNewfstatat:
 		return handler.status(request, int32(arguments[0]), arguments[1], arguments[2], arguments[3], false)
+	case linuxabi.SysGetdents64:
+		return handler.getdents(request)
 	case linuxabi.SysLseek:
 		return handler.seek(request)
 	case linuxabi.SysGetcwd:
@@ -484,9 +495,6 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 	}
 	if !active {
 		emptyPath, errno := linuxcompat.StatFlags(flags)
-		if errno == 0 && !vm.CanCopyOut(handler.root, buffer, linuxcompat.StatSize) {
-			errno = linuxabi.EFAULT
-		}
 		if errno == 0 && !descriptor && emptyPath {
 			// AT_EMPTY_PATH with an empty path names dirfd itself.
 			var raw []byte
@@ -580,6 +588,129 @@ func (handler *linuxCallHandler) deliverStatus(buffer uint64, described linuxcom
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
+}
+
+var linuxDirent [linuxcompat.MaxDirentSize]byte
+
+// direntRetry marks, in the value one stage hands the next, that the entry
+// at the current position has a name too long for a reply message and must
+// be asked for again with a memory object to return it in. The rest of the
+// value is the bytes already written to the caller's buffer.
+const direntRetry = uint64(1) << 63
+
+// getdents fills the caller's buffer with whole linux_dirent64 records, one
+// VFS exchange per entry. The listing position is the VFS cursor, kept in
+// the directory's description and returned as each record's d_off, so lseek
+// can rewind or resume it. GoOS directories hold no "." or ".." entries and
+// none are made up.
+//
+// A record that does not fit ends the call: EINVAL when it is the first,
+// the bytes so far otherwise. Its entry stays unread for the next call.
+func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcompat.Result {
+	_, active, errno := handler.vfsStage(request)
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0])
+	if !found {
+		return linuxErrno(linuxabi.EBADF)
+	}
+	if description.Kind != linuxcompat.FDVFSDirectory {
+		return linuxErrno(linuxabi.ENOTDIR)
+	}
+	buffer, capacity := request.Arguments[1], request.Arguments[2]
+	if !active {
+		path, named := linuxcompat.DirectoryPath(handler.root, description.Object)
+		if !named {
+			return linuxErrno(linuxabi.EBADF)
+		}
+		if errno := handler.vfsBegin(request, path, nil, 0); errno != 0 {
+			return linuxErrno(errno)
+		}
+	}
+	path, _ := linuxcompat.SyscallContinuations.Paths(handler.task)
+	for {
+		pending, _ := linuxcompat.SyscallContinuations.Pending(handler.task)
+		written, retry := pending.Partial&^direntRetry, pending.Partial&direntRetry != 0
+		attachment := attachPaths
+		if retry {
+			attachment = attachName
+		}
+		reply, errno, blocked := handler.vfsExchange(vfs.Request{Operation: vfs.OperationReadDir, Path: path, Offset: description.Offset, NameReturn: retry}, attachment)
+		if blocked {
+			return linuxBlocked
+		}
+		if errno != 0 {
+			return direntResult(written, errno)
+		}
+		name := reply.Name
+		switch {
+		case reply.Status == vfs.StatusNotFound:
+			// The end of the directory.
+			handler.vfsFinish()
+			return linuxcompat.Result{Value: written}
+		case reply.Status == vfs.StatusNameTooLong && !retry:
+			if errno := handler.vfsNext(pending.Stage, pending.Stage+1, written|direntRetry); errno != 0 {
+				return direntResult(written, errno)
+			}
+			continue
+		case reply.Status != vfs.StatusOK:
+			handler.vfsFinish()
+			return direntResult(written, linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
+		case reply.AttachedName != 0:
+			name = handler.returnedName(int(reply.AttachedName))
+		}
+		size, encoded := linuxcompat.EncodeDirent(linuxDirent[:], reply.Node, uint64(reply.Cursor), reply.Kind, name)
+		switch {
+		case !encoded:
+			errno = linuxabi.EIO
+		case uint64(size) > capacity || written > capacity-uint64(size):
+			errno = linuxabi.EINVAL
+		case !vm.CopyOut(handler.root, buffer+written, linuxDirent[:size]):
+			errno = linuxabi.EFAULT
+		}
+		if errno != 0 {
+			handler.vfsFinish()
+			return direntResult(written, errno)
+		}
+		description.Offset, written = uint64(reply.Cursor), written+uint64(size)
+		if pending.Stage >= linuxcompat.MaxDirentExchanges {
+			handler.vfsFinish()
+			return linuxcompat.Result{Value: written}
+		}
+		if errno := handler.vfsNext(pending.Stage, pending.Stage+1, written); errno != 0 {
+			return direntResult(written, errno)
+		}
+	}
+}
+
+// direntResult reports the records already delivered when a later entry
+// fails. The failure reaches the caller on its next call, as on Linux.
+func direntResult(written uint64, errno linuxabi.Errno) linuxcompat.Result {
+	if written != 0 {
+		return linuxcompat.Result{Value: written}
+	}
+	return linuxErrno(errno)
+}
+
+// returnedName reads a listed name the VFS wrote to the start of the I/O
+// buffer.
+func (handler *linuxCallHandler) returnedName(size int) []byte {
+	state, found := linuxcompat.FindProcess(handler.root)
+	owner, owned := processRegistry.ByRoot(handler.root)
+	if !found || !owned || size > limits.NameMax {
+		return nil
+	}
+	object, ready := ioBuffer(state, owner)
+	if !ready {
+		return nil
+	}
+	frame, located := object.Frame(vm.PhysicalPage, 0)
+	page, mapped := vm.PhysicalPage(frame)
+	if !located || !mapped {
+		return nil
+	}
+	return page[:size]
 }
 
 // A seek from the end is two exchanges: the file length, then the seek.

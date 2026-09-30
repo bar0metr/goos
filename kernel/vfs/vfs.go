@@ -137,7 +137,7 @@ type openFile struct {
 	// identity is the node the path named when the file was opened. A
 	// backend with open objects hands out a cookie for node, which differs
 	// from what a stat of the path reports; identity is the value both
-	// agree on for as long as the file keeps its name.
+	// agree on. A rename moves it with the name.
 	identity   ramfs.NodeID
 	offset     uint64
 	generation uint32
@@ -731,8 +731,37 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
 	if status == StatusOK {
 		namespace.invalidate()
+		namespace.follow(sourceMount, node, target)
 	}
 	return status
+}
+
+// follow gives files opened under a name that just moved the identity of the
+// new name. A backend whose node IDs are directory locations changes the ID a
+// stat of the path reports when the entry moves; an open file has to change
+// with it, or a stat by handle and a stat by path would stop agreeing.
+func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, target []byte) {
+	held := false
+	for index := range namespace.files {
+		entry := &namespace.files[index]
+		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+			held = true
+			break
+		}
+	}
+	if !held {
+		return
+	}
+	targetMount, moved, status := namespace.Resolve(target)
+	if status != StatusOK || targetMount != mountIndex || moved == previous {
+		return
+	}
+	for index := range namespace.files {
+		entry := &namespace.files[index]
+		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+			entry.identity = moved
+		}
+	}
 }
 
 // Replace moves the regular file path onto target within one filesystem
@@ -786,6 +815,9 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	}
 	status = mapStatus(replacer.ReplaceName(node, parent, name))
 	namespace.invalidate()
+	if status == StatusOK {
+		namespace.follow(sourceMount, node, target)
+	}
 	return status
 }
 

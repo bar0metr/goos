@@ -73,9 +73,9 @@ layer uses it for `lseek` from the end and for appending writes.
 
 Version 13 returns a node's identity with a `Stat` and with a directory entry,
 in the reply field an `Open` uses for its handle (ADR 0142). Two answers about
-one file of a mount carry the same value. An open file keeps the identity its
-path had when it was opened, so a stat by handle and a stat by path agree on
-filesystems that name open files by a cookie.
+one file of a mount carry the same value. An open file keeps the identity of
+its path and takes the new one when it is renamed, so a stat by handle and a
+stat by path agree on filesystems that name open files by a cookie.
 
 The validation build answers one name late: a request for
 `/tmp/.validation-vfs-stall` gets its reply only when the same session sends

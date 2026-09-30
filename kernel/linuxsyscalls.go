@@ -38,8 +38,8 @@ func (handler *linuxCallHandler) Read(request linuxcompat.Request) linuxcompat.R
 	return handler.read(request, false)
 }
 
-// Readv reads into a bounded vector. A stream fills the elements in order
-// with what one read delivers; a file does the same with one VFS read.
+// Readv reads into a bounded vector: a stream's waiting bytes or one VFS
+// read of a file, delivered to the elements in order.
 func (handler *linuxCallHandler) Readv(request linuxcompat.Request) linuxcompat.Result {
 	return handler.read(request, true)
 }
@@ -58,51 +58,64 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 	if errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
-	limit, errno := handler.readLimit(request, vector, stream.AtomicWrite)
+	limit, wire, errno := handler.readLimit(request, vector, stream.Capacity)
 	if errno != 0 || limit == 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		count, status := endpoint.Read(linuxIOBuffer[:limit])
+	// One call delivers what the stream holds now, up to the request. It
+	// waits only while it has nothing to return.
+	delivered := uint64(0)
+	for retries := 0; delivered < limit && retries < 2; {
+		count, status := endpoint.Read(linuxIOBuffer[:min64(limit-delivered, stream.AtomicWrite)])
 		switch status {
 		case stream.StatusOK:
 			wakeStreamWaiters(streamID, 1, ipc.WaitMessage)
-			if !handler.deliverRead(request, vector, linuxIOBuffer[:count], nil, uint64(count)) {
+			if !handler.deliver(request, wire, delivered, linuxIOBuffer[:count], nil, uint64(count)) {
 				return linuxcompat.Result{Errno: linuxabi.EFAULT}
 			}
-			return linuxcompat.Result{Value: uint64(count)}
+			delivered += uint64(count)
 		case stream.StatusPeerClosed:
-			return linuxcompat.Result{}
+			return linuxcompat.Result{Value: delivered}
 		case stream.StatusWouldBlock:
+			if delivered != 0 {
+				return linuxcompat.Result{Value: delivered}
+			}
 			blocked, retry := handler.blockStream(request, endpoint, streamID, 0, 0)
 			if blocked.Action == linuxabi.ActionBlock || !retry {
 				return blocked
 			}
+			retries++
 		default:
+			if delivered != 0 {
+				return linuxcompat.Result{Value: delivered}
+			}
 			return linuxcompat.Result{Errno: linuxcompat.StreamReadErrno(status)}
 		}
 	}
-	return linuxcompat.Result{Errno: linuxabi.EIO}
+	if delivered == 0 {
+		return linuxcompat.Result{Errno: linuxabi.EIO}
+	}
+	return linuxcompat.Result{Value: delivered}
 }
 
 // readLimit checks where a read or readv will put its bytes and returns how
-// many one call may deliver, at most bound. The destination is checked
-// before any byte leaves its source, so a bad pointer costs the caller no
-// data.
-func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector bool, bound uint64) (uint64, linuxabi.Errno) {
+// many one call may deliver, at most bound, with the copied vector of a
+// readv. The destination is checked before any byte leaves its source, so a
+// bad pointer costs the caller no data.
+func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector bool, bound uint64) (uint64, []byte, linuxabi.Errno) {
 	if !vector {
 		address, limit := request.Arguments[1], request.Arguments[2]
 		if limit > bound {
 			limit = bound
 		}
 		if limit != 0 && !vm.CanCopyOut(handler.root, address, limit) {
-			return 0, linuxabi.EFAULT
+			return 0, nil, linuxabi.EFAULT
 		}
-		return limit, 0
+		return limit, nil, 0
 	}
 	wire, errno := handler.copyIOVec(request)
 	if errno != 0 {
-		return 0, errno
+		return 0, nil, errno
 	}
 	total := uint64(0)
 	for index := 0; index < len(wire)/linuxabi.IOVecSize && total < bound; index++ {
@@ -111,11 +124,11 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 			length = bound - total
 		}
 		if length != 0 && !vm.CanCopyOut(handler.root, base, length) {
-			return 0, linuxabi.EFAULT
+			return 0, nil, linuxabi.EFAULT
 		}
 		total += length
 	}
-	return total, 0
+	return total, wire, 0
 }
 
 // copyIOVec copies and validates the vector of a readv or writev.
@@ -134,39 +147,33 @@ func (handler *linuxCallHandler) copyIOVec(request linuxcompat.Request) ([]byte,
 	return wire, 0
 }
 
-// deliverRead copies what a read produced to the caller: to one address, or
-// across the vector's elements in order. The bytes come from data, or from
-// the I/O object when data is nil; size is how many there are.
-func (handler *linuxCallHandler) deliverRead(request linuxcompat.Request, vector bool, data []byte, object *shmem.Object, size uint64) bool {
-	if !vector {
-		return handler.deliver(data, object, 0, request.Arguments[1], size)
-	}
-	wire, errno := handler.copyIOVec(request)
-	if errno != 0 {
-		return false
-	}
-	delivered := uint64(0)
-	for index := 0; index < len(wire)/linuxabi.IOVecSize && delivered < size; index++ {
-		base, length := linuxcompat.IOVecEntry(wire, index)
-		if length > size-delivered {
-			length = size - delivered
+// deliver copies length bytes of a read to the caller, starting at byte
+// position of the destination: the address a read names, or the elements of
+// a readv vector in order when wire is not nil. The bytes come from data, or
+// from the I/O object at the same position when object is not nil.
+func (handler *linuxCallHandler) deliver(request linuxcompat.Request, wire []byte, position uint64, data []byte, object *shmem.Object, length uint64) bool {
+	for moved := uint64(0); moved < length; {
+		address, room := request.Arguments[1]+position+moved, length-moved
+		if wire != nil {
+			piece, remaining, found := linuxcompat.VectorPiece(wire, position+moved)
+			if !found {
+				return false
+			}
+			address = piece
+			if remaining < room {
+				room = remaining
+			}
 		}
-		if !handler.deliver(data, object, delivered, base, length) {
+		if object != nil {
+			if !handler.ioTransfer(object, position+moved, address, room, true) {
+				return false
+			}
+		} else if !vm.CopyOut(handler.root, address, data[moved:moved+room]) {
 			return false
 		}
-		delivered += length
+		moved += room
 	}
-	return delivered == size
-}
-
-func (handler *linuxCallHandler) deliver(data []byte, object *shmem.Object, offset uint64, address uint64, length uint64) bool {
-	if length == 0 {
-		return true
-	}
-	if object != nil {
-		return handler.ioTransfer(object, offset, address, length, true)
-	}
-	return vm.CopyOut(handler.root, address, data[offset:offset+length])
+	return true
 }
 
 func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.Result {

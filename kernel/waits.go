@@ -9,6 +9,7 @@ import (
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
 	"goos/kernel/diag"
@@ -414,6 +415,12 @@ func expireWaitAny() {
 	for index := 0; index < count && index < len(waitAnyCompletions); index++ {
 		if diag.Enabled {
 			trace(diag.WaitTimeout, pidOfTask(waitAnyCompletions[index].Task), uint64(waitAnyCompletions[index].Task), 0, 0)
+		}
+		// A sleeping Linux task resumes through its continuation, which
+		// accepts only the wait it is in.
+		if resumeLinuxIPCWaiter(waitAnyCompletions[index].Task, linuxcompat.WakeTimeout) {
+			waitAnyCompletions[index] = kernelwait.Completion{}
+			continue
 		}
 		amd64.WakeTaskID(uint64(waitAnyCompletions[index].Task))
 		waitAnyCompletions[index] = kernelwait.Completion{}

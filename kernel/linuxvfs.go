@@ -111,6 +111,10 @@ const (
 	attachSource
 	// attachSink lends the I/O buffer for the VFS to fill: a file read.
 	attachSink
+	// attachName lends the I/O buffer for a listed name too long for a
+	// reply message. It also carries the request's path when that is too
+	// long for the request message, as a native client's path page does.
+	attachName
 )
 
 // vfsExchange runs the exchange of the current stage. It sends operation
@@ -168,6 +172,13 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 		case attachSink:
 			rights |= capability.Write
 			object, granted = lendIOBuffer(state, owner, rights)
+		case attachName:
+			rights |= capability.Write
+			object, granted = lendIOBuffer(state, owner, rights)
+			if buffer, found := ioBuffer(state, owner); granted && found && !vfs.FitsInline(operation) {
+				copyToObject(buffer, 0, operation.Path)
+				operation.PathsAttached = true
+			}
 		default:
 			object, granted = lendIOBuffer(state, owner, rights)
 		}
@@ -387,8 +398,9 @@ func (handler *linuxCallHandler) dropAttachedHandles() {
 	}
 }
 
-// resumeLinuxIPCWaiter routes a channel wake to the continuation of a Linux
-// task. It reports false for a native task, which the caller wakes itself.
+// resumeLinuxIPCWaiter routes a channel wake or an expired deadline to the
+// continuation of a Linux task. It reports false for a native task, which
+// the caller wakes itself.
 func resumeLinuxIPCWaiter(task sched.TaskID, reason linuxcompat.WakeReason) bool {
 	pending, found := linuxcompat.SyscallContinuations.Pending(task)
 	if !found {

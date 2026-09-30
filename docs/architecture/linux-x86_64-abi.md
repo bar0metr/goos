@@ -28,14 +28,21 @@ It describes current code, not the final release target.
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `readv(19)` | implemented | streams and files; at most 16 elements; one read fills the elements in order |
+| `readv(19)` | implemented | streams and files; at most 16 elements and 64 KiB per call, filled in order |
 | `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call, short count when the stream fills |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations rejected |
 | `exit(60)` | implemented | exits the calling task |
+| `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
 | `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
+| `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
+| `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
 | `exit_group(231)` | implemented | retires every task in the process |
+| `nanosleep(35)` | implemented | a timer deadline, never early; no signal interrupts it |
+| `getpid(39)`, `gettid(186)`, `getppid(110)` | implemented | the compatibility PID; the parent is 1 |
+| `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
 | `getcwd(79)`, `chdir(80)` | implemented | the working directory; `chdir` requires an existing directory |
+| `getuid(102)`, `getgid(104)`, `geteuid(107)`, `getegid(108)` | implemented | 1000 |
 | `rename(82)`, `renameat(264)`, `renameat2(316)` | partial | files replace an existing target, directories need a free name; `renameat2` takes no flags |
 | `mkdir(83)`, `mkdirat(258)` | implemented | the mode is ignored |
 | `rmdir(84)`, `unlink(87)`, `unlinkat(263)` | implemented | a name some session holds open is `EBUSY` |
@@ -148,7 +155,22 @@ against another writer.
 | `rmdir` | `ENOTDIR` for a file, `ENOTEMPTY`, `EBUSY` for a mount point |
 | `rename` | `EISDIR` for a file onto a directory, `EEXIST` for a directory onto an existing name, `EBUSY` for an open target, `EXDEV` across mounts |
 
-`getdents64`, `ftruncate`, `fsync`, and `statx` return `ENOSYS`.
+`ftruncate`, `fsync`, and `statx` return `ENOSYS`.
+
+## Directory listing
+
+`getdents64` fills the buffer with whole `linux_dirent64` records, one VFS
+exchange per entry (ADR 0143). `d_ino` is the identity `st_ino` reports,
+`d_off` the position after the entry, `d_type` `DT_REG` or `DT_DIR`. The
+position lives in the directory's description: `lseek` to 0 rewinds and to a
+`d_off` resumes. A name over 152 bytes comes back through the process's I/O
+memory object. GoOS directories have no `.` and `..`, and the listing has
+none.
+
+A buffer too small for the next record is `EINVAL` when nothing was written
+and ends the call otherwise. A descriptor that is not a directory is
+`ENOTDIR`. One call runs at most 128 exchanges and may return fewer records
+than the buffer holds.
 
 ## File status
 
@@ -167,13 +189,38 @@ written out from the Linux x86_64 header (ADR 0142).
 A file descriptor is stat-ed through its VFS handle, a directory descriptor by
 the path it keeps, a stream without the VFS. `fstat` of a closed descriptor is
 `EBADF`. A path that names a file and ends in a slash is `ENOTDIR`. An
-unwritable buffer is `EFAULT`, checked before the VFS is asked. An unknown
-`newfstatat` flag is `EINVAL`.
+unwritable buffer is `EFAULT`, reported after the path errors as on Linux. An
+unknown `newfstatat` flag is `EINVAL`.
 
-`readv` reads once and fills the vector's elements in order. Every element is
-checked for writability before any byte leaves its source. A stream delivers
-at most 256 bytes per call and a file at most 64 KiB; musl stdio reads a file
-through it.
+## Vector I/O
+
+`readv` and `writev` take at most 16 elements and move at most 64 KiB per
+call (ADR 0144). The kernel copies the element array into fixed storage and
+checks every element before a byte moves: a count over 16 or a negative
+length is `EINVAL`, an element outside user memory `EFAULT`. Elements are
+used in order and empty ones skipped.
+
+A stream `readv` or `read` delivers what the stream holds, up to the request,
+and blocks only while it has nothing. A stream `writev` or `write` returns
+the count so far when the stream fills. On a file each is one VFS read or
+write through the process's I/O memory object. musl stdio uses both calls.
+
+## Identity, time, and limits
+
+These calls answer from kernel state and ask no service (ADR 0145).
+
+| Call | Answer |
+| --- | --- |
+| `getpid`, `gettid` | the compatibility PID, 2 to 32767 |
+| `getppid` | 1 |
+| `getuid`, `geteuid`, `getgid`, `getegid` | 1000 |
+| `uname` | `Linux`, `goos`, `6.0.0-goos`, `GoOS <release> Linux ABI`, `x86_64`, `(none)` |
+| `clock_gettime` | clocks 0 and 5 read realtime; 1, 4, 6, and 7 read monotonic; others `EINVAL` |
+| `nanosleep` | sleeps whole ticks, rounded up plus one; returns 0; bad fields `EINVAL` |
+| `prlimit64` | `RLIMIT_NOFILE` 64, `RLIMIT_STACK` 8 MiB, `RLIMIT_DATA` 64 MiB, `RLIMIT_CORE` 0, others unlimited |
+
+`prlimit64` refuses a new limit with `EPERM`, another PID with `ESRCH`, and a
+resource over 15 with `EINVAL`. No signal exists to interrupt a sleep.
 
 ## ELF status
 
@@ -304,9 +351,16 @@ expected type, size, link count, and mode, and `ENOENT`, `ENOTDIR`, `EBADF`,
 and reads it back through `fgets` and `fread`, which is `readv`, and reads end
 of input from standard input the same way.
 
+It lists a directory of three files and a subdirectory through `getdents64`
+with a 256-byte buffer, twice with a rewind between, and requires every name,
+each type, a 200-byte name, and `d_ino` equal to `st_ino`. It writes a file
+with a three-element `writev` and reads it back with a two-element `readv`.
+It reads its PID, thread, parent, and user identity, the system name, both
+clocks, and a limit, and sleeps 20 ms, which the monotonic clock must show.
+
 PID 1 compares the whole output, requires exit status zero, and publishes
 `LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
-and `LINUX_STAT_OK`. The same binary prints the same lines on Linux;
+`LINUX_STAT_OK`, `LINUX_DIRENT_OK`, and `LINUX_SYSTEM_OK`. The same binary prints the same lines on Linux;
 `userspace/linux/README.md` holds that trace and the three calls whose results
 differ.
 
@@ -321,7 +375,9 @@ the session it was launched with and gets no new one.
 Host tests cover the pieces that need no CPU: reply classification, session
 correlation and failure, open flags and the open plan, seek arithmetic,
 removal checks, directory records, two-path continuations, the `struct stat`
-layout with a fuzz target, the VFS-to-status translation, path resolution
+layout with a fuzz target, the VFS-to-status translation, directory records
+with a fuzz target, vector positions, clock mapping, sleep rounding, the
+system name, resource limits, path resolution
 with its bounds and a fuzz target, vector validation,
 compatibility PID allocation, descriptor close, and the fixture's checksum and
 ELF acceptance.
