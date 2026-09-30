@@ -24,6 +24,9 @@ type Result struct {
 	Value  uint64
 	Errno  abi.Errno
 	Action uint64
+	Entry  uint64
+	Stack  uint64
+	Root   uint64
 }
 
 func (result Result) Register() uint64 {
@@ -58,6 +61,7 @@ type Handler interface {
 	Mprotect(Request) Result
 	Madvise(Request) Result
 	ArchPrctl(Request) Result
+	Execve(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -160,6 +164,8 @@ func route(request Request, handler Handler) Result {
 			return handler.Madvise(request)
 		case abi.SysArchPrctl:
 			return handler.ArchPrctl(request)
+		case abi.SysExecve:
+			return handler.Execve(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

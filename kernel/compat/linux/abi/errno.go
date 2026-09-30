@@ -8,6 +8,8 @@ const (
 	ESRCH        Errno = 3
 	EIO          Errno = 5
 	ENXIO        Errno = 6
+	E2BIG        Errno = 7
+	ENOEXEC      Errno = 8
 	EBADF        Errno = 9
 	EAGAIN       Errno = 11
 	ENOMEM       Errno = 12

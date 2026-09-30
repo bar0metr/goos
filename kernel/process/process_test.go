@@ -1,6 +1,7 @@
 package process
 
 import (
+	"goos/kernel/mm/region"
 	"goos/kernel/sched"
 	"testing"
 )
@@ -16,6 +17,22 @@ func TestProcessOwnsAddressSpaceAndTasks(t *testing.T) {
 	}
 	if process.TaskCount() != 1 {
 		t.Fatalf("task count = %d", process.TaskCount())
+	}
+}
+
+func TestReplaceAddressSpacePreservesProcessIdentity(t *testing.T) {
+	value, ok := New(7, ABILinuxX8664, AddressSpace{Root: 0x1000})
+	if !ok {
+		t.Fatal("process creation failed")
+	}
+	value.SetName([]byte("old"))
+	var regions region.Map
+	regions.Init(0x1000, 0x9000)
+	if !value.ReplaceAddressSpace(AddressSpace{Root: 0x2000}, &regions) {
+		t.Fatal("replacement failed")
+	}
+	if value.ID() != 7 || value.ABI() != ABILinuxX8664 || value.AddressSpace().Root != 0x2000 || string(value.Name()) != "old" {
+		t.Fatalf("process changed: id=%d abi=%d root=%#x name=%q", value.ID(), value.ABI(), value.AddressSpace().Root, value.Name())
 	}
 }
 

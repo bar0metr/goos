@@ -168,7 +168,6 @@ func TestBuildInitialStackRejectsInvalidAndOversizedInput(t *testing.T) {
 		input Startup
 		want  StackError
 	}{
-		{name: "zero arguments", input: badStartup{}, want: StackTooManyArguments},
 		{name: "too many arguments", input: badStartup{args: MaxArguments + 1}, want: StackTooManyArguments},
 		{name: "too much environment", input: badStartup{args: 1, arg: []byte("x"), envs: MaxEnvironment + 1}, want: StackTooManyEnvironment},
 		{name: "NUL argument", input: badStartup{args: 1, arg: []byte{'x', 0}}, want: StackStringInvalid},
@@ -180,6 +179,31 @@ func TestBuildInitialStackRejectsInvalidAndOversizedInput(t *testing.T) {
 	}
 	if _, failure := BuildInitialStack(target[:128], vm.UserStackTop, testImage(), testStartup(t), nil); failure != StackTooLarge {
 		t.Fatalf("small target failure = %d", failure)
+	}
+}
+
+func TestBuildInitialStackAcceptsEmptyArgumentVector(t *testing.T) {
+	var target [MaxInitialStackSize]byte
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), badStartup{}, nil)
+	if failure != StackOK || binary.LittleEndian.Uint64(stack.Data[:8]) != 0 {
+		t.Fatalf("failure=%d argc=%d", failure, binary.LittleEndian.Uint64(stack.Data[:8]))
+	}
+}
+
+type rawExecStartup struct{ badStartup }
+
+func (rawExecStartup) Environment(int) ([]byte, bool) { return []byte("without-equals"), true }
+
+func TestBuildInitialStackPreservesRawEnvironment(t *testing.T) {
+	var target [MaxInitialStackSize]byte
+	input := rawExecStartup{badStartup{args: 1, envs: 1, arg: []byte{}}}
+	stack, failure := BuildInitialStack(target[:], vm.UserStackTop, testImage(), input, nil)
+	if failure != StackOK {
+		t.Fatalf("failure = %d", failure)
+	}
+	word := func(offset int) uint64 { return binary.LittleEndian.Uint64(stack.Data[offset:]) }
+	if got := stackString(t, stack, word(24)); got != "without-equals" {
+		t.Fatalf("envp[0] = %q", got)
 	}
 }
 

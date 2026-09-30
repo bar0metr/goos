@@ -83,6 +83,13 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 			linuxcompat.NoteBadPointer(linuxabi.Syscall(frame.Number))
 		}
 	}
+	if result.Action == linuxabi.ActionExec {
+		if result.Entry == 0 || result.Stack == 0 || result.Root == 0 {
+			result = linuxcompat.Result{Errno: linuxabi.EIO}
+		} else {
+			frame.UserIP, frame.UserStack, frame.Root = result.Entry, result.Stack, result.Root
+		}
+	}
 	frame.Return, frame.Action = result.Register(), result.Action
 	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
 		linuxSyscallFrameRejections++

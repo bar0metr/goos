@@ -23,6 +23,20 @@ type SignalState struct {
 	actions [abi.SignalCount][SignalActionSize]byte
 }
 
+// ResetForExec restores caught signals to their default disposition. Ignored
+// signals and the blocked mask survive image replacement.
+func (state *SignalState) ResetForExec() {
+	if state == nil {
+		return
+	}
+	for index := range state.actions {
+		action := &state.actions[index]
+		if binary.LittleEndian.Uint64(action[:8]) != 1 {
+			*action = [SignalActionSize]byte{}
+		}
+	}
+}
+
 // uncatchable are the mask bits of SIGKILL and SIGSTOP, which no process can
 // block.
 const uncatchable = uint64(1)<<(abi.SignalKill-1) | uint64(1)<<(abi.SignalStop-1)

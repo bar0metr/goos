@@ -223,6 +223,10 @@ run '/system/linux/abi-probe random'
 expect '^random: hardware$' 'random source'
 clean 'random source'
 
+run '/system/linux/abi-probe exec'
+expect '^exec ok pid [0-9]*$' 'in-place Linux image replacement'
+clean 'in-place Linux image replacement'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'

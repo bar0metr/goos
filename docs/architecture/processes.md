@@ -134,6 +134,12 @@ state also names the process's file I/O memory object, created at its first file
 read or write (ADR 0141), and holds the signal dispositions and blocked mask
 the program registered, which nothing acts on (ADR 0151).
 
+A Linux `execve` prepares a second address space under the same Process and
+task (ADR 0157). Commit replaces the scheduler root, Process root, region map,
+compatibility root, brk bounds, and entry state without changing Process ID,
+task ownership, family identity, quotas, handles, or cwd. The old address space
+is inactive before reclamation begins.
+
 ## Teardown liveness
 
 Process teardown separates what other parties observe from what merely reclaims

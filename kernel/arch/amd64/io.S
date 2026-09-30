@@ -25,6 +25,7 @@
 .set GOOS_LINUX_IRET_BASE, GOOS_LINUX_FRAME_RESERVE + 120
 .set GOOS_LINUX_ACTION_EXIT, 1
 .set GOOS_LINUX_ACTION_BLOCK, 2
+.set GOOS_LINUX_ACTION_EXEC, 3
 
 // The console ring is a power of two so the wrap is a mask. It holds two of
 // the longest lines the terminal accepts (4096 bytes), so a pasted line
@@ -880,9 +881,12 @@ goos_linux_syscall_entry:
     je .linux_user_exit
     cmpq $GOOS_LINUX_ACTION_BLOCK, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
     je .linux_user_block
+    cmpq $GOOS_LINUX_ACTION_EXEC, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
+    je .linux_user_exec
+.linux_user_return:
     movq GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_RETURN(%rsp), %rax
     movq %rax, GOOS_LINUX_SAVED_RAX(%rsp)
-    movq GOOS_LINUX_SAVED_RCX(%rsp), %rax
+    movq GOOS_LINUX_FRAME_BASE+56(%rsp), %rax
     movq %rax, GOOS_LINUX_IRET_BASE+0(%rsp)
     movq $0x23, GOOS_LINUX_IRET_BASE+8(%rsp)
     movq GOOS_LINUX_SAVED_R11(%rsp), %rax
@@ -910,6 +914,24 @@ goos_linux_syscall_entry:
     popq %r15
     GOOS_RETURN_LINUX
     iretq
+.linux_user_exec:
+    // A new image starts with no register state from the program it replaced.
+    movq $0, GOOS_LINUX_SAVED_RAX(%rsp)
+    movq $0, GOOS_LINUX_SAVED_RCX(%rsp)
+    movq $0, GOOS_LINUX_SAVED_RDX(%rsp)
+    movq $0, GOOS_LINUX_FRAME_RESERVE+24(%rsp)
+    movq $0, GOOS_LINUX_FRAME_RESERVE+32(%rsp)
+    movq $0, GOOS_LINUX_SAVED_RSI(%rsp)
+    movq $0, GOOS_LINUX_SAVED_RDI(%rsp)
+    movq $0, GOOS_LINUX_SAVED_R8(%rsp)
+    movq $0, GOOS_LINUX_SAVED_R9(%rsp)
+    movq $0, GOOS_LINUX_SAVED_R10(%rsp)
+    movq $0, GOOS_LINUX_SAVED_R11(%rsp)
+    movq $0, GOOS_LINUX_FRAME_RESERVE+88(%rsp)
+    movq $0, GOOS_LINUX_FRAME_RESERVE+96(%rsp)
+    movq $0, GOOS_LINUX_FRAME_RESERVE+104(%rsp)
+    movq $0, GOOS_LINUX_FRAME_RESERVE+112(%rsp)
+    jmp .linux_user_return
 .linux_user_block:
     // Save an ordinary scheduler context that retries the two-byte SYSCALL
     // instruction after its continuation is woken. The continuation's Issued
@@ -1759,6 +1781,36 @@ goos_task_fs_base_set:
 	popfq
 	movq $1, %rax
 .task_fs_base_set_done:
+	retq
+
+.global goos_task_root_replace
+goos_task_root_replace:
+	xorq %rax, %rax
+	movl %ecx, %r8d
+	testl %r8d, %r8d
+	jz .task_root_replace_done
+	cmpl $64, %r8d
+	ja .task_root_replace_done
+	testq %rdx, %rdx
+	jz .task_root_replace_done
+	decl %r8d
+	movq %rcx, %r9
+	shrq $32, %r9
+	leaq goos_task_generations(%rip), %r10
+	cmpq (%r10,%r8,8), %r9
+	jne .task_root_replace_done
+	cmpq goos_current_task(%rip), %r8
+	jne .task_root_replace_done
+	btq %r8, goos_task_dead_mask(%rip)
+	jc .task_root_replace_done
+	pushfq
+	cli
+	leaq goos_task_roots(%rip), %r10
+	movq %rdx, (%r10,%r8,8)
+	movq %rdx, goos_linux_entry_data+GOOS_LINUX_ENTRY_PROCESS_ROOT(%rip)
+	popfq
+	movq $1, %rax
+.task_root_replace_done:
 	retq
 
 .global goos_task_fs_base_read

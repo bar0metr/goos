@@ -72,6 +72,39 @@ func TestProcessFDExhaustionIsEMFILE(t *testing.T) {
 	}
 }
 
+func TestExecReplacementPreservesStateAndClosesMarkedDescriptors(t *testing.T) {
+	resetCompatibilityProcesses()
+	data := linuxStartup(t, "/persist/work", [4]handle.ID{11, 12, 13, 14})
+	if !InstallProcess(0x9000, 60, data, StandardStreams{Input: 11, Output: 12, Error: 13}, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	state, _ := FindProcess(0x9000)
+	state.Signals.Mask(abi.SignalSetMask, 7, true)
+	closed, errno := AllocateFD(0x9000, FileDescription{Kind: FDVFSFile, Object: 71}, true)
+	kept, errno2 := AllocateFD(0x9000, FileDescription{Kind: FDVFSFile, Object: 72, Offset: 19}, false)
+	if errno != 0 || errno2 != 0 || !ReplaceRoot(0x9000, 0xa000, 0x800000, 0x4800000) {
+		t.Fatalf("fd=%d,%d errno=%d,%d", closed, kept, errno, errno2)
+	}
+	var handles [LinuxMaxFD]uint64
+	if count := state.CloseOnExecVFS(handles[:]); count != 1 || handles[0] != 71 {
+		t.Fatalf("close handles count=%d handles=%v", count, handles[:count])
+	}
+	released := FileDescription{}
+	state.CloseOnExec(func(description FileDescription) { released = description })
+	replaced, found := FindProcess(0xa000)
+	blocked, _ := replaced.Signals.Mask(0, 0, false)
+	if !found || replaced.PID != state.PID || replaced.FamilyID != state.FamilyID || string(replaced.CWD()) != "/persist/work" || blocked != 7 {
+		t.Fatalf("replaced state = %#v", replaced)
+	}
+	if _, found := replaced.FDs.Lookup(closed); found || released.Object != 71 {
+		t.Fatalf("closed fd remained or released=%#v", released)
+	}
+	if description, found := replaced.FDs.Lookup(kept); !found || description.Object != 72 || description.Offset != 19 {
+		t.Fatalf("retained fd = %#v found=%v", description, found)
+	}
+	resetCompatibilityProcesses()
+}
+
 func linuxStartup(t *testing.T, cwd string, ids [4]handle.ID) startup.Data {
 	t.Helper()
 	var target [startup.MaxSize]byte
