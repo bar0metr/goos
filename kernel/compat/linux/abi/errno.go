@@ -11,6 +11,7 @@ const (
 	E2BIG        Errno = 7
 	ENOEXEC      Errno = 8
 	EBADF        Errno = 9
+	ECHILD       Errno = 10
 	EAGAIN       Errno = 11
 	ENOMEM       Errno = 12
 	EACCES       Errno = 13

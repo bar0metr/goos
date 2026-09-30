@@ -47,6 +47,7 @@ an errno; nothing is accepted and ignored.
 | `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
+| `wait4(61)` | partial | a child by PID or any child; `WNOHANG`; process-group targets, `WUNTRACED`, and `WCONTINUED` `EINVAL`; `rusage` holds user time only |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
 | `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND`; others `EINVAL` |
@@ -75,7 +76,6 @@ BusyBox does about it:
 | `kill(62)`, `tkill(200)`, `tgkill(234)`, `rt_sigreturn(15)`, `sigaltstack(131)` | no signal is sent or delivered; `raise` and `abort` see the refusal |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `wait4(61)` | nothing reaps a child; a zombie goes when its parent exits |
 | `pipe(22)`, `pipe2(293)`, `poll(7)`, `ppoll(271)`, `futex(202)` | no pipes, polling, or threads inside a process |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
@@ -164,6 +164,21 @@ the child exits. The child never shares the parent's memory, so its writes
 stay its own. `clone(SIGCHLD, stack)` is `fork`. A nonzero stack becomes the
 child's stack pointer; one outside the user range is `EINVAL`. Any other flag
 set, including every thread form, is `EINVAL` (ADR 0159).
+
+## Waiting for children
+
+`wait4(pid, status, options, rusage)` reaps a child of the caller: the one
+`pid` names, or any child for -1. A zombie is consumed at once and its PID is
+returned with the wait status: the exit status in bits 8 to 15, or the
+terminating signal in the low seven bits. With only running matches, `WNOHANG`
+returns 0 and a plain call sleeps until a child exits. No matching child is
+`ECHILD`, including after the last one was reaped.
+
+Process-group targets, 0 and below -1, are `EINVAL`, and so are `WUNTRACED`,
+`WCONTINUED`, and unknown options. `__WALL` and `__WNOTHREAD` are accepted.
+An unwritable `status` or `rusage` is `EFAULT` and leaves the child waitable.
+`rusage` reports the child's CPU time as user time with every other field zero
+(ADR 0161).
 
 ## Image replacement
 
@@ -541,8 +556,8 @@ Results a correct Linux program can observe to differ:
 ## Release limits
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
-or not. It has no `PT_INTERP`, dynamic linker, or glibc; no `wait4` and no
-`clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no signal delivery; no pipes
+or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
+and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no signal delivery; no pipes
 created by a Linux process; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs

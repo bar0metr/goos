@@ -39,6 +39,7 @@
  *   fork              create a child and check what it shares and copies
  *   vfork             suspend in vfork until the child exits; clone a child
  *   orphan            a grandchild whose parent exits is reparented to PID 1
+ *   wait              reap children by PID and by any, with and without WNOHANG
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -62,6 +63,7 @@
 #include <sys/sysmacros.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1523,6 +1525,70 @@ static int orphan_test(void)
 	return child > 0 && lseek(fd, 0, SEEK_CUR) == 1 ? 0 : 1;
 }
 
+static int wait_fail(const char *step)
+{
+	printf("wait failed: %s errno=%d\n", step, errno);
+	return 1;
+}
+
+/* wait4 on no child, on a running child with WNOHANG, on an exact PID that is
+ * still running, on a child already reaped, on a process that is no child,
+ * and on any child for one normal exit and one SIGSEGV. */
+static int wait_test(void)
+{
+	struct timespec nap = {0, 50 * 1000 * 1000};
+	struct rusage usage;
+	pid_t first, second, crashed, got;
+	int status, index, seen = 0;
+
+	fflush(stdout);
+	if (!fails(wait4(-1, &status, 0, NULL), ECHILD) || !fails(wait4(-1, &status, WNOHANG, NULL), ECHILD))
+		return wait_fail("no children");
+	if (!fails(wait4(-1, &status, 4, NULL), EINVAL))
+		return wait_fail("options");
+	first = fork();
+	if (first == 0) {
+		nanosleep(&nap, NULL);
+		_exit(7);
+	}
+	if (first < 0 || wait4(first, &status, WNOHANG, NULL) != 0)
+		return wait_fail("WNOHANG on a running child");
+	memset(&usage, 0xff, sizeof usage);
+	if (wait4(first, &status, 0, &usage) != first || !WIFEXITED(status) || WEXITSTATUS(status) != 7 ||
+	    usage.ru_utime.tv_usec < 0 || usage.ru_utime.tv_usec >= 1000000)
+		return wait_fail("exact child");
+	if (!fails(wait4(first, &status, 0, NULL), ECHILD))
+		return wait_fail("second wait");
+	if (!fails(wait4(getppid(), &status, WNOHANG, NULL), ECHILD))
+		return wait_fail("parent is no child");
+	second = fork();
+	if (second == 0)
+		_exit(3);
+	crashed = fork();
+	if (crashed == 0) {
+		*(volatile int *)0 = 1;
+		_exit(0);
+	}
+	if (second < 0 || crashed < 0)
+		return wait_fail("fork");
+	for (index = 0; index < 2; index++) {
+		got = wait4(-1, &status, 0, NULL);
+		if (got == second && WIFEXITED(status) && WEXITSTATUS(status) == 3)
+			seen |= 1;
+		else if (got == crashed && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV)
+			seen |= 2;
+	}
+	if (seen != 3 || !fails(wait4(-1, &status, WNOHANG, NULL), ECHILD))
+		return wait_fail("any child");
+	second = fork();
+	if (second == 0)
+		_exit(0);
+	if (second < 0 || waitpid(second, NULL, 0) != second)
+		return wait_fail("null status");
+	printf("wait ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1556,6 +1622,8 @@ int main(int argc, char **argv)
 			return vfork_test();
 		if (!strcmp(argv[1], "orphan"))
 			return orphan_test();
+		if (!strcmp(argv[1], "wait"))
+			return wait_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

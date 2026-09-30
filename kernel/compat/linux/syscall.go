@@ -64,6 +64,7 @@ type Handler interface {
 	Execve(Request) Result
 	// Fork serves fork, vfork, and the process forms of clone.
 	Fork(Request) Result
+	Wait4(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -170,6 +171,8 @@ func route(request Request, handler Handler) Result {
 			return handler.Execve(request)
 		case abi.SysFork, abi.SysVfork, abi.SysClone:
 			return handler.Fork(request)
+		case abi.SysWait4:
+			return handler.Wait4(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

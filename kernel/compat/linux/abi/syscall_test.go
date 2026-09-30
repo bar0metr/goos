@@ -9,7 +9,7 @@ func TestCanonicalX8664SyscallNumbers(t *testing.T) {
 	}{
 		{SysRead, 0}, {SysWrite, 1}, {SysOpen, 2}, {SysClose, 3}, {SysStat, 4}, {SysFstat, 5}, {SysLstat, 6}, {SysReadv, 19}, {SysNewfstatat, 262}, {SysMmap, 9},
 		{SysMprotect, 10}, {SysMunmap, 11}, {SysBrk, 12}, {SysMadvise, 28},
-		{SysClone, 56}, {SysFork, 57}, {SysVfork, 58}, {SysExecve, 59}, {SysExit, 60}, {SysArchPrctl, 158},
+		{SysClone, 56}, {SysFork, 57}, {SysVfork, 58}, {SysExecve, 59}, {SysExit, 60}, {SysWait4, 61}, {SysArchPrctl, 158},
 		{SysWritev, 20}, {SysGetdents64, 217}, {SysSetTidAddress, 218}, {SysClockGettime, 228}, {SysExitGroup, 231},
 		{SysLseek, 8}, {SysGetcwd, 79}, {SysChdir, 80}, {SysRename, 82}, {SysMkdir, 83}, {SysRmdir, 84}, {SysUnlink, 87},
 		{SysRtSigaction, 13}, {SysRtSigprocmask, 14}, {SysIoctl, 16}, {SysPread64, 17}, {SysPwrite64, 18}, {SysAccess, 21}, {SysSetuid, 105}, {SysSetgid, 106}, {SysGetgroups, 115}, {SysFaccessat, 269}, {SysDup, 32}, {SysDup2, 33}, {SysFcntl, 72}, {SysDup3, 292}, {SysNanosleep, 35}, {SysGetpid, 39}, {SysUname, 63}, {SysGetuid, 102}, {SysGetgid, 104}, {SysGeteuid, 107},

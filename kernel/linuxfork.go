@@ -183,9 +183,9 @@ func abandonFork(pid process.ID, root uint64, child *process.Process, registered
 	}
 }
 
-// exitLinuxProcess records a Linux exit. While other family members still
-// use the family VFS context, the exited process gives up its handle to the
-// shared endpoint without closing it.
+// exitLinuxProcess records a Linux exit and wakes a parent blocked in wait4.
+// While other family members still use the family VFS context, the exited
+// process gives up its handle to the shared endpoint without closing it.
 func exitLinuxProcess(exited *process.Process, code uint64) {
 	root := exited.AddressSpace().Root
 	state, found := linuxcompat.FindProcess(root)
@@ -193,8 +193,10 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 		return
 	}
 	vfsHandle, familyID := state.VFSHandle, state.FamilyID
+	parentPID := linuxcompat.ParentPIDOf(state.PID)
 	releaseVforkParent(state)
 	linuxcompat.ExitProcess(root, linuxcompat.TerminationFromCode(code, exited.CPUTicks()), releaseLinuxDescriptionReference)
+	wakeChildWaiter(parentPID)
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}
