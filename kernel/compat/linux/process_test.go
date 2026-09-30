@@ -382,6 +382,66 @@ func TestExitProcessReleasesHeavyState(t *testing.T) {
 	}
 }
 
+func TestForkProcessSharesDescriptionsAndCopiesState(t *testing.T) {
+	resetCompatibilityProcesses()
+	data := linuxStartup(t, "/persist/work", [4]handle.ID{1, 2, 3, 4})
+	if !InstallProcess(0xa000, 500, data, StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	parent, _ := FindProcess(0xa000)
+	parent.BrkCurrent = 0x602000
+	parent.ClearChildTID = 0x1234
+	if _, errno := parent.Signals.Mask(abi.SignalBlock, 1<<14, true); errno != 0 {
+		t.Fatalf("mask errno = %d", errno)
+	}
+	file, errno := AllocateFD(0xa000, FileDescription{Kind: FDVFSFile, Object: 77}, true)
+	if errno != 0 {
+		t.Fatalf("allocate errno = %d", errno)
+	}
+	record, registered := registerChildForTest(501, parent.PID)
+	if !registered || ForkProcess(0xa000, 0xb000, record, 0) || ForkProcess(0xa000, 0xa000, record, 9) {
+		t.Fatal("fork accepted an invalid child")
+	}
+	if !ForkProcess(0xa000, 0xb000, record, 9) || ForkProcess(0xa000, 0xb000, record, 9) {
+		t.Fatal("fork did not install exactly one child")
+	}
+	child, _ := FindProcess(0xb000)
+	if child.PID != record.PID || child.PID == parent.PID || child.FamilyID != parent.FamilyID || child.VFSHandle != 9 ||
+		!child.Forked || parent.Forked || child.BrkCurrent != 0x602000 || child.ClearChildTID != 0 || string(child.CWD()) != "/persist/work" {
+		t.Fatalf("child = %#v cwd=%q", child, child.CWD())
+	}
+	if mask, _ := child.Signals.Mask(abi.SignalBlock, 0, false); mask != 1<<14 {
+		t.Fatalf("child mask = %#x", mask)
+	}
+	if closeOnExec, open := child.FDs.CloseOnExec(file); !open || !closeOnExec {
+		t.Fatal("child lost the descriptor or its close-on-exec bit")
+	}
+	shared, _ := DescriptionOf(0xa000, uint64(file))
+	shared.Offset = 42
+	if description, _ := LookupFD(0xb000, file); description.Offset != 42 || description.References != 2 {
+		t.Fatalf("child description = %#v", description)
+	}
+	if context, _ := VFSContext(parent.FamilyID); context.References != 2 {
+		t.Fatalf("VFS context references = %d", context.References)
+	}
+	if _, last, _ := CloseFD(0xb000, file); last {
+		t.Fatal("child close released the parent's description")
+	}
+	if _, found := LookupFD(0xa000, file); !found {
+		t.Fatal("child close removed the parent's descriptor")
+	}
+	familyID := parent.FamilyID
+	if !RemoveProcess(0xb000, nil) {
+		t.Fatal("child rollback failed")
+	}
+	if _, found := FindProcessRecord(record.PID); found {
+		t.Fatal("rolled-back child kept its PID")
+	}
+	if context, found := VFSContext(familyID); !found || context.References != 1 {
+		t.Fatal("child rollback did not return its VFS context reference")
+	}
+}
+
 func resetCompatibilityProcesses() {
 	processStates = [process.MaxProcesses]ProcessState{}
 	processRecords = [process.MaxProcesses]ProcessRecord{}

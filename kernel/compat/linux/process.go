@@ -35,8 +35,11 @@ type ProcessState struct {
 	// Signals is what the process registered with rt_sigaction and
 	// rt_sigprocmask. Nothing delivers a signal from it.
 	Signals SignalState
-	cwd     [limits.PathMax]byte
-	cwdLen  uint16
+	// Forked marks a process created by fork rather than launched by PID 1,
+	// which holds no handle to it and hears nothing of its exit.
+	Forked bool
+	cwd    [limits.PathMax]byte
+	cwdLen uint16
 }
 
 type StandardStreams struct {
@@ -232,6 +235,44 @@ func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, st
 		*state = ProcessState{}
 		return false
 	}
+	return true
+}
+
+// ForkProcess installs the compatibility state of a child registered by
+// RegisterChild. The child shares its parent's open-file descriptions and
+// family VFS context and copies everything else. It inherits no pending
+// signal, syscall continuation, or clear-child-tid address. The caller owns
+// rollback through RemoveProcess if a later step fails.
+func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
+	parent, found := FindProcess(parentRoot)
+	if !found || childRoot == 0 || vfsHandle == 0 || record.State != ProcessRunning ||
+		record.ParentPID != parent.PID || record.FamilyID != parent.FamilyID || recordIndex(record.PID) < 0 {
+		return false
+	}
+	free := -1
+	for index := range processStates {
+		if processStates[index].Root == childRoot {
+			return false
+		}
+		if free == -1 && processStates[index].Root == 0 {
+			free = index
+		}
+	}
+	if free == -1 || !RetainVFSContext(parent.FamilyID) {
+		return false
+	}
+	child := &processStates[free]
+	*child = ProcessState{}
+	if !child.FDs.Inherit(&parent.FDs) {
+		ReleaseVFSContext(parent.FamilyID)
+		*child = ProcessState{}
+		return false
+	}
+	child.Root, child.VFSHandle, child.FamilyID = childRoot, vfsHandle, parent.FamilyID
+	child.BrkBase, child.BrkCurrent, child.BrkLimit = parent.BrkBase, parent.BrkCurrent, parent.BrkLimit
+	child.PID, child.Forked = record.PID, true
+	child.Signals.CopyFrom(&parent.Signals)
+	child.cwdLen = uint16(copy(child.cwd[:], parent.CWD()))
 	return true
 }
 

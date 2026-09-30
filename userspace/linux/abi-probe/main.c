@@ -36,6 +36,7 @@
  *   stack-overflow   recurse until the stack guard ends the process
  *   random           say whether the kernel has a random source
  *   exec              replace this image and verify the retained state
+ *   fork              create a child and check what it shares and copies
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -1387,6 +1388,54 @@ static int exec_test(void)
 	return 1;
 }
 
+static int fork_global = 1;
+
+/* The child changes a global, a heap block, and a stack variable, then reads
+ * one byte through an inherited descriptor. The parent must still see its own
+ * values and must find the shared file position moved. Nothing reaps the
+ * child yet, so the parent watches the position instead of waiting. */
+static int fork_test(void)
+{
+	struct timespec nap = {0, 10 * 1000 * 1000};
+	volatile int local = 1;
+	char *heap = malloc(16);
+	pid_t parent = getpid(), child;
+	char byte;
+	int fd, tries;
+
+	fd = open(IMAGE, O_RDONLY);
+	if (fd < 0 || !heap)
+		return 1;
+	strcpy(heap, "parent");
+	fflush(stdout);
+	child = fork();
+	if (child < 0) {
+		printf("fork failed: errno=%d\n", errno);
+		return 1;
+	}
+	if (child == 0) {
+		fork_global = 2;
+		local = 2;
+		strcpy(heap, "child");
+		if (getpid() == parent || getppid() != parent || fork_global != 2 || local != 2)
+			_exit(1);
+		printf("fork child ok\n");
+		fflush(stdout);
+		if (read(fd, &byte, 1) != 1 || byte != 0x7f)
+			_exit(1);
+		_exit(0);
+	}
+	for (tries = 0; tries < 500 && lseek(fd, 0, SEEK_CUR) != 1; tries++)
+		nanosleep(&nap, NULL);
+	if (child == parent || fork_global != 1 || local != 1 || strcmp(heap, "parent") ||
+	    read(fd, &byte, 1) != 1 || byte != 'E') {
+		printf("fork parent failed\n");
+		return 1;
+	}
+	printf("fork parent ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1414,6 +1463,8 @@ int main(int argc, char **argv)
 			return session_timeout();
 		if (!strcmp(argv[1], "exec"))
 			return exec_test();
+		if (!strcmp(argv[1], "fork"))
+			return fork_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

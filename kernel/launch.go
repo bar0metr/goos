@@ -180,24 +180,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	pid := nextProcessID
-	var spawned *process.Process
-	for index := range spawnedProcesses {
-		// A slot gets its record's pages the first time it is needed and
-		// keeps them for the processes that reuse it: other kernel
-		// structures point at a live record, and reuse never frees one they
-		// might still name (ADR 0111).
-		if spawnedProcesses[index] == nil {
-			allocated, ok := vm.NewObject[process.Process](&pageAllocator)
-			if !ok {
-				break
-			}
-			spawnedProcesses[index] = allocated
-		}
-		if spawnedProcesses[index].ID() == 0 {
-			spawned = spawnedProcesses[index]
-			break
-		}
-	}
+	spawned := freeProcessSlot()
 	if spawned == nil {
 		abandonSpawn(root, nil, false)
 		return 0, 0, supervisor.LaunchResourceExhausted
@@ -220,7 +203,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		return 0, 0, supervisor.LaunchCapabilityDenied
 	}
 	ok = process.InitWithProfile(spawned, pid, processABI, process.AddressSpace{Root: root}, profile)
-	*spawned.Regions() = launchRegions
+	spawned.Regions().CopyFrom(&launchRegions)
 	spawned.SetName(name)
 	if !ok || spawned.Handles().Available() < len(grants) {
 		abandonSpawn(root, spawned, false)
@@ -267,7 +250,9 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			if amd64.FillRandom(linuxStackRandom[:]) {
 				random = &linuxStackRandom
 			}
-			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound, random)
+			linuxLaunchStartup = bound
+			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, &linuxLaunchStartup, random)
+			linuxLaunchStartup = startup.Data{}
 			clear(linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
 			streams, streamHandles, streamsOK := linuxStandardStreams(spawned, bound)
@@ -343,6 +328,28 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 	}
 	return pid, processHandle, supervisor.LaunchOK
+}
+
+// freeProcessSlot returns an unused process record, or nil when every slot is
+// taken or a new record's pages cannot be allocated.
+func freeProcessSlot() *process.Process {
+	for index := range spawnedProcesses {
+		// A slot gets its record's pages the first time it is needed and
+		// keeps them for the processes that reuse it: other kernel
+		// structures point at a live record, and reuse never frees one they
+		// might still name (ADR 0111).
+		if spawnedProcesses[index] == nil {
+			allocated, ok := vm.NewObject[process.Process](&pageAllocator)
+			if !ok {
+				return nil
+			}
+			spawnedProcesses[index] = allocated
+		}
+		if spawnedProcesses[index].ID() == 0 {
+			return spawnedProcesses[index]
+		}
+	}
+	return nil
 }
 
 // launchResourceProfile maps the lifecycle ABI to kernel-owned quota sets.
@@ -429,6 +436,11 @@ var linuxStackRandom [linuxabi.RandomSize]byte
 // over 1 KiB, so a local copy would be allocated on the kernel heap and never
 // freed; the same serialization that guards linuxInitialStack guards it.
 var linuxLaunchImage linuxelf.Image
+
+// linuxLaunchStartup is the bound startup record of the Linux launch in
+// progress. The stack builder takes it as an interface, and boxing a local
+// value would allocate on the kernel heap at every launch.
+var linuxLaunchStartup startup.Data
 
 func classifyExecutable(source loader.Source) supervisor.ExecutableFormat {
 	length := min(source.Len(), uint64(8))

@@ -135,9 +135,10 @@ Syscalls map onto native primitives:
 | `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
 | `arch_prctl` | task-local FS base; GS remains architecture-owned |
 | `execve` | a VFS-pinned executable snapshot and a prepared replacement root |
+| `fork` | a new Process, address space, and task built from a private copy of the caller |
 
-Remaining composition work maps `pipe2` to `StreamCreate`, `wait4` to process
-completion state, and `poll` to `WaitAny`.
+Remaining composition work maps `pipe2` to `StreamCreate`, `wait4` to the
+family zombie records, and `poll` to `WaitAny`.
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -412,9 +413,10 @@ and its VFS session go with it, and no Linux signal is delivered.
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, `fork`, `clone`, threads, signal delivery,
+Dynamic linking, glibc, `vfork`, `clone`, `wait4`, threads, signal delivery,
 pipes created by a Linux process, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not
-run. The next Linux work is `pipe2`, `wait4`, a chosen `fork` semantics,
-minimal signals, and `poll`.
+run. `fork` creates a child from a private copy of the caller (ADR 0158). The
+next Linux work is `pipe2`, `wait4`, the `vfork` or `clone` form BusyBox
+uses, minimal signals, and `poll`.

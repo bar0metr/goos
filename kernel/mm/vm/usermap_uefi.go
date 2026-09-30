@@ -212,3 +212,43 @@ func UserPageCount(rootAddress, base, length uint64) (uint64, uint64) {
 		address = at + PageSize
 	}
 }
+
+// CopyUserRange gives target a private copy of every present user leaf of
+// source in [base, base+length), with the same permission bits. Each copy is a
+// fresh page target owns. A leaf source does not own is shared or device
+// memory, which no copy may duplicate, so the call stops there and fails.
+// Pages and tables already placed in target stay there for the caller to
+// destroy with the address space.
+func CopyUserRange(allocator *pmm.Allocator, sourceRoot, targetRoot, base, length uint64) bool {
+	if allocator == nil || sourceRoot == targetRoot || sourceRoot%PageSize != 0 || sourceRoot >= IdentityMapLimit ||
+		base%PageSize != 0 || !ValidateUserRange(base, length) {
+		return false
+	}
+	// SAFETY: sourceRoot names a process PML4 created by this package.
+	root := (*table)(unsafe.Pointer(uintptr(sourceRoot)))
+	for address, end := base, base+length; ; {
+		leaf, at := nextLeaf(root, address, end)
+		if leaf == nil {
+			return true
+		}
+		value := *leaf
+		if value&entryOwned == 0 {
+			return false
+		}
+		source, mapped := PhysicalPage(value & addressMask)
+		physical, allocated := allocator.Allocate()
+		if !mapped || !allocated {
+			if allocated {
+				allocator.Free(physical)
+			}
+			return false
+		}
+		slot, _, found := userSlot(allocator, targetRoot, at, true)
+		if !found || *slot&entryPresent != 0 || !InitializePhysical(physical, source) {
+			allocator.Free(physical)
+			return false
+		}
+		*slot = physical | value&^(addressMask|entryAccessed|entryDirty)
+		address = at + PageSize
+	}
+}

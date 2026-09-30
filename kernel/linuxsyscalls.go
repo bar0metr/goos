@@ -16,6 +16,9 @@ import (
 type linuxCallHandler struct {
 	root uint64
 	task sched.TaskID
+	// frame is the entry frame of the call being served, with the caller's
+	// saved registers above it.
+	frame *linuxabi.Frame
 }
 
 var linuxHandler linuxCallHandler
