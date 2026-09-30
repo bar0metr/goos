@@ -511,6 +511,7 @@ func commitLinuxExec(handler *linuxCallHandler, state *linuxExecState, compat *l
 	amd64.SetTaskFSBase(handler.task, 0)
 	compat.Signals.ResetForExec()
 	compat.CloseOnExec(releaseLinuxDescriptionReference)
+	releaseVforkParent(compat)
 	owner.SetName(execBaseName(path))
 	if object, found := executables.Find(state.objectID); found {
 		object.MarkLaunched()

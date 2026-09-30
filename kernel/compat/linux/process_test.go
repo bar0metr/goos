@@ -430,6 +430,10 @@ func TestForkProcessSharesDescriptionsAndCopiesState(t *testing.T) {
 	if _, found := LookupFD(0xa000, file); !found {
 		t.Fatal("child close removed the parent's descriptor")
 	}
+	child.HoldVforkParent(7)
+	if child.ReleaseVforkParent() != 7 || child.ReleaseVforkParent() != 0 {
+		t.Fatal("the vfork parent was not released exactly once")
+	}
 	familyID := parent.FamilyID
 	if !RemoveProcess(0xb000, nil) {
 		t.Fatal("child rollback failed")

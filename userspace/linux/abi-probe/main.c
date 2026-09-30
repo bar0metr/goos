@@ -37,6 +37,7 @@
  *   random           say whether the kernel has a random source
  *   exec              replace this image and verify the retained state
  *   fork              create a child and check what it shares and copies
+ *   vfork             suspend in vfork until the child exits; clone a child
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -48,6 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/auxv.h>
 #include <sys/ioctl.h>
@@ -1436,6 +1438,54 @@ static int fork_test(void)
 	return 0;
 }
 
+/* A vfork child reads one byte through the shared descriptor and exits. The
+ * parent resumes only after that exit, so the position has already moved
+ * when vfork returns. A clone with SIGCHLD alone is a fork; the parent
+ * watches the position as fork_test does. GoOS refuses the thread form of
+ * clone; Linux would create a thread, so that check runs on GoOS only. */
+static int vfork_test(void)
+{
+	struct timespec nap = {0, 10 * 1000 * 1000};
+	char byte;
+	long child;
+	int fd, tries;
+
+	fd = open(IMAGE, O_RDONLY);
+	if (fd < 0)
+		return 1;
+	fflush(stdout);
+	child = vfork();
+	if (child == 0) {
+		if (read(fd, &byte, 1) != 1)
+			_exit(1);
+		_exit(0);
+	}
+	if (child < 0 || lseek(fd, 0, SEEK_CUR) != 1) {
+		printf("vfork failed: child=%ld errno=%d\n", child, errno);
+		return 1;
+	}
+	printf("vfork ok\n");
+	fflush(stdout);
+	child = syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);
+	if (child == 0) {
+		if (getppid() == getpid() || read(fd, &byte, 1) != 1)
+			_exit(1);
+		_exit(0);
+	}
+	for (tries = 0; child > 0 && tries < 500 && lseek(fd, 0, SEEK_CUR) != 2; tries++)
+		nanosleep(&nap, NULL);
+	if (child < 0 || lseek(fd, 0, SEEK_CUR) != 2) {
+		printf("clone failed: child=%ld errno=%d\n", child, errno);
+		return 1;
+	}
+	if (on_goos() && !fails(syscall(SYS_clone, CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD, 0, 0, 0, 0), EINVAL)) {
+		printf("clone accepted a thread\n");
+		return 1;
+	}
+	printf("clone ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1465,6 +1515,8 @@ int main(int argc, char **argv)
 			return exec_test();
 		if (!strcmp(argv[1], "fork"))
 			return fork_test();
+		if (!strcmp(argv[1], "vfork"))
+			return vfork_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))
