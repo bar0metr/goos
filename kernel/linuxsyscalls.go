@@ -23,7 +23,23 @@ var linuxHandler linuxCallHandler
 var linuxIOBuffer [stream.AtomicWrite]byte
 var linuxIOVecWire [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
 
+// fileDescription returns the description behind fd when it names a VFS
+// file or directory. Stream descriptors keep their own path through endpoint.
+func (handler *linuxCallHandler) fileDescription(fd uint64) (*linuxcompat.FileDescription, bool) {
+	description, found := linuxcompat.DescriptionOf(handler.root, fd)
+	if !found || description.Kind != linuxcompat.FDVFSFile && description.Kind != linuxcompat.FDVFSDirectory {
+		return nil, false
+	}
+	return description, true
+}
+
 func (handler *linuxCallHandler) Read(request linuxcompat.Request) linuxcompat.Result {
+	if description, file := handler.fileDescription(request.Arguments[0]); file {
+		if description.Kind == linuxcompat.FDVFSDirectory {
+			return linuxcompat.Result{Errno: linuxabi.EISDIR}
+		}
+		return handler.readFile(request, description)
+	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
@@ -66,6 +82,12 @@ func (handler *linuxCallHandler) Read(request linuxcompat.Request) linuxcompat.R
 }
 
 func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.Result {
+	if description, file := handler.fileDescription(request.Arguments[0]); file {
+		if description.Kind == linuxcompat.FDVFSDirectory {
+			return linuxcompat.Result{Errno: linuxabi.EBADF}
+		}
+		return handler.writeFile(request, description, false)
+	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
@@ -126,10 +148,17 @@ func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoin
 	return written, linuxcompat.Result{}, false
 }
 
-// Writev writes a bounded vector to a stream. Every element is validated
-// before the first byte moves, as Linux does. A stalled or oversized vector
-// returns the bytes already written; the caller continues from there.
+// Writev writes a bounded vector to a stream or a file. Every element is
+// validated before the first byte moves, as Linux does. A stalled or
+// oversized vector returns the bytes already written; the caller continues
+// from there.
 func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat.Result {
+	if description, file := handler.fileDescription(request.Arguments[0]); file {
+		if description.Kind == linuxcompat.FDVFSDirectory {
+			return linuxcompat.Result{Errno: linuxabi.EBADF}
+		}
+		return handler.writeFile(request, description, true)
+	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}

@@ -484,6 +484,21 @@ func (namespace *Namespace) Stat(path []byte) (ramfs.Stat, Status) {
 	return stat, mapStatus(backendStatus)
 }
 
+// StatOpen describes the file an open handle names. It follows the handle,
+// not a path, so the answer stays right after the file is renamed, and a
+// client needs no path to learn how long its open file is.
+func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, Status) {
+	entry, status := namespace.file(owner, handle, 0)
+	if status != StatusOK {
+		return ramfs.Stat{}, status
+	}
+	stat, backendStatus := namespace.mounts[entry.mount].backend.Stat(entry.node)
+	if backendStatus == ramfs.StatusOK {
+		stat.MountID = uint64(namespace.mountID(int(entry.mount)))
+	}
+	return stat, mapStatus(backendStatus)
+}
+
 // ReadDir lists a directory in two phases. Cursors below mountCursor belong to
 // the backend that owns the directory; once the backend is exhausted the scan
 // continues through the mount table, so a mounted filesystem is discoverable by

@@ -66,6 +66,11 @@ and replace only when that file is complete, so a failed save leaves the
 original as it was. On FAT32 the replacement ends in a device flush and never
 leaves the target holding part of either version.
 
+Version 12 lets a `Stat` with a handle and no path describe that open file
+(ADR 0141). The answer follows the file through a rename, and a client learns
+the length of its open file without keeping the path. The Linux compatibility
+layer uses it for `lseek` from the end and for appending writes.
+
 PID 1 supervises `/system/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address
 space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archive at

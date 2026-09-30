@@ -13,14 +13,17 @@ const (
 	EFAULT       Errno = 14
 	EBUSY        Errno = 16
 	EEXIST       Errno = 17
+	EXDEV        Errno = 18
 	ENOTDIR      Errno = 20
 	EISDIR       Errno = 21
 	EINVAL       Errno = 22
 	ENFILE       Errno = 23
 	EMFILE       Errno = 24
 	ENOSPC       Errno = 28
+	ESPIPE       Errno = 29
 	EROFS        Errno = 30
 	EPIPE        Errno = 32
+	ERANGE       Errno = 34
 	ENAMETOOLONG Errno = 36
 	ENOSYS       Errno = 38
 	ENOTEMPTY    Errno = 39

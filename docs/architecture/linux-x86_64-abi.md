@@ -18,21 +18,26 @@ It describes current code, not the final release target.
 
 | Syscall | Status | Notes |
 | --- | --- | --- |
-| `read(0)` | partial | stream descriptors, blocking without polling; no files yet |
-| `write(1)` | partial | stream descriptors, bounded chunks and partial writes; no files yet |
-| `open(2)` | partial | `openat` from the working directory; musl's `open()` uses it |
-| `close(3)` | implemented | frees the descriptor, then releases the stream handle or the VFS file |
+| `read(0)` | implemented | streams block without polling; files read at their position, at most 64 KiB per call; a directory is `EISDIR` |
+| `write(1)` | implemented | streams in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call |
+| `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
+| `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
+| `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | kernel-chosen anonymous private mappings; no executable or file-backed mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `writev(20)` | partial | stream descriptors; at most 16 elements and 64 KiB per call, short count when the stream fills |
+| `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call, short count when the stream fills |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations rejected |
 | `exit(60)` | implemented | exits the calling task |
 | `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
 | `exit_group(231)` | implemented | retires every task in the process |
-| `openat(257)` | partial | absolute or working-directory-relative path; access mode, `O_CLOEXEC`, `O_LARGEFILE`; regular files only |
+| `getcwd(79)`, `chdir(80)` | implemented | the working directory; `chdir` requires an existing directory |
+| `rename(82)`, `renameat(264)`, `renameat2(316)` | partial | files replace an existing target, directories need a free name; `renameat2` takes no flags |
+| `mkdir(83)`, `mkdirat(258)` | implemented | the mode is ignored |
+| `rmdir(84)`, `unlink(87)`, `unlinkat(263)` | implemented | a name some session holds open is `EBUSY` |
+| `openat(257)` | implemented | files and directories; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `ioctl(16)` | `ENOSYS` | musl reads the failure as "no terminal" |
 | other declared numbers | `ENOSYS` | decoded and typed; no fake success |
 | every other number | `ENOSYS` | bounded diagnostics; no fake success |
@@ -92,16 +97,57 @@ directory, which the launch supplies. The resolver removes empty, `.`, and
 | empty path | `ENOENT` |
 | no terminator within 4096 bytes | `ENAMETOOLONG` |
 | component over 1024 bytes, or result over 4096 bytes | `ENAMETOOLONG` |
-| relative path, `dirfd` open but not `AT_FDCWD` | `ENOTDIR` |
+| relative path, `dirfd` open but not a directory | `ENOTDIR` |
 | relative path, `dirfd` not open | `EBADF` |
-| path ending in `/`, `.`, or `..` given to an open | `EOPNOTSUPP` |
+| path ending in `/`, `.`, or `..` that names a regular file | `ENOTDIR` |
 
 A resolved path over 216 bytes reaches the VFS in a memory object attached to
-the request. Open errors after resolution: `ENOENT` for a missing file,
-`EOPNOTSUPP` for an unsupported flag, `EINVAL` for access mode 3, `EMFILE` for
-a full descriptor table, `ENFILE` for a full VFS open-file table, `EROFS` for
-a refused write open, and `ENOMEM` when the process cannot pay for a path
-object. A stale or out-of-range descriptor gives `close` `EBADF`.
+the request.
+
+## Files
+
+A file call is one or more exchanges on the VFS session (ADR 0141). An open
+stats the path, creates or truncates when the flags ask, and opens:
+
+| Flags and target | Result |
+| --- | --- |
+| missing, no `O_CREAT` | `ENOENT` |
+| missing, `O_CREAT` | the file is created and opened |
+| existing, `O_CREAT\|O_EXCL` | `EEXIST` |
+| regular file, `O_TRUNC` | the file is emptied and opened |
+| regular file, `O_DIRECTORY` or a trailing slash | `ENOTDIR` |
+| directory, read-only | a directory descriptor |
+| directory with write access, `O_CREAT`, or `O_TRUNC` | `EISDIR` |
+| `O_DIRECTORY\|O_CREAT`, or access mode 3 | `EINVAL` |
+| any flag outside the accepted set | `EOPNOTSUPP` |
+
+`O_LARGEFILE`, `O_NOCTTY`, and `O_NOFOLLOW` are accepted and change nothing.
+A full descriptor table is `EMFILE`; a full VFS open-file table or directory
+record table is `ENFILE`; a refused write open is `EROFS`.
+
+A descriptor names a stream, a VFS file, or a directory. Duplicated
+descriptors share one description with its position and status flags. A
+directory description keeps its canonical path; 32 exist system-wide. `*at`
+calls resolve a relative path from the directory their `dirfd` names.
+
+File bytes move through one 64 KiB memory object per process, charged to the
+process. A read or write of more is a short transfer. Reading a write-only
+descriptor or writing a read-only one is `EBADF`. A write through `O_APPEND`
+asks the VFS for the file length, seeks there, and writes; it is not atomic
+against another writer.
+
+| Call | Errors beyond path resolution |
+| --- | --- |
+| `lseek` | `EINVAL` for a negative result or an unknown whence, `ESPIPE` for a stream |
+| `getcwd` | `ERANGE` for a buffer shorter than the path and its terminator |
+| `chdir` | `ENOENT`, `ENOTDIR` |
+| `mkdir` | `EEXIST`, `ENOENT`, `ENOTDIR`, `EROFS`, `ENOSPC` |
+| `unlink` | `EISDIR` for a directory, `EBUSY` for an open file or a mount point |
+| `rmdir` | `ENOTDIR` for a file, `ENOTEMPTY`, `EBUSY` for a mount point |
+| `rename` | `EISDIR` for a file onto a directory, `EEXIST` for a directory onto an existing name, `EBUSY` for an open target, `EXDEV` across mounts |
+
+`fstat`, `newfstatat`, `getdents64`, `readv`, `ftruncate`, and `fsync` return
+`ENOSYS`.
 
 ## ELF status
 
@@ -215,12 +261,29 @@ closed `dirfd`, `ENOENT` for a missing 300-byte name, and `ENAMETOOLONG` for a
 in `GOOS_LINUX_LONG`; the program must open it, which needs the attached path
 object.
 
+Last it works in `/tmp/linux-files`. It creates a file with
+`O_CREAT|O_EXCL`, writes 8192 bytes, seeks by all three origins, reads back a
+range and the short tail, appends through `O_APPEND`, truncates with
+`O_TRUNC`, writes with `writev`, opens the directory and a file under it by
+`dirfd`, renames a file and a directory, and removes everything. It checks the
+errno of each refusal on the way: `EEXIST`, `EINVAL`, `EBADF`, `ESPIPE`,
+`EISDIR`, `ENOTDIR`, `ENOENT`, `ENOTEMPTY`, `ERANGE`, and `EROFS` for the
+system image.
+
 PID 1 compares the whole output, requires exit status zero, and publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, and `LINUX_PATH_OK`.
-`userspace/linux/README.md` lists the calls the run makes.
+`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, and
+`LINUX_FILE_IO_OK`. The same binary prints the same lines on Linux;
+`userspace/linux/README.md` holds that trace and the three calls whose results
+differ.
+
+The boot test also starts `musl-hello session-loss` from the shell behind a
+pipeline, restarts the VFS, and requires the program to report `EIO` from its
+next open: a Linux process keeps the session it was launched with and gets no
+new one.
 
 Host tests cover the pieces that need no CPU: reply classification, session
-correlation and failure, open flags, path resolution with its bounds and a
-fuzz target, vector validation,
+correlation and failure, open flags and the open plan, seek arithmetic,
+removal checks, directory records, two-path continuations, path resolution
+with its bounds and a fuzz target, vector validation,
 compatibility PID allocation, descriptor close, and the fixture's checksum and
 ELF acceptance.

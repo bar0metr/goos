@@ -31,8 +31,20 @@ type ProcessState struct {
 	// at thread exit only while another task shares the address space, which
 	// a single-task process never has, so GoOS stores it and writes nothing.
 	ClearChildTID uint64
-	cwd           [limits.PathMax]byte
-	cwdLen        uint16
+	// IOBuffer is the native handle of the memory object file reads and
+	// writes move their bytes through. The bridge creates it on first use.
+	IOBuffer handle.ID
+	cwd      [limits.PathMax]byte
+	cwdLen   uint16
+}
+
+// SetCWD replaces the working directory with a canonical absolute path.
+func (state *ProcessState) SetCWD(path []byte) bool {
+	if state == nil || len(path) == 0 || len(path) > limits.PathMax || path[0] != '/' {
+		return false
+	}
+	state.cwdLen = uint16(copy(state.cwd[:], path))
+	return true
 }
 
 const (
@@ -152,6 +164,14 @@ func CloseFD(root uint64, fd int) (FileDescription, bool, abi.Errno) {
 	return FileDescription{}, false, abi.EBADF
 }
 
+// DescriptionOf returns the open-file description behind a descriptor.
+func DescriptionOf(root uint64, fd uint64) (*FileDescription, bool) {
+	if state, found := FindProcess(root); found && fd < LinuxMaxFD {
+		return state.FDs.Description(int(fd))
+	}
+	return nil, false
+}
+
 func FindProcess(root uint64) (*ProcessState, bool) {
 	if root != 0 {
 		for index := range processStates {
@@ -168,6 +188,7 @@ func RemoveProcess(root uint64) bool {
 		for index := range processStates {
 			if processStates[index].Root == root {
 				processStates[index].FDs.CloseAll(nil)
+				releaseDirectories(root)
 				processStates[index] = ProcessState{}
 				return true
 			}

@@ -86,6 +86,16 @@ func (table *FDTable) Lookup(fd int) (FileDescription, bool) {
 	return description, description.valid()
 }
 
+// Description returns the shared open-file description behind fd for
+// updating its offset. Every descriptor that duplicates fd sees the change.
+func (table *FDTable) Description(fd int) (*FileDescription, bool) {
+	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
+		return nil, false
+	}
+	description := &table.descriptions[table.entries[fd].description]
+	return description, description.valid()
+}
+
 // Duplicate adds another integer referring to the same open-file description.
 func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, bool) {
 	if table == nil || minimum < 0 || minimum >= LinuxMaxFD || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {

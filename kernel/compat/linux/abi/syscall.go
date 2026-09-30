@@ -33,6 +33,10 @@ const (
 	SysUname         Syscall = 63
 	SysGetcwd        Syscall = 79
 	SysChdir         Syscall = 80
+	SysRename        Syscall = 82
+	SysMkdir         Syscall = 83
+	SysRmdir         Syscall = 84
+	SysUnlink        Syscall = 87
 	SysReadlink      Syscall = 89
 	SysGetuid        Syscall = 102
 	SysGetgid        Syscall = 104
@@ -46,13 +50,16 @@ const (
 	SysClockGettime  Syscall = 228
 	SysExitGroup     Syscall = 231
 	SysOpenat        Syscall = 257
+	SysMkdirat       Syscall = 258
 	SysNewfstatat    Syscall = 262
 	SysUnlinkat      Syscall = 263
+	SysRenameat      Syscall = 264
 	SysReadlinkat    Syscall = 267
 	SysPpoll         Syscall = 271
 	SysSetRobustList Syscall = 273
 	SysPipe2         Syscall = 293
 	SysPrlimit64     Syscall = 302
+	SysRenameat2     Syscall = 316
 	SysGetrandom     Syscall = 318
 	SysStatx         Syscall = 332
 )
@@ -80,8 +87,22 @@ const (
 	OpenWriteOnly = uint32(1)
 	OpenReadWrite = uint32(2)
 	OpenAccess    = uint32(3)
+	OpenCreate    = uint32(0o100)
+	OpenExclusive = uint32(0o200)
+	OpenNoCTTY    = uint32(0o400)
+	OpenTruncate  = uint32(0o1000)
+	OpenAppend    = uint32(0o2000)
 	OpenLargeFile = uint32(0o100000)
+	OpenDirectory = uint32(0o200000)
+	OpenNoFollow  = uint32(0o400000)
 	OpenCloseExec = uint32(0o2000000)
+
+	// AtRemoveDir makes unlinkat remove a directory.
+	AtRemoveDir = uint64(0x200)
+
+	SeekSet = uint64(0)
+	SeekCur = uint64(1)
+	SeekEnd = uint64(2)
 
 	// PathMax is Linux PATH_MAX: the longest path in bytes, terminator
 	// included.
@@ -100,6 +121,8 @@ func (number Syscall) Known() bool {
 		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,
+		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
+		SysRenameat2,
 		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid,
 		SysArchPrctl, SysGettid, SysFutex, SysGetdents64, SysSetTidAddress,
 		SysClockGettime,

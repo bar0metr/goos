@@ -7,16 +7,30 @@
  * on the VFS session PID 1 granted, and names that image through the working
  * directory in several spellings to check path resolution.
  *
+ * Last it works in a scratch directory under /tmp: it creates, writes,
+ * seeks, reads, appends to, truncates, renames, and removes files and
+ * directories, and checks the errno of each refusal.
+ *
  * GoOS starts it as /system/linux/musl-hello with /system/linux as the
  * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
- * path is too long for one request message.
+ * path is too long for one request message; GoOS alone sets it, so it also
+ * marks the run whose program image sits on a read-only mount.
+ *
+ * "musl-hello session-loss" is a second mode for the GoOS boot test. It
+ * waits for end of input, then reports whether its VFS session still opens
+ * files.
  */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
 #include <unistd.h>
+
+#define IMAGE "/system/linux/musl-hello"
 
 static _Thread_local int tls_data = 40;
 static _Thread_local int tls_zero;
@@ -80,7 +94,7 @@ static int paths_ok(void)
 	if (!opens(AT_FDCWD, "./musl-hello") ||
 	    !opens(AT_FDCWD, "..//linux/./musl-hello") ||
 	    !opens(AT_FDCWD, "../../../system/linux/musl-hello") ||
-	    !opens(1, "/system/linux/musl-hello"))
+	    !opens(1, IMAGE))
 		return 0;
 	if (!refuses(AT_FDCWD, "", ENOENT) ||
 	    !refuses(1, "musl-hello", ENOTDIR) ||
@@ -88,15 +102,137 @@ static int paths_ok(void)
 		return 0;
 	if (existing && !opens(AT_FDCWD, existing))
 		return 0;
-	/* 300 bytes fit a file name and no request message; 1100 bytes fit
-	 * neither. */
+	/* A 250-byte name is legal on Linux and on GoOS, and with its
+	 * directory it is too long for one request message. 1100 bytes are
+	 * over both name limits. */
 	memset(name, 'n', sizeof name - 1);
-	name[300] = 0;
+	name[250] = 0;
 	if (!refuses(AT_FDCWD, name, ENOENT))
 		return 0;
-	name[300] = 'n';
+	name[250] = 'n';
 	name[1100] = 0;
 	return refuses(AT_FDCWD, name, ENAMETOOLONG);
+}
+
+/* The bundled musl has no stat directory, which is where mkdir lives. */
+static int make_directory(int dirfd, const char *path)
+{
+	return syscall(SYS_mkdirat, dirfd, path, 0755);
+}
+
+static int fails(long result, int reason)
+{
+	int failed = result == -1 && errno == reason;
+
+	errno = 0;
+	return failed;
+}
+
+static int position_ok(int fd, off_t offset, int whence, off_t want)
+{
+	return lseek(fd, offset, whence) == want;
+}
+
+static int data_ok(void)
+{
+	static char pattern[8192];
+	char back[300];
+	struct iovec pieces[2] = {{"ab", 2}, {"cde", 3}};
+	int fd = open("data", O_RDWR | O_CREAT | O_EXCL, 0644);
+
+	if (fd != 3 || !fails(open("data", O_WRONLY | O_CREAT | O_EXCL, 0644), EEXIST))
+		return 0;
+	for (size_t index = 0; index < sizeof pattern; index++)
+		pattern[index] = (char)(index * 7 + 3);
+	if (write(fd, pattern, sizeof pattern) != sizeof pattern ||
+	    !position_ok(fd, 0, SEEK_CUR, 8192) ||
+	    !position_ok(fd, -4096, SEEK_END, 4096) ||
+	    !position_ok(fd, 100, SEEK_SET, 100) ||
+	    !fails(lseek(fd, -1, SEEK_SET), EINVAL) ||
+	    !fails(lseek(1, 0, SEEK_CUR), ESPIPE))
+		return 0;
+	if (read(fd, back, sizeof back) != sizeof back ||
+	    memcmp(back, pattern + 100, sizeof back) ||
+	    !position_ok(fd, 0, SEEK_CUR, 400) ||
+	    !position_ok(fd, 8000, SEEK_SET, 8000) ||
+	    read(fd, back, sizeof back) != 192 ||
+	    memcmp(back, pattern + 8000, 192) ||
+	    read(fd, back, sizeof back) != 0 || close(fd) != 0)
+		return 0;
+
+	fd = open("data", O_WRONLY | O_APPEND);
+	if (fd != 3 || !fails(read(fd, back, 1), EBADF) ||
+	    write(fd, "tail", 4) != 4 || !position_ok(fd, 0, SEEK_CUR, 8196) ||
+	    close(fd) != 0)
+		return 0;
+	fd = open("data", O_RDONLY);
+	if (fd != 3 || !position_ok(fd, -4, SEEK_END, 8192) ||
+	    read(fd, back, sizeof back) != 4 || memcmp(back, "tail", 4) ||
+	    !fails(write(fd, "x", 1), EBADF) || close(fd) != 0)
+		return 0;
+
+	fd = open("data", O_WRONLY | O_TRUNC);
+	if (fd != 3 || !position_ok(fd, 0, SEEK_END, 0) ||
+	    writev(fd, pieces, 2) != 5 || close(fd) != 0)
+		return 0;
+	fd = open("data", O_RDONLY);
+	return fd == 3 && read(fd, back, sizeof back) == 5 &&
+	       !memcmp(back, "abcde", 5) && close(fd) == 0;
+}
+
+static int names_ok(int read_only_image)
+{
+	char back[1];
+	int fd, dirfd = open(".", O_RDONLY | O_DIRECTORY);
+
+	if (dirfd != 3 || !fails(open("data", O_RDONLY | O_DIRECTORY), ENOTDIR) ||
+	    !fails(open(".", O_WRONLY), EISDIR) ||
+	    !fails(read(dirfd, back, 1), EISDIR))
+		return 0;
+	fd = openat(dirfd, "data", O_RDONLY);
+	if (fd != 4 || close(fd) != 0)
+		return 0;
+	if (rename("data", "moved") != 0 || !fails(open("data", O_RDONLY), ENOENT) ||
+	    make_directory(dirfd, "sub") != 0 || rename("sub", "sub2") != 0 ||
+	    !fails(unlink("sub2"), EISDIR) || !fails(rmdir("moved"), ENOTDIR) ||
+	    unlinkat(dirfd, "sub2", AT_REMOVEDIR) != 0 ||
+	    !fails(rmdir("../linux-files"), ENOTEMPTY) ||
+	    unlink("moved") != 0 || close(dirfd) != 0)
+		return 0;
+	return !read_only_image || fails(make_directory(AT_FDCWD, IMAGE "-dir"), EROFS);
+}
+
+static int files_ok(const char *self)
+{
+	const char *scratch = "/tmp/linux-files";
+	char cwd[64];
+	int ok;
+
+	errno = 0;
+	if (make_directory(AT_FDCWD, scratch) != 0 ||
+	    !fails(make_directory(AT_FDCWD, scratch), EEXIST) ||
+	    !fails(chdir(self), ENOTDIR) || chdir(scratch) != 0 ||
+	    !getcwd(cwd, sizeof cwd) || strcmp(cwd, scratch) ||
+	    getcwd(cwd, 4) || !fails(-1, ERANGE))
+		return 0;
+	ok = data_ok() && names_ok(getenv("GOOS_LINUX_LONG") != NULL);
+	return chdir("/system/linux") == 0 && rmdir(scratch) == 0 && ok;
+}
+
+static int session_loss(void)
+{
+	char byte;
+	int fd;
+
+	while (read(0, &byte, 1) > 0)
+		;
+	errno = 0;
+	fd = open(IMAGE, O_RDONLY);
+	if (fd == -1 && errno == EIO)
+		puts("session lost: EIO");
+	else
+		printf("session kept: fd=%d errno=%d\n", fd, errno);
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -104,6 +240,8 @@ int main(int argc, char **argv)
 	const char *mode = getenv("GOOS_LINUX_PROBE");
 	int failed = 0;
 
+	if (argc == 2 && !strcmp(argv[1], "session-loss"))
+		return session_loss();
 	printf("argc=%d\n", argc);
 	for (int index = 1; index < argc; index++)
 		printf("argv[%d]=%s\n", index, argv[index]);
@@ -133,6 +271,12 @@ int main(int argc, char **argv)
 		puts("paths ok");
 	} else {
 		puts("paths failed");
+		failed = 1;
+	}
+	if (files_ok(argv[0])) {
+		puts("files ok");
+	} else {
+		puts("files failed");
 		failed = 1;
 	}
 	if (!failed)

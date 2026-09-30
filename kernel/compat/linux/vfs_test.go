@@ -3,7 +3,6 @@ package linux
 import (
 	"testing"
 
-	"goos/kernel/compat/linux/abi"
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
 )
@@ -77,32 +76,6 @@ func TestClassifyVFSReply(t *testing.T) {
 	}
 	if _, verdict := ClassifyVFSReply(nil, 7, vfs.OperationOpen); verdict != VFSReplyMalformed {
 		t.Fatalf("nil message: verdict=%d", verdict)
-	}
-}
-
-func TestOpenRights(t *testing.T) {
-	cases := []struct {
-		flags       uint64
-		rights      vfs.Rights
-		closeOnExec bool
-		errno       abi.Errno
-	}{
-		{0, vfs.Read, false, 0},
-		{1, vfs.Write, false, 0},
-		{2, vfs.Read | vfs.Write, false, 0},
-		{0o2000000 | 0o100000, vfs.Read, true, 0},
-		{3, 0, false, abi.EINVAL},
-		{0o100, 0, false, abi.EOPNOTSUPP},      // O_CREAT
-		{0o1000 | 1, 0, false, abi.EOPNOTSUPP}, // O_TRUNC
-		{0o2000 | 1, 0, false, abi.EOPNOTSUPP}, // O_APPEND
-		{0o200000, 0, false, abi.EOPNOTSUPP},   // O_DIRECTORY
-		{1 << 32, vfs.Read, false, 0},          // flags is an int
-	}
-	for _, test := range cases {
-		rights, closeOnExec, errno := OpenRights(test.flags)
-		if rights != test.rights || closeOnExec != test.closeOnExec || errno != test.errno {
-			t.Errorf("flags %#o: rights=%d cloexec=%v errno=%d", test.flags, rights, closeOnExec, errno)
-		}
 	}
 }
 

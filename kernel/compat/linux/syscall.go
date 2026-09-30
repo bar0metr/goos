@@ -41,6 +41,9 @@ type Handler interface {
 	Open(Request) Result
 	Openat(Request) Result
 	SetTidAddress(Request) Result
+	// Filesystem serves the position and path calls: lseek, getcwd, chdir,
+	// and the calls that create, remove, and rename names.
+	Filesystem(Request) Result
 	Brk(Request) Result
 	Mmap(Request) Result
 	Munmap(Request) Result
@@ -89,6 +92,9 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 			return handler.Openat(request)
 		case abi.SysSetTidAddress:
 			return handler.SetTidAddress(request)
+		case abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
+			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2:
+			return handler.Filesystem(request)
 		case abi.SysBrk:
 			return handler.Brk(request)
 		case abi.SysMmap:

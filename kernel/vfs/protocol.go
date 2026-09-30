@@ -18,8 +18,9 @@ const (
 	// version 8 adds immutable executable preparation and page reads; version
 	// 9 adds fixed-width timestamps, native attributes and mount identity;
 	// version 10 adds filesystem capacity and bounded mount enumeration;
-	// version 11 adds whole-file replacement (ADR 0129).
-	ProtocolVersion = uint16(11)
+	// version 11 adds whole-file replacement (ADR 0129); version 12 lets a
+	// stat with no path name an open file by its handle (ADR 0141).
+	ProtocolVersion = uint16(12)
 	protocolHeader  = 40
 	// MaxProtocolData is the most write data one inline request carries.
 	MaxProtocolData = ipc.MaxPayload - protocolHeader
