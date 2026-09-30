@@ -256,14 +256,29 @@ up.
 
 `getpid`, `gettid`, `getppid`, the four user and group calls, `uname`,
 `clock_gettime`, `nanosleep`, and `prlimit64` answer from kernel state with no
-service (ADR 0145). The PID is the compatibility PID, the parent is 1, and the
-user and group are 1000; none of them is GoOS authority. `uname` names the
+service (ADR 0145). The PID is the compatibility PID, and the user and group
+are 1000; none of them is GoOS authority. A launch root has
+parent PID 1. Compatibility-created descendants use the parent stored in the
+Linux family registry, and orphans return to PID 1 (ADR 0154). `uname` names the
 Linux ABI and the GoOS release that implements it. `clock_gettime` reads the
 GoOS realtime and monotonic clocks. `nanosleep` blocks on a timer deadline
 through the syscall continuation and never ends early: a deadline that
 passes before the monotonic clock has advanced by the request waits again
 (ADR 0153). `prlimit64` reports
 the descriptor table, stack, and `brk` bounds and accepts no change.
+
+### Process families
+
+The kernel keeps a bounded Linux family registry apart from the native process
+registry (ADR 0154). Each record connects a compatibility PID to a
+generation-safe GoOS Process ID and stores its parent, family identifier,
+lifecycle state, exit status, and terminating signal.
+
+Process exit releases the Linux address-space, descriptor, directory, and VFS
+state before retaining a compact zombie record. The parent consumes that record
+through the family reaper. A zombie keeps its PID reserved. Parent exit moves
+running children to conceptual PID 1 and removes orphan zombies, so records
+cannot leak after their Linux parent disappears.
 
 ### Path model
 

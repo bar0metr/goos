@@ -120,7 +120,7 @@ func releaseExitedProcess(event process.ExitEvent) {
 		}
 	}
 	if exited, found := processRegistry.ByID(event.Process); found {
-		linuxcompat.RemoveProcess(exited.AddressSpace().Root)
+		linuxcompat.ExitProcess(exited.AddressSpace().Root, event.Code, 0)
 		releaseProcessHandles(exited)
 		releasingProcess = exited.ID()
 		releaseSharedMappings(exited)

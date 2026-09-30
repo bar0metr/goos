@@ -270,7 +270,7 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound, random)
 			clear(linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
-			if stackStatus != linuxabi.StackOK || !brkOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, bound, brkBase, brkLimit) {
+			if stackStatus != linuxabi.StackOK || !brkOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, pid, bound, brkBase, brkLimit) {
 				abandonSpawn(root, spawned, false)
 				return 0, 0, supervisor.LaunchInvalidImage
 			}

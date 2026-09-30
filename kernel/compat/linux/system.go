@@ -8,10 +8,6 @@ import (
 )
 
 const (
-	// ParentPID is what getppid reports. PID 1 launches every Linux process
-	// and no Linux process tree exists, so every parent is init, as it is
-	// for an orphan on Linux.
-	ParentPID = 1
 	// TimespecSize is the size of struct timespec: seconds and nanoseconds,
 	// eight bytes each.
 	TimespecSize = 16
