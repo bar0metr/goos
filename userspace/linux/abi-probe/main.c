@@ -38,6 +38,7 @@
  *   exec              replace this image and verify the retained state
  *   fork              create a child and check what it shares and copies
  *   vfork             suspend in vfork until the child exits; clone a child
+ *   orphan            a grandchild whose parent exits is reparented to PID 1
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -1486,6 +1487,42 @@ static int vfork_test(void)
 	return 0;
 }
 
+/* The child forks a grandchild and exits at once. The grandchild waits until
+ * PID 1 is its parent, says so, and moves the shared file position. The
+ * probe watches that position, as fork_test does. */
+static int orphan_test(void)
+{
+	struct timespec nap = {0, 10 * 1000 * 1000};
+	char byte;
+	pid_t child;
+	int fd, tries;
+
+	fd = open(IMAGE, O_RDONLY);
+	if (fd < 0)
+		return 1;
+	fflush(stdout);
+	child = fork();
+	if (child == 0) {
+		pid_t middle = getpid();
+
+		if (fork() != 0)
+			_exit(0);
+		for (tries = 0; tries < 500 && getppid() == middle; tries++)
+			nanosleep(&nap, NULL);
+		if (getppid() != 1)
+			printf("orphan failed: ppid=%d\n", getppid());
+		else
+			printf("orphan ok\n");
+		fflush(stdout);
+		if (read(fd, &byte, 1) != 1)
+			_exit(1);
+		_exit(0);
+	}
+	for (tries = 0; child > 0 && tries < 700 && lseek(fd, 0, SEEK_CUR) != 1; tries++)
+		nanosleep(&nap, NULL);
+	return child > 0 && lseek(fd, 0, SEEK_CUR) == 1 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1517,6 +1554,8 @@ int main(int argc, char **argv)
 			return fork_test();
 		if (!strcmp(argv[1], "vfork"))
 			return vfork_test();
+		if (!strcmp(argv[1], "orphan"))
+			return orphan_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

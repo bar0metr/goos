@@ -26,7 +26,8 @@ guard below the stack; `random` says whether the kernel has a random source;
 position, `CLOEXEC`, and signal state; `fork` creates a child and checks that
 memory is private and the file position is shared; `vfork` checks that
 `vfork` returns only after the child exits, that `clone(SIGCHLD)` forks, and,
-on GoOS, that `clone` refuses a thread.
+on GoOS, that `clone` refuses a thread; `orphan` checks that a process whose
+parent exits reports PID 1 as its parent.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -93,7 +94,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `b151937a0da29ed220aeb9b1c41503ca73732953340c92e3d73078f7d50394e6` |
+| `prebuilt/abi-probe` | `2569323fc77d91036f5b42ec7c8001bae6d479ac917ffe4731ec7735467d171c` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

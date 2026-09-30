@@ -194,7 +194,7 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	}
 	vfsHandle, familyID := state.VFSHandle, state.FamilyID
 	releaseVforkParent(state)
-	linuxcompat.ExitProcess(root, code, 0, releaseLinuxDescriptionReference)
+	linuxcompat.ExitProcess(root, linuxcompat.TerminationFromCode(code, exited.CPUTicks()), releaseLinuxDescriptionReference)
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}
