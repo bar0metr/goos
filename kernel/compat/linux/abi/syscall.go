@@ -10,6 +10,7 @@ type Syscall uint64
 const (
 	SysRead          Syscall = 0
 	SysWrite         Syscall = 1
+	SysOpen          Syscall = 2
 	SysClose         Syscall = 3
 	SysFstat         Syscall = 5
 	SysPoll          Syscall = 7
@@ -82,6 +83,10 @@ const (
 	OpenLargeFile = uint32(0o100000)
 	OpenCloseExec = uint32(0o2000000)
 
+	// PathMax is Linux PATH_MAX: the longest path in bytes, terminator
+	// included.
+	PathMax = 4096
+
 	// IOVecSize is the wire size of one struct iovec.
 	IOVecSize = 16
 )
@@ -91,7 +96,7 @@ const (
 // returns ENOSYS.
 func (number Syscall) Known() bool {
 	switch number {
-	case SysRead, SysWrite, SysClose, SysFstat, SysPoll, SysLseek, SysMmap,
+	case SysRead, SysWrite, SysOpen, SysClose, SysFstat, SysPoll, SysLseek, SysMmap,
 		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,

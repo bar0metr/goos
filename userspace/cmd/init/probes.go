@@ -9,6 +9,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	supervisor "goos/userspace/init"
 	"goos/userspace/runtime/sys"
@@ -129,10 +130,15 @@ func probeLinuxLaunch() bool {
 	return true
 }
 
+// linuxLongPath names a file PID 1 creates for the musl probe. At 235 bytes
+// the path is too long for one VFS request message, so opening it proves the
+// Linux bridge can attach a path the way native clients do.
+var linuxLongPath [235]byte
+
 // probeLinuxMusl runs the static musl fixture through libc startup. The
-// fixture checks its arguments, environment, TLS, heap, and VFS session, and
-// prints one line per result; PID 1 accepts only the complete expected output
-// and a zero exit status.
+// fixture checks its arguments, environment, TLS, heap, VFS session, and path
+// resolution from its working directory, and prints one line per result. PID
+// 1 accepts only the complete expected output and a zero exit status.
 //
 //go:noinline
 func probeLinuxMusl() bool {
@@ -141,18 +147,38 @@ func probeLinuxMusl() bool {
 	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
 		return false
 	}
+	for index := range linuxLongPath {
+		linuxLongPath[index] = 'p'
+	}
+	copy(linuxLongPath[:], "/tmp/")
+	session, reason := openVFSSession()
+	if reason != "" {
+		return false
+	}
+	if reply, ok := callSession(session, vfs.Request{Operation: vfs.OperationCreate, Path: linuxLongPath[:]}); !ok || reply.Status != vfs.StatusOK {
+		sys.HandleClose(session)
+		return false
+	}
+	passed := runLinuxMusl(executable, name, path)
+	reply, ok := callSession(session, vfs.Request{Operation: vfs.OperationUnlink, Path: linuxLongPath[:]})
+	sys.HandleClose(session)
+	return passed && ok && reply.Status == vfs.StatusOK
+}
+
+func runLinuxMusl(executable supervisor.Executable, name string, path []byte) bool {
 	streams, grants, vfsHandle, prepared := prepareLinuxProbe(0)
 	if !prepared {
 		return false
 	}
 	slot, staging := stagingSlot()
-	writer := startup.NewWriter(staging, 3, 1, 4)
+	writer := startup.NewWriter(staging, 3, 2, 4)
 	writer.Command(path)
-	writer.CWD([]byte("/"))
+	writer.CWD([]byte("/system/linux"))
 	writer.Argument(path)
 	writer.Argument([]byte("one"))
 	writer.Argument([]byte("two"))
 	writer.Variable([]byte("GOOS_LINUX_PROBE"), []byte("musl"))
+	writer.Variable([]byte("GOOS_LINUX_LONG"), linuxLongPath[:])
 	writer.Handle([]byte("in"), 0)
 	writer.Handle([]byte("stdout"), 0)
 	writer.Handle([]byte("stderr"), 0)
@@ -171,7 +197,7 @@ func probeLinuxMusl() bool {
 	}
 	sys.HandleClose(handle.ID(streams[0][1]))
 	sys.HandleClose(handle.ID(streams[2][0]))
-	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\nhello from musl\n")
+	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nhello from musl\n")
 	sys.HandleClose(handle.ID(streams[1][0]))
 	return waitApplicationExit(launched.ProcessHandle) == 0 && printed
 }

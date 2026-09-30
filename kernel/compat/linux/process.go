@@ -52,7 +52,7 @@ var processStates [process.MaxProcesses]ProcessState
 // teardown if a later launch step fails.
 func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uint64) bool {
 	if root == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
-		data.HandleCount() != 4 || len(data.CWD()) == 0 || len(data.CWD()) > limits.PathMax {
+		data.HandleCount() != 4 || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax {
 		return false
 	}
 	input, inputOK := data.Handle("in")
@@ -76,15 +76,20 @@ func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uin
 	}
 	state := &processStates[free]
 	*state = ProcessState{}
+	// The inherited working directory is stored in canonical form, so every
+	// later relative path starts from a base that needs no second check.
+	size, _, errno := ResolvePath(state.cwd[:], nil, data.CWD())
+	if errno != 0 {
+		return false
+	}
 	state.Root, state.Input, state.Output = root, input, output
-	state.Error, state.VFS.Handle, state.cwdLen = errorOutput, vfsHandle, uint16(len(data.CWD()))
+	state.Error, state.VFS.Handle, state.cwdLen = errorOutput, vfsHandle, uint16(size)
 	state.PID = allocatePID()
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	if !state.FDs.Initialize(input, output, errorOutput) {
 		*state = ProcessState{}
 		return false
 	}
-	copy(state.cwd[:], data.CWD())
 	return true
 }
 

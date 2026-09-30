@@ -31,8 +31,8 @@ func testStartup(t testing.TB) startup.Data {
 	return data
 }
 
-func testImage() elf.Image {
-	return elf.Image{Entry: 0x401020, ProgramHeaderAddress: 0x400040, ProgramHeaderCount: 7}
+func testImage() *elf.Image {
+	return &elf.Image{Entry: 0x401020, ProgramHeaderAddress: 0x400040, ProgramHeaderCount: 7}
 }
 
 func stackOffset(t *testing.T, stack InitialStack, address uint64) int {

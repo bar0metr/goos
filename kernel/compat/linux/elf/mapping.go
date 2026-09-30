@@ -34,8 +34,8 @@ func GoOSConfig() Config {
 // supplies zero pages after them. The stack is writable, NX and demand-zero.
 //
 // The operation preflights every range and table slot before changing the map.
-func MapImage(image Image, source loader.Source, origin loader.Origin, regions *region.Map) (Layout, bool) {
-	if regions == nil || !origin.Valid() || !validMapping(image, source) {
+func MapImage(image *Image, source loader.Source, origin loader.Origin, regions *region.Map) (Layout, bool) {
+	if image == nil || regions == nil || !origin.Valid() || !validMapping(image, source) {
 		return Layout{}, false
 	}
 	stackBase := vm.UserStackTop - DefaultStackReserve
@@ -81,7 +81,7 @@ func MapImage(image Image, source loader.Source, origin loader.Origin, regions *
 // is the normal producer, but callers cannot mutate an Image into a mapping
 // that escapes the low image area, aliases pages, violates W^X, or reads past
 // a source that changed after validation.
-func validMapping(image Image, source loader.Source) bool {
+func validMapping(image *Image, source loader.Source) bool {
 	if image.SegmentCount <= 0 || image.SegmentCount > MaxLoadSegments {
 		return false
 	}

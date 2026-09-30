@@ -145,14 +145,12 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		return 0, 0, supervisor.LaunchInvalidImage
 	}
 	processABI := process.ABINative
-	var linuxImage linuxelf.Image
+	linuxImage := &linuxLaunchImage
 	if actualFormat == supervisor.ExecutableLinuxX8664 {
 		if !validLinuxLaunch(grants, resourceProfile, startupData) {
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
-		var parseFailure linuxelf.Error
-		linuxImage, parseFailure = linuxelf.ParseSource(image, linuxelf.GoOSConfig())
-		if parseFailure != linuxelf.OK {
+		if linuxelf.ParseInto(linuxImage, image, linuxelf.GoOSConfig()) != linuxelf.OK {
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
 		processABI = process.ABILinuxX8664
@@ -384,6 +382,11 @@ var launchRegions region.Map
 // linuxInitialStack is shared launch scratch. Launches are serialized by PID 1
 // and the final bytes are copied into private process pages before task start.
 var linuxInitialStack [linuxabi.MaxInitialStackSize]byte
+
+// linuxLaunchImage is the parsed ELF of the launch in progress. The record is
+// over 1 KiB, so a local copy would be allocated on the kernel heap and never
+// freed; the same serialization that guards linuxInitialStack guards it.
+var linuxLaunchImage linuxelf.Image
 
 func classifyExecutable(source loader.Source) supervisor.ExecutableFormat {
 	length := min(source.Len(), uint64(8))

@@ -20,6 +20,7 @@ It describes current code, not the final release target.
 | --- | --- | --- |
 | `read(0)` | partial | stream descriptors, blocking without polling; no files yet |
 | `write(1)` | partial | stream descriptors, bounded chunks and partial writes; no files yet |
+| `open(2)` | partial | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle or the VFS file |
 | `mmap(9)` | partial | kernel-chosen anonymous private mappings; no executable or file-backed mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
@@ -31,7 +32,7 @@ It describes current code, not the final release target.
 | `exit(60)` | implemented | exits the calling task |
 | `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
 | `exit_group(231)` | implemented | retires every task in the process |
-| `openat(257)` | partial | absolute path up to 216 bytes; access mode, `O_CLOEXEC`, `O_LARGEFILE`; regular files only |
+| `openat(257)` | partial | absolute or working-directory-relative path; access mode, `O_CLOEXEC`, `O_LARGEFILE`; regular files only |
 | `ioctl(16)` | `ENOSYS` | musl reads the failure as "no terminal" |
 | other declared numbers | `ENOSYS` | decoded and typed; no fake success |
 | every other number | `ENOSYS` | bounded diagnostics; no fake success |
@@ -78,11 +79,29 @@ and wakes it on a reply, on peer death, or after eight seconds.
 | deadline | `ETIMEDOUT` |
 | process without the session handle or its rights | `EIO` |
 
-`openat` errors: `EFAULT` for an unreadable path pointer, `ENOENT` for an empty
-or missing path, `ENAMETOOLONG` past 216 bytes, `EOPNOTSUPP` for a relative
-path or an unsupported flag, `EINVAL` for access mode 3, `EMFILE` for a full
-descriptor table, `ENFILE` for a full VFS open-file table, and `EROFS` for a
-refused write open. A stale or out-of-range descriptor gives `close` `EBADF`.
+## Paths
+
+A path resolves in the GoOS VFS namespace from the process's working
+directory, which the launch supplies. The resolver removes empty, `.`, and
+`..` components in one bounded pass and produces an absolute path of at most
+4096 bytes with components of at most 1024.
+
+| Input | Result |
+| --- | --- |
+| unreadable path pointer | `EFAULT` |
+| empty path | `ENOENT` |
+| no terminator within 4096 bytes | `ENAMETOOLONG` |
+| component over 1024 bytes, or result over 4096 bytes | `ENAMETOOLONG` |
+| relative path, `dirfd` open but not `AT_FDCWD` | `ENOTDIR` |
+| relative path, `dirfd` not open | `EBADF` |
+| path ending in `/`, `.`, or `..` given to an open | `EOPNOTSUPP` |
+
+A resolved path over 216 bytes reaches the VFS in a memory object attached to
+the request. Open errors after resolution: `ENOENT` for a missing file,
+`EOPNOTSUPP` for an unsupported flag, `EINVAL` for access mode 3, `EMFILE` for
+a full descriptor table, `ENFILE` for a full VFS open-file table, `EROFS` for
+a refused write open, and `ENOMEM` when the process cannot pay for a path
+object. A stale or out-of-range descriptor gives `close` `EBADF`.
 
 ## ELF status
 
@@ -181,16 +200,27 @@ and terminate through `exit_group`. PID 1 observes both outputs and teardown
 before publishing `LINUX_MEMORY_TLS_OK`, `LINUX_PID1_LAUNCH_OK`, and
 `LINUX_RAW_SYSCALL_OK`.
 
-PID 1 then runs `/system/linux/musl-hello one two` with
+PID 1 then runs `/system/linux/musl-hello one two` in `/system/linux` with
 `GOOS_LINUX_PROBE=musl`. The static musl program prints its argument count and
 arguments, checks the environment, TLS, and both heaps, opens and closes its
 own image twice through the VFS session, and confirms `EBADF` for a closed
-descriptor and `ENOENT` for a missing path. PID 1 compares the whole output,
-requires exit status zero, and publishes `LINUX_MUSL_OK` and
-`LINUX_VFS_SESSION_OK`. `userspace/linux/README.md` lists the calls the run
-makes.
+descriptor and `ENOENT` for a missing path.
+
+It then names the same image as `musl-hello` through `open`, and as
+`./musl-hello`, `..//linux/./musl-hello`, and
+`../../../system/linux/musl-hello` through `openat`. It expects `ENOENT` for an
+empty path, `ENOTDIR` and `EBADF` for a relative path under a stream and a
+closed `dirfd`, `ENOENT` for a missing 300-byte name, and `ENAMETOOLONG` for a
+1100-byte one. PID 1 also creates a file with a 235-byte path under `/tmp` and passes it
+in `GOOS_LINUX_LONG`; the program must open it, which needs the attached path
+object.
+
+PID 1 compares the whole output, requires exit status zero, and publishes
+`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, and `LINUX_PATH_OK`.
+`userspace/linux/README.md` lists the calls the run makes.
 
 Host tests cover the pieces that need no CPU: reply classification, session
-correlation and failure, open-flag and path checks, vector validation,
+correlation and failure, open flags, path resolution with its bounds and a
+fuzz target, vector validation,
 compatibility PID allocation, descriptor close, and the fixture's checksum and
 ELF acceptance.

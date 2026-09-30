@@ -31,7 +31,7 @@ func emptyRegions(t *testing.T) *region.Map {
 func TestMapImageUsesCommonLazySourceAndDemandZeroStack(t *testing.T) {
 	data, image := mappedELF(t)
 	regions := emptyRegions(t)
-	layout, ok := MapImage(image, loader.Contiguous(data), loader.Origin{Object: 41}, regions)
+	layout, ok := MapImage(&image, loader.Contiguous(data), loader.Origin{Object: 41}, regions)
 	if !ok || layout.Entry != image.Entry || layout.StackTop != vm.UserStackTop || regions.Count() != image.SegmentCount+2 {
 		t.Fatalf("map failed: ok=%v layout=%+v regions=%d", ok, layout, regions.Count())
 	}
@@ -67,7 +67,7 @@ func TestMapImagePreservesCongruentUnalignedFileWindow(t *testing.T) {
 		t.Fatalf("unaligned ELF rejected: %d", failure)
 	}
 	regions := emptyRegions(t)
-	if _, ok := MapImage(image, loader.Contiguous(data), loader.Origin{Key: 7}, regions); !ok {
+	if _, ok := MapImage(&image, loader.Contiguous(data), loader.Origin{Key: 7}, regions); !ok {
 		t.Fatal("unaligned image mapping failed")
 	}
 	mapping, found := regions.Find(0x401000)
@@ -83,11 +83,11 @@ func TestMapImageAllowsConventionalLowAddressAndRejectsCollisions(t *testing.T) 
 		t.Fatal("collision setup failed")
 	}
 	before := regions.Count()
-	if _, ok := MapImage(image, loader.Contiguous(data), loader.Origin{Object: 1}, regions); ok || regions.Count() != before {
+	if _, ok := MapImage(&image, loader.Contiguous(data), loader.Origin{Object: 1}, regions); ok || regions.Count() != before {
 		t.Fatalf("collision was accepted or partially mapped: ok=%v count=%d", ok, regions.Count())
 	}
 	clean := emptyRegions(t)
-	if _, ok := MapImage(image, loader.Contiguous(data), loader.Origin{Object: 1}, clean); !ok {
+	if _, ok := MapImage(&image, loader.Contiguous(data), loader.Origin{Object: 1}, clean); !ok {
 		t.Fatal("ordinary 0x400000 ET_EXEC mapping rejected")
 	}
 }
@@ -113,7 +113,7 @@ func TestMapImageRevalidatesSourceOriginAndProtection(t *testing.T) {
 		origin loader.Origin
 	}{name: "write execute", image: wx, source: loader.Contiguous(data), origin: loader.Origin{Object: 1}})
 	for _, test := range tests {
-		if _, ok := MapImage(test.image, test.source, test.origin, emptyRegions(t)); ok {
+		if _, ok := MapImage(&test.image, test.source, test.origin, emptyRegions(t)); ok {
 			t.Errorf("accepted %s", test.name)
 		}
 	}

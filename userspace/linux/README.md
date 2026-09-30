@@ -6,7 +6,7 @@ them to the native image format.
 
 | Fixture | Source | Checks |
 | --- | --- | --- |
-| `musl-hello` | [musl-hello/main.c](musl-hello/main.c) | libc startup, `argv`, `envp`, TLS, heap, stdio, one VFS session exchange |
+| `musl-hello` | [musl-hello/main.c](musl-hello/main.c) | libc startup, `argv`, `envp`, TLS, heap, stdio, VFS session exchanges, path resolution |
 
 `/system/linux/raw-probe` is a second fixture with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -18,15 +18,15 @@ assembles it byte by byte, so it has no entry here.
 | Toolchain | TinyGo 0.42.0, with Go 1.25.5 and LLVM 22.1.4 |
 | Compiler | the clang inside TinyGo (`tinygo clang`) |
 | Linker | the lld inside TinyGo (`tinygo ld.lld`), LLD 22.1.4 |
-| libc | the musl sources TinyGo ships under `lib/musl` |
+| libc | musl 1.2.3, the sources TinyGo ships under `lib/musl` |
 | Target | `x86_64-unknown-linux-musl`, static, non-PIE |
 
-TinyGo ships the musl sources without a `VERSION` file. The headers place them
-in the 1.2.3 series: `qsort_r` is declared, `statx` is absent, and
-`_GNU_SOURCE` still implies the LFS64 names. The tree itself is pinned by
-content. This command prints
+TinyGo 0.42.0 pins `lib/musl` at commit
+`7a43f6fea9081bdd53d8a11cef9e9fab0348c53d` of `tinygo-org/musl-libc`, the
+upstream commit "release 1.2.3". The installed tree has no `VERSION` file, so
+the sources are also pinned by content. This command prints
 `7db2c261d8040935b9ad57e914874560ce76e3cb4759127bef1667daef9c0588` for the
-sources the committed binary came from:
+tree the committed binary came from:
 
 ```sh
 cd "$(tinygo env TINYGOROOT)/lib/musl"
@@ -68,7 +68,7 @@ Linker flags:
 
 | File | SHA-256 |
 | --- | --- |
-| `prebuilt/musl-hello` | `d2d25146c7f6d26f85911e13b078ddb16a4c3d3606362c7c3eba7510f46505fb` |
+| `prebuilt/musl-hello` | `7b843cd21f11936db53ce1e51985dfa0853c1276a6bf9ed48a46f2424fcb206c` |
 
 `fixtures.go` embeds the binary and repeats the checksum. `go test
 ./userspace/linux` fails when the two disagree, and when the kernel ELF parser
@@ -77,12 +77,13 @@ constant, and this table in one commit.
 
 The image has four `PT_LOAD` segments (`R`, `R-X`, and two `RW-`), `PT_PHDR`,
 `PT_TLS`, `PT_GNU_RELRO`, and a non-executable `PT_GNU_STACK`. Its entry is
-`0x202110`.
+`0x2021a0`.
 
 ## Syscall trace
 
 The validation kernel recorded this sequence for
-`/system/linux/musl-hello one two` with `GOOS_LINUX_PROBE=musl`:
+`/system/linux/musl-hello one two` with `GOOS_LINUX_PROBE=musl`, before the
+fixture gained its path checks:
 
 | Call | Result | Made by |
 | --- | --- | --- |
@@ -99,7 +100,13 @@ The validation kernel recorded this sequence for
 | `writev(1)` | bytes written | stdio flush in `exit` |
 | `exit_group` | | `_Exit` |
 
-This trace comes from GoOS. Nobody has yet run the same binary under `strace`
+The path checks add calls between the last `openat` above and the final
+`writev`. Read from the source, they are one `open` and four `openat` calls
+that return 3, each followed by `close`; one more such pair when
+`GOOS_LINUX_LONG` is set; and five `openat` calls that fail with `ENOENT`,
+`ENOTDIR`, `EBADF`, `ENOENT`, and `ENAMETOOLONG`. No run recorded them.
+
+The recorded trace comes from GoOS. Nobody has yet run the same binary under `strace`
 on Linux; the build host has no Linux kernel to run it on. To compare, copy
 `prebuilt/musl-hello` to an x86_64 Linux machine and run:
 
@@ -108,8 +115,11 @@ GOOS_LINUX_PROBE=musl strace -f ./musl-hello one two
 ```
 
 On Linux the `ioctl` returns `-ENOTTY` for a pipe and the fixed `mmap`
-succeeds. The session check opens `argv[0]`, so it needs the binary at an
-absolute path.
+succeeds. The program opens `argv[0]` and `musl-hello` in its working
+directory, and expects `/system/linux/musl-hello` to exist, so on Linux it
+reports `vfs session failed` or `paths failed` unless the binary sits at that
+path and runs from that directory. Startup, TLS, heap, and stdio do not depend
+on the location.
 
 ## License
 

@@ -70,8 +70,8 @@ const (
 // BuildInitialStack writes a Linux x86_64 process-entry stack into target.
 // It includes argc, argv, envp and the required static-ELF auxv entries. It
 // deliberately omits AT_RANDOM until GoOS has trustworthy entropy.
-func BuildInitialStack(target []byte, top uint64, image elf.Image, startup Startup) (InitialStack, StackError) {
-	if startup == nil || top == 0 || top%16 != 0 || image.Entry == 0 || image.ProgramHeaderAddress == 0 ||
+func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Startup) (InitialStack, StackError) {
+	if startup == nil || image == nil || top == 0 || top%16 != 0 || image.Entry == 0 || image.ProgramHeaderAddress == 0 ||
 		image.ProgramHeaderCount == 0 || image.ProgramHeaderCount > elf.MaxProgramHeaders {
 		return InitialStack{}, StackInvalidInput
 	}

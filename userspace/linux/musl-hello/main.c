@@ -4,7 +4,12 @@
  * libc startup depends on: the argument and environment vectors, the TLS
  * image behind FS, the brk and mmap heaps, and buffered stdio flushed at exit.
  * It then opens and closes its own image, which is one request and one reply
- * on the VFS session PID 1 granted.
+ * on the VFS session PID 1 granted, and names that image through the working
+ * directory in several spellings to check path resolution.
+ *
+ * GoOS starts it as /system/linux/musl-hello with /system/linux as the
+ * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
+ * path is too long for one request message.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -50,6 +55,50 @@ static int session_ok(const char *self)
 	return openat(AT_FDCWD, "/system/linux/absent", O_RDONLY) == -1 && errno == ENOENT;
 }
 
+static int opens(int dirfd, const char *path)
+{
+	int fd = openat(dirfd, path, O_RDONLY);
+
+	return fd == 3 && close(fd) == 0;
+}
+
+static int refuses(int dirfd, const char *path, int reason)
+{
+	errno = 0;
+	return openat(dirfd, path, O_RDONLY) == -1 && errno == reason;
+}
+
+static int paths_ok(void)
+{
+	static char name[1200];
+	const char *existing = getenv("GOOS_LINUX_LONG");
+	/* musl's open() is the legacy open call on x86_64, not openat. */
+	int fd = open("musl-hello", O_RDONLY);
+
+	if (fd != 3 || close(fd) != 0)
+		return 0;
+	if (!opens(AT_FDCWD, "./musl-hello") ||
+	    !opens(AT_FDCWD, "..//linux/./musl-hello") ||
+	    !opens(AT_FDCWD, "../../../system/linux/musl-hello") ||
+	    !opens(1, "/system/linux/musl-hello"))
+		return 0;
+	if (!refuses(AT_FDCWD, "", ENOENT) ||
+	    !refuses(1, "musl-hello", ENOTDIR) ||
+	    !refuses(42, "musl-hello", EBADF))
+		return 0;
+	if (existing && !opens(AT_FDCWD, existing))
+		return 0;
+	/* 300 bytes fit a file name and no request message; 1100 bytes fit
+	 * neither. */
+	memset(name, 'n', sizeof name - 1);
+	name[300] = 0;
+	if (!refuses(AT_FDCWD, name, ENOENT))
+		return 0;
+	name[300] = 'n';
+	name[1100] = 0;
+	return refuses(AT_FDCWD, name, ENAMETOOLONG);
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -78,6 +127,12 @@ int main(int argc, char **argv)
 		puts("vfs session ok");
 	} else {
 		puts("vfs session failed");
+		failed = 1;
+	}
+	if (paths_ok()) {
+		puts("paths ok");
+	} else {
+		puts("paths failed");
 		failed = 1;
 	}
 	if (!failed)
