@@ -7,6 +7,7 @@ package main
 import (
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
+	"goos/kernel/stream"
 	"goos/kernel/vfs"
 )
 
@@ -112,15 +113,27 @@ func (handler *linuxCallHandler) duplicateOnto(request linuxcompat.Request, stat
 func (handler *linuxCallHandler) releaseDescription(released linuxcompat.FileDescription) bool {
 	switch released.Kind {
 	case linuxcompat.FDStreamReader, linuxcompat.FDStreamWriter:
-		// The native handle goes with the last descriptor, so the peer
-		// sees end of input or a closed reader.
-		nativeCallHandler{root: handler.root}.HandleClose(released.Object)
+		releaseLinuxDescriptionReference(released)
 	case linuxcompat.FDVFSDirectory:
-		linuxcompat.ReleaseDirectory(handler.root, released.Object)
+		if state, found := linuxcompat.FindProcess(handler.root); found {
+			linuxcompat.ReleaseDirectory(state.FamilyID, released.Object)
+		}
 	case linuxcompat.FDVFSFile:
 		return true
 	}
 	return false
+}
+
+// releaseLinuxDescriptionReference releases kernel objects owned by a shared
+// open-file description after its last descriptor closes.
+func releaseLinuxDescriptionReference(released linuxcompat.FileDescription) {
+	if released.Kind != linuxcompat.FDStreamReader && released.Kind != linuxcompat.FDStreamWriter {
+		return
+	}
+	streamID, writer, closed, ok := streamRegistry.Drop(released.Object)
+	if ok {
+		finishStreamClosure(stream.Closure{Stream: streamID, Writer: writer, Closed: closed})
+	}
 }
 
 func (handler *linuxCallHandler) fcntl(state *linuxcompat.ProcessState, fd int, command uint64, argument uint64) linuxcompat.Result {

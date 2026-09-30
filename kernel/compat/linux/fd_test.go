@@ -3,12 +3,13 @@ package linux
 import (
 	"testing"
 
-	"goos/kernel/handle"
+	"goos/kernel/compat/linux/abi"
 )
 
 func TestFDTableInstallsOnlyCompatibilityIntegers(t *testing.T) {
+	resetFDTest()
 	var table FDTable
-	if !table.Initialize(handle.ID(0x100000001), handle.ID(0x200000002), handle.ID(0x300000003)) {
+	if !table.Initialize(1, 0x100000001, 0x200000002, 0x300000003) {
 		t.Fatal("initialize failed")
 	}
 	cases := []struct {
@@ -28,8 +29,9 @@ func TestFDTableInstallsOnlyCompatibilityIntegers(t *testing.T) {
 }
 
 func TestFDTableIsBoundedAndReturnsEMFILEBoundary(t *testing.T) {
+	resetFDTest()
 	var table FDTable
-	if !table.Initialize(1, 2, 3) {
+	if !table.Initialize(1, 1, 2, 3) {
 		t.Fatal("initialize failed")
 	}
 	for fd := 3; fd < LinuxMaxFD; fd++ {
@@ -44,8 +46,9 @@ func TestFDTableIsBoundedAndReturnsEMFILEBoundary(t *testing.T) {
 }
 
 func TestFDTableSharesDescriptionAndReleasesOnce(t *testing.T) {
+	resetFDTest()
 	var table FDTable
-	if !table.Initialize(1, 2, 3) {
+	if !table.Initialize(1, 1, 2, 3) {
 		t.Fatal("initialize failed")
 	}
 	duplicate, ok := table.Duplicate(1, 3, true)
@@ -65,8 +68,9 @@ func TestFDTableSharesDescriptionAndReleasesOnce(t *testing.T) {
 }
 
 func TestFDTableCloseAllReleasesDescriptionsOnce(t *testing.T) {
+	resetFDTest()
 	var table FDTable
-	if !table.Initialize(1, 2, 3) {
+	if !table.Initialize(1, 1, 2, 3) {
 		t.Fatal("initialize failed")
 	}
 	if _, ok := table.Duplicate(1, 3, false); !ok {
@@ -85,8 +89,9 @@ func TestFDTableCloseAllReleasesDescriptionsOnce(t *testing.T) {
 }
 
 func TestDuplicateAtAndDescriptorFlags(t *testing.T) {
+	resetFDTest()
 	var table FDTable
-	if !table.Initialize(1, 2, 3) {
+	if !table.Initialize(1, 1, 2, 3) {
 		t.Fatal("initialize failed")
 	}
 	if fd, ok := table.Duplicate(9, 0, false); ok || fd != -2 {
@@ -132,4 +137,46 @@ func TestDuplicateAtAndDescriptorFlags(t *testing.T) {
 	if fd, ok := table.Duplicate(0, 0, false); ok || fd != -1 {
 		t.Fatalf("duplicate into a full table = %d", fd)
 	}
+}
+
+func TestFDTableInheritanceSharesDescriptionsAndCopiesFlags(t *testing.T) {
+	resetFDTest()
+	var parent FDTable
+	var child FDTable
+	if !parent.Initialize(7, 1, 2, 3) {
+		t.Fatal("parent initialize failed")
+	}
+	file, ok := parent.Allocate(FileDescription{Kind: FDVFSFile, Flags: 9, Object: 44, Offset: 12}, true)
+	if !ok || !child.Inherit(&parent) {
+		t.Fatal("inherit failed")
+	}
+	parentDescription, _ := parent.Description(file)
+	childDescription, _ := child.Description(file)
+	if parentDescription != childDescription || parentDescription.References != 2 {
+		t.Fatalf("parent=%#v child=%#v", parentDescription, childDescription)
+	}
+	childDescription.Offset = 99
+	if parentDescription.Offset != 99 {
+		t.Fatal("file offset was copied instead of shared")
+	}
+	if errno := SetStatusFlags(childDescription, uint64(abi.OpenAppend)); errno != 0 || parentDescription.Flags&abi.OpenAppend == 0 {
+		t.Fatalf("shared O_APPEND = %#x errno=%d", parentDescription.Flags, errno)
+	}
+	if flag, found := child.CloseOnExec(file); !found || !flag {
+		t.Fatal("child lost close-on-exec")
+	}
+	child.SetCloseOnExec(file, false)
+	if flag, _ := parent.CloseOnExec(file); !flag {
+		t.Fatal("child changed the parent's descriptor flag")
+	}
+	if _, last, _ := parent.Close(file); last {
+		t.Fatal("parent close released the inherited description")
+	}
+	if released, last, _ := child.Close(file); !last || released.Object != 44 {
+		t.Fatalf("final close = %#v last=%v", released, last)
+	}
+}
+
+func resetFDTest() {
+	openDescriptions = [MaxOpenDescriptions]descriptionSlot{}
 }

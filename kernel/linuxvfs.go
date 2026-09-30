@@ -44,10 +44,11 @@ var (
 // table, so the rights PID 1 granted are checked on every exchange.
 func (handler *linuxCallHandler) vfsEndpoint(state *linuxcompat.ProcessState) (*process.Process, *ipc.Channel, uint64, uint8, bool) {
 	owner, found := processRegistry.ByRoot(handler.root)
-	if !found || state.VFS.Failed() {
+	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
+	if !found || !contextFound || context.Session.Failed() {
 		return nil, nil, 0, 0, false
 	}
-	authority, allowed := owner.Handles().Lookup(state.VFS.Handle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait)
+	authority, allowed := owner.Handles().Lookup(state.VFSHandle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait)
 	channelID, side, valid := ipc.DecodeEndpointObject(authority.Object())
 	channel, exists := channelRegistry.Lookup(channelID)
 	if !allowed || !valid || !exists {
@@ -84,8 +85,10 @@ func (handler *linuxCallHandler) vfsBegin(request linuxcompat.Request, path []by
 }
 
 func (handler *linuxCallHandler) vfsAbandon() {
+	next := linuxcompat.CancelVFSTask(handler.task)
 	linuxcompat.SyscallContinuations.Cancel(handler.task)
 	ipcWaitSet.Cancel(handler.task)
+	wakeVFSContextWaiter(next)
 }
 
 // vfsNext commits a finished stage and names the one that follows.
@@ -97,7 +100,14 @@ func (handler *linuxCallHandler) vfsNext(stage uint8, next uint8, partial uint64
 }
 
 func (handler *linuxCallHandler) vfsFinish() {
-	linuxcompat.SyscallContinuations.Finish(handler.task)
+	state, found := linuxcompat.FindProcess(handler.root)
+	if !linuxcompat.SyscallContinuations.Finish(handler.task) || !found {
+		return
+	}
+	next, released := linuxcompat.ReleaseVFS(state.FamilyID, handler.task)
+	if released {
+		wakeVFSContextWaiter(next)
+	}
 }
 
 // vfsAttachment says which memory object travels with a request.
@@ -126,6 +136,20 @@ func (handler *linuxCallHandler) vfsExchange(operation vfs.Request, attachment v
 	if !active {
 		return vfs.Reply{}, linuxabi.EIO, false
 	}
+	state, found := linuxcompat.FindProcess(handler.root)
+	if !found {
+		return vfs.Reply{}, handler.vfsFailed(), false
+	}
+	switch linuxcompat.AcquireVFS(state.FamilyID, handler.task) {
+	case linuxcompat.VFSAccessQueued:
+		if !linuxcompat.SyscallContinuations.BlockContext(handler.task, pending.Stage) {
+			return vfs.Reply{}, handler.vfsFailed(), false
+		}
+		return vfs.Reply{}, 0, true
+	case linuxcompat.VFSAccessAcquired:
+	default:
+		return vfs.Reply{}, handler.vfsFailed(), false
+	}
 	if !pending.Issued {
 		if errno := handler.vfsIssue(pending.Stage, operation, attachment); errno != 0 {
 			return vfs.Reply{}, errno, false
@@ -148,7 +172,11 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 		return handler.vfsFailed()
 	}
 	owner, channel, channelID, side, reachable := handler.vfsEndpoint(state)
-	correlation, fresh := state.VFS.Next()
+	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
+	if !contextFound {
+		return handler.vfsFailed()
+	}
+	correlation, fresh := context.Session.Next()
 	if !reachable || !fresh {
 		return handler.vfsFailed()
 	}
@@ -159,7 +187,7 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 		peerObject, _ := ipc.EndpointObject(channelID, side^1)
 		peer, _ := processRegistry.ByCapabilityObject(handle.TypeChannel, peerObject)
 		if peer == nil {
-			state.VFS.Fail()
+			context.Session.Fail()
 			return handler.vfsFailed()
 		}
 		rights := capability.Read
@@ -197,7 +225,7 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 	}
 	if status := channel.Send(side, linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached]); status != ipc.StatusOK {
 		if status == ipc.StatusPeerDied {
-			state.VFS.Fail()
+			context.Session.Fail()
 		}
 		handler.vfsUnsent(transfers[:attached])
 		linuxcompat.NoteVFSFailure()
@@ -344,7 +372,8 @@ func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Re
 		return vfs.Reply{}, linuxabi.EIO, false
 	}
 	_, channel, channelID, side, reachable := handler.vfsEndpoint(state)
-	if !reachable {
+	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
+	if !reachable || !contextFound {
 		return vfs.Reply{}, handler.vfsFailed(), false
 	}
 	// At most a full queue of replies to abandoned requests precedes this one.
@@ -356,7 +385,7 @@ func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Re
 		}
 		if status != ipc.StatusOK {
 			// The peer died with nothing queued. The session stays dead.
-			state.VFS.Fail()
+			context.Session.Fail()
 			return vfs.Reply{}, handler.vfsFailed(), false
 		}
 		handler.dropAttachedHandles()
@@ -413,6 +442,16 @@ func resumeLinuxIPCWaiter(task sched.TaskID, reason linuxcompat.WakeReason) bool
 	return true
 }
 
+func wakeVFSContextWaiter(task sched.TaskID) {
+	for task != 0 {
+		if linuxcompat.SyscallContinuations.ResumeContext(task) && amd64.WakeTaskID(uint64(task)) {
+			return
+		}
+		linuxcompat.SyscallContinuations.Cancel(task)
+		task = linuxcompat.CancelVFSTask(task)
+	}
+}
+
 // copyPath copies a NUL-terminated user path. Linux bounds a path at PATH_MAX
 // bytes with its terminator, so a string with no terminator in that span is
 // ENAMETOOLONG. The copy goes page by page, so a short string at the end of a
@@ -454,7 +493,7 @@ func (handler *linuxCallHandler) resolvePath(state *linuxcompat.ProcessState, di
 			return nil, false, linuxabi.EBADF
 		}
 		var named bool
-		if base, named = linuxcompat.DirectoryPath(handler.root, description.Object); !named || description.Kind != linuxcompat.FDVFSDirectory {
+		if base, named = linuxcompat.DirectoryPath(state.FamilyID, description.Object); !named || description.Kind != linuxcompat.FDVFSDirectory {
 			return nil, false, linuxabi.ENOTDIR
 		}
 	}

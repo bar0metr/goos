@@ -44,6 +44,7 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
 		taskID := sched.TaskID(task)
+		wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
 		linuxcompat.SyscallContinuations.Cancel(taskID)
 		if waitAnyTable.Cancel(taskID) && diag.Enabled {
 			trace(diag.WaitCancelExit, pidOfTask(taskID), task, 0, 0)
@@ -120,7 +121,7 @@ func releaseExitedProcess(event process.ExitEvent) {
 		}
 	}
 	if exited, found := processRegistry.ByID(event.Process); found {
-		linuxcompat.ExitProcess(exited.AddressSpace().Root, event.Code, 0)
+		linuxcompat.ExitProcess(exited.AddressSpace().Root, event.Code, 0, releaseLinuxDescriptionReference)
 		releaseProcessHandles(exited)
 		releasingProcess = exited.ID()
 		releaseSharedMappings(exited)

@@ -143,16 +143,18 @@ error, then completion clears the slot. Stream `read` and backpressured stream
 
 ### File descriptors
 
-Each Linux process has a bounded fd table mapping small integers to private
-compatibility entries plus per-fd state. An fd is never a native handle.
-Descriptors 0, 1, and 2 bind to the supplied `in`, `stdout`, and `stderr`
-streams. Files are reached only through the process's explicit VFS session
-(ADR 0135).
+Each Linux process has a bounded fd table mapping small integers to local
+entries. An fd is never a native handle. Descriptors 0, 1, and 2 bind to the
+supplied `in`, `stdout`, and `stderr` streams. Files are reached only through
+the process's explicit VFS authority (ADR 0135).
 
-The table has 64 entries and separate shared open-file descriptions carrying
-kind, status flags, offset, object reference, and reference count. Exhaustion is
-`EMFILE`; teardown invalidates every descriptor and reports each final
-description once.
+The table has 64 entries. Its entries point to bounded, family-owned open-file
+descriptions carrying kind, status flags, offset, object reference, and
+reference count. Inheritance and `dup` retain the same description, so file
+position, `O_APPEND`, stream endpoint, directory cursor, and device state stay
+shared. Close-on-exec remains in the local fd entry. The last reference closes
+the underlying resource. Exhaustion is `EMFILE`; teardown invalidates every
+local fd and reports each final description once (ADR 0156).
 
 Errno conversion is operation-specific. VFS permission denial becomes `EACCES`
 or `EROFS` only with caller context, VFS resource exhaustion requires the
@@ -163,8 +165,15 @@ and a write to a closed reader returns `EPIPE`.
 
 A file operation is one request on the channel PID 1 granted at launch and one
 reply with the same correlation (ADR 0138). The bridge looks the channel up in
-the process's handle table for every exchange and requires Read, Write, and
-Wait rights. The kernel has no session of its own.
+the calling process's handle table for every exchange and requires Read, Write,
+and Wait rights. The kernel has no filesystem authority of its own.
+
+Related processes share a bounded family VFS context with one current owner
+and a FIFO queue. A process retains its own VFS channel handle and file I/O
+buffer. The shared context serializes correlations, service-owned file
+positions, and directory cursors without spinning. Completion wakes only the
+owning generation-safe task. Kill, fault, and exit remove queued tasks before
+their scheduler slots can be reused (ADR 0156).
 
 The calling task's continuation records the correlation before the request
 enters the queue, then the task blocks in the channel wait set. The VFS reply,

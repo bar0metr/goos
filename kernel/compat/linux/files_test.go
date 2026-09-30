@@ -209,11 +209,12 @@ func TestDirectoryDescriptionsAreBoundedAndOwned(t *testing.T) {
 func TestProcessRemovalReleasesDirectoriesAndOffsetsAreShared(t *testing.T) {
 	resetCompatibilityProcesses()
 	directorySlots = [MaxOpenDirectories]directorySlot{}
-	if !InstallProcess(0x5000, 60, linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4}), 0x600000, 0x4600000) {
+	if !InstallProcess(0x5000, 60, linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4}), StandardStreams{Input: 1, Output: 2, Error: 3}, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	state, _ := FindProcess(0x5000)
-	reference, _ := RetainDirectory(0x5000, []byte("/tmp"))
+	familyID := state.FamilyID
+	reference, _ := RetainDirectory(familyID, []byte("/tmp"))
 	directoryFD, _ := AllocateFD(0x5000, FileDescription{Kind: FDVFSDirectory, Object: reference}, false)
 	fileFD, _ := AllocateFD(0x5000, FileDescription{Kind: FDVFSFile, Flags: abi.OpenReadWrite, Object: 77}, false)
 	duplicate, _ := state.FDs.Duplicate(fileFD, 0, false)
@@ -234,8 +235,8 @@ func TestProcessRemovalReleasesDirectoriesAndOffsetsAreShared(t *testing.T) {
 	if !state.SetCWD([]byte("/tmp")) || string(state.CWD()) != "/tmp" || state.SetCWD([]byte("tmp")) || state.SetCWD(nil) {
 		t.Fatalf("cwd = %q", state.CWD())
 	}
-	RemoveProcess(0x5000)
-	if _, found := DirectoryPath(0x5000, reference); found {
+	RemoveProcess(0x5000, nil)
+	if _, found := DirectoryPath(familyID, reference); found {
 		t.Fatal("process removal kept its directory description")
 	}
 }
