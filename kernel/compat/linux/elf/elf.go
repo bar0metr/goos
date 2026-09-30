@@ -151,7 +151,7 @@ type Image struct {
 }
 
 // LoadEnd returns the first page after the highest load segment.
-func (image Image) LoadEnd() uint64 {
+func (image *Image) LoadEnd() uint64 {
 	if image.SegmentCount < 0 || image.SegmentCount > len(image.Segments) {
 		return 0
 	}
@@ -183,53 +183,76 @@ func Parse(data []byte, config Config) (Image, Error) {
 // Segment contents remain in the stable source for lazy mapping by MapImage.
 func ParseSource(source Source, config Config) (Image, Error) {
 	var image Image
+	failure := ParseInto(&image, source, config)
+	return image, failure
+}
+
+// tableScratch receives the program-header table of the image being parsed.
+// It is package storage because a 3.5 KiB local would land on the kernel
+// heap, which never frees. Launches are serialized, so one table suffices.
+var tableScratch [MaxProgramHeaders * ProgramHeaderSize]byte
+
+// ParseInto is ParseSource for a caller that owns the Image storage. The
+// kernel uses it with fixed storage; a rejected image leaves image zeroed.
+func ParseInto(image *Image, source Source, config Config) Error {
+	if image == nil {
+		return InvalidConfig
+	}
+	failure := image.parse(source, config)
+	if failure != OK {
+		*image = Image{}
+	}
+	return failure
+}
+
+func (image *Image) parse(source Source, config Config) Error {
+	*image = Image{}
 	if !config.valid() {
-		return image, InvalidConfig
+		return InvalidConfig
 	}
 	sourceSize := source.Len()
 	var headerScratch [HeaderSize]byte
 	header, ok := source.Read(0, HeaderSize, headerScratch[:])
 	if !ok || uint64(len(header)) != HeaderSize {
-		return image, SourceReadFailed
+		return SourceReadFailed
 	}
 	if header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F' {
-		return image, BadMagic
+		return BadMagic
 	}
 	if header[4] != class64 {
-		return image, UnsupportedClass
+		return UnsupportedClass
 	}
 	if header[5] != littleData {
-		return image, UnsupportedEncoding
+		return UnsupportedEncoding
 	}
 	if header[6] != version || binary.LittleEndian.Uint32(header[20:]) != version {
-		return image, UnsupportedVersion
+		return UnsupportedVersion
 	}
 	if binary.LittleEndian.Uint16(header[16:]) != typeExec {
-		return image, UnsupportedType
+		return UnsupportedType
 	}
 	if binary.LittleEndian.Uint16(header[18:]) != machineX64 {
-		return image, UnsupportedMachine
+		return UnsupportedMachine
 	}
 	if binary.LittleEndian.Uint16(header[52:]) != uint16(HeaderSize) {
-		return image, BadHeaderSize
+		return BadHeaderSize
 	}
 	if binary.LittleEndian.Uint16(header[54:]) != uint16(ProgramHeaderSize) {
-		return image, BadProgramHeaderSize
+		return BadProgramHeaderSize
 	}
 	count := binary.LittleEndian.Uint16(header[56:])
 	if count == 0 || count > MaxProgramHeaders {
-		return image, BadProgramHeaderCount
+		return BadProgramHeaderCount
 	}
 	phoff := binary.LittleEndian.Uint64(header[32:])
 	tableSize := uint64(count) * ProgramHeaderSize
 	tableEnd, valid := add(phoff, tableSize)
 	if !valid || phoff < HeaderSize || tableEnd > sourceSize {
-		return image, BadProgramHeaderTable
+		return BadProgramHeaderTable
 	}
-	var tableScratch [MaxProgramHeaders * ProgramHeaderSize]byte
 	table, ok := source.Read(phoff, tableSize, tableScratch[:])
 	if !ok || uint64(len(table)) != tableSize {
-		return image, SourceReadFailed
+		return SourceReadFailed
 	}
 	image.Entry = binary.LittleEndian.Uint64(header[24:])
 	image.ProgramHeaderOffset = phoff
@@ -249,75 +272,75 @@ func ParseSource(source Source, config Config) (Image, Error) {
 			alignment:  binary.LittleEndian.Uint64(raw[48:]),
 		}
 		if entry.flags&^validFlags != 0 {
-			return Image{}, BadFlags
+			return BadFlags
 		}
 		switch entry.typeValue {
 		case programNull:
 			continue
 		case programInterp:
-			return Image{}, InterpreterPresent
+			return InterpreterPresent
 		case programDynamic:
-			return Image{}, DynamicLinkingPresent
+			return DynamicLinkingPresent
 		case programLoad:
 			if failure := image.addLoad(entry, sourceSize, config); failure != OK {
-				return Image{}, failure
+				return failure
 			}
 		case programPHDR:
 			if explicitPHDR {
-				return Image{}, DuplicateProgramHeader
+				return DuplicateProgramHeader
 			}
 			explicitPHDR = true
 			if entry.offset != phoff || entry.fileSize != tableSize || entry.memorySize != tableSize || entry.flags != FlagReadable ||
 				!fileRange(entry.offset, entry.fileSize, sourceSize) || !memoryRange(entry.virtual, entry.memorySize, config) ||
 				!aligned(entry.alignment) || !congruent(entry, config.PageSize) {
-				return Image{}, MalformedProgramHeader
+				return MalformedProgramHeader
 			}
 			image.ProgramHeaderAddress = entry.virtual
 		case programTLS:
 			if image.TLS.Present {
-				return Image{}, DuplicateProgramHeader
+				return DuplicateProgramHeader
 			}
 			if entry.memorySize == 0 || entry.fileSize > entry.memorySize || entry.flags&FlagExecutable != 0 || entry.flags&FlagReadable == 0 ||
 				!fileRange(entry.offset, entry.fileSize, sourceSize) || !memoryRange(entry.virtual, entry.memorySize, config) ||
 				!aligned(entry.alignment) || !congruent(entry, config.PageSize) {
-				return Image{}, MalformedTLS
+				return MalformedTLS
 			}
 			image.TLS = TLS{VirtualAddress: entry.virtual, FileOffset: entry.offset, FileSize: entry.fileSize, MemorySize: entry.memorySize, Alignment: entry.alignment, Present: true}
 		case programGNUStack:
 			if image.GNUStackPresent {
-				return Image{}, DuplicateProgramHeader
+				return DuplicateProgramHeader
 			}
 			if entry.flags&FlagExecutable != 0 {
-				return Image{}, ExecutableStack
+				return ExecutableStack
 			}
 			if entry.flags&FlagReadable == 0 || entry.offset != 0 || entry.virtual != 0 || entry.fileSize != 0 || !aligned(entry.alignment) {
-				return Image{}, MalformedProgramHeader
+				return MalformedProgramHeader
 			}
 			image.GNUStackPresent = true
 			image.GNUStackSize = entry.memorySize
 		case programGNURelro:
 			if image.RELROPresent {
-				return Image{}, DuplicateProgramHeader
+				return DuplicateProgramHeader
 			}
 			if entry.memorySize == 0 || entry.fileSize > entry.memorySize || entry.flags&FlagExecutable != 0 ||
 				!fileRange(entry.offset, entry.fileSize, sourceSize) || !memoryRange(entry.virtual, entry.memorySize, config) ||
 				!aligned(entry.alignment) || !congruent(entry, config.PageSize) {
-				return Image{}, MalformedRELRO
+				return MalformedRELRO
 			}
 			end, _ := add(entry.virtual, entry.memorySize)
 			image.RELRO, image.RELROPresent = Range{Start: entry.virtual, End: end}, true
 			image.relroFileOffset, image.relroFileSize = entry.offset, entry.fileSize
 		default:
-			return Image{}, UnsupportedProgramHeader
+			return UnsupportedProgramHeader
 		}
 	}
 	if !image.entryExecutable() {
-		return Image{}, EntryNotExecutable
+		return EntryNotExecutable
 	}
 	if failure := image.validateMetadata(phoff, tableEnd, tableSize, explicitPHDR); failure != OK {
-		return Image{}, failure
+		return failure
 	}
-	return image, OK
+	return OK
 }
 
 func (config Config) valid() bool {
@@ -402,7 +425,7 @@ func (image *Image) addLoad(header programHeader, sourceSize uint64, config Conf
 	return OK
 }
 
-func (image Image) entryExecutable() bool {
+func (image *Image) entryExecutable() bool {
 	for index := 0; index < image.SegmentCount; index++ {
 		segment := image.Segments[index]
 		end, _ := add(segment.VirtualAddress, segment.MemorySize)
@@ -445,7 +468,7 @@ func (image *Image) validateMetadata(phoff uint64, tableEnd uint64, tableSize ui
 	return OK
 }
 
-func (image Image) metadataInsideLoad(address uint64, size uint64, offset uint64, fileSize uint64) bool {
+func (image *Image) metadataInsideLoad(address uint64, size uint64, offset uint64, fileSize uint64) bool {
 	addressEnd, addressOK := add(address, size)
 	fileEnd, fileOK := add(offset, fileSize)
 	if !addressOK || !fileOK {

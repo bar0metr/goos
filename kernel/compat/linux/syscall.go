@@ -38,6 +38,7 @@ type Handler interface {
 	Write(Request) Result
 	Close(Request) Result
 	Writev(Request) Result
+	Open(Request) Result
 	Openat(Request) Result
 	SetTidAddress(Request) Result
 	Brk(Request) Result
@@ -82,6 +83,8 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 			return handler.Close(request)
 		case abi.SysWritev:
 			return handler.Writev(request)
+		case abi.SysOpen:
+			return handler.Open(request)
 		case abi.SysOpenat:
 			return handler.Openat(request)
 		case abi.SysSetTidAddress:

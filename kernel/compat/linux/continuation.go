@@ -70,16 +70,6 @@ func (table *ContinuationTable) Begin(task sched.TaskID, request Request, path [
 	return true
 }
 
-// Lookup copies the whole record, path included. Kernel paths that only need
-// the scalars use Pending.
-func (table *ContinuationTable) Lookup(task sched.TaskID) (Continuation, bool) {
-	entry, ok := table.entry(task)
-	if !ok {
-		return Continuation{}, false
-	}
-	return *entry, true
-}
-
 // Pending is a continuation without its copied path. The full record is
 // over 4 KiB, which a syscall handler should not copy onto the kernel stack.
 type Pending struct {

@@ -110,6 +110,7 @@ func startServices(ticks uint64) {
 		}
 		mark("LINUX_MUSL_OK\n")
 		mark("LINUX_VFS_SESSION_OK\n")
+		mark("LINUX_PATH_OK\n")
 	}
 	// The log service comes after the filesystem and before the shell: its
 	// session has to be asked for rather than handed over at boot, and it

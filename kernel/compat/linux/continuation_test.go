@@ -115,3 +115,13 @@ func TestContinuationPendingAndTimeoutWake(t *testing.T) {
 		t.Fatal("second wake did not finish")
 	}
 }
+
+// Lookup copies a whole record, path included, for assertions. Kernel code
+// reads the scalars through Pending instead: the record is over 4 KiB.
+func (table *ContinuationTable) Lookup(task sched.TaskID) (Continuation, bool) {
+	entry, ok := table.entry(task)
+	if !ok {
+		return Continuation{}, false
+	}
+	return *entry, true
+}

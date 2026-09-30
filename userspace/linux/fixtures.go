@@ -12,4 +12,4 @@ var MuslHello []byte
 
 // MuslHelloSHA256 pins MuslHello. A rebuild that changes the binary must
 // change this value and README.md in the same commit.
-const MuslHelloSHA256 = "d2d25146c7f6d26f85911e13b078ddb16a4c3d3606362c7c3eba7510f46505fb"
+const MuslHelloSHA256 = "7b843cd21f11936db53ce1e51985dfa0853c1276a6bf9ed48a46f2424fcb206c"

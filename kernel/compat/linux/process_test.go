@@ -143,3 +143,14 @@ func TestCloseFDReportsTheLastReference(t *testing.T) {
 	}
 	processStates = [process.MaxProcesses]ProcessState{}
 }
+
+func TestWorkingDirectoryIsStoredCanonical(t *testing.T) {
+	processStates = [process.MaxProcesses]ProcessState{}
+	if !InstallProcess(0x8000, linuxStartup(t, "/persist//work/./deep/..", [4]handle.ID{1, 2, 3, 4}), 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	if state, _ := FindProcess(0x8000); string(state.CWD()) != "/persist/work" {
+		t.Fatalf("cwd = %q", state.CWD())
+	}
+	processStates = [process.MaxProcesses]ProcessState{}
+}

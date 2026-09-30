@@ -48,9 +48,9 @@ every later request with `EIO`. The bridge opens no replacement session for a
 running process. A restarted VFS receives sessions from PID 1, and PID 1 grants
 them to new launches only.
 
-Requests carry paths inline, up to 216 bytes. A longer path returns
-`ENAMETOOLONG` until the bridge can attach a path object. A relative path
-returns `EOPNOTSUPP` until working-directory resolution exists.
+A request carries a path of at most 216 bytes in its message and a longer one
+in an attached memory object. ADR 0140 defines how a Linux path becomes the
+canonical absolute path a request carries.
 
 `openat` and `close` are the first calls on the bridge. `openat` accepts an
 access mode, `O_CLOEXEC`, and `O_LARGEFILE`, and refuses every other flag with

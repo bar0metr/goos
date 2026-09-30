@@ -18,6 +18,7 @@ func (handler *testHandler) Write(request Request) Result {
 }
 func (handler *testHandler) Close(request Request) Result         { return handler.memory(request) }
 func (handler *testHandler) Writev(request Request) Result        { return handler.memory(request) }
+func (handler *testHandler) Open(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) Openat(request Request) Result        { return handler.memory(request) }
 func (handler *testHandler) SetTidAddress(request Request) Result { return handler.memory(request) }
 func (handler *testHandler) Brk(request Request) Result           { return handler.memory(request) }
@@ -80,7 +81,7 @@ func TestUnsupportedDiagnosticsStayBounded(t *testing.T) {
 func TestDispatchRoutesImplementedCalls(t *testing.T) {
 	handler := &testHandler{}
 	for _, syscall := range []abi.Syscall{
-		abi.SysRead, abi.SysWrite, abi.SysClose, abi.SysWritev, abi.SysOpenat,
+		abi.SysRead, abi.SysWrite, abi.SysOpen, abi.SysClose, abi.SysWritev, abi.SysOpenat,
 		abi.SysSetTidAddress, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
 	} {

@@ -106,30 +106,6 @@ func TestOpenRights(t *testing.T) {
 	}
 }
 
-func TestSessionPath(t *testing.T) {
-	long := make([]byte, VFSPathInline+1)
-	for index := range long {
-		long[index] = 'a'
-	}
-	long[0] = '/'
-	cases := []struct {
-		path []byte
-		want abi.Errno
-	}{
-		{[]byte("/system/motd"), 0},
-		{long[:VFSPathInline], 0},
-		{nil, abi.ENOENT},
-		{[]byte("motd"), abi.EOPNOTSUPP},
-		{[]byte("./motd"), abi.EOPNOTSUPP},
-		{long, abi.ENAMETOOLONG},
-	}
-	for _, test := range cases {
-		if got := SessionPath(test.path); got != test.want {
-			t.Errorf("path of %d bytes: errno %d, want %d", len(test.path), got, test.want)
-		}
-	}
-}
-
 func TestVFSCountersSaturate(t *testing.T) {
 	vfsDiagnostics = VFSDiagnostics{Requests: ^uint64(0) - 1}
 	NoteVFSRequest()

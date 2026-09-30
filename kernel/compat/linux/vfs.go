@@ -8,8 +8,8 @@ import (
 )
 
 // VFSPathInline is the longest path one VFS request carries in its message.
-// A longer path needs an attached memory object, which the bridge does not
-// build yet, so it is refused by name instead of being truncated.
+// The bridge sends a longer path in a memory object attached to the request,
+// as native clients do.
 const VFSPathInline = vfs.MaxProtocolData
 
 // VFSSession is the one filesystem authority a Linux process holds: the
@@ -73,7 +73,7 @@ func ClassifyVFSReply(message *ipc.Message, correlation uint64, operation vfs.Op
 // OpenRights decodes the openat flags the bridge accepts: an access mode,
 // O_CLOEXEC, and O_LARGEFILE, which is always in effect on x86_64. Creation,
 // truncation, append, and directory opens are refused until their semantics
-// exist.
+// exist. A resolved path that demands a directory is refused the same way.
 func OpenRights(flags uint64) (vfs.Rights, bool, abi.Errno) {
 	value := uint32(flags)
 	if value&^(abi.OpenAccess|abi.OpenLargeFile|abi.OpenCloseExec) != 0 {
@@ -89,23 +89,6 @@ func OpenRights(flags uint64) (vfs.Rights, bool, abi.Errno) {
 		return vfs.Read | vfs.Write, closeOnExec, 0
 	}
 	return 0, false, abi.EINVAL
-}
-
-// SessionPath checks a copied, NUL-free path against what the bridge can
-// send. An absolute path ignores dirfd, as on Linux. A relative one needs
-// working-directory resolution and fails explicitly until that exists; the
-// bridge never guesses a base directory.
-func SessionPath(path []byte) abi.Errno {
-	if len(path) == 0 {
-		return abi.ENOENT
-	}
-	if len(path) > VFSPathInline {
-		return abi.ENAMETOOLONG
-	}
-	if path[0] != '/' {
-		return abi.EOPNOTSUPP
-	}
-	return 0
 }
 
 // VFSDiagnostics counts bridge traffic. The counters saturate.

@@ -488,17 +488,21 @@ Linux instances block with distinct bases, resume, verify FS-relative memory,
 and exit normally.
 
 A pinned static musl program now starts through `__libc_start_main`, with
-`set_tid_address` and a bounded `writev` added for it. `openat` and `close`
-run on the VFS bridge: one correlated request per call on the session PID 1
-granted, a deadline on every wait, and `EIO` after VFS death with no
+`set_tid_address` and a bounded `writev` added for it. `open`, `openat`, and
+`close` run on the VFS bridge: one correlated request per call on the session
+PID 1 granted, a deadline on every wait, and `EIO` after VFS death with no
 reconnection.
+
+Linux paths resolve in the VFS namespace from a per-process working directory.
+One bounded pass removes `.` and `..`, refuses what exceeds the native path and
+name limits, and reports a directory demand to the caller. Paths too long for
+a request message travel in an attached memory object.
 
 Order for the remaining release work:
 
-1. path resolution against the working directory, then file `read`, `write`,
-   `lseek`, `fstat`, `newfstatat`, `getcwd`, `chdir`, and `getdents64` on the
-   bridge;
-2. the legacy `open` and `stat` numbers musl's own wrappers use on x86_64;
+1. file `read`, `write`, `lseek`, `fstat`, `newfstatat`, `getcwd`, `chdir`,
+   and `getdents64` on the bridge, with directory descriptors;
+2. the legacy `stat` and `lstat` numbers musl's wrappers use on x86_64;
 3. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
