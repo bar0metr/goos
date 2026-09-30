@@ -30,14 +30,23 @@ status, and each difference from Linux.
 Linux ELF is a distinct format from the native envelope
 ([native-images.md](../kernel/native-images.md)). The implemented parser:
 
-1. accepts ELF64 little-endian x86_64 `ET_EXEC` only;
+1. accepts ELF64 little-endian x86_64 `ET_EXEC`, and `ET_DYN` with no
+   interpreter, which is a static position-independent executable
+   (ADR 0149);
 2. bounds the table at 64 program headers and 16 `PT_LOAD` segments;
 3. validates file/memory arithmetic, page congruence, user and reserved ranges,
    page-rounded overlap, entry location, and `R--`/`RW-`/`R-X` protections;
-4. rejects `PT_INTERP`, `PT_DYNAMIC`, W+X, executable stack, and unsupported
-   program-header kinds;
+4. rejects `PT_INTERP`, W+X, executable stack, `PT_DYNAMIC` in an `ET_EXEC`
+   image, and unsupported program-header kinds;
 5. records validated `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO`
-   metadata from the existing stable executable source.
+   metadata from the existing stable executable source;
+6. checks the file range of `PT_NOTE`, `PT_GNU_EH_FRAME`, and
+   `PT_GNU_PROPERTY` and otherwise ignores them.
+
+A static PIE loads at one fixed base, `0x40000000`. The parser adds the base
+to every address the image names before it validates them, so the mapper and
+the fault path see an ordinary plan. The kernel applies no relocation; the
+program's startup code relocates itself from `AT_PHDR`.
 
 The mapper records that plan as pinned `region.Image` reservations backed by the same
 stable system-image extent or executable object as native images. Pages remain
@@ -50,15 +59,16 @@ Congruent non-page-aligned loads retain their aligned file window. The mapper
 revalidates the exported plan and current source length, preflights all region
 collisions, and accepts conventional low addresses such as `0x400000` while
 keeping loads below the fixed GoOS user windows. It also reserves an 8 MiB NX
-demand-zero stack with a 64 KiB guard. `ET_DYN`, static PIE included, is refused.
+demand-zero stack with a 64 KiB guard.
 
 The stack builder converts the kernel's validated startup view into a Linux stack image,
 not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
 and the static-ELF auxv required by the release specification. The complete
 image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
 RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
-`AT_PLATFORM` is `x86_64`; `AT_RANDOM` is absent until trustworthy entropy is
-available. Only occupied stack pages are installed; the remaining reservation
+`AT_PLATFORM` is `x86_64`. `AT_RANDOM` points at 16 bytes from the CPU's
+RDRAND generator and is absent on a CPU without one (ADR 0151). Only occupied
+stack pages are installed; the remaining reservation
 stays demand-zero. The common launch path installs this state before scheduling.
 
 ### Syscall entry
@@ -95,7 +105,11 @@ Syscalls map onto native primitives:
 | `read`, `readv`, `write`, `writev` on stdio and pipes | stream endpoints |
 | `open`, `openat`, `close`, `lseek` | VFS session requests plus the fd table |
 | `getdents64` | VFS directory entries by the path a directory descriptor keeps |
-| `stat`, `lstat`, `fstat`, `newfstatat` | VFS stat by path or by handle; a synthetic record for streams |
+| `stat`, `lstat`, `fstat`, `newfstatat`, `statx` | VFS stat by path or by handle; a synthetic record for streams and devices |
+| `pread64`, `pwrite64` | a VFS seek, a bulk request, and a seek back |
+| `open`, `read`, `write` on `/dev/null` and `/dev/zero` | the kernel itself; no VFS exchange |
+| `rt_sigaction`, `rt_sigprocmask` | compatibility state; nothing is delivered |
+| `getrandom` | the CPU's RDRAND generator |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
@@ -208,8 +222,35 @@ is `EBUSY`, and a directory moves only onto a free name.
   the VFS cursor in the directory's description.
 - `readv` and `writev` take 16 elements and 64 KiB per call, with every
   element checked before a byte moves (ADR 0144).
+- `statx` runs the same stat and writes the 256-byte `struct statx`, with a
+  birth time when the filesystem has one (ADR 0150).
+- `pread64` and `pwrite64` seek the VFS position to the offset, transfer, and
+  seek back, because the VFS reads and writes only at the position it keeps.
+  The description's position never changes.
 
-`ftruncate`, `fsync`, and `statx` are not implemented.
+`ftruncate` and `fsync` are not implemented.
+
+### Devices
+
+The kernel compares a resolved path with `/dev/null`, `/dev/zero`, and
+`/dev/tty` before it asks the VFS (ADR 0150). The first two open as
+descriptors of a synthetic kind: a read of `/dev/null` is at its end, a read
+of `/dev/zero` returns zeros, and both discard writes. `/dev/tty` has a
+status and opens with `ENXIO`, because a GoOS Linux process has no
+controlling terminal. All three stat as character devices. No VFS node
+stands behind them, so native programs and directory listings do not show
+them, and the names cannot be removed or renamed.
+
+### Signal state and random bytes
+
+`rt_sigaction` and `rt_sigprocmask` store dispositions and the blocked mask
+in the process's compatibility state and report them back (ADR 0151).
+Nothing delivers a signal from that state. The calls that would send one
+stay `ENOSYS`.
+
+`getrandom` returns bytes from RDRAND, 256 per call at most, and `ENOSYS` on
+a CPU without the instruction. The kernel has no other source and makes none
+up.
 
 ### Identity and time
 
@@ -219,7 +260,9 @@ service (ADR 0145). The PID is the compatibility PID, the parent is 1, and the
 user and group are 1000; none of them is GoOS authority. `uname` names the
 Linux ABI and the GoOS release that implements it. `clock_gettime` reads the
 GoOS realtime and monotonic clocks. `nanosleep` blocks on a timer deadline
-through the syscall continuation and never ends early. `prlimit64` reports
+through the syscall continuation and never ends early: a deadline that
+passes before the monotonic clock has advanced by the request waits again
+(ADR 0153). `prlimit64` reports
 the descriptor table, stack, and `brk` bounds and accepts no change.
 
 ### Path model
@@ -249,8 +292,9 @@ the VFS with the request, as native clients do.
 
 A Linux process sees the GoOS VFS namespace: `/system`, `/tmp`, `/persist`,
 `/home`, `/state`, and whatever else is mounted. Nothing is added for it.
-`/dev`, `/proc`, and `/sys` do not exist, and a program that opens
-`/dev/null` or `/proc/mounts` gets `ENOENT`.
+`/proc` and `/sys` do not exist, and a program that opens `/proc/mounts`
+gets `ENOENT`. Of `/dev` the kernel serves three names to Linux processes;
+`/dev` itself is no directory.
 
 ### Descriptors and the terminal
 
@@ -290,19 +334,22 @@ kernel GS remains architecture-owned (ADR 0137).
 
 ### Programs in the image
 
-`/system/linux` holds five prebuilt static programs, pinned by checksum and
+`/system/linux` holds six prebuilt static programs, pinned by checksum and
 built by one offline recipe (ADR 0139, ADR 0148): `hello` with no libc,
-`musl-hello` for libc startup, `fsprobe` and `dirprobe` for files and
-directories, and `abi-probe`, the conformance suite. `userspace/linux/README.md`
-records the toolchain, the checksums, and the Linux call trace.
+`hello-pie`, the same linked position-independent, `musl-hello` for libc
+startup, `fsprobe` and `dirprobe` for files and directories, and `abi-probe`,
+the conformance suite. `userspace/linux/README.md` records the toolchain,
+the checksums, and the Linux call trace.
 
 `abi-probe` checks each result it gets and prints one line per group. PID 1
 runs it at every validation boot and requires the whole output. The same
-binary runs on a Linux kernel in a container and must print the same lines,
-so an expectation is wrong on Linux before it can mislead the kernel. Its
+binary runs on a Linux kernel and must print the same lines, so an
+expectation is wrong on Linux before it can mislead the kernel. One
+reference run uses a container; a second boots a real Linux kernel in QEMU
+and holds the probe to the exact Linux result in every check (ADR 0152). Its
 other modes pass bad pointers and lengths to every call, exhaust the
-descriptor table and the page quota, try the native call gate, and touch an
-I/O port.
+descriptor table and the page quota, try the native call gate, touch an
+I/O port, and recurse into the stack guard.
 
 musl startup needs `arch_prctl`, `set_tid_address`, and `writev`. Its
 terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY`.
@@ -311,7 +358,8 @@ terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY`.
 
 A pointer from a Linux program reaches kernel code only through the checked
 copy helpers. A read or write across the end of a mapping is short, as on
-Linux, and one that starts outside a mapping is `EFAULT` (ADR 0147). `mmap`
+Linux, and one that starts outside a mapping, or whose length leaves the
+user half, is `EFAULT` (ADR 0147, ADR 0150). `mmap`
 and `brk` refuse what the page quota cannot back, so exhaustion is `ENOMEM`
 at the call. A full descriptor table is `EMFILE`. Ctrl-C ends a Linux process
 through the native kill path: its continuation, its waits, its descriptors,
@@ -319,9 +367,10 @@ and its VFS session go with it, and no Linux signal is delivered.
 
 ## Scope
 
-GoOS 0.2.0 runs static, non-PIE x86_64 programs. Dynamic linking, glibc,
-`fork`, `clone`, `execve`, threads, signals, pipes created by a Linux
-process, networking, `/proc`, termios, and file-backed `mmap` are outside it.
-BusyBox `sh` starts and runs builtins but cannot start a program, and `nano`
-does not run. The next Linux milestone is process composition: `execve`,
+GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
+Dynamic linking, glibc, `fork`, `clone`, `execve`, threads, signal delivery,
+pipes created by a Linux process, networking, `/proc`, termios, file-backed
+`mmap`, and address-space randomization are outside it. BusyBox `sh` runs
+builtins and redirections but cannot start a program, and `nano` does not
+run. The next Linux milestone is process composition: `execve`,
 `pipe2`, `wait4`, a chosen `fork` semantics, minimal signals, and `poll`.

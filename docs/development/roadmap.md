@@ -472,16 +472,20 @@ What it contains:
 - immutable `Native`/`LinuxX8664` process identity and a dedicated
   `SYSCALL` entry that the native gate and the Linux gate each refuse to the
   other;
-- a bounded static ELF64 `ET_EXEC` loader with lazy file-backed pages, and a
-  System V initial stack that exposes no native startup object;
+- a bounded static ELF64 loader for `ET_EXEC` and static PIE images with lazy
+  file-backed pages, and a System V initial stack that exposes no native
+  startup object;
 - a PID 1 launch policy of three streams and one VFS session, enforced again
   by the kernel;
 - a syscall layer with its own number and errno namespaces, continuations for
   calls that block, a 64-entry descriptor table, anonymous memory, FS-base
   TLS, and files, directories, status, and naming through the VFS session;
-- identity, clocks, sleep, and limits answered from kernel state;
-- five pinned fixtures, a conformance probe that prints the same lines on
-  Linux and on GoOS, a Linux boot gate, and a BusyBox harness.
+- identity, clocks, sleep, limits, and signal state answered from kernel
+  state, and random bytes from the CPU's generator;
+- `/dev/null` and `/dev/zero`, positioned I/O, and `statx`;
+- six pinned fixtures, a conformance probe that prints the same lines on
+  Linux and on GoOS, a strict reference run on a real Linux kernel, a Linux
+  boot gate, and a BusyBox harness.
 
 [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md) is the contract,
 with every call, each difference from Linux, and the release limits.
@@ -495,13 +499,14 @@ The next Linux milestone lets one Linux program run another, which BusyBox
 2. `pipe2` on native streams;
 3. `wait4` on process handles, and a documented process-tree policy;
 4. a deliberately chosen `fork` semantics;
-5. minimal signals: `SIGINT`, `SIGCHLD`, `SIGPIPE`, handlers, masks;
+5. signal delivery for `SIGINT`, `SIGCHLD`, and `SIGPIPE`, on the
+   dispositions and masks the kernel already records;
 6. `poll` and `ppoll` on `WaitAny`.
 
 Later: `futex` and threads, richer signals, termios and a terminal
-descriptor, interactive programs, `nano`. Static PIE, `statx`, `pread64`,
-`/dev/null`, and `getrandom` with real entropy are small independent steps.
-Dynamic linking and glibc stay separate work.
+descriptor, interactive programs, `nano`. A random source for CPUs without
+RDRAND and a randomized load base are independent steps. Dynamic linking and
+glibc stay separate work.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

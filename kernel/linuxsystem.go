@@ -2,8 +2,9 @@
 
 package main
 
-// Linux identity, time, and limit calls. None of them reaches a service:
-// they answer from the process's compatibility state and the kernel clocks.
+// Linux identity, time, limit, signal-state, and random calls. None of them
+// reaches a service: they answer from the process's compatibility state, the
+// kernel clocks, and the CPU's random generator.
 
 import (
 	"goos/internal/timekeeping"
@@ -20,6 +21,12 @@ var (
 	linuxTimespec [linuxcompat.TimespecSize]byte
 	linuxUname    [linuxcompat.UnameSize]byte
 	linuxRlimit   [linuxcompat.RlimitSize]byte
+	// linuxSignalAction and linuxSignalPrevious hold the new and the old
+	// disposition of one rt_sigaction call.
+	linuxSignalAction   [linuxcompat.SignalActionSize]byte
+	linuxSignalPrevious [linuxcompat.SignalActionSize]byte
+	linuxSignalSet      [linuxcompat.SignalSetSize]byte
+	linuxRandom         [linuxcompat.MaxRandomBytes]byte
 )
 
 const (
@@ -28,6 +35,9 @@ const (
 	linuxSleepCorrelation = 1
 	// linuxSleepTicks bounds a sleep far below where a deadline would wrap.
 	linuxSleepTicks = uint64(1) << 40
+	// linuxSleepRounds bounds how often one sleep waits again because its
+	// tick deadline passed before the time had.
+	linuxSleepRounds = uint8(200)
 )
 
 func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat.Result {
@@ -77,8 +87,100 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return handler.nanosleep(request)
 	case linuxabi.SysPrlimit64:
 		return handler.prlimit(state, arguments)
+	case linuxabi.SysRtSigaction:
+		return handler.signalAction(state, arguments)
+	case linuxabi.SysRtSigprocmask:
+		return handler.signalMask(state, arguments)
+	case linuxabi.SysGetrandom:
+		return handler.getrandom(request)
 	}
 	return linuxErrno(linuxabi.ENOSYS)
+}
+
+// signalAction records and reports a signal disposition. GoOS delivers no
+// signal, so a handler stored here never runs: the call exists so a program
+// that installs handlers at startup finds the kernel it expects, and reads
+// back what it wrote.
+func (handler *linuxCallHandler) signalAction(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	signal, action, previous := uint64(uint32(arguments[0])), arguments[1], arguments[2]
+	if arguments[3] != linuxcompat.SignalSetSize {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	var replacement *[linuxcompat.SignalActionSize]byte
+	if action != 0 {
+		if !vm.CopyIn(handler.root, action, linuxSignalAction[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		replacement = &linuxSignalAction
+	}
+	if errno := state.Signals.Action(signal, replacement, &linuxSignalPrevious); errno != 0 {
+		return linuxErrno(errno)
+	}
+	if previous != 0 && !vm.CopyOut(handler.root, previous, linuxSignalPrevious[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{}
+}
+
+// signalMask records and reports the blocked mask. Nothing is ever pending,
+// so blocking and unblocking have no further effect.
+func (handler *linuxCallHandler) signalMask(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	how, set, previous := uint64(uint32(arguments[0])), arguments[1], arguments[2]
+	if arguments[3] != linuxcompat.SignalSetSize {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	requested := uint64(0)
+	if set != 0 {
+		if !vm.CopyIn(handler.root, set, linuxSignalSet[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		requested = linuxcompat.DecodeSignalSet(&linuxSignalSet)
+	}
+	before, errno := state.Signals.Mask(how, requested, set != 0)
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if previous != 0 {
+		linuxcompat.EncodeSignalSet(&linuxSignalSet, before)
+		if !vm.CopyOut(handler.root, previous, linuxSignalSet[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+	}
+	return linuxcompat.Result{}
+}
+
+// getrandom returns bytes from the CPU's RDRAND generator. A machine without
+// one gets ENOSYS, which the C library reports as a missing call: the kernel
+// has no other source it could call random without lying. The refusal is
+// counted with the unsupported calls so a diagnostic run shows it.
+func (handler *linuxCallHandler) getrandom(request linuxcompat.Request) linuxcompat.Result {
+	address, length := request.Arguments[0], request.Arguments[1]
+	if errno := linuxcompat.RandomFlags(uint64(uint32(request.Arguments[2]))); errno != 0 {
+		return linuxErrno(errno)
+	}
+	if !amd64.HasHardwareRandom() {
+		return linuxcompat.Refuse(request.Number)
+	}
+	if length > linuxcompat.MaxRandomBytes {
+		length = linuxcompat.MaxRandomBytes
+	}
+	if length == 0 {
+		return linuxcompat.Result{}
+	}
+	if length = handler.accessible(address, length, true); length == 0 {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	filled := amd64.FillRandom(linuxRandom[:length])
+	copied := filled && vm.CopyOut(handler.root, address, linuxRandom[:length])
+	// The kernel keeps no copy of bytes a program may use as a key.
+	clear(linuxRandom[:length])
+	switch {
+	case !filled:
+		return linuxErrno(linuxabi.EIO)
+	case !copied:
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{Value: length}
 }
 
 // clockGettime reads a kernel clock directly. It asks no service and cannot
@@ -106,28 +208,50 @@ func (handler *linuxCallHandler) clockGettime(id uint64, address uint64) linuxco
 // a GoOS Linux process, so the sleep always runs to its end and the
 // remaining-time argument is never written. Killing the process cancels the
 // wait with the task's other waits.
+//
+// The deadline counts timer ticks, and ticks are no clock: a host that
+// delivers them late delivers them in a burst, and three can arrive in a
+// millisecond. The call therefore also records when the sleep must end by
+// the monotonic clock, and a wake that comes before then waits again for
+// what is left.
 func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcompat.Result {
-	_, active, errno := handler.vfsStage(request)
+	pending, active, errno := handler.vfsStage(request)
 	if errno != 0 {
 		waitAnyTable.Cancel(handler.task)
 		return linuxErrno(errno)
 	}
+	stage, ticks := uint8(1), uint64(0)
 	if active {
 		waitAnyTable.Take(handler.task)
-		linuxcompat.SyscallContinuations.Finish(handler.task)
-		return linuxcompat.Result{}
+		now := nowNanos()
+		if pending.Note <= now || pending.Stage >= linuxSleepRounds ||
+			!linuxcompat.SyscallContinuations.Advance(handler.task, pending.Stage, pending.Stage+1, 0) {
+			linuxcompat.SyscallContinuations.Finish(handler.task)
+			return linuxcompat.Result{}
+		}
+		stage, ticks = pending.Stage+1, linuxcompat.RemainingTicks(pending.Note-now, clock.TicksPerSecond, linuxSleepTicks)
+	} else {
+		if !vm.CopyIn(handler.root, request.Arguments[0], linuxTimespec[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		if ticks, errno = linuxcompat.SleepTicks(&linuxTimespec, clock.TicksPerSecond, linuxSleepTicks); errno != 0 || ticks == 0 {
+			return linuxErrno(errno)
+		}
+		// The note is the monotonic time the sleep ends at, or zero before
+		// the clock is calibrated, when the tick deadline alone decides.
+		end := uint64(0)
+		if monotonicClock.Calibrated() {
+			if end = nowNanos() + linuxcompat.SleepNanos(&linuxTimespec); end < linuxcompat.SleepNanos(&linuxTimespec) {
+				end = ^uint64(0)
+			}
+		}
+		if errno := handler.vfsBegin(request, nil, nil, end); errno != 0 {
+			return linuxErrno(errno)
+		}
 	}
-	if !vm.CopyIn(handler.root, request.Arguments[0], linuxTimespec[:]) {
-		return linuxErrno(linuxabi.EFAULT)
-	}
-	ticks, errno := linuxcompat.SleepTicks(&linuxTimespec, clock.TicksPerSecond, linuxSleepTicks)
-	if errno != 0 || ticks == 0 {
-		return linuxErrno(errno)
-	}
-	if !linuxcompat.SyscallContinuations.Begin(handler.task, request, nil) ||
-		!linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxSleepCorrelation) ||
+	if !linuxcompat.SyscallContinuations.Issue(handler.task, stage, linuxSleepCorrelation) ||
 		!waitAnyTable.Begin(handler.task, nil, amd64.TimerTicks()+ticks) ||
-		!linuxcompat.SyscallContinuations.Block(handler.task, 1) {
+		!linuxcompat.SyscallContinuations.Block(handler.task, stage) {
 		waitAnyTable.Cancel(handler.task)
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
 		return linuxErrno(linuxabi.EINVAL)

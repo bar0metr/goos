@@ -24,17 +24,11 @@ var linuxHandler linuxCallHandler
 var linuxIOBuffer [stream.AtomicWrite]byte
 var linuxIOVecWire [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
 
-// fileDescription returns the description behind fd when it names a VFS
-// file or directory. Stream descriptors keep their own path through endpoint.
-func (handler *linuxCallHandler) fileDescription(fd uint64) (*linuxcompat.FileDescription, bool) {
-	description, found := linuxcompat.DescriptionOf(handler.root, fd)
-	if !found || description.Kind != linuxcompat.FDVFSFile && description.Kind != linuxcompat.FDVFSDirectory {
-		return nil, false
-	}
-	return description, true
-}
-
+// Read serves read and pread64.
 func (handler *linuxCallHandler) Read(request linuxcompat.Request) linuxcompat.Result {
+	if request.Number == linuxabi.SysPread64 {
+		return handler.positioned(request, false)
+	}
 	return handler.read(request, false)
 }
 
@@ -44,12 +38,18 @@ func (handler *linuxCallHandler) Readv(request linuxcompat.Request) linuxcompat.
 	return handler.read(request, true)
 }
 
+// read sends a descriptor to what serves its kind: the VFS for a file, the
+// kernel itself for a device, and the stream code below for everything else.
 func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) linuxcompat.Result {
-	if description, file := handler.fileDescription(request.Arguments[0]); file {
-		if description.Kind == linuxcompat.FDVFSDirectory {
+	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
+		switch description.Kind {
+		case linuxcompat.FDVFSFile:
+			return handler.readFile(request, description, vector)
+		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EISDIR}
+		case linuxcompat.FDSynthetic:
+			return handler.deviceRead(request, *description, vector)
 		}
-		return handler.readFile(request, description, vector)
 	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
@@ -105,6 +105,9 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector bool, bound uint64) (uint64, []byte, linuxabi.Errno) {
 	if !vector {
 		address, limit := request.Arguments[1], request.Arguments[2]
+		if !userRange(address, limit) {
+			return 0, nil, linuxabi.EFAULT
+		}
 		if limit > bound {
 			limit = bound
 		}
@@ -143,6 +146,16 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 }
 
 var linuxProbe [1]byte
+
+// userRange is the check Linux makes on a read or write before anything
+// else: the whole requested range lies in the user half and does not wrap.
+// It looks at the length the program asked for, so a length that runs past
+// the user half is EFAULT even when the first bytes are mapped and the call
+// would have moved only those.
+func userRange(address uint64, length uint64) bool {
+	end := address + length
+	return end >= address && end <= vm.UserAddressLimit
+}
 
 // accessible returns how many of length bytes at address the process can
 // read, or write when write is set, counted from the first byte to the first
@@ -214,12 +227,20 @@ func (handler *linuxCallHandler) deliver(request linuxcompat.Request, wire []byt
 	return true
 }
 
+// Write serves write and pwrite64.
 func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.Result {
-	if description, file := handler.fileDescription(request.Arguments[0]); file {
-		if description.Kind == linuxcompat.FDVFSDirectory {
+	if request.Number == linuxabi.SysPwrite64 {
+		return handler.positioned(request, true)
+	}
+	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
+		switch description.Kind {
+		case linuxcompat.FDVFSFile:
+			return handler.writeFile(request, description, false)
+		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EBADF}
+		case linuxcompat.FDSynthetic:
+			return handler.deviceWrite(request, *description, false)
 		}
-		return handler.writeFile(request, description, false)
 	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
@@ -229,6 +250,9 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 		return linuxcompat.Result{Errno: errno}
 	}
 	address, requested := request.Arguments[1], request.Arguments[2]
+	if !userRange(address, requested) {
+		return linuxcompat.Result{Errno: linuxabi.EFAULT}
+	}
 	if requested == 0 {
 		return linuxcompat.Result{}
 	}
@@ -286,11 +310,15 @@ func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoin
 // oversized vector returns the bytes already written; the caller continues
 // from there.
 func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat.Result {
-	if description, file := handler.fileDescription(request.Arguments[0]); file {
-		if description.Kind == linuxcompat.FDVFSDirectory {
+	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
+		switch description.Kind {
+		case linuxcompat.FDVFSFile:
+			return handler.writeFile(request, description, true)
+		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EBADF}
+		case linuxcompat.FDSynthetic:
+			return handler.deviceWrite(request, *description, true)
 		}
-		return handler.writeFile(request, description, true)
 	}
 	if errno := handler.consumeWake(request); errno != 0 {
 		return linuxcompat.Result{Errno: errno}

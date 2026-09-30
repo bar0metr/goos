@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Extended by ADR 0150, which adds `statx` and character devices.
 
 ## Context
 

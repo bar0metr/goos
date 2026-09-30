@@ -167,7 +167,9 @@ observe() {
 run 'write /tmp/observe.txt observed'
 for applet in 'uname -a' 'id' 'date' 'sleep 1' 'touch /tmp/touched' 'cp /tmp/observe.txt /tmp/copied' \
 	'mv /tmp/copied /tmp/moved' 'head -n 1 /tmp/observe.txt' 'wc -c /tmp/observe.txt' 'stat /tmp/observe.txt' \
-	'ls -l /tmp' 'rmdir /tmp/linux-test' 'true' 'basename /tmp/observe.txt' 'env' 'df /tmp' 'sh -c true'; do
+	'ls -l /tmp' 'rmdir /tmp/linux-test' 'true' 'basename /tmp/observe.txt' 'env' 'df /tmp' 'sh -c true' \
+	'stat /dev/null' 'dd if=/dev/zero of=/tmp/zeros bs=512 count=2' 'tail -c 4 /tmp/observe.txt' \
+	'md5sum /tmp/observe.txt' 'sh -c "echo discarded > /dev/null"'; do
 	observe "$applet"
 done
 

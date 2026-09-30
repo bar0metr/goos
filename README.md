@@ -533,13 +533,14 @@ GoOS 0.2.0 ([docs/releases/0.2.0.md](docs/releases/0.2.0.md)) is the first
 Linux ABI release. Unmodified, statically linked Linux x86_64 programs run as
 GoOS processes: `/system/linux/hello`, a static musl program, file and
 directory probes, and applets of a static BusyBox the user supplies. A
-bounded layer in the kernel translates 53 Linux system calls into the VM,
-stream, clock, and VFS primitives a native process uses. A Linux process gets
+bounded layer in the kernel translates 59 Linux system calls into the VM,
+stream, clock, and VFS primitives a native process uses. Static
+position-independent executables load too. A Linux process gets
 its standard streams and one VFS session, cannot enter the native call gate,
 and holds no device authority. The
 [ABI document](docs/architecture/linux-x86_64-abi.md) lists every call and
 each difference from Linux. Dynamic linking, `fork`, `execve`, threads,
-signals, and networking are outside this release.
+signal delivery, and networking are outside this release.
 
 Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
 and capability model and does not weaken the native architecture for POSIX

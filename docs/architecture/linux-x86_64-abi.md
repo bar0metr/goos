@@ -28,17 +28,19 @@ an errno; nothing is accepted and ignored.
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
-| `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; no `SEEK_DATA` or `SEEK_HOLE` |
+| `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address; no fixed, file-backed, or executable mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
+| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | record and report dispositions and the blocked mask; no signal is delivered |
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
+| `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
 | `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call |
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
-| `nanosleep(35)` | implemented | a timer deadline, never early; no signal interrupts it |
+| `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; no signal interrupts it |
 | `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is 1 |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
@@ -54,8 +56,10 @@ an errno; nothing is accepted and ignored.
 | `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
 | `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
 | `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
-| `openat(257)` | implemented | files and directories; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
+| `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
+| `getrandom(318)` | partial | bytes from the CPU's RDRAND, at most 256 per call; `ENOSYS` on a CPU without it |
+| `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
 
 Calls programs commonly make that stay `ENOSYS` in 0.2.0, with what musl or
@@ -63,12 +67,12 @@ BusyBox does about it:
 
 | Syscall | Effect of `ENOSYS` |
 | --- | --- |
-| `rt_sigaction(13)`, `rt_sigprocmask(14)` | no signal exists to handle or block; BusyBox applets carry on |
-| `sendfile(40)` | BusyBox `cat` falls back to `read` and `write` |
+| `kill(62)`, `tkill(200)`, `tgkill(234)`, `rt_sigreturn(15)`, `sigaltstack(131)` | no signal is sent or delivered; `raise` and `abort` see the refusal |
+| `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
 | `fork(57)`, `vfork(58)`, `clone(56)`, `execve(59)`, `wait4(61)` | no Linux process starts another |
 | `pipe(22)`, `pipe2(293)`, `poll(7)`, `ppoll(271)`, `futex(202)` | no pipes, polling, or threads inside a process |
-| `ftruncate(77)`, `fsync(74)`, `statx(332)`, `statfs(137)`, `getrandom(318)` | not implemented |
+| `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
 Wrong-ABI Linux entry returns `-EPERM`. A noncanonical or non-user return RIP
@@ -157,7 +161,8 @@ record table is `ENFILE`; a refused write open is `EROFS`.
 A descriptor names a stream, a VFS file, or a directory. Duplicated
 descriptors share one description with its position and status flags. A
 directory description keeps its canonical path; 32 exist system-wide. `*at`
-calls resolve a relative path from the directory their `dirfd` names.
+calls resolve a relative path from the directory their `dirfd` names. A
+fourth kind of descriptor names a device; see [Devices](#devices).
 
 File bytes move through one 64 KiB memory object per process, charged to the
 process. A read or write of more is a short transfer. Reading a write-only
@@ -168,6 +173,7 @@ against another writer.
 | Call | Errors beyond path resolution |
 | --- | --- |
 | `lseek` | `EINVAL` for a negative result or an unknown whence, `ESPIPE` for a stream |
+| `pread64`, `pwrite64` | `EINVAL` for a negative offset, checked before the descriptor; `ESPIPE` for a stream; `EISDIR` reading and `EBADF` writing a directory |
 | `getcwd` | `ERANGE` for a buffer shorter than the path and its terminator |
 | `chdir` | `ENOENT`, `ENOTDIR` |
 | `mkdir` | `EEXIST`, `ENOENT`, `ENOTDIR`, `EROFS`, `ENOSPC` |
@@ -175,7 +181,42 @@ against another writer.
 | `rmdir` | `ENOTDIR` for a file, `ENOTEMPTY`, `EBUSY` for a mount point |
 | `rename` | `EISDIR` for a file onto a directory, `EEXIST` for a directory onto an existing name, `EBUSY` for an open target, `EXDEV` across mounts |
 
-`ftruncate`, `fsync`, and `statx` return `ENOSYS`.
+`pread64` and `pwrite64` move the VFS position to the offset, transfer, and
+move it back to where the description has it, so the position a program sees
+never changes (ADR 0150). A transfer that fails still restores it. A
+descriptor opened with `O_APPEND` writes at the end of the file whatever
+offset `pwrite64` names, which is the Linux behavior.
+
+`ftruncate` and `fsync` return `ENOSYS`.
+
+## Devices
+
+The kernel serves three device names itself, with no VFS exchange
+(ADR 0150). It recognizes them after path resolution, so `/dev/../dev/null`
+and a relative path that resolves there name the same device.
+
+| Path | `open` | `read` | `write` | Device number |
+| --- | --- | --- | --- | --- |
+| `/dev/null` | a descriptor | 0, end of file | the count, bytes discarded | 1, 3 |
+| `/dev/zero` | a descriptor | zero bytes, at most 64 KiB per call | the count, bytes discarded | 1, 5 |
+| `/dev/tty` | `ENXIO`: the process has no controlling terminal | | | 5, 0 |
+
+`stat`, `fstat`, and `statx` report `S_IFCHR\|0666` with the device number in
+`st_rdev`, and `access` answers from that mode. `readv`, `writev`, `pread64`,
+and `pwrite64` work as `read` and `write` do; a write never reads the memory
+it is given, so the buffer need not be mapped. `lseek` returns 0 and `ioctl`
+`ENOTTY`.
+
+| Call on a device name | Result |
+| --- | --- |
+| `open` with `O_DIRECTORY` or a trailing slash, a path beneath the name | `ENOTDIR` |
+| `open` with `O_CREAT\|O_EXCL` | `EEXIST` |
+| `unlink`, `rename` from or onto it | `EACCES` |
+| `mkdir` | `EEXIST` |
+| `rmdir`, `chdir` | `ENOTDIR` |
+
+`/dev` is no directory: `stat("/dev")` is `ENOENT` and no listing shows the
+three names. Native programs do not see them.
 
 ## Directory listing
 
@@ -195,11 +236,13 @@ than the buffer holds.
 ## File status
 
 `stat`, `lstat`, `fstat`, and `newfstatat` fill a 144-byte `struct stat`
-written out from the Linux x86_64 header (ADR 0142).
+written out from the Linux x86_64 header (ADR 0142). `statx` fills the
+256-byte `struct statx` from the same answer (ADR 0150).
 
 | Field | Value |
 | --- | --- |
-| `st_mode` | `S_IFREG\|0644` or `S_IFDIR\|0755`; no write bits for a read-only file or mount; `S_IFIFO\|0600` for a stream |
+| `st_mode` | `S_IFREG\|0644` or `S_IFDIR\|0755`; no write bits for a read-only file or mount; `S_IFIFO\|0600` for a stream; `S_IFCHR\|0666` for a device |
+| `st_rdev` | the device number of a device, zero otherwise |
 | `st_uid`, `st_gid` | 1000 |
 | `st_nlink` | 1 |
 | `st_dev`, `st_ino` | the VFS mount identity and node identity; equal for two names of one file |
@@ -207,10 +250,18 @@ written out from the Linux x86_64 header (ADR 0142).
 | `st_atime`, `st_mtime`, `st_ctime` | one time: modification, else creation, else zero |
 
 A file descriptor is stat-ed through its VFS handle, a directory descriptor by
-the path it keeps, a stream without the VFS. `fstat` of a closed descriptor is
-`EBADF`. A path that names a file and ends in a slash is `ENOTDIR`. An
-unwritable buffer is `EFAULT`, reported after the path errors as on Linux. An
-unknown `newfstatat` flag is `EINVAL`.
+the path it keeps, a stream or a device without the VFS. `fstat` of a closed
+descriptor is `EBADF`. A path that names a file and ends in a slash is
+`ENOTDIR`. An unwritable buffer is `EFAULT`, reported after the path errors
+as on Linux. An unknown `newfstatat` flag is `EINVAL`.
+
+`statx` differs in three ways. `stx_mask` is `STATX_BASIC_STATS`, with
+`STATX_BTIME` and `stx_btime` when the filesystem recorded a creation time;
+the requested mask changes nothing. `stx_dev_major` and `stx_dev_minor` are
+the halves `major()` and `minor()` give for `st_dev`. `AT_STATX_FORCE_SYNC`
+and `AT_STATX_DONT_SYNC` are accepted; both at once, a reserved mask bit, or
+an unknown flag is `EINVAL`. `statx` takes a null path with `AT_EMPTY_PATH`,
+and `newfstatat` does when that is its only flag, as Linux 6.11 and later do.
 
 ## Vector I/O
 
@@ -238,23 +289,68 @@ These calls answer from kernel state and ask no service (ADR 0145).
 | `getgroups` | no supplementary groups |
 | `uname` | `Linux`, `goos`, `6.0.0-goos`, `GoOS <release> Linux ABI`, `x86_64`, `(none)` |
 | `clock_gettime` | clocks 0 and 5 read realtime; 1, 4, 6, and 7 read monotonic; others `EINVAL` |
-| `nanosleep` | sleeps whole ticks, rounded up plus one; returns 0; bad fields `EINVAL` |
+| `nanosleep` | sleeps whole ticks, rounded up plus one, and again while the monotonic clock has not advanced by the request; returns 0; bad fields `EINVAL` |
 | `prlimit64` | `RLIMIT_NOFILE` 64, `RLIMIT_STACK` 8 MiB, `RLIMIT_DATA` 64 MiB, `RLIMIT_CORE` 0, others unlimited |
 
 `prlimit64` refuses a new limit with `EPERM`, another PID with `ESRCH`, and a
 resource over 15 with `EINVAL`. No signal exists to interrupt a sleep.
 
+## Signal state
+
+`rt_sigaction` and `rt_sigprocmask` keep what a program registers and report
+it back (ADR 0151). GoOS sends no signal, so no handler runs, no call returns
+`EINTR`, and a blocked signal is never pending.
+
+| Call | Behavior |
+| --- | --- |
+| `rt_sigaction` | stores the 32-byte kernel `sigaction` for signals 1 to 64 and returns the previous one; `SIGKILL` and `SIGSTOP` are removed from the stored mask |
+| `rt_sigprocmask` | `SIG_BLOCK`, `SIG_UNBLOCK`, `SIG_SETMASK` on a 64-bit mask; `SIGKILL` and `SIGSTOP` never enter it; a call with no new set reports the mask whatever the operation |
+| either, set size other than 8 | `EINVAL` |
+| `rt_sigaction` for signal 0 or above 64, or a new disposition for `SIGKILL` or `SIGSTOP` | `EINVAL` |
+| `rt_sigprocmask` with an unknown operation and a new set | `EINVAL` |
+| an unreadable or unwritable pointer | `EFAULT` |
+
+Ctrl-C ends the process through the native kill path whatever it registered
+for `SIGINT`. The calls that send a signal stay `ENOSYS`.
+
+## Random bytes
+
+`getrandom` and `AT_RANDOM` have one source, the CPU's RDRAND generator
+(ADR 0151).
+
+| CPU | `getrandom` | `AT_RANDOM` |
+| --- | --- | --- |
+| has RDRAND | fills up to 256 bytes per call; a longer request returns 256 | 16 bytes, drawn at launch |
+| has none | `ENOSYS`, counted with the refused calls | absent |
+
+`GRND_NONBLOCK`, `GRND_RANDOM`, and `GRND_INSECURE` are accepted and change
+nothing. An unknown flag, or `GRND_RANDOM` with `GRND_INSECURE`, is `EINVAL`.
+A buffer that runs off a mapping gets the bytes that fit; one that starts
+outside any is `EFAULT`. The kernel keeps no pool and no copy. QEMU's default
+CPU model has no RDRAND; `-cpu qemu64,+rdrand` adds it.
+
 ## ELF status
 
-The pure parser accepts only ELF64 little-endian x86_64 `ET_EXEC`. It bounds
-program headers at 64 and `PT_LOAD` segments at 16, produces page-rounded load
+The pure parser accepts ELF64 little-endian x86_64 images of two types:
+`ET_EXEC`, at the addresses the file names, and `ET_DYN` with no interpreter,
+a static position-independent executable (ADR 0149). It bounds program
+headers at 64 and `PT_LOAD` segments at 16, produces page-rounded load
 metadata, and validates source ranges, user ranges, configured reserved pages,
 alignment/congruence, overlap, protections, and the executable entry.
 
 `PT_PHDR`, `PT_TLS`, `PT_GNU_STACK`, and `PT_GNU_RELRO` are recorded and checked
-against their containing loads. `PT_INTERP`, `PT_DYNAMIC`, executable stack,
-W+X, unknown program-header kinds, and malformed arithmetic are rejected.
-`ET_DYN`, static PIE included, is refused. Parsing itself does not map or execute images.
+against their containing loads. `PT_NOTE`, `PT_GNU_EH_FRAME`, and
+`PT_GNU_PROPERTY` must name a range inside the file and are otherwise ignored.
+`PT_INTERP`, executable stack, W+X, every other program-header kind, and
+malformed arithmetic are rejected. Parsing itself does not map or execute
+images.
+
+A static PIE loads at the fixed base `0x40000000`. The parser adds the base
+to the entry and to every address a header names, then applies the checks
+above to the moved addresses. `PT_DYNAMIC` is accepted in such an image, once
+and inside a load segment, and refused in an `ET_EXEC` image. The kernel
+applies no relocation: the program's own startup code does, from `AT_PHDR`.
+The base is the same on every launch; GoOS randomizes no layout.
 
 ## Mapping status
 
@@ -265,7 +361,8 @@ The shared page-fault path reads file bytes on first touch and supplies zeroes
 after `p_filesz`; its existing quota accounting and W^X checks remain in force.
 
 The mapping boundary rechecks source length, range arithmetic, overlap, entry
-placement, and protections. Linux `ET_EXEC` may start at `0x400000`; load pages
+placement, and protections. Linux `ET_EXEC` may start at `0x400000` and a
+static PIE starts at `0x40000000`; load pages
 must remain below 2 GiB, away from fixed GoOS user windows. The Linux stack is
 reserved as 8 MiB RW/NX demand-zero memory below `vm.UserStackTop`, with a
 64 KiB guard. PID 1 launch uses this mapping directly.
@@ -287,8 +384,9 @@ Initial RSP is 16-byte aligned. The complete occupied image is limited to
 `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_ENTRY`, `AT_EXECFN`,
 `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE`, `AT_CLKTCK`,
 `AT_PLATFORM="x86_64"`, and `AT_NULL`. UID/GID are 1000 and `AT_CLKTCK` is
-100. `AT_RANDOM` is deliberately absent; no deterministic bytes are presented
-as entropy.
+100. `AT_PHDR` and `AT_ENTRY` are the loaded addresses, base included.
+`AT_RANDOM` points at 16 bytes from RDRAND when the CPU has it and is absent
+otherwise; no deterministic bytes are presented as entropy.
 
 The installer maps only pages occupied by this image as user RW/NX owned
 pages. Normal launch accounting will charge them before the task becomes
@@ -351,7 +449,9 @@ Every pointer argument is copied through the checked user-memory helpers. A
 null, noncanonical, kernel-half, or unmapped pointer is `EFAULT`. A read or
 write whose buffer runs off the end of a mapping moves the bytes before the
 end and reports them; one whose buffer starts outside any mapping is
-`EFAULT`. A zero length succeeds without touching the pointer. A call whose
+`EFAULT`. So is one whose length carries the range past the user half,
+before any byte moves: Linux checks the range a call names first. A zero
+length succeeds without touching the pointer. A call whose
 argument lies in a page of the program's own image that is still loading from
 its file waits for the page and runs again.
 
@@ -362,7 +462,11 @@ Results a correct Linux program can observe to differ:
 | Area | GoOS 0.2.0 | Linux |
 | --- | --- | --- |
 | terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
-| signals | none; Ctrl-C ends the process; `nanosleep` never returns `EINTR` | delivered, handled, masked |
+| signals | dispositions and the mask are recorded; none is sent or delivered; Ctrl-C ends the process whatever handles `SIGINT`; `nanosleep` never returns `EINTR` | delivered, handled, masked |
+| devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
+| random bytes | `ENOSYS` and no `AT_RANDOM` on a CPU without RDRAND; 256 bytes per call | always available; 32 MiB per call |
+| positioned I/O | three VFS exchanges per call | one atomic operation |
+| load address | a static PIE always loads at `0x40000000` | randomized |
 | users | every file and process is 1000:1000; mode bits are presentation | enforced ownership and permissions |
 | directory listing | no `.` and `..`; a directory removed while open lists as empty | both entries; `ENOENT` |
 | link count | 1 for files and directories | directories count their subdirectories |
@@ -380,12 +484,13 @@ Results a correct Linux program can observe to differ:
 
 ## Release limits
 
-GoOS 0.2.0 runs x86_64, statically linked, non-PIE ELF programs. It has no
-`PT_INTERP`, dynamic linker, or glibc; no `fork`, `vfork`, `clone`, or
-`execve`; no threads or `futex`; no signals; no pipes created by a Linux
-process; no networking; no `/proc`, `/sys`, or `/dev`; no file-backed `mmap`;
-no ownership or permission enforcement; no root; no termios. BusyBox `sh`
-starts but cannot run a program. `nano` does not run.
+GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
+or not. It has no `PT_INTERP`, dynamic linker, or glibc; no `fork`, `vfork`,
+`clone`, or `execve`; no threads or `futex`; no signal delivery; no pipes
+created by a Linux process; no networking; no `/proc` or `/sys`, and of
+`/dev` three names; no file-backed `mmap`; no address-space randomization; no
+ownership or permission enforcement; no root; no termios. BusyBox `sh` runs
+builtins and redirections but cannot run a program. `nano` does not run.
 
 ## Bounds
 
@@ -399,12 +504,15 @@ starts but cannot run a program. `nano` does not run.
 | path component | 1024 bytes |
 | initial stack image | 64 KiB, 256 arguments, 256 environment entries |
 | stack reservation | 8 MiB, 64 KiB guard |
+| static PIE load base | `0x40000000` |
 | `brk` heap | 64 MiB |
 | page quota | 16384 pages |
 | continuations | 1 per task |
 | VFS exchanges per `getdents64` | 128 |
 | vector elements | 16 |
 | bytes per read or write | 64 KiB |
+| bytes per `getrandom` | 256 |
+| signal dispositions per process | 64 |
 | wait for a VFS reply | 8 seconds |
 | compatibility PIDs | 2 to 32767 |
 | refused-call record | 8 recent numbers and a 512-bit set |
@@ -435,15 +543,22 @@ block, resume, and check FS-relative memory. Markers: `LINUX_PID1_LAUNCH_OK`,
 PID 1 then runs `/system/linux/abi-probe one two` in `/system/linux`. The
 probe checks every result itself and prints one line per group: arguments
 and environment, TLS and heaps, the VFS session, path resolution, file I/O,
-file status, stdio, directory listing, vectors, descriptors, naming, and
-identity, clocks, limits, and sleep. PID 1 requires the whole output and exit
-status zero. Markers: `LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`,
+file status, `statx`, positioned I/O, stdio, directory listing, vectors,
+descriptors, naming, the devices, identity, clocks, limits, and sleep, the
+signal state, and random bytes. PID 1 requires the whole output and exit
+status zero, and prints the output it got between `LINUX_PROBE_OUTPUT_BEGIN`
+and `LINUX_PROBE_OUTPUT_END` when it differs. Markers: `LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`,
 `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`, `LINUX_STAT_OK`, `LINUX_DIRENT_OK`,
 `LINUX_SYSTEM_OK`.
 
 **Reference.** The same `abi-probe` binary prints the same lines on a Linux
-kernel (`make test-linux-reference`). `userspace/linux/README.md` holds the
-recorded call trace and the results that differ.
+kernel. `make test-linux-reference` runs it in an amd64 container, under
+user-mode emulation on an arm64 host. `make test-linux-kernel-reference
+KERNEL=path BUSYBOX=path` boots a real Linux kernel in QEMU and runs the
+default and hostile modes strict: every check must give the exact Linux
+result, which GoOS is always held to (ADR 0152). Both modes pass on Linux
+6.12. `userspace/linux/README.md` holds the recorded call trace and the
+results that differ.
 
 **Linux boot.** `make test-linux-boot` runs from the shell of one validation
 boot:
@@ -451,6 +566,7 @@ boot:
 | Step | Requires |
 | --- | --- |
 | `hello` | `hello from Linux ABI`, status 0 |
+| `hello-pie` | `hello from a static PIE`, printed only when `AT_PHDR` and `AT_ENTRY` match the address the program runs at |
 | `musl-hello alpha beta` | `argc=3`, `hello from musl` |
 | `fsprobe` on `/tmp` and on `/persist` | `write ok`, `read ok`, `stat ok`; native `cat` reads the file |
 | `dirprobe` on `/tmp` and on `/persist` | every name, directories marked, the count |
@@ -460,34 +576,42 @@ boot:
 | `abi-probe hostile` | `EFAULT` for bad pointers in every call, short transfers at a mapping's end, 100000-byte transfers, stale descriptors |
 | `abi-probe exhaust` | `EMFILE` at 64 descriptors, `ENOMEM` at the page quota, and recovery from both |
 | `abi-probe isolation` | the native call gate refuses all 128 call numbers; native handle values are `EBADF` |
+| `abi-probe random` | `random: hardware`: the guest CPU of this test has RDRAND |
+| `abi-probe stack-overflow` | recursion reaches the guard below the stack; the kernel logs `user fault: guard page`, the process ends, the shell continues |
 | `abi-probe port-io` | the process ends with a fault status and the shell continues |
 | Ctrl-C on a blocked read, a sleep, and a VFS wait | the process ends, the shell reads the next line, later runs pass |
 
 **General boot test.** `make test-boot` also restarts the VFS under a Linux
 process, which must then get `EIO` and no new session, and makes the VFS
 answer one request late, which must end in `ETIMEDOUT` with the session still
-usable.
+usable. Its guest CPU has no RDRAND, so PID 1's probe there requires
+`getrandom` to return `ENOSYS` and `AT_RANDOM` to be absent.
 
 **BusyBox.** `make test-linux-busybox BUSYBOX=path` requires `echo`, `pwd`,
 `cat`, `ls`, `mkdir`, and `rm` of a static BusyBox the caller supplies
 (ADR 0148). With BusyBox 1.35.0 built against musl these also run: `uname`,
-`date`, `sleep`, `cp`, `mv`, `head`, `wc`, `stat`, `ls -l`, `rmdir`, `true`,
-`basename`, `env`, `id`, and `sh -c true`. `touch` fails on the missing
-`utimensat` and `df` on the missing `/proc/mounts`.
+`date`, `sleep`, `cp`, `mv`, `head`, `tail`, `wc`, `stat`, `ls -l`, `rmdir`,
+`true`, `basename`, `env`, `id`, `md5sum`, `dd if=/dev/zero`, `sh -c true`,
+and `sh -c "echo x > /dev/null"`. `touch` fails on the missing `utimensat`
+and `df` on the missing `/proc/mounts`. Alpine 3.22's static BusyBox 1.37,
+which carries `PT_NOTE` and `PT_GNU_PROPERTY` headers, runs the same set.
 
 **Host tests.** `make test-linux-elf` parses hostile and real images and
 checks every fixture against its checksum and the kernel ELF parser.
 `make test-linux-abi` covers the pure translation code: reply
 classification, session state, open planning, seek arithmetic, path
-resolution, the `struct stat` and `linux_dirent64` layouts, vectors, status
-flags, clocks, sleep rounding, limits, PIDs, and the descriptor table. Fuzz
-targets cover the ELF parser, the initial stack, path resolution, and both
-record encoders.
+resolution, the `struct stat`, `struct statx`, and `linux_dirent64` layouts,
+vectors, status flags, clocks, sleep rounding, limits, PIDs, the descriptor
+table, the device names, the signal state, and the random flags. Fuzz targets
+cover the ELF parser for both image types, the initial stack, path
+resolution, and both record encoders.
 
 ## Timing baseline
 
-`make test-linux-bench` writes `build/reports/linux-abi-<variant>.md`. On the
-development host, an arm64 machine running the guest under QEMU TCG at
+`make test-linux-bench` writes `build/reports/linux-abi-<variant>.md`.
+`QEMU_ACCEL` names the accelerator, `tcg` by default; an x86_64 host can pass
+`kvm` and time the guest on its own CPU. The development host is an arm64
+machine, which can only translate an x86_64 guest. There, under QEMU TCG at
 100 Hz and `-opt=2`, the lowest averages of three runs were:
 
 | Linux call | ns per call |

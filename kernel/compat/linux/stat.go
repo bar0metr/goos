@@ -43,7 +43,8 @@ const (
 	StreamDevice = uint64(1)
 )
 
-// FileStatus is the part of struct stat GoOS has an answer for.
+// FileStatus is the part of struct stat and struct statx GoOS has an answer
+// for.
 type FileStatus struct {
 	Device      uint64
 	Inode       uint64
@@ -51,6 +52,14 @@ type FileStatus struct {
 	Size        uint64
 	Seconds     int64
 	Nanoseconds uint32
+	// RawDevice is st_rdev: the device number of a character device and zero
+	// for everything else.
+	RawDevice uint64
+	// Born reports that the filesystem recorded a creation time, which only
+	// statx has a field for.
+	Born            bool
+	BirthSeconds    int64
+	BirthNanosecond uint32
 }
 
 // StatusOfReply turns a VFS stat reply into Linux file status.
@@ -88,6 +97,9 @@ func StatusOfReply(reply *vfs.Reply) (FileStatus, abi.Errno) {
 	if stamp.Available {
 		status.Seconds, status.Nanoseconds = stamp.Seconds, stamp.Nanoseconds
 	}
+	if reply.Created.Available {
+		status.Born, status.BirthSeconds, status.BirthNanosecond = true, reply.Created.Seconds, reply.Created.Nanoseconds
+	}
 	return status, 0
 }
 
@@ -108,7 +120,7 @@ func EncodeStat(target *[StatSize]byte, status FileStatus) {
 	binary.LittleEndian.PutUint32(target[statMode:], status.Mode)
 	binary.LittleEndian.PutUint32(target[statUID:], StatUID)
 	binary.LittleEndian.PutUint32(target[statGID:], StatGID)
-	put(target[statRawDevice:], 0)
+	put(target[statRawDevice:], status.RawDevice)
 	put(target[statLength:], status.Size)
 	put(target[statBlockSize:], StatBlockSize)
 	blocks := status.Size / statBlockUnits
@@ -145,4 +157,84 @@ func AccessErrno(requested uint64, mode uint32) abi.Errno {
 		return abi.EACCES
 	}
 	return 0
+}
+
+// StatxSize is the size of struct statx, which is the same on every Linux
+// architecture. The offsets below come from include/uapi/linux/stat.h.
+const StatxSize = 256
+
+const (
+	statxMask        = 0   // stx_mask, 4 bytes
+	statxBlockSize   = 4   // stx_blksize, 4
+	statxLinks       = 16  // stx_nlink, 4; stx_attributes before it stays zero
+	statxUID         = 20  // stx_uid, 4
+	statxGID         = 24  // stx_gid, 4
+	statxMode        = 28  // stx_mode, 2; 2 bytes of padding follow
+	statxInode       = 32  // stx_ino, 8
+	statxLength      = 40  // stx_size, 8
+	statxBlocks      = 48  // stx_blocks, 8; stx_attributes_mask follows, zero
+	statxAccessed    = 64  // stx_atime: 8 bytes of seconds, 4 of nanoseconds, 4 unused
+	statxBorn        = 80  // stx_btime
+	statxChanged     = 96  // stx_ctime
+	statxModified    = 112 // stx_mtime
+	statxRawMajor    = 128 // stx_rdev_major, 4
+	statxRawMinor    = 132 // stx_rdev_minor, 4
+	statxDeviceMajor = 136 // stx_dev_major, 4
+	statxDeviceMinor = 140 // stx_dev_minor, 4; the rest stays zero
+)
+
+// StatxFlags checks the flags and the requested mask of statx. The sync
+// flags change nothing, because a GoOS stat always asks the filesystem. The
+// mask is a request Linux may exceed, and GoOS returns the same fields
+// whatever it names. emptyPath is AT_EMPTY_PATH, as in StatFlags.
+func StatxFlags(flags uint64, mask uint64) (emptyPath bool, errno abi.Errno) {
+	if mask&abi.StatxReservedMask != 0 || flags&abi.AtStatxSyncType == abi.AtStatxSyncType {
+		return false, abi.EINVAL
+	}
+	return StatFlags(flags &^ abi.AtStatxSyncType)
+}
+
+// DeviceParts splits a device number the way the C library's major() and
+// minor() do, so makedev of the two halves gives the st_dev of the same file.
+func DeviceParts(device uint64) (major uint32, minor uint32) {
+	major = uint32(device>>32&0xfffff000 | device>>8&0xfff)
+	minor = uint32(device>>12&0xffffff00 | device&0xff)
+	return major, minor
+}
+
+// EncodeStatx writes status as a struct statx. Every byte of target is set.
+// stx_mask names the basic fields, and the birth time when the filesystem
+// recorded one.
+func EncodeStatx(target *[StatxSize]byte, status FileStatus) {
+	*target = [StatxSize]byte{}
+	put32, put64 := binary.LittleEndian.PutUint32, binary.LittleEndian.PutUint64
+	mask := abi.StatxBasicStats
+	if status.Born {
+		mask |= abi.StatxBirthTime
+		put64(target[statxBorn:], uint64(status.BirthSeconds))
+		put32(target[statxBorn+8:], status.BirthNanosecond)
+	}
+	put32(target[statxMask:], mask)
+	put32(target[statxBlockSize:], StatBlockSize)
+	put32(target[statxLinks:], 1)
+	put32(target[statxUID:], StatUID)
+	put32(target[statxGID:], StatGID)
+	binary.LittleEndian.PutUint16(target[statxMode:], uint16(status.Mode))
+	put64(target[statxInode:], status.Inode)
+	put64(target[statxLength:], status.Size)
+	blocks := status.Size / statBlockUnits
+	if status.Size%statBlockUnits != 0 {
+		blocks++
+	}
+	put64(target[statxBlocks:], blocks)
+	for _, offset := range [...]int{statxAccessed, statxChanged, statxModified} {
+		put64(target[offset:], uint64(status.Seconds))
+		put32(target[offset+8:], status.Nanoseconds)
+	}
+	major, minor := DeviceParts(status.RawDevice)
+	put32(target[statxRawMajor:], major)
+	put32(target[statxRawMinor:], minor)
+	major, minor = DeviceParts(status.Device)
+	put32(target[statxDeviceMajor:], major)
+	put32(target[statxDeviceMinor:], minor)
 }

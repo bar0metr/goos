@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by ADR 0150: a length that carries the range past the user
+half is `EFAULT` before any byte moves.
 
 ## Context
 

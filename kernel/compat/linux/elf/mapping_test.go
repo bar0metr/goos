@@ -118,3 +118,31 @@ func TestMapImageRevalidatesSourceOriginAndProtection(t *testing.T) {
 		}
 	}
 }
+
+func TestMapImagePlacesAStaticPIEAtItsBase(t *testing.T) {
+	data := pieELF(t)
+	image, failure := Parse(data, GoOSConfig())
+	if failure != OK || image.Base != StaticPIEBase {
+		t.Fatalf("static PIE: failure=%d base=%#x", failure, image.Base)
+	}
+	regions := emptyRegions(t)
+	layout, ok := MapImage(&image, loader.Contiguous(data), loader.Origin{Object: 7}, regions)
+	if !ok || layout.Entry != StaticPIEBase+0x1020 || regions.Count() != image.SegmentCount+2 {
+		t.Fatalf("map failed: ok=%v layout=%+v regions=%d", ok, layout, regions.Count())
+	}
+	code, found := regions.Find(StaticPIEBase + 0x1000)
+	if !found || code.Backing != region.Image || code.Offset != 0x1000 || code.Data != 0x200 || code.Protection != region.Read|region.Execute {
+		t.Fatalf("code mapping: %+v", code)
+	}
+	// The file offsets stay where the file has them; only addresses moved.
+	data2, found := regions.Find(StaticPIEBase + 0x2000)
+	if !found || data2.Offset != 0x2000 || data2.Data != 0x200 || data2.Protection != region.Read|region.Write {
+		t.Fatalf("data mapping: %+v", data2)
+	}
+	if _, low := regions.Find(0x1000); low {
+		t.Fatal("the image left a mapping at its link-time address")
+	}
+	if StaticPIEBase%vm.PageSize != 0 || StaticPIEBase >= vm.UserImageAreaLimit || StaticPIEBase < vm.UserAddressStart {
+		t.Fatalf("base %#x outside the image area", StaticPIEBase)
+	}
+}

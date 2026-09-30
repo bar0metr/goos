@@ -262,7 +262,13 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
 		if processABI == process.ABILinuxX8664 {
-			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound)
+			// AT_RANDOM exists only when the CPU has a generator to fill it.
+			var random *[linuxabi.RandomSize]byte
+			if amd64.FillRandom(linuxStackRandom[:]) {
+				random = &linuxStackRandom
+			}
+			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound, random)
+			clear(linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
 			if stackStatus != linuxabi.StackOK || !brkOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, bound, brkBase, brkLimit) {
 				abandonSpawn(root, spawned, false)
@@ -382,6 +388,10 @@ var launchRegions region.Map
 // linuxInitialStack is shared launch scratch. Launches are serialized by PID 1
 // and the final bytes are copied into private process pages before task start.
 var linuxInitialStack [linuxabi.MaxInitialStackSize]byte
+
+// linuxStackRandom holds the AT_RANDOM bytes of the launch in progress. The
+// launch clears it once the stack image has its copy.
+var linuxStackRandom [linuxabi.RandomSize]byte
 
 // linuxLaunchImage is the parsed ELF of the launch in progress. The record is
 // over 1 KiB, so a local copy would be allocated on the kernel heap and never

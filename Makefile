@@ -109,7 +109,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference
 
 all: iso
 
@@ -563,6 +563,8 @@ test-linux-all: test-linux-elf test-linux-abi test-linux-boot
 # Interoperability with a static x86_64 BusyBox the caller supplies. The
 # repository carries no BusyBox, so this is no part of test-all.
 #   make test-linux-busybox BUSYBOX=/path/to/busybox
+# LINUX_EXTRA places further Linux programs under /system/linux in any image
+# build; several paths are separated as in PATH.
 LINUX_EXTRA ?=
 test-linux-busybox:
 	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
@@ -583,6 +585,16 @@ test-linux-bench: iso
 # a reference check and no part of test-all.
 test-linux-reference:
 	@userspace/linux/run-on-linux.sh | tee /dev/stderr | grep -q '^exit=0$$'
+
+# Runs the conformance probe on a real Linux kernel booted in QEMU, where no
+# user-mode emulator stands between the program and the kernel and every
+# result must be the exact Linux one. The caller supplies the kernel and a
+# static BusyBox for the guest's /init; the repository carries neither.
+#   make test-linux-kernel-reference KERNEL=/path/to/vmlinuz BUSYBOX=/path/to/busybox
+test-linux-kernel-reference:
+	@test -n "$(KERNEL)" && test -f "$(KERNEL)" || { echo "KERNEL=/path/to/linux/kernel/image is required" >&2; exit 2; }
+	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
+	@userspace/linux/run-on-linux-kernel.sh $(KERNEL) $(BUSYBOX)
 
 clean:
 	@rm -rf $(BUILD_DIR)
@@ -612,6 +624,7 @@ help:
 	  '  version         print the release from internal/version/version.go' \
 	  '  linux-fixtures  rebuild the static Linux test fixtures under userspace/linux' \
 	  '  test-linux-reference run those fixtures on a Linux kernel in Docker' \
+	  '  test-linux-kernel-reference KERNEL=path BUSYBOX=path  run the probe on a Linux kernel in QEMU' \
 	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
 	  '  test-linux-bench time Linux calls beside native ones into build/reports' \

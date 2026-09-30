@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by ADR 0153: a sleep ends by the monotonic clock, and a
+tick deadline that passes early waits again.
 
 ## Context
 

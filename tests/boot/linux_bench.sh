@@ -4,6 +4,10 @@
 # It writes the results to build/reports. The numbers describe this host and
 # this QEMU; they are a baseline to compare a change against and no gate.
 #
+# QEMU_ACCEL names the accelerator, tcg by default. An x86_64 host can time
+# the guest on its own CPU with QEMU_ACCEL=kvm; the report names the one
+# used. An arm64 host has only tcg for an x86_64 guest.
+#
 # usage: linux_bench.sh ISO OVMF DISK
 set -eu
 
@@ -11,6 +15,7 @@ iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?disk path required}
 memory=${MEMORY:-512M}
+accel=${QEMU_ACCEL:-tcg}
 command_timeout=${COMMAND_TIMEOUT:-60}
 read -r hz diag_build validation_build opt_build variant <build/config/build
 variant=${variant:-hz$hz}
@@ -103,7 +108,7 @@ clean() {
 	refuse 'exit status:\|killed\|not found\|permission denied\|exec:' "$1"
 }
 
-qemu-system-x86_64 -machine q35 -m "$memory" \
+qemu-system-x86_64 -machine q35 -accel "$accel" -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -144,8 +149,8 @@ lowest() { sed -n "s/^linux-bench $1 \([0-9][0-9]*\) ns.call\$/\1/p" "$work/linu
 
 {
 	printf '# Linux ABI call times at %s Hz\n\n' "$hz"
-	printf 'Build HZ=%s DIAG=%s OPT=%s, %s runs after one warm-up run, QEMU %s (TCG) on %s.\n' \
-		"$hz" "$diag_build" "${opt_build:-?}" "$repeats" "$(qemu-system-x86_64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')" "$(uname -m)"
+	printf 'Build HZ=%s DIAG=%s OPT=%s, %s runs after one warm-up run, QEMU %s (%s) on %s.\n' \
+		"$hz" "$diag_build" "${opt_build:-?}" "$repeats" "$(qemu-system-x86_64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')" "$accel" "$(uname -m)"
 	printf 'Times come from CLOCK_MONOTONIC inside the guest. Each row is the lowest\n'
 	printf 'average over the runs.\n\n'
 	printf '| Linux call | ns per call | What it costs |\n| --- | ---: | --- |\n'

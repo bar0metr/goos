@@ -1,6 +1,8 @@
 // Package elf validates and maps the bounded static ELF64 subset accepted by
-// the GoOS Linux x86_64 compatibility layer. Parsing remains pure; MapImage
-// records a validated plan in the common lazy executable region model.
+// the GoOS Linux x86_64 compatibility layer: ET_EXEC images at the addresses
+// they name, and static position-independent ET_DYN images at a base the
+// caller chooses. Parsing remains pure; MapImage records a validated plan in
+// the common lazy executable region model.
 package elf
 
 import "encoding/binary"
@@ -16,16 +18,20 @@ const (
 	littleData = 1
 	version    = 1
 	typeExec   = 2
+	typeDyn    = 3
 	machineX64 = 62
 
 	programNull     = uint32(0)
 	programLoad     = uint32(1)
 	programDynamic  = uint32(2)
 	programInterp   = uint32(3)
+	programNote     = uint32(4)
 	programPHDR     = uint32(6)
 	programTLS      = uint32(7)
+	programGNUFrame = uint32(0x6474e550)
 	programGNUStack = uint32(0x6474e551)
 	programGNURelro = uint32(0x6474e552)
+	programGNUProp  = uint32(0x6474e553)
 
 	FlagExecutable = uint32(1)
 	FlagWritable   = uint32(2)
@@ -61,9 +67,12 @@ type Range struct {
 // particular launch layout. Reserved ranges are checked page-wise because the
 // loader cannot safely assign two meanings or protections to one page.
 type Config struct {
-	PageSize      uint64
-	UserStart     uint64
-	UserEnd       uint64
+	PageSize  uint64
+	UserStart uint64
+	UserEnd   uint64
+	// PIEBase is where a position-independent image is loaded: the parser
+	// adds it to every address the image names. Zero refuses such images.
+	PIEBase       uint64
 	Reserved      [MaxReservedRanges]Range
 	ReservedCount int
 }
@@ -107,6 +116,7 @@ const (
 	MalformedTLS
 	MalformedRELRO
 	ProgramHeadersNotMapped
+	MalformedDynamic
 )
 
 type Segment struct {
@@ -135,6 +145,9 @@ type TLS struct {
 }
 
 type Image struct {
+	// Base is the address a position-independent image was moved to, and
+	// zero for an ET_EXEC image. Every other address here includes it.
+	Base                 uint64
 	Entry                uint64
 	ProgramHeaderOffset  uint64
 	ProgramHeaderAddress uint64
@@ -146,8 +159,15 @@ type Image struct {
 	RELROPresent         bool
 	GNUStackPresent      bool
 	GNUStackSize         uint64
-	relroFileOffset      uint64
-	relroFileSize        uint64
+	// Dynamic is the PT_DYNAMIC range of a position-independent image. The
+	// program's own startup code reads it to relocate itself; the kernel
+	// applies no relocation.
+	Dynamic           Range
+	DynamicPresent    bool
+	relroFileOffset   uint64
+	relroFileSize     uint64
+	dynamicFileOffset uint64
+	dynamicFileSize   uint64
 }
 
 // LoadEnd returns the first page after the highest load segment.
@@ -228,7 +248,16 @@ func (image *Image) parse(source Source, config Config) Error {
 	if header[6] != version || binary.LittleEndian.Uint32(header[20:]) != version {
 		return UnsupportedVersion
 	}
-	if binary.LittleEndian.Uint16(header[16:]) != typeExec {
+	switch binary.LittleEndian.Uint16(header[16:]) {
+	case typeExec:
+	case typeDyn:
+		// A static position-independent executable. An ET_DYN image that
+		// needs a dynamic linker names one in PT_INTERP and is refused below.
+		if config.PIEBase == 0 {
+			return UnsupportedType
+		}
+		image.Base = config.PIEBase
+	default:
 		return UnsupportedType
 	}
 	if binary.LittleEndian.Uint16(header[18:]) != machineX64 {
@@ -254,7 +283,9 @@ func (image *Image) parse(source Source, config Config) Error {
 	if !ok || uint64(len(table)) != tableSize {
 		return SourceReadFailed
 	}
-	image.Entry = binary.LittleEndian.Uint64(header[24:])
+	if image.Entry, ok = add(binary.LittleEndian.Uint64(header[24:]), image.Base); !ok {
+		return EntryNotExecutable
+	}
 	image.ProgramHeaderOffset = phoff
 	image.ProgramHeaderCount = count
 
@@ -275,12 +306,41 @@ func (image *Image) parse(source Source, config Config) Error {
 			return BadFlags
 		}
 		switch entry.typeValue {
+		case programLoad, programPHDR, programTLS, programGNURelro, programDynamic:
+			// These name memory, which moves with the image.
+			if !entry.rebase(image.Base) {
+				return BadMemoryRange
+			}
+		}
+		switch entry.typeValue {
 		case programNull:
 			continue
+		case programNote, programGNUFrame, programGNUProp:
+			// Notes, the unwind index, and property notes describe the image
+			// to tools. Nothing here acts on them; the file range still has
+			// to exist.
+			if !fileRange(entry.offset, entry.fileSize, sourceSize) {
+				return MalformedProgramHeader
+			}
 		case programInterp:
 			return InterpreterPresent
 		case programDynamic:
-			return DynamicLinkingPresent
+			// An ET_EXEC image with a dynamic section expects a linker. A
+			// static position-independent image carries one for itself.
+			if image.Base == 0 {
+				return DynamicLinkingPresent
+			}
+			if image.DynamicPresent {
+				return DuplicateProgramHeader
+			}
+			if entry.memorySize == 0 || entry.fileSize > entry.memorySize || entry.flags&FlagExecutable != 0 || entry.flags&FlagReadable == 0 ||
+				!fileRange(entry.offset, entry.fileSize, sourceSize) || !memoryRange(entry.virtual, entry.memorySize, config) ||
+				!aligned(entry.alignment) || !congruent(entry, config.PageSize) {
+				return MalformedDynamic
+			}
+			end, _ := add(entry.virtual, entry.memorySize)
+			image.Dynamic, image.DynamicPresent = Range{Start: entry.virtual, End: end}, true
+			image.dynamicFileOffset, image.dynamicFileSize = entry.offset, entry.fileSize
 		case programLoad:
 			if failure := image.addLoad(entry, sourceSize, config); failure != OK {
 				return failure
@@ -347,6 +407,9 @@ func (config Config) valid() bool {
 	if config.PageSize == 0 || config.PageSize&(config.PageSize-1) != 0 || config.UserStart >= config.UserEnd ||
 		config.UserStart%config.PageSize != 0 || config.UserEnd%config.PageSize != 0 ||
 		config.ReservedCount < 0 || config.ReservedCount > MaxReservedRanges {
+		return false
+	}
+	if config.PIEBase != 0 && (config.PIEBase%config.PageSize != 0 || config.PIEBase < config.UserStart || config.PIEBase >= config.UserEnd) {
 		return false
 	}
 	for index := 0; index < config.ReservedCount; index++ {
@@ -465,6 +528,9 @@ func (image *Image) validateMetadata(phoff uint64, tableEnd uint64, tableSize ui
 	if image.RELROPresent && !image.metadataInsideLoad(image.RELRO.Start, image.RELRO.End-image.RELRO.Start, image.relroFileOffset, image.relroFileSize) {
 		return MalformedRELRO
 	}
+	if image.DynamicPresent && !image.metadataInsideLoad(image.Dynamic.Start, image.Dynamic.End-image.Dynamic.Start, image.dynamicFileOffset, image.dynamicFileSize) {
+		return MalformedDynamic
+	}
 	return OK
 }
 
@@ -484,6 +550,14 @@ func (image *Image) metadataInsideLoad(address uint64, size uint64, offset uint6
 		}
 	}
 	return false
+}
+
+// rebase moves the header's address by base and reports false when the sum
+// leaves the address space.
+func (header *programHeader) rebase(base uint64) bool {
+	moved, ok := add(header.virtual, base)
+	header.virtual = moved
+	return ok
 }
 
 func fileRange(offset uint64, size uint64, sourceSize uint64) bool {

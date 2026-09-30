@@ -86,7 +86,7 @@ func TestStatusOfReply(t *testing.T) {
 		errno abi.Errno
 	}{
 		{"writable file", vfs.Reply{Kind: ramfs.KindFile, Node: 9, MountID: 5, Size: 12, Modified: modified, Created: created},
-			FileStatus{Device: 5, Inode: 9, Mode: 0o100644, Size: 12, Seconds: 50, Nanoseconds: 6}, 0},
+			FileStatus{Device: 5, Inode: 9, Mode: 0o100644, Size: 12, Seconds: 50, Nanoseconds: 6, Born: true, BirthSeconds: 40, BirthNanosecond: 3}, 0},
 		{"directory", vfs.Reply{Kind: ramfs.KindDirectory, Node: 2, MountID: 5},
 			FileStatus{Device: 5, Inode: 2, Mode: 0o040755}, 0},
 		{"read-only file", vfs.Reply{Kind: ramfs.KindFile, Node: 9, Attributes: ramfs.AttrReadOnly, AttributesAvailable: true},
@@ -96,7 +96,7 @@ func TestStatusOfReply(t *testing.T) {
 		{"hidden is not read-only", vfs.Reply{Kind: ramfs.KindFile, Node: 9, Attributes: ramfs.AttrHidden, AttributesAvailable: true},
 			FileStatus{Inode: 9, Mode: 0o100644}, 0},
 		{"creation time only", vfs.Reply{Kind: ramfs.KindFile, Node: 9, Created: created},
-			FileStatus{Inode: 9, Mode: 0o100644, Seconds: 40, Nanoseconds: 3}, 0},
+			FileStatus{Inode: 9, Mode: 0o100644, Seconds: 40, Nanoseconds: 3, Born: true, BirthSeconds: 40, BirthNanosecond: 3}, 0},
 		{"zero identity", vfs.Reply{Kind: ramfs.KindFile}, FileStatus{Inode: 1, Mode: 0o100644}, 0},
 		{"unknown kind", vfs.Reply{Node: 9}, FileStatus{}, abi.EIO},
 	}
@@ -176,6 +176,102 @@ func TestAccessErrno(t *testing.T) {
 	for _, test := range cases {
 		if got := AccessErrno(test.requested, test.mode); got != test.want {
 			t.Errorf("access %d on %#o: errno %d, want %d", test.requested, test.mode, got, test.want)
+		}
+	}
+}
+
+func TestEncodeStatxMatchesTheLinuxLayout(t *testing.T) {
+	var wire [StatxSize]byte
+	for index := range wire {
+		wire[index] = 0xee
+	}
+	status := FileStatus{
+		Device: 0x0000_0123_0004_5678, Inode: 0x1122334455667788, Mode: abi.ModeRegular | 0o644, Size: 1025,
+		Seconds: 1_700_000_000, Nanoseconds: 123456789, Born: true, BirthSeconds: 1_600_000_000, BirthNanosecond: 42,
+	}
+	EncodeStatx(&wire, status)
+	u16, u32, u64 := binary.LittleEndian.Uint16, binary.LittleEndian.Uint32, binary.LittleEndian.Uint64
+	major, minor := DeviceParts(status.Device)
+	for name, got := range map[string][2]uint64{
+		"stx_mask":      {uint64(u32(wire[0:])), 0xfff},
+		"stx_blksize":   {uint64(u32(wire[4:])), StatBlockSize},
+		"stx_attrs":     {u64(wire[8:]), 0},
+		"stx_nlink":     {uint64(u32(wire[16:])), 1},
+		"stx_uid":       {uint64(u32(wire[20:])), uint64(StatUID)},
+		"stx_gid":       {uint64(u32(wire[24:])), uint64(StatGID)},
+		"stx_mode":      {uint64(u16(wire[28:])), uint64(abi.ModeRegular | 0o644)},
+		"padding":       {uint64(u16(wire[30:])), 0},
+		"stx_ino":       {u64(wire[32:]), status.Inode},
+		"stx_size":      {u64(wire[40:]), 1025},
+		"stx_blocks":    {u64(wire[48:]), 3},
+		"stx_atime":     {u64(wire[64:]), 1_700_000_000},
+		"stx_atime_ns":  {uint64(u32(wire[72:])), 123456789},
+		"stx_btime":     {u64(wire[80:]), 1_600_000_000},
+		"stx_btime_ns":  {uint64(u32(wire[88:])), 42},
+		"stx_ctime":     {u64(wire[96:]), 1_700_000_000},
+		"stx_mtime":     {u64(wire[112:]), 1_700_000_000},
+		"stx_mtime_ns":  {uint64(u32(wire[120:])), 123456789},
+		"stx_rdev":      {u64(wire[128:]), 0},
+		"stx_dev_major": {uint64(u32(wire[136:])), uint64(major)},
+		"stx_dev_minor": {uint64(u32(wire[140:])), uint64(minor)},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s = %#x, want %#x", name, got[0], got[1])
+		}
+	}
+	for index := 144; index < StatxSize; index++ {
+		if wire[index] != 0 {
+			t.Fatalf("byte %d of the unused tail is %#x", index, wire[index])
+		}
+	}
+	// Without a creation time the mask leaves STATX_BTIME out and the field
+	// stays zero.
+	status.Born = false
+	EncodeStatx(&wire, status)
+	if u32(wire[0:]) != 0x7ff || u64(wire[80:]) != 0 {
+		t.Fatalf("mask=%#x btime=%d without a creation time", u32(wire[0:]), u64(wire[80:]))
+	}
+	// A character device reports its number in the two rdev halves.
+	EncodeStatx(&wire, DeviceStatus(DeviceNull))
+	if u32(wire[128:]) != 1 || u32(wire[132:]) != 3 || u16(wire[28:]) != uint16(abi.ModeCharacter|0o666) {
+		t.Fatalf("/dev/null: rdev %d:%d mode %#o", u32(wire[128:]), u32(wire[132:]), u16(wire[28:]))
+	}
+}
+
+func TestDevicePartsInvertMakedev(t *testing.T) {
+	makedev := func(major, minor uint32) uint64 {
+		return uint64(major&0xfffff000)<<32 | uint64(major&0xfff)<<8 | uint64(minor&0xffffff00)<<12 | uint64(minor&0xff)
+	}
+	for _, device := range []uint64{0, 1, 0x103, 0x500, 0xfd00, 0x0000_0001_0000_0002, 0x1234_5678_9abc_def0, ^uint64(0)} {
+		major, minor := DeviceParts(device)
+		if makedev(major, minor) != device {
+			t.Errorf("device %#x splits to %#x:%#x, which makes %#x", device, major, minor, makedev(major, minor))
+		}
+	}
+	if major, minor := DeviceParts(0x103); major != 1 || minor != 3 {
+		t.Fatalf("0x103 = %d:%d", major, minor)
+	}
+}
+
+func TestStatxFlags(t *testing.T) {
+	for _, test := range []struct {
+		flags, mask uint64
+		empty       bool
+		errno       abi.Errno
+	}{
+		{0, 0x7ff, false, 0},
+		{abi.AtEmptyPath, 0xfff, true, 0},
+		{abi.AtSymlinkNoFollow | abi.AtNoAutomount, 0, false, 0},
+		{0x2000, 0x7ff, false, 0},                  // AT_STATX_FORCE_SYNC
+		{0x4000 | abi.AtEmptyPath, 0x7ff, true, 0}, // AT_STATX_DONT_SYNC
+		{0x6000, 0x7ff, false, abi.EINVAL},
+		{0, 0x80000000, false, abi.EINVAL},
+		{0x10000000, 0x7ff, false, abi.EINVAL},
+		{0, 0x7fffffff, false, 0},
+	} {
+		empty, errno := StatxFlags(test.flags, test.mask)
+		if empty != test.empty || errno != test.errno {
+			t.Errorf("flags %#x mask %#x: empty=%v errno=%d", test.flags, test.mask, empty, errno)
 		}
 	}
 }

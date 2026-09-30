@@ -11,6 +11,12 @@ const (
 	// are supplied on demand; the stack installer populates the initial image.
 	DefaultStackReserve = uint64(8 << 20)
 	StackGuardSize      = uint64(64 << 10)
+	// StaticPIEBase is where every position-independent image loads. The
+	// address is fixed: GoOS randomizes no layout, so a program that prints
+	// its addresses prints the same ones on each run. It leaves the lower
+	// half of the image area to ET_EXEC images and the upper half to the
+	// image and its heap.
+	StaticPIEBase = uint64(1 << 30)
 )
 
 // Layout is the entry state reserved by MapImage. StackTop points just past
@@ -20,12 +26,14 @@ type Layout struct {
 	StackTop uint64
 }
 
-// GoOSConfig is the address policy for Linux ET_EXEC images. Executable loads
-// use the ordinary low-address image area, including conventional addresses
-// such as 0x400000. Kernel-selected mappings and fixed GoOS user windows live
-// above this limit and therefore cannot collide with a load segment.
+// GoOSConfig is the address policy for Linux images. Executable loads use
+// the ordinary low-address image area: an ET_EXEC image at the addresses it
+// names, conventional ones such as 0x400000 included, and a static
+// position-independent image at StaticPIEBase. Kernel-selected mappings and
+// fixed GoOS user windows live above this limit and therefore cannot collide
+// with a load segment.
 func GoOSConfig() Config {
-	return Config{PageSize: vm.PageSize, UserStart: vm.UserAddressStart, UserEnd: vm.UserImageAreaLimit}
+	return Config{PageSize: vm.PageSize, UserStart: vm.UserAddressStart, UserEnd: vm.UserImageAreaLimit, PIEBase: StaticPIEBase}
 }
 
 // MapImage records a validated Linux ELF image in a process region map. The

@@ -29,9 +29,15 @@ const (
 	auxPlatform  = uint64(15)
 	auxClockTick = uint64(17)
 	auxSecure    = uint64(23)
+	auxRandom    = uint64(25)
 	auxExecFN    = uint64(31)
 
+	// auxiliaryCount is the number of auxv entries, the terminator included,
+	// of a stack without AT_RANDOM.
 	auxiliaryCount = 14
+
+	// RandomSize is the number of bytes AT_RANDOM points at.
+	RandomSize = 16
 )
 
 var platform = [...]byte{'x', '8', '6', '_', '6', '4'}
@@ -68,9 +74,14 @@ const (
 )
 
 // BuildInitialStack writes a Linux x86_64 process-entry stack into target.
-// It includes argc, argv, envp and the required static-ELF auxv entries. It
-// deliberately omits AT_RANDOM until GoOS has trustworthy entropy.
-func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Startup) (InitialStack, StackError) {
+// It includes argc, argv, envp and the required static-ELF auxv entries.
+//
+// random is 16 bytes from a hardware generator, which the stack carries
+// behind AT_RANDOM. A caller without such a source passes nil and the entry
+// is left out: a constant or a guessable value there would be read as a
+// secret. The C library then derives its stack-protector canary from
+// addresses, as it does on a Linux kernel too old to supply the entry.
+func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Startup, random *[RandomSize]byte) (InitialStack, StackError) {
 	if startup == nil || image == nil || top == 0 || top%16 != 0 || image.Entry == 0 || image.ProgramHeaderAddress == 0 ||
 		image.ProgramHeaderCount == 0 || image.ProgramHeaderCount > elf.MaxProgramHeaders {
 		return InitialStack{}, StackInvalidInput
@@ -108,8 +119,15 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 			return InitialStack{}, StackTooLarge
 		}
 	}
+	entries := auxiliaryCount
+	if random != nil {
+		entries++
+		if !addSize(&strings, RandomSize) {
+			return InitialStack{}, StackTooLarge
+		}
+	}
 	words := 1 + arguments + 1 + environment + 1
-	vectorBytes := words*8 + auxiliaryCount*16
+	vectorBytes := words*8 + entries*16
 	if vectorBytes > MaxInitialStackSize || strings > MaxInitialStackSize-vectorBytes {
 		return InitialStack{}, StackTooLarge
 	}
@@ -156,6 +174,16 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 	if cursor, ok = putString(data, cursor, platform[:]); !ok {
 		return InitialStack{}, StackInvalidInput
 	}
+	// The random bytes follow the strings. With no source the entry that
+	// would name them is the terminator, and the pair after it is not written.
+	randomType, randomAddress := auxNull, uint64(0)
+	if random != nil {
+		if cursor < 0 || RandomSize > len(data)-cursor {
+			return InitialStack{}, StackInvalidInput
+		}
+		randomType, randomAddress = auxRandom, pointer+uint64(cursor)
+		copy(data[cursor:], random[:])
+	}
 	auxiliary := [...]uint64{
 		auxPHDR, image.ProgramHeaderAddress,
 		auxPHENT, elf.ProgramHeaderSize,
@@ -170,10 +198,11 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 		auxClockTick, ClockTicks,
 		auxPlatform, platformAddress,
 		auxExecFN, execAddress,
+		randomType, randomAddress,
 		auxNull, 0,
 	}
-	for index, value := range auxiliary {
-		binary.LittleEndian.PutUint64(data[auxvAt+index*8:], value)
+	for index := 0; index < entries*2; index++ {
+		binary.LittleEndian.PutUint64(data[auxvAt+index*8:], auxiliary[index])
 	}
 	return InitialStack{Pointer: pointer, Top: top, Data: data}, StackOK
 }

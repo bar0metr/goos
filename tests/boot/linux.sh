@@ -5,6 +5,10 @@
 # boot itself runs PID 1's Linux probes, whose markers are checked first.
 # Boot and command handling follow tests/boot/microbench.sh.
 #
+# The guest CPU has RDRAND, so this run covers getrandom and AT_RANDOM with a
+# source behind them. The main boot test uses the default CPU, which has
+# none, and covers the refusal.
+#
 # usage: linux.sh ISO OVMF DISK
 set -eu
 
@@ -100,7 +104,7 @@ clean() {
 	refuse 'exit status:\|killed\|not found\|permission denied\|exec:' "$1"
 }
 
-qemu-system-x86_64 -machine q35 -m "$memory" \
+qemu-system-x86_64 -machine q35 -cpu qemu64,+rdrand -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -129,6 +133,12 @@ done
 run '/system/linux/hello'
 expect '^hello from Linux ABI$' 'minimal ELF'
 clean 'minimal ELF'
+
+# A static position-independent image. The program checks the addresses the
+# kernel reported against where it runs, and prints only when they agree.
+run '/system/linux/hello-pie'
+expect '^hello from a static PIE$' 'static PIE'
+clean 'static PIE'
 
 run '/system/linux/musl-hello alpha beta'
 expect '^argc=3$' 'static musl arguments'
@@ -207,6 +217,21 @@ expect '^native gate ok$' 'native call gate'
 expect '^handle guesses ok$' 'native handles as descriptors'
 expect '^isolation ok$' 'isolation'
 clean 'isolation'
+
+# The CPU of this guest has a generator, so the kernel must hand out bytes.
+run '/system/linux/abi-probe random'
+expect '^random: hardware$' 'random source'
+clean 'random source'
+
+# Running off the end of the stack reaches the guard below it. That is a
+# fault: the process dies and the system goes on.
+run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'
+expect '^stack-overflow: recursing$' 'stack overflow'
+refuse 'stack-overflow survived' 'stack overflow'
+expect 'user fault: guard page' 'stack overflow reaches the guard'
+expect '^after-stack-overflow$' 'shell after a stack overflow'
+run '/system/linux/musl-hello'
+expect '^hello from musl$' 'Linux program after a stack overflow'
 
 # An I/O port access is a fault: the process dies and the system goes on.
 run '/system/linux/abi-probe port-io; echo after-port-io'

@@ -17,6 +17,8 @@ type Fixture struct {
 var (
 	//go:embed prebuilt/hello
 	hello []byte
+	//go:embed prebuilt/hello-pie
+	helloPIE []byte
 	//go:embed prebuilt/musl-hello
 	muslHello []byte
 	//go:embed prebuilt/fsprobe
@@ -31,9 +33,10 @@ var (
 func All() []Fixture {
 	return []Fixture{
 		{"hello", hello, "9c83f5b9fd8af078d35eff4b2fd852eefff421c25e2cb3eddc14ebea9d37a708"},
+		{"hello-pie", helloPIE, "81d29ff66f43da7eb92f9be2509930b1758fda0e97410e63d0881e29c6a5b150"},
 		{"musl-hello", muslHello, "0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f"},
 		{"fsprobe", fsprobe, "7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6"},
 		{"dirprobe", dirprobe, "6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca"},
-		{"abi-probe", abiProbe, "59a0b7945256146df8c4798fee25e078b75d520cae6dd5ec3cf56faef389e7d1"},
+		{"abi-probe", abiProbe, "17c325ceca15414c46ac695b9e5344eec342f221396c7bed6ac45d488f1857b1"},
 	}
 }

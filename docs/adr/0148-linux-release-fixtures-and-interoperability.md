@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Extended by ADR 0152, which adds a strict reference run on a real
+Linux kernel, and by ADR 0149, which adds a sixth fixture.
 
 ## Context
 

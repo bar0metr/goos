@@ -370,6 +370,36 @@ goos_read_tsc:
     orq %rdx, %rax
     retq
 
+// CPUID.01H:ECX bit 30 reports RDRAND.
+.global goos_has_rdrand
+goos_has_rdrand:
+    pushq %rbx
+    movl $1, %eax
+    cpuid
+    btl $30, %ecx
+    setc %al
+    popq %rbx
+    retq
+
+// goos_rdrand64 stores one hardware random value at the address in rcx and
+// returns whether the generator produced it. The generator may run dry for a
+// moment, which it signals by clearing CF; ten tries is what its vendors
+// recommend before a caller treats it as failed.
+.global goos_rdrand64
+goos_rdrand64:
+    movl $10, %edx
+.rdrand_retry:
+    rdrand %rax
+    jc .rdrand_ready
+    decl %edx
+    jnz .rdrand_retry
+    xorl %eax, %eax
+    retq
+.rdrand_ready:
+    movq %rax, (%rcx)
+    movl $1, %eax
+    retq
+
 .global goos_probe_address_spaces
 goos_probe_address_spaces:
     pushfq

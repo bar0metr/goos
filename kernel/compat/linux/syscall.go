@@ -34,6 +34,7 @@ func (result Result) Register() uint64 {
 }
 
 type Handler interface {
+	// Read serves read and pread64, and Write serves write and pwrite64.
 	Read(Request) Result
 	Write(Request) Result
 	Close(Request) Result
@@ -43,11 +44,11 @@ type Handler interface {
 	Openat(Request) Result
 	SetTidAddress(Request) Result
 	// Filesystem serves the status, position, and path calls: the stat
-	// family, getdents64, lseek, getcwd, chdir, and the calls that create,
-	// remove, and rename names.
+	// family with statx, getdents64, lseek, getcwd, chdir, and the calls
+	// that create, remove, and rename names.
 	Filesystem(Request) Result
-	// System serves the identity, time, and limit calls, which answer from
-	// kernel state without asking a service.
+	// System serves the identity, time, limit, signal-state, and random
+	// calls, which answer from kernel state without asking a service.
 	System(Request) Result
 	// Descriptor serves dup, dup2, dup3, fcntl, and ioctl.
 	Descriptor(Request) Result
@@ -121,9 +122,9 @@ func NoteBadPointer(number abi.Syscall) {
 func route(request Request, handler Handler) Result {
 	if handler != nil {
 		switch request.Number {
-		case abi.SysRead:
+		case abi.SysRead, abi.SysPread64:
 			return handler.Read(request)
-		case abi.SysWrite:
+		case abi.SysWrite, abi.SysPwrite64:
 			return handler.Write(request)
 		case abi.SysClose:
 			return handler.Close(request)
@@ -141,10 +142,11 @@ func route(request Request, handler Handler) Result {
 			return handler.Descriptor(request)
 		case abi.SysGetpid, abi.SysGettid, abi.SysGetppid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid,
 			abi.SysSetuid, abi.SysSetgid, abi.SysGetgroups,
-			abi.SysUname, abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64:
+			abi.SysUname, abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64,
+			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom:
 			return handler.System(request)
 		case abi.SysAccess, abi.SysFaccessat, abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
-			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2:
+			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2, abi.SysStatx:
 			return handler.Filesystem(request)
 		case abi.SysBrk:
 			return handler.Brk(request)
@@ -165,6 +167,13 @@ func route(request Request, handler Handler) Result {
 		}
 	}
 	noteUnsupported(request.Number)
+	return Result{Errno: abi.ENOSYS}
+}
+
+// Refuse records a call the handler cannot serve on this machine and
+// returns ENOSYS, as route does for a number with no handler at all.
+func Refuse(number abi.Syscall) Result {
+	noteUnsupported(number)
 	return Result{Errno: abi.ENOSYS}
 }
 

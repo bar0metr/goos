@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. ADR 0151 later implements `rt_sigaction` and `rt_sigprocmask`.
 
 ## Context
 

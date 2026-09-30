@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by ADR 0149, which adds static position-independent images
+and descriptive program headers, and by ADR 0151, which supplies `AT_RANDOM`
+on a CPU with a random generator.
 
 ## Context
 

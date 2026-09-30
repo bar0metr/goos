@@ -6,14 +6,20 @@
  *
  * With two ordinary arguments it checks, in order: arguments and
  * environment, TLS, the heaps, the VFS session, path resolution, and then in
- * a scratch directory under /tmp file I/O, file status, stdio, directory
- * listing, vectors, descriptors, and naming. Last come identity, the system
- * name, the clocks, a limit, and a sleep.
+ * a scratch directory under /tmp file I/O, file status in both forms,
+ * positioned I/O, stdio, directory listing, vectors, descriptors, and
+ * naming. Last come the devices, identity, the system name, the clocks, a
+ * limit, a sleep, the signal state, and random bytes.
  *
  * GoOS starts it as /system/linux/abi-probe with /system/linux as the
  * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
  * path is too long for one request message. A few results differ on GoOS by
  * design; the program tells GoOS from Linux by the version field of uname.
+ *
+ * A Linux run under user-mode emulation answers a few hostile calls in its
+ * own way, so the program accepts those answers there. ABI_PROBE_STRICT in
+ * the environment says the kernel underneath is a real one and must give
+ * the exact Linux result, which GoOS is always held to.
  *
  * A first argument selects another mode:
  *
@@ -27,6 +33,8 @@
  *   bench            time four calls and print nanoseconds per call
  *   session-loss     report whether the VFS session survives a VFS restart
  *   session-timeout  open a name the validation VFS answers late
+ *   stack-overflow   recurse until the stack guard ends the process
+ *   random           say whether the kernel has a random source
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -38,11 +46,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/auxv.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 #include <time.h>
@@ -57,6 +69,13 @@ static int on_goos(void)
 	struct utsname name;
 
 	return uname(&name) == 0 && !strncmp(name.version, "GoOS ", 5);
+}
+
+/* A kernel whose answers must be the exact Linux ones: GoOS, or a Linux
+ * kernel the caller vouched for. */
+static int strict_kernel(void)
+{
+	return on_goos() || getenv("ABI_PROBE_STRICT") != NULL;
 }
 
 /* The scratch directory of this instance; enter_scratch names it. */
@@ -269,6 +288,125 @@ static int status_ok(const char *self, int read_only_image)
 	       fails(syscall(SYS_stat, "data", (void *)8), EFAULT);
 }
 
+/* struct statx as the kernel defines it. The bundled musl predates it. */
+struct extended_time {
+	long long seconds;
+	unsigned int nanoseconds;
+	int unused;
+};
+
+struct extended_status {
+	unsigned int mask, block_size;
+	unsigned long long attributes;
+	unsigned int links, uid, gid;
+	unsigned short mode, padding;
+	unsigned long long inode, size, blocks, attributes_mask;
+	struct extended_time accessed, born, changed, modified;
+	unsigned int rdev_major, rdev_minor, dev_major, dev_minor;
+	unsigned long long spare[14];
+};
+
+#define EXTENDED_BASIC 0x7ffU
+#define EXTENDED_BORN 0x800U
+
+static long extended(int dirfd, const char *path, int flags, unsigned int mask, void *status)
+{
+	return syscall(SYS_statx, dirfd, path, flags, mask, status);
+}
+
+/* statx reports what stat reports, in its own layout. */
+static int extended_status_ok(int strict)
+{
+	struct extended_status by_path, by_fd;
+	struct stat plain;
+	int fd = open("data", O_RDONLY);
+
+	if (sizeof by_path != 256 || fd != 3 || syscall(SYS_stat, "data", &plain) != 0)
+		return 0;
+	memset(&by_path, 0xff, sizeof by_path);
+	if (extended(AT_FDCWD, "data", 0, EXTENDED_BASIC, &by_path) != 0 ||
+	    (by_path.mask & EXTENDED_BASIC) != EXTENDED_BASIC ||
+	    by_path.size != 5 || by_path.mode != (S_IFREG | 0644) ||
+	    by_path.links != 1 || by_path.block_size == 0 ||
+	    by_path.inode != plain.st_ino || by_path.uid != plain.st_uid ||
+	    by_path.gid != plain.st_gid || by_path.blocks != (unsigned long long)plain.st_blocks ||
+	    makedev(by_path.dev_major, by_path.dev_minor) != plain.st_dev ||
+	    by_path.rdev_major != 0 || by_path.rdev_minor != 0 ||
+	    by_path.modified.seconds != plain.st_mtim.tv_sec ||
+	    by_path.modified.nanoseconds != (unsigned int)plain.st_mtim.tv_nsec ||
+	    ((by_path.mask & EXTENDED_BORN) && by_path.born.seconds <= 0))
+		return 0;
+	/* An empty path with AT_EMPTY_PATH names the descriptor; so does a
+	 * null one on Linux 6.11 and later. The sync flags change nothing. */
+	if (extended(fd, "", AT_EMPTY_PATH, EXTENDED_BASIC | EXTENDED_BORN, &by_fd) != 0 ||
+	    by_fd.inode != by_path.inode || by_fd.size != 5 ||
+	    (strict && (extended(fd, NULL, AT_EMPTY_PATH, 0, &by_fd) != 0 ||
+			by_fd.inode != by_path.inode)) ||
+	    extended(AT_FDCWD, "data", 0x2000, 0, &by_fd) != 0 ||
+	    extended(AT_FDCWD, ".", 0x4000 | AT_SYMLINK_NOFOLLOW, EXTENDED_BASIC, &by_fd) != 0 ||
+	    !S_ISDIR(by_fd.mode) || by_fd.inode == by_path.inode ||
+	    makedev(by_fd.dev_major, by_fd.dev_minor) != plain.st_dev ||
+	    close(fd) != 0)
+		return 0;
+	errno = 0;
+	return fails(extended(AT_FDCWD, "missing", 0, EXTENDED_BASIC, &by_fd), ENOENT) &&
+	       fails(extended(AT_FDCWD, "data/", 0, EXTENDED_BASIC, &by_fd), ENOTDIR) &&
+	       fails(extended(AT_FDCWD, "data", 0x6000, EXTENDED_BASIC, &by_fd), EINVAL) &&
+	       fails(extended(AT_FDCWD, "data", 0, 0x80000000U, &by_fd), EINVAL) &&
+	       fails(extended(AT_FDCWD, "data", 0x10000000, EXTENDED_BASIC, &by_fd), EINVAL) &&
+	       fails(extended(42, "data", 0, EXTENDED_BASIC, &by_fd), EBADF) &&
+	       fails(extended(AT_FDCWD, "data", 0, EXTENDED_BASIC, (void *)8), EFAULT);
+}
+
+/* pread and pwrite move bytes at an offset and leave the file position
+ * where it was. */
+static int positions_ok(void)
+{
+	char back[16];
+	int dirfd, fd = open("placed", O_RDWR | O_CREAT | O_TRUNC, 0644);
+
+	if (fd != 3 || write(fd, "0123456789", 10) != 10 ||
+	    pread(fd, back, 4, 3) != 4 || memcmp(back, "3456", 4) ||
+	    !position_ok(fd, 0, SEEK_CUR, 10) ||
+	    pwrite(fd, "XY", 2, 1) != 2 || !position_ok(fd, 0, SEEK_CUR, 10) ||
+	    pread(fd, back, sizeof back, 0) != 10 || memcmp(back, "0XY3456789", 10) ||
+	    pread(fd, back, sizeof back, 10) != 0 || pread(fd, back, sizeof back, 1000) != 0 ||
+	    pread(fd, back, 0, 0) != 0 || pwrite(fd, back, 0, 0) != 0)
+		return 0;
+	/* A write at the end extends the file, and the position still holds:
+	 * the next plain write lands at 10, over what pwrite put there. */
+	if (pwrite(fd, "ab", 2, 10) != 2 || !position_ok(fd, 0, SEEK_CUR, 10) ||
+	    write(fd, "c", 1) != 1 || !position_ok(fd, 0, SEEK_CUR, 11) ||
+	    pread(fd, back, sizeof back, 8) != 4 || memcmp(back, "89cb", 4) ||
+	    close(fd) != 0)
+		return 0;
+	/* Access modes hold for the positioned calls too. */
+	fd = open("placed", O_RDONLY);
+	if (fd != 3 || !fails(pwrite(fd, "x", 1, 0), EBADF) || pread(fd, back, 1, 11) != 1 ||
+	    back[0] != 'b' || close(fd) != 0)
+		return 0;
+	fd = open("placed", O_WRONLY);
+	if (fd != 3 || !fails(pread(fd, back, 1, 0), EBADF) || close(fd) != 0)
+		return 0;
+	/* O_APPEND wins over the offset, as Linux documents. */
+	fd = open("placed", O_RDWR | O_APPEND);
+	if (fd != 3 || pwrite(fd, "z", 1, 0) != 1 || !position_ok(fd, 0, SEEK_CUR, 0) ||
+	    pread(fd, back, sizeof back, 0) != 13 || memcmp(back, "0XY345678", 9) ||
+	    back[12] != 'z' || close(fd) != 0)
+		return 0;
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	errno = 0;
+	return dirfd == 3 && fails(pread(dirfd, back, 1, 0), EISDIR) &&
+	       fails(pwrite(dirfd, back, 1, 0), EBADF) && close(dirfd) == 0 &&
+	       fails(pread(1, back, 1, 0), ESPIPE) && fails(pwrite(1, back, 1, 0), ESPIPE) &&
+	       fails(pread(42, back, 1, 0), EBADF) && fails(pwrite(42, back, 1, 0), EBADF) &&
+	       /* Linux refuses a negative offset before it looks at the
+		* descriptor. */
+	       fails(syscall(SYS_pread64, 42, back, 1, -1L), EINVAL) &&
+	       fails(syscall(SYS_pwrite64, 1, back, 1, -1L), EINVAL) &&
+	       unlink("placed") == 0;
+}
+
 /* musl stdio writes with writev. It fills its buffer with read, and reads a
  * larger request with readv: the caller's memory first, its buffer second. */
 static int stdio_ok(void)
@@ -445,6 +583,213 @@ static int names_ok(int read_only_image)
 	return !read_only_image || fails(make_directory(AT_FDCWD, IMAGE "-dir"), EROFS);
 }
 
+/* /dev/null and /dev/zero are character devices the kernel serves; /dev/tty
+ * has a status, and no open for a process without a controlling terminal. */
+static int devices_ok(int goos, int strict)
+{
+	struct extended_status wide;
+	struct stat status;
+	char zeros[64], first[3], second[5];
+	struct iovec in[2] = {{first, sizeof first}, {second, sizeof second}};
+	struct iovec out[2] = {{"dis", 3}, {"carded", 6}};
+	struct winsize window;
+	int tty, fd = open("/dev/null", O_RDWR);
+
+	if (fd != 3 || write(fd, "gone", 4) != 4 || read(fd, zeros, sizeof zeros) != 0 ||
+	    writev(fd, out, 2) != 9 || readv(fd, in, 2) != 0 ||
+	    pwrite(fd, "gone", 4, 100) != 4 || pread(fd, zeros, sizeof zeros, 100) != 0 ||
+	    lseek(fd, 5, SEEK_SET) != 0 || lseek(fd, 0, SEEK_END) != 0 ||
+	    /* The device never looks at the memory it is handed. An
+	     * emulator that checks the buffer itself refuses it. */
+	    (strict && (write(fd, NULL, 16) != 16 || read(fd, NULL, 16) != 0)) ||
+	    syscall(SYS_fstat, fd, &status) != 0 || !S_ISCHR(status.st_mode) ||
+	    status.st_rdev != makedev(1, 3) || status.st_size != 0 ||
+	    !fails(ioctl(fd, TIOCGWINSZ, &window), ENOTTY) || isatty(fd) ||
+	    (fcntl(fd, F_GETFL) & O_ACCMODE) != O_RDWR || dup2(fd, 9) != 9 ||
+	    write(9, "x", 1) != 1 || close(9) != 0 || close(fd) != 0)
+		return 0;
+	errno = 0;
+	if (syscall(SYS_stat, "/dev/null", &status) != 0 || !S_ISCHR(status.st_mode) ||
+	    status.st_rdev != makedev(1, 3) ||
+	    extended(AT_FDCWD, "/dev/null", 0, EXTENDED_BASIC, &wide) != 0 ||
+	    !S_ISCHR(wide.mode) || wide.rdev_major != 1 || wide.rdev_minor != 3 ||
+	    access("/dev/null", R_OK | W_OK) != 0 || !fails(access("/dev/null", X_OK), EACCES))
+		return 0;
+
+	memset(zeros, 0xff, sizeof zeros);
+	memset(first, 0xff, sizeof first);
+	memset(second, 0xff, sizeof second);
+	fd = open("/dev/zero", O_RDONLY);
+	if (fd != 3 || read(fd, zeros, sizeof zeros) != sizeof zeros ||
+	    readv(fd, in, 2) != 8 || pread(fd, zeros, 8, 1 << 20) != 8 ||
+	    !fails(write(fd, "x", 1), EBADF) ||
+	    syscall(SYS_fstat, fd, &status) != 0 || !S_ISCHR(status.st_mode) ||
+	    status.st_rdev != makedev(1, 5) || close(fd) != 0)
+		return 0;
+	for (size_t index = 0; index < sizeof zeros; index++)
+		if (zeros[index])
+			return 0;
+	if (first[0] || first[2] || second[0] || second[4])
+		return 0;
+	fd = open("/dev/zero", O_WRONLY);
+	if (fd != 3 || write(fd, "gone", 4) != 4 || !fails(read(fd, zeros, 1), EBADF) ||
+	    close(fd) != 0)
+		return 0;
+
+	/* A run with a controlling terminal, which no reference run has, may
+	 * open it. */
+	errno = 0;
+	tty = open("/dev/tty", O_RDWR | O_NOCTTY);
+	if (tty >= 0 ? (goos || close(tty) != 0) : errno != ENXIO)
+		return 0;
+	errno = 0;
+	return syscall(SYS_stat, "/dev/tty", &status) == 0 && S_ISCHR(status.st_mode) &&
+	       status.st_rdev == makedev(5, 0) &&
+	       fails(open("/dev/null/below", O_RDONLY), ENOTDIR) &&
+	       fails(open("/dev/null", O_RDONLY | O_DIRECTORY), ENOTDIR) &&
+	       fails(open("/dev/zero", O_WRONLY | O_CREAT | O_EXCL, 0644), EEXIST) &&
+	       fails(chdir("/dev/null"), ENOTDIR) &&
+	       fails(make_directory(AT_FDCWD, "/dev/null"), EEXIST) &&
+	       /* Removing the names is tried on GoOS only: a Linux run as root
+		* would succeed and take the device away. */
+	       (!goos || (fails(unlink("/dev/null"), EACCES) &&
+			  fails(rmdir("/dev/zero"), ENOTDIR) &&
+			  fails(rename("/dev/null", "/tmp/null"), EACCES) &&
+			  open("/dev/null", O_WRONLY) == 3 && close(3) == 0));
+}
+
+/* struct sigaction as the kernel takes it, which is not the C library's. */
+struct kernel_action {
+	void (*handler)(int);
+	unsigned long flags;
+	void (*restorer)(void);
+	unsigned long mask;
+};
+
+#define SET_SIZE 8
+#define ACTION_RESTORER 0x04000000UL
+#define ACTION_RESTART 0x10000000UL
+#define BIT(signal) (1UL << ((signal) - 1))
+
+static void never_called(int signal)
+{
+	(void)signal;
+}
+
+static void never_returned(void)
+{
+}
+
+/* The kernel records dispositions and the blocked mask and reports them
+ * back. No check here raises a signal: GoOS delivers none. An emulator that
+ * keeps the signal table itself leaves SIGKILL and SIGSTOP in a handler's
+ * mask, so only a strict run requires them gone. */
+static int signals_ok(int strict)
+{
+	struct kernel_action fresh = {never_called, ACTION_RESTORER | ACTION_RESTART, never_returned,
+				      BIT(12) | BIT(9) | BIT(19)};
+	struct kernel_action old, back;
+	unsigned long set, before;
+
+	memset(&old, 0xff, sizeof old);
+	if (syscall(SYS_rt_sigaction, 10, &fresh, &old, SET_SIZE) != 0 || old.handler != NULL ||
+	    syscall(SYS_rt_sigaction, 10, NULL, &back, SET_SIZE) != 0 ||
+	    back.handler != never_called || back.flags != fresh.flags ||
+	    back.restorer != never_returned ||
+	    /* SIGKILL and SIGSTOP leave a handler's mask. */
+	    (back.mask & BIT(12)) == 0 || (strict && back.mask != BIT(12)) ||
+	    syscall(SYS_rt_sigaction, 12, NULL, &back, SET_SIZE) != 0 || back.handler != NULL ||
+	    syscall(SYS_rt_sigaction, 64, &fresh, NULL, SET_SIZE) != 0 ||
+	    syscall(SYS_rt_sigaction, 9, NULL, &back, SET_SIZE) != 0 || back.handler != NULL)
+		return 0;
+	errno = 0;
+	if (!fails(syscall(SYS_rt_sigaction, 9, &fresh, NULL, SET_SIZE), EINVAL) ||
+	    !fails(syscall(SYS_rt_sigaction, 19, &fresh, NULL, SET_SIZE), EINVAL) ||
+	    !fails(syscall(SYS_rt_sigaction, 0, NULL, &back, SET_SIZE), EINVAL) ||
+	    !fails(syscall(SYS_rt_sigaction, 65, NULL, &back, SET_SIZE), EINVAL) ||
+	    !fails(syscall(SYS_rt_sigaction, 10, NULL, &back, 4), EINVAL) ||
+	    !fails(syscall(SYS_rt_sigaction, 10, (void *)8, NULL, SET_SIZE), EFAULT) ||
+	    !fails(syscall(SYS_rt_sigaction, 10, NULL, (void *)8, SET_SIZE), EFAULT))
+		return 0;
+	/* Put the default back, so the process leaves as it arrived. */
+	memset(&fresh, 0, sizeof fresh);
+	if (syscall(SYS_rt_sigaction, 10, &fresh, NULL, SET_SIZE) != 0 ||
+	    syscall(SYS_rt_sigaction, 64, &fresh, NULL, SET_SIZE) != 0)
+		return 0;
+
+	if (syscall(SYS_rt_sigprocmask, SIG_SETMASK, NULL, &before, SET_SIZE) != 0)
+		return 0;
+	set = BIT(10) | BIT(12) | BIT(9) | BIT(19);
+	if (syscall(SYS_rt_sigprocmask, SIG_BLOCK, &set, NULL, SET_SIZE) != 0 ||
+	    /* A call with no new set reports the mask whatever "how" says. */
+	    syscall(SYS_rt_sigprocmask, 99, NULL, &back.mask, SET_SIZE) != 0 ||
+	    back.mask != (before | BIT(10) | BIT(12)))
+		return 0;
+	set = BIT(12);
+	if (syscall(SYS_rt_sigprocmask, SIG_UNBLOCK, &set, &back.mask, SET_SIZE) != 0 ||
+	    back.mask != (before | BIT(10) | BIT(12)) ||
+	    syscall(SYS_rt_sigprocmask, SIG_SETMASK, &before, &back.mask, SET_SIZE) != 0 ||
+	    back.mask != (before | BIT(10)) ||
+	    syscall(SYS_rt_sigprocmask, SIG_SETMASK, NULL, &back.mask, SET_SIZE) != 0 ||
+	    back.mask != before)
+		return 0;
+	errno = 0;
+	return fails(syscall(SYS_rt_sigprocmask, 99, &set, NULL, SET_SIZE), EINVAL) &&
+	       fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, &set, NULL, 4), EINVAL) &&
+	       fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, (void *)8, NULL, SET_SIZE), EFAULT) &&
+	       fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, NULL, (void *)8, SET_SIZE), EFAULT);
+}
+
+/* 1 when the kernel hands out random bytes, 0 when it has no source and says
+ * so in both places a program looks, -1 when the two disagree. */
+static int random_source(void)
+{
+	unsigned char byte;
+	long got;
+
+	errno = 0;
+	got = getrandom(&byte, 1, 0);
+	if (got == 1 && getauxval(AT_RANDOM) != 0)
+		return 1;
+	if (got == -1 && errno == ENOSYS && getauxval(AT_RANDOM) == 0)
+		return 0;
+	return -1;
+}
+
+/* Linux always has a source. GoOS has one when the CPU has a generator; a
+ * machine without it must refuse the call and leave AT_RANDOM out. */
+static int random_ok(int goos)
+{
+	static unsigned char large[300];
+	unsigned char first[32], second[32], *start;
+	int source = random_source(), zero = 0;
+	long got;
+
+	errno = 0;
+	if (source != 1)
+		return goos && source == 0;
+	memset(first, 0, sizeof first);
+	memset(second, 0, sizeof second);
+	if (getrandom(first, sizeof first, 0) != sizeof first ||
+	    getrandom(second, sizeof second, GRND_NONBLOCK) != sizeof second ||
+	    !memcmp(first, second, sizeof first) || getrandom(first, 0, 0) != 0)
+		return 0;
+	for (size_t index = 0; index < sizeof first; index++)
+		zero += first[index] == 0;
+	/* Sixteen bytes at AT_RANDOM, and not the bytes a call returns. */
+	start = (unsigned char *)getauxval(AT_RANDOM);
+	if (zero == sizeof first || !memcmp(start, first, 16) || !memcmp(start, second, 16))
+		return 0;
+	/* Up to 256 bytes come whole; GoOS returns no more than that. */
+	got = getrandom(large, sizeof large, 0);
+	if (got != (goos ? 256 : (long)sizeof large))
+		return 0;
+	errno = 0;
+	return fails(getrandom(first, sizeof first, 0x100), EINVAL) &&
+	       fails(getrandom(first, sizeof first, GRND_RANDOM | 4), EINVAL) &&
+	       fails(getrandom((void *)8, sizeof first, 0), EFAULT);
+}
+
 static int report(const char *what, int ok)
 {
 	printf("%s %s\n", what, ok ? "ok" : "failed");
@@ -528,6 +873,8 @@ static int scratch_checks(const char *self)
 		return report("scratch directory", 0);
 	failed = report("files", data_ok());
 	failed += report("status", status_ok(self, read_only_image));
+	failed += report("statx", extended_status_ok(strict_kernel()));
+	failed += report("positions", positions_ok());
 	failed += report("stdio", stdio_ok());
 	failed += report("listing", listing_ok());
 	failed += report("vectors", vectors_ok(read_only_image));
@@ -544,12 +891,14 @@ static void *const unusable[] = {
 	NULL, (void *)0x8000000000000000ULL, (void *)0xffff800000000000ULL,
 };
 
-/* The reference run leaves out nanosleep: the emulator it runs under sleeps
- * on whatever the bad pointer holds instead of refusing it. */
+/* A reference run under user-mode emulation leaves out nanosleep: the
+ * emulator sleeps on whatever the bad pointer holds instead of refusing it. */
 static int bad_pointers(int fd, int dirfd, int goos)
 {
+	struct extended_status wide;
 	struct stat status;
 	struct rlimit limit;
+	int random = random_source();
 
 	for (int index = 0; index < 3; index++) {
 		void *bad = unusable[index];
@@ -572,7 +921,19 @@ static int bad_pointers(int fd, int dirfd, int goos)
 		    !fails(syscall(SYS_getdents64, dirfd, bad, 256), EFAULT) ||
 		    !fails(chdir(bad), EFAULT) || !fails(unlink(bad), EFAULT) ||
 		    !fails(rename(bad, "x"), EFAULT) || !fails(rename("data", bad), EFAULT) ||
-		    !fails(make_directory(AT_FDCWD, bad), EFAULT))
+		    !fails(make_directory(AT_FDCWD, bad), EFAULT) ||
+		    !fails(pread(fd, bad, 16, 0), EFAULT) ||
+		    !fails(pwrite(fd, bad, 16, 0), EFAULT) ||
+		    !fails(extended(AT_FDCWD, bad, 0, EXTENDED_BASIC, &wide), EFAULT) ||
+		    !fails(extended(AT_FDCWD, "/", 0, EXTENDED_BASIC, bad), EFAULT) ||
+		    (random == 1 && !fails(getrandom(bad, 16, 0), EFAULT)))
+			return 0;
+		/* A null action or set means "leave it", so only the other two
+		 * pointers are bad for the signal calls. */
+		if (bad && (!fails(syscall(SYS_rt_sigaction, 10, bad, NULL, SET_SIZE), EFAULT) ||
+			    !fails(syscall(SYS_rt_sigaction, 10, NULL, bad, SET_SIZE), EFAULT) ||
+			    !fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, bad, NULL, SET_SIZE), EFAULT) ||
+			    !fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, NULL, bad, SET_SIZE), EFAULT)))
 			return 0;
 		/* A null old-limit pointer means "do not report", so only the
 		 * other two are bad here. */
@@ -585,16 +946,16 @@ static int bad_pointers(int fd, int dirfd, int goos)
 
 /* A buffer that runs off the end of a mapping. Linux moves the bytes before
  * the fault and reports them; an emulator that checks the whole range first
- * reports EFAULT, and the reference run accepts that too. */
-static int short_or_fault(long result, long moved, int goos)
+ * reports EFAULT, and a run that is not strict accepts that too. */
+static int short_or_fault(long result, long moved, int strict)
 {
 	int fault = result == -1 && errno == EFAULT;
 
 	errno = 0;
-	return result == moved || (!goos && fault);
+	return result == moved || (!strict && fault);
 }
 
-static int mapping_edges(int fd, int goos)
+static int mapping_edges(int fd, int strict)
 {
 	struct stat *straddling;
 	char *region = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -605,14 +966,20 @@ static int mapping_edges(int fd, int goos)
 	edge = region + 4096 - 8;
 	memset(edge, 'e', 8);
 	errno = 0;
-	if (lseek(fd, 0, SEEK_SET) != 0 || !short_or_fault(write(fd, edge, 16), 8, goos) ||
-	    lseek(fd, 0, SEEK_SET) != 0 || !short_or_fault(read(fd, edge, 16), 8, goos))
+	if (lseek(fd, 0, SEEK_SET) != 0 || !short_or_fault(write(fd, edge, 16), 8, strict) ||
+	    lseek(fd, 0, SEEK_SET) != 0 || !short_or_fault(read(fd, edge, 16), 8, strict) ||
+	    !short_or_fault(pwrite(fd, edge, 16, 0), 8, strict) ||
+	    !short_or_fault(pread(fd, edge, 16, 0), 8, strict))
 		return 0;
-	/* The longest possible lengths. The reference run skips them: the
-	 * emulator it runs under walks the whole range before it answers. */
-	if (goos && (!short_or_fault(write(fd, edge, (size_t)-1), 8, goos) ||
-		     mmap(NULL, (size_t)-1, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED ||
-		     !fails(-1, ENOMEM)))
+	/* The longest possible lengths. A length that carries the address past
+	 * the user half is refused before a byte moves. A run under user-mode
+	 * emulation skips these: the emulator walks the whole range before it
+	 * answers. */
+	if (strict && (!fails(write(fd, edge, (size_t)-1), EFAULT) ||
+		       !fails(read(fd, edge, (size_t)-1), EFAULT) ||
+		       !fails(pwrite(fd, edge, (size_t)-1, 0), EFAULT) ||
+		       mmap(NULL, (size_t)-1, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED ||
+		       !fails(-1, ENOMEM)))
 		return 0;
 	/* A path with no terminator before the mapping ends, and a stat
 	 * buffer that straddles the end. */
@@ -656,6 +1023,7 @@ static int long_transfers(int fd)
 
 static int stale_descriptors(int fd, int dirfd)
 {
+	struct extended_status wide;
 	struct winsize window;
 	struct stat status;
 	char byte;
@@ -670,6 +1038,8 @@ static int stale_descriptors(int fd, int dirfd)
 	       fails(dup(fd), EBADF) && fails(fcntl(fd, F_GETFL), EBADF) &&
 	       fails(ioctl(fd, TIOCGWINSZ, &window), EBADF) &&
 	       fails(syscall(SYS_newfstatat, dirfd, "data", &status, 0), EBADF) &&
+	       fails(pread(fd, &byte, 1, 0), EBADF) && fails(pwrite(fd, &byte, 1, 0), EBADF) &&
+	       fails(extended(fd, "", AT_EMPTY_PATH, EXTENDED_BASIC, &wide), EBADF) &&
 	       fails(openat(dirfd, "data", O_RDONLY), EBADF);
 }
 
@@ -690,7 +1060,7 @@ static int no_executable_memory(void)
 
 static int hostile(void)
 {
-	int goos = on_goos();
+	int goos = on_goos(), strict = strict_kernel();
 	int failed, fd, dirfd;
 	char byte;
 
@@ -701,8 +1071,8 @@ static int hostile(void)
 	if (fd != 3 || dirfd != 4 || write(fd, "0123456789abcdef", 16) != 16 ||
 	    lseek(fd, 0, SEEK_SET) != 0)
 		return report("scratch file", 0);
-	failed = report("bad pointers", bad_pointers(fd, dirfd, goos));
-	failed += report("mapping edges", mapping_edges(fd, goos));
+	failed = report("bad pointers", bad_pointers(fd, dirfd, strict));
+	failed += report("mapping edges", mapping_edges(fd, strict));
 	failed += report("long transfers", long_transfers(fd));
 	errno = 0;
 	failed += report("arguments",
@@ -848,6 +1218,25 @@ static int pair(const char *name, int drain)
 	return !ok;
 }
 
+/* Each call keeps a page of stack and hands its address on, so no compiler
+ * can turn the recursion into a loop. The stack reservation is 8 MiB with a
+ * guard below it; the touch that reaches the guard ends the process. */
+__attribute__((noinline)) static int descend(volatile char *above)
+{
+	volatile char frame[4096];
+
+	frame[0] = above ? above[0] + 1 : 1;
+	return descend(frame) + frame[0];
+}
+
+static int stack_overflow(void)
+{
+	puts("stack-overflow: recursing");
+	fflush(stdout);
+	printf("stack-overflow survived: %d\n", descend(NULL));
+	return 1;
+}
+
 static long long monotonic(void)
 {
 	struct timespec now;
@@ -956,6 +1345,14 @@ int main(int argc, char **argv)
 			return session_loss();
 		if (!strcmp(argv[1], "session-timeout"))
 			return session_timeout();
+		if (!strcmp(argv[1], "stack-overflow"))
+			return stack_overflow();
+		if (!strcmp(argv[1], "random")) {
+			int source = random_source();
+
+			printf("random: %s\n", source == 1 ? "hardware" : source == 0 ? "none" : "inconsistent");
+			return source < 0;
+		}
 		if (!strcmp(argv[1], "block")) {
 			puts("blocking on standard input");
 			fflush(stdout);
@@ -1004,7 +1401,10 @@ int main(int argc, char **argv)
 		failed = 1;
 	}
 	failed += scratch_checks(argv[0]);
+	failed += report("devices", devices_ok(on_goos(), strict_kernel()));
 	failed += report("system", system_ok());
+	failed += report("signals", signals_ok(strict_kernel()));
+	failed += report("random", random_ok(on_goos()));
 	if (!failed)
 		puts("abi-probe ok");
 	return failed;

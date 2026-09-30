@@ -12,7 +12,7 @@ func TestCanonicalX8664SyscallNumbers(t *testing.T) {
 		{SysExit, 60}, {SysArchPrctl, 158},
 		{SysWritev, 20}, {SysGetdents64, 217}, {SysSetTidAddress, 218}, {SysClockGettime, 228}, {SysExitGroup, 231},
 		{SysLseek, 8}, {SysGetcwd, 79}, {SysChdir, 80}, {SysRename, 82}, {SysMkdir, 83}, {SysRmdir, 84}, {SysUnlink, 87},
-		{SysIoctl, 16}, {SysAccess, 21}, {SysSetuid, 105}, {SysSetgid, 106}, {SysGetgroups, 115}, {SysFaccessat, 269}, {SysDup, 32}, {SysDup2, 33}, {SysFcntl, 72}, {SysDup3, 292}, {SysNanosleep, 35}, {SysGetpid, 39}, {SysUname, 63}, {SysGetuid, 102}, {SysGetgid, 104}, {SysGeteuid, 107},
+		{SysRtSigaction, 13}, {SysRtSigprocmask, 14}, {SysIoctl, 16}, {SysPread64, 17}, {SysPwrite64, 18}, {SysAccess, 21}, {SysSetuid, 105}, {SysSetgid, 106}, {SysGetgroups, 115}, {SysFaccessat, 269}, {SysDup, 32}, {SysDup2, 33}, {SysFcntl, 72}, {SysDup3, 292}, {SysNanosleep, 35}, {SysGetpid, 39}, {SysUname, 63}, {SysGetuid, 102}, {SysGetgid, 104}, {SysGeteuid, 107},
 		{SysGetegid, 108}, {SysGetppid, 110}, {SysGettid, 186},
 		{SysOpenat, 257}, {SysMkdirat, 258}, {SysUnlinkat, 263}, {SysRenameat, 264}, {SysRenameat2, 316}, {SysPpoll, 271}, {SysPipe2, 293},
 		{SysPrlimit64, 302}, {SysGetrandom, 318}, {SysStatx, 332},
@@ -25,7 +25,7 @@ func TestCanonicalX8664SyscallNumbers(t *testing.T) {
 			t.Fatalf("syscall %d: value=%d known=%v", test.want, test.number, test.number.Known())
 		}
 	}
-	for _, number := range []Syscall{17, 59, 333, 512, ^Syscall(0)} {
+	for _, number := range []Syscall{23, 59, 333, 512, ^Syscall(0)} {
 		if number.Known() {
 			t.Fatalf("out-of-contract syscall %d is known", number)
 		}

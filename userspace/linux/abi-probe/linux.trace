@@ -1,10 +1,10 @@
-arch_prctl(4098,2382448,0,8388608,0,131072) = 0
-set_tid_address(2382360,2382448,0,8388608,0,131072) = 17
-ioctl(1,TIOCGWINSZ,0x00000040007fe898) = -1 errno=25 (Not a tty)
-writev(1,0x40007fe830,0x2) = 7
-brk(NULL) = 0x0000000000247000
-brk(0x0000000000249000) = 0x0000000000249000
-mmap(0x0000000000247000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x0000000000247000
+arch_prctl(4098,2392656,0,8388608,0,131072) = 0
+set_tid_address(2392568,2392656,0,8388608,0,131072) = 17
+ioctl(1,TIOCGWINSZ,0x00000040007fe7f8) = -1 errno=25 (Not a tty)
+writev(1,0x40007fe790,0x2) = 7
+brk(NULL) = 0x000000000024a000
+brk(0x000000000024c000) = 0x000000000024c000
+mmap(0x000000000024a000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x000000000024a000
 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000803000
 mmap(NULL,1048596,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000804000
 munmap(0x0000004000804000,1052672) = 0
@@ -29,8 +29,8 @@ close(3) = 0
 openat(AT_FDCWD,"",O_RDONLY|O_LARGEFILE) = -1 errno=2 (No such file or directory)
 openat(1,"abi-probe",O_RDONLY|O_LARGEFILE) = -1 errno=20 (Not a directory)
 openat(42,"abi-probe",O_RDONLY|O_LARGEFILE) = -1 errno=9 (Bad file descriptor)
-openat(AT_FDCWD,"<n repeated>",O_RDONLY|O_LARGEFILE) = -1 errno=2 (No such file or directory)
-openat(AT_FDCWD,"<n repeated>",O_RDONLY|O_LARGEFILE) = -1 errno=36 (Filename too long)
+openat(AT_FDCWD,"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",O_RDONLY|O_LARGEFILE) = -1 errno=2 (No such file or directory)
+openat(AT_FDCWD,"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",O_RDONLY|O_LARGEFILE) = -1 errno=36 (Filename too long)
 uname(0x4000800b70) = 0
 getpid() = 17
 mkdirat(-100,"/tmp/abi-17",0755) = 0
@@ -41,64 +41,119 @@ getcwd(0x4000800b70,64) = 12
 getcwd(0x4000800b70,4) = -1 errno=34 (Result not representable)
 open("data",O_RDWR|O_CREAT|O_EXCL|O_LARGEFILE,0644) = 3
 open("data",O_WRONLY|O_CREAT|O_EXCL|O_LARGEFILE,0644) = -1 errno=17 (File exists)
-write(3,0x243630,8192) = 8192
+write(3,0x245ce0,8192) = 8192
 lseek(3,0,SEEK_CUR) = 8192
 lseek(3,-4096,SEEK_END) = 4096
 lseek(3,100,SEEK_SET) = 100
 lseek(3,-1,SEEK_SET) = -1 errno=22 (Invalid argument)
 lseek(1,0,SEEK_CUR) = -1 errno=29 (Invalid seek)
-read(3,0x800970,300) = 300
+read(3,0x8008d0,300) = 300
 lseek(3,0,SEEK_CUR) = 400
 lseek(3,8000,SEEK_SET) = 8000
-read(3,0x800970,300) = 192
-read(3,0x800970,300) = 0
+read(3,0x8008d0,300) = 192
+read(3,0x8008d0,300) = 0
 close(3) = 0
 open("data",O_WRONLY|O_APPEND|O_LARGEFILE) = 3
-read(3,0x800970,1) = -1 errno=9 (Bad file descriptor)
-write(3,0x2005bf,4) = 4
+read(3,0x8008d0,1) = -1 errno=9 (Bad file descriptor)
+write(3,0x200660,4) = 4
 lseek(3,0,SEEK_CUR) = 8196
 close(3) = 0
 open("data",O_RDONLY|O_LARGEFILE) = 3
 lseek(3,-4,SEEK_END) = 8192
-read(3,0x800970,300) = 4
-write(3,0x20059d,1) = -1 errno=9 (Bad file descriptor)
+read(3,0x8008d0,300) = 4
+write(3,0x20063e,1) = -1 errno=9 (Bad file descriptor)
 close(3) = 0
 open("data",O_WRONLY|O_LARGEFILE|O_TRUNC) = 3
 lseek(3,0,SEEK_END) = 0
-writev(3,0x4000800950,0x2) = 5
+writev(3,0x40008008b0,0x2) = 5
 close(3) = 0
 open("data",O_RDONLY|O_LARGEFILE) = 3
-read(3,0x800970,300) = 5
+read(3,0x8008d0,300) = 5
 close(3) = 0
 open("data",O_RDONLY|O_LARGEFILE) = 3
-stat("data",0x0000004000800850) = 0
-fstat(3,0x0000004000800a00) = 0
+stat("data",0x00000040008007b0) = 0
+fstat(3,0x0000004000800960) = 0
 close(3) = 0
-lstat("data",0x00000040008007c0) = 0
-newfstatat(-100,"./data",0x00000040008007c0,AT_SYMLINK_NOFOLLOW) = 0
+lstat("data",0x0000004000800720) = 0
+newfstatat(-100,"./data",0x0000004000800720,AT_SYMLINK_NOFOLLOW) = 0
 open(".",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = 3
-stat(".",0x00000040008008e0) = 0
-newfstatat(3,"",0x00000040008007c0,0x1000) = 0
-fstat(3,0x00000040008007c0) = 0
-newfstatat(3,"data",0x00000040008007c0,0) = 0
+stat(".",0x0000004000800840) = 0
+newfstatat(3,"",0x0000004000800720,0x1000) = 0
+fstat(3,0x0000004000800720) = 0
+newfstatat(3,"data",0x0000004000800720,0) = 0
 close(3) = 0
-stat("/system/linux/abi-probe",0x0000004000800970) = 0
-fstat(1,0x00000040008007c0) = 0
+stat("/system/linux/abi-probe",0x00000040008008d0) = 0
+fstat(1,0x0000004000800720) = 0
 access("data",F_OK) = 0
 access("data",R_OK|W_OK) = 0
 access(".",R_OK|X_OK) = 0
 access("missing",F_OK) = -1 errno=2 (No such file or directory)
 access("data/",F_OK) = -1 errno=20 (Not a directory)
-stat("missing",0x00000040008007c0) = -1 errno=2 (No such file or directory)
-stat("data/",0x00000040008007c0) = -1 errno=20 (Not a directory)
-fstat(42,0x00000040008007c0) = -1 errno=9 (Bad file descriptor)
-fstat(-100,0x00000040008007c0) = -1 errno=9 (Bad file descriptor)
-newfstatat(-100,"data",0x00000040008007c0,0x10000000) = -1 errno=22 (Invalid argument)
+stat("missing",0x0000004000800720) = -1 errno=2 (No such file or directory)
+stat("data/",0x0000004000800720) = -1 errno=20 (Not a directory)
+fstat(42,0x0000004000800720) = -1 errno=9 (Bad file descriptor)
+fstat(-100,0x0000004000800720) = -1 errno=9 (Bad file descriptor)
+newfstatat(-100,"data",0x0000004000800720,0x10000000) = -1 errno=22 (Invalid argument)
 stat("data",0x0000000000000008) = -1 errno=14 (Bad address)
+uname(0x4000800892) = 0
+open("data",O_RDONLY|O_LARGEFILE) = 3
+stat("data",0x0000004000800970) = 0
+statx(-100,"data",0,0x7ff,0x0000004000800770) = 0
+statx(3,"",AT_EMPTY_PATH,0xfff,0x0000004000800870) = 0
+statx(-100,"data",AT_STATX_FORCE_SYNC,(null),0x0000004000800870) = 0
+statx(-100,".",AT_SYMLINK_NOFOLLOW|AT_STATX_DONT_SYNC,0x7ff,0x0000004000800870) = 0
+close(3) = 0
+statx(-100,"missing",0,0x7ff,0x0000004000800870) = -1 errno=2 (No such file or directory)
+statx(-100,"data/",0,0x7ff,0x0000004000800870) = -1 errno=20 (Not a directory)
+statx(-100,"data",AT_STATX_FORCE_SYNC|AT_STATX_DONT_SYNC,0x7ff,0x0000004000800870) = -1 errno=22 (Invalid argument)
+statx(-100,"data",0,0x80000000,0x0000004000800870) = -1 errno=22 (Invalid argument)
+statx(-100,"data",0x10000000,0x7ff,0x0000004000800870) = -1 errno=22 (Invalid argument)
+statx(42,"data",0,0x7ff,0x0000004000800870) = -1 errno=9 (Bad file descriptor)
+statx(-100,"data",0,0x7ff,0x0000000000000008) = -1 errno=14 (Bad address)
+open("placed",O_RDWR|O_CREAT|O_LARGEFILE|O_TRUNC,0644) = 3
+write(3,0x200357,10) = 10
+pread64(3,274886298096,4,3,0,0) = 4
+lseek(3,0,SEEK_CUR) = 10
+pwrite64(3,2098590,2,1,0,0) = 2
+lseek(3,0,SEEK_CUR) = 10
+pread64(3,274886298096,16,0,0,0) = 10
+pread64(3,274886298096,16,10,0,0) = 0
+pread64(3,274886298096,16,1000,0,0) = 0
+pread64(3,274886298096,0,0,0,0) = 0
+pwrite64(3,274886298096,0,0,0,0) = 0
+pwrite64(3,2098323,2,10,0,0) = 2
+lseek(3,0,SEEK_CUR) = 10
+write(3,0x200548,1) = 1
+lseek(3,0,SEEK_CUR) = 11
+pread64(3,274886298096,16,8,0,0) = 4
+close(3) = 0
+open("placed",O_RDONLY|O_LARGEFILE) = 3
+pwrite64(3,2098750,1,0,0,0) = -1 errno=9 (Bad file descriptor)
+pread64(3,274886298096,1,11,0,0) = 1
+close(3) = 0
+open("placed",O_WRONLY|O_LARGEFILE) = 3
+pread64(3,274886298096,1,0,0,0) = -1 errno=9 (Bad file descriptor)
+close(3) = 0
+open("placed",O_RDWR|O_APPEND|O_LARGEFILE) = 3
+pwrite64(3,2099701,1,0,0,0) = 1
+lseek(3,0,SEEK_CUR) = 0
+pread64(3,274886298096,16,0,0,0) = 13
+close(3) = 0
+open(".",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = 3
+pread64(3,274886298096,1,0,0,0) = -1 errno=21 (Is a directory)
+pwrite64(3,274886298096,1,0,0,0) = -1 errno=9 (Bad file descriptor)
+close(3) = 0
+pread64(1,274886298096,1,0,0,0) = -1 errno=29 (Invalid seek)
+pwrite64(1,274886298096,1,0,0,0) = -1 errno=29 (Invalid seek)
+pread64(42,274886298096,1,0,0,0) = -1 errno=9 (Bad file descriptor)
+pwrite64(42,274886298096,1,0,0,0) = -1 errno=9 (Bad file descriptor)
+pread64(42,274886298096,1,-1,0,3978425819144476720) = -1 errno=22 (Invalid argument)
+pwrite64(1,274886298096,1,-1,3978425819144476720,3978425819144476720) = -1 errno=22 (Invalid argument)
+unlink("placed") = 0
 open("lines",O_WRONLY|O_CREAT|O_LARGEFILE|O_TRUNC,0666) = 3
 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x0000004000905000
-ioctl(3,TIOCGWINSZ,0x0000004000800a38) = -1 errno=25 (Not a tty)
-writev(3,0x40008009d0,0x2) = 15
+ioctl(3,TIOCGWINSZ,0x0000004000800998) = -1 errno=25 (Not a tty)
+writev(3,0x4000800930,0x2) = 15
 close(3) = 0
 munmap(0x0000004000905000,4096) = 0
 open("lines",O_RDONLY|O_LARGEFILE) = 3
@@ -106,11 +161,11 @@ mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00000040
 read(3,0x906140,1024) = 15
 read(3,0x906140,1024) = 0
 lseek(3,0,SEEK_SET) = 0
-readv(3,274886298096,2,1,8028074750225088512,65281) = 15
-readv(3,274886298096,2,1,8028074750225088512,65281) = 0
+readv(3,274886297936,2,1,274887368704,1) = 15
+readv(3,274886297936,2,1,274887368704,1) = 0
 close(3) = 0
 munmap(0x0000004000906000,4096) = 0
-readv(0,274886298096,2,1344,6,2) = 0
+readv(0,274886297936,2,1344,6,2) = 0
 unlink("lines") = 0
 mkdirat(-100,"list",0755) = 0
 chdir("list") = 0
@@ -118,45 +173,45 @@ open("a",O_WRONLY|O_CREAT|O_LARGEFILE,0644) = 3
 close(3) = 0
 open("b",O_WRONLY|O_CREAT|O_LARGEFILE,0644) = 3
 close(3) = 0
-open("<L repeated>",O_WRONLY|O_CREAT|O_LARGEFILE,0644) = 3
+open("LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL",O_WRONLY|O_CREAT|O_LARGEFILE,0644) = 3
 close(3) = 0
 mkdirat(-100,"d",0755) = 0
-stat("a",0x00000040008009f8) = 0
+stat("a",0x0000004000800958) = 0
 open(".",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = 3
-getdents64(3,2381568,256,3,0,206158430216) = 248
-getdents64(3,2381568,256,0,206158430216,206158430216) = 96
-getdents64(3,2381568,256,206158430208,206158430216,206158430216) = 0
+getdents64(3,2391472,256,3,0,206158430216) = 248
+getdents64(3,2391472,256,0,206158430216,206158430216) = 96
+getdents64(3,2391472,256,206158430208,206158430216,206158430216) = 0
 lseek(3,0,SEEK_SET) = 0
-getdents64(3,2381568,256,206158430216,206158430216,206158430216) = 248
-getdents64(3,2381568,256,206158430208,206158430216,206158430216) = 96
-getdents64(3,2381568,256,206158430208,206158430216,206158430216) = 0
+getdents64(3,2391472,256,206158430216,206158430216,206158430216) = 248
+getdents64(3,2391472,256,206158430208,206158430216,206158430216) = 96
+getdents64(3,2391472,256,206158430208,206158430216,206158430216) = 0
 lseek(3,0,SEEK_SET) = 0
 open("a",O_RDONLY|O_LARGEFILE) = 4
-getdents64(3,2381568,16,4,0,206158430216) = -1 errno=22 (Invalid argument)
+getdents64(3,2391472,16,4,0,206158430216) = -1 errno=22 (Invalid argument)
 getdents64(3,8,256,0,206158430216,206158430216) = -1 errno=14 (Bad address)
-getdents64(4,2381568,256,206158430216,206158430216,206158430216) = -1 errno=20 (Not a directory)
-getdents64(42,2381568,256,206158430216,206158430216,206158430216) = -1 errno=9 (Bad file descriptor)
+getdents64(4,2391472,256,206158430216,206158430216,206158430216) = -1 errno=20 (Not a directory)
+getdents64(42,2391472,256,206158430216,206158430216,206158430216) = -1 errno=9 (Bad file descriptor)
 close(4) = 0
 close(3) = 0
 unlink("a") = 0
 unlink("b") = 0
-unlink("<L repeated>") = 0
+unlink("LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL") = 0
 rmdir("d",) = 0
 chdir("..") = 0
 rmdir("list",) = 0
 open("vector",O_RDWR|O_CREAT|O_LARGEFILE|O_TRUNC,0644) = 3
-writev(3,0x4000800a70,0x3) = 8
+writev(3,0x40008009d0,0x3) = 8
 lseek(3,0,SEEK_SET) = 0
-readv(3,274886298176,2,0,0,0) = 8
-readv(3,274886298176,2,0,0,0) = 0
-readv(3,274886298176,-1,0,0,0) = -1 errno=22 (Invalid argument)
+readv(3,274886298016,2,0,0,0) = 8
+readv(3,274886298016,2,0,0,0) = 0
+readv(3,274886298016,-1,0,0,0) = -1 errno=22 (Invalid argument)
 writev(3,0x8,0x1) = -1 errno=14 (Bad address)
-readv(42,274886298176,2,0,0,0) = -1 errno=9 (Bad file descriptor)
+readv(42,274886298016,2,0,0,0) = -1 errno=9 (Bad file descriptor)
 close(3) = 0
 unlink("vector") = 0
 open("dup",O_RDWR|O_CREAT|O_LARGEFILE|O_TRUNC,0644) = 3
 dup(3) = 4
-write(3,0x20061f,3) = 3
+write(3,0x2006c5,3) = 3
 lseek(4,0,SEEK_CUR) = 3
 dup2(3,10) = 10
 dup2(3,3) = 3
@@ -175,7 +230,7 @@ fcntl(3,F_GETFL) = 32770
 fcntl(3,F_SETFL,O_RDWR|O_APPEND|O_LARGEFILE) = 0
 fcntl(10,F_GETFL) = 33794
 lseek(3,0,SEEK_SET) = 0
-write(3,0x200511,2) = 2
+write(3,0x2005a1,2) = 2
 lseek(20,0,SEEK_CUR) = 5
 fcntl(3,F_SETFL,O_RDWR|O_LARGEFILE) = 0
 fcntl(3,F_GETFL) = 32770
@@ -188,9 +243,9 @@ dup2(3,1073741824) = -1 errno=9 (Bad file descriptor)
 dup3(3,12,1) = -1 errno=22 (Invalid argument)
 fcntl(42,F_GETFD) = -1 errno=9 (Bad file descriptor)
 fcntl(3,F_DUPFD,1073741824) = -1 errno=22 (Invalid argument)
-ioctl(3,TIOCGWINSZ,0x0000004000800a98) = -1 errno=25 (Not a tty)
-ioctl(42,TIOCGWINSZ,0x0000004000800a98) = -1 errno=9 (Bad file descriptor)
-ioctl(3,TIOCGWINSZ,0x0000004000800a80) = -1 errno=25 (Not a tty)
+ioctl(3,TIOCGWINSZ,0x00000040008009f8) = -1 errno=25 (Not a tty)
+ioctl(42,TIOCGWINSZ,0x00000040008009f8) = -1 errno=9 (Bad file descriptor)
+ioctl(3,TIOCGWINSZ,0x00000040008009e0) = -1 errno=25 (Not a tty)
 close(3) = 0
 close(4) = 0
 close(5) = 0
@@ -216,7 +271,7 @@ unlink("other") = 0
 open(".",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = 3
 open("data",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = -1 errno=20 (Not a directory)
 open(".",O_WRONLY|O_LARGEFILE) = -1 errno=21 (Is a directory)
-read(3,0x800a9f,1) = -1 errno=21 (Is a directory)
+read(3,0x8009ff,1) = -1 errno=21 (Is a directory)
 openat(3,"data",O_RDONLY|O_LARGEFILE) = 4
 close(4) = 0
 rename("data","moved") = 0
@@ -231,6 +286,47 @@ unlink("moved") = 0
 close(3) = 0
 chdir("/system/linux") = 0
 rmdir("/tmp/abi-17",) = 0
+uname(0x4000800b70) = 0
+uname(0x4000800b70) = 0
+open("/dev/null",O_RDWR|O_LARGEFILE) = 3
+write(3,0x2005e8,4) = 4
+read(3,0x800a60,64) = 0
+writev(3,0x4000800aa0,0x2) = 9
+readv(3,274886298176,2,0,0,0) = 0
+pwrite64(3,2098664,4,100,0,0) = 4
+pread64(3,274886298208,64,100,0,0) = 0
+lseek(3,5,SEEK_SET) = 0
+lseek(3,0,SEEK_END) = 0
+fstat(3,0x0000004000800ae0) = 0
+ioctl(3,TIOCGWINSZ,0x0000004000800ad0) = -1 errno=25 (Not a tty)
+ioctl(3,TIOCGWINSZ,0x0000004000800a10) = -1 errno=25 (Not a tty)
+fcntl(3,F_GETFL) = 32770
+dup2(3,9) = 9
+write(9,0x20063e,1) = 1
+close(9) = 0
+close(3) = 0
+stat("/dev/null",0x0000004000800ae0) = 0
+statx(-100,"/dev/null",0,0x7ff,0x0000004000800b70) = 0
+access("/dev/null",R_OK|W_OK) = 0
+access("/dev/null",X_OK) = -1 errno=13 (Permission denied)
+open("/dev/zero",O_RDONLY|O_LARGEFILE) = 3
+read(3,0x800a60,64) = 64
+readv(3,274886298176,2,0,0,0) = 8
+pread64(3,274886298208,8,1048576,0,0) = 8
+write(3,0x20063e,1) = -1 errno=9 (Bad file descriptor)
+fstat(3,0x0000004000800ae0) = 0
+close(3) = 0
+open("/dev/zero",O_WRONLY|O_LARGEFILE) = 3
+write(3,0x2005e8,4) = 4
+read(3,0x800a60,1) = -1 errno=9 (Bad file descriptor)
+close(3) = 0
+open("/dev/tty",O_RDWR|O_LARGEFILE|O_NOCTTY) = -1 errno=6 (No such device or address)
+stat("/dev/tty",0x0000004000800ae0) = 0
+open("/dev/null/below",O_RDONLY|O_LARGEFILE) = -1 errno=20 (Not a directory)
+open("/dev/null",O_RDONLY|O_DIRECTORY|O_LARGEFILE) = -1 errno=20 (Not a directory)
+open("/dev/zero",O_WRONLY|O_CREAT|O_EXCL|O_LARGEFILE,0644) = -1 errno=17 (File exists)
+chdir("/dev/null") = -1 errno=20 (Not a directory)
+mkdirat(-100,"/dev/null",0755) = -1 errno=17 (File exists)
 getpid() = 17
 gettid() = 17
 getppid() = 1
@@ -239,24 +335,58 @@ geteuid() = 0
 getgid() = 0
 getegid() = 0
 getuid() = 0
-rt_sigprocmask(SIG_BLOCK,0x0000000000201858,0x00000040008009e8) = 0
-rt_sigprocmask(SIG_BLOCK,0x0000000000201850,NULL) = 0
+rt_sigprocmask(SIG_BLOCK,0x00000000002019c8,0x0000004000800948) = 0
+rt_sigprocmask(SIG_BLOCK,0x00000000002019c0,NULL) = 0
 setuid(0,0,0,8,0,0) = 0
-rt_sigprocmask(SIG_SETMASK,0x00000040008009e8,NULL) = 0
+rt_sigprocmask(SIG_SETMASK,0x0000004000800948,NULL) = 0
 getgid() = 0
-rt_sigprocmask(SIG_BLOCK,0x0000000000201858,0x00000040008009e8) = 0
-rt_sigprocmask(SIG_BLOCK,0x0000000000201850,NULL) = 0
+rt_sigprocmask(SIG_BLOCK,0x00000000002019c8,0x0000004000800948) = 0
+rt_sigprocmask(SIG_BLOCK,0x00000000002019c0,NULL) = 0
 setgid(0) = 0
-rt_sigprocmask(SIG_SETMASK,0x00000040008009e8,NULL) = 0
+rt_sigprocmask(SIG_SETMASK,0x0000004000800948,NULL) = 0
 getgroups(0,0,0,8,0,0) = 12
 uname(0x4000800b70) = 0
-clock_gettime(CLOCK_REALTIME,0x0000004000800b30) = 0 ({tv_sec = 1790777430,tv_nsec = 824906662})
-clock_gettime(CLOCK_REALTIME,0x0000004000800aa0) = 0 ({tv_sec = 1790777430,tv_nsec = 824931495})
-clock_gettime(CLOCK_MONOTONIC,0x0000004000800ad0) = 0 ({tv_sec = 16873,tv_nsec = 99265665})
-nanosleep(274886298368,0,0,0,0,0) = 0
-clock_gettime(CLOCK_MONOTONIC,0x0000004000800af0) = 0 ({tv_sec = 16873,tv_nsec = 122235124})
-clock_gettime(0x63,0x0000004000800b30) = -1 errno=22 (Invalid argument)
-nanosleep(274886298384,0,0,0,0,0) = -1 errno=22 (Invalid argument)
-prlimit64(0,7,0,274886298400,0,0) = 0
-writev(1,0x4000800cb0,0x2) = 145
+clock_gettime(CLOCK_REALTIME,0x0000004000800ae0) = 0 ({tv_sec = 1790781866,tv_nsec = 150277362})
+clock_gettime(CLOCK_REALTIME,0x0000004000800a00) = 0 ({tv_sec = 1790781866,tv_nsec = 150296445})
+clock_gettime(CLOCK_MONOTONIC,0x0000004000800a60) = 0 ({tv_sec = 21308,tv_nsec = 222808405})
+nanosleep(274886298272,0,0,0,0,0) = 0
+clock_gettime(CLOCK_MONOTONIC,0x0000004000800a40) = 0 ({tv_sec = 21308,tv_nsec = 246122863})
+clock_gettime(0x63,0x0000004000800ae0) = -1 errno=22 (Invalid argument)
+nanosleep(274886298320,0,0,0,0,0) = -1 errno=22 (Invalid argument)
+prlimit64(0,7,0,274886298304,0,0) = 0
+uname(0x4000800b70) = 0
+rt_sigaction(SIGUSR1,0x0000004000800b70,0x0000004000800ae0) = 0
+rt_sigaction(SIGUSR1,NULL,0x0000004000800a60) = 0
+rt_sigaction(SIGUSR2,NULL,0x0000004000800a60) = 0
+rt_sigaction(64,0x0000004000800b70,NULL) = 0
+rt_sigaction(SIGKILL,NULL,0x0000004000800a60) = 0
+rt_sigaction(SIGKILL,0x0000004000800b70,NULL) = -1 errno=22 (Invalid argument)
+rt_sigaction(SIGSTOP,0x0000004000800b70,NULL) = -1 errno=22 (Invalid argument)
+rt_sigaction(0,NULL,0x0000004000800a60) = -1 errno=22 (Invalid argument)
+rt_sigaction(65,NULL,0x0000004000800a60) = -1 errno=22 (Invalid argument)
+rt_sigaction(SIGUSR1,NULL,0x0000004000800a60) = -1 errno=22 (Invalid argument)
+rt_sigaction(SIGUSR1,0x0000000000000008,NULL) = -1 errno=14 (Bad address)
+rt_sigaction(SIGUSR1,NULL,0x0000000000000008) = -1 errno=14 (Bad address)
+rt_sigaction(SIGUSR1,0x0000004000800b70,NULL) = 0
+rt_sigaction(64,0x0000004000800b70,NULL) = 0
+rt_sigprocmask(SIG_SETMASK,NULL,0x0000004000800aa0) = 0
+rt_sigprocmask(SIG_BLOCK,0x0000004000800a40,NULL) = 0
+rt_sigprocmask(UNKNOWN,NULL,0x0000004000800a78) = 0
+rt_sigprocmask(SIG_UNBLOCK,0x0000004000800a40,0x0000004000800a78) = 0
+rt_sigprocmask(SIG_SETMASK,0x0000004000800aa0,0x0000004000800a78) = 0
+rt_sigprocmask(SIG_SETMASK,NULL,0x0000004000800a78) = 0
+rt_sigprocmask(UNKNOWN,0x0000004000800a40,NULL) = -1 errno=22 (Invalid argument)
+rt_sigprocmask(SIG_BLOCK,0x0000004000800a40,NULL) = -1 errno=22 (Invalid argument)
+rt_sigprocmask(SIG_BLOCK,0x0000000000000008,NULL) = -1 errno=14 (Bad address)
+rt_sigprocmask(SIG_BLOCK,NULL,0x0000000000000008) = -1 errno=14 (Bad address)
+uname(0x4000800b70) = 0
+getrandom(274886298208,1,0,0,0,0) = 1
+getrandom(274886298480,32,0,0,0,0) = 32
+getrandom(274886298336,32,1,0,0,0) = 32
+getrandom(274886298480,0,0,0,0,0) = 0
+getrandom(2392256,300,0,0,0,0) = 300
+getrandom(274886298480,32,256,0,0,0) = -1 errno=22 (Invalid argument)
+getrandom(274886298480,32,6,0,0,0) = -1 errno=22 (Invalid argument)
+getrandom(8,32,0,0,0,0) = -1 errno=14 (Bad address)
+writev(1,0x4000800cb0,0x2) = 199
 exit_group(0)

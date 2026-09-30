@@ -24,6 +24,8 @@ const (
 	SysRtSigaction   Syscall = 13
 	SysRtSigprocmask Syscall = 14
 	SysIoctl         Syscall = 16
+	SysPread64       Syscall = 17
+	SysPwrite64      Syscall = 18
 	SysAccess        Syscall = 21
 	SysReadv         Syscall = 19
 	SysWritev        Syscall = 20
@@ -155,8 +157,29 @@ const (
 	ResourceCount     = uint64(16)
 	ResourceInfinity  = ^uint64(0)
 
+	// Flags and field masks of statx.
+	AtStatxSyncType   = uint64(0x6000)
+	StatxBasicStats   = uint32(0x7ff)
+	StatxBirthTime    = uint32(0x800)
+	StatxReservedMask = uint64(0x80000000)
+
+	// Flags of getrandom. None changes what GoOS returns.
+	RandomNonBlock = uint64(1)
+	RandomRandom   = uint64(2)
+	RandomInsecure = uint64(4)
+
+	// Operations of rt_sigprocmask, and the signals no mask or handler
+	// may claim.
+	SignalBlock   = uint64(0)
+	SignalUnblock = uint64(1)
+	SignalSetMask = uint64(2)
+	SignalKill    = uint64(9)
+	SignalStop    = uint64(19)
+	SignalCount   = uint64(64)
+
 	// File type and permission bits of st_mode.
 	ModeFIFO      = uint32(0o010000)
+	ModeCharacter = uint32(0o020000)
 	ModeDirectory = uint32(0o040000)
 	ModeRegular   = uint32(0o100000)
 
@@ -180,7 +203,7 @@ func (number Syscall) Known() bool {
 	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
 		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
-		SysDup, SysDup2, SysFcntl, SysDup3, SysAccess, SysSetuid, SysSetgid,
+		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,

@@ -34,8 +34,11 @@ type ProcessState struct {
 	// IOBuffer is the native handle of the memory object file reads and
 	// writes move their bytes through. The bridge creates it on first use.
 	IOBuffer handle.ID
-	cwd      [limits.PathMax]byte
-	cwdLen   uint16
+	// Signals is what the process registered with rt_sigaction and
+	// rt_sigprocmask. Nothing delivers a signal from it.
+	Signals SignalState
+	cwd     [limits.PathMax]byte
+	cwdLen  uint16
 }
 
 // SetCWD replaces the working directory with a canonical absolute path.
