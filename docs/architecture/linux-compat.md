@@ -136,9 +136,10 @@ Syscalls map onto native primitives:
 | `arch_prctl` | task-local FS base; GS remains architecture-owned |
 | `execve` | a VFS-pinned executable snapshot and a prepared replacement root |
 | `fork`, `vfork`, `clone` | a new Process, address space, and task built from a private copy of the caller; `vfork` parks the caller on its continuation |
+| `wait4` | the family zombie records; a blocked caller parks on its continuation until a child exits |
 
-Remaining composition work maps `pipe2` to `StreamCreate`, `wait4` to the
-family zombie records, and `poll` to `WaitAny`.
+Remaining composition work maps `pipe2` to `StreamCreate` and `poll` to
+`WaitAny`.
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -422,10 +423,10 @@ and its VFS session go with it, and no Linux signal is delivered.
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, `wait4`, threads, signal delivery,
+Dynamic linking, glibc, process groups, threads, signal delivery,
 pipes created by a Linux process, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not
 run. `fork`, `vfork`, and two process forms of `clone` create a child from
-a private copy of the caller (ADR 0158, ADR 0159). The next Linux work is
-`pipe2`, `wait4`, minimal signals, and `poll`.
+a private copy of the caller (ADR 0158, ADR 0159), and `wait4` reaps it
+(ADR 0161). The next Linux work is `pipe2`, minimal signals, and `poll`.

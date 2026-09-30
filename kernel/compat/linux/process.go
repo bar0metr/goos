@@ -42,6 +42,8 @@ type ProcessState struct {
 	// vforkParent is the task a vfork suspended until this process replaces
 	// its image or exits.
 	vforkParent sched.TaskID
+	// childWaiter is this process's task while wait4 blocks for a child.
+	childWaiter sched.TaskID
 	cwd         [limits.PathMax]byte
 	cwdLen      uint16
 }

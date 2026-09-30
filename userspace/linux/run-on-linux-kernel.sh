@@ -46,6 +46,7 @@ echo "== process"
 /system/linux/$fixture fork < /dev/null | /bin/busybox cat
 /system/linux/$fixture vfork < /dev/null | /bin/busybox cat
 /system/linux/$fixture orphan < /dev/null | /bin/busybox cat
+/system/linux/$fixture wait < /dev/null | /bin/busybox cat
 echo "== done"
 /bin/busybox poweroff -f
 INIT
@@ -75,7 +76,7 @@ status=0
 tr -d '\r' < "$log" | grep -q '^abi-probe ok$' || { echo "FAIL default mode" >&2; status=1; }
 tr -d '\r' < "$log" | grep -q '^hostile ok$' || { echo "FAIL hostile mode" >&2; status=1; }
 if [ "$fixture" = abi-probe ]; then
-	for line in 'fork parent ok' 'vfork ok' 'clone ok' 'orphan ok'; do
+	for line in 'fork parent ok' 'vfork ok' 'clone ok' 'orphan ok' 'wait ok'; do
 		tr -d '\r' < "$log" | grep -q "^$line\$" || { echo "FAIL process mode: no $line" >&2; status=1; }
 	done
 fi

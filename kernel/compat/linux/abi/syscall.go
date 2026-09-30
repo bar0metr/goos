@@ -41,6 +41,7 @@ const (
 	SysVfork         Syscall = 58
 	SysExecve        Syscall = 59
 	SysExit          Syscall = 60
+	SysWait4         Syscall = 61
 	SysUname         Syscall = 63
 	SysFcntl         Syscall = 72
 	SysGetcwd        Syscall = 79
@@ -188,6 +189,14 @@ const (
 	CloneVfork      = uint64(0x4000)
 	CloneSignalMask = uint64(0xff)
 
+	// wait4 options. WaitAll and WaitNoThread change nothing for a
+	// single-task process that creates children only with SIGCHLD.
+	WaitNoHang   = uint64(1)
+	WaitNoThread = uint64(0x20000000)
+	WaitAll      = uint64(0x40000000)
+	// RusageSize is the size of struct rusage on x86_64.
+	RusageSize = 144
+
 	// File type and permission bits of st_mode.
 	ModeFIFO      = uint32(0o010000)
 	ModeCharacter = uint32(0o020000)
@@ -216,7 +225,7 @@ func (number Syscall) Known() bool {
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,
-		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysUname, SysGetcwd, SysChdir,
+		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysWait4, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
 		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,
