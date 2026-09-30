@@ -33,7 +33,7 @@ an errno; nothing is accepted and ignored.
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | record and report dispositions and the blocked mask; no signal is delivered |
+| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | recorded signal state only: record and report dispositions and the blocked mask; no signal is delivered |
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
 | `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call |
@@ -54,11 +54,11 @@ an errno; nothing is accepted and ignored.
 | `getgroups(115)` | implemented | no supplementary groups |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
 | `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
-| `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
+| `set_tid_address(218)` | partial | stores the address, returns the compatibility PID; a single-task exit clears nothing |
 | `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
 | `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
-| `getrandom(318)` | partial | bytes from the CPU's RDRAND, at most 256 per call; `ENOSYS` on a CPU without it |
+| `getrandom(318)` | partial | bytes straight from the CPU's RDRAND, not a Linux entropy pool or CSPRNG; at most 256 per call; `ENOSYS` on a CPU without it |
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
 
@@ -295,7 +295,7 @@ These calls answer from kernel state and ask no service (ADR 0145).
 `prlimit64` refuses a new limit with `EPERM`, another PID with `ESRCH`, and a
 resource over 15 with `EINVAL`. No signal exists to interrupt a sleep.
 
-## Signal state
+## Recorded signal state
 
 `rt_sigaction` and `rt_sigprocmask` keep what a program registers and report
 it back (ADR 0151). GoOS sends no signal, so no handler runs, no call returns
@@ -316,7 +316,10 @@ for `SIGINT`. The calls that send a signal stay `ENOSYS`.
 ## Random bytes
 
 `getrandom` and `AT_RANDOM` have one source, the CPU's RDRAND generator
-(ADR 0151).
+(ADR 0151). This is a direct hardware source, not the Linux entropy pool or
+kernel CSPRNG: the kernel keeps no pool, mixes nothing, and reseeds nothing.
+A program that takes a working `getrandom` for that abstraction gets the
+quality of the CPU's generator, and a transient generator failure is `EIO`.
 
 | CPU | `getrandom` | `AT_RANDOM` |
 | --- | --- | --- |
