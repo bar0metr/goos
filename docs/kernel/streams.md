@@ -47,8 +47,8 @@ reader discards buffered bytes and makes later writes fail with peer closure.
 Process teardown drops every owned stream handle and releases the object after
 both ends close.
 
-The registry holds up to 256 streams. Each is one page, a 4080-byte ring and
-its counters, taken from the page allocator when the stream is created and
+The registry holds up to 256 streams. Each is two pages, an 8176-byte ring and
+its counters (ADR 0162), taken from the page allocator when the stream is created and
 returned when it is released (ADR 0111). Launch profiles allow eight, sixteen,
 or thirty-two streams; PID 1 may hold sixty-four (ADR 0072, ADR 0089, ADR
 0111, ADR 0122).

@@ -264,6 +264,11 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 	if limit = handler.accessible(address, limit, false); limit == 0 {
 		return linuxcompat.Result{Errno: linuxabi.EFAULT}
 	}
+	if limit == requested {
+		if result, ready := handler.awaitWholeWrite(request, endpoint, streamID, limit); !ready {
+			return result
+		}
+	}
 	written, result, final := handler.writeRange(request, endpoint, streamID, address, limit, false)
 	if final {
 		return result
@@ -341,6 +346,20 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 	}
 	if errno := linuxcompat.ValidateIOVec(wire, vm.UserAddressLimit); errno != 0 {
 		return linuxcompat.Result{Errno: errno}
+	}
+	// A vector of at most PIPE_BUF readable bytes is one write and lands
+	// whole, as a single write of that size does.
+	whole := uint64(0)
+	for index := uint64(0); index < count && whole <= linuxcompat.LinuxPipeBuf; index++ {
+		base, length := linuxcompat.IOVecEntry(wire, int(index))
+		if length > linuxcompat.LinuxPipeBuf-whole || handler.accessible(base, length, false) != length {
+			whole = linuxcompat.LinuxPipeBuf + 1
+			break
+		}
+		whole += length
+	}
+	if result, ready := handler.awaitWholeWrite(request, endpoint, streamID, whole); !ready {
+		return result
 	}
 	total := uint64(0)
 	for index := uint64(0); index < count && total < linuxcompat.MaxVectorBytes; index++ {

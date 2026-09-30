@@ -6,9 +6,10 @@
 // the first to exit does not close it for the others.
 package stream
 
-// Capacity is the ring's size: with the stream's counters it fills one page,
-// which is what the registry allocates for a stream (ADR 0111).
-const Capacity = 4080
+// Capacity is the ring's size: with the stream's counters it fills two pages,
+// which is what the registry allocates for a stream (ADR 0111). The ring holds
+// more than the 4096 bytes a Linux program may write to a pipe in one piece.
+const Capacity = 8176
 
 // AtomicWrite is the largest write that is never split. A write of at most
 // this many bytes lands whole or not at all, so writers sharing an endpoint
@@ -202,12 +203,12 @@ func (stream *Stream) WriteStatus() Status {
 	return stream.WriteStatusFor(AtomicWrite)
 }
 
-// WriteStatusFor reports whether one bounded write can be accepted whole.
+// WriteStatusFor reports whether a write of size bytes fits the ring whole.
 func (stream *Stream) WriteStatusFor(size int) Status {
 	if stream == nil || !stream.writerOpen {
 		return StatusInvalidEndpoint
 	}
-	if size <= 0 || size > AtomicWrite {
+	if size <= 0 || size > Capacity {
 		return StatusInvalidEndpoint
 	}
 	if !stream.readerOpen {

@@ -40,6 +40,7 @@
  *   vfork             suspend in vfork until the child exits; clone a child
  *   orphan            a grandchild whose parent exits is reparented to PID 1
  *   wait              reap children by PID and by any, with and without WNOHANG
+ *   pipe              pipe and pipe2: direction, EOF, EPIPE, lifetime, PIPE_BUF
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -1589,6 +1590,151 @@ static int wait_test(void)
 	return 0;
 }
 
+static int pipe_fail(const char *step)
+{
+	printf("pipe failed: %s errno=%d\n", step, errno);
+	return 1;
+}
+
+/* Reads until EOF and returns the byte count, or -1 on an error. */
+static long drain(int fd, char *buffer, long size)
+{
+	long total = 0, count;
+
+	while ((count = read(fd, buffer + total, size - total > 4096 ? 4096 : size - total)) > 0) {
+		total += count;
+		if (total == size)
+			break;
+	}
+	return count < 0 ? -1 : total;
+}
+
+#define PIPE_RECORDS 16
+static char pipe_data[2 * PIPE_RECORDS * 4096];
+
+/* Two children write sixteen 4096-byte records each, one letter per child,
+ * into one pipe. Every 4096-byte block the parent reads must hold one
+ * letter: PIPE_BUF writes do not interleave. */
+static int pipe_atomic(void)
+{
+	char record[4096];
+	int fds[2], child, index, status;
+	long total;
+
+	if (pipe(fds) != 0)
+		return pipe_fail("atomic pipe");
+	for (child = 0; child < 2; child++) {
+		pid_t pid = fork();
+
+		if (pid == 0) {
+			close(fds[0]);
+			memset(record, 'a' + child, sizeof record);
+			for (index = 0; index < PIPE_RECORDS; index++)
+				if (write(fds[1], record, sizeof record) != sizeof record)
+					_exit(1);
+			_exit(0);
+		}
+		if (pid < 0)
+			return pipe_fail("atomic fork");
+	}
+	close(fds[1]);
+	total = drain(fds[0], pipe_data, sizeof pipe_data);
+	close(fds[0]);
+	for (child = 0; child < 2; child++)
+		if (wait4(-1, &status, 0, NULL) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+			return pipe_fail("atomic writer");
+	if (total != sizeof pipe_data)
+		return pipe_fail("atomic total");
+	for (total = 0; total < (long)sizeof pipe_data; total += 4096)
+		for (index = 1; index < 4096; index++)
+			if (pipe_data[total + index] != pipe_data[total])
+				return pipe_fail("interleaved record");
+	return 0;
+}
+
+static int pipe_test(void)
+{
+	struct timespec nap = {0, 50 * 1000 * 1000};
+	struct stat reader, writer;
+	char buffer[16];
+	int fds[2], spare, status;
+	pid_t child;
+	long total;
+
+	signal(SIGPIPE, SIG_IGN);
+	fflush(stdout);
+	if (!fails(pipe((int *)8), EFAULT) || !fails(pipe2(fds, O_DIRECT << 4), EINVAL))
+		return pipe_fail("arguments");
+	if (on_goos() && !fails(pipe2(fds, O_NONBLOCK), EINVAL))
+		return pipe_fail("O_NONBLOCK");
+	if (pipe2(fds, O_CLOEXEC) != 0 || fcntl(fds[0], F_GETFD) != FD_CLOEXEC || fcntl(fds[1], F_GETFD) != FD_CLOEXEC)
+		return pipe_fail("pipe2 O_CLOEXEC");
+	close(fds[0]);
+	close(fds[1]);
+	if (pipe(fds) != 0 || fcntl(fds[0], F_GETFD) != 0 ||
+	    (fcntl(fds[0], F_GETFL) & O_ACCMODE) != O_RDONLY || (fcntl(fds[1], F_GETFL) & O_ACCMODE) != O_WRONLY)
+		return pipe_fail("pipe");
+	if (syscall(SYS_fstat, fds[0], &reader) != 0 || syscall(SYS_fstat, fds[1], &writer) != 0 || !S_ISFIFO(reader.st_mode) ||
+	    reader.st_ino != writer.st_ino || reader.st_dev != writer.st_dev)
+		return pipe_fail("fstat");
+	if (!fails(lseek(fds[0], 0, SEEK_CUR), ESPIPE) || !fails(ioctl(fds[0], TIOCGWINSZ, buffer), ENOTTY) ||
+	    !fails(write(fds[0], "x", 1), EBADF) || !fails(read(fds[1], buffer, 1), EBADF))
+		return pipe_fail("direction");
+	if (write(fds[1], "hello", 5) != 5 || read(fds[0], buffer, sizeof buffer) != 5 || memcmp(buffer, "hello", 5))
+		return pipe_fail("round trip");
+	spare = dup(fds[1]);
+	close(fds[1]);
+	if (spare < 0 || write(spare, "dup", 3) != 3 || close(spare) != 0 ||
+	    read(fds[0], buffer, sizeof buffer) != 3 || read(fds[0], buffer, sizeof buffer) != 0)
+		return pipe_fail("duplicate writer and EOF");
+	close(fds[0]);
+	if (pipe(fds) != 0 || close(fds[0]) != 0 || !fails(write(fds[1], "x", 1), EPIPE))
+		return pipe_fail("broken pipe");
+	close(fds[1]);
+
+	/* A forked writer: the parent blocks in read until the child writes, and
+	 * sees EOF once the child, the last writer, exits. */
+	if (pipe(fds) != 0)
+		return pipe_fail("fork pipe");
+	child = fork();
+	if (child == 0) {
+		close(fds[0]);
+		nanosleep(&nap, NULL);
+		_exit(write(fds[1], "child", 5) == 5 ? 0 : 1);
+	}
+	close(fds[1]);
+	if (child < 0 || read(fds[0], buffer, sizeof buffer) != 5 || memcmp(buffer, "child", 5) ||
+	    read(fds[0], buffer, sizeof buffer) != 0 || wait4(child, &status, 0, NULL) != child || status != 0)
+		return pipe_fail("forked writer");
+	close(fds[0]);
+
+	/* A writer larger than any pipe blocks until the reader drains it. */
+	if (pipe(fds) != 0)
+		return pipe_fail("large pipe");
+	child = fork();
+	if (child == 0) {
+		close(fds[1]);
+		total = drain(fds[0], pipe_data, sizeof pipe_data);
+		_exit(total == sizeof pipe_data ? 0 : 1);
+	}
+	close(fds[0]);
+	memset(pipe_data, 'z', sizeof pipe_data);
+	for (total = 0; total < (long)sizeof pipe_data;) {
+		long count = write(fds[1], pipe_data + total, sizeof pipe_data - total);
+
+		if (count <= 0)
+			return pipe_fail("large write");
+		total += count;
+	}
+	close(fds[1]);
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || status != 0)
+		return pipe_fail("large reader");
+	if (pipe_atomic() != 0)
+		return 1;
+	printf("pipe ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1624,6 +1770,8 @@ int main(int argc, char **argv)
 			return orphan_test();
 		if (!strcmp(argv[1], "wait"))
 			return wait_test();
+		if (!strcmp(argv[1], "pipe"))
+			return pipe_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

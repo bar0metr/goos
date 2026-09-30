@@ -103,10 +103,10 @@ func StatusOfReply(reply *vfs.Reply) (FileStatus, abi.Errno) {
 	return status, 0
 }
 
-// StreamStatus describes a standard stream: a FIFO only its holder may use.
-// index tells one open stream of a process from another.
-func StreamStatus(index int) FileStatus {
-	return FileStatus{Device: StreamDevice, Inode: uint64(index) + 1, Mode: abi.ModeFIFO | 0o600}
+// StreamStatus describes a stream: a FIFO only its holders may use. The
+// stream identity is the inode, so both ends of a pipe report the same one.
+func StreamStatus(identity uint64) FileStatus {
+	return FileStatus{Device: StreamDevice, Inode: identity, Mode: abi.ModeFIFO | 0o600}
 }
 
 // EncodeStat writes status as a Linux x86_64 struct stat. Every byte of

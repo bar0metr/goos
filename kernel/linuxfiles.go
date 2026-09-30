@@ -13,6 +13,7 @@ import (
 	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/mm/vm"
 	"goos/kernel/ramfs"
+	"goos/kernel/stream"
 	"goos/kernel/vfs"
 )
 
@@ -829,7 +830,6 @@ func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Reque
 		return linuxErrno(errno), errno != 0
 	}
 	description, open := state.FDs.Lookup(int(fd))
-	index, _ := state.FDs.DescriptionIndex(int(fd))
 	if !open {
 		return linuxErrno(linuxabi.EBADF), true
 	}
@@ -846,7 +846,8 @@ func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Reque
 	case linuxcompat.FDSynthetic:
 		return handler.deliverStatus(request, buffer, linuxcompat.DeviceStatus(linuxcompat.DeviceOf(description))), true
 	default:
-		return handler.deliverStatus(request, buffer, linuxcompat.StreamStatus(index)), true
+		identity, _, _ := stream.DecodeEndpointObject(description.Object)
+		return handler.deliverStatus(request, buffer, linuxcompat.StreamStatus(identity)), true
 	}
 	return linuxErrno(errno), errno != 0
 }
