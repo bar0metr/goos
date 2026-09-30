@@ -18,14 +18,31 @@ type ProcessState struct {
 	Input      handle.ID
 	Output     handle.ID
 	Error      handle.ID
-	VFS        handle.ID
+	VFS        VFSSession
 	FDs        FDTable
 	BrkBase    uint64
 	BrkCurrent uint64
 	BrkLimit   uint64
-	cwd        [limits.PathMax]byte
-	cwdLen     uint16
+	// PID is the process and thread identity a Linux program sees for itself.
+	// It comes from a small positive range and never carries a native process
+	// or task ID.
+	PID int32
+	// ClearChildTID is the address set_tid_address recorded. Linux clears it
+	// at thread exit only while another task shares the address space, which
+	// a single-task process never has, so GoOS stores it and writes nothing.
+	ClearChildTID uint64
+	cwd           [limits.PathMax]byte
+	cwdLen        uint16
 }
+
+const (
+	firstPID = int32(2)
+	// MaxPID matches the default Linux pid_max, so a compatibility PID fits
+	// every pid_t a program may narrow it to.
+	MaxPID = int32(32767)
+)
+
+var nextPID = firstPID
 
 func (state *ProcessState) CWD() []byte { return state.cwd[:state.cwdLen] }
 
@@ -60,7 +77,8 @@ func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uin
 	state := &processStates[free]
 	*state = ProcessState{}
 	state.Root, state.Input, state.Output = root, input, output
-	state.Error, state.VFS, state.cwdLen = errorOutput, vfsHandle, uint16(len(data.CWD()))
+	state.Error, state.VFS.Handle, state.cwdLen = errorOutput, vfsHandle, uint16(len(data.CWD()))
+	state.PID = allocatePID()
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	if !state.FDs.Initialize(input, output, errorOutput) {
 		*state = ProcessState{}
@@ -68,6 +86,28 @@ func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uin
 	}
 	copy(state.cwd[:], data.CWD())
 	return true
+}
+
+// allocatePID returns the next identity no live Linux process holds. The
+// table has fewer slots than the range has values, so the scan terminates.
+func allocatePID() int32 {
+	for {
+		candidate := nextPID
+		nextPID++
+		if nextPID > MaxPID {
+			nextPID = firstPID
+		}
+		used := false
+		for index := range processStates {
+			if processStates[index].Root != 0 && processStates[index].PID == candidate {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return candidate
+		}
+	}
 }
 
 func LookupFD(root uint64, fd int) (FileDescription, bool) {
@@ -94,6 +134,17 @@ func AllocateFD(root uint64, description FileDescription, closeOnExec bool) (int
 		}
 	}
 	return -1, abi.EBADF
+}
+
+// CloseFD invalidates one descriptor. It reports the description when the
+// last descriptor naming it closed, so the caller can release what it held.
+func CloseFD(root uint64, fd int) (FileDescription, bool, abi.Errno) {
+	if state, found := FindProcess(root); found {
+		if released, last, ok := state.FDs.Close(fd); ok {
+			return released, last, 0
+		}
+	}
+	return FileDescription{}, false, abi.EBADF
 }
 
 func FindProcess(root uint64) (*ProcessState, bool) {

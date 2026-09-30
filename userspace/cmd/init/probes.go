@@ -129,6 +129,53 @@ func probeLinuxLaunch() bool {
 	return true
 }
 
+// probeLinuxMusl runs the static musl fixture through libc startup. The
+// fixture checks its arguments, environment, TLS, heap, and VFS session, and
+// prints one line per result; PID 1 accepts only the complete expected output
+// and a zero exit status.
+//
+//go:noinline
+func probeLinuxMusl() bool {
+	path := []byte("/system/linux/musl-hello")
+	executable, name, located := locateExecutable(path)
+	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
+		return false
+	}
+	streams, grants, vfsHandle, prepared := prepareLinuxProbe(0)
+	if !prepared {
+		return false
+	}
+	slot, staging := stagingSlot()
+	writer := startup.NewWriter(staging, 3, 1, 4)
+	writer.Command(path)
+	writer.CWD([]byte("/"))
+	writer.Argument(path)
+	writer.Argument([]byte("one"))
+	writer.Argument([]byte("two"))
+	writer.Variable([]byte("GOOS_LINUX_PROBE"), []byte("musl"))
+	writer.Handle([]byte("in"), 0)
+	writer.Handle([]byte("stdout"), 0)
+	writer.Handle([]byte("stderr"), 0)
+	writer.Handle([]byte("vfs"), 0)
+	data, ok := writer.Finish()
+	if !ok {
+		closeProbeStreams(streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	launched, status := requestLaunch(executable, name, grants, supervisor.ProfileLarge, slot, uint32(len(data)))
+	if status != supervisor.LaunchOK || launched.Process == 0 || launched.ProcessHandle == 0 {
+		closeProbeStreams(streams, false)
+		sys.HandleClose(vfsHandle)
+		return false
+	}
+	sys.HandleClose(handle.ID(streams[0][1]))
+	sys.HandleClose(handle.ID(streams[2][0]))
+	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\nhello from musl\n")
+	sys.HandleClose(handle.ID(streams[1][0]))
+	return waitApplicationExit(launched.ProcessHandle) == 0 && printed
+}
+
 func prepareLinuxProbe(index int) (*[3][2]uint64, []supervisor.Capability, handle.ID, bool) {
 	if index < 0 || index >= len(linuxProbeStreams) {
 		return nil, nil, 0, false

@@ -8,6 +8,7 @@ package main
 import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
+	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
@@ -336,6 +337,14 @@ func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 			ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
+		linuxReason := linuxcompat.WakeMessage
+		if reason == ipc.WaitPeerDied {
+			linuxReason = linuxcompat.WakePeerDied
+		}
+		if resumeLinuxIPCWaiter(ipcWakeResults[index].Task, linuxReason) {
+			ipcWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
 		if reason == ipc.WaitPeerDied {
 			ipcWaitStatus[task] = kcall.StatusPeerDied
 		}
@@ -355,6 +364,10 @@ func expireIPCWaiters() {
 	for index := 0; index < count; index++ {
 		task, _, valid := ipcWakeResults[index].Task.Parts()
 		if !valid {
+			ipcWakeResults[index] = ipc.WaitResult{}
+			continue
+		}
+		if resumeLinuxIPCWaiter(ipcWakeResults[index].Task, linuxcompat.WakeTimeout) {
 			ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}

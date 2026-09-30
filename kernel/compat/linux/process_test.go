@@ -16,7 +16,7 @@ func TestProcessStateRetainsLaunchAuthority(t *testing.T) {
 		t.Fatal("state install did not enforce unique root")
 	}
 	state, found := FindProcess(0x4000)
-	if !found || state.Input != 11 || state.Output != 12 || state.Error != 13 || state.VFS != 14 ||
+	if !found || state.Input != 11 || state.Output != 12 || state.Error != 13 || state.VFS.Handle != 14 || state.PID < firstPID ||
 		state.BrkBase != 0x600000 || state.BrkCurrent != 0x600000 || state.BrkLimit != 0x4600000 || string(state.CWD()) != "/persist/work" {
 		t.Fatalf("state = %#v cwd=%q", state, state.CWD())
 	}
@@ -82,4 +82,64 @@ func linuxStartup(t *testing.T, cwd string, ids [4]handle.ID) startup.Data {
 		t.Fatal("startup decode failed")
 	}
 	return data
+}
+
+func TestCompatibilityPIDsAreDistinctAndBounded(t *testing.T) {
+	processStates = [process.MaxProcesses]ProcessState{}
+	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
+	nextPID = MaxPID
+	if !InstallProcess(0x1000, data, 0x600000, 0x4600000) || !InstallProcess(0x2000, data, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	first, _ := FindProcess(0x1000)
+	second, _ := FindProcess(0x2000)
+	if first.PID != MaxPID || second.PID != firstPID {
+		t.Fatalf("pids = %d,%d; the range did not wrap", first.PID, second.PID)
+	}
+	// The counter returns to a live PID and must step past it.
+	nextPID = MaxPID
+	if !InstallProcess(0x3000, data, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	if third, _ := FindProcess(0x3000); third.PID != firstPID+1 {
+		t.Fatalf("pid = %d, want the first free value", third.PID)
+	}
+	processStates = [process.MaxProcesses]ProcessState{}
+	nextPID = firstPID
+}
+
+func TestCloseFDReportsTheLastReference(t *testing.T) {
+	processStates = [process.MaxProcesses]ProcessState{}
+	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
+	if !InstallProcess(0x6000, data, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	state, _ := FindProcess(0x6000)
+	fd, errno := AllocateFD(0x6000, FileDescription{Kind: FDVFSFile, Object: 77}, true)
+	duplicate, duplicated := state.FDs.Duplicate(fd, 0, false)
+	if errno != 0 || fd != 3 || !duplicated || duplicate != 4 || !state.FDs.HasFree() {
+		t.Fatalf("fd=%d errno=%d duplicate=%d", fd, errno, duplicate)
+	}
+	if _, last, errno := CloseFD(0x6000, fd); errno != 0 || last {
+		t.Fatalf("first close: last=%v errno=%d", last, errno)
+	}
+	released, last, errno := CloseFD(0x6000, duplicate)
+	if errno != 0 || !last || released.Kind != FDVFSFile || released.Object != 77 {
+		t.Fatalf("final close: %#v last=%v errno=%d", released, last, errno)
+	}
+	if _, _, errno := CloseFD(0x6000, duplicate); errno != abi.EBADF {
+		t.Fatalf("stale fd errno = %d", errno)
+	}
+	if _, _, errno := CloseFD(0x7000, 0); errno != abi.EBADF {
+		t.Fatalf("unknown process errno = %d", errno)
+	}
+	for state.FDs.HasFree() {
+		if _, errno := AllocateFD(0x6000, FileDescription{Kind: FDVFSFile, Object: 1}, false); errno != 0 {
+			t.Fatalf("allocate errno = %d", errno)
+		}
+	}
+	if _, errno := AllocateFD(0x6000, FileDescription{Kind: FDVFSFile, Object: 1}, false); errno != abi.EMFILE {
+		t.Fatalf("full table errno = %d", errno)
+	}
+	processStates = [process.MaxProcesses]ProcessState{}
 }

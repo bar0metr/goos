@@ -5,7 +5,10 @@ and Linux process identities, a dedicated x86_64 `SYSCALL`/IRETQ entry, bounded
 static ELF loading, a System V initial stack, and a constrained PID 1 launch
 policy. The syscall layer has a distinct Linux number and errno namespace,
 bounded diagnostics, generation-safe blocking continuations, a 64-entry fd
-table, and raw stream `read`/`write` plus `exit`/`exit_group`.
+table, stream `read`/`write`/`writev`, the memory and TLS calls, and
+`exit`/`exit_group`. A pinned static musl program starts through its normal
+libc entry, and `openat` and `close` reach files through the process's VFS
+session.
 
 ## Principles
 
@@ -87,8 +90,9 @@ Syscalls map onto native primitives:
 | Linux | Native mechanism |
 | --- | --- |
 | `read`, `write` on files | VFS session requests |
-| `read`, `write` on stdio and pipes | stream endpoints |
+| `read`, `write`, `writev` on stdio and pipes | stream endpoints |
 | `openat`, `close`, `fstat`, `getdents64`, `lseek` | VFS session requests plus the fd table |
+| `set_tid_address` | compatibility PID and stored address; no native ID |
 | `pipe2` | `StreamCreate` |
 | `exit`, `exit_group` | `Exit` |
 | `clock_gettime` | `ClockReadNanos` |
@@ -132,6 +136,33 @@ or `EROFS` only with caller context, VFS resource exhaustion requires the
 caller to identify the exhausted resource, stream EOF is successful for reads,
 and a write to a closed reader returns `EPIPE`.
 
+### VFS bridge
+
+A file operation is one request on the channel PID 1 granted at launch and one
+reply with the same correlation (ADR 0138). The bridge looks the channel up in
+the process's handle table for every exchange and requires Read, Write, and
+Wait rights. The kernel has no session of its own.
+
+The calling task's continuation records the correlation before the request
+enters the queue, then the task blocks in the channel wait set. The VFS reply,
+the peer's death, or an eight-second deadline wakes it through the path native
+receivers use. After the wake the bridge accepts the reply whose correlation
+and operation match, drops replies to calls that gave up earlier, and fails
+the call with `EIO` on anything else. It closes handles a message attached.
+
+Peer death returns `EIO` and marks the session failed; later requests fail the
+same way. The bridge opens no new session for a running process, so a VFS
+restart cannot hand a process authority PID 1 did not grant. A deadline expiry
+returns `ETIMEDOUT`.
+
+`openat` and `close` run on the bridge today. `openat` takes an absolute path
+of at most 216 bytes, an access mode, `O_CLOEXEC`, and `O_LARGEFILE`. Relative
+paths and the other flags return `EOPNOTSUPP`; a longer path returns
+`ENAMETOOLONG`. The VFS opens regular files only, so opening a directory
+fails with `EIO` until directory descriptors exist. `close` frees the
+descriptor, then closes the native stream handle or the VFS file it named.
+File `read` and `write` do not use the bridge yet.
+
 ### Namespace view
 
 Linux paths resolve through the process's VFS session. The expected layout
@@ -169,6 +200,22 @@ holds back their remaining input until both have installed TLS and blocked.
 FS base is task context and is saved and restored on every context switch.
 `ARCH_SET_FS` and `ARCH_GET_FS` are implemented. GS operations are rejected and
 kernel GS remains architecture-owned (ADR 0137).
+
+### musl startup
+
+`/system/linux/musl-hello` is a static, non-PIE C program linked against a
+pinned musl (ADR 0139). `userspace/linux/README.md` records the toolchain, the
+build recipe, the checksum, and the syscall trace. PID 1 launches it with two
+arguments and one environment variable, reads its complete output, and
+requires exit status zero before it publishes `LINUX_MUSL_OK` and
+`LINUX_VFS_SESSION_OK`.
+
+The program reaches `main` through `__libc_start_main`. It checks `argv` and
+`envp`, a TLS image with initialized and zero-filled data behind FS, `malloc`
+through both `brk` and `mmap`, buffered stdio flushed at exit, and an
+open/close round trip on its VFS session. musl startup needs `arch_prctl`,
+`set_tid_address`, and `writev`. Its terminal probe, `ioctl(TIOCGWINSZ)`, gets
+`ENOSYS`, which musl reads as "no terminal".
 
 ## Iterative targets
 

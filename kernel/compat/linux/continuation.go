@@ -19,6 +19,8 @@ const (
 	WakeMessage WakeReason = iota + 1
 	WakePeerDied
 	WakeCancelled
+	// WakeTimeout ends a wait whose deadline passed with no reply.
+	WakeTimeout
 )
 
 // Continuation is the bounded kernel-owned state of one blocking Linux
@@ -58,18 +60,45 @@ func (table *ContinuationTable) Begin(task sched.TaskID, request Request, path [
 			return false
 		}
 	}
-	state := Continuation{Task: task, Number: request.Number, Arguments: request.Arguments, Stage: 1, Phase: ContinuationReady, pathSize: uint16(len(path))}
-	copy(state.path[:], path)
-	table.entries[slot] = state
+	// The record is filled in place. It is over 4 KiB, and a value that size
+	// built on the way in would land on the kernel heap, which never frees.
+	entry := &table.entries[slot]
+	*entry = Continuation{}
+	entry.Task, entry.Number, entry.Arguments = task, request.Number, request.Arguments
+	entry.Stage, entry.Phase, entry.pathSize = 1, ContinuationReady, uint16(len(path))
+	copy(entry.path[:], path)
 	return true
 }
 
+// Lookup copies the whole record, path included. Kernel paths that only need
+// the scalars use Pending.
 func (table *ContinuationTable) Lookup(task sched.TaskID) (Continuation, bool) {
 	entry, ok := table.entry(task)
 	if !ok {
 		return Continuation{}, false
 	}
 	return *entry, true
+}
+
+// Pending is a continuation without its copied path. The full record is
+// over 4 KiB, which a syscall handler should not copy onto the kernel stack.
+type Pending struct {
+	Number      abi.Syscall
+	Arguments   [6]uint64
+	Stage       uint8
+	Phase       ContinuationPhase
+	Correlation uint64
+	Wake        WakeReason
+	Issued      bool
+}
+
+func (table *ContinuationTable) Pending(task sched.TaskID) (Pending, bool) {
+	entry, ok := table.entry(task)
+	if !ok {
+		return Pending{}, false
+	}
+	return Pending{Number: entry.Number, Arguments: entry.Arguments, Stage: entry.Stage, Phase: entry.Phase,
+		Correlation: entry.Correlation, Wake: entry.Wake, Issued: entry.Issued}, true
 }
 
 // Issue marks the current stage's externally visible request before it is
@@ -107,7 +136,7 @@ func (table *ContinuationTable) BlockFrame(frame *abi.Frame, task sched.TaskID, 
 // reply cannot advance the state machine or make a task runnable.
 func (table *ContinuationTable) Resume(task sched.TaskID, correlation uint64, reason WakeReason) bool {
 	entry, ok := table.entry(task)
-	if !ok || correlation == 0 || reason < WakeMessage || reason > WakeCancelled || entry.Phase != ContinuationWaiting || entry.Correlation != correlation {
+	if !ok || correlation == 0 || reason < WakeMessage || reason > WakeTimeout || entry.Phase != ContinuationWaiting || entry.Correlation != correlation {
 		return false
 	}
 	entry.Phase, entry.Wake = ContinuationReady, reason

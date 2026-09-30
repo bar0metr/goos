@@ -64,6 +64,20 @@ func (table *FDTable) Allocate(description FileDescription, closeOnExec bool) (i
 	return -1, false
 }
 
+// HasFree reports whether Allocate would find a descriptor. A caller checks
+// before asking a service to open something it could not then name.
+func (table *FDTable) HasFree() bool {
+	if table == nil {
+		return false
+	}
+	for fd := 0; fd < LinuxMaxFD; fd++ {
+		if !table.entries[fd].open {
+			return true
+		}
+	}
+	return false
+}
+
 func (table *FDTable) Lookup(fd int) (FileDescription, bool) {
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return FileDescription{}, false

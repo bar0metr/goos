@@ -16,12 +16,16 @@ func (handler *testHandler) Write(request Request) Result {
 	handler.called = request.Number
 	return Result{Errno: abi.EPIPE}
 }
-func (handler *testHandler) Brk(request Request) Result       { return handler.memory(request) }
-func (handler *testHandler) Mmap(request Request) Result      { return handler.memory(request) }
-func (handler *testHandler) Munmap(request Request) Result    { return handler.memory(request) }
-func (handler *testHandler) Mprotect(request Request) Result  { return handler.memory(request) }
-func (handler *testHandler) Madvise(request Request) Result   { return handler.memory(request) }
-func (handler *testHandler) ArchPrctl(request Request) Result { return handler.memory(request) }
+func (handler *testHandler) Close(request Request) Result         { return handler.memory(request) }
+func (handler *testHandler) Writev(request Request) Result        { return handler.memory(request) }
+func (handler *testHandler) Openat(request Request) Result        { return handler.memory(request) }
+func (handler *testHandler) SetTidAddress(request Request) Result { return handler.memory(request) }
+func (handler *testHandler) Brk(request Request) Result           { return handler.memory(request) }
+func (handler *testHandler) Mmap(request Request) Result          { return handler.memory(request) }
+func (handler *testHandler) Munmap(request Request) Result        { return handler.memory(request) }
+func (handler *testHandler) Mprotect(request Request) Result      { return handler.memory(request) }
+func (handler *testHandler) Madvise(request Request) Result       { return handler.memory(request) }
+func (handler *testHandler) ArchPrctl(request Request) Result     { return handler.memory(request) }
 func (handler *testHandler) memory(request Request) Result {
 	handler.called = request.Number
 	return Result{}
@@ -63,6 +67,9 @@ func TestUnsupportedDiagnosticsStayBounded(t *testing.T) {
 	if diagnostics.Count != unsupportedHistorySize+3 || diagnostics.Stored != unsupportedHistorySize {
 		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
+	if diagnostics.Last() != unsupportedHistorySize+2 || (UnsupportedDiagnostics{}).Last() != 0 {
+		t.Fatalf("last unsupported = %d", diagnostics.Last())
+	}
 	for number := abi.Syscall(3); number < unsupportedHistorySize+3; number++ {
 		if diagnostics.Numbers[number%unsupportedHistorySize] != number {
 			t.Fatalf("number %d was not retained: %#v", number, diagnostics.Numbers)
@@ -73,7 +80,8 @@ func TestUnsupportedDiagnosticsStayBounded(t *testing.T) {
 func TestDispatchRoutesImplementedCalls(t *testing.T) {
 	handler := &testHandler{}
 	for _, syscall := range []abi.Syscall{
-		abi.SysRead, abi.SysWrite, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
+		abi.SysRead, abi.SysWrite, abi.SysClose, abi.SysWritev, abi.SysOpenat,
+		abi.SysSetTidAddress, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
 	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)

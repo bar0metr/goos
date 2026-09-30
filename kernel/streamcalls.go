@@ -210,7 +210,7 @@ func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
 	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindStream, Object: streamID, Side: side}, event)
 	count := streamWaitSet.Wake(streamID, side, reason, streamWakeResults[:])
 	for index := 0; index < count; index++ {
-		if state, found := linuxcompat.SyscallContinuations.Lookup(streamWakeResults[index].Task); found {
+		if state, found := linuxcompat.SyscallContinuations.Pending(streamWakeResults[index].Task); found {
 			wake := linuxcompat.WakeMessage
 			if reason == ipc.WaitPeerDied {
 				wake = linuxcompat.WakePeerDied

@@ -10,7 +10,7 @@ func TestCanonicalX8664SyscallNumbers(t *testing.T) {
 		{SysRead, 0}, {SysWrite, 1}, {SysClose, 3}, {SysMmap, 9},
 		{SysMprotect, 10}, {SysMunmap, 11}, {SysBrk, 12}, {SysMadvise, 28},
 		{SysExit, 60}, {SysArchPrctl, 158},
-		{SysGetdents64, 217}, {SysClockGettime, 228}, {SysExitGroup, 231},
+		{SysWritev, 20}, {SysGetdents64, 217}, {SysSetTidAddress, 218}, {SysClockGettime, 228}, {SysExitGroup, 231},
 		{SysOpenat, 257}, {SysPpoll, 271}, {SysPipe2, 293},
 		{SysPrlimit64, 302}, {SysGetrandom, 318}, {SysStatx, 332},
 	}

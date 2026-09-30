@@ -21,7 +21,7 @@ to the streams supplied by launch policy.
 Path operations issue VFS IPC through that session. They never call a backend
 or filesystem implementation directly. Teardown closes every fd and the VFS
 session; peer death produces a Linux error and cannot trigger a privileged
-fallback. Duplication shares an open-file description and offset while
+fallback (ADR 0138 defines the exchange). Duplication shares an open-file description and offset while
 retaining per-fd flags such as close-on-exec.
 
 ## Consequences

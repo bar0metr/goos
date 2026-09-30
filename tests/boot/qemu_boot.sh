@@ -821,7 +821,7 @@ for marker in HANDLE_TABLE_OK KCALL_ABI_OK IPC_WIRE_OK IPC_REQUEST_REPLY_OK IPC_
 done
 pass_group ipc-capabilities
 
-for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK LAUNCH_AUTHORITY_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK LINUX_PID1_LAUNCH_OK USER_CONSOLE_CAP_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
+for marker in INIT_PROCESS_OK INITRAMFS_DISCOVERY_OK PID1_INIT_OK PROCESS_EXIT_EVENT_OK SUPERVISOR_CRASH_EVENT_OK INIT_LIFECYCLE_IPC_OK INIT_SERVICE_LAUNCH_OK INIT_SERVICE_STARTED_OK USERSPACE_SUPERVISOR_OK LIFECYCLE_IPC_OK INIT_EXECUTABLE_LOOKUP_OK LAUNCH_AUTHORITY_OK INIT_CAPABILITY_MANIFEST_OK NATIVE_STARTUP_ABI_OK PID1_SERVICE_LAUNCH_OK LINUX_PID1_LAUNCH_OK LINUX_MUSL_OK LINUX_VFS_SESSION_OK USER_CONSOLE_CAP_OK TTY_SERVICE_OK TTY_RIGHTS_OK USER_EXIT_OK USER_RING3_OK NATIVE_PROCESS_OK; do
 	require_marker "userspace.$marker" "$marker" "$log"
 done
 pass_group userspace
@@ -919,7 +919,7 @@ forbid_regex shell.stdin-not-a-command '^bounded: command not found$' 'typed inp
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
 require_regex stat.file-kib '^file [0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes)$' 'a file size in KiB by default' "$log" 'goos> stat /system/bin/ls'
 require_regex stat.directory-size '^directory [1-9][0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 0 directories$' 'a directory sized by its contents' "$log" 'goos> stat /system/bin'
-require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 1 directory$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
+require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 2 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
 require_regex stat.bytes '^file 16 bytes$' 'stat -b prints exact bytes' "$log" 'goos> stat -b /system/motd'
 require_regex stat.bad-flag '^usage: stat \[-b|-k|-m|-g\] PATH$' 'an unknown unit flag is a usage error' "$log" 'goos> stat -x /system'
 require_window mount.system '^/system  *image  *ro$' 'system image in mount output' "$log" 'goos> mount' 'goos> df'
