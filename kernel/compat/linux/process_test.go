@@ -211,7 +211,7 @@ func TestProcessFamilyLifecycle(t *testing.T) {
 	if !ok || child.FamilyID != root.FamilyID || grandchild.FamilyID != root.FamilyID || ParentPIDOf(grandchild.PID) != child.PID {
 		t.Fatalf("child=%#v grandchild=%#v", child, grandchild)
 	}
-	if !markProcessExited(child.PID, 17, 0) {
+	if !markProcessExited(child.PID, Termination{Status: 17}) {
 		t.Fatal("child exit failed")
 	}
 	zombie, found := FindProcessRecord(child.PID)
@@ -239,14 +239,14 @@ func TestOrphanZombiesAreReaped(t *testing.T) {
 	root, _ := installProcessRecord(200, 1, 0)
 	zombie, _ := registerChildForTest(201, root.PID)
 	running, _ := registerChildForTest(202, root.PID)
-	if !markProcessExited(zombie.PID, 0, 9) {
+	if !markProcessExited(zombie.PID, Termination{Signal: 9}) {
 		t.Fatal("child exit transition failed")
 	}
 	exited, found := FindProcessRecord(zombie.PID)
 	if !found || exited.SignalTermination != 9 {
 		t.Fatalf("exited child = %#v", exited)
 	}
-	if !markProcessExited(root.PID, 0, 0) {
+	if !markProcessExited(root.PID, Termination{}) {
 		t.Fatal("exit transition failed")
 	}
 	if _, found := FindProcessRecord(root.PID); found {
@@ -264,7 +264,7 @@ func TestOrphanZombiesAreReaped(t *testing.T) {
 	if !ok || newRoot.PID != root.PID || newRoot.FamilyID == orphan.FamilyID {
 		t.Fatalf("new root = %#v orphan = %#v", newRoot, orphan)
 	}
-	if !markProcessExited(orphan.PID, 0, 15) {
+	if !markProcessExited(orphan.PID, Termination{Signal: 15}) {
 		t.Fatal("orphan exit failed")
 	}
 	if _, found := FindProcessRecord(orphan.PID); found {
@@ -310,7 +310,7 @@ func TestChildRegistrationEnforcesFamilyAndNativeReserve(t *testing.T) {
 	if _, status := RegisterChild(700, root.PID, LinuxFamilyMaxProcesses); status != ChildRegistrationLimit {
 		t.Fatalf("family overflow status = %d", status)
 	}
-	if !markProcessExited(children[0].PID, 0, 0) {
+	if !markProcessExited(children[0].PID, Termination{}) {
 		t.Fatal("child exit failed")
 	}
 	if _, status := RegisterChild(701, root.PID, LinuxFamilyMaxProcesses-1); status != ChildRegistrationLimit {
@@ -360,7 +360,7 @@ func TestExitProcessReleasesHeavyState(t *testing.T) {
 	if _, found := VFSContext(familyID); !found {
 		t.Fatal("VFS context missing")
 	}
-	if !ExitProcess(0x9000, 23, 0, func(description FileDescription) {
+	if !ExitProcess(0x9000, Termination{Status: 23}, func(description FileDescription) {
 		released = append(released, description)
 	}) {
 		t.Fatal("exit failed")
@@ -377,7 +377,7 @@ func TestExitProcessReleasesHeavyState(t *testing.T) {
 	if _, found := VFSContext(familyID); found {
 		t.Fatal("final process retained its VFS context")
 	}
-	if ExitProcess(0x9000, 23, 0, nil) {
+	if ExitProcess(0x9000, Termination{Status: 23}, nil) {
 		t.Fatal("duplicate exit succeeded")
 	}
 }

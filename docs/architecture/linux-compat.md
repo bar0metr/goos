@@ -304,7 +304,9 @@ generation-safe GoOS Process ID and stores its parent, family identifier,
 lifecycle state, exit status, and terminating signal.
 
 Process exit releases the Linux address-space, descriptor, directory, and VFS
-state before retaining a compact zombie record. The parent consumes that record
+state before retaining a compact zombie record. The record takes the exit
+status, or the signal a fault, kill, or kernel termination stands for, and the
+CPU ticks the process used (ADR 0160). The parent consumes that record
 through the family reaper. A zombie keeps its PID reserved. Parent exit moves
 running children to conceptual PID 1 and removes orphan zombies, so records
 cannot leak after their Linux parent disappears.

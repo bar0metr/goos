@@ -78,13 +78,26 @@ const (
 // ProcessRecord connects a Linux-visible identity to a generation-safe GoOS
 // Process identity. Zombie records contain no address-space or handle state.
 type ProcessRecord struct {
-	PID               int32
-	GoOSProcessID     process.ID
-	ParentPID         int32
-	FamilyID          uint64
-	State             ProcessLifecycle
-	ExitStatus        uint64
+	PID           int32
+	GoOSProcessID process.ID
+	ParentPID     int32
+	FamilyID      uint64
+	State         ProcessLifecycle
+	// ExitStatus is the status of a normal exit. SignalTermination is the
+	// signal that ended the process instead, or zero.
+	ExitStatus        uint8
 	SignalTermination int32
+	// CPUTicks is the run time the process accumulated, in timer ticks.
+	CPUTicks uint64
+}
+
+// WaitStatus encodes how the process ended as wait4 reports it: the exit
+// status in bits 8 to 15, or the terminating signal in the low seven bits.
+func (record ProcessRecord) WaitStatus() uint32 {
+	if record.SignalTermination != 0 {
+		return uint32(record.SignalTermination) & 0x7f
+	}
+	return uint32(record.ExitStatus) << 8
 }
 
 // SetCWD replaces the working directory with a canonical absolute path.
@@ -464,14 +477,15 @@ func ReapChild(parentPID int32, childPID int32) (ProcessRecord, bool) {
 
 // markProcessExited retains only wait-visible state, reparents live children,
 // and removes zombies whose only reaper is conceptual PID 1.
-func markProcessExited(pid int32, exitStatus uint64, signalTermination int32) bool {
+func markProcessExited(pid int32, termination Termination) bool {
 	index := recordIndex(pid)
 	if index < 0 || processRecords[index].State != ProcessRunning {
 		return false
 	}
 	processRecords[index].State = ProcessZombie
-	processRecords[index].ExitStatus = exitStatus
-	processRecords[index].SignalTermination = signalTermination
+	processRecords[index].ExitStatus = termination.Status
+	processRecords[index].SignalTermination = termination.Signal
+	processRecords[index].CPUTicks = termination.CPUTicks
 	for childIndex := range processRecords {
 		child := &processRecords[childIndex]
 		if child.State == 0 || child.ParentPID != pid {
@@ -579,7 +593,7 @@ func RemoveProcess(root uint64, release func(FileDescription)) bool {
 
 // ExitProcess releases heavy compatibility state and records the Linux exit
 // for its parent. Native resource teardown remains in the kernel lifecycle.
-func ExitProcess(root uint64, exitStatus uint64, signalTermination int32, release func(FileDescription)) bool {
+func ExitProcess(root uint64, termination Termination, release func(FileDescription)) bool {
 	if root == 0 {
 		return false
 	}
@@ -594,7 +608,7 @@ func ExitProcess(root uint64, exitStatus uint64, signalTermination int32, releas
 			releaseDirectories(familyID)
 		}
 		processStates[index] = ProcessState{}
-		return markProcessExited(pid, exitStatus, signalTermination)
+		return markProcessExited(pid, termination)
 	}
 	return false
 }
