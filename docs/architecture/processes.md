@@ -116,6 +116,12 @@ syscall. The slot is keyed by the full generation-safe Task ID, not the reusable
 scheduler index. Kill, fault, and process teardown cancel it before task-slot
 reclamation, so a late VFS reply cannot wake a replacement task.
 
+The compatibility state also holds the process's VFS session and its Linux
+identity. The session is the channel PID 1 granted, a request counter, and a
+failed flag that peer death sets and nothing clears (ADR 0138). The identity
+is a PID between 2 and 32767, allocated at launch and unique among live Linux
+processes. Linux programs never see a native process or task ID.
+
 ## Teardown liveness
 
 Process teardown separates what other parties observe from what merely reclaims

@@ -18,16 +18,21 @@ It describes current code, not the final release target.
 
 | Syscall | Status | Notes |
 | --- | --- | --- |
-| `read(0)` | implemented | fd 0 stream, blocking without polling |
-| `write(1)` | implemented | fd 1/2 streams, bounded chunks and partial writes |
+| `read(0)` | partial | stream descriptors, blocking without polling; no files yet |
+| `write(1)` | partial | stream descriptors, bounded chunks and partial writes; no files yet |
+| `close(3)` | implemented | frees the descriptor, then releases the stream handle or the VFS file |
 | `mmap(9)` | partial | kernel-chosen anonymous private mappings; no executable or file-backed mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection rejected |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
+| `writev(20)` | partial | stream descriptors; at most 16 elements and 64 KiB per call, short count when the stream fills |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations rejected |
 | `exit(60)` | implemented | exits the calling task |
+| `set_tid_address(218)` | implemented | stores the address, returns the compatibility PID; a single-task exit clears nothing |
 | `exit_group(231)` | implemented | retires every task in the process |
+| `openat(257)` | partial | absolute path up to 216 bytes; access mode, `O_CLOEXEC`, `O_LARGEFILE`; regular files only |
+| `ioctl(16)` | `ENOSYS` | musl reads the failure as "no terminal" |
 | other declared numbers | `ENOSYS` | decoded and typed; no fake success |
 | every other number | `ENOSYS` | bounded diagnostics; no fake success |
 
@@ -48,6 +53,36 @@ advance, embedded NUL in copied path data, and paths above `PathMax`. Blocking
 clears the runnable bit and switches tasks; wake resumes the exact stage without
 busy-waiting. Lifecycle and kill paths remove the continuation before a task
 slot can be reused.
+
+`writev` copies the vector, then checks every element before it writes: a
+length negative as `ssize_t` is `EINVAL`, and a non-empty element outside user
+memory is `EFAULT`. An element that stalls after earlier bytes went out ends
+the call with the count so far.
+
+Each Linux process has a compatibility PID between 2 and 32767, allocated at
+launch and distinct among live Linux processes. It is the only process or
+thread identity a Linux program sees.
+
+## VFS session
+
+File calls translate to requests on the one VFS channel PID 1 granted. The
+bridge numbers requests per session, blocks the task through its continuation,
+and wakes it on a reply, on peer death, or after eight seconds.
+
+| Event | Result |
+| --- | --- |
+| reply with the pending correlation and operation | the call completes with the translated VFS status |
+| reply to an earlier, abandoned call | dropped; the wait continues |
+| any other message on the session | `EIO`; attached handles are closed |
+| VFS peer death | `EIO`; the session stays failed |
+| deadline | `ETIMEDOUT` |
+| process without the session handle or its rights | `EIO` |
+
+`openat` errors: `EFAULT` for an unreadable path pointer, `ENOENT` for an empty
+or missing path, `ENAMETOOLONG` past 216 bytes, `EOPNOTSUPP` for a relative
+path or an unsupported flag, `EINVAL` for access mode 3, `EMFILE` for a full
+descriptor table, `ENFILE` for a full VFS open-file table, and `EROFS` for a
+refused write open. A stale or out-of-range descriptor gives `close` `EBADF`.
 
 ## ELF status
 
@@ -145,3 +180,17 @@ resume, verify `ARCH_GET_FS` and an actual FS-relative load, exercise stdio,
 and terminate through `exit_group`. PID 1 observes both outputs and teardown
 before publishing `LINUX_MEMORY_TLS_OK`, `LINUX_PID1_LAUNCH_OK`, and
 `LINUX_RAW_SYSCALL_OK`.
+
+PID 1 then runs `/system/linux/musl-hello one two` with
+`GOOS_LINUX_PROBE=musl`. The static musl program prints its argument count and
+arguments, checks the environment, TLS, and both heaps, opens and closes its
+own image twice through the VFS session, and confirms `EBADF` for a closed
+descriptor and `ENOENT` for a missing path. PID 1 compares the whole output,
+requires exit status zero, and publishes `LINUX_MUSL_OK` and
+`LINUX_VFS_SESSION_OK`. `userspace/linux/README.md` lists the calls the run
+makes.
+
+Host tests cover the pieces that need no CPU: reply classification, session
+correlation and failure, open-flag and path checks, vector validation,
+compatibility PID allocation, descriptor close, and the fixture's checksum and
+ELF acceptance.

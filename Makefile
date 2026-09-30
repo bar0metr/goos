@@ -109,7 +109,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures
 
 all: iso
 
@@ -530,6 +530,12 @@ docs:
 	@test -f docs/development/adding-service.md
 	@tests/docs/check.sh
 
+# Rebuilds the committed static Linux fixtures from their C sources with the
+# clang, lld, and musl sources TinyGo ships (userspace/linux/README.md). The
+# ordinary build embeds the committed binaries and never runs this.
+linux-fixtures:
+	@userspace/linux/build.sh
+
 clean:
 	@rm -rf $(BUILD_DIR)
 
@@ -556,6 +562,7 @@ help:
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
 	  '  version         print the release from internal/version/version.go' \
+	  '  linux-fixtures  rebuild the static Linux test fixtures under userspace/linux' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
 	  '  test-all        run the complete validation gate, including QEMU' \

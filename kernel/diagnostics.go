@@ -6,6 +6,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
+	linuxcompat "goos/kernel/compat/linux"
 	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
@@ -284,6 +285,16 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("waitany", uint64(waitAnyTable.Count()))
 	out.uint("lifecycle-pending", uint64(pendingLifecycleCount))
 	out.uint("lifecycle-overflows", lifecycleOverflows)
+	out.end()
+	unsupported := linuxcompat.Unsupported()
+	sessions := linuxcompat.VFSStatistics()
+	out.text("DIAG linux")
+	out.uint("syscalls", linuxSyscallEntries)
+	out.uint("unsupported", unsupported.Count)
+	out.uint("last-unsupported", uint64(unsupported.Last()))
+	out.uint("vfs-requests", sessions.Requests)
+	out.uint("vfs-failures", sessions.Failures)
+	out.uint("vfs-stale", sessions.Stale)
 	out.end()
 	dumpTiming(out)
 	out.text("DIAG events")

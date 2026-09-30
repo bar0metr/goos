@@ -71,6 +71,7 @@ IDs. The exact field set may change with the code in `kernel/diagnostics.go`.
 | `DIAG channel` | channel ID, liveness and queue depth per side, holder PIDs | messages queued with no reader; a side with no holder |
 | `DIAG waitany` / `interest` | task, state, deadline, each interest's object, events, readiness | registrations that never complete |
 | `DIAG waits` | counts per wait set, retained lifecycle messages, overflows | non-zero overflows |
+| `DIAG linux` | Linux syscall entries, unsupported calls and the last unsupported number, VFS bridge requests, failures, and dropped stale replies | a rising `vfs-failures`; the call a program needs next |
 | `DIAG clock`, `DIAG launch` | TSC rate, uptime, per-stage launch counts and times | slow launch stages |
 | `DIAG event` | time (µs), kind, PID, task, object, value or denial reason | the last events before the stall |
 

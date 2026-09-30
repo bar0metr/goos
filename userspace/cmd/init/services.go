@@ -105,6 +105,11 @@ func startServices(ticks uint64) {
 			fatal("LINUX_PID1_LAUNCH_FAILED\n")
 		}
 		mark("LINUX_PID1_LAUNCH_OK\n")
+		if !probeLinuxMusl() {
+			fatal("LINUX_MUSL_FAILED\n")
+		}
+		mark("LINUX_MUSL_OK\n")
+		mark("LINUX_VFS_SESSION_OK\n")
 	}
 	// The log service comes after the filesystem and before the shell: its
 	// session has to be asked for rather than handed over at boot, and it

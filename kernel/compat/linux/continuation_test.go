@@ -88,3 +88,30 @@ func TestContinuationTableIsBoundedBySchedulerSlots(t *testing.T) {
 		t.Fatal("reused occupied slot accepted")
 	}
 }
+
+func TestContinuationPendingAndTimeoutWake(t *testing.T) {
+	var table ContinuationTable
+	task, _ := sched.NewTaskID(3, 1)
+	request := Request{Number: abi.SysOpenat, Arguments: [6]uint64{1, 2, 3, 4, 5, 6}}
+	if _, found := table.Pending(task); found {
+		t.Fatal("empty slot reported a pending call")
+	}
+	if !table.Begin(task, request, nil) || !table.Issue(task, 1, 41) || !table.Block(task, 1) {
+		t.Fatal("continuation did not block")
+	}
+	pending, found := table.Pending(task)
+	if !found || pending.Number != abi.SysOpenat || pending.Arguments != request.Arguments || pending.Stage != 1 ||
+		pending.Phase != ContinuationWaiting || pending.Correlation != 41 || pending.Wake != 0 || !pending.Issued {
+		t.Fatalf("pending = %#v found=%v", pending, found)
+	}
+	if table.Resume(task, 41, WakeTimeout+1) || !table.Resume(task, 41, WakeTimeout) {
+		t.Fatal("timeout wake was not accepted exactly")
+	}
+	// A reply to an abandoned request leaves the call waiting again.
+	if pending, _ = table.Pending(task); pending.Wake != WakeTimeout || pending.Phase != ContinuationReady || !table.Block(task, 1) {
+		t.Fatalf("resumed call could not wait again: %#v", pending)
+	}
+	if !table.Resume(task, 41, WakeMessage) || !table.Finish(task) {
+		t.Fatal("second wake did not finish")
+	}
+}

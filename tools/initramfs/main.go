@@ -11,6 +11,7 @@ import (
 
 	"goos/kernel/boot"
 	"goos/userspace/commands"
+	linuxfixtures "goos/userspace/linux"
 )
 
 // usage names the fixed system images in order, then the directory of
@@ -28,6 +29,7 @@ func main() {
 		directory("system/bin/"),
 		directory("system/linux/"),
 		file("system/linux/raw-probe", 0o555, linuxProbe()),
+		file("system/linux/musl-hello", 0o555, linuxfixtures.MuslHello),
 		// The message of the day belongs to the immutable system image rather
 		// than to the volatile root, because /system is a read-only mount of
 		// this archive.

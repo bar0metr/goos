@@ -41,6 +41,7 @@ const (
 	SysGettid        Syscall = 186
 	SysFutex         Syscall = 202
 	SysGetdents64    Syscall = 217
+	SysSetTidAddress Syscall = 218
 	SysClockGettime  Syscall = 228
 	SysExitGroup     Syscall = 231
 	SysOpenat        Syscall = 257
@@ -70,6 +71,19 @@ const (
 	ArchSetFS = uint64(0x1002)
 	ArchGetFS = uint64(0x1003)
 	ArchGetGS = uint64(0x1004)
+
+	// AtFDCWD is the dirfd that names the working directory.
+	AtFDCWD = int32(-100)
+
+	OpenReadOnly  = uint32(0)
+	OpenWriteOnly = uint32(1)
+	OpenReadWrite = uint32(2)
+	OpenAccess    = uint32(3)
+	OpenLargeFile = uint32(0o100000)
+	OpenCloseExec = uint32(0o2000000)
+
+	// IOVecSize is the wire size of one struct iovec.
+	IOVecSize = 16
 )
 
 // Known reports whether number belongs to the bounded planning namespace.
@@ -82,7 +96,8 @@ func (number Syscall) Known() bool {
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysNanosleep, SysGetpid, SysExit, SysUname, SysGetcwd, SysChdir,
 		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid,
-		SysArchPrctl, SysGettid, SysFutex, SysGetdents64, SysClockGettime,
+		SysArchPrctl, SysGettid, SysFutex, SysGetdents64, SysSetTidAddress,
+		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,
 		SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
 		SysStatx:
