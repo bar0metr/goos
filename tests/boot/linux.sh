@@ -245,6 +245,10 @@ run '/system/linux/abi-probe wait'
 expect '^wait ok$' 'wait4 reaps exact and any children, with and without WNOHANG'
 clean 'wait4 reaps exact and any children, with and without WNOHANG'
 
+run '/system/linux/abi-probe pipe'
+expect '^pipe ok$' 'Linux pipes: direction, EOF, EPIPE, lifetime, PIPE_BUF'
+clean 'Linux pipes: direction, EOF, EPIPE, lifetime, PIPE_BUF'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'

@@ -28,7 +28,10 @@ memory is private and the file position is shared; `vfork` checks that
 `vfork` returns only after the child exits, that `clone(SIGCHLD)` forks, and,
 on GoOS, that `clone` refuses a thread; `orphan` checks that a process whose
 parent exits reports PID 1 as its parent; `wait` reaps children by PID and by
-any, with and without `WNOHANG`, and reads a normal exit and a `SIGSEGV`.
+any, with and without `WNOHANG`, and reads a normal exit and a `SIGSEGV`;
+`pipe` checks `pipe` and `pipe2`: direction, EOF, `EPIPE`, writer lifetime
+across `dup` and `fork`, a writer larger than the pipe, and `PIPE_BUF`
+atomicity with two writers.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -95,7 +98,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `eaebb91e0538ed747ca0c00b0910b4b7adf8366c646621172cc7fc7e5b662d11` |
+| `prebuilt/abi-probe` | `9615b68e9fd9cf5e8801c122fddf88f061707c2325ce48442da13b8c7076ad1a` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

@@ -1,6 +1,9 @@
 package stream
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestBoundedStreamLifecycle(t *testing.T) {
 	stream := New()
@@ -112,5 +115,15 @@ func TestRegistryReportsTheChargedProcessOnRelease(t *testing.T) {
 	// The slot is reusable and no longer names the old owner.
 	if _, _, created := registry.Create(11); !created {
 		t.Fatal("released slot was not reused")
+	}
+}
+
+func TestStreamFillsTwoPages(t *testing.T) {
+	if size := reflect.TypeOf(Stream{}).Size(); size > 2*4096 || size <= 4096 {
+		t.Fatalf("a stream is %d bytes", size)
+	}
+	value := New()
+	if value.WriteStatusFor(4096) != StatusOK || value.WriteStatusFor(Capacity+1) != StatusInvalidEndpoint {
+		t.Fatal("a 4096-byte write does not fit an empty ring")
 	}
 }

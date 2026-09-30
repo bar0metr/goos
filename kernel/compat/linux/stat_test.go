@@ -106,7 +106,7 @@ func TestStatusOfReply(t *testing.T) {
 			t.Errorf("%s: %+v errno=%d, want %+v errno=%d", test.label, got, errno, test.want, test.errno)
 		}
 	}
-	first, second := StreamStatus(0), StreamStatus(3)
+	first, second := StreamStatus(1), StreamStatus(4)
 	if first.Mode != 0o010600 || first.Inode == 0 || first.Inode == second.Inode || first.Device != StreamDevice || first.Size != 0 {
 		t.Fatalf("stream status %+v %+v", first, second)
 	}

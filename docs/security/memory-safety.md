@@ -184,7 +184,7 @@ Every table has a fixed system-wide limit, but the large entries are not
 static: a registry holds a pointer per slot and takes an entry's pages when
 the entry is created (ADR 0111). The limits are 256 handles per process, 64
 processes, 64 tasks (the scheduler's 64-bit masks), 256 channels with
-16-message queues, 256 streams with 4080-byte rings, a waiter per task slot,
+16-message queues, 256 streams with 8176-byte rings, a waiter per task slot,
 64 log records, 256 shared-memory objects (16 per paying process), 64
 executable objects, 128 regions per address space, and a shared image cache
 of 128 segments and 1024 frames. Objects index their pages in page

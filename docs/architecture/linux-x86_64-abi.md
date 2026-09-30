@@ -25,7 +25,7 @@ an errno; nothing is accepted and ignored.
 | Syscall | Status | Notes |
 | --- | --- | --- |
 | `read(0)` | implemented | streams block without polling; files read at their position, at most 64 KiB per call; a directory is `EISDIR` |
-| `write(1)` | implemented | streams in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call |
+| `write(1)` | implemented | streams: at most 4096 bytes land whole, larger writes move in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call |
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
@@ -37,7 +37,8 @@ an errno; nothing is accepted and ignored.
 | `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | recorded signal state only: record and report dispositions and the blocked mask; no signal is delivered |
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
-| `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call |
+| `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call; a stream vector of at most 4096 bytes lands whole |
+| `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` without `SIGPIPE` |
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
@@ -76,7 +77,7 @@ BusyBox does about it:
 | `kill(62)`, `tkill(200)`, `tgkill(234)`, `rt_sigreturn(15)`, `sigaltstack(131)` | no signal is sent or delivered; `raise` and `abort` see the refusal |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `pipe(22)`, `pipe2(293)`, `poll(7)`, `ppoll(271)`, `futex(202)` | no pipes, polling, or threads inside a process |
+| `poll(7)`, `ppoll(271)`, `futex(202)` | no polling or threads inside a process |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
@@ -164,6 +165,25 @@ the child exits. The child never shares the parent's memory, so its writes
 stay its own. `clone(SIGCHLD, stack)` is `fork`. A nonzero stack becomes the
 child's stack pointer; one outside the user range is `EINVAL`. Any other flag
 set, including every thread form, is `EINVAL` (ADR 0159).
+
+## Pipes
+
+`pipe(fds)` and `pipe2(fds, flags)` return a read end and a write end on the
+two lowest free descriptors. `pipe2` accepts `O_CLOEXEC`; `O_NONBLOCK`,
+`O_DIRECT`, and unknown flags are `EINVAL`. An unwritable `fds` is `EFAULT`,
+a full stream quota `EMFILE`, and a full stream registry `ENFILE`.
+
+The read end refuses writes and the write end reads, both with `EBADF`.
+`lseek` is `ESPIPE`, `ioctl` is `ENOTTY`, and `fstat` reports a FIFO with the
+same device and inode for both ends. `F_GETFL` reports `O_RDONLY` or
+`O_WRONLY`. A read waits for data and returns 0 once every write end is
+closed, in whichever process held it. A write to a pipe with no reader is
+`EPIPE`; no `SIGPIPE` is sent yet.
+
+`PIPE_BUF` is 4096. A write or a readable vector of at most that many bytes
+waits for room for all of it and lands whole, so two writers never interleave
+inside such a write. A larger write moves what fits and returns the count
+(ADR 0162).
 
 ## Waiting for children
 
@@ -557,8 +577,8 @@ Results a correct Linux program can observe to differ:
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
 or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
-and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no signal delivery; no pipes
-created by a Linux process; no networking; no `/proc` or `/sys`, and of
+and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no signal delivery; no
+nonblocking pipes; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs
 builtins and redirections but cannot run a program. `nano` does not run.
