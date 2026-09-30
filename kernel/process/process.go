@@ -103,6 +103,17 @@ func (process *Process) Name() []byte { return process.name[:process.nameSize] }
 
 func (process *Process) AddressSpace() AddressSpace { return process.addressSpace }
 
+// ReplaceAddressSpace commits a prepared address space and region map without
+// changing process identity, ABI, handles, tasks, or resource profile.
+func (process *Process) ReplaceAddressSpace(addressSpace AddressSpace, regions *region.Map) bool {
+	if process == nil || addressSpace.Root == 0 || regions == nil {
+		return false
+	}
+	process.addressSpace = addressSpace
+	process.regions = *regions
+	return true
+}
+
 func (process *Process) Handles() *handle.Table { return &process.handles }
 
 // Executable is the executable object the process reads its image from.

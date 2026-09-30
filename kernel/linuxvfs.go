@@ -125,6 +125,8 @@ const (
 	// reply message. It also carries the request's path when that is too
 	// long for the request message, as a native client's path page does.
 	attachName
+	// attachExecutable lends the executable snapshot being filled.
+	attachExecutable
 )
 
 // vfsExchange runs the exchange of the current stage. It sends operation
@@ -207,6 +209,9 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 				copyToObject(buffer, 0, operation.Path)
 				operation.PathsAttached = true
 			}
+		case attachExecutable:
+			rights = capability.Write
+			object, granted = lendLinuxExecObject(handler.task, owner, rights)
 		default:
 			object, granted = lendIOBuffer(state, owner, rights)
 		}

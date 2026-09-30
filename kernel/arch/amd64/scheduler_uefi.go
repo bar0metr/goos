@@ -132,6 +132,35 @@ func PrepareUserAddressSpace(allocator *pmm.Allocator, pageTable uint64) bool {
 	return mapProcessEntryState(allocator, pageTable)
 }
 
+// PrepareTaskAddressSpace maps the entry state and existing guarded kernel
+// stack into a replacement user address space before it becomes visible.
+func PrepareTaskAddressSpace(allocator *pmm.Allocator, task sched.TaskID, pageTable uint64) bool {
+	slot, _, valid := task.Parts()
+	if !valid || pageTable == 0 || TaskIDForSlot(uint64(slot)) != uint64(task) || !mapProcessEntryState(allocator, pageTable) {
+		return false
+	}
+	stack := taskKernelStacks[slot]
+	if stack.physical == 0 || stack.virtual == 0 || stack.top == 0 {
+		return false
+	}
+	stackStart := stack.physical + stackGuardPages*pmm.PageSize
+	for page := uint64(0); page < kernelStackPages; page++ {
+		physical := stackStart + page*pmm.PageSize
+		virtual := stack.virtual + page*pmm.PageSize
+		if !vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, true, false) {
+			return false
+		}
+	}
+	guard, _ := vm.KernelAlias(stack.physical)
+	return !vm.IsMapped(pageTable, guard)
+}
+
+// ReplaceTaskAddressSpace changes the saved root of the current live task.
+// The prepared root supplies the next return to ring 3 and later entries.
+//
+//export goos_task_root_replace
+func ReplaceTaskAddressSpace(task sched.TaskID, pageTable uint64) bool
+
 func mapProcessAliasRange(allocator *pmm.Allocator, pageTable, address, size uint64, writable, executable bool) bool {
 	start := address &^ (vm.PageSize - 1)
 	end := (address + size + vm.PageSize - 1) &^ (vm.PageSize - 1)

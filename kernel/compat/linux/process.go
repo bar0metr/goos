@@ -76,6 +76,78 @@ func (state *ProcessState) SetCWD(path []byte) bool {
 	return true
 }
 
+// ReplaceRoot commits a prepared address space while retaining process
+// identity, descriptors, working directory, and family membership.
+func ReplaceRoot(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit uint64) bool {
+	if oldRoot == 0 || newRoot == 0 || brkBase == 0 || brkBase >= brkLimit {
+		return false
+	}
+	state, found := FindProcess(oldRoot)
+	if !found {
+		return false
+	}
+	state.Root = newRoot
+	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
+	state.ClearChildTID = 0
+	return true
+}
+
+// CloseOnExec closes local fd entries marked for image replacement. Shared
+// descriptions remain alive while another fd table references them.
+func (state *ProcessState) CloseOnExec(release func(FileDescription)) {
+	if state == nil {
+		return
+	}
+	for fd := 0; fd < LinuxMaxFD; fd++ {
+		closeOnExec, open := state.FDs.CloseOnExec(fd)
+		if !open || !closeOnExec {
+			continue
+		}
+		description, last, closed := state.FDs.Close(fd)
+		if closed && last && description.Kind == FDVFSDirectory {
+			ReleaseDirectory(state.FamilyID, description.Object)
+		} else if closed && last && release != nil {
+			release(description)
+		}
+	}
+}
+
+// CloseOnExecVFS returns VFS handles whose final description reference will
+// disappear at image replacement. The caller closes them through the shared
+// VFS context before removing the local descriptor entries.
+func (state *ProcessState) CloseOnExecVFS(target []uint64) int {
+	if state == nil {
+		return 0
+	}
+	count := 0
+	for fd := 0; fd < LinuxMaxFD; fd++ {
+		entry := state.FDs.entries[fd]
+		if !entry.open || !entry.CloseOnExec {
+			continue
+		}
+		duplicate := false
+		marked := 0
+		for other := 0; other < LinuxMaxFD; other++ {
+			candidate := state.FDs.entries[other]
+			if candidate.open && candidate.description == entry.description && candidate.CloseOnExec {
+				marked++
+				if other < fd {
+					duplicate = true
+				}
+			}
+		}
+		if duplicate {
+			continue
+		}
+		slot, valid := state.FDs.description(entry.description)
+		if valid && slot.description.Kind == FDVFSFile && int(slot.description.References) == marked && count < len(target) {
+			target[count] = slot.description.Object
+			count++
+		}
+	}
+	return count
+}
+
 const (
 	firstPID = int32(2)
 	// MaxPID matches the default Linux pid_max, so a compatibility PID fits

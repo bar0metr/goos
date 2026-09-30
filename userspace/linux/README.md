@@ -21,7 +21,9 @@ gate; `port-io` touches an I/O port; `pair NAME` runs beside another
 instance in a pipeline; `block` and `sleep` wait to be interrupted; `bench`
 times four calls; `session-loss` and `session-timeout` serve the VFS restart
 and late-answer checks of the boot test; `stack-overflow` recurses into the
-guard below the stack; `random` says whether the kernel has a random source.
+guard below the stack; `random` says whether the kernel has a random source;
+`exec` replaces the probe image and checks preserved identity, cwd, descriptor
+position, `CLOEXEC`, and signal state.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -88,7 +90,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `17c325ceca15414c46ac695b9e5344eec342f221396c7bed6ac45d488f1857b1` |
+| `prebuilt/abi-probe` | `3b25484c96c86f4bc60b0bd22388e60a09f8b36579c96f32b205a48268c6374b` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

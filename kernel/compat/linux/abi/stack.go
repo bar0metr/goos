@@ -53,6 +53,10 @@ type Startup interface {
 	EnvAt(index int) ([]byte, []byte)
 }
 
+type rawEnvironment interface {
+	Environment(index int) ([]byte, bool)
+}
+
 // InitialStack is a contiguous image of the occupied top of a Linux stack.
 // Data aliases the caller's target buffer and covers [Pointer, Top).
 type InitialStack struct {
@@ -87,7 +91,7 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 		return InitialStack{}, StackInvalidInput
 	}
 	arguments, environment := startup.Args(), startup.EnvCount()
-	if arguments <= 0 || arguments > MaxArguments {
+	if arguments < 0 || arguments > MaxArguments {
 		return InitialStack{}, StackTooManyArguments
 	}
 	if environment < 0 || environment > MaxEnvironment {
@@ -103,7 +107,7 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 	}
 	for index := 0; index < arguments; index++ {
 		argument, ok := startup.Arg(index)
-		if !ok || !validString(argument, index == 0) {
+		if !ok || !validString(argument, false) {
 			return InitialStack{}, StackStringInvalid
 		}
 		if !addStringSize(&strings, argument) {
@@ -111,6 +115,16 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 		}
 	}
 	for index := 0; index < environment; index++ {
+		if raw, ok := startup.(rawEnvironment); ok {
+			variable, found := raw.Environment(index)
+			if !found || !validString(variable, false) {
+				return InitialStack{}, StackStringInvalid
+			}
+			if !addStringSize(&strings, variable) {
+				return InitialStack{}, StackTooLarge
+			}
+			continue
+		}
 		name, value := startup.EnvAt(index)
 		if !validEnvironment(name, value) {
 			return InitialStack{}, StackStringInvalid
@@ -146,7 +160,7 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 	cursor := vectorBytes
 	for index := 0; index < arguments; index++ {
 		argument, ok := startup.Arg(index)
-		if !ok || !validString(argument, index == 0) {
+		if !ok || !validString(argument, false) {
 			return InitialStack{}, StackInvalidInput
 		}
 		binary.LittleEndian.PutUint64(data[argvAt+index*8:], pointer+uint64(cursor))
@@ -155,6 +169,18 @@ func BuildInitialStack(target []byte, top uint64, image *elf.Image, startup Star
 		}
 	}
 	for index := 0; index < environment; index++ {
+		if raw, exists := startup.(rawEnvironment); exists {
+			variable, found := raw.Environment(index)
+			if !found || !validString(variable, false) {
+				return InitialStack{}, StackInvalidInput
+			}
+			binary.LittleEndian.PutUint64(data[envpAt+index*8:], pointer+uint64(cursor))
+			var ok bool
+			if cursor, ok = putString(data, cursor, variable); !ok {
+				return InitialStack{}, StackInvalidInput
+			}
+			continue
+		}
 		name, value := startup.EnvAt(index)
 		if !validEnvironment(name, value) {
 			return InitialStack{}, StackInvalidInput

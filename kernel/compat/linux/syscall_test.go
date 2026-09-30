@@ -31,6 +31,7 @@ func (handler *testHandler) Munmap(request Request) Result        { return handl
 func (handler *testHandler) Mprotect(request Request) Result      { return handler.memory(request) }
 func (handler *testHandler) Madvise(request Request) Result       { return handler.memory(request) }
 func (handler *testHandler) ArchPrctl(request Request) Result     { return handler.memory(request) }
+func (handler *testHandler) Execve(request Request) Result        { return handler.memory(request) }
 func (handler *testHandler) memory(request Request) Result {
 	handler.called = request.Number
 	return Result{}
@@ -109,7 +110,7 @@ func TestDispatchRoutesImplementedCalls(t *testing.T) {
 		abi.SysDup3, abi.SysFcntl, abi.SysIoctl, abi.SysAccess, abi.SysFaccessat, abi.SysSetuid,
 		abi.SysSetgid, abi.SysGetgroups, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
-		abi.SysPread64, abi.SysPwrite64, abi.SysStatx, abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom,
+		abi.SysPread64, abi.SysPwrite64, abi.SysStatx, abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom, abi.SysExecve,
 	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)
 		if handler.called != syscall {

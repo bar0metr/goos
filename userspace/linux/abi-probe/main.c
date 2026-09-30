@@ -35,6 +35,7 @@
  *   session-timeout  open a name the validation VFS answers late
  *   stack-overflow   recurse until the stack guard ends the process
  *   random           say whether the kernel has a random source
+ *   exec              replace this image and verify the retained state
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -1320,6 +1321,72 @@ static int session_timeout(void)
 	return 0;
 }
 
+static void exec_handler(int signal)
+{
+	(void)signal;
+}
+
+static int after_exec(int argc, char **argv)
+{
+	struct sigaction action;
+	sigset_t mask;
+	char cwd[32];
+	char byte;
+	int kept, closed;
+
+	if (argc != 5 || strcmp(argv[1], "after-exec"))
+		return 1;
+	kept = atoi(argv[3]);
+	closed = atoi(argv[4]);
+	memset(&action, 0, sizeof action);
+	if (getpid() != atoi(argv[2]) || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/tmp") ||
+		!getenv("EXEC_VALUE") || strcmp(getenv("EXEC_VALUE"), "raw") ||
+		read(kept, &byte, 1) != 1 || byte != 'E' ||
+		fcntl(closed, F_GETFD) != -1 || errno != EBADF ||
+		sigaction(SIGUSR1, NULL, &action) || action.sa_handler != SIG_DFL)
+		return 1;
+	if (sigaction(SIGUSR2, NULL, &action) || action.sa_handler != SIG_IGN ||
+		sigprocmask(SIG_SETMASK, NULL, &mask) || !sigismember(&mask, SIGTERM))
+		return 1;
+	printf("exec ok pid %d\n", getpid());
+	return 0;
+}
+
+static int exec_test(void)
+{
+	struct sigaction action;
+	sigset_t mask;
+	char pid[24], kept_text[24], closed_text[24];
+	char byte;
+	int kept, closed;
+	char *arguments[] = {IMAGE, "after-exec", pid, kept_text, closed_text, NULL};
+	char *environment[] = {"EXEC_VALUE=raw", "without-equals", NULL};
+
+	kept = open(IMAGE, O_RDONLY);
+	closed = open(IMAGE, O_RDONLY);
+	if (kept < 0 || closed < 0 || read(kept, &byte, 1) != 1 || byte != 0x7f ||
+		fcntl(closed, F_SETFD, FD_CLOEXEC) != 0 || chdir("/tmp") != 0)
+		return 1;
+	memset(&action, 0, sizeof action);
+	action.sa_handler = exec_handler;
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGUSR1, &action, NULL) != 0)
+		return 1;
+	action.sa_handler = SIG_IGN;
+	if (sigaction(SIGUSR2, &action, NULL) != 0)
+		return 1;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGTERM);
+	if (sigprocmask(SIG_BLOCK, &mask, NULL) != 0)
+		return 1;
+	snprintf(pid, sizeof pid, "%d", getpid());
+	snprintf(kept_text, sizeof kept_text, "%d", kept);
+	snprintf(closed_text, sizeof closed_text, "%d", closed);
+	execve(IMAGE, arguments, environment);
+	printf("exec failed: errno=%d\n", errno);
+	return 1;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1345,6 +1412,10 @@ int main(int argc, char **argv)
 			return session_loss();
 		if (!strcmp(argv[1], "session-timeout"))
 			return session_timeout();
+		if (!strcmp(argv[1], "exec"))
+			return exec_test();
+		if (!strcmp(argv[1], "after-exec"))
+			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))
 			return stack_overflow();
 		if (!strcmp(argv[1], "random")) {

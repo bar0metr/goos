@@ -1,6 +1,7 @@
 package linux
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"goos/kernel/compat/linux/abi"
@@ -79,5 +80,34 @@ func TestSignalMask(t *testing.T) {
 	EncodeSignalSet(&wire, 0x8000000000000001)
 	if DecodeSignalSet(&wire) != 0x8000000000000001 {
 		t.Fatal("signal set does not round-trip")
+	}
+}
+
+func TestSignalStateExecResetPreservesIgnoredAndMask(t *testing.T) {
+	var state SignalState
+	var caught, ignored [SignalActionSize]byte
+	binary.LittleEndian.PutUint64(caught[:8], 0x4000)
+	binary.LittleEndian.PutUint64(ignored[:8], 1)
+	if errno := state.Action(2, &caught, nil); errno != 0 {
+		t.Fatalf("caught action errno = %d", errno)
+	}
+	if errno := state.Action(3, &ignored, nil); errno != 0 {
+		t.Fatalf("ignored action errno = %d", errno)
+	}
+	if _, errno := state.Mask(abi.SignalSetMask, 1<<4, true); errno != 0 {
+		t.Fatalf("mask errno = %d", errno)
+	}
+	state.ResetForExec()
+	var got [SignalActionSize]byte
+	state.Action(2, nil, &got)
+	if binary.LittleEndian.Uint64(got[:8]) != 0 {
+		t.Fatalf("caught handler = %#x", binary.LittleEndian.Uint64(got[:8]))
+	}
+	state.Action(3, nil, &got)
+	if binary.LittleEndian.Uint64(got[:8]) != 1 {
+		t.Fatalf("ignored handler = %#x", binary.LittleEndian.Uint64(got[:8]))
+	}
+	if mask, errno := state.Mask(0, 0, false); errno != 0 || mask != 1<<4 {
+		t.Fatalf("mask = %#x errno=%d", mask, errno)
 	}
 }

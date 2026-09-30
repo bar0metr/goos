@@ -1,7 +1,8 @@
 # Linux compatibility
 
-**Status: implemented in GoOS 0.2.0.** Unmodified, statically linked Linux
-x86_64 programs run as GoOS processes. The kernel has immutable native and
+**Status: implemented.** GoOS 0.2.0 introduced the base ABI; current source
+also provides in-place static Linux image replacement. Unmodified, statically
+linked Linux x86_64 programs run as GoOS processes. The kernel has immutable native and
 Linux process identities, a dedicated `SYSCALL`/IRETQ entry, bounded static
 ELF loading, a System V initial stack, and a constrained PID 1 launch policy.
 A translation layer in the kernel turns Linux calls into the primitives a
@@ -71,6 +72,19 @@ RDRAND generator and is absent on a CPU without one (ADR 0151). Only occupied
 stack pages are installed; the remaining reservation
 stays demand-zero. The common launch path installs this state before scheduling.
 
+`execve` uses the same parser and mapper but never destroys the current image
+while validation can still fail (ADR 0157). The VFS fills an immutable snapshot
+of the candidate. The kernel then prepares a second root, maps the current
+task's guarded kernel stack into it, builds the Linux entry stack from copied
+arguments and environment, and charges the new pages. One commit changes the
+scheduler, compatibility, and Process roots. The old root is reclaimed only
+after the new entry state is complete.
+
+The copied input is bounded at 256 arguments, 256 environment entries, 32 KiB
+per string, and 64 KiB in total. Each pointer and terminator is checked against
+the old root. The environment retains raw entries, including strings without an
+equals sign, as Linux does.
+
 ### Syscall entry
 
 Linux programs use the `syscall` instruction with the Linux register
@@ -120,9 +134,10 @@ Syscalls map onto native primitives:
 | `access`, `faccessat` | a VFS stat, answered from the mode `stat` reports |
 | `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
 | `arch_prctl` | task-local FS base; GS remains architecture-owned |
+| `execve` | a VFS-pinned executable snapshot and a prepared replacement root |
 
-The next milestone plans `pipe2` on `StreamCreate`, `execve` and `wait4` on
-an exec request to PID 1 and a process-handle wait, and `poll` on `WaitAny`.
+Remaining composition work maps `pipe2` to `StreamCreate`, `wait4` to process
+completion state, and `poll` to `WaitAny`.
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -257,6 +272,10 @@ in the process's compatibility state and report them back (ADR 0151).
 Nothing delivers a signal from that state. The calls that would send one
 stay `ENOSYS`.
 
+Image replacement resets caught dispositions to default, preserves ignored
+dispositions and the blocked mask, and starts with no pending signals. The
+pending set is always empty because signal delivery is not implemented.
+
 `getrandom` returns bytes from RDRAND, 256 per call at most, and `ENOSYS` on
 a CPU without the instruction. The kernel has no other source and makes none
 up.
@@ -373,7 +392,8 @@ reference run uses a container; a second boots a real Linux kernel in QEMU
 and holds the probe to the exact Linux result in every check (ADR 0152). Its
 other modes pass bad pointers and lengths to every call, exhaust the
 descriptor table and the page quota, try the native call gate, touch an
-I/O port, and recurse into the stack guard.
+I/O port, recurse into the stack guard, and replace the probe image while
+checking PID, cwd, descriptors, signal state, and a second musl startup.
 
 musl startup needs `arch_prctl`, `set_tid_address`, and `writev`. Its
 terminal probe, `ioctl(TIOCGWINSZ)`, gets `ENOTTY`.
@@ -392,9 +412,9 @@ and its VFS session go with it, and no Linux signal is delivered.
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, `fork`, `clone`, `execve`, threads, signal delivery,
+Dynamic linking, glibc, `fork`, `clone`, threads, signal delivery,
 pipes created by a Linux process, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not
-run. The next Linux milestone is process composition: `execve`,
-`pipe2`, `wait4`, a chosen `fork` semantics, minimal signals, and `poll`.
+run. The next Linux work is `pipe2`, `wait4`, a chosen `fork` semantics,
+minimal signals, and `poll`.

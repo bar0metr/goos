@@ -1,9 +1,10 @@
 # Linux x86_64 ABI matrix
 
-This document is the GoOS 0.2.0 Linux compatibility contract: what a static
-Linux x86_64 program can call, what each call does, and where the answer
-differs from Linux. [linux-compat.md](linux-compat.md) describes how the
-layer is built.
+This document is the Linux compatibility contract of the current source: what
+a static Linux x86_64 program can call, what each call does, and where the
+answer differs from Linux. Release-specific contracts remain in
+`docs/releases`. [linux-compat.md](linux-compat.md) describes how the layer is
+built.
 
 ## Entry contract
 
@@ -42,6 +43,7 @@ an errno; nothing is accepted and ignored.
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; no signal interrupts it |
 | `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is 1 |
+| `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
 | `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND`; others `EINVAL` |
@@ -70,7 +72,7 @@ BusyBox does about it:
 | `kill(62)`, `tkill(200)`, `tgkill(234)`, `rt_sigreturn(15)`, `sigaltstack(131)` | no signal is sent or delivered; `raise` and `abort` see the refusal |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `fork(57)`, `vfork(58)`, `clone(56)`, `execve(59)`, `wait4(61)` | no Linux process starts another |
+| `fork(57)`, `vfork(58)`, `clone(56)`, `wait4(61)` | no Linux process starts another |
 | `pipe(22)`, `pipe2(293)`, `poll(7)`, `ppoll(271)`, `futex(202)` | no pipes, polling, or threads inside a process |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
@@ -136,6 +138,31 @@ directory, which the launch supplies. The resolver removes empty, `.`, and
 
 A resolved path over 216 bytes reaches the VFS in a memory object attached to
 the request.
+
+## Image replacement
+
+`execve(path, argv, envp)` resolves `path` from the stored cwd and accepts only
+static x86_64 ELF classes supported at launch. Empty paths are `ENOENT`.
+Missing files preserve the VFS error; native images, interpreters, malformed
+ELF, and rejected layouts are `ENOEXEC`.
+
+The pointer vectors may be null, which supplies an empty vector. Otherwise the
+kernel reads each 64-bit pointer through the old root until a null pointer. The
+limits are 256 arguments, 256 environment entries, 32 KiB for one string, and
+64 KiB for all copied strings and terminators. An unreadable vector, pointer, or
+string is `EFAULT`. A vector, string, aggregate, or final stack above its bound
+is `E2BIG`. Raw environment entries need no equals sign.
+
+Success keeps PID, parentage, cwd, process handles, quotas, and every descriptor
+without `FD_CLOEXEC`. Retained descriptors keep their shared description and
+position. Final VFS descriptions selected by `FD_CLOEXEC` are closed through
+the family VFS context; a close failure does not roll back the replacement.
+The call discards the old image, stack, brk, anonymous mappings, and FS base.
+
+Caught signal dispositions reset to default. Ignored dispositions and the
+blocked mask remain. No pending signal is carried across the call because the
+current signal model never queues one. The process name becomes the path's
+basename. `AT_EXECFN` contains the requested path.
 
 ## Files
 
@@ -506,6 +533,9 @@ builtins and redirections but cannot run a program. `nano` does not run.
 | path | 4096 bytes |
 | path component | 1024 bytes |
 | initial stack image | 64 KiB, 256 arguments, 256 environment entries |
+| one `execve` string | 32 KiB |
+| copied `execve` strings | 64 KiB including terminators |
+| concurrent `execve` preparation | 4 system-wide |
 | stack reservation | 8 MiB, 64 KiB guard |
 | static PIE load base | `0x40000000` |
 | `brk` heap | 64 MiB |
