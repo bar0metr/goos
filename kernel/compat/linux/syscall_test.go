@@ -21,6 +21,7 @@ func (handler *testHandler) Writev(request Request) Result        { return handl
 func (handler *testHandler) Open(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) Openat(request Request) Result        { return handler.memory(request) }
 func (handler *testHandler) SetTidAddress(request Request) Result { return handler.memory(request) }
+func (handler *testHandler) Filesystem(request Request) Result    { return handler.memory(request) }
 func (handler *testHandler) Brk(request Request) Result           { return handler.memory(request) }
 func (handler *testHandler) Mmap(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) Munmap(request Request) Result        { return handler.memory(request) }
@@ -82,7 +83,9 @@ func TestDispatchRoutesImplementedCalls(t *testing.T) {
 	handler := &testHandler{}
 	for _, syscall := range []abi.Syscall{
 		abi.SysRead, abi.SysWrite, abi.SysOpen, abi.SysClose, abi.SysWritev, abi.SysOpenat,
-		abi.SysSetTidAddress, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
+		abi.SysSetTidAddress, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename,
+		abi.SysMkdir, abi.SysRmdir, abi.SysUnlink, abi.SysMkdirat, abi.SysUnlinkat,
+		abi.SysRenameat, abi.SysRenameat2, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
 	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)

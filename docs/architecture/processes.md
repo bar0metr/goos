@@ -121,8 +121,10 @@ identity. The session is the channel PID 1 granted, a request counter, and a
 failed flag that peer death sets and nothing clears (ADR 0138). The identity
 is a PID between 2 and 32767, allocated at launch and unique among live Linux
 processes. Linux programs never see a native process or task ID. The working
-directory is the one the launch supplied, held in canonical form as the base
-for relative paths (ADR 0140).
+directory starts as the one the launch supplied, held in canonical form as
+the base for relative paths (ADR 0140), and `chdir` replaces it. The state
+also names the process's file I/O memory object, created at its first file
+read or write (ADR 0141).
 
 ## Teardown liveness
 

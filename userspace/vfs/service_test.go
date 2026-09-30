@@ -469,3 +469,39 @@ func TestSessionFilesAreItsOwn(t *testing.T) {
 		t.Fatalf("file of a gone session still open: %d", reply.Status)
 	}
 }
+
+// A stat with a handle and no path follows the open file: it reports the
+// size as writes change it, survives a rename, belongs to its session, and
+// ends with the handle.
+func TestServiceStatByHandleFollowsTheOpenFile(t *testing.T) {
+	service := startedService(t, nil)
+	path := []byte("/tmp/by-handle")
+	if created := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: path}); created.Status != vfs.StatusOK {
+		t.Fatalf("create = %d", created.Status)
+	}
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read | vfs.Write, Path: path})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open = %d", opened.Status)
+	}
+	byHandle := vfs.Request{Operation: vfs.OperationStat, Handle: opened.Handle}
+	if stat := service.Dispatch(testSession, byHandle); stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 0 {
+		t.Fatalf("empty file = %+v", stat)
+	}
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte("seven b")})
+	if renamed := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: path, Target: []byte("/tmp/renamed")}); renamed.Status != vfs.StatusOK {
+		t.Fatalf("rename = %d", renamed.Status)
+	}
+	if stat := service.Dispatch(testSession, byHandle); stat.Status != vfs.StatusOK || stat.Size != 7 {
+		t.Fatalf("after write and rename = %+v", stat)
+	}
+	if other := service.Dispatch(testSession+1, byHandle); other.Status != vfs.StatusNotFound {
+		t.Fatalf("another session's stat = %d", other.Status)
+	}
+	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
+	if stale := service.Dispatch(testSession, byHandle); stale.Status != vfs.StatusNotFound {
+		t.Fatalf("closed handle stat = %d", stale.Status)
+	}
+	if empty := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat}); empty.Status == vfs.StatusOK {
+		t.Fatal("stat with neither path nor handle succeeded")
+	}
+}

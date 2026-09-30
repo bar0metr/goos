@@ -6,7 +6,7 @@ them to the native image format.
 
 | Fixture | Source | Checks |
 | --- | --- | --- |
-| `musl-hello` | [musl-hello/main.c](musl-hello/main.c) | libc startup, `argv`, `envp`, TLS, heap, stdio, VFS session exchanges, path resolution |
+| `musl-hello` | [musl-hello/main.c](musl-hello/main.c) | libc startup, `argv`, `envp`, TLS, heap, stdio, VFS session exchanges, path resolution, file I/O and naming |
 
 `/system/linux/raw-probe` is a second fixture with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -68,7 +68,7 @@ Linker flags:
 
 | File | SHA-256 |
 | --- | --- |
-| `prebuilt/musl-hello` | `7b843cd21f11936db53ce1e51985dfa0853c1276a6bf9ed48a46f2424fcb206c` |
+| `prebuilt/musl-hello` | `442a6f1ddd0b5b0f6cf1c6ae69398d1f2f308df86c6dff9f658f78e32ee66768` |
 
 `fixtures.go` embeds the binary and repeats the checksum. `go test
 ./userspace/linux` fails when the two disagree, and when the kernel ELF parser
@@ -77,49 +77,52 @@ constant, and this table in one commit.
 
 The image has four `PT_LOAD` segments (`R`, `R-X`, and two `RW-`), `PT_PHDR`,
 `PT_TLS`, `PT_GNU_RELRO`, and a non-executable `PT_GNU_STACK`. Its entry is
-`0x2021a0`.
+`0x2022d0`.
 
 ## Syscall trace
 
-The validation kernel recorded this sequence for
-`/system/linux/musl-hello one two` with `GOOS_LINUX_PROBE=musl`, before the
-fixture gained its path checks:
-
-| Call | Result | Made by |
-| --- | --- | --- |
-| `arch_prctl(ARCH_SET_FS)` | 0 | `__init_tp`, installing the thread pointer |
-| `set_tid_address` | thread ID | `__init_tp` |
-| `ioctl(1, TIOCGWINSZ)` | `-ENOSYS` | first stdout write, asking whether fd 1 is a terminal |
-| `writev(1)` | bytes written | first line; stdout is fully buffered afterwards |
-| `brk(0)`, `brk(+2 pages)` | new break | malloc metadata area |
-| `mmap(MAP_FIXED, PROT_NONE)` | `-EINVAL` | guard page under the metadata area; musl ignores the result |
-| `mmap` twice | addresses | the 64-byte and the 1 MiB allocation |
-| `munmap` twice | 0 | `free` |
-| `openat`, `close`, `close` | 3, 0, `-EBADF` | session check, run twice |
-| `openat` of a missing path | `-ENOENT` | session check |
-| `writev(1)` | bytes written | stdio flush in `exit` |
-| `exit_group` | | `_Exit` |
-
-The path checks add calls between the last `openat` above and the final
-`writev`. Read from the source, they are one `open` and four `openat` calls
-that return 3, each followed by `close`; one more such pair when
-`GOOS_LINUX_LONG` is set; and five `openat` calls that fail with `ENOENT`,
-`ENOTDIR`, `EBADF`, `ENOENT`, and `ENAMETOOLONG`. No run recorded them.
-
-The recorded trace comes from GoOS. Nobody has yet run the same binary under `strace`
-on Linux; the build host has no Linux kernel to run it on. To compare, copy
-`prebuilt/musl-hello` to an x86_64 Linux machine and run:
+[musl-hello/linux.trace](musl-hello/linux.trace) is the sequence the committed
+binary makes on Linux 6.8, 90 calls from `arch_prctl` to `exit_group`. To
+record it again:
 
 ```sh
-GOOS_LINUX_PROBE=musl strace -f ./musl-hello one two
+TRACE=1 userspace/linux/run-on-linux.sh
 ```
 
-On Linux the `ioctl` returns `-ENOTTY` for a pipe and the fixed `mmap`
-succeeds. The program opens `argv[0]` and `musl-hello` in its working
-directory, and expects `/system/linux/musl-hello` to exist, so on Linux it
-reports `vfs session failed` or `paths failed` unless the binary sits at that
-path and runs from that directory. Startup, TLS, heap, and stdio do not depend
-on the location.
+`run-on-linux.sh` runs a fixture in an amd64 Alpine container and prints its
+output and exit status; `make test-linux-reference` requires status zero. The build host is arm64, so the container runs under
+QEMU user-mode emulation. `ptrace` does not work there and `strace` cannot
+attach; the trace is QEMU's own call log (`QEMU_STRACE`). Every call still
+reaches the Linux kernel, which produces the results shown.
+
+The program checks each result itself and prints the same seven lines on
+Linux and on GoOS. Three calls it does not check differ:
+
+| Call | Linux | GoOS |
+| --- | --- | --- |
+| `ioctl(1, TIOCGWINSZ)` | `-ENOTTY` for a pipe | `-ENOSYS`; musl reads both as "no terminal" |
+| `mmap(MAP_FIXED, PROT_NONE)` | maps malloc's guard page | `-EINVAL`; musl ignores the result |
+| `set_tid_address` | the thread ID | the compatibility PID |
+
+On GoOS, PID 1 also sets `GOOS_LINUX_LONG`. It adds one `openat` of a 235-byte
+path and one `mkdirat` on the read-only system image that must fail with
+`EROFS`.
+
+What the startup calls are for:
+
+| Call | Made by |
+| --- | --- |
+| `arch_prctl(ARCH_SET_FS)`, `set_tid_address` | `__init_tp`, installing the thread pointer |
+| `ioctl(1, TIOCGWINSZ)` | the first stdout write, asking whether fd 1 is a terminal |
+| first `writev(1)` | the first line; stdout is fully buffered afterwards |
+| `brk(0)`, `brk(+2 pages)`, fixed `mmap` | malloc's metadata area and its guard page |
+| two `mmap`, two `munmap` | the 64-byte and the 1 MiB allocation, and `free` |
+| last `writev(1)`, `exit_group` | the stdio flush in `exit`, then `_Exit` |
+
+musl reaches the kernel through the legacy numbers where x86_64 has them:
+`open`, `rename`, `rmdir`, `unlink`, `chdir`, and `getcwd`. The fixture calls
+`mkdirat` directly because the musl sources TinyGo ships leave out the
+directory that holds `mkdir`.
 
 ## License
 

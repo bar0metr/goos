@@ -24,7 +24,7 @@ const (
 )
 
 // Continuation is the bounded kernel-owned state of one blocking Linux
-// syscall. It stores only validated scalars and a copied path; it never keeps
+// syscall. It stores only validated scalars and copied paths; it never keeps
 // an unchecked user pointer to dereference after the task sleeps.
 type Continuation struct {
 	Task        sched.TaskID
@@ -36,8 +36,12 @@ type Continuation struct {
 	Partial     uint64
 	Wake        WakeReason
 	Issued      bool
-	path        [limits.PathMax]byte
-	pathSize    uint16
+	// Note is set once when the call begins and kept across every stage.
+	Note       uint64
+	path       [limits.PathMax]byte
+	target     [limits.PathMax]byte
+	pathSize   uint16
+	targetSize uint16
 }
 
 func (state *Continuation) Path() []byte { return state.path[:state.pathSize] }
@@ -78,6 +82,8 @@ type Pending struct {
 	Stage       uint8
 	Phase       ContinuationPhase
 	Correlation uint64
+	Partial     uint64
+	Note        uint64
 	Wake        WakeReason
 	Issued      bool
 }
@@ -88,7 +94,34 @@ func (table *ContinuationTable) Pending(task sched.TaskID) (Pending, bool) {
 		return Pending{}, false
 	}
 	return Pending{Number: entry.Number, Arguments: entry.Arguments, Stage: entry.Stage, Phase: entry.Phase,
-		Correlation: entry.Correlation, Wake: entry.Wake, Issued: entry.Issued}, true
+		Correlation: entry.Correlation, Partial: entry.Partial, Note: entry.Note, Wake: entry.Wake, Issued: entry.Issued}, true
+}
+
+// Annotate stores the second path of a two-path call and a note the handler
+// needs at every stage. Both belong to the call, not to a stage, so they
+// are set once, before the first request is issued.
+func (table *ContinuationTable) Annotate(task sched.TaskID, target []byte, note uint64) bool {
+	entry, ok := table.entry(task)
+	if !ok || len(target) > limits.PathMax || entry.Stage != 1 || entry.Issued {
+		return false
+	}
+	for _, character := range target {
+		if character == 0 {
+			return false
+		}
+	}
+	entry.targetSize, entry.Note = uint16(copy(entry.target[:], target)), note
+	return true
+}
+
+// Paths returns the copied paths of an active call. The slices alias the
+// table and are valid until the call finishes.
+func (table *ContinuationTable) Paths(task sched.TaskID) ([]byte, []byte) {
+	entry, ok := table.entry(task)
+	if !ok {
+		return nil, nil
+	}
+	return entry.path[:entry.pathSize], entry.target[:entry.targetSize]
 }
 
 // Issue marks the current stage's externally visible request before it is

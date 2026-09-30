@@ -7,8 +7,9 @@ policy. The syscall layer has a distinct Linux number and errno namespace,
 bounded diagnostics, generation-safe blocking continuations, a 64-entry fd
 table, stream `read`/`write`/`writev`, the memory and TLS calls, and
 `exit`/`exit_group`. A pinned static musl program starts through its normal
-libc entry. `open`, `openat`, and `close` reach files through the process's
-VFS session, by absolute path or relative to the working directory.
+libc entry. Through its VFS session a program opens, creates, reads, writes,
+seeks, renames, and removes files and directories, by absolute path or
+relative to a working directory it can change.
 
 ## Principles
 
@@ -89,9 +90,11 @@ Syscalls map onto native primitives:
 
 | Linux | Native mechanism |
 | --- | --- |
-| `read`, `write` on files | VFS session requests |
+| `read`, `write`, `writev` on files | VFS bulk requests through the process's I/O object |
 | `read`, `write`, `writev` on stdio and pipes | stream endpoints |
-| `openat`, `close`, `fstat`, `getdents64`, `lseek` | VFS session requests plus the fd table |
+| `open`, `openat`, `close`, `lseek`, `fstat`, `getdents64` | VFS session requests plus the fd table |
+| `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
+| `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
 | `pipe2` | `StreamCreate` |
 | `exit`, `exit_group` | `Exit` |
@@ -155,12 +158,38 @@ same way. The bridge opens no new session for a running process, so a VFS
 restart cannot hand a process authority PID 1 did not grant. A deadline expiry
 returns `ETIMEDOUT`.
 
-`open`, `openat`, and `close` run on the bridge today. An open takes an access
-mode, `O_CLOEXEC`, and `O_LARGEFILE`; other flags return `EOPNOTSUPP`. The VFS
-opens regular files only, so opening a directory fails with `EIO` until
-directory descriptors exist. `close` frees the descriptor, then closes the
-native stream handle or the VFS file it named. File `read` and `write` do not
-use the bridge yet.
+### File calls
+
+The file calls run on the bridge, several exchanges each where needed
+(ADR 0141). The continuation keeps the stage, the resolved paths, and what one
+stage hands the next, so a handler resumed after a wake reads no user memory
+it already consumed.
+
+- `open` and `openat` stat the path, create the file for `O_CREAT`, empty it
+  for `O_TRUNC`, and open it. A directory gets a descriptor that keeps its
+  canonical path, because the VFS lists directories by path. 32 directory
+  records exist system-wide.
+- `read`, `write`, and `writev` on a file move bytes through one 64 KiB
+  memory object per process. The bridge lends it to the VFS for each request
+  with only the rights that request needs. A longer request is a short
+  transfer.
+- `lseek` sets the position the VFS keeps per open file; the kernel mirrors
+  it in the open-file description. `SEEK_END` and `O_APPEND` ask the VFS for
+  the file length through a stat by handle.
+- `getcwd` and `chdir` work on the stored working directory. `chdir` accepts
+  a path only after the VFS confirms a directory.
+- `mkdir`, `unlink`, `rmdir`, and `rename` map to the VFS operations, with
+  their `*at` forms and the legacy numbers musl uses. Removal stats the name
+  first so that each call refuses the other's kind.
+
+The flags an open accepts and the errno of each refusal are in
+[linux-x86_64-abi.md](linux-x86_64-abi.md). Unsupported flags return
+`EOPNOTSUPP`. GoOS has no permission bits, so mode arguments are ignored and a
+refused write is `EROFS`. Removing or replacing a file some session holds open
+is `EBUSY`, and a directory moves only onto a free name.
+
+`fstat`, `newfstatat`, `getdents64`, `readv`, `ftruncate`, and `fsync` are not
+implemented.
 
 ### Path model
 
@@ -171,15 +200,15 @@ canonical form.
 
 One bounded pass joins a relative path to the working directory and removes
 empty, `.`, and `..` components; `..` at the root stays at the root. An
-absolute path ignores `dirfd`. A relative path with a `dirfd` other than
-`AT_FDCWD` returns `ENOTDIR` for an open descriptor and `EBADF` otherwise,
-because no descriptor names a directory yet.
+absolute path ignores `dirfd`. A relative path starts at the directory its
+`dirfd` names: `ENOTDIR` when that descriptor is not a directory, `EBADF` when
+it is not open.
 
 The pass refuses what GoOS cannot hold and shortens nothing: `ENOENT` for an
 empty path, `ENAMETOOLONG` for a string with no terminator in 4096 bytes, a
 component over 1024 bytes, or a result over 4096 bytes. A path that ends in a
-slash, `.`, or `..` demands a directory; an open refuses it with `EOPNOTSUPP`
-and never opens the file of that name.
+slash, `.`, or `..` demands a directory; an open of it is `ENOTDIR` on a
+regular file and never opens the file of that name.
 
 A resolved path over 216 bytes does not fit a request message. The bridge puts
 it in a one-page memory object charged to the process and moves the handle to
@@ -229,13 +258,15 @@ pinned musl (ADR 0139). `userspace/linux/README.md` records the toolchain, the
 build recipe, the checksum, and the syscall trace. PID 1 launches it in
 `/system/linux` with two arguments and two environment variables, reads its
 complete output, and requires exit status zero before it publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, and `LINUX_PATH_OK`.
+`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, and
+`LINUX_FILE_IO_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
+a Linux kernel, where it prints the same lines.
 
 The program reaches `main` through `__libc_start_main`. It checks `argv` and
 `envp`, a TLS image with initialized and zero-filled data behind FS, `malloc`
 through both `brk` and `mmap`, buffered stdio flushed at exit, an open/close
-round trip on its VFS session, and its own image under several relative
-spellings. musl startup needs `arch_prctl`,
+round trip on its VFS session, its own image under several relative
+spellings, and file I/O and naming in a scratch directory under `/tmp`. musl startup needs `arch_prctl`,
 `set_tid_address`, and `writev`. Its terminal probe, `ioctl(TIOCGWINSZ)`, gets
 `ENOSYS`, which musl reads as "no terminal".
 

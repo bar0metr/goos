@@ -498,12 +498,20 @@ One bounded pass removes `.` and `..`, refuses what exceeds the native path and
 name limits, and reports a directory demand to the caller. Paths too long for
 a request message travel in an attached memory object.
 
+File calls run as staged exchanges on the bridge: `open` with creation,
+truncation, append, and directory descriptors; file `read`, `write`, and
+`writev` through a 64 KiB per-process memory object; `lseek`; `getcwd` and
+`chdir`; `mkdir`, `unlink`, `rmdir`, and `rename` with their `*at` forms and
+musl's legacy numbers. The musl fixture runs the same checks on Linux and on
+GoOS and prints the same result.
+
 Order for the remaining release work:
 
-1. file `read`, `write`, `lseek`, `fstat`, `newfstatat`, `getcwd`, `chdir`,
-   and `getdents64` on the bridge, with directory descriptors;
-2. the legacy `stat` and `lstat` numbers musl's wrappers use on x86_64;
-3. selected static BusyBox applets as measured P1 interoperability.
+1. `stat` translation: `fstat`, `newfstatat`, and the legacy `stat` and
+   `lstat` numbers;
+2. `getdents64` on directory descriptors;
+3. `readv`, which musl stdio needs to read a file;
+4. selected static BusyBox applets as measured P1 interoperability.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

@@ -257,7 +257,14 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	case vfs.OperationUnlink:
 		reply.Status = service.namespace.Unlink(request.Path)
 	case vfs.OperationStat:
-		stat, status := service.namespace.Stat(request.Path)
+		// A stat with a handle and no path describes that open file.
+		var stat ramfs.Stat
+		var status vfs.Status
+		if len(request.Path) == 0 && request.Handle != 0 {
+			stat, status = service.namespace.StatOpen(owner, request.Handle)
+		} else {
+			stat, status = service.namespace.Stat(request.Path)
+		}
 		reply.Status, reply.Kind, reply.Size = status, stat.Kind, stat.Size
 		reply.Created, reply.Modified = stat.Created, stat.Modified
 		reply.Attributes, reply.AttributesAvailable = stat.Attributes, stat.AttributesAvailable

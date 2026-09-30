@@ -20,7 +20,7 @@ resolves that channel through the process's handle table on every exchange and
 requires Read, Write, and Wait rights. The kernel holds no session of its own,
 so a process without the handle reaches no file.
 
-One exchange is one request and one reply. A session numbers its requests from
+One exchange is one request and one reply; a call may run several in turn. A session numbers its requests from
 one and reuses no number. The calling task's continuation records the number
 before the request enters the queue, so a retried syscall entry cannot send it
 twice. The task then blocks in the channel wait set. A reply, the peer's death,
@@ -52,11 +52,8 @@ A request carries a path of at most 216 bytes in its message and a longer one
 in an attached memory object. ADR 0140 defines how a Linux path becomes the
 canonical absolute path a request carries.
 
-`openat` and `close` are the first calls on the bridge. `openat` accepts an
-access mode, `O_CLOEXEC`, and `O_LARGEFILE`, and refuses every other flag with
-`EOPNOTSUPP`. `close` frees the descriptor first, as Linux does, and then
-releases what it named: the native stream handle, or the VFS open file through
-one exchange.
+`openat` and `close` were the first calls on the bridge. ADR 0141 defines the
+file calls built on it and how a call runs several exchanges.
 
 ## Consequences
 

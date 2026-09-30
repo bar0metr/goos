@@ -109,7 +109,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference
 
 all: iso
 
@@ -536,6 +536,12 @@ docs:
 linux-fixtures:
 	@userspace/linux/build.sh
 
+# Runs the committed Linux fixtures on a Linux kernel in an amd64 container
+# and requires the exit status GoOS must reproduce. It needs Docker, so it is
+# a reference check and no part of test-all.
+test-linux-reference:
+	@userspace/linux/run-on-linux.sh | tee /dev/stderr | grep -q '^exit=0$$'
+
 clean:
 	@rm -rf $(BUILD_DIR)
 
@@ -563,6 +569,7 @@ help:
 	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  linux-fixtures  rebuild the static Linux test fixtures under userspace/linux' \
+	  '  test-linux-reference run those fixtures on a Linux kernel in Docker' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
 	  '  test-all        run the complete validation gate, including QEMU' \

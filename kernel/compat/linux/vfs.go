@@ -1,7 +1,6 @@
 package linux
 
 import (
-	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
@@ -68,27 +67,6 @@ func ClassifyVFSReply(message *ipc.Message, correlation uint64, operation vfs.Op
 		return vfs.Reply{}, VFSReplyMalformed
 	}
 	return reply, VFSReplyAccepted
-}
-
-// OpenRights decodes the openat flags the bridge accepts: an access mode,
-// O_CLOEXEC, and O_LARGEFILE, which is always in effect on x86_64. Creation,
-// truncation, append, and directory opens are refused until their semantics
-// exist. A resolved path that demands a directory is refused the same way.
-func OpenRights(flags uint64) (vfs.Rights, bool, abi.Errno) {
-	value := uint32(flags)
-	if value&^(abi.OpenAccess|abi.OpenLargeFile|abi.OpenCloseExec) != 0 {
-		return 0, false, abi.EOPNOTSUPP
-	}
-	closeOnExec := value&abi.OpenCloseExec != 0
-	switch value & abi.OpenAccess {
-	case abi.OpenReadOnly:
-		return vfs.Read, closeOnExec, 0
-	case abi.OpenWriteOnly:
-		return vfs.Write, closeOnExec, 0
-	case abi.OpenReadWrite:
-		return vfs.Read | vfs.Write, closeOnExec, 0
-	}
-	return 0, false, abi.EINVAL
 }
 
 // VFSDiagnostics counts bridge traffic. The counters saturate.

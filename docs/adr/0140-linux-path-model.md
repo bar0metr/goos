@@ -24,16 +24,17 @@ form. A launch whose working directory is relative or too long is refused.
 Resolution is one pure, bounded pass over the working directory and the path:
 
 - An absolute path ignores `dirfd`. A relative path starts at the working
-  directory when `dirfd` is `AT_FDCWD`. No descriptor names a directory yet,
-  so another `dirfd` is `ENOTDIR` when it is open and `EBADF` when it is not.
+  directory when `dirfd` is `AT_FDCWD` and at the directory a descriptor names
+  otherwise: `ENOTDIR` when the descriptor is not a directory, `EBADF` when it
+  is not open.
 - Empty components and `.` vanish. `..` removes the component before it and
   stays at the root when none is left, as on Linux. GoOS has no symbolic
   links, so removing `name/..` by text names the object a walk would reach.
 - The result is absolute, has no trailing slash, and never exceeds 4096 bytes.
 - A path that ends in a slash, `.`, or `..` demands a directory. The canonical
   form cannot carry that spelling, so the resolver reports the demand and the
-  caller enforces it. `openat` opens regular files only and refuses such a
-  path with `EOPNOTSUPP`, as it refuses `O_DIRECTORY`.
+  caller enforces it: an open of such a path never opens the regular file of
+  that name (ADR 0141).
 
 The layer refuses a path it cannot hold and shortens nothing:
 
@@ -65,4 +66,4 @@ Linux programs see one namespace, the one native programs see. Every path the
 VFS receives from the layer is canonical and bounded, and the working
 directory needs no revalidation per call. Text normalization succeeds for
 `missing/../file`, where Linux reports `ENOENT`; GoOS accepts that difference.
-`chdir` and `getcwd` can build on the stored working directory.
+`chdir` and `getcwd` work on the stored working directory.
