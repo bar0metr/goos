@@ -1,8 +1,13 @@
 package linux
 
-import "goos/kernel/handle"
+import (
+	"goos/kernel/process"
+)
 
-const LinuxMaxFD = 64
+const (
+	LinuxMaxFD          = 64
+	MaxOpenDescriptions = process.MaxProcesses * LinuxMaxFD
+)
 
 type FDKind uint8
 
@@ -20,31 +25,67 @@ type FileDescription struct {
 	Flags      uint32
 	Object     uint64
 	Offset     uint64
-	References uint8
+	References uint16
 }
 
 type FDEntry struct {
-	description uint8
+	description uint16
 	CloseOnExec bool
 	open        bool
 }
 
-// FDTable maps Linux integers to bounded compatibility-owned descriptions.
-// Object may identify a process-owned native handle or a VFS open ID, but that
-// value is never returned to Linux userspace.
-type FDTable struct {
-	entries      [LinuxMaxFD]FDEntry
-	descriptions [LinuxMaxFD]FileDescription
+type descriptionSlot struct {
+	familyID    uint64
+	description FileDescription
 }
 
-func (table *FDTable) Initialize(input, output, errorOutput handle.ID) bool {
-	if table == nil || input == 0 || output == 0 || errorOutput == 0 {
+var openDescriptions [MaxOpenDescriptions]descriptionSlot
+
+// FDTable maps Linux integers to bounded compatibility-owned descriptions.
+// Object may identify a kernel stream endpoint or a VFS open ID, but that value
+// is never returned to Linux userspace.
+type FDTable struct {
+	familyID uint64
+	entries  [LinuxMaxFD]FDEntry
+}
+
+func (table *FDTable) Initialize(familyID uint64, input, output, errorOutput uint64) bool {
+	if table == nil || familyID == 0 || input == 0 || output == 0 || errorOutput == 0 {
 		return false
 	}
 	*table = FDTable{}
-	return table.install(0, FileDescription{Kind: FDStreamReader, Object: uint64(input)}) &&
-		table.install(1, FileDescription{Kind: FDStreamWriter, Object: uint64(output)}) &&
-		table.install(2, FileDescription{Kind: FDStreamWriter, Object: uint64(errorOutput)})
+	table.familyID = familyID
+	if table.install(0, FileDescription{Kind: FDStreamReader, Object: input}) &&
+		table.install(1, FileDescription{Kind: FDStreamWriter, Object: output}) &&
+		table.install(2, FileDescription{Kind: FDStreamWriter, Object: errorOutput}) {
+		return true
+	}
+	table.CloseAll(nil)
+	*table = FDTable{}
+	return false
+}
+
+// Inherit copies descriptor integers and retains their shared open-file
+// descriptions. Close-on-exec remains attached to each copied integer.
+func (table *FDTable) Inherit(parent *FDTable) bool {
+	if table == nil || parent == nil || table == parent || parent.familyID == 0 {
+		return false
+	}
+	*table = FDTable{familyID: parent.familyID}
+	for fd := range parent.entries {
+		entry := parent.entries[fd]
+		if !entry.open {
+			continue
+		}
+		slot, valid := parent.description(entry.description)
+		if !valid || slot.description.References == ^uint16(0) {
+			table.CloseAll(nil)
+			return false
+		}
+		slot.description.References++
+		table.entries[fd] = entry
+	}
+	return true
 }
 
 func (table *FDTable) Allocate(description FileDescription, closeOnExec bool) (int, bool) {
@@ -82,8 +123,11 @@ func (table *FDTable) Lookup(fd int) (FileDescription, bool) {
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return FileDescription{}, false
 	}
-	description := table.descriptions[table.entries[fd].description]
-	return description, description.valid()
+	slot, valid := table.description(table.entries[fd].description)
+	if !valid {
+		return FileDescription{}, false
+	}
+	return slot.description, true
 }
 
 // Description returns the shared open-file description behind fd for
@@ -92,8 +136,11 @@ func (table *FDTable) Description(fd int) (*FileDescription, bool) {
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return nil, false
 	}
-	description := &table.descriptions[table.entries[fd].description]
-	return description, description.valid()
+	slot, valid := table.description(table.entries[fd].description)
+	if !valid {
+		return nil, false
+	}
+	return &slot.description, true
 }
 
 // DescriptionIndex identifies the description behind fd among those the
@@ -113,15 +160,15 @@ func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, boo
 		return -2, false
 	}
 	descriptionIndex := table.entries[fd].description
-	description := &table.descriptions[descriptionIndex]
-	if !description.valid() || description.References >= LinuxMaxFD {
+	slot, valid := table.description(descriptionIndex)
+	if !valid || slot.description.References == ^uint16(0) {
 		return -1, false
 	}
 	for target := minimum; target < LinuxMaxFD; target++ {
 		if table.entries[target].open {
 			continue
 		}
-		description.References++
+		slot.description.References++
 		table.entries[target] = FDEntry{description: descriptionIndex, CloseOnExec: closeOnExec, open: true}
 		return target, true
 	}
@@ -136,11 +183,11 @@ func (table *FDTable) DuplicateAt(fd int, target int, closeOnExec bool) bool {
 		return false
 	}
 	descriptionIndex := table.entries[fd].description
-	description := &table.descriptions[descriptionIndex]
-	if !description.valid() || description.References >= LinuxMaxFD {
+	slot, valid := table.description(descriptionIndex)
+	if !valid || slot.description.References == ^uint16(0) {
 		return false
 	}
-	description.References++
+	slot.description.References++
 	table.entries[target] = FDEntry{description: descriptionIndex, CloseOnExec: closeOnExec, open: true}
 	return true
 }
@@ -170,7 +217,11 @@ func (table *FDTable) Close(fd int) (FileDescription, bool, bool) {
 		return FileDescription{}, false, false
 	}
 	index := table.entries[fd].description
-	description := &table.descriptions[index]
+	slot, valid := table.description(index)
+	if !valid {
+		return FileDescription{}, false, false
+	}
+	description := &slot.description
 	table.entries[fd] = FDEntry{}
 	if description.References == 0 {
 		return FileDescription{}, false, false
@@ -180,7 +231,7 @@ func (table *FDTable) Close(fd int) (FileDescription, bool, bool) {
 		return FileDescription{}, false, true
 	}
 	released := *description
-	*description = FileDescription{}
+	*slot = descriptionSlot{}
 	return released, true, true
 }
 
@@ -196,19 +247,30 @@ func (table *FDTable) CloseAll(visit func(FileDescription)) {
 }
 
 func (table *FDTable) install(fd int, description FileDescription) bool {
-	if table == nil || fd < 0 || fd >= LinuxMaxFD || table.entries[fd].open || !description.valid() {
+	if table == nil || table.familyID == 0 || fd < 0 || fd >= LinuxMaxFD || table.entries[fd].open || !description.valid() {
 		return false
 	}
-	for index := range table.descriptions {
-		if table.descriptions[index].References != 0 {
+	for index := range openDescriptions {
+		if openDescriptions[index].familyID != 0 {
 			continue
 		}
 		description.References = 1
-		table.descriptions[index] = description
-		table.entries[fd] = FDEntry{description: uint8(index), open: true}
+		openDescriptions[index] = descriptionSlot{familyID: table.familyID, description: description}
+		table.entries[fd] = FDEntry{description: uint16(index), open: true}
 		return true
 	}
 	return false
+}
+
+func (table *FDTable) description(index uint16) (*descriptionSlot, bool) {
+	if table == nil || table.familyID == 0 || int(index) >= len(openDescriptions) {
+		return nil, false
+	}
+	slot := &openDescriptions[index]
+	if slot.familyID != table.familyID || !slot.description.valid() || slot.description.References == 0 {
+		return nil, false
+	}
+	return slot, true
 }
 
 func (description FileDescription) valid() bool {

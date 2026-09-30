@@ -270,9 +270,15 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, bound, random)
 			clear(linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
-			if stackStatus != linuxabi.StackOK || !brkOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, pid, bound, brkBase, brkLimit) {
+			streams, streamHandles, streamsOK := linuxStandardStreams(spawned, bound)
+			if stackStatus != linuxabi.StackOK || !brkOK || !streamsOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, pid, bound, streams, brkBase, brkLimit) {
 				abandonSpawn(root, spawned, false)
 				return 0, 0, supervisor.LaunchInvalidImage
+			}
+			// The shared descriptions now own these endpoint references. The
+			// process table keeps only the VFS channel used by its requests.
+			for _, id := range streamHandles {
+				spawned.Handles().Close(id)
 			}
 			loaded.StackTop = stack.Pointer
 		} else {
@@ -357,7 +363,7 @@ func launchResourceProfile(profile supervisor.ResourceProfile) (process.Resource
 // abandonSpawn releases a launch that failed before its task existed: the
 // derived handles, the registry entry, the process slot, and the address space.
 func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
-	linuxcompat.RemoveProcess(root)
+	linuxcompat.RemoveProcess(root, releaseLinuxDescriptionReference)
 	if spawned != nil {
 		// Only stream handles were counted when installed; the source handles
 		// stay with PID 1, so no end can close here.
@@ -370,6 +376,32 @@ func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
 	if !vm.DestroyUserAddressSpace(&pageAllocator, root) {
 		addressSpaceReclaimFailures++
 	}
+}
+
+// linuxStandardStreams resolves the endpoint objects installed for the three
+// conventional descriptors. Their references can then move from native
+// handles into compatibility-owned open-file descriptions.
+func linuxStandardStreams(owner *process.Process, data startup.Data) (linuxcompat.StandardStreams, [3]handle.ID, bool) {
+	if owner == nil {
+		return linuxcompat.StandardStreams{}, [3]handle.ID{}, false
+	}
+	input, inputOK := data.Handle("in")
+	output, outputOK := data.Handle("stdout")
+	errorOutput, errorOK := data.Handle("stderr")
+	if !inputOK || !outputOK || !errorOK {
+		return linuxcompat.StandardStreams{}, [3]handle.ID{}, false
+	}
+	inputCapability, inputAllowed := owner.Handles().Lookup(input, handle.TypeStream, capability.Read)
+	outputCapability, outputAllowed := owner.Handles().Lookup(output, handle.TypeStream, capability.Write)
+	errorCapability, errorAllowed := owner.Handles().Lookup(errorOutput, handle.TypeStream, capability.Write)
+	if !inputAllowed || !outputAllowed || !errorAllowed {
+		return linuxcompat.StandardStreams{}, [3]handle.ID{}, false
+	}
+	return linuxcompat.StandardStreams{
+		Input:  inputCapability.Object(),
+		Output: outputCapability.Object(),
+		Error:  errorCapability.Object(),
+	}, [3]handle.ID{input, output, errorOutput}, true
 }
 
 func abandonHandle(typeID handle.Type, cap capability.Capability) {

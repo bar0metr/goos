@@ -1,8 +1,9 @@
 package linux
 
 import (
-	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/process"
+	"goos/kernel/sched"
 	"goos/kernel/vfs"
 )
 
@@ -11,12 +12,11 @@ import (
 // as native clients do.
 const VFSPathInline = vfs.MaxProtocolData
 
-// VFSSession is the one filesystem authority a Linux process holds: the
-// channel PID 1 granted at launch. Every file operation is a request on this
-// channel. A session whose peer died stays failed; nothing reconnects it, so
-// a restarted VFS cannot hand the process authority PID 1 never granted.
+// VFSSession is the shared sequencing state for one family's VFS authority.
+// Each process retains its own granted channel handle. A session whose peer
+// died stays failed; nothing reconnects it, so a restarted VFS cannot replace
+// the authority PID 1 granted.
 type VFSSession struct {
-	Handle      handle.ID
 	correlation uint64
 	failed      bool
 }
@@ -25,7 +25,7 @@ type VFSSession struct {
 // are never reused within a session, which lets a late reply to an abandoned
 // request be told apart from the reply in flight.
 func (session *VFSSession) Next() (uint64, bool) {
-	if session == nil || session.Handle == 0 || session.failed || session.correlation == ^uint64(0) {
+	if session == nil || session.failed || session.correlation == ^uint64(0) {
 		return 0, false
 	}
 	session.correlation++
@@ -39,6 +39,146 @@ func (session *VFSSession) Fail() {
 }
 
 func (session *VFSSession) Failed() bool { return session == nil || session.failed }
+
+type VFSAccess uint8
+
+const (
+	VFSAccessInvalid VFSAccess = iota
+	VFSAccessAcquired
+	VFSAccessQueued
+)
+
+// LinuxVFSContext serializes one family's filesystem exchanges. Each process
+// keeps its own channel handle and I/O buffer; the context shares correlation,
+// failure, and queue state.
+type LinuxVFSContext struct {
+	FamilyID   uint64
+	References uint8
+	Session    VFSSession
+	Owner      sched.TaskID
+	waiters    [LinuxFamilyMaxProcesses - 1]sched.TaskID
+	waitCount  uint8
+}
+
+var vfsContexts [process.MaxProcesses]LinuxVFSContext
+
+func installVFSContext(familyID uint64) bool {
+	if familyID == 0 {
+		return false
+	}
+	for index := range vfsContexts {
+		if vfsContexts[index].FamilyID == familyID {
+			return false
+		}
+	}
+	for index := range vfsContexts {
+		if vfsContexts[index].FamilyID == 0 {
+			vfsContexts[index] = LinuxVFSContext{FamilyID: familyID, References: 1}
+			return true
+		}
+	}
+	return false
+}
+
+func RetainVFSContext(familyID uint64) bool {
+	context, found := VFSContext(familyID)
+	if !found || context.References >= LinuxFamilyMaxProcesses {
+		return false
+	}
+	context.References++
+	return true
+}
+
+func ReleaseVFSContext(familyID uint64) (final bool, released bool) {
+	context, found := VFSContext(familyID)
+	if !found || context.References == 0 {
+		return false, false
+	}
+	context.References--
+	if context.References == 0 {
+		*context = LinuxVFSContext{}
+		return true, true
+	}
+	return false, true
+}
+
+func VFSContext(familyID uint64) (*LinuxVFSContext, bool) {
+	if familyID != 0 {
+		for index := range vfsContexts {
+			if vfsContexts[index].FamilyID == familyID {
+				return &vfsContexts[index], true
+			}
+		}
+	}
+	return nil, false
+}
+
+func AcquireVFS(familyID uint64, task sched.TaskID) VFSAccess {
+	context, found := VFSContext(familyID)
+	if !found || context.Session.Failed() {
+		return VFSAccessInvalid
+	}
+	if context.Owner == 0 || context.Owner == task {
+		context.Owner = task
+		return VFSAccessAcquired
+	}
+	for index := 0; index < int(context.waitCount); index++ {
+		if context.waiters[index] == task {
+			return VFSAccessQueued
+		}
+	}
+	if task == 0 || int(context.waitCount) == len(context.waiters) {
+		return VFSAccessInvalid
+	}
+	context.waiters[context.waitCount] = task
+	context.waitCount++
+	return VFSAccessQueued
+}
+
+func ReleaseVFS(familyID uint64, task sched.TaskID) (sched.TaskID, bool) {
+	context, found := VFSContext(familyID)
+	if !found || task == 0 || context.Owner != task {
+		return 0, false
+	}
+	context.Owner = 0
+	if context.waitCount == 0 {
+		return 0, true
+	}
+	next := context.waiters[0]
+	context.waitCount--
+	copy(context.waiters[:], context.waiters[1:int(context.waitCount)+1])
+	context.waiters[context.waitCount] = 0
+	context.Owner = next
+	return next, true
+}
+
+// CancelVFSTask removes a killed or failed task from an owner or waiter slot.
+// It returns the next owner when cancellation transfers the context.
+func CancelVFSTask(task sched.TaskID) sched.TaskID {
+	if task == 0 {
+		return 0
+	}
+	for contextIndex := range vfsContexts {
+		context := &vfsContexts[contextIndex]
+		if context.FamilyID == 0 {
+			continue
+		}
+		if context.Owner == task {
+			next, _ := ReleaseVFS(context.FamilyID, task)
+			return next
+		}
+		for index := 0; index < int(context.waitCount); index++ {
+			if context.waiters[index] != task {
+				continue
+			}
+			context.waitCount--
+			copy(context.waiters[index:], context.waiters[index+1:int(context.waitCount)+1])
+			context.waiters[context.waitCount] = 0
+			return 0
+		}
+	}
+	return 0
+}
 
 type VFSReplyVerdict uint8
 

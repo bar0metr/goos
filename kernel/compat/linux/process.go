@@ -15,11 +15,9 @@ import (
 // IDs never enter the Linux initial stack.
 type ProcessState struct {
 	Root       uint64
-	Input      handle.ID
-	Output     handle.ID
-	Error      handle.ID
-	VFS        VFSSession
+	VFSHandle  handle.ID
 	FDs        FDTable
+	FamilyID   uint64
 	BrkBase    uint64
 	BrkCurrent uint64
 	BrkLimit   uint64
@@ -39,6 +37,12 @@ type ProcessState struct {
 	Signals SignalState
 	cwd     [limits.PathMax]byte
 	cwdLen  uint16
+}
+
+type StandardStreams struct {
+	Input  uint64
+	Output uint64
+	Error  uint64
 }
 
 // ProcessLifecycle is the part of Linux process lifetime retained after the
@@ -77,6 +81,19 @@ const (
 	// MaxPID matches the default Linux pid_max, so a compatibility PID fits
 	// every pid_t a program may narrow it to.
 	MaxPID = int32(32767)
+	// NativeProcessReserve keeps scheduler and process slots unavailable to
+	// Linux descendants. The system has 64 slots; descendants may use 48.
+	NativeProcessReserve    = 16
+	LinuxGlobalMaxProcesses = process.MaxProcesses - NativeProcessReserve
+	LinuxFamilyMaxProcesses = 16
+)
+
+type ChildRegistrationStatus uint8
+
+const (
+	ChildRegistrationInvalid ChildRegistrationStatus = iota
+	ChildRegistrationOK
+	ChildRegistrationLimit
 )
 
 var (
@@ -91,9 +108,10 @@ var processRecords [process.MaxProcesses]ProcessRecord
 
 // InstallProcess records one validated, bound Linux launch. The caller owns
 // teardown if a later launch step fails.
-func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, brkBase uint64, brkLimit uint64) bool {
+func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
 	if root == 0 || goosProcessID == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
-		data.HandleCount() != 4 || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax {
+		data.HandleCount() != 4 || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax ||
+		streams.Input == 0 || streams.Output == 0 || streams.Error == 0 {
 		return false
 	}
 	input, inputOK := data.Handle("in")
@@ -123,32 +141,65 @@ func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, br
 	if errno != 0 {
 		return false
 	}
-	state.Root, state.Input, state.Output = root, input, output
-	state.Error, state.VFS.Handle, state.cwdLen = errorOutput, vfsHandle, uint16(size)
-	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
-	if !state.FDs.Initialize(input, output, errorOutput) {
-		*state = ProcessState{}
-		return false
-	}
 	record, installed := installProcessRecord(goosProcessID, 1, 0)
 	if !installed {
-		state.FDs.CloseAll(nil)
 		*state = ProcessState{}
 		return false
 	}
-	state.PID = record.PID
+	if !installVFSContext(record.FamilyID) {
+		processRecords[recordIndex(record.PID)] = ProcessRecord{}
+		*state = ProcessState{}
+		return false
+	}
+	state.Root, state.VFSHandle, state.cwdLen = root, vfsHandle, uint16(size)
+	state.PID, state.FamilyID = record.PID, record.FamilyID
+	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
+	if !state.FDs.Initialize(record.FamilyID, streams.Input, streams.Output, streams.Error) {
+		ReleaseVFSContext(record.FamilyID)
+		processRecords[recordIndex(record.PID)] = ProcessRecord{}
+		*state = ProcessState{}
+		return false
+	}
 	return true
 }
 
 // RegisterChild reserves an identity for a compatibility-created GoOS
 // Process. The caller installs the child's heavy compatibility state before
 // making its task runnable.
-func RegisterChild(goosProcessID process.ID, parentPID int32) (ProcessRecord, bool) {
+func RegisterChild(goosProcessID process.ID, parentPID int32, liveProcessCount int) (ProcessRecord, ChildRegistrationStatus) {
 	parent, found := FindProcessRecord(parentPID)
-	if !found || parent.State != ProcessRunning {
-		return ProcessRecord{}, false
+	if !found || parent.State != ProcessRunning || goosProcessID == 0 || liveProcessCount < 0 || liveProcessCount > process.MaxProcesses {
+		return ProcessRecord{}, ChildRegistrationInvalid
 	}
-	return installProcessRecord(goosProcessID, parentPID, parent.FamilyID)
+	global, family := processCounts(parent.FamilyID)
+	if liveProcessCount >= LinuxGlobalMaxProcesses || global >= LinuxGlobalMaxProcesses || family >= LinuxFamilyMaxProcesses {
+		return ProcessRecord{}, ChildRegistrationLimit
+	}
+	record, installed := installProcessRecord(goosProcessID, parentPID, parent.FamilyID)
+	if !installed {
+		return ProcessRecord{}, ChildRegistrationInvalid
+	}
+	return record, ChildRegistrationOK
+}
+
+// ProcessCounts reports all compatibility records and the records in one
+// family. Running and zombie records consume both budgets.
+func ProcessCounts(familyID uint64) (global int, family int) {
+	return processCounts(familyID)
+}
+
+func processCounts(familyID uint64) (global int, family int) {
+	for index := range processRecords {
+		record := processRecords[index]
+		if record.State == 0 {
+			continue
+		}
+		global++
+		if familyID != 0 && record.FamilyID == familyID {
+			family++
+		}
+	}
+	return global, family
 }
 
 // RollbackProcessRecord removes a child reservation that never became
@@ -375,13 +426,16 @@ func FindProcess(root uint64) (*ProcessState, bool) {
 
 // RemoveProcess rolls back compatibility state for a launch that never made
 // its task runnable.
-func RemoveProcess(root uint64) bool {
+func RemoveProcess(root uint64, release func(FileDescription)) bool {
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root == root {
 				pid := processStates[index].PID
-				processStates[index].FDs.CloseAll(nil)
-				releaseDirectories(root)
+				familyID := processStates[index].FamilyID
+				closeProcessFDs(&processStates[index], release)
+				if final, _ := ReleaseVFSContext(familyID); final {
+					releaseDirectories(familyID)
+				}
 				processStates[index] = ProcessState{}
 				if record := recordIndex(pid); record >= 0 {
 					processRecords[record] = ProcessRecord{}
@@ -395,7 +449,7 @@ func RemoveProcess(root uint64) bool {
 
 // ExitProcess releases heavy compatibility state and records the Linux exit
 // for its parent. Native resource teardown remains in the kernel lifecycle.
-func ExitProcess(root uint64, exitStatus uint64, signalTermination int32) bool {
+func ExitProcess(root uint64, exitStatus uint64, signalTermination int32, release func(FileDescription)) bool {
 	if root == 0 {
 		return false
 	}
@@ -404,10 +458,27 @@ func ExitProcess(root uint64, exitStatus uint64, signalTermination int32) bool {
 			continue
 		}
 		pid := processStates[index].PID
-		processStates[index].FDs.CloseAll(nil)
-		releaseDirectories(root)
+		familyID := processStates[index].FamilyID
+		closeProcessFDs(&processStates[index], release)
+		if final, _ := ReleaseVFSContext(familyID); final {
+			releaseDirectories(familyID)
+		}
 		processStates[index] = ProcessState{}
 		return markProcessExited(pid, exitStatus, signalTermination)
 	}
 	return false
+}
+
+func closeProcessFDs(state *ProcessState, release func(FileDescription)) {
+	if state == nil {
+		return
+	}
+	for fd := 0; fd < LinuxMaxFD; fd++ {
+		description, last, closed := state.FDs.Close(fd)
+		if closed && last && description.Kind == FDVFSDirectory {
+			ReleaseDirectory(state.FamilyID, description.Object)
+		} else if closed && last && release != nil {
+			release(description)
+		}
+	}
 }

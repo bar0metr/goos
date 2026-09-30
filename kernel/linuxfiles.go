@@ -99,7 +99,7 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 			case linuxcompat.OpenExistingDirectory:
 				// The descriptor copies the path before the continuation
 				// that holds it is released.
-				result := handler.installDirectory(path, intent)
+				result := handler.installDirectory(state, path, intent)
 				handler.vfsFinish()
 				return result
 			case linuxcompat.OpenCreateFile:
@@ -174,15 +174,15 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 	}
 }
 
-func (handler *linuxCallHandler) installDirectory(path []byte, intent linuxcompat.OpenIntent) linuxcompat.Result {
-	reference, retained := linuxcompat.RetainDirectory(handler.root, path)
+func (handler *linuxCallHandler) installDirectory(state *linuxcompat.ProcessState, path []byte, intent linuxcompat.OpenIntent) linuxcompat.Result {
+	reference, retained := linuxcompat.RetainDirectory(state.FamilyID, path)
 	if !retained {
 		return linuxErrno(linuxabi.ENFILE)
 	}
 	description := linuxcompat.FileDescription{Kind: linuxcompat.FDVFSDirectory, Flags: intent.StatusFlags(), Object: reference}
 	fd, errno := linuxcompat.AllocateFD(handler.root, description, intent.CloseOnExec)
 	if errno != 0 {
-		linuxcompat.ReleaseDirectory(handler.root, reference)
+		linuxcompat.ReleaseDirectory(state.FamilyID, reference)
 		return linuxErrno(errno)
 	}
 	return linuxcompat.Result{Value: uint64(fd)}
@@ -838,7 +838,7 @@ func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Reque
 	case linuxcompat.FDVFSFile:
 		errno = handler.vfsBegin(request, nil, nil, description.Object)
 	case linuxcompat.FDVFSDirectory:
-		path, named := linuxcompat.DirectoryPath(handler.root, description.Object)
+		path, named := linuxcompat.DirectoryPath(state.FamilyID, description.Object)
 		if !named {
 			return linuxErrno(linuxabi.EBADF), true
 		}
@@ -888,8 +888,9 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 	if errno != 0 {
 		return linuxErrno(errno)
 	}
+	state, processFound := linuxcompat.FindProcess(handler.root)
 	description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0])
-	if !found {
+	if !processFound || !found {
 		return linuxErrno(linuxabi.EBADF)
 	}
 	if description.Kind != linuxcompat.FDVFSDirectory {
@@ -897,7 +898,7 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 	}
 	buffer, capacity := request.Arguments[1], request.Arguments[2]
 	if !active {
-		path, named := linuxcompat.DirectoryPath(handler.root, description.Object)
+		path, named := linuxcompat.DirectoryPath(state.FamilyID, description.Object)
 		if !named {
 			return linuxErrno(linuxabi.EBADF)
 		}

@@ -3,11 +3,9 @@
 package main
 
 import (
-	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
-	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/mm/vm"
 	"goos/kernel/sched"
@@ -403,21 +401,16 @@ func (handler *linuxCallHandler) endpoint(fd int64, writer bool) (*stream.Stream
 		return nil, 0, linuxabi.EBADF
 	}
 	description, found := linuxcompat.LookupFD(handler.root, int(fd))
-	wantKind, rights := linuxcompat.FDStreamReader, capability.Read
+	wantKind := linuxcompat.FDStreamReader
 	if writer {
-		wantKind, rights = linuxcompat.FDStreamWriter, capability.Write
+		wantKind = linuxcompat.FDStreamWriter
 	}
 	if !found || description.Kind != wantKind {
 		return nil, 0, linuxabi.EBADF
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
-	if !found {
-		return nil, 0, linuxabi.EBADF
-	}
-	cap, allowed := owner.Handles().Lookup(handle.ID(description.Object), handle.TypeStream, rights)
-	streamID, isWriter, valid := stream.DecodeEndpointObject(cap.Object())
+	streamID, isWriter, valid := stream.DecodeEndpointObject(description.Object)
 	endpoint, exists := streamRegistry.Lookup(streamID)
-	if !allowed || !valid || !exists || isWriter != writer {
+	if !valid || !exists || isWriter != writer {
 		return nil, 0, linuxabi.EBADF
 	}
 	return endpoint, streamID, 0

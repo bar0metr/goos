@@ -21,6 +21,8 @@ const (
 	WakeCancelled
 	// WakeTimeout ends a wait whose deadline passed with no reply.
 	WakeTimeout
+	// WakeContext grants a queued task ownership of its family VFS context.
+	WakeContext
 )
 
 // Continuation is the bounded kernel-owned state of one blocking Linux
@@ -131,7 +133,27 @@ func (table *ContinuationTable) Issue(task sched.TaskID, stage uint8, correlatio
 	if !ok || stage == 0 || correlation == 0 || entry.Stage != stage || entry.Phase != ContinuationReady || entry.Issued {
 		return false
 	}
-	entry.Correlation, entry.Issued = correlation, true
+	entry.Correlation, entry.Wake, entry.Issued = correlation, 0, true
+	return true
+}
+
+// BlockContext parks a syscall before it issues a VFS request. The family
+// context wakes it without a correlation because no request exists yet.
+func (table *ContinuationTable) BlockContext(task sched.TaskID, stage uint8) bool {
+	entry, ok := table.entry(task)
+	if !ok || entry.Stage != stage || entry.Phase != ContinuationReady || entry.Issued || entry.Correlation != 0 {
+		return false
+	}
+	entry.Phase = ContinuationWaiting
+	return true
+}
+
+func (table *ContinuationTable) ResumeContext(task sched.TaskID) bool {
+	entry, ok := table.entry(task)
+	if !ok || entry.Phase != ContinuationWaiting || entry.Issued || entry.Correlation != 0 {
+		return false
+	}
+	entry.Phase, entry.Wake = ContinuationReady, WakeContext
 	return true
 }
 

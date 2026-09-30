@@ -89,6 +89,33 @@ func TestContinuationTableIsBoundedBySchedulerSlots(t *testing.T) {
 	}
 }
 
+func TestContinuationBlocksBeforeVFSIssue(t *testing.T) {
+	var table ContinuationTable
+	task, _ := sched.NewTaskID(4, 1)
+	request := Request{Number: abi.SysOpen, Arguments: [6]uint64{1, 2, 3}}
+	if !table.Begin(task, request, nil) || !table.BlockContext(task, 1) {
+		t.Fatal("context wait did not start")
+	}
+	pending, _ := table.Pending(task)
+	if pending.Phase != ContinuationWaiting || pending.Issued || pending.Correlation != 0 {
+		t.Fatalf("blocked state = %#v", pending)
+	}
+	if !table.ResumeContext(task) {
+		t.Fatal("context wait did not resume")
+	}
+	pending, _ = table.Pending(task)
+	if pending.Phase != ContinuationReady || pending.Wake != WakeContext {
+		t.Fatalf("resumed state = %#v", pending)
+	}
+	if !table.Issue(task, 1, 9) {
+		t.Fatal("resumed call did not issue")
+	}
+	pending, _ = table.Pending(task)
+	if pending.Wake != 0 || pending.Correlation != 9 || !pending.Issued {
+		t.Fatalf("issued state = %#v", pending)
+	}
+}
+
 func TestContinuationPendingAndTimeoutWake(t *testing.T) {
 	var table ContinuationTable
 	task, _ := sched.NewTaskID(3, 1)
