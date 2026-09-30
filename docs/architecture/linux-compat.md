@@ -90,15 +90,18 @@ Syscalls map onto native primitives:
 
 | Linux | Native mechanism |
 | --- | --- |
-| `read`, `write`, `writev` on files | VFS bulk requests through the process's I/O object |
-| `read`, `write`, `writev` on stdio and pipes | stream endpoints |
-| `open`, `openat`, `close`, `lseek`, `fstat`, `getdents64` | VFS session requests plus the fd table |
+| `read`, `readv`, `write`, `writev` on files | VFS bulk requests through the process's I/O object |
+| `read`, `readv`, `write`, `writev` on stdio and pipes | stream endpoints |
+| `open`, `openat`, `close`, `lseek` | VFS session requests plus the fd table |
+| `getdents64` | VFS directory entries by the path a directory descriptor keeps |
+| `stat`, `lstat`, `fstat`, `newfstatat` | VFS stat by path or by handle; a synthetic record for streams |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
 | `pipe2` | `StreamCreate` |
 | `exit`, `exit_group` | `Exit` |
-| `clock_gettime` | `ClockReadNanos` |
+| `clock_gettime`, `nanosleep` | the kernel realtime and monotonic clocks; a timer deadline |
+| `getpid`, `getuid`, `uname`, `prlimit64` and their relatives | compatibility state and fixed bounds |
 | `execve`, `wait4` | exec request to PID 1, process handle wait |
 | `ppoll`, `poll` | `WaitAny` |
 | `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
@@ -154,7 +157,9 @@ and operation match, drops replies to calls that gave up earlier, and fails
 the call with `EIO` on anything else. It closes handles a message attached.
 
 Peer death returns `EIO` and marks the session failed; later requests fail the
-same way. The bridge opens no new session for a running process, so a VFS
+same way. The boot test proves both ends of this in the VM: a program whose
+VFS restarted gets `EIO`, and one whose request went unanswered gets
+`ETIMEDOUT` and then keeps using its session. The bridge opens no new session for a running process, so a VFS
 restart cannot hand a process authority PID 1 did not grant. A deadline expiry
 returns `ETIMEDOUT`.
 
@@ -188,8 +193,31 @@ The flags an open accepts and the errno of each refusal are in
 refused write is `EROFS`. Removing or replacing a file some session holds open
 is `EBUSY`, and a directory moves only onto a free name.
 
-`fstat`, `newfstatat`, `getdents64`, `readv`, `ftruncate`, and `fsync` are not
-implemented.
+- `stat`, `lstat`, `fstat`, and `newfstatat` translate a VFS stat into a
+  hand-laid-out `struct stat` (ADR 0142). Mode, owner, and link count are
+  synthetic presentation. `st_dev` and `st_ino` come from the VFS mount and
+  node identity, so two names of one file compare equal.
+- `readv` reads once and fills its elements in order, from a stream or a
+  file.
+
+- `getdents64` lists a directory descriptor one VFS entry per exchange and
+  packs whole `linux_dirent64` records (ADR 0143). The listing position is
+  the VFS cursor in the directory's description.
+- `readv` and `writev` take 16 elements and 64 KiB per call, with every
+  element checked before a byte moves (ADR 0144).
+
+`ftruncate`, `fsync`, and `statx` are not implemented.
+
+### Identity and time
+
+`getpid`, `gettid`, `getppid`, the four user and group calls, `uname`,
+`clock_gettime`, `nanosleep`, and `prlimit64` answer from kernel state with no
+service (ADR 0145). The PID is the compatibility PID, the parent is 1, and the
+user and group are 1000; none of them is GoOS authority. `uname` names the
+Linux ABI and the GoOS release that implements it. `clock_gettime` reads the
+GoOS realtime and monotonic clocks. `nanosleep` blocks on a timer deadline
+through the syscall continuation and never ends early. `prlimit64` reports
+the descriptor table, stack, and `brk` bounds and accepts no change.
 
 ### Path model
 
@@ -258,15 +286,17 @@ pinned musl (ADR 0139). `userspace/linux/README.md` records the toolchain, the
 build recipe, the checksum, and the syscall trace. PID 1 launches it in
 `/system/linux` with two arguments and two environment variables, reads its
 complete output, and requires exit status zero before it publishes
-`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, and
-`LINUX_FILE_IO_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
+`LINUX_MUSL_OK`, `LINUX_VFS_SESSION_OK`, `LINUX_PATH_OK`, `LINUX_FILE_IO_OK`,
+`LINUX_STAT_OK`, `LINUX_DIRENT_OK`, and `LINUX_SYSTEM_OK`. `userspace/linux/run-on-linux.sh` runs the same binary on
 a Linux kernel, where it prints the same lines.
 
 The program reaches `main` through `__libc_start_main`. It checks `argv` and
 `envp`, a TLS image with initialized and zero-filled data behind FS, `malloc`
 through both `brk` and `mmap`, buffered stdio flushed at exit, an open/close
 round trip on its VFS session, its own image under several relative
-spellings, and file I/O and naming in a scratch directory under `/tmp`. musl startup needs `arch_prctl`,
+spellings, and in a scratch directory under `/tmp` file I/O, file status,
+stdio, directory listing, vector I/O, and naming. Last it checks its identity,
+the system name, the clocks, a limit, and a sleep. musl startup needs `arch_prctl`,
 `set_tid_address`, and `writev`. Its terminal probe, `ioctl(TIOCGWINSZ)`, gets
 `ENOSYS`, which musl reads as "no terminal".
 

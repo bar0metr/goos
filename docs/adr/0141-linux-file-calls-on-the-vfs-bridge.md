@@ -87,7 +87,8 @@ flags.
 
 ## Consequences
 
-`fstat`, `newfstatat`, and `getdents64` can build on the stat exchange and the
-directory records without new transport. `readv`, `ftruncate`, and `fsync`
-are not implemented and return `ENOSYS`. A program that reads a file through
-musl stdio needs `readv` first.
+ADR 0142 adds the stat calls on the stat exchange and ADR 0143 `getdents64`
+on the directory records. `readv` reads a file
+through the same memory object: one read, delivered across the vector's
+elements in order. `ftruncate` and `fsync` are not implemented and return
+`ENOSYS`.

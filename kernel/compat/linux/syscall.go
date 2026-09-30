@@ -37,13 +37,18 @@ type Handler interface {
 	Read(Request) Result
 	Write(Request) Result
 	Close(Request) Result
+	Readv(Request) Result
 	Writev(Request) Result
 	Open(Request) Result
 	Openat(Request) Result
 	SetTidAddress(Request) Result
-	// Filesystem serves the position and path calls: lseek, getcwd, chdir,
-	// and the calls that create, remove, and rename names.
+	// Filesystem serves the status, position, and path calls: the stat
+	// family, getdents64, lseek, getcwd, chdir, and the calls that create,
+	// remove, and rename names.
 	Filesystem(Request) Result
+	// System serves the identity, time, and limit calls, which answer from
+	// kernel state without asking a service.
+	System(Request) Result
 	Brk(Request) Result
 	Mmap(Request) Result
 	Munmap(Request) Result
@@ -84,6 +89,8 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 			return handler.Write(request)
 		case abi.SysClose:
 			return handler.Close(request)
+		case abi.SysReadv:
+			return handler.Readv(request)
 		case abi.SysWritev:
 			return handler.Writev(request)
 		case abi.SysOpen:
@@ -92,7 +99,10 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 			return handler.Openat(request)
 		case abi.SysSetTidAddress:
 			return handler.SetTidAddress(request)
-		case abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
+		case abi.SysGetpid, abi.SysGettid, abi.SysGetppid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid,
+			abi.SysUname, abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64:
+			return handler.System(request)
+		case abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
 			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2:
 			return handler.Filesystem(request)
 		case abi.SysBrk:

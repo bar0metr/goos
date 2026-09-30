@@ -505,13 +505,24 @@ truncation, append, and directory descriptors; file `read`, `write`, and
 musl's legacy numbers. The musl fixture runs the same checks on Linux and on
 GoOS and prints the same result.
 
+`stat`, `lstat`, `fstat`, and `newfstatat` fill a hand-laid-out `struct stat`
+with synthetic mode, owner, and link count and with the VFS mount and node
+identity as `st_dev` and `st_ino`. `readv` serves streams and files, so musl
+stdio reads files. The boot test runs a Linux program through a VFS restart
+and through a VFS that answers late.
+
+`getdents64` lists directory descriptors in whole `linux_dirent64` records.
+`readv` and `writev` have fixed bounds of 16 elements and 64 KiB. `getpid`
+and its relatives, `uname`, `clock_gettime`, `nanosleep`, and `prlimit64`
+answer from kernel state.
+
 Order for the remaining release work:
 
-1. `stat` translation: `fstat`, `newfstatat`, and the legacy `stat` and
-   `lstat` numbers;
-2. `getdents64` on directory descriptors;
-3. `readv`, which musl stdio needs to read a file;
-4. selected static BusyBox applets as measured P1 interoperability.
+1. the terminal `ioctl` subset and `dup`/`fcntl`, as BusyBox applets measure
+   the need;
+2. selected static BusyBox applets as measured P1 interoperability;
+3. hardening: quota exhaustion, kill while blocked, concurrent processes,
+   and latency measurements.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

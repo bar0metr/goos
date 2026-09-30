@@ -299,6 +299,9 @@ func userspaceMain() {
 				// The files the session left open close with it, before its
 				// slot, and with it its owner number, can be reused.
 				service.CloseSession(sessionOwner(index))
+				if validation.Enabled {
+					releaseWithheld(sessionOwner(index), session, false)
+				}
 				sys.HandleClose(handle.ID(session))
 				sessions[index] = 0
 				liveSessions--
@@ -379,6 +382,9 @@ func pollControl() bool {
 func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 
 func serve(owner vfs.Owner, session uint64, message ipc.Message) {
+	if validation.Enabled {
+		releaseWithheld(owner, session, true)
+	}
 	request, ok := vfs.DecodeRequest(message)
 	// A bulk operation, and a request whose paths or listed name travel in
 	// memory, carry exactly one handle, and nothing else carries any.
@@ -424,7 +430,45 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
+	if validation.Enabled && withhold(owner, request, reply) {
+		return
+	}
 	send(session, reply)
+}
+
+// stallPath is a name the validation build answers late. A request for it
+// gets no reply until the same session sends its next request, which lets a
+// test observe a client's deadline and then the late reply it must discard.
+// The normal build has no such name.
+const stallPath = "/tmp/.validation-vfs-stall"
+
+var (
+	withheld    [maxSessions]ipc.Message
+	withholding [maxSessions]bool
+)
+
+// withhold keeps the reply to a request for stallPath and reports that it
+// did.
+func withhold(owner vfs.Owner, request vfs.Request, reply ipc.Message) bool {
+	index := int(owner) - 1
+	if index < 0 || index >= maxSessions || withholding[index] || string(request.Path) != stallPath {
+		return false
+	}
+	withheld[index], withholding[index] = reply, true
+	return true
+}
+
+// releaseWithheld sends the reply a session is owed before its next request
+// is served, or drops it when the session is gone.
+func releaseWithheld(owner vfs.Owner, session uint64, deliver bool) {
+	index := int(owner) - 1
+	if index < 0 || index >= maxSessions || !withholding[index] {
+		return
+	}
+	withholding[index] = false
+	if deliver {
+		send(session, withheld[index])
+	}
 }
 
 // serveExecutable pins a source on its first request and reads one bounded

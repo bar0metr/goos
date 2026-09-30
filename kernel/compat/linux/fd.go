@@ -96,6 +96,15 @@ func (table *FDTable) Description(fd int) (*FileDescription, bool) {
 	return description, description.valid()
 }
 
+// DescriptionIndex identifies the description behind fd among those the
+// table holds. Duplicated descriptors report the same index.
+func (table *FDTable) DescriptionIndex(fd int) (int, bool) {
+	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
+		return 0, false
+	}
+	return int(table.entries[fd].description), true
+}
+
 // Duplicate adds another integer referring to the same open-file description.
 func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, bool) {
 	if table == nil || minimum < 0 || minimum >= LinuxMaxFD || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {

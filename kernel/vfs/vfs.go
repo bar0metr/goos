@@ -133,7 +133,12 @@ type MountInfo struct {
 }
 
 type openFile struct {
-	node       ramfs.NodeID
+	node ramfs.NodeID
+	// identity is the node the path named when the file was opened. A
+	// backend with open objects hands out a cookie for node, which differs
+	// from what a stat of the path reports; identity is the value both
+	// agree on. A rename moves it with the name.
+	identity   ramfs.NodeID
 	offset     uint64
 	generation uint32
 	owner      Owner
@@ -288,6 +293,7 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	if backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
 		return 0, StatusBackendError
 	}
+	identity := node
 	backend := namespace.mounts[mountIndex].backend
 	if objects, ok := backend.(ObjectBackend); ok {
 		node, backendStatus = objects.AcquireObject(node)
@@ -303,6 +309,7 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 		entry.generation = 1
 	}
 	entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
+	entry.identity = identity
 	return encodeHandle(free, entry.generation), StatusOK
 }
 
@@ -486,7 +493,8 @@ func (namespace *Namespace) Stat(path []byte) (ramfs.Stat, Status) {
 
 // StatOpen describes the file an open handle names. It follows the handle,
 // not a path, so the answer stays right after the file is renamed, and a
-// client needs no path to learn how long its open file is.
+// client needs no path to learn how long its open file is. Its ID is the one
+// a stat of the path gave when the file was opened.
 func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, Status) {
 	entry, status := namespace.file(owner, handle, 0)
 	if status != StatusOK {
@@ -495,6 +503,7 @@ func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, St
 	stat, backendStatus := namespace.mounts[entry.mount].backend.Stat(entry.node)
 	if backendStatus == ramfs.StatusOK {
 		stat.MountID = uint64(namespace.mountID(int(entry.mount)))
+		stat.ID = entry.identity
 	}
 	return stat, mapStatus(backendStatus)
 }
@@ -722,8 +731,37 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
 	if status == StatusOK {
 		namespace.invalidate()
+		namespace.follow(sourceMount, node, target)
 	}
 	return status
+}
+
+// follow gives files opened under a name that just moved the identity of the
+// new name. A backend whose node IDs are directory locations changes the ID a
+// stat of the path reports when the entry moves; an open file has to change
+// with it, or a stat by handle and a stat by path would stop agreeing.
+func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, target []byte) {
+	held := false
+	for index := range namespace.files {
+		entry := &namespace.files[index]
+		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+			held = true
+			break
+		}
+	}
+	if !held {
+		return
+	}
+	targetMount, moved, status := namespace.Resolve(target)
+	if status != StatusOK || targetMount != mountIndex || moved == previous {
+		return
+	}
+	for index := range namespace.files {
+		entry := &namespace.files[index]
+		if entry.used && entry.mount == mountIndex && entry.identity == previous {
+			entry.identity = moved
+		}
+	}
 }
 
 // Replace moves the regular file path onto target within one filesystem
@@ -777,6 +815,9 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	}
 	status = mapStatus(replacer.ReplaceName(node, parent, name))
 	namespace.invalidate()
+	if status == StatusOK {
+		namespace.follow(sourceMount, node, target)
+	}
 	return status
 }
 

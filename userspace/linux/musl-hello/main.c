@@ -7,27 +7,35 @@
  * on the VFS session PID 1 granted, and names that image through the working
  * directory in several spellings to check path resolution.
  *
- * Last it works in a scratch directory under /tmp: it creates, writes,
- * seeks, reads, appends to, truncates, renames, and removes files and
- * directories, and checks the errno of each refusal.
+ * It works in a scratch directory under /tmp: it creates, writes, seeks,
+ * reads, appends to, truncates, stats, lists, renames, and removes files and
+ * directories, reads and writes them through stdio and through vectors, and
+ * checks the errno of each refusal. Last it reads its identity, the system
+ * name, the clocks, and a limit, and sleeps.
  *
  * GoOS starts it as /system/linux/musl-hello with /system/linux as the
  * working directory. GOOS_LINUX_LONG, when set, names an existing file whose
  * path is too long for one request message; GoOS alone sets it, so it also
  * marks the run whose program image sits on a read-only mount.
  *
- * "musl-hello session-loss" is a second mode for the GoOS boot test. It
- * waits for end of input, then reports whether its VFS session still opens
- * files.
+ * Two more modes serve the GoOS boot test. "musl-hello session-loss" waits
+ * for end of input, then reports whether its VFS session still opens files.
+ * "musl-hello session-timeout" opens a name the validation VFS answers late
+ * and expects the wait to end with ETIMEDOUT and the session to keep working.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 #define IMAGE "/system/linux/musl-hello"
@@ -180,6 +188,211 @@ static int data_ok(void)
 	       !memcmp(back, "abcde", 5) && close(fd) == 0;
 }
 
+/* The bundled musl has no stat wrappers either; the calls below are the ones
+ * its stat(), lstat(), fstat(), and fstatat() make on x86_64. */
+static int status_ok(const char *self, int read_only_image)
+{
+	struct stat by_path, by_fd, other, directory, image;
+	int dirfd, fd = open("data", O_RDONLY);
+
+	if (fd != 3 || syscall(SYS_stat, "data", &by_path) != 0 ||
+	    syscall(SYS_fstat, fd, &by_fd) != 0 || close(fd) != 0)
+		return 0;
+	/* One file has one identity, by name and by descriptor. */
+	if (!S_ISREG(by_path.st_mode) || (by_path.st_mode & 0777) != 0644 ||
+	    by_path.st_size != 5 || by_fd.st_size != 5 ||
+	    by_path.st_nlink != 1 || by_path.st_blksize <= 0 ||
+	    by_path.st_ino == 0 || by_path.st_ino != by_fd.st_ino ||
+	    by_path.st_dev != by_fd.st_dev)
+		return 0;
+	if (syscall(SYS_lstat, "data", &other) != 0 ||
+	    other.st_ino != by_path.st_ino ||
+	    syscall(SYS_newfstatat, AT_FDCWD, "./data", &other, AT_SYMLINK_NOFOLLOW) != 0 ||
+	    other.st_ino != by_path.st_ino || other.st_size != 5)
+		return 0;
+	/* The directory is another node of the same filesystem. */
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (dirfd != 3 || syscall(SYS_stat, ".", &directory) != 0 ||
+	    !S_ISDIR(directory.st_mode) || directory.st_nlink < 1 ||
+	    directory.st_dev != by_path.st_dev ||
+	    directory.st_ino == by_path.st_ino ||
+	    syscall(SYS_newfstatat, dirfd, "", &other, AT_EMPTY_PATH) != 0 ||
+	    !S_ISDIR(other.st_mode) || other.st_ino != directory.st_ino ||
+	    syscall(SYS_fstat, dirfd, &other) != 0 ||
+	    other.st_ino != directory.st_ino ||
+	    syscall(SYS_newfstatat, dirfd, "data", &other, 0) != 0 ||
+	    other.st_ino != by_path.st_ino || close(dirfd) != 0)
+		return 0;
+	/* The program image is a different file. Standard output is a pipe
+	 * here and may be a terminal elsewhere. */
+	if (syscall(SYS_stat, self, &image) != 0 || !S_ISREG(image.st_mode) ||
+	    image.st_size <= 0 ||
+	    (image.st_dev == by_path.st_dev && image.st_ino == by_path.st_ino) ||
+	    (read_only_image && (image.st_mode & 0222)) ||
+	    syscall(SYS_fstat, 1, &other) != 0 ||
+	    (!S_ISFIFO(other.st_mode) && !S_ISCHR(other.st_mode)))
+		return 0;
+	errno = 0;
+	return fails(syscall(SYS_stat, "missing", &other), ENOENT) &&
+	       fails(syscall(SYS_stat, "data/", &other), ENOTDIR) &&
+	       fails(syscall(SYS_fstat, 42, &other), EBADF) &&
+	       fails(syscall(SYS_fstat, AT_FDCWD, &other), EBADF) &&
+	       fails(syscall(SYS_newfstatat, AT_FDCWD, "data", &other, 0x10000000), EINVAL) &&
+	       fails(syscall(SYS_stat, "data", (void *)8), EFAULT);
+}
+
+/* musl stdio writes with writev. It fills its buffer with read, and reads a
+ * larger request with readv: the caller's memory first, its buffer second. */
+static int stdio_ok(void)
+{
+	static const char text[] = "first\nsecond 2\n";
+	char line[32];
+	FILE *file = fopen("lines", "w");
+
+	if (!file || fprintf(file, "first\nsecond %d\n", 2) < 0 || fclose(file) != 0)
+		return 0;
+	file = fopen("lines", "r");
+	if (!file || !fgets(line, sizeof line, file) || strcmp(line, "first\n") ||
+	    !fgets(line, sizeof line, file) || strcmp(line, "second 2\n") ||
+	    fgets(line, sizeof line, file) || !feof(file))
+		return 0;
+	rewind(file);
+	if (fread(line, 1, sizeof line, file) != sizeof text - 1 ||
+	    memcmp(line, text, sizeof text - 1) || fclose(file) != 0)
+		return 0;
+	/* Standard input is at its end in every run of this mode. */
+	return fread(line, 1, sizeof line, stdin) == 0 && feof(stdin) &&
+	       unlink("lines") == 0;
+}
+
+/* The record getdents64 fills. The bundled musl has no readdir. */
+struct listed {
+	unsigned long long inode;
+	long long next;
+	unsigned short length;
+	unsigned char type;
+	char name[];
+};
+
+static int touch(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT, 0644);
+
+	return fd == 3 && close(fd) == 0;
+}
+
+static int listing_ok(void)
+{
+	static char long_name[201], buffer[512];
+	struct stat first;
+	int fd, dirfd, ok = 1;
+	long got;
+
+	/* 200 bytes fit a Linux name and no VFS reply message. */
+	memset(long_name, 'L', sizeof long_name - 1);
+	if (make_directory(AT_FDCWD, "list") != 0 || chdir("list") != 0 ||
+	    !touch("a") || !touch("b") || !touch(long_name) ||
+	    make_directory(AT_FDCWD, "d") != 0 ||
+	    syscall(SYS_stat, "a", &first) != 0)
+		return 0;
+	dirfd = open(".", O_RDONLY | O_DIRECTORY);
+	if (dirfd != 3)
+		return 0;
+	/* A 256-byte buffer holds the long name and little else, so one
+	 * listing takes several calls. The second pass follows a rewind. */
+	for (int pass = 0; pass < 2 && ok; pass++) {
+		int count = 0, found = 0;
+
+		while ((got = syscall(SYS_getdents64, dirfd, buffer, 256)) > 0) {
+			for (long at = 0; at < got;) {
+				struct listed *entry = (void *)(buffer + at);
+
+				if (entry->length < 24 || entry->length % 8 ||
+				    at + entry->length > got || entry->inode == 0)
+					return 0;
+				at += entry->length;
+				if (!strcmp(entry->name, ".") || !strcmp(entry->name, ".."))
+					continue;
+				count++;
+				if (!strcmp(entry->name, "a"))
+					found |= entry->type == DT_REG && entry->inode == first.st_ino;
+				else if (!strcmp(entry->name, "b"))
+					found |= (entry->type == DT_REG) << 1;
+				else if (!strcmp(entry->name, "d"))
+					found |= (entry->type == DT_DIR) << 2;
+				else if (!strcmp(entry->name, long_name))
+					found |= (entry->type == DT_REG) << 3;
+			}
+		}
+		ok = got == 0 && count == 4 && found == 15 &&
+		     lseek(dirfd, 0, SEEK_SET) == 0;
+	}
+	errno = 0;
+	fd = open("a", O_RDONLY);
+	ok = ok && fd == 4 &&
+	     fails(syscall(SYS_getdents64, dirfd, buffer, 16), EINVAL) &&
+	     fails(syscall(SYS_getdents64, dirfd, (void *)8, 256), EFAULT) &&
+	     fails(syscall(SYS_getdents64, fd, buffer, 256), ENOTDIR) &&
+	     fails(syscall(SYS_getdents64, 42, buffer, 256), EBADF) &&
+	     close(fd) == 0 && close(dirfd) == 0;
+	return unlink("a") == 0 && unlink("b") == 0 && unlink(long_name) == 0 &&
+	       rmdir("d") == 0 && chdir("..") == 0 && rmdir("list") == 0 && ok;
+}
+
+static int vectors_ok(int goos)
+{
+	static struct iovec many[17];
+	char first[4], second[8];
+	struct iovec out[3] = {{"vec", 3}, {"", 0}, {"tors!", 5}};
+	struct iovec in[2] = {{first, sizeof first}, {second, sizeof second}};
+	int fd = open("vector", O_RDWR | O_CREAT | O_TRUNC, 0644);
+
+	if (fd != 3 || writev(fd, out, 3) != 8 || lseek(fd, 0, SEEK_SET) != 0 ||
+	    readv(fd, in, 2) != 8 || memcmp(first, "vect", 4) ||
+	    memcmp(second, "ors!", 4) || readv(fd, in, 2) != 0)
+		return 0;
+	errno = 0;
+	if (!fails(readv(fd, in, -1), EINVAL) ||
+	    !fails(writev(fd, (void *)8, 1), EFAULT) ||
+	    !fails(readv(42, in, 2), EBADF))
+		return 0;
+	/* Linux takes 1024 elements; GoOS bounds a vector at 16. */
+	if (goos && !fails(writev(fd, many, 17), EINVAL))
+		return 0;
+	return close(fd) == 0 && unlink("vector") == 0;
+}
+
+static int system_ok(void)
+{
+	struct timespec wall, before, after, nap = {0, 20000000}, bad = {0, 1000000000};
+	struct utsname name;
+	struct rlimit files;
+	long long elapsed;
+	pid_t pid = getpid();
+
+	if (pid <= 0 || syscall(SYS_gettid) != pid || getppid() <= 0 ||
+	    getuid() != geteuid() || getgid() != getegid())
+		return 0;
+	if (uname(&name) != 0 || strcmp(name.sysname, "Linux") ||
+	    strcmp(name.machine, "x86_64") || !name.release[0] || !name.nodename[0])
+		return 0;
+	/* The sleep may run long; it must not end early. */
+	if (clock_gettime(CLOCK_REALTIME, &wall) != 0 || wall.tv_sec < 1000000000 ||
+	    time(NULL) < wall.tv_sec ||
+	    clock_gettime(CLOCK_MONOTONIC, &before) != 0 ||
+	    nanosleep(&nap, NULL) != 0 ||
+	    clock_gettime(CLOCK_MONOTONIC, &after) != 0)
+		return 0;
+	elapsed = (after.tv_sec - before.tv_sec) * 1000000000LL + after.tv_nsec - before.tv_nsec;
+	if (elapsed < nap.tv_nsec || elapsed > 5000000000LL)
+		return 0;
+	errno = 0;
+	return fails(clock_gettime(99, &wall), EINVAL) &&
+	       fails(nanosleep(&bad, NULL), EINVAL) &&
+	       getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur > 0 &&
+	       files.rlim_cur <= files.rlim_max;
+}
+
 static int names_ok(int read_only_image)
 {
 	char back[1];
@@ -202,11 +415,19 @@ static int names_ok(int read_only_image)
 	return !read_only_image || fails(make_directory(AT_FDCWD, IMAGE "-dir"), EROFS);
 }
 
-static int files_ok(const char *self)
+static int report(const char *what, int ok)
+{
+	printf("%s %s\n", what, ok ? "ok" : "failed");
+	return !ok;
+}
+
+/* Returns how many of its checks failed. */
+static int scratch_checks(const char *self)
 {
 	const char *scratch = "/tmp/linux-files";
+	int read_only_image = getenv("GOOS_LINUX_LONG") != NULL;
 	char cwd[64];
-	int ok;
+	int failed;
 
 	errno = 0;
 	if (make_directory(AT_FDCWD, scratch) != 0 ||
@@ -214,9 +435,16 @@ static int files_ok(const char *self)
 	    !fails(chdir(self), ENOTDIR) || chdir(scratch) != 0 ||
 	    !getcwd(cwd, sizeof cwd) || strcmp(cwd, scratch) ||
 	    getcwd(cwd, 4) || !fails(-1, ERANGE))
-		return 0;
-	ok = data_ok() && names_ok(getenv("GOOS_LINUX_LONG") != NULL);
-	return chdir("/system/linux") == 0 && rmdir(scratch) == 0 && ok;
+		return report("scratch directory", 0);
+	failed = report("files", data_ok());
+	failed += report("status", status_ok(self, read_only_image));
+	failed += report("stdio", stdio_ok());
+	failed += report("listing", listing_ok());
+	failed += report("vectors", vectors_ok(read_only_image));
+	failed += report("names", names_ok(read_only_image));
+	if (chdir("/system/linux") != 0 || rmdir(scratch) != 0)
+		failed += report("scratch cleanup", 0);
+	return failed;
 }
 
 static int session_loss(void)
@@ -235,6 +463,26 @@ static int session_loss(void)
 	return 0;
 }
 
+static int session_timeout(void)
+{
+	int fd;
+
+	errno = 0;
+	fd = open("/tmp/.validation-vfs-stall", O_RDONLY);
+	if (fd != -1 || errno != ETIMEDOUT) {
+		printf("stalled open: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	/* The late reply arrives with this request and must be discarded. */
+	fd = open(IMAGE, O_RDONLY);
+	if (fd != 3 || close(fd) != 0) {
+		printf("open after timeout: fd=%d errno=%d\n", fd, errno);
+		return 1;
+	}
+	puts("session timeout: ETIMEDOUT, then ok");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -242,6 +490,8 @@ int main(int argc, char **argv)
 
 	if (argc == 2 && !strcmp(argv[1], "session-loss"))
 		return session_loss();
+	if (argc == 2 && !strcmp(argv[1], "session-timeout"))
+		return session_timeout();
 	printf("argc=%d\n", argc);
 	for (int index = 1; index < argc; index++)
 		printf("argv[%d]=%s\n", index, argv[index]);
@@ -273,12 +523,8 @@ int main(int argc, char **argv)
 		puts("paths failed");
 		failed = 1;
 	}
-	if (files_ok(argv[0])) {
-		puts("files ok");
-	} else {
-		puts("files failed");
-		failed = 1;
-	}
+	failed += scratch_checks(argv[0]);
+	failed += report("system", system_ok());
 	if (!failed)
 		puts("hello from musl");
 	return failed;

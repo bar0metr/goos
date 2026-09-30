@@ -137,8 +137,10 @@ var linuxLongPath [235]byte
 
 // probeLinuxMusl runs the static musl fixture through libc startup. The
 // fixture checks its arguments, environment, TLS, heap, VFS session, path
-// resolution from its working directory, and file I/O in a scratch directory
-// under /tmp, and prints one line per result. PID 1 accepts only the complete
+// resolution from its working directory, and in a scratch directory under
+// /tmp file I/O, file status, stdio, directory listing, vector I/O, and
+// naming, then its identity, the clocks, and a sleep. It prints one line per
+// result. PID 1 accepts only the complete
 // expected output and a zero exit status.
 //
 //go:noinline
@@ -198,7 +200,7 @@ func runLinuxMusl(executable supervisor.Executable, name string, path []byte) bo
 	}
 	sys.HandleClose(handle.ID(streams[0][1]))
 	sys.HandleClose(handle.ID(streams[2][0]))
-	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nhello from musl\n")
+	printed := linuxProbeRead(streams[1][0], "argc=3\nargv[1]=one\nargv[2]=two\nvfs session ok\npaths ok\nfiles ok\nstatus ok\nstdio ok\nlisting ok\nvectors ok\nnames ok\nsystem ok\nhello from musl\n")
 	sys.HandleClose(handle.ID(streams[1][0]))
 	return waitApplicationExit(launched.ProcessHandle) == 0 && printed
 }

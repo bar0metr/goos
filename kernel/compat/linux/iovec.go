@@ -30,3 +30,18 @@ func ValidateIOVec(wire []byte, userLimit uint64) abi.Errno {
 	}
 	return 0
 }
+
+// VectorPiece locates byte position of the data a vector describes. It
+// returns the address that byte goes to and how many bytes remain in the
+// same element. Empty elements are skipped; a position at or past the end of
+// the vector has no piece.
+func VectorPiece(wire []byte, position uint64) (uint64, uint64, bool) {
+	for index := 0; index < len(wire)/abi.IOVecSize; index++ {
+		base, length := IOVecEntry(wire, index)
+		if position < length {
+			return base + position, length - position, true
+		}
+		position -= length
+	}
+	return 0, 0, false
+}

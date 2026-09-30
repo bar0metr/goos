@@ -376,7 +376,7 @@ func TestProtocolRoundTripAndReservedFields(t *testing.T) {
 
 func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 	message, ok := EncodeReply(Reply{Operation: OperationReadDir, Status: StatusOK, Kind: ramfs.KindFile,
-		Handle: 7, Size: 4, Cursor: 3, Name: []byte("motd"), Data: []byte("data"), MountID: 4,
+		Node: 7, Size: 4, Cursor: 3, Name: []byte("motd"), Data: []byte("data"), MountID: 4,
 		Created:    ramfs.Timestamp{Seconds: 10, Nanoseconds: 20, Available: true},
 		Modified:   ramfs.Timestamp{Seconds: 30, Nanoseconds: 40, Available: true},
 		Attributes: ramfs.AttrArchive, AttributesAvailable: true}, 11)
@@ -384,7 +384,7 @@ func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 		t.Fatal("reply encode failed")
 	}
 	reply, ok := DecodeReply(message)
-	if !ok || reply.Operation != OperationReadDir || reply.Kind != ramfs.KindFile || reply.Handle != 7 ||
+	if !ok || reply.Operation != OperationReadDir || reply.Kind != ramfs.KindFile || reply.Node != 7 || reply.Handle != 0 ||
 		reply.Size != 4 || reply.Cursor != 3 || string(reply.Name) != "motd" || string(reply.Data) != "data" || reply.MountID != 4 ||
 		reply.Created.Seconds != 10 || reply.Modified.Nanoseconds != 40 || reply.Attributes != ramfs.AttrArchive || !reply.AttributesAvailable {
 		t.Fatalf("unexpected reply: %#v", reply)
@@ -397,6 +397,18 @@ func TestReplyProtocolRoundTripAndReservedFields(t *testing.T) {
 	message.Payload[52], message.Payload[53], message.Payload[54], message.Payload[55] = 0, 202, 154, 59 // 1,000,000,000 ns
 	if _, ok := DecodeReply(message); ok {
 		t.Fatal("out-of-range timestamp accepted")
+	}
+	// One field carries a handle for an open and a node for a stat or a
+	// directory entry; a reply cannot claim the other.
+	opened, _ := EncodeReply(Reply{Operation: OperationOpen, Handle: 9}, 15)
+	if reply, valid := DecodeReply(opened); !valid || reply.Handle != 9 || reply.Node != 0 {
+		t.Fatalf("open reply: %#v", reply)
+	}
+	if _, ok := EncodeReply(Reply{Operation: OperationOpen, Node: 9}, 15); ok {
+		t.Fatal("open reply with a node encoded")
+	}
+	if _, ok := EncodeReply(Reply{Operation: OperationStat, Handle: 9}, 15); ok {
+		t.Fatal("stat reply with a handle encoded")
 	}
 	busy, ok := EncodeReply(Reply{Operation: OperationUnlink, Status: StatusBusy}, 12)
 	if reply, valid := DecodeReply(busy); !ok || !valid || reply.Status != StatusBusy {
