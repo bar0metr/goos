@@ -5,7 +5,6 @@ import (
 
 	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
-	"goos/kernel/process"
 	"goos/kernel/ramfs"
 	"goos/kernel/sched"
 	"goos/kernel/vfs"
@@ -208,9 +207,9 @@ func TestDirectoryDescriptionsAreBoundedAndOwned(t *testing.T) {
 }
 
 func TestProcessRemovalReleasesDirectoriesAndOffsetsAreShared(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 	directorySlots = [MaxOpenDirectories]directorySlot{}
-	if !InstallProcess(0x5000, linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4}), 0x600000, 0x4600000) {
+	if !InstallProcess(0x5000, 60, linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4}), 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	state, _ := FindProcess(0x5000)

@@ -120,8 +120,10 @@ reclamation, so a late VFS reply cannot wake a replacement task.
 The compatibility state also holds the process's VFS session and its Linux
 identity. The session is the channel PID 1 granted, a request counter, and a
 failed flag that peer death sets and nothing clears (ADR 0138). The identity
-is a PID between 2 and 32767, allocated at launch and unique among live Linux
-processes. Linux programs never see a native process or task ID. The working
+is a PID between 2 and 32767, allocated at launch and unique among running and
+zombie Linux processes. A bounded family record maps it to the generation-safe
+GoOS Process ID and retains parentage plus wait status after resource teardown
+(ADR 0154). Linux programs never see a native process or task ID. The working
 directory starts as the one the launch supplied, held in canonical form as
 the base for relative paths (ADR 0140), and `chdir` replaces it. The state
 also names the process's file I/O memory object, created at its first file

@@ -41,6 +41,28 @@ type ProcessState struct {
 	cwdLen  uint16
 }
 
+// ProcessLifecycle is the part of Linux process lifetime retained after the
+// GoOS Process has released its address space and handles.
+type ProcessLifecycle uint8
+
+const (
+	ProcessRunning ProcessLifecycle = iota + 1
+	ProcessZombie
+	ProcessReaped
+)
+
+// ProcessRecord connects a Linux-visible identity to a generation-safe GoOS
+// Process identity. Zombie records contain no address-space or handle state.
+type ProcessRecord struct {
+	PID               int32
+	GoOSProcessID     process.ID
+	ParentPID         int32
+	FamilyID          uint64
+	State             ProcessLifecycle
+	ExitStatus        uint64
+	SignalTermination int32
+}
+
 // SetCWD replaces the working directory with a canonical absolute path.
 func (state *ProcessState) SetCWD(path []byte) bool {
 	if state == nil || len(path) == 0 || len(path) > limits.PathMax || path[0] != '/' {
@@ -57,16 +79,20 @@ const (
 	MaxPID = int32(32767)
 )
 
-var nextPID = firstPID
+var (
+	nextPID      = firstPID
+	nextFamilyID = uint64(1)
+)
 
 func (state *ProcessState) CWD() []byte { return state.cwd[:state.cwdLen] }
 
 var processStates [process.MaxProcesses]ProcessState
+var processRecords [process.MaxProcesses]ProcessRecord
 
 // InstallProcess records one validated, bound Linux launch. The caller owns
 // teardown if a later launch step fails.
-func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uint64) bool {
-	if root == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
+func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, brkBase uint64, brkLimit uint64) bool {
+	if root == 0 || goosProcessID == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
 		data.HandleCount() != 4 || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax {
 		return false
 	}
@@ -99,13 +125,99 @@ func InstallProcess(root uint64, data startup.Data, brkBase uint64, brkLimit uin
 	}
 	state.Root, state.Input, state.Output = root, input, output
 	state.Error, state.VFS.Handle, state.cwdLen = errorOutput, vfsHandle, uint16(size)
-	state.PID = allocatePID()
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	if !state.FDs.Initialize(input, output, errorOutput) {
 		*state = ProcessState{}
 		return false
 	}
+	record, installed := installProcessRecord(goosProcessID, 1, 0)
+	if !installed {
+		state.FDs.CloseAll(nil)
+		*state = ProcessState{}
+		return false
+	}
+	state.PID = record.PID
 	return true
+}
+
+// RegisterChild reserves an identity for a compatibility-created GoOS
+// Process. The caller installs the child's heavy compatibility state before
+// making its task runnable.
+func RegisterChild(goosProcessID process.ID, parentPID int32) (ProcessRecord, bool) {
+	parent, found := FindProcessRecord(parentPID)
+	if !found || parent.State != ProcessRunning {
+		return ProcessRecord{}, false
+	}
+	return installProcessRecord(goosProcessID, parentPID, parent.FamilyID)
+}
+
+// RollbackProcessRecord removes a child reservation that never became
+// runnable. It refuses records that have already exited or gained children.
+func RollbackProcessRecord(goosProcessID process.ID) bool {
+	for index := range processRecords {
+		record := &processRecords[index]
+		if record.GoOSProcessID != goosProcessID || record.State != ProcessRunning {
+			continue
+		}
+		for childIndex := range processRecords {
+			if processRecords[childIndex].State != 0 && processRecords[childIndex].ParentPID == record.PID {
+				return false
+			}
+		}
+		*record = ProcessRecord{}
+		return true
+	}
+	return false
+}
+
+func installProcessRecord(goosProcessID process.ID, parentPID int32, familyID uint64) (ProcessRecord, bool) {
+	if goosProcessID == 0 || parentPID < 1 {
+		return ProcessRecord{}, false
+	}
+	free := -1
+	for index := range processRecords {
+		if processRecords[index].GoOSProcessID == goosProcessID {
+			return ProcessRecord{}, false
+		}
+		if free == -1 && processRecords[index].State == 0 {
+			free = index
+		}
+	}
+	if free == -1 {
+		return ProcessRecord{}, false
+	}
+	pid := allocatePID()
+	if familyID == 0 {
+		familyID = allocateFamilyID()
+	}
+	processRecords[free] = ProcessRecord{
+		PID:           pid,
+		GoOSProcessID: goosProcessID,
+		ParentPID:     parentPID,
+		FamilyID:      familyID,
+		State:         ProcessRunning,
+	}
+	return processRecords[free], true
+}
+
+func allocateFamilyID() uint64 {
+	for {
+		candidate := nextFamilyID
+		nextFamilyID++
+		if nextFamilyID == 0 {
+			nextFamilyID = 1
+		}
+		used := false
+		for index := range processRecords {
+			if processRecords[index].State != 0 && processRecords[index].FamilyID == candidate {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return candidate
+		}
+	}
 }
 
 // allocatePID returns the next identity no live Linux process holds. The
@@ -118,8 +230,8 @@ func allocatePID() int32 {
 			nextPID = firstPID
 		}
 		used := false
-		for index := range processStates {
-			if processStates[index].Root != 0 && processStates[index].PID == candidate {
+		for index := range processRecords {
+			if processRecords[index].State != 0 && processRecords[index].PID == candidate {
 				used = true
 				break
 			}
@@ -128,6 +240,81 @@ func allocatePID() int32 {
 			return candidate
 		}
 	}
+}
+
+// FindProcessRecord returns a copy so callers cannot mutate family state
+// without applying its lifecycle rules.
+func FindProcessRecord(pid int32) (ProcessRecord, bool) {
+	if pid >= firstPID {
+		for index := range processRecords {
+			if processRecords[index].State != 0 && processRecords[index].PID == pid {
+				return processRecords[index], true
+			}
+		}
+	}
+	return ProcessRecord{}, false
+}
+
+// ParentPIDOf returns the compatibility parent. Unknown identities use PID 1,
+// which matches Linux orphan semantics and the launch-root relationship.
+func ParentPIDOf(pid int32) int32 {
+	record, found := FindProcessRecord(pid)
+	if !found {
+		return 1
+	}
+	return record.ParentPID
+}
+
+// ReapChild consumes one zombie owned by parentPID. The returned copy records
+// the final reaped state while the registry releases the PID immediately.
+func ReapChild(parentPID int32, childPID int32) (ProcessRecord, bool) {
+	for index := range processRecords {
+		record := &processRecords[index]
+		if record.PID != childPID || record.ParentPID != parentPID || record.State != ProcessZombie {
+			continue
+		}
+		reaped := *record
+		reaped.State = ProcessReaped
+		*record = ProcessRecord{}
+		return reaped, true
+	}
+	return ProcessRecord{}, false
+}
+
+// markProcessExited retains only wait-visible state, reparents live children,
+// and removes zombies whose only reaper is conceptual PID 1.
+func markProcessExited(pid int32, exitStatus uint64, signalTermination int32) bool {
+	index := recordIndex(pid)
+	if index < 0 || processRecords[index].State != ProcessRunning {
+		return false
+	}
+	processRecords[index].State = ProcessZombie
+	processRecords[index].ExitStatus = exitStatus
+	processRecords[index].SignalTermination = signalTermination
+	for childIndex := range processRecords {
+		child := &processRecords[childIndex]
+		if child.State == 0 || child.ParentPID != pid {
+			continue
+		}
+		if child.State == ProcessZombie {
+			*child = ProcessRecord{}
+		} else {
+			child.ParentPID = 1
+		}
+	}
+	if processRecords[index].ParentPID == 1 {
+		processRecords[index] = ProcessRecord{}
+	}
+	return true
+}
+
+func recordIndex(pid int32) int {
+	for index := range processRecords {
+		if processRecords[index].State != 0 && processRecords[index].PID == pid {
+			return index
+		}
+	}
+	return -1
 }
 
 func LookupFD(root uint64, fd int) (FileDescription, bool) {
@@ -186,16 +373,41 @@ func FindProcess(root uint64) (*ProcessState, bool) {
 	return nil, false
 }
 
+// RemoveProcess rolls back compatibility state for a launch that never made
+// its task runnable.
 func RemoveProcess(root uint64) bool {
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root == root {
+				pid := processStates[index].PID
 				processStates[index].FDs.CloseAll(nil)
 				releaseDirectories(root)
 				processStates[index] = ProcessState{}
+				if record := recordIndex(pid); record >= 0 {
+					processRecords[record] = ProcessRecord{}
+				}
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// ExitProcess releases heavy compatibility state and records the Linux exit
+// for its parent. Native resource teardown remains in the kernel lifecycle.
+func ExitProcess(root uint64, exitStatus uint64, signalTermination int32) bool {
+	if root == 0 {
+		return false
+	}
+	for index := range processStates {
+		if processStates[index].Root != root {
+			continue
+		}
+		pid := processStates[index].PID
+		processStates[index].FDs.CloseAll(nil)
+		releaseDirectories(root)
+		processStates[index] = ProcessState{}
+		return markProcessExited(pid, exitStatus, signalTermination)
 	}
 	return false
 }

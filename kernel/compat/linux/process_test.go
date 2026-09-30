@@ -10,9 +10,9 @@ import (
 )
 
 func TestProcessStateRetainsLaunchAuthority(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 	data := linuxStartup(t, "/persist/work", [4]handle.ID{11, 12, 13, 14})
-	if !InstallProcess(0x4000, data, 0x600000, 0x4600000) || InstallProcess(0x4000, data, 0x600000, 0x4600000) {
+	if !InstallProcess(0x4000, 10, data, 0x600000, 0x4600000) || InstallProcess(0x4000, 11, data, 0x600000, 0x4600000) {
 		t.Fatal("state install did not enforce unique root")
 	}
 	state, found := FindProcess(0x4000)
@@ -25,31 +25,39 @@ func TestProcessStateRetainsLaunchAuthority(t *testing.T) {
 			t.Fatalf("startup fd %d missing", fd)
 		}
 	}
+	record, found := FindProcessRecord(state.PID)
+	if !found || record.GoOSProcessID != 10 || record.ParentPID != 1 || record.FamilyID == 0 || record.State != ProcessRunning {
+		t.Fatalf("record = %#v", record)
+	}
+	pid := state.PID
 	if !RemoveProcess(0x4000) {
 		t.Fatal("state removal failed")
 	}
 	if _, found := FindProcess(0x4000); found || RemoveProcess(0x4000) {
 		t.Fatal("removed state remained visible")
 	}
+	if _, found := FindProcessRecord(pid); found {
+		t.Fatal("removed process kept its compatibility identity")
+	}
 }
 
 func TestProcessStateIsBounded(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
 	for index := range processStates {
-		if !InstallProcess(uint64(index+1), data, 0x600000, 0x4600000) {
+		if !InstallProcess(uint64(index+1), process.ID(index+1), data, 0x600000, 0x4600000) {
 			t.Fatalf("install %d failed", index)
 		}
 	}
-	if InstallProcess(uint64(len(processStates)+1), data, 0x600000, 0x4600000) {
+	if InstallProcess(uint64(len(processStates)+1), process.ID(len(processStates)+1), data, 0x600000, 0x4600000) {
 		t.Fatal("over-capacity state installed")
 	}
 }
 
 func TestProcessFDExhaustionIsEMFILE(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
-	if !InstallProcess(0x5000, data, 0x600000, 0x4600000) {
+	if !InstallProcess(0x5000, 20, data, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	for fd := 3; fd < LinuxMaxFD; fd++ {
@@ -85,10 +93,10 @@ func linuxStartup(t *testing.T, cwd string, ids [4]handle.ID) startup.Data {
 }
 
 func TestCompatibilityPIDsAreDistinctAndBounded(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
 	nextPID = MaxPID
-	if !InstallProcess(0x1000, data, 0x600000, 0x4600000) || !InstallProcess(0x2000, data, 0x600000, 0x4600000) {
+	if !InstallProcess(0x1000, 30, data, 0x600000, 0x4600000) || !InstallProcess(0x2000, 31, data, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	first, _ := FindProcess(0x1000)
@@ -98,20 +106,19 @@ func TestCompatibilityPIDsAreDistinctAndBounded(t *testing.T) {
 	}
 	// The counter returns to a live PID and must step past it.
 	nextPID = MaxPID
-	if !InstallProcess(0x3000, data, 0x600000, 0x4600000) {
+	if !InstallProcess(0x3000, 32, data, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	if third, _ := FindProcess(0x3000); third.PID != firstPID+1 {
 		t.Fatalf("pid = %d, want the first free value", third.PID)
 	}
-	processStates = [process.MaxProcesses]ProcessState{}
-	nextPID = firstPID
+	resetCompatibilityProcesses()
 }
 
 func TestCloseFDReportsTheLastReference(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
-	if !InstallProcess(0x6000, data, 0x600000, 0x4600000) {
+	if !InstallProcess(0x6000, 40, data, 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	state, _ := FindProcess(0x6000)
@@ -141,16 +148,144 @@ func TestCloseFDReportsTheLastReference(t *testing.T) {
 	if _, errno := AllocateFD(0x6000, FileDescription{Kind: FDVFSFile, Object: 1}, false); errno != abi.EMFILE {
 		t.Fatalf("full table errno = %d", errno)
 	}
-	processStates = [process.MaxProcesses]ProcessState{}
+	resetCompatibilityProcesses()
 }
 
 func TestWorkingDirectoryIsStoredCanonical(t *testing.T) {
-	processStates = [process.MaxProcesses]ProcessState{}
-	if !InstallProcess(0x8000, linuxStartup(t, "/persist//work/./deep/..", [4]handle.ID{1, 2, 3, 4}), 0x600000, 0x4600000) {
+	resetCompatibilityProcesses()
+	if !InstallProcess(0x8000, 50, linuxStartup(t, "/persist//work/./deep/..", [4]handle.ID{1, 2, 3, 4}), 0x600000, 0x4600000) {
 		t.Fatal("install failed")
 	}
 	if state, _ := FindProcess(0x8000); string(state.CWD()) != "/persist/work" {
 		t.Fatalf("cwd = %q", state.CWD())
 	}
+	resetCompatibilityProcesses()
+}
+
+func TestProcessFamilyLifecycle(t *testing.T) {
+	resetCompatibilityProcesses()
+	root, ok := installProcessRecord(100, 1, 0)
+	if !ok {
+		t.Fatal("root registration failed")
+	}
+	child, ok := RegisterChild(101, root.PID)
+	if !ok {
+		t.Fatal("child registration failed")
+	}
+	grandchild, ok := RegisterChild(102, child.PID)
+	if !ok || child.FamilyID != root.FamilyID || grandchild.FamilyID != root.FamilyID || ParentPIDOf(grandchild.PID) != child.PID {
+		t.Fatalf("child=%#v grandchild=%#v", child, grandchild)
+	}
+	if !markProcessExited(child.PID, 17, 0) {
+		t.Fatal("child exit failed")
+	}
+	zombie, found := FindProcessRecord(child.PID)
+	if !found || zombie.State != ProcessZombie || zombie.ExitStatus != 17 || ParentPIDOf(grandchild.PID) != 1 {
+		t.Fatalf("zombie=%#v grandchild ppid=%d", zombie, ParentPIDOf(grandchild.PID))
+	}
+	nextPID = child.PID
+	replacement, ok := RegisterChild(103, root.PID)
+	if !ok || replacement.PID == child.PID {
+		t.Fatalf("replacement = %#v", replacement)
+	}
+	reaped, ok := ReapChild(root.PID, child.PID)
+	if !ok || reaped.State != ProcessReaped || reaped.ExitStatus != 17 {
+		t.Fatalf("reaped = %#v", reaped)
+	}
+	nextPID = child.PID
+	reused, ok := RegisterChild(104, root.PID)
+	if !ok || reused.PID != child.PID {
+		t.Fatalf("reused = %#v", reused)
+	}
+}
+
+func TestOrphanZombiesAreReaped(t *testing.T) {
+	resetCompatibilityProcesses()
+	root, _ := installProcessRecord(200, 1, 0)
+	zombie, _ := RegisterChild(201, root.PID)
+	running, _ := RegisterChild(202, root.PID)
+	if !markProcessExited(zombie.PID, 0, 9) {
+		t.Fatal("child exit transition failed")
+	}
+	exited, found := FindProcessRecord(zombie.PID)
+	if !found || exited.SignalTermination != 9 {
+		t.Fatalf("exited child = %#v", exited)
+	}
+	if !markProcessExited(root.PID, 0, 0) {
+		t.Fatal("exit transition failed")
+	}
+	if _, found := FindProcessRecord(root.PID); found {
+		t.Fatal("launch root remained as a zombie")
+	}
+	if _, found := FindProcessRecord(zombie.PID); found {
+		t.Fatal("orphan zombie remained reserved")
+	}
+	orphan, found := FindProcessRecord(running.PID)
+	if !found || orphan.ParentPID != 1 || orphan.State != ProcessRunning {
+		t.Fatalf("orphan = %#v", orphan)
+	}
+	nextPID = root.PID
+	newRoot, ok := installProcessRecord(203, 1, 0)
+	if !ok || newRoot.PID != root.PID || newRoot.FamilyID == orphan.FamilyID {
+		t.Fatalf("new root = %#v orphan = %#v", newRoot, orphan)
+	}
+	if !markProcessExited(orphan.PID, 0, 15) {
+		t.Fatal("orphan exit failed")
+	}
+	if _, found := FindProcessRecord(orphan.PID); found {
+		t.Fatal("orphan exit was not reaped")
+	}
+}
+
+func TestProcessFamilyRejectsInvalidRelations(t *testing.T) {
+	resetCompatibilityProcesses()
+	root, _ := installProcessRecord(300, 1, 0)
+	if _, ok := RegisterChild(300, root.PID); ok {
+		t.Fatal("duplicate GoOS process identity accepted")
+	}
+	if _, ok := RegisterChild(301, MaxPID); ok {
+		t.Fatal("missing parent accepted")
+	}
+	reserved, ok := RegisterChild(301, root.PID)
+	if !ok || !RollbackProcessRecord(301) {
+		t.Fatal("child reservation rollback failed")
+	}
+	if _, found := FindProcessRecord(reserved.PID); found || RollbackProcessRecord(301) {
+		t.Fatal("rolled-back child remained registered")
+	}
+	if _, ok := ReapChild(root.PID, root.PID); ok {
+		t.Fatal("running process reaped")
+	}
+	if ParentPIDOf(MaxPID) != 1 {
+		t.Fatal("unknown process did not use init parent")
+	}
+}
+
+func TestExitProcessReleasesHeavyState(t *testing.T) {
+	resetCompatibilityProcesses()
+	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
+	if !InstallProcess(0x9000, 400, data, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	state, _ := FindProcess(0x9000)
+	pid := state.PID
+	if !ExitProcess(0x9000, 23, 0) {
+		t.Fatal("exit failed")
+	}
+	if _, found := FindProcess(0x9000); found {
+		t.Fatal("exit retained heavy compatibility state")
+	}
+	if _, found := FindProcessRecord(pid); found {
+		t.Fatal("PID 1 child remained as a zombie")
+	}
+	if ExitProcess(0x9000, 23, 0) {
+		t.Fatal("duplicate exit succeeded")
+	}
+}
+
+func resetCompatibilityProcesses() {
 	processStates = [process.MaxProcesses]ProcessState{}
+	processRecords = [process.MaxProcesses]ProcessRecord{}
+	nextPID = firstPID
+	nextFamilyID = 1
 }

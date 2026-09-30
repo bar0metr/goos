@@ -51,7 +51,7 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		// One task per process: the thread ID is the process ID.
 		return linuxcompat.Result{Value: uint64(state.PID)}
 	case linuxabi.SysGetppid:
-		return linuxcompat.Result{Value: linuxcompat.ParentPID}
+		return linuxcompat.Result{Value: uint64(linuxcompat.ParentPIDOf(state.PID))}
 	case linuxabi.SysGetuid, linuxabi.SysGeteuid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.StatUID)}
 	case linuxabi.SysGetgid, linuxabi.SysGetegid:
