@@ -107,6 +107,10 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	}
 	if frame.Action == linuxabi.ActionReturn {
 		deliverLinuxSignals(frame, linuxHandler.task)
+		// A temporary mask no handler took over ends with the call.
+		if state, found := linuxcompat.FindProcess(frame.Root); found {
+			state.Signals.EndMaskSwap()
+		}
 	}
 	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
 		linuxSyscallFrameRejections++

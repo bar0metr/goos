@@ -430,6 +430,10 @@ func TestForkProcessSharesDescriptionsAndCopiesState(t *testing.T) {
 	if _, found := LookupFD(0xa000, file); !found {
 		t.Fatal("child close removed the parent's descriptor")
 	}
+	var roots [4]uint64
+	if count := FamilyRoots(parent.FamilyID, roots[:]); count != 2 || roots[0]+roots[1] != 0xa000+0xb000 {
+		t.Fatalf("family roots = %d %#x", count, roots)
+	}
 	child.HoldVforkParent(7)
 	if child.ReleaseVforkParent() != 7 || child.ReleaseVforkParent() != 0 {
 		t.Fatal("the vfork parent was not released exactly once")

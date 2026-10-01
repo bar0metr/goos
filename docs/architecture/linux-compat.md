@@ -361,6 +361,8 @@ is at the other end. libc therefore buffers output in blocks.
 PID 1 may classify native magic versus ELF magic, but the kernel independently
 validates the selected format. A Linux launch receives only supplied standard
 streams, one fresh VFS session, argv, environment, cwd, and a resource profile.
+PID 1 gives it `PATH=/system/linux` in place of the native default
+`PATH=/system/bin`, which holds images Linux `execve` refuses (ADR 0171).
 It receives no device, loader, system-image, PID 1 launch, DMA, IRQ, port,
 framebuffer, raw-keyboard, or kernel-log authority (ADR 0136).
 
@@ -424,12 +426,13 @@ user half, is `EFAULT` (ADR 0147, ADR 0150). `mmap`
 and `brk` refuse what the page quota cannot back, so exhaustion is `ENOMEM`
 at the call. A full descriptor table is `EMFILE`. Ctrl-C ends a Linux process
 through the native kill path: its continuation, its waits, its descriptors,
-and its VFS session go with it, and no Linux signal is delivered.
+and its VFS session go with it, and no Linux signal is delivered. Ending a
+launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, process groups, threads, `ppoll`, `select`,
+Dynamic linking, glibc, process groups, threads, `select`,
 nonblocking pipes, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not

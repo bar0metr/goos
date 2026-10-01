@@ -78,6 +78,42 @@ func CommandFromSystemPath(path []byte) ([]byte, bool) {
 	return command, true
 }
 
+// nativePathVariable is the PATH the shell gives every command, and
+// linuxPathVariable the one a Linux program gets instead. The native search
+// root holds native images, which Linux execve refuses, so a Linux program
+// searches the Linux fixture directory.
+var (
+	nativePathVariable = []byte("PATH=" + SearchRoot[:len(SearchRoot)-1])
+	linuxPathVariable  = []byte("PATH=" + LinuxRoot[:len(LinuxRoot)-1])
+)
+
+// LinuxEnvironmentEntry returns the environment entry a Linux program gets
+// for one entry of a launch request: the native default PATH becomes the
+// Linux one, and every other entry is kept.
+func LinuxEnvironmentEntry(entry []byte) []byte {
+	if string(entry) == string(nativePathVariable) {
+		return linuxPathVariable
+	}
+	return entry
+}
+
+// LinuxPathMissing reports whether a launch request names no PATH, so a
+// Linux program must be given the Linux one.
+func LinuxPathMissing(environment List) bool {
+	for offset, index := 0, 0; index < environment.Count(); index++ {
+		var entry []byte
+		entry, offset = environment.Next(offset)
+		if len(entry) >= 5 && string(entry[:5]) == "PATH=" {
+			return false
+		}
+	}
+	return true
+}
+
+// LinuxPathVariable is the PATH a Linux program gets when the request names
+// none.
+func LinuxPathVariable() []byte { return linuxPathVariable }
+
 // LinuxSystemPath reports whether path names a direct child of the immutable
 // Linux fixture directory. Native services elsewhere under /system remain
 // unavailable to shell launch requests.

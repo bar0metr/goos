@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/timekeeping"
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
 	linuxcompat "goos/kernel/compat/linux"
@@ -20,15 +21,27 @@ var (
 	linuxPollEntries [linuxcompat.LinuxMaxPollFD]kernelwait.Entry
 )
 
-// Poll reports which of a bounded set of descriptors are ready. When none is
-// and the timeout allows, the task sleeps on the native readiness of every
-// stream it names, with a timer for a finite timeout, and scans again when
-// any of them, the timer, or a signal with a handler wakes it. Regular files
-// and devices are always ready. A descriptor that is not open is POLLNVAL in
-// its entry; the call itself does not fail for it.
+// Poll serves poll and ppoll. It reports which of a bounded set of
+// descriptors are ready. When none is and the timeout allows, the task sleeps
+// on the native readiness of every stream it names, with a timer for a finite
+// timeout, and scans again when any of them, the timer, or a signal with a
+// handler wakes it. Regular files and devices are always ready. A descriptor
+// that is not open is POLLNVAL in its entry; the call itself does not fail
+// for it.
+//
+// ppoll takes its timeout as a timespec and may install a temporary signal
+// mask for the call. The mask comes back when the call returns, except on
+// EINTR: the handler that interrupted the call runs under the temporary mask
+// and its return gives the old one back.
 func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.Result {
+	state, found := linuxcompat.FindProcess(handler.root)
+	if !found {
+		return linuxErrno(linuxabi.EBADF)
+	}
+	masked := request.Number == linuxabi.SysPpoll
 	address, count := request.Arguments[0], request.Arguments[1]
-	end, finite := linuxcompat.PollTimeoutNanos(int32(request.Arguments[2]))
+	var end uint64
+	finite := true
 	pending, active := linuxcompat.SyscallContinuations.Pending(handler.task)
 	if active {
 		if pending.Number != request.Number || pending.Arguments != request.Arguments {
@@ -37,23 +50,28 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 		}
 		waitAnyTable.Cancel(handler.task)
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
-		if pending.Wake == linuxcompat.WakeInterrupted {
-			return linuxErrno(linuxabi.EINTR)
+		end, finite = pending.Note, request.Arguments[2] != 0
+		if !masked {
+			_, finite = linuxcompat.PollTimeoutNanos(int32(request.Arguments[2]))
 		}
-		end = pending.Note
-	} else if finite && end != 0 {
-		end += nowNanos()
+		if pending.Wake == linuxcompat.WakeInterrupted {
+			return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINTR))
+		}
+	} else {
+		var errno linuxabi.Errno
+		if end, finite, errno = handler.pollTimeout(state, request); errno != 0 {
+			return linuxErrno(errno)
+		}
+		if finite && end != 0 {
+			end += nowNanos()
+		}
 	}
 	if count > linuxcompat.LinuxMaxPollFD {
-		return linuxErrno(linuxabi.EINVAL)
+		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINVAL))
 	}
 	wire := linuxPollWire[:count*linuxcompat.PollFDSize]
 	if count != 0 && !vm.CopyIn(handler.root, address, wire) {
-		return linuxErrno(linuxabi.EFAULT)
-	}
-	state, found := linuxcompat.FindProcess(handler.root)
-	if !found {
-		return linuxErrno(linuxabi.EBADF)
+		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
 	}
 	ready, interests := uint64(0), 0
 	for index := 0; index < int(count); index++ {
@@ -70,9 +88,13 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 	expired := finite && (end == 0 || now >= end)
 	if ready != 0 || expired {
 		if count != 0 && !vm.CopyOut(handler.root, address, wire) {
-			return linuxErrno(linuxabi.EFAULT)
+			return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EFAULT))
 		}
-		return linuxcompat.Result{Value: ready}
+		return handler.pollReturn(state, request, end, linuxcompat.Result{Value: ready})
+	}
+	// A handled signal the mask lets through ends the call before it sleeps.
+	if state.Signals.Interrupting() {
+		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.EINTR))
 	}
 	deadline := uint64(0)
 	if finite {
@@ -85,9 +107,67 @@ func (handler *linuxCallHandler) Poll(request linuxcompat.Request) linuxcompat.R
 		!linuxcompat.SyscallContinuations.Block(handler.task, 1) {
 		waitAnyTable.Cancel(handler.task)
 		linuxcompat.SyscallContinuations.Cancel(handler.task)
-		return linuxErrno(linuxabi.ENOMEM)
+		return handler.pollReturn(state, request, end, linuxErrno(linuxabi.ENOMEM))
 	}
 	return linuxBlocked
+}
+
+// pollTimeout reads the timeout of poll or ppoll and installs the temporary
+// mask of ppoll. It returns the timeout in nanoseconds from now, or finite
+// false for no limit.
+func (handler *linuxCallHandler) pollTimeout(state *linuxcompat.ProcessState, request linuxcompat.Request) (uint64, bool, linuxabi.Errno) {
+	if request.Number != linuxabi.SysPpoll {
+		end, finite := linuxcompat.PollTimeoutNanos(int32(request.Arguments[2]))
+		return end, finite, 0
+	}
+	if request.Arguments[3] != 0 {
+		if request.Arguments[4] != linuxcompat.SignalSetSize {
+			return 0, false, linuxabi.EINVAL
+		}
+		if !vm.CopyIn(handler.root, request.Arguments[3], linuxSignalSet[:]) {
+			return 0, false, linuxabi.EFAULT
+		}
+	}
+	if request.Arguments[2] == 0 {
+		if request.Arguments[3] != 0 {
+			state.Signals.SwapMask(linuxcompat.DecodeSignalSet(&linuxSignalSet))
+		}
+		return 0, false, 0
+	}
+	if !vm.CopyIn(handler.root, request.Arguments[2], linuxTimespec[:]) {
+		return 0, false, linuxabi.EFAULT
+	}
+	if _, errno := linuxcompat.SleepTicks(&linuxTimespec, clock.TicksPerSecond, linuxSleepTicks); errno != 0 {
+		return 0, false, errno
+	}
+	if request.Arguments[3] != 0 {
+		state.Signals.SwapMask(linuxcompat.DecodeSignalSet(&linuxSignalSet))
+	}
+	return linuxcompat.SleepNanos(&linuxTimespec), true, 0
+}
+
+// pollReturn ends a poll or ppoll that does not sleep. ppoll writes the time
+// left to its timespec and, unless a handler is about to interrupt it, gives
+// back the mask it replaced.
+func (handler *linuxCallHandler) pollReturn(state *linuxcompat.ProcessState, request linuxcompat.Request, end uint64, result linuxcompat.Result) linuxcompat.Result {
+	if request.Number != linuxabi.SysPpoll {
+		return result
+	}
+	if result.Errno != linuxabi.EINTR {
+		state.Signals.EndMaskSwap()
+	}
+	if request.Arguments[2] != 0 {
+		remaining, now := uint64(0), nowNanos()
+		if end > now {
+			remaining = end - now
+		}
+		putUint64(linuxTimespec[0:8], remaining/uint64(timekeeping.NanosPerSecond))
+		putUint64(linuxTimespec[8:16], remaining%uint64(timekeeping.NanosPerSecond))
+		if !vm.CopyOut(handler.root, request.Arguments[2], linuxTimespec[:]) && result.Errno == 0 {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+	}
+	return result
 }
 
 // pollDescriptor evaluates one pollfd. watch reports a stream end that is not

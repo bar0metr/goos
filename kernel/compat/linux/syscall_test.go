@@ -117,7 +117,7 @@ func TestDispatchRoutesImplementedCalls(t *testing.T) {
 		abi.SysSetgid, abi.SysGetgroups, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
 		abi.SysPread64, abi.SysPwrite64, abi.SysStatx, abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom, abi.SysExecve,
-		abi.SysFork, abi.SysVfork, abi.SysClone, abi.SysWait4, abi.SysPipe, abi.SysPipe2, abi.SysRtSigreturn, abi.SysKill, abi.SysTkill, abi.SysTgkill, abi.SysPoll,
+		abi.SysFork, abi.SysVfork, abi.SysClone, abi.SysWait4, abi.SysPipe, abi.SysPipe2, abi.SysRtSigreturn, abi.SysKill, abi.SysTkill, abi.SysTgkill, abi.SysPoll, abi.SysPpoll,
 	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)
 		if handler.called != syscall {

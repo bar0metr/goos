@@ -11,6 +11,7 @@ import (
 )
 
 var (
+	linuxFamilyRoots    [linuxcompat.LinuxFamilyMaxProcesses]uint64
 	linuxSignalFrame    [linuxcompat.SignalFrameSize]byte
 	linuxSignalUContext [linuxcompat.UContextSize]byte
 )
@@ -216,9 +217,9 @@ func (handler *linuxCallHandler) interrupted(restartable bool) linuxcompat.Resul
 
 // interruptLinuxSleeper wakes the task of state from an interruptible wait
 // once a signal with a handler is pending for it: a stream read or write,
-// wait4, nanosleep, or poll. A VFS exchange, a queued VFS request, and a
-// vfork parent keep waiting, as Linux file I/O and vfork do. A signal that
-// would end the process has already ended it.
+// wait4, nanosleep, poll, or ppoll. A VFS exchange, a queued VFS request,
+// and a vfork parent keep waiting, as Linux file I/O and vfork do. A signal
+// that would end the process has already ended it.
 func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
 	if !state.Signals.Interrupting() {
 		return
@@ -239,10 +240,32 @@ func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
 		}
 	case linuxabi.SysWait4:
 		linuxcompat.ReleaseChildWaiter(state.PID)
-	case linuxabi.SysNanosleep, linuxabi.SysPoll:
+	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll:
 		waitAnyTable.Cancel(task)
 	default:
 		return
 	}
 	resumeLinuxSyscall(task, pending.Correlation, linuxcompat.WakeInterrupted)
+}
+
+// killLinuxFamily ends every other member of the family a launch root leads,
+// as SIGKILL would. Ending the root from the native shell ends the job, and
+// no descendant outlives it. Each member's exit then follows the ordinary
+// path: zombie records, SIGCHLD, and wakes.
+func killLinuxFamily(root uint64) {
+	state, found := linuxcompat.FindProcess(root)
+	if !found || state.Forked {
+		return
+	}
+	count := linuxcompat.FamilyRoots(state.FamilyID, linuxFamilyRoots[:])
+	for index := 0; index < count; index++ {
+		member, alive := processRegistry.ByRoot(linuxFamilyRoots[index])
+		if !alive || linuxFamilyRoots[index] == root {
+			continue
+		}
+		for _, task := range member.Tasks() {
+			cancelTaskWaits(task)
+			amd64.TerminateTask(uint64(task), linuxcompat.SignalExitCode(linuxabi.SignalKill))
+		}
+	}
 }

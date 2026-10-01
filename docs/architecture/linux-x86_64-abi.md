@@ -29,7 +29,7 @@ an errno; nothing is accepted and ignored.
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
-| `poll(7)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
+| `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address; no fixed, file-backed, or executable mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
@@ -80,7 +80,7 @@ BusyBox does about it:
 | `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `ppoll(271)`, `futex(202)` | no masked polling or threads inside a process |
+| `futex(202)` | no threads inside a process |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
@@ -424,16 +424,6 @@ and `poll` always fail with `EINTR`; `nanosleep` reports the time left.
 operation waiting for the VFS is not interrupted, as Linux does not interrupt
 regular-file I/O (ADR 0167).
 
-## Polling
-
-`poll` takes at most 64 entries. A stream read end is ready with bytes in it
-and reports `POLLHUP` when its writers are gone and it is empty; a write end
-is ready while 4096 bytes fit and reports `POLLERR` when its readers are gone.
-Files, directories, and devices are always ready. A closed descriptor reports
-`POLLNVAL` and a negative one is skipped. A timeout of 0 returns at once, a
-positive one never returns early, and any negative one waits without limit.
-The wait uses native stream readiness and a timer, never a loop (ADR 0168).
-
 | Call | Behavior |
 | --- | --- |
 | `rt_sigaction` | stores the 32-byte kernel `sigaction` for signals 1 to 64 and returns the previous one; `SIGKILL` and `SIGSTOP` are removed from the stored mask |
@@ -444,9 +434,26 @@ The wait uses native stream readiness and a timer, never a loop (ADR 0168).
 | an unreadable or unwritable pointer | `EFAULT` |
 
 Ctrl-C ends the process through the native kill path whatever it registered
-for `SIGINT`. A handler without
+for `SIGINT`. On a launch root it also ends every descendant with `SIGKILL`
+(ADR 0170). A handler without
 `SA_RESTORER`, or one whose frame does not fit or cannot be written, ends the
 process with `SIGSEGV`.
+
+## Polling
+
+`poll` takes at most 64 entries. A stream read end is ready with bytes in it
+and reports `POLLHUP` when its writers are gone and it is empty; a write end
+is ready while 4096 bytes fit and reports `POLLERR` when its readers are gone.
+Files, directories, and devices are always ready. A closed descriptor reports
+`POLLNVAL` and a negative one is skipped. A timeout of 0 returns at once, a
+positive one never returns early, and any negative one waits without limit.
+The wait uses native stream readiness and a timer, never a loop (ADR 0168).
+
+`ppoll` takes a `timespec` timeout, a null one waiting without limit, and
+writes the time left back. A non-null mask of size 8 replaces the signal mask
+for the call. A handled signal the mask lets through ends the call with
+`EINTR` unless a descriptor is ready, and its handler's return restores the
+old mask. Any other return restores the old mask first (ADR 0169).
 
 ## Random bytes
 
@@ -624,7 +631,7 @@ Results a correct Linux program can observe to differ:
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
 or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
-and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no process-group `kill`, `ppoll`, `select`, or alternate signal stack; no
+and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no process-group `kill`, `select`, or alternate signal stack; no
 nonblocking pipes; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs

@@ -265,6 +265,13 @@ run '/system/linux/abi-probe poll'
 expect '^poll ok$' 'poll readiness, hangup, error, timeout, and wake-up'
 clean 'poll readiness, hangup, error, timeout, and wake-up'
 
+run '/system/linux/abi-probe ppoll'
+expect '^ppoll ok$' 'ppoll timespec timeout and temporary signal mask'
+clean 'ppoll timespec timeout and temporary signal mask'
+
+run '/system/linux/abi-probe path'
+expect '^path /system/linux$' 'a Linux program searches the Linux fixture directory'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'
@@ -287,6 +294,11 @@ interrupt '/system/linux/abi-probe block' 'blocking on standard input'
 refuse 'standard input ended' 'Ctrl-C on a blocked read'
 run 'echo after-blocked-read'
 expect '^after-blocked-read$' 'shell after Ctrl-C on a blocked read'
+
+# Ctrl-C on a Linux launch root ends every descendant it forked.
+interrupt '/system/linux/abi-probe family' '^family blocking with child'
+run 'ps'
+refuse 'abi-probe' 'Ctrl-C on a Linux root ends its family'
 
 interrupt '/system/linux/abi-probe sleep' '^sleeping$'
 refuse 'sleep ended' 'Ctrl-C on a sleep'
