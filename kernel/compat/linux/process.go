@@ -478,7 +478,8 @@ func ReapChild(parentPID int32, childPID int32) (ProcessRecord, bool) {
 }
 
 // markProcessExited retains only wait-visible state, reparents live children,
-// and removes zombies whose only reaper is conceptual PID 1.
+// and removes zombies whose only reaper is conceptual PID 1 or whose parent
+// asked for no zombies with SIG_IGN or SA_NOCLDWAIT on SIGCHLD.
 func markProcessExited(pid int32, termination Termination) bool {
 	index := recordIndex(pid)
 	if index < 0 || processRecords[index].State != ProcessRunning {
@@ -500,6 +501,8 @@ func markProcessExited(pid int32, termination Termination) bool {
 		}
 	}
 	if processRecords[index].ParentPID == 1 {
+		processRecords[index] = ProcessRecord{}
+	} else if parent, found := FindProcessByPID(processRecords[index].ParentPID); found && parent.Signals.ReapsChildren() {
 		processRecords[index] = ProcessRecord{}
 	}
 	return true

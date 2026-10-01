@@ -276,7 +276,9 @@ Child exit raises `SIGCHLD` in the Linux parent and a failed pipe write raises
 `SIGPIPE` in the writer. The syscall dispatcher acts on pending signals when a
 call returns: it discards, ends the process, or builds an `rt_sigframe` and
 enters the handler, and `rt_sigreturn` restores the saved context
-(ADR 0163, ADR 0164). The calls that would send a signal stay `ENOSYS`.
+(ADR 0163, ADR 0164). `rt_sigaction` refuses flags GoOS cannot honor
+(ADR 0165). `kill`, `tkill`, and `tgkill` reach the caller and its
+descendants through the family registry, never by Linux UID (ADR 0166).
 
 Image replacement resets caught dispositions to default and preserves ignored
 dispositions, the blocked mask, and pending signals. Fork copies dispositions
@@ -427,12 +429,12 @@ and its VFS session go with it, and no Linux signal is delivered.
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, process groups, threads, `kill`, `EINTR`,
+Dynamic linking, glibc, process groups, threads, `EINTR`,
 nonblocking pipes, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not
 run. `fork`, `vfork`, and two process forms of `clone` create a child from
 a private copy of the caller (ADR 0158, ADR 0159), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
-reach handlers (ADR 0163, ADR 0164). The next Linux work is `kill`,
-interrupted calls, and `poll`.
+reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166).
+The next Linux work is interrupted calls and `poll`.

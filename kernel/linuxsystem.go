@@ -97,10 +97,8 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 	return linuxErrno(linuxabi.ENOSYS)
 }
 
-// signalAction records and reports a signal disposition. GoOS delivers no
-// signal, so a handler stored here never runs: the call exists so a program
-// that installs handlers at startup finds the kernel it expects, and reads
-// back what it wrote.
+// signalAction records and reports a signal disposition. A handler stored
+// here runs when its signal is delivered at a system call return.
 func (handler *linuxCallHandler) signalAction(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
 	signal, action, previous := uint64(uint32(arguments[0])), arguments[1], arguments[2]
 	if arguments[3] != linuxcompat.SignalSetSize {
@@ -122,8 +120,8 @@ func (handler *linuxCallHandler) signalAction(state *linuxcompat.ProcessState, a
 	return linuxcompat.Result{}
 }
 
-// signalMask records and reports the blocked mask. Nothing is ever pending,
-// so blocking and unblocking have no further effect.
+// signalMask records and reports the blocked mask. A signal it unblocks that
+// is pending is delivered as this call returns.
 func (handler *linuxCallHandler) signalMask(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
 	how, set, previous := uint64(uint32(arguments[0])), arguments[1], arguments[2]
 	if arguments[3] != linuxcompat.SignalSetSize {

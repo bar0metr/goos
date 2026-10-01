@@ -145,3 +145,57 @@ func registersFromContext(registers *amd64.UserRegisters, context *linuxcompat.U
 	registers.RDX, registers.RCX = context.Registers[linuxcompat.RegRDX], context.Registers[linuxcompat.RegRCX]
 	registers.RAX = context.Registers[linuxcompat.RegRAX]
 }
+
+// Kill serves kill, tkill, and tgkill for the caller and its descendants. A
+// positive PID names one process; a single-task process has one thread whose
+// ID is its PID, so tgkill needs both IDs equal. Process-group and broadcast
+// targets wait for process groups and are EINVAL. Signal 0 checks the target
+// and sends nothing, and a zombie target accepts a signal it never acts on.
+func (handler *linuxCallHandler) Kill(request linuxcompat.Request) linuxcompat.Result {
+	state, found := linuxcompat.FindProcess(handler.root)
+	if !found {
+		return linuxErrno(linuxabi.ESRCH)
+	}
+	target, signal, code := int64(int32(request.Arguments[0])), request.Arguments[1], linuxabi.SignalCodeUser
+	switch request.Number {
+	case linuxabi.SysTkill:
+		code = linuxabi.SignalCodeThreadKill
+	case linuxabi.SysTgkill:
+		thread := int64(int32(request.Arguments[1]))
+		signal, code = request.Arguments[2], linuxabi.SignalCodeThreadKill
+		if target <= 0 || thread <= 0 {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		if thread != target {
+			return linuxErrno(linuxabi.ESRCH)
+		}
+	}
+	if target <= 0 || signal > linuxabi.SignalCount || signal != 0 && !linuxcompat.DeliverableSignal(signal) {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	record, errno := linuxcompat.SignalTarget(state.PID, int32(target))
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if signal == 0 || record.State != linuxcompat.ProcessRunning {
+		return linuxcompat.Result{}
+	}
+	receiver, found := linuxcompat.FindProcessByPID(record.PID)
+	if !found {
+		return linuxcompat.Result{}
+	}
+	info := linuxcompat.SignalInfo{Code: code, PID: state.PID, UID: linuxcompat.StatUID}
+	// A signal the target would die of ends it now, even while it sleeps in
+	// a system call. The caller's own fatal signal acts as this call returns.
+	if receiver != state && receiver.Signals.Fatal(signal) {
+		if owner, alive := processRegistry.ByRoot(receiver.Root); alive {
+			for _, task := range owner.Tasks() {
+				cancelTaskWaits(task)
+				amd64.TerminateTask(uint64(task), linuxcompat.SignalExitCode(signal))
+			}
+		}
+		return linuxcompat.Result{}
+	}
+	receiver.Signals.Raise(signal, info)
+	return linuxcompat.Result{}
+}
