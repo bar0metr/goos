@@ -562,6 +562,19 @@ func DescriptionOf(root uint64, fd uint64) (*FileDescription, bool) {
 	return nil, false
 }
 
+// FamilyRoots writes the address-space roots of the running members of a
+// family to target and returns how many it wrote.
+func FamilyRoots(familyID uint64, target []uint64) int {
+	count := 0
+	for index := range processStates {
+		if familyID != 0 && processStates[index].Root != 0 && processStates[index].FamilyID == familyID && count < len(target) {
+			target[count] = processStates[index].Root
+			count++
+		}
+	}
+	return count
+}
+
 // FindProcessByPID returns the running process with a compatibility PID.
 func FindProcessByPID(pid int32) (*ProcessState, bool) {
 	if pid >= firstPID {

@@ -45,6 +45,9 @@
  *   kill              kill, tkill, tgkill, and SA_NOCLDWAIT on the process tree
  *   eintr             signals interrupt read, wait4, nanosleep, and poll; SA_RESTART
  *   poll              poll readiness, HUP, ERR, NVAL, timeouts, and wake-ups
+ *   ppoll             ppoll timespec timeouts and its temporary signal mask
+ *   family            leave a child asleep and wait on standard input
+ *   path              print the PATH the program started with
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -2270,6 +2273,119 @@ static int poll_test(void)
 	return 0;
 }
 
+static int probe_ppoll(struct pollfd *entries, unsigned long count, struct timespec *timeout, const sigset_t *mask, unsigned long size)
+{
+	return syscall(SYS_ppoll, entries, count, timeout, mask, size);
+}
+
+static volatile int ppoll_seen;
+
+static void note_ppoll(int number)
+{
+	(void)number;
+	ppoll_seen++;
+}
+
+static int ppoll_fail(const char *step)
+{
+	printf("ppoll failed: %s errno=%d seen=%d\n", step, errno, ppoll_seen);
+	return 1;
+}
+
+static int user1_blocked(void)
+{
+	sigset_t mask;
+
+	sigprocmask(SIG_SETMASK, NULL, &mask);
+	return sigismember(&mask, SIGUSR1);
+}
+
+/* Sleeps in ppoll with SIGUSR1 let through, after saying ready. */
+static int ppoll_sleeper(int ready)
+{
+	struct pollfd entry = {eintr_pipe[0], POLLIN, 0};
+	sigset_t open;
+
+	sigemptyset(&open);
+	if (write(ready, "r", 1) != 1)
+		return 2;
+	if (probe_ppoll(&entry, 1, NULL, &open, 8) != -1 || errno != EINTR || ppoll_seen != 1)
+		return 1;
+	return user1_blocked() ? 0 : 3;
+}
+
+static int ppoll_test(void)
+{
+	struct timespec timeout = {0, 60 * 1000 * 1000}, bad = {0, 2000000000}, start;
+	struct pollfd entry;
+	sigset_t block, open;
+	int fds[2], status;
+
+	fflush(stdout);
+	if (pipe(fds) != 0 || pipe(eintr_pipe) != 0)
+		return ppoll_fail("pipe");
+	entry = (struct pollfd){fds[0], POLLIN, 0};
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	if (probe_ppoll(&entry, 1, &timeout, NULL, 0) != 0 || elapsed_ms(&start) < 55 ||
+	    timeout.tv_sec != 0 || timeout.tv_nsec != 0)
+		return ppoll_fail("timeout");
+	if (!fails(probe_ppoll(&entry, 1, &bad, NULL, 0), EINVAL) || !fails(probe_ppoll(&entry, 1, NULL, &open, 4), EINVAL))
+		return ppoll_fail("arguments");
+
+	/* A signal the temporary mask lets through interrupts the call, and the
+	 * handler's return gives the old mask back. */
+	signal(SIGUSR1, note_ppoll);
+	sigemptyset(&block);
+	sigaddset(&block, SIGUSR1);
+	sigemptyset(&open);
+	sigprocmask(SIG_BLOCK, &block, NULL);
+	raise(SIGUSR1);
+	if (ppoll_seen != 0 || probe_ppoll(&entry, 1, NULL, &open, 8) != -1 || errno != EINTR ||
+	    ppoll_seen != 1 || !user1_blocked())
+		return ppoll_fail("pending signal");
+
+	/* A ready descriptor wins: the old mask is back before any delivery. */
+	raise(SIGUSR1);
+	if (write(fds[1], "x", 1) != 1 || probe_ppoll(&entry, 1, NULL, &open, 8) != 1 || ppoll_seen != 1)
+		return ppoll_fail("ready with a pending signal");
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	if (ppoll_seen != 2)
+		return ppoll_fail("unblock");
+	sigprocmask(SIG_BLOCK, &block, NULL);
+
+	/* A signal sent while the call sleeps interrupts it. */
+	ppoll_seen = 0;
+	if ((status = interrupt_child(ppoll_sleeper, 0)) != 0) {
+		printf("ppoll failed: sleeper %d\n", status);
+		return 1;
+	}
+	sigprocmask(SIG_UNBLOCK, &block, NULL);
+	signal(SIGUSR1, SIG_DFL);
+	printf("ppoll ok\n");
+	return 0;
+}
+
+/* The child sleeps on a pipe nobody writes; the parent says so and reads
+ * standard input. Ctrl-C on the parent must end both. */
+static int family_test(void)
+{
+	int idle[2];
+	char byte;
+	pid_t child;
+
+	if (pipe(idle) != 0)
+		return 1;
+	child = fork();
+	if (child == 0) {
+		read(idle[0], &byte, 1);
+		_exit(0);
+	}
+	printf("family blocking with child %d\n", child);
+	fflush(stdout);
+	read(0, &byte, 1);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -2315,6 +2431,14 @@ int main(int argc, char **argv)
 			return eintr_test();
 		if (!strcmp(argv[1], "poll"))
 			return poll_test();
+		if (!strcmp(argv[1], "ppoll"))
+			return ppoll_test();
+		if (!strcmp(argv[1], "family"))
+			return family_test();
+		if (!strcmp(argv[1], "path")) {
+			printf("path %s\n", getenv("PATH") ? getenv("PATH") : "(none)");
+			return 0;
+		}
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

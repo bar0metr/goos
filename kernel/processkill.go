@@ -36,6 +36,7 @@ func (handler nativeCallHandler) ProcessKill(processHandle uint64) kcall.Status 
 			stopped = true
 		}
 	}
+	killLinuxFamily(target.AddressSpace().Root)
 	if !stopped {
 		return kcall.StatusNotFound
 	}

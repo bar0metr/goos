@@ -20,6 +20,10 @@ const signalActionMask = 24
 type SignalState struct {
 	mask    uint64
 	pending uint64
+	// saved is the mask a call that installs a temporary one, ppoll, gives
+	// back on return. restore says a temporary mask is in force.
+	saved   uint64
+	restore bool
 	actions [abi.SignalCount][SignalActionSize]byte
 	info    [standardSignals]SignalInfo
 }
@@ -72,6 +76,10 @@ func DefaultIgnored(signal uint64) bool { return signal == abi.SignalChild }
 // Pending signals stay with source.
 func (state *SignalState) CopyFrom(source *SignalState) {
 	state.mask = source.mask
+	if source.restore {
+		state.mask = source.saved
+	}
+	state.saved, state.restore = 0, false
 	state.pending = 0
 	copy(state.actions[:], source.actions[:])
 	clear(state.info[:])
@@ -221,6 +229,11 @@ func (state *SignalState) Outcome(signal uint64) SignalOutcome {
 // mask the handler's return restores.
 func (state *SignalState) EnterHandler(signal uint64, action SignalAction) uint64 {
 	previous := state.mask
+	if state.restore {
+		// The handler runs under the temporary mask, and its return gives
+		// back the mask the interrupted call replaced.
+		previous, state.restore = state.saved, false
+	}
 	state.mask |= action.Mask
 	if action.Flags&abi.SignalActionNoDefer == 0 {
 		state.mask |= uint64(1) << (signal - 1)
@@ -230,6 +243,24 @@ func (state *SignalState) EnterHandler(signal uint64, action SignalAction) uint6
 		state.actions[signal-1] = [SignalActionSize]byte{}
 	}
 	return previous
+}
+
+// SwapMask installs a temporary mask for the length of one call and keeps
+// the mask the call returns to. A retried call that swaps again keeps the
+// first saved mask.
+func (state *SignalState) SwapMask(mask uint64) {
+	if !state.restore {
+		state.saved, state.restore = state.mask, true
+	}
+	state.mask = mask &^ uncatchable
+}
+
+// EndMaskSwap gives back the mask a temporary mask replaced. A handler entered
+// on the way out has already taken it as the mask its return restores.
+func (state *SignalState) EndMaskSwap() {
+	if state.restore {
+		state.mask, state.restore = state.saved, false
+	}
 }
 
 // RestoreMask installs the mask rt_sigreturn found in the signal frame.

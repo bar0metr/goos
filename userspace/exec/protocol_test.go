@@ -352,3 +352,17 @@ func TestStartedCarriesTheInputHandle(t *testing.T) {
 		t.Fatal("started without a job correlation decoded")
 	}
 }
+
+func TestLinuxEnvironmentPath(t *testing.T) {
+	if got := LinuxEnvironmentEntry([]byte("PATH=/system/bin")); string(got) != "PATH=/system/linux" {
+		t.Fatalf("native PATH became %q", got)
+	}
+	for _, kept := range []string{"PATH=/persist/bin", "COLUMNS=80", "PATHX=/system/bin"} {
+		if got := LinuxEnvironmentEntry([]byte(kept)); string(got) != kept {
+			t.Fatalf("%q became %q", kept, got)
+		}
+	}
+	if string(LinuxPathVariable()) != "PATH=/system/linux" {
+		t.Fatal("Linux PATH is wrong")
+	}
+}

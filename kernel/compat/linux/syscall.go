@@ -74,6 +74,7 @@ type Handler interface {
 	SigReturn(Request) Result
 	// Kill serves kill, tkill, and tgkill.
 	Kill(Request) Result
+	// Poll serves poll and ppoll.
 	Poll(Request) Result
 	Exit(Request, bool) Result
 }
@@ -189,7 +190,7 @@ func route(request Request, handler Handler) Result {
 			return handler.SigReturn(request)
 		case abi.SysKill, abi.SysTkill, abi.SysTgkill:
 			return handler.Kill(request)
-		case abi.SysPoll:
+		case abi.SysPoll, abi.SysPpoll:
 			return handler.Poll(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)

@@ -39,7 +39,11 @@ in `read`, `SIGUSR1` to a handler, and `SIGTERM` to a child that blocks it,
 checks `raise` and `tgkill`, and checks that `SA_NOCLDWAIT` leaves no zombie;
 `eintr` interrupts `read`, `wait4`, `nanosleep`, and `poll` with a handled
 signal and restarts a `read` under `SA_RESTART`; `poll` checks readiness,
-`POLLHUP`, `POLLERR`, `POLLNVAL`, a timeout, and a wake-up from a child.
+`POLLHUP`, `POLLERR`, `POLLNVAL`, a timeout, and a wake-up from a child;
+`ppoll` checks a timespec timeout and the remaining time it writes back, and
+a temporary mask that lets a pending or a sent signal interrupt the call and
+comes back after the handler or a ready return; `family` leaves a child asleep
+for the Ctrl-C check of the boot test; `path` prints the `PATH` it got.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -106,7 +110,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `71fbb7e0b4c5eb2d9bc144635f23e4af7624ebf343fb23b1b8473eadb957f642` |
+| `prebuilt/abi-probe` | `a2717d87a2b828317b34ce16eccb14c051fe27fe4060db15a8e6194bf9373af8` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

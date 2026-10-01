@@ -139,7 +139,14 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLaunch {
 		handles++
 	}
-	writer := startup.NewWriter(staging, arguments.Count(), environment.Count(), handles)
+	// A Linux program searches the Linux fixture directory, never the
+	// native one: its execve refuses native images.
+	addLinuxPath := linuxProcess && execproto.LinuxPathMissing(environment)
+	entries := environment.Count()
+	if addLinuxPath {
+		entries++
+	}
+	writer := startup.NewWriter(staging, arguments.Count(), entries, handles)
 	writer.Command(command)
 	writer.CWD(cwd)
 	for offset, index := 0, 0; index < arguments.Count(); index++ {
@@ -150,7 +157,13 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	for offset, index := 0, 0; index < environment.Count(); index++ {
 		var variable []byte
 		variable, offset = environment.Next(offset)
+		if linuxProcess {
+			variable = execproto.LinuxEnvironmentEntry(variable)
+		}
 		writer.Entry(variable)
+	}
+	if addLinuxPath {
+		writer.Entry(execproto.LinuxPathVariable())
 	}
 	writer.Handle([]byte("in"), 0)
 	writer.Handle([]byte("stdout"), 0)
