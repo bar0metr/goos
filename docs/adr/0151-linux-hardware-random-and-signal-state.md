@@ -4,6 +4,9 @@
 
 Accepted. Amends the `AT_RANDOM` decision of ADR 0133.
 
+The signal-delivery portion is superseded by ADR 0163 through ADR 0167.
+The RDRAND/getrandom decision remains current.
+
 ## Context
 
 ADR 0133 left `AT_RANDOM` out of the initial stack because the kernel had no
@@ -37,6 +40,10 @@ QEMU's default CPU model has no RDRAND. The Linux boot test asks for one
 (`-cpu qemu64,+rdrand`) and covers the source; the general boot test keeps
 the default and covers the refusal.
 
+This section describes the 0.2.0 behavior and is superseded by ADR 0163 to
+ADR 0167, under which signals are delivered, interrupt blocked calls, and
+return through `rt_sigreturn`.
+
 **Signal state is recorded and nothing is delivered.** `rt_sigaction` stores
 a disposition per signal and reports the previous one. `rt_sigprocmask` keeps
 the blocked mask. Both follow the Linux rules a program can check: signals 1
@@ -57,6 +64,7 @@ the quality of that output is the CPU vendor's. On a machine without it the
 program gets an error it has to handle. Two runs of one program on two
 machines can therefore differ in whether `getrandom` works.
 
-A program that installs a `SIGINT` handler to clean up on Ctrl-C finds the
-handler installed and does not get to run it. The state costs 2 KiB per
+In 0.2.0, a program that installed a `SIGINT` handler to clean up on Ctrl-C
+found the handler installed and did not get to run it; ADR 0163 to ADR 0167
+supersede this. The state costs 2 KiB per
 Linux process slot.

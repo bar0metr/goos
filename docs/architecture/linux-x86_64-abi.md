@@ -748,12 +748,12 @@ boot:
 | `abi-probe stack-overflow` | recursion reaches the guard below the stack; the kernel logs `user fault: guard page`, the process ends, the shell continues |
 | `abi-probe port-io` | the process ends with a fault status and the shell continues |
 | Ctrl-C on a blocked read, a sleep, and a VFS wait | the process ends, the shell reads the next line, later runs pass |
-| `abi-probe exec` and `abi-probe run musl-hello alpha beta` | the image is replaced in place: same PID, cwd, kept descriptor and position, `CLOEXEC` closed, signal state reset; `argc=3` |
+| `abi-probe exec` and `abi-probe run musl-hello alpha beta` | the image is replaced in place: same PID, cwd, kept descriptor and position, `CLOEXEC` closed, signal state and x87 and SSE state reset; `argc=3` |
 | `abi-probe fork`, `vfork`, `orphan` | private memory, shared file position, a suspended `vfork` parent, `clone(SIGCHLD)`, reparenting to PID 1 |
 | `abi-probe wait`, `pipe`, `signal`, `kill` | `wait4` by PID and any with `WNOHANG` and `ECHILD`; pipe direction, EOF, `EPIPE`, lifetime, `PIPE_BUF`; `SIGPIPE` and `SIGCHLD` handlers, masks, `rt_sigreturn`, forged frames; `kill` on the tree, `SA_NOCLDWAIT` |
 | `abi-probe eintr`, `poll`, `ppoll` | `EINTR` and `SA_RESTART` on blocked calls; `poll` readiness, `POLLHUP`, `POLLERR`, `POLLNVAL`, timeouts; `ppoll` and `rt_sigsuspend` with a temporary mask |
 | `abi-probe hardening` | failed `execve` keeps the image; fork copies touched, untouched, read-only, and brk pages; shared descriptions; a killed writer; pipe exhaustion; bad handler and restorer addresses; `SIGKILL` in a handler; the native gate refused in a child |
-| `abi-probe fpstate` | XMM0, XMM1, XMM7, XMM15, MXCSR, and the x87 control word survive a handler that clobbers them and a nested signal; an edited image comes back; a null `fpstate` gives the initial state; an unreadable, kernel-half, or truncated `fpstate` ends the process with `SIGSEGV`; reserved MXCSR bits are cleared |
+| `abi-probe fpstate` | XMM0, XMM1, XMM7, XMM15, MXCSR, and the x87 control word survive `getpid`, a sleeping `nanosleep`, `fork` into the child, a handler that clobbers them and a nested signal; an edited image comes back; a null `fpstate` gives the initial state; an unreadable, kernel-half, or truncated `fpstate` ends the process with `SIGSEGV`; reserved MXCSR bits are cleared |
 | `abi-probe limits` | a fork bomb stops at 15 children with `EAGAIN`; zombies count; reaping frees the budget |
 | Ctrl-C on `abi-probe family` | the root and its forked child are gone from `ps` |
 | `abi-probe path` | `PATH=/system/linux` |

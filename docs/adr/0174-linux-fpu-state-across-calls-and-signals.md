@@ -46,7 +46,10 @@ before any state changes. A null `fpstate` restores the initial state.
 ## Consequences
 
 XMM0 to XMM15, MXCSR, and the x87 registers and control word survive system
-calls, handlers, nested handlers, and `fork`. A handler can edit the saved
+calls that return at once and calls that sleep in the scheduler, handlers,
+nested handlers, and `fork`, and `execve` starts from the initial state.
+`abi-probe fpstate` and `abi-probe exec` check each case on GoOS and on a
+Linux kernel. A handler can edit the saved
 image and the interrupted code gets the edited state. AVX and AVX-512 state is
 not saved: GoOS does not enable it, so a Linux program cannot use those
 registers. Each Linux system call costs one `FXSAVE` and one `FXRSTOR`.

@@ -4,6 +4,9 @@
 
 Accepted.
 
+The general rt_sigframe and rt_sigreturn design remains current.
+The floating-point/SSE portion is superseded by ADR 0174.
+
 ## Context
 
 A Linux handler expects the x86_64 `rt_sigframe`: a return address, then
@@ -20,7 +23,8 @@ frame holds the restorer address, `struct ucontext`, and `siginfo`. The
 context saves the general-purpose registers, the call's return value as RAX,
 RIP, RSP, RFLAGS, the user selectors, and the mask from before the handler.
 It writes no floating-point state and sets `fpstate` to null; `uc_stack` says
-no alternate stack is in use.
+no alternate stack is in use. Superseded by ADR 0174: current signal frames
+carry a 512-byte FXSAVE image through `uc_mcontext.fpstate`.
 
 The handler starts with RDI holding the signal, RSI the `siginfo`, RDX the
 `ucontext`, and RAX zero. Its mask adds the action's mask and, without
@@ -43,6 +47,6 @@ A handler can change the context it returns to, including the result of the
 interrupted call. No frame value can return to kernel memory or raise the
 task's privilege. Handlers run on the interrupted stack because
 `sigaltstack` is not supported. FS base is not part of the frame and stays
-what it was, as on Linux. Signals arrive only at system call returns, where
-the calling convention already treats SSE registers as clobbered, so the
-missing floating-point state does not corrupt a C program.
+what it was, as on Linux. The floating-point consequences are ADR 0174's:
+the frame carries the interrupted x87 and SSE state and `rt_sigreturn`
+restores it.

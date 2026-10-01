@@ -9,51 +9,19 @@ privileged kernel.
 
 ## Project history
 
-The history of GoOS began in 2011 as a personal operating-system research
-project written in Free Pascal. The immediate objective was not to produce a
-finished product. It was to understand how a machine begins executing custom
-code, how bootstrapping, memory, and interrupts work, and where the boundary
-between the kernel and applications should be drawn.
+I started GoOS in 2011 as a personal operating-system research project written in Free Pascal. I used it to study how a machine starts executing custom code, how memory and interrupts work, and how a kernel should interact with applications.
 
-The project was later moved to C++. Development continued at an unhurried pace:
-individual ideas were tested, parts of the code were rewritten, and the
-architecture was reconsidered several times. It was never a continuous effort
-driven by a release schedule. The project remained a personal laboratory to
-return to whenever a new idea appeared or a particular area of systems
-programming deserved deeper study.
+I later moved the project to C++. There was no release schedule or fixed roadmap. I worked on it when I wanted to test an idea or study a part of operating-system development in more detail. Some experiments led to new code; others made me reconsider the architecture and rewrite existing parts.
 
-The arrival of Go raised a different question: could it be used to build more
-than a small educational kernel? Could it support a coherent operating system
-with controlled complexity and components that are safe by default? The
-standard Go runtime assumes an existing operating system, but TinyGo gradually
-made this experiment practical. The old research project gained a new technical
-foundation and evolved into the current GoOS design.
+Go gave the project a new direction. I wanted to see whether I could use it for a complete operating system rather than a small teaching kernel. The standard Go runtime depends on services provided by an existing OS, but TinyGo made a freestanding Go system practical. I used that foundation to develop the current GoOS architecture.
 
-GoOS grew out of a long-standing interest in operating-system architecture and
-dissatisfaction with the historical baggage carried by existing systems. Linux
-demonstrates the value of openness, observability, broad hardware support, and
-the ability to operate in almost any environment. macOS demonstrates the value
-of a coherent system, predictable user experience, and consistency between its
-components. Both also carry decades of accumulated compromises: excessive
-ambient authority, large trusted components, unclear ownership boundaries,
-stringly typed interfaces where structured protocols would be safer, global
-mutable state, and compatibility requirements that increasingly dictate the
-internal design of the system.
+My experience with Linux and macOS shaped the design. From Linux, I took openness, observability, hardware support, and the ability to run across different environments. From macOS, I took an appreciation for coherent system design, predictable behavior, and consistent interfaces.
 
-The objective is not to mechanically combine Linux and macOS. GoOS takes useful
-ideas from both without treating their limitations as unavoidable. Its native
-API does not have to reproduce Unix. `fork`, UID 0, universal `ioctl`, a global
-root, and the principle that “everything is a file” do not become foundational
-merely because they are familiar. Linux compatibility belongs in a separate
-layer and must not define the internal process, security, or resource model.
+I also wanted to avoid the constraints that decades of compatibility impose on both systems. GoOS uses explicit ownership, structured protocols, and narrow authority boundaries. Its native API has its own process, security, and resource model. Unix concepts such as `fork`, UID 0, universal `ioctl`, a global root, and “everything is a file” are not part of that foundation. Linux compatibility belongs in a separate layer.
 
-GoOS is built according to the author's view of a technically coherent
-operating system: little code running with maximum privilege, processes without
-implicit authority, capability-based access to resources, services and drivers
-in userspace, stable versioned IPC protocols, and measured fast paths for bulk
-data. It is an opinionated research project and its decisions do not have to
-repeat the industry consensus. Fundamental decisions must still have testable
-reasoning, an ADR, appropriate tests, and clearly documented consequences.
+I design GoOS around a small privileged kernel, capability-based access to resources, userspace services and drivers, versioned IPC protocols, and dedicated fast paths for bulk data. Processes receive only the authority granted to them. Services communicate through defined interfaces instead of shared global state.
+
+GoOS remains a personal research project, so I can reject conventions that do not fit its design. I still expect major architectural decisions to have a testable rationale, an ADR, relevant tests, and documented consequences.
 
 ## What is being built
 
