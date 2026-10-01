@@ -102,9 +102,14 @@ who wrote the volume.
 A path under `/bootstrap` names an archive member, launched by extent. Every
 other path names a file, read through the VFS into a file-backed executable
 source (ADR 0121). A file missing from the volume is never looked for in the
-archive. Services are launched the same way: PID 1 prepares a service from
-the volume under the same bounded deadline as a command, so a VFS that does
-not answer costs the launch and not PID 1.
+archive. Services are launched the same way. Once the system is up, a
+service's program, and the program an application asks PID 1 to run for it,
+is read as a job's programs are: PID 1 starts the read, the supervisor holds
+the launch as deferred, which spends none of the restart budget, and the
+main loop waits on the read with everything else. The launch runs when the
+read is answered, or fails when its deadline passes, so a VFS that does not
+answer costs the launch and never stops PID 1 from serving. The boot, which
+starts services in order before the main loop, reads them in place.
 
 The kernel copies a native call's buffers without taking file-backed page
 faults. The userspace runtime therefore touches every page of a buffer
@@ -158,8 +163,9 @@ before.
 services, the terminal, the shell, the message of the day, and the recovery
 commands `cat cp df echo edit fsck-fat ls mkdir mount mv pwd rm stat touch
 write`, with an index cut down to them. A validation archive adds
-`fault-probe` and the generated raw Linux probe. `tools/sysimage` lays out
-the installed system from the build's outputs, and `mkfat32 -tree` copies it
+`fault-probe`, the generated raw Linux probe, and `ps`, kept in a list of
+its own. `tools/sysimage` lays out the installed system from the build's
+outputs, and `mkfat32 -tree` copies it
 onto a volume in name order. `make run` makes `build/goos-disk.img` only when
 it does not exist. `make disk` refuses an existing disk; `make disk-overwrite`
 replaces it. `make run RECOVERY=1` boots an ISO whose archive asks for

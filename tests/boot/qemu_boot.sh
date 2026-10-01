@@ -194,17 +194,17 @@ wait_for_count() {
 pass_group() { printf 'PASS %s\n' "$1"; }
 
 # await_ready waits until the system writing log has settled, at most two
-# minutes: the validation build's storage driver fault at the end of the
-# boot has been recovered from, the Nth time for the Nth boot in log, and a
-# prompt has been printed after it. The shell is read from the volume
-# (ADR 0175) and can be started again after that fault, so a fixed pause is
-# not enough. On a timeout it returns, and the marker the caller waits for
-# next reports the failure.
+# minutes: within the Nth boot in log, a prompt has been printed and the
+# validation build's storage driver fault at the end of the boot has been
+# recovered from. The shell is read from the volume (ADR 0175) and can start
+# again after that fault, so it then waits three seconds more for such a
+# restart to finish. On a timeout it returns, and the marker the caller waits
+# for next reports the failure.
 await_ready() {
 	waited=0
 	while [ "$waited" -lt 240 ]; do
-		if awk -v want="${2:-1}" '/BLOCK_DRIVER_REPLACED_OK/ { seen++ } seen >= want && /goos> / { found = 1 } END { exit !found }' "$1" 2>/dev/null; then
-			sleep 2
+		if awk -v want="${2:-1}" '/BOOT_SERVICES_EXITED/ { boot++ } boot == want && /goos> / { prompt = 1 } boot == want && /BLOCK_DRIVER_REPLACED_OK/ { driver = 1 } END { exit !(prompt && driver) }' "$1" 2>/dev/null; then
+			sleep 3
 			return 0
 		fi
 		sleep 0.5

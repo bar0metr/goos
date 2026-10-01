@@ -150,25 +150,29 @@ func cancelServiceSources() {
 	}
 }
 
-// fillsPending calls visit with the deadline of every fill in flight.
-func fillsPending(visit func(deadline uint64)) {
+// earliestFill returns the earliest deadline of every fill in flight, and
+// whether there is one. It runs on every pass of the main loop, so it walks
+// the tables itself rather than take a closure, which TinyGo would allocate.
+func earliestFill() (uint64, bool) {
+	earliest, pending := uint64(0), false
 	for index := range execJobs {
 		job := &execJobs[index]
 		if !job.active {
 			continue
 		}
-		if job.fill.session != 0 {
-			visit(job.fill.deadline)
-		}
-		if job.launcher.fill.session != 0 {
-			visit(job.launcher.fill.deadline)
+		for _, fill := range [2]*pendingFill{&job.fill, &job.launcher.fill} {
+			if fill.session != 0 && (!pending || fill.deadline < earliest) {
+				earliest, pending = fill.deadline, true
+			}
 		}
 	}
 	for index := range serviceSources {
-		if serviceSources[index].fill.session != 0 {
-			visit(serviceSources[index].fill.deadline)
+		fill := &serviceSources[index].fill
+		if fill.session != 0 && (!pending || fill.deadline < earliest) {
+			earliest, pending = fill.deadline, true
 		}
 	}
+	return earliest, pending
 }
 
 // expireServiceFills gives up on service and child reads the VFS has not

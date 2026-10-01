@@ -244,12 +244,7 @@ func completeFill(job *execJob) {
 // fill is overdue, and whether any fill is pending.
 func fillTimeout() (uint64, bool) {
 	now, _ := sys.ClockRead()
-	earliest, pending := uint64(0), false
-	fillsPending(func(deadline uint64) {
-		if !pending || deadline < earliest {
-			earliest, pending = deadline, true
-		}
-	})
+	earliest, pending := earliestFill()
 	if !pending {
 		return 0, false
 	}

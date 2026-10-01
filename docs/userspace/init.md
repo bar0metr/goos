@@ -60,8 +60,14 @@ full, is refused. The launched process reads payload pages by offset when it
 touches them and holds the source open while it runs. Those private pages are
 charged to the process; the source itself retains only the header page
 (ADR 0106, ADR 0121). PID 1 closes its source handle once the kernel has
-answered. A service of the installed system is prepared the same way, waiting
-for the VFS under the same bounded deadline. Paths in `/system` outside
+answered. A service of the installed system, and the child a `GrantLaunch`
+application asks for, is prepared the same way once the system is up: the
+read is one more object the main loop waits on, the supervisor holds the
+service as deferred meanwhile without spending its restart budget
+(`Manager.Defer`), and the launch runs when the read is answered or fails at
+its deadline (ADR 0175). The child's request is copied and checked again
+then, and launched only if it still names the program that was read. Only the
+boot, before the main loop, reads a service's program in place. Paths in `/system` outside
 `/system/bin` and `/system/linux`, and in `/bootstrap` outside
 `/bootstrap/bin`, are not commands.
 
