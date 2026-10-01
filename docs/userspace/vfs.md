@@ -82,10 +82,12 @@ The validation build answers one name late: a request for
 its next request. The boot test uses it to watch a client's deadline expire.
 The normal build has no such name.
 
-PID 1 supervises `/system/vfs` and starts the shell only after the service is
+PID 1 supervises `/bootstrap/vfs` and starts the shell only after the service is
 healthy. The service owns its RAMFS backend and namespace in its own address
-space. Its initial namespace contains `/tmp` in RAMFS, the read-only boot archive at
-`/system`, and the persistent volume at `/persist`, `/home` and `/state`. The
+space. Its initial namespace contains `/tmp` and `/run` in RAMFS, the
+read-only boot archive at `/bootstrap`, and the persistent volume at
+`/persist`, `/home` and `/state`; PID 1 later asks it to publish the installed
+system at `/system` and `/apps` (ADR 0175). The
 persistent volume is served by the FAT32 service, a separate process: VFS
 reaches it through a remote backend over the `GFSPRT01` protocol, and mounts it
 when PID 1 hands over the channel with the `SetFilesystem` control operation.
@@ -105,9 +107,27 @@ handles after a FAT32 service restart (ADR 0119). Kernel launch
 grants explicitly identify the client or server side of a channel; neither
 process infers endpoint identity from handle numbers or launch order.
 
+When it mounts a volume the service looks up the volume's `system` directory
+and asks the namespace to protect it (ADR 0175). The namespace records the
+directory as a node of the backend, and every walk notes whether it passed
+through that node, so the protection holds under every name that reaches it:
+`/system`, `/persist/system`, case variants FAT32 resolves to the same entry,
+and the mount of the directory itself. Create, writable open, truncate,
+unlink, rename, and replace at or below it are refused with
+`StatusPermissionDenied`, a rename or replace into or out of it too, and stat
+reports its files read-only. The VFS keeps `/bootstrap`, `/system`, and
+`/apps` reserved: nothing can be created at or below them, or moved there,
+while nothing is mounted there.
+
+Control protocol version 7 adds two PID 1-only operations. `Publish` mounts
+the protected system directory at `/system` and the volume's `apps`
+directory, made if missing, at `/apps`; both appear or neither does, and a
+volume without a protected system directory is refused. `Withdraw` removes
+both, and is busy while a file is open through either.
+
 Clean unmount is a distinct PID 1-only control operation (ADR 0116). It flushes
 the filesystem first, refuses while any open VFS handle refers to any alias of
-the backend, then removes `/persist`, `/home` and `/state` atomically and closes
+the backend, then removes every mount of it, `/system` and `/apps` included, atomically and closes
 the service channel. A dead filesystem service is not treated as a clean
 unmount: its mounts remain and return peer errors so supervision can reattach a
 replacement without invalidating namespace identity.

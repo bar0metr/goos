@@ -44,13 +44,36 @@ type ConsoleInfo struct {
 func status(value uint64) kcall.Status { return kcall.Status(value) }
 
 // address is the user virtual address of the first byte of data, or zero for
-// an empty slice, which every call treats as an invalid pointer.
+// an empty slice, which every call treats as an invalid pointer. The pages of
+// data are touched first.
 func address(data []byte) unsafe.Pointer {
 	if len(data) == 0 {
 		return nil
 	}
+	touch(data)
 	return unsafe.Pointer(&data[0])
 }
+
+// touch reads one byte of every page data spans. A program read from a file
+// gets its pages when it first touches them (ADR 0121), and the kernel copies
+// a call's buffers without taking those faults, so a buffer it reads or
+// fills, a string constant included, must already be in place (ADR 0175).
+func touch(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	sum := data[0] ^ data[len(data)-1]
+	start := uintptr(unsafe.Pointer(&data[0]))
+	for offset := (pageSize - start%pageSize) % pageSize; offset < uintptr(len(data)); offset += pageSize {
+		sum ^= data[offset]
+	}
+	touched ^= sum
+}
+
+// touched keeps the reads touch makes from being optimized away.
+var touched byte
+
+const pageSize = 4096
 
 // Exit ends the calling process with code. It does not return.
 func Exit(code uint64) { processExit(code) }
@@ -68,6 +91,7 @@ func ConsoleWriteString(device handle.ID, text string) kcall.Status {
 // ConsoleRead takes one typed byte from the console, or NotFound when none is
 // pending.
 func ConsoleRead(device handle.ID) (byte, kcall.Status) {
+	consoleByteBox[0] = 0
 	result := status(consoleRead(uint64(device), unsafe.Pointer(&consoleByteBox[0]), 1))
 	return consoleByteBox[0], result
 }
@@ -80,6 +104,7 @@ func ConsoleInterrupt(device handle.ID) kcall.Status {
 // ConsoleInformation returns terminal geometry and availability flags.
 func ConsoleInformation(device handle.ID) (ConsoleInfo, kcall.Status) {
 	clear(consoleInfoWire[:])
+	consoleInfoWire = [kcall.ConsoleInfoSize]byte{}
 	result := status(consoleInfo(uint64(device), unsafe.Pointer(&consoleInfoWire[0]), uintptr(len(consoleInfoWire))))
 	return ConsoleInfo{
 		Columns: uint32(consoleInfoWire[0]) | uint32(consoleInfoWire[1])<<8 | uint32(consoleInfoWire[2])<<16 | uint32(consoleInfoWire[3])<<24,
@@ -95,12 +120,14 @@ func LogWrite(device handle.ID, record []byte) kcall.Status {
 
 // LogRead copies the text of the record index places past the oldest one.
 func LogRead(device handle.ID, index uint64, target *[kcall.LogText]byte) kcall.Status {
+	touch(target[:])
 	return status(logRead(uint64(device), index, unsafe.Pointer(&target[0])))
 }
 
 // LogBounds reports the sequence numbers of the oldest retained record and one
 // past the newest.
 func LogBounds(device handle.ID) (uint64, uint64, kcall.Status) {
+	boundsWire[0], boundsWire[1] = 0, 0
 	result := status(logBounds(uint64(device), unsafe.Pointer(&boundsWire[0])))
 	return boundsWire[0], boundsWire[1], result
 }
@@ -116,6 +143,7 @@ func DiagnosticsTrace(device handle.ID, words []uint64) kcall.Status {
 	if len(words) == 0 {
 		return Diagnostics(device)
 	}
+	touch(unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8))
 	return status(diagnostics(uint64(device), uintptr(unsafe.Pointer(&words[0]))))
 }
 
@@ -176,6 +204,7 @@ func HandleClose(id handle.ID) kcall.Status { return status(handleClose(uint64(i
 
 // HandleInfo describes slot of the caller's own handle table.
 func HandleInfo(slot uint64, target *[kcall.HandleInfoSize]byte) kcall.Status {
+	touch(target[:])
 	return status(handleInfo(slot, unsafe.Pointer(&target[0])))
 }
 
@@ -192,6 +221,7 @@ func ProcessKill(process handle.ID) kcall.Status { return status(processKill(uin
 
 // ProcessInfo fills target with the record of the index-th process.
 func ProcessInfo(index uint64, target *[kcall.ProcessInfoSize]byte) kcall.Status {
+	touch(target[:])
 	return status(processInfo(index, unsafe.Pointer(&target[0])))
 }
 
@@ -201,11 +231,13 @@ func StartupRead(target []byte) kcall.Status {
 	if len(target) == 0 {
 		return kcall.StatusInvalidArgument
 	}
+	touch(target)
 	return status(startupRead(unsafe.Pointer(&target[0]), uintptr(len(target))))
 }
 
 // SystemInfo fills target with the kernel's system summary.
 func SystemInfo(target *[kcall.SystemInfoSize]byte) kcall.Status {
+	touch(target[:])
 	return status(systemInfoRead(unsafe.Pointer(&target[0]), uintptr(len(target))))
 }
 
@@ -226,6 +258,7 @@ func ClockReadNanos() (uint64, kcall.Status) {
 // ClockNow reads a fixed-width native MONOTONIC or REALTIME timestamp.
 func ClockNow(clock timekeeping.Clock) (timekeeping.Time, kcall.Status) {
 	clear(timeWire[:])
+	timeWire = [kcall.ClockTimeSize]byte{}
 	result := status(clockNow(uint64(clock), unsafe.Pointer(&timeWire[0]), uintptr(len(timeWire))))
 	if result != kcall.StatusOK {
 		return timekeeping.Time{}, result
@@ -289,6 +322,7 @@ func WaitAny(interests *[kcall.WaitAnyMaxObjects]Interest, count int, timeout ui
 		return 0, kcall.StatusInvalidArgument
 	}
 	waitWire[0], waitWire[1] = timeout, 0
+	touch(unsafe.Slice((*byte)(unsafe.Pointer(&interests[0])), count*16))
 	// SAFETY: Interest is two 8-byte fields with no padding, which is the
 	// kernel's 16-byte interest record, and the array outlives the call.
 	result := status(waitAny(unsafe.Pointer(&interests[0]), uintptr(count), unsafe.Pointer(&waitWire[0])))

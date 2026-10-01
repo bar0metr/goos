@@ -4,20 +4,20 @@ Files reach applications through five isolated components. None of them runs
 in the kernel, and none holds more authority than its layer needs.
 
 ```text
-utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp)
-                               ├─ image backend            (/system, read-only boot archive)
+utility ──GVF1──▶ VFS service ─┬─ RAMFS backend            (/, /tmp, /run)
+                               ├─ image backend            (/bootstrap, read-only boot archive)
                                └─ remote backend ──GFSPRT01──▶ FAT32 service ──GBLK001──▶ block service ──IPC──▶ virtio-blk driver ──▶ disk
-                                  (/persist, /home, /state)                      (one slice)   (partition table)
+                                  (/persist, /system, /apps, /home, /state)       (one slice)   (partition table)
 ```
 
 | Component | Process | Holds | Details |
 | --- | --- | --- | --- |
-| VFS | `/system/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel, file cache mapping | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096, 0098 |
+| VFS | `/bootstrap/vfs` | control endpoint, one server endpoint per session, client end of the FAT32 channel, file cache mapping | [vfs.md](../userspace/vfs.md), ADR 0018, 0026, 0096, 0098 |
 | RAMFS | inside VFS | a page pool in the VFS's address space | [ramfs.md](../userspace/ramfs.md), ADR 0017, 0105 |
-| System image | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070 |
-| FAT32 | `/system/fat32` | server end of the VFS channel, a block client endpoint bounded to its partition, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098, 0115 |
-| Block service | `/system/block` | public and filesystem server endpoints, driver client endpoint; reads the partition table and serves the filesystem endpoint through a slice | [storage.md](../userspace/storage.md), ADR 0033, 0115 |
-| virtio-blk | `/system/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
+| Boot archive | inside VFS | image capability, read-only mapping of the boot archive | ADR 0070, ADR 0175 |
+| FAT32 | `/bootstrap/fat32` | server end of the VFS channel, a block client endpoint bounded to its partition, file cache mapping | [storage.md](../userspace/storage.md), ADR 0036, 0096, 0098, 0115 |
+| Block service | `/bootstrap/block` | public and filesystem server endpoints, driver client endpoint; reads the partition table and serves the filesystem endpoint through a slice | [storage.md](../userspace/storage.md), ADR 0033, 0115 |
+| virtio-blk | `/bootstrap/virtio-blk` | port range, IRQ 11, DMA domain, driver server endpoint | [storage.md](../userspace/storage.md), ADR 0034, 0035 |
 
 ## Namespace
 
@@ -30,9 +30,11 @@ longest whole-component prefix.
 | Path | Backend | Persistence |
 | --- | --- | --- |
 | `/` | RAMFS | volatile |
-| `/tmp` | RAMFS | volatile |
-| `/system` | boot archive, read-only | immutable; replaced only by a new image |
+| `/tmp`, `/run` | RAMFS | volatile |
+| `/bootstrap` | boot archive, read-only | immutable; replaced only by a new image |
 | `/persist` | FAT32 over the virtio-blk disk | survives reboot; the whole volume |
+| `/system` | the volume's `system` directory, protected | the installed system; changed only outside GoOS |
+| `/apps` | the volume's `apps` directory | survives reboot; applications |
 | `/home` | the volume's `home` directory | survives reboot; user data |
 | `/state` | the volume's `state` directory | survives reboot; mutable system state |
 
@@ -41,14 +43,20 @@ found by walking the namespace rather than by knowing a path in advance. A
 directory another mount points at cannot be removed, by path or under an alias
 such as `/persist/home` (ADR 0069).
 
-`/system` is the boot archive itself, mounted read-only, so the executables the
-launch path resolves under `/system/bin` are exactly the ones a listing shows.
-Every mutation of it is refused with permission denied. Executables are still
-not *loaded* through VFS: PID 1 maps the same archive read-only, resolves the
+`/bootstrap` is the boot archive itself, mounted read-only, so the programs
+PID 1 starts from it are exactly the ones a listing shows. They are not
+*loaded* through VFS: PID 1 maps the same archive read-only, resolves the
 path there, and asks the kernel to launch the extent it found under an image
-capability with Execute. The filesystem service maps the archive through a
-Read-only copy of that capability, which cannot launch anything (ADR 0070,
-ADR 0093). For a program elsewhere, PID 1 opens a private VFS session and has
+capability with Execute. The VFS maps the archive through a Read-only copy of
+that capability, which cannot launch anything (ADR 0070, ADR 0093).
+
+`/system` is the system installed on the volume, published by PID 1 once it
+has checked it (ADR 0175). The VFS protects the volume's `system` directory
+on its node: every mutation at or below it is refused with permission denied
+under every name that reaches it, `/persist/system` and case variants
+included, and stat reports its files read-only. `/bootstrap`, `/system`, and
+`/apps` are reserved, so nothing can be made there while they are not
+mounted. For a program on a filesystem, the installed system's included, PID 1 opens a private VFS session and has
 VFS pin the stable open object against mutation. The kernel retains one header
 page and requests later pages by offset as the process faults them in. The
 source capability contains no path (ADR 0106, ADR 0119, ADR 0121).
@@ -79,7 +87,7 @@ byte or invented Unix ownership/mode field crosses the boundary.
 
 FAT32 translates its directory-entry fields in the filesystem service. RAMFS
 uses the native realtime clock for creation and modification events. The
-system image reports its read-only state and explicitly leaves timestamps
+boot archive reports its read-only state and explicitly leaves timestamps
 unavailable. Mount IDs are descriptions assigned by VFS, not handles and not
 authority.
 
@@ -93,7 +101,7 @@ table is enumerated with a bounded cursor; entries expose only descriptive IDs,
 paths and filesystem properties, never backend handles or endpoints.
 
 RAMFS derives capacity from its configured page quota and current page use.
-The immutable system image reports its archive length and zero reusable bytes.
+The boot archive reports its length and zero reusable bytes.
 FAT32 derives total bytes from validated cluster geometry with checked 64-bit
 arithmetic and refreshes an unknown free count from the FAT rather than trusting
 the advisory FSInfo sector.

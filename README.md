@@ -152,10 +152,10 @@ The native kernel and the first isolated services are implemented:
 - reclamation of exited process address spaces and guarded kernel stacks;
 - generation-safe task-slot reuse and bounded process completion records;
 - capability-protected process handles and a blocking native wait call;
-- bounded `/system/bin` executable lookup with per-process VFS sessions;
-- the boot archive mounted read-only at `/system` through a capability only the
-  filesystem service holds, so `ls /system/bin` lists the executables the launch
-  path resolves and every write to them is refused;
+- bounded executable lookup along a search path with per-process VFS sessions;
+- an installed system on the disk, published at `/system` and protected from
+  every client under every name, with the boot archive mounted read-only at
+  `/bootstrap` and a recovery mode that runs from it without the disk;
 - a versioned native startup ABI with named, capability-bounded handle roles;
 - bounded environment data, child exit-status propagation, and read-only
   process/memory system information;
@@ -189,12 +189,14 @@ The native kernel and the first isolated services are implemented:
   signals, without authority a native process with the same grants would
   lack.
 
-PID 1 runs the supervision policy and resolves every service and system
-command in its own read-only mapping of the system image; the kernel launches
-an extent of that image under an image capability with Execute, or a sealed
-file-backed source holding a stable VFS open object, and knows no path but the
-bootstrap `system/init` (ADR 0093, ADR 0121). The shell resolves native
-executables beneath `/system/bin`, runs program paths such as `./args`, with
+PID 1 runs the supervision policy. It starts the storage services from its
+read-only mapping of the boot archive, checks the system installed on the
+disk, and starts the session services and every command from there; the
+kernel launches an extent of the archive under an image capability with
+Execute, or a sealed file-backed source holding a stable VFS open object, and
+knows no path but the bootstrap `system/init` (ADR 0093, ADR 0121, ADR 0175).
+The shell finds native commands in `/system/bin` and then `/home/user/bin`,
+runs program paths such as `./args`, with
 bounded quoting and structured arguments, runs
 pipelines of up to four processes, `;` sequences, and background jobs, and
 redirects stdin with `<`, stdout with `>`/`>>`, and stderr with `2>`/`2>>`.
@@ -236,12 +238,14 @@ and switches the machine off through ACPI S5, which in QEMU ends the emulator
 subdirectories (ADR 0060), so the M7 acceptance of writing, rebooting from the
 shell, and reading back runs inside one VM in the boot test, through `/home`.
 
-The namespace describes itself. `ls /` names `system`, `tmp`, `persist`, `home`
-and `state` because a mount is listed in the directory it is mounted on (ADR
-0069). `/system` is the boot archive itself, mounted read-only (ADR 0070), so
-the utilities under `/system/bin` are visible and `mkdir /system/backdoor`
-answers "read-only filesystem". `/home` and `/state` name user data and mutable
-system state on the persistent volume (ADR 0071).
+The namespace describes itself. `ls /` names `bootstrap`, `system`, `apps`,
+`persist`, `home` and `state` because a mount is listed in the directory it
+is mounted on (ADR 0069). `/system` is the system installed on the disk; it
+is protected under every name that reaches it, so `mkdir /system/backdoor`
+and `mkdir /persist/SYSTEM/backdoor` both answer "read-only filesystem"
+(ADR 0175). `/bootstrap` is the boot archive, read-only. `/home` and
+`/state` name user data and mutable system state on the same volume
+(ADR 0071).
 
 ## Building and running
 
@@ -259,9 +263,16 @@ make test
 make test-all
 make run
 make run-gui
+make run RECOVERY=1
 ```
 
-The resulting image is written to `build/goos-x86_64.iso`. All intermediate
+The resulting image is written to `build/goos-x86_64.iso`. `make run` boots
+the system installed on `build/goos-disk.img`, which it makes from the build
+when the file does not exist and never changes afterwards; after a rebuild
+of another release that disk boots into recovery until `make
+disk-overwrite` installs the new system on it, replacing what is there.
+`make disk` installs on a new disk and refuses an existing one, and `make
+system-image` builds the ISO and a volume image together. All intermediate
 files and caches remain under `build/`. Builds are reproducible: `make
 test-reproducible` builds the ISO twice from a clean tree and requires every
 artifact to be byte-identical (ADR 0086). Images are built with TinyGo's
@@ -272,7 +283,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.2.1
+GoOS 0.2.2
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
@@ -287,6 +298,7 @@ Starting services...
 [ OK ] block
 [ OK ] virtio-blk
 [ OK ] fat32
+[MODE] normal
 [ OK ] config
 [ OK ] log
 [ OK ] tty
@@ -302,25 +314,20 @@ The namespace is walkable from there. This is real output, not a transcript:
 ```text
 goos> ls /
 tmp/
-system/
+run/
+bootstrap/
 persist/
 home/
 state/
+system/
+apps/
 goos> ls /system
 bin/
+commands
 linux/
 motd
-init
-fault-probe
-vfs
-shell
-block
-virtio-blk
-log
-config
-tty
-fat32
-commands
+release
+services/
 goos> ls /system/bin
 args
 bench
@@ -350,52 +357,92 @@ uptime
 vmprobe
 write
 goos> ls /system/linux
-raw-probe
+abi-probe
+dirprobe
+fsprobe
 hello
 hello-pie
 musl-hello
-fsprobe
-dirprobe
-abi-probe
+goos> ls /bootstrap
+bin/
+motd
+init
+vfs
+shell
+block
+virtio-blk
+tty
+fat32
+commands
 goos> /system/linux/musl-hello one two
 argc=3
 hello from musl
 goos> mkdir /system/backdoor
 mkdir: /system/backdoor: read-only filesystem
 exit status: 2
-goos> mkdir /home/user
-goos> write /home/user/notes.txt "Hello from GoOS"
-goos> cat /home/user/notes.txt
+goos> mkdir /persist/SYSTEM/backdoor
+mkdir: /persist/SYSTEM/backdoor: read-only filesystem
+exit status: 2
+goos> mkdir /home/user/notes
+goos> write /home/user/notes/notes.txt "Hello from GoOS"
+goos> cat /home/user/notes/notes.txt
 Hello from GoOS
+goos> cp /system/bin/uname /home/user/bin/myuname
+goos> myuname
+GoOS 0.2.2 x86_64
+goos> fsck-fat --check auto
+exec: cannot start fsck-fat: volume in use by the running system; check it in recovery mode
 goos> ps
 PID   TYPE     STATE      MEM  CPU   COMMAND
-1     native   waiting    639  10    init
-4     native   waiting    54   3     vfs
-5     native   waiting    63   16    block
+1     native   waiting    750  12    init
+4     native   waiting    60   11    vfs
+5     native   waiting    63   12    block
 6     native   waiting    60   1     virtio-blk
-7     native   waiting    119  5     fat32
-8     native   waiting    27   2     config
-9     native   waiting    27   3     log
-10    native   ready      26   2     tty
-11    native   waiting    56   3     shell
+7     native   waiting    119  16    fat32
+8     native   waiting    69   40    config
+9     native   waiting    56   28    log
+10    native   waiting    26   0     tty
+11    native   waiting    142  85    shell
 12    native   waiting    26   0     tty
-13    native   waiting    32   0     shell
-23    native   running    19   0     ps
-goos> quota
-PID   COMMAND           RESOURCE  HELD/LIMIT
-1     init              chan      22/256
-1     init              strm      3/64
-1     init              task      1/8
-1     init              page      639/16384
-4     vfs               chan      0/4
-4     vfs               strm      0/16
-4     vfs               task      1/4
-...
+13    native   waiting    89   56    shell
+27    native   running    27   6     ps
 ```
 
 MEM is the pages the kernel allocated for the process and CPU the timer ticks it
 was found running on. PIDs 12 and 13 are the terminal service and shell of the
 framebuffer console.
+
+A disk without an installed system of this release, or no disk at all, boots
+into recovery mode, which says why and offers the archive's own commands
+(system log lines left out):
+
+```text
+[ OK ] fat32
+[MODE] recovery: stage=record path=/system reason=no installed system on the volume
+[ OK ] tty
+[ OK ] shell
+[ OK ] tty-fb
+[ OK ] shell-fb
+
+goos> ls /bootstrap/bin
+cat
+cp
+df
+echo
+edit
+fsck-fat
+ls
+mkdir
+mount
+mv
+pwd
+rm
+stat
+touch
+write
+goos> fsck-fat --check auto
+files=1 directories=3 used-clusters=4 free-clusters=130808 errors=0
+```
 
 `make VALIDATION=1` builds the validation variant used by `make test-boot`. It
 runs the kernel self-tests and fault-injection scenarios and prints the `*_OK`
@@ -423,8 +470,8 @@ or OCR. In `make run-gui`, type `gfm` in the QEMU window to use the file
 manager.
 `make test` is the fast host-side validation set. `make test-all` is the
 canonical complete gate: lint, documentation checks, ISO creation, the
-two-phase QEMU boot and persistence test, the Linux boot test, the console
-test, and two stress runs. `make release-check` adds a reproducible clean build,
+two-phase QEMU boot and persistence test, the installed-system and recovery
+test, the Linux boot test, the console test, and two stress runs. `make release-check` adds a reproducible clean build,
 FAT32 storage stress, and the release checks. Complete serial logs remain in
 `build/logs/boot.log` and `build/logs/reboot.log`; successful harness output is
 grouped and concise. See [`docs/development/testing.md`](docs/development/testing.md).
@@ -448,8 +495,8 @@ complete: stdin consumption, native streams, pipelines of up to four processes,
 sequential execution, bounded stdout `>`/`>>` redirection, bounded stdin `<`
 redirection, and bounded stderr `2>`/`2>>` redirection all work through explicit
 typed handles. The namespace now describes the system it serves: mounts are
-discoverable and protected, `/system` is the read-only boot image, and `/home`
-and `/state` separate user data from mutable system state. Launch resource
+discoverable and protected, `/system` is the protected installed system, and
+`/home` and `/state` separate user data from mutable system state. Launch resource
 profiles bound each process's share of kernel tables, and `ps` and `quota`
 report the applied limits and current use. A supervised log service persists the kernel
 ring to `/state`, so records survive a reboot, and a typed configuration service
@@ -532,11 +579,22 @@ process composition. A Linux program can `fork`, `execve`, connect children
 with pipes, reap them with `wait4`, and send and handle signals; `poll` waits
 on several descriptors. A static BusyBox `sh` runs programs, pipelines,
 redirections, scripts, and background jobs non-interactively. BusyBox is no
-part of the image: `make LINUX_EXTRA=/path/to/busybox` adds the one you supply
-under `/system/linux`. Every Linux
+part of the image: `make disk LINUX_EXTRA=/path/to/busybox` installs the one
+you supply under `/system/linux`. Every Linux
 descendant is an ordinary GoOS Process with no authority its parent lacks.
 Dynamic linking, threads, a Linux terminal, and networking are outside this
 release.
+
+GoOS 0.2.2 ([docs/releases/0.2.2.md](docs/releases/0.2.2.md)) runs the
+system from disk. The boot archive keeps the storage services, the shell, and
+a few recovery commands; everything else is installed on the FAT32 volume and
+published at `/system` after PID 1 has checked its installation record,
+service images, and command index. The VFS protects the installed system on
+its directory's node, so no client can change it through any name. Commands
+are granted only by the index of their own origin. A missing or unusable
+installation boots into a recovery mode that says why, and storage that fails
+for good under a running system moves it there. This checks compatibility;
+it is not a verified boot chain or an update system.
 
 Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
 and capability model and does not weaken the native architecture for POSIX

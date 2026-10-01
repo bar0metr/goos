@@ -197,7 +197,7 @@ func TestPageCacheRefusesAnOverlongPage(t *testing.T) {
 // Without the shared mapping no file data moves, and nothing else is harmed.
 func TestNoCacheMeansNoData(t *testing.T) {
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) || !service.AttachFilesystem(newLoopback(testFAT32Device())) {
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachFilesystem(newLoopback(testFAT32Device())) {
 		t.Fatal("service init failed")
 	}
 	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationCreate, Path: []byte("/persist/file")})

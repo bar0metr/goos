@@ -55,6 +55,7 @@ func VMDiscard(address uint64, length uint64) kcall.Status { return status(vmDis
 
 // VMQuery describes the region containing address.
 func VMQuery(address uint64) (Region, kcall.Status) {
+	vmRecord = [kcall.VMRecordSize]byte{}
 	result := status(vmQuery(address, unsafe.Pointer(&vmRecord[0])))
 	if result != kcall.StatusOK {
 		return Region{}, result

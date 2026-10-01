@@ -120,6 +120,9 @@ func attachFilesystem(client handle.ID) vfs.Status {
 	filesystem = client
 	first := !service.PersistentMounted()
 	if service.AttachFilesystem(filesystemTransport{}) {
+		if service.SystemProtected() {
+			mark("SYSTEM_PROTECTED_OK\n")
+		}
 		if first {
 			mark("FAT32_MOUNT_OK\n")
 			syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
@@ -149,13 +152,13 @@ func wireSize(data []byte) int {
 	return size
 }
 
-// mountSystemImage maps the read-only boot image and mounts it at /system, so
-// the executables the launch path resolves are the ones a listing shows. The
-// capability is the only authority the service has over the image, and the
+// mountBootstrap maps the read-only boot archive and mounts it at /bootstrap,
+// so the programs PID 1 starts from it are the ones a listing shows. The
+// capability is the only authority the service has over the archive, and the
 // mapping it produces is not writable.
-func mountSystemImage(imageHandle handle.ID) bool {
+func mountBootstrap(imageHandle handle.ID) bool {
 	image, status := sys.ImageMap(imageHandle)
-	return status == kcall.StatusOK && service.MountSystemImage(image)
+	return status == kcall.StatusOK && service.MountBootstrap(image)
 }
 
 // The volatile root's bounds. Its pages count against this process's page
@@ -230,7 +233,7 @@ func userspaceMain() {
 	if !service.Init() {
 		fatal("VFS_INIT_FAILED\n")
 	}
-	if !mountSystemImage(imageHandle) {
+	if !mountBootstrap(imageHandle) {
 		fatal("VFS_IMAGE_MOUNT_FAILED\n")
 	}
 	// File data on the persistent volume moves through the cache this
@@ -248,7 +251,7 @@ func userspaceMain() {
 	arenaBase = arena.Current()
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
-	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", "/system"))
+	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", vfsservice.BootstrapPath))
 	for {
 		arena.Reset(arenaBase)
 		var interests [userwait.MaxObjects]userwait.Interest
@@ -336,6 +339,23 @@ func pollControl() bool {
 		if service.Sync() {
 			result = vfs.StatusOK
 			syslog.Info("synced")
+		}
+		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
+		if !encoded {
+			fatal("VFS_CONTROL_REPLY_FAILED\n")
+		}
+		send(uint64(controlHandle), reply)
+		return true
+	}
+	if vfs.IsPublish(message) || vfs.IsWithdraw(message) {
+		var result vfs.Status
+		if vfs.IsPublish(message) {
+			if result = service.Publish(); result == vfs.StatusOK {
+				mark("SYSTEM_PUBLISHED_OK\n")
+				syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", vfsservice.SystemPath))
+			}
+		} else if result = service.Withdraw(); result == vfs.StatusOK {
+			syslog.Info("unmounted", syslog.Str("path", vfsservice.SystemPath))
 		}
 		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
 		if !encoded {
@@ -631,7 +651,14 @@ func serveBulk(owner vfs.Owner, request vfs.Request, object handle.ID) vfs.Reply
 
 func send(channel uint64, message ipc.Message) {
 	size, ok := ipc.Encode(message, wire[:])
-	if !ok || sys.IPCSend(handle.ID(channel), wire[:size]) != kcall.StatusOK {
+	if !ok {
+		fatal("VFS_SEND_FAILED\n")
+	}
+	status := sys.IPCSend(handle.ID(channel), wire[:size])
+	// A client that went while its request was served, such as a process
+	// that exited with a page of its program still being read, gets no
+	// reply; its session is closed when the loop sees it gone.
+	if status != kcall.StatusOK && status != kcall.StatusPeerDied {
 		fatal("VFS_SEND_FAILED\n")
 	}
 }

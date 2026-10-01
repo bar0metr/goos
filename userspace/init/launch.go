@@ -11,14 +11,14 @@ import (
 // its manifest's grants except GrantLaunch, so nesting stops at one level and
 // an application cannot reach PID 1 through a chain of children.
 //
-// lookup returns the grants of a command in the index, and false for one the
-// index does not describe.
-func ChildLaunch(request execproto.Request, lookup func(command []byte) (commands.Grant, bool)) ([]byte, commands.Grant, LaunchStatus) {
+// lookup returns the grants of the command at a path in the index that
+// describes that path, and false for one no index describes.
+func ChildLaunch(request execproto.Request, lookup func(path []byte) (commands.Grant, bool)) ([]byte, commands.Grant, LaunchStatus) {
 	command, ok := request.LaunchCommand()
 	if !ok {
 		return nil, 0, LaunchCapabilityDenied
 	}
-	granted, found := lookup(command)
+	granted, found := lookup(request.Stages[0].Path)
 	if !found {
 		return nil, 0, LaunchNotFound
 	}

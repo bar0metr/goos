@@ -268,18 +268,19 @@ func main() {
 	if systemPowerOffFound {
 		mark("ACPI_POWEROFF_OK")
 	}
+	// A machine without the disk still boots: PID 1 finds no volume and runs
+	// the system in recovery mode (ADR 0175).
 	virtioBlock, virtioBlockFound := pci.FindLegacyVirtioBlock(pciConfig{})
-	if !virtioBlockFound || virtioBlock.IRQ != 11 {
-		console.WriteString("PANIC: legacy virtio-blk PCI device not found\n")
-		for {
-			amd64.Halt()
-		}
+	if virtioBlockFound && virtioBlock.IRQ == 11 {
+		command := uint16(amd64.PCIConfigRead32(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4))
+		command = command&^uint16(1<<10) | 1<<0 | 1<<2
+		amd64.PCIConfigWrite16(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4, command)
+		virtioBlockPort = virtioBlock.IOBase
+		mark("PCI_DISCOVERY_OK")
+	} else {
+		virtioBlock = pci.Device{IRQ: 11}
+		console.WriteString("Storage: no legacy virtio-blk device\n")
 	}
-	command := uint16(amd64.PCIConfigRead32(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4))
-	command = command&^uint16(1<<10) | 1<<0 | 1<<2
-	amd64.PCIConfigWrite16(virtioBlock.Bus, virtioBlock.Slot, virtioBlock.Function, 4, command)
-	virtioBlockPort = virtioBlock.IOBase
-	mark("PCI_DISCOVERY_OK")
 
 	// The allocator's bitmap is carved out of low memory and reached through
 	// the firmware's identity map until the kernel's own map replaces it.
@@ -537,6 +538,13 @@ func bootContinue() {
 	blockServerHandle, blockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(blockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	portObject, portObjectValid := device.PortObject(virtioBlock.IOBase, virtioBlock.IOSize)
 	dmaObject, dmaObjectValid := device.DMAObject(1)
+	if virtioBlockPort == 0 {
+		// Without a device the driver's slots hold an object that grants no
+		// port or DMA access, so the layout PID 1 knows is kept and the
+		// driver fails at its first use of them.
+		portObject, portObjectValid = device.LogObject, true
+		dmaObject, dmaObjectValid = device.LogObject, true
+	}
 	irqObject, irqObjectValid := device.IRQObject(virtioBlock.IRQ)
 	virtioPortHandle, virtioPortInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(portObject, capability.Read|capability.Write|capability.Transfer))
 	virtioIRQHandle, virtioIRQInstalled := initProcess.Handles().Insert(handle.TypeIRQ, capability.New(irqObject, capability.Wait|capability.Transfer))

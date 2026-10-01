@@ -13,7 +13,10 @@ import (
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
 	ControlVersion    = uint16(4)
-	MaxServiceEntries = 8
+	// MaxServiceEntries is as many entries as one reply holds: eleven of
+	// 22 bytes, after the count, in a 256-byte payload. A system with both
+	// consoles runs eleven services.
+	MaxServiceEntries = 11
 	MaxServiceName    = 15
 	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
 )
@@ -55,6 +58,11 @@ const (
 	// FaultBlock kills the block service, which PID 1 restarts with the
 	// driver and the filesystem service behind it (ADR 0101).
 	FaultBlock
+	// FaultDriver kills the storage driver, which PID 1 restarts.
+	FaultDriver
+	// FaultStorage kills the filesystem service and keeps every restart of it
+	// from starting, as a volume that is gone for good would (ADR 0175).
+	FaultStorage
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -117,7 +125,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultBlock
+		return argument >= FaultTerminal && argument <= FaultStorage
 	default:
 		return false
 	}

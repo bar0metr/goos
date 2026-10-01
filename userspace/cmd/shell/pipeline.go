@@ -10,6 +10,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
@@ -25,8 +26,69 @@ func execSlot(slot int) []byte {
 	return execPage[start : start+execproto.SlotSize]
 }
 
-// pathVariable is the environment every command receives.
-var pathVariable = []byte("PATH=" + execproto.SearchRoot[:len(execproto.SearchRoot)-1])
+// searchPath is where a bare command name is looked for: the PATH PID 1
+// started the shell with, or the installed commands and then the user's
+// (ADR 0175). pathVariable is the same, as the environment entry every
+// command receives.
+var (
+	searchStorage [maxSearchPath]byte
+	searchPath    = []byte(execproto.NormalPath)
+	pathStorage   [len("PATH=") + maxSearchPath]byte
+	pathVariable  = []byte("PATH=" + execproto.NormalPath)
+	searchProbe   [execproto.MaxPath]byte
+)
+
+// maxSearchPath bounds the PATH the shell takes.
+const maxSearchPath = 256
+
+// setSearchPath takes the PATH the shell was started with, when it has one
+// that fits.
+func setSearchPath(value []byte) {
+	if len(value) == 0 || len(value) > len(searchStorage) {
+		return
+	}
+	searchPath = searchStorage[:copy(searchStorage[:], value)]
+	size := copy(pathStorage[:], "PATH=")
+	size += copy(pathStorage[size:], value)
+	pathVariable = pathStorage[:size]
+}
+
+// searchCommand looks for name in each directory of the search path in turn
+// and writes the first regular file it finds into target. An empty or
+// relative entry is skipped, so the working directory is never searched by
+// accident. With no match it names the file in the first directory, and PID 1
+// reports the command not found.
+func searchCommand(name []byte, target *[execproto.MaxPath]byte) ([]byte, bool) {
+	if !execproto.CommandName(name) {
+		return nil, false
+	}
+	first := -1
+	for start := 0; start <= len(searchPath); {
+		end := start
+		for end < len(searchPath) && searchPath[end] != ':' {
+			end++
+		}
+		directory := searchPath[start:end]
+		start = end + 1
+		if len(directory) == 0 || directory[0] != '/' {
+			continue
+		}
+		candidate, ok := execproto.CommandPath(directory, name, &searchProbe)
+		if !ok {
+			continue
+		}
+		if first < 0 {
+			first = copy(target[:], candidate)
+		}
+		if stat, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: candidate}); ok && stat.Status == vfs.StatusOK && stat.Kind == ramfs.KindFile {
+			return target[:copy(target[:], candidate)], true
+		}
+	}
+	if first < 0 {
+		return nil, false
+	}
+	return target[:first], true
+}
 
 // readWholeFile reads path into target and refuses a file that does not fit,
 // rather than using a prefix of it.
@@ -56,9 +118,8 @@ func readWholeFile(path []byte, target []byte) (int, bool) {
 }
 
 // commandPath turns a command word into the path PID 1 launches. A bare name
-// is looked up in /system/bin; a word with a slash is a program path, absolute
-// or relative to the working directory, which PID 1 reads from the filesystem
-// when it lies outside /system (ADR 0097).
+// is looked up in the search path; a word with a slash is a program path,
+// absolute or relative to the working directory (ADR 0097).
 func commandPath(word []byte, target *[execproto.MaxPath]byte) ([]byte, bool) {
 	for _, value := range word {
 		if value == '/' {
@@ -66,7 +127,7 @@ func commandPath(word []byte, target *[execproto.MaxPath]byte) ([]byte, bool) {
 			return path, ok && len(path) > 1
 		}
 	}
-	return execproto.ResolveExecutable(word, target)
+	return searchCommand(word, target)
 }
 
 // writeSink adds the isolated `write` stage that drains its input stream into
@@ -77,7 +138,7 @@ func writeSink(builder *execproto.Builder, encodedTarget []byte, appendMode bool
 		write("exec: invalid redirection\n")
 		return false
 	}
-	writePath, ok := execproto.ResolveExecutable([]byte("write"), &executableBuffers[index])
+	writePath, ok := searchCommand([]byte("write"), &executableBuffers[index])
 	if !ok {
 		write("exec: invalid redirection\n")
 		return false
@@ -173,7 +234,7 @@ func executeExternal(line []byte, background bool) {
 	stageOffset := 0
 	if len(redirects.Input) != 0 {
 		target, parsed := shellcmd.ParseInvocation(redirects.Input, &argumentStorage)
-		readPath, ok := execproto.ResolveExecutable([]byte("cat"), &executableBuffers[0])
+		readPath, ok := searchCommand([]byte("cat"), &executableBuffers[0])
 		if !parsed || target.Count != 1 || !ok {
 			write("exec: invalid redirection\n")
 			return
@@ -196,7 +257,7 @@ func executeExternal(line []byte, background bool) {
 		}
 		builder.Stage(executable, invocation.Arguments)
 		if count == 1 && !background && stageOffset == 0 && redirectCount == 0 {
-			rawJob = wantsRawTerminal(invocation.Arguments[0])
+			rawJob = wantsRawTerminal(executable)
 		}
 	}
 	nextIndex := stageOffset + count
@@ -276,7 +337,7 @@ func writeLaunchFailure(slot int, reply execproto.Reply) {
 	if request, ok := execproto.DecodeRequest(execSlot(slot)[:jobs[slot].requestSize]); ok && reply.Stage < request.Count {
 		// A command is named as it was typed; a program path in full.
 		path := request.Stages[reply.Stage].Path
-		if command, searched := execproto.CommandFromSystemPath(path); searched {
+		if command, searched := execproto.CommandFromSearchPath(path); searched {
 			name = command
 		} else {
 			name = path

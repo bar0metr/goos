@@ -94,6 +94,7 @@ func renewFilesystemChannels(spec *supervisor.LaunchSpec) bool {
 func attachFilesystem() {
 	client := filesystemClient
 	filesystemClient = 0
+	filesystemAttached = false
 	correlation++
 	request, ok := vfs.SetFilesystemRequest(client, correlation)
 	if !ok || !sendMessage(vfsControlHandle, request) {
@@ -101,12 +102,15 @@ func attachFilesystem() {
 		syslog.Error("filesystem service not handed to the vfs")
 		return
 	}
+	// Launching the service is not mounting the volume: the wait for the
+	// VFS's answer is what says whether storage is there.
 	reply, status := receive(vfsControlHandle, attachDeadline)
 	vfsStatus, valid := vfs.DecodeAddSessionReply(reply)
 	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
 		syslog.Warn("persistent volume unavailable")
 		return
 	}
+	filesystemAttached = true
 	if filesystemStarted {
 		syslog.Info("filesystem service reattached")
 		mark("FAT32_RESTARTED_OK\n")

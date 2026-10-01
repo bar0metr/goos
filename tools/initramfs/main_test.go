@@ -29,3 +29,22 @@ func TestLinuxProbeIsAcceptedStaticELF(t *testing.T) {
 		t.Fatalf("probe layout: size=%#x image=%#v", len(fixture), image)
 	}
 }
+
+func TestRecoveryCommandsExcludeTheDistribution(t *testing.T) {
+	for _, excluded := range []string{"gfm", "bench", "gview", "vmprobe", "args"} {
+		for _, name := range RecoveryCommands {
+			if name == excluded {
+				t.Fatalf("%s is in the recovery archive", excluded)
+			}
+		}
+	}
+	for _, needed := range []string{"cat", "write", "ls", "edit", "fsck-fat"} {
+		found := false
+		for _, name := range RecoveryCommands {
+			found = found || name == needed
+		}
+		if !found {
+			t.Fatalf("%s is missing from the recovery archive", needed)
+		}
+	}
+}

@@ -114,7 +114,10 @@ for key in e c h o spc g r a p h i c a l minus k e y b o a r d minus o k; do
 done
 send_key ret
 
-wait_for_log '^PS2_KEYBOARD_OK' 'PS/2 input marker'
+# The marker can follow the serial prompt on the same line: the shell is
+# read from the volume (ADR 0175) and starts again after the boot's driver
+# fault, so its prompt may be written just before it.
+wait_for_log 'PS2_KEYBOARD_OK' 'PS/2 input marker'
 wait_for_log '^graphical-keyboard-ok' 'graphical keyboard command output'
 printf 'PASS console-keyboard\n'
 

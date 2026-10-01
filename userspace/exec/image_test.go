@@ -38,7 +38,7 @@ func systemImage(t *testing.T) []byte {
 
 func TestLocateImageNamesTheBytesOfAnExecutable(t *testing.T) {
 	image := systemImage(t)
-	for path, want := range map[string]string{"/system/vfs": "VFS IMAGE", "/system/bin/ls": "LS IMAGE"} {
+	for path, want := range map[string]string{"/bootstrap/vfs": "VFS IMAGE", "/bootstrap/bin/ls": "LS IMAGE"} {
 		offset, size, status := LocateImage(image, []byte(path))
 		if status != ImageFound || string(image[offset:offset+size]) != want {
 			t.Fatalf("%s = %d+%d, %d", path, offset, size, status)
@@ -46,8 +46,8 @@ func TestLocateImageNamesTheBytesOfAnExecutable(t *testing.T) {
 	}
 	// A hard link names the same bytes, so the kernel files both launches
 	// under one extent and shares their read-only pages.
-	linkOffset, linkSize, _ := LocateImage(image, []byte("/system/bin/dir"))
-	fileOffset, fileSize, _ := LocateImage(image, []byte("/system/bin/ls"))
+	linkOffset, linkSize, _ := LocateImage(image, []byte("/bootstrap/bin/dir"))
+	fileOffset, fileSize, _ := LocateImage(image, []byte("/bootstrap/bin/ls"))
 	if linkOffset != fileOffset || linkSize != fileSize {
 		t.Fatal("hard link resolved to other bytes")
 	}
@@ -55,29 +55,51 @@ func TestLocateImageNamesTheBytesOfAnExecutable(t *testing.T) {
 
 func TestLocateImageRefusesPathsOutsideItsPolicy(t *testing.T) {
 	image := systemImage(t)
-	for _, path := range []string{"", "/", "/system/", "system/vfs", "/system//vfs", "/system/./vfs", "/system/bin/../vfs", "/system/vfs/"} {
+	for _, path := range []string{"", "/", "/bootstrap/", "bootstrap/vfs", "/bootstrap//vfs", "/bootstrap/./vfs", "/bootstrap/bin/../vfs", "/bootstrap/vfs/"} {
 		if _, _, status := LocateImage(image, []byte(path)); status != ImageInvalidPath {
 			t.Fatalf("%q = %d", path, status)
 		}
 	}
-	for _, path := range []string{"/persist/bin/ls", "/systemx/vfs", "/home/demo/args", "/tmp/system/vfs"} {
-		if _, _, status := LocateImage(image, []byte(path)); status != ImageOutsideSystem {
+	// The installed system is a filesystem, never the archive: a path under
+	// /system is not looked up there, whatever the archive holds.
+	for _, path := range []string{"/system/vfs", "/system/bin/ls", "/persist/bin/ls", "/bootstrapx/vfs", "/home/demo/args", "/tmp/bootstrap/vfs"} {
+		if _, _, status := LocateImage(image, []byte(path)); status != ImageOutsideArchive {
 			t.Fatalf("%q = %d", path, status)
 		}
 	}
-	for _, path := range []string{"/system/bin/missing", "/system/bin", "/system"} {
+	for _, path := range []string{"/bootstrap/bin/missing", "/bootstrap/bin", "/bootstrap"} {
 		if _, _, status := LocateImage(image, []byte(path)); status != ImageNotFound {
 			t.Fatalf("%q = %d", path, status)
 		}
 	}
 	image[148] ^= 1
-	if _, _, status := LocateImage(image, []byte("/system/vfs")); status != ImageNotFound {
+	if _, _, status := LocateImage(image, []byte("/bootstrap/vfs")); status != ImageNotFound {
 		t.Fatal("corrupt image resolved")
 	}
 }
 
+func TestOriginIsExplicit(t *testing.T) {
+	for path, want := range map[string]Origin{
+		"/bootstrap/bin/ls": OriginArchive, "/bootstrap/shell": OriginArchive,
+		"/system/bin/ls": OriginFile, "/system/services/shell": OriginFile, "/home/user/bin/ls": OriginFile,
+		"/bootstrapx/ls": OriginFile, "/persist/bootstrap/bin/ls": OriginFile,
+	} {
+		if got := OriginOf([]byte(path)); got != want {
+			t.Fatalf("%q = %d, want %d", path, got, want)
+		}
+	}
+	if member, ok := ArchiveMember([]byte("/bootstrap/bin/ls")); !ok || string(member) != "system/bin/ls" {
+		t.Fatalf("member = %q, %v", member, ok)
+	}
+	for _, path := range []string{"/bootstrap", "/bootstrap/", "/system/bin/ls"} {
+		if _, ok := ArchiveMember([]byte(path)); ok {
+			t.Fatalf("%q mapped to a member", path)
+		}
+	}
+}
+
 func TestInSystem(t *testing.T) {
-	for path, want := range map[string]bool{"/system": true, "/system/vfs": true, "/system/bin/ls": true, "/systemx": false, "/persist/system": false, "/": false} {
+	for path, want := range map[string]bool{"/system": true, "/system/vfs": true, "/system/bin/ls": true, "/systemx": false, "/persist/system": false, "/": false, "/bootstrap/bin/ls": false} {
 		if got := InSystem([]byte(path)); got != want {
 			t.Fatalf("%q = %v", path, got)
 		}

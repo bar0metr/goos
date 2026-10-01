@@ -64,11 +64,12 @@ The registry retains a bounded completion record after lifecycle delivery and
 resource teardown, allowing waiters to distinguish running, exited, and unknown
 processes without retaining reclaimed objects.
 
-Every launch after PID 1 names its executable as an extent of the system image
+A launch after PID 1 names its executable as an extent of the boot archive
 together with PID 1's image capability, which must carry Execute; PID 1 has
-resolved the path in its own read-only mapping of the image, and the kernel
-checks only the authority, the bounds, and the native image (ADR 0093). A
-program outside `/system` is named by a sealed file-backed source under its own
+resolved the path in its own read-only mapping of the archive, and the kernel
+checks only the authority, the bounds, and the native image (ADR 0093). Any
+other program, the installed system's included, is named by a sealed
+file-backed source under its own
 Execute right. The source owns a stable VFS open object and one retained header
 page; process faults fetch the remaining bytes by offset (ADR 0121).
 

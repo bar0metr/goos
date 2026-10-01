@@ -31,9 +31,11 @@ after bootstrap, the shell-exec channel. A returned bit mask can identify both;
 PID 1 then performs the typed receives, issues correlated launch requests, and
 continues only after the replacement Process and Task exist.
 
-PID 1 is its own executable source. Before it launches anything it maps the
-immutable system image read-only (`ImageMap`, handle `0x100000015`), and it
-resolves every executable path under `/system/` there with `exec.LocateImage`:
+PID 1 chooses each program's source by its origin (ADR 0175). Before it
+launches anything it maps the boot archive read-only (`ImageMap`, handle
+`0x100000015`), and it resolves every executable path under `/bootstrap/`
+there with `exec.LocateImage`, which maps `/bootstrap/X` to the member
+`system/X`:
 the path must be canonical, and hard links resolve to the program they name.
 A missing path is answered "command not found" without asking the kernel.
 Launch requests (lifecycle version 7) then identify the executable as an extent
@@ -43,7 +45,8 @@ that the extent lies inside the image, validates the native image, assigns a
 fresh process identifier from a bounded pool, and creates a new address space
 and initial task (ADR 0093).
 
-A command path outside `/system` is a program on a filesystem. PID 1 opens it
+Every other path, `/system` included, is a program on a filesystem, and a
+file missing there is never looked for in the archive. PID 1 opens it
 through a VFS session of its own, creates a one-page executable object for the
 native header, and asks VFS to pin the stable open object and fill that page.
 `ExecutableSource` consumes the session and turns the sealed header object into
@@ -56,10 +59,11 @@ larger than the executable-source limit, or whose header cannot be read in
 full, is refused. The launched process reads payload pages by offset when it
 touches them and holds the source open while it runs. Those private pages are
 charged to the process; the source itself retains only the header page
-(ADR 0106, ADR 0121). Such a program receives its standard streams and no
-other grant, and PID 1 closes its source handle once the kernel has answered.
-Services are launched only from the
-image, and paths in `/system` outside `/system/bin` are not commands.
+(ADR 0106, ADR 0121). PID 1 closes its source handle once the kernel has
+answered. A service of the installed system is prepared the same way, waiting
+for the VFS under the same bounded deadline. Paths in `/system` outside
+`/system/bin` and `/system/linux`, and in `/bootstrap` outside
+`/bootstrap/bin`, are not commands.
 
 PID 1 classifies GoOS native magic and ELF magic, but the kernel re-reads the
 stable source and independently validates the selected format before assigning
@@ -69,14 +73,16 @@ resource profile, and carries argv/environment on its System V stack. Cwd and
 resolved handles stay in bounded kernel compatibility state. Services remain
 native-only (ADR 0132, ADR 0136). A Linux program under `/system/linux` or on
 a writable volume starts from the shell like a native one, alone or as a
-pipeline stage. PID 1 replaces the shell's `PATH=/system/bin` with
+pipeline stage. PID 1 replaces a native default PATH, `/system/bin`,
+`/system/bin:/home/user/bin`, or `/bootstrap/bin`, with
 `PATH=/system/linux` in its environment, because Linux `execve` refuses native
 images (ADR 0171). The processes a Linux program forks are no jobs of PID 1:
 it holds no handle to them and gets no lifecycle message when they exit.
 
 In validation builds PID 1 runs the Linux probes before it starts the shell:
-two raw-syscall programs at once, then `/system/linux/abi-probe`, whose whole
-output and exit status it checks. It creates one file with a 235-byte path
+two raw-syscall programs from the archive at once, then, in normal mode,
+`/system/linux/abi-probe` from the volume, whose whole output and exit status
+it checks. It creates one file with a 235-byte path
 for the probe first and removes it afterwards.
 
 PID 1 is compiled from Go with a freestanding amd64 TinyGo target. A small
@@ -114,7 +120,8 @@ The kernel also grants PID 1 a 512 KiB exec area of eight slots (handle `0x10000
 PID 1 maps it with `MemoryMap` and passes a derived `Read|Write` handle to the
 shell through the launch manifest (ADR 0063).
 
-Shell exec requests are restricted to simple names below `/system/bin`. A
+Shell exec requests name a program by path: a command the shell found in its
+search path, or a path the user typed. A
 request carries one to four invocation records, a shared cwd, and a shared
 environment. The shell writes it into a 64 KiB slot of the exec area it
 shares with PID 1, and the version 11 submit message names the slot and size
@@ -158,9 +165,14 @@ Completion readiness is observed through the generation-safe `WaitAny` table;
 PID 1 then consumes the exit code with the typed process wait.
 
 PID 1 creates and transfers a fresh VFS session only for commands whose manifest
-asks for one. It reads those manifests once, from the command index
-`/system/commands` in the immutable system image, through a VFS session of its
-own; no list of command names is kept in PID 1 (ADR 0080). Pure stream and
+asks for one. A command is described only by the index of its origin
+(ADR 0175): `/bootstrap/bin/X` launched from the archive by the archive's
+recovery index, which PID 1 reads from the mapped archive, and
+`/system/bin/X` read from the volume by the installed index, which PID 1 reads
+through a session of its own when it checks the installed system, and only in
+normal mode while the system is published. Any other program, under any name,
+gets its standard streams and nothing more; no list of command names is kept
+in PID 1 (ADR 0080). Pure stream and
 diagnostic commands receive no VFS endpoint.
 The VFS control protocol version 2 identifies the add-session operation with an
 explicit payload byte, preventing an unrelated control-shaped message from
@@ -173,7 +185,8 @@ of a foreground job also gets a `launch` channel (ADR 0130). PID 1 grants that
 stage a counted copy of its standard input and keeps the reader. `gfm` uses
 the channel to run `gview` and `edit`: it writes one exec-style stage into a
 memory object of its own, attaches it to a `GLNCH001` request and waits. PID 1
-copies the request out, accepts only a `/system/bin` command whose manifest
+copies the request out, accepts only a `/system/bin` or `/bootstrap/bin`
+command whose manifest in its own index
 declares `GrantTerminal`, and launches it with its own manifest's grants, a new
 VFS session, PID 1's copy of the caller's input and the session's terminal for
 output. The child never gets `GrantLaunch`. PID 1 waits on the child in its
@@ -189,10 +202,15 @@ before registering them. Once `fat32` runs, PID 1 hands the VFS its channel to
 it through the VFS control endpoint and waits for the persistent volume to be
 mounted, so the services started next find `/state` (ADR 0096). `fat32`
 restarts on failure; PID 1 then gives the new instance fresh channels to the
-VFS and the block service and hands their other ends over as at first start. The second starts the
-log service and then one terminal session per console: `tty` and `shell` on
-COM1, then `tty-fb` and `shell-fb` on the framebuffer when the machine has one
-(ADR 0125).
+VFS and the block service and hands their other ends over as at first start.
+Between the phases PID 1 chooses the boot mode and, in normal mode, publishes
+the installed system (ADR 0175). The second starts the configuration and log
+services from the volume, in normal mode only, and then one terminal session
+per console: `tty` and `shell` on COM1, then `tty-fb` and `shell-fb` on the
+framebuffer when the machine has one (ADR 0125). The terminals always come
+from the archive; the shell from `/system/services/shell` in normal mode and
+from `/bootstrap/shell` in recovery, started with
+`PATH=/system/bin:/home/user/bin` or `PATH=/bootstrap/bin`.
 
 The split exists because the log service's VFS session cannot be handed over at
 boot: it has to be asked for, through the VFS control endpoint, the same way an
@@ -200,8 +218,40 @@ application's session is, and that needs VFS already running (ADR 0073). Placing
 it before the shell also means the prompt appears after every service line
 rather than in the middle of them.
 
-A failure to start the log service warns and continues. Every other service is
-required, because the system cannot serve files or a prompt without them.
+A failure to start the log service warns and continues. Without a VFS there is
+no prompt, so its failure stops the boot. A storage stack that does not
+attach a volume within 20 seconds leaves the system in recovery mode, and so
+does an installed shell that does not start.
+
+## Boot mode
+
+`supervisor.BootState` holds the mode: starting, then normal or recovery, and
+from normal only to recovery (ADR 0175). The first reason for recovery is the
+one kept and printed:
+
+| Stage | Cause |
+| --- | --- |
+| `forced` | the archive has the member `system/force-recovery` (`make run RECOVERY=1`) |
+| `storage` | no volume was attached |
+| `record` | no `system` directory, or `/system/release` missing, malformed, or for another architecture, release, startup block, image format, or index format |
+| `services` | a session service image missing or not a native image |
+| `index` | `/system/commands` missing or malformed, or a command it lists missing |
+| `publish` | the VFS refused to publish `/system` and `/apps` |
+| `launch` | an installed session service failed to start or used up its restarts |
+| `runtime` | a storage service used up its restarts under a normal system |
+
+When the VFS, block, driver, or FAT32 service goes, PID 1 holds the session
+services back until the storage is up again: a restarted FAT32 service is
+attached, the system published again and its record and index read again,
+and a restarted driver alone makes the volume usable at once. Recovering the
+storage gives each session service a fresh restart budget. Entering recovery
+withdraws the installed system, or does so once the programs using it have
+exited, stops the configuration and log services, and starts each shell again
+from the archive after stopping the running one. A reboot returns to normal
+mode.
+
+An exclusive volume check (`GrantBlockCheck`) is refused in normal mode with
+`LaunchVolumeBusy`, before anything is unmounted.
 
 ## Restarts
 
@@ -248,6 +298,7 @@ shell brings a new one. After boot, a restarted service is recorded in the log
 rather than printed as an `[ OK ]` line, which would land in the line being
 typed. The validation build's `fault tty` and `fault shell` kill the pair of
 the shell that asks; `fault fat32`,
-`fault vfs`, `fault config`, `fault log` and `fault block` (exec control
-`ControlFault`) kill
-each once during the boot test.
+`fault vfs`, `fault config`, `fault log`, `fault block` and `fault driver`
+(exec control `ControlFault`) kill
+each once during the boot tests, and `fault storage` kills the filesystem
+service and keeps it from starting again.

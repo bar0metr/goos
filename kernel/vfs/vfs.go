@@ -146,14 +146,17 @@ type openFile struct {
 	rights     Rights
 	used       bool
 	executable bool
+	// protected marks a file opened below the protected directory.
+	protected bool
 }
 
 type cacheEntry struct {
-	node  ramfs.NodeID
-	mount uint8
-	path  [maxCachedPath]byte
-	size  uint16
-	used  bool
+	node      ramfs.NodeID
+	mount     uint8
+	path      [maxCachedPath]byte
+	size      uint16
+	protected bool
+	used      bool
 }
 
 type Namespace struct {
@@ -166,6 +169,119 @@ type Namespace struct {
 	// own requested.
 	resolved  [MaxPath]byte
 	requested [MaxPath]byte
+	// guard and guarded name the one protected directory: a node of one
+	// backend, below which no path may be changed (ADR 0175). The check is
+	// made on the node a walk reaches, not on the path that reached it, so
+	// every name of the directory is covered: another mount of the same
+	// volume, a name that differs only in case on a filesystem that ignores
+	// case, and a mount of the directory itself.
+	guard   Backend
+	guarded ramfs.NodeID
+	// reserved are mount points nothing may be created at or below while
+	// they are not mounted, so a client cannot build a directory in the
+	// volatile root that a path meant for a mount would reach instead.
+	reserved [maxReserved]reservedPath
+}
+
+const maxReserved = 4
+
+type reservedPath struct {
+	path [maxReservedPath]byte
+	size uint8
+}
+
+const maxReservedPath = 32
+
+// Reserve keeps the canonical path free for a mount: until a filesystem is
+// mounted there, creating it or anything below it, or moving a name there, is
+// refused.
+func (namespace *Namespace) Reserve(path []byte) Status {
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
+	if !ok || size == 1 || size > maxReservedPath {
+		return StatusInvalidArgument
+	}
+	for index := range namespace.reserved {
+		entry := &namespace.reserved[index]
+		if entry.size == 0 {
+			entry.size = uint8(copy(entry.path[:], canonical[:size]))
+			return StatusOK
+		}
+	}
+	return StatusResourceExhausted
+}
+
+// reservedTarget reports whether path is at or below a reserved mount point
+// that nothing is mounted at.
+func (namespace *Namespace) reservedTarget(path []byte) bool {
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
+	if !ok {
+		return false
+	}
+	for index := range namespace.reserved {
+		entry := &namespace.reserved[index]
+		if entry.size == 0 || !mountMatches(canonical[:size], entry.path[:entry.size]) {
+			continue
+		}
+		mounted := false
+		for mountIndex := range namespace.mounts {
+			if point := &namespace.mounts[mountIndex]; point.used && equal(point.path[:point.size], entry.path[:entry.size]) {
+				mounted = true
+			}
+		}
+		if !mounted {
+			return true
+		}
+	}
+	return false
+}
+
+// Protect makes the directory node of backend and everything below it
+// immutable through this namespace: no create, writable open, truncate,
+// unlink, rename, or replace reaches it. It refuses while a file of backend is
+// open for writing, because that handle was granted before the protection and
+// could still write below the directory. Only one directory is protected at a
+// time; protecting another replaces it.
+func (namespace *Namespace) Protect(backend Backend, node ramfs.NodeID) Status {
+	if backend == nil || node == 0 {
+		return StatusInvalidArgument
+	}
+	for index := range namespace.files {
+		file := &namespace.files[index]
+		if file.used && file.rights&Write != 0 && namespace.mounts[file.mount].backend == backend {
+			return StatusBusy
+		}
+	}
+	namespace.guard, namespace.guarded = backend, node
+	namespace.invalidate()
+	return StatusOK
+}
+
+// Unprotect lifts the protection Protect set, if any.
+func (namespace *Namespace) Unprotect() {
+	namespace.guard, namespace.guarded = nil, 0
+	namespace.invalidate()
+}
+
+// Protected returns the protected directory of backend, if it has one.
+func (namespace *Namespace) Protected(backend Backend) (ramfs.NodeID, bool) {
+	if backend == nil || namespace.guard != backend {
+		return 0, false
+	}
+	return namespace.guarded, true
+}
+
+// protectedMount reports whether the mount in slot index is of the protected
+// directory itself, which is then reported read-only.
+func (namespace *Namespace) protectedMount(index int) bool {
+	entry := &namespace.mounts[index]
+	return entry.used && namespace.guards(entry, entry.root)
+}
+
+// guards reports whether node of mount is the protected directory.
+func (namespace *Namespace) guards(mount *mount, node ramfs.NodeID) bool {
+	return namespace.guard != nil && mount.backend == namespace.guard && node == namespace.guarded
 }
 
 func (namespace *Namespace) Mount(path []byte, backend Backend, root ramfs.NodeID) Status {
@@ -222,6 +338,9 @@ func (namespace *Namespace) UnmountBackend(backend Backend) Status {
 	if !found {
 		return StatusNotFound
 	}
+	if namespace.guard == backend {
+		namespace.guard, namespace.guarded = nil, 0
+	}
 	for index := range namespace.mounts {
 		if namespace.mounts[index].used && namespace.mounts[index].backend == backend {
 			entry := &namespace.mounts[index]
@@ -236,36 +355,74 @@ func (namespace *Namespace) UnmountBackend(backend Backend) Status {
 	return StatusOK
 }
 
+// UnmountPath detaches the one mount at path. It refuses while an open file
+// was opened through that mount, and never detaches the root.
+func (namespace *Namespace) UnmountPath(path []byte) Status {
+	canonical := &namespace.requested
+	size, ok := canonicalPath(canonical, path)
+	if !ok || size == 1 {
+		return StatusInvalidArgument
+	}
+	for index := range namespace.mounts {
+		entry := &namespace.mounts[index]
+		if !entry.used || !equal(entry.path[:entry.size], canonical[:size]) {
+			continue
+		}
+		for fileIndex := range namespace.files {
+			if file := &namespace.files[fileIndex]; file.used && int(file.mount) == index {
+				return StatusBusy
+			}
+		}
+		generation := entry.generation + 1
+		if generation == 0 {
+			generation = 1
+		}
+		*entry = mount{generation: generation}
+		namespace.invalidate()
+		return StatusOK
+	}
+	return StatusNotFound
+}
+
 func (namespace *Namespace) Resolve(path []byte) (uint8, ramfs.NodeID, Status) {
+	mountIndex, node, _, status := namespace.resolve(path)
+	return mountIndex, node, status
+}
+
+// resolve walks path to its node and reports whether the walk reached the
+// protected directory, so the node is it or lies below it.
+func (namespace *Namespace) resolve(path []byte) (uint8, ramfs.NodeID, bool, Status) {
 	canonical := &namespace.resolved
 	size, ok := canonicalPath(canonical, path)
 	if !ok {
-		return 0, 0, StatusInvalidArgument
+		return 0, 0, false, StatusInvalidArgument
 	}
-	if mountIndex, node, found := namespace.cached(canonical[:size]); found {
-		return mountIndex, node, StatusOK
+	if mountIndex, node, protected, found := namespace.cached(canonical[:size]); found {
+		return mountIndex, node, protected, StatusOK
 	}
 	mountIndex, relative, status := namespace.selectMount(canonical[:size])
 	if status != StatusOK {
-		return 0, 0, status
+		return 0, 0, false, status
 	}
 	mounted := &namespace.mounts[mountIndex]
 	node := mounted.root
+	protected := namespace.guards(mounted, node)
 	for relative < size {
 		component, rest := nextComponent(canonical[relative:size])
 		name, valid := ramfs.MakeName(component)
 		if !valid {
-			return 0, 0, StatusInvalidArgument
+			return 0, 0, false, StatusInvalidArgument
 		}
 		var backendStatus ramfs.Status
 		node, backendStatus = mounted.backend.OpenName(node, name)
 		if backendStatus != ramfs.StatusOK {
-			return 0, 0, mapStatus(backendStatus)
+			return 0, 0, false, mapStatus(backendStatus)
 		}
+		protected = protected || namespace.guards(mounted, node)
 		relative = size - len(rest)
 	}
-	namespace.remember(canonical[:size], mountIndex, node)
-	return mountIndex, node, StatusOK
+	namespace.remember(canonical[:size], mountIndex, node, protected)
+	return mountIndex, node, protected, StatusOK
 }
 
 func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handle, Status) {
@@ -285,9 +442,12 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	if free < 0 {
 		return 0, StatusResourceExhausted
 	}
-	mountIndex, node, status := namespace.Resolve(path)
+	mountIndex, node, protected, status := namespace.resolve(path)
 	if status != StatusOK {
 		return 0, status
+	}
+	if protected && rights&Write != 0 {
+		return 0, StatusPermissionDenied
 	}
 	stat, backendStatus := namespace.mounts[mountIndex].backend.Stat(node)
 	if backendStatus != ramfs.StatusOK || stat.Kind != ramfs.KindFile {
@@ -309,7 +469,7 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 		entry.generation = 1
 	}
 	entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
-	entry.identity = identity
+	entry.identity, entry.protected = identity, protected
 	return encodeHandle(free, entry.generation), StatusOK
 }
 
@@ -464,9 +624,15 @@ func (namespace *Namespace) Seek(owner Owner, handle Handle, offset uint64) Stat
 }
 
 func (namespace *Namespace) Create(path []byte, directory bool) Status {
-	mountIndex, parent, name, status := namespace.resolveParent(path)
+	if namespace.reservedTarget(path) {
+		return StatusPermissionDenied
+	}
+	mountIndex, parent, name, protected, status := namespace.resolveParent(path)
 	if status != StatusOK {
 		return status
+	}
+	if protected {
+		return StatusPermissionDenied
 	}
 	if directory {
 		_, status = mapNodeResult(namespace.mounts[mountIndex].backend.MkdirName(parent, name))
@@ -480,15 +646,25 @@ func (namespace *Namespace) Create(path []byte, directory bool) Status {
 }
 
 func (namespace *Namespace) Stat(path []byte) (ramfs.Stat, Status) {
-	mountIndex, node, status := namespace.Resolve(path)
+	mountIndex, node, protected, status := namespace.resolve(path)
 	if status != StatusOK {
 		return ramfs.Stat{}, status
 	}
 	stat, backendStatus := namespace.mounts[mountIndex].backend.Stat(node)
 	if backendStatus == ramfs.StatusOK {
 		stat.MountID = uint64(namespace.mountID(int(mountIndex)))
+		markProtected(&stat, protected)
 	}
 	return stat, mapStatus(backendStatus)
+}
+
+// markProtected reports a protected node as read-only, as a read-only
+// filesystem's are. It describes the protection; it does not enforce it.
+func markProtected(stat *ramfs.Stat, protected bool) {
+	if protected {
+		stat.Attributes |= ramfs.AttrReadOnly
+		stat.AttributesAvailable = true
+	}
 }
 
 // StatOpen describes the file an open handle names. It follows the handle,
@@ -504,6 +680,7 @@ func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, St
 	if backendStatus == ramfs.StatusOK {
 		stat.MountID = uint64(namespace.mountID(int(entry.mount)))
 		stat.ID = entry.identity
+		markProtected(&stat, entry.protected)
 	}
 	return stat, mapStatus(backendStatus)
 }
@@ -518,7 +695,7 @@ func (namespace *Namespace) ReadDir(path []byte, cursor int) (ramfs.Entry, int, 
 	if !ok || cursor < 0 {
 		return ramfs.Entry{}, cursor, StatusInvalidArgument
 	}
-	mountIndex, node, status := namespace.Resolve(canonical[:size])
+	mountIndex, node, protected, status := namespace.resolve(canonical[:size])
 	if status != StatusOK {
 		return ramfs.Entry{}, cursor, status
 	}
@@ -527,6 +704,7 @@ func (namespace *Namespace) ReadDir(path []byte, cursor int) (ramfs.Entry, int, 
 		if backendStatus != ramfs.StatusNotFound {
 			if backendStatus == ramfs.StatusOK {
 				entry.Stat.MountID = uint64(namespace.mountID(int(mountIndex)))
+				markProtected(&entry.Stat, protected)
 			}
 			return entry, next, mapStatus(backendStatus)
 		}
@@ -604,6 +782,7 @@ func (namespace *Namespace) FilesystemInfo(path []byte, id MountID) (ramfs.Files
 		}
 		return ramfs.FilesystemInfo{}, 0, mapStatus(backendStatus)
 	}
+	info.ReadOnly = info.ReadOnly || namespace.protectedMount(index)
 	return info, namespace.mountID(index), StatusOK
 }
 
@@ -634,7 +813,7 @@ func (namespace *Namespace) ReadMount(cursor int) (MountInfo, int, Status) {
 			}
 			entry.filesystemType, entry.readOnly = info.Type, info.ReadOnly
 		}
-		info = ramfs.FilesystemInfo{Type: entry.filesystemType, ReadOnly: entry.readOnly}
+		info = ramfs.FilesystemInfo{Type: entry.filesystemType, ReadOnly: entry.readOnly || namespace.protectedMount(index)}
 		result := MountInfo{ID: namespace.mountID(index), PathSize: entry.size, Filesystem: info}
 		copy(result.Path[:], entry.path[:entry.size])
 		return result, index + 1, StatusOK
@@ -657,9 +836,12 @@ func (namespace *Namespace) mountIndex(id MountID) (int, bool) {
 }
 
 func (namespace *Namespace) Truncate(path []byte, size uint64) Status {
-	mountIndex, node, status := namespace.Resolve(path)
+	mountIndex, node, protected, status := namespace.resolve(path)
 	if status != StatusOK {
 		return status
+	}
+	if protected {
+		return StatusPermissionDenied
 	}
 	if namespace.executablePinned(mountIndex, node) {
 		return StatusPermissionDenied
@@ -671,12 +853,15 @@ func (namespace *Namespace) Unlink(path []byte) Status {
 	if namespace.carriesMount(path) {
 		return StatusBusy
 	}
-	if mount, node, resolved := namespace.Resolve(path); resolved == StatusOK && namespace.executablePinned(mount, node) {
+	if mount, node, protected, resolved := namespace.resolve(path); resolved == StatusOK && (protected || namespace.executablePinned(mount, node)) {
 		return StatusPermissionDenied
 	}
-	mountIndex, parent, name, status := namespace.resolveParent(path)
+	mountIndex, parent, name, protected, status := namespace.resolveParent(path)
 	if status != StatusOK {
 		return status
+	}
+	if protected {
+		return StatusPermissionDenied
 	}
 	status = mapStatus(namespace.mounts[mountIndex].backend.UnlinkName(parent, name))
 	if status == StatusOK {
@@ -715,11 +900,14 @@ func (namespace *Namespace) carriesMount(path []byte) bool {
 }
 
 func (namespace *Namespace) Rename(path []byte, target []byte) Status {
+	if namespace.reservedTarget(target) || namespace.changesProtected(path, target) {
+		return StatusPermissionDenied
+	}
 	sourceMount, node, status := namespace.Resolve(path)
 	if status != StatusOK {
 		return status
 	}
-	targetMount, parent, name, status := namespace.resolveParent(target)
+	targetMount, parent, name, _, status := namespace.resolveParent(target)
 	if status != StatusOK {
 		return status
 	}
@@ -769,6 +957,9 @@ func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, targ
 // open; it is removed as path takes its name, and the backend decides what an
 // interruption can leave. With no target this is a rename.
 func (namespace *Namespace) Replace(path []byte, target []byte) Status {
+	if namespace.reservedTarget(target) || namespace.changesProtected(path, target) {
+		return StatusPermissionDenied
+	}
 	if namespace.carriesMount(path) || namespace.carriesMount(target) {
 		return StatusBusy
 	}
@@ -809,7 +1000,7 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	if !ok {
 		return StatusUnsupported
 	}
-	_, parent, name, status := namespace.resolveParent(target)
+	_, parent, name, _, status := namespace.resolveParent(target)
 	if status != StatusOK {
 		return status
 	}
@@ -821,11 +1012,29 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	return status
 }
 
-func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, ramfs.Name, Status) {
+// changesProtected reports whether moving path to target would take a name
+// out of the protected directory, put one into it, or move the directory
+// itself. Either path naming nothing yet is decided by its parent.
+func (namespace *Namespace) changesProtected(path []byte, target []byte) bool {
+	if namespace.guard == nil {
+		return false
+	}
+	for _, name := range [2][]byte{path, target} {
+		if _, _, protected, status := namespace.resolve(name); status == StatusOK && protected {
+			return true
+		}
+		if _, _, _, protected, status := namespace.resolveParent(name); status == StatusOK && protected {
+			return true
+		}
+	}
+	return false
+}
+
+func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, ramfs.Name, bool, Status) {
 	canonical := &namespace.requested
 	size, ok := canonicalPath(canonical, path)
 	if !ok || size == 1 {
-		return 0, 0, ramfs.Name{}, StatusInvalidArgument
+		return 0, 0, ramfs.Name{}, false, StatusInvalidArgument
 	}
 	last := size - 1
 	for last > 0 && canonical[last] != '/' {
@@ -833,14 +1042,14 @@ func (namespace *Namespace) resolveParent(path []byte) (uint8, ramfs.NodeID, ram
 	}
 	name, ok := ramfs.MakeName(canonical[last+1 : size])
 	if !ok {
-		return 0, 0, ramfs.Name{}, StatusInvalidArgument
+		return 0, 0, ramfs.Name{}, false, StatusInvalidArgument
 	}
 	parentPath := canonical[:last]
 	if len(parentPath) == 0 {
 		parentPath = canonical[:1]
 	}
-	mountIndex, parent, status := namespace.Resolve(parentPath)
-	return mountIndex, parent, name, status
+	mountIndex, parent, protected, status := namespace.resolve(parentPath)
+	return mountIndex, parent, name, protected, status
 }
 
 func (namespace *Namespace) selectMount(path []byte) (uint8, int, Status) {
@@ -882,24 +1091,24 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 	return entry, StatusOK
 }
 
-func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool) {
+func (namespace *Namespace) cached(path []byte) (uint8, ramfs.NodeID, bool, bool) {
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
 		if entry.used && equal(entry.path[:entry.size], path) {
-			return entry.mount, entry.node, true
+			return entry.mount, entry.node, entry.protected, true
 		}
 	}
-	return 0, 0, false
+	return 0, 0, false, false
 }
 
-func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID) {
+func (namespace *Namespace) remember(path []byte, mountIndex uint8, node ramfs.NodeID, protected bool) {
 	if len(path) > maxCachedPath {
 		return
 	}
 	for index := range namespace.cache {
 		entry := &namespace.cache[index]
 		if !entry.used {
-			entry.used, entry.mount, entry.node, entry.size = true, mountIndex, node, uint16(len(path))
+			entry.used, entry.mount, entry.node, entry.size, entry.protected = true, mountIndex, node, uint16(len(path)), protected
 			copy(entry.path[:], path)
 			return
 		}

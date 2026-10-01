@@ -1,7 +1,8 @@
 # Native shell
 
-PID 1 launches `/system/shell` as a normal supervised native image after the
-terminal service. The shell holds no console capability (ADR 0089): what is
+PID 1 launches the shell as a normal supervised native image after the
+terminal service: `/system/services/shell` from the installed system in
+normal mode, `/bootstrap/shell` from the boot archive in recovery (ADR 0175). The shell holds no console capability (ADR 0089): what is
 typed reaches it as lines from the terminal service over its `tty` session
 (ADR 0082), and what it prints goes back through the same service on `stdout`,
 a write-only copy of the terminal's output stream. It assembles its output into
@@ -32,14 +33,19 @@ quotes, double quotes, and backslash escaping (ADR 0109). The shell owns a
 fixed working-directory buffer of the native path limit, 4096 bytes, and
 resolves
 relative paths without heap allocation. `cd` commits a new directory only after
-VFS `Stat` confirms it. Other command names are resolved beneath the fixed
-`/system/bin/` search root; a command word with a slash is a program path,
-absolute or relative to the working directory, such as `/home/demo/args` or
-`./args` (ADR 0097). The shell sends the executable path, structured bounded
-argument and environment vectors, and current directory to PID 1 and waits
-through a process handle. PID 1 independently validates the path: under
-`/system` it looks in the image, elsewhere it reads the file into an
-executable object, and the kernel validates the executable image either way.
+VFS `Stat` confirms it. A bare command name is looked up in each directory of
+the shell's search path in turn, and the first regular file found is run: the
+`PATH` PID 1 starts the shell with, `/system/bin:/home/user/bin` in normal
+mode and `/bootstrap/bin` in recovery (ADR 0175). Only absolute entries count;
+the working directory is never searched unless a command names it. A command
+word with a slash is a program path, absolute or relative to the working
+directory, such as `/home/demo/args` or `./args` (ADR 0097). The shell sends
+the executable path, structured bounded argument and environment vectors, and
+current directory to PID 1 and waits through a process handle. PID 1
+independently validates the path: under `/bootstrap` it looks in the boot
+archive, elsewhere it reads the file into an executable object, and the
+kernel validates the executable image either way. A command in
+`/home/user/bin` runs with its standard streams only, whatever its name.
 The shell similarly restores its post-startup arena mark after every completed
 command, so repeated IPC commands cannot exhaust the non-freeing TinyGo heap.
 
@@ -52,7 +58,7 @@ arrive before a launch reply are retained in a bounded PID 1 queue. The exec
 reply distinguishes launch status from the final child exit code. The native
 base utilities are separate images under `userspace/bin`, each with a manifest
 the build collects into `/system/commands` (ADR 0080). They receive structured
-`argv`, `PATH=/system/bin`, the framebuffer console's size as `COLUMNS` and
+`argv`, the shell's `PATH`, the framebuffer console's size as `COLUMNS` and
 `LINES` when there is one, a VFS
 session when their manifest asks for one, a
 read-only standard-input handle named `in`, and distinct write-only
@@ -144,8 +150,8 @@ recognizes the format, the kernel validates it, and the process starts with
 the shell's working directory, its arguments and environment, the command's
 standard streams, and a VFS session of its own. It can be a pipeline stage on
 either side of a native program, a background job, and the target of Ctrl-C
-and `kill`. Programs under `/system/linux` ship with the image; others run
-from any volume.
+and `kill`. Programs under `/system/linux` are installed with the system;
+others run from any volume.
 
 ```text
 goos> /system/linux/hello

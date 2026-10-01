@@ -38,8 +38,12 @@ func injectFault(target []byte) {
 		service = execproto.FaultLog
 	} else if argumentIs(target, "block") {
 		service = execproto.FaultBlock
+	} else if argumentIs(target, "driver") {
+		service = execproto.FaultDriver
+	} else if argumentIs(target, "storage") {
+		service = execproto.FaultStorage
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty, shell, fat32, vfs, config, log, block or kernel-stack\n")
+		write("fault: tty, shell, fat32, vfs, config, log, block, driver, storage or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)
@@ -73,8 +77,10 @@ func printHelp(invocation shellcmd.Invocation) {
 	for index := range shellcmd.Commands {
 		writeCommandLine([]byte(shellcmd.Commands[index].Name), []byte(shellcmd.Commands[index].Summary))
 	}
-	write("Commands in /system/bin:\n")
 	index, ok := systemCommands()
+	write("Commands in ")
+	write(commandDirectory)
+	write(":\n")
 	if !ok {
 		write("  (the command index could not be read)\n")
 	}
@@ -111,16 +117,24 @@ func writeUsageBytes(usage, summary []byte) {
 	write("\n")
 }
 
+// systemCommands returns the index of the commands this shell runs: the
+// installed one, or in recovery, where nothing is installed, the archive's.
 func systemCommands() ([]byte, bool) {
 	if !commandIndexLoaded {
 		size, ok := readWholeFile([]byte(commands.IndexPath), commandIndex[:])
 		if !ok {
-			return nil, false
+			if size, ok = readWholeFile([]byte(commands.BootstrapIndexPath), commandIndex[:]); !ok {
+				return nil, false
+			}
+			commandDirectory = execproto.BootstrapSearchRoot[:len(execproto.BootstrapSearchRoot)-1]
 		}
 		commandIndexSize, commandIndexLoaded = size, true
 	}
 	return commandIndex[:commandIndexSize], true
 }
+
+// commandDirectory is where the commands of the index read are.
+var commandDirectory = execproto.SearchRoot[:len(execproto.SearchRoot)-1]
 
 func printServices() {
 	reply, ok := controlExchange(execproto.ControlServices, 0)

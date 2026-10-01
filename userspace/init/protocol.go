@@ -75,6 +75,12 @@ const (
 	// LaunchArgumentsTooLong is a command whose arguments and environment do
 	// not fit a startup object (ADR 0109).
 	LaunchArgumentsTooLong
+	// LaunchVolumeBusy refuses an exclusive check of the volume the running
+	// system starts its programs from (ADR 0175).
+	LaunchVolumeBusy
+	// LaunchSystemUnavailable refuses a program of the installed system
+	// while it is not published (ADR 0175).
+	LaunchSystemUnavailable
 )
 
 // Reason describes a launch failure for a person reading the console.
@@ -102,6 +108,10 @@ func (status LaunchStatus) Reason() string {
 		return "stopped before it started"
 	case LaunchArgumentsTooLong:
 		return "arguments too long"
+	case LaunchSystemUnavailable:
+		return "installed system unavailable"
+	case LaunchVolumeBusy:
+		return "volume in use by the running system; check it in recovery mode"
 	default:
 		return "launch failed"
 	}

@@ -30,7 +30,7 @@ oldest retained record and one past the newest. It takes the same read rights
 
 ## Persistence
 
-`/system/log` is a supervised userspace service that drains the ring onto the
+`log` (`/system/services/log`) is a supervised userspace service that drains the ring onto the
 persistent volume (ADR 0073). The ring stays the ordering point: every component
 still writes to it with `LogWrite`, and this service is a consumer rather than a
 path records travel through, so a component's diagnostics do not depend on

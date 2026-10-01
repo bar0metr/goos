@@ -95,3 +95,21 @@ func TestSessionNoticeRoundTrip(t *testing.T) {
 		t.Fatal("a notice taken for a session request")
 	}
 }
+
+func TestPublishAndWithdrawControlRoundTrip(t *testing.T) {
+	publish, ok := PublishRequest(8)
+	if !ok || !IsPublish(publish) || IsWithdraw(publish) || IsUnmount(publish) || IsSync(publish) {
+		t.Fatalf("publish request = %#v, %v", publish, ok)
+	}
+	withdraw, ok := WithdrawRequest(9)
+	if !ok || !IsWithdraw(withdraw) || IsPublish(withdraw) {
+		t.Fatalf("withdraw request = %#v, %v", withdraw, ok)
+	}
+	withdraw.HandleCount = 1
+	if IsWithdraw(withdraw) {
+		t.Fatal("withdraw request carrying a handle was accepted")
+	}
+	if _, ok := PublishRequest(0); ok {
+		t.Fatal("publish request without a correlation was encoded")
+	}
+}

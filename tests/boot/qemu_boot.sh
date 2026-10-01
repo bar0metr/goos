@@ -5,6 +5,7 @@ log=build/logs/boot.log
 reboot_log=build/logs/reboot.log
 m7_log=build/logs/m7-reboot.log
 corrupt_log=build/logs/corrupt-volume.log
+fsck_log=build/logs/recovery-fsck.log
 partition_log=build/logs/partition-tables.log
 stack_log=build/logs/kernel-stack-overflow.log
 poweroff_log=build/logs/poweroff.log
@@ -225,6 +226,9 @@ memory=${MEMORY:-512M}
 # touches, put on the volume the guest mounts, so launching it proves a large
 # program starts without being copied whole.
 variant=$(cut -d' ' -f5 build/config/build)
+# Every disk this script makes for itself is an installed one, made from the
+# build's system tree as make test-disk makes the main one (ADR 0175).
+system_tree=build/variants/$variant/system
 go run ./tools/padimage "build/variants/$variant/userspace/bin/vmprobe" build/bigprobe 3145728
 # The padded program exercises a source much larger than the pages it touches.
 # Launch must not read the padding before the process starts.
@@ -605,32 +609,13 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'echo "pipeline request larger than one ipc message 0123456789abcdefghijklmnopqrstuvwxyz" | readline | readline | readline\n'
 	sleep 3
-	# Phase 4: PID 1 cleanly unmounts the volume, hands fsck-fat the
-	# exclusive block slice, then supervision mounts it again after the
-	# checker closes its endpoint. Run before deliberate service faults so
-	# their restart-rate validation remains independent.
+	# Phase 4: the running system's programs are read from the volume, so
+	# PID 1 refuses an exclusive check of it and unmounts nothing (ADR 0175).
+	# The check and the repair run in the recovery boot below.
 	printf 'fsck-fat --check auto\n'
-	waited=0
-	while [ "$waited" -lt 60 ] && ! grep -q 'LOG_SESSION_RENEWED_OK' "$log" 2>/dev/null; do
-		sleep 1
-		waited=$((waited + 1))
-	done
 	sleep 2
-	printf 'cat /home/demo/message.txt; echo after-fsck\n'
-	sleep 3
-	# Phase 5: repair is explicit, gets the same exclusive slice, reports an
-	# idempotent zero-change pass on the clean image, and remounts it again.
-	printf 'fsck-fat --repair auto\n'
-	waited=0
-	while [ "$waited" -lt 60 ]; do
-		renewed=$(grep -c 'LOG_SESSION_RENEWED_OK' "$log" 2>/dev/null || true)
-		[ "$renewed" -ge 2 ] && break
-		sleep 1
-		waited=$((waited + 1))
-	done
+	printf 'cat /home/demo/message.txt; echo after-fsck-busy\n'
 	sleep 2
-	printf 'cat /home/demo/message.txt; echo after-fsck-repair\n'
-	sleep 3
 	# The FAT32 service parses the volume in a process of its own (ADR 0096).
 	# Killing it leaves the rest of the namespace working, and its restart
 	# serves the same volume under the mounts and handles the VFS kept.
@@ -770,9 +755,11 @@ heap_address=$(heap_symbol || true)
 	heap_pointer "$heap_address" >"$monitor.heap" 2>/dev/null || true
 ) &
 
-# The scripted session sleeps about 345 seconds between its commands; the
-# deadline leaves room for a slow boot on a loaded host.
-wait_for_marker boot '^arena-stress-complete$' 540 "$log"
+# The scripted session sleeps about 345 seconds between its commands. Its
+# commands are read from the installed volume (ADR 0175), which takes longer
+# than launching them from the archive did, and the guest falls behind the
+# script; the deadline leaves room for that and for a loaded host.
+wait_for_marker boot '^arena-stress-complete$' 900 "$log"
 heap_last=$(heap_pointer "$heap_address" 2>/dev/null || true)
 heap_first=$(cat "$monitor.heap" 2>/dev/null || true)
 rm -f "$monitor.heap"
@@ -861,12 +848,9 @@ require_marker storage.fat32-fault FAT32_FAULT_INJECTED "$log" 'fault fat32'
 require_marker storage.fat32-block-renewed BLOCK_FILESYSTEM_REPLACED_OK "$log" 'fault fat32'
 require_marker storage.fat32-reattached FAT32_REATTACHED_OK "$log" 'fault fat32'
 require_marker storage.fat32-restarted FAT32_RESTARTED_OK "$log" 'fault fat32'
-require_marker storage.fsck-check FSCK_FAT_CHECK_OK "$log" 'fsck-fat --check auto'
-require_regex storage.fsck-summary '^files=[0-9][0-9]* directories=[1-9][0-9]* used-clusters=[0-9][0-9]* free-clusters=[0-9][0-9]* errors=0$' 'clean fsck summary' "$log" 'fsck-fat --check auto'
-require_window storage.fsck-remounted '^persistent$' 'persistent volume remounted after fsck' "$log" 'FSCK_FAT_CHECK_OK' 'ECHO_PROCESS_OK'
-require_marker storage.fsck-repair FSCK_FAT_REPAIR_OK "$log" 'fsck-fat --repair auto'
-require_regex storage.fsck-repair-summary '^files=[0-9][0-9]* directories=[1-9][0-9]* used-clusters=[0-9][0-9]* free-clusters=[0-9][0-9]* errors=0 repaired=0$' 'idempotent clean repair summary' "$log" 'fsck-fat --repair auto'
-require_window storage.fsck-repair-remounted '^persistent$' 'persistent volume remounted after repair' "$log" 'FSCK_FAT_REPAIR_OK' 'ECHO_PROCESS_OK'
+require_regex storage.fsck-busy 'volume in use by the running system' 'the exclusive check refused in normal mode' "$log" 'fsck-fat --check auto'
+forbid_regex storage.fsck-not-run '^FSCK_FAT_CHECK_OK$' 'no check against the live volume' "$log" 'fsck-fat --check auto'
+require_window storage.fsck-busy-mounted '^persistent$' 'the volume still mounted after the refusal' "$log" 'goos> cat /home/demo/message.txt; echo after-fsck-busy' 'after-fsck-busy'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
 # File data moves between the VFS and the FAT32 service through the file cache
@@ -931,13 +915,14 @@ forbid_regex shell.stdin-not-a-command '^bounded: command not found$' 'typed inp
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
 require_regex stat.file-kib '^file [0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes)$' 'a file size in KiB by default' "$log" 'goos> stat /system/bin/ls'
 require_regex stat.directory-size '^directory [1-9][0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 0 directories$' 'a directory sized by its contents' "$log" 'goos> stat /system/bin'
-require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 2 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
+require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 3 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
 require_regex stat.bytes '^file 16 bytes$' 'stat -b prints exact bytes' "$log" 'goos> stat -b /system/motd'
 require_regex stat.bad-flag '^usage: stat \[-b|-k|-m|-g\] PATH$' 'an unknown unit flag is a usage error' "$log" 'goos> stat -x /system'
-require_window mount.system '^/system  *image  *ro$' 'system image in mount output' "$log" 'goos> mount' 'goos> df'
+require_window mount.system '^/bootstrap  *image  *ro$' 'boot archive in mount output' "$log" 'goos> mount' 'goos> df'
+require_window mount.installed '^/system  *fat32  *ro$' 'protected installed system in mount output' "$log" 'goos> mount' 'goos> df'
 require_window mount.persist '^/persist  *fat32  *rw$' 'persistent volume in mount output' "$log" 'goos> mount' 'goos> df'
 require_window df.header '^Filesystem  *Mount  *Size  *Used  *Free  *Flags$' 'df column header' "$log" 'goos> df' 'goos> stat /system/bin/ls'
-require_window df.system '^image  */system  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only image capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
+require_window df.system '^image  */bootstrap  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only archive capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_window df.persist '^fat32  */persist  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *rw$' 'persistent capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_regex gview.serial-return '^after-gview-serial$' 'shell input after gview on COM1' "$log" 'gview /system/motd'
 require_marker launch.gfm GFM_LAUNCH_OK "$log"
@@ -1001,8 +986,10 @@ require_count pipeline-stress.reuse '^pipeline-reuse$' 20 "$log" pipeline-reuse
 require_count pipeline-stress.expected-failures '^missing-stage: command not found$' 23 "$log" 'missing-stage: command not found'
 forbid_regex pipeline-stress.launch-errors 'APP_LAUNCH_.*FAILED' 'no APP_LAUNCH_* failures' "$log" APP_LAUNCH_
 require_regex pipeline-stress.complete '^pipeline-stress-complete$' 'pipeline-stress-complete on its own line' "$log" pipeline-stress-complete
-require_min_count process-reuse.cat '^CAT_PROCESS_OK$' 31 "$log" CAT_PROCESS_OK
-require_min_count process-reuse.exec '^SHELL_EXEC_OK$' 66 "$log" SHELL_EXEC_OK
+# A marker a command prints can follow the next prompt on the same line when
+# the guest is behind the script, so the counts accept a prefix.
+require_min_count process-reuse.cat 'CAT_PROCESS_OK$' 31 "$log" CAT_PROCESS_OK
+require_min_count process-reuse.exec 'SHELL_EXEC_OK$' 66 "$log" SHELL_EXEC_OK
 require_marker process-reuse.arena arena-stress-complete "$log"
 pass_group pipeline-stress
 
@@ -1099,7 +1086,13 @@ pass_group persistence
 require_marker vfs-restart.injected VFS_FAULT_INJECTED "$log" 'fault vfs'
 require_marker vfs-restart.restarted VFS_RESTARTED_OK "$log" 'fault vfs'
 require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fault vfs'
-require_marker vfs-restart.shell-session SHELL_VFS_RENEWED_OK "$log" 'fault vfs'
+# The shell is read from the volume (ADR 0175). A program whose source is
+# served by the VFS that died can end with it when it next touches a page it
+# has not read yet (ADR 0121); the shell then starts again from the volume
+# once the VFS has it attached, rather than being handed a new session.
+if ! grep -q '^SHELL_VFS_RENEWED_OK$' "$log"; then
+	require_window vfs-restart.shell-session '^SERVICE_FROM_DISK_OK shell$' 'the shell given a new session or started again from the volume' "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault'
+fi
 require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
@@ -1107,10 +1100,21 @@ require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the nam
 forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
 require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
 require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
-require_regex vfs-restart.linux-session-dead 'session lost: EIO$' 'a Linux process keeps a dead session after the VFS restarts' "$log" 'goos> fault vfs'
+# A Linux process never gets a new session: it keeps the dead one, or it
+# ends with the shell whose job it is.
+if ! grep -q 'session lost: EIO$' "$log"; then
+	require_marker vfs-restart.linux-session-ended SESSION_JOBS_STOPPED_OK "$log" 'fault vfs'
+fi
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
-require_regex vfs-restart.jobs-kept '^\[[0-9]\] running  sleep 25$' 'the shell kept its job across the restart' "$log" 'fault vfs'
-count_window vfs-restart.shell-kept '^SHELL_RESTARTED_OK$' 0 "$log" 'goos> fault vfs' 'arena-stress-complete'
+# The jobs of a shell that ended were stopped with it, or kept by a shell
+# that survived.
+if ! grep -q '^\[[0-9]\] running  sleep 25$' "$log"; then
+	require_window vfs-restart.jobs-ended '^SESSION_JOBS_STOPPED_OK$' 'the jobs of the ended shell stopped with it' "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault'
+fi
+# Never two shells: at most one start of the console's shell.
+restarts=$(window "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault' | grep -c '^SERVICE_FROM_DISK_OK shell$' || true)
+[ "$restarts" -le 1 ] || fail_check vfs-restart.one-shell 'at most one shell start' "$restarts" "$log" 'VFS_FAULT_INJECTED'
+checks=$((checks + 1))
 pass_group vfs-restart
 
 # The configuration and log services restart on their own (ADR 0100). The
@@ -1155,7 +1159,7 @@ require_marker file-exec.kernel-object EXECUTABLE_OBJECT_OK "$log"
 require_marker file-exec.shell-denied EXECUTABLE_CREATE_DENIED_OK "$log"
 require_marker file-exec.launched FILE_EXEC_OK "$log" '/home/demo/args'
 require_window file-exec.absolute '^file-exec from the volume$' 'arguments printed by the copy on /home' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
-require_window file-exec.environment '^PATH=/system/bin$' 'the shell environment given to the copy' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
+require_window file-exec.environment '^PATH=/system/bin:/home/user/bin$' 'the shell environment given to the copy' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
 require_regex file-exec.relative '^relative-file-exec$' 'a program path relative to the working directory' "$log" './args relative-file-exec'
 require_regex file-exec.pipeline '^piped-file-exec$' 'a program from the volume as a pipeline stage' "$log" 'piped-file-exec | readline'
 require_regex file-exec.not-a-program '^/home/demo/message.txt: not a valid executable$' 'a data file refused by the validator' "$log" 'goos> /home/demo/message.txt'
@@ -1220,7 +1224,7 @@ forbid_window release.caps-no-console '^console ' 'no console capability in the 
 require_regex release.caps-terminal '^tty       channel   read,write,wait$' 'shell terminal session' "$log" 'goos> caps'
 require_regex release.caps-log '^log       device    read$' 'shell log capability' "$log" 'goos> caps'
 require_regex release.handles '^0x0000000100000001  stream' 'shell handle table' "$log" 'goos> handles'
-require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
+require_regex release.log 'INFO  init\[1\]: service started service=[a-z-]* pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
 require_regex release.long-name-read '^a long file name in a long directory$' 'long name created and read back' "$log" 'goos> cat /persist/long-directory-name/startup-block-regression.txt'
 require_window release.long-name-listed 'startup-block-regression\.txt' 'long file name in ls output' "$log" 'goos> ls /persist/long-directory-name' 'goos> ls /persist'
@@ -1248,7 +1252,10 @@ require_regex session.shell-survived-terminal '^after-terminal-restart$' 'the sh
 # stopped with its session rather than orphaned.
 require_marker session.shell-fault SHELL_FAULT_INJECTED "$log" 'fault shell'
 require_marker session.shell-restarted SHELL_RESTARTED_OK "$log" 'fault shell'
-require_count session.shell-started 'SHELL_PROCESS_OK' 2 "$log" 'fault shell'
+# The shell also starts again after the storage faults of this session,
+# because it is read from the volume (ADR 0175); the shell fault itself
+# starts exactly one.
+count_window session.shell-started 'SHELL_PROCESS_OK' 1 "$log" 'SHELL_FAULT_INJECTED' 'after-shell-restart'
 require_marker session.shell-session-offered SHELL_SESSION_OFFERED_OK "$log" 'fault shell'
 require_marker session.terminal-took-session TTY_SESSION_REPLACED_OK "$log" 'fault shell'
 require_marker session.jobs-stopped SESSION_JOBS_STOPPED_OK "$log" 'fault shell'
@@ -1261,15 +1268,15 @@ pass_group release-shell
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.
 # It uses /home because that is where the specification puts user data.
 rm -f "$m7_log"
-( sleep 6
+( sleep 12
 	printf 'mkdir /home/m7\n'
-	sleep 2
+	sleep 3
 	printf 'write /home/m7/hello.txt "Hello from GoOS"\n'
-	sleep 2
+	sleep 3
 	printf 'cat /home/m7/hello.txt\n'
-	sleep 2
+	sleep 3
 	printf 'reboot\n'
-	sleep 12
+	sleep 20
 	printf 'cat /home/m7/hello.txt\n'
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
@@ -1298,16 +1305,17 @@ pass_group m7-reboot
 # mounted read-only from it instead (ADR 0112).
 rm -f "$corrupt_log"
 corrupt_disk=build/corrupt-virtio-blk.img
-go run ./tools/mkfat32 "$corrupt_disk"
+rm -f "$corrupt_disk"
+go run ./tools/mkfat32 -tree "$system_tree" "$corrupt_disk"
 for boot_sector in 0 6; do
 	printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=$((boot_sector * 512 + 32)) count=4 conv=notrunc 2>/dev/null
 done
-( sleep 6
+( sleep 12
 	printf 'ls /\n'
 	sleep 2
 	printf 'echo volatile-root-still-works\n'
 	sleep 2
-	printf 'config get system.shell.prompt\n'
+	printf 'ls /bootstrap/bin\n'
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$corrupt_disk" \
@@ -1315,18 +1323,57 @@ done
 	-cdrom "$iso" -display none -serial stdio -no-reboot -no-shutdown >"$corrupt_log" 2>&1 &
 pid=$!
 
-wait_for_marker corrupt '^CONFIG_GET_OK$' 60 "$corrupt_log"
+wait_for_marker corrupt '^LS_PROCESS_OK$' 60 "$corrupt_log"
+wait_for_count corrupt '^LS_PROCESS_OK$' 2 30 "$corrupt_log"
 cleanup
 require_marker corrupt.boot BOOT_OK "$corrupt_log"
 require_marker corrupt.shell SHELL_VFS_CONNECTED_OK "$corrupt_log"
 require_regex corrupt.reported '^\[WARN\] no persistent storage$' 'the refused volume reported' "$corrupt_log" 'Starting services'
 forbid_regex corrupt.no-mount-marker '^FAT32_MOUNT_OK$' 'no mount claimed for a refused volume' "$corrupt_log" 'Starting services'
-# The namespace tells the truth about what is there.
-require_window corrupt.root-listed '^system/$' 'the system image still mounted' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
+# The namespace tells the truth about what is there. Without the volume the
+# installed system is unreachable, so the machine runs in recovery mode from
+# the archive (ADR 0175).
+require_regex corrupt.recovery '^\[MODE\] recovery: stage=storage' 'recovery mode for a refused volume' "$corrupt_log" 'Starting services'
+require_window corrupt.root-listed '^bootstrap/$' 'the boot archive still mounted' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 forbid_window corrupt.persist-absent '^persist/$' 'no persistent mounts listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
+forbid_window corrupt.system-absent '^system/$' 'no installed system listed' "$corrupt_log" 'ls /' 'LS_PROCESS_OK'
 require_regex corrupt.usable '^volatile-root-still-works$' 'the system usable without storage' "$corrupt_log" 'goos> echo volatile-root-still-works'
-require_marker corrupt.config CONFIG_GET_OK "$corrupt_log" 'config get system.shell.prompt'
+require_window corrupt.recovery-commands '^fsck-fat$' 'the recovery commands' "$corrupt_log" 'goos> ls /bootstrap/bin' 'LS_PROCESS_OK'
 pass_group corrupt-volume
+
+# The exclusive check runs in recovery mode (ADR 0175). The recovery ISO boots
+# the main test disk: PID 1 cleanly unmounts the volume, hands fsck-fat the
+# exclusive block slice, then supervision mounts it again after the checker
+# closes its endpoint. Repair is explicit, gets the same exclusive slice,
+# reports an idempotent zero-change pass on the clean image, and remounts it
+# again.
+rm -f "$fsck_log"
+recovery_iso=build/variants/$variant/goos-x86_64-recovery.iso
+( sleep 8
+	printf 'fsck-fat --check auto\n'
+	sleep 8
+	printf 'cat /home/demo/message.txt; echo after-fsck\n'
+	sleep 2
+	printf 'fsck-fat --repair auto\n'
+	sleep 8
+	printf 'cat /home/demo/message.txt; echo after-fsck-repair\n'
+	sleep 2
+) | qemu-system-x86_64 -machine q35 -m "$memory" \
+	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
+	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
+	-cdrom "$recovery_iso" -display none -serial stdio -no-reboot -no-shutdown >"$fsck_log" 2>&1 &
+pid=$!
+wait_for_marker fsck '^after-fsck-repair$' 90 "$fsck_log"
+cleanup
+require_regex storage.fsck-recovery '^\[MODE\] recovery: stage=forced' 'forced recovery mode' "$fsck_log" 'Starting services'
+require_marker storage.fsck-check FSCK_FAT_CHECK_OK "$fsck_log" 'fsck-fat --check auto'
+require_regex storage.fsck-summary '^files=[0-9][0-9]* directories=[1-9][0-9]* used-clusters=[0-9][0-9]* free-clusters=[0-9][0-9]* errors=0$' 'clean fsck summary' "$fsck_log" 'fsck-fat --check auto'
+require_window storage.fsck-remounted '^persistent$' 'persistent volume remounted after fsck' "$fsck_log" 'FSCK_FAT_CHECK_OK' 'ECHO_PROCESS_OK'
+require_marker storage.fsck-repair FSCK_FAT_REPAIR_OK "$fsck_log" 'fsck-fat --repair auto'
+require_regex storage.fsck-repair-summary '^files=[0-9][0-9]* directories=[1-9][0-9]* used-clusters=[0-9][0-9]* free-clusters=[0-9][0-9]* errors=0 repaired=0$' 'idempotent clean repair summary' "$fsck_log" 'fsck-fat --repair auto'
+require_window storage.fsck-repair-remounted '^persistent$' 'persistent volume remounted after repair' "$fsck_log" 'FSCK_FAT_REPAIR_OK' 'ECHO_PROCESS_OK'
+pass_group recovery-fsck
 
 # A volume inside a partition: the block service reads the MBR or GPT and
 # gives the filesystem service a slice of the disk holding the partition, and
@@ -1338,8 +1385,8 @@ for table_kind in mbr gpt; do
 	table_upper=$(printf '%s' "$table_kind" | tr '[:lower:]' '[:upper:]')
 	partition_disk=build/partition-$table_kind-virtio-blk.img
 	rm -f "$partition_log" "$partition_disk" "build/partition-$table_kind.out"
-	go run ./tools/mkfat32 -size 128 -table "$table_kind" "$partition_disk"
-	( sleep 6
+	go run ./tools/mkfat32 -size 128 -table "$table_kind" -tree "$system_tree" "$partition_disk"
+	( sleep 12
 		printf 'write /persist/partition.txt "inside-%s-partition"\n' "$table_kind"
 		sleep 2
 		printf 'cat /persist/partition.txt\n'
@@ -1372,8 +1419,9 @@ pass_group partition-tables
 # That address has to lie in the guard (ADR 0091).
 rm -f "$stack_log"
 stack_disk=build/stack-virtio-blk.img
-go run ./tools/mkfat32 "$stack_disk"
-( sleep 6
+rm -f "$stack_disk"
+go run ./tools/mkfat32 -tree "$system_tree" "$stack_disk"
+( sleep 12
 	printf 'fault kernel-stack\n'
 	sleep 10
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
@@ -1404,8 +1452,9 @@ pass_group kernel-stack-overflow
 # guest powers off; a second boot from the same disk reads the file back.
 rm -f "$poweroff_log" "$poweroff_after_log"
 poweroff_disk=build/poweroff-virtio-blk.img
-go run ./tools/mkfat32 "$poweroff_disk"
-( sleep 6
+rm -f "$poweroff_disk"
+go run ./tools/mkfat32 -tree "$system_tree" "$poweroff_disk"
+( sleep 12
 	printf 'write /home/poweroff.txt "kept across poweroff"\n'
 	sleep 2
 	printf 'poweroff\n'
@@ -1437,7 +1486,7 @@ require_regex poweroff.message '^Powering off\.\.\.' 'the power-off announced' "
 checks=$((checks + 1))
 forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log" 'Powering off'
 
-( sleep 6
+( sleep 12
 	printf 'cat /home/poweroff.txt\n'
 	sleep 3
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \

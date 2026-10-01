@@ -121,14 +121,17 @@ type service struct {
 	dependencies    [MaxDependencies]uint8
 	dependencyCount uint8
 	plannedStop     bool
-	restart         RestartPolicy
-	state           State
-	health          Health
-	pid             uint64
-	windowStart     uint64
-	restarts        uint8
-	nextStart       uint64
-	used            bool
+	// held keeps the service from starting, as a dependency that is down
+	// would, until Release.
+	held        bool
+	restart     RestartPolicy
+	state       State
+	health      Health
+	pid         uint64
+	windowStart uint64
+	restarts    uint8
+	nextStart   uint64
+	used        bool
 }
 
 type Manager struct {
@@ -200,7 +203,7 @@ func (manager *Manager) StartReady(now uint64, launcher func(LaunchSpec) (uint64
 			if entry.state != StateRegistered && entry.state != StateBlocked || now < entry.nextStart {
 				continue
 			}
-			if !manager.dependenciesHealthy(entry) {
+			if entry.held || !manager.dependenciesHealthy(entry) {
 				if entry.state != StateBlocked {
 					entry.state, entry.health = StateBlocked, HealthBlocked
 					manager.record(Event{Kind: EventDependencyBlocked, Service: uint8(index + 1), Tick: now})
@@ -295,6 +298,58 @@ func (manager *Manager) Resume(name string, now uint64) Status {
 	}
 	entry := &manager.services[index]
 	entry.state, entry.health, entry.nextStart = StateRegistered, HealthStarting, now
+	return StatusOK
+}
+
+// Rebase points a registered service at another executable and gives it a
+// fresh restart budget. A service that failed or stopped becomes startable at
+// now; a running one keeps running, and its next restart uses executable.
+func (manager *Manager) Rebase(name, executable string, now uint64) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	if !validExecutable(executable) {
+		return StatusInvalidArgument
+	}
+	entry := &manager.services[int(position)]
+	entry.launch.ExecutableSize = uint8(copy(entry.launch.Executable[:], executable))
+	entry.restarts, entry.windowStart = 0, 0
+	if entry.state == StateFailed || entry.state == StateStopped {
+		entry.plannedStop = false
+		entry.state, entry.health, entry.nextStart = StateRegistered, HealthStarting, now
+	}
+	return StatusOK
+}
+
+// Executable returns the executable a registered service starts from.
+func (manager *Manager) Executable(name string) ([]byte, bool) {
+	position, found := manager.index(name)
+	if !found {
+		return nil, false
+	}
+	entry := &manager.services[int(position)]
+	return entry.launch.Executable[:entry.launch.ExecutableSize], true
+}
+
+// Hold keeps a service that is not running from being started, as if a
+// dependency were down, until Release. A running service is not stopped.
+func (manager *Manager) Hold(name string) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	manager.services[int(position)].held = true
+	return StatusOK
+}
+
+// Release undoes Hold.
+func (manager *Manager) Release(name string) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	manager.services[int(position)].held = false
 	return StatusOK
 }
 

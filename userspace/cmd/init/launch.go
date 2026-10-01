@@ -8,6 +8,7 @@ package main
 import (
 	"goos/internal/validation"
 	"goos/kernel/handle"
+	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/sys"
@@ -38,7 +39,7 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 			return 0, false
 		}
 	}
-	if filesystemStarted && bytesString(spec.Name[:spec.NameSize]) == filesystemName && !renewFilesystemChannels(&spec) {
+	if bytesString(spec.Name[:spec.NameSize]) == filesystemName && (storageLost || filesystemStarted && !renewFilesystemChannels(&spec)) {
 		return 0, false
 	}
 	if blockStarted && bytesString(spec.Name[:spec.NameSize]) == "block" && !renewBlockGrants(&spec) {
@@ -53,7 +54,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if logStarted && bytesString(spec.Name[:spec.NameSize]) == "log" && !renewLogGrants(&spec) {
 		return 0, false
 	}
-	executable, processName, located := locateExecutable(spec.Executable[:spec.ExecutableSize])
+	// A service of the installed system is read from the volume; every other
+	// one, and every service in recovery, comes from the archive (ADR 0175).
+	executable, processName, located := openExecutable(spec.Executable[:spec.ExecutableSize])
 	if located != supervisor.LaunchOK {
 		if !supervisionComplete {
 			write("[FAIL] " + bytesString(spec.Name[:spec.NameSize]) + "\n")
@@ -69,9 +72,15 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if snapshot, found := manager.Snapshot(bytesString(spec.Name[:spec.NameSize])); found && snapshot.Restarts != 0 {
 		restarted = true
 	}
+	_, tty, interactive := sessionOfService(bytesString(spec.Name[:spec.NameSize]))
+	// A shell searches the commands of the mode it was started in.
+	shell := interactive && !tty
 	variables := 0
 	if restarted {
-		variables = 1
+		variables++
+	}
+	if shell {
+		variables++
 	}
 	writer := startup.NewWriter(staging, 1, variables, int(spec.CapabilityCount))
 	writer.Command(spec.Name[:spec.NameSize])
@@ -80,21 +89,30 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	if restarted {
 		writer.Variable([]byte(startup.RestartVariable), []byte("1"))
 	}
+	if shell {
+		writer.Variable([]byte("PATH"), []byte(supervisor.SearchPath(boot.Mode())))
+	}
 	for index := 0; index < int(spec.CapabilityCount); index++ {
 		writer.Handle([]byte(spec.Capabilities[index].Name), 0)
 	}
 	startupData, ok := writer.Finish()
 	if !ok {
+		closeExecutable(executable)
 		return 0, false
 	}
 	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], spec.Profile, slot, uint32(len(startupData)))
+	// The process holds its own reference to a file-backed source.
+	closeExecutable(executable)
 	mark("INIT_SERVICE_LAUNCH_OK\n")
 	name := bytesString(spec.Name[:spec.NameSize])
-	// The validation build keeps the driver's process handle so it can inject
-	// the fault that proves a crashed driver is replaced. Every other service's
-	// handle is closed: PID 1 supervises through lifecycle events, not handles.
+	// The validation build keeps the storage services' process handles so it
+	// can inject the faults that prove each is replaced. The services that
+	// run from the volume are kept in every build: leaving normal mode stops
+	// them. Every other handle is closed: PID 1 supervises through lifecycle
+	// events, not handles.
 	session, tty, interactive := sessionOfService(name)
-	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == filesystemName || name == "vfs" || name == "config" || name == "log" || name == "block")
+	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == filesystemName || name == "vfs" || name == "block") ||
+		diskService(name)
 	if keep && launched == supervisor.LaunchOK {
 		switch {
 		case interactive && tty:
@@ -125,6 +143,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		return 0, false
 	}
 	mark("INIT_SERVICE_STARTED_OK\n")
+	if execproto.OriginOf(spec.Executable[:spec.ExecutableSize]) == execproto.OriginFile {
+		mark("SERVICE_FROM_DISK_OK " + name + "\n")
+	}
 	// Once the prompt is up the console belongs to the terminal service, and
 	// a line written past it would land in whatever is being typed. A restart
 	// after boot is recorded in the log instead.
@@ -133,6 +154,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	if name == driverName {
+		if driverStarted {
+			driverRestarted()
+		}
 		driverStarted = true
 	}
 	if name == "block" {
@@ -161,8 +185,12 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		logStarted = true
 	}
 	if name == filesystemName {
+		restarted := filesystemStarted
 		attachFilesystem()
 		filesystemStarted = true
+		if restarted {
+			restoreSystem()
+		}
 		renewVFSClients()
 	}
 	if interactive && tty {

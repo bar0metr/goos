@@ -363,8 +363,12 @@ is at the other end. libc therefore buffers output in blocks.
 PID 1 may classify native magic versus ELF magic, but the kernel independently
 validates the selected format. A Linux launch receives only supplied standard
 streams, one fresh VFS session, argv, environment, cwd, and a resource profile.
-PID 1 gives it `PATH=/system/linux` in place of the native default
-`PATH=/system/bin`, which holds images Linux `execve` refuses (ADR 0171).
+PID 1 gives it `PATH=/system/linux` in place of a native default,
+`PATH=/system/bin`, `PATH=/system/bin:/home/user/bin`, or `PATH=/bootstrap/bin`,
+which hold images Linux `execve` refuses (ADR 0171, ADR 0175). A Linux
+program cannot change the installed system either: it is refused under
+`/system`, `/persist/system`, or any other name, a writable open or a create
+with `EROFS`, and stat shows those files without write bits.
 It receives no device, loader, system-image, PID 1 launch, DMA, IRQ, port,
 framebuffer, raw-keyboard, or kernel-log authority (ADR 0136).
 

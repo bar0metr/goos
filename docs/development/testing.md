@@ -12,6 +12,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
+- `make test-system-boot` runs the installed-system and recovery proofs
+  (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, the real QEMU
   boot/persistence test, and the Linux end-to-end boot in sequence so host
@@ -137,10 +139,12 @@ shell composition, or boot behavior.
 `512M`). The physical-memory group then requires the validation kernel to have
 used a page above 1 GiB from 2 GiB, and one above 4 GiB from 3 GiB (ADR 0103).
 
-The target creates a fresh `build/boot-test-virtio-blk.img` for each run. Tests
-therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
-used by `make run` and `make run-gui`; both QEMU phases share the fresh test image to validate
-reboot persistence.
+The target installs the system on a fresh `build/boot-test-virtio-blk.img`
+for each run (`make test-disk`, ADR 0175). Tests therefore cannot corrupt or
+overwrite the persistent `build/goos-disk.img` used by `make run` and `make
+run-gui`; both QEMU phases share the fresh test image to validate reboot
+persistence. The exclusive volume check runs in a forced-recovery boot of the
+same image, because the running system refuses it.
 
 `make run-gui` is a manual target and is never invoked by the automated test
 hierarchy. It opens a host window, while `make test-boot` remains headless and
@@ -343,6 +347,41 @@ returns failure without starting QEMU:
 ```sh
 tests/boot/qemu_boot.sh --self-test-failure
 ```
+
+## System boot test
+
+`make test-system-boot` (`tests/boot/system.sh`) boots the validation ISO
+against disposable disks made from the build's system tree, types commands
+at the serial prompt, and powers each guest off. It checks:
+
+1. the production archive, built from the same inputs without the
+   validation probes, holds the storage services, the shell, and the recovery
+   commands and none of `gfm`, `bench`, `uname`, the Linux fixtures,
+   `fault-probe`, `config`, or `log`; and `make run-disk` leaves an existing
+   disk byte for byte as it was while `make disk` refuses it;
+2. a normal boot starts `config`, `log`, and `shell` from the volume
+   (`SERVICE_FROM_DISK_OK`), runs `uname`, which only the volume has
+   (`SYSTEM_COMMAND_FROM_DISK_OK`), and gives the shell
+   `PATH=/system/bin:/home/user/bin`;
+3. native commands cannot change the installed system through `/system`,
+   `/persist/system`, case variants, rename, copy, or a moved directory, and
+   the Linux `fsprobe` cannot open it for writing under either name; a copy of
+   `fsck-fat` in `/home/user/bin` gets no storage slice, and `fsck-fat` in
+   normal mode is refused as busy without unmounting anything; pipelines,
+   redirection, and a Linux program still work;
+4. after a reboot of the same disk the user's file is there and a copied
+   command runs from `/home/user/bin` by its bare name without grants; after
+   `fault fat32`, `fault vfs`, and `fault driver` the system is attached
+   again, still protected, and runs commands from the volume; `fault storage`
+   ends in recovery mode with one shell per console;
+5. a forced-recovery ISO checks the installed volume with `fsck-fat` and
+   mounts it again afterwards;
+6. a missing disk, a blank volume, a malformed record, an older release, a
+   missing shell image, and a malformed index each boot to a recovery prompt
+   within 60 seconds with the stage and reason printed, where the archive's
+   commands work; and recovery can `edit` a file and check the volume.
+
+The transcripts are `build/logs/system-*.log`.
 
 ## Stress test
 

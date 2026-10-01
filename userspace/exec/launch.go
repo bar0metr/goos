@@ -87,5 +87,5 @@ func (request Request) LaunchCommand() ([]byte, bool) {
 	if request.Count != 1 || request.ErrorSource != 0 || request.Background {
 		return nil, false
 	}
-	return CommandFromSystemPath(request.Stages[0].Path)
+	return CommandFromSearchPath(request.Stages[0].Path)
 }

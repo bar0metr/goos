@@ -29,7 +29,7 @@ func writePersistent(t *testing.T, service *Service, path string, payload string
 func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 	device := testFAT32Device()
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) || !service.AttachCache(testCache) {
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachCache(testCache) {
 		t.Fatal("service init failed")
 	}
 	first := newLoopback(device)
@@ -57,7 +57,7 @@ func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 		t.Fatal("sync succeeded without a filesystem service")
 	}
 	// Everything the dead service does not serve still works.
-	for _, path := range []string{"/", "/tmp", "/system/bin"} {
+	for _, path := range []string{"/", "/tmp", "/bootstrap/bin"} {
 		if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); reply.Status != vfs.StatusOK {
 			t.Fatalf("stat %s with the filesystem service dead = %d", path, reply.Status)
 		}
