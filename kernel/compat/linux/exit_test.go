@@ -20,6 +20,8 @@ func TestTerminationFromCode(t *testing.T) {
 		{abnormalExit | 17, 0, 7, 7},
 		{abnormalExit | 9, 0, 9, 9},
 		{abnormalExit | 5, 0, 9, 9},
+		{SignalExitCode(15), 0, 15, 15},
+		{SignalExitCode(13), 0, 13, 13},
 	}
 	for _, test := range cases {
 		termination := TerminationFromCode(test.code, 12)

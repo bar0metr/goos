@@ -12,6 +12,13 @@ type Termination struct {
 // 9 for a kill and 5 for a task the kernel had to end.
 const abnormalExit = uint64(1) << 63
 
+// signalExit marks an abnormal exit whose low seven bits are the Linux signal
+// that ended the process by its default action.
+const signalExit = uint64(1) << 62
+
+// SignalExitCode is the task exit code of a process a signal ended.
+func SignalExitCode(signal uint64) uint64 { return abnormalExit | signalExit | signal&0x7f }
+
 // Linux signal numbers a termination can carry.
 const (
 	signalIllegal     = 4
@@ -28,6 +35,9 @@ const (
 func TerminationFromCode(code uint64, cpuTicks uint64) Termination {
 	if code&abnormalExit == 0 {
 		return Termination{Status: uint8(code), CPUTicks: cpuTicks}
+	}
+	if code&signalExit != 0 {
+		return Termination{Signal: int32(code & 0x7f), CPUTicks: cpuTicks}
 	}
 	signal := int32(signalKill)
 	switch code &^ abnormalExit {

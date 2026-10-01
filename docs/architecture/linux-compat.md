@@ -270,13 +270,17 @@ them, and the names cannot be removed or renamed.
 ### Signal state and random bytes
 
 `rt_sigaction` and `rt_sigprocmask` store dispositions and the blocked mask
-in the process's compatibility state and report them back (ADR 0151).
-Nothing delivers a signal from that state. The calls that would send one
-stay `ENOSYS`.
+in the process's compatibility state and report them back (ADR 0151). The
+state also holds a pending set with one `siginfo` record per standard signal.
+Child exit raises `SIGCHLD` in the Linux parent and a failed pipe write raises
+`SIGPIPE` in the writer. The syscall dispatcher acts on pending signals when a
+call returns: it discards, ends the process, or builds an `rt_sigframe` and
+enters the handler, and `rt_sigreturn` restores the saved context
+(ADR 0163, ADR 0164). The calls that would send a signal stay `ENOSYS`.
 
-Image replacement resets caught dispositions to default, preserves ignored
-dispositions and the blocked mask, and starts with no pending signals. The
-pending set is always empty because signal delivery is not implemented.
+Image replacement resets caught dispositions to default and preserves ignored
+dispositions, the blocked mask, and pending signals. Fork copies dispositions
+and the mask and starts the child with nothing pending.
 
 `getrandom` returns bytes from RDRAND, 256 per call at most, and `ENOSYS` on
 a CPU without the instruction. The kernel has no other source and makes none
@@ -423,11 +427,12 @@ and its VFS session go with it, and no Linux signal is delivered.
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, process groups, threads, signal delivery,
+Dynamic linking, glibc, process groups, threads, `kill`, `EINTR`,
 nonblocking pipes, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not
 run. `fork`, `vfork`, and two process forms of `clone` create a child from
 a private copy of the caller (ADR 0158, ADR 0159), and `wait4` reaps it
-(ADR 0161). Pipes connect them (ADR 0162). The next Linux work is minimal
-signals and `poll`.
+(ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
+reach handlers (ADR 0163, ADR 0164). The next Linux work is `kill`,
+interrupted calls, and `poll`.

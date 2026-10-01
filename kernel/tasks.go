@@ -91,7 +91,17 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 			frame.UserIP, frame.UserStack, frame.Root = result.Entry, result.Stack, result.Root
 		}
 	}
+	if result.Errno == linuxabi.EPIPE && (frame.Number == uint64(linuxabi.SysWrite) || frame.Number == uint64(linuxabi.SysWritev)) {
+		// A write to a pipe nobody reads raises SIGPIPE as well as failing.
+		// Linux reports it as sent by the writer itself.
+		if state, found := linuxcompat.FindProcess(frame.Root); found {
+			state.Signals.Raise(linuxabi.SignalPipe, linuxcompat.SignalInfo{Code: linuxabi.SignalCodeUser, PID: state.PID, UID: linuxcompat.StatUID})
+		}
+	}
 	frame.Return, frame.Action = result.Register(), result.Action
+	if frame.Action == linuxabi.ActionReturn {
+		deliverLinuxSignals(frame, linuxHandler.task)
+	}
 	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
 		linuxSyscallFrameRejections++
 		amd64.SetCurrentTaskExitCode(uint64(1)<<63 | 13)

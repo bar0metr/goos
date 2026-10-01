@@ -89,6 +89,22 @@ func LinuxCallRegisters(task sched.TaskID) (UserRegisters, bool) {
 	}, true
 }
 
+// SetLinuxCallRegisters replaces the general-purpose registers the current
+// task's Linux system call returns with. The return path pops them from the
+// top of the task's kernel stack; R11 also supplies the returned RFLAGS.
+func SetLinuxCallRegisters(task sched.TaskID, registers UserRegisters) bool {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(taskKernelStacks) || TaskIDForSlot(uint64(slot)) != uint64(task) || taskKernelStacks[slot].top == 0 {
+		return false
+	}
+	// SAFETY: see LinuxCallRegisters.
+	saved := (*[15]uint64)(unsafe.Pointer(uintptr(taskKernelStacks[slot].top - 15*8)))
+	saved[0], saved[1], saved[2], saved[3], saved[4] = registers.RAX, registers.RCX, registers.RDX, registers.RBX, registers.RBP
+	saved[5], saved[6], saved[7], saved[8], saved[9] = registers.RSI, registers.RDI, registers.R8, registers.R9, registers.R10
+	saved[10], saved[11], saved[12], saved[13], saved[14] = registers.R11, registers.R12, registers.R13, registers.R14, registers.R15
+	return true
+}
+
 // userFlagsCleared are the RFLAGS bits a user task never resumes with: TF,
 // DF, IOPL, NT, RF, VM, and AC. IF is always set.
 const userFlagsCleared = uint64(0x77700)

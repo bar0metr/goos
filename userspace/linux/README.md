@@ -31,7 +31,10 @@ parent exits reports PID 1 as its parent; `wait` reaps children by PID and by
 any, with and without `WNOHANG`, and reads a normal exit and a `SIGSEGV`;
 `pipe` checks `pipe` and `pipe2`: direction, EOF, `EPIPE`, writer lifetime
 across `dup` and `fork`, a writer larger than the pipe, and `PIPE_BUF`
-atomicity with two writers.
+atomicity with two writers; `signal` checks `SIGPIPE` and `SIGCHLD`: default
+termination, handlers with their mask and siginfo, a blocked signal arriving
+on unblock, `SA_RESETHAND`, a handler rewriting the saved context, and a
+forged return address.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -98,7 +101,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `9615b68e9fd9cf5e8801c122fddf88f061707c2325ce48442da13b8c7076ad1a` |
+| `prebuilt/abi-probe` | `49492f8db8c76a4368855b70b9fc7593b835fc5c5ec725de8829646d1e84feef` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

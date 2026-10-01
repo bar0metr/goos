@@ -249,6 +249,10 @@ run '/system/linux/abi-probe pipe'
 expect '^pipe ok$' 'Linux pipes: direction, EOF, EPIPE, lifetime, PIPE_BUF'
 clean 'Linux pipes: direction, EOF, EPIPE, lifetime, PIPE_BUF'
 
+run '/system/linux/abi-probe signal'
+expect '^signal ok$' 'Linux signal delivery, handlers, masks, and rt_sigreturn'
+clean 'Linux signal delivery, handlers, masks, and rt_sigreturn'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'
