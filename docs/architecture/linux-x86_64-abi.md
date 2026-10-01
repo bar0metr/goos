@@ -40,7 +40,7 @@ an errno; nothing is accepted and ignored.
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
 | `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call; a stream vector of at most 4096 bytes lands whole |
-| `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` without `SIGPIPE` |
+| `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` and `SIGPIPE` with no reader |
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
@@ -182,8 +182,10 @@ The read end refuses writes and the write end reads, both with `EBADF`.
 `lseek` is `ESPIPE`, `ioctl` is `ENOTTY`, and `fstat` reports a FIFO with the
 same device and inode for both ends. `F_GETFL` reports `O_RDONLY` or
 `O_WRONLY`. A read waits for data and returns 0 once every write end is
-closed, in whichever process held it. A write to a pipe with no reader is
-`EPIPE`; no `SIGPIPE` is sent yet.
+closed, in whichever process held it. A `write` or `writev` to a pipe with
+no reader fails with `EPIPE` and raises `SIGPIPE` in the writer. By default
+`SIGPIPE` ends the writer; ignored, the call just fails; blocked, it stays
+pending; handled, the handler runs before the call returns `EPIPE`.
 
 `PIPE_BUF` is 4096. A write or a readable vector of at most that many bytes
 waits for room for all of it and lands whole, so two writers never interleave
@@ -375,7 +377,7 @@ These calls answer from kernel state and ask no service (ADR 0145).
 | Call | Answer |
 | --- | --- |
 | `getpid`, `gettid` | the compatibility PID, 2 to 32767 |
-| `getppid` | 1 |
+| `getppid` | 1 for a launch root and an orphan; the forking parent's compatibility PID for a child |
 | `getuid`, `geteuid`, `getgid`, `getegid` | 1000 |
 | `setuid`, `setgid` | succeed for 1000, `EPERM` for any other value |
 | `getgroups` | no supplementary groups |
@@ -399,10 +401,16 @@ Pending signals the mask allows act when a system call returns: `SIGKILL`
 first, then the lowest number. A default action ends the process with that
 signal as its status. A handler starts on an x86_64 `rt_sigframe` below the
 stack's red zone, with the signal, `siginfo`, and `ucontext` in RDI, RSI, and
-RDX, and runs before the interrupted call returns to the program. The frame
-holds no floating-point state. `SA_NODEFER` and `SA_RESETHAND` take effect.
-`rt_sigreturn` restores the saved registers and mask; a handler that edits
-the context changes what the interrupted call returns (ADR 0163, ADR 0164).
+RDX, and runs before the interrupted call returns to the program. The
+interrupted x87 and SSE state lies above the frame as a 512-byte FXSAVE
+image that `uc_mcontext.fpstate` points to, and the handler starts from the
+initial state. `SA_NODEFER` and `SA_RESETHAND` take effect.
+`rt_sigreturn` restores the saved registers, mask, and FXSAVE image; a
+handler that edits the context changes what the interrupted call returns.
+An `fpstate` the process cannot read, or one outside the user half, ends the
+process with `SIGSEGV`; reserved MXCSR bits are cleared; a null `fpstate`
+restores the initial state. XMM0 to XMM15, MXCSR, and the x87 state survive;
+AVX state does not exist under GoOS (ADR 0163, ADR 0164, ADR 0174).
 
 `kill`, `tkill`, and `tgkill` send `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGABRT`,
 `SIGKILL`, `SIGUSR1`, `SIGUSR2`, `SIGPIPE`, `SIGALRM`, `SIGTERM`, or
@@ -657,7 +665,7 @@ pipelines, redirections, scripts, and background jobs non-interactively.
 | copied `execve` strings | 64 KiB including terminators |
 | concurrent `execve` preparation | 4 system-wide |
 | Linux processes per family | 16, zombies included |
-| Linux processes, all families | 48 |
+| Linux processes, all families | 48, so 16 of 64 process slots stay native |
 | `poll` and `ppoll` entries | 64 |
 | pending signals | one per standard signal, 31 |
 | VFS requests queued per family | 15 |
@@ -745,6 +753,7 @@ boot:
 | `abi-probe wait`, `pipe`, `signal`, `kill` | `wait4` by PID and any with `WNOHANG` and `ECHILD`; pipe direction, EOF, `EPIPE`, lifetime, `PIPE_BUF`; `SIGPIPE` and `SIGCHLD` handlers, masks, `rt_sigreturn`, forged frames; `kill` on the tree, `SA_NOCLDWAIT` |
 | `abi-probe eintr`, `poll`, `ppoll` | `EINTR` and `SA_RESTART` on blocked calls; `poll` readiness, `POLLHUP`, `POLLERR`, `POLLNVAL`, timeouts; `ppoll` and `rt_sigsuspend` with a temporary mask |
 | `abi-probe hardening` | failed `execve` keeps the image; fork copies touched, untouched, read-only, and brk pages; shared descriptions; a killed writer; pipe exhaustion; bad handler and restorer addresses; `SIGKILL` in a handler; the native gate refused in a child |
+| `abi-probe fpstate` | XMM0, XMM1, XMM7, XMM15, MXCSR, and the x87 control word survive a handler that clobbers them and a nested signal; an edited image comes back; a null `fpstate` gives the initial state; an unreadable, kernel-half, or truncated `fpstate` ends the process with `SIGSEGV`; reserved MXCSR bits are cleared |
 | `abi-probe limits` | a fork bomb stops at 15 children with `EAGAIN`; zombies count; reaping frees the budget |
 | Ctrl-C on `abi-probe family` | the root and its forked child are gone from `ps` |
 | `abi-probe path` | `PATH=/system/linux` |

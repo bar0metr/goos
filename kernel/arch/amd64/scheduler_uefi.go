@@ -24,6 +24,34 @@ var taskEntryTable [3]uintptr
 //go:extern goos_task_fpu
 var taskFPU [64][FPUAreaSize]byte
 
+// linuxUserFPU is the FXSAVE image of a Linux task's own x87 and SSE state
+// during its current system call. The entry path saves it and the return
+// path restores it, so kernel code may use SSE registers in between.
+//
+//go:extern goos_linux_user_fpu
+var linuxUserFPU [64][FPUAreaSize]byte
+
+// LinuxUserFPU returns the saved x87 and SSE state of the current task's
+// Linux system call, which the return path restores.
+func LinuxUserFPU(task sched.TaskID) (*[FPUAreaSize]byte, bool) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(linuxUserFPU) || TaskIDForSlot(uint64(slot)) != uint64(task) {
+		return nil, false
+	}
+	return &linuxUserFPU[slot], true
+}
+
+// SetTaskFPU replaces the x87 and SSE state a task that is not running
+// resumes with, as a forked child resumes with its parent's.
+func SetTaskFPU(task sched.TaskID, area *[FPUAreaSize]byte) bool {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(taskFPU) || TaskIDForSlot(uint64(slot)) != uint64(task) || area == nil {
+		return false
+	}
+	taskFPU[slot] = *area
+	return true
+}
+
 type taskKernelStack struct {
 	physical uint64
 	virtual  uint64

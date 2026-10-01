@@ -124,7 +124,7 @@ Syscalls map onto native primitives:
 | `stat`, `lstat`, `fstat`, `newfstatat`, `statx` | VFS stat by path or by handle; a synthetic record for streams and devices |
 | `pread64`, `pwrite64` | a VFS seek, a bulk request, and a seek back |
 | `open`, `read`, `write` on `/dev/null` and `/dev/zero` | the kernel itself; no VFS exchange |
-| `rt_sigaction`, `rt_sigprocmask` | compatibility state; nothing is delivered |
+| `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn` | compatibility state; pending signals act at system call returns through an `rt_sigframe` |
 | `getrandom` | the CPU's RDRAND generator |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |

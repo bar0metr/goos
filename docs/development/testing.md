@@ -26,7 +26,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   once, Ctrl-C on a blocked Linux process and on a Linux root with a forked
   child, and the process-composition modes: `exec`, `fork`, `vfork`,
   `orphan`, `wait`, `pipe`, `signal`, `kill`, `eintr`, `poll`, `ppoll`,
-  `hardening`, and `limits`. Last come two injected failures: a fork that
+  `hardening`, `fpstate`, and `limits`. Last come two injected failures: a fork that
   fails mid-copy and an `execve` whose VFS dies (ADR 0173). Its guest CPU has RDRAND
   (`-cpu qemu64,+rdrand`), so `getrandom` must work there; the general boot
   test keeps the default CPU, where it must return `ENOSYS`.

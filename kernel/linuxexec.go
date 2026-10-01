@@ -509,6 +509,9 @@ func commitLinuxExec(handler *linuxCallHandler, state *linuxExecState, compat *l
 		panicSerial("prepared Linux exec address space refused at commit")
 	}
 	amd64.SetTaskFSBase(handler.task, 0)
+	if fpu, found := amd64.LinuxUserFPU(handler.task); found {
+		amd64.InitialFPUArea(fpu)
+	}
 	compat.Signals.ResetForExec()
 	compat.CloseOnExec(releaseLinuxDescriptionReference)
 	releaseVforkParent(compat)

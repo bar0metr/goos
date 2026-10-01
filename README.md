@@ -140,7 +140,7 @@ The native kernel and the first isolated services are implemented:
 - controlled IPC handle passing and peer-death reporting;
 - capability-controlled NX shared-memory mappings for bulk IPC;
 - restartable blocking IPC with message and timeout wakeups;
-- bounded readiness-only waits across up to 16 capability-checked channel,
+- bounded readiness-only waits across up to 64 capability-checked channel,
   stream, or process handles, with a ready bit mask and generation-safe wakeups;
 - a userspace terminal service that alone reads the console and relays
   everything the shell and its commands print, redrawing the line being typed
@@ -180,41 +180,46 @@ The native kernel and the first isolated services are implemented:
   `help`, `clear`, and `cd`, plus isolated native base utilities;
 - a supervised userspace VFS service reached through explicit, non-transferable
   client and server channel endpoints;
-- unit, integration, boot, and performance tests.
-- reclamation of exited process address spaces and guarded kernel stacks.
-- generation-safe task-slot reuse and bounded process completion records.
-- capability-protected process handles and a blocking native wait call.
-- bounded `/system/bin` executable lookup with per-process VFS sessions.
+- unit, integration, boot, and performance tests;
+- reclamation of exited process address spaces and guarded kernel stacks;
+- generation-safe task-slot reuse and bounded process completion records;
+- capability-protected process handles and a blocking native wait call;
+- bounded `/system/bin` executable lookup with per-process VFS sessions;
 - the boot archive mounted read-only at `/system` through a capability only the
   filesystem service holds, so `ls /system/bin` lists the executables the launch
-  path resolves and every write to them is refused.
-- a versioned native startup ABI with named, capability-bounded handle roles.
+  path resolves and every write to them is refused;
+- a versioned native startup ABI with named, capability-bounded handle roles;
 - bounded environment data, child exit-status propagation, and read-only
-  process/memory system information.
+  process/memory system information;
 - a bounded versioned block-device protocol and a supervised ring-3 block
-  service with a volatile validation backend.
+  service with a volatile validation backend;
 - PCI discovery for a legacy virtio-blk function, capability-scoped port I/O,
-  IRQ and DMA authority, and an isolated ring-3 virtio-blk probe driver.
+  IRQ and DMA authority, and an isolated ring-3 virtio-blk probe driver;
 - a persistent legacy virtio-blk data path with bounded DMA, IOAPIC-backed IRQ
-  waits, a private driver channel, and QEMU-verified read/write/flush requests.
+  waits, a private driver channel, and QEMU-verified read/write/flush requests;
 - a bounded FAT32 filesystem service, a process of its own mounted at
   `/persist` through VFS and reaching the disk over a dedicated
   capability-scoped block-service endpoint, with persistence verified
-  across separate QEMU boots.
+  across separate QEMU boots;
 - user data at `/home` and mutable system state at `/state` on that volume,
-  named apart from the immutable system image.
+  named apart from the immutable system image;
 - distinct named standard-stream capabilities for external native utilities:
-  read-only input role `in` and write-only `stdout` and `stderr`.
+  read-only input role `in` and write-only `stdout` and `stderr`;
 - bounded `readline` input through an isolated utility's inherited `in`
-  capability.
+  capability;
 - capability-protected byte streams with separate reader/writer endpoints,
-  bounded buffering, backpressure, and close-driven EOF.
+  bounded buffering, backpressure, and close-driven EOF;
 - scheduler-backed native pipelines of up to four processes with directional
-  startup capabilities and no POSIX file descriptors.
+  startup capabilities and no POSIX file descriptors;
 - bounded stdout file redirection with `>` and `>>` and stderr redirection with
   `2>` and `2>>`, each through an isolated stream consumer with its own
   capability-scoped VFS session, and bounded stdin file redirection with `<`
-  through an isolated producer.
+  through an isolated producer;
+- a Linux x86_64 compatibility layer: static ELF programs run as GoOS
+  processes, start and replace other Linux programs with `fork` and `execve`,
+  connect them with pipes, reap them with `wait4`, and send and handle
+  signals, without authority a native process with the same grants would
+  lack.
 
 PID 1 runs the supervision policy and resolves every service and system
 command in its own read-only mapping of the system image; the kernel launches
@@ -250,9 +255,8 @@ trip about 0.15 ms, nearly independent of the tick rate (ADR 0057). The stress
 suite passes at 100, 250, and 1000 Hz; the default remains 100 Hz.
 
 A normal boot is quiet: a short banner, `Starting services...`, one `[ OK ]`
-line per service, and the prompt. Everything after that — the prompt, what is
-typed, and what the shell and its commands print — passes through the terminal
-service, which keeps the line being typed intact when a background job reports
+line per service, and the prompt. After that the prompt, what is typed, and
+what the shell and its commands print all pass through the terminal service, which keeps the line being typed intact when a background job reports
 (ADR 0082, ADR 0089). Kernel self-tests and markers live in the
 `VALIDATION=1` build (ADR 0058). Services and the kernel log structured events
 to a bounded kernel ring, printed by `log` (ADR 0059). The shell provides
@@ -304,7 +308,7 @@ GoOS 0.2.1
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
-Memory: 367 MiB managed
+Memory: 364 MiB managed
 Timer: 100 Hz
 Security: capabilities, NX, W^X
 Scheduler: preemptive round-robin
@@ -336,6 +340,7 @@ home/
 state/
 goos> ls /system
 bin/
+linux/
 motd
 init
 fault-probe
@@ -376,6 +381,17 @@ uname
 uptime
 vmprobe
 write
+goos> ls /system/linux
+raw-probe
+hello
+hello-pie
+musl-hello
+fsprobe
+dirprobe
+abi-probe
+goos> /system/linux/musl-hello one two
+argc=3
+hello from musl
 goos> mkdir /system/backdoor
 mkdir: /system/backdoor: read-only filesystem
 exit status: 2
@@ -385,30 +401,33 @@ goos> cat /home/user/notes.txt
 Hello from GoOS
 goos> ps
 PID   TYPE     STATE      MEM  CPU   COMMAND
-1     native   waiting    160  4     init
-4     native   waiting    84   6     vfs
-5     native   waiting    47   4     block
-6     native   waiting    50   2     virtio-blk
-7     native   waiting    47   4     fat32
-8     native   waiting    50   2     config
-9     native   waiting    46   1     log
-10    native   waiting    46   0     tty
-11    native   waiting    48   7     shell
-19    native   running    46   1     ps
+1     native   waiting    639  10    init
+4     native   waiting    54   3     vfs
+5     native   waiting    63   16    block
+6     native   waiting    60   1     virtio-blk
+7     native   waiting    119  5     fat32
+8     native   waiting    27   2     config
+9     native   waiting    27   3     log
+10    native   ready      26   2     tty
+11    native   waiting    56   3     shell
+12    native   waiting    26   0     tty
+13    native   waiting    32   0     shell
+23    native   running    19   0     ps
 goos> quota
 PID   COMMAND           RESOURCE  HELD/LIMIT
-1     init              chan      16/24
-1     init              strm      2/24
+1     init              chan      22/256
+1     init              strm      3/64
 1     init              task      1/8
-1     init              page      160/512
+1     init              page      639/16384
 4     vfs               chan      0/4
-4     vfs               strm      0/4
+4     vfs               strm      0/16
 4     vfs               task      1/4
 ...
 ```
 
 MEM is the pages the kernel allocated for the process and CPU the timer ticks it
-was found running on.
+was found running on. PIDs 12 and 13 are the terminal service and shell of the
+framebuffer console.
 
 `make VALIDATION=1` builds the validation variant used by `make test-boot`. It
 runs the kernel self-tests and fault-injection scenarios and prints the `*_OK`
@@ -435,8 +454,10 @@ reads the saved result back in the shell. It does not require a graphical host s
 or OCR. In `make run-gui`, type `gfm` in the QEMU window to use the file
 manager.
 `make test` is the fast host-side validation set. `make test-all` is the
-canonical complete gate and includes lint, documentation checks, ISO creation,
-and the two-phase QEMU boot/persistence test. Complete serial logs remain in
+canonical complete gate: lint, documentation checks, ISO creation, the
+two-phase QEMU boot and persistence test, the Linux boot test, the console
+test, and two stress runs. `make release-check` adds a reproducible clean build,
+FAT32 storage stress, and the release checks. Complete serial logs remain in
 `build/logs/boot.log` and `build/logs/reboot.log`; successful harness output is
 grouped and concise. See [`docs/development/testing.md`](docs/development/testing.md).
 
@@ -486,8 +507,7 @@ memory as they grow. GoOS 0.1.4
 memory contract needed by the next milestone: foreign FAT32 geometry and
 metadata, raw/MBR/GPT block slices, dynamic mounts, native FAT repair, stable
 open-file identity, high-half kernel entry trampolines, file-backed executable
-pages, and bounded launch resource profiles. The next milestone is Linux ELF
-compatibility.
+pages, and bounded launch resource profiles.
 
 GoOS 0.1.5
 ([docs/releases/0.1.5.md](docs/releases/0.1.5.md)) adds an interactive UEFI GOP
@@ -515,9 +535,7 @@ truncating the original (ADR 0129). `gfm` starts `gview` and the new `edit`
 editor through a capability-bounded launch channel to PID 1 (ADR 0130), shows
 modification times and free space, and keeps its selection across edits.
 `edit` holds up to 1 MiB in a gap buffer (ADR 0131). Line commands show
-control characters in file names as `?`. GoOS is
-licensed under GPL-3.0-only; third-party components retain their documented
-licenses.
+control characters in file names as `?`.
 
 Shell redirection extends the explicit native stdin/stdout/stderr handles and
 stream primitives without adding POSIX file descriptors. Background jobs can be
@@ -545,7 +563,9 @@ GoOS 0.2.1 ([docs/releases/0.2.1.md](docs/releases/0.2.1.md)) adds Linux
 process composition. A Linux program can `fork`, `execve`, connect children
 with pipes, reap them with `wait4`, and send and handle signals; `poll` waits
 on several descriptors. A static BusyBox `sh` runs programs, pipelines,
-redirections, scripts, and background jobs non-interactively. Every Linux
+redirections, scripts, and background jobs non-interactively. BusyBox is no
+part of the image: `make LINUX_EXTRA=/path/to/busybox` adds the one you supply
+under `/system/linux`. Every Linux
 descendant is an ordinary GoOS Process with no authority its parent lacks.
 Dynamic linking, threads, a Linux terminal, and networking are outside this
 release.

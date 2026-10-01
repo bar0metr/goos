@@ -463,3 +463,35 @@ func registerChildForTest(goosProcessID process.ID, parentPID int32) (ProcessRec
 	record, status := RegisterChild(goosProcessID, parentPID, 1)
 	return record, status == ChildRegistrationOK
 }
+
+func TestLinuxProcessCreationKeepsTheNativeReserve(t *testing.T) {
+	if !LinuxProcessCreationAllowed(LinuxGlobalMaxProcesses-1) || LinuxProcessCreationAllowed(LinuxGlobalMaxProcesses) ||
+		LinuxProcessCreationAllowed(LinuxGlobalMaxProcesses+1) || LinuxProcessCreationAllowed(process.MaxProcesses) ||
+		LinuxProcessCreationAllowed(-1) {
+		t.Fatal("the Linux creation ceiling is wrong")
+	}
+	if process.MaxProcesses-LinuxGlobalMaxProcesses != NativeProcessReserve {
+		t.Fatal("the ceiling does not leave the native reserve")
+	}
+	resetCompatibilityProcesses()
+	root, _ := installProcessRecord(950, 1, 0)
+	// The family has room, the native registry does not.
+	if _, status := RegisterChild(951, root.PID, LinuxGlobalMaxProcesses); status != ChildRegistrationLimit {
+		t.Fatalf("a full registry registered a child: %d", status)
+	}
+	if _, status := RegisterChild(951, root.PID, LinuxGlobalMaxProcesses-1); status != ChildRegistrationOK {
+		t.Fatalf("a registry with room refused a child: %d", status)
+	}
+	// The registry has room, the family does not.
+	for id := process.ID(952); ; id++ {
+		if _, status := RegisterChild(id, root.PID, 2); status != ChildRegistrationOK {
+			if status != ChildRegistrationLimit {
+				t.Fatalf("family exhaustion status %d", status)
+			}
+			break
+		}
+	}
+	if _, family := ProcessCounts(root.FamilyID); family != LinuxFamilyMaxProcesses {
+		t.Fatalf("the family stopped at %d", family)
+	}
+}

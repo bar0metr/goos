@@ -278,6 +278,10 @@ run '/system/linux/abi-probe hardening'
 expect '^hardening ok$' 'failed exec, fork memory, descriptors, pipes, and signal frames'
 clean 'failed exec, fork memory, descriptors, pipes, and signal frames'
 
+run '/system/linux/abi-probe fpstate'
+expect '^fpstate ok$' 'x87 and SSE state survives a signal handler'
+clean 'x87 and SSE state survives a signal handler'
+
 run '/system/linux/abi-probe limits'
 expect '^fork bomb bounded at 15$' 'the family budget bounds a fork bomb'
 expect '^limits ok$' 'zombies count against the family budget'

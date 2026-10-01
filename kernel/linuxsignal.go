@@ -14,6 +14,7 @@ var (
 	linuxFamilyRoots    [linuxcompat.LinuxFamilyMaxProcesses]uint64
 	linuxSignalFrame    [linuxcompat.SignalFrameSize]byte
 	linuxSignalUContext [linuxcompat.UContextSize]byte
+	linuxSignalFPU      [linuxcompat.FPUStateSize]byte
 )
 
 // deliverLinuxSignals runs when a Linux system call is about to return to the
@@ -46,8 +47,9 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 			return
 		}
 		registers, valid := amd64.LinuxCallRegisters(task)
-		base, placed := linuxcompat.SignalFrameAddress(frame.UserStack, vm.UserAddressStart)
-		if !valid || !placed {
+		fpu, fpuFound := amd64.LinuxUserFPU(task)
+		base, fpuBase, placed := linuxcompat.SignalFrameAddress(frame.UserStack, vm.UserAddressStart)
+		if !valid || !fpuFound || !placed {
 			endLinuxProcessBySignal(frame, linuxabi.SignalSegv)
 			return
 		}
@@ -58,11 +60,14 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 		context.Registers[linuxcompat.RegRSP] = frame.UserStack
 		context.Registers[linuxcompat.RegRFlags] = registers.R11
 		previous := state.Signals.EnterHandler(signal, action)
-		linuxcompat.EncodeSignalFrame(&linuxSignalFrame, signal, info, &context, previous, action.Restorer)
-		if !vm.CopyOut(frame.Root, base, linuxSignalFrame[:]) {
+		linuxcompat.EncodeSignalFrame(&linuxSignalFrame, signal, info, &context, previous, action.Restorer, fpuBase)
+		if !vm.CopyOut(frame.Root, base, linuxSignalFrame[:]) || !vm.CopyOut(frame.Root, fpuBase, fpu[:]) {
 			endLinuxProcessBySignal(frame, linuxabi.SignalSegv)
 			return
 		}
+		// The handler starts from a clean x87 and SSE state, as on Linux.
+		// The interrupted state waits in the frame.
+		amd64.InitialFPUArea(fpu)
 		registers.RDI = signal
 		registers.RSI = linuxcompat.SignalFrameInfo(base)
 		registers.RDX = linuxcompat.SignalFrameUContext(base)
@@ -75,19 +80,33 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 	}
 }
 
-// SigReturn resumes the context a handler's frame saved. The frame is user
-// memory: a return address or stack outside the user half, or a frame the
-// process cannot read, ends the process with SIGSEGV instead of entering it.
+// SigReturn resumes the context a handler's frame saved: the registers, the
+// signal mask, and the x87 and SSE state. The frame is user memory: a return
+// address, stack, or floating-point image outside the user half, or a frame
+// the process cannot read, ends the process with SIGSEGV instead of entering
+// it. Reserved MXCSR bits are cleared, as on Linux. A null fpstate restores
+// the initial state.
 func (handler *linuxCallHandler) SigReturn(request linuxcompat.Request) linuxcompat.Result {
 	state, found := linuxcompat.FindProcess(handler.root)
 	registers, valid := amd64.LinuxCallRegisters(handler.task)
 	if !found || !valid || handler.frame == nil || !vm.CopyIn(handler.root, handler.frame.UserStack, linuxSignalUContext[:]) {
 		return linuxSignalFault(handler)
 	}
-	context, mask := linuxcompat.DecodeSignalContext(&linuxSignalUContext)
+	context, mask, fpuAddress := linuxcompat.DecodeSignalContext(&linuxSignalUContext)
 	ip, stack := context.Registers[linuxcompat.RegRIP], context.Registers[linuxcompat.RegRSP]
-	if !vm.ValidateUserRange(ip, 1) || !vm.ValidateUserRange(stack, 0) {
+	fpu, fpuFound := amd64.LinuxUserFPU(handler.task)
+	if !vm.ValidateUserRange(ip, 1) || !vm.ValidateUserRange(stack, 0) || !fpuFound {
 		return linuxSignalFault(handler)
+	}
+	// The image is copied whole into kernel memory and made safe there
+	// before anything changes, so the restored state never comes from a
+	// pointer the program can still move.
+	if fpuAddress != 0 && (!vm.ValidateUserRange(fpuAddress, linuxcompat.FPUStateSize) ||
+		!vm.CopyIn(handler.root, fpuAddress, linuxSignalFPU[:])) {
+		return linuxSignalFault(handler)
+	}
+	if fpuAddress != 0 {
+		linuxcompat.SanitizeFPUState(&linuxSignalFPU, fpu)
 	}
 	registersFromContext(&registers, &context)
 	// The return path takes RFLAGS from R11 and keeps only the bits a user
@@ -95,6 +114,11 @@ func (handler *linuxCallHandler) SigReturn(request linuxcompat.Request) linuxcom
 	registers.R11 = context.Registers[linuxcompat.RegRFlags]
 	if !amd64.SetLinuxCallRegisters(handler.task, registers) {
 		return linuxSignalFault(handler)
+	}
+	if fpuAddress == 0 {
+		amd64.InitialFPUArea(fpu)
+	} else {
+		*fpu = linuxSignalFPU
 	}
 	state.Signals.RestoreMask(mask)
 	handler.frame.UserIP, handler.frame.UserStack = ip, stack

@@ -7,8 +7,9 @@ import (
 )
 
 // The x86_64 rt_sigframe a handler starts on: the restorer address its
-// return pops, then struct ucontext, then struct siginfo. GoOS writes no
-// floating-point state, so uc_mcontext.fpstate is null.
+// return pops, then struct ucontext, then struct siginfo. The interrupted
+// x87 and SSE state lies above the frame as a 512-byte FXSAVE image, aligned
+// to 64 bytes, and uc_mcontext.fpstate points at it.
 const (
 	signalFrameUContext = 8
 	// UContextSize is struct ucontext as the kernel writes it: flags, link,
@@ -20,13 +21,20 @@ const (
 	ucontextStack     = 16
 	ucontextMcontext  = 40
 	ucontextSignalSet = 296
+	ucontextFPState   = ucontextMcontext + (contextRegisters+5)*8
 	// signalRedZone is the area below a stack pointer that leaf code may use
 	// without moving it. A frame never overlaps it.
 	signalRedZone = 128
 	// ucontextFlags are UC_SIGCONTEXT_SS and UC_STRICT_RESTORE_SS, which
 	// Linux sets on every frame.
-	ucontextFlags    = 0x6
-	stackDisabled    = 2
+	ucontextFlags = 0x6
+	stackDisabled = 2
+	// FPUStateSize is the FXSAVE image a frame carries.
+	FPUStateSize     = 512
+	fpuStateAlign    = 64
+	fpuMXCSROffset   = 24
+	fpuMXCSRMask     = 28
+	defaultMXCSRMask = 0xffbf
 	userCodeSelector = 0x33
 	userDataSelector = 0x2b
 )
@@ -60,19 +68,21 @@ type UserContext struct {
 	Registers [contextRegisters]uint64
 }
 
-// SignalFrameAddress places a frame below the interrupted stack and its red
-// zone, aligned as a function entry expects: 8 bytes past a 16-byte boundary.
-// It reports false when the stack is too low to hold one.
-func SignalFrameAddress(stack uint64, lowest uint64) (uint64, bool) {
-	if stack < lowest+signalRedZone+SignalFrameSize+24 {
-		return 0, false
+// SignalFrameAddress places the floating-point image below the interrupted
+// stack and its red zone, aligned to 64 bytes, and the frame below that,
+// aligned as a function entry expects: 8 bytes past a 16-byte boundary. It
+// reports false when the stack is too low to hold both.
+func SignalFrameAddress(stack uint64, lowest uint64) (frame uint64, fpu uint64, ok bool) {
+	if stack < lowest+signalRedZone+FPUStateSize+fpuStateAlign+SignalFrameSize+24 {
+		return 0, 0, false
 	}
-	return (stack-signalRedZone-SignalFrameSize)&^15 - 8, true
+	fpu = (stack - signalRedZone - FPUStateSize) &^ (fpuStateAlign - 1)
+	return (fpu-SignalFrameSize)&^15 - 8, fpu, true
 }
 
 // EncodeSignalFrame writes the frame for signal at base. The handler's
 // return pops restorer; context and oldMask are what rt_sigreturn restores.
-func EncodeSignalFrame(frame *[SignalFrameSize]byte, signal uint64, info SignalInfo, context *UserContext, oldMask uint64, restorer uint64) {
+func EncodeSignalFrame(frame *[SignalFrameSize]byte, signal uint64, info SignalInfo, context *UserContext, oldMask uint64, restorer uint64, fpu uint64) {
 	clear(frame[:])
 	binary.LittleEndian.PutUint64(frame[0:8], restorer)
 	uc := frame[signalFrameUContext:signalFrameInfo]
@@ -85,6 +95,7 @@ func EncodeSignalFrame(frame *[SignalFrameSize]byte, signal uint64, info SignalI
 	binary.LittleEndian.PutUint64(uc[ucontextMcontext+contextRegisters*8:], selectors)
 	// err, trapno, oldmask, cr2, fpstate, and the reserved words follow.
 	binary.LittleEndian.PutUint64(uc[ucontextMcontext+(contextRegisters+3)*8:], oldMask)
+	binary.LittleEndian.PutUint64(uc[ucontextFPState:], fpu)
 	binary.LittleEndian.PutUint64(uc[ucontextSignalSet:], oldMask)
 	siginfo := frame[signalFrameInfo:]
 	binary.LittleEndian.PutUint32(siginfo[0:4], uint32(signal))
@@ -101,13 +112,28 @@ func EncodeSignalFrame(frame *[SignalFrameSize]byte, signal uint64, info SignalI
 func SignalFrameUContext(base uint64) uint64 { return base + signalFrameUContext }
 func SignalFrameInfo(base uint64) uint64     { return base + signalFrameInfo }
 
-// DecodeSignalContext reads the registers and signal mask rt_sigreturn
-// restores from a copied struct ucontext. The caller validates them: the
-// frame is user memory and may hold anything.
-func DecodeSignalContext(uc *[UContextSize]byte) (UserContext, uint64) {
+// DecodeSignalContext reads the registers, the signal mask, and the address
+// of the floating-point image rt_sigreturn restores from a copied struct
+// ucontext. The caller validates them: the frame is user memory and may hold
+// anything.
+func DecodeSignalContext(uc *[UContextSize]byte) (UserContext, uint64, uint64) {
 	var context UserContext
 	for index := range context.Registers {
 		context.Registers[index] = binary.LittleEndian.Uint64(uc[ucontextMcontext+index*8:])
 	}
-	return context, binary.LittleEndian.Uint64(uc[ucontextSignalSet:])
+	return context, binary.LittleEndian.Uint64(uc[ucontextSignalSet:]), binary.LittleEndian.Uint64(uc[ucontextFPState:])
+}
+
+// SanitizeFPUState makes an FXSAVE image from user memory safe to load: it
+// clears every MXCSR bit the processor reserves, as Linux does, because
+// loading one would fault in the kernel. current is an image the processor
+// wrote, whose MXCSR_MASK names the bits it supports; a zero mask means the
+// architectural default.
+func SanitizeFPUState(image *[FPUStateSize]byte, current *[FPUStateSize]byte) {
+	mask := binary.LittleEndian.Uint32(current[fpuMXCSRMask:])
+	if mask == 0 {
+		mask = defaultMXCSRMask
+	}
+	mxcsr := binary.LittleEndian.Uint32(image[fpuMXCSROffset:])
+	binary.LittleEndian.PutUint32(image[fpuMXCSROffset:], mxcsr&mask)
 }
