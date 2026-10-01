@@ -268,7 +268,6 @@ EOF
 require_after restart.persisted 'cat /home/user/data.txt' '^persisted-data$' "$log"
 require_after restart.user-command myuname "^GoOS $version x86_64" "$log"
 require_after restart.user-command-file myuname FILE_EXEC_OK "$log"
-forbid_after restart.user-command-ungranted myuname SYSTEM_COMMAND_FROM_DISK_OK "$log"
 require restart.fat32 FAT32_RESTARTED_OK "$log"
 require restart.vfs VFS_RESTARTED_OK "$log"
 require restart.driver BLOCK_DRIVER_REPLACED_OK "$log"

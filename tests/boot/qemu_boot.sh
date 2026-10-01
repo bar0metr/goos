@@ -915,13 +915,14 @@ forbid_regex shell.stdin-not-a-command '^bounded: command not found$' 'typed inp
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
 require_regex stat.file-kib '^file [0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes)$' 'a file size in KiB by default' "$log" 'goos> stat /system/bin/ls'
 require_regex stat.directory-size '^directory [1-9][0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 0 directories$' 'a directory sized by its contents' "$log" 'goos> stat /system/bin'
-require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 2 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
+require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 3 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
 require_regex stat.bytes '^file 16 bytes$' 'stat -b prints exact bytes' "$log" 'goos> stat -b /system/motd'
 require_regex stat.bad-flag '^usage: stat \[-b|-k|-m|-g\] PATH$' 'an unknown unit flag is a usage error' "$log" 'goos> stat -x /system'
-require_window mount.system '^/system  *image  *ro$' 'system image in mount output' "$log" 'goos> mount' 'goos> df'
+require_window mount.system '^/bootstrap  *image  *ro$' 'boot archive in mount output' "$log" 'goos> mount' 'goos> df'
+require_window mount.installed '^/system  *fat32  *ro$' 'protected installed system in mount output' "$log" 'goos> mount' 'goos> df'
 require_window mount.persist '^/persist  *fat32  *rw$' 'persistent volume in mount output' "$log" 'goos> mount' 'goos> df'
 require_window df.header '^Filesystem  *Mount  *Size  *Used  *Free  *Flags$' 'df column header' "$log" 'goos> df' 'goos> stat /system/bin/ls'
-require_window df.system '^image  */system  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only image capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
+require_window df.system '^image  */bootstrap  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *0B  *ro$' 'read-only archive capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_window df.persist '^fat32  */persist  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *[0-9][0-9]*\.[0-9]M  *rw$' 'persistent capacity' "$log" 'goos> df' 'goos> stat /system/bin/ls'
 require_regex gview.serial-return '^after-gview-serial$' 'shell input after gview on COM1' "$log" 'gview /system/motd'
 require_marker launch.gfm GFM_LAUNCH_OK "$log"
@@ -985,8 +986,10 @@ require_count pipeline-stress.reuse '^pipeline-reuse$' 20 "$log" pipeline-reuse
 require_count pipeline-stress.expected-failures '^missing-stage: command not found$' 23 "$log" 'missing-stage: command not found'
 forbid_regex pipeline-stress.launch-errors 'APP_LAUNCH_.*FAILED' 'no APP_LAUNCH_* failures' "$log" APP_LAUNCH_
 require_regex pipeline-stress.complete '^pipeline-stress-complete$' 'pipeline-stress-complete on its own line' "$log" pipeline-stress-complete
-require_min_count process-reuse.cat '^CAT_PROCESS_OK$' 31 "$log" CAT_PROCESS_OK
-require_min_count process-reuse.exec '^SHELL_EXEC_OK$' 66 "$log" SHELL_EXEC_OK
+# A marker a command prints can follow the next prompt on the same line when
+# the guest is behind the script, so the counts accept a prefix.
+require_min_count process-reuse.cat 'CAT_PROCESS_OK$' 31 "$log" CAT_PROCESS_OK
+require_min_count process-reuse.exec 'SHELL_EXEC_OK$' 66 "$log" SHELL_EXEC_OK
 require_marker process-reuse.arena arena-stress-complete "$log"
 pass_group pipeline-stress
 
@@ -1083,7 +1086,13 @@ pass_group persistence
 require_marker vfs-restart.injected VFS_FAULT_INJECTED "$log" 'fault vfs'
 require_marker vfs-restart.restarted VFS_RESTARTED_OK "$log" 'fault vfs'
 require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fault vfs'
-require_marker vfs-restart.shell-session SHELL_VFS_RENEWED_OK "$log" 'fault vfs'
+# The shell is read from the volume (ADR 0175). A program whose source is
+# served by the VFS that died can end with it when it next touches a page it
+# has not read yet (ADR 0121); the shell then starts again from the volume
+# once the VFS has it attached, rather than being handed a new session.
+if ! grep -q '^SHELL_VFS_RENEWED_OK$' "$log"; then
+	require_window vfs-restart.shell-session '^SERVICE_FROM_DISK_OK shell$' 'the shell given a new session or started again from the volume' "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault'
+fi
 require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
@@ -1091,10 +1100,21 @@ require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the nam
 forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
 require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
 require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
-require_regex vfs-restart.linux-session-dead 'session lost: EIO$' 'a Linux process keeps a dead session after the VFS restarts' "$log" 'goos> fault vfs'
+# A Linux process never gets a new session: it keeps the dead one, or it
+# ends with the shell whose job it is.
+if ! grep -q 'session lost: EIO$' "$log"; then
+	require_marker vfs-restart.linux-session-ended SESSION_JOBS_STOPPED_OK "$log" 'fault vfs'
+fi
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
-require_regex vfs-restart.jobs-kept '^\[[0-9]\] running  sleep 25$' 'the shell kept its job across the restart' "$log" 'fault vfs'
-count_window vfs-restart.shell-kept '^SHELL_RESTARTED_OK$' 0 "$log" 'goos> fault vfs' 'arena-stress-complete'
+# The jobs of a shell that ended were stopped with it, or kept by a shell
+# that survived.
+if ! grep -q '^\[[0-9]\] running  sleep 25$' "$log"; then
+	require_window vfs-restart.jobs-ended '^SESSION_JOBS_STOPPED_OK$' 'the jobs of the ended shell stopped with it' "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault'
+fi
+# Never two shells: at most one start of the console's shell.
+restarts=$(window "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault' | grep -c '^SERVICE_FROM_DISK_OK shell$' || true)
+[ "$restarts" -le 1 ] || fail_check vfs-restart.one-shell 'at most one shell start' "$restarts" "$log" 'VFS_FAULT_INJECTED'
+checks=$((checks + 1))
 pass_group vfs-restart
 
 # The configuration and log services restart on their own (ADR 0100). The
@@ -1139,7 +1159,7 @@ require_marker file-exec.kernel-object EXECUTABLE_OBJECT_OK "$log"
 require_marker file-exec.shell-denied EXECUTABLE_CREATE_DENIED_OK "$log"
 require_marker file-exec.launched FILE_EXEC_OK "$log" '/home/demo/args'
 require_window file-exec.absolute '^file-exec from the volume$' 'arguments printed by the copy on /home' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
-require_window file-exec.environment '^PATH=/system/bin$' 'the shell environment given to the copy' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
+require_window file-exec.environment '^PATH=/system/bin:/home/user/bin$' 'the shell environment given to the copy' "$log" 'goos> /home/demo/args file-exec' 'goos> cd /home/demo'
 require_regex file-exec.relative '^relative-file-exec$' 'a program path relative to the working directory' "$log" './args relative-file-exec'
 require_regex file-exec.pipeline '^piped-file-exec$' 'a program from the volume as a pipeline stage' "$log" 'piped-file-exec | readline'
 require_regex file-exec.not-a-program '^/home/demo/message.txt: not a valid executable$' 'a data file refused by the validator' "$log" 'goos> /home/demo/message.txt'
@@ -1204,7 +1224,7 @@ forbid_window release.caps-no-console '^console ' 'no console capability in the 
 require_regex release.caps-terminal '^tty       channel   read,write,wait$' 'shell terminal session' "$log" 'goos> caps'
 require_regex release.caps-log '^log       device    read$' 'shell log capability' "$log" 'goos> caps'
 require_regex release.handles '^0x0000000100000001  stream' 'shell handle table' "$log" 'goos> handles'
-require_regex release.log 'INFO  init\[1\]: service started service=vfs pid=' 'structured service start event' "$log" 'goos> log'
+require_regex release.log 'INFO  init\[1\]: service started service=[a-z-]* pid=' 'structured service start event' "$log" 'goos> log'
 require_regex release.large-startup '^a startup block larger than the former 128-byte limit$' 'write with a startup block over 128 bytes' "$log" 'goos> cat /persist/startup.txt'
 require_regex release.long-name-read '^a long file name in a long directory$' 'long name created and read back' "$log" 'goos> cat /persist/long-directory-name/startup-block-regression.txt'
 require_window release.long-name-listed 'startup-block-regression\.txt' 'long file name in ls output' "$log" 'goos> ls /persist/long-directory-name' 'goos> ls /persist'
@@ -1232,7 +1252,10 @@ require_regex session.shell-survived-terminal '^after-terminal-restart$' 'the sh
 # stopped with its session rather than orphaned.
 require_marker session.shell-fault SHELL_FAULT_INJECTED "$log" 'fault shell'
 require_marker session.shell-restarted SHELL_RESTARTED_OK "$log" 'fault shell'
-require_count session.shell-started 'SHELL_PROCESS_OK' 2 "$log" 'fault shell'
+# The shell also starts again after the storage faults of this session,
+# because it is read from the volume (ADR 0175); the shell fault itself
+# starts exactly one.
+count_window session.shell-started 'SHELL_PROCESS_OK' 1 "$log" 'SHELL_FAULT_INJECTED' 'after-shell-restart'
 require_marker session.shell-session-offered SHELL_SESSION_OFFERED_OK "$log" 'fault shell'
 require_marker session.terminal-took-session TTY_SESSION_REPLACED_OK "$log" 'fault shell'
 require_marker session.jobs-stopped SESSION_JOBS_STOPPED_OK "$log" 'fault shell'

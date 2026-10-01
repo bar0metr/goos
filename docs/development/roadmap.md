@@ -508,12 +508,27 @@ program run another:
 - `poll` and `ppoll` on native readiness;
 - a non-interactive BusyBox `sh` gate.
 
+### The installed system
+
+GoOS 0.2.2 ([docs/releases/0.2.2.md](../releases/0.2.2.md)) runs the system
+from disk:
+
+- a small boot archive at `/bootstrap` with the storage services, the shell,
+  and the recovery commands;
+- the installed system on the FAT32 volume, checked by PID 1 and published at
+  `/system`, protected by the VFS on its directory's node under every name;
+- executable origin by path, file-backed service launch, and grants only from
+  the index of a command's own origin;
+- normal and recovery modes, restart of the storage stack under a running
+  system, and recovery when it does not come back;
+- `make run` on a disk that is never overwritten implicitly.
+
 ### Next: a Linux terminal, then threads
 
-GoOS 0.2.2 is to give Linux programs a terminal: a terminal descriptor,
+GoOS 0.2.3 is to give Linux programs a terminal: a terminal descriptor,
 `isatty`, `TIOCGWINSZ`, a termios subset, sessions and process groups, a
 foreground group, terminal-generated `SIGINT`, `SIGTSTP`, and `SIGCONT`, and an
-interactive BusyBox `sh`. GoOS 0.2.3 is to add threads: thread-form `clone`,
+interactive BusyBox `sh`. GoOS 0.2.4 is to add threads: thread-form `clone`,
 per-thread TLS, `futex`, and thread-directed signals.
 
 Later: interactive programs such as `nano`. A random source for CPUs without

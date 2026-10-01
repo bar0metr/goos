@@ -166,6 +166,7 @@ func checkInstalled(session handle.ID) (supervisor.Stage, string, string) {
 		offset = next
 	}
 	commandIndexSize, commandIndexLoaded = size, true
+	mark("INIT_COMMAND_INDEX_OK\n")
 	return supervisor.StageNone, "", ""
 }
 
@@ -407,7 +408,9 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 			session.shellProcess = 0
 		}
 	}
-	manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
+	// The main loop starts the shells: a stopped one when its exit arrives,
+	// one that had failed at its next restart deadline. enterRecovery can
+	// run inside a launch, which must not start others.
 	mark("RECOVERY_SESSIONS_OK\n")
 }
 

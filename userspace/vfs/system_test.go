@@ -189,3 +189,34 @@ func TestProtectedFilesAreReportedReadOnly(t *testing.T) {
 		t.Fatal("a user file is reported read-only")
 	}
 }
+
+func TestPublishedSystemMountIsReportedReadOnly(t *testing.T) {
+	service := startedService(t, installedDevice(t))
+	if service.Publish() != vfs.StatusOK {
+		t.Fatal("publish failed")
+	}
+	info := dispatchOK(t, service, vfs.Request{Operation: vfs.OperationFilesystemInfo, Path: []byte("/system/bin")})
+	if !info.Filesystem.ReadOnly {
+		t.Fatal("/system is reported writable")
+	}
+	if info := dispatchOK(t, service, vfs.Request{Operation: vfs.OperationFilesystemInfo, Path: []byte("/apps")}); info.Filesystem.ReadOnly {
+		t.Fatal("/apps is reported read-only")
+	}
+	seen := false
+	for cursor := uint64(0); ; {
+		reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationReadMount, Offset: cursor})
+		if reply.Status != vfs.StatusOK {
+			break
+		}
+		if string(reply.Name) == "/system" {
+			seen = true
+			if !reply.Filesystem.ReadOnly {
+				t.Fatal("the /system mount entry is writable")
+			}
+		}
+		cursor = uint64(reply.Cursor)
+	}
+	if !seen {
+		t.Fatal("no /system mount entry")
+	}
+}

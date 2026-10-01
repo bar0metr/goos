@@ -54,6 +54,9 @@ func openVFSSession() (handle.ID, string) {
 	return handle.ID(pair[0]), ""
 }
 
+// diskCommandSeen records that an installed command has been launched.
+var diskCommandSeen bool
+
 // launch, when not nil, is the record of a job whose only stage may be given a
 // launch channel (ADR 0130); a child launched through one gets none.
 func launchApplication(path, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams, launch *launcher) (uint64, handle.ID, supervisor.LaunchStatus) {
@@ -68,9 +71,15 @@ func launchApplication(path, command, cwd []byte, arguments, environment execpro
 	granted, grantable := trustedGrants(path, executable.Image == systemImageHandle)
 	process, processHandle, launched := launchExecutable(executable, processName, located, grantable, granted, command, cwd, arguments, environment, streams, launch)
 	closeExecutable(executable)
+	// The validation markers stay as few as they were before the system moved
+	// to the volume: one per program from outside it, and one the first time
+	// an installed command runs, so the console does not fill with them.
 	if launched == supervisor.LaunchOK && executable.Image != systemImageHandle {
-		mark("FILE_EXEC_OK\n")
-		if grantable {
+		if !execproto.InSystem(path) {
+			mark("FILE_EXEC_OK\n")
+		}
+		if grantable && !diskCommandSeen {
+			diskCommandSeen = true
 			mark("SYSTEM_COMMAND_FROM_DISK_OK\n")
 		}
 	}

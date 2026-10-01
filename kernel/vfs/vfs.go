@@ -272,6 +272,13 @@ func (namespace *Namespace) Protected(backend Backend) (ramfs.NodeID, bool) {
 	return namespace.guarded, true
 }
 
+// protectedMount reports whether the mount in slot index is of the protected
+// directory itself, which is then reported read-only.
+func (namespace *Namespace) protectedMount(index int) bool {
+	entry := &namespace.mounts[index]
+	return entry.used && namespace.guards(entry, entry.root)
+}
+
 // guards reports whether node of mount is the protected directory.
 func (namespace *Namespace) guards(mount *mount, node ramfs.NodeID) bool {
 	return namespace.guard != nil && mount.backend == namespace.guard && node == namespace.guarded
@@ -775,6 +782,7 @@ func (namespace *Namespace) FilesystemInfo(path []byte, id MountID) (ramfs.Files
 		}
 		return ramfs.FilesystemInfo{}, 0, mapStatus(backendStatus)
 	}
+	info.ReadOnly = info.ReadOnly || namespace.protectedMount(index)
 	return info, namespace.mountID(index), StatusOK
 }
 
@@ -805,7 +813,7 @@ func (namespace *Namespace) ReadMount(cursor int) (MountInfo, int, Status) {
 			}
 			entry.filesystemType, entry.readOnly = info.Type, info.ReadOnly
 		}
-		info = ramfs.FilesystemInfo{Type: entry.filesystemType, ReadOnly: entry.readOnly}
+		info = ramfs.FilesystemInfo{Type: entry.filesystemType, ReadOnly: entry.readOnly || namespace.protectedMount(index)}
 		result := MountInfo{ID: namespace.mountID(index), PathSize: entry.size, Filesystem: info}
 		copy(result.Path[:], entry.path[:entry.size])
 		return result, index + 1, StatusOK
