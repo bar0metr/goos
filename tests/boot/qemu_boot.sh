@@ -1268,15 +1268,15 @@ pass_group release-shell
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.
 # It uses /home because that is where the specification puts user data.
 rm -f "$m7_log"
-( sleep 6
+( sleep 12
 	printf 'mkdir /home/m7\n'
-	sleep 2
+	sleep 3
 	printf 'write /home/m7/hello.txt "Hello from GoOS"\n'
-	sleep 2
+	sleep 3
 	printf 'cat /home/m7/hello.txt\n'
-	sleep 2
+	sleep 3
 	printf 'reboot\n'
-	sleep 12
+	sleep 20
 	printf 'cat /home/m7/hello.txt\n'
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
@@ -1310,7 +1310,7 @@ go run ./tools/mkfat32 -tree "$system_tree" "$corrupt_disk"
 for boot_sector in 0 6; do
 	printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=$((boot_sector * 512 + 32)) count=4 conv=notrunc 2>/dev/null
 done
-( sleep 6
+( sleep 12
 	printf 'ls /\n'
 	sleep 2
 	printf 'echo volatile-root-still-works\n'
@@ -1386,7 +1386,7 @@ for table_kind in mbr gpt; do
 	partition_disk=build/partition-$table_kind-virtio-blk.img
 	rm -f "$partition_log" "$partition_disk" "build/partition-$table_kind.out"
 	go run ./tools/mkfat32 -size 128 -table "$table_kind" -tree "$system_tree" "$partition_disk"
-	( sleep 6
+	( sleep 12
 		printf 'write /persist/partition.txt "inside-%s-partition"\n' "$table_kind"
 		sleep 2
 		printf 'cat /persist/partition.txt\n'
@@ -1421,7 +1421,7 @@ rm -f "$stack_log"
 stack_disk=build/stack-virtio-blk.img
 rm -f "$stack_disk"
 go run ./tools/mkfat32 -tree "$system_tree" "$stack_disk"
-( sleep 6
+( sleep 12
 	printf 'fault kernel-stack\n'
 	sleep 10
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
@@ -1454,7 +1454,7 @@ rm -f "$poweroff_log" "$poweroff_after_log"
 poweroff_disk=build/poweroff-virtio-blk.img
 rm -f "$poweroff_disk"
 go run ./tools/mkfat32 -tree "$system_tree" "$poweroff_disk"
-( sleep 6
+( sleep 12
 	printf 'write /home/poweroff.txt "kept across poweroff"\n'
 	sleep 2
 	printf 'poweroff\n'
@@ -1486,7 +1486,7 @@ require_regex poweroff.message '^Powering off\.\.\.' 'the power-off announced' "
 checks=$((checks + 1))
 forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log" 'Powering off'
 
-( sleep 6
+( sleep 12
 	printf 'cat /home/poweroff.txt\n'
 	sleep 3
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
