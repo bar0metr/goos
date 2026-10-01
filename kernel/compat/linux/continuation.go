@@ -23,6 +23,9 @@ const (
 	WakeTimeout
 	// WakeContext grants a queued task ownership of its family VFS context.
 	WakeContext
+	// WakeInterrupted ends a wait because a signal with a handler became
+	// deliverable.
+	WakeInterrupted
 )
 
 // Continuation is the bounded kernel-owned state of one blocking Linux
@@ -181,7 +184,8 @@ func (table *ContinuationTable) BlockFrame(frame *abi.Frame, task sched.TaskID, 
 // reply cannot advance the state machine or make a task runnable.
 func (table *ContinuationTable) Resume(task sched.TaskID, correlation uint64, reason WakeReason) bool {
 	entry, ok := table.entry(task)
-	if !ok || correlation == 0 || reason < WakeMessage || reason > WakeTimeout || entry.Phase != ContinuationWaiting || entry.Correlation != correlation {
+	if !ok || correlation == 0 || reason < WakeMessage || reason > WakeTimeout && reason != WakeInterrupted ||
+		entry.Phase != ContinuationWaiting || entry.Correlation != correlation {
 		return false
 	}
 	entry.Phase, entry.Wake = ContinuationReady, reason

@@ -222,6 +222,23 @@ func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcom
 	if active {
 		waitAnyTable.Take(handler.task)
 		now := nowNanos()
+		if pending.Wake == linuxcompat.WakeInterrupted {
+			// A handler is about to run. nanosleep fails with EINTR whatever
+			// SA_RESTART says and reports the time left in rem.
+			linuxcompat.SyscallContinuations.Finish(handler.task)
+			remaining := uint64(0)
+			if pending.Note > now {
+				remaining = pending.Note - now
+			}
+			if request.Arguments[1] != 0 {
+				putUint64(linuxTimespec[0:8], remaining/uint64(timekeeping.NanosPerSecond))
+				putUint64(linuxTimespec[8:16], remaining%uint64(timekeeping.NanosPerSecond))
+				if !vm.CopyOut(handler.root, request.Arguments[1], linuxTimespec[:]) {
+					return linuxErrno(linuxabi.EFAULT)
+				}
+			}
+			return linuxErrno(linuxabi.EINTR)
+		}
 		if pending.Note <= now || pending.Stage >= linuxSleepRounds ||
 			!linuxcompat.SyscallContinuations.Advance(handler.task, pending.Stage, pending.Stage+1, 0) {
 			linuxcompat.SyscallContinuations.Finish(handler.task)

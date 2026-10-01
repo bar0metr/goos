@@ -27,6 +27,10 @@ type Result struct {
 	Entry  uint64
 	Stack  uint64
 	Root   uint64
+	// Restart re-executes the call after any handler a signal runs, as
+	// SA_RESTART asks: the return resumes at the SYSCALL instruction with
+	// the call number in RAX.
+	Restart bool
 }
 
 func (result Result) Register() uint64 {
@@ -70,6 +74,7 @@ type Handler interface {
 	SigReturn(Request) Result
 	// Kill serves kill, tkill, and tgkill.
 	Kill(Request) Result
+	Poll(Request) Result
 	Exit(Request, bool) Result
 }
 
@@ -184,6 +189,8 @@ func route(request Request, handler Handler) Result {
 			return handler.SigReturn(request)
 		case abi.SysKill, abi.SysTkill, abi.SysTgkill:
 			return handler.Kill(request)
+		case abi.SysPoll:
+			return handler.Poll(request)
 		case abi.SysExit:
 			return handler.Exit(request, false)
 		case abi.SysExitGroup:

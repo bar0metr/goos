@@ -26,9 +26,13 @@ func (handler *linuxCallHandler) Wait4(request linuxcompat.Request) linuxcompat.
 		pending.Number == request.Number && pending.Arguments == request.Arguments {
 		return linuxBlocked
 	}
-	if _, active, errno := handler.vfsStage(request); errno != 0 {
+	pending, active, errno := handler.vfsStage(request)
+	if errno != 0 {
 		return linuxErrno(errno)
-	} else if active {
+	}
+	// A child that ended wins over the signal that woke the wait, as on Linux.
+	interrupted := active && pending.Wake == linuxcompat.WakeInterrupted
+	if active {
 		linuxcompat.SyscallContinuations.Finish(handler.task)
 	}
 	state, found := linuxcompat.FindProcess(handler.root)
@@ -63,6 +67,9 @@ func (handler *linuxCallHandler) Wait4(request linuxcompat.Request) linuxcompat.
 	}
 	if noHang {
 		return linuxcompat.Result{}
+	}
+	if interrupted {
+		return handler.interrupted(true)
 	}
 	if !linuxcompat.SyscallContinuations.Begin(handler.task, request, nil) ||
 		!linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxWaitCorrelation) ||

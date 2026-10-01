@@ -43,6 +43,8 @@
  *   pipe              pipe and pipe2: direction, EOF, EPIPE, lifetime, PIPE_BUF
  *   signal            SIGPIPE and SIGCHLD delivery, handlers, masks, rt_sigreturn
  *   kill              kill, tkill, tgkill, and SA_NOCLDWAIT on the process tree
+ *   eintr             signals interrupt read, wait4, nanosleep, and poll; SA_RESTART
+ *   poll              poll readiness, HUP, ERR, NVAL, timeouts, and wake-ups
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -50,6 +52,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2043,6 +2046,230 @@ static int kill_test(void)
 	return 0;
 }
 
+/* The fixture links only the musl objects the probe needs, and poll is not
+ * among them. */
+static int probe_poll(struct pollfd *entries, unsigned long count, int timeout)
+{
+	return syscall(SYS_poll, entries, count, timeout);
+}
+
+static volatile int eintr_seen;
+static int eintr_pipe[2] = {-1, -1};
+
+static void note_eintr(int number)
+{
+	(void)number;
+	eintr_seen++;
+}
+
+static int eintr_handler(int number, int flags)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof action);
+	action.sa_handler = note_eintr;
+	action.sa_flags = flags;
+	sigemptyset(&action.sa_mask);
+	return sigaction(number, &action, NULL);
+}
+
+static int eintr_read(int ready)
+{
+	char byte;
+
+	if (eintr_handler(SIGUSR1, 0) != 0 || write(ready, "r", 1) != 1)
+		return 2;
+	return read(eintr_pipe[0], &byte, 1) == -1 && errno == EINTR && eintr_seen == 1 ? 0 : 1;
+}
+
+static int restart_read(int ready)
+{
+	char byte;
+
+	if (eintr_handler(SIGUSR1, SA_RESTART) != 0 || write(ready, "r", 1) != 1)
+		return 2;
+	return read(eintr_pipe[0], &byte, 1) == 1 && byte == 'x' && eintr_seen == 1 ? 0 : 1;
+}
+
+static int eintr_sleep(int ready)
+{
+	struct timespec nap = {10, 0}, rem = {0, 0};
+
+	if (eintr_handler(SIGUSR1, SA_RESTART) != 0 || write(ready, "r", 1) != 1)
+		return 2;
+	if (nanosleep(&nap, &rem) != -1 || errno != EINTR || eintr_seen != 1)
+		return 1;
+	return rem.tv_sec < 10 && (rem.tv_sec > 0 || rem.tv_nsec > 0) ? 0 : 3;
+}
+
+static int eintr_poll(int ready)
+{
+	struct pollfd entry = {eintr_pipe[0], POLLIN, 0};
+
+	if (eintr_handler(SIGUSR1, SA_RESTART) != 0 || write(ready, "r", 1) != 1)
+		return 2;
+	return probe_poll(&entry, 1, -1) == -1 && errno == EINTR && eintr_seen == 1 ? 0 : 1;
+}
+
+static int eintr_wait(int ready)
+{
+	int status;
+	pid_t sleeper = fork();
+
+	if (sleeper == 0) {
+		char byte;
+
+		read(eintr_pipe[0], &byte, 1);
+		_exit(0);
+	}
+	if (sleeper < 0 || eintr_handler(SIGUSR1, 0) != 0 || write(ready, "r", 1) != 1)
+		return 2;
+	if (wait4(-1, &status, 0, NULL) != -1 || errno != EINTR || eintr_seen != 1)
+		return 1;
+	kill(sleeper, SIGKILL);
+	return wait4(sleeper, &status, 0, NULL) == sleeper ? 0 : 3;
+}
+
+/* Starts body in a child, waits until it is about to block, signals it, and
+ * returns its exit status. A restarted child gets a byte to read after the
+ * signal. */
+static int interrupt_child(int (*body)(int), int feed)
+{
+	struct timespec settle = {0, 100 * 1000 * 1000};
+	int status;
+	pid_t child = ready_child(body);
+
+	if (child < 0)
+		return -1;
+	nanosleep(&settle, NULL);
+	if (kill(child, SIGUSR1) != 0)
+		return -1;
+	if (feed) {
+		nanosleep(&settle, NULL);
+		if (write(eintr_pipe[1], "x", 1) != 1)
+			return -1;
+	}
+	if (wait4(child, &status, 0, NULL) != child || !WIFEXITED(status))
+		return -1;
+	return WEXITSTATUS(status);
+}
+
+static int eintr_test(void)
+{
+	struct timespec nap = {0, 100 * 1000 * 1000};
+	char byte;
+	pid_t child;
+	int status;
+
+	fflush(stdout);
+	if (pipe(eintr_pipe) != 0)
+		return 1;
+	if ((status = interrupt_child(eintr_read, 0)) != 0) {
+		printf("eintr failed: read %d\n", status);
+		return 1;
+	}
+	if ((status = interrupt_child(restart_read, 1)) != 0) {
+		printf("eintr failed: SA_RESTART read %d\n", status);
+		return 1;
+	}
+	if ((status = interrupt_child(eintr_sleep, 0)) != 0) {
+		printf("eintr failed: nanosleep %d\n", status);
+		return 1;
+	}
+	if ((status = interrupt_child(eintr_poll, 0)) != 0) {
+		printf("eintr failed: poll %d\n", status);
+		return 1;
+	}
+	if ((status = interrupt_child(eintr_wait, 0)) != 0) {
+		printf("eintr failed: wait4 %d\n", status);
+		return 1;
+	}
+	/* SIGCHLD with a handler interrupts the parent's own read. */
+	eintr_handler(SIGCHLD, 0);
+	child = fork();
+	if (child == 0) {
+		nanosleep(&nap, NULL);
+		_exit(0);
+	}
+	if (child < 0 || read(eintr_pipe[0], &byte, 1) != -1 || errno != EINTR || eintr_seen != 1 ||
+	    wait4(child, &status, 0, NULL) != child) {
+		printf("eintr failed: SIGCHLD read errno=%d\n", errno);
+		return 1;
+	}
+	signal(SIGCHLD, SIG_DFL);
+	printf("eintr ok\n");
+	return 0;
+}
+
+static int poll_fail(const char *step)
+{
+	printf("poll failed: %s errno=%d\n", step, errno);
+	return 1;
+}
+
+static long elapsed_ms(const struct timespec *start)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
+static int poll_test(void)
+{
+	struct timespec nap = {0, 50 * 1000 * 1000}, start;
+	struct pollfd entries[4];
+	char byte;
+	int fds[2], file, status;
+	pid_t child;
+
+	signal(SIGPIPE, SIG_IGN);
+	fflush(stdout);
+	if (probe_poll(NULL, 0, 0) != 0 || pipe(fds) != 0)
+		return poll_fail("empty");
+	if (on_goos() && !fails(probe_poll(entries, 65, 0), EINVAL))
+		return poll_fail("too many");
+	entries[0] = (struct pollfd){fds[0], POLLIN, 0};
+	entries[1] = (struct pollfd){fds[1], POLLOUT, 0};
+	entries[2] = (struct pollfd){-1, POLLIN, 7};
+	entries[3] = (struct pollfd){60, POLLIN, 0};
+	if (probe_poll(entries, 4, 0) != 2 || entries[0].revents != 0 || entries[1].revents != POLLOUT ||
+	    entries[2].revents != 0 || entries[3].revents != POLLNVAL)
+		return poll_fail("idle pipe");
+	if (write(fds[1], "x", 1) != 1 || probe_poll(entries, 1, 0) != 1 || entries[0].revents != POLLIN)
+		return poll_fail("readable");
+	read(fds[0], &byte, 1);
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	if (probe_poll(entries, 1, 60) != 0 || elapsed_ms(&start) < 55)
+		return poll_fail("timeout");
+	child = fork();
+	if (child == 0) {
+		nanosleep(&nap, NULL);
+		_exit(write(fds[1], "y", 1) == 1 ? 0 : 1);
+	}
+	if (child < 0 || probe_poll(entries, 1, -1) != 1 || entries[0].revents != POLLIN ||
+	    wait4(child, &status, 0, NULL) != child || status != 0)
+		return poll_fail("wake");
+	read(fds[0], &byte, 1);
+	close(fds[1]);
+	if (probe_poll(entries, 1, -1) != 1 || entries[0].revents != POLLHUP)
+		return poll_fail("hangup");
+	close(fds[0]);
+	if (pipe(fds) != 0 || close(fds[0]) != 0)
+		return poll_fail("broken pipe");
+	entries[1] = (struct pollfd){fds[1], POLLOUT, 0};
+	if (probe_poll(&entries[1], 1, 0) != 1 || !(entries[1].revents & POLLERR))
+		return poll_fail("error");
+	close(fds[1]);
+	file = open(IMAGE, O_RDONLY);
+	entries[0] = (struct pollfd){file, POLLIN | POLLOUT, 0};
+	if (file < 0 || probe_poll(entries, 1, -1) != 1 || entries[0].revents != (POLLIN | POLLOUT))
+		return poll_fail("regular file");
+	close(file);
+	printf("poll ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -2084,6 +2311,10 @@ int main(int argc, char **argv)
 			return signal_test();
 		if (!strcmp(argv[1], "kill"))
 			return kill_test();
+		if (!strcmp(argv[1], "eintr"))
+			return eintr_test();
+		if (!strcmp(argv[1], "poll"))
+			return poll_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

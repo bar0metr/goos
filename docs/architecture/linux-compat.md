@@ -139,7 +139,7 @@ Syscalls map onto native primitives:
 | `wait4` | the family zombie records; a blocked caller parks on its continuation until a child exits |
 
 `pipe` and `pipe2` create a native stream whose two ends become open-file
-descriptions (ADR 0162). Remaining composition work maps `poll` to `WaitAny`.
+descriptions (ADR 0162). `poll` sleeps on the native wait-any table (ADR 0168).
 
 Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
 may access caller memory after the ordinary address-space checks, but authority
@@ -429,12 +429,13 @@ and its VFS session go with it, and no Linux signal is delivered.
 ## Scope
 
 GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, process groups, threads, `EINTR`,
+Dynamic linking, glibc, process groups, threads, `ppoll`, `select`,
 nonblocking pipes, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
 builtins and redirections but cannot start a program, and `nano` does not
 run. `fork`, `vfork`, and two process forms of `clone` create a child from
 a private copy of the caller (ADR 0158, ADR 0159), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
-reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166).
-The next Linux work is interrupted calls and `poll`.
+reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166),
+a handled signal interrupts a blocked call (ADR 0167), and `poll` waits on
+several descriptors (ADR 0168).

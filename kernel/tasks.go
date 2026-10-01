@@ -99,6 +99,12 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		}
 	}
 	frame.Return, frame.Action = result.Register(), result.Action
+	if result.Restart && frame.Action == linuxabi.ActionReturn && frame.UserIP >= 2 {
+		// The return enters a handler, or comes straight back, at the
+		// SYSCALL instruction with the call number, as Linux restarts a call.
+		frame.UserIP -= 2
+		frame.Return = frame.Number
+	}
 	if frame.Action == linuxabi.ActionReturn {
 		deliverLinuxSignals(frame, linuxHandler.task)
 	}
