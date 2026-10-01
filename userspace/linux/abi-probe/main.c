@@ -52,7 +52,7 @@
  *   hardening         failed exec, fork memory, descriptors, pipes, signal frames
  *   limits            fork until the family budget refuses, with zombies too
  *   fork-fault        a validation kernel fails a fork mid-copy; another succeeds
- *   fpstate           x87 and SSE state survives a signal handler and its return
+ *   fpstate           x87 and SSE state survives calls, sleeps, fork, and handlers
  *   exec-vfs-loss     the validation VFS dies while execve prepares its image
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
@@ -1370,6 +1370,15 @@ static int after_exec(int argc, char **argv)
 	if (sigaction(SIGUSR2, NULL, &action) || action.sa_handler != SIG_IGN ||
 		sigprocmask(SIG_SETMASK, NULL, &mask) || !sigismember(&mask, SIGTERM))
 		return 1;
+	/* The new image starts from the initial x87 and SSE state. */
+	{
+		unsigned int mxcsr;
+		unsigned short fcw;
+
+		__asm__ volatile("stmxcsr %0\n\tfnstcw %1" : "=m"(mxcsr), "=m"(fcw));
+		if (mxcsr != 0x1f80 || fcw != 0x037f)
+			return 1;
+	}
 	printf("exec ok pid %d\n", getpid());
 	return 0;
 }
@@ -1404,6 +1413,13 @@ static int exec_test(void)
 	snprintf(pid, sizeof pid, "%d", getpid());
 	snprintf(kept_text, sizeof kept_text, "%d", kept);
 	snprintf(closed_text, sizeof closed_text, "%d", closed);
+	/* A changed MXCSR and x87 control word must not reach the new image. */
+	{
+		unsigned int mxcsr = 0xbf80;
+		unsigned short fcw = 0x007f;
+
+		__asm__ volatile("ldmxcsr %0\n\tfldcw %1" : : "m"(mxcsr), "m"(fcw));
+	}
 	execve(IMAGE, arguments, environment);
 	printf("exec failed: errno=%d\n", errno);
 	return 1;
@@ -2758,12 +2774,14 @@ static volatile int fp_nested_ok, fp_seen;
 #define FP_MXCSR 0x7f80u
 #define FP_FCW 0x027fu
 
-/* Loads the state, signals the calling thread with the SYSCALL inside the
- * same asm block, and stores the state the return gives back. */
-static long fp_signal(long signal, unsigned int *mxcsr, unsigned short *fcw)
+/* Loads XMM0, XMM1, XMM7, XMM15 from fp_in, MXCSR, and the x87 control
+ * word, makes one system call inside the same asm block, and stores the state
+ * the return gives back in fp_out, *mxcsr, and *fcw. */
+static long fp_syscall(long number, long first, long second, unsigned int mxcsr_in, unsigned short fcw_in,
+		       unsigned int *mxcsr, unsigned short *fcw)
 {
-	unsigned int mx = FP_MXCSR;
-	unsigned short cw = FP_FCW;
+	unsigned int mx = mxcsr_in;
+	unsigned short cw = fcw_in;
 	long result;
 
 	__asm__ volatile("ldmxcsr %[mx]\n\tfldcw %[cw]\n\t"
@@ -2774,11 +2792,17 @@ static long fp_signal(long signal, unsigned int *mxcsr, unsigned short *fcw)
 			 "movdqu %%xmm7, 32(%[out])\n\tmovdqu %%xmm15, 48(%[out])\n\t"
 			 "stmxcsr %[mx]\n\tfnstcw %[cw]"
 			 : "=a"(result), [mx] "+m"(mx), [cw] "+m"(cw)
-			 : "a"((long)SYS_tkill), "D"((long)getpid()), "S"(signal), [in] "r"(fp_in), [out] "r"(fp_out)
+			 : "a"(number), "D"(first), "S"(second), [in] "r"(fp_in), [out] "r"(fp_out)
 			 : "rcx", "r11", "memory", "xmm0", "xmm1", "xmm7", "xmm15");
 	*mxcsr = mx;
 	*fcw = cw;
 	return result;
+}
+
+/* Signals the calling thread with the state loaded. */
+static long fp_signal(long signal, unsigned int *mxcsr, unsigned short *fcw)
+{
+	return fp_syscall(SYS_tkill, getpid(), signal, FP_MXCSR, FP_FCW, mxcsr, fcw);
 }
 
 static void fp_clobber(void)
@@ -2868,14 +2892,50 @@ static int fp_bad_child(void)
 	return mxcsr >> 16 == 0 ? 3 : 4;
 }
 
+/* State unlike both the initial state and the signal tests' state: MXCSR
+ * rounds down with flush-to-zero and every exception masked, and the x87
+ * control word selects 24-bit precision. */
+#define FP_PLAIN_MXCSR 0xbf80u
+#define FP_PLAIN_FCW 0x007fu
+
+/* Loads the plain state, makes one call, and checks that the state came back
+ * as loaded. A forked child checks its own copy and exits with the verdict. */
+static int fp_call_keeps_state(const char *name, long number, long first, long second)
+{
+	unsigned int mxcsr;
+	unsigned short fcw;
+	int status;
+	long result;
+
+	for (int index = 0; index < 64; index++)
+		fp_in[index] = (unsigned char)(0xe1 ^ (index * 13));
+	fflush(stdout);
+	result = fp_syscall(number, first, second, FP_PLAIN_MXCSR, FP_PLAIN_FCW, &mxcsr, &fcw);
+	int kept = !memcmp(fp_out, fp_in, sizeof fp_out) && mxcsr == FP_PLAIN_MXCSR && fcw == FP_PLAIN_FCW;
+	if (number == SYS_fork && result == 0)
+		_exit(kept ? 0 : 1);
+	if (number == SYS_fork && (result < 0 || wait4(result, &status, 0, NULL) != result || status != 0))
+		kept = 0;
+	if (!kept)
+		printf("fpstate failed: %s mxcsr=%#x fcw=%#x result=%ld\n", name, mxcsr, fcw, result);
+	return kept;
+}
+
 static int fpstate_test(void)
 {
+	struct timespec nap = {0, 30 * 1000 * 1000};
 	unsigned int mxcsr;
 	unsigned short fcw;
 	char *pages;
 	int status;
 
 	fflush(stdout);
+	/* A call that returns at once, one that sleeps in the scheduler, and a
+	 * fork child all see the caller's state. */
+	if (!fp_call_keeps_state("getpid", SYS_getpid, 0, 0) ||
+	    !fp_call_keeps_state("nanosleep", SYS_nanosleep, (long)&nap, 0) ||
+	    !fp_call_keeps_state("fork", SYS_fork, 0, 0))
+		return 1;
 	for (int index = 0; index < 64; index++)
 		fp_in[index] = (unsigned char)(index * 7 + 1);
 

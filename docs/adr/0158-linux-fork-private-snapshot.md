@@ -4,6 +4,9 @@
 
 Accepted.
 
+The process/memory snapshot decision remains current.
+The FPU/SSE inheritance portion is superseded by ADR 0174.
+
 ## Context
 
 A shell starts a program by forking and then replacing the child image. The
@@ -54,7 +57,6 @@ wait registration, or `clear_child_tid` address.
 Fork cost grows with the pages the parent has touched, including its image
 pages. Two processes never share a writable frame, so no write can leak between
 them. A fork can fail with `ENOMEM` when the child quota or physical memory
-cannot hold the copy even though the parent runs. FPU and SSE state start from
-the initial image in the child. The C calling convention treats those
-registers as clobbered across the `fork` call; a changed MXCSR or x87 control
-word does not survive into the child.
+cannot hold the copy even though the parent runs. FPU/SSE inheritance is
+defined by ADR 0174: fork, vfork, and supported process-form clone inherit the
+parent's x87/SSE state at the call boundary.

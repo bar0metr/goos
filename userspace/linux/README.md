@@ -23,7 +23,7 @@ times four calls; `session-loss` and `session-timeout` serve the VFS restart
 and late-answer checks of the boot test; `stack-overflow` recurses into the
 guard below the stack; `random` says whether the kernel has a random source;
 `exec` replaces the probe image and checks preserved identity, cwd, descriptor
-position, `CLOEXEC`, and signal state; `fork` creates a child and checks that
+position, `CLOEXEC`, and signal state, and the initial x87 and SSE state; `fork` creates a child and checks that
 memory is private and the file position is shared; `vfork` checks that
 `vfork` returns only after the child exits, that `clone(SIGCHLD)` forks, and,
 on GoOS, that `clone` refuses a thread; `orphan` checks that a process whose
@@ -46,8 +46,9 @@ comes back after the handler or a ready return; `family` leaves a child asleep
 for the Ctrl-C check of the boot test; `path` prints the `PATH` it got;
 `fork-fault` and `exec-vfs-loss` serve the validation kernel and VFS, which
 fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
-registers, MXCSR, and the x87 control word survive a handler that clobbers
-them, a nested signal, an edited and a null `fpstate`, and that a bad
+registers, MXCSR, and the x87 control word survive `getpid`, a `nanosleep`
+that sleeps, `fork` into the child, a handler that clobbers them, a nested
+signal, an edited and a null `fpstate`, and that a bad
 `fpstate` ends the process.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
@@ -115,7 +116,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `380102422eabd6550c9f045b32c0778e637001b7bbfd5621037a49d702e32351` |
+| `prebuilt/abi-probe` | `9eca29ee272084604b411f63aaeb715e034986d65506d6b0caaccf03bf87a54f` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

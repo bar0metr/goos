@@ -43,6 +43,7 @@ echo "== default"
 echo "== hostile"
 /system/linux/$fixture hostile < /dev/null | /bin/busybox cat
 echo "== process"
+/system/linux/$fixture exec < /dev/null | /bin/busybox cat
 /system/linux/$fixture fork < /dev/null | /bin/busybox cat
 /system/linux/$fixture vfork < /dev/null | /bin/busybox cat
 /system/linux/$fixture orphan < /dev/null | /bin/busybox cat
@@ -84,6 +85,7 @@ status=0
 tr -d '\r' < "$log" | grep -q '^abi-probe ok$' || { echo "FAIL default mode" >&2; status=1; }
 tr -d '\r' < "$log" | grep -q '^hostile ok$' || { echo "FAIL hostile mode" >&2; status=1; }
 if [ "$fixture" = abi-probe ]; then
+	tr -d '\r' < "$log" | grep -q '^exec ok pid [0-9]*$' || { echo "FAIL process mode: no exec ok" >&2; status=1; }
 	for line in 'fork parent ok' 'vfork ok' 'clone ok' 'orphan ok' 'wait ok' 'pipe ok' 'signal ok' 'kill ok' 'eintr ok' 'poll ok' 'ppoll ok' 'hardening ok' 'fpstate ok'; do
 		tr -d '\r' < "$log" | grep -q "^$line\$" || { echo "FAIL process mode: no $line" >&2; status=1; }
 	done
