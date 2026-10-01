@@ -283,7 +283,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.2.1
+GoOS 0.2.2
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
@@ -298,6 +298,7 @@ Starting services...
 [ OK ] block
 [ OK ] virtio-blk
 [ OK ] fat32
+[MODE] normal
 [ OK ] config
 [ OK ] log
 [ OK ] tty
@@ -313,25 +314,20 @@ The namespace is walkable from there. This is real output, not a transcript:
 ```text
 goos> ls /
 tmp/
-system/
+run/
+bootstrap/
 persist/
 home/
 state/
+system/
+apps/
 goos> ls /system
 bin/
+commands
 linux/
 motd
-init
-fault-probe
-vfs
-shell
-block
-virtio-blk
-log
-config
-tty
-fat32
-commands
+release
+services/
 goos> ls /system/bin
 args
 bench
@@ -361,47 +357,55 @@ uptime
 vmprobe
 write
 goos> ls /system/linux
-raw-probe
+abi-probe
+dirprobe
+fsprobe
 hello
 hello-pie
 musl-hello
-fsprobe
-dirprobe
-abi-probe
+goos> ls /bootstrap
+bin/
+motd
+init
+vfs
+shell
+block
+virtio-blk
+tty
+fat32
+commands
 goos> /system/linux/musl-hello one two
 argc=3
 hello from musl
 goos> mkdir /system/backdoor
 mkdir: /system/backdoor: read-only filesystem
 exit status: 2
-goos> mkdir /home/user
-goos> write /home/user/notes.txt "Hello from GoOS"
-goos> cat /home/user/notes.txt
+goos> mkdir /persist/SYSTEM/backdoor
+mkdir: /persist/SYSTEM/backdoor: read-only filesystem
+exit status: 2
+goos> mkdir /home/user/notes
+goos> write /home/user/notes/notes.txt "Hello from GoOS"
+goos> cat /home/user/notes/notes.txt
 Hello from GoOS
+goos> cp /system/bin/uname /home/user/bin/myuname
+goos> myuname
+GoOS 0.2.2 x86_64
+goos> fsck-fat --check auto
+exec: cannot start fsck-fat: volume in use by the running system; check it in recovery mode
 goos> ps
 PID   TYPE     STATE      MEM  CPU   COMMAND
-1     native   waiting    639  10    init
-4     native   waiting    54   3     vfs
-5     native   waiting    63   16    block
+1     native   waiting    750  12    init
+4     native   waiting    60   11    vfs
+5     native   waiting    63   12    block
 6     native   waiting    60   1     virtio-blk
-7     native   waiting    119  5     fat32
-8     native   waiting    27   2     config
-9     native   waiting    27   3     log
-10    native   ready      26   2     tty
-11    native   waiting    56   3     shell
+7     native   waiting    119  16    fat32
+8     native   waiting    69   40    config
+9     native   waiting    56   28    log
+10    native   waiting    26   0     tty
+11    native   waiting    142  85    shell
 12    native   waiting    26   0     tty
-13    native   waiting    32   0     shell
-23    native   running    19   0     ps
-goos> quota
-PID   COMMAND           RESOURCE  HELD/LIMIT
-1     init              chan      22/256
-1     init              strm      3/64
-1     init              task      1/8
-1     init              page      639/16384
-4     vfs               chan      0/4
-4     vfs               strm      0/16
-4     vfs               task      1/4
-...
+13    native   waiting    89   56    shell
+27    native   running    27   6     ps
 ```
 
 MEM is the pages the kernel allocated for the process and CPU the timer ticks it
@@ -409,10 +413,17 @@ was found running on. PIDs 12 and 13 are the terminal service and shell of the
 framebuffer console.
 
 A disk without an installed system of this release, or no disk at all, boots
-into recovery mode, which says why and offers the archive's own commands:
+into recovery mode, which says why and offers the archive's own commands
+(system log lines left out):
 
 ```text
+[ OK ] fat32
 [MODE] recovery: stage=record path=/system reason=no installed system on the volume
+[ OK ] tty
+[ OK ] shell
+[ OK ] tty-fb
+[ OK ] shell-fb
+
 goos> ls /bootstrap/bin
 cat
 cp
@@ -430,7 +441,7 @@ stat
 touch
 write
 goos> fsck-fat --check auto
-files=3 directories=3 used-clusters=6 free-clusters=130806 errors=0
+files=1 directories=3 used-clusters=4 free-clusters=130808 errors=0
 ```
 
 `make VALIDATION=1` builds the validation variant used by `make test-boot`. It

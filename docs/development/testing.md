@@ -139,10 +139,12 @@ shell composition, or boot behavior.
 `512M`). The physical-memory group then requires the validation kernel to have
 used a page above 1 GiB from 2 GiB, and one above 4 GiB from 3 GiB (ADR 0103).
 
-The target creates a fresh `build/boot-test-virtio-blk.img` for each run. Tests
-therefore cannot corrupt or overwrite the persistent `build/virtio-blk.img`
-used by `make run` and `make run-gui`; both QEMU phases share the fresh test image to validate
-reboot persistence.
+The target installs the system on a fresh `build/boot-test-virtio-blk.img`
+for each run (`make test-disk`, ADR 0175). Tests therefore cannot corrupt or
+overwrite the persistent `build/goos-disk.img` used by `make run` and `make
+run-gui`; both QEMU phases share the fresh test image to validate reboot
+persistence. The exclusive volume check runs in a forced-recovery boot of the
+same image, because the running system refuses it.
 
 `make run-gui` is a manual target and is never invoked by the automated test
 hierarchy. It opens a host window, while `make test-boot` remains headless and
