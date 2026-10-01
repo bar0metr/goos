@@ -453,7 +453,8 @@ adds whole-file `Replace` (ADR 0129), through which the new gap-buffer editor
 and `edit` through a launch channel PID 1 grants by manifest, with the child's
 own grants and the caller's input (ADR 0130), and shows modification times and
 free space. GoOS 0.1.7 is released (docs/releases/0.1.7.md). GoOS 0.2.0
-follows it with Linux ABI compatibility (Priority 5).
+follows it with Linux ABI compatibility and GoOS 0.2.1 with Linux process
+composition (Priority 5).
 
 Known gaps left by ADR 0089: the system services that start before the terminal
 still write the console directly, as does the kernel's warning echo, so either
@@ -490,21 +491,32 @@ What it contains:
 [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md) is the contract,
 with every call, each difference from Linux, and the release limits.
 
-### Next: process composition
+### Process composition
 
-The next Linux milestone lets one Linux program run another, which BusyBox
-`sh` needs:
+GoOS 0.2.1 ([docs/releases/0.2.1.md](../releases/0.2.1.md)) lets one Linux
+program run another:
 
-1. `execve` through PID 1's launch path, with close-on-exec honored;
-2. `pipe2` on native streams;
-3. `wait4` on process handles, and a documented process-tree policy;
-4. a deliberately chosen `fork` semantics;
-5. signal delivery for `SIGINT`, `SIGCHLD`, and `SIGPIPE`, on the
-   dispositions and masks the kernel already records;
-6. `poll` and `ppoll` on `WaitAny`.
+- a bounded family registry with zombie records, reparenting, and process
+  budgets that keep native slots free;
+- per-process descriptor tables over shared open-file descriptions and one
+  serialized VFS context per family;
+- in-place `execve`, private-snapshot `fork`, `vfork`, and the process forms
+  of `clone`;
+- `wait4`, `pipe`, and `pipe2` with atomic `PIPE_BUF` writes;
+- signal delivery on an `rt_sigframe`, `kill` on the caller's tree,
+  interrupted calls with `SA_RESTART`, `rt_sigsuspend`, and `pause`;
+- `poll` and `ppoll` on native readiness;
+- a non-interactive BusyBox `sh` gate.
 
-Later: `futex` and threads, richer signals, termios and a terminal
-descriptor, interactive programs, `nano`. A random source for CPUs without
+### Next: a Linux terminal, then threads
+
+GoOS 0.2.2 is to give Linux programs a terminal: a terminal descriptor,
+`isatty`, `TIOCGWINSZ`, a termios subset, sessions and process groups, a
+foreground group, terminal-generated `SIGINT`, `SIGTSTP`, and `SIGCONT`, and an
+interactive BusyBox `sh`. GoOS 0.2.3 is to add threads: thread-form `clone`,
+per-thread TLS, `futex`, and thread-directed signals.
+
+Later: interactive programs such as `nano`. A random source for CPUs without
 RDRAND and a randomized load base are independent steps. Dynamic linking and
 glibc stay separate work.
 

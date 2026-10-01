@@ -180,3 +180,24 @@ func TestFDTableInheritanceSharesDescriptionsAndCopiesFlags(t *testing.T) {
 func resetFDTest() {
 	openDescriptions = [MaxOpenDescriptions]descriptionSlot{}
 }
+
+func TestOpenDescriptionCountFollowsInheritance(t *testing.T) {
+	resetCompatibilityProcesses()
+	var parent, child FDTable
+	if !parent.Initialize(9, 1, 2, 3) {
+		t.Fatal("initialize failed")
+	}
+	if descriptions, references := OpenDescriptionCount(); descriptions != 3 || references != 3 {
+		t.Fatalf("after initialize: %d descriptions, %d references", descriptions, references)
+	}
+	if !child.Inherit(&parent) {
+		t.Fatal("inherit failed")
+	}
+	if descriptions, references := OpenDescriptionCount(); descriptions != 3 || references != 6 {
+		t.Fatalf("after inherit: %d descriptions, %d references", descriptions, references)
+	}
+	child.CloseAll(nil)
+	if descriptions, references := OpenDescriptionCount(); descriptions != 3 || references != 3 {
+		t.Fatalf("after child close: %d descriptions, %d references", descriptions, references)
+	}
+}

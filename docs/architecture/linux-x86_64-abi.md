@@ -44,6 +44,7 @@ an errno; nothing is accepted and ignored.
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
+| `pause(34)` | implemented | sleeps until a handled signal, then `EINTR` |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; a handled signal ends it with `EINTR` and the time left |
 | `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is the forking process, or 1 for a launched or orphaned one |
 | `clone(56)` | partial | `SIGCHLD` is `fork`, `CLONE_VM\|CLONE_VFORK\|SIGCHLD` is `vfork`, both with an optional stack; thread, TLS, TID, and namespace flags `EINVAL` |
@@ -62,6 +63,7 @@ an errno; nothing is accepted and ignored.
 | `getuid(102)`, `getgid(104)`, `geteuid(107)`, `getegid(108)` | implemented | 1000 |
 | `setuid(105)`, `setgid(106)` | partial | succeed for 1000, `EPERM` otherwise |
 | `getgroups(115)` | implemented | no supplementary groups |
+| `rt_sigsuspend(130)` | implemented | a temporary mask until a handled signal, then `EINTR`; the handler's return restores the mask |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
 | `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
 | `set_tid_address(218)` | partial | stores the address, returns the compatibility PID; a single-task exit clears nothing |
@@ -72,7 +74,7 @@ an errno; nothing is accepted and ignored.
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
 
-Calls programs commonly make that stay `ENOSYS` in 0.2.0, with what musl or
+Calls programs commonly make that stay `ENOSYS` in 0.2.1, with what musl or
 BusyBox does about it:
 
 | Syscall | Effect of `ENOSYS` |
@@ -604,7 +606,7 @@ its file waits for the page and runs again.
 
 Results a correct Linux program can observe to differ:
 
-| Area | GoOS 0.2.0 | Linux |
+| Area | GoOS 0.2.1 | Linux |
 | --- | --- | --- |
 | terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
 | signals | delivered at system call returns; `kill` reaches the caller and its descendants only; Ctrl-C ends the process whatever handles `SIGINT`; file I/O is never interrupted | sent by UID, delivered at any return to user mode |
@@ -629,13 +631,16 @@ Results a correct Linux program can observe to differ:
 
 ## Release limits
 
-GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
-or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
-and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no process-group `kill`, `select`, or alternate signal stack; no
-nonblocking pipes; no networking; no `/proc` or `/sys`, and of
-`/dev` three names; no file-backed `mmap`; no address-space randomization; no
-ownership or permission enforcement; no root; no termios. BusyBox `sh` runs
-builtins and redirections but cannot run a program. `nano` does not run.
+GoOS 0.2.1 runs x86_64, statically linked ELF programs, position-independent
+or not. It has no `PT_INTERP`, dynamic linker, or glibc; no threads, no
+thread-form `clone`, and no `futex`; no copy-on-write and no shared-memory
+`vfork`; no process groups, sessions, or job control; no process-group
+`kill`, `select`, `epoll`, or alternate signal stack; no nonblocking pipes;
+no networking; no `/proc` or `/sys`, and of `/dev` three names; no
+file-backed `mmap`; no address-space randomization; no ownership or
+permission enforcement; no root; no termios. BusyBox `sh` runs programs,
+pipelines, redirections, scripts, and background jobs non-interactively.
+`nano` does not run.
 
 ## Bounds
 
@@ -653,6 +658,10 @@ builtins and redirections but cannot run a program. `nano` does not run.
 | concurrent `execve` preparation | 4 system-wide |
 | Linux processes per family | 16, zombies included |
 | Linux processes, all families | 48 |
+| `poll` and `ppoll` entries | 64 |
+| pending signals | one per standard signal, 31 |
+| VFS requests queued per family | 15 |
+| `execve` arguments and environment entries | 256 each |
 | stack reservation | 8 MiB, 64 KiB guard |
 | static PIE load base | `0x40000000` |
 | `brk` heap | 64 MiB |
@@ -704,8 +713,9 @@ and `LINUX_PROBE_OUTPUT_END` when it differs. Markers: `LINUX_MUSL_OK`, `LINUX_V
 **Reference.** The same `abi-probe` binary prints the same lines on a Linux
 kernel. `make test-linux-reference` runs it in an amd64 container, under
 user-mode emulation on an arm64 host. `make test-linux-kernel-reference
-KERNEL=path BUSYBOX=path` boots a real Linux kernel in QEMU and runs the
-default and hostile modes strict: every check must give the exact Linux
+KERNEL=path BUSYBOX=path`, also `make test-linux-process-reference`, boots a
+real Linux kernel in QEMU and runs the default, hostile, and process modes
+strict: every check must give the exact Linux
 result, which GoOS is always held to (ADR 0152). Both modes pass on Linux
 6.12. `userspace/linux/README.md` holds the recorded call trace and the
 results that differ.
@@ -730,6 +740,16 @@ boot:
 | `abi-probe stack-overflow` | recursion reaches the guard below the stack; the kernel logs `user fault: guard page`, the process ends, the shell continues |
 | `abi-probe port-io` | the process ends with a fault status and the shell continues |
 | Ctrl-C on a blocked read, a sleep, and a VFS wait | the process ends, the shell reads the next line, later runs pass |
+| `abi-probe exec` and `abi-probe run musl-hello alpha beta` | the image is replaced in place: same PID, cwd, kept descriptor and position, `CLOEXEC` closed, signal state reset; `argc=3` |
+| `abi-probe fork`, `vfork`, `orphan` | private memory, shared file position, a suspended `vfork` parent, `clone(SIGCHLD)`, reparenting to PID 1 |
+| `abi-probe wait`, `pipe`, `signal`, `kill` | `wait4` by PID and any with `WNOHANG` and `ECHILD`; pipe direction, EOF, `EPIPE`, lifetime, `PIPE_BUF`; `SIGPIPE` and `SIGCHLD` handlers, masks, `rt_sigreturn`, forged frames; `kill` on the tree, `SA_NOCLDWAIT` |
+| `abi-probe eintr`, `poll`, `ppoll` | `EINTR` and `SA_RESTART` on blocked calls; `poll` readiness, `POLLHUP`, `POLLERR`, `POLLNVAL`, timeouts; `ppoll` and `rt_sigsuspend` with a temporary mask |
+| `abi-probe hardening` | failed `execve` keeps the image; fork copies touched, untouched, read-only, and brk pages; shared descriptions; a killed writer; pipe exhaustion; bad handler and restorer addresses; `SIGKILL` in a handler; the native gate refused in a child |
+| `abi-probe limits` | a fork bomb stops at 15 children with `EAGAIN`; zombies count; reaping frees the budget |
+| Ctrl-C on `abi-probe family` | the root and its forked child are gone from `ps` |
+| `abi-probe path` | `PATH=/system/linux` |
+| `abi-probe fork-fault` | a validation kernel fails a fork after four copied pages: `ENOMEM`, `LINUX_FORK_ROLLBACK_OK`, no child, the pipe write end released, and the next fork succeeds (ADR 0173) |
+| `abi-probe exec-vfs-loss`, last | the validation VFS dies while `execve` prepares the image: `EIO`, the same PID, memory, descriptors, and cwd; after PID 1 restarts the VFS a new Linux program runs |
 
 **General boot test.** `make test-boot` also restarts the VFS under a Linux
 process, which must then get `EIO` and no new session, and makes the VFS
@@ -737,9 +757,12 @@ answer one request late, which must end in `ETIMEDOUT` with the session still
 usable. Its guest CPU has no RDRAND, so PID 1's probe there requires
 `getrandom` to return `ENOSYS` and `AT_RANDOM` to be absent.
 
-**BusyBox.** `make test-linux-busybox BUSYBOX=path` requires `echo`, `pwd`,
-`cat`, `ls`, `mkdir`, and `rm` of a static BusyBox the caller supplies
-(ADR 0148). With BusyBox 1.35.0 built against musl these also run: `uname`,
+**BusyBox.** `make test-linux-busybox BUSYBOX=path`, also named
+`make test-linux-shell`, requires `echo`, `pwd`, `cat`, `ls`, `mkdir`, and
+`rm` of a static BusyBox the caller supplies (ADR 0148). It also requires
+`sh` to run a program by path and through `PATH`, report `$?` and its own
+status, connect two- and three-stage pipelines, redirect into a file a child
+reads, run a script by name, and collect `sleep 1 &` with `wait` (ADR 0172). With BusyBox 1.35.0 built against musl these also run: `uname`,
 `date`, `sleep`, `cp`, `mv`, `head`, `tail`, `wc`, `stat`, `ls -l`, `rmdir`,
 `true`, `basename`, `env`, `id`, `md5sum`, `dd if=/dev/zero`, `sh -c true`,
 and `sh -c "echo x > /dev/null"`. `touch` fails on the missing `utimensat`

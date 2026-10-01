@@ -155,6 +155,8 @@ goos> /system/linux/dirprobe /persist
 ```
 
 A Linux program has no terminal: its libc buffers output in blocks, so lines
-appear when the buffer fills or the program exits. Ctrl-C ends the process; no
-signal reaches it. [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md)
+appear when the buffer fills or the program exits. It may fork and run other
+Linux programs; a static BusyBox `sh` runs command lines, pipelines, and
+scripts that way. The shell waits for the program it started. Ctrl-C ends that
+program and every process it forked; no signal reaches them (ADR 0170). [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md)
 lists what such a program can call.

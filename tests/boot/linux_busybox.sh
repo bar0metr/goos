@@ -1,8 +1,9 @@
 #!/bin/sh
 # Boots one validation guest and runs applets of a static x86_64 BusyBox the
 # caller supplied, which the build placed under /system/linux. The applets
-# are the release's interoperability set: echo, pwd, cat, ls, mkdir, rm.
-# BusyBox sh is outside it. When an applet fails, the kernel's record of
+# are the release's interoperability set: echo, pwd, cat, ls, mkdir, rm, and
+# a non-interactive sh that starts programs, connects pipelines, redirects,
+# and runs a script. When an applet fails, the kernel's record of
 # unsupported calls is printed, which names what the applet missed.
 #
 # usage: linux_busybox.sh ISO OVMF DISK NAME
@@ -152,6 +153,51 @@ clean 'busybox rm'
 run 'ls /tmp/linux-test; echo listed'
 refuse '^file$' 'busybox rm'
 expect '^listed$' 'busybox rm'
+
+# A non-interactive shell starts other Linux programs, by path and through
+# PATH, and sees their exit status.
+run "$busybox sh -c '/system/linux/musl-hello one two'"
+expect '^argc=3$' 'busybox sh runs a program'
+expect '^hello from musl$' 'busybox sh runs a program'
+clean 'busybox sh runs a program'
+
+run "$busybox sh -c '$busybox false || $busybox echo recovered'"
+expect '^recovered$' 'busybox sh sees a failing status'
+clean 'busybox sh sees a failing status'
+
+run "$busybox sh -c '$busybox false; echo status=\$?; exit 3'"
+expect '^status=1$' 'busybox sh reports a child status'
+expect '^exit status: 3$' 'busybox sh exit status reaches the native shell'
+
+run "$busybox sh -c 'busybox echo through-path'"
+expect '^through-path$' 'busybox sh searches PATH'
+clean 'busybox sh searches PATH'
+
+# Pipelines of two and three stages.
+run "$busybox sh -c '$busybox echo hello | $busybox cat'"
+expect '^hello$' 'two-stage busybox pipeline'
+clean 'two-stage busybox pipeline'
+
+run "$busybox sh -c '$busybox echo A | $busybox cat | $busybox cat'"
+expect '^A$' 'three-stage busybox pipeline'
+clean 'three-stage busybox pipeline'
+
+# Redirection, then a child reading the file.
+run "$busybox sh -c '$busybox echo data >/tmp/sh-file; $busybox cat /tmp/sh-file'"
+expect '^data$' 'busybox sh redirection and a child'
+clean 'busybox sh redirection and a child'
+
+# A script passed by name.
+run "write /persist/test.sh '$busybox echo from-script; $busybox echo second-line'"
+run "$busybox sh /persist/test.sh"
+expect '^from-script$' 'busybox sh script'
+expect '^second-line$' 'busybox sh script'
+clean 'busybox sh script'
+
+# A background job and wait.
+run "$busybox sh -c '$busybox sleep 1 & wait; echo waited'"
+expect '^waited$' 'busybox sh background job and wait'
+clean 'busybox sh background job and wait'
 
 # Applets outside the release set are observed, not required: the report
 # says which of them run, so the supported set can grow from measurements.

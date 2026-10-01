@@ -45,9 +45,14 @@
  *   kill              kill, tkill, tgkill, and SA_NOCLDWAIT on the process tree
  *   eintr             signals interrupt read, wait4, nanosleep, and poll; SA_RESTART
  *   poll              poll readiness, HUP, ERR, NVAL, timeouts, and wake-ups
- *   ppoll             ppoll timespec timeouts and its temporary signal mask
+ *   ppoll             ppoll and rt_sigsuspend with a temporary signal mask
  *   family            leave a child asleep and wait on standard input
  *   path              print the PATH the program started with
+ *   run PATH ARGS...  replace this image with PATH and ARGS
+ *   hardening         failed exec, fork memory, descriptors, pipes, signal frames
+ *   limits            fork until the family budget refuses, with zombies too
+ *   fork-fault        a validation kernel fails a fork mid-copy; another succeeds
+ *   exec-vfs-loss     the validation VFS dies while execve prepares its image
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -2353,6 +2358,11 @@ static int ppoll_test(void)
 		return ppoll_fail("unblock");
 	sigprocmask(SIG_BLOCK, &block, NULL);
 
+	/* rt_sigsuspend lets a pending signal through and restores the mask. */
+	raise(SIGUSR1);
+	if (syscall(SYS_rt_sigsuspend, &open, 8) != -1 || errno != EINTR || ppoll_seen != 3 || !user1_blocked())
+		return ppoll_fail("sigsuspend");
+
 	/* A signal sent while the call sleeps interrupts it. */
 	ppoll_seen = 0;
 	if ((status = interrupt_child(ppoll_sleeper, 0)) != 0) {
@@ -2383,6 +2393,359 @@ static int family_test(void)
 	printf("family blocking with child %d\n", child);
 	fflush(stdout);
 	read(0, &byte, 1);
+	return 0;
+}
+
+static int hard_fail(const char *step)
+{
+	printf("hardening failed: %s errno=%d\n", step, errno);
+	return 1;
+}
+
+/* Runs body in a child and returns its wait status. */
+static int child_status(int (*body)(void))
+{
+	int status = -1;
+	pid_t child;
+
+	fflush(stdout);
+	child = fork();
+	if (child == 0)
+		_exit(body());
+	if (child < 0 || wait4(child, &status, 0, NULL) != child)
+		return -1;
+	return status;
+}
+
+static char *fork_area;
+static char *fork_heap;
+static long fork_page;
+
+/* The child sees the parent's pages, touched and untouched, and its writes
+ * stay its own. */
+static int fork_memory_child(void)
+{
+	if (fork_area[0] != 'p' || fork_area[fork_page] != 0 || fork_area[2 * fork_page] != 'r' ||
+	    fork_heap[0] != 'h')
+		return 1;
+	fork_area[0] = 'c';
+	fork_area[fork_page] = 'c';
+	fork_heap[0] = 'c';
+	return 0;
+}
+
+static int sigsegv_status(int status)
+{
+	return WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV;
+}
+
+static void spin_handler(int number)
+{
+	char byte;
+	int idle[2];
+
+	(void)number;
+	if (pipe(idle) == 0)
+		read(idle[0], &byte, 1);
+}
+
+static unsigned long bad_handler, bad_restorer;
+
+/* Installs a raw action whose handler or restorer the process cannot run,
+ * and signals itself. */
+static int raw_handler_child(void)
+{
+	struct kernel_action action = {(void (*)(int))bad_handler, ACTION_RESTORER, (void (*)(void))bad_restorer, 0};
+
+	if (syscall(SYS_rt_sigaction, SIGUSR1, &action, NULL, 8) != 0)
+		return 2;
+	syscall(SYS_tkill, getpid(), SIGUSR1);
+	return 3;
+}
+
+static void plain_handler(int number)
+{
+	(void)number;
+}
+
+static int native_gate_child(void)
+{
+	return isolation() == 0 ? 0 : 1;
+}
+
+static int hardening_test(void)
+{
+	char *arguments[] = {IMAGE, NULL};
+	static char big[70000];
+	char *large[] = {big, NULL};
+	char byte;
+	int fds[2], shared, status, index, count;
+	pid_t child;
+
+	signal(SIGPIPE, SIG_IGN);
+	/* Every failed exec leaves this image running. */
+	if (!fails(execve((char *)8, arguments, NULL), EFAULT) || !fails(execve(IMAGE, (char **)8, NULL), EFAULT) ||
+	    !fails(execve("/tmp/no-such-image", arguments, NULL), ENOENT) ||
+	    !fails(execve("/tmp", arguments, NULL), EACCES))
+		return hard_fail("failed exec");
+	if (on_goos()) {
+		memset(big, 'e', sizeof big - 1);
+		if (!fails(execve("/system/bin/echo", arguments, NULL), ENOEXEC) ||
+		    !fails(execve(IMAGE, arguments, large), E2BIG))
+			return hard_fail("refused exec");
+		/* A forked child cannot reach the native gate either. */
+		if (child_status(native_gate_child) != 0)
+			return hard_fail("native gate in a child");
+	}
+	printf("exec failures ok\n");
+
+	/* Fork copies touched, untouched, read-only, and brk pages, and maps
+	 * a PROT_NONE region without touching it. */
+	fork_page = sysconf(_SC_PAGESIZE);
+	fork_area = mmap(NULL, 3 * fork_page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	/* musl's sbrk refuses to grow the break, so the probe asks brk. */
+	fork_heap = (char *)syscall(SYS_brk, 0);
+	if (syscall(SYS_brk, fork_heap + fork_page) != (long)(fork_heap + fork_page))
+		fork_heap = (void *)-1;
+	if (fork_area == MAP_FAILED || fork_heap == (void *)-1 ||
+	    mmap(NULL, fork_page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
+		return hard_fail("fork memory setup");
+	fork_area[0] = 'p';
+	fork_area[2 * fork_page] = 'r';
+	fork_heap[0] = 'h';
+	if (mprotect(fork_area + 2 * fork_page, fork_page, PROT_READ) != 0)
+		return hard_fail("mprotect");
+	status = child_status(fork_memory_child);
+	if (status != 0 || fork_area[0] != 'p' || fork_area[fork_page] != 0 || fork_heap[0] != 'h')
+		return hard_fail("fork memory");
+	printf("fork memory ok\n");
+
+	/* Descriptors: dup and fork share one description, status flags
+	 * included, and close-on-exec bits copy but stay per descriptor. */
+	if (pipe(fds) != 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0)
+		return hard_fail("descriptor setup");
+	shared = open(IMAGE, O_RDONLY);
+	child = fork();
+	if (child == 0) {
+		int copy = dup(shared);
+
+		_exit(fcntl(fds[1], F_GETFD) == FD_CLOEXEC && fcntl(fds[0], F_GETFD) == 0 && copy >= 0 &&
+		      read(copy, &byte, 1) == 1 && close(fds[0]) == 0 && fcntl(shared, F_SETFL, O_APPEND) == 0 ? 0 : 1);
+	}
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || status != 0 ||
+	    lseek(shared, 0, SEEK_CUR) != 1 || fcntl(fds[0], F_GETFD) != 0 || !(fcntl(shared, F_GETFL) & O_APPEND))
+		return hard_fail("shared descriptions");
+	close(shared);
+	printf("descriptors ok\n");
+
+	/* A writer asleep on a full pipe dies of SIGKILL, and the read end then
+	 * sees EOF. Pipes run out with EMFILE and come back. */
+	child = fork();
+	if (child == 0) {
+		static char fill[65536];
+
+		close(fds[0]);
+		for (;;)
+			write(fds[1], fill, sizeof fill);
+	}
+	close(fds[1]);
+	{
+		struct timespec settle = {0, 100 * 1000 * 1000};
+
+		nanosleep(&settle, NULL);
+	}
+	if (child < 0 || kill(child, SIGKILL) != 0 || wait4(child, &status, 0, NULL) != child ||
+	    !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL)
+		return hard_fail("killed writer");
+	while ((count = read(fds[0], big, sizeof big)) > 0)
+		;
+	if (count != 0)
+		return hard_fail("EOF after the writer died");
+	close(fds[0]);
+	for (count = 0; count < 4096 && pipe(fds) == 0; count++)
+		;
+	if (errno != EMFILE && errno != ENFILE)
+		return hard_fail("pipe exhaustion");
+	for (index = 3; index < 4096 + 3; index++)
+		close(index);
+	if (pipe(fds) != 0)
+		return hard_fail("pipes after exhaustion");
+	close(fds[0]);
+	close(fds[1]);
+	printf("pipes ok\n");
+
+	/* Signal frames that return to bad places end the process, and SIGKILL
+	 * ends one that sleeps in its handler. */
+	bad_handler = 0x1000;
+	bad_restorer = (unsigned long)plain_handler;
+	if (!sigsegv_status(child_status(raw_handler_child)))
+		return hard_fail("unmapped handler");
+	bad_handler = 0xffff800000001000UL;
+	if (!sigsegv_status(child_status(raw_handler_child)))
+		return hard_fail("kernel handler");
+	bad_handler = (unsigned long)plain_handler;
+	bad_restorer = 0x10;
+	if (!sigsegv_status(child_status(raw_handler_child)))
+		return hard_fail("bad restorer");
+	if (pipe(fds) != 0)
+		return hard_fail("handler pipe");
+	child = fork();
+	if (child == 0) {
+		signal(SIGUSR1, spin_handler);
+		write(fds[1], "r", 1);
+		for (;;)
+			pause();
+	}
+	if (child < 0 || read(fds[0], &byte, 1) != 1 || kill(child, SIGUSR1) != 0)
+		return hard_fail("handler child");
+	{
+		struct timespec settle = {0, 100 * 1000 * 1000};
+
+		nanosleep(&settle, NULL);
+	}
+	if (kill(child, SIGKILL) != 0 || wait4(child, &status, 0, NULL) != child || !WIFSIGNALED(status) ||
+	    WTERMSIG(status) != SIGKILL)
+		return hard_fail("kill in a handler");
+	close(fds[0]);
+	close(fds[1]);
+	printf("signal frames ok\n");
+	printf("hardening ok\n");
+	return 0;
+}
+
+/* GoOS only. The family budget ends a fork bomb with EAGAIN, zombies count
+ * against it, and reaping returns the slots. */
+static int limits_test(void)
+{
+	pid_t children[64];
+	int idle[2], count, index, status;
+	char byte;
+
+	if (!on_goos() || pipe(idle) != 0)
+		return 1;
+	fflush(stdout);
+	for (count = 0; count < 64; count++) {
+		children[count] = fork();
+		if (children[count] == 0) {
+			read(idle[0], &byte, 1);
+			_exit(0);
+		}
+		if (children[count] < 0)
+			break;
+	}
+	if (count == 64 || errno != EAGAIN || count != 15) {
+		printf("limits failed: %d children, errno=%d\n", count, errno);
+		return 1;
+	}
+	for (index = 0; index < count; index++)
+		kill(children[index], SIGKILL);
+	for (index = 0; index < count; index++)
+		if (wait4(children[index], &status, 0, NULL) != children[index])
+			return 1;
+	printf("fork bomb bounded at %d\n", count);
+	for (count = 0; count < 64; count++) {
+		children[count] = fork();
+		if (children[count] == 0)
+			_exit(0);
+		if (children[count] < 0)
+			break;
+	}
+	if (count != 15 || errno != EAGAIN || wait4(children[0], &status, 0, NULL) != children[0]) {
+		printf("limits failed: %d zombies, errno=%d\n", count, errno);
+		return 1;
+	}
+	children[0] = fork();
+	if (children[0] == 0)
+		_exit(0);
+	if (children[0] < 0)
+		return 1;
+	for (index = 0; index < count; index++)
+		if (wait4(-1, &status, 0, NULL) < 0)
+			return 1;
+	if (!fails(wait4(-1, &status, WNOHANG, NULL), ECHILD))
+		return 1;
+	printf("limits ok\n");
+	return 0;
+}
+
+/* GoOS validation builds only. Under this working directory the kernel
+ * fails fork after a few pages of its copy and checks its rollback. */
+#define FORK_FAULT_DIRECTORY "/tmp/.validation-fork-fault"
+
+static int fork_fault_test(void)
+{
+	int fds[2], status;
+	char byte;
+	pid_t child;
+
+	if (!on_goos() || pipe(fds) != 0 || (syscall(SYS_mkdir, FORK_FAULT_DIRECTORY, 0755) != 0 && errno != EEXIST) ||
+	    chdir(FORK_FAULT_DIRECTORY) != 0)
+		return 1;
+	fflush(stdout);
+	child = fork();
+	if (child == 0)
+		_exit(9);
+	if (child != -1 || errno != ENOMEM) {
+		printf("fork fault failed: fork returned %d errno=%d\n", child, errno);
+		return 1;
+	}
+	/* No child exists to wait for, and none holds the write end: closing
+	 * the only one ends the pipe. */
+	if (chdir("/") != 0 || !fails(wait4(-1, &status, WNOHANG, NULL), ECHILD) || close(fds[1]) != 0 ||
+	    read(fds[0], &byte, 1) != 0) {
+		printf("fork fault failed: a child survived errno=%d\n", errno);
+		return 1;
+	}
+	child = fork();
+	if (child == 0)
+		_exit(7);
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 7) {
+		printf("fork fault failed: the next fork errno=%d\n", errno);
+		return 1;
+	}
+	printf("fork fault ok\n");
+	return 0;
+}
+
+/* GoOS validation builds only. The VFS dies when it is asked to prepare
+ * this file as an executable, in the middle of execve. */
+#define EXEC_CRASH_PATH "/tmp/.validation-vfs-exec-crash"
+
+extern char __executable_start[], end[];
+static int exec_loss_canary = 0x5a;
+
+static int exec_vfs_loss_test(void)
+{
+	char *arguments[] = {EXEC_CRASH_PATH, NULL};
+	char cwd[16], *heap = malloc(32);
+	volatile char sink = 0;
+	pid_t pid = getpid();
+	int kept, file;
+
+	if (!on_goos() || !heap)
+		return 1;
+	strcpy(heap, "heap");
+	/* The image pages in from the VFS on first touch. Every page is read
+	 * now, while the VFS still answers. */
+	for (char *page = __executable_start; page < end; page += 4096)
+		sink += *(volatile char *)page;
+	(void)sink;
+	kept = open(IMAGE, O_RDONLY);
+	file = open(EXEC_CRASH_PATH, O_CREAT | O_TRUNC | O_WRONLY, 0755);
+	if (kept < 0 || file < 0 || write(file, "\177ELF", 4) != 4 || close(file) != 0 || chdir("/tmp") != 0)
+		return 1;
+	fflush(stdout);
+	if (execve(EXEC_CRASH_PATH, arguments, NULL) != -1 || errno != EIO) {
+		printf("exec vfs loss failed: errno=%d\n", errno);
+		return 1;
+	}
+	/* The old image still runs: same PID, memory, descriptors, and cwd. */
+	if (getpid() != pid || exec_loss_canary != 0x5a || strcmp(heap, "heap") || fcntl(kept, F_GETFD) != 0 ||
+	    fcntl(1, F_GETFD) != 0 || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/tmp")) {
+		printf("exec vfs loss failed: state changed\n");
+		return 1;
+	}
+	printf("exec vfs loss ok errno=%d\n", EIO);
 	return 0;
 }
 
@@ -2435,6 +2798,19 @@ int main(int argc, char **argv)
 			return ppoll_test();
 		if (!strcmp(argv[1], "family"))
 			return family_test();
+		if (!strcmp(argv[1], "run") && argc >= 3) {
+			execv(argv[2], argv + 2);
+			printf("run failed: errno=%d\n", errno);
+			return 1;
+		}
+		if (!strcmp(argv[1], "hardening"))
+			return hardening_test();
+		if (!strcmp(argv[1], "limits"))
+			return limits_test();
+		if (!strcmp(argv[1], "fork-fault"))
+			return fork_fault_test();
+		if (!strcmp(argv[1], "exec-vfs-loss"))
+			return exec_vfs_loss_test();
 		if (!strcmp(argv[1], "path")) {
 			printf("path %s\n", getenv("PATH") ? getenv("PATH") : "(none)");
 			return 0;

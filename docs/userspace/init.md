@@ -69,7 +69,10 @@ resource profile, and carries argv/environment on its System V stack. Cwd and
 resolved handles stay in bounded kernel compatibility state. Services remain
 native-only (ADR 0132, ADR 0136). A Linux program under `/system/linux` or on
 a writable volume starts from the shell like a native one, alone or as a
-pipeline stage.
+pipeline stage. PID 1 replaces the shell's `PATH=/system/bin` with
+`PATH=/system/linux` in its environment, because Linux `execve` refuses native
+images (ADR 0171). The processes a Linux program forks are no jobs of PID 1:
+it holds no handle to them and gets no lifecycle message when they exit.
 
 In validation builds PID 1 runs the Linux probes before it starts the shell:
 two raw-syscall programs at once, then `/system/linux/abi-probe`, whose whole

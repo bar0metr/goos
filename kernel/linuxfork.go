@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
@@ -89,6 +90,14 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	if stack != 0 {
 		registers.RSP = stack
 	}
+	// A validation build fails the page copy of a fork whose caller stands
+	// in linuxForkFaultDirectory, and checks that nothing of the child
+	// survives the rollback.
+	fault := validation.Enabled && equalLaunchName(compat.CWD(), linuxForkFaultDirectory)
+	var census linuxForkCensus
+	if fault {
+		census = takeForkCensus(compat.FamilyID)
+	}
 	pid := nextProcessID
 	record, status := linuxcompat.RegisterChild(pid, compat.PID, processRegistry.Count())
 	if status != linuxcompat.ChildRegistrationOK {
@@ -109,10 +118,6 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 		abandonFork(pid, root, child, false)
 		return 0, nil, linuxabi.ENOMEM
 	}
-	if !vm.CopyUserRange(&pageAllocator, handler.root, root, vm.UserAddressStart, vm.UserAddressLimit-vm.UserAddressStart) {
-		abandonFork(pid, root, child, false)
-		return 0, nil, linuxabi.ENOMEM
-	}
 	// The child names the same VFS endpoint through its own handle. The
 	// family context, not any one process, decides when the endpoint closes.
 	vfsHandle, inserted := child.Handles().Insert(handle.TypeChannel, vfsAuthority)
@@ -123,6 +128,17 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	if !processRegistry.Add(child) {
 		abandonFork(pid, root, child, false)
 		return 0, nil, linuxabi.EAGAIN
+	}
+	limit := uint64(0)
+	if fault {
+		limit = linuxForkFaultPages
+	}
+	if !vm.CopyUserRangeLimited(&pageAllocator, handler.root, root, vm.UserAddressStart, vm.UserAddressLimit-vm.UserAddressStart, limit) {
+		abandonFork(pid, root, child, true)
+		if fault {
+			checkForkRollback(census, compat.FamilyID, pid, record.PID, child, pagesBefore)
+		}
+		return 0, nil, linuxabi.ENOMEM
 	}
 	if used := pagesBefore - pageAllocator.Statistics().FreePages; used > uint64(^uint32(0)) || used != 0 && !child.Charge(process.ResourcePages, uint32(used)) {
 		abandonFork(pid, root, child, true)
@@ -205,4 +221,49 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}
+}
+
+// linuxForkFaultDirectory is the working directory under which a validation
+// build fails fork after linuxForkFaultPages pages of the copy. The normal
+// build has no such directory.
+const (
+	linuxForkFaultDirectory = "/tmp/.validation-fork-fault"
+	linuxForkFaultPages     = 4
+)
+
+// linuxForkCensus is what a failed fork must leave as it found it.
+type linuxForkCensus struct {
+	processes    int
+	records      int
+	members      int
+	descriptions int
+	references   int
+	vfsUsers     uint8
+	tasks        uint64
+}
+
+func takeForkCensus(familyID uint64) linuxForkCensus {
+	census := linuxForkCensus{processes: processRegistry.Count(), tasks: amd64.ReadSchedulerState().Count}
+	census.records, census.members = linuxcompat.ProcessCounts(familyID)
+	census.descriptions, census.references = linuxcompat.OpenDescriptionCount()
+	if context, found := linuxcompat.VFSContext(familyID); found {
+		census.vfsUsers = context.References
+	}
+	return census
+}
+
+// checkForkRollback compares the state after an injected fork failure with
+// the state before it: the process registry and slot, the compatibility PID
+// and family membership, the open-file descriptions and their references,
+// the family VFS context, the scheduler, and the free pages.
+func checkForkRollback(before linuxForkCensus, familyID uint64, pid process.ID, compatPID int32, slot *process.Process, freePages uint64) {
+	after := takeForkCensus(familyID)
+	_, registered := processRegistry.ByID(pid)
+	_, recorded := linuxcompat.FindProcessRecord(compatPID)
+	if after != before || registered || recorded || slot.ID() != 0 || slot.TaskCount() != 0 ||
+		pageAllocator.Statistics().FreePages != freePages {
+		mark("LINUX_FORK_ROLLBACK_FAILED")
+		return
+	}
+	mark("LINUX_FORK_ROLLBACK_OK")
 }

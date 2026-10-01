@@ -220,6 +220,14 @@ func UserPageCount(rootAddress, base, length uint64) (uint64, uint64) {
 // Pages and tables already placed in target stay there for the caller to
 // destroy with the address space.
 func CopyUserRange(allocator *pmm.Allocator, sourceRoot, targetRoot, base, length uint64) bool {
+	return CopyUserRangeLimited(allocator, sourceRoot, targetRoot, base, length, 0)
+}
+
+// CopyUserRangeLimited is CopyUserRange that fails once it has copied limit
+// pages, when limit is not zero. Validation builds use it to fail a fork in
+// the middle of its copy.
+func CopyUserRangeLimited(allocator *pmm.Allocator, sourceRoot, targetRoot, base, length, limit uint64) bool {
+	copied := uint64(0)
 	if allocator == nil || sourceRoot == targetRoot || sourceRoot%PageSize != 0 || sourceRoot >= IdentityMapLimit ||
 		base%PageSize != 0 || !ValidateUserRange(base, length) {
 		return false
@@ -232,7 +240,7 @@ func CopyUserRange(allocator *pmm.Allocator, sourceRoot, targetRoot, base, lengt
 			return true
 		}
 		value := *leaf
-		if value&entryOwned == 0 {
+		if value&entryOwned == 0 || limit != 0 && copied == limit {
 			return false
 		}
 		source, mapped := PhysicalPage(value & addressMask)
@@ -249,6 +257,7 @@ func CopyUserRange(allocator *pmm.Allocator, sourceRoot, targetRoot, base, lengt
 			return false
 		}
 		*slot = physical | value&^(addressMask|entryAccessed|entryDirty)
+		copied++
 		address = at + PageSize
 	}
 }

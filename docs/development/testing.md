@@ -23,10 +23,16 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   `tests/boot/linux.sh`: one boot in which PID 1's Linux probes run, then the
   shell runs the release proofs, a static PIE, the conformance probe's
   hardening modes, a stack overflow into the guard, two Linux processes at
-  once, and Ctrl-C on a blocked Linux process. Its guest CPU has RDRAND
+  once, Ctrl-C on a blocked Linux process and on a Linux root with a forked
+  child, and the process-composition modes: `exec`, `fork`, `vfork`,
+  `orphan`, `wait`, `pipe`, `signal`, `kill`, `eintr`, `poll`, `ppoll`,
+  `hardening`, and `limits`. Last come two injected failures: a fork that
+  fails mid-copy and an `execve` whose VFS dies (ADR 0173). Its guest CPU has RDRAND
   (`-cpu qemu64,+rdrand`), so `getrandom` must work there; the general boot
   test keeps the default CPU, where it must return `ENOSYS`.
-  `test-linux-musl`, `test-linux-vfs`, and `test-linux-security` are the same
+  `test-linux-musl`, `test-linux-vfs`, `test-linux-security`,
+  `test-linux-process`, `test-linux-exec`, `test-linux-fork`,
+  `test-linux-pipe`, `test-linux-signals`, and `test-linux-poll` are the same
   run. `make test-linux-all` adds the two host targets. `make test-all`
   includes the boot.
 - `make test-linux-reference` runs the conformance probe on a Linux kernel in
@@ -36,13 +42,16 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   there.
 - `make test-linux-kernel-reference KERNEL=/path/to/vmlinuz
   BUSYBOX=/path/to/busybox` boots a real Linux kernel in QEMU with the probe
-  in an initramfs and requires the default and hostile modes to pass strict:
+  in an initramfs and requires the default, hostile, and process modes to
+  pass strict; `make test-linux-process-reference` is the same run:
   every check must give the exact Linux result. An Alpine `vmlinuz-virt`
   works as it comes. The repository carries neither file, so the target is
   no part of `test-all`.
-- `make test-linux-busybox BUSYBOX=/path/to/busybox` places a static x86_64
-  BusyBox in the validation image and requires `echo`, `pwd`, `cat`, `ls`,
-  `mkdir`, and `rm`; it reports on further applets without requiring them.
+- `make test-linux-busybox BUSYBOX=/path/to/busybox`, also
+  `make test-linux-shell`, places a static x86_64 BusyBox in the validation
+  image and requires `echo`, `pwd`, `cat`, `ls`, `mkdir`, and `rm`, and a
+  non-interactive `sh` that runs programs, pipelines, redirections, a script,
+  and a background job; it reports on further applets without requiring them.
   With `DIAG=1` it also prints the kernel's record of refused calls. The
   repository carries no BusyBox.
 - `make test-linux-bench` times four Linux calls beside native `bench` cases

@@ -41,6 +41,19 @@ type descriptionSlot struct {
 
 var openDescriptions [MaxOpenDescriptions]descriptionSlot
 
+// OpenDescriptionCount reports how many open-file descriptions exist in all
+// families and how many descriptor references they hold together.
+// Validation checks that a failed fork leaves both unchanged.
+func OpenDescriptionCount() (descriptions int, references int) {
+	for index := range openDescriptions {
+		if openDescriptions[index].familyID != 0 {
+			descriptions++
+			references += int(openDescriptions[index].description.References)
+		}
+	}
+	return descriptions, references
+}
+
 // FDTable maps Linux integers to bounded compatibility-owned descriptions.
 // Object may identify a kernel stream endpoint or a VFS open ID, but that value
 // is never returned to Linux userspace.
