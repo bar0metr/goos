@@ -20,8 +20,19 @@ const (
 	submitSize  = 5
 	startedSize = 9
 	headerSize  = 12
-	SearchRoot  = "/system/bin/"
-	LinuxRoot   = "/system/linux/"
+	// SearchRoot holds the installed native commands, BootstrapSearchRoot
+	// the archive's recovery commands, and UserSearchRoot the commands a
+	// user adds (ADR 0175).
+	SearchRoot          = "/system/bin/"
+	BootstrapSearchRoot = "/bootstrap/bin/"
+	UserSearchRoot      = "/home/user/bin/"
+	LinuxRoot           = "/system/linux/"
+	// BootstrapLinuxRoot holds the Linux probes of a validation archive.
+	BootstrapLinuxRoot = "/bootstrap/linux/"
+	// NormalPath and RecoveryPath are the native shell's search path in each
+	// boot mode.
+	NormalPath   = "/system/bin:/home/user/bin"
+	RecoveryPath = "/bootstrap/bin"
 )
 
 // Requests are written to an area shared by the shell and PID 1, one slot per
@@ -37,61 +48,79 @@ const (
 
 const flagBackground = 1
 
+// ResolveExecutable is CommandPath in the installed command directory.
 func ResolveExecutable(command []byte, target *[MaxPath]byte) ([]byte, bool) {
-	if target == nil || len(command) == 0 || len(command) > limits.NameMax || len(SearchRoot)+len(command) > len(target) {
+	return CommandPath([]byte(SearchRoot[:len(SearchRoot)-1]), command, target)
+}
+
+// CommandPath joins a search directory and a command name into target. The
+// name must be one path component; the directory an absolute path.
+func CommandPath(directory, command []byte, target *[MaxPath]byte) ([]byte, bool) {
+	if target == nil || !CommandName(command) || len(directory) == 0 || directory[0] != '/' || len(directory)+1+len(command) > len(target) {
 		return nil, false
 	}
+	size := copy(target[:], directory)
+	if target[size-1] != '/' {
+		target[size] = '/'
+		size++
+	}
+	size += copy(target[size:], command)
+	return target[:size], true
+}
+
+// CommandName reports whether a word can name a command in a search
+// directory: one component, not "." or "..", within NameMax.
+func CommandName(command []byte) bool {
+	if len(command) == 0 || len(command) > limits.NameMax {
+		return false
+	}
 	if len(command) == 1 && command[0] == '.' || len(command) == 2 && command[0] == '.' && command[1] == '.' {
-		return nil, false
+		return false
 	}
 	for _, value := range command {
 		if value == 0 || value == '/' || value == ' ' {
-			return nil, false
+			return false
 		}
 	}
-	copy(target[:], SearchRoot)
-	copy(target[len(SearchRoot):], command)
-	return target[:len(SearchRoot)+len(command)], true
+	return true
 }
 
-func CommandFromSystemPath(path []byte) ([]byte, bool) {
-	if len(path) <= len(SearchRoot) {
-		return nil, false
-	}
-	for index := range SearchRoot {
-		if path[index] != SearchRoot[index] {
-			return nil, false
-		}
-	}
-	command := path[len(SearchRoot):]
-	if len(command) > limits.NameMax {
-		return nil, false
-	}
-	for _, value := range command {
-		if value == 0 || value == '/' || value == ' ' {
-			return nil, false
-		}
-	}
-	if len(command) == 1 && command[0] == '.' || len(command) == 2 && command[0] == '.' && command[1] == '.' {
-		return nil, false
-	}
-	return command, true
+// CommandFromSystemPath returns the command an installed command path names.
+func CommandFromSystemPath(path []byte) ([]byte, bool) { return commandIn(path, SearchRoot) }
+
+// CommandFromBootstrapPath returns the command a recovery command path names.
+func CommandFromBootstrapPath(path []byte) ([]byte, bool) {
+	return commandIn(path, BootstrapSearchRoot)
 }
 
-// nativePathVariable is the PATH the shell gives every command, and
-// linuxPathVariable the one a Linux program gets instead. The native search
-// root holds native images, which Linux execve refuses, so a Linux program
-// searches the Linux fixture directory.
-var (
-	nativePathVariable = []byte("PATH=" + SearchRoot[:len(SearchRoot)-1])
-	linuxPathVariable  = []byte("PATH=" + LinuxRoot[:len(LinuxRoot)-1])
-)
+// CommandFromSearchPath returns the command a path names in either trusted
+// command directory.
+func CommandFromSearchPath(path []byte) ([]byte, bool) {
+	if command, found := CommandFromSystemPath(path); found {
+		return command, true
+	}
+	return CommandFromBootstrapPath(path)
+}
+
+func commandIn(path []byte, root string) ([]byte, bool) {
+	if len(path) <= len(root) || !hasPrefix(path, root) {
+		return nil, false
+	}
+	command := path[len(root):]
+	return command, CommandName(command)
+}
+
+// linuxPathVariable is the PATH a Linux program gets in place of a native
+// default. The native search directories hold native images, which Linux
+// execve refuses, so a Linux program searches the Linux directory.
+var linuxPathVariable = []byte("PATH=" + LinuxRoot[:len(LinuxRoot)-1])
 
 // LinuxEnvironmentEntry returns the environment entry a Linux program gets
-// for one entry of a launch request: the native default PATH becomes the
-// Linux one, and every other entry is kept.
+// for one entry of a launch request: a native default PATH becomes the Linux
+// one, and every other entry is kept.
 func LinuxEnvironmentEntry(entry []byte) []byte {
-	if string(entry) == string(nativePathVariable) {
+	switch string(entry) {
+	case "PATH=" + SearchRoot[:len(SearchRoot)-1], "PATH=" + NormalPath, "PATH=" + RecoveryPath:
 		return linuxPathVariable
 	}
 	return entry
@@ -114,24 +143,25 @@ func LinuxPathMissing(environment List) bool {
 // none.
 func LinuxPathVariable() []byte { return linuxPathVariable }
 
-// LinuxSystemPath reports whether path names a direct child of the immutable
-// Linux fixture directory. Native services elsewhere under /system remain
-// unavailable to shell launch requests.
+// LinuxSystemPath reports whether path names a direct child of the installed
+// Linux directory or of the archive's. Native services elsewhere under
+// /system and /bootstrap remain unavailable to shell launch requests.
 func LinuxSystemPath(path []byte) bool {
-	if len(path) <= len(LinuxRoot) {
-		return false
-	}
-	for index := range LinuxRoot {
-		if path[index] != LinuxRoot[index] {
-			return false
+	for _, root := range [...]string{LinuxRoot, BootstrapLinuxRoot} {
+		if len(path) <= len(root) || !hasPrefix(path, root) {
+			continue
+		}
+		direct := true
+		for _, value := range path[len(root):] {
+			if value == 0 || value == '/' {
+				direct = false
+			}
+		}
+		if direct {
+			return true
 		}
 	}
-	for _, value := range path[len(LinuxRoot):] {
-		if value == 0 || value == '/' {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 // List is a validated sequence of strings as a request carries them: each is

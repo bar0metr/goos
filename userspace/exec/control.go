@@ -55,6 +55,11 @@ const (
 	// FaultBlock kills the block service, which PID 1 restarts with the
 	// driver and the filesystem service behind it (ADR 0101).
 	FaultBlock
+	// FaultDriver kills the storage driver, which PID 1 restarts.
+	FaultDriver
+	// FaultStorage kills the filesystem service and keeps every restart of it
+	// from starting, as a volume that is gone for good would (ADR 0175).
+	FaultStorage
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -117,7 +122,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultBlock
+		return argument >= FaultTerminal && argument <= FaultStorage
 	default:
 		return false
 	}

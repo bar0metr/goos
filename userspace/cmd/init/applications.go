@@ -60,20 +60,24 @@ func launchApplication(path, command, cwd []byte, arguments, environment execpro
 	// A command that cannot be found or read is reported before a session or
 	// a stream is committed to it.
 	executable, processName, located := openExecutable(path)
-	// Grants are for the commands of the immutable image. A program read from
-	// the filesystem gets its standard streams and nothing more, whatever it
-	// is called (ADR 0097).
-	_, searchPath := execproto.CommandFromSystemPath(path)
-	grantable := searchPath && executable.Image == systemImageHandle
-	process, processHandle, launched := launchExecutable(executable, processName, located, grantable, command, cwd, arguments, environment, streams, launch)
+	// Grants are for the commands a trusted index describes, launched from
+	// the origin that index belongs to: the archive's from the archive, the
+	// installed system's from the protected volume. Any other program gets
+	// its standard streams and nothing more, whatever it is called
+	// (ADR 0097, ADR 0175).
+	granted, grantable := trustedGrants(path, executable.Image == systemImageHandle)
+	process, processHandle, launched := launchExecutable(executable, processName, located, grantable, granted, command, cwd, arguments, environment, streams, launch)
 	closeExecutable(executable)
 	if launched == supervisor.LaunchOK && executable.Image != systemImageHandle {
 		mark("FILE_EXEC_OK\n")
+		if grantable {
+			mark("SYSTEM_COMMAND_FROM_DISK_OK\n")
+		}
 	}
 	return process, processHandle, launched
 }
 
-func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams, launch *launcher) (uint64, handle.ID, supervisor.LaunchStatus) {
+func launchExecutable(executable supervisor.Executable, processName string, located supervisor.LaunchStatus, grantable bool, granted commands.Grant, command, cwd []byte, arguments, environment execproto.List, streams supervisor.Streams, launch *launcher) (uint64, handle.ID, supervisor.LaunchStatus) {
 	if located != supervisor.LaunchOK {
 		// The kernel used to record this when it did the lookup; the record
 		// moved with the lookup, so a failed command still leaves a trace.
@@ -88,11 +92,17 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	linuxProcess := executable.Format == supervisor.ExecutableLinuxX8664
 	grantsRequested := commands.Grant(0)
 	if grantable && !linuxProcess {
-		grantsRequested = commandGrants(command)
+		grantsRequested = granted
 	}
 	useVFS := linuxProcess || grantable && grantsRequested&commands.GrantVFS != 0
 	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
 	useLaunch := grantable && launch != nil && grantsRequested&commands.GrantLaunch != 0 && streams.Input.Type == handle.TypeStream
+	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
+		// The running system starts its programs from the volume, so the
+		// volume is never taken from it for a check (ADR 0175).
+		syslog.Warn("volume check refused in normal mode")
+		return 0, 0, supervisor.LaunchVolumeBusy
+	}
 	var checkBlock handle.ID
 	if useBlockCheck {
 		var reason string
@@ -275,36 +285,6 @@ func openCheckBlock() (handle.ID, string) {
 		return 0, "APP_FSCK_BLOCK_REFUSED"
 	}
 	return handle.ID(pair[0]), ""
-}
-
-func commandGrants(command []byte) commands.Grant {
-	if !commandIndexLoaded {
-		loadCommandIndex()
-	}
-	entry, found := commands.Lookup(commandIndex[:commandIndexSize], command)
-	if !found {
-		return 0
-	}
-	return entry.Grants
-}
-
-// loadCommandIndex reads the index, or leaves it unloaded so the next launch
-// tries again: a VFS that is briefly unavailable must not cost the commands
-// their grants for the rest of the boot.
-func loadCommandIndex() {
-	session, reason := openVFSSession()
-	if reason != "" {
-		syslog.Warn("INIT_COMMAND_INDEX_UNAVAILABLE")
-		return
-	}
-	size, ok := readSessionFile(session, commandIndexPath, commandIndex[:])
-	sys.HandleClose(session)
-	if !ok {
-		syslog.Warn("INIT_COMMAND_INDEX_UNREADABLE")
-		return
-	}
-	commandIndexSize, commandIndexLoaded = size, true
-	mark("INIT_COMMAND_INDEX_OK\n")
 }
 
 // readSessionFile reads the whole of path into target and refuses a file that

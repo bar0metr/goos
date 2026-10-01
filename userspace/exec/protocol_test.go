@@ -268,6 +268,18 @@ func TestResolveExecutableUsesBoundedSystemPath(t *testing.T) {
 	if _, ok := CommandFromSystemPath([]byte("/tmp/args")); ok {
 		t.Fatal("accepted executable outside system search root")
 	}
+	if path, ok := CommandPath([]byte(UserSearchRoot[:len(UserSearchRoot)-1]), []byte("tool"), &target); !ok || string(path) != "/home/user/bin/tool" {
+		t.Fatalf("user command path = %q", path)
+	}
+	if command, ok := CommandFromSearchPath([]byte("/bootstrap/bin/ls")); !ok || string(command) != "ls" {
+		t.Fatalf("recovery command = %q", command)
+	}
+	// A copy in the user's directory is not a command of either index.
+	for _, path := range []string{"/home/user/bin/fsck-fat", "/system/bin/a/b", "/bootstrap/fsck-fat"} {
+		if _, ok := CommandFromSearchPath([]byte(path)); ok {
+			t.Fatalf("%q was taken for a trusted command", path)
+		}
+	}
 	for _, command := range [][]byte{nil, []byte("../init"), []byte("nested/tool"), []byte("bad name"), bytes.Repeat([]byte{'n'}, limits.NameMax+1)} {
 		if _, ok := ResolveExecutable(command, &target); ok {
 			t.Fatalf("accepted command %q", command)
@@ -276,7 +288,7 @@ func TestResolveExecutableUsesBoundedSystemPath(t *testing.T) {
 }
 
 func TestLinuxSystemPath(t *testing.T) {
-	if !LinuxSystemPath([]byte("/system/linux/hello")) {
+	if !LinuxSystemPath([]byte("/system/linux/hello")) || !LinuxSystemPath([]byte("/bootstrap/linux/raw-probe")) {
 		t.Fatal("Linux fixture path rejected")
 	}
 	for _, path := range []string{"/system/linux/", "/system/linux/a/b", "/system/bin/hello", "/system/init"} {
@@ -354,8 +366,10 @@ func TestStartedCarriesTheInputHandle(t *testing.T) {
 }
 
 func TestLinuxEnvironmentPath(t *testing.T) {
-	if got := LinuxEnvironmentEntry([]byte("PATH=/system/bin")); string(got) != "PATH=/system/linux" {
-		t.Fatalf("native PATH became %q", got)
+	for _, native := range []string{"PATH=/system/bin", "PATH=" + NormalPath, "PATH=" + RecoveryPath} {
+		if got := LinuxEnvironmentEntry([]byte(native)); string(got) != "PATH=/system/linux" {
+			t.Fatalf("native %q became %q", native, got)
+		}
 	}
 	for _, kept := range []string{"PATH=/persist/bin", "COLUMNS=80", "PATHX=/system/bin"} {
 		if got := LinuxEnvironmentEntry([]byte(kept)); string(got) != kept {

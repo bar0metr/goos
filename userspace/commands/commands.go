@@ -46,8 +46,10 @@ func (manifest Manifest) Accepts(count int) bool {
 }
 
 const (
-	// IndexPath is where the build places the index in the system image.
-	IndexPath = "/system/commands"
+	// IndexPath is where the installed index is published, and
+	// BootstrapIndexPath where the boot archive's recovery index is.
+	IndexPath          = "/system/commands"
+	BootstrapIndexPath = "/bootstrap/commands"
 	// MaxIndex bounds the index a reader has to hold.
 	MaxIndex = 4096
 	// MaxName, MaxUsage and MaxSummary bound one entry's fields.
@@ -56,6 +58,9 @@ const (
 	MaxSummary = 96
 	// MaxArgs is the largest bounded argument count an entry may declare.
 	MaxArgs = 99
+	// IndexFormat names the line format below. An installed system records
+	// it, so a system built for another format is refused (ADR 0175).
+	IndexFormat = 1
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.
@@ -117,6 +122,26 @@ func Next(index []byte, offset int) (Entry, int, bool) {
 		return Entry{}, offset, false
 	}
 	return entry, end + 1, true
+}
+
+// Valid reports whether index is a whole well-formed index: every line
+// decodes, no name appears twice, and nothing follows the last line.
+func Valid(index []byte) bool {
+	if len(index) > MaxIndex {
+		return false
+	}
+	offset := 0
+	for offset < len(index) {
+		entry, next, ok := Next(index, offset)
+		if !ok {
+			return false
+		}
+		if _, found := Lookup(index[:offset], entry.Name); found {
+			return false
+		}
+		offset = next
+	}
+	return true
 }
 
 // Lookup finds the entry for name. A malformed index answers not found.

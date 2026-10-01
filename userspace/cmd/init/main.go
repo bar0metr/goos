@@ -152,7 +152,7 @@ func userspaceMain() {
 			fatal("STREAM_SHARED_ENDPOINT_FAILED\n")
 		}
 		mark("STREAM_SHARED_ENDPOINT_OK\n")
-		if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/system/fault-probe",
+		if manager.Register(supervisor.Definition{Name: "fault-probe", Executable: "/bootstrap/fault-probe",
 			Capabilities: []supervisor.Capability{{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write}}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
 			manager.StartReady(0, bootstrapService) != 1 {
 			fatal("INIT_POLICY_SETUP_FAILED\n")
@@ -224,6 +224,7 @@ func userspaceMain() {
 				if restarting {
 					supervisionTicks += supervisor.RestartBackoff
 					manager.StartReady(supervisionTicks, launchService)
+					checkExhaustion()
 				}
 				continue
 			}
@@ -273,6 +274,13 @@ func userspaceMain() {
 		for index := range sessions {
 			shells[index], _ = manager.Snapshot(sessions[index].shell)
 		}
+		// Nothing is read from the volume while its VFS or filesystem
+		// service is gone.
+		for _, name := range [...]string{"vfs", filesystemName} {
+			if snapshot, _ := manager.Snapshot(name); snapshot.State == supervisor.StateRunning && snapshot.PID == event.Process {
+				systemUnavailable()
+			}
+		}
 		exitStatus := manager.Exit(event.Process, event.Code, supervisionTicks)
 		if filesystemCheckComplete && manager.Resume(filesystemName, supervisionTicks) == supervisor.StatusOK {
 			filesystemCheckComplete = false
@@ -289,6 +297,7 @@ func userspaceMain() {
 		}
 		syslog.Warn("service exited", syslog.Uint("pid", event.Process), syslog.Uint("code", event.Code))
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
+		checkExhaustion()
 		snapshot, found := manager.Snapshot("fault-probe")
 		if validation.Enabled && found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
 			startServices(supervisionTicks)
@@ -325,16 +334,16 @@ const (
 // instead of stalling PID 1 and every shell behind it.
 const launchReplyDeadline = 5 * clock.TicksPerSecond
 
-// The command index is read once, through a VFS session of PID 1's own, from
-// the immutable system image. What a command is granted beyond its standard
-// streams is decided from the manifest it was built with, not from a list of
-// names kept here (ADR 0080). A command the index does not describe gets the
-// standard streams only.
+// The installed command index is read through a VFS session of PID 1's own
+// when the installed system is checked, before it is published, and again
+// after every restart of its storage (ADR 0175). What a command is granted
+// beyond its standard streams is decided from the manifest it was built with,
+// not from a list of names kept here (ADR 0080). A command no index describes
+// gets the standard streams only.
 var (
 	commandIndex       [commands.MaxIndex]byte
 	commandIndexSize   int
 	commandIndexLoaded bool
-	commandIndexPath   = []byte(commands.IndexPath)
 )
 
 // createChannel and createStream fill pair with the two endpoints of a new

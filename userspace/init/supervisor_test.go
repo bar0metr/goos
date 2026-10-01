@@ -271,3 +271,69 @@ func TestCancelledStopKeepsFailureRestartPolicy(t *testing.T) {
 		t.Fatal("cancelled stop suppressed a real failure")
 	}
 }
+
+func TestRebaseRestartsAFailedServiceFromAnotherExecutable(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "shell", Executable: "/system/services/shell", Restart: RestartAlways}) != StatusOK {
+		t.Fatal("registration failed")
+	}
+	pid := uint64(1)
+	var launched []string
+	launch := func(spec LaunchSpec) (uint64, bool) {
+		launched = append(launched, string(spec.Executable[:spec.ExecutableSize]))
+		pid++
+		return pid, true
+	}
+	fail := func(LaunchSpec) (uint64, bool) { return 0, false }
+	now := uint64(0)
+	manager.StartReady(now, launch)
+	// The volume goes: every launch from it fails until the budget is spent.
+	manager.Exit(pid, 1, now)
+	for attempt := 0; attempt < MaxRestarts+1; attempt++ {
+		now += RestartBackoff
+		manager.StartReady(now, fail)
+	}
+	if snapshot, _ := manager.Snapshot("shell"); snapshot.State != StateFailed {
+		t.Fatalf("shell after its budget = %#v", snapshot)
+	}
+	if manager.Rebase("shell", "/bootstrap/shell", now) != StatusOK {
+		t.Fatal("rebase failed")
+	}
+	if started := manager.StartReady(now, launch); started != 1 || launched[len(launched)-1] != "/bootstrap/shell" {
+		t.Fatalf("started %d, launches %q", started, launched)
+	}
+	if snapshot, _ := manager.Snapshot("shell"); snapshot.State != StateRunning || snapshot.Restarts != 0 {
+		t.Fatalf("rebased shell = %#v", snapshot)
+	}
+	// A running service keeps running; only its next start changes, and
+	// there is never a second instance.
+	if manager.Rebase("shell", "/system/services/shell", now) != StatusOK || manager.StartReady(now, launch) != 0 {
+		t.Fatal("rebasing a running service started another instance")
+	}
+	if executable, _ := manager.Executable("shell"); string(executable) != "/system/services/shell" {
+		t.Fatalf("executable = %q", executable)
+	}
+	if manager.Rebase("missing", "/bootstrap/shell", now) != StatusNotFound || manager.Rebase("shell", "", now) != StatusInvalidArgument {
+		t.Fatal("rebase accepted a bad request")
+	}
+}
+
+func TestHeldServiceWaitsLikeABlockedOne(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "log", Executable: "/system/services/log", Restart: RestartOnFailure}) != StatusOK {
+		t.Fatal("registration failed")
+	}
+	launches := 0
+	launch := func(LaunchSpec) (uint64, bool) { launches++; return uint64(10 + launches), true }
+	manager.Hold("log")
+	if manager.StartReady(0, launch) != 0 || launches != 0 {
+		t.Fatal("a held service was started")
+	}
+	if snapshot, _ := manager.Snapshot("log"); snapshot.State != StateBlocked || snapshot.Restarts != 0 {
+		t.Fatalf("held service = %#v", snapshot)
+	}
+	manager.Release("log")
+	if manager.StartReady(0, launch) != 1 {
+		t.Fatal("a released service was not started")
+	}
+}

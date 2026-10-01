@@ -53,7 +53,7 @@ func testSystemImage(t testing.TB) []byte {
 func startedService(t testing.TB, device fat32.Device) *Service {
 	t.Helper()
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) || !service.AttachCache(testCache) {
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachCache(testCache) {
 		t.Fatal("service init failed")
 	}
 	if device != nil && !service.AttachFilesystem(newLoopback(device)) {
@@ -91,11 +91,11 @@ func testFAT32Device() *testBlockDevice {
 
 func TestServiceFilesystemLifecycle(t *testing.T) {
 	service := startedService(t, nil)
-	stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/system")})
+	stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/bootstrap")})
 	if stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindDirectory {
 		t.Fatalf("stat = %+v", stat)
 	}
-	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/system/motd")})
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/bootstrap/motd")})
 	if opened.Status != vfs.StatusOK || opened.Handle == 0 {
 		t.Fatalf("open = %+v", opened)
 	}
@@ -250,7 +250,7 @@ func TestUserDataAndStateHaveTheirOwnMounts(t *testing.T) {
 		names[string(reply.Name)] = true
 		cursor = reply.Cursor
 	}
-	for _, wanted := range []string{"system", "tmp", "persist", "home", "state"} {
+	for _, wanted := range []string{"bootstrap", "tmp", "run", "persist", "home", "state"} {
 		if !names[wanted] {
 			t.Fatalf("root listing %v is missing %q", names, wanted)
 		}
@@ -318,23 +318,23 @@ func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
 	// The executables the launch path resolves are the ones a listing shows.
 	names := map[string]bool{}
 	for cursor := uint32(0); ; {
-		reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/system/bin"), Offset: uint64(cursor)})
+		reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationReadDir, Path: []byte("/bootstrap/bin"), Offset: uint64(cursor)})
 		if reply.Status == vfs.StatusNotFound {
 			break
 		}
 		if reply.Status != vfs.StatusOK || reply.Cursor <= cursor {
-			t.Fatalf("readdir /system/bin = %d cursor %d", reply.Status, reply.Cursor)
+			t.Fatalf("readdir /bootstrap/bin = %d cursor %d", reply.Status, reply.Cursor)
 		}
 		names[string(reply.Name)] = true
 		cursor = reply.Cursor
 	}
 	if !names["ls"] || !names["coreutils"] {
-		t.Fatalf("/system/bin listing = %v", names)
+		t.Fatalf("/bootstrap/bin listing = %v", names)
 	}
-	if stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/system/bin/ls")}); stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 7 {
-		t.Fatalf("stat /system/bin/ls = %+v", stat)
+	if stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte("/bootstrap/bin/ls")}); stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size != 7 {
+		t.Fatalf("stat /bootstrap/bin/ls = %+v", stat)
 	}
-	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/system/motd")})
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/bootstrap/motd")})
 	if opened.Status != vfs.StatusOK {
 		t.Fatalf("open motd = %d", opened.Status)
 	}
@@ -345,17 +345,17 @@ func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
 
 	// Nothing can change the system image through the namespace.
 	for _, request := range []vfs.Request{
-		{Operation: vfs.OperationCreate, Path: []byte("/system/bin/backdoor")},
-		{Operation: vfs.OperationMkdir, Path: []byte("/system/extra")},
-		{Operation: vfs.OperationUnlink, Path: []byte("/system/motd")},
-		{Operation: vfs.OperationTruncate, Path: []byte("/system/motd"), Offset: 0},
-		{Operation: vfs.OperationRename, Path: []byte("/system/motd"), Target: []byte("/system/banner")},
+		{Operation: vfs.OperationCreate, Path: []byte("/bootstrap/bin/backdoor")},
+		{Operation: vfs.OperationMkdir, Path: []byte("/bootstrap/extra")},
+		{Operation: vfs.OperationUnlink, Path: []byte("/bootstrap/motd")},
+		{Operation: vfs.OperationTruncate, Path: []byte("/bootstrap/motd"), Offset: 0},
+		{Operation: vfs.OperationRename, Path: []byte("/bootstrap/motd"), Target: []byte("/bootstrap/banner")},
 	} {
 		if reply := service.Dispatch(testSession, request); reply.Status != vfs.StatusPermissionDenied {
 			t.Fatalf("mutation %d of %s = %d", request.Operation, request.Path, reply.Status)
 		}
 	}
-	writable := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte("/system/motd")})
+	writable := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte("/bootstrap/motd")})
 	if writable.Status == vfs.StatusOK {
 		if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationWrite, Handle: writable.Handle, Data: []byte("x")}); reply.Status != vfs.StatusPermissionDenied {
 			t.Fatalf("write to the system image = %d", reply.Status)
@@ -367,10 +367,10 @@ func TestSystemImageIsVisibleAndImmutable(t *testing.T) {
 func TestMalformedSystemImageIsRefused(t *testing.T) {
 	image := testSystemImage(t)
 	image[0] = 'x'
-	if (&Service{}).MountSystemImage(image) {
+	if (&Service{}).MountBootstrap(image) {
 		t.Fatal("corrupt system image mounted")
 	}
-	if (&Service{}).MountSystemImage(nil) {
+	if (&Service{}).MountBootstrap(nil) {
 		t.Fatal("empty system image mounted")
 	}
 }
@@ -380,7 +380,7 @@ func TestRejectedVolumeLeavesTheRestOfTheNamespace(t *testing.T) {
 	// Claim a volume far larger than the device holds.
 	device.data[32], device.data[33], device.data[34], device.data[35] = 0, 0, 0, 0x20
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) {
 		t.Fatal("service init failed")
 	}
 	if service.AttachFilesystem(newLoopback(device)) {
@@ -388,7 +388,7 @@ func TestRejectedVolumeLeavesTheRestOfTheNamespace(t *testing.T) {
 	}
 	// A refused volume must not take the rest of the namespace with it: the
 	// system has to come up to a prompt from which the volume can be looked at.
-	for _, path := range []string{"/", "/tmp", "/system", "/system/bin"} {
+	for _, path := range []string{"/", "/tmp", "/bootstrap", "/bootstrap/bin"} {
 		if stat := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationStat, Path: []byte(path)}); stat.Status != vfs.StatusOK {
 			t.Fatalf("stat %s after a refused mount = %d", path, stat.Status)
 		}
@@ -407,7 +407,7 @@ func TestRejectedVolumeLeavesTheRestOfTheNamespace(t *testing.T) {
 func TestPartiallyMountedVolumeIsNotHalfInstalled(t *testing.T) {
 	device := testFAT32Device()
 	service := &Service{}
-	if !service.Init() || !service.MountSystemImage(testSystemImage(t)) {
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) {
 		t.Fatal("service init failed")
 	}
 	if !service.AttachFilesystem(newLoopback(device)) {

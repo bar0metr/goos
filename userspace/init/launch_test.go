@@ -22,7 +22,11 @@ func oneStage(t *testing.T, path string, background bool) execproto.Request {
 	return request
 }
 
-func index(command []byte) (commands.Grant, bool) {
+func index(path []byte) (commands.Grant, bool) {
+	command, found := execproto.CommandFromSearchPath(path)
+	if !found {
+		return 0, false
+	}
 	switch string(command) {
 	case "gview", "edit":
 		return commands.GrantVFS | commands.GrantTerminal, true
@@ -57,6 +61,7 @@ func TestChildLaunchRefusals(t *testing.T) {
 		"unknown":       {oneStage(t, "/system/bin/nosuch", false), LaunchNotFound},
 		"from a file":   {oneStage(t, "/home/gview", false), LaunchCapabilityDenied},
 		"a service":     {oneStage(t, "/system/vfs", false), LaunchCapabilityDenied},
+		"a user copy":   {oneStage(t, "/home/user/bin/gview", false), LaunchCapabilityDenied},
 		"in background": {oneStage(t, "/system/bin/gview", true), LaunchCapabilityDenied},
 	}
 	for name, test := range cases {

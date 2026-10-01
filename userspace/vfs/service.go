@@ -20,21 +20,25 @@ type Service struct {
 	// service can be checked to serve the same one.
 	persistentRoot    ramfs.NodeID
 	persistentMounted bool
+	// systemNode is the volume's system directory, protected from the moment
+	// the volume is mounted, or zero for a volume without one (ADR 0175).
+	systemNode ramfs.NodeID
+	// published records that /system and /apps are mounted.
+	published bool
 }
 
-// MountSystemImage mounts the boot image read-only at /system. The executables
-// the launch path resolves under /system/bin therefore appear in the namespace
-// under exactly those names, instead of the search root being a path that
-// nothing can list. The archive is untrusted input, so a malformed image is
-// refused here rather than at a later lookup.
-func (service *Service) MountSystemImage(archive []byte) bool {
+// MountBootstrap mounts the boot archive read-only at /bootstrap, the
+// programs the system starts from before storage is up and recovery runs
+// from without it (ADR 0175). The archive is untrusted input, so a malformed
+// image is refused here rather than at a later lookup.
+func (service *Service) MountBootstrap(archive []byte) bool {
 	if !service.image.Init(archive) {
 		return false
 	}
-	// The archive stores its members under a system/ prefix, which is what the
-	// launch path resolves, so the mount root is that directory rather than the
-	// archive root. The two then name the same bytes by the same path.
-	name, valid := ramfs.MakeName([]byte(systemImageDirectory))
+	// The kernel finds PID 1 as the member system/init, so the archive keeps
+	// its members under system/. The mount root is that directory: the
+	// member system/bin/ls is /bootstrap/bin/ls.
+	name, valid := ramfs.MakeName([]byte(archiveDirectory))
 	if !valid {
 		return false
 	}
@@ -42,11 +46,20 @@ func (service *Service) MountSystemImage(archive []byte) bool {
 	if status != ramfs.StatusOK {
 		return false
 	}
-	return service.namespace.Mount([]byte("/"+systemImageDirectory), &service.image, root) == vfs.StatusOK
+	return service.namespace.Mount([]byte(BootstrapPath), &service.image, root) == vfs.StatusOK
 }
 
-// systemImageDirectory is the archive directory mounted as /system.
-const systemImageDirectory = "system"
+const (
+	// archiveDirectory is the archive directory mounted at BootstrapPath.
+	archiveDirectory = "system"
+	BootstrapPath    = "/bootstrap"
+	// systemDirectory and appsDirectory are the volume directories
+	// published at SystemPath and AppsPath.
+	systemDirectory = "system"
+	appsDirectory   = "apps"
+	SystemPath      = "/system"
+	AppsPath        = "/apps"
+)
 
 // persistentMounts names the directories of the persistent volume that get
 // their own place in the namespace. User data and mutable system state are
@@ -60,11 +73,12 @@ var persistentMounts = [...]struct{ path, directory string }{
 }
 
 // AttachFilesystem connects the filesystem service at the other end of
-// transport. The first attach mounts its volume at /persist, /home and /state;
-// a later one, after the service was restarted, only checks that the new
-// instance serves the volume those mounts name, so open files and mounts stay
-// valid across the restart. A service that refuses its volume leaves the
-// namespace without persistent mounts rather than without a root.
+// transport. The first attach mounts its volume at /persist, /home and /state
+// and protects its system directory; a later one, after the service was
+// restarted, only checks that the new instance serves the volume those mounts
+// name, with the system directory where it was, so open files, mounts, and the
+// protection stay valid across the restart. A service that refuses its volume
+// leaves the namespace without persistent mounts rather than without a root.
 func (service *Service) AttachFilesystem(transport Transport) bool {
 	service.persistent.transport = transport
 	root, status := service.persistent.Root()
@@ -73,7 +87,7 @@ func (service *Service) AttachFilesystem(transport Transport) bool {
 		return false
 	}
 	if service.persistentMounted {
-		return root == service.persistentRoot
+		return root == service.persistentRoot && service.lookupSystem(root) == service.systemNode
 	}
 	if !service.mountPersistent(root) {
 		// Mounting /persist, /home and /state is one operation. None can have
@@ -83,9 +97,89 @@ func (service *Service) AttachFilesystem(transport Transport) bool {
 		service.persistent.transport = nil
 		return false
 	}
+	// No file of the volume is open yet, so nothing can have been granted
+	// write access below the system directory before it is protected.
+	service.systemNode = service.lookupSystem(root)
+	if service.systemNode != 0 && service.namespace.Protect(&service.persistent, service.systemNode) != vfs.StatusOK {
+		service.namespace.UnmountBackend(&service.persistent)
+		service.persistent.transport = nil
+		service.systemNode = 0
+		return false
+	}
 	service.persistentRoot, service.persistentMounted = root, true
 	return true
 }
+
+// lookupSystem returns the volume's system directory, or zero when the volume
+// has none or the name is not a directory. It never creates one: a volume
+// without an installed system is not given an empty one.
+func (service *Service) lookupSystem(root ramfs.NodeID) ramfs.NodeID {
+	name, _ := ramfs.MakeName([]byte(systemDirectory))
+	node, status := service.persistent.OpenName(root, name)
+	if status != ramfs.StatusOK {
+		return 0
+	}
+	if stat, status := service.persistent.Stat(node); status != ramfs.StatusOK || stat.Kind != ramfs.KindDirectory {
+		return 0
+	}
+	return node
+}
+
+// SystemProtected reports whether the mounted volume has a system directory
+// and the namespace protects it.
+func (service *Service) SystemProtected() bool {
+	node, protected := service.namespace.Protected(&service.persistent)
+	return service.persistentMounted && service.systemNode != 0 && protected && node == service.systemNode
+}
+
+// Publish mounts the protected system directory at /system and the volume's
+// applications at /apps, creating the apps directory if the volume lacks it.
+// Both appear or neither does. Publishing what is already published succeeds.
+func (service *Service) Publish() vfs.Status {
+	if service.published {
+		return vfs.StatusOK
+	}
+	if !service.SystemProtected() {
+		return vfs.StatusNotFound
+	}
+	apps, ok := service.persistentDirectory(service.persistentRoot, appsDirectory)
+	if !ok {
+		return vfs.StatusBackendError
+	}
+	if status := service.namespace.Mount([]byte(SystemPath), &service.persistent, service.systemNode); status != vfs.StatusOK {
+		return status
+	}
+	if status := service.namespace.Mount([]byte(AppsPath), &service.persistent, apps); status != vfs.StatusOK {
+		// Nothing can have opened a file through /system yet.
+		service.namespace.UnmountPath([]byte(SystemPath))
+		return status
+	}
+	service.published = true
+	return vfs.StatusOK
+}
+
+// Withdraw removes /apps and /system. A file still open through either makes
+// it busy, and then neither is removed.
+func (service *Service) Withdraw() vfs.Status {
+	if !service.published {
+		return vfs.StatusOK
+	}
+	if status := service.namespace.UnmountPath([]byte(AppsPath)); status != vfs.StatusOK && status != vfs.StatusNotFound {
+		return status
+	}
+	if status := service.namespace.UnmountPath([]byte(SystemPath)); status != vfs.StatusOK && status != vfs.StatusNotFound {
+		// Put /apps back, so the namespace is as it was.
+		if apps, ok := service.persistentDirectory(service.persistentRoot, appsDirectory); ok {
+			service.namespace.Mount([]byte(AppsPath), &service.persistent, apps)
+		}
+		return status
+	}
+	service.published = false
+	return vfs.StatusOK
+}
+
+// Published reports whether /system and /apps are mounted.
+func (service *Service) Published() bool { return service.published }
 
 // AttachCache gives the persistent backend the file cache it shares with the
 // filesystem service (ADR 0098). Without it the volume can be listed but no
@@ -115,6 +209,7 @@ func (service *Service) UnmountFilesystem() vfs.Status {
 	service.persistent.transport = nil
 	service.persistentRoot = 0
 	service.persistentMounted = false
+	service.systemNode, service.published = 0, false
 	service.persistent.forgetAll()
 	return vfs.StatusOK
 }
@@ -175,13 +270,24 @@ func (service *Service) SetRAMFSClock(clock func() (ramfs.Timestamp, bool)) {
 // RAMFSUsage reports what the volatile root holds against its limits.
 func (service *Service) RAMFSUsage() ramfs.Usage { return service.fs.Usage() }
 
-// Init builds the volatile root. /system is not created here: it is the mount
-// point of the immutable boot image, and the namespace lists a mount in its
-// parent directory without needing a placeholder to stand in for it.
+// Init builds the volatile root with its /tmp and /run. /bootstrap, /system
+// and /apps are not created here: they are mount points, and the namespace
+// lists a mount in its parent directory without needing a placeholder to
+// stand in for it.
 func (service *Service) Init() bool {
 	root := service.fs.Init()
-	if _, status := service.fs.Mkdir(root, []byte("tmp")); status != ramfs.StatusOK {
-		return false
+	for _, name := range [...]string{"tmp", "run"} {
+		if _, status := service.fs.Mkdir(root, []byte(name)); status != ramfs.StatusOK {
+			return false
+		}
+	}
+	// The mount points of the system are kept free while nothing is mounted
+	// there: a /system a client made in the volatile root is never mistaken
+	// for the installed one (ADR 0175).
+	for _, path := range [...]string{BootstrapPath, SystemPath, AppsPath} {
+		if service.namespace.Reserve([]byte(path)) != vfs.StatusOK {
+			return false
+		}
 	}
 	return service.namespace.Mount([]byte("/"), &service.fs, root) == vfs.StatusOK
 }

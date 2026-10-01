@@ -41,7 +41,7 @@ func startServices(ticks uint64) {
 		fatal("INIT_FILESYSTEM_CHANNEL_FAILED\n")
 	}
 	filesystemClient = handle.ID(filesystemPair[0])
-	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/system/vfs",
+	if manager.Register(supervisor.Definition{Name: "vfs", Executable: "/bootstrap/vfs",
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 			{Name: "session", Handle: vfsServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
@@ -53,7 +53,7 @@ func startServices(ticks uint64) {
 			// A VFS that fails is started again, and its clients are handed
 			// new sessions (ADR 0099).
 		}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
-		manager.Register(supervisor.Definition{Name: "block", Executable: "/system/block",
+		manager.Register(supervisor.Definition{Name: "block", Executable: "/bootstrap/block",
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "block", Handle: blockServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
@@ -71,7 +71,7 @@ func startServices(ticks uint64) {
 		// also resets the device and masks its interrupt.
 		// The driver serves the block service and nothing else, so it starts
 		// after it, and again after it restarts.
-		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/system/virtio-blk", Dependencies: []string{"block"},
+		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/bootstrap/virtio-blk", Dependencies: []string{"block"},
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "ports", Handle: virtioPortHandle, Type: handle.TypeDevice, Rights: capability.Read | capability.Write},
@@ -86,7 +86,7 @@ func startServices(ticks uint64) {
 		// it serves nothing without either, and after a restart of any of
 		// them it has to start again once they run, so its mount can ask the
 		// device for its size.
-		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/system/fat32", Dependencies: []string{"block", "virtio-blk", "vfs"},
+		manager.Register(supervisor.Definition{Name: filesystemName, Executable: "/bootstrap/fat32", Dependencies: []string{"block", "virtio-blk", "vfs"},
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "vfs", Handle: handle.ID(filesystemPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
@@ -97,7 +97,15 @@ func startServices(ticks uint64) {
 			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
-	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 4 || validation.Enabled && !probeBlockService() {
+	// The storage services start from the archive whether or not there is a
+	// volume. Only the VFS is required: without it there is no namespace,
+	// and recovery needs one too. A volume that does not come up in time
+	// leaves the system in recovery mode (ADR 0175).
+	manager.StartReady(ticks+supervisor.RestartBackoff, launchService)
+	if snapshot, _ := manager.Snapshot("vfs"); snapshot.State != supervisor.StateRunning {
+		fatal("SHELL_LAUNCH_FAILED\n")
+	}
+	if validation.Enabled && filesystemAttached && !probeBlockService() {
 		fatal("SHELL_LAUNCH_FAILED\n")
 	}
 	if validation.Enabled {
@@ -105,6 +113,10 @@ func startServices(ticks uint64) {
 			fatal("LINUX_PID1_LAUNCH_FAILED\n")
 		}
 		mark("LINUX_PID1_LAUNCH_OK\n")
+	}
+	chooseMode()
+	if validation.Enabled && boot.Mode() == supervisor.ModeNormal {
+		// The musl probe is a Linux fixture of the installed system.
 		if !probeLinuxMusl() {
 			fatal("LINUX_MUSL_FAILED\n")
 		}
@@ -120,9 +132,13 @@ func startServices(ticks uint64) {
 	// session has to be asked for rather than handed over at boot, and it
 	// should be persisting records by the time a prompt appears.
 	// Configuration comes first: the log service consults it, so it has to be
-	// answering before anything that reads a setting starts.
-	startConfigService(ticks)
-	startLogService(ticks)
+	// answering before anything that reads a setting starts. Recovery runs
+	// neither: the shell does without them, and they would hold files on
+	// the volume a check needs to itself.
+	if boot.Mode() == supervisor.ModeNormal {
+		startConfigService(ticks)
+		startLogService(ticks)
+	}
 	for index := range sessions {
 		if sessions[index].active {
 			startSession(&sessions[index], ticks)
@@ -176,12 +192,16 @@ func startSession(session *terminalSession, ticks uint64) {
 		shellCapabilities = append(shellCapabilities, supervisor.Capability{Name: "config", Handle: configClient,
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	if manager.Register(supervisor.Definition{Name: session.shell, Executable: "/system/shell", Dependencies: []string{"vfs", session.tty},
+	if manager.Register(supervisor.Definition{Name: session.shell, Executable: supervisor.ServicePath("shell", boot.Mode()), Dependencies: []string{"vfs", session.tty},
 		Capabilities: shellCapabilities, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	if manager.StartReady(ticks+supervisor.RestartBackoff, launchService) != 1 {
-		fatal("SHELL_LAUNCH_FAILED\n")
+		if boot.Mode() != supervisor.ModeNormal {
+			fatal("SHELL_LAUNCH_FAILED\n")
+		}
+		// The installed shell would not start: run the archive's.
+		enterRecovery(supervisor.StageLaunch, "/system/services/shell", "the shell did not start")
 	}
 }
 
@@ -217,7 +237,7 @@ func startTerminalService(session *terminalSession, ticks uint64) handle.ID {
 	}
 	// Always, not on failure: a terminal that exits, even cleanly, leaves a
 	// console no one can type at. The restart limit still ends a crash loop.
-	if manager.Register(supervisor.Definition{Name: session.tty, Executable: "/system/tty",
+	if manager.Register(supervisor.Definition{Name: session.tty, Executable: "/bootstrap/tty",
 		Capabilities: capabilities, Restart: supervisor.RestartAlways}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
@@ -264,7 +284,7 @@ func startLogService(ticks uint64) {
 		capabilities = append(capabilities, supervisor.Capability{Name: "control", Handle: handle.ID(control[1]),
 			Type: handle.TypeChannel, Rights: capability.Read | capability.Wait, Consume: true})
 	}
-	if manager.Register(supervisor.Definition{Name: "log", Executable: "/system/log", Dependencies: []string{"vfs"},
+	if manager.Register(supervisor.Definition{Name: "log", Executable: supervisor.ServicePath("log", boot.Mode()), Dependencies: []string{"vfs"},
 		Capabilities: capabilities, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
 		syslog.Warn("log service registration failed")
 		sys.HandleClose(session)
@@ -297,7 +317,7 @@ func startConfigService(ticks uint64) handle.ID {
 		sys.HandleClose(session)
 		return 0
 	}
-	if manager.Register(supervisor.Definition{Name: "config", Executable: "/system/config", Dependencies: []string{"vfs"},
+	if manager.Register(supervisor.Definition{Name: "config", Executable: supervisor.ServicePath("config", boot.Mode()), Dependencies: []string{"vfs"},
 		Capabilities: []supervisor.Capability{
 			{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 			{Name: "vfs", Handle: session, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},

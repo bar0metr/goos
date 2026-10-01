@@ -13,34 +13,34 @@ import (
 	"goos/userspace/runtime/sys"
 )
 
-// systemImage is the boot system image, mapped read-only into PID 1. It is the
-// executable source for every service and every command under /system: PID 1
-// finds a program here under its own search policy and names it to the kernel
-// by extent, so the kernel resolves no path after the bootstrap (ADR 0093).
-// Programs outside the image use file-backed executable sources (ADR 0121).
+// systemImage is the boot archive, mapped read-only into PID 1. It is the
+// executable source for the bootstrap services and every program under
+// /bootstrap: PID 1 finds a program here under its own search policy and
+// names it to the kernel by extent, so the kernel resolves no path after the
+// bootstrap (ADR 0093). Every other program, the installed system's
+// included, uses a file-backed executable source (ADR 0121, ADR 0175).
 var systemImage []byte
 
-// mapSystemImage maps the image before anything is launched. The filesystem
-// service is itself launched from it, so PID 1 cannot wait for /system to be
-// served before it can start a process.
+// mapSystemImage maps the archive before anything is launched. The storage
+// services are themselves launched from it, so PID 1 cannot wait for a
+// volume before it can start a process.
 func mapSystemImage() bool {
 	image, status := sys.ImageMap(systemImageHandle)
 	systemImage = image
 	return status == kcall.StatusOK
 }
 
-// locateExecutable turns a path in the system image into what the kernel
-// launches: an extent of the image, the handle that authorizes executing from
-// it, and the display name ps reports. A path the image does not hold never
-// reaches the kernel. Services are launched only from here, so every service
-// is a program of the immutable image.
+// locateExecutable turns a path under /bootstrap into what the kernel
+// launches: an extent of the archive, the handle that authorizes executing
+// from it, and the display name ps reports. A path the archive does not hold
+// never reaches the kernel.
 func locateExecutable(path []byte) (supervisor.Executable, string, supervisor.LaunchStatus) {
 	offset, size, status := execproto.LocateImage(systemImage, path)
 	switch status {
 	case execproto.ImageFound:
 	case execproto.ImageNotFound:
 		return supervisor.Executable{}, "", supervisor.LaunchNotFound
-	case execproto.ImageOutsideSystem, execproto.ImageInvalidPath:
+	case execproto.ImageOutsideArchive, execproto.ImageInvalidPath:
 		return supervisor.Executable{}, "", supervisor.LaunchCapabilityDenied
 	default:
 		return supervisor.Executable{}, "", supervisor.LaunchInvalidImage
@@ -49,17 +49,23 @@ func locateExecutable(path []byte) (supervisor.Executable, string, supervisor.La
 	return supervisor.Executable{Image: systemImageHandle, Offset: offset, Size: size, Format: supervisor.ClassifyExecutable(header)}, processName(path), supervisor.LaunchOK
 }
 
-// openExecutable resolves a command: in the system image when the path is
-// under /system, and otherwise from the file-backed source prepared before
-// the job started (ADR 0121). The caller closes an object with
-// closeExecutable once the launch is answered.
+// openExecutable resolves a program by its origin (ADR 0175): in the archive
+// for a path under /bootstrap, and otherwise from a file-backed source
+// (ADR 0121). A file missing from the volume is never looked for in the
+// archive. The caller closes an object with closeExecutable once the launch
+// is answered.
 func openExecutable(path []byte) (supervisor.Executable, string, supervisor.LaunchStatus) {
-	if _, _, status := execproto.LocateImage(systemImage, path); status != execproto.ImageOutsideSystem {
+	if execproto.OriginOf(path) == execproto.OriginArchive {
 		return locateExecutable(path)
 	}
 	// A job's program sources were prepared before its pipeline started
 	// (ADR 0108).
 	if executable, status, found := takePrepared(path); found {
+		return executable, processName(path), status
+	}
+	if launchingJob == nil {
+		// A service, or an application's child: read it now.
+		executable, status := prepareSource(path)
 		return executable, processName(path), status
 	}
 	syslog.Warn("executable source missing", syslog.Str("path", bytesString(path)))
@@ -110,8 +116,8 @@ func requestLaunch(executable supervisor.Executable, name string, grants []super
 // launches only what an image capability with Execute authorizes, and only
 // bytes that lie inside the image and validate as a native image.
 func probeLaunchAuthority() bool {
-	valid, _, status := locateExecutable([]byte("/system/fault-probe"))
-	motd, _, motdStatus := locateExecutable([]byte("/system/motd"))
+	valid, _, status := locateExecutable([]byte("/bootstrap/fault-probe"))
+	motd, _, motdStatus := locateExecutable([]byte("/bootstrap/motd"))
 	if status != supervisor.LaunchOK || motdStatus != supervisor.LaunchOK {
 		return false
 	}
@@ -138,8 +144,8 @@ func probeLaunchAuthority() bool {
 			return false
 		}
 	}
-	_, _, outside := locateExecutable([]byte("/persist/fault-probe"))
-	_, _, missing := locateExecutable([]byte("/system/bin/missing"))
+	_, _, outside := locateExecutable([]byte("/system/fault-probe"))
+	_, _, missing := locateExecutable([]byte("/bootstrap/bin/missing"))
 	return outside == supervisor.LaunchCapabilityDenied && missing == supervisor.LaunchNotFound && probeExecutableObjects(valid, motd)
 }
 

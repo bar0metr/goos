@@ -12,6 +12,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/userspace/commands"
 	"goos/userspace/config"
+	execproto "goos/userspace/exec"
 	"goos/userspace/runtime/sys"
 	terminal "goos/userspace/tty"
 )
@@ -143,20 +144,19 @@ func endRawJob() {
 	}
 }
 
-// wantsRawTerminal reports whether word names a system command that asks for
-// raw terminal mode. A program path never does: only the immutable system
-// image's manifests are trusted, as PID 1 trusts them for grants.
-func wantsRawTerminal(word []byte) bool {
-	for _, value := range word {
-		if value == '/' {
-			return false
-		}
+// wantsRawTerminal reports whether path names a command of the trusted
+// index that asks for the terminal in raw mode. A program elsewhere, under
+// whatever name, gets the line discipline.
+func wantsRawTerminal(path []byte) bool {
+	command, found := execproto.CommandFromSearchPath(path)
+	if !found {
+		return false
 	}
 	index, ok := systemCommands()
 	if !ok {
 		return false
 	}
-	entry, found := commands.Lookup(index, word)
+	entry, found := commands.Lookup(index, command)
 	return found && entry.Grants&commands.GrantTerminal != 0
 }
 

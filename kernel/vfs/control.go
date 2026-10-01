@@ -7,8 +7,8 @@ import (
 
 const (
 	ControlProtocolID = uint64(0x4756465343544c31)
-	// Version 6 adds explicit clean unmount authority.
-	ControlVersion      = uint16(6)
+	// Version 7 adds publishing and withdrawing the installed system.
+	ControlVersion      = uint16(7)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
 	// operationSetFilesystem hands the service the client end of a channel to
@@ -20,6 +20,11 @@ const (
 	operationSession = byte(4)
 	// operationUnmount is accepted only on the control endpoint held by PID 1.
 	operationUnmount = byte(5)
+	// operationPublish mounts the installed system and applications of the
+	// persistent volume at /system and /apps; operationWithdraw removes them
+	// again (ADR 0175).
+	operationPublish  = byte(6)
+	operationWithdraw = byte(7)
 )
 
 // SessionNotice hands a client of a restarted VFS the client end of a new
@@ -90,6 +95,35 @@ func UnmountRequest(correlation uint64) (ipc.Message, bool) {
 func IsUnmount(message ipc.Message) bool {
 	return message.ProtocolID == ControlProtocolID && message.Version == ControlVersion && message.Kind == ipc.KindRequest &&
 		message.Correlation != 0 && message.PayloadSize == 1 && message.Payload[0] == operationUnmount && message.HandleCount == 0
+}
+
+// PublishRequest asks the VFS to mount the protected system directory of the
+// persistent volume at /system and its applications at /apps.
+func PublishRequest(correlation uint64) (ipc.Message, bool) {
+	return plainRequest(operationPublish, correlation)
+}
+
+func IsPublish(message ipc.Message) bool { return isPlainRequest(message, operationPublish) }
+
+// WithdrawRequest asks the VFS to remove /system and /apps.
+func WithdrawRequest(correlation uint64) (ipc.Message, bool) {
+	return plainRequest(operationWithdraw, correlation)
+}
+
+func IsWithdraw(message ipc.Message) bool { return isPlainRequest(message, operationWithdraw) }
+
+func plainRequest(operation byte, correlation uint64) (ipc.Message, bool) {
+	if correlation == 0 {
+		return ipc.Message{}, false
+	}
+	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: 1}
+	message.Payload[0] = operation
+	return message, true
+}
+
+func isPlainRequest(message ipc.Message, operation byte) bool {
+	return message.ProtocolID == ControlProtocolID && message.Version == ControlVersion && message.Kind == ipc.KindRequest &&
+		message.Correlation != 0 && message.PayloadSize == 1 && message.Payload[0] == operation && message.HandleCount == 0
 }
 
 func AddSessionRequest(server handle.ID, correlation uint64) (ipc.Message, bool) {

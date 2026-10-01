@@ -19,6 +19,8 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # Every directory under userspace/bin is one command in /system/bin. Nothing
 # lists them: adding a directory adds the command, and the index PID 1 and the
 # shell read is generated from the manifests the commands declare (ADR 0080).
+# The boot archive carries the recovery subset tools/initramfs names
+# (ADR 0175).
 COMMANDS := $(sort $(notdir $(wildcard userspace/bin/*)))
 COMMAND_DIR = $(OUT_DIR)/userspace/bin
 COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
@@ -48,6 +50,25 @@ STACKFRAMES = $(BUILD_ENV) go run ./tools/stackframes
 EFI_IMAGE = $(OUT_DIR)/iso/efi.img
 VARIANT_ISO = $(OUT_DIR)/goos-x86_64.iso
 ISO := $(BUILD_DIR)/goos-x86_64.iso
+INITRAMFS = $(OUT_DIR)/initramfs/initramfs.tar
+# RECOVERY=1 boots an ISO whose archive asks PID 1 for recovery mode, to
+# diagnose or check a volume (ADR 0175). It is a separate archive and ISO in
+# the same variant tree; nothing else is rebuilt for it.
+RECOVERY ?= 0
+ifeq ($(filter $(RECOVERY),0 1),)
+$(error RECOVERY must be 0 or 1)
+endif
+RECOVERY_INITRAMFS = $(OUT_DIR)/initramfs/initramfs-recovery.tar
+RECOVERY_EFI_IMAGE = $(OUT_DIR)/iso/efi-recovery.img
+RECOVERY_ISO = $(OUT_DIR)/goos-x86_64-recovery.iso
+RUN_ISO = $(if $(filter 1,$(RECOVERY)),$(RECOVERY_ISO),$(ISO))
+# The installed system (ADR 0175): the tree tools/sysimage lays out from this
+# build, and the volume made from it. DISK is the disk run and run-gui boot
+# from. It is made from the system when it does not exist and never touched
+# when it does; make disk-overwrite replaces it.
+SYSTEM_TREE = $(OUT_DIR)/system
+SYSTEM_IMAGE = $(OUT_DIR)/system.img
+DISK ?= $(BUILD_DIR)/goos-disk.img
 QEMU := qemu-system-x86_64
 QEMU_SHARE ?= /opt/local/share/qemu
 OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
@@ -58,9 +79,9 @@ MEMORY ?= 512M
 # host. Other hosts can select an available backend without changing targets,
 # for example QEMU_DISPLAY=gtk or QEMU_DISPLAY=sdl.
 QEMU_DISPLAY ?= cocoa
-QEMU_COMMON_FLAGS := -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(BUILD_DIR)/virtio-blk.img -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -no-reboot
-QEMU_FLAGS := $(QEMU_COMMON_FLAGS) -display none
-QEMU_GUI_FLAGS := $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
+QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(DISK) -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -no-reboot
+QEMU_FLAGS = $(QEMU_COMMON_FLAGS) -display none
+QEMU_GUI_FLAGS = $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
 SOURCE_DATE_EPOCH ?= 0
 HZ ?= 100
 ifeq ($(filter $(HZ),100 250 1000),)
@@ -109,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference
 
 all: iso
 
@@ -224,30 +245,76 @@ $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loa
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
 
-$(BUILD_DIR)/virtio-blk.img: tools/mkfat32/main.go
-	@mkdir -p $(BUILD_DIR)
-	@$(BUILD_ENV) go run ./tools/mkfat32 $@
+INITRAMFS_FLAGS = $(if $(filter 1,$(VALIDATION)),-validation)
+INITRAMFS_INPUTS = $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX)
 
+# The archive holds what boots before there is a volume and what recovery
+# runs without one; the rest of the system is installed on the volume
+# (ADR 0175). The recovery archive is the same with the request for recovery
+# mode added.
 initramfs: userspace
 	@mkdir -p $(OUT_DIR)/initramfs/root/system
 	@cp $(INIT_IMAGE) $(OUT_DIR)/initramfs/root/system/init
 	@# A command whose directory was removed leaves its image behind; the
 	@# archive takes only the commands the tree still has.
 	@find $(COMMAND_DIR) -type f $(foreach command,$(COMMANDS),! -name $(command)) -delete
-	$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/initramfs $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(OUT_DIR)/initramfs/initramfs.tar
+	$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) $(INITRAMFS_INPUTS) $(INITRAMFS)
+	@$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) -force-recovery $(INITRAMFS_INPUTS) $(RECOVERY_INITRAMFS)
+
+# The installed system as a directory tree and as a volume image. Both are
+# made from this build's outputs alone, in name order, so the same build
+# gives the same bytes. LINUX_EXTRA adds Linux programs under /system/linux.
+system-tree: userspace
+	@$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+
+system-image: iso system-tree
+	@rm -f $(SYSTEM_IMAGE)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(SYSTEM_IMAGE)
+	@printf 'built %s and %s (GoOS %s)\n' '$(ISO)' '$(SYSTEM_IMAGE)' '$(VERSION)'
+
+# disk installs the system on a new DISK and refuses one that exists;
+# disk-overwrite replaces it, data and all. run and run-gui make DISK only
+# when it is missing, and never change one that is there.
+disk: system-tree
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(DISK)
+	@printf 'installed GoOS %s on %s\n' '$(VERSION)' '$(DISK)'
+
+disk-overwrite: system-tree
+	@rm -f $(DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(DISK)
+	@printf 'installed GoOS %s on %s, replacing what was there\n' '$(VERSION)' '$(DISK)'
+
+run-disk:
+	@if [ -e '$(DISK)' ]; then printf 'using %s as it is\n' '$(DISK)'; else $(MAKE) --no-print-directory disk; fi
+
+# A disposable installed disk for one QEMU test, made afresh every time.
+test-disk: system-tree
+	@test -n '$(TEST_DISK)' || { echo 'TEST_DISK is required' >&2; exit 2; }
+	@rm -f $(TEST_DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(TEST_DISK)
 
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
 # byte-identical (ADR 0086).
 $(EFI_IMAGE): $(KERNEL) initramfs $(wildcard tools/mkiso/*.go)
 	@mkdir -p $(dir $@)
-	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(OUT_DIR)/initramfs/initramfs.tar $@
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(INITRAMFS) $@
 
 iso: $(ISO)
 
 $(VARIANT_ISO): $(EFI_IMAGE)
-	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(EFI_IMAGE) $(KERNEL) $(OUT_DIR)/initramfs/initramfs.tar $@
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(EFI_IMAGE) $(KERNEL) $(INITRAMFS) $@
 	@test -s $@
+
+recovery-iso: $(RECOVERY_ISO)
+
+$(RECOVERY_EFI_IMAGE): $(KERNEL) initramfs $(wildcard tools/mkiso/*.go)
+	@mkdir -p $(dir $@)
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso esp $(KERNEL) $(RECOVERY_INITRAMFS) $@
+
+$(RECOVERY_ISO): $(RECOVERY_EFI_IMAGE)
+	@$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) go run ./tools/mkiso iso $(RECOVERY_EFI_IMAGE) $(KERNEL) $(RECOVERY_INITRAMFS) $@
+	@printf 'built %s (GoOS %s, recovery)\n' '$@' '$(VERSION)'
 
 # build/goos-x86_64.iso is always the most recently requested configuration;
 # build/config/build names it, and its variant directory, for the test harnesses.
@@ -257,14 +324,16 @@ $(ISO): $(VARIANT_ISO) FORCE
 	@printf '%s\n' '$(HZ) $(DIAG) $(VALIDATION) $(OPT) $(notdir $(OUT_DIR))' >$(BUILD_CONFIG)
 	@printf 'built %s (GoOS %s, %s)\n' '$@' '$(VERSION)' '$(notdir $(OUT_DIR))'
 
-run: iso $(BUILD_DIR)/virtio-blk.img
-	$(QEMU) $(QEMU_FLAGS) -cdrom $(ISO)
+RUN_TARGET = $(if $(filter 1,$(RECOVERY)),recovery-iso,iso)
 
-run-gui: iso $(BUILD_DIR)/virtio-blk.img
-	$(QEMU) $(QEMU_GUI_FLAGS) -cdrom $(ISO)
+run: $(RUN_TARGET) run-disk
+	$(QEMU) $(QEMU_FLAGS) -cdrom $(RUN_ISO)
 
-run-debug: iso $(BUILD_DIR)/virtio-blk.img
-	$(QEMU) $(QEMU_FLAGS) -s -S -cdrom $(ISO)
+run-gui: $(RUN_TARGET) run-disk
+	$(QEMU) $(QEMU_GUI_FLAGS) -cdrom $(RUN_ISO)
+
+run-debug: $(RUN_TARGET) run-disk
+	$(QEMU) $(QEMU_FLAGS) -s -S -cdrom $(RUN_ISO)
 
 test: test-unit test-integration test-security
 
@@ -327,22 +396,20 @@ test-fat32-stress:
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
-	@rm -f $(BUILD_DIR)/boot-test-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/boot-test-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
-	@rm -f $(BUILD_DIR)/console-gui-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/console-gui-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/console-gui-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/console_gui.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/console-gui-virtio-blk.img
 
 STRESS_RUNS ?= 4
 STRESS_JOBS ?= 4
 STRESS_ROUNDS ?= 15
 
-test-stress: iso
-	@MEMORY=$(MEMORY) tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
+test-stress: iso system-tree
+	@MEMORY=$(MEMORY) SYSTEM_TREE=$(SYSTEM_TREE) tests/boot/stress_matrix.sh $(ISO) $(OVMF_CODE) $(STRESS_RUNS) $(STRESS_JOBS) $(STRESS_ROUNDS)
 
 # Builds the ISO twice from a clean build/ and compares every artifact (ADR
 # 0086). It cleans build/ itself, keeping only disks, logs, and reports.
@@ -352,8 +419,7 @@ test-reproducible:
 LATENCY_REPEATS ?= 10
 
 test-latency: iso
-	@rm -f $(BUILD_DIR)/latency-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/latency-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/latency-virtio-blk.img
 	@MEMORY=$(MEMORY) LATENCY_REPEATS=$(LATENCY_REPEATS) tests/boot/latency.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/latency-virtio-blk.img
 
 MICROBENCH_REPEATS ?= 5
@@ -361,8 +427,7 @@ MICROBENCH_REPEATS ?= 5
 # In-guest microbenchmarks (ADR 0085): context switch, IPC, and VFS reads
 # measured in a booted system.
 test-microbench: iso
-	@rm -f $(BUILD_DIR)/microbench-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/microbench-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/microbench-virtio-blk.img
 	@MEMORY=$(MEMORY) MICROBENCH_REPEATS=$(MICROBENCH_REPEATS) tests/boot/microbench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/microbench-virtio-blk.img
 
 test-performance: test-microbench
@@ -552,8 +617,7 @@ test-linux-abi:
 # security gates are parts of that one run, so their targets are the same.
 test-linux-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
-	@rm -f $(BUILD_DIR)/linux-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/linux-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/linux-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/linux.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-virtio-blk.img
 
 test-linux-musl test-linux-vfs test-linux-security: test-linux-boot
@@ -567,24 +631,22 @@ test-linux-all: test-linux-elf test-linux-abi test-linux-boot
 # Interoperability with a static x86_64 BusyBox the caller supplies. The
 # repository carries no BusyBox, so this is no part of test-all.
 #   make test-linux-busybox BUSYBOX=/path/to/busybox
-# LINUX_EXTRA places further Linux programs under /system/linux in any image
-# build; several paths are separated as in PATH.
+# LINUX_EXTRA places further Linux programs under /system/linux of the
+# installed system; several paths are separated as in PATH.
 LINUX_EXTRA ?=
 # test-linux-shell is the same run: BusyBox sh starts programs, pipelines,
 # redirections, and a script.
 test-linux-shell: test-linux-busybox
 test-linux-busybox:
 	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
-	@$(MAKE) --no-print-directory iso VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX))
-	@rm -f $(BUILD_DIR)/linux-busybox-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/linux-busybox-virtio-blk.img
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)) TEST_DISK=$(BUILD_DIR)/linux-busybox-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/linux_busybox.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-busybox-virtio-blk.img $(notdir $(BUSYBOX))
 
 # Times four Linux calls beside their native counterparts in one guest and
 # writes build/reports/linux-abi-<variant>.md. The numbers depend on the host.
 test-linux-bench: iso
-	@rm -f $(BUILD_DIR)/linux-bench-virtio-blk.img
-	@$(BUILD_ENV) go run ./tools/mkfat32 $(BUILD_DIR)/linux-bench-virtio-blk.img
+	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/linux-bench-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/linux_bench.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-bench-virtio-blk.img
 
 # Runs the committed Linux fixtures on a Linux kernel in an amd64 container
@@ -620,7 +682,12 @@ help:
 	  'GoOS build targets:' \
 	  '  all/iso          build the bootable x86_64 ISO' \
 	  '  kernel          build the UEFI kernel' \
-	  '  run             boot with QEMU and serial on this terminal' \
+	  '  run             boot with QEMU and serial on this terminal, from DISK' \
+	  '  RECOVERY=1      run, run-gui: boot into recovery mode' \
+	  '  system-image    build the ISO and an installed system volume image' \
+	  '  disk            install the system on a new DISK (default build/goos-disk.img); refuses an existing one' \
+	  '  disk-overwrite  install the system on DISK, replacing what is there' \
+	  '  test-system-boot boot an installed disk and the recovery cases in QEMU' \
 	  '  run-gui         boot with QEMU graphical display and serial on this terminal' \
 	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \

@@ -168,12 +168,8 @@ func closeLauncher(launch *launcher) {
 	*launch = launcher{}
 }
 
-// commandEntry returns a command's grants from the index and whether the
-// index describes it.
-func commandEntry(command []byte) (commands.Grant, bool) {
-	if !commandIndexLoaded {
-		loadCommandIndex()
-	}
-	entry, found := commands.Lookup(commandIndex[:commandIndexSize], command)
-	return entry.Grants, found
+// commandEntry returns the grants of the command at path from the index that
+// describes it, and whether one does.
+func commandEntry(path []byte) (commands.Grant, bool) {
+	return trustedGrants(path, execproto.OriginOf(path) == execproto.OriginArchive)
 }

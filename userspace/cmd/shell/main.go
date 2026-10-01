@@ -115,6 +115,9 @@ func userspaceMain() {
 	// The configuration session is optional: the service warns and continues if
 	// it cannot start, and the shell must still come up without it.
 	configHandle, _ = startupData.Handle("config")
+	if path, found := startupData.Env("PATH"); found {
+		setSearchPath(path)
+	}
 	pageHandle, found := startupData.Handle("execpage")
 	if !found {
 		fatal("SHELL_EXEC_PAGE_FAILED\n")
@@ -166,8 +169,8 @@ func userspaceMain() {
 	}
 }
 
-// The command index describes the executables in /system/bin. It is part of
-// the immutable system image, so it is read once and kept (ADR 0080).
+// The command index describes the shell's commands. It is protected from
+// change, so it is read once and kept (ADR 0080, ADR 0175).
 var (
 	commandIndex       [commands.MaxIndex]byte
 	commandIndexSize   int

@@ -2,7 +2,8 @@
 // whole disk, or in the one partition of an MBR or GPT table (ADR 0115). An
 // existing image holding a FAT32 volume the system would choose is left alone,
 // so the data on the development disk survives rebuilds; delete it to get a
-// fresh volume.
+// fresh volume. With -new an existing file of any kind is refused instead, so
+// a disk is never formatted over by mistake (ADR 0175).
 package main
 
 import (
@@ -12,7 +13,9 @@ import (
 	blockproto "goos/userspace/block"
 	"goos/userspace/fat32"
 	"goos/userspace/partition"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -102,8 +105,10 @@ func main() {
 		gets = append(gets, value)
 		return nil
 	})
+	tree := flag.String("tree", "", "copy the host directory `DIR` onto the volume root, empty directories included, in name order")
+	fresh := flag.Bool("new", false, "refuse an IMAGE that already exists rather than reuse or reformat it")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-size MiB] [-table none|mbr|gpt] [-sector-size N] [-cluster-sectors N] [-fats N] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
+		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-new] [-size MiB] [-table none|mbr|gpt] [-sector-size N] [-cluster-sectors N] [-fats N] [-tree DIR] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -113,12 +118,51 @@ func main() {
 		os.Exit(2)
 	}
 	path := flag.Arg(0)
+	if *fresh {
+		if _, err := os.Lstat(path); err == nil {
+			fail(fmt.Errorf("%s already exists; refusing to overwrite it", path))
+		}
+	}
 	if !valid(path) {
 		create(path, *size, *scheme, *sector, *perCluster, *fats)
+	}
+	if *tree != "" {
+		entries, err := treeEntries(*tree)
+		if err != nil {
+			fail(err)
+		}
+		puts = append(entries, puts...)
 	}
 	if len(puts) != 0 || len(gets) != 0 {
 		transfer(path, puts, gets)
 	}
+}
+
+// treeEntries lists what -tree copies: every file of root as HOSTFILE:PATH,
+// and every directory as :PATH, which makes it without a file. WalkDir visits
+// in lexical order, so the volume is written the same way every time.
+func treeEntries(root string) ([]string, error) {
+	var entries []string
+	err := filepath.WalkDir(root, func(host string, entry fs.DirEntry, err error) error {
+		if err != nil || host == root {
+			return err
+		}
+		relative, err := filepath.Rel(root, host)
+		if err != nil {
+			return err
+		}
+		target := "/" + filepath.ToSlash(relative)
+		switch {
+		case entry.IsDir():
+			entries = append(entries, ":"+target)
+		case entry.Type().IsRegular():
+			entries = append(entries, host+":"+target)
+		default:
+			return fmt.Errorf("%s: not a regular file or directory", host)
+		}
+		return nil
+	})
+	return entries, err
 }
 
 // create writes the partition table, if any, and formats the volume.
@@ -219,11 +263,15 @@ func getFile(volume *fat32.FileSystem, root ramfs.NodeID, path, target string) e
 }
 
 // putFile copies the host file at source to path on the volume, creating the
-// directories on the way and replacing a file already there.
+// directories on the way and replacing a file already there. With no source
+// it makes path a directory.
 func putFile(volume *fat32.FileSystem, root ramfs.NodeID, source, path string) error {
-	data, err := os.ReadFile(source)
-	if err != nil {
-		return err
+	var data []byte
+	if source != "" {
+		var err error
+		if data, err = os.ReadFile(source); err != nil {
+			return err
+		}
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	parent := root
@@ -232,7 +280,7 @@ func putFile(volume *fat32.FileSystem, root ramfs.NodeID, source, path string) e
 		if !ok {
 			return fmt.Errorf("invalid name %q in %s", part, path)
 		}
-		if index == len(parts)-1 {
+		if index == len(parts)-1 && source != "" {
 			id, status := volume.OpenName(parent, name)
 			if status == ramfs.StatusNotFound {
 				id, status = volume.CreateName(parent, name)

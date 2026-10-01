@@ -157,6 +157,19 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultDriver:
+		status := execproto.ControlNotFound
+		if driverProcessHandle != 0 {
+			injectDriverFault()
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultStorage:
+		status := execproto.ControlNotFound
+		if injectStorageLoss() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultFilesystem:
 		status := execproto.ControlNotFound
 		if injectFilesystemFault() {
@@ -249,19 +262,23 @@ func (nativePipelineRunner) CreateStream() (handle.ID, handle.ID, bool) {
 func (nativePipelineRunner) Close(id handle.ID) bool { return sys.HandleClose(id) == 0 }
 
 func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environment execproto.List, streams supervisor.Streams) (uint64, handle.ID, supervisor.LaunchStatus) {
-	// A command of /system/bin is known by its name there, which selects its
-	// grants. The rest of /system holds services, which are not commands; a
-	// program anywhere else is named by its file.
-	command, fromSearchPath := execproto.CommandFromSystemPath(stage.Path)
+	// A command of /system/bin or /bootstrap/bin is known by its name there,
+	// which selects its grants. The rest of /system and /bootstrap holds
+	// services, which are not commands; a program anywhere else is named by
+	// its file.
+	command, fromSearchPath := execproto.CommandFromSearchPath(stage.Path)
 	if !fromSearchPath {
-		if execproto.InSystem(stage.Path) && !execproto.LinuxSystemPath(stage.Path) {
+		if (execproto.InSystem(stage.Path) || execproto.InBootstrap(stage.Path)) && !execproto.LinuxSystemPath(stage.Path) {
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
 		command = execproto.ExecutableName(stage.Path)
 	}
 	var launch *launcher
-	if job := launchingJob; fromSearchPath && job != nil && supervisor.LaunchesChildren(job.request, commandGrants(command)) {
-		launch = &job.launcher
+	if job := launchingJob; fromSearchPath && job != nil {
+		granted, _ := trustedGrants(stage.Path, execproto.OriginOf(stage.Path) == execproto.OriginArchive)
+		if supervisor.LaunchesChildren(job.request, granted) {
+			launch = &job.launcher
+		}
 	}
 	return launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams, launch)
 }

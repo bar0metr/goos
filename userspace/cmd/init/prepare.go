@@ -3,10 +3,12 @@
 package main
 
 // Programs read from a file are prepared without blocking PID 1 (ADR 0108).
-// For a stage outside /system, PID 1 opens the file and asks VFS to pin it and
-// return its header page. The resulting executable source owns that session.
-// Preparation stays asynchronous, so PID 1 continues serving lifecycle events,
-// other jobs, restarts, and shutdown.
+// For a stage outside the boot archive, PID 1 opens the file and asks VFS to
+// pin it and return its header page. The resulting executable source owns
+// that session. A job's preparation stays asynchronous, so PID 1 continues
+// serving lifecycle events, other jobs, restarts, and shutdown. A service and
+// an application's child are prepared the same way, waiting for the answer
+// under the same bounded deadline (ADR 0175).
 
 import (
 	"goos/internal/capability"
@@ -43,11 +45,14 @@ type pendingFill struct {
 }
 
 // needsPreparation reports whether a stage names a program to be read from a
-// file: anything outside /system. A path in /system is either a command of
-// the image or refused at launch.
+// file: anything outside the boot archive except what the launch refuses
+// anyway, the services of the installed system.
 func needsPreparation(stage execproto.Stage) bool {
-	_, fromSearchPath := execproto.CommandFromSystemPath(stage.Path)
-	return !fromSearchPath && !execproto.InSystem(stage.Path)
+	if execproto.OriginOf(stage.Path) == execproto.OriginArchive {
+		return false
+	}
+	_, command := execproto.CommandFromSystemPath(stage.Path)
+	return !execproto.InSystem(stage.Path) || command || execproto.LinuxSystemPath(stage.Path)
 }
 
 // beginJob starts a decoded job: its programs' preparation if any stage
@@ -91,53 +96,65 @@ func advancePreparation(job *execJob) {
 // with it. It reports false when it recorded a result instead of starting.
 func startFill(job *execJob, index uint8) bool {
 	entry := &job.prepared[index]
-	entry.ready, entry.status = true, supervisor.LaunchProcessFailed
-	path := job.request.Stages[index].Path
+	pending, status := beginSource(job.request.Stages[index].Path)
+	if status != supervisor.LaunchOK {
+		entry.ready, entry.status = true, status
+		return false
+	}
+	entry.ready = false
+	job.fill = pending
+	return true
+}
+
+// beginSource opens the file at path, reads its header, and asks the VFS to
+// fill a new header object with the first page and pin the file. It returns
+// the fill to wait for, or why none was started; nothing is left open then.
+func beginSource(path []byte) (pendingFill, supervisor.LaunchStatus) {
+	if execproto.InSystem(path) && !systemReady {
+		// The installed system is not published, or is being attached
+		// again after a restart: nothing is read from it until it is.
+		return pendingFill{}, supervisor.LaunchSystemUnavailable
+	}
 	session, reason := openVFSSession()
 	if reason != "" {
 		syslog.Warn("executable read failed", syslog.Str("reason", reason))
-		return false
+		return pendingFill{}, supervisor.LaunchProcessFailed
 	}
 	stat, ok := callSession(session, vfs.Request{Operation: vfs.OperationStat, Path: path})
 	switch {
 	case !ok:
 		sys.HandleClose(session)
-		return false
+		return pendingFill{}, supervisor.LaunchProcessFailed
 	case stat.Status == vfs.StatusNotFound:
-		entry.status = supervisor.LaunchNotFound
 		sys.HandleClose(session)
-		return false
+		return pendingFill{}, supervisor.LaunchNotFound
 	case stat.Status != vfs.StatusOK || stat.Kind != ramfs.KindFile || stat.Size == 0 || stat.Size > executable.MaxSize:
-		entry.status = supervisor.LaunchInvalidImage
 		sys.HandleClose(session)
-		return false
+		return pendingFill{}, supervisor.LaunchInvalidImage
 	}
 	opened, ok := callSession(session, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
 	if !ok || opened.Status != vfs.StatusOK {
 		sys.HandleClose(session)
-		return false
+		return pendingFill{}, supervisor.LaunchProcessFailed
 	}
 	headerReply, ok := callSession(session, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 8})
 	format := supervisor.ClassifyExecutable(headerReply.Data)
 	if !ok || headerReply.Status != vfs.StatusOK || len(headerReply.Data) != 8 || format == supervisor.ExecutableUnknown {
-		entry.status = supervisor.LaunchInvalidImage
 		closeFile(session, opened.Handle)
-		return false
+		return pendingFill{}, supervisor.LaunchInvalidImage
 	}
 	correlation++
 	header := min(stat.Size, uint64(vm.PageSize))
 	object, status := sys.ExecutableCreate(loaderHandle, header)
 	if status != kcall.StatusOK {
-		entry.status = supervisor.LaunchResourceExhausted
 		closeFile(session, opened.Handle)
-		return false
+		return pendingFill{}, supervisor.LaunchResourceExhausted
 	}
 	fill, status := sys.HandleDuplicate(object, capability.Write|capability.Transfer)
 	if status != kcall.StatusOK {
 		sys.HandleClose(object)
-		entry.status = supervisor.LaunchResourceExhausted
 		closeFile(session, opened.Handle)
-		return false
+		return pendingFill{}, supervisor.LaunchResourceExhausted
 	}
 	message, encoded := vfs.EncodeRequest(vfs.Request{Operation: vfs.OperationPrepareExecutable, Handle: opened.Handle, Size: uint32(header)}, correlation)
 	if encoded {
@@ -145,15 +162,69 @@ func startFill(job *execJob, index uint8) bool {
 	}
 	if encoded && sendMessage(uint64(session), message) {
 		now, _ := sys.ClockRead()
-		entry.ready = false
-		job.fill = pendingFill{session: session, file: opened.Handle, object: object, size: stat.Size, correlation: correlation, deadline: now + fillDeadline(header), format: format}
-		return true
+		return pendingFill{session: session, file: opened.Handle, object: object, size: stat.Size, correlation: correlation, deadline: now + fillDeadline(header), format: format}, supervisor.LaunchOK
 	}
 	sys.HandleClose(fill)
 	sys.HandleClose(object)
-	entry.status = supervisor.LaunchResourceExhausted
 	closeFile(session, opened.Handle)
-	return false
+	return pendingFill{}, supervisor.LaunchResourceExhausted
+}
+
+// finishSource takes the VFS's answer to a fill and makes the executable
+// source, which then owns the session and its open file. On failure
+// everything the fill held is closed.
+func finishSource(pending pendingFill, message ipc.Message, status ipc.Status) (supervisor.Executable, supervisor.LaunchStatus) {
+	var reply vfs.Reply
+	valid := false
+	if status == ipc.StatusOK && message.Correlation == pending.correlation {
+		reply, valid = vfs.DecodeReply(message)
+	}
+	result := supervisor.LaunchProcessFailed
+	switch {
+	case valid && reply.Operation == vfs.OperationPrepareExecutable && reply.Status == vfs.StatusOK && reply.Size == min(pending.size, uint64(vm.PageSize)):
+		object, createStatus := sys.ExecutableSource(loaderHandle, pending.session, pending.file, pending.object, pending.size)
+		if createStatus == kcall.StatusOK {
+			return supervisor.Executable{Image: object, Size: uint32(pending.size), Format: pending.format}, supervisor.LaunchOK
+		}
+		result = supervisor.LaunchResourceExhausted
+		fallthrough
+	case valid && reply.Status != vfs.StatusBackendError:
+		result = supervisor.LaunchInvalidImage
+		fallthrough
+	default:
+		syslog.Warn("executable read failed", syslog.Uint("read", reply.Size), syslog.Uint("size", pending.size))
+		sys.HandleClose(pending.object)
+	}
+	if status == ipc.StatusPeerDied {
+		// The VFS is gone; so is the file it had open.
+		sys.HandleClose(pending.session)
+	} else {
+		closeFile(pending.session, pending.file)
+	}
+	return supervisor.Executable{}, result
+}
+
+// prepareSource reads the program at path into an executable source and
+// waits for it, at most the fill deadline. A VFS that does not answer costs
+// the launch, not PID 1.
+func prepareSource(path []byte) (supervisor.Executable, supervisor.LaunchStatus) {
+	pending, status := beginSource(path)
+	if status != supervisor.LaunchOK {
+		return supervisor.Executable{}, status
+	}
+	now, _ := sys.ClockRead()
+	wait := uint64(1)
+	if pending.deadline > now {
+		wait = pending.deadline - now
+	}
+	message, received := receive(uint64(pending.session), wait)
+	if received == ipc.StatusTimeout {
+		syslog.Warn("executable read timed out", syslog.Uint("size", pending.size))
+		sys.HandleClose(pending.object)
+		sys.HandleClose(pending.session)
+		return supervisor.Executable{}, supervisor.LaunchProcessFailed
+	}
+	return finishSource(pending, message, received)
 }
 
 // completeFill takes the VFS's answer to a job's fill, records the object or
@@ -162,39 +233,9 @@ func completeFill(job *execJob) {
 	pending := job.fill
 	job.fill = pendingFill{}
 	entry := &job.prepared[job.nextStage]
-	entry.ready, entry.status = true, supervisor.LaunchProcessFailed
 	message, status := receiveNow(pending.session)
-	var reply vfs.Reply
-	valid := false
-	if status == ipc.StatusOK && message.Correlation == pending.correlation {
-		reply, valid = vfs.DecodeReply(message)
-	}
-	consumed := false
-	switch {
-	case valid && reply.Operation == vfs.OperationPrepareExecutable && reply.Status == vfs.StatusOK && reply.Size == min(pending.size, uint64(vm.PageSize)):
-		object, createStatus := sys.ExecutableSource(loaderHandle, pending.session, pending.file, pending.object, pending.size)
-		if createStatus == kcall.StatusOK {
-			entry.executable, entry.status = supervisor.Executable{Image: object, Size: uint32(pending.size), Format: pending.format}, supervisor.LaunchOK
-			consumed = true
-			break
-		}
-		entry.status = supervisor.LaunchResourceExhausted
-		fallthrough
-	case valid && reply.Status != vfs.StatusBackendError:
-		entry.status = supervisor.LaunchInvalidImage
-		fallthrough
-	default:
-		syslog.Warn("executable read failed", syslog.Uint("read", reply.Size), syslog.Uint("size", pending.size))
-		sys.HandleClose(pending.object)
-	}
-	if consumed {
-		// The source owns the session and its open file.
-	} else if status == ipc.StatusPeerDied {
-		// The VFS is gone; so is the file it had open.
-		sys.HandleClose(pending.session)
-	} else {
-		closeFile(pending.session, pending.file)
-	}
+	entry.executable, entry.status = finishSource(pending, message, status)
+	entry.ready = true
 	job.nextStage++
 	advancePreparation(job)
 }

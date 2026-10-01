@@ -25,7 +25,7 @@ var linuxProbeGrants [2][5]supervisor.Capability
 //
 //go:noinline
 func probeLinuxLaunch() bool {
-	executable, name, located := locateExecutable([]byte("/system/linux/raw-probe"))
+	executable, name, located := locateExecutable([]byte("/bootstrap/linux/raw-probe"))
 	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
 		return false
 	}
@@ -148,10 +148,13 @@ var linuxLongPath [235]byte
 //go:noinline
 func probeLinuxMusl() bool {
 	path := []byte("/system/linux/abi-probe")
-	executable, name, located := locateExecutable(path)
-	if located != supervisor.LaunchOK || executable.Format != supervisor.ExecutableLinuxX8664 {
-		return false
-	}
+	executable, name, located := openExecutable(path)
+	passed := located == supervisor.LaunchOK && executable.Format == supervisor.ExecutableLinuxX8664 && runMuslProbe(executable, name, path)
+	closeExecutable(executable)
+	return passed
+}
+
+func runMuslProbe(executable supervisor.Executable, name string, path []byte) bool {
 	for index := range linuxLongPath {
 		linuxLongPath[index] = 'p'
 	}
@@ -285,7 +288,7 @@ func linuxProbeStartup(extra bool) (uint8, []byte, bool) {
 		handles++
 	}
 	writer := startup.NewWriter(staging, 1, 0, handles)
-	path := []byte("/system/linux/raw-probe")
+	path := []byte("/bootstrap/linux/raw-probe")
 	writer.Command(path)
 	writer.CWD([]byte("/"))
 	writer.Argument(path)

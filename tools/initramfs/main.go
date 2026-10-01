@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,52 +11,72 @@ import (
 	"time"
 
 	"goos/kernel/boot"
-	"goos/userspace/commands"
-	linuxfixtures "goos/userspace/linux"
+	"goos/tools/internal/commandset"
 )
 
-// usage names the fixed system images in order, then the directory of
-// command images and the command index the build generated from them.
-const usage = "usage: initramfs INIT_IMAGE SERVICE_IMAGE VFS_IMAGE SHELL_IMAGE BLOCK_IMAGE VIRTIO_BLOCK_IMAGE LOG_IMAGE CONFIG_IMAGE TTY_IMAGE FAT32_IMAGE COMMAND_DIR COMMAND_INDEX OUTPUT"
+// usage names the fixed images in order, then the directory of command images
+// and the command index the build generated from them.
+const usage = "usage: initramfs [-validation] [-force-recovery] INIT FAULT_PROBE VFS SHELL BLOCK VIRTIO_BLOCK TTY FAT32 COMMAND_DIR COMMAND_INDEX OUTPUT"
+
+// RecoveryCommands are the commands the archive carries for recovery mode
+// (ADR 0175): enough to look at, edit, copy, and check a volume. The shell
+// itself needs two of them, cat and write, for redirection. Nothing else of
+// the distribution is in the archive; it is installed on the volume.
+var RecoveryCommands = []string{"cat", "cp", "df", "echo", "edit", "fsck-fat", "ls", "mkdir", "mount", "mv", "pwd", "rm", "stat", "touch", "write"}
+
+// The services the archive carries: everything PID 1 starts before there is
+// a volume, and the terminal and shell recovery runs.
+var services = []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "tty", "fat32"}
 
 func main() {
-	if len(os.Args) != 14 {
-		fmt.Fprintln(os.Stderr, usage)
+	validation := flag.Bool("validation", false, "add the validation probes")
+	forceRecovery := flag.Bool("force-recovery", false, "make PID 1 boot into recovery mode")
+	flag.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
+	flag.Parse()
+	arguments := flag.Args()
+	if len(arguments) != len(services)+3 {
+		flag.Usage()
 		os.Exit(2)
 	}
 	epoch := time.Unix(0, 0)
 	members := []member{
 		directory("system/"),
 		directory("system/bin/"),
-		directory("system/linux/"),
-		file("system/linux/raw-probe", 0o555, linuxProbe()),
-		// The message of the day belongs to the immutable system image rather
-		// than to the volatile root, because /system is a read-only mount of
-		// this archive.
+		// The message of the day is read-only text, kept with the archive so
+		// recovery has something to cat.
 		file("system/motd", 0o444, []byte("Welcome to GoOS\n")),
 	}
-	for _, fixture := range linuxfixtures.All() {
-		members = append(members, file("system/linux/"+fixture.Name, 0o555, fixture.Image))
-	}
-	// LINUX_EXTRA adds Linux programs the repository does not carry, such as
-	// a BusyBox the interoperability test was given, each under its own
-	// name. Several paths are separated as in PATH.
-	for _, extra := range filepath.SplitList(os.Getenv("LINUX_EXTRA")) {
-		if extra != "" {
-			members = append(members, file("system/linux/"+filepath.Base(extra), 0o555, read(extra)))
+	for index, name := range services {
+		if name == "fault-probe" && !*validation {
+			continue
 		}
+		members = append(members, file("system/"+name, 0o555, read(arguments[index])))
 	}
-	for index, name := range []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "log", "config", "tty", "fat32"} {
-		members = append(members, file("system/"+name, 0o555, read(os.Args[1+index])))
+	if *validation {
+		// The validation probes PID 1 runs before the volume is up. They
+		// are not commands and no index describes them.
+		members = append(members, directory("system/linux/"), file("system/linux/raw-probe", 0o555, linuxProbe()))
 	}
-	index := read(os.Args[12])
-	members = append(members, file("system/commands", 0o444, index))
-	binaries, err := commandImages(os.Args[11], index)
+	if *forceRecovery {
+		members = append(members, file("system/force-recovery", 0o444, []byte("recovery\n")))
+	}
+	commandDirectory, outputPath := arguments[len(services)], arguments[len(services)+2]
+	index := read(arguments[len(services)+1])
+	if _, err := commandset.Names(commandDirectory, index); err != nil {
+		fail(err)
+	}
+	recoveryIndex, err := commandset.Subset(index, RecoveryCommands)
 	if err != nil {
 		fail(err)
 	}
-	members = append(members, binaries...)
-	output, err := os.Create(os.Args[13])
+	if err := commandset.Agree(sortedCopy(RecoveryCommands), recoveryIndex); err != nil {
+		fail(err)
+	}
+	members = append(members, file("system/commands", 0o444, recoveryIndex))
+	for _, name := range sortedCopy(RecoveryCommands) {
+		members = append(members, file("system/bin/"+name, 0o555, read(filepath.Join(commandDirectory, name))))
+	}
+	output, err := os.Create(outputPath)
 	if err != nil {
 		fail(err)
 	}
@@ -80,14 +101,20 @@ func main() {
 	}
 	// The kernel reads at most boot.MaxInitramfs and refuses to boot from a
 	// larger archive, so the build refuses to produce one.
-	written, err := os.Stat(os.Args[13])
+	written, err := os.Stat(outputPath)
 	if err != nil {
 		fail(err)
 	}
 	if err := checkSize(written.Size()); err != nil {
-		os.Remove(os.Args[13])
+		os.Remove(outputPath)
 		fail(err)
 	}
+}
+
+func sortedCopy(names []string) []string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	return sorted
 }
 
 // linuxProbe is a static ELF64 ET_EXEC that exercises anonymous memory, brk,
@@ -258,44 +285,6 @@ func read(path string) []byte {
 		fail(err)
 	}
 	return data
-}
-
-// commandImages returns one /system/bin member per image in directory, in
-// name order, and refuses an image the index does not describe or an index
-// entry without an image: the two are built from the same tree and must agree,
-// or PID 1 would grant from a description of a different program.
-func commandImages(directory string, index []byte) ([]member, error) {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, entry := range entries {
-		if entry.Type().IsRegular() {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
-	var members []member
-	for _, name := range names {
-		if _, found := commands.Lookup(index, []byte(name)); !found {
-			return nil, fmt.Errorf("%s: image without an index entry", name)
-		}
-		members = append(members, file("system/bin/"+name, 0o555, read(filepath.Join(directory, name))))
-	}
-	for offset := 0; ; {
-		entry, next, ok := commands.Next(index, offset)
-		if !ok {
-			if offset != len(index) {
-				return nil, fmt.Errorf("command index is malformed at byte %d", offset)
-			}
-			return members, nil
-		}
-		if sort.SearchStrings(names, string(entry.Name)) == len(names) || names[sort.SearchStrings(names, string(entry.Name))] != string(entry.Name) {
-			return nil, fmt.Errorf("%s: index entry without an image", entry.Name)
-		}
-		offset = next
-	}
 }
 
 func fail(err error) {
