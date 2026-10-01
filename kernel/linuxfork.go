@@ -198,8 +198,10 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	termination := linuxcompat.TerminationFromCode(code, exited.CPUTicks())
 	releaseVforkParent(state)
 	linuxcompat.ExitProcess(root, termination, releaseLinuxDescriptionReference)
-	raiseChildSignal(parentPID, pid, termination)
+	// The waiting parent is woken for the child before SIGCHLD can
+	// interrupt it, so wait4 returns the child.
 	wakeChildWaiter(parentPID)
+	raiseChildSignal(parentPID, pid, termination)
 	if _, shared := linuxcompat.VFSContext(familyID); shared {
 		exited.Handles().Close(vfsHandle)
 	}

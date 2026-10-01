@@ -123,6 +123,7 @@ func raiseChildSignal(parentPID int32, childPID int32, termination linuxcompat.T
 		info.Code, info.Status = linuxabi.SignalCodeChildKill, termination.Signal
 	}
 	parent.Signals.Raise(linuxabi.SignalChild, info)
+	interruptLinuxSleeper(parent)
 }
 
 func contextFromRegisters(context *linuxcompat.UserContext, registers *amd64.UserRegisters) {
@@ -197,5 +198,51 @@ func (handler *linuxCallHandler) Kill(request linuxcompat.Request) linuxcompat.R
 		return linuxcompat.Result{}
 	}
 	receiver.Signals.Raise(signal, info)
+	if receiver != state {
+		interruptLinuxSleeper(receiver)
+	}
 	return linuxcompat.Result{}
+}
+
+// interrupted ends a call whose wait a signal broke. A restartable call, a
+// pipe read or write or wait4, restarts after the handler when the signal
+// asked for SA_RESTART; any other call fails with EINTR.
+func (handler *linuxCallHandler) interrupted(restartable bool) linuxcompat.Result {
+	if state, found := linuxcompat.FindProcess(handler.root); found && restartable && state.Signals.RestartsInterrupted() {
+		return linuxcompat.Result{Restart: true}
+	}
+	return linuxErrno(linuxabi.EINTR)
+}
+
+// interruptLinuxSleeper wakes the task of state from an interruptible wait
+// once a signal with a handler is pending for it: a stream read or write,
+// wait4, nanosleep, or poll. A VFS exchange, a queued VFS request, and a
+// vfork parent keep waiting, as Linux file I/O and vfork do. A signal that
+// would end the process has already ended it.
+func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
+	if !state.Signals.Interrupting() {
+		return
+	}
+	owner, found := processRegistry.ByRoot(state.Root)
+	if !found || owner.TaskCount() != 1 {
+		return
+	}
+	task := owner.Tasks()[0]
+	pending, active := linuxcompat.SyscallContinuations.Pending(task)
+	if !active || pending.Phase != linuxcompat.ContinuationWaiting {
+		return
+	}
+	switch pending.Number {
+	case linuxabi.SysRead, linuxabi.SysReadv, linuxabi.SysWrite, linuxabi.SysWritev:
+		if !streamWaitSet.Cancel(task) {
+			return
+		}
+	case linuxabi.SysWait4:
+		linuxcompat.ReleaseChildWaiter(state.PID)
+	case linuxabi.SysNanosleep, linuxabi.SysPoll:
+		waitAnyTable.Cancel(task)
+	default:
+		return
+	}
+	resumeLinuxSyscall(task, pending.Correlation, linuxcompat.WakeInterrupted)
 }

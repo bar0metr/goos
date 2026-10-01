@@ -52,7 +52,9 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 			return handler.deviceRead(request, *description, vector)
 		}
 	}
-	if errno := handler.consumeWake(request); errno != 0 {
+	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
+		return handler.interrupted(true)
+	} else if errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
 	endpoint, streamID, errno := handler.endpoint(int64(request.Arguments[0]), false)
@@ -243,7 +245,9 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 			return handler.deviceWrite(request, *description, false)
 		}
 	}
-	if errno := handler.consumeWake(request); errno != 0 {
+	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
+		return handler.interrupted(true)
+	} else if errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
 	endpoint, streamID, errno := handler.endpoint(int64(request.Arguments[0]), true)
@@ -326,7 +330,9 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 			return handler.deviceWrite(request, *description, true)
 		}
 	}
-	if errno := handler.consumeWake(request); errno != 0 {
+	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
+		return handler.interrupted(true)
+	} else if errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
 	endpoint, streamID, errno := handler.endpoint(int64(request.Arguments[0]), true)
@@ -438,6 +444,8 @@ func (handler *linuxCallHandler) endpoint(fd int64, writer bool) (*stream.Stream
 	return endpoint, streamID, 0
 }
 
+// consumeWake ends the stream wait a retried call was woken from. EINTR means
+// a signal ended the wait before any byte moved.
 func (handler *linuxCallHandler) consumeWake(request linuxcompat.Request) linuxabi.Errno {
 	state, found := linuxcompat.SyscallContinuations.Pending(handler.task)
 	if !found {
@@ -450,6 +458,9 @@ func (handler *linuxCallHandler) consumeWake(request linuxcompat.Request) linuxa
 	}
 	if !linuxcompat.SyscallContinuations.Finish(handler.task) {
 		return linuxabi.EIO
+	}
+	if state.Wake == linuxcompat.WakeInterrupted {
+		return linuxabi.EINTR
 	}
 	return 0
 }

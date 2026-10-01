@@ -6,6 +6,7 @@ const (
 	EPERM        Errno = 1
 	ENOENT       Errno = 2
 	ESRCH        Errno = 3
+	EINTR        Errno = 4
 	EIO          Errno = 5
 	ENXIO        Errno = 6
 	E2BIG        Errno = 7

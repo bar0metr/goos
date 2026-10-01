@@ -131,6 +131,46 @@ func (state *SignalState) Fatal(signal uint64) bool {
 	return DeliverableSignal(signal) && state.mask&(uint64(1)<<(signal-1)) == 0 && state.Outcome(signal) == SignalTerminate
 }
 
+// next returns the signal Take would return, without taking it.
+func (state *SignalState) next() (uint64, bool) {
+	ready := state.pending &^ (state.mask &^ uncatchable)
+	if ready == 0 {
+		return 0, false
+	}
+	if ready&(uint64(1)<<(abi.SignalKill-1)) != 0 {
+		return abi.SignalKill, true
+	}
+	signal := uint64(1)
+	for ready&(uint64(1)<<(signal-1)) == 0 {
+		signal++
+	}
+	return signal, true
+}
+
+// Interrupting reports whether a pending signal the mask allows would run a
+// handler. Such a signal ends an interruptible wait.
+func (state *SignalState) Interrupting() bool {
+	ready := state.pending &^ (state.mask &^ uncatchable)
+	for signal := uint64(1); ready != 0; signal++ {
+		if ready&1 != 0 && state.Outcome(signal) == SignalHandle {
+			return true
+		}
+		ready >>= 1
+	}
+	return false
+}
+
+// RestartsInterrupted reports whether a call an interrupting signal ended
+// restarts after the handler instead of failing with EINTR: the signal
+// delivered next has SA_RESTART, or no signal remains to deliver.
+func (state *SignalState) RestartsInterrupted() bool {
+	signal, found := state.next()
+	if !found || state.Outcome(signal) != SignalHandle {
+		return true
+	}
+	return state.ActionOf(signal).Flags&abi.SignalActionRestart != 0
+}
+
 // Pending reports the pending set.
 func (state *SignalState) Pending() uint64 { return state.pending }
 
@@ -140,17 +180,9 @@ func (state *SignalState) Take() (uint64, SignalInfo, bool) {
 	if state == nil {
 		return 0, SignalInfo{}, false
 	}
-	ready := state.pending &^ (state.mask &^ uncatchable)
-	if ready == 0 {
+	signal, found := state.next()
+	if !found {
 		return 0, SignalInfo{}, false
-	}
-	signal := uint64(1)
-	if ready&(uint64(1)<<(abi.SignalKill-1)) == 0 {
-		for ready&(uint64(1)<<(signal-1)) == 0 {
-			signal++
-		}
-	} else {
-		signal = abi.SignalKill
 	}
 	state.pending &^= uint64(1) << (signal - 1)
 	info := state.info[signal-1]

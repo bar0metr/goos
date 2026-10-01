@@ -24,11 +24,12 @@ an errno; nothing is accepted and ignored.
 
 | Syscall | Status | Notes |
 | --- | --- | --- |
-| `read(0)` | implemented | streams block without polling; files read at their position, at most 64 KiB per call; a directory is `EISDIR` |
+| `read(0)` | implemented | streams block without polling; a handled signal interrupts the wait with `EINTR` or restarts it under `SA_RESTART`; files read at their position, at most 64 KiB per call; a directory is `EISDIR` |
 | `write(1)` | implemented | streams: at most 4096 bytes land whole, larger writes move in bounded chunks with partial writes; files at their position or at the end for `O_APPEND`, at most 64 KiB per call |
 | `open(2)` | implemented | `openat` from the working directory; musl's `open()` uses it |
 | `close(3)` | implemented | frees the descriptor, then releases the stream handle, the VFS file, or the directory record |
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
+| `poll(7)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address; no fixed, file-backed, or executable mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
@@ -43,7 +44,7 @@ an errno; nothing is accepted and ignored.
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
-| `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; no signal interrupts it |
+| `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; a handled signal ends it with `EINTR` and the time left |
 | `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is the forking process, or 1 for a launched or orphaned one |
 | `clone(56)` | partial | `SIGCHLD` is `fork`, `CLONE_VM\|CLONE_VFORK\|SIGCHLD` is `vfork`, both with an optional stack; thread, TLS, TID, and namespace flags `EINVAL` |
 | `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
@@ -79,7 +80,7 @@ BusyBox does about it:
 | `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `poll(7)`, `ppoll(271)`, `futex(202)` | no polling or threads inside a process |
+| `ppoll(271)`, `futex(202)` | no masked polling or threads inside a process |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
@@ -382,7 +383,7 @@ These calls answer from kernel state and ask no service (ADR 0145).
 | `prlimit64` | `RLIMIT_NOFILE` 64, `RLIMIT_STACK` 8 MiB, `RLIMIT_DATA` 64 MiB, `RLIMIT_CORE` 0, others unlimited |
 
 `prlimit64` refuses a new limit with `EPERM`, another PID with `ESRCH`, and a
-resource over 15 with `EINVAL`. No signal interrupts a sleep yet.
+resource over 15 with `EINVAL`. A handled signal ends a sleep with `EINTR`.
 
 ## Signals
 
@@ -413,8 +414,25 @@ call. Others wait for its next system call return (ADR 0166).
 `SA_RESETHAND`, `SA_NOCLDWAIT`, `SA_NOCLDSTOP`, `SA_ONSTACK`, and
 `SA_RESTART`; any other flag is `EINVAL`. `SA_NOCLDWAIT` or `SIG_IGN` on
 `SIGCHLD` leaves no zombie, and `wait4` then sleeps until the children end and
-returns `ECHILD` (ADR 0165). A handled signal does not interrupt a blocked
-call, and no call returns `EINTR`.
+returns `ECHILD` (ADR 0165).
+
+A handled signal interrupts a stream `read` or `write` that moved nothing,
+`wait4`, `nanosleep`, and `poll`. A stream call or `wait4` restarts after the
+handler under `SA_RESTART`, and fails with `EINTR` without it. `nanosleep`
+and `poll` always fail with `EINTR`; `nanosleep` reports the time left.
+`wait4` returns a child that has already ended rather than `EINTR`. A file
+operation waiting for the VFS is not interrupted, as Linux does not interrupt
+regular-file I/O (ADR 0167).
+
+## Polling
+
+`poll` takes at most 64 entries. A stream read end is ready with bytes in it
+and reports `POLLHUP` when its writers are gone and it is empty; a write end
+is ready while 4096 bytes fit and reports `POLLERR` when its readers are gone.
+Files, directories, and devices are always ready. A closed descriptor reports
+`POLLNVAL` and a negative one is skipped. A timeout of 0 returns at once, a
+positive one never returns early, and any negative one waits without limit.
+The wait uses native stream readiness and a timer, never a loop (ADR 0168).
 
 | Call | Behavior |
 | --- | --- |
@@ -582,7 +600,7 @@ Results a correct Linux program can observe to differ:
 | Area | GoOS 0.2.0 | Linux |
 | --- | --- | --- |
 | terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
-| signals | delivered at system call returns; `kill` reaches the caller and its descendants only; Ctrl-C ends the process whatever handles `SIGINT`; no call returns `EINTR` | sent by UID, delivered at any return to user mode, interrupt blocked calls |
+| signals | delivered at system call returns; `kill` reaches the caller and its descendants only; Ctrl-C ends the process whatever handles `SIGINT`; file I/O is never interrupted | sent by UID, delivered at any return to user mode |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
 | random bytes | `ENOSYS` and no `AT_RANDOM` on a CPU without RDRAND; 256 bytes per call | always available; 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
@@ -606,7 +624,7 @@ Results a correct Linux program can observe to differ:
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
 or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
-and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no process-group `kill`, `EINTR`, or alternate signal stack; no
+and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no process-group `kill`, `ppoll`, `select`, or alternate signal stack; no
 nonblocking pipes; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs

@@ -257,6 +257,14 @@ run '/system/linux/abi-probe kill'
 expect '^kill ok$' 'kill, tkill, and tgkill on the process tree'
 clean 'kill, tkill, and tgkill on the process tree'
 
+run '/system/linux/abi-probe eintr'
+expect '^eintr ok$' 'signals interrupt blocked calls; SA_RESTART restarts them'
+clean 'signals interrupt blocked calls; SA_RESTART restarts them'
+
+run '/system/linux/abi-probe poll'
+expect '^poll ok$' 'poll readiness, hangup, error, timeout, and wake-up'
+clean 'poll readiness, hangup, error, timeout, and wake-up'
+
 # Running off the end of the stack reaches the guard below it. That is a
 # fault: the process dies and the system goes on.
 run '/system/linux/abi-probe stack-overflow; echo after-stack-overflow'
