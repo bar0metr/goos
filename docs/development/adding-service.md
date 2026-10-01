@@ -1,6 +1,6 @@
 # Adding a native service
 
-A service is a ring-3 TinyGo program in the initramfs, launched and supervised
+A service is a ring-3 TinyGo program in the initramfs or the installed system, launched and supervised
 by PID 1 with an explicit capability manifest. Use the block service
 (`userspace/cmd/block`, `userspace/block`) as the reference: it is small, has
 two endpoints, and uses the current wait and startup APIs.
@@ -101,19 +101,22 @@ In the `Makefile`:
    on the ELF, which fails the build if a stack frame could step over the
    guard below the stack (ADR 0088), and then `tools/elf2native`.
 4. Add `$(<NAME>_IMAGE)` to the `userspace` target and to the `initramfs`
-   recipe.
+   recipe for a service that runs before the volume is up, or to the
+   `system-tree` recipe for one that runs from it.
 5. Add the host test package to `test-security` if it validates untrusted
    input.
 
 ## 6. Initramfs
 
 `tools/initramfs` takes a fixed positional list of service images and writes
-each to a fixed path. Add an argument and a `system/<name>` entry (mode
-`0o555`). Programs launched by name from the shell are commands, not services:
-they belong in `userspace/bin/` and need none of this (see
-[Adding a command](adding-command.md)). The kernel
-looks up executables by exact path in this archive; there is no other source
-of code.
+each to a fixed path; a service in it appears as `/bootstrap/<name>`. Add an
+argument and a `system/<name>` entry (mode `0o555`) only for a service needed
+before the volume is mounted or in recovery. Any other service is installed
+by `tools/sysimage` under `system/services/` on the volume, and PID 1 starts
+it from `/system/services/<name>` in normal mode (ADR 0175). Programs
+launched by name from the shell are commands, not services: they belong in
+`userspace/bin/` and need none of this (see
+[Adding a command](adding-command.md)).
 
 ## 7. Supervision and capabilities
 
@@ -123,7 +126,7 @@ Register the service in `userspace/cmd/init/services.go` with a
 ```go
 supervisor.Definition{
     Name:         "name",
-    Executable:   "/system/name",
+    Executable:   "/bootstrap/name",
     Dependencies: []string{"vfs"},
     Capabilities: []supervisor.Capability{
         {Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},

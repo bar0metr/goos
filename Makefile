@@ -398,6 +398,7 @@ test-fat32-stress:
 
 test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory recovery-iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
 

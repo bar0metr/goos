@@ -69,7 +69,15 @@ largest frame of the binary; `go run ./tools/stackframes -v BINARY` lists
 every frame (ADR 0088).
 
 `make run` boots the ISO headlessly with 512 MiB in QEMU and attaches COM1 to
-the current terminal. `make run-gui` uses the same OVMF, ISO, persistent disk,
+the current terminal. It boots the installed system on `build/goos-disk.img`
+(`DISK`), which it makes from the build's system tree when the file does not
+exist and never changes when it does (ADR 0175). After a rebuild the disk
+still holds the system it was installed with; a disk of another release boots
+into recovery. `make disk` installs the system on a new `DISK` and refuses one
+that exists; `make disk-overwrite` replaces it, user data and all.
+`make system-image` builds the ISO and a volume image of the installed system,
+`$(OUT_DIR)/system.img`. `make run RECOVERY=1` boots an ISO whose archive asks
+PID 1 for recovery mode, to inspect or check the disk. `make run-gui` uses the same OVMF, ISO, persistent disk,
 q35 machine, and COM1 connection, but also opens QEMU's VGA window for manual
 framebuffer-console validation. It uses the native macOS Cocoa backend by
 default; set `QEMU_DISPLAY=gtk`, `QEMU_DISPLAY=sdl`, or another backend
@@ -90,8 +98,11 @@ PASS lines or a bounded diagnostic for the first failed named check. `make
 test-all` is the canonical complete Definition-of-Done gate and includes host
 tests, lint, documentation checks, ISO construction, and QEMU validation. See
 `docs/development/testing.md` for the target hierarchy and harness details.
-Boot tests use a disposable test disk; `make run` and `make run-gui` retain
-`build/virtio-blk.img` across interactive boots.
+Boot tests use disposable installed disks made from the system tree; `make
+run` and `make run-gui` retain `build/goos-disk.img` across interactive boots.
+`make test-system-boot` boots an installed disk, reboots it under storage
+faults, checks it from forced recovery, and boots each kind of unusable disk
+into recovery.
 `make test-performance` writes the host benchmarks, such as
 `build/reports/page-allocation.txt`, and the in-guest microbenchmarks of
 `make test-microbench` to `build/reports/microbench-<variant>.md`.

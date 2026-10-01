@@ -1,5 +1,6 @@
 #!/bin/sh
-# Builds the ISO twice from a clean build tree and compares every artifact.
+# Builds the ISO and the installed system image twice from a clean build tree
+# and compares every artifact.
 #
 # The TinyGo targets name build/kernel/io.o and build/userspace/runtime.o, so
 # both builds run in the ordinary build/ directory: the first build's outputs
@@ -15,7 +16,7 @@ first=$work/first
 second=$work/second
 # Outputs the reproducibility check leaves alone: its own tree, the
 # interactive disk, and logs and reports of other targets.
-keep='reproducible virtio-blk.img boot-test-virtio-blk.img latency-virtio-blk.img logs reports'
+keep='reproducible goos-disk.img virtio-blk.img boot-test-virtio-blk.img latency-virtio-blk.img logs reports'
 
 clean_build() {
 	[ -d "$build" ] || return 0
@@ -44,7 +45,7 @@ collect() {
 build_once() {
 	printf 'reproducible: %s build from a clean tree\n' "$1"
 	clean_build
-	if ! "$make" --no-print-directory iso >"$work/$1.log" 2>&1; then
+	if ! "$make" --no-print-directory system-image >"$work/$1.log" 2>&1; then
 		cat "$work/$1.log" >&2
 		printf 'reproducible: %s build failed\n' "$1" >&2
 		exit 1
@@ -89,7 +90,7 @@ config=$(cat "$first/config/build" 2>/dev/null || true)
 set -- goos-x86_64.iso
 for variant in "$first"/variants/*; do
 	v=variants/${variant##*/}
-	set -- "$@" "$v/goos-x86_64.iso" "$v/iso/efi.img" "$v/kernel/goos.efi" "$v/initramfs/initramfs.tar" "$v/userspace/init" "$v/userspace/shell"
+	set -- "$@" "$v/goos-x86_64.iso" "$v/iso/efi.img" "$v/kernel/goos.efi" "$v/initramfs/initramfs.tar" "$v/system.img" "$v/userspace/init" "$v/userspace/shell"
 done
 for file in "$@"; do
 	if [ -f "$first/$file" ] && [ -f "$second/$file" ] && cmp -s "$first/$file" "$second/$file"; then

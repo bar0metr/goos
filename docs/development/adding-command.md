@@ -2,9 +2,12 @@
 
 A command is a program in `/system/bin` that the shell runs by name. Each one is
 its own directory under `userspace/bin/` and its own image; nothing else lists
-it. The build finds the directory, compiles it, places the image in
-`/system/bin/<name>`, and adds the command's manifest to the command index
-`/system/commands` that PID 1 and the shell read (ADR 0080).
+it. The build finds the directory, compiles it, installs the image as
+`/system/bin/<name>` on the disk, and adds the command's manifest to the
+command index `/system/commands` that PID 1 and the shell read (ADR 0080,
+ADR 0175). A command that recovery needs is also added to the archive's
+`RecoveryCommands` list in `tools/initramfs`, with the reason it is needed;
+the archive's size limit is shared by everything in it.
 
 For a long-running supervised program, see [Adding a native service](adding-service.md).
 
@@ -70,8 +73,11 @@ source without compiling it, so every field must be a literal:
 | `MinArgs`, `MaxArgs` | Arguments after the name. `commands.Unbounded` for no limit. |
 | `Grants` | `commands.GrantVFS` if the command uses the filesystem, `commands.GrantTerminal` if it is full-screen, `commands.GrantLaunch` if it starts other full-screen commands; join several with `\|`; omit otherwise. |
 
-`Grants` is a request, not authority. PID 1 grants only roles it knows, to
-images in the immutable system image. A command without `GrantVFS` gets its
+`Grants` is a request, not authority. PID 1 grants only roles it knows, and
+only to a command launched from the origin of the index that describes it:
+`/system/bin` from the protected installed system in normal mode, or
+`/bootstrap/bin` from the archive. A copy of the image anywhere else gets
+none (ADR 0175). A command without `GrantVFS` gets its
 standard streams and nothing else, which is what most commands need: `pwd`
 reads its working directory from the startup data and has no filesystem
 session.

@@ -6,6 +6,9 @@
 #   - the normal build carries no validation-only code: no validation marker
 #     and no fault-injection report in any normal image (ADR 0058), and no
 #     identity-authorized console call anywhere (ADR 0094);
+#   - the normal archive holds the recovery set and nothing installed on the
+#     volume: no validation probe, Linux program, or distribution command
+#     (ADR 0175);
 #   - the root license and copyright notice declare GPL-3.0-only and the
 #     release author;
 #   - every generated file is under build/: nothing outside it is untracked
@@ -38,6 +41,18 @@ for image in "$variant/kernel/goos.efi" "$variant"/userspace/* "$variant"/usersp
 	marker=$(strings -a "$image" | grep -E '^[A-Z0-9]{2,}_[A-Z0-9_]*(_OK|_INJECTED)$' | sed -n '1p' || true)
 	[ -z "$marker" ] || complain "validation marker $marker in the normal image $image"
 done
+archive=$variant/initramfs/initramfs.tar
+if [ -f "$archive" ]; then
+	members=$(tar -tf "$archive")
+	for excluded in system/fault-probe system/linux/ system/force-recovery system/config system/log system/bin/gfm system/bin/bench system/bin/uname; do
+		printf '%s\n' "$members" | grep -qx "$excluded" && complain "$excluded is in the normal archive"
+	done
+	for required in system/init system/shell system/tty system/commands system/bin/fsck-fat system/bin/edit; do
+		printf '%s\n' "$members" | grep -qx "$required" || complain "$required is missing from the normal archive"
+	done
+else
+	complain "no normal archive at $archive"
+fi
 if grep -R -n 'goos_debug_write' userspace kernel >/dev/null 2>&1; then
 	complain 'the retired DebugWrite stub is still present'
 fi

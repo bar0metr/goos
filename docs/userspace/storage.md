@@ -118,21 +118,49 @@ mounting repairs nothing.
 
 A refused volume is not fatal. The filesystem service reports it, prints
 `[WARN] no persistent storage`, and serves the rest of the namespace: the
-volatile root and the read-only system image are already mounted, so the machine
-comes up to a prompt with `/persist`, `/home` and `/state` simply absent. That
-prompt is where the volume gets looked at. The log service keeps draining the
-kernel ring and retries its file on each pass; the configuration service serves
-its declared defaults.
+volatile root and the read-only boot archive are already mounted, so the machine
+comes up to a prompt with `/persist`, `/home` and `/state` simply absent. With
+no volume there is no installed system either, so PID 1 runs in recovery mode
+from the archive (ADR 0175). That prompt is where the volume gets looked at.
 
 ## The FAT32 volume
 
 The volume is mounted at `/persist`, and its `home` and `state` directories are
 mounted again at `/home` and `/state` so that user data and mutable system state
-are named apart from the immutable system image (ADR 0071). The filesystem
-service creates those directories on a volume that lacks them. The three mounts
+are named apart from the installed system (ADR 0071). The filesystem
+service creates those directories on a volume that lacks them. The mounts
 share one backend instance and one sector cache, so `/persist/home` and `/home`
 are one directory rather than two views; the namespace refuses to remove a
 directory another mount points at, under either name.
+
+## The installed system
+
+An installed volume also holds the system (ADR 0175):
+
+| Volume directory | Published at | Contents |
+| --- | --- | --- |
+| `system` | `/system` | `bin/`, `services/`, `linux/`, `commands`, `motd`, `release` |
+| `apps` | `/apps` | applications; empty as installed |
+| `home` | `/home` | user files, including `home/user/bin` for the user's commands |
+| `state` | `/state` | service state and configuration |
+
+The VFS protects the `system` directory from the moment it mounts the volume.
+The protection is a property of the directory's node, not of a path: no
+client can create, write, truncate, remove, rename, or replace anything at or
+below it through `/system`, `/persist/system`, a name that differs only in
+case, or any other way the walk can reach it, and stat reports its files
+read-only. FAT32's read-only attribute plays no part. A volume without a
+`system` directory is never given one; it boots into recovery.
+
+PID 1 publishes `/system` and `/apps` only after it has checked the
+installation record, the session service images, and the command index. The
+VFS keeps both paths reserved while they are not mounted, so a client cannot
+make a `/system` of its own in the volatile root.
+
+The build makes installed volumes: `make disk` installs a new
+`build/goos-disk.img` and refuses one that exists, `make disk-overwrite`
+replaces it, and `make run` makes it only when it is missing. Nothing in the
+guest formats, populates, or updates a volume.
 
 Files are limited only by FAT32 itself: 4 GiB − 1 bytes, the free space, and the
 caller's memory. Directories are cluster chains of any valid length, up to the
@@ -208,7 +236,10 @@ devices, and block payloads larger than the inline IPC limit remain future work.
 ## Checking an unmounted FAT32 volume
 
 `fsck-fat --check auto` performs the native read-only consistency pass (ADR
-0117). PID 1 owns the authority transition: VFS must flush and atomically
+0117). It runs in recovery mode only: in normal mode the running system's
+programs are read from the volume, so PID 1 refuses the check as busy and
+unmounts nothing (ADR 0175); `make run RECOVERY=1` boots into recovery. PID 1
+owns the authority transition: VFS must flush and atomically
 unmount `/persist`, `/home` and `/state`, after which the block service gives
 the command an exclusive slice of the selected partition. Open files make the
 operation fail as busy. The checker reports BPB/backup/FSInfo health, FAT-copy

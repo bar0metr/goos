@@ -1,6 +1,6 @@
 # Terminal
 
-The terminal service, `/system/tty`, owns a console (ADR 0082, ADR 0089). Two
+The terminal service, `/bootstrap/tty`, owns a console (ADR 0082, ADR 0089). Two
 instances run, each with a shell of its own (ADR 0125): `tty` on COM1 and
 `tty-fb` on the framebuffer with the PS/2 keyboard. Each is the only process
 that holds the right to read its console, so nothing else can see what is

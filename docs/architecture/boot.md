@@ -13,10 +13,15 @@ contains:
 
 - `EFI/BOOT/BOOTX64.EFI`: the kernel, a TinyGo UEFI PE image linked at
   `0x400000` (ADR 0001);
-- `initramfs.tar`: a USTAR archive with `system/init`, the services, one
-  image per command in `system/bin/`, and the command index
-  `system/commands` generated from the commands' manifests
-  (`tools/initramfs`, `tools/commands`, ADR 0080).
+- `initramfs.tar`: a USTAR archive with `system/init`, the storage
+  services, the terminal and the shell, the recovery commands in
+  `system/bin/`, and their index `system/commands`, cut from the index the
+  build generates from the commands' manifests (`tools/initramfs`,
+  `tools/commands`, ADR 0080, ADR 0175).
+
+The rest of the system is installed on the disk: `make run` boots
+`build/goos-disk.img`, made from the build's system tree when it does not
+exist and never changed when it does (ADR 0175).
 
 The ESP is the ISO's El Torito boot image, an 8 MiB FAT volume
 (`tools/mkiso`, ADR 0086). QEMU runs q35 with OVMF, 512 MiB RAM (`MEMORY`), COM1 on
@@ -114,10 +119,11 @@ kernel halts.
 ## PID 1 and service start order
 
 PID 1 is a freestanding TinyGo program (ADR 0023). It first maps the
-read-only system image through its image capability: every service and every
-command in `/system/bin` it launches is found there (ADR 0093); a program
-elsewhere is read into an executable object (ADR 0097). In a validation build
-it then:
+read-only boot archive through its image capability: every service it starts
+before the volume is up, and every program under `/bootstrap`, is found
+there (ADR 0093). Every other program, the installed system's included, is
+read from a file into an executable source (ADR 0121, ADR 0175). In a
+validation build it then:
 
 1. proves that the kernel refuses launches without Execute authority, outside
    the image, or of bytes that are not a native image, and executable objects
@@ -127,36 +133,45 @@ it then:
 2. registers `fault-probe` (restart on failure) and adopts the already running
    PID 3 as its first instance;
 3. handles each fault-probe exit through the supervisor, which relaunches
-   `/system/fault-probe` until the restart allowance is exhausted and the
+   `/bootstrap/fault-probe` until the restart allowance is exhausted and the
    service is marked failed (ADR 0019, 0021).
 
 In every build it then:
 
 1. maps the exec area and creates the block service's control channel and the
    channel between the VFS and the FAT32 service;
-2. registers and starts `vfs` (VFS with the RAMFS root and the read-only system
-   image at `/system`), restarted on failure with its clients handed new
+2. registers and starts `vfs` (VFS with the RAMFS root and the read-only boot
+   archive at `/bootstrap`), restarted on failure with its clients handed new
    sessions (ADR 0099), and `block`, `virtio-blk` and `fat32`, all restarted on
    failure, the driver and `fat32` after `block` (ADR 0101); once `fat32` runs, hands the VFS its
-   channel to it and waits for the volume to be mounted at `/persist`, `/home`,
-   and `/state` (ADR 0070, 0071, 0078, 0096);
+   channel to it and waits, at most 20 seconds, for the volume to be mounted
+   at `/persist`, `/home`, and `/state`, with its `system` directory
+   protected (ADR 0070, 0071, 0078, 0096, 0175);
 3. in a validation build, probes the block service with an info, write, read,
    and flush exchange;
-4. starts `config` and then `log`, both restarted on failure; a failure to
-   start either is a warning, not a stopped boot (ADR 0073, 0074);
-5. creates the terminal's output stream, session and control channels and
-   starts `tty`, then opens a full-scope configuration session for the shell
-   and starts `shell`, which depends on `vfs` and `tty` (ADR 0076, 0082).
-   Both are `RestartAlways` and restart independently on a renewed session
-   (ADR 0089);
-6. in a validation build, kills the driver once to exercise its restart
+4. chooses the mode (ADR 0175): recovery when the archive asks for it or no
+   volume was attached; otherwise it checks the installation record, the
+   session service images, and the command index under `/persist/system`
+   and asks the VFS to publish `/system` and `/apps`, and runs in normal
+   mode if all of that succeeds. It prints `[MODE] normal`, or
+   `[MODE] recovery:` with the stage, path, and reason;
+5. in normal mode, starts `config` and then `log` from `/system/services`,
+   both restarted on failure; a failure to start either is a warning, not a
+   stopped boot (ADR 0073, 0074). Recovery runs neither;
+6. creates the terminal's output stream, session and control channels and
+   starts `tty` from the archive, then in normal mode opens a full-scope
+   configuration session for the shell and starts `shell` from
+   `/system/services`, or in recovery from `/bootstrap`; the shell depends on
+   `vfs` and `tty` (ADR 0076, 0082). Both are `RestartAlways` and restart
+   independently on a renewed session (ADR 0089);
+7. in a validation build, kills the driver once to exercise its restart
    (ADR 0078);
-7. enters its main loop: one `WaitAny` over the lifecycle channel, the shell's
+8. enters its main loop: one `WaitAny` over the lifecycle channel, the shell's
    exec channel, and the next process of each running job, bounded by the
    restart backoff while a restart is pending (ADR 0051, 0064, 0078).
 
 Each launch is a correlated request on the lifecycle channel that names the
-executable as an extent of the system image, or a sealed executable object.
+executable as an extent of the boot archive, or a sealed executable object.
 The kernel checks Execute on the image capability and the extent's bounds, or
 Execute on the object and that it is sealed and named whole, validates the
 capability manifest,
@@ -170,6 +185,7 @@ task (ADR 0024, 0031, 0062, 0093).
 | `HZ` | 100 (default), 250, 1000 | build tag `goos_hz<rate>`; selects the PIT divisor and every userspace deadline (ADR 0052) |
 | `DIAG` | 0 (default), 1 | build tag `goos_diag`; enables the kernel event ring, the `Diagnostics` operation, and launch-stage timing (ADR 0052) |
 | `VALIDATION` | 0 (default), 1 | build tag `goos_validation`; runs the kernel self-tests, processes 2 and 3, the supervision scenario, the storage probe, and the driver fault, and prints success markers (ADR 0058) |
+| `RECOVERY` | 0 (default), 1 | `run`, `run-gui`, `run-debug`: boot an ISO whose archive asks PID 1 for recovery mode (ADR 0175) |
 
 `build/config/build` records the active values. Each combination builds into
 its own tree under `build/variants/`, and `build/goos-x86_64.iso` is the most
