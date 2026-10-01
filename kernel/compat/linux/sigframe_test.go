@@ -85,11 +85,11 @@ func TestForkCopiesDispositionsButNotPendingSignals(t *testing.T) {
 }
 
 func TestSignalFrameRoundTrip(t *testing.T) {
-	base, ok := SignalFrameAddress(0x7fff0000, 0x1000)
-	if !ok || (base+8)%16 != 0 || base+SignalFrameSize > 0x7fff0000-signalRedZone {
-		t.Fatalf("frame at %#x", base)
+	base, fpu, ok := SignalFrameAddress(0x7fff0000, 0x1000)
+	if !ok || (base+8)%16 != 0 || fpu%64 != 0 || base+SignalFrameSize > fpu || fpu+FPUStateSize > 0x7fff0000-signalRedZone {
+		t.Fatalf("frame at %#x, FPU image at %#x", base, fpu)
 	}
-	if _, ok := SignalFrameAddress(0x1100, 0x1000); ok {
+	if _, _, ok := SignalFrameAddress(0x1100, 0x1000); ok {
 		t.Fatal("a frame was placed below the stack")
 	}
 	var context UserContext
@@ -97,7 +97,7 @@ func TestSignalFrameRoundTrip(t *testing.T) {
 		context.Registers[index] = uint64(index + 1)
 	}
 	var frame [SignalFrameSize]byte
-	EncodeSignalFrame(&frame, abi.SignalChild, SignalInfo{Code: abi.SignalCodeChildExit, PID: 7, UID: 1000, Status: 3}, &context, 0x4000, 0x402000)
+	EncodeSignalFrame(&frame, abi.SignalChild, SignalInfo{Code: abi.SignalCodeChildExit, PID: 7, UID: 1000, Status: 3}, &context, 0x4000, 0x402000, 0x7ffef000)
 	if binary.LittleEndian.Uint64(frame[0:8]) != 0x402000 {
 		t.Fatal("restorer is not the return address")
 	}
@@ -108,12 +108,34 @@ func TestSignalFrameRoundTrip(t *testing.T) {
 	}
 	var uc [UContextSize]byte
 	copy(uc[:], frame[SignalFrameUContext(0):])
-	decoded, mask := DecodeSignalContext(&uc)
-	if decoded != context || mask != 0x4000 {
-		t.Fatalf("decoded %+v mask %#x", decoded, mask)
+	decoded, mask, fpuAddress := DecodeSignalContext(&uc)
+	if decoded != context || mask != 0x4000 || fpuAddress != 0x7ffef000 {
+		t.Fatalf("decoded %+v mask %#x fpstate %#x", decoded, mask, fpuAddress)
+	}
+	// mcontext_t: fpregs follows the 23 gregs.
+	if binary.LittleEndian.Uint64(uc[ucontextMcontext+23*8:]) != 0x7ffef000 {
+		t.Fatal("fpstate is not where mcontext_t keeps fpregs")
 	}
 	// mcontext_t gregs: REG_RIP is 16 and REG_CSGSFS 18 from uc_mcontext.
 	if binary.LittleEndian.Uint64(uc[ucontextMcontext+16*8:]) != 17 || binary.LittleEndian.Uint16(uc[ucontextMcontext+18*8:]) != 0x33 {
 		t.Fatal("register layout differs from mcontext_t")
+	}
+}
+
+func TestSanitizeFPUStateClearsReservedMXCSRBits(t *testing.T) {
+	var image, current [FPUStateSize]byte
+	mxcsr := func() uint32 { return binary.LittleEndian.Uint32(image[fpuMXCSROffset:]) }
+	binary.LittleEndian.PutUint32(image[fpuMXCSROffset:], 0x1f80|0x6000)
+	if SanitizeFPUState(&image, &current); mxcsr() != 0x7f80 {
+		t.Fatalf("a supported MXCSR changed to %#x", mxcsr())
+	}
+	binary.LittleEndian.PutUint32(image[fpuMXCSROffset:], 0xffffffff)
+	if SanitizeFPUState(&image, &current); mxcsr() != defaultMXCSRMask {
+		t.Fatalf("reserved bits survived the default mask: %#x", mxcsr())
+	}
+	binary.LittleEndian.PutUint32(current[fpuMXCSRMask:], 0xffff)
+	binary.LittleEndian.PutUint32(image[fpuMXCSROffset:], 0xffffffff)
+	if SanitizeFPUState(&image, &current); mxcsr() != 0xffff {
+		t.Fatalf("the processor's own mask was ignored: %#x", mxcsr())
 	}
 }

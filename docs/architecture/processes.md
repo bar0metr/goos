@@ -124,15 +124,16 @@ identity is a PID between 2 and 32767, allocated at launch and unique among
 running and zombie Linux processes. A bounded family record maps it to the
 generation-safe GoOS Process ID and retains parentage plus wait status after
 resource teardown (ADR 0154). Running and zombie records count against a
-16-process family limit and a 48-process global compatibility limit. The latter
-leaves 16 of the 64 native process slots unavailable to descendants
+16-process family limit and a 48-process global compatibility limit. No Linux
+process, launch root or descendant, may take one of the last 16 of the 64
+process slots, which stay for native processes
 (ADR 0155). Linux programs never see a native process or task ID.
 
 The working directory starts as the one the launch supplied, held in canonical
 form as the base for relative paths (ADR 0140), and `chdir` replaces it. The
 state also names the process's file I/O memory object, created at its first file
-read or write (ADR 0141), and holds the signal dispositions and blocked mask
-the program registered, which nothing acts on (ADR 0151).
+read or write (ADR 0141), and holds the signal dispositions, blocked mask,
+and pending signals that system call returns act on (ADR 0163).
 
 A Linux `execve` prepares a second address space under the same Process and
 task (ADR 0157). Commit replaces the scheduler root, Process root, region map,

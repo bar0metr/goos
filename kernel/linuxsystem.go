@@ -202,10 +202,10 @@ func (handler *linuxCallHandler) clockGettime(id uint64, address uint64) linuxco
 	return linuxcompat.Result{}
 }
 
-// nanosleep blocks the task until a timer deadline. No signal can interrupt
-// a GoOS Linux process, so the sleep always runs to its end and the
-// remaining-time argument is never written. Killing the process cancels the
-// wait with the task's other waits.
+// nanosleep blocks the task until a timer deadline. A signal with a handler
+// ends the sleep early with EINTR and writes the time left to the
+// remaining-time argument; SA_RESTART does not restart it. Killing the
+// process cancels the wait with the task's other waits.
 //
 // The deadline counts timer ticks, and ticks are no clock: a host that
 // delivers them late delivers them in a burst, and three can arrive in a

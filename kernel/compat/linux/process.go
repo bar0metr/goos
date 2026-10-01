@@ -189,7 +189,9 @@ const (
 	// every pid_t a program may narrow it to.
 	MaxPID = int32(32767)
 	// NativeProcessReserve keeps scheduler and process slots unavailable to
-	// Linux descendants. The system has 64 slots; descendants may use 48.
+	// every Linux process. The system has 64 slots; Linux processes, launch
+	// roots and descendants together, may hold 48 of them. A family holds at
+	// most 16.
 	NativeProcessReserve    = 16
 	LinuxGlobalMaxProcesses = process.MaxProcesses - NativeProcessReserve
 	LinuxFamilyMaxProcesses = 16
@@ -308,6 +310,15 @@ func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsH
 	return true
 }
 
+// LinuxProcessCreationAllowed reports whether a new Linux Process may join a
+// native registry that holds total processes. Every Linux creation path asks
+// it: a PID 1 launch and fork, vfork, and clone. The answer is no once the
+// new process would take one of the NativeProcessReserve slots, which stay
+// for native processes. Native creation never asks.
+func LinuxProcessCreationAllowed(total int) bool {
+	return total >= 0 && total < LinuxGlobalMaxProcesses
+}
+
 // RegisterChild reserves an identity for a compatibility-created GoOS
 // Process. The caller installs the child's heavy compatibility state before
 // making its task runnable.
@@ -317,7 +328,7 @@ func RegisterChild(goosProcessID process.ID, parentPID int32, liveProcessCount i
 		return ProcessRecord{}, ChildRegistrationInvalid
 	}
 	global, family := processCounts(parent.FamilyID)
-	if liveProcessCount >= LinuxGlobalMaxProcesses || global >= LinuxGlobalMaxProcesses || family >= LinuxFamilyMaxProcesses {
+	if !LinuxProcessCreationAllowed(liveProcessCount) || global >= LinuxGlobalMaxProcesses || family >= LinuxFamilyMaxProcesses {
 		return ProcessRecord{}, ChildRegistrationLimit
 	}
 	record, installed := installProcessRecord(goosProcessID, parentPID, parent.FamilyID)

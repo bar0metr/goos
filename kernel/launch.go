@@ -150,6 +150,11 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		if !validLinuxLaunch(grants, resourceProfile, startupData) {
 			return 0, 0, supervisor.LaunchCapabilityDenied
 		}
+		// A Linux root obeys the same native reserve as a forked child,
+		// checked before anything is built for it.
+		if !linuxcompat.LinuxProcessCreationAllowed(processRegistry.Count()) {
+			return 0, 0, supervisor.LaunchResourceExhausted
+		}
 		if linuxelf.ParseInto(linuxImage, image, linuxelf.GoOSConfig()) != linuxelf.OK {
 			return 0, 0, supervisor.LaunchInvalidImage
 		}

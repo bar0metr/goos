@@ -52,6 +52,7 @@
  *   hardening         failed exec, fork memory, descriptors, pipes, signal frames
  *   limits            fork until the family budget refuses, with zombies too
  *   fork-fault        a validation kernel fails a fork mid-copy; another succeeds
+ *   fpstate           x87 and SSE state survives a signal handler and its return
  *   exec-vfs-loss     the validation VFS dies while execve prepares its image
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
@@ -703,9 +704,9 @@ static void never_returned(void)
 }
 
 /* The kernel records dispositions and the blocked mask and reports them
- * back. No check here raises a signal: GoOS delivers none. An emulator that
- * keeps the signal table itself leaves SIGKILL and SIGSTOP in a handler's
- * mask, so only a strict run requires them gone. */
+ * back. No check here raises a signal; the signal mode delivers them. An
+ * emulator that keeps the signal table itself leaves SIGKILL and SIGSTOP in
+ * a handler's mask, so only a strict run requires them gone. */
 static int signals_ok(int strict)
 {
 	struct kernel_action fresh = {never_called, ACTION_RESTORER | ACTION_RESTART, never_returned,
@@ -2749,6 +2750,195 @@ static int exec_vfs_loss_test(void)
 	return 0;
 }
 
+/* XMM0, XMM1, XMM7, and XMM15 carry one 16-byte pattern each, MXCSR rounds
+ * toward zero, and the x87 control word selects 53-bit precision. */
+static unsigned char fp_in[64], fp_out[64];
+static volatile int fp_nested_ok, fp_seen;
+
+#define FP_MXCSR 0x7f80u
+#define FP_FCW 0x027fu
+
+/* Loads the state, signals the calling thread with the SYSCALL inside the
+ * same asm block, and stores the state the return gives back. */
+static long fp_signal(long signal, unsigned int *mxcsr, unsigned short *fcw)
+{
+	unsigned int mx = FP_MXCSR;
+	unsigned short cw = FP_FCW;
+	long result;
+
+	__asm__ volatile("ldmxcsr %[mx]\n\tfldcw %[cw]\n\t"
+			 "movdqu 0(%[in]), %%xmm0\n\tmovdqu 16(%[in]), %%xmm1\n\t"
+			 "movdqu 32(%[in]), %%xmm7\n\tmovdqu 48(%[in]), %%xmm15\n\t"
+			 "syscall\n\t"
+			 "movdqu %%xmm0, 0(%[out])\n\tmovdqu %%xmm1, 16(%[out])\n\t"
+			 "movdqu %%xmm7, 32(%[out])\n\tmovdqu %%xmm15, 48(%[out])\n\t"
+			 "stmxcsr %[mx]\n\tfnstcw %[cw]"
+			 : "=a"(result), [mx] "+m"(mx), [cw] "+m"(cw)
+			 : "a"((long)SYS_tkill), "D"((long)getpid()), "S"(signal), [in] "r"(fp_in), [out] "r"(fp_out)
+			 : "rcx", "r11", "memory", "xmm0", "xmm1", "xmm7", "xmm15");
+	*mxcsr = mx;
+	*fcw = cw;
+	return result;
+}
+
+static void fp_clobber(void)
+{
+	unsigned int mx = 0x1f80;
+	unsigned short cw = 0x037f;
+
+	__asm__ volatile("pcmpeqb %%xmm0, %%xmm0\n\tpxor %%xmm1, %%xmm1\n\t"
+			 "pcmpeqb %%xmm7, %%xmm7\n\tpxor %%xmm15, %%xmm15\n\t"
+			 "ldmxcsr %[mx]\n\tfldcw %[cw]"
+			 :
+			 : [mx] "m"(mx), [cw] "m"(cw)
+			 : "xmm0", "xmm1", "xmm7", "xmm15");
+}
+
+static void fp_clobber_handler(int number)
+{
+	(void)number;
+	fp_seen++;
+	fp_clobber();
+}
+
+/* Runs a second signal inside the first handler and checks that its own
+ * state comes back, then clobbers everything before it returns. */
+static void fp_outer_handler(int number)
+{
+	unsigned char saved[64];
+	unsigned int mxcsr;
+	unsigned short fcw;
+
+	(void)number;
+	memcpy(saved, fp_in, sizeof saved);
+	for (int index = 0; index < 64; index++)
+		fp_in[index] = (unsigned char)(0xa0 + index);
+	fp_signal(SIGUSR2, &mxcsr, &fcw);
+	fp_nested_ok = !memcmp(fp_out, fp_in, sizeof fp_out) && mxcsr == FP_MXCSR && fcw == FP_FCW;
+	memcpy(fp_in, saved, sizeof saved);
+	fp_clobber();
+}
+
+/* Rewrites the saved XMM1 image: offset 160 holds XMM0, 176 XMM1. */
+static void fp_edit_handler(int number, siginfo_t *info, void *context)
+{
+	unsigned char *image = (unsigned char *)((ucontext_t *)context)->uc_mcontext.fpregs;
+
+	(void)number;
+	(void)info;
+	memset(image + 176, 0x3c, 16);
+	fp_clobber();
+}
+
+static void fp_null_handler(int number, siginfo_t *info, void *context)
+{
+	(void)number;
+	(void)info;
+	((ucontext_t *)context)->uc_mcontext.fpregs = NULL;
+}
+
+static unsigned long fp_bad_address;
+
+static void fp_bad_pointer_handler(int number, siginfo_t *info, void *context)
+{
+	(void)number;
+	(void)info;
+	((ucontext_t *)context)->uc_mcontext.fpregs = (void *)fp_bad_address;
+}
+
+static void fp_bad_mxcsr_handler(int number, siginfo_t *info, void *context)
+{
+	unsigned char *image = (unsigned char *)((ucontext_t *)context)->uc_mcontext.fpregs;
+
+	(void)number;
+	(void)info;
+	memset(image + 24, 0xff, 4);
+}
+
+static int fp_bad_child(void)
+{
+	unsigned int mxcsr;
+	unsigned short fcw;
+
+	if (set_action(SIGUSR1, fp_bad_mxcsr_handler, 0) != 0 ||
+	    (fp_bad_address != 0 && set_action(SIGUSR1, fp_bad_pointer_handler, 0) != 0))
+		return 2;
+	fp_signal(SIGUSR1, &mxcsr, &fcw);
+	/* Reserved MXCSR bits are cleared, as Linux clears them. */
+	return mxcsr >> 16 == 0 ? 3 : 4;
+}
+
+static int fpstate_test(void)
+{
+	unsigned int mxcsr;
+	unsigned short fcw;
+	char *pages;
+	int status;
+
+	fflush(stdout);
+	for (int index = 0; index < 64; index++)
+		fp_in[index] = (unsigned char)(index * 7 + 1);
+
+	/* A handler that clobbers every register gives nothing back. */
+	signal(SIGUSR1, fp_clobber_handler);
+	if (fp_signal(SIGUSR1, &mxcsr, &fcw) != 0 || fp_seen != 1 || memcmp(fp_out, fp_in, sizeof fp_out) ||
+	    mxcsr != FP_MXCSR || fcw != FP_FCW) {
+		printf("fpstate failed: clobbered mxcsr=%#x fcw=%#x seen=%d\n", mxcsr, fcw, fp_seen);
+		return 1;
+	}
+
+	/* A signal inside a handler restores the handler's own state. */
+	signal(SIGUSR1, fp_outer_handler);
+	signal(SIGUSR2, fp_clobber_handler);
+	if (fp_signal(SIGUSR1, &mxcsr, &fcw) != 0 || !fp_nested_ok || memcmp(fp_out, fp_in, sizeof fp_out) ||
+	    mxcsr != FP_MXCSR || fcw != FP_FCW) {
+		printf("fpstate failed: nested\n");
+		return 1;
+	}
+
+	/* An edited image is what comes back. */
+	set_action(SIGUSR1, fp_edit_handler, 0);
+	fp_signal(SIGUSR1, &mxcsr, &fcw);
+	for (int index = 0; index < 16; index++)
+		if (fp_out[16 + index] != 0x3c || fp_out[index] != fp_in[index]) {
+			printf("fpstate failed: edited image\n");
+			return 1;
+		}
+
+	/* A null fpstate returns to the initial state. */
+	set_action(SIGUSR1, fp_null_handler, 0);
+	fp_signal(SIGUSR1, &mxcsr, &fcw);
+	if (mxcsr != 0x1f80 || fcw != 0x037f) {
+		printf("fpstate failed: null image mxcsr=%#x fcw=%#x\n", mxcsr, fcw);
+		return 1;
+	}
+
+	/* An image the process cannot read, one in the kernel half, and one
+	 * that runs off a mapping end the process with SIGSEGV. */
+	pages = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (pages == MAP_FAILED || munmap(pages + 4096, 4096) != 0)
+		return 1;
+	unsigned long bad[] = {0x1000, 0xffff800000001000UL, (unsigned long)pages + 4096 - 256};
+	for (int index = 0; index < 3; index++) {
+		fp_bad_address = bad[index];
+		if (!sigsegv_status(status = child_status(fp_bad_child))) {
+			printf("fpstate failed: bad image %d status=%#x\n", index, status);
+			return 1;
+		}
+	}
+	/* What a Linux kernel does with them depends on the CPU, which may fault
+	 * on the load; an emulated one may not. GoOS clears them on any CPU. */
+	fp_bad_address = 0;
+	if (on_goos() && (status = child_status(fp_bad_child)) != 3 << 8) {
+		printf("fpstate failed: reserved MXCSR status=%#x\n", status);
+		return 1;
+	}
+	signal(SIGUSR1, SIG_DFL);
+	signal(SIGUSR2, SIG_DFL);
+	printf("fpstate ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -2809,6 +2999,8 @@ int main(int argc, char **argv)
 			return limits_test();
 		if (!strcmp(argv[1], "fork-fault"))
 			return fork_fault_test();
+		if (!strcmp(argv[1], "fpstate"))
+			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))
 			return exec_vfs_loss_test();
 		if (!strcmp(argv[1], "path")) {

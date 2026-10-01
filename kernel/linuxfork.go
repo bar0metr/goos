@@ -161,7 +161,10 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	// A runnable task cannot be withdrawn. Its process ID is consumed either
 	// way so it is never handed out twice.
 	nextProcessID++
-	if !processRegistry.BindTask(pid, sched.TaskID(task)) || !amd64.SetTaskFSBase(sched.TaskID(task), fsBase) {
+	// The child resumes with the parent's x87 and SSE state at this call.
+	parentFPU, _ := amd64.LinuxUserFPU(handler.task)
+	if !processRegistry.BindTask(pid, sched.TaskID(task)) || !amd64.SetTaskFSBase(sched.TaskID(task), fsBase) ||
+		!amd64.SetTaskFPU(sched.TaskID(task), parentFPU) {
 		panicSerial("forked Linux task could not be bound")
 	}
 	trace(diag.ProcessSpawned, pid, task, 0, 0)

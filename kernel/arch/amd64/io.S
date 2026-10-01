@@ -852,6 +852,13 @@ goos_linux_syscall_entry:
     movabsq $.L_linux_syscall_low, %r10
     jmp *%r10
 .L_linux_syscall_low:
+    // The caller's x87 and SSE state is kept aside before any kernel code
+    // runs: the kernel uses SSE registers, and the return restores the copy.
+    // Signal delivery and rt_sigreturn read and replace it.
+    movq goos_current_task(%rip), %rax
+    shlq $GOOS_FPU_AREA_SHIFT, %rax
+    leaq goos_linux_user_fpu(%rip), %r10
+    fxsave64 (%r10,%rax)
     subq $GOOS_LINUX_FRAME_RESERVE, %rsp
     movq GOOS_LINUX_SAVED_RAX(%rsp), %rax
     movq %rax, GOOS_LINUX_FRAME_BASE+0(%rsp)
@@ -884,6 +891,10 @@ goos_linux_syscall_entry:
     cmpq $GOOS_LINUX_ACTION_EXEC, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
     je .linux_user_exec
 .linux_user_return:
+    movq goos_current_task(%rip), %rax
+    shlq $GOOS_FPU_AREA_SHIFT, %rax
+    leaq goos_linux_user_fpu(%rip), %r10
+    fxrstor64 (%r10,%rax)
     movq GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_RETURN(%rsp), %rax
     movq %rax, GOOS_LINUX_SAVED_RAX(%rsp)
     movq GOOS_LINUX_FRAME_BASE+56(%rsp), %rax
@@ -984,6 +995,10 @@ goos_linux_syscall_entry:
     movq %rsp, (%rdx,%rcx,8)
     movq %rcx, %r9
     shlq $GOOS_FPU_AREA_SHIFT, %r9
+    // The retried SYSCALL resumes with the caller's state, not with what the
+    // kernel left in the registers.
+    leaq goos_linux_user_fpu(%rip), %r11
+    fxrstor64 (%r11,%r9)
     leaq goos_task_fpu(%rip), %r10
     fxsave64 (%r10,%r9)
     btrq %rcx, goos_runnable_mask(%rip)
@@ -2083,6 +2098,12 @@ goos_need_reschedule:
 .align 16
 .global goos_task_fpu
 goos_task_fpu:
+    .zero 32768
+// goos_linux_user_fpu holds, per task slot, the x87 and SSE state of a Linux
+// task at its current system call: saved on entry, restored on return.
+.align 16
+.global goos_linux_user_fpu
+goos_linux_user_fpu:
     .zero 32768
 goos_scheduler_enabled:
     .byte 0

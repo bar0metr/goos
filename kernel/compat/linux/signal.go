@@ -29,8 +29,10 @@ type SignalState struct {
 }
 
 // supportedActionFlags are the sigaction flags whose Linux meaning GoOS
-// provides. SA_NOCLDSTOP, SA_ONSTACK, and SA_RESTART hold trivially: no child
-// ever stops, no alternate stack can be installed, and no call is interrupted.
+// provides. SA_RESTART restarts an interrupted stream read or write that moved
+// nothing, and wait4; no completed effect is repeated. SA_NOCLDSTOP and
+// SA_ONSTACK hold because no child ever stops and no alternate stack can be
+// installed.
 const supportedActionFlags = abi.SignalActionNoChildStop | abi.SignalActionNoChildWait | abi.SignalActionInfo |
 	abi.SignalActionRestorer | abi.SignalActionOnStack | abi.SignalActionRestart | abi.SignalActionNoDefer |
 	abi.SignalActionResetHand

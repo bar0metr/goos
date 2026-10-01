@@ -45,7 +45,10 @@ a temporary mask that lets a pending or a sent signal interrupt the call and
 comes back after the handler or a ready return; `family` leaves a child asleep
 for the Ctrl-C check of the boot test; `path` prints the `PATH` it got;
 `fork-fault` and `exec-vfs-loss` serve the validation kernel and VFS, which
-fail a fork mid-copy and die during an `execve`.
+fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
+registers, MXCSR, and the x87 control word survive a handler that clobbers
+them, a nested signal, an edited and a null `fpstate`, and that a bad
+`fpstate` ends the process.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -112,7 +115,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `7299e4317a68b60b295e2bda9b7202e051b5bbf128d26f43f94e8f5517efb630` |
+| `prebuilt/abi-probe` | `380102422eabd6550c9f045b32c0778e637001b7bbfd5621037a49d702e32351` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
