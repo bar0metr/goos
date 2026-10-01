@@ -105,31 +105,53 @@ func executablePagePending(task sched.TaskID) bool {
 
 // completeExecutablePage consumes a VFS reply before another request can
 // reuse the transport slot. It returns true when it consumed the endpoint's
-// queued message.
+// queued message. Processes forked from one program share its source, so
+// several tasks can wait on one endpoint; the reply goes to the task whose
+// request it answers, found by correlation.
 func completeExecutablePage(channelID uint64, side uint8) bool {
+	waiting := false
+	for index := range executableFaults {
+		fault := &executableFaults[index]
+		if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side {
+			waiting = true
+			break
+		}
+	}
+	if !waiting {
+		return false
+	}
+	channel, live := channelRegistry.Lookup(channelID)
+	if !live {
+		// The source's service is gone: every request on it fails.
+		for index := range executableFaults {
+			fault := &executableFaults[index]
+			if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side {
+				fault.failed = true
+				amd64.WakeTaskID(uint64(fault.task))
+			}
+		}
+		return false
+	}
+	var status ipc.Status
+	executableReply, status = channel.Receive(side)
+	if status != ipc.StatusOK {
+		return false
+	}
 	slot := -1
 	for index := range executableFaults {
 		fault := &executableFaults[index]
-		if fault.task != 0 && fault.channelID == channelID && fault.side == side {
+		if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side && fault.correlation == executableReply.Correlation {
 			slot = index
 			break
 		}
 	}
 	if slot < 0 {
-		return false
+		// A reply to a request whose task has gone or given up.
+		return true
 	}
 	fault := &executableFaults[slot]
-	channel, live := channelRegistry.Lookup(channelID)
-	if !live {
-		fault.failed = true
-		amd64.WakeTaskID(uint64(fault.task))
-		return false
-	}
-	var status ipc.Status
-	executableReply, status = channel.Receive(side)
 	reply, valid := vfs.DecodeReplyFrom(&executableReply)
-	valid = status == ipc.StatusOK && valid && executableReply.Correlation == fault.correlation &&
-		reply.Operation == vfs.OperationReadExecutable && reply.Status == vfs.StatusOK && reply.Size == fault.count
+	valid = valid && reply.Operation == vfs.OperationReadExecutable && reply.Status == vfs.StatusOK && reply.Size == fault.count
 	if valid {
 		valid = installExecutablePage(*fault)
 	}
