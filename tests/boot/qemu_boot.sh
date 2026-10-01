@@ -193,6 +193,25 @@ wait_for_count() {
 
 pass_group() { printf 'PASS %s\n' "$1"; }
 
+# await_ready waits until the system writing log has settled, at most two
+# minutes: within the Nth boot in log, a prompt has been printed and the
+# validation build's storage driver fault at the end of the boot has been
+# recovered from. The shell is read from the volume (ADR 0175) and can start
+# again after that fault, so it then waits three seconds more for such a
+# restart to finish. On a timeout it returns, and the marker the caller waits
+# for next reports the failure.
+await_ready() {
+	waited=0
+	while [ "$waited" -lt 240 ]; do
+		if awk -v want="${2:-1}" '/BOOT_SERVICES_EXITED/ { boot++ } boot == want && /goos> / { prompt = 1 } boot == want && /BLOCK_DRIVER_REPLACED_OK/ { driver = 1 } END { exit !(prompt && driver) }' "$1" 2>/dev/null; then
+			sleep 3
+			return 0
+		fi
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+}
+
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
 # whole number with an optional M or G suffix and fails on anything else.
 guest_memory_mib() {
@@ -247,7 +266,7 @@ long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
 # One byte past the native name limit, NameMax (ADR 0114).
 too_long_name=$(awk 'BEGIN { for (i = 0; i < 1025; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
-( sleep 8
+( await_ready "$log"
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
@@ -649,6 +668,8 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 2
 	printf 'jobs\n'
 	sleep 1
+	printf 'echo before-vfs-ps; ps; echo after-vfs-ps\n'
+	sleep 2
 	# After the VFS restart gfm and the viewer it starts get sessions from the
 	# new VFS (ADR 0130). Ctrl-C while gfm waits for the editor stops both,
 	# and the shell reads lines again.
@@ -1045,7 +1066,7 @@ checks=$((checks + 1))
 grep -a -q 'Welcome to GoOS' "$disk" || fail_check persistence.fat32-image 'Welcome to GoOS in disk image' 'content not found' "$log" 'cat /persist/state.txt'
 checks=$((checks + 1))
 
-( sleep 20
+( await_ready "$reboot_log"
 	printf 'cat /persist/state.txt\n'
 	sleep 2
 	printf '/home/demo/args after-reboot\n'
@@ -1086,13 +1107,6 @@ pass_group persistence
 require_marker vfs-restart.injected VFS_FAULT_INJECTED "$log" 'fault vfs'
 require_marker vfs-restart.restarted VFS_RESTARTED_OK "$log" 'fault vfs'
 require_count vfs-restart.service-started-twice '^VFS_SERVICE_OK$' 2 "$log" 'fault vfs'
-# The shell is read from the volume (ADR 0175). A program whose source is
-# served by the VFS that died can end with it when it next touches a page it
-# has not read yet (ADR 0121); the shell then starts again from the volume
-# once the VFS has it attached, rather than being handed a new session.
-if ! grep -q '^SHELL_VFS_RENEWED_OK$' "$log"; then
-	require_window vfs-restart.shell-session '^SERVICE_FROM_DISK_OK shell$' 'the shell given a new session or started again from the volume' "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault'
-fi
 require_marker vfs-restart.config-session CONFIG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_marker vfs-restart.log-session LOG_SESSION_RENEWED_OK "$log" 'fault vfs'
 require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'fault vfs'
@@ -1100,21 +1114,30 @@ require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the nam
 forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
 require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
 require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
-# A Linux process never gets a new session: it keeps the dead one, or it
-# ends with the shell whose job it is.
-if ! grep -q 'session lost: EIO$' "$log"; then
-	require_marker vfs-restart.linux-session-ended SESSION_JOBS_STOPPED_OK "$log" 'fault vfs'
-fi
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
-# The jobs of a shell that ended were stopped with it, or kept by a shell
-# that survived.
-if ! grep -q '^\[[0-9]\] running  sleep 25$' "$log"; then
-	require_window vfs-restart.jobs-ended '^SESSION_JOBS_STOPPED_OK$' 'the jobs of the ended shell stopped with it' "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault'
+# The shell is read from the volume (ADR 0175). A program whose source is
+# served by the VFS that died can end with it when it next touches a page it
+# has not read yet (ADR 0121). Every check below looks only at what happened
+# from this fault to the end of its scenario, never at an earlier fault.
+#
+# Either the shell survived: it was handed a new session, kept its jobs, and
+# its Linux job found the session it was launched with dead.
+# Or it ended: it started again from the volume exactly once, its jobs were
+# stopped with it, and none of their processes is left.
+vfs_window() { window "$log" 'VFS_FAULT_INJECTED' 'cd /home/fm'; }
+shell_starts=$(vfs_window | grep -c 'SERVICE_FROM_DISK_OK shell$' || true)
+if vfs_window | grep -q 'SHELL_VFS_RENEWED_OK$'; then
+	[ "$shell_starts" -eq 0 ] || fail_check vfs-restart.shell-kept 'no shell start when the shell kept its session' "$shell_starts" "$log" 'VFS_FAULT_INJECTED'
+	vfs_window | grep -q '^\[[0-9]\] running  sleep 25$' || fail_check vfs-restart.jobs-kept 'the shell kept its job across the restart' 'job not listed' "$log" 'VFS_FAULT_INJECTED'
+	vfs_window | grep -q 'session lost: EIO$' || fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'no EIO' "$log" 'VFS_FAULT_INJECTED'
+else
+	[ "$shell_starts" -eq 1 ] || fail_check vfs-restart.shell-started 'one shell start from the volume' "$shell_starts" "$log" 'VFS_FAULT_INJECTED'
+	vfs_window | grep -q 'SESSION_JOBS_STOPPED_OK$' || fail_check vfs-restart.jobs-ended 'the jobs of the ended shell stopped with it' 'marker not found' "$log" 'VFS_FAULT_INJECTED'
+	leftover=$(window "$log" 'before-vfs-ps' 'after-vfs-ps' | grep ' sleep$\| abi-probe$' | sed -n '1p' || true)
+	[ -z "$leftover" ] || fail_check vfs-restart.jobs-gone 'no process of the ended shell left' "$leftover" "$log" 'before-vfs-ps'
+	window "$log" 'before-vfs-ps' 'after-vfs-ps' | grep -q ' ps$' || fail_check vfs-restart.ps-ran 'ps listed the processes after the restart' 'no ps output' "$log" 'before-vfs-ps'
 fi
-# Never two shells: at most one start of the console's shell.
-restarts=$(window "$log" 'VFS_FAULT_INJECTED' 'after-vfs-fault' | grep -c '^SERVICE_FROM_DISK_OK shell$' || true)
-[ "$restarts" -le 1 ] || fail_check vfs-restart.one-shell 'at most one shell start' "$restarts" "$log" 'VFS_FAULT_INJECTED'
-checks=$((checks + 1))
+checks=$((checks + 3))
 pass_group vfs-restart
 
 # The configuration and log services restart on their own (ADR 0100). The
@@ -1268,7 +1291,7 @@ pass_group release-shell
 # The M7 acceptance runs inside one VM: write, reboot from the shell, read back.
 # It uses /home because that is where the specification puts user data.
 rm -f "$m7_log"
-( sleep 12
+( await_ready "$m7_log"
 	printf 'mkdir /home/m7\n'
 	sleep 3
 	printf 'write /home/m7/hello.txt "Hello from GoOS"\n'
@@ -1276,7 +1299,7 @@ rm -f "$m7_log"
 	printf 'cat /home/m7/hello.txt\n'
 	sleep 3
 	printf 'reboot\n'
-	sleep 20
+	await_ready "$m7_log" 2
 	printf 'cat /home/m7/hello.txt\n'
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
@@ -1310,7 +1333,7 @@ go run ./tools/mkfat32 -tree "$system_tree" "$corrupt_disk"
 for boot_sector in 0 6; do
 	printf '\000\000\000\040' | dd of="$corrupt_disk" bs=1 seek=$((boot_sector * 512 + 32)) count=4 conv=notrunc 2>/dev/null
 done
-( sleep 12
+( await_ready "$corrupt_log"
 	printf 'ls /\n'
 	sleep 2
 	printf 'echo volatile-root-still-works\n'
@@ -1349,7 +1372,7 @@ pass_group corrupt-volume
 # again.
 rm -f "$fsck_log"
 recovery_iso=build/variants/$variant/goos-x86_64-recovery.iso
-( sleep 8
+( await_ready "$fsck_log"
 	printf 'fsck-fat --check auto\n'
 	sleep 8
 	printf 'cat /home/demo/message.txt; echo after-fsck\n'
@@ -1386,7 +1409,7 @@ for table_kind in mbr gpt; do
 	partition_disk=build/partition-$table_kind-virtio-blk.img
 	rm -f "$partition_log" "$partition_disk" "build/partition-$table_kind.out"
 	go run ./tools/mkfat32 -size 128 -table "$table_kind" -tree "$system_tree" "$partition_disk"
-	( sleep 12
+	( await_ready "$partition_log"
 		printf 'write /persist/partition.txt "inside-%s-partition"\n' "$table_kind"
 		sleep 2
 		printf 'cat /persist/partition.txt\n'
@@ -1421,7 +1444,7 @@ rm -f "$stack_log"
 stack_disk=build/stack-virtio-blk.img
 rm -f "$stack_disk"
 go run ./tools/mkfat32 -tree "$system_tree" "$stack_disk"
-( sleep 12
+( await_ready "$stack_log"
 	printf 'fault kernel-stack\n'
 	sleep 10
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \
@@ -1454,7 +1477,7 @@ rm -f "$poweroff_log" "$poweroff_after_log"
 poweroff_disk=build/poweroff-virtio-blk.img
 rm -f "$poweroff_disk"
 go run ./tools/mkfat32 -tree "$system_tree" "$poweroff_disk"
-( sleep 12
+( await_ready "$poweroff_log"
 	printf 'write /home/poweroff.txt "kept across poweroff"\n'
 	sleep 2
 	printf 'poweroff\n'
@@ -1486,7 +1509,7 @@ require_regex poweroff.message '^Powering off\.\.\.' 'the power-off announced' "
 checks=$((checks + 1))
 forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log" 'Powering off'
 
-( sleep 12
+( await_ready "$poweroff_after_log"
 	printf 'cat /home/poweroff.txt\n'
 	sleep 3
 ) | qemu-system-x86_64 -machine q35 -m "$memory" \

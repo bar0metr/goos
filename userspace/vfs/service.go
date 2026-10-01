@@ -217,8 +217,15 @@ func (service *Service) UnmountFilesystem() vfs.Status {
 // PersistentMounted reports whether the persistent volume is in the namespace.
 func (service *Service) PersistentMounted() bool { return service.persistentMounted }
 
-// Sync makes every completed write to the persistent volume durable.
-func (service *Service) Sync() bool { return service.persistent.Flush() }
+// Sync makes every completed write to the persistent volume durable. With no
+// volume mounted there is nothing to make durable, so a machine without one
+// can still be switched off; a mounted volume whose service has gone fails.
+func (service *Service) Sync() bool {
+	if !service.persistentMounted {
+		return true
+	}
+	return service.persistent.Flush()
+}
 
 func (service *Service) mountPersistent(root ramfs.NodeID) bool {
 	if service.namespace.Mount([]byte("/persist"), &service.persistent, root) != vfs.StatusOK {

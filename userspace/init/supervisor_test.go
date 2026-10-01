@@ -337,3 +337,37 @@ func TestHeldServiceWaitsLikeABlockedOne(t *testing.T) {
 		t.Fatal("a released service was not started")
 	}
 }
+
+func TestDeferredLaunchWaitsWithoutCountingAFailure(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "shell", Executable: "/system/services/shell", Restart: RestartAlways}) != StatusOK {
+		t.Fatal("registration failed")
+	}
+	attempts := 0
+	pending := true
+	launch := func(LaunchSpec) (uint64, bool) {
+		attempts++
+		if pending {
+			manager.Defer("shell")
+			return 0, false
+		}
+		return 7, true
+	}
+	if manager.StartReady(0, launch) != 0 || attempts != 1 {
+		t.Fatal("a deferred launch started")
+	}
+	if manager.StartReady(1, launch) != 0 || attempts != 1 {
+		t.Fatal("a deferred service was launched again before Proceed")
+	}
+	if snapshot, _ := manager.Snapshot("shell"); snapshot.State != StateBlocked || snapshot.Restarts != 0 {
+		t.Fatalf("deferred service = %#v", snapshot)
+	}
+	pending = false
+	manager.Proceed("shell")
+	if manager.StartReady(2, launch) != 1 {
+		t.Fatal("the service was not started after Proceed")
+	}
+	if snapshot, _ := manager.Snapshot("shell"); snapshot.State != StateRunning || snapshot.Restarts != 0 {
+		t.Fatalf("started service = %#v", snapshot)
+	}
+}

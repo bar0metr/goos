@@ -44,7 +44,7 @@ done
 archive=$variant/initramfs/initramfs.tar
 if [ -f "$archive" ]; then
 	members=$(tar -tf "$archive")
-	for excluded in system/fault-probe system/linux/ system/force-recovery system/config system/log system/bin/gfm system/bin/bench system/bin/uname; do
+	for excluded in system/fault-probe system/linux/ system/force-recovery system/config system/log system/bin/gfm system/bin/bench system/bin/uname system/bin/ps; do
 		printf '%s\n' "$members" | grep -qx "$excluded" && complain "$excluded is in the normal archive"
 	done
 	for required in system/init system/shell system/tty system/commands system/bin/fsck-fat system/bin/edit; do

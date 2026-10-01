@@ -32,6 +32,15 @@ type launcher struct {
 	// child is the running child, and correlation the request it answers.
 	child       handle.ID
 	correlation uint64
+	// While the child's program is read from a file (ADR 0175), fill is the
+	// read in flight and object and size the caller's request, which is
+	// copied and checked again once the read is answered; path is the
+	// program the read is for.
+	fill     pendingFill
+	object   handle.ID
+	size     int
+	path     [execproto.MaxPath]byte
+	pathSize int
 }
 
 // launchData holds the request being handled, copied out of the caller's
@@ -45,6 +54,8 @@ const maxLaunchMapping = (execproto.MaxLaunchObject + 4095) &^ 4095
 // one runs, the channel otherwise.
 func (launch *launcher) interest() (userwait.Interest, bool) {
 	switch {
+	case launch.fill.session != 0:
+		return userwait.Interest{Handle: launch.fill.session, Events: kcall.WaitReadable | kcall.WaitPeerClosed}, true
 	case launch.child != 0:
 		return userwait.Interest{Handle: launch.child, Events: kcall.WaitCompleted}, true
 	case launch.server != 0:
@@ -57,6 +68,10 @@ func (launch *launcher) interest() (userwait.Interest, bool) {
 // request.
 func pollLauncher(job *execJob) {
 	launch := &job.launcher
+	if launch.fill.session != 0 {
+		completeChildFill(job)
+		return
+	}
 	if launch.child != 0 {
 		code := waitApplicationExit(launch.child)
 		launch.child = 0
@@ -95,28 +110,97 @@ func pollLauncher(job *execJob) {
 		return
 	}
 	request, copied := copyLaunchRequest(message.Handles[0], size)
-	sys.HandleClose(message.Handles[0])
 	if !copied {
+		sys.HandleClose(message.Handles[0])
 		replyLaunch(launch, execproto.LaunchReply{LaunchStatus: uint64(supervisor.LaunchInvalidImage)}, message.Correlation)
 		return
 	}
+	launch.correlation = message.Correlation
+	command, launched := checkChild(launch, request)
+	path := request.Stages[0].Path
+	if launched == supervisor.LaunchOK && execproto.OriginOf(path) == execproto.OriginFile {
+		// The program is read in the main loop, and the request copied and
+		// checked again when it has been.
+		pending, status := beginSource(path)
+		if status == supervisor.LaunchOK {
+			launch.fill, launch.object, launch.size = pending, message.Handles[0], size
+			launch.pathSize = copy(launch.path[:], path)
+			return
+		}
+		launched = status
+	}
+	sys.HandleClose(message.Handles[0])
+	if launched == supervisor.LaunchOK {
+		launched = startChild(job, request, command)
+	}
+	if launched != supervisor.LaunchOK {
+		endChildLaunch(launch, launched)
+	}
+}
+
+// checkChild decides whether a request may run, and what as.
+func checkChild(launch *launcher, request execproto.Request) ([]byte, supervisor.LaunchStatus) {
 	command, _, launched := supervisor.ChildLaunch(request, commandEntry)
 	if launched == supervisor.LaunchOK && launch.input == 0 {
 		launched = supervisor.LaunchResourceExhausted
 	}
+	return command, launched
+}
+
+// startChild launches a checked request on the job's terminal.
+func startChild(job *execJob, request execproto.Request, command []byte) supervisor.LaunchStatus {
+	launch := &job.launcher
+	terminal := supervisor.Endpoint{ID: handle.ID(job.session.output[1]), Type: handle.TypeStream, Shared: true}
+	streams := supervisor.Streams{Input: supervisor.Endpoint{ID: launch.input, Type: handle.TypeStream, Shared: true}, Output: terminal, Error: terminal}
+	stage := request.Stages[0]
+	var launched supervisor.LaunchStatus
+	_, launch.child, launched = launchApplication(stage.Path, command, request.CWD, stage.Arguments, request.Environment, streams, nil)
+	discardReady()
 	if launched == supervisor.LaunchOK {
-		terminal := supervisor.Endpoint{ID: handle.ID(job.session.output[1]), Type: handle.TypeStream, Shared: true}
-		streams := supervisor.Streams{Input: supervisor.Endpoint{ID: launch.input, Type: handle.TypeStream, Shared: true}, Output: terminal, Error: terminal}
-		stage := request.Stages[0]
-		_, launch.child, launched = launchApplication(stage.Path, command, request.CWD, stage.Arguments, request.Environment, streams, nil)
+		syslog.Info("application launched", syslog.Str("command", bytesString(command)))
+	}
+	return launched
+}
+
+// completeChildFill takes the VFS's answer to the read of a child's program.
+// The request is copied again from the caller's object, which it could have
+// changed meanwhile, checked again, and launched only if it still names the
+// program that was read.
+func completeChildFill(job *execJob) {
+	launch := &job.launcher
+	pending := launch.fill
+	launch.fill = pendingFill{}
+	message, status := receiveNow(pending.session)
+	executable, launched := finishSource(pending, message, status)
+	request, copied := copyLaunchRequest(launch.object, launch.size)
+	sys.HandleClose(launch.object)
+	launch.object = 0
+	var command []byte
+	if launched == supervisor.LaunchOK {
+		command, launched = checkChild(launch, request)
+	}
+	if launched == supervisor.LaunchOK && (!copied || !equalPath(request.Stages[0].Path, launch.path[:launch.pathSize])) {
+		launched = supervisor.LaunchInvalidImage
+	}
+	if launched == supervisor.LaunchOK {
+		setReady(launch.path[:launch.pathSize], executable, launched)
+		launched = startChild(job, request, command)
+	} else {
+		closeExecutable(executable)
 	}
 	if launched != supervisor.LaunchOK {
-		launch.child = 0
-		replyLaunch(launch, execproto.LaunchReply{LaunchStatus: uint64(launched)}, message.Correlation)
-		return
+		endChildLaunch(launch, launched)
 	}
-	launch.correlation = message.Correlation
-	syslog.Info("application launched", syslog.Str("command", bytesString(command)))
+}
+
+// endChildLaunch answers a launch that started no child.
+func endChildLaunch(launch *launcher, launched supervisor.LaunchStatus) {
+	if launch.object != 0 {
+		sys.HandleClose(launch.object)
+		launch.object = 0
+	}
+	launch.child = 0
+	replyLaunch(launch, execproto.LaunchReply{LaunchStatus: uint64(launched)}, launch.correlation)
 }
 
 // copyLaunchRequest copies size bytes from the start of object and decodes
@@ -155,6 +239,12 @@ func stopChild(launch *launcher) {
 // running is stopped and reaped first, so it cannot outlive the job and read
 // input the shell no longer feeds it raw.
 func closeLauncher(launch *launcher) {
+	if launch.fill.session != 0 {
+		dropFill(&launch.fill)
+	}
+	if launch.object != 0 {
+		sys.HandleClose(launch.object)
+	}
 	if launch.child != 0 {
 		sys.ProcessKill(launch.child)
 		waitApplicationExit(launch.child)

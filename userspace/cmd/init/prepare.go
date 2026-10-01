@@ -244,16 +244,7 @@ func completeFill(job *execJob) {
 // fill is overdue, and whether any fill is pending.
 func fillTimeout() (uint64, bool) {
 	now, _ := sys.ClockRead()
-	earliest, pending := uint64(0), false
-	for index := range execJobs {
-		job := &execJobs[index]
-		if !job.active || job.fill.session == 0 {
-			continue
-		}
-		if !pending || job.fill.deadline < earliest {
-			earliest, pending = job.fill.deadline, true
-		}
-	}
+	earliest, pending := earliestFill()
 	if !pending {
 		return 0, false
 	}
@@ -265,7 +256,8 @@ func fillTimeout() (uint64, bool) {
 
 // expireFills gives up on fills the VFS has not answered in time. Closing the
 // session tells the VFS the request is abandoned; the object goes with it.
-func expireFills() {
+// It reports whether a service's read ended, so the caller starts it again.
+func expireFills() bool {
 	now, _ := sys.ClockRead()
 	for index := range execJobs {
 		job := &execJobs[index]
@@ -282,6 +274,7 @@ func expireFills() {
 		job.nextStage++
 		advancePreparation(job)
 	}
+	return expireServiceFills(now)
 }
 
 // receiveNow takes a message that has arrived, without waiting.

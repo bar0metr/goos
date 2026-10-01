@@ -373,7 +373,10 @@ at the serial prompt, and powers each guest off. It checks:
    command runs from `/home/user/bin` by its bare name without grants; after
    `fault fat32`, `fault vfs`, and `fault driver` the system is attached
    again, still protected, and runs commands from the volume; `fault storage`
-   ends in recovery mode with one shell per console;
+   ends in recovery mode with one shell per console, counted both in the
+   supervisor's records and in `ps`; while the VFS holds back the answer to a
+   read of the configuration service's program, PID 1 still answers the
+   shell, then starts the service when the read ends;
 5. a forced-recovery ISO checks the installed volume with `fsck-fat` and
    mounts it again afterwards;
 6. a missing disk, a blank volume, a malformed record, an older release, a
@@ -381,7 +384,11 @@ at the serial prompt, and powers each guest off. It checks:
    within 60 seconds with the stage and reason printed, where the archive's
    commands work; and recovery can `edit` a file and check the volume.
 
-The transcripts are `build/logs/system-*.log`.
+Every guest must power itself off: QEMU has to exit with status 0 within 30
+seconds of `poweroff`, or the test fails. The one boot whose storage is lost
+must instead refuse to power off and report the failed flush. A validation
+archive adds `ps` to the recovery commands for these checks. The
+transcripts are `build/logs/system-*.log`.
 
 ## Stress test
 

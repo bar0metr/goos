@@ -274,6 +274,8 @@ func storageExited(name string) {
 	if name == "vfs" || name == "block" {
 		filesystemPending = true
 	}
+	// A read in flight from the storage that went cannot be answered.
+	cancelServiceSources()
 	if !systemReady {
 		return
 	}
@@ -361,6 +363,7 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 		return
 	}
 	systemReady = false
+	cancelServiceSources()
 	announceMode()
 	if status := requestSystem(false); status != vfs.StatusOK {
 		// Programs read from it are still running; it goes once they
