@@ -748,6 +748,8 @@ boot:
 | `abi-probe limits` | a fork bomb stops at 15 children with `EAGAIN`; zombies count; reaping frees the budget |
 | Ctrl-C on `abi-probe family` | the root and its forked child are gone from `ps` |
 | `abi-probe path` | `PATH=/system/linux` |
+| `abi-probe fork-fault` | a validation kernel fails a fork after four copied pages: `ENOMEM`, `LINUX_FORK_ROLLBACK_OK`, no child, the pipe write end released, and the next fork succeeds (ADR 0173) |
+| `abi-probe exec-vfs-loss`, last | the validation VFS dies while `execve` prepares the image: `EIO`, the same PID, memory, descriptors, and cwd; after PID 1 restarts the VFS a new Linux program runs |
 
 **General boot test.** `make test-boot` also restarts the VFS under a Linux
 process, which must then get `EIO` and no new session, and makes the VFS

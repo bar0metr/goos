@@ -51,6 +51,8 @@
  *   run PATH ARGS...  replace this image with PATH and ARGS
  *   hardening         failed exec, fork memory, descriptors, pipes, signal frames
  *   limits            fork until the family budget refuses, with zombies too
+ *   fork-fault        a validation kernel fails a fork mid-copy; another succeeds
+ *   exec-vfs-loss     the validation VFS dies while execve prepares its image
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -2666,6 +2668,87 @@ static int limits_test(void)
 	return 0;
 }
 
+/* GoOS validation builds only. Under this working directory the kernel
+ * fails fork after a few pages of its copy and checks its rollback. */
+#define FORK_FAULT_DIRECTORY "/tmp/.validation-fork-fault"
+
+static int fork_fault_test(void)
+{
+	int fds[2], status;
+	char byte;
+	pid_t child;
+
+	if (!on_goos() || pipe(fds) != 0 || (syscall(SYS_mkdir, FORK_FAULT_DIRECTORY, 0755) != 0 && errno != EEXIST) ||
+	    chdir(FORK_FAULT_DIRECTORY) != 0)
+		return 1;
+	fflush(stdout);
+	child = fork();
+	if (child == 0)
+		_exit(9);
+	if (child != -1 || errno != ENOMEM) {
+		printf("fork fault failed: fork returned %d errno=%d\n", child, errno);
+		return 1;
+	}
+	/* No child exists to wait for, and none holds the write end: closing
+	 * the only one ends the pipe. */
+	if (chdir("/") != 0 || !fails(wait4(-1, &status, WNOHANG, NULL), ECHILD) || close(fds[1]) != 0 ||
+	    read(fds[0], &byte, 1) != 0) {
+		printf("fork fault failed: a child survived errno=%d\n", errno);
+		return 1;
+	}
+	child = fork();
+	if (child == 0)
+		_exit(7);
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 7) {
+		printf("fork fault failed: the next fork errno=%d\n", errno);
+		return 1;
+	}
+	printf("fork fault ok\n");
+	return 0;
+}
+
+/* GoOS validation builds only. The VFS dies when it is asked to prepare
+ * this file as an executable, in the middle of execve. */
+#define EXEC_CRASH_PATH "/tmp/.validation-vfs-exec-crash"
+
+extern char __executable_start[], end[];
+static int exec_loss_canary = 0x5a;
+
+static int exec_vfs_loss_test(void)
+{
+	char *arguments[] = {EXEC_CRASH_PATH, NULL};
+	char cwd[16], *heap = malloc(32);
+	volatile char sink = 0;
+	pid_t pid = getpid();
+	int kept, file;
+
+	if (!on_goos() || !heap)
+		return 1;
+	strcpy(heap, "heap");
+	/* The image pages in from the VFS on first touch. Every page is read
+	 * now, while the VFS still answers. */
+	for (char *page = __executable_start; page < end; page += 4096)
+		sink += *(volatile char *)page;
+	(void)sink;
+	kept = open(IMAGE, O_RDONLY);
+	file = open(EXEC_CRASH_PATH, O_CREAT | O_TRUNC | O_WRONLY, 0755);
+	if (kept < 0 || file < 0 || write(file, "\177ELF", 4) != 4 || close(file) != 0 || chdir("/tmp") != 0)
+		return 1;
+	fflush(stdout);
+	if (execve(EXEC_CRASH_PATH, arguments, NULL) != -1 || errno != EIO) {
+		printf("exec vfs loss failed: errno=%d\n", errno);
+		return 1;
+	}
+	/* The old image still runs: same PID, memory, descriptors, and cwd. */
+	if (getpid() != pid || exec_loss_canary != 0x5a || strcmp(heap, "heap") || fcntl(kept, F_GETFD) != 0 ||
+	    fcntl(1, F_GETFD) != 0 || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/tmp")) {
+		printf("exec vfs loss failed: state changed\n");
+		return 1;
+	}
+	printf("exec vfs loss ok errno=%d\n", EIO);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -2724,6 +2807,10 @@ int main(int argc, char **argv)
 			return hardening_test();
 		if (!strcmp(argv[1], "limits"))
 			return limits_test();
+		if (!strcmp(argv[1], "fork-fault"))
+			return fork_fault_test();
+		if (!strcmp(argv[1], "exec-vfs-loss"))
+			return exec_vfs_loss_test();
 		if (!strcmp(argv[1], "path")) {
 			printf("path %s\n", getenv("PATH") ? getenv("PATH") : "(none)");
 			return 0;

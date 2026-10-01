@@ -283,6 +283,14 @@ expect '^fork bomb bounded at 15$' 'the family budget bounds a fork bomb'
 expect '^limits ok$' 'zombies count against the family budget'
 clean 'zombies count against the family budget'
 
+# A fork that fails in the middle of its page copy leaves no trace of the
+# child, and the next fork succeeds. The kernel compares its process, PID,
+# description, VFS-context, scheduler, and page counts across the failure.
+run '/system/linux/abi-probe fork-fault'
+expect '^LINUX_FORK_ROLLBACK_OK$' 'a failed fork rolls back every child resource'
+expect '^fork fault ok$' 'a fork after the injected failure succeeds'
+clean 'a fork after the injected failure succeeds'
+
 run '/system/linux/abi-probe path'
 expect '^path /system/linux$' 'a Linux program searches the Linux fixture directory'
 
@@ -330,6 +338,16 @@ run '/system/linux/abi-probe hostile'
 expect '^hostile ok$' 'hostile mode after the kills'
 run '/system/linux/abi-probe pair again | write /tmp/paired; cat /tmp/paired'
 expect '^pair again ok pid [0-9]*$' 'pairing after the kills'
+
+# Last, because it ends the VFS: the service dies while execve prepares an
+# image. The call fails with EIO and the caller goes on in its old image.
+# PID 1 restarts the VFS, and a new Linux program then runs.
+run '/system/linux/abi-probe exec-vfs-loss'
+expect '^exec vfs loss ok errno=5$' 'execve survives the VFS dying in preparation'
+clean 'execve survives the VFS dying in preparation'
+run 'sleep 2'
+run '/system/linux/musl-hello'
+expect '^hello from musl$' 'a Linux program after the VFS restarted'
 
 ! grep -q "$fatal" "$log" || fail "fatal marker in the log"
 printf 'PASS linux-abi (%s checks)\n' "$checks"

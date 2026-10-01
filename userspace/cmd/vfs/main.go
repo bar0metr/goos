@@ -411,6 +411,11 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 		}
 		return
 	}
+	if validation.Enabled && request.Operation == vfs.OperationPrepareExecutable && execCrashHandle(owner, request.Handle) {
+		// The validation build dies here, with the caller's exec in its
+		// preparation stage, as a crashed service would.
+		sys.Exit(exitFailed)
+	}
 	var answer vfs.Reply
 	if request.Operation.Bulk() {
 		answer = serveBulk(owner, request, attached[0])
@@ -430,8 +435,11 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	if !ok {
 		fatal("VFS_REPLY_FAILED\n")
 	}
-	if validation.Enabled && withhold(owner, request, reply) {
-		return
+	if validation.Enabled {
+		noteExecCrashOpen(owner, request, answer)
+		if withhold(owner, request, reply) {
+			return
+		}
 	}
 	send(session, reply)
 }
@@ -441,6 +449,28 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 // test observe a client's deadline and then the late reply it must discard.
 // The normal build has no such name.
 const stallPath = "/tmp/.validation-vfs-stall"
+
+// execCrashPath is a name the validation build dies for. A session that
+// opens it and then asks to prepare it as an executable ends the service
+// before the reply, which lets a test observe a Linux execve losing its VFS
+// in the middle of preparation. The normal build has no such name.
+const execCrashPath = "/tmp/.validation-vfs-exec-crash"
+
+// execCrashHandles holds, per session, the handle that opened execCrashPath.
+var execCrashHandles [maxSessions]vfs.Handle
+
+func noteExecCrashOpen(owner vfs.Owner, request vfs.Request, answer vfs.Reply) {
+	index := int(owner) - 1
+	if index >= 0 && index < maxSessions && request.Operation == vfs.OperationOpen &&
+		answer.Status == vfs.StatusOK && string(request.Path) == execCrashPath {
+		execCrashHandles[index] = answer.Handle
+	}
+}
+
+func execCrashHandle(owner vfs.Owner, file vfs.Handle) bool {
+	index := int(owner) - 1
+	return index >= 0 && index < maxSessions && file != 0 && execCrashHandles[index] == file
+}
 
 var (
 	withheld    [maxSessions]ipc.Message
