@@ -34,7 +34,8 @@ an errno; nothing is accepted and ignored.
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | recorded signal state only: record and report dispositions and the blocked mask; no signal is delivered |
+| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions and the blocked mask; handlers run at system call returns; unblocking delivers what is pending |
+| `rt_sigreturn(15)` | implemented | restores registers and mask from the handler's frame; a frame returning outside the user half ends the process with `SIGSEGV` |
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
 | `readv(19)`, `writev(20)` | implemented | streams and files; at most 16 elements and 64 KiB per call; a stream vector of at most 4096 bytes lands whole |
@@ -74,7 +75,7 @@ BusyBox does about it:
 
 | Syscall | Effect of `ENOSYS` |
 | --- | --- |
-| `kill(62)`, `tkill(200)`, `tgkill(234)`, `rt_sigreturn(15)`, `sigaltstack(131)` | no signal is sent or delivered; `raise` and `abort` see the refusal |
+| `kill(62)`, `tkill(200)`, `tgkill(234)`, `sigaltstack(131)` | a process cannot send a signal; `raise` and `abort` see the refusal |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
 | `poll(7)`, `ppoll(271)`, `futex(202)` | no polling or threads inside a process |
@@ -220,9 +221,8 @@ position. Final VFS descriptions selected by `FD_CLOEXEC` are closed through
 the family VFS context; a close failure does not roll back the replacement.
 The call discards the old image, stack, brk, anonymous mappings, and FS base.
 
-Caught signal dispositions reset to default. Ignored dispositions and the
-blocked mask remain. No pending signal is carried across the call because the
-current signal model never queues one. The process name becomes the path's
+Caught signal dispositions reset to default. Ignored dispositions, the
+blocked mask, and pending signals remain. The process name becomes the path's
 basename. `AT_EXECFN` contains the requested path.
 
 ## Files
@@ -381,13 +381,28 @@ These calls answer from kernel state and ask no service (ADR 0145).
 | `prlimit64` | `RLIMIT_NOFILE` 64, `RLIMIT_STACK` 8 MiB, `RLIMIT_DATA` 64 MiB, `RLIMIT_CORE` 0, others unlimited |
 
 `prlimit64` refuses a new limit with `EPERM`, another PID with `ESRCH`, and a
-resource over 15 with `EINVAL`. No signal exists to interrupt a sleep.
+resource over 15 with `EINVAL`. No signal interrupts a sleep yet.
 
-## Recorded signal state
+## Signals
 
 `rt_sigaction` and `rt_sigprocmask` keep what a program registers and report
-it back (ADR 0151). GoOS sends no signal, so no handler runs, no call returns
-`EINTR`, and a blocked signal is never pending.
+it back (ADR 0151). The kernel generates `SIGCHLD` for a Linux parent when a
+child ends and `SIGPIPE` for a writer whose `write` or `writev` fails with
+`EPIPE`. An ignored signal that is not blocked is discarded; `SIGCHLD` is
+ignored by default. A blocked signal stays pending, one instance per signal.
+
+Pending signals the mask allows act when a system call returns: `SIGKILL`
+first, then the lowest number. A default action ends the process with that
+signal as its status. A handler starts on an x86_64 `rt_sigframe` below the
+stack's red zone, with the signal, `siginfo`, and `ucontext` in RDI, RSI, and
+RDX, and runs before the interrupted call returns to the program. The frame
+holds no floating-point state. `SA_NODEFER` and `SA_RESETHAND` take effect.
+`rt_sigreturn` restores the saved registers and mask; a handler that edits
+the context changes what the interrupted call returns (ADR 0163, ADR 0164).
+
+Delivery, `SIGINT`, `SIGQUIT`, `SIGKILL`, `SIGUSR1`, `SIGUSR2`, and `SIGTERM`
+are ready, but no call sends them yet. A signal does not interrupt a blocked
+call, and no call returns `EINTR`.
 
 | Call | Behavior |
 | --- | --- |
@@ -399,7 +414,9 @@ it back (ADR 0151). GoOS sends no signal, so no handler runs, no call returns
 | an unreadable or unwritable pointer | `EFAULT` |
 
 Ctrl-C ends the process through the native kill path whatever it registered
-for `SIGINT`. The calls that send a signal stay `ENOSYS`.
+for `SIGINT`. The calls that send a signal stay `ENOSYS`. A handler without
+`SA_RESTORER`, or one whose frame does not fit or cannot be written, ends the
+process with `SIGSEGV`.
 
 ## Random bytes
 
@@ -553,7 +570,7 @@ Results a correct Linux program can observe to differ:
 | Area | GoOS 0.2.0 | Linux |
 | --- | --- | --- |
 | terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
-| signals | dispositions and the mask are recorded; none is sent or delivered; Ctrl-C ends the process whatever handles `SIGINT`; `nanosleep` never returns `EINTR` | delivered, handled, masked |
+| signals | `SIGCHLD` and `SIGPIPE` are generated and delivered at system call returns; no process sends one; Ctrl-C ends the process whatever handles `SIGINT`; no call returns `EINTR` | sent, delivered at any return to user mode, interrupt blocked calls |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
 | random bytes | `ENOSYS` and no `AT_RANDOM` on a CPU without RDRAND; 256 bytes per call | always available; 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
@@ -577,7 +594,7 @@ Results a correct Linux program can observe to differ:
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
 or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
-and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no signal delivery; no
+and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no `kill`, `EINTR`, or alternate signal stack; no
 nonblocking pipes; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs

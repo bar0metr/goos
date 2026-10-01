@@ -41,6 +41,7 @@
  *   orphan            a grandchild whose parent exits is reparented to PID 1
  *   wait              reap children by PID and by any, with and without WNOHANG
  *   pipe              pipe and pipe2: direction, EOF, EPIPE, lifetime, PIPE_BUF
+ *   signal            SIGPIPE and SIGCHLD delivery, handlers, masks, rt_sigreturn
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -66,6 +67,7 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #define IMAGE "/system/linux/abi-probe"
@@ -1735,6 +1737,151 @@ static int pipe_test(void)
 	return 0;
 }
 
+static volatile int signal_count;
+static volatile int signal_blocked_inside;
+static volatile siginfo_t signal_info;
+
+static void count_signal(int number, siginfo_t *info, void *context)
+{
+	sigset_t mask;
+
+	(void)context;
+	signal_count++;
+	signal_info = *info;
+	sigprocmask(SIG_SETMASK, NULL, &mask);
+	signal_blocked_inside = sigismember(&mask, number);
+}
+
+/* Changes the result the interrupted write returns. */
+static void rewrite_result(int number, siginfo_t *info, void *context)
+{
+	(void)number;
+	(void)info;
+	((ucontext_t *)context)->uc_mcontext.gregs[REG_RAX] = 1234;
+}
+
+/* Points the interrupted context at kernel memory. */
+static void forge_return(int number, siginfo_t *info, void *context)
+{
+	(void)number;
+	(void)info;
+	((ucontext_t *)context)->uc_mcontext.gregs[REG_RIP] = (greg_t)0xffff800000001000ULL;
+}
+
+static int signal_fail(const char *step)
+{
+	printf("signal failed: %s errno=%d count=%d\n", step, errno, signal_count);
+	return 1;
+}
+
+static int set_action(int number, void (*handler)(int, siginfo_t *, void *), int flags)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof action);
+	action.sa_sigaction = handler;
+	action.sa_flags = SA_SIGINFO | flags;
+	sigemptyset(&action.sa_mask);
+	return sigaction(number, &action, NULL);
+}
+
+/* Forks a child that writes to a pipe with no reader after installing
+ * handler, or none, and returns its wait status. */
+static int broken_pipe_child(void (*handler)(int, siginfo_t *, void *))
+{
+	int fds[2], status = -1;
+	pid_t child;
+
+	if (pipe(fds) != 0)
+		return -1;
+	child = fork();
+	if (child == 0) {
+		long result;
+
+		close(fds[0]);
+		if (handler)
+			set_action(SIGPIPE, handler, 0);
+		else
+			signal(SIGPIPE, SIG_DFL);
+		result = write(fds[1], "x", 1);
+		_exit(result == -1 ? 0 : 1);
+	}
+	close(fds[0]);
+	close(fds[1]);
+	if (child < 0 || wait4(child, &status, 0, NULL) != child)
+		return -1;
+	return status;
+}
+
+static int signal_test(void)
+{
+	struct sigaction query;
+	sigset_t mask;
+	int fds[2], status;
+	long result;
+	pid_t child;
+
+	fflush(stdout);
+	status = broken_pipe_child(NULL);
+	if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGPIPE)
+		return signal_fail("default SIGPIPE");
+	status = broken_pipe_child(forge_return);
+	if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV)
+		return signal_fail("forged return address");
+	if (!fails(sigaction(SIGKILL, &query, NULL), EINVAL))
+		return signal_fail("SIGKILL handler");
+
+	/* A handler runs before the failing write returns, with the signal
+	 * blocked, and the mask comes back after it. */
+	if (pipe(fds) != 0 || close(fds[0]) != 0 || set_action(SIGPIPE, count_signal, 0) != 0)
+		return signal_fail("setup");
+	result = write(fds[1], "x", 1);
+	if (result != -1 || errno != EPIPE || signal_count != 1 || !signal_blocked_inside ||
+	    signal_info.si_signo != SIGPIPE || signal_info.si_pid != getpid())
+		return signal_fail("SIGPIPE handler");
+	sigprocmask(SIG_SETMASK, NULL, &mask);
+	if (sigismember(&mask, SIGPIPE))
+		return signal_fail("mask after handler");
+
+	/* A blocked signal stays pending and arrives when it is unblocked. */
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGPIPE);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+	if (write(fds[1], "x", 1) != -1 || signal_count != 1)
+		return signal_fail("blocked SIGPIPE");
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
+	if (signal_count != 2)
+		return signal_fail("unblocked SIGPIPE");
+
+	/* The handler's changes to the saved context take effect. */
+	set_action(SIGPIPE, rewrite_result, 0);
+	if (syscall(SYS_write, fds[1], "x", 1) != 1234)
+		return signal_fail("context restore");
+
+	/* SA_RESETHAND restores the default after one delivery. */
+	set_action(SIGPIPE, count_signal, SA_RESETHAND);
+	write(fds[1], "x", 1);
+	if (signal_count != 3 || sigaction(SIGPIPE, NULL, &query) != 0 || query.sa_handler != SIG_DFL)
+		return signal_fail("SA_RESETHAND");
+	signal(SIGPIPE, SIG_IGN);
+	if (!fails(write(fds[1], "x", 1), EPIPE) || signal_count != 3)
+		return signal_fail("ignored SIGPIPE");
+	close(fds[1]);
+
+	/* SIGCHLD reports the child that ended and its status. */
+	set_action(SIGCHLD, count_signal, 0);
+	child = fork();
+	if (child == 0)
+		_exit(5);
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || signal_count != 4 ||
+	    signal_info.si_signo != SIGCHLD || signal_info.si_pid != child ||
+	    signal_info.si_code != CLD_EXITED || signal_info.si_status != 5)
+		return signal_fail("SIGCHLD");
+	signal(SIGCHLD, SIG_DFL);
+	printf("signal ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1772,6 +1919,8 @@ int main(int argc, char **argv)
 			return wait_test();
 		if (!strcmp(argv[1], "pipe"))
 			return pipe_test();
+		if (!strcmp(argv[1], "signal"))
+			return signal_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))

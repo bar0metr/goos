@@ -37,6 +37,6 @@ func All() []Fixture {
 		{"musl-hello", muslHello, "0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f"},
 		{"fsprobe", fsprobe, "7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6"},
 		{"dirprobe", dirprobe, "6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca"},
-		{"abi-probe", abiProbe, "9615b68e9fd9cf5e8801c122fddf88f061707c2325ce48442da13b8c7076ad1a"},
+		{"abi-probe", abiProbe, "49492f8db8c76a4368855b70b9fc7593b835fc5c5ec725de8829646d1e84feef"},
 	}
 }

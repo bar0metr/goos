@@ -23,6 +23,7 @@ const (
 	SysBrk           Syscall = 12
 	SysRtSigaction   Syscall = 13
 	SysRtSigprocmask Syscall = 14
+	SysRtSigreturn   Syscall = 15
 	SysIoctl         Syscall = 16
 	SysPread64       Syscall = 17
 	SysPwrite64      Syscall = 18
@@ -175,13 +176,33 @@ const (
 
 	// Operations of rt_sigprocmask, and the signals no mask or handler
 	// may claim.
-	SignalBlock   = uint64(0)
-	SignalUnblock = uint64(1)
-	SignalSetMask = uint64(2)
-	SignalKill    = uint64(9)
-	SignalChild   = uint64(17)
-	SignalStop    = uint64(19)
-	SignalCount   = uint64(64)
+	SignalBlock     = uint64(0)
+	SignalUnblock   = uint64(1)
+	SignalSetMask   = uint64(2)
+	SignalInterrupt = uint64(2)
+	SignalQuit      = uint64(3)
+	SignalKill      = uint64(9)
+	SignalUser1     = uint64(10)
+	SignalSegv      = uint64(11)
+	SignalUser2     = uint64(12)
+	SignalPipe      = uint64(13)
+	SignalTerm      = uint64(15)
+	SignalChild     = uint64(17)
+	SignalStop      = uint64(19)
+	SignalCount     = uint64(64)
+
+	// sigaction flags and the special handler values.
+	SignalActionInfo      = uint64(4)
+	SignalActionRestorer  = uint64(0x04000000)
+	SignalActionNoDefer   = uint64(0x40000000)
+	SignalActionResetHand = uint64(0x80000000)
+	SignalHandlerDefault  = uint64(0)
+	SignalHandlerIgnore   = uint64(1)
+
+	// si_code values: sent by a process, and the two ways a child ends.
+	SignalCodeUser      = int32(0)
+	SignalCodeChildExit = int32(1)
+	SignalCodeChildKill = int32(2)
 
 	// clone flags a process-creating call may carry. The low byte of the
 	// flags is the signal the parent receives when the child ends.
@@ -221,7 +242,7 @@ const (
 func (number Syscall) Known() bool {
 	switch number {
 	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
-		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask,
+		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask, SysRtSigreturn,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,

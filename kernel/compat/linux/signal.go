@@ -13,24 +13,175 @@ const SignalActionSize = 32
 // signalActionMask is the offset of sa_mask in that structure.
 const signalActionMask = 24
 
-// SignalState records what a process told the kernel about signals: its
-// blocked mask and a disposition for each signal. GoOS delivers no signal in
-// this release, so the state is kept and reported and nothing acts on it. A
-// process that Ctrl-C ends is ended as SIGKILL would end it, whatever it
-// registered for SIGINT.
+// SignalState holds what a process told the kernel about signals, its blocked
+// mask and a disposition for each signal, and the signals pending for it.
+// Standard signals do not queue: a second instance of a pending signal is
+// merged with the first, whose information is kept.
 type SignalState struct {
 	mask    uint64
+	pending uint64
 	actions [abi.SignalCount][SignalActionSize]byte
+	info    [standardSignals]SignalInfo
 }
 
+// standardSignals is the count of non-realtime signals, 1 to 31.
+const standardSignals = 31
+
+// SignalInfo is the part of siginfo a delivered signal carries: who sent it,
+// and for SIGCHLD how the child ended.
+type SignalInfo struct {
+	Code   int32
+	PID    int32
+	UID    uint32
+	Status int32
+}
+
+// SignalAction is one decoded struct sigaction.
+type SignalAction struct {
+	Handler  uint64
+	Flags    uint64
+	Restorer uint64
+	Mask     uint64
+}
+
+// DeliverableSignal reports whether GoOS can generate and deliver signal:
+// SIGINT, SIGQUIT, SIGKILL, SIGUSR1, SIGUSR2, SIGPIPE, SIGTERM, and SIGCHLD.
+// A CPU fault ends the process at once and cannot be caught.
+func DeliverableSignal(signal uint64) bool {
+	switch signal {
+	case abi.SignalInterrupt, abi.SignalQuit, abi.SignalKill, abi.SignalUser1, abi.SignalUser2,
+		abi.SignalPipe, abi.SignalTerm, abi.SignalChild:
+		return true
+	}
+	return false
+}
+
+// DefaultIgnored reports whether the default action of a deliverable signal is
+// to discard it. Every other deliverable signal ends the process by default.
+func DefaultIgnored(signal uint64) bool { return signal == abi.SignalChild }
+
 // CopyFrom gives state the mask and dispositions of source, as fork does.
+// Pending signals stay with source.
 func (state *SignalState) CopyFrom(source *SignalState) {
 	state.mask = source.mask
+	state.pending = 0
 	copy(state.actions[:], source.actions[:])
+	clear(state.info[:])
+}
+
+// ActionOf decodes the disposition of signal.
+func (state *SignalState) ActionOf(signal uint64) SignalAction {
+	if signal == 0 || signal > abi.SignalCount {
+		return SignalAction{}
+	}
+	action := &state.actions[signal-1]
+	return SignalAction{
+		Handler:  binary.LittleEndian.Uint64(action[0:8]),
+		Flags:    binary.LittleEndian.Uint64(action[8:16]),
+		Restorer: binary.LittleEndian.Uint64(action[16:24]),
+		Mask:     binary.LittleEndian.Uint64(action[signalActionMask:]),
+	}
+}
+
+func (state *SignalState) ignored(signal uint64) bool {
+	handler := state.ActionOf(signal).Handler
+	return handler == abi.SignalHandlerIgnore || handler == abi.SignalHandlerDefault && DefaultIgnored(signal)
+}
+
+// Raise makes signal pending. An ignored signal that is not blocked is
+// discarded, as Linux discards it; SIGKILL is never ignored. It reports
+// whether the signal is pending afterwards.
+func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
+	if state == nil || !DeliverableSignal(signal) {
+		return false
+	}
+	bit := uint64(1) << (signal - 1)
+	if signal != abi.SignalKill && state.mask&bit == 0 && state.ignored(signal) {
+		return false
+	}
+	if state.pending&bit == 0 {
+		state.pending |= bit
+		state.info[signal-1] = info
+	}
+	return true
+}
+
+// Pending reports the pending set.
+func (state *SignalState) Pending() uint64 { return state.pending }
+
+// Take removes and returns the next signal to deliver: SIGKILL first, then
+// the lowest-numbered pending signal the mask does not block.
+func (state *SignalState) Take() (uint64, SignalInfo, bool) {
+	if state == nil {
+		return 0, SignalInfo{}, false
+	}
+	ready := state.pending &^ (state.mask &^ uncatchable)
+	if ready == 0 {
+		return 0, SignalInfo{}, false
+	}
+	signal := uint64(1)
+	if ready&(uint64(1)<<(abi.SignalKill-1)) == 0 {
+		for ready&(uint64(1)<<(signal-1)) == 0 {
+			signal++
+		}
+	} else {
+		signal = abi.SignalKill
+	}
+	state.pending &^= uint64(1) << (signal - 1)
+	info := state.info[signal-1]
+	state.info[signal-1] = SignalInfo{}
+	return signal, info, true
+}
+
+// SignalOutcome is what delivering a taken signal does.
+type SignalOutcome uint8
+
+const (
+	SignalDiscard SignalOutcome = iota + 1
+	SignalTerminate
+	SignalHandle
+)
+
+// Outcome decides what a taken signal does under its current disposition.
+func (state *SignalState) Outcome(signal uint64) SignalOutcome {
+	if signal == abi.SignalKill {
+		return SignalTerminate
+	}
+	switch handler := state.ActionOf(signal).Handler; {
+	case handler == abi.SignalHandlerIgnore:
+		return SignalDiscard
+	case handler == abi.SignalHandlerDefault && DefaultIgnored(signal):
+		return SignalDiscard
+	case handler == abi.SignalHandlerDefault:
+		return SignalTerminate
+	}
+	return SignalHandle
+}
+
+// EnterHandler applies what running a handler does to the signal state: the
+// handler's mask and, without SA_NODEFER, the signal itself join the blocked
+// mask, and SA_RESETHAND restores the default disposition. It returns the
+// mask the handler's return restores.
+func (state *SignalState) EnterHandler(signal uint64, action SignalAction) uint64 {
+	previous := state.mask
+	state.mask |= action.Mask
+	if action.Flags&abi.SignalActionNoDefer == 0 {
+		state.mask |= uint64(1) << (signal - 1)
+	}
+	state.mask &^= uncatchable
+	if action.Flags&abi.SignalActionResetHand != 0 && signal != abi.SignalKill && signal != abi.SignalStop {
+		state.actions[signal-1] = [SignalActionSize]byte{}
+	}
+	return previous
+}
+
+// RestoreMask installs the mask rt_sigreturn found in the signal frame.
+func (state *SignalState) RestoreMask(mask uint64) {
+	state.mask = mask &^ uncatchable
 }
 
 // ResetForExec restores caught signals to their default disposition. Ignored
-// signals and the blocked mask survive image replacement.
+// signals, the blocked mask, and pending signals survive image replacement.
 func (state *SignalState) ResetForExec() {
 	if state == nil {
 		return

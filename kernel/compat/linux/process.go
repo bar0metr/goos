@@ -33,8 +33,8 @@ type ProcessState struct {
 	// IOBuffer is the native handle of the memory object file reads and
 	// writes move their bytes through. The bridge creates it on first use.
 	IOBuffer handle.ID
-	// Signals is what the process registered with rt_sigaction and
-	// rt_sigprocmask. Nothing delivers a signal from it.
+	// Signals holds the dispositions and mask the process registered with
+	// rt_sigaction and rt_sigprocmask, and the signals pending for it.
 	Signals SignalState
 	// Forked marks a process created by fork rather than launched by PID 1,
 	// which holds no handle to it and hears nothing of its exit.
@@ -555,6 +555,18 @@ func CloseFD(root uint64, fd int) (FileDescription, bool, abi.Errno) {
 func DescriptionOf(root uint64, fd uint64) (*FileDescription, bool) {
 	if state, found := FindProcess(root); found && fd < LinuxMaxFD {
 		return state.FDs.Description(int(fd))
+	}
+	return nil, false
+}
+
+// FindProcessByPID returns the running process with a compatibility PID.
+func FindProcessByPID(pid int32) (*ProcessState, bool) {
+	if pid >= firstPID {
+		for index := range processStates {
+			if processStates[index].Root != 0 && processStates[index].PID == pid {
+				return &processStates[index], true
+			}
+		}
 	}
 	return nil, false
 }
