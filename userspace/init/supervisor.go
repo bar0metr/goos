@@ -123,7 +123,11 @@ type service struct {
 	plannedStop     bool
 	// held keeps the service from starting, as a dependency that is down
 	// would, until Release.
-	held        bool
+	held bool
+	// deferred marks a launch that is waiting for work its launcher started,
+	// such as reading the executable; until Proceed it waits as a blocked
+	// service does, and the wait is not a failure.
+	deferred    bool
 	restart     RestartPolicy
 	state       State
 	health      Health
@@ -203,7 +207,7 @@ func (manager *Manager) StartReady(now uint64, launcher func(LaunchSpec) (uint64
 			if entry.state != StateRegistered && entry.state != StateBlocked || now < entry.nextStart {
 				continue
 			}
-			if entry.held || !manager.dependenciesHealthy(entry) {
+			if entry.held || entry.deferred || !manager.dependenciesHealthy(entry) {
 				if entry.state != StateBlocked {
 					entry.state, entry.health = StateBlocked, HealthBlocked
 					manager.record(Event{Kind: EventDependencyBlocked, Service: uint8(index + 1), Tick: now})
@@ -212,6 +216,10 @@ func (manager *Manager) StartReady(now uint64, launcher func(LaunchSpec) (uint64
 			}
 			entry.state, entry.health = StateStarting, HealthStarting
 			pid, ok := launcher(entry.launch)
+			if !ok && entry.deferred {
+				entry.state, entry.health = StateBlocked, HealthBlocked
+				continue
+			}
 			if !ok || pid == 0 || manager.pidInUse(pid) {
 				manager.failed(index, 1, now)
 				continue
@@ -340,6 +348,28 @@ func (manager *Manager) Hold(name string) Status {
 		return StatusNotFound
 	}
 	manager.services[int(position)].held = true
+	return StatusOK
+}
+
+// Defer, called by a launcher before it returns without a process, makes
+// StartReady treat the attempt as waiting rather than failed: the service
+// stays blocked, its restart budget untouched, until Proceed.
+func (manager *Manager) Defer(name string) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	manager.services[int(position)].deferred = true
+	return StatusOK
+}
+
+// Proceed ends a Defer; the next StartReady launches the service again.
+func (manager *Manager) Proceed(name string) Status {
+	position, found := manager.index(name)
+	if !found {
+		return StatusNotFound
+	}
+	manager.services[int(position)].deferred = false
 	return StatusOK
 }
 

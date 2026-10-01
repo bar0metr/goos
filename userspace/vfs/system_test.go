@@ -220,3 +220,15 @@ func TestPublishedSystemMountIsReportedReadOnly(t *testing.T) {
 		t.Fatal("no /system mount entry")
 	}
 }
+
+func TestSyncWithoutAVolumeHasNothingToFlush(t *testing.T) {
+	service := startedService(t, nil)
+	if !service.Sync() {
+		t.Fatal("sync without a volume failed")
+	}
+	service = startedService(t, installedDevice(t))
+	service.DetachFilesystem()
+	if service.Sync() {
+		t.Fatal("sync of a mounted volume whose service is gone succeeded")
+	}
+}

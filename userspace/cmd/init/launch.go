@@ -26,6 +26,18 @@ func stagingSlot() (uint8, []byte) {
 }
 
 func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
+	// Once the system is up, a program from the volume is read first, in
+	// the main loop, and the launch comes back for it (ADR 0175).
+	if !serviceReadable(bytesString(spec.Name[:spec.NameSize]), spec.Executable[:spec.ExecutableSize]) {
+		return 0, false
+	}
+	process, launched := launchPrepared(spec)
+	discardReady()
+	return process, launched
+}
+
+// launchPrepared launches a service whose program can be opened now.
+func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// A driver that is starting again needs a channel whose other end is live.
 	// The first launch uses the pair created at boot, which still is.
 	if driverStarted && bytesString(spec.Name[:spec.NameSize]) == driverName && !replaceDriverChannel(&spec) {

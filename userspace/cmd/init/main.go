@@ -168,7 +168,8 @@ func userspaceMain() {
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		var jobs, fills, launches [len(execJobs)]int
 		var execBits [len(sessions)]int
-		firstJob, firstFill, firstLaunch := 1, 1, 1
+		var sources [len(serviceSources)]int
+		firstJob, firstFill, firstLaunch, firstSource := 1, 1, 1, 1
 		if supervisionComplete {
 			// While a shell is gone there is no exec channel to wait on; its
 			// replacement brings a new one.
@@ -203,6 +204,15 @@ func userspaceMain() {
 					count++
 				}
 			}
+			// The reads of services' programs (ADR 0175).
+			firstSource = count
+			for index := range serviceSources {
+				if serviceSources[index].fill.session != 0 {
+					interests[count] = userwait.Interest{Handle: serviceSources[index].fill.session, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+					sources[count-firstSource] = index
+					count++
+				}
+			}
 		}
 		readyMask := uint64(1)
 		if lifecycleCount == 0 {
@@ -220,7 +230,10 @@ func userspaceMain() {
 			}
 			result, status := userwait.Any(&interests, count, timeout)
 			if status == kcall.StatusTimeout {
-				expireFills()
+				if expireFills() {
+					manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
+					checkExhaustion()
+				}
 				if restarting {
 					supervisionTicks += supervisor.RestartBackoff
 					manager.StartReady(supervisionTicks, launchService)
@@ -243,10 +256,21 @@ func userspaceMain() {
 				completeFill(&execJobs[fills[bit-firstFill]])
 			}
 		}
-		for bit := firstLaunch; bit < count; bit++ {
+		for bit := firstLaunch; bit < firstSource; bit++ {
 			if readyMask&(1<<bit) != 0 {
 				pollLauncher(&execJobs[launches[bit-firstLaunch]])
 			}
+		}
+		sourced := false
+		for bit := firstSource; bit < count; bit++ {
+			if readyMask&(1<<bit) != 0 {
+				completeServiceFill(&serviceSources[sources[bit-firstSource]])
+				sourced = true
+			}
+		}
+		if sourced {
+			manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
+			checkExhaustion()
 		}
 		if readyMask&1 == 0 {
 			for index := range sessions {

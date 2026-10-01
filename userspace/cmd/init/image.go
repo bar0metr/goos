@@ -59,12 +59,17 @@ func openExecutable(path []byte) (supervisor.Executable, string, supervisor.Laun
 		return locateExecutable(path)
 	}
 	// A job's program sources were prepared before its pipeline started
-	// (ADR 0108).
+	// (ADR 0108); a service's or an application child's was read ahead in
+	// the main loop.
 	if executable, status, found := takePrepared(path); found {
 		return executable, processName(path), status
 	}
-	if launchingJob == nil {
-		// A service, or an application's child: read it now.
+	if executable, status, found := takeReady(path); found {
+		return executable, processName(path), status
+	}
+	if !supervisionComplete {
+		// The boot starts services in order before the main loop runs, so
+		// it reads their programs in place.
 		executable, status := prepareSource(path)
 		return executable, processName(path), status
 	}

@@ -24,6 +24,10 @@ const usage = "usage: initramfs [-validation] [-force-recovery] INIT FAULT_PROBE
 // the distribution is in the archive; it is installed on the volume.
 var RecoveryCommands = []string{"cat", "cp", "df", "echo", "edit", "fsck-fat", "ls", "mkdir", "mount", "mv", "pwd", "rm", "stat", "touch", "write"}
 
+// ValidationCommands are added to a validation archive only, kept apart from
+// RecoveryCommands: the boot tests list processes in recovery mode with ps.
+var ValidationCommands = []string{"ps"}
+
 // The services the archive carries: everything PID 1 starts before there is
 // a volume, and the terminal and shell recovery runs.
 var services = []string{"init", "fault-probe", "vfs", "shell", "block", "virtio-blk", "tty", "fat32"}
@@ -65,15 +69,19 @@ func main() {
 	if _, err := commandset.Names(commandDirectory, index); err != nil {
 		fail(err)
 	}
-	recoveryIndex, err := commandset.Subset(index, RecoveryCommands)
+	archived := RecoveryCommands
+	if *validation {
+		archived = append(append([]string(nil), RecoveryCommands...), ValidationCommands...)
+	}
+	recoveryIndex, err := commandset.Subset(index, archived)
 	if err != nil {
 		fail(err)
 	}
-	if err := commandset.Agree(sortedCopy(RecoveryCommands), recoveryIndex); err != nil {
+	if err := commandset.Agree(sortedCopy(archived), recoveryIndex); err != nil {
 		fail(err)
 	}
 	members = append(members, file("system/commands", 0o444, recoveryIndex))
-	for _, name := range sortedCopy(RecoveryCommands) {
+	for _, name := range sortedCopy(archived) {
 		members = append(members, file("system/bin/"+name, 0o555, read(filepath.Join(commandDirectory, name))))
 	}
 	output, err := os.Create(outputPath)

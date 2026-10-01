@@ -470,6 +470,17 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 // The normal build has no such name.
 const stallPath = "/tmp/.validation-vfs-stall"
 
+// slowSourcePath is a name whose presence makes the validation build hold
+// back every answer to a request to prepare an executable, as a stalled
+// filesystem would. A test uses it to watch PID 1 keep serving while a
+// service's program is being read (ADR 0175). The normal build has no such
+// name.
+const slowSourcePath = "/tmp/.validation-slow-source"
+
+func slowSources() bool {
+	return service.Dispatch(0, vfs.Request{Operation: vfs.OperationStat, Path: []byte(slowSourcePath)}).Status == vfs.StatusOK
+}
+
 // execCrashPath is a name the validation build dies for. A session that
 // opens it and then asks to prepare it as an executable ends the service
 // before the reply, which lets a test observe a Linux execve losing its VFS
@@ -497,11 +508,13 @@ var (
 	withholding [maxSessions]bool
 )
 
-// withhold keeps the reply to a request for stallPath and reports that it
+// withhold keeps the reply to a request for stallPath, or to a request to
+// prepare an executable while slowSourcePath exists, and reports that it
 // did.
 func withhold(owner vfs.Owner, request vfs.Request, reply ipc.Message) bool {
 	index := int(owner) - 1
-	if index < 0 || index >= maxSessions || withholding[index] || string(request.Path) != stallPath {
+	if index < 0 || index >= maxSessions || withholding[index] ||
+		string(request.Path) != stallPath && !(request.Operation == vfs.OperationPrepareExecutable && slowSources()) {
 		return false
 	}
 	withheld[index], withholding[index] = reply, true

@@ -89,9 +89,14 @@ wait_for() { # pattern timeout log
 }
 
 # boot starts QEMU on iso with disk (or none), waits for a prompt, types the
-# lines of the script on stdin, powers the machine off, and waits for QEMU to
-# end. A line "@sleep N" waits N seconds; "@keys TEXT" sends TEXT, escapes
-# expanded, with no newline. Every other line is a command.
+# lines of the script on stdin, and asks the machine to power off. A line
+# "@sleep N" waits N seconds; "@keys TEXT" sends TEXT, escapes expanded, with
+# no newline. Every other line is a command.
+#
+# The machine must then switch itself off: QEMU has to exit, with status 0,
+# within 30 seconds, or the test fails. With shutdown=refused the storage
+# cannot be flushed, so the machine must refuse to power off and say so; QEMU
+# is then stopped by the test, and that stop is checked, not ignored.
 boot() { # iso disk log
 	image=$1
 	disk=$2
@@ -119,13 +124,24 @@ boot() { # iso disk log
 		esac
 	done
 	printf 'poweroff\n' >&3
-	elapsed=0
-	while kill -0 "$qpid" 2>/dev/null && [ "$elapsed" -lt 30 ]; do
-		sleep 1
-		elapsed=$((elapsed + 1))
-	done
-	kill "$qpid" 2>/dev/null || true
-	wait "$qpid" 2>/dev/null || true
+	if [ "${shutdown:-poweroff}" = refused ]; then
+		wait_for 'poweroff: storage sync failed' 15 "$log"
+		kill -0 "$qpid" 2>/dev/null || fail shutdown.refused 'the machine still running after a refused poweroff' "$log"
+		kill "$qpid"
+		wait "$qpid" 2>/dev/null || true
+		checks=$((checks + 2))
+	else
+		elapsed=0
+		while kill -0 "$qpid" 2>/dev/null && [ "$elapsed" -lt 30 ]; do
+			sleep 1
+			elapsed=$((elapsed + 1))
+		done
+		kill -0 "$qpid" 2>/dev/null && fail shutdown.timeout 'QEMU exited within 30 seconds of poweroff' "$log"
+		if wait "$qpid"; then qemu_status=0; else qemu_status=$?; fi
+		[ "$qemu_status" -eq 0 ] || fail shutdown.status "QEMU exit status 0 after poweroff, not $qemu_status" "$log"
+		grep -q '^Powering off\.\.\.$' "$log" || fail shutdown.message 'Powering off...' "$log"
+		checks=$((checks + 3))
+	fi
 	qpid=
 	exec 3>&-
 	rm -f "$work/in"
@@ -155,7 +171,7 @@ for member in system/init system/vfs system/shell system/tty system/fat32 system
 	grep -qx "$member" "$work/production.list" || fail archive.member "$member in the production archive" "$work/production.list"
 	checks=$((checks + 1))
 done
-for excluded in system/bin/gfm system/bin/bench system/bin/uname system/bin/args system/linux/ system/linux/abi-probe system/linux/raw-probe system/fault-probe system/config system/log system/force-recovery; do
+for excluded in system/bin/gfm system/bin/bench system/bin/uname system/bin/args system/bin/ps system/linux/ system/linux/abi-probe system/linux/raw-probe system/fault-probe system/config system/log system/force-recovery; do
 	if grep -qx "$excluded" "$work/production.list"; then
 		fail archive.exclusion "no $excluded in the production archive" "$work/production.list"
 	fi
@@ -245,9 +261,16 @@ printf 'PASS normal (prompt after %ss)\n' "$prompt_seconds"
 # --- Reboot of the same disk, then storage faults (proofs 2, 5) -------------
 
 log=$logs/system-restart.log
+# Storage is lost at the end of this boot, so its poweroff is refused.
+shutdown=refused
 boot "$iso" "$work/installed.img" "$log" <<'EOF'
 cat /home/user/data.txt
 myuname
+/bootstrap/bin/touch /tmp/.validation-slow-source
+fault config
+services; /bootstrap/bin/rm /tmp/.validation-slow-source
+@sleep 6
+services
 fault fat32
 @sleep 4
 uname
@@ -262,12 +285,24 @@ uname
 fault storage
 @sleep 6
 echo after-storage
-services
+echo recovery-listing; services
+ps
 ls /bootstrap/bin
 EOF
+shutdown=poweroff
 require_after restart.persisted 'cat /home/user/data.txt' '^persisted-data$' "$log"
 require_after restart.user-command myuname "^GoOS $version x86_64" "$log"
 require_after restart.user-command-file myuname FILE_EXEC_OK "$log"
+# While the configuration service's program is being read, and the VFS holds
+# the answer back, PID 1 goes on serving: it answers the shell's service
+# listing, which shows the service waiting, and starts it once the read is
+# answered or abandoned (ADR 0175).
+require restart.source-pending 'SERVICE_SOURCE_PENDING config' "$log"
+require_after restart.pid1-serving 'services; /bootstrap/bin/rm /tmp/.validation-slow-source' '^config  *blocked' "$log"
+require restart.config-back CONFIG_RESTARTED_OK "$log"
+awk '/SERVICE_SOURCE_PENDING config/ { pending = NR } /^config  *blocked/ && pending { listed = NR } /CONFIG_RESTARTED_OK/ && listed { done = 1 } END { exit !done }' "$log" ||
+	fail restart.pending-order 'the read pending, PID 1 answering, then the service restarted' "$log"
+checks=$((checks + 1))
 require restart.fat32 FAT32_RESTARTED_OK "$log"
 require restart.vfs VFS_RESTARTED_OK "$log"
 require restart.driver BLOCK_DRIVER_REPLACED_OK "$log"
@@ -279,11 +314,16 @@ require restart.storage-lost STORAGE_LOSS_INJECTED "$log"
 require restart.recovery '^\[MODE\] recovery: stage=runtime' "$log"
 require restart.recovery-sessions RECOVERY_SESSIONS_OK "$log"
 require_after restart.recovery-prompt 'echo after-storage' '^after-storage$' "$log"
-require_after restart.fat32-failed services '^fat32  *failed' "$log"
+require_after restart.fat32-failed 'echo recovery-listing; services' '^fat32  *failed' "$log"
 require_after restart.recovery-commands 'ls /bootstrap/bin' '^fsck-fat$' "$log"
-count_after=$(window "$log" services | grep -c '^shell  *running' || true)
-[ "$count_after" -eq 1 ] || fail restart.one-shell 'one serial shell after the transition' "$log"
-checks=$((checks + 1))
+# One shell per console after the transition: the supervisor's records and
+# the processes that actually run. ps names both consoles' shells "shell".
+supervised=$(window "$log" 'echo recovery-listing; services' | grep -cE '^shell(-fb)? +running' || true)
+[ "$supervised" -eq 2 ] || fail restart.one-shell-record "one running shell record per console, saw $supervised" "$log"
+running=$(window "$log" ps | grep -c ' shell$' || true)
+[ "$running" -eq 2 ] || fail restart.one-shell-process "two shell processes, one per console, saw $running" "$log"
+require restart.refused-poweroff 'shutdown: storage sync failed' "$log"
+checks=$((checks + 3))
 printf 'PASS restart\n'
 
 # --- Forced recovery checks the installed volume (proof 6) ------------------
