@@ -274,11 +274,11 @@ func userspaceMain() {
 		for index := range sessions {
 			shells[index], _ = manager.Snapshot(sessions[index].shell)
 		}
-		// Nothing is read from the volume while its VFS or filesystem
-		// service is gone.
-		for _, name := range [...]string{"vfs", filesystemName} {
+		// Nothing is read from the volume while a service it depends on is
+		// gone.
+		for _, name := range [...]string{"vfs", "block", driverName, filesystemName} {
 			if snapshot, _ := manager.Snapshot(name); snapshot.State == supervisor.StateRunning && snapshot.PID == event.Process {
-				systemUnavailable()
+				storageExited(name)
 			}
 		}
 		exitStatus := manager.Exit(event.Process, event.Code, supervisionTicks)
@@ -298,6 +298,7 @@ func userspaceMain() {
 		syslog.Warn("service exited", syslog.Uint("pid", event.Process), syslog.Uint("code", event.Code))
 		manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
 		checkExhaustion()
+		retryWithdraw()
 		snapshot, found := manager.Snapshot("fault-probe")
 		if validation.Enabled && found && snapshot.State == supervisor.StateFailed && !supervisionComplete {
 			startServices(supervisionTicks)

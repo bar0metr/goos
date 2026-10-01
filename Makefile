@@ -342,6 +342,7 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-boot
+	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -359,6 +360,7 @@ release-check:
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
+	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -398,6 +400,14 @@ test-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+
+# The installed system and recovery boot (ADR 0175): a normal boot from an
+# installed disk, a reboot of it with storage faults, forced recovery, and
+# recovery for a missing disk and each way the installed system can be unusable.
+test-system-boot:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory recovery-iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) tests/boot/system.sh $(ISO) $(OVMF_CODE)
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1

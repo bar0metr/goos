@@ -37,6 +37,13 @@ var (
 	// storageLost is the validation build's volume that is gone for good:
 	// no filesystem service starts while it is set.
 	storageLost bool
+	// filesystemPending records that the VFS or the block service went, so
+	// the volume is usable again only once the filesystem service that
+	// follows them has been attached.
+	filesystemPending bool
+	// withdrawPending records a withdrawal of the installed system the VFS
+	// refused while files were open through it.
+	withdrawPending bool
 	// bootstrapIndex is the archive's recovery index, read from the mapped
 	// archive rather than through the VFS.
 	bootstrapIndex     []byte
@@ -246,27 +253,55 @@ func restoreSystem() {
 		enterRecovery(stage, path, reason)
 		return
 	}
-	systemReady = true
-	releaseSessionServices()
+	filesystemPending = false
+	systemResumed()
 	mark("SYSTEM_REATTACHED_OK\n")
 	syslog.Info("installed system attached again")
 }
 
-// systemUnavailable runs when the VFS or the filesystem service has gone.
-// Nothing is started from the volume until restoreSystem.
-func systemUnavailable() {
+// driverRestarted runs once a restarted storage driver is installed. When the
+// driver was all that went, the volume is usable again now.
+func driverRestarted() {
+	if boot.Mode() == supervisor.ModeNormal && !systemReady && !filesystemPending && filesystemAttached {
+		systemResumed()
+	}
+}
+
+// storageExited runs when a storage service has gone. Nothing is started
+// from the volume until the services behind it are back.
+func storageExited(name string) {
+	if name == "vfs" || name == "block" {
+		filesystemPending = true
+	}
 	if !systemReady {
 		return
 	}
 	systemReady = false
-	for _, name := range sessionServiceNames() {
-		manager.Hold(name)
+	for _, service := range sessionServiceNames() {
+		manager.Hold(service)
 	}
 }
 
-func releaseSessionServices() {
+// systemResumed lets the session services start from the volume again. A
+// program read from a file fails when its source goes, so each storage fault
+// can end them; recovering the storage gives each a fresh restart budget,
+// and only a service that keeps failing with storage up uses its budget up.
+func systemResumed() {
+	systemReady = true
 	for _, name := range sessionServiceNames() {
+		if executable, found := manager.Executable(name); found {
+			manager.Rebase(name, bytesString(executable), supervisionTicks)
+		}
 		manager.Release(name)
+	}
+}
+
+// retryWithdraw withdraws the installed system once the files that kept it
+// in use have closed.
+func retryWithdraw() {
+	if withdrawPending && requestSystem(false) == vfs.StatusOK {
+		withdrawPending = false
+		syslog.Info("installed system withdrawn")
 	}
 }
 
@@ -327,7 +362,10 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 	systemReady = false
 	announceMode()
 	if status := requestSystem(false); status != vfs.StatusOK {
-		syslog.Warn("installed system not withdrawn", syslog.Uint("status", uint64(status)))
+		// Programs read from it are still running; it goes once they
+		// have.
+		withdrawPending = true
+		syslog.Info("installed system in use; withdrawn once it is not", syslog.Uint("status", uint64(status)))
 	}
 	// Recovery needs the VFS, so a VFS that used up its restarts gets
 	// another budget.

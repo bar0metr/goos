@@ -8,6 +8,7 @@ package main
 import (
 	"goos/internal/validation"
 	"goos/kernel/handle"
+	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/sys"
@@ -142,6 +143,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 		return 0, false
 	}
 	mark("INIT_SERVICE_STARTED_OK\n")
+	if execproto.OriginOf(spec.Executable[:spec.ExecutableSize]) == execproto.OriginFile {
+		mark("SERVICE_FROM_DISK_OK " + name + "\n")
+	}
 	// Once the prompt is up the console belongs to the terminal service, and
 	// a line written past it would land in whatever is being typed. A restart
 	// after boot is recorded in the log instead.
@@ -150,6 +154,9 @@ func launchService(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	syslog.Info("service started", syslog.Str("service", name), syslog.Uint("pid", event.Process))
 	if name == driverName {
+		if driverStarted {
+			driverRestarted()
+		}
 		driverStarted = true
 	}
 	if name == "block" {

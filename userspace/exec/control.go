@@ -13,7 +13,10 @@ import (
 const (
 	ControlProtocolID = uint64(0x4743544c30303031)
 	ControlVersion    = uint16(4)
-	MaxServiceEntries = 8
+	// MaxServiceEntries is as many entries as one reply holds: eleven of
+	// 22 bytes, after the count, in a 256-byte payload. A system with both
+	// consoles runs eleven services.
+	MaxServiceEntries = 11
 	MaxServiceName    = 15
 	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
 )
