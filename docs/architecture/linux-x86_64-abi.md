@@ -34,7 +34,7 @@ an errno; nothing is accepted and ignored.
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions and the blocked mask; handlers run at system call returns; unblocking delivers what is pending |
+| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions and the blocked mask; handlers run at system call returns; unblocking delivers what is pending; flags GoOS cannot honor `EINVAL` |
 | `rt_sigreturn(15)` | implemented | restores registers and mask from the handler's frame; a frame returning outside the user half ends the process with `SIGSEGV` |
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
@@ -50,6 +50,7 @@ an errno; nothing is accepted and ignored.
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
 | `wait4(61)` | partial | a child by PID or any child; `WNOHANG`; process-group targets, `WUNTRACED`, and `WCONTINUED` `EINVAL`; `rusage` holds user time only |
+| `kill(62)`, `tkill(200)`, `tgkill(234)` | partial | the caller and its descendants only; process-group targets `EINVAL`; a fatal signal ends a sleeping target at once |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
 | `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND`; others `EINVAL` |
@@ -75,7 +76,7 @@ BusyBox does about it:
 
 | Syscall | Effect of `ENOSYS` |
 | --- | --- |
-| `kill(62)`, `tkill(200)`, `tgkill(234)`, `sigaltstack(131)` | a process cannot send a signal; `raise` and `abort` see the refusal |
+| `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
 | `poll(7)`, `ppoll(271)`, `futex(202)` | no polling or threads inside a process |
@@ -400,8 +401,19 @@ holds no floating-point state. `SA_NODEFER` and `SA_RESETHAND` take effect.
 `rt_sigreturn` restores the saved registers and mask; a handler that edits
 the context changes what the interrupted call returns (ADR 0163, ADR 0164).
 
-Delivery, `SIGINT`, `SIGQUIT`, `SIGKILL`, `SIGUSR1`, `SIGUSR2`, and `SIGTERM`
-are ready, but no call sends them yet. A signal does not interrupt a blocked
+`kill`, `tkill`, and `tgkill` send `SIGHUP`, `SIGINT`, `SIGQUIT`, `SIGABRT`,
+`SIGKILL`, `SIGUSR1`, `SIGUSR2`, `SIGPIPE`, `SIGALRM`, `SIGTERM`, or
+`SIGCHLD` to the caller or a descendant. Another target in the family is
+`EPERM`; one outside it, a native process included, is `ESRCH`. A PID of 0
+or below is `EINVAL`, and so is a signal outside the set. Signal 0 checks the
+target. A signal the target would die of ends it at once, even asleep in a
+call. Others wait for its next system call return (ADR 0166).
+
+`rt_sigaction` accepts `SA_SIGINFO`, `SA_RESTORER`, `SA_NODEFER`,
+`SA_RESETHAND`, `SA_NOCLDWAIT`, `SA_NOCLDSTOP`, `SA_ONSTACK`, and
+`SA_RESTART`; any other flag is `EINVAL`. `SA_NOCLDWAIT` or `SIG_IGN` on
+`SIGCHLD` leaves no zombie, and `wait4` then sleeps until the children end and
+returns `ECHILD` (ADR 0165). A handled signal does not interrupt a blocked
 call, and no call returns `EINTR`.
 
 | Call | Behavior |
@@ -414,7 +426,7 @@ call, and no call returns `EINTR`.
 | an unreadable or unwritable pointer | `EFAULT` |
 
 Ctrl-C ends the process through the native kill path whatever it registered
-for `SIGINT`. The calls that send a signal stay `ENOSYS`. A handler without
+for `SIGINT`. A handler without
 `SA_RESTORER`, or one whose frame does not fit or cannot be written, ends the
 process with `SIGSEGV`.
 
@@ -570,7 +582,7 @@ Results a correct Linux program can observe to differ:
 | Area | GoOS 0.2.0 | Linux |
 | --- | --- | --- |
 | terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
-| signals | `SIGCHLD` and `SIGPIPE` are generated and delivered at system call returns; no process sends one; Ctrl-C ends the process whatever handles `SIGINT`; no call returns `EINTR` | sent, delivered at any return to user mode, interrupt blocked calls |
+| signals | delivered at system call returns; `kill` reaches the caller and its descendants only; Ctrl-C ends the process whatever handles `SIGINT`; no call returns `EINTR` | sent by UID, delivered at any return to user mode, interrupt blocked calls |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
 | random bytes | `ENOSYS` and no `AT_RANDOM` on a CPU without RDRAND; 256 bytes per call | always available; 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
@@ -594,7 +606,7 @@ Results a correct Linux program can observe to differ:
 
 GoOS 0.2.0 runs x86_64, statically linked ELF programs, position-independent
 or not. It has no `PT_INTERP`, dynamic linker, or glibc; no process groups
-and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no `kill`, `EINTR`, or alternate signal stack; no
+and no `clone` beyond two process forms; no shared-memory `vfork`; no threads or `futex`; no process-group `kill`, `EINTR`, or alternate signal stack; no
 nonblocking pipes; no networking; no `/proc` or `/sys`, and of
 `/dev` three names; no file-backed `mmap`; no address-space randomization; no
 ownership or permission enforcement; no root; no termios. BusyBox `sh` runs

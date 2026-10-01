@@ -43,6 +43,7 @@ const (
 	SysExecve        Syscall = 59
 	SysExit          Syscall = 60
 	SysWait4         Syscall = 61
+	SysKill          Syscall = 62
 	SysUname         Syscall = 63
 	SysFcntl         Syscall = 72
 	SysGetcwd        Syscall = 79
@@ -62,11 +63,13 @@ const (
 	SysGetgroups     Syscall = 115
 	SysArchPrctl     Syscall = 158
 	SysGettid        Syscall = 186
+	SysTkill         Syscall = 200
 	SysFutex         Syscall = 202
 	SysGetdents64    Syscall = 217
 	SysSetTidAddress Syscall = 218
 	SysClockGettime  Syscall = 228
 	SysExitGroup     Syscall = 231
+	SysTgkill        Syscall = 234
 	SysOpenat        Syscall = 257
 	SysMkdirat       Syscall = 258
 	SysNewfstatat    Syscall = 262
@@ -179,30 +182,39 @@ const (
 	SignalBlock     = uint64(0)
 	SignalUnblock   = uint64(1)
 	SignalSetMask   = uint64(2)
+	SignalHangup    = uint64(1)
 	SignalInterrupt = uint64(2)
 	SignalQuit      = uint64(3)
+	SignalAbort     = uint64(6)
 	SignalKill      = uint64(9)
 	SignalUser1     = uint64(10)
 	SignalSegv      = uint64(11)
 	SignalUser2     = uint64(12)
 	SignalPipe      = uint64(13)
+	SignalAlarm     = uint64(14)
 	SignalTerm      = uint64(15)
 	SignalChild     = uint64(17)
 	SignalStop      = uint64(19)
 	SignalCount     = uint64(64)
 
 	// sigaction flags and the special handler values.
-	SignalActionInfo      = uint64(4)
-	SignalActionRestorer  = uint64(0x04000000)
-	SignalActionNoDefer   = uint64(0x40000000)
-	SignalActionResetHand = uint64(0x80000000)
-	SignalHandlerDefault  = uint64(0)
-	SignalHandlerIgnore   = uint64(1)
+	SignalActionNoChildStop = uint64(1)
+	SignalActionNoChildWait = uint64(2)
+	SignalActionInfo        = uint64(4)
+	SignalActionOnStack     = uint64(0x08000000)
+	SignalActionRestart     = uint64(0x10000000)
+	SignalActionRestorer    = uint64(0x04000000)
+	SignalActionNoDefer     = uint64(0x40000000)
+	SignalActionResetHand   = uint64(0x80000000)
+	SignalHandlerDefault    = uint64(0)
+	SignalHandlerIgnore     = uint64(1)
 
-	// si_code values: sent by a process, and the two ways a child ends.
-	SignalCodeUser      = int32(0)
-	SignalCodeChildExit = int32(1)
-	SignalCodeChildKill = int32(2)
+	// si_code values: sent by kill, sent by tkill or tgkill, and the two
+	// ways a child ends.
+	SignalCodeUser       = int32(0)
+	SignalCodeThreadKill = int32(-6)
+	SignalCodeChildExit  = int32(1)
+	SignalCodeChildKill  = int32(2)
 
 	// clone flags a process-creating call may carry. The low byte of the
 	// flags is the signal the parent receives when the child ends.
@@ -246,7 +258,7 @@ func (number Syscall) Known() bool {
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,
-		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysWait4, SysUname, SysGetcwd, SysChdir,
+		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysWait4, SysKill, SysTkill, SysTgkill, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
 		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,

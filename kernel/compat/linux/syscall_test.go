@@ -36,6 +36,7 @@ func (handler *testHandler) Fork(request Request) Result          { return handl
 func (handler *testHandler) Wait4(request Request) Result         { return handler.memory(request) }
 func (handler *testHandler) Pipe(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) SigReturn(request Request) Result     { return handler.memory(request) }
+func (handler *testHandler) Kill(request Request) Result          { return handler.memory(request) }
 func (handler *testHandler) memory(request Request) Result {
 	handler.called = request.Number
 	return Result{}
@@ -115,7 +116,7 @@ func TestDispatchRoutesImplementedCalls(t *testing.T) {
 		abi.SysSetgid, abi.SysGetgroups, abi.SysBrk, abi.SysMmap, abi.SysMunmap,
 		abi.SysMprotect, abi.SysMadvise, abi.SysArchPrctl, abi.SysExit, abi.SysExitGroup,
 		abi.SysPread64, abi.SysPwrite64, abi.SysStatx, abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom, abi.SysExecve,
-		abi.SysFork, abi.SysVfork, abi.SysClone, abi.SysWait4, abi.SysPipe, abi.SysPipe2, abi.SysRtSigreturn,
+		abi.SysFork, abi.SysVfork, abi.SysClone, abi.SysWait4, abi.SysPipe, abi.SysPipe2, abi.SysRtSigreturn, abi.SysKill, abi.SysTkill, abi.SysTgkill,
 	} {
 		result := Dispatch(&abi.Frame{Number: uint64(syscall)}, handler)
 		if handler.called != syscall {

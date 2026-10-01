@@ -24,6 +24,13 @@ type SignalState struct {
 	info    [standardSignals]SignalInfo
 }
 
+// supportedActionFlags are the sigaction flags whose Linux meaning GoOS
+// provides. SA_NOCLDSTOP, SA_ONSTACK, and SA_RESTART hold trivially: no child
+// ever stops, no alternate stack can be installed, and no call is interrupted.
+const supportedActionFlags = abi.SignalActionNoChildStop | abi.SignalActionNoChildWait | abi.SignalActionInfo |
+	abi.SignalActionRestorer | abi.SignalActionOnStack | abi.SignalActionRestart | abi.SignalActionNoDefer |
+	abi.SignalActionResetHand
+
 // standardSignals is the count of non-realtime signals, 1 to 31.
 const standardSignals = 31
 
@@ -45,12 +52,13 @@ type SignalAction struct {
 }
 
 // DeliverableSignal reports whether GoOS can generate and deliver signal:
-// SIGINT, SIGQUIT, SIGKILL, SIGUSR1, SIGUSR2, SIGPIPE, SIGTERM, and SIGCHLD.
+// SIGHUP, SIGINT, SIGQUIT, SIGABRT, SIGKILL, SIGUSR1, SIGUSR2, SIGPIPE,
+// SIGALRM, SIGTERM, and SIGCHLD.
 // A CPU fault ends the process at once and cannot be caught.
 func DeliverableSignal(signal uint64) bool {
 	switch signal {
-	case abi.SignalInterrupt, abi.SignalQuit, abi.SignalKill, abi.SignalUser1, abi.SignalUser2,
-		abi.SignalPipe, abi.SignalTerm, abi.SignalChild:
+	case abi.SignalHangup, abi.SignalInterrupt, abi.SignalQuit, abi.SignalAbort, abi.SignalKill,
+		abi.SignalUser1, abi.SignalUser2, abi.SignalPipe, abi.SignalAlarm, abi.SignalTerm, abi.SignalChild:
 		return true
 	}
 	return false
@@ -104,6 +112,23 @@ func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
 		state.info[signal-1] = info
 	}
 	return true
+}
+
+// ReapsChildren reports whether children of this process skip the zombie
+// state: SIGCHLD is ignored, or its action carries SA_NOCLDWAIT.
+func (state *SignalState) ReapsChildren() bool {
+	action := state.ActionOf(abi.SignalChild)
+	return action.Handler == abi.SignalHandlerIgnore || action.Flags&abi.SignalActionNoChildWait != 0
+}
+
+// Fatal reports whether signal sent now would end the process by its default
+// action without waiting for the process to run: SIGKILL, or an unblocked
+// signal whose default action terminates.
+func (state *SignalState) Fatal(signal uint64) bool {
+	if signal == abi.SignalKill {
+		return true
+	}
+	return DeliverableSignal(signal) && state.mask&(uint64(1)<<(signal-1)) == 0 && state.Outcome(signal) == SignalTerminate
 }
 
 // Pending reports the pending set.
@@ -207,6 +232,11 @@ func (state *SignalState) Action(signal uint64, replacement *[SignalActionSize]b
 		return abi.EINVAL
 	}
 	if replacement != nil && (signal == abi.SignalKill || signal == abi.SignalStop) {
+		return abi.EINVAL
+	}
+	// The kernel's sa_flags is 64 bits wide, and libc stores an int in it:
+	// SA_RESETHAND sign-extends into the upper half, which Linux ignores.
+	if replacement != nil && uint64(binary.LittleEndian.Uint32(replacement[8:12]))&^supportedActionFlags != 0 {
 		return abi.EINVAL
 	}
 	current := &state.actions[signal-1]

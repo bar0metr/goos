@@ -34,7 +34,9 @@ across `dup` and `fork`, a writer larger than the pipe, and `PIPE_BUF`
 atomicity with two writers; `signal` checks `SIGPIPE` and `SIGCHLD`: default
 termination, handlers with their mask and siginfo, a blocked signal arriving
 on unblock, `SA_RESETHAND`, a handler rewriting the saved context, and a
-forged return address.
+forged return address; `kill` sends `SIGTERM` and `SIGKILL` to children asleep
+in `read`, `SIGUSR1` to a handler, and `SIGTERM` to a child that blocks it,
+checks `raise` and `tgkill`, and checks that `SA_NOCLDWAIT` leaves no zombie.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -101,7 +103,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `49492f8db8c76a4368855b70b9fc7593b835fc5c5ec725de8829646d1e84feef` |
+| `prebuilt/abi-probe` | `ce0e0918e7fa9af64b4845fb7a2b731a4195d4cbb7c1c3c5a3377b74528325e7` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

@@ -42,6 +42,7 @@
  *   wait              reap children by PID and by any, with and without WNOHANG
  *   pipe              pipe and pipe2: direction, EOF, EPIPE, lifetime, PIPE_BUF
  *   signal            SIGPIPE and SIGCHLD delivery, handlers, masks, rt_sigreturn
+ *   kill              kill, tkill, tgkill, and SA_NOCLDWAIT on the process tree
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -1792,13 +1793,14 @@ static int broken_pipe_child(void (*handler)(int, siginfo_t *, void *))
 	int fds[2], status = -1;
 	pid_t child;
 
-	if (pipe(fds) != 0)
+	/* The read end closes before the fork, so no reader exists when the
+	 * child writes. */
+	if (pipe(fds) != 0 || close(fds[0]) != 0)
 		return -1;
 	child = fork();
 	if (child == 0) {
 		long result;
 
-		close(fds[0]);
 		if (handler)
 			set_action(SIGPIPE, handler, 0);
 		else
@@ -1806,7 +1808,6 @@ static int broken_pipe_child(void (*handler)(int, siginfo_t *, void *))
 		result = write(fds[1], "x", 1);
 		_exit(result == -1 ? 0 : 1);
 	}
-	close(fds[0]);
 	close(fds[1]);
 	if (child < 0 || wait4(child, &status, 0, NULL) != child)
 		return -1;
@@ -1882,6 +1883,166 @@ static int signal_test(void)
 	return 0;
 }
 
+static volatile int kill_seen;
+
+static void note_kill(int number)
+{
+	kill_seen = number;
+}
+
+static int kill_fail(const char *step)
+{
+	printf("kill failed: %s errno=%d\n", step, errno);
+	return 1;
+}
+
+/* Forks a child that runs body after it says it is ready, and returns its
+ * PID once it has said so. */
+static pid_t ready_child(int (*body)(int))
+{
+	int ready[2];
+	char byte;
+	pid_t child;
+
+	if (pipe(ready) != 0)
+		return -1;
+	child = fork();
+	if (child == 0) {
+		close(ready[0]);
+		_exit(body(ready[1]));
+	}
+	close(ready[1]);
+	if (child < 0 || read(ready[0], &byte, 1) != 1)
+		child = -1;
+	close(ready[0]);
+	return child;
+}
+
+/* Says ready, then sleeps in read on a pipe nobody writes. */
+static int blocked_reader(int ready)
+{
+	int idle[2];
+	char byte;
+
+	if (pipe(idle) != 0 || write(ready, "r", 1) != 1)
+		return 2;
+	read(idle[0], &byte, 1);
+	return 3;
+}
+
+/* Handles SIGUSR1, says ready, and naps until the handler has run. */
+static int handled_user1(int ready)
+{
+	struct timespec nap = {0, 10 * 1000 * 1000};
+	int tries;
+
+	signal(SIGUSR1, note_kill);
+	if (write(ready, "r", 1) != 1)
+		return 2;
+	for (tries = 0; tries < 500 && kill_seen != SIGUSR1; tries++)
+		nanosleep(&nap, NULL);
+	return kill_seen == SIGUSR1 ? 0 : 1;
+}
+
+static int blocker_go = -1;
+
+/* Blocks SIGTERM, says ready, waits for the go byte, then unblocks it. */
+static int blocked_term(int ready)
+{
+	sigset_t mask;
+	char byte;
+
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGTERM);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+	if (write(ready, "r", 1) != 1 || read(blocker_go, &byte, 1) != 1)
+		return 2;
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
+	return 4;
+}
+
+static int asks_parent(int ready)
+{
+	if (write(ready, "r", 1) != 1)
+		return 2;
+	return fails(kill(getppid(), 0), EPERM) ? 0 : 1;
+}
+
+static int kill_test(void)
+{
+	struct sigaction action;
+	int status, go[2];
+	pid_t child;
+
+	fflush(stdout);
+	if (kill(getpid(), 0) != 0 || !fails(kill(getpid(), 65), EINVAL) || !fails(kill(30000, 0), ESRCH))
+		return kill_fail("probes");
+	if (on_goos() && (!fails(kill(0, SIGTERM), EINVAL) || !fails(kill(-1, SIGTERM), EINVAL) ||
+	    !fails(kill(getppid(), 0), ESRCH) || !fails(kill(1, SIGKILL), ESRCH)))
+		return kill_fail("targets outside the tree");
+
+	/* A fatal signal ends a child asleep in a system call. */
+	child = ready_child(blocked_reader);
+	if (child < 0 || kill(child, 0) != 0 || kill(child, SIGTERM) != 0 ||
+	    wait4(child, &status, 0, NULL) != child || !WIFSIGNALED(status) || WTERMSIG(status) != SIGTERM)
+		return kill_fail("SIGTERM");
+	child = ready_child(blocked_reader);
+	if (child < 0 || kill(child, SIGKILL) != 0 || wait4(child, &status, 0, NULL) != child ||
+	    !WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL)
+		return kill_fail("SIGKILL");
+
+	/* A handled signal runs the child's handler. */
+	child = ready_child(handled_user1);
+	if (child < 0 || kill(child, SIGUSR1) != 0 || wait4(child, &status, 0, NULL) != child || status != 0)
+		return kill_fail("SIGUSR1 handler");
+
+	/* A blocked fatal signal waits until the child unblocks it. */
+	if (pipe(go) != 0)
+		return kill_fail("go pipe");
+	blocker_go = go[0];
+	child = ready_child(blocked_term);
+	if (child < 0 || kill(child, SIGTERM) != 0 || write(go[1], "g", 1) != 1 ||
+	    wait4(child, &status, 0, NULL) != child || !WIFSIGNALED(status) || WTERMSIG(status) != SIGTERM)
+		return kill_fail("blocked SIGTERM");
+	close(go[0]);
+	close(go[1]);
+
+	if (on_goos()) {
+		child = ready_child(asks_parent);
+		if (child < 0 || wait4(child, &status, 0, NULL) != child || status != 0)
+			return kill_fail("child signals its parent");
+	}
+
+	/* raise uses tkill and runs the handler before it returns. */
+	signal(SIGUSR2, note_kill);
+	if (raise(SIGUSR2) != 0 || kill_seen != SIGUSR2 ||
+	    syscall(SYS_tgkill, getpid(), getpid(), SIGUSR2) != 0 || !fails(syscall(SYS_tgkill, getpid(), getpid() + 1, SIGUSR2), ESRCH))
+		return kill_fail("tkill and tgkill");
+	signal(SIGUSR2, SIG_DFL);
+
+	/* With SA_NOCLDWAIT a child leaves no zombie: wait4 sleeps until it
+	 * ends and then has nothing to report. */
+	memset(&action, 0, sizeof action);
+	action.sa_handler = SIG_DFL;
+	action.sa_flags = SA_NOCLDWAIT;
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGCHLD, &action, NULL) != 0)
+		return kill_fail("SA_NOCLDWAIT");
+	child = fork();
+	if (child == 0)
+		_exit(0);
+	if (child < 0 || !fails(wait4(-1, &status, 0, NULL), ECHILD))
+		return kill_fail("no zombie");
+	signal(SIGCHLD, SIG_DFL);
+	if (on_goos()) {
+		action.sa_flags = 0x20;
+		if (!fails(sigaction(SIGUSR1, &action, NULL), EINVAL))
+			return kill_fail("unknown sigaction flag");
+	}
+	printf("kill ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -1921,6 +2082,8 @@ int main(int argc, char **argv)
 			return pipe_test();
 		if (!strcmp(argv[1], "signal"))
 			return signal_test();
+		if (!strcmp(argv[1], "kill"))
+			return kill_test();
 		if (!strcmp(argv[1], "after-exec"))
 			return after_exec(argc, argv);
 		if (!strcmp(argv[1], "stack-overflow"))
