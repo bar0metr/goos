@@ -167,8 +167,8 @@ recovery.
 
 ## Consequences
 
-The archive holds about a fifth of what it did, and the distribution is no
-longer bounded by `boot.MaxInitramfs`. A system on a disk runs only with a
+The production archive is 3.4 MiB of the unchanged 6 MiB limit, and the rest
+of the distribution is no longer bounded by `boot.MaxInitramfs`. A system on a disk runs only with a
 boot archive of the same release; a newer archive boots an older disk into
 recovery until the disk is installed again.
 
