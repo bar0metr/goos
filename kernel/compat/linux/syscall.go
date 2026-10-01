@@ -72,6 +72,8 @@ type Handler interface {
 	// Pipe serves pipe and pipe2.
 	Pipe(Request) Result
 	SigReturn(Request) Result
+	// SigSuspend serves rt_sigsuspend and pause.
+	SigSuspend(Request) Result
 	// Kill serves kill, tkill, and tgkill.
 	Kill(Request) Result
 	// Poll serves poll and ppoll.
@@ -188,6 +190,8 @@ func route(request Request, handler Handler) Result {
 			return handler.Pipe(request)
 		case abi.SysRtSigreturn:
 			return handler.SigReturn(request)
+		case abi.SysRtSigsuspend, abi.SysPause:
+			return handler.SigSuspend(request)
 		case abi.SysKill, abi.SysTkill, abi.SysTgkill:
 			return handler.Kill(request)
 		case abi.SysPoll, abi.SysPpoll:

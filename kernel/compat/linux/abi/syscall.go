@@ -6,7 +6,7 @@ type Syscall uint64
 
 // Numbers are from Linux arch/x86/entry/syscalls/syscall_64.tbl. This bounded
 // planning namespace includes measured release candidates and later fallbacks;
-// membership is not a claim of implementation or a 0.2.0 release commitment.
+// membership is not a claim of implementation or a release commitment.
 const (
 	SysRead          Syscall = 0
 	SysWrite         Syscall = 1
@@ -35,6 +35,7 @@ const (
 	SysMadvise       Syscall = 28
 	SysDup           Syscall = 32
 	SysDup2          Syscall = 33
+	SysPause         Syscall = 34
 	SysNanosleep     Syscall = 35
 	SysGetpid        Syscall = 39
 	SysClone         Syscall = 56
@@ -62,6 +63,7 @@ const (
 	SysGetppid       Syscall = 110
 	SysGetgroups     Syscall = 115
 	SysArchPrctl     Syscall = 158
+	SysRtSigsuspend  Syscall = 130
 	SysGettid        Syscall = 186
 	SysTkill         Syscall = 200
 	SysFutex         Syscall = 202
@@ -254,7 +256,7 @@ const (
 func (number Syscall) Known() bool {
 	switch number {
 	case SysRead, SysWrite, SysOpen, SysClose, SysStat, SysFstat, SysLstat, SysPoll, SysLseek, SysMmap,
-		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask, SysRtSigreturn,
+		SysMprotect, SysMunmap, SysBrk, SysRtSigaction, SysRtSigprocmask, SysRtSigreturn, SysRtSigsuspend, SysPause,
 		SysIoctl, SysReadv, SysWritev, SysPipe, SysSchedYield, SysMadvise,
 		SysDup, SysDup2, SysFcntl, SysDup3, SysPread64, SysPwrite64, SysAccess, SysSetuid, SysSetgid,
 		SysGetgroups, SysFaccessat,

@@ -269,6 +269,20 @@ run '/system/linux/abi-probe ppoll'
 expect '^ppoll ok$' 'ppoll timespec timeout and temporary signal mask'
 clean 'ppoll timespec timeout and temporary signal mask'
 
+run '/system/linux/abi-probe run /system/linux/musl-hello alpha beta'
+expect '^argc=3$' 'a Linux program replaces itself with another'
+expect '^hello from musl$' 'a Linux program replaces itself with another'
+clean 'a Linux program replaces itself with another'
+
+run '/system/linux/abi-probe hardening'
+expect '^hardening ok$' 'failed exec, fork memory, descriptors, pipes, and signal frames'
+clean 'failed exec, fork memory, descriptors, pipes, and signal frames'
+
+run '/system/linux/abi-probe limits'
+expect '^fork bomb bounded at 15$' 'the family budget bounds a fork bomb'
+expect '^limits ok$' 'zombies count against the family budget'
+clean 'zombies count against the family budget'
+
 run '/system/linux/abi-probe path'
 expect '^path /system/linux$' 'a Linux program searches the Linux fixture directory'
 

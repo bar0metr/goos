@@ -109,7 +109,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference
+.PHONY: FORCE all kernel userspace initramfs iso run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference
 
 all: iso
 
@@ -558,6 +558,10 @@ test-linux-boot:
 
 test-linux-musl test-linux-vfs test-linux-security: test-linux-boot
 
+# The process-composition proofs run in the same validation boot: fork, exec,
+# pipes, wait, signals, poll, and the hardening and budget modes.
+test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll: test-linux-boot
+
 test-linux-all: test-linux-elf test-linux-abi test-linux-boot
 
 # Interoperability with a static x86_64 BusyBox the caller supplies. The
@@ -566,6 +570,9 @@ test-linux-all: test-linux-elf test-linux-abi test-linux-boot
 # LINUX_EXTRA places further Linux programs under /system/linux in any image
 # build; several paths are separated as in PATH.
 LINUX_EXTRA ?=
+# test-linux-shell is the same run: BusyBox sh starts programs, pipelines,
+# redirections, and a script.
+test-linux-shell: test-linux-busybox
 test-linux-busybox:
 	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
 	@$(MAKE) --no-print-directory iso VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX))
@@ -591,6 +598,7 @@ test-linux-reference:
 # result must be the exact Linux one. The caller supplies the kernel and a
 # static BusyBox for the guest's /init; the repository carries neither.
 #   make test-linux-kernel-reference KERNEL=/path/to/vmlinuz BUSYBOX=/path/to/busybox
+test-linux-process-reference: test-linux-kernel-reference
 test-linux-kernel-reference:
 	@test -n "$(KERNEL)" && test -f "$(KERNEL)" || { echo "KERNEL=/path/to/linux/kernel/image is required" >&2; exit 2; }
 	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }

@@ -217,7 +217,7 @@ func (handler *linuxCallHandler) interrupted(restartable bool) linuxcompat.Resul
 
 // interruptLinuxSleeper wakes the task of state from an interruptible wait
 // once a signal with a handler is pending for it: a stream read or write,
-// wait4, nanosleep, poll, or ppoll. A VFS exchange, a queued VFS request,
+// wait4, nanosleep, poll, ppoll, rt_sigsuspend, or pause. A VFS exchange, a queued VFS request,
 // and a vfork parent keep waiting, as Linux file I/O and vfork do. A signal
 // that would end the process has already ended it.
 func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
@@ -240,7 +240,7 @@ func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
 		}
 	case linuxabi.SysWait4:
 		linuxcompat.ReleaseChildWaiter(state.PID)
-	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll:
+	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll, linuxabi.SysRtSigsuspend, linuxabi.SysPause:
 		waitAnyTable.Cancel(task)
 	default:
 		return
@@ -268,4 +268,48 @@ func killLinuxFamily(root uint64) {
 			amd64.TerminateTask(uint64(task), linuxcompat.SignalExitCode(linuxabi.SignalKill))
 		}
 	}
+}
+
+// linuxSuspendCorrelation marks the one wait a task in rt_sigsuspend has.
+const linuxSuspendCorrelation = 1
+
+// SigSuspend serves rt_sigsuspend and pause. rt_sigsuspend replaces the
+// signal mask; pause keeps it. Either sleeps until a signal with a handler
+// arrives and fails with EINTR. Under rt_sigsuspend the handler runs with the
+// temporary mask, and its return restores the mask the call replaced. A
+// signal whose default action ends the process ends it in the sleep.
+func (handler *linuxCallHandler) SigSuspend(request linuxcompat.Request) linuxcompat.Result {
+	state, found := linuxcompat.FindProcess(handler.root)
+	if !found {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	if pending, active := linuxcompat.SyscallContinuations.Pending(handler.task); active {
+		if pending.Number != request.Number || pending.Arguments != request.Arguments {
+			handler.vfsAbandon()
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		if pending.Phase == linuxcompat.ContinuationWaiting {
+			return linuxBlocked
+		}
+		linuxcompat.SyscallContinuations.Finish(handler.task)
+	} else if request.Number == linuxabi.SysRtSigsuspend {
+		if request.Arguments[1] != linuxcompat.SignalSetSize {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		if !vm.CopyIn(handler.root, request.Arguments[0], linuxSignalSet[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		state.Signals.SwapMask(linuxcompat.DecodeSignalSet(&linuxSignalSet))
+	}
+	if state.Signals.Interrupting() {
+		return linuxErrno(linuxabi.EINTR)
+	}
+	if !linuxcompat.SyscallContinuations.Begin(handler.task, request, nil) ||
+		!linuxcompat.SyscallContinuations.Issue(handler.task, 1, linuxSuspendCorrelation) ||
+		!linuxcompat.SyscallContinuations.Block(handler.task, 1) {
+		linuxcompat.SyscallContinuations.Cancel(handler.task)
+		state.Signals.EndMaskSwap()
+		return linuxErrno(linuxabi.ENOMEM)
+	}
+	return linuxBlocked
 }

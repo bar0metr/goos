@@ -1,13 +1,15 @@
 # Linux compatibility
 
-**Status: implemented.** GoOS 0.2.0 introduced the base ABI; current source
-also provides in-place static Linux image replacement. Unmodified, statically
-linked Linux x86_64 programs run as GoOS processes. The kernel has immutable native and
+**Status: implemented.** GoOS 0.2.0 introduced the base ABI and GoOS 0.2.1
+adds process composition: `fork`, `execve`, pipes, `wait4`, signals, and
+`poll`. Unmodified, statically linked Linux x86_64 programs run as GoOS
+processes. The kernel has immutable native and
 Linux process identities, a dedicated `SYSCALL`/IRETQ entry, bounded static
 ELF loading, a System V initial stack, and a constrained PID 1 launch policy.
 A translation layer in the kernel turns Linux calls into the primitives a
 native process uses: VM regions, byte streams, the kernel clocks, and one VFS
-session per process. Static musl programs and BusyBox applets run on it.
+session per process. Static musl programs, BusyBox applets, and a
+non-interactive BusyBox `sh` run on it.
 [linux-x86_64-abi.md](linux-x86_64-abi.md) is the contract: every call, its
 status, and each difference from Linux.
 
@@ -141,7 +143,7 @@ Syscalls map onto native primitives:
 `pipe` and `pipe2` create a native stream whose two ends become open-file
 descriptions (ADR 0162). `poll` sleeps on the native wait-any table (ADR 0168).
 
-Translation runs in a separate kernel compatibility subsystem for 0.2.0. It
+Translation runs in a separate kernel compatibility subsystem. It
 may access caller memory after the ordinary address-space checks, but authority
 still comes only from process-owned resources. It cannot call filesystem or
 device implementations directly (ADR 0134).
@@ -431,12 +433,12 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 
 ## Scope
 
-GoOS 0.2.0 runs static x86_64 programs, position-independent or not.
+GoOS 0.2.1 runs static x86_64 programs, position-independent or not.
 Dynamic linking, glibc, process groups, threads, `select`,
 nonblocking pipes, networking, `/proc`, termios, file-backed
 `mmap`, and address-space randomization are outside it. BusyBox `sh` runs
-builtins and redirections but cannot start a program, and `nano` does not
-run. `fork`, `vfork`, and two process forms of `clone` create a child from
+programs, pipelines, redirections, scripts, and background jobs without a
+terminal (ADR 0172), and `nano` does not run. `fork`, `vfork`, and two process forms of `clone` create a child from
 a private copy of the caller (ADR 0158, ADR 0159), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
 reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166),

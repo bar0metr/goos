@@ -249,6 +249,11 @@ grant, a device, or a smaller resource profile refuses the launch.
 | no device authority | the launch takes four stream and channel grants and refuses a fifth; an I/O port instruction faults and ends the process |
 | no framebuffer, DMA, IRQ, or kernel log | each needs a native call or a device handle, and a Linux process has neither |
 | no PID 1 launch authority | no launch channel is among the four grants |
+| fork and exec create no authority | a forked child gets the parent's VFS channel capability and nothing else; `execve` loads only a static Linux image, never a native image or manifest (ADR 0157, ADR 0158) |
+| a forked child cannot reach the native gate | `abi-probe hardening` runs the isolation check in a child |
+| `kill` cannot cross families | the target must be the caller or a descendant in the family registry; another family or a native process is `ESRCH` (ADR 0166) |
+| a fork bomb stays bounded | 16 processes per family, 48 for all families, 16 native slots reserved; `abi-probe limits` stops at 15 children (ADR 0155) |
+| a forged signal frame cannot escalate | `rt_sigreturn` refuses a return address or stack outside the user half, and every return filters RFLAGS (ADR 0164) |
 
 Linux user and group numbers, mode bits, and PIDs are presentation. No GoOS
 check reads them.

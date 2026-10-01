@@ -300,7 +300,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.2.0
+GoOS 0.2.1
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
@@ -539,8 +539,16 @@ position-independent executables load too. A Linux process gets
 its standard streams and one VFS session, cannot enter the native call gate,
 and holds no device authority. The
 [ABI document](docs/architecture/linux-x86_64-abi.md) lists every call and
-each difference from Linux. Dynamic linking, `fork`, `execve`, threads,
-signal delivery, and networking are outside this release.
+each difference from Linux.
+
+GoOS 0.2.1 ([docs/releases/0.2.1.md](docs/releases/0.2.1.md)) adds Linux
+process composition. A Linux program can `fork`, `execve`, connect children
+with pipes, reap them with `wait4`, and send and handle signals; `poll` waits
+on several descriptors. A static BusyBox `sh` runs programs, pipelines,
+redirections, scripts, and background jobs non-interactively. Every Linux
+descendant is an ordinary GoOS Process with no authority its parent lacks.
+Dynamic linking, threads, a Linux terminal, and networking are outside this
+release.
 
 Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
 and capability model and does not weaken the native architecture for POSIX
