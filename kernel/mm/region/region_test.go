@@ -277,3 +277,31 @@ func TestCopyFromDuplicatesTheTable(t *testing.T) {
 		t.Fatal("the copy shares state with its source")
 	}
 }
+
+func TestRestrictNarrowsPinnedImage(t *testing.T) {
+	m := newMap(t)
+	data := Region{Base: lower, Length: 8 * PageSize, Protection: Read | Write, Backing: Image, Flags: Pinned, Object: 7, Offset: 0x3000, Data: 5 * PageSize}
+	m.Insert(data)
+	if status := m.Protect(lower, 2*PageSize, Read); status != PermissionDenied {
+		t.Fatalf("Protect of a pinned image: %v", status)
+	}
+	// The relocated prefix becomes read-only; the split keeps the source
+	// offset and the file bytes of each part.
+	if status := m.Restrict(lower+PageSize, 3*PageSize, Read); status != OK {
+		t.Fatal(status)
+	}
+	expect(t, m,
+		Region{Base: lower, Length: PageSize, Protection: Read | Write, Backing: Image, Flags: Pinned, Object: 7, Offset: 0x3000, Data: PageSize},
+		Region{Base: lower + PageSize, Length: 3 * PageSize, Protection: Read, Backing: Image, Flags: Pinned, Object: 7, Offset: 0x3000 + PageSize, Data: 3 * PageSize},
+		Region{Base: lower + 4*PageSize, Length: 4 * PageSize, Protection: Read | Write, Backing: Image, Flags: Pinned, Object: 7, Offset: 0x3000 + 4*PageSize, Data: PageSize})
+	// A right taken away is not given back, and none is added.
+	if status := m.Restrict(lower+PageSize, PageSize, Read|Write); status != PermissionDenied {
+		t.Fatalf("write restored: %v", status)
+	}
+	if status := m.Restrict(lower, PageSize, Read|Execute); status != PermissionDenied {
+		t.Fatalf("execute added: %v", status)
+	}
+	if status := m.Restrict(lower, 20*PageSize, Read); status != NotMapped {
+		t.Fatalf("restrict over a hole: %v", status)
+	}
+}

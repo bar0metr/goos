@@ -725,6 +725,7 @@ goos_exception_fatal:
     movq (%rcx,%rax,8), %rcx
     movq %cr2, %rdx
     movq 160(%rsp), %r8
+    movq 168(%rsp), %r9
     callq goos_resolve_user_fault
     addq $32, %rsp
     movq %rax, %r11

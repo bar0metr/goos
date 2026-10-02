@@ -54,11 +54,14 @@
  *   fork-fault        a validation kernel fails a fork mid-copy; another succeeds
  *   fpstate           x87 and SSE state survives calls, sleeps, fork, and handlers
  *   exec-vfs-loss     the validation VFS dies while execve prepares its image
+ *   libc              what glibc asks at startup: RELRO mprotect, robust list,
+ *                     umask, readlink, futex, gettimeofday, time, sysinfo
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -75,6 +78,8 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
+#include <sys/time.h>
 #include <sys/sysmacros.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
@@ -2728,14 +2733,33 @@ static int fork_fault_test(void)
  * this file as an executable, in the middle of execve. */
 #define EXEC_CRASH_PATH "/tmp/.validation-vfs-exec-crash"
 
-extern char __executable_start[], end[];
+/* touch_image reads one byte of every page of every PT_LOAD segment. The
+ * segments need not be contiguous: the linker leaves an unmapped page
+ * between them when a section asks for page alignment. */
+static void touch_image(void)
+{
+	const Elf64_Phdr *headers = (const Elf64_Phdr *)getauxval(AT_PHDR);
+	unsigned long count = getauxval(AT_PHNUM), index;
+	volatile char sink = 0;
+
+	for (index = 0; headers && index < count; index++) {
+		uintptr_t page, last;
+
+		if (headers[index].p_type != PT_LOAD || headers[index].p_memsz == 0)
+			continue;
+		page = headers[index].p_vaddr & ~(uintptr_t)4095;
+		last = headers[index].p_vaddr + headers[index].p_memsz - 1;
+		for (; page <= last; page += 4096)
+			sink += *(volatile char *)page;
+	}
+	(void)sink;
+}
 static int exec_loss_canary = 0x5a;
 
 static int exec_vfs_loss_test(void)
 {
 	char *arguments[] = {EXEC_CRASH_PATH, NULL};
 	char cwd[16], *heap = malloc(32);
-	volatile char sink = 0;
 	pid_t pid = getpid();
 	int kept, file;
 
@@ -2744,9 +2768,7 @@ static int exec_vfs_loss_test(void)
 	strcpy(heap, "heap");
 	/* The image pages in from the VFS on first touch. Every page is read
 	 * now, while the VFS still answers. */
-	for (char *page = __executable_start; page < end; page += 4096)
-		sink += *(volatile char *)page;
-	(void)sink;
+	touch_image();
 	kept = open(IMAGE, O_RDONLY);
 	file = open(EXEC_CRASH_PATH, O_CREAT | O_TRUNC | O_WRONLY, 0755);
 	if (kept < 0 || file < 0 || write(file, "\177ELF", 4) != 4 || close(file) != 0 || chdir("/tmp") != 0)
@@ -2999,6 +3021,82 @@ static int fpstate_test(void)
 	return 0;
 }
 
+/* Two pages of initialized data. The first is made read-only the way glibc
+ * protects its relocated data (PT_GNU_RELRO) before main; the second stays
+ * writable. */
+static char libc_relro[2 * 4096] __attribute__((aligned(4096))) = {1};
+
+struct probe_robust_list_head {
+	void *list;
+	long offset;
+	void *pending;
+};
+
+#define PROBE_FUTEX_WAIT_PRIVATE 128
+#define PROBE_FUTEX_WAKE_PRIVATE 129
+
+static int libc_test(void)
+{
+	struct probe_robust_list_head head = {&head, 0, NULL};
+	unsigned int words[2] = {1, 1};
+	struct timeval tv;
+	struct sysinfo info;
+	long now, stored = 0;
+	mode_t previous;
+	char link[16];
+
+	libc_relro[4096] = 2;
+	if (mprotect(libc_relro, 4096, PROT_READ) != 0 || libc_relro[0] != 1) {
+		printf("libc failed: mprotect of the image errno=%d\n", errno);
+		return 1;
+	}
+	libc_relro[4096] = 3;
+	if (libc_relro[4096] != 3) {
+		printf("libc failed: the page after the read-only one\n");
+		return 1;
+	}
+	if (syscall(SYS_set_robust_list, &head, sizeof head) != 0 ||
+	    !fails(syscall(SYS_set_robust_list, &head, sizeof head - 1), EINVAL)) {
+		printf("libc failed: set_robust_list\n");
+		return 1;
+	}
+	previous = syscall(SYS_umask, 027);
+	if (syscall(SYS_umask, previous) != 027 || syscall(SYS_umask, previous) != previous) {
+		printf("libc failed: umask\n");
+		return 1;
+	}
+	if (!fails(syscall(SYS_readlink, "/", link, sizeof link), EINVAL) ||
+	    !fails(syscall(SYS_readlink, "/no-such-link", link, sizeof link), ENOENT) ||
+	    !fails(syscall(SYS_readlink, "/", link, 0), EINVAL) ||
+	    !fails(syscall(SYS_readlinkat, AT_FDCWD, "/no-such-link", link, sizeof link), ENOENT)) {
+		printf("libc failed: readlink\n");
+		return 1;
+	}
+	if (syscall(SYS_futex, &words[0], PROBE_FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0) != 0 ||
+	    !fails(syscall(SYS_futex, &words[0], PROBE_FUTEX_WAIT_PRIVATE, 2, NULL, NULL, 0), EAGAIN) ||
+	    !fails(syscall(SYS_futex, (char *)&words[0] + 1, PROBE_FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0), EINVAL)) {
+		printf("libc failed: futex\n");
+		return 1;
+	}
+	if (syscall(SYS_gettimeofday, &tv, NULL) != 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000 ||
+	    syscall(SYS_gettimeofday, NULL, NULL) != 0) {
+		printf("libc failed: gettimeofday\n");
+		return 1;
+	}
+	now = syscall(SYS_time, &stored);
+	if (now <= 0 || stored != now || now < tv.tv_sec || now > tv.tv_sec + 2) {
+		printf("libc failed: time %ld stored %ld timeval %ld\n", now, stored, (long)tv.tv_sec);
+		return 1;
+	}
+	if (syscall(SYS_sysinfo, &info) != 0 || info.mem_unit < 1 || info.totalram == 0 ||
+	    info.freeram > info.totalram || info.procs < 1) {
+		printf("libc failed: sysinfo\n");
+		return 1;
+	}
+	printf("libc ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -3059,6 +3157,8 @@ int main(int argc, char **argv)
 			return limits_test();
 		if (!strcmp(argv[1], "fork-fault"))
 			return fork_fault_test();
+		if (!strcmp(argv[1], "libc"))
+			return libc_test();
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))

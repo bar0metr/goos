@@ -98,10 +98,41 @@ func (handler *linuxCallHandler) Mprotect(request linuxcompat.Request) linuxcomp
 		return linuxcompat.Result{Errno: linuxabi.EINVAL}
 	}
 	status := nativeCallHandler{root: handler.root}.VMProtect(address, length, uint64(protection))
+	if status == kcall.StatusPermissionDenied {
+		status = handler.restrictImage(address, length, region.Protection(protection))
+	}
 	if status != kcall.StatusOK {
 		return linuxcompat.Result{Errno: linuxVMErrno(status)}
 	}
 	return linuxcompat.Result{}
+}
+
+// restrictImage lets a Linux program take rights away from its own image
+// segments, which the native call refuses because they are pinned. glibc
+// makes its relocated data (PT_GNU_RELRO) read-only this way before main.
+// Every page of a Linux image is a private copy (demandFault and
+// installExecutablePage allocate and fill it), never a frame another
+// process maps, so a narrower protection affects this process alone. Adding
+// a right stays refused.
+func (handler *linuxCallHandler) restrictImage(address, length uint64, requested region.Protection) kcall.Status {
+	owner, found := processRegistry.ByRoot(handler.root)
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	regions := owner.Regions()
+	count := regions.Overlapping(address, length, &vmPieces)
+	for index := 0; index < count; index++ {
+		if vmPieces[index].Region.Backing != region.Image {
+			return kcall.StatusPermissionDenied
+		}
+	}
+	if status := regionStatus(regions.Restrict(address, length, requested)); status != kcall.StatusOK {
+		return status
+	}
+	if !vm.ProtectUserRange(handler.root, address, length, regionPermissions(requested)) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
 }
 
 func (handler *linuxCallHandler) Madvise(request linuxcompat.Request) linuxcompat.Result {

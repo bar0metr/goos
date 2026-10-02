@@ -231,32 +231,48 @@ go run ./tools/pvelab cleanup --stale 6h --yes
 Both read only local journals. A VM made from another checkout is invisible
 to them; remove it from that checkout or by hand.
 
-## 7-Zip diagnostic workflow
+## 7-Zip workflow
 
-The `7zip` scenario runs a static `7zzs` that you supply and records which
-Linux calls GoOS refused. The repository carries no 7-Zip binary and the tool
-downloads nothing.
+The `7zip` scenario runs a static `7zzs` that you supply through a round
+trip and records which Linux calls GoOS refused. The repository carries no
+7-Zip binary and the tool downloads nothing.
 
 ```sh
 make test-pve-7zip LINUX_EXTRA=/path/to/7zzs
 ```
 
 This builds the inputs with `DIAG=1`, so the shell has `diag`, and places
-`7zzs` in `/system/linux`. The scenario runs `/system/linux/7zzs i`, sends
-Ctrl-C if no prompt returns within `--workload-timeout` (60s), then runs
-`diag` and parses its `DIAG linux` line:
+`7zzs` in `/system/linux`. The scenario runs, in order, and stops at the first
+step that fails:
+
+| Step | Command |
+| --- | --- |
+| info | `7zzs i` |
+| add | `7zzs a -mmt1 /tmp/pvelab.7z /system/linux/abi-probe` |
+| test | `7zzs t /tmp/pvelab.7z` |
+| extract | `7zzs x -y -o/tmp/pvelab-out /tmp/pvelab.7z` |
+| hash | `7zzs h -scrcSHA256` of the copy and the original; the hashes must match |
+
+A step that holds the prompt past `--workload-timeout` (60s) gets Ctrl-C.
+Then the scenario runs `diag` and parses its `DIAG linux` line:
 
 ```text
-[pvelab] 7zip workload did not complete: exit status 127
-[pvelab] linux syscalls=17 unsupported=2 refused=89,273 recent=273,89 bad-pointers=0
-[pvelab] result expected-failure
+[pvelab] linux syscalls=451 unsupported=2 refused=280 recent=280,280 bad-pointers=0
+[pvelab] 7zip PASS
 ```
 
-`report.json` carries the workload's ending and fault lines and every field of
-`DIAG linux`. A workload that does not complete is the expected result and
-exits 0; `PVE_FLAGS=--require-pass` makes it a failure, for when 7-Zip is
-meant to work. Compare the refused set with a trace of the same command on
-Linux:
+`report.json` carries the steps that passed, the ending of the last one, its
+fault lines, and every field of `DIAG linux`. A workload that does not
+complete is a diagnostic result, `expected-failure`, and exits 0;
+`PVE_FLAGS=--require-pass` makes it a failure. `-mmt1` keeps 7-Zip on one
+thread: GoOS runs no Linux threads (ADR 0176).
+
+glibc needs `AT_RANDOM`, which GoOS supplies only on a CPU with RDRAND (ADR
+0151). `cpu=host` on any recent x86_64 has it; under local QEMU use
+`-cpu max`.
+
+To see what a workload asks for, trace it on Linux and compare the calls with
+the refused set:
 
 ```sh
 strace -f ./7zzs i
@@ -268,11 +284,11 @@ The first runs on a Xeon Gold 6240 node (PVE 7.4, QEMU 7.2):
 
 - With one vCPU, the smoke and Linux scenarios pass under KVM with
   `cpu=host`, including ACPI poweroff.
-- With four vCPUs, the kernel panics before leaving boot services:
-  `UEFI handoff failed: 0x8000000000000021` (`EFI_COMPROMISED_DATA`), the
-  status `CaptureAndExit` returns when `boot.Info.AddRegion` rejects a
-  firmware memory descriptor. The 128-entry region table is the likely limit;
-  this is not yet confirmed.
-- The static glibc `7zzs` 26.03 stops before `main`: the loader's
-  `mprotect` after relocation is refused, and GoOS refused `readlink` (89)
-  and `set_robust_list` (273).
+- With four vCPUs the kernel panicked before leaving boot services: OVMF
+  returned 138 memory descriptors and `boot.Info` held 128. The kernel now
+  merges adjacent regions of one kind and holds 256; four and eight vCPUs
+  boot.
+- The static glibc `7zzs` 26.03 stopped before `main`, because the loader's
+  `mprotect` of its relocated data was refused. ADR 0176 lets a Linux program
+  narrow its own image and adds the other calls glibc and 7-Zip ask for; the
+  round trip passes.

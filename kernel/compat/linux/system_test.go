@@ -251,3 +251,31 @@ func TestSleepNanosAndRemainingTicks(t *testing.T) {
 		t.Fatal("a zero tick rate must still wait one tick")
 	}
 }
+
+func TestEncodeTimeval(t *testing.T) {
+	var out [TimevalSize]byte
+	EncodeTimeval(&out, timekeeping.Time{Seconds: 1790944000, Nanoseconds: 123456789})
+	if sec, usec := binary.LittleEndian.Uint64(out[0:]), binary.LittleEndian.Uint64(out[8:]); sec != 1790944000 || usec != 123456 {
+		t.Fatalf("timeval %d.%06d", sec, usec)
+	}
+}
+
+func TestEncodeSysinfo(t *testing.T) {
+	var out [SysinfoSize]byte
+	for index := range out {
+		out[index] = 0xff
+	}
+	EncodeSysinfo(&out, Sysinfo{UptimeSeconds: 42, TotalRAM: 1 << 30, FreeRAM: 1 << 29, Processes: 13})
+	le := binary.LittleEndian
+	if le.Uint64(out[0:]) != 42 || le.Uint64(out[32:]) != 1<<30 || le.Uint64(out[40:]) != 1<<29 ||
+		le.Uint16(out[80:]) != 13 || le.Uint32(out[104:]) != 1 {
+		t.Fatalf("fields wrong: % x", out)
+	}
+	for _, zero := range [][2]int{{8, 32}, {48, 80}, {82, 104}, {108, 112}} {
+		for index := zero[0]; index < zero[1]; index++ {
+			if out[index] != 0 {
+				t.Fatalf("byte %d is %#x, want 0", index, out[index])
+			}
+		}
+	}
+}

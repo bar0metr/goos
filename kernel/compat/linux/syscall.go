@@ -51,11 +51,12 @@ type Handler interface {
 	Openat(Request) Result
 	SetTidAddress(Request) Result
 	// Filesystem serves the status, position, and path calls: the stat
-	// family with statx, getdents64, lseek, getcwd, chdir, and the calls
-	// that create, remove, and rename names.
+	// family with statx, getdents64, lseek, getcwd, chdir, readlink, and
+	// the calls that create, remove, and rename names.
 	Filesystem(Request) Result
-	// System serves the identity, time, limit, signal-state, and random
-	// calls, which answer from kernel state without asking a service.
+	// System serves the identity, time, limit, signal-state, random, umask,
+	// robust-list, and futex calls, which answer from kernel state without
+	// asking a service.
 	System(Request) Result
 	// Descriptor serves dup, dup2, dup3, fcntl, and ioctl.
 	Descriptor(Request) Result
@@ -162,11 +163,13 @@ func route(request Request, handler Handler) Result {
 			return handler.Descriptor(request)
 		case abi.SysGetpid, abi.SysGettid, abi.SysGetppid, abi.SysGetuid, abi.SysGeteuid, abi.SysGetgid, abi.SysGetegid,
 			abi.SysSetuid, abi.SysSetgid, abi.SysGetgroups,
-			abi.SysUname, abi.SysClockGettime, abi.SysNanosleep, abi.SysPrlimit64,
-			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom:
+			abi.SysUname, abi.SysClockGettime, abi.SysGettimeofday, abi.SysTime, abi.SysSysinfo, abi.SysNanosleep, abi.SysPrlimit64,
+			abi.SysRtSigaction, abi.SysRtSigprocmask, abi.SysGetrandom,
+			abi.SysUmask, abi.SysSetRobustList, abi.SysFutex:
 			return handler.System(request)
 		case abi.SysAccess, abi.SysFaccessat, abi.SysGetdents64, abi.SysStat, abi.SysFstat, abi.SysLstat, abi.SysNewfstatat, abi.SysLseek, abi.SysGetcwd, abi.SysChdir, abi.SysRename, abi.SysMkdir, abi.SysRmdir, abi.SysUnlink,
-			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2, abi.SysStatx:
+			abi.SysMkdirat, abi.SysUnlinkat, abi.SysRenameat, abi.SysRenameat2, abi.SysStatx,
+			abi.SysReadlink, abi.SysReadlinkat:
 			return handler.Filesystem(request)
 		case abi.SysBrk:
 			return handler.Brk(request)

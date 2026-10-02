@@ -282,6 +282,13 @@ run '/system/linux/abi-probe fpstate'
 expect '^fpstate ok$' 'x87 and SSE state survives a signal handler'
 clean 'x87 and SSE state survives a signal handler'
 
+# What a static glibc program asks before main: its relocated data made
+# read-only, a robust futex list, umask, readlink, a futex nobody waits on,
+# and the clocks and memory sysinfo reports.
+run '/system/linux/abi-probe libc'
+expect '^libc ok$' 'the calls of a glibc program start'
+clean 'the calls of a glibc program start'
+
 run '/system/linux/abi-probe limits'
 expect '^fork bomb bounded at 15$' 'the family budget bounds a fork bomb'
 expect '^limits ok$' 'zombies count against the family budget'

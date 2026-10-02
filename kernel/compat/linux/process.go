@@ -30,6 +30,14 @@ type ProcessState struct {
 	// at thread exit only while another task shares the address space, which
 	// a single-task process never has, so GoOS stores it and writes nothing.
 	ClearChildTID uint64
+	// RobustList is the head set_robust_list recorded. Linux walks the list
+	// when a thread dies holding a robust futex, to hand each one on; a
+	// single-task process has no other thread to hand one to, so GoOS keeps
+	// the address and walks nothing.
+	RobustList uint64
+	// umask is the file mode creation mask umask sets. It is inherited across
+	// fork and exec as on Linux.
+	umask uint16
 	// IOBuffer is the native handle of the memory object file reads and
 	// writes move their bytes through. The bridge creates it on first use.
 	IOBuffer handle.ID
@@ -123,8 +131,20 @@ func ReplaceRoot(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit uint64
 	}
 	state.Root = newRoot
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
-	state.ClearChildTID = 0
+	state.ClearChildTID, state.RobustList = 0, 0
 	return true
+}
+
+// DefaultUmask is the mask a process launched by PID 1 starts with, the
+// usual Linux login default.
+const DefaultUmask = 0o022
+
+// SetUmask replaces the file mode creation mask with the permission bits of
+// mask and returns the previous one, as umask does.
+func (state *ProcessState) SetUmask(mask uint64) uint64 {
+	previous := uint64(state.umask)
+	state.umask = uint16(mask & 0o777)
+	return previous
 }
 
 // CloseOnExec closes local fd entries marked for image replacement. Shared
@@ -263,6 +283,7 @@ func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, st
 	state.Root, state.VFSHandle, state.cwdLen = root, vfsHandle, uint16(size)
 	state.PID, state.FamilyID = record.PID, record.FamilyID
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
+	state.umask = DefaultUmask
 	if !state.FDs.Initialize(record.FamilyID, streams.Input, streams.Output, streams.Error) {
 		ReleaseVFSContext(record.FamilyID)
 		processRecords[recordIndex(record.PID)] = ProcessRecord{}
@@ -305,6 +326,7 @@ func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsH
 	child.Root, child.VFSHandle, child.FamilyID = childRoot, vfsHandle, parent.FamilyID
 	child.BrkBase, child.BrkCurrent, child.BrkLimit = parent.BrkBase, parent.BrkCurrent, parent.BrkLimit
 	child.PID, child.Forked = record.PID, true
+	child.umask = parent.umask
 	child.Signals.CopyFrom(&parent.Signals)
 	child.cwdLen = uint16(copy(child.cwd[:], parent.CWD()))
 	return true

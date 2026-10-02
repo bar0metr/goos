@@ -7,6 +7,8 @@ package main
 // kernel clocks, and the CPU's random generator.
 
 import (
+	"encoding/binary"
+
 	"goos/internal/timekeeping"
 	"goos/internal/version"
 	"goos/kernel/arch/amd64"
@@ -83,6 +85,12 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return linuxcompat.Result{}
 	case linuxabi.SysClockGettime:
 		return handler.clockGettime(arguments[0], arguments[1])
+	case linuxabi.SysGettimeofday:
+		return handler.gettimeofday(arguments[0], arguments[1])
+	case linuxabi.SysTime:
+		return handler.time(arguments[0])
+	case linuxabi.SysSysinfo:
+		return handler.sysinfo(arguments[0])
 	case linuxabi.SysNanosleep:
 		return handler.nanosleep(request)
 	case linuxabi.SysPrlimit64:
@@ -93,8 +101,43 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return handler.signalMask(state, arguments)
 	case linuxabi.SysGetrandom:
 		return handler.getrandom(request)
+	case linuxabi.SysUmask:
+		return linuxcompat.Result{Value: state.SetUmask(arguments[0])}
+	case linuxabi.SysSetRobustList:
+		if arguments[1] != linuxcompat.RobustListHeadSize {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		state.RobustList = arguments[0]
+		return linuxcompat.Result{}
+	case linuxabi.SysFutex:
+		return handler.futex(request)
 	}
 	return linuxErrno(linuxabi.ENOSYS)
+}
+
+var linuxFutexWord [4]byte
+
+// futex serves the calls a process with one task can answer: a wake finds
+// no waiter, and a wait whose word has already changed returns EAGAIN. A
+// wait that would sleep needs another task to end it and is refused, so it
+// shows in the diagnostics instead of hanging the process.
+func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.Result {
+	address := request.Arguments[0]
+	if address%4 != 0 {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	if !vm.CopyIn(handler.root, address, linuxFutexWord[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	word := binary.LittleEndian.Uint32(linuxFutexWord[:])
+	action, errno := linuxcompat.FutexDecide(request.Arguments[1], word, request.Arguments[2], request.Arguments[5])
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if action == linuxcompat.FutexNoWaiter {
+		return linuxcompat.Result{}
+	}
+	return linuxcompat.Refuse(request.Number)
 }
 
 // signalAction records and reports a signal disposition. A handler stored
@@ -197,6 +240,74 @@ func (handler *linuxCallHandler) clockGettime(id uint64, address uint64) linuxco
 	}
 	linuxcompat.EncodeTimespec(&linuxTimespec, value)
 	if !vm.CopyOut(handler.root, address, linuxTimespec[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{}
+}
+
+var (
+	linuxTimeval  [linuxcompat.TimevalSize]byte
+	linuxTimezone [linuxcompat.TimezoneSize]byte
+)
+
+// gettimeofday reads the realtime clock in microseconds. Either pointer may
+// be null. The timezone is UTC with no daylight saving, as Linux reports
+// when nothing set one.
+func (handler *linuxCallHandler) gettimeofday(timeval uint64, timezone uint64) linuxcompat.Result {
+	if timeval != 0 {
+		if !monotonicClock.Calibrated() {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		value, set := realtimeClock.Now(&monotonicClock, amd64.ReadTSC())
+		if !set {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		linuxcompat.EncodeTimeval(&linuxTimeval, value)
+		if !vm.CopyOut(handler.root, timeval, linuxTimeval[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+	}
+	if timezone != 0 && !vm.CopyOut(handler.root, timezone, linuxTimezone[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{}
+}
+
+var linuxTime [8]byte
+
+// time returns the realtime clock in whole seconds and also stores it where
+// tloc points, when it points anywhere.
+func (handler *linuxCallHandler) time(tloc uint64) linuxcompat.Result {
+	if !monotonicClock.Calibrated() {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	value, set := realtimeClock.Now(&monotonicClock, amd64.ReadTSC())
+	if !set {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	seconds := uint64(value.Seconds)
+	if tloc != 0 {
+		putUint64(linuxTime[:], seconds)
+		if !vm.CopyOut(handler.root, tloc, linuxTime[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+	}
+	return linuxcompat.Result{Value: seconds}
+}
+
+var linuxSysinfo [linuxcompat.SysinfoSize]byte
+
+// sysinfo reports uptime, the managed RAM, and the free pages. Programs
+// size their buffers from totalram; 7-Zip picks its dictionary limit there.
+func (handler *linuxCallHandler) sysinfo(address uint64) linuxcompat.Result {
+	statistics := pageAllocator.Statistics()
+	linuxcompat.EncodeSysinfo(&linuxSysinfo, linuxcompat.Sysinfo{
+		UptimeSeconds: nowNanos() / 1_000_000_000,
+		TotalRAM:      statistics.ManagedPages * vm.PageSize,
+		FreeRAM:       statistics.FreePages * vm.PageSize,
+		Processes:     uint16(processRegistry.Count()),
+	})
+	if !vm.CopyOut(handler.root, address, linuxSysinfo[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}

@@ -58,6 +58,17 @@ func kernelLogUint(level logfmt.Level, message string, key string, value uint64)
 	kernelLog(level, message, logfmt.AppendUint(logFields[:size+1], value))
 }
 
+// kernelLogUints is kernelLogUint with two fields.
+func kernelLogUints(level logfmt.Level, message string, key string, value uint64, key2 string, value2 uint64) {
+	size := copy(logFields[:], key)
+	logFields[size] = '='
+	fields := logfmt.AppendUint(logFields[:size+1], value)
+	fields = append(fields, ' ')
+	fields = append(fields, key2...)
+	fields = append(fields, '=')
+	kernelLog(level, message, logfmt.AppendUint(fields, value2))
+}
+
 // logAuthority reports whether id is the caller's read capability for the log
 // ring.
 func (handler nativeCallHandler) logAuthority(id uint64) bool {
