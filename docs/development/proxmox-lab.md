@@ -248,7 +248,7 @@ step that fails:
 | Step | Command |
 | --- | --- |
 | info | `7zzs i` |
-| add | `7zzs a -mmt1 /tmp/pvelab.7z /system/linux/abi-probe` |
+| add | `7zzs a /tmp/pvelab.7z /system/linux/7zzs`, with 7-Zip's own thread count |
 | test | `7zzs t /tmp/pvelab.7z` |
 | extract | `7zzs x -y -o/tmp/pvelab-out /tmp/pvelab.7z` |
 | hash | `7zzs h -scrcSHA256` of the copy and the original; the hashes must match |
@@ -264,8 +264,8 @@ Then the scenario runs `diag` and parses its `DIAG linux` line:
 `report.json` carries the steps that passed, the ending of the last one, its
 fault lines, and every field of `DIAG linux`. A workload that does not
 complete is a diagnostic result, `expected-failure`, and exits 0;
-`PVE_FLAGS=--require-pass` makes it a failure. `-mmt1` keeps 7-Zip on one
-thread: GoOS runs no Linux threads (ADR 0176).
+`PVE_FLAGS=--require-pass` makes it a failure. The add step runs 7-Zip's
+multithreaded LZMA2 encoder (ADR 0177).
 
 glibc needs `AT_RANDOM`, which GoOS supplies only on a CPU with RDRAND (ADR
 0151). `cpu=host` on any recent x86_64 has it; under local QEMU use
@@ -290,5 +290,8 @@ The first runs on a Xeon Gold 6240 node (PVE 7.4, QEMU 7.2):
   boot.
 - The static glibc `7zzs` 26.03 stopped before `main`, because the loader's
   `mprotect` of its relocated data was refused. ADR 0176 lets a Linux program
-  narrow its own image and adds the other calls glibc and 7-Zip ask for; the
-  round trip passes.
+  narrow its own image and adds the other calls glibc and 7-Zip ask for.
+- 7-Zip's multithreaded encoder needed Linux threads, and then wrote corrupt
+  archives: two threads shared one kernel file I/O buffer. ADR 0177 adds
+  threads with a buffer each; the round trip passes with 7-Zip's default
+  thread count.

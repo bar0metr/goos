@@ -3,6 +3,7 @@
 ## Status
 
 Accepted. Amends the `mprotect` decision of ADR 0104 for Linux processes.
+The thread limit in its consequences is lifted by ADR 0177.
 
 ## Context
 

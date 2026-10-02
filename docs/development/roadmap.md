@@ -528,8 +528,9 @@ from disk:
 GoOS 0.2.3 is to give Linux programs a terminal: a terminal descriptor,
 `isatty`, `TIOCGWINSZ`, a termios subset, sessions and process groups, a
 foreground group, terminal-generated `SIGINT`, `SIGTSTP`, and `SIGCONT`, and an
-interactive BusyBox `sh`. GoOS 0.2.4 is to add threads: thread-form `clone`,
-per-thread TLS, `futex`, and thread-directed signals.
+interactive BusyBox `sh`. Threads came first: thread-form `clone`, per-thread
+TLS, TIDs, and signal masks, and sleeping `futex` waits (ADR 0177).
+Thread-directed delivery remains.
 
 Later: interactive programs such as `nano`. A random source for CPUs without
 RDRAND and a randomized load base are independent steps. Dynamic linking and

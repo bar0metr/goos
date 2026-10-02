@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Amends ADR 0096.
+Accepted. Amends ADR 0096. ADR 0178 reverses its restart rule: the VFS
+acquires new objects for open files from a restarted service.
 
 ## Context
 

@@ -16,6 +16,10 @@ const abnormalExit = uint64(1) << 63
 // that ended the process by its default action.
 const signalExit = uint64(1) << 62
 
+// AbnormalExit reports a task exit code that is no exit status: a fault, a
+// kill, or a signal's default action.
+func AbnormalExit(code uint64) bool { return code&abnormalExit != 0 }
+
 // SignalExitCode is the task exit code of a process a signal ended.
 func SignalExitCode(signal uint64) uint64 { return abnormalExit | signalExit | signal&0x7f }
 

@@ -56,6 +56,8 @@
  *   exec-vfs-loss     the validation VFS dies while execve prepares its image
  *   libc              what glibc asks at startup: RELRO mprotect, robust list,
  *                     umask, readlink, futex, gettimeofday, time, sysinfo
+ *   threads           pthreads: a mutex and a condition shared by three threads,
+ *                     join values, TIDs, TLS, and exit_group from a thread
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -65,6 +67,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3097,6 +3100,236 @@ static int libc_test(void)
 	return 0;
 }
 
+/* Three threads add to one counter under a mutex and report through a
+ * condition; the main thread waits for all three, then joins them. Each
+ * thread has its own TID and its own copy of a thread-local variable. */
+#define PROBE_THREADS 3
+#define PROBE_ROUNDS 2000
+
+static pthread_mutex_t probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t probe_done = PTHREAD_COND_INITIALIZER;
+static long probe_counter;
+static int probe_finished;
+static pid_t probe_tids[PROBE_THREADS];
+static __thread long probe_local = 7;
+
+static void *probe_worker(void *argument)
+{
+	long index = (long)argument, round;
+
+	probe_local = 100 + index;
+	probe_tids[index] = syscall(SYS_gettid);
+	for (round = 0; round < PROBE_ROUNDS; round++) {
+		pthread_mutex_lock(&probe_lock);
+		probe_counter++;
+		pthread_mutex_unlock(&probe_lock);
+		if (round % 256 == 0)
+			sched_yield();
+	}
+	pthread_mutex_lock(&probe_lock);
+	probe_finished++;
+	pthread_cond_signal(&probe_done);
+	pthread_mutex_unlock(&probe_lock);
+	return (void *)(probe_local * 2);
+}
+
+static void *probe_exit_group(void *argument)
+{
+	(void)argument;
+	syscall(SYS_exit_group, 42);
+	return NULL;
+}
+
+/* Two threads checksum their own stack buffers for a few seconds, long
+ * enough for the timer to switch between them many times, and compare
+ * every round with the first. A register, SSE, or stack value lost across
+ * a switch shows as a different sum. */
+static void *probe_grind(void *argument)
+{
+	unsigned char buffer[64 * 1024];
+	unsigned long seed = (unsigned long)argument, first = 0, sum, round, index;
+	struct timespec start, now;
+
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	for (round = 0;; round++) {
+		for (index = 0; index < sizeof buffer; index++)
+			buffer[index] = (unsigned char)(index * 31 + seed);
+		memmove(buffer + 1, buffer, sizeof buffer - 1);
+		sum = 0;
+		for (index = 0; index < sizeof buffer; index++)
+			sum = sum * 131 + buffer[index] + (double)index * 0.5;
+		if (round == 0)
+			first = sum;
+		else if (sum != first)
+			return (void *)1;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (now.tv_sec - start.tv_sec >= 3)
+			return round > 1 ? NULL : (void *)2;
+	}
+}
+
+/* A thread writes a file while another reads a different one, many times
+ * over. Every byte read must be the reader's file and every byte written
+ * the writer's: the two calls may not share a buffer in the kernel. */
+static void *probe_writer(void *argument)
+{
+	char block[4096];
+	int fd = open((const char *)argument, O_CREAT | O_TRUNC | O_WRONLY, 0644), round;
+
+	if (fd < 0)
+		return (void *)1;
+	memset(block, 'w', sizeof block);
+	for (round = 0; round < 64; round++)
+		if (write(fd, block, sizeof block) != sizeof block)
+			return (void *)2;
+	return close(fd) == 0 ? NULL : (void *)3;
+}
+
+static int probe_file_io(void)
+{
+	char block[4096], *dir = getcwd(NULL, 0);
+	static char reader_path[64], writer_path[64];
+	pthread_t writer;
+	void *result;
+	int fd, round, index;
+
+	snprintf(reader_path, sizeof reader_path, "%s/threads-read", dir ? dir : "/tmp");
+	snprintf(writer_path, sizeof writer_path, "%s/threads-write", dir ? dir : "/tmp");
+	free(dir);
+	fd = open(reader_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+	memset(block, 'r', sizeof block);
+	for (round = 0; fd >= 0 && round < 64; round++)
+		if (write(fd, block, sizeof block) != sizeof block)
+			return 1;
+	if (fd < 0 || pthread_create(&writer, NULL, probe_writer, writer_path) != 0)
+		return 1;
+	for (round = 0; round < 64; round++) {
+		if (pread(fd, block, sizeof block, (off_t)round * sizeof block) != sizeof block)
+			return 1;
+		for (index = 0; index < (int)sizeof block; index++)
+			if (block[index] != 'r')
+				return 1;
+	}
+	if (pthread_join(writer, &result) != 0 || result != NULL || close(fd) != 0)
+		return 1;
+	fd = open(writer_path, O_RDONLY);
+	for (round = 0; fd >= 0 && round < 64; round++) {
+		if (read(fd, block, sizeof block) != sizeof block)
+			return 1;
+		for (index = 0; index < (int)sizeof block; index++)
+			if (block[index] != 'w')
+				return 1;
+	}
+	unlink(reader_path);
+	unlink(writer_path);
+	return fd < 0 || close(fd) != 0;
+}
+
+static volatile sig_atomic_t probe_raised;
+
+static void probe_on_usr1(int signal)
+{
+	(void)signal;
+	probe_raised = 1;
+}
+
+/* raise in a thread is tgkill(PID, TID): the signal reaches the process. */
+static void *probe_raiser(void *argument)
+{
+	(void)argument;
+	return raise(SIGUSR1) == 0 ? NULL : (void *)1;
+}
+
+static int threads_test(void)
+{
+	pthread_t workers[PROBE_THREADS];
+	pid_t pid = getpid(), tid = syscall(SYS_gettid), child;
+	void *result;
+	long index;
+	int status;
+
+	if (tid != pid) {
+		printf("threads failed: main TID %d is not the PID %d\n", tid, pid);
+		return 1;
+	}
+	for (index = 0; index < PROBE_THREADS; index++)
+		if (pthread_create(&workers[index], NULL, probe_worker, (void *)index) != 0) {
+			printf("threads failed: create %ld\n", index);
+			return 1;
+		}
+	pthread_mutex_lock(&probe_lock);
+	while (probe_finished < PROBE_THREADS)
+		pthread_cond_wait(&probe_done, &probe_lock);
+	pthread_mutex_unlock(&probe_lock);
+	for (index = 0; index < PROBE_THREADS; index++) {
+		if (pthread_join(workers[index], &result) != 0 || (long)result != 2 * (100 + index)) {
+			printf("threads failed: join %ld\n", index);
+			return 1;
+		}
+		if (probe_tids[index] == pid || probe_tids[index] <= 0 ||
+		    (index > 0 && probe_tids[index] == probe_tids[index - 1])) {
+			printf("threads failed: TIDs %d %d %d\n", probe_tids[0], probe_tids[1], probe_tids[2]);
+			return 1;
+		}
+	}
+	if (probe_counter != PROBE_THREADS * PROBE_ROUNDS || probe_local != 7 || getpid() != pid) {
+		printf("threads failed: counter %ld local %ld\n", probe_counter, probe_local);
+		return 1;
+	}
+	printf("threads joined: %d threads %d rounds\n", PROBE_THREADS, PROBE_ROUNDS);
+	{
+		pthread_t grinders[2];
+
+		for (index = 0; index < 2; index++)
+			if ((status = pthread_create(&grinders[index], NULL, probe_grind, (void *)(index + 3))) != 0) {
+				printf("threads failed: create grinder %ld: %d\n", index, status);
+				return 1;
+			}
+		probe_grind((void *)9);
+		for (index = 0; index < 2; index++)
+			if (pthread_join(grinders[index], &result) != 0 || result != NULL) {
+				printf("threads failed: grinder %ld result %ld\n", index, (long)result);
+				return 1;
+			}
+		printf("threads preempted: state kept\n");
+	}
+	if (probe_file_io() != 0) {
+		printf("threads failed: concurrent file I/O\n");
+		return 1;
+	}
+	printf("threads file I/O: kept apart\n");
+	{
+		pthread_t raiser;
+		struct sigaction action = {0};
+
+		action.sa_handler = probe_on_usr1;
+		if (sigaction(SIGUSR1, &action, NULL) != 0 || pthread_create(&raiser, NULL, probe_raiser, NULL) != 0 ||
+		    pthread_join(raiser, &result) != 0 || result != NULL) {
+			printf("threads failed: raise in a thread\n");
+			return 1;
+		}
+		while (!probe_raised)
+			sched_yield();
+		printf("threads signal: delivered\n");
+	}
+	/* exit_group from a thread ends the whole process with its status. */
+	fflush(stdout);
+	child = fork();
+	if (child == 0) {
+		pthread_t ender;
+
+		pthread_create(&ender, NULL, probe_exit_group, NULL);
+		for (;;)
+			pause();
+	}
+	if (child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 42) {
+		printf("threads failed: exit_group from a thread, status %#x\n", status);
+		return 1;
+	}
+	printf("threads ok\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -3159,6 +3392,8 @@ int main(int argc, char **argv)
 			return fork_fault_test();
 		if (!strcmp(argv[1], "libc"))
 			return libc_test();
+		if (!strcmp(argv[1], "threads"))
+			return threads_test();
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))

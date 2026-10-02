@@ -445,5 +445,6 @@ func expireWaitDeadlines() {
 	expireProcessWaiters()
 	expireStreamWaiters()
 	expireWaitAny()
+	retryExecutablePages()
 	wakeConsoleWaiters()
 }

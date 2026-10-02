@@ -455,6 +455,7 @@ func resetCompatibilityProcesses() {
 	processRecords = [process.MaxProcesses]ProcessRecord{}
 	openDescriptions = [MaxOpenDescriptions]descriptionSlot{}
 	vfsContexts = [process.MaxProcesses]LinuxVFSContext{}
+	threads = [len(threads)]Thread{}
 	nextPID = firstPID
 	nextFamilyID = 1
 }

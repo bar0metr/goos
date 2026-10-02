@@ -402,6 +402,10 @@ func (handler *linuxCallHandler) SetTidAddress(request linuxcompat.Request) linu
 	if !found {
 		return linuxcompat.Result{Errno: linuxabi.EINVAL}
 	}
+	if thread, isThread := linuxcompat.FindThread(handler.task); isThread {
+		thread.ClearChildTID = request.Arguments[0]
+		return linuxcompat.Result{Value: uint64(thread.TID)}
+	}
 	state.ClearChildTID = request.Arguments[0]
 	return linuxcompat.Result{Value: uint64(state.PID)}
 }

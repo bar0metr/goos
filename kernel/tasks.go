@@ -70,6 +70,10 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	linuxHandler.root = frame.Root
 	linuxHandler.frame = frame
 	linuxHandler.task = sched.TaskID(amd64.TaskIDForSlot(state.Current))
+	// The call works with, and returns under, its own thread's signal mask.
+	if process, found := linuxcompat.FindProcess(frame.Root); found {
+		linuxcompat.SelectThreadSignals(process, linuxHandler.task)
+	}
 	result := linuxcompat.Dispatch(frame, &linuxHandler)
 	if result.Errno == linuxabi.EFAULT {
 		if executablePagePending(linuxHandler.task) {

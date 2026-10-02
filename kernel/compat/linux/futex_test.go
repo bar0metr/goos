@@ -13,26 +13,27 @@ func TestFutexDecide(t *testing.T) {
 		word      uint32
 		value     uint64
 		bitset    uint64
-		action    FutexAction
+		call      FutexCall
 		errno     abi.Errno
 	}{
-		{"wake", FutexWake, 0, 1, 0, FutexNoWaiter, 0},
-		{"private wake", FutexWake | FutexPrivateFlag, 0, 0x7fffffff, 0, FutexNoWaiter, 0},
-		{"wake bitset", FutexWakeBitset | FutexPrivateFlag, 0, 1, ^uint64(0), FutexNoWaiter, 0},
-		{"wake empty bitset", FutexWakeBitset, 0, 1, 0, 0, abi.EINVAL},
-		{"wake realtime", FutexWake | FutexClockRealtime, 0, 1, 0, 0, abi.ENOSYS},
-		{"wait changed", FutexWait | FutexPrivateFlag, 2, 1, 0, FutexChanged, abi.EAGAIN},
-		{"wait compares 32 bits", FutexWait, 1, 1 | 1<<32, 0, FutexRefused, 0},
-		{"wait would sleep", FutexWait, 1, 1, 0, FutexRefused, 0},
-		{"wait realtime would sleep", FutexWait | FutexClockRealtime, 1, 1, 0, FutexRefused, 0},
-		{"wait bitset realtime changed", FutexWaitBitset | FutexClockRealtime, 3, 1, 1, FutexChanged, abi.EAGAIN},
-		{"wait empty bitset", FutexWaitBitset, 1, 1, 0, 0, abi.EINVAL},
-		{"requeue", 3, 0, 0, 0, FutexRefused, 0},
+		{"wake", FutexWake, 0, 1, 0, FutexCall{Action: FutexWakeWaiters, Bitset: FutexBitsetAll, Count: 1}, 0},
+		{"private wake all", FutexWake | FutexPrivateFlag, 0, 0x7fffffff, 0, FutexCall{Action: FutexWakeWaiters, Bitset: FutexBitsetAll, Count: 0x7fffffff}, 0},
+		{"wake negative count", FutexWake, 0, 0xffffffff, 0, FutexCall{Action: FutexWakeWaiters, Bitset: FutexBitsetAll, Count: 1<<31 - 1}, 0},
+		{"wake bitset", FutexWakeBitset | FutexPrivateFlag, 0, 1, 4, FutexCall{Action: FutexWakeWaiters, Bitset: 4, Count: 1}, 0},
+		{"wake empty bitset", FutexWakeBitset, 0, 1, 0, FutexCall{}, abi.EINVAL},
+		{"wake realtime", FutexWake | FutexClockRealtime, 0, 1, 0, FutexCall{}, abi.ENOSYS},
+		{"wait changed", FutexWait | FutexPrivateFlag, 2, 1, 0, FutexCall{Action: FutexChanged}, abi.EAGAIN},
+		{"wait compares 32 bits", FutexWait, 1, 1 | 1<<32, 0, FutexCall{Action: FutexSleep, Bitset: FutexBitsetAll}, 0},
+		{"wait realtime", FutexWait | FutexClockRealtime, 1, 1, 0, FutexCall{Action: FutexSleep, Bitset: FutexBitsetAll, Realtime: true}, 0},
+		{"wait bitset", FutexWaitBitset | FutexPrivateFlag, 1, 1, 6, FutexCall{Action: FutexSleep, Bitset: 6, Absolute: true}, 0},
+		{"wait bitset changed", FutexWaitBitset | FutexClockRealtime, 3, 1, 1, FutexCall{Action: FutexChanged}, abi.EAGAIN},
+		{"wait empty bitset", FutexWaitBitset, 1, 1, 0, FutexCall{}, abi.EINVAL},
+		{"requeue", 3, 0, 0, 0, FutexCall{Action: FutexRefused}, 0},
 	}
 	for _, c := range cases {
-		action, errno := FutexDecide(c.operation, c.word, c.value, c.bitset)
-		if action != c.action || errno != c.errno {
-			t.Errorf("%s: got %d %d, want %d %d", c.name, action, errno, c.action, c.errno)
+		call, errno := FutexDecide(c.operation, c.word, c.value, c.bitset)
+		if call != c.call || errno != c.errno {
+			t.Errorf("%s: got %+v %d, want %+v %d", c.name, call, errno, c.call, c.errno)
 		}
 	}
 }

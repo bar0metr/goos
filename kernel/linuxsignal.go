@@ -193,8 +193,14 @@ func (handler *linuxCallHandler) Kill(request linuxcompat.Request) linuxcompat.R
 			return linuxErrno(linuxabi.EINVAL)
 		}
 		if thread != target {
-			return linuxErrno(linuxabi.ESRCH)
+			if group, isThread := linuxcompat.ThreadGroupOf(int32(thread)); !isThread || int64(group) != target {
+				return linuxErrno(linuxabi.ESRCH)
+			}
 		}
+	}
+	// A thread's TID names its process: the threads share one signal state.
+	if group, isThread := linuxcompat.ThreadGroupOf(int32(target)); isThread {
+		target = int64(group)
 	}
 	if target <= 0 || signal > linuxabi.SignalCount || signal != 0 && !linuxcompat.DeliverableSignal(signal) {
 		return linuxErrno(linuxabi.EINVAL)
@@ -249,27 +255,41 @@ func interruptLinuxSleeper(state *linuxcompat.ProcessState) {
 		return
 	}
 	owner, found := processRegistry.ByRoot(state.Root)
-	if !found || owner.TaskCount() != 1 {
+	if !found {
 		return
 	}
-	task := owner.Tasks()[0]
+	// A process-directed signal goes to one thread: the first one found in
+	// an interruptible wait. A thread that is running takes it at its next
+	// system call return instead.
+	for _, task := range owner.Tasks() {
+		if interruptLinuxTask(state, task) {
+			return
+		}
+	}
+}
+
+// interruptLinuxTask ends the interruptible wait of one task for a signal,
+// and reports whether the task was in one.
+func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool {
 	pending, active := linuxcompat.SyscallContinuations.Pending(task)
 	if !active || pending.Phase != linuxcompat.ContinuationWaiting {
-		return
+		return false
 	}
 	switch pending.Number {
 	case linuxabi.SysRead, linuxabi.SysReadv, linuxabi.SysWrite, linuxabi.SysWritev:
 		if !streamWaitSet.Cancel(task) {
-			return
+			return false
 		}
 	case linuxabi.SysWait4:
 		linuxcompat.ReleaseChildWaiter(state.PID)
 	case linuxabi.SysNanosleep, linuxabi.SysPoll, linuxabi.SysPpoll, linuxabi.SysRtSigsuspend, linuxabi.SysPause:
 		waitAnyTable.Cancel(task)
+	case linuxabi.SysFutex:
+		return interruptFutexWaiter(task)
 	default:
-		return
+		return false
 	}
-	resumeLinuxSyscall(task, pending.Correlation, linuxcompat.WakeInterrupted)
+	return resumeLinuxSyscall(task, pending.Correlation, linuxcompat.WakeInterrupted)
 }
 
 // killLinuxFamily ends every other member of the family a launch root leads,

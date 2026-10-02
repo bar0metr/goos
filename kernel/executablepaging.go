@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/kernel/arch/amd64"
+	"goos/kernel/clock"
 	"goos/kernel/ipc"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
@@ -24,7 +25,21 @@ type executableFault struct {
 	side        uint8
 	correlation uint64
 	failed      bool
+	// retryAt is the tick a request the filesystem could not serve is sent
+	// again, and giveUp the tick after which a refusal is final. Both are
+	// zero until the first such refusal.
+	retryAt uint64
+	giveUp  uint64
 }
+
+// A filesystem service that dies or restarts (ADR 0096) leaves the VFS and its
+// handles in place, so a page it could not read becomes readable when the
+// service is back. A faulting task waits that long rather than dying with a
+// service that had only to restart.
+const (
+	executableRetryPerSecond = 10
+	executableRetrySeconds   = 10
+)
 
 var (
 	executableFaults      [sched.MaxTasks]executableFault
@@ -61,17 +76,28 @@ func requestExecutablePage(owner *process.Process, entry region.Region, page uin
 	if within >= entry.Data {
 		return false, false
 	}
-	object, found := executables.Find(entry.Object)
-	if !found {
+	*current = executableFault{task: task, root: owner.AddressSpace().Root, page: page, object: entry.Object,
+		offset: entry.Offset + within, count: min(vm.PageSize, entry.Data-within)}
+	if !sendExecutableRequest(current) {
+		*current = executableFault{}
 		return false, true
+	}
+	amd64.BlockCurrentTask()
+	return true, false
+}
+
+// sendExecutableRequest asks the VFS for the page fault describes, under a
+// fresh correlation.
+func sendExecutableRequest(fault *executableFault) bool {
+	object, found := executables.Find(fault.object)
+	if !found {
+		return false
 	}
 	channelID, side, file, source := object.Source()
 	channel, live := channelRegistry.Lookup(channelID)
 	if !source || !live {
-		return false, true
+		return false
 	}
-	count := min(vm.PageSize, entry.Data-within)
-	offset := entry.Offset + within
 	executableCorrelation++
 	if executableCorrelation == 0 {
 		executableCorrelation++
@@ -79,17 +105,31 @@ func requestExecutablePage(owner *process.Process, entry region.Region, page uin
 	message, encoded := vfs.EncodeRequest(vfs.Request{
 		Operation: vfs.OperationReadExecutable,
 		Handle:    vfs.Handle(file),
-		Offset:    offset,
-		Size:      uint32(count),
+		Offset:    fault.offset,
+		Size:      uint32(fault.count),
 	}, executableCorrelation)
 	if !encoded || channel.Send(side, message, nil, nil, nil) != ipc.StatusOK {
-		return false, true
+		return false
 	}
-	*current = executableFault{task: task, root: owner.AddressSpace().Root, page: page, object: entry.Object,
-		offset: offset, count: count, channelID: channelID, side: side, correlation: executableCorrelation}
+	fault.channelID, fault.side, fault.correlation, fault.retryAt = channelID, side, executableCorrelation, 0
 	wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
-	amd64.BlockCurrentTask()
-	return true, false
+	return true
+}
+
+// retryExecutablePages sends again each page request whose filesystem was
+// away, once its retry tick has come. A request that cannot be sent fails.
+func retryExecutablePages() {
+	now := amd64.TimerTicks()
+	for index := range executableFaults {
+		fault := &executableFaults[index]
+		if fault.task == 0 || fault.failed || fault.retryAt == 0 || now < fault.retryAt {
+			continue
+		}
+		if !sendExecutableRequest(fault) {
+			fault.failed = true
+			amd64.WakeTaskID(uint64(fault.task))
+		}
+	}
 }
 
 // executablePagePending reports whether task waits for a page of its image
@@ -151,6 +191,17 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 	}
 	fault := &executableFaults[slot]
 	reply, valid := vfs.DecodeReplyFrom(&executableReply)
+	if valid && reply.Operation == vfs.OperationReadExecutable && (reply.Status == vfs.StatusPeerDied || reply.Status == vfs.StatusTimeout) {
+		now := amd64.TimerTicks()
+		if fault.giveUp == 0 {
+			fault.giveUp = now + executableRetrySeconds*clock.TicksPerSecond
+		}
+		if now < fault.giveUp {
+			// The task stays parked; retryExecutablePages asks again.
+			fault.retryAt = now + max(clock.TicksPerSecond/executableRetryPerSecond, 1)
+			return true
+		}
+	}
 	valid = valid && reply.Operation == vfs.OperationReadExecutable && reply.Status == vfs.StatusOK && reply.Size == fault.count
 	if valid {
 		valid = installExecutablePage(*fault)
@@ -167,7 +218,16 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 
 func installExecutablePage(fault executableFault) bool {
 	owner, found := processRegistry.ByRoot(fault.root)
-	if !found || owner.Available(process.ResourcePages) < 1+faultTables || vm.UserPageMapped(fault.root, fault.page) {
+	if !found {
+		return false
+	}
+	// Two threads that touched the same page each asked for it. The first
+	// reply mapped it; the second has nothing left to do and its thread
+	// retries the access against the page already there.
+	if vm.UserPageMapped(fault.root, fault.page) {
+		return true
+	}
+	if owner.Available(process.ResourcePages) < 1+faultTables {
 		return false
 	}
 	entry, found := owner.Regions().Find(fault.page)

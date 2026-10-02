@@ -31,11 +31,11 @@ an errno; nothing is accepted and ignored.
 | `stat(4)`, `fstat(5)`, `lstat(6)`, `newfstatat(262)` | implemented | synthetic mode, owner, and link count; `lstat` is `stat`; `newfstatat` takes `AT_EMPTY_PATH` |
 | `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
-| `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address; no fixed, file-backed, or executable mappings |
+| `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address, with `MAP_STACK` and `MAP_NORESERVE` as hints; the descriptor is ignored; no fixed, file-backed, or executable mappings |
 | `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; on the program's own image segments only rights taken away (glibc's `PT_GNU_RELRO`), never given back; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
-| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions and the blocked mask; handlers run at system call returns; unblocking delivers what is pending; flags GoOS cannot honor `EINVAL` |
+| `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions per process and the blocked mask per thread; handlers run at system call returns; unblocking delivers what is pending; flags GoOS cannot honor `EINVAL` |
 | `rt_sigreturn(15)` | implemented | restores registers and mask from the handler's frame; a frame returning outside the user half ends the process with `SIGSEGV` |
 | `ioctl(16)` | implemented | `ENOTTY` for every request: no descriptor is a terminal |
 | `pread64(17)`, `pwrite64(18)` | implemented | files at an offset, position unchanged; three VFS exchanges; streams are `ESPIPE` |
@@ -43,11 +43,12 @@ an errno; nothing is accepted and ignored.
 | `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` and `SIGPIPE` with no reader |
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
+| `sched_yield(24)` | implemented | returns at once; the scheduler preempts every task at its tick |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `pause(34)` | implemented | sleeps until a handled signal, then `EINTR` |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; a handled signal ends it with `EINTR` and the time left |
-| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is the forking process, or 1 for a launched or orphaned one |
-| `clone(56)` | partial | `SIGCHLD` is `fork`, `CLONE_VM\|CLONE_VFORK\|SIGCHLD` is `vfork`, both with an optional stack; thread, TLS, TID, and namespace flags `EINVAL` |
+| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is the forking process, or 1 for a launched or orphaned one; a thread's TID comes from the PID space, and the first thread's is the PID |
+| `clone(56)` | partial | `SIGCHLD` is `fork`, `CLONE_VM\|CLONE_VFORK\|SIGCHLD` is `vfork`, both with an optional stack; the five thread-sharing flags with a stack make a thread, with `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID`, `CLONE_SYSVSEM`, and `CLONE_DETACHED` optional (ADR 0177); 8 tasks per process, `EAGAIN` past them; namespace flags `EINVAL` |
 | `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
@@ -68,15 +69,15 @@ an errno; nothing is accepted and ignored.
 | `setuid(105)`, `setgid(106)` | partial | succeed for 1000, `EPERM` otherwise |
 | `getgroups(115)` | implemented | no supplementary groups |
 | `time(201)` | implemented | the realtime clock in seconds |
-| `futex(202)` | partial | a process has one task: `FUTEX_WAKE` wakes none and returns 0, a wait whose word changed is `EAGAIN`; a wait that would sleep and the other operations are `ENOSYS` |
+| `futex(202)` | partial | `FUTEX_WAIT`, `FUTEX_WAKE`, and their bitset forms, private or shared, with relative or absolute timeouts; a handled signal ends a wait with `EINTR`; requeue, priority inheritance, wake-op, and multi-word waits `ENOSYS` |
 | `rt_sigsuspend(130)` | implemented | a temporary mask until a handled signal, then `EINTR`; the handler's return restores the mask |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
 | `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
-| `set_tid_address(218)` | partial | stores the address, returns the compatibility PID; a single-task exit clears nothing |
+| `set_tid_address(218)` | implemented | stores the address per thread and returns the TID; when a thread ends while its process lives, the word is zeroed and one waiter woken |
 | `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
 | `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
-| `set_robust_list(273)` | partial | stores the list head of the only task; nothing walks it |
+| `set_robust_list(273)` | partial | stores the list head per thread; nothing walks it |
 | `getrandom(318)` | partial | bytes straight from the CPU's RDRAND, not a Linux entropy pool or CSPRNG; at most 256 per call; `ENOSYS` on a CPU without it |
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
@@ -89,7 +90,6 @@ BusyBox does about it:
 | `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `futex(202)` waits that would sleep | no threads inside a process; a sleeping wait could never end |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
@@ -647,9 +647,9 @@ Results a correct Linux program can observe to differ:
 ## Release limits
 
 GoOS 0.2.1 runs x86_64, statically linked ELF programs, position-independent
-or not, musl or glibc (ADR 0176). It has no `PT_INTERP` or dynamic linker;
-no threads, no thread-form `clone`, and no sleeping `futex` wait; no
-copy-on-write and no shared-memory
+or not, musl or glibc (ADR 0176), with threads (ADR 0177) that have their own
+signal masks and share the process's pending signals. It has no `PT_INTERP` or dynamic
+linker; no copy-on-write and no shared-memory
 `vfork`; no process groups, sessions, or job control; no process-group
 `kill`, `select`, `epoll`, or alternate signal stack; no nonblocking pipes;
 no networking; no `/proc` or `/sys`, and of `/dev` three names; no

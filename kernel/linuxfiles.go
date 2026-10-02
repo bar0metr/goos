@@ -265,7 +265,7 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 	if reply.Size > pending.Note || state == nil || !owned {
 		return linuxErrno(linuxabi.EIO)
 	}
-	object, found := ioBuffer(state, owner)
+	object, found := ioBuffer(handler.task, state, owner)
 	if !found {
 		return linuxErrno(linuxabi.EIO)
 	}
@@ -527,7 +527,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 			if state == nil || !owned {
 				return linuxErrno(linuxabi.EIO)
 			}
-			object, ready := ioBuffer(state, owner)
+			object, ready := ioBuffer(handler.task, state, owner)
 			if !ready {
 				return linuxErrno(linuxabi.EIO)
 			}
@@ -561,7 +561,7 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 		if length == 0 {
 			return 0, 0
 		}
-		object, ready := ioBuffer(state, owner)
+		object, ready := ioBuffer(handler.task, state, owner)
 		if !ready {
 			return 0, linuxabi.ENOMEM
 		}
@@ -574,7 +574,7 @@ func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector
 	if errno != 0 || len(wire) == 0 {
 		return 0, errno
 	}
-	object, ready := ioBuffer(state, owner)
+	object, ready := ioBuffer(handler.task, state, owner)
 	if !ready {
 		return 0, linuxabi.ENOMEM
 	}
@@ -999,7 +999,7 @@ func (handler *linuxCallHandler) returnedName(size int) []byte {
 	if !found || !owned || size > limits.NameMax {
 		return nil
 	}
-	object, ready := ioBuffer(state, owner)
+	object, ready := ioBuffer(handler.task, state, owner)
 	if !ready {
 		return nil
 	}
