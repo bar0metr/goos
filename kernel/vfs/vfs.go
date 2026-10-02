@@ -483,6 +483,45 @@ func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
 
 // CloseOwner closes every file owner holds, when the session it names has
 // gone, and returns how many there were.
+// ReacquireObjects gives every file open on backend an object from a
+// filesystem service that has restarted. The objects the old instance handed
+// out died with it; identity, where each file's name is now, is what the new
+// instance is asked for. All old objects are released before any new one is
+// acquired, so an old cookie that happens to equal a new one cannot release
+// it. It returns how many files got no object; they answer not found.
+func (namespace *Namespace) ReacquireObjects(backend Backend) int {
+	objects, ok := backend.(ObjectBackend)
+	if !ok {
+		return 0
+	}
+	for index := range namespace.files {
+		if file := &namespace.files[index]; namespace.openOn(file, backend) {
+			// The new instance knows no such object; the call only drops
+			// what this side cached for it.
+			objects.ReleaseObject(file.node)
+		}
+	}
+	lost := 0
+	for index := range namespace.files {
+		file := &namespace.files[index]
+		if !namespace.openOn(file, backend) {
+			continue
+		}
+		node, status := objects.AcquireObject(file.identity)
+		if status != ramfs.StatusOK || node == 0 {
+			lost++
+			continue
+		}
+		file.node = node
+	}
+	return lost
+}
+
+func (namespace *Namespace) openOn(file *openFile, backend Backend) bool {
+	return file.used && int(file.mount) < len(namespace.mounts) && namespace.mounts[file.mount].used &&
+		namespace.mounts[file.mount].backend == backend
+}
+
 func (namespace *Namespace) CloseOwner(owner Owner) int {
 	closed := 0
 	for index := range namespace.files {

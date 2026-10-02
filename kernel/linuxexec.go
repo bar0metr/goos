@@ -498,6 +498,8 @@ func commitLinuxExec(handler *linuxCallHandler, state *linuxExecState, compat *l
 	}
 	oldRoot := handler.root
 	oldExecutable := owner.Executable()
+	// Linux ends every other thread at this point of no return.
+	endOtherLinuxThreads(handler)
 	if !amd64.ReplaceTaskAddressSpace(handler.task, state.newRoot) {
 		panicSerial("prepared Linux exec task root refused at commit")
 	}

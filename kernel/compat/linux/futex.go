@@ -10,48 +10,77 @@ const (
 	FutexWakeBitset    = 10
 	FutexPrivateFlag   = 128
 	FutexClockRealtime = 256
+	// FutexBitsetAll is the bit set of FUTEX_WAIT and FUTEX_WAKE: every
+	// waiter matches every waker.
+	FutexBitsetAll = uint32(0xffffffff)
 	// RobustListHeadSize is the size of struct robust_list_head, the only
 	// length set_robust_list accepts.
 	RobustListHeadSize = 24
 )
 
-// FutexAction is what a futex call comes to in a process with one task.
+// FutexAction is what a futex call comes to.
 type FutexAction uint8
 
 const (
-	// FutexNoWaiter answers a wake: no other task can be waiting, so it
-	// wakes none and returns 0.
-	FutexNoWaiter FutexAction = iota + 1
+	// FutexWakeWaiters wakes up to Count waiters whose bit set meets Bitset.
+	FutexWakeWaiters FutexAction = iota + 1
 	// FutexChanged answers a wait whose word no longer holds the expected
 	// value: EAGAIN, before any sleep.
 	FutexChanged
-	// FutexRefused is a call GoOS cannot serve: a wait that would sleep,
-	// which needs another task to end it, or an operation it lacks.
+	// FutexSleep blocks the caller on the word until a wake with a
+	// matching bit set, a signal, or the timeout.
+	FutexSleep
+	// FutexRefused is an operation GoOS lacks: requeue, the
+	// priority-inheritance locks, wake-op, and wait on several words.
 	FutexRefused
 )
 
-// FutexDecide decides a futex call from its operation, the word at its
-// address, and the value or bit set it names. The caller has read word;
+// FutexCall is a decoded futex call.
+type FutexCall struct {
+	Action FutexAction
+	Bitset uint32
+	// Count is how many waiters a wake may wake.
+	Count uint32
+	// Absolute says the timeout is a point in time on the clock Realtime
+	// names (FUTEX_WAIT_BITSET); otherwise it is an interval (FUTEX_WAIT).
+	Absolute bool
+	Realtime bool
+}
+
+// FutexDecide decodes a futex call from its operation, the word at its
+// address, the value argument, and the bit set. The caller has read word;
 // an unreadable or misaligned address is EFAULT or EINVAL before this.
-func FutexDecide(operation uint64, word uint32, value uint64, bitset uint64) (FutexAction, abi.Errno) {
+func FutexDecide(operation uint64, word uint32, value uint64, bitset uint64) (FutexCall, abi.Errno) {
+	realtime := operation&FutexClockRealtime != 0
 	switch operation &^ (FutexPrivateFlag | FutexClockRealtime) {
 	case FutexWake, FutexWakeBitset:
-		if operation&^FutexPrivateFlag == FutexWakeBitset && uint32(bitset) == 0 {
-			return 0, abi.EINVAL
+		mask := FutexBitsetAll
+		if operation&^(FutexPrivateFlag|FutexClockRealtime) == FutexWakeBitset {
+			if mask = uint32(bitset); mask == 0 {
+				return FutexCall{}, abi.EINVAL
+			}
 		}
 		// Linux takes FUTEX_CLOCK_REALTIME only with the waits.
-		if operation&FutexClockRealtime != 0 {
-			return 0, abi.ENOSYS
+		if realtime {
+			return FutexCall{}, abi.ENOSYS
 		}
-		return FutexNoWaiter, 0
+		count := uint32(value)
+		if int32(count) < 0 {
+			count = 1<<31 - 1
+		}
+		return FutexCall{Action: FutexWakeWaiters, Bitset: mask, Count: count}, 0
 	case FutexWait, FutexWaitBitset:
-		if operation&^(FutexPrivateFlag|FutexClockRealtime) == FutexWaitBitset && uint32(bitset) == 0 {
-			return 0, abi.EINVAL
+		call := FutexCall{Action: FutexSleep, Bitset: FutexBitsetAll, Realtime: realtime}
+		if operation&^(FutexPrivateFlag|FutexClockRealtime) == FutexWaitBitset {
+			if call.Bitset = uint32(bitset); call.Bitset == 0 {
+				return FutexCall{}, abi.EINVAL
+			}
+			call.Absolute = true
 		}
 		if word != uint32(value) {
-			return FutexChanged, abi.EAGAIN
+			return FutexCall{Action: FutexChanged}, abi.EAGAIN
 		}
-		return FutexRefused, 0
+		return call, 0
 	}
-	return FutexRefused, 0
+	return FutexCall{Action: FutexRefused}, 0
 }

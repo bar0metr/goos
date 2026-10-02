@@ -289,6 +289,18 @@ run '/system/linux/abi-probe libc'
 expect '^libc ok$' 'the calls of a glibc program start'
 clean 'the calls of a glibc program start'
 
+# Three pthreads share a mutex and a condition, join with their values, and
+# see their own TIDs and thread-local storage. Two threads keep their state
+# across seconds of preemption, two more read and write files at once, and
+# exit_group from a thread ends the whole process.
+run '/system/linux/abi-probe threads'
+expect '^threads joined: 3 threads 2000 rounds$' 'pthreads share memory and synchronize'
+expect '^threads preempted: state kept$' 'threads keep their registers across preemption'
+expect '^threads file I/O: kept apart$' 'two threads read and write files at once'
+expect '^threads signal: delivered$' 'raise in a thread reaches the process'
+expect '^threads ok$' 'exit_group from a thread ends the process'
+clean 'pthreads'
+
 run '/system/linux/abi-probe limits'
 expect '^fork bomb bounded at 15$' 'the family budget bounds a fork bomb'
 expect '^limits ok$' 'zombies count against the family budget'

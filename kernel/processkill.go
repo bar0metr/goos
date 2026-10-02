@@ -47,6 +47,7 @@ func (handler nativeCallHandler) ProcessKill(processHandle uint64) kcall.Status 
 // later wake refers to a slot that has been retired.
 func cancelTaskWaits(taskID sched.TaskID) {
 	cancelLinuxExec(taskID)
+	forgetFutexWaiter(taskID)
 	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
 	linuxcompat.SyscallContinuations.Cancel(taskID)
 	ipcWaitSet.Cancel(taskID)

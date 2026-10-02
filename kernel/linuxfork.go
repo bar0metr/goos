@@ -36,6 +36,9 @@ func (handler *linuxCallHandler) Fork(request linuxcompat.Request) linuxcompat.R
 		return linuxcompat.Result{Value: pending.Note}
 	}
 	form, errno := linuxcompat.ProcessCloneForm(request)
+	if errno == 0 && form.Thread {
+		return handler.cloneThread(form)
+	}
 	if errno == 0 && form.Stack != 0 && !vm.ValidateUserRange(form.Stack, 0) {
 		errno = linuxabi.EINVAL
 	}
@@ -78,7 +81,7 @@ func releaseVforkParent(state *linuxcompat.ProcessState) {
 func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.ProcessState, linuxabi.Errno) {
 	parent, found := processRegistry.ByTask(handler.task)
 	compat, compatFound := linuxcompat.FindProcess(handler.root)
-	if !found || !compatFound || handler.frame == nil || parent.TaskCount() != 1 || kernelPageTable == 0 {
+	if !found || !compatFound || handler.frame == nil || kernelPageTable == 0 {
 		return 0, nil, linuxabi.EIO
 	}
 	vfsAuthority, vfsFound := parent.Handles().Lookup(compat.VFSHandle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait)

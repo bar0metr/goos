@@ -39,3 +39,35 @@ func TestProcessCloneFormAcceptsProcessFormsOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessCloneFormThread(t *testing.T) {
+	const glibc = abi.CloneVM | abi.CloneFS | abi.CloneFiles | abi.CloneSighand | abi.CloneThread | abi.CloneSysvsem |
+		abi.CloneSettls | abi.CloneParentSettid | abi.CloneChildCleartid
+	form, errno := ProcessCloneForm(Request{Number: abi.SysClone, Arguments: [6]uint64{glibc, 0x7f00, 0x5000, 0x6000, 0x8000}})
+	want := CloneForm{Thread: true, Stack: 0x7f00, SetTLS: true, TLS: 0x8000, SetParentTID: true, ParentTID: 0x5000,
+		ClearChildTID: true, ChildTID: 0x6000}
+	if errno != 0 || form != want {
+		t.Fatalf("glibc thread = %+v, errno %d", form, errno)
+	}
+	musl := abi.CloneVM | abi.CloneFS | abi.CloneFiles | abi.CloneSighand | abi.CloneThread | abi.CloneSysvsem |
+		abi.CloneSettls | abi.CloneParentSettid | abi.CloneChildCleartid | abi.CloneDetached
+	if form, errno := ProcessCloneForm(Request{Number: abi.SysClone, Arguments: [6]uint64{musl, 0x7f00, 0, 0x6000, 0}}); errno != 0 || !form.ClearChildTID || form.SetChildTID {
+		t.Fatalf("musl thread = %+v, errno %d", form, errno)
+	}
+	for name, flags := range map[string]uint64{
+		"no stack":        glibc,
+		"exit signal":     glibc | abi.SignalChild,
+		"vfork":           glibc | abi.CloneVfork,
+		"namespace":       glibc | 0x20000000,
+		"missing files":   glibc &^ abi.CloneFiles,
+		"missing sighand": glibc &^ abi.CloneSighand,
+	} {
+		stack := uint64(0x7f00)
+		if name == "no stack" {
+			stack = 0
+		}
+		if _, errno := ProcessCloneForm(Request{Number: abi.SysClone, Arguments: [6]uint64{flags, stack}}); errno != abi.EINVAL {
+			t.Errorf("%s: errno %d, want EINVAL", name, errno)
+		}
+	}
+}

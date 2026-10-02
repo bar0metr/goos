@@ -414,7 +414,12 @@ func reclaimExitedTask(task uint64) uint64
 
 // ReclaimExitedTask releases the guarded kernel stack after the dead task's
 // exit record has been consumed. Its architecture slot remains reusable.
-func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64) bool {
+//
+// liveRoot is the address space the task ran in when that address space
+// outlives it, as a thread's process does; its mapping of the task's
+// kernel-entry stack is removed there. It is zero when the address space is
+// gone or about to be destroyed.
+func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64, liveRoot uint64) bool {
 	if allocator == nil || kernelRoot == 0 {
 		return false
 	}
@@ -428,6 +433,13 @@ func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64)
 		return false
 	}
 	taskKernelStacks[slot-1] = taskKernelStack{}
+	if liveRoot != 0 {
+		for page := uint64(0); page < kernelStackPages; page++ {
+			virtual := stack.virtual + page*pmm.PageSize
+			vm.UnmapProcessKernelPage(liveRoot, virtual)
+			invalidatePage(virtual)
+		}
+	}
 	allocation := stack.physical
 	for page := uint64(0); page < stackGuardPages; page++ {
 		guard := allocation + page*pmm.PageSize

@@ -265,6 +265,24 @@ func (state *SignalState) EndMaskSwap() {
 	}
 }
 
+// ThreadMask is the signal state each thread has of its own: its blocked
+// mask and a temporary mask a call such as ppoll installed. Dispositions and
+// pending signals belong to the process.
+type ThreadMask struct {
+	mask, saved uint64
+	restore     bool
+}
+
+// SaveThreadMask returns the thread part of the state in force.
+func (state *SignalState) SaveThreadMask() ThreadMask {
+	return ThreadMask{mask: state.mask, saved: state.saved, restore: state.restore}
+}
+
+// LoadThreadMask puts a thread's part in force.
+func (state *SignalState) LoadThreadMask(thread ThreadMask) {
+	state.mask, state.saved, state.restore = thread.mask, thread.saved, thread.restore
+}
+
 // RestoreMask installs the mask rt_sigreturn found in the signal frame.
 func (state *SignalState) RestoreMask(mask uint64) {
 	state.mask = mask &^ uncatchable

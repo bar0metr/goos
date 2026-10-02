@@ -201,11 +201,11 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 			operation.PathsAttached = true
 		case attachSink:
 			rights |= capability.Write
-			object, granted = lendIOBuffer(state, owner, rights)
+			object, granted = lendIOBuffer(handler.task, state, owner, rights)
 		case attachName:
 			rights |= capability.Write
-			object, granted = lendIOBuffer(state, owner, rights)
-			if buffer, found := ioBuffer(state, owner); granted && found && !vfs.FitsInline(operation) {
+			object, granted = lendIOBuffer(handler.task, state, owner, rights)
+			if buffer, found := ioBuffer(handler.task, state, owner); granted && found && !vfs.FitsInline(operation) {
 				copyToObject(buffer, 0, operation.Path)
 				operation.PathsAttached = true
 			}
@@ -213,7 +213,7 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 			rights = capability.Write
 			object, granted = lendLinuxExecObject(handler.task, owner, rights)
 		default:
-			object, granted = lendIOBuffer(state, owner, rights)
+			object, granted = lendIOBuffer(handler.task, state, owner, rights)
 		}
 		if !granted {
 			handler.vfsAbandon()
@@ -302,11 +302,18 @@ const (
 	linuxIOBytes = linuxIOPages * vm.PageSize
 )
 
-// ioBuffer returns the process's I/O object, creating it on first use. The
-// process pays for it and holds its handle in its own table, where a Linux
-// program cannot name it. It goes with the process's other handles at exit.
-func ioBuffer(state *linuxcompat.ProcessState, owner *process.Process) (*shmem.Object, bool) {
-	if state.IOBuffer == 0 {
+// ioBuffer returns the I/O object of the calling thread, creating it on first
+// use. The process pays for it and holds its handle in its own table, where a
+// Linux program cannot name it. Each thread has its own: one thread's file
+// read must not see the bytes another thread's write gathered. The first
+// thread's goes with the process's other handles at exit; another thread's
+// goes when the thread ends (releaseThreadIOBuffer).
+func ioBuffer(task sched.TaskID, state *linuxcompat.ProcessState, owner *process.Process) (*shmem.Object, bool) {
+	slot := &state.IOBuffer
+	if thread, isThread := linuxcompat.FindThread(task); isThread {
+		slot = &thread.IOBuffer
+	}
+	if *slot == 0 {
 		const charge = linuxIOPages + 1
 		if owner.Handles().Available() == 0 || !owner.Charge(process.ResourcePages, charge) {
 			return nil, false
@@ -322,9 +329,9 @@ func ioBuffer(state *linuxcompat.ProcessState, owner *process.Process) (*shmem.O
 			owner.Release(process.ResourcePages, charge)
 			return nil, false
 		}
-		state.IOBuffer = granted
+		*slot = granted
 	}
-	authority, allowed := owner.Handles().Lookup(state.IOBuffer, handle.TypeMemory, capability.Read|capability.Write|capability.Transfer)
+	authority, allowed := owner.Handles().Lookup(*slot, handle.TypeMemory, capability.Read|capability.Write|capability.Transfer)
 	if !allowed {
 		return nil, false
 	}
@@ -334,12 +341,26 @@ func ioBuffer(state *linuxcompat.ProcessState, owner *process.Process) (*shmem.O
 // lendIOBuffer makes a second handle to the I/O object with only the rights
 // one request needs. The request moves it to the VFS, which maps the object
 // for that request and closes the handle.
-func lendIOBuffer(state *linuxcompat.ProcessState, owner *process.Process, rights capability.Rights) (handle.ID, bool) {
-	object, found := ioBuffer(state, owner)
+func lendIOBuffer(task sched.TaskID, state *linuxcompat.ProcessState, owner *process.Process, rights capability.Rights) (handle.ID, bool) {
+	object, found := ioBuffer(task, state, owner)
 	if !found {
 		return 0, false
 	}
 	return object.Grant(owner.Handles(), rights|capability.Transfer)
+}
+
+// releaseThreadIOBuffer closes the I/O object of a thread that ended and
+// returns its pages to the process quota.
+func releaseThreadIOBuffer(owner *process.Process, id handle.ID) {
+	if id == 0 {
+		return
+	}
+	_, authority, found := owner.Handles().Describe(id)
+	if !found || !owner.Handles().Close(id) {
+		return
+	}
+	releaseMemory(authority)
+	owner.Release(process.ResourcePages, linuxIOPages+1)
 }
 
 // ioTransfer moves length bytes between the I/O object at offset and user

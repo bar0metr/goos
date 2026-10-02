@@ -7,8 +7,6 @@ package main
 // kernel clocks, and the CPU's random generator.
 
 import (
-	"encoding/binary"
-
 	"goos/internal/timekeeping"
 	"goos/internal/version"
 	"goos/kernel/arch/amd64"
@@ -49,9 +47,12 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 	}
 	arguments := &request.Arguments
 	switch request.Number {
-	case linuxabi.SysGetpid, linuxabi.SysGettid:
-		// One task per process: the thread ID is the process ID.
+	case linuxabi.SysGetpid:
 		return linuxcompat.Result{Value: uint64(state.PID)}
+	case linuxabi.SysGettid:
+		// The first thread's TID is the PID; a clone-created thread has
+		// its own.
+		return linuxcompat.Result{Value: uint64(linuxcompat.TaskTID(handler.task, state))}
 	case linuxabi.SysGetppid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.ParentPIDOf(state.PID))}
 	case linuxabi.SysGetuid, linuxabi.SysGeteuid:
@@ -107,37 +108,20 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		if arguments[1] != linuxcompat.RobustListHeadSize {
 			return linuxErrno(linuxabi.EINVAL)
 		}
-		state.RobustList = arguments[0]
+		if thread, isThread := linuxcompat.FindThread(handler.task); isThread {
+			thread.RobustList = arguments[0]
+		} else {
+			state.RobustList = arguments[0]
+		}
 		return linuxcompat.Result{}
 	case linuxabi.SysFutex:
 		return handler.futex(request)
-	}
-	return linuxErrno(linuxabi.ENOSYS)
-}
-
-var linuxFutexWord [4]byte
-
-// futex serves the calls a process with one task can answer: a wake finds
-// no waiter, and a wait whose word has already changed returns EAGAIN. A
-// wait that would sleep needs another task to end it and is refused, so it
-// shows in the diagnostics instead of hanging the process.
-func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.Result {
-	address := request.Arguments[0]
-	if address%4 != 0 {
-		return linuxErrno(linuxabi.EINVAL)
-	}
-	if !vm.CopyIn(handler.root, address, linuxFutexWord[:]) {
-		return linuxErrno(linuxabi.EFAULT)
-	}
-	word := binary.LittleEndian.Uint32(linuxFutexWord[:])
-	action, errno := linuxcompat.FutexDecide(request.Arguments[1], word, request.Arguments[2], request.Arguments[5])
-	if errno != 0 {
-		return linuxErrno(errno)
-	}
-	if action == linuxcompat.FutexNoWaiter {
+	case linuxabi.SysSchedYield:
+		// The scheduler preempts every task at its tick, so a task that
+		// spins on a lock another holds loses at most one quantum.
 		return linuxcompat.Result{}
 	}
-	return linuxcompat.Refuse(request.Number)
+	return linuxErrno(linuxabi.ENOSYS)
 }
 
 // signalAction records and reports a signal disposition. A handler stored

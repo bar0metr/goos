@@ -101,6 +101,11 @@ const (
 
 	MapPrivate   = uint64(0x02)
 	MapAnonymous = uint64(0x20)
+	// MapNoreserve and MapStack are hints a private anonymous mapping may
+	// carry. GoOS reserves nothing ahead and treats every mapping alike, so
+	// both change nothing.
+	MapNoreserve = uint64(0x4000)
+	MapStack     = uint64(0x20000)
 
 	MadvDontNeed = uint64(4)
 
@@ -224,9 +229,19 @@ const (
 
 	// clone flags a process-creating call may carry. The low byte of the
 	// flags is the signal the parent receives when the child ends.
-	CloneVM         = uint64(0x100)
-	CloneVfork      = uint64(0x4000)
-	CloneSignalMask = uint64(0xff)
+	CloneVM            = uint64(0x100)
+	CloneFS            = uint64(0x200)
+	CloneFiles         = uint64(0x400)
+	CloneSighand       = uint64(0x800)
+	CloneVfork         = uint64(0x4000)
+	CloneThread        = uint64(0x10000)
+	CloneSysvsem       = uint64(0x40000)
+	CloneSettls        = uint64(0x80000)
+	CloneParentSettid  = uint64(0x100000)
+	CloneChildCleartid = uint64(0x200000)
+	CloneDetached      = uint64(0x400000)
+	CloneChildSettid   = uint64(0x1000000)
+	CloneSignalMask    = uint64(0xff)
 
 	// wait4 options. WaitAll and WaitNoThread change nothing for a
 	// single-task process that creates children only with SIGCHLD.

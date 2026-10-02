@@ -87,7 +87,13 @@ func (service *Service) AttachFilesystem(transport Transport) bool {
 		return false
 	}
 	if service.persistentMounted {
-		return root == service.persistentRoot && service.lookupSystem(root) == service.systemNode
+		if root != service.persistentRoot || service.lookupSystem(root) != service.systemNode {
+			return false
+		}
+		// Files stay open across the restart: each gets an object from the
+		// new instance, found again by where its name is.
+		service.namespace.ReacquireObjects(&service.persistent)
+		return true
 	}
 	if !service.mountPersistent(root) {
 		// Mounting /persist, /home and /state is one operation. None can have

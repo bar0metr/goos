@@ -32,7 +32,10 @@ func PageRange(address uint64, length uint64, pageSize uint64) (uint64, abi.Errn
 func AnonymousMapping(arguments [6]uint64, pageSize uint64) (uint64, uint64, abi.Errno) {
 	address, length, protection := arguments[0], arguments[1], arguments[2]
 	flags, fd, offset := arguments[3], arguments[4], arguments[5]
-	if address != 0 || flags != abi.MapPrivate|abi.MapAnonymous || fd != ^uint64(0) || offset != 0 {
+	// Linux ignores the descriptor of an anonymous mapping. glibc passes -1
+	// as a 32-bit int, which arrives as 0xffffffff, not as a 64-bit -1.
+	_ = fd
+	if address != 0 || flags&^(abi.MapNoreserve|abi.MapStack) != abi.MapPrivate|abi.MapAnonymous || offset != 0 {
 		return 0, 0, abi.EINVAL
 	}
 	if _, errno := MemoryProtection(protection); errno != 0 {

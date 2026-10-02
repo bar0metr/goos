@@ -180,7 +180,7 @@ func sevenZipReplies() map[string]string {
 		replies[step.command] = "7-Zip (z) 26.03 (x64)\n\nEverything is Ok"
 	}
 	replies[sevenZipSteps[0].command] = "7-Zip (z) 26.03 (x64)\n\nFormats:\n 7z\n\nCodecs:\n LZMA"
-	replies[sevenZipSteps[4].command] = sevenZipHash + "  98816  abi-probe\n" + sevenZipHash + "  98816  abi-probe\n\nEverything is Ok"
+	replies[sevenZipSteps[4].command] = sevenZipHash + "  2557064  7zzs\n" + sevenZipHash + "  2557064  7zzs\n\nEverything is Ok"
 	return replies
 }
 
@@ -239,7 +239,7 @@ func TestSevenZipStopsAtTheFailingStep(t *testing.T) {
 func TestSevenZipDetectsADifferentCopy(t *testing.T) {
 	replies := sevenZipReplies()
 	other := strings.Repeat("0", 64)
-	replies[sevenZipSteps[4].command] = sevenZipHash + "  98816  abi-probe\n" + other + "  98816  abi-probe\n\nEverything is Ok"
+	replies[sevenZipSteps[4].command] = sevenZipHash + "  2557064  7zzs\n" + other + "  2557064  7zzs\n\nEverything is Ok"
 	result, report, err := runSevenZip(t, replies, nil, false)
 	if err != nil || result != ResultExpectedFailure || !strings.Contains(report.Workload.Ending, "differs") {
 		t.Fatalf("%s %v %+v", result, err, report.Workload)

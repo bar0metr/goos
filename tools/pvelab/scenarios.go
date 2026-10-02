@@ -278,19 +278,19 @@ func (linuxScenario) Run(ctx context.Context, s *Session) (Result, error) {
 // result.
 type sevenZipScenario struct{}
 
-// sevenZipInput is the file the round trip packs: a static ELF every system
-// disk carries.
-const sevenZipInput = "/system/linux/abi-probe"
+// sevenZipInput is the file the round trip packs: 7-Zip itself, a few MiB
+// that keep the multithreaded LZMA2 encoder busy.
+const sevenZipInput = "/system/linux/7zzs"
 
-// sevenZipSteps run in order; the first that fails ends the workload. The
-// archive is made with one thread (-mmt1): GoOS runs no Linux threads, and
-// 7-Zip's two-thread LZMA2 encoder stops with EINVAL from clone.
+// sevenZipSteps run in order; the first that fails ends the workload. 7-Zip
+// chooses its thread count itself, so the add step runs the multithreaded
+// encoder.
 var sevenZipSteps = []struct{ name, command, want string }{
 	{"info", "/system/linux/7zzs i", "Formats:"},
-	{"add", "/system/linux/7zzs a -mmt1 /tmp/pvelab.7z " + sevenZipInput, "Everything is Ok"},
+	{"add", "/system/linux/7zzs a /tmp/pvelab.7z " + sevenZipInput, "Everything is Ok"},
 	{"test", "/system/linux/7zzs t /tmp/pvelab.7z", "Everything is Ok"},
 	{"extract", "/system/linux/7zzs x -y -o/tmp/pvelab-out /tmp/pvelab.7z", "Everything is Ok"},
-	{"hash", "/system/linux/7zzs h -scrcSHA256 /tmp/pvelab-out/abi-probe " + sevenZipInput, "Everything is Ok"},
+	{"hash", "/system/linux/7zzs h -scrcSHA256 /tmp/pvelab-out/7zzs " + sevenZipInput, "Everything is Ok"},
 }
 
 func (sevenZipScenario) Name() string { return "7zip" }

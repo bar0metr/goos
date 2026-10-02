@@ -70,11 +70,11 @@ func TestFilesystemServiceDeathAndRestart(t *testing.T) {
 	if !service.AttachFilesystem(newLoopback(device)) {
 		t.Fatal("restarted service refused")
 	}
-	// Stable object cookies belong to one filesystem-service lifetime. A
-	// service restart invalidates its old open objects; pathname lookup on the
-	// newly mounted service remains usable.
+	// Object cookies belong to one filesystem-service lifetime, but the VFS
+	// knows where each open file's name is and acquires a new object for it
+	// from the restarted service: the handle reads the same file.
 	read := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
-	if read.Status != vfs.StatusNotFound || len(read.Data) != 0 {
+	if read.Status != vfs.StatusOK || string(read.Data) != "survives a restart" {
 		t.Fatalf("read through a handle opened before the restart = %d, %q", read.Status, read.Data)
 	}
 	service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
@@ -193,5 +193,34 @@ func TestTransportFailuresKeepTheirReason(t *testing.T) {
 		if _, status := remote.Stat(1); status != reason {
 			t.Fatalf("backend reported %d for %d", status, reason)
 		}
+	}
+}
+
+// A file renamed while open is found again at its new place when the
+// filesystem service restarts.
+func TestRenamedOpenFileSurvivesRestart(t *testing.T) {
+	device := testFAT32Device()
+	service := &Service{}
+	if !service.Init() || !service.MountBootstrap(testSystemImage(t)) || !service.AttachCache(testCache) {
+		t.Fatal("service init failed")
+	}
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("volume refused")
+	}
+	writePersistent(t, service, "/home/before.txt", "moved then restarted")
+	opened := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte("/home/before.txt")})
+	if opened.Status != vfs.StatusOK {
+		t.Fatalf("open = %d", opened.Status)
+	}
+	if reply := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRename, Path: []byte("/home/before.txt"), Target: []byte("/home/after.txt")}); reply.Status != vfs.StatusOK {
+		t.Fatalf("rename = %d", reply.Status)
+	}
+	service.DetachFilesystem()
+	if !service.AttachFilesystem(newLoopback(device)) {
+		t.Fatal("restarted service refused")
+	}
+	read := service.Dispatch(testSession, vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: 64})
+	if read.Status != vfs.StatusOK || string(read.Data) != "moved then restarted" {
+		t.Fatalf("read after rename and restart = %d, %q", read.Status, read.Data)
 	}
 }

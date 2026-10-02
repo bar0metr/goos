@@ -12,12 +12,27 @@ func TestAnonymousMappingAcceptsOnlyBoundedPrivateAnonymousMemory(t *testing.T) 
 	if errno != 0 || length != 8192 || protection != abi.ProtRead|abi.ProtWrite {
 		t.Fatalf("mapping = length=%d protection=%d errno=%d", length, protection, errno)
 	}
-	for index, value := range []uint64{1, 0, abi.ProtExec, abi.MapAnonymous, 0, 1} {
+	// The descriptor is ignored: index 4 has no invalid value.
+	for index, value := range []uint64{1, 0, abi.ProtExec, abi.MapAnonymous, 4: 0, 5: 1} {
+		if index == 4 {
+			continue
+		}
 		invalid := arguments
 		invalid[index] = value
 		if _, _, errno := AnonymousMapping(invalid, 4096); errno != abi.EINVAL {
 			t.Fatalf("argument %d accepted: %#v", index, invalid)
 		}
+	}
+	shared := arguments
+	shared[3] = 0x01 | abi.MapAnonymous
+	if _, _, errno := AnonymousMapping(shared, 4096); errno != abi.EINVAL {
+		t.Fatal("MAP_SHARED accepted")
+	}
+	// glibc's thread stacks and arenas: a 32-bit -1 descriptor, PROT_NONE,
+	// and the MAP_STACK and MAP_NORESERVE hints.
+	stack := [6]uint64{0, 8 << 20, abi.ProtNone, abi.MapPrivate | abi.MapAnonymous | abi.MapStack | abi.MapNoreserve, 0xffffffff, 0}
+	if length, _, errno := AnonymousMapping(stack, 4096); errno != 0 || length != 8<<20 {
+		t.Fatalf("thread stack mapping: length %d errno %d", length, errno)
 	}
 }
 

@@ -54,16 +54,30 @@ func deliverProcessExits() {
 		// slot is released, so the process keeps the time and the next task to
 		// take the slot starts from zero.
 		accountTaskCPU(taskID)
+		forgetFutexWaiter(taskID)
 		code := amd64.TaskExitCode(task)
 		if validation.Enabled {
 			noteStackGuardFault(taskID, code)
 		}
+		owner, _ := processRegistry.ByTask(taskID)
+		// A task exec ended ran in an address space exec has destroyed.
+		execEnded := isExecEnded(taskID)
 		event, report := processRegistry.ReportTaskExit(taskID, code)
+		liveRoot := uint64(0)
+		if report == process.ExitTaskRemoved && owner != nil && !execEnded {
+			liveRoot = owner.AddressSpace().Root
+		}
+		if report == process.ExitTaskRemoved && owner != nil && owner.ABI() == process.ABILinuxX8664 {
+			endLinuxThread(taskID, owner, code)
+		} else {
+			linuxcompat.RemoveThread(taskID)
+			takeExecEnded(taskID)
+		}
 		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
 		// not gate the steps below: a process that has exited has to release its
 		// waiters and its handles even if its stack cannot be returned, or its
 		// peers wait forever for an EOF that never arrives.
-		if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task) {
+		if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task, liveRoot) {
 			taskStackReclaimFailures++
 			if taskStackReclaimFailures == 1 {
 				kernelLog(logfmt.Warn, "TASK_STACK_RECLAIM_FAILED", nil)

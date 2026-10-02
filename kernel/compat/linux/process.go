@@ -38,6 +38,11 @@ type ProcessState struct {
 	// umask is the file mode creation mask umask sets. It is inherited across
 	// fork and exec as on Linux.
 	umask uint16
+	// Signals holds one thread's mask at a time: that of maskTID, or of the
+	// first thread when maskTID is zero. The first thread's mask waits in
+	// firstMask while another thread's is in force.
+	maskTID   int32
+	firstMask ThreadMask
 	// IOBuffer is the native handle of the memory object file reads and
 	// writes move their bytes through. The bridge creates it on first use.
 	IOBuffer handle.ID
@@ -458,7 +463,7 @@ func allocatePID() int32 {
 		if nextPID > MaxPID {
 			nextPID = firstPID
 		}
-		used := false
+		used := tidInUse(candidate)
 		for index := range processRecords {
 			if processRecords[index].State != 0 && processRecords[index].PID == candidate {
 				used = true
@@ -644,6 +649,7 @@ func RemoveProcess(root uint64, release func(FileDescription)) bool {
 					releaseDirectories(familyID)
 				}
 				processStates[index] = ProcessState{}
+				forgetThreads(root)
 				if record := recordIndex(pid); record >= 0 {
 					processRecords[record] = ProcessRecord{}
 				}
@@ -671,6 +677,7 @@ func ExitProcess(root uint64, termination Termination, release func(FileDescript
 			releaseDirectories(familyID)
 		}
 		processStates[index] = ProcessState{}
+		forgetThreads(root)
 		return markProcessExited(pid, termination)
 	}
 	return false

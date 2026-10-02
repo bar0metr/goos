@@ -316,6 +316,29 @@ func MapProcessKernelPage(allocator *pmm.Allocator, rootAddress, virtual, physic
 	return true
 }
 
+// UnmapProcessKernelPage removes one higher-half mapping MapProcessKernelPage
+// installed in a process root, leaving the page tables that held it. A
+// thread's kernel-entry stack is mapped in the root its process shares; the
+// mapping must go with the stack, or a later stack whose guard reuses the
+// pages would find it mapped. The caller invalidates the address.
+func UnmapProcessKernelPage(rootAddress, virtual uint64) bool {
+	if rootAddress%PageSize != 0 || virtual%PageSize != 0 {
+		return false
+	}
+	if _, ok := KernelPhysical(virtual); !ok {
+		return false
+	}
+	// SAFETY: rootAddress is a live process PML4; kernel subtables in it are
+	// low pages the identity map covers.
+	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	entry := leafEntry(root, virtual)
+	if entry == nil || *entry&entryPresent == 0 || *entry&entryUser != 0 {
+		return false
+	}
+	*entry = 0
+	return true
+}
+
 func bootstrapAddress(address uint64) bool {
 	if address < IdentityMapLimit {
 		return true
