@@ -47,7 +47,7 @@ an errno; nothing is accepted and ignored.
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `pause(34)` | implemented | sleeps until a handled signal, then `EINTR` |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; a handled signal ends it with `EINTR` and the time left |
-| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | the compatibility PID; the parent is the forking process, or 1 for a launched or orphaned one; a thread's TID comes from the PID space, and the first thread's is the PID |
+| `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | `getpid` is the process's compatibility PID; `gettid` is the calling thread's TID, which equals the PID for the first thread; the parent is the forking process, or 1 for a launched or orphaned one |
 | `clone(56)` | partial | `SIGCHLD` is `fork`, `CLONE_VM\|CLONE_VFORK\|SIGCHLD` is `vfork`, both with an optional stack; the five thread-sharing flags with a stack make a thread, with `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID`, `CLONE_SYSVSEM`, and `CLONE_DETACHED` optional (ADR 0177); 8 tasks per process, `EAGAIN` past them; namespace flags `EINVAL` |
 | `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
@@ -82,7 +82,7 @@ an errno; nothing is accepted and ignored.
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
 
-Calls programs commonly make that stay `ENOSYS` in 0.2.1, with what musl or
+Calls programs commonly make that still return `ENOSYS`, with what musl or
 BusyBox does about it:
 
 | Syscall | Effect of `ENOSYS` |
@@ -117,8 +117,10 @@ memory is `EFAULT`. An element that stalls after earlier bytes went out ends
 the call with the count so far.
 
 Each Linux process has a compatibility PID between 2 and 32767, allocated at
-launch and distinct among live Linux processes. It is the only process or
-thread identity a Linux program sees.
+launch and distinct among live Linux processes. Each thread other than the
+first has a TID from the same range, distinct from every live PID and TID; the
+first thread's TID is the PID (ADR 0177). These are the only process and
+thread identities a Linux program sees.
 
 ## VFS session
 
@@ -175,8 +177,10 @@ and no child exists afterwards (ADR 0158).
 private child and suspend the caller until the child's `execve` succeeds or
 the child exits. The child never shares the parent's memory, so its writes
 stay its own. `clone(SIGCHLD, stack)` is `fork`. A nonzero stack becomes the
-child's stack pointer; one outside the user range is `EINVAL`. Any other flag
-set, including every thread form, is `EINVAL` (ADR 0159).
+child's stack pointer; one outside the user range is `EINVAL`. The thread
+form, `CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD` with a stack,
+creates a thread in the caller's process (ADR 0177). Any other flag set,
+including a thread with no stack of its own, is `EINVAL`.
 
 ## Pipes
 
@@ -325,8 +329,8 @@ three names. Native programs do not see them.
 exchange per entry (ADR 0143). `d_ino` is the identity `st_ino` reports,
 `d_off` the position after the entry, `d_type` `DT_REG` or `DT_DIR`. The
 position lives in the directory's description: `lseek` to 0 rewinds and to a
-`d_off` resumes. A name over 152 bytes comes back through the process's I/O
-memory object. GoOS directories have no `.` and `..`, and the listing has
+`d_off` resumes. A name over 152 bytes comes back through the calling
+thread's I/O memory object. GoOS directories have no `.` and `..`, and the listing has
 none.
 
 A buffer too small for the next record is `EINVAL` when nothing was written
@@ -375,7 +379,8 @@ used in order and empty ones skipped.
 A stream `readv` or `read` delivers what the stream holds, up to the request,
 and blocks only while it has nothing. A stream `writev` or `write` returns
 the count so far when the stream fills. On a file each is one VFS read or
-write through the process's I/O memory object. musl stdio uses both calls.
+write through the calling thread's I/O memory object. musl stdio uses both
+calls.
 
 ## Identity, time, and limits
 
@@ -383,7 +388,8 @@ These calls answer from kernel state and ask no service (ADR 0145).
 
 | Call | Answer |
 | --- | --- |
-| `getpid`, `gettid` | the compatibility PID, 2 to 32767 |
+| `getpid` | the process's compatibility PID, 2 to 32767 |
+| `gettid` | the calling thread's TID, from the same range; the PID for the first thread |
 | `getppid` | 1 for a launch root and an orphan; the forking parent's compatibility PID for a child |
 | `getuid`, `geteuid`, `getgid`, `getegid` | 1000 |
 | `setuid`, `setgid` | succeed for 1000, `EPERM` for any other value |

@@ -1484,8 +1484,9 @@ static int fork_test(void)
 /* A vfork child reads one byte through the shared descriptor and exits. The
  * parent resumes only after that exit, so the position has already moved
  * when vfork returns. A clone with SIGCHLD alone is a fork; the parent
- * watches the position as fork_test does. GoOS refuses the thread form of
- * clone; Linux would create a thread, so that check runs on GoOS only. */
+ * watches the position as fork_test does. GoOS refuses a thread with no
+ * stack of its own; Linux would create one on the caller's stack, so that
+ * check runs on GoOS only. */
 static int vfork_test(void)
 {
 	struct timespec nap = {0, 10 * 1000 * 1000};

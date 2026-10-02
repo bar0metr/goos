@@ -481,8 +481,6 @@ func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
 	return namespace.release(entry)
 }
 
-// CloseOwner closes every file owner holds, when the session it names has
-// gone, and returns how many there were.
 // ReacquireObjects gives every file open on backend an object from a
 // filesystem service that has restarted. The objects the old instance handed
 // out died with it; identity, where each file's name is now, is what the new
@@ -526,6 +524,8 @@ func (namespace *Namespace) openOn(file *openFile, backend Backend) bool {
 		namespace.mounts[file.mount].backend == backend
 }
 
+// CloseOwner closes every file owner holds, when the session it names has
+// gone, and returns how many there were.
 func (namespace *Namespace) CloseOwner(owner Owner) int {
 	closed := 0
 	for index := range namespace.files {
