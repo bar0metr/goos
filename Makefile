@@ -130,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -677,6 +677,55 @@ test-linux-kernel-reference:
 	@test -n "$(BUSYBOX)" && test -f "$(BUSYBOX)" || { echo "BUSYBOX=/path/to/static/busybox is required" >&2; exit 2; }
 	@userspace/linux/run-on-linux-kernel.sh $(KERNEL) $(BUSYBOX)
 
+# Proxmox hardware lab (docs/development/proxmox-lab.md). tools/pvelab boots
+# the same ISO and a fresh installed disk on a remote Proxmox VE host under
+# KVM. None of these targets is part of test-all or release-check: they need
+# the private host and the credentials in .env.
+PVE_INPUT := $(BUILD_DIR)/pve/input
+PVE_ISO := $(PVE_INPUT)/goos.iso
+PVE_DISK := $(PVE_INPUT)/goos-disk.img
+PVELAB = $(BUILD_ENV) go run ./tools/pvelab
+PVE_RUN_FLAGS = --iso $(PVE_ISO) --disk $(PVE_DISK) $(PVE_FLAGS)
+
+pve-doctor:
+	@$(PVELAB) doctor
+
+# The lab inputs: this configuration's ISO and a new installed disk, made
+# afresh on every call so no run sees what an earlier one wrote. DISK is never
+# touched.
+pve-artifacts: iso
+	@mkdir -p $(PVE_INPUT)
+	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(PVE_DISK)
+	@cp $(ISO) $(PVE_ISO)
+	@printf 'lab inputs %s and %s\n' '$(PVE_ISO)' '$(PVE_DISK)'
+
+test-pve-smoke: pve-artifacts
+	@$(PVELAB) run --scenario smoke $(PVE_RUN_FLAGS)
+
+test-pve-smp: pve-artifacts
+	@$(PVELAB) run --scenario smoke --cores 4 $(PVE_RUN_FLAGS)
+
+test-pve-linux: pve-artifacts
+	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
+
+# A diagnostic run of a static 7-Zip the caller supplies. DIAG=1 gives the
+# guest the diag command, whose DIAG linux line names the refused calls.
+#   make test-pve-7zip LINUX_EXTRA=/path/to/7zzs
+test-pve-7zip:
+	@test -n "$(LINUX_EXTRA)" && test -f "$(LINUX_EXTRA)" || { echo "LINUX_EXTRA=/path/to/7zzs is required" >&2; exit 2; }
+	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(LINUX_EXTRA))
+	@$(PVELAB) run --scenario 7zip $(PVE_RUN_FLAGS)
+
+# Boots the smoke scenario and keeps the VM for debugging; pvelab prints the
+# run ID that pvelab destroy --run takes.
+pve-run: pve-artifacts
+	@$(PVELAB) run --scenario smoke --keep $(PVE_RUN_FLAGS)
+
+test-pvelab:
+	$(BUILD_ENV) go test ./tools/pvelab
+
+test-hardware: test-pve-smoke test-pve-linux
+
 clean:
 	@rm -rf $(BUILD_DIR)
 
@@ -730,4 +779,8 @@ help:
 	  '  test-reproducible build the ISO twice from clean and compare every artifact' \
 	  '  lint/fmt/docs   quality checks' \
 	  '  clean           remove build artifacts' \
-	  '  toolchain-check validate tools and pinned versions (tools/toolchain.versions)'
+	  '  toolchain-check validate tools and pinned versions (tools/toolchain.versions)' \
+	  '  pve-doctor      check the Proxmox lab settings in .env (docs/development/proxmox-lab.md)' \
+	  '  test-pve-smoke  boot a fresh disk on Proxmox under KVM; also test-pve-smp, test-pve-linux' \
+	  '  test-pve-7zip LINUX_EXTRA=path  run a static 7zzs on Proxmox and report refused calls' \
+	  '  pve-run         boot on Proxmox and keep the VM for debugging'

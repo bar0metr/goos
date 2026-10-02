@@ -476,6 +476,10 @@ FAT32 storage stress, and the release checks. Complete serial logs remain in
 `build/logs/boot.log` and `build/logs/reboot.log`; successful harness output is
 grouped and concise. See [`docs/development/testing.md`](docs/development/testing.md).
 
+Optional KVM validation on real hardware runs on a Proxmox VE node through
+`tools/pvelab`; see [`docs/development/proxmox-lab.md`](docs/development/proxmox-lab.md).
+It is no part of `make test-all` or `make release-check`.
+
 `HZ=250` or `HZ=1000` builds any target at a diagnostic timer rate, and
 `DIAG=1` builds the diagnostic variant whose `diag` shell builtin prints the
 kernel's process, handle, channel, and wait state. `make test-stress` boots
@@ -642,6 +646,7 @@ Further documentation:
 - Development: [building](docs/development/building.md),
   [debugging](docs/development/debugging.md),
   [testing](docs/development/testing.md),
+  [Proxmox hardware lab](docs/development/proxmox-lab.md),
   [coding style](docs/development/coding-style.md),
   [adding a command](docs/development/adding-command.md),
   [adding a service](docs/development/adding-service.md),
