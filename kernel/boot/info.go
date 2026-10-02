@@ -34,10 +34,16 @@ func (region MemoryRegion) End() uint64 {
 	return region.Start + region.Pages*PageSize
 }
 
+// MaxRegions bounds the memory map the kernel keeps. Adjacent regions of
+// one kind are merged as they are added, so it bounds the changes of kind
+// along physical memory, not the firmware's descriptor count. OVMF with four
+// vCPUs under Proxmox gives 138 descriptors.
+const MaxRegions = 256
+
 // Info is the immutable handoff from firmware-specific boot code to the
 // architecture-independent kernel.
 type Info struct {
-	Regions          [128]MemoryRegion
+	Regions          [MaxRegions]MemoryRegion
 	RegionCount      int
 	UsableBytes      uint64
 	FirmwareName     string
@@ -48,11 +54,25 @@ type Info struct {
 	ACPIRoot uint64
 }
 
+// AddRegion appends a region, or extends the last one when the new region
+// continues it with the same kind. Firmware splits memory of one kind into
+// many descriptors (boot services data, per CPU), and the kernel needs only
+// the kind.
 func (info *Info) AddRegion(region MemoryRegion) bool {
-	if region.Pages == 0 || region.Start%PageSize != 0 || info.RegionCount == len(info.Regions) {
+	if region.Pages == 0 || region.Start%PageSize != 0 || region.Pages > (^uint64(0)-region.Start)/PageSize {
 		return false
 	}
-	if region.End() < region.Start {
+	if info.RegionCount > 0 {
+		last := &info.Regions[info.RegionCount-1]
+		if last.Kind == region.Kind && last.End() == region.Start && last.Pages+region.Pages <= (^uint64(0)-last.Start)/PageSize {
+			last.Pages += region.Pages
+			if region.Kind == MemoryUsable {
+				info.UsableBytes += region.Pages * PageSize
+			}
+			return true
+		}
+	}
+	if info.RegionCount == len(info.Regions) {
 		return false
 	}
 	info.Regions[info.RegionCount] = region
