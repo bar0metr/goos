@@ -128,6 +128,13 @@ Use `make test` during the normal edit loop. Use `make test-all` before delivery
 of changes that affect the kernel, native userspace, startup protocols, storage,
 shell composition, or boot behavior.
 
+## Proxmox hardware lab
+
+`make test-pve-smoke`, `make test-pve-smp`, `make test-pve-linux`, and
+`make test-pve-7zip` boot GoOS under KVM on a remote Proxmox VE node. They
+need private credentials and are part of no other target; see
+[the Proxmox hardware lab](proxmox-lab.md).
+
 ## QEMU boot test
 
 `tests/boot/qemu_boot.sh` captures the complete serial streams in:
