@@ -265,8 +265,8 @@ directory description keeps its canonical path; 32 exist system-wide. `*at`
 calls resolve a relative path from the directory their `dirfd` names. A
 fourth kind of descriptor names a device; see [Devices](#devices).
 
-File bytes move through one 64 KiB memory object per process, charged to the
-process. A read or write of more is a short transfer. Reading a write-only
+File bytes move through a 64 KiB memory object of the calling thread,
+charged to the process and released when the thread ends (ADR 0177). A read or write of more is a short transfer. Reading a write-only
 descriptor or writing a read-only one is `EBADF`. A write through `O_APPEND`
 asks the VFS for the file length, seeks there, and writes; it is not atomic
 against another writer.

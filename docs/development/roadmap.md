@@ -523,18 +523,25 @@ from disk:
   system, and recovery when it does not come back;
 - `make run` on a disk that is never overwritten implicitly.
 
-### Next: a Linux terminal, then threads
+### GoOS 0.2.3: static glibc and threads
 
-GoOS 0.2.3 is to give Linux programs a terminal: a terminal descriptor,
+Implemented: static glibc programs (ADR 0176) and Linux threads: thread-form
+`clone`, per-thread TLS, TIDs, and signal masks, and sleeping `futex` waits
+(ADR 0177). Open files survive a FAT32 service restart (ADR 0178). 7-Zip runs
+with its own thread count.
+
+### Next: a Linux terminal
+
+The next release is to give Linux programs a terminal: a terminal descriptor,
 `isatty`, `TIOCGWINSZ`, a termios subset, sessions and process groups, a
 foreground group, terminal-generated `SIGINT`, `SIGTSTP`, and `SIGCONT`, and an
-interactive BusyBox `sh`. Threads came first: thread-form `clone`, per-thread
-TLS, TIDs, and signal masks, and sleeping `futex` waits (ADR 0177).
-Thread-directed delivery remains.
+interactive BusyBox `sh`. Signals aimed at one thread, rather than at its
+process, remain.
 
-Later: interactive programs such as `nano`. A random source for CPUs without
-RDRAND and a randomized load base are independent steps. Dynamic linking and
-glibc stay separate work.
+Later: interactive programs such as `nano`, and `utimensat`, which needs the
+VFS to set a file's times. A random source for CPUs without RDRAND and a
+randomized load base are independent steps. Dynamic linking stays separate
+work.
 
 Linux syscalls translate into native GoOS primitives and userspace services.
 They must not create a privileged bypass around VFS, IPC, handles, or

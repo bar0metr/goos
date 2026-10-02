@@ -488,7 +488,10 @@ func (namespace *Namespace) Close(owner Owner, handle Handle) Status {
 // out died with it; identity, where each file's name is now, is what the new
 // instance is asked for. All old objects are released before any new one is
 // acquired, so an old cookie that happens to equal a new one cannot release
-// it. It returns how many files got no object; they answer not found.
+// it. A file whose identity the new instance does not resolve keeps no
+// cookie: the new instance numbers its objects afresh, and an old cookie
+// could name another file's new object. It returns how many files got no
+// object; they answer not found.
 func (namespace *Namespace) ReacquireObjects(backend Backend) int {
 	objects, ok := backend.(ObjectBackend)
 	if !ok {
@@ -507,6 +510,7 @@ func (namespace *Namespace) ReacquireObjects(backend Backend) int {
 		if !namespace.openOn(file, backend) {
 			continue
 		}
+		file.node = 0
 		node, status := objects.AcquireObject(file.identity)
 		if status != ramfs.StatusOK || node == 0 {
 			lost++
