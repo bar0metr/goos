@@ -1,15 +1,15 @@
 # Linux compatibility
 
-**Status: implemented.** GoOS 0.2.0 introduced the base ABI and GoOS 0.2.1
-adds process composition: `fork`, `execve`, pipes, `wait4`, signals, and
-`poll`. Unmodified, statically linked Linux x86_64 programs run as GoOS
-processes. The kernel has immutable native and
+**Status: implemented.** GoOS 0.2.0 introduced the base ABI, GoOS 0.2.1 added
+process composition: `fork`, `execve`, pipes, `wait4`, signals, and `poll`,
+and GoOS 0.2.3 adds static glibc programs (ADR 0176) and threads (ADR 0177).
+Unmodified, statically linked Linux x86_64 programs run as GoOS processes. The kernel has immutable native and
 Linux process identities, a dedicated `SYSCALL`/IRETQ entry, bounded static
 ELF loading, a System V initial stack, and a constrained PID 1 launch policy.
 A translation layer in the kernel turns Linux calls into the primitives a
 native process uses: VM regions, byte streams, the kernel clocks, and one VFS
-session per process. Static musl programs, BusyBox applets, and a
-non-interactive BusyBox `sh` run on it.
+session per process. Static musl and glibc programs, BusyBox applets, a
+non-interactive BusyBox `sh`, and 7-Zip with its own thread count run on it.
 [linux-x86_64-abi.md](linux-x86_64-abi.md) is the contract: every call, its
 status, and each difference from Linux.
 
@@ -219,10 +219,12 @@ it already consumed.
   for `O_TRUNC`, and open it. A directory gets a descriptor that keeps its
   canonical path, because the VFS lists directories by path. 32 directory
   records exist system-wide.
-- `read`, `write`, and `writev` on a file move bytes through one 64 KiB
-  memory object per process. The bridge lends it to the VFS for each request
-  with only the rights that request needs. A longer request is a short
-  transfer.
+- `read`, `write`, and `writev` on a file move bytes through a 64 KiB memory
+  object of the calling thread, created on its first file call. The bridge
+  lends it to the VFS for each request with only the rights that request
+  needs. A longer request is a short transfer. One object per process let a
+  thread's write overwrite bytes another thread's read was waiting for
+  (ADR 0177).
 - `lseek` sets the position the VFS keeps per open file; the kernel mirrors
   it in the open-file description. `SEEK_END` and `O_APPEND` ask the VFS for
   the file length through a stat by handle.
@@ -437,13 +439,16 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 
 ## Scope
 
-GoOS 0.2.1 runs static x86_64 programs, position-independent or not.
-Dynamic linking, glibc, process groups, threads, `select`,
-nonblocking pipes, networking, `/proc`, termios, file-backed
-`mmap`, and address-space randomization are outside it. BusyBox `sh` runs
+GoOS 0.2.3 runs static x86_64 programs, musl or glibc, position-independent
+or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
+signal mask and shares the process's pending signals; all threads share one
+CPU, and a process holds at most 8 tasks. Dynamic linking, process groups,
+`select`, nonblocking pipes, networking, `/proc`, termios, file-backed
+`mmap`, setting file times, and address-space randomization are outside it. BusyBox `sh` runs
 programs, pipelines, redirections, scripts, and background jobs without a
 terminal (ADR 0172), and `nano` does not run. `fork`, `vfork`, and two process forms of `clone` create a child from
-a private copy of the caller (ADR 0158, ADR 0159), and `wait4` reaps it
+a private copy of the caller (ADR 0158, ADR 0159), the thread form of `clone`
+a thread in the caller's address space (ADR 0177), and `wait4` reaps it
 (ADR 0161). Pipes connect them (ADR 0162), and `SIGCHLD` and `SIGPIPE`
 reach handlers (ADR 0163, ADR 0164). `kill` signals descendants (ADR 0166),
 a handled signal interrupts a blocked call (ADR 0167), and `poll` waits on

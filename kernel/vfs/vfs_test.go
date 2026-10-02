@@ -690,3 +690,118 @@ func TestRenameAcrossMountsIsUnsupported(t *testing.T) {
 		t.Fatalf("rename into a missing directory = %d", status)
 	}
 }
+
+// cookieBackend hands out open objects the way FAT32 does (ADR 0119): a
+// cookie names a slot and its generation, and a restarted instance numbers
+// its objects afresh from the first slot. refuse is a location the next
+// instance cannot resolve.
+type cookieBackend struct {
+	*ramfs.FileSystem
+	objects [4]struct {
+		used       bool
+		generation uint32
+		location   ramfs.NodeID
+	}
+	refuse ramfs.NodeID
+}
+
+const cookieFlag = ramfs.NodeID(1) << 63
+
+func (backend *cookieBackend) resolve(id ramfs.NodeID) (ramfs.NodeID, bool) {
+	if id&cookieFlag == 0 {
+		return id, true
+	}
+	slot, generation := int(id&0xff), uint32(id>>8&0xffff)
+	if slot >= len(backend.objects) || !backend.objects[slot].used || backend.objects[slot].generation != generation {
+		return 0, false
+	}
+	return backend.objects[slot].location, true
+}
+
+func (backend *cookieBackend) AcquireObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	if id == backend.refuse {
+		return 0, ramfs.StatusNotFound
+	}
+	for slot := range backend.objects {
+		object := &backend.objects[slot]
+		if object.used {
+			continue
+		}
+		if object.generation == 0 {
+			object.generation = 1
+		}
+		object.used, object.location = true, id
+		return cookieFlag | ramfs.NodeID(object.generation)<<8 | ramfs.NodeID(slot), ramfs.StatusOK
+	}
+	return 0, ramfs.StatusResourceExhausted
+}
+
+func (backend *cookieBackend) ReleaseObject(id ramfs.NodeID) (ramfs.NodeID, ramfs.Status) {
+	if _, live := backend.resolve(id); !live || id&cookieFlag == 0 {
+		return 0, ramfs.StatusNotFound
+	}
+	object := &backend.objects[int(id&0xff)]
+	object.used = false
+	object.generation++
+	return object.location, ramfs.StatusOK
+}
+
+func (backend *cookieBackend) Read(id ramfs.NodeID, offset uint64, target []byte) (int, ramfs.Status) {
+	location, live := backend.resolve(id)
+	if !live {
+		return 0, ramfs.StatusNotFound
+	}
+	return backend.FileSystem.Read(location, offset, target)
+}
+
+// restart forgets every object, as a new filesystem service instance has none.
+func (backend *cookieBackend) restart() {
+	for slot := range backend.objects {
+		backend.objects[slot].used, backend.objects[slot].generation = false, 0
+	}
+}
+
+// A file the restarted service cannot find answers not found. It must not
+// read another file whose new object happens to carry its old cookie.
+func TestReacquireNeverHandsALostFileAnotherFilesObject(t *testing.T) {
+	filesystem := &ramfs.FileSystem{}
+	root := filesystem.Init()
+	backend := &cookieBackend{FileSystem: filesystem}
+	namespace := &Namespace{}
+	if status := namespace.Mount([]byte("/"), backend, root); status != StatusOK {
+		t.Fatal(status)
+	}
+	locations := map[string]ramfs.NodeID{}
+	for _, name := range []string{"first", "second"} {
+		id, status := filesystem.Create(root, []byte(name))
+		if status != ramfs.StatusOK {
+			t.Fatal(status)
+		}
+		if _, status := filesystem.Write(id, 0, []byte(name+" data")); status != ramfs.StatusOK {
+			t.Fatal(status)
+		}
+		locations[name] = id
+	}
+	first, status := namespace.Open(1, []byte("/first"), Read)
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	second, status := namespace.Open(1, []byte("/second"), Read)
+	if status != StatusOK {
+		t.Fatal(status)
+	}
+	// The new instance resolves the second file and hands it the first
+	// slot, which carried the first file's cookie before the restart.
+	backend.restart()
+	backend.refuse = locations["first"]
+	if lost := namespace.ReacquireObjects(backend); lost != 1 {
+		t.Fatalf("lost = %d, want 1", lost)
+	}
+	buffer := make([]byte, 32)
+	if count, status := namespace.ReadAt(1, first, 0, buffer); status != StatusNotFound {
+		t.Fatalf("the lost file read %q, status %d; want not found", buffer[:count], status)
+	}
+	if count, status := namespace.ReadAt(1, second, 0, buffer); status != StatusOK || string(buffer[:count]) != "second data" {
+		t.Fatalf("the reacquired file read %q, status %d", buffer[:count], status)
+	}
+}
