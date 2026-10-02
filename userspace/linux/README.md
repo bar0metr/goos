@@ -26,7 +26,8 @@ guard below the stack; `random` says whether the kernel has a random source;
 position, `CLOEXEC`, and signal state, and the initial x87 and SSE state; `fork` creates a child and checks that
 memory is private and the file position is shared; `vfork` checks that
 `vfork` returns only after the child exits, that `clone(SIGCHLD)` forks, and,
-on GoOS, that `clone` refuses a thread; `orphan` checks that a process whose
+on GoOS, that `clone` refuses a thread with no stack of its own; `orphan`
+checks that a process whose
 parent exits reports PID 1 as its parent; `wait` reaps children by PID and by
 any, with and without `WNOHANG`, and reads a normal exit and a `SIGSEGV`;
 `pipe` checks `pipe` and `pipe2`: direction, EOF, `EPIPE`, writer lifetime
@@ -49,7 +50,14 @@ fail a fork mid-copy and die during an `execve`; `fpstate` checks that XMM
 registers, MXCSR, and the x87 control word survive `getpid`, a `nanosleep`
 that sleeps, `fork` into the child, a handler that clobbers them, a nested
 signal, an edited and a null `fpstate`, and that a bad
-`fpstate` ends the process.
+`fpstate` ends the process; `libc` checks the calls a static glibc program
+makes before `main`: `mprotect` of its own relocated data, `set_robust_list`,
+`umask`, `readlink`, a `futex` nobody waits on, `gettimeofday`, `time`, and
+`sysinfo`; `threads` runs three pthreads under a mutex and a condition and
+joins them with their values and distinct TIDs and TLS, keeps two threads'
+registers and SSE state across seconds of preemption, has two threads read
+and write files at once, raises a signal in a thread, and ends the process
+with `exit_group` from a thread.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.

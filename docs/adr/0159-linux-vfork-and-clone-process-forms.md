@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. The restriction on thread-form `clone` described below is
+superseded by ADR 0177: the thread flags with a stack create a thread.
 
 ## Context
 
