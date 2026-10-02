@@ -22,13 +22,13 @@ type ProcessState struct {
 	BrkBase    uint64
 	BrkCurrent uint64
 	BrkLimit   uint64
-	// PID is the process and thread identity a Linux program sees for itself.
-	// It comes from a small positive range and never carries a native process
-	// or task ID.
+	// PID is the process identity a Linux program sees and the TID of its
+	// first thread; later threads have TIDs of their own. It comes from a
+	// small positive range and never carries a native process or task ID.
 	PID int32
-	// ClearChildTID is the address set_tid_address recorded. Linux clears it
-	// at thread exit only while another task shares the address space, which
-	// a single-task process never has, so GoOS stores it and writes nothing.
+	// ClearChildTID is the first thread's clear-child-TID address. When that
+	// thread exits while other tasks of the process remain, the kernel zeroes
+	// it and wakes its futex.
 	ClearChildTID uint64
 	// umask is the file mode creation mask umask sets. It is inherited across
 	// fork and exec as on Linux.

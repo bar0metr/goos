@@ -134,7 +134,10 @@ func TestThreadCreationRollsBackStageFailures(t *testing.T) {
 		t.Fatal("thread preparation failed")
 	}
 	prepared.ClearChildTID = 0x5000
-	if !creation.Cancel() || owner.Available(process.ResourceTasks) != available || tidInUse(prepared.TID) || ThreadCount(0x1000) != 0 {
+	// Cancel clears the record prepared points at, TID included.
+	reservedTID := prepared.TID
+	if !creation.Cancel() || owner.Available(process.ResourceTasks) != available || tidInUse(reservedTID) ||
+		ThreadCount(0x1000) != 0 || ThreadRecords(0x1000) != 0 {
 		t.Fatal("task creation failure left prepared state")
 	}
 

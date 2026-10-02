@@ -133,7 +133,9 @@ resource teardown (ADR 0154). Running and zombie records count against a
 16-process family limit and a 48-process global compatibility limit. No Linux
 process, launch root or descendant, may take one of the last 16 of the 64
 process slots, which stay for native processes
-(ADR 0155). Linux programs never see a native process or task ID.
+(ADR 0155). Tasks have a separate reserve: no Linux launch, `fork`, or
+`clone` may take one of the last 16 scheduler slots, which stay for native
+tasks (ADR 0179). Linux programs never see a native process or task ID.
 
 The working directory starts as the one the launch supplied, held in canonical
 form as the base for relative paths (ADR 0140), and `chdir` replaces it. The

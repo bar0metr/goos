@@ -3,6 +3,7 @@
 package amd64
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/sched"
@@ -173,14 +174,15 @@ func AddUserTaskWithRegisters(allocator *pmm.Allocator, pageTable uint64, regist
 	for page := uint64(0); page < kernelStackPages; page++ {
 		physical := stackStart + page*pmm.PageSize
 		virtual := virtualStart + page*pmm.PageSize
-		if !vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, true, false) {
+		if injectedTaskStackFault(mappedPages, virtualStart) ||
+			!vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, true, false) {
 			abandonPreparedUserTask(allocator, pageTable, allocation, virtualStart, mappedPages)
 			return 0, false
 		}
 		mappedPages++
 	}
 	guard, _ := vm.KernelAlias(allocation)
-	if vm.IsMapped(activeKernelRoot, guard) || vm.IsMapped(pageTable, guard) {
+	if injectedTaskStackFault(mappedPages, virtualStart) || vm.IsMapped(activeKernelRoot, guard) || vm.IsMapped(pageTable, guard) {
 		abandonPreparedUserTask(allocator, pageTable, allocation, virtualStart, mappedPages)
 		return 0, false
 	}
@@ -193,6 +195,43 @@ func AddUserTaskWithRegisters(allocator *pmm.Allocator, pageTable uint64, regist
 	}
 	taskKernelStacks[uint32(taskID)-1] = taskKernelStack{physical: allocation, virtual: virtualStart, top: kernelStackTop}
 	return taskID, true
+}
+
+// The validation build can fail one task creation at a chosen stage, so a
+// self-test can check that the rollback returns every page and slot.
+var (
+	taskStackFaultArmed   bool
+	taskStackFaultAfter   uint64
+	taskStackFaultVirtual uint64
+)
+
+// InjectTaskStackFault makes the next AddUserTaskWithRegisters fail once
+// mappedPages of its kernel-entry stack are mapped. KernelStackPages fails it
+// after the last mapping, just before the task is installed. Normal builds
+// refuse.
+func InjectTaskStackFault(mappedPages uint64) bool {
+	if !validation.Enabled || mappedPages > kernelStackPages {
+		return false
+	}
+	taskStackFaultArmed, taskStackFaultAfter, taskStackFaultVirtual = true, mappedPages, 0
+	return true
+}
+
+// InjectedTaskStack returns the kernel-entry stack address and size the last
+// injected failure abandoned.
+func InjectedTaskStack() (uint64, uint64) {
+	return taskStackFaultVirtual, kernelStackPages * pmm.PageSize
+}
+
+// KernelStackPages is the number of pages a task's kernel-entry stack maps.
+func KernelStackPages() uint64 { return kernelStackPages }
+
+func injectedTaskStackFault(mappedPages, virtualStart uint64) bool {
+	if !validation.Enabled || !taskStackFaultArmed || mappedPages != taskStackFaultAfter {
+		return false
+	}
+	taskStackFaultArmed, taskStackFaultVirtual = false, virtualStart
+	return true
 }
 
 func abandonPreparedUserTask(allocator *pmm.Allocator, pageTable, allocation, virtualStart, mappedPages uint64) {

@@ -236,6 +236,18 @@ func ThreadCount(root uint64) int {
 	return count
 }
 
+// ThreadRecords counts the records the process at root holds, reserved or
+// committed.
+func ThreadRecords(root uint64) int {
+	count := 0
+	for index := range threads {
+		if root != 0 && threads[index].Root == root {
+			count++
+		}
+	}
+	return count
+}
+
 // TaskTID is the TID task sees from gettid: its thread's, or the PID for
 // the first thread.
 func TaskTID(task sched.TaskID, state *ProcessState) int32 {

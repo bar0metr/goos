@@ -54,6 +54,10 @@ tables and apply together to a new Linux Process.
 A failed thread clone leaves no TID store, compatibility record, Process task
 charge, scheduler task, or kernel-entry stack allocation. Successful clones
 publish all task-local state before the scheduler can select the new task.
+The validation build fails scheduler installation before the first stack
+mapping, after two, and after the last, then checks that free pages, free
+task slots, the Process task charge, thread records, and stack mappings
+match their values before the attempt.
 
 Programs that require robust mutex recovery receive `ENOSYS`. The pthread and
 7-Zip paths used for GoOS 0.2.3 do not require robust mutex owner-death
