@@ -117,7 +117,7 @@ Syscalls map onto native primitives:
 
 | Linux | Native mechanism |
 | --- | --- |
-| `read`, `readv`, `write`, `writev` on files | VFS bulk requests through the process's I/O object |
+| `read`, `readv`, `write`, `writev` on files | VFS bulk requests through the calling thread's 64 KiB I/O object |
 | `read`, `readv`, `write`, `writev` on stdio and pipes | stream endpoints |
 | `open`, `openat`, `close`, `lseek` | VFS session requests plus the fd table |
 | `getdents64` | VFS directory entries by the path a directory descriptor keeps |
@@ -137,7 +137,8 @@ Syscalls map onto native primitives:
 | `brk`, `mmap`, `mprotect`, `munmap`, `madvise` | native bounded region map, demand-zero faults, page quota, and page release |
 | `arch_prctl` | task-local FS base; GS remains architecture-owned |
 | `execve` | a VFS-pinned executable snapshot and a prepared replacement root |
-| `fork`, `vfork`, `clone` | a new Process, address space, and task built from a private copy of the caller; `vfork` parks the caller on its continuation |
+| `fork`, `vfork`, process-form `clone` | a new Process, address space, and task built from a private copy of the caller; `vfork` parks the caller on its continuation |
+| thread-form `clone` | a new Task in the caller's Process and address space, with its own TID, TLS, signal mask, FPU state, kernel stack, and 64 KiB file-I/O object |
 | `wait4` | the family zombie records; a blocked caller parks on its continuation until a child exits |
 
 `pipe` and `pipe2` create a native stream whose two ends become open-file
@@ -188,8 +189,9 @@ the calling process's handle table for every exchange and requires Read, Write,
 and Wait rights. The kernel has no filesystem authority of its own.
 
 Related processes share a bounded family VFS context with one current owner
-and a FIFO queue. A process retains its own VFS channel handle and file I/O
-buffer. The shared context serializes correlations, service-owned file
+and a FIFO queue. A process retains its own VFS channel handle. Each Linux
+thread creates a 64 KiB file-I/O object on its first file call and releases it
+at thread exit. The shared context serializes correlations, service-owned file
 positions, and directory cursors without spinning. Completion wakes only the
 owning generation-safe task. Kill, fault, and exit remove queued tasks before
 their scheduler slots can be reused (ADR 0156).

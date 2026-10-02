@@ -48,7 +48,7 @@ an errno; nothing is accepted and ignored.
 | `pause(34)` | implemented | sleeps until a handled signal, then `EINTR` |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; a handled signal ends it with `EINTR` and the time left |
 | `getpid(39)`, `getppid(110)`, `gettid(186)` | implemented | `getpid` is the process's compatibility PID; `gettid` is the calling thread's TID, which equals the PID for the first thread; the parent is the forking process, or 1 for a launched or orphaned one |
-| `clone(56)` | partial | `SIGCHLD` is `fork`, `CLONE_VM\|CLONE_VFORK\|SIGCHLD` is `vfork`, both with an optional stack; the five thread-sharing flags with a stack make a thread, with `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID`, `CLONE_SYSVSEM`, and `CLONE_DETACHED` optional (ADR 0177); 8 tasks per process, `EAGAIN` past them; namespace flags `EINVAL` |
+| `clone(56)` | partial | `SIGCHLD` and `CLONE_VM\|CLONE_VFORK\|SIGCHLD` create a new Process and private address space; the five thread-sharing flags with a stack create a Task in the caller's Process and address space, with `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`, `CLONE_CHILD_CLEARTID`, `CLONE_SYSVSEM`, and `CLONE_DETACHED` optional (ADR 0177, ADR 0179); 8 tasks per process and a 16-slot native task reserve, `EAGAIN` past either bound; namespace flags `EINVAL` |
 | `fork(57)` | implemented | a private copy of every touched page; descriptors share open-file descriptions; family and global process budgets give `EAGAIN` |
 | `vfork(58)` | partial | a private copy as `fork`; the parent waits until the child replaces its image or exits |
 | `execve(59)` | implemented | replaces the current image with a static Linux `ET_EXEC` or supported static PIE; no interpreter, shebang, PATH search, or native GoOS image |
@@ -77,7 +77,7 @@ an errno; nothing is accepted and ignored.
 | `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
 | `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
-| `set_robust_list(273)` | partial | stores the list head per thread; nothing walks it |
+| `set_robust_list(273)` | unsupported | `ENOSYS` for the 24-byte structure because thread exit lacks robust-futex owner-death handling; other lengths `EINVAL` (ADR 0179) |
 | `getrandom(318)` | partial | bytes straight from the CPU's RDRAND, not a Linux entropy pool or CSPRNG; at most 256 per call; `ENOSYS` on a CPU without it |
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |

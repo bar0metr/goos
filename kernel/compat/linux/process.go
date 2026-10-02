@@ -22,19 +22,14 @@ type ProcessState struct {
 	BrkBase    uint64
 	BrkCurrent uint64
 	BrkLimit   uint64
-	// PID is the process and thread identity a Linux program sees for itself.
-	// It comes from a small positive range and never carries a native process
-	// or task ID.
+	// PID is the process identity a Linux program sees and the TID of its
+	// first thread; later threads have TIDs of their own. It comes from a
+	// small positive range and never carries a native process or task ID.
 	PID int32
-	// ClearChildTID is the address set_tid_address recorded. Linux clears it
-	// at thread exit only while another task shares the address space, which
-	// a single-task process never has, so GoOS stores it and writes nothing.
+	// ClearChildTID is the first thread's clear-child-TID address. When that
+	// thread exits while other tasks of the process remain, the kernel zeroes
+	// it and wakes its futex.
 	ClearChildTID uint64
-	// RobustList is the head set_robust_list recorded. Linux walks the list
-	// when a thread dies holding a robust futex, to hand each one on; a
-	// single-task process has no other thread to hand one to, so GoOS keeps
-	// the address and walks nothing.
-	RobustList uint64
 	// umask is the file mode creation mask umask sets. It is inherited across
 	// fork and exec as on Linux.
 	umask uint16
@@ -136,7 +131,7 @@ func ReplaceRoot(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit uint64
 	}
 	state.Root = newRoot
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
-	state.ClearChildTID, state.RobustList = 0, 0
+	state.ClearChildTID = 0
 	return true
 }
 
@@ -213,13 +208,15 @@ const (
 	// MaxPID matches the default Linux pid_max, so a compatibility PID fits
 	// every pid_t a program may narrow it to.
 	MaxPID = int32(32767)
-	// NativeProcessReserve keeps scheduler and process slots unavailable to
-	// every Linux process. The system has 64 slots; Linux processes, launch
-	// roots and descendants together, may hold 48 of them. A family holds at
-	// most 16.
+	// NativeProcessReserve keeps Process registry slots unavailable to Linux.
+	// Linux launch roots and descendants together may hold 48 of the 64 slots.
+	// A family holds at most 16.
 	NativeProcessReserve    = 16
 	LinuxGlobalMaxProcesses = process.MaxProcesses - NativeProcessReserve
 	LinuxFamilyMaxProcesses = 16
+	// NativeTaskReserve leaves scheduler capacity for PID 1 and native
+	// services even when Linux processes create threads.
+	NativeTaskReserve = 16
 )
 
 type ChildRegistrationStatus uint8
@@ -344,6 +341,12 @@ func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsH
 // for native processes. Native creation never asks.
 func LinuxProcessCreationAllowed(total int) bool {
 	return total >= 0 && total < LinuxGlobalMaxProcesses
+}
+
+// LinuxTaskCreationAllowed reports whether one Linux task may be created
+// while leaving the fixed native reserve free.
+func LinuxTaskCreationAllowed(free int) bool {
+	return free > NativeTaskReserve && free <= sched.MaxTasks
 }
 
 // RegisterChild reserves an identity for a compatibility-created GoOS

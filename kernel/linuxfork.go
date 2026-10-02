@@ -84,6 +84,9 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	if !found || !compatFound || handler.frame == nil || kernelPageTable == 0 {
 		return 0, nil, linuxabi.EIO
 	}
+	if !linuxcompat.LinuxTaskCreationAllowed(amd64.FreeTaskSlots()) {
+		return 0, nil, linuxabi.EAGAIN
+	}
 	vfsAuthority, vfsFound := parent.Handles().Lookup(compat.VFSHandle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait)
 	fsBase, fsFound := amd64.TaskFSBase(handler.task)
 	registers, registersFound := forkRegisters(handler.task, handler.frame)

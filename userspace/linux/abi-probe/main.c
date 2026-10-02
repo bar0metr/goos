@@ -3059,7 +3059,8 @@ static int libc_test(void)
 		printf("libc failed: the page after the read-only one\n");
 		return 1;
 	}
-	if (syscall(SYS_set_robust_list, &head, sizeof head) != 0 ||
+	errno = 0;
+	if ((syscall(SYS_set_robust_list, &head, sizeof head) != 0 && errno != ENOSYS) ||
 	    !fails(syscall(SYS_set_robust_list, &head, sizeof head - 1), EINVAL)) {
 		printf("libc failed: set_robust_list\n");
 		return 1;

@@ -4,6 +4,8 @@
 
 Accepted. Amends the `mprotect` decision of ADR 0104 for Linux processes.
 The thread limit in its consequences is lifted by ADR 0177.
+ADR 0179 supersedes the `set_robust_list` decision: GoOS now returns `ENOSYS`
+for a valid request instead of retaining a head that thread exit never walks.
 
 ## Context
 

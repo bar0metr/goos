@@ -108,12 +108,7 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		if arguments[1] != linuxcompat.RobustListHeadSize {
 			return linuxErrno(linuxabi.EINVAL)
 		}
-		if thread, isThread := linuxcompat.FindThread(handler.task); isThread {
-			thread.RobustList = arguments[0]
-		} else {
-			state.RobustList = arguments[0]
-		}
-		return linuxcompat.Result{}
+		return linuxcompat.Refuse(request.Number)
 	case linuxabi.SysFutex:
 		return handler.futex(request)
 	case linuxabi.SysSchedYield:

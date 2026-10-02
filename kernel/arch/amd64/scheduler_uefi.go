@@ -3,6 +3,7 @@
 package amd64
 
 import (
+	"goos/internal/validation"
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/sched"
@@ -148,40 +149,114 @@ func AddUserTask(allocator *pmm.Allocator, pageTable uint64, entry uint64, userS
 // general-purpose register given, as a forked child resumes where its parent
 // made the call.
 func AddUserTaskWithRegisters(allocator *pmm.Allocator, pageTable uint64, registers UserRegisters) (uint64, bool) {
-	if pageTable == 0 || registers.RIP == 0 || registers.RSP == 0 {
+	if allocator == nil || pageTable == 0 || registers.RIP == 0 || registers.RSP == 0 || activeKernelRoot == 0 {
 		return 0, false
 	}
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
-	if !ok || activeKernelRoot == 0 || !unmapGuardPages(activeKernelRoot, allocation) {
+	if !ok {
+		return 0, false
+	}
+	if !unmapGuardPages(activeKernelRoot, allocation) {
+		abandonPreparedUserTask(allocator, pageTable, allocation, 0, 0)
 		return 0, false
 	}
 	stackStart := allocation + stackGuardPages*pmm.PageSize
 	virtualStart, aliasOK := vm.KernelAlias(stackStart)
 	if !aliasOK {
+		abandonPreparedUserTask(allocator, pageTable, allocation, 0, 0)
 		return 0, false
 	}
 	if !mapProcessEntryState(allocator, pageTable) {
+		abandonPreparedUserTask(allocator, pageTable, allocation, virtualStart, 0)
 		return 0, false
 	}
+	mappedPages := uint64(0)
 	for page := uint64(0); page < kernelStackPages; page++ {
 		physical := stackStart + page*pmm.PageSize
 		virtual := virtualStart + page*pmm.PageSize
-		if !vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, true, false) {
+		if injectedTaskStackFault(mappedPages, virtualStart) ||
+			!vm.MapProcessKernelPage(allocator, pageTable, virtual, physical, true, false) {
+			abandonPreparedUserTask(allocator, pageTable, allocation, virtualStart, mappedPages)
 			return 0, false
 		}
+		mappedPages++
 	}
 	guard, _ := vm.KernelAlias(allocation)
-	if vm.IsMapped(activeKernelRoot, guard) || vm.IsMapped(pageTable, guard) {
+	if injectedTaskStackFault(mappedPages, virtualStart) || vm.IsMapped(activeKernelRoot, guard) || vm.IsMapped(pageTable, guard) {
+		abandonPreparedUserTask(allocator, pageTable, allocation, virtualStart, mappedPages)
 		return 0, false
 	}
 	kernelStackTop := virtualStart + kernelStackPages*pmm.PageSize - 64
 	context := initialUserContext(stackStart, &registers)
 	taskID := installUserTask(context, pageTable, kernelStackTop)
 	if taskID == 0 {
+		abandonPreparedUserTask(allocator, pageTable, allocation, virtualStart, mappedPages)
 		return 0, false
 	}
 	taskKernelStacks[uint32(taskID)-1] = taskKernelStack{physical: allocation, virtual: virtualStart, top: kernelStackTop}
 	return taskID, true
+}
+
+// The validation build can fail one task creation at a chosen stage, so a
+// self-test can check that the rollback returns every page and slot.
+var (
+	taskStackFaultArmed   bool
+	taskStackFaultAfter   uint64
+	taskStackFaultVirtual uint64
+)
+
+// InjectTaskStackFault makes the next AddUserTaskWithRegisters fail once
+// mappedPages of its kernel-entry stack are mapped. KernelStackPages fails it
+// after the last mapping, just before the task is installed. Normal builds
+// refuse.
+func InjectTaskStackFault(mappedPages uint64) bool {
+	if !validation.Enabled || mappedPages > kernelStackPages {
+		return false
+	}
+	taskStackFaultArmed, taskStackFaultAfter, taskStackFaultVirtual = true, mappedPages, 0
+	return true
+}
+
+// InjectedTaskStack returns the kernel-entry stack address and size the last
+// injected failure abandoned.
+func InjectedTaskStack() (uint64, uint64) {
+	return taskStackFaultVirtual, kernelStackPages * pmm.PageSize
+}
+
+// KernelStackPages is the number of pages a task's kernel-entry stack maps.
+func KernelStackPages() uint64 { return kernelStackPages }
+
+func injectedTaskStackFault(mappedPages, virtualStart uint64) bool {
+	if !validation.Enabled || !taskStackFaultArmed || mappedPages != taskStackFaultAfter {
+		return false
+	}
+	taskStackFaultArmed, taskStackFaultVirtual = false, virtualStart
+	return true
+}
+
+func abandonPreparedUserTask(allocator *pmm.Allocator, pageTable, allocation, virtualStart, mappedPages uint64) {
+	for page := uint64(0); page < mappedPages; page++ {
+		virtual := virtualStart + page*pmm.PageSize
+		vm.UnmapProcessKernelPage(pageTable, virtual)
+		invalidatePage(virtual)
+	}
+	for page := uint64(0); page < stackGuardPages; page++ {
+		guard := allocation + page*pmm.PageSize
+		if !vm.IsMapped(activeKernelRoot, guard) {
+			vm.MapKernelPage(activeKernelRoot, guard)
+		}
+		invalidatePage(guard)
+		if alias, mapped := vm.KernelAlias(guard); mapped {
+			invalidatePage(alias)
+		}
+	}
+	freeTaskStackAllocation(allocator, allocation)
+}
+
+func freeTaskStackAllocation(allocator *pmm.Allocator, allocation uint64) {
+	for page := uint64(0); page < kernelStackPages+stackGuardPages; page++ {
+		allocator.Free(allocation + page*pmm.PageSize)
+	}
 }
 
 func mapProcessEntryState(allocator *pmm.Allocator, pageTable uint64) bool {
@@ -365,6 +440,19 @@ func ReadSchedulerState() SchedulerState {
 	var state SchedulerState
 	readSchedulerState(&state)
 	return state
+}
+
+// FreeTaskSlots counts unused slots and dead slots whose exit state and
+// kernel stack have both been reclaimed.
+func FreeTaskSlots() int {
+	state := ReadSchedulerState()
+	free := sched.MaxTasks - int(state.Count)
+	for slot := uint64(0); slot < state.Count && slot < sched.MaxTasks; slot++ {
+		if state.Dead&(uint64(1)<<slot) != 0 && TaskStackTop(slot) == 0 {
+			free++
+		}
+	}
+	return free
 }
 
 //export goos_wake_task

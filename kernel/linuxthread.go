@@ -29,45 +29,62 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 	if !vm.ValidateUserRange(form.Stack, 0) || form.SetTLS && !linuxcompat.UserFSBase(form.TLS, vm.UserAddressLimit) {
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	// The family and global process budgets bound processes; tasks are
-	// bounded by the process's task quota and the scheduler's slots.
-	if owner.Available(process.ResourceTasks) < 1 || owner.TaskCount() >= process.MaxTasksPerProcess || !linuxcompat.ThreadSlotFree() {
+	if form.SetParentTID && !vm.CanCopyOut(handler.root, form.ParentTID, uint64(len(linuxTIDWire))) ||
+		form.SetChildTID && !vm.CanCopyOut(handler.root, form.ChildTID, uint64(len(linuxTIDWire))) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	if owner.Available(process.ResourceTasks) < 1 || owner.TaskCount() >= process.MaxTasksPerProcess || !linuxcompat.ThreadSlotFree() ||
+		!linuxcompat.LinuxTaskCreationAllowed(amd64.FreeTaskSlots()) {
 		return linuxErrno(linuxabi.EAGAIN)
 	}
 	fsBase, fsFound := amd64.TaskFSBase(handler.task)
 	registers, registersFound := forkRegisters(handler.task, handler.frame)
-	if !fsFound || !registersFound {
+	parentFPU, fpuFound := amd64.LinuxUserFPU(handler.task)
+	if !fsFound || !registersFound || !fpuFound {
 		return linuxErrno(linuxabi.EIO)
 	}
 	registers.RSP = form.Stack
 	if form.SetTLS {
 		fsBase = form.TLS
 	}
-	tid := linuxcompat.AllocateTID()
-	putUint32(linuxTIDWire[:], uint32(tid))
-	if form.SetParentTID && !vm.CopyOut(handler.root, form.ParentTID, linuxTIDWire[:]) ||
-		form.SetChildTID && !vm.CopyOut(handler.root, form.ChildTID, linuxTIDWire[:]) {
-		return linuxErrno(linuxabi.EFAULT)
-	}
-	task, added := amd64.AddUserTaskWithRegisters(&pageAllocator, handler.root, registers)
-	if !added {
+	creation, prepared := linuxcompat.PrepareThreadCreation(owner, handler.root)
+	if !prepared {
 		return linuxErrno(linuxabi.EAGAIN)
 	}
-	parentFPU, _ := amd64.LinuxUserFPU(handler.task)
-	thread, recorded := linuxcompat.AddThread(sched.TaskID(task), handler.root, tid)
-	if !recorded || !processRegistry.BindTask(owner.ID(), sched.TaskID(task)) ||
+	threadState, statePrepared := creation.PreparedThread()
+	if !statePrepared {
+		creation.Cancel()
+		return linuxErrno(linuxabi.EIO)
+	}
+	if form.ClearChildTID {
+		threadState.ClearChildTID = form.ChildTID
+	}
+	if state, stateFound := linuxcompat.FindProcess(handler.root); stateFound {
+		threadState.Mask = state.Signals.SaveThreadMask()
+	}
+
+	// Interrupt exclusion keeps the prepared task from running until its
+	// process binding, thread record, TLS, FPU state, and TID writes exist.
+	flags := amd64.DisableInterrupts()
+	task, added := amd64.AddUserTaskWithRegisters(&pageAllocator, handler.root, registers)
+	if !added {
+		amd64.RestoreInterrupts(flags)
+		creation.Cancel()
+		return linuxErrno(linuxabi.EAGAIN)
+	}
+	thread, recorded := creation.Commit(sched.TaskID(task))
+	if !recorded ||
 		!amd64.SetTaskFSBase(sched.TaskID(task), fsBase) || !amd64.SetTaskFPU(sched.TaskID(task), parentFPU) {
 		panicSerial("Linux thread could not be bound")
 	}
-	if form.ClearChildTID {
-		thread.ClearChildTID = form.ChildTID
+	putUint32(linuxTIDWire[:], uint32(thread.TID))
+	if form.SetParentTID && !vm.CopyOut(handler.root, form.ParentTID, linuxTIDWire[:]) ||
+		form.SetChildTID && !vm.CopyOut(handler.root, form.ChildTID, linuxTIDWire[:]) {
+		panicSerial("validated Linux TID write failed")
 	}
-	// A thread starts with its creator's blocked mask.
-	if state, found := linuxcompat.FindProcess(handler.root); found {
-		thread.Mask = state.Signals.SaveThreadMask()
-	}
+	amd64.RestoreInterrupts(flags)
 	trace(diag.ProcessSpawned, owner.ID(), task, 0, 0)
-	return linuxcompat.Result{Value: uint64(tid)}
+	return linuxcompat.Result{Value: uint64(thread.TID)}
 }
 
 // execEndedTasks are tasks exec ended in the image it replaced. Their exit

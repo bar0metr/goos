@@ -113,6 +113,24 @@ func TestProcessTaskCapacityIsBounded(t *testing.T) {
 	}
 }
 
+func TestTaskReservationChargesRollsBackAndCommits(t *testing.T) {
+	process, _ := New(2, ABINative, AddressSpace{Root: 0x1000})
+	before := process.Available(ResourceTasks)
+	if !process.ReserveTask() || process.Available(ResourceTasks) != before-1 || process.TaskCount() != 0 {
+		t.Fatal("task reservation did not charge")
+	}
+	if !process.CancelReservedTask() || process.Available(ResourceTasks) != before || process.TaskCount() != 0 {
+		t.Fatal("task reservation did not roll back")
+	}
+	if !process.ReserveTask() {
+		t.Fatal("second task reservation failed")
+	}
+	task, _ := sched.NewTaskID(4, 1)
+	if !process.CommitReservedTask(task) || process.TaskCount() != 1 || process.Available(ResourceTasks) != before-1 {
+		t.Fatal("task reservation did not commit")
+	}
+}
+
 func TestInitPreparesSlotInPlace(t *testing.T) {
 	var slot Process
 	task, _ := sched.NewTaskID(0, 1)

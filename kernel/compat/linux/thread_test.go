@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"goos/kernel/handle"
+	"goos/kernel/process"
 	"goos/kernel/sched"
 )
 
@@ -94,6 +95,65 @@ func TestThreadsHaveTheirOwnSignalMasks(t *testing.T) {
 	SelectThreadSignals(state, first)
 	if mask, _ := state.Signals.Mask(0, 0, false); mask != 1<<9 {
 		t.Fatalf("after the worker ended the first thread has %#x", mask)
+	}
+	resetCompatibilityProcesses()
+}
+
+func TestThreadCreationRollsBackStageFailures(t *testing.T) {
+	resetCompatibilityProcesses()
+	data := linuxStartup(t, "/", [4]handle.ID{1, 2, 3, 4})
+	streams := StandardStreams{Input: 1, Output: 2, Error: 3}
+	if !InstallProcess(0x1000, 30, data, streams, 0x600000, 0x4600000) {
+		t.Fatal("install failed")
+	}
+	exhausted, _ := process.New(30, process.ABILinuxX8664, process.AddressSpace{Root: 0x1000})
+	limit := exhausted.Available(process.ResourceTasks)
+	for index := uint32(0); index < limit; index++ {
+		task, _ := sched.NewTaskID(index, 1)
+		if !exhausted.AddTask(task) {
+			t.Fatal("quota setup failed")
+		}
+	}
+	if _, ok := PrepareThreadCreation(&exhausted, 0x1000); ok {
+		t.Fatal("creation passed an exhausted task quota")
+	}
+
+	owner, _ := process.New(31, process.ABILinuxX8664, process.AddressSpace{Root: 0x1000})
+	available := owner.Available(process.ResourceTasks)
+	for index := range threads {
+		threads[index] = Thread{Root: 0x2000, TID: firstPID + int32(index)}
+	}
+	if _, ok := PrepareThreadCreation(&owner, 0x1000); ok || owner.Available(process.ResourceTasks) != available {
+		t.Fatal("full thread table leaked the task charge")
+	}
+	threads = [len(threads)]Thread{}
+
+	creation, ok := PrepareThreadCreation(&owner, 0x1000)
+	prepared, found := creation.PreparedThread()
+	if !ok || !found || prepared.TID < firstPID || !tidInUse(prepared.TID) {
+		t.Fatal("thread preparation failed")
+	}
+	prepared.ClearChildTID = 0x5000
+	// Cancel clears the record prepared points at, TID included.
+	reservedTID := prepared.TID
+	if !creation.Cancel() || owner.Available(process.ResourceTasks) != available || tidInUse(reservedTID) ||
+		ThreadCount(0x1000) != 0 || ThreadRecords(0x1000) != 0 {
+		t.Fatal("task creation failure left prepared state")
+	}
+
+	creation, ok = PrepareThreadCreation(&owner, 0x1000)
+	if _, committed := creation.Commit(0); !ok || committed || owner.Available(process.ResourceTasks) != available || ThreadCount(0x1000) != 0 {
+		t.Fatal("invalid task commit left prepared state")
+	}
+
+	creation, ok = PrepareThreadCreation(&owner, 0x1000)
+	task, _ := sched.NewTaskID(2, 1)
+	thread, committed := creation.Commit(task)
+	if !ok || !committed || thread.Task != task || ThreadCount(0x1000) != 1 || owner.TaskCount() != 1 {
+		t.Fatal("prepared thread did not commit")
+	}
+	if _, found := FindThread(task); !found {
+		t.Fatal("committed thread missing")
 	}
 	resetCompatibilityProcesses()
 }
