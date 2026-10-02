@@ -98,9 +98,11 @@ type VMInfo struct {
 	MemoryMiB int    `json:"memory_mib"`
 }
 
-// Workload is what a diagnostic workload did.
+// Workload is what a diagnostic workload did. Command is the last one it
+// ran: the failing step, or the final one of a complete run.
 type Workload struct {
 	Command   string   `json:"command"`
+	Steps     []string `json:"steps_passed,omitempty"`
 	Completed bool     `json:"completed"`
 	Ending    string   `json:"ending"`
 	Faults    []string `json:"faults,omitempty"`

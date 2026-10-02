@@ -353,10 +353,23 @@ func (m *Map) Remove(base, length uint64, allowPinned bool) Status {
 // caller decides beforehand, with Overlapping, whether the new protection is
 // allowed for each backing it covers.
 func (m *Map) Protect(base, length uint64, protection Protection) Status {
+	return m.protect(base, length, protection, false)
+}
+
+// Restrict is Protect for a request that only takes rights away: every
+// region the range covers must already allow everything protection allows.
+// It may cover pinned regions, because removing a right never lets the
+// process reach more than the kernel gave it. A Linux program uses it to
+// make the relocated part of its image read-only.
+func (m *Map) Restrict(base, length uint64, protection Protection) Status {
+	return m.protect(base, length, protection, true)
+}
+
+func (m *Map) protect(base, length uint64, protection Protection, restrict bool) Status {
 	if !m.validRange(base, length) || !protection.Valid() {
 		return InvalidArgument
 	}
-	if !m.Covered(base, length, false) {
+	if !m.Covered(base, length, restrict) {
 		if m.Covered(base, length, true) {
 			return PermissionDenied
 		}
@@ -368,6 +381,9 @@ func (m *Map) Protect(base, length uint64, protection Protection) Status {
 	for index := first; index < m.count && m.regions[index].Base < end; index++ {
 		region := m.regions[index]
 		if region.Backing == Guard && protection != 0 {
+			return PermissionDenied
+		}
+		if restrict && protection&^region.Protection != 0 {
 			return PermissionDenied
 		}
 		if region.Protection == protection {

@@ -32,7 +32,7 @@ an errno; nothing is accepted and ignored.
 | `poll(7)`, `ppoll(271)` | implemented | at most 64 entries; streams sleep on native readiness; files and devices always ready; `POLLHUP`, `POLLERR`, `POLLNVAL`; a handled signal ends it with `EINTR` |
 | `lseek(8)` | implemented | files by `SEEK_SET`, `SEEK_CUR`, `SEEK_END`; streams are `ESPIPE`; a device stays at 0; no `SEEK_DATA` or `SEEK_HOLE` |
 | `mmap(9)` | partial | anonymous private mappings at a kernel-chosen address; no fixed, file-backed, or executable mappings |
-| `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; executable protection refused |
+| `mprotect(10)` | partial | anonymous `PROT_NONE`, read-only, or read-write; on the program's own image segments only rights taken away (glibc's `PT_GNU_RELRO`), never given back; executable protection refused |
 | `munmap(11)` | implemented | page-aligned anonymous ranges; owned pages and quota are released |
 | `brk(12)` | implemented | 64 MiB bounded heap after the highest load segment |
 | `rt_sigaction(13)`, `rt_sigprocmask(14)` | partial | dispositions and the blocked mask; handlers run at system call returns; unblocking delivers what is pending; flags GoOS cannot honor `EINVAL` |
@@ -60,9 +60,15 @@ an errno; nothing is accepted and ignored.
 | `rename(82)`, `renameat(264)`, `renameat2(316)` | partial | files replace an existing target, directories need a free name; `renameat2` takes no flags |
 | `mkdir(83)`, `mkdirat(258)` | implemented | the mode is ignored |
 | `rmdir(84)`, `unlink(87)`, `unlinkat(263)` | implemented | a name some session holds open is `EBUSY` |
+| `readlink(89)`, `readlinkat(267)` | implemented | GoOS has no symbolic links: a name that exists is `EINVAL`, a missing one `ENOENT`; `/proc/self/exe` is `ENOENT` as on a Linux without `/proc` |
+| `umask(95)` | implemented | a mask per process, 022 at launch, kept across `fork` and `execve`; FAT32 stores no mode, so it changes no file |
+| `gettimeofday(96)` | implemented | the realtime clock in microseconds; the timezone is UTC |
+| `sysinfo(99)` | partial | uptime, the managed RAM, free pages, and the process count; no swap, load, shared, or buffer figures |
 | `getuid(102)`, `getgid(104)`, `geteuid(107)`, `getegid(108)` | implemented | 1000 |
 | `setuid(105)`, `setgid(106)` | partial | succeed for 1000, `EPERM` otherwise |
 | `getgroups(115)` | implemented | no supplementary groups |
+| `time(201)` | implemented | the realtime clock in seconds |
+| `futex(202)` | partial | a process has one task: `FUTEX_WAKE` wakes none and returns 0, a wait whose word changed is `EAGAIN`; a wait that would sleep and the other operations are `ENOSYS` |
 | `rt_sigsuspend(130)` | implemented | a temporary mask until a handled signal, then `EINTR`; the handler's return restores the mask |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
 | `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |
@@ -70,6 +76,7 @@ an errno; nothing is accepted and ignored.
 | `clock_gettime(228)` | implemented | realtime and monotonic clocks and their variants; CPU-time clocks `EINVAL` |
 | `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
+| `set_robust_list(273)` | partial | stores the list head of the only task; nothing walks it |
 | `getrandom(318)` | partial | bytes straight from the CPU's RDRAND, not a Linux entropy pool or CSPRNG; at most 256 per call; `ENOSYS` on a CPU without it |
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
@@ -82,7 +89,7 @@ BusyBox does about it:
 | `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
-| `futex(202)` | no threads inside a process |
+| `futex(202)` waits that would sleep | no threads inside a process; a sleeping wait could never end |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
@@ -640,8 +647,9 @@ Results a correct Linux program can observe to differ:
 ## Release limits
 
 GoOS 0.2.1 runs x86_64, statically linked ELF programs, position-independent
-or not. It has no `PT_INTERP`, dynamic linker, or glibc; no threads, no
-thread-form `clone`, and no `futex`; no copy-on-write and no shared-memory
+or not, musl or glibc (ADR 0176). It has no `PT_INTERP` or dynamic linker;
+no threads, no thread-form `clone`, and no sleeping `futex` wait; no
+copy-on-write and no shared-memory
 `vfork`; no process groups, sessions, or job control; no process-group
 `kill`, `select`, `epoll`, or alternate signal stack; no nonblocking pipes;
 no networking; no `/proc` or `/sys`, and of `/dev` three names; no

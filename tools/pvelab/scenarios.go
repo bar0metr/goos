@@ -271,12 +271,27 @@ func (linuxScenario) Run(ctx context.Context, s *Session) (Result, error) {
 }
 
 // sevenZipScenario runs a static 7zzs the caller placed in /system/linux
-// and records how far it got and which Linux calls the kernel refused. It
-// is a diagnostic: unless RequirePass is set, a workload that does not
-// complete is the expected result.
+// through a round trip: list the codecs, pack a file, test the archive,
+// unpack it, and hash the copy beside the original. It records how far it
+// got and which Linux calls the kernel refused. It is a diagnostic: unless
+// RequirePass is set, a workload that does not complete is the expected
+// result.
 type sevenZipScenario struct{}
 
-const sevenZipCommand = "/system/linux/7zzs i"
+// sevenZipInput is the file the round trip packs: a static ELF every system
+// disk carries.
+const sevenZipInput = "/system/linux/abi-probe"
+
+// sevenZipSteps run in order; the first that fails ends the workload. The
+// archive is made with one thread (-mmt1): GoOS runs no Linux threads, and
+// 7-Zip's two-thread LZMA2 encoder stops with EINVAL from clone.
+var sevenZipSteps = []struct{ name, command, want string }{
+	{"info", "/system/linux/7zzs i", "Formats:"},
+	{"add", "/system/linux/7zzs a -mmt1 /tmp/pvelab.7z " + sevenZipInput, "Everything is Ok"},
+	{"test", "/system/linux/7zzs t /tmp/pvelab.7z", "Everything is Ok"},
+	{"extract", "/system/linux/7zzs x -y -o/tmp/pvelab-out /tmp/pvelab.7z", "Everything is Ok"},
+	{"hash", "/system/linux/7zzs h -scrcSHA256 /tmp/pvelab-out/abi-probe " + sevenZipInput, "Everything is Ok"},
+}
 
 func (sevenZipScenario) Name() string { return "7zip" }
 
@@ -290,29 +305,33 @@ func (sevenZipScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		return "", failf(ClassConfig, "7zip", "/system/linux/7zzs is missing; build the disk with LINUX_EXTRA=/path/to/7zzs")
 	}
 
-	w := &Workload{Command: sevenZipCommand}
+	w := &Workload{}
 	s.Report.Workload = w
-	out, err := g.Run(ctx, sevenZipCommand, s.WorkloadTimeout)
-	var timeout *promptTimeoutError
-	switch {
-	case errors.As(err, &timeout):
-		w.Ending = fmt.Sprintf("no prompt within %s; interrupted", s.WorkloadTimeout)
-		if writeErr := g.con.Write([]byte{3}); writeErr != nil {
-			return "", failf(ClassInfra, "console", "sending Ctrl-C: %v", writeErr)
-		}
-		rest, err := g.awaitPrompt(ctx, "", 20*time.Second)
+	for _, step := range sevenZipSteps {
+		w.Command = step.command
+		out, ending, err := runWorkloadStep(ctx, g, step.command, s.WorkloadTimeout)
 		if err != nil {
-			w.Ending = "hung: no prompt after Ctrl-C"
-			return "", failf(ClassScenario, "7zip", "the shell did not come back after Ctrl-C:\n%s", tailText(g.con))
+			w.Ending = ending
+			return "", err
 		}
-		out += rest
-	case err != nil:
-		return "", fail(ClassScenario, "7zip", err)
+		w.Faults = faultLines(out)
+		ok := strings.Contains(out, step.want) && len(w.Faults) == 0
+		if ok && step.name == "hash" && !sameHashes(out, 2) {
+			ok, ending = false, "the unpacked copy differs from the original"
+		}
+		if !ok {
+			if ending == "" {
+				ending = workloadEnding(out, false)
+			}
+			w.Ending = step.name + ": " + ending
+			break
+		}
+		w.Steps = append(w.Steps, step.name)
+		g.pass("7zip-" + step.name)
 	}
-	w.Faults = faultLines(out)
-	w.Completed = strings.Contains(out, "Formats:") && len(w.Faults) == 0
-	if w.Ending == "" {
-		w.Ending = workloadEnding(out, w.Completed)
+	w.Completed = len(w.Steps) == len(sevenZipSteps)
+	if w.Completed {
+		w.Ending = "exit 0"
 	}
 
 	diag, err := captureDiag(ctx, g)
@@ -322,13 +341,55 @@ func (sevenZipScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	s.Report.Linux = diag
 
 	if w.Completed {
-		g.pass("7zip-completed")
 		return ResultPass, nil
 	}
 	if s.RequirePass {
 		return "", failf(ClassScenario, "7zip", "the workload did not complete (%s)", w.Ending)
 	}
 	return ResultExpectedFailure, nil
+}
+
+// runWorkloadStep runs one command of a workload. A command that holds the
+// prompt past timeout gets Ctrl-C; ending then says so. err is set only
+// when the shell itself stops answering.
+func runWorkloadStep(ctx context.Context, g *Guest, command string, timeout time.Duration) (string, string, error) {
+	out, err := g.Run(ctx, command, timeout)
+	var late *promptTimeoutError
+	switch {
+	case errors.As(err, &late):
+		if writeErr := g.con.Write([]byte{3}); writeErr != nil {
+			return "", "", failf(ClassInfra, "console", "sending Ctrl-C: %v", writeErr)
+		}
+		rest, err := g.awaitPrompt(ctx, "", 20*time.Second)
+		if err != nil {
+			return "", "hung: no prompt after Ctrl-C", failf(ClassScenario, "7zip", "the shell did not come back after Ctrl-C:\n%s", tailText(g.con))
+		}
+		return out + rest, fmt.Sprintf("no prompt within %s; interrupted", timeout), nil
+	case err != nil:
+		return "", "", fail(ClassScenario, "7zip", err)
+	}
+	return out, "", nil
+}
+
+// sameHashes reports whether 7-Zip's hash listing has count file lines,
+// all with one SHA-256.
+func sameHashes(out string, count int) bool {
+	var hashes []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && len(fields[0]) == 64 && strings.Trim(fields[0], "0123456789abcdef") == "" {
+			hashes = append(hashes, fields[0])
+		}
+	}
+	if len(hashes) != count {
+		return false
+	}
+	for _, h := range hashes[1:] {
+		if h != hashes[0] {
+			return false
+		}
+	}
+	return true
 }
 
 func hasLine(out, want string) bool {

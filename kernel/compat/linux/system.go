@@ -16,7 +16,33 @@ const (
 	unameField = 65
 	// RlimitSize is the size of struct rlimit64: the soft and the hard limit.
 	RlimitSize = 16
+	// TimevalSize is the size of struct timeval: seconds and microseconds,
+	// eight bytes each. TimezoneSize is the size of the obsolete struct
+	// timezone gettimeofday still fills.
+	TimevalSize  = 16
+	TimezoneSize = 8
+	// SysinfoSize is the size of struct sysinfo on x86_64.
+	SysinfoSize = 112
 )
+
+// Sysinfo is what sysinfo reports. GoOS has no swap, no load average, no
+// shared or buffer memory to count, and no high memory, so those stay zero.
+type Sysinfo struct {
+	UptimeSeconds uint64
+	TotalRAM      uint64
+	FreeRAM       uint64
+	Processes     uint16
+}
+
+// EncodeSysinfo writes a struct sysinfo with sizes in bytes (mem_unit 1).
+func EncodeSysinfo(target *[SysinfoSize]byte, info Sysinfo) {
+	clear(target[:])
+	binary.LittleEndian.PutUint64(target[0:], info.UptimeSeconds)
+	binary.LittleEndian.PutUint64(target[32:], info.TotalRAM)
+	binary.LittleEndian.PutUint64(target[40:], info.FreeRAM)
+	binary.LittleEndian.PutUint16(target[80:], info.Processes)
+	binary.LittleEndian.PutUint32(target[104:], 1)
+}
 
 // ClockOf maps a Linux clock to the GoOS clock that keeps the same time.
 // GoOS has one realtime and one monotonic clock; the raw, coarse, and
@@ -30,6 +56,12 @@ func ClockOf(id uint64) (timekeeping.Clock, abi.Errno) {
 		return timekeeping.Monotonic, 0
 	}
 	return 0, abi.EINVAL
+}
+
+// EncodeTimeval writes a struct timeval, truncating to microseconds.
+func EncodeTimeval(target *[TimevalSize]byte, value timekeeping.Time) {
+	binary.LittleEndian.PutUint64(target[0:], uint64(value.Seconds))
+	binary.LittleEndian.PutUint64(target[8:], uint64(value.Nanoseconds/1000))
 }
 
 // EncodeTimespec writes a struct timespec.

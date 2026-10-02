@@ -620,6 +620,10 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 	case linuxabi.SysStatx:
 		// The flags are a C int; the mask stays in the request for status.
 		return handler.status(request, int32(arguments[0]), arguments[1], arguments[4], uint64(uint32(arguments[2])), false)
+	case linuxabi.SysReadlink:
+		return handler.readlink(request, linuxabi.AtFDCWD, arguments[0], arguments[2])
+	case linuxabi.SysReadlinkat:
+		return handler.readlink(request, int32(arguments[0]), arguments[1], arguments[3])
 	case linuxabi.SysGetdents64:
 		return handler.getdents(request)
 	case linuxabi.SysLseek:
@@ -819,6 +823,21 @@ func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32
 		return linuxErrno(errno)
 	}
 	return linuxErrno(linuxcompat.AccessErrno(requested, described.Mode))
+}
+
+// readlink serves readlink and readlinkat. GoOS has no symbolic links, so
+// a name that exists is not one (EINVAL) and the lookup's error is the
+// answer for any other; access does the lookup. /proc/self/exe, which glibc
+// asks for at startup, is ENOENT as on a Linux without /proc.
+func (handler *linuxCallHandler) readlink(request linuxcompat.Request, dirfd int32, pathAddress uint64, size uint64) linuxcompat.Result {
+	if int32(size) <= 0 {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	result := handler.access(request, dirfd, pathAddress, 0)
+	if result == linuxBlocked || result.Errno != 0 {
+		return result
+	}
+	return linuxErrno(linuxabi.EINVAL)
 }
 
 // beginDescriptorStatus starts the stat of what a descriptor holds. done

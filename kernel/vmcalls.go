@@ -41,10 +41,11 @@ const (
 // resolveUserFaultEntry is called by the exception path for a page fault in
 // user mode, with interrupts disabled, on the task's kernel stack. It returns
 // one when a page was supplied and the instruction can be retried, zero when
-// the process has to be retired.
+// the process has to be retired. rip is the faulting instruction, for the
+// log.
 //
 //export goos_resolve_user_fault
-func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64) uint64 {
+func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip uint64) uint64 {
 	const (
 		faultPresent = 1 << 0
 		faultWrite   = 1 << 1
@@ -60,7 +61,7 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64) uint64
 			return 1
 		}
 	}
-	kernelLogUint(logfmt.Warn, userFaultReason(kind), "address", address)
+	kernelLogUints(logfmt.Warn, userFaultReason(kind), "address", address, "rip", rip)
 	return 0
 }
 

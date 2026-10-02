@@ -54,6 +54,9 @@ const (
 	SysRmdir         Syscall = 84
 	SysUnlink        Syscall = 87
 	SysReadlink      Syscall = 89
+	SysUmask         Syscall = 95
+	SysGettimeofday  Syscall = 96
+	SysSysinfo       Syscall = 99
 	SysGetuid        Syscall = 102
 	SysGetgid        Syscall = 104
 	SysSetuid        Syscall = 105
@@ -66,6 +69,7 @@ const (
 	SysRtSigsuspend  Syscall = 130
 	SysGettid        Syscall = 186
 	SysTkill         Syscall = 200
+	SysTime          Syscall = 201
 	SysFutex         Syscall = 202
 	SysGetdents64    Syscall = 217
 	SysSetTidAddress Syscall = 218
@@ -263,8 +267,8 @@ func (number Syscall) Known() bool {
 		SysNanosleep, SysGetpid, SysClone, SysFork, SysVfork, SysExecve, SysExit, SysWait4, SysKill, SysTkill, SysTgkill, SysUname, SysGetcwd, SysChdir,
 		SysRename, SysMkdir, SysRmdir, SysUnlink, SysMkdirat, SysRenameat,
 		SysRenameat2,
-		SysReadlink, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,
-		SysArchPrctl, SysGettid, SysFutex, SysGetdents64, SysSetTidAddress,
+		SysReadlink, SysUmask, SysGettimeofday, SysSysinfo, SysGetuid, SysGetgid, SysGeteuid, SysGetegid, SysGetppid,
+		SysArchPrctl, SysGettid, SysTime, SysFutex, SysGetdents64, SysSetTidAddress,
 		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,
 		SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,

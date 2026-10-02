@@ -171,58 +171,85 @@ func TestLinuxScenarioFailsOnBadOutput(t *testing.T) {
 
 const sevenZipDiag = "DIAG waits ipc=0\n" + recordedDiag + "\nDIAG end"
 
-func TestSevenZipExpectedFailure(t *testing.T) {
-	replies := map[string]string{
-		"ls /system/linux": "7zzs\nabi-probe",
-		sevenZipCommand:    "7-Zip (z) 24.08 (x64)\nuser fault: rip=0x4a1b2c addr=0x0\nexit status: 139",
-		"diag":             sevenZipDiag,
+const sevenZipHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+// sevenZipReplies answers every round-trip step with success.
+func sevenZipReplies() map[string]string {
+	replies := map[string]string{"ls /system/linux": "7zzs\nabi-probe", "diag": sevenZipDiag}
+	for _, step := range sevenZipSteps {
+		replies[step.command] = "7-Zip (z) 26.03 (x64)\n\nEverything is Ok"
 	}
-	con, _ := fakeGuest{boot: normalBoot, replies: replies}.start(t)
+	replies[sevenZipSteps[0].command] = "7-Zip (z) 26.03 (x64)\n\nFormats:\n 7z\n\nCodecs:\n LZMA"
+	replies[sevenZipSteps[4].command] = sevenZipHash + "  98816  abi-probe\n" + sevenZipHash + "  98816  abi-probe\n\nEverything is Ok"
+	return replies
+}
+
+func runSevenZip(t *testing.T, replies map[string]string, hang map[string]bool, requirePass bool) (Result, *Report, error) {
+	t.Helper()
+	con, _ := fakeGuest{boot: normalBoot, replies: replies, hang: hang}.start(t)
 	s, report := newSession(con)
-	s.Guest.WaitBoot(context.Background(), 5*time.Second)
-	result, err := sevenZipScenario{}.Run(context.Background(), s)
-	if err != nil || result != ResultExpectedFailure {
-		t.Fatalf("%s %v", result, err)
+	s.RequirePass = requirePass
+	if err := s.Guest.WaitBoot(context.Background(), 5*time.Second); err != nil {
+		t.Fatal(err)
 	}
-	if report.Workload.Completed || report.Workload.Ending != "exit status 139" || len(report.Workload.Faults) != 2 {
-		t.Errorf("workload %+v", report.Workload)
+	result, err := sevenZipScenario{}.Run(context.Background(), s)
+	return result, report, err
+}
+
+func TestSevenZipRoundTripPasses(t *testing.T) {
+	result, report, err := runSevenZip(t, sevenZipReplies(), nil, false)
+	if err != nil || result != ResultPass || !report.Workload.Completed || len(report.Workload.Steps) != len(sevenZipSteps) {
+		t.Fatalf("%s %v %+v", result, err, report.Workload)
 	}
 	if report.Linux == nil || report.Linux.Unsupported != 7 {
 		t.Errorf("linux %+v", report.Linux)
 	}
+}
 
+func TestSevenZipExpectedFailure(t *testing.T) {
+	replies := sevenZipReplies()
+	replies[sevenZipSteps[0].command] = ": error while loading shared libraries: cannot apply additional memory protection after relocation: Permission denied\nexit status: 127"
+	result, report, err := runSevenZip(t, replies, nil, false)
+	if err != nil || result != ResultExpectedFailure {
+		t.Fatalf("%s %v", result, err)
+	}
+	w := report.Workload
+	if w.Completed || w.Ending != "info: exit status 127" || len(w.Steps) != 0 || w.Command != sevenZipSteps[0].command {
+		t.Errorf("workload %+v", w)
+	}
+	if report.Linux == nil {
+		t.Error("no DIAG linux after a failed step")
+	}
 	// --require-pass turns the same run into a workload failure.
-	con, _ = fakeGuest{boot: normalBoot, replies: replies}.start(t)
-	s, _ = newSession(con)
-	s.RequirePass = true
-	s.Guest.WaitBoot(context.Background(), 5*time.Second)
-	if _, err := (sevenZipScenario{}).Run(context.Background(), s); err == nil || classOf(err) != ClassScenario {
+	if _, _, err := runSevenZip(t, replies, nil, true); err == nil || classOf(err) != ClassScenario {
 		t.Fatalf("require-pass: %v", err)
 	}
 }
 
-func TestSevenZipHangIsInterrupted(t *testing.T) {
-	replies := map[string]string{"ls /system/linux": "7zzs", "diag": sevenZipDiag}
-	con, _ := fakeGuest{boot: normalBoot, replies: replies, hang: map[string]bool{sevenZipCommand: true}}.start(t)
-	s, report := newSession(con)
-	s.Guest.WaitBoot(context.Background(), 5*time.Second)
-	result, err := sevenZipScenario{}.Run(context.Background(), s)
-	if err != nil || result != ResultExpectedFailure || !strings.Contains(report.Workload.Ending, "interrupted") {
+func TestSevenZipStopsAtTheFailingStep(t *testing.T) {
+	replies := sevenZipReplies()
+	replies[sevenZipSteps[1].command] = "Creating archive: /tmp/pvelab.7z\n\nSystem ERROR:\nerrno=22 : Invalid argument\nexit status: 2"
+	result, report, err := runSevenZip(t, replies, nil, false)
+	w := report.Workload
+	if err != nil || result != ResultExpectedFailure || strings.Join(w.Steps, ",") != "info" || w.Ending != "add: exit status 2" {
+		t.Fatalf("%s %v %+v", result, err, w)
+	}
+}
+
+func TestSevenZipDetectsADifferentCopy(t *testing.T) {
+	replies := sevenZipReplies()
+	other := strings.Repeat("0", 64)
+	replies[sevenZipSteps[4].command] = sevenZipHash + "  98816  abi-probe\n" + other + "  98816  abi-probe\n\nEverything is Ok"
+	result, report, err := runSevenZip(t, replies, nil, false)
+	if err != nil || result != ResultExpectedFailure || !strings.Contains(report.Workload.Ending, "differs") {
 		t.Fatalf("%s %v %+v", result, err, report.Workload)
 	}
 }
 
-func TestSevenZipPass(t *testing.T) {
-	replies := map[string]string{
-		"ls /system/linux": "7zzs",
-		sevenZipCommand:    "7-Zip (z) 24.08 (x64)\n\nFormats:\n 7z\n\nCodecs:\n LZMA",
-		"diag":             sevenZipDiag,
-	}
-	con, _ := fakeGuest{boot: normalBoot, replies: replies}.start(t)
-	s, _ := newSession(con)
-	s.Guest.WaitBoot(context.Background(), 5*time.Second)
-	if result, err := (sevenZipScenario{}).Run(context.Background(), s); err != nil || result != ResultPass {
-		t.Fatalf("%s %v", result, err)
+func TestSevenZipHangIsInterrupted(t *testing.T) {
+	result, report, err := runSevenZip(t, sevenZipReplies(), map[string]bool{sevenZipSteps[0].command: true}, false)
+	if err != nil || result != ResultExpectedFailure || !strings.Contains(report.Workload.Ending, "interrupted") {
+		t.Fatalf("%s %v %+v", result, err, report.Workload)
 	}
 }
 
@@ -236,11 +263,9 @@ func TestSevenZipMissingIsConfig(t *testing.T) {
 }
 
 func TestSevenZipWithoutDiagIsConfig(t *testing.T) {
-	replies := map[string]string{"ls /system/linux": "7zzs", sevenZipCommand: "exit status: 1", "diag": "diag: unavailable in this build"}
-	con, _ := fakeGuest{boot: normalBoot, replies: replies}.start(t)
-	s, _ := newSession(con)
-	s.Guest.WaitBoot(context.Background(), 5*time.Second)
-	if _, err := (sevenZipScenario{}).Run(context.Background(), s); classOf(err) != ClassConfig {
+	replies := sevenZipReplies()
+	replies["diag"] = "diag: unavailable in this build"
+	if _, _, err := runSevenZip(t, replies, nil, false); classOf(err) != ClassConfig {
 		t.Fatalf("err = %v", err)
 	}
 }
