@@ -250,6 +250,18 @@ func main() {
 	if status != 0 {
 		console.WriteString("PANIC: UEFI handoff failed: ")
 		console.WriteHex(uint64(status))
+		if rejected := bootuefi.Rejected; rejected.Descriptors != 0 {
+			console.WriteString(" descriptor=")
+			console.WriteUint(uint64(rejected.Index))
+			console.WriteString("/")
+			console.WriteUint(uint64(rejected.Descriptors))
+			console.WriteString(" type=")
+			console.WriteUint(uint64(rejected.Type))
+			console.WriteString(" start=")
+			console.WriteHex(rejected.Start)
+			console.WriteString(" pages=")
+			console.WriteUint(rejected.Pages)
+		}
 		console.WriteString("\n")
 		for {
 			amd64.Halt()

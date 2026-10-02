@@ -123,6 +123,19 @@ func getMemoryMap(services *bootServicesLayout, raw *memoryMap) deviceuefi.EFI_S
 	)
 }
 
+// MapRejection describes the firmware memory descriptor parseMemoryMap
+// refused, so the boot panic can say which one and why.
+type MapRejection struct {
+	Index       uintptr
+	Descriptors uintptr
+	Type        uint32
+	Start       uint64
+	Pages       uint64
+}
+
+// Rejected is set when CaptureAndExit returns EFI_COMPROMISED_DATA.
+var Rejected MapRejection
+
 func parseMemoryMap(info *boot.Info, raw *memoryMap) bool {
 	// Sizeof verifies the standardized descriptor prefix without dereferencing
 	// firmware memory.
@@ -141,6 +154,13 @@ func parseMemoryMap(info *boot.Info, raw *memoryMap) bool {
 			Pages: descriptor.NumberOfPages,
 			Kind:  memoryKind(deviceuefi.EFI_MEMORY_TYPE(descriptor.Type)),
 		}) {
+			Rejected = MapRejection{
+				Index:       offset / raw.descriptorSize,
+				Descriptors: raw.size / raw.descriptorSize,
+				Type:        descriptor.Type,
+				Start:       descriptor.PhysicalStart,
+				Pages:       descriptor.NumberOfPages,
+			}
 			return false
 		}
 	}

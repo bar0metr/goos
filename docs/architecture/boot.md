@@ -53,7 +53,8 @@ is described in [boot-chain.md](../security/boot-chain.md).
    warning and leaves the boot serial-only. No GOP pointer or firmware-owned
    mode record crosses the boot boundary.
 4. **Memory map and exit.** The kernel captures the final UEFI memory map into
-   a fixed buffer, normalizes region types, and calls `ExitBootServices` with
+   a fixed buffer, normalizes region types, merges adjacent regions of one
+   type into at most 256 regions, and calls `ExitBootServices` with
    the matching key, retrying on a stale key without allocating in between
    (ADR 0002, [memory.md](memory.md)). No firmware service is called after
    this point. Just before, the kernel records the ACPI RSDP from the UEFI
