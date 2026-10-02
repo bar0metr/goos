@@ -4,6 +4,8 @@
 
 Accepted. Lifts the thread limit ADR 0176 recorded; amends the `clone`,
 `futex`, `gettid`, and `set_tid_address` rows of the Linux ABI table.
+ADR 0179 supersedes the task-capacity, clone-commit, and `set_robust_list`
+parts of this decision. The thread model and the remaining decisions stand.
 
 ## Context
 

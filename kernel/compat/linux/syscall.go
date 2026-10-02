@@ -54,9 +54,9 @@ type Handler interface {
 	// family with statx, getdents64, lseek, getcwd, chdir, readlink, and
 	// the calls that create, remove, and rename names.
 	Filesystem(Request) Result
-	// System serves the identity, time, limit, signal-state, random, umask,
-	// robust-list, and futex calls, which answer from kernel state without
-	// asking a service.
+	// System serves the identity, time, limit, signal-state, random, umask, and
+	// futex calls, which answer from kernel state without asking a service. It
+	// also rejects a valid set_robust_list with ENOSYS.
 	System(Request) Result
 	// Descriptor serves dup, dup2, dup3, fcntl, and ioctl.
 	Descriptor(Request) Result

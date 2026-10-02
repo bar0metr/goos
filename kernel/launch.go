@@ -152,7 +152,8 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		}
 		// A Linux root obeys the same native reserve as a forked child,
 		// checked before anything is built for it.
-		if !linuxcompat.LinuxProcessCreationAllowed(processRegistry.Count()) {
+		if !linuxcompat.LinuxProcessCreationAllowed(processRegistry.Count()) ||
+			!linuxcompat.LinuxTaskCreationAllowed(amd64.FreeTaskSlots()) {
 			return 0, 0, supervisor.LaunchResourceExhausted
 		}
 		if linuxelf.ParseInto(linuxImage, image, linuxelf.GoOSConfig()) != linuxelf.OK {

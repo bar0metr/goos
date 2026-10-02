@@ -2,13 +2,14 @@ package linux
 
 import (
 	"goos/kernel/handle"
+	"goos/kernel/process"
 	"goos/kernel/sched"
 )
 
 // Thread is a Linux thread other than the first of its process: a task that
 // shares the process's address space, descriptors, and signal handlers and
 // has a TID of its own. The first thread's TID is the PID, and its
-// clear-child-TID and robust list live in ProcessState.
+// clear-child-TID lives in ProcessState.
 type Thread struct {
 	Task sched.TaskID
 	Root uint64
@@ -16,13 +17,29 @@ type Thread struct {
 	// ClearChildTID is the address the kernel zeroes and wakes when the
 	// thread ends, so a joiner sleeping on it returns.
 	ClearChildTID uint64
-	RobustList    uint64
 	// IOBuffer is the thread's own I/O object, created on its first file
 	// read or write.
 	IOBuffer handle.ID
 	// Mask is the thread's blocked signal mask while another thread's is
 	// in force.
-	Mask ThreadMask
+	Mask     ThreadMask
+	reserved bool
+}
+
+// threadReservation owns one compatibility thread slot and TID until the
+// scheduler task is ready to publish.
+type threadReservation struct {
+	slot uint8
+	tid  int32
+	root uint64
+}
+
+// ThreadCreation holds the Process charge, TID, and compatibility slot until
+// the architecture task exists.
+type ThreadCreation struct {
+	owner       *process.Process
+	reservation threadReservation
+	active      bool
 }
 
 var threads [sched.MaxTasks]Thread
@@ -34,7 +51,7 @@ func AllocateTID() int32 { return allocatePID() }
 // ThreadSlotFree reports whether the table can take another thread.
 func ThreadSlotFree() bool {
 	for index := range threads {
-		if threads[index].Task == 0 {
+		if threads[index].Root == 0 {
 			return true
 		}
 	}
@@ -55,7 +72,7 @@ func AddThread(task sched.TaskID, root uint64, tid int32) (*Thread, bool) {
 		if threads[index].Task == task {
 			return nil, false
 		}
-		if free == -1 && threads[index].Task == 0 {
+		if free == -1 && threads[index].Root == 0 {
 			free = index
 		}
 	}
@@ -66,6 +83,122 @@ func AddThread(task sched.TaskID, root uint64, tid int32) (*Thread, bool) {
 	return &threads[free], true
 }
 
+// reserveThread takes a TID and compatibility slot before task creation. A
+// failed creator must cancel the reservation.
+func reserveThread(root uint64) (threadReservation, bool) {
+	if root == 0 {
+		return threadReservation{}, false
+	}
+	if _, found := FindProcess(root); !found {
+		return threadReservation{}, false
+	}
+	for index := range threads {
+		if threads[index].Root != 0 {
+			continue
+		}
+		tid := AllocateTID()
+		threads[index] = Thread{Root: root, TID: tid, reserved: true}
+		return threadReservation{slot: uint8(index + 1), tid: tid, root: root}, true
+	}
+	return threadReservation{}, false
+}
+
+// preparedThread returns the reserved record so the creator can fill fields
+// that cannot fail before it publishes the scheduler task.
+func preparedThread(reservation threadReservation) (*Thread, bool) {
+	index := int(reservation.slot) - 1
+	if index < 0 || index >= len(threads) {
+		return nil, false
+	}
+	thread := &threads[index]
+	if !thread.reserved || thread.Root != reservation.root || thread.TID != reservation.tid {
+		return nil, false
+	}
+	return thread, true
+}
+
+// commitThread attaches a prepared task to its reserved record.
+func commitThread(reservation threadReservation, task sched.TaskID) (*Thread, bool) {
+	thread, found := preparedThread(reservation)
+	if !found || task == 0 {
+		return nil, false
+	}
+	if _, _, valid := task.Parts(); !valid {
+		return nil, false
+	}
+	for index := range threads {
+		if threads[index].Task == task {
+			return nil, false
+		}
+	}
+	thread.Task = task
+	thread.reserved = false
+	return thread, true
+}
+
+// cancelThread releases a reservation whose scheduler task was not created.
+func cancelThread(reservation threadReservation) bool {
+	thread, found := preparedThread(reservation)
+	if !found {
+		return false
+	}
+	*thread = Thread{}
+	return true
+}
+
+// PrepareThreadCreation reserves every non-architecture resource that clone
+// needs. Failure returns the Process quota to its previous value.
+func PrepareThreadCreation(owner *process.Process, root uint64) (ThreadCreation, bool) {
+	if owner == nil || !owner.ReserveTask() {
+		return ThreadCreation{}, false
+	}
+	reservation, reserved := reserveThread(root)
+	if !reserved {
+		owner.CancelReservedTask()
+		return ThreadCreation{}, false
+	}
+	return ThreadCreation{owner: owner, reservation: reservation, active: true}, true
+}
+
+func (creation *ThreadCreation) PreparedThread() (*Thread, bool) {
+	if creation == nil || !creation.active {
+		return nil, false
+	}
+	return preparedThread(creation.reservation)
+}
+
+// Cancel releases a prepared creation after architecture setup fails.
+func (creation *ThreadCreation) Cancel() bool {
+	if creation == nil || !creation.active {
+		return false
+	}
+	threadCanceled := cancelThread(creation.reservation)
+	taskCanceled := creation.owner.CancelReservedTask()
+	creation.active = false
+	return threadCanceled && taskCanceled
+}
+
+// Commit binds the scheduler task to both reservations. A rejected task
+// returns the transaction to its initial state.
+func (creation *ThreadCreation) Commit(task sched.TaskID) (*Thread, bool) {
+	if creation == nil || !creation.active {
+		return nil, false
+	}
+	thread, committed := commitThread(creation.reservation, task)
+	if !committed {
+		creation.Cancel()
+		return nil, false
+	}
+	if !creation.owner.CommitReservedTask(task) {
+		RemoveThread(task)
+		creation.owner.CancelReservedTask()
+		creation.active = false
+		return nil, false
+	}
+	creation.active = false
+	return thread, true
+}
+
 // FindThread returns the thread record of task, if task is a thread
 // created by clone.
 func FindThread(task sched.TaskID) (*Thread, bool) {
@@ -73,7 +206,7 @@ func FindThread(task sched.TaskID) (*Thread, bool) {
 		return nil, false
 	}
 	for index := range threads {
-		if threads[index].Task == task {
+		if !threads[index].reserved && threads[index].Task == task {
 			return &threads[index], true
 		}
 	}
@@ -118,7 +251,7 @@ func TaskTID(task sched.TaskID, state *ProcessState) int32 {
 // tidInUse reports whether a live thread holds tid.
 func tidInUse(tid int32) bool {
 	for index := range threads {
-		if threads[index].Task != 0 && threads[index].TID == tid {
+		if threads[index].Root != 0 && threads[index].TID == tid {
 			return true
 		}
 	}

@@ -42,6 +42,7 @@ type Process struct {
 	handles      handle.Table
 	tasks        [MaxTasksPerProcess]sched.TaskID
 	taskCount    int
+	taskReserved uint8
 	quota        Quota
 	// regions is the process's virtual-memory region map (ADR 0104).
 	regions region.Map
@@ -143,6 +144,32 @@ func (process *Process) SetExecutable(id uint64) { process.executable = id }
 func (process *Process) Regions() *region.Map { return &process.regions }
 
 func (process *Process) AddTask(id sched.TaskID) bool {
+	if !process.ReserveTask() {
+		return false
+	}
+	if process.CommitReservedTask(id) {
+		return true
+	}
+	process.CancelReservedTask()
+	return false
+}
+
+// ReserveTask charges one task slot before architecture state becomes
+// runnable. The caller either commits the returned slot or cancels it.
+func (process *Process) ReserveTask() bool {
+	if process == nil || process.taskCount+int(process.taskReserved) == len(process.tasks) || !process.Charge(ResourceTasks, 1) {
+		return false
+	}
+	process.taskReserved++
+	return true
+}
+
+// CommitReservedTask binds a prepared architecture task without another
+// allocation or quota decision.
+func (process *Process) CommitReservedTask(id sched.TaskID) bool {
+	if process == nil || process.taskReserved == 0 {
+		return false
+	}
 	if _, _, valid := id.Parts(); !valid || process.taskCount == len(process.tasks) {
 		return false
 	}
@@ -151,11 +178,19 @@ func (process *Process) AddTask(id sched.TaskID) bool {
 			return false
 		}
 	}
-	if !process.Charge(ResourceTasks, 1) {
-		return false
-	}
 	process.tasks[process.taskCount] = id
 	process.taskCount++
+	process.taskReserved--
+	return true
+}
+
+// CancelReservedTask returns one uncommitted task charge.
+func (process *Process) CancelReservedTask() bool {
+	if process == nil || process.taskReserved == 0 {
+		return false
+	}
+	process.taskReserved--
+	process.Release(ResourceTasks, 1)
 	return true
 }
 

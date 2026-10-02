@@ -118,6 +118,11 @@ syscall. The slot is keyed by the full generation-safe Task ID, not the reusable
 scheduler index. Kill, fault, and process teardown cancel it before task-slot
 reclamation, so a late VFS reply cannot wake a replacement task.
 
+Linux `fork`, `vfork`, and process-form `clone` create a Process with a private
+address space and its first Task. Thread-form `clone` adds a Task to the
+caller's Process and address space. Each Linux thread owns a 64 KiB file-I/O
+object, created on its first file call and released at thread exit (ADR 0177).
+
 The compatibility state holds the process's Linux identity and its VFS channel
 handle. The family owns the VFS request counter, failed-session state, and a
 bounded FIFO that serializes requests across descendants (ADR 0156). The
@@ -132,9 +137,8 @@ process slots, which stay for native processes
 
 The working directory starts as the one the launch supplied, held in canonical
 form as the base for relative paths (ADR 0140), and `chdir` replaces it. The
-state also names the process's file I/O memory object, created at its first file
-read or write (ADR 0141), and holds the signal dispositions, blocked mask,
-and pending signals that system call returns act on (ADR 0163).
+state holds the signal dispositions, thread masks, and pending signals that
+system call returns act on (ADR 0163, ADR 0177).
 
 A Linux `execve` prepares a second address space under the same Process and
 task (ADR 0157). Commit replaces the scheduler root, Process root, region map,

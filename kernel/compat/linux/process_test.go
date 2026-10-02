@@ -6,6 +6,7 @@ import (
 	"goos/kernel/compat/linux/abi"
 	"goos/kernel/handle"
 	"goos/kernel/process"
+	"goos/kernel/sched"
 	"goos/userspace/startup"
 )
 
@@ -494,5 +495,15 @@ func TestLinuxProcessCreationKeepsTheNativeReserve(t *testing.T) {
 	}
 	if _, family := ProcessCounts(root.FamilyID); family != LinuxFamilyMaxProcesses {
 		t.Fatalf("the family stopped at %d", family)
+	}
+}
+
+func TestLinuxTaskCreationKeepsTheNativeReserve(t *testing.T) {
+	if !LinuxTaskCreationAllowed(NativeTaskReserve+1) || LinuxTaskCreationAllowed(NativeTaskReserve) ||
+		LinuxTaskCreationAllowed(0) || LinuxTaskCreationAllowed(sched.MaxTasks+1) {
+		t.Fatal("the Linux task reserve boundary is wrong")
+	}
+	if sched.MaxTasks-NativeTaskReserve != LinuxGlobalMaxProcesses {
+		t.Fatal("task and process reserves diverged")
 	}
 }
