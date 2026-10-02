@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. The bulk-data buffer ownership described below is superseded by
+ADR 0177: each Linux thread has its own 64 KiB file-I/O object.
 
 ## Context
 
