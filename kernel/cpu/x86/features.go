@@ -89,9 +89,10 @@ func DetectFeatures(source Source, maximumBasicLeaf, maximumExtendedLeaf uint32)
 	}
 	usable := hardware
 	for _, feature := range [...]cpuinfo.Feature{
-		cpuinfo.FeatureFMA, cpuinfo.FeatureAVX, cpuinfo.FeatureF16C,
-		cpuinfo.FeatureAVX2, cpuinfo.FeatureAVX512F, cpuinfo.FeatureVAES,
-		cpuinfo.FeatureVPCLMULQDQ,
+		cpuinfo.FeatureXSAVE, cpuinfo.FeatureOSXSAVE, cpuinfo.FeatureFMA,
+		cpuinfo.FeatureAVX, cpuinfo.FeatureF16C, cpuinfo.FeatureFSGSBASE,
+		cpuinfo.FeatureAVX2, cpuinfo.FeatureAVX512F, cpuinfo.FeatureGFNI,
+		cpuinfo.FeatureVAES, cpuinfo.FeatureVPCLMULQDQ,
 	} {
 		usable.Remove(feature)
 	}

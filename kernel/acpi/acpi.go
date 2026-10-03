@@ -37,7 +37,7 @@ var buffer [maxTable]byte
 // FindPowerOff follows the RSDP at root to the FADT and the DSDT and returns the
 // S5 transition, or false when any table is missing or malformed.
 func FindPowerOff(memory Memory, root uint64) (PowerOff, bool) {
-	fadt, ok := findFADT(memory, root)
+	fadt, ok := findTable(memory, root, "FACP")
 	if !ok {
 		return PowerOff{}, false
 	}
@@ -56,9 +56,9 @@ func FindPowerOff(memory Memory, root uint64) (PowerOff, bool) {
 	return PowerOff{Port: port, Value: uint16(sleepType)<<sleepShift | sleepEnable}, true
 }
 
-// findFADT validates the RSDP and walks the XSDT, or the RSDT of an ACPI 1.0
-// RSDP, to the table signed FACP, which it returns in buffer.
-func findFADT(memory Memory, root uint64) ([]byte, bool) {
+// findTable validates the RSDP and walks the XSDT, or the RSDT of an ACPI 1.0
+// RSDP, to the requested table, which it returns in buffer.
+func findTable(memory Memory, root uint64, wanted string) ([]byte, bool) {
 	var rsdp [36]byte
 	if root == 0 || !memory.Read(root, rsdp[:20]) || string(rsdp[:8]) != "RSD PTR " || !checksum(rsdp[:20]) {
 		return nil, false
@@ -76,7 +76,7 @@ func findFADT(memory Memory, root uint64) ([]byte, bool) {
 	}
 	entries := uint64(len(table)-headerSize) / width
 	if entries > maxEntries {
-		entries = maxEntries
+		return nil, false
 	}
 	var addresses [maxEntries]uint64
 	for index := uint64(0); index < entries; index++ {
@@ -88,8 +88,8 @@ func findFADT(memory Memory, root uint64) ([]byte, bool) {
 		}
 	}
 	for index := uint64(0); index < entries; index++ {
-		if fadt, found := readTable(memory, addresses[index], "FACP"); found {
-			return fadt, true
+		if foundTable, found := readTable(memory, addresses[index], wanted); found {
+			return foundTable, true
 		}
 	}
 	return nil, false

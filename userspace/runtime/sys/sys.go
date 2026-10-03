@@ -241,6 +241,24 @@ func SystemInfo(target *[kcall.SystemInfoSize]byte) kcall.Status {
 	return status(systemInfoRead(unsafe.Pointer(&target[0]), uintptr(len(target))))
 }
 
+// CPUInfo fills target with the immutable CPU summary record.
+func CPUInfo(target *[kcall.CPUInfoSize]byte) kcall.Status {
+	touch(target[:])
+	return status(cpuInfoRead(unsafe.Pointer(&target[0]), uintptr(len(target))))
+}
+
+// CPUEntry fills target with the index-th logical CPU record.
+func CPUEntry(index uint64, target *[kcall.CPUEntrySize]byte) kcall.Status {
+	touch(target[:])
+	return status(cpuEntryRead(index, unsafe.Pointer(&target[0])))
+}
+
+// CPUCacheInfo fills target with the index-th deterministic cache record.
+func CPUCacheInfo(index uint64, target *[kcall.CPUCacheInfoSize]byte) kcall.Status {
+	touch(target[:])
+	return status(cpuCacheInfoRead(index, unsafe.Pointer(&target[0])))
+}
+
 // ClockRead reads the monotonic timer in ticks.
 func ClockRead() (uint64, kcall.Status) {
 	valueWire = 0

@@ -60,6 +60,15 @@ func processWait(process uint64, result unsafe.Pointer, timeout uint64) uint64
 //go:linkname systemInfoRead goos_system_info
 func systemInfoRead(address unsafe.Pointer, size uintptr) uint64
 
+//go:linkname cpuInfoRead goos_cpu_info
+func cpuInfoRead(address unsafe.Pointer, size uintptr) uint64
+
+//go:linkname cpuEntryRead goos_cpu_entry
+func cpuEntryRead(index uint64, address unsafe.Pointer) uint64
+
+//go:linkname cpuCacheInfoRead goos_cpu_cache_info
+func cpuCacheInfoRead(index uint64, address unsafe.Pointer) uint64
+
 //go:linkname portRead goos_port_read
 func portRead(device uint64, specification uint64, address unsafe.Pointer) uint64
 

@@ -63,6 +63,16 @@ type Inventory struct {
 // Probe decodes all CPUID-backed facts. It does not infer configured CPU
 // count; firmware enumeration supplies that separately.
 func Probe(source Source) Inventory {
+	var inventory Inventory
+	ProbeInto(&inventory, source)
+	return inventory
+}
+
+// ProbeInto is the stack-bounded kernel form of Probe.
+//
+//go:noinline
+func ProbeInto(result *Inventory, source Source) {
+	*result = Inventory{}
 	leaf0 := source.Query(0, 0)
 	extended0 := source.Query(0x80000000, 0)
 	identity := Identity{
@@ -103,10 +113,10 @@ func Probe(source Source) Inventory {
 		identity.FrequencyValid = identity.BaseMHz != 0 || identity.MaximumMHz != 0 || identity.BusMHz != 0
 	}
 
-	topology, _ := DetectTopology(source, leaf0.EAX)
+	topology, _ := DetectTopology(source, identity.Vendor.String(), leaf0.EAX, extended0.EAX)
 	hardware, usable := DetectFeatures(source, leaf0.EAX, extended0.EAX)
 	caches, cacheCount := DetectCaches(source, identity.Vendor.String(), leaf0.EAX, extended0.EAX)
-	return Inventory{
+	*result = Inventory{
 		Identity: identity, Topology: topology, Caches: caches, CacheCount: cacheCount,
 		Hardware: hardware, Usable: usable,
 	}

@@ -80,6 +80,9 @@ table with type, generation, and rights checks.
 | 47 | `ClockSet` | device handle, Write, system-control object | realtime value and validity bounds | none | changes the realtime offset |
 | 48 | `ExecutableSource` | loader device with Write; prepared VFS channel with Read, Write, Wait; sealed executable header object with Execute and Write | 32-byte descriptor; file handle nonzero; file size 1..256 MiB; header object size `min(file size, 4096)`; live channel endpoint | consumes the channel; converts the existing one-page object without allocating payload pages; later faults allocate and charge one process page at a time | no |
 | 49 | `ConsoleInfo` | device handle, Read, console object | length exactly 16; `CopyOut` | columns, rows, availability flags, and a zero reserved word; no hardware address | no |
+| 50 | `CPUInfo` | registered | length exactly 320; version and size fixed; `CopyOut` | immutable normalized CPUID and topology summary collected at boot | no |
+| 51 | `CPUEntry` | registered | index below the bounded present-CPU table; 32-byte `CopyOut` | immutable logical CPU, APIC, ACPI UID, state, and normalized topology IDs | no; past the table → `NotFound` |
+| 52 | `CPUCacheInfo` | registered | index below the bounded cache table; 48-byte `CopyOut` | immutable deterministic-cache geometry collected at boot | no; past the table → `NotFound` |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -109,7 +112,7 @@ compiles away.
   path; VFS refuses mutation until the source closes (ADR 0121).
 - `LogWrite`, `LogRead`, and `LogBounds` serve the kernel log ring, which must
   work before any service exists (ADR 0059, 0073).
-- `SystemInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters and
+- `SystemInfo`, `CPUInfo`, `CPUEntry`, `CPUCacheInfo`, `ClockRead`, and `ClockReadNanos` expose kernel counters or normalized hardware facts and
   have no userspace source.
 - Process launch is not a native call. It is requested over the lifecycle
   channel that only PID 1 holds and runs in kernel housekeeping. The request
@@ -149,10 +152,11 @@ virtio-blk driver, which re-checks the used ring after every wake (ADR 0035).
 
 ### Capabilities
 
-See [capabilities.md](capabilities.md). Nine calls authorize by caller
+See [capabilities.md](capabilities.md). Twelve calls authorize by caller
 identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
 `SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
-`HandleInfo` (own table only), and `ProcessInfo`.
+`HandleInfo` (own table only), `ProcessInfo`, `CPUInfo`, `CPUEntry`, and
+`CPUCacheInfo`.
 
 ### Stream reference counts (ADR 0089)
 
@@ -217,6 +221,7 @@ interrupts off, and takes about 2 ms (ADR 0057).
 | `SystemInfo` | caller PID, process count, managed and free pages, tick count |
 | `ClockReadNanos` | nanosecond TSC-derived time |
 | `ProcessInfo` | PID, scheduling state, task count, executable name, CPU ticks, and resource use and limits of every process |
+| `CPUInfo`, `CPUEntry`, `CPUCacheInfo` | CPUID identity and usable features, firmware-visible enabled processors, present/online state, normalized topology, and deterministic-cache geometry; no MSRs, kernel pointers, or CPU control authority |
 | `HandleInfo` | ID, type, and rights of the caller's own handles; never the kernel object |
 | `LogRead`, `LogBounds` | every retained log record, including other components' events, and the ring's sequence window |
 | `DMAAllocate` | physical address of the caller's DMA window |

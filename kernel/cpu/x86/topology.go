@@ -16,16 +16,81 @@ type TopologyID struct {
 	Thread  uint32
 }
 
-func DetectTopology(source Source, maximumBasicLeaf uint32) (Topology, bool) {
+func DetectTopology(source Source, vendor string, maximumBasicLeaf, maximumExtendedLeaf uint32) (Topology, bool) {
 	if maximumBasicLeaf >= 0x1f {
 		if topology, ok := topologyLeaf(source, 0x1f); ok {
 			return topology, true
 		}
 	}
 	if maximumBasicLeaf >= 0x0b {
-		return topologyLeaf(source, 0x0b)
+		if topology, ok := topologyLeaf(source, 0x0b); ok {
+			return topology, true
+		}
 	}
-	return Topology{}, false
+	return legacyTopology(source, vendor, maximumBasicLeaf, maximumExtendedLeaf)
+}
+
+func legacyTopology(source Source, vendor string, maximumBasicLeaf, maximumExtendedLeaf uint32) (Topology, bool) {
+	if maximumBasicLeaf < 1 {
+		return Topology{}, false
+	}
+	leaf1 := source.Query(1, 0)
+	logical := (leaf1.EBX >> 16) & 0xff
+	if logical <= 1 || !powerOfTwo(logical) {
+		return Topology{}, false
+	}
+	var cores uint32
+	switch vendor {
+	case "GenuineIntel":
+		if maximumBasicLeaf < 4 {
+			return Topology{}, false
+		}
+		leaf4 := source.Query(4, 0)
+		if leaf4.EAX&0x1f == 0 {
+			return Topology{}, false
+		}
+		cores = (leaf4.EAX>>26)&0x3f + 1
+	case "AuthenticAMD":
+		if maximumExtendedLeaf < 0x80000008 {
+			return Topology{}, false
+		}
+		leaf8 := source.Query(0x80000008, 0)
+		cores = leaf8.ECX&0xff + 1
+		coreIDBits := leaf8.ECX >> 12 & 0xf
+		if coreIDBits != 0 && uint32(1)<<coreIDBits != cores {
+			return Topology{}, false
+		}
+	default:
+		return Topology{}, false
+	}
+	if cores == 0 || !powerOfTwo(cores) || logical%cores != 0 {
+		return Topology{}, false
+	}
+	threads := logical / cores
+	if !powerOfTwo(threads) {
+		return Topology{}, false
+	}
+	topology := Topology{
+		ThreadsPerCore:        uint16(threads),
+		LogicalCPUsPerPackage: uint16(logical),
+		CoresPerPackage:       uint16(cores),
+		SMTShift:              log2PowerOfTwo(threads),
+		PackageShift:          log2PowerOfTwo(logical),
+		BootstrapX2APICID:     leaf1.EBX >> 24,
+		Valid:                 true,
+	}
+	return topology, true
+}
+
+func powerOfTwo(value uint32) bool { return value != 0 && value&(value-1) == 0 }
+
+func log2PowerOfTwo(value uint32) uint8 {
+	var shift uint8
+	for value > 1 {
+		value >>= 1
+		shift++
+	}
+	return shift
 }
 
 func topologyLeaf(source Source, leaf uint32) (Topology, bool) {

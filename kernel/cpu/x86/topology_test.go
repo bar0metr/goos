@@ -13,7 +13,7 @@ func topologyFixture(leafValue uint32) map[leaf]Registers {
 func TestDetectTopologyPrefersLeaf1F(t *testing.T) {
 	data := topologyFixture(0x1f)
 	data[leaf{0x0b, 0}] = Registers{EAX: 2, EBX: 4, ECX: 1 << 8}
-	got, ok := DetectTopology(source(data), 0x1f)
+	got, ok := DetectTopology(source(data), "GenuineIntel", 0x1f, 0)
 	if !ok || !got.Valid || got.ThreadsPerCore != 2 || got.CoresPerPackage != 4 ||
 		got.LogicalCPUsPerPackage != 8 || got.SMTShift != 1 || got.PackageShift != 3 || got.BootstrapX2APICID != 6 {
 		t.Fatalf("topology: %+v %v", got, ok)
@@ -25,7 +25,7 @@ func TestDetectTopologyPrefersLeaf1F(t *testing.T) {
 }
 
 func TestDetectTopologyFallsBackToLeaf0B(t *testing.T) {
-	got, ok := DetectTopology(source(topologyFixture(0x0b)), 0x0b)
+	got, ok := DetectTopology(source(topologyFixture(0x0b)), "GenuineIntel", 0x0b, 0)
 	if !ok || got.ThreadsPerCore != 2 || got.CoresPerPackage != 4 {
 		t.Fatalf("topology: %+v %v", got, ok)
 	}
@@ -53,9 +53,39 @@ func TestDetectTopologyRejectsMalformedData(t *testing.T) {
 		}, 0x0b},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got, ok := DetectTopology(source(test.data), test.max); ok || got.Valid {
+			if got, ok := DetectTopology(source(test.data), "unknown", test.max, 0); ok || got.Valid {
 				t.Fatalf("accepted %+v", got)
 			}
 		})
+	}
+}
+
+func TestDetectTopologyUsesConservativeVendorFallback(t *testing.T) {
+	intel := source(map[leaf]Registers{
+		{1, 0}: {EBX: 8 << 16},
+		{4, 0}: {EAX: 1 | 3<<26},
+	})
+	got, ok := DetectTopology(intel, "GenuineIntel", 4, 0)
+	if !ok || got.ThreadsPerCore != 2 || got.CoresPerPackage != 4 || got.PackageShift != 3 {
+		t.Fatalf("Intel fallback: %+v %v", got, ok)
+	}
+
+	amd := source(map[leaf]Registers{
+		{1, 0}:          {EBX: 8 << 16},
+		{0x80000008, 0}: {ECX: 3 | 2<<12},
+	})
+	got, ok = DetectTopology(amd, "AuthenticAMD", 1, 0x80000008)
+	if !ok || got.ThreadsPerCore != 2 || got.CoresPerPackage != 4 || got.PackageShift != 3 {
+		t.Fatalf("AMD fallback: %+v %v", got, ok)
+	}
+}
+
+func TestDetectTopologyRejectsAmbiguousVendorFallback(t *testing.T) {
+	data := source(map[leaf]Registers{
+		{1, 0}: {EBX: 6 << 16},
+		{4, 0}: {EAX: 1 | 2<<26},
+	})
+	if got, ok := DetectTopology(data, "GenuineIntel", 4, 0); ok || got.Valid {
+		t.Fatalf("accepted ambiguous fallback: %+v", got)
 	}
 }

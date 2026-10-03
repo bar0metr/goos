@@ -60,7 +60,10 @@ is described in [boot-chain.md](../security/boot-chain.md).
    this point. Just before, the kernel records the ACPI RSDP from the UEFI
    configuration table. Right after, it reads the FADT and DSDT once, checking
    every checksum and length, and keeps only the port and value that switch the
-   machine off (`kernel/acpi`, ADR 0092).
+   machine off (`kernel/acpi`, ADR 0092). The same checked root-table walker
+   reads the MADT processor entries. CPUID identity, topology, cache, and
+   feature leaves are combined with that bounded firmware list into an
+   immutable CPU inventory; only the bootstrap processor is online (ADR 0180).
 
 Any failure in this phase prints a panic line and halts.
 
