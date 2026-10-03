@@ -39,6 +39,18 @@ func TestJSONEscapesText(t *testing.T) {
 		t.Fatalf("JSON: %s", got)
 	}
 }
+func TestJSONHonorsBytesAndHex(t *testing.T) {
+	got := string(format(fixture(), options{json: true, bytes: true, hex: true}, nil))
+	for _, want := range []string{
+		`"field":"On-line CPU(s) mask:","data":"1"`,
+		`"field":"Off-line CPU(s) mask:","data":"e"`,
+		`"field":"L2 cache:","data":"1048576"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in JSON: %s", want, got)
+		}
+	}
+}
 func TestTablesAndUnknownTopology(t *testing.T) {
 	data := fixture()
 	data.entries[1].Flags &^= cpuinfo.CPUEntryTopologyValid
@@ -53,6 +65,14 @@ func TestTablesAndUnknownTopology(t *testing.T) {
 	got = string(format(data, option, nil))
 	if !strings.Contains(got, "#CPU,ONLINE,APICID\n0,yes,0") {
 		t.Fatalf("parse:\n%s", got)
+	}
+}
+func TestRawTableFormatting(t *testing.T) {
+	option := defaultOptions()
+	option.mode, option.raw = modeExtended, true
+	got := string(format(fixture(), option, nil))
+	if !strings.Contains(got, "CPU ONLINE SOCKET CORE THREAD APICID\n") || strings.Contains(got, "CPU  ONLINE") {
+		t.Fatalf("raw extended:\n%s", got)
 	}
 }
 func TestOptions(t *testing.T) {
@@ -72,6 +92,34 @@ func TestOptions(t *testing.T) {
 	bad.parse([]byte("-a"))
 	if bad.parse([]byte("-b")) == "" {
 		t.Fatal("accepted conflicting filters")
+	}
+}
+func TestOptionsRejectIgnoredCombinations(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"--raw"},
+		{"--extended", "--hex"},
+		{"--physical"},
+		{"--output-all"},
+	} {
+		option := defaultOptions()
+		for _, argument := range arguments {
+			if problem := option.parse([]byte(argument)); problem != "" {
+				t.Fatalf("parse %v: %s", arguments, problem)
+			}
+		}
+		if problem := option.validate(); problem == "" {
+			t.Fatalf("accepted ignored combination %v", arguments)
+		}
+	}
+}
+func TestCacheSummaryDoesNotOverflow(t *testing.T) {
+	data := fixture()
+	data.caches[0].Size = ^uint64(0)
+	option := defaultOptions()
+	option.bytes = true
+	got := string(format(data, option, nil))
+	if !strings.Contains(got, "L2 cache:                 18446744073709551615") {
+		t.Fatalf("overflowed cache size:\n%s", got)
 	}
 }
 func TestCPUListAndHexMask(t *testing.T) {

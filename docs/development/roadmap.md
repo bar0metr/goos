@@ -525,10 +525,10 @@ from disk:
 
 ### GoOS 0.2.3: static glibc and threads
 
-Implemented: static glibc programs (ADR 0176) and Linux threads: thread-form
-`clone`, per-thread TLS, TIDs, and signal masks, and sleeping `futex` waits
-(ADR 0177). Open files survive a FAT32 service restart (ADR 0178). 7-Zip runs
-with its own thread count.
+GoOS 0.2.3 ([docs/releases/0.2.3.md](../releases/0.2.3.md)) adds static glibc
+programs (ADR 0176) and Linux threads: thread-form `clone`, per-thread TLS,
+TIDs, signal masks, and sleeping `futex` waits (ADR 0177). Open files survive a
+FAT32 service restart (ADR 0178). 7-Zip runs with its own thread count.
 
 ### Next: a Linux terminal
 

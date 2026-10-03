@@ -102,6 +102,19 @@ func TestFindPowerOff(t *testing.T) {
 	}
 }
 
+func TestFindPowerOffScansBoundedRootPrefix(t *testing.T) {
+	memory := system(2, []byte{0x08, '_', 'S', '5', '_', 0x12, 0x06, 0x02, 0x01, 0x01})
+	entries := make([]byte, (maxEntries+6)*8)
+	for index := 0; index < maxEntries+6; index++ {
+		binary.LittleEndian.PutUint64(entries[index*8:], uint64(0x10000+index*0x1000))
+	}
+	binary.LittleEndian.PutUint64(entries[(maxEntries-1)*8:], 0x8000)
+	memory[0x7000] = table("XSDT", entries)
+	if off, ok := FindPowerOff(memory, 0x1000); !ok || off.Port != 0x604 {
+		t.Fatalf("bounded XSDT prefix: %+v %v", off, ok)
+	}
+}
+
 func TestFindPowerOffRefusesMalformedTables(t *testing.T) {
 	good := []byte{0x08, '_', 'S', '5', '_', 0x12, 0x06, 0x04, 0x0a, 0x05}
 	cases := map[string]func(fakeMemory){

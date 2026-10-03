@@ -283,7 +283,7 @@ release version is set in one place, `internal/version/version.go`, and
 A successful boot of a normal build produces:
 
 ```text
-GoOS 0.2.2
+GoOS 0.2.3
 
 CPU: x86_64
 Graphics: GOP 1280x800x32
@@ -340,6 +340,7 @@ fsck-fat
 gfm
 gview
 ls
+lscpu
 mem
 mkdir
 mount
@@ -389,7 +390,7 @@ goos> cat /home/user/notes/notes.txt
 Hello from GoOS
 goos> cp /system/bin/uname /home/user/bin/myuname
 goos> myuname
-GoOS 0.2.2 x86_64
+GoOS 0.2.3 x86_64
 goos> fsck-fat --check auto
 exec: cannot start fsck-fat: volume in use by the running system; check it in recovery mode
 goos> ps
@@ -599,6 +600,12 @@ are granted only by the index of their own origin. A missing or unusable
 installation boots into a recovery mode that says why, and storage that fails
 for good under a running system moves it there. This checks compatibility;
 it is not a verified boot chain or an update system.
+
+GoOS 0.2.3 ([docs/releases/0.2.3.md](docs/releases/0.2.3.md)) adds static
+glibc compatibility, Linux threads with per-thread TLS and signal state, and
+sleeping futex waits. The kernel also publishes a bounded, read-only CPU
+inventory derived from CPUID and ACPI MADT data; the native `lscpu` command
+formats it without exposing raw hardware access to userspace.
 
 Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
 and capability model and does not weaken the native architecture for POSIX

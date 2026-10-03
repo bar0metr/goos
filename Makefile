@@ -342,6 +342,7 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-boot
+	$(MAKE) test-lscpu
 	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -360,6 +361,7 @@ release-check:
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
+	$(MAKE) test-lscpu
 	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
