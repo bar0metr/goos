@@ -49,6 +49,12 @@ func processWait(process uint64, result unsafe.Pointer, timeout uint64) uint64 {
 
 func systemInfoRead(address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
+func cpuInfoRead(address unsafe.Pointer, size uintptr) uint64 { return unsupported }
+
+func cpuEntryRead(index uint64, address unsafe.Pointer) uint64 { return unsupported }
+
+func cpuCacheInfoRead(index uint64, address unsafe.Pointer) uint64 { return unsupported }
+
 func portRead(device uint64, specification uint64, address unsafe.Pointer) uint64 { return unsupported }
 
 func portWrite(device uint64, specification uint64, value uint64) uint64 { return unsupported }

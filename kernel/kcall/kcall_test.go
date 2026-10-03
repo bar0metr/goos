@@ -55,6 +55,21 @@ func (handler *testHandler) SystemInfo(address uint64, length uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) CPUInfo(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
+func (handler *testHandler) CPUEntry(index uint64, address uint64) Status {
+	handler.length, handler.address = index, address
+	return StatusOK
+}
+
+func (handler *testHandler) CPUCacheInfo(index uint64, address uint64) Status {
+	handler.length, handler.address = index, address
+	return StatusOK
+}
+
 func (handler *testHandler) PortRead(device uint64, specification uint64, address uint64) Status {
 	return StatusOK
 }
@@ -324,6 +339,25 @@ func TestDispatchSystemInfo(t *testing.T) {
 	}
 }
 
+func TestDispatchCPUInformation(t *testing.T) {
+	handler := &testHandler{}
+	result := Dispatch(Request{Operation: OperationCPUInfo, Arg0: 0x7000, Arg1: CPUInfoSize}, handler)
+	if result.Status != StatusOK || handler.address != 0x7000 || handler.length != CPUInfoSize {
+		t.Fatalf("CPU info = %#v, handler: %#v", result, handler)
+	}
+	if result = Dispatch(Request{Operation: OperationCPUInfo, Arg1: CPUInfoSize - 1}, handler); result.Status != StatusInvalidArgument {
+		t.Fatalf("short CPU info = %#v", result)
+	}
+	result = Dispatch(Request{Operation: OperationCPUEntry, Arg0: 3, Arg1: 0x8000}, handler)
+	if result.Status != StatusOK || handler.length != 3 || handler.address != 0x8000 {
+		t.Fatalf("CPU entry = %#v, handler: %#v", result, handler)
+	}
+	result = Dispatch(Request{Operation: OperationCPUCacheInfo, Arg0: 2, Arg1: 0x9000}, handler)
+	if result.Status != StatusOK || handler.length != 2 || handler.address != 0x9000 {
+		t.Fatalf("CPU cache = %#v, handler: %#v", result, handler)
+	}
+}
+
 func TestDispatchStreamOperations(t *testing.T) {
 	handler := &testHandler{}
 	if result := Dispatch(Request{Operation: OperationStreamCreate, Arg0: 0x7000, Arg1: 16}, handler); result.Status != StatusOK {
@@ -487,7 +521,10 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationConsoleInfo != 49 {
 		t.Fatalf("console info operation %d", OperationConsoleInfo)
 	}
-	if result := Dispatch(Request{Operation: OperationConsoleInfo + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if OperationCPUInfo != 50 || OperationCPUEntry != 51 || OperationCPUCacheInfo != 52 {
+		t.Fatalf("CPU operations %d %d %d", OperationCPUInfo, OperationCPUEntry, OperationCPUCacheInfo)
+	}
+	if result := Dispatch(Request{Operation: OperationCPUCacheInfo + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}

@@ -103,6 +103,22 @@ goos_pause:
     pause
     retq
 
+// goos_cpuid(leaf, subleaf, target) preserves RBX and writes EAX, EBX, ECX,
+// EDX to the fixed register record named by target.
+.global goos_cpuid
+goos_cpuid:
+    pushq %rbx
+    movq %r8, %r9
+    movl %ecx, %eax
+    movl %edx, %ecx
+    cpuid
+    movl %eax, 0(%r9)
+    movl %ebx, 4(%r9)
+    movl %ecx, 8(%r9)
+    movl %edx, 12(%r9)
+    popq %rbx
+    retq
+
 .global goos_halt
 goos_halt:
     hlt

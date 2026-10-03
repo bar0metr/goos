@@ -272,6 +272,30 @@ goos_console_info:
     ret
 .size goos_console_info, .-goos_console_info
 
+.global goos_cpu_info
+.type goos_cpu_info,@function
+goos_cpu_info:
+    movl $50, %eax
+    int $0x80
+    ret
+.size goos_cpu_info, .-goos_cpu_info
+
+.global goos_cpu_entry
+.type goos_cpu_entry,@function
+goos_cpu_entry:
+    movl $51, %eax
+    int $0x80
+    ret
+.size goos_cpu_entry, .-goos_cpu_entry
+
+.global goos_cpu_cache_info
+.type goos_cpu_cache_info,@function
+goos_cpu_cache_info:
+    movl $52, %eax
+    int $0x80
+    ret
+.size goos_cpu_cache_info, .-goos_cpu_cache_info
+
 .global goos_validation_fault
 .type goos_validation_fault,@function
 goos_validation_fault:

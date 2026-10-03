@@ -222,14 +222,16 @@ Some calls authorize by caller identity or need nothing:
 | Operation | Authorization |
 | --- | --- |
 | `Exit`, `ClockRead`, `ClockReadNanos` | none |
-| `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo` | caller must be a registered process |
+| `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo`, `CPUInfo`, `CPUEntry`, `CPUCacheInfo` | caller must be a registered process |
 | `HandleInfo` | caller must be a registered process; describes only its own table |
 | `ChannelCreate` | caller must be PID 1 |
 
 `StreamCreate` is open because the new endpoints grant nothing beyond
 themselves (ADR 0040); the per-process stream quota bounds how many one
 process can hold (ADR 0072). `ProcessInfo` names no kernel object and reveals
-only process names, states, and accounting. The full list is in
+only process names, states, and accounting. The CPU information calls expose
+only immutable normalized boot records; they grant no CPUID, MSR, APIC, or CPU
+startup access. The full list is in
 [attack-surface.md](attack-surface.md).
 
 ## Linux processes

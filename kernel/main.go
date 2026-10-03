@@ -277,6 +277,7 @@ func main() {
 	// off (ADR 0092). The firmware's page tables are still loaded and
 	// identity-map all memory; firmware keeps its tables below 4 GiB.
 	systemPowerOff, systemPowerOffFound = acpi.FindPowerOff(bootuefi.PhysicalMemory{Limit: firmwareTableLimit}, bootInfo.ACPIRoot)
+	collectCPUInventory(bootuefi.PhysicalMemory{Limit: firmwareTableLimit}, bootInfo.ACPIRoot)
 	if systemPowerOffFound {
 		mark("ACPI_POWEROFF_OK")
 	}

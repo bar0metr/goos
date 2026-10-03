@@ -1,5 +1,7 @@
 package kcall
 
+import "goos/internal/cpuinfo"
+
 // MaxConsoleWrite bounds one console write.
 const MaxConsoleWrite = uint64(4096)
 
@@ -72,6 +74,9 @@ const (
 	// OperationConsoleInfo returns read-only terminal geometry and availability
 	// flags through an existing console capability.
 	OperationConsoleInfo
+	OperationCPUInfo
+	OperationCPUEntry
+	OperationCPUCacheInfo
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -144,6 +149,9 @@ type Handler interface {
 	LogBounds(device uint64, address uint64) Status
 	ConsoleInterrupt(device uint64) Status
 	ConsoleInfo(device uint64, address uint64, length uint64) Status
+	CPUInfo(address uint64, length uint64) Status
+	CPUEntry(index uint64, address uint64) Status
+	CPUCacheInfo(index uint64, address uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
@@ -263,6 +271,15 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.ConsoleInfo(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationCPUInfo:
+		if request.Arg1 != CPUInfoSize {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.CPUInfo(request.Arg0, request.Arg1)}
+	case OperationCPUEntry:
+		return Result{Status: handler.CPUEntry(request.Arg0, request.Arg1)}
+	case OperationCPUCacheInfo:
+		return Result{Status: handler.CPUCacheInfo(request.Arg0, request.Arg1)}
 	case OperationValidationFault:
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:
@@ -318,6 +335,12 @@ func Dispatch(request Request, handler Handler) Result {
 
 const MaxIPCMessage = uint64(320)
 const SystemInfoSize = uint64(40)
+
+const (
+	CPUInfoSize      = uint64(cpuinfo.SummarySize)
+	CPUEntrySize     = uint64(cpuinfo.CPUEntrySize)
+	CPUCacheInfoSize = uint64(cpuinfo.CacheInfoSize)
+)
 
 // ConsoleInfoSize is columns, rows, flags, then one reserved uint32.
 const ConsoleInfoSize = uint64(16)

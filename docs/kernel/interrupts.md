@@ -36,8 +36,10 @@ route, wakes the single capability-authorized waiter, and acknowledges the
 LAPIC. The driver acknowledges the device ISR; its next wait rearms the route.
 
 The current interrupt routing is deliberately single-CPU and single-device.
-ACPI MADT parsing, dynamic GSI routing, per-CPU timers, and calibrated time
-conversion are required before SMP.
+The kernel parses MADT processor entries for the read-only CPU inventory, but
+does not use MADT interrupt-controller entries to route devices or start APs.
+Dynamic GSI routing, per-CPU timers, and calibrated time conversion are
+required before SMP.
 
 ## Ring transition state
 
