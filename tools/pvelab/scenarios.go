@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,6 +179,7 @@ type Scenario interface {
 
 var scenarios = map[string]Scenario{
 	"smoke": smokeScenario{},
+	"lscpu": lscpuScenario{},
 	"linux": linuxScenario{},
 	"7zip":  sevenZipScenario{},
 }
@@ -231,6 +234,147 @@ func (smokeScenario) Run(ctx context.Context, s *Session) (Result, error) {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// lscpuScenario checks that the native command reports the VM topology and
+// the kernel's current bootstrap-only online state consistently in every
+// supported output mode.
+type lscpuScenario struct{}
+
+func (lscpuScenario) Name() string { return "lscpu" }
+
+func (lscpuScenario) Run(ctx context.Context, s *Session) (Result, error) {
+	g := s.Guest
+	sockets, cores := s.Report.VM.Sockets, s.Report.VM.Cores
+	if sockets < 1 || cores < 1 {
+		return "", failf(ClassConfig, "lscpu", "invalid VM topology: sockets=%d cores=%d", sockets, cores)
+	}
+	cpus := sockets * cores
+	want := map[string]string{
+		"Architecture:":        "x86_64",
+		"CPU(s):":              strconv.Itoa(cpus),
+		"On-line CPU(s) list:": "0",
+		"Thread(s) per core:":  "1",
+		"Core(s) per socket:":  strconv.Itoa(cores),
+		"Socket(s):":           strconv.Itoa(sockets),
+	}
+	if cpus > 1 {
+		want["Off-line CPU(s) list:"] = cpuRange(1, cpus-1)
+	}
+
+	summary, err := g.Run(ctx, "lscpu", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "lscpu-summary", err)
+	}
+	if err := g.Clean("lscpu-summary", summary); err != nil {
+		return "", err
+	}
+	if err := expectLscpuFields(g, "lscpu-summary", summaryFields(summary), want); err != nil {
+		return "", err
+	}
+
+	extended, err := g.Run(ctx, "lscpu -e=CPU,ONLINE,SOCKET,CORE,THREAD,APICID", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "lscpu-extended", err)
+	}
+	if err := g.Clean("lscpu-extended", extended); err != nil {
+		return "", err
+	}
+	if err := checkLscpuRows(g, extended, cpus); err != nil {
+		return "", err
+	}
+
+	jsonOut, err := g.Run(ctx, "lscpu -J", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "lscpu-json", err)
+	}
+	if err := g.Clean("lscpu-json", jsonOut); err != nil {
+		return "", err
+	}
+	fields, err := jsonLscpuFields(jsonOut)
+	if err != nil {
+		return "", failf(ClassScenario, "lscpu-json", "invalid JSON: %v", err)
+	}
+	if err := expectLscpuFields(g, "lscpu-json", fields, want); err != nil {
+		return "", err
+	}
+	return ResultPass, nil
+}
+
+func cpuRange(first, last int) string {
+	if first == last {
+		return strconv.Itoa(first)
+	}
+	return fmt.Sprintf("%d-%d", first, last)
+}
+
+func summaryFields(out string) map[string]string {
+	fields := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if ok {
+			fields[strings.TrimSpace(name)+":"] = strings.TrimSpace(value)
+		}
+	}
+	return fields
+}
+
+func expectLscpuFields(g *Guest, check string, got, want map[string]string) error {
+	for name, value := range want {
+		if got[name] != value {
+			return failf(ClassScenario, check, "%s = %q, want %q", name, got[name], value)
+		}
+	}
+	g.pass(check)
+	return nil
+}
+
+func checkLscpuRows(g *Guest, out string, cpus int) error {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	wantHeader := []string{"CPU", "ONLINE", "SOCKET", "CORE", "THREAD", "APICID"}
+	if len(lines) == 0 || strings.Join(strings.Fields(lines[0]), " ") != strings.Join(wantHeader, " ") {
+		return failf(ClassScenario, "lscpu-extended", "unexpected header:\n%s", out)
+	}
+	if len(lines)-1 != cpus {
+		return failf(ClassScenario, "lscpu-extended", "got %d CPU rows, want %d:\n%s", len(lines)-1, cpus, out)
+	}
+	for id, line := range lines[1:] {
+		cells := strings.Fields(line)
+		if len(cells) != len(wantHeader) || cells[0] != strconv.Itoa(id) {
+			return failf(ClassScenario, "lscpu-extended", "invalid CPU %d row %q", id, line)
+		}
+		wantOnline := "no"
+		if id == 0 {
+			wantOnline = "yes"
+		}
+		if cells[1] != wantOnline {
+			return failf(ClassScenario, "lscpu-extended", "CPU %d ONLINE = %q, want %q", id, cells[1], wantOnline)
+		}
+	}
+	g.pass("lscpu-extended")
+	return nil
+}
+
+func jsonLscpuFields(out string) (map[string]string, error) {
+	var document struct {
+		LSCPU []struct {
+			Field string `json:"field"`
+			Data  string `json:"data"`
+		} `json:"lscpu"`
+	}
+	if err := json.Unmarshal([]byte(out), &document); err != nil {
+		return nil, err
+	}
+	fields := make(map[string]string, len(document.LSCPU))
+	for _, field := range document.LSCPU {
+		fields[field.Field] = field.Data
+	}
+	return fields, nil
 }
 
 // linuxScenario runs the committed static Linux programs under KVM.
