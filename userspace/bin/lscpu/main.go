@@ -13,7 +13,7 @@ import (
 	"goos/userspace/utility"
 )
 
-var manifest = commands.Manifest{Usage: "lscpu [OPTION]...", Summary: "display CPU architecture information", MaxArgs: commands.Unbounded}
+var manifest = commands.Manifest{Usage: "lscpu [OPTION]...", Summary: "display CPU architecture information", Options: "-h, --help; -V, --version; -B, --bytes; -J, --json; -e, --extended[=LIST]; -p, --parse[=LIST]; -C, --caches[=LIST]; -H, --list-columns; -a, --all; -b, --online; -c, --offline; -r, --raw; -x, --hex; -y, --physical; --output-all", MaxArgs: commands.Unbounded}
 var outputBuffer [32 << 10]byte
 
 //export userspaceMain
@@ -100,10 +100,8 @@ func readCPUData() cpuData {
 func printHelp() {
 	utility.PrintText("usage: " + manifest.Usage)
 	utility.EndLine()
-	utility.PrintText("  -B, --bytes  -J, --json  -e, --extended[=LIST]  -p, --parse[=LIST]")
+	utility.PrintText("  " + manifest.Summary)
 	utility.EndLine()
-	utility.PrintText("  -C, --caches[=LIST]  -H, --list-columns  -a, -b, -c  -x, --hex")
-	utility.EndLine()
-	utility.PrintText("  -y, --physical  -r, --raw  --output-all  -V, --version")
+	utility.PrintText("  " + manifest.Options)
 	utility.EndLine()
 }

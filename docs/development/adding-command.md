@@ -70,6 +70,7 @@ source without compiling it, so every field must be a literal:
 | --- | --- |
 | `Usage` | Synopsis; must start with the command name. Printable ASCII, at most 96 bytes. |
 | `Summary` | One line for `help`. Printable ASCII, at most 96 bytes. |
+| `Options` | Optional command-specific option list printed by `help COMMAND` and `COMMAND --help`. Printable ASCII, at most 512 bytes. |
 | `MinArgs`, `MaxArgs` | Arguments after the name. `commands.Unbounded` for no limit. |
 | `Grants` | `commands.GrantVFS` if the command uses the filesystem, `commands.GrantTerminal` if it is full-screen, `commands.GrantLaunch` if it starts other full-screen commands; join several with `\|`; omit otherwise. |
 
@@ -101,9 +102,10 @@ A malformed manifest fails the build with the command's name and the reason.
 
 ## 4. What `utility` provides
 
-`utility.Run` binds the standard streams, answers `-h` and `--help`, checks the
-argument count, requires the VFS session when the manifest asks for one, calls
-`run`, and exits with status 0.
+`utility.Run` binds the standard streams, answers `-h` and `--help` from the
+manifest's usage, summary, and options, checks the argument count, requires the
+VFS session when the manifest asks for one, calls `run`, and exits with status
+0.
 
 | Need | Use |
 | --- | --- |

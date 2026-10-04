@@ -36,6 +36,7 @@ const Unbounded = -1
 // after the command name.
 type Manifest struct {
 	Usage, Summary   string
+	Options          string
 	MinArgs, MaxArgs int
 	Grants           Grant
 }
@@ -52,22 +53,23 @@ const (
 	BootstrapIndexPath = "/bootstrap/commands"
 	// MaxIndex bounds the index a reader has to hold.
 	MaxIndex = 4096
-	// MaxName, MaxUsage and MaxSummary bound one entry's fields.
+	// MaxName, MaxUsage, MaxSummary and MaxOptions bound one entry's fields.
 	MaxName    = 32
 	MaxUsage   = 96
 	MaxSummary = 96
+	MaxOptions = 512
 	// MaxArgs is the largest bounded argument count an entry may declare.
 	MaxArgs = 99
 	// IndexFormat names the line format below. An installed system records
 	// it, so a system built for another format is refused (ADR 0175).
-	IndexFormat = 1
+	IndexFormat = 2
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.
 type Entry struct {
-	Name, Usage, Summary []byte
-	MinArgs, MaxArgs     int
-	Grants               Grant
+	Name, Usage, Summary, Options []byte
+	MinArgs, MaxArgs              int
+	Grants                        Grant
 }
 
 // Accepts reports whether count arguments after the name are allowed.
@@ -79,7 +81,8 @@ func (entry Entry) Accepts(count int) bool {
 // It returns false at the end of the index and on any malformed line, so a
 // reader stops rather than trusting what follows.
 //
-// A line is NAME TAB GRANTS TAB MIN TAB MAX TAB USAGE TAB SUMMARY LF, with
+// A line is NAME TAB GRANTS TAB MIN TAB MAX TAB USAGE TAB SUMMARY TAB OPTIONS
+// LF, with
 // GRANTS, MIN and MAX in decimal and MAX written as "*" when unbounded.
 func Next(index []byte, offset int) (Entry, int, bool) {
 	if offset < 0 || offset >= len(index) {
@@ -92,7 +95,7 @@ func Next(index []byte, offset int) (Entry, int, bool) {
 	if end == len(index) {
 		return Entry{}, offset, false
 	}
-	var fields [6][]byte
+	var fields [7][]byte
 	count, start := 0, offset
 	for position := offset; position <= end; position++ {
 		if position < end && index[position] != '\t' {
@@ -116,9 +119,10 @@ func Next(index []byte, offset int) (Entry, int, bool) {
 		value, maximumOK = decimal(fields[3], MaxArgs)
 		maximum = int(value)
 	}
-	entry := Entry{Name: fields[0], Usage: fields[4], Summary: fields[5], MinArgs: int(minimum), MaxArgs: maximum, Grants: Grant(grants)}
+	entry := Entry{Name: fields[0], Usage: fields[4], Summary: fields[5], Options: fields[6], MinArgs: int(minimum), MaxArgs: maximum, Grants: Grant(grants)}
 	if !grantsOK || !minimumOK || !maximumOK || maximum != Unbounded && maximum < entry.MinArgs ||
-		!ValidName(entry.Name) || !validText(entry.Usage, MaxUsage) || !validText(entry.Summary, MaxSummary) {
+		!ValidName(entry.Name) || !validText(entry.Usage, MaxUsage) || !validText(entry.Summary, MaxSummary) ||
+		!validOptionalText(entry.Options, MaxOptions) {
 		return Entry{}, offset, false
 	}
 	return entry, end + 1, true
@@ -162,6 +166,7 @@ func Lookup(index []byte, name []byte) (Entry, bool) {
 // would reject, so the build fails instead of the index being cut short.
 func Append(target []byte, name string, manifest Manifest) ([]byte, bool) {
 	if !ValidName([]byte(name)) || !validText([]byte(manifest.Usage), MaxUsage) || !validText([]byte(manifest.Summary), MaxSummary) ||
+		!validOptionalText([]byte(manifest.Options), MaxOptions) ||
 		manifest.Grants&^knownGrants != 0 || manifest.MinArgs < 0 || manifest.MinArgs > MaxArgs ||
 		manifest.MaxArgs != Unbounded && (manifest.MaxArgs < manifest.MinArgs || manifest.MaxArgs > MaxArgs) {
 		return target, false
@@ -181,6 +186,8 @@ func Append(target []byte, name string, manifest Manifest) ([]byte, bool) {
 	target = append(target, manifest.Usage...)
 	target = append(target, '\t')
 	target = append(target, manifest.Summary...)
+	target = append(target, '\t')
+	target = append(target, manifest.Options...)
 	return append(target, '\n'), true
 }
 
@@ -210,6 +217,10 @@ func validText(text []byte, limit int) bool {
 		}
 	}
 	return true
+}
+
+func validOptionalText(text []byte, limit int) bool {
+	return len(text) == 0 || validText(text, limit)
 }
 
 func decimal(text []byte, limit uint64) (uint64, bool) {
