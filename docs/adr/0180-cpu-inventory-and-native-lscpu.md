@@ -36,10 +36,11 @@ require no capability and provide no operation that starts a processor,
 changes scheduling, reads an MSR, controls an APIC, or submits arbitrary
 CPUID leaves.
 
-Hardware-advertised and user-usable feature bitmaps are separate. AVX, FMA,
-AVX2, AVX-512, VAES, and VPCLMULQDQ remain absent from the usable bitmap until
-the kernel enables and preserves their required extended state. Missing facts
-are omitted rather than estimated.
+Hardware-advertised and user-usable feature bitmaps are separate. The usable
+bitmap omits XSAVE, OSXSAVE, FSGSBASE, PKU, AVX-family instructions, GFNI,
+VAES, and VPCLMULQDQ. The kernel does not enable their required CR4 or extended
+state, and the scheduler does not preserve it. Missing facts are omitted rather
+than estimated.
 
 `/system/bin/lscpu` formats only these immutable records. It never accesses
 firmware or hardware directly.

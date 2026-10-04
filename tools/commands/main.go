@@ -140,6 +140,8 @@ func decode(literal *ast.CompositeLit) (commands.Manifest, error) {
 			manifest.Usage, err = stringValue(field.Value)
 		case "Summary":
 			manifest.Summary, err = stringValue(field.Value)
+		case "Options":
+			manifest.Options, err = stringValue(field.Value)
 		case "MinArgs":
 			manifest.MinArgs, err = intValue(field.Value)
 		case "MaxArgs":

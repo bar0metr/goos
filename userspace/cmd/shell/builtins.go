@@ -63,7 +63,7 @@ func printHelp(invocation shellcmd.Invocation) {
 		}
 		if index, ok := systemCommands(); ok {
 			if entry, found := commands.Lookup(index, name); found {
-				writeUsageBytes(entry.Usage, entry.Summary)
+				writeUsageBytes(entry.Usage, entry.Summary, entry.Options)
 				mark("SHELL_HELP_COMMAND_OK\n")
 				return
 			}
@@ -106,15 +106,20 @@ func writeCommandLine(name, summary []byte) {
 func writeCommandHelp(info shellcmd.CommandInfo) { writeUsage(info.Usage, info.Summary) }
 
 func writeUsage(usage, summary string) {
-	writeUsageBytes([]byte(usage), []byte(summary))
+	writeUsageBytes([]byte(usage), []byte(summary), nil)
 }
 
-func writeUsageBytes(usage, summary []byte) {
+func writeUsageBytes(usage, summary, options []byte) {
 	write("usage: ")
 	writeBytes(usage)
 	write("\n  ")
 	writeBytes(summary)
 	write("\n")
+	if len(options) != 0 {
+		write("  ")
+		writeBytes(options)
+		write("\n")
+	}
 }
 
 // systemCommands returns the index of the commands this shell runs: the

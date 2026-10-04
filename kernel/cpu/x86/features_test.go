@@ -8,7 +8,7 @@ import (
 func TestDetectFeaturesMapsLeavesAndFiltersExtendedState(t *testing.T) {
 	input := source(map[leaf]Registers{
 		{1, 0}:          {ECX: 1<<12 | 1<<26 | 1<<27 | 1<<28 | 1<<29 | 1<<30, EDX: 1<<25 | 1<<26},
-		{7, 0}:          {EBX: 1<<0 | 1<<5 | 1<<16 | 1<<18, ECX: 1<<8 | 1<<9 | 1<<22, EDX: 1 << 14},
+		{7, 0}:          {EBX: 1<<0 | 1<<5 | 1<<16 | 1<<18, ECX: 1<<3 | 1<<8 | 1<<9 | 1<<22, EDX: 1 << 14},
 		{0x80000001, 0}: {ECX: 1<<2 | 1<<5, EDX: 1<<20 | 1<<29},
 	})
 	hardware, usable := DetectFeatures(input, 7, 0x80000001)
@@ -19,6 +19,7 @@ func TestDetectFeaturesMapsLeavesAndFiltersExtendedState(t *testing.T) {
 		cpuinfo.FeatureABM, cpuinfo.FeatureNX, cpuinfo.FeatureLM, cpuinfo.FeatureVAES,
 		cpuinfo.FeatureRDPID, cpuinfo.FeatureSERIALIZE, cpuinfo.FeatureXSAVE,
 		cpuinfo.FeatureOSXSAVE, cpuinfo.FeatureFSGSBASE, cpuinfo.FeatureGFNI,
+		cpuinfo.FeaturePKU,
 	} {
 		if !hardware.Has(feature) {
 			t.Errorf("hardware missing %s", cpuinfo.FeatureName(feature))
@@ -27,7 +28,7 @@ func TestDetectFeaturesMapsLeavesAndFiltersExtendedState(t *testing.T) {
 	for _, feature := range []cpuinfo.Feature{
 		cpuinfo.FeatureXSAVE, cpuinfo.FeatureOSXSAVE, cpuinfo.FeatureFMA,
 		cpuinfo.FeatureAVX, cpuinfo.FeatureF16C, cpuinfo.FeatureFSGSBASE,
-		cpuinfo.FeatureAVX2, cpuinfo.FeatureAVX512F, cpuinfo.FeatureGFNI,
+		cpuinfo.FeatureAVX2, cpuinfo.FeatureAVX512F, cpuinfo.FeaturePKU, cpuinfo.FeatureGFNI,
 		cpuinfo.FeatureVAES,
 	} {
 		if usable.Has(feature) {

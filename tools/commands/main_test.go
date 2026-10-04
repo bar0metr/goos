@@ -25,13 +25,13 @@ func TestBuildReadsManifestsInNameOrder(t *testing.T) {
 	writeCommand(t, root, "zz", `package main
 var manifest = commands.Manifest{Usage: "zz", Summary: "last"}`)
 	writeCommand(t, root, "aa", `package main
-var manifest = commands.Manifest{Usage: "aa FILE", Summary: "first", MinArgs: 1, MaxArgs: commands.Unbounded, Grants: commands.GrantVFS}`)
+var manifest = commands.Manifest{Usage: "aa FILE", Summary: "first", Options: "-f, --first", MinArgs: 1, MaxArgs: commands.Unbounded, Grants: commands.GrantVFS}`)
 	index, err := build(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first, next, ok := commands.Next(index, 0)
-	if !ok || string(first.Name) != "aa" || first.Grants != commands.GrantVFS || first.MaxArgs != commands.Unbounded || first.MinArgs != 1 {
+	if !ok || string(first.Name) != "aa" || string(first.Options) != "-f, --first" || first.Grants != commands.GrantVFS || first.MaxArgs != commands.Unbounded || first.MinArgs != 1 {
 		t.Fatalf("first = %+v", first)
 	}
 	if second, _, ok := commands.Next(index, next); !ok || string(second.Name) != "zz" {
@@ -101,6 +101,15 @@ func TestTheSystemCommandsBuild(t *testing.T) {
 	for _, name := range []string{"ls", "cat", "echo", "write", "mem", "uptime"} {
 		if _, found := commands.Lookup(index, []byte(name)); !found {
 			t.Fatalf("%s missing from the index", name)
+		}
+	}
+	lscpu, found := commands.Lookup(index, []byte("lscpu"))
+	if !found {
+		t.Fatal("lscpu missing from the index")
+	}
+	for _, option := range []string{"--help", "--version", "--bytes", "--json", "--extended", "--parse", "--caches", "--list-columns", "--all", "--online", "--offline", "--raw", "--hex", "--physical", "--output-all"} {
+		if !strings.Contains(string(lscpu.Options), option) {
+			t.Errorf("lscpu help missing %s: %q", option, lscpu.Options)
 		}
 	}
 }

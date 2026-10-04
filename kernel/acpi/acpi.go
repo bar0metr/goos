@@ -76,7 +76,7 @@ func findTable(memory Memory, root uint64, wanted string) ([]byte, bool) {
 	}
 	entries := uint64(len(table)-headerSize) / width
 	if entries > maxEntries {
-		return nil, false
+		entries = maxEntries
 	}
 	var addresses [maxEntries]uint64
 	for index := uint64(0); index < entries; index++ {

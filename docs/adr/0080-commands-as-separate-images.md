@@ -26,9 +26,9 @@ and not to the image, but the loader copies the whole image into every process.
 directories and builds one image per directory into `/system/bin/<name>`.
 
 **A command describes itself in its source.** Each declares
-`var manifest = commands.Manifest{...}` with its synopsis, summary, argument
-bounds and the grants it asks for. The program passes it to `utility.Run`, which
-answers `--help` and checks the arguments from it.
+`var manifest = commands.Manifest{...}` with its synopsis, summary, optional
+option list, argument bounds and the grants it asks for. The program passes it
+to `utility.Run`, which answers `--help` and checks the arguments from it.
 
 **The build turns the manifests into an index.** `tools/commands` reads each
 manifest from the syntax tree, validates it — literal fields only, a known
@@ -43,7 +43,9 @@ command without an entry gets the standard streams only. The index lives in the
 immutable system image, which is the same trust the images themselves have.
 
 **The shell lists commands from the index.** `help` prints the builtins from
-the shell's own table and the executables from the index.
+the shell's own table and the executables from the index. `help COMMAND` prints
+the same usage, summary, and option list as `COMMAND --help` without launching
+the command.
 
 **`userspace/utility` is a library.** It keeps the runtime hooks, startup, output,
 diagnostics and filesystem helpers the commands share, and no command logic.

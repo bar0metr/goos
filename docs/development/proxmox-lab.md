@@ -9,8 +9,8 @@ everything it made.
 The lab is optional. Building and testing GoOS never needs it, and no
 Proxmox target is part of `make test-all` or `make release-check`: the node is
 private infrastructure that may be offline or busy, and a release must not
-depend on it. `make test-hardware` runs the smoke and Linux scenarios and is
-recommended before a release, not required.
+depend on it. `make test-hardware` runs the smoke, lscpu, and Linux scenarios
+and is recommended before a release, not required.
 
 ## What a run does
 
@@ -145,9 +145,10 @@ flag.
 
 ```sh
 make test-pve-smoke     # boot, uname, ACPI poweroff
-make test-pve-smp       # the same with 4 vCPUs
+make test-pve-lscpu     # lscpu on 2 sockets x 2 cores
+make test-pve-smp       # alias for test-pve-lscpu
 make test-pve-linux     # the static Linux programs in /system/linux
-make test-hardware      # smoke and linux
+make test-hardware      # smoke, lscpu, and linux
 ```
 
 Each target rebuilds the lab inputs with `make pve-artifacts`: the ISO of the

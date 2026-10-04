@@ -76,6 +76,11 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 			PrintText("  ")
 			PrintText(manifest.Summary)
 			EndLine()
+			if manifest.Options != "" {
+				PrintText("  ")
+				PrintText(manifest.Options)
+				EndLine()
+			}
 			Exit(0)
 		}
 	}

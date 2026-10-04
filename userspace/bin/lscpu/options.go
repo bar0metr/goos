@@ -45,6 +45,7 @@ type options struct {
 	cacheColumns uint32
 	bytes        bool
 	json         bool
+	raw          bool
 	hex          bool
 	physical     bool
 	listColumns  bool
@@ -66,8 +67,10 @@ func (option *options) parse(argument []byte) string {
 		option.help = true
 	case "-V", "--version":
 		option.version = true
-	case "-B", "--bytes", "-r", "--raw":
+	case "-B", "--bytes":
 		option.bytes = true
+	case "-r", "--raw":
+		option.raw = true
 	case "-J", "--json":
 		option.json = true
 	case "-H", "--list-columns":
@@ -161,6 +164,18 @@ func (option *options) validate() string {
 	}
 	if option.json && option.mode != modeSummary {
 		return "JSON is supported only for summary output"
+	}
+	if option.raw && option.mode == modeSummary {
+		return "raw output requires extended, parse, or caches mode"
+	}
+	if option.hex && option.mode != modeSummary {
+		return "hex output is supported only for summary output"
+	}
+	if option.physical && option.mode != modeExtended && option.mode != modeParse {
+		return "physical IDs require extended or parse mode"
+	}
+	if option.outputAll && !option.tableSet {
+		return "output-all requires extended, parse, or caches mode"
 	}
 	if option.outputAll {
 		option.cpuColumns, option.cacheColumns = allCPUColumns, allCacheColumns

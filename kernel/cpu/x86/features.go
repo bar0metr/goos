@@ -91,7 +91,8 @@ func DetectFeatures(source Source, maximumBasicLeaf, maximumExtendedLeaf uint32)
 	for _, feature := range [...]cpuinfo.Feature{
 		cpuinfo.FeatureXSAVE, cpuinfo.FeatureOSXSAVE, cpuinfo.FeatureFMA,
 		cpuinfo.FeatureAVX, cpuinfo.FeatureF16C, cpuinfo.FeatureFSGSBASE,
-		cpuinfo.FeatureAVX2, cpuinfo.FeatureAVX512F, cpuinfo.FeatureGFNI,
+		cpuinfo.FeatureAVX2, cpuinfo.FeatureAVX512F, cpuinfo.FeaturePKU,
+		cpuinfo.FeatureGFNI,
 		cpuinfo.FeatureVAES, cpuinfo.FeatureVPCLMULQDQ,
 	} {
 		usable.Remove(feature)

@@ -146,6 +146,41 @@ func TestSmokeScenario(t *testing.T) {
 	}
 }
 
+func lscpuReplies() map[string]string {
+	return map[string]string{
+		"lscpu": "Architecture:             x86_64\nCPU(s):                   4\nOn-line CPU(s) list:      0\nOff-line CPU(s) list:     1-3\nThread(s) per core:       1\nCore(s) per socket:       2\nSocket(s):                2",
+		"lscpu -e=CPU,ONLINE,SOCKET,CORE,THREAD,APICID": "CPU ONLINE SOCKET CORE THREAD APICID\n0 yes 0 0 0 0\n1 no 0 1 0 1\n2 no 1 0 0 2\n3 no 1 1 0 3",
+		"lscpu -J": `{"lscpu":[{"field":"Architecture:","data":"x86_64"},{"field":"CPU(s):","data":"4"},{"field":"On-line CPU(s) list:","data":"0"},{"field":"Off-line CPU(s) list:","data":"1-3"},{"field":"Thread(s) per core:","data":"1"},{"field":"Core(s) per socket:","data":"2"},{"field":"Socket(s):","data":"2"}]}`,
+	}
+}
+
+func runLscpu(t *testing.T, replies map[string]string) (Result, error) {
+	t.Helper()
+	con, _ := fakeGuest{boot: normalBoot, replies: replies}.start(t)
+	s, report := newSession(con)
+	report.VM.Sockets, report.VM.Cores = 2, 2
+	if err := s.Guest.WaitBoot(context.Background(), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	return lscpuScenario{}.Run(context.Background(), s)
+}
+
+func TestLscpuScenario(t *testing.T) {
+	result, err := runLscpu(t, lscpuReplies())
+	if err != nil || result != ResultPass {
+		t.Fatalf("%s %v", result, err)
+	}
+}
+
+func TestLscpuScenarioRejectsWrongCPUCount(t *testing.T) {
+	replies := lscpuReplies()
+	replies["lscpu"] = strings.Replace(replies["lscpu"], "CPU(s):                   4", "CPU(s):                   3", 1)
+	_, err := runLscpu(t, replies)
+	if err == nil || classOf(err) != ClassScenario || !strings.Contains(err.Error(), `CPU(s): = "3", want "4"`) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestCleanOutput(t *testing.T) {
 	if got := cleanOutput("uname", "uname\r\nGoOS 0.2.2\r\n"+shellPrompt); got != "GoOS 0.2.2" {
 		t.Errorf("%q", got)

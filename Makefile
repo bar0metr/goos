@@ -130,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -342,6 +342,7 @@ test-all:
 	$(MAKE) lint
 	$(MAKE) docs
 	$(MAKE) test-boot
+	$(MAKE) test-lscpu
 	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -360,6 +361,7 @@ release-check:
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
+	$(MAKE) test-lscpu
 	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -706,8 +708,10 @@ pve-artifacts: iso
 test-pve-smoke: pve-artifacts
 	@$(PVELAB) run --scenario smoke $(PVE_RUN_FLAGS)
 
-test-pve-smp: pve-artifacts
-	@$(PVELAB) run --scenario smoke --cores 4 $(PVE_RUN_FLAGS)
+test-pve-lscpu: pve-artifacts
+	@$(PVELAB) run --scenario lscpu --cpu host --sockets 2 --cores 2 $(PVE_RUN_FLAGS)
+
+test-pve-smp: test-pve-lscpu
 
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
@@ -728,7 +732,7 @@ pve-run: pve-artifacts
 test-pvelab:
 	$(BUILD_ENV) go test ./tools/pvelab
 
-test-hardware: test-pve-smoke test-pve-linux
+test-hardware: test-pve-smoke test-pve-lscpu test-pve-linux
 
 clean:
 	@rm -rf $(BUILD_DIR)
@@ -785,6 +789,8 @@ help:
 	  '  clean           remove build artifacts' \
 	  '  toolchain-check validate tools and pinned versions (tools/toolchain.versions)' \
 	  '  pve-doctor      check the Proxmox lab settings in .env (docs/development/proxmox-lab.md)' \
-	  '  test-pve-smoke  boot a fresh disk on Proxmox under KVM; also test-pve-smp, test-pve-linux' \
+	  '  test-pve-smoke  boot a fresh disk on Proxmox under KVM' \
+	  '  test-pve-lscpu validate 2-socket, 4-vCPU topology; test-pve-smp is an alias' \
+	  '  test-pve-linux  run the static Linux programs on Proxmox' \
 	  '  test-pve-7zip LINUX_EXTRA=path  run a static 7zzs on Proxmox and report refused calls' \
 	  '  pve-run         boot on Proxmox and keep the VM for debugging'

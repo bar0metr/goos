@@ -54,7 +54,7 @@ func format(data cpuData, option options, target []byte) []byte {
 		out.text("CPU columns: CPU ONLINE SOCKET CORE THREAD APICID ACPIUID\n")
 		out.text("Cache columns: NAME ONE-SIZE ALL-SIZE TYPE LEVEL WAYS SETS COHERENCY-SIZE SHARED-CPUS\n")
 	case option.json:
-		formatJSON(&out, data)
+		formatJSON(&out, data, option)
 	case option.mode == modeExtended:
 		formatCPUTable(&out, data, option, false)
 	case option.mode == modeParse:
@@ -125,7 +125,7 @@ func formatSummary(out *output, data cpuData, option options) {
 	out.line("Flags:", func() { appendFeatures(out, summary.UsableFeatures) })
 }
 
-func formatJSON(out *output, data cpuData) {
+func formatJSON(out *output, data cpuData, option options) {
 	out.text("{\"lscpu\":[")
 	first := true
 	jsonField := func(field string, value func()) {
@@ -156,9 +156,29 @@ func formatJSON(out *output, data cpuData) {
 	}
 	jsonField("Byte Order:", func() { out.text("Little Endian") })
 	jsonField("CPU(s):", func() { out.uint(uint64(data.summary.PresentLogicalCPUs)) })
-	jsonField("On-line CPU(s) list:", func() { appendCPUList(out, data, true) })
+	setLabel := "On-line CPU(s) list:"
+	if option.hex {
+		setLabel = "On-line CPU(s) mask:"
+	}
+	jsonField(setLabel, func() {
+		if option.hex {
+			appendMask(out, data, true)
+		} else {
+			appendCPUList(out, data, true)
+		}
+	})
 	if data.summary.PresentLogicalCPUs > data.summary.OnlineCPUs {
-		jsonField("Off-line CPU(s) list:", func() { appendCPUList(out, data, false) })
+		setLabel = "Off-line CPU(s) list:"
+		if option.hex {
+			setLabel = "Off-line CPU(s) mask:"
+		}
+		jsonField(setLabel, func() {
+			if option.hex {
+				appendMask(out, data, false)
+			} else {
+				appendCPUList(out, data, false)
+			}
+		})
 	}
 	if data.summary.Vendor[0] != 0 {
 		jsonField("Vendor ID:", func() { jsonSafeText(out, data.summary.Vendor[:]) })
@@ -214,7 +234,7 @@ func formatJSON(out *output, data cpuData) {
 				if total, ok := aggregateCache(data.summary, cache); ok {
 					size = total
 				}
-				jsonField(wanted.label, func() { appendSize(out, size, false) })
+				jsonField(wanted.label, func() { appendSize(out, size, option.bytes) })
 				break
 			}
 		}
@@ -372,8 +392,8 @@ func appendCacheSummary(out *output, data cpuData, option options) {
 				continue
 			}
 			size := cache.Size
-			if data.summary.Validity&cpuinfo.ValidTopology != 0 && cache.SharingCount != 0 && data.summary.PresentLogicalCPUs%cache.SharingCount == 0 {
-				size *= uint64(data.summary.PresentLogicalCPUs / cache.SharingCount)
+			if total, ok := aggregateCache(data.summary, cache); ok {
+				size = total
 			}
 			out.line(wanted.label, func() { appendSize(out, size, option.bytes) })
 			break
@@ -406,10 +426,10 @@ func formatCPUTable(out *output, data cpuData, option options, parse bool) {
 	columns := option.cpuColumns
 	if parse {
 		out.byte('#')
-		appendCPUHeader(out, columns, ',')
+		appendCPUHeader(out, columns, ',', option.raw)
 		out.byte('\n')
 	} else {
-		appendCPUHeader(out, columns, ' ')
+		appendCPUHeader(out, columns, ' ', option.raw)
 		out.byte('\n')
 	}
 	for index := 0; index < data.entryCount; index++ {
@@ -428,6 +448,8 @@ func formatCPUTable(out *output, data cpuData, option options, parse bool) {
 			}
 			if !first {
 				if parse {
+					out.byte(separator)
+				} else if option.raw {
 					out.byte(separator)
 				} else {
 					out.text("  ")
@@ -465,7 +487,7 @@ func formatCPUTable(out *output, data cpuData, option options, parse bool) {
 	}
 }
 
-func appendCPUHeader(out *output, columns uint32, separator byte) {
+func appendCPUHeader(out *output, columns uint32, separator byte, raw bool) {
 	first := true
 	for _, column := range []struct {
 		bit  uint32
@@ -476,6 +498,8 @@ func appendCPUHeader(out *output, columns uint32, separator byte) {
 		}
 		if !first {
 			if separator == ',' {
+				out.byte(separator)
+			} else if raw {
 				out.byte(separator)
 			} else {
 				out.text("  ")
@@ -494,7 +518,7 @@ func appendTopologyCell(out *output, entry cpuinfo.CPUEntry, value uint32) {
 }
 
 func formatCacheTable(out *output, data cpuData, option options) {
-	appendCacheHeader(out, option.cacheColumns)
+	appendCacheHeader(out, option.cacheColumns, option.raw)
 	out.byte('\n')
 	for index := 0; index < data.cacheCount; index++ {
 		cache := data.caches[index]
@@ -504,7 +528,11 @@ func formatCacheTable(out *output, data cpuData, option options) {
 				return
 			}
 			if !first {
-				out.text("  ")
+				if option.raw {
+					out.byte(' ')
+				} else {
+					out.text("  ")
+				}
 			}
 			first = false
 			value()
@@ -544,7 +572,7 @@ func formatCacheTable(out *output, data cpuData, option options) {
 		out.byte('\n')
 	}
 }
-func appendCacheHeader(out *output, columns uint32) {
+func appendCacheHeader(out *output, columns uint32, raw bool) {
 	first := true
 	for _, column := range []struct {
 		bit  uint32
@@ -554,7 +582,11 @@ func appendCacheHeader(out *output, columns uint32) {
 			continue
 		}
 		if !first {
-			out.text("  ")
+			if raw {
+				out.byte(' ')
+			} else {
+				out.text("  ")
+			}
 		}
 		first = false
 		out.text(column.name)
