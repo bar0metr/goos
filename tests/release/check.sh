@@ -58,9 +58,9 @@ if grep -R -n 'goos_debug_write' userspace kernel >/dev/null 2>&1; then
 fi
 
 stray=$(git ls-files --others --exclude-standard; git ls-files --others --ignored --exclude-standard | grep -v '^build/' || true)
-# Finder's .DS_Store files are host metadata the repository ignores, not
-# build output.
-stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '\(^\|/\)\.DS_Store$' || true)
+# Finder's .DS_Store files are host metadata. The root .env is the documented,
+# ignored secret store for the optional Proxmox lab. Neither is build output.
+stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '^\.env$' -e '\(^\|/\)\.DS_Store$' || true)
 [ -z "$stray" ] || complain "files outside build/ that are not in the repository: $(printf '%s' "$stray" | tr '\n' ' ')"
 
 [ "$status" -eq 0 ] && printf 'PASS release checks (%s)\n' "$release"
