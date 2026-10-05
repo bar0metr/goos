@@ -3341,6 +3341,8 @@ static int threads_test(void)
  * rather than threads that merely completed. */
 #define SMP_WORKERS 16
 #define SMP_SECONDS 3
+/* A Linux process has eight tasks on GoOS: the main thread and seven more. */
+#define SMP_THREADS 7
 
 static int smp_count;
 static volatile int smp_go, smp_stop;
@@ -3615,8 +3617,8 @@ static int smp_test(void)
 		return 1;
 	}
 	smp_count = __builtin_popcountl(mask) + 1;
-	if (smp_count > SMP_WORKERS)
-		smp_count = SMP_WORKERS;
+	if (smp_count > SMP_THREADS)
+		smp_count = SMP_THREADS;
 	printf("smp cpus: %d online\n", __builtin_popcountl(mask));
 	for (index = 0; index < smp_count; index++)
 		if (pthread_create(&workers[index], NULL, smp_worker, (void *)index) != 0) {
@@ -3635,7 +3637,10 @@ static int smp_test(void)
 			migrated++;
 	}
 	printf("smp workers: %d on cpus %#lx, %d moved, %d parallel samples\n", smp_count, seen, migrated, overlaps);
-	if (seen != mask || (mask & (mask - 1)) != 0 && (overlaps == 0 || migrated == 0) || smp_fpu_bad) {
+	/* With fewer workers than processors, each worker must find one of its
+	 * own; with more, every processor must have run one. */
+	if (__builtin_popcountl(seen) < (smp_count < __builtin_popcountl(mask) ? smp_count : __builtin_popcountl(mask)) ||
+	    (seen & ~mask) != 0 || (mask & (mask - 1)) != 0 && (overlaps == 0 || migrated == 0) || smp_fpu_bad) {
 		printf("smp failed: cpus %#lx of %#lx, overlaps %d, moved %d, fpu %d\n", seen, mask, overlaps, migrated, smp_fpu_bad);
 		return 1;
 	}
@@ -3669,7 +3674,7 @@ static int smp_test(void)
 	printf("smp vm: discards and concurrent faults kept\n");
 	/* Measured before the spinners below start: they never stop. */
 	{
-		int threads = __builtin_popcountl(mask) > SMP_WORKERS ? SMP_WORKERS : __builtin_popcountl(mask);
+		int threads = __builtin_popcountl(mask) > SMP_THREADS ? SMP_THREADS : __builtin_popcountl(mask);
 		long tenths = smp_speedup(threads);
 
 		printf("smp speedup: %ld.%ld with %d threads\n", tenths / 10, tenths % 10, threads);

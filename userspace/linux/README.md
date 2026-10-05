@@ -58,7 +58,8 @@ joins them with their values and distinct TIDs and TLS, keeps two threads'
 registers and SSE state across seconds of preemption, has two threads read
 and write files at once, raises a signal in a thread, and ends the process
 with `exit_group` from a thread. `smp` starts one worker more than there are
-online processors (`sched_getaffinity`) and requires, from `getcpu`, that
+online processors (`sched_getaffinity`), at most the seven threads a GoOS
+process may add, and requires, from `getcpu`, that
 the workers ran on every processor, that some moved between processors, and
 that two of them computed on distinct processors within one window shorter
 than half a tick; it then contends for one mutex from four threads, discards a page
@@ -132,7 +133,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `f61aeab277855f7559786f52bd3c6a4932672af938cff358b45d0e379b5fef12` |
+| `prebuilt/abi-probe` | `84331bec6ac572586a0869be7e94766fb10aa8fd1cf0fe3e62627bbc8474d49d` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF
