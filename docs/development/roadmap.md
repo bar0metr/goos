@@ -8,7 +8,8 @@ The following foundation is already implemented:
 
 - UEFI boot and `ExitBootServices`;
 - physical and virtual memory management with NX/W^X foundations;
-- GDT/IDT, timer interrupts, guarded stacks, and preemptive scheduling;
+- GDT/IDT, timer interrupts, guarded stacks, and preemptive scheduling on
+  every processor;
 - Process/Task separation and per-process address spaces;
 - generation-safe typed handles and capability enforcement;
 - ring-3 native processes and a versioned native image format;
@@ -530,6 +531,15 @@ programs (ADR 0176) and Linux threads: thread-form `clone`, per-thread TLS,
 TIDs, signal masks, and sleeping `futex` waits (ADR 0177). Open files survive a
 FAT32 service restart (ADR 0178). 7-Zip runs with its own thread count.
 
+### Symmetric multiprocessing
+
+Every processor the firmware lists, up to 64, starts and runs tasks
+([SMP](../kernel/smp.md), ADR 0181 to ADR 0183). Threads of one process run
+in parallel; per-processor run queues, local APIC timers, reschedule
+interrupts, and TLB shootdown carry it. Kernel calls run one at a time under
+the kernel lock. Splitting that lock by process and by object type is the
+next step for workloads that spend their time in the kernel.
+
 ### Next: a Linux terminal
 
 The next release is to give Linux programs a terminal: a terminal descriptor,
@@ -567,7 +577,7 @@ Only after that milestone should a larger Go/TinyGo toolchain be evaluated.
 Do not move these ahead of the native application and storage milestones unless
 a concrete blocker requires them:
 
-- SMP;
+- splitting the kernel lock without a measured need;
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
 - networking;

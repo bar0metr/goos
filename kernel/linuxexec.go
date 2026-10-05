@@ -506,6 +506,11 @@ func commitLinuxExec(handler *linuxCallHandler, state *linuxExecState, compat *l
 	if !amd64.QuiesceTasks(siblings) {
 		panicSerial("Linux exec: a sibling thread did not stop")
 	}
+	// The ended threads belong to the old image. Their exits, delivered
+	// later, neither end the process nor give it their exit code.
+	for index := range siblings {
+		owner.DetachTask(siblings[index])
+	}
 	if !amd64.ReplaceTaskAddressSpace(handler.task, state.newRoot) {
 		panicSerial("prepared Linux exec task root refused at commit")
 	}

@@ -246,8 +246,6 @@ controls the system ([boot-chain.md](boot-chain.md)).
 
 ## Out of scope for 0.1
 
-- SMP. The single exclusion domain (interrupts disabled, ADR 0053) is correct
-  only on one CPU.
 - IOMMU. DMA is not confined (see compromised driver).
 - ASLR. Kernel and user layouts are fixed (kernel image at `0x400000`, user
   code at `0x40002000`). What would have to change is described in

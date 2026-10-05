@@ -12,6 +12,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -220,7 +221,32 @@ func dumpDiagnostics(requester process.ID) {
 	out.hex("dead", state.Dead)
 	out.uint("slots", state.Count)
 	out.uint("current", state.Current)
+	out.hex("running", state.Running)
+	out.hex("online", state.Online)
+	out.uint("switches", state.Stats.Switches)
+	out.uint("steals", state.Stats.Steals)
+	out.uint("migrations", state.Stats.Migrations)
+	out.uint("kills", state.Stats.Kills)
+	out.uint("parallel-peak", amd64.ParallelPeak())
+	out.uint("lock-contention", lock.Contended())
+	shootdowns, targets, timeouts := amd64.ShootdownStats()
+	out.uint("shootdowns", shootdowns)
+	out.uint("shootdown-ipis", targets)
+	out.uint("shootdown-timeouts", timeouts)
 	out.end()
+	for cpu := 0; cpu < amd64.MaxCPUs; cpu++ {
+		if state.Online&(uint64(1)<<uint(cpu)) == 0 {
+			continue
+		}
+		counters := amd64.ProcessorCounters(cpu)
+		out.text("DIAG cpu")
+		out.uint("index", uint64(cpu))
+		out.uint("ticks", counters.Ticks)
+		out.uint("idle", amd64.IdleTicks(cpu))
+		out.uint("resched-ipis", counters.RescheduleIPIs)
+		out.uint("shootdown-ipis", counters.ShootdownIPIs)
+		out.end()
+	}
 	for index := 0; ; index++ {
 		owner, found := processRegistry.At(index)
 		if !found {

@@ -6,6 +6,7 @@ import (
 	"goos/internal/validation"
 	"goos/kernel/lock"
 	"goos/kernel/sched"
+	"math/bits"
 	"sync/atomic"
 )
 
@@ -84,6 +85,9 @@ var (
 	cpuGeneration    [MaxCPUs]uint64
 	// online mirrors runState's online mask for readers outside the lock.
 	online atomic.Uint64
+	// parallelPeak is the most tasks of one address space that ran on
+	// distinct processors at once.
+	parallelPeak atomic.Uint64
 )
 
 // CPUIndex returns the calling processor's index; processor 0 is the
@@ -161,6 +165,9 @@ func schedSwitch(action uint64) uint64 {
 		taskExitCodes[previous] = killCodes[previous]
 	}
 	next := runState.Switch(cpu, sched.Action(action))
+	if next != sched.Idle && next >= kernelTasks {
+		noteParallel(taskRoots[next])
+	}
 	atomic.StoreUint64(&cpuData[cpu][cpuNeedResched], 0)
 	leave := uint64(0)
 	if runState.MustLeave(cpu) {
@@ -178,6 +185,25 @@ func schedSwitch(action uint64) uint64 {
 	}
 	return asmSlot(next, cpu)
 }
+
+// noteParallel counts the processors that run a task of root, the caller's
+// next task included, and raises the peak. The scheduler lock is held.
+func noteParallel(root uint64) {
+	count := uint64(0)
+	for mask := runState.OnlineMask(); mask != 0; mask &= mask - 1 {
+		cpu := bits.TrailingZeros64(mask)
+		if slot := runState.Current(cpu); slot != sched.Idle && taskRoots[slot] == root {
+			count++
+		}
+	}
+	if count > parallelPeak.Load() {
+		parallelPeak.Store(count)
+	}
+}
+
+// ParallelPeak returns the most tasks of one address space that ran on
+// distinct processors at the same time since boot.
+func ParallelPeak() uint64 { return parallelPeak.Load() }
 
 // schedFinish runs on the incoming task's stack once the outgoing slot's
 // stack is no longer in use.
@@ -233,8 +259,11 @@ func KernelUnlock(flags uint64) {
 func HoldsKernelLock() bool { return kernelLock.HeldByCaller() }
 
 // kernelEnter takes the kernel lock for a system call or user fault. It
-// gives up, returning zero, when the calling task is killed while it waits:
-// the processor that killed it may hold the lock until the task is gone.
+// gives up, returning zero, when the calling task is killed or held: while
+// it waits, because the processor that stopped it may hold the lock until
+// the task is gone, and once it has the lock, because a stopped task must
+// not start a call whose waits nobody would cancel. The processor that
+// stopped it set the request before it released the lock.
 //
 //export goos_kernel_enter
 func kernelEnter() uint64 {
@@ -244,6 +273,10 @@ func kernelEnter() uint64 {
 			return 0
 		}
 		cpuPause()
+	}
+	if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
+		kernelLock.Unlock()
+		return 0
 	}
 	return 1
 }

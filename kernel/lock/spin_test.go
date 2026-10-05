@@ -1,6 +1,7 @@
 package lock
 
 import (
+	"goos/internal/validation"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -8,6 +9,9 @@ import (
 )
 
 func TestSpinExcludesConcurrentHolders(t *testing.T) {
+	if validation.Enabled {
+		t.Skip("goroutines share one processor index, which validation builds treat as recursion")
+	}
 	Install(Hooks{Pause: runtime.Gosched})
 	defer Install(Hooks{})
 	var spin Spin
@@ -43,7 +47,8 @@ func TestTryLock(t *testing.T) {
 	if !spin.TryLock() {
 		t.Fatal("free lock refused")
 	}
-	if spin.TryLock() {
+	// A validation build treats the holder's second attempt as recursion.
+	if !validation.Enabled && spin.TryLock() {
 		t.Fatal("held lock taken twice")
 	}
 	spin.Unlock()

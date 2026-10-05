@@ -374,6 +374,7 @@ test-unit:
 	$(BUILD_ENV) go test ./...
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
 	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
+	$(BUILD_ENV) go test -tags goos_validation ./kernel/lock
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
@@ -729,7 +730,9 @@ test-pve-smoke: pve-artifacts
 test-pve-lscpu: pve-artifacts
 	@$(PVELAB) run --scenario lscpu --cpu host --sockets 2 --cores 2 $(PVE_RUN_FLAGS)
 
-test-pve-smp: test-pve-lscpu
+test-pve-smp: pve-artifacts
+	@$(PVELAB) run --scenario lscpu --cpu host --sockets 2 --cores 2 $(PVE_RUN_FLAGS)
+	@$(PVELAB) run --scenario smp --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)

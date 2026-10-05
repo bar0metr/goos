@@ -18,8 +18,7 @@ fixed sizes before calling the handler in the file for its area: `devicecalls.go
 `imagemap.go`.
 Unknown numbers return `Unsupported`.
 
-Every call runs with interrupts disabled, inside the kernel exclusion domain
-(ADR 0053). The caller is identified by its CR3 root, and blocking calls also
+Every call runs with interrupts disabled under the kernel lock (ADR 0182). The caller is identified by its CR3 root, and blocking calls also
 receive the task slot. Results are a `kcall.Status` in `RAX`. Blocking calls
 park the task and re-execute the call on wake (ADR 0015).
 
@@ -205,11 +204,12 @@ rate. Process and task slots are consumed only through PID 1 launches.
 CPU is accounted, not limited: the timer charges a tick to the task it
 interrupted, and `ps` reports the total per process. Nothing refuses a process
 that never yields. Under round-robin on one CPU that costs throughput, not
-progress; it would need a policy before SMP.
+progress, on each processor alike.
 
 ### Work with interrupts disabled
 
-Each call runs to completion with interrupts off. The longest native calls are
+Each call runs to completion with interrupts off on its processor, holding
+the kernel lock, so a long call also delays other processors' calls. The longest native calls are
 `ConsoleWrite` (up to 4096 bytes to the UART) and, in diagnostic
 builds, `Diagnostics`. Process launch runs in housekeeping, also with
 interrupts off, and takes about 2 ms (ADR 0057).

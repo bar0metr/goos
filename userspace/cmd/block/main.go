@@ -278,6 +278,13 @@ func userspaceMain() {
 		if filesystemHandle == 0 {
 			count--
 		}
+		// A restarted service has no driver until PID 1 hands one over,
+		// and the restarted filesystem service may ask for its volume
+		// first. Requests wait in their channels until the driver is here,
+		// so the volume is not refused for a device that is on its way.
+		if driverHandle == 0 {
+			count = 1
+		}
 		var interests [userwait.MaxObjects]userwait.Interest
 		for index, endpoint := range endpoints[:count] {
 			interests[index] = userwait.Interest{Handle: endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}

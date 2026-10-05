@@ -122,6 +122,12 @@ Linux `fork`, `vfork`, and process-form `clone` create a Process with a private
 address space and its first Task. Thread-form `clone` adds a Task to the
 caller's Process and address space. Each Linux thread owns a 64 KiB file-I/O
 object, created on its first file call and released at thread exit (ADR 0177).
+The tasks of one Process run on different processors at the same time; a task
+starts only once its process binding, thread record, TLS, FPU state, and TID
+writes exist (ADR 0182). A fatal fault or `exit_group` in one thread kills the
+others wherever they run: each processor stops its task at its next
+scheduling point, and the Process's resources are reclaimed only after every
+task has left its processor.
 
 The compatibility state holds the process's Linux identity and its VFS channel
 handle. The family owns the VFS request counter, failed-session state, and a
@@ -145,13 +151,16 @@ system call returns act on (ADR 0163, ADR 0177).
 A Linux `execve` prepares a second address space under the same Process and
 task (ADR 0157). Commit replaces the scheduler root, Process root, region map,
 compatibility root, brk bounds, and entry state without changing Process ID,
-task ownership, family identity, quotas, handles, or cwd. The old address space
-is inactive before reclamation begins.
+task ownership, family identity, quotas, handles, or cwd. Commit kills the
+process's other threads and waits until each has left its processor, so none
+runs the old image after exec returns, and the old address space is inactive
+before reclamation begins.
 
 A Linux `fork` creates an ordinary Process in the native registry
 (ADR 0158). It copies the parent's ABI, quota limits, region map, and every
 touched page into a new address space, and receives only the parent's VFS
-channel capability. Its task starts with the parent's registers. PID 1 holds
+channel capability. The parent's other threads are held off their processors
+while the pages are copied, so the child gets one moment's memory. Its task starts with the parent's registers. PID 1 holds
 no handle to it and gets no lifecycle message when it exits. The family VFS
 context keeps the shared channel endpoint open until the last member exits.
 

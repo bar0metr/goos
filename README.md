@@ -77,12 +77,16 @@ The native kernel and the first isolated services are implemented:
 - kernel-owned GDT and IDT tables;
 - gates for all architectural CPU exception vectors;
 - a live INT3 exception-path self-test;
-- a PIT bootstrap timer at the rate named by `kernel/clock` through a remapped
-  legacy PIC;
+- a PIT bootstrap timer that calibrates the TSC and the local APIC timers,
+  which then tick each processor at the rate named by `kernel/clock`;
+- symmetric multiprocessing: every processor the firmware lists, up to 64,
+  starts through a low trampoline and runs tasks from its own run queue, with
+  reschedule interrupts, TLB shootdown, and explicit kernel locks
+  ([SMP](docs/kernel/smp.md));
 - hardware IRQ delivery with end-of-interrupt acknowledgement;
 - a bounded architecture-neutral Task and round-robin run-queue model;
 - timer-preempted x86_64 context switching across independent kernel stacks;
-- two live worker tasks and an idle task;
+- two live worker tasks and an idle loop on every processor;
 - two unmapped guard pages below every created kernel-task stack, with every
   kernel frame bounded by them at build time;
 - task blocking and explicit wakeup in the live IRQ scheduler;
@@ -606,6 +610,12 @@ glibc compatibility, Linux threads with per-thread TLS and signal state, and
 sleeping futex waits. The kernel also publishes a bounded, read-only CPU
 inventory derived from CPUID and ACPI MADT data; the native `lscpu` command
 formats it without exposing raw hardware access to userspace.
+
+Every processor in that inventory now starts and runs tasks, so the threads of
+one program compute in parallel; `lscpu` lists the processors that joined the
+scheduler as online. Kernel calls still run one at a time under a kernel lock
+(ADR 0182). `make test-smp` boots four processors and proves overlapping
+execution.
 
 Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
 and capability model and does not weaken the native architecture for POSIX

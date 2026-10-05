@@ -34,8 +34,10 @@ through the direct map and a process mapping (`PMM_HIGH_OK`). Within a
 segment, the search starts after the last allocation, falls back to the
 lowest freed page, skips bitmap words that have no free page, and finds the
 first free bit with a trailing-zero count, so a long used run costs one test
-per 64 pages (ADR 0057). Allocation, release, and every other change to
-allocator state happen inside the kernel exclusion domain of ADR 0053.
+per 64 pages (ADR 0057). Allocation, release, and every other operation take
+the allocator's own lock, so processors allocate and free concurrently and no
+page reaches two owners (ADR 0182). Unmapped process pages return to it only
+after a TLB shootdown (ADR 0183).
 
 The allocator counts the usable pages it manages, its bitmap included, and
 how many are free; `mem` reports both. `make MEMORY=4G run` and

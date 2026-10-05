@@ -3569,6 +3569,39 @@ static int smp_exec_with_threads(void)
 	return child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 }
 
+/* smp_speedup times a fixed amount of SSE work done by one thread, then the
+ * same work split over threads threads, and returns the ratio in tenths. It
+ * is a coarse sanity figure, not a pass mark: host load moves it. */
+#define SMP_UNITS 96
+
+static void *smp_units(void *argument)
+{
+	long units = (long)argument, index;
+
+	for (index = 0; index < units; index++)
+		smp_slice(SMP_WORKERS);
+	return NULL;
+}
+
+static long smp_speedup(int threads)
+{
+	pthread_t helpers[SMP_WORKERS];
+	long start, single, parallel;
+	int index;
+
+	start = smp_now_us();
+	smp_units((void *)(long)SMP_UNITS);
+	single = smp_now_us() - start;
+	start = smp_now_us();
+	for (index = 0; index < threads; index++)
+		if (pthread_create(&helpers[index], NULL, smp_units, (void *)(long)(SMP_UNITS / threads)) != 0)
+			return 0;
+	for (index = 0; index < threads; index++)
+		pthread_join(helpers[index], NULL);
+	parallel = smp_now_us() - start;
+	return parallel > 0 ? single * 10 / parallel : 0;
+}
+
 static int smp_test(void)
 {
 	pthread_t workers[SMP_WORKERS];
@@ -3633,7 +3666,14 @@ static int smp_test(void)
 			printf("smp failed: concurrent fault lost a write\n");
 			return 1;
 		}
-	printf("smp vm: remap and concurrent faults kept\n");
+	printf("smp vm: discards and concurrent faults kept\n");
+	/* Measured before the spinners below start: they never stop. */
+	{
+		int threads = __builtin_popcountl(mask) > SMP_WORKERS ? SMP_WORKERS : __builtin_popcountl(mask);
+		long tenths = smp_speedup(threads);
+
+		printf("smp speedup: %ld.%ld with %d threads\n", tenths / 10, tenths % 10, threads);
+	}
 	/* fork from a process whose other threads run */
 	for (index = 0; index < 4; index++)
 		pthread_create(&workers[index], NULL, smp_spinner, NULL);

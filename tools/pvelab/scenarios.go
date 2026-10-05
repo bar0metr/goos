@@ -180,6 +180,7 @@ type Scenario interface {
 var scenarios = map[string]Scenario{
 	"smoke": smokeScenario{},
 	"lscpu": lscpuScenario{},
+	"smp":   smpScenario{},
 	"linux": linuxScenario{},
 	"7zip":  sevenZipScenario{},
 }
@@ -236,9 +237,8 @@ func (smokeScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	}
 }
 
-// lscpuScenario checks that the native command reports the VM topology and
-// the kernel's current bootstrap-only online state consistently in every
-// supported output mode.
+// lscpuScenario checks that the native command reports the VM topology, with
+// every processor online, consistently in every supported output mode.
 type lscpuScenario struct{}
 
 func (lscpuScenario) Name() string { return "lscpu" }
@@ -253,13 +253,10 @@ func (lscpuScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	want := map[string]string{
 		"Architecture:":        "x86_64",
 		"CPU(s):":              strconv.Itoa(cpus),
-		"On-line CPU(s) list:": "0",
+		"On-line CPU(s) list:": cpuRange(0, cpus-1),
 		"Thread(s) per core:":  "1",
 		"Core(s) per socket:":  strconv.Itoa(cores),
 		"Socket(s):":           strconv.Itoa(sockets),
-	}
-	if cpus > 1 {
-		want["Off-line CPU(s) list:"] = cpuRange(1, cpus-1)
 	}
 
 	summary, err := g.Run(ctx, "lscpu", commandTimeout)
@@ -348,12 +345,8 @@ func checkLscpuRows(g *Guest, out string, cpus int) error {
 		if len(cells) != len(wantHeader) || cells[0] != strconv.Itoa(id) {
 			return failf(ClassScenario, "lscpu-extended", "invalid CPU %d row %q", id, line)
 		}
-		wantOnline := "no"
-		if id == 0 {
-			wantOnline = "yes"
-		}
-		if cells[1] != wantOnline {
-			return failf(ClassScenario, "lscpu-extended", "CPU %d ONLINE = %q, want %q", id, cells[1], wantOnline)
+		if cells[1] != "yes" {
+			return failf(ClassScenario, "lscpu-extended", "CPU %d ONLINE = %q, want \"yes\"", id, cells[1])
 		}
 	}
 	g.pass("lscpu-extended")
@@ -411,6 +404,32 @@ func (linuxScenario) Run(ctx context.Context, s *Session) (Result, error) {
 			return "", failf(ClassScenario, p.check, "output reports a failure:\n%s", out)
 		}
 	}
+	return ResultPass, nil
+}
+
+// smpScenario runs the Linux probe's smp mode on real virtualization: the
+// workers must run on every online processor, overlap in time on distinct
+// processors, and survive fork, exec, contended locks, and page discards.
+type smpScenario struct{}
+
+func (smpScenario) Name() string { return "smp" }
+
+func (smpScenario) Run(ctx context.Context, s *Session) (Result, error) {
+	g := s.Guest
+	cpus := s.Report.VM.Sockets * s.Report.VM.Cores
+	out, err := g.Run(ctx, "/system/linux/abi-probe smp", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "smp", err)
+	}
+	for _, want := range []string{fmt.Sprintf("smp cpus: %d online", cpus), "smp workers:", "smp futex:", "smp vm:", "smp exec:", "smp ok"} {
+		if err := g.Expect("smp", out, want); err != nil {
+			return "", err
+		}
+	}
+	if err := g.Clean("smp", out); err != nil {
+		return "", err
+	}
+	g.pass("smp")
 	return ResultPass, nil
 }
 

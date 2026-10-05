@@ -159,3 +159,26 @@ func TestRegistryAuthorizesOnlyTheProcessABI(t *testing.T) {
 		t.Fatal("missing process or invalid ABI authorized")
 	}
 }
+
+// A task exec ended leaves the process at once: when the new image exits
+// first, the process ends with its code, and the old thread's later exit
+// is unknown to the registry.
+func TestDetachedTaskNeitherEndsNorCodesTheProcess(t *testing.T) {
+	owner, _ := New(1, ABINative, AddressSpace{Root: 0x1000})
+	var registry Registry
+	registry.Add(&owner)
+	survivor, _ := sched.NewTaskID(3, 1)
+	ended, _ := sched.NewTaskID(4, 1)
+	registry.BindTask(1, survivor)
+	registry.BindTask(1, ended)
+	if !owner.DetachTask(ended) || owner.DetachTask(ended) || owner.TaskCount() != 1 {
+		t.Fatal("detach failed")
+	}
+	event, report := registry.ReportTaskExit(survivor, 0)
+	if report != ExitProcessEnded || event.Code != 0 {
+		t.Fatalf("process exit = %#v, report = %d", event, report)
+	}
+	if _, report := registry.ReportTaskExit(ended, 9); report != ExitUnknownTask {
+		t.Fatalf("detached task report = %d", report)
+	}
+}

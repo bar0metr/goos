@@ -144,16 +144,22 @@ bytes from the ring, so a bad buffer cannot lose data.
   restores the zeroing guarantee the Go compiler relies on (ADR 0048).
 - A reused scheduler slot starts from a clean FXSAVE image (ADR 0056).
 
-## Kernel exclusion domain
+## Kernel locks
 
-The kernel has one exclusion domain on its single CPU: interrupts disabled
-(ADR 0053). Native calls enter through an interrupt gate and run inside it.
-Kernel housekeeping (`serviceKernel`) disables interrupts for each step:
-deadline expiry, lifecycle retry, exit delivery, and one launch. Kernel code in
-task context must enter the domain before touching the allocator, registries,
-handle tables, wait sets, or the lifecycle queue. Without this rule a preempted
-update exposes torn state, for example a physical page handed to two owners.
-SMP will need real locks; the domain marks where.
+Disabling interrupts excludes only the local processor. Shared kernel state
+has explicit locks, taken in a fixed level order with interrupts disabled
+(ADR 0182, [SMP](../kernel/smp.md)): the kernel lock over the object layer,
+the page allocator's lock, the scheduler lock, and the console lock. Native
+calls, Linux calls, user fault resolution, and each housekeeping step run
+under the kernel lock. Kernel code in task context takes it before it touches
+registries, handle tables, wait sets, or the lifecycle queue. Without this
+rule two processors would expose torn state to each other, for example a
+physical page handed to two owners. Validation builds check the lock order,
+recursion, and the scheduler's invariants at run time.
+
+A page unmapped from a process goes back to the allocator only after every
+other processor that ran the process has dropped its translations
+(ADR 0183).
 
 ## Task context includes SSE
 

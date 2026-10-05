@@ -198,6 +198,14 @@ processor flushes its TLB at its next switch when the kernel's generation
 counter moved; only the processor that runs a task touches its stack, and it
 switches to the task first.
 
+## Diagnostics
+
+In a diagnostic build, `diag` prints the run state (running and online
+masks, switches, steals, migrations, kills), the most tasks of one address
+space that ran on distinct processors at once (`parallel-peak`), lock
+contention, shootdown counts, and per processor its ticks, idle ticks, and
+received reschedule and shootdown interrupts. Nothing is logged per switch.
+
 ## Panics
 
 A kernel panic stops the other processors with the stop vector, then prints

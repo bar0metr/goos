@@ -148,9 +148,9 @@ func TestSmokeScenario(t *testing.T) {
 
 func lscpuReplies() map[string]string {
 	return map[string]string{
-		"lscpu": "Architecture:             x86_64\nCPU(s):                   4\nOn-line CPU(s) list:      0\nOff-line CPU(s) list:     1-3\nThread(s) per core:       1\nCore(s) per socket:       2\nSocket(s):                2",
-		"lscpu -e=CPU,ONLINE,SOCKET,CORE,THREAD,APICID": "CPU ONLINE SOCKET CORE THREAD APICID\n0 yes 0 0 0 0\n1 no 0 1 0 1\n2 no 1 0 0 2\n3 no 1 1 0 3",
-		"lscpu -J": `{"lscpu":[{"field":"Architecture:","data":"x86_64"},{"field":"CPU(s):","data":"4"},{"field":"On-line CPU(s) list:","data":"0"},{"field":"Off-line CPU(s) list:","data":"1-3"},{"field":"Thread(s) per core:","data":"1"},{"field":"Core(s) per socket:","data":"2"},{"field":"Socket(s):","data":"2"}]}`,
+		"lscpu": "Architecture:             x86_64\nCPU(s):                   4\nOn-line CPU(s) list:      0-3\nThread(s) per core:       1\nCore(s) per socket:       2\nSocket(s):                2",
+		"lscpu -e=CPU,ONLINE,SOCKET,CORE,THREAD,APICID": "CPU ONLINE SOCKET CORE THREAD APICID\n0 yes 0 0 0 0\n1 yes 0 1 0 1\n2 yes 1 0 0 2\n3 yes 1 1 0 3",
+		"lscpu -J": `{"lscpu":[{"field":"Architecture:","data":"x86_64"},{"field":"CPU(s):","data":"4"},{"field":"On-line CPU(s) list:","data":"0-3"},{"field":"Thread(s) per core:","data":"1"},{"field":"Core(s) per socket:","data":"2"},{"field":"Socket(s):","data":"2"}]}`,
 	}
 }
 

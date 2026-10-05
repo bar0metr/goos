@@ -116,11 +116,12 @@ run '/system/linux/abi-probe smp'
 expect "^smp cpus: $cpus online\$" 'smp: sched_getaffinity'
 expect '^smp workers: ' 'smp: workers ran'
 expect '^smp futex: ' 'smp: contended mutex'
-expect '^smp vm: ' 'smp: remaps and faults'
+expect '^smp vm: ' 'smp: discards and faults'
+expect '^smp speedup: ' 'smp: speedup measured'
 expect '^smp lifecycle: ' 'smp: fork beside threads'
 expect '^smp exec: ' 'smp: exec beside threads'
 expect '^smp ok$' 'smp probe'
-sed -n 's/^smp workers: /  workers: /p' "$work/output"
+sed -n -e 's/^smp workers: /  workers: /p' -e 's/^smp speedup: /  speedup: /p' "$work/output"
 
 for mode in threads fpstate vfork wait pipe signal kill; do
 	run "/system/linux/abi-probe $mode"
