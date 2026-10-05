@@ -278,6 +278,9 @@ func kernelEnter() uint64 {
 		kernelLock.Unlock()
 		return 0
 	}
+	schedulerLock.Lock()
+	runState.ForgetWake(cpu)
+	schedulerLock.Unlock()
 	return 1
 }
 

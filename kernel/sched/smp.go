@@ -174,6 +174,16 @@ func (core *Core) Wake(slot int, self int) (int, bool) {
 	return core.place(slot, self), true
 }
 
+// ForgetWake drops a wake recorded for the task a processor runs. A call
+// clears it when it enters the kernel: a wait it registers there may only be
+// kept from sleeping by a wake that came after, for that wait, and not by a
+// wake meant for one that already ended.
+func (core *Core) ForgetWake(cpu int) {
+	if slot := int(core.current[cpu]); slot != Idle {
+		core.wakePending &^= bit(slot)
+	}
+}
+
 // Block parks the task a processor runs unless a wake is pending for it. The
 // processor switches away at its next scheduling point.
 func (core *Core) Block(cpu int) {

@@ -170,6 +170,18 @@ holds the lock while it waits for that task to leave cannot deadlock.
 | Per-processor data blocks, TSS, idle slots | local to their processor |
 | GDT, IDT, trampoline layout | written before the processor that uses them starts |
 
+## Services that restart together
+
+With one processor, the order in which dying services ran fixed the order
+PID 1 saw their exits. On several processors a filesystem service can exit
+before the block driver that serves the same, restarted, block service. Two
+rules keep a restart from depending on that order. The supervisor counts a
+running instance whose dependency has started again since as not healthy
+(`FollowsDependencies`, set for the virtio-blk driver and the FAT32 service),
+so the filesystem service waits for the new driver. A block service that
+restarted without a driver leaves its clients' requests queued until PID 1
+hands one over.
+
 ## TLB shootdown
 
 A processor holds translations of a process root only while it runs in ring 3

@@ -70,7 +70,9 @@ func startServices(ticks uint64) {
 		// them. The dead process's copies are released by its teardown, which
 		// also resets the device and masks its interrupt.
 		// The driver serves the block service and nothing else, so it starts
-		// after it, and again after it restarts.
+		// after it, and again after it restarts. Until it has, the old
+		// instance counts as down, so nothing that needs the device starts
+		// against a driver that is about to exit.
 		manager.Register(supervisor.Definition{Name: "virtio-blk", Executable: "/bootstrap/virtio-blk", Dependencies: []string{"block"},
 			Capabilities: []supervisor.Capability{
 				{Name: "console", Handle: serviceDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
@@ -78,7 +80,7 @@ func startServices(ticks uint64) {
 				{Name: "irq", Handle: virtioIRQHandle, Type: handle.TypeIRQ, Rights: capability.Wait},
 				{Name: "dma", Handle: virtioDMAHandle, Type: handle.TypeDevice, Rights: capability.Write},
 				{Name: "service", Handle: driverServerHandle, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
-			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK ||
+			}, Restart: supervisor.RestartOnFailure, FollowsDependencies: true}) != supervisor.StatusOK ||
 		// The FAT32 service parses the untrusted volume in a process of its
 		// own, between the VFS and the block service (ADR 0096). It holds a
 		// channel to each and nothing else: no namespace, no device.
@@ -94,7 +96,7 @@ func startServices(ticks uint64) {
 				// File data moves through the cache it shares with the VFS,
 				// not through messages (ADR 0098).
 				{Name: "cache", Handle: fileCacheHandle, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
-			}, Restart: supervisor.RestartOnFailure}) != supervisor.StatusOK {
+			}, Restart: supervisor.RestartOnFailure, FollowsDependencies: true}) != supervisor.StatusOK {
 		fatal("INIT_SERVICE_REGISTRATION_FAILED\n")
 	}
 	// The storage services start from the archive whether or not there is a

@@ -212,6 +212,17 @@ await_ready() {
 	done
 }
 
+# await_count waits, for at most a minute, until the file has at least count
+# lines matching pattern. A guest step that takes longer than usual, as on
+# several emulated processors, then does not receive the next command early.
+await_count() { # file pattern count
+	waited=0
+	while [ "$(grep -c "$2" "$1" 2>/dev/null || true)" -lt "$3" ] && [ "$waited" -lt 600 ]; do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+}
+
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
 # whole number with an optional M or G suffix and fails on anything else.
 guest_memory_mib() {
@@ -1377,11 +1388,13 @@ rm -f "$fsck_log"
 recovery_iso=build/variants/$variant/goos-x86_64-recovery.iso
 ( await_ready "$fsck_log"
 	printf 'fsck-fat --check auto\n'
-	sleep 8
+	await_count "$fsck_log" '^FAT32_RESTARTED_OK$' 1
+	sleep 2
 	printf 'cat /home/demo/message.txt; echo after-fsck\n'
 	sleep 2
 	printf 'fsck-fat --repair auto\n'
-	sleep 8
+	await_count "$fsck_log" '^FAT32_RESTARTED_OK$' 2
+	sleep 2
 	printf 'cat /home/demo/message.txt; echo after-fsck-repair\n'
 	sleep 2
 ) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \

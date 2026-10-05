@@ -450,3 +450,18 @@ func TestHeldTaskLeavesAndStaysOffUntilRelease(t *testing.T) {
 	}
 	check(t, core)
 }
+
+// A wake that ended an earlier wait must not keep the task from sleeping in
+// the next one: the call that registers the new wait forgets it first.
+func TestForgottenWakeDoesNotSkipTheNextSleep(t *testing.T) {
+	core := newCore(t, 2)
+	slot := startTask(t, core, 0)
+	home := core.homeOf(slot)
+	switchTo(core, home, Preempt)
+	core.Wake(slot, 0)
+	core.ForgetWake(home)
+	if next := switchTo(core, home, Block); next == slot {
+		t.Fatal("a stale wake kept the task running")
+	}
+	check(t, core)
+}
