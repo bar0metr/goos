@@ -60,7 +60,7 @@ and write files at once, raises a signal in a thread, and ends the process
 with `exit_group` from a thread. `smp` starts one worker more than there are
 online processors (`sched_getaffinity`), at most the seven threads a GoOS
 process may add, and requires, from `getcpu`, that
-the workers ran on every processor, that some moved between processors, and
+the workers ran on as many processors as there are workers, that some moved, and
 that two of them computed on distinct processors within one window shorter
 than half a tick; it then contends for one mutex from four threads, discards a page
 under a reader on another processor, faults the same untouched pages from
