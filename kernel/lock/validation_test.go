@@ -10,6 +10,10 @@ func expectFatal(t *testing.T, name string, run func()) {
 	Install(Hooks{Fatal: func(text string) { message = text; panic(text) }})
 	defer Install(Hooks{})
 	defer func() {
+		// The panic left whatever run took recorded as held.
+		for index := range held {
+			held[index].Store(0)
+		}
 		if recover() == nil || message == "" {
 			t.Fatalf("%s was accepted", name)
 		}

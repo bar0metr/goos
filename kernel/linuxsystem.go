@@ -218,18 +218,14 @@ func (handler *linuxCallHandler) signalMask(state *linuxcompat.ProcessState, arg
 	return linuxcompat.Result{}
 }
 
-// getrandom returns bytes from the CPU's RDRAND generator. A machine without
-// one gets ENOSYS, which the C library reports as a missing call: the kernel
-// has no other source it could call random without lying. The refusal is
-// counted with the unsupported calls so a diagnostic run shows it.
+// getrandom returns bytes from the kernel's generator (ADR 0185), which boot
+// seeds before the first process starts, so the call never blocks.
 func (handler *linuxCallHandler) getrandom(request linuxcompat.Request) linuxcompat.Result {
 	address, length := request.Arguments[0], request.Arguments[1]
 	if errno := linuxcompat.RandomFlags(uint64(uint32(request.Arguments[2]))); errno != 0 {
 		return linuxErrno(errno)
 	}
-	if !amd64.HasHardwareRandom() {
-		return linuxcompat.Refuse(request.Number)
-	}
+	stirRandom()
 	if length > linuxcompat.MaxRandomBytes {
 		length = linuxcompat.MaxRandomBytes
 	}
@@ -239,7 +235,7 @@ func (handler *linuxCallHandler) getrandom(request linuxcompat.Request) linuxcom
 	if length = handler.accessible(address, length, true); length == 0 {
 		return linuxErrno(linuxabi.EFAULT)
 	}
-	filled := amd64.FillRandom(linuxRandom[:length])
+	filled := randomBytes(linuxRandom[:length])
 	copied := filled && vm.CopyOut(handler.root, address, linuxRandom[:length])
 	// The kernel keeps no copy of bytes a program may use as a key.
 	clear(linuxRandom[:length])

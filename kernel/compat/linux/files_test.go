@@ -27,12 +27,12 @@ func TestDecodeOpen(t *testing.T) {
 		{0o400 | 0o400000, OpenIntent{Rights: vfs.Read}, 0}, // O_NOCTTY, O_NOFOLLOW
 		{1 << 32, OpenIntent{Rights: vfs.Read}, 0},          // flags is an int
 		{3, OpenIntent{}, abi.EINVAL},
-		{0o200000 | 0o100, OpenIntent{}, abi.EINVAL},   // O_DIRECTORY|O_CREAT
-		{0o4000, OpenIntent{}, abi.EOPNOTSUPP},         // O_NONBLOCK
-		{0o10000, OpenIntent{}, abi.EOPNOTSUPP},        // O_DSYNC
-		{0o40000, OpenIntent{}, abi.EOPNOTSUPP},        // O_DIRECT
-		{0o10000000, OpenIntent{}, abi.EOPNOTSUPP},     // O_PATH
-		{0o20200000 | 2, OpenIntent{}, abi.EOPNOTSUPP}, // O_TMPFILE
+		{0o200000 | 0o100, OpenIntent{}, abi.EINVAL},                                          // O_DIRECTORY|O_CREAT
+		{0o4000 | 0o200000, OpenIntent{Rights: vfs.Read, Directory: true, NonBlock: true}, 0}, // opendir
+		{0o10000, OpenIntent{}, abi.EOPNOTSUPP},                                               // O_DSYNC
+		{0o40000, OpenIntent{}, abi.EOPNOTSUPP},                                               // O_DIRECT
+		{0o10000000, OpenIntent{}, abi.EOPNOTSUPP},                                            // O_PATH
+		{0o20200000 | 2, OpenIntent{}, abi.EOPNOTSUPP},                                        // O_TMPFILE
 	}
 	for _, test := range cases {
 		got, errno := DecodeOpen(test.flags)
@@ -296,7 +296,13 @@ func TestStatusFlags(t *testing.T) {
 	if errno := SetStatusFlags(&file, 0); errno != 0 || file.Flags != abi.OpenReadWrite {
 		t.Fatalf("clear append: errno=%d flags=%#o", errno, file.Flags)
 	}
-	for _, refused := range []uint32{abi.OpenNonBlock, abi.OpenAsync, abi.OpenDirect, abi.OpenNoATime} {
+	if errno := SetStatusFlags(&file, uint64(abi.OpenNonBlock)); errno != 0 || file.Flags != abi.OpenReadWrite|abi.OpenNonBlock {
+		t.Fatalf("set nonblock: errno=%d flags=%#o", errno, file.Flags)
+	}
+	if errno := SetStatusFlags(&file, 0); errno != 0 || file.Flags != abi.OpenReadWrite {
+		t.Fatalf("clear nonblock: errno=%d flags=%#o", errno, file.Flags)
+	}
+	for _, refused := range []uint32{abi.OpenAsync, abi.OpenDirect, abi.OpenNoATime} {
 		if errno := SetStatusFlags(&file, uint64(refused|abi.OpenAppend)); errno != abi.EINVAL || file.Flags != abi.OpenReadWrite {
 			t.Fatalf("flag %#o: errno=%d flags=%#o", refused, errno, file.Flags)
 		}
@@ -304,5 +310,9 @@ func TestStatusFlags(t *testing.T) {
 	stream := FileDescription{Kind: FDStreamWriter, Object: 1}
 	if errno := SetStatusFlags(&stream, uint64(abi.OpenAppend)); errno != 0 || stream.Flags != 0 {
 		t.Fatalf("append on a stream: errno=%d flags=%#o", errno, stream.Flags)
+	}
+	// A stream blocks, so it cannot claim not to.
+	if errno := SetStatusFlags(&stream, uint64(abi.OpenNonBlock)); errno != abi.EINVAL || stream.Flags != 0 {
+		t.Fatalf("nonblock on a stream: errno=%d flags=%#o", errno, stream.Flags)
 	}
 }

@@ -2,23 +2,68 @@
 
 package main
 
-// The character devices a Linux process can open: /dev/null and /dev/zero.
-// The kernel serves them from the descriptor alone, with no VFS exchange and
-// nothing to wait for.
+// The devices a Linux process can open: /dev/null, /dev/zero, and the sysfs
+// processor lists. The kernel serves them from the descriptor alone, with no
+// VFS exchange and nothing to wait for.
 
 import (
+	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
 )
 
+var linuxCPUList [linuxcompat.CPUListSize]byte
+
+// deviceText is the current content of a text device: the online
+// processors, or every processor the firmware lists.
+func deviceText(device linuxcompat.Device) []byte {
+	mask := amd64.OnlineMask()
+	if device == linuxcompat.DeviceCPUPossible {
+		count := uint(cpuInventory.CPUCount)
+		mask = ^uint64(0)
+		if count < 64 {
+			mask = uint64(1)<<count - 1
+		}
+	}
+	return linuxcompat.CPUListText(&linuxCPUList, mask)
+}
+
+// textRead reads a text device from the description's position, or from
+// the offset pread64 names, which leaves the position alone.
+func (handler *linuxCallHandler) textRead(request linuxcompat.Request, description *linuxcompat.FileDescription, vector bool) linuxcompat.Result {
+	text := deviceText(linuxcompat.DeviceOf(*description))
+	position := description.Offset
+	if request.Number == linuxabi.SysPread64 {
+		position = request.Arguments[3]
+	}
+	limit, wire, errno := handler.readLimit(request, vector, linuxcompat.MaxDeviceTransfer)
+	if errno != 0 || limit == 0 {
+		return linuxErrno(errno)
+	}
+	if position >= uint64(len(text)) {
+		return linuxcompat.Result{}
+	}
+	chunk := min(limit, uint64(len(text))-position)
+	if !handler.deliver(request, wire, 0, text[position:position+chunk], nil, chunk) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	if request.Number != linuxabi.SysPread64 {
+		description.Offset = position + chunk
+	}
+	return linuxcompat.Result{Value: chunk}
+}
+
 // deviceRead serves read, readv, and pread64. /dev/null is at its end from
 // the first byte. /dev/zero fills the destination with zeros, up to a bound
 // and up to the first page the process cannot write.
-func (handler *linuxCallHandler) deviceRead(request linuxcompat.Request, description linuxcompat.FileDescription, vector bool) linuxcompat.Result {
+func (handler *linuxCallHandler) deviceRead(request linuxcompat.Request, description *linuxcompat.FileDescription, vector bool) linuxcompat.Result {
 	if description.Flags&linuxabi.OpenAccess == linuxabi.OpenWriteOnly {
 		return linuxErrno(linuxabi.EBADF)
 	}
-	if linuxcompat.DeviceOf(description) != linuxcompat.DeviceZero {
+	if linuxcompat.DeviceOf(*description).Text() {
+		return handler.textRead(request, description, vector)
+	}
+	if linuxcompat.DeviceOf(*description) != linuxcompat.DeviceZero {
 		// The vector of a readv is still read and checked, as on Linux.
 		if vector {
 			_, errno := handler.copyIOVec(request)

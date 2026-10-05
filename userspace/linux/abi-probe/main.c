@@ -774,8 +774,8 @@ static int signals_ok(int strict)
 	       fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, NULL, (void *)8, SET_SIZE), EFAULT);
 }
 
-/* 1 when the kernel hands out random bytes, 0 when it has no source and says
- * so in both places a program looks, -1 when the two disagree. */
+/* 1 when the kernel hands out random bytes in both places a program looks,
+ * 0 when it has none in either, -1 when the two disagree. */
 static int random_source(void)
 {
 	unsigned char byte;
@@ -790,8 +790,8 @@ static int random_source(void)
 	return -1;
 }
 
-/* Linux always has a source. GoOS has one when the CPU has a generator; a
- * machine without it must refuse the call and leave AT_RANDOM out. */
+/* Linux and GoOS always have a source: static glibc takes its stack canary
+ * from AT_RANDOM before main and faults when the entry is missing. */
 static int random_ok(int goos)
 {
 	static unsigned char large[300];
@@ -801,7 +801,7 @@ static int random_ok(int goos)
 
 	errno = 0;
 	if (source != 1)
-		return goos && source == 0;
+		return 0;
 	memset(first, 0, sizeof first);
 	memset(second, 0, sizeof second);
 	if (getrandom(first, sizeof first, 0) != sizeof first ||
@@ -3787,8 +3787,8 @@ int main(int argc, char **argv)
 		if (!strcmp(argv[1], "random")) {
 			int source = random_source();
 
-			printf("random: %s\n", source == 1 ? "hardware" : source == 0 ? "none" : "inconsistent");
-			return source < 0;
+			printf("random: %s\n", source == 1 ? "available" : source == 0 ? "none" : "inconsistent");
+			return source != 1;
 		}
 		if (!strcmp(argv[1], "block")) {
 			puts("blocking on standard input");

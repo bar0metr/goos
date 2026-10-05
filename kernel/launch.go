@@ -251,9 +251,9 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
 		if processABI == process.ABILinuxX8664 {
-			// AT_RANDOM exists only when the CPU has a generator to fill it.
+			// Every Linux image gets AT_RANDOM, as on Linux (ADR 0185).
 			var random *[linuxabi.RandomSize]byte
-			if amd64.FillRandom(linuxStackRandom[:]) {
+			if randomBytes(linuxStackRandom[:]) {
 				random = &linuxStackRandom
 			}
 			linuxLaunchStartup = bound

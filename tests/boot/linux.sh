@@ -5,9 +5,9 @@
 # boot itself runs PID 1's Linux probes, whose markers are checked first.
 # Boot and command handling follow tests/boot/microbench.sh.
 #
-# The guest CPU has RDRAND, so this run covers getrandom and AT_RANDOM with a
-# source behind them. The main boot test uses the default CPU, which has
-# none, and covers the refusal.
+# The guest CPU has RDRAND, so this run seeds the kernel's generator with it.
+# The main boot test uses the default CPU, which has none, and checks that
+# getrandom and AT_RANDOM work from timing jitter alone (ADR 0185).
 #
 # usage: linux.sh ISO OVMF DISK
 set -eu
@@ -222,7 +222,7 @@ clean 'isolation'
 
 # The CPU of this guest has a generator, so the kernel must hand out bytes.
 run '/system/linux/abi-probe random'
-expect '^random: hardware$' 'random source'
+expect '^random: available$' 'random source'
 clean 'random source'
 
 run '/system/linux/abi-probe exec'

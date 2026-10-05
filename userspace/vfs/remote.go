@@ -417,6 +417,14 @@ func (remote *Remote) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 	return status
 }
 
+// SetMetadata changes a node's modification time or read-only attribute in
+// the filesystem service. Cached pages stay valid: the data is unchanged.
+func (remote *Remote) SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status {
+	_, status := remote.call(fsproto.MetadataRequest(id, change))
+	remote.forget(id)
+	return status
+}
+
 func (remote *Remote) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if stat, known := remote.cached(id); known {
 		return stat, ramfs.StatusOK

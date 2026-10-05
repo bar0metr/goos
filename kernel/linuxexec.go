@@ -466,7 +466,7 @@ func (handler *linuxCallHandler) prepareLinuxExec(state *linuxExecState) linuxab
 		return linuxabi.ENOEXEC
 	}
 	var random *[linuxabi.RandomSize]byte
-	if amd64.FillRandom(linuxStackRandom[:]) {
+	if randomBytes(linuxStackRandom[:]) {
 		random = &linuxStackRandom
 	}
 	stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], layout.StackTop, &linuxLaunchImage, &state.snapshot, random)

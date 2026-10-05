@@ -58,7 +58,8 @@ an errno; nothing is accepted and ignored.
 | `kill(62)`, `tkill(200)`, `tgkill(234)` | partial | the caller and its descendants only; process-group targets `EINVAL`; a fatal signal ends a sleeping target at once |
 | `exit(60)`, `exit_group(231)` | implemented | end the task, or every task of the process |
 | `uname(63)` | implemented | `Linux`, `goos`, `6.0.0-goos`, the GoOS release, `x86_64` |
-| `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND`; others `EINVAL` |
+| `fcntl(72)` | partial | `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL` for `O_APPEND` and `O_NONBLOCK`; others `EINVAL` |
+| `chmod(90)`, `fchmod(91)`, `fchmodat(268)` | partial | the write bits set or clear the read-only attribute; other mode bits accepted and not kept (ADR 0186) |
 | `getcwd(79)`, `chdir(80)` | implemented | the working directory; `chdir` requires an existing directory |
 | `rename(82)`, `renameat(264)`, `renameat2(316)` | partial | files replace an existing target, directories need a free name; `renameat2` takes no flags |
 | `mkdir(83)`, `mkdirat(258)` | implemented | the mode is ignored |
@@ -80,7 +81,8 @@ an errno; nothing is accepted and ignored.
 | `openat(257)` | implemented | files, directories, `/dev/null`, and `/dev/zero`; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`, `O_CLOEXEC`; other flags `EOPNOTSUPP` |
 | `prlimit64(302)` | partial | reports fixed limits of the caller; a new limit is `EPERM` |
 | `set_robust_list(273)` | unsupported | `ENOSYS` for the 24-byte structure because thread exit lacks robust-futex owner-death handling; other lengths `EINVAL` (ADR 0179) |
-| `getrandom(318)` | partial | bytes straight from the CPU's RDRAND, not a Linux entropy pool or CSPRNG; at most 256 per call; `ENOSYS` on a CPU without it |
+| `getrandom(318)` | partial | bytes from the kernel's ChaCha20 generator, seeded from RDRAND when present and from timing jitter (ADR 0185); at most 256 per call; never blocks |
+| `utimensat(280)` | partial | the modification time, `UTIME_NOW`, `UTIME_OMIT`; the access time accepted and not kept; a null path acts on the descriptor (ADR 0186) |
 | `statx(332)` | implemented | the status `stat` reports, as `struct statx`; `STATX_BTIME` when the filesystem has a creation time |
 | every other number | `ENOSYS` | counted and recorded; nothing is faked |
 
@@ -91,7 +93,7 @@ BusyBox does about it:
 | --- | --- |
 | `sigaltstack(131)` | no alternate signal stack |
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
-| `utimes(235)`, `futimesat(261)`, `utimensat(280)` | `touch` fails on an existing file: the VFS cannot set a time |
+| `utimes(235)`, `futimesat(261)` | a program that uses them in place of `utimensat` cannot set a time |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
 | `socket(41)` and the network calls | no networking |
 
@@ -325,6 +327,28 @@ it is given, so the buffer need not be mapped. `lseek` returns 0 and `ioctl`
 `/dev` is no directory: `stat("/dev")` is `ENOENT` and no listing shows the
 three names. Native programs do not see them.
 
+Two more names hold text, for programs that count processors from sysfs as
+older glibc's `get_nprocs` does:
+
+| Path | Contents |
+| --- | --- |
+| `/sys/devices/system/cpu/online` | the online processors as a Linux CPU list, such as `0-3` |
+| `/sys/devices/system/cpu/possible` | every processor the firmware lists, in the same form |
+
+They read and `pread` as regular files of mode 0444 and size 4096; `lseek`
+moves the offset. Opening one for writing or with `O_CREAT` is `EACCES`.
+
+## Metadata changes
+
+`chmod`, `fchmod`, `fchmodat`, and `utimensat` send one VFS
+`OperationSetMetadata` request (ADR 0186). A mode without any of the 0222
+bits makes a file read-only, any write bit makes it writable again, and
+`stat` shows the result in `st_mode`. A write to a read-only file is
+`EACCES`. `utimensat` sets the modification time, the one time `stat`
+reports; `UTIME_NOW` takes the realtime clock and changes nothing when the
+clock is unset. A change on a directory, a device, or a stream succeeds and
+keeps nothing.
+
 ## Directory listing
 
 `getdents64` fills the buffer with whole `linux_dirent64` records, one VFS
@@ -482,22 +506,20 @@ old mask. Any other return restores the old mask first (ADR 0169).
 
 ## Random bytes
 
-`getrandom` and `AT_RANDOM` have one source, the CPU's RDRAND generator
-(ADR 0151). This is a direct hardware source, not the Linux entropy pool or
-kernel CSPRNG: the kernel keeps no pool, mixes nothing, and reseeds nothing.
-A program that takes a working `getrandom` for that abstraction gets the
-quality of the CPU's generator, and a transient generator failure is `EIO`.
+`getrandom` and `AT_RANDOM` come from the kernel's generator (ADR 0185): a
+ChaCha20 stream whose key comes from an entropy pool and is replaced after
+every request. Boot fills the pool before the first process starts, from
+RDRAND when the CPU has it and from the cycle counter read around work of
+varying length in every case, as Linux does on a CPU without a hardware
+generator. Housekeeping and every `getrandom` stir more cycle counts in.
 
-| CPU | `getrandom` | `AT_RANDOM` |
-| --- | --- | --- |
-| has RDRAND | fills up to 256 bytes per call; a longer request returns 256 | 16 bytes, drawn at launch |
-| has none | `ENOSYS`, counted with the refused calls | absent |
+`getrandom` fills up to 256 bytes per call, and a longer request returns
+256. `AT_RANDOM` points at 16 bytes drawn at launch.
 
 `GRND_NONBLOCK`, `GRND_RANDOM`, and `GRND_INSECURE` are accepted and change
 nothing. An unknown flag, or `GRND_RANDOM` with `GRND_INSECURE`, is `EINVAL`.
 A buffer that runs off a mapping gets the bytes that fit; one that starts
-outside any is `EFAULT`. The kernel keeps no pool and no copy. QEMU's default
-CPU model has no RDRAND; `-cpu qemu64,+rdrand` adds it.
+outside any is `EFAULT`. The kernel keeps no copy of bytes it handed out.
 
 ## ELF status
 
@@ -555,8 +577,7 @@ Initial RSP is 16-byte aligned. The complete occupied image is limited to
 `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE`, `AT_CLKTCK`,
 `AT_PLATFORM="x86_64"`, and `AT_NULL`. UID/GID are 1000 and `AT_CLKTCK` is
 100. `AT_PHDR` and `AT_ENTRY` are the loaded addresses, base included.
-`AT_RANDOM` points at 16 bytes from RDRAND when the CPU has it and is absent
-otherwise; no deterministic bytes are presented as entropy.
+`AT_RANDOM` points at 16 bytes from the kernel's generator.
 
 The installer maps only pages occupied by this image as user RW/NX owned
 pages. Normal launch accounting will charge them before the task becomes
@@ -598,10 +619,13 @@ position and status flags and keep separate close-on-exec flags. `dup2` onto
 an open descriptor closes it first. The table holds 64 descriptors; the next
 is `EMFILE`.
 
-`fcntl(F_GETFL)` reports the access mode, `O_APPEND`, and `O_LARGEFILE` for a
-file, adds `O_DIRECTORY` for a directory, and reports the direction alone for
-a stream. `F_SETFL` changes `O_APPEND` on a file and refuses `O_NONBLOCK`,
-`O_ASYNC`, `O_DIRECT`, and `O_NOATIME` with `EINVAL`.
+`fcntl(F_GETFL)` reports the access mode, `O_APPEND`, `O_NONBLOCK`, and
+`O_LARGEFILE` for a file, adds `O_DIRECTORY` for a directory, and reports the
+direction alone for a stream. `F_SETFL` changes `O_APPEND` on a file and
+`O_NONBLOCK` on a file, a directory, or a device; a stream refuses
+`O_NONBLOCK`, and every description refuses `O_ASYNC`, `O_DIRECT`, and
+`O_NOATIME` with `EINVAL`. `open` accepts `O_NONBLOCK` and changes nothing:
+Linux ignores it for files and directories, and the devices never block.
 
 `ioctl` returns `ENOTTY` on an open descriptor and `EBADF` on a closed one.
 The standard streams are FIFOs to `fstat` and no terminal to `ioctl`, whatever
@@ -634,7 +658,7 @@ Results a correct Linux program can observe to differ:
 | terminal | no descriptor is a terminal; `ioctl` is `ENOTTY` | a terminal answers `TIOCGWINSZ` and termios |
 | signals | delivered at system call returns; `kill` reaches the caller and its descendants only; Ctrl-C ends the process whatever handles `SIGINT`; file I/O is never interrupted | sent by UID, delivered at any return to user mode |
 | devices | `/dev/null`, `/dev/zero`, and `/dev/tty` only; `/dev` is no directory | a populated `/dev` |
-| random bytes | `ENOSYS` and no `AT_RANDOM` on a CPU without RDRAND; 256 bytes per call | always available; 32 MiB per call |
+| random bytes | 256 bytes per call; seeded from jitter alone on a CPU without RDRAND | 32 MiB per call |
 | positioned I/O | three VFS exchanges per call | one atomic operation |
 | load address | a static PIE always loads at `0x40000000` | randomized |
 | users | every file and process is 1000:1000; mode bits are presentation | enforced ownership and permissions |
@@ -649,7 +673,7 @@ Results a correct Linux program can observe to differ:
 | transfers | at most 64 KiB per call, then a short count | 2 GiB |
 | memory | no executable anonymous memory, no fixed or file-backed mappings | all three |
 | limits | 64 descriptors, 64 MiB of pages, fixed | adjustable |
-| open flags | `O_NONBLOCK` and the others outside the accepted set are `EOPNOTSUPP` | accepted |
+| open flags | `O_DSYNC`, `O_DIRECT`, `O_PATH`, `O_TMPFILE`, and the others outside the accepted set are `EOPNOTSUPP` | accepted |
 | name length | 1024 bytes per component | 255 |
 
 ## Release limits
@@ -760,7 +784,7 @@ boot:
 | `abi-probe hostile` | `EFAULT` for bad pointers in every call, short transfers at a mapping's end, 100000-byte transfers, stale descriptors |
 | `abi-probe exhaust` | `EMFILE` at 64 descriptors, `ENOMEM` at the page quota, and recovery from both |
 | `abi-probe isolation` | the native call gate refuses all 128 call numbers; native handle values are `EBADF` |
-| `abi-probe random` | `random: hardware`: the guest CPU of this test has RDRAND |
+| `abi-probe random` | `random: available`: `getrandom` and `AT_RANDOM` both work |
 | `abi-probe stack-overflow` | recursion reaches the guard below the stack; the kernel logs `user fault: guard page`, the process ends, the shell continues |
 | `abi-probe port-io` | the process ends with a fault status and the shell continues |
 | Ctrl-C on a blocked read, a sleep, and a VFS wait | the process ends, the shell reads the next line, later runs pass |
@@ -779,8 +803,8 @@ boot:
 **General boot test.** `make test-boot` also restarts the VFS under a Linux
 process, which must then get `EIO` and no new session, and makes the VFS
 answer one request late, which must end in `ETIMEDOUT` with the session still
-usable. Its guest CPU has no RDRAND, so PID 1's probe there requires
-`getrandom` to return `ENOSYS` and `AT_RANDOM` to be absent.
+usable. Its guest CPU has no RDRAND, so its `abi-probe random` checks that
+`getrandom` and `AT_RANDOM` work from the jitter-seeded generator.
 
 **BusyBox.** `make test-linux-busybox BUSYBOX=path`, also named
 `make test-linux-shell`, requires `echo`, `pwd`, `cat`, `ls`, `mkdir`, and
@@ -790,8 +814,9 @@ status, connect two- and three-stage pipelines, redirect into a file a child
 reads, run a script by name, and collect `sleep 1 &` with `wait` (ADR 0172). With BusyBox 1.35.0 built against musl these also run: `uname`,
 `date`, `sleep`, `cp`, `mv`, `head`, `tail`, `wc`, `stat`, `ls -l`, `rmdir`,
 `true`, `basename`, `env`, `id`, `md5sum`, `dd if=/dev/zero`, `sh -c true`,
-and `sh -c "echo x > /dev/null"`. `touch` fails on the missing `utimensat`
-and `df` on the missing `/proc/mounts`. Alpine 3.22's static BusyBox 1.37,
+and `sh -c "echo x > /dev/null"`. The test also requires `touch -d` and
+`chmod` on an existing file to show in `stat` (ADR 0186). `df` fails on the
+missing `/proc/mounts`. Alpine 3.22's static BusyBox 1.37,
 which carries `PT_NOTE` and `PT_GNU_PROPERTY` headers, runs the same set.
 
 **Host tests.** `make test-linux-elf` parses hostile and real images and

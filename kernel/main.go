@@ -501,6 +501,7 @@ func bootContinue() {
 	if !startLocalTimer() {
 		panicSerial("local APIC timer calibration failed")
 	}
+	seedRandom()
 	if !realtimeClock.Init(bootRealtime, bootRealtimeCounter) {
 		panicSerial("realtime clock initialization failed")
 	}
@@ -736,6 +737,7 @@ func serviceKernel() {
 		}
 		kernelframebuffer.DrawValidationMarker(&graphicalFramebuffer)
 	}
+	stirRandom()
 	expireWaitDeadlines()
 	flushLifecycle()
 	deliverProcessExits()

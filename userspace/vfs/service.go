@@ -392,6 +392,16 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 		reply.MountID = vfs.MountID(stat.MountID)
 	case vfs.OperationTruncate:
 		reply.Status = service.namespace.Truncate(request.Path, request.Offset)
+	case vfs.OperationSetMetadata:
+		change, valid := vfs.MetadataChangeOf(request)
+		switch {
+		case !valid:
+			reply.Status = vfs.StatusInvalidArgument
+		case len(request.Path) == 0 && request.Handle != 0:
+			reply.Status = service.namespace.SetMetadataOpen(owner, request.Handle, change)
+		default:
+			reply.Status = service.namespace.SetMetadata(request.Path, change)
+		}
 	case vfs.OperationFilesystemInfo:
 		info, mountID, status := service.namespace.FilesystemInfo(request.Path, request.MountID)
 		reply.Status, reply.MountID, reply.Filesystem = status, mountID, info

@@ -26,6 +26,8 @@ const (
 	LevelKernel Level = iota + 1
 	// LevelMemory is the physical page allocator.
 	LevelMemory
+	// LevelRandom is the kernel's random byte generator.
+	LevelRandom
 	// LevelScheduler is the run state: task states, run queues, and the
 	// processor each task runs on.
 	LevelScheduler

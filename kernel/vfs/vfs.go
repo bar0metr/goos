@@ -106,6 +106,12 @@ type ReplaceBackend interface {
 	ReplaceName(id ramfs.NodeID, parent ramfs.NodeID, name ramfs.Name) ramfs.Status
 }
 
+// MetadataBackend changes a node's modification time and a file's read-only
+// attribute. A backend without it answers SetMetadata with Unsupported.
+type MetadataBackend interface {
+	SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status
+}
+
 // ObjectBackend gives an opened file identity independent of pathname lookup.
 // Backends whose node IDs are already stable need not implement it.
 type ObjectBackend interface {
@@ -890,6 +896,39 @@ func (namespace *Namespace) Truncate(path []byte, size uint64) Status {
 		return StatusPermissionDenied
 	}
 	return mapStatus(namespace.mounts[mountIndex].backend.Truncate(node, size))
+}
+
+// SetMetadata applies change to the node at path. A protected node and a
+// pinned executable cannot change, as they cannot be truncated.
+func (namespace *Namespace) SetMetadata(path []byte, change ramfs.MetadataChange) Status {
+	mountIndex, node, protected, status := namespace.resolve(path)
+	if status != StatusOK {
+		return status
+	}
+	return namespace.setMetadata(mountIndex, node, protected, change)
+}
+
+// SetMetadataOpen applies change to an open file.
+func (namespace *Namespace) SetMetadataOpen(owner Owner, handle Handle, change ramfs.MetadataChange) Status {
+	entry, status := namespace.file(owner, handle, 0)
+	if status != StatusOK {
+		return status
+	}
+	return namespace.setMetadata(entry.mount, entry.node, entry.protected, change)
+}
+
+func (namespace *Namespace) setMetadata(mountIndex uint8, node ramfs.NodeID, protected bool, change ramfs.MetadataChange) Status {
+	if !change.Valid() {
+		return StatusInvalidArgument
+	}
+	if protected || namespace.executablePinned(mountIndex, node) {
+		return StatusPermissionDenied
+	}
+	backend, ok := namespace.mounts[mountIndex].backend.(MetadataBackend)
+	if !ok {
+		return StatusUnsupported
+	}
+	return mapStatus(backend.SetMetadata(node, change))
 }
 
 func (namespace *Namespace) Unlink(path []byte) Status {

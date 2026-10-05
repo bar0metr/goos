@@ -49,7 +49,7 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EISDIR}
 		case linuxcompat.FDSynthetic:
-			return handler.deviceRead(request, *description, vector)
+			return handler.deviceRead(request, description, vector)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {

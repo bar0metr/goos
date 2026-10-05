@@ -291,6 +291,43 @@ func (fs *FileSystem) touchDirectory(dir *directory) {
 	}
 }
 
+// SetMetadata writes a node's modification time into its directory entry
+// and sets or clears a file's READ_ONLY attribute. FAT records the time to
+// two seconds and keeps no other permission. The root directory has no
+// entry and refuses.
+func (fs *FileSystem) SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status {
+	if !change.Valid() {
+		return ramfs.StatusInvalidArgument
+	}
+	if status := fs.mutable(); status != ramfs.StatusOK {
+		return status
+	}
+	if id == rootNode {
+		return ramfs.StatusPermissionDenied
+	}
+	dir, index, entry, status := fs.node(id)
+	if status != ramfs.StatusOK {
+		return status
+	}
+	if change.SetReadOnly && isDirectory(entry) {
+		return ramfs.StatusIsDirectory
+	}
+	if change.SetModified {
+		stamp := encodeTime(change.Modified.Seconds*nanosPerSecond + int64(change.Modified.Nanoseconds))
+		put16(entry[fieldWriteTime:], stamp.time)
+		put16(entry[fieldWriteDate:], stamp.date)
+	}
+	if change.SetReadOnly && change.ReadOnly {
+		entry[11] |= attrReadOnly
+	} else if change.SetReadOnly {
+		entry[11] &^= attrReadOnly
+	}
+	if status = fs.writeEntry(&dir, index, entry); status != ramfs.StatusOK {
+		return status
+	}
+	return fs.sync()
+}
+
 // mutable refuses a change to a volume mounted read-only.
 func (fs *FileSystem) mutable() ramfs.Status {
 	if fs.readOnly {

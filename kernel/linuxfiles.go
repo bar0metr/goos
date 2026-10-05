@@ -412,7 +412,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 		if write {
 			return handler.deviceWrite(request, *description, false)
 		}
-		return handler.deviceRead(request, *description, false)
+		return handler.deviceRead(request, description, false)
 	default:
 		// A stream has no positions.
 		return linuxErrno(linuxabi.ESPIPE)
@@ -656,6 +656,18 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		fallthrough
 	case linuxabi.SysRenameat:
 		return handler.rename(request, int32(arguments[0]), arguments[1], int32(arguments[2]), arguments[3])
+	case linuxabi.SysChmod:
+		return handler.changeMetadata(request, linuxabi.AtFDCWD, arguments[0], false)
+	case linuxabi.SysFchmod:
+		return handler.changeMetadata(request, int32(arguments[0]), 0, true)
+	case linuxabi.SysFchmodat:
+		return handler.changeMetadata(request, int32(arguments[0]), arguments[1], false)
+	case linuxabi.SysUtimensat:
+		if arguments[3]&^(linuxabi.AtSymlinkNoFollow|linuxabi.AtEmptyPath) != 0 {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		// A null path names dirfd itself, as futimens does.
+		return handler.changeMetadata(request, int32(arguments[0]), arguments[1], arguments[1] == 0)
 	}
 	return linuxErrno(linuxabi.ENOSYS)
 }
@@ -1042,8 +1054,17 @@ func (handler *linuxCallHandler) seek(request linuxcompat.Request) linuxcompat.R
 		description.Offset = target
 		return linuxcompat.Result{Value: target}
 	case linuxcompat.FDSynthetic:
-		// /dev/null and /dev/zero accept any seek and stay at zero.
-		return linuxcompat.Result{}
+		device := linuxcompat.DeviceOf(*description)
+		if !device.Text() {
+			// /dev/null and /dev/zero accept any seek and stay at zero.
+			return linuxcompat.Result{}
+		}
+		target, errno := linuxcompat.SeekTarget(whence, offset, description.Offset, uint64(len(deviceText(device))))
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+		description.Offset = target
+		return linuxcompat.Result{Value: target}
 	default:
 		return linuxErrno(linuxabi.ESPIPE)
 	}

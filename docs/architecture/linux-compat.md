@@ -69,8 +69,8 @@ not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
 and the static-ELF auxv required by the release specification. The complete
 image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
 RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
-`AT_PLATFORM` is `x86_64`. `AT_RANDOM` points at 16 bytes from the CPU's
-RDRAND generator and is absent on a CPU without one (ADR 0151). Only occupied
+`AT_PLATFORM` is `x86_64`. `AT_RANDOM` points at 16 bytes from the
+kernel's generator (ADR 0185). Only occupied
 stack pages are installed; the remaining reservation
 stays demand-zero. The common launch path installs this state before scheduling.
 
@@ -126,7 +126,7 @@ Syscalls map onto native primitives:
 | `pread64`, `pwrite64` | a VFS seek, a bulk request, and a seek back |
 | `open`, `read`, `write` on `/dev/null` and `/dev/zero` | the kernel itself; no VFS exchange |
 | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn` | compatibility state; pending signals act at system call returns through an `rt_sigframe` |
-| `getrandom` | the CPU's RDRAND generator |
+| `getrandom` | the kernel's ChaCha20 generator |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
@@ -291,9 +291,8 @@ Image replacement resets caught dispositions to default and preserves ignored
 dispositions, the blocked mask, and pending signals. Fork copies dispositions
 and the mask and starts the child with nothing pending.
 
-`getrandom` returns bytes from RDRAND, 256 per call at most, and `ENOSYS` on
-a CPU without the instruction. The kernel has no other source and makes none
-up.
+`getrandom` returns bytes from the kernel's generator, 256 per call at most
+(ADR 0185).
 
 ### Identity and time
 

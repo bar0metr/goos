@@ -268,9 +268,9 @@ complete is a diagnostic result, `expected-failure`, and exits 0;
 `PVE_FLAGS=--require-pass` makes it a failure. The add step runs 7-Zip's
 multithreaded LZMA2 encoder (ADR 0177).
 
-glibc needs `AT_RANDOM`, which GoOS supplies only on a CPU with RDRAND (ADR
-0151). `cpu=host` on any recent x86_64 has it; under local QEMU use
-`-cpu max`.
+glibc reads `AT_RANDOM` before `main`, which GoOS supplies on every CPU
+(ADR 0185). `make test-linux-7zip` runs the same round trip under local
+QEMU.
 
 To see what a workload asks for, trace it on Linux and compare the calls with
 the refused set:
