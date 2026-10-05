@@ -371,3 +371,43 @@ func TestDeferredLaunchWaitsWithoutCountingAFailure(t *testing.T) {
 		t.Fatalf("started service = %#v", snapshot)
 	}
 }
+
+// When the block service restarts before its driver has noticed, the old
+// driver instance is not healthy, so the filesystem service, which needs a
+// live driver, waits for the replacement instead of starting against the
+// one about to exit. The exits can arrive in either order.
+func TestFollowerOfRestartedDependencyBlocksItsDependents(t *testing.T) {
+	var manager Manager
+	if manager.Register(Definition{Name: "block", Executable: "/block", Restart: RestartOnFailure}) != StatusOK ||
+		manager.Register(Definition{Name: "driver", Executable: "/driver", Dependencies: []string{"block"}, Restart: RestartOnFailure, FollowsDependencies: true}) != StatusOK ||
+		manager.Register(Definition{Name: "fs", Executable: "/fs", Dependencies: []string{"block", "driver"}, Restart: RestartOnFailure, FollowsDependencies: true}) != StatusOK {
+		t.Fatal("registration failed")
+	}
+	pids := map[string]uint64{}
+	next := uint64(10)
+	launch := func(spec LaunchSpec) (uint64, bool) {
+		next++
+		pids[string(spec.Name[:spec.NameSize])] = next
+		return next, true
+	}
+	if manager.StartReady(0, launch) != 3 {
+		t.Fatal("initial start")
+	}
+	manager.Exit(pids["block"], 1, 10)
+	manager.Exit(pids["fs"], 1, 11)
+	if started := manager.StartReady(10+RestartBackoff, launch); started != 1 {
+		t.Fatalf("started %d services, want only the block service", started)
+	}
+	if fs, _ := manager.Snapshot("fs"); fs.State == StateRunning {
+		t.Fatal("filesystem started against the old driver")
+	}
+	manager.Exit(pids["driver"], 1, 30)
+	if started := manager.StartReady(30+RestartBackoff, launch); started != 2 {
+		t.Fatalf("started %d services, want the driver and then the filesystem", started)
+	}
+	for _, name := range []string{"block", "driver", "fs"} {
+		if snapshot, _ := manager.Snapshot(name); snapshot.State != StateRunning || snapshot.Health != HealthHealthy {
+			t.Fatalf("%s = %#v", name, snapshot)
+		}
+	}
+}

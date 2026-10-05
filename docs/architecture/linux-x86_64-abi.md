@@ -43,7 +43,9 @@ an errno; nothing is accepted and ignored.
 | `pipe(22)`, `pipe2(293)` | partial | a native stream with an 8176-byte ring; `pipe2` takes `O_CLOEXEC`, other flags `EINVAL`; `EPIPE` and `SIGPIPE` with no reader |
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
-| `sched_yield(24)` | implemented | returns at once; the scheduler preempts every task at its tick |
+| `sched_yield(24)` | implemented | the return is a scheduling point: other runnable tasks on the processor run first |
+| `sched_getaffinity(204)` | implemented | the caller's own process or thread only: every online processor, an 8-byte mask; `ESRCH` for another ID, `EINVAL` for a buffer under 8 bytes or not a multiple of 8 |
+| `getcpu(309)` | implemented | the processor the caller runs on, and node 0 |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `pause(34)` | implemented | sleeps until a handled signal, then `EINTR` |
 | `nanosleep(35)` | implemented | a timer deadline checked against the monotonic clock, never early; a handled signal ends it with `EINTR` and the time left |
@@ -69,7 +71,7 @@ an errno; nothing is accepted and ignored.
 | `setuid(105)`, `setgid(106)` | partial | succeed for 1000, `EPERM` otherwise |
 | `getgroups(115)` | implemented | no supplementary groups |
 | `time(201)` | implemented | the realtime clock in seconds |
-| `futex(202)` | partial | `FUTEX_WAIT`, `FUTEX_WAKE`, and their bitset forms, private or shared, with relative or absolute timeouts; a handled signal ends a wait with `EINTR`; requeue, priority inheritance, wake-op, and multi-word waits `ENOSYS` |
+| `futex(202)` | partial | `FUTEX_WAIT`, `FUTEX_WAKE`, and their bitset forms, private or shared, with relative or absolute timeouts; `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE`, which musl's condition variables use; a handled signal ends a wait with `EINTR`; priority inheritance, wake-op, and multi-word waits `ENOSYS` |
 | `rt_sigsuspend(130)` | implemented | a temporary mask until a handled signal, then `EINTR`; the handler's return restores the mask |
 | `arch_prctl(158)` | partial | `ARCH_SET_FS` and `ARCH_GET_FS`; GS operations refused |
 | `getdents64(217)` | implemented | one VFS exchange per entry; whole records only; no `.` or `..` |

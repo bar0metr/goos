@@ -212,6 +212,17 @@ await_ready() {
 	done
 }
 
+# await_count waits, for at most a minute, until the file has at least count
+# lines matching pattern. A guest step that takes longer than usual, as on
+# several emulated processors, then does not receive the next command early.
+await_count() { # file pattern count
+	waited=0
+	while [ "$(grep -c "$2" "$1" 2>/dev/null || true)" -lt "$3" ] && [ "$waited" -lt 600 ]; do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+}
+
 # guest_memory_mib prints the size a QEMU -m value names, in MiB. It accepts a
 # whole number with an optional M or G suffix and fails on anything else.
 guest_memory_mib() {
@@ -240,6 +251,8 @@ firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
 # MEMORY is the guest RAM, in QEMU -m syntax; the Makefile passes it.
 memory=${MEMORY:-512M}
+# SMP is the guest's processor count, as a QEMU -smp argument.
+smp=${SMP:-1}
 # An executable far larger than anything the build produces (ADR 0106): the
 # validation build's vmprobe with three MiB of read-only data it never
 # touches, put on the volume the guest mounts, so launching it proves a large
@@ -758,7 +771,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	done
 	sleep 1
 	printf 'echo arena-stress-complete\n'
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1077,7 +1090,7 @@ checks=$((checks + 1))
 	printf 'ls /state\n'
 	sleep 2
 	printf 'config get user.name\n'
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1302,7 +1315,7 @@ rm -f "$m7_log"
 	printf 'reboot\n'
 	await_ready "$m7_log" 2
 	printf 'cat /home/m7/hello.txt\n'
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1340,7 +1353,7 @@ done
 	printf 'echo volatile-root-still-works\n'
 	sleep 2
 	printf 'ls /bootstrap/bin\n'
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$corrupt_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1375,14 +1388,16 @@ rm -f "$fsck_log"
 recovery_iso=build/variants/$variant/goos-x86_64-recovery.iso
 ( await_ready "$fsck_log"
 	printf 'fsck-fat --check auto\n'
-	sleep 8
+	await_count "$fsck_log" '^FAT32_RESTARTED_OK$' 1
+	sleep 2
 	printf 'cat /home/demo/message.txt; echo after-fsck\n'
 	sleep 2
 	printf 'fsck-fat --repair auto\n'
-	sleep 8
+	await_count "$fsck_log" '^FAT32_RESTARTED_OK$' 2
+	sleep 2
 	printf 'cat /home/demo/message.txt; echo after-fsck-repair\n'
 	sleep 2
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1416,7 +1431,7 @@ for table_kind in mbr gpt; do
 		printf 'cat /persist/partition.txt\n'
 		sleep 2
 		printf 'config get system.shell.prompt\n'
-	) | qemu-system-x86_64 -machine q35 -m "$memory" \
+	) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 		-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 		-drive "if=none,id=goosdisk,format=raw,file=$partition_disk" \
 		-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1448,7 +1463,7 @@ go run ./tools/mkfat32 -tree "$system_tree" "$stack_disk"
 ( await_ready "$stack_log"
 	printf 'fault kernel-stack\n'
 	sleep 10
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$stack_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1483,7 +1498,7 @@ go run ./tools/mkfat32 -tree "$system_tree" "$poweroff_disk"
 	sleep 2
 	printf 'poweroff\n'
 	sleep 30
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
@@ -1513,7 +1528,7 @@ forbid_regex poweroff.no-panic 'PANIC' 'no panic on the way down' "$poweroff_log
 ( await_ready "$poweroff_after_log"
 	printf 'cat /home/poweroff.txt\n'
 	sleep 3
-) | qemu-system-x86_64 -machine q35 -m "$memory" \
+) | qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$poweroff_disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

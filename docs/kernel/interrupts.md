@@ -29,17 +29,23 @@ returns with `IRETQ`. Boot waits for three physical timer interrupts, then
 counts TSC cycles across 100 ms of ticks to calibrate a nanosecond clock
 (ADR 0054), before emitting `TIMER_OK`.
 
-The PIC/PIT path remains the bootstrap timer mechanism. For Q35 PCI INTx, the
+The same 100 ms of PIT ticks calibrate the bootstrap processor's local APIC
+timer. Boot then masks the PIT and runs the scheduler tick from the local
+APIC timer at vector 0x30, one per processor; only the bootstrap processor's
+tick advances kernel time ([SMP](smp.md), ADR 0181).
+
+For Q35 PCI INTx, the
 kernel maps the LAPIC and IOAPIC into supervisor-only pages and routes virtio
 GSI 11 to vector 43. The handler coalesces the level-triggered source, masks the
 route, wakes the single capability-authorized waiter, and acknowledges the
 LAPIC. The driver acknowledges the device ISR; its next wait rearms the route.
 
-The current interrupt routing is deliberately single-CPU and single-device.
-The kernel parses MADT processor entries for the read-only CPU inventory, but
-does not use MADT interrupt-controller entries to route devices or start APs.
-Dynamic GSI routing, per-CPU timers, and calibrated time conversion are
-required before SMP.
+Device interrupts go to the bootstrap processor alone, routed to its APIC
+ID. A handler that wakes a task on another processor sends that processor a
+reschedule interrupt. Processors interrupt each other on vectors 0x31
+(reschedule), 0x32 (TLB shootdown), and 0x33 (stop after a panic). The kernel
+does not use MADT interrupt-controller entries; dynamic GSI routing and
+spreading device interrupts over processors are future work.
 
 ## Ring transition state
 

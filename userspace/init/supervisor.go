@@ -77,6 +77,11 @@ type Definition struct {
 	Capabilities []Capability
 	Restart      RestartPolicy
 	Profile      ResourceProfile
+	// FollowsDependencies marks a service whose instance serves the
+	// instances of its dependencies that ran when it started. Once one of
+	// them starts again, the running instance is not healthy: it is on its
+	// way out, and a service that depends on it waits for its replacement.
+	FollowsDependencies bool
 }
 
 type LaunchSpec struct {
@@ -127,8 +132,12 @@ type service struct {
 	// deferred marks a launch that is waiting for work its launcher started,
 	// such as reading the executable; until Proceed it waits as a blocked
 	// service does, and the wait is not a failure.
-	deferred    bool
-	restart     RestartPolicy
+	deferred bool
+	restart  RestartPolicy
+	follows  bool
+	// started orders launches: a dependency whose started is later than
+	// this service's began after this instance did.
+	started     uint64
 	state       State
 	health      Health
 	pid         uint64
@@ -144,6 +153,8 @@ type Manager struct {
 	events     [MaxEvents]Event
 	eventStart uint8
 	eventCount uint8
+	// launches counts successful launches, the clock started is read on.
+	launches uint64
 }
 
 func (manager *Manager) Register(definition Definition) Status {
@@ -174,6 +185,7 @@ func (manager *Manager) Register(definition Definition) Status {
 	entry := &manager.services[manager.count]
 	entry.used = true
 	entry.state, entry.health, entry.restart = StateRegistered, HealthUnknown, definition.Restart
+	entry.follows = definition.FollowsDependencies
 	entry.launch.NameSize = uint8(copy(entry.launch.Name[:], definition.Name))
 	entry.launch.ExecutableSize = uint8(copy(entry.launch.Executable[:], definition.Executable))
 	entry.launch.CapabilityCount = uint8(copy(entry.launch.Capabilities[:], definition.Capabilities))
@@ -224,7 +236,8 @@ func (manager *Manager) StartReady(now uint64, launcher func(LaunchSpec) (uint64
 				manager.failed(index, 1, now)
 				continue
 			}
-			entry.pid, entry.state, entry.health = pid, StateRunning, HealthHealthy
+			manager.launches++
+			entry.pid, entry.state, entry.health, entry.started = pid, StateRunning, HealthHealthy, manager.launches
 			manager.record(Event{Kind: EventStarted, Service: uint8(index + 1), PID: pid, Tick: now})
 			manager.refreshRunningHealth(now)
 			started++
@@ -540,7 +553,7 @@ func (manager *Manager) refreshRunningHealth(now uint64) {
 			continue
 		}
 		health := HealthHealthy
-		if !manager.dependenciesHealthy(entry) {
+		if !manager.dependenciesHealthy(entry) || manager.outlived(entry) {
 			health = HealthBlocked
 		}
 		if entry.health != health && health == HealthBlocked {
@@ -548,6 +561,20 @@ func (manager *Manager) refreshRunningHealth(now uint64) {
 		}
 		entry.health = health
 	}
+}
+
+// outlived reports whether a service that follows its dependencies serves
+// an instance of one that has since started again.
+func (manager *Manager) outlived(entry *service) bool {
+	if !entry.follows {
+		return false
+	}
+	for index := 0; index < int(entry.dependencyCount); index++ {
+		if manager.services[entry.dependencies[index]].started > entry.started {
+			return true
+		}
+	}
+	return false
 }
 
 func (manager *Manager) index(name string) (uint8, bool) {

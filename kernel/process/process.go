@@ -207,6 +207,11 @@ func (process *Process) OwnsTask(id sched.TaskID) bool {
 	return false
 }
 
+// DetachTask removes a task that no longer belongs to the program the
+// process runs, as exec ends the other threads of the image it replaced. The
+// task's exit then neither ends the process nor gives it an exit code.
+func (process *Process) DetachTask(id sched.TaskID) bool { return process.removeTask(id) }
+
 func (process *Process) removeTask(id sched.TaskID) bool {
 	for index := 0; index < process.taskCount; index++ {
 		if process.tasks[index] != id {

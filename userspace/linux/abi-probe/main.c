@@ -58,6 +58,9 @@
  *                     umask, readlink, futex, gettimeofday, time, sysinfo
  *   threads           pthreads: a mutex and a condition shared by three threads,
  *                     join values, TIDs, TLS, and exit_group from a thread
+ *   smp               workers on every online processor at once, a contended
+ *                     mutex, remaps and faults beside readers, fork and exec
+ *                     beside running threads
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -3332,6 +3335,377 @@ static int threads_test(void)
 	return 0;
 }
 
+/* smp runs on every online processor at once. Workers record the
+ * processors getcpu reports and whether another worker computed on another
+ * processor at the same moment, so the result proves parallel execution
+ * rather than threads that merely completed. */
+#define SMP_WORKERS 16
+#define SMP_SECONDS 3
+/* A Linux process has eight tasks on GoOS: the main thread and seven more. */
+#define SMP_THREADS 7
+
+static int smp_count;
+static volatile int smp_go, smp_stop;
+static volatile int smp_inside[SMP_WORKERS];
+static volatile int smp_where[SMP_WORKERS];
+static unsigned long smp_seen[SMP_WORKERS];
+static int smp_overlap[SMP_WORKERS];
+static int smp_fpu_bad;
+
+static int smp_cpu(void)
+{
+	unsigned cpu = 0;
+
+	if (syscall(SYS_getcpu, &cpu, NULL, NULL) != 0)
+		return -1;
+	return (int)cpu;
+}
+
+static long smp_elapsed_ms(const struct timespec *start)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
+/* One slice of SSE work with a known answer. A state lost across a
+ * preemption or a move to another processor shows as a different sum. The
+ * worker's progress counter advances while it computes. */
+static volatile unsigned long smp_progress[SMP_WORKERS];
+
+static double smp_slice(int seed)
+{
+	volatile double sum = 0;
+	int index;
+
+	for (index = 1; index < 20000; index++) {
+		sum += (double)(index ^ seed) / (double)index;
+		if (index % 512 == 0 && seed < SMP_WORKERS)
+			smp_progress[seed]++;
+	}
+	return sum;
+}
+
+static long smp_now_us(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return now.tv_sec * 1000000 + now.tv_nsec / 1000;
+}
+
+/* smp_watch reports whether worker other computed on another processor
+ * during a window shorter than half a scheduler tick in which this thread
+ * stayed on cpu. A thread that lost its processor to another task would be
+ * away for a whole tick, so both ran at the same moment. */
+static int smp_watch(int other, int cpu)
+{
+	unsigned long before, after;
+	long start = smp_now_us(), spin;
+
+	if (!__atomic_load_n(&smp_inside[other], __ATOMIC_SEQ_CST) || smp_where[other] == cpu)
+		return 0;
+	before = smp_progress[other];
+	for (spin = 0; spin < 2000; spin++)
+		__asm__ volatile("pause");
+	after = smp_progress[other];
+	return after != before && smp_now_us() - start < 5000 && smp_where[other] != cpu && smp_cpu() == cpu;
+}
+
+static void *smp_worker(void *argument)
+{
+	long self = (long)argument;
+	double expected = smp_slice((int)self + SMP_WORKERS);
+	struct timespec start, nap = {0, 2000000};
+	int cpu, other, round = 0;
+
+	while (!smp_go)
+		sched_yield();
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	while (!smp_stop && smp_elapsed_ms(&start) < SMP_SECONDS * 1000) {
+		cpu = smp_cpu();
+		if (cpu < 0 || cpu >= 64)
+			return (void *)1;
+		smp_seen[self] |= 1ul << cpu;
+		smp_where[self] = cpu;
+		__atomic_store_n(&smp_inside[self], 1, __ATOMIC_SEQ_CST);
+		if (smp_slice((int)self) != smp_slice((int)self) || smp_slice((int)self + SMP_WORKERS) != expected)
+			__atomic_store_n(&smp_fpu_bad, 1, __ATOMIC_SEQ_CST);
+		for (other = 0; other < smp_count; other++)
+			if (other != self && smp_watch(other, cpu))
+				smp_overlap[self]++;
+		__atomic_store_n(&smp_inside[self], 0, __ATOMIC_SEQ_CST);
+		/* A short sleep now and then lets the scheduler place the worker
+		 * again, on whichever processor is free. */
+		if (++round % 16 == 0)
+			nanosleep(&nap, NULL);
+	}
+	return NULL;
+}
+
+/* Threads take one mutex and pass one condition back and forth. */
+#define SMP_LOCK_ROUNDS 20000
+static pthread_mutex_t smp_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t smp_turn = PTHREAD_COND_INITIALIZER;
+static long smp_counter;
+static int smp_token;
+
+static void *smp_contender(void *argument)
+{
+	long self = (long)argument, round;
+
+	for (round = 0; round < SMP_LOCK_ROUNDS; round++) {
+		pthread_mutex_lock(&smp_lock);
+		smp_counter++;
+		pthread_mutex_unlock(&smp_lock);
+	}
+	for (round = 0; round < 200; round++) {
+		pthread_mutex_lock(&smp_lock);
+		while (smp_token != self % 2)
+			pthread_cond_wait(&smp_turn, &smp_lock);
+		smp_token = !smp_token;
+		pthread_cond_broadcast(&smp_turn);
+		pthread_mutex_unlock(&smp_lock);
+	}
+	return NULL;
+}
+
+/* A page is discarded and written again at one address while another
+ * thread reads it on another processor. Each discard frees the physical
+ * page and the next write faults in a fresh one, so after a new value is
+ * published the reader must see it, or zero: an old translation would show
+ * an older value, or the bytes of whoever has the freed page now. */
+#define SMP_REMAPS 400
+static volatile unsigned long *smp_page;
+static volatile int smp_generation, smp_reader_bad, smp_reader_done;
+
+static void *smp_reader(void *argument)
+{
+	int seen;
+	unsigned long value;
+
+	(void)argument;
+	while (!__atomic_load_n(&smp_reader_done, __ATOMIC_ACQUIRE)) {
+		seen = __atomic_load_n(&smp_generation, __ATOMIC_ACQUIRE);
+		if (seen <= 0)
+			continue;
+		value = smp_page[0];
+		if (value < (unsigned long)seen && value != 0)
+			smp_reader_bad = 1;
+	}
+	return NULL;
+}
+
+static int smp_remap(void)
+{
+	void *address = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	pthread_t reader;
+	int round;
+
+	if (address == MAP_FAILED)
+		return 2;
+	smp_page = address;
+	smp_page[0] = 1;
+	__atomic_store_n(&smp_generation, 1, __ATOMIC_RELEASE);
+	if (pthread_create(&reader, NULL, smp_reader, NULL) != 0)
+		return 2;
+	for (round = 2; round < SMP_REMAPS; round++) {
+		if (madvise(address, 4096, MADV_DONTNEED) != 0)
+			return 2;
+		smp_page[0] = (unsigned long)round;
+		__atomic_store_n(&smp_generation, round, __ATOMIC_RELEASE);
+		if (round % 4 == 0 && (mprotect(address, 4096, PROT_READ) != 0 || mprotect(address, 4096, PROT_READ | PROT_WRITE) != 0))
+			return 2;
+	}
+	__atomic_store_n(&smp_reader_done, 1, __ATOMIC_RELEASE);
+	pthread_join(reader, NULL);
+	munmap(address, 4096);
+	return smp_reader_bad;
+}
+
+/* Several threads touch the same untouched pages of one mapping at once:
+ * every fault but the first finds the page already there. */
+#define SMP_FAULT_PAGES 64
+static volatile unsigned char *smp_lazy;
+static volatile int smp_fault_go;
+
+static void *smp_toucher(void *argument)
+{
+	long self = (long)argument;
+	int page;
+
+	while (!smp_fault_go)
+		;
+	for (page = 0; page < SMP_FAULT_PAGES; page++)
+		smp_lazy[page * 4096 + self] = (unsigned char)(self + 1);
+	return NULL;
+}
+
+/* A child creates spinning threads and calls execve: every thread must be
+ * gone before the new image runs, and the new image must start. */
+static void *smp_spinner(void *argument)
+{
+	(void)argument;
+	for (;;)
+		smp_slice(SMP_WORKERS);
+	return NULL;
+}
+
+static int smp_exec_with_threads(void)
+{
+	char *arguments[] = {"/system/linux/hello", NULL};
+	pid_t child;
+	int status, index;
+
+	fflush(stdout);
+	child = fork();
+	if (child == 0) {
+		pthread_t spinner;
+
+		for (index = 0; index < 3; index++)
+			pthread_create(&spinner, NULL, smp_spinner, NULL);
+		execv(arguments[0], arguments);
+		_exit(9);
+	}
+	return child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+}
+
+/* smp_speedup times a fixed amount of SSE work done by one thread, then the
+ * same work split over threads threads, and returns the ratio in tenths. It
+ * is a coarse sanity figure, not a pass mark: host load moves it. */
+#define SMP_UNITS 96
+
+static void *smp_units(void *argument)
+{
+	long units = (long)argument, index;
+
+	for (index = 0; index < units; index++)
+		smp_slice(SMP_WORKERS);
+	return NULL;
+}
+
+static long smp_speedup(int threads)
+{
+	pthread_t helpers[SMP_WORKERS];
+	long start, single, parallel;
+	int index;
+
+	start = smp_now_us();
+	smp_units((void *)(long)SMP_UNITS);
+	single = smp_now_us() - start;
+	start = smp_now_us();
+	for (index = 0; index < threads; index++)
+		if (pthread_create(&helpers[index], NULL, smp_units, (void *)(long)(SMP_UNITS / threads)) != 0)
+			return 0;
+	for (index = 0; index < threads; index++)
+		pthread_join(helpers[index], NULL);
+	parallel = smp_now_us() - start;
+	return parallel > 0 ? single * 10 / parallel : 0;
+}
+
+static int smp_test(void)
+{
+	pthread_t workers[SMP_WORKERS];
+	unsigned long mask = 0, seen = 0;
+	long index;
+	int migrated = 0, overlaps = 0, status;
+	void *result;
+
+	if (syscall(SYS_sched_getaffinity, 0, sizeof mask, &mask) != sizeof mask || mask == 0) {
+		printf("smp failed: sched_getaffinity\n");
+		return 1;
+	}
+	smp_count = __builtin_popcountl(mask) + 1;
+	if (smp_count > SMP_THREADS)
+		smp_count = SMP_THREADS;
+	printf("smp cpus: %d online\n", __builtin_popcountl(mask));
+	for (index = 0; index < smp_count; index++)
+		if (pthread_create(&workers[index], NULL, smp_worker, (void *)index) != 0) {
+			printf("smp failed: create worker %ld\n", index);
+			return 1;
+		}
+	smp_go = 1;
+	for (index = 0; index < smp_count; index++) {
+		if (pthread_join(workers[index], &result) != 0 || result != NULL) {
+			printf("smp failed: worker %ld\n", index);
+			return 1;
+		}
+		seen |= smp_seen[index];
+		overlaps += smp_overlap[index];
+		if (__builtin_popcountl(smp_seen[index]) > 1)
+			migrated++;
+	}
+	printf("smp workers: %d on cpus %#lx, %d moved, %d parallel samples\n", smp_count, seen, migrated, overlaps);
+	/* With fewer workers than processors, each worker must find one of its
+	 * own; with more, every processor must have run one. */
+	if (__builtin_popcountl(seen) < (smp_count < __builtin_popcountl(mask) ? smp_count : __builtin_popcountl(mask)) ||
+	    (seen & ~mask) != 0 || (mask & (mask - 1)) != 0 && (overlaps == 0 || migrated == 0) || smp_fpu_bad) {
+		printf("smp failed: cpus %#lx of %#lx, overlaps %d, moved %d, fpu %d\n", seen, mask, overlaps, migrated, smp_fpu_bad);
+		return 1;
+	}
+	for (index = 0; index < 4; index++)
+		if (pthread_create(&workers[index], NULL, smp_contender, (void *)index) != 0)
+			return 1;
+	for (index = 0; index < 4; index++)
+		pthread_join(workers[index], NULL);
+	if (smp_counter != 4 * SMP_LOCK_ROUNDS) {
+		printf("smp failed: mutex counter %ld\n", smp_counter);
+		return 1;
+	}
+	printf("smp futex: %ld locked increments\n", smp_counter);
+	if ((status = smp_remap()) != 0) {
+		printf("smp failed: %s\n", status == 1 ? "a reader saw a discarded page" : "discard and write");
+		return 1;
+	}
+	smp_lazy = mmap(NULL, SMP_FAULT_PAGES * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (smp_lazy == MAP_FAILED)
+		return 1;
+	for (index = 0; index < 4; index++)
+		pthread_create(&workers[index], NULL, smp_toucher, (void *)index);
+	smp_fault_go = 1;
+	for (index = 0; index < 4; index++)
+		pthread_join(workers[index], NULL);
+	for (index = 0; index < SMP_FAULT_PAGES * 4; index++)
+		if (smp_lazy[(index / 4) * 4096 + index % 4] != index % 4 + 1) {
+			printf("smp failed: concurrent fault lost a write\n");
+			return 1;
+		}
+	printf("smp vm: discards and concurrent faults kept\n");
+	/* Measured before the spinners below start: they never stop. */
+	{
+		int threads = __builtin_popcountl(mask) > SMP_THREADS ? SMP_THREADS : __builtin_popcountl(mask);
+		long tenths = smp_speedup(threads);
+
+		printf("smp speedup: %ld.%ld with %d threads\n", tenths / 10, tenths % 10, threads);
+	}
+	/* fork from a process whose other threads run */
+	for (index = 0; index < 4; index++)
+		pthread_create(&workers[index], NULL, smp_spinner, NULL);
+	for (index = 0; index < 20; index++) {
+		pid_t child;
+
+		fflush(stdout);
+		child = fork();
+		if (child == 0)
+			_exit(smp_lazy[0] == 1 ? 3 : 4);
+		if (child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 3) {
+			printf("smp failed: fork from a running process\n");
+			return 1;
+		}
+	}
+	printf("smp lifecycle: 20 forks beside running threads\n");
+	if (smp_exec_with_threads() != 0) {
+		printf("smp failed: exec with running threads\n");
+		return 1;
+	}
+	printf("smp exec: threads stopped\n");
+	printf("smp ok\n");
+	fflush(stdout);
+	/* The spinners end with the process. */
+	_exit(0);
+}
+
 int main(int argc, char **argv)
 {
 	const char *mode = getenv("GOOS_LINUX_PROBE");
@@ -3396,6 +3770,8 @@ int main(int argc, char **argv)
 			return libc_test();
 		if (!strcmp(argv[1], "threads"))
 			return threads_test();
+		if (!strcmp(argv[1], "smp"))
+			return smp_test();
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))

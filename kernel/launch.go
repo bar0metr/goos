@@ -320,7 +320,9 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 	// A runnable task cannot be withdrawn; its process ID is consumed either
 	// way so it is never handed out twice.
 	nextProcessID++
-	if !processRegistry.BindTask(pid, sched.TaskID(task)) {
+	bound := processRegistry.BindTask(pid, sched.TaskID(task))
+	amd64.StartTask(sched.TaskID(task))
+	if !bound {
 		kernelLogUint(logfmt.Error, "task bind failed", "pid", uint64(pid))
 		return 0, 0, supervisor.LaunchTaskFailed
 	}

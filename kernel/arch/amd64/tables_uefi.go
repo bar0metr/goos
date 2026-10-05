@@ -20,45 +20,104 @@ const (
 	// GSI 4 is the legacy UART line. Vector numbering follows the IOAPIC
 	// convention this bootstrap already uses for GSI 11.
 	serialIRQVector = 36
-	virtioIRQVector = 43
-	userCallVector  = 0x80
-	yieldVector     = 0x81
-	tssBytes        = 104
+	// The PICs' spurious vectors, IRQ 7 and IRQ 15 after the remap.
+	picSpuriousMaster = 39
+	picSpuriousSlave  = 47
+	virtioIRQVector   = 43
+	// localTimerVector is every processor's own preemption tick. The three
+	// vectors after it are interrupts one processor sends another: look at
+	// the run queue, drop translations, and stop after a panic.
+	localTimerVector   = 0x30
+	rescheduleVector   = 0x31
+	shootdownVector    = 0x32
+	stopVector         = 0x33
+	userCallVector     = 0x80
+	yieldVector        = 0x81
+	apicSpuriousVector = 0xff
+	tssBytes           = 104
+	// tssStride spaces the processors' TSSs; each fits in its stride.
+	tssStride = 128
 	// tssIST1 is the offset of the first interrupt stack pointer in the TSS.
 	tssIST1           = 36
 	doubleFaultVector = 8
+	// gdtFixed is the null, kernel code and data, and user data and code
+	// descriptors. Processor n's 16-byte TSS descriptor follows at index
+	// gdtFixed+2n, selector tssSelector+16n.
+	gdtFixed = 5
+)
+
+// Positions of the handlers after the exceptions in goos_interrupt_table.
+const (
+	handlerTimer = exceptionCount + iota
+	handlerUserCall
+	handlerVirtio
+	handlerYield
+	handlerSerial
+	handlerKeyboard
+	handlerLocalTimer
+	handlerReschedule
+	handlerShootdown
+	handlerStop
+	handlerSpurious
+	handlerCount
 )
 
 var (
-	gdt = [7]uint64{
+	gdt = [gdtFixed + 2*MaxCPUs]uint64{
 		0,
 		0x00af9a000000ffff,
 		0x00af92000000ffff,
 		0x00cff2000000ffff,
 		0x00affa000000ffff,
-		0,
-		0,
 	}
 	idt [256]IDTEntry
-	tss [tssBytes]byte
+	// tss holds every processor's TSS. RSP0 names the kernel-entry stack of
+	// the task the processor runs; IST1 its own double-fault stack.
+	tss [MaxCPUs][tssStride]byte
 )
 
 //go:extern goos_interrupt_table
-var interruptTable [exceptionCount + 6]uintptr
+var interruptTable [handlerCount]uintptr
 
 //go:extern goos_linux_entry_mapping_table
 var linuxEntryMappingTable [3]uintptr
 
+//go:extern goos_smp_ready
+var smpReady uint64
+
 // EntryProbeAddress returns one mapped higher-half trampoline address for
 // supervisor-isolation validation.
 func EntryProbeAddress() uint64 {
-	address, _ := vm.KernelAlias(uint64(interruptTable[exceptionCount+1]))
+	address, _ := vm.KernelAlias(uint64(interruptTable[handlerUserCall]))
 	return address
 }
 
-// InstallDescriptorTables replaces firmware GDT/IDT state. All architectural
-// exception vectors receive a gate; vector 3 is deliberately callable from
-// ring 3 for debugger-compatible breakpoints.
+// gates lists the IDT vectors past the exceptions and their handlers.
+var gates = [...]struct {
+	vector  uint8
+	handler int
+	user    bool
+}{
+	{timerVector, handlerTimer, false},
+	{keyboardIRQVector, handlerKeyboard, false},
+	{serialIRQVector, handlerSerial, false},
+	{picSpuriousMaster, handlerSpurious, false},
+	{virtioIRQVector, handlerVirtio, false},
+	{picSpuriousSlave, handlerSpurious, false},
+	{localTimerVector, handlerLocalTimer, false},
+	{rescheduleVector, handlerReschedule, false},
+	{shootdownVector, handlerShootdown, false},
+	{stopVector, handlerStop, false},
+	{userCallVector, handlerUserCall, true},
+	{yieldVector, handlerYield, false},
+	{apicSpuriousVector, handlerSpurious, false},
+}
+
+// InstallDescriptorTables replaces firmware GDT/IDT state on the bootstrap
+// processor. All architectural exception vectors receive a gate; vector 3 is
+// deliberately callable from ring 3 for debugger-compatible breakpoints. The
+// IDT is shared by every processor: its gates never change after boot, and
+// every handler finds its processor through the task register.
 func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	for vector := 0; vector < exceptionCount; vector++ {
 		attributes := interruptGate
@@ -74,66 +133,43 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 		}
 		idt[vector] = NewIDTEntry(uintptr(handler), attributes)
 	}
-	if interruptTable[timerVector] == 0 {
-		return false
+	for index := range gates {
+		gate := gates[index]
+		if interruptTable[gate.handler] == 0 {
+			return false
+		}
+		handler, ok := vm.KernelAlias(uint64(interruptTable[gate.handler]))
+		if !ok {
+			return false
+		}
+		attributes := interruptGate
+		if gate.user {
+			attributes = userCallGate
+		}
+		idt[gate.vector] = NewIDTEntry(uintptr(handler), attributes)
 	}
-	timer, ok := vm.KernelAlias(uint64(interruptTable[timerVector]))
-	if !ok {
-		return false
-	}
-	idt[timerVector] = NewIDTEntry(uintptr(timer), interruptGate)
-	if interruptTable[exceptionCount+2] == 0 {
-		return false
-	}
-	virtio, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+2]))
-	if !ok {
-		return false
-	}
-	idt[virtioIRQVector] = NewIDTEntry(uintptr(virtio), interruptGate)
-	if interruptTable[exceptionCount+1] == 0 {
-		return false
-	}
-	userCall, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+1]))
-	if !ok {
-		return false
-	}
-	idt[userCallVector] = NewIDTEntry(uintptr(userCall), userCallGate)
-	if interruptTable[exceptionCount+3] == 0 {
-		return false
-	}
-	yield, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+3]))
-	if !ok {
-		return false
-	}
-	idt[yieldVector] = NewIDTEntry(uintptr(yield), interruptGate)
-	if interruptTable[exceptionCount+4] == 0 {
-		return false
-	}
-	serial, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+4]))
-	if !ok {
-		return false
-	}
-	idt[serialIRQVector] = NewIDTEntry(uintptr(serial), interruptGate)
-	if interruptTable[exceptionCount+5] == 0 {
-		return false
-	}
-	keyboard, ok := vm.KernelAlias(uint64(interruptTable[exceptionCount+5]))
-	if !ok {
-		return false
-	}
-	idt[keyboardIRQVector] = NewIDTEntry(uintptr(keyboard), interruptGate)
+	// A double fault switches to the TSS's first interrupt stack, so it can be
+	// reported when the stack that faulted has run into its guard (ADR 0091).
+	idt[doubleFaultVector].IST = 1
 
 	allocation, ok := allocator.AllocateContiguous(kernelStackPages + stackGuardPages)
 	if !ok || !unmapGuardPages(pageTable, allocation) {
 		return false
 	}
 	rsp0, ok := vm.KernelAlias(allocation + (kernelStackPages+stackGuardPages)*pmm.PageSize - 64)
-	if !ok {
+	if !ok || !prepareCPUTables(allocator, pageTable, 0, rsp0) {
 		return false
 	}
-	putUint64(tss[4:12], rsp0)
-	// A double fault switches to the TSS's first interrupt stack, so it can be
-	// reported when the stack that faulted has run into its guard (ADR 0091).
+	return loadCPUTables(0)
+}
+
+// prepareCPUTables gives processor cpu its TSS, with rsp0 as the initial
+// kernel-entry stack and a fresh guarded double-fault stack, and the GDT
+// descriptor that names it.
+func prepareCPUTables(allocator *pmm.Allocator, pageTable uint64, cpu int, rsp0 uint64) bool {
+	if cpu < 0 || cpu >= MaxCPUs {
+		return false
+	}
 	fault, ok := allocator.AllocateContiguous(faultStackPages + stackGuardPages)
 	if !ok || !unmapGuardPages(pageTable, fault) {
 		return false
@@ -142,21 +178,31 @@ func InstallDescriptorTables(allocator *pmm.Allocator, pageTable uint64) bool {
 	if !ok {
 		return false
 	}
-	putUint64(tss[tssIST1:tssIST1+8], faultTop)
-	idt[doubleFaultVector].IST = 1
-	tssBase, ok := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&tss[0]))))
+	segment := &tss[cpu]
+	for index := range segment {
+		segment[index] = 0
+	}
+	putUint64(segment[4:12], rsp0)
+	putUint64(segment[tssIST1:tssIST1+8], faultTop)
+	segment[102], segment[103] = byte(tssBytes), 0
+	tssBase, ok := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&segment[0]))))
 	if !ok {
 		return false
 	}
-	setTSSStackAddress((*byte)(unsafe.Pointer(uintptr(tssBase + 4))))
-	tss[102], tss[103] = byte(tssBytes), 0
-	gdt[5], gdt[6] = tssDescriptor(uintptr(tssBase), tssBytes-1)
+	cpuData[cpu][cpuTSSRSP0] = tssBase + 4
+	gdt[gdtFixed+2*cpu], gdt[gdtFixed+2*cpu+1] = tssDescriptor(uintptr(tssBase), tssBytes-1)
+	return true
+}
+
+// loadCPUTables loads the GDT with processor cpu's task register and the IDT
+// on the calling processor.
+func loadCPUTables(cpu int) bool {
 	gdtBase, gdtOK := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&gdt[0]))))
 	idtBase, idtOK := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&idt[0]))))
 	if !gdtOK || !idtOK {
 		return false
 	}
-	loadGDT((*uint64)(unsafe.Pointer(uintptr(gdtBase))), uint16(len(gdt)*8-1))
+	loadGDT((*uint64)(unsafe.Pointer(uintptr(gdtBase))), uint16(len(gdt)*8-1), tssSelector+uint16(16*cpu))
 	loadIDT((*IDTEntry)(unsafe.Pointer(uintptr(idtBase))), uint16(len(idt)*16-1))
 	return true
 }
@@ -168,8 +214,14 @@ func InstallLinuxSyscallEntry() bool {
 	if linuxEntryMappingTable[0] == 0 || linuxEntryMappingTable[1] == 0 || linuxEntryMappingTable[2] == 0 {
 		return false
 	}
+	return installLinuxSyscallFor(0)
+}
+
+// installLinuxSyscallFor binds SYSCALL on the calling processor, which is
+// processor cpu, with its own entry block behind KERNEL_GS_BASE.
+func installLinuxSyscallFor(cpu int) bool {
 	entry, entryOK := vm.KernelAlias(uint64(linuxEntryMappingTable[0]))
-	data, dataOK := vm.KernelAlias(uint64(linuxEntryMappingTable[2]))
+	data, dataOK := vm.KernelAlias(uint64(uintptr(unsafe.Pointer(&linuxEntryData[cpu][0]))))
 	return entryOK && dataOK && installLinuxSyscall(entry, data, linuxSTAR, linuxFMASK)
 }
 
@@ -177,7 +229,9 @@ func InstallLinuxSyscallEntry() bool {
 func installLinuxSyscall(entry uint64, entryData uint64, star uint64, fmask uint64) bool
 
 // ConfigureDeviceIRQs maps the architectural APIC pages and routes virtio and
-// both legacy console-input lines on bootstrap CPU 0.
+// both legacy console-input lines to the bootstrap processor, whatever its
+// APIC ID. Device interrupts stay there when other processors start; a
+// handler that wakes a task elsewhere interrupts that processor.
 func ConfigureDeviceIRQs(pageTable uint64) bool {
 	if !vm.MapKernelDevicePage(pageTable, uint64(lapicVirtual), 0xfee00000) ||
 		!vm.MapKernelDevicePage(pageTable, uint64(ioapicVirtual), 0xfec00000) {
@@ -185,13 +239,16 @@ func ConfigureDeviceIRQs(pageTable uint64) bool {
 	}
 	invalidatePage(uint64(lapicVirtual))
 	invalidatePage(uint64(ioapicVirtual))
-	mmioWrite32(lapicVirtual+0xf0, mmioRead32(lapicVirtual+0xf0)|1<<8|0xff)
-	ioapicWrite(0x10+2*11+1, 0)
+	enableLocalAPIC()
+	destination := lapicRead(lapicIDRegister) & 0xff000000
+	cpuAPIC[0] = destination >> 24
+	ioapicWrite(0x10+2*11+1, destination)
 	ioapicWrite(0x10+2*11, uint32(virtioIRQVector)|1<<13|1<<15)
-	ioapicWrite(0x10+2*4+1, 0)
+	ioapicWrite(0x10+2*4+1, destination)
 	ioapicWrite(0x10+2*4, uint32(serialIRQVector))
-	ioapicWrite(0x10+2*1+1, 0)
+	ioapicWrite(0x10+2*1+1, destination)
 	ioapicWrite(0x10+2*1, uint32(keyboardIRQVector))
+	smpReady = 1
 	return true
 }
 
@@ -223,7 +280,7 @@ func putUint64(target []byte, value uint64) {
 func TriggerBreakpoint()
 
 //export goos_load_gdt
-func loadGDT(base *uint64, limit uint16)
+func loadGDT(base *uint64, limit uint16, selector uint16)
 
 //export goos_load_idt
 func loadIDT(base *IDTEntry, limit uint16)
@@ -240,7 +297,7 @@ func StartBootstrapTimer(divisor uint16)
 func TimerTicks() uint64
 
 // KernelCallArg2 returns the third native-call argument captured by the
-// interrupt entry path. The bootstrap kernel has one CPU.
+// interrupt entry path. The entry path writes it under the kernel lock.
 //
 //export goos_kernel_call_arg2_read
 func KernelCallArg2() uint64
@@ -308,6 +365,3 @@ func RearmIRQ11()
 //
 //export goos_quiesce_irq_11
 func QuiesceIRQ11()
-
-//export goos_set_tss_stack_address
-func setTSSStackAddress(address *byte)

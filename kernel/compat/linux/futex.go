@@ -6,6 +6,8 @@ import "goos/kernel/compat/linux/abi"
 const (
 	FutexWait          = 0
 	FutexWake          = 1
+	FutexRequeue       = 3
+	FutexCmpRequeue    = 4
 	FutexWaitBitset    = 9
 	FutexWakeBitset    = 10
 	FutexPrivateFlag   = 128
@@ -30,9 +32,14 @@ const (
 	// FutexSleep blocks the caller on the word until a wake with a
 	// matching bit set, a signal, or the timeout.
 	FutexSleep
-	// FutexRefused is an operation GoOS lacks: requeue, the
-	// priority-inheritance locks, wake-op, and wait on several words.
+	// FutexRefused is an operation GoOS lacks: the priority-inheritance
+	// locks, wake-op, and wait on several words.
 	FutexRefused
+	// FutexMoveWaiters wakes up to Count waiters on the word and moves up
+	// to Requeue more to a second word, where a wake on that word finds
+	// them. A condition variable broadcast hands its waiters to the mutex
+	// this way.
+	FutexMoveWaiters
 )
 
 // FutexCall is a decoded futex call.
@@ -41,6 +48,8 @@ type FutexCall struct {
 	Bitset uint32
 	// Count is how many waiters a wake may wake.
 	Count uint32
+	// Requeue is how many more waiters a requeue may move.
+	Requeue uint32
 	// Absolute says the timeout is a point in time on the clock Realtime
 	// names (FUTEX_WAIT_BITSET); otherwise it is an interval (FUTEX_WAIT).
 	Absolute bool
@@ -48,11 +57,24 @@ type FutexCall struct {
 }
 
 // FutexDecide decodes a futex call from its operation, the word at its
-// address, the value argument, and the bit set. The caller has read word;
-// an unreadable or misaligned address is EFAULT or EINVAL before this.
-func FutexDecide(operation uint64, word uint32, value uint64, bitset uint64) (FutexCall, abi.Errno) {
+// address, the value argument, the second value (a requeue's count), and the
+// last argument (a bit set, or the value a compared requeue expects). The
+// caller has read word; an unreadable or misaligned address is EFAULT or
+// EINVAL before this.
+func FutexDecide(operation uint64, word uint32, value uint64, value2 uint64, bitset uint64) (FutexCall, abi.Errno) {
 	realtime := operation&FutexClockRealtime != 0
 	switch operation &^ (FutexPrivateFlag | FutexClockRealtime) {
+	case FutexRequeue, FutexCmpRequeue:
+		if realtime {
+			return FutexCall{}, abi.ENOSYS
+		}
+		if int32(uint32(value)) < 0 || int32(uint32(value2)) < 0 {
+			return FutexCall{}, abi.EINVAL
+		}
+		if operation&^FutexPrivateFlag == FutexCmpRequeue && word != uint32(bitset) {
+			return FutexCall{Action: FutexChanged}, abi.EAGAIN
+		}
+		return FutexCall{Action: FutexMoveWaiters, Bitset: FutexBitsetAll, Count: uint32(value), Requeue: uint32(value2)}, 0
 	case FutexWake, FutexWakeBitset:
 		mask := FutexBitsetAll
 		if operation&^(FutexPrivateFlag|FutexClockRealtime) == FutexWakeBitset {

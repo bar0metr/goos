@@ -66,10 +66,9 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		return
 	}
 	linuxSyscallEntries++
-	state := amd64.ReadSchedulerState()
 	linuxHandler.root = frame.Root
 	linuxHandler.frame = frame
-	linuxHandler.task = sched.TaskID(amd64.TaskIDForSlot(state.Current))
+	linuxHandler.task = amd64.CurrentTask()
 	// The call works with, and returns under, its own thread's signal mask.
 	if process, found := linuxcompat.FindProcess(frame.Root); found {
 		linuxcompat.SelectThreadSignals(process, linuxHandler.task)

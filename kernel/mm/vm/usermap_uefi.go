@@ -26,6 +26,28 @@ func SetFaultResolver(resolver func(root uint64, address uint64, write bool) boo
 	faultResolver = resolver
 }
 
+// shootdown makes every other processor drop its translations of a process
+// root. Another task of the process may run in ring 3 on another processor
+// while a call changes the process's mappings; a page an entry named goes
+// back to the allocator only after the shootdown, so no stale translation
+// reaches it once it has a new owner.
+var shootdown func(root uint64)
+
+// SetShootdown installs the TLB shootdown.
+func SetShootdown(function func(root uint64)) { shootdown = function }
+
+func shootdownRoot(root uint64) {
+	if shootdown != nil {
+		shootdown(root)
+	}
+}
+
+// entryRetired marks a leaf UnmapUserRange has cleared but whose owned page
+// it has not freed yet. The leaf is not present, so neither the processor
+// nor any walker here uses it; it exists only between the two passes, under
+// the kernel lock.
+const entryRetired = uint64(1 << 10)
+
 // userTable returns the table a user entry of parent names, creating it when
 // the entry is empty and create is set. An entry the kernel placed — without
 // the user bit, or a large leaf — is never descended into or replaced.
@@ -108,6 +130,11 @@ func UserPageMapped(rootAddress, virtual uint64) bool {
 // nextLeaf returns the first present user leaf at or above address and below
 // end, skipping whole tables that are absent, and its virtual address.
 func nextLeaf(root *table, address, end uint64) (*uint64, uint64) {
+	return nextEntry(root, address, end, entryPresent)
+}
+
+// nextEntry is nextLeaf for the first leaf with any bit of mark set.
+func nextEntry(root *table, address, end uint64, mark uint64) (*uint64, uint64) {
 	for address < end {
 		pml4Entry := root[(address>>39)&0x1ff]
 		if pml4Entry&(entryPresent|entryUser) != entryPresent|entryUser {
@@ -132,7 +159,7 @@ func nextLeaf(root *table, address, end uint64) (*uint64, uint64) {
 		pt := (*table)(unsafe.Pointer(uintptr(pdEntry & addressMask)))
 		for ; address < end; address += PageSize {
 			leaf := &pt[(address>>12)&0x1ff]
-			if *leaf&entryPresent != 0 {
+			if *leaf&mark != 0 {
 				return leaf, address
 			}
 			if (address+PageSize)&(LeafTableSpan-1) == 0 {
@@ -146,27 +173,48 @@ func nextLeaf(root *table, address, end uint64) (*uint64, uint64) {
 
 // UnmapUserRange removes every user leaf in [base, base+length). Owned pages
 // go back to the allocator; the count of them is returned so the caller can
-// uncharge them. Shared, image, and device pages are only unmapped.
+// uncharge them. Shared, image, and device pages are only unmapped. The
+// first pass clears the leaves, keeping owned pages' addresses in retired
+// entries; after the shootdown the second pass frees them.
 func UnmapUserRange(allocator *pmm.Allocator, rootAddress, base, length uint64) uint64 {
 	if allocator == nil || rootAddress%PageSize != 0 || rootAddress >= IdentityMapLimit || base%PageSize != 0 || !ValidateUserRange(base, length) {
 		return 0
 	}
 	// SAFETY: rootAddress names a process PML4 created by this package.
 	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
-	freed := uint64(0)
+	cleared, retired := uint64(0), uint64(0)
 	for address, end := base, base+length; ; {
 		leaf, at := nextLeaf(root, address, end)
 		if leaf == nil {
-			return freed
+			break
 		}
 		value := *leaf
 		*leaf = 0
-		invalidatePage(at)
-		if value&entryOwned != 0 && allocator.Free(value&addressMask) {
-			freed++
+		if value&entryOwned != 0 {
+			*leaf = value&addressMask | entryRetired
+			retired++
 		}
+		cleared++
 		address = at + PageSize
 	}
+	if cleared == 0 {
+		return 0
+	}
+	shootdownRoot(rootAddress)
+	freed := uint64(0)
+	for address, end := base, base+length; retired != 0; {
+		leaf, at := nextEntry(root, address, end, entryRetired)
+		if leaf == nil {
+			break
+		}
+		if allocator.Free(*leaf & addressMask) {
+			freed++
+		}
+		*leaf = 0
+		retired--
+		address = at + PageSize
+	}
+	return freed
 }
 
 // ProtectUserRange gives every present user leaf in [base, base+length) new
@@ -179,16 +227,32 @@ func ProtectUserRange(rootAddress, base, length uint64, permissions Permissions)
 	}
 	// SAFETY: rootAddress names a process PML4 created by this package.
 	root := (*table)(unsafe.Pointer(uintptr(rootAddress)))
+	changed := false
 	for address, end := base, base+length; ; {
 		leaf, at := nextLeaf(root, address, end)
 		if leaf == nil {
-			return true
+			break
 		}
 		value, _ := pageEntry(*leaf&addressMask, permissions)
 		*leaf = value | *leaf&entryOwned
-		invalidatePage(at)
+		changed = true
 		address = at + PageSize
 	}
+	if changed {
+		shootdownRoot(rootAddress)
+	}
+	return true
+}
+
+// UserPageAllows reports whether the present user leaf at virtual permits
+// the access. A fault on such a page came from a translation another
+// processor has since replaced, and only needs a retry.
+func UserPageAllows(rootAddress, virtual uint64, write, fetch bool) bool {
+	entry, _, ok := userSlot(nil, rootAddress, virtual&^(PageSize-1), false)
+	if !ok || *entry&(entryPresent|entryUser) != entryPresent|entryUser {
+		return false
+	}
+	return (!write || *entry&entryWritable != 0) && (!fetch || *entry&entryNX == 0)
 }
 
 // UserPageCount counts the present user leaves in [base, base+length) and how

@@ -146,7 +146,7 @@ flag.
 ```sh
 make test-pve-smoke     # boot, uname, ACPI poweroff
 make test-pve-lscpu     # lscpu on 2 sockets x 2 cores
-make test-pve-smp       # alias for test-pve-lscpu
+make test-pve-smp       # lscpu, then the Linux probe's smp mode on 4 cores
 make test-pve-linux     # the static Linux programs in /system/linux
 make test-hardware      # smoke, lscpu, and linux
 ```

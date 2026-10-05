@@ -130,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -343,6 +343,7 @@ test-all:
 	$(MAKE) docs
 	$(MAKE) test-boot
 	$(MAKE) test-lscpu
+	$(MAKE) test-smp
 	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -362,6 +363,7 @@ release-check:
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
 	$(MAKE) test-boot
 	$(MAKE) test-lscpu
+	$(MAKE) test-smp
 	$(MAKE) test-system-boot
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -372,6 +374,7 @@ test-unit:
 	$(BUILD_ENV) go test ./...
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
 	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
+	$(BUILD_ENV) go test -tags goos_validation ./kernel/lock
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
@@ -407,6 +410,22 @@ test-boot:
 test-lscpu: iso
 	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/lscpu-test.img
 	@MEMORY=$(MEMORY) tests/boot/lscpu.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/lscpu-test.img
+
+# SMP (docs/kernel/smp.md): one validation guest with four processors runs
+# every processor at once. SMP_MATRIX=1 adds one-, two-, and eight-processor
+# boots of the same scenario. The other boot targets take SMP=N as well.
+SMP_MATRIX ?= 0
+
+test-smp:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/smp-test.img
+	@MEMORY=$(MEMORY) tests/boot/smp.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/smp-test.img
+	@if [ "$(SMP_MATRIX)" = 1 ]; then \
+		for cpus in 1 2 8; do \
+			$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/smp-test.img && \
+			MEMORY=$(MEMORY) SMP=$$cpus CPUS=$$cpus tests/boot/smp.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/smp-test.img || exit 1; \
+		done; \
+	fi
 
 # The installed system and recovery boot (ADR 0175): a normal boot from an
 # installed disk, a reboot of it with storage faults, forced recovery, and
@@ -711,7 +730,9 @@ test-pve-smoke: pve-artifacts
 test-pve-lscpu: pve-artifacts
 	@$(PVELAB) run --scenario lscpu --cpu host --sockets 2 --cores 2 $(PVE_RUN_FLAGS)
 
-test-pve-smp: test-pve-lscpu
+test-pve-smp: pve-artifacts
+	@$(PVELAB) run --scenario lscpu --cpu host --sockets 2 --cores 2 $(PVE_RUN_FLAGS)
+	@$(PVELAB) run --scenario smp --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
@@ -776,6 +797,7 @@ help:
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
+	  '  test-smp        boot four processors and prove they run tasks at once' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \

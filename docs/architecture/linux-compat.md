@@ -98,7 +98,8 @@ authorizes only `Native`; the MSR-backed Linux gate authorizes only
 
 The Linux gate switches from the untrusted user RSP to the current task's
 guarded kernel-entry stack through supervisor-only GS data before using the
-stack or entering Go. It then installs the kernel CR3, snapshots the Linux
+stack or entering Go. Each processor's `KERNEL_GS_BASE` names its own entry
+block, which the context switch fills for the task it runs (ADR 0181). It then installs the kernel CR3, snapshots the Linux
 register ABI into a fixed frame, and returns through a higher-half IRETQ
 prefix. The dispatcher snapshots all six scalar arguments into a Linux request
 whose number type is distinct from native `kcall.Operation`. Known but not yet

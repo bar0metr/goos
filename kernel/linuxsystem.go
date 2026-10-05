@@ -112,11 +112,60 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 	case linuxabi.SysFutex:
 		return handler.futex(request)
 	case linuxabi.SysSchedYield:
-		// The scheduler preempts every task at its tick, so a task that
-		// spins on a lock another holds loses at most one quantum.
+		// The call returns through a scheduling point, so a thread that
+		// spins on a lock another holds lets the holder run.
+		amd64.RequestReschedule()
 		return linuxcompat.Result{}
+	case linuxabi.SysSchedGetaffinity:
+		return handler.schedGetaffinity(state, arguments)
+	case linuxabi.SysGetcpu:
+		return handler.getcpu(arguments)
 	}
 	return linuxErrno(linuxabi.ENOSYS)
+}
+
+// linuxCPUMaskSize is the kernel's CPU mask: one 64-bit word covers every
+// processor GoOS runs.
+const linuxCPUMaskSize = 8
+
+var linuxCPUMask [linuxCPUMaskSize]byte
+
+// schedGetaffinity reports every online processor for the caller's own
+// process or thread: a thread runs wherever the scheduler places it. The
+// result is the size of the mask written, as Linux returns it.
+func (handler *linuxCallHandler) schedGetaffinity(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	pid, size := int32(arguments[0]), arguments[1]
+	if pid != 0 && pid != state.PID && pid != linuxcompat.TaskTID(handler.task, state) {
+		return linuxErrno(linuxabi.ESRCH)
+	}
+	if size < linuxCPUMaskSize || size%8 != 0 {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	putUint64(linuxCPUMask[:], amd64.OnlineMask())
+	if !vm.CopyOut(handler.root, arguments[2], linuxCPUMask[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	return linuxcompat.Result{Value: linuxCPUMaskSize}
+}
+
+var linuxCPUWire [4]byte
+
+// getcpu reports the processor the caller runs on, which may change before
+// it uses the answer, and node zero.
+func (handler *linuxCallHandler) getcpu(arguments *[6]uint64) linuxcompat.Result {
+	if arguments[0] != 0 {
+		putUint32(linuxCPUWire[:], uint32(amd64.CPUIndex()))
+		if !vm.CopyOut(handler.root, arguments[0], linuxCPUWire[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+	}
+	if arguments[1] != 0 {
+		clear(linuxCPUWire[:])
+		if !vm.CopyOut(handler.root, arguments[1], linuxCPUWire[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+	}
+	return linuxcompat.Result{}
 }
 
 // signalAction records and reports a signal disposition. A handler stored

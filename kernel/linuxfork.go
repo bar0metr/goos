@@ -139,7 +139,14 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	if fault {
 		limit = linuxForkFaultPages
 	}
-	if !vm.CopyUserRangeLimited(&pageAllocator, handler.root, root, vm.UserAddressStart, vm.UserAddressLimit-vm.UserAddressStart, limit) {
+	// The parent's other threads stop while its pages are copied, so the
+	// child gets the memory of this moment rather than a mix of moments.
+	siblings := collectSiblings(parent, handler.task)
+	amd64.HoldTasks(siblings)
+	quiet := amd64.QuiesceTasks(siblings)
+	copied := quiet && vm.CopyUserRangeLimited(&pageAllocator, handler.root, root, vm.UserAddressStart, vm.UserAddressLimit-vm.UserAddressStart, limit)
+	amd64.ReleaseTasks(siblings)
+	if !copied {
 		abandonFork(pid, root, child, true)
 		if fault {
 			checkForkRollback(census, compat.FamilyID, pid, record.PID, child, pagesBefore)
@@ -170,7 +177,7 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	// The child resumes with the parent's x87 and SSE state at this call.
 	parentFPU, _ := amd64.LinuxUserFPU(handler.task)
 	if !processRegistry.BindTask(pid, sched.TaskID(task)) || !amd64.SetTaskFSBase(sched.TaskID(task), fsBase) ||
-		!amd64.SetTaskFPU(sched.TaskID(task), parentFPU) {
+		!amd64.SetTaskFPU(sched.TaskID(task), parentFPU) || !amd64.StartTask(sched.TaskID(task)) {
 		panicSerial("forked Linux task could not be bound")
 	}
 	trace(diag.ProcessSpawned, pid, task, 0, 0)

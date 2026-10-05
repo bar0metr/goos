@@ -486,7 +486,8 @@ func startSelfTestTasks() {
 		!guardFound || guardHigh == 0 || guardLow >= guardHigh || vm.IsMapped(selfTestRootA, guardHigh-vm.PageSize) || vm.IsMapped(kernelPageTable, guardHigh-vm.PageSize) {
 		panicSerial("self-test kernel-entry stack mapping invalid")
 	}
-	if !processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) || !processRegistry.BindTask(selfTestLinuxProcessID, sched.TaskID(linuxTaskID)) {
+	if !processRegistry.BindTask(2, sched.TaskID(userTaskID)) || !processRegistry.BindTask(3, sched.TaskID(faultTaskID)) || !processRegistry.BindTask(selfTestLinuxProcessID, sched.TaskID(linuxTaskID)) ||
+		!amd64.StartTask(sched.TaskID(userTaskID)) || !amd64.StartTask(sched.TaskID(faultTaskID)) || !amd64.StartTask(sched.TaskID(linuxTaskID)) {
 		panicSerial("self-test task binding failed")
 	}
 }
