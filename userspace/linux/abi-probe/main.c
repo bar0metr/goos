@@ -1092,6 +1092,21 @@ static int no_executable_memory(void)
 	return ok && munmap(page, 4096) == 0;
 }
 
+/* O_NONBLOCK changes nothing for a regular file, as on Linux, and F_GETFL
+ * reports it. */
+static int nonblocking_open(void)
+{
+	int fd = open("data", O_RDONLY | O_NONBLOCK);
+	int flags = fd < 0 ? -1 : fcntl(fd, F_GETFL);
+	char byte;
+	int ok = fd >= 0 && flags >= 0 && (flags & O_NONBLOCK) && read(fd, &byte, 1) == 1 &&
+		 fcntl(fd, F_SETFL, 0) == 0 && !(fcntl(fd, F_GETFL) & O_NONBLOCK);
+
+	if (fd >= 0)
+		close(fd);
+	return ok;
+}
+
 static int hostile(void)
 {
 	int goos = on_goos(), strict = strict_kernel();
@@ -1115,7 +1130,8 @@ static int hostile(void)
 			 fails(syscall(9999), ENOSYS) &&
 			 fails(syscall(SYS_getdents64, fd, &byte, 256), ENOTDIR) &&
 			 fails(lseek(1, 0, SEEK_SET), ESPIPE) &&
-			 (!goos || fails(open("data", O_RDONLY | O_NONBLOCK), EOPNOTSUPP)) &&
+			 (!goos || fails(open("data", O_RDONLY | O_DIRECT), EOPNOTSUPP)) &&
+			 nonblocking_open() &&
 			 (!goos || no_executable_memory()));
 	failed += report("stale descriptors", stale_descriptors(fd, dirfd));
 	if (unlink("data") != 0 || !leave_scratch())
