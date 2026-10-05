@@ -57,7 +57,14 @@ makes before `main`: `mprotect` of its own relocated data, `set_robust_list`,
 joins them with their values and distinct TIDs and TLS, keeps two threads'
 registers and SSE state across seconds of preemption, has two threads read
 and write files at once, raises a signal in a thread, and ends the process
-with `exit_group` from a thread.
+with `exit_group` from a thread. `smp` starts one worker more than there are
+online processors (`sched_getaffinity`) and requires, from `getcpu`, that
+the workers ran on every processor, that some moved between processors, and
+that two of them computed on distinct processors within one window shorter
+than half a tick; it then contends for one mutex from four threads, discards a page
+under a reader on another processor, faults the same untouched pages from
+four threads, forks beside running threads, and calls `execve` from a child
+whose other threads spin.
 
 `/system/linux/raw-probe` is a seventh program with no libc. `tools/initramfs`
 assembles it byte by byte, so it has no entry here.
@@ -124,7 +131,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `97ed351533faf94da77e3649a15b4773047b7040514e608a8900093ecd04d0f7` |
+| `prebuilt/abi-probe` | `219ee428a28fda27b65073d6e3f9ceb9b6a0f1294b982013cd6ecd7f3c99cd57` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

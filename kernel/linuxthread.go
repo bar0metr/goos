@@ -63,12 +63,10 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 		threadState.Mask = state.Signals.SaveThreadMask()
 	}
 
-	// Interrupt exclusion keeps the prepared task from running until its
-	// process binding, thread record, TLS, FPU state, and TID writes exist.
-	flags := amd64.DisableInterrupts()
+	// The task starts only once its process binding, thread record, TLS,
+	// FPU state, and TID writes exist; until then no processor can pick it.
 	task, added := amd64.AddUserTaskWithRegisters(&pageAllocator, handler.root, registers)
 	if !added {
-		amd64.RestoreInterrupts(flags)
 		creation.Cancel()
 		return linuxErrno(linuxabi.EAGAIN)
 	}
@@ -82,9 +80,27 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 		form.SetChildTID && !vm.CopyOut(handler.root, form.ChildTID, linuxTIDWire[:]) {
 		panicSerial("validated Linux TID write failed")
 	}
-	amd64.RestoreInterrupts(flags)
+	if !amd64.StartTask(sched.TaskID(task)) {
+		panicSerial("Linux thread could not be started")
+	}
 	trace(diag.ProcessSpawned, owner.ID(), task, 0, 0)
 	return linuxcompat.Result{Value: uint64(thread.TID)}
+}
+
+// siblingTasks lists, under the kernel lock, the other tasks of a process a
+// call stops or ends.
+var siblingTasks [sched.MaxTasks]sched.TaskID
+
+// collectSiblings returns the tasks of owner other than self.
+func collectSiblings(owner *process.Process, self sched.TaskID) []sched.TaskID {
+	count := 0
+	for _, other := range owner.Tasks() {
+		if other != self && count < len(siblingTasks) {
+			siblingTasks[count] = other
+			count++
+		}
+	}
+	return siblingTasks[:count]
 }
 
 // execEndedTasks are tasks exec ended in the image it replaced. Their exit

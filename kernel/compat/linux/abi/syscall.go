@@ -68,29 +68,33 @@ const (
 	SysArchPrctl     Syscall = 158
 	SysRtSigsuspend  Syscall = 130
 	SysGettid        Syscall = 186
-	SysTkill         Syscall = 200
-	SysTime          Syscall = 201
-	SysFutex         Syscall = 202
-	SysGetdents64    Syscall = 217
-	SysSetTidAddress Syscall = 218
-	SysClockGettime  Syscall = 228
-	SysExitGroup     Syscall = 231
-	SysTgkill        Syscall = 234
-	SysOpenat        Syscall = 257
-	SysMkdirat       Syscall = 258
-	SysNewfstatat    Syscall = 262
-	SysUnlinkat      Syscall = 263
-	SysRenameat      Syscall = 264
-	SysReadlinkat    Syscall = 267
-	SysFaccessat     Syscall = 269
-	SysPpoll         Syscall = 271
-	SysSetRobustList Syscall = 273
-	SysDup3          Syscall = 292
-	SysPipe2         Syscall = 293
-	SysPrlimit64     Syscall = 302
-	SysRenameat2     Syscall = 316
-	SysGetrandom     Syscall = 318
-	SysStatx         Syscall = 332
+	// SysSchedGetaffinity reports the processors a thread may run on: every
+	// online one, since GoOS has no affinity.
+	SysSchedGetaffinity Syscall = 204
+	SysTkill            Syscall = 200
+	SysTime             Syscall = 201
+	SysFutex            Syscall = 202
+	SysGetdents64       Syscall = 217
+	SysSetTidAddress    Syscall = 218
+	SysClockGettime     Syscall = 228
+	SysExitGroup        Syscall = 231
+	SysTgkill           Syscall = 234
+	SysOpenat           Syscall = 257
+	SysMkdirat          Syscall = 258
+	SysNewfstatat       Syscall = 262
+	SysUnlinkat         Syscall = 263
+	SysRenameat         Syscall = 264
+	SysReadlinkat       Syscall = 267
+	SysFaccessat        Syscall = 269
+	SysPpoll            Syscall = 271
+	SysSetRobustList    Syscall = 273
+	SysDup3             Syscall = 292
+	SysPipe2            Syscall = 293
+	SysPrlimit64        Syscall = 302
+	SysGetcpu           Syscall = 309
+	SysRenameat2        Syscall = 316
+	SysGetrandom        Syscall = 318
+	SysStatx            Syscall = 332
 )
 
 const (

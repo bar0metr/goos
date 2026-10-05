@@ -28,10 +28,14 @@ func TestFutexDecide(t *testing.T) {
 		{"wait bitset", FutexWaitBitset | FutexPrivateFlag, 1, 1, 6, FutexCall{Action: FutexSleep, Bitset: 6, Absolute: true}, 0},
 		{"wait bitset changed", FutexWaitBitset | FutexClockRealtime, 3, 1, 1, FutexCall{Action: FutexChanged}, abi.EAGAIN},
 		{"wait empty bitset", FutexWaitBitset, 1, 1, 0, FutexCall{}, abi.EINVAL},
-		{"requeue", 3, 0, 0, 0, FutexCall{Action: FutexRefused}, 0},
+		{"requeue", FutexRequeue | FutexPrivateFlag, 5, 1, 0, FutexCall{Action: FutexMoveWaiters, Bitset: FutexBitsetAll, Count: 1}, 0},
+		{"compared requeue", FutexCmpRequeue, 5, 0, 5, FutexCall{Action: FutexMoveWaiters, Bitset: FutexBitsetAll}, 0},
+		{"compared requeue changed", FutexCmpRequeue | FutexPrivateFlag, 6, 0, 5, FutexCall{Action: FutexChanged}, abi.EAGAIN},
+		{"requeue negative", FutexRequeue, 0, 0xffffffff, 0, FutexCall{}, abi.EINVAL},
+		{"wake-op", 5, 0, 0, 0, FutexCall{Action: FutexRefused}, 0},
 	}
 	for _, c := range cases {
-		call, errno := FutexDecide(c.operation, c.word, c.value, c.bitset)
+		call, errno := FutexDecide(c.operation, c.word, c.value, 0, c.bitset)
 		if call != c.call || errno != c.errno {
 			t.Errorf("%s: got %+v %d, want %+v %d", c.name, call, errno, c.call, c.errno)
 		}

@@ -12,6 +12,8 @@ set -eu
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 memory=${MEMORY:-512M}
+# SMP is the guest's processor count, as a QEMU -smp argument.
+smp=${SMP:-1}
 read -r _hz _diag validation _opt variant <build/config/build
 [ "$validation" = 1 ] || { echo 'system.sh needs a VALIDATION=1 build' >&2; exit 2; }
 dir=build/variants/$variant
@@ -103,7 +105,7 @@ boot() { # iso disk log
 	log=$3
 	rm -f "$log" "$work/in"
 	mkfifo "$work/in"
-	set -- -machine q35 -m "$memory" -drive "if=pflash,format=raw,readonly=on,file=$firmware" -serial stdio -display none -no-reboot -cdrom "$image"
+	set -- -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" -drive "if=pflash,format=raw,readonly=on,file=$firmware" -serial stdio -display none -no-reboot -cdrom "$image"
 	if [ "$disk" != none ]; then
 		set -- "$@" -drive "if=none,id=goosdisk,format=raw,file=$disk" -device virtio-blk-pci,drive=goosdisk,disable-modern=on
 	fi

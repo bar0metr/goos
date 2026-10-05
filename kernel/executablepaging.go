@@ -51,16 +51,12 @@ var (
 // task. The same fault may re-enter before the next timer switch; it does not
 // queue a second request.
 func requestExecutablePage(owner *process.Process, entry region.Region, page uint64) (pending bool, failed bool) {
-	state := amd64.ReadSchedulerState()
-	if state.Current >= sched.MaxTasks {
+	task := amd64.CurrentTask()
+	slot, _, valid := task.Parts()
+	if !valid {
 		return false, true
 	}
-	slot := int(state.Current)
 	current := &executableFaults[slot]
-	task := sched.TaskID(amd64.TaskIDForSlot(state.Current))
-	if _, _, valid := task.Parts(); !valid {
-		return false, true
-	}
 	if current.task != 0 && current.task != task {
 		*current = executableFault{}
 	}

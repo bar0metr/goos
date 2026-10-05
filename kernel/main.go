@@ -178,8 +178,17 @@ func putUint32(data []byte, value uint32) {
 	data[3] = byte(value >> 24)
 }
 
+// panicSerial stops the machine: it stops every other processor, then
+// reports the message and the processor that panicked.
 func panicSerial(message string) {
+	amd64.StopOtherProcessors()
 	kernelconsole.Panic(message)
+	console := kernelconsole.New()
+	console.WriteString("CPU ")
+	console.WriteUint(uint64(amd64.CPUIndex()))
+	console.WriteString(" APIC ")
+	console.WriteUint(uint64(amd64.LocalAPICID()))
+	console.WriteString("\n")
 	for {
 		amd64.Halt()
 	}
@@ -355,6 +364,7 @@ func main() {
 			console.WriteString("Graphics: PAT configuration failed, using serial console\n")
 			bootInfo.Framebuffer = boot.FramebufferInfo{}
 		} else {
+			amd64.NotePATConfigured()
 			mark("PAT_CONFIGURED")
 		}
 	}
@@ -370,6 +380,10 @@ func main() {
 	// The kernel's copies into user memory fault in demand-zero pages the
 	// way the processor's accesses do (ADR 0104).
 	vm.SetFaultResolver(resolveCopyFault)
+	// A change to a process's mappings reaches the other processors before
+	// the pages it unmapped are reused (docs/kernel/smp.md).
+	vm.SetShootdown(amd64.ShootdownRoot)
+	amd64.SetFatalHandler(panicSerial)
 	// Registry entries take their pages as they are created (ADR 0111).
 	channelRegistry.SetStorage(pageObjects[ipc.Channel]{})
 	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
@@ -484,6 +498,9 @@ func bootContinue() {
 		amd64.Halt()
 	}
 	calibrateClock()
+	if !startLocalTimer() {
+		panicSerial("local APIC timer calibration failed")
+	}
 	if !realtimeClock.Init(bootRealtime, bootRealtimeCounter) {
 		panicSerial("realtime clock initialization failed")
 	}
@@ -503,6 +520,7 @@ func bootContinue() {
 	if validation.Enabled {
 		awaitSchedulerSelfTest()
 	}
+	startProcessors()
 
 	// PID 1's own pages are counted the same way a launched process's are, so
 	// the reported memory of init means what it means for everything else.
@@ -642,18 +660,21 @@ func bootContinue() {
 			amd64.Halt()
 		}
 	}
-	flags := amd64.DisableInterrupts()
+	// From here the other processors run tasks, so the boot task changes
+	// kernel objects only under the kernel lock.
+	flags := amd64.KernelLock()
+	bringProcessorsOnline()
 	if pagesUsed := initPagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !initProcess.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		panicSerial("PID 1 exceeded its page quota")
 	}
 	initTaskID, initTaskAdded := amd64.AddUserTask(&pageAllocator, rootInit, loadedInit.Entry, loadedInit.StackTop)
-	if !initTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) {
+	if !initTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) || !amd64.StartTask(sched.TaskID(initTaskID)) {
 		panicSerial("PID 1 task scheduling failed")
 	}
 	if validation.Enabled {
 		startSelfTestTasks()
 	}
-	amd64.RestoreInterrupts(flags)
+	amd64.KernelUnlock(flags)
 	if validation.Enabled {
 		awaitValidationBoot()
 	} else {
@@ -702,14 +723,12 @@ func mark(marker string) {
 	}
 }
 
-// serviceKernel runs one step of the kernel's own work inside the exclusion
-// domain native calls already run in, then sleeps until the next tick, task
-// exit, or lifecycle request. Preempted mid-step, it would expose torn
-// registries and handle tables to whichever task the timer selects next;
-// sleeping inside the domain means no wake can fall between the last check
-// and the sleep.
+// serviceKernel runs one step of the kernel's own work under the kernel lock
+// that native calls run under, then sleeps until the next tick, task exit,
+// or lifecycle request. A wake that arrives after the step's last check
+// keeps the task from sleeping, so none is lost.
 func serviceKernel() {
-	flags := amd64.DisableInterrupts()
+	flags := amd64.KernelLock()
 	if validation.Enabled {
 		if !ps2KeyboardValidated && amd64.PS2KeyboardEventTake() {
 			ps2KeyboardValidated = true
@@ -721,6 +740,6 @@ func serviceKernel() {
 	flushLifecycle()
 	deliverProcessExits()
 	consumeInitControl()
+	amd64.KernelUnlock(flags)
 	amd64.KernelSleep()
-	amd64.RestoreInterrupts(flags)
 }

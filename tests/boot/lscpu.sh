@@ -1,5 +1,6 @@
 #!/bin/sh
-# Boots one four-vCPU guest and validates native lscpu without starting APs.
+# Boots one four-vCPU guest and validates native lscpu: every processor the
+# firmware lists has started and runs tasks.
 set -eu
 
 iso=${1:?ISO path required}
@@ -55,7 +56,7 @@ run() {
 	tail -n "+$((start + 1))" "$log" | tr -d '\r' >"$work/output"
 }
 
-qemu-system-x86_64 -machine q35 -m "$memory" \
+qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi \
 	-smp 4,sockets=1,cores=2,threads=2 \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
@@ -76,8 +77,8 @@ run lscpu
 grep -q '^Architecture:             x86_64$' "$work/output" || fail 'architecture'
 grep -q '^Byte Order:               Little Endian$' "$work/output" || fail 'byte order'
 grep -q '^CPU(s):                   4$' "$work/output" || fail 'CPU count'
-grep -q '^On-line CPU(s) list:      0$' "$work/output" || fail 'online list'
-grep -q '^Off-line CPU(s) list:     1-3$' "$work/output" || fail 'offline list'
+grep -q '^On-line CPU(s) list:      0-3$' "$work/output" || fail 'online list'
+! grep -q '^Off-line CPU(s) list:' "$work/output" || fail 'offline list'
 grep -q '^Thread(s) per core:       2$' "$work/output" || fail 'threads per core'
 grep -q '^Core(s) per socket:       2$' "$work/output" || fail 'cores per socket'
 grep -q '^Socket(s):                1$' "$work/output" || fail 'socket count'

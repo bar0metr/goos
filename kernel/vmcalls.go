@@ -28,6 +28,9 @@ var (
 	vmRecord     [kcall.VMRecordSize]byte
 	// userFaultsResolved counts demand-zero pages supplied on a fault.
 	userFaultsResolved uint64
+	// userFaultsRetried counts faults on pages that already allowed the
+	// access when the kernel looked.
+	userFaultsRetried uint64
 )
 
 // Kinds of user page fault that retire the process, for the log.
@@ -47,11 +50,19 @@ const (
 //export goos_resolve_user_fault
 func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip uint64) uint64 {
 	const (
-		faultPresent = 1 << 0
-		faultWrite   = 1 << 1
-		faultFetch   = 1 << 4
+		faultPresent  = 1 << 0
+		faultWrite    = 1 << 1
+		faultReserved = 1 << 3
+		faultFetch    = 1 << 4
 	)
 	page := address &^ (vm.PageSize - 1)
+	// Another task of the process may have mapped the page, or widened its
+	// protection, on another processor since this one translated the
+	// address. The access is retried.
+	if errorCode&faultReserved == 0 && vm.UserPageAllows(root, page, errorCode&faultWrite != 0, errorCode&faultFetch != 0) {
+		userFaultsRetried++
+		return 1
+	}
 	kind := faultPermission
 	if errorCode&faultPresent == 0 {
 		var resolved bool

@@ -7,6 +7,7 @@ import (
 	"goos/kernel/mm/pmm"
 	"goos/kernel/mm/vm"
 	"goos/kernel/sched"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -23,7 +24,7 @@ var taskEntryTable [3]uintptr
 // the outgoing task's SSE and x87 state and restores the incoming one's.
 //
 //go:extern goos_task_fpu
-var taskFPU [64][FPUAreaSize]byte
+var taskFPU [slotCount][FPUAreaSize]byte
 
 // linuxUserFPU is the FXSAVE image of a Linux task's own x87 and SSE state
 // during its current system call. The entry path saves it and the return
@@ -46,7 +47,7 @@ func LinuxUserFPU(task sched.TaskID) (*[FPUAreaSize]byte, bool) {
 // resumes with, as a forked child resumes with its parent's.
 func SetTaskFPU(task sched.TaskID, area *[FPUAreaSize]byte) bool {
 	slot, _, valid := task.Parts()
-	if !valid || int(slot) >= len(taskFPU) || TaskIDForSlot(uint64(slot)) != uint64(task) || area == nil {
+	if !valid || int(slot) >= sched.MaxTasks || TaskIDForSlot(uint64(slot)) != uint64(task) || area == nil {
 		return false
 	}
 	taskFPU[slot] = *area
@@ -59,16 +60,20 @@ type taskKernelStack struct {
 	top      uint64
 }
 
-var taskKernelStacks [64]taskKernelStack
+var taskKernelStacks [sched.MaxTasks]taskKernelStack
+
+//go:extern goos_user_call_rsp_baselines
+var userCallBaselines [sched.MaxTasks]uint64
 
 //go:extern goos_entry_mapping_table
 var entryMappingTable [3]uintptr
 
 var activeKernelRoot uint64
 
-// SetupBootstrapScheduler creates contexts for two demonstration tasks and one
-// idle task. The currently executing boot task becomes slot zero on the first
-// timer interrupt.
+// SetupBootstrapScheduler creates contexts for the two demonstration tasks
+// and the bootstrap processor's idle loop, and starts scheduling on the
+// bootstrap processor. The currently executing boot task becomes slot zero
+// on the first timer interrupt. Slot 3 is reserved and never runs.
 func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
 	activeKernelRoot = pageTable
 	for slot := range taskFPU {
@@ -89,8 +94,24 @@ func SetupBootstrapScheduler(allocator *pmm.Allocator, pageTable uint64) bool {
 		stackStart := allocation + stackGuardPages*pmm.PageSize
 		contexts[index] = initialContext(stackStart, taskEntryTable[index])
 	}
-	installScheduler(contexts[0], contexts[1], contexts[2], pageTable)
-	return true
+	flags := lockScheduler()
+	taskContexts[1], taskContexts[2] = contexts[0], contexts[1]
+	taskContexts[idleBase] = contexts[2]
+	for slot := 0; slot < kernelTasks; slot++ {
+		taskRoots[slot] = pageTable
+	}
+	for cpu := 0; cpu < MaxCPUs; cpu++ {
+		taskRoots[idleBase+cpu] = pageTable
+	}
+	ok := runState.Bootstrap(kernelTasks, 0x7)
+	online.Store(runState.OnlineMask())
+	cpuData[0][cpuCurrent] = 0
+	cpuData[0][cpuEnabled] = 1
+	unlockScheduler(flags)
+	if ok {
+		enableInterrupts()
+	}
+	return ok
 }
 
 // UserRegisters is the ring 3 state a new user task starts with.
@@ -197,6 +218,55 @@ func AddUserTaskWithRegisters(allocator *pmm.Allocator, pageTable uint64, regist
 	return taskID, true
 }
 
+// installUserTask claims a slot for a task that is not runnable until
+// StartTask.
+func installUserTask(context uint64, pageTable uint64, kernelStackTop uint64) uint64 {
+	flags := lockScheduler()
+	slot, _, ok := runState.Install()
+	id := sched.TaskID(0)
+	if ok {
+		taskContexts[slot] = context
+		taskRoots[slot] = pageTable
+		taskFSBases[slot] = 0
+		taskExitCodes[slot] = 0
+		userCallBaselines[slot] = 0
+		atomic.StoreUint64(&taskRSP0[slot], kernelStackTop)
+		id = runState.TaskID(slot)
+	}
+	unlockScheduler(flags)
+	return uint64(id)
+}
+
+// AbandonTask releases a task AddUserTask installed that never started,
+// with its kernel-entry stack. liveRoot is the address space that keeps a
+// mapping of the stack, or zero.
+func AbandonTask(allocator *pmm.Allocator, task sched.TaskID, liveRoot uint64) bool {
+	flags := lockScheduler()
+	slot, ok := runState.Alive(task)
+	ok = ok && runState.Abandon(slot)
+	unlockScheduler(flags)
+	if !ok {
+		return false
+	}
+	stack := taskKernelStacks[slot]
+	taskKernelStacks[slot] = taskKernelStack{}
+	atomic.StoreUint64(&taskRSP0[slot], 0)
+	taskContexts[slot], taskRoots[slot] = 0, 0
+	InitialFPUArea(&taskFPU[slot])
+	if stack.physical == 0 {
+		return false
+	}
+	abandonPreparedUserTask(allocator, liveRoot, stack.physical, stack.virtual, liveMappedPages(liveRoot))
+	return true
+}
+
+func liveMappedPages(liveRoot uint64) uint64 {
+	if liveRoot == 0 {
+		return 0
+	}
+	return kernelStackPages
+}
+
 // The validation build can fail one task creation at a chosen stage, so a
 // self-test can check that the rollback returns every page and slot.
 var (
@@ -235,7 +305,7 @@ func injectedTaskStackFault(mappedPages, virtualStart uint64) bool {
 }
 
 func abandonPreparedUserTask(allocator *pmm.Allocator, pageTable, allocation, virtualStart, mappedPages uint64) {
-	for page := uint64(0); page < mappedPages; page++ {
+	for page := uint64(0); page < mappedPages && pageTable != 0; page++ {
 		virtual := virtualStart + page*pmm.PageSize
 		vm.UnmapProcessKernelPage(pageTable, virtual)
 		invalidatePage(virtual)
@@ -260,8 +330,9 @@ func freeTaskStackAllocation(allocator *pmm.Allocator, allocation uint64) {
 }
 
 func mapProcessEntryState(allocator *pmm.Allocator, pageTable uint64) bool {
-	for _, handler := range interruptTable {
-		if handler == 0 || !mapProcessAliasRange(allocator, pageTable, uint64(handler), 64, false, true) {
+	for index := range interruptTable {
+		handler := interruptTable[index]
+		if handler == 0 || !mapProcessAliasRange(allocator, pageTable, uint64(handler), 128, false, true) {
 			return false
 		}
 	}
@@ -270,12 +341,12 @@ func mapProcessEntryState(allocator *pmm.Allocator, pageTable uint64) bool {
 		!mapProcessAliasRange(allocator, pageTable, uint64(entryMappingTable[2]), 128, false, true) ||
 		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&idt[0]))), uint64(len(idt))*16, true, false) ||
 		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&gdt[0]))), uint64(len(gdt))*8, true, false) ||
-		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&tss[0]))), uint64(len(tss)), true, false) {
+		!mapProcessAliasRange(allocator, pageTable, uint64(uintptr(unsafe.Pointer(&tss[0][0]))), uint64(len(tss)*tssStride), true, false) {
 		return false
 	}
 	if !mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[0]), vm.PageSize, false, true) ||
 		!mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[1]), vm.PageSize, false, true) ||
-		!mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[2]), 32, true, false) {
+		!mapProcessAliasRange(allocator, pageTable, uint64(linuxEntryMappingTable[2]), uint64(len(linuxEntryData)*32), true, false) {
 		return false
 	}
 	return true
@@ -309,12 +380,6 @@ func PrepareTaskAddressSpace(allocator *pmm.Allocator, task sched.TaskID, pageTa
 	guard, _ := vm.KernelAlias(stack.physical)
 	return !vm.IsMapped(pageTable, guard)
 }
-
-// ReplaceTaskAddressSpace changes the saved root of the current live task.
-// The prepared root supplies the next return to ring 3 and later entries.
-//
-//export goos_task_root_replace
-func ReplaceTaskAddressSpace(task sched.TaskID, pageTable uint64) bool
 
 func mapProcessAliasRange(allocator *pmm.Allocator, pageTable, address, size uint64, writable, executable bool) bool {
 	start := address &^ (vm.PageSize - 1)
@@ -372,97 +437,11 @@ func initialUserContext(stackStart uint64, registers *UserRegisters) uint64 {
 	return contextAlias
 }
 
-//export goos_scheduler_install
-func installScheduler(taskA uint64, taskB uint64, idle uint64, kernelRoot uint64)
-
-//export goos_scheduler_install_user
-func installUserTask(context uint64, pageTable uint64, kernelStackTop uint64) uint64
-
-// SetTaskFSBase changes the saved FS base of one live task and updates the CPU
-// immediately when it is the current task.
-//
-//export goos_task_fs_base_set
-func SetTaskFSBase(task sched.TaskID, base uint64) bool
-
-//export goos_task_fs_base_read
-func readTaskFSBase(task sched.TaskID, base *uint64) bool
-
-// TaskFSBase reads the saved FS base of one live task.
-func TaskFSBase(task sched.TaskID) (uint64, bool) {
-	var base uint64
-	ok := readTaskFSBase(task, &base)
-	return base, ok
-}
-
 //export goos_user_preemptions_read
 func UserPreemptions() uint64
 
 //export goos_user_faults_read
 func UserFaults() uint64
-
-//export goos_block_current_task
-func BlockCurrentTask()
-
-// KernelSleep blocks the calling kernel task and switches away at once instead
-// of halting until the next tick. It returns after a wake, with the caller's
-// interrupt state restored.
-//
-//export goos_kernel_sleep
-func KernelSleep()
-
-// DisableInterrupts enters the uniprocessor kernel exclusion domain that native
-// calls already run in, and returns the flags RestoreInterrupts needs to leave it.
-//
-//export goos_interrupts_disable
-func DisableInterrupts() uint64
-
-//export goos_interrupts_restore
-func RestoreInterrupts(flags uint64)
-
-// SchedulerState is a snapshot of the architecture run queue.
-type SchedulerState struct {
-	Runnable uint64
-	Dead     uint64
-	Count    uint64
-	Current  uint64
-}
-
-//export goos_scheduler_state_read
-func readSchedulerState(state *SchedulerState)
-
-// TaskStackTop returns the kernel-entry stack top of a user task slot, or zero
-// for kernel tasks and unused slots.
-//
-//export goos_task_rsp0_read
-func TaskStackTop(slot uint64) uint64
-
-func ReadSchedulerState() SchedulerState {
-	var state SchedulerState
-	readSchedulerState(&state)
-	return state
-}
-
-// FreeTaskSlots counts unused slots and dead slots whose exit state and
-// kernel stack have both been reclaimed.
-func FreeTaskSlots() int {
-	state := ReadSchedulerState()
-	free := sched.MaxTasks - int(state.Count)
-	for slot := uint64(0); slot < state.Count && slot < sched.MaxTasks; slot++ {
-		if state.Dead&(uint64(1)<<slot) != 0 && TaskStackTop(slot) == 0 {
-			free++
-		}
-	}
-	return free
-}
-
-//export goos_wake_task
-func WakeTask(index uint64) bool
-
-//export goos_wake_task_id
-func WakeTaskID(task uint64) bool
-
-//export goos_task_id_for_slot
-func TaskIDForSlot(slot uint64) uint64
 
 // TaskTicks returns the timer ticks charged to a task slot. The timer charges
 // the task it interrupted, so this samples who was running rather than timing
@@ -482,24 +461,6 @@ func ClearTaskTicks(slot uint64)
 //export goos_task_fault_address_take
 func TakeTaskFaultAddress(slot uint64) uint64
 
-//export goos_set_current_task_exit_code
-func SetCurrentTaskExitCode(code uint64)
-
-// TerminateTask retires another task with an exit code, as a fault does. The
-// caller cancels the task's wait registrations first.
-//
-//export goos_terminate_task
-func TerminateTask(task uint64, code uint64) bool
-
-//export goos_take_exited_task
-func TakeExitedTask() uint64
-
-//export goos_task_exit_code
-func TaskExitCode(task uint64) uint64
-
-//export goos_reclaim_exited_task
-func reclaimExitedTask(task uint64) uint64
-
 // ReclaimExitedTask releases the guarded kernel stack after the dead task's
 // exit record has been consumed. Its architecture slot remains reusable.
 //
@@ -511,16 +472,24 @@ func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64,
 	if allocator == nil || kernelRoot == 0 {
 		return false
 	}
-	slot := uint32(task)
-	if slot == 0 || int(slot) > len(taskFPU) {
+	slot, _, valid := sched.TaskID(task).Parts()
+	if !valid {
 		return false
 	}
-	InitialFPUArea(&taskFPU[slot-1])
-	stack := taskKernelStacks[slot-1]
-	if stack.physical == 0 || reclaimExitedTask(task) == 0 {
+	flags := lockScheduler()
+	resolved, ok := runState.Resolve(sched.TaskID(task))
+	stack := taskKernelStacks[slot]
+	ok = ok && int(slot) == resolved && stack.physical != 0 && runState.Vacate(resolved)
+	if ok {
+		atomic.StoreUint64(&taskRSP0[slot], 0)
+		taskContexts[slot], taskRoots[slot], taskFSBases[slot] = 0, 0, 0
+	}
+	unlockScheduler(flags)
+	if !ok {
 		return false
 	}
-	taskKernelStacks[slot-1] = taskKernelStack{}
+	InitialFPUArea(&taskFPU[slot])
+	taskKernelStacks[slot] = taskKernelStack{}
 	if liveRoot != 0 {
 		for page := uint64(0); page < kernelStackPages; page++ {
 			virtual := stack.virtual + page*pmm.PageSize
@@ -539,7 +508,7 @@ func ReclaimExitedTask(allocator *pmm.Allocator, kernelRoot uint64, task uint64,
 			invalidatePage(alias)
 		}
 	}
-	ok := true
+	ok = true
 	for page := uint64(0); page < kernelStackPages+stackGuardPages; page++ {
 		ok = allocator.Free(allocation+page*pmm.PageSize) && ok
 	}
@@ -552,8 +521,7 @@ func invalidatePage(address uint64)
 // KernelStackGuard returns the unmapped guard below the kernel-entry stack
 // that holds address, found among the user task slots, as [low, high).
 func KernelStackGuard(address uint64) (uint64, uint64, bool) {
-	state := ReadSchedulerState()
-	for slot := uint64(0); slot < state.Count; slot++ {
+	for slot := uint64(0); slot < sched.MaxTasks; slot++ {
 		top := TaskStackTop(slot)
 		if top == 0 {
 			continue

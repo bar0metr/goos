@@ -8,6 +8,8 @@ firmware=${2:?OVMF path required}
 disk=${3:?disk path required}
 # MEMORY is the guest RAM, in QEMU -m syntax; the Makefile passes it.
 memory=${MEMORY:-512M}
+# SMP is the guest's processor count, as a QEMU -smp argument.
+smp=${SMP:-1}
 log=${4:?log path required}
 rounds=${5:-20}
 command_timeout=${COMMAND_TIMEOUT:-30}
@@ -59,7 +61,7 @@ run() {
 	await_prompt "$next"
 }
 
-qemu-system-x86_64 -machine q35 -m "$memory" \
+qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

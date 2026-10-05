@@ -38,8 +38,9 @@ var (
 // futex serves wait and wake. A wait sleeps until a wake with a matching
 // bit set, a signal with a handler, or its timeout: an interval for
 // FUTEX_WAIT, a point on the monotonic or realtime clock for
-// FUTEX_WAIT_BITSET. Requeue, the priority-inheritance operations, and
-// wake-op are refused and counted.
+// FUTEX_WAIT_BITSET. A requeue wakes some waiters and moves the rest to a
+// second word. The priority-inheritance operations and wake-op are refused
+// and counted.
 func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.Result {
 	pending, active, errno := handler.vfsStage(request)
 	if errno != 0 {
@@ -68,13 +69,20 @@ func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	word := binary.LittleEndian.Uint32(linuxFutexWord[:])
-	call, errno := linuxcompat.FutexDecide(request.Arguments[1], word, request.Arguments[2], request.Arguments[5])
+	call, errno := linuxcompat.FutexDecide(request.Arguments[1], word, request.Arguments[2], request.Arguments[3], request.Arguments[5])
 	if errno != 0 {
 		return linuxErrno(errno)
 	}
 	switch call.Action {
 	case linuxcompat.FutexWakeWaiters:
 		return linuxcompat.Result{Value: uint64(wakeFutex(handler.root, address, call.Bitset, call.Count))}
+	case linuxcompat.FutexMoveWaiters:
+		target := request.Arguments[4]
+		if target%4 != 0 || !vm.CopyIn(handler.root, target, linuxFutexWord[:]) {
+			return linuxErrno(linuxabi.EFAULT)
+		}
+		woken := wakeFutex(handler.root, address, call.Bitset, call.Count)
+		return linuxcompat.Result{Value: uint64(woken + requeueFutex(handler.root, address, target, call.Requeue))}
 	case linuxcompat.FutexSleep:
 		return handler.futexSleep(request, address, call)
 	}
@@ -168,6 +176,25 @@ func wakeFutex(root uint64, address uint64, bitset uint32, count uint32) uint32 
 		}
 	}
 	return woken
+}
+
+// requeueFutex moves up to count tasks asleep on the word at address to
+// the word at target, oldest slot first, and reports how many moved. They
+// stay asleep until a wake on target.
+func requeueFutex(root uint64, address uint64, target uint64, count uint32) uint32 {
+	moved := uint32(0)
+	for index := range futexWaiters {
+		if moved >= count {
+			break
+		}
+		waiter := &futexWaiters[index]
+		if waiter.task == 0 || waiter.root != root || waiter.address != address {
+			continue
+		}
+		waiter.address = target
+		moved++
+	}
+	return moved
 }
 
 // forgetFutexWaiter removes the wait of task, if it has one.

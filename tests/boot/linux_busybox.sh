@@ -15,6 +15,8 @@ disk=${3:?disk path required}
 name=${4:?program name under /system/linux required}
 busybox=/system/linux/$name
 memory=${MEMORY:-512M}
+# SMP is the guest's processor count, as a QEMU -smp argument.
+smp=${SMP:-1}
 command_timeout=${COMMAND_TIMEOUT:-60}
 log=build/logs/linux-busybox.log
 fatal='PANIC\|_WAIT_PERMISSION_DENIED\|_WAIT_NOT_FOUND\|_WAIT_FAILED\|_RECEIVE_FAILED\|_SEND_FAILED\|_CONTROL_FAILED\|OUT_OF_MEMORY\|exec: no reply\|APP_.*FAILED\|INIT_EXEC_.*FAILED\|LIFECYCLE_QUEUE_OVERFLOW\|LINUX_.*_FAILED'
@@ -108,7 +110,7 @@ clean() {
 	refuse 'exit status:\|killed\|not found\|permission denied\|exec:' "$1"
 }
 
-qemu-system-x86_64 -machine q35 -m "$memory" \
+qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

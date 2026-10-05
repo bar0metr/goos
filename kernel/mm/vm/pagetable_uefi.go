@@ -750,6 +750,53 @@ func resolveUser(rootAddress uint64, virtual uint64) (uint64, uint64, bool) {
 	return leaf&addressMask | virtual&(PageSize-1), leaf, true
 }
 
+// BuildTrampolineRoot returns a root for processor start-up: the kernel
+// root's top level, with private copies of the tables over the first 2 MiB
+// that also map page, read-only and executable, at its physical address. A
+// starting processor enables paging while it runs from page. The other
+// entries share the kernel's tables. The four pages it allocated are
+// returned for the caller to free once no processor uses the root.
+func BuildTrampolineRoot(allocator *pmm.Allocator, kernelRootAddress, page uint64) (uint64, [4]uint64, bool) {
+	var pages [4]uint64
+	if allocator == nil || kernelRootAddress%PageSize != 0 || page%PageSize != 0 || page >= LeafTableSpan {
+		return 0, pages, false
+	}
+	// SAFETY: kernelRootAddress is the live kernel PML4; its first entries
+	// name the identity map's low page tables, which BuildIdentity made with
+	// 4 KiB leaves.
+	source := (*table)(unsafe.Pointer(uintptr(kernelRootAddress)))
+	var copies [4]*table
+	for level := range copies {
+		address, copied, ok := allocateTable(allocator)
+		if !ok {
+			for index := 0; index < level; index++ {
+				allocator.Free(pages[index])
+			}
+			return 0, [4]uint64{}, false
+		}
+		pages[level], copies[level] = address, copied
+		for index := range copied {
+			copied[index] = source[index]
+		}
+		if level == 3 {
+			break
+		}
+		entry := source[0]
+		if entry&entryPresent == 0 || entry&entryLarge != 0 {
+			for index := 0; index <= level; index++ {
+				allocator.Free(pages[index])
+			}
+			return 0, [4]uint64{}, false
+		}
+		source = (*table)(unsafe.Pointer(uintptr(entry & addressMask)))
+	}
+	for level := 0; level < 3; level++ {
+		copies[level][0] = pages[level+1] | copies[level][0]&^addressMask
+	}
+	copies[3][(page>>12)&0x1ff] = page | entryPresent
+	return pages[0], pages, true
+}
+
 // allocateTable takes page-table pages from low memory, so every walker in
 // this file can use a table's physical address as its kernel address.
 func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {

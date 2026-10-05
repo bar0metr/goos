@@ -2,6 +2,7 @@ package pmm
 
 import (
 	"goos/kernel/boot"
+	"goos/kernel/lock"
 	"math/bits"
 )
 
@@ -61,7 +62,11 @@ type segment struct {
 // straddle LowLimit: the first lowCount lie below it and the rest above it.
 // The bitmaps live in pages Init carves out of low memory and keeps marked
 // used, so the allocator needs no memory of its own beyond this structure.
+//
+// Every processor allocates and frees, so each operation after Init holds
+// the allocator's lock. The caller has disabled local interrupts.
 type Allocator struct {
+	lock           lock.Spin
 	segments       [MaxSegments]segment
 	count          int
 	lowCount       int
@@ -80,6 +85,7 @@ type Allocator struct {
 // reports false when no usable memory can be managed.
 func (allocator *Allocator) Init(regions []boot.MemoryRegion, view MetadataView) bool {
 	*allocator = Allocator{}
+	allocator.lock.SetLevel(lock.LevelMemory)
 	allocator.planSegments(regions)
 	words, metadata := uint64(0), -1
 	for allocator.count != 0 {
@@ -238,18 +244,26 @@ func (allocator *Allocator) dropLastSegment() {
 // the direct map, and it must never be used as a pointer, a page table, or a
 // kernel stack. Those use AllocateLow or AllocateContiguous.
 func (allocator *Allocator) Allocate() (uint64, bool) {
+	allocator.lock.Lock()
+	defer allocator.lock.Unlock()
 	for index := allocator.count - 1; index >= allocator.lowCount; index-- {
 		if page, ok := allocator.segments[index].take(); ok {
 			allocator.freePages--
 			return page * PageSize, true
 		}
 	}
-	return allocator.AllocateLow()
+	return allocator.allocateLow()
 }
 
 // AllocateLow returns a free page below LowLimit, from the lowest segment
 // that has one.
 func (allocator *Allocator) AllocateLow() (uint64, bool) {
+	allocator.lock.Lock()
+	defer allocator.lock.Unlock()
+	return allocator.allocateLow()
+}
+
+func (allocator *Allocator) allocateLow() (uint64, bool) {
 	for index := 0; index < allocator.lowCount; index++ {
 		if page, ok := allocator.segments[index].take(); ok {
 			allocator.freePages--
@@ -266,6 +280,8 @@ func (allocator *Allocator) AllocateContiguous(count uint64) (uint64, bool) {
 	if count == 0 {
 		return 0, false
 	}
+	allocator.lock.Lock()
+	defer allocator.lock.Unlock()
 	for index := 0; index < allocator.lowCount; index++ {
 		if page, ok := allocator.segments[index].takeRun(count); ok {
 			allocator.freePages -= count
@@ -286,6 +302,8 @@ func (allocator *Allocator) Free(address uint64) bool {
 	if page >= allocator.metadataStart && page < allocator.metadataEnd {
 		return false
 	}
+	allocator.lock.Lock()
+	defer allocator.lock.Unlock()
 	current := allocator.segmentOf(page)
 	if current == nil || !current.isUsed(page) {
 		return false
@@ -299,6 +317,8 @@ func (allocator *Allocator) Free(address uint64) bool {
 }
 
 func (allocator *Allocator) Statistics() Stats {
+	allocator.lock.Lock()
+	defer allocator.lock.Unlock()
 	return Stats{
 		ManagedPages:   allocator.managedPages,
 		FreePages:      allocator.freePages,
@@ -311,6 +331,8 @@ func (allocator *Allocator) Statistics() Stats {
 // IsAllocated reports whether the page containing address is managed and in
 // use. Memory the allocator does not manage is never reported as allocated.
 func (allocator *Allocator) IsAllocated(address uint64) bool {
+	allocator.lock.Lock()
+	defer allocator.lock.Unlock()
 	page := address / PageSize
 	current := allocator.segmentOf(page)
 	return current != nil && current.isUsed(page)

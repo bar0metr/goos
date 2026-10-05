@@ -5,6 +5,8 @@ iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 disk=${3:?test disk path required}
 memory=${MEMORY:-512M}
+# SMP is the guest's processor count, as a QEMU -smp argument.
+smp=${SMP:-1}
 log=build/logs/console-gui.log
 dump=build/reports/console-gui.ppm
 monitor=${TMPDIR:-/tmp}/goos-console-gui-monitor.$$
@@ -50,7 +52,7 @@ trap 'cleanup; exit 130' HUP INT TERM
 mkdir -p build/logs build/reports
 rm -f "$log" "$dump" "$monitor"
 
-qemu-system-x86_64 -machine q35 -m "$memory" \
+qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \

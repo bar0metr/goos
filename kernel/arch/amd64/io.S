@@ -1,14 +1,43 @@
 //go:build uefi && amd64
 
 .set GOOS_KERNEL_SLOT, 0
-.set GOOS_IDLE_SLOT, 3
 .set GOOS_YIELD_VECTOR, 0x81
 .set GOOS_FPU_AREA_SHIFT, 9
 .set GOOS_CR4_SSE, 0x600
 .set GOOS_KERNEL_LOW_BASE, 0xffffc00000000000
+// Slots 0-63 are tasks. Slot 64+n is processor n's idle loop, which has a
+// context, a stack, and an FPU area like a task but is never in a run queue.
+.set GOOS_IDLE_BASE, 64
+// Processor n loads task register selector 0x28 + 16n, which names its own
+// TSS descriptor. Entry code reads the selector back to find its processor.
+.set GOOS_TSS_SELECTOR0, 0x28
+// Each processor has a 256-byte data block in goos_cpu_data.
+.set GOOS_CPU_SHIFT, 8
+.set GOOS_CPU_CURRENT, 0
+.set GOOS_CPU_NEED_RESCHED, 8
+.set GOOS_CPU_TSS_RSP0, 16
+.set GOOS_CPU_ACTIVE_ROOT, 24
+.set GOOS_CPU_ENTRY_SEQ, 32
+.set GOOS_CPU_ENABLED, 40
+.set GOOS_CPU_KILL, 48
+.set GOOS_CPU_PREVIOUS, 56
+.set GOOS_CPU_RESCHED_IPIS, 64
+.set GOOS_CPU_TLB_IPIS, 72
+.set GOOS_CPU_TICKS, 80
+// The reasons goos_sched_switch takes for leaving the current task.
+.set GOOS_SWITCH_PREEMPT, 0
+.set GOOS_SWITCH_BLOCK, 1
+.set GOOS_SWITCH_EXIT, 2
+.set GOOS_SWITCH_TICK, 3
+.set GOOS_LAPIC_EOI, 0x3fffd0b0
+.set GOOS_LAPIC_ICR_LOW, 0x3fffd300
+.set GOOS_LAPIC_ICR_HIGH, 0x3fffd310
+.set GOOS_LAPIC_ID, 0x3fffd020
+.set GOOS_STOP_VECTOR, 0x33
 .set GOOS_LINUX_ENTRY_PROCESS_ROOT, 0
 .set GOOS_LINUX_ENTRY_STACK, 8
 .set GOOS_LINUX_ENTRY_USER_RSP, 16
+.set GOOS_LINUX_ENTRY_CURRENT, 24
 .set GOOS_LINUX_FRAME_BASE, 32
 .set GOOS_LINUX_FRAME_RETURN, 88
 .set GOOS_LINUX_FRAME_ACTION, 96
@@ -42,6 +71,28 @@
 .set GOOS_INPUT_STRIDE, 8224
 .set GOOS_INPUT_COUNT, 2
 .set GOOS_KEYBOARD_BYTES, 8
+
+// GOOS_CPU leaves the calling processor's data block in reg, whose low half
+// is reg32. The task register holds GOOS_TSS_SELECTOR0 + 16n on processor n.
+// It clobbers the flags and needs the kernel root, which maps the block.
+.macro GOOS_CPU reg, reg32
+    xorl \reg32, \reg32
+    str \reg32
+    subl $GOOS_TSS_SELECTOR0, \reg32
+    shll $(GOOS_CPU_SHIFT - 4), \reg32
+    addq goos_cpu_data_base(%rip), \reg
+.endm
+
+// GOOS_CALL calls a Go function with the Win64 stack alignment and home
+// space, from a point where the stack's alignment is unknown. RBP keeps the
+// old stack pointer; the callee preserves it.
+.macro GOOS_CALL function
+    movq %rsp, %rbp
+    andq $-16, %rsp
+    subq $32, %rsp
+    callq \function
+    movq %rbp, %rsp
+.endm
 
 .section .text
 
@@ -170,22 +221,58 @@ goos_zero_bytes:
     popq %rdi
     retq
 
-.global goos_scheduler_state_read
-goos_scheduler_state_read:
-    movq goos_runnable_mask(%rip), %rax
-    movq %rax, 0(%rcx)
-    movq goos_task_dead_mask(%rip), %rax
-    movq %rax, 8(%rcx)
-    movq goos_task_count(%rip), %rax
-    movq %rax, 16(%rcx)
-    movq goos_current_task(%rip), %rax
-    movq %rax, 24(%rcx)
+// goos_cpu_index returns the calling processor's index, from its task
+// register, or zero before the first task register load.
+.global goos_cpu_index
+goos_cpu_index:
+    xorl %eax, %eax
+    str %eax
+    cmpl $GOOS_TSS_SELECTOR0, %eax
+    jb .cpu_index_boot
+    subl $GOOS_TSS_SELECTOR0, %eax
+    shrl $4, %eax
+    retq
+.cpu_index_boot:
+    xorl %eax, %eax
     retq
 
-.global goos_task_rsp0_read
-goos_task_rsp0_read:
-    leaq goos_task_rsp0(%rip), %rax
-    movq (%rax,%rcx,8), %rax
+.global goos_interrupts_enable
+goos_interrupts_enable:
+    sti
+    retq
+
+// goos_wait_for_interrupt halts with interrupts enabled and returns with them
+// disabled. STI delays interrupts by one instruction, so an interrupt that
+// arrives after the caller's last check still ends the HLT.
+.global goos_wait_for_interrupt
+goos_wait_for_interrupt:
+    sti
+    hlt
+    cli
+    retq
+
+// goos_flush_tlb reloads CR3, which drops every translation the processor
+// caches; GoOS maps no global pages.
+.global goos_flush_tlb
+goos_flush_tlb:
+    movq %cr3, %rax
+    movq %rax, %cr3
+    retq
+
+.global goos_write_fs_base
+goos_write_fs_base:
+    movq %rcx, %rax
+    movq %rcx, %rdx
+    shrq $32, %rdx
+    movl $0xc0000100, %ecx
+    wrmsr
+    retq
+
+// goos_yield enters the scheduler through the kernel-only yield vector. The
+// task blocks unless a wake is pending for it.
+.global goos_yield
+goos_yield:
+    int $GOOS_YIELD_VECTOR
     retq
 
 .global goos_interrupts_disable
@@ -443,6 +530,8 @@ goos_probe_address_spaces:
     popfq
     retq
 
+// goos_load_gdt(base, limit, selector) loads the GDT, reloads the segment
+// registers, and loads the task register with this processor's TSS selector.
 .global goos_load_gdt
 goos_load_gdt:
     subq $16, %rsp
@@ -459,8 +548,7 @@ goos_load_gdt:
     pushq %rax
     lretq
 .gdt_loaded:
-    movw $0x28, %ax
-    ltr %ax
+    ltr %r8w
     retq
 
 .global goos_load_idt
@@ -480,15 +568,36 @@ goos_trigger_breakpoint:
 // IDT gates use the higher-half alias of each entry label. This prefix uses
 // assembly only, installs the kernel root, and returns to the handler's low
 // link-time address with every interrupted register intact.
+// IDT gates use the higher-half alias of each entry label. This prefix uses
+// assembly only, installs the kernel root, and returns to the handler's low
+// link-time address with every interrupted register intact. The CR3 write
+// drops every translation of the root the processor left, so the entry ends
+// any TLB shootdown waiting for this processor (docs/kernel/smp.md).
 .macro GOOS_ENTER_LOW target
     pushq %rax
     movq goos_kernel_root(%rip), %rax
     movq %rax, %cr3
+    GOOS_CPU %rax, %eax
+    movq $0, GOOS_CPU_ACTIVE_ROOT(%rax)
+    incq GOOS_CPU_ENTRY_SEQ(%rax)
     popq %rax
     pushq %r11
     movabsq $\target, %r11
     xchgq %r11, (%rsp)
     retq
+.endm
+
+// GOOS_ACTIVATE_ROOT leaves the current task's root in RAX and records it as
+// the root this processor is about to run. A shootdown that reads the record
+// interrupts the processor; one that reads it before this store changed the
+// page tables before the CR3 write that follows, whose page walks see the
+// change. It clobbers RCX and RDX.
+.macro GOOS_ACTIVATE_ROOT
+    GOOS_CPU %rdx, %edx
+    movq GOOS_CPU_CURRENT(%rdx), %rax
+    leaq goos_task_roots(%rip), %rcx
+    movq (%rcx,%rax,8), %rax
+    movq %rax, GOOS_CPU_ACTIVE_ROOT(%rdx)
 .endm
 
 // User returns enter this prefix while the kernel root is active. The prefix
@@ -498,9 +607,9 @@ goos_trigger_breakpoint:
     jne 991f
     pushq %rax
     pushq %rcx
-    movq goos_current_task(%rip), %rax
-    leaq goos_task_roots(%rip), %rcx
-    movq (%rcx,%rax,8), %rax
+    pushq %rdx
+    GOOS_ACTIVATE_ROOT
+    popq %rdx
     pushq %rax
     pushq %r11
     movabsq $(GOOS_KERNEL_LOW_BASE + goos_return_high), %r11
@@ -516,9 +625,9 @@ goos_trigger_breakpoint:
     jne 991f
     pushq %rax
     pushq %rcx
-    movq goos_current_task(%rip), %rax
-    leaq goos_task_roots(%rip), %rcx
-    movq (%rcx,%rax,8), %rax
+    pushq %rdx
+    GOOS_ACTIVATE_ROOT
+    popq %rdx
     pushq %rax
     pushq %r11
     movabsq $(GOOS_KERNEL_LOW_BASE + goos_linux_return_high), %r11
@@ -661,8 +770,10 @@ goos_exception_fatal:
     incq %rsi
     jmp .fatal_next
 .fatal_halt:
+    callq .fatal_report_cpu
+.fatal_stop:
     hlt
-    jmp .fatal_halt
+    jmp .fatal_stop
 
 // A double fault arrives on its own stack (IST 1). Its usual cause here is a
 // kernel stack overflow: the page fault on a guard page cannot push its frame
@@ -709,10 +820,67 @@ goos_exception_fatal:
     outb %al, %dx
     retq
 
+
+// .fatal_report_cpu names the processor that stopped, by index and APIC ID,
+// and stops every other processor, once the descriptor tables and the local
+// APIC are in place.
+.fatal_report_cpu:
+    cmpq $0, goos_smp_ready(%rip)
+    je .fatal_report_done
+    movl $0, GOOS_LAPIC_ICR_HIGH
+    movl $(0xc4000 | GOOS_STOP_VECTOR), GOOS_LAPIC_ICR_LOW
+    leaq fatal_cpu_message(%rip), %rsi
+    callq .fatal_serial_string
+    xorl %esi, %esi
+    str %esi
+    subl $GOOS_TSS_SELECTOR0, %esi
+    shrl $4, %esi
+    callq .fatal_serial_hex8
+    leaq fatal_apic_message(%rip), %rsi
+    callq .fatal_serial_string
+    movl GOOS_LAPIC_ID, %esi
+    shrl $24, %esi
+    callq .fatal_serial_hex8
+    movb $0x0d, %ah
+    callq .fatal_serial_byte
+    movb $0x0a, %ah
+    callq .fatal_serial_byte
+.fatal_report_done:
+    retq
+
+// .fatal_serial_string writes the NUL-terminated string at RSI.
+.fatal_serial_string:
+    movb (%rsi), %ah
+    testb %ah, %ah
+    jz .fatal_serial_string_done
+    callq .fatal_serial_byte
+    incq %rsi
+    jmp .fatal_serial_string
+.fatal_serial_string_done:
+    retq
+
+// .fatal_serial_hex8 writes the low byte of ESI as two hex digits.
+.fatal_serial_hex8:
+    movl %esi, %eax
+    shrl $4, %eax
+    andl $0xf, %eax
+    leaq hex_digits(%rip), %rdx
+    movb (%rdx,%rax), %ah
+    callq .fatal_serial_byte
+    movl %esi, %eax
+    andl $0xf, %eax
+    leaq hex_digits(%rip), %rdx
+    movb (%rdx,%rax), %ah
+    callq .fatal_serial_byte
+    retq
+
 // A page fault in user mode may be a demand-zero page (ADR 0104). The
 // registers and the SSE state are saved around the resolver, which runs on the
-// task's kernel stack with interrupts disabled; a supplied page retries the
-// instruction, anything else retires the task as before.
+// task's kernel stack with interrupts disabled and the kernel lock held; a
+// supplied page retries the instruction, anything else retires the task as
+// before. Another task of the process may have mapped the page first, or
+// changed its protection, on another processor; the resolver then answers
+// with a retry.
 .user_fault:
     cmpq $14, (%rsp)
     jne .terminate_user_fault
@@ -731,25 +899,34 @@ goos_exception_fatal:
     pushq %rdx
     pushq %rcx
     pushq %rax
-    movq goos_current_task(%rip), %rax
-    movq %rax, %r9
-    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %rax
+    shlq $GOOS_FPU_AREA_SHIFT, %rax
     leaq goos_task_fpu(%rip), %r10
-    fxsave64 (%r10,%r9)
-    subq $32, %rsp
+    fxsave64 (%r10,%rax)
+    movq %rsp, %r14
+    GOOS_CALL goos_kernel_enter
+    movq $1, %r12
+    testq %rax, %rax
+    jz .user_fault_resolved
+    movq GOOS_CPU_CURRENT(%rbx), %rax
     leaq goos_task_roots(%rip), %rcx
     movq (%rcx,%rax,8), %rcx
     movq %cr2, %rdx
-    movq 160(%rsp), %r8
-    movq 168(%rsp), %r9
-    callq goos_resolve_user_fault
-    addq $32, %rsp
-    movq %rax, %r11
-    movq goos_current_task(%rip), %r9
+    movq 128(%r14), %r8
+    movq 136(%r14), %r9
+    GOOS_CALL goos_resolve_user_fault
+    movq %rax, %r12
+    GOOS_CALL goos_kernel_leave
+.user_fault_resolved:
+    movq GOOS_CPU_CURRENT(%rbx), %r9
     shlq $GOOS_FPU_AREA_SHIFT, %r9
     leaq goos_task_fpu(%rip), %r10
     fxrstor64 (%r10,%r9)
-    testq %r11, %r11
+    testq %r12, %r12
+    jz .user_fault_retire
+    cmpq $0, GOOS_CPU_NEED_RESCHED(%rbx)
+    jne .user_fault_preempt
     popq %rax
     popq %rcx
     popq %rdx
@@ -765,14 +942,68 @@ goos_exception_fatal:
     popq %r13
     popq %r14
     popq %r15
-    jz .terminate_user_fault
     addq $16, %rsp
     GOOS_RETURN_USER
     iretq
+// A retried fault that is due a reschedule, or whose task was killed while
+// it waited for the kernel lock, leaves the processor first. The registers
+// are saved again above the IRETQ frame in the order the context switch
+// restores; the faulting instruction runs again when the task does.
+.user_fault_preempt:
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+    addq $16, %rsp
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq $GOOS_SWITCH_PREEMPT, %rcx
+    jmp .preempt_current
+.user_fault_retire:
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
 
 .terminate_user_fault:
-    incq goos_user_faults(%rip)
-    movq goos_current_task(%rip), %rcx
+    lock incq goos_user_faults(%rip)
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %rcx
     // A page fault records its address, any other fault zero, so the kernel
     // can tell which page a faulting task touched.
     xorl %eax, %eax
@@ -786,13 +1017,8 @@ goos_exception_fatal:
     btsq $63, %rax
     leaq goos_task_exit_codes(%rip), %rdx
     movq %rax, (%rdx,%rcx,8)
-    btsq %rcx, goos_task_exit_pending(%rip)
-    btrq %rcx, goos_runnable_mask(%rip)
-    btsq %rcx, goos_task_dead_mask(%rip)
-    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
-    movq %rcx, %rax
-    callq goos_select_next
-    jmp .switch_to
+    movq $GOOS_SWITCH_EXIT, %rcx
+    jmp .switch_away
 
 .section .rdata
 goos_zero_idtr:
@@ -809,6 +1035,10 @@ fatal_pf_message:
     .asciz "PANIC: page fault\r\n"
 fatal_df_message:
     .asciz "PANIC: double fault, a kernel stack overflow if this address is a guard page: 0x"
+fatal_cpu_message:
+    .asciz "CPU 0x"
+fatal_apic_message:
+    .asciz " APIC 0x"
 hex_digits:
     .ascii "0123456789abcdef"
 
@@ -829,6 +1059,11 @@ goos_interrupt_table:
     .quad goos_irq_yield
     .quad goos_irq_serial
     .quad goos_irq_keyboard
+    .quad goos_irq_local_timer
+    .quad goos_irq_reschedule
+    .quad goos_irq_shootdown
+    .quad goos_irq_stop
+    .quad goos_irq_spurious
 
 .global goos_entry_mapping_table
 goos_entry_mapping_table:
@@ -869,10 +1104,13 @@ goos_linux_syscall_entry:
     movabsq $.L_linux_syscall_low, %r10
     jmp *%r10
 .L_linux_syscall_low:
+    GOOS_CPU %rbx, %ebx
+    movq $0, GOOS_CPU_ACTIVE_ROOT(%rbx)
+    incq GOOS_CPU_ENTRY_SEQ(%rbx)
     // The caller's x87 and SSE state is kept aside before any kernel code
     // runs: the kernel uses SSE registers, and the return restores the copy.
     // Signal delivery and rt_sigreturn read and replace it.
-    movq goos_current_task(%rip), %rax
+    movq GOOS_CPU_CURRENT(%rbx), %rax
     shlq $GOOS_FPU_AREA_SHIFT, %rax
     leaq goos_linux_user_fpu(%rip), %r10
     fxsave64 (%r10,%rax)
@@ -899,8 +1137,14 @@ goos_linux_syscall_entry:
     movq %rax, GOOS_LINUX_FRAME_BASE+72(%rsp)
     movq %gs:GOOS_LINUX_ENTRY_PROCESS_ROOT, %rax
     movq %rax, GOOS_LINUX_FRAME_BASE+80(%rsp)
+    // A task killed while it waits for the kernel lock leaves without the
+    // call; the retried SYSCALL never runs because the task never resumes.
+    callq goos_kernel_enter
+    testq %rax, %rax
+    jz .linux_user_retry
     leaq GOOS_LINUX_FRAME_BASE(%rsp), %rcx
     callq goos_dispatch_linux_syscall
+    callq goos_kernel_leave
     cmpq $GOOS_LINUX_ACTION_EXIT, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
     je .linux_user_exit
     cmpq $GOOS_LINUX_ACTION_BLOCK, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
@@ -908,7 +1152,7 @@ goos_linux_syscall_entry:
     cmpq $GOOS_LINUX_ACTION_EXEC, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
     je .linux_user_exec
 .linux_user_return:
-    movq goos_current_task(%rip), %rax
+    movq GOOS_CPU_CURRENT(%rbx), %rax
     shlq $GOOS_FPU_AREA_SHIFT, %rax
     leaq goos_linux_user_fpu(%rip), %r10
     fxrstor64 (%r10,%rax)
@@ -924,7 +1168,10 @@ goos_linux_syscall_entry:
     movq GOOS_LINUX_FRAME_BASE+72(%rsp), %rax
     movq %rax, GOOS_LINUX_IRET_BASE+24(%rsp)
     movq $0x1b, GOOS_LINUX_IRET_BASE+32(%rsp)
+    movq GOOS_CPU_NEED_RESCHED(%rbx), %r10
     addq $GOOS_LINUX_FRAME_RESERVE, %rsp
+    testq %r10, %r10
+    jnz .linux_user_yield
     popq %rax
     popq %rcx
     popq %rdx
@@ -942,6 +1189,44 @@ goos_linux_syscall_entry:
     popq %r15
     GOOS_RETURN_LINUX
     iretq
+// A completed call due a reschedule, from a wake it made or a kill, parks
+// the task with its result in RAX, as a timer interrupt on the return would.
+// The user registers are saved again in the order the context switch
+// restores; the user x87 and SSE state is in the registers already.
+.linux_user_yield:
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+    swapgs
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq $GOOS_SWITCH_PREEMPT, %rcx
+    jmp .preempt_current
 .linux_user_exec:
     // A new image starts with no register state from the program it replaced.
     movq $0, GOOS_LINUX_SAVED_RAX(%rsp)
@@ -960,7 +1245,12 @@ goos_linux_syscall_entry:
     movq $0, GOOS_LINUX_FRAME_RESERVE+104(%rsp)
     movq $0, GOOS_LINUX_FRAME_RESERVE+112(%rsp)
     jmp .linux_user_return
+.linux_user_retry:
+    movq $GOOS_SWITCH_PREEMPT, %r12
+    jmp .linux_user_park
 .linux_user_block:
+    movq $GOOS_SWITCH_BLOCK, %r12
+.linux_user_park:
     // Save an ordinary scheduler context that retries the two-byte SYSCALL
     // instruction after its continuation is woken. The continuation's Issued
     // bit prevents the retried dispatcher from duplicating side effects.
@@ -1007,7 +1297,7 @@ goos_linux_syscall_entry:
     movq 104(%r10), %rax
     movq %rax, 144(%rsp)
     movq $0x1b, 152(%rsp)
-    movq goos_current_task(%rip), %rcx
+    movq GOOS_CPU_CURRENT(%rbx), %rcx
     leaq goos_task_contexts(%rip), %rdx
     movq %rsp, (%rdx,%rcx,8)
     movq %rcx, %r9
@@ -1018,31 +1308,24 @@ goos_linux_syscall_entry:
     fxrstor64 (%r11,%r9)
     leaq goos_task_fpu(%rip), %r10
     fxsave64 (%r10,%r9)
-    btrq %rcx, goos_runnable_mask(%rip)
     swapgs
-    movq %rcx, %rax
-    callq goos_select_next
-    jmp .switch_to
+    movq %r12, %rcx
+    jmp .switch_away
 .linux_user_exit:
-    movq goos_current_task(%rip), %rcx
-    btsq %rcx, goos_task_exit_pending(%rip)
-    btrq %rcx, goos_runnable_mask(%rip)
-    btsq %rcx, goos_task_dead_mask(%rip)
-    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
     swapgs
-    movq %rcx, %rax
-    callq goos_select_next
-    jmp .switch_to
+    movq $GOOS_SWITCH_EXIT, %rcx
+    jmp .switch_away
 
 .global goos_user_call
 goos_user_call:
     GOOS_ENTER_LOW .L_user_call
 .L_user_call:
-    incq goos_user_call_entries(%rip)
+    lock incq goos_user_call_entries(%rip)
     pushq %rax
     pushq %rdx
     pushq %r8
-    movq goos_current_task(%rip), %rax
+    GOOS_CPU %rax, %eax
+    movq GOOS_CPU_CURRENT(%rax), %rax
     leaq 24(%rsp), %rdx
     leaq goos_user_call_rsp_baselines(%rip), %r8
     cmpq $0, (%r8,%rax,8)
@@ -1052,7 +1335,7 @@ goos_user_call:
 .L_user_call_compare_rsp:
     cmpq (%r8,%rax,8), %rdx
     je .L_user_call_rsp_recorded
-    incq goos_user_call_rsp_drift(%rip)
+    lock incq goos_user_call_rsp_drift(%rip)
 .L_user_call_rsp_recorded:
     popq %r8
     popq %rdx
@@ -1077,7 +1360,13 @@ goos_user_call:
 	 subq $48, %rsp
 	 movq 48(%rsp), %rax
 	 movq %rax, 40(%rsp)
-	 movq goos_current_task(%rip), %rax
+	 GOOS_CPU %rbx, %ebx
+	 // A task killed while it waits for the kernel lock leaves without the
+	 // call.
+	 callq goos_kernel_enter
+	 testq %rax, %rax
+	 jz .user_retry
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %rcx
 	 movq (%rcx,%rax,8), %rcx
 	 callq goos_authorize_native_call
@@ -1098,7 +1387,7 @@ goos_user_call:
 	 movq 88(%rsp), %r8
 	 movq 64(%rsp), %r10
 	 movq %r10, goos_kernel_call_arg2(%rip)
-	 movq goos_current_task(%rip), %rax
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
 	 callq goos_dispatch_kernel_call
@@ -1107,7 +1396,7 @@ goos_user_call:
 	 movq 96(%rsp), %rcx
 	 movq 88(%rsp), %rdx
 	 movq 64(%rsp), %r8
-	 movq goos_current_task(%rip), %rax
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
 	 orq %rax, %r9
@@ -1117,7 +1406,7 @@ goos_user_call:
 	 movq 96(%rsp), %rcx
 	 movq 88(%rsp), %rdx
 	 movq 64(%rsp), %r8
-	 movq goos_current_task(%rip), %rax
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
 	 orq %rax, %r9
@@ -1125,7 +1414,7 @@ goos_user_call:
 	 jmp .user_call_result
 .user_call_irq_wait:
 	 movq 96(%rsp), %rcx
-	 movq goos_current_task(%rip), %rax
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %rdx
 	 movq (%rdx,%rax,8), %rdx
 	 orq %rax, %rdx
@@ -1134,7 +1423,7 @@ goos_user_call:
 .user_call_stream_wait:
 	 movq 96(%rsp), %rcx
 	 movq 88(%rsp), %rdx
-	 movq goos_current_task(%rip), %rax
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r8
 	 movq (%r8,%rax,8), %r8
 	 orq %rax, %r8
@@ -1144,12 +1433,15 @@ goos_user_call:
 	 movq 96(%rsp), %rcx
 	 movq 88(%rsp), %rdx
 	 movq 64(%rsp), %r8
-	 movq goos_current_task(%rip), %rax
+	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
 	 orq %rax, %r9
 	 callq goos_dispatch_wait_any
 .user_call_result:
+	 movq %rax, %r12
+	 callq goos_kernel_leave
+	 movq %r12, %rax
 	 movq $0, 48(%rsp)
 	 movl %eax, 48(%rsp)
 	 shrq $32, %rax
@@ -1160,7 +1452,7 @@ goos_user_call:
 	 jmp .user_block
 .user_return:
 	 movq $0, 64(%rsp)
-	 cmpq $0, goos_need_reschedule(%rip)
+	 cmpq $0, GOOS_CPU_NEED_RESCHED(%rbx)
 	 jne .user_yield
 	 addq $48, %rsp
 	 popq %rax
@@ -1184,9 +1476,15 @@ goos_user_call:
 	 movq 48(%rsp), %rax
 	 movq %rax, 40(%rsp)
 	 xorq %r11, %r11
+	 movq $GOOS_SWITCH_PREEMPT, %r12
+	 jmp .user_park
+.user_retry:
+	 movq $2, %r11
+	 movq $GOOS_SWITCH_PREEMPT, %r12
 	 jmp .user_park
 .user_block:
 	 movq $2, %r11
+	 movq $GOOS_SWITCH_BLOCK, %r12
 .user_park:
 	 movq %rsp, %r10
 	 subq $160, %rsp
@@ -1233,36 +1531,42 @@ goos_user_call:
 	 movq %rax, 144(%rsp)
 	 movq 200(%r10), %rax
 	 movq %rax, 152(%rsp)
-	 movq goos_current_task(%rip), %rcx
+	 GOOS_CPU %rbx, %ebx
+	 movq GOOS_CPU_CURRENT(%rbx), %rcx
 	 leaq goos_task_contexts(%rip), %rdx
 	 movq %rsp, (%rdx,%rcx,8)
 	 movq %rcx, %r9
 	 shlq $GOOS_FPU_AREA_SHIFT, %r9
 	 leaq goos_task_fpu(%rip), %r10
 	 fxsave64 (%r10,%r9)
-	 testq %r11, %r11
-	 jz .user_park_select
-	 btrq %rcx, goos_runnable_mask(%rip)
-.user_park_select:
-	 movq %rcx, %rax
-	 callq goos_select_next
-	 jmp .switch_to
+	 movq %r12, %rcx
+	 jmp .switch_away
 .user_exit:
-    addq $48, %rsp
-    movq goos_current_task(%rip), %rcx
-    btsq %rcx, goos_task_exit_pending(%rip)
-    btrq %rcx, goos_runnable_mask(%rip)
-    btsq %rcx, goos_task_dead_mask(%rip)
-    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
-    movq %rcx, %rax
-    callq goos_select_next
-    jmp .switch_to
+    movq $GOOS_SWITCH_EXIT, %rcx
+    jmp .switch_away
 
 .section .text
+// goos_irq_timer is the PIT's IRQ0. It runs only while boot calibrates the
+// clocks; the local APIC timers take over before the scheduler starts.
 .global goos_irq_timer
 goos_irq_timer:
     GOOS_ENTER_LOW .L_irq_timer
 .L_irq_timer:
+    pushq %rax
+    incq goos_timer_ticks(%rip)
+    movb $0x20, %al
+    outb %al, $0x20
+    popq %rax
+    GOOS_RETURN_USER
+    iretq
+
+// goos_irq_local_timer is every processor's own preemption tick. Only the
+// housekeeping processor advances kernel time, so time runs at the tick rate
+// however many processors tick.
+.global goos_irq_local_timer
+goos_irq_local_timer:
+    GOOS_ENTER_LOW .L_irq_local_timer
+.L_irq_local_timer:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -1278,89 +1582,84 @@ goos_irq_timer:
     pushq %r13
     pushq %r14
     pushq %r15
+    GOOS_CPU %rbx, %ebx
+    cmpq goos_cpu_data_base(%rip), %rbx
+    jne .local_timer_charge
     incq goos_timer_ticks(%rip)
-    movq goos_current_task(%rip), %rax
+.local_timer_charge:
+    incq GOOS_CPU_TICKS(%rbx)
+    movq GOOS_CPU_CURRENT(%rbx), %rax
     leaq goos_task_ticks(%rip), %rdx
     incq (%rdx,%rax,8)
     cmpq $0x23, 128(%rsp)
-    jne .timer_not_user
-    incq goos_user_preemptions(%rip)
-.timer_not_user:
-    movb $0x20, %al
-    outb %al, $0x20
-    cmpb $0, goos_scheduler_enabled(%rip)
+    jne .local_timer_eoi
+    lock incq goos_user_preemptions(%rip)
+.local_timer_eoi:
+    movl $0, GOOS_LAPIC_EOI
+    cmpq $0, GOOS_CPU_ENABLED(%rbx)
     je .restore_context
-    // The kernel task sleeps between housekeeping steps; each tick wakes it
-    // to expire deadlines and retry retained lifecycle messages.
-    btsq $GOOS_KERNEL_SLOT, goos_runnable_mask(%rip)
-.preempt_current:
-    movq goos_current_task(%rip), %rax
-    leaq goos_task_contexts(%rip), %rdx
-    movq %rsp, (%rdx,%rax,8)
-    movq %rax, %r9
-    shlq $GOOS_FPU_AREA_SHIFT, %r9
-    leaq goos_task_fpu(%rip), %r10
-    fxsave64 (%r10,%r9)
-    callq goos_select_next
-.switch_to:
-	// FS base is schedulable user state. Save the outgoing value before RAX
-	// changes from the incoming slot to the MSR halves.
-	movq %rax, %r8
-	movq goos_current_task(%rip), %r9
-	movl $0xc0000100, %ecx
-	rdmsr
-	shlq $32, %rdx
-	orq %rdx, %rax
-	leaq goos_task_fs_bases(%rip), %r10
-	movq %rax, (%r10,%r9,8)
-	movq %r8, %rax
-    movq %rax, %r9
-    shlq $GOOS_FPU_AREA_SHIFT, %r9
-    leaq goos_task_fpu(%rip), %r10
-    fxrstor64 (%r10,%r9)
-    movq %rax, goos_current_task(%rip)
-	movq %rax, %r8
-	leaq goos_task_fs_bases(%rip), %r10
-	movq (%r10,%r8,8), %rax
-	movq %rax, %rdx
-	shrq $32, %rdx
-	movl $0xc0000100, %ecx
-	wrmsr
-	movq %r8, %rax
-    leaq goos_task_rsp0(%rip), %r10
-    movq (%r10,%rax,8), %r11
-    leaq goos_task_roots(%rip), %r9
-    movq (%r9,%rax,8), %r9
-    movq %r9, goos_linux_entry_data+GOOS_LINUX_ENTRY_PROCESS_ROOT(%rip)
-    movq %r11, goos_linux_entry_data+GOOS_LINUX_ENTRY_STACK(%rip)
-    testq %r11, %r11
-    jz .switch_load
-    movq goos_tss_rsp0_address(%rip), %r10
-    movq %r11, (%r10)
-.switch_load:
-    leaq goos_task_contexts(%rip), %rdx
-    movq (%rdx,%rax,8), %rsp
-.restore_context:
-    popq %r15
-    popq %r14
-    popq %r13
-    popq %r12
-    popq %r11
-    popq %r10
-    popq %r9
-    popq %r8
-    popq %rdi
-    popq %rsi
-    popq %rbp
-    popq %rdx
-    popq %rcx
-    popq %rbx
+    movq $GOOS_SWITCH_TICK, %rcx
+    jmp .preempt_current
+
+// goos_irq_reschedule answers another processor's request to look at the run
+// queue: a task was woken for this processor, or the task it runs was killed.
+.global goos_irq_reschedule
+goos_irq_reschedule:
+    GOOS_ENTER_LOW .L_irq_reschedule
+.L_irq_reschedule:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    GOOS_CPU %rbx, %ebx
+    incq GOOS_CPU_RESCHED_IPIS(%rbx)
+    movl $0, GOOS_LAPIC_EOI
+    cmpq $0, GOOS_CPU_ENABLED(%rbx)
+    je .restore_context
+    movq $GOOS_SWITCH_PREEMPT, %rcx
+    jmp .preempt_current
+
+// goos_irq_shootdown is a TLB shootdown. The entry prefix already reloaded
+// CR3 and recorded the entry, which is everything the initiator waits for.
+.global goos_irq_shootdown
+goos_irq_shootdown:
+    GOOS_ENTER_LOW .L_irq_shootdown
+.L_irq_shootdown:
+    pushq %rax
+    GOOS_CPU %rax, %eax
+    incq GOOS_CPU_TLB_IPIS(%rax)
+    movl $0, GOOS_LAPIC_EOI
     popq %rax
     GOOS_RETURN_USER
     iretq
 
+// goos_irq_stop parks a processor for good after another one panicked.
+.global goos_irq_stop
+goos_irq_stop:
+    cli
+    hlt
+    jmp goos_irq_stop
+
+// goos_irq_spurious takes the local APIC's and the PICs' spurious vectors,
+// which need no acknowledgement.
+.global goos_irq_spurious
+goos_irq_spurious:
+    iretq
+
 // goos_irq_yield switches away from a kernel task without advancing time.
-// Its vector is not callable from ring 3.
+// Its vector is not callable from ring 3. The task blocks unless a wake is
+// pending for it.
 .global goos_irq_yield
 goos_irq_yield:
     GOOS_ENTER_LOW .L_irq_yield
@@ -1380,36 +1679,100 @@ goos_irq_yield:
     pushq %r13
     pushq %r14
     pushq %r15
-    cmpb $0, goos_scheduler_enabled(%rip)
+    GOOS_CPU %rbx, %ebx
+    cmpq $0, GOOS_CPU_ENABLED(%rbx)
     je .restore_context
-    jmp .preempt_current
+    movq $GOOS_SWITCH_BLOCK, %rcx
 
-// goos_select_next returns in %rax the runnable slot after the one in %rax,
-// in round-robin order. The idle slot is chosen only when no other task is
-// runnable. Clobbers %r8.
-goos_select_next:
-    movq %rax, %r8
-.select_loop:
-    incq %rax
-    cmpq goos_task_count(%rip), %rax
-    jb .select_check
-    xorq %rax, %rax
-.select_check:
-    cmpq $GOOS_IDLE_SLOT, %rax
-    je .select_skip
-    btq %rax, goos_runnable_mask(%rip)
-    jc .select_done
-.select_skip:
-    cmpq %r8, %rax
-    jne .select_loop
-    movq $GOOS_IDLE_SLOT, %rax
-.select_done:
-    movq $0, goos_need_reschedule(%rip)
-    retq
+// .preempt_current saves the running task's context, the fifteen registers
+// above an IRETQ frame at RSP, and its FPU state, then switches for the
+// reason in RCX.
+.preempt_current:
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %rax
+    leaq goos_task_contexts(%rip), %rdx
+    movq %rsp, (%rdx,%rax,8)
+    shlq $GOOS_FPU_AREA_SHIFT, %rax
+    leaq goos_task_fpu(%rip), %r10
+    fxsave64 (%r10,%rax)
 
-// goos_irq_serial drains every byte the UART has and returns. It takes no
-// scheduling decision: the kernel loop sees the ring and wakes the waiters
-// through the ordinary wait table, so one path publishes readiness.
+// .switch_away asks the scheduler for the next slot. A task that stays is
+// resumed from the context at RSP; another one is switched to.
+.switch_away:
+    GOOS_CALL goos_sched_switch
+.switch_to:
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %r12
+    movq %rax, %r13
+    cmpq %r12, %r13
+    je .switch_same
+	// FS base is schedulable user state. Save the outgoing value before RAX
+	// changes from the incoming slot to the MSR halves.
+	movl $0xc0000100, %ecx
+	rdmsr
+	shlq $32, %rdx
+	orq %rdx, %rax
+	leaq goos_task_fs_bases(%rip), %r10
+	movq %rax, (%r10,%r12,8)
+    movq %r12, GOOS_CPU_PREVIOUS(%rbx)
+    movq %r13, GOOS_CPU_CURRENT(%rbx)
+	leaq goos_task_fs_bases(%rip), %r10
+	movq (%r10,%r13,8), %rax
+	movq %rax, %rdx
+	shrq $32, %rdx
+	movl $0xc0000100, %ecx
+	wrmsr
+    // The Linux entry block and TSS.RSP0 of this processor name the incoming
+    // task's kernel-entry stack and root.
+    leaq goos_task_rsp0(%rip), %r10
+    movq (%r10,%r13,8), %r11
+    leaq goos_task_roots(%rip), %r9
+    movq (%r9,%r13,8), %r9
+    movq %rbx, %rdx
+    subq goos_cpu_data_base(%rip), %rdx
+    shrq $(GOOS_CPU_SHIFT - 5), %rdx
+    leaq goos_linux_entry_data(%rip), %r10
+    addq %r10, %rdx
+    movq %r9, GOOS_LINUX_ENTRY_PROCESS_ROOT(%rdx)
+    movq %r11, GOOS_LINUX_ENTRY_STACK(%rdx)
+    movq %r13, GOOS_LINUX_ENTRY_CURRENT(%rdx)
+    testq %r11, %r11
+    jz .switch_load
+    movq GOOS_CPU_TSS_RSP0(%rbx), %r10
+    movq %r11, (%r10)
+.switch_load:
+    leaq goos_task_contexts(%rip), %rdx
+    movq (%rdx,%r13,8), %rsp
+    // The outgoing task's stack is no longer in use: the scheduler may now
+    // let another processor pick it, or publish its exit.
+    movq %r12, %rcx
+    GOOS_CALL goos_sched_finish
+// Go code may use the volatile SSE registers, so the incoming FPU state is
+// loaded only after the last call.
+.switch_same:
+    movq %r13, %r9
+    shlq $GOOS_FPU_AREA_SHIFT, %r9
+    leaq goos_task_fpu(%rip), %r10
+    fxrstor64 (%r10,%r9)
+.restore_context:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    GOOS_RETURN_USER
+    iretq
+
 .global goos_irq_serial
 goos_irq_serial:
     GOOS_ENTER_LOW .L_irq_serial
@@ -1429,7 +1792,7 @@ goos_irq_serial:
     inb %dx, %al
     cmpb $3, %al
     jne .serial_store
-    incq GOOS_INPUT_INTERRUPT(%rdi)
+    lock incq GOOS_INPUT_INTERRUPT(%rdi)
     jmp .serial_drain
 .serial_store:
     callq .input_enqueue
@@ -1478,16 +1841,25 @@ goos_irq_keyboard:
     movw $0x60, %dx
     inb %dx, %al
     movzbq %al, %rcx
+    // The decoder is Go, which may use the SSE registers the interrupted
+    // task has live; they are kept in the task's FPU area around the call.
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %rbx
+    shlq $GOOS_FPU_AREA_SHIFT, %rbx
+    leaq goos_task_fpu(%rip), %rax
+    addq %rax, %rbx
+    fxsave64 (%rbx)
     leaq goos_keyboard_bytes(%rip), %rdx
     subq $32, %rsp
     callq goos_keyboard_feed
     addq $32, %rsp
+    fxrstor64 (%rbx)
     movq %rax, %rbx
     leaq goos_input_rings(%rip), %rdi
     addq $GOOS_INPUT_STRIDE, %rdi
     btq $32, %rbx
     jnc .keyboard_bytes
-    incq GOOS_INPUT_INTERRUPT(%rdi)
+    lock incq GOOS_INPUT_INTERRUPT(%rdi)
     movq $1, goos_ps2_keyboard_event_pending(%rip)
 .keyboard_bytes:
     movq %rbx, %r8
@@ -1582,40 +1954,34 @@ goos_irq_11:
     orl $0x10000, %eax
     movl %eax, 0x3fffe010
     movq $1, goos_irq_11_pending(%rip)
-    movq goos_irq_11_waiter(%rip), %rcx
+    xorl %ecx, %ecx
+    xchgq %rcx, goos_irq_11_waiter(%rip)
     testq %rcx, %rcx
     jz .irq_11_eoi
+    // The waiter may run on another processor; the scheduler wakes it there.
+    // The wake is Go, which may use the SSE registers the interrupted task
+    // has live.
     decq %rcx
-    btsq %rcx, goos_runnable_mask(%rip)
-    movq $1, goos_need_reschedule(%rip)
-    movq $0, goos_irq_11_waiter(%rip)
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %r12
+    shlq $GOOS_FPU_AREA_SHIFT, %r12
+    leaq goos_task_fpu(%rip), %rax
+    addq %rax, %r12
+    fxsave64 (%r12)
+    GOOS_CALL goos_wake_slot
+    fxrstor64 (%r12)
 .irq_11_eoi:
-    movl $0, 0x3fffD0b0
+    movl $0, GOOS_LAPIC_EOI
     movb $0x20, %al
     outb %al, $0xa0
     outb %al, $0x20
-    cmpq $0, goos_need_reschedule(%rip)
-    je .irq_11_return
-    cmpb $0, goos_scheduler_enabled(%rip)
-    jne .preempt_current
-.irq_11_return:
-    popq %r15
-    popq %r14
-    popq %r13
-    popq %r12
-    popq %r11
-    popq %r10
-    popq %r9
-    popq %r8
-    popq %rdi
-    popq %rsi
-    popq %rbp
-    popq %rdx
-    popq %rcx
-    popq %rbx
-    popq %rax
-    GOOS_RETURN_USER
-    iretq
+    GOOS_CPU %rbx, %ebx
+    cmpq $0, GOOS_CPU_NEED_RESCHED(%rbx)
+    je .restore_context
+    cmpq $0, GOOS_CPU_ENABLED(%rbx)
+    je .restore_context
+    movq $GOOS_SWITCH_PREEMPT, %rcx
+    jmp .preempt_current
 
 .global goos_start_bootstrap_timer
 goos_start_bootstrap_timer:
@@ -1657,7 +2023,7 @@ goos_timer_ticks_read:
 .global goos_task_ticks_read
 goos_task_ticks_read:
     xorq %rax, %rax
-    cmpq $64, %rcx
+    cmpq $128, %rcx
     jae .task_ticks_done
     leaq goos_task_ticks(%rip), %rdx
     movq (%rdx,%rcx,8), %rax
@@ -1695,367 +2061,11 @@ goos_user_call_entry_drift:
 // task does not inherit the previous one's time.
 .global goos_task_ticks_clear
 goos_task_ticks_clear:
-    cmpq $64, %rcx
+    cmpq $128, %rcx
     jae .task_ticks_clear_done
     leaq goos_task_ticks(%rip), %rdx
     movq $0, (%rdx,%rcx,8)
 .task_ticks_clear_done:
-    retq
-
-.global goos_scheduler_install
-goos_scheduler_install:
-    cli
-    leaq goos_task_contexts(%rip), %rax
-    movq %rcx, 8(%rax)
-    movq %rdx, 16(%rax)
-    movq %r8, 24(%rax)
-    leaq goos_task_roots(%rip), %rax
-    movq %r9, 0(%rax)
-    movq %r9, 8(%rax)
-    movq %r9, 16(%rax)
-    movq %r9, 24(%rax)
-    movq $4, goos_task_count(%rip)
-    movq $0, goos_current_task(%rip)
-    movq $0x0f, goos_runnable_mask(%rip)
-    movb $1, goos_scheduler_enabled(%rip)
-    sti
-    retq
-
-.global goos_scheduler_install_user
-goos_scheduler_install_user:
-    xorq %rax, %rax
-    pushfq
-    cli
-    movq goos_task_dead_mask(%rip), %r10
-    testq %r10, %r10
-    jz .install_user_append
-    leaq goos_task_rsp0(%rip), %r11
-.install_user_dead_scan:
-    // Only a dead slot whose exit record was already delivered may be reused:
-    // reclaim zeroes rsp0 last, so a non-zero rsp0 means the exit is still
-    // pending or being reclaimed. Reusing it would bump the generation and
-    // orphan the exit record, leaving waiters blocked forever.
-    bsfq %r10, %rax
-    cmpq $0, (%r11,%rax,8)
-    je .install_user_dead_found
-    btrq %rax, %r10
-    testq %r10, %r10
-    jnz .install_user_dead_scan
-    jmp .install_user_append
-.install_user_dead_found:
-    movq %rax, %r10
-    btrq %r10, goos_task_dead_mask(%rip)
-    jmp .install_user_slot
-.install_user_append:
-    xorq %rax, %rax
-    movq goos_task_count(%rip), %r10
-    cmpq $64, %r10
-    jae .install_user_done
-    incq goos_task_count(%rip)
-.install_user_slot:
-	 leaq goos_task_generations(%rip), %r11
-	 incq (%r11,%r10,8)
-	 jnz .install_user_generation_ready
-	 incq (%r11,%r10,8)
-.install_user_generation_ready:
-    leaq goos_user_call_rsp_baselines(%rip), %r11
-    movq $0, (%r11,%r10,8)
-	leaq goos_task_fs_bases(%rip), %r11
-	movq $0, (%r11,%r10,8)
-    leaq goos_task_contexts(%rip), %r11
-    movq %rcx, (%r11,%r10,8)
-    leaq goos_task_roots(%rip), %r11
-    movq %rdx, (%r11,%r10,8)
-    leaq goos_task_rsp0(%rip), %r11
-    movq %r8, (%r11,%r10,8)
-    btsq %r10, goos_runnable_mask(%rip)
-	 leaq goos_task_generations(%rip), %r11
-	 movq (%r11,%r10,8), %rax
-	 shlq $32, %rax
-	 leaq 1(%r10,%rax), %rax
-.install_user_done:
-    popfq
-    retq
-
-.global goos_set_tss_stack_address
-goos_set_tss_stack_address:
-    movq %rcx, goos_tss_rsp0_address(%rip)
-    retq
-
-.global goos_task_fs_base_set
-goos_task_fs_base_set:
-	xorq %rax, %rax
-	movl %ecx, %r8d
-	testl %r8d, %r8d
-	jz .task_fs_base_set_done
-	cmpl $64, %r8d
-	ja .task_fs_base_set_done
-	decl %r8d
-	movq %rcx, %r9
-	shrq $32, %r9
-	leaq goos_task_generations(%rip), %r10
-	cmpq (%r10,%r8,8), %r9
-	jne .task_fs_base_set_done
-	btq %r8, goos_task_dead_mask(%rip)
-	jc .task_fs_base_set_done
-	pushfq
-	cli
-	leaq goos_task_fs_bases(%rip), %r10
-	movq %rdx, (%r10,%r8,8)
-	cmpq goos_current_task(%rip), %r8
-	jne .task_fs_base_set_success
-	movq %rdx, %r11
-	movq %r11, %rax
-	shrq $32, %rdx
-	movl $0xc0000100, %ecx
-	wrmsr
-.task_fs_base_set_success:
-	popfq
-	movq $1, %rax
-.task_fs_base_set_done:
-	retq
-
-.global goos_task_root_replace
-goos_task_root_replace:
-	xorq %rax, %rax
-	movl %ecx, %r8d
-	testl %r8d, %r8d
-	jz .task_root_replace_done
-	cmpl $64, %r8d
-	ja .task_root_replace_done
-	testq %rdx, %rdx
-	jz .task_root_replace_done
-	decl %r8d
-	movq %rcx, %r9
-	shrq $32, %r9
-	leaq goos_task_generations(%rip), %r10
-	cmpq (%r10,%r8,8), %r9
-	jne .task_root_replace_done
-	cmpq goos_current_task(%rip), %r8
-	jne .task_root_replace_done
-	btq %r8, goos_task_dead_mask(%rip)
-	jc .task_root_replace_done
-	pushfq
-	cli
-	leaq goos_task_roots(%rip), %r10
-	movq %rdx, (%r10,%r8,8)
-	movq %rdx, goos_linux_entry_data+GOOS_LINUX_ENTRY_PROCESS_ROOT(%rip)
-	popfq
-	movq $1, %rax
-.task_root_replace_done:
-	retq
-
-.global goos_task_fs_base_read
-goos_task_fs_base_read:
-	xorq %rax, %rax
-	movl %ecx, %r8d
-	testl %r8d, %r8d
-	jz .task_fs_base_read_done
-	cmpl $64, %r8d
-	ja .task_fs_base_read_done
-	decl %r8d
-	movq %rcx, %r9
-	shrq $32, %r9
-	leaq goos_task_generations(%rip), %r10
-	cmpq (%r10,%r8,8), %r9
-	jne .task_fs_base_read_done
-	btq %r8, goos_task_dead_mask(%rip)
-	jc .task_fs_base_read_done
-	leaq goos_task_fs_bases(%rip), %r10
-	movq (%r10,%r8,8), %r11
-	movq %r11, (%rdx)
-	movq $1, %rax
-.task_fs_base_read_done:
-	retq
-
-.global goos_block_current_task
-goos_block_current_task:
-    pushfq
-    cli
-    movq goos_current_task(%rip), %rcx
-    movq $1, %rax
-    shlq %cl, %rax
-    notq %rax
-    andq %rax, goos_runnable_mask(%rip)
-    popfq
-    retq
-
-.global goos_kernel_sleep
-goos_kernel_sleep:
-    pushfq
-    cli
-    movq goos_current_task(%rip), %rax
-    btrq %rax, goos_runnable_mask(%rip)
-    int $GOOS_YIELD_VECTOR
-    popfq
-    retq
-
-.global goos_wake_task
-goos_wake_task:
-    xorq %rax, %rax
-    cmpq goos_task_count(%rip), %rcx
-    jae .wake_done
-    pushfq
-    cli
-    btsq %rcx, goos_runnable_mask(%rip)
-    movq $1, goos_need_reschedule(%rip)
-    popfq
-    movq $1, %rax
-.wake_done:
-    retq
-
-.global goos_wake_task_id
-goos_wake_task_id:
-	 xorq %rax, %rax
-	 movl %ecx, %r8d
-	 testl %r8d, %r8d
-	 jz .wake_id_done
-	 cmpl $64, %r8d
-	 ja .wake_id_done
-	 decl %r8d
-	 movq %rcx, %r9
-	 shrq $32, %r9
-	 leaq goos_task_generations(%rip), %rdx
-	 cmpq (%rdx,%r8,8), %r9
-	 jne .wake_id_done
-	 btq %r8, goos_task_dead_mask(%rip)
-	 jc .wake_id_done
-	 pushfq
-	 cli
-	 btsq %r8, goos_runnable_mask(%rip)
-	 movq $1, goos_need_reschedule(%rip)
-	 popfq
-	 movq $1, %rax
-.wake_id_done:
-	 retq
-
-.global goos_task_id_for_slot
-goos_task_id_for_slot:
-	 xorq %rax, %rax
-	 cmpq goos_task_count(%rip), %rcx
-	 jae .task_id_for_slot_done
-	 leaq goos_task_generations(%rip), %rdx
-	 movq (%rdx,%rcx,8), %rax
-	 testq %rax, %rax
-	 jz .task_id_for_slot_done
-	 shlq $32, %rax
-	 leaq 1(%rcx,%rax), %rax
-.task_id_for_slot_done:
-	 retq
-
-.global goos_set_current_task_exit_code
-goos_set_current_task_exit_code:
-    movq goos_current_task(%rip), %rax
-    leaq goos_task_exit_codes(%rip), %rdx
-    movq %rcx, (%rdx,%rax,8)
-    retq
-
-// goos_terminate_task(task, code) marks another task dead, the way a faulting
-// task is retired. The caller has already cancelled its wait registrations.
-.global goos_terminate_task
-goos_terminate_task:
-    xorq %rax, %rax
-    movl %ecx, %r8d
-    testl %r8d, %r8d
-    jz .terminate_task_done
-    cmpl $64, %r8d
-    ja .terminate_task_done
-    decl %r8d
-    movq %rcx, %r9
-    shrq $32, %r9
-    leaq goos_task_generations(%rip), %r10
-    cmpq (%r10,%r8,8), %r9
-    jne .terminate_task_done
-    cmpq $GOOS_KERNEL_SLOT, %r8
-    je .terminate_task_done
-    cmpq $GOOS_IDLE_SLOT, %r8
-    je .terminate_task_done
-    cmpq goos_current_task(%rip), %r8
-    je .terminate_task_done
-    pushfq
-    cli
-    btq %r8, goos_task_dead_mask(%rip)
-    jc .terminate_task_locked
-    leaq goos_task_exit_codes(%rip), %r10
-    movq %rdx, (%r10,%r8,8)
-    btsq %r8, goos_task_exit_pending(%rip)
-    btrq %r8, goos_runnable_mask(%rip)
-    btsq %r8, goos_task_dead_mask(%rip)
-    movq $1, %rax
-.terminate_task_locked:
-    popfq
-.terminate_task_done:
-    retq
-
-.global goos_take_exited_task
-goos_take_exited_task:
-    pushfq
-    cli
-    xorq %rax, %rax
-    movq goos_task_exit_pending(%rip), %rdx
-    testq %rdx, %rdx
-    jz .take_exited_done
-    bsfq %rdx, %rcx
-    btrq %rcx, goos_task_exit_pending(%rip)
-	 leaq goos_task_generations(%rip), %rax
-	 movq (%rax,%rcx,8), %rax
-	 shlq $32, %rax
-	 leaq 1(%rcx,%rax), %rax
-.take_exited_done:
-    popfq
-    retq
-
-.global goos_task_exit_code
-goos_task_exit_code:
-    xorq %rax, %rax
-	 movl %ecx, %r8d
-	 testl %r8d, %r8d
-    jz .task_exit_code_done
-	 cmpl $64, %r8d
-    ja .task_exit_code_done
-	 decl %r8d
-	 movq %rcx, %r9
-	 shrq $32, %r9
-	 leaq goos_task_generations(%rip), %rdx
-	 cmpq (%rdx,%r8,8), %r9
-	 jne .task_exit_code_done
-    leaq goos_task_exit_codes(%rip), %rdx
-	 movq (%rdx,%r8,8), %rax
-	 movq $0, (%rdx,%r8,8)
-.task_exit_code_done:
-    retq
-
-.global goos_reclaim_exited_task
-goos_reclaim_exited_task:
-    xorq %rax, %rax
-	 movl %ecx, %r8d
-	 testl %r8d, %r8d
-    jz .reclaim_exited_done
-	 cmpl $64, %r8d
-    ja .reclaim_exited_done
-	 decl %r8d
-	 movq %rcx, %r9
-	 shrq $32, %r9
-	 leaq goos_task_generations(%rip), %rdx
-	 cmpq (%rdx,%r8,8), %r9
-	 jne .reclaim_exited_done
-	 btq %r8, goos_task_dead_mask(%rip)
-    jnc .reclaim_exited_done
-	 btq %r8, goos_task_exit_pending(%rip)
-    jc .reclaim_exited_done
-    leaq goos_task_rsp0(%rip), %rdx
-	 movq (%rdx,%r8,8), %rax
-    testq %rax, %rax
-    jz .reclaim_exited_done
-	 movq $0, (%rdx,%r8,8)
-    leaq goos_task_contexts(%rip), %rdx
-	 movq $0, (%rdx,%r8,8)
-	leaq goos_task_roots(%rip), %rdx
-	movq $0, (%rdx,%r8,8)
-	leaq goos_task_fs_bases(%rip), %rdx
-	movq $0, (%rdx,%r8,8)
-	movq $1, %rax
-.reclaim_exited_done:
     retq
 
 .global goos_invalidate_page
@@ -2075,64 +2085,48 @@ goos_user_call_entries:
     .quad 0
 goos_user_call_rsp_drift:
     .quad 0
+.global goos_user_call_rsp_baselines
 goos_user_call_rsp_baselines:
     .zero 512
-goos_current_task:
-    .quad 0
 goos_kernel_root:
     .quad 0
-goos_task_count:
-    .quad 1
+// goos_cpu_data_base holds the low address of goos_cpu_data, so GOOS_CPU
+// reaches the blocks from the higher-half entry prefixes too.
+goos_cpu_data_base:
+    .quad goos_cpu_data
+// goos_smp_ready is set once the descriptor tables and the local APIC are in
+// place, so a fatal exception can name its processor and stop the others.
+.global goos_smp_ready
+goos_smp_ready:
+    .quad 0
+// Per-slot state: the 64 task slots, then one idle slot per processor.
+.global goos_task_contexts
 goos_task_contexts:
-    .zero 512
+    .zero 1024
+.global goos_task_roots
 goos_task_roots:
-    .zero 512
+    .zero 1024
+.global goos_task_fs_bases
 goos_task_fs_bases:
-	.zero 512
+	.zero 1024
+.global goos_task_rsp0
 goos_task_rsp0:
-    .zero 512
-goos_task_generations:
-	.zero 512
+    .zero 1024
+.global goos_task_exit_codes
 goos_task_exit_codes:
     .zero 512
 // The faulting address of each slot's last user page fault, zero after any
 // other fault.
+.global goos_task_fault_addresses
 goos_task_fault_addresses:
     .zero 512
-// One tick counter per task slot. The timer charges the task it interrupted,
-// so the count is a sample of who was running rather than an exact duration,
-// which is what a tick-driven scheduler can honestly report.
+// One tick counter per slot. The timer charges the slot it interrupted, so
+// the count is a sample of who was running rather than an exact duration,
+// which is what a tick-driven scheduler can honestly report. An idle slot's
+// count is its processor's idle time.
 goos_task_ticks:
-    .zero 512
-goos_runnable_mask:
-    .quad 1
-goos_task_exit_pending:
-    .quad 0
-goos_task_dead_mask:
-    .quad 0
-goos_need_reschedule:
-    .quad 0
-.align 16
-.global goos_task_fpu
-goos_task_fpu:
-    .zero 32768
-// goos_linux_user_fpu holds, per task slot, the x87 and SSE state of a Linux
-// task at its current system call: saved on entry, restored on return.
-.align 16
-.global goos_linux_user_fpu
-goos_linux_user_fpu:
-    .zero 32768
-goos_scheduler_enabled:
-    .byte 0
-goos_tss_rsp0_address:
-    .quad 0
+    .zero 1024
 goos_kernel_call_arg2:
-    .quad 0
-.align 32
-goos_linux_entry_data:
-    .quad 0
-    .quad 0
-    .quad 0
     .quad 0
 goos_irq_11_pending:
     .quad 0
@@ -2140,6 +2134,21 @@ goos_irq_11_waiter:
     .quad 0
 goos_ps2_keyboard_event_pending:
     .quad 0
+.align 16
+.global goos_task_fpu
+goos_task_fpu:
+    .zero 65536
+// goos_linux_user_fpu holds, per task slot, the x87 and SSE state of a Linux
+// task at its current system call: saved on entry, restored on return.
+.align 16
+.global goos_linux_user_fpu
+goos_linux_user_fpu:
+    .zero 32768
+// goos_cpu_data is one 256-byte block per processor (the GOOS_CPU_ offsets).
+.align 64
+.global goos_cpu_data
+goos_cpu_data:
+    .zero 16384
 // Console input arrives faster than a tick, so each interrupt drains its
 // device into its ring immediately and the kernel loop wakes readers from it.
 // Draining in the handler is what keeps pasted input from being lost; the wake
@@ -2150,9 +2159,133 @@ goos_ps2_keyboard_event_pending:
 goos_input_rings:
     .zero GOOS_INPUT_STRIDE * GOOS_INPUT_COUNT
 // goos_keyboard_bytes receives the decoder's key sequence. Only IRQ1 uses it,
-// with interrupts disabled, so it needs no lock.
+// on the bootstrap processor with interrupts disabled, so it needs no lock.
 goos_keyboard_bytes:
     .zero GOOS_KEYBOARD_BYTES
+// goos_linux_entry_data is the block SWAPGS exposes to the SYSCALL entry, one
+// 32-byte block per processor: the process root, the kernel-entry stack, the
+// user stack pointer, and the current slot. Every process root maps the
+// 2 KiB array supervisor-only; each processor's KERNEL_GS_BASE names its own
+// block.
+.balign 2048
+.global goos_linux_entry_data
+goos_linux_entry_data:
+    .zero 2048
+
+.section .text
+// The processor start-up trampoline. The bootstrap processor copies it to a
+// page below 1 MiB and fills in the far-jump targets, the GDT base, and the
+// parameter block. A started processor begins at its first byte in real
+// mode, with CS naming that page, and reaches goos_ap_entry in long mode on
+// its own stack with its processor index in RCX. EBX holds the page's linear
+// address throughout.
+.balign 16
+.global goos_ap_trampoline
+goos_ap_trampoline:
+.code16
+    cli
+    cld
+    xorl %ebx, %ebx
+    movw %cs, %bx
+    shll $4, %ebx
+    movw %cs, %ax
+    movw %ax, %ds
+    lgdtl .L_ap_gdtr - goos_ap_trampoline
+    movl %cr0, %eax
+    orl $1, %eax
+    movl %eax, %cr0
+    .byte 0x66, 0xea
+.L_ap_far32:
+    .long 0
+    .word 0x08
+.code32
+.L_ap_protected:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    // PAE, OSFXSR, OSXMMEXCPT.
+    movl %cr4, %eax
+    orl $0x620, %eax
+    movl %eax, %cr4
+    movl (.L_ap_cr3 - goos_ap_trampoline)(%ebx), %eax
+    movl %eax, %cr3
+    // SCE, LME, NXE.
+    movl $0xc0000080, %ecx
+    rdmsr
+    orl $0x901, %eax
+    wrmsr
+    // PG, WP, NE, ET, MP, PE.
+    movl $0x80010033, %eax
+    movl %eax, %cr0
+    .byte 0xea
+.L_ap_far64:
+    .long 0
+    .word 0x18
+.code64
+.L_ap_long:
+    movl %ebx, %ebx
+    movq (.L_ap_stack - goos_ap_trampoline)(%rbx), %rsp
+    movq (.L_ap_cpu - goos_ap_trampoline)(%rbx), %rcx
+    movq (.L_ap_entry - goos_ap_trampoline)(%rbx), %rax
+    jmpq *%rax
+.balign 8
+.L_ap_gdt:
+    .quad 0
+    .quad 0x00cf9a000000ffff
+    .quad 0x00cf92000000ffff
+    .quad 0x00af9a000000ffff
+.L_ap_gdtr:
+    .word 31
+    .long 0
+.balign 8
+.L_ap_cr3:
+    .quad 0
+.L_ap_stack:
+    .quad 0
+.L_ap_cpu:
+    .quad 0
+.L_ap_entry:
+    .quad 0
+.L_ap_end:
+
+// goos_ap_entry runs in the kernel image on the trampoline's page tables. It
+// switches to the kernel root and calls goos_ap_main(cpu), which never
+// returns.
+.global goos_ap_entry
+goos_ap_entry:
+    movq goos_kernel_root(%rip), %rax
+    movq %rax, %cr3
+    andq $-16, %rsp
+    subq $32, %rsp
+    xorl %ebp, %ebp
+    callq goos_ap_main
+.ap_entry_returned:
+    cli
+    hlt
+    jmp .ap_entry_returned
+
+.section .rdata
+.align 8
+// goos_ap_trampoline_layout gives the offsets the bootstrap processor patches:
+// the 32-bit far jump's target and the code it names, the 64-bit far jump's
+// target and the code it names, the GDT, its pseudo-descriptor, CR3, the
+// stack, the processor index, the entry, the trampoline's size, and the
+// address of goos_ap_entry.
+.global goos_ap_trampoline_layout
+goos_ap_trampoline_layout:
+    .quad .L_ap_far32 - goos_ap_trampoline
+    .quad .L_ap_protected - goos_ap_trampoline
+    .quad .L_ap_far64 - goos_ap_trampoline
+    .quad .L_ap_long - goos_ap_trampoline
+    .quad .L_ap_gdt - goos_ap_trampoline
+    .quad .L_ap_gdtr - goos_ap_trampoline
+    .quad .L_ap_cr3 - goos_ap_trampoline
+    .quad .L_ap_stack - goos_ap_trampoline
+    .quad .L_ap_cpu - goos_ap_trampoline
+    .quad .L_ap_entry - goos_ap_trampoline
+    .quad .L_ap_end - goos_ap_trampoline
+    .quad goos_ap_entry
 
 .section .text
 // The input ring functions take the ring's index in RCX and leave its base in
@@ -2203,10 +2336,10 @@ goos_input_pending:
 goos_input_take_interrupt:
     xorq %rax, %rax
     GOOS_INPUT_BASE .input_interrupt_done
-    cmpq $0, GOOS_INPUT_INTERRUPT(%rdx)
-    je .input_interrupt_done
-    movq $0, GOOS_INPUT_INTERRUPT(%rdx)
-    movq $1, %rax
+    xchgq %rax, GOOS_INPUT_INTERRUPT(%rdx)
+    testq %rax, %rax
+    setnz %al
+    movzbl %al, %eax
 .input_interrupt_done:
     retq
 
@@ -2223,12 +2356,8 @@ goos_input_dropped:
 // successfully published keyboard input to the logical console.
 .global goos_ps2_keyboard_event_take
 goos_ps2_keyboard_event_take:
-    xorq %rax, %rax
-    cmpq $0, goos_ps2_keyboard_event_pending(%rip)
-    je .ps2_keyboard_event_done
-    movq $0, goos_ps2_keyboard_event_pending(%rip)
-    movq $1, %rax
-.ps2_keyboard_event_done:
+    xorl %eax, %eax
+    xchgq %rax, goos_ps2_keyboard_event_pending(%rip)
     retq
 
 // goos_enable_console_interrupt sets the UART's received-data-available bit.
@@ -2242,12 +2371,8 @@ goos_enable_console_interrupt:
 
 .global goos_take_irq_11
 goos_take_irq_11:
-    xorq %rax, %rax
-    cmpq $0, goos_irq_11_pending(%rip)
-    je .take_irq_11_done
-    decq goos_irq_11_pending(%rip)
-    movq $1, %rax
-.take_irq_11_done:
+    xorl %eax, %eax
+    xchgq %rax, goos_irq_11_pending(%rip)
     retq
 
 .global goos_set_irq_11_waiter

@@ -32,13 +32,37 @@ func calibrateClock() {
 	}
 	startTick := amd64.TimerTicks()
 	start := amd64.ReadTSC()
+	amd64.StartLocalTimerCalibration()
 	for amd64.TimerTicks() < startTick+calibrationTicks {
 		amd64.Halt()
 	}
+	localTimerElapsed = amd64.LocalTimerElapsed()
 	endTick := amd64.TimerTicks()
 	end := amd64.ReadTSC()
+	localTimerTicks = endTick - startTick
 	if !monotonicClock.Calibrate(startTick, start, end, endTick-startTick) {
 		kernelLog(logfmt.Error, "CLOCK_CALIBRATION_FAILED", nil)
+	}
+}
+
+// The local APIC timer runs through the same PIT periods as the TSC.
+var (
+	localTimerElapsed uint32
+	localTimerTicks   uint64
+)
+
+// startLocalTimer moves the scheduler tick from the PIT to the bootstrap
+// processor's local APIC timer, at the rate the PIT measured. Every other
+// processor starts its own timer with the same count when it joins.
+func startLocalTimer() bool {
+	return amd64.SwitchToLocalTimer(localTimerElapsed, localTimerTicks)
+}
+
+// waitMicros spins for at least micros microseconds by the calibrated TSC.
+func waitMicros(micros uint64) {
+	start := nowNanos()
+	for nowNanos()-start < micros*1000 {
+		amd64.Pause()
 	}
 }
 
