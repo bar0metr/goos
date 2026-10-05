@@ -24,6 +24,7 @@
 .set GOOS_CPU_RESCHED_IPIS, 64
 .set GOOS_CPU_TLB_IPIS, 72
 .set GOOS_CPU_TICKS, 80
+.set GOOS_CPU_CALL_ARG2, 88
 // The reasons goos_sched_switch takes for leaving the current task.
 .set GOOS_SWITCH_PREEMPT, 0
 .set GOOS_SWITCH_BLOCK, 1
@@ -1386,7 +1387,7 @@ goos_user_call:
 	 movq 96(%rsp), %rdx
 	 movq 88(%rsp), %r8
 	 movq 64(%rsp), %r10
-	 movq %r10, goos_kernel_call_arg2(%rip)
+	 movq %r10, GOOS_CPU_CALL_ARG2(%rbx)
 	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
@@ -2126,8 +2127,6 @@ goos_task_fault_addresses:
 // count is its processor's idle time.
 goos_task_ticks:
     .zero 1024
-goos_kernel_call_arg2:
-    .quad 0
 goos_irq_11_pending:
     .quad 0
 goos_irq_11_waiter:
@@ -2403,11 +2402,6 @@ goos_user_preemptions_read:
 .global goos_user_faults_read
 goos_user_faults_read:
     movq goos_user_faults(%rip), %rax
-    retq
-
-.global goos_kernel_call_arg2_read
-goos_kernel_call_arg2_read:
-    movq goos_kernel_call_arg2(%rip), %rax
     retq
 
 .section .rdata

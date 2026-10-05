@@ -44,7 +44,6 @@ const (
 var (
 	executableFaults      [sched.MaxTasks]executableFault
 	executableCorrelation uint64
-	executableReply       ipc.Message
 )
 
 // requestExecutablePage queues one bounded random read and parks the faulting
@@ -145,6 +144,7 @@ func executablePagePending(task sched.TaskID) bool {
 // several tasks can wait on one endpoint; the reply goes to the task whose
 // request it answers, found by correlation.
 func completeExecutablePage(channelID uint64, side uint8) bool {
+	local := thisCPU()
 	waiting := false
 	for index := range executableFaults {
 		fault := &executableFaults[index]
@@ -169,14 +169,14 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 		return false
 	}
 	var status ipc.Status
-	executableReply, status = channel.Receive(side)
+	local.executableReply, status = channel.Receive(side)
 	if status != ipc.StatusOK {
 		return false
 	}
 	slot := -1
 	for index := range executableFaults {
 		fault := &executableFaults[index]
-		if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side && fault.correlation == executableReply.Correlation {
+		if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side && fault.correlation == local.executableReply.Correlation {
 			slot = index
 			break
 		}
@@ -186,7 +186,7 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 		return true
 	}
 	fault := &executableFaults[slot]
-	reply, valid := vfs.DecodeReplyFrom(&executableReply)
+	reply, valid := vfs.DecodeReplyFrom(&local.executableReply)
 	if valid && reply.Operation == vfs.OperationReadExecutable && (reply.Status == vfs.StatusPeerDied || reply.Status == vfs.StatusTimeout) {
 		now := amd64.TimerTicks()
 		if fault.giveUp == 0 {

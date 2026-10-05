@@ -21,12 +21,11 @@ import (
 	"goos/kernel/vfs"
 )
 
-var linuxTimes [32]byte
-
 // metadataChange decodes what the call asks to change. A change with nothing
 // left in it, an access time alone or two omitted times, still checks that
 // the file exists.
 func (handler *linuxCallHandler) metadataChange(request linuxcompat.Request) (ramfs.MetadataChange, linuxabi.Errno) {
+	local := thisCPU()
 	arguments := &request.Arguments
 	var change ramfs.MetadataChange
 	switch request.Number {
@@ -40,11 +39,11 @@ func (handler *linuxCallHandler) metadataChange(request linuxcompat.Request) (ra
 	if arguments[2] == 0 {
 		return handler.nowChange()
 	}
-	if !vm.CopyIn(handler.root, arguments[2], linuxTimes[:]) {
+	if !vm.CopyIn(handler.root, arguments[2], local.linuxTimes[:]) {
 		return change, linuxabi.EFAULT
 	}
-	access := binary.LittleEndian.Uint64(linuxTimes[8:16])
-	seconds, nanos := int64(binary.LittleEndian.Uint64(linuxTimes[16:24])), binary.LittleEndian.Uint64(linuxTimes[24:32])
+	access := binary.LittleEndian.Uint64(local.linuxTimes[8:16])
+	seconds, nanos := int64(binary.LittleEndian.Uint64(local.linuxTimes[16:24])), binary.LittleEndian.Uint64(local.linuxTimes[24:32])
 	for _, value := range [...]uint64{access, nanos} {
 		if value != linuxabi.UtimeNow && value != linuxabi.UtimeOmit && value >= uint64(timekeeping.NanosPerSecond) {
 			return change, linuxabi.EINVAL
@@ -73,6 +72,7 @@ func (handler *linuxCallHandler) nowChange() (ramfs.MetadataChange, linuxabi.Err
 // changeMetadata serves the four calls through the VFS, as status serves
 // stat: by path, or by the descriptor's open file when descriptor is set.
 func (handler *linuxCallHandler) changeMetadata(request linuxcompat.Request, dirfd int32, pathAddress uint64, descriptor bool) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -91,7 +91,7 @@ func (handler *linuxCallHandler) changeMetadata(request linuxcompat.Request, dir
 				return result
 			}
 		} else {
-			path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &linuxResolved)
+			path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &local.linuxResolved)
 			device := linuxcompat.DeviceNone
 			if errno == 0 {
 				device, errno = linuxcompat.LookupDevice(path)

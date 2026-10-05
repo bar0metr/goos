@@ -17,6 +17,7 @@ import (
 // HandleInfo describes one slot of the caller's own handle table: handle ID,
 // type, and rights. It never reveals the kernel object behind the handle.
 func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -28,7 +29,7 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 	if !open {
 		return kcall.StatusNotFound
 	}
-	record := handleInfoWire[:]
+	record := local.handleInfoWire[:]
 	clear(record)
 	putUint64(record[0:8], uint64(id))
 	record[8] = byte(typeID)
@@ -44,6 +45,7 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 // it needs no capability: the record names no kernel object and reveals only
 // what a process list already shows.
 func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	if _, found := processRegistry.ByRoot(handler.root); !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -66,7 +68,7 @@ func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall
 			status = kcall.ProcessReady
 		}
 	}
-	record := processInfoWire[:]
+	record := local.processInfoWire[:]
 	clear(record)
 	putUint64(record[0:8], uint64(target.ID()))
 	record[8] = status

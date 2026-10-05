@@ -13,6 +13,7 @@ func expectFatal(t *testing.T, name string, run func()) {
 		// The panic left whatever run took recorded as held.
 		for index := range held {
 			held[index].Store(0)
+			heldCount[index] = [levelCount]uint8{}
 		}
 		if recover() == nil || message == "" {
 			t.Fatalf("%s was accepted", name)
@@ -58,4 +59,51 @@ func TestInOrderAcquisitionAndOwnership(t *testing.T) {
 	scheduler.Unlock()
 	kernel.Lock()
 	kernel.Unlock()
+}
+
+func TestSameLevelLocksTakeAddressOrder(t *testing.T) {
+	Install(Hooks{})
+	var buckets [2]Spin
+	buckets[0].SetLevel(LevelFutex)
+	buckets[1].SetLevel(LevelFutex)
+	buckets[0].SetRank(1)
+	buckets[1].SetRank(2)
+	buckets[0].Lock()
+	buckets[1].LockAfter(&buckets[0])
+	buckets[0].Unlock()
+	if HeldLevels() != 1<<LevelFutex {
+		t.Fatalf("held = %#x after releasing one of two", HeldLevels())
+	}
+	buckets[1].Unlock()
+	if HeldLevels() != 0 {
+		t.Fatalf("held = %#x after releasing both", HeldLevels())
+	}
+	expectFatal(t, "a second bucket below the first", func() {
+		buckets[1].Lock()
+		buckets[0].LockAfter(&buckets[1])
+	})
+	expectFatal(t, "a second lock of another level", func() {
+		process := New(LevelProcess)
+		buckets[0].Lock()
+		process.LockAfter(&buckets[0])
+	})
+}
+
+func TestAssertHeld(t *testing.T) {
+	spin := New(LevelChannel)
+	// Without hooks, as in host tests, nothing is checked.
+	spin.AssertHeld()
+	Install(Hooks{CPU: func() uint32 { return 0 }})
+	defer Install(Hooks{})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("state used without its lock was accepted")
+			}
+		}()
+		spin.AssertHeld()
+	}()
+	spin.Lock()
+	spin.AssertHeld()
+	spin.Unlock()
 }

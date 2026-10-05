@@ -222,8 +222,9 @@ func exitedPages(exited *process.Process) uint32 {
 }
 
 func reportProcessExit(handler nativeCallHandler, resultAddress uint64, event process.ExitEvent) kcall.Status {
-	putUint64(exitWire[:], event.Code)
-	if !vm.CopyOut(handler.root, resultAddress, exitWire[:]) {
+	local := thisCPU()
+	putUint64(local.exitWire[:], event.Code)
+	if !vm.CopyOut(handler.root, resultAddress, local.exitWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

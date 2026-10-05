@@ -5,6 +5,8 @@ package main
 // Kernel-side tasks and the dispatch entry points the scheduler calls.
 
 import (
+	"sync/atomic"
+
 	"goos/internal/logfmt"
 	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
@@ -16,10 +18,11 @@ import (
 	"goos/kernel/sched"
 )
 
-var nativeCallABIRejections uint64
-var linuxSyscallEntries uint64
-var linuxSyscallABIRejections uint64
-var linuxSyscallFrameRejections uint64
+// Entry counters; every processor adds to them.
+var nativeCallABIRejections atomic.Uint64
+var linuxSyscallEntries atomic.Uint64
+var linuxSyscallABIRejections atomic.Uint64
+var linuxSyscallFrameRejections atomic.Uint64
 
 // authorizeNativeCall rejects the native gate before any operation-specific
 // dispatcher observes registers belonging to another process ABI. The first
@@ -30,8 +33,7 @@ func authorizeNativeCall(root uint64) uint64 {
 	if processRegistry.AllowsABI(root, process.ABINative) {
 		return uint64(kcall.StatusOK)
 	}
-	nativeCallABIRejections++
-	if nativeCallABIRejections == 1 {
+	if nativeCallABIRejections.Add(1) == 1 {
 		kernelLogUint(logfmt.Warn, "native call ABI rejected", "root", root)
 	}
 	return uint64(kcall.StatusPermissionDenied)
@@ -43,14 +45,14 @@ func authorizeNativeCall(root uint64) uint64 {
 //
 //export goos_dispatch_linux_syscall
 func dispatchLinuxSyscall(frame *linuxabi.Frame) {
+	local := thisCPU()
 	if frame == nil {
 		return
 	}
 	frame.Return = linuxabi.Negative(linuxabi.EINVAL)
 	frame.Action = linuxabi.ActionReturn
 	if !vm.ValidateUserRange(frame.UserIP, 1) || !vm.ValidateUserRange(frame.UserStack, 0) {
-		linuxSyscallFrameRejections++
-		if linuxSyscallFrameRejections == 1 {
+		if linuxSyscallFrameRejections.Add(1) == 1 {
 			kernelLogUint(logfmt.Warn, "Linux syscall frame rejected", "ip", frame.UserIP)
 		}
 		amd64.SetCurrentTaskExitCode(uint64(1)<<63 | 13)
@@ -58,30 +60,29 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		return
 	}
 	if !processRegistry.AllowsABI(frame.Root, process.ABILinuxX8664) {
-		linuxSyscallABIRejections++
-		if linuxSyscallABIRejections == 1 {
+		if linuxSyscallABIRejections.Add(1) == 1 {
 			kernelLogUint(logfmt.Warn, "Linux syscall ABI rejected", "root", frame.Root)
 		}
 		frame.Return = linuxabi.Negative(linuxabi.EPERM)
 		return
 	}
-	linuxSyscallEntries++
-	linuxHandler.root = frame.Root
-	linuxHandler.frame = frame
-	linuxHandler.task = amd64.CurrentTask()
+	linuxSyscallEntries.Add(1)
+	local.linuxHandler.root = frame.Root
+	local.linuxHandler.frame = frame
+	local.linuxHandler.task = amd64.CurrentTask()
 	// The call works with, and returns under, its own thread's signal mask.
 	if process, found := linuxcompat.FindProcess(frame.Root); found {
-		linuxcompat.SelectThreadSignals(process, linuxHandler.task)
+		linuxcompat.SelectThreadSignals(process, local.linuxHandler.task)
 	}
-	result := linuxcompat.Dispatch(frame, &linuxHandler)
+	result := linuxcompat.Dispatch(frame, &local.linuxHandler)
 	if result.Errno == linuxabi.EFAULT {
-		if executablePagePending(linuxHandler.task) {
+		if executablePagePending(local.linuxHandler.task) {
 			// The copy touched a page of the program's own image that is
 			// still on its way from the VFS. The fault path asked for it
 			// and parked the task; the call is retried when it arrives,
 			// before it has changed anything.
-			linuxcompat.SyscallContinuations.Cancel(linuxHandler.task)
-			ipcWaitSet.Cancel(linuxHandler.task)
+			linuxcompat.SyscallContinuations.Cancel(local.linuxHandler.task)
+			ipcWaitSet.Cancel(local.linuxHandler.task)
 			result = linuxcompat.Result{Action: linuxabi.ActionBlock}
 		} else {
 			linuxcompat.NoteBadPointer(linuxabi.Syscall(frame.Number))
@@ -109,14 +110,14 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		frame.Return = frame.Number
 	}
 	if frame.Action == linuxabi.ActionReturn {
-		deliverLinuxSignals(frame, linuxHandler.task)
+		deliverLinuxSignals(frame, local.linuxHandler.task)
 		// A temporary mask no handler took over ends with the call.
 		if state, found := linuxcompat.FindProcess(frame.Root); found {
 			state.Signals.EndMaskSwap()
 		}
 	}
 	if frame.Action == linuxabi.ActionBlock && (frame.UserIP < 2 || !vm.ValidateUserRange(frame.UserIP-2, 2)) {
-		linuxSyscallFrameRejections++
+		linuxSyscallFrameRejections.Add(1)
 		amd64.SetCurrentTaskExitCode(uint64(1)<<63 | 13)
 		frame.Action = linuxabi.ActionExit
 	}
@@ -141,10 +142,11 @@ func resumeLinuxSyscall(task sched.TaskID, correlation uint64, reason linuxcompa
 //
 //export goos_dispatch_kernel_call
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
+	local := thisCPU()
 	// The handler is reused through a pointer: a struct passed as an interface
 	// would be boxed, and the kernel leaks every heap allocation.
-	dispatchHandler.root = root
-	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, &dispatchHandler)
+	local.dispatchHandler.root = root
+	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: amd64.KernelCallArg2()}, &local.dispatchHandler)
 	return uint64(result.Action)<<32 | uint64(result.Status)
 }
 

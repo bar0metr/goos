@@ -20,9 +20,8 @@ import (
 )
 
 var (
-	executables          executable.Table
-	executableWire       [8]byte
-	executableSourceWire [32]byte
+	executables executable.Table
+
 	// launchObject is the object a launch is reading, for executablePage.
 	// Launches run one at a time in the kernel exclusion domain.
 	launchObject *executable.Object
@@ -45,6 +44,7 @@ func executablePage(index uint64) ([]byte, bool) {
 // executable source. descriptor contains the file handle, file size, and the
 // sealed header object, then receives that object's handle as the source.
 func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, descriptor uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -59,16 +59,16 @@ func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, des
 	if !allowed || !valid || !live || !channel.Alive(side) {
 		return kcall.StatusPermissionDenied
 	}
-	clear(executableSourceWire[:])
-	if !vm.CopyIn(handler.root, descriptor, executableSourceWire[:]) {
+	clear(local.executableSourceWire[:])
+	if !vm.CopyIn(handler.root, descriptor, local.executableSourceWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
-	if !vm.CopyOut(handler.root, descriptor, executableSourceWire[:]) {
+	if !vm.CopyOut(handler.root, descriptor, local.executableSourceWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
-	file := decodeUint64(executableSourceWire[0:8])
-	size := decodeUint64(executableSourceWire[8:16])
-	headerHandle := handle.ID(decodeUint64(executableSourceWire[16:24]))
+	file := decodeUint64(local.executableSourceWire[0:8])
+	size := decodeUint64(local.executableSourceWire[8:16])
+	headerHandle := handle.ID(decodeUint64(local.executableSourceWire[16:24]))
 	headerCap, allowed := owner.Handles().Lookup(headerHandle, handle.TypeMemory, capability.Execute|capability.Write)
 	object, known := executables.Find(headerCap.Object())
 	headerSize := min(size, uint64(vm.PageSize))
@@ -81,8 +81,8 @@ func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, des
 	// Ownership moves into the source. The same object handle now names the
 	// full file-backed image and cannot accept further writes.
 	owner.Handles().Close(handle.ID(session))
-	putUint64(executableSourceWire[24:32], uint64(headerHandle))
-	if !vm.CopyOut(handler.root, descriptor, executableSourceWire[:]) {
+	putUint64(local.executableSourceWire[24:32], uint64(headerHandle))
+	if !vm.CopyOut(handler.root, descriptor, local.executableSourceWire[:]) {
 		panicSerial("executable source descriptor changed after validation")
 	}
 	return kcall.StatusOK
@@ -95,6 +95,7 @@ func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, des
 // Write-only copy to fill it with (ADR 0107). Every handle and every process
 // started from the object is a reference; the last one frees it.
 func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -108,8 +109,8 @@ func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, addres
 	}
 	// The result pointer is checked before anything is allocated, so a bad
 	// one cannot leave an object without a handle behind.
-	clear(executableWire[:])
-	if !vm.CopyOut(handler.root, address, executableWire[:]) {
+	clear(local.executableWire[:])
+	if !vm.CopyOut(handler.root, address, local.executableWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	if owner.Handles().Available() == 0 {
@@ -143,8 +144,8 @@ func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, addres
 		destroyExecutable(objectID)
 		return kcall.StatusResourceExhausted
 	}
-	putUint64(executableWire[:], uint64(created))
-	if !vm.CopyOut(handler.root, address, executableWire[:]) {
+	putUint64(local.executableWire[:], uint64(created))
+	if !vm.CopyOut(handler.root, address, local.executableWire[:]) {
 		owner.Handles().Close(created)
 		destroyExecutable(objectID)
 		return kcall.StatusInvalidArgument

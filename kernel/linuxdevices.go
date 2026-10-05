@@ -57,6 +57,7 @@ func (handler *linuxCallHandler) textRead(request linuxcompat.Request, descripti
 // the first byte. /dev/zero fills the destination with zeros, up to a bound
 // and up to the first page the process cannot write.
 func (handler *linuxCallHandler) deviceRead(request linuxcompat.Request, description *linuxcompat.FileDescription, vector bool) linuxcompat.Result {
+	local := thisCPU()
 	if description.Flags&linuxabi.OpenAccess == linuxabi.OpenWriteOnly {
 		return linuxErrno(linuxabi.EBADF)
 	}
@@ -80,10 +81,10 @@ func (handler *linuxCallHandler) deviceRead(request linuxcompat.Request, descrip
 	if errno != 0 || limit == 0 {
 		return linuxErrno(errno)
 	}
-	clear(linuxIOBuffer[:])
+	clear(local.linuxIOBuffer[:])
 	for delivered := uint64(0); delivered < limit; {
-		chunk := uint64(min64(limit-delivered, len(linuxIOBuffer)))
-		if !handler.deliver(request, wire, delivered, linuxIOBuffer[:chunk], nil, chunk) {
+		chunk := uint64(min64(limit-delivered, len(local.linuxIOBuffer)))
+		if !handler.deliver(request, wire, delivered, local.linuxIOBuffer[:chunk], nil, chunk) {
 			if delivered != 0 {
 				return linuxcompat.Result{Value: delivered}
 			}

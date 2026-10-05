@@ -6,6 +6,8 @@ package main
 // calls that reserve, release, reprotect, discard, and describe regions.
 
 import (
+	"sync/atomic"
+
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	bootuefi "goos/kernel/boot/uefi"
@@ -24,13 +26,12 @@ import (
 const faultTables = 3
 
 var (
-	vmDescriptor [kcall.VMDescriptorSize]byte
-	vmRecord     [kcall.VMRecordSize]byte
+
 	// userFaultsResolved counts demand-zero pages supplied on a fault.
-	userFaultsResolved uint64
+	userFaultsResolved atomic.Uint64
 	// userFaultsRetried counts faults on pages that already allowed the
 	// access when the kernel looked.
-	userFaultsRetried uint64
+	userFaultsRetried atomic.Uint64
 )
 
 // Kinds of user page fault that retire the process, for the log.
@@ -60,7 +61,7 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 	// protection, on another processor since this one translated the
 	// address. The access is retried.
 	if errorCode&faultReserved == 0 && vm.UserPageAllows(root, page, errorCode&faultWrite != 0, errorCode&faultFetch != 0) {
-		userFaultsRetried++
+		userFaultsRetried.Add(1)
 		return 1
 	}
 	kind := faultPermission
@@ -68,7 +69,7 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 		var resolved bool
 		resolved, kind = demandFault(root, page, errorCode&faultWrite != 0, errorCode&faultFetch != 0)
 		if resolved {
-			userFaultsResolved++
+			userFaultsResolved.Add(1)
 			return 1
 		}
 	}
@@ -215,6 +216,7 @@ func regionPermissions(protection region.Protection) vm.Permissions {
 
 // VMMap reserves anonymous demand-zero memory.
 func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, flags uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -223,10 +225,10 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 		// Executable anonymous memory needs a write-then-seal interface.
 		return kcall.StatusPermissionDenied
 	}
-	if !vm.CopyIn(handler.root, descriptor, vmDescriptor[:]) {
+	if !vm.CopyIn(handler.root, descriptor, local.vmDescriptor[:]) {
 		return kcall.StatusInvalidArgument
 	}
-	address, length := decodeUint64(vmDescriptor[0:8]), decodeUint64(vmDescriptor[8:16])
+	address, length := decodeUint64(local.vmDescriptor[0:8]), decodeUint64(local.vmDescriptor[8:16])
 	if length == 0 || length%vm.PageSize != 0 || length > vm.UserMapLimit-vm.UserMapBase {
 		return kcall.StatusInvalidArgument
 	}
@@ -247,8 +249,8 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 	default:
 		return kcall.StatusInvalidArgument
 	}
-	putUint64(vmDescriptor[0:8], address)
-	if !vm.CopyOut(handler.root, descriptor, vmDescriptor[:8]) {
+	putUint64(local.vmDescriptor[0:8], address)
+	if !vm.CopyOut(handler.root, descriptor, local.vmDescriptor[:8]) {
 		regions.Remove(address, length, false)
 		return kcall.StatusInvalidArgument
 	}
@@ -259,6 +261,7 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 // there. Owned pages are freed and uncharged; shared and image pages are only
 // unmapped. Pinned regions cannot be removed.
 func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -266,9 +269,9 @@ func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.St
 	// A shared mapping is one reference to its object, so it goes whole or
 	// not at all.
 	regions := owner.Regions()
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		piece := vmPieces[index]
+		piece := local.vmPieces[index]
 		if piece.Region.Backing == region.Shared && (piece.Base != piece.Region.Base || piece.Length != piece.Region.Length) {
 			return kcall.StatusInvalidArgument
 		}
@@ -278,8 +281,8 @@ func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.St
 	}
 	releasePages(owner, vm.UnmapUserRange(&pageAllocator, handler.root, address, length))
 	for index := 0; index < count; index++ {
-		if vmPieces[index].Region.Backing == region.Shared {
-			dropShared(vmPieces[index].Region.Object)
+		if local.vmPieces[index].Region.Backing == region.Shared {
+			dropShared(local.vmPieces[index].Region.Object)
 		}
 	}
 	return kcall.StatusOK
@@ -288,6 +291,7 @@ func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.St
 // VMDiscard frees the pages of an anonymous range but keeps the reservation,
 // so the range reads as zeros again and costs nothing until touched.
 func (handler nativeCallHandler) VMDiscard(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -299,9 +303,9 @@ func (handler nativeCallHandler) VMDiscard(address uint64, length uint64) kcall.
 		}
 		return kcall.StatusInvalidArgument
 	}
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		if vmPieces[index].Region.Backing != region.Anonymous {
+		if local.vmPieces[index].Region.Backing != region.Anonymous {
 			return kcall.StatusPermissionDenied
 		}
 	}
@@ -309,14 +313,12 @@ func (handler nativeCallHandler) VMDiscard(address uint64, length uint64) kcall.
 	return kcall.StatusOK
 }
 
-// vmPieces is the scratch the protection and discard checks inspect.
-var vmPieces region.Pieces
-
 // VMProtect changes the protection of a range covered by unpinned regions.
 // Anonymous memory may become inaccessible, read-only, or read-write, never
 // executable; shared and device mappings keep the protection they were mapped
 // with.
 func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protection uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -326,9 +328,9 @@ func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protec
 		return kcall.StatusInvalidArgument
 	}
 	regions := owner.Regions()
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		backing := vmPieces[index].Region.Backing
+		backing := local.vmPieces[index].Region.Backing
 		if backing != region.Anonymous || requested&region.Execute != 0 {
 			return kcall.StatusPermissionDenied
 		}
@@ -344,6 +346,7 @@ func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protec
 
 // VMQuery describes the region containing address.
 func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -352,14 +355,14 @@ func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.St
 	if !ok {
 		return kcall.StatusNotFound
 	}
-	clear(vmRecord[:])
-	putUint64(vmRecord[0:8], entry.Base)
-	putUint64(vmRecord[8:16], entry.Length)
-	vmRecord[16], vmRecord[17] = byte(entry.Protection), byte(entry.Backing)
+	clear(local.vmRecord[:])
+	putUint64(local.vmRecord[0:8], entry.Base)
+	putUint64(local.vmRecord[8:16], entry.Length)
+	local.vmRecord[16], local.vmRecord[17] = byte(entry.Protection), byte(entry.Backing)
 	if entry.Flags&region.Pinned != 0 {
-		vmRecord[18] = 1
+		local.vmRecord[18] = 1
 	}
-	if !vm.CopyOut(handler.root, record, vmRecord[:]) {
+	if !vm.CopyOut(handler.root, record, local.vmRecord[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -370,6 +373,7 @@ func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.St
 // chooses and writes to the eight bytes address names. The mapping is never
 // owned, so the object outlives it.
 func (handler nativeCallHandler) MemoryMap(memoryHandle uint64, address uint64, flags uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -396,8 +400,8 @@ func (handler nativeCallHandler) MemoryMap(memoryHandle uint64, address uint64, 
 			return kcall.StatusResourceExhausted
 		}
 		target = base
-		putUint64(vmDescriptor[0:8], target)
-		if !vm.CopyOut(handler.root, address, vmDescriptor[:8]) {
+		putUint64(local.vmDescriptor[0:8], target)
+		if !vm.CopyOut(handler.root, address, local.vmDescriptor[:8]) {
 			return kcall.StatusInvalidArgument
 		}
 	}

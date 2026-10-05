@@ -50,6 +50,13 @@ func startProcessors() {
 			console.WriteString(", beyond the xAPIC destinations; left offline\n")
 			continue
 		}
+		if !prepareScratch(index) {
+			cpuTable.Transition(index, kernelcpu.Failed)
+			console.WriteString("SMP: no memory for CPU ")
+			console.WriteUint(uint64(index))
+			console.WriteString("'s call scratch; left offline\n")
+			continue
+		}
 		startable++
 		if amd64.StartProcessor(&startup, &pageAllocator, kernelPageTable, index, apicID, waitMicros) {
 			cpuTable.Transition(index, kernelcpu.Started)

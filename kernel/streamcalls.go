@@ -52,6 +52,7 @@ func finishStreamClosure(closure stream.Closure) {
 }
 
 func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || length != 16 || owner.Handles().Available() < 2 {
 		return kcall.StatusPermissionDenied
@@ -83,9 +84,9 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 		releaseStreamSlot(id)
 		return kcall.StatusResourceExhausted
 	}
-	putUint64(streamCreateWire[0:8], uint64(reader))
-	putUint64(streamCreateWire[8:16], uint64(writer))
-	if !vm.CopyOut(handler.root, address, streamCreateWire[:]) {
+	putUint64(local.streamCreateWire[0:8], uint64(reader))
+	putUint64(local.streamCreateWire[8:16], uint64(writer))
+	if !vm.CopyOut(handler.root, address, local.streamCreateWire[:]) {
 		owner.Handles().Close(reader)
 		owner.Handles().Close(writer)
 		endpoint.CloseReader()
@@ -124,25 +125,28 @@ func streamStatus(status stream.Status) kcall.Status {
 }
 
 func streamDescriptor(root, address, length uint64) (uint64, uint64, bool) {
+	local := thisCPU()
 	if length != kcall.StreamDescriptorSize {
 		return 0, 0, false
 	}
-	if !vm.CopyIn(root, address, streamDescriptorWire[:]) {
+	if !vm.CopyIn(root, address, local.streamDescriptorWire[:]) {
 		return 0, 0, false
 	}
-	buffer, size := decodeUint64(streamDescriptorWire[0:8]), decodeUint64(streamDescriptorWire[8:16])
-	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(streamDescriptorWire[16:24]) != 0 {
+	buffer, size := decodeUint64(local.streamDescriptorWire[0:8]), decodeUint64(local.streamDescriptorWire[8:16])
+	if size == 0 || size > kcall.MaxStreamIO || decodeUint64(local.streamDescriptorWire[16:24]) != 0 {
 		return 0, 0, false
 	}
 	return buffer, size, true
 }
 
 func writeStreamResult(root, descriptor, size uint64) bool {
-	putUint64(streamResultWire[:], size)
-	return vm.CopyOut(root, descriptor+16, streamResultWire[:])
+	local := thisCPU()
+	putUint64(local.streamResultWire[:], size)
+	return vm.CopyOut(root, descriptor+16, local.streamResultWire[:])
 }
 
 func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	endpoint, status := handler.streamEndpoint(id, capability.Read, false)
 	buffer, size, valid := streamDescriptor(handler.root, descriptor, length)
 	if status != kcall.StatusOK || !valid {
@@ -154,11 +158,11 @@ func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length
 	if !vm.CanCopyOut(handler.root, buffer, size) || !vm.CanCopyOut(handler.root, descriptor+16, 8) {
 		return kcall.StatusInvalidArgument
 	}
-	count, result := endpoint.Read(streamCallData[:size])
+	count, result := endpoint.Read(local.streamCallData[:size])
 	if result != stream.StatusOK {
 		return streamStatus(result)
 	}
-	if !vm.CopyOut(handler.root, buffer, streamCallData[:count]) || !writeStreamResult(handler.root, descriptor, uint64(count)) {
+	if !vm.CopyOut(handler.root, buffer, local.streamCallData[:count]) || !writeStreamResult(handler.root, descriptor, uint64(count)) {
 		return kcall.StatusInvalidArgument
 	}
 	// Writers wait for room for a whole atomic write, so they are woken only
@@ -174,6 +178,7 @@ func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length
 }
 
 func (handler nativeCallHandler) StreamWrite(id uint64, descriptor uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	endpoint, status := handler.streamEndpoint(id, capability.Write, true)
 	buffer, size, valid := streamDescriptor(handler.root, descriptor, length)
 	if status != kcall.StatusOK || !valid {
@@ -182,10 +187,10 @@ func (handler nativeCallHandler) StreamWrite(id uint64, descriptor uint64, lengt
 		}
 		return kcall.StatusInvalidArgument
 	}
-	if !vm.CopyIn(handler.root, buffer, streamCallData[:size]) {
+	if !vm.CopyIn(handler.root, buffer, local.streamCallData[:size]) {
 		return kcall.StatusInvalidArgument
 	}
-	count, result := endpoint.Write(streamCallData[:size])
+	count, result := endpoint.Write(local.streamCallData[:size])
 	if result != stream.StatusOK {
 		return streamStatus(result)
 	}
@@ -200,6 +205,7 @@ func (handler nativeCallHandler) StreamWrite(id uint64, descriptor uint64, lengt
 }
 
 func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
+	local := thisCPU()
 	event := kernelwait.Readable
 	if side == 1 {
 		event = kernelwait.Writable
@@ -208,48 +214,49 @@ func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
 		event = kernelwait.PeerClosed
 	}
 	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindStream, Object: streamID, Side: side}, event)
-	count := streamWaitSet.Wake(streamID, side, reason, streamWakeResults[:])
+	count := streamWaitSet.Wake(streamID, side, reason, local.streamWakeResults[:])
 	for index := 0; index < count; index++ {
-		if state, found := linuxcompat.SyscallContinuations.Pending(streamWakeResults[index].Task); found {
+		if state, found := linuxcompat.SyscallContinuations.Pending(local.streamWakeResults[index].Task); found {
 			wake := linuxcompat.WakeMessage
 			if reason == ipc.WaitPeerDied {
 				wake = linuxcompat.WakePeerDied
 			}
-			if state.Correlation != streamID || !resumeLinuxSyscall(streamWakeResults[index].Task, streamID, wake) {
-				cancelTaskWaits(streamWakeResults[index].Task)
-				amd64.TerminateTask(uint64(streamWakeResults[index].Task), uint64(1)<<63|5)
+			if state.Correlation != streamID || !resumeLinuxSyscall(local.streamWakeResults[index].Task, streamID, wake) {
+				cancelTaskWaits(local.streamWakeResults[index].Task)
+				amd64.TerminateTask(uint64(local.streamWakeResults[index].Task), uint64(1)<<63|5)
 			}
-			streamWakeResults[index] = ipc.WaitResult{}
+			local.streamWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
-		task, _, valid := streamWakeResults[index].Task.Parts()
+		task, _, valid := local.streamWakeResults[index].Task.Parts()
 		if !valid {
-			streamWakeResults[index] = ipc.WaitResult{}
+			local.streamWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
 		if reason == ipc.WaitPeerDied {
 			streamWaitStatus[task] = kcall.StatusPeerDied
 		}
-		if !amd64.WakeTaskID(uint64(streamWakeResults[index].Task)) {
+		if !amd64.WakeTaskID(uint64(local.streamWakeResults[index].Task)) {
 			panicSerial("stale stream wake task")
 		}
-		streamWakeResults[index] = ipc.WaitResult{}
+		local.streamWakeResults[index] = ipc.WaitResult{}
 	}
 }
 
 func expireStreamWaiters() {
-	count := streamWaitSet.Expire(amd64.TimerTicks(), streamWakeResults[:])
+	local := thisCPU()
+	count := streamWaitSet.Expire(amd64.TimerTicks(), local.streamWakeResults[:])
 	for index := 0; index < count; index++ {
-		task, _, valid := streamWakeResults[index].Task.Parts()
+		task, _, valid := local.streamWakeResults[index].Task.Parts()
 		if !valid {
-			streamWakeResults[index] = ipc.WaitResult{}
+			local.streamWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
 		streamWaitStatus[task] = kcall.StatusTimeout
-		if !amd64.WakeTaskID(uint64(streamWakeResults[index].Task)) {
+		if !amd64.WakeTaskID(uint64(local.streamWakeResults[index].Task)) {
 			panicSerial("stale stream timeout task")
 		}
-		streamWakeResults[index] = ipc.WaitResult{}
+		local.streamWakeResults[index] = ipc.WaitResult{}
 	}
 }
 

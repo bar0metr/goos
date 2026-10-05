@@ -114,6 +114,7 @@ func consumeInitControl() {
 // executing from it (ADR 0093, ADR 0097). The only name the
 // kernel knows at launch is the bootstrap program's, in bootContinue.
 func spawnExecutable(executable supervisor.Executable, name []byte, grants []supervisor.Capability, resourceProfile supervisor.ResourceProfile, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+	local := thisCPU()
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -253,13 +254,13 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		if processABI == process.ABILinuxX8664 {
 			// Every Linux image gets AT_RANDOM, as on Linux (ADR 0185).
 			var random *[linuxabi.RandomSize]byte
-			if randomBytes(linuxStackRandom[:]) {
-				random = &linuxStackRandom
+			if randomBytes(local.linuxStackRandom[:]) {
+				random = &local.linuxStackRandom
 			}
 			linuxLaunchStartup = bound
 			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, &linuxLaunchStartup, random)
 			linuxLaunchStartup = startup.Data{}
-			clear(linuxStackRandom[:])
+			clear(local.linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
 			streams, streamHandles, streamsOK := linuxStandardStreams(spawned, bound)
 			if stackStatus != linuxabi.StackOK || !brkOK || !streamsOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, pid, bound, streams, brkBase, brkLimit) {
@@ -435,10 +436,6 @@ var launchRegions region.Map
 // linuxInitialStack is shared launch scratch. Launches are serialized by PID 1
 // and the final bytes are copied into private process pages before task start.
 var linuxInitialStack [linuxabi.MaxInitialStackSize]byte
-
-// linuxStackRandom holds the AT_RANDOM bytes of the launch in progress. The
-// launch clears it once the stack image has its copy.
-var linuxStackRandom [linuxabi.RandomSize]byte
 
 // linuxLaunchImage is the parsed ELF of the launch in progress. The record is
 // over 1 KiB, so a local copy would be allocated on the kernel heap and never

@@ -20,6 +20,7 @@ import (
 )
 
 func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -28,7 +29,7 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 	if !ok || !device.IsConsole(cap.Object()) || length == 0 || length > kcall.MaxConsoleWrite {
 		return kcall.StatusPermissionDenied
 	}
-	data := kernelCallData[:int(length)]
+	data := local.kernelCallData[:int(length)]
 	if !vm.CopyIn(handler.root, address, data) {
 		if validation.Enabled {
 			mark("USER_COPYIN_OK")
@@ -57,6 +58,7 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 }
 
 func (handler nativeCallHandler) ConsoleRead(id uint64, address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || length != 1 {
 		return kcall.StatusPermissionDenied
@@ -72,8 +74,8 @@ func (handler nativeCallHandler) ConsoleRead(id uint64, address uint64, length u
 	if taken == 0 {
 		return kcall.StatusNotFound
 	}
-	consoleByteWire[0] = byte(taken)
-	if !vm.CopyOut(handler.root, address, consoleByteWire[:]) {
+	local.consoleByteWire[0] = byte(taken)
+	if !vm.CopyOut(handler.root, address, local.consoleByteWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -102,6 +104,7 @@ func (handler nativeCallHandler) ConsoleInterrupt(id uint64) kcall.Status {
 // ConsoleInfo returns logical terminal geometry without exposing framebuffer
 // addresses or granting any new hardware authority.
 func (handler nativeCallHandler) ConsoleInfo(id uint64, address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -135,39 +138,41 @@ func (handler nativeCallHandler) ConsoleInfo(id uint64, address uint64, length u
 			flags |= kcall.ConsoleFlagKeyboard
 		}
 	}
-	clear(consoleInfoWire[:])
-	putUint32(consoleInfoWire[0:4], columns)
-	putUint32(consoleInfoWire[4:8], rows)
-	putUint32(consoleInfoWire[8:12], flags)
-	if !vm.CopyOut(handler.root, address, consoleInfoWire[:]) {
+	clear(local.consoleInfoWire[:])
+	putUint32(local.consoleInfoWire[0:4], columns)
+	putUint32(local.consoleInfoWire[4:8], rows)
+	putUint32(local.consoleInfoWire[8:12], flags)
+	if !vm.CopyOut(handler.root, address, local.consoleInfoWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }
 
 func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	if length != 8 {
 		return kcall.StatusInvalidArgument
 	}
-	putUint64(clockWire[:], amd64.TimerTicks())
-	if !vm.CopyOut(handler.root, address, clockWire[:]) {
+	putUint64(local.clockWire[:], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, local.clockWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }
 
 func (handler nativeCallHandler) SystemInfo(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || length != kcall.SystemInfoSize {
 		return kcall.StatusInvalidArgument
 	}
 	statistics := pageAllocator.Statistics()
-	putUint64(systemInfoWire[0:8], uint64(owner.ID()))
-	putUint64(systemInfoWire[8:16], uint64(processRegistry.Count()))
-	putUint64(systemInfoWire[16:24], statistics.ManagedPages)
-	putUint64(systemInfoWire[24:32], statistics.FreePages)
-	putUint64(systemInfoWire[32:40], amd64.TimerTicks())
-	if !vm.CopyOut(handler.root, address, systemInfoWire[:]) {
+	putUint64(local.systemInfoWire[0:8], uint64(owner.ID()))
+	putUint64(local.systemInfoWire[8:16], uint64(processRegistry.Count()))
+	putUint64(local.systemInfoWire[16:24], statistics.ManagedPages)
+	putUint64(local.systemInfoWire[24:32], statistics.FreePages)
+	putUint64(local.systemInfoWire[32:40], amd64.TimerTicks())
+	if !vm.CopyOut(handler.root, address, local.systemInfoWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -182,6 +187,7 @@ func portSpecification(specification uint64) (uint16, uint8, bool) {
 }
 
 func (handler nativeCallHandler) PortRead(id uint64, specification uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -196,8 +202,8 @@ func (handler nativeCallHandler) PortRead(id uint64, specification uint64, addre
 	if !read {
 		return kcall.StatusInvalidArgument
 	}
-	putUint32(portWire[:], value)
-	if !vm.CopyOut(handler.root, address, portWire[:]) {
+	putUint32(local.portWire[:], value)
+	if !vm.CopyOut(handler.root, address, local.portWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -233,6 +239,7 @@ const defaultDMAPages = 4
 // the size the driver wants in its third word, zero for the default, and
 // receives the physical address, the virtual address, and the size.
 func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	owner, found := processRegistry.ByRoot(handler.root)
 	if !found || virtual != vm.UserDMAAddress {
 		return kcall.StatusInvalidArgument
@@ -241,10 +248,10 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
 		return kcall.StatusPermissionDenied
 	}
-	if !vm.CopyIn(handler.root, address, dmaWire[:]) {
+	if !vm.CopyIn(handler.root, address, local.dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
-	requested := decodeUint64(dmaWire[16:24])
+	requested := decodeUint64(local.dmaWire[16:24])
 	pages := uint64(defaultDMAPages)
 	if requested != 0 {
 		pages = (requested + vm.PageSize - 1) / vm.PageSize
@@ -296,10 +303,10 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 			return kcall.StatusResourceExhausted
 		}
 	}
-	putUint64(dmaWire[0:8], physical)
-	putUint64(dmaWire[8:16], virtual)
-	putUint64(dmaWire[16:24], pages*vm.PageSize)
-	if !vm.CopyOut(handler.root, address, dmaWire[:]) {
+	putUint64(local.dmaWire[0:8], physical)
+	putUint64(local.dmaWire[8:16], virtual)
+	putUint64(local.dmaWire[16:24], pages*vm.PageSize)
+	if !vm.CopyOut(handler.root, address, local.dmaWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

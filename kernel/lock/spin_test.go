@@ -80,3 +80,60 @@ func TestBitHelpers(t *testing.T) {
 		t.Fatalf("word = %#x", word.Load())
 	}
 }
+
+func TestLockUnlessGivesUpWhenStopped(t *testing.T) {
+	Install(Hooks{})
+	defer Install(Hooks{})
+	holder := New(LevelProcess)
+	holder.state.Store(1) // another processor holds it
+	stop := uint64(1)
+	waiter := &holder
+	if waiter.LockUnless(&stop) {
+		t.Fatal("a stopped waiter took a held lock")
+	}
+	holder.state.Store(0)
+	stop = 0
+	if !holder.LockUnless(&stop) {
+		t.Fatal("a free lock refused")
+	}
+	holder.Unlock()
+}
+
+func TestContentionAndWatchdogPerLevel(t *testing.T) {
+	if validation.Enabled {
+		t.Skip("goroutines share one processor index, which validation builds treat as recursion")
+	}
+	var clock atomic.Uint64
+	var stuck atomic.Uint32
+	Install(Hooks{
+		Pause:      func() { clock.Add(1); runtime.Gosched() },
+		Now:        clock.Load,
+		StuckAfter: 5000,
+		Stuck:      func(level Level, holder uint32) { stuck.Store(uint32(level)) },
+	})
+	defer Install(Hooks{})
+	before := Statistics(LevelStream)
+	spin := New(LevelStream)
+	spin.Lock()
+	done := make(chan struct{})
+	go func() {
+		spin.Lock()
+		spin.Unlock()
+		close(done)
+	}()
+	for stuck.Load() == 0 {
+		runtime.Gosched()
+	}
+	spin.Unlock()
+	<-done
+	after := Statistics(LevelStream)
+	if Level(stuck.Load()) != LevelStream {
+		t.Fatalf("watchdog reported level %d", stuck.Load())
+	}
+	if after.Contended != before.Contended+1 || after.Stuck != before.Stuck+1 || after.Longest < 5000 || after.Spin < after.Longest {
+		t.Fatalf("stats %+v after %+v", after, before)
+	}
+	if LevelStream.String() != "stream" || Level(200).String() != "unknown" {
+		t.Fatal("level names")
+	}
+}

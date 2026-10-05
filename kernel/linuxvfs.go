@@ -29,17 +29,6 @@ import (
 // client allows its service before it gives up.
 const linuxVFSReplyTicks = 8 * clock.TicksPerSecond
 
-var (
-	// linuxVFSMessage holds the request being sent, then the reply being read.
-	// A decoded reply aliases it until the handler returns.
-	linuxVFSMessage ipc.Message
-	// linuxPath receives a path as the program wrote it; linuxResolved is its
-	// canonical absolute form, the only one a request carries.
-	linuxPath     [linuxabi.PathMax]byte
-	linuxResolved [limits.PathMax]byte
-	linuxTarget   [limits.PathMax]byte
-)
-
 // vfsEndpoint resolves the session channel through the process's own handle
 // table, so the rights PID 1 granted are checked on every exchange.
 func (handler *linuxCallHandler) vfsEndpoint(state *linuxcompat.ProcessState) (*process.Process, *ipc.Channel, uint64, uint8, bool) {
@@ -169,6 +158,7 @@ func (handler *linuxCallHandler) vfsExchange(operation vfs.Request, attachment v
 //
 //go:noinline
 func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, attachment vfsAttachment) linuxabi.Errno {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	if !found {
 		return handler.vfsFailed()
@@ -223,12 +213,12 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 		peerHandles, attached = peer.Handles(), 1
 	}
 	var encoded bool
-	linuxVFSMessage, encoded = vfs.EncodeRequest(operation, correlation)
+	local.linuxVFSMessage, encoded = vfs.EncodeRequest(operation, correlation)
 	if !encoded || !linuxcompat.SyscallContinuations.Issue(handler.task, stage, correlation) {
 		handler.vfsUnsent(transfers[:attached])
 		return linuxabi.EIO
 	}
-	if status := channel.Send(side, linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached]); status != ipc.StatusOK {
+	if status := channel.Send(side, local.linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached]); status != ipc.StatusOK {
 		if status == ipc.StatusPeerDied {
 			context.Session.Fail()
 		}
@@ -391,6 +381,7 @@ func (handler *linuxCallHandler) ioTransfer(object *shmem.Object, offset uint64,
 //
 //go:noinline
 func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Reply, errno linuxabi.Errno, blocked bool) {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	pending, active := linuxcompat.SyscallContinuations.Pending(handler.task)
 	if !found || !active {
@@ -405,7 +396,7 @@ func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Re
 	// At most a full queue of replies to abandoned requests precedes this one.
 	for drained := 0; drained <= ipc.QueueCapacity; drained++ {
 		var status ipc.Status
-		linuxVFSMessage, status = channel.Receive(side)
+		local.linuxVFSMessage, status = channel.Receive(side)
 		if status == ipc.StatusNotFound {
 			break
 		}
@@ -415,7 +406,7 @@ func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Re
 			return vfs.Reply{}, handler.vfsFailed(), false
 		}
 		handler.dropAttachedHandles()
-		decoded, verdict := linuxcompat.ClassifyVFSReply(&linuxVFSMessage, pending.Correlation, operation)
+		decoded, verdict := linuxcompat.ClassifyVFSReply(&local.linuxVFSMessage, pending.Correlation, operation)
 		switch verdict {
 		case linuxcompat.VFSReplyAccepted:
 			return decoded, 0, false
@@ -448,8 +439,9 @@ func (handler *linuxCallHandler) vfsFailed() linuxabi.Errno {
 // reply the bridge accepts attaches any, and a Linux process must not keep
 // native authority PID 1 never granted it.
 func (handler *linuxCallHandler) dropAttachedHandles() {
-	for index := 0; index < int(linuxVFSMessage.HandleCount) && index < len(linuxVFSMessage.Handles); index++ {
-		nativeCallHandler{root: handler.root}.HandleClose(uint64(linuxVFSMessage.Handles[index]))
+	local := thisCPU()
+	for index := 0; index < int(local.linuxVFSMessage.HandleCount) && index < len(local.linuxVFSMessage.Handles); index++ {
+		nativeCallHandler{root: handler.root}.HandleClose(uint64(local.linuxVFSMessage.Handles[index]))
 	}
 }
 
@@ -483,18 +475,19 @@ func wakeVFSContextWaiter(task sched.TaskID) {
 // ENAMETOOLONG. The copy goes page by page, so a short string at the end of a
 // mapping is not refused for the unmapped page after it.
 func (handler *linuxCallHandler) copyPath(address uint64) ([]byte, linuxabi.Errno) {
+	local := thisCPU()
 	length := 0
-	for length < len(linuxPath) {
+	for length < len(local.linuxPath) {
 		chunk := int(vm.PageSize - (address+uint64(length))%vm.PageSize)
-		if chunk > len(linuxPath)-length {
-			chunk = len(linuxPath) - length
+		if chunk > len(local.linuxPath)-length {
+			chunk = len(local.linuxPath) - length
 		}
-		if !vm.CopyIn(handler.root, address+uint64(length), linuxPath[length:length+chunk]) {
+		if !vm.CopyIn(handler.root, address+uint64(length), local.linuxPath[length:length+chunk]) {
 			return nil, linuxabi.EFAULT
 		}
 		for index := length; index < length+chunk; index++ {
-			if linuxPath[index] == 0 {
-				return linuxPath[:index], 0
+			if local.linuxPath[index] == 0 {
+				return local.linuxPath[:index], 0
 			}
 		}
 		length += chunk

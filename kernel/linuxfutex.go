@@ -30,11 +30,6 @@ type futexWaiter struct {
 // futexWaiters holds at most one wait per task.
 var futexWaiters [sched.MaxTasks]futexWaiter
 
-var (
-	linuxFutexWord    [4]byte
-	linuxFutexTimeout [linuxcompat.TimespecSize]byte
-)
-
 // futex serves wait and wake. A wait sleeps until a wake with a matching
 // bit set, a signal with a handler, or its timeout: an interval for
 // FUTEX_WAIT, a point on the monotonic or realtime clock for
@@ -42,6 +37,7 @@ var (
 // second word. The priority-inheritance operations and wake-op are refused
 // and counted.
 func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	pending, active, errno := handler.vfsStage(request)
 	if errno != 0 {
 		forgetFutexWaiter(handler.task)
@@ -65,10 +61,10 @@ func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.
 	if address%4 != 0 {
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	if !vm.CopyIn(handler.root, address, linuxFutexWord[:]) {
+	if !vm.CopyIn(handler.root, address, local.linuxFutexWord[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
-	word := binary.LittleEndian.Uint32(linuxFutexWord[:])
+	word := binary.LittleEndian.Uint32(local.linuxFutexWord[:])
 	call, errno := linuxcompat.FutexDecide(request.Arguments[1], word, request.Arguments[2], request.Arguments[3], request.Arguments[5])
 	if errno != 0 {
 		return linuxErrno(errno)
@@ -78,7 +74,7 @@ func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.
 		return linuxcompat.Result{Value: uint64(wakeFutex(handler.root, address, call.Bitset, call.Count))}
 	case linuxcompat.FutexMoveWaiters:
 		target := request.Arguments[4]
-		if target%4 != 0 || !vm.CopyIn(handler.root, target, linuxFutexWord[:]) {
+		if target%4 != 0 || !vm.CopyIn(handler.root, target, local.linuxFutexWord[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 		woken := wakeFutex(handler.root, address, call.Bitset, call.Count)
@@ -90,9 +86,10 @@ func (handler *linuxCallHandler) futex(request linuxcompat.Request) linuxcompat.
 }
 
 func (handler *linuxCallHandler) futexSleep(request linuxcompat.Request, address uint64, call linuxcompat.FutexCall) linuxcompat.Result {
+	local := thisCPU()
 	deadline := uint64(0)
 	if timeout := request.Arguments[3]; timeout != 0 {
-		if !vm.CopyIn(handler.root, timeout, linuxFutexTimeout[:]) {
+		if !vm.CopyIn(handler.root, timeout, local.linuxFutexTimeout[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 		ticks, errno := handler.futexTicks(call)
@@ -133,10 +130,11 @@ func (handler *linuxCallHandler) futexSleep(request linuxcompat.Request, address
 // interval is FUTEX_WAIT's; an absolute time on the monotonic or realtime
 // clock is FUTEX_WAIT_BITSET's. A time already passed is zero ticks.
 func (handler *linuxCallHandler) futexTicks(call linuxcompat.FutexCall) (uint64, linuxabi.Errno) {
+	local := thisCPU()
 	if !call.Absolute {
-		return linuxcompat.SleepTicks(&linuxFutexTimeout, clock.TicksPerSecond, linuxSleepTicks)
+		return linuxcompat.SleepTicks(&local.linuxFutexTimeout, clock.TicksPerSecond, linuxSleepTicks)
 	}
-	if _, errno := linuxcompat.SleepTicks(&linuxFutexTimeout, clock.TicksPerSecond, linuxSleepTicks); errno != 0 {
+	if _, errno := linuxcompat.SleepTicks(&local.linuxFutexTimeout, clock.TicksPerSecond, linuxSleepTicks); errno != 0 {
 		return 0, errno
 	}
 	if !monotonicClock.Calibrated() {
@@ -150,7 +148,7 @@ func (handler *linuxCallHandler) futexTicks(call linuxcompat.FutexCall) (uint64,
 		}
 		now = uint64(value.Seconds)*uint64(timekeeping.NanosPerSecond) + uint64(value.Nanoseconds)
 	}
-	end := linuxcompat.SleepNanos(&linuxFutexTimeout)
+	end := linuxcompat.SleepNanos(&local.linuxFutexTimeout)
 	if end <= now {
 		return 0, 0
 	}

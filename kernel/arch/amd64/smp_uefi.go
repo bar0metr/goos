@@ -35,6 +35,7 @@ const (
 	cpuReschedIPIs
 	cpuTLBIPIs
 	cpuTicks
+	cpuCallArg2
 	cpuWords = 32
 )
 
@@ -88,6 +89,10 @@ var (
 	// parallelPeak is the most tasks of one address space that ran on
 	// distinct processors at once.
 	parallelPeak atomic.Uint64
+	// inKernel counts the processors between kernel entry and leave for a
+	// call or a fault; kernelPeak is the most at once.
+	inKernel   atomic.Int64
+	kernelPeak atomic.Uint64
 )
 
 // CPUIndex returns the calling processor's index; processor 0 is the
@@ -281,11 +286,27 @@ func kernelEnter() uint64 {
 	schedulerLock.Lock()
 	runState.ForgetWake(cpu)
 	schedulerLock.Unlock()
+	noteKernelEntry()
 	return 1
 }
 
 //export goos_kernel_leave
-func kernelLeave() { kernelLock.Unlock() }
+func kernelLeave() {
+	inKernel.Add(-1)
+	kernelLock.Unlock()
+}
+
+// noteKernelEntry counts the calling processor in the kernel and raises the
+// peak.
+func noteKernelEntry() {
+	count := uint64(inKernel.Add(1))
+	for peak := kernelPeak.Load(); count > peak && !kernelPeak.CompareAndSwap(peak, count); peak = kernelPeak.Load() {
+	}
+}
+
+// KernelParallelPeak returns the most processors that were inside system
+// calls or fault resolution at the same time since boot.
+func KernelParallelPeak() uint64 { return kernelPeak.Load() }
 
 // currentSlot returns the task the calling processor runs, or sched.Idle.
 func currentSlot() int {
@@ -666,6 +687,20 @@ var fatalHandler func(message string)
 func SetFatalHandler(handler func(message string)) {
 	fatalHandler = handler
 	lock.Install(lock.Hooks{Pause: func() { cpuPause() }, CPU: func() uint32 { return uint32(cpuIndex()) }, Fatal: handler})
+}
+
+// SetLockWatchdog arms the lock watchdog before a second processor starts:
+// a spin that lasts longer than seconds on the TSC, which runs at hz, is
+// reported through stuck.
+func SetLockWatchdog(hz uint64, seconds uint64, stuck func(level lock.Level, holder uint32)) {
+	lock.Install(lock.Hooks{
+		Pause:      func() { cpuPause() },
+		CPU:        func() uint32 { return uint32(cpuIndex()) },
+		Fatal:      fatalHandler,
+		Now:        func() uint64 { return ReadTSC() },
+		StuckAfter: hz * seconds,
+		Stuck:      stuck,
+	})
 }
 
 func fatal(message string) {
