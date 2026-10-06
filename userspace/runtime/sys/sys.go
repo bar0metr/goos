@@ -332,6 +332,10 @@ func PortWrite(device handle.ID, specification uint64, value uint64) kcall.Statu
 // IRQWait blocks until the interrupt line the capability names fires.
 func IRQWait(irq handle.ID) kcall.Status { return status(irqWait(uint64(irq))) }
 
+// IRQTake consumes the pending event of a line a WaitAny reported ready, or
+// returns NotFound when there is none. It never blocks.
+func IRQTake(irq handle.ID) kcall.Status { return status(irqTake(uint64(irq))) }
+
 // SystemReset resets the machine through the system-control capability.
 func SystemReset(device handle.ID) kcall.Status { return status(systemReset(uint64(device))) }
 

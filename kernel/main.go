@@ -129,6 +129,10 @@ func (pciConfig) Read32(bus, slot, function, offset uint8) uint32 {
 	return amd64.PCIConfigRead32(bus, slot, function, offset)
 }
 
+func (pciConfig) Write32(bus, slot, function, offset uint8, value uint32) {
+	amd64.PCIConfigWrite32(bus, slot, function, offset, value)
+}
+
 func equalBytes(value []byte, expected string) bool {
 	if len(value) != len(expected) {
 		return false
@@ -289,6 +293,7 @@ func main() {
 		virtioBlock = pci.Device{IRQ: 11}
 		console.WriteString("Storage: no legacy virtio-blk device\n")
 	}
+	discoverNetwork(virtioBlock, virtioBlockPort != 0)
 
 	// The allocator's bitmap is carved out of low memory and reached through
 	// the firmware's identity map until the kernel's own map replaces it.
@@ -468,6 +473,7 @@ func bootContinue() {
 			amd64.Halt()
 		}
 	}
+	routeNetwork()
 	// The UART interrupt is enabled only now: its gate exists, so the first
 	// byte to arrive has a handler to drain it.
 	amd64.EnableConsoleInterrupt()
@@ -562,7 +568,7 @@ func bootContinue() {
 	blockClientHandle, blockClientInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(blockClientObject, capability.Read|capability.Write|capability.Wait))
 	blockServerHandle, blockServerInstalled := initProcess.Handles().Insert(handle.TypeChannel, capability.New(blockServerObject, capability.Read|capability.Write|capability.Wait|capability.Transfer))
 	portObject, portObjectValid := device.PortObject(virtioBlock.IOBase, virtioBlock.IOSize)
-	dmaObject, dmaObjectValid := device.DMAObject(1)
+	dmaObject, dmaObjectValid := device.DMAObject(device.DMADomainBlock)
 	if virtioBlockPort == 0 {
 		// Without a device the driver's slots hold an object that grants no
 		// port or DMA access, so the layout PID 1 knows is kept and the
@@ -621,6 +627,9 @@ func bootContinue() {
 	if !serialConsoleInstalled || !graphicalConsoleInstalled || !secondExecPageGranted || serialConsoleHandle != handle.ID(0x0000000100000019) ||
 		graphicalConsoleHandle != handle.ID(0x000000010000001a) || secondExecPageHandle != handle.ID(0x000000010000001b) {
 		panicSerial("terminal console handles unavailable")
+	}
+	if !installNetHandles(initProcess) {
+		panicSerial("network device handles unavailable")
 	}
 	if !lifecycleCreated || !lifecycleInstalled || !serviceDeviceInstalled || !vfsChannelCreated || !vfsChannelInstalled || !vfsServerInstalled || !vfsControlCreated || !vfsControlInstalled || !vfsControlServerInstalled || !execControlCreated || !execServerInstalled || !execClientInstalled || !blockChannelCreated || !blockClientInstalled || !blockServerInstalled || !portObjectValid || !dmaObjectValid || !irqObjectValid || !virtioPortInstalled || !virtioIRQInstalled || !virtioDMAInstalled || !driverChannelCreated || !driverClientInstalled || !driverServerInstalled || !filesystemBlockChannelCreated || !filesystemBlockClientInstalled || !filesystemBlockServerInstalled || !systemControlInstalled || !imageObjectValid || !systemImageInstalled || !logDeviceInstalled || !loaderInstalled || !fileCacheGranted || !launchStagingMapped || !sharedRegistered || lifecycleHandle != handle.ID(0x0000000100000001) ||
 		serviceDeviceHandle != handle.ID(0x0000000100000002) || vfsChannelHandle != handle.ID(0x0000000100000003) || vfsServerHandle != handle.ID(0x0000000100000004) || vfsControlHandle != handle.ID(0x0000000100000005) || vfsControlServerHandle != handle.ID(0x0000000100000006) || execServerHandle != handle.ID(0x0000000100000007) || execClientHandle != handle.ID(0x0000000100000008) || blockClientHandle != handle.ID(0x0000000100000009) || blockServerHandle != handle.ID(0x000000010000000a) || virtioPortHandle != handle.ID(0x000000010000000b) || virtioIRQHandle != handle.ID(0x000000010000000c) || virtioDMAHandle != handle.ID(0x000000010000000d) || driverClientHandle != handle.ID(0x000000010000000e) || driverServerHandle != handle.ID(0x000000010000000f) || filesystemBlockClientHandle != handle.ID(0x0000000100000010) || filesystemBlockServerHandle != handle.ID(0x0000000100000011) || systemControlHandle != handle.ID(0x0000000100000012) || launchStagingHandle != handle.ID(0x0000000100000013) || execPageHandle != handle.ID(0x0000000100000014) || systemImageHandle != handle.ID(0x0000000100000015) || logDeviceHandle != handle.ID(0x0000000100000016) || loaderHandle != handle.ID(0x0000000100000017) || fileCacheHandle != handle.ID(0x0000000100000018) {

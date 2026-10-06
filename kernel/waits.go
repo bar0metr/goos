@@ -236,6 +236,14 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		return kcall.StatusResourceExhausted, false
 	}
 	trace(diag.WaitBegin, owner.ID(), uint64(taskID), waitTraceObject(entries), count)
+	// A line is unmasked only once its waiter is registered, so the interrupt
+	// it may raise at once finds someone to wake; the recheck below sees an
+	// event that arrived before the registration.
+	for index := range entries {
+		if entries[index].Key.Kind == kernelwait.KindIRQ {
+			amd64.RearmNetIRQ()
+		}
+	}
 	// Registration precedes the final readiness observation: a publisher
 	// changes an object's state under its lock before it publishes, so either
 	// the check below sees the change or the publication sees this
@@ -301,6 +309,20 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
 		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindConsole, Object: authority.Object()}, Events: kernelwait.Readable}, kcall.StatusOK, 0
+	case handle.TypeIRQ:
+		// Only the network line is waitable: the disk's driver blocks in
+		// IRQWait, which owns its line's single waiter. Readiness is the
+		// pending event, which the wait reports and IRQTake consumes.
+		if !isNetIRQ(authority.Object()) {
+			return kernelwait.Entry{}, kcall.StatusUnsupported, diag.DenyObject
+		}
+		if events != kcall.WaitReadable {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+		}
+		if !authority.Allows(capability.Wait) {
+			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
+		}
+		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindIRQ, Object: authority.Object()}, Events: kernelwait.Readable}, kcall.StatusOK, 0
 	case handle.TypeProcess:
 		if events != kcall.WaitCompleted {
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
@@ -363,6 +385,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 		case kernelwait.KindConsole:
 			input, _ := consoleInput(entry.Key.Object)
 			ready = amd64.InputPending(input)
+		case kernelwait.KindIRQ:
+			ready = amd64.NetIRQPending()
 		}
 		if ready {
 			mask |= 1 << index
@@ -410,6 +434,33 @@ func wakeConsoleWaiters() {
 			publishWaitAny(kernelwait.Key{Kind: kernelwait.KindConsole, Object: object}, kernelwait.Readable)
 		}
 	}
+}
+
+// wakeIRQWaiters publishes the network line's pending event. Its interrupt
+// wakes the kernel loop, which runs this, so the driver's wait completes on
+// the same path as every other readiness without a tick of delay.
+func wakeIRQWaiters() {
+	if object, routed := netIRQObject(); routed && amd64.NetIRQPending() {
+		publishWaitAny(kernelwait.Key{Kind: kernelwait.KindIRQ, Object: object}, kernelwait.Readable)
+	}
+}
+
+// IRQTake consumes the network line's pending event without blocking. A
+// driver calls it after reading its device's interrupt status, so an event
+// raised after that read stays pending for its next wait.
+func (handler nativeCallHandler) IRQTake(irqHandle uint64) kcall.Status {
+	owner, found := handler.self()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(irqHandle), handle.TypeIRQ, capability.Wait)
+	if !allowed || !isNetIRQ(authority.Object()) {
+		return kcall.StatusPermissionDenied
+	}
+	if !amd64.TakeNetIRQ() {
+		return kcall.StatusNotFound
+	}
+	return kcall.StatusOK
 }
 
 // expireWaitAnyTask times out task's multi-object wait if it is still due.
@@ -473,4 +524,5 @@ func expireWaitDeadlines() {
 		}
 	}
 	wakeConsoleWaiters()
+	wakeIRQWaiters()
 }

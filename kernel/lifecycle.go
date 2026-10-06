@@ -230,9 +230,8 @@ func releaseProcessHandles(exited *process.Process) {
 
 func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 	if typeID == handle.TypeDevice {
-		if _, dma := device.DecodeDMAObject(cap.Object()); dma && virtioBlockPort != 0 {
-			amd64.PortWrite(virtioBlockPort+18, 1, 0)
-			amd64.QuiesceIRQ11()
+		if domain, dma := device.DecodeDMAObject(cap.Object()); dma {
+			quiesceDMADomain(domain)
 		}
 	}
 	if typeID == handle.TypeMemory {

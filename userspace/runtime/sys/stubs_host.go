@@ -66,6 +66,7 @@ func portWrite(device uint64, specification uint64, value uint64) uint64 { retur
 func dmaAllocate(device uint64, virtual uint64, address unsafe.Pointer) uint64 { return unsupported }
 
 func irqWait(irq uint64) uint64 { return unsupported }
+func irqTake(irq uint64) uint64 { return unsupported }
 
 func streamCreate(address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 

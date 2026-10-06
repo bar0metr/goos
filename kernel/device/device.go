@@ -24,7 +24,21 @@ const (
 	// there, and it has no input.
 	SerialConsoleObject    = uint64(6)
 	GraphicalConsoleObject = uint64(7)
+	// InertObject stands in a fixed handle slot for a device that is absent.
+	// It authorizes nothing: no call accepts it.
+	InertObject = uint64(8)
 )
+
+// The DMA domains, one per discovered device. A domain names the device whose
+// reset and interrupt teardown runs before its driver's DMA pages are freed.
+const (
+	DMADomainBlock = uint16(1)
+	DMADomainNet   = uint16(2)
+)
+
+// InertIRQObject is the IRQ placeholder for an absent device. It is not a
+// line, so no route matches it.
+const InertIRQObject = uint64(0x100)
 
 // IsConsole reports whether object is the logical console or a terminal
 // console; any of them authorizes writing kernel log records.

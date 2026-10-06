@@ -245,7 +245,7 @@ func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address 
 		return kcall.StatusInvalidArgument
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Write)
-	if _, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid {
+	if domain, valid := device.DecodeDMAObject(cap.Object()); !ok || !valid || !dmaDomainPresent(domain) {
 		return kcall.StatusPermissionDenied
 	}
 	if !vm.CopyIn(handler.root, address, local.dmaWire[:]) {

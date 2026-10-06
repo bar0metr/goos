@@ -312,6 +312,14 @@ goos_task_affinity:
     ret
 .size goos_task_affinity, .-goos_task_affinity
 
+.global goos_irq_take
+.type goos_irq_take,@function
+goos_irq_take:
+    movl $55, %eax
+    int $0x80
+    ret
+.size goos_irq_take, .-goos_irq_take
+
 .global goos_validation_fault
 .type goos_validation_fault,@function
 goos_validation_fault:
