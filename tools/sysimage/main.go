@@ -2,7 +2,8 @@
 // -tree copies onto a volume (ADR 0175):
 //
 //	system/bin/        the native commands
-//	system/services/   the shell, configuration, and log services
+//	system/services/   the shell, configuration, log, and network services
+//	                   and the network driver
 //	system/linux/      the static Linux programs
 //	system/commands    the command index
 //	system/motd        the message of the day
@@ -25,14 +26,14 @@ import (
 	"goos/userspace/release"
 )
 
-const usage = "usage: sysimage SHELL CONFIG LOG COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
+const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
 
 func main() {
-	if len(os.Args) != 7 {
+	if len(os.Args) != 9 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	output := os.Args[6]
+	output := os.Args[8]
 	if err := os.RemoveAll(output); err != nil {
 		fail(err)
 	}
@@ -41,10 +42,10 @@ func main() {
 			fail(err)
 		}
 	}
-	for index, name := range []string{"shell", "config", "log"} {
+	for index, name := range []string{"shell", "config", "log", "netd", "virtio-net"} {
 		write(output, "system/services/"+name, read(os.Args[1+index]))
 	}
-	commandDirectory, index := os.Args[4], read(os.Args[5])
+	commandDirectory, index := os.Args[6], read(os.Args[7])
 	names, err := commandset.Names(commandDirectory, index)
 	if err != nil {
 		fail(err)
