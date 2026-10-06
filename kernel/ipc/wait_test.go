@@ -16,11 +16,14 @@ func TestWaitSetWakeAndTimeout(t *testing.T) {
 	if count := set.Wake(7, 0, WaitMessage, results); count != 1 || results[0] != (WaitResult{Task: first, Reason: WaitMessage}) {
 		t.Fatalf("unexpected message wake: %#v", results)
 	}
-	if count := set.Expire(19, results); count != 0 {
-		t.Fatalf("waiter expired early: %d", count)
+	if _, expired := set.ExpireTask(second, 19); expired {
+		t.Fatal("waiter expired early")
 	}
-	if count := set.Expire(20, results); count != 1 || results[0] != (WaitResult{Task: second, Reason: WaitTimeout}) {
-		t.Fatalf("unexpected timeout wake: %#v", results)
+	if _, expired := set.ExpireTask(first, 20); expired {
+		t.Fatal("a woken waiter timed out too")
+	}
+	if result, expired := set.ExpireTask(second, 20); !expired || result != (WaitResult{Task: second, Reason: WaitTimeout}) {
+		t.Fatalf("unexpected timeout wake: %#v", result)
 	}
 }
 

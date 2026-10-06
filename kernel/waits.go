@@ -10,6 +10,7 @@ import (
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
+	"goos/kernel/deadline"
 	"goos/kernel/device"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
@@ -83,21 +84,17 @@ func wakeProcessWaiters(pid process.ID) {
 	}
 }
 
-func expireProcessWaiters() {
-	local := thisCPU()
-	count := processWaitSet.Expire(amd64.TimerTicks(), local.processWakeResults[:])
-	for index := 0; index < count; index++ {
-		task, _, valid := local.processWakeResults[index].Task.Parts()
-		if !valid {
-			local.processWakeResults[index] = process.WaitResult{}
-			continue
-		}
-		processWaitStatus.set(uint64(task), kcall.StatusTimeout)
-		// A task another processor killed after it registered fails the
-		// wake; its exit cancels what it left registered.
-		amd64.WakeTaskID(uint64(local.processWakeResults[index].Task))
-		local.processWakeResults[index] = process.WaitResult{}
+// expireProcessWaiter times out task's process wait if it is still due.
+func expireProcessWaiter(task sched.TaskID, now uint64) {
+	result, expired := processWaitSet.ExpireTask(task, now)
+	slot, _, valid := result.Task.Parts()
+	if !expired || !valid {
+		return
 	}
+	processWaitStatus.set(uint64(slot), kcall.StatusTimeout)
+	// A task another processor killed after it registered fails the wake;
+	// its exit cancels what it left registered.
+	amd64.WakeTaskID(uint64(result.Task))
 }
 
 //export goos_dispatch_process_wait
@@ -415,22 +412,20 @@ func wakeConsoleWaiters() {
 	}
 }
 
-func expireWaitAny() {
-	local := thisCPU()
-	count := waitAnyTable.Expire(amd64.TimerTicks(), local.waitAnyCompletions[:])
-	for index := 0; index < count && index < len(local.waitAnyCompletions); index++ {
-		if diag.Enabled {
-			trace(diag.WaitTimeout, pidOfTask(local.waitAnyCompletions[index].Task), uint64(local.waitAnyCompletions[index].Task), 0, 0)
-		}
-		// A sleeping Linux task resumes through its continuation, which
-		// accepts only the wait it is in.
-		if resumeLinuxIPCWaiter(local.waitAnyCompletions[index].Task, linuxcompat.WakeTimeout) {
-			local.waitAnyCompletions[index] = kernelwait.Completion{}
-			continue
-		}
-		amd64.WakeTaskID(uint64(local.waitAnyCompletions[index].Task))
-		local.waitAnyCompletions[index] = kernelwait.Completion{}
+// expireWaitAnyTask times out task's multi-object wait if it is still due.
+func expireWaitAnyTask(task sched.TaskID, now uint64) {
+	if _, expired := waitAnyTable.ExpireTask(task, now); !expired {
+		return
 	}
+	if diag.Enabled {
+		trace(diag.WaitTimeout, pidOfTask(task), uint64(task), 0, 0)
+	}
+	// A sleeping Linux task resumes through its continuation, which accepts
+	// only the wait it is in.
+	if resumeLinuxIPCWaiter(task, linuxcompat.WakeTimeout) {
+		return
+	}
+	amd64.WakeTaskID(uint64(task))
 }
 
 //export goos_dispatch_wait_any
@@ -449,16 +444,33 @@ func dispatchWaitAny(interestsAddress, count, resultAddress, rootAndTask uint64)
 
 // expireWaitDeadlines releases waiters whose deadline has passed. It is driven
 // from serviceKernel: a deadline is the last line of defence behind an event
-// wakeup, so it must not depend on any particular task being scheduled.
+// wakeup, so it must not depend on any particular task being scheduled. The
+// deadline index names the waits that are due, so a tick with none due costs
+// one load. Each table then decides, under its own lock, whether the wait is
+// still there to time out: a wake that came first has taken it away.
 func expireWaitDeadlines() {
-	expireIPCWaiters()
-	expireProcessWaiters()
-	expireStreamWaiters()
-	expireWaitAny()
-	executableLock.Lock()
-	pagingLock.Lock()
-	retryExecutablePages()
-	pagingLock.Unlock()
-	executableLock.Unlock()
+	local := thisCPU()
+	now := amd64.TimerTicks()
+	for {
+		count := deadlines.Expired(now, local.expiredDeadlines[:])
+		for index := 0; index < count; index++ {
+			entry := local.expiredDeadlines[index]
+			switch entry.Source {
+			case deadline.SourceChannel:
+				expireIPCWaiter(entry.Task, now)
+			case deadline.SourceStream:
+				expireStreamWaiter(entry.Task, now)
+			case deadline.SourceProcess:
+				expireProcessWaiter(entry.Task, now)
+			case deadline.SourceWaitAny:
+				expireWaitAnyTask(entry.Task, now)
+			case deadline.SourcePaging:
+				retryExecutablePage(entry.Task, now)
+			}
+		}
+		if count < len(local.expiredDeadlines) {
+			break
+		}
+	}
 	wakeConsoleWaiters()
 }

@@ -234,7 +234,8 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 	case kcall.OperationExit:
 		return 0
 	case kcall.OperationClockRead, kcall.OperationClockReadNanos, kcall.OperationClockNow,
-		kcall.OperationCPUInfo, kcall.OperationCPUEntry, kcall.OperationCPUCacheInfo, kcall.OperationStartupRead:
+		kcall.OperationCPUInfo, kcall.OperationCPUEntry, kcall.OperationCPUCacheInfo, kcall.OperationCPURuntime,
+		kcall.OperationStartupRead:
 		return callCopy
 	case kcall.OperationConsoleWrite, kcall.OperationConsoleRead, kcall.OperationConsoleInterrupt, kcall.OperationConsoleInfo,
 		kcall.OperationPortRead, kcall.OperationPortWrite, kcall.OperationLogWrite, kcall.OperationLogRead, kcall.OperationLogBounds,
@@ -259,7 +260,8 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		return callMemory
 	case kcall.OperationExecutableCreate, kcall.OperationExecutableWrite, kcall.OperationExecutableSource:
 		return callExecFile
-	case kcall.OperationSystemInfo, kcall.OperationHandleInfo, kcall.OperationProcessInfo, kcall.OperationProcessWait:
+	case kcall.OperationSystemInfo, kcall.OperationHandleInfo, kcall.OperationProcessInfo, kcall.OperationProcessWait,
+		kcall.OperationTaskAffinity:
 		return callInspect
 	case kcall.OperationWaitAny:
 		return registryRead | handleRead | streams | spaceRead
@@ -295,7 +297,7 @@ func linuxCallLocks(number linuxabi.Syscall) lockSet {
 		linuxabi.SysGetuid, linuxabi.SysGeteuid, linuxabi.SysGetgid, linuxabi.SysGetegid,
 		linuxabi.SysSetuid, linuxabi.SysSetgid, linuxabi.SysGetgroups, linuxabi.SysUname,
 		linuxabi.SysClockGettime, linuxabi.SysGettimeofday, linuxabi.SysTime, linuxabi.SysGetrandom,
-		linuxabi.SysSchedGetaffinity, linuxabi.SysGetcpu:
+		linuxabi.SysGetcpu:
 		return linuxFast
 	case linuxabi.SysMmap, linuxabi.SysMunmap, linuxabi.SysMprotect, linuxabi.SysMadvise, linuxabi.SysBrk:
 		return linuxMemory

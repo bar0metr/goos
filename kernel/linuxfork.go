@@ -175,9 +175,12 @@ func (handler *linuxCallHandler) forkChild(stack uint64) (int32, *linuxcompat.Pr
 	// way so it is never handed out twice.
 	nextProcessID++
 	// The child resumes with the parent's x87 and SSE state at this call.
+	// It inherits the parent's affinity, as on Linux.
 	parentFPU, _ := amd64.LinuxUserFPU(handler.task)
+	affinity, _ := amd64.TaskAffinity(handler.task)
 	if !processRegistry.BindTask(pid, sched.TaskID(task)) || !amd64.SetTaskFSBase(sched.TaskID(task), fsBase) ||
-		!amd64.SetTaskFPU(sched.TaskID(task), parentFPU) || !amd64.StartTask(sched.TaskID(task)) {
+		!amd64.SetTaskFPU(sched.TaskID(task), parentFPU) || !amd64.SetTaskAffinity(sched.TaskID(task), affinity) ||
+		!amd64.StartTask(sched.TaskID(task)) {
 		panicSerial("forked Linux task could not be bound")
 	}
 	trace(diag.ProcessSpawned, pid, task, 0, 0)

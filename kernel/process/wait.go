@@ -1,6 +1,7 @@
 package process
 
 import (
+	"goos/kernel/deadline"
 	"goos/kernel/lock"
 	"goos/kernel/sched"
 )
@@ -20,11 +21,27 @@ type waiter struct {
 	active   bool
 }
 
-// WaitSet is a bounded collection of tasks blocked on process completion.
-// Its lock makes each method one step, safe on several processors at once.
+// WaitSet is a bounded collection of tasks blocked on process completion,
+// one registration per task slot. Its lock makes each method one step, safe
+// on several processors at once. With a deadline index installed, every
+// registration's deadline is in the index while the registration lasts.
 type WaitSet struct {
-	lock    lock.Spin
-	waiters [MaxWaiters]waiter
+	lock      lock.Spin
+	waiters   [MaxWaiters]waiter
+	deadlines *deadline.Index
+	source    deadline.Source
+}
+
+// UseDeadlines keeps the set's deadlines in index under source.
+func (set *WaitSet) UseDeadlines(index *deadline.Index, source deadline.Source) {
+	set.deadlines, set.source = index, source
+}
+
+func (set *WaitSet) forget(entry *waiter) {
+	if set.deadlines != nil {
+		set.deadlines.Cancel(set.source, entry.task)
+	}
+	*entry = waiter{}
 }
 
 func (set *WaitSet) take() {
@@ -32,22 +49,20 @@ func (set *WaitSet) take() {
 	set.lock.Lock()
 }
 
-func (set *WaitSet) addHeld(task sched.TaskID, process ID, deadline uint64) bool {
-	if _, _, valid := task.Parts(); !valid || process == 0 || deadline == 0 {
+func (set *WaitSet) addHeld(task sched.TaskID, process ID, at uint64) bool {
+	slot, _, valid := task.Parts()
+	if !valid || process == 0 || at == 0 {
 		return false
 	}
-	for index := range set.waiters {
-		if set.waiters[index].active && set.waiters[index].task == task {
-			return false
-		}
+	entry := &set.waiters[slot]
+	if entry.active && entry.task == task {
+		return false
 	}
-	for index := range set.waiters {
-		if !set.waiters[index].active {
-			set.waiters[index] = waiter{task: task, process: process, deadline: deadline, active: true}
-			return true
-		}
+	*entry = waiter{task: task, process: process, deadline: at, active: true}
+	if set.deadlines != nil {
+		set.deadlines.Arm(set.source, task, at)
 	}
-	return false
+	return true
 }
 
 func (set *WaitSet) countHeld() int {
@@ -61,13 +76,12 @@ func (set *WaitSet) countHeld() int {
 }
 
 func (set *WaitSet) cancelHeld(task sched.TaskID) bool {
-	for index := range set.waiters {
-		if set.waiters[index].active && set.waiters[index].task == task {
-			set.waiters[index] = waiter{}
-			return true
-		}
+	slot, _, valid := task.Parts()
+	if !valid || !set.waiters[slot].active || set.waiters[slot].task != task {
+		return false
 	}
-	return false
+	set.forget(&set.waiters[slot])
+	return true
 }
 
 func (set *WaitSet) wakeHeld(process ID, output []WaitResult) int {
@@ -77,23 +91,23 @@ func (set *WaitSet) wakeHeld(process ID, output []WaitResult) int {
 		if entry.active && entry.process == process && count < len(output) {
 			output[count] = WaitResult{Task: entry.task}
 			count++
-			*entry = waiter{}
+			set.forget(entry)
 		}
 	}
 	return count
 }
 
-func (set *WaitSet) expireHeld(now uint64, output []WaitResult) int {
-	count := 0
-	for index := range set.waiters {
-		entry := &set.waiters[index]
-		if entry.active && now >= entry.deadline && count < len(output) {
-			output[count] = WaitResult{Task: entry.task}
-			count++
-			*entry = waiter{}
-		}
+func (set *WaitSet) expireTaskHeld(task sched.TaskID, now uint64) (WaitResult, bool) {
+	slot, _, valid := task.Parts()
+	if !valid {
+		return WaitResult{}, false
 	}
-	return count
+	entry := &set.waiters[slot]
+	if !entry.active || entry.task != task || now < entry.deadline {
+		return WaitResult{}, false
+	}
+	*entry = waiter{}
+	return WaitResult{Task: task}, true
 }
 
 func (set *WaitSet) Add(task sched.TaskID, process ID, deadline uint64) bool {
@@ -129,9 +143,11 @@ func (set *WaitSet) Wake(process ID, output []WaitResult) int {
 	return result
 }
 
-func (set *WaitSet) Expire(now uint64, output []WaitResult) int {
+// ExpireTask times out task's registration when its deadline is at or before
+// now, and leaves alone one a wake ended or the task made since.
+func (set *WaitSet) ExpireTask(task sched.TaskID, now uint64) (WaitResult, bool) {
 	set.take()
-	result := set.expireHeld(now, output)
+	result, expired := set.expireTaskHeld(task, now)
 	set.lock.Unlock()
-	return result
+	return result, expired
 }

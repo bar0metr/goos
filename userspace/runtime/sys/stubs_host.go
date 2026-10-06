@@ -55,6 +55,10 @@ func cpuEntryRead(index uint64, address unsafe.Pointer) uint64 { return unsuppor
 
 func cpuCacheInfoRead(index uint64, address unsafe.Pointer) uint64 { return unsupported }
 
+func cpuRuntimeRead(index uint64, address unsafe.Pointer) uint64 { return unsupported }
+
+func taskAffinity(process uint64, mask uint64, address unsafe.Pointer) uint64 { return unsupported }
+
 func portRead(device uint64, specification uint64, address unsafe.Pointer) uint64 { return unsupported }
 
 func portWrite(device uint64, specification uint64, value uint64) uint64 { return unsupported }

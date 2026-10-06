@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/kernel/deadline"
 	"sync/atomic"
 
 	"goos/kernel/arch/amd64"
@@ -228,6 +229,9 @@ func clearExecutableFault(fault *executableFault) {
 	if fault.physical != 0 {
 		pageAllocator.Free(fault.physical)
 	}
+	if fault.retryAt != 0 {
+		deadlines.Cancel(deadline.SourcePaging, fault.task)
+	}
 	*fault = executableFault{}
 }
 
@@ -274,21 +278,24 @@ func sendExecutableRequest(fault *executableFault) bool {
 	return true
 }
 
-// retryExecutablePages sends again each page request whose filesystem was
-// away, once its retry tick has come. A request that cannot be sent fails.
-// Housekeeping calls it holding the executable and paging locks.
-func retryExecutablePages() {
-	now := amd64.TimerTicks()
-	for index := range executableFaults {
-		fault := &executableFaults[index]
-		if fault.task == 0 || fault.failed || fault.physical != 0 || fault.retryAt == 0 || now < fault.retryAt {
-			continue
-		}
-		if !sendExecutableRequest(fault) {
-			fault.failed = true
-			amd64.WakeTaskID(uint64(fault.task))
-		}
+// retryExecutablePage sends task's page request again once its filesystem
+// was away and its retry tick has come. A request that cannot be sent fails.
+// The deadline index names the task when the tick comes.
+func retryExecutablePage(task sched.TaskID, now uint64) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(executableFaults) {
+		return
 	}
+	executableLock.Lock()
+	pagingLock.Lock()
+	fault := &executableFaults[slot]
+	if fault.task == task && !fault.failed && fault.physical == 0 && fault.retryAt != 0 && now >= fault.retryAt &&
+		!sendExecutableRequest(fault) {
+		fault.failed = true
+		amd64.WakeTaskID(uint64(fault.task))
+	}
+	pagingLock.Unlock()
+	executableLock.Unlock()
 }
 
 // completeExecutablePage consumes a VFS reply before another request can
@@ -354,8 +361,9 @@ func completeExecutablePageLocked(channelID uint64, side uint8) bool {
 			fault.giveUp = now + executableRetrySeconds*clock.TicksPerSecond
 		}
 		if now < fault.giveUp {
-			// The task stays parked; retryExecutablePages asks again.
+			// The task stays parked; retryExecutablePage asks again.
 			fault.retryAt = now + max(clock.TicksPerSecond/executableRetryPerSecond, 1)
+			deadlines.Arm(deadline.SourcePaging, fault.task, fault.retryAt)
 			return true
 		}
 	}

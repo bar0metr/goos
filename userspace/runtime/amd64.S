@@ -296,6 +296,22 @@ goos_cpu_cache_info:
     ret
 .size goos_cpu_cache_info, .-goos_cpu_cache_info
 
+.global goos_cpu_runtime
+.type goos_cpu_runtime,@function
+goos_cpu_runtime:
+    movl $53, %eax
+    int $0x80
+    ret
+.size goos_cpu_runtime, .-goos_cpu_runtime
+
+.global goos_task_affinity
+.type goos_task_affinity,@function
+goos_task_affinity:
+    movl $54, %eax
+    int $0x80
+    ret
+.size goos_task_affinity, .-goos_task_affinity
+
 .global goos_validation_fault
 .type goos_validation_fault,@function
 goos_validation_fault:

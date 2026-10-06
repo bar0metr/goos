@@ -494,6 +494,38 @@ func ReleaseTasks(tasks []sched.TaskID) {
 	}
 }
 
+// SetTaskAffinity limits a live task to the processors in mask. A processor
+// that runs it outside the mask is asked to reschedule and leaves it at its
+// next scheduling point. It refuses a mask with no online processor, a dead
+// task, and a kernel task moved away from the housekeeping processor.
+func SetTaskAffinity(task sched.TaskID, mask uint64) bool {
+	cpu := CPUIndex()
+	flags := lockScheduler()
+	slot, ok := runState.Alive(task)
+	target := sched.Idle
+	if ok {
+		target, ok = runState.SetAffinity(slot, mask, cpu)
+	}
+	schedulerLock.Unlock()
+	if target != sched.Idle {
+		kickCPU(target, cpu)
+	}
+	RestoreInterrupts(flags)
+	return ok
+}
+
+// TaskAffinity returns the online processors a live task may run on.
+func TaskAffinity(task sched.TaskID) (uint64, bool) {
+	flags := lockScheduler()
+	slot, ok := runState.Alive(task)
+	mask := uint64(0)
+	if ok {
+		mask = runState.Affinity(slot)
+	}
+	unlockScheduler(flags)
+	return mask, ok && mask != 0
+}
+
 // TaskOffProcessor reports whether a task is on no processor: never started,
 // dead and switched away from, or waiting in a run queue.
 func TaskOffProcessor(task sched.TaskID) bool {
@@ -661,6 +693,35 @@ func FreeTaskSlots() int {
 // stacks, which only a task's own processor touches, and it switches to the
 // task before it runs it.
 func KernelMappingsChanged() { kernelGeneration.Add(1) }
+
+// CPURuntime is one processor's counters at one moment. Each processor
+// updates its own, so a set read across processors is not one instant.
+type CPURuntime struct {
+	Online      bool
+	Current     sched.TaskID
+	Ticks       uint64
+	IdleTicks   uint64
+	Scheduler   sched.Stats
+	Reschedules uint64
+	Shootdowns  uint64
+}
+
+// ReadCPURuntime returns processor cpu's counters. It stops no processor.
+func ReadCPURuntime(cpu int) CPURuntime {
+	if cpu < 0 || cpu >= MaxCPUs {
+		return CPURuntime{}
+	}
+	flags := lockScheduler()
+	runtime := CPURuntime{Online: runState.OnlineMask()&(uint64(1)<<uint(cpu)) != 0, Scheduler: runState.CPUStats(cpu)}
+	if slot := runState.Current(cpu); slot != sched.Idle {
+		runtime.Current = runState.TaskID(slot)
+	}
+	unlockScheduler(flags)
+	counters := ProcessorCounters(cpu)
+	runtime.Ticks, runtime.Reschedules, runtime.Shootdowns = counters.Ticks, counters.RescheduleIPIs, counters.ShootdownIPIs
+	runtime.IdleTicks = IdleTicks(cpu)
+	return runtime
+}
 
 // SMPCounters reports per-processor event counts for diagnostics.
 type SMPCounters struct {

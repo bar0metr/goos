@@ -362,7 +362,7 @@ func TestRandomInterleavings(t *testing.T) {
 		pending := map[int]int{}
 		for step := 0; step < 400; step++ {
 			cpu := random.Intn(cpus)
-			switch random.Intn(9) {
+			switch random.Intn(10) {
 			case 0:
 				if slot, _, ok := core.Install(); ok {
 					core.Start(slot, cpu)
@@ -374,6 +374,9 @@ func TestRandomInterleavings(t *testing.T) {
 					action = Block
 				}
 				next := core.Switch(cpu, action)
+				if next != Idle && !core.allows(next, cpu) {
+					t.Fatalf("processor %d picked task %d its affinity leaves out", cpu, next)
+				}
 				if previous != Idle && previous < 4 && core.dying&bit(previous) != 0 {
 					t.Fatal("a kernel task exited")
 				}
@@ -401,6 +404,8 @@ func TestRandomInterleavings(t *testing.T) {
 				core.Block(cpu)
 			case 8:
 				core.Tick()
+			case 9:
+				core.SetAffinity(random.Intn(MaxTasks), random.Uint64()&lowMask(cpus), cpu)
 			}
 			if core.Current(cpu) >= 0 && core.Current(cpu) < 4 && cpu != Housekeeping {
 				t.Fatal("kernel task ran away from the housekeeping processor")

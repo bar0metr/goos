@@ -38,6 +38,11 @@ const (
 // home. At most one processor runs it: the running mask marks a task from the
 // moment a processor picks it until that processor has left its stack, so no
 // other processor can pick a task whose registers are still being saved.
+//
+// A task runs only on the processors its affinity allows. Its home is always
+// one of them; a processor whose task's affinity changed away from it leaves
+// the task at its next scheduling point, and no processor steals a task it
+// may not run.
 type Core struct {
 	generations [MaxTasks]uint32
 	count       int
@@ -57,10 +62,17 @@ type Core struct {
 	online      uint64
 	current     [MaxCPUs]int8
 	rotor       [MaxCPUs]int8
-	stats       Stats
+	// affinity is each task's requested processor mask; zero means every
+	// processor. barred has, per processor, the tasks whose affinity leaves
+	// it out, so a steal or a placement tests a task with one AND.
+	affinity [MaxTasks]uint64
+	barred   [MaxCPUs]uint64
+	stats    [MaxCPUs]Stats
 }
 
-// Stats counts scheduler events for diagnostics.
+// Stats counts scheduler events. Per processor, Switches are the switches it
+// made, Steals the tasks it took from other queues, Migrations the tasks
+// moved to its queue, and Kills the tasks it terminated while they ran.
 type Stats struct {
 	Switches   uint64
 	Steals     uint64
@@ -102,6 +114,12 @@ func (core *Core) Online(cpu int) bool {
 	}
 	core.current[cpu] = Idle
 	core.online |= bit(cpu)
+	core.barred[cpu] = 0
+	for slot := 0; slot < core.count; slot++ {
+		if core.affinity[slot] != 0 && core.affinity[slot]&bit(cpu) == 0 {
+			core.barred[cpu] |= bit(slot)
+		}
+	}
 	return true
 }
 
@@ -134,6 +152,10 @@ func (core *Core) Install() (int, uint32, bool) {
 	core.killed &^= bit(slot)
 	core.held &^= bit(slot)
 	core.pinned &^= bit(slot)
+	core.affinity[slot] = 0
+	for cpu := range core.barred {
+		core.barred[cpu] &^= bit(slot)
+	}
 	return slot, core.generations[slot], true
 }
 
@@ -211,7 +233,7 @@ func (core *Core) Terminate(slot int, self int) (int, bool) {
 	}
 	if core.running&bit(slot) != 0 {
 		core.killed |= bit(slot)
-		core.stats.Kills++
+		core.stats[self].Kills++
 		return core.runningOn(slot), true
 	}
 	core.retire(slot)
@@ -288,7 +310,7 @@ func (core *Core) Switch(cpu int, action Action) int {
 	}
 	next := core.pick(cpu, previous)
 	if next != previous {
-		core.stats.Switches++
+		core.stats[cpu].Switches++
 		if next != Idle {
 			core.running |= bit(next)
 			core.wakePending &^= bit(next)
@@ -321,10 +343,14 @@ func (core *Core) Finish(cpu int, previous int) int {
 		return Idle
 	}
 	if home := core.homeOf(previous); home != cpu && home >= 0 {
-		// A wake already placed it elsewhere.
+		// Its affinity moved it while it ran. The new home may be idle and
+		// not know it has work.
+		if core.current[home] == Idle {
+			return home
+		}
 		return Idle
 	}
-	target := core.idleCPU(cpu)
+	target := core.idleCPUFor(cpu, previous)
 	if target == Idle || target == cpu {
 		if core.current[cpu] == Idle {
 			// It was woken while this processor left it for the idle loop.
@@ -414,7 +440,65 @@ func (core *Core) Alive(id TaskID) (int, bool) {
 	return slot, true
 }
 
-// Snapshot is a view of the run state for diagnostics.
+// SetAffinity sets the processors a task may run on. The mask must name an
+// online processor; a kernel task keeps the housekeeping processor and
+// accepts only a mask that includes it. A task queued on a processor the mask
+// leaves out moves to one it allows. It returns the processor to interrupt:
+// the one that runs the task and must now leave it, or the idle one the task
+// moved to, or Idle.
+func (core *Core) SetAffinity(slot int, mask uint64, self int) (int, bool) {
+	if !core.inRange(slot) || core.live&bit(slot) == 0 || core.dead&bit(slot) != 0 || mask&core.online == 0 {
+		return Idle, false
+	}
+	if core.pinned&bit(slot) != 0 {
+		return Idle, mask&bit(Housekeeping) != 0
+	}
+	core.affinity[slot] = mask
+	for cpu := 0; cpu < MaxCPUs; cpu++ {
+		if mask&bit(cpu) == 0 {
+			core.barred[cpu] |= bit(slot)
+		} else {
+			core.barred[cpu] &^= bit(slot)
+		}
+	}
+	kick := Idle
+	if home := core.homeOf(slot); home >= 0 && !core.allows(slot, home) {
+		target := core.idleCPUFor(home, slot)
+		if target == Idle {
+			target = core.leastLoaded(slot)
+		}
+		core.move(slot, target)
+		if core.runnable&bit(slot) != 0 && core.held&bit(slot) == 0 {
+			kick = target
+		}
+	}
+	if core.running&bit(slot) != 0 {
+		if cpu := core.runningOn(slot); cpu != Idle && !core.allows(slot, cpu) {
+			return cpu, true
+		}
+		return Idle, true
+	}
+	return kick, true
+}
+
+// Affinity returns the online processors a task may run on, or zero for a
+// slot that holds no live task.
+func (core *Core) Affinity(slot int) uint64 {
+	if !core.inRange(slot) || core.live&bit(slot) == 0 {
+		return 0
+	}
+	if core.pinned&bit(slot) != 0 {
+		return bit(Housekeeping)
+	}
+	mask := core.affinity[slot]
+	if mask == 0 {
+		mask = ^uint64(0)
+	}
+	return mask & core.online
+}
+
+// Snapshot is a view of the run state for diagnostics. Its Stats sum every
+// processor's.
 type Snapshot struct {
 	Runnable, Dead, Running, Vacant, Online uint64
 	Count                                   int
@@ -422,8 +506,23 @@ type Snapshot struct {
 }
 
 func (core *Core) Snapshot() Snapshot {
+	var total Stats
+	for cpu := range core.stats {
+		total.Switches += core.stats[cpu].Switches
+		total.Steals += core.stats[cpu].Steals
+		total.Migrations += core.stats[cpu].Migrations
+		total.Kills += core.stats[cpu].Kills
+	}
 	return Snapshot{Runnable: core.runnable, Dead: core.dead, Running: core.running, Vacant: core.vacant,
-		Online: core.online, Count: core.count, Stats: core.stats}
+		Online: core.online, Count: core.count, Stats: total}
+}
+
+// CPUStats returns one processor's counters.
+func (core *Core) CPUStats(cpu int) Stats {
+	if cpu < 0 || cpu >= MaxCPUs {
+		return Stats{}
+	}
+	return core.stats[cpu]
 }
 
 // Check verifies the invariants that make two processors running one task
@@ -431,7 +530,7 @@ func (core *Core) Snapshot() Snapshot {
 func (core *Core) Check() bool {
 	var homes, running uint64
 	for cpu := 0; cpu < MaxCPUs; cpu++ {
-		if core.home[cpu]&homes != 0 {
+		if core.home[cpu]&homes != 0 || core.home[cpu]&core.barred[cpu] != 0 {
 			return false
 		}
 		homes |= core.home[cpu]
@@ -471,13 +570,13 @@ func (core *Core) pick(cpu int, previous int) int {
 		if core.online&bit(other) == 0 {
 			continue
 		}
-		candidates := core.runnable & core.home[other] &^ core.running &^ core.pinned &^ core.held
+		candidates := core.runnable & core.home[other] &^ core.running &^ core.pinned &^ core.held &^ core.barred[cpu]
 		if candidates == 0 {
 			continue
 		}
 		next := nextAfter(candidates, int(core.rotor[other]))
 		core.move(next, cpu)
-		core.stats.Steals++
+		core.stats[cpu].Steals++
 		core.rotor[cpu] = int8(next)
 		return next
 	}
@@ -487,7 +586,7 @@ func (core *Core) pick(cpu int, previous int) int {
 // place chooses the run queue of a task that became runnable. A pinned task
 // goes home to the housekeeping processor. Otherwise the task stays where it
 // last ran when that processor idles, then goes to an idle processor, then
-// to the least loaded one.
+// to the least loaded one, each among the processors its affinity allows.
 func (core *Core) place(slot int, self int) int {
 	if core.pinned&bit(slot) != 0 {
 		return Housekeeping
@@ -495,21 +594,21 @@ func (core *Core) place(slot int, self int) int {
 	home := core.homeOf(slot)
 	if home < 0 {
 		home = self
-		if core.online&bit(home) == 0 {
-			home = Housekeeping
+		if !core.allows(slot, home) {
+			home = core.leastLoaded(slot)
 		}
 		core.home[home] |= bit(slot)
 	}
 	if core.idle(home, slot) {
 		return home
 	}
-	if target := core.idleCPU(home); target != Idle {
+	if target := core.idleCPUFor(home, slot); target != Idle {
 		core.move(slot, target)
 		return target
 	}
 	target, load := home, core.load(home, slot)
 	for cpu := 0; cpu < MaxCPUs; cpu++ {
-		if core.online&bit(cpu) == 0 {
+		if !core.allows(slot, cpu) {
 			continue
 		}
 		if candidate := core.load(cpu, slot); candidate+1 < load {
@@ -522,17 +621,41 @@ func (core *Core) place(slot int, self int) int {
 	return target
 }
 
+// allows reports whether slot may run on cpu.
+func (core *Core) allows(slot int, cpu int) bool {
+	if core.pinned&bit(slot) != 0 {
+		return cpu == Housekeeping
+	}
+	return cpu >= 0 && cpu < MaxCPUs && core.online&bit(cpu) != 0 && core.barred[cpu]&bit(slot) == 0
+}
+
+// leastLoaded returns the allowed processor with the least to run, the
+// lowest on a tie. A task's affinity always names an online processor.
+func (core *Core) leastLoaded(slot int) int {
+	target, load := Housekeeping, -1
+	for cpu := 0; cpu < MaxCPUs; cpu++ {
+		if !core.allows(slot, cpu) {
+			continue
+		}
+		if candidate := core.load(cpu, slot); load < 0 || candidate < load {
+			target, load = cpu, candidate
+		}
+	}
+	return target
+}
+
 // idle reports whether cpu runs its idle loop with nothing else queued.
 func (core *Core) idle(cpu int, except int) bool {
 	return core.online&bit(cpu) != 0 && core.current[cpu] == Idle &&
 		core.runnable&core.home[cpu]&^core.held&^bit(except) == 0
 }
 
-// idleCPU returns an idle processor, searching from after start, or Idle.
-func (core *Core) idleCPU(start int) int {
+// idleCPUFor returns an idle processor slot may run on, searching from
+// after start, or Idle.
+func (core *Core) idleCPUFor(start int, slot int) int {
 	for step := 1; step <= MaxCPUs; step++ {
 		cpu := (start + step) % MaxCPUs
-		if core.idle(cpu, -1) {
+		if core.idle(cpu, -1) && core.allows(slot, cpu) {
 			return cpu
 		}
 	}
@@ -568,7 +691,7 @@ func (core *Core) move(slot int, target int) {
 		core.home[home] &^= bit(slot)
 	}
 	core.home[target] |= bit(slot)
-	core.stats.Migrations++
+	core.stats[target].Migrations++
 }
 
 func (core *Core) homeOf(slot int) int {

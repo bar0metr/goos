@@ -69,6 +69,12 @@ func cpuEntryRead(index uint64, address unsafe.Pointer) uint64
 //go:linkname cpuCacheInfoRead goos_cpu_cache_info
 func cpuCacheInfoRead(index uint64, address unsafe.Pointer) uint64
 
+//go:linkname cpuRuntimeRead goos_cpu_runtime
+func cpuRuntimeRead(index uint64, address unsafe.Pointer) uint64
+
+//go:linkname taskAffinity goos_task_affinity
+func taskAffinity(process uint64, mask uint64, address unsafe.Pointer) uint64
+
 //go:linkname portRead goos_port_read
 func portRead(device uint64, specification uint64, address unsafe.Pointer) uint64
 

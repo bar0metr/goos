@@ -15,6 +15,7 @@ import (
 	linuxabi "goos/kernel/compat/linux/abi"
 	linuxelf "goos/kernel/compat/linux/elf"
 	"goos/kernel/mm/vm"
+	"goos/kernel/sched"
 )
 
 const (
@@ -109,6 +110,8 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		return linuxcompat.Result{}
 	case linuxabi.SysSchedGetaffinity:
 		return handler.schedGetaffinity(state, arguments)
+	case linuxabi.SysSchedSetaffinity:
+		return handler.schedSetaffinity(state, arguments)
 	case linuxabi.SysGetcpu:
 		return handler.getcpu(arguments)
 	}
@@ -119,23 +122,77 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 // processor GoOS runs.
 const linuxCPUMaskSize = 8
 
-// schedGetaffinity reports every online processor for the caller's own
-// process or thread: a thread runs wherever the scheduler places it. The
-// result is the size of the mask written, as Linux returns it.
+// affinityTarget resolves the thread a sched_getaffinity or
+// sched_setaffinity call names: zero is the caller, and any other TID must
+// be a thread of the caller's own thread group, the group leader included.
+func (handler *linuxCallHandler) affinityTarget(state *linuxcompat.ProcessState, tid int32) (sched.TaskID, linuxabi.Errno) {
+	if tid == 0 || tid == handler.tid {
+		return handler.task, 0
+	}
+	if tid < 0 {
+		return 0, linuxabi.EINVAL
+	}
+	owner, found := handler.self()
+	if !found {
+		return 0, linuxabi.ESRCH
+	}
+	for _, task := range owner.Tasks() {
+		if linuxcompat.TaskTID(task, state) == tid {
+			return task, 0
+		}
+	}
+	return 0, linuxabi.ESRCH
+}
+
+// schedGetaffinity writes the processors the thread may run on, the online
+// ones its affinity allows. The result is the size of the mask written, as
+// Linux returns it.
 func (handler *linuxCallHandler) schedGetaffinity(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
 	local := thisCPU()
-	pid, size := int32(arguments[0]), arguments[1]
-	if pid != 0 && pid != state.PID && pid != handler.tid {
-		return linuxErrno(linuxabi.ESRCH)
-	}
+	size := arguments[1]
 	if size < linuxCPUMaskSize || size%8 != 0 {
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	putUint64(local.linuxCPUMask[:], amd64.OnlineMask())
+	task, errno := handler.affinityTarget(state, int32(arguments[0]))
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	mask, alive := amd64.TaskAffinity(task)
+	if !alive {
+		return linuxErrno(linuxabi.ESRCH)
+	}
+	putUint64(local.linuxCPUMask[:], mask)
 	if !vm.CopyOut(handler.root, arguments[2], local.linuxCPUMask[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{Value: linuxCPUMaskSize}
+}
+
+// schedSetaffinity limits a thread to the processors in the caller's mask.
+// GoOS reads the first 64 bits, which cover every processor it runs; the
+// rest of a larger set is ignored, as Linux ignores processors it does not
+// have. Offline processors drop out, and a mask left with none is EINVAL. A
+// set shorter than 64 bits is EINVAL too, where Linux would zero-extend it.
+func (handler *linuxCallHandler) schedSetaffinity(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
+	if arguments[1] < linuxCPUMaskSize {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	task, errno := handler.affinityTarget(state, int32(arguments[0]))
+	if errno != 0 {
+		return linuxErrno(errno)
+	}
+	if !vm.CopyIn(handler.root, arguments[2], local.linuxCPUMask[:]) {
+		return linuxErrno(linuxabi.EFAULT)
+	}
+	mask := decodeUint64(local.linuxCPUMask[:]) & amd64.OnlineMask()
+	if mask == 0 {
+		return linuxErrno(linuxabi.EINVAL)
+	}
+	if !amd64.SetTaskAffinity(task, mask) {
+		return linuxErrno(linuxabi.ESRCH)
+	}
+	return linuxcompat.Result{}
 }
 
 // getcpu reports the processor the caller runs on, which may change before

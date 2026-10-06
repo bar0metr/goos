@@ -14,6 +14,7 @@ import (
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/clock"
 	kernelconsole "goos/kernel/console"
+	"goos/kernel/deadline"
 	"goos/kernel/device"
 	"goos/kernel/executable"
 	kernelframebuffer "goos/kernel/framebuffer"
@@ -71,6 +72,9 @@ var (
 	streamWaitSet     ipc.WaitSet
 	streamWaitStatus  waitStatuses
 	waitAnyTable      kernelwait.Table
+	// deadlines orders every wait deadline, so the housekeeping tick looks
+	// only at the waits that are due (ADR 0189).
+	deadlines deadline.Index
 
 	// imagePages holds the read-only pages of system images that every
 	// process running them maps (ADR 0081).
@@ -368,6 +372,10 @@ func main() {
 	amd64.SetFatalHandler(panicSerial)
 	// Registry entries take their pages as they are created (ADR 0111).
 	channelRegistry.SetStorage(pageObjects[ipc.Channel]{})
+	ipcWaitSet.UseDeadlines(&deadlines, deadline.SourceChannel)
+	streamWaitSet.UseDeadlines(&deadlines, deadline.SourceStream)
+	processWaitSet.UseDeadlines(&deadlines, deadline.SourceProcess)
+	waitAnyTable.UseDeadlines(&deadlines, deadline.SourceWaitAny)
 	streamRegistry.SetStorage(pageObjects[stream.Stream]{})
 	sharedObjects.SetStorage(pageObjects[shmem.Object]{})
 	executables.SetStorage(pageObjects[executable.Object]{})
