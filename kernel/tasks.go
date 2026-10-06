@@ -13,7 +13,6 @@ import (
 	linuxcompat "goos/kernel/compat/linux"
 	linuxabi "goos/kernel/compat/linux/abi"
 	"goos/kernel/kcall"
-	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -68,6 +67,7 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	}
 	task := amd64.CurrentTask()
 	owner, space := callerSpace()
+	slot, _, _ := task.Parts()
 	if owner == nil || owner.ABI() != process.ABILinuxX8664 || owner.AddressSpace().Root != frame.Root {
 		if linuxSyscallABIRejections.Add(1) == 1 {
 			kernelLogUint(logfmt.Warn, "Linux syscall ABI rejected", "root", frame.Root)
@@ -76,6 +76,7 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		return
 	}
 	linuxSyscallEntries.Add(1)
+	local.callKind, local.callNumber = 'l', frame.Number
 	handler := &local.linuxHandler
 	handler.root, handler.frame, handler.task = frame.Root, frame, task
 	set := linuxCallLocks(linuxabi.Syscall(frame.Number))
@@ -88,14 +89,35 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		handler.prepare()
 		linuxLock.Unlock()
 	}
-	if !takeLocks(set, space, stop) {
-		frame.Action = linuxabi.ActionRetry
-		return
+	// A file call moves a handle to the VFS service, whose table it needs as
+	// well as its own. The task's last such peer is taken at once; a call
+	// that needs another stops before it changes anything and runs again
+	// holding that one.
+	held := &local.linuxCall
+	peer := process.ID(linuxPeerHints[slot].Load())
+	var result linuxcompat.Result
+	for attempt := 0; ; attempt++ {
+		*held = heldLocks{set: set, owner: owner, peerID: peer}
+		if !held.take(stop) {
+			frame.Action = linuxabi.ActionRetry
+			return
+		}
+		if set&linuxState != 0 {
+			handler.prepare()
+		}
+		local.peerWanted = 0
+		result = linuxcompat.Dispatch(frame, handler)
+		if local.peerWanted == 0 {
+			break
+		}
+		peer = local.peerWanted
+		linuxPeerHints[slot].Store(uint64(peer))
+		held.drop()
+		if attempt == 1 {
+			frame.Action = linuxabi.ActionRetry
+			return
+		}
 	}
-	if set&linuxState != 0 {
-		handler.prepare()
-	}
-	result := linuxcompat.Dispatch(frame, handler)
 	wanted, wants := uint64(0), false
 	if result.Errno == linuxabi.EFAULT {
 		if wanted, wants = takeExecutableWant(task); wants {
@@ -130,7 +152,7 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		frame.Return = frame.Number
 	}
 	if set&linuxState == 0 {
-		dropLocks(set, space)
+		held.drop()
 		if frame.Action == linuxabi.ActionReturn {
 			// A stopped task skips delivery; its next call delivers.
 			if linuxLock.LockUnless(stop) {
@@ -145,7 +167,7 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		if frame.Action == linuxabi.ActionReturn {
 			handler.finish(frame)
 		}
-		dropLocks(set, space)
+		held.drop()
 	}
 	if wants {
 		frame.Action = executableCallStep(owner, wanted)
@@ -160,6 +182,10 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 		frame.Action = linuxabi.ActionExit
 	}
 }
+
+// linuxPeerHints holds, per task slot, the process whose handle table the
+// task's last file call needed.
+var linuxPeerHints [sched.MaxTasks]atomic.Uint64
 
 // executableCallStep brings in the image page a call's copy wanted, with the
 // call's locks released, and returns how the Linux call goes on: again at
@@ -222,42 +248,61 @@ func resumeLinuxSyscall(task sched.TaskID, correlation uint64, reason linuxcompa
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
 	local := thisCPU()
 	arg2 := amd64.KernelCallArg2()
-	call, ok := beginNativeCall(kcall.Operation(number))
-	if !ok {
-		return uint64(kcall.ActionRetry) << 32
+	peer := process.ID(0)
+	local.callKind, local.callNumber = 'n', number
+	for attempt := 0; ; attempt++ {
+		call, ok := beginNativeCall(kcall.Operation(number), peer)
+		if !ok {
+			return uint64(kcall.ActionRetry) << 32
+		}
+		// The handler is reused through a pointer: a struct passed as an
+		// interface would be boxed, and the kernel leaks every heap
+		// allocation.
+		local.dispatchHandler.root = root
+		local.peerWanted = 0
+		result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: arg2}, &local.dispatchHandler)
+		if local.peerWanted == 0 {
+			return call.end(uint64(result.Action)<<32 | uint64(result.Status))
+		}
+		// The call stopped before it changed anything, because it needs the
+		// handle table of the process its handles move to. It runs again
+		// holding both tables; a peer that keeps changing has it run again
+		// after a scheduling point.
+		peer = local.peerWanted
+		call.end(0)
+		if attempt == 1 {
+			return uint64(kcall.ActionRetry) << 32
+		}
 	}
-	// The handler is reused through a pointer: a struct passed as an interface
-	// would be boxed, and the kernel leaks every heap allocation.
-	local.dispatchHandler.root = root
-	result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: arg2}, &local.dispatchHandler)
-	return call.end(uint64(result.Action)<<32 | uint64(result.Status))
 }
 
 // nativeCall is the lock set a native call holds while it runs.
 type nativeCall struct {
-	set   lockSet
-	owner *process.Process
-	space *lock.RW
+	held heldLocks
 }
 
-// beginNativeCall takes the set of operation for the calling task. It
-// returns false, holding nothing, when the task is being stopped.
-func beginNativeCall(operation kcall.Operation) (nativeCall, bool) {
-	call := nativeCall{set: nativeCallLocks(operation)}
-	call.owner, call.space = callerSpace()
-	return call, takeLocks(call.set, call.space, amd64.StopWord())
+// beginNativeCall takes the set of operation for the calling task, with the
+// handle table of peer when peer is not zero. It returns false, holding
+// nothing, when the task is being stopped.
+func beginNativeCall(operation kcall.Operation, peer process.ID) (*nativeCall, bool) {
+	local := thisCPU()
+	call := &local.nativeCall
+	owner, _ := callerSpace()
+	call.held = heldLocks{set: nativeCallLocks(operation), owner: owner, peerID: peer}
+	return call, call.held.take(amd64.StopWord())
 }
 
 // end releases the call's set and returns its packed result. A copy that
 // needed a page an executable object holds left the call without effect; the
 // page is brought in with the set released and the call runs again.
-func (call nativeCall) end(packed uint64) uint64 {
-	dropLocks(call.set, call.space)
+func (call *nativeCall) end(packed uint64) uint64 {
+	owner := call.held.owner
+	call.held.drop()
 	page, wants := takeExecutableWant(amd64.CurrentTask())
-	if !wants || call.owner == nil {
+	if !wants || owner == nil {
 		return packed
 	}
-	switch executableStep(call.owner, page, false, false) {
+	switch executableStep(owner, page, false, false) {
 	case pageMapped, pageRetry:
 		return uint64(kcall.ActionRetry) << 32
 	case pageParked:

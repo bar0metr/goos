@@ -130,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -693,6 +693,17 @@ test-linux-7zip:
 	@$(MAKE) --no-print-directory test-disk DIAG=1 LINUX_EXTRA=$(abspath $(LINUX_EXTRA)) TEST_DISK=$(BUILD_DIR)/linux-7zip-virtio-blk.img
 	@MEMORY=1G SMP=$(or $(SMP),4) tests/boot/linux_7zip.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-7zip-virtio-blk.img $(abspath $(LINUX_EXTRA))
 
+# Profiles the kernel's locks (ADR 0187): a diagnostic guest with SMP
+# processors, four by default, runs the probe's smp, kernel, and domains
+# workloads, native file copies, and with LINUX_EXTRA naming a 7zzs a 7-Zip
+# archive, and build/reports/lock-profile.md gives each workload's
+# acquisitions and contention per lock level.
+#   make profile-locks [LINUX_EXTRA=/path/to/7zzs] [SMP=4]
+profile-locks:
+	@$(MAKE) --no-print-directory iso DIAG=1
+	@$(MAKE) --no-print-directory test-disk DIAG=1 $(if $(LINUX_EXTRA),LINUX_EXTRA=$(abspath $(LINUX_EXTRA))) TEST_DISK=$(BUILD_DIR)/lock-profile-virtio-blk.img
+	@MEMORY=1G SMP=$(or $(SMP),4) tests/boot/lock_profile.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/lock-profile-virtio-blk.img $(if $(LINUX_EXTRA),$(notdir $(LINUX_EXTRA)))
+
 # Times four Linux calls beside their native counterparts in one guest and
 # writes build/reports/linux-abi-<variant>.md. The numbers depend on the host.
 test-linux-bench: iso
@@ -807,6 +818,7 @@ help:
 	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
 	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
+	  '  profile-locks [LINUX_EXTRA=path]  lock acquisitions and contention per workload on SMP=4' \
 	  '  test-linux-bench time Linux calls beside native ones into build/reports' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \

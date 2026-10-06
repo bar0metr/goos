@@ -142,11 +142,38 @@ func (handler *linuxCallHandler) vfsExchange(operation vfs.Request, attachment v
 		return vfs.Reply{}, handler.vfsFailed(), false
 	}
 	if !pending.Issued {
+		if handler.vfsWantsPeer(state, operation, attachment) {
+			// Nothing is sent and the continuation stays ready at this
+			// stage; the dispatcher enters the call again holding the VFS
+			// service's handle table, and the call resumes here.
+			return vfs.Reply{}, 0, true
+		}
 		if errno := handler.vfsIssue(pending.Stage, operation, attachment); errno != 0 {
 			return vfs.Reply{}, errno, false
 		}
 	}
 	return handler.vfsReply(operation.Operation)
+}
+
+// vfsWantsPeer reports whether a request that moves a handle to the VFS
+// service needs that service's handle table, which the call does not hold,
+// and asks the dispatcher for it.
+func (handler *linuxCallHandler) vfsWantsPeer(state *linuxcompat.ProcessState, operation vfs.Request, attachment vfsAttachment) bool {
+	if attachment == attachPaths && vfs.FitsInline(operation) {
+		return false
+	}
+	_, _, channelID, side, reachable := handler.vfsEndpoint(state)
+	if !reachable {
+		return false
+	}
+	peerObject, _ := ipc.EndpointObject(channelID, side^1)
+	peer, found := processRegistry.EndpointHolder(peerObject)
+	local := thisCPU()
+	if !found || local.linuxCall.holdsPeer(peer) {
+		return false
+	}
+	local.peerWanted = peer.ID()
+	return true
 }
 
 // vfsIssue sends one request. The continuation is marked issued before the
@@ -168,6 +195,7 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 	if !contextFound {
 		return handler.vfsFailed()
 	}
+	needsPeer := attachment != attachPaths || !vfs.FitsInline(operation)
 	correlation, fresh := context.Session.Next()
 	if !reachable || !fresh {
 		return handler.vfsFailed()
@@ -175,13 +203,14 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 	var transfers [1]ipc.Transfer
 	var peerHandles *handle.Table
 	attached := 0
-	if attachment != attachPaths || !vfs.FitsInline(operation) {
+	if needsPeer {
 		peerObject, _ := ipc.EndpointObject(channelID, side^1)
-		peer, _ := processRegistry.ByCapabilityObject(handle.TypeChannel, peerObject)
+		peer, _ := processRegistry.EndpointHolder(peerObject)
 		if peer == nil {
 			context.Session.Fail()
 			return handler.vfsFailed()
 		}
+
 		rights := capability.Read
 		var object handle.ID
 		var granted bool

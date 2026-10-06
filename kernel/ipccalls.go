@@ -157,7 +157,7 @@ func (handler nativeCallHandler) endpoint(channel uint64, required capability.Ri
 		return nil, 0, nil, nil, kcall.StatusNotFound
 	}
 	peerObject, _ := ipc.EndpointObject(channelID, side^1)
-	peer, _ := processRegistry.ByCapabilityObject(handle.TypeChannel, peerObject)
+	peer, _ := processRegistry.EndpointHolder(peerObject)
 	return endpoint, side, owner, peer, kcall.StatusOK
 }
 
@@ -192,6 +192,9 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	if transferCount != 0 && peerHandles == nil {
 		return kcall.StatusPeerDied
 	}
+	if transferCount != 0 && !wantPeerTable(peer) {
+		return kcall.StatusOK
+	}
 	for index := 0; index < transferCount; index++ {
 		typeID, attached, found := owner.Handles().Describe(message.Handles[index])
 		if !found || !attached.Allows(capability.Transfer) {
@@ -213,6 +216,10 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	message.HandleCount = 0
 	for index := range message.Handles {
 		message.Handles[index] = 0
+	}
+	if transferCount == 0 {
+		// Only a message that moves handles reaches the peer's table.
+		peerHandles = nil
 	}
 	status = endpoint.Send(side, message, owner.Handles(), peerHandles, transfers[:transferCount])
 	if status == ipc.StatusOK {
@@ -239,6 +246,18 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	}
 	handler.recordInitSend(status)
 	return status
+}
+
+// wantPeerTable reports whether the native call holds peer's handle table.
+// When it does not, it asks for it: the call has changed nothing yet, and the
+// dispatcher runs it again holding the table.
+func wantPeerTable(peer *process.Process) bool {
+	local := thisCPU()
+	if local.nativeCall.held.holdsPeer(peer) {
+		return true
+	}
+	local.peerWanted = peer.ID()
+	return false
 }
 
 func (handler nativeCallHandler) recordInitSend(status kcall.Status) {
@@ -380,7 +399,7 @@ func expireIPCWaiters() {
 
 //export goos_dispatch_ipc_wait
 func dispatchIPCWait(channel uint64, descriptor uint64, size uint64, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationIPCWaitReceive)
+	call, ok := beginNativeCall(kcall.OperationIPCWaitReceive, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}

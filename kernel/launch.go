@@ -75,9 +75,9 @@ const launchLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | 
 
 // consumeInitControl serves one request PID 1 sent on the lifecycle channel.
 func consumeInitControl() {
-	takeLocks(launchLocks, nil, nil)
+	held := takeLocks(launchLocks, bootInitProcess)
 	consumeInitControlLocked()
-	dropLocks(launchLocks, nil)
+	held.drop()
 }
 
 func consumeInitControlLocked() {

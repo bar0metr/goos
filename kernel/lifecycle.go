@@ -16,7 +16,6 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
-	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -42,29 +41,20 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	return kcall.StatusOK
 }
 
-// exitLocks is the set an exit takes, besides the address space of the
-// task's process and the executable table, which come after it in level
-// order.
-const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+// exitLocks is the set an exit takes; the handle table and address space
+// are those of the task's process.
+const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory | spaceWrite | executableTable
 
 // deliverProcessExits runs, on the housekeeping task, the teardown of every
-// task whose exit the scheduler has published, one task at a time.
+// task whose exit the scheduler has published, one task at a time. The
+// task-to-process map still names the task's process: only this teardown
+// clears the entry.
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
-		takeLocks(exitLocks, nil, nil)
-		owner, _ := processRegistry.ByTask(sched.TaskID(task))
-		var space *lock.RW
-		if owner != nil {
-			space = owner.Space()
-			space.Lock()
-		}
-		executableLock.Lock()
+		owner, _ := processRegistry.Owner(sched.TaskID(task))
+		held := takeLocks(exitLocks, owner)
 		released := deliverTaskExit(task)
-		executableLock.Unlock()
-		if space != nil {
-			space.Unlock()
-		}
-		dropLocks(exitLocks, nil)
+		held.drop()
 		// The slot is cleared only now: its locks lived in it.
 		if released != nil {
 			released.Reset()

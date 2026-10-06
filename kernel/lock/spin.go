@@ -56,6 +56,9 @@ const (
 	// stream waits, process waits, multi-object waits, and the Linux call
 	// continuations. None is taken while another is held.
 	LevelWait
+	// LevelHandleIndex is the index of which processes hold each channel
+	// endpoint, taken briefly by handle tables as they change.
+	LevelHandleIndex
 	// LevelLog is the kernel log and the diagnostic trace ring.
 	LevelLog
 	// LevelMemory is the physical page allocator.
@@ -76,7 +79,7 @@ const Levels = int(levelCount)
 
 var levelNames = [levelCount]string{
 	"none", "registry", "linux", "lifecycle", "handle", "channel",
-	"stream", "shmem", "address-space", "executable", "futex", "wait", "log",
+	"stream", "shmem", "address-space", "executable", "futex", "wait", "handle-index", "log",
 	"memory", "random", "scheduler", "console",
 }
 
@@ -132,6 +135,8 @@ var (
 
 // Stats is the contention of one level since boot.
 type Stats struct {
+	// Acquired counts every acquisition.
+	Acquired uint64
 	// Contended counts acquisitions that had to spin.
 	Contended uint64
 	// Spin is the total time those acquisitions spun, in the clock's units.
@@ -147,6 +152,20 @@ var stats [levelCount]struct {
 	spin      atomic.Uint64
 	longest   atomic.Uint64
 	stuck     atomic.Uint64
+}
+
+// acquisitions counts each processor's acquisitions per level. Every
+// processor adds to its own row, so the count costs no shared cache line.
+var acquisitions [MaxCPUs][levelCount]atomic.Uint64
+
+// count records one acquisition of level by the calling processor.
+func count(level Level) {
+	if hooks.CPU == nil || level >= levelCount {
+		return
+	}
+	if cpu := hooks.CPU(); cpu < MaxCPUs {
+		acquisitions[cpu][level].Add(1)
+	}
 }
 
 // contended counts acquisitions that had to wait, over every level.
@@ -384,7 +403,12 @@ func Statistics(level Level) Stats {
 	if level >= levelCount {
 		return Stats{}
 	}
+	acquired := uint64(0)
+	for cpu := range acquisitions {
+		acquired += acquisitions[cpu][level].Load()
+	}
 	return Stats{
+		Acquired:  acquired,
 		Contended: stats[level].contended.Load(),
 		Spin:      stats[level].spin.Load(),
 		Longest:   stats[level].longest.Load(),
@@ -421,6 +445,7 @@ func (lock *Spin) enter(first *Spin) uint32 {
 }
 
 func (lock *Spin) acquired(cpu uint32) {
+	count(lock.level())
 	if !validation.Enabled {
 		return
 	}

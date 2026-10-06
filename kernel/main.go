@@ -165,6 +165,11 @@ func panicSerial(message string) {
 	console.WriteUint(uint64(amd64.CPUIndex()))
 	console.WriteString(" APIC ")
 	console.WriteUint(uint64(amd64.LocalAPICID()))
+	if local := cpuScratches[amd64.CPUIndex()]; local != nil && local.callKind != 0 {
+		console.WriteString(" last call ")
+		console.WriteByte(local.callKind)
+		console.WriteUint(local.callNumber)
+	}
 	console.WriteString("\n")
 	for {
 		amd64.Halt()
@@ -646,7 +651,7 @@ func bootContinue() {
 	// does.
 	installLockGuards()
 	flags := amd64.DisableInterrupts()
-	takeLocks(launchLocks, nil, nil)
+	held := takeLocks(launchLocks, initProcess)
 	bringProcessorsOnline()
 	if pagesUsed := initPagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !initProcess.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		panicSerial("PID 1 exceeded its page quota")
@@ -658,7 +663,7 @@ func bootContinue() {
 	if validation.Enabled {
 		startSelfTestTasks()
 	}
-	dropLocks(launchLocks, nil)
+	held.drop()
 	amd64.RestoreInterrupts(flags)
 	if validation.Enabled {
 		awaitValidationBoot()
@@ -725,9 +730,9 @@ func serviceKernel() {
 	}
 	stirRandom()
 	expireWaitDeadlines()
-	takeLocks(lifecycleQueue|channels, nil, nil)
+	held := takeLocks(lifecycleQueue|channels, nil)
 	flushLifecycle()
-	dropLocks(lifecycleQueue|channels, nil)
+	held.drop()
 	deliverProcessExits()
 	consumeInitControl()
 	amd64.RestoreInterrupts(flags)

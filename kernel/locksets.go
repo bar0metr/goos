@@ -33,115 +33,175 @@ const (
 	spaceRead
 	spaceWrite
 	executableTable
+	// peerTable marks, in what a call took, a second process's handle table.
+	peerTable
 )
 
-// takeLocks takes set in level order; space is the address-space lock the
-// set names, if any. When stop turns nonzero it releases what it took and
-// returns false.
-func takeLocks(set lockSet, space *lock.RW, stop *uint64) bool {
-	taken := lockSet(0)
+// heldLocks is what a call holds: its set, the process whose handle table
+// and address space the set names, and a second process whose handle table
+// it also holds for writing, the peer a message's handles move to. A peer is
+// named by ID and found once the registry is held.
+type heldLocks struct {
+	set    lockSet
+	owner  *process.Process
+	peerID process.ID
+	peer   *process.Process
+	taken  lockSet
+}
+
+// take takes the set in level order, the two handle tables lower rank first.
+// When stop turns nonzero it releases what it took and returns false.
+func (held *heldLocks) take(stop *uint64) bool {
+	set := held.set
+	held.taken, held.peer = 0, nil
 	ok := true
 	switch {
 	case set&registryWrite != 0:
-		ok = registryLock.LockUnless(stop)
-		taken |= registryWrite
+		ok = held.mark(registryWrite, registryLock.LockUnless(stop))
 	case set&registryRead != 0:
-		ok = registryLock.RLockUnless(stop)
-		taken |= registryRead
+		ok = held.mark(registryRead, registryLock.RLockUnless(stop))
+	}
+	if ok && held.peerID != 0 && held.taken&(registryRead|registryWrite) != 0 {
+		if peer, found := processRegistry.ByID(held.peerID); found && peer != held.owner {
+			held.peer = peer
+		}
 	}
 	if ok && set&linuxState != 0 {
-		ok = linuxLock.LockUnless(stop)
-		taken |= linuxState
+		ok = held.mark(linuxState, linuxLock.LockUnless(stop))
 	}
 	if ok && set&lifecycleQueue != 0 {
-		ok = lifecycleLock.LockUnless(stop)
-		taken |= lifecycleQueue
+		ok = held.mark(lifecycleQueue, lifecycleLock.LockUnless(stop))
 	}
-	if ok && set&handleWrite != 0 {
-		ok = handleLock.LockUnless(stop)
-		taken |= handleWrite
-	} else if ok && set&handleRead != 0 {
-		ok = handleLock.RLockUnless(stop)
-		taken |= handleRead
+	if ok && set&(handleRead|handleWrite) != 0 && held.owner != nil {
+		ok = held.takeTables(stop)
 	}
 	if ok && set&channels != 0 {
-		ok = channelLock.LockUnless(stop)
-		taken |= channels
+		ok = held.mark(channels, channelLock.LockUnless(stop))
 	}
 	if ok && set&streams != 0 {
-		ok = streamLock.LockUnless(stop)
-		taken |= streams
+		ok = held.mark(streams, streamLock.LockUnless(stop))
 	}
 	if ok && set&sharedMemory != 0 {
-		ok = shmemLock.LockUnless(stop)
-		taken |= sharedMemory
+		ok = held.mark(sharedMemory, shmemLock.LockUnless(stop))
 	}
-	if ok && space != nil && set&spaceWrite != 0 {
-		ok = space.LockUnless(stop)
-		taken |= spaceWrite
-	} else if ok && space != nil && set&spaceRead != 0 {
-		ok = space.RLockUnless(stop)
-		taken |= spaceRead
+	if ok && held.owner != nil && set&spaceWrite != 0 {
+		ok = held.mark(spaceWrite, held.owner.Space().LockUnless(stop))
+	} else if ok && held.owner != nil && set&spaceRead != 0 {
+		ok = held.mark(spaceRead, held.owner.Space().RLockUnless(stop))
 	}
 	if ok && set&executableTable != 0 {
-		ok = executableLock.LockUnless(stop)
-		taken |= executableTable
+		ok = held.mark(executableTable, executableLock.LockUnless(stop))
 	}
 	if !ok {
-		// The last lock in taken is the one that was not acquired.
-		dropLocks(taken&^highest(taken), space)
+		held.drop()
 		return false
 	}
 	return true
 }
 
-// highest returns the last lock takeLocks attempts of those in set.
-func highest(set lockSet) lockSet {
-	for bit := executableTable; bit != 0; bit >>= 1 {
-		if set&bit != 0 {
-			return bit
-		}
+// mark records lock as taken when acquired is true and returns acquired.
+func (held *heldLocks) mark(lock lockSet, acquired bool) bool {
+	if acquired {
+		held.taken |= lock
 	}
-	return 0
+	return acquired
 }
 
-// dropLocks releases set in the reverse of the order takeLocks took it.
-func dropLocks(set lockSet, space *lock.RW) {
-	if set&executableTable != 0 {
+// takeTables takes the owner's handle table, for writing when the set says
+// so, and the peer's for writing, the lower-ranked first.
+func (held *heldLocks) takeTables(stop *uint64) bool {
+	own := held.owner.Handles().Lock()
+	write := held.set&handleWrite != 0
+	if held.peer == nil {
+		if write {
+			return held.mark(handleWrite, own.LockUnless(stop))
+		}
+		return held.mark(handleRead, own.RLockUnless(stop))
+	}
+	peer := held.peer.Handles().Lock()
+	if peer.Rank() < own.Rank() {
+		if !peer.LockUnless(stop) {
+			return false
+		}
+		held.taken |= peerTable
+		if write {
+			return held.mark(handleWrite, own.LockAfter(peer, stop))
+		}
+		return held.mark(handleRead, own.RLockAfter(peer, stop))
+	}
+	if write {
+		if !held.mark(handleWrite, own.LockUnless(stop)) {
+			return false
+		}
+	} else if !held.mark(handleRead, own.RLockUnless(stop)) {
+		return false
+	}
+	return held.mark(peerTable, peer.LockAfter(own, stop))
+}
+
+// holdsPeer reports whether the call holds peer's handle table: the
+// caller's own table, or the peer's it took.
+func (held *heldLocks) holdsPeer(peer *process.Process) bool {
+	return peer == held.owner || peer != nil && peer == held.peer && held.taken&peerTable != 0
+}
+
+// drop releases what take took, in the reverse order.
+func (held *heldLocks) drop() {
+	taken := held.taken
+	held.taken = 0
+	if taken&executableTable != 0 {
 		executableLock.Unlock()
 	}
-	if space != nil {
-		if set&spaceWrite != 0 {
-			space.Unlock()
-		} else if set&spaceRead != 0 {
-			space.RUnlock()
-		}
+	if taken&spaceWrite != 0 {
+		held.owner.Space().Unlock()
+	} else if taken&spaceRead != 0 {
+		held.owner.Space().RUnlock()
 	}
-	if set&sharedMemory != 0 {
+	if taken&sharedMemory != 0 {
 		shmemLock.Unlock()
 	}
-	if set&streams != 0 {
+	if taken&streams != 0 {
 		streamLock.Unlock()
 	}
-	if set&channels != 0 {
+	if taken&channels != 0 {
 		channelLock.Unlock()
 	}
-	if set&handleWrite != 0 {
-		handleLock.Unlock()
-	} else if set&handleRead != 0 {
-		handleLock.RUnlock()
+	// The second table taken goes first.
+	own, peerFirst := (*lock.RW)(nil), false
+	if held.owner != nil {
+		own = held.owner.Handles().Lock()
+		peerFirst = taken&peerTable != 0 && held.peer.Handles().Lock().Rank() < own.Rank()
 	}
-	if set&lifecycleQueue != 0 {
+	if taken&peerTable != 0 && !peerFirst {
+		held.peer.Handles().Lock().Unlock()
+	}
+	if taken&handleWrite != 0 {
+		own.Unlock()
+	} else if taken&handleRead != 0 {
+		own.RUnlock()
+	}
+	if taken&peerTable != 0 && peerFirst {
+		held.peer.Handles().Lock().Unlock()
+	}
+	if taken&lifecycleQueue != 0 {
 		lifecycleLock.Unlock()
 	}
-	if set&linuxState != 0 {
+	if taken&linuxState != 0 {
 		linuxLock.Unlock()
 	}
-	if set&registryWrite != 0 {
+	if taken&registryWrite != 0 {
 		registryLock.Unlock()
-	} else if set&registryRead != 0 {
+	} else if taken&registryRead != 0 {
 		registryLock.RUnlock()
 	}
+}
+
+// takeLocks takes set for owner, which may be nil when the set names no
+// handle table or address space, and never gives up.
+func takeLocks(set lockSet, owner *process.Process) heldLocks {
+	held := heldLocks{set: set, owner: owner}
+	held.take(nil)
+	return held
 }
 
 // callerSpace is the address-space lock of the calling task's process.
@@ -203,8 +263,11 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		return registryRead | handleRead | channels | streams | spaceRead
 	case kcall.OperationProcessKill:
 		return registryRead | linuxState | handleRead | channels | streams | spaceRead
+	case kcall.OperationDiagnostics:
+		// The dump takes the locks of each part as it prints it.
+		return 0
 	}
-	// Diagnostics, and any operation not named above, see everything.
+	// An operation not named above sees everything.
 	return callEvery
 }
 

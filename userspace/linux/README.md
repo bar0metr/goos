@@ -133,7 +133,7 @@ Linker flags:
 | `prebuilt/musl-hello` | `0219392433258d1b91944fdaf4d8ee5b1bad7d6eb9ad7871bc8cc4efd7efbf5f` |
 | `prebuilt/fsprobe` | `7e1b34187f159cbf673d3a95c2ae366aba88f0aae6ad88fd284f51d1e24b3cc6` |
 | `prebuilt/dirprobe` | `6d4767fffedf1e8d820fce56ea791aa813721e1552cd93cdedf4c4151e54ddca` |
-| `prebuilt/abi-probe` | `351ef7b220525e4c1dae2779543a59c8a441778f23d56782235a33488f0c446c` |
+| `prebuilt/abi-probe` | `f5e740f264c5845c7b793b80bec7da4fc8d998cdf1789c7e494325aed78b902e` |
 
 `fixtures.go` embeds the binaries and repeats the checksums. `go test
 ./userspace/linux` fails when a pair disagrees, and when the kernel ELF

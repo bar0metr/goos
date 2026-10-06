@@ -50,7 +50,10 @@ func traceDeniedInterests(root, address, count uint64) {
 
 // traceAddress reports the physical page behind a user address, whether the
 // allocator and kernel image own it, and every other mapping or kernel stack
-// that reaches the same page.
+// that reaches the same page. The caller holds the registry and root's
+// address space for reading. Other processes' page tables are read without
+// their locks, since a processor may hold one address-space lock at a time;
+// a mapping another processor removes meanwhile may still be reported.
 func traceAddress(out diagWriter, root, address uint64) {
 	physical, mapped := vm.ResolveUser(root, address)
 	page := physical &^ (vm.PageSize - 1)
@@ -146,16 +149,14 @@ func auditAddressSpace(out diagWriter, root uint64) {
 	out.end()
 }
 
+// pidOfTask names a task's process for a trace record. Traces are taken
+// under any locks, so it reads the task-to-process map without the
+// registry's lock; a task that exits meanwhile may be named 0.
 func pidOfTask(task sched.TaskID) process.ID {
-	for index := 0; ; index++ {
-		owner, found := processRegistry.At(index)
-		if !found {
-			return 0
-		}
-		if owner.OwnsTask(task) {
-			return owner.ID()
-		}
+	if owner, found := processRegistry.Owner(task); found {
+		return owner.ID()
 	}
+	return 0
 }
 
 // Diagnostics prints a kernel state dump on the serial console in goos_diag
@@ -169,16 +170,29 @@ func (handler nativeCallHandler) Diagnostics(device uint64, address uint64) kcal
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
-	authority, allowed := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
+	authority, allowed := lookupHandle(owner, handle.ID(device), handle.TypeDevice, capability.Write)
 	if !allowed || authority.Object() != 1 {
 		return kcall.StatusPermissionDenied
 	}
 	dumpDiagnostics(owner.ID())
 	if address != 0 {
+		registryLock.RLock()
+		owner.Space().RLock()
 		traceAddress(diagWriter{console: kernelconsole.New()}, handler.root, address)
+		owner.Space().RUnlock()
+		registryLock.RUnlock()
 	}
 	return kcall.StatusOK
 }
+
+// The dump prints slowly, over the serial port, so it holds no lock across
+// the whole of it: each process and each channel is printed under the
+// locks of its own domains, and other calls run between them. A dump of a
+// busy machine is therefore not one instant's state.
+const (
+	processDumpLocks = handleRead | channels | streams
+	channelDumpLocks = registryRead | channels
+)
 
 type diagWriter struct{ console kernelconsole.Writer }
 
@@ -237,16 +251,16 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("shootdown-ipis", targets)
 	out.uint("shootdown-timeouts", timeouts)
 	out.end()
-	// One line per lock level that ever had to wait; spin times are TSC
-	// cycles.
+	// One line per lock level ever taken; spin times are TSC cycles.
 	for level := lock.Level(1); int(level) < lock.Levels; level++ {
 		stats := lock.Statistics(level)
-		if stats.Contended == 0 {
+		if stats.Acquired == 0 {
 			continue
 		}
 		out.text("DIAG lock")
 		out.console.WriteString(" level=")
 		out.console.WriteString(level.String())
+		out.uint("acquired", stats.Acquired)
 		out.uint("contended", stats.Contended)
 		out.uint("spin", stats.Spin)
 		out.uint("longest", stats.Longest)
@@ -267,33 +281,23 @@ func dumpDiagnostics(requester process.ID) {
 		out.end()
 	}
 	for index := 0; ; index++ {
+		registryLock.RLock()
 		owner, found := processRegistry.At(index)
+		if found {
+			// The registry stays held, so the process stays.
+			held := takeLocks(processDumpLocks, owner)
+			dumpProcess(out, owner, state)
+			held.drop()
+		}
+		registryLock.RUnlock()
 		if !found {
 			break
 		}
-		dumpProcess(out, owner, state)
 	}
 	for index := 0; index < ipc.MaxChannels; index++ {
-		id, channel, found := channelRegistry.At(index)
-		if !found {
-			continue
-		}
-		out.text("DIAG channel")
-		out.hex("id", id)
-		out.uint("alive0", boolValue(channel.Alive(0)))
-		out.uint("alive1", boolValue(channel.Alive(1)))
-		out.uint("queued0", uint64(channel.Queued(0)))
-		out.uint("queued1", uint64(channel.Queued(1)))
-		out.uint("pending0", uint64(channel.Pending(0)))
-		out.uint("pending1", uint64(channel.Pending(1)))
-		for side := uint8(0); side <= 1; side++ {
-			object, _ := ipc.EndpointObject(id, side)
-			holder, held := processRegistry.ByCapabilityObject(handle.TypeChannel, object)
-			if held {
-				out.uint(sideName(side), uint64(holder.ID()))
-			}
-		}
-		out.end()
+		held := takeLocks(channelDumpLocks, nil)
+		dumpChannel(out, index)
+		held.drop()
 	}
 	for slot := 0; slot < sched.MaxTasks; slot++ {
 		view, found := waitAnyTable.At(slot)
@@ -328,8 +332,11 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("stream", uint64(streamWaitSet.Count()))
 	out.uint("process", uint64(processWaitSet.Count()))
 	out.uint("waitany", uint64(waitAnyTable.Count()))
-	out.uint("lifecycle-pending", uint64(pendingLifecycleCount))
-	out.uint("lifecycle-overflows", lifecycleOverflows)
+	lifecycleLock.Lock()
+	pending, overflows := pendingLifecycleCount, lifecycleOverflows
+	lifecycleLock.Unlock()
+	out.uint("lifecycle-pending", uint64(pending))
+	out.uint("lifecycle-overflows", overflows)
 	out.end()
 	unsupported := linuxcompat.Unsupported()
 	sessions := linuxcompat.VFSStatistics()
@@ -446,6 +453,31 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 		}
 		out.end()
 	}
+}
+
+// dumpChannel prints the channel in slot index, if one is there. The
+// registry, handle, and channel locks are held.
+func dumpChannel(out diagWriter, index int) {
+	id, channel, found := channelRegistry.At(index)
+	if !found {
+		return
+	}
+	out.text("DIAG channel")
+	out.hex("id", id)
+	out.uint("alive0", boolValue(channel.Alive(0)))
+	out.uint("alive1", boolValue(channel.Alive(1)))
+	out.uint("queued0", uint64(channel.Queued(0)))
+	out.uint("queued1", uint64(channel.Queued(1)))
+	out.uint("pending0", uint64(channel.Pending(0)))
+	out.uint("pending1", uint64(channel.Pending(1)))
+	for side := uint8(0); side <= 1; side++ {
+		object, _ := ipc.EndpointObject(id, side)
+		holder, held := processRegistry.EndpointHolder(object)
+		if held {
+			out.uint(sideName(side), uint64(holder.ID()))
+		}
+	}
+	out.end()
 }
 
 func sideName(side uint8) string {

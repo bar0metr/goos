@@ -23,10 +23,9 @@ import (
 )
 
 var (
-	// registryLock and handleLock are read far more often than written, so
-	// readers share them.
+	// registryLock is read far more often than written, so readers share
+	// it. Each process's handle table has a lock of its own (ADR 0187).
 	registryLock lock.RW
-	handleLock   lock.RW
 
 	linuxLock      = lock.New(lock.LevelLinux)
 	lifecycleLock  = lock.New(lock.LevelLifecycle)
@@ -38,7 +37,6 @@ var (
 
 func init() {
 	registryLock.SetLevel(lock.LevelRegistry)
-	handleLock.SetLevel(lock.LevelHandle)
 }
 
 // consoleInputLock serializes the readers of the console input rings. Each
@@ -60,7 +58,6 @@ func installLockGuards() {
 	process.Guard(&registryLock)
 	processRegistry.GuardSpaces()
 	linuxcompat.Guard(linuxLock)
-	handle.Guard(&handleLock)
 	ipc.Guard(channelLock)
 	stream.Guard(streamLock)
 	executable.Guard(executableLock)
@@ -95,8 +92,9 @@ func (handler *linuxCallHandler) self() (*process.Process, bool) {
 
 // lookupHandle resolves one of the caller's handles under the handle lock.
 func lookupHandle(owner *process.Process, id handle.ID, typeID handle.Type, required capability.Rights) (capability.Capability, bool) {
-	handleLock.RLock()
-	authority, allowed := owner.Handles().Lookup(id, typeID, required)
-	handleLock.RUnlock()
+	table := owner.Handles()
+	table.Lock().RLock()
+	authority, allowed := table.Lookup(id, typeID, required)
+	table.Lock().RUnlock()
 	return authority, allowed
 }

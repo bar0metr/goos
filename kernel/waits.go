@@ -102,7 +102,7 @@ func expireProcessWaiters() {
 
 //export goos_dispatch_process_wait
 func dispatchProcessWait(processHandle uint64, resultAddress uint64, timeout uint64, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationProcessWait)
+	call, ok := beginNativeCall(kcall.OperationProcessWait, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
@@ -147,7 +147,7 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 
 //export goos_dispatch_irq_wait
 func dispatchIRQWait(irqHandle uint64, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationIRQWait)
+	call, ok := beginNativeCall(kcall.OperationIRQWait, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
@@ -434,7 +434,7 @@ func expireWaitAny() {
 
 //export goos_dispatch_wait_any
 func dispatchWaitAny(interestsAddress, count, resultAddress, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationWaitAny)
+	call, ok := beginNativeCall(kcall.OperationWaitAny, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}

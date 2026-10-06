@@ -133,6 +133,15 @@ type cpuScratch struct {
 	// vmPieces is the scratch the protection and discard checks inspect.
 	vmPieces     region.Pieces
 	startupChunk [512]byte
+	// nativeCall is the lock set of the native call the processor runs, and
+	// peerWanted the process whose handle table that call asked for.
+	nativeCall nativeCall
+	linuxCall  heldLocks
+	peerWanted process.ID
+	// call names the call the processor runs, for a panic report: 'n' and
+	// the native operation, 'l' and the Linux number, or zero.
+	callKind   byte
+	callNumber uint64
 }
 
 // cpuScratches holds each started processor's scratch. The bootstrap
