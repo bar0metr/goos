@@ -2234,11 +2234,15 @@ goos_ap_trampoline:
     movq (.L_ap_entry - goos_ap_trampoline)(%rbx), %rax
     jmpq *%rax
 .balign 8
+// The descriptors carry their accessed bit already. A processor loads the
+// 64-bit code selector after paging is on, from this page, which the
+// trampoline root maps read-only; with CR0.WP set, the write that marks a
+// descriptor accessed would fault there with no IDT to take it.
 .L_ap_gdt:
     .quad 0
-    .quad 0x00cf9a000000ffff
-    .quad 0x00cf92000000ffff
-    .quad 0x00af9a000000ffff
+    .quad 0x00cf9b000000ffff
+    .quad 0x00cf93000000ffff
+    .quad 0x00af9b000000ffff
 .L_ap_gdtr:
     .word 31
     .long 0

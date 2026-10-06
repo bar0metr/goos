@@ -296,3 +296,10 @@ The first runs on a Xeon Gold 6240 node (PVE 7.4, QEMU 7.2):
   archives: two threads shared one kernel file I/O buffer. ADR 0177 adds
   threads with a buffer each; the round trip passes with 7-Zip's default
   thread count.
+- With processors started (ADR 0181), every boot under KVM reset the VM as
+  the first application processor entered long mode. The start-up
+  trampoline's GDT had clear accessed bits; the processor loads the 64-bit
+  code selector after paging is on, writes the accessed bit, and the
+  trampoline page is mapped read-only with CR0.WP set, so the write faulted
+  with no IDT. TCG never writes the bit. The descriptors now carry it, and
+  `test-pve-smp` passes on 2 sockets x 2 cores.
