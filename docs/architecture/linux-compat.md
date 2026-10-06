@@ -109,12 +109,13 @@ bounded diagnostics without per-call logging.
 
 Every Linux call takes a lock set by class (ADR 0184). `futex`,
 `sched_yield`, the identity calls, `uname`, the clocks, `getrandom`,
-`sched_getaffinity`, and `getcpu` hold only their address space for reading;
-the dispatcher takes the Linux lock just before such a call, to find the
-process state and thread ID and select the thread's signal mask, and just
-after it, to deliver signals. The mapping calls write the address space,
-the process calls take the registry for writing, and every other call holds
-the Linux lock throughout. A futex word is read with its hash bucket locked,
+`sched_getaffinity`, and `getcpu` hold only their address space for reading.
+They find the process state and thread ID in a per-task cache and take
+their family's lock after the call only when a signal is pending, to deliver
+it. The mapping calls write the address space, the process calls take the
+registry for writing, and every other call holds its family's lock
+throughout (ADR 0187). A family is the processes one launch forked; the
+personality's shared tables lock themselves for each operation. A futex word is read with its hash bucket locked,
 so a wake cannot fall between the read and the sleep.
 
 Every handler must validate flags and lengths before copying

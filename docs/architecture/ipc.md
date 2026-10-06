@@ -28,8 +28,9 @@ retain the source; the native `IPCSend` boundary applies move semantics after a
 successful send and strips Transfer authority from the receiver.
 
 Closing one endpoint prevents further sends. Its peer may drain already queued
-messages and then receives `PeerDied`. Callers hold the channel lock, and
-the handle lock for writing when handles move (ADR 0184). Userspace accesses channels only through
+messages and then receives `PeerDied`. Each channel has its own lock, held
+for one operation; a call that moves handles holds both processes' handle
+tables for writing, the lower process ID first (ADR 0187). Userspace accesses channels only through
 capability-checked handles, never through kernel object addresses. Each channel
 capability identifies one endpoint side. PID 1 may create a bounded channel pair
 through the native call ABI. Userspace IPC attachments use move semantics and

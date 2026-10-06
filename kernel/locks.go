@@ -107,7 +107,7 @@ func (handler *linuxCallHandler) self() (*process.Process, bool) {
 	return ownerOf(handler.task, handler.root)
 }
 
-// lookupHandle resolves one of the caller's handles under the handle lock.
+// lookupHandle resolves one of the caller's handles under its table's lock.
 func lookupHandle(owner *process.Process, id handle.ID, typeID handle.Type, required capability.Rights) (capability.Capability, bool) {
 	table := owner.Handles()
 	table.Lock().RLock()
