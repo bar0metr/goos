@@ -2,6 +2,7 @@ package linux
 
 import (
 	"encoding/binary"
+	"sync/atomic"
 
 	"goos/kernel/compat/linux/abi"
 )
@@ -77,20 +78,18 @@ func DefaultIgnored(signal uint64) bool { return signal == abi.SignalChild }
 // CopyFrom gives state the mask and dispositions of source, as fork does.
 // Pending signals stay with source.
 func (state *SignalState) CopyFrom(source *SignalState) {
-	guard.Check()
 	state.mask = source.mask
 	if source.restore {
 		state.mask = source.saved
 	}
 	state.saved, state.restore = 0, false
-	state.pending = 0
+	atomic.StoreUint64(&state.pending, 0)
 	copy(state.actions[:], source.actions[:])
 	clear(state.info[:])
 }
 
 // ActionOf decodes the disposition of signal.
 func (state *SignalState) ActionOf(signal uint64) SignalAction {
-	guard.Check()
 	if signal == 0 || signal > abi.SignalCount {
 		return SignalAction{}
 	}
@@ -112,7 +111,6 @@ func (state *SignalState) ignored(signal uint64) bool {
 // discarded, as Linux discards it; SIGKILL is never ignored. It reports
 // whether the signal is pending afterwards.
 func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
-	guard.Check()
 	if state == nil || !DeliverableSignal(signal) {
 		return false
 	}
@@ -121,7 +119,7 @@ func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
 		return false
 	}
 	if state.pending&bit == 0 {
-		state.pending |= bit
+		atomic.StoreUint64(&state.pending, state.pending|bit)
 		state.info[signal-1] = info
 	}
 	return true
@@ -130,7 +128,6 @@ func (state *SignalState) Raise(signal uint64, info SignalInfo) bool {
 // ReapsChildren reports whether children of this process skip the zombie
 // state: SIGCHLD is ignored, or its action carries SA_NOCLDWAIT.
 func (state *SignalState) ReapsChildren() bool {
-	guard.Check()
 	action := state.ActionOf(abi.SignalChild)
 	return action.Handler == abi.SignalHandlerIgnore || action.Flags&abi.SignalActionNoChildWait != 0
 }
@@ -139,7 +136,6 @@ func (state *SignalState) ReapsChildren() bool {
 // action without waiting for the process to run: SIGKILL, or an unblocked
 // signal whose default action terminates.
 func (state *SignalState) Fatal(signal uint64) bool {
-	guard.Check()
 	if signal == abi.SignalKill {
 		return true
 	}
@@ -165,7 +161,6 @@ func (state *SignalState) next() (uint64, bool) {
 // Interrupting reports whether a pending signal the mask allows would run a
 // handler. Such a signal ends an interruptible wait.
 func (state *SignalState) Interrupting() bool {
-	guard.Check()
 	ready := state.pending &^ (state.mask &^ uncatchable)
 	for signal := uint64(1); ready != 0; signal++ {
 		if ready&1 != 0 && state.Outcome(signal) == SignalHandle {
@@ -180,7 +175,6 @@ func (state *SignalState) Interrupting() bool {
 // restarts after the handler instead of failing with EINTR: the signal
 // delivered next has SA_RESTART, or no signal remains to deliver.
 func (state *SignalState) RestartsInterrupted() bool {
-	guard.Check()
 	signal, found := state.next()
 	if !found || state.Outcome(signal) != SignalHandle {
 		return true
@@ -188,13 +182,18 @@ func (state *SignalState) RestartsInterrupted() bool {
 	return state.ActionOf(signal).Flags&abi.SignalActionRestart != 0
 }
 
+// AnyPending reports whether any signal is pending, without the family's
+// lock: a call that returns with nothing pending skips signal delivery and
+// that lock. A signal raised just after the check is delivered at the next
+// return, or ends a wait through the sleeper's interruption.
+func (state *SignalState) AnyPending() bool { return atomic.LoadUint64(&state.pending) != 0 }
+
 // Pending reports the pending set.
 func (state *SignalState) Pending() uint64 { return state.pending }
 
 // Take removes and returns the next signal to deliver: SIGKILL first, then
 // the lowest-numbered pending signal the mask does not block.
 func (state *SignalState) Take() (uint64, SignalInfo, bool) {
-	guard.Check()
 	if state == nil {
 		return 0, SignalInfo{}, false
 	}
@@ -202,7 +201,7 @@ func (state *SignalState) Take() (uint64, SignalInfo, bool) {
 	if !found {
 		return 0, SignalInfo{}, false
 	}
-	state.pending &^= uint64(1) << (signal - 1)
+	atomic.StoreUint64(&state.pending, state.pending&^(uint64(1)<<(signal-1)))
 	info := state.info[signal-1]
 	state.info[signal-1] = SignalInfo{}
 	return signal, info, true
@@ -219,7 +218,6 @@ const (
 
 // Outcome decides what a taken signal does under its current disposition.
 func (state *SignalState) Outcome(signal uint64) SignalOutcome {
-	guard.Check()
 	if signal == abi.SignalKill {
 		return SignalTerminate
 	}
@@ -239,7 +237,6 @@ func (state *SignalState) Outcome(signal uint64) SignalOutcome {
 // mask, and SA_RESETHAND restores the default disposition. It returns the
 // mask the handler's return restores.
 func (state *SignalState) EnterHandler(signal uint64, action SignalAction) uint64 {
-	guard.Check()
 	previous := state.mask
 	if state.restore {
 		// The handler runs under the temporary mask, and its return gives
@@ -261,7 +258,6 @@ func (state *SignalState) EnterHandler(signal uint64, action SignalAction) uint6
 // the mask the call returns to. A retried call that swaps again keeps the
 // first saved mask.
 func (state *SignalState) SwapMask(mask uint64) {
-	guard.Check()
 	if !state.restore {
 		state.saved, state.restore = state.mask, true
 	}
@@ -271,7 +267,6 @@ func (state *SignalState) SwapMask(mask uint64) {
 // EndMaskSwap gives back the mask a temporary mask replaced. A handler entered
 // on the way out has already taken it as the mask its return restores.
 func (state *SignalState) EndMaskSwap() {
-	guard.Check()
 	if state.restore {
 		state.mask, state.restore = state.saved, false
 	}
@@ -287,26 +282,22 @@ type ThreadMask struct {
 
 // SaveThreadMask returns the thread part of the state in force.
 func (state *SignalState) SaveThreadMask() ThreadMask {
-	guard.Check()
 	return ThreadMask{mask: state.mask, saved: state.saved, restore: state.restore}
 }
 
 // LoadThreadMask puts a thread's part in force.
 func (state *SignalState) LoadThreadMask(thread ThreadMask) {
-	guard.Check()
 	state.mask, state.saved, state.restore = thread.mask, thread.saved, thread.restore
 }
 
 // RestoreMask installs the mask rt_sigreturn found in the signal frame.
 func (state *SignalState) RestoreMask(mask uint64) {
-	guard.Check()
 	state.mask = mask &^ uncatchable
 }
 
 // ResetForExec restores caught signals to their default disposition. Ignored
 // signals, the blocked mask, and pending signals survive image replacement.
 func (state *SignalState) ResetForExec() {
-	guard.Check()
 	if state == nil {
 		return
 	}
@@ -327,7 +318,6 @@ const uncatchable = uint64(1)<<(abi.SignalKill-1) | uint64(1)<<(abi.SignalStop-1
 // becomes the new one when it is not nil. SIGKILL and SIGSTOP take no
 // replacement.
 func (state *SignalState) Action(signal uint64, replacement *[SignalActionSize]byte, previous *[SignalActionSize]byte) abi.Errno {
-	guard.Check()
 	if signal == 0 || signal > abi.SignalCount {
 		return abi.EINVAL
 	}
@@ -356,7 +346,6 @@ func (state *SignalState) Action(signal uint64, replacement *[SignalActionSize]b
 // Mask reads the blocked mask and, when change is set, applies set to it by
 // how, as rt_sigprocmask does. It returns the mask from before the call.
 func (state *SignalState) Mask(how uint64, set uint64, change bool) (uint64, abi.Errno) {
-	guard.Check()
 	previous := state.mask
 	if !change {
 		return previous, 0

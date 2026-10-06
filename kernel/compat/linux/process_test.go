@@ -90,8 +90,12 @@ func TestExecReplacementPreservesStateAndClosesMarkedDescriptors(t *testing.T) {
 	if count := state.CloseOnExecVFS(handles[:]); count != 1 || handles[0] != 71 {
 		t.Fatalf("close handles count=%d handles=%v", count, handles[:count])
 	}
+	var collected Released
+	state.CloseOnExec(&collected)
 	released := FileDescription{}
-	state.CloseOnExec(func(description FileDescription) { released = description })
+	if collected.Len() == 1 {
+		released = collected.At(0)
+	}
 	replaced, found := FindProcess(0xa000)
 	blocked, _ := replaced.Signals.Mask(0, 0, false)
 	if !found || replaced.PID != state.PID || replaced.FamilyID != state.FamilyID || string(replaced.CWD()) != "/persist/work" || blocked != 7 {
@@ -357,16 +361,14 @@ func TestExitProcessReleasesHeavyState(t *testing.T) {
 	state, _ := FindProcess(0x9000)
 	pid := state.PID
 	familyID := state.FamilyID
-	released := make([]FileDescription, 0, 3)
+	var released Released
 	if _, found := VFSContext(familyID); !found {
 		t.Fatal("VFS context missing")
 	}
-	if !ExitProcess(0x9000, Termination{Status: 23}, func(description FileDescription) {
-		released = append(released, description)
-	}) {
+	if !ExitProcess(0x9000, Termination{Status: 23}, &released) {
 		t.Fatal("exit failed")
 	}
-	if len(released) != 3 || released[0].Kind != FDStreamReader || released[1].Kind != FDStreamWriter || released[2].Kind != FDStreamWriter {
+	if released.Len() != 3 || released.At(0).Kind != FDStreamReader || released.At(1).Kind != FDStreamWriter || released.At(2).Kind != FDStreamWriter {
 		t.Fatalf("released descriptions = %#v", released)
 	}
 	if _, found := FindProcess(0x9000); found {

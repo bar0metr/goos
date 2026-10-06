@@ -63,6 +63,8 @@
  *                     beside running threads
  *   kernel            threads and processes making calls that share no lock,
  *                     so several processors run kernel code at once
+ *   domains [tag]     files, a pipe, and fork in four threads, the lock
+ *                     profile's workload; copies run with different tags
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -3694,6 +3696,95 @@ static int kernel_test(void)
 	return 0;
 }
 
+/* domains mode: the work of one program spread over the kernel's wide lock
+ * domains. Two threads read and write files of their own through the VFS,
+ * a third moves bytes through a pipe, and a fourth forks and reaps children.
+ * Several copies with different tags, started at once, are the lock profile's
+ * workload: unrelated programs doing unrelated work. */
+#define DOMAINS_ROUNDS 200
+
+static const char *domains_tag;
+static volatile int domains_go;
+
+static void *domains_files(void *argument)
+{
+	char path[64], block[512], back[512];
+	long index = (long)argument;
+	int round, fd;
+
+	snprintf(path, sizeof path, "/tmp/domains-%s-%ld", domains_tag, index);
+	memset(block, 'a' + (int)index, sizeof block);
+	while (!domains_go)
+		;
+	for (round = 0; round < DOMAINS_ROUNDS; round++) {
+		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+		if (fd < 0 || write(fd, block, sizeof block) != sizeof block || lseek(fd, 0, SEEK_SET) != 0 ||
+		    read(fd, back, sizeof back) != sizeof back || memcmp(block, back, sizeof block) != 0 ||
+		    lseek(fd, 0, SEEK_END) != sizeof block || close(fd) != 0)
+			return (void *)1;
+	}
+	return unlink(path) == 0 ? NULL : (void *)1;
+}
+
+static void *domains_pipe(void *argument)
+{
+	int ends[2], round;
+	char byte = 'p', back;
+
+	(void)argument;
+	if (pipe(ends) != 0)
+		return (void *)1;
+	while (!domains_go)
+		;
+	for (round = 0; round < DOMAINS_ROUNDS * 4; round++)
+		if (write(ends[1], &byte, 1) != 1 || read(ends[0], &back, 1) != 1 || back != byte)
+			return (void *)1;
+	close(ends[0]);
+	close(ends[1]);
+	return NULL;
+}
+
+static void *domains_processes(void *argument)
+{
+	int round, status;
+
+	(void)argument;
+	while (!domains_go)
+		;
+	for (round = 0; round < DOMAINS_ROUNDS / 10; round++) {
+		pid_t child = fork();
+
+		if (child == 0)
+			_exit(7);
+		if (child < 0 || wait4(child, &status, 0, NULL) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 7)
+			return (void *)1;
+	}
+	return NULL;
+}
+
+static int domains_test(const char *tag)
+{
+	pthread_t workers[4];
+	void *(*bodies[4])(void *) = {domains_files, domains_files, domains_pipe, domains_processes};
+	long index;
+	int failed = 0;
+	void *result;
+
+	domains_tag = tag;
+	fflush(stdout);
+	for (index = 0; index < 4; index++)
+		if (pthread_create(&workers[index], NULL, bodies[index], (void *)index) != 0) {
+			printf("domains %s failed: thread %ld\n", tag, index);
+			return 1;
+		}
+	domains_go = 1;
+	for (index = 0; index < 4; index++)
+		if (pthread_join(workers[index], &result) != 0 || result != NULL)
+			failed = 1;
+	printf(failed ? "domains %s failed\n" : "domains %s ok\n", tag);
+	return failed;
+}
+
 static int smp_test(void)
 {
 	pthread_t workers[SMP_WORKERS];
@@ -3864,6 +3955,8 @@ int main(int argc, char **argv)
 			return smp_test();
 		if (!strcmp(argv[1], "kernel"))
 			return kernel_test();
+		if (!strcmp(argv[1], "domains"))
+			return domains_test(argc > 2 ? argv[2] : "a");
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))

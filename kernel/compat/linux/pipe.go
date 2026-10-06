@@ -17,23 +17,30 @@ func PipeFlags(flags uint64) (closeOnExec bool, errno abi.Errno) {
 	return flags != 0, 0
 }
 
+func installPipeHeld(root uint64, reader uint64, writer uint64, closeOnExec bool) (int, int, abi.Errno) {
+	state, found := findProcessHeld(root)
+	if !found {
+		return -1, -1, abi.EBADF
+	}
+	readFD, ok := state.FDs.allocateHeld(FileDescription{Kind: FDStreamReader, Object: reader}, closeOnExec)
+	if !ok {
+		return -1, -1, abi.EMFILE
+	}
+	writeFD, ok := state.FDs.allocateHeld(FileDescription{Kind: FDStreamWriter, Object: writer}, closeOnExec)
+	if !ok {
+		state.FDs.closeHeld(readFD)
+		return -1, -1, abi.EMFILE
+	}
+	return readFD, writeFD, 0
+}
+
 // InstallPipe gives a stream's two endpoints their open-file descriptions
 // and descriptors: the reader on the lowest free descriptor and the writer
 // on the next. Either both descriptors exist afterwards or neither does, and
 // on failure the caller still owns both endpoint references.
 func InstallPipe(root uint64, reader uint64, writer uint64, closeOnExec bool) (int, int, abi.Errno) {
-	state, found := FindProcess(root)
-	if !found {
-		return -1, -1, abi.EBADF
-	}
-	readFD, ok := state.FDs.Allocate(FileDescription{Kind: FDStreamReader, Object: reader}, closeOnExec)
-	if !ok {
-		return -1, -1, abi.EMFILE
-	}
-	writeFD, ok := state.FDs.Allocate(FileDescription{Kind: FDStreamWriter, Object: writer}, closeOnExec)
-	if !ok {
-		state.FDs.Close(readFD)
-		return -1, -1, abi.EMFILE
-	}
-	return readFD, writeFD, 0
+	tablesLock.Lock()
+	result0, result1, result2 := installPipeHeld(root, reader, writer, closeOnExec)
+	tablesLock.Unlock()
+	return result0, result1, result2
 }

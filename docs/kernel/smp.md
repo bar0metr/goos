@@ -134,32 +134,43 @@ before it destroys the old address space.
 ## Locks
 
 There is no kernel lock (ADR 0184). The kernel's state is split into
-domains, each with one lock, taken in increasing level order with local
+domains, and the busiest are split again by object (ADR 0187): each process
+has its own handle-table lock, each Linux family its own lock, and each
+channel its own. Locks are taken in increasing level order with local
 interrupts disabled. A system call, a fault, and each housekeeping step take
-the locks of the domains they touch; calls whose locks do not meet run on
+the locks of the state they touch; calls whose locks do not meet run on
 several processors at once.
 
 | Level | Lock | Taken by |
 | ---: | --- | --- |
 | 1 | registry (reader-writer) | lifecycle calls write; lookups across processes read |
-| 2 | linux | most Linux calls, for the whole call; fast calls before and after |
+| 2 | linux family (64 buckets) | Linux file and process calls, for the whole call; fast calls only to deliver a pending signal |
 | 3 | lifecycle | launches, process exits, the housekeeping flush |
-| 4 | handle (reader-writer) | native calls; IPC, launches, and teardown write |
-| 5 | channel | IPC, the VFS bridge, executable page requests |
-| 6 | stream | stream calls, pipes, teardown |
-| 7 | shmem | memory objects, the file cache |
-| 8 | address space (reader-writer, per process) | copies and faults read; mapping changes write |
-| 9 | executable | executable calls, image page faults, launches |
-| 10 | futex bucket (32) | futex, a thread's exit, a signal ending a wait |
-| 11 | wait tables | each table locks itself for one step |
-| 12 | log | kernel log, diagnostic ring, Linux counters, console readers |
-| 13 | memory | the physical page allocator |
-| 14 | random | the random generator |
-| 15 | scheduler | `sched.Core`, slot tables, kill and hold requests |
-| 16 | console | serial and framebuffer output |
+| 4 | handle table (reader-writer, one per process, ranked by process ID) | native calls; IPC, launches, and teardown write; a call that moves handles holds two |
+| 5 | stream | stream calls, pipes, a send that moves a stream handle, teardown |
+| 6 | shmem | memory objects, the file cache |
+| 7 | address space (reader-writer, per process) | copies and faults read; mapping changes write |
+| 8 | executable | executable calls, image page faults, launches |
+| 9 | paging | executable page requests and their replies |
+| 10 | channel slots | finding, creating, and removing a channel |
+| 11 | channel (one per channel) | one send, receive, close, or readiness check |
+| 12 | futex bucket (32) | futex, a thread's exit, a signal ending a wait |
+| 13 | wait tables | each table locks itself for one step |
+| 14 | linux tables | each table operation of the Linux personality |
+| 15 | handle index | handle tables as channel endpoints come and go |
+| 16 | log | kernel log, diagnostic ring, Linux counters, console readers |
+| 17 | memory | the physical page allocator |
+| 18 | random | the random generator |
+| 19 | scheduler | `sched.Core`, slot tables, kill and hold requests |
+| 20 | console | serial and framebuffer output |
 
 A call takes its set when it starts (`kernel/locksets.go`) and holds it to
-the end, so nothing it found through those locks changes under it. A task
+the end, so nothing it found through those locks changes under it. A call
+that finds it needs another process's handle table, or the stream lock,
+returns before it changes anything and runs again holding them. Two handle
+tables are taken in process-ID order and two futex buckets in rank order;
+no call holds two channels, two families, or two address spaces. Nothing
+orders locks by address. A task
 whose processor is asked to stop it gives up waiting for its set and runs the
 call again if it ever runs; a processor that holds locks while it waits for
 tasks to stop never waits for a task that waits for it. Validation builds
@@ -171,17 +182,23 @@ and check the order and recursion of every acquisition.
 | Process registry, PID allocation, exit records, task-to-process map | registry lock; a task reads its own map entry without it |
 | Process quotas and CPU time | atomic counters |
 | Process tasks, name, executable | registry lock |
-| Handle tables | handle lock |
+| Handle tables | each table's own lock |
+| Which processes hold each channel endpoint | the handle index lock |
 | Region maps and page tables | the process's address-space lock; installs use compare-and-swap so readers may fault |
 | Kernel root mappings after boot (stack guard pages) | registry lock for writing, which task creation and teardown hold, plus a lazy flush at the next switch |
-| Channels, executable page requests and their correlation | channel lock |
+| The channel registry's slots and charges | the channel slots lock |
+| One channel's queues, outstanding requests, and open sides | that channel's lock |
+| Executable page requests and their correlation | paging lock |
 | Streams | stream lock |
 | Shared memory objects, the boot file cache | shmem lock |
 | Executable objects, the object a fault or launch reads | executable lock |
 | Channel, stream, and process waits; multi-object waits; Linux continuations | each table's own lock |
 | Per-task wait statuses | atomic words |
 | Futex waiters | their bucket's lock; a task's bucket index is atomic |
-| Linux process states, descriptors, signals, records, threads, directories, VFS sessions | linux lock |
+| Linux tables: process states and records, threads, open descriptions, directories, VFS sessions, PID and family allocation | linux tables lock, one table operation at a time |
+| Fields of a Linux family's states, descriptions, and VFS session; its signals | the family's lock |
+| A Linux process's pending-signal summary | an atomic word, read without a lock |
+| Per-task Linux caller cache (state, thread ID, family) | written by the task itself and by its exit |
 | Lifecycle queue | lifecycle lock |
 | Kernel log, diagnostic ring, Linux call counters | their own locks, at the log level |
 | Physical page allocator | memory lock |

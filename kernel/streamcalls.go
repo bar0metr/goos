@@ -311,7 +311,7 @@ func waitStream(handler nativeCallHandler, id, timeout, task uint64) (kcall.Stat
 
 //export goos_dispatch_stream_wait
 func dispatchStreamWait(id, timeout, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationStreamWait)
+	call, ok := beginNativeCall(kcall.OperationStreamWait, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}

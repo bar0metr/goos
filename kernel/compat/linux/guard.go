@@ -2,10 +2,16 @@ package linux
 
 import "goos/kernel/lock"
 
-// guard is the lock the kernel installs to guard the Linux personality's
-// tables: process states, records, threads, open descriptions, directories,
-// and VFS sessions.
+// tablesLock guards the personality's shared tables: process states and
+// records, threads, open descriptions, directories, VFS sessions, and the
+// PIDs and family IDs they hand out. Every exported function that touches
+// them takes it for its own duration and no longer (ADR 0187). What a
+// family's processes share beyond the tables, the fields of their states and
+// descriptions, the kernel guards with the family's lock.
+var tablesLock = lock.New(lock.LevelLinuxTables)
+
+// guard checks, in validation builds, that the tables are held where they
+// are used.
 var guard lock.Guard
 
-// Guard installs the lock that guards the Linux personality's tables.
-func Guard(spin *lock.Spin) { guard.Set(spin) }
+func init() { guard.Set(tablesLock) }

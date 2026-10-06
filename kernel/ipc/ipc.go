@@ -4,6 +4,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/kernel/lock"
 )
 
 const (
@@ -57,34 +58,61 @@ type queue struct {
 	count    uint8
 }
 
+// Channel is one bidirectional channel. Its lock guards its queues, its
+// outstanding requests, and which sides are open.
 type Channel struct {
+	lock    lock.Spin
 	inbound [2]queue
 	alive   [2]bool
 	pending [2][QueueCapacity]uint64
 }
 
-func NewChannel() Channel {
-	return Channel{alive: [2]bool{true, true}}
+// NewChannel returns an open channel outside any registry.
+func NewChannel() *Channel {
+	return &Channel{alive: [2]bool{true, true}}
 }
 
-// Reset reopens a registry slot in place; see stream.Stream.Reset.
+// Reset reopens a registry slot in place; see stream.Stream.Reset. Nobody
+// else can reach the channel yet.
 func (channel *Channel) Reset() {
-	guard.Check()
 	*channel = Channel{}
 	channel.alive = [2]bool{true, true}
 }
 
+// Lock takes the channel's lock.
+func (channel *Channel) Lock() {
+	channel.lock.SetLevel(lock.LevelChannel)
+	channel.lock.Lock()
+}
+
+// Unlock releases the channel's lock.
+func (channel *Channel) Unlock() { channel.lock.Unlock() }
+
+// held stops a validation kernel whose caller does not hold the lock.
+func (channel *Channel) held() {
+	if channel != nil {
+		channel.lock.AssertHeld()
+	}
+}
+
 func (channel *Channel) Alive(side uint8) bool {
-	guard.Check()
+	channel.held()
 	return channel != nil && side <= 1 && channel.alive[side]
 }
 
-// Send validates and queues one typed message. Side identifies the sender;
-// side zero and side one are the only endpoints. External IRQ-level locking is
-// required until channels gain per-object synchronization for SMP.
+// Send validates and queues one typed message; see SendFrom.
 func (channel *Channel) Send(side uint8, message Message, source *handle.Table, target *handle.Table, transfers []Transfer) Status {
-	guard.Check()
-	if channel == nil || side > 1 || !validMessage(&message) || len(transfers) > MaxAttachedHandles || message.HandleCount != 0 {
+	return channel.SendFrom(side, &message, source, target, transfers)
+}
+
+// SendFrom validates and queues one typed message. Side identifies the
+// sender; side zero and side one are the only endpoints. The caller holds
+// the channel's lock and the handle tables the transfers touch. The message
+// is passed by reference, because a copy on a kernel stack costs as much as
+// the message, and SendFrom writes the received handles into it.
+func (channel *Channel) SendFrom(side uint8, message *Message, source *handle.Table, target *handle.Table, transfers []Transfer) Status {
+	channel.held()
+	if channel == nil || side > 1 || !validMessage(message) || len(transfers) > MaxAttachedHandles || message.HandleCount != 0 {
 		return StatusInvalidArgument
 	}
 	peer := side ^ 1
@@ -129,36 +157,48 @@ func (channel *Channel) Send(side uint8, message Message, source *handle.Table, 
 	if message.Kind == KindReply {
 		channel.removePending(peer, message.Correlation)
 	}
-	queue.messages[queue.tail] = message
+	queue.messages[queue.tail] = *message
 	queue.tail = (queue.tail + 1) % QueueCapacity
 	queue.count++
 	return StatusOK
 }
 
+// Receive takes the next message at side; see ReceiveInto.
 func (channel *Channel) Receive(side uint8) (Message, Status) {
-	guard.Check()
+	var message Message
+	status := channel.ReceiveInto(side, &message)
+	return message, status
+}
+
+// ReceiveInto takes the next message at side into out, or clears out when
+// there is none. The caller holds the channel's lock.
+func (channel *Channel) ReceiveInto(side uint8, out *Message) Status {
+	channel.held()
 	if channel == nil || side > 1 || !channel.alive[side] {
-		return Message{}, StatusInvalidArgument
+		*out = Message{}
+		return StatusInvalidArgument
 	}
 	queue := &channel.inbound[side]
 	if queue.count == 0 {
+		*out = Message{}
 		if !channel.alive[side^1] {
-			return Message{}, StatusPeerDied
+			return StatusPeerDied
 		}
-		return Message{}, StatusNotFound
+		return StatusNotFound
 	}
-	message := queue.messages[queue.head]
-	queue.messages[queue.head] = Message{}
+	slot := &queue.messages[queue.head]
+	*out = *slot
+	*slot = Message{}
 	queue.head = (queue.head + 1) % QueueCapacity
 	queue.count--
-	return message, StatusOK
+	return StatusOK
 }
 
 // ReceiveStatus observes endpoint readiness without consuming a message.
 // WaitAny uses it after registering interest so the observation and the
 // subsequent decision to block cannot lose an intervening state change.
 func (channel *Channel) ReceiveStatus(side uint8) Status {
-	guard.Check()
+	channel.held()
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return StatusInvalidArgument
 	}
@@ -173,7 +213,7 @@ func (channel *Channel) ReceiveStatus(side uint8) Status {
 
 // Queued reports how many messages wait at the given endpoint.
 func (channel *Channel) Queued(side uint8) int {
-	guard.Check()
+	channel.held()
 	if channel == nil || side > 1 {
 		return 0
 	}
@@ -182,7 +222,7 @@ func (channel *Channel) Queued(side uint8) int {
 
 // Pending reports how many requests sent from side still await a reply.
 func (channel *Channel) Pending(side uint8) int {
-	guard.Check()
+	channel.held()
 	if channel == nil || side > 1 {
 		return 0
 	}
@@ -196,7 +236,7 @@ func (channel *Channel) Pending(side uint8) int {
 }
 
 func (channel *Channel) Close(side uint8) bool {
-	guard.Check()
+	channel.held()
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return false
 	}

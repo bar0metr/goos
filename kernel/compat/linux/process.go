@@ -58,14 +58,12 @@ type ProcessState struct {
 
 // HoldVforkParent records the task a vfork suspended for this child.
 func (state *ProcessState) HoldVforkParent(task sched.TaskID) {
-	guard.Check()
 	state.vforkParent = task
 }
 
 // ReleaseVforkParent returns the suspended parent task, if any, and forgets
 // it, so image replacement and exit release the parent once.
 func (state *ProcessState) ReleaseVforkParent() sched.TaskID {
-	guard.Check()
 	task := state.vforkParent
 	state.vforkParent = 0
 	return task
@@ -114,7 +112,6 @@ func (record ProcessRecord) WaitStatus() uint32 {
 
 // SetCWD replaces the working directory with a canonical absolute path.
 func (state *ProcessState) SetCWD(path []byte) bool {
-	guard.Check()
 	if state == nil || len(path) == 0 || len(path) > limits.PathMax || path[0] != '/' {
 		return false
 	}
@@ -122,14 +119,12 @@ func (state *ProcessState) SetCWD(path []byte) bool {
 	return true
 }
 
-// ReplaceRoot commits a prepared address space while retaining process
-// identity, descriptors, working directory, and family membership.
-func ReplaceRoot(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit uint64) bool {
+func replaceRootHeld(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit uint64) bool {
 	guard.Check()
 	if oldRoot == 0 || newRoot == 0 || brkBase == 0 || brkBase >= brkLimit {
 		return false
 	}
-	state, found := FindProcess(oldRoot)
+	state, found := findProcessHeld(oldRoot)
 	if !found {
 		return false
 	}
@@ -146,37 +141,31 @@ const DefaultUmask = 0o022
 // SetUmask replaces the file mode creation mask with the permission bits of
 // mask and returns the previous one, as umask does.
 func (state *ProcessState) SetUmask(mask uint64) uint64 {
-	guard.Check()
 	previous := uint64(state.umask)
 	state.umask = uint16(mask & 0o777)
 	return previous
 }
 
-// CloseOnExec closes local fd entries marked for image replacement. Shared
-// descriptions remain alive while another fd table references them.
-func (state *ProcessState) CloseOnExec(release func(FileDescription)) {
+func (state *ProcessState) closeOnExecHeld(released *Released) {
 	guard.Check()
 	if state == nil {
 		return
 	}
 	for fd := 0; fd < LinuxMaxFD; fd++ {
-		closeOnExec, open := state.FDs.CloseOnExec(fd)
+		closeOnExec, open := state.FDs.closeOnExecHeld(fd)
 		if !open || !closeOnExec {
 			continue
 		}
-		description, last, closed := state.FDs.Close(fd)
+		description, last, closed := state.FDs.closeHeld(fd)
 		if closed && last && description.Kind == FDVFSDirectory {
-			ReleaseDirectory(state.FamilyID, description.Object)
-		} else if closed && last && release != nil {
-			release(description)
+			releaseDirectoryHeld(state.FamilyID, description.Object)
+		} else if closed && last {
+			released.add(description)
 		}
 	}
 }
 
-// CloseOnExecVFS returns VFS handles whose final description reference will
-// disappear at image replacement. The caller closes them through the shared
-// VFS context before removing the local descriptor entries.
-func (state *ProcessState) CloseOnExecVFS(target []uint64) int {
+func (state *ProcessState) closeOnExecVFSHeld(target []uint64) int {
 	guard.Check()
 	if state == nil {
 		return 0
@@ -244,9 +233,7 @@ func (state *ProcessState) CWD() []byte { return state.cwd[:state.cwdLen] }
 var processStates [process.MaxProcesses]ProcessState
 var processRecords [process.MaxProcesses]ProcessRecord
 
-// InstallProcess records one validated, bound Linux launch. The caller owns
-// teardown if a later launch step fails.
-func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
+func installProcessHeld(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
 	guard.Check()
 	if root == 0 || goosProcessID == 0 || brkBase == 0 || brkBase >= brkLimit || brkBase%LinuxPageSize != 0 || brkLimit%LinuxPageSize != 0 ||
 		data.HandleCount() != 4 || len(data.CWD()) == 0 || data.CWD()[0] != '/' || len(data.CWD()) > limits.PathMax ||
@@ -294,8 +281,8 @@ func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, st
 	state.PID, state.FamilyID = record.PID, record.FamilyID
 	state.BrkBase, state.BrkCurrent, state.BrkLimit = brkBase, brkBase, brkLimit
 	state.umask = DefaultUmask
-	if !state.FDs.Initialize(record.FamilyID, streams.Input, streams.Output, streams.Error) {
-		ReleaseVFSContext(record.FamilyID)
+	if !state.FDs.initializeHeld(record.FamilyID, streams.Input, streams.Output, streams.Error) {
+		releaseVFSContextHeld(record.FamilyID)
 		processRecords[recordIndex(record.PID)] = ProcessRecord{}
 		*state = ProcessState{}
 		return false
@@ -303,14 +290,9 @@ func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, st
 	return true
 }
 
-// ForkProcess installs the compatibility state of a child registered by
-// RegisterChild. The child shares its parent's open-file descriptions and
-// family VFS context and copies everything else. It inherits no pending
-// signal, syscall continuation, or clear-child-tid address. The caller owns
-// rollback through RemoveProcess if a later step fails.
-func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
+func forkProcessHeld(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
 	guard.Check()
-	parent, found := FindProcess(parentRoot)
+	parent, found := findProcessHeld(parentRoot)
 	if !found || childRoot == 0 || vfsHandle == 0 || record.State != ProcessRunning ||
 		record.ParentPID != parent.PID || record.FamilyID != parent.FamilyID || recordIndex(record.PID) < 0 {
 		return false
@@ -324,13 +306,13 @@ func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsH
 			free = index
 		}
 	}
-	if free == -1 || !RetainVFSContext(parent.FamilyID) {
+	if free == -1 || !retainVFSContextHeld(parent.FamilyID) {
 		return false
 	}
 	child := &processStates[free]
 	*child = ProcessState{}
-	if !child.FDs.Inherit(&parent.FDs) {
-		ReleaseVFSContext(parent.FamilyID)
+	if !child.FDs.inheritHeld(&parent.FDs) {
+		releaseVFSContextHeld(parent.FamilyID)
 		*child = ProcessState{}
 		return false
 	}
@@ -349,23 +331,18 @@ func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsH
 // new process would take one of the NativeProcessReserve slots, which stay
 // for native processes. Native creation never asks.
 func LinuxProcessCreationAllowed(total int) bool {
-	guard.Check()
 	return total >= 0 && total < LinuxGlobalMaxProcesses
 }
 
 // LinuxTaskCreationAllowed reports whether one Linux task may be created
 // while leaving the fixed native reserve free.
 func LinuxTaskCreationAllowed(free int) bool {
-	guard.Check()
 	return free > NativeTaskReserve && free <= sched.MaxTasks
 }
 
-// RegisterChild reserves an identity for a compatibility-created GoOS
-// Process. The caller installs the child's heavy compatibility state before
-// making its task runnable.
-func RegisterChild(goosProcessID process.ID, parentPID int32, liveProcessCount int) (ProcessRecord, ChildRegistrationStatus) {
+func registerChildHeld(goosProcessID process.ID, parentPID int32, liveProcessCount int) (ProcessRecord, ChildRegistrationStatus) {
 	guard.Check()
-	parent, found := FindProcessRecord(parentPID)
+	parent, found := findProcessRecordHeld(parentPID)
 	if !found || parent.State != ProcessRunning || goosProcessID == 0 || liveProcessCount < 0 || liveProcessCount > process.MaxProcesses {
 		return ProcessRecord{}, ChildRegistrationInvalid
 	}
@@ -380,9 +357,7 @@ func RegisterChild(goosProcessID process.ID, parentPID int32, liveProcessCount i
 	return record, ChildRegistrationOK
 }
 
-// ProcessCounts reports all compatibility records and the records in one
-// family. Running and zombie records consume both budgets.
-func ProcessCounts(familyID uint64) (global int, family int) {
+func processCountsHeld(familyID uint64) (global int, family int) {
 	guard.Check()
 	return processCounts(familyID)
 }
@@ -401,9 +376,7 @@ func processCounts(familyID uint64) (global int, family int) {
 	return global, family
 }
 
-// RollbackProcessRecord removes a child reservation that never became
-// runnable. It refuses records that have already exited or gained children.
-func RollbackProcessRecord(goosProcessID process.ID) bool {
+func rollbackProcessRecordHeld(goosProcessID process.ID) bool {
 	guard.Check()
 	for index := range processRecords {
 		record := &processRecords[index]
@@ -493,9 +466,7 @@ func allocatePID() int32 {
 	}
 }
 
-// FindProcessRecord returns a copy so callers cannot mutate family state
-// without applying its lifecycle rules.
-func FindProcessRecord(pid int32) (ProcessRecord, bool) {
+func findProcessRecordHeld(pid int32) (ProcessRecord, bool) {
 	guard.Check()
 	if pid >= firstPID {
 		for index := range processRecords {
@@ -507,20 +478,16 @@ func FindProcessRecord(pid int32) (ProcessRecord, bool) {
 	return ProcessRecord{}, false
 }
 
-// ParentPIDOf returns the compatibility parent. Unknown identities use PID 1,
-// which matches Linux orphan semantics and the launch-root relationship.
-func ParentPIDOf(pid int32) int32 {
+func parentPIDOfHeld(pid int32) int32 {
 	guard.Check()
-	record, found := FindProcessRecord(pid)
+	record, found := findProcessRecordHeld(pid)
 	if !found {
 		return 1
 	}
 	return record.ParentPID
 }
 
-// ReapChild consumes one zombie owned by parentPID. The returned copy records
-// the final reaped state while the registry releases the PID immediately.
-func ReapChild(parentPID int32, childPID int32) (ProcessRecord, bool) {
+func reapChildHeld(parentPID int32, childPID int32) (ProcessRecord, bool) {
 	guard.Check()
 	for index := range processRecords {
 		record := &processRecords[index]
@@ -560,7 +527,7 @@ func markProcessExited(pid int32, termination Termination) bool {
 	}
 	if processRecords[index].ParentPID == 1 {
 		processRecords[index] = ProcessRecord{}
-	} else if parent, found := FindProcessByPID(processRecords[index].ParentPID); found && parent.Signals.ReapsChildren() {
+	} else if parent, found := findProcessByPIDHeld(processRecords[index].ParentPID); found && parent.Signals.ReapsChildren() {
 		processRecords[index] = ProcessRecord{}
 	}
 	return true
@@ -575,26 +542,26 @@ func recordIndex(pid int32) int {
 	return -1
 }
 
-func LookupFD(root uint64, fd int) (FileDescription, bool) {
+func lookupFDHeld(root uint64, fd int) (FileDescription, bool) {
 	guard.Check()
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root == root {
-				return processStates[index].FDs.Lookup(fd)
+				return processStates[index].FDs.lookupHeld(fd)
 			}
 		}
 	}
 	return FileDescription{}, false
 }
 
-func AllocateFD(root uint64, description FileDescription, closeOnExec bool) (int, abi.Errno) {
+func allocateFDHeld(root uint64, description FileDescription, closeOnExec bool) (int, abi.Errno) {
 	guard.Check()
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root != root {
 				continue
 			}
-			if fd, ok := processStates[index].FDs.Allocate(description, closeOnExec); ok {
+			if fd, ok := processStates[index].FDs.allocateHeld(description, closeOnExec); ok {
 				return fd, 0
 			}
 			return -1, abi.EMFILE
@@ -603,30 +570,25 @@ func AllocateFD(root uint64, description FileDescription, closeOnExec bool) (int
 	return -1, abi.EBADF
 }
 
-// CloseFD invalidates one descriptor. It reports the description when the
-// last descriptor naming it closed, so the caller can release what it held.
-func CloseFD(root uint64, fd int) (FileDescription, bool, abi.Errno) {
+func closeFDHeld(root uint64, fd int) (FileDescription, bool, abi.Errno) {
 	guard.Check()
-	if state, found := FindProcess(root); found {
-		if released, last, ok := state.FDs.Close(fd); ok {
+	if state, found := findProcessHeld(root); found {
+		if released, last, ok := state.FDs.closeHeld(fd); ok {
 			return released, last, 0
 		}
 	}
 	return FileDescription{}, false, abi.EBADF
 }
 
-// DescriptionOf returns the open-file description behind a descriptor.
-func DescriptionOf(root uint64, fd uint64) (*FileDescription, bool) {
+func descriptionOfHeld(root uint64, fd uint64) (*FileDescription, bool) {
 	guard.Check()
-	if state, found := FindProcess(root); found && fd < LinuxMaxFD {
-		return state.FDs.Description(int(fd))
+	if state, found := findProcessHeld(root); found && fd < LinuxMaxFD {
+		return state.FDs.descriptionHeld(int(fd))
 	}
 	return nil, false
 }
 
-// FamilyRoots writes the address-space roots of the running members of a
-// family to target and returns how many it wrote.
-func FamilyRoots(familyID uint64, target []uint64) int {
+func familyRootsHeld(familyID uint64, target []uint64) int {
 	guard.Check()
 	count := 0
 	for index := range processStates {
@@ -638,8 +600,7 @@ func FamilyRoots(familyID uint64, target []uint64) int {
 	return count
 }
 
-// FindProcessByPID returns the running process with a compatibility PID.
-func FindProcessByPID(pid int32) (*ProcessState, bool) {
+func findProcessByPIDHeld(pid int32) (*ProcessState, bool) {
 	guard.Check()
 	if pid >= firstPID {
 		for index := range processStates {
@@ -651,7 +612,7 @@ func FindProcessByPID(pid int32) (*ProcessState, bool) {
 	return nil, false
 }
 
-func FindProcess(root uint64) (*ProcessState, bool) {
+func findProcessHeld(root uint64) (*ProcessState, bool) {
 	guard.Check()
 	if root != 0 {
 		for index := range processStates {
@@ -663,17 +624,15 @@ func FindProcess(root uint64) (*ProcessState, bool) {
 	return nil, false
 }
 
-// RemoveProcess rolls back compatibility state for a launch that never made
-// its task runnable.
-func RemoveProcess(root uint64, release func(FileDescription)) bool {
+func removeProcessHeld(root uint64, released *Released) bool {
 	guard.Check()
 	if root != 0 {
 		for index := range processStates {
 			if processStates[index].Root == root {
 				pid := processStates[index].PID
 				familyID := processStates[index].FamilyID
-				closeProcessFDs(&processStates[index], release)
-				if final, _ := ReleaseVFSContext(familyID); final {
+				closeProcessFDs(&processStates[index], released)
+				if final, _ := releaseVFSContextHeld(familyID); final {
 					releaseDirectories(familyID)
 				}
 				processStates[index] = ProcessState{}
@@ -688,9 +647,7 @@ func RemoveProcess(root uint64, release func(FileDescription)) bool {
 	return false
 }
 
-// ExitProcess releases heavy compatibility state and records the Linux exit
-// for its parent. Native resource teardown remains in the kernel lifecycle.
-func ExitProcess(root uint64, termination Termination, release func(FileDescription)) bool {
+func exitProcessHeld(root uint64, termination Termination, released *Released) bool {
 	guard.Check()
 	if root == 0 {
 		return false
@@ -701,8 +658,8 @@ func ExitProcess(root uint64, termination Termination, release func(FileDescript
 		}
 		pid := processStates[index].PID
 		familyID := processStates[index].FamilyID
-		closeProcessFDs(&processStates[index], release)
-		if final, _ := ReleaseVFSContext(familyID); final {
+		closeProcessFDs(&processStates[index], released)
+		if final, _ := releaseVFSContextHeld(familyID); final {
 			releaseDirectories(familyID)
 		}
 		processStates[index] = ProcessState{}
@@ -712,16 +669,192 @@ func ExitProcess(root uint64, termination Termination, release func(FileDescript
 	return false
 }
 
-func closeProcessFDs(state *ProcessState, release func(FileDescription)) {
+func closeProcessFDs(state *ProcessState, released *Released) {
 	if state == nil {
 		return
 	}
 	for fd := 0; fd < LinuxMaxFD; fd++ {
-		description, last, closed := state.FDs.Close(fd)
+		description, last, closed := state.FDs.closeHeld(fd)
 		if closed && last && description.Kind == FDVFSDirectory {
-			ReleaseDirectory(state.FamilyID, description.Object)
-		} else if closed && last && release != nil {
-			release(description)
+			releaseDirectoryHeld(state.FamilyID, description.Object)
+		} else if closed && last {
+			released.add(description)
 		}
 	}
+}
+
+// ReplaceRoot commits a prepared address space while retaining process
+// identity, descriptors, working directory, and family membership.
+func ReplaceRoot(oldRoot uint64, newRoot uint64, brkBase uint64, brkLimit uint64) bool {
+	tablesLock.Lock()
+	result := replaceRootHeld(oldRoot, newRoot, brkBase, brkLimit)
+	tablesLock.Unlock()
+	return result
+}
+
+// CloseOnExec closes local fd entries marked for image replacement. Shared
+// descriptions remain alive while another fd table references them.
+func (state *ProcessState) CloseOnExec(released *Released) {
+	tablesLock.Lock()
+	state.closeOnExecHeld(released)
+	tablesLock.Unlock()
+}
+
+// CloseOnExecVFS returns VFS handles whose final description reference will
+// disappear at image replacement. The caller closes them through the shared
+// VFS context before removing the local descriptor entries.
+func (state *ProcessState) CloseOnExecVFS(target []uint64) int {
+	tablesLock.Lock()
+	result := state.closeOnExecVFSHeld(target)
+	tablesLock.Unlock()
+	return result
+}
+
+// InstallProcess records one validated, bound Linux launch. The caller owns
+// teardown if a later launch step fails.
+func InstallProcess(root uint64, goosProcessID process.ID, data startup.Data, streams StandardStreams, brkBase uint64, brkLimit uint64) bool {
+	tablesLock.Lock()
+	result := installProcessHeld(root, goosProcessID, data, streams, brkBase, brkLimit)
+	tablesLock.Unlock()
+	return result
+}
+
+// ForkProcess installs the compatibility state of a child registered by
+// RegisterChild. The child shares its parent's open-file descriptions and
+// family VFS context and copies everything else. It inherits no pending
+// signal, syscall continuation, or clear-child-tid address. The caller owns
+// rollback through RemoveProcess if a later step fails.
+func ForkProcess(parentRoot uint64, childRoot uint64, record ProcessRecord, vfsHandle handle.ID) bool {
+	tablesLock.Lock()
+	result := forkProcessHeld(parentRoot, childRoot, record, vfsHandle)
+	tablesLock.Unlock()
+	return result
+}
+
+// RegisterChild reserves an identity for a compatibility-created GoOS
+// Process. The caller installs the child's heavy compatibility state before
+// making its task runnable.
+func RegisterChild(goosProcessID process.ID, parentPID int32, liveProcessCount int) (ProcessRecord, ChildRegistrationStatus) {
+	tablesLock.Lock()
+	result0, result1 := registerChildHeld(goosProcessID, parentPID, liveProcessCount)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// ProcessCounts reports all compatibility records and the records in one
+// family. Running and zombie records consume both budgets.
+func ProcessCounts(familyID uint64) (global int, family int) {
+	tablesLock.Lock()
+	result0, result1 := processCountsHeld(familyID)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// RollbackProcessRecord removes a child reservation that never became
+// runnable. It refuses records that have already exited or gained children.
+func RollbackProcessRecord(goosProcessID process.ID) bool {
+	tablesLock.Lock()
+	result := rollbackProcessRecordHeld(goosProcessID)
+	tablesLock.Unlock()
+	return result
+}
+
+// FindProcessRecord returns a copy so callers cannot mutate family state
+// without applying its lifecycle rules.
+func FindProcessRecord(pid int32) (ProcessRecord, bool) {
+	tablesLock.Lock()
+	result0, result1 := findProcessRecordHeld(pid)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// ParentPIDOf returns the compatibility parent. Unknown identities use PID 1,
+// which matches Linux orphan semantics and the launch-root relationship.
+func ParentPIDOf(pid int32) int32 {
+	tablesLock.Lock()
+	result := parentPIDOfHeld(pid)
+	tablesLock.Unlock()
+	return result
+}
+
+// ReapChild consumes one zombie owned by parentPID. The returned copy records
+// the final reaped state while the registry releases the PID immediately.
+func ReapChild(parentPID int32, childPID int32) (ProcessRecord, bool) {
+	tablesLock.Lock()
+	result0, result1 := reapChildHeld(parentPID, childPID)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+func LookupFD(root uint64, fd int) (FileDescription, bool) {
+	tablesLock.Lock()
+	result0, result1 := lookupFDHeld(root, fd)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+func AllocateFD(root uint64, description FileDescription, closeOnExec bool) (int, abi.Errno) {
+	tablesLock.Lock()
+	result0, result1 := allocateFDHeld(root, description, closeOnExec)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// CloseFD invalidates one descriptor. It reports the description when the
+// last descriptor naming it closed, so the caller can release what it held.
+func CloseFD(root uint64, fd int) (FileDescription, bool, abi.Errno) {
+	tablesLock.Lock()
+	result0, result1, result2 := closeFDHeld(root, fd)
+	tablesLock.Unlock()
+	return result0, result1, result2
+}
+
+// DescriptionOf returns the open-file description behind a descriptor.
+func DescriptionOf(root uint64, fd uint64) (*FileDescription, bool) {
+	tablesLock.Lock()
+	result0, result1 := descriptionOfHeld(root, fd)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// FamilyRoots writes the address-space roots of the running members of a
+// family to target and returns how many it wrote.
+func FamilyRoots(familyID uint64, target []uint64) int {
+	tablesLock.Lock()
+	result := familyRootsHeld(familyID, target)
+	tablesLock.Unlock()
+	return result
+}
+
+// FindProcessByPID returns the running process with a compatibility PID.
+func FindProcessByPID(pid int32) (*ProcessState, bool) {
+	tablesLock.Lock()
+	result0, result1 := findProcessByPIDHeld(pid)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+func FindProcess(root uint64) (*ProcessState, bool) {
+	tablesLock.Lock()
+	result0, result1 := findProcessHeld(root)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// RemoveProcess rolls back compatibility state for a launch that never made
+// its task runnable.
+func RemoveProcess(root uint64, released *Released) bool {
+	tablesLock.Lock()
+	result := removeProcessHeld(root, released)
+	tablesLock.Unlock()
+	return result
+}
+
+// ExitProcess releases heavy compatibility state and records the Linux exit
+// for its parent. Native resource teardown remains in the kernel lifecycle.
+func ExitProcess(root uint64, termination Termination, released *Released) bool {
+	tablesLock.Lock()
+	result := exitProcessHeld(root, termination, released)
+	tablesLock.Unlock()
+	return result
 }

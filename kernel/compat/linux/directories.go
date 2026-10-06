@@ -16,10 +16,7 @@ type directorySlot struct {
 
 var directorySlots [MaxOpenDirectories]directorySlot
 
-// RetainDirectory records path for one directory description of a family and
-// returns the reference the description stores. The reference carries a
-// generation, so a stale one cannot name a slot that was reused.
-func RetainDirectory(familyID uint64, path []byte) (uint64, bool) {
+func retainDirectoryHeld(familyID uint64, path []byte) (uint64, bool) {
 	guard.Check()
 	if familyID == 0 || len(path) == 0 || len(path) > limits.PathMax || path[0] != '/' {
 		return 0, false
@@ -39,9 +36,7 @@ func RetainDirectory(familyID uint64, path []byte) (uint64, bool) {
 	return 0, false
 }
 
-// DirectoryPath returns the path behind a reference the family holds. The slice
-// aliases the table until the description is released.
-func DirectoryPath(familyID uint64, reference uint64) ([]byte, bool) {
+func directoryPathHeld(familyID uint64, reference uint64) ([]byte, bool) {
 	guard.Check()
 	slot, found := directory(familyID, reference)
 	if !found {
@@ -50,7 +45,7 @@ func DirectoryPath(familyID uint64, reference uint64) ([]byte, bool) {
 	return slot.path[:slot.size], true
 }
 
-func ReleaseDirectory(familyID uint64, reference uint64) bool {
+func releaseDirectoryHeld(familyID uint64, reference uint64) bool {
 	guard.Check()
 	slot, found := directory(familyID, reference)
 	if !found {
@@ -79,4 +74,30 @@ func directory(familyID uint64, reference uint64) (*directorySlot, bool) {
 		return nil, false
 	}
 	return slot, true
+}
+
+// RetainDirectory records path for one directory description of a family and
+// returns the reference the description stores. The reference carries a
+// generation, so a stale one cannot name a slot that was reused.
+func RetainDirectory(familyID uint64, path []byte) (uint64, bool) {
+	tablesLock.Lock()
+	result0, result1 := retainDirectoryHeld(familyID, path)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// DirectoryPath returns the path behind a reference the family holds. The slice
+// aliases the table until the description is released.
+func DirectoryPath(familyID uint64, reference uint64) ([]byte, bool) {
+	tablesLock.Lock()
+	result0, result1 := directoryPathHeld(familyID, reference)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+func ReleaseDirectory(familyID uint64, reference uint64) bool {
+	tablesLock.Lock()
+	result := releaseDirectoryHeld(familyID, reference)
+	tablesLock.Unlock()
+	return result
 }

@@ -528,7 +528,10 @@ func commitLinuxExec(handler *linuxCallHandler, state *linuxExecState, compat *l
 		amd64.InitialFPUArea(fpu)
 	}
 	compat.Signals.ResetForExec()
-	compat.CloseOnExec(releaseLinuxDescriptionReference)
+	released := &thisCPU().linuxReleased
+	released.Reset()
+	compat.CloseOnExec(released)
+	releaseDescriptions(released)
 	releaseVforkParent(compat)
 	owner.SetName(execBaseName(path))
 	if object, found := executables.Find(state.objectID); found {

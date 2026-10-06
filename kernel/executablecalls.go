@@ -55,8 +55,7 @@ func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, des
 	}
 	endpointCap, allowed := owner.Handles().Lookup(handle.ID(session), handle.TypeChannel, capability.Read|capability.Write|capability.Wait)
 	channelID, side, valid := ipc.DecodeEndpointObject(endpointCap.Object())
-	channel, live := channelRegistry.Lookup(channelID)
-	if !allowed || !valid || !live || !channel.Alive(side) {
+	if !allowed || !valid || !channelSideOpen(channelID, side) {
 		return kcall.StatusPermissionDenied
 	}
 	clear(local.executableSourceWire[:])
@@ -197,9 +196,8 @@ func destroyExecutable(id uint64) {
 		return
 	}
 	if channelID, side, _, fileBacked := object.Source(); fileBacked {
-		if channel, live := channelRegistry.Lookup(channelID); live && channel.Close(side) {
+		if closeChannelSide(channelID, side) {
 			wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-			releaseChannelSlot(channelID)
 		}
 	}
 	object.ReleaseFrames(&pageAllocator, vm.PhysicalPage)

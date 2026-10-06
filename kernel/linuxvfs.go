@@ -31,19 +31,18 @@ const linuxVFSReplyTicks = 8 * clock.TicksPerSecond
 
 // vfsEndpoint resolves the session channel through the process's own handle
 // table, so the rights PID 1 granted are checked on every exchange.
-func (handler *linuxCallHandler) vfsEndpoint(state *linuxcompat.ProcessState) (*process.Process, *ipc.Channel, uint64, uint8, bool) {
+func (handler *linuxCallHandler) vfsEndpoint(state *linuxcompat.ProcessState) (*process.Process, uint64, uint8, bool) {
 	owner, found := handler.self()
 	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
 	if !found || !contextFound || context.Session.Failed() {
-		return nil, nil, 0, 0, false
+		return nil, 0, 0, false
 	}
 	authority, allowed := owner.Handles().Lookup(state.VFSHandle, handle.TypeChannel, capability.Read|capability.Write|capability.Wait)
 	channelID, side, valid := ipc.DecodeEndpointObject(authority.Object())
-	channel, exists := channelRegistry.Lookup(channelID)
-	if !allowed || !valid || !exists {
-		return nil, nil, 0, 0, false
+	if !allowed || !valid {
+		return nil, 0, 0, false
 	}
-	return owner, channel, channelID, side, true
+	return owner, channelID, side, true
 }
 
 // vfsStage reports where the current call stands: inactive on a first entry,
@@ -142,11 +141,38 @@ func (handler *linuxCallHandler) vfsExchange(operation vfs.Request, attachment v
 		return vfs.Reply{}, handler.vfsFailed(), false
 	}
 	if !pending.Issued {
+		if handler.vfsWantsPeer(state, operation, attachment) {
+			// Nothing is sent and the continuation stays ready at this
+			// stage; the dispatcher enters the call again holding the VFS
+			// service's handle table, and the call resumes here.
+			return vfs.Reply{}, 0, true
+		}
 		if errno := handler.vfsIssue(pending.Stage, operation, attachment); errno != 0 {
 			return vfs.Reply{}, errno, false
 		}
 	}
 	return handler.vfsReply(operation.Operation)
+}
+
+// vfsWantsPeer reports whether a request that moves a handle to the VFS
+// service needs that service's handle table, which the call does not hold,
+// and asks the dispatcher for it.
+func (handler *linuxCallHandler) vfsWantsPeer(state *linuxcompat.ProcessState, operation vfs.Request, attachment vfsAttachment) bool {
+	if attachment == attachPaths && vfs.FitsInline(operation) {
+		return false
+	}
+	_, channelID, side, reachable := handler.vfsEndpoint(state)
+	if !reachable {
+		return false
+	}
+	peerObject, _ := ipc.EndpointObject(channelID, side^1)
+	peer, found := processRegistry.EndpointHolder(peerObject)
+	local := thisCPU()
+	if !found || local.linuxCall.holdsPeer(peer) {
+		return false
+	}
+	local.peerWanted = peer.ID()
+	return true
 }
 
 // vfsIssue sends one request. The continuation is marked issued before the
@@ -163,11 +189,12 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 	if !found {
 		return handler.vfsFailed()
 	}
-	owner, channel, channelID, side, reachable := handler.vfsEndpoint(state)
+	owner, channelID, side, reachable := handler.vfsEndpoint(state)
 	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
 	if !contextFound {
 		return handler.vfsFailed()
 	}
+	needsPeer := attachment != attachPaths || !vfs.FitsInline(operation)
 	correlation, fresh := context.Session.Next()
 	if !reachable || !fresh {
 		return handler.vfsFailed()
@@ -175,13 +202,14 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 	var transfers [1]ipc.Transfer
 	var peerHandles *handle.Table
 	attached := 0
-	if attachment != attachPaths || !vfs.FitsInline(operation) {
+	if needsPeer {
 		peerObject, _ := ipc.EndpointObject(channelID, side^1)
-		peer, _ := processRegistry.ByCapabilityObject(handle.TypeChannel, peerObject)
+		peer, _ := processRegistry.EndpointHolder(peerObject)
 		if peer == nil {
 			context.Session.Fail()
 			return handler.vfsFailed()
 		}
+
 		rights := capability.Read
 		var object handle.ID
 		var granted bool
@@ -218,7 +246,7 @@ func (handler *linuxCallHandler) vfsIssue(stage uint8, operation vfs.Request, at
 		handler.vfsUnsent(transfers[:attached])
 		return linuxabi.EIO
 	}
-	if status := channel.Send(side, local.linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached]); status != ipc.StatusOK {
+	if status := channelSend(channelID, side, &local.linuxVFSMessage, owner.Handles(), peerHandles, transfers[:attached]); status != ipc.StatusOK {
 		if status == ipc.StatusPeerDied {
 			context.Session.Fail()
 		}
@@ -388,15 +416,14 @@ func (handler *linuxCallHandler) vfsReply(operation vfs.Operation) (reply vfs.Re
 		handler.vfsAbandon()
 		return vfs.Reply{}, linuxabi.EIO, false
 	}
-	_, channel, channelID, side, reachable := handler.vfsEndpoint(state)
+	_, channelID, side, reachable := handler.vfsEndpoint(state)
 	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
 	if !reachable || !contextFound {
 		return vfs.Reply{}, handler.vfsFailed(), false
 	}
 	// At most a full queue of replies to abandoned requests precedes this one.
 	for drained := 0; drained <= ipc.QueueCapacity; drained++ {
-		var status ipc.Status
-		local.linuxVFSMessage, status = channel.Receive(side)
+		status := channelReceive(channelID, side, &local.linuxVFSMessage)
 		if status == ipc.StatusNotFound {
 			break
 		}

@@ -30,7 +30,7 @@ const (
 
 func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat.Result {
 	local := thisCPU()
-	// The calls of the fast class run without the Linux lock; they use only
+	// The calls of the fast class run without the family's lock; they use only
 	// the PID and the TID the dispatcher found.
 	state := handler.state
 	if state == nil {

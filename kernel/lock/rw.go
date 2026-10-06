@@ -7,8 +7,9 @@ import (
 
 // RW is a reader-writer spin lock: any number of readers, or one writer. A
 // writer that waits keeps new readers out, so a stream of readers cannot
-// starve it. Its level orders it with the other locks; a processor holds at
-// most one RW of a level, as reader or as writer.
+// starve it. Its level orders it with the other locks. A processor holds a
+// second RW of one level only through RLockAfter or LockAfter, which take
+// it above the first in rank order.
 type RW struct {
 	// state is the reader count, with rwWriter set while a writer holds the
 	// lock and rwPending while one waits for it.
@@ -16,7 +17,17 @@ type RW struct {
 	// owner is the writer's processor plus one, kept by validation builds.
 	owner     atomic.Uint32
 	levelWord atomic.Uint32
+	// rank orders the locks of one level, such as every process's handle
+	// table.
+	rank uint32
 }
+
+// readHeld records, per processor, the RW locks it holds for reading, so a
+// validation build can tell one handle table from another. A processor
+// holds at most readSlots of them at once.
+const readSlots = 4
+
+var readHeld [MaxCPUs][readSlots]*RW
 
 const (
 	rwWriter  = uint32(1) << 31
@@ -31,6 +42,12 @@ func (lock *RW) SetLevel(level Level) {
 	}
 }
 
+// SetRank orders the lock among the locks of its level.
+func (lock *RW) SetRank(rank uint32) { lock.rank = rank }
+
+// Rank returns the lock's rank.
+func (lock *RW) Rank() uint32 { return lock.rank }
+
 // level returns the lock's level. It is atomic: types that lock themselves
 // name their level each time they take the lock, from any processor.
 func (lock *RW) level() Level { return Level(lock.levelWord.Load()) }
@@ -41,7 +58,17 @@ func (lock *RW) RLock() { lock.RLockUnless(nil) }
 // RLockUnless takes the lock for reading, or gives up when the word stop
 // points at becomes nonzero, and reports whether it took the lock.
 func (lock *RW) RLockUnless(stop *uint64) bool {
-	cpu := lock.enter()
+	return lock.readUnless(nil, stop)
+}
+
+// RLockAfter takes the lock for reading as the second lock of first's level;
+// first ranks below it.
+func (lock *RW) RLockAfter(first *RW, stop *uint64) bool {
+	return lock.readUnless(first, stop)
+}
+
+func (lock *RW) readUnless(first *RW, stop *uint64) bool {
+	cpu := lock.enter(first)
 	if !lock.tryRead() {
 		var wait waiting
 		wait.begin(lock.level())
@@ -84,7 +111,17 @@ func (lock *RW) Lock() { lock.LockUnless(nil) }
 // LockUnless takes the lock for writing, or gives up when the word stop
 // points at becomes nonzero, and reports whether it took the lock.
 func (lock *RW) LockUnless(stop *uint64) bool {
-	cpu := lock.enter()
+	return lock.writeUnless(nil, stop)
+}
+
+// LockAfter takes the lock for writing as the second lock of first's level;
+// first ranks below it.
+func (lock *RW) LockAfter(first *RW, stop *uint64) bool {
+	return lock.writeUnless(first, stop)
+}
+
+func (lock *RW) writeUnless(first *RW, stop *uint64) bool {
+	cpu := lock.enter(first)
 	if !lock.state.CompareAndSwap(0, rwWriter) {
 		var wait waiting
 		wait.begin(lock.level())
@@ -129,7 +166,7 @@ func (lock *RW) Unlock() {
 }
 
 // AssertHeld stops a validation build whose caller holds the lock neither for
-// reading nor for writing. A reader is known only by the level it holds.
+// reading nor for writing.
 func (lock *RW) AssertHeld() {
 	if !validation.Enabled || hooks.CPU == nil {
 		return
@@ -138,40 +175,81 @@ func (lock *RW) AssertHeld() {
 	if lock.owner.Load() == cpu+1 {
 		return
 	}
-	if cpu < MaxCPUs && lock.level() < levelCount && heldCount[cpu][lock.level()] != 0 && lock.state.Load()&rwReaders != 0 {
-		return
+	if cpu < MaxCPUs {
+		for _, held := range readHeld[cpu] {
+			if held == lock {
+				return
+			}
+		}
 	}
-	fatal("kernel state used without its lock: " + lock.level().String())
+	fatal("kernel state used without its lock: " + lock.level().String() + " rank " + decimal(lock.rank))
 }
 
 // AssertWriter stops a validation build whose caller does not hold the lock
 // for writing.
 func (lock *RW) AssertWriter() {
 	if validation.Enabled && hooks.CPU != nil && lock.owner.Load() != hooks.CPU()+1 {
-		fatal("kernel state changed without its write lock: " + lock.level().String())
+		fatal("kernel state changed without its write lock: " + lock.level().String() + " rank " + decimal(lock.rank))
 	}
 }
 
-func (lock *RW) enter() uint32 {
+func (lock *RW) enter(first *RW) uint32 {
 	if !validation.Enabled {
 		return 0
 	}
 	cpu := currentCPU()
-	if lock.owner.Load() == cpu+1 {
+	if lock.owner.Load() == cpu+1 || lock.readBy(cpu) {
 		fatal("recursive lock acquisition")
 	}
-	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs && held[cpu].Load()>>lock.level() != 0 {
+	if lock.level() == 0 || lock.level() >= levelCount || cpu >= MaxCPUs {
+		return cpu
+	}
+	if first != nil {
+		if first.level() != lock.level() || first.owner.Load() != cpu+1 && !first.readBy(cpu) || first.rank >= lock.rank {
+			fatal("second lock of a level taken out of rank order")
+		}
+		if held[cpu].Load()>>(lock.level()+1) != 0 {
+			fatal("lock taken out of level order")
+		}
+		return cpu
+	}
+	if held[cpu].Load()>>lock.level() != 0 {
 		fatal("lock taken out of level order")
 	}
 	return cpu
 }
 
+// readBy reports whether processor cpu holds the lock for reading.
+func (lock *RW) readBy(cpu uint32) bool {
+	if cpu >= MaxCPUs {
+		return false
+	}
+	for _, held := range readHeld[cpu] {
+		if held == lock {
+			return true
+		}
+	}
+	return false
+}
+
 func (lock *RW) acquired(cpu uint32, writer bool) {
+	count(lock.level())
 	if !validation.Enabled {
 		return
 	}
 	if writer {
 		lock.owner.Store(cpu + 1)
+	} else if cpu < MaxCPUs {
+		recorded := false
+		for slot := range readHeld[cpu] {
+			if readHeld[cpu][slot] == nil {
+				readHeld[cpu][slot], recorded = lock, true
+				break
+			}
+		}
+		if !recorded {
+			fatal("too many read locks held at once")
+		}
 	}
 	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs {
 		heldCount[cpu][lock.level()]++
@@ -189,6 +267,17 @@ func (lock *RW) released(writer bool) {
 			fatal("lock released by a processor that does not hold it")
 		}
 		lock.owner.Store(0)
+	} else if cpu < MaxCPUs {
+		found := false
+		for slot := range readHeld[cpu] {
+			if readHeld[cpu][slot] == lock {
+				readHeld[cpu][slot], found = nil, true
+				break
+			}
+		}
+		if !found {
+			fatal("read lock released by a processor that does not hold it")
+		}
 	}
 	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs {
 		if heldCount[cpu][lock.level()] == 0 {
@@ -197,6 +286,20 @@ func (lock *RW) released(writer bool) {
 		heldCount[cpu][lock.level()]--
 		if heldCount[cpu][lock.level()] == 0 {
 			clearBit(&held[cpu], uint32(1)<<lock.level())
+		}
+	}
+}
+
+// decimal formats a rank for a fatal message.
+func decimal(value uint32) string {
+	var digits [10]byte
+	at := len(digits)
+	for {
+		at--
+		digits[at] = byte('0' + value%10)
+		value /= 10
+		if value == 0 {
+			return string(digits[at:])
 		}
 	}
 }

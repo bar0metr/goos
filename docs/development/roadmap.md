@@ -538,9 +538,10 @@ Every processor the firmware lists, up to 64, starts and runs tasks
 in parallel; per-processor run queues, local APIC timers, reschedule
 interrupts, and TLB shootdown carry it. Kernel calls take the locks of the
 domains they touch (ADR 0184), so faults and the fast Linux calls of one
-program's threads run in the kernel at once. Most Linux file and process
-calls still share the linux lock, and every channel shares one lock; splitting
-those is the next step for workloads that spend their time in the kernel.
+program's threads run in the kernel at once. Each process's handle table,
+each Linux family, and each channel has a lock of its own (ADR 0187), so
+unrelated Linux programs make file and process calls at once. A family's
+threads still run their file calls one at a time.
 
 ### Next: a Linux terminal
 

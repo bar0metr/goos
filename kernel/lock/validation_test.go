@@ -14,6 +14,7 @@ func expectFatal(t *testing.T, name string, run func()) {
 		for index := range held {
 			held[index].Store(0)
 			heldCount[index] = [levelCount]uint8{}
+			readHeld[index] = [readSlots]*RW{}
 		}
 		if recover() == nil || message == "" {
 			t.Fatalf("%s was accepted", name)
@@ -106,4 +107,37 @@ func TestAssertHeld(t *testing.T) {
 	spin.Lock()
 	spin.AssertHeld()
 	spin.Unlock()
+}
+
+func TestTwoTablesTakeRankOrder(t *testing.T) {
+	Install(Hooks{})
+	var low, high RW
+	low.SetLevel(LevelHandle)
+	high.SetLevel(LevelHandle)
+	low.SetRank(1)
+	high.SetRank(2)
+	low.RLock()
+	high.LockAfter(&low, nil)
+	high.AssertWriter()
+	low.AssertHeld()
+	high.Unlock()
+	low.RUnlock()
+	expectFatal(t, "a lower-ranked table after a higher one", func() {
+		high.RLock()
+		low.LockAfter(&high, nil)
+	})
+	var message string
+	Install(Hooks{CPU: func() uint32 { return 0 }, Fatal: func(text string) { message = text; panic(text) }})
+	defer Install(Hooks{})
+	var other RW
+	other.SetLevel(LevelHandle)
+	low.RLock()
+	func() {
+		defer func() { recover() }()
+		other.AssertHeld()
+	}()
+	low.RUnlock()
+	if message == "" {
+		t.Fatal("a table the processor does not hold passed for one it reads")
+	}
 }

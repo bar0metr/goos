@@ -102,7 +102,7 @@ func expireProcessWaiters() {
 
 //export goos_dispatch_process_wait
 func dispatchProcessWait(processHandle uint64, resultAddress uint64, timeout uint64, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationProcessWait)
+	call, ok := beginNativeCall(kcall.OperationProcessWait, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
@@ -147,7 +147,7 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 
 //export goos_dispatch_irq_wait
 func dispatchIRQWait(irqHandle uint64, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationIRQWait)
+	call, ok := beginNativeCall(kcall.OperationIRQWait, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
@@ -266,7 +266,7 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 			return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
 		}
 		object, side, valid := ipc.DecodeEndpointObject(authority.Object())
-		if _, exists := channelRegistry.Lookup(object); !valid || !exists {
+		if !valid || !channelRegistry.Live(object) {
 			return kernelwait.Entry{}, kcall.StatusNotFound, diag.DenyObject
 		}
 		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindChannel, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK, 0
@@ -344,9 +344,10 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 		ready := false
 		switch entry.Key.Kind {
 		case kernelwait.KindChannel:
-			channel, found := channelRegistry.Lookup(entry.Key.Object)
+			channel, found := channelRegistry.Acquire(entry.Key.Object)
 			if found {
 				status := channel.ReceiveStatus(entry.Key.Side)
+				channel.Unlock()
 				ready = status == ipc.StatusOK && entry.Events&kernelwait.Readable != 0 ||
 					status == ipc.StatusPeerDied && entry.Events&kernelwait.PeerClosed != 0
 			}
@@ -434,7 +435,7 @@ func expireWaitAny() {
 
 //export goos_dispatch_wait_any
 func dispatchWaitAny(interestsAddress, count, resultAddress, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationWaitAny)
+	call, ok := beginNativeCall(kcall.OperationWaitAny, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}
@@ -454,10 +455,10 @@ func expireWaitDeadlines() {
 	expireProcessWaiters()
 	expireStreamWaiters()
 	expireWaitAny()
-	channelLock.Lock()
 	executableLock.Lock()
+	pagingLock.Lock()
 	retryExecutablePages()
+	pagingLock.Unlock()
 	executableLock.Unlock()
-	channelLock.Unlock()
 	wakeConsoleWaiters()
 }

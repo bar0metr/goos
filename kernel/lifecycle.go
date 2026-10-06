@@ -16,7 +16,6 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
-	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -42,34 +41,38 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	return kcall.StatusOK
 }
 
-// exitLocks is the set an exit takes, besides the address space of the
-// task's process and the executable table, which come after it in level
-// order.
-const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+// exitLocks is the set an exit takes; the handle table and address space
+// are those of the task's process.
+const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | streams | sharedMemory | spaceWrite | executableTable
 
 // deliverProcessExits runs, on the housekeeping task, the teardown of every
-// task whose exit the scheduler has published, one task at a time.
+// task whose exit the scheduler has published, one task at a time. The
+// task-to-process map still names the task's process: only this teardown
+// clears the entry.
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
-		takeLocks(exitLocks, nil, nil)
-		owner, _ := processRegistry.ByTask(sched.TaskID(task))
-		var space *lock.RW
-		if owner != nil {
-			space = owner.Space()
-			space.Lock()
-		}
-		executableLock.Lock()
+		owner, _ := processRegistry.Owner(sched.TaskID(task))
+		held := heldLocks{set: exitLocks, owner: owner, family: linuxFamilyOf(owner)}
+		held.take(nil)
 		released := deliverTaskExit(task)
-		executableLock.Unlock()
-		if space != nil {
-			space.Unlock()
-		}
-		dropLocks(exitLocks, nil)
+		held.drop()
 		// The slot is cleared only now: its locks lived in it.
 		if released != nil {
 			released.Reset()
 		}
 	}
+}
+
+// linuxFamilyOf returns the Linux family of a process, or zero for a native
+// process.
+func linuxFamilyOf(owner *process.Process) uint64 {
+	if owner == nil || owner.ABI() != process.ABILinuxX8664 {
+		return 0
+	}
+	if state, found := linuxcompat.FindProcess(owner.AddressSpace().Root); found {
+		return state.FamilyID
+	}
+	return 0
 }
 
 // deliverTaskExit tears down one exited task and, with its process's last
@@ -78,6 +81,7 @@ func deliverProcessExits() {
 func deliverTaskExit(task uint64) *process.Process {
 	taskID := sched.TaskID(task)
 	cancelExecutableFault(taskID)
+	forgetLinuxCaller(taskID)
 	processRegistry.ForgetOwner(taskID)
 	cancelLinuxExec(taskID)
 	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
@@ -245,11 +249,9 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 		return
 	}
 	channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-	channel, exists := channelRegistry.Lookup(channelID)
-	if valid && exists && channel.Close(side) {
+	if valid && closeChannelSide(channelID, side) {
 		trace(diag.ChannelClosed, releasingProcess, 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-		releaseChannelSlot(channelID)
 	}
 }
 

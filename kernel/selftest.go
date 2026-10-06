@@ -153,6 +153,10 @@ func runKernelSelfTests(pageTable uint64) {
 	copy(request.Payload[:], []byte("ping"))
 	wireSize, wireEncoded := ipc.Encode(request, local.ipcWireData[:])
 	wireRequest, wireDecoded := ipc.Decode(local.ipcWireData[:wireSize])
+	// Boot runs alone, but the channel's methods check its lock all the same.
+	if channelCreated {
+		registeredChannel.Lock()
+	}
 	ipcStatus := registeredChannel.Send(0, wireRequest, processA.Handles(), processB.Handles(), []ipc.Transfer{{
 		Handle: memoryHandle,
 		Type:   handle.TypeMemory,
@@ -163,6 +167,9 @@ func runKernelSelfTests(pageTable uint64) {
 	reply := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindReply, Correlation: request.Correlation}
 	replyStatus := registeredChannel.Send(1, reply, nil, nil, nil)
 	_, replyReceiveStatus := registeredChannel.Receive(0)
+	if channelCreated {
+		registeredChannel.Unlock()
+	}
 	if !channelCreated || !channelAInstalled || !channelBInstalled || !channelACanWrite || !channelBCanRead || !wireEncoded || !wireDecoded ||
 		ipcStatus != ipc.StatusOK || receivedStatus != ipc.StatusOK || receivedRequest.HandleCount != 1 || !receivedMemoryReadable ||
 		string(receivedRequest.Payload[:receivedRequest.PayloadSize]) != "ping" || replyStatus != ipc.StatusOK || replyReceiveStatus != ipc.StatusOK {
@@ -191,7 +198,8 @@ func runKernelSelfTests(pageTable uint64) {
 	mark("TTY_CAPABILITY_OK")
 	runFilesystemSelfTests(console)
 
-	boundedChannel = ipc.NewChannel()
+	boundedChannel.Reset()
+	boundedChannel.Lock()
 	notification := ipc.Message{ProtocolID: request.ProtocolID, Version: request.Version, Kind: ipc.KindNotification}
 	for index := 0; index < ipc.QueueCapacity; index++ {
 		if boundedChannel.Send(0, notification, nil, nil, nil) != ipc.StatusOK {
@@ -221,6 +229,7 @@ func runKernelSelfTests(pageTable uint64) {
 			amd64.Halt()
 		}
 	}
+	boundedChannel.Unlock()
 	mark("IPC_BOUNDED_OK")
 	mark("IPC_PEER_DEATH_OK")
 

@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. Supersedes the kernel lock of the SMP design (docs/kernel/smp.md
-before this change) and amends ADR 0183.
+before this change) and amends ADR 0183. Amended by ADR 0187, which splits
+the linux, handle, and channel domains and reorders the levels; the tables
+below show the order this ADR introduced.
 
 ## Context
 
@@ -153,4 +155,4 @@ Some domains are still wide. Most Linux calls hold the linux lock, so file
 and process calls of all Linux programs run one at a time; every channel
 shares one lock, and so does every handle table. Splitting them is a later
 change that needs no new mechanism: a finer lock goes in at the level of the
-one it replaces.
+one it replaces. ADR 0187 makes that change.

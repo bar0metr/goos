@@ -45,8 +45,11 @@ func (handler nativeCallHandler) ProcessKill(processHandle uint64) kcall.Status 
 
 // cancelTaskWaits removes every registration a task may be blocked on, so no
 // later wake refers to a slot that has been retired.
+//
+// An exec the task has in progress is not cancelled here: the task may be
+// preparing it on another processor under its family's lock. Its exit, which
+// follows, cancels it (deliverTaskExit).
 func cancelTaskWaits(taskID sched.TaskID) {
-	cancelLinuxExec(taskID)
 	forgetFutexWaiter(taskID)
 	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
 	linuxcompat.SyscallContinuations.Cancel(taskID)

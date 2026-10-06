@@ -28,18 +28,15 @@ const (
 	// LevelRegistry is the process registry, the fields of every process
 	// but its handles and address space, and the task-to-process map.
 	LevelRegistry Level = iota + 1
-	// LevelLinux is the Linux personality's state: process states with their
-	// descriptors and signals, process records, threads, open descriptions,
-	// directories, VFS sessions, and exec staging.
+	// LevelLinux is one bucket of Linux families: the descriptors, signals,
+	// threads, and exec staging of the processes that share a thread group or
+	// descriptor table.
 	LevelLinux
 	// LevelLifecycle is the queue of lifecycle messages for PID 1.
 	LevelLifecycle
-	// LevelHandle is every process's handle table. IPC moves handles from
-	// one table to another, so one lock covers them all.
+	// LevelHandle is one process's handle table, ranked by process ID. A
+	// call that moves handles holds two, the lower rank first.
 	LevelHandle
-	// LevelChannel is the channel registry, every channel, and the
-	// executable page requests that travel on channels.
-	LevelChannel
 	// LevelStream is the stream registry and every stream.
 	LevelStream
 	// LevelShmem is the shared memory objects and the image page cache.
@@ -50,12 +47,29 @@ const (
 	// LevelExecutable is the executable table. A fault inside a copy reads
 	// an image page from it with the address space held.
 	LevelExecutable
+	// LevelPaging is the table of executable page requests out to file
+	// services. A request is sent and recorded under it.
+	LevelPaging
+	// LevelChannelSlots is the channel registry's slots, held only to find,
+	// add, or remove a channel.
+	LevelChannelSlots
+	// LevelChannel is one channel: its queues and endpoint state. Nothing
+	// holds two.
+	LevelChannel
 	// LevelFutex is one futex bucket.
 	LevelFutex
 	// LevelWait is the wait tables, each with a lock of its own: channel and
 	// stream waits, process waits, multi-object waits, and the Linux call
 	// continuations. None is taken while another is held.
 	LevelWait
+	// LevelLinuxTables is the Linux personality's shared tables: process
+	// state and record slots, threads, open descriptions, directories, VFS
+	// sessions, and the identities they hand out. The personality takes it
+	// itself, for one table operation at a time.
+	LevelLinuxTables
+	// LevelHandleIndex is the index of which processes hold each channel
+	// endpoint, taken briefly by handle tables as they change.
+	LevelHandleIndex
 	// LevelLog is the kernel log and the diagnostic trace ring.
 	LevelLog
 	// LevelMemory is the physical page allocator.
@@ -75,8 +89,8 @@ const (
 const Levels = int(levelCount)
 
 var levelNames = [levelCount]string{
-	"none", "registry", "linux", "lifecycle", "handle", "channel",
-	"stream", "shmem", "address-space", "executable", "futex", "wait", "log",
+	"none", "registry", "linux", "lifecycle", "handle",
+	"stream", "shmem", "address-space", "executable", "paging", "channel-slots", "channel", "futex", "wait", "linux-tables", "handle-index", "log",
 	"memory", "random", "scheduler", "console",
 }
 
@@ -132,6 +146,8 @@ var (
 
 // Stats is the contention of one level since boot.
 type Stats struct {
+	// Acquired counts every acquisition.
+	Acquired uint64
 	// Contended counts acquisitions that had to spin.
 	Contended uint64
 	// Spin is the total time those acquisitions spun, in the clock's units.
@@ -147,6 +163,20 @@ var stats [levelCount]struct {
 	spin      atomic.Uint64
 	longest   atomic.Uint64
 	stuck     atomic.Uint64
+}
+
+// acquisitions counts each processor's acquisitions per level. Every
+// processor adds to its own row, so the count costs no shared cache line.
+var acquisitions [MaxCPUs][levelCount]atomic.Uint64
+
+// count records one acquisition of level by the calling processor.
+func count(level Level) {
+	if hooks.CPU == nil || level >= levelCount {
+		return
+	}
+	if cpu := hooks.CPU(); cpu < MaxCPUs {
+		acquisitions[cpu][level].Add(1)
+	}
 }
 
 // contended counts acquisitions that had to wait, over every level.
@@ -384,7 +414,12 @@ func Statistics(level Level) Stats {
 	if level >= levelCount {
 		return Stats{}
 	}
+	acquired := uint64(0)
+	for cpu := range acquisitions {
+		acquired += acquisitions[cpu][level].Load()
+	}
 	return Stats{
+		Acquired:  acquired,
 		Contended: stats[level].contended.Load(),
 		Spin:      stats[level].spin.Load(),
 		Longest:   stats[level].longest.Load(),
@@ -421,6 +456,7 @@ func (lock *Spin) enter(first *Spin) uint32 {
 }
 
 func (lock *Spin) acquired(cpu uint32) {
+	count(lock.level())
 	if !validation.Enabled {
 		return
 	}

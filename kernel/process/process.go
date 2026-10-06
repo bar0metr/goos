@@ -80,6 +80,7 @@ func InitWithProfile(target *Process, id ID, abi ABI, addressSpace AddressSpace,
 	target.addressSpace = addressSpace
 	target.quota = quota
 	target.space.SetLevel(lock.LevelAddressSpace)
+	target.handles.SetOwner(uint64(id))
 	target.regions.Init(vm.UserAddressStart, vm.UserAddressLimit)
 	return true
 }
@@ -98,6 +99,7 @@ func InitChild(target *Process, id ID, parent *Process, addressSpace AddressSpac
 	target.quota.limits = parent.quota.limits
 	target.regions.CopyFrom(&parent.regions)
 	target.space.SetLevel(lock.LevelAddressSpace)
+	target.handles.SetOwner(uint64(id))
 	target.name, target.nameSize = parent.name, parent.nameSize
 	return true
 }
@@ -346,6 +348,7 @@ func (registry *Registry) Add(process *Process) bool {
 func (registry *Registry) GuardSpaces() {
 	for index := 0; index < int(registry.count); index++ {
 		registry.processes[index].regions.Guard(&registry.processes[index].space)
+		registry.processes[index].handles.Guard()
 	}
 }
 
@@ -363,6 +366,12 @@ func (registry *Registry) BindTask(id ID, task sched.TaskID) bool {
 		if registry.processes[index].ID() == id {
 			if !registry.processes[index].AddTask(task) {
 				return false
+			}
+			// Until now only the call creating the process, which holds the
+			// registry for writing, could reach its handle table; its task
+			// will, so the table checks for its lock from here.
+			if guard.Installed() {
+				registry.processes[index].handles.Guard()
 			}
 			return registry.NoteOwner(task, registry.processes[index])
 		}
@@ -446,14 +455,15 @@ func (registry *Registry) AllowsABI(root uint64, abi ABI) bool {
 	return found && abi.Valid() && process.ABI() == abi
 }
 
-func (registry *Registry) ByCapabilityObject(typeID handle.Type, object uint64) (*Process, bool) {
+// EndpointHolder returns a process that holds a handle to the channel
+// endpoint object, from the handle tables' holder index.
+func (registry *Registry) EndpointHolder(object uint64) (*Process, bool) {
 	guard.Check()
-	for index := 0; index < int(registry.count); index++ {
-		if registry.processes[index].Handles().HasObject(typeID, object) {
-			return registry.processes[index], true
-		}
+	holder, held := handle.Holder(object)
+	if !held {
+		return nil, false
 	}
-	return nil, false
+	return registry.ByID(ID(holder))
 }
 
 func (registry *Registry) ByID(id ID) (*Process, bool) {
