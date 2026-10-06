@@ -14,6 +14,37 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   runs the two-phase QEMU boot and reboot persistence test.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
+- `make test-network` builds the validation ISO and system tree and runs
+  `tests/boot/network.sh`, the network gate (ADR 0190, ADR 0191). Each
+  scenario boots from its own disposable disk with the NIC at PCI slot 4:
+  - `user`: QEMU user networking. DHCP must reach ready on `10.0.2.x` within
+    15 seconds of the prompt, and `net status` must show the state, link,
+    MAC, mode, address, gateway `10.0.2.2` and lease. Four rounds of
+    `ping -c 4 -W 1000 10.0.2.2` must each print a reply for every sequence
+    number and `4 sent, 4 received, 0% lost`. Between rounds `fault
+    net-driver` kills the driver twice; a file written before the first
+    kill reads back after it, and a replacement driver must start each time.
+    The per-process counts `quota` prints for PID 1, `netd` and the driver
+    must match between the first and the second round of pings, and
+    between the rounds that follow the first and the second driver
+    replacement.
+  - `stream`: two guests on one QEMU `stream` backend over a Unix socket,
+    with static `192.0.2.10/24` and `192.0.2.11/24` stored in their
+    configuration files and no gateway. Each pings the other four times and
+    must get every reply; `net status` must show static mode, the address,
+    and no gateway.
+  - `none`: no NIC. The guest must reach normal mode and read
+    `/system/motd`; `net status` must say `down`, and `ping -c 1 -W 500`
+    must print a failed sequence, `1 sent, 0 received, 100% lost`, and exit
+    status 1.
+
+  `NETWORK_SCENARIOS` picks some of them, for example
+  `make test-network NETWORK_SCENARIOS=stream`. Logs go to
+  `build/logs/network-*.log`. The target needs no host privileges and is
+  not part of `test-all` or `release-check`. A ping beyond `10.0.2.2` under
+  user networking depends on the host's ICMP support and is no test of
+  GoOS. The host tests and fuzz seeds of `userspace/netdev`,
+  `userspace/netapi` and `userspace/network` run in `make test-unit`.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, the real QEMU
   boot/persistence test, and the Linux end-to-end boot in sequence so host

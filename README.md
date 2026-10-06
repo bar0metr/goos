@@ -45,7 +45,7 @@ Native applications             Linux ELF applications
                           |
         +-----------------+-----------------+
         |                 |                 |
-       VFS          network (planned)     drivers
+       VFS             network          drivers
         |                 |                 |
         +-----------------+-----------------+
                           |
@@ -56,10 +56,9 @@ Native applications             Linux ELF applications
 
 The kernel keeps the mechanisms that need full privilege: CPU state,
 interrupts, memory, scheduling, processes, IPC, handles, capabilities, and
-timers. Filesystems, the terminal, configuration, logging, and complex drivers
-run as isolated userspace services that hold only the authority they were
-given. Networking is the target design for a future service; GoOS has no
-network stack yet.
+timers. Filesystems, the terminal, configuration, logging, networking, and
+complex drivers run as isolated userspace services that hold only the
+authority they were given.
 
 The central principle:
 
@@ -72,6 +71,9 @@ capability-oriented native userspace built from isolated services. The
 installed system includes persistent FAT32 storage, VFS, supervision, a native
 shell and utilities, serial and framebuffer terminals, configuration and
 logging services, and full-screen tools such as `gfm`, `gview`, and `edit`.
+A userspace IPv4 service over a virtio-net driver configures its address
+with DHCP or static settings and answers and sends ICMP echo; `ping` and
+`net status` use it from the shell.
 
 The kernel supports preemptive SMP on up to 64 processors, per-process address
 spaces, typed capability-checked handles, IPC, shared memory, fine-grained
@@ -100,6 +102,7 @@ make                  # build build/goos-x86_64.iso
 make run              # boot in QEMU with the serial console here
 make run-gui          # boot with a graphical display
 make run RECOVERY=1   # boot into recovery
+make run NET=none     # boot without a network device
 ```
 
 `make run` boots the system installed on `build/goos-disk.img`. It creates the
@@ -122,6 +125,7 @@ and [testing](docs/development/testing.md) for the full set of targets.
 - [Architecture](docs/architecture/)
 - [Roadmap](docs/development/roadmap.md)
 - [SMP design](docs/kernel/smp.md)
+- [Networking](docs/architecture/networking.md)
 - [Linux x86_64 compatibility](docs/architecture/linux-x86_64-abi.md)
 - [ADRs](docs/adr/)
 - [Release notes](docs/releases/)

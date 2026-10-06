@@ -545,6 +545,29 @@ through the native API and Linux `sched_setaffinity`, the `cpu` command exposes
 per-CPU runtime state, and housekeeping uses a bounded deadline index. SMP and
 7-Zip are validated under QEMU and KVM/Proxmox.
 
+### Native networking
+
+Done after 0.2.4, under ADR 0190 and ADR 0191, as the
+[networking specification](networking.md) set out:
+
+- discovery of one legacy virtio-net function with a probed and validated
+  I/O BAR, a dedicated interrupt vector, an IRQ interest in `WaitAny` and
+  `IRQTake`, and a DMA domain per device whose teardown resets only its own
+  device;
+- a userspace driver and a network service, `netd`, with frames carried in
+  two shared pools and only slot numbers in `GNETDRV1` messages;
+- Ethernet II, ARP, IPv4, ICMP echo, and a DHCP client with renew, rebind
+  and conflict detection, or a static address from the configuration
+  service;
+- `ping` and `net status|reload` over private sessions granted by the
+  command index, format 3;
+- `make test-network`: DHCP and ping on QEMU user networking with two driver
+  replacements and exact resource counts, two guests on a private stream
+  backend, and a boot without a NIC.
+
+DNS, TCP, UDP sockets, IPv6 and Linux network calls are not part of it.
+`test-network` is not yet in `test-all` or the release gate.
+
 ### Next: a Linux terminal
 
 The next release is to give Linux programs a terminal: a terminal descriptor,
@@ -584,7 +607,7 @@ a concrete blocker requires them:
 
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
-- networking;
+- networking beyond IPv4 and ICMP echo on one virtio-net interface;
 - USB;
 - GUI;
 - ext4;
