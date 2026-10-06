@@ -77,6 +77,11 @@ const (
 	OperationCPUInfo
 	OperationCPUEntry
 	OperationCPUCacheInfo
+	// OperationCPURuntime reads one processor's scheduler counters, and
+	// OperationTaskAffinity reads or sets the processors a task may run on
+	// (ADR 0188).
+	OperationCPURuntime
+	OperationTaskAffinity
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -156,6 +161,8 @@ type Handler interface {
 	CPUInfo(address uint64, length uint64) Status
 	CPUEntry(index uint64, address uint64) Status
 	CPUCacheInfo(index uint64, address uint64) Status
+	CPURuntime(index uint64, address uint64) Status
+	TaskAffinity(process uint64, mask uint64, address uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
@@ -284,6 +291,10 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.CPUEntry(request.Arg0, request.Arg1)}
 	case OperationCPUCacheInfo:
 		return Result{Status: handler.CPUCacheInfo(request.Arg0, request.Arg1)}
+	case OperationCPURuntime:
+		return Result{Status: handler.CPURuntime(request.Arg0, request.Arg1)}
+	case OperationTaskAffinity:
+		return Result{Status: handler.TaskAffinity(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationValidationFault:
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:

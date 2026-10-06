@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/kernel/deadline"
 	"sync/atomic"
 
 	"goos/kernel/arch/amd64"
@@ -53,6 +54,12 @@ const (
 var (
 	executableFaults      [sched.MaxTasks]executableFault
 	executableCorrelation uint64
+	// executableOrphans are requests whose task went away before the reply.
+	// The reply still comes to the kernel's side of the source channel,
+	// where nothing else receives, so completeExecutablePage takes it and
+	// drops it; left there, such replies would fill the queue and stop
+	// every later request on the channel. The paging lock guards it.
+	executableOrphans [sched.MaxTasks]executableOrphan
 	// executableWanted is the page, plus one, a copy of the task's call needed
 	// from an executable object and could not take. The task writes it and
 	// takes it back itself.
@@ -228,7 +235,60 @@ func clearExecutableFault(fault *executableFault) {
 	if fault.physical != 0 {
 		pageAllocator.Free(fault.physical)
 	}
+	if fault.task != 0 && !fault.failed && fault.physical == 0 && fault.correlation != 0 && fault.retryAt == 0 {
+		noteExecutableOrphan(fault.channelID, fault.side, fault.correlation)
+	}
+	if fault.retryAt != 0 {
+		deadlines.Cancel(deadline.SourcePaging, fault.task)
+	}
 	*fault = executableFault{}
+}
+
+// executableOrphan is a request in flight whose task no longer waits.
+type executableOrphan struct {
+	channelID   uint64
+	side        uint8
+	correlation uint64
+}
+
+// noteExecutableOrphan records a request whose reply nobody will take. When
+// every entry is in use, the oldest correlation gives way: correlations only
+// grow, and the oldest reply is the likeliest to have come already.
+func noteExecutableOrphan(channelID uint64, side uint8, correlation uint64) {
+	target := 0
+	for index := range executableOrphans {
+		if executableOrphans[index].correlation == 0 {
+			target = index
+			break
+		}
+		if executableOrphans[index].correlation < executableOrphans[target].correlation {
+			target = index
+		}
+	}
+	executableOrphans[target] = executableOrphan{channelID: channelID, side: side, correlation: correlation}
+}
+
+// executableOrphanOn reports whether a request on the endpoint has lost its
+// task.
+func executableOrphanOn(channelID uint64, side uint8) bool {
+	for index := range executableOrphans {
+		if orphan := &executableOrphans[index]; orphan.correlation != 0 && orphan.channelID == channelID && orphan.side == side {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetExecutableOrphans drops the orphans on an endpoint: the one whose
+// reply came, or, with correlation zero, every one on a channel that is gone.
+func forgetExecutableOrphans(channelID uint64, side uint8, correlation uint64) {
+	for index := range executableOrphans {
+		orphan := &executableOrphans[index]
+		if orphan.correlation != 0 && orphan.channelID == channelID && orphan.side == side &&
+			(correlation == 0 || orphan.correlation == correlation) {
+			*orphan = executableOrphan{}
+		}
+	}
 }
 
 // cancelExecutableFault forgets the request of a task that has exited.
@@ -274,21 +334,24 @@ func sendExecutableRequest(fault *executableFault) bool {
 	return true
 }
 
-// retryExecutablePages sends again each page request whose filesystem was
-// away, once its retry tick has come. A request that cannot be sent fails.
-// Housekeeping calls it holding the executable and paging locks.
-func retryExecutablePages() {
-	now := amd64.TimerTicks()
-	for index := range executableFaults {
-		fault := &executableFaults[index]
-		if fault.task == 0 || fault.failed || fault.physical != 0 || fault.retryAt == 0 || now < fault.retryAt {
-			continue
-		}
-		if !sendExecutableRequest(fault) {
-			fault.failed = true
-			amd64.WakeTaskID(uint64(fault.task))
-		}
+// retryExecutablePage sends task's page request again once its filesystem
+// was away and its retry tick has come. A request that cannot be sent fails.
+// The deadline index names the task when the tick comes.
+func retryExecutablePage(task sched.TaskID, now uint64) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(executableFaults) {
+		return
 	}
+	executableLock.Lock()
+	pagingLock.Lock()
+	fault := &executableFaults[slot]
+	if fault.task == task && !fault.failed && fault.physical == 0 && fault.retryAt != 0 && now >= fault.retryAt &&
+		!sendExecutableRequest(fault) {
+		fault.failed = true
+		amd64.WakeTaskID(uint64(fault.task))
+	}
+	pagingLock.Unlock()
+	executableLock.Unlock()
 }
 
 // completeExecutablePage consumes a VFS reply before another request can
@@ -316,11 +379,12 @@ func completeExecutablePageLocked(channelID uint64, side uint8) bool {
 			break
 		}
 	}
-	if !waiting {
+	if !waiting && !executableOrphanOn(channelID, side) {
 		return false
 	}
 	status := channelReceive(channelID, side, &local.executableReply)
 	if status == ipc.StatusPeerDied {
+		forgetExecutableOrphans(channelID, side, 0)
 		// The source's service is gone: every request on it fails.
 		for index := range executableFaults {
 			fault := &executableFaults[index]
@@ -344,6 +408,7 @@ func completeExecutablePageLocked(channelID uint64, side uint8) bool {
 	}
 	if slot < 0 {
 		// A reply to a request whose task has gone or given up.
+		forgetExecutableOrphans(channelID, side, local.executableReply.Correlation)
 		return true
 	}
 	fault := &executableFaults[slot]
@@ -354,8 +419,9 @@ func completeExecutablePageLocked(channelID uint64, side uint8) bool {
 			fault.giveUp = now + executableRetrySeconds*clock.TicksPerSecond
 		}
 		if now < fault.giveUp {
-			// The task stays parked; retryExecutablePages asks again.
+			// The task stays parked; retryExecutablePage asks again.
 			fault.retryAt = now + max(clock.TicksPerSecond/executableRetryPerSecond, 1)
+			deadlines.Arm(deadline.SourcePaging, fault.task, fault.retryAt)
 			return true
 		}
 	}

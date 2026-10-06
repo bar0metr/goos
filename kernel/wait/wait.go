@@ -2,6 +2,7 @@
 package wait
 
 import (
+	"goos/kernel/deadline"
 	"goos/kernel/lock"
 	"goos/kernel/sched"
 )
@@ -69,11 +70,31 @@ type operation struct {
 // Completed registrations remain only until Take so readiness published in
 // the same scheduling interval can be coalesced into one result. Its lock
 // makes each method one step, safe on several processors at once.
+//
+// With a deadline index installed, an active operation's deadline is in the
+// index until the operation completes or is cancelled.
 type Table struct {
 	lock       lock.Spin
 	operations [sched.MaxTasks]operation
 	active     int
 	registered int
+	deadlines  *deadline.Index
+	source     deadline.Source
+}
+
+// UseDeadlines keeps the table's deadlines in index under source.
+func (table *Table) UseDeadlines(index *deadline.Index, source deadline.Source) {
+	table.deadlines, table.source = index, source
+}
+
+// deactivate ends an active operation's wait and drops its deadline.
+func (table *Table) deactivate(op *operation) {
+	op.active = false
+	table.active--
+	table.registered -= int(op.count)
+	if table.deadlines != nil && op.deadline != 0 {
+		table.deadlines.Cancel(table.source, op.task)
+	}
 }
 
 func (set *Table) take() {
@@ -102,8 +123,7 @@ func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint6
 		return false
 	}
 	if op.active {
-		table.active--
-		table.registered -= int(op.count)
+		table.deactivate(op)
 	}
 	// The fields are set in place: an operation literal is larger than
 	// TinyGo keeps on the stack, and the kernel's heap never frees.
@@ -113,6 +133,9 @@ func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint6
 	copy(op.entries[:], entries)
 	table.active++
 	table.registered += len(entries)
+	if table.deadlines != nil && deadline != 0 {
+		table.deadlines.Arm(table.source, task, deadline)
+	}
 	return true
 }
 
@@ -136,10 +159,8 @@ func (table *Table) publishHeld(key Key, event Event, output []Completion) int {
 			}
 		}
 		if matched && op.active {
-			op.active = false
+			table.deactivate(op)
 			op.complete = true
-			table.active--
-			table.registered -= int(op.count)
 			if completed < len(output) {
 				output[completed] = completion(op)
 			}
@@ -149,23 +170,23 @@ func (table *Table) publishHeld(key Key, event Event, output []Completion) int {
 	return completed
 }
 
-func (table *Table) expireHeld(now uint64, output []Completion) int {
-	completed := 0
-	for slot := range table.operations {
-		op := &table.operations[slot]
-		if op.active && op.deadline != 0 && now >= op.deadline {
-			op.active = false
-			op.complete = true
-			op.timedOut = true
-			table.active--
-			table.registered -= int(op.count)
-			if completed < len(output) {
-				output[completed] = completion(op)
-			}
-			completed++
-		}
+// expireTaskHeld times out task's operation if its deadline has come. The
+// index already let go of the deadline it reported.
+func (table *Table) expireTaskHeld(task sched.TaskID, now uint64) (Completion, bool) {
+	slot, _, valid := task.Parts()
+	if !valid {
+		return Completion{}, false
 	}
-	return completed
+	op := &table.operations[slot]
+	if op.task != task || !op.active || op.deadline == 0 || now < op.deadline {
+		return Completion{}, false
+	}
+	op.active = false
+	table.active--
+	table.registered -= int(op.count)
+	op.complete = true
+	op.timedOut = true
+	return completion(op), true
 }
 
 func (table *Table) cancelHeld(task sched.TaskID) bool {
@@ -178,8 +199,7 @@ func (table *Table) cancelHeld(task sched.TaskID) bool {
 		return false
 	}
 	if op.active {
-		table.active--
-		table.registered -= int(op.count)
+		table.deactivate(op)
 	}
 	*op = operation{}
 	return true
@@ -272,11 +292,14 @@ func (table *Table) Publish(key Key, event Event, output []Completion) int {
 	return result
 }
 
-func (table *Table) Expire(now uint64, output []Completion) int {
+// ExpireTask times out task's operation when its deadline is at or before
+// now. An operation an event completed first, or one the task began since,
+// is left alone, so exactly one of them completes a wait.
+func (table *Table) ExpireTask(task sched.TaskID, now uint64) (Completion, bool) {
 	table.take()
-	result := table.expireHeld(now, output)
+	result, expired := table.expireTaskHeld(task, now)
 	table.lock.Unlock()
-	return result
+	return result, expired
 }
 
 func (table *Table) Cancel(task sched.TaskID) bool {

@@ -243,20 +243,16 @@ func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
 	}
 }
 
-func expireStreamWaiters() {
-	local := thisCPU()
-	count := streamWaitSet.Expire(amd64.TimerTicks(), local.streamWakeResults[:])
-	for index := 0; index < count; index++ {
-		task, _, valid := local.streamWakeResults[index].Task.Parts()
-		if !valid {
-			local.streamWakeResults[index] = ipc.WaitResult{}
-			continue
-		}
-		streamWaitStatus.set(uint64(task), kcall.StatusTimeout)
-		if !amd64.WakeTaskID(uint64(local.streamWakeResults[index].Task)) {
-			panicSerial("stale stream timeout task")
-		}
-		local.streamWakeResults[index] = ipc.WaitResult{}
+// expireStreamWaiter times out task's stream wait if it is still due.
+func expireStreamWaiter(task sched.TaskID, now uint64) {
+	result, expired := streamWaitSet.ExpireTask(task, now)
+	slot, _, valid := result.Task.Parts()
+	if !expired || !valid {
+		return
+	}
+	streamWaitStatus.set(uint64(slot), kcall.StatusTimeout)
+	if !amd64.WakeTaskID(uint64(result.Task)) {
+		panicSerial("stale stream timeout task")
 	}
 }
 

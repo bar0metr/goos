@@ -3624,6 +3624,247 @@ static long smp_speedup(int threads)
 	return parallel > 0 ? single * 10 / parallel : 0;
 }
 
+/* smp_affinity limits the calling thread to one processor and checks that
+ * it runs nowhere else, that a thread made before keeps its own mask, and
+ * that an empty mask is refused. Widened to two processors while a thread
+ * pinned to the first keeps it busy, the caller moves to the second. The
+ * kernel need not move it at once, so the check runs until a deadline. */
+static volatile int affinity_stop, affinity_tid;
+
+/* The bystander sleeps between looks, so the processors it may use go idle
+ * and the widened caller has somewhere to go. */
+static void *affinity_bystander(void *argument)
+{
+	struct timespec nap = {0, 2000000};
+
+	(void)argument;
+	__atomic_store_n(&affinity_tid, (int)syscall(SYS_gettid), __ATOMIC_SEQ_CST);
+	while (!__atomic_load_n(&affinity_stop, __ATOMIC_SEQ_CST))
+		nanosleep(&nap, NULL);
+	return NULL;
+}
+
+static void *affinity_hog(void *argument)
+{
+	unsigned long mask = (unsigned long)argument;
+
+	if (syscall(SYS_sched_setaffinity, 0, sizeof mask, &mask) != 0)
+		return (void *)1;
+	while (!__atomic_load_n(&affinity_stop, __ATOMIC_SEQ_CST))
+		smp_slice(SMP_WORKERS);
+	return NULL;
+}
+
+static int smp_affinity_fail(const char *step)
+{
+	printf("smp failed: affinity %s\n", step);
+	__atomic_store_n(&affinity_stop, 1, __ATOMIC_SEQ_CST);
+	return 1;
+}
+
+static int smp_affinity(unsigned long online)
+{
+	unsigned long mask = 0, one, pair, empty = 0;
+	struct timespec nap = {0, 1000000};
+	pthread_t bystander, hog;
+	int target, second, round, moved = 0;
+	long start;
+
+	if (syscall(SYS_sched_getaffinity, 0, sizeof mask, &mask) != sizeof mask || mask != online)
+		return smp_affinity_fail("read");
+	if ((online & (online - 1)) == 0) {
+		printf("smp affinity: one processor\n");
+		return 0;
+	}
+	target = 63 - __builtin_clzl(online);
+	second = __builtin_ctzl(online);
+	one = 1ul << target;
+	pair = one | 1ul << second;
+	if (pthread_create(&bystander, NULL, affinity_bystander, NULL) != 0)
+		return smp_affinity_fail("bystander");
+	while (!__atomic_load_n(&affinity_tid, __ATOMIC_SEQ_CST))
+		sched_yield();
+	if (syscall(SYS_sched_setaffinity, 0, sizeof one, &one) != 0)
+		return smp_affinity_fail("restrict");
+	for (round = 0; round < 2000; round++) {
+		if (smp_cpu() != target)
+			return smp_affinity_fail("ran outside its mask");
+		if (round % 64 == 0)
+			sched_yield();
+		if (round % 400 == 0)
+			nanosleep(&nap, NULL);
+	}
+	mask = 0;
+	if (syscall(SYS_sched_getaffinity, 0, sizeof mask, &mask) != sizeof mask || mask != one)
+		return smp_affinity_fail("read back");
+	mask = 0;
+	if (syscall(SYS_sched_getaffinity, affinity_tid, sizeof mask, &mask) != sizeof mask || mask != online)
+		return smp_affinity_fail("bystander mask");
+	if (syscall(SYS_sched_setaffinity, 0, sizeof empty, &empty) != -1 || errno != EINVAL)
+		return smp_affinity_fail("empty mask");
+	if (pthread_create(&hog, NULL, affinity_hog, (void *)one) != 0)
+		return smp_affinity_fail("hog");
+	if (syscall(SYS_sched_setaffinity, 0, sizeof pair, &pair) != 0)
+		return smp_affinity_fail("widen");
+	start = smp_now_us();
+	while (!moved && smp_now_us() - start < 3000000) {
+		smp_slice(SMP_WORKERS);
+		sched_yield();
+		moved = smp_cpu() == second;
+	}
+	__atomic_store_n(&affinity_stop, 1, __ATOMIC_SEQ_CST);
+	pthread_join(hog, NULL);
+	pthread_join(bystander, NULL);
+	if (!moved)
+		return smp_affinity_fail("never moved after widening");
+	if (syscall(SYS_sched_setaffinity, 0, sizeof online, &online) != 0)
+		return smp_affinity_fail("restore");
+	printf("smp affinity: held to cpu %d for %d checks, moved to cpu %d after widening\n", target, round, second);
+	return 0;
+}
+
+/* smp_pinned runs one CPU-bound worker pinned to each processor, up to
+ * four: each must make progress and run only on its own processor. */
+#define PINNED_WORKERS 4
+
+static volatile int pinned_go;
+static volatile unsigned long pinned_progress[PINNED_WORKERS];
+static volatile int pinned_strayed[PINNED_WORKERS];
+
+static void *pinned_worker(void *argument)
+{
+	long index = (long)argument & 0xff, cpu = (long)argument >> 8;
+	unsigned long mask = 1ul << cpu;
+	long start;
+
+	if (syscall(SYS_sched_setaffinity, 0, sizeof mask, &mask) != 0)
+		return (void *)1;
+	while (!__atomic_load_n(&pinned_go, __ATOMIC_SEQ_CST))
+		sched_yield();
+	start = smp_now_us();
+	while (smp_now_us() - start < 300000) {
+		smp_slice(SMP_WORKERS);
+		pinned_progress[index]++;
+		if (smp_cpu() != cpu)
+			pinned_strayed[index] = 1;
+	}
+	return NULL;
+}
+
+static int smp_pinned(unsigned long online)
+{
+	pthread_t workers[PINNED_WORKERS];
+	unsigned long left = online;
+	long index, count = 0;
+	void *result;
+
+	while (left != 0 && count < PINNED_WORKERS) {
+		long cpu = __builtin_ctzl(left);
+
+		left &= left - 1;
+		if (pthread_create(&workers[count], NULL, pinned_worker, (void *)(cpu << 8 | count)) != 0) {
+			printf("smp failed: pinned worker\n");
+			return 1;
+		}
+		count++;
+	}
+	__atomic_store_n(&pinned_go, 1, __ATOMIC_SEQ_CST);
+	for (index = 0; index < count; index++)
+		if (pthread_join(workers[index], &result) != 0 || result != NULL || pinned_strayed[index] || pinned_progress[index] == 0) {
+			printf("smp failed: pinned worker %ld strayed %d, progress %lu\n", index, pinned_strayed[index], pinned_progress[index]);
+			return 1;
+		}
+	printf("smp pinned: %ld workers, one per processor, each stayed and ran\n", count);
+	return 0;
+}
+
+/* smp_deadlines checks the timeouts of waits: a short one fires, readiness
+ * beats a long one, a timeout beats readiness that comes later, a timeout
+ * readiness ended never fires into a later sleep, and many timeouts on many
+ * threads all expire. The scheduler tick is 10 ms, so a timeout may fire up
+ * to one tick early by the monotonic clock. */
+#define DEADLINE_THREADS 6
+#define DEADLINE_SLACK_US 10000
+
+static int deadline_ends[2];
+
+static void *deadline_writer(void *argument)
+{
+	struct timespec pause_for = {0, 20000000};
+
+	(void)argument;
+	nanosleep(&pause_for, NULL);
+	return write(deadline_ends[1], "x", 1) == 1 ? NULL : (void *)1;
+}
+
+static void *deadline_timer(void *argument)
+{
+	long index = (long)argument, timeout = 10 * (index + 1), start;
+	int ends[2], ready;
+	struct pollfd poller;
+
+	if (pipe(ends) != 0)
+		return (void *)1;
+	poller.fd = ends[0];
+	poller.events = POLLIN;
+	start = smp_now_us();
+	ready = probe_poll(&poller, 1, (int)timeout);
+	close(ends[0]);
+	close(ends[1]);
+	return ready == 0 && smp_now_us() - start >= timeout * 1000 - DEADLINE_SLACK_US ? NULL : (void *)1;
+}
+
+static int smp_deadline_fail(const char *step)
+{
+	printf("smp failed: deadline %s\n", step);
+	return 1;
+}
+
+static int smp_deadlines(void)
+{
+	struct pollfd poller;
+	struct timespec sleep_for = {0, 300000000};
+	pthread_t threads[DEADLINE_THREADS];
+	char byte;
+	long start, index;
+	void *result;
+
+	if (pipe(deadline_ends) != 0)
+		return smp_deadline_fail("pipe");
+	poller.fd = deadline_ends[0];
+	poller.events = POLLIN;
+	start = smp_now_us();
+	if (probe_poll(&poller, 1, 30) != 0 || smp_now_us() - start < 30000 - DEADLINE_SLACK_US)
+		return smp_deadline_fail("short timeout");
+	if (write(deadline_ends[1], "x", 1) != 1)
+		return smp_deadline_fail("write");
+	start = smp_now_us();
+	if (probe_poll(&poller, 1, 2000) != 1 || smp_now_us() - start > 1000000 || read(deadline_ends[0], &byte, 1) != 1)
+		return smp_deadline_fail("readiness before a timeout");
+	start = smp_now_us();
+	if (pthread_create(&threads[0], NULL, deadline_writer, NULL) != 0 || probe_poll(&poller, 1, 200) != 1 ||
+	    pthread_join(threads[0], &result) != 0 || result != NULL || read(deadline_ends[0], &byte, 1) != 1)
+		return smp_deadline_fail("readiness during a timeout");
+	/* The poll's timeout would have fired 200 ms after it began; a sleep
+	 * that spans that moment must last its whole length. */
+	start = smp_now_us();
+	if (nanosleep(&sleep_for, NULL) != 0 || smp_now_us() - start < 300000 - DEADLINE_SLACK_US)
+		return smp_deadline_fail("a finished wait's timeout fired later");
+	if (probe_poll(&poller, 1, 30) != 0 || write(deadline_ends[1], "x", 1) != 1 || probe_poll(&poller, 1, 0) != 1 ||
+	    read(deadline_ends[0], &byte, 1) != 1)
+		return smp_deadline_fail("readiness after a timeout");
+	for (index = 0; index < DEADLINE_THREADS; index++)
+		if (pthread_create(&threads[index], NULL, deadline_timer, (void *)index) != 0)
+			return smp_deadline_fail("timer thread");
+	for (index = 0; index < DEADLINE_THREADS; index++)
+		if (pthread_join(threads[index], &result) != 0 || result != NULL)
+			return smp_deadline_fail("concurrent timeouts");
+	close(deadline_ends[0]);
+	close(deadline_ends[1]);
+	printf("smp deadlines: timeouts, wakes, and %d concurrent timeouts\n", DEADLINE_THREADS);
+	return 0;
+}
+
 /* kernel mode: threads and processes that stay inside the kernel, with
  * calls that take no lock in common, so several processors run kernel code
  * at once. The kernel reports the most processors it saw inside system calls
@@ -3853,6 +4094,8 @@ static int smp_test(void)
 			return 1;
 		}
 	printf("smp vm: discards and concurrent faults kept\n");
+	if (smp_affinity(mask) != 0 || smp_pinned(mask) != 0 || smp_deadlines() != 0)
+		return 1;
 	/* Measured before the spinners below start: they never stop. */
 	{
 		int threads = __builtin_popcountl(mask) > SMP_THREADS ? SMP_THREADS : __builtin_popcountl(mask);

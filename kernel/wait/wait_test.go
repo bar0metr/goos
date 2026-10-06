@@ -79,7 +79,7 @@ func TestEventWinsTimeoutRaceOnce(t *testing.T) {
 	key := Key{Kind: KindIRQ, Object: 9}
 	table.Begin(id, []Entry{{Key: key, Events: Interrupt}}, 20)
 	completed := make([]Completion, sched.MaxTasks)
-	if table.Publish(key, Interrupt, completed) != 1 || table.Expire(20, completed) != 0 || table.Publish(key, Interrupt, completed) != 0 {
+	if table.Publish(key, Interrupt, completed) != 1 || expires(&table, id, 20) || table.Publish(key, Interrupt, completed) != 0 {
 		t.Fatal("event did not win exactly once")
 	}
 	result, ok := table.Take(id)
@@ -89,7 +89,7 @@ func TestEventWinsTimeoutRaceOnce(t *testing.T) {
 
 	id = task(5, 1)
 	table.Begin(id, []Entry{{Key: key, Events: Interrupt}}, 20)
-	if table.Expire(20, completed) != 1 || table.Publish(key, Interrupt, completed) != 0 {
+	if !expires(&table, id, 20) || table.Publish(key, Interrupt, completed) != 0 {
 		t.Fatal("timeout did not win exactly once")
 	}
 	result, ok = table.Take(id)
@@ -170,12 +170,16 @@ func TestEmptyWaitIsATimedSleep(t *testing.T) {
 	if !table.Begin(task, nil, 50) {
 		t.Fatal("empty wait with a deadline rejected")
 	}
-	var completions [1]Completion
-	if count := table.Expire(50, completions[:]); count != 1 || completions[0].Task != task || !completions[0].TimedOut {
-		t.Fatalf("expire = %d, %#v", count, completions[0])
+	if expired, ok := table.ExpireTask(task, 50); !ok || expired.Task != task || !expired.TimedOut {
+		t.Fatalf("expire = %v, %#v", ok, expired)
 	}
 	completion, ready := table.Take(task)
 	if !ready || !completion.TimedOut || completion.ReadyMask != 0 {
 		t.Fatalf("completion = %#v, %v", completion, ready)
 	}
+}
+
+func expires(table *Table, id sched.TaskID, now uint64) bool {
+	_, expired := table.ExpireTask(id, now)
+	return expired
 }

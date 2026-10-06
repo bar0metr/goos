@@ -16,11 +16,11 @@ func TestProcessWaitWakeAndTimeout(t *testing.T) {
 	if count := set.Wake(7, results); count != 1 || results[0].Task != first {
 		t.Fatalf("wake result = %#v", results)
 	}
-	if count := set.Expire(19, results); count != 0 {
-		t.Fatalf("wait expired early: %d", count)
+	if _, expired := set.ExpireTask(second, 19); expired {
+		t.Fatal("wait expired early")
 	}
-	if count := set.Expire(20, results); count != 1 || results[0].Task != second {
-		t.Fatalf("timeout result = %#v", results)
+	if result, expired := set.ExpireTask(second, 20); !expired || result.Task != second {
+		t.Fatalf("timeout result = %#v", result)
 	}
 }
 

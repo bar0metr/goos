@@ -109,11 +109,24 @@ never frees a stack a processor still stands on.
 A processor picks from its own queue round-robin, and when that is empty
 steals one task from another queue. A woken or new task stays where it ran if
 that processor idles, then goes to an idle processor, then to the least
-loaded one, and the chosen processor is asked to reschedule. The request is a
+loaded one, and the chosen processor is asked to reschedule.
+
+Each task has an affinity mask (ADR 0188), every processor by default. A
+task runs only on online processors its mask allows: placement, stealing,
+and the move of a preempted task to an idle processor all skip the others,
+and a task's queue is always on an allowed processor. Changing the mask moves
+a queued task to an allowed queue at once. A running task on a processor the
+new mask leaves out stays until that processor's next scheduling point, which
+a reschedule request brings; its queue has already moved, so the processor
+does not pick it again. The kernel's own tasks keep the housekeeping
+processor whatever mask they are given. Threads and forked Linux children
+inherit their creator's mask. The request is a
 flag plus an interrupt, and a pending flag covers later requests. The
 kernel's own tasks (slots 0 to 3) are pinned to the bootstrap processor,
 which is the housekeeping processor: deadline expiry, exit delivery, and
-lifecycle retries run there once.
+lifecycle retries run there once. Deadline expiry looks only at the waits
+whose deadlines are due: every wait table keeps its deadlines in one index
+(ADR 0189).
 
 A wake sets the task runnable and records a pending wake. A task that blocks
 with a wake pending stays runnable. That replaces the old rule that no wake
@@ -156,13 +169,14 @@ several processors at once.
 | 11 | channel (one per channel) | one send, receive, close, or readiness check |
 | 12 | futex bucket (32) | futex, a thread's exit, a signal ending a wait |
 | 13 | wait tables | each table locks itself for one step |
-| 14 | linux tables | each table operation of the Linux personality |
-| 15 | handle index | handle tables as channel endpoints come and go |
-| 16 | log | kernel log, diagnostic ring, Linux counters, console readers |
-| 17 | memory | the physical page allocator |
-| 18 | random | the random generator |
-| 19 | scheduler | `sched.Core`, slot tables, kill and hold requests |
-| 20 | console | serial and framebuffer output |
+| 14 | deadline index | the wait tables as deadlines are armed and cancelled; housekeeping as they expire |
+| 15 | linux tables | each table operation of the Linux personality |
+| 16 | handle index | handle tables as channel endpoints come and go |
+| 17 | log | kernel log, diagnostic ring, Linux counters, console readers |
+| 18 | memory | the physical page allocator |
+| 19 | random | the random generator |
+| 20 | scheduler | `sched.Core`, slot tables, kill and hold requests |
+| 21 | console | serial and framebuffer output |
 
 A call takes its set when it starts (`kernel/locksets.go`) and holds it to
 the end, so nothing it found through those locks changes under it. A call
@@ -193,6 +207,7 @@ and check the order and recursion of every acquisition.
 | Shared memory objects, the boot file cache | shmem lock |
 | Executable objects, the object a fault or launch reads | executable lock |
 | Channel, stream, and process waits; multi-object waits; Linux continuations | each table's own lock |
+| Wait deadlines | the deadline index's lock, taken inside a wait table's; the earliest deadline is an atomic word |
 | Per-task wait statuses | atomic words |
 | Futex waiters | their bucket's lock; a task's bucket index is atomic |
 | Linux tables: process states and records, threads, open descriptions, directories, VFS sessions, PID and family allocation | linux tables lock, one table operation at a time |
@@ -204,7 +219,8 @@ and check the order and recursion of every acquisition.
 | Physical page allocator | memory lock |
 | Random generator | its own lock, at the random level |
 | Monotonic and realtime clocks | set before a second processor starts; the last reading rises atomically |
-| Run state, slot contexts, roots, FS bases, exit codes | scheduler lock |
+| Run state, slot contexts, roots, FS bases, exit codes, affinity masks, per-processor scheduler counters | scheduler lock |
+| Per-processor ticks and received interrupts | atomic words each processor updates |
 | Console input rings | one producer, the bootstrap processor's IRQ; readers take the console input lock |
 | IRQ 11 pending flag and waiter | exchanged atomically |
 | Kernel console output | console lock, one line at a time |
@@ -265,6 +281,14 @@ that waited, their total and longest spin in TSC cycles, and the spins the
 watchdog reported (`DIAG lock`), and per processor its ticks, idle ticks, and
 received reschedule and shootdown interrupts. Nothing is logged per switch.
 
+Every build publishes each processor's counters through `CPURuntime`: online
+state, the task it runs, ticks, idle ticks, switches, steals, migrations, and
+received reschedule and shootdown interrupts. The scheduler counts its
+events per processor under the lock it already holds, and each processor
+updates its tick and interrupt words itself, so a read stops nobody. Records
+of two processors are not one instant. The `cpu` command prints them; `cpu
+-r` prints the raw counts.
+
 The lock watchdog reports a spin that lasts longer than four seconds as
 `LOCK_STUCK level=... cpu=... holder=...`. A validation build stops there;
 another build keeps spinning, in case the holder is only slow. Validation
@@ -288,7 +312,11 @@ It then runs the probe's `kernel` mode, four threads and two processes whose
 calls share no lock. On more than one processor it requires a
 kernel-parallel peak of 2 or more and a kernel-thread peak the probe raised
 to 2 or more: boot's services each run one task, so only the probe's threads
-put several tasks of one process in the kernel at once. The thread, FPU, fork, exec, pipe, and
+put several tasks of one process in the kernel at once. The `smp` mode also
+holds a thread to one processor with `sched_setaffinity`, checks with
+`getcpu` that it stays there, widens the mask and waits for it to move, and
+checks timeouts against wakes; the boot then runs `cpu` and requires every
+processor online with switches counted. The thread, FPU, fork, exec, pipe, and
 signal probes follow with their tasks spread over the processors. `SMP_MATRIX=1` adds one, two, and eight
 processors. Every boot target takes `SMP=N` to run its own scenario on N
 processors.

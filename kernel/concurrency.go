@@ -5,6 +5,7 @@ package main
 // Per-processor call state and concurrency diagnostics (ADR 0184).
 
 import (
+	"goos/kernel/deadline"
 	"sync/atomic"
 
 	"goos/internal/cpuinfo"
@@ -33,9 +34,14 @@ import (
 // a block lives in its continuation instead. The kernel heap never frees, so
 // these buffers are static rather than allocated per call.
 type cpuScratch struct {
-	cpuInfoWire          [cpuinfo.SummarySize]byte
-	cpuEntryWire         [cpuinfo.CPUEntrySize]byte
-	cpuCacheWire         [cpuinfo.CacheInfoSize]byte
+	cpuInfoWire    [cpuinfo.SummarySize]byte
+	cpuEntryWire   [cpuinfo.CPUEntrySize]byte
+	cpuCacheWire   [cpuinfo.CacheInfoSize]byte
+	cpuRuntimeWire [kcall.CPURuntimeSize]byte
+	affinityWire   [kcall.AffinityMaskSize]byte
+	affinityTasks  [process.MaxTasksPerProcess]sched.TaskID
+	// expiredDeadlines receives the deadlines housekeeping takes from the index.
+	expiredDeadlines     [16]deadline.Entry
 	executableWire       [8]byte
 	executableSourceWire [32]byte
 	executableReply      ipc.Message

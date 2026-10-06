@@ -79,7 +79,9 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 		form.SetChildTID && !vm.CopyOut(handler.root, form.ChildTID, local.linuxTIDWire[:]) {
 		panicSerial("validated Linux TID write failed")
 	}
-	if !amd64.StartTask(sched.TaskID(task)) {
+	// The new thread inherits its creator's affinity, as on Linux.
+	affinity, _ := amd64.TaskAffinity(handler.task)
+	if !amd64.SetTaskAffinity(sched.TaskID(task), affinity) || !amd64.StartTask(sched.TaskID(task)) {
 		panicSerial("Linux thread could not be started")
 	}
 	trace(diag.ProcessSpawned, owner.ID(), task, 0, 0)

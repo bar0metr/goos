@@ -70,8 +70,9 @@ const (
 	SysArchPrctl     Syscall = 158
 	SysRtSigsuspend  Syscall = 130
 	SysGettid        Syscall = 186
-	// SysSchedGetaffinity reports the processors a thread may run on: every
-	// online one, since GoOS has no affinity.
+	// SysSchedSetaffinity and SysSchedGetaffinity set and report the
+	// processors a thread may run on.
+	SysSchedSetaffinity Syscall = 203
 	SysSchedGetaffinity Syscall = 204
 	SysTkill            Syscall = 200
 	SysTime             Syscall = 201
@@ -299,7 +300,7 @@ func (number Syscall) Known() bool {
 		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,
 		SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
-		SysStatx, SysChmod, SysFchmod, SysFchmodat, SysUtimensat, SysSchedGetaffinity, SysGetcpu:
+		SysStatx, SysChmod, SysFchmod, SysFchmodat, SysUtimensat, SysSchedGetaffinity, SysSchedSetaffinity, SysGetcpu:
 		return true
 	default:
 		return false

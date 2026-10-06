@@ -82,7 +82,8 @@ The native kernel and the first isolated services are implemented:
 - symmetric multiprocessing: every processor the firmware lists, up to 64,
   starts through a low trampoline and runs tasks from its own run queue, with
   reschedule interrupts, TLB shootdown, and domain locks in place of a kernel
-  lock ([SMP](docs/kernel/smp.md));
+  lock ([SMP](docs/kernel/smp.md)), with per-task processor affinity and
+  per-processor runtime counters;
 - hardware IRQ delivery with end-of-interrupt acknowledgement;
 - a bounded architecture-neutral Task and round-robin run-queue model;
 - timer-preempted x86_64 context switching across independent kernel stacks;
@@ -617,7 +618,10 @@ scheduler as online. Kernel calls take the locks of the domains they touch
 instead of one kernel lock (ADR 0184): faults and the fast Linux calls of one
 program's threads, and calls of different programs, run in the kernel on
 several processors at once. `make test-smp` boots four processors and proves
-overlapping execution in user mode and in the kernel.
+overlapping execution in user mode and in the kernel. A thread can be held to
+some processors with `sched_setaffinity` or the native `TaskAffinity`, and
+`cpu` shows each processor's busy share, current task, and scheduler counters
+(ADR 0188).
 
 Linux compatibility translates into the same GoOS process, VFS, IPC, handle,
 and capability model and does not weaken the native architecture for POSIX

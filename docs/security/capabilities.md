@@ -222,7 +222,8 @@ Some calls authorize by caller identity or need nothing:
 | Operation | Authorization |
 | --- | --- |
 | `Exit`, `ClockRead`, `ClockReadNanos` | none |
-| `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo`, `CPUInfo`, `CPUEntry`, `CPUCacheInfo` | caller must be a registered process |
+| `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo`, `CPUInfo`, `CPUEntry`, `CPUCacheInfo`, `CPURuntime` | caller must be a registered process |
+| `TaskAffinity` | the calling task with handle zero; another process through a process handle, Wait to read and Write to set |
 | `HandleInfo` | caller must be a registered process; describes only its own table |
 | `ChannelCreate` | caller must be PID 1 |
 

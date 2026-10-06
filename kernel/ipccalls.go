@@ -429,25 +429,20 @@ func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 	}
 }
 
-func expireIPCWaiters() {
-	local := thisCPU()
-	count := ipcWaitSet.Expire(amd64.TimerTicks(), local.ipcWakeResults[:])
-	for index := 0; index < count; index++ {
-		task, _, valid := local.ipcWakeResults[index].Task.Parts()
-		if !valid {
-			local.ipcWakeResults[index] = ipc.WaitResult{}
-			continue
-		}
-		if resumeLinuxIPCWaiter(local.ipcWakeResults[index].Task, linuxcompat.WakeTimeout) {
-			local.ipcWakeResults[index] = ipc.WaitResult{}
-			continue
-		}
-		ipcWaitStatus.set(uint64(task), kcall.StatusTimeout)
-		// A task another processor killed after it registered fails the
-		// wake; its exit cancels what it left registered.
-		amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task))
-		local.ipcWakeResults[index] = ipc.WaitResult{}
+// expireIPCWaiter times out task's channel wait if it is still due.
+func expireIPCWaiter(task sched.TaskID, now uint64) {
+	result, expired := ipcWaitSet.ExpireTask(task, now)
+	slot, _, valid := result.Task.Parts()
+	if !expired || !valid {
+		return
 	}
+	if resumeLinuxIPCWaiter(result.Task, linuxcompat.WakeTimeout) {
+		return
+	}
+	ipcWaitStatus.set(uint64(slot), kcall.StatusTimeout)
+	// A task another processor killed after it registered fails the wake;
+	// its exit cancels what it left registered.
+	amd64.WakeTaskID(uint64(result.Task))
 }
 
 //export goos_dispatch_ipc_wait

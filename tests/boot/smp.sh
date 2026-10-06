@@ -144,8 +144,20 @@ expect '^smp vm: ' 'smp: discards and faults'
 expect '^smp speedup: ' 'smp: speedup measured'
 expect '^smp lifecycle: ' 'smp: fork beside threads'
 expect '^smp exec: ' 'smp: exec beside threads'
+expect '^smp affinity: ' 'smp: sched_setaffinity holds and widens'
+expect '^smp pinned: ' 'smp: one pinned worker per processor'
+expect '^smp deadlines: ' 'smp: timeouts and wakes'
 expect '^smp ok$' 'smp probe'
-sed -n -e 's/^smp workers: /  workers: /p' -e 's/^smp speedup: /  speedup: /p' "$work/output"
+sed -n -e 's/^smp workers: /  workers: /p' -e 's/^smp speedup: /  speedup: /p' -e 's/^smp affinity: /  affinity: /p' "$work/output"
+
+# The cpu command lists every processor online, each having switched tasks.
+run cpu
+rows=$(awk '$2 == "online" && $6 + 0 > 0' "$work/output" | wc -l | tr -d ' ')
+[ "$rows" -eq "$cpus" ] || fail "cpu listed $rows online processors with switches, want $cpus"
+checks=$((checks + 1))
+run 'cpu -r'
+expect '^CPU *STATE *TICKS *IDLE *TASK *SWITCHES *STEALS *MIGRATIONS *RESCHED *SHOOTDOWN$' 'cpu -r header'
+
 
 
 for mode in threads fpstate vfork wait pipe signal kill; do

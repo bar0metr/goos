@@ -62,6 +62,9 @@ const (
 	// stream waits, process waits, multi-object waits, and the Linux call
 	// continuations. None is taken while another is held.
 	LevelWait
+	// LevelDeadline is the index of wait deadlines. The wait tables take it
+	// inside their own locks as registrations come and go.
+	LevelDeadline
 	// LevelLinuxTables is the Linux personality's shared tables: process
 	// state and record slots, threads, open descriptions, directories, VFS
 	// sessions, and the identities they hand out. The personality takes it
@@ -90,7 +93,7 @@ const Levels = int(levelCount)
 
 var levelNames = [levelCount]string{
 	"none", "registry", "linux", "lifecycle", "handle",
-	"stream", "shmem", "address-space", "executable", "paging", "channel-slots", "channel", "futex", "wait", "linux-tables", "handle-index", "log",
+	"stream", "shmem", "address-space", "executable", "paging", "channel-slots", "channel", "futex", "wait", "deadline", "linux-tables", "handle-index", "log",
 	"memory", "random", "scheduler", "console",
 }
 

@@ -14,6 +14,7 @@
 package sys
 
 import (
+	"encoding/binary"
 	"goos/internal/timekeeping"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
@@ -257,6 +258,22 @@ func CPUEntry(index uint64, target *[kcall.CPUEntrySize]byte) kcall.Status {
 func CPUCacheInfo(index uint64, target *[kcall.CPUCacheInfoSize]byte) kcall.Status {
 	touch(target[:])
 	return status(cpuCacheInfoRead(index, unsafe.Pointer(&target[0])))
+}
+
+// CPURuntime fills target with the index-th processor's scheduler counters.
+func CPURuntime(index uint64, target *[kcall.CPURuntimeSize]byte) kcall.Status {
+	touch(target[:])
+	return status(cpuRuntimeRead(index, unsafe.Pointer(&target[0])))
+}
+
+// TaskAffinity returns the processors a process's tasks may run on, after
+// limiting them to mask when mask is not zero. Handle zero names the calling
+// task.
+func TaskAffinity(process handle.ID, mask uint64) (uint64, kcall.Status) {
+	var wire [kcall.AffinityMaskSize]byte
+	touch(wire[:])
+	result := status(taskAffinity(uint64(process), mask, unsafe.Pointer(&wire[0])))
+	return binary.LittleEndian.Uint64(wire[:]), result
 }
 
 // ClockRead reads the monotonic timer in ticks.
