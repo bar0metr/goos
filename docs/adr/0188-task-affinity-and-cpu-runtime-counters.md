@@ -88,7 +88,8 @@ hang one on, and the probe and `cpu` cover the need.
 `getcpu` that 2,000 samples all ran there, that a thread made before keeps
 its full mask, and that an empty mask is `EINVAL`, then widens the mask to
 two processors while a thread pinned to the first keeps it busy and waits
-for the probe thread to reach the second. It also runs `cpu` and requires
+for the probe thread to reach the second. Four workers, each pinned to its
+own processor, all make progress and none runs elsewhere. It also runs `cpu` and requires
 every processor online with switches counted. On four processors the probe
 reports `held to cpu 3 for 2000 checks, moved to cpu 0 after widening`.
 

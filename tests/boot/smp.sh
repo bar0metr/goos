@@ -145,6 +145,7 @@ expect '^smp speedup: ' 'smp: speedup measured'
 expect '^smp lifecycle: ' 'smp: fork beside threads'
 expect '^smp exec: ' 'smp: exec beside threads'
 expect '^smp affinity: ' 'smp: sched_setaffinity holds and widens'
+expect '^smp pinned: ' 'smp: one pinned worker per processor'
 expect '^smp deadlines: ' 'smp: timeouts and wakes'
 expect '^smp ok$' 'smp probe'
 sed -n -e 's/^smp workers: /  workers: /p' -e 's/^smp speedup: /  speedup: /p' -e 's/^smp affinity: /  affinity: /p' "$work/output"

@@ -3723,6 +3723,61 @@ static int smp_affinity(unsigned long online)
 	return 0;
 }
 
+/* smp_pinned runs one CPU-bound worker pinned to each processor, up to
+ * four: each must make progress and run only on its own processor. */
+#define PINNED_WORKERS 4
+
+static volatile int pinned_go;
+static volatile unsigned long pinned_progress[PINNED_WORKERS];
+static volatile int pinned_strayed[PINNED_WORKERS];
+
+static void *pinned_worker(void *argument)
+{
+	long index = (long)argument & 0xff, cpu = (long)argument >> 8;
+	unsigned long mask = 1ul << cpu;
+	long start;
+
+	if (syscall(SYS_sched_setaffinity, 0, sizeof mask, &mask) != 0)
+		return (void *)1;
+	while (!__atomic_load_n(&pinned_go, __ATOMIC_SEQ_CST))
+		sched_yield();
+	start = smp_now_us();
+	while (smp_now_us() - start < 300000) {
+		smp_slice(SMP_WORKERS);
+		pinned_progress[index]++;
+		if (smp_cpu() != cpu)
+			pinned_strayed[index] = 1;
+	}
+	return NULL;
+}
+
+static int smp_pinned(unsigned long online)
+{
+	pthread_t workers[PINNED_WORKERS];
+	unsigned long left = online;
+	long index, count = 0;
+	void *result;
+
+	while (left != 0 && count < PINNED_WORKERS) {
+		long cpu = __builtin_ctzl(left);
+
+		left &= left - 1;
+		if (pthread_create(&workers[count], NULL, pinned_worker, (void *)(cpu << 8 | count)) != 0) {
+			printf("smp failed: pinned worker\n");
+			return 1;
+		}
+		count++;
+	}
+	__atomic_store_n(&pinned_go, 1, __ATOMIC_SEQ_CST);
+	for (index = 0; index < count; index++)
+		if (pthread_join(workers[index], &result) != 0 || result != NULL || pinned_strayed[index] || pinned_progress[index] == 0) {
+			printf("smp failed: pinned worker %ld strayed %d, progress %lu\n", index, pinned_strayed[index], pinned_progress[index]);
+			return 1;
+		}
+	printf("smp pinned: %ld workers, one per processor, each stayed and ran\n", count);
+	return 0;
+}
+
 /* smp_deadlines checks the timeouts of waits: a short one fires, readiness
  * beats a long one, a timeout beats readiness that comes later, a timeout
  * readiness ended never fires into a later sleep, and many timeouts on many
@@ -4039,7 +4094,7 @@ static int smp_test(void)
 			return 1;
 		}
 	printf("smp vm: discards and concurrent faults kept\n");
-	if (smp_affinity(mask) != 0 || smp_deadlines() != 0)
+	if (smp_affinity(mask) != 0 || smp_pinned(mask) != 0 || smp_deadlines() != 0)
 		return 1;
 	/* Measured before the spinners below start: they never stop. */
 	{
