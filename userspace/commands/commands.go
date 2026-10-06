@@ -25,8 +25,14 @@ const (
 	// (ADR 0130). PID 1 grants it only to the single stage of a foreground
 	// job, and never to a command launched that way.
 	GrantLaunch
+	// GrantNetworkPing asks for a private network session that may send echo
+	// requests and read the interface status (ADR 0191).
+	GrantNetworkPing
+	// GrantNetworkAdmin asks for a private network session that may read the
+	// interface status and reload the network configuration. It cannot ping.
+	GrantNetworkAdmin
 
-	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch
+	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -60,9 +66,10 @@ const (
 	MaxOptions = 512
 	// MaxArgs is the largest bounded argument count an entry may declare.
 	MaxArgs = 99
-	// IndexFormat names the line format below. An installed system records
-	// it, so a system built for another format is refused (ADR 0175).
-	IndexFormat = 2
+	// IndexFormat names the line format below and the meaning of its grant
+	// bits. An installed system records it, so a system built for another
+	// format is refused (ADR 0175). Format 3 added the network grants.
+	IndexFormat = 3
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

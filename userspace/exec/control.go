@@ -63,6 +63,9 @@ const (
 	// FaultStorage kills the filesystem service and keeps every restart of it
 	// from starting, as a volume that is gone for good would (ADR 0175).
 	FaultStorage
+	// FaultNetDriver kills the network driver, which PID 1 restarts with a
+	// new device binding (ADR 0191).
+	FaultNetDriver
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -125,7 +128,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultStorage
+		return argument >= FaultTerminal && argument <= FaultNetDriver
 	default:
 		return false
 	}

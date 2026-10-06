@@ -42,8 +42,10 @@ func injectFault(target []byte) {
 		service = execproto.FaultDriver
 	} else if argumentIs(target, "storage") {
 		service = execproto.FaultStorage
+	} else if argumentIs(target, "net-driver") {
+		service = execproto.FaultNetDriver
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty, shell, fat32, vfs, config, log, block, driver, storage or kernel-stack\n")
+		write("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)
