@@ -18,7 +18,7 @@ fixed sizes before calling the handler in the file for its area: `devicecalls.go
 `imagemap.go`.
 Unknown numbers return `Unsupported`.
 
-Every call runs with interrupts disabled under the kernel lock (ADR 0182). The caller is identified by its CR3 root, and blocking calls also
+Every call runs with interrupts disabled and takes the locks of the state it touches (ADR 0184, ADR 0187). The caller is identified by its CR3 root, and blocking calls also
 receive the task slot. Results are a `kcall.Status` in `RAX`. Blocking calls
 park the task and re-execute the call on wake (ADR 0015).
 
@@ -211,7 +211,8 @@ progress, on each processor alike.
 ### Work with interrupts disabled
 
 Each call runs to completion with interrupts off on its processor, holding
-the kernel lock, so a long call also delays other processors' calls. The longest native calls are
+the locks of the state it touches, so a long call delays the calls on other
+processors that need the same locks. The longest native calls are
 `ConsoleWrite` (up to 4096 bytes to the UART) and, in diagnostic
 builds, `Diagnostics`. Process launch runs in housekeeping, also with
 interrupts off, and takes about 2 ms (ADR 0057).

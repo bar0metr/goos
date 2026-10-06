@@ -533,19 +533,17 @@ programs (ADR 0176) and Linux threads: thread-form `clone`, per-thread TLS,
 TIDs, signal masks, and sleeping `futex` waits (ADR 0177). Open files survive a
 FAT32 service restart (ADR 0178). 7-Zip runs with its own thread count.
 
-### Symmetric multiprocessing
+### GoOS 0.2.4: symmetric multiprocessing
 
-Every processor the firmware lists, up to 64, starts and runs tasks
-([SMP](../kernel/smp.md), ADR 0181 to ADR 0183). Threads of one process run
-in parallel; per-processor run queues, local APIC timers, reschedule
-interrupts, and TLB shootdown carry it. Kernel calls take the locks of the
-domains they touch (ADR 0184), so faults and the fast Linux calls of one
-program's threads run in the kernel at once. Each process's handle table,
-each Linux family, and each channel has a lock of its own (ADR 0187), so
-unrelated Linux programs make file and process calls at once. A family's
-threads still run their file calls one at a time. A task can be limited to
-some processors through `TaskAffinity` or `sched_setaffinity`, and the `cpu`
-command shows each processor's load and scheduler counters (ADR 0188).
+GoOS 0.2.4 ([docs/releases/0.2.4.md](../releases/0.2.4.md)) adds symmetric
+multiprocessing and the concurrency work required to use it in practice. All
+supported processors run Tasks with per-CPU run queues, local timers,
+migration, remote rescheduling, and TLB shootdown. The old kernel-wide lock is
+replaced by explicit fine-grained locking, with handle tables, Linux families,
+and channels split by object after profiling. Task affinity is available
+through the native API and Linux `sched_setaffinity`, the `cpu` command exposes
+per-CPU runtime state, and housekeeping uses a bounded deadline index. SMP and
+7-Zip are validated under QEMU and KVM/Proxmox.
 
 ### Next: a Linux terminal
 
@@ -584,7 +582,6 @@ Only after that milestone should a larger Go/TinyGo toolchain be evaluated.
 Do not move these ahead of the native application and storage milestones unless
 a concrete blocker requires them:
 
-- splitting the linux, channel, or handle lock without a measured need;
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
 - networking;

@@ -452,7 +452,7 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 
 ## Scope
 
-GoOS 0.2.3 runs static x86_64 programs, musl or glibc, position-independent
+GoOS runs static x86_64 programs, musl or glibc, position-independent
 or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
 CPU, and a process holds at most 8 tasks. Dynamic linking, process groups,
