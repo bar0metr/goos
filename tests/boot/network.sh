@@ -16,6 +16,8 @@ set -eu
 iso=${1:?ISO path required}
 firmware=${2:?OVMF path required}
 memory=${MEMORY:-512M}
+# SMP is each guest's processor count, as a QEMU -smp argument.
+smp=${SMP:-1}
 read -r _hz _diag validation _opt variant <build/config/build
 [ "$validation" = 1 ] || { echo 'network.sh needs a VALIDATION=1 build' >&2; exit 2; }
 tree=build/variants/$variant/system
@@ -96,7 +98,7 @@ start() { # name fd extra-args...
 	rm -f "$work/$name.in"
 	mkfifo "$work/$name.in"
 	# shellcheck disable=SC2086
-	qemu-system-x86_64 -machine q35 -m "$memory" -drive "if=pflash,format=raw,readonly=on,file=$firmware" \
+	qemu-system-x86_64 -machine q35 -smp "$smp" -accel tcg,thread=multi -m "$memory" -drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 		-serial stdio -display none -no-reboot -cdrom "$iso" \
 		-drive "if=none,id=goosdisk,format=raw,file=$work/$name.img" -device virtio-blk-pci,drive=goosdisk,disable-modern=on \
 		"$@" <"$work/$name.in" >"$logs/network-$name.log" 2>&1 &

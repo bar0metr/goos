@@ -478,7 +478,7 @@ test-system-boot:
 # boot without a network function, each from its own disposable disk.
 test-network:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
-	@MEMORY=$(MEMORY) tests/boot/network.sh $(ISO) $(OVMF_CODE)
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/network.sh $(ISO) $(OVMF_CODE)
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
