@@ -113,3 +113,20 @@ func TestTheSystemCommandsBuild(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildNetworkGrants(t *testing.T) {
+	root := t.TempDir()
+	writeCommand(t, root, "net", `package main
+var manifest = commands.Manifest{Usage: "net status|reload", Summary: "network", MinArgs: 1, MaxArgs: 1, Grants: commands.GrantNetworkAdmin}`)
+	writeCommand(t, root, "ping", `package main
+var manifest = commands.Manifest{Usage: "ping IPv4", Summary: "echo", MinArgs: 1, MaxArgs: 5, Grants: commands.GrantNetworkPing}`)
+	index, err := build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	net, netFound := commands.Lookup(index, []byte("net"))
+	ping, pingFound := commands.Lookup(index, []byte("ping"))
+	if !netFound || !pingFound || net.Grants != commands.GrantNetworkAdmin || ping.Grants != commands.GrantNetworkPing {
+		t.Fatalf("net %+v ping %+v", net, ping)
+	}
+}

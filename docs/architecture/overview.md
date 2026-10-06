@@ -35,6 +35,11 @@ an image capability with Execute, or, for every other program, the installed
 system on the disk included, from a file-backed executable source tied to a
 stable VFS open object; the kernel resolves no application path (ADR 0093,
 ADR 0121, ADR 0175).
+A userspace network service runs Ethernet, ARP, IPv4, ICMP echo and a DHCP
+client over a second isolated driver, for one legacy virtio-net function;
+the kernel's part is discovery, a dedicated interrupt route, a wait on that
+line, and a DMA domain per device ([networking](networking.md), ADR 0190,
+ADR 0191).
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for standard-stream redirection and carry
@@ -49,6 +54,7 @@ existing monotonic TSC source (ADR 0113).
 
 - [boot sequence](boot.md);
 - [filesystem stack](filesystem.md);
+- [networking](networking.md);
 - [timekeeping](timekeeping.md);
 - [Linux compatibility](linux-compat.md);
 - [threat model](../security/threat-model.md);
@@ -62,7 +68,7 @@ existing monotonic TSC source (ADR 0113).
 ## Documentation map
 
 `docs/architecture/` describes the system as a whole: boot, processes,
-scheduling, memory, IPC, capabilities and the filesystem stack.
+scheduling, memory, IPC, capabilities, the filesystem stack and networking.
 `docs/kernel/` holds kernel mechanisms that are not system-wide design:
 [interrupts](../kernel/interrupts.md), the [native image format](../kernel/native-images.md)
 and [byte streams](../kernel/streams.md). `docs/userspace/` holds the services

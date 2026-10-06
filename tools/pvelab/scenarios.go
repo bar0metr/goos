@@ -178,11 +178,12 @@ type Scenario interface {
 }
 
 var scenarios = map[string]Scenario{
-	"smoke": smokeScenario{},
-	"lscpu": lscpuScenario{},
-	"smp":   smpScenario{},
-	"linux": linuxScenario{},
-	"7zip":  sevenZipScenario{},
+	"smoke":   smokeScenario{},
+	"lscpu":   lscpuScenario{},
+	"smp":     smpScenario{},
+	"linux":   linuxScenario{},
+	"7zip":    sevenZipScenario{},
+	"network": networkScenario{},
 }
 
 func scenarioNames() string {
@@ -624,4 +625,116 @@ func captureDiag(ctx context.Context, g *Guest) (*DiagLinux, error) {
 	}
 	g.pass("diag-linux")
 	return d, nil
+}
+
+// networkScenario takes an address from the lab network's DHCP server through
+// the GoOS driver and network service, then pings the gateway that server
+// named. A LAN may drop a probe now and then, so one reply out of four is
+// enough; every request must still be answered or reported.
+type networkScenario struct{}
+
+// networkReadyTimeout bounds the wait for a lease on the lab bridge.
+const networkReadyTimeout = 45 * time.Second
+
+func (networkScenario) Name() string { return "network" }
+
+func (networkScenario) Run(ctx context.Context, s *Session) (Result, error) {
+	g := s.Guest
+	if s.Report.VM.NetBridge == "" {
+		return "", failf(ClassInfra, "network", "PVE_NET_BRIDGE is empty, so the VM has no network function")
+	}
+	deadline := time.Now().Add(networkReadyTimeout)
+	var status string
+	for {
+		out, err := g.Run(ctx, "net status", commandTimeout)
+		if err != nil {
+			return "", fail(ClassScenario, "net status", err)
+		}
+		status = out
+		if strings.Contains(out, "state: ready") {
+			break
+		}
+		if time.Now().After(deadline) {
+			return "", failf(ClassScenario, "dhcp", "no address within %s; net status:\n%s", networkReadyTimeout, out)
+		}
+		select {
+		case <-ctx.Done():
+			return "", fail(ClassInfra, "dhcp", ctx.Err())
+		case <-time.After(3 * time.Second):
+		}
+	}
+	g.pass("dhcp")
+	fields := statusFields(status)
+	for key, want := range map[string]string{"link": "up", "mode": "dhcp"} {
+		if fields[key] != want {
+			return "", failf(ClassScenario, "net status", "%s is %q, want %q:\n%s", key, fields[key], want, status)
+		}
+	}
+	gateway := fields["gateway"]
+	if gateway == "" || gateway == "none" {
+		return "", failf(ClassScenario, "gateway", "the DHCP server named no router:\n%s", status)
+	}
+	s.logf("address %s, gateway %s", fields["address"], gateway)
+	out, err := g.Run(ctx, "ping -c 4 -W 1000 "+gateway, commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "ping", err)
+	}
+	if err := g.Clean("ping", out); err != nil {
+		return "", err
+	}
+	sent, received, ok := pingSummary(out)
+	if !ok || sent != 4 || received == 0 {
+		return "", failf(ClassScenario, "ping", "no reply from %s:\n%s", gateway, out)
+	}
+	if err := g.Expect("ping", out, "bytes from "+gateway+": seq="); err != nil {
+		return "", err
+	}
+	services, err := g.Run(ctx, "services", commandTimeout)
+	if err != nil {
+		return "", fail(ClassScenario, "services", err)
+	}
+	for _, name := range []string{"netd", "virtio-net"} {
+		state, restarts, ok := serviceState(services, name)
+		if !ok || state != "running" || restarts != 0 {
+			return "", failf(ClassScenario, "network stability", "%s state=%q restarts=%d; want running with no restarts:\n%s", name, state, restarts, services)
+		}
+	}
+	g.pass("network-services-stable")
+	s.logf("ping %s: %d of %d replies", gateway, received, sent)
+	return ResultPass, nil
+}
+
+// serviceState reads one row from the services builtin.
+func serviceState(out, name string) (string, int, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || fields[0] != name {
+			continue
+		}
+		restarts, err := strconv.Atoi(fields[3])
+		return fields[1], restarts, err == nil
+	}
+	return "", 0, false
+}
+
+// statusFields reads the "name: value" lines net status prints.
+func statusFields(out string) map[string]string {
+	fields := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if key, value, ok := strings.Cut(line, ": "); ok {
+			fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	return fields
+}
+
+// pingSummary reads ping's "N sent, M received, L% lost" line.
+func pingSummary(out string) (int, int, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		var sent, received, lost int
+		if n, _ := fmt.Sscanf(strings.TrimSpace(line), "%d sent, %d received, %d%% lost", &sent, &received, &lost); n == 3 {
+			return sent, received, true
+		}
+	}
+	return 0, 0, false
 }

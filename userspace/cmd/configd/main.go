@@ -211,6 +211,12 @@ func declareSchema() {
 		{"system.build.release", release, true},
 		{"system.build.machine", machine, true},
 		{"system.log.persist", config.Bool(true), false},
+		// The network service's settings (ADR 0191). The service validates them
+		// as a whole when it loads them; the store only checks their types.
+		{"system.net.mode", mustText("dhcp"), false},
+		{"system.net.ipv4.address", mustText("0.0.0.0"), false},
+		{"system.net.ipv4.prefix", config.Uint(24), false},
+		{"system.net.ipv4.gateway", mustText("0.0.0.0"), false},
 		{"system.shell.prompt", mustText("goos> "), false},
 		{"user.name", mustText("goos"), false},
 	}

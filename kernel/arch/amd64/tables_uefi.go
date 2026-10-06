@@ -27,10 +27,13 @@ const (
 	// localTimerVector is every processor's own preemption tick. The three
 	// vectors after it are interrupts one processor sends another: look at
 	// the run queue, drop translations, and stop after a panic.
-	localTimerVector   = 0x30
-	rescheduleVector   = 0x31
-	shootdownVector    = 0x32
-	stopVector         = 0x33
+	localTimerVector = 0x30
+	rescheduleVector = 0x31
+	shootdownVector  = 0x32
+	stopVector       = 0x33
+	// netIRQVector is the network line's, whichever ISA line it is: a vector
+	// outside the remapped PICs' range cannot be confused with theirs.
+	netIRQVector       = 0x34
 	userCallVector     = 0x80
 	yieldVector        = 0x81
 	apicSpuriousVector = 0xff
@@ -58,6 +61,7 @@ const (
 	handlerReschedule
 	handlerShootdown
 	handlerStop
+	handlerNet
 	handlerSpurious
 	handlerCount
 )
@@ -108,6 +112,7 @@ var gates = [...]struct {
 	{rescheduleVector, handlerReschedule, false},
 	{shootdownVector, handlerShootdown, false},
 	{stopVector, handlerStop, false},
+	{netIRQVector, handlerNet, false},
 	{userCallVector, handlerUserCall, true},
 	{yieldVector, handlerYield, false},
 	{apicSpuriousVector, handlerSpurious, false},
@@ -251,6 +256,64 @@ func ConfigureDeviceIRQs(pageTable uint64) bool {
 	smpReady = 1
 	return true
 }
+
+//go:extern goos_net_irq_select
+var netIRQSelect uint64
+
+//go:extern goos_net_irq_route
+var netIRQRoute uint64
+
+// The IOAPIC redirection bits the device routes use: level-triggered,
+// active-low as the PCI INTx lines are, and masked.
+const (
+	routeActiveLow = 1 << 13
+	routeLevel     = 1 << 15
+	routeMasked    = 1 << 16
+)
+
+// ConfigureNetIRQ routes ISA line to the network vector on the bootstrap
+// processor, masked: the driver's first wait unmasks it. It runs once, on the
+// boot processor, before any other processor starts, so the asm state it
+// writes is published before a handler or an arm reads it.
+func ConfigureNetIRQ(line uint8) bool {
+	if line == 0 || line >= 16 || netIRQSelect != 0 {
+		return false
+	}
+	selector := uint32(0x10 + 2*uint32(line))
+	route := uint32(netIRQVector) | routeActiveLow | routeLevel
+	ioapicWrite(selector+1, cpuAPIC[0]<<24)
+	ioapicWrite(selector, route|routeMasked)
+	netIRQRoute = uint64(route)
+	netIRQSelect = uint64(selector)
+	return true
+}
+
+// NetIRQCount reports how many network interrupts have been taken.
+//
+//go:extern goos_net_irq_count
+var netIRQCount uint64
+
+func NetIRQCount() uint64 { return netIRQCount }
+
+// TakeNetIRQ consumes the network line's pending event.
+//
+//export goos_take_net_irq
+func TakeNetIRQ() bool
+
+// NetIRQPending reports the pending event without consuming it.
+//
+//export goos_net_irq_is_pending
+func NetIRQPending() bool
+
+// RearmNetIRQ unmasks the network route as its driver begins a wait.
+//
+//export goos_rearm_net_irq
+func RearmNetIRQ()
+
+// QuiesceNetIRQ masks the network route and forgets its pending event.
+//
+//export goos_quiesce_net_irq
+func QuiesceNetIRQ()
 
 func ioapicWrite(register uint32, value uint32) {
 	mmioWrite32(ioapicVirtual, register)

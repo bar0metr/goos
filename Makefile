@@ -42,6 +42,10 @@ CONFIG_IMAGE = $(OUT_DIR)/userspace/config
 CONFIG_ELF = $(OUT_DIR)/userspace/config.elf
 TTY_IMAGE = $(OUT_DIR)/userspace/tty
 TTY_ELF = $(OUT_DIR)/userspace/tty.elf
+NETD_IMAGE = $(OUT_DIR)/userspace/netd
+NETD_ELF = $(OUT_DIR)/userspace/netd.elf
+VIRTIO_NET_IMAGE = $(OUT_DIR)/userspace/virtio-net
+VIRTIO_NET_ELF = $(OUT_DIR)/userspace/virtio-net.elf
 # tools/stackframes bounds every stack frame by the unmapped guard below the
 # stack (ADR 0088). It runs on every userspace ELF before elf2native turns it
 # into an image, and on the kernel right after it is linked.
@@ -79,7 +83,16 @@ MEMORY ?= 512M
 # host. Other hosts can select an available backend without changing targets,
 # for example QEMU_DISPLAY=gtk or QEMU_DISPLAY=sdl.
 QEMU_DISPLAY ?= cocoa
-QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(DISK) -device virtio-blk-pci,drive=goosdisk,disable-modern=on -serial stdio -no-reboot
+# NET=user attaches one legacy virtio-net function to QEMU user networking
+# (ADR 0190, 0191); NET=none runs without a network. The function sits at
+# slot 4, whose INTA the Q35 firmware routes to a line the disk does not use.
+NET ?= user
+ifeq ($(filter $(NET),user none),)
+$(error NET must be user or none)
+endif
+NET_MAC ?= 52:54:00:12:34:56
+QEMU_NET_FLAGS = $(if $(filter user,$(NET)),-netdev user,id=goosnet -device virtio-net-pci,netdev=goosnet,disable-modern=on,mac=$(NET_MAC),addr=0x4)
+QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(DISK) -device virtio-blk-pci,drive=goosdisk,disable-modern=on $(QEMU_NET_FLAGS) -serial stdio -no-reboot
 QEMU_FLAGS = $(QEMU_COMMON_FLAGS) -display none
 QEMU_GUI_FLAGS = $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
 SOURCE_DATE_EPOCH ?= 0
@@ -130,7 +143,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -147,7 +160,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAM
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -241,6 +254,22 @@ $(TTY_IMAGE): $(TTY_ELF) tools/elf2native/main.go kernel/loader/native.go kernel
 	@$(STACKFRAMES) $(TTY_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(TTY_ELF) $@
 
+$(NETD_ELF): $(call go_deps,./userspace/cmd/netd) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/netd
+
+$(NETD_IMAGE): $(NETD_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(NETD_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(NETD_ELF) $@
+
+$(VIRTIO_NET_ELF): $(call go_deps,./userspace/cmd/virtio-net) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-net
+
+$(VIRTIO_NET_IMAGE): $(VIRTIO_NET_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(VIRTIO_NET_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_NET_ELF) $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go kernel/mm/vm/permissions.go
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
@@ -265,7 +294,7 @@ initramfs: userspace
 # made from this build's outputs alone, in name order, so the same build
 # gives the same bytes. LINUX_EXTRA adds Linux programs under /system/linux.
 system-tree: userspace
-	@$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
@@ -345,6 +374,7 @@ test-all:
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-system-boot
+	$(MAKE) test-network
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -365,6 +395,7 @@ release-check:
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-system-boot
+	$(MAKE) test-network
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -387,7 +418,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/vfs ./tools/stackframes
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -441,6 +472,13 @@ test-system-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory recovery-iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) tests/boot/system.sh $(ISO) $(OVMF_CODE)
+
+# The network gate (ADR 0190, 0191): DHCP and ping on QEMU user networking
+# with a driver replacement, two guests on a private stream backend, and a
+# boot without a network function, each from its own disposable disk.
+test-network:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/network.sh $(ISO) $(OVMF_CODE)
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
@@ -637,6 +675,7 @@ docs:
 	@test -f docs/architecture/boot.md
 	@test -f docs/architecture/filesystem.md
 	@test -f docs/architecture/linux-compat.md
+	@test -f docs/architecture/networking.md
 	@test -f docs/development/debugging.md
 	@test -f docs/development/coding-style.md
 	@test -f docs/development/adding-service.md
@@ -769,6 +808,11 @@ test-pve-smp: pve-artifacts
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
 
+# DHCP on the lab bridge (PVE_NET_BRIDGE) through the GoOS driver and network
+# service, then a ping of the gateway the DHCP server named.
+test-pve-network: pve-artifacts
+	@$(PVELAB) run --scenario network $(PVE_RUN_FLAGS)
+
 # A diagnostic run of a static 7-Zip the caller supplies on four host cores.
 # DIAG=1 gives the guest the diag command, whose DIAG linux line names the
 # refused calls and whose DIAG sched line the parallel peaks.
@@ -786,7 +830,7 @@ pve-run: pve-artifacts
 test-pvelab:
 	$(BUILD_ENV) go test ./tools/pvelab
 
-test-hardware: test-pve-smoke test-pve-lscpu test-pve-linux
+test-hardware: test-pve-smoke test-pve-lscpu test-pve-linux test-pve-network
 
 clean:
 	@rm -rf $(BUILD_DIR)

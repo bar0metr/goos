@@ -80,6 +80,11 @@ func (handler *testHandler) TaskAffinity(process uint64, mask uint64, address ui
 	return StatusOK
 }
 
+func (handler *testHandler) IRQTake(irq uint64) Status {
+	handler.channel = irq
+	return StatusOK
+}
+
 func (handler *testHandler) PortRead(device uint64, specification uint64, address uint64) Status {
 	return StatusOK
 }
@@ -537,7 +542,14 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationCPURuntime != 53 || OperationTaskAffinity != 54 {
 		t.Fatalf("runtime and affinity operations %d %d", OperationCPURuntime, OperationTaskAffinity)
 	}
-	if result := Dispatch(Request{Operation: OperationTaskAffinity + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if OperationIRQTake != 55 {
+		t.Fatalf("IRQ take operation %d", OperationIRQTake)
+	}
+	irqHandler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationIRQTake, Arg0: 0x10000001d}, irqHandler); result.Status != StatusOK || irqHandler.channel != 0x10000001d {
+		t.Fatalf("IRQ take dispatch %+v %#x", result, irqHandler.channel)
+	}
+	if result := Dispatch(Request{Operation: OperationIRQTake + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}

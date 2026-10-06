@@ -19,7 +19,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, bad := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultStorage + 1}} {
+	}{{ControlOperation(9), 0}, {ControlReboot, 1}, {ControlKill, Slots}, {ControlDiagnostics, 1}, {ControlFault, 0}, {ControlFault, FaultNetDriver + 1}} {
 		if _, ok := EncodeControl(bad.operation, bad.argument, 7); ok {
 			t.Fatalf("encoded %#v", bad)
 		}
@@ -41,7 +41,7 @@ func TestControlRequestRoundTrip(t *testing.T) {
 	for _, request := range []struct {
 		operation ControlOperation
 		argument  uint8
-	}{{ControlDiagnostics, 0}, {ControlFault, FaultTerminal}, {ControlFault, FaultShell}, {ControlFault, FaultKernelStack}, {ControlFault, FaultFilesystem}, {ControlFault, FaultVFS}, {ControlFault, FaultConfig}, {ControlFault, FaultLog}, {ControlFault, FaultBlock}, {ControlFault, FaultDriver}, {ControlFault, FaultStorage}} {
+	}{{ControlDiagnostics, 0}, {ControlFault, FaultTerminal}, {ControlFault, FaultShell}, {ControlFault, FaultKernelStack}, {ControlFault, FaultFilesystem}, {ControlFault, FaultVFS}, {ControlFault, FaultConfig}, {ControlFault, FaultLog}, {ControlFault, FaultBlock}, {ControlFault, FaultDriver}, {ControlFault, FaultStorage}, {ControlFault, FaultNetDriver}} {
 		encoded, ok := EncodeControl(request.operation, request.argument, 11)
 		operation, argument, decoded := DecodeControl(encoded)
 		if !ok || !decoded || operation != request.operation || argument != request.argument {
@@ -80,5 +80,22 @@ func TestServicesReplyRoundTripAndBounds(t *testing.T) {
 	}
 	if message, ok := EncodeServices(full, 9); !ok || int(message.PayloadSize) > ipc.MaxPayload {
 		t.Fatal("maximum reply does not fit")
+	}
+}
+
+func TestServicesListingStartIndex(t *testing.T) {
+	for _, start := range []uint8{0, MaxServiceEntries, MaxServiceIndex - 1} {
+		message, ok := EncodeControl(ControlServices, start, 7)
+		if !ok {
+			t.Fatalf("start %d not encoded", start)
+		}
+		if operation, argument, valid := DecodeControl(message); !valid || operation != ControlServices || argument != start {
+			t.Fatalf("start %d decoded as %d %d %v", start, operation, argument, valid)
+		}
+	}
+	if message, ok := EncodeControl(ControlServices, MaxServiceIndex, 7); ok {
+		if _, _, valid := DecodeControl(message); valid {
+			t.Fatal("start past the service table accepted")
+		}
 	}
 }

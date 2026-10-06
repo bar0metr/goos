@@ -57,6 +57,9 @@ type Config struct {
 	Sockets int    `json:"sockets"`
 	Cores   int    `json:"cores"`
 	Memory  int    `json:"memory_mib"`
+	// NetBridge is the bridge the VM's virtio network function joins; empty
+	// leaves the VM without one.
+	NetBridge string `json:"net_bridge"`
 
 	Timeout     time.Duration `json:"timeout"`
 	Keep        bool          `json:"keep"`
@@ -125,6 +128,7 @@ var settings = []setting{
 	{"PVE_CPU", "host", text(func(c *Config) *string { return &c.CPU }), true},
 	{"PVE_SOCKETS", "1", number("PVE_SOCKETS", func(c *Config) *int { return &c.Sockets }), true},
 	{"PVE_CORES", "1", number("PVE_CORES", func(c *Config) *int { return &c.Cores }), true},
+	{"PVE_NET_BRIDGE", "vmbr0", text(func(c *Config) *string { return &c.NetBridge }), false},
 	{"PVE_MEMORY", "1024", number("PVE_MEMORY", func(c *Config) *int { return &c.Memory }), true},
 	{"PVE_TIMEOUT", "180s", func(c *Config, v string) error {
 		d, err := time.ParseDuration(v)

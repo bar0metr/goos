@@ -211,7 +211,8 @@ restarts on failure; PID 1 then gives the new instance fresh channels to the
 VFS and the block service and hands their other ends over as at first start.
 Between the phases PID 1 chooses the boot mode and, in normal mode, publishes
 the installed system (ADR 0175). The second starts the configuration and log
-services from the volume, in normal mode only, and then one terminal session
+services and then the network services from the volume, in normal mode only,
+and then one terminal session
 per console: `tty` and `shell` on COM1, then `tty-fb` and `shell-fb` on the
 framebuffer when the machine has one (ADR 0125). The terminals always come
 from the archive; the shell from `/system/services/shell` in normal mode and
@@ -240,7 +241,7 @@ one kept and printed:
 | `forced` | the archive has the member `system/force-recovery` (`make run RECOVERY=1`) |
 | `storage` | no volume was attached |
 | `record` | no `system` directory, or `/system/release` missing, malformed, or for another architecture, release, startup block, image format, or index format |
-| `services` | a session service image missing or not a native image |
+| `services` | a session or network service image missing or not a native image |
 | `index` | `/system/commands` missing or malformed, or a command it lists missing |
 | `publish` | the VFS refused to publish `/system` and `/apps` |
 | `launch` | an installed session service failed to start or used up its restarts |
@@ -258,6 +259,41 @@ mode.
 
 An exclusive volume check (`GrantBlockCheck`) is refused in normal mode with
 `LaunchVolumeBusy`, before anything is unmounted.
+
+## Network services
+
+In normal mode PID 1 registers `netd` from `/system/services/netd` after the
+configuration and log services, with a new control channel and a
+configuration session scoped to `system.net.`, read only (ADR 0191). It
+registers the driver, `/system/services/virtio-net`, only when the kernel
+gave it a live network function: it reads its handle slot `0x1c` with
+`HandleInfo`, and an inert placeholder without Transfer means there is none
+(ADR 0190). The driver depends on `netd`, follows it when it restarts, and
+gets the network function's ports, line and DMA domain, which PID 1 grants
+and keeps. Both restart on failure. Nothing waits for the network: a service
+that does not start is logged, and the boot goes on.
+
+Every driver launch, the first included, gets a new binding. PID 1
+increments the generation, creates a channel and two 2-page frame pools,
+sends `netd` its ends in a `SetDevice` request on the control channel, waits
+for the answer, and only then launches the driver with the other ends and
+`NET_GENERATION` in its environment. A restarted `netd` gets a new control
+channel and configuration session; after a configuration service restart,
+PID 1 sends it the renewed session as a notice on its control channel.
+
+For a command whose index entry declares `GrantNetworkPing` or
+`GrantNetworkAdmin`, PID 1 creates a channel, sends one end to `netd` in an
+`AddSession` request with the matching rights class, and grants the other as
+the command's `net` role. A command that declares both gets the ping class.
+Without a network service the command starts without a session and reports
+`network service unavailable`.
+
+When a storage service fails, PID 1 holds both network services with the
+session services and releases them when storage is back. Entering recovery
+stops both and closes the control channel; recovery runs no network. Unlike
+the session services, a network service that uses up its restarts stays
+failed and never sends the system into recovery, and neither does a missing
+NIC. The validation build's `fault net-driver` kills the driver once.
 
 ## Restarts
 
@@ -294,6 +330,8 @@ they held the same way, and their clients are handed new sessions instead of bei
 | `config` | a new VFS session and control channel (client end kept) | new configuration sessions to every shell and the log service, as session notices (ADR 0100) |
 | `log` | a new VFS session, configuration session and control channel (client end kept) | nothing; it starts with `RESTART=1` and resumes after the last record in the file (ADR 0100) |
 | `block` | a new control channel (client end kept) and public endpoint, no driver or filesystem endpoint | nothing; the driver and `fat32` exit, restart after it, and hand it their endpoints over the control channel (ADR 0101) |
+| `netd` | a new control channel (client end kept) and configuration session | nothing; the driver follows it and restarts with a new binding (ADR 0191) |
+| `virtio-net` | a new channel, two new frame pools and a new generation | the channel's other end and narrowed copies of the pools, to `netd` in `SetDevice` before the launch (ADR 0191) |
 
 A handle renewed for a launch that then fails is closed at the next renewal, so
 failures cannot fill PID 1's table. Each shell numbers the slots of its own

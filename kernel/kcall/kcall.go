@@ -82,6 +82,9 @@ const (
 	// (ADR 0188).
 	OperationCPURuntime
 	OperationTaskAffinity
+	// OperationIRQTake consumes a line's pending event without blocking; a
+	// WaitAny on the line reports the event without consuming it (ADR 0190).
+	OperationIRQTake
 )
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
@@ -163,6 +166,7 @@ type Handler interface {
 	CPUCacheInfo(index uint64, address uint64) Status
 	CPURuntime(index uint64, address uint64) Status
 	TaskAffinity(process uint64, mask uint64, address uint64) Status
+	IRQTake(irq uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
@@ -295,6 +299,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.CPURuntime(request.Arg0, request.Arg1)}
 	case OperationTaskAffinity:
 		return Result{Status: handler.TaskAffinity(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationIRQTake:
+		return Result{Status: handler.IRQTake(request.Arg0)}
 	case OperationValidationFault:
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:

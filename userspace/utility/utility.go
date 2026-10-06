@@ -63,6 +63,7 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	vfsEndpoint, vfsFound := data.Handle("vfs")
 	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
 	launchHandle, _ = data.Handle("launch")
+	networkHandle, _ = data.Handle("net")
 	commandName, current = data.Command(), manifest
 	if !stdinFound || !stdoutFound || !stderrFound {
 		finish(1, "startup handles unavailable\n")
@@ -89,6 +90,9 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	}
 	if manifest.Grants&commands.GrantVFS != 0 && !vfsFound {
 		Fail(nil, "filesystem session not granted")
+	}
+	if manifest.Grants&(commands.GrantNetworkPing|commands.GrantNetworkAdmin) != 0 && networkHandle == 0 {
+		Fail(nil, "network service unavailable")
 	}
 	main(data)
 	Exit(0)

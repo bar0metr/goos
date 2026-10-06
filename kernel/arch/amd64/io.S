@@ -96,6 +96,21 @@
     movq %rbp, %rsp
 .endm
 
+// IOAPIC_LOCK and IOAPIC_UNLOCK bracket one IOAPIC register access, with
+// interrupts already disabled. They clobber nothing but the flags.
+.macro IOAPIC_LOCK
+1:
+    lock btsq $0, goos_ioapic_lock(%rip)
+    jnc 2f
+    pause
+    jmp 1b
+2:
+.endm
+
+.macro IOAPIC_UNLOCK
+    movq $0, goos_ioapic_lock(%rip)
+.endm
+
 .section .text
 
 .global goos_outb
@@ -1065,6 +1080,7 @@ goos_interrupt_table:
     .quad goos_irq_reschedule
     .quad goos_irq_shootdown
     .quad goos_irq_stop
+    .quad goos_irq_net
     .quad goos_irq_spurious
 
 .global goos_entry_mapping_table
@@ -1955,10 +1971,12 @@ goos_irq_11:
     pushq %r13
     pushq %r14
     pushq %r15
+    IOAPIC_LOCK
     movl $0x26, 0x3fffe000
     movl 0x3fffe010, %eax
     orl $0x10000, %eax
     movl %eax, 0x3fffe010
+    IOAPIC_UNLOCK
     movq $1, goos_irq_11_pending(%rip)
     xorl %ecx, %ecx
     xchgq %rcx, goos_irq_11_waiter(%rip)
@@ -1981,6 +1999,59 @@ goos_irq_11:
     movb $0x20, %al
     outb %al, $0xa0
     outb %al, $0x20
+    GOOS_CPU %rbx, %ebx
+    cmpq $0, GOOS_CPU_NEED_RESCHED(%rbx)
+    je .restore_context
+    cmpq $0, GOOS_CPU_ENABLED(%rbx)
+    je .restore_context
+    movq $GOOS_SWITCH_PREEMPT, %rcx
+    jmp .preempt_current
+
+// goos_irq_net is the network function's line. Like IRQ 11 it masks its
+// level-triggered route, records the event and acknowledges; the driver reads
+// the device's ISR, which deasserts the line, before its next wait unmasks
+// the route. The waiter is a WaitAny registration, completed by the kernel
+// loop, so the handler wakes that loop and touches no wait table.
+.global goos_irq_net
+goos_irq_net:
+    GOOS_ENTER_LOW .L_irq_net
+.L_irq_net:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rbp
+    pushq %rsi
+    pushq %rdi
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    IOAPIC_LOCK
+    movl goos_net_irq_select(%rip), %eax
+    movl %eax, 0x3fffe000
+    movl 0x3fffe010, %eax
+    orl $0x10000, %eax
+    movl %eax, 0x3fffe010
+    IOAPIC_UNLOCK
+    movq $1, goos_net_irq_pending(%rip)
+    lock incq goos_net_irq_count(%rip)
+    // Slot 0 is the kernel loop, which publishes the readiness. The wake is
+    // Go, which may use the SSE registers the interrupted task has live.
+    xorl %ecx, %ecx
+    GOOS_CPU %rbx, %ebx
+    movq GOOS_CPU_CURRENT(%rbx), %r12
+    shlq $GOOS_FPU_AREA_SHIFT, %r12
+    leaq goos_task_fpu(%rip), %rax
+    addq %rax, %r12
+    fxsave64 (%r12)
+    GOOS_CALL goos_wake_slot
+    fxrstor64 (%r12)
+    movl $0, GOOS_LAPIC_EOI
     GOOS_CPU %rbx, %ebx
     cmpq $0, GOOS_CPU_NEED_RESCHED(%rbx)
     je .restore_context
@@ -2135,6 +2206,26 @@ goos_task_ticks:
 goos_irq_11_pending:
     .quad 0
 goos_irq_11_waiter:
+    .quad 0
+// The network line's state. select is the IOAPIC register of its route's low
+// word and route the unmasked value; both are written once, at boot, before
+// the route is first armed. Zero select means there is no network line.
+.global goos_net_irq_select
+goos_net_irq_select:
+    .quad 0
+.global goos_net_irq_route
+goos_net_irq_route:
+    .quad 0
+goos_net_irq_pending:
+    .quad 0
+.global goos_net_irq_count
+goos_net_irq_count:
+    .quad 0
+// goos_ioapic_lock orders the IOAPIC's register-select and data accesses. The
+// handlers run on the bootstrap processor while any processor may arm or
+// quiesce a route, and an access interleaved between another's select and
+// data writes the wrong register.
+goos_ioapic_lock:
     .quad 0
 goos_ps2_keyboard_event_pending:
     .quad 0
@@ -2390,16 +2481,77 @@ goos_set_irq_11_waiter:
 
 .global goos_rearm_irq_11
 goos_rearm_irq_11:
+    pushfq
+    cli
+    IOAPIC_LOCK
     movl $0x26, 0x3fffe000
     movl $0xa02b, 0x3fffe010
+    IOAPIC_UNLOCK
+    popfq
     retq
 
 .global goos_quiesce_irq_11
 goos_quiesce_irq_11:
+    pushfq
+    cli
+    IOAPIC_LOCK
     movl $0x26, 0x3fffe000
     movl $0x1a02b, 0x3fffe010
+    IOAPIC_UNLOCK
+    popfq
     movq $0, goos_irq_11_pending(%rip)
     movq $0, goos_irq_11_waiter(%rip)
+    retq
+
+// goos_take_net_irq consumes the network line's pending event; the readiness
+// a WaitAny reports is not consumed until the driver takes it here.
+.global goos_take_net_irq
+goos_take_net_irq:
+    xorl %eax, %eax
+    xchgq %rax, goos_net_irq_pending(%rip)
+    retq
+
+.global goos_net_irq_is_pending
+goos_net_irq_is_pending:
+    movq goos_net_irq_pending(%rip), %rax
+    retq
+
+// goos_rearm_net_irq unmasks the network route. It does nothing when there is
+// no network line, so a stray call cannot write IOAPIC register zero.
+.global goos_rearm_net_irq
+goos_rearm_net_irq:
+    movl goos_net_irq_select(%rip), %ecx
+    testl %ecx, %ecx
+    jz .rearm_net_done
+    pushfq
+    cli
+    IOAPIC_LOCK
+    movl %ecx, 0x3fffe000
+    movl goos_net_irq_route(%rip), %eax
+    movl %eax, 0x3fffe010
+    IOAPIC_UNLOCK
+    popfq
+.rearm_net_done:
+    retq
+
+// goos_quiesce_net_irq masks the route and forgets a pending event, at driver
+// teardown, before the device is reset.
+.global goos_quiesce_net_irq
+goos_quiesce_net_irq:
+    movl goos_net_irq_select(%rip), %ecx
+    testl %ecx, %ecx
+    jz .quiesce_net_done
+    pushfq
+    cli
+    IOAPIC_LOCK
+    movl %ecx, 0x3fffe000
+    movl goos_net_irq_route(%rip), %eax
+    orl $0x10000, %eax
+    movl %eax, 0x3fffe010
+    IOAPIC_UNLOCK
+    popfq
+.quiesce_net_done:
+    movq $0, goos_net_irq_pending(%rip)
     retq
 
 .section .text

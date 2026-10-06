@@ -113,6 +113,13 @@ func (l *Lab) CreateVM(ctx context.Context, st *State) error {
 			"tablet":      {"0"},
 			"onboot":      {"0"},
 		}
+		if c.NetBridge != "" {
+			// Proxmox's net0 slot shares the disk's INTx line. Net2 has the same
+			// safe interrupt swizzle as the slot used by the QEMU network gate,
+			// and needs no root-only raw QEMU arguments. Its MAC is Proxmox's to
+			// choose and record in the VM configuration.
+			form.Set("net2", "virtio,bridge="+c.NetBridge+",firewall=0")
+		}
 		if strings.EqualFold(c.BIOS, "ovmf") {
 			// No pre-enrolled keys: GoOS does not support Secure Boot.
 			form.Set("efidisk0", c.EFIStorage+":1,efitype=4m,pre-enrolled-keys=0")
@@ -275,7 +282,6 @@ func (l *Lab) ConfigureVM(ctx context.Context, st *State, diskVolume string) (ma
 	form := url.Values{
 		"virtio0": {diskVolume},
 		"ide2":    {st.ISOVolume + ",media=cdrom"},
-		"boot":    {"order=ide2"},
 	}
 	upid, err := l.api.SetVMConfig(ctx, st.VMID, form)
 	if err != nil {
@@ -286,12 +292,34 @@ func (l *Lab) ConfigureVM(ctx context.Context, st *State, diskVolume string) (ma
 	if err := l.api.WaitTask(tctx, upid); err != nil {
 		return nil, fail(ClassInfra, "configure vm", err)
 	}
+	// Proxmox 7 may prepend an existing NIC when a boot order is submitted in
+	// the same request that creates the named disk devices. Set it separately
+	// after ide2 exists so firmware never attempts PXE or HTTP boot.
+	upid, err = l.api.SetVMConfig(ctx, st.VMID, url.Values{"boot": {"order=ide2"}})
+	if err != nil {
+		return nil, fail(ClassInfra, "configure boot order", err)
+	}
+	if err := l.api.WaitTask(tctx, upid); err != nil {
+		return nil, fail(ClassInfra, "configure boot order", err)
+	}
 	config, err := l.api.VMConfig(ctx, st.VMID)
 	if err != nil {
 		return nil, fail(ClassInfra, "configure vm", err)
 	}
 	if volumeID(config["virtio0"]) != diskVolume {
 		return nil, failf(ClassInfra, "configure vm", "virtio0 is %q, want %s", config["virtio0"], diskVolume)
+	}
+	if config["boot"] != "order=ide2" {
+		return nil, failf(ClassInfra, "configure vm", "boot is %q, want order=ide2", config["boot"])
+	}
+	if l.cfg.NetBridge != "" {
+		nic := config["net2"]
+		if !strings.HasPrefix(nic, "virtio=") || !strings.Contains(nic, "bridge="+l.cfg.NetBridge) {
+			return nil, failf(ClassInfra, "configure vm", "net2 is %q, want active virtio on %s", nic, l.cfg.NetBridge)
+		}
+		if strings.Contains(nic, "link_down=1") {
+			return nil, failf(ClassInfra, "configure vm", "net2 is disconnected: %q", nic)
+		}
 	}
 	if volumeID(config["ide2"]) != st.ISOVolume {
 		return nil, failf(ClassInfra, "configure vm", "ide2 is %q, want %s", config["ide2"], st.ISOVolume)
@@ -390,7 +418,7 @@ func (l *Lab) Run(ctx context.Context, opts RunOptions) int {
 	report := &Report{
 		Tool: "pvelab", RunID: runID, StartedAt: time.Now().UTC(), Git: git, Scenario: scenario.Name(),
 		Proxmox: ProxmoxInfo{Node: c.Node, Pool: c.Pool},
-		VM:      VMInfo{Machine: c.Machine, BIOS: c.BIOS, CPU: c.CPU, Sockets: c.Sockets, Cores: c.Cores, MemoryMiB: c.Memory},
+		VM:      VMInfo{Machine: c.Machine, BIOS: c.BIOS, CPU: c.CPU, Sockets: c.Sockets, Cores: c.Cores, MemoryMiB: c.Memory, NetBridge: c.NetBridge},
 	}
 	l.log.Infof("run %s", runID)
 	l.log.Infof("git %s", git)

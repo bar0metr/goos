@@ -362,8 +362,16 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 		capabilityManifestOK = 1
 	}
 	for _, grant := range grants {
-		if grant.Consume {
-			closeMovedHandle(bootInitProcess.Handles(), grant.Handle)
+		if !grant.Consume {
+			continue
+		}
+		// The child's copy of a memory grant took a reference of its own,
+		// so the consumed one is dropped with PID 1's handle; a move over
+		// IPC takes none and drops none.
+		typeID, moved, found := bootInitProcess.Handles().Describe(grant.Handle)
+		closeMovedHandle(bootInitProcess.Handles(), grant.Handle)
+		if found && typeID == handle.TypeMemory {
+			releaseMemory(moved)
 		}
 	}
 	return pid, processHandle, supervisor.LaunchOK

@@ -164,6 +164,12 @@ func handleControl(message ipc.Message) {
 			status = execproto.ControlOK
 		}
 		sendControlStatus(status, message.Correlation)
+	case operation == execproto.ControlFault && argument == execproto.FaultNetDriver:
+		status := execproto.ControlNotFound
+		if injectNetDriverFault() {
+			status = execproto.ControlOK
+		}
+		sendControlStatus(status, message.Correlation)
 	case operation == execproto.ControlFault && argument == execproto.FaultStorage:
 		status := execproto.ControlNotFound
 		if injectStorageLoss() {
@@ -192,7 +198,7 @@ func handleControl(message ipc.Message) {
 	case operation == execproto.ControlServices:
 		var entries [execproto.MaxServiceEntries]execproto.ServiceEntry
 		count := 0
-		for index := 0; count < len(entries); index++ {
+		for index := int(argument); count < len(entries); index++ {
 			name, snapshot, found := manager.At(index)
 			if !found {
 				break

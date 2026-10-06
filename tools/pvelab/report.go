@@ -96,6 +96,7 @@ type VMInfo struct {
 	Sockets   int    `json:"sockets"`
 	Cores     int    `json:"cores"`
 	MemoryMiB int    `json:"memory_mib"`
+	NetBridge string `json:"net_bridge,omitempty"`
 }
 
 // Workload is what a diagnostic workload did. Command is the last one it

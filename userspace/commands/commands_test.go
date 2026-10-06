@@ -47,7 +47,7 @@ func TestAppendRefusesWhatReadersReject(t *testing.T) {
 		"ctl":     {Usage: "ctl", Summary: "\x1b[2J"},
 		"option":  {Usage: "option", Summary: "x", Options: "bad\toption"},
 		"longopt": {Usage: "longopt", Summary: "x", Options: strings.Repeat("x", MaxOptions+1)},
-		"grant":   {Usage: "grant", Summary: "x", Grants: 1 << 7},
+		"grant":   {Usage: "grant", Summary: "x", Grants: 1 << 6},
 		"range":   {Usage: "range", Summary: "x", MinArgs: 2, MaxArgs: 1},
 		"huge":    {Usage: "huge", Summary: "x", MaxArgs: MaxArgs + 1},
 		"empty":   {Summary: "x"},
@@ -65,7 +65,7 @@ func TestNextRejectsMalformedLines(t *testing.T) {
 		"ls\t1\t0\t1\tls\tlist\t",          // no newline
 		"ls\t1\t0\t1\tls\tlist\n",          // missing field
 		"ls\t1\t0\t1\tls\tlist\t\textra\n", // extra field
-		"ls\t16\t0\t1\tls\tlist\t\n",       // unknown grant
+		"ls\t64\t0\t1\tls\tlist\t\n",       // unknown grant
 		"ls\t1\t2\t1\tls\tlist\t\n",        // max below min
 		"ls\t1\t-1\t1\tls\tlist\t\n",       // negative
 		"ls\t1\t0\t1000\tls\tlist\t\n",     // over bound
@@ -86,5 +86,27 @@ func TestLookupDoesNotAllocate(t *testing.T) {
 	name := []byte("ls")
 	if allocations := testing.AllocsPerRun(10, func() { Lookup(index, name) }); allocations != 0 {
 		t.Fatalf("lookup allocated %v times", allocations)
+	}
+}
+
+func TestNetworkGrantBits(t *testing.T) {
+	if GrantNetworkPing != 0x10 || GrantNetworkAdmin != 0x20 || IndexFormat != 3 {
+		t.Fatalf("grant bits %#x %#x format %d", GrantNetworkPing, GrantNetworkAdmin, IndexFormat)
+	}
+	index, ok := Append(nil, "ping", Manifest{Usage: "ping IPv4", Summary: "x", MinArgs: 1, MaxArgs: 5, Grants: GrantNetworkPing})
+	if !ok {
+		t.Fatal("ping refused")
+	}
+	index, ok = Append(index, "net", Manifest{Usage: "net status|reload", Summary: "x", MinArgs: 1, MaxArgs: 1, Grants: GrantNetworkAdmin})
+	if !ok || !Valid(index) {
+		t.Fatal("net refused")
+	}
+	ping, _ := Lookup(index, []byte("ping"))
+	net, _ := Lookup(index, []byte("net"))
+	if ping.Grants != GrantNetworkPing || net.Grants != GrantNetworkAdmin {
+		t.Fatalf("grants %#x %#x", ping.Grants, net.Grants)
+	}
+	if _, _, ok := Next([]byte("x\t64\t0\t0\tx\tx\t\n"), 0); ok {
+		t.Fatal("unknown grant bit decoded")
 	}
 }

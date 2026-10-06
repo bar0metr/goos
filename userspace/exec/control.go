@@ -15,10 +15,13 @@ const (
 	ControlVersion    = uint16(4)
 	// MaxServiceEntries is as many entries as one reply holds: eleven of
 	// 22 bytes, after the count, in a 256-byte payload. A system with both
-	// consoles runs eleven services.
+	// consoles and a network runs thirteen services, so a listing asks for
+	// the entries from an index on until a reply comes back short.
 	MaxServiceEntries = 11
-	MaxServiceName    = 15
-	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
+	// MaxServiceIndex bounds the index a listing request may start at.
+	MaxServiceIndex  = 32
+	MaxServiceName   = 15
+	serviceEntrySize = 1 + MaxServiceName + 1 + 1 + 4
 )
 
 type ControlOperation uint8
@@ -63,6 +66,9 @@ const (
 	// FaultStorage kills the filesystem service and keeps every restart of it
 	// from starting, as a volume that is gone for good would (ADR 0175).
 	FaultStorage
+	// FaultNetDriver kills the network driver, which PID 1 restarts with a
+	// new device binding (ADR 0191).
+	FaultNetDriver
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -120,12 +126,14 @@ func DecodeControl(message ipc.Message) (ControlOperation, uint8, bool) {
 // slot for ControlKill and a service for ControlFault.
 func validControl(operation ControlOperation, argument uint8) bool {
 	switch operation {
-	case ControlServices, ControlReboot, ControlDiagnostics, ControlPowerOff:
+	case ControlServices:
+		return argument < MaxServiceIndex
+	case ControlReboot, ControlDiagnostics, ControlPowerOff:
 		return argument == 0
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultStorage
+		return argument >= FaultTerminal && argument <= FaultNetDriver
 	default:
 		return false
 	}

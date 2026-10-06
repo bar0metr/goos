@@ -44,8 +44,9 @@ travel in the request (ADR 0076):
 | --- | --- | --- |
 | shell | the whole namespace | read, write |
 | log service | `system.log.` | read |
+| network service | `system.net.` | read |
 
-The service serves up to six sessions and drops one whose peer has gone.
+The service serves up to 16 sessions and drops one whose peer has gone.
 
 ## Protocol
 
@@ -112,6 +113,7 @@ A setting is not configuration until something reads it:
 | --- | --- | --- |
 | `system.shell.prompt` | the shell | at startup and after a successful write |
 | `system.log.persist` | the log service | on every drain pass |
+| `system.net.*` | the network service | at startup and on `net reload` |
 
 A component that cannot reach the service, or gets an answer of the wrong type,
 keeps its built-in default. Configuration decides what a component does, not
@@ -121,3 +123,40 @@ things coming up.
 Turning `system.log.persist` off advances the log service's cursor without
 writing, so turning it back on starts from the present rather than writing out a
 backlog.
+
+## Network
+
+The network service's settings (ADR 0191):
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `system.net.mode` | `text` | `dhcp` | `dhcp` or `static` |
+| `system.net.ipv4.address` | `text` | `0.0.0.0` | the static address |
+| `system.net.ipv4.prefix` | `uint` | `24` | the static prefix length, 1 to 30 |
+| `system.net.ipv4.gateway` | `text` | `0.0.0.0` | the static default gateway; `0.0.0.0` means none |
+
+The store checks only their types. The network service reads all four as one
+candidate when it starts and when `net reload` asks it to. DHCP mode ignores
+the other three keys. Static mode needs a unicast host address written as
+plain dotted decimal, a prefix from 1 to 30, and a gateway that is zero or
+another host address inside the prefix. A candidate that fails names the
+first key at fault and leaves the running configuration as it was; one that
+passes replaces it in one step. Settings that are invalid when the service
+starts leave it on DHCP.
+
+Each `config set` writes one key, and nothing applies them together, so set
+every key first and reload once:
+
+```text
+goos> config set system.net.mode static
+goos> config set system.net.ipv4.address 192.0.2.10
+goos> config set system.net.ipv4.prefix 24
+goos> config set system.net.ipv4.gateway 0.0.0.0
+goos> net reload
+network configuration applied
+```
+
+A refused candidate prints, for example,
+`net: invalid setting system.net.ipv4.gateway; previous configuration kept`.
+The settings persist in `/state/config` like any other; there is no separate
+network file.

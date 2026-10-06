@@ -66,6 +66,14 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	if logStarted && bytesString(spec.Name[:spec.NameSize]) == "log" && !renewLogGrants(&spec) {
 		return 0, false
 	}
+	if netServiceStarted && bytesString(spec.Name[:spec.NameSize]) == netServiceName && !renewNetServiceGrants(&spec) {
+		return 0, false
+	}
+	// Every driver launch, the first included, gets a binding of its own.
+	netDriver := bytesString(spec.Name[:spec.NameSize]) == netDriverName
+	if netDriver && !bindNetDevice(&spec) {
+		return 0, false
+	}
 	// A service of the installed system is read from the volume; every other
 	// one, and every service in recovery, comes from the archive (ADR 0175).
 	executable, processName, located := openExecutable(spec.Executable[:spec.ExecutableSize])
@@ -94,6 +102,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	if shell {
 		variables++
 	}
+	if netDriver {
+		variables++
+	}
 	writer := startup.NewWriter(staging, 1, variables, int(spec.CapabilityCount))
 	writer.Command(spec.Name[:spec.NameSize])
 	writer.CWD([]byte("/"))
@@ -103,6 +114,11 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	}
 	if shell {
 		writer.Variable([]byte("PATH"), []byte(supervisor.SearchPath(boot.Mode())))
+	}
+	if netDriver {
+		// The driver stamps every message with its binding's generation.
+		var digits [20]byte
+		writer.Variable([]byte("NET_GENERATION"), appendDecimal(digits[:0], netGeneration))
 	}
 	for index := 0; index < int(spec.CapabilityCount); index++ {
 		writer.Handle([]byte(spec.Capabilities[index].Name), 0)
@@ -124,7 +140,7 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// events, not handles.
 	session, tty, interactive := sessionOfService(name)
 	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == filesystemName || name == "vfs" || name == "block") ||
-		diskService(name)
+		diskService(name) || networkService(name)
 	if keep && launched == supervisor.LaunchOK {
 		switch {
 		case interactive && tty:
@@ -146,6 +162,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 		case "block":
 			blockProcessHandle = keepProcess(blockProcessHandle, event.ProcessHandle)
 		}
+	}
+	if networkService(name) && launched == supervisor.LaunchOK {
+		networkLaunched(name, event.ProcessHandle)
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
 		if !supervisionComplete {

@@ -88,7 +88,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | PID 1 slot | Object | PID 1 rights | Derived to | Child rights | Consumed |
 | --- | --- | --- | --- | --- | --- |
 | 1 | lifecycle channel | R W Wait | PID 1 only | - | - |
-| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log | W | no |
+| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log, netd, virtio-net | W | no |
 | | | | tty `console` | R W | no |
 | 3 | VFS session, client end | R W Wait T | shell `vfs` | R W Wait | yes |
 | 4 | VFS session, server end | R W Wait T | VFS `session` | R W Wait | yes |
@@ -110,10 +110,19 @@ uses slot 9 for a block-service probe (ADR 0058).
 | 20 | exec area (memory) | R W T | shell `execpage` | R W | no |
 | 21 | system image | R X T | VFS `image` | R | no; PID 1 keeps it to launch from (ADR 0093) |
 | 22 | log | R T | log `log`, shell `log` | R | no |
+| 28 | virtio-net port range | R W T | virtio-net `ports` | R W | no |
+| 29 | network IRQ line | Wait T | virtio-net `irq` | Wait | no |
+| 30 | DMA domain 2 | W T | virtio-net `dma` | W | no |
 
-The driver's port, IRQ, and DMA authority is granted, not consumed, so PID 1
+Slots 23 to 27 hold the loader, the file cache, the two terminal consoles and
+the second exec area. Without a usable network function, slots 28 to 30 hold
+inert objects that no call accepts, Read on the ports and DMA slots and Wait
+on the line, all without Transfer; PID 1 starts no network driver then
+(ADR 0190).
+
+Both drivers' port, IRQ, and DMA authority is granted, not consumed, so PID 1
 can hand the same authority to a restarted driver; the dead driver's copies go
-with its teardown (ADR 0078).
+with its teardown (ADR 0078, ADR 0190).
 
 Only the terminal service holds the console's read right: nothing else can read
 what is typed (ADR 0082). The shell and the commands hold no console capability
@@ -149,11 +158,36 @@ index entry asks for one (ADR 0073, 0076, 0078, 0080). It keeps only the
 client side of each control endpoint.
 
 No child receives Transfer. After boot, PID 1 still holds slots 1, 2, 5, 7, 9,
-11, 12, 13, 18, 19, and 20, the client sides of the block, config and terminal
-control endpoints, both ends of the terminal output stream, and a Wait + Write
+11, 12, 13, 18, 19, 20, 28, 29, and 30, the client sides of the block,
+config, network and terminal control endpoints, both ends of the terminal output stream, and a Wait + Write
 process handle for each running job stage; the Write right is what
 `ProcessKill` requires (ADR 0067). Slot 7, the exec server end, is replaced by a
 fresh channel's when the shell restarts.
+
+### Network
+
+PID 1 creates the network's channels and pools at run time (ADR 0191):
+
+| Object | PID 1 keeps | Derived to | Child rights | Consumed |
+| --- | --- | --- | --- | --- |
+| `netd` control, client end | R W Wait | PID 1 only | - | - |
+| `netd` control, server end | - | netd `control` | R W Wait | yes |
+| configuration session, `system.net.` read only | - | netd `config` | R W Wait | yes |
+| driver channel, driver end | - | virtio-net `service` | R W Wait | yes |
+| driver channel, service end | - | moved to `netd` in `SetDevice` | R W Wait | yes |
+| receive pool, 2 pages | - | virtio-net `rx`; a copy moved to `netd` | R W; R | yes |
+| transmit pool, 2 pages | - | virtio-net `tx`; a copy moved to `netd` | R; R W | yes |
+| command session, service end | - | moved to `netd` in `AddSession` | R W Wait | yes |
+| command session, client end | - | the command's `net` | R W Wait | yes |
+
+A new driver channel and a new pair of pools are made for every driver
+launch, and PID 1 keeps nothing of them once the driver starts. It narrows
+its copies of the pools with `HandleDuplicate` before it moves them, and
+`netd` checks through `HandleInfo` that each handle it receives carries
+exactly the rights above, so it never holds write access to the receive pool.
+A command session's rights class, ping and status or status and reload, is
+recorded by `netd` against its end when PID 1 opens it; the command cannot
+change it or pass the session on.
 
 ### Utilities
 
@@ -165,6 +199,7 @@ For each pipeline stage PID 1 grants:
 | `stdout` | stream writer: the next stage's pipe, a redirection sink's, or a copy of the terminal's writing end | W Wait |
 | `stderr` | stream writer: a `2>` sink's, or a copy of the terminal's writing end | W Wait |
 | `vfs` | new private VFS session channel, only when the command's entry in `/system/commands` asks for one | R W Wait |
+| `net` | new private network session channel, only when the entry asks for `GrantNetworkPing` or `GrantNetworkAdmin` and `netd` accepted the session | R W Wait |
 
 The VFS session is a fresh channel from `ChannelCreate`. PID 1 sends the
 server end to VFS as an IPC attachment on the control channel and consumes the
@@ -175,23 +210,30 @@ the build turns into the command index in the immutable system image
 
 ## Device authority
 
-The kernel discovers the legacy virtio-blk function and mints three separately
-typed objects held first by PID 1 (ADR 0034, 0035):
+The kernel discovers the legacy virtio-blk function and the legacy
+virtio-net function, and mints three separately typed objects for each, held
+first by PID 1 (ADR 0034, 0035, 0190):
 
 - **Ports**: a device object encoding the discovered I/O BAR base and size.
   `PortRead`/`PortWrite` require Read/Write, widths 1, 2, or 4, and
   `offset + width <= size`. There is no other port-I/O path from ring 3.
-- **IRQ**: an IRQ object for line 11 only. `IRQWait` requires Wait. The kernel
-  masks the level-triggered route in the handler and rearms it on the next
-  wait.
-- **DMA**: a DMA-domain device object. `DMAAllocate` requires Write and maps
-  four zeroed contiguous pages RW+NX at one fixed user address, returning their
-  physical address to the caller only.
+- **IRQ**: an IRQ object for line 11, the disk's, or for the network
+  function's routed line. `IRQWait` requires Wait and serves line 11 only;
+  a `WaitAny` interest and `IRQTake` require Wait and serve the network line
+  only. The kernel masks the level-triggered route in the handler and
+  unmasks it on the next wait.
+- **DMA**: a DMA-domain device object, domain 1 for the disk and 2 for the
+  network function. `DMAAllocate` requires Write, refuses a domain whose
+  device was not discovered, and maps up to 64 zeroed contiguous pages RW+NX
+  at one fixed user address, returning their physical address to the caller
+  only.
 
-When a process holding DMA authority exits, teardown resets the device and
-masks IRQ 11 before its owned pages are reclaimed. Without an IOMMU these
-checks bound what the driver can do through the CPU, not what the device can
-do on its behalf; see [threat-model.md](threat-model.md).
+When a process holding DMA authority exits, teardown masks that domain's
+interrupt route and resets that domain's device before its owned pages are
+reclaimed; a network driver's exit leaves the disk alone. Without an IOMMU
+these checks bound what a driver can do through the CPU, not what its device
+can do on its behalf, so both drivers are part of the effective trusted
+computing base; see [threat-model.md](threat-model.md).
 
 Four further device objects are not tied to hardware discovery:
 

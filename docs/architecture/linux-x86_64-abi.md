@@ -96,7 +96,7 @@ BusyBox does about it:
 | `sendfile(40)` | BusyBox `cat` and `cp` fall back to `read` and `write` |
 | `utimes(235)`, `futimesat(261)` | a program that uses them in place of `utimensat` cannot set a time |
 | `ftruncate(77)`, `fsync(74)`, `statfs(137)`, `preadv(295)`, `pwritev(296)` | not implemented |
-| `socket(41)` and the network calls | no networking |
+| `socket(41)` and the network calls | no networking for Linux programs; the native network service (ADR 0191) offers no socket interface |
 
 Wrong-ABI Linux entry returns `-EPERM`. A noncanonical or non-user return RIP
 or RSP retires the task rather than attempting an unsafe IRETQ.

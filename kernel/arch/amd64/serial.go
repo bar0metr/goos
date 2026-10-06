@@ -132,6 +132,12 @@ func PCIConfigRead32(bus, slot, function, offset uint8) uint32 {
 	return inl(0xcfc)
 }
 
+func PCIConfigWrite32(bus, slot, function, offset uint8, value uint32) {
+	address := uint32(1<<31) | uint32(bus)<<16 | uint32(slot&0x1f)<<11 | uint32(function&7)<<8 | uint32(offset&0xfc)
+	outl(0xcf8, address)
+	outl(0xcfc, value)
+}
+
 func PCIConfigWrite16(bus, slot, function, offset uint8, value uint16) {
 	address := uint32(1<<31) | uint32(bus)<<16 | uint32(slot&0x1f)<<11 | uint32(function&7)<<8 | uint32(offset&0xfc)
 	outl(0xcf8, address)
