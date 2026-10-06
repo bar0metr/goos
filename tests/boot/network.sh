@@ -120,7 +120,13 @@ held() { # log command name
 	window "$1" "$2" | awk -v name="$3" '$2 == name { print $3, $4 }'
 }
 
+# NETWORK_SCENARIOS limits a development run to some of the scenarios.
+scenarios=${NETWORK_SCENARIOS:-user stream none}
+wants() { case " $scenarios " in *" $1 "*) return 0 ;; esac; return 1; }
+
 # --- 1. User networking, DHCP, ping, driver replacement ---------------------
+
+if wants user; then
 
 disk user
 log=$logs/network-user.log
@@ -131,9 +137,9 @@ wait_for 'NETD_READY 10\.0\.2\.' 15 "$log"
 printf 'dhcp ready %ss after the prompt\n' "$(($(date +%s) - started))"
 sleep 2
 type_line 3 'net status'
-type_line 3 'quota'
 type_line 3 'ping -c 4 -W 1000 10.0.2.2'
 sleep 5
+type_line 3 'quota'
 type_line 3 'ping -c 4 -W 1000 10.0.2.2 '
 sleep 5
 type_line 3 'quota '
@@ -145,6 +151,11 @@ type_line 3 'cat /home/user/net.txt'
 type_line 3 'ping -c 4 -W 1000  10.0.2.2'
 sleep 5
 type_line 3 'quota  '
+type_line 3 'fault net-driver'
+sleep 12
+type_line 3 'ping -c 4 -W 1000   10.0.2.2'
+sleep 5
+type_line 3 'quota   '
 stop 3 "$log"
 
 require user.pci PCI_NET_DISCOVERY_OK "$log"
@@ -156,7 +167,7 @@ require_after user.mode 'net status' '^mode: dhcp$' "$log"
 require_after user.address 'net status' '^address: 10\.0\.2\.[0-9]*/24$' "$log"
 require_after user.gateway 'net status' '^gateway: 10\.0\.2\.2$' "$log"
 require_after user.lease 'net status' '^lease: [0-9]* s$' "$log"
-for command in 'ping -c 4 -W 1000 10.0.2.2' 'ping -c 4 -W 1000 10.0.2.2 ' 'ping -c 4 -W 1000  10.0.2.2'; do
+for command in 'ping -c 4 -W 1000 10.0.2.2' 'ping -c 4 -W 1000 10.0.2.2 ' 'ping -c 4 -W 1000  10.0.2.2' 'ping -c 4 -W 1000   10.0.2.2'; do
 	for sequence in 1 2 3 4; do
 		require_after "user.reply.$sequence" "$command" "^40 bytes from 10\\.0\\.2\\.2: seq=$sequence time=[0-9]*\\.[0-9][0-9][0-9] ms$" "$log"
 	done
@@ -165,24 +176,31 @@ for command in 'ping -c 4 -W 1000 10.0.2.2' 'ping -c 4 -W 1000 10.0.2.2 ' 'ping 
 done
 require user.fault NET_DRIVER_FAULT_INJECTED "$log"
 require user.unbound NETD_DRIVER_UNBOUND "$log"
-[ "$(grep -c '^VIRTIO_NET_DRIVER_OK$' "$log")" -ge 2 ] || fail user.replaced 'a second VIRTIO_NET_DRIVER_OK' "$log"
+[ "$(grep -c '^VIRTIO_NET_DRIVER_OK$' "$log")" -ge 3 ] || fail user.replaced 'three VIRTIO_NET_DRIVER_OK lines, one per driver' "$log"
 checks=$((checks + 1))
 require_after user.file 'cat /home/user/net.txt' '^kept$' "$log"
-grep -q 'VIRTIO_BLK_DRIVER_OK' "$log" || fail user.storage 'the storage driver running' "$log"
-# The network service's and the driver's resource counts after the second
-# round of pings equal those after the first: nothing grows per request.
-before=$(held "$log" 'quota' netd)
-after=$(held "$log" 'quota ' netd)
-[ -n "$before" ] && [ "$before" = "$after" ] || fail user.netd-stable "netd counts '$before' unchanged, saw '$after'" "$log"
-replaced=$(held "$log" 'quota  ' netd)
-[ "$before" = "$replaced" ] || fail user.netd-after-restart "netd counts '$before' after the driver restart, saw '$replaced'" "$log"
-driver_before=$(held "$log" 'quota' virtio-net)
-driver_after=$(held "$log" 'quota  ' virtio-net)
-[ -n "$driver_before" ] && [ "$driver_before" = "$driver_after" ] || fail user.driver-stable "driver counts '$driver_before' for its replacement, saw '$driver_after'" "$log"
-checks=$((checks + 3))
+require user.storage VIRTIO_BLK_DRIVER_OK "$log"
+# Exact per-process counts: a round of pings changes nothing once the first
+# round has warmed the service up, and a second driver replacement leaves
+# PID 1, the service and the new driver where the first one did.
+compare() { # name first second process
+	first=$(held "$log" "$2" "$4")
+	second=$(held "$log" "$3" "$4")
+	[ -n "$first" ] && [ "$first" = "$second" ] || fail "$1" "$4 counts after '$2' equal to those after '$3'" "$log"
+	checks=$((checks + 1))
+}
+compare user.netd-pings 'quota' 'quota ' netd
+compare user.driver-pings 'quota' 'quota ' virtio-net
+compare user.init-pings 'quota' 'quota ' init
+compare user.netd-restart 'quota  ' 'quota   ' netd
+compare user.driver-restart 'quota  ' 'quota   ' virtio-net
+compare user.init-restart 'quota  ' 'quota   ' init
 printf 'PASS user networking (%s)\n' "$log"
+fi
 
 # --- 2. Two guests on a private stream backend -----------------------------
+
+if wants stream; then
 
 disk left 192.0.2.10
 disk right 192.0.2.11
@@ -214,8 +232,11 @@ require_after left.static 'net status' '^mode: static$' "$left"
 require_after left.address 'net status' '^address: 192\.0\.2\.10/24$' "$left"
 require_after right.gateway 'net status' '^gateway: none$' "$right"
 printf 'PASS stream backend (%s, %s)\n' "$left" "$right"
+fi
 
 # --- 3. No network function -----------------------------------------------
+
+if wants none; then
 
 disk none
 log=$logs/network-none.log
@@ -235,5 +256,6 @@ require_after none.ping 'ping -c 1 -W 500 10.0.2.2' '^seq=1: ' "$log"
 require_after none.ping-summary 'ping -c 1 -W 500 10.0.2.2' '^1 sent, 0 received, 100% lost$' "$log"
 require_after none.ping-exit 'ping -c 1 -W 500 10.0.2.2' '^exit status: 1$' "$log"
 printf 'PASS no network (%s)\n' "$log"
+fi
 
 printf 'PASS network (%d checks)\n' "$checks"

@@ -118,7 +118,10 @@ func parseTarget(target []byte) network.IPv4 {
 	return address
 }
 
-// echo asks for one reply and prints its outcome.
+// echo asks for one reply and prints its outcome. It is not inlined: its
+// frame in the loop that calls it would otherwise grow on every request.
+//
+//go:noinline
 func echo(destination network.IPv4, sequence, timeout uint16) bool {
 	reply, ok := utility.CallNetwork(netapi.Request{Opcode: netapi.OpEcho, Destination: destination, Sequence: sequence, TimeoutMS: timeout})
 	if !ok {

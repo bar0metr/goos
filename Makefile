@@ -143,7 +143,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -470,6 +470,13 @@ test-system-boot:
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory recovery-iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) tests/boot/system.sh $(ISO) $(OVMF_CODE)
+
+# The network gate (ADR 0190, 0191): DHCP and ping on QEMU user networking
+# with a driver replacement, two guests on a private stream backend, and a
+# boot without a network function, each from its own disposable disk.
+test-network:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) tests/boot/network.sh $(ISO) $(OVMF_CODE)
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1

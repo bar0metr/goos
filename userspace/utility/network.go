@@ -52,7 +52,8 @@ func CallNetwork(request netapi.Request) (netapi.Reply, bool) {
 	if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &networkReply) {
 		return reply, false
 	}
-	return reply, netapi.DecodeReply(&networkReply, correlation, request.Opcode, &reply)
+	valid := netapi.DecodeReply(&networkReply, correlation, request.Opcode, &reply)
+	return reply, valid
 }
 
 // Sleep waits ticks without watching anything.

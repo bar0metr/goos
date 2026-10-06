@@ -325,16 +325,19 @@ func unbind(reason string) {
 	}
 	syslog.Warn("driver binding ended", syslog.Str("reason", reason), syslog.Uint("generation", device.generation))
 	driverFaults++
+	// A pool stays allocated while any handle or mapping names it, so a
+	// release that fails is reported: it is memory PID 1 paid for.
 	for _, id := range [...]handle.ID{device.channel, device.rxHandle, device.txHandle} {
-		if id != 0 {
-			sys.HandleClose(id)
+		if id != 0 && sys.HandleClose(id) != kcall.StatusOK {
+			syslog.Error("binding handle not released", syslog.Uint("handle", uint64(id)))
+			mark("NETD_RELEASE_FAILED\n")
 		}
 	}
-	if device.rxBase != 0 {
-		sys.VMUnmap(device.rxBase, device.rxSize)
-	}
-	if device.txBase != 0 {
-		sys.VMUnmap(device.txBase, device.txSize)
+	for _, mapping := range [...][2]uint64{{device.rxBase, device.rxSize}, {device.txBase, device.txSize}} {
+		if mapping[0] != 0 && sys.VMUnmap(mapping[0], mapping[1]) != kcall.StatusOK {
+			syslog.Error("pool mapping not released", syslog.Uint("address", mapping[0]))
+			mark("NETD_RELEASE_FAILED\n")
+		}
 	}
 	generation := device.generation
 	device = binding{generation: generation}
