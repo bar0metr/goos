@@ -6,6 +6,12 @@ Accepted. Builds on ADR 0190. Extends the command index of ADR 0080 and
 ADR 0175 to format 3 and declares the first network settings in the
 configuration service of ADR 0074.
 
+Supersession note (2026-10-07): the 256-entry virtqueue ceiling in "The
+driver" is superseded by the current 1024-entry ceiling. Proxmox VE 7.4 with
+QEMU 7.2 exposes 1024-entry virtio-net queues; their rings and the fixed frame
+buffers still fit within the unchanged 64-page DMA limit. The rest of this
+decision remains in force.
+
 ## Context
 
 GoOS had no network. ADR 0190 gives a driver bounded authority over one

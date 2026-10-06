@@ -354,7 +354,9 @@ func deliverReceived() {
 		}
 		if status != netdev.UsedOK {
 			counters.malformed++
-			fault(netdev.FaultDevice, "VIRTIO_NET_MALFORMED_RECEIVE\n")
+			syslog.Error("malformed receive completion", syslog.Uint("status", uint64(status)),
+				syslog.Uint("id", uint64(id)), syslog.Uint("written", uint64(written)))
+			fault(netdev.FaultDevice, "VIRTIO_NET_MALFORMED_RECEIVE_COMPLETION\n")
 		}
 		buffer := rxBufferOf[id]
 		base := rxBufferOffset + uint64(buffer)*bufferSize
@@ -363,7 +365,10 @@ func deliverReceived() {
 			// A device that writes a header it was not asked for or a length
 			// outside one frame is not trusted with further buffers.
 			counters.malformed++
-			fault(netdev.FaultDevice, "VIRTIO_NET_MALFORMED_RECEIVE\n")
+			syslog.Error("malformed receive frame", syslog.Uint("id", uint64(id)),
+				syslog.Uint("written", uint64(written)), syslog.Uint("flags", uint64(dma.Memory[base])),
+				syslog.Uint("gso_type", uint64(dma.Memory[base+1])))
+			fault(netdev.FaultDevice, "VIRTIO_NET_MALFORMED_RECEIVE_FRAME\n")
 		}
 		offset, _ := netdev.SlotOffset(slot)
 		copy(rxPool[offset:offset+uint64(length)], dma.Memory[base+netdev.NetHeaderSize:base+netdev.NetHeaderSize+uint64(length)])

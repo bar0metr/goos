@@ -15,12 +15,14 @@ func TestQueueLayout(t *testing.T) {
 		{1, 0, 0, 0, false},
 		{3, 0, 0, 0, false},
 		{255, 0, 0, 0, false},
-		{512, 0, 0, 0, false},
+		{2048, 0, 0, 0, false},
 		{0xffff, 0, 0, 0, false},
 		{2, 32, 4096, 8192, true},
 		{8, 128, 4096, 8192, true},
 		{128, 2048, 4096, 8192, true},
 		{256, 4096, 8192, 12288, true},
+		{512, 8192, 12288, 20480, true},
+		{1024, 16384, 20480, 32768, true},
 	}
 	for _, test := range tests {
 		available, used, total, ok := QueueLayout(test.size)
@@ -281,11 +283,21 @@ func TestValidHeader(t *testing.T) {
 	if !ValidHeader(header) {
 		t.Fatal("ignored fields rejected")
 	}
-	for _, index := range []int{headerFlags, headerSegmentType} {
-		bad := make([]byte, NetHeaderSize)
-		bad[index] = 2
-		if ValidHeader(bad) {
-			t.Fatalf("nonzero byte %d accepted", index)
+	dataValid := make([]byte, NetHeaderSize)
+	dataValid[headerFlags] = headerDataValid
+	if !ValidHeader(dataValid) {
+		t.Fatal("DATA_VALID rejected")
+	}
+	for _, bad := range [][]byte{
+		{1},
+		{4},
+		{headerDataValid | 4},
+		{0, 1},
+	} {
+		header := make([]byte, NetHeaderSize)
+		copy(header, bad)
+		if ValidHeader(header) {
+			t.Fatalf("unsupported header %v accepted", bad)
 		}
 	}
 }

@@ -3,7 +3,7 @@ package netdev
 import "encoding/binary"
 
 const (
-	MaxQueueSize = 256
+	MaxQueueSize = 1024
 	// QueueAlign is the legacy interface's ring alignment; the queue address
 	// register takes a page frame number of this size.
 	QueueAlign = 4096
@@ -21,6 +21,7 @@ const (
 	maxQueuePFN       = 0xffffffff
 	headerFlags       = 0
 	headerSegmentType = 1
+	headerDataValid   = 2
 )
 
 // QueueLayout returns the byte offsets of the available and used rings and
@@ -196,10 +197,12 @@ func ValidReceive(written uint32) (frameLength uint16, ok bool) {
 }
 
 // ValidHeader checks the first NetHeaderSize bytes of a received buffer.
-// With no offloads negotiated the device has no reason to set flags or
-// gso_type, so either being nonzero means it disagrees about the feature
-// set. ValidHeader ignores hdr_len, gso_size and the checksum fields: they
-// mean something only under those offloads and the driver never reads them.
+// The driver negotiates no receive offloads. It tolerates DATA_VALID from
+// hosts that set the advisory bit without GUEST_CSUM, but does not trust it:
+// the network stack still verifies every supported checksum. NEEDS_CSUM,
+// other flags and every segmented packet remain unsupported. ValidHeader
+// ignores hdr_len, gso_size and the checksum fields because the driver never
+// uses them.
 func ValidHeader(header []byte) bool {
-	return len(header) >= NetHeaderSize && header[headerFlags] == 0 && header[headerSegmentType] == 0
+	return len(header) >= NetHeaderSize && header[headerFlags]&^headerDataValid == 0 && header[headerSegmentType] == 0
 }

@@ -143,7 +143,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -808,6 +808,11 @@ test-pve-smp: pve-artifacts
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
 
+# DHCP on the lab bridge (PVE_NET_BRIDGE) through the GoOS driver and network
+# service, then a ping of the gateway the DHCP server named.
+test-pve-network: pve-artifacts
+	@$(PVELAB) run --scenario network $(PVE_RUN_FLAGS)
+
 # A diagnostic run of a static 7-Zip the caller supplies on four host cores.
 # DIAG=1 gives the guest the diag command, whose DIAG linux line names the
 # refused calls and whose DIAG sched line the parallel peaks.
@@ -825,7 +830,7 @@ pve-run: pve-artifacts
 test-pvelab:
 	$(BUILD_ENV) go test ./tools/pvelab
 
-test-hardware: test-pve-smoke test-pve-lscpu test-pve-linux
+test-hardware: test-pve-smoke test-pve-lscpu test-pve-linux test-pve-network
 
 clean:
 	@rm -rf $(BUILD_DIR)

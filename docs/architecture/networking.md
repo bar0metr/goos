@@ -183,7 +183,7 @@ blocks.
 | pool size | 2 pages, 4 slots of 2048 bytes | `netdev.PoolPages`, `netdev.Slots` |
 | receive buffers posted | 16 of 2048 bytes | `userspace/cmd/virtio-net` |
 | transmit buffers | 4 of 2048 bytes, one per slot | `userspace/cmd/virtio-net` |
-| queue size | power of two, 2 to 256 | `netdev.MaxQueueSize` |
+| queue size | power of two, 2 to 1024 | `netdev.MaxQueueSize` |
 | DMA window | 64 pages | `userspace/cmd/virtio-net` |
 | ARP entries | 16 | `network.MaxNeighbors` |
 | ARP resolutions in progress | 4 | `network.MaxResolutions` |

@@ -312,3 +312,24 @@ func TestExitCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkOutputParsing(t *testing.T) {
+	fields := statusFields("state: ready\nlink: up\nmode: dhcp\naddress: 192.168.1.40/24\ngateway: 192.168.1.1\n")
+	if fields["gateway"] != "192.168.1.1" || fields["state"] != "ready" || fields["mode"] != "dhcp" {
+		t.Fatalf("fields %v", fields)
+	}
+	sent, received, ok := pingSummary("40 bytes from 192.168.1.1: seq=1 time=0.4 ms\nseq=2: timeout\n4 sent, 3 received, 25% lost\n")
+	if !ok || sent != 4 || received != 3 {
+		t.Fatalf("summary %d %d %v", sent, received, ok)
+	}
+	if _, _, ok := pingSummary("ping: network service unavailable\n"); ok {
+		t.Fatal("summary found in a failure")
+	}
+	services := "NAME        STATE       PID   RESTARTS\nnetd        running     10    0\nvirtio-net  running     12    1\n"
+	if state, restarts, ok := serviceState(services, "netd"); !ok || state != "running" || restarts != 0 {
+		t.Fatalf("netd service %q %d %v", state, restarts, ok)
+	}
+	if state, restarts, ok := serviceState(services, "virtio-net"); !ok || state != "running" || restarts != 1 {
+		t.Fatalf("virtio-net service %q %d %v", state, restarts, ok)
+	}
+}
