@@ -19,9 +19,9 @@ const (
 	// the entries from an index on until a reply comes back short.
 	MaxServiceEntries = 11
 	// MaxServiceIndex bounds the index a listing request may start at.
-	MaxServiceIndex = 32
-	MaxServiceName    = 15
-	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
+	MaxServiceIndex  = 32
+	MaxServiceName   = 15
+	serviceEntrySize = 1 + MaxServiceName + 1 + 1 + 4
 )
 
 type ControlOperation uint8

@@ -374,6 +374,7 @@ test-all:
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-system-boot
+	$(MAKE) test-network
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -394,6 +395,7 @@ release-check:
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
 	$(MAKE) test-system-boot
+	$(MAKE) test-network
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2

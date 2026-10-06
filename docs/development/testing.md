@@ -41,10 +41,11 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   `NETWORK_SCENARIOS` picks some of them, for example
   `make test-network NETWORK_SCENARIOS=stream`. Logs go to
   `build/logs/network-*.log`. The target needs no host privileges and is
-  not part of `test-all` or `release-check`. A ping beyond `10.0.2.2` under
+  part of `test-all` and `release-check`. A ping beyond `10.0.2.2` under
   user networking depends on the host's ICMP support and is no test of
   GoOS. The host tests and fuzz seeds of `userspace/netdev`,
-  `userspace/netapi` and `userspace/network` run in `make test-unit`.
+  `userspace/netapi` and `userspace/network` run in `make test-unit` and
+  `make test-security`.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, the real QEMU
   boot/persistence test, and the Linux end-to-end boot in sequence so host

@@ -317,5 +317,5 @@ The driver joins the block driver in the effective trusted computing base
 until an IOMMU confines DMA (ADR 0190). `netd` parses untrusted frames, so a
 defect in it is reachable from the network; it holds the frame pools, its
 control channel, a read-only configuration session and the command
-sessions, and nothing else. `test-network` is not yet part of `test-all` or
-the release gate.
+sessions, and nothing else. `test-network` is part of `test-all` and the
+release gate.

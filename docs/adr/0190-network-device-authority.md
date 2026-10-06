@@ -136,8 +136,9 @@ closing PID 1's handle without dropping its reference left the object
 alive after the child had gone. The launch path now drops that reference
 when it closes a consumed memory handle. A handle moved over IPC takes no
 reference and drops none. The network test found this: PID 1's page count
-grew by six on every driver restart, because the two frame pools it created
-for the old driver were never freed.
+grew by six on every driver restart: each two-page pool is charged three
+pages, its frames and one page of bookkeeping, and the two pools created for
+the old driver were never freed.
 
 ## Consequences
 
