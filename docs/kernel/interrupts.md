@@ -35,15 +35,17 @@ APIC timer at vector 0x30, one per processor; only the bootstrap processor's
 tick advances kernel time ([SMP](smp.md), ADR 0181).
 
 For Q35 PCI INTx, the
-kernel maps the LAPIC and IOAPIC into supervisor-only pages and routes virtio
-GSI 11 to vector 43. The handler coalesces the level-triggered source, masks the
+kernel maps the LAPIC and IOAPIC into supervisor-only pages and routes the
+virtio-blk GSI 11 to vector 43, and the virtio-net line, when there is one,
+to vector `0x34`. The handler coalesces the level-triggered source, masks the
 route, wakes the single capability-authorized waiter, and acknowledges the
 LAPIC. The driver acknowledges the device ISR; its next wait rearms the route.
 
 Device interrupts go to the bootstrap processor alone, routed to its APIC
 ID. A handler that wakes a task on another processor sends that processor a
 reschedule interrupt. Processors interrupt each other on vectors 0x31
-(reschedule), 0x32 (TLB shootdown), and 0x33 (stop after a panic). The kernel
+(reschedule), 0x32 (TLB shootdown), and 0x33 (stop after a panic); 0x34 is
+the network line's. The kernel
 does not use MADT interrupt-controller entries; dynamic GSI routing and
 spreading device interrupts over processors are future work.
 
@@ -78,17 +80,40 @@ contract.
 
 ## Device interrupts
 
-Three device lines are routed through the IOAPIC on bootstrap CPU 0:
+Up to four device lines are routed through the IOAPIC on bootstrap CPU 0:
 
 | Line | Vector | Trigger | Owner |
 | --- | ---: | --- | --- |
 | GSI 11 | 43 | active-low, level | the userspace virtio-blk driver, through `IRQWait` |
+| the NIC's line: 3, 5, 6, 9, 10, 12 or 14 | `0x34` (52) | active-low, level | the userspace virtio-net driver, through `WaitAny` and `IRQTake` |
 | GSI 4 | 36 | active-high, edge | the console UART, handled in the kernel |
 | GSI 1 | 33 | active-high, edge | the PS/2 keyboard, handled in the kernel |
 
-The virtio line is masked by its handler and rearmed by the driver's next wait,
-so an unserviced device cannot storm. The console line is not: every byte
-matters and the handler consumes the condition by reading the device.
+The two virtio lines are masked by their handlers and unmasked by their
+driver's next wait, so an unserviced device cannot storm. The console line is
+not: every byte matters and the handler consumes the condition by reading the
+device.
+
+The network line is the NIC's PCI interrupt line, when discovery accepts it
+(ADR 0190). The kernel refuses one it would share: the disk's 11, the
+consoles' 1 and 4, the PICs' spurious 7 and 15, and the timer, cascade, RTC
+and FPU lines. Its vector sits outside the remapped PICs' range, and its
+route stays masked until the driver first waits. Its handler masks the
+route, sets a pending flag, counts the interrupt, wakes the kernel loop and
+acknowledges the LAPIC; it parses nothing. The kernel loop publishes the
+pending flag to the driver's `WaitAny` the way it publishes console input.
+That wait registers the driver, unmasks the route and checks the flag again
+before it sleeps, and reports readiness without clearing it. The driver reads
+the device ISR, which deasserts the line, and then clears the flag with
+`IRQTake`, so an interrupt raised after the ISR read stays pending. When the
+driver exits, closing its DMA capability masks the route, resets the NIC,
+and clears the flag before its pages are freed.
+
+An IOAPIC access is a register select followed by a data write. The handlers
+run on the bootstrap processor, but a driver on any processor can arm or
+quiesce its route, so `goos_ioapic_lock`, a spinlock taken with interrupts
+off, brackets every select and data pair of the virtio lines: in both
+handlers and in their arm and quiesce routines.
 
 The kernel keeps two 8 KiB input rings, one per terminal console (ADR 0125):
 the serial ring, which the COM1 handler fills and the serial console object

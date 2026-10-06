@@ -90,6 +90,21 @@ instruction.
 VGA device but uses `-display none`, captures a QEMU monitor screendump, and
 checks a validation-only framebuffer marker pixel-for-pixel.
 
+`make run` and `make run-gui` attach one legacy virtio-net function to QEMU
+user networking: `-netdev user` and
+`virtio-net-pci,disable-modern=on,mac=$(NET_MAC),addr=0x4`. The function sits
+at PCI slot 4 because the Q35 firmware routes that slot's interrupt to a line
+the disk does not use (ADR 0190). `NET=user` is the default; `NET=none`
+boots without a network device, and any other value stops the build.
+`NET_MAC` sets the MAC address, `52:54:00:12:34:56` by default. Under user
+networking QEMU's DHCP server gives the guest an address in `10.0.2.0/24`
+with gateway `10.0.2.2`, and `ping 10.0.2.2` reaches QEMU's router; reaching
+further depends on the host's ICMP support.
+
+The command index format is 3 since the network grants (ADR 0191). A disk
+installed by an older build records format 2 and boots into recovery;
+`make disk-overwrite` installs the current system on it, user data and all.
+
 `make test` runs the fast host unit, artifact-integration, and security targets
 without starting QEMU. `make test-boot` performs the bounded two-phase QEMU boot
 and persistence validation. It keeps the complete serial transcripts in
@@ -102,7 +117,7 @@ Boot tests use disposable installed disks made from the system tree; `make
 run` and `make run-gui` retain `build/goos-disk.img` across interactive boots.
 `make test-system-boot` boots an installed disk, reboots it under storage
 faults, checks it from forced recovery, and boots each kind of unusable disk
-into recovery.
+into recovery. `make test-network` runs the network gate.
 `make test-performance` writes the host benchmarks, such as
 `build/reports/page-allocation.txt`, and the in-guest microbenchmarks of
 `make test-microbench` to `build/reports/microbench-<variant>.md`.

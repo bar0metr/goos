@@ -70,8 +70,14 @@ data. Userspace supplies one to 16 fixed-size `(handle, event mask)` interests
 and receives a 16-bit ready mask. The kernel validates every handle generation,
 object type, event mask, endpoint direction, and required capability rights
 before registering the complete generation-safe Task ID. Current interests cover
-channels, streams, and processes. Existing one-object receive, stream, process,
-and IRQ waits remain available.
+channels, streams, processes, console input, and the network function's
+interrupt line, whose readiness `IRQTake` consumes (ADR 0190). Existing
+one-object receive, stream, process, and IRQ waits remain available.
+
+The network service's protocols, `GNETDRV1` with its driver, `GNETCTL1` with
+PID 1 and `GNETAPI1` with commands, are fixed-size bodies on this envelope.
+Frames travel in two shared pools, and a message names only a slot and a
+length ([networking](networking.md), ADR 0191).
 
 ## PID 1 lifecycle channel
 

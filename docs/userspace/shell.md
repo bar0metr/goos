@@ -143,6 +143,42 @@ name of the stage that failed, `NAME: command not found`, even inside a pipeline
 (ADR 0079). `uptime` prints `up H:MM:SS` and `mem` prints total, used and free
 memory in binary units.
 
+## Network commands
+
+`ping` and `net` are native commands whose manifests ask for a network
+session; PID 1 opens one for each launch (ADR 0191). Neither builds a packet:
+`netd` does the work and answers.
+
+`ping [-c COUNT] [-W TIMEOUT_MS] IPv4` sends COUNT echo requests, 1 to 16 and
+4 by default, one at a time and one second apart, each waiting up to
+TIMEOUT_MS, 100 to 5000 and 1000 by default, for its reply. It takes a
+numeric unicast address only: a name is refused with
+`numeric IPv4 address required` before anything is sent, as there is no name
+service. Each request prints one line and a summary follows, for example:
+
+```text
+goos> ping -c 2 10.0.2.2
+40 bytes from 10.0.2.2: seq=1 time=0.412 ms
+40 bytes from 10.0.2.2: seq=2 time=0.388 ms
+2 sent, 2 received, 0% lost
+```
+
+A request that fails prints `seq=N: REASON`, for example `seq=3: timeout`,
+`seq=1: neighbor unreachable` or `seq=1: interface down`; a router's ICMP
+error prints `from A: seq=N destination unreachable` or `time exceeded`.
+`ping` exits 0 when at least one reply came, 1 when none did, and 2 for a
+usage error or when the network service is unavailable.
+
+`net status` prints the interface: `state` (`down`, `configuring`, `ready` or
+`failed`), `link`, `mac`, `mode`, `address` with its prefix or `none`,
+`gateway` or `none`, `lease` in seconds while a DHCP lease runs, and the
+`frames` counters for received, transmitted, dropped and malformed frames.
+`net reload` asks the service to apply the `system.net.*` settings; see
+[configuration](configuration.md#network).
+
+The validation build's `fault net-driver` kills the network driver once;
+PID 1 starts a new one with a new binding, and storage and the shell carry on.
+
 ## Linux programs
 
 A path that names a static Linux x86_64 ELF runs like a native program: PID 1

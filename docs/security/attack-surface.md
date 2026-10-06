@@ -1,8 +1,9 @@
 # Native kernel attack surface
 
 The only intentional ring 3 → ring 0 entry points are `int 0x80` native calls,
-CPU exceptions, and the timer, virtio (GSI 11), and console UART (GSI 4,
-ADR 0075) interrupts. This document covers the native calls defined by
+CPU exceptions, and the timer, virtio-blk (GSI 11), virtio-net (its routed
+line, vector `0x34`, ADR 0190), and console UART (GSI 4, ADR 0075)
+interrupts. This document covers the native calls defined by
 `kcall.Operation` in `kernel/kcall/kcall.go`.
 
 ## Entry path
@@ -45,13 +46,13 @@ table with type, generation, and rights checks.
 | 13 | `SystemInfo` | registered | length exactly 40; `CopyOut` | none | no |
 | 14 | `PortRead` | device handle, Read, port object | spec: width 1/2/4, bits 24+ zero, `offset + width ≤ BAR size` (32-bit sum); `CopyOut` | one port access | no |
 | 15 | `PortWrite` | device handle, Write, port object | as `PortRead`; value must fit the width | one port access | no |
-| 16 | `DMAAllocate` | device handle, Write, DMA object | virtual address must equal the fixed DMA address; 24-byte descriptor `CopyIn`, its size a whole number of pages up to 256 KiB (zero for 16 KiB); the window must be free in the region map | up to 64 contiguous low pages, charged with their page tables to the page quota; a pinned region; at most once per address space | no |
+| 16 | `DMAAllocate` | device handle, Write, DMA object of a discovered device's domain | virtual address must equal the fixed DMA address; 24-byte descriptor `CopyIn`, its size a whole number of pages up to 256 KiB (zero for 16 KiB); the window must be free in the region map | up to 64 contiguous low pages, charged with their page tables to the page quota; a pinned region; at most once per address space | no |
 | 17 | `IRQWait` | IRQ handle, Wait, IRQ 11 | none beyond the handle | one waiter slot | yes, **no deadline** |
 | 18 | `StreamCreate` | registered | length exactly 16; two free handle slots; `CopyOut` with rollback | 256 streams of one page each, global; 8/16/32 by launch profile, 64 for PID 1 (ADR 0111, 0122) | no |
 | 19 | `StreamRead` | reader handle, Read | 24-byte descriptor; size 1..256; result field must be 0; `CanCopyOut` before consuming | static 256 B buffer | no; empty → `ResourceExhausted` |
 | 20 | `StreamWrite` | writer handle, Write | as `StreamRead`; `CopyIn` of payload; a write that does not fit whole is refused, never split | static 256 B buffer | no; full → `ResourceExhausted` |
 | 21 | `StreamWait` | stream handle, Wait | timeout must be non-zero; wrap check | 64 waiters | yes, tick deadline; a writer wakes when 256 bytes are free |
-| 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..64, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
+| 22 | `WaitAny` | per interest: type-specific rights + Wait; the console device needs Read only | count 0..64, where 0 is a timed sleep and needs a finite deadline; interest array and 16-byte result validated; per-interest handle, type, event mask, rights, and live object; an IRQ interest must name the routed network line, Readable only; wrap check | fixed table, one operation per task slot | yes; deadline or infinite (`^0`) |
 | 23 | `Diagnostics` | device handle, Write, console object; `goos_diag` build only | optional address, only for the caller's own address space | output proportional to kernel state | no |
 | 24 | `ClockReadNanos` | — | length exactly 8; `CopyOut` | none | no |
 | 25 | `LogWrite` | device handle, Write, console object | length 1..181; `CopyIn`; `logfmt.Decode` checks version, level, printable ASCII, component and field syntax (failure → `CorruptData`); time and PID are set by the kernel | 64-record ring, oldest overwritten | no |
@@ -84,6 +85,7 @@ table with type, generation, and rights checks.
 | 52 | `CPUCacheInfo` | registered | index below the bounded cache table; 48-byte `CopyOut` | immutable deterministic-cache geometry collected at boot | no; past the table → `NotFound` |
 | 53 | `CPURuntime` | registered | index below the present-CPU table; 80-byte `CopyOut` | one processor's online state, current task ID, tick, idle, switch, steal, migration, and interrupt counts; no addresses or scheduler state it can change | no; past the table → `NotFound` |
 | 54 | `TaskAffinity` | handle zero for the calling task; otherwise a process handle with Wait to read, Write to set | mask must name an online processor; kernel tasks stay on the housekeeping processor; optional 8-byte `CopyOut` | the processors a task may run on; a scheduling constraint, not authority | no |
+| 55 | `IRQTake` | IRQ handle, Wait, the routed network line | none beyond the handle | clears one pending flag | no; nothing pending → `NotFound` |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -95,7 +97,9 @@ compiles away.
 
 - Handles, channels, streams, waits, and process lifetime are kernel objects;
   their integrity is the authority model.
-- Port I/O, DMA memory, and IRQ routing need ring 0.
+- Port I/O, DMA memory, and IRQ routing need ring 0. The network line's
+  handler records an event and parses nothing; Ethernet, ARP, IPv4, ICMP and
+  DHCP run in `netd` (ADR 0191).
 - `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` stay in the kernel
   because COM1 is also the early console, the panic path and the log's warning
   echo. The terminal service holds the only read right and relays everything the
@@ -150,6 +154,9 @@ status, and task exit cancels its `WaitAny` registration (ADR 0050, 0051). Each
 wait registers, re-checks readiness, and only then blocks, so a wake between
 check and block is not lost. `IRQWait` has no deadline; the only holder is the
 virtio-blk driver, which re-checks the used ring after every wake (ADR 0035).
+A `WaitAny` on the network line registers, then unmasks the route, then
+re-checks the pending flag, so an interrupt that arrives at any point either
+completes the registration or is seen by the re-check (ADR 0190).
 
 ### Capabilities
 

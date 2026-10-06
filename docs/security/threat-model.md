@@ -9,7 +9,7 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 | Asset | Where it lives | Why it matters |
 | --- | --- | --- |
 | Kernel integrity | kernel image, page tables, GDT/IDT/TSS, kernel stacks | Every other guarantee depends on it |
-| Physical memory | PMM bitmap, owned user pages, shared image frames, DMA window | Aliasing a page breaks isolation |
+| Physical memory | PMM bitmap, owned user pages, shared image frames, the two drivers' DMA windows | Aliasing a page breaks isolation |
 | Handle tables and registries | per-process `handle.Table`, channel, stream, process registries | They *are* the authority model |
 | Resource accounts | per-process quota counters (ADR 0072) | Stop one process from starving the rest |
 | PID 1 authority | PID 1 handle table | Root of every capability granted after boot |
@@ -17,6 +17,7 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 | Persistent data | FAT32 image on the virtio-blk disk (`/persist`, with `/home` and `/state` on the same volume) | Survives reboot; reachable only through VFS |
 | System log and configuration | kernel log ring, `/state/system.log`, `/state/config` | Diagnostics and the settings components act on |
 | Console | COM1 through the console device capability, and the terminal output stream the terminal service relays | Operator I/O, warning echo, and read access to the log ring |
+| Network interface | `netd`'s address, ARP table and DHCP lease, the frame pools | What the guest says and answers on the link |
 | CPU time | scheduler slots, wait sets | Liveness of every service |
 
 ## Trust boundaries
@@ -29,11 +30,13 @@ host (QEMU, OVMF, ISO, disk image file)
      │   ├─ FAT32 service                  holds a channel to the VFS and a block client endpoint; parses the untrusted volume
      │   ├─ block service                  holds block endpoints, driver client endpoint
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
+     │   ├─ virtio-net driver              holds port, IRQ, DMA authority for the NIC, a channel to netd, both frame pools
+     │   ├─ netd                           holds the frame pools (receive read-only), a driver channel, a read-only system.net. config session, command sessions; no device
      │   ├─ config service                 holds the configuration store and a VFS session
      │   ├─ log service                    holds the log (read), console write, and a VFS session
      │   ├─ terminal service               the only holder of console read and of the terminal output stream's reader; a session with the shell
      │   └─ shell                          holds a terminal output writer, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session; no console
-     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session
+     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session and one network session
 ```
 
 | Boundary | Crossing | Enforcement |
@@ -46,7 +49,10 @@ host (QEMU, OVMF, ISO, disk image file)
 | VFS → storage | `GBLK001` IPC | block service validates ranges and overflow; VFS never holds device authority (ADR 0033, 0036) |
 | VFS → system image | `ImageMap` | read-only, non-executable, unowned mapping of the archive; the capability is held only by VFS (ADR 0070) |
 | client → config service | `GCF1` session | scope and rights are fixed by PID 1 when it creates the session (ADR 0074, 0076) |
-| driver → hardware | port, IRQ, DMA calls | BAR-bounded ports, IRQ 11 only, fixed DMA window (ADR 0034, 0035) |
+| driver → hardware | port, IRQ, DMA calls | BAR-bounded ports, one line per driver, fixed DMA window, a DMA domain per device (ADR 0034, 0035, 0190) |
+| link → `netd` | frames the driver copies into the receive pool | the driver checks length and header; `netd` parses every frame and keeps fixed tables (ADR 0191) |
+| `netd` ↔ driver | `GNETDRV1` and two shared pools | slot numbers only, exact slot ownership, a generation per binding; the driver copies frames out of the pool before the device sees them (ADR 0191) |
+| commands → `netd` | `GNETAPI1` session | rights class fixed by PID 1 at `AddSession`; one echo in flight per session (ADR 0191) |
 | host → guest | firmware, ISO, disk image | trusted, except disk *contents*, which are treated as untrusted input |
 
 The kernel and the host (QEMU, OVMF, the ISO build) are trusted. Nothing in the
@@ -75,6 +81,10 @@ A program launched from the shell, for example a compromised command image in
   pause fills the 4 KiB stream so that other writers wait. It cannot close the
   stream for anyone else, and the terminal service keeps serving the keyboard
   while it relays (ADR 0089).
+- A command whose index entry asks for a network session can, by its class,
+  have `netd` send echo requests to any address it names, one at a time, or
+  read the interface and have `netd` reload the stored settings. It builds
+  no packet, holds no device, and cannot pass the session on (ADR 0191).
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
@@ -144,6 +154,14 @@ attacker-controlled code.
   bounded storage deadlines report I/O errors instead of freezing (ADR 0048,
   0078).
 
+- `netd` compromise, for example through a malformed frame, controls what
+  the guest sends and answers on the link and what `ping` and `net status`
+  report. It holds no device authority, no VFS session, and a configuration
+  session that can only read `system.net.`. It cannot write the receive
+  pool, and the frames it writes to the transmit pool are copied by the
+  driver before the device reads them. It restarts on failure with a new
+  control channel, and the driver restarts behind it (ADR 0191).
+
 ### Compromised driver
 
 The `virtio-blk` process programs a bus-mastering device. There is no IOMMU:
@@ -156,6 +174,38 @@ the shared read-only image pages every process running an image maps
 it does not contain a malicious driver. The driver is part of the effective
 TCB until an IOMMU is used. PID 1 keeps the driver's port, IRQ, and DMA
 authority so that it can grant it to a restarted driver (ADR 0078).
+
+The `virtio-net` driver is in the same position (ADR 0190): its device is
+bus-mastering, nothing confines its DMA, and it is part of the effective TCB
+for the same reason. Its own DMA domain means that its exit resets the NIC
+and never the disk. That contains a crash and does nothing against a
+malicious driver.
+
+### Hostile network peer
+
+Anything on the link can send the guest arbitrary frames.
+
+- Frames reach `netd` only through the driver. It checks each used-ring
+  entry's index, descriptor, length and header, and a bad one ends the
+  driver; PID 1 starts another. It copies at most one 1514-byte frame into a
+  receive slot.
+- `netd` checks every length and offset before reading a field and refuses
+  oversized frames, IPv4 options and fragments, bad checksums, and DHCP
+  replies for another transaction or MAC. Its tables are fixed: 16 ARP
+  entries, 4 resolutions, an 8-frame transmit ring, 8 sessions.
+- The ARP table learns a sender only when it is on the prefix and talking to
+  us, or already known or being resolved. A peer on the link can still
+  answer for another address, as on any ARP network, and so take traffic
+  meant for it.
+- Echo replies are matched by addresses, identifier, sequence and a random
+  payload token, so a reply cannot be forged without seeing the request.
+  ICMP errors quote only eight bytes of the request and are matched without
+  the token.
+- A DHCP server on the link decides the address, prefix and router. An
+  address another host holds is declined after the ARP probe.
+- `netd` answers at most 20 echo requests a second, so an echo flood cannot
+  fill its transmit ring.
+- There is no encryption, authentication or filtering on the link.
 
 ### Malformed storage image
 
@@ -193,8 +243,9 @@ The raw disk image is host-provided and persists across boots.
   payload size, and attached-handle count before queueing, and checks Transfer
   authority on every attached handle (docs/architecture/ipc.md).
 - Protocol decoders (`GVF1`, `GRF1`, `GBLK001`, lifecycle, exec and its
-  control protocol, `GCF1` and its control protocol) check protocol ID,
-  version, sizes, and require reserved fields to be zero.
+  control protocol, `GCF1` and its control protocol, `GNETDRV1`, `GNETAPI1`
+  and `GNETCTL1`) check protocol ID, version, sizes, and require reserved
+  fields to be zero.
 - Services answer unparsable but attributable requests with an
   invalid-argument reply instead of dropping them (ADR 0048). A request whose
   peer has died is dropped without stopping the service (ADR 0078).
@@ -239,14 +290,16 @@ controls the system ([boot-chain.md](boot-chain.md)).
 | crash loop | bounded restart count and backoff in the PID 1 supervisor (ADR 0019) |
 | stalled storage peer | bounded storage deadlines (ADR 0048) |
 | storage driver crash | PID 1 restarts the driver on a fresh channel and hands the block service the new endpoint (ADR 0078) |
+| network driver crash | `netd` fails pending echoes and unbinds; PID 1 starts a driver with a new generation, channel and pools; the disk is untouched (ADR 0190, 0191) |
+| missing or failed NIC | the network reports down; storage, the installed system and the shell keep running, and recovery is never entered for it (ADR 0191) |
 | terminal or shell crash | PID 1 restarts it on a fresh session and hands the survivor the other end; a dead shell's jobs are stopped with it (ADR 0089) |
 | a pipeline stage exiting | closes only its own copies of shared stream ends; the terminal's writing end stays open for the other stages (ADR 0089) |
 | corrupt persistent volume | mount refused, system runs without persistent storage (ADR 0077) |
-| driver exit with DMA armed | teardown resets the device and masks IRQ 11 before freeing pages (ADR 0035) |
+| driver exit with DMA armed | teardown masks that device's line and resets that device before freeing pages (ADR 0035, 0190) |
 
 ## Out of scope for 0.1
 
-- IOMMU. DMA is not confined (see compromised driver).
+- IOMMU. DMA is not confined for either driver (see compromised driver).
 - ASLR. Kernel and user layouts are fixed (kernel image at `0x400000`, user
   code at `0x40002000`). What would have to change is described in
   [memory.md](../architecture/memory.md#aslr-readiness).
@@ -264,9 +317,9 @@ controls the system ([boot-chain.md](boot-chain.md)).
 - PID 1 is a single point of authority. Compromising it grants every
   capability it still holds, including the console with Transfer, both ends of
   the terminal output stream, the lifecycle channel, the VFS, block,
-  configuration and terminal control endpoints, the system-control capability,
-  the driver's port, IRQ, and DMA authority, and a stop right over every running
-  job.
+  configuration, network and terminal control endpoints, the system-control
+  capability, both drivers' port, IRQ, and DMA authority, and a stop right over
+  every running job.
 - The kernel's warning echo, and the reports of the services that start before
   the terminal, still write the console directly and can land in a line being
   typed (ADR 0089).
