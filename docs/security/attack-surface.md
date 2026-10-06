@@ -82,6 +82,8 @@ table with type, generation, and rights checks.
 | 50 | `CPUInfo` | registered | length exactly 320; version and size fixed; `CopyOut` | immutable normalized CPUID and topology summary collected at boot | no |
 | 51 | `CPUEntry` | registered | index below the bounded present-CPU table; 32-byte `CopyOut` | immutable logical CPU, APIC, ACPI UID, state, and normalized topology IDs | no; past the table → `NotFound` |
 | 52 | `CPUCacheInfo` | registered | index below the bounded cache table; 48-byte `CopyOut` | immutable deterministic-cache geometry collected at boot | no; past the table → `NotFound` |
+| 53 | `CPURuntime` | registered | index below the present-CPU table; 80-byte `CopyOut` | one processor's online state, current task ID, tick, idle, switch, steal, migration, and interrupt counts; no addresses or scheduler state it can change | no; past the table → `NotFound` |
+| 54 | `TaskAffinity` | handle zero for the calling task; otherwise a process handle with Wait to read, Write to set | mask must name an online processor; kernel tasks stay on the housekeeping processor; optional 8-byte `CopyOut` | the processors a task may run on; a scheduling constraint, not authority | no |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording

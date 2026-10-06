@@ -44,7 +44,8 @@ an errno; nothing is accepted and ignored.
 | `access(21)`, `faccessat(269)` | implemented | answers from the mode `stat` reports |
 | `madvise(28)` | partial | `MADV_DONTNEED` on anonymous ranges |
 | `sched_yield(24)` | implemented | the return is a scheduling point: other runnable tasks on the processor run first |
-| `sched_getaffinity(204)` | implemented | the caller's own process or thread only: every online processor, an 8-byte mask; `ESRCH` for another ID, `EINVAL` for a buffer under 8 bytes or not a multiple of 8 |
+| `sched_setaffinity(203)` | implemented | TID 0, the caller's TID, or another thread of its thread group (ADR 0188); reads the first 64 bits and drops offline processors; `EINVAL` for a set under 8 bytes or a mask with no online processor, `EFAULT` for a bad pointer, `ESRCH` for another ID; threads and forked children inherit the mask |
+| `sched_getaffinity(204)` | implemented | the same targets: the thread's mask of online processors, 8 bytes; `ESRCH` for another ID, `EINVAL` for a buffer under 8 bytes or not a multiple of 8 |
 | `getcpu(309)` | implemented | the processor the caller runs on, and node 0 |
 | `dup(32)`, `dup2(33)`, `dup3(292)` | implemented | duplicates share position and status flags |
 | `pause(34)` | implemented | sleeps until a handled signal, then `EINTR` |

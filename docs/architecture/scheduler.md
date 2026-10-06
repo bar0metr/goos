@@ -9,7 +9,9 @@ kernel tasks use the kernel page-table root.
 slots with generation-safe IDs, a run queue and a current slot per
 processor, and the set of tasks on a processor. The amd64 layer calls it
 under the scheduler lock. Processors, placement, stealing, and the locks are
-described in [SMP](../kernel/smp.md) (ADR 0182).
+described in [SMP](../kernel/smp.md) (ADR 0182). Each task also has an
+affinity mask: it runs only on the online processors the mask allows, and
+the kernel's own tasks stay on the housekeeping processor (ADR 0188).
 
 ## x86_64 context switch
 
@@ -77,7 +79,8 @@ processor, to which the kernel tasks are pinned. Each step runs with
 interrupts disabled, takes the locks of the state it touches (ADR 0184), and
 ends by sleeping through vector 0x81; a wake that came during
 the step keeps it running. It is woken by every tick, which
-expires deadlines and retries retained lifecycle messages; by a user task exit
+expires the waits the deadline index reports due (ADR 0189) and retries
+retained lifecycle messages; by a user task exit
 or fault; and by a lifecycle request from PID 1. Slots 1 and 2, the boot-time
 scheduling demonstration, sleep permanently once the demonstration completes.
 Slot 3 is reserved and never runs; each processor's idle loop has its own

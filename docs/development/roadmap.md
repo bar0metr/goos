@@ -194,9 +194,11 @@ latency nearly independent of the tick rate. `make test-stress` passes 16 of 16
 guests at 100, 250, and 1000 Hz.
 
 The default rate remains 100 Hz because nothing now depends on a faster one.
-Remaining performance items are demand-zero stack and heap pages, TinyGo
-utility startup cost, and a deadline index so the housekeeping loop wakes only
-when a deadline is due.
+Stack, heap, BSS, and anonymous pages already arrive on first touch through
+the common region fault path (ADR 0104). A deadline index lets the
+housekeeping tick look only at the waits that are due (ADR 0189). Remaining
+performance items are TinyGo utility startup cost and waking housekeeping
+only when a deadline or lifecycle work is due.
 
 ## Priority 4 — Separate normal boot from validation boot
 
@@ -541,7 +543,9 @@ domains they touch (ADR 0184), so faults and the fast Linux calls of one
 program's threads run in the kernel at once. Each process's handle table,
 each Linux family, and each channel has a lock of its own (ADR 0187), so
 unrelated Linux programs make file and process calls at once. A family's
-threads still run their file calls one at a time.
+threads still run their file calls one at a time. A task can be limited to
+some processors through `TaskAffinity` or `sched_setaffinity`, and the `cpu`
+command shows each processor's load and scheduler counters (ADR 0188).
 
 ### Next: a Linux terminal
 
