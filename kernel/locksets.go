@@ -27,7 +27,6 @@ const (
 	lifecycleQueue
 	handleRead
 	handleWrite
-	channels
 	streams
 	sharedMemory
 	spaceRead
@@ -76,9 +75,6 @@ func (held *heldLocks) take(stop *uint64) bool {
 	}
 	if ok && set&(handleRead|handleWrite) != 0 && held.owner != nil {
 		ok = held.takeTables(stop)
-	}
-	if ok && set&channels != 0 {
-		ok = held.mark(channels, channelLock.LockUnless(stop))
 	}
 	if ok && set&streams != 0 {
 		ok = held.mark(streams, streamLock.LockUnless(stop))
@@ -165,9 +161,6 @@ func (held *heldLocks) drop() {
 	if taken&streams != 0 {
 		streamLock.Unlock()
 	}
-	if taken&channels != 0 {
-		channelLock.Unlock()
-	}
 	// The second table taken goes first.
 	own, peerFirst := (*lock.RW)(nil), false
 	if held.owner != nil {
@@ -220,15 +213,19 @@ func callerSpace() (*process.Process, *lock.RW) {
 // can drop the last reference to an object returns the object's charge to
 // whichever process paid for it, which takes the registry for reading.
 const (
-	callCopy     = spaceRead
-	callDevice   = handleRead | spaceRead
-	callMapping  = registryRead | handleRead | executableTable | sharedMemory | spaceWrite
-	callIPC      = registryRead | handleWrite | channels | streams | executableTable | sharedMemory | spaceRead
-	callStream   = registryRead | handleWrite | streams | spaceRead
-	callMemory   = registryRead | handleWrite | executableTable | sharedMemory | spaceRead
-	callExecFile = registryRead | handleWrite | channels | executableTable | sharedMemory | spaceRead
-	callInspect  = registryRead | handleRead | spaceRead
-	callEvery    = registryRead | lifecycleQueue | handleRead | channels | streams | executableTable | sharedMemory | spaceRead
+	callCopy    = spaceRead
+	callDevice  = handleRead | spaceRead
+	callMapping = registryRead | handleRead | executableTable | sharedMemory | spaceWrite
+	callIPC     = registryRead | handleWrite | streams | executableTable | sharedMemory | spaceRead
+	// A send takes the stream lock only for a message that moves a stream
+	// handle; it asks for it the way it asks for the peer's table.
+	callIPCSend    = registryRead | handleWrite | executableTable | sharedMemory | spaceRead
+	callIPCReceive = registryRead | handleRead | spaceRead
+	callStream     = registryRead | handleWrite | streams | spaceRead
+	callMemory     = registryRead | handleWrite | executableTable | sharedMemory | spaceRead
+	callExecFile   = registryRead | handleWrite | executableTable | sharedMemory | spaceRead
+	callInspect    = registryRead | handleRead | spaceRead
+	callEvery      = registryRead | lifecycleQueue | handleRead | streams | executableTable | sharedMemory | spaceRead
 )
 
 // nativeCallLocks is the set native operation takes.
@@ -250,8 +247,11 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		return spaceRead
 	case kcall.OperationVMMap, kcall.OperationVMUnmap, kcall.OperationVMProtect, kcall.OperationVMDiscard, kcall.OperationMemoryMap:
 		return callMapping
-	case kcall.OperationIPCSend, kcall.OperationIPCReceive, kcall.OperationIPCWaitReceive,
-		kcall.OperationChannelCreate, kcall.OperationHandleClose:
+	case kcall.OperationIPCSend:
+		return callIPCSend
+	case kcall.OperationIPCReceive, kcall.OperationIPCWaitReceive:
+		return callIPCReceive
+	case kcall.OperationChannelCreate, kcall.OperationHandleClose:
 		return callIPC
 	case kcall.OperationStreamCreate, kcall.OperationStreamRead, kcall.OperationStreamWrite, kcall.OperationStreamWait:
 		return callStream
@@ -262,9 +262,9 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 	case kcall.OperationSystemInfo, kcall.OperationHandleInfo, kcall.OperationProcessInfo, kcall.OperationProcessWait:
 		return callInspect
 	case kcall.OperationWaitAny:
-		return registryRead | handleRead | channels | streams | spaceRead
+		return registryRead | handleRead | streams | spaceRead
 	case kcall.OperationProcessKill:
-		return registryRead | handleRead | channels | streams | spaceRead
+		return registryRead | handleRead | streams | spaceRead
 	case kcall.OperationDiagnostics:
 		// The dump takes the locks of each part as it prints it.
 		return 0
@@ -282,10 +282,10 @@ const (
 	linuxMemory = registryRead | linuxState | sharedMemory | spaceWrite
 	// linuxProcess creates, replaces, ends, waits for, or signals processes
 	// and threads.
-	linuxProcess = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | executableTable | sharedMemory | spaceWrite
+	linuxProcess = registryWrite | linuxState | lifecycleQueue | handleWrite | streams | executableTable | sharedMemory | spaceWrite
 	// linuxFiles is every other call: descriptors, files through the VFS,
 	// pipes, polls, signal state, and identity.
-	linuxFiles = registryRead | linuxState | handleWrite | channels | streams | executableTable | sharedMemory | spaceRead
+	linuxFiles = registryRead | linuxState | handleWrite | streams | executableTable | sharedMemory | spaceRead
 )
 
 // linuxCallLocks is the set a Linux call takes.

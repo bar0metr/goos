@@ -46,9 +46,10 @@ const (
 	executableRetrySeconds   = 10
 )
 
-// executableFaults holds each task's outstanding page request. Requests and
-// replies travel on channels, so the channel lock guards the table, and
-// executableCorrelation with it.
+// executableFaults holds each task's outstanding page request. The paging
+// lock guards the table and executableCorrelation. A request is recorded
+// and sent under it, so the reply, which takes it too, always finds its
+// record.
 var (
 	executableFaults      [sched.MaxTasks]executableFault
 	executableCorrelation uint64
@@ -93,28 +94,22 @@ func takeExecutableWant(task sched.TaskID) (uint64, bool) {
 
 // executableStep supplies a page an executable object holds: an object in
 // memory fills it at once, a file-backed object through a request to the
-// VFS that parks the task until the reply. It takes the channel lock, the
-// address space for reading, and the executable lock, and gives up when the
-// task is being stopped. The caller holds no lock.
+// VFS that parks the task until the reply. It takes the address space for
+// reading and the executable lock, and gives up when the task is being
+// stopped. The caller holds no lock.
 func executableStep(owner *process.Process, page uint64, write bool, fetch bool) pageResult {
 	stop := amd64.StopWord()
 	space := owner.Space()
-	if !channelLock.LockUnless(stop) {
-		return pageRetry
-	}
 	if !space.RLockUnless(stop) {
-		channelLock.Unlock()
 		return pageRetry
 	}
 	if !executableLock.LockUnless(stop) {
 		space.RUnlock()
-		channelLock.Unlock()
 		return pageRetry
 	}
 	result := executableStepLocked(owner, page, write, fetch)
 	executableLock.Unlock()
 	space.RUnlock()
-	channelLock.Unlock()
 	return result
 }
 
@@ -154,12 +149,16 @@ func executableStepLocked(owner *process.Process, page uint64, write bool, fetch
 		}
 		return pageFailed
 	}
-	return requestExecutablePage(owner, entry, page)
+	pagingLock.Lock()
+	result := requestExecutablePage(owner, entry, page)
+	pagingLock.Unlock()
+	return result
 }
 
 // requestExecutablePage maps the page a reply delivered, or queues one
 // bounded read and parks the faulting task. A task has one request out at a
-// time; an access that runs again before the reply parks again.
+// time; an access that runs again before the reply parks again. The paging
+// lock is held.
 func requestExecutablePage(owner *process.Process, entry region.Region, page uint64) pageResult {
 	task := amd64.CurrentTask()
 	slot, _, valid := task.Parts()
@@ -232,29 +231,29 @@ func clearExecutableFault(fault *executableFault) {
 	*fault = executableFault{}
 }
 
-// cancelExecutableFault forgets the request of a task that has exited. The
-// channel lock is held.
+// cancelExecutableFault forgets the request of a task that has exited.
 func cancelExecutableFault(task sched.TaskID) {
 	slot, _, valid := task.Parts()
 	if !valid || int(slot) >= len(executableFaults) {
 		return
 	}
+	pagingLock.Lock()
 	if executableFaults[slot].task == task {
 		clearExecutableFault(&executableFaults[slot])
 	}
+	pagingLock.Unlock()
 	executableWanted[slot].Store(0)
 }
 
 // sendExecutableRequest asks the VFS for the page fault describes, under a
-// fresh correlation. The channel and executable locks are held.
+// fresh correlation. The executable and paging locks are held.
 func sendExecutableRequest(fault *executableFault) bool {
 	object, found := executables.Find(fault.object)
 	if !found {
 		return false
 	}
 	channelID, side, file, source := object.Source()
-	channel, live := channelRegistry.Lookup(channelID)
-	if !source || !live {
+	if !source {
 		return false
 	}
 	executableCorrelation++
@@ -267,7 +266,7 @@ func sendExecutableRequest(fault *executableFault) bool {
 		Offset:    fault.offset,
 		Size:      uint32(fault.count),
 	}, executableCorrelation)
-	if !encoded || channel.Send(side, message, nil, nil, nil) != ipc.StatusOK {
+	if !encoded || channelSend(channelID, side, &message, nil, nil, nil) != ipc.StatusOK {
 		return false
 	}
 	fault.channelID, fault.side, fault.correlation, fault.retryAt = channelID, side, executableCorrelation, 0
@@ -277,7 +276,7 @@ func sendExecutableRequest(fault *executableFault) bool {
 
 // retryExecutablePages sends again each page request whose filesystem was
 // away, once its retry tick has come. A request that cannot be sent fails.
-// Housekeeping calls it holding the channel and executable locks.
+// Housekeeping calls it holding the executable and paging locks.
 func retryExecutablePages() {
 	now := amd64.TimerTicks()
 	for index := range executableFaults {
@@ -298,9 +297,16 @@ func retryExecutablePages() {
 // several tasks can wait on one endpoint; the reply goes to the task whose
 // request it answers, found by correlation. The page's bytes are copied out
 // of the file cache at once, since the next reply reuses it; the task maps
-// the copy when its access runs again. The caller holds the channel and
-// shared-memory locks.
+// the copy when its access runs again. The caller holds the shared-memory
+// lock.
 func completeExecutablePage(channelID uint64, side uint8) bool {
+	pagingLock.Lock()
+	completed := completeExecutablePageLocked(channelID, side)
+	pagingLock.Unlock()
+	return completed
+}
+
+func completeExecutablePageLocked(channelID uint64, side uint8) bool {
 	local := thisCPU()
 	waiting := false
 	for index := range executableFaults {
@@ -313,8 +319,8 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 	if !waiting {
 		return false
 	}
-	channel, live := channelRegistry.Lookup(channelID)
-	if !live {
+	status := channelReceive(channelID, side, &local.executableReply)
+	if status == ipc.StatusPeerDied {
 		// The source's service is gone: every request on it fails.
 		for index := range executableFaults {
 			fault := &executableFaults[index]
@@ -325,8 +331,6 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 		}
 		return false
 	}
-	var status ipc.Status
-	local.executableReply, status = channel.Receive(side)
 	if status != ipc.StatusOK {
 		return false
 	}

@@ -13,7 +13,6 @@ import (
 	"goos/kernel/arch/amd64"
 	"goos/kernel/executable"
 	"goos/kernel/handle"
-	"goos/kernel/ipc"
 	"goos/kernel/lock"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -26,8 +25,10 @@ var (
 	// it. Each process's handle table has a lock of its own (ADR 0187).
 	registryLock lock.RW
 
-	lifecycleLock  = lock.New(lock.LevelLifecycle)
-	channelLock    = lock.New(lock.LevelChannel)
+	lifecycleLock = lock.New(lock.LevelLifecycle)
+	// pagingLock guards the executable page requests out to file services
+	// and the correlations they carry.
+	pagingLock     = lock.New(lock.LevelPaging)
 	streamLock     = lock.New(lock.LevelStream)
 	executableLock = lock.New(lock.LevelExecutable)
 	shmemLock      = lock.New(lock.LevelShmem)
@@ -75,7 +76,6 @@ func takeConsoleInput(input uint64) uint64 {
 func installLockGuards() {
 	process.Guard(&registryLock)
 	processRegistry.GuardSpaces()
-	ipc.Guard(channelLock)
 	stream.Guard(streamLock)
 	executable.Guard(executableLock)
 	shmem.Guard(shmemLock)

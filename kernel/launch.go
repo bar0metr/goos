@@ -61,8 +61,16 @@ func flushLifecycle() {
 	}
 }
 
+// sendLifecycle queues message to PID 1. The kernel keeps side zero of the
+// lifecycle channel open, so the channel never goes away under it.
 func sendLifecycle(message ipc.Message) bool {
-	if lifecycleChannel == nil || lifecycleChannel.Send(0, message, nil, nil, nil) != ipc.StatusOK {
+	if lifecycleChannel == nil {
+		return false
+	}
+	lifecycleChannel.Lock()
+	status := lifecycleChannel.SendFrom(0, &message, nil, nil, nil)
+	lifecycleChannel.Unlock()
+	if status != ipc.StatusOK {
 		return false
 	}
 	wakeIPCWaiters(lifecycleChannelID, 1, ipc.WaitMessage)
@@ -73,7 +81,7 @@ func sendLifecycle(message ipc.Message) bool {
 // needs no lock: no other processor can reach it until it is registered. A
 // Linux launch starts a family nothing else can reach yet, so it needs no
 // family lock either.
-const launchLocks = registryWrite | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+const launchLocks = registryWrite | lifecycleQueue | handleWrite | streams | sharedMemory
 
 // consumeInitControl serves one request PID 1 sent on the lifecycle channel.
 func consumeInitControl() {
@@ -88,7 +96,10 @@ func consumeInitControlLocked() {
 	if lifecycleChannel == nil || pendingLifecycleCount != 0 {
 		return
 	}
-	message, status := lifecycleChannel.Receive(0)
+	var message ipc.Message
+	lifecycleChannel.Lock()
+	status := lifecycleChannel.ReceiveInto(0, &message)
+	lifecycleChannel.Unlock()
 	if status != ipc.StatusOK {
 		return
 	}

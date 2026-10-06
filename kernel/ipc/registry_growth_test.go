@@ -28,16 +28,14 @@ func TestRegistryTakesMemoryAsItGrows(t *testing.T) {
 		t.Fatal("a channel past MaxChannels was created")
 	}
 	for index, id := range ids {
-		channel, found := registry.Lookup(id)
-		if !found {
+		if !registry.Live(id) {
 			t.Fatalf("channel %d not found", index)
 		}
-		channel.Close(0)
-		channel.Close(1)
-		if owner, released := registry.Release(id); !released || owner != uint64(index+1) {
+		registry.Close(id, 0)
+		if _, owner, released := registry.Close(id, 1); !released || owner != uint64(index+1) {
 			t.Fatalf("release %d: owner %d, %v", index, owner, released)
 		}
-		if _, found := registry.Lookup(id); found {
+		if registry.Live(id) {
 			t.Fatalf("released channel %d still found", index)
 		}
 	}
@@ -54,14 +52,14 @@ func TestRegistryTakesMemoryAsItGrows(t *testing.T) {
 		}
 	}
 	// A stale ID that lands on a live slot finds nothing.
-	if _, found := registry.Lookup(ids[0]); found {
+	if registry.Live(ids[0]) {
 		t.Fatal("a stale ID found the slot's new channel")
 	}
 	storage.Limit = storage.Live
 	if _, _, ok := registry.Create(2); ok {
 		t.Fatal("a create succeeded without memory")
 	}
-	if _, found := registry.Lookup(0); found {
+	if registry.Live(0) {
 		t.Fatal("ID zero found a channel")
 	}
 }

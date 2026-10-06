@@ -28,18 +28,15 @@ const (
 	// LevelRegistry is the process registry, the fields of every process
 	// but its handles and address space, and the task-to-process map.
 	LevelRegistry Level = iota + 1
-	// LevelLinux is the Linux personality's state: process states with their
-	// descriptors and signals, process records, threads, open descriptions,
-	// directories, VFS sessions, and exec staging.
+	// LevelLinux is one bucket of Linux families: the descriptors, signals,
+	// threads, and exec staging of the processes that share a thread group or
+	// descriptor table.
 	LevelLinux
 	// LevelLifecycle is the queue of lifecycle messages for PID 1.
 	LevelLifecycle
-	// LevelHandle is every process's handle table. IPC moves handles from
-	// one table to another, so one lock covers them all.
+	// LevelHandle is one process's handle table, ranked by process ID. A
+	// call that moves handles holds two, the lower rank first.
 	LevelHandle
-	// LevelChannel is the channel registry, every channel, and the
-	// executable page requests that travel on channels.
-	LevelChannel
 	// LevelStream is the stream registry and every stream.
 	LevelStream
 	// LevelShmem is the shared memory objects and the image page cache.
@@ -50,6 +47,15 @@ const (
 	// LevelExecutable is the executable table. A fault inside a copy reads
 	// an image page from it with the address space held.
 	LevelExecutable
+	// LevelPaging is the table of executable page requests out to file
+	// services. A request is sent and recorded under it.
+	LevelPaging
+	// LevelChannelSlots is the channel registry's slots, held only to find,
+	// add, or remove a channel.
+	LevelChannelSlots
+	// LevelChannel is one channel: its queues and endpoint state. Nothing
+	// holds two.
+	LevelChannel
 	// LevelFutex is one futex bucket.
 	LevelFutex
 	// LevelWait is the wait tables, each with a lock of its own: channel and
@@ -83,8 +89,8 @@ const (
 const Levels = int(levelCount)
 
 var levelNames = [levelCount]string{
-	"none", "registry", "linux", "lifecycle", "handle", "channel",
-	"stream", "shmem", "address-space", "executable", "futex", "wait", "linux-tables", "handle-index", "log",
+	"none", "registry", "linux", "lifecycle", "handle",
+	"stream", "shmem", "address-space", "executable", "paging", "channel-slots", "channel", "futex", "wait", "linux-tables", "handle-index", "log",
 	"memory", "random", "scheduler", "console",
 }
 

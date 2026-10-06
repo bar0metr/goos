@@ -190,8 +190,8 @@ func (handler nativeCallHandler) Diagnostics(device uint64, address uint64) kcal
 // locks of its own domains, and other calls run between them. A dump of a
 // busy machine is therefore not one instant's state.
 const (
-	processDumpLocks = handleRead | channels | streams
-	channelDumpLocks = registryRead | channels
+	processDumpLocks = handleRead | streams
+	channelDumpLocks = registryRead
 )
 
 type diagWriter struct{ console kernelconsole.Writer }
@@ -433,9 +433,11 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 			channelID, side, valid := ipc.DecodeEndpointObject(authority.Object())
 			out.hex("channel", channelID)
 			out.uint("side", uint64(side))
-			if channel, exists := channelRegistry.Lookup(channelID); valid && exists {
-				out.uint("peer-alive", boolValue(channel.Alive(side^1)))
-				out.uint("queued", uint64(channel.Queued(side)))
+			if channel, exists := channelRegistry.Acquire(channelID); valid && exists {
+				peerAlive, queued := channel.Alive(side^1), channel.Queued(side)
+				channel.Unlock()
+				out.uint("peer-alive", boolValue(peerAlive))
+				out.uint("queued", uint64(queued))
 			} else {
 				out.word("channel-state", "released")
 			}
@@ -456,20 +458,24 @@ func dumpProcess(out diagWriter, owner *process.Process, state amd64.SchedulerSt
 }
 
 // dumpChannel prints the channel in slot index, if one is there. The
-// registry, handle, and channel locks are held.
+// registry is held; the channel's lock is held only to read its state.
 func dumpChannel(out diagWriter, index int) {
-	id, channel, found := channelRegistry.At(index)
+	id, channel, found := channelRegistry.AcquireAt(index)
 	if !found {
 		return
 	}
+	alive0, alive1 := channel.Alive(0), channel.Alive(1)
+	queued0, queued1 := channel.Queued(0), channel.Queued(1)
+	pending0, pending1 := channel.Pending(0), channel.Pending(1)
+	channel.Unlock()
 	out.text("DIAG channel")
 	out.hex("id", id)
-	out.uint("alive0", boolValue(channel.Alive(0)))
-	out.uint("alive1", boolValue(channel.Alive(1)))
-	out.uint("queued0", uint64(channel.Queued(0)))
-	out.uint("queued1", uint64(channel.Queued(1)))
-	out.uint("pending0", uint64(channel.Pending(0)))
-	out.uint("pending1", uint64(channel.Pending(1)))
+	out.uint("alive0", boolValue(alive0))
+	out.uint("alive1", boolValue(alive1))
+	out.uint("queued0", uint64(queued0))
+	out.uint("queued1", uint64(queued1))
+	out.uint("pending0", uint64(pending0))
+	out.uint("pending1", uint64(pending1))
 	for side := uint8(0); side <= 1; side++ {
 		object, _ := ipc.EndpointObject(id, side)
 		holder, held := processRegistry.EndpointHolder(object)

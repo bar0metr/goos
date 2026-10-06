@@ -33,12 +33,52 @@ func bootChannel() (*ipc.Channel, uint64, bool) {
 	return channel, id, created
 }
 
-// releaseChannelSlot frees a released channel's slot and returns the quota
-// charge to whichever process created it, which has often already exited.
-func releaseChannelSlot(channelID uint64) {
-	if owner, released := channelRegistry.Release(channelID); released && owner != 0 {
+// closeChannelSide closes one side of a channel and reports whether this
+// call closed it. Closing the second side frees the channel, and the quota
+// charge goes back to whichever process created it, which has often already
+// exited.
+func closeChannelSide(channelID uint64, side uint8) bool {
+	closed, owner, released := channelRegistry.Close(channelID, side)
+	if released && owner != 0 {
 		processRegistry.ReleaseProcess(process.ID(owner), process.ResourceChannels, 1)
 	}
+	return closed
+}
+
+// channelSend queues message on a channel under the channel's lock. A
+// channel that is gone reports its peer dead.
+func channelSend(channelID uint64, side uint8, message *ipc.Message, source *handle.Table, target *handle.Table, transfers []ipc.Transfer) ipc.Status {
+	channel, live := channelRegistry.Acquire(channelID)
+	if !live {
+		return ipc.StatusPeerDied
+	}
+	status := channel.SendFrom(side, message, source, target, transfers)
+	channel.Unlock()
+	return status
+}
+
+// channelReceive takes the next message from a channel into out under the
+// channel's lock. A channel that is gone reports its peer dead.
+func channelReceive(channelID uint64, side uint8, out *ipc.Message) ipc.Status {
+	channel, live := channelRegistry.Acquire(channelID)
+	if !live {
+		*out = ipc.Message{}
+		return ipc.StatusPeerDied
+	}
+	status := channel.ReceiveInto(side, out)
+	channel.Unlock()
+	return status
+}
+
+// channelSideOpen reports whether side of the channel is open.
+func channelSideOpen(channelID uint64, side uint8) bool {
+	channel, live := channelRegistry.Acquire(channelID)
+	if !live {
+		return false
+	}
+	open := channel.Alive(side)
+	channel.Unlock()
+	return open
 }
 
 func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kcall.Status {
@@ -50,7 +90,7 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 	if !owner.Charge(process.ResourceChannels, 1) {
 		return kcall.StatusResourceExhausted
 	}
-	channel, id, ok := channelRegistry.Create(uint64(owner.ID()))
+	_, id, ok := channelRegistry.Create(uint64(owner.ID()))
 	if !ok {
 		owner.Release(process.ResourceChannels, 1)
 		return kcall.StatusResourceExhausted
@@ -67,9 +107,8 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		if ok1 {
 			owner.Handles().Close(handle1)
 		}
-		channel.Close(0)
-		channel.Close(1)
-		releaseChannelSlot(id)
+		closeChannelSide(id, 0)
+		closeChannelSide(id, 1)
 		return kcall.StatusResourceExhausted
 	}
 	putUint64(local.channelWire[0:8], uint64(handle0))
@@ -77,9 +116,8 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 	if !vm.CopyOut(handler.root, address, local.channelWire[:]) {
 		owner.Handles().Close(handle0)
 		owner.Handles().Close(handle1)
-		channel.Close(0)
-		channel.Close(1)
-		releaseChannelSlot(id)
+		closeChannelSide(id, 0)
+		closeChannelSide(id, 1)
 		return kcall.StatusInvalidArgument
 	}
 	trace(diag.ChannelCreated, owner.ID(), 0, id, uint64(handle1))
@@ -97,13 +135,11 @@ func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
 	}
 	if typeID == handle.TypeChannel {
 		channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-		channel, exists := channelRegistry.Lookup(channelID)
-		if !valid || !exists || !channel.Close(side) {
+		if !valid || !closeChannelSide(channelID, side) {
 			return kcall.StatusNotFound
 		}
 		trace(diag.ChannelClosed, owner.ID(), id, channelID|uint64(side)<<63, diag.CloseByHandle)
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-		releaseChannelSlot(channelID)
 	} else if typeID == handle.TypeStream {
 		// Closing a stream handle forgets its reference; the end itself closes
 		// only with its last handle (ADR 0089).
@@ -142,28 +178,31 @@ func closeMovedHandle(table *handle.Table, id handle.ID) {
 	table.Close(id)
 }
 
-func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (*ipc.Channel, uint8, *process.Process, *process.Process, kcall.Status) {
+// endpoint resolves a channel handle of the calling process to the channel's
+// ID and side, the caller, and the process holding the other side. The call
+// takes the channel's lock itself when it touches the channel; a channel
+// closed in between is not found then.
+func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (uint64, uint8, *process.Process, *process.Process, kcall.Status) {
 	owner, found := handler.self()
 	if !found {
-		return nil, 0, nil, nil, kcall.StatusPermissionDenied
+		return 0, 0, nil, nil, kcall.StatusPermissionDenied
 	}
 	cap, ok := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, required)
 	if !ok {
-		return nil, 0, nil, nil, kcall.StatusPermissionDenied
+		return 0, 0, nil, nil, kcall.StatusPermissionDenied
 	}
 	channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-	endpoint, ok := channelRegistry.Lookup(channelID)
-	if !valid || !ok {
-		return nil, 0, nil, nil, kcall.StatusNotFound
+	if !valid {
+		return 0, 0, nil, nil, kcall.StatusNotFound
 	}
 	peerObject, _ := ipc.EndpointObject(channelID, side^1)
 	peer, _ := processRegistry.EndpointHolder(peerObject)
-	return endpoint, side, owner, peer, kcall.StatusOK
+	return channelID, side, owner, peer, kcall.StatusOK
 }
 
 func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	endpoint, side, owner, peer, status := handler.endpoint(channel, capability.Write)
+	channelID, side, owner, peer, status := handler.endpoint(channel, capability.Write)
 	if status != kcall.StatusOK {
 		handler.recordInitSend(status)
 		return status
@@ -192,9 +231,7 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	if transferCount != 0 && peerHandles == nil {
 		return kcall.StatusPeerDied
 	}
-	if transferCount != 0 && !wantPeerTable(peer) {
-		return kcall.StatusOK
-	}
+	movesStream := false
 	for index := 0; index < transferCount; index++ {
 		typeID, attached, found := owner.Handles().Describe(message.Handles[index])
 		if !found || !attached.Allows(capability.Transfer) {
@@ -204,14 +241,20 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		if rights == 0 {
 			return kcall.StatusPermissionDenied
 		}
+		movesStream = movesStream || typeID == handle.TypeStream
+		transfers[index] = ipc.Transfer{Handle: message.Handles[index], Type: typeID, Rights: rights}
+		transferObjects[index] = attached.Object()
+	}
+	if transferCount != 0 && !wantTransferLocks(peer, movesStream) {
+		return kcall.StatusOK
+	}
+	for index := 0; index < transferCount; index++ {
 		// The receiver's copy of a stream endpoint is counted after the send,
 		// so the end must have room for it now: a send that cannot be
 		// accounted is refused before anything moves.
-		if typeID == handle.TypeStream && !streamRegistry.CanRetain(attached.Object(), ipc.MaxAttachedHandles) {
+		if transfers[index].Type == handle.TypeStream && !streamRegistry.CanRetain(transferObjects[index], ipc.MaxAttachedHandles) {
 			return kcall.StatusResourceExhausted
 		}
-		transfers[index] = ipc.Transfer{Handle: message.Handles[index], Type: typeID, Rights: rights}
-		transferObjects[index] = attached.Object()
 	}
 	message.HandleCount = 0
 	for index := range message.Handles {
@@ -221,14 +264,18 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		// Only a message that moves handles reaches the peer's table.
 		peerHandles = nil
 	}
-	status = endpoint.Send(side, message, owner.Handles(), peerHandles, transfers[:transferCount])
+	endpoint, live := channelRegistry.Acquire(channelID)
+	if !live {
+		handler.recordInitSend(kcall.StatusNotFound)
+		return kcall.StatusNotFound
+	}
+	status = endpoint.SendFrom(side, &message, owner.Handles(), peerHandles, transfers[:transferCount])
+	endpoint.Unlock()
 	if status == ipc.StatusOK {
-		channelCapability, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Write)
-		if found {
-			channelID, _, _ := ipc.DecodeEndpointObject(channelCapability.Object())
-			if !completeExecutablePage(channelID, side^1) {
-				wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
-			}
+		// A receiver that registered before the send is woken now; one that
+		// registers after it finds the message when it looks again.
+		if !completeExecutablePage(channelID, side^1) {
+			wakeIPCWaiters(channelID, side^1, ipc.WaitMessage)
 		}
 		for index := 0; index < transferCount; index++ {
 			if diag.Enabled && peer != nil {
@@ -238,7 +285,7 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 			// sender's handle goes, so a stream end never closes in between,
 			// and a handle attached twice is two copies and one close. The
 			// check above guarantees the count has room.
-			if !streamRegistry.Placed(transfers[index].Type, transferObjects[index]) {
+			if transfers[index].Type == handle.TypeStream && !streamRegistry.Placed(transfers[index].Type, transferObjects[index]) {
 				panicSerial("stream transfer count refused after check")
 			}
 			closeMovedHandle(owner.Handles(), transfers[index].Handle)
@@ -248,15 +295,17 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 	return status
 }
 
-// wantPeerTable reports whether the native call holds peer's handle table.
-// When it does not, it asks for it: the call has changed nothing yet, and the
-// dispatcher runs it again holding the table.
-func wantPeerTable(peer *process.Process) bool {
+// wantTransferLocks reports whether the native call holds peer's handle
+// table, and the stream lock when withStreams is set. When it does not, it
+// asks for them: the call has changed nothing yet, and the dispatcher runs it
+// again holding them.
+func wantTransferLocks(peer *process.Process, withStreams bool) bool {
 	local := thisCPU()
-	if local.nativeCall.held.holdsPeer(peer) {
+	held := &local.nativeCall.held
+	if held.holdsPeer(peer) && (!withStreams || held.taken&streams != 0) {
 		return true
 	}
-	local.peerWanted = peer.ID()
+	local.peerWanted, local.streamsWanted = peer.ID(), withStreams
 	return false
 }
 
@@ -292,18 +341,16 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	if timeout == 0 {
 		return kcall.StatusTimeout, false
 	}
-	endpoint, side, owner, _, endpointStatus := handler.endpoint(channel, capability.Read|capability.Wait)
-	if endpointStatus != kcall.StatusOK || endpoint == nil {
+	channelID, side, _, _, endpointStatus := handler.endpoint(channel, capability.Read|capability.Wait)
+	if endpointStatus != kcall.StatusOK {
 		return endpointStatus, false
 	}
-	cap, found := owner.Handles().Lookup(handle.ID(channel), handle.TypeChannel, capability.Read|capability.Wait)
-	if !found {
-		return kcall.StatusPermissionDenied, false
+	if !channelRegistry.Live(channelID) {
+		return kcall.StatusNotFound, false
 	}
 	now := amd64.TimerTicks()
 	deadline := now + timeout
-	channelID, _, valid := ipc.DecodeEndpointObject(cap.Object())
-	if !valid || deadline < now || !ipcWaitSet.Add(taskID, channelID, side, deadline) {
+	if deadline < now || !ipcWaitSet.Add(taskID, channelID, side, deadline) {
 		return kcall.StatusResourceExhausted, false
 	}
 	// Re-check after registering, because a message sent between the receive
@@ -320,14 +367,20 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 
 func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capacity uint64) kcall.Status {
 	local := thisCPU()
-	endpoint, side, _, _, status := handler.endpoint(channel, capability.Read)
+	channelID, side, _, _, status := handler.endpoint(channel, capability.Read)
 	if status != kcall.StatusOK {
 		return status
 	}
 	if capacity < ipc.WireMaxSize {
 		return kcall.StatusInvalidArgument
 	}
-	message, status := endpoint.Receive(side)
+	endpoint, live := channelRegistry.Acquire(channelID)
+	if !live {
+		return kcall.StatusNotFound
+	}
+	var message ipc.Message
+	status = endpoint.ReceiveInto(side, &message)
+	endpoint.Unlock()
 	if status != ipc.StatusOK {
 		return status
 	}
@@ -399,7 +452,7 @@ func expireIPCWaiters() {
 
 //export goos_dispatch_ipc_wait
 func dispatchIPCWait(channel uint64, descriptor uint64, size uint64, rootAndTask uint64) uint64 {
-	call, ok := beginNativeCall(kcall.OperationIPCWaitReceive, 0)
+	call, ok := beginNativeCall(kcall.OperationIPCWaitReceive, 0, 0)
 	if !ok {
 		return uint64(kcall.ActionRetry) << 32
 	}

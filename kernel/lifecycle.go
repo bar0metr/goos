@@ -43,7 +43,7 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 
 // exitLocks is the set an exit takes; the handle table and address space
 // are those of the task's process.
-const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory | spaceWrite | executableTable
+const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | streams | sharedMemory | spaceWrite | executableTable
 
 // deliverProcessExits runs, on the housekeeping task, the teardown of every
 // task whose exit the scheduler has published, one task at a time. The
@@ -249,11 +249,9 @@ func releaseProcessHandle(typeID handle.Type, cap capability.Capability) {
 		return
 	}
 	channelID, side, valid := ipc.DecodeEndpointObject(cap.Object())
-	channel, exists := channelRegistry.Lookup(channelID)
-	if valid && exists && channel.Close(side) {
+	if valid && closeChannelSide(channelID, side) {
 		trace(diag.ChannelClosed, releasingProcess, 0, channelID|uint64(side)<<63, diag.CloseByTeardown)
 		wakeIPCWaiters(channelID, side^1, ipc.WaitPeerDied)
-		releaseChannelSlot(channelID)
 	}
 }
 

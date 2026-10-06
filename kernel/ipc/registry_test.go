@@ -8,9 +8,10 @@ func TestRegistryCreatesUniqueBoundedChannels(t *testing.T) {
 	if !ok || first == nil || firstID&channelNamespace == 0 {
 		t.Fatal("first channel was not created")
 	}
-	if found, ok := registry.Lookup(firstID); !ok || found != first {
+	if found, ok := registry.Acquire(firstID); !ok || found != first {
 		t.Fatal("created channel cannot be resolved")
 	}
+	first.Unlock()
 	for index := 1; index < MaxChannels; index++ {
 		_, id, created := registry.Create(7)
 		if !created || id == firstID {
@@ -20,7 +21,7 @@ func TestRegistryCreatesUniqueBoundedChannels(t *testing.T) {
 	if channel, id, created := registry.Create(7); created || channel != nil || id != 0 {
 		t.Fatal("registry exceeded its bound")
 	}
-	if _, ok := registry.Lookup(channelNamespace | 0xffff); ok {
+	if registry.Live(channelNamespace | 0xffff) {
 		t.Fatal("unknown channel resolved")
 	}
 }
@@ -54,17 +55,20 @@ func TestRegistryReusesReleasedChannelSlot(t *testing.T) {
 	if !ok {
 		t.Fatal("channel was not created")
 	}
-	if _, released := registry.Release(id); released {
-		t.Fatal("live channel was released")
+	if closed, _, released := registry.Close(id, 0); !closed || released {
+		t.Fatalf("first side closed = %v, released = %v", closed, released)
 	}
-	if !channel.Close(0) || !channel.Close(1) {
-		t.Fatal("endpoints were not closed")
+	if !registry.Live(id) || channel.Alive(0) || !channel.Alive(1) {
+		t.Fatal("channel with one side open is not live")
 	}
-	owner, released := registry.Release(id)
-	if !released || owner != 7 {
+	if closed, _, _ := registry.Close(id, 0); closed {
+		t.Fatal("a side closed twice")
+	}
+	closed, owner, released := registry.Close(id, 1)
+	if !closed || !released || owner != 7 {
 		t.Fatalf("closed channel released = %v, charged to %d", released, owner)
 	}
-	if _, found := registry.Lookup(id); found {
+	if registry.Live(id) {
 		t.Fatal("released channel still resolves")
 	}
 	reused, reusedID, created := registry.Create(7)
@@ -80,14 +84,15 @@ func TestRegistryAtAndQueueState(t *testing.T) {
 	if channel.Send(0, message, nil, nil, nil) != StatusOK {
 		t.Fatal("request was not queued")
 	}
-	found, at, ok := registry.At(0)
+	found, at, ok := registry.AcquireAt(0)
 	if !ok || found != id || at != channel {
 		t.Fatal("live channel not reported")
 	}
+	at.Unlock()
 	if channel.Queued(1) != 1 || channel.Queued(0) != 0 || channel.Pending(0) != 1 || channel.Pending(1) != 0 {
 		t.Fatalf("queued %d/%d pending %d/%d", channel.Queued(0), channel.Queued(1), channel.Pending(0), channel.Pending(1))
 	}
-	if _, _, ok := registry.At(1); ok {
+	if _, _, ok := registry.AcquireAt(1); ok {
 		t.Fatal("empty slot reported")
 	}
 }

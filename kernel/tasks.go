@@ -275,10 +275,10 @@ func resumeLinuxSyscall(task sched.TaskID, correlation uint64, reason linuxcompa
 func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) uint64 {
 	local := thisCPU()
 	arg2 := amd64.KernelCallArg2()
-	peer := process.ID(0)
+	peer, extra := process.ID(0), lockSet(0)
 	local.callKind, local.callNumber = 'n', number
 	for attempt := 0; ; attempt++ {
-		call, ok := beginNativeCall(kcall.Operation(number), peer)
+		call, ok := beginNativeCall(kcall.Operation(number), peer, extra)
 		if !ok {
 			return uint64(kcall.ActionRetry) << 32
 		}
@@ -286,7 +286,7 @@ func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) ui
 		// interface would be boxed, and the kernel leaks every heap
 		// allocation.
 		local.dispatchHandler.root = root
-		local.peerWanted = 0
+		local.peerWanted, local.streamsWanted = 0, false
 		result := kcall.Dispatch(kcall.Request{Operation: kcall.Operation(number), Arg0: arg0, Arg1: arg1, Arg2: arg2}, &local.dispatchHandler)
 		if local.peerWanted == 0 {
 			return call.end(uint64(result.Action)<<32 | uint64(result.Status))
@@ -296,6 +296,9 @@ func dispatchKernelCall(number uint64, arg0 uint64, arg1 uint64, root uint64) ui
 		// holding both tables; a peer that keeps changing has it run again
 		// after a scheduling point.
 		peer = local.peerWanted
+		if local.streamsWanted {
+			extra = streams
+		}
 		call.end(0)
 		if attempt == 1 {
 			return uint64(kcall.ActionRetry) << 32
@@ -308,14 +311,14 @@ type nativeCall struct {
 	held heldLocks
 }
 
-// beginNativeCall takes the set of operation for the calling task, with the
-// handle table of peer when peer is not zero. It returns false, holding
-// nothing, when the task is being stopped.
-func beginNativeCall(operation kcall.Operation, peer process.ID) (*nativeCall, bool) {
+// beginNativeCall takes the set of operation, plus extra, for the calling
+// task, with the handle table of peer when peer is not zero. It returns
+// false, holding nothing, when the task is being stopped.
+func beginNativeCall(operation kcall.Operation, peer process.ID, extra lockSet) (*nativeCall, bool) {
 	local := thisCPU()
 	call := &local.nativeCall
 	owner, _ := callerSpace()
-	call.held = heldLocks{set: nativeCallLocks(operation), owner: owner, peerID: peer}
+	call.held = heldLocks{set: nativeCallLocks(operation) | extra, owner: owner, peerID: peer}
 	return call, call.held.take(amd64.StopWord())
 }
 

@@ -130,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -375,6 +375,11 @@ test-unit:
 	$(BUILD_ENV) go test -tags goos_diag ./kernel/diag
 	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
 	$(BUILD_ENV) go test -tags goos_validation ./kernel/lock
+
+# The concurrency tests under the race detector (ADR 0187): handle tables,
+# channels, and the Linux tables shared the way processors share them.
+test-race:
+	$(BUILD_ENV) go test -race -run 'Race|Ways|Busy|Holder|TwoProcesses|ConcurrentFileIO' ./kernel/handle ./kernel/ipc ./kernel/compat/linux
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
@@ -819,6 +824,7 @@ help:
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
 	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
 	  '  profile-locks [LINUX_EXTRA=path]  lock acquisitions and contention per workload on SMP=4' \
+	  '  test-race       handle, channel, and Linux table concurrency tests under the race detector' \
 	  '  test-linux-bench time Linux calls beside native ones into build/reports' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \

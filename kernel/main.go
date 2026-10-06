@@ -730,7 +730,7 @@ func serviceKernel() {
 	}
 	stirRandom()
 	expireWaitDeadlines()
-	held := takeLocks(lifecycleQueue|channels, nil)
+	held := takeLocks(lifecycleQueue, nil)
 	flushLifecycle()
 	held.drop()
 	deliverProcessExits()
