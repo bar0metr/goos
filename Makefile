@@ -673,6 +673,7 @@ docs:
 	@test -f docs/architecture/boot.md
 	@test -f docs/architecture/filesystem.md
 	@test -f docs/architecture/linux-compat.md
+	@test -f docs/architecture/networking.md
 	@test -f docs/development/debugging.md
 	@test -f docs/development/coding-style.md
 	@test -f docs/development/adding-service.md

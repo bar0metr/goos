@@ -1,6 +1,9 @@
 # GoOS networking specification: native IPv4 and ICMP
 
-Status: proposed implementation specification. This document does not change an accepted ADR.
+Status: implemented by [ADR 0190](../adr/0190-network-device-authority.md) and
+[ADR 0191](../adr/0191-network-service.md). This document records the
+requirements the implementation was built from; the ADRs and
+[networking.md](../architecture/networking.md) describe what was built.
 
 Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete
