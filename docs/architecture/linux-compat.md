@@ -361,10 +361,13 @@ the VFS with the request, as native clients do.
 ### Namespace view
 
 A Linux process sees the GoOS VFS namespace: `/system`, `/tmp`, `/persist`,
-`/home`, `/state`, and whatever else is mounted. Nothing is added for it.
-`/proc` and `/sys` do not exist, and a program that opens `/proc/mounts`
-gets `ENOENT`. Of `/dev` the kernel serves three names to Linux processes;
-`/dev` itself is no directory.
+`/home`, `/state`, and whatever else is mounted. GoOS has no general `/proc`
+or `/sys` filesystem. The kernel serves a few synthetic names that supported
+programs need: `/dev/null`, `/dev/zero`, and `/dev/tty`, and the processor
+lists `/sys/devices/system/cpu/online` and `/sys/devices/system/cpu/possible`,
+which the C library reads to count processors. Neither `/dev` nor `/sys` is a
+directory a program can list, and a program that opens `/proc/mounts` gets
+`ENOENT`.
 
 ### Descriptors and the terminal
 
@@ -452,7 +455,7 @@ launch root ends every other member of its family with `SIGKILL` (ADR 0170).
 
 ## Scope
 
-GoOS 0.2.3 runs static x86_64 programs, musl or glibc, position-independent
+GoOS runs static x86_64 programs, musl or glibc, position-independent
 or not, with threads (ADR 0176, ADR 0177). A thread has its own TID, TLS, and
 signal mask and shares the process's pending signals; all threads share one
 CPU, and a process holds at most 8 tasks. Dynamic linking, process groups,

@@ -63,7 +63,8 @@ is described in [boot-chain.md](../security/boot-chain.md).
    machine off (`kernel/acpi`, ADR 0092). The same checked root-table walker
    reads the MADT processor entries. CPUID identity, topology, cache, and
    feature leaves are combined with that bounded firmware list into an
-   immutable CPU inventory; only the bootstrap processor is online (ADR 0180).
+   immutable CPU inventory (ADR 0180). The bootstrap processor later starts
+   the others, which join the scheduler ([SMP](../kernel/smp.md), ADR 0181).
 
 Fatal UEFI handoff failures print a panic line and halt. Optional hardware
 discovery, including CPU inventory, degrades conservatively when its inputs
