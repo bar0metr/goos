@@ -1,14 +1,6 @@
 package network
 
-import (
-	"testing"
-	"unsafe"
-)
-
-func TestStackSize(t *testing.T) {
-	var stack Stack
-	t.Logf("Stack is %d bytes", unsafe.Sizeof(stack))
-}
+import "testing"
 
 func TestInitialState(t *testing.T) {
 	h := newHarness(t)
