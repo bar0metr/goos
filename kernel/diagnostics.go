@@ -230,6 +230,7 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("kills", state.Stats.Kills)
 	out.uint("parallel-peak", amd64.ParallelPeak())
 	out.uint("kernel-parallel-peak", amd64.KernelParallelPeak())
+	out.uint("kernel-thread-peak", amd64.KernelThreadPeak())
 	out.uint("lock-contention", lock.Contended())
 	shootdowns, targets, timeouts := amd64.ShootdownStats()
 	out.uint("shootdowns", shootdowns)

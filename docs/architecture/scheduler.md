@@ -73,8 +73,9 @@ between a task's last check and its sleep, whichever processor publishes it.
 ## Kernel tasks
 
 Slot 0 runs the kernel's housekeeping loop (ADR 0053) on the bootstrap
-processor, to which the kernel tasks are pinned. Each step runs under the
-kernel lock and ends by sleeping through vector 0x81; a wake that came during
+processor, to which the kernel tasks are pinned. Each step runs with
+interrupts disabled, takes the locks of the state it touches (ADR 0184), and
+ends by sleeping through vector 0x81; a wake that came during
 the step keeps it running. It is woken by every tick, which
 expires deadlines and retries retained lifecycle messages; by a user task exit
 or fault; and by a lifecycle request from PID 1. Slots 1 and 2, the boot-time

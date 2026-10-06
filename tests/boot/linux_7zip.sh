@@ -5,7 +5,8 @@
 # trees; every file must come back with the same SHA-256. The diag lines
 # before and after give the most threads of one process that ran on distinct
 # processors at once: nothing before 7-Zip may reach two, and 7-Zip must.
-# The report goes to build/reports/linux-7zip.md.
+# The report, with the most processors that were inside the kernel at once,
+# goes to build/reports/linux-7zip.md.
 #
 # usage: linux_7zip.sh ISO OVMF DISK 7ZZS
 #
@@ -133,6 +134,8 @@ run diag
 after=$(peak)
 [ -n "$after" ] && [ "$after" -ge 2 ] || fail "parallel-peak is ${after:-missing} after 7-Zip, want at least 2"
 refused=$(sed -n 's/^DIAG linux .*refused=\([^ ]*\).*/\1/p' "$work/output" | tail -n 1)
+kernel_peak=$(sed -n 's/^DIAG sched .* kernel-parallel-peak=\([0-9]*\).*/\1/p' "$work/output" | tail -n 1)
+thread_peak=$(sed -n 's/^DIAG sched .* kernel-thread-peak=\([0-9]*\).*/\1/p' "$work/output" | tail -n 1)
 
 {
 	printf '# 7-Zip on GoOS\n\n'
@@ -144,6 +147,7 @@ refused=$(sed -n 's/^DIAG linux .*refused=\([^ ]*\).*/\1/p' "$work/output" | tai
 	printf '| Create, test, extract | Everything is Ok |\n'
 	printf '| Files compared | %s, all SHA-256 equal |\n' "$files"
 	printf '| parallel-peak before, after | %s, %s |\n' "$before" "$after"
+	printf '| kernel-parallel-peak, kernel-thread-peak | %s, %s |\n' "${kernel_peak:-unknown}" "${thread_peak:-unknown}"
 	printf '| Refused Linux calls | %s |\n\n' "${refused:-none}"
 	printf '## SHA-256 of the extracted files\n\n```\n'
 	cat "$work/extracted"

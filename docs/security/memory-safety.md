@@ -147,19 +147,36 @@ bytes from the ring, so a bad buffer cannot lose data.
 ## Kernel locks
 
 Disabling interrupts excludes only the local processor. Shared kernel state
-has explicit locks, taken in a fixed level order with interrupts disabled
-(ADR 0182, [SMP](../kernel/smp.md)): the kernel lock over the object layer,
-the page allocator's lock, the scheduler lock, and the console lock. Native
-calls, Linux calls, user fault resolution, and each housekeeping step run
-under the kernel lock. Kernel code in task context takes it before it touches
-registries, handle tables, wait sets, or the lifecycle queue. Without this
-rule two processors would expose torn state to each other, for example a
-physical page handed to two owners. Validation builds check the lock order,
-recursion, and the scheduler's invariants at run time.
+has explicit locks, one per domain, taken in a fixed level order with
+interrupts disabled (ADR 0184, [SMP](../kernel/smp.md)). A call takes the
+locks of the state it touches when it starts and holds them until it returns
+or blocks, so nothing it finds through them changes or is freed under it.
+Kernel code outside a call, the housekeeping and boot tasks, takes the same
+locks before it touches registries, handle tables, wait sets, or the
+lifecycle queue. Without this rule two processors would expose torn state to
+each other, for example a physical page handed to two owners.
+
+Each package that holds a domain's state checks in validation builds that
+its caller holds the domain's lock, and every lock checks its order and
+recursion. A task's own process is the one object a call reaches without a
+lock: teardown frees it only after the task's last call has returned.
+References from one domain to another are IDs with a generation, looked up
+again under the other domain's lock. Page-table pages and leaves go in with a
+compare-and-swap, since faults of one process run at once, and leave only
+under the process's write lock. A lint check refuses a kernel lock under the
+names the removed one had.
 
 A page unmapped from a process goes back to the allocator only after every
 other processor that ran the process has dropped its translations
 (ADR 0183).
+
+Another thread of the caller's process can rewrite user memory while a call
+runs on another processor. Every call copies an argument from user memory
+into its processor's scratch once and checks and uses the copy; no handler
+reads one user address twice and acts on both readings. A futex reads its
+word again on each attempt, which is the semantics Linux defines. Paths,
+exec arguments, IPC messages, and launch templates are copied whole before
+they are parsed (ADR 0184).
 
 ## Task context includes SSE
 

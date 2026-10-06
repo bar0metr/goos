@@ -480,6 +480,8 @@ lint:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
 	@tests/lint/unsafe_boundary.sh
+	@tests/lint/no_kernel_lock.sh --self-test >/dev/null
+	@tests/lint/no_kernel_lock.sh
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './build/*')

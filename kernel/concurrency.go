@@ -180,6 +180,29 @@ func (statuses *waitStatuses) take(task uint64) kcall.Status {
 	return kcall.Status(statuses[task].Swap(uint64(kcall.StatusOK)))
 }
 
+// The highest kernel peaks reported. Housekeeping alone touches them.
+var kernelParallelReported, kernelThreadReported uint64
+
+// reportKernelParallelPeak prints, in validation builds, each new most of
+// processors that were inside system calls or fault resolution at once, and
+// each new most of one process's tasks inside them at once, so a boot test
+// can tell kernel code ran on several processors together.
+func reportKernelParallelPeak() {
+	reportPeak("KERNEL_PARALLEL_PEAK ", amd64.KernelParallelPeak(), &kernelParallelReported)
+	reportPeak("KERNEL_THREAD_PEAK ", amd64.KernelThreadPeak(), &kernelThreadReported)
+}
+
+func reportPeak(marker string, peak uint64, reported *uint64) {
+	if peak <= *reported {
+		return
+	}
+	*reported = peak
+	console := kernelconsole.New()
+	console.WriteString(marker)
+	console.WriteUint(peak)
+	console.WriteString("\n")
+}
+
 // lockWatchdogSeconds is how long a processor spins for one lock before the
 // watchdog reports it. No lock is held for more than a call's worth of work,
 // so a spin this long is a deadlock or a lost unlock.

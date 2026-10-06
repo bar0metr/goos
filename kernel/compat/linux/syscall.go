@@ -232,7 +232,6 @@ func Refuse(number abi.Syscall) Result {
 
 func noteUnsupported(number abi.Syscall) {
 	diagnosticsLock.Lock()
-	defer diagnosticsLock.Unlock()
 	if unsupportedDiagnostics.Count != ^uint64(0) {
 		unsupportedDiagnostics.Count++
 	}
@@ -247,6 +246,7 @@ func noteUnsupported(number abi.Syscall) {
 	if unsupportedDiagnostics.Stored < unsupportedHistorySize {
 		unsupportedDiagnostics.Stored++
 	}
+	diagnosticsLock.Unlock()
 }
 
 func Unsupported() UnsupportedDiagnostics {

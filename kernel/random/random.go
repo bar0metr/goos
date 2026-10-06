@@ -93,8 +93,8 @@ func (generator *Generator) Seeded() bool {
 func (generator *Generator) Read(target []byte) bool {
 	generator.lock.SetLevel(lock.LevelRandom)
 	generator.lock.Lock()
-	defer generator.lock.Unlock()
 	if !generator.seeded {
+		generator.lock.Unlock()
 		return false
 	}
 	var block [64]byte
@@ -109,6 +109,7 @@ func (generator *Generator) Read(target []byte) bool {
 		generator.key[index] = binary.LittleEndian.Uint32(block[4*index:])
 	}
 	clear(block[:])
+	generator.lock.Unlock()
 	return true
 }
 

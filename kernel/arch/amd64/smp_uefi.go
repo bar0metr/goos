@@ -36,6 +36,7 @@ const (
 	cpuTLBIPIs
 	cpuTicks
 	cpuCallArg2
+	cpuKernelRoot
 	cpuWords = 32
 )
 
@@ -89,6 +90,9 @@ var (
 	// call or a fault; kernelPeak is the most at once.
 	inKernel   atomic.Int64
 	kernelPeak atomic.Uint64
+	// threadPeak is the most tasks of one address space inside the kernel
+	// at once, which only a program with several threads raises.
+	threadPeak atomic.Uint64
 )
 
 // CPUIndex returns the calling processor's index; processor 0 is the
@@ -261,13 +265,37 @@ func kernelEnter() uint64 {
 }
 
 //export goos_kernel_leave
-func kernelLeave() { inKernel.Add(-1) }
+func kernelLeave() {
+	atomic.StoreUint64(&cpuData[CPUIndex()][cpuKernelRoot], 0)
+	inKernel.Add(-1)
+}
 
 // noteKernelEntry counts the calling processor in the kernel and raises the
 // peak.
 func noteKernelEntry() {
 	count := uint64(inKernel.Add(1))
-	for peak := kernelPeak.Load(); count > peak && !kernelPeak.CompareAndSwap(peak, count); peak = kernelPeak.Load() {
+	raisePeak(&kernelPeak, count)
+	cpu := CPUIndex()
+	slot := atomic.LoadUint64(&cpuData[cpu][cpuCurrent])
+	if slot >= slotCount {
+		return
+	}
+	root := taskRoots[slot]
+	atomic.StoreUint64(&cpuData[cpu][cpuKernelRoot], root)
+	if root == 0 {
+		return
+	}
+	same := uint64(0)
+	for mask := online.Load(); mask != 0; mask &= mask - 1 {
+		if atomic.LoadUint64(&cpuData[bits.TrailingZeros64(mask)][cpuKernelRoot]) == root {
+			same++
+		}
+	}
+	raisePeak(&threadPeak, same)
+}
+
+func raisePeak(peak *atomic.Uint64, count uint64) {
+	for old := peak.Load(); count > old && !peak.CompareAndSwap(old, count); old = peak.Load() {
 	}
 }
 
@@ -280,6 +308,10 @@ func StopWord() *uint64 { return &cpuData[CPUIndex()][cpuKill] }
 // KernelParallelPeak returns the most processors that were inside system
 // calls or fault resolution at the same time since boot.
 func KernelParallelPeak() uint64 { return kernelPeak.Load() }
+
+// KernelThreadPeak returns the most tasks of one address space that were
+// inside system calls or fault resolution at the same time since boot.
+func KernelThreadPeak() uint64 { return threadPeak.Load() }
 
 // currentSlot returns the task the calling processor runs, or sched.Idle.
 func currentSlot() int {

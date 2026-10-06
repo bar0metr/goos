@@ -61,6 +61,8 @@
  *   smp               workers on every online processor at once, a contended
  *                     mutex, remaps and faults beside readers, fork and exec
  *                     beside running threads
+ *   kernel            threads and processes making calls that share no lock,
+ *                     so several processors run kernel code at once
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -3620,6 +3622,78 @@ static long smp_speedup(int threads)
 	return parallel > 0 ? single * 10 / parallel : 0;
 }
 
+/* kernel mode: threads and processes that stay inside the kernel, with
+ * calls that take no lock in common, so several processors run kernel code
+ * at once. The kernel reports the most processors it saw inside system calls
+ * at the same time; the boot test reads that after this mode. */
+#define KERNEL_THREADS 4
+#define KERNEL_PROCESSES 2
+#define KERNEL_ROUNDS 4000
+
+static volatile int kernel_go;
+static int kernel_words[KERNEL_THREADS + 1];
+
+static void *kernel_grind(void *argument)
+{
+	long index = (long)argument;
+	struct timespec now;
+	unsigned char bytes[16];
+	unsigned long mask;
+	int round;
+
+	while (!kernel_go)
+		;
+	for (round = 0; round < KERNEL_ROUNDS; round++)
+		if (syscall(SYS_futex, &kernel_words[index], PROBE_FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0) != 0 ||
+		    syscall(SYS_getpid) <= 0 || syscall(SYS_gettid) <= 0 ||
+		    syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &now) != 0 ||
+		    syscall(SYS_getrandom, bytes, sizeof bytes, 0) != sizeof bytes ||
+		    syscall(SYS_sched_getaffinity, 0, sizeof mask, &mask) != sizeof mask)
+			return (void *)1;
+	return NULL;
+}
+
+static int kernel_test(void)
+{
+	pthread_t workers[KERNEL_THREADS];
+	pid_t children[KERNEL_PROCESSES];
+	long index;
+	int status, failed = 0;
+	void *result;
+
+	fflush(stdout);
+	for (index = 0; index < KERNEL_PROCESSES; index++) {
+		children[index] = fork();
+		if (children[index] == 0) {
+			kernel_go = 1;
+			_exit(kernel_grind((void *)KERNEL_THREADS) == NULL ? 0 : 1);
+		}
+		if (children[index] < 0) {
+			printf("kernel failed: fork\n");
+			return 1;
+		}
+	}
+	for (index = 0; index < KERNEL_THREADS; index++)
+		if (pthread_create(&workers[index], NULL, kernel_grind, (void *)index) != 0) {
+			printf("kernel failed: thread %ld\n", index);
+			return 1;
+		}
+	kernel_go = 1;
+	for (index = 0; index < KERNEL_THREADS; index++)
+		if (pthread_join(workers[index], &result) != 0 || result != NULL)
+			failed = 1;
+	for (index = 0; index < KERNEL_PROCESSES; index++)
+		if (wait4(children[index], &status, 0, NULL) != children[index] || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+			failed = 1;
+	if (failed) {
+		printf("kernel failed: a worker's call failed\n");
+		return 1;
+	}
+	printf("kernel workers: %d threads and %d processes, %d rounds of 6 calls each\n", KERNEL_THREADS, KERNEL_PROCESSES, KERNEL_ROUNDS);
+	printf("kernel ok\n");
+	return 0;
+}
+
 static int smp_test(void)
 {
 	pthread_t workers[SMP_WORKERS];
@@ -3788,6 +3862,8 @@ int main(int argc, char **argv)
 			return threads_test();
 		if (!strcmp(argv[1], "smp"))
 			return smp_test();
+		if (!strcmp(argv[1], "kernel"))
+			return kernel_test();
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))

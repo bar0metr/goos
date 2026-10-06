@@ -14,8 +14,8 @@ type RW struct {
 	// lock and rwPending while one waits for it.
 	state atomic.Uint32
 	// owner is the writer's processor plus one, kept by validation builds.
-	owner atomic.Uint32
-	level Level
+	owner     atomic.Uint32
+	levelWord atomic.Uint32
 }
 
 const (
@@ -25,7 +25,15 @@ const (
 )
 
 // SetLevel names the level of a lock declared as a zero value.
-func (lock *RW) SetLevel(level Level) { lock.level = level }
+func (lock *RW) SetLevel(level Level) {
+	if lock.level() != level {
+		lock.levelWord.Store(uint32(level))
+	}
+}
+
+// level returns the lock's level. It is atomic: types that lock themselves
+// name their level each time they take the lock, from any processor.
+func (lock *RW) level() Level { return Level(lock.levelWord.Load()) }
 
 // RLock takes the lock for reading.
 func (lock *RW) RLock() { lock.RLockUnless(nil) }
@@ -36,7 +44,7 @@ func (lock *RW) RLockUnless(stop *uint64) bool {
 	cpu := lock.enter()
 	if !lock.tryRead() {
 		var wait waiting
-		wait.begin(lock.level)
+		wait.begin(lock.level())
 		for !lock.tryRead() {
 			if stop != nil && atomic.LoadUint64(stop) != 0 {
 				wait.end()
@@ -79,7 +87,7 @@ func (lock *RW) LockUnless(stop *uint64) bool {
 	cpu := lock.enter()
 	if !lock.state.CompareAndSwap(0, rwWriter) {
 		var wait waiting
-		wait.begin(lock.level)
+		wait.begin(lock.level())
 		for {
 			state := lock.state.Load()
 			if state&(rwWriter|rwReaders) == 0 {
@@ -130,17 +138,17 @@ func (lock *RW) AssertHeld() {
 	if lock.owner.Load() == cpu+1 {
 		return
 	}
-	if cpu < MaxCPUs && lock.level < levelCount && heldCount[cpu][lock.level] != 0 && lock.state.Load()&rwReaders != 0 {
+	if cpu < MaxCPUs && lock.level() < levelCount && heldCount[cpu][lock.level()] != 0 && lock.state.Load()&rwReaders != 0 {
 		return
 	}
-	fatal("kernel state used without its lock: " + lock.level.String())
+	fatal("kernel state used without its lock: " + lock.level().String())
 }
 
 // AssertWriter stops a validation build whose caller does not hold the lock
 // for writing.
 func (lock *RW) AssertWriter() {
 	if validation.Enabled && hooks.CPU != nil && lock.owner.Load() != hooks.CPU()+1 {
-		fatal("kernel state changed without its write lock: " + lock.level.String())
+		fatal("kernel state changed without its write lock: " + lock.level().String())
 	}
 }
 
@@ -152,7 +160,7 @@ func (lock *RW) enter() uint32 {
 	if lock.owner.Load() == cpu+1 {
 		fatal("recursive lock acquisition")
 	}
-	if lock.level != 0 && lock.level < levelCount && cpu < MaxCPUs && held[cpu].Load()>>lock.level != 0 {
+	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs && held[cpu].Load()>>lock.level() != 0 {
 		fatal("lock taken out of level order")
 	}
 	return cpu
@@ -165,9 +173,9 @@ func (lock *RW) acquired(cpu uint32, writer bool) {
 	if writer {
 		lock.owner.Store(cpu + 1)
 	}
-	if lock.level != 0 && lock.level < levelCount && cpu < MaxCPUs {
-		heldCount[cpu][lock.level]++
-		setBit(&held[cpu], uint32(1)<<lock.level)
+	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs {
+		heldCount[cpu][lock.level()]++
+		setBit(&held[cpu], uint32(1)<<lock.level())
 	}
 }
 
@@ -182,13 +190,13 @@ func (lock *RW) released(writer bool) {
 		}
 		lock.owner.Store(0)
 	}
-	if lock.level != 0 && lock.level < levelCount && cpu < MaxCPUs {
-		if heldCount[cpu][lock.level] == 0 {
+	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs {
+		if heldCount[cpu][lock.level()] == 0 {
 			fatal("lock released by a processor that does not hold it")
 		}
-		heldCount[cpu][lock.level]--
-		if heldCount[cpu][lock.level] == 0 {
-			clearBit(&held[cpu], uint32(1)<<lock.level)
+		heldCount[cpu][lock.level()]--
+		if heldCount[cpu][lock.level()] == 0 {
+			clearBit(&held[cpu], uint32(1)<<lock.level())
 		}
 	}
 }

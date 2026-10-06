@@ -87,7 +87,7 @@ func TestLockUnlessGivesUpWhenStopped(t *testing.T) {
 	holder := New(LevelRegistry)
 	holder.state.Store(1) // another processor holds it
 	stop := uint64(1)
-	waiter := &holder
+	waiter := holder
 	if waiter.LockUnless(&stop) {
 		t.Fatal("a stopped waiter took a held lock")
 	}

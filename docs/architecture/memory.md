@@ -39,6 +39,16 @@ the allocator's own lock, so processors allocate and free concurrently and no
 page reaches two owners (ADR 0182). Unmapped process pages return to it only
 after a TLB shootdown (ADR 0183).
 
+Each process's address space has a reader-writer lock over its region map
+and page tables (ADR 0184). Copies to and from user memory and demand faults
+hold it for reading, so the threads of a process fault on several processors
+at once: a page table or a leaf goes in with a compare-and-swap, and the
+fault that loses the race finds the page present and runs its access again.
+`mmap`, `munmap`, `mprotect`, `madvise`, and the native mapping calls hold it
+for writing, and so does the shootdown that follows a change. A page an
+executable object holds is brought in with the call's other locks released
+and mapped by the faulting task.
+
 The allocator counts the usable pages it manages, its bitmap included, and
 how many are free; `mem` reports both. `make MEMORY=4G run` and
 `make MEMORY=4G test-boot` boot a guest with more RAM; the default is 512 MiB.

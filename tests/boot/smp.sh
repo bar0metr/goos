@@ -2,7 +2,8 @@
 # Boots one validation guest with several processors and checks that they
 # all run tasks at once: the kernel's start-up markers, lscpu, the Linux
 # probe's smp mode, which proves overlapping execution on distinct
-# processors, and the thread, fork, exec, pipe, and signal probes, which now
+# processors, its kernel mode, which proves kernel code running on several
+# processors at once, and the thread, fork, exec, pipe, and signal probes, which now
 # run with their tasks spread over the processors. Boot and command handling
 # follow tests/boot/linux.sh.
 #
@@ -112,6 +113,29 @@ expect "^CPU(s): *$cpus\$" 'lscpu CPU count'
 expect "^On-line CPU(s) list: *$online\$" 'lscpu online list'
 refuse '^Off-line CPU(s) list:' 'lscpu offline list'
 
+# Threads and processes whose calls share no lock run kernel code on several
+# processors at once. The kernel prints each new peak of processors inside
+# calls together, and of one process's tasks inside calls together; only a
+# program with several threads raises the second, so it rises here.
+peaks() {
+	tr -d '\r' <"$log" | grep -o "$1 [0-9]*" | sed 's/.* //' | sort -n | tail -n 1
+}
+before=$(peaks KERNEL_THREAD_PEAK)
+run '/system/linux/abi-probe kernel'
+expect '^kernel ok$' 'kernel: calls beside each other'
+# Housekeeping prints the peaks on its next tick; one more command gives it
+# that tick.
+run uptime
+threads=$(peaks KERNEL_THREAD_PEAK)
+peak=$(peaks KERNEL_PARALLEL_PEAK)
+if [ "$cpus" -gt 1 ]; then
+	[ "${threads:-0}" -ge 2 ] && [ "${threads:-0}" -gt "${before:-0}" ] ||
+		fail "kernel-thread-peak is ${threads:-0} after the kernel probe, ${before:-0} before; want at least 2, raised by the probe"
+	[ "${peak:-0}" -ge 2 ] || fail "kernel-parallel-peak is ${peak:-0}, want at least 2"
+	checks=$((checks + 2))
+fi
+printf '  kernel-parallel-peak: %s, kernel-thread-peak: %s (before the probe %s)\n' "${peak:-0}" "${threads:-0}" "${before:-0}"
+
 run '/system/linux/abi-probe smp'
 expect "^smp cpus: $cpus online\$" 'smp: sched_getaffinity'
 expect '^smp workers: ' 'smp: workers ran'
@@ -122,6 +146,7 @@ expect '^smp lifecycle: ' 'smp: fork beside threads'
 expect '^smp exec: ' 'smp: exec beside threads'
 expect '^smp ok$' 'smp probe'
 sed -n -e 's/^smp workers: /  workers: /p' -e 's/^smp speedup: /  speedup: /p' "$work/output"
+
 
 for mode in threads fpstate vfork wait pipe signal kill; do
 	run "/system/linux/abi-probe $mode"

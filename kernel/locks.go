@@ -41,18 +41,30 @@ func init() {
 	handleLock.SetLevel(lock.LevelHandle)
 }
 
+// consoleInputLock serializes the readers of the console input rings. Each
+// ring has one producer, its interrupt, and takes one consumer at a time.
+var consoleInputLock = lock.New(lock.LevelLog)
+
+// takeConsoleInput takes one byte from an input ring.
+func takeConsoleInput(input uint64) uint64 {
+	consoleInputLock.Lock()
+	taken := amd64.InputTake(input)
+	consoleInputLock.Unlock()
+	return taken
+}
+
 // installLockGuards makes each package check, in validation builds, that its
 // state is used under its lock. Boot runs it before a second processor joins;
 // until then boot is the only code running.
 func installLockGuards() {
 	process.Guard(&registryLock)
 	processRegistry.GuardSpaces()
-	linuxcompat.Guard(&linuxLock)
+	linuxcompat.Guard(linuxLock)
 	handle.Guard(&handleLock)
-	ipc.Guard(&channelLock)
-	stream.Guard(&streamLock)
-	executable.Guard(&executableLock)
-	shmem.Guard(&shmemLock)
+	ipc.Guard(channelLock)
+	stream.Guard(streamLock)
+	executable.Guard(executableLock)
+	shmem.Guard(shmemLock)
 }
 
 // self returns the calling task's process. A task's process outlives every

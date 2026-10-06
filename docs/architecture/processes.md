@@ -127,7 +127,10 @@ starts only once its process binding, thread record, TLS, FPU state, and TID
 writes exist (ADR 0182). A fatal fault or `exit_group` in one thread kills the
 others wherever they run: each processor stops its task at its next
 scheduling point, and the Process's resources are reclaimed only after every
-task has left its processor.
+task has left its processor. A task's calls find its Process through the
+task-to-process map without a lock, since nothing frees the Process while one
+of its tasks runs (ADR 0184). A thread stopped while it waits for a lock gives
+the wait up, so the thread that stops it may hold locks while it waits.
 
 The compatibility state holds the process's Linux identity and its VFS channel
 handle. The family owns the VFS request counter, failed-session state, and a

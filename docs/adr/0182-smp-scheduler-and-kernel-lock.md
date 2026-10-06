@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. ADR 0184 replaced the kernel lock with domain locks; the run
+queues, wake protocol, and kill and hold requests stand.
 
 ## Context
 

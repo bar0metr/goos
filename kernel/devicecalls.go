@@ -70,7 +70,7 @@ func (handler nativeCallHandler) ConsoleRead(id uint64, address uint64, length u
 	}
 	// The byte comes from the ring the console's interrupt fills, not from
 	// the device: polling it here is what made a reader spin.
-	taken := amd64.InputTake(input)
+	taken := takeConsoleInput(input)
 	if taken == 0 {
 		return kcall.StatusNotFound
 	}

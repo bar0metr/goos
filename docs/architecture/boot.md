@@ -115,12 +115,13 @@ RAMFS and VFS checks are compiled only into that build, so the normal kernel
 links no filesystem code (ADR 0084).
 
 Before PID 1 starts, the bootstrap processor starts the other processors and
-parks them; it brings them online under the kernel lock just before it adds
-the user tasks ([SMP](../kernel/smp.md)). From then on the boot thread runs
-`serviceKernel` in a loop on the bootstrap processor: each step takes the
-kernel lock, expires wait deadlines, retries retained lifecycle messages,
-delivers task exits, serves at most one launch request from PID 1, and sleeps
-until the next tick, exit, or request (ADR 0053, 0055). A validation build
+parks them; it brings them online, holding the launch locks, just before it
+adds the user tasks ([SMP](../kernel/smp.md)). From then on the boot thread
+runs `serviceKernel` in a loop on the bootstrap processor: each step expires
+wait deadlines, retries retained lifecycle messages, delivers task exits,
+serves at most one launch request from PID 1, each part under the locks of
+the state it touches (ADR 0184), and sleeps until the next tick, exit, or
+request (ADR 0053, 0055). A validation build
 first waits until PID 1 has completed its bootstrap. If PID 1 exits, the
 kernel halts.
 

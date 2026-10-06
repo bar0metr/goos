@@ -65,8 +65,6 @@ const (
 	// LevelScheduler is the run state: task states, run queues, and the
 	// processor each task runs on.
 	LevelScheduler
-	// LevelShootdown serializes TLB shootdowns.
-	LevelShootdown
 	// LevelConsole serializes kernel output to the serial port and the
 	// framebuffer, which a panic may need while holding any other lock.
 	LevelConsole
@@ -79,7 +77,7 @@ const Levels = int(levelCount)
 var levelNames = [levelCount]string{
 	"none", "registry", "linux", "lifecycle", "handle", "channel",
 	"stream", "shmem", "address-space", "executable", "futex", "wait", "log",
-	"memory", "random", "scheduler", "shootdown", "console",
+	"memory", "random", "scheduler", "console",
 }
 
 // String names the level in diagnostics.
@@ -97,8 +95,8 @@ const MaxCPUs = 64
 type Spin struct {
 	state atomic.Uint32
 	// owner is the holding processor plus one, kept by validation builds.
-	owner atomic.Uint32
-	level Level
+	owner     atomic.Uint32
+	levelWord atomic.Uint32
 	// rank orders the locks of one level, such as the buckets of a table.
 	rank uint32
 }
@@ -158,18 +156,28 @@ var contended atomic.Uint64
 func Install(installed Hooks) { hooks = installed }
 
 // New returns an unlocked lock of the given level.
-func New(level Level) Spin {
-	return Spin{level: level}
+func New(level Level) *Spin {
+	spin := new(Spin)
+	spin.levelWord.Store(uint32(level))
+	return spin
 }
 
 // SetLevel names the level of a lock declared as a zero value.
-func (lock *Spin) SetLevel(level Level) { lock.level = level }
+func (lock *Spin) SetLevel(level Level) {
+	if lock.level() != level {
+		lock.levelWord.Store(uint32(level))
+	}
+}
+
+// level returns the lock's level. It is atomic: types that lock themselves
+// name their level each time they take the lock, from any processor.
+func (lock *Spin) level() Level { return Level(lock.levelWord.Load()) }
 
 // SetRank orders a lock among the locks of its level.
 func (lock *Spin) SetRank(rank uint32) { lock.rank = rank }
 
 // Level returns the lock's level.
-func (lock *Spin) Level() Level { return lock.level }
+func (lock *Spin) Level() Level { return lock.level() }
 
 // Lock spins until the lock is free and takes it.
 func (lock *Spin) Lock() {
@@ -208,7 +216,7 @@ func (lock *Spin) LockUnless(stop *uint64) bool {
 // when stop becomes nonzero.
 func (lock *Spin) spin(stop *uint64) bool {
 	var wait waiting
-	wait.begin(lock.level)
+	wait.begin(lock.level())
 	for {
 		for lock.state.Load() != 0 {
 			if stop != nil && atomic.LoadUint64(stop) != 0 {
@@ -290,10 +298,10 @@ func (lock *Spin) Unlock() {
 			fatal("lock released by a processor that does not hold it")
 		}
 		lock.owner.Store(0)
-		if lock.level != 0 && lock.level < levelCount && cpu < MaxCPUs {
-			heldCount[cpu][lock.level]--
-			if heldCount[cpu][lock.level] == 0 {
-				clearBit(&held[cpu], uint32(1)<<lock.level)
+		if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs {
+			heldCount[cpu][lock.level()]--
+			if heldCount[cpu][lock.level()] == 0 {
+				clearBit(&held[cpu], uint32(1)<<lock.level())
 			}
 		}
 	}
@@ -319,7 +327,7 @@ func (lock *Spin) HeldByCaller() bool {
 // run single-threaded without the kernel's locking.
 func (lock *Spin) AssertHeld() {
 	if validation.Enabled && hooks.CPU != nil && lock.owner.Load() != hooks.CPU()+1 {
-		fatal("kernel state used without its lock: " + lock.level.String())
+		fatal("kernel state used without its lock: " + lock.level().String())
 	}
 }
 
@@ -394,19 +402,19 @@ func (lock *Spin) enter(first *Spin) uint32 {
 	if lock.owner.Load() == cpu+1 {
 		fatal("recursive lock acquisition")
 	}
-	if lock.level == 0 || lock.level >= levelCount || cpu >= MaxCPUs {
+	if lock.level() == 0 || lock.level() >= levelCount || cpu >= MaxCPUs {
 		return cpu
 	}
 	if first != nil {
-		if first.level != lock.level || first.owner.Load() != cpu+1 || first.rank >= lock.rank {
+		if first.level() != lock.level() || first.owner.Load() != cpu+1 || first.rank >= lock.rank {
 			fatal("second lock of a level taken out of rank order")
 		}
-		if held[cpu].Load()>>(lock.level+1) != 0 {
+		if held[cpu].Load()>>(lock.level()+1) != 0 {
 			fatal("lock taken out of level order")
 		}
 		return cpu
 	}
-	if held[cpu].Load()>>lock.level != 0 {
+	if held[cpu].Load()>>lock.level() != 0 {
 		fatal("lock taken out of level order")
 	}
 	return cpu
@@ -417,9 +425,9 @@ func (lock *Spin) acquired(cpu uint32) {
 		return
 	}
 	lock.owner.Store(cpu + 1)
-	if lock.level != 0 && lock.level < levelCount && cpu < MaxCPUs {
-		heldCount[cpu][lock.level]++
-		setBit(&held[cpu], uint32(1)<<lock.level)
+	if lock.level() != 0 && lock.level() < levelCount && cpu < MaxCPUs {
+		heldCount[cpu][lock.level()]++
+		setBit(&held[cpu], uint32(1)<<lock.level())
 	}
 }
 

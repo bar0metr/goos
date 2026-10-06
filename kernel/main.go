@@ -721,6 +721,7 @@ func serviceKernel() {
 			mark("PS2_KEYBOARD_OK")
 		}
 		kernelframebuffer.DrawValidationMarker(&graphicalFramebuffer)
+		reportKernelParallelPeak()
 	}
 	stirRandom()
 	expireWaitDeadlines()
