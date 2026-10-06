@@ -137,7 +137,7 @@ func TestReleaseAllClearsEveryReservation(t *testing.T) {
 func TestRegistryChargesAndReleasesByProcessID(t *testing.T) {
 	var registry Registry
 	process, _ := New(3, ABINative, AddressSpace{Root: 0x3000})
-	if !registry.Add(&process) {
+	if !registry.Add(process) {
 		t.Fatal("add failed")
 	}
 	if !registry.ChargeProcess(3, ResourceChannels, 1) {

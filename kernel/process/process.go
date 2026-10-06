@@ -102,9 +102,11 @@ func InitChild(target *Process, id ID, parent *Process, addressSpace AddressSpac
 	return true
 }
 
-func New(id ID, abi ABI, addressSpace AddressSpace) (Process, bool) {
-	var created Process
-	ok := Init(&created, id, abi, addressSpace)
+// New allocates and prepares a process; host tests use it, the kernel
+// prepares slots in place with Init.
+func New(id ID, abi ABI, addressSpace AddressSpace) (*Process, bool) {
+	created := new(Process)
+	ok := Init(created, id, abi, addressSpace)
 	return created, ok
 }
 
