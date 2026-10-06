@@ -43,11 +43,11 @@ func authorizeNativeCall(root uint64) uint64 {
 // personality before the compatibility subsystem observes the request. The
 // assembly caller owns frame on the current task's guarded kernel stack.
 //
-// Most calls run holding the Linux lock and the domains a file or process
-// call can reach (linuxCallLocks). The calls of the fast class hold only
-// their address space for reading: they take the Linux lock just long enough
-// to find the caller's state and select its signal mask before the call, and
-// to deliver signals after it.
+// Most calls run holding their family's lock and the domains a file or
+// process call can reach (linuxCallLocks). The calls of the fast class hold
+// only their address space for reading. They find the caller's state and
+// thread ID in a per-task cache, and take the family's lock after the call
+// only when a signal is pending, to deliver it.
 //
 //export goos_dispatch_linux_syscall
 func dispatchLinuxSyscall(frame *linuxabi.Frame) {
@@ -81,14 +81,8 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	handler.root, handler.frame, handler.task = frame.Root, frame, task
 	set := linuxCallLocks(linuxabi.Syscall(frame.Number))
 	stop := amd64.StopWord()
-	if set&linuxState == 0 {
-		if !linuxLock.LockUnless(stop) {
-			frame.Action = linuxabi.ActionRetry
-			return
-		}
-		handler.prepare()
-		linuxLock.Unlock()
-	}
+	caller := linuxCaller(task, frame.Root)
+	handler.state, handler.tid = caller.state, caller.tid
 	// A file call moves a handle to the VFS service, whose table it needs as
 	// well as its own. The task's last such peer is taken at once; a call
 	// that needs another stops before it changes anything and runs again
@@ -97,13 +91,15 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	peer := process.ID(linuxPeerHints[slot].Load())
 	var result linuxcompat.Result
 	for attempt := 0; ; attempt++ {
-		*held = heldLocks{set: set, owner: owner, peerID: peer}
+		*held = heldLocks{set: set, owner: owner, peerID: peer, family: caller.family}
 		if !held.take(stop) {
 			frame.Action = linuxabi.ActionRetry
 			return
 		}
-		if set&linuxState != 0 {
-			handler.prepare()
+		if set&linuxState != 0 && caller.state != nil {
+			// The call works with, and returns under, its own thread's
+			// signal mask.
+			linuxcompat.SelectThreadSignals(caller.state, task)
 		}
 		local.peerWanted = 0
 		result = linuxcompat.Dispatch(frame, handler)
@@ -141,7 +137,7 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	if result.Errno == linuxabi.EPIPE && handler.state != nil && (frame.Number == uint64(linuxabi.SysWrite) || frame.Number == uint64(linuxabi.SysWritev)) {
 		// A write to a pipe nobody reads raises SIGPIPE as well as failing.
 		// Linux reports it as sent by the writer itself. Writes run under the
-		// Linux lock.
+		// family's lock.
 		handler.state.Signals.Raise(linuxabi.SignalPipe, linuxcompat.SignalInfo{Code: linuxabi.SignalCodeUser, PID: handler.state.PID, UID: linuxcompat.StatUID})
 	}
 	frame.Return, frame.Action = result.Register(), result.Action
@@ -153,14 +149,15 @@ func dispatchLinuxSyscall(frame *linuxabi.Frame) {
 	}
 	if set&linuxState == 0 {
 		held.drop()
-		if frame.Action == linuxabi.ActionReturn {
+		if frame.Action == linuxabi.ActionReturn && caller.state != nil && caller.state.Signals.AnyPending() {
 			// A stopped task skips delivery; its next call delivers.
-			if linuxLock.LockUnless(stop) {
+			family := familyLock(caller.family)
+			if family.LockUnless(stop) {
 				if space.RLockUnless(stop) {
 					handler.finish(frame)
 					space.RUnlock()
 				}
-				linuxLock.Unlock()
+				family.Unlock()
 			}
 		}
 	} else {
@@ -201,21 +198,51 @@ func executableCallStep(owner *process.Process, page uint64) uint64 {
 	return linuxabi.ActionReturn
 }
 
-// prepare finds the caller's Linux state and thread identity and selects the
-// calling thread's signal mask. The Linux lock is held.
-func (handler *linuxCallHandler) prepare() {
-	handler.state, handler.tid = nil, 0
-	state, found := linuxcompat.FindProcess(handler.root)
-	if !found {
-		return
+// linuxCallerEntry is what a Linux task's calls need to know of it before
+// they take any lock: its process state, its thread ID, and its family.
+type linuxCallerEntry struct {
+	task   sched.TaskID
+	root   uint64
+	state  *linuxcompat.ProcessState
+	tid    int32
+	family uint64
+}
+
+// linuxCallers caches, per task slot, the entry of the task's last call. A
+// task writes only its own slot and the exit of the task clears it, so it is
+// read without a lock. A state outlives every call of its tasks, and its
+// thread ID and family never change; exec changes the root, which the entry
+// checks.
+var linuxCallers [sched.MaxTasks]linuxCallerEntry
+
+// linuxCaller returns the calling task's entry, finding it in the
+// personality's tables the first time.
+func linuxCaller(task sched.TaskID, root uint64) linuxCallerEntry {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(linuxCallers) {
+		return linuxCallerEntry{}
 	}
-	// The call works with, and returns under, its own thread's signal mask.
-	linuxcompat.SelectThreadSignals(state, handler.task)
-	handler.state, handler.tid = state, linuxcompat.TaskTID(handler.task, state)
+	if entry := linuxCallers[slot]; entry.task == task && entry.root == root && entry.state != nil {
+		return entry
+	}
+	state, found := linuxcompat.FindProcess(root)
+	if !found {
+		return linuxCallerEntry{}
+	}
+	entry := linuxCallerEntry{task: task, root: root, state: state, tid: linuxcompat.TaskTID(task, state), family: state.FamilyID}
+	linuxCallers[slot] = entry
+	return entry
+}
+
+// forgetLinuxCaller clears the entry of a task that exited.
+func forgetLinuxCaller(task sched.TaskID) {
+	if slot, _, valid := task.Parts(); valid && int(slot) < len(linuxCallers) {
+		linuxCallers[slot] = linuxCallerEntry{}
+	}
 }
 
 // finish delivers the caller's pending signals and ends a temporary mask no
-// handler took over. The Linux lock and the address space are held.
+// handler took over. The family's lock and the address space are held.
 func (handler *linuxCallHandler) finish(frame *linuxabi.Frame) {
 	state, found := linuxcompat.FindProcess(frame.Root)
 	if !found {

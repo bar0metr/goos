@@ -46,6 +46,8 @@ type heldLocks struct {
 	owner  *process.Process
 	peerID process.ID
 	peer   *process.Process
+	// family is the Linux family whose lock linuxState names, or zero.
+	family uint64
 	taken  lockSet
 }
 
@@ -66,8 +68,8 @@ func (held *heldLocks) take(stop *uint64) bool {
 			held.peer = peer
 		}
 	}
-	if ok && set&linuxState != 0 {
-		ok = held.mark(linuxState, linuxLock.LockUnless(stop))
+	if ok && set&linuxState != 0 && held.family != 0 {
+		ok = held.mark(linuxState, familyLock(held.family).LockUnless(stop))
 	}
 	if ok && set&lifecycleQueue != 0 {
 		ok = held.mark(lifecycleQueue, lifecycleLock.LockUnless(stop))
@@ -187,7 +189,7 @@ func (held *heldLocks) drop() {
 		lifecycleLock.Unlock()
 	}
 	if taken&linuxState != 0 {
-		linuxLock.Unlock()
+		familyLock(held.family).Unlock()
 	}
 	if taken&registryWrite != 0 {
 		registryLock.Unlock()
@@ -226,7 +228,7 @@ const (
 	callMemory   = registryRead | handleWrite | executableTable | sharedMemory | spaceRead
 	callExecFile = registryRead | handleWrite | channels | executableTable | sharedMemory | spaceRead
 	callInspect  = registryRead | handleRead | spaceRead
-	callEvery    = registryRead | linuxState | lifecycleQueue | handleRead | channels | streams | executableTable | sharedMemory | spaceRead
+	callEvery    = registryRead | lifecycleQueue | handleRead | channels | streams | executableTable | sharedMemory | spaceRead
 )
 
 // nativeCallLocks is the set native operation takes.
@@ -262,7 +264,7 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 	case kcall.OperationWaitAny:
 		return registryRead | handleRead | channels | streams | spaceRead
 	case kcall.OperationProcessKill:
-		return registryRead | linuxState | handleRead | channels | streams | spaceRead
+		return registryRead | handleRead | channels | streams | spaceRead
 	case kcall.OperationDiagnostics:
 		// The dump takes the locks of each part as it prints it.
 		return 0

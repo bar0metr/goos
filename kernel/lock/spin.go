@@ -56,6 +56,11 @@ const (
 	// stream waits, process waits, multi-object waits, and the Linux call
 	// continuations. None is taken while another is held.
 	LevelWait
+	// LevelLinuxTables is the Linux personality's shared tables: process
+	// state and record slots, threads, open descriptions, directories, VFS
+	// sessions, and the identities they hand out. The personality takes it
+	// itself, for one table operation at a time.
+	LevelLinuxTables
 	// LevelHandleIndex is the index of which processes hold each channel
 	// endpoint, taken briefly by handle tables as they change.
 	LevelHandleIndex
@@ -79,7 +84,7 @@ const Levels = int(levelCount)
 
 var levelNames = [levelCount]string{
 	"none", "registry", "linux", "lifecycle", "handle", "channel",
-	"stream", "shmem", "address-space", "executable", "futex", "wait", "handle-index", "log",
+	"stream", "shmem", "address-space", "executable", "futex", "wait", "linux-tables", "handle-index", "log",
 	"memory", "random", "scheduler", "console",
 }
 

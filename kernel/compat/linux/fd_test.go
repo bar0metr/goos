@@ -76,10 +76,10 @@ func TestFDTableCloseAllReleasesDescriptionsOnce(t *testing.T) {
 	if _, ok := table.Duplicate(1, 3, false); !ok {
 		t.Fatal("duplicate failed")
 	}
-	released := 0
-	table.CloseAll(func(FileDescription) { released++ })
-	if released != 3 {
-		t.Fatalf("released descriptions = %d", released)
+	var released Released
+	table.CloseAll(&released)
+	if released.Len() != 3 {
+		t.Fatalf("released descriptions = %d", released.Len())
 	}
 	for fd := 0; fd < LinuxMaxFD; fd++ {
 		if _, found := table.Lookup(fd); found {

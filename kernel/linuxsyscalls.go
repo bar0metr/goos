@@ -19,9 +19,9 @@ type linuxCallHandler struct {
 	// frame is the entry frame of the call being served, with the caller's
 	// saved registers above it.
 	frame *linuxabi.Frame
-	// state and tid are the caller's Linux state and thread ID, found under
-	// the Linux lock before the call. A call of the fast class reads only
-	// what never changes in them: the PID and the TID.
+	// state and tid are the caller's Linux state and thread ID, from the
+	// per-task cache. A call of the fast class reads only what never changes
+	// in them: the PID and the TID.
 	state *linuxcompat.ProcessState
 	tid   int32
 }

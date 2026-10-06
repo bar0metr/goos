@@ -21,10 +21,7 @@ func WaitRequest(pid uint64, options uint64) (target int32, noHang bool, errno a
 	return int32(signed), options&abi.WaitNoHang != 0, 0
 }
 
-// WaitableChild looks for a child of parentPID that target matches. It
-// returns a zombie when one matches, and reports whether any child matches at
-// all, running or not.
-func WaitableChild(parentPID int32, target int32) (ProcessRecord, bool) {
+func waitableChildHeld(parentPID int32, target int32) (ProcessRecord, bool) {
 	guard.Check()
 	matched := false
 	for index := range processRecords {
@@ -40,15 +37,12 @@ func WaitableChild(parentPID int32, target int32) (ProcessRecord, bool) {
 	return ProcessRecord{}, matched
 }
 
-// HoldChildWaiter records the task that wait4 blocked for a child of state.
-func (state *ProcessState) HoldChildWaiter(task sched.TaskID) {
+func (state *ProcessState) holdChildWaiterHeld(task sched.TaskID) {
 	guard.Check()
 	state.childWaiter = task
 }
 
-// ReleaseChildWaiter returns the task blocked in wait4 by the process with
-// PID parentPID, if any, and forgets it, so one child exit wakes it once.
-func ReleaseChildWaiter(parentPID int32) sched.TaskID {
+func releaseChildWaiterHeld(parentPID int32) sched.TaskID {
 	guard.Check()
 	if parentPID < firstPID {
 		return 0
@@ -62,4 +56,30 @@ func ReleaseChildWaiter(parentPID int32) sched.TaskID {
 		}
 	}
 	return 0
+}
+
+// WaitableChild looks for a child of parentPID that target matches. It
+// returns a zombie when one matches, and reports whether any child matches at
+// all, running or not.
+func WaitableChild(parentPID int32, target int32) (ProcessRecord, bool) {
+	tablesLock.Lock()
+	result0, result1 := waitableChildHeld(parentPID, target)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// HoldChildWaiter records the task that wait4 blocked for a child of state.
+func (state *ProcessState) HoldChildWaiter(task sched.TaskID) {
+	tablesLock.Lock()
+	state.holdChildWaiterHeld(task)
+	tablesLock.Unlock()
+}
+
+// ReleaseChildWaiter returns the task blocked in wait4 by the process with
+// PID parentPID, if any, and forgets it, so one child exit wakes it once.
+func ReleaseChildWaiter(parentPID int32) sched.TaskID {
+	tablesLock.Lock()
+	result := releaseChildWaiterHeld(parentPID)
+	tablesLock.Unlock()
+	return result
 }

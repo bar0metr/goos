@@ -70,8 +70,10 @@ func sendLifecycle(message ipc.Message) bool {
 }
 
 // launchLocks is the set a launch takes. The new process's address space
-// needs no lock: no other processor can reach it until it is registered.
-const launchLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+// needs no lock: no other processor can reach it until it is registered. A
+// Linux launch starts a family nothing else can reach yet, so it needs no
+// family lock either.
+const launchLocks = registryWrite | lifecycleQueue | handleWrite | channels | streams | sharedMemory
 
 // consumeInitControl serves one request PID 1 sent on the lifecycle channel.
 func consumeInitControl() {
@@ -396,7 +398,7 @@ func launchResourceProfile(profile supervisor.ResourceProfile) (process.Resource
 // abandonSpawn releases a launch that failed before its task existed: the
 // derived handles, the registry entry, the process slot, and the address space.
 func abandonSpawn(root uint64, spawned *process.Process, registered bool) {
-	linuxcompat.RemoveProcess(root, releaseLinuxDescriptionReference)
+	removeLinuxProcess(root)
 	if spawned != nil {
 		// Only stream handles were counted when installed; the source handles
 		// stay with PID 1, so no end can close here.

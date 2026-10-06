@@ -142,6 +142,9 @@ type cpuScratch struct {
 	// the native operation, 'l' and the Linux number, or zero.
 	callKind   byte
 	callNumber uint64
+	// linuxReleased collects descriptions the Linux tables let go of, for
+	// release once the tables are no longer held.
+	linuxReleased linuxcompat.Released
 }
 
 // cpuScratches holds each started processor's scratch. The bootstrap

@@ -44,12 +44,9 @@ type ThreadCreation struct {
 
 var threads [sched.MaxTasks]Thread
 
-// AllocateTID takes a TID from the PID space, distinct from every live PID
-// and TID. The caller records it with AddThread before allocating another.
-func AllocateTID() int32 { return allocatePID() }
+func allocateTIDHeld() int32 { return allocatePID() }
 
-// ThreadSlotFree reports whether the table can take another thread.
-func ThreadSlotFree() bool {
+func threadSlotFreeHeld() bool {
 	guard.Check()
 	for index := range threads {
 		if threads[index].Root == 0 {
@@ -59,14 +56,12 @@ func ThreadSlotFree() bool {
 	return false
 }
 
-// AddThread records a new thread of the process at root with a TID from
-// AllocateTID.
-func AddThread(task sched.TaskID, root uint64, tid int32) (*Thread, bool) {
+func addThreadHeld(task sched.TaskID, root uint64, tid int32) (*Thread, bool) {
 	guard.Check()
 	if task == 0 || root == 0 || tid < firstPID {
 		return nil, false
 	}
-	if _, found := FindProcess(root); !found {
+	if _, found := findProcessHeld(root); !found {
 		return nil, false
 	}
 	free := -1
@@ -91,14 +86,14 @@ func reserveThread(root uint64) (threadReservation, bool) {
 	if root == 0 {
 		return threadReservation{}, false
 	}
-	if _, found := FindProcess(root); !found {
+	if _, found := findProcessHeld(root); !found {
 		return threadReservation{}, false
 	}
 	for index := range threads {
 		if threads[index].Root != 0 {
 			continue
 		}
-		tid := AllocateTID()
+		tid := allocateTIDHeld()
 		threads[index] = Thread{Root: root, TID: tid, reserved: true}
 		return threadReservation{slot: uint8(index + 1), tid: tid, root: root}, true
 	}
@@ -148,9 +143,7 @@ func cancelThread(reservation threadReservation) bool {
 	return true
 }
 
-// PrepareThreadCreation reserves every non-architecture resource that clone
-// needs. Failure returns the Process quota to its previous value.
-func PrepareThreadCreation(owner *process.Process, root uint64) (ThreadCreation, bool) {
+func prepareThreadCreationHeld(owner *process.Process, root uint64) (ThreadCreation, bool) {
 	guard.Check()
 	if owner == nil || !owner.ReserveTask() {
 		return ThreadCreation{}, false
@@ -163,7 +156,7 @@ func PrepareThreadCreation(owner *process.Process, root uint64) (ThreadCreation,
 	return ThreadCreation{owner: owner, reservation: reservation, active: true}, true
 }
 
-func (creation *ThreadCreation) PreparedThread() (*Thread, bool) {
+func (creation *ThreadCreation) preparedThreadHeld() (*Thread, bool) {
 	guard.Check()
 	if creation == nil || !creation.active {
 		return nil, false
@@ -171,8 +164,7 @@ func (creation *ThreadCreation) PreparedThread() (*Thread, bool) {
 	return preparedThread(creation.reservation)
 }
 
-// Cancel releases a prepared creation after architecture setup fails.
-func (creation *ThreadCreation) Cancel() bool {
+func (creation *ThreadCreation) cancelHeld() bool {
 	guard.Check()
 	if creation == nil || !creation.active {
 		return false
@@ -183,20 +175,18 @@ func (creation *ThreadCreation) Cancel() bool {
 	return threadCanceled && taskCanceled
 }
 
-// Commit binds the scheduler task to both reservations. A rejected task
-// returns the transaction to its initial state.
-func (creation *ThreadCreation) Commit(task sched.TaskID) (*Thread, bool) {
+func (creation *ThreadCreation) commitHeld(task sched.TaskID) (*Thread, bool) {
 	guard.Check()
 	if creation == nil || !creation.active {
 		return nil, false
 	}
 	thread, committed := commitThread(creation.reservation, task)
 	if !committed {
-		creation.Cancel()
+		creation.cancelHeld()
 		return nil, false
 	}
 	if !creation.owner.CommitReservedTask(task) {
-		RemoveThread(task)
+		removeThreadHeld(task)
 		creation.owner.CancelReservedTask()
 		creation.active = false
 		return nil, false
@@ -205,9 +195,7 @@ func (creation *ThreadCreation) Commit(task sched.TaskID) (*Thread, bool) {
 	return thread, true
 }
 
-// FindThread returns the thread record of task, if task is a thread
-// created by clone.
-func FindThread(task sched.TaskID) (*Thread, bool) {
+func findThreadHeld(task sched.TaskID) (*Thread, bool) {
 	guard.Check()
 	if task == 0 {
 		return nil, false
@@ -220,10 +208,9 @@ func FindThread(task sched.TaskID) (*Thread, bool) {
 	return nil, false
 }
 
-// RemoveThread forgets the thread of task and returns what it recorded.
-func RemoveThread(task sched.TaskID) (Thread, bool) {
+func removeThreadHeld(task sched.TaskID) (Thread, bool) {
 	guard.Check()
-	record, found := FindThread(task)
+	record, found := findThreadHeld(task)
 	if !found {
 		return Thread{}, false
 	}
@@ -232,9 +219,7 @@ func RemoveThread(task sched.TaskID) (Thread, bool) {
 	return removed, true
 }
 
-// ThreadCount reports how many clone-created threads the process at root
-// has.
-func ThreadCount(root uint64) int {
+func threadCountHeld(root uint64) int {
 	guard.Check()
 	count := 0
 	for index := range threads {
@@ -245,9 +230,7 @@ func ThreadCount(root uint64) int {
 	return count
 }
 
-// ThreadRecords counts the records the process at root holds, reserved or
-// committed.
-func ThreadRecords(root uint64) int {
+func threadRecordsHeld(root uint64) int {
 	guard.Check()
 	count := 0
 	for index := range threads {
@@ -258,11 +241,9 @@ func ThreadRecords(root uint64) int {
 	return count
 }
 
-// TaskTID is the TID task sees from gettid: its thread's, or the PID for
-// the first thread.
-func TaskTID(task sched.TaskID, state *ProcessState) int32 {
+func taskTIDHeld(task sched.TaskID, state *ProcessState) int32 {
 	guard.Check()
-	if thread, found := FindThread(task); found {
+	if thread, found := findThreadHeld(task); found {
 		return thread.TID
 	}
 	if state == nil {
@@ -291,37 +272,27 @@ func forgetThreads(root uint64) {
 	}
 }
 
-// ForgetThreadsOf is forgetThreads for the kernel's exec path: the old
-// image's threads have been ended and must not touch the new one.
-func ForgetThreadsOf(root uint64) { forgetThreads(root) }
+func forgetThreadsOfHeld(root uint64) { forgetThreads(root) }
 
-// ThreadGroupOf returns the PID of the process whose thread holds tid. A
-// signal aimed at a thread goes to its process, whose signal state all its
-// threads share.
-func ThreadGroupOf(tid int32) (int32, bool) {
+func threadGroupOfHeld(tid int32) (int32, bool) {
 	guard.Check()
 	for index := range threads {
 		if threads[index].Task == 0 || threads[index].TID != tid {
 			continue
 		}
-		if state, found := FindProcess(threads[index].Root); found {
+		if state, found := findProcessHeld(threads[index].Root); found {
 			return state.PID, true
 		}
 	}
 	return 0, false
 }
 
-// SelectThreadSignals puts the signal mask of task in force in its process's
-// state, saving the mask of the thread that had it. The kernel calls it as
-// each Linux system call begins, so a call reads and changes its own
-// thread's mask and a signal is delivered at its return only if that
-// thread's mask allows. A thread that has ended gives its mask up.
-func SelectThreadSignals(state *ProcessState, task sched.TaskID) {
+func selectThreadSignalsHeld(state *ProcessState, task sched.TaskID) {
 	guard.Check()
 	if state == nil {
 		return
 	}
-	tid := TaskTID(task, state)
+	tid := taskTIDHeld(task, state)
 	current := state.maskTID
 	if current == 0 {
 		current = state.PID
@@ -340,15 +311,13 @@ func SelectThreadSignals(state *ProcessState, task sched.TaskID) {
 		state.maskTID = 0
 		return
 	}
-	if thread, found := FindThread(task); found {
+	if thread, found := findThreadHeld(task); found {
 		state.Signals.LoadThreadMask(thread.Mask)
 		state.maskTID = tid
 	}
 }
 
-// AdoptSignalsAsFirst makes the mask in force the first thread's, for a
-// thread exec makes the process's only one.
-func AdoptSignalsAsFirst(state *ProcessState) {
+func adoptSignalsAsFirstHeld(state *ProcessState) {
 	guard.Check()
 	if state != nil {
 		state.maskTID = 0
@@ -362,4 +331,144 @@ func threadByTID(tid int32) (*Thread, bool) {
 		}
 	}
 	return nil, false
+}
+
+// AllocateTID takes a TID from the PID space, distinct from every live PID
+// and TID. The caller records it with AddThread before allocating another.
+func AllocateTID() int32 {
+	tablesLock.Lock()
+	result := allocateTIDHeld()
+	tablesLock.Unlock()
+	return result
+}
+
+// ThreadSlotFree reports whether the table can take another thread.
+func ThreadSlotFree() bool {
+	tablesLock.Lock()
+	result := threadSlotFreeHeld()
+	tablesLock.Unlock()
+	return result
+}
+
+// AddThread records a new thread of the process at root with a TID from
+// AllocateTID.
+func AddThread(task sched.TaskID, root uint64, tid int32) (*Thread, bool) {
+	tablesLock.Lock()
+	result0, result1 := addThreadHeld(task, root, tid)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// PrepareThreadCreation reserves every non-architecture resource that clone
+// needs. Failure returns the Process quota to its previous value.
+func PrepareThreadCreation(owner *process.Process, root uint64) (ThreadCreation, bool) {
+	tablesLock.Lock()
+	result0, result1 := prepareThreadCreationHeld(owner, root)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+func (creation *ThreadCreation) PreparedThread() (*Thread, bool) {
+	tablesLock.Lock()
+	result0, result1 := creation.preparedThreadHeld()
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// Cancel releases a prepared creation after architecture setup fails.
+func (creation *ThreadCreation) Cancel() bool {
+	tablesLock.Lock()
+	result := creation.cancelHeld()
+	tablesLock.Unlock()
+	return result
+}
+
+// Commit binds the scheduler task to both reservations. A rejected task
+// returns the transaction to its initial state.
+func (creation *ThreadCreation) Commit(task sched.TaskID) (*Thread, bool) {
+	tablesLock.Lock()
+	result0, result1 := creation.commitHeld(task)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// FindThread returns the thread record of task, if task is a thread
+// created by clone.
+func FindThread(task sched.TaskID) (*Thread, bool) {
+	tablesLock.Lock()
+	result0, result1 := findThreadHeld(task)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// RemoveThread forgets the thread of task and returns what it recorded.
+func RemoveThread(task sched.TaskID) (Thread, bool) {
+	tablesLock.Lock()
+	result0, result1 := removeThreadHeld(task)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// ThreadCount reports how many clone-created threads the process at root
+// has.
+func ThreadCount(root uint64) int {
+	tablesLock.Lock()
+	result := threadCountHeld(root)
+	tablesLock.Unlock()
+	return result
+}
+
+// ThreadRecords counts the records the process at root holds, reserved or
+// committed.
+func ThreadRecords(root uint64) int {
+	tablesLock.Lock()
+	result := threadRecordsHeld(root)
+	tablesLock.Unlock()
+	return result
+}
+
+// TaskTID is the TID task sees from gettid: its thread's, or the PID for
+// the first thread.
+func TaskTID(task sched.TaskID, state *ProcessState) int32 {
+	tablesLock.Lock()
+	result := taskTIDHeld(task, state)
+	tablesLock.Unlock()
+	return result
+}
+
+// ForgetThreadsOf is forgetThreads for the kernel's exec path: the old
+// image's threads have been ended and must not touch the new one.
+func ForgetThreadsOf(root uint64) {
+	tablesLock.Lock()
+	forgetThreadsOfHeld(root)
+	tablesLock.Unlock()
+}
+
+// ThreadGroupOf returns the PID of the process whose thread holds tid. A
+// signal aimed at a thread goes to its process, whose signal state all its
+// threads share.
+func ThreadGroupOf(tid int32) (int32, bool) {
+	tablesLock.Lock()
+	result0, result1 := threadGroupOfHeld(tid)
+	tablesLock.Unlock()
+	return result0, result1
+}
+
+// SelectThreadSignals puts the signal mask of task in force in its process's
+// state, saving the mask of the thread that had it. The kernel calls it as
+// each Linux system call begins, so a call reads and changes its own
+// thread's mask and a signal is delivered at its return only if that
+// thread's mask allows. A thread that has ended gives its mask up.
+func SelectThreadSignals(state *ProcessState, task sched.TaskID) {
+	tablesLock.Lock()
+	selectThreadSignalsHeld(state, task)
+	tablesLock.Unlock()
+}
+
+// AdoptSignalsAsFirst makes the mask in force the first thread's, for a
+// thread exec makes the process's only one.
+func AdoptSignalsAsFirst(state *ProcessState) {
+	tablesLock.Lock()
+	adoptSignalsAsFirstHeld(state)
+	tablesLock.Unlock()
 }

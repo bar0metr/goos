@@ -199,7 +199,7 @@ func forkRegisters(task sched.TaskID, frame *linuxabi.Frame) (amd64.UserRegister
 // registry entry, and its address space. Handle release closes no channel,
 // so the parent's VFS endpoint stays open.
 func abandonFork(pid process.ID, root uint64, child *process.Process, registered bool) {
-	if !linuxcompat.RemoveProcess(root, releaseLinuxDescriptionReference) {
+	if !removeLinuxProcess(root) {
 		linuxcompat.RollbackProcessRecord(pid)
 	}
 	child.Handles().CloseAll(abandonHandle)
@@ -229,7 +229,10 @@ func exitLinuxProcess(exited *process.Process, code uint64) {
 	parentPID, pid := linuxcompat.ParentPIDOf(state.PID), state.PID
 	termination := linuxcompat.TerminationFromCode(code, exited.CPUTicks())
 	releaseVforkParent(state)
-	linuxcompat.ExitProcess(root, termination, releaseLinuxDescriptionReference)
+	released := &thisCPU().linuxReleased
+	released.Reset()
+	linuxcompat.ExitProcess(root, termination, released)
+	releaseDescriptions(released)
 	// The waiting parent is woken for the child before SIGCHLD can
 	// interrupt it, so wait4 returns the child.
 	wakeChildWaiter(parentPID)
@@ -282,4 +285,23 @@ func checkForkRollback(before linuxForkCensus, familyID uint64, pid process.ID, 
 		return
 	}
 	mark("LINUX_FORK_ROLLBACK_OK")
+}
+
+// removeLinuxProcess rolls back the compatibility state of a process that
+// never ran and releases what its last descriptors held.
+func removeLinuxProcess(root uint64) bool {
+	released := &thisCPU().linuxReleased
+	released.Reset()
+	removed := linuxcompat.RemoveProcess(root, released)
+	releaseDescriptions(released)
+	return removed
+}
+
+// releaseDescriptions releases the descriptions the Linux tables collected,
+// outside them.
+func releaseDescriptions(released *linuxcompat.Released) {
+	for index := 0; index < released.Len(); index++ {
+		releaseLinuxDescriptionReference(released.At(index))
+	}
+	released.Reset()
 }

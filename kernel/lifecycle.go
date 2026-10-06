@@ -52,7 +52,8 @@ const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | ch
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
 		owner, _ := processRegistry.Owner(sched.TaskID(task))
-		held := takeLocks(exitLocks, owner)
+		held := heldLocks{set: exitLocks, owner: owner, family: linuxFamilyOf(owner)}
+		held.take(nil)
 		released := deliverTaskExit(task)
 		held.drop()
 		// The slot is cleared only now: its locks lived in it.
@@ -62,12 +63,25 @@ func deliverProcessExits() {
 	}
 }
 
+// linuxFamilyOf returns the Linux family of a process, or zero for a native
+// process.
+func linuxFamilyOf(owner *process.Process) uint64 {
+	if owner == nil || owner.ABI() != process.ABILinuxX8664 {
+		return 0
+	}
+	if state, found := linuxcompat.FindProcess(owner.AddressSpace().Root); found {
+		return state.FamilyID
+	}
+	return 0
+}
+
 // deliverTaskExit tears down one exited task and, with its process's last
 // task, the process. It returns the process slot to clear once the locks
 // are released.
 func deliverTaskExit(task uint64) *process.Process {
 	taskID := sched.TaskID(task)
 	cancelExecutableFault(taskID)
+	forgetLinuxCaller(taskID)
 	processRegistry.ForgetOwner(taskID)
 	cancelLinuxExec(taskID)
 	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
