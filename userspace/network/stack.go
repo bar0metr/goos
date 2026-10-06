@@ -43,9 +43,14 @@ type probe struct {
 	deadline  uint64
 }
 
-// Stack is the whole state of one interface. It holds no pointers and grows
-// with nothing: every table and the transmit ring are fixed arrays, so a
-// service can keep one in static storage.
+// Stack is the whole state of one interface. It holds no pointers and every
+// table and the transmit ring are fixed arrays, so a service can keep one in
+// static storage.
+//
+// Before any address goes live, DHCP or static, the stack sends two ARP probes
+// 500 ms apart and waits 500 ms after the second. A DHCP conflict declines the
+// lease and retries discovery after 10 s. A static conflict leaves the stack
+// Failed until the next Configure or LinkUp.
 type Stack struct {
 	random     uint64
 	state      State

@@ -487,7 +487,9 @@ func TestDHCPOfferValidation(t *testing.T) {
 				return append(o, option{optionRenewalTime, u32(30)}, option{optionRebindTime, u32(60)})
 			})
 		}, true},
-		{"pads", func(r *serverReply) { r.options = append([]byte{0, 0, 0}, base(func(o []option) []option { return o })...) }, true},
+		{"pads", func(r *serverReply) {
+			r.options = append([]byte{0, 0, 0}, base(func(o []option) []option { return o })...)
+		}, true},
 		{"unknown option", func(r *serverReply) { r.options = base(add(200, make([]byte, 255))) }, true},
 		{"minimum lease", func(r *serverReply) { r.options = base(replace(optionLeaseTime, u32(minLeaseSeconds))) }, true},
 

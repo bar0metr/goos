@@ -115,8 +115,8 @@ func (client *dhcpClient) leased() bool {
 }
 
 // dhcpMessage holds the fields of a server reply this client uses. seen
-// tracks options already read, so a repeated option is refused rather than
-// silently overriding the first.
+// tracks options already read, so a repeated option fails the message
+// instead of overriding the first.
 type dhcpMessage struct {
 	kind     uint8
 	yiaddr   IPv4
@@ -142,7 +142,8 @@ const (
 )
 
 // parseDHCP decodes a BOOTP reply for our transaction. A wrong transaction
-// ID or hardware address is someone else's traffic, not a malformed packet.
+// ID or hardware address marks another client's traffic, which counts as a
+// drop.
 func parseDHCP(data []byte, xid uint32, mac MAC) (dhcpMessage, parseStatus) {
 	var message dhcpMessage
 	if len(data) < dhcpOptionsAt {
@@ -572,8 +573,11 @@ func (stack *Stack) sendDHCP(outgoing dhcpOutgoing, now uint64) {
 	}
 	message[0], message[1], message[2] = bootRequest, hardwareEther, hardwareLength
 	binary.BigEndian.PutUint32(message[4:8], stack.dhcp.xid)
-	elapsed := (now - stack.dhcp.started) / second
-	if now < stack.dhcp.started || elapsed > 0xffff {
+	elapsed := uint64(0)
+	if now > stack.dhcp.started {
+		elapsed = (now - stack.dhcp.started) / second
+	}
+	if elapsed > 0xffff {
 		elapsed = 0xffff
 	}
 	binary.BigEndian.PutUint16(message[8:10], uint16(elapsed))

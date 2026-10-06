@@ -209,8 +209,8 @@ func equalText(text []byte, want string) bool {
 }
 
 // ParseIPv4 accepts strict dotted decimal: four parts of one to three digits,
-// each at most 255, with no leading zero except a lone "0". Octal-looking or
-// padded forms are refused rather than guessed at.
+// each at most 255, with no leading zero except a lone "0". It refuses
+// octal-looking and padded forms instead of guessing what they mean.
 func ParseIPv4(text []byte) (IPv4, bool) {
 	var address IPv4
 	if len(text) == 0 || len(text) > MaxIPv4Text {
