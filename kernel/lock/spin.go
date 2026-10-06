@@ -25,32 +25,37 @@ import (
 type Level uint8
 
 const (
-	// LevelKernel is the kernel-object lock: processes, handles, channels,
-	// streams, waits, address-space metadata, and the Linux personality.
-	LevelKernel Level = iota + 1
-	// LevelLifecycle serializes housekeeping steps and the lifecycle queue.
+	// LevelRegistry is the process registry, the fields of every process
+	// but its handles and address space, and the task-to-process map.
+	LevelRegistry Level = iota + 1
+	// LevelLinux is the Linux personality's state: process states with their
+	// descriptors and signals, process records, threads, open descriptions,
+	// directories, VFS sessions, and exec staging.
+	LevelLinux
+	// LevelLifecycle is the queue of lifecycle messages for PID 1.
 	LevelLifecycle
-	// LevelRegistry is the process registry and the Linux process tables.
-	LevelRegistry
-	// LevelProcess is one process: its handles, quotas, and Linux state.
-	LevelProcess
-	// LevelAddressSpace is one address space: its regions and page tables.
-	LevelAddressSpace
-	// LevelVFS is the Linux VFS bridge: sessions and their owners.
-	LevelVFS
-	// LevelChannel is the channel registry, every channel, and IPC waits.
+	// LevelHandle is every process's handle table. IPC moves handles from
+	// one table to another, so one lock covers them all.
+	LevelHandle
+	// LevelChannel is the channel registry, every channel, and the
+	// executable page requests that travel on channels.
 	LevelChannel
-	// LevelStream is the stream registry, every stream, and stream waits.
+	// LevelStream is the stream registry and every stream.
 	LevelStream
+	// LevelShmem is the shared memory objects and the image page cache.
+	LevelShmem
+	// LevelAddressSpace is one address space: its regions and page tables.
+	// Copies and faults read it; mapping changes write it.
+	LevelAddressSpace
+	// LevelExecutable is the executable table. A fault inside a copy reads
+	// an image page from it with the address space held.
+	LevelExecutable
 	// LevelFutex is one futex bucket.
 	LevelFutex
-	// LevelWait is process waits, multi-object waits, IRQ waits, and the
-	// Linux call continuations.
+	// LevelWait is the wait tables, each with a lock of its own: channel and
+	// stream waits, process waits, multi-object waits, and the Linux call
+	// continuations. None is taken while another is held.
 	LevelWait
-	// LevelShmem is the shared memory objects.
-	LevelShmem
-	// LevelExecutable is the executable table and its page cache.
-	LevelExecutable
 	// LevelLog is the kernel log and the diagnostic trace ring.
 	LevelLog
 	// LevelMemory is the physical page allocator.
@@ -72,9 +77,9 @@ const (
 const Levels = int(levelCount)
 
 var levelNames = [levelCount]string{
-	"none", "kernel", "lifecycle", "registry", "process", "address-space", "vfs",
-	"channel", "stream", "futex", "wait", "shmem", "executable", "log", "memory",
-	"random", "scheduler", "shootdown", "console",
+	"none", "registry", "linux", "lifecycle", "handle", "channel",
+	"stream", "shmem", "address-space", "executable", "futex", "wait", "log",
+	"memory", "random", "scheduler", "shootdown", "console",
 }
 
 // String names the level in diagnostics.
@@ -202,46 +207,66 @@ func (lock *Spin) LockUnless(stop *uint64) bool {
 // spin waits for the lock and takes it. It returns false, without the lock,
 // when stop becomes nonzero.
 func (lock *Spin) spin(stop *uint64) bool {
-	contended.Add(1)
-	level := lock.level
-	if level >= levelCount {
-		level = 0
-	}
-	stats[level].contended.Add(1)
-	start, reported, rounds := uint64(0), false, 0
-	if hooks.Now != nil {
-		start = hooks.Now()
-	}
+	var wait waiting
+	wait.begin(lock.level)
 	for {
 		for lock.state.Load() != 0 {
 			if stop != nil && atomic.LoadUint64(stop) != 0 {
-				lock.spun(level, start)
+				wait.end()
 				return false
 			}
-			if hooks.Pause != nil {
-				hooks.Pause()
-			}
-			rounds++
-			if rounds%1024 == 0 && !reported && hooks.Now != nil && hooks.StuckAfter != 0 && hooks.Now()-start > hooks.StuckAfter {
-				reported = true
-				stats[level].stuck.Add(1)
-				if hooks.Stuck != nil {
-					hooks.Stuck(level, lock.owner.Load())
-				}
-			}
+			wait.pause(&lock.owner)
 		}
 		if lock.state.CompareAndSwap(0, 1) {
-			lock.spun(level, start)
+			wait.end()
 			return true
 		}
 	}
 }
 
-func (lock *Spin) spun(level Level, start uint64) {
+// waiting is one acquisition that spins: it counts the contention and runs
+// the watchdog.
+type waiting struct {
+	level    Level
+	start    uint64
+	rounds   int
+	reported bool
+}
+
+func (wait *waiting) begin(level Level) {
+	if level >= levelCount {
+		level = 0
+	}
+	contended.Add(1)
+	stats[level].contended.Add(1)
+	wait.level = level
+	if hooks.Now != nil {
+		wait.start = hooks.Now()
+	}
+}
+
+// pause spins once. owner is the holder's processor plus one, when known.
+func (wait *waiting) pause(owner *atomic.Uint32) {
+	if hooks.Pause != nil {
+		hooks.Pause()
+	}
+	wait.rounds++
+	if wait.rounds%1024 != 0 || wait.reported || hooks.Now == nil || hooks.StuckAfter == 0 || hooks.Now()-wait.start <= hooks.StuckAfter {
+		return
+	}
+	wait.reported = true
+	stats[wait.level].stuck.Add(1)
+	if hooks.Stuck != nil {
+		hooks.Stuck(wait.level, owner.Load())
+	}
+}
+
+func (wait *waiting) end() {
 	if hooks.Now == nil {
 		return
 	}
-	spent := hooks.Now() - start
+	spent := hooks.Now() - wait.start
+	level := wait.level
 	stats[level].spin.Add(spent)
 	for longest := stats[level].longest.Load(); spent > longest && !stats[level].longest.CompareAndSwap(longest, spent); longest = stats[level].longest.Load() {
 	}
@@ -295,6 +320,51 @@ func (lock *Spin) HeldByCaller() bool {
 func (lock *Spin) AssertHeld() {
 	if validation.Enabled && hooks.CPU != nil && lock.owner.Load() != hooks.CPU()+1 {
 		fatal("kernel state used without its lock: " + lock.level.String())
+	}
+}
+
+// Guard names the lock that guards a package's state when the package does
+// not own it: the kernel installs the lock at boot, and the package checks it
+// at each entry. Host tests install nothing and check nothing.
+type Guard struct {
+	spin *Spin
+	rw   *RW
+}
+
+// Set installs the guarding lock.
+func (guard *Guard) Set(spin *Spin) { guard.spin = spin }
+
+// Installed reports whether a guarding lock is installed.
+func (guard *Guard) Installed() bool { return guard.spin != nil || guard.rw != nil }
+
+// SetRW installs a reader-writer lock as the guard.
+func (guard *Guard) SetRW(rw *RW) { guard.rw = rw }
+
+// Check stops a validation build whose caller does not hold the guarding
+// lock, for reading at least.
+func (guard *Guard) Check() {
+	if !validation.Enabled {
+		return
+	}
+	if guard.spin != nil {
+		guard.spin.AssertHeld()
+	}
+	if guard.rw != nil {
+		guard.rw.AssertHeld()
+	}
+}
+
+// CheckWriter stops a validation build whose caller changes the guarded
+// state without holding the guarding lock exclusively.
+func (guard *Guard) CheckWriter() {
+	if !validation.Enabled {
+		return
+	}
+	if guard.spin != nil {
+		guard.spin.AssertHeld()
+	}
+	if guard.rw != nil {
+		guard.rw.AssertWriter()
 	}
 }
 

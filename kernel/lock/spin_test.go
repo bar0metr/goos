@@ -84,7 +84,7 @@ func TestBitHelpers(t *testing.T) {
 func TestLockUnlessGivesUpWhenStopped(t *testing.T) {
 	Install(Hooks{})
 	defer Install(Hooks{})
-	holder := New(LevelProcess)
+	holder := New(LevelRegistry)
 	holder.state.Store(1) // another processor holds it
 	stop := uint64(1)
 	waiter := &holder

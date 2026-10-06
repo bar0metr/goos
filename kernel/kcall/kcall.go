@@ -104,6 +104,10 @@ const (
 	ActionReturn Action = iota
 	ActionExit
 	ActionBlock
+	// ActionRetry runs the call again after a scheduling point, with nothing
+	// changed: the kernel gave it up before it began, because the task was
+	// being stopped while it waited for a lock.
+	ActionRetry
 )
 
 type Request struct {

@@ -53,7 +53,7 @@ func finishStreamClosure(closure stream.Closure) {
 
 func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found || length != 16 || owner.Handles().Available() < 2 {
 		return kcall.StatusPermissionDenied
 	}
@@ -98,7 +98,7 @@ func (handler nativeCallHandler) StreamCreate(address uint64, length uint64) kca
 }
 
 func (handler nativeCallHandler) streamEndpoint(id uint64, required capability.Rights, writer bool) (*stream.Stream, kcall.Status) {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return nil, kcall.StatusPermissionDenied
 	}
@@ -169,7 +169,7 @@ func (handler nativeCallHandler) StreamRead(id uint64, descriptor uint64, length
 	// once there is that much; waking them for less would have them refused
 	// and wait again.
 	if endpoint.WriteStatus() != stream.StatusWouldBlock {
-		cap, _ := processRegistry.ByRoot(handler.root)
+		cap, _ := handler.self()
 		streamCap, _ := cap.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Read)
 		streamID, _, _ := stream.DecodeEndpointObject(streamCap.Object())
 		wakeStreamWaiters(streamID, 1, ipc.WaitMessage)
@@ -197,7 +197,7 @@ func (handler nativeCallHandler) StreamWrite(id uint64, descriptor uint64, lengt
 	if !writeStreamResult(handler.root, descriptor, uint64(count)) {
 		return kcall.StatusInvalidArgument
 	}
-	owner, _ := processRegistry.ByRoot(handler.root)
+	owner, _ := handler.self()
 	streamCap, _ := owner.Handles().Lookup(handle.ID(id), handle.TypeStream, capability.Write)
 	streamID, _, _ := stream.DecodeEndpointObject(streamCap.Object())
 	wakeStreamWaiters(streamID, 0, ipc.WaitMessage)
@@ -234,7 +234,7 @@ func wakeStreamWaiters(streamID uint64, side uint8, reason ipc.WaitReason) {
 			continue
 		}
 		if reason == ipc.WaitPeerDied {
-			streamWaitStatus[task] = kcall.StatusPeerDied
+			streamWaitStatus.set(uint64(task), kcall.StatusPeerDied)
 		}
 		if !amd64.WakeTaskID(uint64(local.streamWakeResults[index].Task)) {
 			panicSerial("stale stream wake task")
@@ -252,7 +252,7 @@ func expireStreamWaiters() {
 			local.streamWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
-		streamWaitStatus[task] = kcall.StatusTimeout
+		streamWaitStatus.set(uint64(task), kcall.StatusTimeout)
 		if !amd64.WakeTaskID(uint64(local.streamWakeResults[index].Task)) {
 			panicSerial("stale stream timeout task")
 		}
@@ -268,12 +268,10 @@ func waitStream(handler nativeCallHandler, id, timeout, task uint64) (kcall.Stat
 	if _, _, valid := taskID.Parts(); !valid {
 		return kcall.StatusInvalidArgument, false
 	}
-	if streamWaitStatus[task] != kcall.StatusOK {
-		status := streamWaitStatus[task]
-		streamWaitStatus[task] = kcall.StatusOK
+	if status := streamWaitStatus.take(task); status != kcall.StatusOK {
 		return status, false
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied, false
 	}
@@ -305,7 +303,7 @@ func waitStream(handler nativeCallHandler, id, timeout, task uint64) (kcall.Stat
 	}
 	if status != stream.StatusWouldBlock {
 		streamWaitSet.Cancel(taskID)
-		streamWaitStatus[task] = kcall.StatusOK
+		streamWaitStatus.set(uint64(task), kcall.StatusOK)
 		return streamStatus(status), false
 	}
 	return kcall.StatusNotFound, true
@@ -313,10 +311,14 @@ func waitStream(handler nativeCallHandler, id, timeout, task uint64) (kcall.Stat
 
 //export goos_dispatch_stream_wait
 func dispatchStreamWait(id, timeout, rootAndTask uint64) uint64 {
+	call, ok := beginNativeCall(kcall.OperationStreamWait)
+	if !ok {
+		return uint64(kcall.ActionRetry) << 32
+	}
 	status, blocked := waitStream(nativeCallHandler{root: rootAndTask &^ 0xfff}, id, timeout, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
 	}
-	return uint64(action)<<32 | uint64(status)
+	return call.end(uint64(action)<<32 | uint64(status))
 }

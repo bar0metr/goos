@@ -62,16 +62,15 @@ var (
 	bootProcessB       *process.Process
 	bootInitProcess    *process.Process
 	processRegistry    process.Registry
-	ipcWaitSet         ipc.WaitSet
 
-	ipcWaitStatus  [sched.MaxTasks]kcall.Status
-	processWaitSet process.WaitSet
-
-	processWaitStatus [sched.MaxTasks]kcall.Status
+	// The wait sets lock themselves; the statuses are atomic.
+	ipcWaitSet        ipc.WaitSet
+	ipcWaitStatus     waitStatuses
+	processWaitSet    process.WaitSet
+	processWaitStatus waitStatuses
 	streamWaitSet     ipc.WaitSet
-
-	streamWaitStatus [sched.MaxTasks]kcall.Status
-	waitAnyTable     kernelwait.Table
+	streamWaitStatus  waitStatuses
+	waitAnyTable      kernelwait.Table
 
 	// imagePages holds the read-only pages of system images that every
 	// process running them maps (ADR 0081).
@@ -643,8 +642,11 @@ func bootContinue() {
 		}
 	}
 	// From here the other processors run tasks, so the boot task changes
-	// kernel objects only under the kernel lock.
-	flags := amd64.KernelLock()
+	// kernel objects only under their locks, and the packages check that it
+	// does.
+	installLockGuards()
+	flags := amd64.DisableInterrupts()
+	takeLocks(launchLocks, nil, nil)
 	bringProcessorsOnline()
 	if pagesUsed := initPagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !initProcess.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		panicSerial("PID 1 exceeded its page quota")
@@ -656,7 +658,8 @@ func bootContinue() {
 	if validation.Enabled {
 		startSelfTestTasks()
 	}
-	amd64.KernelUnlock(flags)
+	dropLocks(launchLocks, nil)
+	amd64.RestoreInterrupts(flags)
 	if validation.Enabled {
 		awaitValidationBoot()
 	} else {
@@ -705,12 +708,13 @@ func mark(marker string) {
 	}
 }
 
-// serviceKernel runs one step of the kernel's own work under the kernel lock
-// that native calls run under, then sleeps until the next tick, task exit,
-// or lifecycle request. A wake that arrives after the step's last check
-// keeps the task from sleeping, so none is lost.
+// serviceKernel runs one step of the kernel's own work, then sleeps until
+// the next tick, task exit, or lifecycle request. A wake that arrives after
+// the step's last check keeps the task from sleeping, so none is lost. Each
+// part takes the locks of the state it touches; interrupts stay disabled
+// throughout, as they are wherever a lock is held.
 func serviceKernel() {
-	flags := amd64.KernelLock()
+	flags := amd64.DisableInterrupts()
 	if validation.Enabled {
 		if !ps2KeyboardValidated && amd64.PS2KeyboardEventTake() {
 			ps2KeyboardValidated = true
@@ -720,9 +724,11 @@ func serviceKernel() {
 	}
 	stirRandom()
 	expireWaitDeadlines()
+	takeLocks(lifecycleQueue|channels, nil, nil)
 	flushLifecycle()
+	dropLocks(lifecycleQueue|channels, nil)
 	deliverProcessExits()
 	consumeInitControl()
-	amd64.KernelUnlock(flags)
+	amd64.RestoreInterrupts(flags)
 	amd64.KernelSleep()
 }

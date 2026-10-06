@@ -16,7 +16,7 @@ import (
 
 func (handler *linuxCallHandler) Brk(request linuxcompat.Request) linuxcompat.Result {
 	state, found := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if !found || !owned {
 		return linuxcompat.Result{Errno: linuxabi.ENOMEM}
 	}
@@ -54,7 +54,7 @@ func (handler *linuxCallHandler) Mmap(request linuxcompat.Request) linuxcompat.R
 	if errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return linuxcompat.Result{Errno: linuxabi.ENOMEM}
 	}
@@ -109,12 +109,12 @@ func (handler *linuxCallHandler) Mprotect(request linuxcompat.Request) linuxcomp
 // segments, which the native call refuses because they are pinned. glibc
 // makes its relocated data (PT_GNU_RELRO) read-only this way before main.
 // Every page of a Linux image is a private copy (demandFault and
-// installExecutablePage allocate and fill it), never a frame another
+// executableStep allocate and fill it), never a frame another
 // process maps, so a narrower protection affects this process alone. Adding
 // a right stays refused.
 func (handler *linuxCallHandler) restrictImage(address, length uint64, requested region.Protection) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

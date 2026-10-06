@@ -69,7 +69,18 @@ func sendLifecycle(message ipc.Message) bool {
 	return true
 }
 
+// launchLocks is the set a launch takes. The new process's address space
+// needs no lock: no other processor can reach it until it is registered.
+const launchLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+
+// consumeInitControl serves one request PID 1 sent on the lifecycle channel.
 func consumeInitControl() {
+	takeLocks(launchLocks, nil, nil)
+	consumeInitControlLocked()
+	dropLocks(launchLocks, nil)
+}
+
+func consumeInitControlLocked() {
 	// Retained replies are delivered before new work is accepted, so that the
 	// caller waiting on one is never overtaken by a later request.
 	if lifecycleChannel == nil || pendingLifecycleCount != 0 {
@@ -91,8 +102,14 @@ func consumeInitControl() {
 	// change it between validation and use.
 	staged := launchTemplate[:event.StartupSize]
 	pid, processHandle, launchStatus := process.ID(0), handle.ID(0), supervisor.LaunchInvalidImage
-	if len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged) {
+	initSpace := bootInitProcess.Space()
+	initSpace.RLock()
+	copied := len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged)
+	initSpace.RUnlock()
+	if copied {
+		executableLock.Lock()
 		pid, processHandle, launchStatus = spawnExecutable(event.Executable, event.ProcessName(), event.Capabilities[:event.CapabilityCount], event.ResourceProfile, staged)
+		executableLock.Unlock()
 	}
 	if launchStatus != supervisor.LaunchOK {
 		level := logfmt.Warn
@@ -525,16 +542,13 @@ func mapStartup(root uint64, regions *region.Map, bound []byte) bool {
 	return true
 }
 
-// startupChunk carries StartupRead's copy from the caller's startup pages to
-// the buffer it named.
-var startupChunk [512]byte
-
 // StartupRead copies the first length bytes of the caller's startup pages to
 // address, or zeros past their end and for a process started without them.
 // A process reads the header, learns the object's size, and then reads the
 // rest or looks at the pages directly (ADR 0109).
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found || length == 0 || length > kcall.MaxStartupSize {
 		return kcall.StatusPermissionDenied
 	}
@@ -543,7 +557,7 @@ func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcal
 		available = entry.Length
 	}
 	for done := uint64(0); done < length; {
-		chunk := startupChunk[:min(uint64(len(startupChunk)), length-done)]
+		chunk := local.startupChunk[:min(uint64(len(local.startupChunk)), length-done)]
 		clear(chunk)
 		if done < available {
 			chunk = chunk[:min(uint64(len(chunk)), available-done)]

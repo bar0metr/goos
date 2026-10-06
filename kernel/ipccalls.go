@@ -9,7 +9,6 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
-	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -44,7 +43,7 @@ func releaseChannelSlot(channelID uint64) {
 
 func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found || owner.ID() != 1 || length != 16 || owner.Handles().Available() < 2 {
 		return kcall.StatusPermissionDenied
 	}
@@ -88,7 +87,7 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 }
 
 func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -144,7 +143,7 @@ func closeMovedHandle(table *handle.Table, id handle.ID) {
 }
 
 func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (*ipc.Channel, uint8, *process.Process, *process.Process, kcall.Status) {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return nil, 0, nil, nil, kcall.StatusPermissionDenied
 	}
@@ -258,9 +257,7 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	if _, _, valid := taskID.Parts(); !valid {
 		return kcall.StatusInvalidArgument, false
 	}
-	if ipcWaitStatus[task] != kcall.StatusOK {
-		status := ipcWaitStatus[task]
-		ipcWaitStatus[task] = kcall.StatusOK
+	if status := ipcWaitStatus.take(task); status != kcall.StatusOK {
 		return status, false
 	}
 	if !vm.CopyIn(handler.root, descriptor, local.receiveDescriptorWire[:]) {
@@ -296,7 +293,7 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 		ipcWaitSet.Cancel(taskID)
 		// A waker may already have removed the registration and stored a resume
 		// status. It must not surface on the next wait, which this call answers.
-		ipcWaitStatus[task] = kcall.StatusOK
+		ipcWaitStatus.set(uint64(task), kcall.StatusOK)
 		return status, false
 	}
 	return kcall.StatusNotFound, true
@@ -351,15 +348,11 @@ func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 			continue
 		}
 		if reason == ipc.WaitPeerDied {
-			ipcWaitStatus[task] = kcall.StatusPeerDied
+			ipcWaitStatus.set(uint64(task), kcall.StatusPeerDied)
 		}
-		if !amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task)) {
-			console := kernelconsole.New()
-			console.WriteString("PANIC: stale IPC wake task\n")
-			for {
-				amd64.Halt()
-			}
-		}
+		// A task another processor killed after it registered fails the
+		// wake; its exit cancels what it left registered.
+		amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task))
 		local.ipcWakeResults[index] = ipc.WaitResult{}
 	}
 }
@@ -377,24 +370,24 @@ func expireIPCWaiters() {
 			local.ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
-		ipcWaitStatus[task] = kcall.StatusTimeout
-		if !amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task)) {
-			console := kernelconsole.New()
-			console.WriteString("PANIC: stale IPC timeout task\n")
-			for {
-				amd64.Halt()
-			}
-		}
+		ipcWaitStatus.set(uint64(task), kcall.StatusTimeout)
+		// A task another processor killed after it registered fails the
+		// wake; its exit cancels what it left registered.
+		amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task))
 		local.ipcWakeResults[index] = ipc.WaitResult{}
 	}
 }
 
 //export goos_dispatch_ipc_wait
 func dispatchIPCWait(channel uint64, descriptor uint64, size uint64, rootAndTask uint64) uint64 {
+	call, ok := beginNativeCall(kcall.OperationIPCWaitReceive)
+	if !ok {
+		return uint64(kcall.ActionRetry) << 32
+	}
 	status, blocked := waitReceive(nativeCallHandler{root: rootAndTask &^ 0xfff}, channel, descriptor, size, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
 	}
-	return uint64(action)<<32 | uint64(status)
+	return call.end(uint64(action)<<32 | uint64(status))
 }

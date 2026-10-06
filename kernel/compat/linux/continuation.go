@@ -3,6 +3,7 @@ package linux
 import (
 	"goos/internal/limits"
 	"goos/kernel/compat/linux/abi"
+	"goos/kernel/lock"
 	"goos/kernel/sched"
 )
 
@@ -52,14 +53,22 @@ type Continuation struct {
 func (state *Continuation) Path() []byte { return state.path[:state.pathSize] }
 
 // ContinuationTable has one slot per scheduler slot. Full generation-safe task
-// identity prevents a stale wake from attaching to a reused slot.
+// identity prevents a stale wake from attaching to a reused slot. Its lock
+// makes each method one step, so a wake from another processor lands before
+// or after the owner's own step, never inside it.
 type ContinuationTable struct {
+	lock    lock.Spin
 	entries [sched.MaxTasks]Continuation
+}
+
+func (set *ContinuationTable) take() {
+	set.lock.SetLevel(lock.LevelWait)
+	set.lock.Lock()
 }
 
 var SyscallContinuations ContinuationTable
 
-func (table *ContinuationTable) Begin(task sched.TaskID, request Request, path []byte) bool {
+func (table *ContinuationTable) beginHeld(task sched.TaskID, request Request, path []byte) bool {
 	slot, _, valid := task.Parts()
 	if table == nil || !valid || len(path) > limits.PathMax || table.entries[slot].Task != 0 {
 		return false
@@ -93,7 +102,7 @@ type Pending struct {
 	Issued      bool
 }
 
-func (table *ContinuationTable) Pending(task sched.TaskID) (Pending, bool) {
+func (table *ContinuationTable) pendingHeld(task sched.TaskID) (Pending, bool) {
 	entry, ok := table.entry(task)
 	if !ok {
 		return Pending{}, false
@@ -102,10 +111,7 @@ func (table *ContinuationTable) Pending(task sched.TaskID) (Pending, bool) {
 		Correlation: entry.Correlation, Partial: entry.Partial, Note: entry.Note, Wake: entry.Wake, Issued: entry.Issued}, true
 }
 
-// Annotate stores the second path of a two-path call and a note the handler
-// needs at every stage. Both belong to the call, not to a stage, so they
-// are set once, before the first request is issued.
-func (table *ContinuationTable) Annotate(task sched.TaskID, target []byte, note uint64) bool {
+func (table *ContinuationTable) annotateHeld(task sched.TaskID, target []byte, note uint64) bool {
 	entry, ok := table.entry(task)
 	if !ok || len(target) > limits.PathMax || entry.Stage != 1 || entry.Issued {
 		return false
@@ -119,9 +125,7 @@ func (table *ContinuationTable) Annotate(task sched.TaskID, target []byte, note 
 	return true
 }
 
-// Paths returns the copied paths of an active call. The slices alias the
-// table and are valid until the call finishes.
-func (table *ContinuationTable) Paths(task sched.TaskID) ([]byte, []byte) {
+func (table *ContinuationTable) pathsHeld(task sched.TaskID) ([]byte, []byte) {
 	entry, ok := table.entry(task)
 	if !ok {
 		return nil, nil
@@ -129,9 +133,7 @@ func (table *ContinuationTable) Paths(task sched.TaskID) ([]byte, []byte) {
 	return entry.path[:entry.pathSize], entry.target[:entry.targetSize]
 }
 
-// Issue marks the current stage's externally visible request before it is
-// sent. Retrying the syscall entry cannot issue that stage twice.
-func (table *ContinuationTable) Issue(task sched.TaskID, stage uint8, correlation uint64) bool {
+func (table *ContinuationTable) issueHeld(task sched.TaskID, stage uint8, correlation uint64) bool {
 	entry, ok := table.entry(task)
 	if !ok || stage == 0 || correlation == 0 || entry.Stage != stage || entry.Phase != ContinuationReady || entry.Issued {
 		return false
@@ -140,9 +142,7 @@ func (table *ContinuationTable) Issue(task sched.TaskID, stage uint8, correlatio
 	return true
 }
 
-// BlockContext parks a syscall before it issues a VFS request. The family
-// context wakes it without a correlation because no request exists yet.
-func (table *ContinuationTable) BlockContext(task sched.TaskID, stage uint8) bool {
+func (table *ContinuationTable) blockContextHeld(task sched.TaskID, stage uint8) bool {
 	entry, ok := table.entry(task)
 	if !ok || entry.Stage != stage || entry.Phase != ContinuationReady || entry.Issued || entry.Correlation != 0 {
 		return false
@@ -151,7 +151,7 @@ func (table *ContinuationTable) BlockContext(task sched.TaskID, stage uint8) boo
 	return true
 }
 
-func (table *ContinuationTable) ResumeContext(task sched.TaskID) bool {
+func (table *ContinuationTable) resumeContextHeld(task sched.TaskID) bool {
 	entry, ok := table.entry(task)
 	if !ok || entry.Phase != ContinuationWaiting || entry.Issued || entry.Correlation != 0 {
 		return false
@@ -160,7 +160,7 @@ func (table *ContinuationTable) ResumeContext(task sched.TaskID) bool {
 	return true
 }
 
-func (table *ContinuationTable) Block(task sched.TaskID, stage uint8) bool {
+func (table *ContinuationTable) blockHeld(task sched.TaskID, stage uint8) bool {
 	entry, ok := table.entry(task)
 	if !ok || entry.Stage != stage || entry.Phase != ContinuationReady || !entry.Issued || entry.Correlation == 0 {
 		return false
@@ -169,20 +169,15 @@ func (table *ContinuationTable) Block(task sched.TaskID, stage uint8) bool {
 	return true
 }
 
-// BlockFrame couples persisted state to the architecture return contract. The
-// assembly scheduler removes the task from the runnable set only after this
-// transition succeeds.
-func (table *ContinuationTable) BlockFrame(frame *abi.Frame, task sched.TaskID, stage uint8) bool {
-	if frame == nil || !table.Block(task, stage) {
+func (table *ContinuationTable) blockFrameHeld(frame *abi.Frame, task sched.TaskID, stage uint8) bool {
+	if frame == nil || !table.blockHeld(task, stage) {
 		return false
 	}
 	frame.Action = abi.ActionBlock
 	return true
 }
 
-// Resume accepts only the exact in-flight correlation. A mismatched or late
-// reply cannot advance the state machine or make a task runnable.
-func (table *ContinuationTable) Resume(task sched.TaskID, correlation uint64, reason WakeReason) bool {
+func (table *ContinuationTable) resumeHeld(task sched.TaskID, correlation uint64, reason WakeReason) bool {
 	entry, ok := table.entry(task)
 	if !ok || correlation == 0 || reason < WakeMessage || reason > WakeTimeout && reason != WakeInterrupted ||
 		entry.Phase != ContinuationWaiting || entry.Correlation != correlation {
@@ -192,9 +187,7 @@ func (table *ContinuationTable) Resume(task sched.TaskID, correlation uint64, re
 	return true
 }
 
-// Advance commits completion of one issued stage. The strictly increasing
-// stage and one-shot Issued bit prevent duplicated effects after wake/retry.
-func (table *ContinuationTable) Advance(task sched.TaskID, stage uint8, next uint8, partial uint64) bool {
+func (table *ContinuationTable) advanceHeld(task sched.TaskID, stage uint8, next uint8, partial uint64) bool {
 	entry, ok := table.entry(task)
 	if !ok || entry.Stage != stage || next <= stage || entry.Phase != ContinuationReady || !entry.Issued || entry.Wake == 0 {
 		return false
@@ -204,7 +197,7 @@ func (table *ContinuationTable) Advance(task sched.TaskID, stage uint8, next uin
 	return true
 }
 
-func (table *ContinuationTable) Finish(task sched.TaskID) bool {
+func (table *ContinuationTable) finishHeld(task sched.TaskID) bool {
 	entry, ok := table.entry(task)
 	if !ok || entry.Phase != ContinuationReady {
 		return false
@@ -213,10 +206,7 @@ func (table *ContinuationTable) Finish(task sched.TaskID) bool {
 	return true
 }
 
-// Cancel is used by kill, fault, and process teardown. Peer death is first
-// resumed as an exact correlated wake so the handler can return its error,
-// then Finish clears the slot.
-func (table *ContinuationTable) Cancel(task sched.TaskID) bool {
+func (table *ContinuationTable) cancelHeld(task sched.TaskID) bool {
 	entry, ok := table.entry(task)
 	if !ok {
 		return false
@@ -234,4 +224,114 @@ func (table *ContinuationTable) entry(task sched.TaskID) (*Continuation, bool) {
 		return nil, false
 	}
 	return &table.entries[slot], true
+}
+
+func (table *ContinuationTable) Begin(task sched.TaskID, request Request, path []byte) bool {
+	table.take()
+	result := table.beginHeld(task, request, path)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *ContinuationTable) Pending(task sched.TaskID) (Pending, bool) {
+	table.take()
+	pending, active := table.pendingHeld(task)
+	table.lock.Unlock()
+	return pending, active
+}
+
+// Annotate stores the second path of a two-path call and a note the handler
+// needs at every stage. Both belong to the call, not to a stage, so they
+// are set once, before the first request is issued.
+func (table *ContinuationTable) Annotate(task sched.TaskID, target []byte, note uint64) bool {
+	table.take()
+	result := table.annotateHeld(task, target, note)
+	table.lock.Unlock()
+	return result
+}
+
+// Paths returns the copied paths of an active call. The slices alias the
+// table and are valid until the call finishes.
+func (table *ContinuationTable) Paths(task sched.TaskID) ([]byte, []byte) {
+	table.take()
+	path, target := table.pathsHeld(task)
+	table.lock.Unlock()
+	return path, target
+}
+
+// Issue marks the current stage's externally visible request before it is
+// sent. Retrying the syscall entry cannot issue that stage twice.
+func (table *ContinuationTable) Issue(task sched.TaskID, stage uint8, correlation uint64) bool {
+	table.take()
+	result := table.issueHeld(task, stage, correlation)
+	table.lock.Unlock()
+	return result
+}
+
+// BlockContext parks a syscall before it issues a VFS request. The family
+// context wakes it without a correlation because no request exists yet.
+func (table *ContinuationTable) BlockContext(task sched.TaskID, stage uint8) bool {
+	table.take()
+	result := table.blockContextHeld(task, stage)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *ContinuationTable) ResumeContext(task sched.TaskID) bool {
+	table.take()
+	result := table.resumeContextHeld(task)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *ContinuationTable) Block(task sched.TaskID, stage uint8) bool {
+	table.take()
+	result := table.blockHeld(task, stage)
+	table.lock.Unlock()
+	return result
+}
+
+// BlockFrame couples persisted state to the architecture return contract. The
+// assembly scheduler removes the task from the runnable set only after this
+// transition succeeds.
+func (table *ContinuationTable) BlockFrame(frame *abi.Frame, task sched.TaskID, stage uint8) bool {
+	table.take()
+	result := table.blockFrameHeld(frame, task, stage)
+	table.lock.Unlock()
+	return result
+}
+
+// Resume accepts only the exact in-flight correlation. A mismatched or late
+// reply cannot advance the state machine or make a task runnable.
+func (table *ContinuationTable) Resume(task sched.TaskID, correlation uint64, reason WakeReason) bool {
+	table.take()
+	result := table.resumeHeld(task, correlation, reason)
+	table.lock.Unlock()
+	return result
+}
+
+// Advance commits completion of one issued stage. The strictly increasing
+// stage and one-shot Issued bit prevent duplicated effects after wake/retry.
+func (table *ContinuationTable) Advance(task sched.TaskID, stage uint8, next uint8, partial uint64) bool {
+	table.take()
+	result := table.advanceHeld(task, stage, next, partial)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *ContinuationTable) Finish(task sched.TaskID) bool {
+	table.take()
+	result := table.finishHeld(task)
+	table.lock.Unlock()
+	return result
+}
+
+// Cancel is used by kill, fault, and process teardown. Peer death is first
+// resumed as an exact correlated wake so the handler can return its error,
+// then Finish clears the slot.
+func (table *ContinuationTable) Cancel(task sched.TaskID) bool {
+	table.take()
+	result := table.cancelHeld(task)
+	table.lock.Unlock()
+	return result
 }

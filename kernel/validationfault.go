@@ -21,7 +21,7 @@ func (handler nativeCallHandler) ValidationFault(device uint64) kcall.Status {
 	if !validation.Enabled {
 		return kcall.StatusUnsupported
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

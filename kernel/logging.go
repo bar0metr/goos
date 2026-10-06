@@ -71,7 +71,7 @@ func kernelLogUints(level logfmt.Level, message string, key string, value uint64
 // logAuthority reports whether id is the caller's read capability for the log
 // ring.
 func (handler nativeCallHandler) logAuthority(id uint64) bool {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return false
 	}
@@ -82,7 +82,7 @@ func (handler nativeCallHandler) logAuthority(id uint64) bool {
 // consoleAuthority resolves the caller's console device capability, which
 // authorizes writing records to the log.
 func (handler nativeCallHandler) consoleAuthority(id uint64, rights capability.Rights) (*process.Process, bool) {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return nil, false
 	}

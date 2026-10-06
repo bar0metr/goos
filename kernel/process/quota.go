@@ -1,6 +1,10 @@
 package process
 
-import "goos/kernel/ipc"
+import (
+	"sync/atomic"
+
+	"goos/kernel/ipc"
+)
 
 // Capability isolation decides whether a process may use a resource at all. It
 // says nothing about how much of one it may hold, so a process entitled to a
@@ -87,7 +91,9 @@ const (
 
 // Quota is a process's resource account. Its counters only ever move through
 // Charge and Release, so a leak shows up as a process that cannot acquire
-// rather than as a table that quietly fills.
+// rather than as a table that quietly fills. The limits are set before the
+// process runs; the counters change atomically, since a resource can come back
+// to its creator from any processor.
 type Quota struct {
 	limits [resourceCount]uint32
 	used   [resourceCount]uint32
@@ -112,7 +118,7 @@ func quotaForProfile(profile ResourceProfile) (Quota, bool) {
 // that no caller can hold a pointer to another process's counters.
 func (process *Process) Quota() (used [4]uint32, limits [4]uint32) {
 	for index := Resource(0); index < resourceCount; index++ {
-		used[index], limits[index] = process.quota.used[index], process.quota.limits[index]
+		used[index], limits[index] = atomic.LoadUint32(&process.quota.used[index]), process.quota.limits[index]
 	}
 	return used, limits
 }
@@ -138,12 +144,16 @@ func (process *Process) Charge(resource Resource, amount uint32) bool {
 	if process == nil || resource >= resourceCount || amount == 0 {
 		return false
 	}
-	used := process.quota.used[resource]
-	if amount > process.quota.limits[resource]-used {
-		return false
+	counter := &process.quota.used[resource]
+	for {
+		used := atomic.LoadUint32(counter)
+		if amount > process.quota.limits[resource]-used {
+			return false
+		}
+		if atomic.CompareAndSwapUint32(counter, used, used+amount) {
+			return true
+		}
 	}
-	process.quota.used[resource] = used + amount
-	return true
 }
 
 // Available is how much more of a resource the quota allows.
@@ -151,7 +161,7 @@ func (process *Process) Available(resource Resource) uint32 {
 	if process == nil || resource >= resourceCount {
 		return 0
 	}
-	return process.quota.limits[resource] - process.quota.used[resource]
+	return process.quota.limits[resource] - atomic.LoadUint32(&process.quota.used[resource])
 }
 
 // Release returns amount of a resource. It reports false, and releases what
@@ -161,13 +171,19 @@ func (process *Process) Release(resource Resource, amount uint32) bool {
 	if process == nil || resource >= resourceCount || amount == 0 {
 		return false
 	}
-	used := process.quota.used[resource]
-	if amount > used {
-		process.quota.used[resource] = 0
-		return false
+	counter := &process.quota.used[resource]
+	for {
+		used := atomic.LoadUint32(counter)
+		if amount > used {
+			if atomic.CompareAndSwapUint32(counter, used, 0) {
+				return false
+			}
+			continue
+		}
+		if atomic.CompareAndSwapUint32(counter, used, used-amount) {
+			return true
+		}
 	}
-	process.quota.used[resource] = used - amount
-	return true
 }
 
 // ReleaseAll drops every reservation. Process teardown calls it after the
@@ -178,7 +194,7 @@ func (process *Process) ReleaseAll() {
 		return
 	}
 	for index := range process.quota.used {
-		process.quota.used[index] = 0
+		atomic.StoreUint32(&process.quota.used[index], 0)
 	}
 }
 
@@ -190,20 +206,21 @@ func (process *Process) AccountCPU(ticks uint64) {
 	if process == nil {
 		return
 	}
-	process.cpuTicks += ticks
+	atomic.AddUint64(&process.cpuTicks, ticks)
 }
 
 func (process *Process) CPUTicks() uint64 {
 	if process == nil {
 		return 0
 	}
-	return process.cpuTicks
+	return atomic.LoadUint64(&process.cpuTicks)
 }
 
 // ChargeProcess charges a resource to the process owning an address space, and
 // reports false when that process is unknown or over quota. Native call
 // handlers use it so that an unowned root can never acquire anything.
 func (registry *Registry) ChargeProcess(id ID, resource Resource, amount uint32) bool {
+	guard.Check()
 	owner, found := registry.ByID(id)
 	return found && owner.Charge(resource, amount)
 }
@@ -212,6 +229,7 @@ func (registry *Registry) ChargeProcess(id ID, resource Resource, amount uint32)
 // removed from the registry, which is the ordinary case for a channel released
 // after its creator exited.
 func (registry *Registry) ReleaseProcess(id ID, resource Resource, amount uint32) bool {
+	guard.Check()
 	owner, found := registry.ByID(id)
 	return found && owner.Release(resource, amount)
 }

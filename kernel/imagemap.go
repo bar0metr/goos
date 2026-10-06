@@ -24,7 +24,7 @@ import (
 // and the caller's teardown leaves them intact for the next mount.
 func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found || virtual != vm.UserImageAddress {
 		return kcall.StatusInvalidArgument
 	}

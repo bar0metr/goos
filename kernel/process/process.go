@@ -2,6 +2,7 @@ package process
 
 import (
 	"goos/kernel/handle"
+	"goos/kernel/lock"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/sched"
@@ -44,8 +45,10 @@ type Process struct {
 	taskCount    int
 	taskReserved uint8
 	quota        Quota
-	// regions is the process's virtual-memory region map (ADR 0104).
+	// regions is the process's virtual-memory region map (ADR 0104). space
+	// guards it and the page tables under the root.
 	regions region.Map
+	space   lock.RW
 	// executable is the executable object the process was started from and
 	// reads its pages from, or zero (ADR 0106).
 	executable uint64
@@ -76,6 +79,7 @@ func InitWithProfile(target *Process, id ID, abi ABI, addressSpace AddressSpace,
 	target.abi = abi
 	target.addressSpace = addressSpace
 	target.quota = quota
+	target.space.SetLevel(lock.LevelAddressSpace)
 	target.regions.Init(vm.UserAddressStart, vm.UserAddressLimit)
 	return true
 }
@@ -93,6 +97,7 @@ func InitChild(target *Process, id ID, parent *Process, addressSpace AddressSpac
 	target.addressSpace = addressSpace
 	target.quota.limits = parent.quota.limits
 	target.regions.CopyFrom(&parent.regions)
+	target.space.SetLevel(lock.LevelAddressSpace)
 	target.name, target.nameSize = parent.name, parent.nameSize
 	return true
 }
@@ -140,10 +145,15 @@ func (process *Process) Executable() uint64 { return process.executable }
 // SetExecutable records the executable object the process was started from.
 func (process *Process) SetExecutable(id uint64) { process.executable = id }
 
+// Space is the lock of the process's address space: its region map and
+// page tables. Copies and faults read; mapping changes write.
+func (process *Process) Space() *lock.RW { return &process.space }
+
 // Regions is the process's region map.
 func (process *Process) Regions() *region.Map { return &process.regions }
 
 func (process *Process) AddTask(id sched.TaskID) bool {
+	guard.CheckWriter()
 	if !process.ReserveTask() {
 		return false
 	}
@@ -157,6 +167,7 @@ func (process *Process) AddTask(id sched.TaskID) bool {
 // ReserveTask charges one task slot before architecture state becomes
 // runnable. The caller either commits the returned slot or cancels it.
 func (process *Process) ReserveTask() bool {
+	guard.CheckWriter()
 	if process == nil || process.taskCount+int(process.taskReserved) == len(process.tasks) || !process.Charge(ResourceTasks, 1) {
 		return false
 	}
@@ -167,6 +178,7 @@ func (process *Process) ReserveTask() bool {
 // CommitReservedTask binds a prepared architecture task without another
 // allocation or quota decision.
 func (process *Process) CommitReservedTask(id sched.TaskID) bool {
+	guard.CheckWriter()
 	if process == nil || process.taskReserved == 0 {
 		return false
 	}
@@ -186,6 +198,7 @@ func (process *Process) CommitReservedTask(id sched.TaskID) bool {
 
 // CancelReservedTask returns one uncommitted task charge.
 func (process *Process) CancelReservedTask() bool {
+	guard.CheckWriter()
 	if process == nil || process.taskReserved == 0 {
 		return false
 	}
@@ -213,6 +226,7 @@ func (process *Process) OwnsTask(id sched.TaskID) bool {
 func (process *Process) DetachTask(id sched.TaskID) bool { return process.removeTask(id) }
 
 func (process *Process) removeTask(id sched.TaskID) bool {
+	guard.CheckWriter()
 	for index := 0; index < process.taskCount; index++ {
 		if process.tasks[index] != id {
 			continue
@@ -258,9 +272,54 @@ type Registry struct {
 	count         uint8
 	completed     [MaxExitEvents]ExitEvent
 	completedNext uint8
+	// owners maps each task slot to the process its task runs in. Entries
+	// change under the registry's lock, and a slot's entry only while its
+	// task is not running, so a task reads its own entry with no lock.
+	owners [sched.MaxTasks]owner
+}
+
+type owner struct {
+	task    sched.TaskID
+	process *Process
+}
+
+// NoteOwner records the process a new task runs in. BindTask records its
+// own; a thread a process creates for itself is recorded here.
+func (registry *Registry) NoteOwner(task sched.TaskID, process *Process) bool {
+	guard.CheckWriter()
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(registry.owners) || process == nil {
+		return false
+	}
+	registry.owners[slot] = owner{task: task, process: process}
+	return true
+}
+
+// ForgetOwner clears the entry of a task that has exited.
+func (registry *Registry) ForgetOwner(task sched.TaskID) {
+	guard.CheckWriter()
+	if slot, _, valid := task.Parts(); valid && int(slot) < len(registry.owners) && registry.owners[slot].task == task {
+		registry.owners[slot] = owner{}
+	}
+}
+
+// Owner returns the process task runs in. The calling task may ask for
+// itself without the registry's lock: nothing changes its entry while it
+// runs.
+func (registry *Registry) Owner(task sched.TaskID) (*Process, bool) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(registry.owners) {
+		return nil, false
+	}
+	entry := registry.owners[slot]
+	if entry.task != task || entry.process == nil {
+		return nil, false
+	}
+	return entry.process, true
 }
 
 func (registry *Registry) Add(process *Process) bool {
+	guard.CheckWriter()
 	if process == nil || process.ID() == 0 || registry.count == MaxProcesses {
 		return false
 	}
@@ -271,10 +330,25 @@ func (registry *Registry) Add(process *Process) bool {
 	}
 	registry.processes[registry.count] = process
 	registry.count++
+	// Until now only its creator could reach the process. From here other
+	// processors can, so its region map checks for its lock.
+	if guard.Installed() {
+		process.regions.Guard(&process.space)
+	}
 	return true
 }
 
+// GuardSpaces makes the region map of every registered process check for its
+// lock. Boot registers processes before a second processor runs, and calls
+// it once the locks are in force.
+func (registry *Registry) GuardSpaces() {
+	for index := 0; index < int(registry.count); index++ {
+		registry.processes[index].regions.Guard(&registry.processes[index].space)
+	}
+}
+
 func (registry *Registry) BindTask(id ID, task sched.TaskID) bool {
+	guard.CheckWriter()
 	if task == 0 {
 		return false
 	}
@@ -285,7 +359,10 @@ func (registry *Registry) BindTask(id ID, task sched.TaskID) bool {
 	}
 	for index := 0; index < int(registry.count); index++ {
 		if registry.processes[index].ID() == id {
-			return registry.processes[index].AddTask(task)
+			if !registry.processes[index].AddTask(task) {
+				return false
+			}
+			return registry.NoteOwner(task, registry.processes[index])
 		}
 	}
 	return false
@@ -296,6 +373,7 @@ func (registry *Registry) BindTask(id ID, task sched.TaskID) bool {
 // record is written unconditionally: callers perform teardown that can fail,
 // and a waiter must still be able to observe that the process ended.
 func (registry *Registry) ReportTaskExit(task sched.TaskID, code uint64) (ExitEvent, ExitReport) {
+	guard.CheckWriter()
 	for index := 0; index < int(registry.count); index++ {
 		owner := registry.processes[index]
 		if !owner.OwnsTask(task) {
@@ -318,6 +396,7 @@ func (registry *Registry) ReportTaskExit(task sched.TaskID, code uint64) (ExitEv
 // Wait observes bounded process completion state without consuming lifecycle
 // delivery. Recent exit records remain queryable after registry removal.
 func (registry *Registry) Wait(id ID) (ExitEvent, WaitStatus) {
+	guard.Check()
 	if id == 0 {
 		return ExitEvent{}, WaitNotFound
 	}
@@ -335,6 +414,7 @@ func (registry *Registry) Wait(id ID) (ExitEvent, WaitStatus) {
 // ByTask finds the process owning a task, which teardown needs after the task
 // has stopped running but before it is removed from its process.
 func (registry *Registry) ByTask(task sched.TaskID) (*Process, bool) {
+	guard.Check()
 	for index := 0; index < int(registry.count); index++ {
 		if registry.processes[index].OwnsTask(task) {
 			return registry.processes[index], true
@@ -344,6 +424,7 @@ func (registry *Registry) ByTask(task sched.TaskID) (*Process, bool) {
 }
 
 func (registry *Registry) ByRoot(root uint64) (*Process, bool) {
+	guard.Check()
 	if root == 0 {
 		return nil, false
 	}
@@ -358,11 +439,13 @@ func (registry *Registry) ByRoot(root uint64) (*Process, bool) {
 // AllowsABI reports whether root belongs to a live process with the requested
 // userspace ABI. Entry gates use it before decoding any ABI-specific request.
 func (registry *Registry) AllowsABI(root uint64, abi ABI) bool {
+	guard.Check()
 	process, found := registry.ByRoot(root)
 	return found && abi.Valid() && process.ABI() == abi
 }
 
 func (registry *Registry) ByCapabilityObject(typeID handle.Type, object uint64) (*Process, bool) {
+	guard.Check()
 	for index := 0; index < int(registry.count); index++ {
 		if registry.processes[index].Handles().HasObject(typeID, object) {
 			return registry.processes[index], true
@@ -372,6 +455,7 @@ func (registry *Registry) ByCapabilityObject(typeID handle.Type, object uint64) 
 }
 
 func (registry *Registry) ByID(id ID) (*Process, bool) {
+	guard.Check()
 	for index := 0; index < int(registry.count); index++ {
 		if registry.processes[index].ID() == id {
 			return registry.processes[index], true
@@ -383,6 +467,7 @@ func (registry *Registry) ByID(id ID) (*Process, bool) {
 func (registry *Registry) Count() int { return int(registry.count) }
 
 func (registry *Registry) At(index int) (*Process, bool) {
+	guard.Check()
 	if index < 0 || index >= int(registry.count) {
 		return nil, false
 	}
@@ -390,6 +475,7 @@ func (registry *Registry) At(index int) (*Process, bool) {
 }
 
 func (registry *Registry) Remove(id ID) bool {
+	guard.CheckWriter()
 	for index := 0; index < int(registry.count); index++ {
 		if registry.processes[index].ID() != id {
 			continue

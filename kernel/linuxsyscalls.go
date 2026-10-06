@@ -19,6 +19,11 @@ type linuxCallHandler struct {
 	// frame is the entry frame of the call being served, with the caller's
 	// saved registers above it.
 	frame *linuxabi.Frame
+	// state and tid are the caller's Linux state and thread ID, found under
+	// the Linux lock before the call. A call of the fast class reads only
+	// what never changes in them: the PID and the TID.
+	state *linuxcompat.ProcessState
+	tid   int32
 }
 
 // Read serves read and pread64.
@@ -413,7 +418,7 @@ func (handler *linuxCallHandler) Exit(request linuxcompat.Request, group bool) l
 	code := uint64(uint8(request.Arguments[0]))
 	linuxcompat.SyscallContinuations.Cancel(handler.task)
 	if group {
-		if owner, found := processRegistry.ByRoot(handler.root); found {
+		if owner, found := handler.self(); found {
 			for _, task := range owner.Tasks() {
 				if task == handler.task {
 					continue

@@ -23,7 +23,7 @@ func expectFatal(t *testing.T, name string, run func()) {
 }
 
 func TestRecursiveAcquisitionIsFatal(t *testing.T) {
-	spin := New(LevelKernel)
+	spin := New(LevelRegistry)
 	expectFatal(t, "recursive acquisition", func() {
 		spin.Lock()
 		spin.Lock()
@@ -32,7 +32,7 @@ func TestRecursiveAcquisitionIsFatal(t *testing.T) {
 
 func TestOutOfOrderAcquisitionIsFatal(t *testing.T) {
 	scheduler := New(LevelScheduler)
-	kernel := New(LevelKernel)
+	kernel := New(LevelRegistry)
 	expectFatal(t, "kernel lock under the scheduler lock", func() {
 		scheduler.Lock()
 		kernel.Lock()
@@ -41,7 +41,7 @@ func TestOutOfOrderAcquisitionIsFatal(t *testing.T) {
 
 func TestInOrderAcquisitionAndOwnership(t *testing.T) {
 	Install(Hooks{})
-	kernel, memory, scheduler := New(LevelKernel), New(LevelMemory), New(LevelScheduler)
+	kernel, memory, scheduler := New(LevelRegistry), New(LevelMemory), New(LevelScheduler)
 	kernel.Lock()
 	memory.Lock()
 	scheduler.Lock()
@@ -83,7 +83,7 @@ func TestSameLevelLocksTakeAddressOrder(t *testing.T) {
 		buckets[0].LockAfter(&buckets[1])
 	})
 	expectFatal(t, "a second lock of another level", func() {
-		process := New(LevelProcess)
+		process := New(LevelRegistry)
 		buckets[0].Lock()
 		process.LockAfter(&buckets[0])
 	})

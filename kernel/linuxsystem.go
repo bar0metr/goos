@@ -30,8 +30,10 @@ const (
 
 func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat.Result {
 	local := thisCPU()
-	state, found := linuxcompat.FindProcess(handler.root)
-	if !found {
+	// The calls of the fast class run without the Linux lock; they use only
+	// the PID and the TID the dispatcher found.
+	state := handler.state
+	if state == nil {
 		return linuxErrno(linuxabi.ESRCH)
 	}
 	arguments := &request.Arguments
@@ -41,7 +43,7 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 	case linuxabi.SysGettid:
 		// The first thread's TID is the PID; a clone-created thread has
 		// its own.
-		return linuxcompat.Result{Value: uint64(linuxcompat.TaskTID(handler.task, state))}
+		return linuxcompat.Result{Value: uint64(handler.tid)}
 	case linuxabi.SysGetppid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.ParentPIDOf(state.PID))}
 	case linuxabi.SysGetuid, linuxabi.SysGeteuid:
@@ -123,7 +125,7 @@ const linuxCPUMaskSize = 8
 func (handler *linuxCallHandler) schedGetaffinity(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
 	local := thisCPU()
 	pid, size := int32(arguments[0]), arguments[1]
-	if pid != 0 && pid != state.PID && pid != linuxcompat.TaskTID(handler.task, state) {
+	if pid != 0 && pid != state.PID && pid != handler.tid {
 		return linuxErrno(linuxabi.ESRCH)
 	}
 	if size < linuxCPUMaskSize || size%8 != 0 {

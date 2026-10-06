@@ -5,6 +5,8 @@ package main
 // Per-processor call state and concurrency diagnostics (ADR 0184).
 
 import (
+	"sync/atomic"
+
 	"goos/internal/cpuinfo"
 	"goos/internal/limits"
 	"goos/internal/logfmt"
@@ -129,7 +131,8 @@ type cpuScratch struct {
 	vmDescriptor          [kcall.VMDescriptorSize]byte
 	vmRecord              [kcall.VMRecordSize]byte
 	// vmPieces is the scratch the protection and discard checks inspect.
-	vmPieces region.Pieces
+	vmPieces     region.Pieces
+	startupChunk [512]byte
 }
 
 // cpuScratches holds each started processor's scratch. The bootstrap
@@ -156,6 +159,25 @@ func prepareScratch(index int) bool {
 	scratch, ok := vm.NewObject[cpuScratch](&pageAllocator)
 	cpuScratches[index] = scratch
 	return ok
+}
+
+// waitStatuses holds, per task slot, the status a waker leaves for the task
+// it resumes, which the task takes on its retried call. Wakers on other
+// processors write it, so every access is atomic.
+type waitStatuses [sched.MaxTasks]atomic.Uint64
+
+func (statuses *waitStatuses) set(task uint64, status kcall.Status) {
+	if task < uint64(len(statuses)) {
+		statuses[task].Store(uint64(status))
+	}
+}
+
+// take returns the stored status and leaves StatusOK in its place.
+func (statuses *waitStatuses) take(task uint64) kcall.Status {
+	if task >= uint64(len(statuses)) {
+		return kcall.StatusOK
+	}
+	return kcall.Status(statuses[task].Swap(uint64(kcall.StatusOK)))
 }
 
 // lockWatchdogSeconds is how long a processor spins for one lock before the

@@ -79,8 +79,8 @@ func startProcessors() {
 }
 
 // bringProcessorsOnline lets every started processor join the scheduler and
-// publishes the result to the CPU information calls. The caller holds the
-// kernel lock.
+// publishes the result to the CPU information calls. The boot task calls it
+// once, with interrupts disabled.
 func bringProcessorsOnline() {
 	console := kernelconsole.New()
 	if cpuTable.Count() == 0 {

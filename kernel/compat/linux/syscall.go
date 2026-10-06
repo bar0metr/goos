@@ -1,6 +1,9 @@
 package linux
 
-import "goos/kernel/compat/linux/abi"
+import (
+	"goos/kernel/compat/linux/abi"
+	"goos/kernel/lock"
+)
 
 const unsupportedHistorySize = 8
 
@@ -103,6 +106,10 @@ func (diagnostics UnsupportedDiagnostics) WasRefused(number abi.Syscall) bool {
 
 var unsupportedDiagnostics UnsupportedDiagnostics
 
+// diagnosticsLock guards the call counters, which calls of every class
+// update, the fast ones without the Linux lock.
+var diagnosticsLock = lock.New(lock.LevelLog)
+
 // badPointers counts calls that ended in EFAULT: a program handed the kernel
 // memory it could not use. The counter saturates.
 var badPointers uint64
@@ -111,7 +118,12 @@ var badPointers uint64
 var lastBadPointer abi.Syscall
 
 // BadPointers returns the count and the number of the latest call.
-func BadPointers() (uint64, abi.Syscall) { return badPointers, lastBadPointer }
+func BadPointers() (uint64, abi.Syscall) {
+	diagnosticsLock.Lock()
+	count, last := badPointers, lastBadPointer
+	diagnosticsLock.Unlock()
+	return count, last
+}
 
 func decode(frame *abi.Frame) (Request, bool) {
 	if frame == nil {
@@ -135,8 +147,10 @@ func Dispatch(frame *abi.Frame, handler Handler) Result {
 // once the result is final: a copy that only has to wait for a page of the
 // program's own image is retried and is no bad pointer.
 func NoteBadPointer(number abi.Syscall) {
+	diagnosticsLock.Lock()
 	saturate(&badPointers)
 	lastBadPointer = number
+	diagnosticsLock.Unlock()
 }
 
 // route sends a request to the handler method that implements its number.
@@ -217,6 +231,8 @@ func Refuse(number abi.Syscall) Result {
 }
 
 func noteUnsupported(number abi.Syscall) {
+	diagnosticsLock.Lock()
+	defer diagnosticsLock.Unlock()
 	if unsupportedDiagnostics.Count != ^uint64(0) {
 		unsupportedDiagnostics.Count++
 	}
@@ -233,7 +249,12 @@ func noteUnsupported(number abi.Syscall) {
 	}
 }
 
-func Unsupported() UnsupportedDiagnostics { return unsupportedDiagnostics }
+func Unsupported() UnsupportedDiagnostics {
+	diagnosticsLock.Lock()
+	diagnostics := unsupportedDiagnostics
+	diagnosticsLock.Unlock()
+	return diagnostics
+}
 
 // Recent returns the index-th retained number, oldest first.
 func (diagnostics UnsupportedDiagnostics) Recent(index int) abi.Syscall {

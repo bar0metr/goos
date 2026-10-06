@@ -121,7 +121,7 @@ func (handler nativeCallHandler) ClockNow(clockID uint64, address uint64, length
 // ClockSet is reserved for future synchronization and manual setting. The
 // caller must hold the dedicated CLOCK_SET right; setting is not implemented.
 func (handler nativeCallHandler) ClockSet(authorityID uint64, address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

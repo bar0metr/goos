@@ -32,7 +32,7 @@ const linuxVFSReplyTicks = 8 * clock.TicksPerSecond
 // vfsEndpoint resolves the session channel through the process's own handle
 // table, so the rights PID 1 granted are checked on every exchange.
 func (handler *linuxCallHandler) vfsEndpoint(state *linuxcompat.ProcessState) (*process.Process, *ipc.Channel, uint64, uint8, bool) {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	context, contextFound := linuxcompat.VFSContext(state.FamilyID)
 	if !found || !contextFound || context.Session.Failed() {
 		return nil, nil, 0, 0, false

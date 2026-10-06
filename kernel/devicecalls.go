@@ -21,7 +21,7 @@ import (
 
 func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -59,7 +59,7 @@ func (handler nativeCallHandler) ConsoleWrite(id uint64, address uint64, length 
 
 func (handler nativeCallHandler) ConsoleRead(id uint64, address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found || length != 1 {
 		return kcall.StatusPermissionDenied
 	}
@@ -86,7 +86,7 @@ func (handler nativeCallHandler) ConsoleRead(id uint64, address uint64, length u
 // alternative, reading bytes and discarding the ones that are not Ctrl-C, takes
 // input away from the process the user is typing to.
 func (handler nativeCallHandler) ConsoleInterrupt(id uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -105,7 +105,7 @@ func (handler nativeCallHandler) ConsoleInterrupt(id uint64) kcall.Status {
 // addresses or granting any new hardware authority.
 func (handler nativeCallHandler) ConsoleInfo(id uint64, address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -162,7 +162,7 @@ func (handler nativeCallHandler) ClockRead(address uint64, length uint64) kcall.
 
 func (handler nativeCallHandler) SystemInfo(address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found || length != kcall.SystemInfoSize {
 		return kcall.StatusInvalidArgument
 	}
@@ -188,7 +188,7 @@ func portSpecification(specification uint64) (uint16, uint8, bool) {
 
 func (handler nativeCallHandler) PortRead(id uint64, specification uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -210,7 +210,7 @@ func (handler nativeCallHandler) PortRead(id uint64, specification uint64, addre
 }
 
 func (handler nativeCallHandler) PortWrite(id uint64, specification uint64, value uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -240,7 +240,7 @@ const defaultDMAPages = 4
 // receives the physical address, the virtual address, and the size.
 func (handler nativeCallHandler) DMAAllocate(id uint64, virtual uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found || virtual != vm.UserDMAAddress {
 		return kcall.StatusInvalidArgument
 	}

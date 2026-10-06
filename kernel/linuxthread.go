@@ -70,7 +70,7 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 		return linuxErrno(linuxabi.EAGAIN)
 	}
 	thread, recorded := creation.Commit(sched.TaskID(task))
-	if !recorded ||
+	if !recorded || !processRegistry.NoteOwner(sched.TaskID(task), owner) ||
 		!amd64.SetTaskFSBase(sched.TaskID(task), fsBase) || !amd64.SetTaskFPU(sched.TaskID(task), parentFPU) {
 		panicSerial("Linux thread could not be bound")
 	}

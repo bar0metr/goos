@@ -9,7 +9,7 @@ import (
 
 func (handler nativeCallHandler) CPUInfo(address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	if _, found := processRegistry.ByRoot(handler.root); !found {
+	if _, found := handler.self(); !found {
 		return kcall.StatusPermissionDenied
 	}
 	if length != kcall.CPUInfoSize || !cpuInventory.Summary.Encode(local.cpuInfoWire[:]) {
@@ -23,7 +23,7 @@ func (handler nativeCallHandler) CPUInfo(address uint64, length uint64) kcall.St
 
 func (handler nativeCallHandler) CPUEntry(index uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	if _, found := processRegistry.ByRoot(handler.root); !found {
+	if _, found := handler.self(); !found {
 		return kcall.StatusPermissionDenied
 	}
 	if index >= uint64(cpuInventory.CPUCount) {
@@ -38,7 +38,7 @@ func (handler nativeCallHandler) CPUEntry(index uint64, address uint64) kcall.St
 
 func (handler nativeCallHandler) CPUCacheInfo(index uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	if _, found := processRegistry.ByRoot(handler.root); !found {
+	if _, found := handler.self(); !found {
 		return kcall.StatusPermissionDenied
 	}
 	if index >= uint64(cpuInventory.CacheCount) {

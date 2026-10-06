@@ -30,6 +30,7 @@ type Closure struct {
 // Placed counts a capability just installed in a handle table. Handles that
 // are not streams are not counted and always succeed.
 func (registry *Registry) Placed(typeID handle.Type, object uint64) bool {
+	guard.Check()
 	return typeID != handle.TypeStream || registry.Retain(object)
 }
 
@@ -37,6 +38,7 @@ func (registry *Registry) Placed(typeID handle.Type, object uint64) bool {
 // a stream endpoint. It reports false, and closes nothing, for a handle that is
 // not open or a stream handle whose end has no reference counted.
 func (registry *Registry) CloseHandle(table *handle.Table, id handle.ID) (Closure, bool) {
+	guard.Check()
 	typeID, cap, found := table.Describe(id)
 	if !found {
 		return Closure{}, false

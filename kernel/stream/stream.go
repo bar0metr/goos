@@ -49,6 +49,7 @@ func New() Stream { return Stream{readers: 1, writers: 1, readerOpen: true, writ
 // Reset reopens a registry slot in place. Assigning New() instead would build
 // the whole ring as a temporary, which the kernel's leaking heap never frees.
 func (stream *Stream) Reset() {
+	guard.Check()
 	clear(stream.data[:])
 	stream.head, stream.tail, stream.count = 0, 0, 0
 	stream.readers, stream.writers = 1, 1
@@ -58,6 +59,7 @@ func (stream *Stream) Reset() {
 // Retain counts one more handle naming an end. It refuses an end that has
 // closed, whose last handle is already gone, and a count at its bound.
 func (stream *Stream) Retain(writer bool) bool {
+	guard.Check()
 	if stream == nil {
 		return false
 	}
@@ -74,6 +76,7 @@ func (stream *Stream) Retain(writer bool) bool {
 
 // CanRetain reports whether extra more handles may name an end.
 func (stream *Stream) CanRetain(writer bool, extra int) bool {
+	guard.Check()
 	if stream == nil || extra < 0 {
 		return false
 	}
@@ -89,6 +92,7 @@ func (stream *Stream) CanRetain(writer bool, extra int) bool {
 // no handle is counted: an underflow is a kernel accounting fault, and wrapping
 // the counter would keep an end open for ever.
 func (stream *Stream) Drop(writer bool) (closed bool, ok bool) {
+	guard.Check()
 	if stream == nil {
 		return false, false
 	}
@@ -111,6 +115,7 @@ func (stream *Stream) Drop(writer bool) (closed bool, ok bool) {
 
 // References reports how many handles name each end.
 func (stream *Stream) References() (readers, writers uint16) {
+	guard.Check()
 	if stream == nil {
 		return 0, 0
 	}
@@ -118,6 +123,7 @@ func (stream *Stream) References() (readers, writers uint16) {
 }
 
 func (stream *Stream) Read(target []byte) (int, Status) {
+	guard.Check()
 	if stream == nil || !stream.readerOpen || len(target) == 0 {
 		return 0, StatusInvalidEndpoint
 	}
@@ -140,6 +146,7 @@ func (stream *Stream) Read(target []byte) (int, Status) {
 }
 
 func (stream *Stream) Write(source []byte) (int, Status) {
+	guard.Check()
 	if stream == nil || !stream.writerOpen || len(source) == 0 {
 		return 0, StatusInvalidEndpoint
 	}
@@ -165,6 +172,7 @@ func (stream *Stream) Write(source []byte) (int, Status) {
 }
 
 func (stream *Stream) CloseReader() bool {
+	guard.Check()
 	if stream == nil || !stream.readerOpen {
 		return false
 	}
@@ -176,6 +184,7 @@ func (stream *Stream) CloseReader() bool {
 }
 
 func (stream *Stream) CloseWriter() bool {
+	guard.Check()
 	if stream == nil || !stream.writerOpen {
 		return false
 	}
@@ -187,6 +196,7 @@ func (stream *Stream) CloseWriter() bool {
 func (stream *Stream) Closed() bool { return stream == nil || !stream.readerOpen && !stream.writerOpen }
 
 func (stream *Stream) ReadStatus() Status {
+	guard.Check()
 	if stream == nil || !stream.readerOpen {
 		return StatusInvalidEndpoint
 	}
@@ -200,11 +210,13 @@ func (stream *Stream) ReadStatus() Status {
 }
 
 func (stream *Stream) WriteStatus() Status {
+	guard.Check()
 	return stream.WriteStatusFor(AtomicWrite)
 }
 
 // WriteStatusFor reports whether a write of size bytes fits the ring whole.
 func (stream *Stream) WriteStatusFor(size int) Status {
+	guard.Check()
 	if stream == nil || !stream.writerOpen {
 		return StatusInvalidEndpoint
 	}

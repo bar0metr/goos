@@ -27,7 +27,7 @@ func (handler *linuxCallHandler) Pipe(request linuxcompat.Request) linuxcompat.R
 	if !vm.CanCopyOut(handler.root, address, uint64(len(local.linuxPipeWire))) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return linuxErrno(linuxabi.EBADF)
 	}

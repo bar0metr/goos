@@ -73,7 +73,7 @@ func releaseSharedMappings(exited *process.Process) {
 // pass copies of the handle on.
 func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -119,7 +119,7 @@ func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcal
 // a buffer, for one request — and keep its own.
 func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

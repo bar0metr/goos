@@ -72,10 +72,6 @@ var (
 	// runState is the scheduler's state; schedulerLock guards it.
 	runState      sched.Core
 	schedulerLock = lock.New(lock.LevelScheduler)
-	// kernelLock serializes the kernel's object layer: every native call,
-	// Linux system call, user fault resolution, and housekeeping step runs
-	// under it (docs/kernel/smp.md).
-	kernelLock = lock.New(lock.LevelKernel)
 	// cpuAPIC is each processor's APIC ID, written before it starts.
 	cpuAPIC [MaxCPUs]uint32
 	// killCodes are the exit codes of tasks killed while they ran.
@@ -245,42 +241,16 @@ func kickCPU(target int, self int) {
 	sendIPI(target, rescheduleVector)
 }
 
-// KernelLock disables local interrupts and takes the kernel lock, for kernel
-// tasks that change kernel objects outside a system call.
-func KernelLock() uint64 {
-	flags := DisableInterrupts()
-	kernelLock.Lock()
-	return flags
-}
-
-// KernelUnlock releases the kernel lock and restores the interrupt state.
-func KernelUnlock(flags uint64) {
-	kernelLock.Unlock()
-	RestoreInterrupts(flags)
-}
-
-// HoldsKernelLock reports whether the kernel lock is held, by the caller in
-// validation builds.
-func HoldsKernelLock() bool { return kernelLock.HeldByCaller() }
-
-// kernelEnter takes the kernel lock for a system call or user fault. It
-// gives up, returning zero, when the calling task is killed or held: while
-// it waits, because the processor that stopped it may hold the lock until
-// the task is gone, and once it has the lock, because a stopped task must
-// not start a call whose waits nobody would cancel. The processor that
-// stopped it set the request before it released the lock.
+// kernelEnter starts a system call or user fault on the calling processor.
+// It refuses, returning zero, when the calling task is being killed or held:
+// a stopped task must not start a call whose waits nobody would cancel. The
+// call itself takes the locks of the state it touches (ADR 0184) and gives
+// them up the same way when the task is stopped while it waits for one.
 //
 //export goos_kernel_enter
 func kernelEnter() uint64 {
 	cpu := CPUIndex()
-	for !kernelLock.TryLock() {
-		if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
-			return 0
-		}
-		cpuPause()
-	}
 	if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
-		kernelLock.Unlock()
 		return 0
 	}
 	schedulerLock.Lock()
@@ -291,10 +261,7 @@ func kernelEnter() uint64 {
 }
 
 //export goos_kernel_leave
-func kernelLeave() {
-	inKernel.Add(-1)
-	kernelLock.Unlock()
-}
+func kernelLeave() { inKernel.Add(-1) }
 
 // noteKernelEntry counts the calling processor in the kernel and raises the
 // peak.
@@ -303,6 +270,12 @@ func noteKernelEntry() {
 	for peak := kernelPeak.Load(); count > peak && !kernelPeak.CompareAndSwap(peak, count); peak = kernelPeak.Load() {
 	}
 }
+
+// StopWord is the calling processor's request to stop its task. It turns
+// nonzero when another processor kills or holds the task, so a call that
+// waits for a lock can give up instead of waiting on the processor that
+// stopped it.
+func StopWord() *uint64 { return &cpuData[CPUIndex()][cpuKill] }
 
 // KernelParallelPeak returns the most processors that were inside system
 // calls or fault resolution at the same time since boot.
@@ -502,8 +475,9 @@ func TaskOffProcessor(task sched.TaskID) bool {
 // QuiesceTasks waits until every task in tasks is off its processor. The
 // caller has terminated them; each one's processor stops it at its next
 // scheduling point, which a reschedule interrupt brings at once, and a task
-// waiting for the kernel lock gives up the wait. It reports false when a
-// task does not stop within the bound.
+// waiting for a lock gives up the wait. The caller holds the locks of its
+// own call, which the stopped tasks never need to finish theirs. It reports
+// false when a task does not stop within the bound.
 func QuiesceTasks(tasks []sched.TaskID) bool {
 	for spins := 0; spins < quiesceSpins; spins++ {
 		quiet := true

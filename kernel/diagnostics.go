@@ -165,7 +165,7 @@ func (handler nativeCallHandler) Diagnostics(device uint64, address uint64) kcal
 	if !diag.Enabled {
 		return kcall.StatusUnsupported
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

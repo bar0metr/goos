@@ -23,7 +23,7 @@ var (
 	executables executable.Table
 
 	// launchObject is the object a launch is reading, for executablePage.
-	// Launches run one at a time in the kernel exclusion domain.
+	// The executable lock guards it.
 	launchObject *executable.Object
 )
 
@@ -45,7 +45,7 @@ func executablePage(index uint64) ([]byte, bool) {
 // sealed header object, then receives that object's handle as the source.
 func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, descriptor uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -96,7 +96,7 @@ func (handler nativeCallHandler) ExecutableSource(id uint64, session uint64, des
 // started from the object is a reference; the last one frees it.
 func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -157,7 +157,7 @@ func (handler nativeCallHandler) ExecutableCreate(id uint64, size uint64, addres
 // The object seals when its last byte is written and accepts no write after
 // that; a write that would pass its end is refused whole.
 func (handler nativeCallHandler) ExecutableWrite(id uint64, address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

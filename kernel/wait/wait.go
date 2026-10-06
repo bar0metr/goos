@@ -1,7 +1,10 @@
 // Package wait provides the kernel's bounded, typed wait-any registration table.
 package wait
 
-import "goos/kernel/sched"
+import (
+	"goos/kernel/lock"
+	"goos/kernel/sched"
+)
 
 // MaxObjects is the most objects one wait names: kcall.WaitAnyMaxObjects,
 // the width of the ready mask a waiter receives (ADR 0111).
@@ -64,16 +67,21 @@ type operation struct {
 
 // Table stores at most one wait operation for each scheduler task slot.
 // Completed registrations remain only until Take so readiness published in
-// the same scheduling interval can be coalesced into one result.
+// the same scheduling interval can be coalesced into one result. Its lock
+// makes each method one step, safe on several processors at once.
 type Table struct {
+	lock       lock.Spin
 	operations [sched.MaxTasks]operation
 	active     int
 	registered int
 }
 
-// Begin registers a wait. An empty interest set is a timed sleep and needs a
-// deadline, or the task would never run again.
-func (table *Table) Begin(task sched.TaskID, entries []Entry, deadline uint64) bool {
+func (set *Table) take() {
+	set.lock.SetLevel(lock.LevelWait)
+	set.lock.Lock()
+}
+
+func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint64) bool {
 	slot, _, valid := task.Parts()
 	if !valid || len(entries) > MaxObjects || len(entries) == 0 && deadline == 0 {
 		return false
@@ -108,7 +116,7 @@ func (table *Table) Begin(task sched.TaskID, entries []Entry, deadline uint64) b
 	return true
 }
 
-func (table *Table) Publish(key Key, event Event, output []Completion) int {
+func (table *Table) publishHeld(key Key, event Event, output []Completion) int {
 	if !validKey(key) || event == 0 || event&^allEvents != 0 {
 		return 0
 	}
@@ -141,7 +149,7 @@ func (table *Table) Publish(key Key, event Event, output []Completion) int {
 	return completed
 }
 
-func (table *Table) Expire(now uint64, output []Completion) int {
+func (table *Table) expireHeld(now uint64, output []Completion) int {
 	completed := 0
 	for slot := range table.operations {
 		op := &table.operations[slot]
@@ -160,7 +168,7 @@ func (table *Table) Expire(now uint64, output []Completion) int {
 	return completed
 }
 
-func (table *Table) Cancel(task sched.TaskID) bool {
+func (table *Table) cancelHeld(task sched.TaskID) bool {
 	slot, _, valid := task.Parts()
 	if !valid {
 		return false
@@ -177,7 +185,7 @@ func (table *Table) Cancel(task sched.TaskID) bool {
 	return true
 }
 
-func (table *Table) Take(task sched.TaskID) (Completion, bool) {
+func (table *Table) takeHeld(task sched.TaskID) (Completion, bool) {
 	slot, _, valid := task.Parts()
 	if !valid {
 		return Completion{}, false
@@ -218,7 +226,7 @@ type View struct {
 	TimedOut bool
 }
 
-func (table *Table) At(slot int) (View, bool) {
+func (table *Table) atHeld(slot int) (View, bool) {
 	if slot < 0 || slot >= len(table.operations) {
 		return View{}, false
 	}
@@ -230,9 +238,9 @@ func (table *Table) At(slot int) (View, bool) {
 		Active: op.active, Complete: op.complete, TimedOut: op.timedOut}, true
 }
 
-func (table *Table) Count() int { return table.active }
+func (table *Table) countHeld() int { return table.active }
 
-func (table *Table) RegistrationCount() int { return table.registered }
+func (table *Table) registrationCountHeld() int { return table.registered }
 
 func validEntry(entry Entry) bool {
 	return validKey(entry.Key) && entry.Events != 0 && entry.Events&^allEvents == 0
@@ -246,4 +254,62 @@ func validKey(key Key) bool {
 		return false
 	}
 	return (key.Kind == KindChannel || key.Kind == KindStream) || key.Side == 0
+}
+
+// Begin registers a wait. An empty interest set is a timed sleep and needs a
+// deadline, or the task would never run again.
+func (table *Table) Begin(task sched.TaskID, entries []Entry, deadline uint64) bool {
+	table.take()
+	result := table.beginHeld(task, entries, deadline)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *Table) Publish(key Key, event Event, output []Completion) int {
+	table.take()
+	result := table.publishHeld(key, event, output)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *Table) Expire(now uint64, output []Completion) int {
+	table.take()
+	result := table.expireHeld(now, output)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *Table) Cancel(task sched.TaskID) bool {
+	table.take()
+	result := table.cancelHeld(task)
+	table.lock.Unlock()
+	return result
+}
+
+func (table *Table) Take(task sched.TaskID) (Completion, bool) {
+	table.take()
+	completion, ready := table.takeHeld(task)
+	table.lock.Unlock()
+	return completion, ready
+}
+
+func (table *Table) At(slot int) (View, bool) {
+	table.take()
+	view, found := table.atHeld(slot)
+	table.lock.Unlock()
+	return view, found
+}
+
+func (table *Table) Count() int {
+	table.take()
+	result := table.countHeld()
+	table.lock.Unlock()
+	return result
+}
+
+func (table *Table) RegistrationCount() int {
+	table.take()
+	result := table.registrationCountHeld()
+	table.lock.Unlock()
+	return result
 }

@@ -13,6 +13,7 @@ const maxAncestry = LinuxFamilyMaxProcesses
 // family that is no descendant, such as the sender's parent, is EPERM. The
 // returned record may be a zombie.
 func SignalTarget(senderPID int32, targetPID int32) (ProcessRecord, abi.Errno) {
+	guard.Check()
 	sender, senderFound := FindProcessRecord(senderPID)
 	target, targetFound := FindProcessRecord(targetPID)
 	if !senderFound || !targetFound || target.FamilyID != sender.FamilyID {

@@ -18,7 +18,7 @@ import (
 // type, and rights. It never reveals the kernel object behind the handle.
 func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -46,7 +46,7 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 // what a process list already shows.
 func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall.Status {
 	local := thisCPU()
-	if _, found := processRegistry.ByRoot(handler.root); !found {
+	if _, found := handler.self(); !found {
 		return kcall.StatusPermissionDenied
 	}
 	if index >= process.MaxProcesses {
@@ -91,7 +91,7 @@ func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall
 // SystemReset restarts the machine. Only the holder of the system-control
 // capability, granted to PID 1 at boot, may call it; it does not return.
 func (handler nativeCallHandler) SystemReset(device uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -114,7 +114,7 @@ var (
 // needs the system-control capability, which only PID 1 holds, and does not
 // return when it works. Without the ACPI tables it answers Unsupported.
 func (handler nativeCallHandler) SystemPowerOff(device uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

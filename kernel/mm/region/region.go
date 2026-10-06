@@ -9,6 +9,8 @@
 // touches page tables or physical memory, so it is tested on the host.
 package region
 
+import "goos/kernel/lock"
+
 const (
 	PageSize = uint64(4096)
 	// MaxRegions bounds the regions of one process. Every mapping a process
@@ -122,6 +124,24 @@ type Map struct {
 	lower, upper uint64
 	regions      [MaxRegions]Region
 	count        int
+	// space is the lock of the address space the map describes, which a
+	// validation build checks the caller holds.
+	space *lock.RW
+}
+
+// Guard names the lock of the address space the map describes.
+func (m *Map) Guard(space *lock.RW) { m.space = space }
+
+func (m *Map) reading() {
+	if m.space != nil {
+		m.space.AssertHeld()
+	}
+}
+
+func (m *Map) writing() {
+	if m.space != nil {
+		m.space.AssertWriter()
+	}
 }
 
 // Init empties the map and fixes the range regions may occupy. Both bounds
@@ -140,15 +160,20 @@ func (m *Map) Init(lower, upper uint64) bool {
 // CopyFrom makes m a copy of source in place. Assigning a whole Map builds a
 // temporary, which the kernel's leaking heap never frees.
 func (m *Map) CopyFrom(source *Map) {
+	m.writing()
 	m.lower, m.upper, m.count = source.lower, source.upper, source.count
 	copy(m.regions[:], source.regions[:])
 }
 
 // Count is the number of regions.
-func (m *Map) Count() int { return m.count }
+func (m *Map) Count() int {
+	m.reading()
+	return m.count
+}
 
 // At returns the index-th region in address order.
 func (m *Map) At(index int) (Region, bool) {
+	m.reading()
 	if index < 0 || index >= m.count {
 		return Region{}, false
 	}
@@ -156,7 +181,10 @@ func (m *Map) At(index int) (Region, bool) {
 }
 
 // Bounds are the range regions may occupy.
-func (m *Map) Bounds() (uint64, uint64) { return m.lower, m.upper }
+func (m *Map) Bounds() (uint64, uint64) {
+	m.reading()
+	return m.lower, m.upper
+}
 
 // validRange accepts a page-aligned, non-empty range inside the map's bounds
 // whose end does not wrap.
@@ -167,6 +195,7 @@ func (m *Map) validRange(base, length uint64) bool {
 
 // Find returns the region containing address.
 func (m *Map) Find(address uint64) (Region, bool) {
+	m.reading()
 	index, found := m.find(address)
 	if !found {
 		return Region{}, false
@@ -192,6 +221,7 @@ func (m *Map) find(address uint64) (int, bool) {
 // Free reports whether [base, base+length) is inside the bounds and touches
 // no region.
 func (m *Map) Free(base, length uint64) bool {
+	m.writing()
 	if !m.validRange(base, length) {
 		return false
 	}
@@ -201,6 +231,7 @@ func (m *Map) Free(base, length uint64) bool {
 
 // Insert adds a region over free address space.
 func (m *Map) Insert(region Region) Status {
+	m.writing()
 	if !m.validRange(region.Base, region.Length) || !region.Protection.Valid() || !region.Backing.valid() ||
 		region.Backing == Guard && region.Protection != 0 {
 		return InvalidArgument
@@ -223,6 +254,7 @@ func (m *Map) Insert(region Region) Status {
 // the layout reproducible; a randomized base can replace from later without
 // changing the callers (ASLR readiness).
 func (m *Map) FindFree(length, from, limit uint64) (uint64, bool) {
+	m.reading()
 	if length == 0 || length%PageSize != 0 || from%PageSize != 0 {
 		return 0, false
 	}
@@ -266,6 +298,7 @@ type Pieces [MaxRegions]Piece
 // nothing; the caller inspects the pieces — to check a policy, to unmap their
 // pages — before it calls Remove or Protect.
 func (m *Map) Overlapping(base, length uint64, pieces *Pieces) int {
+	m.reading()
 	if !m.validRange(base, length) || pieces == nil {
 		return 0
 	}
@@ -283,6 +316,7 @@ func (m *Map) Overlapping(base, length uint64, pieces *Pieces) int {
 // Covered reports whether every page of [base, base+length) lies in some
 // region, and none of them is pinned unless allowPinned.
 func (m *Map) Covered(base, length uint64, allowPinned bool) bool {
+	m.reading()
 	if !m.validRange(base, length) {
 		return false
 	}
@@ -309,6 +343,7 @@ func (m *Map) Covered(base, length uint64, allowPinned bool) bool {
 // Pinned regions are refused unless allowPinned. Nothing changes when the
 // result is not OK: the slots a split needs are counted first.
 func (m *Map) Remove(base, length uint64, allowPinned bool) Status {
+	m.writing()
 	if !m.validRange(base, length) {
 		return InvalidArgument
 	}
@@ -353,6 +388,7 @@ func (m *Map) Remove(base, length uint64, allowPinned bool) Status {
 // caller decides beforehand, with Overlapping, whether the new protection is
 // allowed for each backing it covers.
 func (m *Map) Protect(base, length uint64, protection Protection) Status {
+	m.writing()
 	return m.protect(base, length, protection, false)
 }
 
@@ -362,6 +398,7 @@ func (m *Map) Protect(base, length uint64, protection Protection) Status {
 // process reach more than the kernel gave it. A Linux program uses it to
 // make the relocated part of its image read-only.
 func (m *Map) Restrict(base, length uint64, protection Protection) Status {
+	m.writing()
 	return m.protect(base, length, protection, true)
 }
 

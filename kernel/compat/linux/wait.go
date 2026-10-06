@@ -25,6 +25,7 @@ func WaitRequest(pid uint64, options uint64) (target int32, noHang bool, errno a
 // returns a zombie when one matches, and reports whether any child matches at
 // all, running or not.
 func WaitableChild(parentPID int32, target int32) (ProcessRecord, bool) {
+	guard.Check()
 	matched := false
 	for index := range processRecords {
 		record := processRecords[index]
@@ -41,12 +42,14 @@ func WaitableChild(parentPID int32, target int32) (ProcessRecord, bool) {
 
 // HoldChildWaiter records the task that wait4 blocked for a child of state.
 func (state *ProcessState) HoldChildWaiter(task sched.TaskID) {
+	guard.Check()
 	state.childWaiter = task
 }
 
 // ReleaseChildWaiter returns the task blocked in wait4 by the process with
 // PID parentPID, if any, and forgets it, so one child exit wakes it once.
 func ReleaseChildWaiter(parentPID int32) sched.TaskID {
+	guard.Check()
 	if parentPID < firstPID {
 		return 0
 	}

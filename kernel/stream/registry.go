@@ -61,6 +61,7 @@ func DecodeEndpointObject(object uint64) (uint64, bool, bool) {
 
 // Create records owner as the process accountable for the stream.
 func (registry *Registry) Create(owner uint64) (*Stream, uint64, bool) {
+	guard.Check()
 	for index := range registry.ids {
 		if registry.ids[index] != 0 {
 			continue
@@ -87,6 +88,7 @@ func (registry *Registry) slot(id uint64) (int, bool) {
 }
 
 func (registry *Registry) Lookup(id uint64) (*Stream, bool) {
+	guard.Check()
 	index, found := registry.slot(id)
 	if !found {
 		return nil, false
@@ -98,6 +100,7 @@ func (registry *Registry) Lookup(id uint64) (*Stream, bool) {
 // process that was charged for it, which may already have exited. Its page
 // goes back to the storage.
 func (registry *Registry) Release(id uint64) (uint64, bool) {
+	guard.Check()
 	index, found := registry.slot(id)
 	if !found || !registry.streams[index].Closed() {
 		return 0, false
@@ -122,6 +125,7 @@ func (registry *Registry) endpoint(object uint64) (*Stream, bool, bool) {
 // places a stream capability into a handle table calls it, except creation,
 // which starts each end at one.
 func (registry *Registry) Retain(object uint64) bool {
+	guard.Check()
 	stream, writer, found := registry.endpoint(object)
 	return found && stream.Retain(writer)
 }
@@ -129,6 +133,7 @@ func (registry *Registry) Retain(object uint64) bool {
 // CanRetain reports whether extra more handles may name the endpoint object,
 // so a caller can refuse before it installs anything rather than unwind after.
 func (registry *Registry) CanRetain(object uint64, extra int) bool {
+	guard.Check()
 	stream, writer, found := registry.endpoint(object)
 	return found && stream.CanRetain(writer, extra)
 }
@@ -137,6 +142,7 @@ func (registry *Registry) CanRetain(object uint64, extra int) bool {
 // and direction, whether that was the end's last handle, and false when the
 // object names no live stream or the end has no handle counted.
 func (registry *Registry) Drop(object uint64) (id uint64, writer bool, closed bool, ok bool) {
+	guard.Check()
 	stream, writer, found := registry.endpoint(object)
 	if !found {
 		return 0, false, false, false

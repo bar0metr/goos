@@ -262,7 +262,7 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 		return linuxErrno(linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
 	}
 	state, _ := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if reply.Size > pending.Note || state == nil || !owned {
 		return linuxErrno(linuxabi.EIO)
 	}
@@ -524,7 +524,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 				return linuxcompat.Result{Value: pending.Partial}
 			}
 			state, _ := linuxcompat.FindProcess(handler.root)
-			owner, owned := processRegistry.ByRoot(handler.root)
+			owner, owned := handler.self()
 			if state == nil || !owned {
 				return linuxErrno(linuxabi.EIO)
 			}
@@ -547,7 +547,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 // shortens the write; a fault before it is EFAULT.
 func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector bool) (uint64, linuxabi.Errno) {
 	state, found := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if !found || !owned {
 		return 0, linuxabi.EIO
 	}
@@ -1005,7 +1005,7 @@ func direntResult(written uint64, errno linuxabi.Errno) linuxcompat.Result {
 // buffer.
 func (handler *linuxCallHandler) returnedName(size int) []byte {
 	state, found := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if !found || !owned || size > limits.NameMax {
 		return nil
 	}
