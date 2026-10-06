@@ -67,7 +67,7 @@ const (
 )
 
 // sessionServices are the services that run from the volume in normal mode.
-var sessionServices = [...]string{"config", "log", "shell"}
+var sessionServices = [...]string{"config", "log", "shell", netServiceName, netDriverName}
 
 // forcedRecovery reports whether the boot media asks for recovery mode.
 func forcedRecovery() bool {
@@ -283,6 +283,9 @@ func storageExited(name string) {
 	for _, service := range sessionServiceNames() {
 		manager.Hold(service)
 	}
+	for _, service := range networkServiceNames() {
+		manager.Hold(service)
+	}
 }
 
 // systemResumed lets the session services start from the volume again. A
@@ -291,7 +294,7 @@ func storageExited(name string) {
 // and only a service that keeps failing with storage up uses its budget up.
 func systemResumed() {
 	systemReady = true
-	for _, name := range sessionServiceNames() {
+	for _, name := range append(sessionServiceNames(), networkServiceNames()...) {
 		if executable, found := manager.Executable(name); found {
 			manager.Rebase(name, bytesString(executable), supervisionTicks)
 		}
@@ -396,6 +399,8 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 		sys.HandleClose(configControlHandle)
 		configControlHandle = 0
 	}
+	// Recovery runs no network either: both services run from the volume.
+	stopNetwork()
 	for index := range sessions {
 		session := &sessions[index]
 		if !session.active {

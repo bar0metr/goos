@@ -140,6 +140,9 @@ func startServices(ticks uint64) {
 	if boot.Mode() == supervisor.ModeNormal {
 		startConfigService(ticks)
 		startLogService(ticks)
+		// The network reads its settings, so it starts after the
+		// configuration service; nothing before the shell waits for it.
+		startNetwork(ticks)
 	}
 	for index := range sessions {
 		if sessions[index].active {

@@ -15,6 +15,7 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/netapi"
 	"goos/userspace/partition"
 	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
@@ -106,10 +107,22 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	useVFS := linuxProcess || grantable && grantsRequested&commands.GrantVFS != 0
 	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
 	useLaunch := grantable && launch != nil && grantsRequested&commands.GrantLaunch != 0 && streams.Input.Type == handle.TypeStream
+	// A command asks for one network role; one asking for both gets the
+	// narrower, so no session can both ping and reload. Without a network
+	// service the command runs without a session and reports it.
+	var netSession handle.ID
+	switch {
+	case grantable && grantsRequested&commands.GrantNetworkPing != 0:
+		netSession, _ = openNetSession(netapi.RightsPingStatus)
+	case grantable && grantsRequested&commands.GrantNetworkAdmin != 0:
+		netSession, _ = openNetSession(netapi.RightsAdminStatus)
+	}
+	useNetwork := netSession != 0
 	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
 		syslog.Warn("volume check refused in normal mode")
+		closeOpen(netSession)
 		return 0, 0, supervisor.LaunchVolumeBusy
 	}
 	var checkBlock handle.ID
@@ -118,6 +131,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		checkBlock, reason = openCheckBlock()
 		if reason != "" {
 			syslog.Error(reason)
+			closeOpen(netSession)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
@@ -126,6 +140,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if reason != "" {
 			syslog.Error("APP_VFS_SESSION_FAILED")
 			syslog.Error(reason)
+			closeOpen(netSession)
 			if reason == "APP_CHANNEL_CREATE_FAILED" {
 				return 0, 0, supervisor.LaunchResourceExhausted
 			}
@@ -138,6 +153,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	var launchPair [2]uint64
 	if useLaunch {
 		if !createChannel(&launchPair) {
+			closeOpen(netSession)
 			sys.HandleClose(handle.ID(pair[0]))
 			sys.HandleClose(checkBlock)
 			if useBlockCheck {
@@ -156,6 +172,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		handles++
 	}
 	if useLaunch {
+		handles++
+	}
+	if useNetwork {
 		handles++
 	}
 	// A Linux program searches the Linux fixture directory, never the
@@ -196,11 +215,15 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLaunch {
 		writer.Handle([]byte("launch"), 0)
 	}
+	if useNetwork {
+		writer.Handle([]byte("net"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
+		closeOpen(netSession)
 		closePair(launchPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
@@ -223,6 +246,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLaunch {
 		grants = append(grants, supervisor.Capability{Name: "launch", Handle: handle.ID(launchPair[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	if useNetwork {
+		grants = append(grants, supervisor.Capability{Name: "net", Handle: netSession, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -239,6 +265,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
 		}
 		closePair(launchPair)
+		closeOpen(netSession)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -253,6 +280,13 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID
 	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchOK
+}
+
+// closeOpen closes a handle a failed launch did not hand over.
+func closeOpen(id handle.ID) {
+	if id != 0 {
+		sys.HandleClose(id)
+	}
 }
 
 // openCheckBlock detaches the mounted filesystem and replaces its block
