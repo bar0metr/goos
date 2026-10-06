@@ -751,13 +751,14 @@ test-pve-smp: pve-artifacts
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
 
-# A diagnostic run of a static 7-Zip the caller supplies. DIAG=1 gives the
-# guest the diag command, whose DIAG linux line names the refused calls.
+# A diagnostic run of a static 7-Zip the caller supplies on four host cores.
+# DIAG=1 gives the guest the diag command, whose DIAG linux line names the
+# refused calls and whose DIAG sched line the parallel peaks.
 #   make test-pve-7zip LINUX_EXTRA=/path/to/7zzs
 test-pve-7zip:
 	@test -n "$(LINUX_EXTRA)" && test -f "$(LINUX_EXTRA)" || { echo "LINUX_EXTRA=/path/to/7zzs is required" >&2; exit 2; }
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(LINUX_EXTRA))
-	@$(PVELAB) run --scenario 7zip $(PVE_RUN_FLAGS)
+	@$(PVELAB) run --scenario 7zip --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 # Boots the smoke scenario and keeps the VM for debugging; pvelab prints the
 # run ID that pvelab destroy --run takes.
