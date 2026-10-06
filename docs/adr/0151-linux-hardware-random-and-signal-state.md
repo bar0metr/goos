@@ -5,7 +5,7 @@
 Accepted. Amends the `AT_RANDOM` decision of ADR 0133.
 
 The signal-delivery portion is superseded by ADR 0163 through ADR 0167.
-The RDRAND/getrandom decision remains current.
+The RDRAND/getrandom decision is superseded by ADR 0185.
 
 ## Context
 

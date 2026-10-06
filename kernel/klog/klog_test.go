@@ -14,12 +14,13 @@ func TestRingKeepsNewestRecordsInOrder(t *testing.T) {
 	if ring.Len() != Capacity || ring.Total() != Capacity+3 {
 		t.Fatalf("len %d total %d", ring.Len(), ring.Total())
 	}
-	first, _ := ring.At(0)
-	last, _ := ring.At(Capacity - 1)
+	var firstCopy, lastCopy Copy
+	first, _ := ring.At(0, &firstCopy)
+	last, _ := ring.At(Capacity-1, &lastCopy)
 	if first.Time.Seconds != 4 || last.Time.Seconds != Capacity+3 || string(first.Component) != "kernel" {
 		t.Fatalf("first %+v last %+v", first, last)
 	}
-	if _, ok := ring.At(Capacity); ok {
+	if _, ok := ring.At(Capacity, &lastCopy); ok {
 		t.Fatal("index past the ring accepted")
 	}
 }

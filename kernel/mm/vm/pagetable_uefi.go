@@ -810,6 +810,11 @@ func allocateTable(allocator *pmm.Allocator) (uint64, *table, bool) {
 	return address, (*table)(unsafe.Pointer(uintptr(address))), true
 }
 
+// freeTable returns a table allocateTable made that nothing links to.
+func freeTable(allocator *pmm.Allocator, address uint64) {
+	allocator.Free(address)
+}
+
 func protectRange(root *table, address uint64, size uint64, permissions Permissions) bool {
 	if size == 0 || !permissions.Valid() || address+size < address || address+size > IdentityMapLimit {
 		return false

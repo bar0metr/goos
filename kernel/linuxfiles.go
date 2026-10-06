@@ -44,6 +44,7 @@ func (handler *linuxCallHandler) Openat(request linuxcompat.Request) linuxcompat
 // flags ask for it, and opens it. A directory gets a descriptor that keeps
 // its path; the VFS has no open file for one.
 func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int32, address uint64, flags uint64) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	if errno != 0 {
 		return linuxErrno(errno)
@@ -57,7 +58,7 @@ func (handler *linuxCallHandler) openPath(request linuxcompat.Request, dirfd int
 		return linuxErrno(errno)
 	}
 	if !active {
-		path, trailing, errno := handler.resolvePath(state, dirfd, address, &linuxResolved)
+		path, trailing, errno := handler.resolvePath(state, dirfd, address, &local.linuxResolved)
 		if errno == 0 && !state.FDs.HasFree() {
 			errno = linuxabi.EMFILE
 		}
@@ -261,7 +262,7 @@ func (handler *linuxCallHandler) readFile(request linuxcompat.Request, descripti
 		return linuxErrno(linuxcompat.VFSErrno(reply.Status, linuxcompat.VFSPermissionAccess, linuxabi.ENOMEM))
 	}
 	state, _ := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if reply.Size > pending.Note || state == nil || !owned {
 		return linuxErrno(linuxabi.EIO)
 	}
@@ -412,7 +413,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 		if write {
 			return handler.deviceWrite(request, *description, false)
 		}
-		return handler.deviceRead(request, *description, false)
+		return handler.deviceRead(request, description, false)
 	default:
 		// A stream has no positions.
 		return linuxErrno(linuxabi.ESPIPE)
@@ -523,7 +524,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 				return linuxcompat.Result{Value: pending.Partial}
 			}
 			state, _ := linuxcompat.FindProcess(handler.root)
-			owner, owned := processRegistry.ByRoot(handler.root)
+			owner, owned := handler.self()
 			if state == nil || !owned {
 				return linuxErrno(linuxabi.EIO)
 			}
@@ -546,7 +547,7 @@ func (handler *linuxCallHandler) positioned(request linuxcompat.Request, write b
 // shortens the write; a fault before it is EFAULT.
 func (handler *linuxCallHandler) gatherWrite(request linuxcompat.Request, vector bool) (uint64, linuxabi.Errno) {
 	state, found := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if !found || !owned {
 		return 0, linuxabi.EIO
 	}
@@ -656,14 +657,21 @@ func (handler *linuxCallHandler) Filesystem(request linuxcompat.Request) linuxco
 		fallthrough
 	case linuxabi.SysRenameat:
 		return handler.rename(request, int32(arguments[0]), arguments[1], int32(arguments[2]), arguments[3])
+	case linuxabi.SysChmod:
+		return handler.changeMetadata(request, linuxabi.AtFDCWD, arguments[0], false)
+	case linuxabi.SysFchmod:
+		return handler.changeMetadata(request, int32(arguments[0]), 0, true)
+	case linuxabi.SysFchmodat:
+		return handler.changeMetadata(request, int32(arguments[0]), arguments[1], false)
+	case linuxabi.SysUtimensat:
+		if arguments[3]&^(linuxabi.AtSymlinkNoFollow|linuxabi.AtEmptyPath) != 0 {
+			return linuxErrno(linuxabi.EINVAL)
+		}
+		// A null path names dirfd itself, as futimens does.
+		return handler.changeMetadata(request, int32(arguments[0]), arguments[1], arguments[1] == 0)
 	}
 	return linuxErrno(linuxabi.ENOSYS)
 }
-
-var (
-	linuxStat  [linuxcompat.StatSize]byte
-	linuxStatx [linuxcompat.StatxSize]byte
-)
 
 // status serves stat, lstat, fstat, newfstatat, and statx. lstat is stat:
 // GoOS has no symbolic links to stop at. A path is stat-ed by name. A
@@ -673,6 +681,7 @@ var (
 // record, both with no VFS exchange. statx differs from the others only in
 // its flags and in the structure the answer is written as.
 func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32, pathAddress uint64, buffer uint64, flags uint64, descriptor bool) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -712,7 +721,7 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 				return result
 			}
 		} else {
-			path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &linuxResolved)
+			path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &local.linuxResolved)
 			device := linuxcompat.DeviceNone
 			if errno == 0 {
 				device, errno = linuxcompat.LookupDevice(path)
@@ -768,6 +777,7 @@ func (handler *linuxCallHandler) status(request linuxcompat.Request, dirfd int32
 // access answers from the mode a stat of the path would report, so the two
 // calls cannot disagree.
 func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32, pathAddress uint64, requested uint64) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -780,7 +790,7 @@ func (handler *linuxCallHandler) access(request linuxcompat.Request, dirfd int32
 		return linuxErrno(errno)
 	}
 	if !active {
-		path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &linuxResolved)
+		path, trailing, errno := handler.resolvePath(state, dirfd, pathAddress, &local.linuxResolved)
 		device := linuxcompat.DeviceNone
 		if errno == 0 {
 			device, errno = linuxcompat.LookupDevice(path)
@@ -874,20 +884,19 @@ func (handler *linuxCallHandler) beginDescriptorStatus(request linuxcompat.Reque
 // deliverStatus writes the answer in the structure the call asked for:
 // struct statx for statx and struct stat for the rest.
 func (handler *linuxCallHandler) deliverStatus(request linuxcompat.Request, buffer uint64, described linuxcompat.FileStatus) linuxcompat.Result {
-	encoded := linuxStat[:]
+	local := thisCPU()
+	encoded := local.linuxStat[:]
 	if request.Number == linuxabi.SysStatx {
-		linuxcompat.EncodeStatx(&linuxStatx, described)
-		encoded = linuxStatx[:]
+		linuxcompat.EncodeStatx(&local.linuxStatx, described)
+		encoded = local.linuxStatx[:]
 	} else {
-		linuxcompat.EncodeStat(&linuxStat, described)
+		linuxcompat.EncodeStat(&local.linuxStat, described)
 	}
 	if !vm.CopyOut(handler.root, buffer, encoded) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
 }
-
-var linuxDirent [linuxcompat.MaxDirentSize]byte
 
 // direntRetry marks, in the value one stage hands the next, that the entry
 // at the current position has a name too long for a reply message and must
@@ -904,6 +913,7 @@ const direntRetry = uint64(1) << 63
 // A record that does not fit ends the call: EINVAL when it is the first,
 // the bytes so far otherwise. Its entry stays unread for the next call.
 func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	if errno != 0 {
 		return linuxErrno(errno)
@@ -958,13 +968,13 @@ func (handler *linuxCallHandler) getdents(request linuxcompat.Request) linuxcomp
 		case reply.AttachedName != 0:
 			name = handler.returnedName(int(reply.AttachedName))
 		}
-		size, encoded := linuxcompat.EncodeDirent(linuxDirent[:], reply.Node, uint64(reply.Cursor), reply.Kind, name)
+		size, encoded := linuxcompat.EncodeDirent(local.linuxDirent[:], reply.Node, uint64(reply.Cursor), reply.Kind, name)
 		switch {
 		case !encoded:
 			errno = linuxabi.EIO
 		case uint64(size) > capacity || written > capacity-uint64(size):
 			errno = linuxabi.EINVAL
-		case !vm.CopyOut(handler.root, buffer+written, linuxDirent[:size]):
+		case !vm.CopyOut(handler.root, buffer+written, local.linuxDirent[:size]):
 			errno = linuxabi.EFAULT
 		}
 		if errno != 0 {
@@ -995,7 +1005,7 @@ func direntResult(written uint64, errno linuxabi.Errno) linuxcompat.Result {
 // buffer.
 func (handler *linuxCallHandler) returnedName(size int) []byte {
 	state, found := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if !found || !owned || size > limits.NameMax {
 		return nil
 	}
@@ -1042,8 +1052,17 @@ func (handler *linuxCallHandler) seek(request linuxcompat.Request) linuxcompat.R
 		description.Offset = target
 		return linuxcompat.Result{Value: target}
 	case linuxcompat.FDSynthetic:
-		// /dev/null and /dev/zero accept any seek and stay at zero.
-		return linuxcompat.Result{}
+		device := linuxcompat.DeviceOf(*description)
+		if !device.Text() {
+			// /dev/null and /dev/zero accept any seek and stay at zero.
+			return linuxcompat.Result{}
+		}
+		target, errno := linuxcompat.SeekTarget(whence, offset, description.Offset, uint64(len(deviceText(device))))
+		if errno != 0 {
+			return linuxErrno(errno)
+		}
+		description.Offset = target
+		return linuxcompat.Result{Value: target}
 	default:
 		return linuxErrno(linuxabi.ESPIPE)
 	}
@@ -1105,25 +1124,25 @@ func (handler *linuxCallHandler) seek(request linuxcompat.Request) linuxcompat.R
 // getcwd copies the working directory and its terminator and returns the
 // length it copied, as the Linux call does.
 func (handler *linuxCallHandler) getcwd(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	if !found {
 		return linuxErrno(linuxabi.ENOENT)
 	}
-	size := copy(linuxResolved[:], state.CWD())
+	size := copy(local.linuxResolved[:], state.CWD())
 	if uint64(size)+1 > request.Arguments[1] {
 		return linuxErrno(linuxabi.ERANGE)
 	}
-	if !vm.CopyOut(handler.root, request.Arguments[0], linuxResolved[:size]) ||
-		!vm.CopyOut(handler.root, request.Arguments[0]+uint64(size), linuxTerminator[:]) {
+	if !vm.CopyOut(handler.root, request.Arguments[0], local.linuxResolved[:size]) ||
+		!vm.CopyOut(handler.root, request.Arguments[0]+uint64(size), local.linuxTerminator[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{Value: uint64(size) + 1}
 }
 
-var linuxTerminator [1]byte
-
 // chdir accepts a path only after the VFS confirms it names a directory.
 func (handler *linuxCallHandler) chdir(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -1133,7 +1152,7 @@ func (handler *linuxCallHandler) chdir(request linuxcompat.Request) linuxcompat.
 		return linuxErrno(errno)
 	}
 	if !active {
-		path, _, errno := handler.resolvePath(state, linuxabi.AtFDCWD, request.Arguments[0], &linuxResolved)
+		path, _, errno := handler.resolvePath(state, linuxabi.AtFDCWD, request.Arguments[0], &local.linuxResolved)
 		if errno == 0 {
 			errno = linuxcompat.DevicePathErrno(path, linuxabi.ENOTDIR)
 		}
@@ -1166,6 +1185,7 @@ func (handler *linuxCallHandler) chdir(request linuxcompat.Request) linuxcompat.
 
 // mkdir ignores the mode argument: GoOS has no permission bits to set.
 func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32, address uint64) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -1175,7 +1195,7 @@ func (handler *linuxCallHandler) mkdir(request linuxcompat.Request, dirfd int32,
 		return linuxErrno(errno)
 	}
 	if !active {
-		path, _, errno := handler.resolvePath(state, dirfd, address, &linuxResolved)
+		path, _, errno := handler.resolvePath(state, dirfd, address, &local.linuxResolved)
 		if errno == 0 {
 			errno = linuxcompat.DevicePathErrno(path, linuxabi.EEXIST)
 		}
@@ -1206,6 +1226,7 @@ const (
 )
 
 func (handler *linuxCallHandler) remove(request linuxcompat.Request, dirfd int32, address uint64, directory bool) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -1215,7 +1236,7 @@ func (handler *linuxCallHandler) remove(request linuxcompat.Request, dirfd int32
 		return linuxErrno(errno)
 	}
 	if !active {
-		path, trailing, errno := handler.resolvePath(state, dirfd, address, &linuxResolved)
+		path, trailing, errno := handler.resolvePath(state, dirfd, address, &local.linuxResolved)
 		note := uint64(0)
 		if trailing {
 			note |= noteTrailing
@@ -1287,6 +1308,7 @@ const (
 )
 
 func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd int32, fromAddress uint64, toDirfd int32, toAddress uint64) linuxcompat.Result {
+	local := thisCPU()
 	_, active, errno := handler.vfsStage(request)
 	state, found := linuxcompat.FindProcess(handler.root)
 	if errno == 0 && !found {
@@ -1296,11 +1318,11 @@ func (handler *linuxCallHandler) rename(request linuxcompat.Request, fromDirfd i
 		return linuxErrno(errno)
 	}
 	if !active {
-		source, trailing, errno := handler.resolvePath(state, fromDirfd, fromAddress, &linuxResolved)
+		source, trailing, errno := handler.resolvePath(state, fromDirfd, fromAddress, &local.linuxResolved)
 		if errno != 0 {
 			return linuxErrno(errno)
 		}
-		target, targetTrailing, errno := handler.resolvePath(state, toDirfd, toAddress, &linuxTarget)
+		target, targetTrailing, errno := handler.resolvePath(state, toDirfd, toAddress, &local.linuxTarget)
 		note := uint64(0)
 		if trailing {
 			note |= noteTrailing

@@ -6,8 +6,11 @@ package main
 // calls that reserve, release, reprotect, discard, and describe regions.
 
 import (
+	"sync/atomic"
+
 	"goos/internal/capability"
 	"goos/internal/logfmt"
+	"goos/kernel/arch/amd64"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/executable"
 	"goos/kernel/handle"
@@ -24,28 +27,36 @@ import (
 const faultTables = 3
 
 var (
-	vmDescriptor [kcall.VMDescriptorSize]byte
-	vmRecord     [kcall.VMRecordSize]byte
+
 	// userFaultsResolved counts demand-zero pages supplied on a fault.
-	userFaultsResolved uint64
+	userFaultsResolved atomic.Uint64
 	// userFaultsRetried counts faults on pages that already allowed the
 	// access when the kernel looked.
-	userFaultsRetried uint64
+	userFaultsRetried atomic.Uint64
 )
 
-// Kinds of user page fault that retire the process, for the log.
+// Kinds of user page fault that retire the process, for the log, and
+// faultObject, a page an executable object supplies.
 const (
 	faultInvalid    = uint64(1)
 	faultGuard      = uint64(2)
 	faultPermission = uint64(3)
 	faultQuota      = uint64(4)
+	faultObject     = uint64(5)
+	faultMapped     = uint64(6)
 )
 
 // resolveUserFaultEntry is called by the exception path for a page fault in
 // user mode, with interrupts disabled, on the task's kernel stack. It returns
-// one when a page was supplied and the instruction can be retried, zero when
-// the process has to be retired. rip is the faulting instruction, for the
-// log.
+// one when a page was supplied, or the task was parked for one, and the
+// instruction can be retried; zero when the process has to be retired. rip
+// is the faulting instruction, for the log.
+//
+// The fault reads the process's address space: faults of several tasks of a
+// process resolve at once, and two that race for one page settle in the page
+// table, where the second finds the page present. A page of the program's
+// image that an executable object holds is resolved by executableStep, which
+// takes the locks that object needs.
 //
 //export goos_resolve_user_fault
 func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip uint64) uint64 {
@@ -56,21 +67,43 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 		faultFetch    = 1 << 4
 	)
 	page := address &^ (vm.PageSize - 1)
+	owner, space := callerSpace()
+	if owner == nil || owner.AddressSpace().Root != root {
+		kernelLogUints(logfmt.Warn, userFaultReason(faultInvalid), "address", address, "rip", rip)
+		return 0
+	}
+	stop := amd64.StopWord()
+	if !space.RLockUnless(stop) {
+		// The task is being stopped; the instruction runs again only if it
+		// is released.
+		return 1
+	}
 	// Another task of the process may have mapped the page, or widened its
 	// protection, on another processor since this one translated the
 	// address. The access is retried.
 	if errorCode&faultReserved == 0 && vm.UserPageAllows(root, page, errorCode&faultWrite != 0, errorCode&faultFetch != 0) {
-		userFaultsRetried++
+		space.RUnlock()
+		userFaultsRetried.Add(1)
 		return 1
 	}
 	kind := faultPermission
+	write, fetch := errorCode&faultWrite != 0, errorCode&faultFetch != 0
 	if errorCode&faultPresent == 0 {
 		var resolved bool
-		resolved, kind = demandFault(root, page, errorCode&faultWrite != 0, errorCode&faultFetch != 0)
+		resolved, kind = demandFault(owner, root, page, write, fetch)
 		if resolved {
-			userFaultsResolved++
+			space.RUnlock()
+			userFaultsResolved.Add(1)
 			return 1
 		}
+	}
+	space.RUnlock()
+	if kind == faultObject {
+		switch executableStep(owner, page, write, fetch) {
+		case pageMapped, pageParked, pageRetry:
+			return 1
+		}
+		kind = faultInvalid
 	}
 	kernelLogUints(logfmt.Warn, userFaultReason(kind), "address", address, "rip", rip)
 	return 0
@@ -89,50 +122,37 @@ func userFaultReason(kind uint64) string {
 }
 
 // resolveCopyFault is the resolver the kernel's own copies into and out of
-// user memory use (vm.SetFaultResolver).
+// user memory use (vm.SetFaultResolver). The copying call holds its address
+// space. A page an executable object holds needs locks the call may not take
+// now, so the copy fails and records the page; the dispatcher resolves it
+// after the call (executableStep) and runs the call again.
 func resolveCopyFault(root uint64, page uint64, write bool) bool {
-	resolved, _ := demandFault(root, page, write, false)
+	owner, found := processRegistry.Owner(amd64.CurrentTask())
+	if !found || owner.AddressSpace().Root != root {
+		return false
+	}
+	resolved, kind := demandFault(owner, root, page, write, false)
+	if kind == faultObject {
+		wantExecutablePage(page)
+	}
 	return resolved
 }
 
 // demandFault supplies a zeroed page for an absent page of an anonymous or
 // image region whose protection allows the access, charging it and any page
-// tables it needs to the process. It reports why when it cannot.
-func demandFault(root uint64, page uint64, write bool, fetch bool) (bool, uint64) {
-	owner, found := processRegistry.ByRoot(root)
-	if !found {
-		return false, faultInvalid
+// tables it needs to the process. It reports why when it cannot; faultObject
+// means the page comes from an executable object. The caller holds the
+// address space.
+func demandFault(owner *process.Process, root uint64, page uint64, write bool, fetch bool) (bool, uint64) {
+	entry, kind := demandRegion(owner, root, page, write, fetch)
+	if kind == faultMapped {
+		return true, 0
 	}
-	entry, ok := owner.Regions().Find(page)
-	if !ok {
-		return false, faultInvalid
-	}
-	if entry.Backing == region.Guard {
-		return false, faultGuard
-	}
-	need := region.Read
-	if write {
-		need |= region.Write
-	}
-	if fetch {
-		need |= region.Execute
-	}
-	if !entry.Backing.DemandZero() || entry.Protection&need != need || vm.UserPageMapped(root, page) {
-		return false, faultPermission
-	}
-	if owner.Available(process.ResourcePages) < 1+faultTables {
-		return false, faultQuota
+	if kind != 0 {
+		return false, kind
 	}
 	if entry.Backing == region.Image && entry.Flags&region.FromObject != 0 {
-		if object, found := executables.Find(entry.Object); found && object.FileBacked() {
-			pending, failed := requestExecutablePage(owner, entry, page)
-			if pending {
-				return true, 0
-			}
-			if failed {
-				return false, faultInvalid
-			}
-		}
+		return false, faultObject
 	}
 	physical, allocated := pageAllocator.Allocate()
 	if !allocated {
@@ -146,12 +166,54 @@ func demandFault(root uint64, page uint64, write bool, fetch bool) (bool, uint64
 		pageAllocator.Free(physical)
 		return false, faultInvalid
 	}
+	return mapDemandPage(owner, root, page, physical, entry)
+}
+
+// demandRegion finds the region a demand fault falls in and checks that it
+// may supply the page. The caller holds the address space.
+func demandRegion(owner *process.Process, root uint64, page uint64, write bool, fetch bool) (region.Region, uint64) {
+	entry, ok := owner.Regions().Find(page)
+	if !ok {
+		return region.Region{}, faultInvalid
+	}
+	if entry.Backing == region.Guard {
+		return region.Region{}, faultGuard
+	}
+	need := region.Read
+	if write {
+		need |= region.Write
+	}
+	if fetch {
+		need |= region.Execute
+	}
+	if vm.UserPageMapped(root, page) {
+		// Another task of the process mapped the page since this fault was
+		// taken. The access runs again; if the page does not allow it, the
+		// next fault finds the page present and fails on its protection.
+		return region.Region{}, faultMapped
+	}
+	if !entry.Backing.DemandZero() || entry.Protection&need != need {
+		return region.Region{}, faultPermission
+	}
+	if owner.Available(process.ResourcePages) < 1+faultTables {
+		return region.Region{}, faultQuota
+	}
+	return entry, 0
+}
+
+// mapDemandPage maps physical at page and charges it. Another task of the
+// process may have mapped the page first; then physical goes back and the
+// fault counts as resolved, since the access can be retried.
+func mapDemandPage(owner *process.Process, root uint64, page uint64, physical uint64, entry region.Region) (bool, uint64) {
 	tables, mapped := vm.MapUserPageAt(&pageAllocator, root, page, physical, regionPermissions(entry.Protection), true)
 	if tables != 0 {
 		owner.Charge(process.ResourcePages, uint32(tables))
 	}
 	if !mapped {
 		pageAllocator.Free(physical)
+		if vm.UserPageMapped(root, page) {
+			return true, 0
+		}
 		return false, faultInvalid
 	}
 	owner.Charge(process.ResourcePages, 1)
@@ -159,6 +221,7 @@ func demandFault(root uint64, page uint64, write bool, fetch bool) (bool, uint64
 }
 
 // pagingObject is the executable object a fault is reading, for objectPage.
+// The executable lock guards it.
 var pagingObject *executable.Object
 
 // objectPage is the page source of pagingObject; see executablePage.
@@ -215,7 +278,8 @@ func regionPermissions(protection region.Protection) vm.Permissions {
 
 // VMMap reserves anonymous demand-zero memory.
 func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, flags uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -223,10 +287,10 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 		// Executable anonymous memory needs a write-then-seal interface.
 		return kcall.StatusPermissionDenied
 	}
-	if !vm.CopyIn(handler.root, descriptor, vmDescriptor[:]) {
+	if !vm.CopyIn(handler.root, descriptor, local.vmDescriptor[:]) {
 		return kcall.StatusInvalidArgument
 	}
-	address, length := decodeUint64(vmDescriptor[0:8]), decodeUint64(vmDescriptor[8:16])
+	address, length := decodeUint64(local.vmDescriptor[0:8]), decodeUint64(local.vmDescriptor[8:16])
 	if length == 0 || length%vm.PageSize != 0 || length > vm.UserMapLimit-vm.UserMapBase {
 		return kcall.StatusInvalidArgument
 	}
@@ -247,8 +311,8 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 	default:
 		return kcall.StatusInvalidArgument
 	}
-	putUint64(vmDescriptor[0:8], address)
-	if !vm.CopyOut(handler.root, descriptor, vmDescriptor[:8]) {
+	putUint64(local.vmDescriptor[0:8], address)
+	if !vm.CopyOut(handler.root, descriptor, local.vmDescriptor[:8]) {
 		regions.Remove(address, length, false)
 		return kcall.StatusInvalidArgument
 	}
@@ -259,16 +323,17 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 // there. Owned pages are freed and uncharged; shared and image pages are only
 // unmapped. Pinned regions cannot be removed.
 func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
 	// A shared mapping is one reference to its object, so it goes whole or
 	// not at all.
 	regions := owner.Regions()
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		piece := vmPieces[index]
+		piece := local.vmPieces[index]
 		if piece.Region.Backing == region.Shared && (piece.Base != piece.Region.Base || piece.Length != piece.Region.Length) {
 			return kcall.StatusInvalidArgument
 		}
@@ -278,8 +343,8 @@ func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.St
 	}
 	releasePages(owner, vm.UnmapUserRange(&pageAllocator, handler.root, address, length))
 	for index := 0; index < count; index++ {
-		if vmPieces[index].Region.Backing == region.Shared {
-			dropShared(vmPieces[index].Region.Object)
+		if local.vmPieces[index].Region.Backing == region.Shared {
+			dropShared(local.vmPieces[index].Region.Object)
 		}
 	}
 	return kcall.StatusOK
@@ -288,7 +353,8 @@ func (handler nativeCallHandler) VMUnmap(address uint64, length uint64) kcall.St
 // VMDiscard frees the pages of an anonymous range but keeps the reservation,
 // so the range reads as zeros again and costs nothing until touched.
 func (handler nativeCallHandler) VMDiscard(address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -299,9 +365,9 @@ func (handler nativeCallHandler) VMDiscard(address uint64, length uint64) kcall.
 		}
 		return kcall.StatusInvalidArgument
 	}
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		if vmPieces[index].Region.Backing != region.Anonymous {
+		if local.vmPieces[index].Region.Backing != region.Anonymous {
 			return kcall.StatusPermissionDenied
 		}
 	}
@@ -309,15 +375,13 @@ func (handler nativeCallHandler) VMDiscard(address uint64, length uint64) kcall.
 	return kcall.StatusOK
 }
 
-// vmPieces is the scratch the protection and discard checks inspect.
-var vmPieces region.Pieces
-
 // VMProtect changes the protection of a range covered by unpinned regions.
 // Anonymous memory may become inaccessible, read-only, or read-write, never
 // executable; shared and device mappings keep the protection they were mapped
 // with.
 func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protection uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -326,9 +390,9 @@ func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protec
 		return kcall.StatusInvalidArgument
 	}
 	regions := owner.Regions()
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		backing := vmPieces[index].Region.Backing
+		backing := local.vmPieces[index].Region.Backing
 		if backing != region.Anonymous || requested&region.Execute != 0 {
 			return kcall.StatusPermissionDenied
 		}
@@ -344,7 +408,8 @@ func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protec
 
 // VMQuery describes the region containing address.
 func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -352,14 +417,14 @@ func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.St
 	if !ok {
 		return kcall.StatusNotFound
 	}
-	clear(vmRecord[:])
-	putUint64(vmRecord[0:8], entry.Base)
-	putUint64(vmRecord[8:16], entry.Length)
-	vmRecord[16], vmRecord[17] = byte(entry.Protection), byte(entry.Backing)
+	clear(local.vmRecord[:])
+	putUint64(local.vmRecord[0:8], entry.Base)
+	putUint64(local.vmRecord[8:16], entry.Length)
+	local.vmRecord[16], local.vmRecord[17] = byte(entry.Protection), byte(entry.Backing)
 	if entry.Flags&region.Pinned != 0 {
-		vmRecord[18] = 1
+		local.vmRecord[18] = 1
 	}
-	if !vm.CopyOut(handler.root, record, vmRecord[:]) {
+	if !vm.CopyOut(handler.root, record, local.vmRecord[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -370,7 +435,8 @@ func (handler nativeCallHandler) VMQuery(address uint64, record uint64) kcall.St
 // chooses and writes to the eight bytes address names. The mapping is never
 // owned, so the object outlives it.
 func (handler nativeCallHandler) MemoryMap(memoryHandle uint64, address uint64, flags uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -396,8 +462,8 @@ func (handler nativeCallHandler) MemoryMap(memoryHandle uint64, address uint64, 
 			return kcall.StatusResourceExhausted
 		}
 		target = base
-		putUint64(vmDescriptor[0:8], target)
-		if !vm.CopyOut(handler.root, address, vmDescriptor[:8]) {
+		putUint64(local.vmDescriptor[0:8], target)
+		if !vm.CopyOut(handler.root, address, local.vmDescriptor[:8]) {
 			return kcall.StatusInvalidArgument
 		}
 	}

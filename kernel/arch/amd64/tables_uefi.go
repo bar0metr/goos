@@ -296,11 +296,9 @@ func StartBootstrapTimer(divisor uint16)
 //export goos_timer_ticks_read
 func TimerTicks() uint64
 
-// KernelCallArg2 returns the third native-call argument captured by the
-// interrupt entry path. The entry path writes it under the kernel lock.
-//
-//export goos_kernel_call_arg2_read
-func KernelCallArg2() uint64
+// KernelCallArg2 returns the third native-call argument, which the entry path
+// leaves in the calling processor's data block.
+func KernelCallArg2() uint64 { return cpuData[CPUIndex()][cpuCallArg2] }
 
 // The input rings: COM1's and the PS/2 keyboard's, one per console
 // (ADR 0125).

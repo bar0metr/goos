@@ -69,11 +69,13 @@ func NewChannel() Channel {
 
 // Reset reopens a registry slot in place; see stream.Stream.Reset.
 func (channel *Channel) Reset() {
+	guard.Check()
 	*channel = Channel{}
 	channel.alive = [2]bool{true, true}
 }
 
 func (channel *Channel) Alive(side uint8) bool {
+	guard.Check()
 	return channel != nil && side <= 1 && channel.alive[side]
 }
 
@@ -81,6 +83,7 @@ func (channel *Channel) Alive(side uint8) bool {
 // side zero and side one are the only endpoints. External IRQ-level locking is
 // required until channels gain per-object synchronization for SMP.
 func (channel *Channel) Send(side uint8, message Message, source *handle.Table, target *handle.Table, transfers []Transfer) Status {
+	guard.Check()
 	if channel == nil || side > 1 || !validMessage(&message) || len(transfers) > MaxAttachedHandles || message.HandleCount != 0 {
 		return StatusInvalidArgument
 	}
@@ -133,6 +136,7 @@ func (channel *Channel) Send(side uint8, message Message, source *handle.Table, 
 }
 
 func (channel *Channel) Receive(side uint8) (Message, Status) {
+	guard.Check()
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return Message{}, StatusInvalidArgument
 	}
@@ -154,6 +158,7 @@ func (channel *Channel) Receive(side uint8) (Message, Status) {
 // WaitAny uses it after registering interest so the observation and the
 // subsequent decision to block cannot lose an intervening state change.
 func (channel *Channel) ReceiveStatus(side uint8) Status {
+	guard.Check()
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return StatusInvalidArgument
 	}
@@ -168,6 +173,7 @@ func (channel *Channel) ReceiveStatus(side uint8) Status {
 
 // Queued reports how many messages wait at the given endpoint.
 func (channel *Channel) Queued(side uint8) int {
+	guard.Check()
 	if channel == nil || side > 1 {
 		return 0
 	}
@@ -176,6 +182,7 @@ func (channel *Channel) Queued(side uint8) int {
 
 // Pending reports how many requests sent from side still await a reply.
 func (channel *Channel) Pending(side uint8) int {
+	guard.Check()
 	if channel == nil || side > 1 {
 		return 0
 	}
@@ -189,6 +196,7 @@ func (channel *Channel) Pending(side uint8) int {
 }
 
 func (channel *Channel) Close(side uint8) bool {
+	guard.Check()
 	if channel == nil || side > 1 || !channel.alive[side] {
 		return false
 	}

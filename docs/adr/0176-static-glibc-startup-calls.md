@@ -55,7 +55,8 @@ keep the old rule.
   monotonic clock, and the page allocator. `sysinfo` reports no swap, load,
   shared, or buffer memory.
 
-**No change to random bytes.** glibc copies `AT_RANDOM` into its
+**No change to random bytes** (superseded by ADR 0185, which gives every
+CPU `AT_RANDOM`). glibc copies `AT_RANDOM` into its
 stack-protector canary and faults on a null pointer when the entry is
 missing. ADR 0151 leaves the entry out on a CPU without RDRAND, and that
 stands: a glibc program needs a CPU with RDRAND, which Intel CPUs have had

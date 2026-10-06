@@ -22,25 +22,21 @@ const consoleThreshold = logfmt.Warn
 // The kernel leaks every heap allocation, so its own log path uses fixed
 // buffers and never converts a string to a slice.
 var (
-	systemLog     klog.Ring
-	logWire       [kcall.MaxLogRecord]byte
-	logBoundsWire [kcall.LogBoundsSize]byte
-	logText       [kcall.LogText]byte
-	logMessage    [logfmt.MaxMessage]byte
-	logFields     [logfmt.MaxFields]byte
-	logGrant      [logfmt.MaxFields]byte
-	kernelName    = []byte("kernel")
+	systemLog klog.Ring
+
+	kernelName = []byte("kernel")
 )
 
 func logRecord(record logfmt.Record) {
+	local := thisCPU()
 	if value, ok := realtimeClock.Now(&monotonicClock, amd64.ReadTSC()); ok {
 		record.Time = value
 	}
 	systemLog.Append(record)
 	if record.Level >= consoleThreshold {
-		size := logfmt.Format(record, logText[:])
+		size := logfmt.Format(record, local.logText[:])
 		console := kernelconsole.New()
-		for _, character := range logText[:size] {
+		for _, character := range local.logText[:size] {
 			console.WriteByte(character)
 		}
 	}
@@ -48,21 +44,24 @@ func logRecord(record logfmt.Record) {
 
 // kernelLog records an event raised by the kernel itself as process 0.
 func kernelLog(level logfmt.Level, message string, fields []byte) {
-	size := copy(logMessage[:], message)
-	logRecord(logfmt.Record{Level: level, Component: kernelName, Message: logMessage[:size], Fields: fields})
+	local := thisCPU()
+	size := copy(local.logMessage[:], message)
+	logRecord(logfmt.Record{Level: level, Component: kernelName, Message: local.logMessage[:size], Fields: fields})
 }
 
 func kernelLogUint(level logfmt.Level, message string, key string, value uint64) {
-	size := copy(logFields[:], key)
-	logFields[size] = '='
-	kernelLog(level, message, logfmt.AppendUint(logFields[:size+1], value))
+	local := thisCPU()
+	size := copy(local.logFields[:], key)
+	local.logFields[size] = '='
+	kernelLog(level, message, logfmt.AppendUint(local.logFields[:size+1], value))
 }
 
 // kernelLogUints is kernelLogUint with two fields.
 func kernelLogUints(level logfmt.Level, message string, key string, value uint64, key2 string, value2 uint64) {
-	size := copy(logFields[:], key)
-	logFields[size] = '='
-	fields := logfmt.AppendUint(logFields[:size+1], value)
+	local := thisCPU()
+	size := copy(local.logFields[:], key)
+	local.logFields[size] = '='
+	fields := logfmt.AppendUint(local.logFields[:size+1], value)
 	fields = append(fields, ' ')
 	fields = append(fields, key2...)
 	fields = append(fields, '=')
@@ -72,7 +71,7 @@ func kernelLogUints(level logfmt.Level, message string, key string, value uint64
 // logAuthority reports whether id is the caller's read capability for the log
 // ring.
 func (handler nativeCallHandler) logAuthority(id uint64) bool {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return false
 	}
@@ -83,7 +82,7 @@ func (handler nativeCallHandler) logAuthority(id uint64) bool {
 // consoleAuthority resolves the caller's console device capability, which
 // authorizes writing records to the log.
 func (handler nativeCallHandler) consoleAuthority(id uint64, rights capability.Rights) (*process.Process, bool) {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return nil, false
 	}
@@ -92,14 +91,15 @@ func (handler nativeCallHandler) consoleAuthority(id uint64, rights capability.R
 }
 
 func (handler nativeCallHandler) LogWrite(device uint64, address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	owner, allowed := handler.consoleAuthority(device, capability.Write)
 	if !allowed {
 		return kcall.StatusPermissionDenied
 	}
-	if length == 0 || length > kcall.MaxLogRecord || !vm.CopyIn(handler.root, address, logWire[:length]) {
+	if length == 0 || length > kcall.MaxLogRecord || !vm.CopyIn(handler.root, address, local.logWire[:length]) {
 		return kcall.StatusInvalidArgument
 	}
-	record, valid := logfmt.Decode(logWire[:length])
+	record, valid := logfmt.Decode(local.logWire[:length])
 	if !valid {
 		return kcall.StatusCorruptData
 	}
@@ -111,19 +111,20 @@ func (handler nativeCallHandler) LogWrite(device uint64, address uint64, length 
 // LogRead writes the index-th retained record, oldest first, as one text line
 // padded with zeros to kcall.LogText bytes.
 func (handler nativeCallHandler) LogRead(device uint64, index uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	if !handler.logAuthority(device) {
 		return kcall.StatusPermissionDenied
 	}
 	if index >= klog.Capacity {
 		return kcall.StatusNotFound
 	}
-	record, found := systemLog.At(int(index))
+	record, found := systemLog.At(int(index), &local.logCopy)
 	if !found {
 		return kcall.StatusNotFound
 	}
-	size := logfmt.Format(record, logText[:])
-	clear(logText[size:])
-	if !vm.CopyOut(handler.root, address, logText[:]) {
+	size := logfmt.Format(record, local.logText[:])
+	clear(local.logText[size:])
+	if !vm.CopyOut(handler.root, address, local.logText[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -134,19 +135,22 @@ func (handler nativeCallHandler) LogRead(device uint64, index uint64, address ui
 // overwritten before it got to them. It takes the same log authority as
 // LogRead, because it describes the same records.
 func (handler nativeCallHandler) LogBounds(device uint64, address uint64) kcall.Status {
+	local := thisCPU()
 	if !handler.logAuthority(device) {
 		return kcall.StatusPermissionDenied
 	}
-	putUint64(logBoundsWire[0:8], systemLog.Oldest())
-	putUint64(logBoundsWire[8:16], systemLog.Total())
-	if !vm.CopyOut(handler.root, address, logBoundsWire[:]) {
+	oldest, total := systemLog.Bounds()
+	putUint64(local.logBoundsWire[0:8], oldest)
+	putUint64(local.logBoundsWire[8:16], total)
+	if !vm.CopyOut(handler.root, address, local.logBoundsWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }
 
 func kernelLogGrant(message string, name string) {
-	size := copy(logGrant[:], name)
-	fields, _ := logfmt.AppendField(logFields[:0], "grant", logGrant[:size])
+	local := thisCPU()
+	size := copy(local.logGrant[:], name)
+	fields, _ := logfmt.AppendField(local.logFields[:0], "grant", local.logGrant[:size])
 	kernelLog(logfmt.Warn, message, fields)
 }

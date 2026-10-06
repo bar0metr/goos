@@ -76,8 +76,53 @@ const (
 	// OperationReplace moves the regular file Path onto Target, removing the
 	// file Target named in the same step, or renames it when there was none.
 	OperationReplace
-	lastOperation = OperationReplace
+	// OperationSetMetadata changes the modification time, the read-only
+	// attribute, or both, of Path, or of the open file Handle when Path is
+	// empty. Rights carries the Metadata flags; Offset and Size are the new
+	// time's seconds and nanoseconds.
+	OperationSetMetadata
+	lastOperation = OperationSetMetadata
 )
+
+// The flags of OperationSetMetadata, in the request's Rights field.
+const (
+	MetadataModified Rights = 1 << iota
+	MetadataReadOnly
+	MetadataWritable
+)
+
+// MetadataRequest builds the request that applies change to path, or to the
+// open file handle when path is empty.
+func MetadataRequest(path []byte, handle Handle, change ramfs.MetadataChange) Request {
+	request := Request{Operation: OperationSetMetadata, Path: path, Handle: handle}
+	if change.SetModified {
+		request.Rights |= MetadataModified
+		request.Offset, request.Size = uint64(change.Modified.Seconds), change.Modified.Nanoseconds
+	}
+	if change.SetReadOnly && change.ReadOnly {
+		request.Rights |= MetadataReadOnly
+	} else if change.SetReadOnly {
+		request.Rights |= MetadataWritable
+	}
+	return request
+}
+
+// MetadataChangeOf decodes what an OperationSetMetadata request changes.
+func MetadataChangeOf(request Request) (ramfs.MetadataChange, bool) {
+	var change ramfs.MetadataChange
+	if request.Rights&^(MetadataModified|MetadataReadOnly|MetadataWritable) != 0 ||
+		request.Rights&MetadataReadOnly != 0 && request.Rights&MetadataWritable != 0 {
+		return change, false
+	}
+	if request.Rights&MetadataModified != 0 {
+		change.SetModified = true
+		change.Modified = ramfs.Timestamp{Seconds: int64(request.Offset), Nanoseconds: request.Size, Available: true}
+	}
+	if request.Rights&(MetadataReadOnly|MetadataWritable) != 0 {
+		change.SetReadOnly, change.ReadOnly = true, request.Rights&MetadataReadOnly != 0
+	}
+	return change, change.Valid()
+}
 
 // describesNode reports whether a reply to the operation carries a node's
 // identity where an open reply carries a handle.
@@ -355,7 +400,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	}
 	operation := Operation(message.Payload[0])
 	rights := Rights(message.Payload[1])
-	if operation < OperationOpen || operation > lastOperation || rights&^(Read|Write) != 0 || flags&flagNameReturn != 0 && operation != OperationReadDir && operation != OperationReadMount || attached && operation.Bulk() {
+	if operation < OperationOpen || operation > lastOperation || rights&^allowedRights(operation) != 0 || flags&flagNameReturn != 0 && operation != OperationReadDir && operation != OperationReadMount || attached && operation.Bulk() {
 		return Request{}, false
 	}
 	request := Request{
@@ -376,6 +421,15 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		request.Target = message.Payload[protocolHeader+pathSize : protocolHeader+inline]
 	}
 	return request, true
+}
+
+// allowedRights is what the Rights byte may hold: access rights, or the
+// metadata flags of OperationSetMetadata.
+func allowedRights(operation Operation) Rights {
+	if operation == OperationSetMetadata {
+		return MetadataModified | MetadataReadOnly | MetadataWritable
+	}
+	return Read | Write
 }
 
 // Attaches reports whether a request carries exactly one handle: a bulk

@@ -67,6 +67,7 @@ func (object *Object) Size() uint64 { return object.size }
 
 // Sealed reports whether every byte has been written.
 func (object *Object) Sealed() bool {
+	guard.Check()
 	return object.id != 0 && (object.fileBacked || object.filled == object.size)
 }
 
@@ -76,12 +77,14 @@ func (object *Object) FileBacked() bool { return object.fileBacked }
 
 // Source identifies the endpoint and VFS open handle that serve random reads.
 func (object *Object) Source() (uint64, uint8, uint64, bool) {
+	guard.Check()
 	return object.channelID, object.channelSide, object.file, object.fileBacked
 }
 
 // SetSource turns a sealed header object with one retained page into a file-backed
 // source. The endpoint is owned by the object from this point.
 func (object *Object) SetSource(size uint64, channelID uint64, side uint8, file uint64) bool {
+	guard.Check()
 	if object.id == 0 || !object.Sealed() || object.frames.Len() != 1 || size < object.size || size > MaxSize || channelID == 0 || side > 1 || file == 0 {
 		return false
 	}
@@ -95,6 +98,7 @@ func (object *Object) Pages() int { return int((object.size + vm.PageSize - 1) /
 // Charge is every page the object costs: its data pages and the index pages
 // that list them.
 func (object *Object) Charge() uint32 {
+	guard.Check()
 	if object.fileBacked {
 		return uint32(1 + pagelist.IndexPagesFor(1))
 	}
@@ -116,6 +120,7 @@ func (object *Object) MarkLaunched() { object.launched = true }
 
 // AddFrame appends the next physical page. The caller has zeroed it.
 func (object *Object) AddFrame(frames pagelist.Frames, view pagelist.View, physical uint64) bool {
+	guard.Check()
 	if object.id == 0 || object.frames.Len() == uint64(object.Pages()) {
 		return false
 	}
@@ -124,16 +129,19 @@ func (object *Object) AddFrame(frames pagelist.Frames, view pagelist.View, physi
 
 // Frame returns the physical page holding the object's page number index.
 func (object *Object) Frame(view pagelist.View, index uint64) (uint64, bool) {
+	guard.Check()
 	return object.frames.At(view, index)
 }
 
 // ReleaseFrames gives every page back.
 func (object *Object) ReleaseFrames(frames pagelist.Frames, view pagelist.View) bool {
+	guard.Check()
 	return object.frames.Release(frames, view)
 }
 
 // Complete reports whether every page the object needs has been added.
 func (object *Object) Complete() bool {
+	guard.Check()
 	if object.fileBacked {
 		return object.frames.Len() == 1
 	}
@@ -144,6 +152,7 @@ func (object *Object) Complete() bool {
 // append: a caller cannot go back and change bytes it wrote, and an object
 // cannot be written past its size or once sealed.
 func (object *Object) NextWrite(length uint64) (uint64, bool) {
+	guard.Check()
 	if object.fileBacked || !object.Complete() || length == 0 || length > MaxWrite || length > object.size-object.filled {
 		return 0, false
 	}
@@ -152,6 +161,7 @@ func (object *Object) NextWrite(length uint64) (uint64, bool) {
 
 // Advance records length bytes written at the offset NextWrite returned.
 func (object *Object) Advance(length uint64) {
+	guard.Check()
 	object.filled += length
 }
 
@@ -160,6 +170,7 @@ func (object *Object) Retain() { object.refs++ }
 
 // Drop removes a reference and reports whether it was the last.
 func (object *Object) Drop() bool {
+	guard.Check()
 	if object.refs != 0 {
 		object.refs--
 	}
@@ -180,6 +191,7 @@ func (table *Table) SetStorage(storage objects.Storage[Object]) { table.storage 
 // the one reference of the handle its creator will hold. The caller adds its
 // frames, or removes it again if it cannot.
 func (table *Table) Reserve(size uint64, payer uint64) (*Object, bool) {
+	guard.Check()
 	if table == nil || size == 0 || size > MaxSize || table.nextID == idMask {
 		return nil, false
 	}
@@ -202,6 +214,7 @@ func (table *Table) Reserve(size uint64, payer uint64) (*Object, bool) {
 
 // Find returns the object with id.
 func (table *Table) Find(id uint64) (*Object, bool) {
+	guard.Check()
 	if table == nil || !IsObject(id) {
 		return nil, false
 	}
@@ -216,6 +229,7 @@ func (table *Table) Find(id uint64) (*Object, bool) {
 // Remove forgets the object with id and frees its record. The caller frees
 // its frames first and holds no pointer to it afterwards.
 func (table *Table) Remove(id uint64) bool {
+	guard.Check()
 	if table == nil || !IsObject(id) {
 		return false
 	}
@@ -240,6 +254,7 @@ func (object *Object) reset() {
 
 // Live counts the objects in existence.
 func (table *Table) Live() int {
+	guard.Check()
 	count := 0
 	for _, object := range table.objects[:] {
 		if object != nil {

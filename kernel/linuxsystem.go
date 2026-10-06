@@ -17,18 +17,6 @@ import (
 	"goos/kernel/mm/vm"
 )
 
-var (
-	linuxTimespec [linuxcompat.TimespecSize]byte
-	linuxUname    [linuxcompat.UnameSize]byte
-	linuxRlimit   [linuxcompat.RlimitSize]byte
-	// linuxSignalAction and linuxSignalPrevious hold the new and the old
-	// disposition of one rt_sigaction call.
-	linuxSignalAction   [linuxcompat.SignalActionSize]byte
-	linuxSignalPrevious [linuxcompat.SignalActionSize]byte
-	linuxSignalSet      [linuxcompat.SignalSetSize]byte
-	linuxRandom         [linuxcompat.MaxRandomBytes]byte
-)
-
 const (
 	// linuxSleepCorrelation identifies the one wait a sleeping task has. A
 	// sleep ends by its deadline alone, so nothing else could answer it.
@@ -41,8 +29,11 @@ const (
 )
 
 func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat.Result {
-	state, found := linuxcompat.FindProcess(handler.root)
-	if !found {
+	local := thisCPU()
+	// The calls of the fast class run without the Linux lock; they use only
+	// the PID and the TID the dispatcher found.
+	state := handler.state
+	if state == nil {
 		return linuxErrno(linuxabi.ESRCH)
 	}
 	arguments := &request.Arguments
@@ -52,7 +43,7 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 	case linuxabi.SysGettid:
 		// The first thread's TID is the PID; a clone-created thread has
 		// its own.
-		return linuxcompat.Result{Value: uint64(linuxcompat.TaskTID(handler.task, state))}
+		return linuxcompat.Result{Value: uint64(handler.tid)}
 	case linuxabi.SysGetppid:
 		return linuxcompat.Result{Value: uint64(linuxcompat.ParentPIDOf(state.PID))}
 	case linuxabi.SysGetuid, linuxabi.SysGeteuid:
@@ -79,8 +70,8 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 		}
 		return linuxcompat.Result{}
 	case linuxabi.SysUname:
-		linuxcompat.EncodeUname(&linuxUname, version.Release)
-		if !vm.CopyOut(handler.root, arguments[0], linuxUname[:]) {
+		linuxcompat.EncodeUname(&local.linuxUname, version.Release)
+		if !vm.CopyOut(handler.root, arguments[0], local.linuxUname[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 		return linuxcompat.Result{}
@@ -128,40 +119,38 @@ func (handler *linuxCallHandler) System(request linuxcompat.Request) linuxcompat
 // processor GoOS runs.
 const linuxCPUMaskSize = 8
 
-var linuxCPUMask [linuxCPUMaskSize]byte
-
 // schedGetaffinity reports every online processor for the caller's own
 // process or thread: a thread runs wherever the scheduler places it. The
 // result is the size of the mask written, as Linux returns it.
 func (handler *linuxCallHandler) schedGetaffinity(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
 	pid, size := int32(arguments[0]), arguments[1]
-	if pid != 0 && pid != state.PID && pid != linuxcompat.TaskTID(handler.task, state) {
+	if pid != 0 && pid != state.PID && pid != handler.tid {
 		return linuxErrno(linuxabi.ESRCH)
 	}
 	if size < linuxCPUMaskSize || size%8 != 0 {
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	putUint64(linuxCPUMask[:], amd64.OnlineMask())
-	if !vm.CopyOut(handler.root, arguments[2], linuxCPUMask[:]) {
+	putUint64(local.linuxCPUMask[:], amd64.OnlineMask())
+	if !vm.CopyOut(handler.root, arguments[2], local.linuxCPUMask[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{Value: linuxCPUMaskSize}
 }
 
-var linuxCPUWire [4]byte
-
 // getcpu reports the processor the caller runs on, which may change before
 // it uses the answer, and node zero.
 func (handler *linuxCallHandler) getcpu(arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
 	if arguments[0] != 0 {
-		putUint32(linuxCPUWire[:], uint32(amd64.CPUIndex()))
-		if !vm.CopyOut(handler.root, arguments[0], linuxCPUWire[:]) {
+		putUint32(local.linuxCPUWire[:], uint32(amd64.CPUIndex()))
+		if !vm.CopyOut(handler.root, arguments[0], local.linuxCPUWire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 	}
 	if arguments[1] != 0 {
-		clear(linuxCPUWire[:])
-		if !vm.CopyOut(handler.root, arguments[1], linuxCPUWire[:]) {
+		clear(local.linuxCPUWire[:])
+		if !vm.CopyOut(handler.root, arguments[1], local.linuxCPUWire[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 	}
@@ -171,21 +160,22 @@ func (handler *linuxCallHandler) getcpu(arguments *[6]uint64) linuxcompat.Result
 // signalAction records and reports a signal disposition. A handler stored
 // here runs when its signal is delivered at a system call return.
 func (handler *linuxCallHandler) signalAction(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
 	signal, action, previous := uint64(uint32(arguments[0])), arguments[1], arguments[2]
 	if arguments[3] != linuxcompat.SignalSetSize {
 		return linuxErrno(linuxabi.EINVAL)
 	}
 	var replacement *[linuxcompat.SignalActionSize]byte
 	if action != 0 {
-		if !vm.CopyIn(handler.root, action, linuxSignalAction[:]) {
+		if !vm.CopyIn(handler.root, action, local.linuxSignalAction[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
-		replacement = &linuxSignalAction
+		replacement = &local.linuxSignalAction
 	}
-	if errno := state.Signals.Action(signal, replacement, &linuxSignalPrevious); errno != 0 {
+	if errno := state.Signals.Action(signal, replacement, &local.linuxSignalPrevious); errno != 0 {
 		return linuxErrno(errno)
 	}
-	if previous != 0 && !vm.CopyOut(handler.root, previous, linuxSignalPrevious[:]) {
+	if previous != 0 && !vm.CopyOut(handler.root, previous, local.linuxSignalPrevious[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
@@ -194,42 +184,40 @@ func (handler *linuxCallHandler) signalAction(state *linuxcompat.ProcessState, a
 // signalMask records and reports the blocked mask. A signal it unblocks that
 // is pending is delivered as this call returns.
 func (handler *linuxCallHandler) signalMask(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
 	how, set, previous := uint64(uint32(arguments[0])), arguments[1], arguments[2]
 	if arguments[3] != linuxcompat.SignalSetSize {
 		return linuxErrno(linuxabi.EINVAL)
 	}
 	requested := uint64(0)
 	if set != 0 {
-		if !vm.CopyIn(handler.root, set, linuxSignalSet[:]) {
+		if !vm.CopyIn(handler.root, set, local.linuxSignalSet[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
-		requested = linuxcompat.DecodeSignalSet(&linuxSignalSet)
+		requested = linuxcompat.DecodeSignalSet(&local.linuxSignalSet)
 	}
 	before, errno := state.Signals.Mask(how, requested, set != 0)
 	if errno != 0 {
 		return linuxErrno(errno)
 	}
 	if previous != 0 {
-		linuxcompat.EncodeSignalSet(&linuxSignalSet, before)
-		if !vm.CopyOut(handler.root, previous, linuxSignalSet[:]) {
+		linuxcompat.EncodeSignalSet(&local.linuxSignalSet, before)
+		if !vm.CopyOut(handler.root, previous, local.linuxSignalSet[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 	}
 	return linuxcompat.Result{}
 }
 
-// getrandom returns bytes from the CPU's RDRAND generator. A machine without
-// one gets ENOSYS, which the C library reports as a missing call: the kernel
-// has no other source it could call random without lying. The refusal is
-// counted with the unsupported calls so a diagnostic run shows it.
+// getrandom returns bytes from the kernel's generator (ADR 0185), which boot
+// seeds before the first process starts, so the call never blocks.
 func (handler *linuxCallHandler) getrandom(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	address, length := request.Arguments[0], request.Arguments[1]
 	if errno := linuxcompat.RandomFlags(uint64(uint32(request.Arguments[2]))); errno != 0 {
 		return linuxErrno(errno)
 	}
-	if !amd64.HasHardwareRandom() {
-		return linuxcompat.Refuse(request.Number)
-	}
+	stirRandom()
 	if length > linuxcompat.MaxRandomBytes {
 		length = linuxcompat.MaxRandomBytes
 	}
@@ -239,10 +227,10 @@ func (handler *linuxCallHandler) getrandom(request linuxcompat.Request) linuxcom
 	if length = handler.accessible(address, length, true); length == 0 {
 		return linuxErrno(linuxabi.EFAULT)
 	}
-	filled := amd64.FillRandom(linuxRandom[:length])
-	copied := filled && vm.CopyOut(handler.root, address, linuxRandom[:length])
+	filled := randomBytes(local.linuxRandom[:length])
+	copied := filled && vm.CopyOut(handler.root, address, local.linuxRandom[:length])
 	// The kernel keeps no copy of bytes a program may use as a key.
-	clear(linuxRandom[:length])
+	clear(local.linuxRandom[:length])
 	switch {
 	case !filled:
 		return linuxErrno(linuxabi.EIO)
@@ -255,6 +243,7 @@ func (handler *linuxCallHandler) getrandom(request linuxcompat.Request) linuxcom
 // clockGettime reads a kernel clock directly. It asks no service and cannot
 // block.
 func (handler *linuxCallHandler) clockGettime(id uint64, address uint64) linuxcompat.Result {
+	local := thisCPU()
 	source, errno := linuxcompat.ClockOf(id)
 	if errno != 0 || !monotonicClock.Calibrated() {
 		return linuxErrno(linuxabi.EINVAL)
@@ -266,22 +255,18 @@ func (handler *linuxCallHandler) clockGettime(id uint64, address uint64) linuxco
 			return linuxErrno(linuxabi.EINVAL)
 		}
 	}
-	linuxcompat.EncodeTimespec(&linuxTimespec, value)
-	if !vm.CopyOut(handler.root, address, linuxTimespec[:]) {
+	linuxcompat.EncodeTimespec(&local.linuxTimespec, value)
+	if !vm.CopyOut(handler.root, address, local.linuxTimespec[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
 }
 
-var (
-	linuxTimeval  [linuxcompat.TimevalSize]byte
-	linuxTimezone [linuxcompat.TimezoneSize]byte
-)
-
 // gettimeofday reads the realtime clock in microseconds. Either pointer may
 // be null. The timezone is UTC with no daylight saving, as Linux reports
 // when nothing set one.
 func (handler *linuxCallHandler) gettimeofday(timeval uint64, timezone uint64) linuxcompat.Result {
+	local := thisCPU()
 	if timeval != 0 {
 		if !monotonicClock.Calibrated() {
 			return linuxErrno(linuxabi.EINVAL)
@@ -290,22 +275,21 @@ func (handler *linuxCallHandler) gettimeofday(timeval uint64, timezone uint64) l
 		if !set {
 			return linuxErrno(linuxabi.EINVAL)
 		}
-		linuxcompat.EncodeTimeval(&linuxTimeval, value)
-		if !vm.CopyOut(handler.root, timeval, linuxTimeval[:]) {
+		linuxcompat.EncodeTimeval(&local.linuxTimeval, value)
+		if !vm.CopyOut(handler.root, timeval, local.linuxTimeval[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 	}
-	if timezone != 0 && !vm.CopyOut(handler.root, timezone, linuxTimezone[:]) {
+	if timezone != 0 && !vm.CopyOut(handler.root, timezone, local.linuxTimezone[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
 }
 
-var linuxTime [8]byte
-
 // time returns the realtime clock in whole seconds and also stores it where
 // tloc points, when it points anywhere.
 func (handler *linuxCallHandler) time(tloc uint64) linuxcompat.Result {
+	local := thisCPU()
 	if !monotonicClock.Calibrated() {
 		return linuxErrno(linuxabi.EINVAL)
 	}
@@ -315,27 +299,26 @@ func (handler *linuxCallHandler) time(tloc uint64) linuxcompat.Result {
 	}
 	seconds := uint64(value.Seconds)
 	if tloc != 0 {
-		putUint64(linuxTime[:], seconds)
-		if !vm.CopyOut(handler.root, tloc, linuxTime[:]) {
+		putUint64(local.linuxTime[:], seconds)
+		if !vm.CopyOut(handler.root, tloc, local.linuxTime[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 	}
 	return linuxcompat.Result{Value: seconds}
 }
 
-var linuxSysinfo [linuxcompat.SysinfoSize]byte
-
 // sysinfo reports uptime, the managed RAM, and the free pages. Programs
 // size their buffers from totalram; 7-Zip picks its dictionary limit there.
 func (handler *linuxCallHandler) sysinfo(address uint64) linuxcompat.Result {
+	local := thisCPU()
 	statistics := pageAllocator.Statistics()
-	linuxcompat.EncodeSysinfo(&linuxSysinfo, linuxcompat.Sysinfo{
+	linuxcompat.EncodeSysinfo(&local.linuxSysinfo, linuxcompat.Sysinfo{
 		UptimeSeconds: nowNanos() / 1_000_000_000,
 		TotalRAM:      statistics.ManagedPages * vm.PageSize,
 		FreeRAM:       statistics.FreePages * vm.PageSize,
 		Processes:     uint16(processRegistry.Count()),
 	})
-	if !vm.CopyOut(handler.root, address, linuxSysinfo[:]) {
+	if !vm.CopyOut(handler.root, address, local.linuxSysinfo[:]) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	return linuxcompat.Result{}
@@ -352,6 +335,7 @@ func (handler *linuxCallHandler) sysinfo(address uint64) linuxcompat.Result {
 // the monotonic clock, and a wake that comes before then waits again for
 // what is left.
 func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	pending, active, errno := handler.vfsStage(request)
 	if errno != 0 {
 		waitAnyTable.Cancel(handler.task)
@@ -370,9 +354,9 @@ func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcom
 				remaining = pending.Note - now
 			}
 			if request.Arguments[1] != 0 {
-				putUint64(linuxTimespec[0:8], remaining/uint64(timekeeping.NanosPerSecond))
-				putUint64(linuxTimespec[8:16], remaining%uint64(timekeeping.NanosPerSecond))
-				if !vm.CopyOut(handler.root, request.Arguments[1], linuxTimespec[:]) {
+				putUint64(local.linuxTimespec[0:8], remaining/uint64(timekeeping.NanosPerSecond))
+				putUint64(local.linuxTimespec[8:16], remaining%uint64(timekeeping.NanosPerSecond))
+				if !vm.CopyOut(handler.root, request.Arguments[1], local.linuxTimespec[:]) {
 					return linuxErrno(linuxabi.EFAULT)
 				}
 			}
@@ -385,17 +369,17 @@ func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcom
 		}
 		stage, ticks = pending.Stage+1, linuxcompat.RemainingTicks(pending.Note-now, clock.TicksPerSecond, linuxSleepTicks)
 	} else {
-		if !vm.CopyIn(handler.root, request.Arguments[0], linuxTimespec[:]) {
+		if !vm.CopyIn(handler.root, request.Arguments[0], local.linuxTimespec[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
-		if ticks, errno = linuxcompat.SleepTicks(&linuxTimespec, clock.TicksPerSecond, linuxSleepTicks); errno != 0 || ticks == 0 {
+		if ticks, errno = linuxcompat.SleepTicks(&local.linuxTimespec, clock.TicksPerSecond, linuxSleepTicks); errno != 0 || ticks == 0 {
 			return linuxErrno(errno)
 		}
 		// The note is the monotonic time the sleep ends at, or zero before
 		// the clock is calibrated, when the tick deadline alone decides.
 		end := uint64(0)
 		if monotonicClock.Calibrated() {
-			if end = nowNanos() + linuxcompat.SleepNanos(&linuxTimespec); end < linuxcompat.SleepNanos(&linuxTimespec) {
+			if end = nowNanos() + linuxcompat.SleepNanos(&local.linuxTimespec); end < linuxcompat.SleepNanos(&local.linuxTimespec) {
 				end = ^uint64(0)
 			}
 		}
@@ -417,6 +401,7 @@ func (handler *linuxCallHandler) nanosleep(request linuxcompat.Request) linuxcom
 // a new limit is refused with EPERM, which is what Linux answers a process
 // that may not raise its limits.
 func (handler *linuxCallHandler) prlimit(state *linuxcompat.ProcessState, arguments *[6]uint64) linuxcompat.Result {
+	local := thisCPU()
 	pid, resource, replacement, previous := arguments[0], arguments[1], arguments[2], arguments[3]
 	if pid != 0 && pid != uint64(state.PID) {
 		return linuxErrno(linuxabi.ESRCH)
@@ -429,9 +414,9 @@ func (handler *linuxCallHandler) prlimit(state *linuxcompat.ProcessState, argume
 		return linuxErrno(linuxabi.EPERM)
 	}
 	if previous != 0 {
-		putUint64(linuxRlimit[0:8], limit)
-		putUint64(linuxRlimit[8:16], limit)
-		if !vm.CopyOut(handler.root, previous, linuxRlimit[:]) {
+		putUint64(local.linuxRlimit[0:8], limit)
+		putUint64(local.linuxRlimit[8:16], limit)
+		if !vm.CopyOut(handler.root, previous, local.linuxRlimit[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
 	}

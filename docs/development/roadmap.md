@@ -536,9 +536,11 @@ FAT32 service restart (ADR 0178). 7-Zip runs with its own thread count.
 Every processor the firmware lists, up to 64, starts and runs tasks
 ([SMP](../kernel/smp.md), ADR 0181 to ADR 0183). Threads of one process run
 in parallel; per-processor run queues, local APIC timers, reschedule
-interrupts, and TLB shootdown carry it. Kernel calls run one at a time under
-the kernel lock. Splitting that lock by process and by object type is the
-next step for workloads that spend their time in the kernel.
+interrupts, and TLB shootdown carry it. Kernel calls take the locks of the
+domains they touch (ADR 0184), so faults and the fast Linux calls of one
+program's threads run in the kernel at once. Most Linux file and process
+calls still share the linux lock, and every channel shares one lock; splitting
+those is the next step for workloads that spend their time in the kernel.
 
 ### Next: a Linux terminal
 
@@ -577,7 +579,7 @@ Only after that milestone should a larger Go/TinyGo toolchain be evaluated.
 Do not move these ahead of the native application and storage milestones unless
 a concrete blocker requires them:
 
-- splitting the kernel lock without a measured need;
+- splitting the linux, channel, or handle lock without a measured need;
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
 - networking;

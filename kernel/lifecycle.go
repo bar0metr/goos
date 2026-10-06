@@ -16,6 +16,7 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
+	"goos/kernel/lock"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
 	"goos/kernel/sched"
@@ -41,53 +42,92 @@ func (handler nativeCallHandler) Exit(code uint64) kcall.Status {
 	return kcall.StatusOK
 }
 
+// exitLocks is the set an exit takes, besides the address space of the
+// task's process and the executable table, which come after it in level
+// order.
+const exitLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+
+// deliverProcessExits runs, on the housekeeping task, the teardown of every
+// task whose exit the scheduler has published, one task at a time.
 func deliverProcessExits() {
 	for task := amd64.TakeExitedTask(); task != 0; task = amd64.TakeExitedTask() {
-		taskID := sched.TaskID(task)
-		cancelLinuxExec(taskID)
-		wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
-		linuxcompat.SyscallContinuations.Cancel(taskID)
-		if waitAnyTable.Cancel(taskID) && diag.Enabled {
-			trace(diag.WaitCancelExit, pidOfTask(taskID), task, 0, 0)
+		takeLocks(exitLocks, nil, nil)
+		owner, _ := processRegistry.ByTask(sched.TaskID(task))
+		var space *lock.RW
+		if owner != nil {
+			space = owner.Space()
+			space.Lock()
 		}
-		// The exiting task's run time is folded into its process before the
-		// slot is released, so the process keeps the time and the next task to
-		// take the slot starts from zero.
-		accountTaskCPU(taskID)
-		forgetFutexWaiter(taskID)
-		code := amd64.TaskExitCode(task)
-		if validation.Enabled {
-			noteStackGuardFault(taskID, code)
+		executableLock.Lock()
+		released := deliverTaskExit(task)
+		executableLock.Unlock()
+		if space != nil {
+			space.Unlock()
 		}
-		owner, _ := processRegistry.ByTask(taskID)
-		// A task exec ended ran in an address space exec has destroyed.
-		execEnded := isExecEnded(taskID)
-		event, report := processRegistry.ReportTaskExit(taskID, code)
-		liveRoot := uint64(0)
-		if report == process.ExitTaskRemoved && owner != nil && !execEnded {
-			liveRoot = owner.AddressSpace().Root
+		dropLocks(exitLocks, nil)
+		// The slot is cleared only now: its locks lived in it.
+		if released != nil {
+			released.Reset()
 		}
-		if report == process.ExitTaskRemoved && owner != nil && owner.ABI() == process.ABILinuxX8664 {
-			endLinuxThread(taskID, owner, code)
-		} else {
-			linuxcompat.RemoveThread(taskID)
-			takeExecEnded(taskID)
-		}
-		// Reclaiming the guarded kernel stack is independent bookkeeping. It must
-		// not gate the steps below: a process that has exited has to release its
-		// waiters and its handles even if its stack cannot be returned, or its
-		// peers wait forever for an EOF that never arrives.
-		if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task, liveRoot) {
-			taskStackReclaimFailures++
-			if taskStackReclaimFailures == 1 {
-				kernelLog(logfmt.Warn, "TASK_STACK_RECLAIM_FAILED", nil)
-			}
-		}
-		if report != process.ExitProcessEnded {
-			continue
-		}
-		releaseExitedProcess(event)
 	}
+}
+
+// deliverTaskExit tears down one exited task and, with its process's last
+// task, the process. It returns the process slot to clear once the locks
+// are released.
+func deliverTaskExit(task uint64) *process.Process {
+	taskID := sched.TaskID(task)
+	cancelExecutableFault(taskID)
+	processRegistry.ForgetOwner(taskID)
+	cancelLinuxExec(taskID)
+	wakeVFSContextWaiter(linuxcompat.CancelVFSTask(taskID))
+	linuxcompat.SyscallContinuations.Cancel(taskID)
+	// A task killed on another processor may have registered a wait after
+	// its killer cancelled its waits; nothing can wake it now, so the
+	// registrations go before its slot is reused.
+	ipcWaitSet.Cancel(taskID)
+	streamWaitSet.Cancel(taskID)
+	processWaitSet.Cancel(taskID)
+	if waitAnyTable.Cancel(taskID) && diag.Enabled {
+		trace(diag.WaitCancelExit, pidOfTask(taskID), task, 0, 0)
+	}
+	// The exiting task's run time is folded into its process before the
+	// slot is released, so the process keeps the time and the next task to
+	// take the slot starts from zero.
+	accountTaskCPU(taskID)
+	forgetFutexWaiter(taskID)
+	code := amd64.TaskExitCode(task)
+	if validation.Enabled {
+		noteStackGuardFault(taskID, code)
+	}
+	owner, _ := processRegistry.ByTask(taskID)
+	// A task exec ended ran in an address space exec has destroyed.
+	execEnded := isExecEnded(taskID)
+	event, report := processRegistry.ReportTaskExit(taskID, code)
+	liveRoot := uint64(0)
+	if report == process.ExitTaskRemoved && owner != nil && !execEnded {
+		liveRoot = owner.AddressSpace().Root
+	}
+	if report == process.ExitTaskRemoved && owner != nil && owner.ABI() == process.ABILinuxX8664 {
+		endLinuxThread(taskID, owner, code)
+	} else {
+		linuxcompat.RemoveThread(taskID)
+		takeExecEnded(taskID)
+	}
+	// Reclaiming the guarded kernel stack is independent bookkeeping. It must
+	// not gate the steps below: a process that has exited has to release its
+	// waiters and its handles even if its stack cannot be returned, or its
+	// peers wait forever for an EOF that never arrives.
+	if !amd64.ReclaimExitedTask(&pageAllocator, kernelPageTable, task, liveRoot) {
+		taskStackReclaimFailures++
+		if taskStackReclaimFailures == 1 {
+			kernelLog(logfmt.Warn, "TASK_STACK_RECLAIM_FAILED", nil)
+		}
+	}
+	if report != process.ExitProcessEnded {
+		return nil
+	}
+	return releaseExitedProcess(event)
 }
 
 // accountTaskCPU moves a task's tick count onto its process and clears the
@@ -117,7 +157,7 @@ func processCPUTicks(owner *process.Process) uint64 {
 
 // releaseExitedProcess performs the observable half of process teardown first,
 // so that waiters and peers are released before any cleanup that may fail.
-func releaseExitedProcess(event process.ExitEvent) {
+func releaseExitedProcess(event process.ExitEvent) *process.Process {
 	processExitDelivered = 1
 	trace(diag.ProcessExited, event.Process, uint64(event.Task), 0, event.Code)
 	if waited, status := processRegistry.Wait(event.Process); status == process.WaitExited && waited == event {
@@ -127,7 +167,7 @@ func releaseExitedProcess(event process.ExitEvent) {
 	if event.Process == 1 {
 		initExitObserved = 1
 		initExitCode = event.Code
-		return
+		return nil
 	}
 	exited, found := processRegistry.ByID(event.Process)
 	// PID 1 holds no handle to a forked Linux process and is not told it ended.
@@ -170,10 +210,10 @@ func releaseExitedProcess(event process.ExitEvent) {
 	processRegistry.Remove(event.Process)
 	for index := range spawnedProcesses {
 		if spawnedProcesses[index] != nil && spawnedProcesses[index].ID() == event.Process {
-			spawnedProcesses[index].Reset()
-			break
+			return spawnedProcesses[index]
 		}
 	}
+	return nil
 }
 
 // releaseProcessHandles closes everything the exited process held so that the
@@ -222,8 +262,9 @@ func exitedPages(exited *process.Process) uint32 {
 }
 
 func reportProcessExit(handler nativeCallHandler, resultAddress uint64, event process.ExitEvent) kcall.Status {
-	putUint64(exitWire[:], event.Code)
-	if !vm.CopyOut(handler.root, resultAddress, exitWire[:]) {
+	local := thisCPU()
+	putUint64(local.exitWire[:], event.Code)
+	if !vm.CopyOut(handler.root, resultAddress, local.exitWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

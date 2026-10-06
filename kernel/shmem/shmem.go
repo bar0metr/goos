@@ -57,6 +57,7 @@ type Zero func(physical uint64) bool
 // permanent kernel object. It starts with no reference; the first grant
 // takes one.
 func (table *Table) Create(frames pagelist.Frames, view pagelist.View, zero Zero, pages uint32, payer uint64) (*Object, bool) {
+	guard.Check()
 	if table == nil || frames == nil || pages == 0 || uint64(pages) > MaxPages || table.nextID == identityLimit {
 		return nil, false
 	}
@@ -102,6 +103,7 @@ func (table *Table) Create(frames pagelist.Frames, view pagelist.View, zero Zero
 
 // Find returns the object with id.
 func (table *Table) Find(id uint64) (*Object, bool) {
+	guard.Check()
 	if table == nil || id&identityNamespace == 0 || id == identityNamespace {
 		return nil, false
 	}
@@ -123,6 +125,7 @@ func (table *Table) discard(slot int) {
 
 // CountFor counts the objects payer pays for.
 func (table *Table) CountFor(payer uint64) int {
+	guard.Check()
 	count := 0
 	for _, object := range table.objects[:] {
 		if object != nil && object.payer == payer {
@@ -134,6 +137,7 @@ func (table *Table) CountFor(payer uint64) int {
 
 // Live counts the objects in existence.
 func (table *Table) Live() int {
+	guard.Check()
 	count := 0
 	for _, object := range table.objects[:] {
 		if object != nil {
@@ -147,6 +151,7 @@ func (table *Table) Live() int {
 // process pays for, the object's pages are freed and Drop returns the payer
 // and the pages to uncharge. Kernel objects are never freed.
 func (table *Table) Drop(object *Object, frames pagelist.Frames, view pagelist.View) (uint64, uint32, bool) {
+	guard.Check()
 	if object == nil || object.id == 0 {
 		return 0, 0, false
 	}
@@ -173,6 +178,7 @@ func (object *Object) reset() {
 }
 
 func (object *Object) ID() uint64 {
+	guard.Check()
 	if object == nil {
 		return 0
 	}
@@ -181,6 +187,7 @@ func (object *Object) ID() uint64 {
 
 // PageCount is the number of pages the object holds.
 func (object *Object) PageCount() uint32 {
+	guard.Check()
 	if object == nil {
 		return 0
 	}
@@ -189,6 +196,7 @@ func (object *Object) PageCount() uint32 {
 
 // Charge is every page the object costs: its pages and its index pages.
 func (object *Object) Charge() uint32 {
+	guard.Check()
 	return object.count + uint32(pagelist.IndexPagesFor(uint64(object.count)))
 }
 
@@ -203,6 +211,7 @@ func (object *Object) References() uint32 { return object.refs }
 
 // Frame returns the physical page at index.
 func (object *Object) Frame(view pagelist.View, index uint32) (uint64, bool) {
+	guard.Check()
 	return object.frames.At(view, uint64(index))
 }
 
@@ -210,6 +219,7 @@ func (object *Object) Frame(view pagelist.View, index uint32) (uint64, bool) {
 // and counts the handle as a reference. Execute is never a valid
 // shared-memory right.
 func (object *Object) Grant(table *handle.Table, rights capability.Rights) (handle.ID, bool) {
+	guard.Check()
 	allowed := capability.Read | capability.Write | capability.Transfer
 	if object == nil || object.id == 0 || table == nil || rights == 0 || rights&^allowed != 0 {
 		return 0, false

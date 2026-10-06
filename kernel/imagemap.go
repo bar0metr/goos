@@ -13,8 +13,6 @@ import (
 	"goos/kernel/process"
 )
 
-var imageWire [16]byte
-
 // ImageMap maps the boot system image into the caller and writes back the
 // address and length it landed at. The filesystem service uses it to serve
 // /system from the same bytes the launch path resolves, so what a listing shows
@@ -25,7 +23,8 @@ var imageWire [16]byte
 // firmware reservation rather than to the caller, so they are mapped unowned
 // and the caller's teardown leaves them intact for the next mount.
 func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found || virtual != vm.UserImageAddress {
 		return kcall.StatusInvalidArgument
 	}
@@ -44,10 +43,10 @@ func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uin
 	}
 	// The descriptor pointer is validated before anything is mapped, so a bad
 	// one cannot leave a partially mapped image behind.
-	for index := range imageWire {
-		imageWire[index] = 0
+	for index := range local.imageWire {
+		local.imageWire[index] = 0
 	}
-	if !vm.CopyOut(handler.root, address, imageWire[:]) {
+	if !vm.CopyOut(handler.root, address, local.imageWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	// The window is a pinned read-only region; its page tables are created
@@ -68,9 +67,9 @@ func (handler nativeCallHandler) ImageMap(id uint64, virtual uint64, address uin
 			return kcall.StatusResourceExhausted
 		}
 	}
-	putUint64(imageWire[0:8], virtual)
-	putUint64(imageWire[8:16], size)
-	if !vm.CopyOut(handler.root, address, imageWire[:]) {
+	putUint64(local.imageWire[0:8], virtual)
+	putUint64(local.imageWire[8:16], size)
+	if !vm.CopyOut(handler.root, address, local.imageWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK

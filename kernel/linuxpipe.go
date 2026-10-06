@@ -10,13 +10,12 @@ import (
 	"goos/kernel/stream"
 )
 
-var linuxPipeWire [8]byte
-
 // Pipe serves pipe and pipe2 with a native stream. The two open-file
 // descriptions own the stream's two endpoint references, so the stream closes
 // its ends as the last descriptor of each goes, in whichever process holds it.
 // The stream is charged to the caller's stream quota.
 func (handler *linuxCallHandler) Pipe(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	closeOnExec := false
 	if request.Number == linuxabi.SysPipe2 {
 		var errno linuxabi.Errno
@@ -25,10 +24,10 @@ func (handler *linuxCallHandler) Pipe(request linuxcompat.Request) linuxcompat.R
 		}
 	}
 	address := request.Arguments[0]
-	if !vm.CanCopyOut(handler.root, address, uint64(len(linuxPipeWire))) {
+	if !vm.CanCopyOut(handler.root, address, uint64(len(local.linuxPipeWire))) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return linuxErrno(linuxabi.EBADF)
 	}
@@ -49,9 +48,9 @@ func (handler *linuxCallHandler) Pipe(request linuxcompat.Request) linuxcompat.R
 		releaseStreamSlot(id)
 		return linuxErrno(errno)
 	}
-	putUint32(linuxPipeWire[0:4], uint32(readFD))
-	putUint32(linuxPipeWire[4:8], uint32(writeFD))
-	if !vm.CopyOut(handler.root, address, linuxPipeWire[:]) {
+	putUint32(local.linuxPipeWire[0:4], uint32(readFD))
+	putUint32(local.linuxPipeWire[4:8], uint32(writeFD))
+	if !vm.CopyOut(handler.root, address, local.linuxPipeWire[:]) {
 		// The destination was writable a moment ago, so this is not expected.
 		// The descriptors go without dropping references, and the stream
 		// closes as one nobody used.

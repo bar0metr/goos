@@ -130,7 +130,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot run run-gui run-debug release-check test test-all test-unit test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -480,6 +480,8 @@ lint:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
 	@tests/lint/unsafe_boundary.sh
+	@tests/lint/no_kernel_lock.sh --self-test >/dev/null
+	@tests/lint/no_kernel_lock.sh
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './build/*')
@@ -679,6 +681,18 @@ test-linux-busybox:
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 LINUX_EXTRA=$(abspath $(BUSYBOX)) TEST_DISK=$(BUILD_DIR)/linux-busybox-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/linux_busybox.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-busybox-virtio-blk.img $(notdir $(BUSYBOX))
 
+# A static 7-Zip the caller supplies archives, tests, and extracts
+# /system/linux on a diagnostic guest with SMP processors (four by default),
+# and every extracted file must hash as its source. The run writes
+# build/reports/linux-7zip.md. No part of test-all: the repository carries
+# no 7-Zip.
+#   make test-linux-7zip LINUX_EXTRA=/path/to/7zzs SMP=4
+test-linux-7zip:
+	@test -n "$(LINUX_EXTRA)" && test -f "$(LINUX_EXTRA)" || { echo "LINUX_EXTRA=/path/to/7zzs is required" >&2; exit 2; }
+	@$(MAKE) --no-print-directory iso DIAG=1
+	@$(MAKE) --no-print-directory test-disk DIAG=1 LINUX_EXTRA=$(abspath $(LINUX_EXTRA)) TEST_DISK=$(BUILD_DIR)/linux-7zip-virtio-blk.img
+	@MEMORY=1G SMP=$(or $(SMP),4) tests/boot/linux_7zip.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/linux-7zip-virtio-blk.img $(abspath $(LINUX_EXTRA))
+
 # Times four Linux calls beside their native counterparts in one guest and
 # writes build/reports/linux-abi-<variant>.md. The numbers depend on the host.
 test-linux-bench: iso
@@ -737,13 +751,14 @@ test-pve-smp: pve-artifacts
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
 
-# A diagnostic run of a static 7-Zip the caller supplies. DIAG=1 gives the
-# guest the diag command, whose DIAG linux line names the refused calls.
+# A diagnostic run of a static 7-Zip the caller supplies on four host cores.
+# DIAG=1 gives the guest the diag command, whose DIAG linux line names the
+# refused calls and whose DIAG sched line the parallel peaks.
 #   make test-pve-7zip LINUX_EXTRA=/path/to/7zzs
 test-pve-7zip:
 	@test -n "$(LINUX_EXTRA)" && test -f "$(LINUX_EXTRA)" || { echo "LINUX_EXTRA=/path/to/7zzs is required" >&2; exit 2; }
 	@$(MAKE) --no-print-directory pve-artifacts DIAG=1 LINUX_EXTRA=$(abspath $(LINUX_EXTRA))
-	@$(PVELAB) run --scenario 7zip $(PVE_RUN_FLAGS)
+	@$(PVELAB) run --scenario 7zip --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
 # Boots the smoke scenario and keeps the VM for debugging; pvelab prints the
 # run ID that pvelab destroy --run takes.
@@ -791,6 +806,7 @@ help:
 	  '  test-linux-kernel-reference KERNEL=path BUSYBOX=path  run the probe on a Linux kernel in QEMU' \
 	  '  test-linux-all  Linux ABI host tests and the Linux end-to-end boot' \
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
+	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
 	  '  test-linux-bench time Linux calls beside native ones into build/reports' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \

@@ -156,6 +156,20 @@ run 'ls /tmp/linux-test; echo listed'
 refuse '^file$' 'busybox rm'
 expect '^listed$' 'busybox rm'
 
+# touch sets the time of an existing file and chmod its write bits (ADR 0186).
+run "$busybox touch -d '2001-09-09 01:46:40' /persist/busy.txt"
+clean 'busybox touch'
+run "$busybox stat -c %Y /persist/busy.txt"
+expect '^1000000000$' 'busybox touch time'
+run "$busybox chmod 444 /persist/busy.txt"
+clean 'busybox chmod'
+run "$busybox stat -c %a /persist/busy.txt"
+expect '^444$' 'busybox chmod read-only'
+run "$busybox chmod 644 /persist/busy.txt"
+clean 'busybox chmod'
+run "$busybox stat -c %a /persist/busy.txt"
+expect '^644$' 'busybox chmod writable'
+
 # A non-interactive shell starts other Linux programs, by path and through
 # PATH, and sees their exit status.
 run "$busybox sh -c '/system/linux/musl-hello one two'"

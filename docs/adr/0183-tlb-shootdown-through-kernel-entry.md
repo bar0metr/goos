@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. ADR 0184 replaced the kernel lock the initiator held with the
+process's address-space lock.
 
 ## Context
 
@@ -24,8 +25,9 @@ on the root enter the kernel once.
 
 Each processor records the root it is about to return to before the CR3
 write that loads it, and at each entry clears the record and counts the entry
-after the CR3 write that leaves it. The initiator holds the kernel lock,
-finishes its page-table changes, fences, reads which processors run the root,
+after the CR3 write that leaves it. The initiator holds the process's
+address space for writing, so no other change to the root and no other
+shootdown of it runs alongside; it finishes its page-table changes, fences, reads which processors run the root,
 sends them the shootdown vector, and waits until each has entered the kernel
 or left the root. A processor spinning with interrupts disabled is in the
 kernel, its record is clear, and nobody waits for it. A shootdown that does

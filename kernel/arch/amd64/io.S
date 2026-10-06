@@ -24,6 +24,7 @@
 .set GOOS_CPU_RESCHED_IPIS, 64
 .set GOOS_CPU_TLB_IPIS, 72
 .set GOOS_CPU_TICKS, 80
+.set GOOS_CPU_CALL_ARG2, 88
 // The reasons goos_sched_switch takes for leaving the current task.
 .set GOOS_SWITCH_PREEMPT, 0
 .set GOOS_SWITCH_BLOCK, 1
@@ -55,6 +56,7 @@
 .set GOOS_LINUX_ACTION_EXIT, 1
 .set GOOS_LINUX_ACTION_BLOCK, 2
 .set GOOS_LINUX_ACTION_EXEC, 3
+.set GOOS_LINUX_ACTION_RETRY, 4
 
 // The console ring is a power of two so the wrap is a mask. It holds two of
 // the longest lines the terminal accepts (4096 bytes), so a pasted line
@@ -876,7 +878,7 @@ goos_exception_fatal:
 
 // A page fault in user mode may be a demand-zero page (ADR 0104). The
 // registers and the SSE state are saved around the resolver, which runs on the
-// task's kernel stack with interrupts disabled and the kernel lock held; a
+// task's kernel stack with interrupts disabled and takes the locks it needs; a
 // supplied page retries the instruction, anything else retires the task as
 // before. Another task of the process may have mapped the page first, or
 // changed its protection, on another processor; the resolver then answers
@@ -946,7 +948,7 @@ goos_exception_fatal:
     GOOS_RETURN_USER
     iretq
 // A retried fault that is due a reschedule, or whose task was killed while
-// it waited for the kernel lock, leaves the processor first. The registers
+// it waited for a lock, leaves the processor first. The registers
 // are saved again above the IRETQ frame in the order the context switch
 // restores; the faulting instruction runs again when the task does.
 .user_fault_preempt:
@@ -1137,7 +1139,7 @@ goos_linux_syscall_entry:
     movq %rax, GOOS_LINUX_FRAME_BASE+72(%rsp)
     movq %gs:GOOS_LINUX_ENTRY_PROCESS_ROOT, %rax
     movq %rax, GOOS_LINUX_FRAME_BASE+80(%rsp)
-    // A task killed while it waits for the kernel lock leaves without the
+    // A task killed before the call starts leaves without the
     // call; the retried SYSCALL never runs because the task never resumes.
     callq goos_kernel_enter
     testq %rax, %rax
@@ -1151,6 +1153,8 @@ goos_linux_syscall_entry:
     je .linux_user_block
     cmpq $GOOS_LINUX_ACTION_EXEC, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
     je .linux_user_exec
+    cmpq $GOOS_LINUX_ACTION_RETRY, GOOS_LINUX_FRAME_BASE+GOOS_LINUX_FRAME_ACTION(%rsp)
+    je .linux_user_retry
 .linux_user_return:
     movq GOOS_CPU_CURRENT(%rbx), %rax
     shlq $GOOS_FPU_AREA_SHIFT, %rax
@@ -1361,7 +1365,7 @@ goos_user_call:
 	 movq 48(%rsp), %rax
 	 movq %rax, 40(%rsp)
 	 GOOS_CPU %rbx, %ebx
-	 // A task killed while it waits for the kernel lock leaves without the
+	 // A task killed before the call starts leaves without the
 	 // call.
 	 callq goos_kernel_enter
 	 testq %rax, %rax
@@ -1386,7 +1390,7 @@ goos_user_call:
 	 movq 96(%rsp), %rdx
 	 movq 88(%rsp), %r8
 	 movq 64(%rsp), %r10
-	 movq %r10, goos_kernel_call_arg2(%rip)
+	 movq %r10, GOOS_CPU_CALL_ARG2(%rbx)
 	 movq GOOS_CPU_CURRENT(%rbx), %rax
 	 leaq goos_task_roots(%rip), %r9
 	 movq (%r9,%rax,8), %r9
@@ -1449,6 +1453,8 @@ goos_user_call:
 	 jz .user_return
 	 cmpq $1, %rax
 	 je .user_exit
+	 cmpq $3, %rax
+	 je .user_retry
 	 jmp .user_block
 .user_return:
 	 movq $0, 64(%rsp)
@@ -2126,8 +2132,6 @@ goos_task_fault_addresses:
 // count is its processor's idle time.
 goos_task_ticks:
     .zero 1024
-goos_kernel_call_arg2:
-    .quad 0
 goos_irq_11_pending:
     .quad 0
 goos_irq_11_waiter:
@@ -2230,11 +2234,15 @@ goos_ap_trampoline:
     movq (.L_ap_entry - goos_ap_trampoline)(%rbx), %rax
     jmpq *%rax
 .balign 8
+// The descriptors carry their accessed bit already. A processor loads the
+// 64-bit code selector after paging is on, from this page, which the
+// trampoline root maps read-only; with CR0.WP set, the write that marks a
+// descriptor accessed would fault there with no IDT to take it.
 .L_ap_gdt:
     .quad 0
-    .quad 0x00cf9a000000ffff
-    .quad 0x00cf92000000ffff
-    .quad 0x00af9a000000ffff
+    .quad 0x00cf9b000000ffff
+    .quad 0x00cf93000000ffff
+    .quad 0x00af9b000000ffff
 .L_ap_gdtr:
     .word 31
     .long 0
@@ -2403,11 +2411,6 @@ goos_user_preemptions_read:
 .global goos_user_faults_read
 goos_user_faults_read:
     movq goos_user_faults(%rip), %rax
-    retq
-
-.global goos_kernel_call_arg2_read
-goos_kernel_call_arg2_read:
-    movq goos_kernel_call_arg2(%rip), %rax
     retq
 
 .section .rdata

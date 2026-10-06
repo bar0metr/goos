@@ -69,8 +69,8 @@ not a mapped `GST4` object. It emits `argc`, NUL-terminated `argv` and `envp`,
 and the static-ELF auxv required by the release specification. The complete
 image is capped at 64 KiB and 256 entries in each vector, with 16-byte initial
 RSP alignment. Synthetic UID/GID are 1000 and `AT_CLKTCK` is 100.
-`AT_PLATFORM` is `x86_64`. `AT_RANDOM` points at 16 bytes from the CPU's
-RDRAND generator and is absent on a CPU without one (ADR 0151). Only occupied
+`AT_PLATFORM` is `x86_64`. `AT_RANDOM` points at 16 bytes from the
+kernel's generator (ADR 0185). Only occupied
 stack pages are installed; the remaining reservation
 stays demand-zero. The common launch path installs this state before scheduling.
 
@@ -107,6 +107,16 @@ implemented calls and unknown calls both return `-ENOSYS`. Saturating
 counters, an eight-entry ring, and a set of every refused number retain
 bounded diagnostics without per-call logging.
 
+Every Linux call takes a lock set by class (ADR 0184). `futex`,
+`sched_yield`, the identity calls, `uname`, the clocks, `getrandom`,
+`sched_getaffinity`, and `getcpu` hold only their address space for reading;
+the dispatcher takes the Linux lock just before such a call, to find the
+process state and thread ID and select the thread's signal mask, and just
+after it, to deliver signals. The mapping calls write the address space,
+the process calls take the registry for writing, and every other call holds
+the Linux lock throughout. A futex word is read with its hash bucket locked,
+so a wake cannot fall between the read and the sleep.
+
 Every handler must validate flags and lengths before copying
 through `vm.CopyIn`/`vm.CopyOut`. They may never retain or directly dereference
 an arbitrary user pointer. Copied strings must fit their operation-specific
@@ -126,7 +136,7 @@ Syscalls map onto native primitives:
 | `pread64`, `pwrite64` | a VFS seek, a bulk request, and a seek back |
 | `open`, `read`, `write` on `/dev/null` and `/dev/zero` | the kernel itself; no VFS exchange |
 | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn` | compatibility state; pending signals act at system call returns through an `rt_sigframe` |
-| `getrandom` | the CPU's RDRAND generator |
+| `getrandom` | the kernel's ChaCha20 generator |
 | `getcwd`, `chdir` | the working directory in compatibility state, checked against the VFS |
 | `mkdir`, `unlink`, `rmdir`, `rename` and their `*at` forms | VFS create, remove, rename, and replace |
 | `set_tid_address` | compatibility PID and stored address; no native ID |
@@ -291,9 +301,8 @@ Image replacement resets caught dispositions to default and preserves ignored
 dispositions, the blocked mask, and pending signals. Fork copies dispositions
 and the mask and starts the child with nothing pending.
 
-`getrandom` returns bytes from RDRAND, 256 per call at most, and `ENOSYS` on
-a CPU without the instruction. The kernel has no other source and makes none
-up.
+`getrandom` returns bytes from the kernel's generator, 256 per call at most
+(ADR 0185).
 
 ### Identity and time
 

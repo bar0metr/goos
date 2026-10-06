@@ -3,6 +3,8 @@
 package main
 
 import (
+	"sync/atomic"
+
 	"goos/kernel/arch/amd64"
 	"goos/kernel/clock"
 	"goos/kernel/ipc"
@@ -25,6 +27,9 @@ type executableFault struct {
 	side        uint8
 	correlation uint64
 	failed      bool
+	// physical is the page the reply filled, which the task maps when its
+	// access runs again; zero until the reply comes.
+	physical uint64
 	// retryAt is the tick a request the filesystem could not serve is sent
 	// again, and giveUp the tick after which a refusal is final. Both are
 	// zero until the first such refusal.
@@ -41,49 +46,207 @@ const (
 	executableRetrySeconds   = 10
 )
 
+// executableFaults holds each task's outstanding page request. Requests and
+// replies travel on channels, so the channel lock guards the table, and
+// executableCorrelation with it.
 var (
 	executableFaults      [sched.MaxTasks]executableFault
 	executableCorrelation uint64
-	executableReply       ipc.Message
+	// executableWanted is the page, plus one, a copy of the task's call needed
+	// from an executable object and could not take. The task writes it and
+	// takes it back itself.
+	executableWanted [sched.MaxTasks]atomic.Uint64
 )
 
-// requestExecutablePage queues one bounded random read and parks the faulting
-// task. The same fault may re-enter before the next timer switch; it does not
-// queue a second request.
-func requestExecutablePage(owner *process.Process, entry region.Region, page uint64) (pending bool, failed bool) {
+// The ways executableStep ends.
+type pageResult uint8
+
+const (
+	// pageMapped: the page is mapped; the access or the call runs again.
+	pageMapped pageResult = iota + 1
+	// pageParked: the request is out and the task waits for the reply.
+	pageParked
+	// pageRetry: the task is being stopped; nothing was done.
+	pageRetry
+	// pageFailed: no page can come.
+	pageFailed
+)
+
+// wantExecutablePage records the page a copy of the calling task's call
+// needs from an executable object.
+func wantExecutablePage(page uint64) {
+	if slot, _, valid := amd64.CurrentTask().Parts(); valid && int(slot) < len(executableWanted) {
+		executableWanted[slot].Store(page + 1)
+	}
+}
+
+// takeExecutableWant returns and clears the page the calling task's call
+// wanted, if any.
+func takeExecutableWant(task sched.TaskID) (uint64, bool) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(executableWanted) {
+		return 0, false
+	}
+	wanted := executableWanted[slot].Swap(0)
+	return wanted - 1, wanted != 0
+}
+
+// executableStep supplies a page an executable object holds: an object in
+// memory fills it at once, a file-backed object through a request to the
+// VFS that parks the task until the reply. It takes the channel lock, the
+// address space for reading, and the executable lock, and gives up when the
+// task is being stopped. The caller holds no lock.
+func executableStep(owner *process.Process, page uint64, write bool, fetch bool) pageResult {
+	stop := amd64.StopWord()
+	space := owner.Space()
+	if !channelLock.LockUnless(stop) {
+		return pageRetry
+	}
+	if !space.RLockUnless(stop) {
+		channelLock.Unlock()
+		return pageRetry
+	}
+	if !executableLock.LockUnless(stop) {
+		space.RUnlock()
+		channelLock.Unlock()
+		return pageRetry
+	}
+	result := executableStepLocked(owner, page, write, fetch)
+	executableLock.Unlock()
+	space.RUnlock()
+	channelLock.Unlock()
+	return result
+}
+
+func executableStepLocked(owner *process.Process, page uint64, write bool, fetch bool) pageResult {
+	root := owner.AddressSpace().Root
+	if vm.UserPageMapped(root, page) {
+		return pageMapped
+	}
+	entry, kind := demandRegion(owner, root, page, write, fetch)
+	if kind == faultMapped {
+		return pageMapped
+	}
+	if kind != 0 {
+		return pageFailed
+	}
+	if entry.Backing != region.Image || entry.Flags&region.FromObject == 0 {
+		if resolved, _ := demandFault(owner, root, page, write, fetch); resolved {
+			return pageMapped
+		}
+		return pageFailed
+	}
+	object, found := executables.Find(entry.Object)
+	if !found {
+		return pageFailed
+	}
+	if !object.FileBacked() {
+		physical, allocated := pageAllocator.Allocate()
+		if !allocated {
+			return pageFailed
+		}
+		if !vm.InitializePhysical(physical, nil) || !fillFromOrigin(entry, page, physical) {
+			pageAllocator.Free(physical)
+			return pageFailed
+		}
+		if resolved, _ := mapDemandPage(owner, root, page, physical, entry); resolved {
+			return pageMapped
+		}
+		return pageFailed
+	}
+	return requestExecutablePage(owner, entry, page)
+}
+
+// requestExecutablePage maps the page a reply delivered, or queues one
+// bounded read and parks the faulting task. A task has one request out at a
+// time; an access that runs again before the reply parks again.
+func requestExecutablePage(owner *process.Process, entry region.Region, page uint64) pageResult {
 	task := amd64.CurrentTask()
 	slot, _, valid := task.Parts()
 	if !valid {
-		return false, true
+		return pageFailed
 	}
 	current := &executableFaults[slot]
 	if current.task != 0 && current.task != task {
-		*current = executableFault{}
+		// A request of a task that held the slot before.
+		clearExecutableFault(current)
 	}
 	if current.task != 0 {
-		if current.failed {
-			*current = executableFault{}
-			return false, true
+		switch {
+		case current.failed:
+			clearExecutableFault(current)
+			return pageFailed
+		case current.physical == 0:
+			amd64.BlockCurrentTask()
+			return pageParked
+		case current.page == page:
+			physical := current.physical
+			current.physical = 0
+			clearExecutableFault(current)
+			if resolved, _ := mapDemandPage(owner, owner.AddressSpace().Root, page, physical, entry); resolved {
+				return pageMapped
+			}
+			return pageFailed
 		}
-		amd64.BlockCurrentTask()
-		return true, false
+		// The reply was for a page the task no longer touches.
+		clearExecutableFault(current)
 	}
 	within := page - entry.Base
 	if within >= entry.Data {
-		return false, false
+		// Past the segment's file bytes the page is zero.
+		if resolved, _ := demandZeroImagePage(owner, page, entry); resolved {
+			return pageMapped
+		}
+		return pageFailed
 	}
 	*current = executableFault{task: task, root: owner.AddressSpace().Root, page: page, object: entry.Object,
 		offset: entry.Offset + within, count: min(vm.PageSize, entry.Data-within)}
 	if !sendExecutableRequest(current) {
 		*current = executableFault{}
-		return false, true
+		return pageFailed
 	}
 	amd64.BlockCurrentTask()
-	return true, false
+	return pageParked
+}
+
+// demandZeroImagePage maps a zeroed page of an image region past its file
+// bytes.
+func demandZeroImagePage(owner *process.Process, page uint64, entry region.Region) (bool, uint64) {
+	physical, allocated := pageAllocator.Allocate()
+	if !allocated {
+		return false, faultQuota
+	}
+	if !vm.InitializePhysical(physical, nil) {
+		pageAllocator.Free(physical)
+		return false, faultQuota
+	}
+	return mapDemandPage(owner, owner.AddressSpace().Root, page, physical, entry)
+}
+
+// clearExecutableFault forgets a request and frees a page its reply filled
+// that nobody mapped.
+func clearExecutableFault(fault *executableFault) {
+	if fault.physical != 0 {
+		pageAllocator.Free(fault.physical)
+	}
+	*fault = executableFault{}
+}
+
+// cancelExecutableFault forgets the request of a task that has exited. The
+// channel lock is held.
+func cancelExecutableFault(task sched.TaskID) {
+	slot, _, valid := task.Parts()
+	if !valid || int(slot) >= len(executableFaults) {
+		return
+	}
+	if executableFaults[slot].task == task {
+		clearExecutableFault(&executableFaults[slot])
+	}
+	executableWanted[slot].Store(0)
 }
 
 // sendExecutableRequest asks the VFS for the page fault describes, under a
-// fresh correlation.
+// fresh correlation. The channel and executable locks are held.
 func sendExecutableRequest(fault *executableFault) bool {
 	object, found := executables.Find(fault.object)
 	if !found {
@@ -114,11 +277,12 @@ func sendExecutableRequest(fault *executableFault) bool {
 
 // retryExecutablePages sends again each page request whose filesystem was
 // away, once its retry tick has come. A request that cannot be sent fails.
+// Housekeeping calls it holding the channel and executable locks.
 func retryExecutablePages() {
 	now := amd64.TimerTicks()
 	for index := range executableFaults {
 		fault := &executableFaults[index]
-		if fault.task == 0 || fault.failed || fault.retryAt == 0 || now < fault.retryAt {
+		if fault.task == 0 || fault.failed || fault.physical != 0 || fault.retryAt == 0 || now < fault.retryAt {
 			continue
 		}
 		if !sendExecutableRequest(fault) {
@@ -128,27 +292,20 @@ func retryExecutablePages() {
 	}
 }
 
-// executablePagePending reports whether task waits for a page of its image
-// that a copy or a fault requested and that has neither arrived nor failed.
-func executablePagePending(task sched.TaskID) bool {
-	slot, _, valid := task.Parts()
-	if !valid || int(slot) >= len(executableFaults) {
-		return false
-	}
-	fault := &executableFaults[slot]
-	return fault.task == task && !fault.failed
-}
-
 // completeExecutablePage consumes a VFS reply before another request can
 // reuse the transport slot. It returns true when it consumed the endpoint's
 // queued message. Processes forked from one program share its source, so
 // several tasks can wait on one endpoint; the reply goes to the task whose
-// request it answers, found by correlation.
+// request it answers, found by correlation. The page's bytes are copied out
+// of the file cache at once, since the next reply reuses it; the task maps
+// the copy when its access runs again. The caller holds the channel and
+// shared-memory locks.
 func completeExecutablePage(channelID uint64, side uint8) bool {
+	local := thisCPU()
 	waiting := false
 	for index := range executableFaults {
 		fault := &executableFaults[index]
-		if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side {
+		if fault.task != 0 && !fault.failed && fault.physical == 0 && fault.channelID == channelID && fault.side == side {
 			waiting = true
 			break
 		}
@@ -161,7 +318,7 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 		// The source's service is gone: every request on it fails.
 		for index := range executableFaults {
 			fault := &executableFaults[index]
-			if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side {
+			if fault.task != 0 && !fault.failed && fault.physical == 0 && fault.channelID == channelID && fault.side == side {
 				fault.failed = true
 				amd64.WakeTaskID(uint64(fault.task))
 			}
@@ -169,14 +326,14 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 		return false
 	}
 	var status ipc.Status
-	executableReply, status = channel.Receive(side)
+	local.executableReply, status = channel.Receive(side)
 	if status != ipc.StatusOK {
 		return false
 	}
 	slot := -1
 	for index := range executableFaults {
 		fault := &executableFaults[index]
-		if fault.task != 0 && !fault.failed && fault.channelID == channelID && fault.side == side && fault.correlation == executableReply.Correlation {
+		if fault.task != 0 && !fault.failed && fault.physical == 0 && fault.channelID == channelID && fault.side == side && fault.correlation == local.executableReply.Correlation {
 			slot = index
 			break
 		}
@@ -186,7 +343,7 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 		return true
 	}
 	fault := &executableFaults[slot]
-	reply, valid := vfs.DecodeReplyFrom(&executableReply)
+	reply, valid := vfs.DecodeReplyFrom(&local.executableReply)
 	if valid && reply.Operation == vfs.OperationReadExecutable && (reply.Status == vfs.StatusPeerDied || reply.Status == vfs.StatusTimeout) {
 		now := amd64.TimerTicks()
 		if fault.giveUp == 0 {
@@ -200,56 +357,30 @@ func completeExecutablePage(channelID uint64, side uint8) bool {
 	}
 	valid = valid && reply.Operation == vfs.OperationReadExecutable && reply.Status == vfs.StatusOK && reply.Size == fault.count
 	if valid {
-		valid = installExecutablePage(*fault)
+		fault.physical, valid = copyExecutablePage(fault.count)
 	}
-	task := fault.task
-	if valid {
-		*fault = executableFault{}
-	} else {
+	if !valid {
 		fault.failed = true
 	}
-	amd64.WakeTaskID(uint64(task))
+	amd64.WakeTaskID(uint64(fault.task))
 	return true
 }
 
-func installExecutablePage(fault executableFault) bool {
-	owner, found := processRegistry.ByRoot(fault.root)
-	if !found {
-		return false
-	}
-	// Two threads that touched the same page each asked for it. The first
-	// reply mapped it; the second has nothing left to do and its thread
-	// retries the access against the page already there.
-	if vm.UserPageMapped(fault.root, fault.page) {
-		return true
-	}
-	if owner.Available(process.ResourcePages) < 1+faultTables {
-		return false
-	}
-	entry, found := owner.Regions().Find(fault.page)
-	if !found || entry.Backing != region.Image || entry.Flags&region.FromObject == 0 || entry.Object != fault.object {
-		return false
-	}
+// copyExecutablePage copies count bytes of the file cache's last page into a
+// new zeroed page.
+func copyExecutablePage(count uint64) (uint64, bool) {
 	cacheFrame, found := bootFileCache.Frame(vm.PhysicalPage, fsproto.CachePages-1)
 	cache, mapped := vm.PhysicalPage(cacheFrame)
 	if !found || !mapped {
-		return false
+		return 0, false
 	}
 	physical, allocated := pageAllocator.Allocate()
-	if !allocated || !vm.InitializePhysical(physical, cache[:fault.count]) {
-		if allocated {
-			pageAllocator.Free(physical)
-		}
-		return false
+	if !allocated {
+		return 0, false
 	}
-	tables, mapped := vm.MapUserPageAt(&pageAllocator, fault.root, fault.page, physical, regionPermissions(entry.Protection), true)
-	if tables != 0 {
-		owner.Charge(process.ResourcePages, uint32(tables))
-	}
-	if !mapped {
+	if !vm.InitializePhysical(physical, cache[:count]) {
 		pageAllocator.Free(physical)
-		return false
+		return 0, false
 	}
-	owner.Charge(process.ResourcePages, 1)
-	return true
+	return physical, true
 }

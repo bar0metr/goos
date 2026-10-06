@@ -3,6 +3,8 @@
 // from the serial log without adding output to normal builds.
 package diag
 
+import "goos/kernel/lock"
+
 type Kind uint8
 
 const (
@@ -90,26 +92,47 @@ type Event struct {
 
 const RingSize = 128
 
-// Ring retains the most recent RingSize events.
+// Ring retains the most recent RingSize events. Processors record at once;
+// the ring's lock serializes them.
 type Ring struct {
+	lock   lock.Spin
 	events [RingSize]Event
 	next   int
 	total  uint64
+}
+
+func (ring *Ring) take() {
+	ring.lock.SetLevel(lock.LevelLog)
+	ring.lock.Lock()
 }
 
 func (ring *Ring) Record(event Event) {
 	if !Enabled {
 		return
 	}
+	ring.take()
 	ring.events[ring.next] = event
 	ring.next = (ring.next + 1) % RingSize
 	ring.total++
+	ring.lock.Unlock()
 }
 
-func (ring *Ring) Total() uint64 { return ring.total }
+func (ring *Ring) Total() uint64 {
+	ring.take()
+	total := ring.total
+	ring.lock.Unlock()
+	return total
+}
 
 // Len reports how many events are retained.
 func (ring *Ring) Len() int {
+	ring.take()
+	length := ring.length()
+	ring.lock.Unlock()
+	return length
+}
+
+func (ring *Ring) length() int {
 	if ring.total < RingSize {
 		return int(ring.total)
 	}
@@ -118,6 +141,9 @@ func (ring *Ring) Len() int {
 
 // At returns the index-th retained event, oldest first.
 func (ring *Ring) At(index int) Event {
-	start := (ring.next - ring.Len() + RingSize) % RingSize
-	return ring.events[(start+index)%RingSize]
+	ring.take()
+	start := (ring.next - ring.length() + RingSize) % RingSize
+	event := ring.events[(start+index)%RingSize]
+	ring.lock.Unlock()
+	return event
 }

@@ -12,8 +12,6 @@ import (
 	"goos/kernel/sched"
 )
 
-var linuxTIDWire [4]byte
-
 // cloneThread creates a thread: a task in the caller's process that shares
 // its address space, descriptors, and signal handlers, and resumes after
 // this call with RAX zero on the stack the caller gave. It gets its own FS
@@ -22,6 +20,7 @@ var linuxTIDWire [4]byte
 // Every check that can fail runs before the task exists: a runnable task
 // cannot be withdrawn.
 func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxcompat.Result {
+	local := thisCPU()
 	owner, found := processRegistry.ByTask(handler.task)
 	if !found || handler.frame == nil {
 		return linuxErrno(linuxabi.EIO)
@@ -29,8 +28,8 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 	if !vm.ValidateUserRange(form.Stack, 0) || form.SetTLS && !linuxcompat.UserFSBase(form.TLS, vm.UserAddressLimit) {
 		return linuxErrno(linuxabi.EINVAL)
 	}
-	if form.SetParentTID && !vm.CanCopyOut(handler.root, form.ParentTID, uint64(len(linuxTIDWire))) ||
-		form.SetChildTID && !vm.CanCopyOut(handler.root, form.ChildTID, uint64(len(linuxTIDWire))) {
+	if form.SetParentTID && !vm.CanCopyOut(handler.root, form.ParentTID, uint64(len(local.linuxTIDWire))) ||
+		form.SetChildTID && !vm.CanCopyOut(handler.root, form.ChildTID, uint64(len(local.linuxTIDWire))) {
 		return linuxErrno(linuxabi.EFAULT)
 	}
 	if owner.Available(process.ResourceTasks) < 1 || owner.TaskCount() >= process.MaxTasksPerProcess || !linuxcompat.ThreadSlotFree() ||
@@ -71,13 +70,13 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 		return linuxErrno(linuxabi.EAGAIN)
 	}
 	thread, recorded := creation.Commit(sched.TaskID(task))
-	if !recorded ||
+	if !recorded || !processRegistry.NoteOwner(sched.TaskID(task), owner) ||
 		!amd64.SetTaskFSBase(sched.TaskID(task), fsBase) || !amd64.SetTaskFPU(sched.TaskID(task), parentFPU) {
 		panicSerial("Linux thread could not be bound")
 	}
-	putUint32(linuxTIDWire[:], uint32(thread.TID))
-	if form.SetParentTID && !vm.CopyOut(handler.root, form.ParentTID, linuxTIDWire[:]) ||
-		form.SetChildTID && !vm.CopyOut(handler.root, form.ChildTID, linuxTIDWire[:]) {
+	putUint32(local.linuxTIDWire[:], uint32(thread.TID))
+	if form.SetParentTID && !vm.CopyOut(handler.root, form.ParentTID, local.linuxTIDWire[:]) ||
+		form.SetChildTID && !vm.CopyOut(handler.root, form.ChildTID, local.linuxTIDWire[:]) {
 		panicSerial("validated Linux TID write failed")
 	}
 	if !amd64.StartTask(sched.TaskID(task)) {
@@ -87,20 +86,17 @@ func (handler *linuxCallHandler) cloneThread(form linuxcompat.CloneForm) linuxco
 	return linuxcompat.Result{Value: uint64(thread.TID)}
 }
 
-// siblingTasks lists, under the kernel lock, the other tasks of a process a
-// call stops or ends.
-var siblingTasks [sched.MaxTasks]sched.TaskID
-
 // collectSiblings returns the tasks of owner other than self.
 func collectSiblings(owner *process.Process, self sched.TaskID) []sched.TaskID {
+	local := thisCPU()
 	count := 0
 	for _, other := range owner.Tasks() {
-		if other != self && count < len(siblingTasks) {
-			siblingTasks[count] = other
+		if other != self && count < len(local.siblingTasks) {
+			local.siblingTasks[count] = other
 			count++
 		}
 	}
-	return siblingTasks[:count]
+	return local.siblingTasks[:count]
 }
 
 // execEndedTasks are tasks exec ended in the image it replaced. Their exit
@@ -133,6 +129,7 @@ func takeExecEnded(task sched.TaskID) bool {
 // a fault or a kill, takes the whole process with it, as a fatal signal
 // does on Linux.
 func endLinuxThread(task sched.TaskID, owner *process.Process, code uint64) {
+	local := thisCPU()
 	thread, isThread := linuxcompat.RemoveThread(task)
 	releaseThreadIOBuffer(owner, thread.IOBuffer)
 	if takeExecEnded(task) {
@@ -147,8 +144,8 @@ func endLinuxThread(task sched.TaskID, owner *process.Process, code uint64) {
 		}
 	}
 	if address != 0 {
-		clear(linuxTIDWire[:])
-		if vm.CopyOut(root, address, linuxTIDWire[:]) {
+		clear(local.linuxTIDWire[:])
+		if vm.CopyOut(root, address, local.linuxTIDWire[:]) {
 			wakeFutex(root, address, linuxcompat.FutexBitsetAll, 1)
 		}
 	}

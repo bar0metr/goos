@@ -36,65 +36,42 @@ import (
 )
 
 var (
-	bootInfo        boot.Info
-	pageAllocator   pmm.Allocator
-	demoTaskA       uint64
-	demoTaskB       uint64
-	demoABlocked    uint64
-	demoAResumed    uint64
-	userExited      uint64
-	kernelCallData  [kcall.MaxConsoleWrite]byte
+	bootInfo      boot.Info
+	pageAllocator pmm.Allocator
+	demoTaskA     uint64
+	demoTaskB     uint64
+	demoABlocked  uint64
+	demoAResumed  uint64
+	userExited    uint64
+
 	nativeImageData [1024]byte
 	faultImageData  [1024]byte
 	boundedChannel  ipc.Channel
-	ipcWireData     [ipc.WireMaxSize]byte
-	sharedObjects   shmem.Table
-	bootFileCache   *shmem.Object
-	dispatchHandler nativeCallHandler
-	// Native calls run one at a time in the kernel exclusion domain, so the
-	// call paths share these buffers instead of allocating on a leaking heap.
-	handleInfoWire        [kcall.HandleInfoSize]byte
-	processInfoWire       [kcall.ProcessInfoSize]byte
-	clockWire             [8]byte
-	nanosWire             [8]byte
-	timeWire              [kcall.ClockTimeSize]byte
-	consoleByteWire       [1]byte
-	systemInfoWire        [kcall.SystemInfoSize]byte
-	consoleInfoWire       [kcall.ConsoleInfoSize]byte
-	portWire              [4]byte
-	dmaWire               [24]byte
-	channelWire           [16]byte
-	streamCreateWire      [16]byte
-	streamDescriptorWire  [24]byte
-	streamResultWire      [8]byte
-	receiveDescriptorWire [24]byte
-	exitWire              [8]byte
-	waitAnyResultWire     [kcall.WaitAnyResultSize]byte
-	waitMaskWire          [8]byte
-	launchTemplate        [supervisor.StagingSlotSize]byte
-	channelRegistry       ipc.Registry
-	streamRegistry        stream.Registry
-	streamCallData        [kcall.MaxStreamIO]byte
-	lifecycleChannel      *ipc.Channel
-	lifecycleChannelID    uint64
-	vfsChannelID          uint64
-	bootProcessA          *process.Process
-	bootProcessB          *process.Process
-	bootInitProcess       *process.Process
-	processRegistry       process.Registry
-	ipcWaitSet            ipc.WaitSet
-	ipcWakeResults        [ipc.MaxWaiters]ipc.WaitResult
-	ipcWaitStatus         [sched.MaxTasks]kcall.Status
-	processWaitSet        process.WaitSet
-	processWakeResults    [process.MaxWaiters]process.WaitResult
-	processWaitStatus     [sched.MaxTasks]kcall.Status
-	streamWaitSet         ipc.WaitSet
-	streamWakeResults     [ipc.MaxWaiters]ipc.WaitResult
-	streamWaitStatus      [sched.MaxTasks]kcall.Status
-	waitAnyTable          kernelwait.Table
-	waitAnyCompletions    [sched.MaxTasks]kernelwait.Completion
-	waitAnyEntries        [kernelwait.MaxObjects]kernelwait.Entry
-	waitAnyWire           [kernelwait.MaxObjects * int(kcall.WaitAnyInterestSize)]byte
+
+	sharedObjects shmem.Table
+	bootFileCache *shmem.Object
+
+	launchTemplate  [supervisor.StagingSlotSize]byte
+	channelRegistry ipc.Registry
+	streamRegistry  stream.Registry
+
+	lifecycleChannel   *ipc.Channel
+	lifecycleChannelID uint64
+	vfsChannelID       uint64
+	bootProcessA       *process.Process
+	bootProcessB       *process.Process
+	bootInitProcess    *process.Process
+	processRegistry    process.Registry
+
+	// The wait sets lock themselves; the statuses are atomic.
+	ipcWaitSet        ipc.WaitSet
+	ipcWaitStatus     waitStatuses
+	processWaitSet    process.WaitSet
+	processWaitStatus waitStatuses
+	streamWaitSet     ipc.WaitSet
+	streamWaitStatus  waitStatuses
+	waitAnyTable      kernelwait.Table
+
 	// imagePages holds the read-only pages of system images that every
 	// process running them maps (ADR 0081).
 	imagePages              loader.SharedPages
@@ -498,9 +475,13 @@ func bootContinue() {
 		amd64.Halt()
 	}
 	calibrateClock()
+	if monotonicClock.Calibrated() {
+		amd64.SetLockWatchdog(monotonicClock.Hz(), lockWatchdogSeconds, reportStuckLock)
+	}
 	if !startLocalTimer() {
 		panicSerial("local APIC timer calibration failed")
 	}
+	seedRandom()
 	if !realtimeClock.Init(bootRealtime, bootRealtimeCounter) {
 		panicSerial("realtime clock initialization failed")
 	}
@@ -661,8 +642,11 @@ func bootContinue() {
 		}
 	}
 	// From here the other processors run tasks, so the boot task changes
-	// kernel objects only under the kernel lock.
-	flags := amd64.KernelLock()
+	// kernel objects only under their locks, and the packages check that it
+	// does.
+	installLockGuards()
+	flags := amd64.DisableInterrupts()
+	takeLocks(launchLocks, nil, nil)
 	bringProcessorsOnline()
 	if pagesUsed := initPagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !initProcess.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		panicSerial("PID 1 exceeded its page quota")
@@ -674,7 +658,8 @@ func bootContinue() {
 	if validation.Enabled {
 		startSelfTestTasks()
 	}
-	amd64.KernelUnlock(flags)
+	dropLocks(launchLocks, nil)
+	amd64.RestoreInterrupts(flags)
 	if validation.Enabled {
 		awaitValidationBoot()
 	} else {
@@ -723,23 +708,28 @@ func mark(marker string) {
 	}
 }
 
-// serviceKernel runs one step of the kernel's own work under the kernel lock
-// that native calls run under, then sleeps until the next tick, task exit,
-// or lifecycle request. A wake that arrives after the step's last check
-// keeps the task from sleeping, so none is lost.
+// serviceKernel runs one step of the kernel's own work, then sleeps until
+// the next tick, task exit, or lifecycle request. A wake that arrives after
+// the step's last check keeps the task from sleeping, so none is lost. Each
+// part takes the locks of the state it touches; interrupts stay disabled
+// throughout, as they are wherever a lock is held.
 func serviceKernel() {
-	flags := amd64.KernelLock()
+	flags := amd64.DisableInterrupts()
 	if validation.Enabled {
 		if !ps2KeyboardValidated && amd64.PS2KeyboardEventTake() {
 			ps2KeyboardValidated = true
 			mark("PS2_KEYBOARD_OK")
 		}
 		kernelframebuffer.DrawValidationMarker(&graphicalFramebuffer)
+		reportKernelParallelPeak()
 	}
+	stirRandom()
 	expireWaitDeadlines()
+	takeLocks(lifecycleQueue|channels, nil, nil)
 	flushLifecycle()
+	dropLocks(lifecycleQueue|channels, nil)
 	deliverProcessExits()
 	consumeInitControl()
-	amd64.KernelUnlock(flags)
+	amd64.RestoreInterrupts(flags)
 	amd64.KernelSleep()
 }

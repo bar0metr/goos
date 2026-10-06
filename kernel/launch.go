@@ -69,7 +69,18 @@ func sendLifecycle(message ipc.Message) bool {
 	return true
 }
 
+// launchLocks is the set a launch takes. The new process's address space
+// needs no lock: no other processor can reach it until it is registered.
+const launchLocks = registryWrite | linuxState | lifecycleQueue | handleWrite | channels | streams | sharedMemory
+
+// consumeInitControl serves one request PID 1 sent on the lifecycle channel.
 func consumeInitControl() {
+	takeLocks(launchLocks, nil, nil)
+	consumeInitControlLocked()
+	dropLocks(launchLocks, nil)
+}
+
+func consumeInitControlLocked() {
 	// Retained replies are delivered before new work is accepted, so that the
 	// caller waiting on one is never overtaken by a later request.
 	if lifecycleChannel == nil || pendingLifecycleCount != 0 {
@@ -91,8 +102,14 @@ func consumeInitControl() {
 	// change it between validation and use.
 	staged := launchTemplate[:event.StartupSize]
 	pid, processHandle, launchStatus := process.ID(0), handle.ID(0), supervisor.LaunchInvalidImage
-	if len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged) {
+	initSpace := bootInitProcess.Space()
+	initSpace.RLock()
+	copied := len(staged) == 0 || vm.CopyIn(bootInitProcess.AddressSpace().Root, supervisor.StagingAddress+uint64(event.StartupSlot)*supervisor.StagingSlotSize, staged)
+	initSpace.RUnlock()
+	if copied {
+		executableLock.Lock()
 		pid, processHandle, launchStatus = spawnExecutable(event.Executable, event.ProcessName(), event.Capabilities[:event.CapabilityCount], event.ResourceProfile, staged)
+		executableLock.Unlock()
 	}
 	if launchStatus != supervisor.LaunchOK {
 		level := logfmt.Warn
@@ -114,6 +131,7 @@ func consumeInitControl() {
 // executing from it (ADR 0093, ADR 0097). The only name the
 // kernel knows at launch is the bootstrap program's, in bootContinue.
 func spawnExecutable(executable supervisor.Executable, name []byte, grants []supervisor.Capability, resourceProfile supervisor.ResourceProfile, startupData []byte) (process.ID, handle.ID, supervisor.LaunchStatus) {
+	local := thisCPU()
 	if kernelPageTable == 0 || nextProcessID == 0 {
 		return 0, 0, supervisor.LaunchResourceExhausted
 	}
@@ -251,15 +269,15 @@ func spawnExecutable(executable supervisor.Executable, name []byte, grants []sup
 			return 0, 0, supervisor.LaunchInvalidImage
 		}
 		if processABI == process.ABILinuxX8664 {
-			// AT_RANDOM exists only when the CPU has a generator to fill it.
+			// Every Linux image gets AT_RANDOM, as on Linux (ADR 0185).
 			var random *[linuxabi.RandomSize]byte
-			if amd64.FillRandom(linuxStackRandom[:]) {
-				random = &linuxStackRandom
+			if randomBytes(local.linuxStackRandom[:]) {
+				random = &local.linuxStackRandom
 			}
 			linuxLaunchStartup = bound
 			stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], loaded.StackTop, linuxImage, &linuxLaunchStartup, random)
 			linuxLaunchStartup = startup.Data{}
-			clear(linuxStackRandom[:])
+			clear(local.linuxStackRandom[:])
 			brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
 			streams, streamHandles, streamsOK := linuxStandardStreams(spawned, bound)
 			if stackStatus != linuxabi.StackOK || !brkOK || !streamsOK || !linuxabi.InstallInitialStack(&pageAllocator, root, stack) || !linuxcompat.InstallProcess(root, pid, bound, streams, brkBase, brkLimit) {
@@ -436,10 +454,6 @@ var launchRegions region.Map
 // and the final bytes are copied into private process pages before task start.
 var linuxInitialStack [linuxabi.MaxInitialStackSize]byte
 
-// linuxStackRandom holds the AT_RANDOM bytes of the launch in progress. The
-// launch clears it once the stack image has its copy.
-var linuxStackRandom [linuxabi.RandomSize]byte
-
 // linuxLaunchImage is the parsed ELF of the launch in progress. The record is
 // over 1 KiB, so a local copy would be allocated on the kernel heap and never
 // freed; the same serialization that guards linuxInitialStack guards it.
@@ -528,16 +542,13 @@ func mapStartup(root uint64, regions *region.Map, bound []byte) bool {
 	return true
 }
 
-// startupChunk carries StartupRead's copy from the caller's startup pages to
-// the buffer it named.
-var startupChunk [512]byte
-
 // StartupRead copies the first length bytes of the caller's startup pages to
 // address, or zeros past their end and for a process started without them.
 // A process reads the header, learns the object's size, and then reads the
 // rest or looks at the pages directly (ADR 0109).
 func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found || length == 0 || length > kcall.MaxStartupSize {
 		return kcall.StatusPermissionDenied
 	}
@@ -546,7 +557,7 @@ func (handler nativeCallHandler) StartupRead(address uint64, length uint64) kcal
 		available = entry.Length
 	}
 	for done := uint64(0); done < length; {
-		chunk := startupChunk[:min(uint64(len(startupChunk)), length-done)]
+		chunk := local.startupChunk[:min(uint64(len(local.startupChunk)), length-done)]
 		clear(chunk)
 		if done < available {
 			chunk = chunk[:min(uint64(len(chunk)), available-done)]

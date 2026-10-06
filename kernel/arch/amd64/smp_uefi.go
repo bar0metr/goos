@@ -35,6 +35,8 @@ const (
 	cpuReschedIPIs
 	cpuTLBIPIs
 	cpuTicks
+	cpuCallArg2
+	cpuKernelRoot
 	cpuWords = 32
 )
 
@@ -71,10 +73,6 @@ var (
 	// runState is the scheduler's state; schedulerLock guards it.
 	runState      sched.Core
 	schedulerLock = lock.New(lock.LevelScheduler)
-	// kernelLock serializes the kernel's object layer: every native call,
-	// Linux system call, user fault resolution, and housekeeping step runs
-	// under it (docs/kernel/smp.md).
-	kernelLock = lock.New(lock.LevelKernel)
 	// cpuAPIC is each processor's APIC ID, written before it starts.
 	cpuAPIC [MaxCPUs]uint32
 	// killCodes are the exit codes of tasks killed while they ran.
@@ -88,6 +86,13 @@ var (
 	// parallelPeak is the most tasks of one address space that ran on
 	// distinct processors at once.
 	parallelPeak atomic.Uint64
+	// inKernel counts the processors between kernel entry and leave for a
+	// call or a fault; kernelPeak is the most at once.
+	inKernel   atomic.Int64
+	kernelPeak atomic.Uint64
+	// threadPeak is the most tasks of one address space inside the kernel
+	// at once, which only a program with several threads raises.
+	threadPeak atomic.Uint64
 )
 
 // CPUIndex returns the calling processor's index; processor 0 is the
@@ -240,52 +245,73 @@ func kickCPU(target int, self int) {
 	sendIPI(target, rescheduleVector)
 }
 
-// KernelLock disables local interrupts and takes the kernel lock, for kernel
-// tasks that change kernel objects outside a system call.
-func KernelLock() uint64 {
-	flags := DisableInterrupts()
-	kernelLock.Lock()
-	return flags
-}
-
-// KernelUnlock releases the kernel lock and restores the interrupt state.
-func KernelUnlock(flags uint64) {
-	kernelLock.Unlock()
-	RestoreInterrupts(flags)
-}
-
-// HoldsKernelLock reports whether the kernel lock is held, by the caller in
-// validation builds.
-func HoldsKernelLock() bool { return kernelLock.HeldByCaller() }
-
-// kernelEnter takes the kernel lock for a system call or user fault. It
-// gives up, returning zero, when the calling task is killed or held: while
-// it waits, because the processor that stopped it may hold the lock until
-// the task is gone, and once it has the lock, because a stopped task must
-// not start a call whose waits nobody would cancel. The processor that
-// stopped it set the request before it released the lock.
+// kernelEnter starts a system call or user fault on the calling processor.
+// It refuses, returning zero, when the calling task is being killed or held:
+// a stopped task must not start a call whose waits nobody would cancel. The
+// call itself takes the locks of the state it touches (ADR 0184) and gives
+// them up the same way when the task is stopped while it waits for one.
 //
 //export goos_kernel_enter
 func kernelEnter() uint64 {
 	cpu := CPUIndex()
-	for !kernelLock.TryLock() {
-		if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
-			return 0
-		}
-		cpuPause()
-	}
 	if atomic.LoadUint64(&cpuData[cpu][cpuKill]) != 0 {
-		kernelLock.Unlock()
 		return 0
 	}
 	schedulerLock.Lock()
 	runState.ForgetWake(cpu)
 	schedulerLock.Unlock()
+	noteKernelEntry()
 	return 1
 }
 
 //export goos_kernel_leave
-func kernelLeave() { kernelLock.Unlock() }
+func kernelLeave() {
+	atomic.StoreUint64(&cpuData[CPUIndex()][cpuKernelRoot], 0)
+	inKernel.Add(-1)
+}
+
+// noteKernelEntry counts the calling processor in the kernel and raises the
+// peak.
+func noteKernelEntry() {
+	count := uint64(inKernel.Add(1))
+	raisePeak(&kernelPeak, count)
+	cpu := CPUIndex()
+	slot := atomic.LoadUint64(&cpuData[cpu][cpuCurrent])
+	if slot >= slotCount {
+		return
+	}
+	root := taskRoots[slot]
+	atomic.StoreUint64(&cpuData[cpu][cpuKernelRoot], root)
+	if root == 0 {
+		return
+	}
+	same := uint64(0)
+	for mask := online.Load(); mask != 0; mask &= mask - 1 {
+		if atomic.LoadUint64(&cpuData[bits.TrailingZeros64(mask)][cpuKernelRoot]) == root {
+			same++
+		}
+	}
+	raisePeak(&threadPeak, same)
+}
+
+func raisePeak(peak *atomic.Uint64, count uint64) {
+	for old := peak.Load(); count > old && !peak.CompareAndSwap(old, count); old = peak.Load() {
+	}
+}
+
+// StopWord is the calling processor's request to stop its task. It turns
+// nonzero when another processor kills or holds the task, so a call that
+// waits for a lock can give up instead of waiting on the processor that
+// stopped it.
+func StopWord() *uint64 { return &cpuData[CPUIndex()][cpuKill] }
+
+// KernelParallelPeak returns the most processors that were inside system
+// calls or fault resolution at the same time since boot.
+func KernelParallelPeak() uint64 { return kernelPeak.Load() }
+
+// KernelThreadPeak returns the most tasks of one address space that were
+// inside system calls or fault resolution at the same time since boot.
+func KernelThreadPeak() uint64 { return threadPeak.Load() }
 
 // currentSlot returns the task the calling processor runs, or sched.Idle.
 func currentSlot() int {
@@ -481,8 +507,9 @@ func TaskOffProcessor(task sched.TaskID) bool {
 // QuiesceTasks waits until every task in tasks is off its processor. The
 // caller has terminated them; each one's processor stops it at its next
 // scheduling point, which a reschedule interrupt brings at once, and a task
-// waiting for the kernel lock gives up the wait. It reports false when a
-// task does not stop within the bound.
+// waiting for a lock gives up the wait. The caller holds the locks of its
+// own call, which the stopped tasks never need to finish theirs. It reports
+// false when a task does not stop within the bound.
 func QuiesceTasks(tasks []sched.TaskID) bool {
 	for spins := 0; spins < quiesceSpins; spins++ {
 		quiet := true
@@ -666,6 +693,20 @@ var fatalHandler func(message string)
 func SetFatalHandler(handler func(message string)) {
 	fatalHandler = handler
 	lock.Install(lock.Hooks{Pause: func() { cpuPause() }, CPU: func() uint32 { return uint32(cpuIndex()) }, Fatal: handler})
+}
+
+// SetLockWatchdog arms the lock watchdog before a second processor starts:
+// a spin that lasts longer than seconds on the TSC, which runs at hz, is
+// reported through stuck.
+func SetLockWatchdog(hz uint64, seconds uint64, stuck func(level lock.Level, holder uint32)) {
+	lock.Install(lock.Hooks{
+		Pause:      func() { cpuPause() },
+		CPU:        func() uint32 { return uint32(cpuIndex()) },
+		Fatal:      fatalHandler,
+		Now:        func() uint64 { return ReadTSC() },
+		StuckAfter: hz * seconds,
+		Stuck:      stuck,
+	})
 }
 
 func fatal(message string) {

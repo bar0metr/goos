@@ -51,7 +51,7 @@ func TestEncodeRefusesWhatCannotBeSent(t *testing.T) {
 	var message ipc.Message
 	for _, request := range []Request{
 		{},
-		{Operation: OperationReplace + 1},
+		{Operation: OperationSetMetadata + 1},
 		{Operation: OperationOpen, Name: []byte("a/b")},
 		{Operation: OperationOpen, Name: []byte("..")},
 		{Operation: OperationRead, Size: CacheSize + 1},
@@ -87,7 +87,7 @@ func TestDecodeRefusesMalformedMessages(t *testing.T) {
 		func(m *ipc.Message) { m.Correlation = 0 },
 		func(m *ipc.Message) { m.HandleCount = 1 },
 		func(m *ipc.Message) { m.Payload[0] = 0 },
-		func(m *ipc.Message) { m.Payload[0] = byte(OperationReplace + 1) },
+		func(m *ipc.Message) { m.Payload[0] = byte(OperationSetMetadata + 1) },
 		func(m *ipc.Message) { m.Payload[1] = 200 },
 		func(m *ipc.Message) { m.Payload[3] = 1 },
 		func(m *ipc.Message) { m.Payload[2] = 1 }, // a name in the page, with no page
@@ -287,5 +287,27 @@ func TestLongNamesTravelThroughTheNamePage(t *testing.T) {
 	message.Payload[3] = maxReplyName // claims the page for a name that fits
 	if _, ok := DecodeReply(&message, cache, &copied); ok {
 		t.Fatal("a short name in the page accepted")
+	}
+}
+
+// Every metadata change reaches the service as it was sent.
+func TestMetadataRequestRoundTrip(t *testing.T) {
+	modified := ramfs.Timestamp{Seconds: 1_600_000_000, Nanoseconds: 9, Available: true}
+	for _, change := range []ramfs.MetadataChange{
+		{SetModified: true, Modified: modified, SetReadOnly: true, ReadOnly: true},
+		{SetReadOnly: true},
+		{SetModified: true, Modified: modified},
+	} {
+		var message ipc.Message
+		if !EncodeRequest(MetadataRequest(7, change), 1, &message, nil) {
+			t.Fatalf("%+v: encode refused", change)
+		}
+		request, ok := DecodeRequest(&message, nil, nil)
+		if !ok {
+			t.Fatalf("%+v: decode refused", change)
+		}
+		if decoded, valid := MetadataChangeOf(request); !valid || decoded != change || request.Node != 7 {
+			t.Fatalf("%+v: decoded %+v %v", change, decoded, valid)
+		}
 	}
 }

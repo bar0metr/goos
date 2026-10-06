@@ -272,6 +272,10 @@ controls the system ([boot-chain.md](boot-chain.md)).
   typed (ADR 0089).
 - The `goos_diag` build prints other processes' handle tables and physical
   addresses. It is for diagnosis only (ADR 0052).
+- Some lock domains are wide (ADR 0184). Most Linux file and process calls
+  share one lock, and so do all channels, so a program that spends its time
+  in such calls delays others on those calls; it cannot see or change their
+  state. The lock watchdog reports a spin longer than four seconds.
 - Every kernel stack has an unmapped guard below it, including the boot
   task's since ADR 0091. Only the early boot, before paging is up, runs on the
   unguarded goroutine stack TinyGo allocated for `main`. A kernel stack

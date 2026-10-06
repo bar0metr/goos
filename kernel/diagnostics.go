@@ -37,10 +37,11 @@ func traceWaitKey(kind diag.Kind, pid process.ID, task sched.TaskID, key kernelw
 // else can reach that physical page, so memory aliasing can be told apart from
 // a genuinely stale handle.
 func traceDeniedInterests(root, address, count uint64) {
+	local := thisCPU()
 	out := diagWriter{console: kernelconsole.New()}
 	out.text("DIAG denied wire=")
-	for index := uint64(0); index < count*kcall.WaitAnyInterestSize && index < uint64(len(waitAnyWire)); index += 8 {
-		out.console.WriteHex(decodeUint64(waitAnyWire[index : index+8]))
+	for index := uint64(0); index < count*kcall.WaitAnyInterestSize && index < uint64(len(local.waitAnyWire)); index += 8 {
+		out.console.WriteHex(decodeUint64(local.waitAnyWire[index : index+8]))
 		out.text(",")
 	}
 	out.end()
@@ -164,7 +165,7 @@ func (handler nativeCallHandler) Diagnostics(device uint64, address uint64) kcal
 	if !diag.Enabled {
 		return kcall.StatusUnsupported
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -228,12 +229,30 @@ func dumpDiagnostics(requester process.ID) {
 	out.uint("migrations", state.Stats.Migrations)
 	out.uint("kills", state.Stats.Kills)
 	out.uint("parallel-peak", amd64.ParallelPeak())
+	out.uint("kernel-parallel-peak", amd64.KernelParallelPeak())
+	out.uint("kernel-thread-peak", amd64.KernelThreadPeak())
 	out.uint("lock-contention", lock.Contended())
 	shootdowns, targets, timeouts := amd64.ShootdownStats()
 	out.uint("shootdowns", shootdowns)
 	out.uint("shootdown-ipis", targets)
 	out.uint("shootdown-timeouts", timeouts)
 	out.end()
+	// One line per lock level that ever had to wait; spin times are TSC
+	// cycles.
+	for level := lock.Level(1); int(level) < lock.Levels; level++ {
+		stats := lock.Statistics(level)
+		if stats.Contended == 0 {
+			continue
+		}
+		out.text("DIAG lock")
+		out.console.WriteString(" level=")
+		out.console.WriteString(level.String())
+		out.uint("contended", stats.Contended)
+		out.uint("spin", stats.Spin)
+		out.uint("longest", stats.Longest)
+		out.uint("stuck", stats.Stuck)
+		out.end()
+	}
 	for cpu := 0; cpu < amd64.MaxCPUs; cpu++ {
 		if state.Online&(uint64(1)<<uint(cpu)) == 0 {
 			continue
@@ -315,7 +334,7 @@ func dumpDiagnostics(requester process.ID) {
 	unsupported := linuxcompat.Unsupported()
 	sessions := linuxcompat.VFSStatistics()
 	out.text("DIAG linux")
-	out.uint("syscalls", linuxSyscallEntries)
+	out.uint("syscalls", linuxSyscallEntries.Load())
 	out.uint("unsupported", unsupported.Count)
 	out.uint("last-unsupported", uint64(unsupported.Last()))
 	// The numbers most recently refused, newest last, so a run shows which

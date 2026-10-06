@@ -36,6 +36,7 @@ type Table struct {
 }
 
 func (table *Table) Available() int {
+	guard.Check()
 	if table == nil {
 		return 0
 	}
@@ -49,6 +50,7 @@ func (table *Table) Available() int {
 }
 
 func (table *Table) Insert(typeID Type, cap capability.Capability) (ID, bool) {
+	guard.CheckWriter()
 	if typeID == TypeInvalid || cap.Object() == 0 || cap.Rights() == 0 {
 		return 0, false
 	}
@@ -70,6 +72,7 @@ func (table *Table) Insert(typeID Type, cap capability.Capability) (ID, bool) {
 }
 
 func (table *Table) Lookup(id ID, typeID Type, required capability.Rights) (capability.Capability, bool) {
+	guard.Check()
 	index, generation, ok := decode(id)
 	if !ok {
 		return capability.Capability{}, false
@@ -86,6 +89,7 @@ func (table *Table) Lookup(id ID, typeID Type, required capability.Rights) (capa
 }
 
 func (table *Table) Close(id ID) bool {
+	guard.CheckWriter()
 	index, generation, ok := decode(id)
 	if !ok {
 		return false
@@ -106,6 +110,7 @@ func (table *Table) Close(id ID) bool {
 }
 
 func (table *Table) Describe(id ID) (Type, capability.Capability, bool) {
+	guard.Check()
 	index, generation, ok := decode(id)
 	if !ok {
 		return TypeInvalid, capability.Capability{}, false
@@ -119,6 +124,7 @@ func (table *Table) Describe(id ID) (Type, capability.Capability, bool) {
 
 // At describes the open handle stored in slot index, if any.
 func (table *Table) At(index int) (ID, Type, capability.Capability, bool) {
+	guard.Check()
 	if index < 0 || index >= MaxHandles || !table.slots[index].open {
 		return 0, TypeInvalid, capability.Capability{}, false
 	}
@@ -127,6 +133,7 @@ func (table *Table) At(index int) (ID, Type, capability.Capability, bool) {
 }
 
 func (table *Table) HasObject(typeID Type, object uint64) bool {
+	guard.Check()
 	for index := range table.slots {
 		entry := &table.slots[index]
 		if entry.open && entry.typeID == typeID && entry.object == object {
@@ -139,6 +146,7 @@ func (table *Table) HasObject(typeID Type, object uint64) bool {
 // CloseAll invalidates every open handle and reports each capability before it
 // is discarded so the owning subsystem can release object-level resources.
 func (table *Table) CloseAll(visit func(Type, capability.Capability)) {
+	guard.CheckWriter()
 	if table == nil {
 		return
 	}
@@ -164,6 +172,7 @@ func (table *Table) CloseAll(visit func(Type, capability.Capability)) {
 // Transfer derives a non-escalating capability into another process-local
 // table. The source handle stays valid and must carry Transfer authority.
 func (table *Table) Transfer(target *Table, id ID, typeID Type, rights capability.Rights) (ID, bool) {
+	guard.CheckWriter()
 	if target == nil {
 		return 0, false
 	}

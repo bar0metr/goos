@@ -10,7 +10,6 @@ import (
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
-	kernelconsole "goos/kernel/console"
 	"goos/kernel/device"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
@@ -31,12 +30,10 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 	if _, _, valid := taskID.Parts(); !valid {
 		return kcall.StatusInvalidArgument, false
 	}
-	if processWaitStatus[task] != kcall.StatusOK {
-		status := processWaitStatus[task]
-		processWaitStatus[task] = kcall.StatusOK
+	if status := processWaitStatus.take(task); status != kcall.StatusOK {
 		return status, false
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied, false
 	}
@@ -65,7 +62,7 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 	// leaving this task asleep until its deadline.
 	if event, status := processRegistry.Wait(pid); status != process.WaitRunning {
 		processWaitSet.Cancel(taskID)
-		processWaitStatus[task] = kcall.StatusOK
+		processWaitStatus.set(uint64(task), kcall.StatusOK)
 		if status != process.WaitExited {
 			return kcall.StatusNotFound, false
 		}
@@ -75,48 +72,46 @@ func waitProcess(handler nativeCallHandler, processHandle uint64, resultAddress 
 }
 
 func wakeProcessWaiters(pid process.ID) {
+	local := thisCPU()
 	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindProcess, Object: uint64(pid)}, kernelwait.Exited)
-	count := processWaitSet.Wake(pid, processWakeResults[:])
+	count := processWaitSet.Wake(pid, local.processWakeResults[:])
 	for index := 0; index < count; index++ {
-		if !amd64.WakeTaskID(uint64(processWakeResults[index].Task)) {
-			console := kernelconsole.New()
-			console.WriteString("PANIC: stale process wake task\n")
-			for {
-				amd64.Halt()
-			}
-		}
-		processWakeResults[index] = process.WaitResult{}
+		// A task another processor killed after it registered fails the
+		// wake; its exit cancels what it left registered.
+		amd64.WakeTaskID(uint64(local.processWakeResults[index].Task))
+		local.processWakeResults[index] = process.WaitResult{}
 	}
 }
 
 func expireProcessWaiters() {
-	count := processWaitSet.Expire(amd64.TimerTicks(), processWakeResults[:])
+	local := thisCPU()
+	count := processWaitSet.Expire(amd64.TimerTicks(), local.processWakeResults[:])
 	for index := 0; index < count; index++ {
-		task, _, valid := processWakeResults[index].Task.Parts()
+		task, _, valid := local.processWakeResults[index].Task.Parts()
 		if !valid {
-			processWakeResults[index] = process.WaitResult{}
+			local.processWakeResults[index] = process.WaitResult{}
 			continue
 		}
-		processWaitStatus[task] = kcall.StatusTimeout
-		if !amd64.WakeTaskID(uint64(processWakeResults[index].Task)) {
-			console := kernelconsole.New()
-			console.WriteString("PANIC: stale process timeout task\n")
-			for {
-				amd64.Halt()
-			}
-		}
-		processWakeResults[index] = process.WaitResult{}
+		processWaitStatus.set(uint64(task), kcall.StatusTimeout)
+		// A task another processor killed after it registered fails the
+		// wake; its exit cancels what it left registered.
+		amd64.WakeTaskID(uint64(local.processWakeResults[index].Task))
+		local.processWakeResults[index] = process.WaitResult{}
 	}
 }
 
 //export goos_dispatch_process_wait
 func dispatchProcessWait(processHandle uint64, resultAddress uint64, timeout uint64, rootAndTask uint64) uint64 {
+	call, ok := beginNativeCall(kcall.OperationProcessWait)
+	if !ok {
+		return uint64(kcall.ActionRetry) << 32
+	}
 	status, blocked := waitProcess(nativeCallHandler{root: rootAndTask &^ 0xfff}, processHandle, resultAddress, timeout, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
 	}
-	return uint64(action)<<32 | uint64(status)
+	return call.end(uint64(action)<<32 | uint64(status))
 }
 
 func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.Status, bool) {
@@ -127,7 +122,7 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 	if _, _, valid := taskID.Parts(); !valid {
 		return kcall.StatusInvalidArgument, false
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied, false
 	}
@@ -152,12 +147,16 @@ func waitIRQ(handler nativeCallHandler, irqHandle uint64, task uint64) (kcall.St
 
 //export goos_dispatch_irq_wait
 func dispatchIRQWait(irqHandle uint64, rootAndTask uint64) uint64 {
+	call, ok := beginNativeCall(kcall.OperationIRQWait)
+	if !ok {
+		return uint64(kcall.ActionRetry) << 32
+	}
 	status, blocked := waitIRQ(nativeCallHandler{root: rootAndTask &^ 0xfff}, irqHandle, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
 	}
-	return uint64(action)<<32 | uint64(status)
+	return call.end(uint64(action)<<32 | uint64(status))
 }
 
 func waitTraceObject(entries []kernelwait.Entry) uint64 {
@@ -168,6 +167,7 @@ func waitTraceObject(entries []kernelwait.Entry) uint64 {
 }
 
 func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, task uint64) (kcall.Status, bool) {
+	local := thisCPU()
 	if task >= sched.MaxTasks || count > kernelwait.MaxObjects ||
 		!vm.ValidateUserRange(resultAddress, kcall.WaitAnyResultSize) {
 		return kcall.StatusInvalidArgument, false
@@ -185,7 +185,7 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		}
 		return writeWaitAnyMask(handler.root, resultAddress, completion.ReadyMask), false
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		if diag.Enabled {
 			trace(diag.WaitDenied, pidOfTask(taskID), uint64(taskID), handler.root, uint64(diag.DenyOwner))
@@ -194,17 +194,17 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	}
 	wireSize := count * kcall.WaitAnyInterestSize
 	if count != 0 && (!vm.ValidateUserRange(interestsAddress, wireSize) ||
-		!vm.CopyIn(handler.root, interestsAddress, waitAnyWire[:int(wireSize)])) {
+		!vm.CopyIn(handler.root, interestsAddress, local.waitAnyWire[:int(wireSize)])) {
 		return kcall.StatusInvalidArgument, false
 	}
-	if !vm.CopyIn(handler.root, resultAddress, waitAnyResultWire[:]) {
+	if !vm.CopyIn(handler.root, resultAddress, local.waitAnyResultWire[:]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	timeout := decodeUint64(waitAnyResultWire[0:8])
+	timeout := decodeUint64(local.waitAnyResultWire[0:8])
 	for index := 0; index < int(count); index++ {
 		offset := index * int(kcall.WaitAnyInterestSize)
-		handleID := handle.ID(decodeUint64(waitAnyWire[offset : offset+8]))
-		events := kcall.WaitEvent(decodeUint64(waitAnyWire[offset+8 : offset+16]))
+		handleID := handle.ID(decodeUint64(local.waitAnyWire[offset : offset+8]))
+		events := kcall.WaitEvent(decodeUint64(local.waitAnyWire[offset+8 : offset+16]))
 		entry, status, reason := resolveWaitAny(owner, handleID, events)
 		if status != kcall.StatusOK {
 			trace(diag.WaitDenied, owner.ID(), uint64(taskID), uint64(handleID), uint64(reason))
@@ -213,9 +213,9 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 			}
 			return status, false
 		}
-		waitAnyEntries[index] = entry
+		local.waitAnyEntries[index] = entry
 	}
-	entries := waitAnyEntries[:int(count)]
+	entries := local.waitAnyEntries[:int(count)]
 	if mask := readyWaitAny(entries); mask != 0 {
 		trace(diag.WaitReady, owner.ID(), uint64(taskID), entries[0].Key.Object, uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
@@ -239,9 +239,11 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		return kcall.StatusResourceExhausted, false
 	}
 	trace(diag.WaitBegin, owner.ID(), uint64(taskID), waitTraceObject(entries), count)
-	// Registration precedes the final readiness observation. The interrupt
-	// gate keeps publication in the same exclusion domain until assembly
-	// commits the task to BLOCKED.
+	// Registration precedes the final readiness observation: a publisher
+	// changes an object's state under its lock before it publishes, so either
+	// the check below sees the change or the publication sees this
+	// registration. A wake before assembly commits the task to BLOCKED stays
+	// pending and keeps it running.
 	if mask := readyWaitAny(entries); mask != 0 {
 		waitAnyTable.Cancel(taskID)
 		trace(diag.WaitRecheck, owner.ID(), uint64(taskID), waitTraceObject(entries), uint64(mask))
@@ -372,21 +374,23 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 }
 
 func writeWaitAnyMask(root, resultAddress uint64, mask uint64) kcall.Status {
-	putUint64(waitMaskWire[:], mask)
-	if !vm.CopyOut(root, resultAddress+8, waitMaskWire[:]) {
+	local := thisCPU()
+	putUint64(local.waitMaskWire[:], mask)
+	if !vm.CopyOut(root, resultAddress+8, local.waitMaskWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }
 
 func publishWaitAny(key kernelwait.Key, event kernelwait.Event) {
-	count := waitAnyTable.Publish(key, event, waitAnyCompletions[:])
-	for index := 0; index < count && index < len(waitAnyCompletions); index++ {
+	local := thisCPU()
+	count := waitAnyTable.Publish(key, event, local.waitAnyCompletions[:])
+	for index := 0; index < count && index < len(local.waitAnyCompletions); index++ {
 		if diag.Enabled {
-			traceWaitKey(diag.WaitComplete, pidOfTask(waitAnyCompletions[index].Task), waitAnyCompletions[index].Task, key, uint64(event))
+			traceWaitKey(diag.WaitComplete, pidOfTask(local.waitAnyCompletions[index].Task), local.waitAnyCompletions[index].Task, key, uint64(event))
 		}
-		amd64.WakeTaskID(uint64(waitAnyCompletions[index].Task))
-		waitAnyCompletions[index] = kernelwait.Completion{}
+		amd64.WakeTaskID(uint64(local.waitAnyCompletions[index].Task))
+		local.waitAnyCompletions[index] = kernelwait.Completion{}
 	}
 }
 
@@ -411,30 +415,35 @@ func wakeConsoleWaiters() {
 }
 
 func expireWaitAny() {
-	count := waitAnyTable.Expire(amd64.TimerTicks(), waitAnyCompletions[:])
-	for index := 0; index < count && index < len(waitAnyCompletions); index++ {
+	local := thisCPU()
+	count := waitAnyTable.Expire(amd64.TimerTicks(), local.waitAnyCompletions[:])
+	for index := 0; index < count && index < len(local.waitAnyCompletions); index++ {
 		if diag.Enabled {
-			trace(diag.WaitTimeout, pidOfTask(waitAnyCompletions[index].Task), uint64(waitAnyCompletions[index].Task), 0, 0)
+			trace(diag.WaitTimeout, pidOfTask(local.waitAnyCompletions[index].Task), uint64(local.waitAnyCompletions[index].Task), 0, 0)
 		}
 		// A sleeping Linux task resumes through its continuation, which
 		// accepts only the wait it is in.
-		if resumeLinuxIPCWaiter(waitAnyCompletions[index].Task, linuxcompat.WakeTimeout) {
-			waitAnyCompletions[index] = kernelwait.Completion{}
+		if resumeLinuxIPCWaiter(local.waitAnyCompletions[index].Task, linuxcompat.WakeTimeout) {
+			local.waitAnyCompletions[index] = kernelwait.Completion{}
 			continue
 		}
-		amd64.WakeTaskID(uint64(waitAnyCompletions[index].Task))
-		waitAnyCompletions[index] = kernelwait.Completion{}
+		amd64.WakeTaskID(uint64(local.waitAnyCompletions[index].Task))
+		local.waitAnyCompletions[index] = kernelwait.Completion{}
 	}
 }
 
 //export goos_dispatch_wait_any
 func dispatchWaitAny(interestsAddress, count, resultAddress, rootAndTask uint64) uint64 {
+	call, ok := beginNativeCall(kcall.OperationWaitAny)
+	if !ok {
+		return uint64(kcall.ActionRetry) << 32
+	}
 	status, blocked := waitAny(nativeCallHandler{root: rootAndTask &^ 0xfff}, interestsAddress, count, resultAddress, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
 	}
-	return uint64(action)<<32 | uint64(status)
+	return call.end(uint64(action)<<32 | uint64(status))
 }
 
 // expireWaitDeadlines releases waiters whose deadline has passed. It is driven
@@ -445,6 +454,10 @@ func expireWaitDeadlines() {
 	expireProcessWaiters()
 	expireStreamWaiters()
 	expireWaitAny()
+	channelLock.Lock()
+	executableLock.Lock()
 	retryExecutablePages()
+	executableLock.Unlock()
+	channelLock.Unlock()
 	wakeConsoleWaiters()
 }

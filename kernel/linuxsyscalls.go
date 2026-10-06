@@ -19,11 +19,12 @@ type linuxCallHandler struct {
 	// frame is the entry frame of the call being served, with the caller's
 	// saved registers above it.
 	frame *linuxabi.Frame
+	// state and tid are the caller's Linux state and thread ID, found under
+	// the Linux lock before the call. A call of the fast class reads only
+	// what never changes in them: the PID and the TID.
+	state *linuxcompat.ProcessState
+	tid   int32
 }
-
-var linuxHandler linuxCallHandler
-var linuxIOBuffer [stream.AtomicWrite]byte
-var linuxIOVecWire [linuxcompat.MaxIOVec * linuxabi.IOVecSize]byte
 
 // Read serves read and pread64.
 func (handler *linuxCallHandler) Read(request linuxcompat.Request) linuxcompat.Result {
@@ -42,6 +43,7 @@ func (handler *linuxCallHandler) Readv(request linuxcompat.Request) linuxcompat.
 // read sends a descriptor to what serves its kind: the VFS for a file, the
 // kernel itself for a device, and the stream code below for everything else.
 func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) linuxcompat.Result {
+	local := thisCPU()
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -49,7 +51,7 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 		case linuxcompat.FDVFSDirectory:
 			return linuxcompat.Result{Errno: linuxabi.EISDIR}
 		case linuxcompat.FDSynthetic:
-			return handler.deviceRead(request, *description, vector)
+			return handler.deviceRead(request, description, vector)
 		}
 	}
 	if errno := handler.consumeWake(request); errno == linuxabi.EINTR {
@@ -69,11 +71,11 @@ func (handler *linuxCallHandler) read(request linuxcompat.Request, vector bool) 
 	// waits only while it has nothing to return.
 	delivered := uint64(0)
 	for retries := 0; delivered < limit && retries < 2; {
-		count, status := endpoint.Read(linuxIOBuffer[:min64(limit-delivered, stream.AtomicWrite)])
+		count, status := endpoint.Read(local.linuxIOBuffer[:min64(limit-delivered, stream.AtomicWrite)])
 		switch status {
 		case stream.StatusOK:
 			wakeStreamWaiters(streamID, 1, ipc.WaitMessage)
-			if !handler.deliver(request, wire, delivered, linuxIOBuffer[:count], nil, uint64(count)) {
+			if !handler.deliver(request, wire, delivered, local.linuxIOBuffer[:count], nil, uint64(count)) {
 				return linuxcompat.Result{Errno: linuxabi.EFAULT}
 			}
 			delivered += uint64(count)
@@ -148,8 +150,6 @@ func (handler *linuxCallHandler) readLimit(request linuxcompat.Request, vector b
 	return total, wire, 0
 }
 
-var linuxProbe [1]byte
-
 // userRange is the check Linux makes on a read or write before anything
 // else: the whole requested range lies in the user half and does not wrap.
 // It looks at the length the program asked for, so a length that runs past
@@ -167,6 +167,7 @@ func userRange(address uint64, length uint64) bool {
 // that starts outside any is EFAULT. Probing a page faults it in through the
 // ordinary demand-paging path.
 func (handler *linuxCallHandler) accessible(address uint64, length uint64, write bool) uint64 {
+	local := thisCPU()
 	if length == 0 || !vm.ValidateUserRange(address, length) {
 		return 0
 	}
@@ -177,7 +178,7 @@ func (handler *linuxCallHandler) accessible(address uint64, length uint64, write
 			chunk = length - reached
 		}
 		if write && !vm.CanCopyOut(handler.root, address+reached, chunk) ||
-			!write && !vm.CopyIn(handler.root, address+reached, linuxProbe[:]) {
+			!write && !vm.CopyIn(handler.root, address+reached, local.linuxProbe[:]) {
 			break
 		}
 		reached += chunk
@@ -187,11 +188,12 @@ func (handler *linuxCallHandler) accessible(address uint64, length uint64, write
 
 // copyIOVec copies and validates the vector of a readv or writev.
 func (handler *linuxCallHandler) copyIOVec(request linuxcompat.Request) ([]byte, linuxabi.Errno) {
+	local := thisCPU()
 	count := request.Arguments[2]
 	if count > linuxcompat.MaxIOVec {
 		return nil, linuxabi.EINVAL
 	}
-	wire := linuxIOVecWire[:count*linuxabi.IOVecSize]
+	wire := local.linuxIOVecWire[:count*linuxabi.IOVecSize]
 	if count != 0 && !vm.CopyIn(handler.root, request.Arguments[1], wire) {
 		return nil, linuxabi.EFAULT
 	}
@@ -285,16 +287,17 @@ func (handler *linuxCallHandler) Write(request linuxcompat.Request) linuxcompat.
 // because nothing had been written. progressed says an earlier vector element
 // already wrote bytes, so this range must report a stall instead of blocking.
 func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoint *stream.Stream, streamID uint64, address uint64, limit uint64, progressed bool) (uint64, linuxcompat.Result, bool) {
+	local := thisCPU()
 	written := uint64(0)
 	for written < limit {
 		chunk := min64(limit-written, stream.AtomicWrite)
-		if !vm.CopyIn(handler.root, address+written, linuxIOBuffer[:chunk]) {
+		if !vm.CopyIn(handler.root, address+written, local.linuxIOBuffer[:chunk]) {
 			if written != 0 || progressed {
 				return written, linuxcompat.Result{}, false
 			}
 			return 0, linuxcompat.Result{Errno: linuxabi.EFAULT}, true
 		}
-		count, status := endpoint.Write(linuxIOBuffer[:chunk])
+		count, status := endpoint.Write(local.linuxIOBuffer[:chunk])
 		if status == stream.StatusOK {
 			written += uint64(count)
 			wakeStreamWaiters(streamID, 0, ipc.WaitMessage)
@@ -320,6 +323,7 @@ func (handler *linuxCallHandler) writeRange(request linuxcompat.Request, endpoin
 // oversized vector returns the bytes already written; the caller continues
 // from there.
 func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	if description, found := linuxcompat.DescriptionOf(handler.root, request.Arguments[0]); found {
 		switch description.Kind {
 		case linuxcompat.FDVFSFile:
@@ -346,7 +350,7 @@ func (handler *linuxCallHandler) Writev(request linuxcompat.Request) linuxcompat
 	if count == 0 {
 		return linuxcompat.Result{}
 	}
-	wire := linuxIOVecWire[:count*linuxabi.IOVecSize]
+	wire := local.linuxIOVecWire[:count*linuxabi.IOVecSize]
 	if !vm.CopyIn(handler.root, request.Arguments[1], wire) {
 		return linuxcompat.Result{Errno: linuxabi.EFAULT}
 	}
@@ -414,7 +418,7 @@ func (handler *linuxCallHandler) Exit(request linuxcompat.Request, group bool) l
 	code := uint64(uint8(request.Arguments[0]))
 	linuxcompat.SyscallContinuations.Cancel(handler.task)
 	if group {
-		if owner, found := processRegistry.ByRoot(handler.root); found {
+		if owner, found := handler.self(); found {
 			for _, task := range owner.Tasks() {
 				if task == handler.task {
 					continue

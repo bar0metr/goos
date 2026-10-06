@@ -44,9 +44,8 @@ type linuxExecState struct {
 }
 
 var (
-	linuxExecStates  [maxLinuxExecOperations]linuxExecState
-	linuxExecString  [linuxcompat.MaxExecStringBytes + 1]byte
-	linuxExecPointer [8]byte
+	linuxExecStates [maxLinuxExecOperations]linuxExecState
+	linuxExecString [linuxcompat.MaxExecStringBytes + 1]byte
 )
 
 func (state *linuxExecState) reset() {
@@ -93,6 +92,7 @@ func reserveLinuxExec(task sched.TaskID) (*linuxExecState, int, bool) {
 // Execve replaces the calling Linux image after the candidate ELF, argument
 // snapshot, address space, and initial stack have all been prepared.
 func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	pending, active, errno := handler.vfsStage(request)
 	state, slot, retained := findLinuxExec(handler.task)
 	if errno != 0 {
@@ -114,12 +114,12 @@ func (handler *linuxCallHandler) Execve(request linuxcompat.Request) linuxcompat
 			state.reset()
 			return linuxErrno(errno)
 		}
-		path, _, resolveErrno := linuxcompat.ResolvePath(linuxResolved[:], compat.CWD(), state.snapshot.Command())
+		path, _, resolveErrno := linuxcompat.ResolvePath(local.linuxResolved[:], compat.CWD(), state.snapshot.Command())
 		if resolveErrno != 0 {
 			state.reset()
 			return linuxErrno(resolveErrno)
 		}
-		if errno = handler.vfsBegin(request, linuxResolved[:path], nil, uint64(slot+1)); errno != 0 {
+		if errno = handler.vfsBegin(request, local.linuxResolved[:path], nil, uint64(slot+1)); errno != 0 {
 			state.reset()
 			return linuxErrno(errno)
 		}
@@ -326,15 +326,16 @@ func (handler *linuxCallHandler) copyExecSnapshot(request linuxcompat.Request, s
 }
 
 func (handler *linuxCallHandler) copyExecVector(address uint64, maximum int, appendValue func([]byte) linuxabi.Errno) linuxabi.Errno {
+	local := thisCPU()
 	if address == 0 {
 		return 0
 	}
 	for index := 0; index <= maximum; index++ {
 		pointerAddress := address + uint64(index)*8
-		if pointerAddress < address || !vm.CopyIn(handler.root, pointerAddress, linuxExecPointer[:]) {
+		if pointerAddress < address || !vm.CopyIn(handler.root, pointerAddress, local.linuxExecPointer[:]) {
 			return linuxabi.EFAULT
 		}
-		pointer := binary.LittleEndian.Uint64(linuxExecPointer[:])
+		pointer := binary.LittleEndian.Uint64(local.linuxExecPointer[:])
 		if pointer == 0 {
 			return 0
 		}
@@ -434,6 +435,7 @@ func lendLinuxExecObject(task sched.TaskID, owner *process.Process, rights capab
 }
 
 func (handler *linuxCallHandler) prepareLinuxExec(state *linuxExecState) linuxabi.Errno {
+	local := thisCPU()
 	owner, found := processRegistry.ByTask(handler.task)
 	object, objectFound := executables.Find(state.objectID)
 	if !found || !objectFound || !object.Sealed() {
@@ -466,11 +468,11 @@ func (handler *linuxCallHandler) prepareLinuxExec(state *linuxExecState) linuxab
 		return linuxabi.ENOEXEC
 	}
 	var random *[linuxabi.RandomSize]byte
-	if amd64.FillRandom(linuxStackRandom[:]) {
-		random = &linuxStackRandom
+	if randomBytes(local.linuxStackRandom[:]) {
+		random = &local.linuxStackRandom
 	}
 	stack, stackStatus := linuxabi.BuildInitialStack(linuxInitialStack[:], layout.StackTop, &linuxLaunchImage, &state.snapshot, random)
-	clear(linuxStackRandom[:])
+	clear(local.linuxStackRandom[:])
 	brkBase, brkLimit, brkOK := linuxcompat.BrkBounds(linuxLaunchImage.LoadEnd(), vm.PageSize, vm.UserMapBase)
 	if stackStatus != linuxabi.StackOK {
 		return linuxabi.E2BIG

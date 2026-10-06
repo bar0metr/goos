@@ -30,9 +30,12 @@ const shootdownSpins = 1 << 26
 
 // ShootdownRoot makes sure no processor other than the caller holds a
 // translation of root made before the call. The caller has finished
-// changing root's page tables and holds the kernel lock, which every change
-// to a process root is made under; it frees pages the changed entries named
-// only after this returns.
+// changing root's page tables and holds the process's address space for
+// writing, which every such change is made under, so two shootdowns of one
+// root never overlap; it frees pages the changed entries named only after
+// this returns. Shootdowns of different roots run at once: a target is a
+// processor in ring 3 on the root, which needs no lock to take the
+// interrupt.
 func ShootdownRoot(root uint64) {
 	if root == 0 || smpReady == 0 {
 		return

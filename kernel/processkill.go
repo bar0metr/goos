@@ -16,7 +16,7 @@ import (
 // Its tasks are retired the way a fault retires one, so the normal teardown
 // delivers the exit event, releases the handles, and frees the address space.
 func (handler nativeCallHandler) ProcessKill(processHandle uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -56,8 +56,8 @@ func cancelTaskWaits(taskID sched.TaskID) {
 	waitAnyTable.Cancel(taskID)
 	slot, _, valid := taskID.Parts()
 	if valid && uint64(slot) < uint64(len(ipcWaitStatus)) {
-		ipcWaitStatus[slot] = kcall.StatusOK
-		processWaitStatus[slot] = kcall.StatusOK
-		streamWaitStatus[slot] = kcall.StatusOK
+		ipcWaitStatus.set(uint64(slot), kcall.StatusOK)
+		processWaitStatus.set(uint64(slot), kcall.StatusOK)
+		streamWaitStatus.set(uint64(slot), kcall.StatusOK)
 	}
 }

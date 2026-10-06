@@ -81,6 +81,7 @@ func installVFSContext(familyID uint64) bool {
 }
 
 func RetainVFSContext(familyID uint64) bool {
+	guard.Check()
 	context, found := VFSContext(familyID)
 	if !found || context.References >= LinuxFamilyMaxProcesses {
 		return false
@@ -90,6 +91,7 @@ func RetainVFSContext(familyID uint64) bool {
 }
 
 func ReleaseVFSContext(familyID uint64) (final bool, released bool) {
+	guard.Check()
 	context, found := VFSContext(familyID)
 	if !found || context.References == 0 {
 		return false, false
@@ -103,6 +105,7 @@ func ReleaseVFSContext(familyID uint64) (final bool, released bool) {
 }
 
 func VFSContext(familyID uint64) (*LinuxVFSContext, bool) {
+	guard.Check()
 	if familyID != 0 {
 		for index := range vfsContexts {
 			if vfsContexts[index].FamilyID == familyID {
@@ -114,6 +117,7 @@ func VFSContext(familyID uint64) (*LinuxVFSContext, bool) {
 }
 
 func AcquireVFS(familyID uint64, task sched.TaskID) VFSAccess {
+	guard.Check()
 	context, found := VFSContext(familyID)
 	if !found || context.Session.Failed() {
 		return VFSAccessInvalid
@@ -136,6 +140,7 @@ func AcquireVFS(familyID uint64, task sched.TaskID) VFSAccess {
 }
 
 func ReleaseVFS(familyID uint64, task sched.TaskID) (sched.TaskID, bool) {
+	guard.Check()
 	context, found := VFSContext(familyID)
 	if !found || task == 0 || context.Owner != task {
 		return 0, false
@@ -155,6 +160,7 @@ func ReleaseVFS(familyID uint64, task sched.TaskID) (sched.TaskID, bool) {
 // CancelVFSTask removes a killed or failed task from an owner or waiter slot.
 // It returns the next owner when cancellation transfers the context.
 func CancelVFSTask(task sched.TaskID) sched.TaskID {
+	guard.Check()
 	if task == 0 {
 		return 0
 	}

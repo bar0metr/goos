@@ -22,6 +22,10 @@ type Volume interface {
 	Flush() bool
 }
 
+type metadataVolume interface {
+	SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status
+}
+
 type objectVolume interface {
 	AcquireObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
 	ReleaseObject(ramfs.NodeID) (ramfs.NodeID, ramfs.Status)
@@ -87,6 +91,17 @@ func Serve(volume Volume, request Request, cache []byte, name *[ramfs.MaxName]by
 		reply.Value = uint64(count)
 	case OperationTruncate:
 		reply.Status = volume.Truncate(request.Node, request.Offset)
+	case OperationSetMetadata:
+		change, valid := MetadataChangeOf(request)
+		metadata, supported := volume.(metadataVolume)
+		switch {
+		case !valid:
+			reply.Status = ramfs.StatusInvalidArgument
+		case !supported:
+			reply.Status = ramfs.StatusUnsupported
+		default:
+			reply.Status = metadata.SetMetadata(request.Node, change)
+		}
 	case OperationAcquire:
 		objects, ok := volume.(objectVolume)
 		if !ok {

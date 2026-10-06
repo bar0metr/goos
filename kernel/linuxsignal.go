@@ -10,19 +10,13 @@ import (
 	"goos/kernel/sched"
 )
 
-var (
-	linuxFamilyRoots    [linuxcompat.LinuxFamilyMaxProcesses]uint64
-	linuxSignalFrame    [linuxcompat.SignalFrameSize]byte
-	linuxSignalUContext [linuxcompat.UContextSize]byte
-	linuxSignalFPU      [linuxcompat.FPUStateSize]byte
-)
-
 // deliverLinuxSignals runs when a Linux system call is about to return to the
 // caller with every effect of the call complete. The next pending signal the
 // mask allows is discarded, ends the process, or gets a frame on the user
 // stack and becomes the handler the return enters. One handler is entered per
 // return; its rt_sigreturn is the next boundary.
 func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(frame.Root)
 	if !found {
 		return
@@ -60,8 +54,8 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 		context.Registers[linuxcompat.RegRSP] = frame.UserStack
 		context.Registers[linuxcompat.RegRFlags] = registers.R11
 		previous := state.Signals.EnterHandler(signal, action)
-		linuxcompat.EncodeSignalFrame(&linuxSignalFrame, signal, info, &context, previous, action.Restorer, fpuBase)
-		if !vm.CopyOut(frame.Root, base, linuxSignalFrame[:]) || !vm.CopyOut(frame.Root, fpuBase, fpu[:]) {
+		linuxcompat.EncodeSignalFrame(&local.linuxSignalFrame, signal, info, &context, previous, action.Restorer, fpuBase)
+		if !vm.CopyOut(frame.Root, base, local.linuxSignalFrame[:]) || !vm.CopyOut(frame.Root, fpuBase, fpu[:]) {
 			endLinuxProcessBySignal(frame, linuxabi.SignalSegv)
 			return
 		}
@@ -87,12 +81,13 @@ func deliverLinuxSignals(frame *linuxabi.Frame, task sched.TaskID) {
 // it. Reserved MXCSR bits are cleared, as on Linux. A null fpstate restores
 // the initial state.
 func (handler *linuxCallHandler) SigReturn(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	registers, valid := amd64.LinuxCallRegisters(handler.task)
-	if !found || !valid || handler.frame == nil || !vm.CopyIn(handler.root, handler.frame.UserStack, linuxSignalUContext[:]) {
+	if !found || !valid || handler.frame == nil || !vm.CopyIn(handler.root, handler.frame.UserStack, local.linuxSignalUContext[:]) {
 		return linuxSignalFault(handler)
 	}
-	context, mask, fpuAddress := linuxcompat.DecodeSignalContext(&linuxSignalUContext)
+	context, mask, fpuAddress := linuxcompat.DecodeSignalContext(&local.linuxSignalUContext)
 	ip, stack := context.Registers[linuxcompat.RegRIP], context.Registers[linuxcompat.RegRSP]
 	fpu, fpuFound := amd64.LinuxUserFPU(handler.task)
 	if !vm.ValidateUserRange(ip, 1) || !vm.ValidateUserRange(stack, 0) || !fpuFound {
@@ -102,11 +97,11 @@ func (handler *linuxCallHandler) SigReturn(request linuxcompat.Request) linuxcom
 	// before anything changes, so the restored state never comes from a
 	// pointer the program can still move.
 	if fpuAddress != 0 && (!vm.ValidateUserRange(fpuAddress, linuxcompat.FPUStateSize) ||
-		!vm.CopyIn(handler.root, fpuAddress, linuxSignalFPU[:])) {
+		!vm.CopyIn(handler.root, fpuAddress, local.linuxSignalFPU[:])) {
 		return linuxSignalFault(handler)
 	}
 	if fpuAddress != 0 {
-		linuxcompat.SanitizeFPUState(&linuxSignalFPU, fpu)
+		linuxcompat.SanitizeFPUState(&local.linuxSignalFPU, fpu)
 	}
 	registersFromContext(&registers, &context)
 	// The return path takes RFLAGS from R11 and keeps only the bits a user
@@ -118,7 +113,7 @@ func (handler *linuxCallHandler) SigReturn(request linuxcompat.Request) linuxcom
 	if fpuAddress == 0 {
 		amd64.InitialFPUArea(fpu)
 	} else {
-		*fpu = linuxSignalFPU
+		*fpu = local.linuxSignalFPU
 	}
 	state.Signals.RestoreMask(mask)
 	handler.frame.UserIP, handler.frame.UserStack = ip, stack
@@ -297,14 +292,15 @@ func interruptLinuxTask(state *linuxcompat.ProcessState, task sched.TaskID) bool
 // no descendant outlives it. Each member's exit then follows the ordinary
 // path: zombie records, SIGCHLD, and wakes.
 func killLinuxFamily(root uint64) {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(root)
 	if !found || state.Forked {
 		return
 	}
-	count := linuxcompat.FamilyRoots(state.FamilyID, linuxFamilyRoots[:])
+	count := linuxcompat.FamilyRoots(state.FamilyID, local.linuxFamilyRoots[:])
 	for index := 0; index < count; index++ {
-		member, alive := processRegistry.ByRoot(linuxFamilyRoots[index])
-		if !alive || linuxFamilyRoots[index] == root {
+		member, alive := processRegistry.ByRoot(local.linuxFamilyRoots[index])
+		if !alive || local.linuxFamilyRoots[index] == root {
 			continue
 		}
 		for _, task := range member.Tasks() {
@@ -323,6 +319,7 @@ const linuxSuspendCorrelation = 1
 // temporary mask, and its return restores the mask the call replaced. A
 // signal whose default action ends the process ends it in the sleep.
 func (handler *linuxCallHandler) SigSuspend(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	state, found := linuxcompat.FindProcess(handler.root)
 	if !found {
 		return linuxErrno(linuxabi.EINVAL)
@@ -340,10 +337,10 @@ func (handler *linuxCallHandler) SigSuspend(request linuxcompat.Request) linuxco
 		if request.Arguments[1] != linuxcompat.SignalSetSize {
 			return linuxErrno(linuxabi.EINVAL)
 		}
-		if !vm.CopyIn(handler.root, request.Arguments[0], linuxSignalSet[:]) {
+		if !vm.CopyIn(handler.root, request.Arguments[0], local.linuxSignalSet[:]) {
 			return linuxErrno(linuxabi.EFAULT)
 		}
-		state.Signals.SwapMask(linuxcompat.DecodeSignalSet(&linuxSignalSet))
+		state.Signals.SwapMask(linuxcompat.DecodeSignalSet(&local.linuxSignalSet))
 	}
 	if state.Signals.Interrupting() {
 		return linuxErrno(linuxabi.EINTR)

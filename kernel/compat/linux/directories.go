@@ -20,6 +20,7 @@ var directorySlots [MaxOpenDirectories]directorySlot
 // returns the reference the description stores. The reference carries a
 // generation, so a stale one cannot name a slot that was reused.
 func RetainDirectory(familyID uint64, path []byte) (uint64, bool) {
+	guard.Check()
 	if familyID == 0 || len(path) == 0 || len(path) > limits.PathMax || path[0] != '/' {
 		return 0, false
 	}
@@ -41,6 +42,7 @@ func RetainDirectory(familyID uint64, path []byte) (uint64, bool) {
 // DirectoryPath returns the path behind a reference the family holds. The slice
 // aliases the table until the description is released.
 func DirectoryPath(familyID uint64, reference uint64) ([]byte, bool) {
+	guard.Check()
 	slot, found := directory(familyID, reference)
 	if !found {
 		return nil, false
@@ -49,6 +51,7 @@ func DirectoryPath(familyID uint64, reference uint64) ([]byte, bool) {
 }
 
 func ReleaseDirectory(familyID uint64, reference uint64) bool {
+	guard.Check()
 	slot, found := directory(familyID, reference)
 	if !found {
 		return false

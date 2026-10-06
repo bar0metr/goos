@@ -16,8 +16,6 @@ import (
 	"goos/kernel/shmem"
 )
 
-var memoryWire [8]byte
-
 // zeroPhysicalPage clears a page before it becomes part of an object.
 func zeroPhysicalPage(physical uint64) bool { return vm.InitializePhysical(physical, nil) }
 
@@ -74,15 +72,16 @@ func releaseSharedMappings(exited *process.Process) {
 // address. Any process may create one; what it can do with it is map it and
 // pass copies of the handle on.
 func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
 	if pages == 0 || pages > shmem.MaxPages {
 		return kcall.StatusInvalidArgument
 	}
-	clear(memoryWire[:])
-	if !vm.CopyOut(handler.root, address, memoryWire[:]) {
+	clear(local.memoryWire[:])
+	if !vm.CopyOut(handler.root, address, local.memoryWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	if owner.Handles().Available() == 0 {
@@ -105,8 +104,8 @@ func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcal
 		owner.Release(process.ResourcePages, charge)
 		return kcall.StatusResourceExhausted
 	}
-	putUint64(memoryWire[:], uint64(granted))
-	if !vm.CopyOut(handler.root, address, memoryWire[:]) {
+	putUint64(local.memoryWire[:], uint64(granted))
+	if !vm.CopyOut(handler.root, address, local.memoryWire[:]) {
 		owner.Handles().Close(granted)
 		dropShared(object.ID())
 		return kcall.StatusInvalidArgument
@@ -119,7 +118,8 @@ func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcal
 // address. A process uses it to pass on narrower authority — write access to
 // a buffer, for one request — and keep its own.
 func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, address uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -134,8 +134,8 @@ func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, addre
 	if rights == 0 || !allowed {
 		return kcall.StatusPermissionDenied
 	}
-	clear(memoryWire[:])
-	if !vm.CopyOut(handler.root, address, memoryWire[:]) {
+	clear(local.memoryWire[:])
+	if !vm.CopyOut(handler.root, address, local.memoryWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	duplicate, inserted := owner.Handles().Insert(handle.TypeMemory, derived)
@@ -143,8 +143,8 @@ func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, addre
 		return kcall.StatusResourceExhausted
 	}
 	retainMemory(derived)
-	putUint64(memoryWire[:], uint64(duplicate))
-	if !vm.CopyOut(handler.root, address, memoryWire[:]) {
+	putUint64(local.memoryWire[:], uint64(duplicate))
+	if !vm.CopyOut(handler.root, address, local.memoryWire[:]) {
 		owner.Handles().Close(duplicate)
 		releaseMemory(derived)
 		return kcall.StatusInvalidArgument

@@ -40,6 +40,7 @@ type node struct {
 	used       bool
 	created    Timestamp
 	modified   Timestamp
+	readOnly   bool
 	nameSize   uint16
 	name       [MaxName]byte
 	// firstChild and next link a directory's children in ascending index
@@ -248,6 +249,9 @@ func (fs *FileSystem) Write(id NodeID, offset uint64, data []byte) (int, Status)
 	if status != StatusOK {
 		return 0, status
 	}
+	if entry.readOnly {
+		return 0, StatusPermissionDenied
+	}
 	if len(data) == 0 {
 		return 0, StatusOK
 	}
@@ -293,6 +297,9 @@ func (fs *FileSystem) Truncate(id NodeID, size uint64) Status {
 	if status != StatusOK {
 		return status
 	}
+	if entry.readOnly {
+		return StatusPermissionDenied
+	}
 	if size > MaxFileSize {
 		return StatusResourceExhausted
 	}
@@ -316,6 +323,28 @@ func (fs *FileSystem) Stat(id NodeID) (Stat, Status) {
 		return Stat{}, status
 	}
 	return fs.stat(id, entry), StatusOK
+}
+
+// SetMetadata sets a node's modification time, and a file's read-only
+// attribute, which refuses writes and truncation until it is cleared.
+func (fs *FileSystem) SetMetadata(id NodeID, change MetadataChange) Status {
+	entry, status := fs.lookup(id)
+	if status != StatusOK {
+		return status
+	}
+	if !change.Valid() {
+		return StatusInvalidArgument
+	}
+	if change.SetReadOnly && entry.kind != KindFile {
+		return StatusIsDirectory
+	}
+	if change.SetModified {
+		entry.modified = change.Modified
+	}
+	if change.SetReadOnly {
+		entry.readOnly = change.ReadOnly
+	}
+	return StatusOK
 }
 
 // ReadDir returns the first child of parent whose index is at least cursor,
@@ -527,6 +556,9 @@ func (fs *FileSystem) stat(id NodeID, entry *node) Stat {
 	attributes := Attributes(0)
 	if entry.kind == KindDirectory {
 		attributes = AttrDirectory
+	}
+	if entry.readOnly {
+		attributes |= AttrReadOnly
 	}
 	return Stat{ID: id, Kind: entry.kind, Size: entry.size, Created: entry.created, Modified: entry.modified,
 		Attributes: attributes, AttributesAvailable: true}

@@ -50,6 +50,7 @@ func AllocateTID() int32 { return allocatePID() }
 
 // ThreadSlotFree reports whether the table can take another thread.
 func ThreadSlotFree() bool {
+	guard.Check()
 	for index := range threads {
 		if threads[index].Root == 0 {
 			return true
@@ -61,6 +62,7 @@ func ThreadSlotFree() bool {
 // AddThread records a new thread of the process at root with a TID from
 // AllocateTID.
 func AddThread(task sched.TaskID, root uint64, tid int32) (*Thread, bool) {
+	guard.Check()
 	if task == 0 || root == 0 || tid < firstPID {
 		return nil, false
 	}
@@ -149,6 +151,7 @@ func cancelThread(reservation threadReservation) bool {
 // PrepareThreadCreation reserves every non-architecture resource that clone
 // needs. Failure returns the Process quota to its previous value.
 func PrepareThreadCreation(owner *process.Process, root uint64) (ThreadCreation, bool) {
+	guard.Check()
 	if owner == nil || !owner.ReserveTask() {
 		return ThreadCreation{}, false
 	}
@@ -161,6 +164,7 @@ func PrepareThreadCreation(owner *process.Process, root uint64) (ThreadCreation,
 }
 
 func (creation *ThreadCreation) PreparedThread() (*Thread, bool) {
+	guard.Check()
 	if creation == nil || !creation.active {
 		return nil, false
 	}
@@ -169,6 +173,7 @@ func (creation *ThreadCreation) PreparedThread() (*Thread, bool) {
 
 // Cancel releases a prepared creation after architecture setup fails.
 func (creation *ThreadCreation) Cancel() bool {
+	guard.Check()
 	if creation == nil || !creation.active {
 		return false
 	}
@@ -181,6 +186,7 @@ func (creation *ThreadCreation) Cancel() bool {
 // Commit binds the scheduler task to both reservations. A rejected task
 // returns the transaction to its initial state.
 func (creation *ThreadCreation) Commit(task sched.TaskID) (*Thread, bool) {
+	guard.Check()
 	if creation == nil || !creation.active {
 		return nil, false
 	}
@@ -202,6 +208,7 @@ func (creation *ThreadCreation) Commit(task sched.TaskID) (*Thread, bool) {
 // FindThread returns the thread record of task, if task is a thread
 // created by clone.
 func FindThread(task sched.TaskID) (*Thread, bool) {
+	guard.Check()
 	if task == 0 {
 		return nil, false
 	}
@@ -215,6 +222,7 @@ func FindThread(task sched.TaskID) (*Thread, bool) {
 
 // RemoveThread forgets the thread of task and returns what it recorded.
 func RemoveThread(task sched.TaskID) (Thread, bool) {
+	guard.Check()
 	record, found := FindThread(task)
 	if !found {
 		return Thread{}, false
@@ -227,6 +235,7 @@ func RemoveThread(task sched.TaskID) (Thread, bool) {
 // ThreadCount reports how many clone-created threads the process at root
 // has.
 func ThreadCount(root uint64) int {
+	guard.Check()
 	count := 0
 	for index := range threads {
 		if threads[index].Task != 0 && threads[index].Root == root {
@@ -239,6 +248,7 @@ func ThreadCount(root uint64) int {
 // ThreadRecords counts the records the process at root holds, reserved or
 // committed.
 func ThreadRecords(root uint64) int {
+	guard.Check()
 	count := 0
 	for index := range threads {
 		if root != 0 && threads[index].Root == root {
@@ -251,6 +261,7 @@ func ThreadRecords(root uint64) int {
 // TaskTID is the TID task sees from gettid: its thread's, or the PID for
 // the first thread.
 func TaskTID(task sched.TaskID, state *ProcessState) int32 {
+	guard.Check()
 	if thread, found := FindThread(task); found {
 		return thread.TID
 	}
@@ -288,6 +299,7 @@ func ForgetThreadsOf(root uint64) { forgetThreads(root) }
 // signal aimed at a thread goes to its process, whose signal state all its
 // threads share.
 func ThreadGroupOf(tid int32) (int32, bool) {
+	guard.Check()
 	for index := range threads {
 		if threads[index].Task == 0 || threads[index].TID != tid {
 			continue
@@ -305,6 +317,7 @@ func ThreadGroupOf(tid int32) (int32, bool) {
 // thread's mask and a signal is delivered at its return only if that
 // thread's mask allows. A thread that has ended gives its mask up.
 func SelectThreadSignals(state *ProcessState, task sched.TaskID) {
+	guard.Check()
 	if state == nil {
 		return
 	}
@@ -336,6 +349,7 @@ func SelectThreadSignals(state *ProcessState, task sched.TaskID) {
 // AdoptSignalsAsFirst makes the mask in force the first thread's, for a
 // thread exec makes the process's only one.
 func AdoptSignalsAsFirst(state *ProcessState) {
+	guard.Check()
 	if state != nil {
 		state.maskTID = 0
 	}

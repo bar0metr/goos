@@ -39,6 +39,9 @@ const (
 	ActionExit   = uint64(1)
 	ActionBlock  = uint64(2)
 	ActionExec   = uint64(3)
+	// ActionRetry runs the call again after a scheduling point; the kernel
+	// gave it up before it changed anything.
+	ActionRetry = uint64(4)
 )
 
 type Errno uint64

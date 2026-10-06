@@ -3,6 +3,8 @@
 package main
 
 import (
+	"sync/atomic"
+
 	"goos/internal/capability"
 	"goos/internal/logfmt"
 	"goos/internal/timekeeping"
@@ -71,14 +73,15 @@ func nowNanos() uint64 { return monotonicClock.Nanos(amd64.ReadTSC()) }
 // ClockReadNanos reports nanoseconds since the timer started. Like ClockRead it
 // needs no capability.
 func (handler nativeCallHandler) ClockReadNanos(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	if length != 8 {
 		return kcall.StatusInvalidArgument
 	}
 	if !monotonicClock.Calibrated() {
 		return kcall.StatusUnsupported
 	}
-	putUint64(nanosWire[:], nowNanos())
-	if !vm.CopyOut(handler.root, address, nanosWire[:]) {
+	putUint64(local.nanosWire[:], nowNanos())
+	if !vm.CopyOut(handler.root, address, local.nanosWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -86,6 +89,7 @@ func (handler nativeCallHandler) ClockReadNanos(address uint64, length uint64) k
 
 // ClockNow is the typed native clock API. Reading time needs no capability.
 func (handler nativeCallHandler) ClockNow(clockID uint64, address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	if length != kcall.ClockTimeSize {
 		return kcall.StatusInvalidArgument
 	}
@@ -105,10 +109,10 @@ func (handler nativeCallHandler) ClockNow(clockID uint64, address uint64, length
 	default:
 		return kcall.StatusInvalidArgument
 	}
-	clear(timeWire[:])
-	putUint64(timeWire[0:8], uint64(value.Seconds))
-	putUint32(timeWire[8:12], value.Nanoseconds)
-	if !vm.CopyOut(handler.root, address, timeWire[:]) {
+	clear(local.timeWire[:])
+	putUint64(local.timeWire[0:8], uint64(value.Seconds))
+	putUint32(local.timeWire[8:12], value.Nanoseconds)
+	if !vm.CopyOut(handler.root, address, local.timeWire[:]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
@@ -117,7 +121,7 @@ func (handler nativeCallHandler) ClockNow(clockID uint64, address uint64, length
 // ClockSet is reserved for future synchronization and manual setting. The
 // caller must hold the dedicated CLOCK_SET right; setting is not implemented.
 func (handler nativeCallHandler) ClockSet(authorityID uint64, address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -162,8 +166,8 @@ func launchStageDone(stage launchStage, began uint64) uint64 {
 		return 0
 	}
 	now := nowNanos()
-	launchProfile.count[stage]++
-	launchProfile.total[stage] += now - began
+	atomic.AddUint64(&launchProfile.count[stage], 1)
+	atomic.AddUint64(&launchProfile.total[stage], now-began)
 	return now
 }
 
@@ -173,7 +177,7 @@ func dumpTiming(out diagWriter) {
 	out.uint("now-us", nowNanos()/1000)
 	out.end()
 	for stage := launchStage(0); stage < launchStageCount; stage++ {
-		count, total := launchProfile.count[stage], launchProfile.total[stage]
+		count, total := atomic.LoadUint64(&launchProfile.count[stage]), atomic.LoadUint64(&launchProfile.total[stage])
 		average := uint64(0)
 		if count != 0 {
 			average = total / count

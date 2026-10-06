@@ -40,8 +40,8 @@ per-processor state word with compare-and-swap, so a processor that arrives
 after the bootstrap processor gave up finds the cancellation and parks
 instead of joining. Boot goes on with the processors that answered.
 
-Started processors join when boot hands the machine to userspace, under the
-kernel lock: each one starts its local timer, enters the scheduler's online
+Started processors join when boot hands the machine to userspace, with the
+boot task holding the launch locks: each one starts its local timer, enters the scheduler's online
 set, and runs its idle loop on its start-up stack. Only then does the
 bootstrap processor mark it online in the CPU inventory, which is what
 `lscpu` reports.
@@ -133,40 +133,66 @@ before it destroys the old address space.
 
 ## Locks
 
-Locks are taken in increasing level order, with local interrupts disabled.
-Validation builds record the holder and check the order and recursion.
+There is no kernel lock (ADR 0184). The kernel's state is split into
+domains, each with one lock, taken in increasing level order with local
+interrupts disabled. A system call, a fault, and each housekeeping step take
+the locks of the domains they touch; calls whose locks do not meet run on
+several processors at once.
 
-| Level | Lock | Guards |
+| Level | Lock | Taken by |
 | ---: | --- | --- |
-| 1 | kernel | every kernel object below |
-| 2 | memory | the physical page allocator |
-| 3 | scheduler | `sched.Core`, slot tables, kill and hold requests |
-| 5 | console | serial and framebuffer output |
+| 1 | registry (reader-writer) | lifecycle calls write; lookups across processes read |
+| 2 | linux | most Linux calls, for the whole call; fast calls before and after |
+| 3 | lifecycle | launches, process exits, the housekeeping flush |
+| 4 | handle (reader-writer) | native calls; IPC, launches, and teardown write |
+| 5 | channel | IPC, the VFS bridge, executable page requests |
+| 6 | stream | stream calls, pipes, teardown |
+| 7 | shmem | memory objects, the file cache |
+| 8 | address space (reader-writer, per process) | copies and faults read; mapping changes write |
+| 9 | executable | executable calls, image page faults, launches |
+| 10 | futex bucket (32) | futex, a thread's exit, a signal ending a wait |
+| 11 | wait tables | each table locks itself for one step |
+| 12 | log | kernel log, diagnostic ring, Linux counters, console readers |
+| 13 | memory | the physical page allocator |
+| 14 | random | the random generator |
+| 15 | scheduler | `sched.Core`, slot tables, kill and hold requests |
+| 16 | console | serial and framebuffer output |
 
-The kernel lock serializes the kernel's object layer. Every native call,
-Linux system call, user page-fault resolution, and housekeeping step runs
-under it. Tasks run in parallel in user mode; their kernel calls run one at a
-time. The scheduler, timers, IPIs, TLB shootdown, and the page allocator do
-not depend on it. A task waiting for the kernel lock gives up when it is
-killed or held, retrying its call if it ever runs again, so a processor that
-holds the lock while it waits for that task to leave cannot deadlock.
+A call takes its set when it starts (`kernel/locksets.go`) and holds it to
+the end, so nothing it found through those locks changes under it. A task
+whose processor is asked to stop it gives up waiting for its set and runs the
+call again if it ever runs; a processor that holds locks while it waits for
+tasks to stop never waits for a task that waits for it. Validation builds
+check, in each package, that the caller holds the lock of the state it uses,
+and check the order and recursion of every acquisition.
 
 | State | Protection |
 | --- | --- |
+| Process registry, PID allocation, exit records, task-to-process map | registry lock; a task reads its own map entry without it |
+| Process quotas and CPU time | atomic counters |
+| Process tasks, name, executable | registry lock |
+| Handle tables | handle lock |
+| Region maps and page tables | the process's address-space lock; installs use compare-and-swap so readers may fault |
+| Kernel root mappings after boot (stack guard pages) | registry lock for writing, which task creation and teardown hold, plus a lazy flush at the next switch |
+| Channels, executable page requests and their correlation | channel lock |
+| Streams | stream lock |
+| Shared memory objects, the boot file cache | shmem lock |
+| Executable objects, the object a fault or launch reads | executable lock |
+| Channel, stream, and process waits; multi-object waits; Linux continuations | each table's own lock |
+| Per-task wait statuses | atomic words |
+| Futex waiters | their bucket's lock; a task's bucket index is atomic |
+| Linux process states, descriptors, signals, records, threads, directories, VFS sessions | linux lock |
+| Lifecycle queue | lifecycle lock |
+| Kernel log, diagnostic ring, Linux call counters | their own locks, at the log level |
 | Physical page allocator | memory lock |
+| Random generator | its own lock, at the random level |
+| Monotonic and realtime clocks | set before a second processor starts; the last reading rises atomically |
 | Run state, slot contexts, roots, FS bases, exit codes | scheduler lock |
-| Process registry, PID allocation, completion records | kernel lock |
-| Per-process quotas, handle tables, region maps, thread records | kernel lock |
-| IPC channels, streams, waiter tables, `WaitAny` | kernel lock |
-| Shared memory, executable objects, image page cache | kernel lock |
-| Linux process state, signals, futexes, continuations | kernel lock |
-| VFS bridge, lifecycle queues, kernel log | kernel lock |
-| Process page tables, CopyIn and CopyOut walks | kernel lock, plus TLB shootdown |
-| Kernel root mappings after boot (stack guard pages) | kernel lock, plus a lazy flush |
-| Console input rings | single producer (bootstrap processor's IRQ), single consumer under the kernel lock |
+| Console input rings | one producer, the bootstrap processor's IRQ; readers take the console input lock |
 | IRQ 11 pending flag and waiter | exchanged atomically |
 | Kernel console output | console lock, one line at a time |
-| CPU inventory online state | written by the bootstrap processor under the kernel lock |
+| CPU inventory online state | written by the boot task before user tasks run |
+| Call scratch buffers and call handlers | one set per processor |
 | Per-processor data blocks, TSS, idle slots | local to their processor |
 | GDT, IDT, trampoline layout | written before the processor that uses them starts |
 
@@ -192,8 +218,8 @@ translations. The kernel reaches user memory through the direct map.
 So a shootdown only has to make each processor that may be in ring 3 on the
 root enter the kernel once. Each processor stores the root it is about to
 return to before the CR3 write, and counts its kernel entries after the CR3
-write at entry. The initiator, holding the kernel lock, changes the page
-tables, fences, reads which processors run the root, interrupts them, and
+write at entry. The initiator, holding the process's address space for
+writing, changes the page tables, fences, reads which processors run the root, interrupts them, and
 waits until each has entered the kernel or left the root. Entry code clears
 the active root, so a processor spinning on a lock with interrupts off is
 never waited for.
@@ -214,9 +240,19 @@ switches to the task first.
 
 In a diagnostic build, `diag` prints the run state (running and online
 masks, switches, steals, migrations, kills), the most tasks of one address
-space that ran on distinct processors at once (`parallel-peak`), lock
-contention, shootdown counts, and per processor its ticks, idle ticks, and
+space that ran on distinct processors at once (`parallel-peak`), the most
+processors inside system calls or fault resolution at once
+(`kernel-parallel-peak`), the most tasks of one process inside them at once
+(`kernel-thread-peak`), shootdown counts, per lock level the acquisitions
+that waited, their total and longest spin in TSC cycles, and the spins the
+watchdog reported (`DIAG lock`), and per processor its ticks, idle ticks, and
 received reschedule and shootdown interrupts. Nothing is logged per switch.
+
+The lock watchdog reports a spin that lasts longer than four seconds as
+`LOCK_STUCK level=... cpu=... holder=...`. A validation build stops there;
+another build keeps spinning, in case the holder is only slow. Validation
+builds also print `KERNEL_PARALLEL_PEAK n` and `KERNEL_THREAD_PEAK n` each
+time either peak rises.
 
 ## Panics
 
@@ -231,7 +267,11 @@ offline.
 which uses `getcpu` to prove that workers ran on every processor and that
 two computed on distinct processors within one window shorter than half a
 tick.
-It then runs the thread, FPU, fork, exec, pipe, and signal probes with their
-tasks spread over the processors. `SMP_MATRIX=1` adds one, two, and eight
+It then runs the probe's `kernel` mode, four threads and two processes whose
+calls share no lock. On more than one processor it requires a
+kernel-parallel peak of 2 or more and a kernel-thread peak the probe raised
+to 2 or more: boot's services each run one task, so only the probe's threads
+put several tasks of one process in the kernel at once. The thread, FPU, fork, exec, pipe, and
+signal probes follow with their tasks spread over the processors. `SMP_MATRIX=1` adds one, two, and eight
 processors. Every boot target takes `SMP=N` to run its own scenario on N
 processors.

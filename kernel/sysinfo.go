@@ -17,7 +17,8 @@ import (
 // HandleInfo describes one slot of the caller's own handle table: handle ID,
 // type, and rights. It never reveals the kernel object behind the handle.
 func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -28,7 +29,7 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 	if !open {
 		return kcall.StatusNotFound
 	}
-	record := handleInfoWire[:]
+	record := local.handleInfoWire[:]
 	clear(record)
 	putUint64(record[0:8], uint64(id))
 	record[8] = byte(typeID)
@@ -44,7 +45,8 @@ func (handler nativeCallHandler) HandleInfo(slot uint64, address uint64) kcall.S
 // it needs no capability: the record names no kernel object and reveals only
 // what a process list already shows.
 func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall.Status {
-	if _, found := processRegistry.ByRoot(handler.root); !found {
+	local := thisCPU()
+	if _, found := handler.self(); !found {
 		return kcall.StatusPermissionDenied
 	}
 	if index >= process.MaxProcesses {
@@ -66,7 +68,7 @@ func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall
 			status = kcall.ProcessReady
 		}
 	}
-	record := processInfoWire[:]
+	record := local.processInfoWire[:]
 	clear(record)
 	putUint64(record[0:8], uint64(target.ID()))
 	record[8] = status
@@ -89,7 +91,7 @@ func (handler nativeCallHandler) ProcessInfo(index uint64, address uint64) kcall
 // SystemReset restarts the machine. Only the holder of the system-control
 // capability, granted to PID 1 at boot, may call it; it does not return.
 func (handler nativeCallHandler) SystemReset(device uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -112,7 +114,7 @@ var (
 // needs the system-control capability, which only PID 1 holds, and does not
 // return when it works. Without the ACPI tables it answers Unsupported.
 func (handler nativeCallHandler) SystemPowerOff(device uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}

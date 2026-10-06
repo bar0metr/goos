@@ -84,7 +84,52 @@ const (
 	// OperationReplace gives Node the name of the existing file Name in
 	// Parent and removes that file.
 	OperationReplace
+	// OperationSetMetadata changes Node's modification time, read-only
+	// attribute, or both. Parent carries the metadata flags; Offset and Size
+	// are the new time's seconds and nanoseconds.
+	OperationSetMetadata
 )
+
+// The flags of OperationSetMetadata, in the request's Parent field.
+const (
+	metadataModified = 1 << iota
+	metadataReadOnly
+	metadataWritable
+)
+
+// MetadataRequest builds the request that applies change to id.
+func MetadataRequest(id ramfs.NodeID, change ramfs.MetadataChange) Request {
+	request := Request{Operation: OperationSetMetadata, Node: id}
+	flags := uint64(0)
+	if change.SetModified {
+		flags |= metadataModified
+		request.Offset, request.Size = uint64(change.Modified.Seconds), change.Modified.Nanoseconds
+	}
+	if change.SetReadOnly && change.ReadOnly {
+		flags |= metadataReadOnly
+	} else if change.SetReadOnly {
+		flags |= metadataWritable
+	}
+	request.Parent = ramfs.NodeID(flags)
+	return request
+}
+
+// MetadataChangeOf decodes what an OperationSetMetadata request changes.
+func MetadataChangeOf(request Request) (ramfs.MetadataChange, bool) {
+	var change ramfs.MetadataChange
+	flags := uint64(request.Parent)
+	if flags&^(metadataModified|metadataReadOnly|metadataWritable) != 0 || flags&metadataReadOnly != 0 && flags&metadataWritable != 0 {
+		return change, false
+	}
+	if flags&metadataModified != 0 {
+		change.SetModified = true
+		change.Modified = ramfs.Timestamp{Seconds: int64(request.Offset), Nanoseconds: request.Size, Available: true}
+	}
+	if flags&(metadataReadOnly|metadataWritable) != 0 {
+		change.SetReadOnly, change.ReadOnly = true, flags&metadataReadOnly != 0
+	}
+	return change, change.Valid()
+}
 
 // Request is one backend call. Node, Parent, Offset, Size, Slot and Name are
 // used as the operation needs them; the rest are zero.
@@ -148,7 +193,7 @@ func SlotBytes(cache []byte, request Request) ([]byte, bool) {
 }
 
 func validOperation(operation Operation) bool {
-	return operation >= OperationMount && operation <= OperationReplace
+	return operation >= OperationMount && operation <= OperationSetMetadata
 }
 
 // validName accepts an empty name, for operations that take none, or one a

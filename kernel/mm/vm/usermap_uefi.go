@@ -4,6 +4,7 @@ package vm
 
 import (
 	"goos/kernel/mm/pmm"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -44,15 +45,15 @@ func shootdownRoot(root uint64) {
 
 // entryRetired marks a leaf UnmapUserRange has cleared but whose owned page
 // it has not freed yet. The leaf is not present, so neither the processor
-// nor any walker here uses it; it exists only between the two passes, under
-// the kernel lock.
+// nor any walker here uses it; it exists only between the two passes, which
+// hold the address space for writing.
 const entryRetired = uint64(1 << 10)
 
 // userTable returns the table a user entry of parent names, creating it when
 // the entry is empty and create is set. An entry the kernel placed — without
 // the user bit, or a large leaf — is never descended into or replaced.
 func userTable(allocator *pmm.Allocator, parent *table, index uint64, create bool, added *int) (*table, bool) {
-	entry := parent[index]
+	entry := atomic.LoadUint64(&parent[index])
 	if entry&entryPresent == 0 {
 		if !create || allocator == nil {
 			return nil, false
@@ -61,9 +62,18 @@ func userTable(allocator *pmm.Allocator, parent *table, index uint64, create boo
 		if !ok {
 			return nil, false
 		}
-		parent[index] = address | entryPresent | entryWritable | entryUser
-		*added++
-		return child, true
+		// Faults of several tasks of a process run at once, each holding the
+		// address space for reading. Two that need the same table race here;
+		// the loser frees its table and descends into the winner's.
+		if atomic.CompareAndSwapUint64(&parent[index], entry, address|entryPresent|entryWritable|entryUser) {
+			*added++
+			return child, true
+		}
+		freeTable(allocator, address)
+		entry = atomic.LoadUint64(&parent[index])
+		if entry&entryPresent == 0 {
+			return nil, false
+		}
 	}
 	if entry&entryUser == 0 || entry&entryLarge != 0 {
 		return nil, false
@@ -107,7 +117,11 @@ func MapUserPageAt(allocator *pmm.Allocator, rootAddress, virtual, physical uint
 		return 0, false
 	}
 	entry, added, ok := userSlot(allocator, rootAddress, virtual, true)
-	if !ok || *entry&entryPresent != 0 {
+	if !ok {
+		return added, false
+	}
+	old := atomic.LoadUint64(entry)
+	if old&entryPresent != 0 {
 		return added, false
 	}
 	value, ok := pageEntry(physical, permissions)
@@ -117,8 +131,8 @@ func MapUserPageAt(allocator *pmm.Allocator, rootAddress, virtual, physical uint
 	if owned {
 		value |= entryOwned
 	}
-	*entry = value
-	return added, true
+	// A fault that lost the race for the page finds it present and leaves.
+	return added, atomic.CompareAndSwapUint64(entry, old, value)
 }
 
 // UserPageMapped reports whether a user leaf is present at virtual.

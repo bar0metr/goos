@@ -119,6 +119,22 @@ type Timestamp struct {
 	Available   bool
 }
 
+// MetadataChange is what a SetMetadata call changes: the modification time,
+// the read-only attribute of a file, or both.
+type MetadataChange struct {
+	SetModified bool
+	Modified    Timestamp
+	SetReadOnly bool
+	ReadOnly    bool
+}
+
+// Valid reports whether the change asks for something and names a usable
+// time.
+func (change MetadataChange) Valid() bool {
+	return (change.SetModified || change.SetReadOnly) &&
+		(!change.SetModified || change.Modified.Available && change.Modified.Valid())
+}
+
 func (stamp Timestamp) Valid() bool {
 	return stamp.Available && stamp.Nanoseconds < 1_000_000_000 ||
 		!stamp.Available && stamp.Seconds == 0 && stamp.Nanoseconds == 0

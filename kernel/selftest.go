@@ -52,6 +52,7 @@ func awaitSchedulerSelfTest() {
 }
 
 func runKernelSelfTests(pageTable uint64) {
+	local := thisCPU()
 	checkHighMemory(pageTable)
 	console := kernelconsole.New()
 	physicalA, allocatedA := pageAllocator.Allocate()
@@ -150,8 +151,8 @@ func runKernelSelfTests(pageTable uint64) {
 	_, channelBCanRead := processB.Handles().Lookup(channelB, handle.TypeChannel, capability.Read)
 	request := ipc.Message{ProtocolID: 0x474f4f53, Version: 1, Kind: ipc.KindRequest, Correlation: 1, PayloadSize: 4}
 	copy(request.Payload[:], []byte("ping"))
-	wireSize, wireEncoded := ipc.Encode(request, ipcWireData[:])
-	wireRequest, wireDecoded := ipc.Decode(ipcWireData[:wireSize])
+	wireSize, wireEncoded := ipc.Encode(request, local.ipcWireData[:])
+	wireRequest, wireDecoded := ipc.Decode(local.ipcWireData[:wireSize])
 	ipcStatus := registeredChannel.Send(0, wireRequest, processA.Handles(), processB.Handles(), []ipc.Transfer{{
 		Handle: memoryHandle,
 		Type:   handle.TypeMemory,
@@ -494,7 +495,7 @@ func startSelfTestTasks() {
 
 func awaitValidationBoot() {
 	console := kernelconsole.New()
-	for userExited == 0 || amd64.UserFaults() == 0 || highKernelAccessFaults == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 || linuxSyscallEntries < 2 || linuxSyscallABIRejections == 0 || linuxSyscallFrameRejections == 0 || nativeCallABIRejections == 0 {
+	for userExited == 0 || amd64.UserFaults() == 0 || highKernelAccessFaults == 0 || initAnnounced == 0 || processExitDelivered == 0 || supervisorExitDelivered == 0 || serviceLaunchConfirmed < supervisor.MaxRestarts || stackGuardDeepFaults == 0 || userspaceSupervisorOK == 0 || capabilityManifestOK == 0 || linuxSyscallEntries.Load() < 2 || linuxSyscallABIRejections.Load() == 0 || linuxSyscallFrameRejections.Load() == 0 || nativeCallABIRejections.Load() == 0 {
 		serviceKernel()
 		if initSendObserved != 0 && initSendStatus != kcall.StatusOK {
 			console.WriteString("PANIC: init launch IPC failed: ")

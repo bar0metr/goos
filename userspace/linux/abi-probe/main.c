@@ -61,6 +61,8 @@
  *   smp               workers on every online processor at once, a contended
  *                     mutex, remaps and faults beside readers, fork and exec
  *                     beside running threads
+ *   kernel            threads and processes making calls that share no lock,
+ *                     so several processors run kernel code at once
  *
  * exhaust, isolation, and port-io make sense on GoOS only.
  */
@@ -774,8 +776,8 @@ static int signals_ok(int strict)
 	       fails(syscall(SYS_rt_sigprocmask, SIG_BLOCK, NULL, (void *)8, SET_SIZE), EFAULT);
 }
 
-/* 1 when the kernel hands out random bytes, 0 when it has no source and says
- * so in both places a program looks, -1 when the two disagree. */
+/* 1 when the kernel hands out random bytes in both places a program looks,
+ * 0 when it has none in either, -1 when the two disagree. */
 static int random_source(void)
 {
 	unsigned char byte;
@@ -790,8 +792,8 @@ static int random_source(void)
 	return -1;
 }
 
-/* Linux always has a source. GoOS has one when the CPU has a generator; a
- * machine without it must refuse the call and leave AT_RANDOM out. */
+/* Linux and GoOS always have a source: static glibc takes its stack canary
+ * from AT_RANDOM before main and faults when the entry is missing. */
 static int random_ok(int goos)
 {
 	static unsigned char large[300];
@@ -801,7 +803,7 @@ static int random_ok(int goos)
 
 	errno = 0;
 	if (source != 1)
-		return goos && source == 0;
+		return 0;
 	memset(first, 0, sizeof first);
 	memset(second, 0, sizeof second);
 	if (getrandom(first, sizeof first, 0) != sizeof first ||
@@ -1092,6 +1094,21 @@ static int no_executable_memory(void)
 	return ok && munmap(page, 4096) == 0;
 }
 
+/* O_NONBLOCK changes nothing for a regular file, as on Linux, and F_GETFL
+ * reports it. */
+static int nonblocking_open(void)
+{
+	int fd = open("data", O_RDONLY | O_NONBLOCK);
+	int flags = fd < 0 ? -1 : fcntl(fd, F_GETFL);
+	char byte;
+	int ok = fd >= 0 && flags >= 0 && (flags & O_NONBLOCK) && read(fd, &byte, 1) == 1 &&
+		 fcntl(fd, F_SETFL, 0) == 0 && !(fcntl(fd, F_GETFL) & O_NONBLOCK);
+
+	if (fd >= 0)
+		close(fd);
+	return ok;
+}
+
 static int hostile(void)
 {
 	int goos = on_goos(), strict = strict_kernel();
@@ -1115,7 +1132,8 @@ static int hostile(void)
 			 fails(syscall(9999), ENOSYS) &&
 			 fails(syscall(SYS_getdents64, fd, &byte, 256), ENOTDIR) &&
 			 fails(lseek(1, 0, SEEK_SET), ESPIPE) &&
-			 (!goos || fails(open("data", O_RDONLY | O_NONBLOCK), EOPNOTSUPP)) &&
+			 (!goos || fails(open("data", O_RDONLY | O_DIRECT), EOPNOTSUPP)) &&
+			 nonblocking_open() &&
 			 (!goos || no_executable_memory()));
 	failed += report("stale descriptors", stale_descriptors(fd, dirfd));
 	if (unlink("data") != 0 || !leave_scratch())
@@ -3604,6 +3622,78 @@ static long smp_speedup(int threads)
 	return parallel > 0 ? single * 10 / parallel : 0;
 }
 
+/* kernel mode: threads and processes that stay inside the kernel, with
+ * calls that take no lock in common, so several processors run kernel code
+ * at once. The kernel reports the most processors it saw inside system calls
+ * at the same time; the boot test reads that after this mode. */
+#define KERNEL_THREADS 4
+#define KERNEL_PROCESSES 2
+#define KERNEL_ROUNDS 4000
+
+static volatile int kernel_go;
+static int kernel_words[KERNEL_THREADS + 1];
+
+static void *kernel_grind(void *argument)
+{
+	long index = (long)argument;
+	struct timespec now;
+	unsigned char bytes[16];
+	unsigned long mask;
+	int round;
+
+	while (!kernel_go)
+		;
+	for (round = 0; round < KERNEL_ROUNDS; round++)
+		if (syscall(SYS_futex, &kernel_words[index], PROBE_FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0) != 0 ||
+		    syscall(SYS_getpid) <= 0 || syscall(SYS_gettid) <= 0 ||
+		    syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &now) != 0 ||
+		    syscall(SYS_getrandom, bytes, sizeof bytes, 0) != sizeof bytes ||
+		    syscall(SYS_sched_getaffinity, 0, sizeof mask, &mask) != sizeof mask)
+			return (void *)1;
+	return NULL;
+}
+
+static int kernel_test(void)
+{
+	pthread_t workers[KERNEL_THREADS];
+	pid_t children[KERNEL_PROCESSES];
+	long index;
+	int status, failed = 0;
+	void *result;
+
+	fflush(stdout);
+	for (index = 0; index < KERNEL_PROCESSES; index++) {
+		children[index] = fork();
+		if (children[index] == 0) {
+			kernel_go = 1;
+			_exit(kernel_grind((void *)KERNEL_THREADS) == NULL ? 0 : 1);
+		}
+		if (children[index] < 0) {
+			printf("kernel failed: fork\n");
+			return 1;
+		}
+	}
+	for (index = 0; index < KERNEL_THREADS; index++)
+		if (pthread_create(&workers[index], NULL, kernel_grind, (void *)index) != 0) {
+			printf("kernel failed: thread %ld\n", index);
+			return 1;
+		}
+	kernel_go = 1;
+	for (index = 0; index < KERNEL_THREADS; index++)
+		if (pthread_join(workers[index], &result) != 0 || result != NULL)
+			failed = 1;
+	for (index = 0; index < KERNEL_PROCESSES; index++)
+		if (wait4(children[index], &status, 0, NULL) != children[index] || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+			failed = 1;
+	if (failed) {
+		printf("kernel failed: a worker's call failed\n");
+		return 1;
+	}
+	printf("kernel workers: %d threads and %d processes, %d rounds of 6 calls each\n", KERNEL_THREADS, KERNEL_PROCESSES, KERNEL_ROUNDS);
+	printf("kernel ok\n");
+	return 0;
+}
+
 static int smp_test(void)
 {
 	pthread_t workers[SMP_WORKERS];
@@ -3772,6 +3862,8 @@ int main(int argc, char **argv)
 			return threads_test();
 		if (!strcmp(argv[1], "smp"))
 			return smp_test();
+		if (!strcmp(argv[1], "kernel"))
+			return kernel_test();
 		if (!strcmp(argv[1], "fpstate"))
 			return fpstate_test();
 		if (!strcmp(argv[1], "exec-vfs-loss"))
@@ -3787,8 +3879,8 @@ int main(int argc, char **argv)
 		if (!strcmp(argv[1], "random")) {
 			int source = random_source();
 
-			printf("random: %s\n", source == 1 ? "hardware" : source == 0 ? "none" : "inconsistent");
-			return source < 0;
+			printf("random: %s\n", source == 1 ? "available" : source == 0 ? "none" : "inconsistent");
+			return source != 1;
 		}
 		if (!strcmp(argv[1], "block")) {
 			puts("blocking on standard input");

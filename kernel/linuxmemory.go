@@ -14,11 +14,9 @@ import (
 	"goos/kernel/process"
 )
 
-var linuxFSBaseResult [8]byte
-
 func (handler *linuxCallHandler) Brk(request linuxcompat.Request) linuxcompat.Result {
 	state, found := linuxcompat.FindProcess(handler.root)
-	owner, owned := processRegistry.ByRoot(handler.root)
+	owner, owned := handler.self()
 	if !found || !owned {
 		return linuxcompat.Result{Errno: linuxabi.ENOMEM}
 	}
@@ -56,7 +54,7 @@ func (handler *linuxCallHandler) Mmap(request linuxcompat.Request) linuxcompat.R
 	if errno != 0 {
 		return linuxcompat.Result{Errno: errno}
 	}
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return linuxcompat.Result{Errno: linuxabi.ENOMEM}
 	}
@@ -111,18 +109,19 @@ func (handler *linuxCallHandler) Mprotect(request linuxcompat.Request) linuxcomp
 // segments, which the native call refuses because they are pinned. glibc
 // makes its relocated data (PT_GNU_RELRO) read-only this way before main.
 // Every page of a Linux image is a private copy (demandFault and
-// installExecutablePage allocate and fill it), never a frame another
+// executableStep allocate and fill it), never a frame another
 // process maps, so a narrower protection affects this process alone. Adding
 // a right stays refused.
 func (handler *linuxCallHandler) restrictImage(address, length uint64, requested region.Protection) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
 	regions := owner.Regions()
-	count := regions.Overlapping(address, length, &vmPieces)
+	count := regions.Overlapping(address, length, &local.vmPieces)
 	for index := 0; index < count; index++ {
-		if vmPieces[index].Region.Backing != region.Image {
+		if local.vmPieces[index].Region.Backing != region.Image {
 			return kcall.StatusPermissionDenied
 		}
 	}
@@ -149,6 +148,7 @@ func (handler *linuxCallHandler) Madvise(request linuxcompat.Request) linuxcompa
 }
 
 func (handler *linuxCallHandler) ArchPrctl(request linuxcompat.Request) linuxcompat.Result {
+	local := thisCPU()
 	operation, argument := request.Arguments[0], request.Arguments[1]
 	switch operation {
 	case linuxabi.ArchSetFS:
@@ -161,8 +161,8 @@ func (handler *linuxCallHandler) ArchPrctl(request linuxcompat.Request) linuxcom
 		if !found {
 			return linuxcompat.Result{Errno: linuxabi.EINVAL}
 		}
-		binary.LittleEndian.PutUint64(linuxFSBaseResult[:], base)
-		if !vm.CopyOut(handler.root, argument, linuxFSBaseResult[:]) {
+		binary.LittleEndian.PutUint64(local.linuxFSBaseResult[:], base)
+		if !vm.CopyOut(handler.root, argument, local.linuxFSBaseResult[:]) {
 			return linuxcompat.Result{Errno: linuxabi.EFAULT}
 		}
 		return linuxcompat.Result{}

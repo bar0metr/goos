@@ -16,26 +16,32 @@ type OpenIntent struct {
 	Append      bool
 	Directory   bool
 	CloseOnExec bool
+	NonBlock    bool
 }
 
 // StatusFlags is what the open-file description keeps of the intent: the
-// access mode and O_APPEND. read, write, and lseek consult it.
+// access mode, O_APPEND, and O_NONBLOCK. read, write, and lseek consult it.
 func (intent OpenIntent) StatusFlags() uint32 {
 	flags := intent.Access
 	if intent.Append {
 		flags |= abi.OpenAppend
+	}
+	if intent.NonBlock {
+		flags |= abi.OpenNonBlock
 	}
 	return flags
 }
 
 // DecodeOpen accepts the documented open flags. O_LARGEFILE is always in
 // effect on x86_64. O_NOCTTY and O_NOFOLLOW change nothing here: no GoOS
-// file is a terminal device or a symbolic link. Every other flag is refused,
+// file is a terminal device or a symbolic link. O_NONBLOCK changes nothing
+// either: a path names a file, a directory, or a device that never blocks,
+// and Linux ignores the flag for the first two. Every other flag is refused,
 // because ignoring it would claim a behavior the open does not have.
 func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 	value := uint32(flags)
 	const accepted = abi.OpenAccess | abi.OpenCreate | abi.OpenExclusive | abi.OpenNoCTTY | abi.OpenTruncate |
-		abi.OpenAppend | abi.OpenLargeFile | abi.OpenDirectory | abi.OpenNoFollow | abi.OpenCloseExec
+		abi.OpenAppend | abi.OpenLargeFile | abi.OpenDirectory | abi.OpenNoFollow | abi.OpenCloseExec | abi.OpenNonBlock
 	if value&^accepted != 0 {
 		return OpenIntent{}, abi.EOPNOTSUPP
 	}
@@ -47,6 +53,7 @@ func DecodeOpen(flags uint64) (OpenIntent, abi.Errno) {
 		Append:      value&abi.OpenAppend != 0,
 		Directory:   value&abi.OpenDirectory != 0,
 		CloseOnExec: value&abi.OpenCloseExec != 0,
+		NonBlock:    value&abi.OpenNonBlock != 0,
 	}
 	switch intent.Access {
 	case abi.OpenReadOnly:
@@ -195,17 +202,26 @@ func StatusFlagsOf(description FileDescription) uint32 {
 	return description.Flags | abi.OpenLargeFile
 }
 
-// SetStatusFlags applies F_SETFL. Linux lets it change O_APPEND and four
-// flags GoOS has no behavior for; asking for one of those is refused, and
-// every other bit is ignored as Linux ignores it. O_APPEND takes effect on a
-// regular file, the one kind of description a write consults it for.
+// SetStatusFlags applies F_SETFL. Linux lets it change O_APPEND, O_NONBLOCK,
+// and three flags GoOS has no behavior for; asking for one of those is
+// refused, and every other bit is ignored as Linux ignores it. O_APPEND takes
+// effect on a regular file, the one kind of description a write consults it
+// for. O_NONBLOCK is kept on a file, a directory, or a device, none of which
+// blocks; a stream refuses it because its reads and writes do block.
 func SetStatusFlags(description *FileDescription, flags uint64) abi.Errno {
 	value := uint32(flags)
-	if value&(abi.OpenNonBlock|abi.OpenAsync|abi.OpenDirect|abi.OpenNoATime) != 0 {
+	if value&(abi.OpenAsync|abi.OpenDirect|abi.OpenNoATime) != 0 {
 		return abi.EINVAL
 	}
-	if description.Kind == FDVFSFile {
+	switch description.Kind {
+	case FDStreamReader, FDStreamWriter:
+		if value&abi.OpenNonBlock != 0 {
+			return abi.EINVAL
+		}
+		return 0
+	case FDVFSFile:
 		description.Flags = description.Flags&^abi.OpenAppend | value&abi.OpenAppend
 	}
+	description.Flags = description.Flags&^abi.OpenNonBlock | value&abi.OpenNonBlock
 	return 0
 }

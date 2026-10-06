@@ -114,7 +114,7 @@ func TestThreadCreationRollsBackStageFailures(t *testing.T) {
 			t.Fatal("quota setup failed")
 		}
 	}
-	if _, ok := PrepareThreadCreation(&exhausted, 0x1000); ok {
+	if _, ok := PrepareThreadCreation(exhausted, 0x1000); ok {
 		t.Fatal("creation passed an exhausted task quota")
 	}
 
@@ -123,12 +123,12 @@ func TestThreadCreationRollsBackStageFailures(t *testing.T) {
 	for index := range threads {
 		threads[index] = Thread{Root: 0x2000, TID: firstPID + int32(index)}
 	}
-	if _, ok := PrepareThreadCreation(&owner, 0x1000); ok || owner.Available(process.ResourceTasks) != available {
+	if _, ok := PrepareThreadCreation(owner, 0x1000); ok || owner.Available(process.ResourceTasks) != available {
 		t.Fatal("full thread table leaked the task charge")
 	}
 	threads = [len(threads)]Thread{}
 
-	creation, ok := PrepareThreadCreation(&owner, 0x1000)
+	creation, ok := PrepareThreadCreation(owner, 0x1000)
 	prepared, found := creation.PreparedThread()
 	if !ok || !found || prepared.TID < firstPID || !tidInUse(prepared.TID) {
 		t.Fatal("thread preparation failed")
@@ -141,12 +141,12 @@ func TestThreadCreationRollsBackStageFailures(t *testing.T) {
 		t.Fatal("task creation failure left prepared state")
 	}
 
-	creation, ok = PrepareThreadCreation(&owner, 0x1000)
+	creation, ok = PrepareThreadCreation(owner, 0x1000)
 	if _, committed := creation.Commit(0); !ok || committed || owner.Available(process.ResourceTasks) != available || ThreadCount(0x1000) != 0 {
 		t.Fatal("invalid task commit left prepared state")
 	}
 
-	creation, ok = PrepareThreadCreation(&owner, 0x1000)
+	creation, ok = PrepareThreadCreation(owner, 0x1000)
 	task, _ := sched.NewTaskID(2, 1)
 	thread, committed := creation.Commit(task)
 	if !ok || !committed || thread.Task != task || ThreadCount(0x1000) != 1 || owner.TaskCount() != 1 {

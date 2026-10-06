@@ -64,6 +64,8 @@ const (
 	SysGeteuid       Syscall = 107
 	SysGetegid       Syscall = 108
 	SysGetppid       Syscall = 110
+	SysChmod         Syscall = 90
+	SysFchmod        Syscall = 91
 	SysGetgroups     Syscall = 115
 	SysArchPrctl     Syscall = 158
 	SysRtSigsuspend  Syscall = 130
@@ -85,7 +87,9 @@ const (
 	SysUnlinkat         Syscall = 263
 	SysRenameat         Syscall = 264
 	SysReadlinkat       Syscall = 267
+	SysFchmodat         Syscall = 268
 	SysFaccessat        Syscall = 269
+	SysUtimensat        Syscall = 280
 	SysPpoll            Syscall = 271
 	SysSetRobustList    Syscall = 273
 	SysDup3             Syscall = 292
@@ -142,6 +146,10 @@ const (
 	AtSymlinkNoFollow = uint64(0x100)
 	AtNoAutomount     = uint64(0x800)
 	AtEmptyPath       = uint64(0x1000)
+	// UtimeNow and UtimeOmit are the tv_nsec values utimensat reads as "the
+	// current time" and "leave this time alone".
+	UtimeNow  = uint64(1<<30 - 1)
+	UtimeOmit = uint64(1<<30 - 2)
 
 	// Commands of fcntl and the one descriptor flag.
 	FcntlDupFD        = uint64(0)
@@ -291,7 +299,7 @@ func (number Syscall) Known() bool {
 		SysClockGettime,
 		SysExitGroup, SysOpenat, SysNewfstatat, SysUnlinkat, SysReadlinkat,
 		SysPpoll, SysSetRobustList, SysPipe2, SysPrlimit64, SysGetrandom,
-		SysStatx:
+		SysStatx, SysChmod, SysFchmod, SysFchmodat, SysUtimensat, SysSchedGetaffinity, SysGetcpu:
 		return true
 	default:
 		return false

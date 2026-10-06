@@ -657,6 +657,11 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
 	sleep 2
+	# The default CPU has no RDRAND. getrandom and AT_RANDOM still work, from
+	# the kernel's jitter-seeded generator: static glibc reads AT_RANDOM
+	# before main and faults without it (ADR 0185).
+	printf '/system/linux/abi-probe random\n'
+	sleep 2
 	# The validation VFS answers one name late. A Linux program that opens
 	# it waits out the bridge's eight-second deadline, gets ETIMEDOUT, and on
 	# its next request must discard the late reply and carry on.
@@ -1127,6 +1132,7 @@ require_min_count vfs-restart.fat32-restarted '^FAT32_RESTARTED_OK$' 2 "$log" 'f
 require_regex vfs-restart.namespace '^after-vfs-fault$' 'the shell using the namespace after the restart' "$log" 'goos> ls /tmp; echo after-vfs-fault'
 forbid_window vfs-restart.tmp-empty '^redirected.txt$' 'an empty /tmp in the new VFS' "$log" 'goos> ls /tmp; echo after-vfs-fault' 'after-vfs-fault'
 require_window vfs-restart.volume '^persistent$' 'the volume read through the new VFS' "$log" 'goos> cat /home/demo/message.txt; echo after-vfs-restart' 'after-vfs-restart'
+require_regex vfs-restart.linux-random '^random: available$' 'getrandom and AT_RANDOM without RDRAND' "$log" 'goos> /system/linux/abi-probe random'
 require_regex vfs-restart.linux-timeout 'session timeout: ETIMEDOUT, then ok$' 'a Linux open gives up on a silent VFS and the session survives' "$log" 'goos> /system/linux/abi-probe session-timeout'
 forbid_regex vfs-restart.linux-no-reconnect 'session kept: ' 'a Linux process was not given a new session' "$log" 'goos> fault vfs'
 # The shell is read from the volume (ADR 0175). A program whose source is

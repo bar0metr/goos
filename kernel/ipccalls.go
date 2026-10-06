@@ -9,7 +9,6 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
-	kernelconsole "goos/kernel/console"
 	"goos/kernel/diag"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -43,7 +42,8 @@ func releaseChannelSlot(channelID uint64) {
 }
 
 func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	local := thisCPU()
+	owner, found := handler.self()
 	if !found || owner.ID() != 1 || length != 16 || owner.Handles().Available() < 2 {
 		return kcall.StatusPermissionDenied
 	}
@@ -72,9 +72,9 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 		releaseChannelSlot(id)
 		return kcall.StatusResourceExhausted
 	}
-	putUint64(channelWire[0:8], uint64(handle0))
-	putUint64(channelWire[8:16], uint64(handle1))
-	if !vm.CopyOut(handler.root, address, channelWire[:]) {
+	putUint64(local.channelWire[0:8], uint64(handle0))
+	putUint64(local.channelWire[8:16], uint64(handle1))
+	if !vm.CopyOut(handler.root, address, local.channelWire[:]) {
 		owner.Handles().Close(handle0)
 		owner.Handles().Close(handle1)
 		channel.Close(0)
@@ -87,7 +87,7 @@ func (handler nativeCallHandler) ChannelCreate(address uint64, length uint64) kc
 }
 
 func (handler nativeCallHandler) HandleClose(id uint64) kcall.Status {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
 	}
@@ -143,7 +143,7 @@ func closeMovedHandle(table *handle.Table, id handle.ID) {
 }
 
 func (handler nativeCallHandler) endpoint(channel uint64, required capability.Rights) (*ipc.Channel, uint8, *process.Process, *process.Process, kcall.Status) {
-	owner, found := processRegistry.ByRoot(handler.root)
+	owner, found := handler.self()
 	if !found {
 		return nil, 0, nil, nil, kcall.StatusPermissionDenied
 	}
@@ -162,6 +162,7 @@ func (handler nativeCallHandler) endpoint(channel uint64, required capability.Ri
 }
 
 func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length uint64) kcall.Status {
+	local := thisCPU()
 	endpoint, side, owner, peer, status := handler.endpoint(channel, capability.Write)
 	if status != kcall.StatusOK {
 		handler.recordInitSend(status)
@@ -171,7 +172,7 @@ func (handler nativeCallHandler) IPCSend(channel uint64, address uint64, length 
 		handler.recordInitSend(kcall.StatusInvalidArgument)
 		return kcall.StatusInvalidArgument
 	}
-	data := ipcWireData[:int(length)]
+	data := local.ipcWireData[:int(length)]
 	if !vm.CopyIn(handler.root, address, data) {
 		handler.recordInitSend(kcall.StatusInvalidArgument)
 		return kcall.StatusInvalidArgument
@@ -248,6 +249,7 @@ func (handler nativeCallHandler) recordInitSend(status kcall.Status) {
 }
 
 func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, size uint64, task uint64) (kcall.Status, bool) {
+	local := thisCPU()
 	if size != 24 || task >= sched.MaxTasks {
 		return kcall.StatusInvalidArgument, false
 	}
@@ -255,17 +257,15 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 	if _, _, valid := taskID.Parts(); !valid {
 		return kcall.StatusInvalidArgument, false
 	}
-	if ipcWaitStatus[task] != kcall.StatusOK {
-		status := ipcWaitStatus[task]
-		ipcWaitStatus[task] = kcall.StatusOK
+	if status := ipcWaitStatus.take(task); status != kcall.StatusOK {
 		return status, false
 	}
-	if !vm.CopyIn(handler.root, descriptor, receiveDescriptorWire[:]) {
+	if !vm.CopyIn(handler.root, descriptor, local.receiveDescriptorWire[:]) {
 		return kcall.StatusInvalidArgument, false
 	}
-	buffer := decodeUint64(receiveDescriptorWire[0:8])
-	capacity := decodeUint64(receiveDescriptorWire[8:16])
-	timeout := decodeUint64(receiveDescriptorWire[16:24])
+	buffer := decodeUint64(local.receiveDescriptorWire[0:8])
+	capacity := decodeUint64(local.receiveDescriptorWire[8:16])
+	timeout := decodeUint64(local.receiveDescriptorWire[16:24])
 	status := handler.IPCReceive(channel, buffer, capacity)
 	if status != kcall.StatusNotFound {
 		return status, false
@@ -293,13 +293,14 @@ func waitReceive(handler nativeCallHandler, channel uint64, descriptor uint64, s
 		ipcWaitSet.Cancel(taskID)
 		// A waker may already have removed the registration and stored a resume
 		// status. It must not surface on the next wait, which this call answers.
-		ipcWaitStatus[task] = kcall.StatusOK
+		ipcWaitStatus.set(uint64(task), kcall.StatusOK)
 		return status, false
 	}
 	return kcall.StatusNotFound, true
 }
 
 func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capacity uint64) kcall.Status {
+	local := thisCPU()
 	endpoint, side, _, _, status := handler.endpoint(channel, capability.Read)
 	if status != kcall.StatusOK {
 		return status
@@ -311,17 +312,18 @@ func (handler nativeCallHandler) IPCReceive(channel uint64, address uint64, capa
 	if status != ipc.StatusOK {
 		return status
 	}
-	size, ok := ipc.Encode(message, ipcWireData[:])
+	size, ok := ipc.Encode(message, local.ipcWireData[:])
 	if !ok || uint64(size) > capacity {
 		return kcall.StatusResourceExhausted
 	}
-	if !vm.CopyOut(handler.root, address, ipcWireData[:size]) {
+	if !vm.CopyOut(handler.root, address, local.ipcWireData[:size]) {
 		return kcall.StatusInvalidArgument
 	}
 	return kcall.StatusOK
 }
 
 func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
+	local := thisCPU()
 	if channel == lifecycleChannelID && side == 0 {
 		amd64.WakeTask(0)
 	}
@@ -330,65 +332,62 @@ func wakeIPCWaiters(channel uint64, side uint8, reason ipc.WaitReason) {
 		event = kernelwait.PeerClosed
 	}
 	publishWaitAny(kernelwait.Key{Kind: kernelwait.KindChannel, Object: channel, Side: side}, event)
-	count := ipcWaitSet.Wake(channel, side, reason, ipcWakeResults[:])
+	count := ipcWaitSet.Wake(channel, side, reason, local.ipcWakeResults[:])
 	for index := 0; index < count; index++ {
-		task, _, valid := ipcWakeResults[index].Task.Parts()
+		task, _, valid := local.ipcWakeResults[index].Task.Parts()
 		if !valid {
-			ipcWakeResults[index] = ipc.WaitResult{}
+			local.ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
 		linuxReason := linuxcompat.WakeMessage
 		if reason == ipc.WaitPeerDied {
 			linuxReason = linuxcompat.WakePeerDied
 		}
-		if resumeLinuxIPCWaiter(ipcWakeResults[index].Task, linuxReason) {
-			ipcWakeResults[index] = ipc.WaitResult{}
+		if resumeLinuxIPCWaiter(local.ipcWakeResults[index].Task, linuxReason) {
+			local.ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
 		if reason == ipc.WaitPeerDied {
-			ipcWaitStatus[task] = kcall.StatusPeerDied
+			ipcWaitStatus.set(uint64(task), kcall.StatusPeerDied)
 		}
-		if !amd64.WakeTaskID(uint64(ipcWakeResults[index].Task)) {
-			console := kernelconsole.New()
-			console.WriteString("PANIC: stale IPC wake task\n")
-			for {
-				amd64.Halt()
-			}
-		}
-		ipcWakeResults[index] = ipc.WaitResult{}
+		// A task another processor killed after it registered fails the
+		// wake; its exit cancels what it left registered.
+		amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task))
+		local.ipcWakeResults[index] = ipc.WaitResult{}
 	}
 }
 
 func expireIPCWaiters() {
-	count := ipcWaitSet.Expire(amd64.TimerTicks(), ipcWakeResults[:])
+	local := thisCPU()
+	count := ipcWaitSet.Expire(amd64.TimerTicks(), local.ipcWakeResults[:])
 	for index := 0; index < count; index++ {
-		task, _, valid := ipcWakeResults[index].Task.Parts()
+		task, _, valid := local.ipcWakeResults[index].Task.Parts()
 		if !valid {
-			ipcWakeResults[index] = ipc.WaitResult{}
+			local.ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
-		if resumeLinuxIPCWaiter(ipcWakeResults[index].Task, linuxcompat.WakeTimeout) {
-			ipcWakeResults[index] = ipc.WaitResult{}
+		if resumeLinuxIPCWaiter(local.ipcWakeResults[index].Task, linuxcompat.WakeTimeout) {
+			local.ipcWakeResults[index] = ipc.WaitResult{}
 			continue
 		}
-		ipcWaitStatus[task] = kcall.StatusTimeout
-		if !amd64.WakeTaskID(uint64(ipcWakeResults[index].Task)) {
-			console := kernelconsole.New()
-			console.WriteString("PANIC: stale IPC timeout task\n")
-			for {
-				amd64.Halt()
-			}
-		}
-		ipcWakeResults[index] = ipc.WaitResult{}
+		ipcWaitStatus.set(uint64(task), kcall.StatusTimeout)
+		// A task another processor killed after it registered fails the
+		// wake; its exit cancels what it left registered.
+		amd64.WakeTaskID(uint64(local.ipcWakeResults[index].Task))
+		local.ipcWakeResults[index] = ipc.WaitResult{}
 	}
 }
 
 //export goos_dispatch_ipc_wait
 func dispatchIPCWait(channel uint64, descriptor uint64, size uint64, rootAndTask uint64) uint64 {
+	call, ok := beginNativeCall(kcall.OperationIPCWaitReceive)
+	if !ok {
+		return uint64(kcall.ActionRetry) << 32
+	}
 	status, blocked := waitReceive(nativeCallHandler{root: rootAndTask &^ 0xfff}, channel, descriptor, size, rootAndTask&0xfff)
 	action := kcall.ActionReturn
 	if blocked {
 		action = kcall.ActionBlock
 	}
-	return uint64(action)<<32 | uint64(status)
+	return call.end(uint64(action)<<32 | uint64(status))
 }

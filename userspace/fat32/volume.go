@@ -120,6 +120,13 @@ func (volume *Volume) Truncate(id ramfs.NodeID, size uint64) ramfs.Status {
 	return volume.fs.Truncate(id, size)
 }
 
+func (volume *Volume) SetMetadata(id ramfs.NodeID, change ramfs.MetadataChange) ramfs.Status {
+	if !volume.mounted {
+		return ramfs.StatusIOError
+	}
+	return volume.fs.SetMetadata(id, change)
+}
+
 func (volume *Volume) Stat(id ramfs.NodeID) (ramfs.Stat, ramfs.Status) {
 	if !volume.mounted {
 		return ramfs.Stat{}, ramfs.StatusIOError

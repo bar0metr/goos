@@ -57,6 +57,7 @@ func DecodeEndpointObject(object uint64) (uint64, uint8, bool) {
 
 // Create records owner as the process accountable for the channel.
 func (registry *Registry) Create(owner uint64) (*Channel, uint64, bool) {
+	guard.Check()
 	for index := range registry.ids {
 		if registry.ids[index] != 0 {
 			continue
@@ -84,6 +85,7 @@ func (registry *Registry) slot(id uint64) (int, bool) {
 }
 
 func (registry *Registry) Lookup(id uint64) (*Channel, bool) {
+	guard.Check()
 	index, found := registry.slot(id)
 	if !found {
 		return nil, false
@@ -95,6 +97,7 @@ func (registry *Registry) Lookup(id uint64) (*Channel, bool) {
 // process that was charged for it, which may already have exited. Its memory
 // goes back to the storage; nothing may use the channel afterwards.
 func (registry *Registry) Release(id uint64) (uint64, bool) {
+	guard.Check()
 	index, found := registry.slot(id)
 	if !found || registry.channels[index].Alive(0) || registry.channels[index].Alive(1) {
 		return 0, false
@@ -107,6 +110,7 @@ func (registry *Registry) Release(id uint64) (uint64, bool) {
 
 // At returns the live channel stored in slot index, if any.
 func (registry *Registry) At(index int) (uint64, *Channel, bool) {
+	guard.Check()
 	if index < 0 || index >= MaxChannels || registry.ids[index] == 0 {
 		return 0, nil, false
 	}

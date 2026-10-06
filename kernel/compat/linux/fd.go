@@ -45,6 +45,7 @@ var openDescriptions [MaxOpenDescriptions]descriptionSlot
 // families and how many descriptor references they hold together.
 // Validation checks that a failed fork leaves both unchanged.
 func OpenDescriptionCount() (descriptions int, references int) {
+	guard.Check()
 	for index := range openDescriptions {
 		if openDescriptions[index].familyID != 0 {
 			descriptions++
@@ -63,6 +64,7 @@ type FDTable struct {
 }
 
 func (table *FDTable) Initialize(familyID uint64, input, output, errorOutput uint64) bool {
+	guard.Check()
 	if table == nil || familyID == 0 || input == 0 || output == 0 || errorOutput == 0 {
 		return false
 	}
@@ -81,6 +83,7 @@ func (table *FDTable) Initialize(familyID uint64, input, output, errorOutput uin
 // Inherit copies descriptor integers and retains their shared open-file
 // descriptions. Close-on-exec remains attached to each copied integer.
 func (table *FDTable) Inherit(parent *FDTable) bool {
+	guard.Check()
 	if table == nil || parent == nil || table == parent || parent.familyID == 0 {
 		return false
 	}
@@ -102,6 +105,7 @@ func (table *FDTable) Inherit(parent *FDTable) bool {
 }
 
 func (table *FDTable) Allocate(description FileDescription, closeOnExec bool) (int, bool) {
+	guard.Check()
 	if table == nil || !description.valid() {
 		return -1, false
 	}
@@ -121,6 +125,7 @@ func (table *FDTable) Allocate(description FileDescription, closeOnExec bool) (i
 // HasFree reports whether Allocate would find a descriptor. A caller checks
 // before asking a service to open something it could not then name.
 func (table *FDTable) HasFree() bool {
+	guard.Check()
 	if table == nil {
 		return false
 	}
@@ -133,6 +138,7 @@ func (table *FDTable) HasFree() bool {
 }
 
 func (table *FDTable) Lookup(fd int) (FileDescription, bool) {
+	guard.Check()
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return FileDescription{}, false
 	}
@@ -146,6 +152,7 @@ func (table *FDTable) Lookup(fd int) (FileDescription, bool) {
 // Description returns the shared open-file description behind fd for
 // updating its offset. Every descriptor that duplicates fd sees the change.
 func (table *FDTable) Description(fd int) (*FileDescription, bool) {
+	guard.Check()
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return nil, false
 	}
@@ -159,6 +166,7 @@ func (table *FDTable) Description(fd int) (*FileDescription, bool) {
 // DescriptionIndex identifies the description behind fd among those the
 // table holds. Duplicated descriptors report the same index.
 func (table *FDTable) DescriptionIndex(fd int) (int, bool) {
+	guard.Check()
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return 0, false
 	}
@@ -169,6 +177,7 @@ func (table *FDTable) DescriptionIndex(fd int) (int, bool) {
 // for the same open-file description. It returns -2 when fd names nothing
 // and -1 when no integer is free, so a caller can tell EBADF from EMFILE.
 func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, bool) {
+	guard.Check()
 	if table == nil || minimum < 0 || minimum >= LinuxMaxFD || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return -2, false
 	}
@@ -191,6 +200,7 @@ func (table *FDTable) Duplicate(fd int, minimum int, closeOnExec bool) (int, boo
 // DuplicateAt makes target, which must be free, another integer for the
 // description behind fd.
 func (table *FDTable) DuplicateAt(fd int, target int, closeOnExec bool) bool {
+	guard.Check()
 	if table == nil || target < 0 || target >= LinuxMaxFD || fd < 0 || fd >= LinuxMaxFD ||
 		!table.entries[fd].open || table.entries[target].open {
 		return false
@@ -209,6 +219,7 @@ func (table *FDTable) DuplicateAt(fd int, target int, closeOnExec bool) bool {
 // belongs to the integer; descriptors that share a description keep their
 // own.
 func (table *FDTable) CloseOnExec(fd int) (bool, bool) {
+	guard.Check()
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return false, false
 	}
@@ -216,6 +227,7 @@ func (table *FDTable) CloseOnExec(fd int) (bool, bool) {
 }
 
 func (table *FDTable) SetCloseOnExec(fd int, closeOnExec bool) bool {
+	guard.Check()
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return false
 	}
@@ -226,6 +238,7 @@ func (table *FDTable) SetCloseOnExec(fd int, closeOnExec bool) bool {
 // Close invalidates one Linux integer and reports the description only when
 // its final reference is gone. The caller then releases any VFS-owned state.
 func (table *FDTable) Close(fd int) (FileDescription, bool, bool) {
+	guard.Check()
 	if table == nil || fd < 0 || fd >= LinuxMaxFD || !table.entries[fd].open {
 		return FileDescription{}, false, false
 	}
@@ -249,6 +262,7 @@ func (table *FDTable) Close(fd int) (FileDescription, bool, bool) {
 }
 
 func (table *FDTable) CloseAll(visit func(FileDescription)) {
+	guard.Check()
 	if table == nil {
 		return
 	}
