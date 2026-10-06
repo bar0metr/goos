@@ -376,10 +376,12 @@ test-unit:
 	$(BUILD_ENV) go test -tags goos_hz1000 ./kernel/clock
 	$(BUILD_ENV) go test -tags goos_validation ./kernel/lock
 
-# The concurrency tests under the race detector (ADR 0187): handle tables,
-# channels, and the Linux tables shared the way processors share them.
+# The concurrency tests under the race detector (ADR 0187, ADR 0189): handle
+# tables, channels, and the Linux tables shared the way processors share
+# them, and the wait tables with the deadline index they keep.
 test-race:
 	$(BUILD_ENV) go test -race -run 'Race|Ways|Busy|Holder|TwoProcesses|ConcurrentFileIO' ./kernel/handle ./kernel/ipc ./kernel/compat/linux
+	$(BUILD_ENV) go test -race ./kernel/deadline ./kernel/sched ./kernel/wait ./kernel/process
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
@@ -824,7 +826,7 @@ help:
 	  '  test-linux-busybox BUSYBOX=path  run BusyBox applets from a static busybox' \
 	  '  test-linux-7zip LINUX_EXTRA=path  archive, extract, and hash with a static 7zzs on SMP=4' \
 	  '  profile-locks [LINUX_EXTRA=path]  lock acquisitions and contention per workload on SMP=4' \
-	  '  test-race       handle, channel, and Linux table concurrency tests under the race detector' \
+	  '  test-race       concurrency tests of handles, channels, Linux tables, waits, and the scheduler under the race detector' \
 	  '  test-linux-bench time Linux calls beside native ones into build/reports' \
 	  '  test            run host unit and artifact integration tests' \
 	  '  release-check   run the release gate: reproducible build, all tests, docs, release checks' \
