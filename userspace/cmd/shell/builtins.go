@@ -144,23 +144,30 @@ func systemCommands() ([]byte, bool) {
 var commandDirectory = execproto.SearchRoot[:len(execproto.SearchRoot)-1]
 
 func printServices() {
-	reply, ok := controlExchange(execproto.ControlServices, 0)
-	count, valid := execproto.DecodeServices(reply, &serviceEntries)
-	if !ok || !valid {
-		write("services: no reply\n")
-		return
-	}
-	write("NAME        STATE       PID   RESTARTS\n")
-	for _, entry := range serviceEntries[:count] {
-		writePadded(entry.Name, 12)
-		state := "unknown"
-		if int(entry.State) < len(serviceStates) {
-			state = serviceStates[entry.State]
+	for start := 0; start < execproto.MaxServiceIndex; start += execproto.MaxServiceEntries {
+		reply, ok := controlExchange(execproto.ControlServices, uint8(start))
+		count, valid := execproto.DecodeServices(reply, &serviceEntries)
+		if !ok || !valid {
+			write("services: no reply\n")
+			return
 		}
-		writePadded([]byte(state), 12)
-		writePaddedUint(uint64(entry.PID), 6)
-		writeUint(uint64(entry.Restarts))
-		write("\n")
+		if start == 0 {
+			write("NAME        STATE       PID   RESTARTS\n")
+		}
+		for _, entry := range serviceEntries[:count] {
+			writePadded(entry.Name, 12)
+			state := "unknown"
+			if int(entry.State) < len(serviceStates) {
+				state = serviceStates[entry.State]
+			}
+			writePadded([]byte(state), 12)
+			writePaddedUint(uint64(entry.PID), 6)
+			writeUint(uint64(entry.Restarts))
+			write("\n")
+		}
+		if count < execproto.MaxServiceEntries {
+			return
+		}
 	}
 }
 

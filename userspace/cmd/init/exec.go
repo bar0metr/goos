@@ -198,7 +198,7 @@ func handleControl(message ipc.Message) {
 	case operation == execproto.ControlServices:
 		var entries [execproto.MaxServiceEntries]execproto.ServiceEntry
 		count := 0
-		for index := 0; count < len(entries); index++ {
+		for index := int(argument); count < len(entries); index++ {
 			name, snapshot, found := manager.At(index)
 			if !found {
 				break

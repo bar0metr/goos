@@ -15,8 +15,11 @@ const (
 	ControlVersion    = uint16(4)
 	// MaxServiceEntries is as many entries as one reply holds: eleven of
 	// 22 bytes, after the count, in a 256-byte payload. A system with both
-	// consoles runs eleven services.
+	// consoles and a network runs thirteen services, so a listing asks for
+	// the entries from an index on until a reply comes back short.
 	MaxServiceEntries = 11
+	// MaxServiceIndex bounds the index a listing request may start at.
+	MaxServiceIndex = 32
 	MaxServiceName    = 15
 	serviceEntrySize  = 1 + MaxServiceName + 1 + 1 + 4
 )
@@ -123,7 +126,9 @@ func DecodeControl(message ipc.Message) (ControlOperation, uint8, bool) {
 // slot for ControlKill and a service for ControlFault.
 func validControl(operation ControlOperation, argument uint8) bool {
 	switch operation {
-	case ControlServices, ControlReboot, ControlDiagnostics, ControlPowerOff:
+	case ControlServices:
+		return argument < MaxServiceIndex
+	case ControlReboot, ControlDiagnostics, ControlPowerOff:
 		return argument == 0
 	case ControlKill:
 		return argument < Slots

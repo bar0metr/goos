@@ -82,3 +82,20 @@ func TestServicesReplyRoundTripAndBounds(t *testing.T) {
 		t.Fatal("maximum reply does not fit")
 	}
 }
+
+func TestServicesListingStartIndex(t *testing.T) {
+	for _, start := range []uint8{0, MaxServiceEntries, MaxServiceIndex - 1} {
+		message, ok := EncodeControl(ControlServices, start, 7)
+		if !ok {
+			t.Fatalf("start %d not encoded", start)
+		}
+		if operation, argument, valid := DecodeControl(message); !valid || operation != ControlServices || argument != start {
+			t.Fatalf("start %d decoded as %d %d %v", start, operation, argument, valid)
+		}
+	}
+	if message, ok := EncodeControl(ControlServices, MaxServiceIndex, 7); ok {
+		if _, _, valid := DecodeControl(message); valid {
+			t.Fatal("start past the service table accepted")
+		}
+	}
+}
