@@ -7,7 +7,7 @@ package commands
 // Grant names an authority a command may ask PID 1 for, beyond the standard
 // streams every command receives. It is a request: PID 1 grants only the roles
 // it knows, and only to executables in the immutable system image.
-type Grant uint8
+type Grant uint16
 
 const (
 	// GrantVFS asks for a private session with the filesystem service.
@@ -37,9 +37,12 @@ const (
 	// GrantResolveAdmin asks for a resolver session that may also flush the
 	// cache and reload the resolver's settings.
 	GrantResolveAdmin
+	// GrantUDP asks for a UDP session (ADR 0195): a channel to the network
+	// service and the two pools its datagrams travel in.
+	GrantUDP
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
-		GrantResolve | GrantResolveAdmin
+		GrantResolve | GrantResolveAdmin | GrantUDP
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -75,8 +78,9 @@ const (
 	MaxArgs = 99
 	// IndexFormat names the line format below and the meaning of its grant
 	// bits. An installed system records it, so a system built for another
-	// format is refused (ADR 0175). Format 3 added the network grants.
-	IndexFormat = 3
+	// format is refused (ADR 0175). Format 3 added the network grants and
+	// format 4 the UDP grant.
+	IndexFormat = 4
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

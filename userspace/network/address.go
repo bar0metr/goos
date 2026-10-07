@@ -52,7 +52,15 @@ const (
 	FieldDHCPInitialRetry
 	FieldDHCPMaxRetry
 	FieldDHCPConflictRetry
-	lastField = FieldDHCPConflictRetry
+	// The UDP limits, system.net.udp.*, in the order of UDPTuning's values.
+	// A later transport appends its own block after this one.
+	FieldUDPEphemeralMin
+	FieldUDPEphemeralMax
+	FieldUDPReceiveQueue
+	FieldUDPMaxEndpoints
+	FieldUDPSessionEndpoints
+	FieldUDPMaxPayload
+	lastField = FieldUDPMaxPayload
 )
 
 // Result values are the GNETAPI1 wire values.
@@ -73,6 +81,9 @@ const (
 	ResultConfigInvalid
 	ResultRemoteUnreachable
 	ResultTimeExceeded
+	// ResultAddressInUse is a UDP bind or connect that would make delivery
+	// ambiguous. GNETAPI never carries it.
+	ResultAddressInUse
 )
 
 const (

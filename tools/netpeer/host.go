@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // config is the peer's view of the segment, fixed at start.
@@ -47,13 +48,27 @@ type host struct {
 	config
 	log    *logger
 	nextID atomic.Uint32
+	// formErr answers queries that carry OPT with FORMERR. It starts as
+	// -no-edns and the edns command flips it.
+	formErr atomic.Bool
 
-	mu     sync.Mutex
-	defend map[ipv4]bool
+	mu        sync.Mutex
+	defend    map[ipv4]bool
+	neighbors map[ipv4]mac
+	// later sends frames after a delay; the server sets it. Without it
+	// a slow answer goes at once.
+	later func(delay time.Duration, frames [][]byte)
 }
 
+// slowAnswer is how long a SLOW name's answer waits: well inside the
+// resolver's first 3 s wait, so the query is answered while its receive
+// waits in the network service.
+const slowAnswer = time.Second
+
 func newHost(cfg config, log *logger) *host {
-	return &host{config: cfg, log: log, defend: map[ipv4]bool{}}
+	h := &host{config: cfg, log: log, defend: map[ipv4]bool{}}
+	h.formErr.Store(cfg.noEDNS)
+	return h
 }
 
 func (h *host) ipID() uint16 { return uint16(h.nextID.Add(1)) }
@@ -89,6 +104,9 @@ func (h *host) handleIPv4(src mac, data []byte) [][]byte {
 	if !ok {
 		return nil
 	}
+	if packet.src != (ipv4{}) {
+		h.learn(src, packet.src)
+	}
 	switch packet.protocol {
 	case 1:
 		if packet.dst != h.ip {
@@ -105,6 +123,8 @@ func (h *host) handleIPv4(src mac, data []byte) [][]byte {
 			return h.handleDHCP(datagram.payload)
 		case datagram.dstPort == 53 && packet.dst == h.ip:
 			return h.handleDNS(src, packet.src, datagram)
+		case datagram.dstPort == echoPort && packet.dst == h.ip:
+			return h.handleEcho(src, packet.src, datagram)
 		}
 	}
 	return nil
@@ -131,13 +151,19 @@ func (h *host) handleDNS(src mac, client ipv4, datagram udpDatagram) [][]byte {
 		return nil
 	}
 	h.log.printf("query %s %d %s:%d id=%d", query.logName(), query.qtype, client, datagram.srcPort, query.id)
-	response := answer(query, h.zone, h.noEDNS)
+	response := answer(query, h.zone, h.formErr.Load())
 	if response == nil {
 		return nil
 	}
 	udp := buildUDP(h.ip, client, 53, datagram.srcPort, response)
 	ip := buildIPv4(h.ip, client, 17, h.ipID(), udp)
-	return [][]byte{etherFrame(src, h.mac, etherTypeIPv4, ip)}
+	frames := [][]byte{etherFrame(src, h.mac, etherTypeIPv4, ip)}
+	if entry := h.zone.lookup(query.name); entry != nil && entry.slow && h.later != nil {
+		h.log.printf("slow %s %s", query.logName(), slowAnswer)
+		h.later(slowAnswer, frames)
+		return nil
+	}
+	return frames
 }
 
 // command runs one control line and returns the frames to send and whether
@@ -165,6 +191,13 @@ func (h *host) command(line string) ([][]byte, bool, error) {
 		h.mu.Unlock()
 		h.log.printf("defend-probe %s", addr)
 		return nil, false, nil
+	case "edns":
+		if len(fields) != 2 || fields[1] != "on" && fields[1] != "off" {
+			return nil, false, fmt.Errorf("edns takes on or off")
+		}
+		h.formErr.Store(fields[1] == "off")
+		h.log.printf("edns %s", fields[1])
+		return nil, false, nil
 	case "clear":
 		h.mu.Lock()
 		h.defend = map[ipv4]bool{}
@@ -174,6 +207,9 @@ func (h *host) command(line string) ([][]byte, bool, error) {
 	case "quit":
 		h.log.printf("quit")
 		return nil, true, nil
+	case "udp-send", "udp-bad", "udp-fill", "udp-burst":
+		frames, err := h.udpCommand(fields)
+		return frames, false, err
 	}
 	return nil, false, fmt.Errorf("unknown command %q", fields[0])
 }

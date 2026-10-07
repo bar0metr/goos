@@ -8,8 +8,9 @@ import (
 
 const (
 	ControlProtocolID = uint64(0x474e455443544c31)
-	ControlVersion    = uint16(1)
-	ControlSize       = 16
+	// Version 2 replaced the resolver transport with UDP sessions.
+	ControlVersion = uint16(2)
+	ControlSize    = 16
 
 	controlOpcode     = 0
 	controlClass      = 1
@@ -22,9 +23,12 @@ const (
 	// in that order. The codec checks the count; the service checks each
 	// handle's type and rights through the kernel.
 	SetDeviceHandles = 3
-	// SetTransportHandles are the resolver transport's channel, its query
-	// pool and its reply pool, in that order (see datagram.go).
-	SetTransportHandles = 3
+	// AddUDPSessionHandles are the session channel, the TX pool and the RX
+	// pool, in that order (GUDP1, package udpapi).
+	AddUDPSessionHandles = 3
+	// SetNetworkHandles are a UDP session's three handles followed by a
+	// network session channel.
+	SetNetworkHandles = 4
 )
 
 type ControlOpcode uint8
@@ -32,10 +36,13 @@ type ControlOpcode uint8
 const (
 	ControlAddSession ControlOpcode = iota + 1
 	ControlSetDevice
-	// ControlSetTransport binds the resolver transport. PID 1 sends it to
-	// the network service and to the resolver service, each with its end of
-	// one new channel and its own copies of the two pools.
-	ControlSetTransport
+	// ControlAddUDPSession asks the network service to serve a UDP session
+	// for a program. Rights is RightsUDP.
+	ControlAddUDPSession
+	// ControlSetNetwork gives a service that uses the network, the resolver
+	// service, its own UDP session and a network session, under a generation
+	// that grows with every new pair. The network service never receives it.
+	ControlSetNetwork
 )
 
 type RightsClass uint8
@@ -44,8 +51,11 @@ const (
 	RightsPingStatus RightsClass = iota + 1
 	RightsAdminStatus
 	// RightsResolveStatus is a resolver session that may resolve names and
-	// read the resolver's status. Only the resolver service accepts it.
+	// read the resolver's status. The network service takes it as a session
+	// that may read the status and the DNS servers and nothing more.
 	RightsResolveStatus
+	// RightsUDP is a UDP session, the authority to use UDP (ADR 0195).
+	RightsUDP
 )
 
 type ControlResult uint8
@@ -76,8 +86,10 @@ func controlHandles(opcode ControlOpcode) (int, bool) {
 		return AddSessionHandles, true
 	case ControlSetDevice:
 		return SetDeviceHandles, true
-	case ControlSetTransport:
-		return SetTransportHandles, true
+	case ControlAddUDPSession:
+		return AddUDPSessionHandles, true
+	case ControlSetNetwork:
+		return SetNetworkHandles, true
 	}
 	return 0, false
 }
@@ -86,7 +98,9 @@ func validControlRequest(r *ControlRequest) bool {
 	switch r.Opcode {
 	case ControlAddSession:
 		return r.Generation == 0 && r.Rights >= RightsPingStatus && r.Rights <= RightsResolveStatus
-	case ControlSetDevice, ControlSetTransport:
+	case ControlAddUDPSession:
+		return r.Generation == 0 && r.Rights == RightsUDP
+	case ControlSetDevice, ControlSetNetwork:
 		return r.Generation != 0 && r.Rights == 0
 	}
 	return false

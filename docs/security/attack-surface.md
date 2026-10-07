@@ -99,12 +99,13 @@ compiles away.
 - Handles, channels, streams, waits, and process lifetime are kernel objects;
   their integrity is the authority model.
 - Port I/O, DMA memory, and IRQ routing need ring 0. The network line's
-  handler records an event and parses nothing; Ethernet, ARP, IPv4, ICMP and
-  DHCP run in `netd` (ADR 0191), and DNS runs in `resolved` (ADR 0194).
+  handler records an event and parses nothing; Ethernet, ARP, IPv4, ICMP,
+  UDP and DHCP run in `netd` (ADR 0191, ADR 0195), and DNS runs in
+  `resolved` (ADR 0194). The kernel knows nothing of UDP ports or endpoints.
 - `RandomRead` gives native processes the generator that already serves
   `AT_RANDOM` and `getrandom` (ADR 0185). `netd` and `resolved` seed their
-  own generators from it for source ports, transaction IDs and RFC 5227
-  delays (ADR 0192, ADR 0194); a userspace source would have nothing
+  own generators from it for ephemeral UDP ports, transaction IDs and
+  RFC 5227 delays (ADR 0192, ADR 0194, ADR 0195); a userspace source would have nothing
   unpredictable to start from.
 - `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` stay in the kernel
   because COM1 is also the early console, the panic path and the log's warning
@@ -195,20 +196,29 @@ The kernel parses no packet. These surfaces sit in userspace services that
 hold no device authority, listed here because they take input from the link
 or from other processes:
 
-- `netd` parses Ethernet, ARP, IPv4, ICMP and DHCP, including the DNS
+- `netd` parses Ethernet, ARP, IPv4, ICMP, UDP and DHCP, including the DNS
   servers of DHCP option 6, of which it keeps the first four that are not
   zero, loopback, broadcast or multicast. It drops any frame from the link
   with a loopback source or destination and runs RFC 5227 conflict detection
   on ARP (ADR 0191, ADR 0192, ADR 0193).
-- `GNETDGRAM1`, the resolver transport between `resolved` and `netd`, is
-  bound by PID 1 and held by those two services only. It allows destination
-  port 53 and nothing else, at most 1232 bytes either way, and eight
-  exchanges at once, over two pools of eight 1280-byte slots. The resolver
-  can write the query pool and only read the reply pool; `netd` holds the
-  reverse, and each side checks the exact rights through `HandleInfo` and
-  refuses a message about a slot it does not own. `netd` sends each query
-  from a random source port and accepts one reply from the server's address
-  and port 53 to that port (ADR 0194).
+- UDP from the link reaches an endpoint only after `netd` checks the UDP
+  length against the IPv4 payload and verifies a nonzero checksum; a bad
+  one is dropped and counted before any other use. Only datagrams to the
+  interface's own address reach endpoints, and a connected endpoint drops
+  any source but its peer. Received payloads share 32 buffers of 4096
+  bytes, at most 16 per session, so a flood toward one session's ports
+  leaves the other half to the rest (ADR 0195).
+- `GUDP1` carries programs' UDP requests to `netd` over sessions PID 1 opens
+  for commands whose index entry asks for `GrantUDP`, and for `resolved`.
+  The decoder, fuzzed, refuses an unknown opcode or version, a wrong size,
+  nonzero reserved bytes, a field its opcode does not use, a slot outside
+  the pool and any attached handle. Each session has a TX pool of four
+  4096-byte slots that only the program writes and an RX pool of eight that
+  only `netd` writes; `netd` checks the exact rights through `HandleInfo`
+  and closes a session that sends a malformed request or hands back a slot
+  it does not hold. An endpoint answers only the session that opened it,
+  and a stale endpoint ID matches nothing. A session holds at most eight of
+  the 32 endpoints (ADR 0195).
 - `resolved` parses DNS replies. Before any of a reply is used it checks QR,
   opcode, transaction ID and server, exactly one question equal to the one
   asked, counts and lengths against the message, compression pointers that

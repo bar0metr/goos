@@ -4,9 +4,9 @@
 // cache that turns host names into IPv4 addresses for commands. It answers
 // localhost and names under it itself, asks the configuration service's hosts
 // table next, and only then its cache and the recursive DNS servers named by
-// the DHCP lease and by system.dns.server1..4. It reaches those servers only
-// through the resolver transport the network service gives it; it holds no
-// device and no general network session.
+// the DHCP lease and by system.dns.server1..4. It reaches those servers over
+// the same UDP sessions any program uses (ADR 0195), and learns the lease's
+// servers over a network status session; it holds no device.
 package main
 
 import (
@@ -47,45 +47,14 @@ type session struct {
 	lookup  uint64
 }
 
-// exchange is one query the network service has accepted or is accepting:
-// the resolver transaction it belongs to, under the tag the transport knows
-// it by.
-type exchange struct {
-	tag         uint64
-	transaction int
-}
-
-type binding struct {
-	channel    handle.ID
-	generation uint64
-	queryPool  handle.ID
-	replyPool  handle.ID
-	queryBase  uint64
-	querySize  uint64
-	replyBase  uint64
-	replySize  uint64
-	queries    []byte
-	replies    []byte
-	// lent marks query slots the network service holds.
-	lent [netapi.DatagramSlots]bool
-	// open holds the exchange behind each query slot until it ends.
-	open [netapi.DatagramSlots]exchange
-	// servers is the DHCP server list last reported, under its generation.
-	servers          [netapi.MaxServers][4]byte
-	serverCount      int
-	serverGeneration uint64
-}
-
 var (
 	consoleHandle, controlHandle, configHandle handle.ID
 
-	resolver  dns.Resolver
-	transport binding
-	sessions  [maxSessions]session
+	resolver dns.Resolver
+	sessions [maxSessions]session
 	// configured is the server list from system.dns.server1..4.
 	configured      [4][4]byte
 	configuredCount int
-	nextTag         uint64
 
 	interests     [kcall.WaitAnyMaxObjects]sys.Interest
 	interestOwner [kcall.WaitAnyMaxObjects]int
@@ -100,8 +69,6 @@ var (
 	answer        resolvapi.Reply
 	control       netapi.ControlRequest
 	controlBack   netapi.ControlReply
-	datagram      netapi.Datagram
-	query         [dns.DatagramSize]byte
 	settings      [resolvapi.Keys]config.Value
 )
 
@@ -138,6 +105,7 @@ func serve() {
 		now := clockNanos()
 		resolver.Advance(now)
 		sendQueries(now)
+		releaseFinished()
 		deliverAnswers()
 		count := buildInterests()
 		timeout := uint64(idleWait)
@@ -160,9 +128,11 @@ func serve() {
 			}
 			switch owner := interestOwner[index]; owner {
 			case -1:
-				serviceTransport()
+				serviceUDP()
 			case -2:
 				serviceControl()
+			case -3:
+				serviceStatus()
 			default:
 				serviceSession(owner)
 			}
@@ -177,8 +147,9 @@ func buildInterests() int {
 		interestOwner[count] = owner
 		count++
 	}
-	if transport.channel != 0 {
-		add(transport.channel, -1)
+	if link.channel != 0 {
+		add(link.channel, -1)
+		add(link.status, -3)
 	}
 	add(controlHandle, -2)
 	for index := range sessions {
@@ -249,8 +220,8 @@ func serviceControl() {
 		switch control.Opcode {
 		case netapi.ControlAddSession:
 			answerControl(control.Opcode, addSession(message.Handles[0], control.Rights), 0, correlation)
-		case netapi.ControlSetTransport:
-			answerControl(control.Opcode, setTransport(control.Generation), control.Generation, correlation)
+		case netapi.ControlSetNetwork:
+			answerControl(control.Opcode, setNetwork(control.Generation), control.Generation, correlation)
 		default:
 			closeAttached()
 			answerControl(control.Opcode, netapi.ControlInvalidArgument, 0, correlation)
@@ -296,192 +267,16 @@ func addSession(channel handle.ID, class netapi.RightsClass) netapi.ControlResul
 	return netapi.ControlBusy
 }
 
-// --- transport --------------------------------------------------------------
+// --- servers ----------------------------------------------------------------
 
-// setTransport installs a new binding to the network service. Exchanges on
-// the old one can no longer finish, so every lookup waiting on them fails
-// with Reconfigured; the cache stays.
-func setTransport(generation uint64) netapi.ControlResult {
-	channel, queries, replies := message.Handles[0], message.Handles[1], message.Handles[2]
-	refuse := func(result netapi.ControlResult) netapi.ControlResult {
-		for _, id := range [...]handle.ID{channel, queries, replies} {
-			sys.HandleClose(id)
-		}
-		return result
-	}
-	if generation <= transport.generation {
-		return refuse(netapi.ControlInvalidArgument)
-	}
-	if !handleIs(channel, handle.TypeChannel, capability.Read|capability.Write|capability.Wait) ||
-		!handleIs(queries, handle.TypeMemory, capability.Read|capability.Write) || !handleIs(replies, handle.TypeMemory, capability.Read) {
-		return refuse(netapi.ControlInvalidArgument)
-	}
-	poolSize := uint64(netapi.DatagramSlots * netapi.DatagramSlotSize)
-	queryBase, querySize, queryStatus := sys.MemoryMapAnywhere(queries, true)
-	if queryStatus != kcall.StatusOK || querySize < poolSize {
-		if queryStatus == kcall.StatusOK {
-			sys.VMUnmap(queryBase, querySize)
-		}
-		return refuse(netapi.ControlInvalidArgument)
-	}
-	replyBase, replySize, replyStatus := sys.MemoryMapAnywhere(replies, false)
-	if replyStatus != kcall.StatusOK || replySize < poolSize {
-		sys.VMUnmap(queryBase, querySize)
-		if replyStatus == kcall.StatusOK {
-			sys.VMUnmap(replyBase, replySize)
-		}
-		return refuse(netapi.ControlInvalidArgument)
-	}
-	closeTransport()
-	transport = binding{channel: channel, generation: generation, queryPool: queries, replyPool: replies,
-		queryBase: queryBase, querySize: querySize, replyBase: replyBase, replySize: replySize,
-		queries: sys.Window(queryBase, poolSize), replies: sys.Window(replyBase, poolSize)}
-	resolver.Reset(clockNanos())
-	applyServers()
-	syslog.Info("transport bound", syslog.Uint("generation", generation))
-	return netapi.ControlOK
-}
-
-// closeTransport drops the binding. The DHCP servers belonged to its lease
-// as far as this service can tell, so they go too.
-func closeTransport() {
-	if transport.channel == 0 {
-		return
-	}
-	for _, id := range [...]handle.ID{transport.channel, transport.queryPool, transport.replyPool} {
-		sys.HandleClose(id)
-	}
-	for _, mapping := range [...][2]uint64{{transport.queryBase, transport.querySize}, {transport.replyBase, transport.replySize}} {
-		sys.VMUnmap(mapping[0], mapping[1])
-	}
-	generation := transport.generation
-	transport = binding{generation: generation}
-	resolver.Reset(clockNanos())
-	applyServers()
-}
-
-func serviceTransport() {
-	for transport.channel != 0 {
-		status := receiveOn(transport.channel)
-		if status == kcall.StatusNotFound {
-			return
-		}
-		if status == kcall.StatusPeerDied {
-			syslog.Warn("network service gone; waiting for a new transport")
-			closeTransport()
-			return
-		}
-		if status != kcall.StatusOK || !netapi.DecodeDatagram(&message, &datagram) {
-			closeAttached()
-			syslog.Error("transport message invalid")
-			closeTransport()
-			return
-		}
-		now := clockNanos()
-		switch datagram.Opcode {
-		case netapi.DatagramAccepted:
-			if !transport.lent[datagram.Slot] || transport.open[datagram.Slot].tag != datagram.Tag {
-				syslog.Error("transport returned a slot it did not hold")
-				closeTransport()
-				return
-			}
-			transport.lent[datagram.Slot] = false
-			if datagram.Result != netapi.ResultOK {
-				resolver.SendFailed(transport.open[datagram.Slot].transaction, now)
-				transport.open[datagram.Slot] = exchange{}
-			}
-		case netapi.DatagramResult:
-			receiveResult(now)
-		case netapi.DatagramServers:
-			if datagram.Generation <= transport.serverGeneration {
-				continue
-			}
-			transport.serverGeneration, transport.serverCount = datagram.Generation, int(datagram.Count)
-			transport.servers = datagram.Servers
-			applyServers()
-		default:
-			closeTransport()
-			return
-		}
-	}
-}
-
-// receiveResult ends an accepted exchange. A reply goes to its transaction,
-// which checks it against the query it sent; the reply slot goes straight
-// back. A timeout is the resolver's own business: it keeps its own timers.
-func receiveResult(now uint64) {
-	transaction := -1
-	for index := range transport.open {
-		if transport.open[index].tag == datagram.Tag {
-			transaction = transport.open[index].transaction
-			transport.open[index] = exchange{}
-			break
-		}
-	}
-	switch {
-	case datagram.Result == netapi.ResultOK:
-		offset, _ := netapi.DatagramSlotOffset(datagram.Slot)
-		if transaction >= 0 {
-			resolver.Receive(transaction, datagram.Address, transport.replies[offset:offset+uint64(datagram.Length)], now)
-		}
-		release := netapi.Datagram{Opcode: netapi.DatagramRelease, Slot: datagram.Slot}
-		if !netapi.EncodeDatagram(&release, &reply) || !sendOn(transport.channel, &reply) {
-			closeTransport()
-		}
-	case datagram.Result != netapi.ResultTimeout && transaction >= 0:
-		resolver.SendFailed(transaction, now)
-	}
-}
-
-// sendQueries moves every query the resolver has ready into a free slot. A
-// query that cannot go, for want of a transport or a slot, fails at once so
-// the resolver tries its next server or gives up.
-func sendQueries(now uint64) {
-	for {
-		outgoing, ready := resolver.NextQuery(query[:])
-		if !ready {
-			return
-		}
-		slot := -1
-		if transport.channel != 0 {
-			for index := range transport.lent {
-				if !transport.lent[index] && transport.open[index].tag == 0 {
-					slot = index
-					break
-				}
-			}
-		}
-		if slot < 0 {
-			resolver.SendFailed(outgoing.Transaction, now)
-			continue
-		}
-		offset, _ := netapi.DatagramSlotOffset(uint8(slot))
-		copy(transport.queries[offset:], query[:outgoing.Length])
-		nextTag++
-		if nextTag == 0 {
-			nextTag++
-		}
-		timeout := min(resolver.Policy().QueryTimeout/1_000_000, netapi.MaxDatagramTimeoutMS)
-		datagram = netapi.Datagram{Opcode: netapi.DatagramSend, Slot: uint8(slot), Address: outgoing.Server,
-			Length: uint16(outgoing.Length), Port: netapi.DatagramPort, TimeoutMS: uint16(timeout), Tag: nextTag}
-		if !netapi.EncodeDatagram(&datagram, &reply) || !sendOn(transport.channel, &reply) {
-			resolver.SendFailed(outgoing.Transaction, now)
-			closeTransport()
-			continue
-		}
-		transport.lent[slot] = true
-		transport.open[slot] = exchange{tag: nextTag, transaction: outgoing.Transaction}
-	}
-}
-
-// applyServers gives the resolver the DHCP list, when a transport carries
-// one, then the configured servers.
+// applyServers gives the resolver the DHCP list, while a network session
+// reports one, then the configured servers.
 func applyServers() {
 	var dhcp [netapi.MaxServers][4]byte
 	count := 0
-	if transport.channel != 0 {
-		count = transport.serverCount
-		dhcp = transport.servers
+	if link.channel != 0 {
+		count = link.serverCount
+		dhcp = link.servers
 	}
 	resolver.SetServers(dhcp[:count], configured[:configuredCount])
 }
@@ -631,7 +426,7 @@ func status() {
 		answer.Servers[index] = resolvapi.Server{Address: servers[index].Address,
 			Source: resolvapi.ServerSource(servers[index].Source)}
 	}
-	answer.Generation = transport.serverGeneration
+	answer.Generation = link.serverGeneration
 	stats := resolver.Stats()
 	answer.CacheUsed, answer.CacheLimit = stats.CacheUsed, stats.CacheLimit
 	answer.Positive, answer.Negative, answer.Failures = stats.Positive, stats.Negative, stats.Failures

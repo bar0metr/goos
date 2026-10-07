@@ -36,6 +36,8 @@ type zoneEntry struct {
 	ttl    uint32
 	addrs  []ipv4
 	target string
+	// slow delays every answer for the name by slowAnswer.
+	slow bool
 }
 
 type zone struct {
@@ -47,6 +49,14 @@ func normalizeName(name string) string {
 	return strings.ToLower(strings.TrimSuffix(name, "."))
 }
 
+// lookup returns the entry for a normalized name, or nil.
+func (z *zone) lookup(name string) *zoneEntry {
+	if z == nil {
+		return nil
+	}
+	return z.entries[name]
+}
+
 func inZone(name string) bool {
 	return name == zoneSuffix || strings.HasSuffix(name, "."+zoneSuffix)
 }
@@ -54,6 +64,7 @@ func inZone(name string) bool {
 // parseZone reads one record per line:
 //
 //	name TTL A 1.2.3.4
+//	name TTL SLOW 1.2.3.4
 //	name TTL CNAME target
 //	name NXDOMAIN|NODATA|SERVFAIL|TRUNCATE|DROP
 //
@@ -107,17 +118,17 @@ func (z *zone) add(fields []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid TTL %q", fields[1])
 	}
-	switch strings.ToUpper(fields[2]) {
-	case "A":
+	switch kind := strings.ToUpper(fields[2]); kind {
+	case "A", "SLOW":
 		addr, err := parseIPv4Addr(fields[3])
 		if err != nil {
 			return err
 		}
 		if existing == nil {
-			z.entries[name] = &zoneEntry{kind: kindA, ttl: uint32(ttl), addrs: []ipv4{addr}}
+			z.entries[name] = &zoneEntry{kind: kindA, ttl: uint32(ttl), addrs: []ipv4{addr}, slow: kind == "SLOW"}
 			return nil
 		}
-		if existing.kind != kindA {
+		if existing.kind != kindA || existing.slow != (kind == "SLOW") {
 			return fmt.Errorf("name %s already defined", name)
 		}
 		existing.addrs = append(existing.addrs, addr)

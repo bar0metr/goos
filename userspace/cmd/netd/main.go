@@ -2,7 +2,8 @@
 
 // Command netd is the network service (ADR 0191). It runs the host stack of
 // userspace/network over the frames its driver hands it, answers the private
-// sessions PID 1 opens for commands, and loads its settings from the
+// sessions PID 1 opens for commands and the UDP sessions it opens for
+// programs that use UDP (ADR 0195), and loads its settings from the
 // configuration service. It holds no device authority: frames arrive in a
 // shared pool the driver fills and leave through one the driver reads.
 package main
@@ -34,6 +35,7 @@ const (
 	configBudget   = 5 * clock.TicksPerSecond
 	nanosPerTick   = 1_000_000_000 / clock.TicksPerSecond
 	exitFailed     = 1
+	udpOwner       = 1000
 )
 
 // session is one command's channel and what PID 1 said it may do.
@@ -44,6 +46,10 @@ type session struct {
 	// there is none, and sequence its sequence number.
 	echo     uint64
 	sequence uint16
+	// servers is the correlation of a held Servers request, zero when there
+	// is none, and known the server generation the client has.
+	servers uint64
+	known   uint64
 }
 
 // binding is the current driver: its channel, generation and pools. A new
@@ -67,13 +73,12 @@ type binding struct {
 var (
 	consoleHandle, controlHandle, configHandle handle.ID
 
-	stack     network.Stack
-	device    binding
-	transport resolverTransport
-	sessions  [network.MaxSessions]session
+	stack    network.Stack
+	device   binding
+	sessions [network.MaxSessions]session
 	// interestOwner maps a WaitAny interest to its object: -1 the driver,
-	// -2 the control channel, -3 the resolver transport, otherwise a session
-	// index.
+	// -2 the control channel, udpOwner plus an index a UDP session,
+	// otherwise a session index.
 	interests     [kcall.WaitAnyMaxObjects]sys.Interest
 	interestOwner [kcall.WaitAnyMaxObjects]int
 
@@ -144,8 +149,8 @@ func serve() {
 		now := clockNanos()
 		stack.Advance(now)
 		deliverCompletions()
-		deliverDatagrams()
-		announceServers()
+		deliverUDP()
+		deliverServers()
 		transmitPending()
 		announceState(now)
 		count := buildInterests()
@@ -176,10 +181,12 @@ func serve() {
 				serviceDriver()
 			case -2:
 				serviceControl()
-			case -3:
-				serviceTransport()
 			default:
-				serviceSession(owner)
+				if owner >= udpOwner {
+					serviceUDP(owner - udpOwner)
+				} else {
+					serviceSession(owner)
+				}
 			}
 		}
 	}
@@ -196,12 +203,14 @@ func buildInterests() int {
 		add(device.channel, -1)
 	}
 	add(controlHandle, -2)
-	if transport.channel != 0 {
-		add(transport.channel, -3)
-	}
 	for index := range sessions {
 		if sessions[index].channel != 0 {
 			add(sessions[index].channel, index)
+		}
+	}
+	for index := range udpSessions {
+		if udpSessions[index].channel != 0 {
+			add(udpSessions[index].channel, udpOwner+index)
 		}
 	}
 	return count
@@ -412,8 +421,11 @@ func serviceControl() {
 			answerControl(control.Opcode, addSession(message.Handles[0], control.Rights), 0, correlation)
 		case netapi.ControlSetDevice:
 			answerControl(control.Opcode, setDevice(control.Generation), control.Generation, correlation)
-		case netapi.ControlSetTransport:
-			answerControl(control.Opcode, setTransport(control.Generation), control.Generation, correlation)
+		case netapi.ControlAddUDPSession:
+			answerControl(control.Opcode, addUDPSession(), 0, correlation)
+		default:
+			closeAttached()
+			answerControl(control.Opcode, netapi.ControlInvalidArgument, 0, correlation)
 		}
 	}
 }
@@ -440,8 +452,10 @@ func handleIs(id handle.ID, typeID handle.Type, rights capability.Rights) bool {
 	return recordID == uint64(id) && handle.Type(record[8]) == typeID && got == rights
 }
 
+// addSession takes a command's session. A resolve-status session is the
+// resolver service's: it may read the status and the DNS servers.
 func addSession(channel handle.ID, class netapi.RightsClass) netapi.ControlResult {
-	if class == netapi.RightsResolveStatus || !handleIs(channel, handle.TypeChannel, capability.Read|capability.Write|capability.Wait) {
+	if !handleIs(channel, handle.TypeChannel, capability.Read|capability.Write|capability.Wait) {
 		sys.HandleClose(channel)
 		return netapi.ControlInvalidArgument
 	}
@@ -561,11 +575,25 @@ func handleRequest(index int, correlation uint64) {
 			Probes: snapshot.Conflicts.Probes, ProbeConflicts: snapshot.Conflicts.ProbeConflicts,
 			Announcements: snapshot.Conflicts.Announcements, ActiveConflicts: snapshot.Conflicts.ActiveConflicts,
 			Defenses: snapshot.Conflicts.Defenses, Relinquished: snapshot.Conflicts.Relinquished,
-			RateLimits: snapshot.Conflicts.RateLimits, Loopback: snapshot.Loopback}
+			RateLimits: snapshot.Conflicts.RateLimits, Loopback: snapshot.Loopback,
+			UDPRX: snapshot.UDP.RX, UDPTX: snapshot.UDP.TX, UDPDropNoEndpoint: snapshot.UDP.DropNoEndpoint,
+			UDPDropQueueFull: snapshot.UDP.DropQueueFull, UDPDropChecksum: snapshot.UDP.DropChecksum,
+			UDPDropTooLong: snapshot.UDP.DropTooLong, UDPBindFail: snapshot.UDP.BindFail,
+			UDPEndpoints: uint16(snapshot.UDP.Endpoints)}
+		limits := stack.Tuning().UDP
+		answer.UDPEphemeralMin, answer.UDPEphemeralMax, answer.UDPMaxPayload = limits.EphemeralMin, limits.EphemeralMax, limits.MaxPayload
+		answer.UDPReceiveQueue, answer.UDPMaxEndpoints, answer.UDPSessionEndpoints = limits.ReceiveQueue, limits.MaxEndpoints, limits.SessionEndpoints
 		if snapshot.Link {
 			answer.Link = netapi.LinkUp
 		}
 		send(current, correlation)
+	case netapi.OpServers:
+		if current.servers != 0 {
+			respond(current, request.Opcode, netapi.ResultBusy, correlation)
+			return
+		}
+		current.servers, current.known = correlation, request.Generation
+		deliverServers()
 	case netapi.OpEcho:
 		if current.rights != netapi.RightsPingStatus {
 			respond(current, request.Opcode, netapi.ResultPermissionDenied, correlation)
@@ -603,6 +631,26 @@ func handleRequest(index int, correlation uint64) {
 		}
 		send(current, correlation)
 		transmitPending()
+	}
+}
+
+// deliverServers answers every held Servers request whose client has a list
+// of another generation than the stack's.
+func deliverServers() {
+	servers, count, generation := stack.DNSServers()
+	for index := range sessions {
+		current := &sessions[index]
+		if current.channel == 0 || current.servers == 0 || current.known == generation {
+			continue
+		}
+		answer = netapi.Reply{Opcode: netapi.OpServers, Result: netapi.ResultOK, Generation: generation}
+		for server := 0; server < count && server < netapi.MaxServers; server++ {
+			answer.Servers[server] = servers[server]
+			answer.ServerCount++
+		}
+		correlation := current.servers
+		current.servers = 0
+		send(current, correlation)
 	}
 }
 

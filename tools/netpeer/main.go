@@ -5,8 +5,9 @@
 //
 // It floods every frame between the guests like a hub, and it is a station
 // on the segment that answers ARP and ICMP echo, serves static DHCP leases
-// and an authoritative DNS zone under "test", logs what it sees, and injects
-// ARP address conflicts on command.
+// and an authoritative DNS zone under "test", echoes UDP on port 7, logs
+// what it sees, and injects ARP address conflicts and UDP datagrams on
+// command.
 package main
 
 import (

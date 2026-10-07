@@ -6,11 +6,13 @@
 #      gateway, a killed and replaced driver, and resource counts that do not
 #      grow;
 #   2. two guests on one private stream backend with static addresses, each
-#      answering the other's echo requests, and a reload of tuning settings
-#      that applies a valid candidate and refuses an invalid one by key;
+#      answering the other's echo requests, DNS and generic UDP against the
+#      test peer (ADR 0195), and a reload of tuning settings that applies a
+#      valid candidate and refuses an invalid one by key;
 #   3. one guest without a network function and with an invalid stored
 #      setting: storage and the shell work, net status says down and reports
-#      the built-in defaults, and ping fails within its deadline.
+#      the built-in defaults, ping fails within its deadline, and UDP over lo
+#      still works.
 #
 #   tests/boot/network.sh ISO OVMF_CODE
 set -eu
@@ -229,14 +231,28 @@ left.test 60 A 192.0.2.10
 right.test 60 A 192.0.2.11
 alias.test 60 CNAME right.test
 gone.test NXDOMAIN
+fallback.test 60 A 192.0.2.12
+slow.test 60 SLOW 192.0.2.13
 ZONE
 go build -o "$peer" ./tools/netpeer
 "$peer" -socket "$socket" -control "$control" -zone "$work/zone" -log "$queries" \
-	-lease 52:54:00:00:02:10=192.0.2.10 >"$work/netpeer.out" 2>&1 &
+	-lease 52:54:00:00:02:10=192.0.2.10 -lease-time 40 >"$work/netpeer.out" 2>&1 &
 pids="$pids $!"
 wait_for 'netpeer: listening' 10 "$work/netpeer.out"
 peer_command() { printf '%s\n' "$1" >"$control"; }
 queried() { grep -c "^query $1 1 " "$queries" || true; }
+# listening waits for the left guest's next udp listen to have bound its
+# ports, so the peer's datagrams cannot arrive first.
+listens=0
+listening() {
+	listens=$((listens + 1))
+	elapsed=0
+	while [ "$(grep -c '^UDP_LISTENING' "$left" || true)" -lt "$listens" ]; do
+		[ "$elapsed" -lt 20 ] || fail udp.listen "udp listen number $listens bound" "$left"
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+}
 
 disk left
 disk right 192.0.2.11 'system.dns.server1 text 192.0.2.53'
@@ -281,6 +297,62 @@ type_line 3 'ping -c 2 192.0.2.11'
 sleep 3
 type_line 3 'net status'
 type_line 3 'resolve right.test  '
+# Generic UDP on the left guest against the peer's echo service on port 7
+# and datagrams the peer sends on command.
+# The first datagram comes a second after the listener's receive went out,
+# so netd holds the RecvFrom and completes it when the datagram arrives.
+type_line 3 'udp listen -c 1 -W 8000 9000'
+listening
+sleep 1
+peer_command 'udp-send 192.0.2.10 9000 4000 hello guest'
+sleep 2
+type_line 3 'udp send -r 192.0.2.53 7 echo me'
+type_line 3 'udp listen -c 2 -W 8000 9001 9002'
+listening
+peer_command 'udp-send 192.0.2.10 9002 4002 two'
+peer_command 'udp-send 192.0.2.10 9001 4001 one'
+sleep 2
+type_line 3 'udp send -r 192.0.2.53 7 decoy check'
+type_line 3 'udp listen -c 3 -W 8000 9003'
+listening
+peer_command 'udp-burst 192.0.2.10 9003 4003 3'
+sleep 2
+type_line 3 'udp self 127.0.0.1 9100 loop'
+type_line 3 'udp self 127.0.0.2 9101 other'
+type_line 3 'udp self 192.0.2.10 9102 own'
+type_line 3 'udp self -s 0 127.0.0.1 9103'
+type_line 3 'udp listen -c 1 -W 8000 9004'
+listening
+peer_command 'udp-fill 192.0.2.10 9004 4004 0'
+sleep 2
+type_line 3 'udp send -s 1472 -r 192.0.2.53 7'
+type_line 3 'udp send -s 1473 192.0.2.53 7'
+type_line 3 'udp listen -c 1 -W 8000 9005'
+listening
+peer_command 'udp-bad 192.0.2.10 9005 4005 bad'
+peer_command 'udp-send 192.0.2.10 9005 4005 good'
+sleep 2
+peer_command 'udp-send 192.0.2.10 9999 4006 nobody'
+sleep 1
+type_line 3 'net status '
+peer_command 'edns off'
+type_line 3 'resolve fallback.test'
+peer_command 'edns on'
+# The peer holds this answer for a second, inside the resolver's first wait:
+# the query's RecvFrom waits in netd and resolved takes the answer from it.
+type_line 3 'resolve slow.test'
+sleep 1
+# UDP limits reload with the rest of system.net.*: the DHCP values refused
+# above are put back first, so the candidate fails or applies on UDP alone.
+type_line 3 'config set system.net.dhcp.max-retry-ms 64000'
+type_line 3 'config set system.net.udp.max-payload 1300'
+type_line 3 'net reload  '
+type_line 3 'udp self -s 1301 127.0.0.1 9200'
+type_line 3 'udp self -s 1300 127.0.0.1 9201'
+type_line 3 'config set system.net.udp.ephemeral-port-min 60000'
+type_line 3 'config set system.net.udp.ephemeral-port-max 50000'
+type_line 3 'net reload   '
+type_line 3 'net status  '
 # Address conflicts on the static guest: one claim is defended, a second
 # inside the defend interval makes it give the address up, and a probe the
 # peer answers keeps a new address from going live. lo carries on.
@@ -331,6 +403,48 @@ require_after left.refused 'net reload ' 'invalid setting system\.net\.dhcp\.max
 require_after left.after-reload 'ping -c 2 192.0.2.11' '^2 sent, 2 received, 0% lost$' "$left"
 require_after left.mode-kept 'net status' '^  state: ready$' "$left"
 require_after left.cache-after-reload 'resolve right.test  ' '^right\.test: 192\.0\.2\.11 (cache' "$left"
+require_after left.udp-listen 'udp listen -c 1 -W 8000 9000' '^11 bytes from 192\.0\.2\.53:4000 to 192\.0\.2\.10: hello guest$' "$left"
+require_after left.udp-sent 'udp send -r 192.0.2.53 7 echo me' '^7 bytes to 192\.0\.2\.53:7 from 192\.0\.2\.10:[0-9]*$' "$left"
+require_after left.udp-echo 'udp send -r 192.0.2.53 7 echo me' '^7 bytes from 192\.0\.2\.53:7 to 192\.0\.2\.10: echo me$' "$left"
+require_after left.udp-port-one 'udp listen -c 2 -W 8000 9001 9002' '^3 bytes from 192\.0\.2\.53:4001 to 192\.0\.2\.10: one$' "$left"
+require_after left.udp-port-two 'udp listen -c 2 -W 8000 9001 9002' '^3 bytes from 192\.0\.2\.53:4002 to 192\.0\.2\.10: two$' "$left"
+require_after left.udp-connected 'udp send -r 192.0.2.53 7 decoy check' '^11 bytes from 192\.0\.2\.53:7 to 192\.0\.2\.10: decoy check$' "$left"
+forbid_after left.udp-decoy 'udp send -r 192.0.2.53 7 decoy check' 'from 192\.0\.2\.53:8 ' "$left"
+order=$(window "$left" 'udp listen -c 3 -W 8000 9003' | sed -n 's/^7 bytes from 192\.0\.2\.53:4003 to 192\.0\.2\.10: \(burst [0-9]\)$/\1/p' | tr '\n' ,)
+[ "$order" = 'burst 1,burst 2,burst 3,' ] || fail left.udp-order "bursts in order, saw '$order'" "$left"
+checks=$((checks + 1))
+require_after left.udp-loopback 'udp self 127.0.0.1 9100 loop' '^4 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.1: loop$' "$left"
+require_after left.udp-loopback-other 'udp self 127.0.0.2 9101 other' '^5 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.2: other$' "$left"
+require_after left.udp-own 'udp self 192.0.2.10 9102 own' '^3 bytes from 192\.0\.2\.10:[0-9]* to 192\.0\.2\.10: own$' "$left"
+require_after left.udp-zero-local 'udp self -s 0 127.0.0.1 9103' '^0 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.1$' "$left"
+require_after left.udp-zero 'udp listen -c 1 -W 8000 9004' '^0 bytes from 192\.0\.2\.53:4004 to 192\.0\.2\.10$' "$left"
+require_after left.udp-largest 'udp send -s 1472 -r 192.0.2.53 7' '^1472 bytes from 192\.0\.2\.53:7 to 192\.0\.2\.10$' "$left"
+require_after left.udp-too-large 'udp send -s 1473 192.0.2.53 7' '^udp: send: invalid argument$' "$left"
+require_after left.udp-checksum 'udp listen -c 1 -W 8000 9005' '^4 bytes from 192\.0\.2\.53:4005 to 192\.0\.2\.10: good$' "$left"
+forbid_after left.udp-corrupt 'udp listen -c 1 -W 8000 9005' ': bad$' "$left"
+require_after left.udp-counters 'net status ' '^  dropped: no-endpoint [1-9][0-9]* queue-full 0 checksum 1 too-long 0$' "$left"
+require_after left.udp-limits 'net status ' '^  limits: ports 49152-65535 queue 8 payload 4096$' "$left"
+require_after left.dns-fallback 'resolve fallback.test' '^fallback\.test: 192\.0\.2\.12 (dns, ttl 60 s)$' "$left"
+[ "$(queried fallback.test)" = 2 ] || fail left.edns-fallback "two queries for fallback.test, one with EDNS and one without" "$queries"
+checks=$((checks + 1))
+require_after left.dns-deferred 'resolve slow.test' '^slow\.test: 192\.0\.2\.13 (dns, ttl 60 s)$' "$left"
+require peer.slow '^slow slow\.test 1s$' "$queries"
+[ "$(queried slow.test)" = 1 ] || fail left.dns-deferred-once "one query for slow.test, answered while its receive waited" "$queries"
+checks=$((checks + 1))
+# Every query from the left guest left from its own ephemeral port.
+ports=$(sed -n 's/^query .* 192\.0\.2\.10:\([0-9]*\) id=.*/\1/p' "$queries")
+total=$(printf '%s\n' "$ports" | grep -c . || true)
+distinct=$(printf '%s\n' "$ports" | sort -u | grep -c . || true)
+low=$(printf '%s\n' "$ports" | awk '$1 < 49152' | grep -c . || true)
+[ "$total" -ge 4 ] && [ "$total" = "$distinct" ] && [ "$low" = 0 ] || fail left.dns-ports "a fresh ephemeral port for each of $total queries" "$queries"
+checks=$((checks + 1))
+[ "$(grep -c '^dhcp REQUEST 52:54:00:00:02:10 ' "$queries" || true)" -ge 2 ] || fail left.dhcp-renew 'a lease renewal REQUEST' "$queries"
+checks=$((checks + 1))
+require_after left.udp-reload 'net reload  ' '^network configuration applied$' "$left"
+require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: invalid argument$' "$left"
+require_after left.udp-payload-kept 'udp self -s 1300 127.0.0.1 9201' '^1300 bytes from 127\.0\.0\.1:' "$left"
+require_after left.udp-cross-field 'net reload   ' 'invalid setting system\.net\.udp\.ephemeral-port-max; previous configuration kept' "$left"
+require_after left.udp-limits-kept 'net status  ' '^  limits: ports 49152-65535 queue 8 payload 1300$' "$left"
 require_after right.defended 'net status' '^  conflicts: probe 0 active 1 defended 1 relinquished 0' "$right"
 require_after right.defended-ready 'net status' '^  state: ready$' "$right"
 require_after right.relinquished 'net status ' '^  conflicts: probe 0 active 2 defended 1 relinquished 1' "$right"
@@ -361,6 +475,7 @@ type_line 3 'ping -c 1 localhost'
 type_line 3 'resolve localhost'
 type_line 3 'hosts get localhost'
 type_line 3 'resolve example.test'
+type_line 3 'udp self 127.0.0.2 9100 lonely'
 stop 3 "$log"
 require none.absent 'Network: no legacy virtio-net device' "$log"
 require none.normal BOOT_MODE_NORMAL "$log"
@@ -377,6 +492,7 @@ require_after none.localhost 'ping -c 1 localhost' '^1 sent, 1 received, 0% lost
 require_after none.resolve 'resolve localhost' '^localhost: 127\.0\.0\.1 (localhost)$' "$log"
 require_after none.hosts 'hosts get localhost' '^127\.0\.0\.1 localhost$' "$log"
 require_after none.no-servers 'resolve example.test' 'no DNS servers' "$log"
+require_after none.udp-loopback 'udp self 127.0.0.2 9100 lonely' '^6 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.2: lonely$' "$log"
 printf 'PASS no network (%s)\n' "$log"
 fi
 

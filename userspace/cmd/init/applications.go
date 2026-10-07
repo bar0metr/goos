@@ -128,12 +128,20 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		resolveSession, _ = openResolverSession(netapi.RightsAdminStatus)
 	}
 	useResolver := resolveSession != 0
+	// A UDP session is its own grant: neither ping nor name resolution
+	// carries the authority to send datagrams.
+	var udpSession [3]handle.ID
+	if grantable && grantsRequested&commands.GrantUDP != 0 {
+		udpSession, _ = openUDPSession()
+	}
+	useUDP := udpSession[0] != 0
 	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
 		syslog.Warn("volume check refused in normal mode")
 		closeOpen(netSession)
 		closeOpen(resolveSession)
+		closeUDP(udpSession)
 		return 0, 0, supervisor.LaunchVolumeBusy
 	}
 	var checkBlock handle.ID
@@ -144,6 +152,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error(reason)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
+			closeUDP(udpSession)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
@@ -154,6 +163,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error(reason)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
+			closeUDP(udpSession)
 			if reason == "APP_CHANNEL_CREATE_FAILED" {
 				return 0, 0, supervisor.LaunchResourceExhausted
 			}
@@ -168,6 +178,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if !createChannel(&launchPair) {
 			closeOpen(netSession)
 			closeOpen(resolveSession)
+			closeUDP(udpSession)
 			sys.HandleClose(handle.ID(pair[0]))
 			sys.HandleClose(checkBlock)
 			if useBlockCheck {
@@ -193,6 +204,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useResolver {
 		handles++
+	}
+	if useUDP {
+		handles += len(udpSession)
 	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
@@ -238,6 +252,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useResolver {
 		writer.Handle([]byte("resolve"), 0)
 	}
+	if useUDP {
+		writer.Handle([]byte("udp"), 0)
+		writer.Handle([]byte("udp-tx"), 0)
+		writer.Handle([]byte("udp-rx"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -245,6 +264,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		closeOpen(netSession)
 		closeOpen(resolveSession)
+		closeUDP(udpSession)
 		closePair(launchPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
@@ -273,6 +293,12 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useResolver {
 		grants = append(grants, supervisor.Capability{Name: "resolve", Handle: resolveSession, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	if useUDP {
+		grants = append(grants,
+			supervisor.Capability{Name: "udp", Handle: udpSession[0], Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			supervisor.Capability{Name: "udp-tx", Handle: udpSession[1], Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true},
+			supervisor.Capability{Name: "udp-rx", Handle: udpSession[2], Type: handle.TypeMemory, Rights: capability.Read, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -291,6 +317,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closePair(launchPair)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
+		closeUDP(udpSession)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -308,6 +335,13 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 }
 
 // closeOpen closes a handle a failed launch did not hand over.
+// closeUDP closes whatever of a UDP session's handles was opened.
+func closeUDP(session [3]handle.ID) {
+	for _, id := range session {
+		closeOpen(id)
+	}
+}
+
 func closeOpen(id handle.ID) {
 	if id != 0 {
 		sys.HandleClose(id)

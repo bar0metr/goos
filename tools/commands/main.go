@@ -203,6 +203,8 @@ func grantValue(expression ast.Expr) (commands.Grant, error) {
 		return commands.GrantResolve, nil
 	case isSelector(expression, "commands", "GrantResolveAdmin"):
 		return commands.GrantResolveAdmin, nil
+	case isSelector(expression, "commands", "GrantUDP"):
+		return commands.GrantUDP, nil
 	default:
 		return 0, fmt.Errorf("want a commands grant")
 	}

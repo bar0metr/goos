@@ -225,8 +225,8 @@ func decode(t testing.TB, frame []byte) sentFrame {
 			}
 			sent.icmp = message
 		case protocolUDP:
-			datagram, ok := parseUDP(packet)
-			if !ok || binary.BigEndian.Uint16(packet.payload[6:8]) == 0 {
+			datagram, status := parseUDP(packet)
+			if status != udpOK || binary.BigEndian.Uint16(packet.payload[6:8]) == 0 {
 				t.Fatal("outgoing UDP checksum")
 			}
 			sent.udp = datagram

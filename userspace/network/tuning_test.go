@@ -8,7 +8,8 @@ import (
 // storedDefaults are the schema defaults as the configuration service holds
 // them, in Field order from FieldTTL.
 var storedDefaults = [TuningFields]uint64{64, 3, 1000, 1000, 2000, 2, 2000, 10000, 10, 60000,
-	60000, 1000, 3, 20, 4000, 64000, 10000}
+	60000, 1000, 3, 20, 4000, 64000, 10000,
+	49152, 65535, 8, 32, 8, 4096}
 
 func TestParseTuningDefaults(t *testing.T) {
 	values := storedDefaults
@@ -39,6 +40,15 @@ func TestParseTuningRanges(t *testing.T) {
 			}
 			if field == FieldDHCPMaxRetry {
 				values[FieldDHCPInitialRetry-FieldTTL] = tuningRange[FieldDHCPInitialRetry-FieldTTL].min
+			}
+			if field == FieldUDPEphemeralMin {
+				values[FieldUDPEphemeralMax-FieldTTL] = tuningRange[FieldUDPEphemeralMax-FieldTTL].max
+			}
+			if field == FieldUDPEphemeralMax {
+				values[FieldUDPEphemeralMin-FieldTTL] = tuningRange[FieldUDPEphemeralMin-FieldTTL].min
+			}
+			if field == FieldUDPMaxEndpoints {
+				values[FieldUDPSessionEndpoints-FieldTTL] = tuningRange[FieldUDPSessionEndpoints-FieldTTL].min
 			}
 			if _, got := ParseTuning(&values); got != FieldNone {
 				t.Errorf("field %d value %d refused as %d", field, value, got)

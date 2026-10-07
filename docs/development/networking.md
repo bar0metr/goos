@@ -7,10 +7,11 @@ requirements the implementation was built from; the ADRs and
 
 Later work changed the system this document describes. ADR 0192 added
 runtime tuning and RFC 5227 address-conflict detection, ADR 0193 a loopback
-interface and a hosts table, and ADR 0194 a DNS resolver, so `ping` now
-accepts host names. Where this document puts DNS out of scope or says `ping`
-takes only a numeric address, it describes the first milestone, not the
-current system.
+interface and a hosts table, ADR 0194 a DNS resolver, so `ping` now
+accepts host names, and ADR 0195 generic IPv4 UDP for programs, so UDP is no
+longer private to the network service. Where this document puts DNS or
+general UDP out of scope, keeps UDP internal, or says `ping` takes only a
+numeric address, it describes the first milestone, not the current system.
 
 Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete

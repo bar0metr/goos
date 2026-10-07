@@ -40,12 +40,6 @@ func TestLoopbackNeverUsesTheLink(t *testing.T) {
 	if frames := h.drain(); len(frames) != 0 || h.stack.resolutions != resolutions {
 		t.Fatal("loopback echo used ARP or the link")
 	}
-	if result := h.stack.SendDatagram(0, IPv4{127, 0, 0, 1}, 53, []byte("q"), second, h.now); result != ResultRemoteUnreachable {
-		t.Fatalf("datagram to loopback %d", result)
-	}
-	if frames := h.drain(); len(frames) != 0 {
-		t.Fatal("loopback datagram reached the wire")
-	}
 }
 
 func TestLoopbackSurvivesLinkChanges(t *testing.T) {

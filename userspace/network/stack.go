@@ -39,6 +39,7 @@ type Snapshot struct {
 	RateLimited bool
 	// Loopback counts echoes answered on the loopback interface.
 	Loopback uint64
+	UDP      UDPStats
 }
 
 // Stack is the whole state of one interface. It holds no pointers and every
@@ -66,7 +67,6 @@ type Stack struct {
 	identification uint16
 	echoBase       uint16
 	cursor         int
-	datagramCursor int
 
 	rx, tx, drop, malformed uint64
 
@@ -79,7 +79,12 @@ type Stack struct {
 	probe       probe
 	announcer   announcer
 	dhcp        dhcpClient
-	datagrams   [MaxDatagrams]datagram
+
+	udp           [MaxUDPEndpoints]udpEndpoint
+	udpBuffers    [UDPReceiveBuffers]udpBuffer
+	udpPending    [UDPPendingSends]udpPending
+	udpGeneration uint32
+	udpStats      UDPStats
 
 	// defended and defendedAt record the last defence of the live address.
 	defended   bool
@@ -115,7 +120,7 @@ func (stack *Stack) Init(seed uint64) {
 	stack.clearAddress()
 	stack.identification = uint16(stack.next())
 	stack.echoBase = uint16(stack.next())
-	stack.cursor, stack.datagramCursor = 0, 0
+	stack.cursor = 0
 	stack.rx, stack.tx, stack.drop, stack.malformed = 0, 0, 0, 0
 	stack.replyWindow, stack.replyCount = 0, 0
 	stack.clearNeighbors()
@@ -125,9 +130,7 @@ func (stack *Stack) Init(seed uint64) {
 	stack.probe = probe{}
 	stack.announcer = announcer{}
 	stack.dhcp = dhcpClient{}
-	for index := range stack.datagrams[:] {
-		stack.datagrams[index].clear()
-	}
+	stack.resetUDP()
 	stack.defended, stack.defendedAt = false, 0
 	stack.conflicts, stack.rateLimited = 0, false
 	stack.counters = Conflicts{}
@@ -271,11 +274,13 @@ func (stack *Stack) clearAddress() {
 }
 
 // resetAddressing removes the address and everything that depends on it.
-// Echoes and datagrams fail first so none can match a reply after the address
-// is gone. Loopback echoes never wait, so none are affected.
+// Echoes fail first so none can match a reply after the address is gone, and
+// datagrams waiting for ARP are dropped. Loopback echoes never wait, so none
+// are affected. UDP endpoints stay: one bound to the wildcard or to lo keeps
+// working, and one bound to the old address refuses to send.
 func (stack *Stack) resetAddressing(result Result) {
 	stack.failEchoes(result)
-	stack.failDatagrams(result)
+	stack.dropPendingUDP(IPv4{}, true)
 	stack.clearAddress()
 	stack.clearNeighbors()
 	stack.probe = probe{}
@@ -359,17 +364,29 @@ func (stack *Stack) acceptDestination(packet ipv4Packet) bool {
 	return stack.address == zeroIPv4 && packet.destination.IsUnicast()
 }
 
+// receiveUDP hands DHCP's server-to-client datagrams to the DHCP client
+// while the interface runs DHCP, and the rest to the endpoints. Only a
+// datagram to the interface's address reaches an endpoint: the broadcasts
+// and offers acceptDestination admits are DHCP's alone.
 func (stack *Stack) receiveUDP(ether ethernetFrame, packet ipv4Packet, now uint64) {
-	datagram, ok := parseUDP(packet)
-	if !ok {
+	datagram, status := parseUDP(packet)
+	switch status {
+	case udpMalformed:
 		stack.countMalformed()
 		return
+	case udpBadChecksum:
+		increment(&stack.udpStats.DropChecksum)
+		return
 	}
-	if datagram.sourcePort == portServer && datagram.destinationPort == portClient {
+	if datagram.sourcePort == portServer && datagram.destinationPort == portClient && stack.config.Mode == ModeDHCP {
 		stack.receiveDHCP(ether.source, datagram.payload, now)
 		return
 	}
-	stack.receiveDatagram(&packet, &datagram)
+	if stack.address == zeroIPv4 || packet.destination != stack.address {
+		stack.CountDrop()
+		return
+	}
+	stack.deliverUDP(packet.source, datagram.sourcePort, packet.destination, datagram.destinationPort, datagram.payload)
 }
 
 // Advance runs every timer due at now. Each handler schedules its next
@@ -377,7 +394,6 @@ func (stack *Stack) receiveUDP(ether ethernetFrame, packet ipv4Packet, now uint6
 func (stack *Stack) Advance(now uint64) {
 	stack.advanceEchoes(now)
 	stack.advanceResolutions(now)
-	stack.advanceDatagrams(now)
 	if stack.probe.active && stack.probe.deadline <= now {
 		stack.advanceProbe(now)
 	}
@@ -402,11 +418,6 @@ func (stack *Stack) Deadline() (uint64, bool) {
 	for index := range stack.resolutions[:] {
 		if stack.resolutions[index].used {
 			earliest.consider(stack.resolutions[index].deadline)
-		}
-	}
-	for index := range stack.datagrams[:] {
-		if stack.datagrams[index].waiting() {
-			earliest.consider(stack.datagrams[index].deadline)
 		}
 	}
 	if stack.probe.active {
@@ -497,6 +508,7 @@ func (stack *Stack) Snapshot(now uint64) Snapshot {
 		ConflictRun: stack.conflicts,
 		RateLimited: stack.rateLimited,
 		Loopback:    stack.loopback,
+		UDP:         stack.UDPStats(),
 	}
 	if stack.address != zeroIPv4 && stack.dhcp.leased() && stack.dhcp.expiry > now {
 		snapshot.LeaseRemaining = (stack.dhcp.expiry - now) / second

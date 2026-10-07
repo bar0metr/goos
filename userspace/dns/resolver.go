@@ -439,6 +439,13 @@ func (r *Resolver) NextQuery(dst []byte) (Outgoing, bool) {
 	return Outgoing{}, false
 }
 
+// Waiting reports whether transaction waits for an answer to the last query
+// NextQuery gave out for it. Once it does not, the transport can drop
+// whatever it kept for that query.
+func (r *Resolver) Waiting(transaction int) bool {
+	return transaction >= 0 && transaction < MaxTransactions && r.transactions[transaction].phase == txWaiting
+}
+
 // SendFailed reports that the transport could not send the transaction's
 // last datagram. The server counts as unusable, as after a bad answer.
 func (r *Resolver) SendFailed(transaction int, now uint64) {

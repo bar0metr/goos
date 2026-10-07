@@ -586,16 +586,35 @@ ADR 0194:
   configuration service over `GHST1` and edited with the shell's `hosts`
   builtin, with `localhost` fixed at `127.0.0.1`;
 - `resolved`, a stub resolver with a cache, reached by commands over
-  `GRESOLV1` and reaching DNS servers only through `netd` over `GNETDGRAM1`,
-  with servers from DHCP option 6 and `system.dns.server1..4`;
+  `GRESOLV1` and reaching DNS servers only through `netd`, with servers
+  from DHCP option 6 and `system.dns.server1..4`;
 - `resolve NAME|status|flush|reload` and `ping NAME`;
 - `make test-network` checks loopback without a NIC, conflict handling, the
   hosts table, and DNS against a host-side DHCP and DNS peer on a private
   segment.
 
-Still unsupported: UDP and TCP sockets for applications, DNS over TCP (a
-truncated answer fails), multicast DNS and `.local` names, IPv6 and AAAA
-records, DNSSEC, encrypted DNS, and the Linux socket calls.
+### Generic IPv4 UDP
+
+Done after name resolution, under ADR 0195:
+
+- UDP endpoints in the stack with bind, connect, send and receive, an
+  ephemeral port range, a shared receive buffer pool with a per-session
+  share, and loopback and own-address delivery that needs no NIC;
+- `GUDP1` sessions that PID 1 opens from `netd` for commands granted
+  `GrantUDP`, each one channel and a TX and an RX pool;
+- the resolver as an ordinary UDP client, with a fresh endpoint and port for
+  every query, and the lease's DNS servers over a `GNETAPI` `Servers`
+  request;
+- `system.net.udp.*` limits, applied by `net reload` with the rest of
+  `system.net.*`, and UDP counters and limits in `net status`;
+- the `udp send|listen|self` command;
+- `make test-network` checks UDP against an echo service and injected
+  datagrams on the private segment, the payload limits, checksum drops, a
+  limit reload and loopback UDP without a NIC.
+
+Still unsupported: TCP, IPv4 fragmentation, multicast and broadcast sends,
+DNS over TCP (a truncated answer fails), multicast DNS and `.local` names,
+IPv6 and AAAA records, DNSSEC, encrypted DNS, and the Linux socket calls.
 
 ### Next: a Linux terminal
 
@@ -636,8 +655,8 @@ a concrete blocker requires them:
 
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
-- networking beyond IPv4, ICMP echo, loopback and the DNS stub resolver on
-  one virtio-net interface;
+- networking beyond IPv4, ICMP echo, UDP, loopback and the DNS stub
+  resolver on one virtio-net interface;
 - USB;
 - GUI;
 - ext4;

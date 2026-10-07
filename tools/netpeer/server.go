@@ -41,7 +41,15 @@ func listen(socket string, h *host) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &server{host: h, listener: listener, socket: socket, quit: make(chan struct{}), ports: map[*port]struct{}{}}, nil
+	s := &server{host: h, listener: listener, socket: socket, quit: make(chan struct{}), ports: map[*port]struct{}{}}
+	h.later = func(delay time.Duration, frames [][]byte) {
+		time.AfterFunc(delay, func() {
+			for _, frame := range frames {
+				s.send(frame, nil)
+			}
+		})
+	}
+	return s, nil
 }
 
 func (s *server) serve() {

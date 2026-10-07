@@ -4,8 +4,8 @@ package network
 // link, the address configuration or DHCP do. The whole of 127.0.0.0/8 routes
 // to it (RFC 1122): nothing sent there is framed, resolved with ARP or handed
 // to the gateway, and a frame from the link carrying a loopback source or
-// destination is dropped. Echo is its only user now; a later UDP or TCP
-// socket uses the same route.
+// destination is dropped. Echo and UDP use it; UDP delivers to the endpoint
+// table directly (udp_send.go).
 
 var (
 	// LoopbackAddress and LoopbackPrefix are lo's address.
@@ -14,7 +14,7 @@ var (
 )
 
 // LoopbackMTU is lo's MTU. No frame carries loopback traffic, so it is a
-// logical limit for future sockets, not a device's.
+// logical limit, not a device's; UDP's max-payload binds first.
 const LoopbackMTU = 65536
 
 // IsLoopback reports an address in 127.0.0.0/8.
