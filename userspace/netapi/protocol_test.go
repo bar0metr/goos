@@ -71,6 +71,7 @@ func TestRequestRejects(t *testing.T) {
 	}{
 		{"protocol", func(m *ipc.Message) { m.ProtocolID = ControlProtocolID }},
 		{"version", func(m *ipc.Message) { m.Version = 0 }},
+		{"version 1", func(m *ipc.Message) { m.Version = 1 }},
 		{"reply kind", func(m *ipc.Message) { m.Kind = ipc.KindReply }},
 		{"notification", func(m *ipc.Message) { m.Kind = ipc.KindNotification }},
 		{"no correlation", func(m *ipc.Message) { m.Correlation = 0 }},
@@ -135,7 +136,9 @@ func TestRequestOpcodeAttribution(t *testing.T) {
 func replies() []Reply {
 	return []Reply{
 		{Opcode: OpStatus, State: StateReady, Mode: ModeStatic, Local: local, Gateway: gateway, MAC: station,
-			Prefix: 24, Link: LinkUp, Lease: 86400, RX: 1, TX: 2, Drop: 3, Malformed: ^uint64(0), MTU: 1500},
+			Prefix: 24, Link: LinkUp, Lease: 86400, RX: 1, TX: 2, Drop: 3, Malformed: ^uint64(0), MTU: 1500,
+			RateLimited: true, ConflictRun: 4, Probes: 5, ProbeConflicts: 6, Announcements: 7, ActiveConflicts: 8,
+			Defenses: 9, Relinquished: 10, RateLimits: 11, Loopback: 12},
 		{Opcode: OpStatus, State: StateConfiguring, Link: LinkUp, MTU: 576, Fallback: true},
 		{Opcode: OpStatus},
 		{Opcode: OpStatus, Result: ResultPermissionDenied},
@@ -147,7 +150,7 @@ func replies() []Reply {
 		{Opcode: OpEcho, Result: ResultInvalidArgument},
 		{Opcode: OpReload},
 		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldGateway},
-		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldProbeInterval},
+		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldProbeMax},
 		{Opcode: OpReload, Result: ResultConfigInvalid},
 		{Opcode: OpReload, Result: ResultPermissionDenied},
 	}
@@ -186,6 +189,8 @@ func TestReplyFieldUsage(t *testing.T) {
 		{Opcode: OpEcho, Responder: gateway, State: StateReady},
 		{Opcode: OpEcho, Responder: gateway, Lease: 1},
 		{Opcode: OpEcho, Responder: gateway, MTU: 1500},
+		{Opcode: OpEcho, Responder: gateway, Loopback: 1},
+		{Opcode: OpReload, RateLimited: true},
 		{Opcode: OpReload, Fallback: true},
 		{Opcode: OpStatus, Result: ResultBusy, MTU: 1500},
 		{Opcode: OpEcho, Responder: gateway, Field: FieldMode},
@@ -212,7 +217,7 @@ func TestReplyFieldUsage(t *testing.T) {
 func TestReplyUnusedBytes(t *testing.T) {
 	statusUsed := span(2, 12)
 	statusUsed = append(statusUsed, span(24, 40)...)
-	statusUsed = append(statusUsed, span(44, 79)...)
+	statusUsed = append(statusUsed, span(44, 145)...)
 	used := map[int][]int{
 		0:  statusUsed,
 		1:  statusUsed,
@@ -262,7 +267,8 @@ func TestReplyRejects(t *testing.T) {
 		mutate func(*ipc.Message)
 	}{
 		{"protocol", func(m *ipc.Message) { m.ProtocolID++ }},
-		{"version", func(m *ipc.Message) { m.Version = 2 }},
+		{"version 1", func(m *ipc.Message) { m.Version = 1 }},
+		{"version 3", func(m *ipc.Message) { m.Version = 3 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},
 		{"short", func(m *ipc.Message) { m.PayloadSize = ReplySize - 1 }},
@@ -338,7 +344,7 @@ func TestText(t *testing.T) {
 	keys := map[Field]string{FieldNone: "", FieldMode: "system.net.mode", FieldAddress: "system.net.ipv4.address",
 		FieldPrefix: "system.net.ipv4.prefix", FieldGateway: "system.net.ipv4.gateway",
 		FieldTTL: "system.net.ipv4.default-ttl", FieldDHCPMaxRetry: "system.net.dhcp.max-retry-ms",
-		FieldProbeInterval: "system.net.ipv4.probe-interval-ms", lastField + 1: ""}
+		FieldProbeMax: "system.net.ipv4.probe-max-ms", lastField + 1: ""}
 	seen := map[string]bool{}
 	for field := FieldMode; field <= lastField; field++ {
 		key := field.Key()

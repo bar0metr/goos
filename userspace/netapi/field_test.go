@@ -15,7 +15,9 @@ func TestFieldsMatchNetwork(t *testing.T) {
 		{uint8(FieldARPResolveAttempts), uint8(network.FieldARPResolveAttempts)},
 		{uint8(FieldEchoReplyRate), uint8(network.FieldEchoReplyRate)},
 		{uint8(FieldDHCPMaxRetry), uint8(network.FieldDHCPMaxRetry)},
-		{uint8(FieldProbeInterval), uint8(network.FieldProbeInterval)},
+		{uint8(FieldProbeMax), uint8(network.FieldProbeMax)},
+		{uint8(FieldConflictRateLimit), uint8(network.FieldConflictRateLimit)},
+		{uint8(FieldDHCPConflictRetry), uint8(network.FieldDHCPConflictRetry)},
 		{uint8(lastField), uint8(network.FieldTTL) + uint8(network.TuningFields) - 1},
 	}
 	for _, pair := range pairs {
