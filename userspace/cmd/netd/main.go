@@ -67,11 +67,13 @@ type binding struct {
 var (
 	consoleHandle, controlHandle, configHandle handle.ID
 
-	stack    network.Stack
-	device   binding
-	sessions [network.MaxSessions]session
+	stack     network.Stack
+	device    binding
+	transport resolverTransport
+	sessions  [network.MaxSessions]session
 	// interestOwner maps a WaitAny interest to its object: -1 the driver,
-	// -2 the control channel, otherwise a session index.
+	// -2 the control channel, -3 the resolver transport, otherwise a session
+	// index.
 	interests     [kcall.WaitAnyMaxObjects]sys.Interest
 	interestOwner [kcall.WaitAnyMaxObjects]int
 
@@ -86,7 +88,8 @@ var (
 	controlBack netapi.ControlReply
 
 	txCorrelation  uint64
-	configSequence uint64
+	configClient   config.Client
+	configMessage  ipc.Message
 	driverFaults   uint64
 	reportedState  network.State
 	readyAnnounced bool
@@ -111,7 +114,11 @@ func userspaceMain() {
 	}
 	configHandle, _ = data.Handle("config")
 	now := clockNanos()
-	stack.Init(now ^ uint64(controlHandle)<<17)
+	seed, status := sys.RandomUint64()
+	if status != kcall.StatusOK {
+		fatal("NETD_RANDOM_FAILED\n")
+	}
+	stack.Init(seed ^ now)
 	// Defaults stay in force when the stored settings are missing or invalid.
 	// The stored values are left alone: net status reports the fallback, and
 	// a reload applies the settings once they are fixed.
@@ -137,6 +144,8 @@ func serve() {
 		now := clockNanos()
 		stack.Advance(now)
 		deliverCompletions()
+		deliverDatagrams()
+		announceServers()
 		transmitPending()
 		announceState(now)
 		count := buildInterests()
@@ -167,6 +176,8 @@ func serve() {
 				serviceDriver()
 			case -2:
 				serviceControl()
+			case -3:
+				serviceTransport()
 			default:
 				serviceSession(owner)
 			}
@@ -185,6 +196,9 @@ func buildInterests() int {
 		add(device.channel, -1)
 	}
 	add(controlHandle, -2)
+	if transport.channel != 0 {
+		add(transport.channel, -3)
+	}
 	for index := range sessions {
 		if sessions[index].channel != 0 {
 			add(sessions[index].channel, index)
@@ -398,6 +412,8 @@ func serviceControl() {
 			answerControl(control.Opcode, addSession(message.Handles[0], control.Rights), 0, correlation)
 		case netapi.ControlSetDevice:
 			answerControl(control.Opcode, setDevice(control.Generation), control.Generation, correlation)
+		case netapi.ControlSetTransport:
+			answerControl(control.Opcode, setTransport(control.Generation), control.Generation, correlation)
 		}
 	}
 }
@@ -425,7 +441,7 @@ func handleIs(id handle.ID, typeID handle.Type, rights capability.Rights) bool {
 }
 
 func addSession(channel handle.ID, class netapi.RightsClass) netapi.ControlResult {
-	if !handleIs(channel, handle.TypeChannel, capability.Read|capability.Write|capability.Wait) {
+	if class == netapi.RightsResolveStatus || !handleIs(channel, handle.TypeChannel, capability.Read|capability.Write|capability.Wait) {
 		sys.HandleClose(channel)
 		return netapi.ControlInvalidArgument
 	}
@@ -540,7 +556,12 @@ func handleRequest(index int, correlation uint64) {
 			Mode: netapi.Mode(snapshot.Mode), Local: snapshot.Address, Gateway: snapshot.Gateway, MAC: snapshot.MAC,
 			Prefix: snapshot.Prefix, Lease: snapshot.LeaseRemaining,
 			RX: snapshot.RX, TX: snapshot.TX, Drop: snapshot.Drop, Malformed: snapshot.Malformed,
-			MTU: snapshot.MTU, Fallback: fallback}
+			MTU: snapshot.MTU, Fallback: fallback,
+			RateLimited: snapshot.RateLimited, ConflictRun: snapshot.ConflictRun,
+			Probes: snapshot.Conflicts.Probes, ProbeConflicts: snapshot.Conflicts.ProbeConflicts,
+			Announcements: snapshot.Conflicts.Announcements, ActiveConflicts: snapshot.Conflicts.ActiveConflicts,
+			Defenses: snapshot.Conflicts.Defenses, Relinquished: snapshot.Conflicts.Relinquished,
+			RateLimits: snapshot.Conflicts.RateLimits, Loopback: snapshot.Loopback}
 		if snapshot.Link {
 			answer.Link = netapi.LinkUp
 		}
@@ -627,18 +648,25 @@ var (
 
 // readConfig reads every network setting and parses them as one candidate.
 // It reports false when the configuration service could not be asked. The
-// whole read shares one deadline, so a stalled service delays a reload by
-// seconds, not by seconds per key.
+// whole read shares one deadline in ticks, configBudget from the start, and
+// each key waits at most configDeadline of it. A key that would start at or
+// after the shared deadline is not asked for, and a late reply to a key that
+// timed out is dropped by the next exchange instead of being taken for its
+// answer.
 func readConfig() (network.Config, network.Tuning, network.Field, bool) {
 	if configHandle == 0 {
 		return network.Config{}, network.Tuning{}, network.FieldNone, false
 	}
-	deadline := clockNanos() + configBudget*nanosPerTick
+	var link configLink
+	deadline := link.Now() + configBudget
 	for index := range settings {
 		field := netapi.Field(index + 1)
-		if !getSetting(field.Key(), deadline, &settings[index]) {
+		keyDeadline := min(deadline, link.Now()+configDeadline)
+		value, status, outcome := configClient.ExchangeGet(link, sys.Bytes(field.Key()), keyDeadline, &configMessage)
+		if outcome != config.OutcomeOK || status != config.StatusOK {
 			return network.Config{}, network.Tuning{}, network.FieldNone, false
 		}
+		settings[index] = value
 		want := config.KindUint
 		if field == netapi.FieldMode || field == netapi.FieldAddress || field == netapi.FieldGateway {
 			want = config.KindText
@@ -659,40 +687,32 @@ func readConfig() (network.Config, network.Tuning, network.Field, bool) {
 	return candidate, tuning, field, true
 }
 
-// getSetting reads one key into value, waiting at most configDeadline and
-// never past deadline, a clock time in nanoseconds.
-func getSetting(key string, deadline uint64, value *config.Value) bool {
-	now := clockNanos()
-	if now >= deadline {
-		return false
-	}
-	wait := min((deadline-now)/nanosPerTick, uint64(configDeadline))
-	if wait == 0 {
-		wait = 1
-	}
-	configSequence++
-	request, ok := config.EncodeRequest(config.Request{Operation: config.OperationGet, Key: sys.Bytes(key)}, configSequence)
-	if !ok {
-		return false
-	}
-	size, ok := ipc.Encode(request, configWire[:])
-	if !ok || sys.IPCSend(configHandle, configWire[:size]) != kcall.StatusOK {
-		return false
-	}
-	if sys.IPCWaitReceive(configHandle, configWire[:], wait) != kcall.StatusOK {
-		return false
+// configLink is the configuration session as a config.Transport, with the
+// clock in ticks.
+type configLink struct{}
+
+func (configLink) Send(message *ipc.Message) bool {
+	size, ok := ipc.EncodeFrom(message, configWire[:])
+	return ok && sys.IPCSend(configHandle, configWire[:size]) == kcall.StatusOK
+}
+
+func (configLink) Receive(ticks uint64, out *ipc.Message) kcall.Status {
+	if status := sys.IPCWaitReceive(configHandle, configWire[:], ticks); status != kcall.StatusOK {
+		return status
 	}
 	payloadSize := int(configWire[24]) | int(configWire[25])<<8
-	received, valid := ipc.Decode(configWire[:ipc.WireHeaderSize+payloadSize+int(configWire[26])*8])
-	if !valid || received.Correlation != configSequence {
-		return false
+	if !ipc.DecodeInto(configWire[:ipc.WireHeaderSize+payloadSize+int(configWire[26])*8], out) {
+		return kcall.StatusCorruptData
 	}
-	got, valid := config.DecodeReply(received)
-	if !valid || got.Operation != config.OperationGet || got.Status != config.StatusOK {
-		return false
+	return kcall.StatusOK
+}
+
+func (configLink) Now() uint64 {
+	ticks, status := sys.ClockRead()
+	if status != kcall.StatusOK {
+		fatal("NETD_CLOCK_FAILED\n")
 	}
-	*value = got.Value
-	return true
+	return ticks
 }
 
 // --- reporting ---------------------------------------------------------------
