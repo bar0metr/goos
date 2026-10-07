@@ -16,7 +16,7 @@ DHCP client, the loopback interface, a hosts table (ADR 0193), DNS name
 resolution through a stub resolver with a cache, and IPv4 UDP for any
 program PID 1 grants a UDP session (ADR 0195). Not implemented: TCP, IPv4
 fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
-UDP senders, DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
+UDP senders (no Port Unreachable for an unbound port), DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
 Linux socket calls.
 
 ## Processes

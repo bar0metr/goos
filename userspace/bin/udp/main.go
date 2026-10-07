@@ -221,7 +221,6 @@ func listen(parsed *options) {
 			Port: port(parsed.operands[index])}
 		call("bind")
 	}
-	utility.Mark("UDP_LISTENING\n")
 	for index := 0; index < parsed.operandN; index++ {
 		request = udpapi.Request{Opcode: udpapi.OpRecvFrom, Endpoint: endpoints[index]}
 		started, ok := utility.UDPStart(&request)
@@ -230,6 +229,9 @@ func listen(parsed *options) {
 		}
 		waiting[index] = started
 	}
+	// The receives are on their way: a datagram sent after this mark finds
+	// them waiting in the network service.
+	utility.Mark("UDP_LISTENING\n")
 	for received := 0; received < parsed.count; {
 		answered, ok := utility.UDPWait(parsed.wait*clock.TicksPerSecond/1000, &reply)
 		if !ok {

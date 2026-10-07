@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // udpOut decodes one frame the peer sent to the guest as UDP.
@@ -123,5 +124,35 @@ func TestEDNSCommand(t *testing.T) {
 	}
 	if _, _, err := h.command("edns maybe"); err == nil {
 		t.Fatal("edns maybe accepted")
+	}
+}
+
+func TestSlowAnswer(t *testing.T) {
+	z, err := parseZone(strings.NewReader("slow.test 60 SLOW 192.0.2.13\nslow.test 60 A 192.0.2.14\n"))
+	if err == nil {
+		t.Fatal("SLOW and A mixed for one name")
+	}
+	z, err = parseZone(strings.NewReader("slow.test 60 SLOW 192.0.2.13\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	h := newHost(config{mac: peerMAC, ip: peerIP, mask: ipv4{255, 255, 255, 0}, zone: z}, &logger{w: &log})
+	var held [][]byte
+	var waited time.Duration
+	h.later = func(delay time.Duration, frames [][]byte) { waited, held = delay, frames }
+	query := dnsQueryBytes(5, "slow.test", typeA, true)
+	frame := ipv4Frame(peerMAC, guestIP, peerIP, 17, buildUDP(guestIP, peerIP, 50000, 53, query))
+	if out := h.handle(frame); len(out) != 0 {
+		t.Fatal("slow answer sent at once")
+	}
+	if waited != slowAnswer || len(held) != 1 {
+		t.Fatalf("delay %s, %d frames", waited, len(held))
+	}
+	if _, datagram := udpOut(t, held[0]); datagram.dstPort != 50000 || len(readResponse(t, datagram.payload).answers) != 1 {
+		t.Fatalf("held answer %+v", datagram)
+	}
+	if !strings.Contains(log.String(), "slow slow.test 1s\n") {
+		t.Fatalf("log %q", log.String())
 	}
 }

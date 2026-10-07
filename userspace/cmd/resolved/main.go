@@ -69,7 +69,6 @@ var (
 	answer        resolvapi.Reply
 	control       netapi.ControlRequest
 	controlBack   netapi.ControlReply
-	query         [dns.DatagramSize]byte
 	settings      [resolvapi.Keys]config.Value
 )
 

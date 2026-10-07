@@ -232,6 +232,7 @@ right.test 60 A 192.0.2.11
 alias.test 60 CNAME right.test
 gone.test NXDOMAIN
 fallback.test 60 A 192.0.2.12
+slow.test 60 SLOW 192.0.2.13
 ZONE
 go build -o "$peer" ./tools/netpeer
 "$peer" -socket "$socket" -control "$control" -zone "$work/zone" -log "$queries" \
@@ -298,8 +299,11 @@ type_line 3 'net status'
 type_line 3 'resolve right.test  '
 # Generic UDP on the left guest against the peer's echo service on port 7
 # and datagrams the peer sends on command.
+# The first datagram comes a second after the listener's receive went out,
+# so netd holds the RecvFrom and completes it when the datagram arrives.
 type_line 3 'udp listen -c 1 -W 8000 9000'
 listening
+sleep 1
 peer_command 'udp-send 192.0.2.10 9000 4000 hello guest'
 sleep 2
 type_line 3 'udp send -r 192.0.2.53 7 echo me'
@@ -334,6 +338,10 @@ type_line 3 'net status '
 peer_command 'edns off'
 type_line 3 'resolve fallback.test'
 peer_command 'edns on'
+# The peer holds this answer for a second, inside the resolver's first wait:
+# the query's RecvFrom waits in netd and resolved takes the answer from it.
+type_line 3 'resolve slow.test'
+sleep 1
 # UDP limits reload with the rest of system.net.*: the DHCP values refused
 # above are put back first, so the candidate fails or applies on UDP alone.
 type_line 3 'config set system.net.dhcp.max-retry-ms 64000'
@@ -418,6 +426,10 @@ require_after left.udp-counters 'net status ' '^  dropped: no-endpoint [1-9][0-9
 require_after left.udp-limits 'net status ' '^  limits: ports 49152-65535 queue 8 payload 4096$' "$left"
 require_after left.dns-fallback 'resolve fallback.test' '^fallback\.test: 192\.0\.2\.12 (dns, ttl 60 s)$' "$left"
 [ "$(queried fallback.test)" = 2 ] || fail left.edns-fallback "two queries for fallback.test, one with EDNS and one without" "$queries"
+checks=$((checks + 1))
+require_after left.dns-deferred 'resolve slow.test' '^slow\.test: 192\.0\.2\.13 (dns, ttl 60 s)$' "$left"
+require peer.slow '^slow slow\.test 1s$' "$queries"
+[ "$(queried slow.test)" = 1 ] || fail left.dns-deferred-once "one query for slow.test, answered while its receive waited" "$queries"
 checks=$((checks + 1))
 # Every query from the left guest left from its own ephemeral port.
 ports=$(sed -n 's/^query .* 192\.0\.2\.10:\([0-9]*\) id=.*/\1/p' "$queries")

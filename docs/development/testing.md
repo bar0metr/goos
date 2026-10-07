@@ -50,7 +50,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     a second reload must refuse `max-retry-ms` below `initial-retry-ms` by
     that key; pings and the cached name must survive both reloads. Then
     the first guest runs `udp` against the peer: a datagram the peer sends
-    must arrive with its source and destination, `udp send -r` to the echo
+    a second after `udp listen` sent its receive must arrive with its
+    source and destination, completing the receive `netd` held, `udp send -r` to the echo
     port 7 must print the reply, two ports must listen at once, a connected
     endpoint must ignore the peer's decoy from port 8, a burst of three must
     arrive in order, and `udp self` must round-trip over `127.0.0.1`,
@@ -60,7 +61,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     arrive while the next good one does. `net status` must count the
     checksum drop and the datagram sent to an unbound port, and show the
     default limits. With EDNS refused, a name must resolve after exactly
-    two queries, one with EDNS and one without; every query the guest sent
+    two queries, one with EDNS and one without; a name the peer answers a
+    second late must resolve after exactly one query, its answer taken from
+    the receive `resolved` left waiting in `netd`; every query the guest sent
     must have left from its own port in the ephemeral range, and the
     40-second lease must have been renewed. Last on that guest,
     `system.net.udp.max-payload` set to 1300 must apply on `net reload`,
@@ -88,8 +91,13 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   user networking depends on the host's ICMP support and is no test of
   GoOS. The host tests and fuzz seeds of `userspace/netdev`,
   `userspace/netapi` and `userspace/network` run in `make test-unit` and
-  `make test-security`; those of `userspace/udpapi` run in
-  `make test-unit`.
+  `make test-security`, as do those of `userspace/udpapi`,
+  `userspace/udpserve` and `userspace/upstream`. The last two hold the
+  GUDP1 logic of `netd` and `resolved`, which build only for the guest:
+  deferred `RecvFrom`, `Close` and session teardown on the service side,
+  and the resolver's queries over a real stack through the GUDP1 codec,
+  with late, mismatched and stale answers. The network gate remains the
+  test of the services themselves.
 
   The config exchange unit tests cover the timeout, late reply, then next
   request ordering with a deterministic clock and message queue. The network
@@ -103,8 +111,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   segment (default `52:54:00:00:02:53`, `192.0.2.53/24`). It answers ARP and
   ICMP echo, serves static DHCP leases by client MAC (`-lease MAC=IP`), and
   answers DNS for a zone under `test` read from `-zone`, where a name can
-  also be set to answer NXDOMAIN, NODATA, SERVFAIL or a truncated reply, or
-  to go unanswered; `-no-edns` makes it refuse EDNS queries with FORMERR,
+  also be set to answer NXDOMAIN, NODATA, SERVFAIL or a truncated reply, to
+  go unanswered, or (`name TTL SLOW ADDRESS`) to answer a second late; `-no-edns` makes it refuse EDNS queries with FORMERR,
   and `-lease-time` sets the lease length. It echoes UDP on port 7 and, for
   a payload that starts with `decoy`, first sends `decoy` from port 8.
   Lines written to the `-control` FIFO inject ARP address conflicts:

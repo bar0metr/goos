@@ -182,6 +182,21 @@ saturate.
 
 ### Testing
 
+The services' GUDP1 logic lives in two packages so host tests run it:
+`userspace/udpserve` is `netd`'s side of a session, with the waiting
+`RecvFrom`s and the RX slots the client holds, and `userspace/upstream` is
+the resolver's per-query state. `netd` and `resolved` keep only handles,
+mappings and the channel. The `udpserve` tests hold a `RecvFrom` with
+nothing queued and complete exactly that request when a datagram arrives,
+answer a waiting `RecvFrom` with `Closed` before the `Close` reply, end a
+session with no receive, slot or endpoint left behind, wait for a free RX
+slot, and refuse a request for a closed endpoint whose table slot a new
+endpoint took. The `upstream` tests join a real stack, the resolver core,
+the client and two server sessions through the GUDP1 codec: a query waits
+in a deferred `RecvFrom` until the answer comes, a retransmission's new
+port leaves the old query's answer with no endpoint, a mismatched answer
+re-arms the receive, and a lost session cancels the query.
+
 `udp send`, `udp listen` and `udp self` use nothing but a UDP session. The
 network gate drives them against `tools/netpeer`, which now echoes UDP on
 port 7 (with a decoy from port 8 on request) and sends plain, numbered,
@@ -189,8 +204,14 @@ sized and corrupt datagrams on command. It checks peer metadata, two ports
 at once, a connected endpoint ignoring the decoy, queue order, `lo` with and
 without a network device, own-address delivery, zero-length and 1472-byte
 datagrams, the 1473-byte refusal, a corrupt checksum, an unbound port, DNS,
-the EDNS fallback, a fresh source port per query, a DHCP renewal and a UDP
-tuning reload.
+the EDNS fallback, a fresh source port per query, a DHCP renewal on a
+40-second lease and a UDP tuning reload. Two checks take the deferred path
+through the real services on purpose: the peer sends to a `udp listen` a
+second after its receive went out, and it holds the answer for one name a
+second, inside the resolver's first wait, so `resolved` takes it from a
+waiting `RecvFrom` after exactly one query. The VM gate stays the
+authority for `netd` and `resolved` themselves; the host tests cover the
+logic they call.
 
 ## Consequences
 
@@ -199,8 +220,9 @@ over IPv4, and the resolver is one such program. Loopback UDP works with no
 network device.
 
 Still missing: TCP, IPv6, IPv4 fragmentation and reassembly, multicast and
-broadcast sends, `SO_REUSEADDR` and `SO_REUSEPORT`, ICMP errors to senders,
-path MTU discovery, and the Linux socket calls. The endpoint model is meant
+broadcast sends, `SO_REUSEADDR` and `SO_REUSEPORT`, ICMP errors to senders
+(an unbound port gets no ICMP Port Unreachable), path MTU discovery, and the
+Linux socket calls. The endpoint model is meant
 to back a Linux UDP socket layer later without a second stack.
 
 `netd` now serves datagrams for programs that are not the resolver. A

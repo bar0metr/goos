@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // config is the peer's view of the segment, fixed at start.
@@ -54,7 +55,15 @@ type host struct {
 	mu        sync.Mutex
 	defend    map[ipv4]bool
 	neighbors map[ipv4]mac
+	// later sends frames after a delay; the server sets it. Without it
+	// a slow answer goes at once.
+	later func(delay time.Duration, frames [][]byte)
 }
+
+// slowAnswer is how long a SLOW name's answer waits: well inside the
+// resolver's first 3 s wait, so the query is answered while its receive
+// waits in the network service.
+const slowAnswer = time.Second
 
 func newHost(cfg config, log *logger) *host {
 	h := &host{config: cfg, log: log, defend: map[ipv4]bool{}}
@@ -148,7 +157,13 @@ func (h *host) handleDNS(src mac, client ipv4, datagram udpDatagram) [][]byte {
 	}
 	udp := buildUDP(h.ip, client, 53, datagram.srcPort, response)
 	ip := buildIPv4(h.ip, client, 17, h.ipID(), udp)
-	return [][]byte{etherFrame(src, h.mac, etherTypeIPv4, ip)}
+	frames := [][]byte{etherFrame(src, h.mac, etherTypeIPv4, ip)}
+	if entry := h.zone.lookup(query.name); entry != nil && entry.slow && h.later != nil {
+		h.log.printf("slow %s %s", query.logName(), slowAnswer)
+		h.later(slowAnswer, frames)
+		return nil
+	}
+	return frames
 }
 
 // command runs one control line and returns the frames to send and whether
