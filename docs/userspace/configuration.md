@@ -118,6 +118,7 @@ A setting is not configuration until something reads it:
 | `system.shell.prompt` | the shell | at startup and after a successful write |
 | `system.log.persist` | the log service | on every drain pass |
 | `system.net.*` | the network service | at startup and on `net reload` |
+| `system.dns.*` | the resolver service | at startup and on `resolve reload` |
 
 A component that cannot reach the service, or gets an answer of the wrong type,
 keeps its built-in default. Configuration decides what a component does, not
@@ -144,9 +145,16 @@ Its timer and rate settings (ADR 0192), all `uint`, times in milliseconds:
 | Key | Default | Range | Meaning |
 | --- | ---: | ---: | --- |
 | `system.net.ipv4.default-ttl` | 64 | 1..255 | TTL of every packet the stack builds |
-| `system.net.ipv4.probe-count` | 2 | 1..10 | ARP probes before an address goes live |
-| `system.net.ipv4.probe-interval-ms` | 500 | 100..5000 | gap between probes, and the quiet period after the last |
-| `system.net.arp.cache-timeout-ms` | 60000 | 1000..3600000 | lifetime of an ARP entry after its last refresh |
+| `system.net.ipv4.probe-count` | 3 | 1..10 | ARP probes before an address goes live |
+| `system.net.ipv4.probe-wait-ms` | 1000 | 0..10000 | longest random wait before the first probe |
+| `system.net.ipv4.probe-min-ms` | 1000 | 100..10000 | shortest random gap between probes |
+| `system.net.ipv4.probe-max-ms` | 2000 | 100..10000 | longest random gap between probes; at least `probe-min-ms` |
+| `system.net.ipv4.announce-count` | 2 | 1..10 | announcements once an address goes live |
+| `system.net.ipv4.announce-interval-ms` | 2000 | 100..10000 | gap between announcements |
+| `system.net.ipv4.defend-interval-ms` | 10000 | 1000..60000 | a second claim on the live address inside this gives it up |
+| `system.net.ipv4.max-conflicts` | 10 | 1..100 | conflicts in a row before claims are rate-limited |
+| `system.net.ipv4.conflict-rate-limit-ms` | 60000 | 1000..600000 | wait before the next claim once rate-limited |
+| `system.net.arp.cache-timeout-ms` | 60000 | 1000..3600000 | hard lifetime of an ARP entry after its last refresh |
 | `system.net.arp.resolve-interval-ms` | 1000 | 100..10000 | gap between ARP requests for one next hop |
 | `system.net.arp.resolve-attempts` | 3 | 1..10 | ARP requests before resolution fails |
 | `system.net.icmp.echo-reply-rate` | 20 | 0..10000 | echo requests answered per second; 0 answers none |
@@ -154,13 +162,22 @@ Its timer and rate settings (ADR 0192), all `uint`, times in milliseconds:
 | `system.net.dhcp.max-retry-ms` | 64000 | 4000..300000 | backoff ceiling; at least `initial-retry-ms` |
 | `system.net.dhcp.conflict-retry-ms` | 10000 | 1000..300000 | wait after declining a conflicting lease |
 
-The echo reply rate limits answers to other hosts' pings, not replies to
-`ping` run here. Linux has similar sysctls (`ip_default_ttl`,
-`neigh.*.retrans_time_ms` and others), but GoOS does not mirror
-`/proc/sys/net`.
+The address-conflict values are RFC 5227's defaults; after the last probe the
+stack also waits a fixed 2 s before the address goes live. The echo reply rate
+limits answers to other hosts' pings, not replies to `ping` run here. Some
+Linux sysctls are rough references (`ip_default_ttl`,
+`neigh.*.retrans_time_ms`), but GoOS defines its own semantics and does not
+mirror `/proc/sys/net`; the ARP lifetime, for one, is a hard expiry that
+Linux's neighbour states do not have. ADR 0192 lists them.
 
-The store checks only their types. The network service reads all fourteen as
-one candidate when it starts and when `net reload` asks it to. DHCP mode ignores
+`system.net.ipv4.probe-interval-ms` no longer exists. A stored line for it is
+skipped at restore as an undeclared key; set `probe-min-ms`, `probe-max-ms`
+and `probe-wait-ms` instead.
+
+The store checks only their types. The network service reads all twenty-one
+as one candidate when it starts and when `net reload` asks it to, within 5 s
+in all and at most 2 s per key, counted in scheduler ticks; a key whose turn
+comes after the 5 s is not asked for, and the reload fails. DHCP mode ignores
 the other three keys. Static mode needs a unicast host address written as
 plain dotted decimal, a prefix from 1 to 30, and a gateway that is zero or
 another host address inside the prefix. A candidate that fails names the
@@ -173,9 +190,11 @@ system.net.* settings not applied` until a reload succeeds.
 A reload that changes only tuning keeps the address, the lease and the ARP
 table. Each value takes effect at its next use: TTL and the reply rate on the
 next packet, the ARP lifetime on the next learned or refreshed entry, resolve
-and probe values on the next resolution or probe, DHCP retry values at the
-client's next retransmission or transaction. A resolution or probe already
-running finishes with the values it started with.
+probe and announcement values on the next resolution, claim or announcement
+sequence, defence and rate-limit values on the next conflict, DHCP retry
+values at the client's next retransmission or transaction. A resolution,
+claim or announcement sequence already running finishes with the values it
+started with.
 
 Each `config set` writes one key, and nothing applies them together, so set
 every key first and reload once:
@@ -202,6 +221,38 @@ net: invalid setting system.net.dhcp.max-retry-ms; previous configuration kept
 
 The settings persist in `/state/config` like any other; there is no separate
 network file.
+
+## Resolver
+
+The resolver service's settings (ADR 0194):
+
+| Key | Type | Default | Range | Meaning |
+| --- | --- | --- | ---: | --- |
+| `system.dns.server1`..`server4` | `text` | `0.0.0.0` | | configured DNS servers; `0.0.0.0` leaves a slot unused |
+| `system.dns.cache.entries` | `uint` | 64 | 1..256 | cache entries in use; lowering it evicts at once |
+| `system.dns.cache.max-ttl-sec` | `uint` | 86400 | 1..604800 | cap on how long an answer stays cached |
+| `system.dns.cache.max-negative-sec` | `uint` | 3600 | 1..86400 | cap on how long NXDOMAIN and NODATA stay cached |
+| `system.dns.failure-cache-sec` | `uint` | 5 | 1..300 | how long a timeout or server failure stays cached |
+| `system.dns.query-timeout-ms` | `uint` | 3000 | 500..30000 | time budget of one round of queries |
+| `system.dns.attempts` | `uint` | 2 | 1..3 | queries to each server per lookup |
+
+A server must be strict dotted decimal and may not be in `0.0.0.0/8`,
+`127.0.0.0/8`, broadcast or multicast, or repeat an earlier slot. The servers
+a DHCP lease names come first, then the configured ones not already listed;
+in static mode the configured ones are the whole list. Servers from DHCP are
+never written here: `resolve status` shows them, marked `dhcp`.
+
+`resolve reload` reads all ten as one candidate and applies it whole, or
+names the first bad key and keeps the previous settings:
+
+```text
+goos> config set system.dns.server1 192.0.2.53
+goos> resolve reload
+resolver configuration applied
+goos> config set system.dns.server2 127.0.0.53
+goos> resolve reload
+resolve: invalid setting system.dns.server2; previous configuration kept
+```
 
 ## Hosts
 

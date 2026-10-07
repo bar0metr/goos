@@ -15,12 +15,14 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-network` builds the validation ISO and system tree and runs
-  `tests/boot/network.sh`, the network gate (ADR 0190 to ADR 0192). Each
+  `tests/boot/network.sh`, the network gate (ADR 0190 to ADR 0194). Each
   scenario boots from its own disposable disk with the NIC at PCI slot 4:
   - `user`: QEMU user networking. DHCP must reach ready on `10.0.2.x` within
     15 seconds of the prompt, and `net status` must show the state, link,
-    MAC, mode, address, gateway `10.0.2.2`, lease and `mtu: 1500`, and no
-    `settings` fallback line. Four rounds of
+    MAC, mode, address, gateway `10.0.2.2`, lease and `mtu: 1500`, lo at
+    `127.0.0.1/8`, and no `settings` fallback line; `resolve status` must
+    list `10.0.2.3 (dhcp)` from DHCP option 6, and `ping -c 1 localhost`
+    must get a reply from `127.0.0.1`. Four rounds of
     `ping -c 4 -W 1000 10.0.2.2` must each print a reply for every sequence
     number and `4 sent, 4 received, 0% lost`. Between rounds `fault
     net-driver` kills the driver twice; a file written before the first
@@ -29,21 +31,37 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     must match between the first and the second round of pings, and
     between the rounds that follow the first and the second driver
     replacement.
-  - `stream`: two guests on one QEMU `stream` backend over a Unix socket,
-    with static `192.0.2.10/24` and `192.0.2.11/24` stored in their
-    configuration files and no gateway. Each pings the other four times and
-    must get every reply. The first guest then sets a TTL and an ARP attempt
-    count and must see `net reload` apply them; it must see `config set`
-    refuse a 20-digit TTL above the `uint64` maximum, and a second reload
-    refuse `max-retry-ms` below `initial-retry-ms` by that key. Two more pings
-    must succeed after it. `net status` must show static mode, the address,
-    and no gateway.
+  - `stream`: two guests and `tools/netpeer` on a private segment, each
+    guest a QEMU `stream` client of the peer's Unix socket. The peer is the
+    hub, the DHCP server for the first guest (`192.0.2.10`) and the DNS
+    server at `192.0.2.53` for a `test` zone; the second guest stores the
+    static `192.0.2.11/24` and `system.dns.server1` `192.0.2.53`. Each guest
+    pings the other four times and must get every reply. `resolve status`
+    must show the server as `dhcp` on the first guest and `config` on the
+    second. On the first guest a name must resolve from DNS, then from the
+    cache with exactly one query in the peer's log, then from DNS again
+    after `resolve flush`, with a second query; a CNAME must resolve, an
+    NXDOMAIN must say `name not found`, `localhost` must resolve without any
+    query, and `ping -c 2 right.test` must announce the address and get both
+    replies. The second guest must resolve the first by DNS, add a hosts
+    record and resolve and ping it by that name. The first guest then sets
+    a TTL and an ARP attempt count and must see `net reload` apply them;
+    `config set` must refuse a 20-digit TTL above the `uint64` maximum, and
+    a second reload must refuse `max-retry-ms` below `initial-retry-ms` by
+    that key; pings and the cached name must survive both reloads. Last,
+    the peer claims the second guest's address: the guest must defend it
+    once and stay ready, give it up and fail at a second claim within the
+    defend interval, and fail again on a new address whose probe the peer
+    answers, while `ping -c 1 127.0.0.1` still works.
   - `none`: no NIC, and a stored `system.net.ipv4.probe-count` of 0. The
     guest must reach normal mode and read `/system/motd`; `net status` must
-    say `down` and print the `settings: built-in defaults` line, `net
-    reload` must refuse the probe count by key, and `ping -c 1 -W 500`
+    say `down`, list lo and print the `settings: built-in defaults` line,
+    `net reload` must refuse the probe count by key, and `ping -c 1 -W 500`
     must print a failed sequence, `1 sent, 0 received, 100% lost`, and exit
-    status 1.
+    status 1. With no device, `ping -c 1 127.0.0.1` and `ping -c 1
+    localhost` must get their replies, `resolve localhost` and `hosts get
+    localhost` must give `127.0.0.1`, and another name must fail with `no
+    DNS servers`.
 
   `NETWORK_SCENARIOS` picks some of them, for example
   `make test-network NETWORK_SCENARIOS=stream`. Logs go to

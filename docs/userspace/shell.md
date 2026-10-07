@@ -148,16 +148,20 @@ memory in binary units.
 
 ## Network commands
 
-`ping` and `net` are native commands whose manifests ask for a network
-session; PID 1 opens one for each launch (ADR 0191). Neither builds a packet:
-`netd` does the work and answers.
+`ping`, `net` and `resolve` are native commands whose manifests ask for
+sessions PID 1 opens for each launch: `ping` and `net` a network session
+(ADR 0191), `ping` and `resolve` a resolver session (ADR 0194). None builds a
+packet: `netd` and `resolved` do the work and answer.
 
-`ping [-c COUNT] [-W TIMEOUT_MS] IPv4` sends COUNT echo requests, 1 to 16 and
+`ping [-c COUNT] [-W TIMEOUT_MS] HOST` sends COUNT echo requests, 1 to 16 and
 4 by default, one at a time and one second apart, each waiting up to
-TIMEOUT_MS, 100 to 5000 and 1000 by default, for its reply. It takes a
-numeric unicast address only: a name is refused with
-`numeric IPv4 address required` before anything is sent, as there is no name
-service. Each request prints one line and a summary follows, for example:
+TIMEOUT_MS, 100 to 5000 and 1000 by default, for its reply. HOST is a
+numeric address, used as it is, or a host name, which `ping` asks the
+resolver for and announces as `PING NAME (ADDRESS)` before the first request;
+of several addresses it takes the first. A numeric address works without the
+resolver. Anything in `127.0.0.0/8`, `localhost` among the names, is answered
+on lo at once and never reaches a device. Each request prints one line and a
+summary follows, for example:
 
 ```text
 goos> ping -c 2 10.0.2.2
@@ -170,16 +174,58 @@ A request that fails prints `seq=N: REASON`, for example `seq=3: timeout`,
 `seq=1: neighbor unreachable` or `seq=1: interface down`; a router's ICMP
 error prints `from A: seq=N destination unreachable` or `time exceeded`.
 `ping` exits 0 when at least one reply came, 1 when none did, and 2 for a
-usage error or when the network service is unavailable.
+usage error, a name that does not resolve, or when the network service is
+unavailable.
 
-`net status` prints the interface: `state` (`down`, `configuring`, `ready` or
-`failed`), `link`, `mac`, `mode`, `address` with its prefix or `none`,
-`gateway` or `none`, `mtu` while a link is up, `lease` in seconds while a DHCP
-lease runs, and the `frames` counters for received, transmitted, dropped and
-malformed frames. A `settings` line appears when the service runs on built-in
-defaults because the stored settings were unreadable or invalid at startup.
+`net status` prints two interfaces. `lo:` is always `up` at `127.0.0.1/8`
+with MTU 65536 and the count of `echoes` answered on it. `net0:` gives
+`state` (`down`, `configuring`, `ready` or `failed`), `link`, `mac`, `mode`,
+`address` with its prefix or `none`, `gateway` or `none`, `mtu` while a link
+is up, `lease` in seconds while a DHCP lease runs, the `frames` counters for
+received, transmitted, dropped and malformed frames, `claims` (ARP probes and
+announcements sent) and `conflicts` (conflicts while probing and on the live
+address, defences, addresses given up, rate-limit waits). A `claim` line
+says when the next address claim waits for the conflict rate limit, and a
+`settings` line appears when the service runs on built-in defaults because
+the stored settings were unreadable or invalid at startup. Each field is
+indented under its interface:
+
+```text
+goos> net status
+lo:
+  state: up
+  address: 127.0.0.1/8
+  mtu: 65536
+  echoes: 0
+net0:
+  state: ready
+  ...
+```
+
 `net reload` asks the service to apply the `system.net.*` settings; see
 [configuration](configuration.md#network).
+
+`resolve NAME` prints a name's IPv4 addresses and where they came from,
+`localhost`, `hosts`, `dns` with the record's TTL, or `cache` with the time
+left:
+
+```text
+goos> resolve localhost
+localhost: 127.0.0.1 (localhost)
+goos> resolve right.test
+right.test: 192.0.2.11 (dns, ttl 60 s)
+```
+
+`resolve status` prints the upstream servers, each marked `dhcp` or
+`config`, the cache's use against its limit and its positive, negative and
+failure entries, hit and miss counts, upstream queries and timeouts, replies
+dropped as malformed, mismatched or truncated, and the generation of the
+DHCP server list. `resolve flush` empties the cache, not the hosts table.
+`resolve reload` applies the `system.dns.*` settings; see
+[configuration](configuration.md#resolver). Only the exact words `status`,
+`flush` and `reload` are subcommands: a host by one of those names is
+`status.` and so on. A name under `.local` is refused, as GoOS has no
+multicast DNS, and a truncated answer fails, as it has no DNS over TCP.
 
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.

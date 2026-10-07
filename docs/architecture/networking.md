@@ -1,25 +1,35 @@
 # Networking
 
-GoOS has one IPv4 interface on one legacy virtio-net function. The kernel
+GoOS has two IPv4 interfaces: `lo`, which always exists and owns
+`127.0.0.0/8`, and `net0` on one legacy virtio-net function. The kernel
 discovers the function, routes its interrupt and bounds the driver's
 authority (ADR 0190). Everything that knows what a frame means runs in
 userspace: a driver that moves frames, a network service that runs the
-protocols, and two commands that ask the service for work (ADR 0191). The
+protocols (ADR 0191), a resolver service that turns names into addresses
+(ADR 0194), and commands that ask them for work. The
 [networking specification](../development/networking.md) records the
-requirements this was built from.
+requirements the first version was built from.
+
+Implemented: IPv4 with RFC 5227 address-conflict detection, ICMP echo, a
+DHCP client, the loopback interface, a hosts table (ADR 0193) and DNS name
+resolution through a stub resolver with a cache. Not implemented: UDP or
+TCP sockets for applications, DNS over TCP, multicast DNS, IPv6 and AAAA,
+DNSSEC, and the Linux network calls.
 
 ## Processes
 
 ```text
-ping                         net
-  | GNETAPI1, PingStatus       | GNETAPI1, AdminStatus
-  +-------------+--------------+
-                |  one private session per command
-                v
-netd  <---- GNETCTL1 control ----  PID 1
-  |  Ethernet, ARP, IPv4, ICMP echo, DHCP client
-  |
-  |  GNETDRV1 channel
+resolve             ping                         net
+  | GRESOLV1          | GRESOLV1, GNETAPI version 2 | GNETAPI version 2
+  v                   +-------------+---------------+
+resolved  <-- GNETCTL1 --  PID 1    |  one private session per command
+  |  hosts: GHST1 on its configuration session
+  |  GNETDGRAM1 channel             v
+  |  query pool (resolved writes) netd  <---- GNETCTL1 control ----  PID 1
+  |  reply pool (netd writes)       |  lo, Ethernet, ARP, IPv4, ICMP echo,
+  +-------------------------------->|  DHCP client, DNS datagrams
+                                    |
+                                    |  GNETDRV1 channel
   |  receive pool  (driver writes, netd reads)
   |  transmit pool (netd writes, driver reads)
   v
@@ -30,13 +40,13 @@ legacy virtio-net PCI function (1af4:1000)
 ```
 
 PID 1 creates every channel and pool in the picture and is the only holder
-of `netd`'s control channel. It keeps the device's three capabilities for
+of `netd`'s and `resolved`'s control channels. It keeps the device's three capabilities for
 the life of the system and grants them to each driver it starts. `netd`
 holds no device authority, and the driver holds no filesystem,
 configuration or client session.
 
-`netd` waits on its driver channel, its control channel and up to eight
-command sessions in one `WaitAny`, with a timeout set by the stack's earliest
+`netd` waits on its driver channel, its control channel, the resolver
+transport and up to eight command sessions in one `WaitAny`, with a timeout set by the stack's earliest
 timer, or 30 seconds when no timer is due. The driver waits on its channel
 and its interrupt line in one `WaitAny` with a 10-second timeout and does not
 touch the device when the timeout expires.
@@ -107,15 +117,44 @@ must lie inside the offered prefix. Absent T1 and T2 default to half and
 seven-eighths of the lease, and supplied values must satisfy
 T1 < T2 < lease. The client uses the first router listed. A repeated
 option among those it reads fails the message, option overload into the
-file and server-name fields is followed, and DNS and other options are
-ignored. A `NAK` or an expired lease removes the address and starts
+file and server-name fields is followed. Option 6 gives up to four DNS
+servers that belong to the lease and go with it; other options are ignored. A `NAK` or an expired lease removes the address and starts
 discovery again, and so does a renewal acknowledged for a different
 address.
 
 In static mode the address, prefix and optional gateway come from the
 configuration service and must pass the checks in
-[configuration](../userspace/configuration.md#network). Both modes probe the
-address with ARP before it goes live and announce it once it does.
+[configuration](../userspace/configuration.md#network). Both modes claim the
+address as RFC 5227 describes: a random wait of up to 1 s, three ARP probes
+1 to 2 s apart, a 2 s quiet period, then two announcements 2 s apart. Any ARP
+from another host that uses or probes for the candidate rejects it. Once
+the address is live the stack answers other hosts' probes for it and keeps
+watching: the first claim by another host is answered with one announcement,
+a second claim within 10 s gives the address up, declining a DHCP lease or
+failing a static address. Ten conflicts in a row, with no address held
+through its announcements in between, delay the next claim by 60 s. The
+values are settings (ADR 0192); `net status` shows the counters.
+
+## Loopback
+
+`lo` holds `127.0.0.1/8` from the start of `netd`, with or without a NIC,
+lease or address, and the whole of `127.0.0.0/8` routes to it. An echo to a
+loopback host is answered inside the stack with zero round-trip time; nothing
+for `127.0.0.0/8` is framed, resolved with ARP or sent to the gateway. A
+frame from the link carrying a loopback source or destination, in IPv4 or
+ARP, is dropped. `net status` lists `lo` with its MTU of 65536, a logical
+limit, and the count of echoes answered on it (ADR 0193).
+
+## Names
+
+`resolved` answers `localhost` and names under it with `127.0.0.1` itself,
+refuses `.local` names, asks the configuration service's hosts table, then
+its cache, then the upstream DNS servers: those of the DHCP lease first,
+then `system.dns.server1..4`. It reaches the servers only through
+`GNETDGRAM1`: `netd` sends each query to port 53 from a fresh random port
+and hands back the one reply from that server and port, and the resolver
+checks the transaction ID and question before anything reaches its cache.
+PID 1 makes a new transport whenever either service starts (ADR 0194).
 
 The interface is in one of four states:
 
@@ -124,7 +163,7 @@ The interface is in one of four states:
 | `down` | no driver bound, or no carrier |
 | `configuring` | a live link without a usable address |
 | `ready` | an address that passed validation and the conflict probe |
-| `failed` | a device fault or a static address conflict; a reload or a new link-up starts again |
+| `failed` | a device fault or a static address conflict or relinquished static address; a reload or a new link-up starts again |
 
 ## What the stack accepts
 
@@ -146,7 +185,9 @@ The interface is in one of four states:
   each with its checksum checked. Echo requests to our unicast address are
   answered to the sender's MAC. Replies and errors must match a pending echo
   as ADR 0191 describes; anything else changes no state.
-- UDP only from port 67 to port 68 for the DHCP client. A zero UDP checksum
+- UDP from port 67 to port 68 for the DHCP client, and from port 53 of a
+  queried DNS server to the source port of its open exchange; any other
+  datagram is a drop. A zero UDP checksum
   is accepted as "no checksum"; a nonzero one is verified.
 
 ## Timers
@@ -159,9 +200,13 @@ ranges and for when a reloaded value takes effect.
 | --- | --- | --- |
 | ARP entry lifetime | 60 s | `arp.cache-timeout-ms` |
 | ARP resolution | 3 requests 1 s apart, then `NeighborUnreachable` 1 s after the last | `arp.resolve-attempts`, `arp.resolve-interval-ms` |
-| address probe | 2 ARP probes 500 ms apart, then 500 ms of silence | `ipv4.probe-count`, `ipv4.probe-interval-ms` |
+| address probe | a random wait of 0 to 1 s, then 3 ARP probes a random 1 to 2 s apart | `ipv4.probe-wait-ms`, `ipv4.probe-count`, `ipv4.probe-min-ms`, `ipv4.probe-max-ms` |
+| announcements | 2, 2 s apart | `ipv4.announce-count`, `ipv4.announce-interval-ms` |
+| defence | a second claim within 10 s gives the address up | `ipv4.defend-interval-ms` |
+| conflict rate limit | 60 s before the next claim after 10 conflicts in a row | `ipv4.max-conflicts`, `ipv4.conflict-rate-limit-ms` |
 | DHCP `DISCOVER` and `REQUEST` retransmission | 4 s, doubling to 64 s, with up to 1 s of jitter either way, at most half the base | `dhcp.initial-retry-ms`, `dhcp.max-retry-ms` |
-| DHCP retry after a conflict | 10 s | `dhcp.conflict-retry-ms` |
+| DHCP retry after a conflict | 10 s, or the rate limit when longer | `dhcp.conflict-retry-ms` |
+| DNS lookup | one deadline of 6 s, `query-timeout-ms` times `attempts`, shared among the servers | `system.dns.query-timeout-ms`, `system.dns.attempts` |
 | echo replies answered | 20 per one-second window | `icmp.echo-reply-rate` |
 
 These are fixed:
@@ -174,7 +219,9 @@ These are fixed:
 | `ping` request spacing | 1 s between the starts of two requests |
 | command reply wait | the request's timeout plus 2 s |
 | `netd` idle wait | 30 s |
-| `netd` configuration read | 2 s per key, 5 s for the whole candidate |
+| quiet period after the last probe | 2 s (RFC 5227 ANNOUNCE_WAIT) |
+| `netd` and `resolved` configuration read | 2 s per key, 5 s for the whole candidate, in scheduler ticks; a late reply to an earlier key is dropped |
+| `resolved` hosts lookup | 500 ms |
 | driver wait | 10 s |
 
 The stack holds no clock. `netd` passes monotonic nanoseconds into it and
@@ -207,6 +254,13 @@ protocol bounds.
 | static prefix | 1 to 30 | `network.MinPrefix`, `network.MaxPrefix` |
 | shortest DHCP lease | 30 s | `userspace/network/dhcp.go` |
 | `ping` count | 1 to 16, 4 by default | `userspace/bin/ping` |
+| DNS servers from a lease | 4 | `network.MaxDNSServers` |
+| DNS exchanges in flight | 8, port 53 only, 1232 bytes either way | `network.MaxDatagrams`, `netapi.DatagramMaxPayload` |
+| transport pools | 3 pages each, 8 slots of 1280 bytes | `netapi.DatagramPoolPages`, `netapi.DatagramSlots` |
+| resolver cache | 256 entries, 8 addresses each | `dns.MaxCacheEntries`, `dns.MaxAddresses` |
+| resolver lookups | 4 transactions, 8 waiters each, 16 sessions | `dns.MaxTransactions`, `dns.MaxWaiters`, `dns.MaxClients` |
+| CNAME chain | 8 links | `dns.MaxCNAMEChain` |
+| hosts table | 64 records, names up to 248 bytes, `localhost` built in | `config.MaxHosts`, `config.MaxHostName` |
 
 ## Failure
 
@@ -217,7 +271,14 @@ new generation, channel and pools, so nothing the old driver sent can reach
 the new binding. A `netd` restart takes the driver with it, and commands
 connected to the old service see `PeerDied`.
 
+A `netd` restart also ends the resolver transport; PID 1 binds a new one,
+lookups waiting on the old one fail with `Reconfigured`, and the cache
+stays. A `resolved` restart loses the cache and nothing else: `ping` with a
+numeric address keeps working.
+
 A missing NIC, a refused one, or network services that fail leave storage,
-the installed system and the shell running; `net status` reports `down` and
-`ping` fails within its deadline. Recovery mode runs neither service. See
+the installed system and the shell running; `net status` reports `net0`
+`down`, `lo` keeps answering, and `ping` to another address fails within its
+deadline. Recovery mode runs none of the network services and carries no
+network command. See
 [init](../userspace/init.md#network-services) for the supervision rules.

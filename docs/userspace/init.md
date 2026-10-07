@@ -288,9 +288,28 @@ the command's `net` role. A command that declares both gets the ping class.
 Without a network service the command starts without a session and reports
 `network service unavailable`.
 
-When a storage service fails, PID 1 holds both network services with the
+PID 1 also registers the resolver, `/system/services/resolved`, after `netd`,
+with its own control channel and a configuration session scoped to
+`system.dns.` with the `Read` and `HostsRead` rights (ADR 0194). It is a
+session service: the installed-system check requires its image. Whenever
+`netd` or `resolved` starts and the other is running, PID 1 makes a new
+resolver transport: a channel and two 3-page datagram pools, with a new
+generation. It sends `netd` its channel end, the query pool read-only and the
+reply pool writable, and `resolved` the other end, the query pool writable
+and the reply pool read-only, each in a `SetTransport` control request, and
+keeps nothing. A command whose index entry declares `GrantResolve` or
+`GrantResolveAdmin` gets a channel whose other end goes to `resolved` in an
+`AddSession` request with the `ResolveStatus` or `AdminStatus` class, granted
+as its `resolve` role. This session is separate from the network one: `ping`
+gets both, `resolve` only the resolver's. After a configuration service
+restart PID 1 sends `resolved` a renewed session as a notice, as it does
+`netd`.
+
+When a storage service fails, PID 1 holds the network services with the
 session services and releases them when storage is back. Entering recovery
-stops both and closes the control channel; recovery runs no network. Unlike
+stops `resolved`, the driver and `netd` and closes their control channels;
+recovery runs no network and carries no network command, so it needs no
+loopback either. Unlike
 the session services, a network service that uses up its restarts stays
 failed and never sends the system into recovery, and neither does a missing
 NIC. The validation build's `fault net-driver` kills the driver once.
@@ -332,6 +351,7 @@ they held the same way, and their clients are handed new sessions instead of bei
 | `block` | a new control channel (client end kept) and public endpoint, no driver or filesystem endpoint | nothing; the driver and `fat32` exit, restart after it, and hand it their endpoints over the control channel (ADR 0101) |
 | `netd` | a new control channel (client end kept) and configuration session | nothing; the driver follows it and restarts with a new binding (ADR 0191) |
 | `virtio-net` | a new channel, two new frame pools and a new generation | the channel's other end and narrowed copies of the pools, to `netd` in `SetDevice` before the launch (ADR 0191) |
+| `resolved` | a new control channel (client end kept) and configuration session | a new resolver transport, to `netd` and `resolved` in `SetTransport` after the launch; `netd`'s restart does the same (ADR 0194) |
 
 A handle renewed for a launch that then fails is closed at the next renewal, so
 failures cannot fill PID 1's table. Each shell numbers the slots of its own
