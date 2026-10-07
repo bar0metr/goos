@@ -16,7 +16,10 @@ const (
 	tcpGenerations            = 1 << (32 - tcpSlotBits)
 	tcpInitialWindowBytes     = 14600
 	tcpInitialSSThresh        = 65535
-	tcpEventCapacity          = MaxTCPEndpoints * 2
+	// tcpMaxRetransmits bounds consecutive RTO retransmissions of one
+	// synchronized connection. With the default RTO limits the connection
+	// gives up after about six minutes without progress.
+	tcpMaxRetransmits = 10
 )
 
 // TCPEndpointID contains a table slot and generation. A closed ID cannot
@@ -45,26 +48,6 @@ const (
 	TCPTimeWait
 	TCPClosed
 )
-
-// TCPOperation identifies an asynchronous completion.
-type TCPOperation uint8
-
-const (
-	TCPConnected TCPOperation = iota + 1
-	TCPReadable
-	TCPWritable
-	TCPAccepted
-	TCPClosedEvent
-)
-
-// TCPEvent reports state changes to tcpserve without storing IPC state in the
-// protocol stack.
-type TCPEvent struct {
-	Owner     int
-	Endpoint  TCPEndpointID
-	Operation TCPOperation
-	Result    Result
-}
 
 // TCPTuple is a connection's fixed four-tuple.
 type TCPTuple struct {
@@ -151,7 +134,6 @@ func (stack *Stack) resetTCP() {
 	}
 	stack.tcpGeneration = 0
 	stack.tcpStats = TCPStats{}
-	stack.tcpEventHead, stack.tcpEventCount = 0, 0
 }
 
 func (stack *Stack) tcpEndpoint(owner int, id TCPEndpointID) (*tcpEndpoint, int) {
@@ -396,49 +378,20 @@ func (stack *Stack) TCPState(owner int, id TCPEndpointID) (TCPState, TCPTuple, R
 	return entry.state, tcpTuple(entry), entry.lastResult
 }
 
-func (stack *Stack) TCPEvent() (TCPEvent, bool) {
-	if stack.tcpEventCount == 0 {
-		return TCPEvent{}, false
-	}
-	event := stack.tcpEvents[stack.tcpEventHead]
-	stack.tcpEventHead = (stack.tcpEventHead + 1) % tcpEventCapacity
-	stack.tcpEventCount--
-	return event, true
-}
-
-func (stack *Stack) tcpEvent(entry *tcpEndpoint, operation TCPOperation, result Result) {
-	if stack.tcpEventCount == tcpEventCapacity {
-		return
-	}
-	slot := -1
-	for index := range stack.tcp[:] {
-		if entry == &stack.tcp[index] {
-			slot = index
-			break
-		}
-	}
-	if slot < 0 {
-		return
-	}
-	index := (stack.tcpEventHead + stack.tcpEventCount) % tcpEventCapacity
-	stack.tcpEvents[index] = TCPEvent{Owner: int(entry.owner), Endpoint: tcpID(entry, slot), Operation: operation, Result: result}
-	stack.tcpEventCount++
-}
-
 func (stack *Stack) releaseTCP(entry *tcpEndpoint) {
 	generation := entry.generation
 	*entry = tcpEndpoint{generation: generation}
 }
 
-// closeTCP moves a connection to CLOSED and reports whether its owner still
-// holds it. An orphan is released instead.
-func (stack *Stack) closeTCP(entry *tcpEndpoint, result Result) bool {
+// closeTCP moves a connection to CLOSED with its final result and stops its
+// timers. An orphan is released instead.
+func (stack *Stack) closeTCP(entry *tcpEndpoint, result Result) {
 	if entry.orphan {
 		stack.releaseTCP(entry)
-		return false
+		return
 	}
 	entry.lastResult, entry.state = result, TCPClosed
-	return true
+	entry.deadline, entry.rtoDeadline = 0, 0
 }
 
 // tcpSMSS is the sender maximum segment size: the smaller of the path MSS and

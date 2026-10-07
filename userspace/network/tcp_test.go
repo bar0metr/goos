@@ -644,3 +644,63 @@ func TestTCPOrphanFinWait2TimesOut(t *testing.T) {
 		t.Fatalf("orphan FIN-WAIT-2 kept %d endpoints", stats.Endpoints)
 	}
 }
+
+func TestTCPRetransmitLimitClosesConnection(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50013)
+	if written, result := h.stack.TCPWrite(0, id, []byte("x"), h.now); result != ResultOK || written != 1 {
+		t.Fatalf("write %d %d", written, result)
+	}
+	h.drain()
+	h.runUntil(h.now + 30*60*second)
+	if retransmits := h.stack.TCPStats().Retransmits; retransmits != tcpMaxRetransmits {
+		t.Fatalf("retransmits %d", retransmits)
+	}
+	if entry.state != TCPClosed || entry.lastResult != ResultTimeout {
+		t.Fatalf("state=%d result=%d", entry.state, entry.lastResult)
+	}
+	var buffer [4]byte
+	if _, result := h.stack.TCPRead(0, id, buffer[:], h.now); result != ResultTimeout {
+		t.Fatalf("read result %d", result)
+	}
+	if _, ok := h.stack.Deadline(); ok {
+		t.Fatal("closed connection kept a timer")
+	}
+}
+
+func TestTCPRetransmitProgressResetsLimit(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50014)
+	h.stack.TCPWrite(0, id, []byte("x"), h.now)
+	for range 3 {
+		h.advance(entry.rtoDeadline - h.now)
+	}
+	if entry.retries != 3 {
+		t.Fatalf("retries %d", entry.retries)
+	}
+	h.tcpFromPeer(entry, ackSegment(entry, entry.sndNxt, 1000))
+	if entry.retries != 0 || entry.sndUna != entry.sndNxt {
+		t.Fatalf("after ACK retries=%d una=%d nxt=%d", entry.retries, entry.sndUna, entry.sndNxt)
+	}
+}
+
+func TestTCPLastAckRetransmitLimitReleasesOrphan(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50015)
+	h.tcpFromPeer(entry, tcpSegment{sequence: 200, acknowledgment: 100, flags: tcpFlagACK | tcpFlagFIN, window: 1000})
+	if entry.state != TCPCloseWait {
+		t.Fatalf("state %d", entry.state)
+	}
+	h.stack.TCPClose(0, id, h.now)
+	if entry.state != TCPLastAck {
+		t.Fatalf("state %d", entry.state)
+	}
+	h.drain()
+	h.runUntil(h.now + 30*60*second)
+	if stats := h.stack.TCPStats(); stats.Endpoints != 0 {
+		t.Fatalf("LAST-ACK without a peer kept %d endpoints", stats.Endpoints)
+	}
+	if _, ok := h.stack.Deadline(); ok {
+		t.Fatal("released connection left a timer")
+	}
+}

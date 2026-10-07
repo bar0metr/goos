@@ -90,9 +90,6 @@ type Stack struct {
 	tcp           [MaxTCPEndpoints]tcpEndpoint
 	tcpGeneration uint32
 	tcpStats      TCPStats
-	tcpEvents     [tcpEventCapacity]TCPEvent
-	tcpEventHead  int
-	tcpEventCount int
 
 	// defended and defendedAt record the last defence of the live address.
 	defended   bool

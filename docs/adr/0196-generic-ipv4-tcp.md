@@ -53,7 +53,9 @@ bounded set of later segments, trims duplicates and overlaps, and ACKs the
 highest contiguous sequence.
 
 The retransmission timer uses SRTT, RTTVAR, Karn sampling, exponential backoff
-and configured minimum and maximum values. Congestion control uses slow start,
+and configured minimum and maximum values. A synchronized connection that
+retransmits ten times in a row without new data being acknowledged ends with
+`Timeout`. With the default RTO limits that takes about six minutes. Congestion control uses slow start,
 congestion avoidance, duplicate ACK counting and fast retransmit. A bounded
 persist sequence probes a zero window and resumes after a window update.
 
@@ -66,8 +68,9 @@ causes a rate-limited challenge ACK.
 
 `Close` on a synchronized connection removes it from the owner's view and
 leaves the stack to finish the close. The stack frees the endpoint when
-LAST-ACK receives its final ACK, when TIME_WAIT ends, or when FIN-WAIT-2 has
-waited for the TIME_WAIT interval. Until then it counts against the owner's
+LAST-ACK receives its final ACK, when TIME_WAIT ends, when FIN-WAIT-2 has
+waited for the TIME_WAIT interval, or when the FIN reaches the retransmission
+limit. Until then it counts against the owner's
 endpoint limit.
 
 Loopback and the current `net0` address use the same TCP state machine without
