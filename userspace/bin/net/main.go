@@ -22,7 +22,7 @@ var manifest = commands.Manifest{
 	Grants:  commands.GrantNetworkAdmin,
 }
 
-var text [96]byte
+var text [160]byte
 
 //export userspaceMain
 func userspaceMain() { utility.Run(manifest, run) }
@@ -118,7 +118,41 @@ func status() {
 	if reply.Fallback {
 		field("settings", append(text[:0], "built-in defaults; stored system.net.* settings not applied"...))
 	}
+	udp(&reply)
 	utility.Mark("NET_STATUS_OK\n")
+}
+
+// udp prints the UDP counters and the limits in force (system.net.udp.*).
+func udp(reply *netapi.Reply) {
+	utility.PrintText("udp:")
+	utility.EndLine()
+	endpoints := appendDecimal(text[:0], uint64(reply.UDPEndpoints))
+	endpoints = append(endpoints, '/')
+	endpoints = appendDecimal(endpoints, uint64(reply.UDPMaxEndpoints))
+	endpoints = append(endpoints, " ("...)
+	endpoints = appendDecimal(endpoints, uint64(reply.UDPSessionEndpoints))
+	field("endpoints", append(endpoints, " per session)"...))
+	datagrams := append(text[:0], "rx "...)
+	datagrams = appendDecimal(datagrams, reply.UDPRX)
+	datagrams = append(datagrams, " tx "...)
+	field("datagrams", appendDecimal(datagrams, reply.UDPTX))
+	dropped := append(text[:0], "no-endpoint "...)
+	dropped = appendDecimal(dropped, reply.UDPDropNoEndpoint)
+	dropped = append(dropped, " queue-full "...)
+	dropped = appendDecimal(dropped, reply.UDPDropQueueFull)
+	dropped = append(dropped, " checksum "...)
+	dropped = appendDecimal(dropped, reply.UDPDropChecksum)
+	dropped = append(dropped, " too-long "...)
+	field("dropped", appendDecimal(dropped, reply.UDPDropTooLong))
+	field("bind failures", appendDecimal(text[:0], reply.UDPBindFail))
+	limits := append(text[:0], "ports "...)
+	limits = appendDecimal(limits, uint64(reply.UDPEphemeralMin))
+	limits = append(limits, '-')
+	limits = appendDecimal(limits, uint64(reply.UDPEphemeralMax))
+	limits = append(limits, " queue "...)
+	limits = appendDecimal(limits, uint64(reply.UDPReceiveQueue))
+	limits = append(limits, " payload "...)
+	field("limits", appendDecimal(limits, uint64(reply.UDPMaxPayload)))
 }
 
 func reload() {

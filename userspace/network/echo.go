@@ -179,8 +179,8 @@ func (stack *Stack) sendEcho(number int, mac MAC, now uint64) {
 	stack.commitFrame(echoFrameSize)
 }
 
-// sendWaiting sends every echo and datagram that was waiting for next hop to
-// resolve.
+// sendWaiting sends every echo and UDP datagram that was waiting for next
+// hop to resolve.
 func (stack *Stack) sendWaiting(nextHop IPv4, mac MAC, now uint64) {
 	for index := range stack.sessions[:] {
 		session := &stack.sessions[index]
@@ -188,7 +188,7 @@ func (stack *Stack) sendWaiting(nextHop IPv4, mac MAC, now uint64) {
 			stack.sendEcho(index, mac, now)
 		}
 	}
-	stack.sendWaitingDatagrams(nextHop, mac)
+	stack.sendPendingUDP(nextHop, mac)
 }
 
 func (stack *Stack) failWaiting(nextHop IPv4, result Result) {
@@ -198,7 +198,7 @@ func (stack *Stack) failWaiting(nextHop IPv4, result Result) {
 			stack.complete(index, result, IPv4{}, 0)
 		}
 	}
-	stack.failWaitingDatagrams(nextHop, result)
+	stack.dropPendingUDP(nextHop, false)
 }
 
 func (stack *Stack) failEchoes(result Result) {

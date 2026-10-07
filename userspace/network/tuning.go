@@ -19,6 +19,7 @@ package network
 //     conflict.
 //   - DHCP retry values apply at the client's next scheduling point. A lease,
 //     its T1, T2 and expiry stay as the server set them.
+//   - The UDP limits apply to the next acquisition; see UDPTuning.
 type Tuning struct {
 	TTL               uint8
 	ProbeCount        uint8
@@ -37,6 +38,24 @@ type Tuning struct {
 	DHCPInitialRetry  uint64
 	DHCPMaxRetry      uint64
 	DHCPConflictRetry uint64
+	UDP               UDPTuning
+}
+
+// UDPTuning holds the runtime limits of UDP, system.net.udp.*. Each is a
+// share of a compile-time capacity: no value resizes a table, a queue or a
+// buffer. A lowered limit never takes anything back. Endpoints already open
+// stay open and keep their port and queued datagrams, and the new limit
+// refuses the next Open, the next queued datagram or the next payload that
+// exceeds it. Explicit binds may use any port; the ephemeral range only
+// steers automatic allocation, and its floor keeps the ports below 1024,
+// DHCP's among them, out of it.
+type UDPTuning struct {
+	EphemeralMin     uint16
+	EphemeralMax     uint16
+	ReceiveQueue     uint8
+	MaxEndpoints     uint8
+	SessionEndpoints uint8
+	MaxPayload       uint16
 }
 
 // TuningFields is the number of stored tuning values ParseTuning takes.
@@ -67,6 +86,14 @@ func DefaultTuning() Tuning {
 		DHCPInitialRetry:  4 * second,
 		DHCPMaxRetry:      64 * second,
 		DHCPConflictRetry: 10 * second,
+		UDP: UDPTuning{
+			EphemeralMin:     49152,
+			EphemeralMax:     65535,
+			ReceiveQueue:     8,
+			MaxEndpoints:     MaxUDPEndpoints,
+			SessionEndpoints: MaxUDPSessionEndpoints,
+			MaxPayload:       UDPPayloadCapacity,
+		},
 	}
 }
 
@@ -94,7 +121,23 @@ var tuningRange = [TuningFields]struct {
 	{1000, 60_000, true},    // FieldDHCPInitialRetry
 	{4000, 300_000, true},   // FieldDHCPMaxRetry
 	{1000, 300_000, true},   // FieldDHCPConflictRetry
+
+	{udpEphemeralFloor, 65535, false},          // FieldUDPEphemeralMin
+	{udpEphemeralFloor, 65535, false},          // FieldUDPEphemeralMax
+	{1, UDPQueueCapacity, false},               // FieldUDPReceiveQueue
+	{1, MaxUDPEndpoints, false},                // FieldUDPMaxEndpoints
+	{1, MaxUDPSessionEndpoints, false},         // FieldUDPSessionEndpoints
+	{udpMinPayload, UDPPayloadCapacity, false}, // FieldUDPMaxPayload
 }
+
+const (
+	// udpEphemeralFloor keeps the well-known ports, 67 and 68 among them,
+	// out of automatic allocation.
+	udpEphemeralFloor = 1024
+	// udpMinPayload is the classic DNS message limit (RFC 1035), the least
+	// a resolver needs.
+	udpMinPayload = 512
+)
 
 // ParseTuning builds a tuning from the stored values, given in Field order
 // from FieldTTL, and returns the first field out of range. Range checks run
@@ -134,6 +177,14 @@ func tuningFrom(values *[TuningFields]uint64) Tuning {
 		DHCPInitialRetry:  values[FieldDHCPInitialRetry-FieldTTL],
 		DHCPMaxRetry:      values[FieldDHCPMaxRetry-FieldTTL],
 		DHCPConflictRetry: values[FieldDHCPConflictRetry-FieldTTL],
+		UDP: UDPTuning{
+			EphemeralMin:     uint16(values[FieldUDPEphemeralMin-FieldTTL]),
+			EphemeralMax:     uint16(values[FieldUDPEphemeralMax-FieldTTL]),
+			ReceiveQueue:     uint8(values[FieldUDPReceiveQueue-FieldTTL]),
+			MaxEndpoints:     uint8(values[FieldUDPMaxEndpoints-FieldTTL]),
+			SessionEndpoints: uint8(values[FieldUDPSessionEndpoints-FieldTTL]),
+			MaxPayload:       uint16(values[FieldUDPMaxPayload-FieldTTL]),
+		},
 	}
 }
 
@@ -156,12 +207,18 @@ func (tuning *Tuning) values() [TuningFields]uint64 {
 		tuning.DHCPInitialRetry,
 		tuning.DHCPMaxRetry,
 		tuning.DHCPConflictRetry,
+		uint64(tuning.UDP.EphemeralMin),
+		uint64(tuning.UDP.EphemeralMax),
+		uint64(tuning.UDP.ReceiveQueue),
+		uint64(tuning.UDP.MaxEndpoints),
+		uint64(tuning.UDP.SessionEndpoints),
+		uint64(tuning.UDP.MaxPayload),
 	}
 }
 
 // Validate returns the first field outside its range, or the second field of
 // a pair out of order: ProbeMax below ProbeMin, DHCPMaxRetry below
-// DHCPInitialRetry.
+// DHCPInitialRetry, then the UDP pairs.
 func (tuning Tuning) Validate() Field {
 	values := tuning.values()
 	for index, value := range values {
@@ -178,6 +235,19 @@ func (tuning Tuning) Validate() Field {
 	}
 	if tuning.DHCPMaxRetry < tuning.DHCPInitialRetry {
 		return FieldDHCPMaxRetry
+	}
+	return tuning.UDP.validate()
+}
+
+// validate checks the UDP pairs once each value is in range: the ephemeral
+// range must not be empty, and one session may not be allowed more
+// endpoints than the whole service.
+func (udp UDPTuning) validate() Field {
+	if udp.EphemeralMax < udp.EphemeralMin {
+		return FieldUDPEphemeralMax
+	}
+	if udp.SessionEndpoints > udp.MaxEndpoints {
+		return FieldUDPSessionEndpoints
 	}
 	return FieldNone
 }

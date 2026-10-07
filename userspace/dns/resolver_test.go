@@ -1213,3 +1213,19 @@ func TestInitRejectsInvalidPolicy(t *testing.T) {
 		t.Fatalf("policy %+v", r.Policy())
 	}
 }
+
+func TestWaiting(t *testing.T) {
+	h := newHarness(t, serverA)
+	h.pending(0, "host.test")
+	if h.r.Waiting(-1) || h.r.Waiting(MaxTransactions) {
+		t.Fatal("out-of-range transaction waits")
+	}
+	first := h.sent()
+	if !h.r.Waiting(first.Transaction) {
+		t.Fatal("query in flight not waiting")
+	}
+	h.r.SendFailed(first.Transaction, h.now)
+	if h.r.Waiting(first.Transaction) {
+		t.Fatal("finished transaction still waiting")
+	}
+}

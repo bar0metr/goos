@@ -176,38 +176,38 @@ func TestParseUDP(t *testing.T) {
 			payload: udpBytes(server, broadcastIPv4, portServer, portClient, payload)}
 	}
 	good := build([]byte("hello"))
-	if datagram, ok := parseUDP(good); !ok || string(datagram.payload) != "hello" ||
+	if datagram, status := parseUDP(good); status != udpOK || string(datagram.payload) != "hello" ||
 		datagram.sourcePort != portServer || datagram.destinationPort != portClient {
-		t.Fatalf("good UDP %+v %v", datagram, ok)
+		t.Fatalf("good UDP %+v %v", datagram, status)
 	}
 	noChecksum := build([]byte("hello"))
 	noChecksum.payload[6], noChecksum.payload[7] = 0, 0
-	if _, ok := parseUDP(noChecksum); !ok {
+	if _, status := parseUDP(noChecksum); status != udpOK {
 		t.Error("zero checksum rejected")
 	}
 	badChecksum := build([]byte("hello"))
 	badChecksum.payload[len(badChecksum.payload)-1] ^= 1
-	if _, ok := parseUDP(badChecksum); ok {
+	if _, status := parseUDP(badChecksum); status != udpBadChecksum {
 		t.Error("bad checksum accepted")
 	}
 	wrongPseudo := build([]byte("hello"))
 	wrongPseudo.destination = IPv4{10, 0, 2, 15}
-	if _, ok := parseUDP(wrongPseudo); ok {
+	if _, status := parseUDP(wrongPseudo); status != udpBadChecksum {
 		t.Error("checksum ignored the pseudo-header")
 	}
 	padded := build([]byte("hello"))
 	padded.payload = append(padded.payload, 0, 0, 0)
-	if datagram, ok := parseUDP(padded); !ok || string(datagram.payload) != "hello" {
+	if datagram, status := parseUDP(padded); status != udpOK || string(datagram.payload) != "hello" {
 		t.Error("trailing bytes after the UDP length were not trimmed")
 	}
 	for _, length := range []uint16{0, 7, 14, 0xffff} {
 		packet := build([]byte("hello"))
 		binary.BigEndian.PutUint16(packet.payload[4:6], length)
-		if _, ok := parseUDP(packet); ok {
+		if _, status := parseUDP(packet); status != udpMalformed {
 			t.Errorf("UDP length %d accepted", length)
 		}
 	}
-	if _, ok := parseUDP(ipv4Packet{payload: []byte{0, 67, 0, 68, 0, 8, 0}}); ok {
+	if _, status := parseUDP(ipv4Packet{payload: []byte{0, 67, 0, 68, 0, 8, 0}}); status != udpMalformed {
 		t.Error("truncated UDP header accepted")
 	}
 }

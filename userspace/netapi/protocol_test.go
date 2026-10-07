@@ -17,6 +17,8 @@ func requests() []Request {
 		{Opcode: OpReload},
 		{Opcode: OpEcho, Destination: gateway, Sequence: 0xbeef, TimeoutMS: MinEchoTimeoutMS},
 		{Opcode: OpEcho, Destination: [4]byte{8, 8, 8, 8}, TimeoutMS: MaxEchoTimeoutMS},
+		{Opcode: OpServers},
+		{Opcode: OpServers, Generation: ^uint64(0)},
 	}
 }
 
@@ -50,6 +52,12 @@ func TestRequestInvalid(t *testing.T) {
 		{Opcode: OpEcho, Destination: gateway, TimeoutMS: MinEchoTimeoutMS - 1},
 		{Opcode: OpEcho, Destination: gateway, TimeoutMS: MaxEchoTimeoutMS + 1},
 		{Opcode: OpEcho, Destination: gateway},
+		{Opcode: OpStatus, Generation: 1},
+		{Opcode: OpReload, Generation: 1},
+		{Opcode: OpEcho, Destination: gateway, TimeoutMS: MinEchoTimeoutMS, Generation: 1},
+		{Opcode: OpServers, Destination: gateway},
+		{Opcode: OpServers, Sequence: 1},
+		{Opcode: OpServers, TimeoutMS: 100},
 	}
 	for _, request := range invalid {
 		var wire ipc.Message
@@ -72,6 +80,7 @@ func TestRequestRejects(t *testing.T) {
 		{"protocol", func(m *ipc.Message) { m.ProtocolID = ControlProtocolID }},
 		{"version", func(m *ipc.Message) { m.Version = 0 }},
 		{"version 1", func(m *ipc.Message) { m.Version = 1 }},
+		{"version 2", func(m *ipc.Message) { m.Version = 2 }},
 		{"reply kind", func(m *ipc.Message) { m.Kind = ipc.KindReply }},
 		{"notification", func(m *ipc.Message) { m.Kind = ipc.KindNotification }},
 		{"no correlation", func(m *ipc.Message) { m.Correlation = 0 }},
@@ -94,6 +103,9 @@ func TestRequestRejects(t *testing.T) {
 		reserved := []int{1, 2, 3, 12, 13, 14, 15}
 		if request.Opcode != OpEcho {
 			reserved = append(reserved, 4, 5, 6, 7, 8, 9, 10, 11)
+		}
+		if request.Opcode != OpServers {
+			reserved = append(reserved, span(requestGeneration, RequestSize)...)
 		}
 		for _, index := range reserved {
 			var wire ipc.Message
@@ -138,7 +150,10 @@ func replies() []Reply {
 		{Opcode: OpStatus, State: StateReady, Mode: ModeStatic, Local: local, Gateway: gateway, MAC: station,
 			Prefix: 24, Link: LinkUp, Lease: 86400, RX: 1, TX: 2, Drop: 3, Malformed: ^uint64(0), MTU: 1500,
 			RateLimited: true, ConflictRun: 4, Probes: 5, ProbeConflicts: 6, Announcements: 7, ActiveConflicts: 8,
-			Defenses: 9, Relinquished: 10, RateLimits: 11, Loopback: 12},
+			Defenses: 9, Relinquished: 10, RateLimits: 11, Loopback: 12,
+			UDPRX: 13, UDPTX: 14, UDPDropNoEndpoint: 15, UDPDropQueueFull: 16, UDPDropChecksum: 17, UDPDropTooLong: 18,
+			UDPBindFail: 19, UDPEndpoints: 3, UDPEphemeralMin: 49152, UDPEphemeralMax: 65535, UDPMaxPayload: 4096,
+			UDPReceiveQueue: 8, UDPMaxEndpoints: 32, UDPSessionEndpoints: 8},
 		{Opcode: OpStatus, State: StateConfiguring, Link: LinkUp, MTU: 576, Fallback: true},
 		{Opcode: OpStatus},
 		{Opcode: OpStatus, Result: ResultPermissionDenied},
@@ -153,6 +168,9 @@ func replies() []Reply {
 		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldProbeMax},
 		{Opcode: OpReload, Result: ResultConfigInvalid},
 		{Opcode: OpReload, Result: ResultPermissionDenied},
+		{Opcode: OpServers, ServerCount: 2, Servers: [MaxServers][4]byte{gateway, local}, Generation: 5},
+		{Opcode: OpServers},
+		{Opcode: OpServers, Result: ResultPermissionDenied},
 	}
 }
 
@@ -203,6 +221,15 @@ func TestReplyFieldUsage(t *testing.T) {
 		{Opcode: OpReload, Sequence: 1},
 		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldMode, Local: local},
 		{Opcode: OpReload, TX: 1},
+		{Opcode: OpStatus, ServerCount: 1, Servers: [MaxServers][4]byte{gateway}},
+		{Opcode: OpStatus, Generation: 1},
+		{Opcode: OpEcho, Responder: gateway, UDPRX: 1},
+		{Opcode: OpReload, UDPMaxPayload: 4096},
+		{Opcode: OpServers, State: StateReady},
+		{Opcode: OpServers, UDPEndpoints: 1},
+		{Opcode: OpServers, ServerCount: MaxServers + 1},
+		{Opcode: OpServers, ServerCount: 1, Servers: [MaxServers][4]byte{gateway, local}},
+		{Opcode: OpServers, Result: ResultBusy, Generation: 1},
 	}
 	for index, reply := range invalid {
 		var wire ipc.Message
@@ -218,6 +245,7 @@ func TestReplyUnusedBytes(t *testing.T) {
 	statusUsed := span(2, 12)
 	statusUsed = append(statusUsed, span(24, 40)...)
 	statusUsed = append(statusUsed, span(44, 145)...)
+	statusUsed = append(statusUsed, span(replyUDP, replyServerN)...)
 	used := map[int][]int{
 		0:  statusUsed,
 		1:  statusUsed,
@@ -231,6 +259,8 @@ func TestReplyUnusedBytes(t *testing.T) {
 		11: {42},
 		12: {42},
 		13: {42},
+		15: append([]int{replyServerN}, span(replyServerGen, replyServers+8)...),
+		16: append([]int{replyServerN}, span(replyServerGen, replyServers)...),
 	}
 	for index, reply := range replies() {
 		mask := [ReplySize]bool{0: true, 1: true}
@@ -268,7 +298,8 @@ func TestReplyRejects(t *testing.T) {
 	}{
 		{"protocol", func(m *ipc.Message) { m.ProtocolID++ }},
 		{"version 1", func(m *ipc.Message) { m.Version = 1 }},
-		{"version 3", func(m *ipc.Message) { m.Version = 3 }},
+		{"version 2", func(m *ipc.Message) { m.Version = 2 }},
+		{"version 4", func(m *ipc.Message) { m.Version = 4 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},
 		{"short", func(m *ipc.Message) { m.PayloadSize = ReplySize - 1 }},

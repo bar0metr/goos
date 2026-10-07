@@ -115,6 +115,18 @@ func (f Field) Key() string {
 		return "system.net.dhcp.max-retry-ms"
 	case FieldDHCPConflictRetry:
 		return "system.net.dhcp.conflict-retry-ms"
+	case FieldUDPEphemeralMin:
+		return "system.net.udp.ephemeral-port-min"
+	case FieldUDPEphemeralMax:
+		return "system.net.udp.ephemeral-port-max"
+	case FieldUDPReceiveQueue:
+		return "system.net.udp.recv-queue-depth"
+	case FieldUDPMaxEndpoints:
+		return "system.net.udp.max-endpoints"
+	case FieldUDPSessionEndpoints:
+		return "system.net.udp.max-endpoints-per-session"
+	case FieldUDPMaxPayload:
+		return "system.net.udp.max-payload"
 	}
 	return ""
 }

@@ -9,12 +9,13 @@ import (
 
 const (
 	ProtocolID = uint64(0x474e455441504931)
-	// Version 2 is the 152-byte reply with the MTU, the fallback flag, the
-	// conflict counters and the loopback count. A version-1 message is not
-	// this protocol and fails decoding.
-	Version          = uint16(2)
-	RequestSize      = 16
-	ReplySize        = 152
+	// Version 3 adds the UDP counters, the UDP limits in force and the DNS
+	// servers request, and grows the request to carry a generation. A
+	// message of an older version is not this protocol and fails decoding.
+	Version          = uint16(3)
+	RequestSize      = 24
+	ReplySize        = 248
+	MaxServers       = 4
 	MinEchoTimeoutMS = 100
 	MaxEchoTimeoutMS = 5000
 	MaxPrefix        = 32
@@ -26,6 +27,7 @@ const (
 	requestSequence    = 8
 	requestTimeout     = 10
 	requestReserved    = 12
+	requestGeneration  = 16
 
 	replyOpcode    = 0
 	replyResult    = 1
@@ -51,11 +53,24 @@ const (
 	replyCounters  = 80
 	replyRun       = 144
 	replyReserved  = 145
+	replyUDP       = 152
+	replyEndpoints = 208
+	replyPortMin   = 210
+	replyPortMax   = 212
+	replyPayload   = 214
+	replyQueue     = 216
+	replyMaxEP     = 217
+	replySessionEP = 218
+	replyServerN   = 219
+	replyReserved2 = 220
+	replyServerGen = 224
+	replyServers   = 232
 
 	// flagRateLimited is the only flag: the next address claim waits for
 	// the conflict rate limit.
 	flagRateLimited = 1
 	counterCount    = 8
+	udpCounterCount = 7
 
 	addressSize = 4
 	macSize     = 6
@@ -67,7 +82,13 @@ const (
 	OpStatus Opcode = iota + 1
 	OpEcho
 	OpReload
-	lastOpcode = OpReload
+	// OpServers asks for the DNS servers of the current DHCP lease. The
+	// request carries the generation of the list the client has; the
+	// service answers at once when its list is of another generation and
+	// otherwise holds the request until the list changes. A session holds
+	// one such request at a time.
+	OpServers
+	lastOpcode = OpServers
 )
 
 type Result uint8
@@ -133,7 +154,13 @@ const (
 	FieldDHCPInitialRetry
 	FieldDHCPMaxRetry
 	FieldDHCPConflictRetry
-	lastField = FieldDHCPConflictRetry
+	FieldUDPEphemeralMin
+	FieldUDPEphemeralMax
+	FieldUDPReceiveQueue
+	FieldUDPMaxEndpoints
+	FieldUDPSessionEndpoints
+	FieldUDPMaxPayload
+	lastField = FieldUDPMaxPayload
 )
 
 type Link uint8
@@ -149,6 +176,8 @@ type Request struct {
 	Destination [addressSize]byte
 	Sequence    uint16
 	TimeoutMS   uint16
+	// Generation is set only for Servers.
+	Generation uint64
 }
 
 // Reply is one decoded reply body. Which fields an opcode may set is fixed;
@@ -157,12 +186,14 @@ type Request struct {
 //	Status, OK:          State, Mode, Local, Gateway, MAC, Prefix, Link,
 //	                     Lease, RX, TX, Drop, Malformed, MTU, Fallback,
 //	                     RateLimited, the conflict counters, Loopback,
-//	                     ConflictRun
+//	                     ConflictRun, the UDP counters and limits
 //	Echo, OK:            Responder (nonzero), RTT, Sequence
 //	Echo, RemoteUnreachable or TimeExceeded:
 //	                     Responder (nonzero, the router that answered), Sequence
 //	Echo, other results: Sequence
 //	Reload, ConfigInvalid: Field (may be FieldNone)
+//	Servers, OK:         ServerCount, Servers (the first ServerCount),
+//	                     Generation
 //	any other result:    nothing beyond Opcode and Result
 type Reply struct {
 	Opcode    Opcode
@@ -203,6 +234,31 @@ type Reply struct {
 	Relinquished    uint64
 	RateLimits      uint64
 	Loopback        uint64
+	// The UDP counters, the endpoints open, and the UDP limits in force
+	// (system.net.udp.*).
+	UDPRX               uint64
+	UDPTX               uint64
+	UDPDropNoEndpoint   uint64
+	UDPDropQueueFull    uint64
+	UDPDropChecksum     uint64
+	UDPDropTooLong      uint64
+	UDPBindFail         uint64
+	UDPEndpoints        uint16
+	UDPEphemeralMin     uint16
+	UDPEphemeralMax     uint16
+	UDPMaxPayload       uint16
+	UDPReceiveQueue     uint8
+	UDPMaxEndpoints     uint8
+	UDPSessionEndpoints uint8
+	// ServerCount, Servers and Generation answer Servers.
+	ServerCount uint8
+	Generation  uint64
+	Servers     [MaxServers][addressSize]byte
+}
+
+func (r *Reply) udpCounters() [udpCounterCount]*uint64 {
+	return [udpCounterCount]*uint64{&r.UDPRX, &r.UDPTX, &r.UDPDropNoEndpoint, &r.UDPDropQueueFull,
+		&r.UDPDropChecksum, &r.UDPDropTooLong, &r.UDPBindFail}
 }
 
 // counters lists the reply's eight counters in wire order.
@@ -221,6 +277,7 @@ func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
 	copy(payload[requestDestination:requestDestination+addressSize], r.Destination[:])
 	binary.LittleEndian.PutUint16(payload[requestSequence:], r.Sequence)
 	binary.LittleEndian.PutUint16(payload[requestTimeout:], r.TimeoutMS)
+	binary.LittleEndian.PutUint64(payload[requestGeneration:], r.Generation)
 	return true
 }
 
@@ -232,13 +289,14 @@ func DecodeRequest(in *ipc.Message, out *Request) (correlation uint64, ok bool) 
 		return 0, false
 	}
 	payload := in.Payload[:RequestSize]
-	if !zero(payload[requestOpcode+1:requestDestination]) || !zero(payload[requestReserved:RequestSize]) {
+	if !zero(payload[requestOpcode+1:requestDestination]) || !zero(payload[requestReserved:requestGeneration]) {
 		return 0, false
 	}
 	r := Request{
-		Opcode:    Opcode(payload[requestOpcode]),
-		Sequence:  binary.LittleEndian.Uint16(payload[requestSequence:]),
-		TimeoutMS: binary.LittleEndian.Uint16(payload[requestTimeout:]),
+		Opcode:     Opcode(payload[requestOpcode]),
+		Sequence:   binary.LittleEndian.Uint16(payload[requestSequence:]),
+		TimeoutMS:  binary.LittleEndian.Uint16(payload[requestTimeout:]),
+		Generation: binary.LittleEndian.Uint64(payload[requestGeneration:]),
 	}
 	copy(r.Destination[:], payload[requestDestination:requestDestination+addressSize])
 	if !validRequest(&r) {
@@ -269,9 +327,12 @@ func requestEnvelope(in *ipc.Message) bool {
 func validRequest(r *Request) bool {
 	switch r.Opcode {
 	case OpStatus, OpReload:
-		return r.Destination == [addressSize]byte{} && r.Sequence == 0 && r.TimeoutMS == 0
+		return r.Destination == [addressSize]byte{} && r.Sequence == 0 && r.TimeoutMS == 0 && r.Generation == 0
 	case OpEcho:
-		return r.Destination != [addressSize]byte{} && r.TimeoutMS >= MinEchoTimeoutMS && r.TimeoutMS <= MaxEchoTimeoutMS
+		return r.Destination != [addressSize]byte{} && r.TimeoutMS >= MinEchoTimeoutMS && r.TimeoutMS <= MaxEchoTimeoutMS &&
+			r.Generation == 0
+	case OpServers:
+		return r.Destination == [addressSize]byte{} && r.Sequence == 0 && r.TimeoutMS == 0
 	}
 	return false
 }
@@ -314,6 +375,19 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 		binary.LittleEndian.PutUint64(payload[replyCounters+8*index:], *counter)
 	}
 	payload[replyRun] = r.ConflictRun
+	for index, counter := range r.udpCounters() {
+		binary.LittleEndian.PutUint64(payload[replyUDP+8*index:], *counter)
+	}
+	binary.LittleEndian.PutUint16(payload[replyEndpoints:], r.UDPEndpoints)
+	binary.LittleEndian.PutUint16(payload[replyPortMin:], r.UDPEphemeralMin)
+	binary.LittleEndian.PutUint16(payload[replyPortMax:], r.UDPEphemeralMax)
+	binary.LittleEndian.PutUint16(payload[replyPayload:], r.UDPMaxPayload)
+	payload[replyQueue], payload[replyMaxEP], payload[replySessionEP] = r.UDPReceiveQueue, r.UDPMaxEndpoints, r.UDPSessionEndpoints
+	payload[replyServerN] = r.ServerCount
+	binary.LittleEndian.PutUint64(payload[replyServerGen:], r.Generation)
+	for index := range r.Servers {
+		copy(payload[replyServers+addressSize*index:], r.Servers[index][:])
+	}
 	return true
 }
 
@@ -326,7 +400,8 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	payload := in.Payload[:ReplySize]
 	field := binary.LittleEndian.Uint16(payload[replyField:])
-	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:ReplySize]) || field > uint16(lastField) ||
+	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:replyUDP]) ||
+		!zero(payload[replyReserved2:replyServerGen]) || field > uint16(lastField) ||
 		payload[replyFallback] > 1 || payload[replyFlags]&^flagRateLimited != 0 {
 		return false
 	}
@@ -350,9 +425,25 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 
 		RateLimited: payload[replyFlags] == flagRateLimited,
 		ConflictRun: payload[replyRun],
+
+		UDPEndpoints:        binary.LittleEndian.Uint16(payload[replyEndpoints:]),
+		UDPEphemeralMin:     binary.LittleEndian.Uint16(payload[replyPortMin:]),
+		UDPEphemeralMax:     binary.LittleEndian.Uint16(payload[replyPortMax:]),
+		UDPMaxPayload:       binary.LittleEndian.Uint16(payload[replyPayload:]),
+		UDPReceiveQueue:     payload[replyQueue],
+		UDPMaxEndpoints:     payload[replyMaxEP],
+		UDPSessionEndpoints: payload[replySessionEP],
+		ServerCount:         payload[replyServerN],
+		Generation:          binary.LittleEndian.Uint64(payload[replyServerGen:]),
 	}
 	for index, counter := range r.counters() {
 		*counter = binary.LittleEndian.Uint64(payload[replyCounters+8*index:])
+	}
+	for index, counter := range r.udpCounters() {
+		*counter = binary.LittleEndian.Uint64(payload[replyUDP+8*index:])
+	}
+	for index := range r.Servers {
+		copy(r.Servers[index][:], payload[replyServers+addressSize*index:])
 	}
 	copy(r.Local[:], payload[replyLocal:replyLocal+addressSize])
 	copy(r.Gateway[:], payload[replyGateway:replyGateway+addressSize])
@@ -375,8 +466,28 @@ func validReply(r *Reply) bool {
 		r.MAC == [macSize]byte{} && r.Prefix == 0 && r.Link == LinkDown && r.Lease == 0 &&
 		r.RX == 0 && r.TX == 0 && r.Drop == 0 && r.Malformed == 0 && r.MTU == 0 && !r.Fallback &&
 		!r.RateLimited && r.ConflictRun == 0 && r.Probes == 0 && r.ProbeConflicts == 0 && r.Announcements == 0 &&
-		r.ActiveConflicts == 0 && r.Defenses == 0 && r.Relinquished == 0 && r.RateLimits == 0 && r.Loopback == 0
+		r.ActiveConflicts == 0 && r.Defenses == 0 && r.Relinquished == 0 && r.RateLimits == 0 && r.Loopback == 0 &&
+		r.UDPRX == 0 && r.UDPTX == 0 && r.UDPDropNoEndpoint == 0 && r.UDPDropQueueFull == 0 && r.UDPDropChecksum == 0 &&
+		r.UDPDropTooLong == 0 && r.UDPBindFail == 0 && r.UDPEndpoints == 0 && r.UDPEphemeralMin == 0 &&
+		r.UDPEphemeralMax == 0 && r.UDPMaxPayload == 0 && r.UDPReceiveQueue == 0 && r.UDPMaxEndpoints == 0 &&
+		r.UDPSessionEndpoints == 0
 	echo := r.Responder == noAddress && r.RTT == 0 && r.Sequence == 0
+	for index := range r.Servers {
+		if index >= int(r.ServerCount) && r.Servers[index] != noAddress {
+			return false
+		}
+	}
+	noServers := r.ServerCount == 0 && r.Generation == 0
+	switch r.Opcode {
+	case OpServers:
+		if r.Result == ResultOK {
+			return snapshot && echo && r.Field == FieldNone && r.ServerCount <= MaxServers
+		}
+		return snapshot && echo && r.Field == FieldNone && noServers
+	}
+	if !noServers {
+		return false
+	}
 	switch r.Opcode {
 	case OpStatus:
 		if r.Result == ResultOK {

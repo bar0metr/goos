@@ -4,18 +4,17 @@ package main
 
 // The resolver service (ADR 0194). PID 1 runs it from the installed system in
 // normal mode, next to the network service, with a read-only view of
-// system.dns.* and of the hosts table. It reaches DNS servers only through the
-// resolver transport: one channel and two datagram pools that PID 1 makes and
-// hands to both services, each copy narrowed to what its holder writes. A new
-// transport is made whenever either service starts, so a restart of one never
-// leaves the other holding a dead binding. Commands that resolve names get a
+// system.dns.* and of the hosts table. It reaches DNS servers over a UDP
+// session and learns the DHCP lease's servers over a network status session,
+// both opened from the network service like any program's (ADR 0195). PID 1
+// opens a new pair whenever either service starts, so a restart of one never
+// leaves the other holding dead sessions. Commands that resolve names get a
 // private session each, as they do with the network service.
 
 import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
-	"goos/kernel/kcall"
 	configproto "goos/userspace/config"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
@@ -33,8 +32,9 @@ var (
 	resolverControl handle.ID
 	resolverStarted bool
 	resolverProcess handle.ID
-	// transportGeneration numbers transport bindings; it only grows.
-	transportGeneration uint64
+	// resolverNetworkGeneration numbers the session pairs given to the
+	// resolver; it only grows.
+	resolverNetworkGeneration uint64
 )
 
 // registerResolver registers the resolver after the network service. A
@@ -78,75 +78,46 @@ func renewResolverGrants(spec *supervisor.LaunchSpec) bool {
 	return true
 }
 
-// bindTransport makes a new transport and gives each service its ends. The
-// network service gets the query pool to read and the reply pool to write;
-// the resolver the reverse. PID 1 keeps nothing of it.
-func bindTransport() {
-	if netControl == 0 || resolverControl == 0 || transportGeneration+1 == 0 {
+// bindResolverNetwork opens a UDP session and a status session from the
+// network service and hands both to the resolver. PID 1 keeps nothing of
+// them.
+func bindResolverNetwork() {
+	if netControl == 0 || resolverControl == 0 || resolverNetworkGeneration+1 == 0 {
 		return
 	}
-	var pair [2]uint64
-	if !createChannel(&pair) {
-		syslog.Error("resolver transport channel unavailable")
+	udp, ok := openUDPSession()
+	if !ok {
+		syslog.Error("resolver UDP session unavailable")
 		return
 	}
-	queries, queryStatus := sys.MemoryCreate(netapi.DatagramPoolPages)
-	replies, replyStatus := sys.MemoryCreate(netapi.DatagramPoolPages)
-	if queryStatus != kcall.StatusOK || replyStatus != kcall.StatusOK {
-		closePair(pair)
-		closeOpen(queries)
-		closeOpen(replies)
-		syslog.Error("resolver transport pools unavailable")
-		return
-	}
-	netQueries, _ := sys.HandleDuplicate(queries, capability.Read|capability.Transfer)
-	netReplies, _ := sys.HandleDuplicate(replies, capability.Read|capability.Write|capability.Transfer)
-	resolverQueries, _ := sys.HandleDuplicate(queries, capability.Read|capability.Write|capability.Transfer)
-	resolverReplies, _ := sys.HandleDuplicate(replies, capability.Read|capability.Transfer)
-	sys.HandleClose(queries)
-	sys.HandleClose(replies)
-	if netQueries == 0 || netReplies == 0 || resolverQueries == 0 || resolverReplies == 0 {
-		closePair(pair)
-		for _, id := range [...]handle.ID{netQueries, netReplies, resolverQueries, resolverReplies} {
-			closeOpen(id)
-		}
-		syslog.Error("resolver transport pools not narrowed")
-		return
-	}
-	transportGeneration++
-	toNet := [...]handle.ID{handle.ID(pair[0]), netQueries, netReplies}
-	toResolver := [...]handle.ID{handle.ID(pair[1]), resolverQueries, resolverReplies}
-	if !setTransport(netControl, toNet, netapi.ControlSetTransport) {
-		for _, id := range toResolver {
+	status, ok := openNetSession(netapi.RightsResolveStatus)
+	if !ok {
+		for _, id := range udp {
 			sys.HandleClose(id)
 		}
+		syslog.Error("resolver network session unavailable")
 		return
 	}
-	if setTransport(resolverControl, toResolver, netapi.ControlSetTransport) {
-		syslog.Info("resolver transport bound", syslog.Uint("generation", transportGeneration))
-	}
-}
-
-// setTransport sends one service its ends of the transport; the handles move
-// with the message.
-func setTransport(control handle.ID, ends [3]handle.ID, opcode netapi.ControlOpcode) bool {
+	resolverNetworkGeneration++
 	correlation++
 	var message ipc.Message
-	request := netapi.ControlRequest{Opcode: opcode, Generation: transportGeneration}
-	if !netapi.EncodeControlRequest(&request, ends[:], correlation, &message) || !sendMessage(uint64(control), message) {
-		for _, id := range ends {
+	attachments := [...]handle.ID{udp[0], udp[1], udp[2], status}
+	request := netapi.ControlRequest{Opcode: netapi.ControlSetNetwork, Generation: resolverNetworkGeneration}
+	if !netapi.EncodeControlRequest(&request, attachments[:], correlation, &message) || !sendMessage(uint64(resolverControl), message) {
+		for _, id := range attachments {
 			sys.HandleClose(id)
 		}
-		syslog.Error("service did not take the resolver transport")
-		return false
+		syslog.Error("resolver did not take its network sessions")
+		return
 	}
-	reply, status := receive(uint64(control), vfsSessionDeadline)
+	reply, replyStatus := receive(uint64(resolverControl), vfsSessionDeadline)
 	var decoded netapi.ControlReply
-	if status != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, opcode, &decoded) || decoded.Result != netapi.ControlOK {
-		syslog.Warn("service refused the resolver transport")
-		return false
+	if replyStatus != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, netapi.ControlSetNetwork, &decoded) ||
+		decoded.Result != netapi.ControlOK {
+		syslog.Warn("resolver refused its network sessions")
+		return
 	}
-	return true
+	syslog.Info("resolver network sessions bound", syslog.Uint("generation", resolverNetworkGeneration))
 }
 
 // openResolverSession asks the resolver to accept a session of class and
@@ -186,7 +157,7 @@ func resolverLaunched(process handle.ID) {
 	}
 	resolverStarted = true
 	if netServiceStarted {
-		bindTransport()
+		bindResolverNetwork()
 	}
 }
 

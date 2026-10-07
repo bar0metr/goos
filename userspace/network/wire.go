@@ -273,30 +273,38 @@ type udpDatagram struct {
 	payload         []byte
 }
 
+type udpStatus uint8
+
+const (
+	udpOK udpStatus = iota
+	udpMalformed
+	udpBadChecksum
+)
+
 // parseUDP checks the UDP length against the IPv4 payload and verifies a
 // nonzero checksum over the pseudo-header. Zero is the sender's no-checksum
-// form.
-func parseUDP(packet ipv4Packet) (udpDatagram, bool) {
+// form. Bytes past the UDP length, such as Ethernet padding, are ignored.
+func parseUDP(packet ipv4Packet) (udpDatagram, udpStatus) {
 	var datagram udpDatagram
 	data := packet.payload
 	if len(data) < udpHeaderSize {
-		return datagram, false
+		return datagram, udpMalformed
 	}
 	length := int(binary.BigEndian.Uint16(data[4:6]))
 	if length < udpHeaderSize || length > len(data) {
-		return datagram, false
+		return datagram, udpMalformed
 	}
 	data = data[:length]
 	if binary.BigEndian.Uint16(data[6:8]) != 0 {
 		sum := pseudoHeaderSum(packet.source, packet.destination, protocolUDP, length)
 		if checksumFold(checksumAdd(sum, data)) != 0 {
-			return datagram, false
+			return datagram, udpBadChecksum
 		}
 	}
 	datagram.sourcePort = binary.BigEndian.Uint16(data[0:2])
 	datagram.destinationPort = binary.BigEndian.Uint16(data[2:4])
 	datagram.payload = data[udpHeaderSize:]
-	return datagram, true
+	return datagram, udpOK
 }
 
 // putUDP writes the UDP header for a payload already in place after it and

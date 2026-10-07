@@ -13,7 +13,7 @@ const (
 	MaxText = 64
 	// MaxEntries bounds the store. Configuration is small and system-wide;
 	// anything that needs to grow without bound is data, not configuration.
-	MaxEntries = 48
+	MaxEntries = 64
 )
 
 type Kind uint8

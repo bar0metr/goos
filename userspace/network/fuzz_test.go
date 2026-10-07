@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
@@ -172,7 +173,7 @@ func FuzzParsers(f *testing.F) {
 		if len(packet.payload) > len(data)-ipv4HeaderSize {
 			t.Fatal("IPv4 payload past the data")
 		}
-		if datagram, ok := parseUDP(packet); ok && len(datagram.payload) > len(packet.payload)-udpHeaderSize {
+		if datagram, status := parseUDP(packet); status == udpOK && len(datagram.payload) > len(packet.payload)-udpHeaderSize {
 			t.Fatal("UDP payload past the packet")
 		}
 		parseICMP(packet.payload)
@@ -191,6 +192,69 @@ func FuzzParseIPv4Text(f *testing.F) {
 		var buffer [MaxIPv4Text]byte
 		if string(AppendIPv4(buffer[:0], address)) != string(text) {
 			t.Fatalf("%q is not canonical", text)
+		}
+	})
+}
+
+// FuzzUDPReceive feeds arbitrary UDP bytes, with or without a valid
+// checksum, to bound endpoints. Nothing but the queues and counters may
+// change, and a queued payload is exactly what the datagram carried.
+func FuzzUDPReceive(f *testing.F) {
+	f.Add(udpBytes(peerIP, hostIP, 53, 9000, []byte("hello")), true)
+	f.Add(udpBytes(peerIP, hostIP, 53, 9002, nil), true)
+	f.Add([]byte{0, 53, 0x23, 0x28, 0, 8, 0, 0}, false)
+	f.Fuzz(func(t *testing.T, datagram []byte, fix bool) {
+		if len(datagram) > MTU-ipv4HeaderSize {
+			return
+		}
+		h := readyWithPeer(t)
+		wildcard, specific, connected := h.open(0), h.open(0), h.open(1)
+		h.bind(0, wildcard, IPv4{}, 9000)
+		h.bind(0, specific, hostIP, 9001)
+		_, port, _ := h.stack.UDPConnect(1, connected, peerIP, 53, h.now)
+		if fix && len(datagram) >= udpHeaderSize {
+			datagram = append([]byte(nil), datagram...)
+			length := int(binary.BigEndian.Uint16(datagram[4:6]))
+			if length >= udpHeaderSize && length <= len(datagram) {
+				datagram[6], datagram[7] = 0, 0
+				sum := checksumFold(checksumAdd(pseudoHeaderSum(peerIP, hostIP, protocolUDP, length), datagram[:length]))
+				if sum == 0 {
+					sum = 0xffff
+				}
+				binary.BigEndian.PutUint16(datagram[6:8], sum)
+			}
+		}
+		endpoints := h.stack.udp
+		h.receive(ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, protocolUDP, datagram))
+		for index := range endpoints {
+			before, after := endpoints[index], h.stack.udp[index]
+			before.queue, before.head, before.count = after.queue, after.head, after.count
+			if before != after {
+				t.Fatalf("endpoint %d changed: %+v -> %+v", index, endpoints[index], h.stack.udp[index])
+			}
+		}
+		queued := 0
+		for _, owner := range []struct {
+			owner int
+			id    EndpointID
+		}{{0, wildcard}, {0, specific}, {1, connected}} {
+			var buffer [UDPPayloadCapacity]byte
+			received, ok := h.stack.UDPReceive(owner.owner, owner.id, buffer[:])
+			if !ok {
+				continue
+			}
+			queued++
+			parsed, status := parseUDP(ipv4Packet{source: peerIP, destination: hostIP, payload: datagram})
+			if status != udpOK || received.Source != peerIP || received.SourcePort != parsed.sourcePort ||
+				!bytes.Equal(buffer[:received.Length], parsed.payload) {
+				t.Fatalf("queued %+v from %x", received, datagram)
+			}
+			if owner.id == connected && (parsed.sourcePort != 53 || parsed.destinationPort != port) {
+				t.Fatal("connected endpoint took a datagram from another peer")
+			}
+		}
+		if queued > 1 {
+			t.Fatalf("one datagram queued %d times", queued)
 		}
 	})
 }

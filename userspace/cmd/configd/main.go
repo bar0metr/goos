@@ -247,6 +247,12 @@ func declareSchema() {
 		{"system.net.dhcp.initial-retry-ms", config.Uint(4000), false},
 		{"system.net.dhcp.max-retry-ms", config.Uint(64000), false},
 		{"system.net.dhcp.conflict-retry-ms", config.Uint(10000), false},
+		{"system.net.udp.ephemeral-port-min", config.Uint(49152), false},
+		{"system.net.udp.ephemeral-port-max", config.Uint(65535), false},
+		{"system.net.udp.recv-queue-depth", config.Uint(8), false},
+		{"system.net.udp.max-endpoints", config.Uint(32), false},
+		{"system.net.udp.max-endpoints-per-session", config.Uint(8), false},
+		{"system.net.udp.max-payload", config.Uint(4096), false},
 		// The resolver service's settings (ADR 0194). 0.0.0.0 marks an unused
 		// server slot.
 		{"system.dns.server1", mustText("0.0.0.0"), false},
