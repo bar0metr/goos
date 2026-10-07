@@ -129,7 +129,7 @@ func TestLinkDownFailsEchoes(t *testing.T) {
 		}
 		// The driver comes back: configuration starts over.
 		h.stack.LinkUp(hostMAC, MTU, h.now)
-		h.runUntil(h.now + 2*second)
+		h.runUntil(h.now + claimTime)
 		if state := h.stack.Snapshot(h.now).State; state != StateReady {
 			t.Fatalf("state after relink %d", state)
 		}
@@ -189,7 +189,7 @@ func TestFail(t *testing.T) {
 		t.Fatal("failed stack has a deadline")
 	}
 	h.stack.Configure(staticConfig, h.now)
-	h.runUntil(h.now + 2*second)
+	h.runUntil(h.now + claimTime)
 	if state := h.stack.Snapshot(h.now).State; state != StateReady {
 		t.Fatalf("after reload %d", state)
 	}
@@ -241,11 +241,9 @@ func TestConfigure(t *testing.T) {
 	if completion := h.completion(); completion.Result != ResultReconfigured {
 		t.Fatalf("completion %+v", completion)
 	}
-	probe := only(t, h.drain())
-	if probe.arp.targetIP != renumbered.Address || probe.arp.senderIP != zeroIPv4 {
-		t.Fatalf("probe %+v", probe.arp)
-	}
-	h.runUntil(h.now + 2*second)
+	h.start = h.now
+	checkClaim(t, h.claim(), renumbered.Address, h.start, defaults)
+	h.finishAnnouncements()
 	if snapshot := h.stack.Snapshot(h.now); snapshot.Address != renumbered.Address {
 		t.Fatalf("snapshot %+v", snapshot)
 	}
@@ -277,7 +275,7 @@ func TestConfigureWhileDown(t *testing.T) {
 		t.Fatal("configure while down started work")
 	}
 	h.stack.LinkUp(hostMAC, MTU, h.now)
-	h.runUntil(h.now + 2*second)
+	h.runUntil(h.now + claimTime)
 	if snapshot := h.stack.Snapshot(h.now); snapshot.State != StateReady || snapshot.Address != hostIP {
 		t.Fatalf("snapshot %+v", snapshot)
 	}
@@ -327,7 +325,7 @@ func TestEveryEchoCompletesOnce(t *testing.T) {
 		case 17:
 			h.stack.LinkDown(ResultDown, h.now)
 			h.stack.LinkUp(hostMAC, MTU, h.now)
-			h.runUntil(h.now + 2*second)
+			h.runUntil(h.now + claimTime)
 		case 33:
 			h.stack.CancelSession(session)
 			accepted[session] = completed[session]

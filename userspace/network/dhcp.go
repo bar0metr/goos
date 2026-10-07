@@ -32,6 +32,7 @@ const (
 	optionPad          = 0
 	optionSubnetMask   = 1
 	optionRouter       = 3
+	optionDNS          = 6
 	optionRequestedIP  = 50
 	optionLeaseTime    = 51
 	optionOverload     = 52
@@ -66,15 +67,21 @@ const (
 	dhcpBackoff
 )
 
-// dhcpLease is a validated OFFER or ACK. Times are in nanoseconds.
+// MaxDNSServers bounds the DNS servers kept from a lease.
+const MaxDNSServers = 4
+
+// dhcpLease is a validated OFFER or ACK. Times are in nanoseconds. dns holds
+// the usable servers of option 6 in the server's order.
 type dhcpLease struct {
-	address IPv4
-	prefix  uint8
-	router  IPv4
-	server  IPv4
-	length  uint64
-	renew   uint64
-	rebind  uint64
+	address  IPv4
+	prefix   uint8
+	router   IPv4
+	server   IPv4
+	length   uint64
+	renew    uint64
+	rebind   uint64
+	dns      [MaxDNSServers]IPv4
+	dnsCount uint8
 }
 
 type dhcpClient struct {
@@ -123,6 +130,8 @@ type dhcpMessage struct {
 	rebind   uint32
 	overload uint8
 	seen     uint16
+	dns      [MaxDNSServers]IPv4
+	dnsCount uint8
 }
 
 const (
@@ -134,6 +143,7 @@ const (
 	seenRenew
 	seenRebind
 	seenOverload
+	seenDNS
 )
 
 // parseDHCP decodes a BOOTP reply for our transaction. A wrong transaction
@@ -234,6 +244,8 @@ func (message *dhcpMessage) option(code uint8, value []byte, top bool) bool {
 			return false
 		}
 		copy(message.router[:], value[:4])
+	case optionDNS:
+		return message.dnsServers(value)
 	case optionLeaseTime, optionRenewalTime, optionRebindTime:
 		return message.seconds(code, value)
 	case optionOverload:
@@ -241,6 +253,24 @@ func (message *dhcpMessage) option(code uint8, value []byte, top bool) bool {
 			return false
 		}
 		message.overload = value[0]
+	}
+	return true
+}
+
+// dnsServers reads option 6 (RFC 2132): one or more addresses. It keeps the
+// first MaxDNSServers that can name a server and skips zero, loopback,
+// broadcast and multicast entries.
+func (message *dhcpMessage) dnsServers(value []byte) bool {
+	if len(value) < 4 || len(value)%4 != 0 || !message.mark(seenDNS) {
+		return false
+	}
+	for at := 0; at < len(value) && message.dnsCount < MaxDNSServers; at += 4 {
+		var server IPv4
+		copy(server[:], value[at:at+4])
+		if server.IsUnicast() {
+			message.dns[message.dnsCount] = server
+			message.dnsCount++
+		}
 	}
 	return true
 }
@@ -299,6 +329,7 @@ func (message *dhcpMessage) validLease() (dhcpLease, bool) {
 	}
 	lease.address, lease.prefix, lease.server = message.yiaddr, message.prefix, message.server
 	lease.length, lease.renew, lease.rebind = length, renew, rebind
+	lease.dns, lease.dnsCount = message.dns, message.dnsCount
 	return lease, true
 }
 
@@ -379,6 +410,7 @@ func (stack *Stack) advanceDHCP(now uint64) {
 	case dhcpBound, dhcpRenewing, dhcpRebinding:
 		stack.leaseTimers(now)
 	case dhcpBackoff:
+		stack.rateLimited = false
 		stack.startDiscovery(now)
 	}
 }
@@ -435,7 +467,8 @@ func (stack *Stack) loseLease(now uint64) {
 
 func (stack *Stack) dhcpProbePassed(candidate IPv4, now uint64) {
 	lease := stack.dhcp.lease
-	stack.applyAddress(candidate, lease.prefix, lease.router)
+	stack.applyAddress(candidate, lease.prefix, lease.router, now)
+	stack.setDNS(&stack.dhcp.lease)
 	stack.dhcp.phase = dhcpBound
 	stack.leaseTimers(now)
 }
@@ -443,7 +476,7 @@ func (stack *Stack) dhcpProbePassed(candidate IPv4, now uint64) {
 func (stack *Stack) dhcpDecline(candidate IPv4, now uint64) {
 	stack.sendDHCP(dhcpOutgoing{kind: dhcpDecline, requested: candidate, server: stack.dhcp.lease.server}, now)
 	stack.dhcp.phase = dhcpBackoff
-	stack.dhcp.deadline = addTime(now, stack.tuning.DHCPConflictRetry)
+	stack.dhcp.deadline = addTime(now, stack.conflictWait())
 }
 
 func (stack *Stack) receiveDHCP(source MAC, data []byte, now uint64) {
@@ -534,6 +567,7 @@ func (stack *Stack) receiveLeaseReply(source MAC, message dhcpMessage, now uint6
 		stack.startLease(lease)
 		client.serverMAC = source
 		stack.prefix, stack.gateway = lease.prefix, lease.router
+		stack.setDNS(&client.lease)
 		client.phase = dhcpBound
 		stack.leaseTimers(now)
 	default:
@@ -553,7 +587,7 @@ type dhcpOutgoing struct {
 	link        MAC
 }
 
-var dhcpParameterList = [...]byte{optionSubnetMask, optionRouter, optionLeaseTime, optionServerID,
+var dhcpParameterList = [...]byte{optionSubnetMask, optionRouter, optionDNS, optionLeaseTime, optionServerID,
 	optionRenewalTime, optionRebindTime}
 
 func (stack *Stack) sendDHCP(outgoing dhcpOutgoing, now uint64) {
@@ -623,4 +657,29 @@ func putOption(options []byte, at int, code uint8, value []byte) int {
 	options[at], options[at+1] = code, byte(len(value))
 	copy(options[at+2:], value)
 	return at + 2 + len(value)
+}
+
+// setDNS makes a bound lease's DNS servers the stack's. The generation moves
+// only when the list changes, so a renewal with the same servers is silent.
+func (stack *Stack) setDNS(lease *dhcpLease) {
+	if lease.dnsCount == stack.dnsCount && lease.dns == stack.dns {
+		return
+	}
+	stack.dns, stack.dnsCount = lease.dns, lease.dnsCount
+	stack.dnsGeneration++
+}
+
+// clearDNS drops the servers of a lease that ended.
+func (stack *Stack) clearDNS() {
+	if stack.dnsCount == 0 {
+		return
+	}
+	stack.dns, stack.dnsCount = [MaxDNSServers]IPv4{}, 0
+	stack.dnsGeneration++
+}
+
+// DNSServers returns the servers the current DHCP lease named, and a
+// generation that changes whenever that list does. Static mode has none.
+func (stack *Stack) DNSServers() ([MaxDNSServers]IPv4, int, uint64) {
+	return stack.dns, int(stack.dnsCount), stack.dnsGeneration
 }

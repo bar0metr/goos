@@ -344,7 +344,7 @@ func TestCancelSessionDropsCompletion(t *testing.T) {
 	h.stack.CancelSession(4)
 	h.receive(replyTo(request))
 	h.noCompletion()
-	h.runUntil(h.now + 2*second)
+	h.runUntil(h.now + claimTime)
 	h.noCompletion()
 	h.stack.CancelSession(-1)
 	h.stack.CancelSession(MaxSessions)

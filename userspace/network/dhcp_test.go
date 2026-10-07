@@ -176,10 +176,11 @@ func boundHarness(t testing.TB) (*harness, uint64) {
 	h, discover := dhcpHarness(t)
 	offerAndAck(h, discover, leaseOptions(dhcpAck))
 	requested := h.now
-	h.runUntil(h.now + second)
+	h.claim()
 	if state := h.stack.Snapshot(h.now).State; state != StateReady {
 		t.Fatalf("state %d", state)
 	}
+	h.finishAnnouncements()
 	h.drain()
 	return h, requested
 }
@@ -204,27 +205,17 @@ func TestDHCPHappyPath(t *testing.T) {
 	}
 	h.advance(10 * millisecond)
 	h.receive(dhcpFrame(replyFor(request, hostIP, leaseOptions(dhcpAck)).bytes()))
-	probe := only(t, h.drain())
-	if probe.arp.senderIP != zeroIPv4 || probe.arp.targetIP != hostIP {
-		t.Fatalf("probe %+v", probe.arp)
-	}
-	if snapshot := h.stack.Snapshot(h.now); snapshot.State != StateConfiguring || snapshot.Address != zeroIPv4 {
-		t.Fatalf("address applied before the probe: %+v", snapshot)
-	}
-	h.advance(defaults.ProbeInterval)
-	h.drain()
-	h.advance(defaults.ProbeInterval)
-	announce := only(t, h.drain())
-	if announce.arp.senderIP != hostIP {
-		t.Fatalf("announcement %+v", announce.arp)
-	}
+	acked := h.now
+	h.start = h.now
+	sent := h.claim()
+	checkClaim(t, sent, hostIP, h.start, defaults)
 	snapshot := h.stack.Snapshot(h.now)
 	if snapshot.State != StateReady || snapshot.Mode != ModeDHCP || snapshot.Address != hostIP ||
-		snapshot.Prefix != 24 || snapshot.Gateway != serverIP || snapshot.LeaseRemaining != testLease-2 {
+		snapshot.Prefix != 24 || snapshot.Gateway != serverIP || snapshot.LeaseRemaining != (acked-10*millisecond+testLease*second-h.now)/second {
 		t.Fatalf("snapshot %+v", snapshot)
 	}
-	// With a responsive server the whole path takes about one second.
-	if elapsed := h.now - start; elapsed > 2*second {
+	// With a responsive server the claim dominates: at most 1 + 2 + 2 + 2 s.
+	if elapsed := h.now - start; elapsed > claimTime {
 		t.Fatalf("DHCP took %d ns", elapsed)
 	}
 }
@@ -678,14 +669,21 @@ func TestDHCPDatagramFiltering(t *testing.T) {
 
 func TestDHCPLateProbeGoesStraightToRenew(t *testing.T) {
 	h, discover := dhcpHarness(t)
-	options := append(leaseOptions(dhcpAck), option{optionRenewalTime, u32(1)}, option{optionRebindTime, u32(2)})
+	options := append(leaseOptions(dhcpAck), option{optionRenewalTime, u32(1)}, option{optionRebindTime, u32(60)})
 	offerAndAck(h, discover, options)
 	h.drain()
 	// T1 passes during the conflict probe, so binding starts a renew at once.
-	h.runUntil(h.now + second)
-	messages := dhcpMessages(t, h.drain())
-	if len(messages) != 1 || messages[0].kind != dhcpRequest || messages[0].ciaddr != hostIP {
-		t.Fatalf("messages %+v", messages)
+	renews := 0
+	for _, sent := range h.claim() {
+		if sent.frame.ether.etherType == etherTypeIPv4 {
+			if sent.frame.udp.destinationPort != portServer || sent.frame.ip.source != hostIP {
+				t.Fatalf("message %+v", sent.frame)
+			}
+			renews++
+		}
+	}
+	if renews != 1 {
+		t.Fatalf("%d renews", renews)
 	}
 	if h.stack.dhcp.phase != dhcpRenewing {
 		t.Fatalf("phase %d", h.stack.dhcp.phase)

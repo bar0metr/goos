@@ -22,15 +22,21 @@ var (
 // defaults is the tuning every harness starts with.
 var defaults = DefaultTuning()
 
+// claimTime covers the longest default claim: the 1 s initial wait, two
+// 2 s gaps between three probes, and the 2 s quiet period.
+const claimTime = 8 * second
+
 type harness struct {
 	t     testing.TB
 	stack *Stack
 	now   uint64
+	// start is when the claim under test began.
+	start uint64
 }
 
 func newHarness(t testing.TB) *harness {
 	t.Helper()
-	h := &harness{t: t, stack: new(Stack), now: 1_000 * second}
+	h := &harness{t: t, stack: new(Stack), now: 1_000 * second, start: 1_000 * second}
 	h.stack.Init(0x1234_5678_9abc_def0)
 	return h
 }
@@ -96,10 +102,11 @@ func (h *harness) readyStatic(config Config) {
 		h.t.Fatalf("configure: field %d", field)
 	}
 	h.stack.LinkUp(hostMAC, MTU, h.now)
-	h.runUntil(h.now + 2*second)
+	h.claim()
 	if state := h.stack.Snapshot(h.now).State; state != StateReady {
 		h.t.Fatalf("state %d, want ready", state)
 	}
+	h.finishAnnouncements()
 	h.drain()
 }
 

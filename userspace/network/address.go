@@ -36,6 +36,15 @@ const (
 	FieldGateway
 	// The tuning fields follow in the order of ParseTuning's values.
 	FieldTTL
+	FieldProbeCount
+	FieldProbeWait
+	FieldProbeMin
+	FieldProbeMax
+	FieldAnnounceCount
+	FieldAnnounceInterval
+	FieldDefendInterval
+	FieldMaxConflicts
+	FieldConflictRateLimit
 	FieldARPCacheTimeout
 	FieldARPResolveInterval
 	FieldARPResolveAttempts
@@ -43,9 +52,7 @@ const (
 	FieldDHCPInitialRetry
 	FieldDHCPMaxRetry
 	FieldDHCPConflictRetry
-	FieldProbeCount
-	FieldProbeInterval
-	lastField = FieldProbeInterval
+	lastField = FieldDHCPConflictRetry
 )
 
 // Result values are the GNETAPI1 wire values.
