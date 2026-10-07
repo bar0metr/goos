@@ -94,6 +94,7 @@ func configRestarted() {
 	}
 	offerSettings(uint64(logControl), logConfigScope, configproto.Read)
 	offerSettings(uint64(netControl), netConfigScope, configproto.Read)
+	offerSettings(uint64(resolverControl), resolverConfigScope, configproto.Read|configproto.HostsRead)
 	syslog.Info("config restarted")
 	mark("CONFIG_RESTARTED_OK\n")
 }

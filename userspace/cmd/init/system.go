@@ -67,7 +67,7 @@ const (
 )
 
 // sessionServices are the services that run from the volume in normal mode.
-var sessionServices = [...]string{"config", "log", "shell", netServiceName, netDriverName}
+var sessionServices = [...]string{"config", "log", "shell", netServiceName, netDriverName, resolverName}
 
 // forcedRecovery reports whether the boot media asks for recovery mode.
 func forcedRecovery() bool {

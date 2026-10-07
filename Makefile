@@ -46,6 +46,8 @@ NETD_IMAGE = $(OUT_DIR)/userspace/netd
 NETD_ELF = $(OUT_DIR)/userspace/netd.elf
 VIRTIO_NET_IMAGE = $(OUT_DIR)/userspace/virtio-net
 VIRTIO_NET_ELF = $(OUT_DIR)/userspace/virtio-net.elf
+RESOLVED_IMAGE = $(OUT_DIR)/userspace/resolved
+RESOLVED_ELF = $(OUT_DIR)/userspace/resolved.elf
 # tools/stackframes bounds every stack frame by the unmapped guard below the
 # stack (ADR 0088). It runs on every userspace ELF before elf2native turns it
 # into an image, and on the kernel right after it is linked.
@@ -167,7 +169,7 @@ $(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAM
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -269,6 +271,14 @@ $(NETD_IMAGE): $(NETD_ELF) tools/elf2native/main.go kernel/loader/native.go kern
 	@$(STACKFRAMES) $(NETD_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(NETD_ELF) $@
 
+$(RESOLVED_ELF): $(call go_deps,./userspace/cmd/resolved) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/resolved
+
+$(RESOLVED_IMAGE): $(RESOLVED_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $(RESOLVED_ELF)
+	$(BUILD_ENV) go run ./tools/elf2native $(RESOLVED_ELF) $@
+
 $(VIRTIO_NET_ELF): $(call go_deps,./userspace/cmd/virtio-net) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/virtio-net
@@ -301,7 +311,7 @@ initramfs: userspace
 # made from this build's outputs alone, in name order, so the same build
 # gives the same bytes. LINUX_EXTRA adds Linux programs under /system/linux.
 system-tree: userspace
-	@$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)

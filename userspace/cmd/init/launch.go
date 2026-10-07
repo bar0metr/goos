@@ -69,6 +69,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	if netServiceStarted && bytesString(spec.Name[:spec.NameSize]) == netServiceName && !renewNetServiceGrants(&spec) {
 		return 0, false
 	}
+	if resolverStarted && bytesString(spec.Name[:spec.NameSize]) == resolverName && !renewResolverGrants(&spec) {
+		return 0, false
+	}
 	// Every driver launch, the first included, gets a binding of its own.
 	netDriver := bytesString(spec.Name[:spec.NameSize]) == netDriverName
 	if netDriver && !bindNetDevice(&spec) {

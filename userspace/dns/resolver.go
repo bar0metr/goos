@@ -209,7 +209,9 @@ func (r *Resolver) SetServers(dhcp [][4]byte, configured [][4]byte) {
 }
 
 func (r *Resolver) addServer(address [4]byte, source ServerSource) {
-	if r.serverCount == MaxServers || !usableServer(address) {
+	// The explicit lower bound lets the compiler drop the index check, whose
+	// panic path tools/stackframes cannot follow.
+	if r.serverCount < 0 || r.serverCount >= MaxServers || !usableServer(address) {
 		return
 	}
 	for index := 0; index < r.serverCount; index++ {
@@ -217,7 +219,7 @@ func (r *Resolver) addServer(address [4]byte, source ServerSource) {
 			return
 		}
 	}
-	r.servers[r.serverCount] = Server{Address: address, Source: source}
+	r.servers[r.serverCount].Address, r.servers[r.serverCount].Source = address, source
 	r.serverCount++
 }
 

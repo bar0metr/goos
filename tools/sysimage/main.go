@@ -26,14 +26,14 @@ import (
 	"goos/userspace/release"
 )
 
-const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
+const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET RESOLVED COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
 
 func main() {
-	if len(os.Args) != 9 {
+	if len(os.Args) != 10 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	output := os.Args[8]
+	output := os.Args[9]
 	if err := os.RemoveAll(output); err != nil {
 		fail(err)
 	}
@@ -42,10 +42,10 @@ func main() {
 			fail(err)
 		}
 	}
-	for index, name := range []string{"shell", "config", "log", "netd", "virtio-net"} {
+	for index, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved"} {
 		write(output, "system/services/"+name, read(os.Args[1+index]))
 	}
-	commandDirectory, index := os.Args[6], read(os.Args[7])
+	commandDirectory, index := os.Args[7], read(os.Args[8])
 	names, err := commandset.Names(commandDirectory, index)
 	if err != nil {
 		fail(err)

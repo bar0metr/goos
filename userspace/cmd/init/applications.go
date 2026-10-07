@@ -118,11 +118,22 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		netSession, _ = openNetSession(netapi.RightsAdminStatus)
 	}
 	useNetwork := netSession != 0
+	// A resolver session is separate from the network one: resolving names
+	// grants no echo, and pinging grants no name resolution.
+	var resolveSession handle.ID
+	switch {
+	case grantable && grantsRequested&commands.GrantResolve != 0:
+		resolveSession, _ = openResolverSession(netapi.RightsResolveStatus)
+	case grantable && grantsRequested&commands.GrantResolveAdmin != 0:
+		resolveSession, _ = openResolverSession(netapi.RightsAdminStatus)
+	}
+	useResolver := resolveSession != 0
 	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
 		syslog.Warn("volume check refused in normal mode")
 		closeOpen(netSession)
+		closeOpen(resolveSession)
 		return 0, 0, supervisor.LaunchVolumeBusy
 	}
 	var checkBlock handle.ID
@@ -132,6 +143,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if reason != "" {
 			syslog.Error(reason)
 			closeOpen(netSession)
+			closeOpen(resolveSession)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
@@ -141,6 +153,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error("APP_VFS_SESSION_FAILED")
 			syslog.Error(reason)
 			closeOpen(netSession)
+			closeOpen(resolveSession)
 			if reason == "APP_CHANNEL_CREATE_FAILED" {
 				return 0, 0, supervisor.LaunchResourceExhausted
 			}
@@ -154,6 +167,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useLaunch {
 		if !createChannel(&launchPair) {
 			closeOpen(netSession)
+			closeOpen(resolveSession)
 			sys.HandleClose(handle.ID(pair[0]))
 			sys.HandleClose(checkBlock)
 			if useBlockCheck {
@@ -175,6 +189,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		handles++
 	}
 	if useNetwork {
+		handles++
+	}
+	if useResolver {
 		handles++
 	}
 	// A Linux program searches the Linux fixture directory, never the
@@ -218,12 +235,16 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useNetwork {
 		writer.Handle([]byte("net"), 0)
 	}
+	if useResolver {
+		writer.Handle([]byte("resolve"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
 		closeOpen(netSession)
+		closeOpen(resolveSession)
 		closePair(launchPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
@@ -249,6 +270,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if useNetwork {
 		grants = append(grants, supervisor.Capability{Name: "net", Handle: netSession, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
+	if useResolver {
+		grants = append(grants, supervisor.Capability{Name: "resolve", Handle: resolveSession, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -266,6 +290,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		}
 		closePair(launchPair)
 		closeOpen(netSession)
+		closeOpen(resolveSession)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {

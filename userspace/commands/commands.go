@@ -31,8 +31,15 @@ const (
 	// GrantNetworkAdmin asks for a private network session that may read the
 	// interface status and reload the network configuration. It cannot ping.
 	GrantNetworkAdmin
+	// GrantResolve asks for a private resolver session that may resolve host
+	// names and read the resolver's status (ADR 0194).
+	GrantResolve
+	// GrantResolveAdmin asks for a resolver session that may also flush the
+	// cache and reload the resolver's settings.
+	GrantResolveAdmin
 
-	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin
+	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
+		GrantResolve | GrantResolveAdmin
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
