@@ -7,7 +7,8 @@ import (
 
 // storedDefaults are the schema defaults as the configuration service holds
 // them, in Field order from FieldTTL.
-var storedDefaults = [TuningFields]uint64{64, 60000, 1000, 3, 20, 4000, 64000, 10000, 2, 500}
+var storedDefaults = [TuningFields]uint64{64, 3, 1000, 1000, 2000, 2, 2000, 10000, 10, 60000,
+	60000, 1000, 3, 20, 4000, 64000, 10000}
 
 func TestParseTuningDefaults(t *testing.T) {
 	values := storedDefaults
@@ -27,6 +28,12 @@ func TestParseTuningRanges(t *testing.T) {
 			values := storedDefaults
 			values[index] = value
 			// Keep the backoff ceiling legal while the start moves.
+			if field == FieldProbeMin {
+				values[FieldProbeMax-FieldTTL] = tuningRange[FieldProbeMax-FieldTTL].max
+			}
+			if field == FieldProbeMax {
+				values[FieldProbeMin-FieldTTL] = tuningRange[FieldProbeMin-FieldTTL].min
+			}
 			if field == FieldDHCPInitialRetry {
 				values[FieldDHCPMaxRetry-FieldTTL] = tuningRange[FieldDHCPMaxRetry-FieldTTL].max
 			}
@@ -51,6 +58,15 @@ func TestParseTuningRanges(t *testing.T) {
 	}
 }
 
+func TestParseTuningProbeOrder(t *testing.T) {
+	values := storedDefaults
+	values[FieldProbeMin-FieldTTL] = 3000
+	values[FieldProbeMax-FieldTTL] = 2000
+	if _, field := ParseTuning(&values); field != FieldProbeMax {
+		t.Fatalf("field %d, want probe max", field)
+	}
+}
+
 func TestParseTuningCrossField(t *testing.T) {
 	values := storedDefaults
 	values[FieldDHCPInitialRetry-FieldTTL] = 30000
@@ -70,10 +86,10 @@ func TestApplyIsAtomic(t *testing.T) {
 	before := h.stack.Tuning()
 	bad := DefaultTuning()
 	bad.TTL = 128
-	bad.ProbeInterval = 0
+	bad.ProbeMin = 0
 	moved := staticConfig
 	moved.Address = IPv4{10, 0, 2, 16}
-	if field := h.stack.Apply(moved, bad, h.now); field != FieldProbeInterval {
+	if field := h.stack.Apply(moved, bad, h.now); field != FieldProbeMin {
 		t.Fatalf("field %d", field)
 	}
 	if h.stack.Tuning() != before || h.stack.Snapshot(h.now).Address != hostIP {
@@ -97,7 +113,7 @@ func TestApplyIsAtomic(t *testing.T) {
 func TestTuningAloneKeepsAddressAndNeighbors(t *testing.T) {
 	h := readyWithPeer(t)
 	tuning := DefaultTuning()
-	tuning.ProbeCount, tuning.ProbeInterval = 5, 2*second
+	tuning.ProbeCount, tuning.ProbeMin, tuning.ProbeMax = 5, 2*second, 3*second
 	tuning.NeighborLifetime = 10 * second
 	if field := h.stack.Apply(staticConfig, tuning, h.now); field != FieldNone {
 		t.Fatalf("field %d", field)
@@ -209,22 +225,10 @@ func TestResolutionKeepsItsStartingTuning(t *testing.T) {
 func TestProbeTuning(t *testing.T) {
 	h := newHarness(t)
 	tuning := DefaultTuning()
-	tuning.ProbeCount, tuning.ProbeInterval = 3, 200*millisecond
+	tuning.ProbeCount, tuning.ProbeWait, tuning.ProbeMin, tuning.ProbeMax = 5, 100*millisecond, 200*millisecond, 300*millisecond
 	h.stack.Apply(staticConfig, tuning, h.now)
 	h.stack.LinkUp(hostMAC, MTU, h.now)
-	for probe := 1; probe <= 3; probe++ {
-		if sent := only(t, h.drain()); sent.arp.senderIP != zeroIPv4 {
-			t.Fatalf("probe %d: %+v", probe, sent.arp)
-		}
-		h.advance(200*millisecond - 1)
-		if state := h.stack.Snapshot(h.now).State; state != StateConfiguring {
-			t.Fatalf("probe %d: state %d", probe, state)
-		}
-		h.advance(1)
-	}
-	if announce := only(t, h.drain()); announce.arp.senderIP != hostIP {
-		t.Fatalf("announcement %+v", announce.arp)
-	}
+	checkClaim(t, h.claim(), hostIP, h.start, tuning)
 	if state := h.stack.Snapshot(h.now).State; state != StateReady {
 		t.Fatalf("state %d", state)
 	}

@@ -64,6 +64,7 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
 	launchHandle, _ = data.Handle("launch")
 	networkHandle, _ = data.Handle("net")
+	resolverHandle, _ = data.Handle("resolve")
 	commandName, current = data.Command(), manifest
 	if !stdinFound || !stdoutFound || !stderrFound {
 		finish(1, "startup handles unavailable\n")
@@ -93,6 +94,11 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	}
 	if manifest.Grants&(commands.GrantNetworkPing|commands.GrantNetworkAdmin) != 0 && networkHandle == 0 {
 		Fail(nil, "network service unavailable")
+	}
+	// A resolver session is required only of commands that need nothing
+	// else; ping keeps working on numeric addresses without one.
+	if manifest.Grants&commands.GrantResolveAdmin != 0 && resolverHandle == 0 {
+		Fail(nil, "resolver service unavailable")
 	}
 	main(data)
 	Exit(0)

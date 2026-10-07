@@ -566,7 +566,36 @@ Done after 0.2.4, under ADR 0190 and ADR 0191, as the
   backend, and a boot without a NIC.
 
 DNS, TCP, UDP sockets, IPv6 and Linux network calls are not part of it.
-`test-network` is not yet in `test-all` or the release gate.
+`test-network` runs in `test-all` and the release gate.
+
+### Network tuning, loopback and name resolution
+
+Done after the native networking work, under ADR 0192, ADR 0193 and
+ADR 0194:
+
+- `system.net.*` settings for TTL, ARP, address-conflict, echo-rate and DHCP
+  timing, applied by `net reload` without a reboot;
+- address-conflict detection after RFC 5227: probes and announcements with
+  random delays, defence of a live address, giving it up on a second
+  conflict, and a rate limit after repeated conflicts;
+- a native `RandomRead` call that gives `netd` and the resolver unpredictable
+  ports, transaction IDs and delays;
+- a loopback interface, `lo`, with `127.0.0.0/8`, present with or without a
+  NIC; loopback-addressed frames from the link are dropped;
+- a hosts table of up to 64 records in `/state/hosts`, served by the
+  configuration service over `GHST1` and edited with the shell's `hosts`
+  builtin, with `localhost` fixed at `127.0.0.1`;
+- `resolved`, a stub resolver with a cache, reached by commands over
+  `GRESOLV1` and reaching DNS servers only through `netd` over `GNETDGRAM1`,
+  with servers from DHCP option 6 and `system.dns.server1..4`;
+- `resolve NAME|status|flush|reload` and `ping NAME`;
+- `make test-network` checks loopback without a NIC, conflict handling, the
+  hosts table, and DNS against a host-side DHCP and DNS peer on a private
+  segment.
+
+Still unsupported: UDP and TCP sockets for applications, DNS over TCP (a
+truncated answer fails), multicast DNS and `.local` names, IPv6 and AAAA
+records, DNSSEC, encrypted DNS, and the Linux socket calls.
 
 ### Next: a Linux terminal
 
@@ -607,7 +636,8 @@ a concrete blocker requires them:
 
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
-- networking beyond IPv4 and ICMP echo on one virtio-net interface;
+- networking beyond IPv4, ICMP echo, loopback and the DNS stub resolver on
+  one virtio-net interface;
 - USB;
 - GUI;
 - ext4;

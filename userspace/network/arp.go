@@ -144,18 +144,10 @@ func (stack *Stack) sendARP(destination MAC, packet arpPacket) {
 	stack.commitFrame(HeaderSize + arpSize)
 }
 
-// conflicts reports a packet that shows another host holding the candidate
-// address, or probing for it at the same time as we are.
-func (candidate probe) conflicts(packet arpPacket) bool {
-	if packet.senderIP == candidate.candidate {
-		return true
-	}
-	return packet.operation == arpRequest && packet.senderIP == zeroIPv4 && packet.targetIP == candidate.candidate
-}
-
 // receiveARP learns a mapping only for a host on our prefix that is talking
 // to us, that we already know, or that we are resolving, so unrelated
-// broadcast traffic cannot churn the table.
+// broadcast traffic cannot churn the table. A packet claiming our candidate
+// or our live address goes to conflict detection instead.
 func (stack *Stack) receiveARP(payload []byte, now uint64) {
 	packet, status := parseARP(payload)
 	switch status {
@@ -170,11 +162,27 @@ func (stack *Stack) receiveARP(payload []byte, now uint64) {
 		stack.CountDrop()
 		return
 	}
-	if stack.probe.active && stack.probe.conflicts(packet) {
+	// Loopback addresses never appear on a link (RFC 1122).
+	if packet.senderIP.IsLoopback() || packet.targetIP.IsLoopback() {
+		stack.CountDrop()
+		return
+	}
+	if stack.probe.active && stack.probe.conflicts(&packet) {
 		stack.probeConflict(now)
 		return
 	}
-	if stack.address == zeroIPv4 || !stack.onLink(packet.senderIP) || packet.senderIP == stack.address {
+	if stack.address == zeroIPv4 {
+		return
+	}
+	if packet.senderIP == stack.address {
+		stack.activeConflict(now)
+		return
+	}
+	if packet.operation == arpRequest && packet.senderIP == zeroIPv4 && packet.targetIP == stack.address {
+		stack.answerProbe(&packet)
+		return
+	}
+	if !stack.onLink(packet.senderIP) {
 		return
 	}
 	toUs := packet.targetIP == stack.address

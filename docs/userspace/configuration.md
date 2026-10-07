@@ -42,9 +42,13 @@ travel in the request (ADR 0076):
 
 | Client | Scope | Rights |
 | --- | --- | --- |
-| shell | the whole namespace | read, write |
+| shell | the whole namespace | read, write, hosts read, hosts write |
 | log service | `system.log.` | read |
 | network service | `system.net.` | read |
+
+The hosts rights, `HostsRead` (4) and `HostsWrite` (8), govern the hosts
+table and nothing else; `Read` (1) and `Write` (2) do not reach it. See
+[Hosts](#hosts).
 
 The service serves up to 16 sessions and drops one whose peer has gone.
 
@@ -114,6 +118,7 @@ A setting is not configuration until something reads it:
 | `system.shell.prompt` | the shell | at startup and after a successful write |
 | `system.log.persist` | the log service | on every drain pass |
 | `system.net.*` | the network service | at startup and on `net reload` |
+| `system.dns.*` | the resolver service | at startup and on `resolve reload` |
 
 A component that cannot reach the service, or gets an answer of the wrong type,
 keeps its built-in default. Configuration decides what a component does, not
@@ -140,9 +145,16 @@ Its timer and rate settings (ADR 0192), all `uint`, times in milliseconds:
 | Key | Default | Range | Meaning |
 | --- | ---: | ---: | --- |
 | `system.net.ipv4.default-ttl` | 64 | 1..255 | TTL of every packet the stack builds |
-| `system.net.ipv4.probe-count` | 2 | 1..10 | ARP probes before an address goes live |
-| `system.net.ipv4.probe-interval-ms` | 500 | 100..5000 | gap between probes, and the quiet period after the last |
-| `system.net.arp.cache-timeout-ms` | 60000 | 1000..3600000 | lifetime of an ARP entry after its last refresh |
+| `system.net.ipv4.probe-count` | 3 | 1..10 | ARP probes before an address goes live |
+| `system.net.ipv4.probe-wait-ms` | 1000 | 0..10000 | longest random wait before the first probe |
+| `system.net.ipv4.probe-min-ms` | 1000 | 100..10000 | shortest random gap between probes |
+| `system.net.ipv4.probe-max-ms` | 2000 | 100..10000 | longest random gap between probes; at least `probe-min-ms` |
+| `system.net.ipv4.announce-count` | 2 | 1..10 | announcements once an address goes live |
+| `system.net.ipv4.announce-interval-ms` | 2000 | 100..10000 | gap between announcements |
+| `system.net.ipv4.defend-interval-ms` | 10000 | 1000..60000 | a second claim on the live address inside this gives it up |
+| `system.net.ipv4.max-conflicts` | 10 | 1..100 | conflicts in a row before claims are rate-limited |
+| `system.net.ipv4.conflict-rate-limit-ms` | 60000 | 1000..600000 | wait before the next claim once rate-limited |
+| `system.net.arp.cache-timeout-ms` | 60000 | 1000..3600000 | hard lifetime of an ARP entry after its last refresh |
 | `system.net.arp.resolve-interval-ms` | 1000 | 100..10000 | gap between ARP requests for one next hop |
 | `system.net.arp.resolve-attempts` | 3 | 1..10 | ARP requests before resolution fails |
 | `system.net.icmp.echo-reply-rate` | 20 | 0..10000 | echo requests answered per second; 0 answers none |
@@ -150,13 +162,22 @@ Its timer and rate settings (ADR 0192), all `uint`, times in milliseconds:
 | `system.net.dhcp.max-retry-ms` | 64000 | 4000..300000 | backoff ceiling; at least `initial-retry-ms` |
 | `system.net.dhcp.conflict-retry-ms` | 10000 | 1000..300000 | wait after declining a conflicting lease |
 
-The echo reply rate limits answers to other hosts' pings, not replies to
-`ping` run here. Linux has similar sysctls (`ip_default_ttl`,
-`neigh.*.retrans_time_ms` and others), but GoOS does not mirror
-`/proc/sys/net`.
+The address-conflict values are RFC 5227's defaults; after the last probe the
+stack also waits a fixed 2 s before the address goes live. The echo reply rate
+limits answers to other hosts' pings, not replies to `ping` run here. Some
+Linux sysctls are rough references (`ip_default_ttl`,
+`neigh.*.retrans_time_ms`), but GoOS defines its own semantics and does not
+mirror `/proc/sys/net`; the ARP lifetime, for one, is a hard expiry that
+Linux's neighbour states do not have. ADR 0192 lists them.
 
-The store checks only their types. The network service reads all fourteen as
-one candidate when it starts and when `net reload` asks it to. DHCP mode ignores
+`system.net.ipv4.probe-interval-ms` no longer exists. A stored line for it is
+skipped at restore as an undeclared key; set `probe-min-ms`, `probe-max-ms`
+and `probe-wait-ms` instead.
+
+The store checks only their types. The network service reads all twenty-one
+as one candidate when it starts and when `net reload` asks it to, within 5 s
+in all and at most 2 s per key, counted in scheduler ticks; a key whose turn
+comes after the 5 s is not asked for, and the reload fails. DHCP mode ignores
 the other three keys. Static mode needs a unicast host address written as
 plain dotted decimal, a prefix from 1 to 30, and a gateway that is zero or
 another host address inside the prefix. A candidate that fails names the
@@ -169,9 +190,11 @@ system.net.* settings not applied` until a reload succeeds.
 A reload that changes only tuning keeps the address, the lease and the ARP
 table. Each value takes effect at its next use: TTL and the reply rate on the
 next packet, the ARP lifetime on the next learned or refreshed entry, resolve
-and probe values on the next resolution or probe, DHCP retry values at the
-client's next retransmission or transaction. A resolution or probe already
-running finishes with the values it started with.
+probe and announcement values on the next resolution, claim or announcement
+sequence, defence and rate-limit values on the next conflict, DHCP retry
+values at the client's next retransmission or transaction. A resolution,
+claim or announcement sequence already running finishes with the values it
+started with.
 
 Each `config set` writes one key, and nothing applies them together, so set
 every key first and reload once:
@@ -198,3 +221,156 @@ net: invalid setting system.net.dhcp.max-retry-ms; previous configuration kept
 
 The settings persist in `/state/config` like any other; there is no separate
 network file.
+
+## Resolver
+
+The resolver service's settings (ADR 0194):
+
+| Key | Type | Default | Range | Meaning |
+| --- | --- | --- | ---: | --- |
+| `system.dns.server1`..`server4` | `text` | `0.0.0.0` | | configured DNS servers; `0.0.0.0` leaves a slot unused |
+| `system.dns.cache.entries` | `uint` | 64 | 1..256 | cache entries in use; lowering it evicts at once |
+| `system.dns.cache.max-ttl-sec` | `uint` | 86400 | 1..604800 | cap on how long an answer stays cached |
+| `system.dns.cache.max-negative-sec` | `uint` | 3600 | 1..86400 | cap on how long NXDOMAIN and NODATA stay cached |
+| `system.dns.failure-cache-sec` | `uint` | 5 | 1..300 | how long a timeout or server failure stays cached |
+| `system.dns.query-timeout-ms` | `uint` | 3000 | 500..30000 | time budget of one round of queries |
+| `system.dns.attempts` | `uint` | 2 | 1..3 | normal attempts per server for each queried name; all datagrams share a hard limit of 3 per server and resolution |
+
+A server must be strict dotted decimal and may not be in `0.0.0.0/8`,
+`127.0.0.0/8`, broadcast or multicast, or repeat an earlier slot. The servers
+a DHCP lease names come first, then the configured ones not already listed;
+in static mode the configured ones are the whole list. Servers from DHCP are
+never written here: `resolve status` shows them, marked `dhcp`.
+
+`resolve reload` reads all ten as one candidate and applies it whole, or
+names the first bad key and keeps the previous settings:
+
+```text
+goos> config set system.dns.server1 192.0.2.53
+goos> resolve reload
+resolver configuration applied
+goos> config set system.dns.server2 127.0.0.53
+goos> resolve reload
+resolve: invalid setting system.dns.server2; previous configuration kept
+```
+
+## Hosts
+
+The service also keeps the hosts table: names that resolve to an IPv4 address
+on this machine without asking a DNS server. It is records, not settings, so
+it has its own file, its own protocol and its own rights.
+
+### Records
+
+The table holds up to 64 records of a host name and an IPv4 address. A name
+follows the shared host-name syntax (`userspace/hostname`): labels of letters,
+digits and hyphens, compared without case, stored in lower case without a
+trailing dot. A name in the table is at most 248 bytes, not the 253 of DNS, so
+that the 8-byte protocol header and the name fit one 256-byte IPC payload.
+Names are unique; setting a name that exists replaces its address and keeps
+its place.
+
+An address must be a host address: not in `0.0.0.0/8`, not
+`255.255.255.255`, not multicast (`224.0.0.0/4`) and not class E. A name other
+than `localhost` may map into `127.0.0.0/8`.
+
+`localhost` is policy, not a record. It always answers `127.0.0.1`, whether
+or not the file exists or parses, it is listed first, and it does not use one
+of the 64 records. Setting or removing it answers `ReadOnly`, as does any name
+under `.localhost`; the resolver answers those names itself, so the table never
+holds them, and a lookup of one here is `NotFound`.
+
+The table has a 64-bit generation that goes up with every change that
+succeeds. Setting the address a name already has is not a change.
+
+### File
+
+The table lives at `/state/hosts`, apart from `/state/config`, one record per
+line, in the order the records were added:
+
+```text
+192.0.2.10 build.example
+10.0.0.2 nas
+```
+
+The service rewrites the whole file after every change, as it does the
+settings, and writes no `localhost` line. If the write fails, it tries again
+when PID 1 hands it a new filesystem session.
+
+When the service starts it reads the file after the settings. A missing file
+is an empty table. Reading follows these rules:
+
+- The address comes first, in strict dotted decimal; fields are separated by
+  one or more spaces or tabs, which may also begin or end a line.
+- `#` starts a comment that runs to the end of the line. Blank lines and
+  comment lines are ignored.
+- A trailing dot and upper case in a name are accepted and normalized.
+- A line with a bad address, a bad name, a third field, a `localhost` name, a
+  name already read, or a record past the 64th is skipped. The service logs one
+  warning with the number of lines skipped.
+- Reading stops at 21248 bytes, room for 64 records of the longest name and
+  4 KiB of comments. A line the bound cuts is skipped.
+
+Comments do not survive the next change, which rewrites the file from the
+table.
+
+### Protocol
+
+`GHST` version 1 travels on the configuration session endpoint, told apart from
+`GCF1` by its protocol ID. The session's scope does not apply. `Get` and `List`
+need `HostsRead`; `Set` and `Remove` need `HostsWrite`; without them the answer
+is `PermissionDenied`.
+
+A request is an 8-byte header followed by the name:
+
+| Bytes | Field |
+| --- | --- |
+| 0 | operation: 1 `List`, 2 `Get`, 3 `Set`, 4 `Remove` |
+| 1 | name size, 0 for `List`, 1 to 248 otherwise |
+| 2 | cursor, `List` only |
+| 3 | zero |
+| 4..7 | address, `Set` only |
+| 8.. | name |
+
+A reply is an 8-byte header followed by either a name or the generation:
+
+| Bytes | Field |
+| --- | --- |
+| 0 | operation |
+| 1 | status |
+| 2 | name size |
+| 3 | next cursor, `List` only |
+| 4..7 | address, on success |
+| 8.. | the name if its size is not zero, else the generation as a little-endian `uint64` |
+
+Only a `List` reply that returns a record carries a name; every other reply,
+including the one that ends a listing, carries the generation. The longest
+name fills the payload, so the two cannot travel together. Fields an operation
+does not use must be zero, and the sizes must match the payload exactly.
+
+`List` starts at cursor 0, which is `localhost`, and returns one record and the
+next cursor per request until `NotFound`. A change during a listing can move a
+record past the cursor; a client that needs a consistent listing compares the
+generation from a `Get` before it with the one that ends it.
+
+Statuses: `NotFound` for a name not in the table, `ReadOnly` for `localhost`
+and names under it, `ResourceExhausted` for a full table, `InvalidArgument` for
+a bad name or address.
+
+### Shell
+
+```text
+goos> hosts set 10.0.0.2 NAS.
+goos> hosts
+127.0.0.1 localhost
+10.0.0.2 nas
+goos> hosts get nas
+10.0.0.2 nas
+goos> hosts remove nas
+goos> hosts set 10.0.0.2 localhost
+hosts: localhost is reserved
+```
+
+The other errors are `hosts: invalid IPv4 address`, `hosts: invalid host
+name`, `hosts: table full`, `hosts: no such host` and `hosts: service
+unavailable`.

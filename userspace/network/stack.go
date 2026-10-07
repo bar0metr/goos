@@ -31,29 +31,22 @@ type Snapshot struct {
 	TX             uint64
 	Drop           uint64
 	Malformed      uint64
-}
-
-// probe is the address conflict check that precedes every address
-// assignment, for a DHCP lease and for a static address alike.
-type probe struct {
-	active    bool
-	candidate IPv4
-	sent      uint8
-	deadline  uint64
-	// count and interval are the tuning the probe started with.
-	count    uint8
-	interval uint64
+	// Conflicts counts address-conflict events; ConflictRun is the current
+	// run of conflicts without an address that held, and RateLimited reports
+	// that the next claim waits for the rate limit.
+	Conflicts   Conflicts
+	ConflictRun uint8
+	RateLimited bool
+	// Loopback counts echoes answered on the loopback interface.
+	Loopback uint64
 }
 
 // Stack is the whole state of one interface. It holds no pointers and every
 // table and the transmit ring are fixed arrays, so a service can keep one in
 // static storage.
 //
-// Before any address goes live, DHCP or static, the stack sends ARP probes
-// (two by default, 500 ms apart) and waits one more interval after the last.
-// A DHCP conflict declines the lease and retries discovery after the conflict
-// delay (10 s by default). A static conflict leaves the stack Failed until the
-// next Configure or LinkUp.
+// Every address passes the conflict detection in conflict.go before it goes
+// live. The loopback range never reaches the link: see loopback.go.
 type Stack struct {
 	random     uint64
 	state      State
@@ -73,6 +66,7 @@ type Stack struct {
 	identification uint16
 	echoBase       uint16
 	cursor         int
+	datagramCursor int
 
 	rx, tx, drop, malformed uint64
 
@@ -83,7 +77,21 @@ type Stack struct {
 	resolutions [MaxResolutions]resolution
 	sessions    [MaxSessions]echoSession
 	probe       probe
+	announcer   announcer
 	dhcp        dhcpClient
+	datagrams   [MaxDatagrams]datagram
+
+	// defended and defendedAt record the last defence of the live address.
+	defended   bool
+	defendedAt uint64
+	// dns is the server list of the bound lease.
+	dns           [MaxDNSServers]IPv4
+	dnsCount      uint8
+	dnsGeneration uint64
+	conflicts     uint8
+	rateLimited   bool
+	counters      Conflicts
+	loopback      uint64
 
 	frames  [TxQueueFrames][MaxFrame]byte
 	lengths [TxQueueFrames]uint16
@@ -107,7 +115,7 @@ func (stack *Stack) Init(seed uint64) {
 	stack.clearAddress()
 	stack.identification = uint16(stack.next())
 	stack.echoBase = uint16(stack.next())
-	stack.cursor = 0
+	stack.cursor, stack.datagramCursor = 0, 0
 	stack.rx, stack.tx, stack.drop, stack.malformed = 0, 0, 0, 0
 	stack.replyWindow, stack.replyCount = 0, 0
 	stack.clearNeighbors()
@@ -115,7 +123,16 @@ func (stack *Stack) Init(seed uint64) {
 		stack.sessions[index] = echoSession{}
 	}
 	stack.probe = probe{}
+	stack.announcer = announcer{}
 	stack.dhcp = dhcpClient{}
+	for index := range stack.datagrams[:] {
+		stack.datagrams[index].clear()
+	}
+	stack.defended, stack.defendedAt = false, 0
+	stack.conflicts, stack.rateLimited = 0, false
+	stack.counters = Conflicts{}
+	stack.loopback = 0
+	stack.dns, stack.dnsCount, stack.dnsGeneration = [MaxDNSServers]IPv4{}, 0, 0
 	stack.flushFrames()
 }
 
@@ -254,75 +271,21 @@ func (stack *Stack) clearAddress() {
 }
 
 // resetAddressing removes the address and everything that depends on it.
-// Echoes fail first so none can match a reply after the address is gone.
+// Echoes and datagrams fail first so none can match a reply after the address
+// is gone. Loopback echoes never wait, so none are affected.
 func (stack *Stack) resetAddressing(result Result) {
 	stack.failEchoes(result)
+	stack.failDatagrams(result)
 	stack.clearAddress()
 	stack.clearNeighbors()
 	stack.probe = probe{}
+	stack.announcer = announcer{}
+	stack.defended = false
 	stack.dhcp.phase = dhcpOff
+	stack.clearDNS()
 	if stack.state == StateReady {
 		stack.state = StateConfiguring
 	}
-}
-
-// applyAddress makes a probed address live. The announcement lets peers
-// replace any stale mapping for it.
-func (stack *Stack) applyAddress(address IPv4, prefix uint8, gateway IPv4) {
-	stack.address, stack.prefix, stack.gateway = address, prefix, gateway
-	stack.state = StateReady
-	stack.sendARP(broadcastMAC, arpPacket{
-		operation: arpRequest,
-		senderMAC: stack.mac,
-		senderIP:  address,
-		targetIP:  address,
-	})
-}
-
-func (stack *Stack) startProbe(candidate IPv4, now uint64) {
-	stack.probe = probe{active: true, candidate: candidate, count: stack.tuning.ProbeCount,
-		interval: stack.tuning.ProbeInterval}
-	stack.sendProbe(now)
-}
-
-// sendProbe asks who owns the candidate without claiming it: a zero sender
-// address keeps peers from caching our MAC for an address we do not hold yet.
-func (stack *Stack) sendProbe(now uint64) {
-	stack.sendARP(broadcastMAC, arpPacket{
-		operation: arpRequest,
-		senderMAC: stack.mac,
-		targetIP:  stack.probe.candidate,
-	})
-	stack.probe.sent++
-	stack.probe.deadline = addTime(now, stack.probe.interval)
-}
-
-func (stack *Stack) advanceProbe(now uint64) {
-	if stack.probe.sent < stack.probe.count {
-		stack.sendProbe(now)
-		return
-	}
-	candidate := stack.probe.candidate
-	stack.probe = probe{}
-	if stack.config.Mode == ModeDHCP {
-		stack.dhcpProbePassed(candidate, now)
-		return
-	}
-	stack.applyAddress(candidate, stack.config.Prefix, stack.config.Gateway)
-}
-
-// probeConflict reacts to another host using, or probing for, our candidate.
-// A static conflict needs an operator to pick another address, so the stack
-// stays Failed until a reload.
-func (stack *Stack) probeConflict(now uint64) {
-	candidate := stack.probe.candidate
-	stack.probe = probe{}
-	if stack.config.Mode == ModeDHCP {
-		stack.dhcpDecline(candidate, now)
-		return
-	}
-	stack.state = StateFailed
-	stack.failResult = ResultNoAddress
 }
 
 // Receive processes one Ethernet frame. RX counts every call; a frame outside
@@ -402,11 +365,11 @@ func (stack *Stack) receiveUDP(ether ethernetFrame, packet ipv4Packet, now uint6
 		stack.countMalformed()
 		return
 	}
-	if datagram.sourcePort != portServer || datagram.destinationPort != portClient {
-		stack.CountDrop()
+	if datagram.sourcePort == portServer && datagram.destinationPort == portClient {
+		stack.receiveDHCP(ether.source, datagram.payload, now)
 		return
 	}
-	stack.receiveDHCP(ether.source, datagram.payload, now)
+	stack.receiveDatagram(&packet, &datagram)
 }
 
 // Advance runs every timer due at now. Each handler schedules its next
@@ -414,8 +377,12 @@ func (stack *Stack) receiveUDP(ether ethernetFrame, packet ipv4Packet, now uint6
 func (stack *Stack) Advance(now uint64) {
 	stack.advanceEchoes(now)
 	stack.advanceResolutions(now)
+	stack.advanceDatagrams(now)
 	if stack.probe.active && stack.probe.deadline <= now {
 		stack.advanceProbe(now)
+	}
+	if stack.announcer.active && stack.announcer.deadline <= now {
+		stack.advanceAnnouncer(now)
 	}
 	if stack.dhcp.timed() && stack.dhcp.deadline <= now {
 		stack.advanceDHCP(now)
@@ -437,8 +404,16 @@ func (stack *Stack) Deadline() (uint64, bool) {
 			earliest.consider(stack.resolutions[index].deadline)
 		}
 	}
+	for index := range stack.datagrams[:] {
+		if stack.datagrams[index].waiting() {
+			earliest.consider(stack.datagrams[index].deadline)
+		}
+	}
 	if stack.probe.active {
 		earliest.consider(stack.probe.deadline)
+	}
+	if stack.announcer.active {
+		earliest.consider(stack.announcer.deadline)
 	}
 	if stack.dhcp.timed() {
 		earliest.consider(stack.dhcp.deadline)
@@ -512,11 +487,16 @@ func (stack *Stack) Snapshot(now uint64) Snapshot {
 		Address:   stack.address,
 		Prefix:    stack.prefix,
 		Gateway:   stack.gateway,
-		MTU:       stack.mtu,
 		RX:        stack.rx,
 		TX:        stack.tx,
 		Drop:      stack.drop,
 		Malformed: stack.malformed,
+		MTU:       stack.mtu,
+
+		Conflicts:   stack.counters,
+		ConflictRun: stack.conflicts,
+		RateLimited: stack.rateLimited,
+		Loopback:    stack.loopback,
 	}
 	if stack.address != zeroIPv4 && stack.dhcp.leased() && stack.dhcp.expiry > now {
 		snapshot.LeaseRemaining = (stack.dhcp.expiry - now) / second

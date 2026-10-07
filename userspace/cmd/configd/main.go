@@ -29,7 +29,10 @@ import (
 const (
 	// configPath is on /state: settings are mutable system state, not user data
 	// and not part of the immutable system image.
-	configPath       = "/state/config"
+	configPath = "/state/config"
+	// hostsPath holds the hosts table, apart from the settings: it is
+	// records, not typed keys, and has its own format and bound.
+	hostsPath        = "/state/hosts"
 	vfsReplyDeadline = uint64(200)
 	vfsReplyAttempts = 5
 	// exportSize bounds the whole exported file. Every entry fits a key, a type
@@ -62,6 +65,11 @@ var (
 	arenaBase     arena.Mark
 	correlation   uint64
 	persistFailed bool
+	hosts         config.Hosts
+	// hostsBuffer is one byte past the file bound, so a longer file is seen
+	// to be longer and its cut line is skipped.
+	hostsBuffer        [config.HostsFileSize + 1]byte
+	hostsPersistFailed bool
 )
 
 type session struct {
@@ -102,6 +110,7 @@ func userspaceMain() {
 	// serve it: the shell needs a configuration service to repair a broken
 	// configuration.
 	restore()
+	restoreHosts()
 	arenaBase = arena.Current()
 	mark("CONFIG_SERVICE_OK\n")
 	syslog.Info("ready", syslog.Str("path", configPath))
@@ -155,6 +164,9 @@ func addSession() {
 		mark("CONFIG_SESSION_RENEWED_OK\n")
 		if persistFailed {
 			persist()
+		}
+		if hostsPersistFailed {
+			persistHosts()
 		}
 		return
 	}
@@ -219,8 +231,15 @@ func declareSchema() {
 		{"system.net.ipv4.prefix", config.Uint(24), false},
 		{"system.net.ipv4.gateway", mustText("0.0.0.0"), false},
 		{"system.net.ipv4.default-ttl", config.Uint(64), false},
-		{"system.net.ipv4.probe-count", config.Uint(2), false},
-		{"system.net.ipv4.probe-interval-ms", config.Uint(500), false},
+		{"system.net.ipv4.probe-count", config.Uint(3), false},
+		{"system.net.ipv4.probe-wait-ms", config.Uint(1000), false},
+		{"system.net.ipv4.probe-min-ms", config.Uint(1000), false},
+		{"system.net.ipv4.probe-max-ms", config.Uint(2000), false},
+		{"system.net.ipv4.announce-count", config.Uint(2), false},
+		{"system.net.ipv4.announce-interval-ms", config.Uint(2000), false},
+		{"system.net.ipv4.defend-interval-ms", config.Uint(10000), false},
+		{"system.net.ipv4.max-conflicts", config.Uint(10), false},
+		{"system.net.ipv4.conflict-rate-limit-ms", config.Uint(60000), false},
 		{"system.net.arp.cache-timeout-ms", config.Uint(60000), false},
 		{"system.net.arp.resolve-interval-ms", config.Uint(1000), false},
 		{"system.net.arp.resolve-attempts", config.Uint(3), false},
@@ -228,6 +247,18 @@ func declareSchema() {
 		{"system.net.dhcp.initial-retry-ms", config.Uint(4000), false},
 		{"system.net.dhcp.max-retry-ms", config.Uint(64000), false},
 		{"system.net.dhcp.conflict-retry-ms", config.Uint(10000), false},
+		// The resolver service's settings (ADR 0194). 0.0.0.0 marks an unused
+		// server slot.
+		{"system.dns.server1", mustText("0.0.0.0"), false},
+		{"system.dns.server2", mustText("0.0.0.0"), false},
+		{"system.dns.server3", mustText("0.0.0.0"), false},
+		{"system.dns.server4", mustText("0.0.0.0"), false},
+		{"system.dns.cache.entries", config.Uint(64), false},
+		{"system.dns.cache.max-ttl-sec", config.Uint(86400), false},
+		{"system.dns.cache.max-negative-sec", config.Uint(3600), false},
+		{"system.dns.failure-cache-sec", config.Uint(5), false},
+		{"system.dns.query-timeout-ms", config.Uint(3000), false},
+		{"system.dns.attempts", config.Uint(2), false},
 		{"system.shell.prompt", mustText("goos> "), false},
 		{"user.name", mustText("goos"), false},
 	}
@@ -251,7 +282,7 @@ func mustText(value string) config.Value {
 // counted: a damaged file must not stop the system from booting with its
 // declared defaults.
 func restore() {
-	size, ok := readFile(exportBuffer[:])
+	size, ok := readFile(configPath, exportBuffer[:])
 	if !ok {
 		return
 	}
@@ -280,6 +311,10 @@ func serve(current *session) {
 	}
 	payloadSize := int(wire[24]) | int(wire[25])<<8
 	if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &requestMsg) {
+		return
+	}
+	if requestMsg.ProtocolID == config.HostsProtocolID {
+		serveHosts(current)
 		return
 	}
 	request, valid := config.DecodeRequest(requestMsg)
@@ -321,7 +356,7 @@ func persist() {
 		}
 		size += len(line)
 	}
-	if !writeFile(exportBuffer[:size]) {
+	if !writeFile(configPath, exportBuffer[:size]) {
 		if !persistFailed {
 			persistFailed = true
 			syslog.Error("configuration not persisted", syslog.Str("path", configPath))
@@ -331,8 +366,53 @@ func persist() {
 	persistFailed = false
 }
 
-func readFile(target []byte) (int, bool) {
-	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: []byte(configPath)})
+// restoreHosts loads the hosts table. A missing file is an empty table; a
+// line that does not parse, repeats a name or names localhost is skipped and
+// counted, as a configuration line is.
+func restoreHosts() {
+	size, ok := readFile(hostsPath, hostsBuffer[:])
+	if !ok {
+		return
+	}
+	if skipped := config.ParseHosts(hostsBuffer[:size], &hosts); skipped != 0 {
+		syslog.Warn("hosts lines skipped", syslog.Uint("count", uint64(skipped)))
+	}
+}
+
+// serveHosts answers a GHST request on a configuration session. The session's
+// hosts rights decide; its scope does not apply to the table.
+func serveHosts(current *session) {
+	request, valid := config.DecodeHostsRequest(&requestMsg)
+	reply := config.HostsReply{Operation: config.HostsOperation(requestMsg.Payload[0]), Status: config.StatusInvalidArgument, Generation: hosts.Generation}
+	if valid {
+		generation := hosts.Generation
+		reply = hosts.Serve(current.rights, request)
+		if hosts.Generation != generation {
+			persistHosts()
+		}
+	}
+	message, encoded := config.EncodeHostsReply(reply, requestMsg.Correlation)
+	if size, ok := ipc.Encode(message, wire[:]); encoded && ok {
+		sys.IPCSend(current.endpoint, wire[:size])
+	}
+}
+
+// persistHosts rewrites /state/hosts from the table, as persist does for the
+// settings.
+func persistHosts() {
+	data := config.AppendHosts(hostsBuffer[:0], &hosts)
+	if !writeFile(hostsPath, data) {
+		if !hostsPersistFailed {
+			hostsPersistFailed = true
+			syslog.Error("hosts not persisted", syslog.Str("path", hostsPath))
+		}
+		return
+	}
+	hostsPersistFailed = false
+}
+
+func readFile(path string, target []byte) (int, bool) {
+	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: sys.Bytes(path)})
 	if !ok || opened.Status != vfs.StatusOK {
 		return 0, false
 	}
@@ -348,17 +428,17 @@ func readFile(target []byte) (int, bool) {
 	return size, true
 }
 
-func writeFile(data []byte) bool {
-	created, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: []byte(configPath)})
+func writeFile(path string, data []byte) bool {
+	created, ok := callVFS(vfs.Request{Operation: vfs.OperationCreate, Path: sys.Bytes(path)})
 	if !ok || created.Status != vfs.StatusOK && created.Status != vfs.StatusAlreadyExists {
 		return false
 	}
 	// Truncating first keeps the file from retaining the tail of a longer
 	// previous version behind the new one.
-	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: []byte(configPath), Offset: 0}); !ok || reply.Status != vfs.StatusOK {
+	if reply, ok := callVFS(vfs.Request{Operation: vfs.OperationTruncate, Path: sys.Bytes(path), Offset: 0}); !ok || reply.Status != vfs.StatusOK {
 		return false
 	}
-	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: []byte(configPath)})
+	opened, ok := callVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: sys.Bytes(path)})
 	if !ok || opened.Status != vfs.StatusOK {
 		return false
 	}

@@ -12,29 +12,14 @@ func TestStaticProbeThenReady(t *testing.T) {
 	if state := h.stack.Snapshot(h.now).State; state != StateConfiguring {
 		t.Fatalf("state after link %d", state)
 	}
-	first := only(t, h.drain())
-	if first.arp.operation != arpRequest || first.arp.senderIP != zeroIPv4 || first.arp.targetIP != hostIP ||
-		first.ether.destination != broadcastMAC {
-		t.Fatalf("first probe %+v", first.arp)
-	}
-	h.advance(defaults.ProbeInterval)
-	second := only(t, h.drain())
-	if second.arp.senderIP != zeroIPv4 || second.arp.targetIP != hostIP {
-		t.Fatalf("second probe %+v", second.arp)
-	}
-	if state := h.stack.Snapshot(h.now).State; state != StateConfiguring {
-		t.Fatalf("ready before the probe ended: %d", state)
-	}
-	h.advance(defaults.ProbeInterval)
-	announce := only(t, h.drain())
-	if announce.arp.senderIP != hostIP || announce.arp.targetIP != hostIP {
-		t.Fatalf("announcement %+v", announce.arp)
-	}
+	sent := h.claim()
+	checkClaim(t, sent, hostIP, h.start, defaults)
 	snapshot := h.stack.Snapshot(h.now)
 	if snapshot.State != StateReady || snapshot.Address != hostIP || snapshot.Prefix != 24 ||
 		snapshot.Gateway != gatewayIP || snapshot.LeaseRemaining != 0 || snapshot.Mode != ModeStatic {
 		t.Fatalf("snapshot %+v", snapshot)
 	}
+	h.finishAnnouncements()
 	if _, ok := h.stack.Deadline(); ok {
 		t.Fatal("idle ready stack has a deadline")
 	}
@@ -67,7 +52,7 @@ func TestStaticProbeConflicts(t *testing.T) {
 		}
 		// A reload retries the probe even with the same configuration.
 		h.stack.Configure(staticConfig, h.now)
-		h.runUntil(h.now + 2*second)
+		h.runUntil(h.now + claimTime)
 		if state := h.stack.Snapshot(h.now).State; state != StateReady {
 			t.Fatalf("%s: state after reload %d", test.name, state)
 		}
@@ -82,7 +67,7 @@ func TestProbeIgnoresUnrelatedARP(t *testing.T) {
 		targetIP: gatewayIP}))
 	// Our own probe looped back is not a conflict either.
 	h.receive(arpFrame(broadcastMAC, arpPacket{operation: arpRequest, senderMAC: hostMAC, targetIP: hostIP}))
-	h.runUntil(h.now + 2*second)
+	h.runUntil(h.now + claimTime)
 	if state := h.stack.Snapshot(h.now).State; state != StateReady {
 		t.Fatalf("state %d", state)
 	}

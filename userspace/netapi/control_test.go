@@ -45,9 +45,9 @@ func TestControlRequestRoundTrip(t *testing.T) {
 func TestControlRequestInvalid(t *testing.T) {
 	invalid := []controlSample{
 		{ControlRequest{}, nil},
-		{ControlRequest{Opcode: ControlSetDevice + 1, Generation: 1}, []handle.ID{1}},
+		{ControlRequest{Opcode: ControlSetTransport + 1, Generation: 1}, []handle.ID{1}},
 		{ControlRequest{Opcode: ControlAddSession}, []handle.ID{1}},
-		{ControlRequest{Opcode: ControlAddSession, Rights: RightsAdminStatus + 1}, []handle.ID{1}},
+		{ControlRequest{Opcode: ControlAddSession, Rights: RightsResolveStatus + 1}, []handle.ID{1}},
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsPingStatus, Generation: 1}, []handle.ID{1}},
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsPingStatus}, nil},
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsPingStatus}, []handle.ID{1, 2}},
@@ -86,8 +86,8 @@ func TestControlRequestRejects(t *testing.T) {
 		{"one more handle", func(m *ipc.Message) { m.Handles[m.HandleCount] = 9; m.HandleCount++ }},
 		{"handle count overflow", func(m *ipc.Message) { m.HandleCount = 200 }},
 		{"zero handle", func(m *ipc.Message) { m.Handles[0] = 0 }},
-		{"opcode", func(m *ipc.Message) { m.Payload[0] = byte(ControlSetDevice + 1) }},
-		{"rights", func(m *ipc.Message) { m.Payload[1] = byte(RightsAdminStatus + 1) }},
+		{"opcode", func(m *ipc.Message) { m.Payload[0] = byte(ControlSetTransport + 1) }},
+		{"rights", func(m *ipc.Message) { m.Payload[1] = byte(RightsResolveStatus + 1) }},
 		{"generation", func(m *ipc.Message) {
 			if m.Payload[0] == byte(ControlAddSession) {
 				m.Payload[8] = 1
@@ -138,7 +138,7 @@ func TestControlReply(t *testing.T) {
 			}
 		}
 	}
-	bad := []ControlReply{{}, {Opcode: ControlSetDevice + 1}, {Opcode: ControlAddSession, Result: lastControlResult + 1}}
+	bad := []ControlReply{{}, {Opcode: ControlSetTransport + 1}, {Opcode: ControlAddSession, Result: lastControlResult + 1}}
 	for _, reply := range bad {
 		var wire ipc.Message
 		if EncodeControlReply(&reply, 1, &wire) {

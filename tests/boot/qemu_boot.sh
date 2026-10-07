@@ -1237,8 +1237,10 @@ forbid_window config.read-only-not-exported '^system\.build\.release' 'published
 require_regex config.prompt-applied '^cfg> echo prompt-applied-live$' 'the new prompt in use' "$log" 'config set system.shell.prompt'
 require_regex config.prompt-restored '^cfg> config set system.shell.prompt "goos> "$' 'the prompt set back' "$log" 'prompt-applied-live'
 # Sessions are granted with different scopes and rights: the shell administers
-# configuration, the log service only reads the one namespace that governs it.
-require_regex config.session-admin 'config\[[0-9]*\]: session added rights=3' 'a read-write session' "$log" 'goos> log'
+# configuration and the hosts table, the log service only reads the one
+# namespace that governs it, and the resolver reads its own and the hosts.
+require_regex config.session-admin 'config\[[0-9]*\]: session added rights=15' 'a read-write session with hosts rights' "$log" 'goos> log'
+require_regex config.session-resolver 'config\[[0-9]*\]: session added rights=5' 'a read-only session with hosts reads' "$log" 'goos> log'
 require_regex config.session-confined 'config\[[0-9]*\]: session added rights=1' 'a read-only session' "$log" 'goos> log'
 pass_group config
 

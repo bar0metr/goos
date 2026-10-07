@@ -90,6 +90,9 @@ func irqWait(irq uint64) uint64
 //go:linkname irqTake goos_irq_take
 func irqTake(irq uint64) uint64
 
+//go:linkname randomRead goos_random_read
+func randomRead(address unsafe.Pointer, size uintptr) uint64
+
 //go:linkname streamCreate goos_stream_create
 func streamCreate(address unsafe.Pointer, size uintptr) uint64
 

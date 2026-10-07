@@ -41,11 +41,23 @@ func run(data startup.Data) {
 	}
 }
 
+// status shows lo, which always exists, then net0, the one physical
+// interface.
 func status() {
 	reply, ok := utility.CallNetwork(netapi.Request{Opcode: netapi.OpStatus})
 	if !ok || reply.Result != netapi.ResultOK {
 		utility.Fail(nil, "network service unavailable")
 	}
+	utility.PrintText("lo:")
+	utility.EndLine()
+	field("state", append(text[:0], "up"...))
+	loopback := network.AppendIPv4(text[:0], network.LoopbackAddress)
+	loopback = append(loopback, '/')
+	field("address", appendDecimal(loopback, uint64(network.LoopbackPrefix)))
+	field("mtu", appendDecimal(text[:0], network.LoopbackMTU))
+	field("echoes", appendDecimal(text[:0], reply.Loopback))
+	utility.PrintText("net0:")
+	utility.EndLine()
 	field("state", append(text[:0], reply.State.Text()...))
 	field("link", append(text[:0], reply.Link.Text()...))
 	field("mac", network.AppendMAC(text[:0], reply.MAC))
@@ -82,6 +94,27 @@ func status() {
 	counters = append(counters, " malformed "...)
 	counters = appendDecimal(counters, reply.Malformed)
 	field("frames", counters)
+	arp := append(text[:0], "probes "...)
+	arp = appendDecimal(arp, reply.Probes)
+	arp = append(arp, " announcements "...)
+	arp = appendDecimal(arp, reply.Announcements)
+	field("claims", arp)
+	conflicts := append(text[:0], "probe "...)
+	conflicts = appendDecimal(conflicts, reply.ProbeConflicts)
+	conflicts = append(conflicts, " active "...)
+	conflicts = appendDecimal(conflicts, reply.ActiveConflicts)
+	conflicts = append(conflicts, " defended "...)
+	conflicts = appendDecimal(conflicts, reply.Defenses)
+	conflicts = append(conflicts, " relinquished "...)
+	conflicts = appendDecimal(conflicts, reply.Relinquished)
+	conflicts = append(conflicts, " rate-limited "...)
+	conflicts = appendDecimal(conflicts, reply.RateLimits)
+	field("conflicts", conflicts)
+	if reply.RateLimited {
+		limited := append(text[:0], "next address claim waits for the rate limit after "...)
+		limited = appendDecimal(limited, uint64(reply.ConflictRun))
+		field("claim", append(limited, " conflicts"...))
+	}
 	if reply.Fallback {
 		field("settings", append(text[:0], "built-in defaults; stored system.net.* settings not applied"...))
 	}
@@ -108,6 +141,7 @@ func reload() {
 }
 
 func field(name string, value []byte) {
+	utility.PrintText("  ")
 	utility.PrintText(name)
 	utility.PrintText(": ")
 	utility.Print(value)

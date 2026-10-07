@@ -80,6 +80,9 @@ func TestWrappersReturnTheKernelStatus(t *testing.T) {
 	if region, status := DMAAllocate(handle.ID(1), 0x401c0000, 16384); status != kcall.StatusUnsupported || region.Memory != nil {
 		t.Fatalf("DMAAllocate = %#v, %d", region, status)
 	}
+	if value, status := RandomUint64(); status != kcall.StatusUnsupported || value != 0 {
+		t.Fatalf("RandomUint64 = %d, %d", value, status)
+	}
 	if value, status := ClockNow(timekeeping.Realtime); status != kcall.StatusUnsupported || value != (timekeeping.Time{}) {
 		t.Fatalf("ClockNow = %+v, %d", value, status)
 	}

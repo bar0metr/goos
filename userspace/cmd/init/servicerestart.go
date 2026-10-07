@@ -89,11 +89,12 @@ func renewConfigGrants(spec *supervisor.LaunchSpec) bool {
 func configRestarted() {
 	for index := range sessions {
 		if sessions[index].active {
-			offerSettings(sessions[index].execServer, "", configproto.Read|configproto.Write)
+			offerSettings(sessions[index].execServer, "", configproto.Read|configproto.Write|configproto.HostsRead|configproto.HostsWrite)
 		}
 	}
 	offerSettings(uint64(logControl), logConfigScope, configproto.Read)
 	offerSettings(uint64(netControl), netConfigScope, configproto.Read)
+	offerSettings(uint64(resolverControl), resolverConfigScope, configproto.Read|configproto.HostsRead)
 	syslog.Info("config restarted")
 	mark("CONFIG_RESTARTED_OK\n")
 }

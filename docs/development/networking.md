@@ -5,6 +5,13 @@ Status: implemented by [ADR 0190](../adr/0190-network-device-authority.md) and
 requirements the implementation was built from; the ADRs and
 [networking.md](../architecture/networking.md) describe what was built.
 
+Later work changed the system this document describes. ADR 0192 added
+runtime tuning and RFC 5227 address-conflict detection, ADR 0193 a loopback
+interface and a hosts table, and ADR 0194 a DNS resolver, so `ping` now
+accepts host names. Where this document puts DNS out of scope or says `ping`
+takes only a numeric address, it describes the first milestone, not the
+current system.
+
 Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete
 only when an installed GoOS system sends ICMP echo requests from its own `ping`

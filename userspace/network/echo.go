@@ -55,11 +55,16 @@ type echoSession struct {
 //
 // The identifier is a per-boot random base plus the session number, so a
 // reply names its session directly; the payload token still has to match.
-// An echo to our own address completes at once with zero RTT and never
-// reaches the wire.
+// An echo to our own address, or anywhere in 127.0.0.0/8, completes at once
+// with zero RTT and never reaches the wire.
 func (stack *Stack) Echo(session int, destination IPv4, sequence uint16, timeout uint64, now uint64) Result {
-	if session < 0 || session >= MaxSessions || timeout < MinEchoTimeout || timeout > MaxEchoTimeout ||
-		!destination.IsUnicast() {
+	if session < 0 || session >= MaxSessions || timeout < MinEchoTimeout || timeout > MaxEchoTimeout {
+		return ResultInvalidArgument
+	}
+	if destination.IsLoopback() {
+		return stack.echoLoopback(session, destination, sequence)
+	}
+	if !destination.IsUnicast() {
 		return ResultInvalidArgument
 	}
 	slot := &stack.sessions[session]
@@ -174,7 +179,8 @@ func (stack *Stack) sendEcho(number int, mac MAC, now uint64) {
 	stack.commitFrame(echoFrameSize)
 }
 
-// sendWaiting sends every echo that was waiting for next hop to resolve.
+// sendWaiting sends every echo and datagram that was waiting for next hop to
+// resolve.
 func (stack *Stack) sendWaiting(nextHop IPv4, mac MAC, now uint64) {
 	for index := range stack.sessions[:] {
 		session := &stack.sessions[index]
@@ -182,6 +188,7 @@ func (stack *Stack) sendWaiting(nextHop IPv4, mac MAC, now uint64) {
 			stack.sendEcho(index, mac, now)
 		}
 	}
+	stack.sendWaitingDatagrams(nextHop, mac)
 }
 
 func (stack *Stack) failWaiting(nextHop IPv4, result Result) {
@@ -191,6 +198,7 @@ func (stack *Stack) failWaiting(nextHop IPv4, result Result) {
 			stack.complete(index, result, IPv4{}, 0)
 		}
 	}
+	stack.failWaitingDatagrams(nextHop, result)
 }
 
 func (stack *Stack) failEchoes(result Result) {

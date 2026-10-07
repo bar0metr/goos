@@ -73,7 +73,9 @@ shell and utilities, serial and framebuffer terminals, configuration and
 logging services, and full-screen tools such as `gfm`, `gview`, and `edit`.
 A userspace IPv4 service over a virtio-net driver configures its address
 with DHCP or static settings and answers and sends ICMP echo; `ping` and
-`net status` use it from the shell.
+`net status` use it from the shell. A loopback interface, a hosts table and a
+DNS stub resolver let `ping` and `resolve` take host names. There are no TCP
+or UDP sockets for programs yet, and no IPv6.
 
 The kernel supports preemptive SMP on up to 64 processors, per-process address
 spaces, typed capability-checked handles, IPC, shared memory, fine-grained

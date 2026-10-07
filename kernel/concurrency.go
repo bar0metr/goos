@@ -78,6 +78,7 @@ type cpuScratch struct {
 	linuxSignalPrevious [linuxcompat.SignalActionSize]byte
 	linuxSignalSet      [linuxcompat.SignalSetSize]byte
 	linuxRandom         [linuxcompat.MaxRandomBytes]byte
+	nativeRandom        [kcall.MaxRandomRead]byte
 	linuxCPUMask        [linuxCPUMaskSize]byte
 	linuxCPUWire        [4]byte
 	linuxTimeval        [linuxcompat.TimevalSize]byte

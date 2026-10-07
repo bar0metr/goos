@@ -88,7 +88,7 @@ uses slot 9 for a block-service probe (ADR 0058).
 | PID 1 slot | Object | PID 1 rights | Derived to | Child rights | Consumed |
 | --- | --- | --- | --- | --- | --- |
 | 1 | lifecycle channel | R W Wait | PID 1 only | - | - |
-| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log, netd, virtio-net | W | no |
+| 2 | console device | R W T | VFS, block, virtio-blk, fat32, config, log, netd, virtio-net, resolved | W | no |
 | | | | tty `console` | R W | no |
 | 3 | VFS session, client end | R W Wait T | shell `vfs` | R W Wait | yes |
 | 4 | VFS session, server end | R W Wait T | VFS `session` | R W Wait | yes |
@@ -151,15 +151,16 @@ service's `control` endpoint, over which a restarted driver's channel and a
 restarted FAT32 service's block channel are delivered; the channel between
 the VFS and the FAT32 service, renewed with the block channel on every restart
 of that service, whose VFS end goes over the VFS control endpoint (ADR 0096); the config service's `control` endpoint; one configuration session
-each for the shell (whole namespace, read and write) and the log service
-(`system.log.`, read only); and one VFS session each for the log service, the
+each for the shell (whole namespace, read and write, and the hosts table to
+read and change), the log service (`system.log.`, read only) and the resolver
+(`system.dns.`, read only, and the hosts table to read); and one VFS session each for the log service, the
 config service, its own reading of the command index, and every command whose
 index entry asks for one (ADR 0073, 0076, 0078, 0080). It keeps only the
 client side of each control endpoint.
 
 No child receives Transfer. After boot, PID 1 still holds slots 1, 2, 5, 7, 9,
 11, 12, 13, 18, 19, 20, 28, 29, and 30, the client sides of the block,
-config, network and terminal control endpoints, both ends of the terminal output stream, and a Wait + Write
+config, network, resolver and terminal control endpoints, both ends of the terminal output stream, and a Wait + Write
 process handle for each running job stage; the Write right is what
 `ProcessKill` requires (ADR 0067). Slot 7, the exec server end, is replaced by a
 fresh channel's when the shell restarts.
@@ -189,6 +190,61 @@ A command session's rights class, ping and status or status and reload, is
 recorded by `netd` against its end when PID 1 opens it; the command cannot
 change it or pass the session on.
 
+### Resolver
+
+PID 1 runs `resolved` next to `netd` in normal mode and gives it, at launch
+and on every restart (ADR 0194):
+
+| Object | PID 1 keeps | Derived to | Child rights | Consumed |
+| --- | --- | --- | --- | --- |
+| console device (slot 2) | R W T | resolved `console` | W | no |
+| resolver control, client end | R W Wait | PID 1 only | - | - |
+| resolver control, server end | - | resolved `control` | R W Wait | yes |
+| configuration session, `system.dns.` with `Read` and `HostsRead` | - | resolved `config` | R W Wait | yes |
+
+The control channel carries `GNETCTL1`. Over it and over `netd`'s control
+channel PID 1 binds the resolver transport, a new one with a growing
+generation whenever either service starts, and opens command sessions:
+
+| Object | PID 1 keeps | Moved to `netd` | Moved to `resolved` | Consumed |
+| --- | --- | --- | --- | --- |
+| transport channel, one end each | - | R W Wait | R W Wait | yes |
+| query pool, 3 pages | - | R | R W | yes |
+| reply pool, 3 pages | - | R W | R | yes |
+| command session, service end | - | - | R W Wait, in `AddSession` | yes |
+| command session, client end | - | - | the command's `resolve`, R W Wait | yes |
+
+PID 1 narrows its copies of the pools with `HandleDuplicate` and moves them
+in `SetTransport`; both services check through `HandleInfo` that each handle
+carries exactly the rights above, so neither can write the pool the other
+fills. The transport allows destination port 53 only, at most 1232 bytes
+either way and eight exchanges at once, and no command can open it. The
+resolver holds no device, no network session, no VFS session and no
+configuration write right.
+
+`resolved` accepts two session classes. `RightsResolveStatus` may resolve
+names and read status; `RightsAdminStatus` may also flush the cache and reload
+the `system.dns.` settings. The class is recorded against the session's end
+when PID 1 opens it, and the command cannot change it.
+
+### Configuration rights
+
+A configuration session carries rights fixed by PID 1 when it creates the
+session (ADR 0074, ADR 0193). `Read` and `Write` cover settings inside the
+session's scope. `HostsRead` and `HostsWrite` cover the hosts table, which
+`GHST1` serves on the same session; the table is not part of the key
+namespace, so the scope does not limit them.
+
+| Holder | Scope | Rights |
+| --- | --- | --- |
+| shell | whole namespace | `Read`, `Write`, `HostsRead`, `HostsWrite` |
+| resolved | `system.dns.` | `Read`, `HostsRead` |
+| netd | `system.net.` | `Read` |
+| log service | `system.log.` | `Read` |
+
+No command reaches the hosts table except through the shell's `hosts`
+builtin.
+
 ### Utilities
 
 For each pipeline stage PID 1 grants:
@@ -200,6 +256,7 @@ For each pipeline stage PID 1 grants:
 | `stderr` | stream writer: a `2>` sink's, or a copy of the terminal's writing end | W Wait |
 | `vfs` | new private VFS session channel, only when the command's entry in `/system/commands` asks for one | R W Wait |
 | `net` | new private network session channel, only when the entry asks for `GrantNetworkPing` or `GrantNetworkAdmin` and `netd` accepted the session | R W Wait |
+| `resolve` | new private resolver session channel, only when the entry asks for `GrantResolve` or `GrantResolveAdmin` and `resolved` accepted the session | R W Wait |
 
 The VFS session is a fresh channel from `ChannelCreate`. PID 1 sends the
 server end to VFS as an IPC attachment on the control channel and consumes the
@@ -207,6 +264,13 @@ client end into the child manifest (docs/userspace/vfs.md). Which commands
 get one is decided by the manifest each command declares in its source, which
 the build turns into the command index in the immutable system image
 (ADR 0080). A command without an index entry gets the standard streams only.
+
+The network and resolver grants are separate. `GrantResolve` gives a
+`RightsResolveStatus` session and `GrantResolveAdmin` a `RightsAdminStatus`
+one, and neither gives a network session; the network grants give no
+resolver session. A name lookup therefore grants no echo, and an echo grants
+no name lookup. `ping` asks for `GrantNetworkPing` and
+`GrantResolve`, `resolve` for `GrantResolveAdmin` (ADR 0194).
 
 ## Device authority
 
@@ -263,7 +327,7 @@ Some calls authorize by caller identity or need nothing:
 
 | Operation | Authorization |
 | --- | --- |
-| `Exit`, `ClockRead`, `ClockReadNanos` | none |
+| `Exit`, `ClockRead`, `ClockReadNanos`, `RandomRead` | none |
 | `StartupRead`, `SystemInfo`, `StreamCreate`, `ProcessInfo`, `CPUInfo`, `CPUEntry`, `CPUCacheInfo`, `CPURuntime` | caller must be a registered process |
 | `TaskAffinity` | the calling task with handle zero; another process through a process handle, Wait to read and Write to set |
 | `HandleInfo` | caller must be a registered process; describes only its own table |
@@ -274,7 +338,8 @@ themselves (ADR 0040); the per-process stream quota bounds how many one
 process can hold (ADR 0072). `ProcessInfo` names no kernel object and reveals
 only process names, states, and accounting. The CPU information calls expose
 only immutable normalized boot records; they grant no CPUID, MSR, APIC, or CPU
-startup access. The full list is in
+startup access. `RandomRead` returns at most 64 bytes of generator output a
+call, as Linux `getrandom` does, and names no object. The full list is in
 [attack-surface.md](attack-surface.md).
 
 ## Linux processes

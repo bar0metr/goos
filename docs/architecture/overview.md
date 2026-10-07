@@ -39,7 +39,10 @@ A userspace network service runs Ethernet, ARP, IPv4, ICMP echo and a DHCP
 client over a second isolated driver, for one legacy virtio-net function;
 the kernel's part is discovery, a dedicated interrupt route, a wait on that
 line, and a DMA domain per device ([networking](networking.md), ADR 0190,
-ADR 0191).
+ADR 0191). The same service owns a loopback interface, and a separate
+resolver service, `resolved`, answers host names from the hosts table, its
+cache and DNS servers it reaches only through the network service
+(ADR 0193, ADR 0194).
 Native composition also has bounded unidirectional byte-stream objects with
 separate read and write capabilities, backpressure, and close-driven EOF. These
 objects are the non-POSIX foundation for standard-stream redirection and carry

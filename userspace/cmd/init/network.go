@@ -118,8 +118,10 @@ func startNetwork(ticks uint64) {
 			syslog.Warn("network driver registration failed")
 		}
 	} else if !netDevicePresent {
+		// The service still runs: it owns lo, which needs no device.
 		syslog.Info("no network device")
 	}
+	registerResolver()
 	manager.StartReady(ticks+supervisor.RestartBackoff, launchService)
 }
 
@@ -266,6 +268,11 @@ func networkLaunched(name string, process handle.ID) {
 			mark("NETD_RESTARTED_OK\n")
 		}
 		netServiceStarted = true
+		if resolverStarted {
+			bindTransport()
+		}
+	case resolverName:
+		resolverLaunched(process)
 	case netDriverName:
 		netDriverProcess = keepProcess(netDriverProcess, process)
 		if netDriverStarted {
@@ -284,14 +291,16 @@ func appendDecimal(target []byte, value uint64) []byte {
 }
 
 // networkService reports whether name is one of the network services.
-func networkService(name string) bool { return name == netServiceName || name == netDriverName }
+func networkService(name string) bool {
+	return name == netServiceName || name == netDriverName || name == resolverName
+}
 
 // networkServiceNames lists the registered network services, which run from
 // the volume like the session services but are not needed to keep the
 // system out of recovery.
 func networkServiceNames() []string {
-	names := make([]string, 0, 2)
-	for _, name := range [...]string{netServiceName, netDriverName} {
+	names := make([]string, 0, 3)
+	for _, name := range [...]string{netServiceName, netDriverName, resolverName} {
 		if _, found := manager.Snapshot(name); found {
 			names = append(names, name)
 		}
@@ -299,8 +308,10 @@ func networkServiceNames() []string {
 	return names
 }
 
-// stopNetwork stops both services for recovery, which runs no network.
+// stopNetwork stops the network services for recovery, which runs no
+// network and carries no network command.
 func stopNetwork() {
+	stopResolver()
 	for _, name := range [...]string{netDriverName, netServiceName} {
 		manager.Hold(name)
 		if manager.PlanStop(name) != supervisor.StatusOK {

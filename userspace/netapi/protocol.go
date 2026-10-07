@@ -8,10 +8,13 @@ import (
 )
 
 const (
-	ProtocolID       = uint64(0x474e455441504931)
-	Version          = uint16(1)
+	ProtocolID = uint64(0x474e455441504931)
+	// Version 2 is the 152-byte reply with the MTU, the fallback flag, the
+	// conflict counters and the loopback count. A version-1 message is not
+	// this protocol and fails decoding.
+	Version          = uint16(2)
 	RequestSize      = 16
-	ReplySize        = 80
+	ReplySize        = 152
 	MinEchoTimeoutMS = 100
 	MaxEchoTimeoutMS = 5000
 	MaxPrefix        = 32
@@ -44,7 +47,15 @@ const (
 	replyMalformed = 68
 	replyMTU       = 76
 	replyFallback  = 78
-	replyReserved  = 79
+	replyFlags     = 79
+	replyCounters  = 80
+	replyRun       = 144
+	replyReserved  = 145
+
+	// flagRateLimited is the only flag: the next address claim waits for
+	// the conflict rate limit.
+	flagRateLimited = 1
+	counterCount    = 8
 
 	addressSize = 4
 	macSize     = 6
@@ -106,6 +117,15 @@ const (
 	FieldPrefix
 	FieldGateway
 	FieldTTL
+	FieldProbeCount
+	FieldProbeWait
+	FieldProbeMin
+	FieldProbeMax
+	FieldAnnounceCount
+	FieldAnnounceInterval
+	FieldDefendInterval
+	FieldMaxConflicts
+	FieldConflictRateLimit
 	FieldARPCacheTimeout
 	FieldARPResolveInterval
 	FieldARPResolveAttempts
@@ -113,9 +133,7 @@ const (
 	FieldDHCPInitialRetry
 	FieldDHCPMaxRetry
 	FieldDHCPConflictRetry
-	FieldProbeCount
-	FieldProbeInterval
-	lastField = FieldProbeInterval
+	lastField = FieldDHCPConflictRetry
 )
 
 type Link uint8
@@ -137,7 +155,9 @@ type Request struct {
 // every other field is zero on the wire and in the struct:
 //
 //	Status, OK:          State, Mode, Local, Gateway, MAC, Prefix, Link,
-//	                     Lease, RX, TX, Drop, Malformed, MTU, Fallback
+//	                     Lease, RX, TX, Drop, Malformed, MTU, Fallback,
+//	                     RateLimited, the conflict counters, Loopback,
+//	                     ConflictRun
 //	Echo, OK:            Responder (nonzero), RTT, Sequence
 //	Echo, RemoteUnreachable or TimeExceeded:
 //	                     Responder (nonzero, the router that answered), Sequence
@@ -169,6 +189,26 @@ type Reply struct {
 	// stored network settings could not be read or were invalid at startup.
 	// It clears once a reload applies the stored settings.
 	Fallback bool
+	// RateLimited reports that the next address claim waits for the
+	// conflict rate limit; ConflictRun counts conflicts since an address
+	// last held.
+	RateLimited bool
+	ConflictRun uint8
+	// The address-conflict counters, then echoes answered on lo.
+	Probes          uint64
+	ProbeConflicts  uint64
+	Announcements   uint64
+	ActiveConflicts uint64
+	Defenses        uint64
+	Relinquished    uint64
+	RateLimits      uint64
+	Loopback        uint64
+}
+
+// counters lists the reply's eight counters in wire order.
+func (r *Reply) counters() [counterCount]*uint64 {
+	return [counterCount]*uint64{&r.Probes, &r.ProbeConflicts, &r.Announcements, &r.ActiveConflicts,
+		&r.Defenses, &r.Relinquished, &r.RateLimits, &r.Loopback}
 }
 
 func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
@@ -267,6 +307,13 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 	if r.Fallback {
 		payload[replyFallback] = 1
 	}
+	if r.RateLimited {
+		payload[replyFlags] = flagRateLimited
+	}
+	for index, counter := range r.counters() {
+		binary.LittleEndian.PutUint64(payload[replyCounters+8*index:], *counter)
+	}
+	payload[replyRun] = r.ConflictRun
 	return true
 }
 
@@ -280,7 +327,7 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	payload := in.Payload[:ReplySize]
 	field := binary.LittleEndian.Uint16(payload[replyField:])
 	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:ReplySize]) || field > uint16(lastField) ||
-		payload[replyFallback] > 1 {
+		payload[replyFallback] > 1 || payload[replyFlags]&^flagRateLimited != 0 {
 		return false
 	}
 	r := Reply{
@@ -300,6 +347,12 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 		Malformed: binary.LittleEndian.Uint64(payload[replyMalformed:]),
 		MTU:       binary.LittleEndian.Uint16(payload[replyMTU:]),
 		Fallback:  payload[replyFallback] == 1,
+
+		RateLimited: payload[replyFlags] == flagRateLimited,
+		ConflictRun: payload[replyRun],
+	}
+	for index, counter := range r.counters() {
+		*counter = binary.LittleEndian.Uint64(payload[replyCounters+8*index:])
 	}
 	copy(r.Local[:], payload[replyLocal:replyLocal+addressSize])
 	copy(r.Gateway[:], payload[replyGateway:replyGateway+addressSize])
@@ -320,7 +373,9 @@ func validReply(r *Reply) bool {
 	noAddress := [addressSize]byte{}
 	snapshot := r.State == StateDown && r.Mode == ModeDHCP && r.Local == noAddress && r.Gateway == noAddress &&
 		r.MAC == [macSize]byte{} && r.Prefix == 0 && r.Link == LinkDown && r.Lease == 0 &&
-		r.RX == 0 && r.TX == 0 && r.Drop == 0 && r.Malformed == 0 && r.MTU == 0 && !r.Fallback
+		r.RX == 0 && r.TX == 0 && r.Drop == 0 && r.Malformed == 0 && r.MTU == 0 && !r.Fallback &&
+		!r.RateLimited && r.ConflictRun == 0 && r.Probes == 0 && r.ProbeConflicts == 0 && r.Announcements == 0 &&
+		r.ActiveConflicts == 0 && r.Defenses == 0 && r.Relinquished == 0 && r.RateLimits == 0 && r.Loopback == 0
 	echo := r.Responder == noAddress && r.RTT == 0 && r.Sequence == 0
 	switch r.Opcode {
 	case OpStatus:

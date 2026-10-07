@@ -77,7 +77,11 @@ one-object receive, stream, process, and IRQ waits remain available.
 The network service's protocols, `GNETDRV1` with its driver, `GNETCTL1` with
 PID 1 and `GNETAPI1` with commands, are fixed-size bodies on this envelope.
 Frames travel in two shared pools, and a message names only a slot and a
-length ([networking](networking.md), ADR 0191).
+length ([networking](networking.md), ADR 0191). The resolver service speaks
+`GNETCTL1` with PID 1, `GRESOLV1` with commands and `GNETDGRAM1` with the
+network service, whose DNS datagrams travel the same way in two pools of
+their own (ADR 0194). `GHST1`, the hosts protocol, runs on a configuration
+session next to the configuration protocol `GCF1` (ADR 0193).
 
 ## PID 1 lifecycle channel
 

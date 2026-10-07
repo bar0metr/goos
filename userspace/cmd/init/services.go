@@ -170,8 +170,9 @@ func startSession(session *terminalSession, ticks uint64) {
 		session.execClient, session.execServer = handle.ID(exec[0]), exec[1]
 	}
 	// The shell administers configuration, so its session is the whole
-	// namespace and may write. Every other client gets less.
-	configClient, _ := openConfigSession("", configproto.Read|configproto.Write)
+	// namespace and may write, and it may read and change the hosts table.
+	// Every other client gets less.
+	configClient, _ := openConfigSession("", configproto.Read|configproto.Write|configproto.HostsRead|configproto.HostsWrite)
 	// Each shell gets a filesystem session of its own; the kernel made the
 	// first one at boot.
 	files := vfsChannelHandle

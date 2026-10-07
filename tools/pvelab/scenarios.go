@@ -693,7 +693,7 @@ func (networkScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	if err != nil {
 		return "", fail(ClassScenario, "services", err)
 	}
-	for _, name := range []string{"netd", "virtio-net"} {
+	for _, name := range []string{"netd", "virtio-net", "resolved"} {
 		state, restarts, ok := serviceState(services, name)
 		if !ok || state != "running" || restarts != 0 {
 			return "", failf(ClassScenario, "network stability", "%s state=%q restarts=%d; want running with no restarts:\n%s", name, state, restarts, services)
