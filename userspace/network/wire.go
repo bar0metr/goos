@@ -24,7 +24,6 @@ const (
 	ipv4HeaderSize   = 20
 	ipv4Version      = 4
 	ipv4MinIHL       = 5
-	ipv4DefaultTTL   = 64
 	ipv4FlagMore     = 0x2000
 	ipv4OffsetMask   = 0x1fff
 	protocolICMP     = 1
@@ -192,13 +191,13 @@ func parseIPv4(data []byte) (ipv4Packet, parseStatus) {
 	return packet, parseOK
 }
 
-func putIPv4Header(header []byte, source, destination IPv4, protocol uint8, identification uint16, payloadLength int) {
+func putIPv4Header(header []byte, ttl uint8, source, destination IPv4, protocol uint8, identification uint16, payloadLength int) {
 	header[0] = ipv4Version<<4 | ipv4MinIHL
 	header[1] = 0
 	binary.BigEndian.PutUint16(header[2:4], uint16(ipv4HeaderSize+payloadLength))
 	binary.BigEndian.PutUint16(header[4:6], identification)
 	binary.BigEndian.PutUint16(header[6:8], 0)
-	header[8] = ipv4DefaultTTL
+	header[8] = ttl
 	header[9] = protocol
 	header[10], header[11] = 0, 0
 	copy(header[12:16], source[:])

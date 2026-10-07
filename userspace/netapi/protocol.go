@@ -42,7 +42,9 @@ const (
 	replyTX        = 52
 	replyDrop      = 60
 	replyMalformed = 68
-	replyReserved  = 76
+	replyMTU       = 76
+	replyFallback  = 78
+	replyReserved  = 79
 
 	addressSize = 4
 	macSize     = 6
@@ -103,7 +105,17 @@ const (
 	FieldAddress
 	FieldPrefix
 	FieldGateway
-	lastField = FieldGateway
+	FieldTTL
+	FieldARPCacheTimeout
+	FieldARPResolveInterval
+	FieldARPResolveAttempts
+	FieldEchoReplyRate
+	FieldDHCPInitialRetry
+	FieldDHCPMaxRetry
+	FieldDHCPConflictRetry
+	FieldProbeCount
+	FieldProbeInterval
+	lastField = FieldProbeInterval
 )
 
 type Link uint8
@@ -125,7 +137,7 @@ type Request struct {
 // every other field is zero on the wire and in the struct:
 //
 //	Status, OK:          State, Mode, Local, Gateway, MAC, Prefix, Link,
-//	                     Lease, RX, TX, Drop, Malformed
+//	                     Lease, RX, TX, Drop, Malformed, MTU, Fallback
 //	Echo, OK:            Responder (nonzero), RTT, Sequence
 //	Echo, RemoteUnreachable or TimeExceeded:
 //	                     Responder (nonzero, the router that answered), Sequence
@@ -151,6 +163,12 @@ type Reply struct {
 	TX        uint64
 	Drop      uint64
 	Malformed uint64
+	// MTU is the link's IPv4 MTU, zero without a link.
+	MTU uint16
+	// Fallback reports that the service runs on built-in defaults because the
+	// stored network settings could not be read or were invalid at startup.
+	// It clears once a reload applies the stored settings.
+	Fallback bool
 }
 
 func EncodeRequest(r *Request, correlation uint64, out *ipc.Message) bool {
@@ -245,6 +263,10 @@ func EncodeReply(r *Reply, correlation uint64, out *ipc.Message) bool {
 	binary.LittleEndian.PutUint64(payload[replyTX:], r.TX)
 	binary.LittleEndian.PutUint64(payload[replyDrop:], r.Drop)
 	binary.LittleEndian.PutUint64(payload[replyMalformed:], r.Malformed)
+	binary.LittleEndian.PutUint16(payload[replyMTU:], r.MTU)
+	if r.Fallback {
+		payload[replyFallback] = 1
+	}
 	return true
 }
 
@@ -257,7 +279,8 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 	}
 	payload := in.Payload[:ReplySize]
 	field := binary.LittleEndian.Uint16(payload[replyField:])
-	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:ReplySize]) || field > uint16(lastField) {
+	if Opcode(payload[replyOpcode]) != opcode || !zero(payload[replyReserved:ReplySize]) || field > uint16(lastField) ||
+		payload[replyFallback] > 1 {
 		return false
 	}
 	r := Reply{
@@ -275,6 +298,8 @@ func DecodeReply(in *ipc.Message, correlation uint64, opcode Opcode, out *Reply)
 		TX:        binary.LittleEndian.Uint64(payload[replyTX:]),
 		Drop:      binary.LittleEndian.Uint64(payload[replyDrop:]),
 		Malformed: binary.LittleEndian.Uint64(payload[replyMalformed:]),
+		MTU:       binary.LittleEndian.Uint16(payload[replyMTU:]),
+		Fallback:  payload[replyFallback] == 1,
 	}
 	copy(r.Local[:], payload[replyLocal:replyLocal+addressSize])
 	copy(r.Gateway[:], payload[replyGateway:replyGateway+addressSize])
@@ -295,7 +320,7 @@ func validReply(r *Reply) bool {
 	noAddress := [addressSize]byte{}
 	snapshot := r.State == StateDown && r.Mode == ModeDHCP && r.Local == noAddress && r.Gateway == noAddress &&
 		r.MAC == [macSize]byte{} && r.Prefix == 0 && r.Link == LinkDown && r.Lease == 0 &&
-		r.RX == 0 && r.TX == 0 && r.Drop == 0 && r.Malformed == 0
+		r.RX == 0 && r.TX == 0 && r.Drop == 0 && r.Malformed == 0 && r.MTU == 0 && !r.Fallback
 	echo := r.Responder == noAddress && r.RTT == 0 && r.Sequence == 0
 	switch r.Opcode {
 	case OpStatus:

@@ -115,15 +115,9 @@ func parseConfigValue(kind config.Kind, text []byte) (config.Value, bool) {
 		}
 		return config.Value{}, false
 	case config.KindUint:
-		number := uint64(0)
-		if len(text) == 0 || len(text) > 20 {
+		number, ok := config.ParseUint(text)
+		if !ok {
 			return config.Value{}, false
-		}
-		for _, character := range text {
-			if character < '0' || character > '9' {
-				return config.Value{}, false
-			}
-			number = number*10 + uint64(character-'0')
 		}
 		return config.Uint(number), true
 	case config.KindText:

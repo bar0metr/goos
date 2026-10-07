@@ -19,6 +19,9 @@ var (
 	staticConfig = Config{Mode: ModeStatic, Address: hostIP, Prefix: 24, Gateway: gatewayIP}
 )
 
+// defaults is the tuning every harness starts with.
+var defaults = DefaultTuning()
+
 type harness struct {
 	t     testing.TB
 	stack *Stack
@@ -144,7 +147,7 @@ func arpFrame(destination MAC, packet arpPacket) []byte {
 
 func ipv4Bytes(source, destination IPv4, protocol uint8, payload []byte) []byte {
 	packet := make([]byte, ipv4HeaderSize+len(payload))
-	putIPv4Header(packet, source, destination, protocol, 77, len(payload))
+	putIPv4Header(packet, 64, source, destination, protocol, 77, len(payload))
 	copy(packet[ipv4HeaderSize:], payload)
 	return packet
 }
@@ -176,6 +179,7 @@ type sentFrame struct {
 	ip    ipv4Packet
 	icmp  icmpMessage
 	udp   udpDatagram
+	ttl   uint8
 }
 
 func decode(t testing.TB, frame []byte) sentFrame {
@@ -201,8 +205,9 @@ func decode(t testing.TB, frame []byte) sentFrame {
 		if status != parseOK {
 			t.Fatalf("outgoing IPv4 status %d", status)
 		}
-		if ether.payload[8] != ipv4DefaultTTL {
-			t.Fatalf("TTL %d", ether.payload[8])
+		sent.ttl = ether.payload[8]
+		if sent.ttl == 0 {
+			t.Fatal("outgoing TTL 0")
 		}
 		sent.ip = packet
 		switch packet.protocol {

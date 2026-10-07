@@ -12,6 +12,11 @@ QEMU 7.2 exposes 1024-entry virtio-net queues; their rings and the fixed frame
 buffers still fit within the unchanged 64-page DMA limit. The rest of this
 decision remains in force.
 
+Supersession note (2026-10-07): ADR 0192 makes the stack's timers, TTL and
+echo reply rate configurable, adds tuning keys to the reload `Field` values,
+and gives `Status` replies the link MTU at bytes 76..77 and a fallback flag
+at byte 78. The fixed values below are now defaults.
+
 ## Context
 
 GoOS had no network. ADR 0190 gives a driver bounded authority over one

@@ -211,12 +211,23 @@ func declareSchema() {
 		{"system.build.release", release, true},
 		{"system.build.machine", machine, true},
 		{"system.log.persist", config.Bool(true), false},
-		// The network service's settings (ADR 0191). The service validates them
-		// as a whole when it loads them; the store only checks their types.
+		// The network service's settings (ADR 0191) and timer policy (ADR 0192).
+		// The service validates them as a whole when it loads them; the store
+		// only checks their types. Times are in milliseconds.
 		{"system.net.mode", mustText("dhcp"), false},
 		{"system.net.ipv4.address", mustText("0.0.0.0"), false},
 		{"system.net.ipv4.prefix", config.Uint(24), false},
 		{"system.net.ipv4.gateway", mustText("0.0.0.0"), false},
+		{"system.net.ipv4.default-ttl", config.Uint(64), false},
+		{"system.net.ipv4.probe-count", config.Uint(2), false},
+		{"system.net.ipv4.probe-interval-ms", config.Uint(500), false},
+		{"system.net.arp.cache-timeout-ms", config.Uint(60000), false},
+		{"system.net.arp.resolve-interval-ms", config.Uint(1000), false},
+		{"system.net.arp.resolve-attempts", config.Uint(3), false},
+		{"system.net.icmp.echo-reply-rate", config.Uint(20), false},
+		{"system.net.dhcp.initial-retry-ms", config.Uint(4000), false},
+		{"system.net.dhcp.max-retry-ms", config.Uint(64000), false},
+		{"system.net.dhcp.conflict-retry-ms", config.Uint(10000), false},
 		{"system.shell.prompt", mustText("goos> "), false},
 		{"user.name", mustText("goos"), false},
 	}

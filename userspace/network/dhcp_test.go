@@ -211,9 +211,9 @@ func TestDHCPHappyPath(t *testing.T) {
 	if snapshot := h.stack.Snapshot(h.now); snapshot.State != StateConfiguring || snapshot.Address != zeroIPv4 {
 		t.Fatalf("address applied before the probe: %+v", snapshot)
 	}
-	h.advance(probeInterval)
+	h.advance(defaults.ProbeInterval)
 	h.drain()
-	h.advance(probeInterval)
+	h.advance(defaults.ProbeInterval)
 	announce := only(t, h.drain())
 	if announce.arp.senderIP != hostIP {
 		t.Fatalf("announcement %+v", announce.arp)
@@ -392,7 +392,7 @@ func TestDHCPConflictDeclines(t *testing.T) {
 	if snapshot := h.stack.Snapshot(h.now); snapshot.State != StateConfiguring || snapshot.Address != zeroIPv4 {
 		t.Fatalf("after conflict %+v", snapshot)
 	}
-	h.runUntil(h.now + dhcpDeclineWait - 1)
+	h.runUntil(h.now + defaults.DHCPConflictRetry - 1)
 	if frames := h.drain(); len(frames) != 0 {
 		t.Fatal("restarted before the decline wait")
 	}

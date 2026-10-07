@@ -81,6 +81,26 @@ func (f Field) Key() string {
 		return "system.net.ipv4.prefix"
 	case FieldGateway:
 		return "system.net.ipv4.gateway"
+	case FieldTTL:
+		return "system.net.ipv4.default-ttl"
+	case FieldARPCacheTimeout:
+		return "system.net.arp.cache-timeout-ms"
+	case FieldARPResolveInterval:
+		return "system.net.arp.resolve-interval-ms"
+	case FieldARPResolveAttempts:
+		return "system.net.arp.resolve-attempts"
+	case FieldEchoReplyRate:
+		return "system.net.icmp.echo-reply-rate"
+	case FieldDHCPInitialRetry:
+		return "system.net.dhcp.initial-retry-ms"
+	case FieldDHCPMaxRetry:
+		return "system.net.dhcp.max-retry-ms"
+	case FieldDHCPConflictRetry:
+		return "system.net.dhcp.conflict-retry-ms"
+	case FieldProbeCount:
+		return "system.net.ipv4.probe-count"
+	case FieldProbeInterval:
+		return "system.net.ipv4.probe-interval-ms"
 	}
 	return ""
 }

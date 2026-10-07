@@ -66,6 +66,9 @@ func status() {
 		gateway = network.AppendIPv4(gateway, reply.Gateway)
 	}
 	field("gateway", gateway)
+	if reply.MTU != 0 {
+		field("mtu", appendDecimal(text[:0], uint64(reply.MTU)))
+	}
 	if reply.Mode == netapi.ModeDHCP && reply.Lease != 0 {
 		lease := appendDecimal(text[:0], reply.Lease)
 		field("lease", append(lease, " s"...))
@@ -79,6 +82,9 @@ func status() {
 	counters = append(counters, " malformed "...)
 	counters = appendDecimal(counters, reply.Malformed)
 	field("frames", counters)
+	if reply.Fallback {
+		field("settings", append(text[:0], "built-in defaults; stored system.net.* settings not applied"...))
+	}
 	utility.Mark("NET_STATUS_OK\n")
 }
 

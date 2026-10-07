@@ -294,13 +294,13 @@ func TestAnswerEchoRateLimit(t *testing.T) {
 	h := readyWithPeer(t)
 	request := ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, protocolICMP, icmpBytes(icmpEchoRequest, 0, 1, 1, []byte("x")))
 	answered := 0
-	for index := 0; index < 3*maxRepliesPerSecond; index++ {
+	for index := 0; index < 3*int(defaults.EchoReplyRate); index++ {
 		h.receive(request)
 		answered += len(h.drain())
 		h.now += 10 * millisecond
 	}
 	// 60 requests over 600 ms fall in one window.
-	if answered != maxRepliesPerSecond {
+	if answered != int(defaults.EchoReplyRate) {
 		t.Fatalf("answered %d in one second", answered)
 	}
 	h.now += second
@@ -308,7 +308,7 @@ func TestAnswerEchoRateLimit(t *testing.T) {
 	if len(h.drain()) != 1 {
 		t.Fatal("limit did not reset")
 	}
-	if drop := h.stack.Snapshot(h.now).Drop; drop < 2*maxRepliesPerSecond {
+	if drop := h.stack.Snapshot(h.now).Drop; drop < 2*uint64(defaults.EchoReplyRate) {
 		t.Fatalf("drop counter %d", drop)
 	}
 }
