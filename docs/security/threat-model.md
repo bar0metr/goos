@@ -56,6 +56,7 @@ host (QEMU, OVMF, ISO, disk image file)
 | `netd` ↔ driver | `GNETDRV1` and two shared pools | slot numbers only, exact slot ownership, a generation per binding; the driver copies frames out of the pool before the device sees them (ADR 0191) |
 | commands → `netd` | `GNETAPI1` session | rights class fixed by PID 1 at `AddSession`; one echo in flight per session (ADR 0191) |
 | programs, `resolved` → `netd` | `GUDP1` session and two shared pools | opened by PID 1 for `GrantUDP` or for the resolver; exact pool rights and slot ownership; endpoints owned by the session; 8 endpoints and 16 receive buffers per session (ADR 0195) |
+| programs → `netd` | `GTCP1` session and two shared pools | opened by PID 1 for `GrantTCP`; exact pool rights and slot ownership; generation-safe endpoints owned by the session; fixed TCB, stream and reassembly storage; strict TCP checksum, option, sequence and reset validation (ADR 0196) |
 | `resolved` → `netd` | `GNETAPI1` status session | `RightsResolveStatus`: status and the lease's DNS servers only; handed over with the UDP session under a growing generation (ADR 0195) |
 | commands → `resolved` | `GRESOLV1` session | rights class fixed by PID 1 at `AddSession`, from `GrantResolve` or `GrantResolveAdmin`; separate from the network session (ADR 0194) |
 | shell, `resolved` → hosts table | `GHST1` on a configuration session | `HostsRead` and `HostsWrite` session rights fixed by PID 1; the shell holds both, the resolver only `HostsRead` (ADR 0193) |

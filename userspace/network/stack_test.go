@@ -47,7 +47,7 @@ func TestReceiveFrameFiltering(t *testing.T) {
 		{"ipv6", ipv6, 1, 0, 0},
 		{"header only", good[:HeaderSize], 0, 1, 0},
 		{"truncated ipv4", good[:HeaderSize+ipv4HeaderSize+2], 0, 1, 0},
-		{"unknown protocol", ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, 6, request), 1, 0, 0},
+		{"unknown protocol", ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, 99, request), 1, 0, 0},
 		{"our source address", ipv4Frame(hostMAC, peerMAC, hostIP, hostIP, protocolICMP, request), 1, 0, 0},
 		{"truncated icmp", ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, protocolICMP, request[:4]), 0, 1, 0},
 	} {

@@ -127,6 +127,28 @@ func (f Field) Key() string {
 		return "system.net.udp.max-endpoints-per-session"
 	case FieldUDPMaxPayload:
 		return "system.net.udp.max-payload"
+	case FieldTCPEphemeralMin:
+		return "system.net.tcp.ephemeral-port-min"
+	case FieldTCPEphemeralMax:
+		return "system.net.tcp.ephemeral-port-max"
+	case FieldTCPMaxEndpoints:
+		return "system.net.tcp.max-endpoints"
+	case FieldTCPSessionEndpoints:
+		return "system.net.tcp.max-endpoints-per-session"
+	case FieldTCPListenBacklog:
+		return "system.net.tcp.listen-backlog"
+	case FieldTCPSendBuffer:
+		return "system.net.tcp.send-buffer-bytes"
+	case FieldTCPReceiveBuffer:
+		return "system.net.tcp.recv-buffer-bytes"
+	case FieldTCPConnectTimeout:
+		return "system.net.tcp.connect-timeout-ms"
+	case FieldTCPRTOMin:
+		return "system.net.tcp.rto-min-ms"
+	case FieldTCPRTOMax:
+		return "system.net.tcp.rto-max-ms"
+	case FieldTCPTimeWait:
+		return "system.net.tcp.time-wait-ms"
 	}
 	return ""
 }

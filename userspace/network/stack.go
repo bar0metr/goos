@@ -40,6 +40,7 @@ type Snapshot struct {
 	// Loopback counts echoes answered on the loopback interface.
 	Loopback uint64
 	UDP      UDPStats
+	TCP      TCPStats
 }
 
 // Stack is the whole state of one interface. It holds no pointers and every
@@ -86,6 +87,13 @@ type Stack struct {
 	udpGeneration uint32
 	udpStats      UDPStats
 
+	tcp           [MaxTCPEndpoints]tcpEndpoint
+	tcpGeneration uint32
+	tcpStats      TCPStats
+	tcpEvents     [tcpEventCapacity]TCPEvent
+	tcpEventHead  int
+	tcpEventCount int
+
 	// defended and defendedAt record the last defence of the live address.
 	defended   bool
 	defendedAt uint64
@@ -131,6 +139,7 @@ func (stack *Stack) Init(seed uint64) {
 	stack.announcer = announcer{}
 	stack.dhcp = dhcpClient{}
 	stack.resetUDP()
+	stack.resetTCP()
 	stack.defended, stack.defendedAt = false, 0
 	stack.conflicts, stack.rateLimited = 0, false
 	stack.counters = Conflicts{}
@@ -281,6 +290,7 @@ func (stack *Stack) clearAddress() {
 func (stack *Stack) resetAddressing(result Result) {
 	stack.failEchoes(result)
 	stack.dropPendingUDP(IPv4{}, true)
+	stack.reconfigureTCP(result)
 	stack.clearAddress()
 	stack.clearNeighbors()
 	stack.probe = probe{}
@@ -343,6 +353,8 @@ func (stack *Stack) receiveIPv4(ether ethernetFrame, now uint64) {
 		stack.receiveICMP(ether, packet, now)
 	case protocolUDP:
 		stack.receiveUDP(ether, packet, now)
+	case protocolTCP:
+		stack.receiveTCP(packet, now)
 	default:
 		stack.CountDrop()
 	}
@@ -394,6 +406,7 @@ func (stack *Stack) receiveUDP(ether ethernetFrame, packet ipv4Packet, now uint6
 func (stack *Stack) Advance(now uint64) {
 	stack.advanceEchoes(now)
 	stack.advanceResolutions(now)
+	stack.advanceTCP(now)
 	if stack.probe.active && stack.probe.deadline <= now {
 		stack.advanceProbe(now)
 	}
@@ -429,6 +442,7 @@ func (stack *Stack) Deadline() (uint64, bool) {
 	if stack.dhcp.timed() {
 		earliest.consider(stack.dhcp.deadline)
 	}
+	stack.tcpDeadline(&earliest)
 	return earliest.deadline, earliest.found
 }
 
@@ -509,6 +523,7 @@ func (stack *Stack) Snapshot(now uint64) Snapshot {
 		RateLimited: stack.rateLimited,
 		Loopback:    stack.loopback,
 		UDP:         stack.UDPStats(),
+		TCP:         stack.TCPStats(),
 	}
 	if stack.address != zeroIPv4 && stack.dhcp.leased() && stack.dhcp.expiry > now {
 		snapshot.LeaseRemaining = (stack.dhcp.expiry - now) / second

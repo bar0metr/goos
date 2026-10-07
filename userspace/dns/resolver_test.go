@@ -1276,7 +1276,11 @@ func smallestUDPTuning() [network.TuningFields]uint64 {
 		uint64(tuning.ResolveAttempts), uint64(tuning.EchoReplyRate), tuning.DHCPInitialRetry / 1_000_000,
 		tuning.DHCPMaxRetry / 1_000_000, tuning.DHCPConflictRetry / 1_000_000,
 		uint64(tuning.UDP.EphemeralMin), uint64(tuning.UDP.EphemeralMax), uint64(tuning.UDP.ReceiveQueue),
-		uint64(tuning.UDP.MaxEndpoints), uint64(tuning.UDP.SessionEndpoints), uint64(tuning.UDP.MaxPayload)}
+		uint64(tuning.UDP.MaxEndpoints), uint64(tuning.UDP.SessionEndpoints), uint64(tuning.UDP.MaxPayload),
+		uint64(tuning.TCP.EphemeralMin), uint64(tuning.TCP.EphemeralMax), uint64(tuning.TCP.MaxEndpoints),
+		uint64(tuning.TCP.SessionEndpoints), uint64(tuning.TCP.ListenBacklog), uint64(tuning.TCP.SendBuffer),
+		uint64(tuning.TCP.ReceiveBuffer), tuning.TCP.ConnectTimeout / 1_000_000, tuning.TCP.RTOMin / 1_000_000,
+		tuning.TCP.RTOMax / 1_000_000, tuning.TCP.TimeWait / 1_000_000}
 	copy(values[:], stored[:])
 	return values
 }

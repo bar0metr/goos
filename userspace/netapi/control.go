@@ -8,8 +8,8 @@ import (
 
 const (
 	ControlProtocolID = uint64(0x474e455443544c31)
-	// Version 2 replaced the resolver transport with UDP sessions.
-	ControlVersion = uint16(2)
+	// Version 3 adds capability-bound TCP sessions.
+	ControlVersion = uint16(3)
 	ControlSize    = 16
 
 	controlOpcode     = 0
@@ -26,6 +26,7 @@ const (
 	// AddUDPSessionHandles are the session channel, the TX pool and the RX
 	// pool, in that order (GUDP1, package udpapi).
 	AddUDPSessionHandles = 3
+	AddTCPSessionHandles = 3
 	// SetNetworkHandles are a UDP session's three handles followed by a
 	// network session channel.
 	SetNetworkHandles = 4
@@ -39,6 +40,7 @@ const (
 	// ControlAddUDPSession asks the network service to serve a UDP session
 	// for a program. Rights is RightsUDP.
 	ControlAddUDPSession
+	ControlAddTCPSession
 	// ControlSetNetwork gives a service that uses the network, the resolver
 	// service, its own UDP session and a network session, under a generation
 	// that grows with every new pair. The network service never receives it.
@@ -56,6 +58,7 @@ const (
 	RightsResolveStatus
 	// RightsUDP is a UDP session, the authority to use UDP (ADR 0195).
 	RightsUDP
+	RightsTCP
 )
 
 type ControlResult uint8
@@ -88,6 +91,8 @@ func controlHandles(opcode ControlOpcode) (int, bool) {
 		return SetDeviceHandles, true
 	case ControlAddUDPSession:
 		return AddUDPSessionHandles, true
+	case ControlAddTCPSession:
+		return AddTCPSessionHandles, true
 	case ControlSetNetwork:
 		return SetNetworkHandles, true
 	}
@@ -100,6 +105,8 @@ func validControlRequest(r *ControlRequest) bool {
 		return r.Generation == 0 && r.Rights >= RightsPingStatus && r.Rights <= RightsResolveStatus
 	case ControlAddUDPSession:
 		return r.Generation == 0 && r.Rights == RightsUDP
+	case ControlAddTCPSession:
+		return r.Generation == 0 && r.Rights == RightsTCP
 	case ControlSetDevice, ControlSetNetwork:
 		return r.Generation != 0 && r.Rights == 0
 	}

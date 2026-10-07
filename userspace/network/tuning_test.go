@@ -9,7 +9,8 @@ import (
 // them, in Field order from FieldTTL.
 var storedDefaults = [TuningFields]uint64{64, 3, 1000, 1000, 2000, 2, 2000, 10000, 10, 60000,
 	60000, 1000, 3, 20, 4000, 64000, 10000,
-	49152, 65535, 8, 32, 8, 4096}
+	49152, 65535, 8, 32, 8, 4096,
+	49152, 65535, 32, 8, 8, 16384, 16384, 30000, 1000, 60000, 60000}
 
 func TestParseTuningDefaults(t *testing.T) {
 	values := storedDefaults
@@ -49,6 +50,25 @@ func TestParseTuningRanges(t *testing.T) {
 			}
 			if field == FieldUDPMaxEndpoints {
 				values[FieldUDPSessionEndpoints-FieldTTL] = tuningRange[FieldUDPSessionEndpoints-FieldTTL].min
+			}
+			if field == FieldTCPEphemeralMin {
+				values[FieldTCPEphemeralMax-FieldTTL] = tuningRange[FieldTCPEphemeralMax-FieldTTL].max
+			}
+			if field == FieldTCPEphemeralMax {
+				values[FieldTCPEphemeralMin-FieldTTL] = tuningRange[FieldTCPEphemeralMin-FieldTTL].min
+			}
+			if field == FieldTCPMaxEndpoints {
+				values[FieldTCPSessionEndpoints-FieldTTL] = tuningRange[FieldTCPSessionEndpoints-FieldTTL].min
+			}
+			if field == FieldTCPConnectTimeout {
+				values[FieldTCPRTOMin-FieldTTL] = tuningRange[FieldTCPRTOMin-FieldTTL].min
+			}
+			if field == FieldTCPRTOMin {
+				values[FieldTCPConnectTimeout-FieldTTL] = tuningRange[FieldTCPConnectTimeout-FieldTTL].max
+				values[FieldTCPRTOMax-FieldTTL] = tuningRange[FieldTCPRTOMax-FieldTTL].max
+			}
+			if field == FieldTCPRTOMax {
+				values[FieldTCPRTOMin-FieldTTL] = tuningRange[FieldTCPRTOMin-FieldTTL].min
 			}
 			if _, got := ParseTuning(&values); got != FieldNone {
 				t.Errorf("field %d value %d refused as %d", field, value, got)

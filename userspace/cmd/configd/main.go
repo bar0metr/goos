@@ -253,6 +253,17 @@ func declareSchema() {
 		{"system.net.udp.max-endpoints", config.Uint(32), false},
 		{"system.net.udp.max-endpoints-per-session", config.Uint(8), false},
 		{"system.net.udp.max-payload", config.Uint(4096), false},
+		{"system.net.tcp.ephemeral-port-min", config.Uint(49152), false},
+		{"system.net.tcp.ephemeral-port-max", config.Uint(65535), false},
+		{"system.net.tcp.max-endpoints", config.Uint(32), false},
+		{"system.net.tcp.max-endpoints-per-session", config.Uint(8), false},
+		{"system.net.tcp.listen-backlog", config.Uint(8), false},
+		{"system.net.tcp.send-buffer-bytes", config.Uint(16384), false},
+		{"system.net.tcp.recv-buffer-bytes", config.Uint(16384), false},
+		{"system.net.tcp.connect-timeout-ms", config.Uint(30000), false},
+		{"system.net.tcp.rto-min-ms", config.Uint(1000), false},
+		{"system.net.tcp.rto-max-ms", config.Uint(60000), false},
+		{"system.net.tcp.time-wait-ms", config.Uint(60000), false},
 		// The resolver service's settings (ADR 0194). 0.0.0.0 marks an unused
 		// server slot.
 		{"system.dns.server1", mustText("0.0.0.0"), false},

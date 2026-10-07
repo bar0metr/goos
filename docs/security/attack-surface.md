@@ -234,6 +234,11 @@ or from other processes:
   The configuration service parses `/state/hosts` at restore, skipping and
   counting malformed and duplicate lines, and keeps at most 64 records
   (ADR 0193).
+- `GTCP1` exposes TCP only to sessions PID 1 creates for `GrantTCP`. `netd`
+  checks endpoint ownership, TX and RX slot transitions, request sizes and
+  correlations. Remote TCP input is checksum- and bounds-checked before TCB
+  lookup. Endpoint, backlog, stream and reorder storage are fixed, and stale
+  endpoint IDs carry the wrong generation (ADR 0196).
 
 ### Resource limits
 

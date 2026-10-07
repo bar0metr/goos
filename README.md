@@ -75,8 +75,8 @@ A userspace IPv4 service over a virtio-net driver configures its address
 with DHCP or static settings and answers and sends ICMP echo; `ping` and
 `net status` use it from the shell. A loopback interface, a hosts table and a
 DNS stub resolver let `ping` and `resolve` take host names. Native programs
-granted a UDP session send and receive IPv4 UDP datagrams, as the `udp`
-command does. There is no TCP, no IPv6 and no Linux socket interface yet.
+granted a UDP or TCP session use IPv4 datagrams or bounded byte streams, as
+the `udp` and `tcp` commands do. There is no IPv6 or Linux socket interface.
 
 The kernel supports preemptive SMP on up to 64 processors, per-process address
 spaces, typed capability-checked handles, IPC, shared memory, fine-grained

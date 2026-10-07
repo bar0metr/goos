@@ -12,6 +12,10 @@ accepts host names, and ADR 0195 generic IPv4 UDP for programs, so UDP is no
 longer private to the network service. Where this document puts DNS or
 general UDP out of scope, keeps UDP internal, or says `ping` takes only a
 numeric address, it describes the first milestone, not the current system.
+ADR 0196 adds generic IPv4 TCP, GTCP1 sessions, the `tcp` command and TCP
+status. Its parser, TCBs, stream buffers, reassembly, retransmission,
+congestion control, close states and TIME_WAIT remain in `userspace/network`.
+IPv6, Linux socket calls and DNS-over-TCP migration remain out of scope.
 
 Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete

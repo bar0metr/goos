@@ -23,6 +23,7 @@ import (
 	"goos/userspace/netapi"
 	"goos/userspace/netdev"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/tcpapi"
 	"goos/userspace/udpapi"
 )
 
@@ -305,6 +306,58 @@ func openUDPSession() ([3]handle.ID, bool) {
 		return none, false
 	}
 	if !awaitNetControl(netapi.ControlAddUDPSession) {
+		for _, id := range [...]handle.ID{handle.ID(pair[0]), clientTX, clientRX} {
+			sys.HandleClose(id)
+		}
+		return none, false
+	}
+	return [3]handle.ID{handle.ID(pair[0]), clientTX, clientRX}, true
+}
+
+// openTCPSession creates the channel and directionally restricted stream
+// pools for one GTCP1 client.
+func openTCPSession() ([3]handle.ID, bool) {
+	var none [3]handle.ID
+	if netControl == 0 {
+		return none, false
+	}
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		return none, false
+	}
+	tx, txStatus := sys.MemoryCreate(tcpapi.TXPoolPages)
+	rx, rxStatus := sys.MemoryCreate(tcpapi.RXPoolPages)
+	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK {
+		closePair(pair)
+		closeOpen(tx)
+		closeOpen(rx)
+		return none, false
+	}
+	serviceTX, _ := sys.HandleDuplicate(tx, capability.Read|capability.Transfer)
+	serviceRX, _ := sys.HandleDuplicate(rx, capability.Read|capability.Write|capability.Transfer)
+	clientTX, _ := sys.HandleDuplicate(tx, capability.Read|capability.Write|capability.Transfer)
+	clientRX, _ := sys.HandleDuplicate(rx, capability.Read|capability.Transfer)
+	sys.HandleClose(tx)
+	sys.HandleClose(rx)
+	if serviceTX == 0 || serviceRX == 0 || clientTX == 0 || clientRX == 0 {
+		closePair(pair)
+		for _, id := range [...]handle.ID{serviceTX, serviceRX, clientTX, clientRX} {
+			closeOpen(id)
+		}
+		return none, false
+	}
+	correlation++
+	var message ipc.Message
+	attachments := [...]handle.ID{handle.ID(pair[1]), serviceTX, serviceRX}
+	request := netapi.ControlRequest{Opcode: netapi.ControlAddTCPSession, Rights: netapi.RightsTCP}
+	if !netapi.EncodeControlRequest(&request, attachments[:], correlation, &message) || !sendMessage(uint64(netControl), message) {
+		closePair(pair)
+		for _, id := range [...]handle.ID{serviceTX, serviceRX, clientTX, clientRX} {
+			closeOpen(id)
+		}
+		return none, false
+	}
+	if !awaitNetControl(netapi.ControlAddTCPSession) {
 		for _, id := range [...]handle.ID{handle.ID(pair[0]), clientTX, clientRX} {
 			sys.HandleClose(id)
 		}

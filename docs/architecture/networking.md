@@ -14,7 +14,7 @@ requirements the first version was built from.
 Implemented: IPv4 with RFC 5227 address-conflict detection, ICMP echo, a
 DHCP client, the loopback interface, a hosts table (ADR 0193), DNS name
 resolution through a stub resolver with a cache, and IPv4 UDP for any
-program PID 1 grants a UDP session (ADR 0195). Not implemented: TCP, IPv4
+program PID 1 grants a UDP session (ADR 0195) or TCP session (ADR 0196). Not implemented: IPv4
 fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
 UDP senders (no Port Unreachable for an unbound port), DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
 Linux socket calls.
@@ -23,14 +23,14 @@ Linux socket calls.
 
 ```text
 resolve             ping                         net            udp
-  | GRESOLV1          | GRESOLV1, GNETAPI version 3 | GNETAPI v3 | GUDP1
-  v                   +-------------+---------------+------------+
+  | GRESOLV1          | GRESOLV1, GNETAPI version 4 | GNETAPI v4 | GUDP1 / GTCP1
+  v                   +-------------+---------------+--------------------+
 resolved  <-- GNETCTL --  PID 1     |  one private session per command
   |  hosts: GHST1 on its configuration session
   |  GUDP1 session and GNETAPI      v
   |  status session         netd  <---- GNETCTL version 2 ----  PID 1
   +-------------------------------->|  lo, Ethernet, ARP, IPv4, ICMP echo,
-                                    |  DHCP client, UDP endpoints
+                                    |  DHCP client, UDP endpoints, TCP TCBs
                                     |
                                     |  GNETDRV1 channel
   |  receive pool  (driver writes, netd reads)
@@ -181,6 +181,32 @@ destination address and port, or else to the one bound to the wildcard on
 that port. Queued payloads share 32 receive buffers of 4096 bytes, at most 16
 per session; a full queue or share drops the newcomer and keeps what is
 queued. No ICMP Port Unreachable is sent for an unbound port.
+
+## TCP
+
+TCP uses the same route, ARP and local-delivery paths as UDP, but keeps its
+TCBs in `userspace/network`. Native programs reach it through `GTCP1`: a
+channel, four TX slots and eight RX slots. PID 1 creates these objects only
+for `GrantTCP` and registers the service side with `netd` through
+`ControlAddTCPSession`. Endpoint IDs carry generations and every operation
+checks the owning session.
+
+The stack supports bind, ephemeral ports, listen, deferred accept and connect,
+bounded byte-stream reads and writes, retransmission, receive and congestion
+windows, bounded out-of-order reassembly, zero-window probes, FIN half-close,
+RST and TIME_WAIT. Each connection has fixed 16 KiB send and receive arrays;
+the global table has 32 endpoints, with at most eight per session. Runtime
+settings can lower these limits but cannot allocate more storage.
+
+Traffic to `127.0.0.0/8` or the current interface address is fed back through
+the TCP parser and state machine. It does not use ARP or the virtio driver.
+Replacing the configured external address aborts connections bound to it;
+wildcard and loopback listeners remain. A plain link-down leaves connection
+state to its retransmission deadlines.
+
+`net status` obtains TCP counters and limits through the separate TCP status
+operation in GNETAPI version 4. Stream contents are never diagnostic data.
+See ADR 0196 for the state, ownership and protocol rules.
 
 ## Names
 

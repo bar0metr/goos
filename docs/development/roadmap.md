@@ -612,7 +612,23 @@ Done after name resolution, under ADR 0195:
   datagrams on the private segment, the payload limits, checksum drops, a
   limit reload and loopback UDP without a NIC.
 
-Still unsupported: TCP, IPv4 fragmentation, multicast and broadcast sends,
+### Generic IPv4 TCP
+
+Done after generic UDP, under ADR 0196:
+
+- fixed TCP endpoint and TCB state in `userspace/network`, including active
+  and passive open, byte streams, retransmission, flow and congestion control,
+  bounded reassembly, FIN, RST and TIME_WAIT;
+- `GTCP1` sessions opened by PID 1 for `GrantTCP`, with checked TX and RX pool
+  ownership and deferred Accept, Connect, Read and Write;
+- loopback and own-address delivery through the TCP state machine, including
+  operation without a NIC;
+- `system.net.tcp.*`, TCP status counters and the `tcp connect|listen|self`
+  command;
+- host parser, transport and service tests plus the expanded offline network
+  gate.
+
+Still unsupported: IPv4 fragmentation, multicast and broadcast sends,
 DNS over TCP (a truncated answer fails), multicast DNS and `.local` names,
 IPv6 and AAAA records, DNSSEC, encrypted DNS, and the Linux socket calls.
 
@@ -655,7 +671,7 @@ a concrete blocker requires them:
 
 - full ASLR;
 - IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
-- networking beyond IPv4, ICMP echo, UDP, loopback and the DNS stub
+- networking beyond IPv4, ICMP echo, UDP, TCP, loopback and the DNS stub
   resolver on one virtio-net interface;
 - USB;
 - GUI;

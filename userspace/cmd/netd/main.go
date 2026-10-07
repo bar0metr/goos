@@ -36,6 +36,7 @@ const (
 	nanosPerTick   = 1_000_000_000 / clock.TicksPerSecond
 	exitFailed     = 1
 	udpOwner       = 1000
+	tcpOwner       = 2000
 )
 
 // session is one command's channel and what PID 1 said it may do.
@@ -150,6 +151,7 @@ func serve() {
 		stack.Advance(now)
 		deliverCompletions()
 		deliverUDP()
+		deliverTCP(now)
 		deliverServers()
 		transmitPending()
 		announceState(now)
@@ -182,7 +184,9 @@ func serve() {
 			case -2:
 				serviceControl()
 			default:
-				if owner >= udpOwner {
+				if owner >= tcpOwner {
+					serviceTCP(owner - tcpOwner)
+				} else if owner >= udpOwner {
 					serviceUDP(owner - udpOwner)
 				} else {
 					serviceSession(owner)
@@ -211,6 +215,11 @@ func buildInterests() int {
 	for index := range udpSessions {
 		if udpSessions[index].channel != 0 {
 			add(udpSessions[index].channel, udpOwner+index)
+		}
+	}
+	for index := range tcpSessions {
+		if tcpSessions[index].channel != 0 {
+			add(tcpSessions[index].channel, tcpOwner+index)
 		}
 	}
 	return count
@@ -423,6 +432,8 @@ func serviceControl() {
 			answerControl(control.Opcode, setDevice(control.Generation), control.Generation, correlation)
 		case netapi.ControlAddUDPSession:
 			answerControl(control.Opcode, addUDPSession(), 0, correlation)
+		case netapi.ControlAddTCPSession:
+			answerControl(control.Opcode, addTCPSession(), 0, correlation)
 		default:
 			closeAttached()
 			answerControl(control.Opcode, netapi.ControlInvalidArgument, 0, correlation)
@@ -594,6 +605,24 @@ func handleRequest(index int, correlation uint64) {
 		}
 		current.servers, current.known = correlation, request.Generation
 		deliverServers()
+	case netapi.OpTCPStatus:
+		snapshot := stack.TCPStats()
+		limits := stack.Tuning().TCP
+		answer = netapi.Reply{Opcode: netapi.OpTCPStatus, Result: netapi.ResultOK,
+			TCPRX: snapshot.RX, TCPTX: snapshot.TX, TCPRetransmits: snapshot.Retransmits,
+			TCPRXReset: snapshot.RXReset, TCPTXReset: snapshot.TXReset,
+			TCPDropChecksum: snapshot.DropChecksum, TCPDropNoTCB: snapshot.DropNoTCB,
+			TCPDropWindow: snapshot.DropWindow, TCPDropMalformed: snapshot.DropMalformed,
+			TCPEndpoints: uint16(snapshot.Endpoints), TCPListeners: uint16(snapshot.Listeners), TCPConnections: uint16(snapshot.Connections),
+			TCPEphemeralMin: limits.EphemeralMin, TCPEphemeralMax: limits.EphemeralMax,
+			TCPMaxEndpoints: limits.MaxEndpoints, TCPSessionEndpoints: limits.SessionEndpoints, TCPListenBacklog: limits.ListenBacklog,
+			TCPSendBuffer: limits.SendBuffer, TCPReceiveBuffer: limits.ReceiveBuffer,
+			TCPConnectTimeoutMS: uint32(limits.ConnectTimeout / 1_000_000), TCPRTOMinMS: uint32(limits.RTOMin / 1_000_000),
+			TCPRTOMaxMS: uint32(limits.RTOMax / 1_000_000), TCPTimeWaitMS: uint32(limits.TimeWait / 1_000_000)}
+		for index, count := range snapshot.States {
+			answer.TCPStates[index] = uint16(count)
+		}
+		send(current, correlation)
 	case netapi.OpEcho:
 		if current.rights != netapi.RightsPingStatus {
 			respond(current, request.Opcode, netapi.ResultPermissionDenied, correlation)

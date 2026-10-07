@@ -27,6 +27,7 @@ const (
 	ipv4FlagMore     = 0x2000
 	ipv4OffsetMask   = 0x1fff
 	protocolICMP     = 1
+	protocolTCP      = 6
 	protocolUDP      = 17
 	icmpHeaderSize   = 8
 	icmpEchoReply    = 0

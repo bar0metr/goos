@@ -40,9 +40,11 @@ const (
 	// GrantUDP asks for a UDP session (ADR 0195): a channel to the network
 	// service and the two pools its datagrams travel in.
 	GrantUDP
+	// GrantTCP asks for a TCP session and its stream pools.
+	GrantTCP
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
-		GrantResolve | GrantResolveAdmin | GrantUDP
+		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -78,9 +80,8 @@ const (
 	MaxArgs = 99
 	// IndexFormat names the line format below and the meaning of its grant
 	// bits. An installed system records it, so a system built for another
-	// format is refused (ADR 0175). Format 3 added the network grants and
-	// format 4 the UDP grant.
-	IndexFormat = 4
+	// format is refused (ADR 0175). Format 5 adds the TCP grant.
+	IndexFormat = 5
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

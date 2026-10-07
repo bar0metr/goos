@@ -634,3 +634,19 @@ to the matching architectural group using `require_marker`, `require_regex`,
 stable dotted name and, when useful, an anchor matching the initiating command.
 Do not add another monolithic condition or remove stress iterations to reduce
 host output.
+
+## TCP validation
+
+Run TCP parser, state-machine, GTCP1 and service tests on the host first:
+
+```sh
+go test ./userspace/network ./userspace/tcpapi ./userspace/tcpserve
+go test ./tools/netpeer
+```
+
+`make test-network` is the only TCP VM gate. It reuses the existing private
+network boots and adds remote echo, payloads across MSS boundaries, delayed
+handshake and reads, retransmission, refusal, reset, FIN and EOF, guest listen,
+loopback, own-address and no-NIC loopback checks. It also verifies TCP status
+and atomic tuning reload. Do not add a separate boot for a TCP case that fits
+an existing guest.

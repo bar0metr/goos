@@ -52,9 +52,14 @@ type host struct {
 	// -no-edns and the edns command flips it.
 	formErr atomic.Bool
 
-	mu        sync.Mutex
-	defend    map[ipv4]bool
-	neighbors map[ipv4]mac
+	mu             sync.Mutex
+	defend         map[ipv4]bool
+	neighbors      map[ipv4]mac
+	tcp            map[tcpKey]*tcpConn
+	tcpDelaySYNACK time.Duration
+	tcpZeroWindow  time.Duration
+	tcpDropSYN     bool
+	tcpDropData    bool
 	// later sends frames after a delay; the server sets it. Without it
 	// a slow answer goes at once.
 	later func(delay time.Duration, frames [][]byte)
@@ -126,6 +131,8 @@ func (h *host) handleIPv4(src mac, data []byte) [][]byte {
 		case datagram.dstPort == echoPort && packet.dst == h.ip:
 			return h.handleEcho(src, packet.src, datagram)
 		}
+	case 6:
+		return h.handleTCP(src, packet)
 	}
 	return nil
 }
@@ -210,6 +217,42 @@ func (h *host) command(line string) ([][]byte, bool, error) {
 	case "udp-send", "udp-bad", "udp-fill", "udp-burst":
 		frames, err := h.udpCommand(fields)
 		return frames, false, err
+	case "tcp-drop-next":
+		if len(fields) != 2 || fields[1] != "syn" && fields[1] != "data" {
+			return nil, false, fmt.Errorf("tcp-drop-next takes syn or data")
+		}
+		h.mu.Lock()
+		h.tcpDropSYN = fields[1] == "syn"
+		h.tcpDropData = fields[1] == "data"
+		h.mu.Unlock()
+		h.log.printf("tcp-drop-next %s", fields[1])
+		return nil, false, nil
+	case "tcp-delay-synack":
+		if len(fields) != 2 {
+			return nil, false, fmt.Errorf("tcp-delay-synack needs milliseconds")
+		}
+		delay, err := time.ParseDuration(fields[1] + "ms")
+		if err != nil {
+			return nil, false, err
+		}
+		h.mu.Lock()
+		h.tcpDelaySYNACK = delay
+		h.mu.Unlock()
+		h.log.printf("tcp-delay-synack %s", delay)
+		return nil, false, nil
+	case "tcp-zero-next":
+		if len(fields) != 2 {
+			return nil, false, fmt.Errorf("tcp-zero-next needs milliseconds")
+		}
+		delay, err := time.ParseDuration(fields[1] + "ms")
+		if err != nil || delay <= 0 {
+			return nil, false, fmt.Errorf("invalid zero-window delay")
+		}
+		h.mu.Lock()
+		h.tcpZeroWindow = delay
+		h.mu.Unlock()
+		h.log.printf("tcp-zero-next %s", delay)
+		return nil, false, nil
 	}
 	return nil, false, fmt.Errorf("unknown command %q", fields[0])
 }

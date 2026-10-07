@@ -180,6 +180,35 @@ func FuzzParsers(f *testing.F) {
 	})
 }
 
+func FuzzParseTCP(f *testing.F) {
+	source, destination := IPv4{192, 0, 2, 1}, IPv4{198, 51, 100, 2}
+	var seed [64]byte
+	length := putTCP(seed[:], source, destination, tcpSegment{sourcePort: 1234, destinationPort: 80,
+		sequence: 7, flags: tcpFlagSYN, window: 4096, mss: 1200})
+	f.Add(seed[:length], true)
+	f.Add([]byte{0, 1, 0, 2}, false)
+	f.Fuzz(func(t *testing.T, data []byte, fixChecksum bool) {
+		if len(data) > MTU-ipv4HeaderSize {
+			return
+		}
+		data = append([]byte(nil), data...)
+		if fixChecksum && len(data) >= tcpHeaderSize {
+			data[16], data[17] = 0, 0
+			sum := checksumFold(checksumAdd(pseudoHeaderSum(source, destination, protocolTCP, len(data)), data))
+			binary.BigEndian.PutUint16(data[16:18], sum)
+		}
+		segment, status := parseTCP(ipv4Packet{source: source, destination: destination, protocol: protocolTCP, payload: data})
+		if status != tcpOK {
+			return
+		}
+		headerLength := int(data[12]>>4) * 4
+		if segment.sourcePort == 0 || segment.destinationPort == 0 || headerLength < tcpHeaderSize ||
+			headerLength > len(data) || len(segment.payload) != len(data)-headerLength {
+			t.Fatalf("invalid TCP segment accepted: %+v", segment)
+		}
+	})
+}
+
 func FuzzParseIPv4Text(f *testing.F) {
 	for _, seed := range []string{"10.0.2.15", "0.0.0.0", "255.255.255.255", "01.2.3.4", "1.2.3"} {
 		f.Add([]byte(seed))
