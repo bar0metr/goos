@@ -2,7 +2,8 @@
 
 // Command ping sends ICMP echo requests through the network service and
 // reports each reply (ADR 0191). It builds no packets itself: the service
-// does, and the command holds only a session that may ask for echoes.
+// does, and the command holds only a session that may ask for echoes, and
+// one that may resolve a host name (ADR 0194).
 package main
 
 import (
@@ -10,17 +11,18 @@ import (
 	"goos/userspace/commands"
 	"goos/userspace/netapi"
 	"goos/userspace/network"
+	"goos/userspace/resolvapi"
 	"goos/userspace/startup"
 	"goos/userspace/utility"
 )
 
 var manifest = commands.Manifest{
-	Usage:   "ping [-c COUNT] [-W TIMEOUT_MS] IPv4",
-	Summary: "send ICMP echo requests to a numeric IPv4 address",
+	Usage:   "ping [-c COUNT] [-W TIMEOUT_MS] HOST",
+	Summary: "send ICMP echo requests to an IPv4 address or host name",
 	Options: "-c COUNT requests, 1-16 (default 4); -W TIMEOUT_MS per reply, 100-5000 (default 1000)",
 	MinArgs: 1,
 	MaxArgs: 5,
-	Grants:  commands.GrantNetworkPing,
+	Grants:  commands.GrantNetworkPing | commands.GrantResolve,
 }
 
 const (
@@ -34,7 +36,7 @@ const (
 	icmpBytes = 8 + network.EchoPayload
 )
 
-var text [96]byte
+var text [320]byte
 
 //export userspaceMain
 func userspaceMain() { utility.Run(manifest, run) }
@@ -100,20 +102,30 @@ func run(data startup.Data) {
 	}
 }
 
-// parseTarget refuses anything but a numeric unicast address before a request
-// is sent: there is no name service to resolve a hostname.
+// parseTarget takes a numeric address as it is and resolves anything else,
+// then refuses an address no echo can go to before a request is sent. A
+// resolved name is announced with its address.
 func parseTarget(target []byte) network.IPv4 {
-	address, valid := network.ParseIPv4(target)
-	if !valid {
-		for _, character := range target {
-			if character != '.' && (character < '0' || character > '9') {
-				utility.Fail(target, "numeric IPv4 address required")
-			}
-		}
-		utility.Fail(target, "invalid IPv4 address")
+	address, numeric, result, resolved := utility.Lookup(target)
+	switch {
+	case !resolved:
+		utility.Fail(target, "name resolution unavailable")
+	case result == resolvapi.ResultInvalidName:
+		utility.Fail(target, "invalid IPv4 address or host name")
+	case result != resolvapi.ResultOK:
+		utility.Fail(target, result.Text())
 	}
-	if !address.IsUnicast() {
+	if !address.IsUnicast() && !address.IsLoopback() {
 		utility.Fail(target, "unicast IPv4 address required")
+	}
+	if !numeric {
+		line := append(text[:0], "PING "...)
+		line = append(line, target...)
+		line = append(line, " ("...)
+		line = network.AppendIPv4(line, address)
+		line = append(line, ')')
+		utility.Print(line)
+		utility.EndLine()
 	}
 	return address
 }
