@@ -368,8 +368,13 @@ type_line 3 'tcp connect -W 8000 192.0.2.53 7 echo tcp'
 wait_for '^8 bytes: echo tcp$' 12 "$left"
 wait_command 'tcp connect -W 8000 192.0.2.53 7 echo tcp' 12 "$left"
 type_line 3 'tcp connect -s 4096 -W 8000 192.0.2.53 7'
-wait_for '^496 bytes:' 12 "$left"
+# Guest reads may join segments that arrive together, so only the total is
+# fixed here; the segment sizes are checked at the peer below.
+wait_for '^tcp-echo .* 496$' 12 "$queries"
 wait_command 'tcp connect -s 4096 -W 8000 192.0.2.53 7' 12 "$left"
+echoed=$(window "$left" 'tcp connect -s 4096 -W 8000 192.0.2.53 7' | sed -n 's/^\([0-9]*\) bytes:.*/\1/p' | awk '{sum += $1} END {print sum + 0}')
+[ "$echoed" = 4096 ] || fail tcp.stream "4096 echoed bytes, got $echoed" "$left"
+checks=$((checks + 1))
 peer_command 'tcp-delay-synack 1200'
 type_line 3 'tcp connect -W 8000 192.0.2.53 7 delayed'
 wait_for '^7 bytes: delayed$' 12 "$left"
@@ -507,8 +512,12 @@ require_after left.udp-counters 'net status ' '^  dropped: no-endpoint [1-9][0-9
 require_after left.udp-limits 'net status ' '^  limits: ports 49152-65535 queue 8 payload 4096$' "$left"
 require_after left.tcp-echo 'tcp connect -W 8000 192.0.2.53 7 echo tcp' '^8 bytes: echo tcp$' "$left"
 require_after left.tcp-eof 'tcp connect -W 8000 192.0.2.53 7 echo tcp' '^eof$' "$left"
-require_count_after left.tcp-large-full 'tcp connect -s 4096 -W 8000 192.0.2.53 7' '^1200 bytes:' 3 "$left"
-require_after left.tcp-large-tail 'tcp connect -s 4096 -W 8000 192.0.2.53 7' '^496 bytes:' "$left"
+# The peer echoes the 4096 bytes as three 1200-byte segments and a 496-byte
+# tail on one connection. Guest reads may join them, so count at the peer.
+large=$(sed -n 's/^tcp-echo \(.*\) 496$/\1/p' "$queries" | head -n 1)
+segments=$(grep -c "^tcp-echo $large 1200\$" "$queries" || true)
+[ -n "$large" ] && [ "$segments" = 3 ] || fail left.tcp-large-full "3 echoed 1200-byte segments and a 496-byte tail, saw $segments to '$large'" "$queries"
+checks=$((checks + 2))
 require_after left.tcp-delay 'tcp connect -W 8000 192.0.2.53 7 delayed' '^7 bytes: delayed$' "$left"
 require_after left.tcp-retransmit 'tcp connect -W 8000 192.0.2.53 7 retry' '^5 bytes: retry$' "$left"
 require_after left.tcp-reorder 'tcp connect -W 8000 192.0.2.53 7 reorder' '^7 bytes: reorder$' "$left"

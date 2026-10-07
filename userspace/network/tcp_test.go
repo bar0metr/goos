@@ -435,8 +435,8 @@ func (h *harness) tcpFromPeer(entry *tcpEndpoint, segment tcpSegment) {
 	h.t.Helper()
 	segment.sourcePort, segment.destinationPort = entry.remotePort, entry.port
 	var bytes [MTU]byte
-	length := putTCP(bytes[:], peerIP, hostIP, segment)
-	h.receive(ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, protocolTCP, bytes[:length]))
+	length := putTCP(bytes[:], peerIP, h.stack.address, segment)
+	h.receive(ipv4Frame(hostMAC, peerMAC, peerIP, h.stack.address, protocolTCP, bytes[:length]))
 }
 
 func (h *harness) tcpSent() []tcpSegment {
@@ -652,7 +652,9 @@ func TestTCPRetransmitLimitClosesConnection(t *testing.T) {
 		t.Fatalf("write %d %d", written, result)
 	}
 	h.drain()
-	h.runUntil(h.now + 30*60*second)
+	if sent := h.runWithSilentPeer(h.now + 30*60*second); len(sent) != tcpMaxRetransmits {
+		t.Fatalf("retransmitted segments %d", len(sent))
+	}
 	if retransmits := h.stack.TCPStats().Retransmits; retransmits != tcpMaxRetransmits {
 		t.Fatalf("retransmits %d", retransmits)
 	}
@@ -702,5 +704,249 @@ func TestTCPLastAckRetransmitLimitReleasesOrphan(t *testing.T) {
 	}
 	if _, ok := h.stack.Deadline(); ok {
 		t.Fatal("released connection left a timer")
+	}
+}
+
+// runWithSilentPeer runs timers until limit. The peer answers ARP but never
+// TCP. It returns the TCP segments sent.
+func (h *harness) runWithSilentPeer(limit uint64) []tcpSegment {
+	h.t.Helper()
+	var sent []tcpSegment
+	for {
+		for _, frame := range h.drain() {
+			ether, _ := parseEthernet(frame)
+			if ether.etherType == etherTypeARP {
+				if request, status := parseARP(ether.payload); status == parseOK && request.operation == arpRequest && request.targetIP == peerIP {
+					h.receive(arpFrame(hostMAC, arpPacket{operation: arpReply, senderMAC: peerMAC, senderIP: peerIP,
+						targetMAC: hostMAC, targetIP: hostIP}))
+				}
+				continue
+			}
+			if packet, status := parseIPv4(ether.payload); status == parseOK && packet.protocol == protocolTCP {
+				if segment, tcpStatus := parseTCP(packet); tcpStatus == tcpOK {
+					sent = append(sent, segment)
+				}
+			}
+		}
+		deadline, ok := h.stack.Deadline()
+		if !ok || deadline > limit {
+			return sent
+		}
+		h.now = deadline
+		h.stack.Advance(h.now)
+	}
+}
+
+// passiveOpen completes a handshake from peer to a listener.
+func (h *harness) passiveOpen(peer *tcpEndpoint, iss uint32) {
+	h.t.Helper()
+	h.tcpFromPeer(peer, tcpSegment{sequence: iss, flags: tcpFlagSYN, window: 65535, mss: 1460})
+	synACK := h.tcpSent()
+	if len(synACK) != 1 || synACK[0].flags != tcpFlagSYN|tcpFlagACK {
+		h.t.Fatalf("SYN-ACK %+v", synACK)
+	}
+	h.tcpFromPeer(peer, tcpSegment{sequence: iss + 1, acknowledgment: synACK[0].sequence + 1, flags: tcpFlagACK, window: 65535})
+}
+
+func TestTCPUnacceptedChildReleasedOnRenumber(t *testing.T) {
+	h := readyWithPeer(t)
+	listener, _ := h.stack.TCPOpen(0)
+	h.stack.TCPBind(0, listener, IPv4{}, 8095)
+	if result := h.stack.TCPListen(0, listener, 1); result != ResultOK {
+		t.Fatal(result)
+	}
+	h.passiveOpen(&tcpEndpoint{port: 8095, remotePort: 40001}, 7000)
+	if children := h.stack.listenerChildren(listener); children != 1 {
+		t.Fatalf("children %d", children)
+	}
+	renumbered := IPv4{10, 0, 2, 16}
+	if field := h.stack.Configure(Config{Mode: ModeStatic, Address: renumbered, Prefix: 24, Gateway: gatewayIP}, h.now); field != FieldNone {
+		t.Fatalf("configure field %d", field)
+	}
+	if children := h.stack.listenerChildren(listener); children != 0 {
+		t.Fatalf("children after renumber %d", children)
+	}
+	if state, _, result := h.stack.TCPState(0, listener); result != ResultOK || state != TCPListen {
+		t.Fatalf("listener state=%d result=%d", state, result)
+	}
+	if stats := h.stack.TCPStats(); stats.Endpoints != 1 {
+		t.Fatalf("endpoints %d states %v", stats.Endpoints, stats.States)
+	}
+	h.claim()
+	h.finishAnnouncements()
+	h.drain()
+	h.learn(peerIP, peerMAC)
+	h.passiveOpen(&tcpEndpoint{port: 8095, remotePort: 40002}, 9000)
+	child, tuple, result := h.stack.TCPAccept(0, listener)
+	if result != ResultOK || child == 0 || tuple.Local != renumbered || tuple.RemotePort != 40002 {
+		t.Fatalf("accept %d %+v", result, tuple)
+	}
+}
+
+func TestTCPUnacceptedChildReleasedOnResetAndListenerClose(t *testing.T) {
+	h := readyWithPeer(t)
+	listener, _ := h.stack.TCPOpen(0)
+	h.stack.TCPBind(0, listener, IPv4{}, 8096)
+	h.stack.TCPListen(0, listener, 2)
+	peer := tcpEndpoint{port: 8096, remotePort: 40003}
+	h.passiveOpen(&peer, 7000)
+	h.tcpFromPeer(&peer, tcpSegment{sequence: 7001, flags: tcpFlagRST})
+	if children := h.stack.listenerChildren(listener); children != 0 {
+		t.Fatalf("reset child kept, children %d", children)
+	}
+	h.passiveOpen(&tcpEndpoint{port: 8096, remotePort: 40004}, 8000)
+	h.stack.TCPClose(0, listener, h.now)
+	if stats := h.stack.TCPStats(); stats.Endpoints != 0 {
+		t.Fatalf("listener close kept %d endpoints", stats.Endpoints)
+	}
+	if sent := h.tcpSent(); len(sent) != 1 || sent[0].flags&tcpFlagRST == 0 {
+		t.Fatalf("child reset %+v", sent)
+	}
+}
+
+// forgetPeer drops every neighbour so the next segment waits for ARP.
+func (h *harness) forgetPeer() {
+	h.stack.clearNeighbors()
+}
+
+func (h *harness) answerARP() {
+	h.t.Helper()
+	h.receive(arpFrame(hostMAC, arpPacket{operation: arpReply, senderMAC: peerMAC, senderIP: peerIP,
+		targetMAC: hostMAC, targetIP: hostIP}))
+}
+
+func TestTCPBufferedDataWaitsForARP(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50020)
+	h.forgetPeer()
+	if written, result := h.stack.TCPWrite(0, id, []byte("data"), h.now); result != ResultOK || written != 4 {
+		t.Fatalf("write %d %d", written, result)
+	}
+	if sent := h.tcpSent(); len(sent) != 0 || !entry.l2Pending || entry.sendSent != 0 || entry.rtoDeadline == 0 {
+		t.Fatalf("sent=%d pending=%v sendSent=%d rto=%d", len(sent), entry.l2Pending, entry.sendSent, entry.rtoDeadline)
+	}
+	h.answerARP()
+	sent := h.tcpSent()
+	if len(sent) != 1 || string(sent[0].payload) != "data" || sent[0].sequence != 100 || entry.l2Pending {
+		t.Fatalf("after ARP %+v pending=%v", sent, entry.l2Pending)
+	}
+}
+
+func TestTCPBufferedDataFailsWithNeighbor(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50021)
+	_, idle := establishedWithPeer(t, h, 50022)
+	h.forgetPeer()
+	h.stack.TCPWrite(0, id, []byte("data"), h.now)
+	h.runUntil(h.now + 30*second)
+	if entry.state != TCPClosed || entry.lastResult != ResultNeighborUnreachable || entry.rtoDeadline != 0 {
+		t.Fatalf("state=%d result=%d rto=%d", entry.state, entry.lastResult, entry.rtoDeadline)
+	}
+	if _, result := h.stack.TCPWrite(0, id, []byte("x"), h.now); result != ResultNeighborUnreachable {
+		t.Fatalf("later write %d", result)
+	}
+	if idle.state != TCPEstablished {
+		t.Fatalf("idle connection state %d", idle.state)
+	}
+}
+
+func TestTCPFINWaitsForARP(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50023)
+	h.forgetPeer()
+	h.stack.TCPShutdownWrite(0, id, h.now)
+	if sent := h.tcpSent(); len(sent) != 0 || entry.state != TCPFinWait1 || !entry.l2Pending || entry.rtoDeadline == 0 {
+		t.Fatalf("sent=%d state=%d pending=%v rto=%d", len(sent), entry.state, entry.l2Pending, entry.rtoDeadline)
+	}
+	h.answerARP()
+	sent := h.tcpSent()
+	if len(sent) != 1 || sent[0].flags&tcpFlagFIN == 0 || sent[0].sequence != 100 {
+		t.Fatalf("after ARP %+v", sent)
+	}
+}
+
+func TestTCPFINFailsWithNeighbor(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50024)
+	orphanID, orphan := establishedWithPeer(t, h, 50025)
+	h.tcpFromPeer(orphan, tcpSegment{sequence: 200, acknowledgment: 100, flags: tcpFlagACK | tcpFlagFIN, window: 1000})
+	h.drain()
+	h.forgetPeer()
+	h.stack.TCPShutdownWrite(0, id, h.now)
+	h.stack.TCPClose(0, orphanID, h.now)
+	if entry.state != TCPFinWait1 || !entry.l2Pending || orphan.state != TCPLastAck || !orphan.l2Pending {
+		t.Fatalf("states %d/%d pending %v/%v", entry.state, orphan.state, entry.l2Pending, orphan.l2Pending)
+	}
+	if sent := h.tcpSent(); len(sent) != 0 {
+		t.Fatalf("FIN sent without a neighbour: %+v", sent)
+	}
+	h.runUntil(h.now + 30*second)
+	if entry.state != TCPClosed || entry.lastResult != ResultNeighborUnreachable {
+		t.Fatalf("FIN-WAIT-1 state=%d result=%d", entry.state, entry.lastResult)
+	}
+	if stats := h.stack.TCPStats(); stats.Endpoints != 1 {
+		t.Fatalf("LAST-ACK orphan kept, endpoints %d", stats.Endpoints)
+	}
+}
+
+func receivedStream(entry *tcpEndpoint) string { return string(entry.receive[:entry.recvLen]) }
+
+func TestTCPNoDataAfterFIN(t *testing.T) {
+	stack := Stack{tuning: DefaultTuning()}
+	entry := tcpEndpoint{state: TCPEstablished, rcvNxt: 100, sndNxt: 50}
+	stack.handlePayload(&entry, tcpSegment{sequence: 100, flags: tcpFlagACK | tcpFlagFIN, payload: []byte("abc")}, second)
+	if !entry.finReceived || entry.rcvNxt != 104 || entry.state != TCPCloseWait || receivedStream(&entry) != "abc" {
+		t.Fatalf("FIN fin=%v rcvNxt=%d state=%d data=%q", entry.finReceived, entry.rcvNxt, entry.state, receivedStream(&entry))
+	}
+	for _, segment := range []tcpSegment{
+		{sequence: 104, flags: tcpFlagACK, payload: []byte("xyz")},
+		{sequence: 103, flags: tcpFlagACK | tcpFlagFIN},
+		{sequence: 100, flags: tcpFlagACK | tcpFlagFIN, payload: []byte("abc")},
+		{sequence: 101, flags: tcpFlagACK, payload: []byte("bcdefg")},
+		{sequence: 106, flags: tcpFlagACK | tcpFlagFIN, payload: []byte("late")},
+	} {
+		stack.handlePayload(&entry, segment, second)
+		if entry.rcvNxt != 104 || receivedStream(&entry) != "abc" {
+			t.Fatalf("segment %+v: rcvNxt=%d data=%q", segment, entry.rcvNxt, receivedStream(&entry))
+		}
+	}
+	var buffer [16]byte
+	stack.tcp[0] = entry
+	stack.tcp[0].generation, stack.tcp[0].owner = 1, 0
+	id := tcpID(&stack.tcp[0], 0)
+	if read, result := stack.TCPRead(0, id, buffer[:], second); result != ResultOK || string(buffer[:read]) != "abc" {
+		t.Fatalf("read %d %d", read, result)
+	}
+	if read, result := stack.TCPRead(0, id, buffer[:], second); result != ResultEOF || read != 0 {
+		t.Fatalf("EOF read %d %d", read, result)
+	}
+}
+
+func TestTCPOutOfOrderFINKeepsItsSequence(t *testing.T) {
+	stack := Stack{tuning: DefaultTuning()}
+	// A later same-sequence segment cannot move a held FIN.
+	entry := tcpEndpoint{state: TCPEstablished, rcvNxt: 100, sndNxt: 50}
+	stack.handlePayload(&entry, tcpSegment{sequence: 103, flags: tcpFlagACK | tcpFlagFIN, payload: []byte("d")}, second)
+	stack.handlePayload(&entry, tcpSegment{sequence: 103, flags: tcpFlagACK, payload: []byte("defg")}, second)
+	stack.handlePayload(&entry, tcpSegment{sequence: 106, flags: tcpFlagACK | tcpFlagFIN, payload: []byte("gh")}, second)
+	stack.handlePayload(&entry, tcpSegment{sequence: 100, flags: tcpFlagACK, payload: []byte("abc")}, second)
+	if !entry.finReceived || entry.rcvNxt != 105 || receivedStream(&entry) != "abcd" {
+		t.Fatalf("held FIN fin=%v rcvNxt=%d data=%q", entry.finReceived, entry.rcvNxt, receivedStream(&entry))
+	}
+
+	// An in-order segment that overlaps the FIN stops at it.
+	entry = tcpEndpoint{state: TCPEstablished, rcvNxt: 100, sndNxt: 50}
+	stack.handlePayload(&entry, tcpSegment{sequence: 102, flags: tcpFlagACK | tcpFlagFIN, payload: []byte("cd")}, second)
+	if entry.finReceived || !entry.peerFIN || entry.peerFINAt != 104 {
+		t.Fatalf("out-of-order FIN fin=%v known=%v at=%d", entry.finReceived, entry.peerFIN, entry.peerFINAt)
+	}
+	stack.handlePayload(&entry, tcpSegment{sequence: 100, flags: tcpFlagACK, payload: []byte("abcdefgh")}, second)
+	if !entry.finReceived || entry.rcvNxt != 105 || receivedStream(&entry) != "abcd" || entry.state != TCPCloseWait {
+		t.Fatalf("overlap fin=%v rcvNxt=%d data=%q state=%d", entry.finReceived, entry.rcvNxt, receivedStream(&entry), entry.state)
+	}
+	for index := range entry.reorder {
+		if entry.reorder[index].used {
+			t.Fatalf("reassembly slot %d still held after FIN", index)
+		}
 	}
 }

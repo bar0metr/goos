@@ -194,14 +194,8 @@ func (s *Session) deliverConnect(stack *network.Stack, held *waiter, out Replier
 	if held.connect == 0 {
 		return FaultNone
 	}
-	state, tuple, result := stack.TCPState(s.owner, held.id)
-	if state == network.TCPSynSent {
-		return FaultNone
-	}
-	if state == network.TCPEstablished {
-		result = network.ResultOK
-	}
-	if result == network.ResultOK && state != network.TCPEstablished {
+	tuple, result, done := stack.TCPConnectResult(s.owner, held.id)
+	if !done {
 		return FaultNone
 	}
 	reply := tcpapi.Reply{Opcode: tcpapi.OpConnect, Result: Result(result), Endpoint: uint32(held.id)}

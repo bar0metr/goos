@@ -145,7 +145,7 @@ func (stack *Stack) handleSynSent(entry *tcpEndpoint, segment tcpSegment, now ui
 	entry.peerWindow, entry.peerMSS = uint32(segment.window), segment.mss
 	entry.sndWL1, entry.sndWL2 = segment.sequence, segment.acknowledgment
 	entry.cwnd, entry.retries = tcpInitialWindow(entry), 0
-	entry.state, entry.rtoDeadline, entry.deadline = TCPEstablished, 0, 0
+	entry.state, entry.synchronized, entry.rtoDeadline, entry.deadline = TCPEstablished, true, 0, 0
 	stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 }
 
@@ -162,7 +162,7 @@ func (stack *Stack) handleSynReceived(entry *tcpEndpoint, segment tcpSegment, no
 	entry.peerWindow = uint32(segment.window)
 	entry.sndWL1, entry.sndWL2 = segment.sequence, segment.acknowledgment
 	entry.cwnd, entry.retries = tcpInitialWindow(entry), 0
-	entry.state, entry.rtoDeadline, entry.deadline = TCPEstablished, 0, 0
+	entry.state, entry.synchronized, entry.rtoDeadline, entry.deadline = TCPEstablished, true, 0, 0
 }
 
 func (stack *Stack) handleRST(entry *tcpEndpoint, segment tcpSegment, now uint64) {
@@ -185,10 +185,6 @@ func (stack *Stack) handleRST(entry *tcpEndpoint, segment tcpSegment, now uint64
 		result = ResultConnectionRefused
 	}
 	increment(&stack.tcpStats.RXReset)
-	if entry.listener != 0 && !entry.accepted {
-		stack.releaseTCP(entry)
-		return
-	}
 	stack.closeTCP(entry, result)
 }
 
@@ -291,6 +287,18 @@ func (stack *Stack) handleACK(entry *tcpEndpoint, segment tcpSegment, now uint64
 }
 
 func (stack *Stack) handlePayload(entry *tcpEndpoint, segment tcpSegment, now uint64) {
+	fin := segment.flags&tcpFlagFIN != 0
+	if entry.finReceived {
+		// The stream ended at the peer's FIN. A retransmission only needs an ACK.
+		if len(segment.payload) != 0 || fin {
+			stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
+		}
+		return
+	}
+	window := uint32(stack.tcpAdvertisedWindow(entry))
+	if fin {
+		stack.notePeerFIN(entry, segment.sequence+uint32(len(segment.payload)), window)
+	}
 	sequence := segment.sequence
 	payload := segment.payload
 	if seqLT(sequence, entry.rcvNxt) {
@@ -302,28 +310,62 @@ func (stack *Stack) handlePayload(entry *tcpEndpoint, segment tcpSegment, now ui
 		}
 		sequence = entry.rcvNxt
 	}
-	fin := segment.flags&tcpFlagFIN != 0
+	payload = clipToPeerFIN(entry, sequence, payload)
 	if sequence == entry.rcvNxt {
 		stack.appendTCPReceive(entry, payload)
 		if len(payload) != 0 {
-			stack.promoteTCP(entry, now)
+			stack.promoteTCP(entry)
 		}
-		if fin && sequence+uint32(len(payload)) == entry.rcvNxt {
-			stack.receiveFIN(entry, now)
-		}
-	} else if seqGT(sequence, entry.rcvNxt) && seqLT(sequence, entry.rcvNxt+uint32(stack.tcpAdvertisedWindow(entry))) {
-		windowEnd := entry.rcvNxt + uint32(stack.tcpAdvertisedWindow(entry))
+	} else if seqGT(sequence, entry.rcvNxt) && seqLT(sequence, entry.rcvNxt+window) {
+		windowEnd := entry.rcvNxt + window
 		if seqGT(sequence+uint32(len(payload)), windowEnd) {
 			payload = payload[:windowEnd-sequence]
-			fin = false
 		}
-		stack.queueTCPReorder(entry, sequence, payload, fin)
-	} else if len(payload) != 0 || fin {
+		if len(payload) != 0 {
+			stack.queueTCPReorder(entry, sequence, payload)
+		}
+	} else if len(payload) != 0 {
 		increment(&stack.tcpStats.DropWindow)
+	}
+	if entry.peerFIN && entry.rcvNxt == entry.peerFINAt {
+		stack.receiveFIN(entry, now)
 	}
 	if len(segment.payload) != 0 || fin {
 		stack.sendTCP(entry, tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 	}
+}
+
+// notePeerFIN records the sequence number of the peer's FIN when it lies in
+// the receive window. The first FIN fixes the end of the stream; a later FIN
+// at another position is ignored. Held bytes past the FIN are discarded.
+func (stack *Stack) notePeerFIN(entry *tcpEndpoint, at, window uint32) {
+	if entry.peerFIN || seqLT(at, entry.rcvNxt) || seqGT(at, entry.rcvNxt+window) {
+		return
+	}
+	entry.peerFIN, entry.peerFINAt = true, at
+	for index := range entry.reorder[:] {
+		held := &entry.reorder[index]
+		if !held.used {
+			continue
+		}
+		if seqGE(held.seq, at) {
+			*held = tcpReorder{}
+		} else if seqGT(held.seq+uint32(held.len), at) {
+			held.len = uint16(at - held.seq)
+		}
+	}
+}
+
+// clipToPeerFIN drops the bytes of payload, which starts at sequence, that
+// lie at or after a known FIN.
+func clipToPeerFIN(entry *tcpEndpoint, sequence uint32, payload []byte) []byte {
+	if !entry.peerFIN || !seqGT(sequence+uint32(len(payload)), entry.peerFINAt) {
+		return payload
+	}
+	if seqGE(sequence, entry.peerFINAt) {
+		return nil
+	}
+	return payload[:entry.peerFINAt-sequence]
 }
 
 func (stack *Stack) appendTCPReceive(entry *tcpEndpoint, payload []byte) {
@@ -381,7 +423,7 @@ func (stack *Stack) tcpSegmentAcceptable(entry *tcpEndpoint, segment tcpSegment)
 		(seqGE(last, entry.rcvNxt) && seqLT(last, windowEnd))
 }
 
-func (stack *Stack) queueTCPReorder(entry *tcpEndpoint, sequence uint32, payload []byte, fin bool) {
+func (stack *Stack) queueTCPReorder(entry *tcpEndpoint, sequence uint32, payload []byte) {
 	if len(payload) > TCPReorderPayload {
 		payload = payload[:TCPReorderPayload]
 	}
@@ -391,14 +433,13 @@ func (stack *Stack) queueTCPReorder(entry *tcpEndpoint, sequence uint32, payload
 			if len(payload) > int(held.len) {
 				held.len = uint16(copy(held.data[:], payload))
 			}
-			held.fin = held.fin || fin
 			return
 		}
 	}
 	for index := range entry.reorder[:] {
 		held := &entry.reorder[index]
 		if !held.used {
-			held.used, held.seq, held.fin = true, sequence, fin
+			held.used, held.seq = true, sequence
 			held.len = uint16(copy(held.data[:], payload))
 			return
 		}
@@ -406,7 +447,8 @@ func (stack *Stack) queueTCPReorder(entry *tcpEndpoint, sequence uint32, payload
 	increment(&stack.tcpStats.DropWindow)
 }
 
-func (stack *Stack) promoteTCP(entry *tcpEndpoint, now uint64) {
+// promoteTCP appends held segments that have become contiguous.
+func (stack *Stack) promoteTCP(entry *tcpEndpoint) {
 	for {
 		found := false
 		for index := range entry.reorder[:] {
@@ -420,11 +462,8 @@ func (stack *Stack) promoteTCP(entry *tcpEndpoint, now uint64) {
 			}
 			copyHeld := *held
 			*held = tcpReorder{}
-			stack.appendTCPReceive(entry, copyHeld.data[offset:copyHeld.len])
-			fin := copyHeld.fin && entry.rcvNxt == copyHeld.seq+uint32(copyHeld.len)
-			if fin {
-				stack.receiveFIN(entry, now)
-			}
+			data := clipToPeerFIN(entry, entry.rcvNxt, copyHeld.data[offset:copyHeld.len])
+			stack.appendTCPReceive(entry, data)
 			found = true
 			break
 		}
@@ -434,12 +473,17 @@ func (stack *Stack) promoteTCP(entry *tcpEndpoint, now uint64) {
 	}
 }
 
+// receiveFIN consumes the peer's FIN once every byte before it is in the
+// receive stream.
 func (stack *Stack) receiveFIN(entry *tcpEndpoint, now uint64) {
 	if entry.finReceived {
 		return
 	}
 	entry.finReceived = true
 	entry.rcvNxt++
+	for index := range entry.reorder[:] {
+		entry.reorder[index] = tcpReorder{}
+	}
 	switch entry.state {
 	case TCPEstablished:
 		entry.state = TCPCloseWait
@@ -481,8 +525,13 @@ func (stack *Stack) pumpTCP(entry *tcpEndpoint, now uint64) {
 			entry.rttAt, entry.rttSeq = now, entry.sndNxt
 		}
 		if !stack.sendTCP(entry, tcpFlagACK|tcpFlagPSH, sequence, entry.rcvNxt, entry.send[start:int(start)+length], now) {
+			// The RTO timer pumps again, so a full TX queue or a missing
+			// neighbour cannot strand buffered data.
 			entry.sendSent -= uint16(length)
 			entry.sndNxt -= uint32(length)
+			if entry.rtoDeadline == 0 {
+				entry.rtoDeadline = addTime(now, entry.rto)
+			}
 			break
 		}
 		// A loopback peer may have acknowledged or released the entry already.
@@ -498,28 +547,38 @@ func (stack *Stack) pumpTCP(entry *tcpEndpoint, now uint64) {
 		} else {
 			entry.state = TCPLastAck
 		}
-		if stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now) && entry.sndUna != entry.sndNxt {
+		// Arm the timer even when the FIN could not be sent; it is resent on
+		// expiry. A loopback peer may have acknowledged or released the entry.
+		stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now)
+		if entry.finSent && entry.sndUna != entry.sndNxt {
 			entry.rtoDeadline = addTime(now, entry.rto)
 		}
 	}
 }
 
+// retransmitTCP resends the oldest unacknowledged segment. The counter
+// records only segments that left the stack.
 func (stack *Stack) retransmitTCP(entry *tcpEndpoint, now uint64) {
 	entry.retransmit = true
+	sent := false
 	switch entry.state {
 	case TCPSynSent:
-		stack.sendTCP(entry, tcpFlagSYN, entry.iss, 0, nil, now)
+		sent = stack.sendTCP(entry, tcpFlagSYN, entry.iss, 0, nil, now)
 	case TCPSynReceived:
-		stack.sendTCP(entry, tcpFlagSYN|tcpFlagACK, entry.iss, entry.rcvNxt, nil, now)
+		sent = stack.sendTCP(entry, tcpFlagSYN|tcpFlagACK, entry.iss, entry.rcvNxt, nil, now)
 	default:
 		if entry.sendSent != 0 {
 			length := min(int(entry.sendSent), int(tcpSMSS(entry)))
-			stack.sendTCP(entry, tcpFlagACK|tcpFlagPSH, entry.sendSeq, entry.rcvNxt, entry.send[:length], now)
+			sent = stack.sendTCP(entry, tcpFlagACK|tcpFlagPSH, entry.sendSeq, entry.rcvNxt, entry.send[:length], now)
 		} else if entry.finSent && entry.sndUna == entry.finSequence {
-			stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now)
+			sent = stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now)
+		} else {
+			stack.pumpTCP(entry, now)
 		}
 	}
-	increment(&stack.tcpStats.Retransmits)
+	if sent {
+		increment(&stack.tcpStats.Retransmits)
+	}
 }
 
 func (stack *Stack) updateRTO(entry *tcpEndpoint, sample uint64) {
@@ -560,6 +619,9 @@ func (stack *Stack) sendTCP(entry *tcpEndpoint, flags uint8, sequence, acknowled
 	}
 	mac, known := stack.lookupNeighbor(route.nextHop, now)
 	if !known {
+		if len(payload) != 0 || flags&(tcpFlagSYN|tcpFlagFIN) != 0 {
+			entry.l2Pending = true
+		}
 		stack.resolve(route.nextHop, now)
 		return false
 	}
@@ -617,6 +679,10 @@ func (stack *Stack) advanceTCP(now uint64) {
 			continue
 		}
 		if entry.rtoDeadline != 0 && entry.rtoDeadline <= now {
+			if entry.sndUna == entry.sndNxt && entry.sendLen == 0 {
+				entry.rtoDeadline = 0
+				continue
+			}
 			if entry.peerWindow == 0 && entry.sendSent == 0 && entry.sendLen != 0 {
 				if entry.persist == 8 {
 					stack.closeTCP(entry, ResultTimeout)
@@ -681,16 +747,14 @@ func (stack *Stack) reconfigureTCP(result Result) {
 	}
 }
 
+// sendPendingTCP resends what waited for nextHop to resolve.
 func (stack *Stack) sendPendingTCP(nextHop IPv4, now uint64) {
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
-		if entry.state == TCPFree || entry.state >= TCPTimeWait || entry.local.IsLoopback() || entry.remote.IsLoopback() {
+		if !entry.l2Pending || !stack.tcpVia(entry, nextHop) {
 			continue
 		}
-		route, result := stack.udpRoute(entry.local, entry.remote)
-		if result != ResultOK || route.nextHop != nextHop {
-			continue
-		}
+		entry.l2Pending = false
 		switch entry.state {
 		case TCPSynSent:
 			if stack.sendTCP(entry, tcpFlagSYN, entry.iss, 0, nil, now) {
@@ -701,10 +765,10 @@ func (stack *Stack) sendPendingTCP(nextHop IPv4, now uint64) {
 				entry.rtoDeadline = addTime(now, entry.rto)
 			}
 		default:
-			if entry.finSent && entry.sndUna == entry.finSequence {
-				if stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now) {
-					entry.rtoDeadline = addTime(now, entry.rto)
-				}
+			if entry.sendSent != 0 {
+				stack.retransmitTCP(entry, now)
+			} else if entry.finSent && entry.sndUna == entry.finSequence {
+				stack.sendTCP(entry, tcpFlagFIN|tcpFlagACK, entry.finSequence, entry.rcvNxt, nil, now)
 			} else {
 				stack.pumpTCP(entry, now)
 			}
@@ -712,15 +776,22 @@ func (stack *Stack) sendPendingTCP(nextHop IPv4, now uint64) {
 	}
 }
 
+// failPendingTCP ends the connections whose segments waited for nextHop when
+// its resolution failed. Connections that merely route through it stay.
 func (stack *Stack) failPendingTCP(nextHop IPv4, result Result) {
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
-		if entry.state != TCPSynSent {
-			continue
-		}
-		route, routeResult := stack.udpRoute(entry.local, entry.remote)
-		if routeResult == ResultOK && route.nextHop == nextHop {
+		if entry.l2Pending && stack.tcpVia(entry, nextHop) {
+			entry.l2Pending = false
 			stack.closeTCP(entry, result)
 		}
 	}
+}
+
+func (stack *Stack) tcpVia(entry *tcpEndpoint, nextHop IPv4) bool {
+	if entry.state < TCPSynSent || entry.state >= TCPClosed {
+		return false
+	}
+	route, result := stack.udpRoute(entry.local, entry.remote)
+	return result == ResultOK && route.path != udpLocal && route.nextHop == nextHop
 }

@@ -50,14 +50,21 @@ rule, so an older segment that arrives late cannot replace a newer window. A
 segment that acknowledges unsent data draws an ACK and is dropped with its
 payload and FIN. The receiver advertises retained capacity, holds a
 bounded set of later segments, trims duplicates and overlaps, and ACKs the
-highest contiguous sequence.
+highest contiguous sequence. The first accepted FIN fixes the end of the
+stream at its sequence number, even when it arrives out of order. Bytes at or
+after that number are discarded, and nothing enters the receive stream after
+the FIN is consumed.
 
 The retransmission timer uses SRTT, RTTVAR, Karn sampling, exponential backoff
 and configured minimum and maximum values. A synchronized connection that
 retransmits ten times in a row without new data being acknowledged ends with
-`Timeout`. With the default RTO limits that takes about six minutes. Congestion control uses slow start,
-congestion avoidance, duplicate ACK counting and fast retransmit. A bounded
-persist sequence probes a zero window and resumes after a window update.
+`Timeout`. With the default RTO limits that takes about six minutes. A SYN,
+data segment or FIN that waits for ARP is resent when the next hop resolves. If
+resolution fails, the connection ends with `NeighborUnreachable`; connections
+that only route through the same next hop stay open. Congestion control uses
+slow start, congestion avoidance, duplicate ACK counting and fast retransmit. A
+bounded persist sequence probes a zero window and resumes after a window
+update.
 
 `ShutdownWrite` drains accepted data and sends FIN while leaving reads open.
 FIN is sequenced behind earlier bytes. Buffered bytes precede EOF. The state
@@ -70,8 +77,10 @@ causes a rate-limited challenge ACK.
 leaves the stack to finish the close. The stack frees the endpoint when
 LAST-ACK receives its final ACK, when TIME_WAIT ends, when FIN-WAIT-2 has
 waited for the TIME_WAIT interval, or when the FIN reaches the retransmission
-limit. Until then it counts against the owner's
-endpoint limit.
+limit. Until then it counts against the owner's endpoint limit. A passive
+child that no application has accepted is freed as soon as it ends, by RST,
+timeout, reconfiguration or the close of its listener, and leaves the
+listener's backlog at once.
 
 Loopback and the current `net0` address use the same TCP state machine without
 ARP or a driver. All of `127.0.0.0/8` works without a NIC. Replacing the
@@ -86,9 +95,13 @@ one channel, four 4096-byte TX slots and eight 4096-byte RX slots. Its requests
 are `Open`, `Bind`, `Listen`, `Accept`, `Connect`, `Write`, `Read`,
 `ShutdownWrite`, `Close` and `Release`. Accept, Connect, Write and Read may be
 held until their result is known. A Write reply returns its TX slot on every
-result. A successful Read lends one RX slot until Release. A failed Open has
-no endpoint: its reply carries endpoint zero and the result, such as `Busy`
-when the session or the stack table is full.
+result. Once the transport ends a connection, Write reports why: `Reset`,
+`Timeout`, `Reconfigured` or `NeighborUnreachable`. `Closed` means the
+application shut down writing or the close completed normally. Connect succeeds
+once the handshake completes, even if a FIN or RST arrives before `netd`
+delivers the reply. A successful Read lends one RX slot until Release. A failed
+Open has no endpoint: its reply carries endpoint zero and the result, such as
+`Busy` when the session or the stack table is full.
 
 `userspace/tcpserve` owns deferred requests and pool transitions so host tests
 exercise the same service logic as `netd`. Malformed messages, stale endpoint
@@ -121,7 +134,11 @@ half-close, endpoint generations, GTCP1 codecs, pool ownership and deferred
 service operations. Regression tests run Open exhaustion and repeated passive
 close through the real GTCP1 codec, check the initial window for MSS 536, 1200
 and 1460, and check future-ACK drops and window-update order across sequence
-wrap. Both attacker-controlled decoders are fuzz targets.
+wrap. Others cover a held Connect that sees a FIN before delivery, held Writes
+ending with `Reset`, `Timeout` and `Reconfigured` against a scripted peer,
+data and FIN waiting on ARP that succeeds or fails, unaccepted children across
+renumbering, and data, duplicate and out-of-order FINs around the end of the
+stream. Both attacker-controlled decoders are fuzz targets.
 `tools/netpeer` supplies deterministic closed-port, delayed-handshake,
 retransmission, FIN and RST behavior. The offline network VM gate exercises
 GTCP1 through PID 1 and `netd`, including remote, loopback, own-address and

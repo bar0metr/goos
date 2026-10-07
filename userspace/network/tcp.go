@@ -61,7 +61,6 @@ type tcpReorder struct {
 	used bool
 	seq  uint32
 	len  uint16
-	fin  bool
 	data [TCPReorderPayload]byte
 }
 
@@ -76,6 +75,9 @@ type tcpEndpoint struct {
 	listener   TCPEndpointID
 	accepted   bool
 	backlog    uint8
+	// synchronized records a completed three-way handshake. It survives
+	// later transitions so a deferred Connect still reports success.
+	synchronized bool
 
 	iss, irs       uint32
 	sndUna, sndNxt uint32
@@ -98,6 +100,15 @@ type tcpEndpoint struct {
 	finSent       bool
 	finReceived   bool
 	finSequence   uint32
+	// peerFIN fixes the sequence number of the peer's FIN once a segment
+	// carrying it has been accepted. No stream byte at or after peerFINAt is
+	// delivered.
+	peerFIN   bool
+	peerFINAt uint32
+	// l2Pending marks a SYN, data or FIN segment that could not be sent
+	// because the next hop's link address was unknown. Neighbour resolution
+	// either resends it or ends the connection.
+	l2Pending bool
 
 	rto         uint64
 	rtoDeadline uint64
@@ -275,8 +286,13 @@ func tcpTuple(entry *tcpEndpoint) TCPTuple {
 }
 
 // TCPWrite copies bytes into transport-owned storage. It may accept a prefix.
+// A connection the transport ended reports why; Closed means the
+// application shut down writing or the close completed normally.
 func (stack *Stack) TCPWrite(owner int, id TCPEndpointID, data []byte, now uint64) (int, Result) {
 	entry, _ := stack.tcpEndpoint(owner, id)
+	if entry != nil && entry.state == TCPClosed && entry.lastResult != ResultOK {
+		return 0, entry.lastResult
+	}
 	if entry == nil || entry.shutdownWrite || (entry.state != TCPEstablished && entry.state != TCPCloseWait) {
 		return 0, ResultClosed
 	}
@@ -352,6 +368,9 @@ func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 	case TCPFinWait2:
 		entry.orphan = true
 		entry.deadline = addTime(now, stack.tuning.TCP.TimeWait)
+	case TCPListen:
+		stack.abortChildren(id, now)
+		stack.releaseTCP(entry)
 	default:
 		stack.releaseTCP(entry)
 	}
@@ -370,6 +389,39 @@ func (stack *Stack) TCPCloseOwner(owner int, now uint64) {
 	}
 }
 
+// abortChildren resets and releases the children of a listener that no
+// application has accepted. Nobody else can ever reach them.
+func (stack *Stack) abortChildren(listener TCPEndpointID, now uint64) {
+	for index := range stack.tcp[:] {
+		child := &stack.tcp[index]
+		if child.state == TCPFree || child.listener != listener || child.accepted {
+			continue
+		}
+		if child.state >= TCPSynReceived && child.state < TCPTimeWait {
+			stack.sendTCP(child, tcpFlagRST|tcpFlagACK, child.sndNxt, child.rcvNxt, nil, now)
+		}
+		stack.releaseTCP(child)
+	}
+}
+
+// TCPConnectResult reports whether an active open has finished and how. A
+// connection that completed its handshake reports OK in any later state, so a
+// FIN or RST that arrives before the caller looks does not hide the success.
+func (stack *Stack) TCPConnectResult(owner int, id TCPEndpointID) (TCPTuple, Result, bool) {
+	entry, _ := stack.tcpEndpoint(owner, id)
+	switch {
+	case entry == nil:
+		return TCPTuple{}, ResultInvalidArgument, true
+	case entry.synchronized:
+		return tcpTuple(entry), ResultOK, true
+	case entry.state == TCPSynSent:
+		return TCPTuple{}, ResultOK, false
+	case entry.lastResult != ResultOK:
+		return TCPTuple{}, entry.lastResult, true
+	}
+	return TCPTuple{}, ResultInvalidArgument, true
+}
+
 func (stack *Stack) TCPState(owner int, id TCPEndpointID) (TCPState, TCPTuple, Result) {
 	entry, _ := stack.tcpEndpoint(owner, id)
 	if entry == nil {
@@ -384,9 +436,11 @@ func (stack *Stack) releaseTCP(entry *tcpEndpoint) {
 }
 
 // closeTCP moves a connection to CLOSED with its final result and stops its
-// timers. An orphan is released instead.
+// timers. No application can observe an orphan or a passive child that was
+// never accepted, so those are released instead, which also frees the
+// listener's backlog.
 func (stack *Stack) closeTCP(entry *tcpEndpoint, result Result) {
-	if entry.orphan {
+	if entry.orphan || (entry.listener != 0 && !entry.accepted) {
 		stack.releaseTCP(entry)
 		return
 	}
