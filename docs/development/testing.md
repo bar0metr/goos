@@ -53,6 +53,22 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   GoOS. The host tests and fuzz seeds of `userspace/netdev`,
   `userspace/netapi` and `userspace/network` run in `make test-unit` and
   `make test-security`.
+
+  `tools/netpeer` is a host-side peer for stream-backend scenarios. Guests
+  connect to its Unix socket with
+  `-netdev stream,server=off,addr.type=unix,addr.path=SOCKET`; it relays
+  every frame between them like a hub and is a station of its own on the
+  segment (default `52:54:00:00:02:53`, `192.0.2.53/24`). It answers ARP and
+  ICMP echo, serves static DHCP leases by client MAC (`-lease MAC=IP`), and
+  answers DNS for a zone under `test` read from `-zone`, where a name can
+  also be set to answer NXDOMAIN, NODATA, SERVFAIL or a truncated reply, or
+  to go unanswered; `-no-edns` makes it refuse EDNS queries with FORMERR.
+  Lines written to the `-control` FIFO inject ARP address conflicts:
+  `claim IP` announces the address from a foreign MAC, `defend-probe IP`
+  answers guest probes for it until `clear`, and `quit` stops the peer.
+  Each DNS query, DHCP message and conflict action becomes one line in the
+  `-log` file. The peer prints `netpeer: listening SOCKET` once guests can
+  connect. Its unit tests run with `go test ./tools/netpeer`.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, the real QEMU
   boot/persistence test, and the Linux end-to-end boot in sequence so host
