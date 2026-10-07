@@ -25,6 +25,12 @@ claim follows RFC 5227. General UDP and TCP sockets for applications remain
 out of scope: the resolver transport carries DNS to port 53 for the resolver
 alone.
 
+Supersession note (2026-10-07): [ADR 0195](0195-generic-ipv4-udp.md)
+replaces the resolver transport with generic IPv4 UDP for any program PID 1
+grants a UDP session, raises `GNETCTL1` to version 2, `GNETAPI1` to version 3
+and the command index to format 4. UDP is no longer private to the DHCP
+client. TCP and the Linux socket calls remain out of scope.
+
 ## Context
 
 GoOS had no network. ADR 0190 gives a driver bounded authority over one

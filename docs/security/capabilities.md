@@ -180,6 +180,10 @@ PID 1 creates the network's channels and pools at run time (ADR 0191):
 | transmit pool, 2 pages | - | virtio-net `tx`; a copy moved to `netd` | R; R W | yes |
 | command session, service end | - | moved to `netd` in `AddSession` | R W Wait | yes |
 | command session, client end | - | the command's `net` | R W Wait | yes |
+| UDP session channel, service end | - | moved to `netd` in `AddUDPSession` | R W Wait | yes |
+| UDP TX pool, 4 pages | - | the command's `udp-tx`; a copy moved to `netd` | R W; R | yes |
+| UDP RX pool, 8 pages | - | the command's `udp-rx`; a copy moved to `netd` | R; R W | yes |
+| UDP session channel, client end | - | the command's `udp` | R W Wait | yes |
 
 A new driver channel and a new pair of pools are made for every driver
 launch, and PID 1 keeps nothing of them once the driver starts. It narrows
@@ -188,7 +192,11 @@ its copies of the pools with `HandleDuplicate` before it moves them, and
 exactly the rights above, so it never holds write access to the receive pool.
 A command session's rights class, ping and status or status and reload, is
 recorded by `netd` against its end when PID 1 opens it; the command cannot
-change it or pass the session on.
+change it or pass the session on. A UDP session (`RightsUDP`) is opened the
+same way with `ControlAddUDPSession`; `netd` checks the exact rights of its
+channel and pools, so it never writes the TX pool and the program never
+writes the RX pool, and the session's index owns every endpoint opened on
+it (ADR 0195).
 
 ### Resolver
 
@@ -202,25 +210,28 @@ and on every restart (ADR 0194):
 | resolver control, server end | - | resolved `control` | R W Wait | yes |
 | configuration session, `system.dns.` with `Read` and `HostsRead` | - | resolved `config` | R W Wait | yes |
 
-The control channel carries `GNETCTL1`. Over it and over `netd`'s control
-channel PID 1 binds the resolver transport, a new one with a growing
-generation whenever either service starts, and opens command sessions:
+The control channel carries `GNETCTL1` version 2. Whenever either service
+starts, PID 1 opens a UDP session and a `RightsResolveStatus` network
+session from `netd`, as it does for a command, and moves the resolver's
+ends in one `SetNetwork` request with a growing generation (ADR 0195). It
+also opens command sessions over the resolver's control channel:
 
 | Object | PID 1 keeps | Moved to `netd` | Moved to `resolved` | Consumed |
 | --- | --- | --- | --- | --- |
-| transport channel, one end each | - | R W Wait | R W Wait | yes |
-| query pool, 3 pages | - | R | R W | yes |
-| reply pool, 3 pages | - | R W | R | yes |
+| UDP session channel, one end each | - | R W Wait | R W Wait | yes |
+| UDP TX pool, 4 pages | - | R | R W | yes |
+| UDP RX pool, 8 pages | - | R W | R | yes |
+| status session, one end each | - | R W Wait | R W Wait | yes |
 | command session, service end | - | - | R W Wait, in `AddSession` | yes |
 | command session, client end | - | - | the command's `resolve`, R W Wait | yes |
 
-PID 1 narrows its copies of the pools with `HandleDuplicate` and moves them
-in `SetTransport`; both services check through `HandleInfo` that each handle
-carries exactly the rights above, so neither can write the pool the other
-fills. The transport allows destination port 53 only, at most 1232 bytes
-either way and eight exchanges at once, and no command can open it. The
-resolver holds no device, no network session, no VFS session and no
-configuration write right.
+`resolved` checks through `HandleInfo` that each handle in `SetNetwork`
+carries exactly the rights above and refuses a generation no higher than
+the one it holds. Its UDP session gives it no more than a command's: the
+same endpoint and buffer limits, and any destination port. The status
+session may read the status and the lease's DNS servers and nothing else.
+The resolver holds no device, no VFS session and no configuration write
+right.
 
 `resolved` accepts two session classes. `RightsResolveStatus` may resolve
 names and read status; `RightsAdminStatus` may also flush the cache and reload
@@ -257,6 +268,9 @@ For each pipeline stage PID 1 grants:
 | `vfs` | new private VFS session channel, only when the command's entry in `/system/commands` asks for one | R W Wait |
 | `net` | new private network session channel, only when the entry asks for `GrantNetworkPing` or `GrantNetworkAdmin` and `netd` accepted the session | R W Wait |
 | `resolve` | new private resolver session channel, only when the entry asks for `GrantResolve` or `GrantResolveAdmin` and `resolved` accepted the session | R W Wait |
+| `udp` | new UDP session channel, only when the entry asks for `GrantUDP` and `netd` accepted the session | R W Wait |
+| `udp-tx` | the session's TX pool, 4 pages, with `udp` | R W |
+| `udp-rx` | the session's RX pool, 8 pages, with `udp` | R |
 
 The VFS session is a fresh channel from `ChannelCreate`. PID 1 sends the
 server end to VFS as an IPC attachment on the control channel and consumes the
@@ -269,8 +283,11 @@ The network and resolver grants are separate. `GrantResolve` gives a
 `RightsResolveStatus` session and `GrantResolveAdmin` a `RightsAdminStatus`
 one, and neither gives a network session; the network grants give no
 resolver session. A name lookup therefore grants no echo, and an echo grants
-no name lookup. `ping` asks for `GrantNetworkPing` and
-`GrantResolve`, `resolve` for `GrantResolveAdmin` (ADR 0194).
+no name lookup. `GrantUDP` is separate from all four: no ping, admin or
+resolver grant carries the right to send a datagram, and a UDP session
+reads no status. `ping` asks for `GrantNetworkPing` and `GrantResolve`,
+`resolve` for `GrantResolveAdmin` (ADR 0194), and `udp` for `GrantUDP`
+alone (ADR 0195). Grants are a 16-bit set in command index format 4.
 
 ## Device authority
 

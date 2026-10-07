@@ -288,16 +288,24 @@ the command's `net` role. A command that declares both gets the ping class.
 Without a network service the command starts without a session and reports
 `network service unavailable`.
 
+For a command whose index entry declares `GrantUDP`, PID 1 opens a UDP
+session (ADR 0195): a channel, a 4-page TX pool and an 8-page RX pool. It
+sends `netd` one channel end, the TX pool read-only and the RX pool
+writable, in an `AddUDPSession` request with the `UDP` class, waits for the
+answer, and grants the command the other channel end as `udp`, the TX pool
+writable as `udp-tx` and the RX pool read-only as `udp-rx`. No other grant
+opens a UDP session. A launch that fails after the session opened closes
+all three handles.
+
 PID 1 also registers the resolver, `/system/services/resolved`, after `netd`,
 with its own control channel and a configuration session scoped to
 `system.dns.` with the `Read` and `HostsRead` rights (ADR 0194). It is a
 session service: the installed-system check requires its image. Whenever
-`netd` or `resolved` starts and the other is running, PID 1 makes a new
-resolver transport: a channel and two 3-page datagram pools, with a new
-generation. It sends `netd` its channel end, the query pool read-only and the
-reply pool writable, and `resolved` the other end, the query pool writable
-and the reply pool read-only, each in a `SetTransport` control request, and
-keeps nothing. A command whose index entry declares `GrantResolve` or
+`netd` or `resolved` starts and the other is running, PID 1 opens a UDP
+session from `netd` as it does for a command, and a network session of the
+`ResolveStatus` class, and sends the resolver's ends of both in one
+`SetNetwork` control request with a new generation (ADR 0195). It keeps
+nothing. A command whose index entry declares `GrantResolve` or
 `GrantResolveAdmin` gets a channel whose other end goes to `resolved` in an
 `AddSession` request with the `ResolveStatus` or `AdminStatus` class, granted
 as its `resolve` role. This session is separate from the network one: `ping`
@@ -351,7 +359,7 @@ they held the same way, and their clients are handed new sessions instead of bei
 | `block` | a new control channel (client end kept) and public endpoint, no driver or filesystem endpoint | nothing; the driver and `fat32` exit, restart after it, and hand it their endpoints over the control channel (ADR 0101) |
 | `netd` | a new control channel (client end kept) and configuration session | nothing; the driver follows it and restarts with a new binding (ADR 0191) |
 | `virtio-net` | a new channel, two new frame pools and a new generation | the channel's other end and narrowed copies of the pools, to `netd` in `SetDevice` before the launch (ADR 0191) |
-| `resolved` | a new control channel (client end kept) and configuration session | a new resolver transport, to `netd` and `resolved` in `SetTransport` after the launch; `netd`'s restart does the same (ADR 0194) |
+| `resolved` | a new control channel (client end kept) and configuration session | a new UDP session and status session from `netd`, to `resolved` in `SetNetwork` after the launch; `netd`'s restart does the same (ADR 0194, ADR 0195) |
 
 A handle renewed for a launch that then fails is closed at the next renewal, so
 failures cannot fill PID 1's table. Each shell numbers the slots of its own

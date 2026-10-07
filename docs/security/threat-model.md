@@ -32,13 +32,13 @@ host (QEMU, OVMF, ISO, disk image file)
      │   ├─ block service                  holds block endpoints, driver client endpoint
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
      │   ├─ virtio-net driver              holds port, IRQ, DMA authority for the NIC, a channel to netd, both frame pools
-     │   ├─ netd                           holds the frame pools (receive read-only), a driver channel, a read-only system.net. config session, command sessions; no device
-     │   ├─ resolved                       holds the resolver transport (query pool writable, reply pool read-only), a system.dns. config session that may read settings and the hosts table, command sessions; no device, no network session
+     │   ├─ netd                           holds the frame pools (receive read-only), a driver channel, a read-only system.net. config session, command and UDP sessions (TX pools read-only); no device
+     │   ├─ resolved                       holds a UDP session (RX pool read-only) and a network status session, a system.dns. config session that may read settings and the hosts table, command sessions; no device
      │   ├─ config service                 holds the configuration store and a VFS session
      │   ├─ log service                    holds the log (read), console write, and a VFS session
      │   ├─ terminal service               the only holder of console read and of the terminal output stream's reader; a session with the shell
      │   └─ shell                          holds a terminal output writer, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session; no console
-     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session, one network session and one resolver session
+     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session, one network session, one resolver session and one UDP session
 ```
 
 | Boundary | Crossing | Enforcement |
@@ -55,7 +55,8 @@ host (QEMU, OVMF, ISO, disk image file)
 | link → `netd` | frames the driver copies into the receive pool | the driver checks length and header; `netd` parses every frame and keeps fixed tables (ADR 0191) |
 | `netd` ↔ driver | `GNETDRV1` and two shared pools | slot numbers only, exact slot ownership, a generation per binding; the driver copies frames out of the pool before the device sees them (ADR 0191) |
 | commands → `netd` | `GNETAPI1` session | rights class fixed by PID 1 at `AddSession`; one echo in flight per session (ADR 0191) |
-| `resolved` ↔ `netd` | `GNETDGRAM1` channel and two shared pools | bound by PID 1 under a growing generation; destination port 53 only, at most 1232 bytes, eight exchanges; exact slot ownership; no command can open it (ADR 0194) |
+| programs, `resolved` → `netd` | `GUDP1` session and two shared pools | opened by PID 1 for `GrantUDP` or for the resolver; exact pool rights and slot ownership; endpoints owned by the session; 8 endpoints and 16 receive buffers per session (ADR 0195) |
+| `resolved` → `netd` | `GNETAPI1` status session | `RightsResolveStatus`: status and the lease's DNS servers only; handed over with the UDP session under a growing generation (ADR 0195) |
 | commands → `resolved` | `GRESOLV1` session | rights class fixed by PID 1 at `AddSession`, from `GrantResolve` or `GrantResolveAdmin`; separate from the network session (ADR 0194) |
 | shell, `resolved` → hosts table | `GHST1` on a configuration session | `HostsRead` and `HostsWrite` session rights fixed by PID 1; the shell holds both, the resolver only `HostsRead` (ADR 0193) |
 | host → guest | firmware, ISO, disk image | trusted, except disk *contents*, which are treated as untrusted input |
@@ -95,6 +96,11 @@ A program launched from the shell, for example a compromised command image in
   flush the cache and reload its settings. It cannot send a datagram, choose
   a server or write the hosts table, and a resolver session grants no echo
   (ADR 0194).
+- A command whose index entry asks for `GrantUDP` can bind any free port,
+  well-known ports included, and send datagrams to any unicast IPv4 address
+  and port, at most one link MTU less 28 bytes each off the host. It holds
+  at most 8 endpoints and 16 queued datagrams, cannot reach another
+  session's endpoints, builds no IPv4 header and reads no status (ADR 0195).
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
@@ -173,11 +179,12 @@ attacker-controlled code.
   control channel, and the driver restarts behind it (ADR 0191).
 - `resolved` compromise, for example through a malformed DNS reply, controls
   the answers commands get for every name except `localhost`, and can send
-  DNS queries to any address on port 53 through the transport, at most eight
-  at once. It holds no device, no network session, no VFS session and a
-  configuration session that can only read `system.dns.` and the hosts
-  table. It cannot write the reply pool. It restarts on failure, and PID 1
-  binds a new transport, so exchanges on the old one fail (ADR 0194).
+  UDP to any address and port with a command's limits, since its UDP session
+  is an ordinary one. It holds no device, no VFS session, a status session
+  that reads only status and DNS servers, and a configuration session that
+  can only read `system.dns.` and the hosts table. It cannot write its RX
+  pool. It restarts on failure, and PID 1 hands it new sessions, so queries
+  on the old ones fail (ADR 0194, ADR 0195).
 
 ### Compromised driver
 
@@ -209,7 +216,14 @@ Anything on the link can send the guest arbitrary frames.
 - `netd` checks every length and offset before reading a field and refuses
   oversized frames, IPv4 options and fragments, bad checksums, and DHCP
   replies for another transaction or MAC. Its tables are fixed: 16 ARP
-  entries, 4 resolutions, an 8-frame transmit ring, 8 sessions.
+  entries, 4 resolutions, an 8-frame transmit ring, 8 sessions, 32 UDP
+  endpoints and 32 UDP receive buffers.
+- UDP reaches only endpoints bound to the port on the interface's own
+  address, after the length and checksum checks. A peer can fill the queues
+  of the ports it reaches and one session's half of the receive buffers,
+  which drops later datagrams for that session; the other half stays for
+  every other session, the resolver's among them. No ICMP error answers a
+  datagram to an unbound port (ADR 0195).
 - The ARP table learns a sender only when it is on the prefix and talking to
   us, or already known or being resolved. A peer on the link can still
   answer for another address, as on any ARP network, and so take traffic
@@ -237,8 +251,9 @@ Anything on the link can send the guest arbitrary frames.
 - DNS answers are protected against off-path spoofing, not against a peer
   that sees the queries. Each query leaves from a fresh random port in
   49152..65535 with a random transaction ID, both from generators seeded by
-  `RandomRead`. `netd` accepts one reply from the server's address and port
-  53 to that port, and `resolved` requires the transaction ID, the server and
+  `RandomRead`. Each query has its own endpoint connected to the server's
+  address and port 53, which drops every other source and closes when the
+  transaction stops waiting, and `resolved` requires the transaction ID, the server and
   exactly one question equal to the one asked, then checks every count,
   length, label and compression pointer before using anything. A reply that
   fails any check is dropped whole, so nothing partial reaches the cache,
@@ -286,7 +301,7 @@ The raw disk image is host-provided and persists across boots.
   authority on every attached handle (docs/architecture/ipc.md).
 - Protocol decoders (`GVF1`, `GRF1`, `GBLK001`, lifecycle, exec and its
   control protocol, `GCF1` and its control protocol, `GHST1`, `GNETDRV1`,
-  `GNETAPI1`, `GNETCTL1`, `GNETDGRAM1` and `GRESOLV1`) check protocol ID,
+  `GNETAPI1`, `GNETCTL1`, `GUDP1` and `GRESOLV1`) check protocol ID,
   version, sizes, and require reserved fields to be zero.
 - Services answer unparsable but attributable requests with an
   invalid-argument reply instead of dropping them (ADR 0048). A request whose
@@ -334,7 +349,7 @@ controls the system ([boot-chain.md](boot-chain.md)).
 | storage driver crash | PID 1 restarts the driver on a fresh channel and hands the block service the new endpoint (ADR 0078) |
 | network driver crash | `netd` fails pending echoes and unbinds; PID 1 starts a driver with a new generation, channel and pools; the disk is untouched (ADR 0190, 0191) |
 | missing or failed NIC | the network reports down; storage, the installed system and the shell keep running, and recovery is never entered for it (ADR 0191) |
-| resolver crash or `netd` restart | PID 1 restarts the service and binds a new transport with a new generation; exchanges on the old one fail as `Reconfigured`, and `ping` with a numeric address keeps working (ADR 0194) |
+| resolver crash or `netd` restart | PID 1 restarts the service and hands the resolver a new UDP and status session with a new generation; lookups on the old ones fail as `Reconfigured`, and `ping` with a numeric address keeps working (ADR 0194, ADR 0195) |
 | no DNS server known | `localhost` and the hosts table still answer; other names give `NoServers` (ADR 0194) |
 | terminal or shell crash | PID 1 restarts it on a fresh session and hands the survivor the other end; a dead shell's jobs are stopped with it (ADR 0089) |
 | a pipeline stage exiting | closes only its own copies of shared stream ends; the terminal's writing end stays open for the other stages (ADR 0089) |

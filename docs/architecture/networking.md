@@ -5,29 +5,32 @@ GoOS has two IPv4 interfaces: `lo`, which always exists and owns
 discovers the function, routes its interrupt and bounds the driver's
 authority (ADR 0190). Everything that knows what a frame means runs in
 userspace: a driver that moves frames, a network service that runs the
-protocols (ADR 0191), a resolver service that turns names into addresses
-(ADR 0194), and commands that ask them for work. The
+protocols (ADR 0191) and UDP endpoints for programs (ADR 0195), a resolver
+service that turns names into addresses (ADR 0194), and commands that ask
+them for work. The
 [networking specification](../development/networking.md) records the
 requirements the first version was built from.
 
 Implemented: IPv4 with RFC 5227 address-conflict detection, ICMP echo, a
-DHCP client, the loopback interface, a hosts table (ADR 0193) and DNS name
-resolution through a stub resolver with a cache. Not implemented: UDP or
-TCP sockets for applications, DNS over TCP, multicast DNS, IPv6 and AAAA,
-DNSSEC, and the Linux network calls.
+DHCP client, the loopback interface, a hosts table (ADR 0193), DNS name
+resolution through a stub resolver with a cache, and IPv4 UDP for any
+program PID 1 grants a UDP session (ADR 0195). Not implemented: TCP, IPv4
+fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
+UDP senders, DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
+Linux socket calls.
 
 ## Processes
 
 ```text
-resolve             ping                         net
-  | GRESOLV1          | GRESOLV1, GNETAPI version 2 | GNETAPI version 2
-  v                   +-------------+---------------+
-resolved  <-- GNETCTL1 --  PID 1    |  one private session per command
+resolve             ping                         net            udp
+  | GRESOLV1          | GRESOLV1, GNETAPI version 3 | GNETAPI v3 | GUDP1
+  v                   +-------------+---------------+------------+
+resolved  <-- GNETCTL --  PID 1     |  one private session per command
   |  hosts: GHST1 on its configuration session
-  |  GNETDGRAM1 channel             v
-  |  query pool (resolved writes) netd  <---- GNETCTL1 control ----  PID 1
-  |  reply pool (netd writes)       |  lo, Ethernet, ARP, IPv4, ICMP echo,
-  +-------------------------------->|  DHCP client, DNS datagrams
+  |  GUDP1 session and GNETAPI      v
+  |  status session         netd  <---- GNETCTL version 2 ----  PID 1
+  +-------------------------------->|  lo, Ethernet, ARP, IPv4, ICMP echo,
+                                    |  DHCP client, UDP endpoints
                                     |
                                     |  GNETDRV1 channel
   |  receive pool  (driver writes, netd reads)
@@ -45,8 +48,8 @@ the life of the system and grants them to each driver it starts. `netd`
 holds no device authority, and the driver holds no filesystem,
 configuration or client session.
 
-`netd` waits on its driver channel, its control channel, the resolver
-transport and up to eight command sessions in one `WaitAny`, with a timeout set by the stack's earliest
+`netd` waits on its driver channel, its control channel, up to eight
+command sessions and up to eight UDP sessions in one `WaitAny`, with a timeout set by the stack's earliest
 timer, or 30 seconds when no timer is due. The driver waits on its channel
 and its interrupt line in one `WaitAny` with a 10-second timeout and does not
 touch the device when the timeout expires.
@@ -145,16 +148,55 @@ frame from the link carrying a loopback source or destination, in IPv4 or
 ARP, is dropped. `net status` lists `lo` with its MTU of 65536, a logical
 limit, and the count of echoes answered on it (ADR 0193).
 
+## UDP
+
+A program reaches UDP through a `GUDP1` session (`userspace/udpapi`): one
+channel, a TX pool of four 4096-byte slots the program writes and `netd`
+only reads, and an RX pool of eight slots `netd` writes and the program only
+reads. PID 1 creates the three objects for a command whose manifest asks for
+`GrantUDP` and hands `netd` its ends with `ControlAddUDPSession`. The
+requests are `Open`, `Bind`, `Connect`, `Send`, `SendTo`, `RecvFrom` and
+`Close`, each answered once; `Release` returns an RX slot and gets no reply.
+`netd` closes a session that sends a malformed request or hands back a slot
+it does not hold, and every endpoint of that session closes with it.
+
+The endpoints live in the stack. Each has an owner, the index of the UDP
+session it was opened on, and every call checks it. An endpoint ID carries a
+generation above its table slot, so an ID kept after `Close` matches
+nothing. Bind takes port 0 for a random port from the ephemeral range,
+49152 to 65535 by default; a port is taken when another endpoint holds it
+on the same address or either address is the wildcard, and port 68 belongs
+to the DHCP client while the interface runs DHCP. `Connect` fixes the peer,
+binds an ephemeral port if needed and sends nothing; a connected endpoint
+sends only to that peer and keeps only datagrams from its address and port.
+
+A send to `127.0.0.0/8` or to the interface's own address goes straight to
+the endpoint table with no frame, so loopback UDP works without a NIC.
+Anything else is routed and resolved with ARP like an echo, and waits in an
+8-entry table while ARP runs. An external payload is at most the MTU less 28
+bytes, 1472 on a 1500-byte link; there is no fragmentation. Broadcast,
+multicast, a subnet's network or broadcast address and port 0 are refused as
+destinations. A received datagram goes to the endpoint bound to its
+destination address and port, or else to the one bound to the wildcard on
+that port. Queued payloads share 32 receive buffers of 4096 bytes, at most 16
+per session; a full queue or share drops the newcomer and keeps what is
+queued. No ICMP Port Unreachable is sent for an unbound port.
+
 ## Names
 
 `resolved` answers `localhost` and names under it with `127.0.0.1` itself,
 refuses `.local` names, asks the configuration service's hosts table, then
 its cache, then the upstream DNS servers: those of the DHCP lease first,
-then `system.dns.server1..4`. It reaches the servers only through
-`GNETDGRAM1`: `netd` sends each query to port 53 from a fresh random port
-and hands back the one reply from that server and port, and the resolver
-checks the transaction ID and question before anything reaches its cache.
-PID 1 makes a new transport whenever either service starts (ADR 0194).
+then `system.dns.server1..4`. It reaches the servers over a UDP session
+like any program: each query opens an endpoint, connects it to the server's
+port 53, which binds a fresh ephemeral port, sends, and waits for the
+answer. The connected endpoint drops anything but that server's port 53,
+the resolver checks the source, transaction ID and question before anything
+reaches its cache, and the endpoint closes when its transaction stops
+waiting. The lease's servers arrive over a `GNETAPI` status session through
+a `Servers` request that `netd` holds until the list changes. PID 1 opens
+both sessions and hands them over with `ControlSetNetwork` whenever either
+service starts (ADR 0194, ADR 0195).
 
 The interface is in one of four states:
 
@@ -185,10 +227,11 @@ The interface is in one of four states:
   each with its checksum checked. Echo requests to our unicast address are
   answered to the sender's MAC. Replies and errors must match a pending echo
   as ADR 0191 describes; anything else changes no state.
-- UDP from port 67 to port 68 for the DHCP client, and from port 53 of a
-  queried DNS server to the source port of its open exchange; any other
-  datagram is a drop. A zero UDP checksum
-  is accepted as "no checksum"; a nonzero one is verified.
+- UDP whose length fits the IPv4 payload, with a valid checksum or a zero
+  one, which means "no checksum"; a bad checksum is dropped and counted
+  first. Server-to-client DHCP goes to the DHCP client while the interface
+  runs DHCP. A datagram addressed to the interface's own address goes to
+  the endpoint bound to its port; one with no endpoint is a counted drop.
 
 ## Timers
 
@@ -261,8 +304,14 @@ protocol bounds.
 | shortest DHCP lease | 30 s | `userspace/network/dhcp.go` |
 | `ping` count | 1 to 16, 4 by default | `userspace/bin/ping` |
 | DNS servers from a lease | 4 | `network.MaxDNSServers` |
-| DNS exchanges in flight | 8, port 53 only, 1232 bytes either way | `network.MaxDatagrams`, `netapi.DatagramMaxPayload` |
-| transport pools | 3 pages each, 8 slots of 1280 bytes | `netapi.DatagramPoolPages`, `netapi.DatagramSlots` |
+| UDP sessions | 8 | `network.MaxUDPSessions` |
+| UDP endpoints | 32, 8 per session | `network.MaxUDPEndpoints`, `network.MaxUDPSessionEndpoints` |
+| UDP receive queue | 16 datagrams per endpoint | `network.UDPQueueCapacity` |
+| UDP receive buffers | 32 of 4096 bytes, 16 per session | `network.UDPReceiveBuffers`, `network.UDPSessionBuffers` |
+| UDP sends waiting for ARP | 8 | `network.UDPPendingSends` |
+| UDP payload | 4096 bytes; MTU less 28 off the host | `udpapi.MaxPayload` |
+| UDP session pools | TX 4 slots, RX 8 slots, 4096 bytes each | `udpapi.TXSlots`, `udpapi.RXSlots` |
+| DNS message | 1232 bytes either way | `dns.DatagramSize` |
 | resolver cache | 256 entries, 8 addresses each | `dns.MaxCacheEntries`, `dns.MaxAddresses` |
 | resolver lookups | 4 transactions, 8 waiters each, 16 sessions | `dns.MaxTransactions`, `dns.MaxWaiters`, `dns.MaxClients` |
 | CNAME chain | 8 links | `dns.MaxCNAMEChain` |
@@ -277,9 +326,10 @@ new generation, channel and pools, so nothing the old driver sent can reach
 the new binding. A `netd` restart takes the driver with it, and commands
 connected to the old service see `PeerDied`.
 
-A `netd` restart also ends the resolver transport; PID 1 binds a new one,
-lookups waiting on the old one fail with `Reconfigured`, and the cache
-stays. A `resolved` restart loses the cache and nothing else: `ping` with a
+A `netd` restart also ends every UDP session and the resolver's status
+session. PID 1 hands the resolver new ones, lookups waiting on the old ones
+fail with `Reconfigured`, and the cache stays; a command holding a UDP
+session sees `PeerDied`. A `resolved` restart loses the cache and nothing else: `ping` with a
 numeric address keeps working.
 
 A missing NIC, a refused one, or network services that fail leave storage,

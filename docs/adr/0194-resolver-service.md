@@ -4,6 +4,13 @@
 
 Accepted. Builds on ADR 0191, ADR 0192 and ADR 0193.
 
+Supersession note (2026-10-07): the resolver transport described here,
+`GNETDGRAM1` and `ControlSetTransport`, was replaced by generic UDP in
+[ADR 0195](0195-generic-ipv4-udp.md). The resolver now reaches DNS servers
+over an ordinary UDP session and learns the lease's servers over a network
+status session. The cache, the hosts lookup, the per-server budget, the
+deadline and the EDNS fallback still work as described.
+
 ## Context
 
 Commands could reach only numeric addresses. Resolving names needs DNS over

@@ -148,10 +148,11 @@ memory in binary units.
 
 ## Network commands
 
-`ping`, `net` and `resolve` are native commands whose manifests ask for
-sessions PID 1 opens for each launch: `ping` and `net` a network session
-(ADR 0191), `ping` and `resolve` a resolver session (ADR 0194). None builds a
-packet: `netd` and `resolved` do the work and answer.
+`ping`, `net`, `resolve` and `udp` are native commands whose manifests ask
+for sessions PID 1 opens for each launch: `ping` and `net` a network session
+(ADR 0191), `ping` and `resolve` a resolver session (ADR 0194), and `udp` a
+UDP session (ADR 0195). None builds a packet: `netd` and `resolved` do the
+work and answer.
 
 `ping [-c COUNT] [-W TIMEOUT_MS] HOST` sends COUNT echo requests, 1 to 16 and
 4 by default, one at a time and one second apart, each waiting up to
@@ -187,8 +188,13 @@ announcements sent) and `conflicts` (conflicts while probing and on the live
 address, defences, addresses given up, rate-limit waits). A `claim` line
 says when the next address claim waits for the conflict rate limit, and a
 `settings` line appears when the service runs on built-in defaults because
-the stored settings were unreadable or invalid at startup. Each field is
-indented under its interface:
+the stored settings were unreadable or invalid at startup. A `udp:` section
+follows the interfaces: `endpoints` open against `max-endpoints`, with the
+per-session limit; `datagrams` received and sent; `dropped` datagrams for no
+endpoint, a full queue, a bad checksum and a payload too long;
+`bind failures`; and the `limits` in force, the ephemeral port range, the
+receive queue depth and the largest payload. The counters saturate. Each
+field is indented under its section:
 
 ```text
 goos> net status
@@ -200,6 +206,12 @@ lo:
 net0:
   state: ready
   ...
+udp:
+  endpoints: 0/32 (8 per session)
+  datagrams: rx 3 tx 3
+  dropped: no-endpoint 1 queue-full 0 checksum 1 too-long 0
+  bind failures: 0
+  limits: ports 49152-65535 queue 8 payload 4096
 ```
 
 `net reload` asks the service to apply the `system.net.*` settings; see
@@ -226,6 +238,41 @@ DHCP server list. `resolve flush` empties the cache, not the hosts table.
 `flush` and `reload` are subcommands: a host by one of those names is
 `status.` and so on. A name under `.local` is refused, as GoOS has no
 multicast DNS, and a truncated answer fails, as it has no DNS over TCP.
+
+`udp` sends and receives IPv4 UDP datagrams with nothing but its UDP
+session:
+
+- `udp send [-s SIZE] [-r] [-W MS] ADDRESS PORT [TEXT]` connects an endpoint
+  to ADDRESS:PORT, which binds an ephemeral port, and sends TEXT, or SIZE
+  bytes of a repeating `a` to `z` pattern; TEXT is required without `-s`.
+  It prints `N bytes to ADDRESS:PORT from LOCAL:PORT`. With `-r` it then
+  waits for one reply from that peer.
+- `udp listen [-c COUNT] [-W MS] [-b ADDRESS] PORT...` binds one endpoint to
+  each of up to four ports, on the wildcard or on ADDRESS, and prints COUNT
+  datagrams, 1 to 64 and 1 by default, as they arrive on any of them.
+- `udp self [-s SIZE] ADDRESS PORT [TEXT]` binds a listener at ADDRESS:PORT,
+  sends to it from a second endpoint and prints what the listener got. To
+  `127.0.0.0/8` or the interface's own address the datagram never leaves
+  the machine, so this works without a NIC.
+
+SIZE is 0 to 4096; the service applies `system.net.udp.max-payload` and,
+off the host, the link MTU less 28 bytes. `-W` waits 100 to 60000 ms, 3000
+by default, for each reply or datagram. A received datagram prints as
+`N bytes from ADDRESS:PORT to LOCAL`, followed by `: ` and the payload when
+it is printable text of at most 64 bytes:
+
+```text
+goos> udp self 127.0.0.1 9100 loop
+4 bytes from 127.0.0.1:50211 to 127.0.0.1: loop
+goos> udp send -r 192.0.2.53 7 echo me
+7 bytes to 192.0.2.53:7 from 192.0.2.10:61022
+7 bytes from 192.0.2.53:7 to 192.0.2.10: echo me
+```
+
+A refused operation prints `udp: OPERATION: REASON`, for example
+`udp: send: invalid argument` for a payload over the limit or
+`udp: bind: address in use`; a wait that runs out prints `udp: timeout`.
+`udp` exits 0 on success and 2 on any failure or usage error.
 
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.

@@ -4,6 +4,11 @@
 
 Accepted. Extends ADR 0191 and the configuration service of ADR 0074.
 
+Supersession note (2026-10-07): the resolver transport mentioned here was
+replaced by generic UDP in [ADR 0195](0195-generic-ipv4-udp.md). UDP to a
+loopback address now reaches the endpoint bound there, with no network
+device.
+
 ## Context
 
 The network stack had one interface, net0, and nothing else. `ping

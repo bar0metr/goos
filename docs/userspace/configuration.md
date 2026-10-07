@@ -18,7 +18,8 @@ a namespace and a setting within it. Values are one of three types:
 
 The running image declares the schema at startup. A key it does not declare is
 not a setting: setting one answers "no such setting" rather than creating it, so
-a typo fails instead of becoming a value nothing reads.
+a typo fails instead of becoming a value nothing reads. The store holds at most
+64 entries, declared and published keys together.
 
 Some entries are published rather than configured — the name, release and
 machine of the running image. They are declared read-only, nothing may write
@@ -170,12 +171,41 @@ Linux sysctls are rough references (`ip_default_ttl`,
 mirror `/proc/sys/net`; the ARP lifetime, for one, is a hard expiry that
 Linux's neighbour states do not have. ADR 0192 lists them.
 
+Its UDP limits (ADR 0195), all `uint`:
+
+| Key | Default | Range | Meaning |
+| --- | ---: | ---: | --- |
+| `system.net.udp.ephemeral-port-min` | 49152 | 1024..65535 | lowest port a bind to port 0 or a connect may pick |
+| `system.net.udp.ephemeral-port-max` | 65535 | 1024..65535 | highest such port; at least `ephemeral-port-min` |
+| `system.net.udp.recv-queue-depth` | 8 | 1..16 | datagrams queued on one endpoint before newcomers are dropped |
+| `system.net.udp.max-endpoints` | 32 | 1..32 | endpoints open across all sessions |
+| `system.net.udp.max-endpoints-per-session` | 8 | 1..8 | endpoints open in one session; at most `max-endpoints` |
+| `system.net.udp.max-payload` | 4096 | 512..4096 | largest payload sent or queued, loopback included |
+
+The upper ends are compile-time capacities that no setting raises: 8 UDP
+sessions, 32 endpoints with 8 per session, queues of 16 datagrams, payloads
+of 4096 bytes, 32 receive buffers with 16 per session, and 8 sends waiting
+for ARP. Off the host a payload is also limited to the link MTU less 28
+bytes, 1472 on a 1500-byte link, whatever `max-payload` says. The 1024 floor
+keeps the well-known ports, DHCP's 67 and 68 among them, out of automatic
+allocation; an explicit bind may still name any port. The 512 floor leaves
+room for a classic DNS message.
+
+A new UDP limit applies to the next acquisition and takes nothing back:
+open endpoints keep their ports, queued datagrams stay queued and can still
+be received, and a lowered limit refuses the next `Open`, the next datagram
+to be queued or the next payload over it. Checksums, length checks, the bind
+and delivery rules, loopback isolation and endpoint ownership have no
+setting. A future `system.net.tcp.*` block for TCP is to follow the same
+model: a block of the network tuning, read and applied with the rest of
+`system.net.*`.
+
 `system.net.ipv4.probe-interval-ms` no longer exists. A stored line for it is
 skipped at restore as an undeclared key; set `probe-min-ms`, `probe-max-ms`
 and `probe-wait-ms` instead.
 
-The store checks only their types. The network service reads all twenty-one
-as one candidate when it starts and when `net reload` asks it to, within 5 s
+The store checks only their types. The network service reads all
+twenty-seven, the address, timer and UDP keys together, as one candidate when it starts and when `net reload` asks it to, within 5 s
 in all and at most 2 s per key, counted in scheduler ticks; a key whose turn
 comes after the 5 s is not asked for, and the reload fails. DHCP mode ignores
 the other three keys. Static mode needs a unicast host address written as
@@ -192,7 +222,8 @@ table. Each value takes effect at its next use: TTL and the reply rate on the
 next packet, the ARP lifetime on the next learned or refreshed entry, resolve
 probe and announcement values on the next resolution, claim or announcement
 sequence, defence and rate-limit values on the next conflict, DHCP retry
-values at the client's next retransmission or transaction. A resolution,
+values at the client's next retransmission or transaction, UDP limits as
+described above. A resolution,
 claim or announcement sequence already running finishes with the values it
 started with.
 
@@ -217,6 +248,18 @@ goos> config set system.net.dhcp.initial-retry-ms 30000
 goos> config set system.net.dhcp.max-retry-ms 10000
 goos> net reload
 net: invalid setting system.net.dhcp.max-retry-ms; previous configuration kept
+```
+
+The UDP cross-field rules work the same way: `ephemeral-port-min` above
+`ephemeral-port-max` fails on `ephemeral-port-max`, and
+`max-endpoints-per-session` above `max-endpoints` fails on
+`max-endpoints-per-session`:
+
+```text
+goos> config set system.net.udp.ephemeral-port-min 60000
+goos> config set system.net.udp.ephemeral-port-max 50000
+goos> net reload
+net: invalid setting system.net.udp.ephemeral-port-max; previous configuration kept
 ```
 
 The settings persist in `/state/config` like any other; there is no separate

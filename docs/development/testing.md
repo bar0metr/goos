@@ -15,7 +15,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-network` builds the validation ISO and system tree and runs
-  `tests/boot/network.sh`, the network gate (ADR 0190 to ADR 0194). Each
+  `tests/boot/network.sh`, the network gate (ADR 0190 to ADR 0195). Each
   scenario boots from its own disposable disk with the NIC at PCI slot 4:
   - `user`: QEMU user networking. DHCP must reach ready on `10.0.2.x` within
     15 seconds of the prompt, and `net status` must show the state, link,
@@ -48,7 +48,25 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     a TTL and an ARP attempt count and must see `net reload` apply them;
     `config set` must refuse a 20-digit TTL above the `uint64` maximum, and
     a second reload must refuse `max-retry-ms` below `initial-retry-ms` by
-    that key; pings and the cached name must survive both reloads. Last,
+    that key; pings and the cached name must survive both reloads. Then
+    the first guest runs `udp` against the peer: a datagram the peer sends
+    must arrive with its source and destination, `udp send -r` to the echo
+    port 7 must print the reply, two ports must listen at once, a connected
+    endpoint must ignore the peer's decoy from port 8, a burst of three must
+    arrive in order, and `udp self` must round-trip over `127.0.0.1`,
+    `127.0.0.2` and the guest's own address. Zero-length datagrams must pass
+    both ways, a 1472-byte payload must echo, 1473 bytes must fail with
+    `invalid argument`, and a datagram with a corrupt checksum must never
+    arrive while the next good one does. `net status` must count the
+    checksum drop and the datagram sent to an unbound port, and show the
+    default limits. With EDNS refused, a name must resolve after exactly
+    two queries, one with EDNS and one without; every query the guest sent
+    must have left from its own port in the ephemeral range, and the
+    40-second lease must have been renewed. Last on that guest,
+    `system.net.udp.max-payload` set to 1000 must apply on `net reload`,
+    refuse a 1001-byte `udp self` and pass a 1000-byte one, and a reload
+    with `ephemeral-port-min` above `ephemeral-port-max` must be refused by
+    the `ephemeral-port-max` key and keep the previous limits. Last,
     the peer claims the second guest's address: the guest must defend it
     once and stay ready, give it up and fail at a second claim within the
     defend interval, and fail again on a new address whose probe the peer
@@ -60,8 +78,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     must print a failed sequence, `1 sent, 0 received, 100% lost`, and exit
     status 1. With no device, `ping -c 1 127.0.0.1` and `ping -c 1
     localhost` must get their replies, `resolve localhost` and `hosts get
-    localhost` must give `127.0.0.1`, and another name must fail with `no
-    DNS servers`.
+    localhost` must give `127.0.0.1`, another name must fail with `no
+    DNS servers`, and `udp self 127.0.0.2 9100` must round-trip over lo.
 
   `NETWORK_SCENARIOS` picks some of them, for example
   `make test-network NETWORK_SCENARIOS=stream`. Logs go to
@@ -70,7 +88,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   user networking depends on the host's ICMP support and is no test of
   GoOS. The host tests and fuzz seeds of `userspace/netdev`,
   `userspace/netapi` and `userspace/network` run in `make test-unit` and
-  `make test-security`.
+  `make test-security`; those of `userspace/udpapi` run in
+  `make test-unit`.
 
   The config exchange unit tests cover the timeout, late reply, then next
   request ordering with a deterministic clock and message queue. The network
@@ -85,12 +104,18 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   ICMP echo, serves static DHCP leases by client MAC (`-lease MAC=IP`), and
   answers DNS for a zone under `test` read from `-zone`, where a name can
   also be set to answer NXDOMAIN, NODATA, SERVFAIL or a truncated reply, or
-  to go unanswered; `-no-edns` makes it refuse EDNS queries with FORMERR.
+  to go unanswered; `-no-edns` makes it refuse EDNS queries with FORMERR,
+  and `-lease-time` sets the lease length. It echoes UDP on port 7 and, for
+  a payload that starts with `decoy`, first sends `decoy` from port 8.
   Lines written to the `-control` FIFO inject ARP address conflicts:
   `claim IP` announces the address from a foreign MAC, `defend-probe IP`
-  answers guest probes for it until `clear`, and `quit` stops the peer.
-  Each DNS query, DHCP message and conflict action becomes one line in the
-  `-log` file. The peer prints `netpeer: listening SOCKET` once guests can
+  answers guest probes for it until `clear`. They also send UDP to a guest
+  whose frames the peer has seen: `udp-send ADDRESS PORT SOURCE_PORT TEXT`,
+  `udp-bad` with the same operands and a corrupt checksum, `udp-fill` with
+  a SIZE of up to 1472 bytes and `udp-burst` with a COUNT of numbered
+  datagrams. `edns off` and `edns on` switch EDNS refusal, and `quit` stops
+  the peer. Each DNS query, DHCP message, UDP echo or send and conflict
+  action becomes one line in the `-log` file. The peer prints `netpeer: listening SOCKET` once guests can
   connect. Its unit tests run with `go test ./tools/netpeer`.
 - `make test-all` is the canonical complete Definition-of-Done gate. It runs
   the fast tests, lint, documentation checks, the ISO build, the real QEMU
