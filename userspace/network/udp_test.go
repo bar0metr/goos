@@ -664,7 +664,8 @@ func TestUDPTuningValidation(t *testing.T) {
 		{"queue over capacity", func(u *UDPTuning) { u.ReceiveQueue = UDPQueueCapacity + 1 }, FieldUDPReceiveQueue},
 		{"queue zero", func(u *UDPTuning) { u.ReceiveQueue = 0 }, FieldUDPReceiveQueue},
 		{"payload over capacity", func(u *UDPTuning) { u.MaxPayload = UDPPayloadCapacity + 1 }, FieldUDPMaxPayload},
-		{"payload under DNS", func(u *UDPTuning) { u.MaxPayload = udpMinPayload - 1 }, FieldUDPMaxPayload},
+		{"payload under DNS", func(u *UDPTuning) { u.MaxPayload = UDPMinPayload - 1 }, FieldUDPMaxPayload},
+		{"payload at the EDNS size", func(u *UDPTuning) { u.MaxPayload = UDPMinPayload }, FieldNone},
 		{"queue at capacity", func(u *UDPTuning) { u.ReceiveQueue = UDPQueueCapacity }, FieldNone},
 	} {
 		tuning := base
@@ -713,7 +714,7 @@ func TestUDPTuningReload(t *testing.T) {
 	h := readyWithPeer(t)
 	tuning := DefaultTuning()
 	tuning.UDP.EphemeralMin, tuning.UDP.EphemeralMax = 40000, 40000
-	tuning.UDP.MaxPayload = 600
+	tuning.UDP.MaxPayload = UDPMinPayload
 	if field := h.stack.Apply(staticConfig, tuning, h.now); field != FieldNone {
 		t.Fatalf("field %d", field)
 	}
@@ -724,10 +725,10 @@ func TestUDPTuningReload(t *testing.T) {
 	if port := h.bind(0, id, IPv4{}, 0); port != 40000 {
 		t.Fatalf("port %d outside the new range", port)
 	}
-	if result := h.stack.UDPSendTo(0, id, peerIP, 9, make([]byte, 601), h.now); result != ResultInvalidArgument {
+	if result := h.stack.UDPSendTo(0, id, peerIP, 9, make([]byte, UDPMinPayload+1), h.now); result != ResultInvalidArgument {
 		t.Fatalf("payload over the new limit: %d", result)
 	}
-	h.receive(udpFrame(peerIP, peerMAC, 7, 40000, make([]byte, 601)))
+	h.receive(udpFrame(peerIP, peerMAC, 7, 40000, make([]byte, UDPMinPayload+1)))
 	h.empty(0, id)
 	if stats := h.stack.UDPStats(); stats.DropTooLong != 1 {
 		t.Fatalf("stats %+v", stats)
@@ -745,11 +746,11 @@ func TestUDPLoweredLimitsKeepWhatExists(t *testing.T) {
 	for index := 0; index < 4; index++ {
 		h.receive(udpFrame(peerIP, peerMAC, 7, port, []byte{byte(index), 0, 0}))
 	}
-	h.receive(udpFrame(peerIP, peerMAC, 7, port, make([]byte, 1000)))
+	h.receive(udpFrame(peerIP, peerMAC, 7, port, make([]byte, 1400)))
 	tuning := DefaultTuning()
 	tuning.UDP.MaxEndpoints, tuning.UDP.SessionEndpoints = 2, 1
 	tuning.UDP.ReceiveQueue = 2
-	tuning.UDP.MaxPayload = 512
+	tuning.UDP.MaxPayload = UDPMinPayload
 	tuning.UDP.EphemeralMin, tuning.UDP.EphemeralMax = 2000, 2000
 	if field := h.stack.Apply(staticConfig, tuning, h.now); field != FieldNone {
 		t.Fatalf("field %d", field)
@@ -769,7 +770,7 @@ func TestUDPLoweredLimitsKeepWhatExists(t *testing.T) {
 			t.Fatalf("datagram %d is %v", index, payload)
 		}
 	}
-	if received, _ := h.take(0, ids[0]); received.Length != 1000 {
+	if received, _ := h.take(0, ids[0]); received.Length != 1400 {
 		t.Fatalf("queued datagram over the new payload limit lost: %+v", received)
 	}
 	if result := h.stack.UDPSendTo(1, ids[2], peerIP, 9, nil, h.now); result != ResultOK {
@@ -794,5 +795,63 @@ func TestUDPLoweredLimitsKeepWhatExists(t *testing.T) {
 	}
 	if port := h.bind(2, again, IPv4{}, 0); port != 2000 {
 		t.Fatalf("ephemeral port %d", port)
+	}
+}
+
+// TestUDPWildcardSurvivesConnectAndRenumbering binds the wildcard on a fixed
+// port, connects, and moves net0 to a new address. The endpoint keeps the
+// wildcard and its port, sends from the new address and takes the peer's
+// answer there.
+func TestUDPWildcardSurvivesConnectAndRenumbering(t *testing.T) {
+	h := readyWithPeer(t)
+	id := h.open(0)
+	h.bind(0, id, IPv4{}, 9000)
+	local, port, result := h.stack.UDPConnect(0, id, peerIP, 53, h.now)
+	if result != ResultOK || local != hostIP || port != 9000 {
+		t.Fatalf("connect %v:%d %d", local, port, result)
+	}
+	if entry, _ := h.stack.endpoint(0, id); entry.local != zeroIPv4 {
+		t.Fatalf("connect narrowed the wildcard to %v", entry.local)
+	}
+	moved := staticConfig
+	moved.Address = IPv4{10, 0, 2, 16}
+	h.stack.Configure(moved, h.now)
+	h.claim()
+	h.finishAnnouncements()
+	h.learn(peerIP, peerMAC)
+	if result := h.stack.UDPSend(0, id, []byte("after"), h.now); result != ResultOK {
+		t.Fatalf("send after the address change: %d", result)
+	}
+	sent := only(t, h.drain())
+	if sent.ip.source != moved.Address || sent.udp.sourcePort != 9000 || sent.udp.destinationPort != 53 {
+		t.Fatalf("sent %+v", sent)
+	}
+	h.receive(ipv4Frame(hostMAC, peerMAC, peerIP, moved.Address, protocolUDP,
+		udpBytes(peerIP, moved.Address, 53, 9000, []byte("answer"))))
+	if received, payload := h.take(0, id); string(payload) != "answer" || received.Destination != moved.Address {
+		t.Fatalf("received %+v %q", received, payload)
+	}
+	other := h.open(1)
+	if _, _, result := h.stack.UDPBind(1, other, moved.Address, 9000); result != ResultAddressInUse {
+		t.Fatalf("connected wildcard no longer holds its port: %d", result)
+	}
+}
+
+// TestUDPConnectFixesSourceOfUnboundEndpoint keeps the other side of the
+// rule: an endpoint connect binds itself is fixed to the address it was
+// reached from and refuses to send once that address is gone.
+func TestUDPConnectFixesSourceOfUnboundEndpoint(t *testing.T) {
+	h := readyWithPeer(t)
+	id := h.open(0)
+	if local, _, result := h.stack.UDPConnect(0, id, peerIP, 53, h.now); result != ResultOK || local != hostIP {
+		t.Fatalf("connect %v %d", local, result)
+	}
+	moved := staticConfig
+	moved.Address = IPv4{10, 0, 2, 16}
+	h.stack.Configure(moved, h.now)
+	h.claim()
+	h.finishAnnouncements()
+	if result := h.stack.UDPSend(0, id, nil, h.now); result != ResultReconfigured {
+		t.Fatalf("send from the removed address: %d", result)
 	}
 }

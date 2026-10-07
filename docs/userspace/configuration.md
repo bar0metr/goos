@@ -180,7 +180,7 @@ Its UDP limits (ADR 0195), all `uint`:
 | `system.net.udp.recv-queue-depth` | 8 | 1..16 | datagrams queued on one endpoint before newcomers are dropped |
 | `system.net.udp.max-endpoints` | 32 | 1..32 | endpoints open across all sessions |
 | `system.net.udp.max-endpoints-per-session` | 8 | 1..8 | endpoints open in one session; at most `max-endpoints` |
-| `system.net.udp.max-payload` | 4096 | 512..4096 | largest payload sent or queued, loopback included |
+| `system.net.udp.max-payload` | 4096 | 1232..4096 | largest payload sent or queued, loopback included |
 
 The upper ends are compile-time capacities that no setting raises: 8 UDP
 sessions, 32 endpoints with 8 per session, queues of 16 datagrams, payloads
@@ -188,8 +188,9 @@ of 4096 bytes, 32 receive buffers with 16 per session, and 8 sends waiting
 for ARP. Off the host a payload is also limited to the link MTU less 28
 bytes, 1472 on a 1500-byte link, whatever `max-payload` says. The 1024 floor
 keeps the well-known ports, DHCP's 67 and 68 among them, out of automatic
-allocation; an explicit bind may still name any port. The 512 floor leaves
-room for a classic DNS message.
+allocation; an explicit bind may still name any port. The 1232 floor is the
+EDNS(0) payload size the resolver advertises, so lowering `max-payload`
+never makes the stack drop a DNS answer the resolver asked for.
 
 A new UDP limit applies to the next acquisition and takes nothing back:
 open endpoints keep their ports, queued datagrams stay queued and can still

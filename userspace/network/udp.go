@@ -222,10 +222,14 @@ func (stack *Stack) UDPBind(owner int, id EndpointID, address IPv4, port uint16)
 	return address, port, ResultOK
 }
 
-// UDPConnect fixes an endpoint's peer. It sends nothing: it picks the local
-// address the peer is reached from, binds an ephemeral port if the endpoint
-// has none, and from then on the endpoint sends only to the peer and keeps
-// only what the peer sends. A connected endpoint cannot be connected again.
+// UDPConnect fixes an endpoint's peer. It sends nothing. From then on the
+// endpoint sends only to the peer and keeps only what the peer sends. An
+// endpoint without a port gets an ephemeral one and the local address the
+// peer is reached from now. An endpoint bound explicitly keeps its binding:
+// one bound to the wildcard stays on the wildcard, picks its source address
+// at each send and so follows an address change. The returned address is
+// the source the peer is reached from now. A connected endpoint cannot be
+// connected again.
 func (stack *Stack) UDPConnect(owner int, id EndpointID, remote IPv4, port uint16, now uint64) (IPv4, uint16, Result) {
 	entry, _ := stack.endpoint(owner, id)
 	if entry == nil || entry.state == UDPConnected || port == 0 {
@@ -241,10 +245,10 @@ func (stack *Stack) UDPConnect(owner int, id EndpointID, remote IPv4, port uint1
 			increment(&stack.udpStats.BindFail)
 			return IPv4{}, 0, ResultBusy
 		}
-		entry.port = local
+		entry.local, entry.port = route.source, local
 	}
-	entry.local, entry.remote, entry.remotePort, entry.state = route.source, remote, port, UDPConnected
-	return entry.local, entry.port, ResultOK
+	entry.remote, entry.remotePort, entry.state = remote, port, UDPConnected
+	return route.source, entry.port, ResultOK
 }
 
 // localAddress reports an address an endpoint may bind.

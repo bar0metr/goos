@@ -127,16 +127,18 @@ var tuningRange = [TuningFields]struct {
 	{1, UDPQueueCapacity, false},               // FieldUDPReceiveQueue
 	{1, MaxUDPEndpoints, false},                // FieldUDPMaxEndpoints
 	{1, MaxUDPSessionEndpoints, false},         // FieldUDPSessionEndpoints
-	{udpMinPayload, UDPPayloadCapacity, false}, // FieldUDPMaxPayload
+	{UDPMinPayload, UDPPayloadCapacity, false}, // FieldUDPMaxPayload
 }
 
 const (
 	// udpEphemeralFloor keeps the well-known ports, 67 and 68 among them,
 	// out of automatic allocation.
 	udpEphemeralFloor = 1024
-	// udpMinPayload is the classic DNS message limit (RFC 1035), the least
-	// a resolver needs.
-	udpMinPayload = 512
+	// UDPMinPayload is the floor of max-payload: the EDNS(0) payload size
+	// the resolver advertises, dns.DatagramSize (RFC 9715). A lower limit
+	// would let a server send the resolver an answer the stack then drops;
+	// the dns tests hold the two together.
+	UDPMinPayload = 1232
 )
 
 // ParseTuning builds a tuning from the stored values, given in Field order

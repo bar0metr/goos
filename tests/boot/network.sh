@@ -337,10 +337,10 @@ peer_command 'edns on'
 # UDP limits reload with the rest of system.net.*: the DHCP values refused
 # above are put back first, so the candidate fails or applies on UDP alone.
 type_line 3 'config set system.net.dhcp.max-retry-ms 64000'
-type_line 3 'config set system.net.udp.max-payload 1000'
+type_line 3 'config set system.net.udp.max-payload 1300'
 type_line 3 'net reload  '
-type_line 3 'udp self -s 1001 127.0.0.1 9200'
-type_line 3 'udp self -s 1000 127.0.0.1 9201'
+type_line 3 'udp self -s 1301 127.0.0.1 9200'
+type_line 3 'udp self -s 1300 127.0.0.1 9201'
 type_line 3 'config set system.net.udp.ephemeral-port-min 60000'
 type_line 3 'config set system.net.udp.ephemeral-port-max 50000'
 type_line 3 'net reload   '
@@ -429,10 +429,10 @@ checks=$((checks + 1))
 [ "$(grep -c '^dhcp REQUEST 52:54:00:00:02:10 ' "$queries" || true)" -ge 2 ] || fail left.dhcp-renew 'a lease renewal REQUEST' "$queries"
 checks=$((checks + 1))
 require_after left.udp-reload 'net reload  ' '^network configuration applied$' "$left"
-require_after left.udp-payload-limit 'udp self -s 1001 127.0.0.1 9200' '^udp: send: invalid argument$' "$left"
-require_after left.udp-payload-kept 'udp self -s 1000 127.0.0.1 9201' '^1000 bytes from 127\.0\.0\.1:' "$left"
+require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: invalid argument$' "$left"
+require_after left.udp-payload-kept 'udp self -s 1300 127.0.0.1 9201' '^1300 bytes from 127\.0\.0\.1:' "$left"
 require_after left.udp-cross-field 'net reload   ' 'invalid setting system\.net\.udp\.ephemeral-port-max; previous configuration kept' "$left"
-require_after left.udp-limits-kept 'net status  ' '^  limits: ports 49152-65535 queue 8 payload 1000$' "$left"
+require_after left.udp-limits-kept 'net status  ' '^  limits: ports 49152-65535 queue 8 payload 1300$' "$left"
 require_after right.defended 'net status' '^  conflicts: probe 0 active 1 defended 1 relinquished 0' "$right"
 require_after right.defended-ready 'net status' '^  state: ready$' "$right"
 require_after right.relinquished 'net status ' '^  conflicts: probe 0 active 2 defended 1 relinquished 1' "$right"

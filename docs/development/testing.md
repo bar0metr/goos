@@ -63,8 +63,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     two queries, one with EDNS and one without; every query the guest sent
     must have left from its own port in the ephemeral range, and the
     40-second lease must have been renewed. Last on that guest,
-    `system.net.udp.max-payload` set to 1000 must apply on `net reload`,
-    refuse a 1001-byte `udp self` and pass a 1000-byte one, and a reload
+    `system.net.udp.max-payload` set to 1300 must apply on `net reload`,
+    refuse a 1301-byte `udp self` and pass a 1300-byte one, and a reload
     with `ephemeral-port-min` above `ephemeral-port-max` must be refused by
     the `ephemeral-port-max` key and keep the previous limits. Last,
     the peer claims the second guest's address: the guest must defend it

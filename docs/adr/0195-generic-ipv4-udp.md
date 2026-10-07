@@ -44,10 +44,13 @@ Ephemeral ports come from the stack's generator within the tuned range,
 from the last one. At most 32 ports are bound, so the walk ends within 33
 steps whenever the range is larger than that.
 
-`Connect` stores the peer, picks the local address the peer is reached from,
-binds an ephemeral port if the endpoint has none, and sends nothing. A
-connected endpoint sends only to its peer and keeps only datagrams from that
-address and port. `SendTo` on it is `InvalidArgument`; so is a second
+`Connect` stores the peer and sends nothing. An endpoint without a port gets
+an ephemeral one and the local address the peer is reached from at that
+moment. An explicit bind stays as it was: an endpoint bound to the wildcard
+remains on the wildcard after `Connect`, picks its source address at each
+send, and so keeps working when `net0` changes address. A connected
+endpoint sends only to its peer and keeps only datagrams from that address
+and port. `SendTo` on it is `InvalidArgument`; so is a second
 `Connect`. Close and reopen to change peers.
 
 ### Sending
@@ -98,13 +101,15 @@ per session) and 8 pending sends. `system.net.udp.*` sets how much of each one i
 | `recv-queue-depth` | 8 | 1..16 |
 | `max-endpoints` | 32 | 1..32 |
 | `max-endpoints-per-session` | 8 | 1..8, at most `max-endpoints` |
-| `max-payload` | 4096 | 512..4096 |
+| `max-payload` | 4096 | 1232..4096 |
 
 The values are a block of `network.Tuning`, read with the other
 `system.net.*` keys in `netd`'s one bounded configuration read and applied
 by the same `Apply`: all of the configuration and tuning, or none of it. The
 1024 floor keeps the well-known ports, DHCP's 67 and 68 among them, out of
-automatic allocation. The 512 floor leaves room for a classic DNS message.
+automatic allocation. The 1232 floor is the EDNS(0) payload size the
+resolver advertises, so no setting lets the stack drop an answer the
+resolver asked for; a test in `userspace/dns` holds the two together.
 
 A new limit applies to the next acquisition and takes nothing back. Open
 endpoints stay open with their ports, queued datagrams stay queued and can

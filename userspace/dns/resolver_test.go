@@ -3,6 +3,9 @@ package dns
 import (
 	"encoding/binary"
 	"testing"
+
+	"goos/userspace/network"
+	"goos/userspace/udpapi"
 )
 
 func TestMinimalAnswer(t *testing.T) {
@@ -1228,4 +1231,52 @@ func TestWaiting(t *testing.T) {
 	if h.r.Waiting(first.Transaction) {
 		t.Fatal("finished transaction still waiting")
 	}
+}
+
+// TestEDNSFitsTheSmallestUDPLimit ties the resolver's EDNS(0) payload size
+// to the UDP limits. The smallest max-payload the network settings accept,
+// and the GUDP1 slot, must both hold the largest answer the resolver
+// advertises, so no tuning can make the stack drop an answer the resolver
+// asked for.
+func TestEDNSFitsTheSmallestUDPLimit(t *testing.T) {
+	values := smallestUDPTuning()
+	tuning, field := network.ParseTuning(&values)
+	if field != network.FieldNone {
+		t.Fatalf("smallest UDP limits refused: field %d", field)
+	}
+	values[network.FieldUDPMaxPayload-network.FieldTTL]--
+	if _, field := network.ParseTuning(&values); field != network.FieldUDPMaxPayload {
+		t.Fatalf("max-payload below the EDNS size accepted: field %d", field)
+	}
+	h := newHarness(t, serverA)
+	h.pending(0, "host.test")
+	q := h.sent()
+	if !q.opt || q.payload == 0 {
+		t.Fatalf("query without EDNS: %+v", q)
+	}
+	if int(q.payload) > int(tuning.UDP.MaxPayload) || int(q.payload) > udpapi.MaxPayload || q.payload != DatagramSize {
+		t.Fatalf("advertised %d, smallest max-payload %d, GUDP1 slot %d", q.payload, tuning.UDP.MaxPayload, udpapi.MaxPayload)
+	}
+	if network.UDPMinPayload < DatagramSize {
+		t.Fatalf("UDP floor %d below the EDNS size %d", network.UDPMinPayload, DatagramSize)
+	}
+}
+
+// smallestUDPTuning is the default tuning with every UDP limit at the
+// bottom of its range.
+func smallestUDPTuning() [network.TuningFields]uint64 {
+	tuning := network.DefaultTuning()
+	tuning.UDP = network.UDPTuning{EphemeralMin: 65535, EphemeralMax: 65535, ReceiveQueue: 1, MaxEndpoints: 1,
+		SessionEndpoints: 1, MaxPayload: network.UDPMinPayload}
+	var values [network.TuningFields]uint64
+	stored := [...]uint64{uint64(tuning.TTL), uint64(tuning.ProbeCount), tuning.ProbeWait / 1_000_000,
+		tuning.ProbeMin / 1_000_000, tuning.ProbeMax / 1_000_000, uint64(tuning.AnnounceCount),
+		tuning.AnnounceInterval / 1_000_000, tuning.DefendInterval / 1_000_000, uint64(tuning.MaxConflicts),
+		tuning.ConflictRateLimit / 1_000_000, tuning.NeighborLifetime / 1_000_000, tuning.ResolveInterval / 1_000_000,
+		uint64(tuning.ResolveAttempts), uint64(tuning.EchoReplyRate), tuning.DHCPInitialRetry / 1_000_000,
+		tuning.DHCPMaxRetry / 1_000_000, tuning.DHCPConflictRetry / 1_000_000,
+		uint64(tuning.UDP.EphemeralMin), uint64(tuning.UDP.EphemeralMax), uint64(tuning.UDP.ReceiveQueue),
+		uint64(tuning.UDP.MaxEndpoints), uint64(tuning.UDP.SessionEndpoints), uint64(tuning.UDP.MaxPayload)}
+	copy(values[:], stored[:])
+	return values
 }

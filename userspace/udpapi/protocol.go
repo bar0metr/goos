@@ -72,7 +72,9 @@ const (
 	// bound.
 	OpBind
 	// OpConnect fixes Endpoint's peer at Address and Port. The reply also
-	// carries the local address and port, in Local and LocalPort.
+	// carries the source address the peer is reached from now and the local
+	// port, in Local and LocalPort. An endpoint bound to the wildcard stays
+	// on it and picks its source at each send.
 	OpConnect
 	// OpSend sends Length bytes of TX Slot to a connected endpoint's peer.
 	OpSend
