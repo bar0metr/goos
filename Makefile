@@ -79,6 +79,9 @@ OVMF_CODE ?= $(QEMU_SHARE)/edk2-x86_64-code.fd
 # Guest RAM for run and the QEMU tests, in QEMU -m syntax. q35 places RAM
 # above 4 GiB once the guest has more than 2.75 GiB (ADR 0103).
 MEMORY ?= 512M
+# Guest processors for interactive QEMU runs: one socket, SMP cores, one
+# thread per core. This is unrelated to make's -j build parallelism.
+SMP ?= 1
 # Cocoa is the native QEMU display backend on the primary macOS development
 # host. Other hosts can select an available backend without changing targets,
 # for example QEMU_DISPLAY=gtk or QEMU_DISPLAY=sdl.
@@ -91,8 +94,12 @@ ifeq ($(filter $(NET),user none),)
 $(error NET must be user or none)
 endif
 NET_MAC ?= 52:54:00:12:34:56
-QEMU_NET_FLAGS = $(if $(filter user,$(NET)),-netdev user,id=goosnet -device virtio-net-pci,netdev=goosnet,disable-modern=on,mac=$(NET_MAC),addr=0x4)
-QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(DISK) -device virtio-blk-pci,drive=goosdisk,disable-modern=on $(QEMU_NET_FLAGS) -serial stdio -no-reboot
+ifeq ($(NET),user)
+QEMU_NET_FLAGS = -netdev user,id=goosnet -device virtio-net-pci,netdev=goosnet,disable-modern=on,mac=$(NET_MAC),addr=0x4
+else
+QEMU_NET_FLAGS =
+endif
+QEMU_COMMON_FLAGS = -machine q35 -m $(MEMORY) -smp cpus=$(SMP),sockets=1,cores=$(SMP),threads=1 -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) -drive if=none,id=goosdisk,format=raw,file=$(DISK) -device virtio-blk-pci,drive=goosdisk,disable-modern=on $(QEMU_NET_FLAGS) -serial stdio -no-reboot
 QEMU_FLAGS = $(QEMU_COMMON_FLAGS) -display none
 QEMU_GUI_FLAGS = $(QEMU_COMMON_FLAGS) -device VGA -display $(QEMU_DISPLAY)
 SOURCE_DATE_EPOCH ?= 0
@@ -862,6 +869,7 @@ help:
 	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
+	  '  SMP=1           guest vCPUs for run/run-gui/run-debug, as cores in one socket' \
 	  '  version         print the release from internal/version/version.go' \
 	  '  linux-fixtures  rebuild the static Linux test fixtures under userspace/linux' \
 	  '  test-linux-reference run those fixtures on a Linux kernel in Docker' \

@@ -100,6 +100,7 @@ prints an install hint for anything missing. It never downloads anything.
 make toolchain-check
 make                  # build build/goos-x86_64.iso
 make run              # boot in QEMU with the serial console here
+make run SMP=4        # boot with four guest CPU cores
 make run-gui          # boot with a graphical display
 make run RECOVERY=1   # boot into recovery
 make run NET=none     # boot without a network device

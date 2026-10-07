@@ -82,9 +82,11 @@ q35 machine, and COM1 connection, but also opens QEMU's VGA window for manual
 framebuffer-console validation. It uses the native macOS Cocoa backend by
 default; set `QEMU_DISPLAY=gtk`, `QEMU_DISPLAY=sdl`, or another backend
 available in the local QEMU build on other hosts. `MEMORY=4G` gives the guest
-more RAM and applies to either target and every QEMU test. `make run-debug` adds `-s -S`:
-QEMU waits for a debugger on TCP port 1234 before executing the first
-instruction.
+more RAM and applies to either target and every QEMU test. `SMP=4` gives
+`make run`, `make run-gui`, and `make run-debug` one socket with four guest
+CPU cores and one thread per core; it is unrelated to `make -j` build
+parallelism. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP
+port 1234 before executing the first instruction.
 
 `make test-console-gui` performs the non-interactive counterpart: it keeps the
 VGA device but uses `-display none`, captures a QEMU monitor screendump, and
