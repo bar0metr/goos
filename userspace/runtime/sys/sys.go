@@ -336,6 +336,13 @@ func IRQWait(irq handle.ID) kcall.Status { return status(irqWait(uint64(irq))) }
 // returns NotFound when there is none. It never blocks.
 func IRQTake(irq handle.ID) kcall.Status { return status(irqTake(uint64(irq))) }
 
+// RandomUint64 reads eight bytes from the kernel's generator.
+func RandomUint64() (uint64, kcall.Status) {
+	valueWire = 0
+	result := status(randomRead(unsafe.Pointer(&valueWire), 8))
+	return valueWire, result
+}
+
 // SystemReset resets the machine through the system-control capability.
 func SystemReset(device handle.ID) kcall.Status { return status(systemReset(uint64(device))) }
 

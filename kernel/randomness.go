@@ -8,6 +8,8 @@ package main
 
 import (
 	"goos/kernel/arch/amd64"
+	"goos/kernel/kcall"
+	"goos/kernel/mm/vm"
 	"goos/kernel/random"
 )
 
@@ -47,3 +49,25 @@ func stirRandom() { randomGenerator.Mix(amd64.ReadTSC()) }
 
 // randomBytes fills target with generator output.
 func randomBytes(target []byte) bool { return randomGenerator.Read(target) }
+
+// RandomRead gives a native process generator output, for values an off-path
+// sender must not predict, such as DNS transaction IDs and source ports. Like
+// getrandom it needs no capability, and the kernel clears its copy.
+func (handler nativeCallHandler) RandomRead(address uint64, length uint64) kcall.Status {
+	local := thisCPU()
+	if length == 0 || length > kcall.MaxRandomRead {
+		return kcall.StatusInvalidArgument
+	}
+	stirRandom()
+	buffer := local.nativeRandom[:length]
+	filled := randomBytes(buffer)
+	copied := filled && vm.CopyOut(handler.root, address, buffer)
+	clear(buffer)
+	switch {
+	case !filled:
+		return kcall.StatusUnsupported
+	case !copied:
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
+}

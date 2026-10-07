@@ -85,7 +85,13 @@ const (
 	// OperationIRQTake consumes a line's pending event without blocking; a
 	// WaitAny on the line reports the event without consuming it (ADR 0190).
 	OperationIRQTake
+	// OperationRandomRead fills a buffer of at most MaxRandomRead bytes from
+	// the kernel's generator (ADR 0185). It needs no capability.
+	OperationRandomRead
 )
+
+// MaxRandomRead bounds one RandomRead.
+const MaxRandomRead = uint64(64)
 
 // ExitKilled is the exit code of a process stopped through ProcessKill.
 const ExitKilled = uint64(1)<<63 | 9
@@ -167,6 +173,7 @@ type Handler interface {
 	CPURuntime(index uint64, address uint64) Status
 	TaskAffinity(process uint64, mask uint64, address uint64) Status
 	IRQTake(irq uint64) Status
+	RandomRead(address uint64, length uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
@@ -301,6 +308,11 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.TaskAffinity(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationIRQTake:
 		return Result{Status: handler.IRQTake(request.Arg0)}
+	case OperationRandomRead:
+		if request.Arg1 == 0 || request.Arg1 > MaxRandomRead {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.RandomRead(request.Arg0, request.Arg1)}
 	case OperationValidationFault:
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:

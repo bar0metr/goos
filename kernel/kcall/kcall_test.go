@@ -85,6 +85,11 @@ func (handler *testHandler) IRQTake(irq uint64) Status {
 	return StatusOK
 }
 
+func (handler *testHandler) RandomRead(address uint64, length uint64) Status {
+	handler.address, handler.length = address, length
+	return StatusOK
+}
+
 func (handler *testHandler) PortRead(device uint64, specification uint64, address uint64) Status {
 	return StatusOK
 }
@@ -549,7 +554,21 @@ func TestDispatchExecutableCalls(t *testing.T) {
 	if result := Dispatch(Request{Operation: OperationIRQTake, Arg0: 0x10000001d}, irqHandler); result.Status != StatusOK || irqHandler.channel != 0x10000001d {
 		t.Fatalf("IRQ take dispatch %+v %#x", result, irqHandler.channel)
 	}
-	if result := Dispatch(Request{Operation: OperationIRQTake + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if OperationRandomRead != 56 {
+		t.Fatalf("random read operation %d", OperationRandomRead)
+	}
+	randomHandler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationRandomRead, Arg0: 0x3000, Arg1: MaxRandomRead}, randomHandler); result.Status != StatusOK ||
+		randomHandler.address != 0x3000 || randomHandler.length != MaxRandomRead {
+		t.Fatalf("random read dispatch %+v %+v", result, randomHandler)
+	}
+	for _, length := range []uint64{0, MaxRandomRead + 1} {
+		randomHandler = &testHandler{}
+		if result := Dispatch(Request{Operation: OperationRandomRead, Arg1: length}, randomHandler); result.Status != StatusInvalidArgument || *randomHandler != (testHandler{}) {
+			t.Fatalf("random read of %d bytes reached the handler", length)
+		}
+	}
+	if result := Dispatch(Request{Operation: OperationRandomRead + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}

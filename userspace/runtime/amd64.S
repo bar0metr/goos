@@ -320,6 +320,14 @@ goos_irq_take:
     ret
 .size goos_irq_take, .-goos_irq_take
 
+.global goos_random_read
+.type goos_random_read,@function
+goos_random_read:
+    movl $56, %eax
+    int $0x80
+    ret
+.size goos_random_read, .-goos_random_read
+
 .global goos_validation_fault
 .type goos_validation_fault,@function
 goos_validation_fault:
