@@ -44,7 +44,7 @@ func DecodeSessionNotice(message *ipc.Message) (handle.ID, bool) {
 // AddSessionRequest asks the service to serve a new session on the attached
 // server endpoint, confined to scope and limited to rights.
 func AddSessionRequest(server handle.ID, scope Scope, rights Rights, correlation uint64) (ipc.Message, bool) {
-	if server == 0 || correlation == 0 || rights == 0 || rights & ^(Read|Write) != 0 || int(scope.size) > MaxKey {
+	if server == 0 || correlation == 0 || rights == 0 || rights&^allRights != 0 || int(scope.size) > MaxKey {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindRequest,
@@ -65,7 +65,7 @@ func DecodeAddSession(message ipc.Message) (handle.ID, Scope, Rights, bool) {
 	}
 	rights := Rights(message.Payload[1])
 	size := int(message.Payload[2])
-	if rights == 0 || rights & ^(Read|Write) != 0 || size > MaxKey || 3+size != int(message.PayloadSize) {
+	if rights == 0 || rights&^allRights != 0 || size > MaxKey || 3+size != int(message.PayloadSize) {
 		return 0, Scope{}, 0, false
 	}
 	var scope Scope
