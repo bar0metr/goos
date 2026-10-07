@@ -95,7 +95,11 @@ func closeTransport(reason string) {
 	if transport.channel == 0 {
 		return
 	}
-	syslog.Info("resolver transport closed", syslog.Str("reason", reason))
+	if reason == "replaced" {
+		syslog.Info("resolver transport replaced")
+	} else {
+		syslog.Warn("resolver transport closed", syslog.Str("reason", reason))
+	}
 	for slot, tag := range transport.tags {
 		if tag != 0 {
 			stack.CancelDatagram(slot)

@@ -145,6 +145,8 @@ wait_for 'NETD_READY 10\.0\.2\.' 15 "$log"
 printf 'dhcp ready %ss after the prompt\n' "$(($(date +%s) - started))"
 sleep 2
 type_line 3 'net status'
+type_line 3 'resolve status'
+type_line 3 'ping -c 1 localhost'
 type_line 3 'ping -c 4 -W 1000 10.0.2.2'
 sleep 5
 type_line 3 'quota'
@@ -168,15 +170,18 @@ stop 3 "$log"
 
 require user.pci PCI_NET_DISCOVERY_OK "$log"
 require user.driver VIRTIO_NET_DRIVER_OK "$log"
-require_after user.state 'net status' '^state: ready$' "$log"
-require_after user.link 'net status' '^link: up$' "$log"
-require_after user.mac 'net status' '^mac: 52:54:00:12:34:56$' "$log"
-require_after user.mode 'net status' '^mode: dhcp$' "$log"
-require_after user.address 'net status' '^address: 10\.0\.2\.[0-9]*/24$' "$log"
-require_after user.gateway 'net status' '^gateway: 10\.0\.2\.2$' "$log"
-require_after user.lease 'net status' '^lease: [0-9]* s$' "$log"
-require_after user.mtu 'net status' '^mtu: 1500$' "$log"
-forbid_after user.settings 'net status' '^settings:' "$log"
+require_after user.state 'net status' '^  state: ready$' "$log"
+require_after user.link 'net status' '^  link: up$' "$log"
+require_after user.mac 'net status' '^  mac: 52:54:00:12:34:56$' "$log"
+require_after user.mode 'net status' '^  mode: dhcp$' "$log"
+require_after user.address 'net status' '^  address: 10\.0\.2\.[0-9]*/24$' "$log"
+require_after user.gateway 'net status' '^  gateway: 10\.0\.2\.2$' "$log"
+require_after user.lease 'net status' '^  lease: [0-9]* s$' "$log"
+require_after user.mtu 'net status' '^  mtu: 1500$' "$log"
+forbid_after user.settings 'net status' '^  settings:' "$log"
+require_after user.lo 'net status' '^  address: 127\.0\.0\.1/8$' "$log"
+require_after user.dns-server 'resolve status' '^servers: 10\.0\.2\.3 (dhcp)$' "$log"
+require_after user.localhost 'ping -c 1 localhost' '^40 bytes from 127\.0\.0\.1: seq=1 ' "$log"
 for command in 'ping -c 4 -W 1000 10.0.2.2' 'ping -c 4 -W 1000 10.0.2.2 ' 'ping -c 4 -W 1000  10.0.2.2' 'ping -c 4 -W 1000   10.0.2.2'; do
 	for sequence in 1 2 3 4; do
 		require_after "user.reply.$sequence" "$command" "^40 bytes from 10\\.0\\.2\\.2: seq=$sequence time=[0-9]*\\.[0-9][0-9][0-9] ms$" "$log"
@@ -208,26 +213,63 @@ compare user.init-restart 'quota  ' 'quota   ' init
 printf 'PASS user networking (%s)\n' "$log"
 fi
 
-# --- 2. Two guests on a private stream backend -----------------------------
+# --- 2. Two guests and the test peer on a private segment ----------------
 
 if wants stream; then
 
-disk left 192.0.2.10
-disk right 192.0.2.11
-socket=$work/stream.sock
+# netpeer joins both guests as a hub and is the segment's DHCP and DNS server
+# at 192.0.2.53. Its query log is how the test sees what reached DNS.
+peer=$work/netpeer
+socket=$work/hub.sock
+control=$work/netpeer.control
+queries=$logs/network-netpeer.log
+rm -f "$queries"
+cat >"$work/zone" <<'ZONE'
+left.test 60 A 192.0.2.10
+right.test 60 A 192.0.2.11
+alias.test 60 CNAME right.test
+gone.test NXDOMAIN
+ZONE
+go build -o "$peer" ./tools/netpeer
+"$peer" -socket "$socket" -control "$control" -zone "$work/zone" -log "$queries" \
+	-lease 52:54:00:00:02:10=192.0.2.10 >"$work/netpeer.out" 2>&1 &
+pids="$pids $!"
+wait_for 'netpeer: listening' 10 "$work/netpeer.out"
+peer_command() { printf '%s\n' "$1" >"$control"; }
+queried() { grep -c "^query $1 1 " "$queries" || true; }
+
+disk left
+disk right 192.0.2.11 'system.dns.server1 text 192.0.2.53'
 left=$logs/network-left.log
 right=$logs/network-right.log
-start left 3 -netdev "stream,id=net0,server=on,addr.type=unix,addr.path=$socket" -device virtio-net-pci,netdev=net0,disable-modern=on,mac=52:54:00:00:02:10,addr=0x4
-sleep 2
+start left 3 -netdev "stream,id=net0,server=off,addr.type=unix,addr.path=$socket" -device virtio-net-pci,netdev=net0,disable-modern=on,mac=52:54:00:00:02:10,addr=0x4
 start right 4 -netdev "stream,id=net0,server=off,addr.type=unix,addr.path=$socket" -device virtio-net-pci,netdev=net0,disable-modern=on,mac=52:54:00:00:02:11,addr=0x4
 wait_for 'goos> ' 90 "$left"
 wait_for 'goos> ' 90 "$right"
-wait_for 'NETD_READY 192\.0\.2\.10' 20 "$left"
-wait_for 'NETD_READY 192\.0\.2\.11' 20 "$right"
+wait_for 'NETD_READY 192\.0\.2\.10' 30 "$left"
+wait_for 'NETD_READY 192\.0\.2\.11' 30 "$right"
 sleep 2
 type_line 3 'ping -c 4 192.0.2.11'
 type_line 4 'ping -c 4 192.0.2.10'
 sleep 8
+type_line 3 'resolve status'
+type_line 4 'resolve status'
+type_line 3 'resolve right.test'
+type_line 3 'resolve RIGHT.test.'
+first_count=$(queried right.test)
+type_line 3 'resolve flush'
+type_line 3 'resolve right.test '
+second_count=$(queried right.test)
+type_line 3 'resolve alias.test'
+type_line 3 'resolve gone.test'
+type_line 3 'resolve localhost'
+type_line 3 'ping -c 2 right.test'
+sleep 3
+type_line 4 'resolve left.test'
+type_line 4 'hosts set 192.0.2.10 leftie'
+type_line 4 'resolve leftie'
+type_line 4 'ping -c 1 leftie'
+sleep 2
 type_line 3 'config set system.net.ipv4.default-ttl 18446744073709551616'
 type_line 3 'config set system.net.ipv4.default-ttl 128'
 type_line 3 'config set system.net.arp.resolve-attempts 5'
@@ -238,7 +280,23 @@ type_line 3 'net reload '
 type_line 3 'ping -c 2 192.0.2.11'
 sleep 3
 type_line 3 'net status'
+type_line 3 'resolve right.test  '
+# Address conflicts on the static guest: one claim is defended, a second
+# inside the defend interval makes it give the address up, and a probe the
+# peer answers keeps a new address from going live. lo carries on.
+peer_command 'claim 192.0.2.11'
+sleep 2
 type_line 4 'net status'
+peer_command 'claim 192.0.2.11'
+sleep 2
+type_line 4 'net status '
+peer_command 'defend-probe 192.0.2.12'
+type_line 4 'config set system.net.ipv4.address 192.0.2.12'
+type_line 4 'net reload'
+sleep 8
+type_line 4 'net status  '
+type_line 4 'ping -c 1 127.0.0.1'
+peer_command quit
 stop 3 "$left"
 stop 4 "$right"
 for sequence in 1 2 3 4; do
@@ -247,15 +305,41 @@ for sequence in 1 2 3 4; do
 done
 require_after left.summary 'ping -c 4 192.0.2.11' '^4 sent, 4 received, 0% lost$' "$left"
 require_after right.summary 'ping -c 4 192.0.2.10' '^4 sent, 4 received, 0% lost$' "$right"
-require_after left.static 'net status' '^mode: static$' "$left"
-require_after left.address 'net status' '^address: 192\.0\.2\.10/24$' "$left"
-require_after right.gateway 'net status' '^gateway: none$' "$right"
+require_after left.dhcp-dns 'resolve status' '^servers: 192\.0\.2\.53 (dhcp)$' "$left"
+require_after right.config-dns 'resolve status' '^servers: 192\.0\.2\.53 (config)$' "$right"
+require_after left.resolve 'resolve right.test' '^right\.test: 192\.0\.2\.11 (dns, ttl 60 s)$' "$left"
+require_after left.cached 'resolve RIGHT.test.' '^right\.test: 192\.0\.2\.11 (cache, ttl ' "$left"
+[ "$first_count" = 1 ] || fail left.cache-hit "one upstream query for right.test before the flush, saw $first_count" "$queries"
+[ "$second_count" = 2 ] || fail left.flush "a second upstream query after resolve flush, saw $second_count" "$queries"
+checks=$((checks + 2))
+require_after left.flushed 'resolve flush' '^cache flushed$' "$left"
+require_after left.cname 'resolve alias.test' '^alias\.test: 192\.0\.2\.11 (dns' "$left"
+require_after left.nxdomain 'resolve gone.test' 'name not found' "$left"
+require_after left.localhost 'resolve localhost' '^localhost: 127\.0\.0\.1 (localhost)$' "$left"
+grep -q '^query localhost' "$queries" && fail left.localhost-local 'no DNS query for localhost' "$queries"
+checks=$((checks + 1))
+require_after left.ping-name 'ping -c 2 right.test' '^PING right\.test (192\.0\.2\.11)$' "$left"
+require_after left.ping-name-summary 'ping -c 2 right.test' '^2 sent, 2 received, 0% lost$' "$left"
+require_after right.resolve 'resolve left.test' '^left\.test: 192\.0\.2\.10 (dns' "$right"
+require_after right.hosts 'resolve leftie' '^leftie: 192\.0\.2\.10 (hosts)$' "$right"
+require_after right.hosts-ping 'ping -c 1 leftie' '^1 sent, 1 received, 0% lost$' "$right"
+require_after left.dhcp 'net status' '^  mode: dhcp$' "$left"
+require_after left.address 'net status' '^  address: 192\.0\.2\.10/24$' "$left"
 require_after left.overflow 'config set system.net.ipv4.default-ttl 18446744073709551616' '^config: value does not match the declared type$' "$left"
 require_after left.reload 'net reload' '^network configuration applied$' "$left"
 require_after left.refused 'net reload ' 'invalid setting system\.net\.dhcp\.max-retry-ms; previous configuration kept' "$left"
 require_after left.after-reload 'ping -c 2 192.0.2.11' '^2 sent, 2 received, 0% lost$' "$left"
-require_after left.mode-kept 'net status' '^state: ready$' "$left"
-printf 'PASS stream backend (%s, %s)\n' "$left" "$right"
+require_after left.mode-kept 'net status' '^  state: ready$' "$left"
+require_after left.cache-after-reload 'resolve right.test  ' '^right\.test: 192\.0\.2\.11 (cache' "$left"
+require_after right.defended 'net status' '^  conflicts: probe 0 active 1 defended 1 relinquished 0' "$right"
+require_after right.defended-ready 'net status' '^  state: ready$' "$right"
+require_after right.relinquished 'net status ' '^  conflicts: probe 0 active 2 defended 1 relinquished 1' "$right"
+require_after right.failed 'net status ' '^  state: failed$' "$right"
+require_after right.probe-conflict 'net status  ' '^  conflicts: probe 1 ' "$right"
+require_after right.probe-failed 'net status  ' '^  address: none$' "$right"
+require_after right.loopback 'ping -c 1 127.0.0.1' '^1 sent, 1 received, 0% lost$' "$right"
+require 'peer.claims' '^defend 192\.0\.2\.12$' "$queries"
+printf 'PASS private segment (%s, %s)\n' "$left" "$right"
 fi
 
 # --- 3. No network function -----------------------------------------------
@@ -272,16 +356,27 @@ type_line 3 'net status'
 type_line 3 'net reload'
 type_line 3 'ping -c 1 -W 500 10.0.2.2'
 sleep 3
+type_line 3 'ping -c 1 127.0.0.1'
+type_line 3 'ping -c 1 localhost'
+type_line 3 'resolve localhost'
+type_line 3 'hosts get localhost'
+type_line 3 'resolve example.test'
 stop 3 "$log"
 require none.absent 'Network: no legacy virtio-net device' "$log"
 require none.normal BOOT_MODE_NORMAL "$log"
 require_after none.storage 'cat /system/motd' '^Welcome to GoOS$' "$log"
-require_after none.down 'net status' '^state: down$' "$log"
-require_after none.fallback 'net status' '^settings: built-in defaults' "$log"
+require_after none.down 'net status' '^  state: down$' "$log"
+require_after none.lo 'net status' '^lo:$' "$log"
+require_after none.fallback 'net status' '^  settings: built-in defaults' "$log"
 require_after none.refused 'net reload' 'invalid setting system\.net\.ipv4\.probe-count; previous configuration kept' "$log"
 require_after none.ping 'ping -c 1 -W 500 10.0.2.2' '^seq=1: ' "$log"
 require_after none.ping-summary 'ping -c 1 -W 500 10.0.2.2' '^1 sent, 0 received, 100% lost$' "$log"
 require_after none.ping-exit 'ping -c 1 -W 500 10.0.2.2' '^exit status: 1$' "$log"
+require_after none.loopback 'ping -c 1 127.0.0.1' '^40 bytes from 127\.0\.0\.1: seq=1 time=0\.000 ms$' "$log"
+require_after none.localhost 'ping -c 1 localhost' '^1 sent, 1 received, 0% lost$' "$log"
+require_after none.resolve 'resolve localhost' '^localhost: 127\.0\.0\.1 (localhost)$' "$log"
+require_after none.hosts 'hosts get localhost' '^127\.0\.0\.1 localhost$' "$log"
+require_after none.no-servers 'resolve example.test' 'no DNS servers' "$log"
 printf 'PASS no network (%s)\n' "$log"
 fi
 

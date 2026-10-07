@@ -27,8 +27,16 @@ func TestDatagramRoundTrip(t *testing.T) {
 		if !EncodeDatagram(&datagram, &wire) {
 			t.Fatalf("%d: encode", index)
 		}
+		// The kernel's own rules must accept it: a notification carries no
+		// correlation.
+		var raw [ipc.WireMaxSize]byte
+		size, ok := ipc.EncodeFrom(&wire, raw[:])
+		var copied ipc.Message
+		if !ok || !ipc.DecodeInto(raw[:size], &copied) {
+			t.Fatalf("%d: not a valid IPC message", index)
+		}
 		var decoded Datagram
-		if !DecodeDatagram(&wire, &decoded) || decoded != datagram {
+		if !DecodeDatagram(&copied, &decoded) || decoded != datagram {
 			t.Fatalf("%d: decoded %+v", index, decoded)
 		}
 	}
@@ -60,12 +68,13 @@ func TestDatagramRefused(t *testing.T) {
 	var wire ipc.Message
 	EncodeDatagram(&valid, &wire)
 	for name, mutate := range map[string]func(*ipc.Message){
-		"protocol": func(m *ipc.Message) { m.ProtocolID++ },
-		"version":  func(m *ipc.Message) { m.Version++ },
-		"kind":     func(m *ipc.Message) { m.Kind = ipc.KindRequest },
-		"size":     func(m *ipc.Message) { m.PayloadSize-- },
-		"handle":   func(m *ipc.Message) { m.HandleCount = 1 },
-		"reserved": func(m *ipc.Message) { m.Payload[datagramReserved] = 1 },
+		"protocol":    func(m *ipc.Message) { m.ProtocolID++ },
+		"version":     func(m *ipc.Message) { m.Version++ },
+		"kind":        func(m *ipc.Message) { m.Kind = ipc.KindRequest },
+		"size":        func(m *ipc.Message) { m.PayloadSize-- },
+		"handle":      func(m *ipc.Message) { m.HandleCount = 1 },
+		"correlation": func(m *ipc.Message) { m.Correlation = 1 },
+		"reserved":    func(m *ipc.Message) { m.Payload[datagramReserved] = 1 },
 	} {
 		bad := wire
 		mutate(&bad)

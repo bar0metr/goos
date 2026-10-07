@@ -86,7 +86,7 @@ func EncodeDatagram(d *Datagram, out *ipc.Message) bool {
 	if !validDatagram(d) {
 		return false
 	}
-	prepare(out, DatagramProtocolID, DatagramVersion, ipc.KindNotification, 1, DatagramSize)
+	prepare(out, DatagramProtocolID, DatagramVersion, ipc.KindNotification, 0, DatagramSize)
 	payload := out.Payload[:DatagramSize]
 	payload[datagramOpcode] = byte(d.Opcode)
 	payload[datagramResult] = byte(d.Result)
@@ -107,7 +107,7 @@ func EncodeDatagram(d *Datagram, out *ipc.Message) bool {
 // DecodeDatagram fills out only from a well-formed message.
 func DecodeDatagram(in *ipc.Message, out *Datagram) bool {
 	if in.ProtocolID != DatagramProtocolID || in.Version != DatagramVersion || in.Kind != ipc.KindNotification ||
-		in.Correlation != 1 || in.PayloadSize != DatagramSize || in.HandleCount != 0 {
+		in.Correlation != 0 || in.PayloadSize != DatagramSize || in.HandleCount != 0 {
 		return false
 	}
 	payload := in.Payload[:DatagramSize]
