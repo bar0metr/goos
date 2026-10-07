@@ -18,6 +18,7 @@ mechanisms enforce it. Mechanism details live in the linked documents.
 | System log and configuration | kernel log ring, `/state/system.log`, `/state/config` | Diagnostics and the settings components act on |
 | Console | COM1 through the console device capability, and the terminal output stream the terminal service relays | Operator I/O, warning echo, and read access to the log ring |
 | Network interface | `netd`'s address, ARP table and DHCP lease, the frame pools | What the guest says and answers on the link |
+| Name resolution | `resolved`'s cache and server list, the hosts table in `/state/hosts` | Decides which address a name, such as one given to `ping`, reaches |
 | CPU time | scheduler slots, wait sets | Liveness of every service |
 
 ## Trust boundaries
@@ -32,11 +33,12 @@ host (QEMU, OVMF, ISO, disk image file)
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
      │   ├─ virtio-net driver              holds port, IRQ, DMA authority for the NIC, a channel to netd, both frame pools
      │   ├─ netd                           holds the frame pools (receive read-only), a driver channel, a read-only system.net. config session, command sessions; no device
+     │   ├─ resolved                       holds the resolver transport (query pool writable, reply pool read-only), a system.dns. config session that may read settings and the hosts table, command sessions; no device, no network session
      │   ├─ config service                 holds the configuration store and a VFS session
      │   ├─ log service                    holds the log (read), console write, and a VFS session
      │   ├─ terminal service               the only holder of console read and of the terminal output stream's reader; a session with the shell
      │   └─ shell                          holds a terminal output writer, the terminal session, the log (read), a VFS session, exec endpoint and page, a config session; no console
-     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session and one network session
+     └─ utilities (ring 3, per command)    hold only stdin/stdout/stderr (streams) and optionally one VFS session, one network session and one resolver session
 ```
 
 | Boundary | Crossing | Enforcement |
@@ -53,6 +55,9 @@ host (QEMU, OVMF, ISO, disk image file)
 | link → `netd` | frames the driver copies into the receive pool | the driver checks length and header; `netd` parses every frame and keeps fixed tables (ADR 0191) |
 | `netd` ↔ driver | `GNETDRV1` and two shared pools | slot numbers only, exact slot ownership, a generation per binding; the driver copies frames out of the pool before the device sees them (ADR 0191) |
 | commands → `netd` | `GNETAPI1` session | rights class fixed by PID 1 at `AddSession`; one echo in flight per session (ADR 0191) |
+| `resolved` ↔ `netd` | `GNETDGRAM1` channel and two shared pools | bound by PID 1 under a growing generation; destination port 53 only, at most 1232 bytes, eight exchanges; exact slot ownership; no command can open it (ADR 0194) |
+| commands → `resolved` | `GRESOLV1` session | rights class fixed by PID 1 at `AddSession`, from `GrantResolve` or `GrantResolveAdmin`; separate from the network session (ADR 0194) |
+| shell, `resolved` → hosts table | `GHST1` on a configuration session | `HostsRead` and `HostsWrite` session rights fixed by PID 1; the shell holds both, the resolver only `HostsRead` (ADR 0193) |
 | host → guest | firmware, ISO, disk image | trusted, except disk *contents*, which are treated as untrusted input |
 
 The kernel and the host (QEMU, OVMF, the ISO build) are trusted. Nothing in the
@@ -85,6 +90,11 @@ A program launched from the shell, for example a compromised command image in
   have `netd` send echo requests to any address it names, one at a time, or
   read the interface and have `netd` reload the stored settings. It builds
   no packet, holds no device, and cannot pass the session on (ADR 0191).
+- A command whose index entry asks for a resolver session can have
+  `resolved` look up names, read its status and, with `GrantResolveAdmin`,
+  flush the cache and reload its settings. It cannot send a datagram, choose
+  a server or write the hosts table, and a resolver session grants no echo
+  (ADR 0194).
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
@@ -161,6 +171,13 @@ attacker-controlled code.
   pool, and the frames it writes to the transmit pool are copied by the
   driver before the device reads them. It restarts on failure with a new
   control channel, and the driver restarts behind it (ADR 0191).
+- `resolved` compromise, for example through a malformed DNS reply, controls
+  the answers commands get for every name except `localhost`, and can send
+  DNS queries to any address on port 53 through the transport, at most eight
+  at once. It holds no device, no network session, no VFS session and a
+  configuration session that can only read `system.dns.` and the hosts
+  table. It cannot write the reply pool. It restarts on failure, and PID 1
+  binds a new transport, so exchanges on the old one fail (ADR 0194).
 
 ### Compromised driver
 
@@ -205,6 +222,31 @@ Anything on the link can send the guest arbitrary frames.
   address another host holds is declined after the ARP probe.
 - `netd` answers at most 20 echo requests a second, so an echo flood cannot
   fill its transmit ring.
+- Address conflicts follow RFC 5227. Before using an address `netd` probes
+  for it, and once the address is live it keeps watching: the first claim on
+  it by another host is answered with one announcement, a second claim within
+  the defence interval makes `netd` give the address up, and after a run of
+  conflicts the next claim waits the rate-limit interval. A host that keeps
+  claiming the address can keep the guest off it, as on any ARP network, but
+  cannot make it probe without pause (ADR 0192).
+- Loopback traffic never leaves the guest: nothing sent to `127.0.0.0/8` is
+  framed, resolved with ARP or given to the gateway. A frame from the link
+  with a loopback source or destination, IPv4 or ARP, is dropped and
+  counted, and a static address, gateway, DHCP lease or DNS server may not be
+  a loopback address (ADR 0193).
+- DNS answers are protected against off-path spoofing, not against a peer
+  that sees the queries. Each query leaves from a fresh random port in
+  49152..65535 with a random transaction ID, both from generators seeded by
+  `RandomRead`. `netd` accepts one reply from the server's address and port
+  53 to that port, and `resolved` requires the transaction ID, the server and
+  exactly one question equal to the one asked, then checks every count,
+  length, label and compression pointer before using anything. A reply that
+  fails any check is dropped whole, so nothing partial reaches the cache,
+  and a truncated reply is not used. `localhost` and the hosts table are
+  answered before any query is sent (ADR 0193, ADR 0194).
+- A DHCP server on the link decides which DNS servers the guest asks, and a
+  server it asks can answer with any address. A cached answer lasts at most
+  `system.dns.cache.max-ttl-sec`.
 - There is no encryption, authentication or filtering on the link.
 
 ### Malformed storage image
@@ -243,9 +285,9 @@ The raw disk image is host-provided and persists across boots.
   payload size, and attached-handle count before queueing, and checks Transfer
   authority on every attached handle (docs/architecture/ipc.md).
 - Protocol decoders (`GVF1`, `GRF1`, `GBLK001`, lifecycle, exec and its
-  control protocol, `GCF1` and its control protocol, `GNETDRV1`, `GNETAPI1`
-  and `GNETCTL1`) check protocol ID, version, sizes, and require reserved
-  fields to be zero.
+  control protocol, `GCF1` and its control protocol, `GHST1`, `GNETDRV1`,
+  `GNETAPI1`, `GNETCTL1`, `GNETDGRAM1` and `GRESOLV1`) check protocol ID,
+  version, sizes, and require reserved fields to be zero.
 - Services answer unparsable but attributable requests with an
   invalid-argument reply instead of dropping them (ADR 0048). A request whose
   peer has died is dropped without stopping the service (ADR 0078).
@@ -292,6 +334,8 @@ controls the system ([boot-chain.md](boot-chain.md)).
 | storage driver crash | PID 1 restarts the driver on a fresh channel and hands the block service the new endpoint (ADR 0078) |
 | network driver crash | `netd` fails pending echoes and unbinds; PID 1 starts a driver with a new generation, channel and pools; the disk is untouched (ADR 0190, 0191) |
 | missing or failed NIC | the network reports down; storage, the installed system and the shell keep running, and recovery is never entered for it (ADR 0191) |
+| resolver crash or `netd` restart | PID 1 restarts the service and binds a new transport with a new generation; exchanges on the old one fail as `Reconfigured`, and `ping` with a numeric address keeps working (ADR 0194) |
+| no DNS server known | `localhost` and the hosts table still answer; other names give `NoServers` (ADR 0194) |
 | terminal or shell crash | PID 1 restarts it on a fresh session and hands the survivor the other end; a dead shell's jobs are stopped with it (ADR 0089) |
 | a pipeline stage exiting | closes only its own copies of shared stream ends; the terminal's writing end stays open for the other stages (ADR 0089) |
 | corrupt persistent volume | mount refused, system runs without persistent storage (ADR 0077) |
@@ -311,13 +355,15 @@ controls the system ([boot-chain.md](boot-chain.md)).
 - Physical attacks, malicious firmware, and a malicious hypervisor.
 - Confidentiality of `/persist` against anyone with host access to the image.
 - Users, logins, and multi-user separation. There is no UID model.
+- DNSSEC and encrypted DNS (DNS over TLS or HTTPS). A recursive server, or a
+  peer that sees the queries, can answer with any address (ADR 0194).
 
 ## Known weaknesses
 
 - PID 1 is a single point of authority. Compromising it grants every
   capability it still holds, including the console with Transfer, both ends of
   the terminal output stream, the lifecycle channel, the VFS, block,
-  configuration, network and terminal control endpoints, the system-control
+  configuration, network, resolver and terminal control endpoints, the system-control
   capability, both drivers' port, IRQ, and DMA authority, and a stop right over
   every running job.
 - The kernel's warning echo, and the reports of the services that start before

@@ -16,7 +16,7 @@ and `kernel/waits.go`. Everything else goes through `kcall.Dispatch`, which chec
 fixed sizes before calling the handler in the file for its area: `devicecalls.go`,
 `ipccalls.go`, `streamcalls.go`, `launch.go`, `lifecycle.go`, `diagnostics.go`,
 `timing.go`, `logging.go`, `sysinfo.go`, `memory.go`, `processkill.go`,
-`imagemap.go`.
+`imagemap.go`, `randomness.go`.
 Unknown numbers return `Unsupported`.
 
 Every call runs with interrupts disabled and takes the locks of the state it touches (ADR 0184, ADR 0187). The caller is identified by its CR3 root, and blocking calls also
@@ -86,6 +86,7 @@ table with type, generation, and rights checks.
 | 53 | `CPURuntime` | registered | index below the present-CPU table; 80-byte `CopyOut` | one processor's online state, current task ID, tick, idle, switch, steal, migration, and interrupt counts; no addresses or scheduler state it can change | no; past the table → `NotFound` |
 | 54 | `TaskAffinity` | handle zero for the calling task; otherwise a process handle with Wait to read, Write to set | mask must name an online processor; kernel tasks stay on the housekeeping processor; optional 8-byte `CopyOut` | the processors a task may run on; a scheduling constraint, not authority | no |
 | 55 | `IRQTake` | IRQ handle, Wait, the routed network line | none beyond the handle | clears one pending flag | no; nothing pending → `NotFound` |
+| 56 | `RandomRead` | — | length 1..64, checked in `Dispatch`; `CopyOut` of generator output, after which the kernel clears its copy | at most 64 bytes from a per-CPU buffer; stirs the pool with the cycle counter | no; no generator output → `Unsupported` |
 
 Operations 23 and 24 are diagnostic and measurement aids (ADR 0052, 0054).
 In a normal build operation 23 returns `Unsupported` and all trace recording
@@ -99,7 +100,12 @@ compiles away.
   their integrity is the authority model.
 - Port I/O, DMA memory, and IRQ routing need ring 0. The network line's
   handler records an event and parses nothing; Ethernet, ARP, IPv4, ICMP and
-  DHCP run in `netd` (ADR 0191).
+  DHCP run in `netd` (ADR 0191), and DNS runs in `resolved` (ADR 0194).
+- `RandomRead` gives native processes the generator that already serves
+  `AT_RANDOM` and `getrandom` (ADR 0185). `netd` and `resolved` seed their
+  own generators from it for source ports, transaction IDs and RFC 5227
+  delays (ADR 0192, ADR 0194); a userspace source would have nothing
+  unpredictable to start from.
 - `ConsoleRead`, `ConsoleWrite`, and `ConsoleInterrupt` stay in the kernel
   because COM1 is also the early console, the panic path and the log's warning
   echo. The terminal service holds the only read right and relays everything the
@@ -160,11 +166,11 @@ completes the registration or is seen by the re-check (ADR 0190).
 
 ### Capabilities
 
-See [capabilities.md](capabilities.md). Twelve calls authorize by caller
+See [capabilities.md](capabilities.md). Thirteen calls authorize by caller
 identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
 `SystemInfo`, `ChannelCreate`, `StreamCreate`, `ClockReadNanos`,
-`HandleInfo` (own table only), `ProcessInfo`, `CPUInfo`, `CPUEntry`, and
-`CPUCacheInfo`.
+`HandleInfo` (own table only), `ProcessInfo`, `CPUInfo`, `CPUEntry`,
+`CPUCacheInfo`, and `RandomRead`.
 
 ### Stream reference counts (ADR 0089)
 
@@ -182,6 +188,42 @@ identity or need nothing: `Exit`, `ClockRead`, `StartupRead`,
 - *Waits*: none added. Writers are woken only when a whole 256-byte write fits,
   so a woken writer is not refused again.
 - *Resources*: two 16-bit counters per stream; the registry is 256 streams, each a page taken when it is created.
+
+### Network parsers outside the kernel
+
+The kernel parses no packet. These surfaces sit in userspace services that
+hold no device authority, listed here because they take input from the link
+or from other processes:
+
+- `netd` parses Ethernet, ARP, IPv4, ICMP and DHCP, including the DNS
+  servers of DHCP option 6, of which it keeps the first four that are not
+  zero, loopback, broadcast or multicast. It drops any frame from the link
+  with a loopback source or destination and runs RFC 5227 conflict detection
+  on ARP (ADR 0191, ADR 0192, ADR 0193).
+- `GNETDGRAM1`, the resolver transport between `resolved` and `netd`, is
+  bound by PID 1 and held by those two services only. It allows destination
+  port 53 and nothing else, at most 1232 bytes either way, and eight
+  exchanges at once, over two pools of eight 1280-byte slots. The resolver
+  can write the query pool and only read the reply pool; `netd` holds the
+  reverse, and each side checks the exact rights through `HandleInfo` and
+  refuses a message about a slot it does not own. `netd` sends each query
+  from a random source port and accepts one reply from the server's address
+  and port 53 to that port (ADR 0194).
+- `resolved` parses DNS replies. Before any of a reply is used it checks QR,
+  opcode, transaction ID and server, exactly one question equal to the one
+  asked, counts and lengths against the message, compression pointers that
+  point backwards with at most 64 hops, labels of 63 bytes and names of 255.
+  A reply that fails is dropped whole, and a truncated reply is not used.
+  The parser in `userspace/dns` has fixed tables and fuzz tests (ADR 0194).
+- `GRESOLV1` carries commands' requests to `resolved`: an opcode and a name
+  of at most 253 bytes. Sessions are opened by PID 1 for commands whose index
+  entry asks for `GrantResolve` or `GrantResolveAdmin`, and the resolver
+  holds at most 16 lookups at once.
+- `GHST1`, the hosts protocol, runs on a configuration session and is checked
+  against the session's `HostsRead` and `HostsWrite` rights, not its scope.
+  The configuration service parses `/state/hosts` at restore, skipping and
+  counting malformed and duplicate lines, and keeps at most 64 records
+  (ADR 0193).
 
 ### Resource limits
 
@@ -235,6 +277,7 @@ interrupts off, and takes about 2 ms (ADR 0057).
 | `HandleInfo` | ID, type, and rights of the caller's own handles; never the kernel object |
 | `LogRead`, `LogBounds` | every retained log record, including other components' events, and the ring's sequence window |
 | `DMAAllocate` | physical address of the caller's DMA window |
+| `RandomRead` | output of the generator that also serves `AT_RANDOM` and `getrandom`; never its state |
 | `Diagnostics` (`goos_diag`) | every process's handle table, channel state, physical addresses |
 
 ## Adding an operation
