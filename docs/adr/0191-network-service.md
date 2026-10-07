@@ -17,6 +17,14 @@ echo reply rate configurable, adds tuning keys to the reload `Field` values,
 and gives `Status` replies the link MTU at bytes 76..77 and a fallback flag
 at byte 78. The fixed values below are now defaults.
 
+Supersession note (2026-10-07): ADR 0193 adds the loopback interface and the
+hosts table, and ADR 0194 the resolver service, its transport and host names
+in `ping`; "Out of scope" below no longer holds for DNS or for `ping` taking
+names. The network protocol is at version 2 (ADR 0192), and every address
+claim follows RFC 5227. General UDP and TCP sockets for applications remain
+out of scope: the resolver transport carries DNS to port 53 for the resolver
+alone.
+
 ## Context
 
 GoOS had no network. ADR 0190 gives a driver bounded authority over one
