@@ -14,7 +14,7 @@ const (
 	TCPReorderPayload         = 1460
 	tcpSlotBits               = 8
 	tcpGenerations            = 1 << (32 - tcpSlotBits)
-	tcpInitialWindow          = 10 * 1460
+	tcpInitialWindowBytes     = 14600
 	tcpInitialSSThresh        = 65535
 	tcpEventCapacity          = MaxTCPEndpoints * 2
 )
@@ -98,6 +98,7 @@ type tcpEndpoint struct {
 	sndUna, sndNxt uint32
 	rcvNxt         uint32
 	peerWindow     uint32
+	sndWL1, sndWL2 uint32
 	peerMSS        uint16
 	localMSS       uint16
 
@@ -110,6 +111,7 @@ type tcpEndpoint struct {
 	reorder  [MaxTCPOutOfOrderSegments]tcpReorder
 
 	shutdownWrite bool
+	orphan        bool
 	finSent       bool
 	finReceived   bool
 	finSequence   uint32
@@ -195,7 +197,7 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 	}
 	entry := &stack.tcp[free]
 	*entry = tcpEndpoint{state: TCPOpen, owner: uint8(owner), generation: stack.tcpGeneration,
-		peerMSS: tcpDefaultMSS, cwnd: tcpInitialWindow, ssthresh: tcpInitialSSThresh, rto: stack.tuning.TCP.RTOMin}
+		peerMSS: tcpDefaultMSS, ssthresh: tcpInitialSSThresh, rto: stack.tuning.TCP.RTOMin}
 	return tcpID(entry, free), ResultOK
 }
 
@@ -351,7 +353,9 @@ func (stack *Stack) TCPShutdownWrite(owner int, id TCPEndpointID, now uint64) Re
 }
 
 // TCPClose starts graceful close for a synchronized connection and releases
-// an unconnected endpoint or listener at once.
+// an unconnected endpoint or listener at once. A closing connection becomes an
+// orphan: the stack releases it when the close completes, because its owner
+// no longer holds the ID.
 func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 	entry, _ := stack.tcpEndpoint(owner, id)
 	if entry == nil {
@@ -359,8 +363,13 @@ func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 	}
 	switch entry.state {
 	case TCPEstablished, TCPCloseWait:
-		entry.shutdownWrite = true
+		entry.orphan, entry.shutdownWrite = true, true
 		stack.pumpTCP(entry, now)
+	case TCPFinWait1, TCPClosing, TCPLastAck:
+		entry.orphan = true
+	case TCPFinWait2:
+		entry.orphan = true
+		entry.deadline = addTime(now, stack.tuning.TCP.TimeWait)
 	default:
 		stack.releaseTCP(entry)
 	}
@@ -419,6 +428,37 @@ func (stack *Stack) tcpEvent(entry *tcpEndpoint, operation TCPOperation, result 
 func (stack *Stack) releaseTCP(entry *tcpEndpoint) {
 	generation := entry.generation
 	*entry = tcpEndpoint{generation: generation}
+}
+
+// closeTCP moves a connection to CLOSED and reports whether its owner still
+// holds it. An orphan is released instead.
+func (stack *Stack) closeTCP(entry *tcpEndpoint, result Result) bool {
+	if entry.orphan {
+		stack.releaseTCP(entry)
+		return false
+	}
+	entry.lastResult, entry.state = result, TCPClosed
+	return true
+}
+
+// tcpSMSS is the sender maximum segment size: the smaller of the path MSS and
+// the MSS the peer announced.
+func tcpSMSS(entry *tcpEndpoint) uint32 {
+	mss := min(entry.localMSS, entry.peerMSS)
+	if mss == 0 {
+		return tcpDefaultMSS
+	}
+	return uint32(mss)
+}
+
+// tcpInitialWindow is the RFC 6928 initial window, min(10*SMSS,
+// max(2*SMSS, 14600)), or one segment after a SYN or SYN-ACK was retransmitted.
+func tcpInitialWindow(entry *tcpEndpoint) uint32 {
+	smss := tcpSMSS(entry)
+	if entry.retries != 0 {
+		return smss
+	}
+	return min(10*smss, max(2*smss, tcpInitialWindowBytes))
 }
 
 func (stack *Stack) TCPStats() TCPStats {

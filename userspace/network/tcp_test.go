@@ -176,7 +176,7 @@ func TestTCPWindowUpdateResumesBufferedWrite(t *testing.T) {
 	if read, result := h.stack.TCPRead(0, server, buffer[:], h.now); result != ResultBusy || read != 0 {
 		t.Fatalf("read before window update %d %d", read, result)
 	}
-	h.stack.handleACK(clientEntry, clientEntry.sndUna, 4096, true, h.now)
+	h.stack.handleACK(clientEntry, ackSegment(clientEntry, clientEntry.sndUna, 4096), h.now)
 	if read, result := h.stack.TCPRead(0, server, buffer[:], h.now); result != ResultOK || string(buffer[:read]) != "resume" {
 		t.Fatalf("read after window update %d %d %q", read, result, buffer[:read])
 	}
@@ -185,7 +185,7 @@ func TestTCPWindowUpdateResumesBufferedWrite(t *testing.T) {
 func TestTCPInvalidACKDoesNotChangeWindow(t *testing.T) {
 	entry := tcpEndpoint{state: TCPEstablished, sndUna: 10, sndNxt: 20, peerWindow: 30}
 	stack := Stack{tuning: DefaultTuning()}
-	stack.handleACK(&entry, 21, 4000, true, second)
+	stack.handleACK(&entry, ackSegment(&entry, 21, 4000), second)
 	if entry.sndUna != 10 || entry.peerWindow != 30 {
 		t.Fatalf("invalid ACK changed sender: una=%d window=%d", entry.sndUna, entry.peerWindow)
 	}
@@ -203,7 +203,7 @@ func TestTCPZeroWindowPersistAndReopen(t *testing.T) {
 	entry.remote, entry.remotePort = peerIP, 7
 	entry.localMSS, entry.peerMSS = 1460, 1200
 	entry.sndUna, entry.sndNxt, entry.sendSeq = 100, 100, 100
-	entry.rcvNxt, entry.peerWindow = 200, 0
+	entry.rcvNxt, entry.peerWindow, entry.cwnd = 200, 0, tcpInitialWindow(entry)
 	if written, result := h.stack.TCPWrite(0, id, []byte("x"), h.now); result != ResultOK || written != 1 {
 		t.Fatalf("write %d %d", written, result)
 	}
@@ -228,7 +228,7 @@ func TestTCPZeroWindowPersistAndReopen(t *testing.T) {
 	if status != tcpOK || segment.sequence != 100 || string(segment.payload) != "x" || entry.sndNxt != 100 || entry.sendSent != 0 || entry.persist != 1 {
 		t.Fatalf("probe status=%d segment=%+v sndNxt=%d sent=%d probes=%d", status, segment, entry.sndNxt, entry.sendSent, entry.persist)
 	}
-	h.stack.handleACK(entry, entry.sndUna, 4096, true, h.now)
+	h.stack.handleACK(entry, ackSegment(entry, entry.sndUna, 4096), h.now)
 	frames = h.drain()
 	if len(frames) != 1 {
 		t.Fatalf("resume frames %d", len(frames))
@@ -375,7 +375,7 @@ func TestTCPFastRetransmitAndRecovery(t *testing.T) {
 		t.Fatalf("initial segments %d", len(frames))
 	}
 	for range 3 {
-		h.stack.handleACK(entry, entry.sndUna, uint16(entry.peerWindow), true, h.now)
+		h.stack.handleACK(entry, ackSegment(entry, entry.sndUna, entry.peerWindow), h.now)
 	}
 	if !entry.fastRecover || entry.recover != 1400 || entry.dupACKs != 3 {
 		t.Fatalf("fast recovery=%v recover=%d dupacks=%d", entry.fastRecover, entry.recover, entry.dupACKs)
@@ -384,11 +384,11 @@ func TestTCPFastRetransmitAndRecovery(t *testing.T) {
 		t.Fatalf("fast retransmit frames %d", len(frames))
 	}
 	cwnd := entry.cwnd
-	h.stack.handleACK(entry, entry.sndUna, uint16(entry.peerWindow), true, h.now)
+	h.stack.handleACK(entry, ackSegment(entry, entry.sndUna, entry.peerWindow), h.now)
 	if entry.cwnd != cwnd+100 {
 		t.Fatalf("recovery cwnd %d -> %d", cwnd, entry.cwnd)
 	}
-	h.stack.handleACK(entry, entry.recover, uint16(entry.peerWindow), true, h.now)
+	h.stack.handleACK(entry, ackSegment(entry, entry.recover, entry.peerWindow), h.now)
 	if entry.fastRecover || entry.cwnd != entry.ssthresh {
 		t.Fatalf("recovery exit fast=%v cwnd=%d ssthresh=%d", entry.fastRecover, entry.cwnd, entry.ssthresh)
 	}
@@ -405,5 +405,242 @@ func TestTCPTimeWaitOnlyRefreshesForExactFIN(t *testing.T) {
 	stack.handleTCP(&entry, ipv4Packet{}, tcpSegment{sequence: 100, flags: tcpFlagACK | tcpFlagFIN}, now)
 	if entry.deadline != now+stack.tuning.TCP.TimeWait {
 		t.Fatalf("exact FIN deadline %d", entry.deadline)
+	}
+}
+
+func ackSegment(entry *tcpEndpoint, acknowledgment, window uint32) tcpSegment {
+	return tcpSegment{sequence: entry.rcvNxt, acknowledgment: acknowledgment, flags: tcpFlagACK, window: uint16(window)}
+}
+
+// establishedWithPeer builds a synchronized connection to peerIP whose
+// segments travel through the harness.
+func establishedWithPeer(t *testing.T, h *harness, port uint16) (TCPEndpointID, *tcpEndpoint) {
+	t.Helper()
+	id, result := h.stack.TCPOpen(0)
+	if result != ResultOK {
+		t.Fatal(result)
+	}
+	entry, _ := h.stack.tcpEndpoint(0, id)
+	entry.state = TCPEstablished
+	entry.local, entry.port = hostIP, port
+	entry.remote, entry.remotePort = peerIP, 7
+	entry.localMSS, entry.peerMSS = 1460, 1460
+	entry.sndUna, entry.sndNxt, entry.sendSeq = 100, 100, 100
+	entry.rcvNxt, entry.peerWindow, entry.cwnd = 200, 1000, 14600
+	entry.sndWL1, entry.sndWL2 = 200, 100
+	return id, entry
+}
+
+func (h *harness) tcpFromPeer(entry *tcpEndpoint, segment tcpSegment) {
+	h.t.Helper()
+	segment.sourcePort, segment.destinationPort = entry.remotePort, entry.port
+	var bytes [MTU]byte
+	length := putTCP(bytes[:], peerIP, hostIP, segment)
+	h.receive(ipv4Frame(hostMAC, peerMAC, peerIP, hostIP, protocolTCP, bytes[:length]))
+}
+
+func (h *harness) tcpSent() []tcpSegment {
+	h.t.Helper()
+	var segments []tcpSegment
+	for _, frame := range h.drain() {
+		ether, ok := parseEthernet(frame)
+		if !ok {
+			h.t.Fatal("sent frame is not Ethernet")
+		}
+		packet, status := parseIPv4(ether.payload)
+		if status != parseOK || packet.protocol != protocolTCP {
+			continue
+		}
+		segment, tcpStatus := parseTCP(packet)
+		if tcpStatus != tcpOK {
+			h.t.Fatalf("sent TCP status %d", tcpStatus)
+		}
+		segments = append(segments, segment)
+	}
+	return segments
+}
+
+func TestTCPFutureACKDropsWholeSegment(t *testing.T) {
+	h := readyWithPeer(t)
+	_, entry := establishedWithPeer(t, h, 50010)
+	h.tcpFromPeer(entry, tcpSegment{sequence: 200, acknowledgment: 105, flags: tcpFlagACK | tcpFlagPSH | tcpFlagFIN,
+		window: 9000, payload: []byte("abc")})
+	if entry.recvLen != 0 || entry.rcvNxt != 200 || entry.finReceived || entry.state != TCPEstablished {
+		t.Fatalf("future ACK delivered: recv=%d rcvNxt=%d fin=%v state=%d", entry.recvLen, entry.rcvNxt, entry.finReceived, entry.state)
+	}
+	if entry.peerWindow != 1000 || entry.sndUna != 100 || entry.sndWL1 != 200 || entry.sndWL2 != 100 {
+		t.Fatalf("future ACK changed sender: window=%d una=%d wl=%d/%d", entry.peerWindow, entry.sndUna, entry.sndWL1, entry.sndWL2)
+	}
+	sent := h.tcpSent()
+	if len(sent) != 1 || sent[0].flags != tcpFlagACK || sent[0].sequence != 100 || sent[0].acknowledgment != 200 {
+		t.Fatalf("corrective ACK %+v", sent)
+	}
+}
+
+func TestTCPOldACKStillDeliversPayload(t *testing.T) {
+	h := readyWithPeer(t)
+	_, entry := establishedWithPeer(t, h, 50011)
+	h.tcpFromPeer(entry, tcpSegment{sequence: 200, acknowledgment: 90, flags: tcpFlagACK, window: 9000, payload: []byte("abc")})
+	if entry.rcvNxt != 203 || string(entry.receive[:entry.recvLen]) != "abc" || entry.peerWindow != 1000 {
+		t.Fatalf("old ACK: rcvNxt=%d data=%q window=%d", entry.rcvNxt, entry.receive[:entry.recvLen], entry.peerWindow)
+	}
+}
+
+func TestTCPStaleSegmentKeepsNewerWindow(t *testing.T) {
+	for _, start := range []uint32{200, 0xfffffff0} {
+		stack := Stack{tuning: DefaultTuning()}
+		entry := tcpEndpoint{state: TCPEstablished, sndUna: 100, sndNxt: 100, rcvNxt: start, peerWindow: 1000,
+			sndWL1: start, sndWL2: 100, localMSS: 1460, peerMSS: 1460}
+		// The later segment arrives first and is held for reassembly.
+		later := tcpSegment{sequence: start + 20, acknowledgment: 100, flags: tcpFlagACK, window: 9000, payload: make([]byte, 10)}
+		stack.handleTCP(&entry, ipv4Packet{}, later, second)
+		if entry.peerWindow != 9000 || entry.sndWL1 != start+20 {
+			t.Fatalf("start %#x: newer window %d wl1=%#x", start, entry.peerWindow, entry.sndWL1)
+		}
+		earlier := tcpSegment{sequence: start, acknowledgment: 100, flags: tcpFlagACK, window: 100, payload: make([]byte, 20)}
+		stack.handleTCP(&entry, ipv4Packet{}, earlier, second)
+		if entry.peerWindow != 9000 || entry.rcvNxt != start+30 {
+			t.Fatalf("start %#x: stale segment set window %d rcvNxt=%#x", start, entry.peerWindow, entry.rcvNxt)
+		}
+		// Same SEQ and an equal ACK may shrink the window.
+		stack.handleTCP(&entry, ipv4Packet{}, ackSegment(&entry, 100, 500), second)
+		if entry.peerWindow != 500 || entry.sndWL1 != start+30 {
+			t.Fatalf("start %#x: current ACK window %d wl1=%#x", start, entry.peerWindow, entry.sndWL1)
+		}
+	}
+}
+
+func TestTCPWindowUpdateNeedsNewerACKAtSameSequence(t *testing.T) {
+	stack := Stack{tuning: DefaultTuning()}
+	entry := tcpEndpoint{state: TCPEstablished, sndUna: 0xfffffff8, sndNxt: 0x10, rcvNxt: 300, peerWindow: 1000,
+		sndWL1: 300, sndWL2: 0xfffffffc, localMSS: 1460, peerMSS: 1460}
+	stack.handleACK(&entry, ackSegment(&entry, 0xfffffffa, 7000), second)
+	if entry.peerWindow != 1000 {
+		t.Fatalf("older ACK at the same SEQ set window %d", entry.peerWindow)
+	}
+	stack.handleACK(&entry, ackSegment(&entry, 0x4, 7000), second)
+	if entry.peerWindow != 7000 || entry.sndWL2 != 0x4 {
+		t.Fatalf("wrapped newer ACK window %d wl2=%#x", entry.peerWindow, entry.sndWL2)
+	}
+}
+
+func TestTCPInitialWindowFollowsSMSS(t *testing.T) {
+	for _, test := range []struct {
+		mss  uint16
+		want uint32
+	}{{536, 5360}, {1200, 12000}, {1460, 14600}} {
+		h := readyWithPeer(t)
+		id, _ := h.stack.TCPOpen(0)
+		if _, result := h.stack.TCPConnect(0, id, peerIP, 7, h.now); result != ResultOK {
+			t.Fatal(result)
+		}
+		entry, _ := h.stack.tcpEndpoint(0, id)
+		syn := h.tcpSent()
+		if len(syn) != 1 {
+			t.Fatalf("SYN frames %d", len(syn))
+		}
+		h.tcpFromPeer(entry, tcpSegment{sequence: 5000, acknowledgment: syn[0].sequence + 1, flags: tcpFlagSYN | tcpFlagACK,
+			window: 65535, mss: test.mss})
+		if entry.state != TCPEstablished || entry.cwnd != test.want {
+			t.Fatalf("active MSS %d: state=%d cwnd=%d want %d", test.mss, entry.state, entry.cwnd, test.want)
+		}
+
+		listener, _ := h.stack.TCPOpen(1)
+		h.stack.TCPBind(1, listener, IPv4{}, 8090)
+		h.stack.TCPListen(1, listener, 1)
+		h.drain()
+		peer := tcpEndpoint{port: 8090, remotePort: 40000}
+		h.tcpFromPeer(&peer, tcpSegment{sequence: 9000, flags: tcpFlagSYN, window: 65535, mss: test.mss})
+		synACK := h.tcpSent()
+		if len(synACK) != 1 {
+			t.Fatalf("SYN-ACK frames %d", len(synACK))
+		}
+		h.tcpFromPeer(&peer, tcpSegment{sequence: 9001, acknowledgment: synACK[0].sequence + 1, flags: tcpFlagACK, window: 65535})
+		child, _, result := h.stack.TCPAccept(1, listener)
+		if result != ResultOK {
+			t.Fatalf("accept %d", result)
+		}
+		childEntry, _ := h.stack.tcpEndpoint(1, child)
+		if childEntry.cwnd != test.want {
+			t.Fatalf("passive MSS %d: cwnd=%d want %d", test.mss, childEntry.cwnd, test.want)
+		}
+	}
+}
+
+func TestTCPInitialWindowAfterLostSYNIsOneSegment(t *testing.T) {
+	h := readyWithPeer(t)
+	id, _ := h.stack.TCPOpen(0)
+	h.stack.TCPConnect(0, id, peerIP, 7, h.now)
+	entry, _ := h.stack.tcpEndpoint(0, id)
+	h.advance(entry.rtoDeadline - h.now)
+	syn := h.tcpSent()
+	if len(syn) != 2 || entry.retries != 1 {
+		t.Fatalf("SYN frames %d retries %d", len(syn), entry.retries)
+	}
+	h.tcpFromPeer(entry, tcpSegment{sequence: 5000, acknowledgment: syn[0].sequence + 1, flags: tcpFlagSYN | tcpFlagACK,
+		window: 65535, mss: 1200})
+	if entry.state != TCPEstablished || entry.cwnd != 1200 || entry.ssthresh != tcpInitialSSThresh {
+		t.Fatalf("state=%d cwnd=%d ssthresh=%d", entry.state, entry.cwnd, entry.ssthresh)
+	}
+}
+
+func TestTCPPassiveCloseReleasesOrphan(t *testing.T) {
+	h := newHarness(t)
+	listener, _ := h.stack.TCPOpen(0)
+	if _, _, result := h.stack.TCPBind(0, listener, LoopbackAddress, 8091); result != ResultOK {
+		t.Fatal(result)
+	}
+	if result := h.stack.TCPListen(0, listener, 1); result != ResultOK {
+		t.Fatal(result)
+	}
+	var buffer [8]byte
+	for round := range 3 * MaxTCPEndpointsPerSession {
+		client, result := h.stack.TCPOpen(1)
+		if result != ResultOK {
+			t.Fatalf("round %d client open %d", round, result)
+		}
+		if _, result = h.stack.TCPConnect(1, client, LoopbackAddress, 8091, h.now); result != ResultOK {
+			t.Fatalf("round %d connect %d", round, result)
+		}
+		server, _, result := h.stack.TCPAccept(0, listener)
+		if result != ResultOK {
+			t.Fatalf("round %d accept %d", round, result)
+		}
+		h.stack.TCPShutdownWrite(1, client, h.now)
+		if _, result = h.stack.TCPRead(0, server, buffer[:], h.now); result != ResultEOF {
+			t.Fatalf("round %d EOF %d", round, result)
+		}
+		h.stack.TCPClose(0, server, h.now)
+		if state, _, _ := h.stack.TCPState(1, client); state != TCPTimeWait {
+			t.Fatalf("round %d client state %d", round, state)
+		}
+		if _, _, result = h.stack.TCPState(0, server); result != ResultInvalidArgument {
+			t.Fatalf("round %d server endpoint survived LAST-ACK", round)
+		}
+		h.stack.TCPClose(1, client, h.now)
+		if stats := h.stack.TCPStats(); stats.Endpoints != 1 {
+			t.Fatalf("round %d endpoints %d states %v", round, stats.Endpoints, stats.States)
+		}
+	}
+	if _, ok := h.stack.Deadline(); ok {
+		t.Fatal("released endpoints left a timer")
+	}
+}
+
+func TestTCPOrphanFinWait2TimesOut(t *testing.T) {
+	h := readyWithPeer(t)
+	id, entry := establishedWithPeer(t, h, 50012)
+	h.stack.TCPClose(0, id, h.now)
+	fin := h.tcpSent()
+	if len(fin) != 1 || fin[0].flags&tcpFlagFIN == 0 || entry.state != TCPFinWait1 {
+		t.Fatalf("FIN %+v state %d", fin, entry.state)
+	}
+	h.tcpFromPeer(entry, ackSegment(entry, entry.sndNxt, 1000))
+	if entry.state != TCPFinWait2 {
+		t.Fatalf("state %d", entry.state)
+	}
+	h.runUntil(h.now + h.stack.tuning.TCP.TimeWait)
+	if stats := h.stack.TCPStats(); stats.Endpoints != 0 {
+		t.Fatalf("orphan FIN-WAIT-2 kept %d endpoints", stats.Endpoints)
 	}
 }

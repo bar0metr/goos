@@ -42,7 +42,13 @@ timestamps, ECN or urgent-data delivery.
 Active and passive handshakes retransmit with bounded deadlines. Data is a byte
 stream. Writes copy as much as the send buffer can hold, and reads return any
 contiguous prefix. The sender limits flight by the smaller of the peer window
-and congestion window. The receiver advertises retained capacity, holds a
+and congestion window. The sender MSS is the smaller of the path MSS and the
+peer's MSS option. The initial congestion window follows RFC 6928:
+`min(10*SMSS, max(2*SMSS, 14600))`, or one segment after a retransmitted SYN
+or SYN+ACK. The peer window changes only under the RFC 9293 SND.WL1/SND.WL2
+rule, so an older segment that arrives late cannot replace a newer window. A
+segment that acknowledges unsent data draws an ACK and is dropped with its
+payload and FIN. The receiver advertises retained capacity, holds a
 bounded set of later segments, trims duplicates and overlaps, and ACKs the
 highest contiguous sequence.
 
@@ -58,6 +64,12 @@ defaults to 60 seconds and answers a retransmitted FIN. A valid RST refuses an
 active open or resets a synchronized connection. An in-window non-exact RST
 causes a rate-limited challenge ACK.
 
+`Close` on a synchronized connection removes it from the owner's view and
+leaves the stack to finish the close. The stack frees the endpoint when
+LAST-ACK receives its final ACK, when TIME_WAIT ends, or when FIN-WAIT-2 has
+waited for the TIME_WAIT interval. Until then it counts against the owner's
+endpoint limit.
+
 Loopback and the current `net0` address use the same TCP state machine without
 ARP or a driver. All of `127.0.0.0/8` works without a NIC. Replacing the
 configured address aborts external connections with `Reconfigured`; wildcard
@@ -71,7 +83,9 @@ one channel, four 4096-byte TX slots and eight 4096-byte RX slots. Its requests
 are `Open`, `Bind`, `Listen`, `Accept`, `Connect`, `Write`, `Read`,
 `ShutdownWrite`, `Close` and `Release`. Accept, Connect, Write and Read may be
 held until their result is known. A Write reply returns its TX slot on every
-result. A successful Read lends one RX slot until Release.
+result. A successful Read lends one RX slot until Release. A failed Open has
+no endpoint: its reply carries endpoint zero and the result, such as `Busy`
+when the session or the stack table is full.
 
 `userspace/tcpserve` owns deferred requests and pool transitions so host tests
 exercise the same service logic as `netd`. Malformed messages, stale endpoint
@@ -101,7 +115,10 @@ never exposes payload bytes.
 
 Host tests cover the parser, checksum, sequence arithmetic, loopback stream,
 half-close, endpoint generations, GTCP1 codecs, pool ownership and deferred
-service operations. Both attacker-controlled decoders are fuzz targets.
+service operations. Regression tests run Open exhaustion and repeated passive
+close through the real GTCP1 codec, check the initial window for MSS 536, 1200
+and 1460, and check future-ACK drops and window-update order across sequence
+wrap. Both attacker-controlled decoders are fuzz targets.
 `tools/netpeer` supplies deterministic closed-port, delayed-handshake,
 retransmission, FIN and RST behavior. The offline network VM gate exercises
 GTCP1 through PID 1 and `netd`, including remote, loopback, own-address and

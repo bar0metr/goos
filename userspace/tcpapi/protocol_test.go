@@ -42,6 +42,8 @@ func TestReplyRoundTrip(t *testing.T) {
 		{Opcode: OpWrite, Result: ResultBusy, Endpoint: 2, Slot: 1},
 		{Opcode: OpRead, Result: ResultOK, Endpoint: 2, Slot: 2, Length: 12},
 		{Opcode: OpRead, Result: ResultEOF, Endpoint: 2},
+		{Opcode: OpOpen, Result: ResultBusy},
+		{Opcode: OpOpen, Result: ResultInvalidArgument},
 	}
 	for _, reply := range replies {
 		var message ipc.Message
@@ -52,6 +54,21 @@ func TestReplyRoundTrip(t *testing.T) {
 		correlation, ok := DecodeReply(&message, &decoded)
 		if !ok || correlation != 7 || decoded != reply {
 			t.Fatalf("decode %+v %d %v", decoded, correlation, ok)
+		}
+	}
+}
+
+func TestReplyEndpointRules(t *testing.T) {
+	for _, reply := range []Reply{
+		{Opcode: OpOpen, Result: ResultOK},
+		{Opcode: OpOpen, Result: ResultBusy, Endpoint: 1},
+		{Opcode: OpBind, Result: ResultBusy},
+		{Opcode: OpRead, Result: ResultEOF},
+		{Opcode: OpWrite, Result: ResultBusy},
+	} {
+		var message ipc.Message
+		if EncodeReply(&reply, 7, &message) {
+			t.Fatalf("encoded %+v", reply)
 		}
 	}
 }

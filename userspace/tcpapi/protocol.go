@@ -145,8 +145,13 @@ func DecodeRequest(in *ipc.Message, out *Request) (uint64, bool) {
 	return in.Correlation, true
 }
 
+// validReply requires the request's endpoint, except that a failed Open has
+// no endpoint to name.
 func validReply(r *Reply) bool {
-	if r.Opcode < OpOpen || r.Opcode > lastOpcode || r.Opcode == OpRelease || r.Result > lastResult || r.Endpoint == 0 {
+	if r.Opcode < OpOpen || r.Opcode > lastOpcode || r.Opcode == OpRelease || r.Result > lastResult {
+		return false
+	}
+	if (r.Endpoint == 0) != (r.Opcode == OpOpen && r.Result != ResultOK) {
 		return false
 	}
 	if r.Opcode == OpWrite {
