@@ -89,7 +89,7 @@ func renewConfigGrants(spec *supervisor.LaunchSpec) bool {
 func configRestarted() {
 	for index := range sessions {
 		if sessions[index].active {
-			offerSettings(sessions[index].execServer, "", configproto.Read|configproto.Write)
+			offerSettings(sessions[index].execServer, "", configproto.Read|configproto.Write|configproto.HostsRead|configproto.HostsWrite)
 		}
 	}
 	offerSettings(uint64(logControl), logConfigScope, configproto.Read)

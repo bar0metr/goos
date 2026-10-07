@@ -156,7 +156,7 @@ func renewShellSession(terminal *terminalSession, spec *supervisor.LaunchSpec) b
 	// Configuration is optional, as it is at boot: a shell without a session
 	// keeps its built-in prompt rather than failing to start.
 	if _, granted := manager.Capability(terminal.shell, "config"); granted {
-		settings, ok := openConfigSession("", configproto.Read|configproto.Write)
+		settings, ok := openConfigSession("", configproto.Read|configproto.Write|configproto.HostsRead|configproto.HostsWrite)
 		if !ok || !renewGrant(spec, terminal.shell, "config", settings) {
 			if ok {
 				sys.HandleClose(settings)

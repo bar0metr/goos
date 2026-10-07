@@ -44,6 +44,13 @@ type Rights uint8
 const (
 	Read Rights = 1 << iota
 	Write
+	// HostsRead and HostsWrite govern the hosts table (GHST), which is not
+	// part of the key namespace and so is not covered by Read and Write or
+	// limited by a scope.
+	HostsRead
+	HostsWrite
+
+	allRights = Read | Write | HostsRead | HostsWrite
 )
 
 // Scope is the namespace prefix a session is confined to. An empty scope sees

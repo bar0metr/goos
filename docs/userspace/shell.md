@@ -17,14 +17,17 @@ words in it is bounded only by its length (ADR 0109). Runtime allocation
 remains confined to the fixed userspace arena.
 
 The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`,
-`config`, `log`, `jobs`, `kill`, `reboot`, `diag`, and `time`. Every command,
+`config`, `hosts`, `log`, `jobs`, `kill`, `reboot`, `diag`, and `time`. Every command,
 builtin or executable, is documented in one table in `userspace/shell`: `help`
 lists them with a summary, `help NAME` and `NAME --help` print the synopsis, and
 a command given the wrong number of arguments prints `usage: ...` instead of
 running (ADR 0079). `services` and `reboot` are requests to PID 1
 over the control protocol on the exec channel. `handles` and `caps` list the
 shell's own handle table, raw and under its startup names. `log` prints the
-system log (ADRs 0059 and 0061). `diag`, in a `goos_diag` build, asks PID 1 to
+system log (ADRs 0059 and 0061). `config` and `hosts` use the shell's
+configuration session: `hosts` lists the hosts table, and `hosts get NAME`,
+`hosts set IPV4 NAME` and `hosts remove NAME` read and change one record
+([configuration](configuration.md#hosts)). `diag`, in a `goos_diag` build, asks PID 1 to
 have the kernel dump its state to the console, since the shell cannot write the
 console itself. `clear` emits ANSI terminal control. `time` prefixes a whole command line, runs it through
 the normal path, and prints the elapsed time from the kernel's nanosecond

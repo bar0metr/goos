@@ -108,6 +108,8 @@ func executeCommand(line []byte) {
 		printLog()
 	case "config":
 		runConfig(invocation)
+	case "hosts":
+		runHosts(invocation)
 	case "services":
 		printServices()
 	case "jobs":
