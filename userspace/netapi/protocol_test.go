@@ -135,7 +135,8 @@ func TestRequestOpcodeAttribution(t *testing.T) {
 func replies() []Reply {
 	return []Reply{
 		{Opcode: OpStatus, State: StateReady, Mode: ModeStatic, Local: local, Gateway: gateway, MAC: station,
-			Prefix: 24, Link: LinkUp, Lease: 86400, RX: 1, TX: 2, Drop: 3, Malformed: ^uint64(0)},
+			Prefix: 24, Link: LinkUp, Lease: 86400, RX: 1, TX: 2, Drop: 3, Malformed: ^uint64(0), MTU: 1500},
+		{Opcode: OpStatus, State: StateConfiguring, Link: LinkUp, MTU: 576, Fallback: true},
 		{Opcode: OpStatus},
 		{Opcode: OpStatus, Result: ResultPermissionDenied},
 		{Opcode: OpStatus, State: StateFailed, Prefix: MaxPrefix},
@@ -146,6 +147,7 @@ func replies() []Reply {
 		{Opcode: OpEcho, Result: ResultInvalidArgument},
 		{Opcode: OpReload},
 		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldGateway},
+		{Opcode: OpReload, Result: ResultConfigInvalid, Field: FieldProbeInterval},
 		{Opcode: OpReload, Result: ResultConfigInvalid},
 		{Opcode: OpReload, Result: ResultPermissionDenied},
 	}
@@ -183,6 +185,9 @@ func TestReplyFieldUsage(t *testing.T) {
 		{Opcode: OpEcho},
 		{Opcode: OpEcho, Responder: gateway, State: StateReady},
 		{Opcode: OpEcho, Responder: gateway, Lease: 1},
+		{Opcode: OpEcho, Responder: gateway, MTU: 1500},
+		{Opcode: OpReload, Fallback: true},
+		{Opcode: OpStatus, Result: ResultBusy, MTU: 1500},
 		{Opcode: OpEcho, Responder: gateway, Field: FieldMode},
 		{Opcode: OpEcho, Result: ResultTimeout, Responder: gateway},
 		{Opcode: OpEcho, Result: ResultTimeout, RTT: 1},
@@ -207,18 +212,20 @@ func TestReplyFieldUsage(t *testing.T) {
 func TestReplyUnusedBytes(t *testing.T) {
 	statusUsed := span(2, 12)
 	statusUsed = append(statusUsed, span(24, 40)...)
-	statusUsed = append(statusUsed, span(44, 76)...)
+	statusUsed = append(statusUsed, span(44, 79)...)
 	used := map[int][]int{
 		0:  statusUsed,
 		1:  statusUsed,
-		3:  statusUsed,
-		4:  append(span(12, 24), 40, 41),
-		5:  {40, 41},
-		6:  append(span(12, 16), 40, 41),
+		2:  statusUsed,
+		4:  statusUsed,
+		5:  append(span(12, 24), 40, 41),
+		6:  {40, 41},
 		7:  append(span(12, 16), 40, 41),
-		8:  {40, 41},
-		10: {42},
+		8:  append(span(12, 16), 40, 41),
+		9:  {40, 41},
 		11: {42},
+		12: {42},
+		13: {42},
 	}
 	for index, reply := range replies() {
 		mask := [ReplySize]bool{0: true, 1: true}
@@ -294,6 +301,12 @@ func TestReplyRejects(t *testing.T) {
 	if DecodeReply(&wire, 7, OpReload, &decoded) {
 		t.Fatal("accepted unknown field")
 	}
+	wire.Payload[42] = 0
+	wire.Payload[0], wire.Payload[1] = byte(OpStatus), byte(ResultOK)
+	wire.Payload[78] = 2
+	if DecodeReply(&wire, 7, OpStatus, &decoded) {
+		t.Fatal("accepted a fallback flag other than 0 or 1")
+	}
 }
 
 func TestSaturatingAdd(t *testing.T) {
@@ -323,7 +336,17 @@ func TestText(t *testing.T) {
 		t.Fatal("enum text")
 	}
 	keys := map[Field]string{FieldNone: "", FieldMode: "system.net.mode", FieldAddress: "system.net.ipv4.address",
-		FieldPrefix: "system.net.ipv4.prefix", FieldGateway: "system.net.ipv4.gateway", lastField + 1: ""}
+		FieldPrefix: "system.net.ipv4.prefix", FieldGateway: "system.net.ipv4.gateway",
+		FieldTTL: "system.net.ipv4.default-ttl", FieldDHCPMaxRetry: "system.net.dhcp.max-retry-ms",
+		FieldProbeInterval: "system.net.ipv4.probe-interval-ms", lastField + 1: ""}
+	seen := map[string]bool{}
+	for field := FieldMode; field <= lastField; field++ {
+		key := field.Key()
+		if len(key) < len("system.net.") || key[:len("system.net.")] != "system.net." || seen[key] {
+			t.Fatalf("field %d key %q", field, key)
+		}
+		seen[key] = true
+	}
 	for field, key := range keys {
 		if field.Key() != key {
 			t.Fatalf("field %d key %q", field, field.Key())

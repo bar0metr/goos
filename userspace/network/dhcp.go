@@ -47,13 +47,8 @@ const (
 	overloadBoth       = 3
 	infiniteLease      = 0xffffffff
 	minLeaseSeconds    = 30
-	dhcpInitialBackoff = 4 * second
-	dhcpMaxBackoff     = 64 * second
 	dhcpJitter         = second
 	dhcpRequestRetries = 4
-	// dhcpDeclineWait is the RFC 2131 minimum before trying again after a
-	// conflict.
-	dhcpDeclineWait = 10 * second
 	// dhcpMinRetry is the RFC 2131 floor on RENEW and REBIND retransmission.
 	dhcpMinRetry = 60 * second
 )
@@ -307,16 +302,18 @@ func (message *dhcpMessage) validLease() (dhcpLease, bool) {
 	return lease, true
 }
 
-// jitter spreads retransmissions by up to one second either way. Every base
-// is at least four seconds, so the result is always in the future.
+// jitter spreads retransmissions by up to one second either way, and by at
+// most half the base below two seconds, so the result is always at least half
+// the base and never now.
 func (stack *Stack) jitter(base uint64) uint64 {
-	return base - dhcpJitter + stack.next()%(2*dhcpJitter+1)
+	spread := min(uint64(dhcpJitter), base/2)
+	return base - spread + stack.next()%(2*spread+1)
 }
 
 func (stack *Stack) newTransaction(now uint64) {
 	stack.dhcp.xid = uint32(stack.next())
 	stack.dhcp.started = now
-	stack.dhcp.backoff = dhcpInitialBackoff
+	stack.dhcp.backoff = stack.tuning.DHCPInitialRetry
 	stack.dhcp.retries = 0
 }
 
@@ -369,7 +366,7 @@ func (stack *Stack) advanceDHCP(now uint64) {
 	client := &stack.dhcp
 	switch client.phase {
 	case dhcpSelecting:
-		client.backoff = nextBackoff(client.backoff)
+		client.backoff = nextBackoff(client.backoff, stack.tuning.DHCPMaxRetry)
 		stack.sendDiscover(now)
 	case dhcpRequesting:
 		client.retries++
@@ -377,7 +374,7 @@ func (stack *Stack) advanceDHCP(now uint64) {
 			stack.startDiscovery(now)
 			return
 		}
-		client.backoff = nextBackoff(client.backoff)
+		client.backoff = nextBackoff(client.backoff, stack.tuning.DHCPMaxRetry)
 		stack.sendSelectingRequest(now)
 	case dhcpBound, dhcpRenewing, dhcpRebinding:
 		stack.leaseTimers(now)
@@ -386,9 +383,11 @@ func (stack *Stack) advanceDHCP(now uint64) {
 	}
 }
 
-func nextBackoff(backoff uint64) uint64 {
-	if backoff >= dhcpMaxBackoff/2 {
-		return dhcpMaxBackoff
+// nextBackoff doubles the base up to ceiling. A base already above a ceiling
+// lowered by a reload drops to it.
+func nextBackoff(backoff, ceiling uint64) uint64 {
+	if backoff >= ceiling/2 {
+		return ceiling
 	}
 	return backoff * 2
 }
@@ -444,7 +443,7 @@ func (stack *Stack) dhcpProbePassed(candidate IPv4, now uint64) {
 func (stack *Stack) dhcpDecline(candidate IPv4, now uint64) {
 	stack.sendDHCP(dhcpOutgoing{kind: dhcpDecline, requested: candidate, server: stack.dhcp.lease.server}, now)
 	stack.dhcp.phase = dhcpBackoff
-	stack.dhcp.deadline = addTime(now, dhcpDeclineWait)
+	stack.dhcp.deadline = addTime(now, stack.tuning.DHCPConflictRetry)
 }
 
 func (stack *Stack) receiveDHCP(source MAC, data []byte, now uint64) {
@@ -481,7 +480,7 @@ func (stack *Stack) receiveOffer(message dhcpMessage, now uint64) {
 	client := &stack.dhcp
 	client.phase = dhcpRequesting
 	client.lease = lease
-	client.backoff = dhcpInitialBackoff
+	client.backoff = stack.tuning.DHCPInitialRetry
 	client.retries = 0
 	stack.sendSelectingRequest(now)
 }
@@ -599,17 +598,23 @@ func (stack *Stack) sendDHCP(outgoing dhcpOutgoing, now uint64) {
 	if outgoing.kind != dhcpDecline {
 		at = putOption(options, at, optionParameters, dhcpParameterList[:])
 		options[at], options[at+1] = optionMaxMessage, 2
-		binary.BigEndian.PutUint16(options[at+2:at+4], MTU)
+		binary.BigEndian.PutUint16(options[at+2:at+4], stack.maxMessage())
 		at += 4
 	}
 	options[at] = optionEnd
 
 	putUDP(frame[udpAt:], outgoing.client, outgoing.destination, portClient, portServer, dhcpMinimumSize)
 	stack.identification++
-	putIPv4Header(frame[HeaderSize:], outgoing.client, outgoing.destination, protocolUDP, stack.identification,
+	putIPv4Header(frame[HeaderSize:], stack.tuning.TTL, outgoing.client, outgoing.destination, protocolUDP, stack.identification,
 		udpHeaderSize+dhcpMinimumSize)
 	putEthernet(frame, outgoing.link, stack.mac, etherTypeIPv4)
 	stack.commitFrame(dhcpAt + dhcpMinimumSize)
+}
+
+// maxMessage is the Maximum DHCP Message Size to advertise: the link MTU,
+// which LinkUp keeps between the RFC 2132 floor of 576 and MTU.
+func (stack *Stack) maxMessage() uint16 {
+	return min(max(stack.mtu, minMTU), MTU)
 }
 
 // putOption writes one option at offset at. The options this client sends

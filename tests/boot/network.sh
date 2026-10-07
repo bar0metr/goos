@@ -6,9 +6,11 @@
 #      gateway, a killed and replaced driver, and resource counts that do not
 #      grow;
 #   2. two guests on one private stream backend with static addresses, each
-#      answering the other's echo requests;
-#   3. one guest without a network function: storage and the shell work, net
-#      status says down, and ping fails within its deadline.
+#      answering the other's echo requests, and a reload of tuning settings
+#      that applies a valid candidate and refuses an invalid one by key;
+#   3. one guest without a network function and with an invalid stored
+#      setting: storage and the shell work, net status says down and reports
+#      the built-in defaults, and ping fails within its deadline.
 #
 #   tests/boot/network.sh ISO OVMF_CODE
 set -eu
@@ -79,12 +81,16 @@ require() { # name pattern log
 }
 
 # disk makes a disposable disk, optionally with network settings stored in
-# the configuration file the configuration service restores at boot.
-disk() { # name [address]
+# the configuration file the configuration service restores at boot: a
+# static address, and one more stored line.
+disk() { # name [address] [line]
 	rm -rf "$work/tree-$1"
 	cp -R "$tree" "$work/tree-$1"
 	if [ -n "${2:-}" ]; then
 		printf 'system.net.mode text static\nsystem.net.ipv4.address text %s\nsystem.net.ipv4.prefix uint 24\nsystem.net.ipv4.gateway text 0.0.0.0\n' "$2" >"$work/tree-$1/state/config"
+	fi
+	if [ -n "${3:-}" ]; then
+		printf '%s\n' "$3" >>"$work/tree-$1/state/config"
 	fi
 	go run ./tools/mkfat32 -new -tree "$work/tree-$1" "$work/$1.img"
 }
@@ -169,6 +175,8 @@ require_after user.mode 'net status' '^mode: dhcp$' "$log"
 require_after user.address 'net status' '^address: 10\.0\.2\.[0-9]*/24$' "$log"
 require_after user.gateway 'net status' '^gateway: 10\.0\.2\.2$' "$log"
 require_after user.lease 'net status' '^lease: [0-9]* s$' "$log"
+require_after user.mtu 'net status' '^mtu: 1500$' "$log"
+forbid_after user.settings 'net status' '^settings:' "$log"
 for command in 'ping -c 4 -W 1000 10.0.2.2' 'ping -c 4 -W 1000 10.0.2.2 ' 'ping -c 4 -W 1000  10.0.2.2' 'ping -c 4 -W 1000   10.0.2.2'; do
 	for sequence in 1 2 3 4; do
 		require_after "user.reply.$sequence" "$command" "^40 bytes from 10\\.0\\.2\\.2: seq=$sequence time=[0-9]*\\.[0-9][0-9][0-9] ms$" "$log"
@@ -220,6 +228,15 @@ sleep 2
 type_line 3 'ping -c 4 192.0.2.11'
 type_line 4 'ping -c 4 192.0.2.10'
 sleep 8
+type_line 3 'config set system.net.ipv4.default-ttl 18446744073709551616'
+type_line 3 'config set system.net.ipv4.default-ttl 128'
+type_line 3 'config set system.net.arp.resolve-attempts 5'
+type_line 3 'net reload'
+type_line 3 'config set system.net.dhcp.initial-retry-ms 30000'
+type_line 3 'config set system.net.dhcp.max-retry-ms 10000'
+type_line 3 'net reload '
+type_line 3 'ping -c 2 192.0.2.11'
+sleep 3
 type_line 3 'net status'
 type_line 4 'net status'
 stop 3 "$left"
@@ -233,6 +250,11 @@ require_after right.summary 'ping -c 4 192.0.2.10' '^4 sent, 4 received, 0% lost
 require_after left.static 'net status' '^mode: static$' "$left"
 require_after left.address 'net status' '^address: 192\.0\.2\.10/24$' "$left"
 require_after right.gateway 'net status' '^gateway: none$' "$right"
+require_after left.overflow 'config set system.net.ipv4.default-ttl 18446744073709551616' '^config: value does not match the declared type$' "$left"
+require_after left.reload 'net reload' '^network configuration applied$' "$left"
+require_after left.refused 'net reload ' 'invalid setting system\.net\.dhcp\.max-retry-ms; previous configuration kept' "$left"
+require_after left.after-reload 'ping -c 2 192.0.2.11' '^2 sent, 2 received, 0% lost$' "$left"
+require_after left.mode-kept 'net status' '^state: ready$' "$left"
 printf 'PASS stream backend (%s, %s)\n' "$left" "$right"
 fi
 
@@ -240,13 +262,14 @@ fi
 
 if wants none; then
 
-disk none
+disk none '' 'system.net.ipv4.probe-count uint 0'
 log=$logs/network-none.log
 start none 3
 wait_for 'goos> ' 90 "$log"
 sleep 3
 type_line 3 'cat /system/motd'
 type_line 3 'net status'
+type_line 3 'net reload'
 type_line 3 'ping -c 1 -W 500 10.0.2.2'
 sleep 3
 stop 3 "$log"
@@ -254,6 +277,8 @@ require none.absent 'Network: no legacy virtio-net device' "$log"
 require none.normal BOOT_MODE_NORMAL "$log"
 require_after none.storage 'cat /system/motd' '^Welcome to GoOS$' "$log"
 require_after none.down 'net status' '^state: down$' "$log"
+require_after none.fallback 'net status' '^settings: built-in defaults' "$log"
+require_after none.refused 'net reload' 'invalid setting system\.net\.ipv4\.probe-count; previous configuration kept' "$log"
 require_after none.ping 'ping -c 1 -W 500 10.0.2.2' '^seq=1: ' "$log"
 require_after none.ping-summary 'ping -c 1 -W 500 10.0.2.2' '^1 sent, 0 received, 100% lost$' "$log"
 require_after none.ping-exit 'ping -c 1 -W 500 10.0.2.2' '^exit status: 1$' "$log"

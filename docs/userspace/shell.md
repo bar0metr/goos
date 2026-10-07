@@ -171,8 +171,10 @@ usage error or when the network service is unavailable.
 
 `net status` prints the interface: `state` (`down`, `configuring`, `ready` or
 `failed`), `link`, `mac`, `mode`, `address` with its prefix or `none`,
-`gateway` or `none`, `lease` in seconds while a DHCP lease runs, and the
-`frames` counters for received, transmitted, dropped and malformed frames.
+`gateway` or `none`, `mtu` while a link is up, `lease` in seconds while a DHCP
+lease runs, and the `frames` counters for received, transmitted, dropped and
+malformed frames. A `settings` line appears when the service runs on built-in
+defaults because the stored settings were unreadable or invalid at startup.
 `net reload` asks the service to apply the `system.net.*` settings; see
 [configuration](configuration.md#network).
 

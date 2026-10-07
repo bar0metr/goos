@@ -15,11 +15,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-network` builds the validation ISO and system tree and runs
-  `tests/boot/network.sh`, the network gate (ADR 0190, ADR 0191). Each
+  `tests/boot/network.sh`, the network gate (ADR 0190 to ADR 0192). Each
   scenario boots from its own disposable disk with the NIC at PCI slot 4:
   - `user`: QEMU user networking. DHCP must reach ready on `10.0.2.x` within
     15 seconds of the prompt, and `net status` must show the state, link,
-    MAC, mode, address, gateway `10.0.2.2` and lease. Four rounds of
+    MAC, mode, address, gateway `10.0.2.2`, lease and `mtu: 1500`, and no
+    `settings` fallback line. Four rounds of
     `ping -c 4 -W 1000 10.0.2.2` must each print a reply for every sequence
     number and `4 sent, 4 received, 0% lost`. Between rounds `fault
     net-driver` kills the driver twice; a file written before the first
@@ -31,10 +32,16 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   - `stream`: two guests on one QEMU `stream` backend over a Unix socket,
     with static `192.0.2.10/24` and `192.0.2.11/24` stored in their
     configuration files and no gateway. Each pings the other four times and
-    must get every reply; `net status` must show static mode, the address,
+    must get every reply. The first guest then sets a TTL and an ARP attempt
+    count and must see `net reload` apply them; it must see `config set`
+    refuse a 20-digit TTL above the `uint64` maximum, and a second reload
+    refuse `max-retry-ms` below `initial-retry-ms` by that key. Two more pings
+    must succeed after it. `net status` must show static mode, the address,
     and no gateway.
-  - `none`: no NIC. The guest must reach normal mode and read
-    `/system/motd`; `net status` must say `down`, and `ping -c 1 -W 500`
+  - `none`: no NIC, and a stored `system.net.ipv4.probe-count` of 0. The
+    guest must reach normal mode and read `/system/motd`; `net status` must
+    say `down` and print the `settings: built-in defaults` line, `net
+    reload` must refuse the probe count by key, and `ping -c 1 -W 500`
     must print a failed sequence, `1 sent, 0 received, 100% lost`, and exit
     status 1.
 

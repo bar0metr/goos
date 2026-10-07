@@ -10,9 +10,6 @@ const (
 	// DHCP assumes.
 	minMTU = 576
 
-	probeCount    = 2
-	probeInterval = 500 * millisecond
-
 	maxCounter = ^uint64(0)
 )
 
@@ -26,6 +23,8 @@ type Snapshot struct {
 	Address IPv4
 	Prefix  uint8
 	Gateway IPv4
+	// MTU is the largest IPv4 datagram the link carries, zero without a link.
+	MTU uint16
 	// LeaseRemaining is in whole seconds and is zero outside a DHCP lease.
 	LeaseRemaining uint64
 	RX             uint64
@@ -41,21 +40,26 @@ type probe struct {
 	candidate IPv4
 	sent      uint8
 	deadline  uint64
+	// count and interval are the tuning the probe started with.
+	count    uint8
+	interval uint64
 }
 
 // Stack is the whole state of one interface. It holds no pointers and every
 // table and the transmit ring are fixed arrays, so a service can keep one in
 // static storage.
 //
-// Before any address goes live, DHCP or static, the stack sends two ARP probes
-// 500 ms apart and waits 500 ms after the second. A DHCP conflict declines the
-// lease and retries discovery after 10 s. A static conflict leaves the stack
-// Failed until the next Configure or LinkUp.
+// Before any address goes live, DHCP or static, the stack sends ARP probes
+// (two by default, 500 ms apart) and waits one more interval after the last.
+// A DHCP conflict declines the lease and retries discovery after the conflict
+// delay (10 s by default). A static conflict leaves the stack Failed until the
+// next Configure or LinkUp.
 type Stack struct {
 	random     uint64
 	state      State
 	failResult Result
 	config     Config
+	tuning     Tuning
 	link       bool
 	mac        MAC
 	mtu        uint16
@@ -73,7 +77,7 @@ type Stack struct {
 	rx, tx, drop, malformed uint64
 
 	replyWindow uint64
-	replyCount  uint8
+	replyCount  uint16
 
 	neighbors   [MaxNeighbors]neighbor
 	resolutions [MaxResolutions]resolution
@@ -87,7 +91,8 @@ type Stack struct {
 	txCount int
 }
 
-// Init resets the stack to Down with the default DHCP configuration. Fields are
+// Init resets the stack to Down with the default DHCP configuration and
+// tuning. Fields are
 // reset one by one: a literal of the whole struct would be a temporary larger
 // than TinyGo keeps off the heap.
 func (stack *Stack) Init(seed uint64) {
@@ -95,6 +100,7 @@ func (stack *Stack) Init(seed uint64) {
 	stack.state = StateDown
 	stack.failResult = ResultOK
 	stack.config = Config{Mode: ModeDHCP}
+	stack.tuning = DefaultTuning()
 	stack.link = false
 	stack.mac = MAC{}
 	stack.mtu = 0
@@ -186,6 +192,23 @@ func (stack *Stack) Fail(now uint64) {
 	stack.failResult = ResultDriverFault
 }
 
+// Apply validates a configuration and a tuning together and applies both, or
+// neither: an invalid value in either changes nothing. A tuning change alone
+// restarts nothing; see Tuning for when each value takes effect.
+func (stack *Stack) Apply(config Config, tuning Tuning, now uint64) Field {
+	if field := config.Validate(); field != FieldNone {
+		return field
+	}
+	if field := tuning.Validate(); field != FieldNone {
+		return field
+	}
+	stack.tuning = tuning
+	return stack.Configure(config, now)
+}
+
+// Tuning returns the policy in use.
+func (stack *Stack) Tuning() Tuning { return stack.tuning }
+
 // Configure validates and applies a configuration in one step. An invalid one
 // changes nothing. A new mode or address discards neighbours and fails
 // pending echoes with ResultReconfigured; a static prefix or gateway change on
@@ -257,7 +280,8 @@ func (stack *Stack) applyAddress(address IPv4, prefix uint8, gateway IPv4) {
 }
 
 func (stack *Stack) startProbe(candidate IPv4, now uint64) {
-	stack.probe = probe{active: true, candidate: candidate}
+	stack.probe = probe{active: true, candidate: candidate, count: stack.tuning.ProbeCount,
+		interval: stack.tuning.ProbeInterval}
 	stack.sendProbe(now)
 }
 
@@ -270,11 +294,11 @@ func (stack *Stack) sendProbe(now uint64) {
 		targetIP:  stack.probe.candidate,
 	})
 	stack.probe.sent++
-	stack.probe.deadline = addTime(now, probeInterval)
+	stack.probe.deadline = addTime(now, stack.probe.interval)
 }
 
 func (stack *Stack) advanceProbe(now uint64) {
-	if stack.probe.sent < probeCount {
+	if stack.probe.sent < stack.probe.count {
 		stack.sendProbe(now)
 		return
 	}
@@ -488,6 +512,7 @@ func (stack *Stack) Snapshot(now uint64) Snapshot {
 		Address:   stack.address,
 		Prefix:    stack.prefix,
 		Gateway:   stack.gateway,
+		MTU:       stack.mtu,
 		RX:        stack.rx,
 		TX:        stack.tx,
 		Drop:      stack.drop,

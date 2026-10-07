@@ -62,7 +62,7 @@ func ParseEntry(line []byte) ([]byte, Value, bool) {
 		}
 		return nil, Value{}, false
 	case equal(kind, []byte("uint")):
-		number, ok := parseUint(rest)
+		number, ok := ParseUint(rest)
 		if !ok {
 			return nil, Value{}, false
 		}
@@ -109,7 +109,9 @@ func appendUint(target []byte, value uint64) []byte {
 	return target
 }
 
-func parseUint(text []byte) (uint64, bool) {
+// ParseUint reads up to 20 decimal digits and refuses any value above the
+// uint64 maximum rather than letting it wrap.
+func ParseUint(text []byte) (uint64, bool) {
 	if len(text) == 0 || len(text) > 20 {
 		return 0, false
 	}

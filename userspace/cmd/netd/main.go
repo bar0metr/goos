@@ -28,8 +28,10 @@ const (
 	// idleWait bounds a wait with no timer due, so a lost wake costs
 	// seconds rather than the service.
 	idleWait = 30 * clock.TicksPerSecond
-	// configDeadline bounds one configuration exchange.
+	// configDeadline bounds one configuration exchange and configBudget the
+	// whole read of a candidate.
 	configDeadline = 2 * clock.TicksPerSecond
+	configBudget   = 5 * clock.TicksPerSecond
 	nanosPerTick   = 1_000_000_000 / clock.TicksPerSecond
 	exitFailed     = 1
 )
@@ -89,6 +91,9 @@ var (
 	reportedState  network.State
 	readyAnnounced bool
 	stateAnnounced bool
+	// fallback is set while the stack runs on built-in defaults because the
+	// stored settings could not be read or applied at startup.
+	fallback bool
 )
 
 //export userspaceMain
@@ -107,10 +112,19 @@ func userspaceMain() {
 	configHandle, _ = data.Handle("config")
 	now := clockNanos()
 	stack.Init(now ^ uint64(controlHandle)<<17)
-	if candidate, field, read := readConfig(); !read {
-		syslog.Warn("network settings unavailable; using DHCP")
-	} else if field != network.FieldNone || stack.Configure(candidate, now) != network.FieldNone {
-		syslog.Warn("network settings invalid; using DHCP", syslog.Str("key", netapi.Field(field).Key()))
+	// Defaults stay in force when the stored settings are missing or invalid.
+	// The stored values are left alone: net status reports the fallback, and
+	// a reload applies the settings once they are fixed.
+	candidate, tuning, field, read := readConfig()
+	if read && field == network.FieldNone {
+		field = stack.Apply(candidate, tuning, now)
+	}
+	if !read {
+		fallback = true
+		syslog.Warn("network settings unavailable; using built-in defaults")
+	} else if field != network.FieldNone {
+		fallback = true
+		syslog.Warn("network settings invalid; using built-in defaults", syslog.Str("key", netapi.Field(field).Key()))
 	}
 	mark("NETD_STARTED_OK\n")
 	serve()
@@ -525,7 +539,8 @@ func handleRequest(index int, correlation uint64) {
 		answer = netapi.Reply{Opcode: netapi.OpStatus, Result: netapi.ResultOK, State: netapi.State(snapshot.State),
 			Mode: netapi.Mode(snapshot.Mode), Local: snapshot.Address, Gateway: snapshot.Gateway, MAC: snapshot.MAC,
 			Prefix: snapshot.Prefix, Lease: snapshot.LeaseRemaining,
-			RX: snapshot.RX, TX: snapshot.TX, Drop: snapshot.Drop, Malformed: snapshot.Malformed}
+			RX: snapshot.RX, TX: snapshot.TX, Drop: snapshot.Drop, Malformed: snapshot.Malformed,
+			MTU: snapshot.MTU, Fallback: fallback}
 		if snapshot.Link {
 			answer.Link = netapi.LinkUp
 		}
@@ -552,9 +567,9 @@ func handleRequest(index int, correlation uint64) {
 			return
 		}
 		answer = netapi.Reply{Opcode: netapi.OpReload, Result: netapi.ResultOK}
-		candidate, field, read := readConfig()
+		candidate, tuning, field, read := readConfig()
 		if read && field == network.FieldNone {
-			field = stack.Configure(candidate, now)
+			field = stack.Apply(candidate, tuning, now)
 		}
 		if !read {
 			answer.Result, answer.Field = netapi.ResultConfigInvalid, netapi.FieldNone
@@ -562,6 +577,7 @@ func handleRequest(index int, correlation uint64) {
 			answer.Result, answer.Field = netapi.ResultConfigInvalid, netapi.Field(field)
 			syslog.Warn("network settings refused", syslog.Str("key", netapi.Field(field).Key()))
 		} else {
+			fallback = false
 			syslog.Info("network settings applied")
 		}
 		send(current, correlation)
@@ -598,52 +614,85 @@ func deliverCompletions() {
 
 // --- configuration ----------------------------------------------------------
 
-var configKeys = [...]string{"system.net.mode", "system.net.ipv4.address", "system.net.ipv4.prefix", "system.net.ipv4.gateway"}
+// settingCount is every network setting: the four address keys, then the
+// tuning keys. Setting index i is reported as field i+1, whose Key names it.
+const settingCount = int(network.FieldGateway) + network.TuningFields
 
-// readConfig reads the four settings and parses them as one candidate. It
-// reports false when the configuration service could not be asked.
-func readConfig() (network.Config, network.Field, bool) {
+// settings holds one candidate while it is read. It is static because each
+// value carries a text buffer.
+var (
+	settings [settingCount]config.Value
+	tuningIn [network.TuningFields]uint64
+)
+
+// readConfig reads every network setting and parses them as one candidate.
+// It reports false when the configuration service could not be asked. The
+// whole read shares one deadline, so a stalled service delays a reload by
+// seconds, not by seconds per key.
+func readConfig() (network.Config, network.Tuning, network.Field, bool) {
 	if configHandle == 0 {
-		return network.Config{}, network.FieldNone, false
+		return network.Config{}, network.Tuning{}, network.FieldNone, false
 	}
-	var values [len(configKeys)]config.Value
-	for index, key := range configKeys {
-		value, ok := getSetting(key)
-		if !ok {
-			return network.Config{}, network.FieldNone, false
+	deadline := clockNanos() + configBudget*nanosPerTick
+	for index := range settings {
+		field := netapi.Field(index + 1)
+		if !getSetting(field.Key(), deadline, &settings[index]) {
+			return network.Config{}, network.Tuning{}, network.FieldNone, false
 		}
-		values[index] = value
+		want := config.KindUint
+		if field == netapi.FieldMode || field == netapi.FieldAddress || field == netapi.FieldGateway {
+			want = config.KindText
+		}
+		if settings[index].Kind != want {
+			return network.Config{}, network.Tuning{}, network.Field(field), true
+		}
 	}
-	if values[0].Kind != config.KindText || values[1].Kind != config.KindText || values[2].Kind != config.KindUint || values[3].Kind != config.KindText {
-		return network.Config{}, network.FieldMode, true
+	candidate, field := network.ParseConfig(settings[network.FieldMode-1].Bytes(), settings[network.FieldAddress-1].Bytes(),
+		settings[network.FieldPrefix-1].Uint, settings[network.FieldGateway-1].Bytes())
+	if field != network.FieldNone {
+		return network.Config{}, network.Tuning{}, field, true
 	}
-	candidate, field := network.ParseConfig(values[0].Bytes(), values[1].Bytes(), values[2].Uint, values[3].Bytes())
-	return candidate, field, true
+	for index := range tuningIn {
+		tuningIn[index] = settings[int(network.FieldTTL)-1+index].Uint
+	}
+	tuning, field := network.ParseTuning(&tuningIn)
+	return candidate, tuning, field, true
 }
 
-func getSetting(key string) (config.Value, bool) {
+// getSetting reads one key into value, waiting at most configDeadline and
+// never past deadline, a clock time in nanoseconds.
+func getSetting(key string, deadline uint64, value *config.Value) bool {
+	now := clockNanos()
+	if now >= deadline {
+		return false
+	}
+	wait := min((deadline-now)/nanosPerTick, uint64(configDeadline))
+	if wait == 0 {
+		wait = 1
+	}
 	configSequence++
 	request, ok := config.EncodeRequest(config.Request{Operation: config.OperationGet, Key: sys.Bytes(key)}, configSequence)
 	if !ok {
-		return config.Value{}, false
+		return false
 	}
 	size, ok := ipc.Encode(request, configWire[:])
 	if !ok || sys.IPCSend(configHandle, configWire[:size]) != kcall.StatusOK {
-		return config.Value{}, false
+		return false
 	}
-	if sys.IPCWaitReceive(configHandle, configWire[:], configDeadline) != kcall.StatusOK {
-		return config.Value{}, false
+	if sys.IPCWaitReceive(configHandle, configWire[:], wait) != kcall.StatusOK {
+		return false
 	}
 	payloadSize := int(configWire[24]) | int(configWire[25])<<8
 	received, valid := ipc.Decode(configWire[:ipc.WireHeaderSize+payloadSize+int(configWire[26])*8])
 	if !valid || received.Correlation != configSequence {
-		return config.Value{}, false
+		return false
 	}
 	got, valid := config.DecodeReply(received)
 	if !valid || got.Operation != config.OperationGet || got.Status != config.StatusOK {
-		return config.Value{}, false
+		return false
 	}
-	return got.Value, true
+	*value = got.Value
+	return true
 }
 
 // --- reporting ---------------------------------------------------------------

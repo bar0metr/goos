@@ -12,8 +12,6 @@ const (
 
 	echoTokenSize = 8
 	echoFrameSize = HeaderSize + ipv4HeaderSize + icmpHeaderSize + EchoPayload
-
-	maxRepliesPerSecond = 20
 )
 
 type echoPhase uint8
@@ -171,7 +169,7 @@ func (stack *Stack) sendEcho(number int, mac MAC, now uint64) {
 	}
 	putICMPEcho(message, icmpEchoRequest, session.identifier, session.sequence, data)
 	stack.identification++
-	putIPv4Header(frame[HeaderSize:], session.local, session.destination, protocolICMP, stack.identification,
+	putIPv4Header(frame[HeaderSize:], stack.tuning.TTL, session.local, session.destination, protocolICMP, stack.identification,
 		icmpHeaderSize+EchoPayload)
 	stack.commitFrame(echoFrameSize)
 }
@@ -316,7 +314,8 @@ func (stack *Stack) matchError(packet ipv4Packet, message icmpMessage, result Re
 
 // answerEcho replies to the frame's sender directly, which is the right next
 // hop whether the requester is on the link or behind a router. The reply rate
-// is capped per one-second window so a flood cannot fill the transmit ring.
+// is capped per one-second window so a flood cannot fill the transmit ring; a
+// cap of zero answers nothing. Replies to our own echoes are not counted.
 func (stack *Stack) answerEcho(source MAC, packet ipv4Packet, message icmpMessage, now uint64) {
 	if message.code != 0 || stack.subnetSpecial(packet.source) {
 		stack.CountDrop()
@@ -330,7 +329,7 @@ func (stack *Stack) answerEcho(source MAC, packet ipv4Packet, message icmpMessag
 	if now < stack.replyWindow || now-stack.replyWindow >= second {
 		stack.replyWindow, stack.replyCount = now, 0
 	}
-	if stack.replyCount >= maxRepliesPerSecond {
+	if stack.replyCount >= stack.tuning.EchoReplyRate {
 		stack.CountDrop()
 		return
 	}
@@ -342,7 +341,7 @@ func (stack *Stack) answerEcho(source MAC, packet ipv4Packet, message icmpMessag
 	putEthernet(frame, source, stack.mac, etherTypeIPv4)
 	putICMPEcho(frame[HeaderSize+ipv4HeaderSize:], icmpEchoReply, message.identifier, message.sequence, message.body)
 	stack.identification++
-	putIPv4Header(frame[HeaderSize:], stack.address, packet.source, protocolICMP, stack.identification,
+	putIPv4Header(frame[HeaderSize:], stack.tuning.TTL, stack.address, packet.source, protocolICMP, stack.identification,
 		icmpHeaderSize+len(message.body))
 	stack.commitFrame(HeaderSize + length)
 }

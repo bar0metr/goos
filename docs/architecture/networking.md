@@ -139,7 +139,7 @@ The interface is in one of four states:
 - IPv4 with a 20-byte header, a valid checksum, and the interface's address
   as destination. Fragments and options count as drops. Before an address
   exists only DHCP traffic is accepted, broadcast or unicast. Outgoing
-  packets use TTL 64 and are never fragmented. The connected prefix is
+  packets carry the configured TTL, 64 by default, and are never fragmented. The connected prefix is
   tried first, then the default gateway; with neither an echo fails with
   `NoRoute` before anything is sent.
 - ICMP echo request, echo reply, destination unreachable and time exceeded,
@@ -151,21 +151,30 @@ The interface is in one of four states:
 
 ## Timers
 
+The operator sets these through `system.net.*` (ADR 0192); the table shows
+the defaults. See [configuration](../userspace/configuration.md#network) for
+ranges and for when a reloaded value takes effect.
+
+| Timer | Default | Key |
+| --- | --- | --- |
+| ARP entry lifetime | 60 s | `arp.cache-timeout-ms` |
+| ARP resolution | 3 requests 1 s apart, then `NeighborUnreachable` 1 s after the last | `arp.resolve-attempts`, `arp.resolve-interval-ms` |
+| address probe | 2 ARP probes 500 ms apart, then 500 ms of silence | `ipv4.probe-count`, `ipv4.probe-interval-ms` |
+| DHCP `DISCOVER` and `REQUEST` retransmission | 4 s, doubling to 64 s, with up to 1 s of jitter either way, at most half the base | `dhcp.initial-retry-ms`, `dhcp.max-retry-ms` |
+| DHCP retry after a conflict | 10 s | `dhcp.conflict-retry-ms` |
+| echo replies answered | 20 per one-second window | `icmp.echo-reply-rate` |
+
+These are fixed:
+
 | Timer | Value |
 | --- | --- |
-| ARP entry lifetime | 60 s |
-| ARP resolution | 3 requests 1 s apart, then `NeighborUnreachable` 1 s after the last |
-| address probe | 2 ARP probes 500 ms apart, then 500 ms of silence |
-| DHCP `DISCOVER` and `REQUEST` retransmission | 4 s, doubling to 64 s, with up to 1 s of jitter either way |
 | DHCP `REQUEST` while selecting | 4 retransmissions, then discovery again |
 | DHCP renew and rebind retransmission | half the time left before T2 (renew) or expiry (rebind), at least 60 s, never past that point |
-| DHCP retry after a conflict | 10 s |
 | echo deadline | 100 to 5000 ms per request, 1000 ms by default in `ping` |
-| echo replies answered | 20 per one-second window |
 | `ping` request spacing | 1 s between the starts of two requests |
 | command reply wait | the request's timeout plus 2 s |
 | `netd` idle wait | 30 s |
-| `netd` configuration exchange | 2 s per key |
+| `netd` configuration read | 2 s per key, 5 s for the whole candidate |
 | driver wait | 10 s |
 
 The stack holds no clock. `netd` passes monotonic nanoseconds into it and
@@ -174,12 +183,16 @@ blocks.
 
 ## Limits
 
+No setting changes these. They size static storage, shared memory or
+protocol bounds.
+
 | Limit | Value | Source |
 | --- | --- | --- |
 | network functions | 1 | `pci.FindLegacyVirtioNet` |
 | interrupt lines accepted | 3, 5, 6, 9, 10, 12, 14 | `kernel/netdevice.go` |
 | interrupt vector | `0x34`, bootstrap processor | `kernel/arch/amd64/tables_uefi.go` |
 | frame size | 14 to 1514 bytes, MTU 1500 | `netdev.MinFrame`, `netdev.MaxFrame` |
+| link MTU | 576 to 1500 as the driver reports it; shown by `net status` and sent as DHCP option 57 | `network.Stack.LinkUp` |
 | pool size | 2 pages, 4 slots of 2048 bytes | `netdev.PoolPages`, `netdev.Slots` |
 | receive buffers posted | 16 of 2048 bytes | `userspace/cmd/virtio-net` |
 | transmit buffers | 4 of 2048 bytes, one per slot | `userspace/cmd/virtio-net` |

@@ -17,7 +17,7 @@ func TestStaticProbeThenReady(t *testing.T) {
 		first.ether.destination != broadcastMAC {
 		t.Fatalf("first probe %+v", first.arp)
 	}
-	h.advance(probeInterval)
+	h.advance(defaults.ProbeInterval)
 	second := only(t, h.drain())
 	if second.arp.senderIP != zeroIPv4 || second.arp.targetIP != hostIP {
 		t.Fatalf("second probe %+v", second.arp)
@@ -25,7 +25,7 @@ func TestStaticProbeThenReady(t *testing.T) {
 	if state := h.stack.Snapshot(h.now).State; state != StateConfiguring {
 		t.Fatalf("ready before the probe ended: %d", state)
 	}
-	h.advance(probeInterval)
+	h.advance(defaults.ProbeInterval)
 	announce := only(t, h.drain())
 	if announce.arp.senderIP != hostIP || announce.arp.targetIP != hostIP {
 		t.Fatalf("announcement %+v", announce.arp)
@@ -155,7 +155,7 @@ func TestARPTableExpiryAndBound(t *testing.T) {
 	h := newHarness(t)
 	h.readyStatic(staticConfig)
 	h.learn(peerIP, peerMAC)
-	h.advance(neighborLifetime - 1)
+	h.advance(defaults.NeighborLifetime - 1)
 	if _, ok := h.stack.lookupNeighbor(peerIP, h.now); !ok {
 		t.Fatal("entry expired early")
 	}
@@ -196,14 +196,14 @@ func TestResolutionRetriesThenNeighborUnreachable(t *testing.T) {
 	if result := h.stack.Echo(0, peerIP, 1, MaxEchoTimeout, h.now); result != ResultOK {
 		t.Fatalf("echo %d", result)
 	}
-	for attempt := 1; attempt <= resolutionAttempts; attempt++ {
+	for attempt := 1; attempt <= int(defaults.ResolveAttempts); attempt++ {
 		request := only(t, h.drain())
 		if request.arp.operation != arpRequest || request.arp.targetIP != peerIP || request.arp.senderIP != hostIP ||
 			request.ether.destination != broadcastMAC {
 			t.Fatalf("attempt %d: %+v", attempt, request.arp)
 		}
 		h.noCompletion()
-		h.advance(resolutionInterval - 1)
+		h.advance(defaults.ResolveInterval - 1)
 		if frames := h.drain(); len(frames) != 0 {
 			t.Fatalf("attempt %d: request sent early", attempt)
 		}

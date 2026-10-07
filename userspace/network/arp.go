@@ -3,10 +3,6 @@ package network
 const (
 	MaxNeighbors   = 16
 	MaxResolutions = 4
-
-	neighborLifetime   = 60 * second
-	resolutionInterval = second
-	resolutionAttempts = 3
 )
 
 type neighbor struct {
@@ -23,6 +19,9 @@ type resolution struct {
 	target   IPv4
 	sent     uint8
 	deadline uint64
+	// attempts and interval are the tuning the resolution started with.
+	attempts uint8
+	interval uint64
 }
 
 func (stack *Stack) clearNeighbors() {
@@ -65,7 +64,7 @@ func (stack *Stack) learnNeighbor(address IPv4, mac MAC, now uint64) {
 			slot = entry
 		}
 	}
-	*slot = neighbor{used: true, address: address, mac: mac, expires: addTime(now, neighborLifetime)}
+	*slot = neighbor{used: true, address: address, mac: mac, expires: addTime(now, stack.tuning.NeighborLifetime)}
 }
 
 // rank orders replacement candidates: a free or expired slot first, then the
@@ -98,7 +97,8 @@ func (stack *Stack) resolve(target IPv4, now uint64) bool {
 		if entry.used {
 			continue
 		}
-		*entry = resolution{used: true, target: target}
+		*entry = resolution{used: true, target: target, attempts: stack.tuning.ResolveAttempts,
+			interval: stack.tuning.ResolveInterval}
 		stack.sendResolution(entry, now)
 		return true
 	}
@@ -113,7 +113,7 @@ func (stack *Stack) sendResolution(entry *resolution, now uint64) {
 		targetIP:  entry.target,
 	})
 	entry.sent++
-	entry.deadline = addTime(now, resolutionInterval)
+	entry.deadline = addTime(now, entry.interval)
 }
 
 // advanceResolutions retries each due resolution and gives up one interval
@@ -124,7 +124,7 @@ func (stack *Stack) advanceResolutions(now uint64) {
 		if !entry.used || entry.deadline > now {
 			continue
 		}
-		if entry.sent < resolutionAttempts {
+		if entry.sent < entry.attempts {
 			stack.sendResolution(entry, now)
 			continue
 		}

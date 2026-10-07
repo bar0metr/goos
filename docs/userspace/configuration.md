@@ -126,7 +126,7 @@ backlog.
 
 ## Network
 
-The network service's settings (ADR 0191):
+The network service's address settings (ADR 0191):
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -135,14 +135,43 @@ The network service's settings (ADR 0191):
 | `system.net.ipv4.prefix` | `uint` | `24` | the static prefix length, 1 to 30 |
 | `system.net.ipv4.gateway` | `text` | `0.0.0.0` | the static default gateway; `0.0.0.0` means none |
 
-The store checks only their types. The network service reads all four as one
-candidate when it starts and when `net reload` asks it to. DHCP mode ignores
+Its timer and rate settings (ADR 0192), all `uint`, times in milliseconds:
+
+| Key | Default | Range | Meaning |
+| --- | ---: | ---: | --- |
+| `system.net.ipv4.default-ttl` | 64 | 1..255 | TTL of every packet the stack builds |
+| `system.net.ipv4.probe-count` | 2 | 1..10 | ARP probes before an address goes live |
+| `system.net.ipv4.probe-interval-ms` | 500 | 100..5000 | gap between probes, and the quiet period after the last |
+| `system.net.arp.cache-timeout-ms` | 60000 | 1000..3600000 | lifetime of an ARP entry after its last refresh |
+| `system.net.arp.resolve-interval-ms` | 1000 | 100..10000 | gap between ARP requests for one next hop |
+| `system.net.arp.resolve-attempts` | 3 | 1..10 | ARP requests before resolution fails |
+| `system.net.icmp.echo-reply-rate` | 20 | 0..10000 | echo requests answered per second; 0 answers none |
+| `system.net.dhcp.initial-retry-ms` | 4000 | 1000..60000 | first `DISCOVER` and `REQUEST` retransmission base |
+| `system.net.dhcp.max-retry-ms` | 64000 | 4000..300000 | backoff ceiling; at least `initial-retry-ms` |
+| `system.net.dhcp.conflict-retry-ms` | 10000 | 1000..300000 | wait after declining a conflicting lease |
+
+The echo reply rate limits answers to other hosts' pings, not replies to
+`ping` run here. Linux has similar sysctls (`ip_default_ttl`,
+`neigh.*.retrans_time_ms` and others), but GoOS does not mirror
+`/proc/sys/net`.
+
+The store checks only their types. The network service reads all fourteen as
+one candidate when it starts and when `net reload` asks it to. DHCP mode ignores
 the other three keys. Static mode needs a unicast host address written as
 plain dotted decimal, a prefix from 1 to 30, and a gateway that is zero or
 another host address inside the prefix. A candidate that fails names the
 first key at fault and leaves the running configuration as it was; one that
-passes replaces it in one step. Settings that are invalid when the service
-starts leave it on DHCP.
+passes replaces it in one step. If the settings are unreadable or invalid when
+the service starts, it runs DHCP with the default tuning and leaves the stored
+values alone; `net status` then prints `settings: built-in defaults; stored
+system.net.* settings not applied` until a reload succeeds.
+
+A reload that changes only tuning keeps the address, the lease and the ARP
+table. Each value takes effect at its next use: TTL and the reply rate on the
+next packet, the ARP lifetime on the next learned or refreshed entry, resolve
+and probe values on the next resolution or probe, DHCP retry values at the
+client's next retransmission or transaction. A resolution or probe already
+running finishes with the values it started with.
 
 Each `config set` writes one key, and nothing applies them together, so set
 every key first and reload once:
@@ -158,5 +187,14 @@ network configuration applied
 
 A refused candidate prints, for example,
 `net: invalid setting system.net.ipv4.gateway; previous configuration kept`.
+A cross-field failure names the second key:
+
+```text
+goos> config set system.net.dhcp.initial-retry-ms 30000
+goos> config set system.net.dhcp.max-retry-ms 10000
+goos> net reload
+net: invalid setting system.net.dhcp.max-retry-ms; previous configuration kept
+```
+
 The settings persist in `/state/config` like any other; there is no separate
 network file.
