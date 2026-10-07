@@ -291,6 +291,51 @@ func TestFormErrRetriesWithoutEDNS(t *testing.T) {
 	}
 	h.answer(next, reply{answers: []rr{aRecord("old.test", 60, addr(1))}})
 	expectResult(t, h.completion(0), ResultOK, SourceUpstream)
+	if stats := h.r.Stats(); stats.Queries != 3 {
+		t.Fatalf("queries %d, want 3 datagrams", stats.Queries)
+	}
+}
+
+func TestFormErrCannotExceedTransmissionLimit(t *testing.T) {
+	h := newHarness(t, serverA)
+	policy := DefaultPolicy()
+	policy.Attempts = 3
+	h.r.SetPolicy(policy, h.now)
+	h.pending(0, "old.test")
+	first := h.sent()
+	h.answer(first, reply{flags: rcodeFormErr})
+	retry := h.sent()
+	if retry.opt || retry.id == first.id {
+		t.Fatalf("classic retry %+v", retry)
+	}
+	h.toDeadline()
+	third := h.sent()
+	if third.Server != serverA || third.opt {
+		t.Fatalf("third query %+v", third)
+	}
+	h.toDeadline()
+	h.noQuery()
+	expectResult(t, h.completion(0), ResultTimeout, SourceUpstream)
+	if stats := h.r.Stats(); stats.Queries != maxTransmissions {
+		t.Fatalf("queries %d, want hard limit %d", stats.Queries, maxTransmissions)
+	}
+}
+
+func TestExhaustedServerMovesToNextServer(t *testing.T) {
+	h := newHarness(t, serverA, serverB)
+	policy := DefaultPolicy()
+	policy.Attempts = 3
+	h.r.SetPolicy(policy, h.now)
+	h.pending(0, "a.test")
+	h.answer(h.sent(), reply{answers: []rr{cnameRecord("a.test", "b.test", 60)}})
+	h.answer(h.sent(), reply{answers: []rr{cnameRecord("b.test", "c.test", 60)}})
+	h.answer(h.sent(), reply{answers: []rr{cnameRecord("c.test", "d.test", 60)}})
+	next := h.sent()
+	if next.Server != serverB || !next.opt {
+		t.Fatalf("next server query %+v", next)
+	}
+	h.answer(next, reply{answers: []rr{aRecord("d.test", 60, addr(1))}})
+	expectResult(t, h.completion(0), ResultOK, SourceUpstream)
 }
 
 func TestFormErrWithOPTIsFailure(t *testing.T) {
@@ -785,6 +830,22 @@ func TestOverallDeadline(t *testing.T) {
 	_ = second
 	expectResult(t, h.completion(0), ResultTimeout, SourceUpstream)
 	h.noQuery()
+}
+
+func TestCNAMEKeepsTransmissionLimit(t *testing.T) {
+	h := newHarness(t, serverA)
+	policy := DefaultPolicy()
+	policy.Attempts = 3
+	h.r.SetPolicy(policy, h.now)
+	h.pending(0, "a.test")
+	h.answer(h.sent(), reply{answers: []rr{cnameRecord("a.test", "b.test", 60)}})
+	h.answer(h.sent(), reply{answers: []rr{cnameRecord("b.test", "c.test", 60)}})
+	h.answer(h.sent(), reply{answers: []rr{cnameRecord("c.test", "d.test", 60)}})
+	h.noQuery()
+	expectResult(t, h.completion(0), ResultTemporaryFailure, SourceUpstream)
+	if stats := h.r.Stats(); stats.Queries != maxTransmissions {
+		t.Fatalf("queries %d, want hard limit %d", stats.Queries, maxTransmissions)
+	}
 }
 
 func TestCoalescing(t *testing.T) {

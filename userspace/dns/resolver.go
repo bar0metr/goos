@@ -41,8 +41,11 @@ type transaction struct {
 	// SetServers call cannot shift the index of the server being asked.
 	servers     [MaxServers][4]byte
 	serverCount int
-	sent        [MaxServers]uint8
-	outcomes    [MaxServers]outcome
+	// sent counts normal attempts for the name at chain[links]. transmissions
+	// counts every datagram across the complete resolution.
+	sent          [MaxServers]uint8
+	transmissions [MaxServers]uint8
+	outcomes      [MaxServers]outcome
 	// classic marks servers that rejected EDNS(0) for this transaction.
 	classic [MaxServers]bool
 	server  int
@@ -105,9 +108,10 @@ type Stats struct {
 // SERVFAIL, REFUSED, another error code, TC=1, a malformed answer or a send
 // failure; a timeout keeps it for the next round. A server that answers
 // FORMERR without OPT to a query with OPT is asked once more at once without
-// EDNS(0); that retry does not use up an attempt. A CNAME whose target needs
-// its own query starts the rounds again for the new name under the same
-// deadline.
+// EDNS(0); that retry does not use up a logical attempt. No server receives
+// more than maxTransmissions datagrams during the resolution. The hard limit
+// includes EDNS fallback and queries for CNAME targets. A CNAME whose target
+// needs its own query starts the logical rounds again under the same deadline.
 type Resolver struct {
 	random      uint64
 	policy      Policy
@@ -306,26 +310,36 @@ func (r *Resolver) start(name *hostname.Name, now uint64) int {
 	for index := 0; index < r.serverCount; index++ {
 		tx.servers[index] = r.servers[index].Address
 		tx.classic[index] = false
+		tx.transmissions[index] = 0
 	}
 	tx.waiters = 0
 	tx.deadline = addTime(now, r.policy.QueryTimeout*uint64(tx.attempts))
-	r.restart(tx, now)
+	_ = r.restart(tx, now)
 	return number
 }
 
-// restart begins the rounds for the name being asked now.
-func (r *Resolver) restart(tx *transaction, now uint64) {
+// restart begins the logical rounds for the name being asked now. The hard
+// transmission counters survive CNAME target changes.
+func (r *Resolver) restart(tx *transaction, now uint64) bool {
 	for index := 0; index < tx.serverCount; index++ {
 		tx.sent[index] = 0
 		tx.outcomes[index] = outcomeNone
 	}
-	r.transmit(tx, 0, true, now)
+	for server := 0; server < tx.serverCount; server++ {
+		if r.transmit(tx, server, true, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // transmit schedules the next datagram to a server. A counted transmission
-// uses up an attempt; the retry without EDNS(0) does not and waits as long as
-// the transmission it repeats.
-func (r *Resolver) transmit(tx *transaction, server int, counted bool, now uint64) {
+// uses up a logical attempt; the retry without EDNS(0) does not. Every
+// scheduled datagram must fit the hard per-server transmission budget.
+func (r *Resolver) transmit(tx *transaction, server int, counted bool, now uint64) bool {
+	if tx.transmissions[server] >= maxTransmissions {
+		return false
+	}
 	round := int(tx.sent[server])
 	if counted {
 		tx.sent[server]++
@@ -354,6 +368,7 @@ func (r *Resolver) transmit(tx *transaction, server int, counted bool, now uint6
 	}
 	tx.id = id
 	tx.phase = txSend
+	return true
 }
 
 // moveOn records how the current server's transmission ended and schedules
@@ -367,8 +382,7 @@ func (r *Resolver) moveOn(tx *transaction, result outcome, now uint64) {
 			if tx.outcomes[server] != outcomeTimeout && tx.outcomes[server] != outcomeNone {
 				continue
 			}
-			if tx.sent[server] < tx.attempts {
-				r.transmit(tx, server, true, now)
+			if tx.sent[server] < tx.attempts && r.transmit(tx, server, true, now) {
 				return
 			}
 		}
@@ -417,6 +431,7 @@ func (r *Resolver) NextQuery(dst []byte) (Outgoing, bool) {
 		}
 		r.sendCursor = (number + 1) % MaxTransactions
 		tx.phase = txWaiting
+		tx.transmissions[tx.server]++
 		increment(&r.queries)
 		length := encodeQuery(dst, tx.id, &tx.chain[tx.links], tx.edns)
 		return Outgoing{Transaction: number, Server: tx.servers[tx.server], Length: length}, true
@@ -470,7 +485,10 @@ func (r *Resolver) Receive(transaction int, server [4]byte, payload []byte, now 
 	case rcodeFormErr:
 		if tx.edns && !message.hasOPT {
 			tx.classic[tx.server] = true
-			r.transmit(tx, tx.server, false, now)
+			if r.transmit(tx, tx.server, false, now) {
+				return
+			}
+			r.moveOn(tx, outcomeFailed, now)
 			return
 		}
 		increment(&r.serverFailures)
@@ -505,7 +523,9 @@ func (r *Resolver) interpret(tx *transaction, message []byte, header *response, 
 		r.negative(tx, message, header, ResultNoData, now)
 		return
 	}
-	r.restart(tx, now)
+	if !r.restart(tx, now) {
+		r.fail(tx, ResultTemporaryFailure, now)
+	}
 }
 
 // followChain extends the transaction's chain with the CNAME records of the

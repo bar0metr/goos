@@ -234,7 +234,7 @@ The resolver service's settings (ADR 0194):
 | `system.dns.cache.max-negative-sec` | `uint` | 3600 | 1..86400 | cap on how long NXDOMAIN and NODATA stay cached |
 | `system.dns.failure-cache-sec` | `uint` | 5 | 1..300 | how long a timeout or server failure stays cached |
 | `system.dns.query-timeout-ms` | `uint` | 3000 | 500..30000 | time budget of one round of queries |
-| `system.dns.attempts` | `uint` | 2 | 1..3 | queries to each server per lookup |
+| `system.dns.attempts` | `uint` | 2 | 1..3 | normal attempts per server for each queried name; all datagrams share a hard limit of 3 per server and resolution |
 
 A server must be strict dotted decimal and may not be in `0.0.0.0/8`,
 `127.0.0.0/8`, broadcast or multicast, or repeat an earlier slot. The servers

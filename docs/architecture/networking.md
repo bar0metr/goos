@@ -209,6 +209,12 @@ ranges and for when a reloaded value takes effect.
 | DNS lookup | one deadline of 6 s, `query-timeout-ms` times `attempts`, shared among the servers | `system.dns.query-timeout-ms`, `system.dns.attempts` |
 | echo replies answered | 20 per one-second window | `icmp.echo-reply-rate` |
 
+DNS `attempts` controls the logical retry rounds for each queried name. An
+EDNS-to-classic fallback does not consume a logical attempt. Every datagram,
+including that fallback and queries for CNAME targets, consumes a separate
+per-server budget. No upstream server receives more than three datagrams in
+one resolution, and the resolver keeps the original absolute deadline.
+
 These are fixed:
 
 | Timer | Value |

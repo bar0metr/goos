@@ -72,6 +72,11 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   `userspace/netapi` and `userspace/network` run in `make test-unit` and
   `make test-security`.
 
+  The config exchange unit tests cover the timeout, late reply, then next
+  request ordering with a deterministic clock and message queue. The network
+  boot gate has no per-message configd delay injection, so it does not
+  reproduce that exact ordering.
+
   `tools/netpeer` is a host-side peer for stream-backend scenarios. Guests
   connect to its Unix socket with
   `-netdev stream,server=off,addr.type=unix,addr.path=SOCKET`; it relays

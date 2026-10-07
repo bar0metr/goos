@@ -32,9 +32,11 @@ const (
 
 	// minWait is the shortest time one transmission waits for an answer.
 	minWait = 500 * millisecond
-	// maxAttempts is the most transmissions one server gets for one question,
-	// besides a single retry without EDNS(0).
+	// maxAttempts bounds the normal attempt policy for one queried name.
 	maxAttempts = 3
+	// maxTransmissions bounds all datagrams sent to one server during one
+	// resolution, including EDNS fallback and CNAME target queries.
+	maxTransmissions = 3
 )
 
 // Result values are wire values of the resolver client protocol; keep order.
@@ -112,7 +114,9 @@ type Policy struct {
 	// QueryTimeout is in nanoseconds; see Resolver for how it shapes the
 	// retransmission schedule.
 	QueryTimeout uint64
-	// Attempts is the number of transmissions each server gets.
+	// Attempts is the number of normal attempts each server gets for one
+	// queried name. Resolver also enforces maxTransmissions across the whole
+	// resolution.
 	Attempts uint8
 }
 
