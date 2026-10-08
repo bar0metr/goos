@@ -143,6 +143,9 @@ func (stack *Stack) resetTCP() {
 	for index := range stack.tcp[:] {
 		stack.tcp[index] = tcpEndpoint{}
 	}
+	for index := range stack.tcpTombstones[:] {
+		stack.tcpTombstones[index] = tcpTombstone{}
+	}
 	stack.tcpGeneration = 0
 	stack.tcpStats = TCPStats{}
 }
@@ -184,12 +187,12 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 	if free < 0 || total >= int(stack.tuning.TCP.MaxEndpoints) || mine >= int(stack.tuning.TCP.SessionEndpoints) {
 		// A connection the owner closed first waits out TIME_WAIT on the
 		// owner's count. Rather than refuse the owner for up to time-wait-ms,
-		// reuse the oldest such entry it left; another owner's entries stay.
-		reused := stack.oldestTimeWait(owner)
-		if reused < 0 || reused >= len(stack.tcp) {
+		// reuse the slot of the oldest such entry; its four-tuple stays
+		// protected in a tombstone until the interval ends.
+		reused := stack.recycleTimeWait(owner)
+		if reused < 0 {
 			return 0, ResultBusy
 		}
-		stack.releaseTCP(&stack.tcp[reused])
 		free = reused
 	}
 	stack.tcpGeneration++
@@ -385,10 +388,17 @@ func (stack *Stack) TCPClose(owner int, id TCPEndpointID, now uint64) Result {
 	return ResultOK
 }
 
+// TCPCloseOwner ends every endpoint of a session. A connection in TIME_WAIT
+// stays as an orphan until its interval ends, so its four-tuple stays
+// protected; a later session with the same owner may recycle it.
 func (stack *Stack) TCPCloseOwner(owner int, now uint64) {
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if entry.state != TCPFree && int(entry.owner) == owner {
+			if entry.state == TCPTimeWait {
+				entry.orphan = true
+				continue
+			}
 			if entry.state >= TCPSynSent && entry.state < TCPTimeWait {
 				stack.sendTCP(entry, tcpFlagRST|tcpFlagACK, entry.sndNxt, entry.rcvNxt, nil, now)
 			}
@@ -436,22 +446,6 @@ func (stack *Stack) TCPState(owner int, id TCPEndpointID) (TCPState, TCPTuple, R
 		return TCPFree, TCPTuple{}, ResultInvalidArgument
 	}
 	return entry.state, tcpTuple(entry), entry.lastResult
-}
-
-// oldestTimeWait returns the index of the owner's closed TIME_WAIT entry
-// that expires first, or -1.
-func (stack *Stack) oldestTimeWait(owner int) int {
-	oldest := -1
-	for index := range stack.tcp[:] {
-		entry := &stack.tcp[index]
-		if entry.state != TCPTimeWait || !entry.orphan || int(entry.owner) != owner {
-			continue
-		}
-		if oldest < 0 || entry.deadline < stack.tcp[oldest].deadline {
-			oldest = index
-		}
-	}
-	return oldest
 }
 
 func (stack *Stack) releaseTCP(entry *tcpEndpoint) {
@@ -523,7 +517,12 @@ func (stack *Stack) tcpBindConflict(skip int, address IPv4, port uint16) bool {
 	return false
 }
 
+// tcpTupleConflict reports a four-tuple in use by another connection or
+// still protected by a tombstone.
 func (stack *Stack) tcpTupleConflict(skip int, local IPv4, localPort uint16, remote IPv4, remotePort uint16) bool {
+	if stack.tcpTombstone(local, localPort, remote, remotePort) != nil {
+		return true
+	}
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if index != skip && entry.state >= TCPSynSent && entry.local == local && entry.port == localPort &&

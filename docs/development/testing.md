@@ -110,8 +110,14 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   slots of replies that arrive after a cancel, keep two fallbacks at most,
   and fuzz the read pieces. Three of them run the fallback over a real stack
   with `tcpserve` and `udpserve` on both ends: one answer split across the
-  prefix and two RX slots, then a cache hit; one answer cut short; and 24
-  fallbacks in a row, each leaving the resolver's side in TIME_WAIT. The network gate remains the
+  prefix and two RX slots, then a cache hit; one answer cut short; and 16
+  fallbacks in a row, each leaving the resolver's side in TIME_WAIT, then 8
+  more once the interval ends. The `userspace/network` tests check that a
+  recycled TIME_WAIT slot keeps its four-tuple as a tombstone: a connect
+  limited to the old port is refused, a second port is taken instead,
+  another remote port or address may use the old port, the old ID stays
+  invalid, a retransmitted FIN is acknowledged while other segments get
+  nothing, each owner keeps its own share, and expiry lifts the block. The network gate remains the
   test of the services themselves.
 
   The config exchange unit tests cover the timeout, late reply, then next

@@ -88,6 +88,7 @@ type Stack struct {
 	udpStats      UDPStats
 
 	tcp           [MaxTCPEndpoints]tcpEndpoint
+	tcpTombstones [tcpTombstoneSlots]tcpTombstone
 	tcpGeneration uint32
 	tcpStats      TCPStats
 

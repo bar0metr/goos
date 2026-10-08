@@ -138,8 +138,10 @@ A CNAME target found over TCP gets its own query, which starts over UDP.
 Each fallback opens one connection for one query and closes it after the
 reply, on failure, or as soon as its transaction stops waiting for it.
 Closing right after the reply often leaves the resolver's side in
-TIME_WAIT; the stack reuses those entries when the session reaches its
-endpoint limit (ADR 0196), so fallbacks in a row never run it out.
+TIME_WAIT. The stack recycles those endpoint slots when the session reaches
+its limit and keeps each old four-tuple as a tombstone until TIME_WAIT ends
+(ADR 0196). At least sixteen fallbacks fit in one TIME_WAIT interval; past
+that `Open` is `Busy` and the fallback fails like any TCP failure.
 
 `userspace/tcpupstream` carries the fallbacks over `GTCP1` (ADR 0196):
 Open, Connect, Write of the two-byte big-endian length and the query, Reads

@@ -382,11 +382,13 @@ func big(query []byte, address [4]byte) []byte {
 	return out
 }
 
-// settled runs the stack's timers until only the listener is left, as
-// TIME_WAIT holds the side that closed first for a while.
+// settled runs the stack's timers until only the listener is left and no
+// four-tuple is protected any more, as TIME_WAIT holds the side that closed
+// first for a while.
 func (w *world) settled() {
 	w.t.Helper()
-	for step := 0; step < 1000 && w.stack.TCPStats().Endpoints > 1; step++ {
+	until := w.now + 2*60*1_000_000_000
+	for step := 0; step < 1000 && w.now < until; step++ {
 		deadline, ok := w.stack.Deadline()
 		if !ok {
 			break
@@ -494,11 +496,14 @@ func TestFallbackCutShortOverRealStack(t *testing.T) {
 
 // The resolver closes each fallback connection as soon as it has the answer,
 // before the server does, so each leaves a TIME_WAIT behind on the
-// resolver's session. Many fallbacks in a row must not run the session out
-// of endpoints.
+// resolver's session. The stack lets the session go on past its endpoint
+// limit on recycled slots, the old four-tuples kept as tombstones, up to
+// twice the limit within one TIME_WAIT interval, and again once it ends.
 func TestManyFallbacksOverRealStack(t *testing.T) {
 	w := newWorld(t)
-	for round := range 3 * network.MaxTCPEndpointsPerSession {
+	round := 0
+	fallback := func() {
+		t.Helper()
 		text := "n" + string(rune('a'+round)) + ".test"
 		if _, done := w.lookup(0, text); done {
 			t.Fatalf("round %d answered at once", round)
@@ -520,8 +525,16 @@ func TestManyFallbacksOverRealStack(t *testing.T) {
 		}
 		w.tcpCall(tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: accepted.Endpoint})
 		w.pump()
+		round++
 	}
-	if stats := w.resolver.Stats(); stats.TCPAnswers != 3*network.MaxTCPEndpointsPerSession || stats.TCPFailures != 0 {
+	for range 2 * network.MaxTCPEndpointsPerSession {
+		fallback()
+	}
+	w.settled()
+	for range network.MaxTCPEndpointsPerSession {
+		fallback()
+	}
+	if stats := w.resolver.Stats(); stats.TCPAnswers != uint64(round) || stats.TCPFailures != 0 {
 		t.Fatalf("stats %+v", stats)
 	}
 	w.settled()

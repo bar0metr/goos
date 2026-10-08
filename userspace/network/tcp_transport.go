@@ -13,6 +13,10 @@ func (stack *Stack) receiveTCP(packet ipv4Packet, now uint64) {
 	increment(&stack.tcpStats.RX)
 	entry := stack.tcpMatch(packet.destination, segment.destinationPort, packet.source, segment.sourcePort)
 	if entry == nil {
+		if tombstone := stack.tcpTombstone(packet.destination, segment.destinationPort, packet.source, segment.sourcePort); tombstone != nil {
+			stack.receiveTombstone(tombstone, segment, now)
+			return
+		}
 		listener := stack.tcpListener(packet.destination, segment.destinationPort)
 		if listener != nil && segment.flags&tcpFlagSYN != 0 && segment.flags&(tcpFlagACK|tcpFlagRST) == 0 {
 			stack.passiveSYN(listener, packet, segment, now)
@@ -661,6 +665,7 @@ func (stack *Stack) resetUnknown(packet ipv4Packet, segment tcpSegment, now uint
 }
 
 func (stack *Stack) advanceTCP(now uint64) {
+	stack.advanceTombstones(now)
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if entry.state == TCPFree || entry.state == TCPClosed {
@@ -717,6 +722,7 @@ func (stack *Stack) advanceTCP(now uint64) {
 }
 
 func (stack *Stack) tcpDeadline(earliest *timer) {
+	stack.tombstoneDeadline(earliest)
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if entry.deadline != 0 {
@@ -732,6 +738,7 @@ func (stack *Stack) reconfigureTCP(result Result) {
 	if result == ResultDown {
 		return
 	}
+	stack.dropTombstones()
 	for index := range stack.tcp[:] {
 		entry := &stack.tcp[index]
 		if entry.state == TCPBound || entry.state == TCPListen {
