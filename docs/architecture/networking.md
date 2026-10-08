@@ -16,13 +16,13 @@ DHCP client, the loopback interface, a hosts table (ADR 0193), DNS name
 resolution through a stub resolver with a cache, and IPv4 UDP for any
 program PID 1 grants a UDP session (ADR 0195) or TCP session (ADR 0196). Not implemented: IPv4
 fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
-UDP senders (no Port Unreachable for an unbound port), persistent DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
-Linux socket calls.
+UDP senders (no Port Unreachable for an unbound port), persistent DNS over TCP, multicast DNS, IPv6 transport, DNSSEC, and the
+Linux socket calls. `dnsq` shows AAAA records; nothing sends IPv6.
 
 ## Processes
 
 ```text
-resolve             ping                         net            udp
+resolve             ping                         net    udp, tcp, dnsq
   | GRESOLV1          | GRESOLV1, GNETAPI version 4 | GNETAPI v4 | GUDP1 / GTCP1
   v                   +-------------+---------------+--------------------+
 resolved  <-- GNETCTL --  PID 1     |  one private session per command
@@ -232,6 +232,33 @@ two-byte length and the query, reads exactly one length-prefixed reply into
 one of two 65535-byte buffers, and closes. The reply goes through the same
 checks, CNAME handling and cache as a UDP answer. `resolved` holds a UDP
 session, a TCP session and a status session, and no device.
+
+The DNS code splits into four packages:
+
+```text
+                       +--> userspace/dns --> resolved
+userspace/dnswire -----+
+                       +--> userspace/dnsq --> dnsq
+
+userspace/dnstcp ------+--> userspace/tcpupstream --> resolved
+                       +--> userspace/dnsq --> dnsq
+```
+
+`dnswire` holds the message format: names, query encoding for any QTYPE,
+response validation, record iteration and presentation text. It is the
+only DNS parser in the system, with the bounds above: 63-byte labels,
+255-byte names, backward compression pointers, at most 64 of them in a
+name, and record lengths checked against the message. `dnstcp` holds the
+two-byte length framing and the 65535-byte message limit, and nothing about
+sockets. `dns` keeps resolver policy: the cache, transactions, retries,
+server rotation and CNAME chains. `netd` knows nothing of DNS.
+
+`dnsq` is a command, not a client of `resolved`. With its own UDP and TCP
+sessions it sends one query to the server on its command line and prints the
+answer. It shares `dnswire` and `dnstcp` with the resolver, holds one
+65535-byte buffer for a response from either transport, and runs UDP and a
+TCP fallback against one deadline. Each TCP query uses one connection that
+`dnsq` closes like any `GTCP1` client, TIME_WAIT included.
 
 The interface is in one of four states:
 

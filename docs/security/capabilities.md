@@ -299,7 +299,11 @@ resolver grant carries the right to send a datagram, and a UDP session
 reads no status. `ping` asks for `GrantNetworkPing` and `GrantResolve`,
 `resolve` for `GrantResolveAdmin` (ADR 0194), and `udp` for `GrantUDP`
 alone (ADR 0195). `GrantTCP` is independent of all of them; `tcp` asks for it
-alone (ADR 0196). Grants are stored in command index format 5.
+alone (ADR 0196). `dnsq` asks for `GrantUDP | GrantTCP` and nothing else: it
+queries the DNS server named on its command line through those two sessions,
+holds no resolver session, so it cannot read or flush the cache, and holds no
+network session, so it cannot ping or read the DHCP server list. Grants are
+stored in command index format 5.
 
 ## Device authority
 

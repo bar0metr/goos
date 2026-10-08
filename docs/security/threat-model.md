@@ -102,6 +102,9 @@ A program launched from the shell, for example a compromised command image in
   and port, at most one link MTU less 28 bytes each off the host. It holds
   at most 8 endpoints and 16 queued datagrams, cannot reach another
   session's endpoints, builds no IPv4 header and reads no status (ADR 0195).
+- `dnsq` asks for `GrantUDP | GrantTCP`, so a compromised `dnsq` can do what
+  `udp` and `tcp` can together and no more: it holds no resolver session and
+  cannot touch the cache, the hosts table or the server list.
 - Cannot create channels (`ChannelCreate` is restricted to PID 1), cannot
   launch or stop processes, cannot reach block, driver, lifecycle, or
   configuration endpoints.
@@ -267,6 +270,16 @@ Anything on the link can send the guest arbitrary frames.
   message. A server cannot hold a buffer past the lookup's deadline, and
   TC=1 over TCP does not start another fallback. `localhost` and the hosts table are
   answered before any query is sent (ADR 0193, ADR 0194).
+- `dnsq` sends one query to the server you name and trusts nothing it gets
+  back until `userspace/dnswire` has checked the same things it checks for
+  `resolved`: ID, one matching question, counts, lengths, labels and
+  pointers, and then the data of every record it will print. A reply that
+  fails prints nothing but the failure. TC=1 over UDP repeats the query over
+  TCP once, to the same server and within the same deadline; TC=1 over TCP
+  is an error. The response lands in one fixed 65535-byte buffer, so no
+  length from the server sizes an allocation. Names and TXT strings print
+  with every byte outside printable ASCII escaped as `\DDD`, so a server
+  cannot send terminal control sequences through `dnsq`.
 - A DHCP server on the link decides which DNS servers the guest asks, and a
   server it asks can answer with any address. A cached answer lasts at most
   `system.dns.cache.max-ttl-sec`.
