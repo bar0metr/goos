@@ -3,6 +3,8 @@ package dns
 import (
 	"bytes"
 	"testing"
+
+	"goos/userspace/dnswire"
 )
 
 func TestTruncatedRepeatsOverTCP(t *testing.T) {
@@ -10,7 +12,7 @@ func TestTruncatedRepeatsOverTCP(t *testing.T) {
 	h.pending(0, "big.test")
 	first := h.sent()
 	// A truncated answer may be cut short; its records are not read.
-	payload := reply{id: first.id, flags: flagTC, question: "big.test", opt: true,
+	payload := reply{id: first.id, flags: dnswire.FlagTC, question: "big.test", opt: true,
 		answers: []rr{aRecord("big.test", 60, addr(1))}}.bytes()
 	h.deliver(first, payload[:len(payload)-3])
 	h.noCompletion()
@@ -44,7 +46,7 @@ func TestTruncatedRepeatsOverTCP(t *testing.T) {
 func TestStreamKeepsClassicForm(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.pending(0, "old.test")
-	h.answer(h.sent(), reply{flags: rcodeFormErr, noQuestion: true})
+	h.answer(h.sent(), reply{flags: dnswire.RcodeFormErr, noQuestion: true})
 	classic := h.sent()
 	if classic.opt {
 		t.Fatal("retry still has OPT")
@@ -56,7 +58,7 @@ func TestStreamKeepsClassicForm(t *testing.T) {
 	}
 	// FORMERR over TCP fails the server instead of starting another round
 	// of EDNS(0) negotiation.
-	h.answerStream(repeat, reply{flags: rcodeFormErr})
+	h.answerStream(repeat, reply{flags: dnswire.RcodeFormErr})
 	h.noQuery()
 	h.noStream()
 	expectResult(t, h.completion(0), ResultTemporaryFailure, SourceUpstream)
@@ -66,7 +68,7 @@ func TestStreamNXDomainIsCached(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.pending(0, "gone.test")
 	h.truncate(h.sent())
-	h.answerStream(h.stream(), reply{flags: rcodeNXDomain, authority: []rr{soaRecord("test", 300, 60)}})
+	h.answerStream(h.stream(), reply{flags: dnswire.RcodeNXDomain, authority: []rr{soaRecord("test", 300, 60)}})
 	answer := h.completion(0)
 	expectResult(t, answer, ResultNotFound, SourceUpstream)
 	if answer.TTL != 60 {
@@ -132,10 +134,10 @@ func TestStreamBadAnswersMoveOn(t *testing.T) {
 			h.r.ReceiveStream(q.Transaction, q.Serial, payload, h.now)
 		}, func(stats Stats) bool { return stats.Mismatched == 1 }},
 		{"truncated again", func(h *harness, q query) {
-			h.answerStream(q, reply{flags: flagTC, answers: []rr{aRecord(q.name, 60, addr(1))}})
+			h.answerStream(q, reply{flags: dnswire.FlagTC, answers: []rr{aRecord(q.name, 60, addr(1))}})
 		}, func(stats Stats) bool { return stats.Truncated == 2 }},
 		{"servfail", func(h *harness, q query) {
-			h.answerStream(q, reply{flags: rcodeServFail})
+			h.answerStream(q, reply{flags: dnswire.RcodeServFail})
 		}, func(stats Stats) bool { return stats.ServerFailures == 2 && stats.TCPAnswers == 1 }},
 		{"connection failed", func(h *harness, q query) {
 			h.r.StreamFailed(q.Transaction, q.Serial, false, h.now)
@@ -157,7 +159,7 @@ func TestStreamBadAnswersMoveOn(t *testing.T) {
 			if next.Server != serverB {
 				t.Fatalf("next query %+v", next)
 			}
-			h.answer(next, reply{flags: rcodeServFail})
+			h.answer(next, reply{flags: dnswire.RcodeServFail})
 			expectResult(t, h.completion(0), ResultTemporaryFailure, SourceUpstream)
 			h.cachedFailure("big.test", ResultTemporaryFailure)
 			stats := h.r.Stats()
@@ -177,7 +179,7 @@ func TestStreamBadAnswersMoveOn(t *testing.T) {
 func TestTruncatedWithoutQuestionIsMalformed(t *testing.T) {
 	h := newHarness(t, serverA, serverB)
 	h.pending(0, "old.test")
-	h.answer(h.sent(), reply{flags: rcodeFormErr | flagTC, noQuestion: true})
+	h.answer(h.sent(), reply{flags: dnswire.RcodeFormErr | dnswire.FlagTC, noQuestion: true})
 	h.noStream()
 	if next := h.sent(); next.Server != serverB {
 		t.Fatalf("next query %+v", next)
@@ -339,7 +341,7 @@ func TestStreamBudget(t *testing.T) {
 func TestBudgetsCoexist(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.pending(0, "alias.test")
-	h.answer(h.sent(), reply{flags: rcodeFormErr, noQuestion: true})
+	h.answer(h.sent(), reply{flags: dnswire.RcodeFormErr, noQuestion: true})
 	h.truncate(h.sent())
 	h.answerStream(h.stream(), reply{answers: []rr{cnameRecord("alias.test", "real.test", 60)}})
 	target := h.sent()

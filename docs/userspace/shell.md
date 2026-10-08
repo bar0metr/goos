@@ -148,11 +148,12 @@ memory in binary units.
 
 ## Network commands
 
-`ping`, `net`, `resolve` and `udp` are native commands whose manifests ask
-for sessions PID 1 opens for each launch: `ping` and `net` a network session
-(ADR 0191), `ping` and `resolve` a resolver session (ADR 0194), and `udp` a
-UDP session (ADR 0195). None builds a packet: `netd` and `resolved` do the
-work and answer.
+`ping`, `net`, `resolve`, `dnsq`, `udp` and `tcp` are native commands whose
+manifests ask for sessions PID 1 opens for each launch: `ping` and `net` a
+network session (ADR 0191), `ping` and `resolve` a resolver session
+(ADR 0194), `udp` a UDP session (ADR 0195), `tcp` a TCP session (ADR 0196)
+and `dnsq` one of each of the last two. None builds a packet: `netd` and
+`resolved` do the work and answer.
 
 `ping [-c COUNT] [-W TIMEOUT_MS] HOST` sends COUNT echo requests, 1 to 16 and
 4 by default, one at a time and one second apart, each waiting up to
@@ -240,6 +241,68 @@ DHCP server list. `resolve flush` empties the cache, not the hosts table.
 `status.` and so on. A name under `.local` is refused, as GoOS has no
 multicast DNS. An answer the server truncates over UDP is fetched again
 over TCP from the same server.
+
+`resolve` is a client of the system resolver. `dnsq` asks a DNS server
+directly and shows its answer, so you can tell whether the server, UDP, TCP
+or the fallback between them is at fault:
+
+```text
+dnsq @SERVER [OPTIONS] NAME [TYPE]
+```
+
+SERVER is a numeric IPv4 address and is required; `dnsq` never asks
+`resolved` and never reads the DHCP server list. TYPE is `A` (the default),
+`AAAA`, `CNAME`, `NS`, `MX`, `TXT`, `SOA` or `PTR`, in any case. NAME takes
+any printable ASCII but the backslash, so `_sip._tcp.example` and
+`in-addr.arpa` names work. Options go anywhere on the line:
+
+- `-u`, `--udp` sends one datagram and never falls back to TCP;
+- `-t`, `--tcp` skips UDP and uses one TCP connection;
+- `--no-edns` leaves out the EDNS(0) record, which otherwise advertises
+  1232 bytes with DO clear;
+- `--timeout MS`, 1 to 60000 and 5000 by default, bounds the whole query,
+  a TCP fallback included; closing the endpoint afterwards can add up to a
+  second;
+- `--short` prints the answer records' data only, one per line;
+- `--raw` adds the header fields and counts and prints all four sections.
+
+By default `dnsq` sends one datagram. A matching answer with TC=1 is not
+shown: `dnsq` prints `;; UDP response truncated; retrying over TCP` (not with
+`--short`) and repeats the same query, same ID and EDNS form, over TCP in
+the time left. With `--udp` a truncated answer is an error.
+
+```text
+goos> dnsq @192.0.2.53 dnsq.test
+;; server: 192.0.2.53:53
+;; transport: UDP
+;; id: 39174
+;; status: NOERROR
+;; flags: qr aa rd ra
+
+;; question:
+dnsq.test.    IN    A
+
+;; answer:
+dnsq.test.    60    IN    A    192.0.2.80
+
+;; 1 answer, 54 bytes, 3 ms
+goos> dnsq --short @192.0.2.53 mail.test MX
+10 dnsq.test.
+```
+
+Names print with a trailing dot. Any byte outside printable ASCII in a name
+or TXT string prints as `\DDD`, and a quote or backslash in TXT as `\"` or
+`\\`, so a server cannot send the terminal control sequences. Record
+types `dnsq` does not know print as `\# LENGTH HEX`, at most 64 bytes of it.
+`dnsq` exits 0 for any complete, valid answer to the question asked,
+NXDOMAIN, SERVFAIL, REFUSED and FORMERR included; 1 for a timeout, a
+transport error, a truncated answer it may not repeat, or an answer that
+does not match the query or breaks the protocol, which it prints nothing
+of; and 2 for a usage error. A FORMERR without a question section, which
+`resolved` takes as a refusal of EDNS(0), is a failure in `dnsq`: it does
+not say which query it answers.
+The error line names the step, for example
+`dnsq: tcp connect: connection refused`.
 
 `udp` sends and receives IPv4 UDP datagrams with nothing but its UDP
 session:

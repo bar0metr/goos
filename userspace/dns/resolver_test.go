@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"goos/userspace/dnswire"
 	"goos/userspace/network"
 	"goos/userspace/udpapi"
 )
@@ -12,7 +13,7 @@ func TestMinimalAnswer(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.pending(0, "Example.COM")
 	q := h.sent()
-	if q.Server != serverA || q.name != "example.com" || q.flags != flagRD {
+	if q.Server != serverA || q.name != "example.com" || q.flags != dnswire.FlagRD {
 		t.Fatalf("query %+v", q)
 	}
 	if !q.opt || q.payload != DatagramSize {
@@ -48,7 +49,7 @@ func TestMultipleAddresses(t *testing.T) {
 		records = append(records, aRecord("multi.test", 600-uint32(index), addr(index)))
 	}
 	// A record of another class and one for another owner are ignored.
-	records = append([]rr{{name: "multi.test", kind: typeA, class: 3, ttl: 1, data: []byte{1, 2, 3, 4}},
+	records = append([]rr{{name: "multi.test", kind: dnswire.TypeA, class: 3, ttl: 1, data: []byte{1, 2, 3, 4}},
 		aRecord("other.test", 1, addr(99))}, records...)
 	answer := h.resolve("multi.test", reply{answers: records})
 	expectAddresses(t, answer, addr(1), addr(2), addr(3), addr(4), addr(5), addr(6), addr(7), addr(8))
@@ -165,7 +166,7 @@ func TestNXDomain(t *testing.T) {
 			policy := DefaultPolicy()
 			policy.MaxNegative = c.maxNegative
 			h.r.SetPolicy(policy, h.now)
-			answer := h.resolve("missing.test", reply{flags: rcodeNXDomain, authority: c.soa})
+			answer := h.resolve("missing.test", reply{flags: dnswire.RcodeNXDomain, authority: c.soa})
 			expectResult(t, answer, ResultNotFound, SourceUpstream)
 			if answer.TTL != c.wantTTL {
 				t.Fatalf("TTL %d, want %d", answer.TTL, c.wantTTL)
@@ -186,7 +187,7 @@ func TestNXDomain(t *testing.T) {
 
 func TestNXDomainAfterCNAME(t *testing.T) {
 	h := newHarness(t, serverA)
-	answer := h.resolve("alias.test", reply{flags: rcodeNXDomain,
+	answer := h.resolve("alias.test", reply{flags: dnswire.RcodeNXDomain,
 		answers:   []rr{cnameRecord("alias.test", "gone.example", 40)},
 		authority: []rr{soaRecord("example", 300, 300)}})
 	expectResult(t, answer, ResultNotFound, SourceUpstream)
@@ -220,7 +221,7 @@ func TestNoData(t *testing.T) {
 }
 
 func TestServerErrorsMoveOn(t *testing.T) {
-	for _, rcode := range []uint16{rcodeServFail, rcodeRefused, 4} {
+	for _, rcode := range []uint16{dnswire.RcodeServFail, dnswire.RcodeRefused, 4} {
 		h := newHarness(t, serverA, serverB)
 		h.pending(0, "host.test")
 		first := h.sent()
@@ -241,7 +242,7 @@ func TestServerErrorsMoveOn(t *testing.T) {
 func TestServerErrorThenAnswer(t *testing.T) {
 	h := newHarness(t, serverA, serverB)
 	h.pending(0, "host.test")
-	h.answer(h.sent(), reply{flags: rcodeServFail})
+	h.answer(h.sent(), reply{flags: dnswire.RcodeServFail})
 	h.answer(h.sent(), reply{answers: []rr{aRecord("host.test", 60, addr(1))}})
 	expectResult(t, h.completion(0), ResultOK, SourceUpstream)
 }
@@ -253,7 +254,7 @@ func TestFormErrRetriesWithoutEDNS(t *testing.T) {
 	if !first.opt {
 		t.Fatal("first query without OPT")
 	}
-	h.answer(first, reply{flags: rcodeFormErr, noQuestion: true})
+	h.answer(first, reply{flags: dnswire.RcodeFormErr, noQuestion: true})
 	retry := h.sent()
 	if retry.opt || retry.Server != serverA || retry.id == first.id {
 		t.Fatalf("retry %+v", retry)
@@ -262,7 +263,7 @@ func TestFormErrRetriesWithoutEDNS(t *testing.T) {
 		t.Fatal("classic query too long")
 	}
 	// A second FORMERR from the same server makes it unusable.
-	h.answer(retry, reply{flags: rcodeFormErr})
+	h.answer(retry, reply{flags: dnswire.RcodeFormErr})
 	next := h.sent()
 	if next.Server != serverB || !next.opt {
 		t.Fatalf("next %+v", next)
@@ -281,7 +282,7 @@ func TestFormErrCannotExceedTransmissionLimit(t *testing.T) {
 	h.r.SetPolicy(policy, h.now)
 	h.pending(0, "old.test")
 	first := h.sent()
-	h.answer(first, reply{flags: rcodeFormErr})
+	h.answer(first, reply{flags: dnswire.RcodeFormErr})
 	retry := h.sent()
 	if retry.opt || retry.id == first.id {
 		t.Fatalf("classic retry %+v", retry)
@@ -319,7 +320,7 @@ func TestExhaustedServerMovesToNextServer(t *testing.T) {
 func TestFormErrWithOPTIsFailure(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.pending(0, "host.test")
-	h.answer(h.sent(), reply{flags: rcodeFormErr, opt: true})
+	h.answer(h.sent(), reply{flags: dnswire.RcodeFormErr, opt: true})
 	expectResult(t, h.completion(0), ResultTemporaryFailure, SourceUpstream)
 	h.noQuery()
 }
@@ -327,7 +328,7 @@ func TestFormErrWithOPTIsFailure(t *testing.T) {
 func TestClassicServerStaysClassic(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.pending(0, "host.test")
-	h.answer(h.sent(), reply{flags: rcodeFormErr})
+	h.answer(h.sent(), reply{flags: dnswire.RcodeFormErr})
 	retry := h.sent()
 	h.toDeadline()
 	again := h.sent()
@@ -356,15 +357,15 @@ func TestCompressedNames(t *testing.T) {
 	binary.BigEndian.PutUint16(payload[6:], 2)
 	// www.example.com CNAME cdn.<example.com>, then <cdn.example.com> A.
 	payload = append(payload, 0xc0, 12)
-	payload = binary.BigEndian.AppendUint16(payload, typeCNAME)
-	payload = binary.BigEndian.AppendUint16(payload, classIN)
+	payload = binary.BigEndian.AppendUint16(payload, dnswire.TypeCNAME)
+	payload = binary.BigEndian.AppendUint16(payload, dnswire.ClassIN)
 	payload = binary.BigEndian.AppendUint32(payload, 60)
 	payload = binary.BigEndian.AppendUint16(payload, 6)
 	target := len(payload)
 	payload = append(payload, 3, 'C', 'D', 'N', 0xc0, 16)
 	payload = append(payload, 0xc0, byte(target))
-	payload = binary.BigEndian.AppendUint16(payload, typeA)
-	payload = binary.BigEndian.AppendUint16(payload, classIN)
+	payload = binary.BigEndian.AppendUint16(payload, dnswire.TypeA)
+	payload = binary.BigEndian.AppendUint16(payload, dnswire.ClassIN)
 	payload = binary.BigEndian.AppendUint32(payload, 60)
 	payload = binary.BigEndian.AppendUint16(payload, 4)
 	payload = append(payload, 10, 9, 9, 9)
@@ -382,7 +383,7 @@ type malformedCase struct {
 
 func appendRecordHeader(payload []byte, kind uint16, length int) []byte {
 	payload = binary.BigEndian.AppendUint16(payload, kind)
-	payload = binary.BigEndian.AppendUint16(payload, classIN)
+	payload = binary.BigEndian.AppendUint16(payload, dnswire.ClassIN)
 	payload = binary.BigEndian.AppendUint32(payload, 60)
 	return binary.BigEndian.AppendUint16(payload, uint16(length))
 }
@@ -420,24 +421,24 @@ func TestMalformedResponses(t *testing.T) {
 			payload := withAnswers(q, 1)
 			at := len(payload)
 			payload = append(payload, 0xc0, byte(at))
-			return appendRecordHeader(payload, typeA, 4)
+			return appendRecordHeader(payload, dnswire.TypeA, 4)
 		}},
 		{"two pointers loop", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			at := len(payload)
 			payload = append(payload, 1, 'x', 0xc0, byte(at))
-			return append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 		}},
 		{"pointer outside packet", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, 0xc3, 0xff)
-			return append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 		}},
 		{"forward pointer", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			at := len(payload)
 			payload = append(payload, 0xc0, byte(at+2), 0)
-			return append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 		}},
 		{"truncated pointer", func(q query) []byte {
 			payload := withAnswers(q, 1)
@@ -450,48 +451,48 @@ func TestMalformedResponses(t *testing.T) {
 				payload = append(payload, 'a')
 			}
 			payload = append(payload, 0)
-			return append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 		}},
 		{"extended label type", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, 0x41, 0)
-			return append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 		}},
 		{"name too long", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, long...)
-			return append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 		}},
 		{"rdlength past end", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, wire(q.name)...)
-			return append(appendRecordHeader(payload, typeA, 40), 1, 2, 3, 4)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 40), 1, 2, 3, 4)
 		}},
 		{"A rdata of 5 bytes", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, wire(q.name)...)
-			return append(appendRecordHeader(payload, typeA, 5), 1, 2, 3, 4, 5)
+			return append(appendRecordHeader(payload, dnswire.TypeA, 5), 1, 2, 3, 4, 5)
 		}},
 		{"CNAME rdata longer than the name", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, wire(q.name)...)
 			target := wire("x.test")
-			payload = appendRecordHeader(payload, typeCNAME, len(target)+1)
+			payload = appendRecordHeader(payload, dnswire.TypeCNAME, len(target)+1)
 			return append(append(payload, target...), 0)
 		}},
 		{"CNAME name crossing rdata", func(q query) []byte {
 			payload := withAnswers(q, 1)
 			payload = append(payload, wire(q.name)...)
 			target := wire("x.test")
-			payload = appendRecordHeader(payload, typeCNAME, 2)
+			payload = appendRecordHeader(payload, dnswire.TypeCNAME, 2)
 			return append(payload, target...)
 		}},
 		{"SOA short", func(q query) []byte {
-			payload := reply{id: q.id, question: q.name, flags: rcodeNXDomain}.bytes()
+			payload := reply{id: q.id, question: q.name, flags: dnswire.RcodeNXDomain}.bytes()
 			binary.BigEndian.PutUint16(payload[8:], 1)
 			payload = append(payload, wire("test")...)
 			data := append(append(wire("ns.test"), wire("admin.test")...), make([]byte, 19)...)
-			return append(appendRecordHeader(payload, typeSOA, len(data)), data...)
+			return append(appendRecordHeader(payload, dnswire.TypeSOA, len(data)), data...)
 		}},
 		{"huge counts", func(q query) []byte {
 			payload := withAnswers(q, 0xffff)
@@ -502,19 +503,19 @@ func TestMalformedResponses(t *testing.T) {
 		{"count past the records", func(q query) []byte {
 			payload := withAnswers(q, 2)
 			payload = append(payload, wire(q.name)...)
-			payload = append(appendRecordHeader(payload, typeA, 4), 1, 2, 3, 4)
+			payload = append(appendRecordHeader(payload, dnswire.TypeA, 4), 1, 2, 3, 4)
 			return append(payload, make([]byte, 5)...)
 		}},
 		{"two OPT records", func(q query) []byte {
 			payload := reply{id: q.id, question: q.name, opt: true,
-				additional: []rr{{name: ".", kind: typeOPT, class: 512}}}.bytes()
+				additional: []rr{{name: ".", kind: dnswire.TypeOPT, class: 512}}}.bytes()
 			return payload
 		}},
 		{"OPT in answers", func(q query) []byte {
-			return reply{id: q.id, question: q.name, answers: []rr{{name: ".", kind: typeOPT, class: 512}}}.bytes()
+			return reply{id: q.id, question: q.name, answers: []rr{{name: ".", kind: dnswire.TypeOPT, class: 512}}}.bytes()
 		}},
 		{"OPT not at the root", func(q query) []byte {
-			return reply{id: q.id, question: q.name, additional: []rr{{name: "x", kind: typeOPT, class: 512}}}.bytes()
+			return reply{id: q.id, question: q.name, additional: []rr{{name: "x", kind: dnswire.TypeOPT, class: 512}}}.bytes()
 		}},
 		{"too long", func(q query) []byte {
 			return append(withAnswers(q, 0), make([]byte, DatagramSize)...)
@@ -533,7 +534,7 @@ func TestMalformedResponses(t *testing.T) {
 			if next.Server != serverB {
 				t.Fatalf("malformed answer did not move on: %+v", next)
 			}
-			h.answer(next, reply{flags: rcodeServFail})
+			h.answer(next, reply{flags: dnswire.RcodeServFail})
 			expectResult(t, h.completion(0), ResultTemporaryFailure, SourceUpstream)
 			if _, done := h.lookup(1, "host.test"); !done || h.r.Stats().Positive != 0 {
 				t.Fatal("cache touched by a malformed answer")
@@ -559,7 +560,7 @@ func TestUnknownTypesSkipped(t *testing.T) {
 			{name: "host.test", kind: 99, ttl: 60, data: []byte{0xc0, 0xff, 0xff}},
 			aRecord("host.test", 60, addr(1)),
 		},
-		additional: []rr{{name: "host.test", kind: typeA, class: 255, ttl: 60, data: []byte{1}}},
+		additional: []rr{{name: "host.test", kind: dnswire.TypeA, class: 255, ttl: 60, data: []byte{1}}},
 	})
 	expectAddresses(t, answer, addr(1))
 }
@@ -950,7 +951,7 @@ func TestMaxTTLCap(t *testing.T) {
 
 func TestFailureCacheHit(t *testing.T) {
 	h := newHarness(t, serverA)
-	h.resolve("host.test", reply{flags: rcodeServFail})
+	h.resolve("host.test", reply{flags: dnswire.RcodeServFail})
 	answer, done := h.lookup(0, "host.test")
 	if !done {
 		t.Fatal("failure not cached")
@@ -1069,8 +1070,8 @@ func TestSetServersOrder(t *testing.T) {
 func TestFlush(t *testing.T) {
 	h := newHarness(t, serverA)
 	h.resolve("pos.test", reply{answers: []rr{aRecord("pos.test", 100, addr(1))}})
-	h.resolve("neg.test", reply{flags: rcodeNXDomain, authority: []rr{soaRecord("test", 100, 100)}})
-	h.resolve("fail.test", reply{flags: rcodeServFail})
+	h.resolve("neg.test", reply{flags: dnswire.RcodeNXDomain, authority: []rr{soaRecord("test", 100, 100)}})
+	h.resolve("fail.test", reply{flags: dnswire.RcodeServFail})
 	if stats := h.r.Stats(); stats.Positive != 1 || stats.Negative != 1 || stats.Failures != 1 || stats.CacheUsed != 3 {
 		t.Fatalf("stats %+v", stats)
 	}

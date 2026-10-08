@@ -5,12 +5,16 @@
 // parser and timer here runs on the host.
 package dns
 
-import "goos/userspace/network"
+import (
+	"goos/userspace/dnstcp"
+	"goos/userspace/dnswire"
+	"goos/userspace/network"
+)
 
 const (
 	// DatagramSize is the largest query or response handled, and the UDP
 	// payload size advertised in EDNS(0).
-	DatagramSize = 1232
+	DatagramSize = dnswire.EDNSPayload
 	// ClassicSize is the payload limit of a query without EDNS(0).
 	ClassicSize     = 512
 	MaxAddresses    = 8
@@ -23,11 +27,9 @@ const (
 	MaxTransactions = 4
 	// MaxStreamMessage is the largest DNS message taken over TCP: everything
 	// the two-byte length prefix can describe.
-	MaxStreamMessage = 65535
-	// MinMessage is the DNS header, the shortest message accepted.
-	MinMessage = headerSize
+	MaxStreamMessage = dnstcp.MaxMessage
 	// MaxQuery is the longest query the resolver writes.
-	MaxQuery = maxQuerySize
+	MaxQuery = dnswire.MaxQuery
 	// MaxWaiters bounds the clients attached to one transaction.
 	MaxWaiters    = 8
 	MaxCNAMEChain = 8

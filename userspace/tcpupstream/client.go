@@ -3,6 +3,7 @@
 // the same query over TCP; this package opens a connection to the server's
 // port 53, writes the query behind its two-byte length prefix, reads back
 // exactly one length-prefixed message and hands it to the resolver. The
+// framing itself is userspace/dnstcp, which dnsq shares. The
 // service owns the channel and the pools and sends what this package asks
 // it to, so the whole exchange runs in host tests against a real stack.
 //
@@ -14,9 +15,9 @@
 package tcpupstream
 
 import (
-	"encoding/binary"
-
 	"goos/userspace/dns"
+	"goos/userspace/dnstcp"
+	"goos/userspace/dnswire"
 	"goos/userspace/tcpapi"
 )
 
@@ -24,11 +25,10 @@ const (
 	// Port is the DNS server port every fallback connects to.
 	Port = 53
 	// MaxStreams bounds the fallbacks in flight. Each owns one assembly
-	// buffer of dns.MaxStreamMessage bytes. A transaction that gets TC=1
+	// buffer of dnstcp.MaxMessage bytes. A transaction that gets TC=1
 	// while both are busy waits in the resolver for one to free, at most
 	// until its own wait ends.
 	MaxStreams = 2
-	prefixSize = 2
 )
 
 // Sender sends one GTCP1 request and reports whether it went.
@@ -56,17 +56,8 @@ type stream struct {
 	server      [4]byte
 	endpoint    uint32
 	pending     uint64
-	// query holds the length prefix and the query, length bytes in all;
-	// written of them were accepted and chunk went out in the last Write.
-	query   [prefixSize + dns.MaxQuery]byte
-	length  int
-	written int
-	chunk   int
-	// received counts the stream bytes taken, prefix included; expected is
-	// the message length from the prefix once both bytes are in.
-	prefix   [prefixSize]byte
-	received int
-	expected int
+	query       dnstcp.Sender
+	response    dnstcp.Receiver
 }
 
 // Client is the resolver's side of one TCP session. A method that returns
@@ -77,10 +68,10 @@ type Client struct {
 	tx, rx      []byte
 	txSlots     tcpapi.Slots
 	streams     [MaxStreams]stream
-	buffers     [MaxStreams][dns.MaxStreamMessage]byte
+	buffers     [MaxStreams]dnstcp.Buffer
 	correlation uint64
 	request     tcpapi.Request
-	scratch     [dns.MaxQuery]byte
+	scratch     [dnswire.MaxQuery]byte
 }
 
 // Bind starts using a session whose TX pool is writable and RX pool
@@ -158,10 +149,8 @@ func (c *Client) Start(resolver *dns.Resolver, now uint64, out Sender) bool {
 		}
 		current := &c.streams[index]
 		current.transaction, current.serial, current.server = outgoing.Transaction, outgoing.Serial, outgoing.Server
-		binary.BigEndian.PutUint16(current.query[:prefixSize], uint16(outgoing.Length))
-		copy(current.query[prefixSize:], c.scratch[:outgoing.Length])
-		current.length, current.written, current.chunk = prefixSize+outgoing.Length, 0, 0
-		current.received, current.expected = 0, 0
+		current.query.Set(c.scratch[:outgoing.Length])
+		current.response.Reset()
 		current.phase, current.pending = opening, c.next()
 		c.request = tcpapi.Request{Opcode: tcpapi.OpOpen}
 		if !c.send(out, current.pending) {
@@ -234,11 +223,10 @@ func (c *Client) Answer(resolver *dns.Resolver, reply *tcpapi.Reply, correlation
 		current.phase = writing
 		return c.write(resolver, index, now, out)
 	case tcpapi.OpWrite:
-		if int(reply.Length) > current.chunk {
+		if !current.query.Accepted(int(reply.Length)) {
 			return false
 		}
-		current.written += int(reply.Length)
-		if current.written < current.length {
+		if !current.query.Done() {
 			return c.write(resolver, index, now, out)
 		}
 		current.phase = reading
@@ -258,7 +246,7 @@ func (c *Client) expected(current *stream, reply *tcpapi.Reply) bool {
 	case writing:
 		return reply.Opcode == tcpapi.OpWrite && reply.Endpoint == current.endpoint
 	case reading:
-		return reply.Opcode == tcpapi.OpRead && reply.Endpoint == current.endpoint && int(reply.Length) <= readSize(current)
+		return reply.Opcode == tcpapi.OpRead && reply.Endpoint == current.endpoint && int(reply.Length) <= current.response.Want(tcpapi.SlotSize)
 	}
 	return false
 }
@@ -280,26 +268,16 @@ func (c *Client) write(resolver *dns.Resolver, index int, now uint64, out Sender
 	if !free {
 		return c.fail(resolver, index, false, now, out)
 	}
-	current.chunk = min(current.length-current.written, tcpapi.SlotSize)
-	copy(c.tx[tcpapi.Offset(slot):], current.query[current.written:current.written+current.chunk])
+	length := copy(c.tx[tcpapi.Offset(slot):], current.query.Next(tcpapi.SlotSize))
 	c.txSlots.Lend(slot)
 	current.pending = c.next()
-	c.request = tcpapi.Request{Opcode: tcpapi.OpWrite, Endpoint: current.endpoint, Slot: slot, Length: uint16(current.chunk)}
+	c.request = tcpapi.Request{Opcode: tcpapi.OpWrite, Endpoint: current.endpoint, Slot: slot, Length: uint16(length)}
 	return c.send(out, current.pending)
-}
-
-// readSize asks for a whole slot until the prefix is in, then for no more
-// than the rest of the message.
-func readSize(current *stream) int {
-	if current.received < prefixSize {
-		return tcpapi.SlotSize
-	}
-	return min(current.expected-(current.received-prefixSize), tcpapi.SlotSize)
 }
 
 func (c *Client) read(current *stream, out Sender) bool {
 	current.pending = c.next()
-	c.request = tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: current.endpoint, Length: uint16(readSize(current))}
+	c.request = tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: current.endpoint, Length: uint16(current.response.Want(tcpapi.SlotSize))}
 	return c.send(out, current.pending)
 }
 
@@ -308,7 +286,7 @@ func (c *Client) read(current *stream, out Sender) bool {
 func (c *Client) received(resolver *dns.Resolver, index int, reply *tcpapi.Reply, now uint64, out Sender) bool {
 	current := &c.streams[index]
 	offset := tcpapi.Offset(reply.Slot)
-	complete, valid := current.take(&c.buffers[index], c.rx[offset:offset+uint64(reply.Length)])
+	complete, valid := current.response.Take(&c.buffers[index], c.rx[offset:offset+uint64(reply.Length)])
 	if !c.releaseSlot(reply.Slot, out) {
 		return false
 	}
@@ -322,33 +300,8 @@ func (c *Client) received(resolver *dns.Resolver, index int, reply *tcpapi.Reply
 	if !c.release(index, out) {
 		return false
 	}
-	resolver.ReceiveStream(transaction, serial, c.buffers[index][:current.expected], now)
+	resolver.ReceiveStream(transaction, serial, current.response.Message(&c.buffers[index]), now)
 	return true
-}
-
-// take adds stream bytes to buffer. It reports a complete message, and an
-// invalid length prefix: shorter than a DNS header or longer than the
-// buffer. Bytes after the message are ignored; the connection carries one.
-func (current *stream) take(buffer *[dns.MaxStreamMessage]byte, data []byte) (bool, bool) {
-	for len(data) > 0 {
-		if current.received < prefixSize {
-			current.prefix[current.received] = data[0]
-			current.received++
-			data = data[1:]
-			if current.received == prefixSize {
-				current.expected = int(binary.BigEndian.Uint16(current.prefix[:]))
-				if current.expected < dns.MinMessage || current.expected > len(buffer) {
-					return false, false
-				}
-			}
-			continue
-		}
-		have := current.received - prefixSize
-		count := copy(buffer[have:current.expected], data)
-		current.received += count
-		break
-	}
-	return current.received >= prefixSize && current.received-prefixSize == current.expected, true
 }
 
 // fail ends a fallback that got no whole answer and closes its connection.

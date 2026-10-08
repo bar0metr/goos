@@ -117,8 +117,12 @@ func Usage() {
 }
 
 // Fail ends the command with "command: path: reason", or "command: reason"
-// when path is nil. The line is written at once so it cannot interleave.
-func Fail(path []byte, reason string) {
+// when path is nil, and status 2. The line is written at once so it cannot
+// interleave.
+func Fail(path []byte, reason string) { FailStatus(2, path, reason) }
+
+// FailStatus is Fail with another exit status.
+func FailStatus(code uint64, path []byte, reason string) {
 	// Every copy stops one byte short so the newline always fits.
 	limit := len(errorBuffer) - 1
 	size := copy(errorBuffer[:limit], commandName)
@@ -136,7 +140,7 @@ func Fail(path []byte, reason string) {
 	size += copy(errorBuffer[size:limit], reason)
 	errorBuffer[size] = '\n'
 	writeErrorBytes(errorBuffer[:size+1])
-	finish(2, "")
+	finish(code, "")
 }
 
 // Check ends the command when a VFS request about path failed. A refused

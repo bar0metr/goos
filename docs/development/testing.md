@@ -70,7 +70,16 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     give `temporary failure`, `resolve status` must count two fallbacks, one
     answer and one failure, and with `system.net.tcp.time-wait-ms` at 1000
     for these lookups the TCP endpoint line of `net status` must match the
-    one before. Every query the guest sent
+    one before. On the second guest `dnsq` asks the peer directly: an A
+    query over UDP must print `;; transport: UDP` and the record, AAAA, MX,
+    TXT and SOA queries must print their data, a TXT byte 7 as `\007`, an
+    NXDOMAIN under `--raw` must print the rcode and the SOA in the authority
+    section and exit 0, and `--tcp` must answer over TCP without UDP. A name
+    the peer truncates over UDP must print the fallback notice and a TCP
+    answer of more than 4096 bytes, while `--udp` must fail with exit
+    status 1 and no fallback. The peer's log must show one UDP and one TCP
+    query for the plain name and two UDP queries and one TCP query for the
+    truncated one. Every query the first guest sent
     must have left from its own port in the ephemeral range, and the
     40-second lease must have been renewed. Last on that guest,
     `system.net.udp.max-payload` set to 1300 must apply on `net reload`,
@@ -99,7 +108,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   GoOS. The host tests and fuzz seeds of `userspace/netdev`,
   `userspace/netapi` and `userspace/network` run in `make test-unit` and
   `make test-security`, as do those of `userspace/udpapi`,
-  `userspace/udpserve` and `userspace/upstream`. The last two hold the
+  `userspace/udpserve`, `userspace/upstream`, `userspace/dns`,
+  `userspace/dnswire`, `userspace/dnstcp`, `userspace/dnsq` and
+  `userspace/tcpupstream`. The last two hold the
   GUDP1 logic of `netd` and `resolved`, which build only for the guest:
   deferred `RecvFrom`, `Close` and session teardown on the service side,
   and the resolver's queries over a real stack through the GUDP1 codec,
@@ -112,7 +123,21 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   with `tcpserve` and `udpserve` on both ends: one answer split across the
   prefix and two RX slots, then a cache hit; one answer cut short; and 16
   fallbacks in a row, each leaving the resolver's side in TIME_WAIT, then 8
-  more once the interval ends. The `userspace/network` tests check that a
+  more once the interval ends. `userspace/dnswire`, the one DNS parser, has
+  tests for names, compression pointers and their loops, label and name
+  limits, query encoding for every supported QTYPE, response matching and
+  validation, EDNS fields, record data checks and the text of every type,
+  TXT and name escapes included, and fuzzes the name decoder and the
+  parser with the formatter. `userspace/dnstcp` tests the length prefix
+  split every way, a body over many reads and over one slot, the
+  65535-byte maximum, a short prefix, early EOF and partial writes.
+  `userspace/dnsq` runs the command's logic against a scripted GUDP1 and
+  GTCP1 peer: argument errors, every type, EDNS and `--no-edns`, error
+  rcodes, mismatched and malformed answers, UDP fallback to TCP with a
+  multi-slot answer, `--udp`, forced TCP with 3-byte writes and 1-byte
+  reads, each transport failure, one deadline across both transports,
+  `--short`, `--raw` and TXT escapes, and checks that every lent slot comes
+  back and every endpoint closes. The `userspace/network` tests check that a
   recycled TIME_WAIT slot keeps its four-tuple as a tombstone: a connect
   limited to the old port is refused, a second port is taken instead,
   another remote port or address may use the old port, the old ID stays

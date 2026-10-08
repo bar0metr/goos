@@ -163,7 +163,10 @@ $(KERNEL_IO): kernel/arch/amd64/io.S
 	@mkdir -p $(dir $@)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
-$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAMES_SOURCES)
+# The kernel also imports a few userspace protocol packages (the launch and
+# startup formats), so their sources are prerequisites too.
+KERNEL_LIBRARY = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "uefi baremetal linux amd64 tinygo $(BUILD_TAGS)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{end}}' ./kernel 2>/dev/null || echo FORCE)
+$(KERNEL): $(shell find kernel internal -type f) $(filter-out $(CURDIR)/kernel/% $(CURDIR)/internal/%,$(KERNEL_LIBRARY)) go.mod $(KERNEL_IO) $(STACKFRAMES_SOURCES)
 	@mkdir -p $(KERNEL_DIR)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
@@ -435,7 +438,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes

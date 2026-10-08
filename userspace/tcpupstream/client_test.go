@@ -7,6 +7,8 @@ import (
 
 	"goos/kernel/ipc"
 	"goos/userspace/dns"
+	"goos/userspace/dnstcp"
+	"goos/userspace/dnswire"
 	"goos/userspace/hostname"
 	"goos/userspace/tcpapi"
 )
@@ -401,7 +403,7 @@ func TestReadFailures(t *testing.T) {
 }
 
 func TestBadLengthPrefix(t *testing.T) {
-	for _, length := range []uint16{0, 1, dns.MinMessage - 1} {
+	for _, length := range []uint16{0, 1, dnswire.HeaderSize - 1} {
 		f := newFixture(t, 1)
 		f.truncated(0, "big.test")
 		f.connect()
@@ -420,8 +422,8 @@ func TestLargestMessage(t *testing.T) {
 	f.truncated(0, "big.test")
 	f.connect()
 	f.written(1 << 16)
-	stream := framed(f.response([4]byte{10, 0, 0, 6}, dns.MaxStreamMessage))
-	if len(stream) != dns.MaxStreamMessage+2 {
+	stream := framed(f.response([4]byte{10, 0, 0, 6}, dnstcp.MaxMessage))
+	if len(stream) != dnstcp.MaxMessage+2 {
 		t.Fatalf("stream %d bytes", len(stream))
 	}
 	for slot := uint8(0); len(stream) > 0; slot = (slot + 1) % tcpapi.RXSlots {

@@ -12,7 +12,10 @@ const (
 	// nine, and each record is a few hundred bytes (ADR 0111).
 	MaxServices     = 32
 	MaxDependencies = 8
-	MaxCapabilities = 7
+	// MaxCapabilities fits three streams, a VFS session and a UDP and a TCP
+	// session of three handles each; a launch request with ten grants is 216
+	// of the 256 payload bytes.
+	MaxCapabilities = 10
 	MaxEvents       = 32
 	MaxName         = 31
 	MaxExecutable   = 127

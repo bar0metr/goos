@@ -7,9 +7,13 @@ import (
 
 const (
 	typeA     = 1
+	typeNS    = 2
 	typeCNAME = 5
 	typeSOA   = 6
+	typePTR   = 12
+	typeMX    = 15
 	typeTXT   = 16
+	typeAAAA  = 28
 	typeOPT   = 41
 
 	rcodeNoError  = 0
@@ -150,12 +154,14 @@ func skipName(data []byte, offset int) (int, bool) {
 }
 
 type record struct {
-	name   string
-	rtype  uint16
-	ttl    uint32
-	addr   ipv4
-	target string
-	text   string
+	name       string
+	rtype      uint16
+	ttl        uint32
+	addr       ipv4
+	addr6      [16]byte
+	preference uint16
+	target     string
+	text       string
 }
 
 type resolution struct {
@@ -226,11 +232,19 @@ func (z *zone) resolve(name string, qtype uint16, overTCP bool) resolution {
 		case kindDROP:
 			return resolution{drop: true}
 		case kindA:
-			switch {
-			case qtype == typeA:
+			if qtype == typeA {
 				for _, addr := range entry.addrs {
 					r.answers = append(r.answers, record{name: current, rtype: typeA, ttl: entry.ttl, addr: addr})
 				}
+			}
+			for _, rr := range entry.records {
+				if rr.rtype == qtype {
+					rr.name = current
+					r.answers = append(r.answers, rr)
+				}
+			}
+			switch {
+			case len(r.answers) != 0 && r.answers[len(r.answers)-1].name == current:
 			case qtype == typeSOA && current == zoneSuffix:
 				r.answers = append(r.answers, soaRecord())
 			default:
@@ -354,7 +368,12 @@ func (b *dnsBuilder) record(rr record) {
 	switch rr.rtype {
 	case typeA:
 		b.buf = append(b.buf, rr.addr[:]...)
-	case typeCNAME:
+	case typeAAAA:
+		b.buf = append(b.buf, rr.addr6[:]...)
+	case typeCNAME, typeNS, typePTR:
+		b.name(splitName(rr.target))
+	case typeMX:
+		b.u16(rr.preference)
 		b.name(splitName(rr.target))
 	case typeTXT:
 		b.buf = append(b.buf, byte(len(rr.text)))

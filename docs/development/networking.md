@@ -421,6 +421,20 @@ by `net reload`;
 there is no parallel setting syntax. Both commands follow the normal native
 manifest, help, separate-image and standard-stream rules.
 
+Later commands extend this set without new grant bits. `userspace/bin/dnsq`
+declares `GrantUDP | GrantTCP` and sends one DNS query to a numeric server
+over its own sessions, past `resolved`:
+
+```text
+dnsq @SERVER [-t|--tcp] [-u|--udp] [--no-edns] [--timeout MS] [--short|--raw] NAME [TYPE]
+```
+
+It shares the message parser in `userspace/dnswire` and the TCP framing in
+`userspace/dnstcp` with the resolver. Exit 0 means a complete, valid
+response of any rcode, exit 1 a transport, protocol, timeout or truncation
+failure, exit 2 a usage error. The shell guide documents the options and
+output.
+
 ## 8. Restart and failure behavior
 
 PID 1 keeps the NIC device capabilities so a replacement driver can receive
