@@ -271,6 +271,9 @@ For each pipeline stage PID 1 grants:
 | `udp` | new UDP session channel, only when the entry asks for `GrantUDP` and `netd` accepted the session | R W Wait |
 | `udp-tx` | the session's TX pool, 4 pages, with `udp` | R W |
 | `udp-rx` | the session's RX pool, 8 pages, with `udp` | R |
+| `tcp` | new TCP session channel, only when the entry asks for `GrantTCP` and `netd` accepted the session | R W Wait |
+| `tcp-tx` | the session's TX pool, 4 pages, with `tcp` | R W |
+| `tcp-rx` | the session's RX pool, 8 pages, with `tcp` | R |
 
 The VFS session is a fresh channel from `ChannelCreate`. PID 1 sends the
 server end to VFS as an IPC attachment on the control channel and consumes the
@@ -287,7 +290,8 @@ no name lookup. `GrantUDP` is separate from all four: no ping, admin or
 resolver grant carries the right to send a datagram, and a UDP session
 reads no status. `ping` asks for `GrantNetworkPing` and `GrantResolve`,
 `resolve` for `GrantResolveAdmin` (ADR 0194), and `udp` for `GrantUDP`
-alone (ADR 0195). Grants are a 16-bit set in command index format 4.
+alone (ADR 0195). `GrantTCP` is independent of all of them; `tcp` asks for it
+alone (ADR 0196). Grants are stored in command index format 5.
 
 ## Device authority
 

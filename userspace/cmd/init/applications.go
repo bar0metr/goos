@@ -135,6 +135,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		udpSession, _ = openUDPSession()
 	}
 	useUDP := udpSession[0] != 0
+	var tcpSession [3]handle.ID
+	if grantable && grantsRequested&commands.GrantTCP != 0 {
+		tcpSession, _ = openTCPSession()
+	}
+	useTCP := tcpSession[0] != 0
 	if useBlockCheck && boot.Mode() != supervisor.ModeRecovery {
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
@@ -142,6 +147,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
+		closeUDP(tcpSession)
 		return 0, 0, supervisor.LaunchVolumeBusy
 	}
 	var checkBlock handle.ID
@@ -153,6 +159,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
+			closeUDP(tcpSession)
 			return 0, 0, supervisor.LaunchCapabilityInstallFailed
 		}
 	}
@@ -164,6 +171,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
+			closeUDP(tcpSession)
 			if reason == "APP_CHANNEL_CREATE_FAILED" {
 				return 0, 0, supervisor.LaunchResourceExhausted
 			}
@@ -179,6 +187,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
+			closeUDP(tcpSession)
 			sys.HandleClose(handle.ID(pair[0]))
 			sys.HandleClose(checkBlock)
 			if useBlockCheck {
@@ -207,6 +216,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useUDP {
 		handles += len(udpSession)
+	}
+	if useTCP {
+		handles += len(tcpSession)
 	}
 	// A Linux program searches the Linux fixture directory, never the
 	// native one: its execve refuses native images.
@@ -257,6 +269,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		writer.Handle([]byte("udp-tx"), 0)
 		writer.Handle([]byte("udp-rx"), 0)
 	}
+	if useTCP {
+		writer.Handle([]byte("tcp"), 0)
+		writer.Handle([]byte("tcp-tx"), 0)
+		writer.Handle([]byte("tcp-rx"), 0)
+	}
 	// The request was validated when it arrived, so what does not fit is its
 	// size: its strings need more room in the startup object's tables.
 	startupData, ok := writer.Finish()
@@ -265,6 +282,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
+		closeUDP(tcpSession)
 		closePair(launchPair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
@@ -299,6 +317,12 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			supervisor.Capability{Name: "udp-tx", Handle: udpSession[1], Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true},
 			supervisor.Capability{Name: "udp-rx", Handle: udpSession[2], Type: handle.TypeMemory, Rights: capability.Read, Consume: true})
 	}
+	if useTCP {
+		grants = append(grants,
+			supervisor.Capability{Name: "tcp", Handle: tcpSession[0], Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
+			supervisor.Capability{Name: "tcp-tx", Handle: tcpSession[1], Type: handle.TypeMemory, Rights: capability.Read | capability.Write, Consume: true},
+			supervisor.Capability{Name: "tcp-rx", Handle: tcpSession[2], Type: handle.TypeMemory, Rights: capability.Read, Consume: true})
+	}
 	profile := supervisor.ProfileNormal
 	if linuxProcess {
 		profile = supervisor.ProfileLarge
@@ -318,6 +342,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
+		closeUDP(tcpSession)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {

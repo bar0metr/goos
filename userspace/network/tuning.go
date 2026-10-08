@@ -39,6 +39,7 @@ type Tuning struct {
 	DHCPMaxRetry      uint64
 	DHCPConflictRetry uint64
 	UDP               UDPTuning
+	TCP               TCPTuning
 }
 
 // UDPTuning holds the runtime limits of UDP, system.net.udp.*. Each is a
@@ -56,6 +57,20 @@ type UDPTuning struct {
 	MaxEndpoints     uint8
 	SessionEndpoints uint8
 	MaxPayload       uint16
+}
+
+type TCPTuning struct {
+	EphemeralMin     uint16
+	EphemeralMax     uint16
+	MaxEndpoints     uint8
+	SessionEndpoints uint8
+	ListenBacklog    uint8
+	SendBuffer       uint16
+	ReceiveBuffer    uint16
+	ConnectTimeout   uint64
+	RTOMin           uint64
+	RTOMax           uint64
+	TimeWait         uint64
 }
 
 // TuningFields is the number of stored tuning values ParseTuning takes.
@@ -94,6 +109,19 @@ func DefaultTuning() Tuning {
 			SessionEndpoints: MaxUDPSessionEndpoints,
 			MaxPayload:       UDPPayloadCapacity,
 		},
+		TCP: TCPTuning{
+			EphemeralMin:     49152,
+			EphemeralMax:     65535,
+			MaxEndpoints:     MaxTCPEndpoints,
+			SessionEndpoints: MaxTCPEndpointsPerSession,
+			ListenBacklog:    MaxTCPBacklog,
+			SendBuffer:       TCPSendCapacity,
+			ReceiveBuffer:    TCPReceiveCapacity,
+			ConnectTimeout:   30 * second,
+			RTOMin:           second,
+			RTOMax:           60 * second,
+			TimeWait:         60 * second,
+		},
 	}
 }
 
@@ -128,6 +156,17 @@ var tuningRange = [TuningFields]struct {
 	{1, MaxUDPEndpoints, false},                // FieldUDPMaxEndpoints
 	{1, MaxUDPSessionEndpoints, false},         // FieldUDPSessionEndpoints
 	{UDPMinPayload, UDPPayloadCapacity, false}, // FieldUDPMaxPayload
+	{udpEphemeralFloor, 65535, false},          // FieldTCPEphemeralMin
+	{udpEphemeralFloor, 65535, false},          // FieldTCPEphemeralMax
+	{1, MaxTCPEndpoints, false},                // FieldTCPMaxEndpoints
+	{1, MaxTCPEndpointsPerSession, false},      // FieldTCPSessionEndpoints
+	{1, MaxTCPBacklog, false},                  // FieldTCPListenBacklog
+	{1, TCPSendCapacity, false},                // FieldTCPSendBuffer
+	{1, TCPReceiveCapacity, false},             // FieldTCPReceiveBuffer
+	{1000, 300_000, true},                      // FieldTCPConnectTimeout
+	{100, 60_000, true},                        // FieldTCPRTOMin
+	{1000, 300_000, true},                      // FieldTCPRTOMax
+	{1000, 600_000, true},                      // FieldTCPTimeWait
 }
 
 const (
@@ -187,6 +226,19 @@ func tuningFrom(values *[TuningFields]uint64) Tuning {
 			SessionEndpoints: uint8(values[FieldUDPSessionEndpoints-FieldTTL]),
 			MaxPayload:       uint16(values[FieldUDPMaxPayload-FieldTTL]),
 		},
+		TCP: TCPTuning{
+			EphemeralMin:     uint16(values[FieldTCPEphemeralMin-FieldTTL]),
+			EphemeralMax:     uint16(values[FieldTCPEphemeralMax-FieldTTL]),
+			MaxEndpoints:     uint8(values[FieldTCPMaxEndpoints-FieldTTL]),
+			SessionEndpoints: uint8(values[FieldTCPSessionEndpoints-FieldTTL]),
+			ListenBacklog:    uint8(values[FieldTCPListenBacklog-FieldTTL]),
+			SendBuffer:       uint16(values[FieldTCPSendBuffer-FieldTTL]),
+			ReceiveBuffer:    uint16(values[FieldTCPReceiveBuffer-FieldTTL]),
+			ConnectTimeout:   values[FieldTCPConnectTimeout-FieldTTL],
+			RTOMin:           values[FieldTCPRTOMin-FieldTTL],
+			RTOMax:           values[FieldTCPRTOMax-FieldTTL],
+			TimeWait:         values[FieldTCPTimeWait-FieldTTL],
+		},
 	}
 }
 
@@ -215,6 +267,17 @@ func (tuning *Tuning) values() [TuningFields]uint64 {
 		uint64(tuning.UDP.MaxEndpoints),
 		uint64(tuning.UDP.SessionEndpoints),
 		uint64(tuning.UDP.MaxPayload),
+		uint64(tuning.TCP.EphemeralMin),
+		uint64(tuning.TCP.EphemeralMax),
+		uint64(tuning.TCP.MaxEndpoints),
+		uint64(tuning.TCP.SessionEndpoints),
+		uint64(tuning.TCP.ListenBacklog),
+		uint64(tuning.TCP.SendBuffer),
+		uint64(tuning.TCP.ReceiveBuffer),
+		tuning.TCP.ConnectTimeout,
+		tuning.TCP.RTOMin,
+		tuning.TCP.RTOMax,
+		tuning.TCP.TimeWait,
 	}
 }
 
@@ -238,7 +301,10 @@ func (tuning Tuning) Validate() Field {
 	if tuning.DHCPMaxRetry < tuning.DHCPInitialRetry {
 		return FieldDHCPMaxRetry
 	}
-	return tuning.UDP.validate()
+	if field := tuning.UDP.validate(); field != FieldNone {
+		return field
+	}
+	return tuning.TCP.validate()
 }
 
 // validate checks the UDP pairs once each value is in range: the ephemeral
@@ -250,6 +316,22 @@ func (udp UDPTuning) validate() Field {
 	}
 	if udp.SessionEndpoints > udp.MaxEndpoints {
 		return FieldUDPSessionEndpoints
+	}
+	return FieldNone
+}
+
+func (tcp TCPTuning) validate() Field {
+	if tcp.EphemeralMax < tcp.EphemeralMin {
+		return FieldTCPEphemeralMax
+	}
+	if tcp.SessionEndpoints > tcp.MaxEndpoints {
+		return FieldTCPSessionEndpoints
+	}
+	if tcp.ConnectTimeout < tcp.RTOMin {
+		return FieldTCPConnectTimeout
+	}
+	if tcp.RTOMax < tcp.RTOMin {
+		return FieldTCPRTOMax
 	}
 	return FieldNone
 }

@@ -60,7 +60,18 @@ const (
 	FieldUDPMaxEndpoints
 	FieldUDPSessionEndpoints
 	FieldUDPMaxPayload
-	lastField = FieldUDPMaxPayload
+	FieldTCPEphemeralMin
+	FieldTCPEphemeralMax
+	FieldTCPMaxEndpoints
+	FieldTCPSessionEndpoints
+	FieldTCPListenBacklog
+	FieldTCPSendBuffer
+	FieldTCPReceiveBuffer
+	FieldTCPConnectTimeout
+	FieldTCPRTOMin
+	FieldTCPRTOMax
+	FieldTCPTimeWait
+	lastField = FieldTCPTimeWait
 )
 
 // Result values are the GNETAPI1 wire values.
@@ -84,6 +95,10 @@ const (
 	// ResultAddressInUse is a UDP bind or connect that would make delivery
 	// ambiguous. GNETAPI never carries it.
 	ResultAddressInUse
+	ResultConnectionRefused
+	ResultReset
+	ResultClosed
+	ResultEOF
 )
 
 const (

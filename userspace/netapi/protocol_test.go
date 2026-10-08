@@ -19,6 +19,7 @@ func requests() []Request {
 		{Opcode: OpEcho, Destination: [4]byte{8, 8, 8, 8}, TimeoutMS: MaxEchoTimeoutMS},
 		{Opcode: OpServers},
 		{Opcode: OpServers, Generation: ^uint64(0)},
+		{Opcode: OpTCPStatus},
 	}
 }
 
@@ -58,6 +59,7 @@ func TestRequestInvalid(t *testing.T) {
 		{Opcode: OpServers, Destination: gateway},
 		{Opcode: OpServers, Sequence: 1},
 		{Opcode: OpServers, TimeoutMS: 100},
+		{Opcode: OpTCPStatus, Generation: 1},
 	}
 	for _, request := range invalid {
 		var wire ipc.Message
@@ -171,6 +173,12 @@ func replies() []Reply {
 		{Opcode: OpServers, ServerCount: 2, Servers: [MaxServers][4]byte{gateway, local}, Generation: 5},
 		{Opcode: OpServers},
 		{Opcode: OpServers, Result: ResultPermissionDenied},
+		{Opcode: OpTCPStatus, TCPRX: 1, TCPTX: 2, TCPRetransmits: 3, TCPDropChecksum: 4,
+			TCPEndpoints: 3, TCPListeners: 1, TCPConnections: 2, TCPStates: [tcpStateCount]uint16{0, 1, 1, 1},
+			TCPEphemeralMin: 49152, TCPEphemeralMax: 65535, TCPMaxEndpoints: 32, TCPSessionEndpoints: 8,
+			TCPListenBacklog: 8, TCPSendBuffer: 16384, TCPReceiveBuffer: 16384,
+			TCPConnectTimeoutMS: 30000, TCPRTOMinMS: 1000, TCPRTOMaxMS: 60000, TCPTimeWaitMS: 60000},
+		{Opcode: OpTCPStatus, Result: ResultPermissionDenied},
 	}
 }
 
@@ -261,6 +269,9 @@ func TestReplyUnusedBytes(t *testing.T) {
 		13: {42},
 		15: append([]int{replyServerN}, span(replyServerGen, replyServers+8)...),
 		16: append([]int{replyServerN}, span(replyServerGen, replyServers)...),
+		18: append(append(append(span(replyTCPCounters, replyTCPConnections+2),
+			span(replyTCPStates, replyTCPStates+2*tcpStateCount)...),
+			span(replyTCPLimits, replyTCPLimits+7)...), span(replyTCPLimits+8, replyTCPLimits+28)...),
 	}
 	for index, reply := range replies() {
 		mask := [ReplySize]bool{0: true, 1: true}
@@ -299,7 +310,8 @@ func TestReplyRejects(t *testing.T) {
 		{"protocol", func(m *ipc.Message) { m.ProtocolID++ }},
 		{"version 1", func(m *ipc.Message) { m.Version = 1 }},
 		{"version 2", func(m *ipc.Message) { m.Version = 2 }},
-		{"version 4", func(m *ipc.Message) { m.Version = 4 }},
+		{"version 3", func(m *ipc.Message) { m.Version = 3 }},
+		{"version 5", func(m *ipc.Message) { m.Version = 5 }},
 		{"request kind", func(m *ipc.Message) { m.Kind = ipc.KindRequest }},
 		{"correlation", func(m *ipc.Message) { m.Correlation = 8 }},
 		{"short", func(m *ipc.Message) { m.PayloadSize = ReplySize - 1 }},

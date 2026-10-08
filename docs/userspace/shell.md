@@ -274,6 +274,21 @@ A refused operation prints `udp: OPERATION: REASON`, for example
 `udp: bind: address in use`; a wait that runs out prints `udp: timeout`.
 `udp` exits 0 on success and 2 on any failure or usage error.
 
+`tcp` exercises the native GTCP1 byte-stream API:
+
+- `tcp connect [-W MS] [-s SIZE] ADDRESS PORT [TEXT]` connects, writes the
+  optional text or pattern, half-closes its write side, then reads through EOF;
+- `tcp listen [-W MS] [-c COUNT] [-b ADDRESS] PORT` accepts COUNT connections,
+  echoes each stream, and half-closes after its peer's EOF;
+- `tcp self [-s SIZE] ADDRESS PORT [TEXT]` creates a listener and client in one
+  process to check loopback or own-address delivery.
+
+SIZE is 0 to 4096. `-W` is 100 to 60000 ms. `-c` is 1 to 8 and also sets the
+listen backlog. Reads print `N bytes` and printable contents, then `eof` after
+a FIN. Errors use `tcp: OPERATION: REASON`, including `connection refused`,
+`reset`, `address in use` and `timeout`. The command receives only `tcp`,
+`tcp-tx` and `tcp-rx`; it has no direct network stack or device authority.
+
 The validation build's `fault net-driver` kills the network driver once;
 PID 1 starts a new one with a new binding, and storage and the shell carry on.
 

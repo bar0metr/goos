@@ -119,6 +119,11 @@ func status() {
 		field("settings", append(text[:0], "built-in defaults; stored system.net.* settings not applied"...))
 	}
 	udp(&reply)
+	tcpReply, ok := utility.CallNetwork(netapi.Request{Opcode: netapi.OpTCPStatus})
+	if !ok || tcpReply.Result != netapi.ResultOK {
+		utility.Fail(nil, "network service unavailable")
+	}
+	tcp(&tcpReply)
 	utility.Mark("NET_STATUS_OK\n")
 }
 
@@ -153,6 +158,40 @@ func udp(reply *netapi.Reply) {
 	limits = appendDecimal(limits, uint64(reply.UDPReceiveQueue))
 	limits = append(limits, " payload "...)
 	field("limits", appendDecimal(limits, uint64(reply.UDPMaxPayload)))
+}
+
+func tcp(reply *netapi.Reply) {
+	utility.PrintText("tcp:")
+	utility.EndLine()
+	endpoints := appendDecimal(text[:0], uint64(reply.TCPEndpoints))
+	endpoints = append(endpoints, '/')
+	endpoints = appendDecimal(endpoints, uint64(reply.TCPMaxEndpoints))
+	endpoints = append(endpoints, " listeners "...)
+	endpoints = appendDecimal(endpoints, uint64(reply.TCPListeners))
+	endpoints = append(endpoints, " connections "...)
+	field("endpoints", appendDecimal(endpoints, uint64(reply.TCPConnections)))
+	segments := append(text[:0], "rx "...)
+	segments = appendDecimal(segments, reply.TCPRX)
+	segments = append(segments, " tx "...)
+	segments = appendDecimal(segments, reply.TCPTX)
+	segments = append(segments, " retransmits "...)
+	field("segments", appendDecimal(segments, reply.TCPRetransmits))
+	dropped := append(text[:0], "checksum "...)
+	dropped = appendDecimal(dropped, reply.TCPDropChecksum)
+	dropped = append(dropped, " no-tcb "...)
+	dropped = appendDecimal(dropped, reply.TCPDropNoTCB)
+	dropped = append(dropped, " window "...)
+	field("dropped", appendDecimal(dropped, reply.TCPDropWindow))
+	limits := append(text[:0], "ports "...)
+	limits = appendDecimal(limits, uint64(reply.TCPEphemeralMin))
+	limits = append(limits, '-')
+	limits = appendDecimal(limits, uint64(reply.TCPEphemeralMax))
+	limits = append(limits, " backlog "...)
+	limits = appendDecimal(limits, uint64(reply.TCPListenBacklog))
+	limits = append(limits, " buffers "...)
+	limits = appendDecimal(limits, uint64(reply.TCPSendBuffer))
+	limits = append(limits, '/')
+	field("limits", appendDecimal(limits, uint64(reply.TCPReceiveBuffer)))
 }
 
 func reload() {

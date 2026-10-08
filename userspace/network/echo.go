@@ -189,6 +189,7 @@ func (stack *Stack) sendWaiting(nextHop IPv4, mac MAC, now uint64) {
 		}
 	}
 	stack.sendPendingUDP(nextHop, mac)
+	stack.sendPendingTCP(nextHop, now)
 }
 
 func (stack *Stack) failWaiting(nextHop IPv4, result Result) {
@@ -199,6 +200,7 @@ func (stack *Stack) failWaiting(nextHop IPv4, result Result) {
 		}
 	}
 	stack.dropPendingUDP(nextHop, false)
+	stack.failPendingTCP(nextHop, result)
 }
 
 func (stack *Stack) failEchoes(result Result) {

@@ -19,7 +19,7 @@ a namespace and a setting within it. Values are one of three types:
 The running image declares the schema at startup. A key it does not declare is
 not a setting: setting one answers "no such setting" rather than creating it, so
 a typo fails instead of becoming a value nothing reads. The store holds at most
-64 entries, declared and published keys together.
+96 entries, declared and published keys together.
 
 Some entries are published rather than configured — the name, release and
 machine of the running image. They are declared read-only, nothing may write
@@ -197,16 +197,35 @@ open endpoints keep their ports, queued datagrams stay queued and can still
 be received, and a lowered limit refuses the next `Open`, the next datagram
 to be queued or the next payload over it. Checksums, length checks, the bind
 and delivery rules, loopback isolation and endpoint ownership have no
-setting. A future `system.net.tcp.*` block for TCP is to follow the same
-model: a block of the network tuning, read and applied with the rest of
-`system.net.*`.
+setting. TCP uses the same limit model.
+
+Its TCP settings (ADR 0196), all `uint`:
+
+| Key | Default | Range | Meaning |
+| --- | ---: | ---: | --- |
+| `system.net.tcp.ephemeral-port-min` | 49152 | 1024..65535 | lowest automatic local port |
+| `system.net.tcp.ephemeral-port-max` | 65535 | 1024..65535 | highest automatic local port; at least the minimum |
+| `system.net.tcp.max-endpoints` | 32 | 1..32 | endpoints across all TCP sessions |
+| `system.net.tcp.max-endpoints-per-session` | 8 | 1..8 | endpoints in one session; at most the global limit |
+| `system.net.tcp.listen-backlog` | 8 | 1..8 | children retained by one listener |
+| `system.net.tcp.send-buffer-bytes` | 16384 | 1..16384 | send bytes accepted per connection |
+| `system.net.tcp.recv-buffer-bytes` | 16384 | 1..16384 | contiguous receive bytes retained per connection |
+| `system.net.tcp.connect-timeout-ms` | 30000 | 1000..300000 | active and embryonic handshake deadline |
+| `system.net.tcp.rto-min-ms` | 1000 | 100..60000 | minimum retransmission timeout |
+| `system.net.tcp.rto-max-ms` | 60000 | 1000..300000 | maximum retransmission timeout; at least the minimum |
+| `system.net.tcp.time-wait-ms` | 60000 | 1000..600000 | TIME_WAIT retention |
+
+Lowering a TCP limit preserves existing endpoints and buffered bytes. It
+constrains the next endpoint, backlog child or buffer admission. The RTO and
+timer values apply at their next calculation. `connect-timeout-ms` must not be
+below `rto-min-ms`; a cross-field error names the second key involved.
 
 `system.net.ipv4.probe-interval-ms` no longer exists. A stored line for it is
 skipped at restore as an undeclared key; set `probe-min-ms`, `probe-max-ms`
 and `probe-wait-ms` instead.
 
 The store checks only their types. The network service reads all
-twenty-seven, the address, timer and UDP keys together, as one candidate when it starts and when `net reload` asks it to, within 5 s
+thirty-eight address, timer, UDP and TCP keys together as one candidate when it starts and when `net reload` asks it to, within 5 s
 in all and at most 2 s per key, counted in scheduler ticks; a key whose turn
 comes after the 5 s is not asked for, and the reload fails. DHCP mode ignores
 the other three keys. Static mode needs a unicast host address written as

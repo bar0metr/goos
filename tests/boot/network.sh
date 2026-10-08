@@ -70,6 +70,22 @@ require_after() { # name command pattern log
 	checks=$((checks + 1))
 }
 
+require_count_after() { # name command pattern count log
+	count=$(window "$5" "$2" | grep -c -- "$3" || true)
+	[ "$count" = "$4" ] || fail "$1" "$4 occurrences of $3 after '$2', saw $count" "$5"
+	checks=$((checks + 1))
+}
+
+wait_command() { # command timeout log
+	elapsed=0
+	while [ "$elapsed" -lt "$2" ]; do
+		window "$3" "$1" | grep -q '^SHELL_EXEC_OK$' && return 0
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	fail timeout "'$1' completion within $2s" "$3"
+}
+
 forbid_after() { # name command pattern log
 	if window "$4" "$2" | grep -q -- "$3"; then
 		fail "$1" "no $3 after '$2'" "$4"
@@ -253,6 +269,16 @@ listening() {
 		elapsed=$((elapsed + 1))
 	done
 }
+tcp_listens=0
+tcp_listening() {
+	tcp_listens=$((tcp_listens + 1))
+	elapsed=0
+	while [ "$(grep -c '^TCP_LISTENING' "$left" || true)" -lt "$tcp_listens" ]; do
+		[ "$elapsed" -lt 20 ] || fail tcp.listen "tcp listen number $tcp_listens bound" "$left"
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+}
 
 disk left
 disk right 192.0.2.11 'system.dns.server1 text 192.0.2.53'
@@ -335,6 +361,58 @@ sleep 2
 peer_command 'udp-send 192.0.2.10 9999 4006 nobody'
 sleep 1
 type_line 3 'net status '
+# Generic TCP: remote echo with peer MSS segmentation, deferred operations,
+# retransmission after a dropped data segment, reset/refusal, local delivery,
+# and a guest listener whose Accept waits before the other guest connects.
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 echo tcp'
+wait_for '^8 bytes: echo tcp$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 echo tcp' 12 "$left"
+type_line 3 'tcp connect -s 4096 -W 8000 192.0.2.53 7'
+# Guest reads may join segments that arrive together, so only the total is
+# fixed here; the segment sizes are checked at the peer below.
+wait_for '^tcp-echo .* 496$' 12 "$queries"
+wait_command 'tcp connect -s 4096 -W 8000 192.0.2.53 7' 12 "$left"
+echoed=$(window "$left" 'tcp connect -s 4096 -W 8000 192.0.2.53 7' | sed -n 's/^\([0-9]*\) bytes:.*/\1/p' | awk '{sum += $1} END {print sum + 0}')
+[ "$echoed" = 4096 ] || fail tcp.stream "4096 echoed bytes, got $echoed" "$left"
+checks=$((checks + 1))
+peer_command 'tcp-delay-synack 1200'
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 delayed'
+wait_for '^7 bytes: delayed$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 delayed' 12 "$left"
+peer_command 'tcp-drop-next data'
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 retry'
+wait_for '^5 bytes: retry$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 retry' 12 "$left"
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 reorder'
+wait_for '^7 bytes: reorder$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 reorder' 12 "$left"
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 duplicate'
+wait_for '^9 bytes: duplicate$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 duplicate' 12 "$left"
+peer_command 'tcp-zero-next 2200'
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 zero'
+wait_for '^4 bytes: zero$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 zero' 12 "$left"
+type_line 3 'tcp connect -W 8000 192.0.2.53 7 reset'
+wait_for '^tcp: reset$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 7 reset' 12 "$left"
+type_line 3 'tcp connect -W 8000 192.0.2.53 9 closed'
+wait_for '^tcp: connect: connection refused$' 12 "$left"
+wait_command 'tcp connect -W 8000 192.0.2.53 9 closed' 12 "$left"
+type_line 3 'tcp self 127.0.0.1 9300 loop'
+wait_for '^4 bytes: loop$' 12 "$left"
+wait_command 'tcp self 127.0.0.1 9300 loop' 12 "$left"
+type_line 3 'tcp self 127.0.0.2 9301 other'
+wait_for '^5 bytes: other$' 12 "$left"
+wait_command 'tcp self 127.0.0.2 9301 other' 12 "$left"
+type_line 3 'tcp self 192.0.2.10 9302 own'
+wait_for '^3 bytes: own$' 12 "$left"
+wait_command 'tcp self 192.0.2.10 9302 own' 12 "$left"
+type_line 3 'tcp listen -W 8000 -c 1 -b 192.0.2.10 9303'
+tcp_listening
+type_line 4 'tcp connect -W 8000 192.0.2.10 9303 guest stream'
+wait_for '^12 bytes: guest stream$' 12 "$right"
+sleep 4
 peer_command 'edns off'
 type_line 3 'resolve fallback.test'
 peer_command 'edns on'
@@ -352,6 +430,14 @@ type_line 3 'udp self -s 1300 127.0.0.1 9201'
 type_line 3 'config set system.net.udp.ephemeral-port-min 60000'
 type_line 3 'config set system.net.udp.ephemeral-port-max 50000'
 type_line 3 'net reload   '
+type_line 3 'config set system.net.udp.ephemeral-port-min 49152'
+type_line 3 'config set system.net.udp.ephemeral-port-max 65535'
+type_line 3 'config set system.net.tcp.rto-min-ms 2000'
+type_line 3 'net reload    '
+type_line 3 'config set system.net.tcp.rto-max-ms 1000'
+type_line 3 'net reload     '
+type_line 3 'config set system.net.tcp.rto-min-ms 1000'
+type_line 3 'config set system.net.tcp.rto-max-ms 60000'
 type_line 3 'net status  '
 # Address conflicts on the static guest: one claim is defended, a second
 # inside the defend interval makes it give the address up, and a probe the
@@ -424,6 +510,29 @@ require_after left.udp-checksum 'udp listen -c 1 -W 8000 9005' '^4 bytes from 19
 forbid_after left.udp-corrupt 'udp listen -c 1 -W 8000 9005' ': bad$' "$left"
 require_after left.udp-counters 'net status ' '^  dropped: no-endpoint [1-9][0-9]* queue-full 0 checksum 1 too-long 0$' "$left"
 require_after left.udp-limits 'net status ' '^  limits: ports 49152-65535 queue 8 payload 4096$' "$left"
+require_after left.tcp-echo 'tcp connect -W 8000 192.0.2.53 7 echo tcp' '^8 bytes: echo tcp$' "$left"
+require_after left.tcp-eof 'tcp connect -W 8000 192.0.2.53 7 echo tcp' '^eof$' "$left"
+# The peer echoes the 4096 bytes as three 1200-byte segments and a 496-byte
+# tail on one connection. Guest reads may join them, so count at the peer.
+large=$(sed -n 's/^tcp-echo \(.*\) 496$/\1/p' "$queries" | head -n 1)
+segments=$(grep -c "^tcp-echo $large 1200\$" "$queries" || true)
+[ -n "$large" ] && [ "$segments" = 3 ] || fail left.tcp-large-full "3 echoed 1200-byte segments and a 496-byte tail, saw $segments to '$large'" "$queries"
+checks=$((checks + 2))
+require_after left.tcp-delay 'tcp connect -W 8000 192.0.2.53 7 delayed' '^7 bytes: delayed$' "$left"
+require_after left.tcp-retransmit 'tcp connect -W 8000 192.0.2.53 7 retry' '^5 bytes: retry$' "$left"
+require_after left.tcp-reorder 'tcp connect -W 8000 192.0.2.53 7 reorder' '^7 bytes: reorder$' "$left"
+require_count_after left.tcp-duplicate 'tcp connect -W 8000 192.0.2.53 7 duplicate' '^9 bytes: duplicate$' 1 "$left"
+require_after left.tcp-zero-window 'tcp connect -W 8000 192.0.2.53 7 zero' '^4 bytes: zero$' "$left"
+require left.tcp-persist '^tcp-zero-probe ' "$queries"
+require_after left.tcp-reset 'tcp connect -W 8000 192.0.2.53 7 reset' '^tcp: reset$' "$left"
+require_after left.tcp-refused 'tcp connect -W 8000 192.0.2.53 9 closed' '^tcp: connect: connection refused$' "$left"
+require_after left.tcp-loopback 'tcp self 127.0.0.1 9300 loop' '^4 bytes: loop$' "$left"
+require_after left.tcp-loopback-other 'tcp self 127.0.0.2 9301 other' '^5 bytes: other$' "$left"
+require_after left.tcp-own 'tcp self 192.0.2.10 9302 own' '^3 bytes: own$' "$left"
+require_after left.tcp-listener 'tcp listen -W 8000 -c 1 -b 192.0.2.10 9303' '^12 bytes: guest stream$' "$left"
+require_after right.tcp-client 'tcp connect -W 8000 192.0.2.10 9303 guest stream' '^12 bytes: guest stream$' "$right"
+require_after left.tcp-status 'net status  ' '^tcp:$' "$left"
+require_after left.tcp-limits 'net status  ' '^  limits: ports 49152-65535 backlog 8 buffers 16384/16384$' "$left"
 require_after left.dns-fallback 'resolve fallback.test' '^fallback\.test: 192\.0\.2\.12 (dns, ttl 60 s)$' "$left"
 [ "$(queried fallback.test)" = 2 ] || fail left.edns-fallback "two queries for fallback.test, one with EDNS and one without" "$queries"
 checks=$((checks + 1))
@@ -444,6 +553,8 @@ require_after left.udp-reload 'net reload  ' '^network configuration applied$' "
 require_after left.udp-payload-limit 'udp self -s 1301 127.0.0.1 9200' '^udp: send: invalid argument$' "$left"
 require_after left.udp-payload-kept 'udp self -s 1300 127.0.0.1 9201' '^1300 bytes from 127\.0\.0\.1:' "$left"
 require_after left.udp-cross-field 'net reload   ' 'invalid setting system\.net\.udp\.ephemeral-port-max; previous configuration kept' "$left"
+require_after left.tcp-reload 'net reload    ' '^network configuration applied$' "$left"
+require_after left.tcp-cross-field 'net reload     ' 'invalid setting system\.net\.tcp\.rto-max-ms; previous configuration kept' "$left"
 require_after left.udp-limits-kept 'net status  ' '^  limits: ports 49152-65535 queue 8 payload 1300$' "$left"
 require_after right.defended 'net status' '^  conflicts: probe 0 active 1 defended 1 relinquished 0' "$right"
 require_after right.defended-ready 'net status' '^  state: ready$' "$right"
@@ -476,6 +587,7 @@ type_line 3 'resolve localhost'
 type_line 3 'hosts get localhost'
 type_line 3 'resolve example.test'
 type_line 3 'udp self 127.0.0.2 9100 lonely'
+type_line 3 'tcp self 127.0.0.2 9300 lonely'
 stop 3 "$log"
 require none.absent 'Network: no legacy virtio-net device' "$log"
 require none.normal BOOT_MODE_NORMAL "$log"
@@ -493,6 +605,7 @@ require_after none.resolve 'resolve localhost' '^localhost: 127\.0\.0\.1 (localh
 require_after none.hosts 'hosts get localhost' '^127\.0\.0\.1 localhost$' "$log"
 require_after none.no-servers 'resolve example.test' 'no DNS servers' "$log"
 require_after none.udp-loopback 'udp self 127.0.0.2 9100 lonely' '^6 bytes from 127\.0\.0\.1:[0-9]* to 127\.0\.0\.2: lonely$' "$log"
+require_after none.tcp-loopback 'tcp self 127.0.0.2 9300 lonely' '^6 bytes: lonely$' "$log"
 printf 'PASS no network (%s)\n' "$log"
 fi
 

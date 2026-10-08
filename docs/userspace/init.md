@@ -297,6 +297,13 @@ writable as `udp-tx` and the RX pool read-only as `udp-rx`. No other grant
 opens a UDP session. A launch that fails after the session opened closes
 all three handles.
 
+For `GrantTCP`, PID 1 follows the same pattern with a TCP channel, a four-page
+TX pool and an eight-page RX pool. `ControlAddTCPSession` gives `netd` the
+channel, a read-only TX mapping and a writable RX mapping under `RightsTCP`.
+The command receives `tcp`, writable `tcp-tx` and read-only `tcp-rx`. A partial
+launch closes all three handles. Ping, administrator, resolver and UDP grants
+do not imply TCP authority.
+
 PID 1 also registers the resolver, `/system/services/resolved`, after `netd`,
 with its own control channel and a configuration session scoped to
 `system.dns.` with the `Read` and `HostsRead` rights (ADR 0194). It is a
