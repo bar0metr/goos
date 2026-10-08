@@ -246,31 +246,6 @@ func TestServerErrorThenAnswer(t *testing.T) {
 	expectResult(t, h.completion(0), ResultOK, SourceUpstream)
 }
 
-func TestTruncated(t *testing.T) {
-	h := newHarness(t, serverA, serverB)
-	h.pending(0, "big.test")
-	first := h.sent()
-	// A truncated answer may be cut short; its records are not read.
-	payload := reply{id: first.id, flags: flagTC, question: "big.test",
-		answers: []rr{aRecord("big.test", 60, addr(1))}}.bytes()
-	h.deliver(first, payload[:len(payload)-3])
-	second := h.sent()
-	if second.Server != serverB {
-		t.Fatalf("second query to %v", second.Server)
-	}
-	h.answer(second, reply{flags: flagTC})
-	expectResult(t, h.completion(0), ResultTruncated, SourceUpstream)
-	if stats := h.r.Stats(); stats.Truncated != 2 {
-		t.Fatalf("stats %+v", stats)
-	}
-
-	// Truncated from one server and a failure from the other is a failure.
-	h.pending(0, "mixed.test")
-	h.answer(h.sent(), reply{flags: flagTC})
-	h.answer(h.sent(), reply{flags: rcodeServFail})
-	expectResult(t, h.completion(0), ResultTemporaryFailure, SourceUpstream)
-}
-
 func TestFormErrRetriesWithoutEDNS(t *testing.T) {
 	h := newHarness(t, serverA, serverB)
 	h.pending(0, "old.test")

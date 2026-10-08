@@ -65,7 +65,7 @@ func FuzzParseResponse(f *testing.F) {
 		copy(asked.data[:], wire(question))
 		asked.size = uint8(len(wire(question)))
 		var out response
-		parseResponse(payload, 0, &asked, &scratch, &out)
+		parseResponse(payload, MaxStreamMessage, 0, &asked, &scratch, &out)
 
 		h := newHarness(t, serverA, serverB)
 		h.pending(0, question)
@@ -79,6 +79,12 @@ func FuzzParseResponse(f *testing.F) {
 				copy(data[:2], h.buf[:2])
 			}
 			h.r.Receive(sent.Transaction, sent.Server, data, h.now)
+			if stream, ok := h.r.NextStream(h.buf[:]); ok {
+				if len(data) >= 2 && mode&1 == 0 {
+					copy(data[:2], h.buf[:2])
+				}
+				h.r.ReceiveStream(stream.Transaction, stream.Serial, data, h.now)
+			}
 			if deadline, ok := h.r.Deadline(); ok && mode&2 != 0 {
 				h.now = deadline
 				h.r.Advance(h.now)
