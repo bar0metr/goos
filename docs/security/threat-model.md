@@ -33,7 +33,7 @@ host (QEMU, OVMF, ISO, disk image file)
      │   ├─ virtio-blk driver              holds port, IRQ, DMA authority
      │   ├─ virtio-net driver              holds port, IRQ, DMA authority for the NIC, a channel to netd, both frame pools
      │   ├─ netd                           holds the frame pools (receive read-only), a driver channel, a read-only system.net. config session, command and UDP sessions (TX pools read-only); no device
-     │   ├─ resolved                       holds a UDP session (RX pool read-only) and a network status session, a system.dns. config session that may read settings and the hosts table, command sessions; no device
+     │   ├─ resolved                       holds a UDP session and a TCP session (RX pools read-only) and a network status session, a system.dns. config session that may read settings and the hosts table, command sessions; no device
      │   ├─ config service                 holds the configuration store and a VFS session
      │   ├─ log service                    holds the log (read), console write, and a VFS session
      │   ├─ terminal service               the only holder of console read and of the terminal output stream's reader; a session with the shell
@@ -56,7 +56,7 @@ host (QEMU, OVMF, ISO, disk image file)
 | `netd` ↔ driver | `GNETDRV1` and two shared pools | slot numbers only, exact slot ownership, a generation per binding; the driver copies frames out of the pool before the device sees them (ADR 0191) |
 | commands → `netd` | `GNETAPI1` session | rights class fixed by PID 1 at `AddSession`; one echo in flight per session (ADR 0191) |
 | programs, `resolved` → `netd` | `GUDP1` session and two shared pools | opened by PID 1 for `GrantUDP` or for the resolver; exact pool rights and slot ownership; endpoints owned by the session; 8 endpoints and 16 receive buffers per session (ADR 0195) |
-| programs → `netd` | `GTCP1` session and two shared pools | opened by PID 1 for `GrantTCP`; exact pool rights and slot ownership; generation-safe endpoints owned by the session; fixed TCB, stream and reassembly storage; strict TCP checksum, option, sequence and reset validation (ADR 0196) |
+| programs, `resolved` → `netd` | `GTCP1` session and two shared pools | opened by PID 1 for `GrantTCP` or for the resolver's DNS fallback; exact pool rights and slot ownership; generation-safe endpoints owned by the session; fixed TCB, stream and reassembly storage; strict TCP checksum, option, sequence and reset validation (ADR 0196) |
 | `resolved` → `netd` | `GNETAPI1` status session | `RightsResolveStatus`: status and the lease's DNS servers only; handed over with the UDP session under a growing generation (ADR 0195) |
 | commands → `resolved` | `GRESOLV1` session | rights class fixed by PID 1 at `AddSession`, from `GrantResolve` or `GrantResolveAdmin`; separate from the network session (ADR 0194) |
 | shell, `resolved` → hosts table | `GHST1` on a configuration session | `HostsRead` and `HostsWrite` session rights fixed by PID 1; the shell holds both, the resolver only `HostsRead` (ADR 0193) |
@@ -180,8 +180,8 @@ attacker-controlled code.
   control channel, and the driver restarts behind it (ADR 0191).
 - `resolved` compromise, for example through a malformed DNS reply, controls
   the answers commands get for every name except `localhost`, and can send
-  UDP to any address and port with a command's limits, since its UDP session
-  is an ordinary one. It holds no device, no VFS session, a status session
+  UDP and open TCP connections to any address and port with a command's
+  limits, since its UDP and TCP sessions are ordinary ones. It holds no device, no VFS session, a status session
   that reads only status and DNS servers, and a configuration session that
   can only read `system.dns.` and the hosts table. It cannot write its RX
   pool. It restarts on failure, and PID 1 hands it new sessions, so queries
@@ -258,7 +258,14 @@ Anything on the link can send the guest arbitrary frames.
   exactly one question equal to the one asked, then checks every count,
   length, label and compression pointer before using anything. A reply that
   fails any check is dropped whole, so nothing partial reaches the cache,
-  and a truncated reply is not used. `localhost` and the hosts table are
+  and a truncated reply is not used. Only a reply that passed the ID,
+  server and question checks can make `resolved` repeat the query over TCP,
+  and only to the server it asked. The TCP reply's two-byte length goes
+  into one of two fixed 65535-byte buffers, a length below 12 bytes ends the
+  connection, and the reply then passes the same checks as a datagram; a
+  wrong ID or question fails the server instead of waiting for another
+  message. A server cannot hold a buffer past the lookup's deadline, and
+  TC=1 over TCP does not start another fallback. `localhost` and the hosts table are
   answered before any query is sent (ADR 0193, ADR 0194).
 - A DHCP server on the link decides which DNS servers the guest asks, and a
   server it asks can answer with any address. A cached answer lasts at most

@@ -16,7 +16,7 @@ DHCP client, the loopback interface, a hosts table (ADR 0193), DNS name
 resolution through a stub resolver with a cache, and IPv4 UDP for any
 program PID 1 grants a UDP session (ADR 0195) or TCP session (ADR 0196). Not implemented: IPv4
 fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
-UDP senders (no Port Unreachable for an unbound port), DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
+UDP senders (no Port Unreachable for an unbound port), persistent DNS over TCP, multicast DNS, IPv6 and AAAA, DNSSEC, and the
 Linux socket calls.
 
 ## Processes
@@ -27,8 +27,8 @@ resolve             ping                         net            udp
   v                   +-------------+---------------+--------------------+
 resolved  <-- GNETCTL --  PID 1     |  one private session per command
   |  hosts: GHST1 on its configuration session
-  |  GUDP1 session and GNETAPI      v
-  |  status session         netd  <---- GNETCTL version 2 ----  PID 1
+  |  GUDP1 session, GTCP1 session   v
+  |  and GNETAPI status     netd  <---- GNETCTL version 4 ----  PID 1
   +-------------------------------->|  lo, Ethernet, ARP, IPv4, ICMP echo,
                                     |  DHCP client, UDP endpoints, TCP TCBs
                                     |
@@ -224,6 +224,15 @@ a `Servers` request that `netd` holds until the list changes. PID 1 opens
 both sessions and hands them over with `ControlSetNetwork` whenever either
 service starts (ADR 0194, ADR 0195).
 
+An answer with TC=1 that matches the query makes `resolved` ask the same
+server the same question over TCP. PID 1 gives it a `GTCP1` session with
+`ControlSetTCP` right after the UDP pair, under the same generation
+(ADR 0196). Each fallback opens one connection to port 53, writes the
+two-byte length and the query, reads exactly one length-prefixed reply into
+one of two 65535-byte buffers, and closes. The reply goes through the same
+checks, CNAME handling and cache as a UDP answer. `resolved` holds a UDP
+session, a TCP session and a status session, and no device.
+
 The interface is in one of four states:
 
 | State | Meaning |
@@ -282,7 +291,10 @@ DNS `attempts` controls the logical retry rounds for each queried name. An
 EDNS-to-classic fallback does not consume a logical attempt. Every datagram,
 including that fallback and queries for CNAME targets, consumes a separate
 per-server budget. No upstream server receives more than three datagrams in
-one resolution, and the resolver keeps the original absolute deadline.
+one resolution, and the resolver keeps the original absolute deadline. A
+TCP fallback after TC=1 belongs to the attempt that drew it. It waits at
+most `query-timeout-ms` inside the same deadline, and no server gets more
+than two in one resolution.
 
 These are fixed:
 

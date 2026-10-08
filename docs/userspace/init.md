@@ -311,8 +311,11 @@ session service: the installed-system check requires its image. Whenever
 `netd` or `resolved` starts and the other is running, PID 1 opens a UDP
 session from `netd` as it does for a command, and a network session of the
 `ResolveStatus` class, and sends the resolver's ends of both in one
-`SetNetwork` control request with a new generation (ADR 0195). It keeps
-nothing. A command whose index entry declares `GrantResolve` or
+`SetNetwork` control request with a new generation (ADR 0195). It then opens
+a TCP session from `netd` through `ControlAddTCPSession` and sends the
+resolver's ends in a `SetTCP` request under the same generation, so the
+resolver can repeat a truncated DNS answer over TCP (ADR 0196). Without the
+TCP session the resolver still answers over UDP. PID 1 keeps nothing. A command whose index entry declares `GrantResolve` or
 `GrantResolveAdmin` gets a channel whose other end goes to `resolved` in an
 `AddSession` request with the `ResolveStatus` or `AdminStatus` class, granted
 as its `resolve` role. This session is separate from the network one: `ping`
@@ -366,7 +369,7 @@ they held the same way, and their clients are handed new sessions instead of bei
 | `block` | a new control channel (client end kept) and public endpoint, no driver or filesystem endpoint | nothing; the driver and `fat32` exit, restart after it, and hand it their endpoints over the control channel (ADR 0101) |
 | `netd` | a new control channel (client end kept) and configuration session | nothing; the driver follows it and restarts with a new binding (ADR 0191) |
 | `virtio-net` | a new channel, two new frame pools and a new generation | the channel's other end and narrowed copies of the pools, to `netd` in `SetDevice` before the launch (ADR 0191) |
-| `resolved` | a new control channel (client end kept) and configuration session | a new UDP session and status session from `netd`, to `resolved` in `SetNetwork` after the launch; `netd`'s restart does the same (ADR 0194, ADR 0195) |
+| `resolved` | a new control channel (client end kept) and configuration session | a new UDP session and status session from `netd`, to `resolved` in `SetNetwork` after the launch, then a new TCP session in `SetTCP`; `netd`'s restart does the same (ADR 0194, ADR 0195, ADR 0196) |
 
 A handle renewed for a launch that then fails is closed at the next renewal, so
 failures cannot fill PID 1's table. Each shell numbers the slots of its own

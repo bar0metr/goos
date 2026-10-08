@@ -8,8 +8,9 @@ import (
 
 const (
 	ControlProtocolID = uint64(0x474e455443544c31)
-	// Version 3 adds capability-bound TCP sessions.
-	ControlVersion = uint16(3)
+	// Version 3 adds capability-bound TCP sessions, version 4 the resolver's
+	// TCP session.
+	ControlVersion = uint16(4)
 	ControlSize    = 16
 
 	controlOpcode     = 0
@@ -30,6 +31,8 @@ const (
 	// SetNetworkHandles are a UDP session's three handles followed by a
 	// network session channel.
 	SetNetworkHandles = 4
+	// SetTCPHandles are a TCP session's channel, TX pool and RX pool.
+	SetTCPHandles = 3
 )
 
 type ControlOpcode uint8
@@ -45,6 +48,11 @@ const (
 	// service, its own UDP session and a network session, under a generation
 	// that grows with every new pair. The network service never receives it.
 	ControlSetNetwork
+	// ControlSetTCP gives the resolver service a TCP session for its DNS
+	// fallback, under the generation of the ControlSetNetwork pair it
+	// belongs to. A message carries at most four handles, so it cannot ride
+	// along with that pair.
+	ControlSetTCP
 )
 
 type RightsClass uint8
@@ -95,6 +103,8 @@ func controlHandles(opcode ControlOpcode) (int, bool) {
 		return AddTCPSessionHandles, true
 	case ControlSetNetwork:
 		return SetNetworkHandles, true
+	case ControlSetTCP:
+		return SetTCPHandles, true
 	}
 	return 0, false
 }
@@ -107,7 +117,7 @@ func validControlRequest(r *ControlRequest) bool {
 		return r.Generation == 0 && r.Rights == RightsUDP
 	case ControlAddTCPSession:
 		return r.Generation == 0 && r.Rights == RightsTCP
-	case ControlSetDevice, ControlSetNetwork:
+	case ControlSetDevice, ControlSetNetwork, ControlSetTCP:
 		return r.Generation != 0 && r.Rights == 0
 	}
 	return false

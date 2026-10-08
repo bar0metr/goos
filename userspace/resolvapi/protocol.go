@@ -12,11 +12,12 @@ import (
 
 const (
 	ProtocolID = uint64(0x475245534f4c5631)
-	Version    = uint16(1)
+	// Version 2 adds the TCP fallback counters to the status reply.
+	Version = uint16(2)
 	// A request is the opcode, the name's length and the name. A 253-byte
 	// name fills it to 255 bytes, inside the 256-byte payload.
 	requestHeader = 2
-	ReplySize     = 180
+	ReplySize     = 212
 
 	MaxAddresses = 8
 	MaxServers   = 8
@@ -35,7 +36,7 @@ const (
 	replyField      = 98
 	replyReserved   = 99
 	replyCounters   = 100
-	counterCount    = 10
+	counterCount    = 14
 )
 
 type Opcode uint8
@@ -128,11 +129,16 @@ type Reply struct {
 	Mismatched     uint64
 	Truncated      uint64
 	ServerFailures uint64
+	TCPFallbacks   uint64
+	TCPAnswers     uint64
+	TCPFailures    uint64
+	TCPTimeouts    uint64
 }
 
 func (r *Reply) counters() [counterCount]*uint64 {
 	return [counterCount]*uint64{&r.PositiveHits, &r.NegativeHits, &r.FailureHits, &r.Misses, &r.Queries,
-		&r.Timeouts, &r.Malformed, &r.Mismatched, &r.Truncated, &r.ServerFailures}
+		&r.Timeouts, &r.Malformed, &r.Mismatched, &r.Truncated, &r.ServerFailures,
+		&r.TCPFallbacks, &r.TCPAnswers, &r.TCPFailures, &r.TCPTimeouts}
 }
 
 // prepare clears out field by field: a literal of the whole message would be

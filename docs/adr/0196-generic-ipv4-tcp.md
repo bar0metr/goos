@@ -117,6 +117,16 @@ PID 1 creates TCP sessions only for a command whose manifest requests
 roles. TCP authority is separate from ping, network administration, name
 resolution and UDP.
 
+`resolved` is the first service that uses `GTCP1`. PID 1 opens it a TCP
+session through the same `ControlAddTCPSession` path and hands it over with
+`ControlSetTCP`, under the generation of the UDP and status sessions it sent
+just before (`GNETCTL` version 4). A message carries at most four handles,
+and `ControlSetNetwork` already uses four. The resolver repeats a query
+whose UDP answer came back with TC=1 over that session: one connection to
+port 53 per fallback, one length-prefixed query and one reply (ADR 0194).
+It holds no device and no `GrantTCP`; a fault on the TCP session drops that
+session alone, and UDP lookups go on.
+
 ### Configuration and status
 
 The `system.net.tcp.*` block controls the ephemeral range, global and
@@ -151,9 +161,9 @@ no-NIC paths.
 
 Authorized native programs can act as bounded IPv4 TCP clients and servers.
 The `tcp` command is a protocol client and diagnostic, not a privileged stack
-shortcut. Future DNS fallback and Linux socket adapters can use GTCP1 and the
-same TCB model.
+shortcut. The resolver's DNS fallback runs over GTCP1, and future Linux
+socket adapters can use it and the same TCB model.
 
-IPv6, Linux socket syscalls, DNS-over-TCP migration, TLS, HTTP, SACK, window
+IPv6, Linux socket syscalls, persistent DNS-over-TCP connections, TLS, HTTP, SACK, window
 scaling, timestamps, ECN, Fast Open, keepalive and port reuse remain outside
 this decision.

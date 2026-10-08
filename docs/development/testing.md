@@ -63,7 +63,13 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     default limits. With EDNS refused, a name must resolve after exactly
     two queries, one with EDNS and one without; a name the peer answers a
     second late must resolve after exactly one query, its answer taken from
-    the receive `resolved` left waiting in `netd`; every query the guest sent
+    the receive `resolved` left waiting in `netd`. A name the peer answers
+    with TC=1 must resolve over TCP with one UDP query, one TCP connection,
+    one framed query and one answer larger than a GTCP1 slot, then from the
+    cache with no query at all; a name whose TCP answer the peer resets must
+    give `temporary failure`, `resolve status` must count two fallbacks, one
+    answer and one failure, and the TCP endpoint line of `net status` must
+    match the one before. Every query the guest sent
     must have left from its own port in the ephemeral range, and the
     40-second lease must have been renewed. Last on that guest,
     `system.net.udp.max-payload` set to 1300 must apply on `net reload`,
@@ -96,7 +102,14 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   GUDP1 logic of `netd` and `resolved`, which build only for the guest:
   deferred `RecvFrom`, `Close` and session teardown on the service side,
   and the resolver's queries over a real stack through the GUDP1 codec,
-  with late, mismatched and stale answers. The network gate remains the
+  with late, mismatched and stale answers. `userspace/tcpupstream` holds the
+  resolver's TCP fallback: its tests split the length prefix and the reply
+  across Reads in every way, take partial Writes, fail on early EOF, a bad
+  prefix, `Reset`, `Timeout` and the other transport results, settle the
+  slots of replies that arrive after a cancel, keep two fallbacks at most,
+  and fuzz the read pieces. Two of them run the fallback over a real stack
+  with `tcpserve` and `udpserve` on both ends: one answer split across the
+  prefix and two RX slots, then a cache hit, and one answer cut short. The network gate remains the
   test of the services themselves.
 
   The config exchange unit tests cover the timeout, late reply, then next
@@ -112,7 +125,12 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   ICMP echo, serves static DHCP leases by client MAC (`-lease MAC=IP`), and
   answers DNS for a zone under `test` read from `-zone`, where a name can
   also be set to answer NXDOMAIN, NODATA, SERVFAIL or a truncated reply, to
-  go unanswered, or (`name TTL SLOW ADDRESS`) to answer a second late; `-no-edns` makes it refuse EDNS queries with FORMERR,
+  go unanswered, or (`name TTL SLOW ADDRESS`) to answer a second late. A
+  `name TTL TCP ADDRESS...` name answers TC=1 over UDP and in full over TCP
+  port 53, padded with TXT records to about 6 KB, the length prefix in a
+  segment of its own; a `name TCPRESET` name answers TC=1 too, then sends
+  22 bytes of its TCP answer and a reset. The log gets `dns-tcp-accept`,
+  `dns-tcp-query`, `dns-tcp-answer` and `dns-tcp-reset` lines; `-no-edns` makes it refuse EDNS queries with FORMERR,
   and `-lease-time` sets the lease length. It echoes UDP on port 7 and, for
   a payload that starts with `decoy`, first sends `decoy` from port 8.
   Lines written to the `-control` FIFO inject ARP address conflicts:

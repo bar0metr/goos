@@ -73,7 +73,8 @@ func TestReplyRoundTrip(t *testing.T) {
 		{Opcode: OpResolve, Count: 2, Source: SourceCache, TTL: 30, Addresses: [MaxAddresses][4]byte{{1, 2, 3, 4}, {5, 6, 7, 8}}},
 		{Opcode: OpResolve, Result: ResultNotFound},
 		{Opcode: OpStatus, Count: 2, Servers: [MaxServers]Server{{[4]byte{10, 0, 2, 3}, ServerDHCP}, {[4]byte{9, 9, 9, 9}, ServerConfig}},
-			Generation: 4, CacheUsed: 3, CacheLimit: 64, Positive: 2, Negative: 1, Queries: 9, Truncated: 1, ServerFailures: 2},
+			Generation: 4, CacheUsed: 3, CacheLimit: 64, Positive: 2, Negative: 1, Queries: 9, Truncated: 1, ServerFailures: 2,
+			TCPFallbacks: 1, TCPAnswers: 1, TCPFailures: 3, TCPTimeouts: 4},
 		{Opcode: OpFlush},
 		{Opcode: OpReload, Result: ResultConfigInvalid, Field: Keys},
 	} {
