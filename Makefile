@@ -435,7 +435,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
