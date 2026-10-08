@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"goos/userspace/dnswire"
 	"goos/userspace/hostname"
 )
 
@@ -24,11 +25,11 @@ type rr struct {
 }
 
 func aRecord(name string, ttl uint32, address [4]byte) rr {
-	return rr{name: name, kind: typeA, ttl: ttl, data: address[:]}
+	return rr{name: name, kind: dnswire.TypeA, ttl: ttl, data: address[:]}
 }
 
 func cnameRecord(name, target string, ttl uint32) rr {
-	return rr{name: name, kind: typeCNAME, ttl: ttl, data: wire(target)}
+	return rr{name: name, kind: dnswire.TypeCNAME, ttl: ttl, data: wire(target)}
 }
 
 func soaRecord(zone string, ttl, minimum uint32) rr {
@@ -37,13 +38,13 @@ func soaRecord(zone string, ttl, minimum uint32) rr {
 		suffix = ""
 	}
 	data := append(wire("ns"+suffix), wire("admin"+suffix)...)
-	fixed := make([]byte, soaFixed)
+	fixed := make([]byte, dnswire.SOAFixed)
 	binary.BigEndian.PutUint32(fixed[0:], 1)
 	binary.BigEndian.PutUint32(fixed[4:], 3600)
 	binary.BigEndian.PutUint32(fixed[8:], 600)
 	binary.BigEndian.PutUint32(fixed[12:], 86400)
 	binary.BigEndian.PutUint32(fixed[16:], minimum)
-	return rr{name: zone, kind: typeSOA, ttl: ttl, data: append(data, fixed...)}
+	return rr{name: zone, kind: dnswire.TypeSOA, ttl: ttl, data: append(data, fixed...)}
 }
 
 // wire encodes a dotted name without compression. "" and "." are the root.
@@ -74,22 +75,22 @@ type reply struct {
 }
 
 func (m reply) bytes() []byte {
-	out := make([]byte, headerSize)
+	out := make([]byte, dnswire.HeaderSize)
 	binary.BigEndian.PutUint16(out[0:], m.id)
-	binary.BigEndian.PutUint16(out[2:], flagQR|flagRD|0x0080|m.flags)
+	binary.BigEndian.PutUint16(out[2:], dnswire.FlagQR|dnswire.FlagRD|0x0080|m.flags)
 	if !m.noQuestion {
 		binary.BigEndian.PutUint16(out[4:], 1)
 		out = append(out, wire(m.question)...)
 		qtype := m.qtype
 		if qtype == 0 {
-			qtype = typeA
+			qtype = dnswire.TypeA
 		}
 		out = binary.BigEndian.AppendUint16(out, qtype)
-		out = binary.BigEndian.AppendUint16(out, classIN)
+		out = binary.BigEndian.AppendUint16(out, dnswire.ClassIN)
 	}
 	additional := m.additional
 	if m.opt {
-		additional = append(additional, rr{name: ".", kind: typeOPT, class: DatagramSize})
+		additional = append(additional, rr{name: ".", kind: dnswire.TypeOPT, class: DatagramSize})
 	}
 	binary.BigEndian.PutUint16(out[6:], uint16(len(m.answers)))
 	binary.BigEndian.PutUint16(out[8:], uint16(len(m.authority)))
@@ -98,7 +99,7 @@ func (m reply) bytes() []byte {
 		for _, record := range section {
 			class := record.class
 			if class == 0 {
-				class = classIN
+				class = dnswire.ClassIN
 			}
 			out = append(out, wire(record.name)...)
 			out = binary.BigEndian.AppendUint16(out, record.kind)
@@ -207,16 +208,16 @@ func (h *harness) noQuery() {
 func decodeQuery(t testing.TB, out Outgoing, data []byte) query {
 	t.Helper()
 	q := query{Outgoing: out, raw: append([]byte(nil), data...)}
-	if len(data) < headerSize {
+	if len(data) < dnswire.HeaderSize {
 		t.Fatalf("short query %d", len(data))
 	}
 	q.id = binary.BigEndian.Uint16(data[0:])
 	q.flags = binary.BigEndian.Uint16(data[2:])
 	if binary.BigEndian.Uint16(data[4:]) != 1 || binary.BigEndian.Uint16(data[6:]) != 0 ||
 		binary.BigEndian.Uint16(data[8:]) != 0 {
-		t.Fatalf("query counts % x", data[:headerSize])
+		t.Fatalf("query counts % x", data[:dnswire.HeaderSize])
 	}
-	position := headerSize
+	position := dnswire.HeaderSize
 	var labels []string
 	for data[position] != 0 {
 		length := int(data[position])
@@ -225,20 +226,20 @@ func decodeQuery(t testing.TB, out Outgoing, data []byte) query {
 	}
 	position++
 	q.name = strings.Join(labels, ".")
-	if binary.BigEndian.Uint16(data[position:]) != typeA || binary.BigEndian.Uint16(data[position+2:]) != classIN {
+	if binary.BigEndian.Uint16(data[position:]) != dnswire.TypeA || binary.BigEndian.Uint16(data[position+2:]) != dnswire.ClassIN {
 		t.Fatalf("query type/class % x", data[position:position+4])
 	}
-	position += questionFixed
+	position += dnswire.QuestionFixed
 	switch binary.BigEndian.Uint16(data[10:]) {
 	case 0:
 	case 1:
-		if data[position] != 0 || binary.BigEndian.Uint16(data[position+1:]) != typeOPT ||
+		if data[position] != 0 || binary.BigEndian.Uint16(data[position+1:]) != dnswire.TypeOPT ||
 			binary.BigEndian.Uint32(data[position+5:]) != 0 || binary.BigEndian.Uint16(data[position+9:]) != 0 {
 			t.Fatalf("bad OPT % x", data[position:])
 		}
 		q.opt = true
 		q.payload = binary.BigEndian.Uint16(data[position+3:])
-		position += optRecordSize
+		position += dnswire.OPTSize
 	default:
 		t.Fatal("additional count")
 	}
@@ -362,7 +363,7 @@ func (h *harness) answerStream(q query, m reply) {
 // truncate answers a datagram with a matching TC=1 reply.
 func (h *harness) truncate(q query) {
 	h.t.Helper()
-	h.answer(q, reply{flags: flagTC, opt: q.opt})
+	h.answer(q, reply{flags: dnswire.FlagTC, opt: q.opt})
 }
 
 // cachedFailure checks that text answers from the failure cache with result.

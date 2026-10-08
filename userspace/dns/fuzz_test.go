@@ -3,38 +3,9 @@ package dns
 import (
 	"encoding/binary"
 	"testing"
-)
 
-func FuzzDecodeName(f *testing.F) {
-	f.Add(wire("www.example.com"), uint16(0))
-	f.Add(append(wire("example.com"), 3, 'w', 'w', 'w', 0xc0, 0), uint16(13))
-	f.Add([]byte{0xc0, 0}, uint16(0))
-	f.Add([]byte{1, 'a', 0xc0, 0}, uint16(0))
-	f.Add([]byte{0x40, 0}, uint16(0))
-	f.Add([]byte{63}, uint16(0))
-	f.Fuzz(func(t *testing.T, message []byte, offset uint16) {
-		var out wireName
-		end, ok := decodeName(message, int(offset), &out)
-		if !ok {
-			return
-		}
-		if end <= int(offset) || end > len(message) || out.size == 0 || out.data[out.size-1] != 0 {
-			t.Fatalf("end %d size %d", end, out.size)
-		}
-		// The result is a well-formed wire name.
-		position := 0
-		for out.data[position] != 0 {
-			length := int(out.data[position])
-			if length > 63 {
-				t.Fatalf("label %d", length)
-			}
-			position += 1 + length
-		}
-		if position+1 != int(out.size) {
-			t.Fatalf("labels end at %d, size %d", position, out.size)
-		}
-	})
-}
+	"goos/userspace/dnswire"
+)
 
 // FuzzParseResponse checks the parser alone, then feeds the same bytes to a
 // resolver with the ID patched in, so the interpretation and cache paths see
@@ -45,11 +16,11 @@ func FuzzParseResponse(f *testing.F) {
 		{question: question, answers: []rr{aRecord(question, 60, addr(1))}},
 		{question: question, answers: []rr{cnameRecord(question, "b.test", 60), aRecord("b.test", 60, addr(2))}},
 		{question: question, answers: []rr{cnameRecord(question, "b.test", 60)}},
-		{question: question, flags: rcodeNXDomain, authority: []rr{soaRecord("test", 60, 30)}},
+		{question: question, flags: dnswire.RcodeNXDomain, authority: []rr{soaRecord("test", 60, 30)}},
 		{question: question, authority: []rr{soaRecord("test", 60, 30)}, opt: true},
-		{question: question, flags: rcodeFormErr, noQuestion: true},
-		{question: question, flags: flagTC},
-		{question: question, flags: rcodeServFail},
+		{question: question, flags: dnswire.RcodeFormErr, noQuestion: true},
+		{question: question, flags: dnswire.FlagTC},
+		{question: question, flags: dnswire.RcodeServFail},
 	}
 	for index, seed := range seeds {
 		f.Add(byte(index), seed.bytes())
@@ -57,15 +28,13 @@ func FuzzParseResponse(f *testing.F) {
 	compressed := reply{question: question}.bytes()
 	binary.BigEndian.PutUint16(compressed[6:], 1)
 	compressed = append(compressed, 0xc0, 12)
-	compressed = append(appendRecordHeader(compressed, typeA, 4), 1, 2, 3, 4)
+	compressed = append(appendRecordHeader(compressed, dnswire.TypeA, 4), 1, 2, 3, 4)
 	f.Add(byte(0), compressed)
 	f.Fuzz(func(t *testing.T, mode byte, payload []byte) {
-		var scratch wireName
-		var asked wireName
-		copy(asked.data[:], wire(question))
-		asked.size = uint8(len(wire(question)))
-		var out response
-		parseResponse(payload, MaxStreamMessage, 0, &asked, &scratch, &out)
+		var scratch, asked dnswire.Name
+		asked.SetText([]byte(question))
+		var out dnswire.Response
+		dnswire.ParseResponse(payload, MaxStreamMessage, 0, &asked, dnswire.TypeA, &scratch, &out)
 
 		h := newHarness(t, serverA, serverB)
 		h.pending(0, question)

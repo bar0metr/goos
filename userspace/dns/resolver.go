@@ -3,6 +3,7 @@ package dns
 import (
 	"encoding/binary"
 
+	"goos/userspace/dnswire"
 	"goos/userspace/hostname"
 )
 
@@ -37,7 +38,7 @@ const (
 type transaction struct {
 	phase    txPhase
 	name     hostname.Name
-	chain    [MaxCNAMEChain + 1]wireName
+	chain    [MaxCNAMEChain + 1]dnswire.Name
 	links    int
 	chainTTL uint32
 	attempts uint8
@@ -159,8 +160,8 @@ type Resolver struct {
 	cache        [MaxCacheEntries]entry
 
 	// Scratch space for message parsing, kept here instead of on the stack.
-	owner  wireName
-	target wireName
+	owner  dnswire.Name
+	target dnswire.Name
 	host   hostname.Name
 }
 
@@ -332,7 +333,7 @@ func (r *Resolver) start(name *hostname.Name, now uint64) int {
 	}
 	tx := &r.transactions[number]
 	tx.name = *name
-	tx.chain[0].setHost(name)
+	tx.chain[0].SetHost(name)
 	tx.links = 0
 	tx.chainTTL = ^uint32(0)
 	tx.attempts = r.policy.Attempts
@@ -466,7 +467,7 @@ func (r *Resolver) NextQuery(dst []byte) (Outgoing, bool) {
 		tx.phase = txWaiting
 		tx.transmissions[tx.server]++
 		increment(&r.queries)
-		length := encodeQuery(dst, tx.id, &tx.chain[tx.links], tx.edns)
+		length := dnswire.EncodeQuery(dst, tx.id, &tx.chain[tx.links], dnswire.TypeA, tx.edns)
 		return Outgoing{Transaction: number, Server: tx.servers[tx.server], Length: length, Serial: tx.serial}, true
 	}
 	return Outgoing{}, false
@@ -492,7 +493,7 @@ func (r *Resolver) NextStream(dst []byte) (Outgoing, bool) {
 		tx.phase = txStreamWaiting
 		tx.streams[tx.server]++
 		increment(&r.fallbacks)
-		length := encodeQuery(dst, tx.id, &tx.chain[tx.links], tx.edns)
+		length := dnswire.EncodeQuery(dst, tx.id, &tx.chain[tx.links], dnswire.TypeA, tx.edns)
 		return Outgoing{Transaction: number, Server: tx.servers[tx.server], Length: length, Serial: tx.serial}, true
 	}
 	return Outgoing{}, false
@@ -532,14 +533,14 @@ func (r *Resolver) ReceiveStream(transaction int, serial uint32, payload []byte,
 		return
 	}
 	tx := &r.transactions[transaction]
-	var message response
-	result := parseResponse(payload, MaxStreamMessage, tx.id, &tx.chain[tx.links], &r.owner, &message)
+	var message dnswire.Response
+	result := dnswire.ParseResponse(payload, MaxStreamMessage, tx.id, &tx.chain[tx.links], dnswire.TypeA, &r.owner, &message)
 	switch {
-	case result == parseMismatched:
+	case result == dnswire.ParseMismatched:
 		increment(&r.mismatched)
-	case result == parseMalformed:
+	case result == dnswire.ParseMalformed:
 		increment(&r.malformed)
-	case message.truncated:
+	case message.Truncated:
 		increment(&r.truncated)
 	default:
 		increment(&r.streamAnswers)
@@ -584,17 +585,17 @@ func (r *Resolver) Receive(transaction int, server [4]byte, payload []byte, now 
 		increment(&r.mismatched)
 		return
 	}
-	var message response
-	switch parseResponse(payload, DatagramSize, tx.id, &tx.chain[tx.links], &r.owner, &message) {
-	case parseMismatched:
+	var message dnswire.Response
+	switch dnswire.ParseResponse(payload, DatagramSize, tx.id, &tx.chain[tx.links], dnswire.TypeA, &r.owner, &message) {
+	case dnswire.ParseMismatched:
 		increment(&r.mismatched)
 		return
-	case parseMalformed:
+	case dnswire.ParseMalformed:
 		increment(&r.malformed)
 		r.moveOn(tx, outcomeFailed, now)
 		return
 	}
-	if message.truncated {
+	if message.Truncated {
 		increment(&r.truncated)
 		r.fallBack(tx, now)
 		return
@@ -605,12 +606,12 @@ func (r *Resolver) Receive(transaction int, server [4]byte, payload []byte, now 
 // use acts on a validated answer by its rcode. The retry without EDNS(0)
 // applies to datagrams only: over TCP the query keeps the form that drew
 // TC=1, and FORMERR fails the server.
-func (r *Resolver) use(tx *transaction, payload []byte, message *response, stream bool, now uint64) {
-	switch message.rcode {
-	case rcodeNoError, rcodeNXDomain:
+func (r *Resolver) use(tx *transaction, payload []byte, message *dnswire.Response, stream bool, now uint64) {
+	switch message.Rcode {
+	case dnswire.RcodeNoError, dnswire.RcodeNXDomain:
 		r.interpret(tx, payload, message, now)
-	case rcodeFormErr:
-		if !stream && tx.edns && !message.hasOPT {
+	case dnswire.RcodeFormErr:
+		if !stream && tx.edns && !message.HasOPT {
 			tx.classic[tx.server] = true
 			if r.transmit(tx, tx.server, false, now) {
 				return
@@ -630,13 +631,13 @@ func (r *Resolver) use(tx *transaction, payload []byte, message *response, strea
 // CNAME chain applies to the end of the chain, so the asked name does not
 // resolve either (RFC 6604). A NOERROR answer that ends a chain without A
 // records and without an SOA is followed by a query for the chain's end.
-func (r *Resolver) interpret(tx *transaction, message []byte, header *response, now uint64) {
+func (r *Resolver) interpret(tx *transaction, message []byte, header *dnswire.Response, now uint64) {
 	links := tx.links
 	if !r.followChain(tx, message, header) {
 		r.fail(tx, ResultTemporaryFailure, now)
 		return
 	}
-	if header.rcode == rcodeNXDomain {
+	if header.Rcode == dnswire.RcodeNXDomain {
 		r.negative(tx, message, header, ResultNotFound, now)
 		return
 	}
@@ -659,20 +660,20 @@ func (r *Resolver) interpret(tx *transaction, message []byte, header *response, 
 // answer section. It fails on a loop or a chain longer than MaxCNAMEChain.
 //
 //go:noinline
-func (r *Resolver) followChain(tx *transaction, message []byte, header *response) bool {
-	var item record
+func (r *Resolver) followChain(tx *transaction, message []byte, header *dnswire.Response) bool {
+	var item dnswire.Record
 	for {
 		found := false
-		position := header.answerAt
-		for index := 0; index < header.answers; index++ {
-			next, _ := readRecord(message, position, &r.owner, &item)
+		position := header.AnswerAt
+		for index := 0; index < header.Answers; index++ {
+			next, _ := dnswire.ReadRecord(message, position, &r.owner, &item)
 			position = next
-			if item.kind != typeCNAME || item.class != classIN || !r.owner.equal(&tx.chain[tx.links]) {
+			if item.Type != dnswire.TypeCNAME || item.Class != dnswire.ClassIN || !r.owner.Equal(&tx.chain[tx.links]) {
 				continue
 			}
-			decodeName(message, item.data, &r.target)
+			dnswire.DecodeName(message, item.Data, &r.target)
 			for seen := 0; seen <= tx.links; seen++ {
-				if tx.chain[seen].equal(&r.target) {
+				if tx.chain[seen].Equal(&r.target) {
 					return false
 				}
 			}
@@ -680,8 +681,8 @@ func (r *Resolver) followChain(tx *transaction, message []byte, header *response
 				return false
 			}
 			tx.links++
-			tx.chain[tx.links].copyFrom(&r.target)
-			if ttl := recordTTL(item.ttl); ttl < tx.chainTTL {
+			tx.chain[tx.links].CopyFrom(&r.target)
+			if ttl := dnswire.RecordTTL(item.TTL); ttl < tx.chainTTL {
 				tx.chainTTL = ttl
 			}
 			found = true
@@ -697,19 +698,19 @@ func (r *Resolver) followChain(tx *transaction, message []byte, header *response
 // message order, and returns the smallest TTL among those used.
 //
 //go:noinline
-func (r *Resolver) collect(tx *transaction, message []byte, header *response, answer *Answer) uint32 {
-	var item record
+func (r *Resolver) collect(tx *transaction, message []byte, header *dnswire.Response, answer *Answer) uint32 {
+	var item dnswire.Record
 	ttl := ^uint32(0)
-	position := header.answerAt
-	for index := 0; index < header.answers && answer.Count < MaxAddresses; index++ {
-		next, _ := readRecord(message, position, &r.owner, &item)
+	position := header.AnswerAt
+	for index := 0; index < header.Answers && answer.Count < MaxAddresses; index++ {
+		next, _ := dnswire.ReadRecord(message, position, &r.owner, &item)
 		position = next
-		if item.kind != typeA || item.class != classIN || !r.owner.equal(&tx.chain[tx.links]) {
+		if item.Type != dnswire.TypeA || item.Class != dnswire.ClassIN || !r.owner.Equal(&tx.chain[tx.links]) {
 			continue
 		}
-		copy(answer.Addresses[answer.Count][:], message[item.data:item.data+4])
+		copy(answer.Addresses[answer.Count][:], message[item.Data:item.Data+4])
 		answer.Count++
-		if value := recordTTL(item.ttl); value < ttl {
+		if value := dnswire.RecordTTL(item.TTL); value < ttl {
 			ttl = value
 		}
 	}
@@ -721,17 +722,17 @@ func (r *Resolver) collect(tx *transaction, message []byte, header *response, an
 // section whose owner is name or an ancestor of it.
 //
 //go:noinline
-func (r *Resolver) findSOA(message []byte, header *response, name *wireName) (uint32, bool) {
-	var item record
-	position := header.authorityAt
-	for index := 0; index < header.authorities; index++ {
-		next, _ := readRecord(message, position, &r.owner, &item)
+func (r *Resolver) findSOA(message []byte, header *dnswire.Response, name *dnswire.Name) (uint32, bool) {
+	var item dnswire.Record
+	position := header.AuthorityAt
+	for index := 0; index < header.Authorities; index++ {
+		next, _ := dnswire.ReadRecord(message, position, &r.owner, &item)
 		position = next
-		if item.kind != typeSOA || item.class != classIN || !name.within(&r.owner) {
+		if item.Type != dnswire.TypeSOA || item.Class != dnswire.ClassIN || !name.Within(&r.owner) {
 			continue
 		}
-		ttl := recordTTL(item.ttl)
-		minimum := recordTTL(binary.BigEndian.Uint32(message[item.data+item.length-4:]))
+		ttl := dnswire.RecordTTL(item.TTL)
+		minimum := dnswire.RecordTTL(binary.BigEndian.Uint32(message[item.Data+item.Length-4:]))
 		if minimum < ttl {
 			ttl = minimum
 		}
@@ -752,7 +753,7 @@ func capTTL(ttl, limit uint32) uint32 {
 func (r *Resolver) positive(tx *transaction, answer *Answer, ttl uint32, now uint64) {
 	answer.Result = ResultOK
 	answer.Source = SourceUpstream
-	if tx.links > 0 && tx.chain[tx.links].host(&r.host) && !r.host.Equal(&tx.name) {
+	if tx.links > 0 && tx.chain[tx.links].Host(&r.host) && !r.host.Equal(&tx.name) {
 		r.store(&r.host, entryPositive, ResultOK, &answer.Addresses, answer.Count, capTTL(ttl, r.policy.MaxTTL), now)
 	}
 	if tx.chainTTL < ttl {
@@ -765,7 +766,7 @@ func (r *Resolver) positive(tx *transaction, answer *Answer, ttl uint32, now uin
 
 // negative caches NXDOMAIN or NODATA only when the authority section holds a
 // usable SOA; without one the answer is passed on uncached.
-func (r *Resolver) negative(tx *transaction, message []byte, header *response, result Result, now uint64) {
+func (r *Resolver) negative(tx *transaction, message []byte, header *dnswire.Response, result Result, now uint64) {
 	answer := Answer{Result: result, Source: SourceUpstream}
 	if ttl, ok := r.findSOA(message, header, &tx.chain[tx.links]); ok {
 		if tx.chainTTL < ttl {
