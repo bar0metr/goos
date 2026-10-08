@@ -21,6 +21,8 @@ const (
 	kindSERVFAIL
 	kindTRUNCATE
 	kindDROP
+	kindTCP
+	kindTCPRESET
 )
 
 var directives = map[string]entryKind{
@@ -29,6 +31,7 @@ var directives = map[string]entryKind{
 	"SERVFAIL": kindSERVFAIL,
 	"TRUNCATE": kindTRUNCATE,
 	"DROP":     kindDROP,
+	"TCPRESET": kindTCPRESET,
 }
 
 type zoneEntry struct {
@@ -66,7 +69,12 @@ func inZone(name string) bool {
 //	name TTL A 1.2.3.4
 //	name TTL SLOW 1.2.3.4
 //	name TTL CNAME target
-//	name NXDOMAIN|NODATA|SERVFAIL|TRUNCATE|DROP
+//	name TTL TCP 1.2.3.4 [5.6.7.8 ...]
+//	name NXDOMAIN|NODATA|SERVFAIL|TRUNCATE|DROP|TCPRESET
+//
+// TCP and TCPRESET names answer UDP with TC=1. Over TCP a TCP name gets its
+// addresses padded past 4096 bytes, and a TCPRESET name gets part of an
+// answer and a reset.
 //
 // A name may have several A lines but no other line beside them. Text after
 // '#' is a comment.
@@ -111,7 +119,7 @@ func (z *zone) add(fields []string) error {
 		z.entries[name] = &zoneEntry{kind: kind}
 		return nil
 	}
-	if len(fields) != 4 {
+	if len(fields) < 4 || len(fields) > 4 && strings.ToUpper(fields[2]) != "TCP" {
 		return fmt.Errorf("want 'name TTL A|CNAME value' or 'name DIRECTIVE'")
 	}
 	ttl, err := strconv.ParseUint(fields[1], 10, 32)
@@ -119,6 +127,20 @@ func (z *zone) add(fields []string) error {
 		return fmt.Errorf("invalid TTL %q", fields[1])
 	}
 	switch kind := strings.ToUpper(fields[2]); kind {
+	case "TCP":
+		if existing != nil {
+			return fmt.Errorf("name %s already defined", name)
+		}
+		entry := &zoneEntry{kind: kindTCP, ttl: uint32(ttl)}
+		for _, text := range fields[3:] {
+			addr, err := parseIPv4Addr(text)
+			if err != nil {
+				return err
+			}
+			entry.addrs = append(entry.addrs, addr)
+		}
+		z.entries[name] = entry
+		return nil
 	case "A", "SLOW":
 		addr, err := parseIPv4Addr(fields[3])
 		if err != nil {

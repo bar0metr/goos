@@ -49,6 +49,13 @@ func listen(socket string, h *host) (*server, error) {
 			}
 		})
 	}
+	h.after = func(delay time.Duration, fn func() [][]byte) {
+		time.AfterFunc(delay, func() {
+			for _, frame := range fn() {
+				s.send(frame, nil)
+			}
+		})
+	}
 	return s, nil
 }
 

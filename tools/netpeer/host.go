@@ -63,6 +63,9 @@ type host struct {
 	// later sends frames after a delay; the server sets it. Without it
 	// a slow answer goes at once.
 	later func(delay time.Duration, frames [][]byte)
+	// after runs fn after a delay and sends the frames it returns; the
+	// server sets it. Without it nothing is retransmitted.
+	after func(delay time.Duration, fn func() [][]byte)
 }
 
 // slowAnswer is how long a SLOW name's answer waits: well inside the
