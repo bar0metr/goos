@@ -12,7 +12,8 @@ import (
 
 const (
 	// DefaultTimeout bounds the whole query, TCP fallback included, in
-	// milliseconds.
+	// milliseconds. Closing the endpoint afterwards may take up to a second
+	// more.
 	DefaultTimeout = 5000
 	MinTimeout     = 1
 	MaxTimeout     = 60000

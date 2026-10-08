@@ -36,12 +36,21 @@ CNAME and SOA, as before; `dnsq` checks the other types it prints with
 `ValidRData` before it prints anything, so a malformed MX in an answer
 changes nothing for `resolved`. `MaxStreamMessage` in `userspace/dns` is now
 `dnstcp.MaxMessage`, the one definition of the 65535-byte limit.
+`ParseResponse` also keeps the resolver's one concession, a FORMERR without
+a question section; `dnsq` refuses that answer, since it needs the question
+echoed back.
 
 `dnsq` is a command over its own `GUDP1` and `GTCP1` sessions with
 `GrantUDP | GrantTCP`. It uses no resolver session, so it adds no protocol,
 grant bit or command index format. Its logic lives in `userspace/dnsq` and
 runs in host tests against a scripted transport; the binary in
 `userspace/bin/dnsq` supplies the sessions, the clock and the terminal.
+
+Three streams and two sessions of three handles each are nine grants, two
+more than a launch request could carry. `MaxCapabilities` in the
+supervisor protocol rises from 7 to 10, which also leaves room for a VFS
+session; ten grants take 216 of the 256 bytes of an IPC payload, so the
+wire format and the kernel's checks stay as they are.
 
 ## Consequences
 

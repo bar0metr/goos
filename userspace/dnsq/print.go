@@ -66,12 +66,10 @@ func (q *Query) printDefault(out Output, message []byte) {
 	dnswire.FormatRcode(out, q.response.Rcode)
 	out.Line()
 	q.printFlags(out, false)
-	if q.response.Questions != 0 {
-		out.Line()
-		out.Text(";; question:")
-		out.Line()
-		q.question(out)
-	}
+	out.Line()
+	out.Text(";; question:")
+	out.Line()
+	q.question(out)
 	if q.response.Answers != 0 {
 		out.Line()
 		out.Text(";; answer:")
@@ -112,9 +110,7 @@ func (q *Query) printRaw(out Output, message []byte) {
 	out.Line()
 	out.Text("QUESTION")
 	out.Line()
-	if q.response.Questions != 0 {
-		q.question(out)
-	}
+	q.question(out)
 	q.section(out, message, "ANSWER", q.response.AnswerAt, q.response.Answers)
 	q.section(out, message, "AUTHORITY", q.response.AuthorityAt, q.response.Authorities)
 	q.section(out, message, "ADDITIONAL", q.response.AdditionalAt, q.response.Additionals)

@@ -191,12 +191,12 @@ func TestErrorRcodes(t *testing.T) {
 			t.Fatalf("%s: %d %+v\n%s", text, status, failure, output)
 		}
 	}
-	// A FORMERR without a question section is shown without one.
+	// A FORMERR without a question section does not answer the query.
 	f := newFake(t)
 	f.udpAnswer = reply{flags: dnswire.RcodeFormErr, noQuestion: true}.answer
-	status, _, output := run(t, f, "@192.0.2.53", "a.test")
-	if status != 0 || strings.Contains(output, ";; question:") {
-		t.Fatalf("%d\n%s", status, output)
+	status, failure, output := run(t, f, "@192.0.2.53", "a.test")
+	if status != 1 || failure.Reason != "FORMERR response without the question" || output != "" {
+		t.Fatalf("%d %+v\n%s", status, failure, output)
 	}
 }
 

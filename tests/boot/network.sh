@@ -420,18 +420,6 @@ type_line 3 'tcp listen -W 8000 -c 1 -b 192.0.2.10 9303'
 tcp_listening
 type_line 4 'tcp connect -W 8000 192.0.2.10 9303 guest stream'
 wait_for '^12 bytes: guest stream$' 12 "$right"
-# dnsq on the right guest asks the peer directly over GUDP1 and GTCP1, past
-# resolved: plain UDP, forced TCP, and a TC=1 answer repeated over TCP whose
-# TCP form is larger than one GTCP1 slot. Names of their own keep the
-# resolver's TCP counts above exact.
-for command in 'dnsq @192.0.2.53 dnsq.test' 'dnsq --short @192.0.2.53 dnsq.test AAAA' \
-	'dnsq @192.0.2.53 mail.test MX' 'dnsq --short @192.0.2.53 text.test TXT' \
-	'dnsq --short @192.0.2.53 test SOA' 'dnsq --raw @192.0.2.53 gone.test' \
-	'dnsq --tcp @192.0.2.53 dnsq.test' 'dnsq @192.0.2.53 dnsq-fallback.test' \
-	'dnsq --udp @192.0.2.53 dnsq-fallback.test'; do
-	type_line 4 "$command"
-	wait_command "$command" 12 "$right"
-done
 sleep 4
 peer_command 'edns off'
 type_line 3 'resolve fallback.test'
@@ -476,6 +464,19 @@ type_line 3 'net reload     '
 type_line 3 'config set system.net.tcp.rto-min-ms 1000'
 type_line 3 'config set system.net.tcp.rto-max-ms 60000'
 type_line 3 'net status  '
+# dnsq on the right guest asks the peer directly over GUDP1 and GTCP1, past
+# resolved: plain UDP, forced TCP, and a TC=1 answer repeated over TCP whose
+# TCP form is larger than one GTCP1 slot. Names of their own keep the
+# resolver's TCP counts above exact, and the block runs after the first
+# guest's endpoint readings so it cannot shift their timing.
+for command in 'dnsq @192.0.2.53 dnsq.test' 'dnsq --short @192.0.2.53 dnsq.test AAAA' \
+	'dnsq @192.0.2.53 mail.test MX' 'dnsq --short @192.0.2.53 text.test TXT' \
+	'dnsq --short @192.0.2.53 test SOA' 'dnsq --raw @192.0.2.53 gone.test' \
+	'dnsq --tcp @192.0.2.53 dnsq.test' 'dnsq @192.0.2.53 dnsq-fallback.test' \
+	'dnsq --udp @192.0.2.53 dnsq-fallback.test'; do
+	type_line 4 "$command"
+	wait_command "$command" 12 "$right"
+done
 # Address conflicts on the static guest: one claim is defended, a second
 # inside the defend interval makes it give the address up, and a probe the
 # peer answers keeps a new address from going live. lo carries on.

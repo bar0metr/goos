@@ -163,7 +163,10 @@ $(KERNEL_IO): kernel/arch/amd64/io.S
 	@mkdir -p $(dir $@)
 	clang -target x86_64-unknown-windows-gnu -ffreestanding -c $< -o $@
 
-$(KERNEL): $(shell find kernel internal -type f) go.mod $(KERNEL_IO) $(STACKFRAMES_SOURCES)
+# The kernel also imports a few userspace protocol packages (the launch and
+# startup formats), so their sources are prerequisites too.
+KERNEL_LIBRARY = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "uefi baremetal linux amd64 tinygo $(BUILD_TAGS)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{end}}' ./kernel 2>/dev/null || echo FORCE)
+$(KERNEL): $(shell find kernel internal -type f) $(filter-out $(CURDIR)/kernel/% $(CURDIR)/internal/%,$(KERNEL_LIBRARY)) go.mod $(KERNEL_IO) $(STACKFRAMES_SOURCES)
 	@mkdir -p $(KERNEL_DIR)
 	$(BUILD_ENV) SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-amd64.json -opt=$(OPT) -no-debug -o $@ ./kernel
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }

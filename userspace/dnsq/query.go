@@ -122,6 +122,12 @@ func (q *Query) check(step string) Failure {
 	case dnswire.ParseMalformed:
 		return Failure{step, "malformed response"}
 	}
+	// ParseResponse lets a FORMERR without a question through for the
+	// resolver, which only needs to know that EDNS(0) was refused. dnsq shows
+	// answers to the question asked and nothing else.
+	if q.response.Questions != 1 {
+		return Failure{step, "FORMERR response without the question"}
+	}
 	if q.response.Truncated {
 		return Failure{}
 	}

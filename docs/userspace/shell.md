@@ -261,7 +261,8 @@ any printable ASCII but the backslash, so `_sip._tcp.example` and
 - `--no-edns` leaves out the EDNS(0) record, which otherwise advertises
   1232 bytes with DO clear;
 - `--timeout MS`, 1 to 60000 and 5000 by default, bounds the whole query,
-  a TCP fallback included;
+  a TCP fallback included; closing the endpoint afterwards can add up to a
+  second;
 - `--short` prints the answer records' data only, one per line;
 - `--raw` adds the header fields and counts and prints all four sections.
 
@@ -293,10 +294,13 @@ Names print with a trailing dot. Any byte outside printable ASCII in a name
 or TXT string prints as `\DDD`, and a quote or backslash in TXT as `\"` or
 `\\`, so a server cannot send the terminal control sequences. Record
 types `dnsq` does not know print as `\# LENGTH HEX`, at most 64 bytes of it.
-`dnsq` exits 0 for any complete, valid answer, NXDOMAIN, SERVFAIL, REFUSED
-and FORMERR included; 1 for a timeout, a transport error, a truncated
-answer it may not repeat, or an answer that does not match the query or
-breaks the protocol, which it prints nothing of; and 2 for a usage error.
+`dnsq` exits 0 for any complete, valid answer to the question asked,
+NXDOMAIN, SERVFAIL, REFUSED and FORMERR included; 1 for a timeout, a
+transport error, a truncated answer it may not repeat, or an answer that
+does not match the query or breaks the protocol, which it prints nothing
+of; and 2 for a usage error. A FORMERR without a question section, which
+`resolved` takes as a refusal of EDNS(0), is a failure in `dnsq`: it does
+not say which query it answers.
 The error line names the step, for example
 `dnsq: tcp connect: connection refused`.
 
