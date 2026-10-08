@@ -251,6 +251,12 @@ fallback.test 60 A 192.0.2.12
 slow.test 60 SLOW 192.0.2.13
 tcp-fallback.test 60 TCP 192.0.2.14
 tcp-fallback-reset.test TCPRESET
+dnsq.test 60 A 192.0.2.80
+dnsq.test 60 AAAA 2001:db8::80
+mail.test 60 MX 10 dnsq.test
+text.test 60 TXT hello from netpeer
+text.test 60 TXT bell\007
+dnsq-fallback.test 60 TCP 192.0.2.81
 ZONE
 go build -o "$peer" ./tools/netpeer
 "$peer" -socket "$socket" -control "$control" -zone "$work/zone" -log "$queries" \
@@ -414,6 +420,18 @@ type_line 3 'tcp listen -W 8000 -c 1 -b 192.0.2.10 9303'
 tcp_listening
 type_line 4 'tcp connect -W 8000 192.0.2.10 9303 guest stream'
 wait_for '^12 bytes: guest stream$' 12 "$right"
+# dnsq on the right guest asks the peer directly over GUDP1 and GTCP1, past
+# resolved: plain UDP, forced TCP, and a TC=1 answer repeated over TCP whose
+# TCP form is larger than one GTCP1 slot. Names of their own keep the
+# resolver's TCP counts above exact.
+for command in 'dnsq @192.0.2.53 dnsq.test' 'dnsq --short @192.0.2.53 dnsq.test AAAA' \
+	'dnsq @192.0.2.53 mail.test MX' 'dnsq --short @192.0.2.53 text.test TXT' \
+	'dnsq --short @192.0.2.53 test SOA' 'dnsq --raw @192.0.2.53 gone.test' \
+	'dnsq --tcp @192.0.2.53 dnsq.test' 'dnsq @192.0.2.53 dnsq-fallback.test' \
+	'dnsq --udp @192.0.2.53 dnsq-fallback.test'; do
+	type_line 4 "$command"
+	wait_command "$command" 12 "$right"
+done
 sleep 4
 peer_command 'edns off'
 type_line 3 'resolve fallback.test'
@@ -573,6 +591,38 @@ before=$(window "$left" 'net status   ' | grep '^  endpoints: [0-9]*/32 listener
 after=$(window "$left" 'net status    ' | grep '^  endpoints: [0-9]*/32 listeners')
 [ -n "$before" ] && [ "$before" = "$after" ] || fail left.dns-tcp-endpoints "TCP endpoints after the fallbacks as before, '$before' then '$after'" "$left"
 checks=$((checks + 1))
+require_after right.dnsq-udp 'dnsq @192.0.2.53 dnsq.test' '^;; transport: UDP$' "$right"
+require_after right.dnsq-status 'dnsq @192.0.2.53 dnsq.test' '^;; status: NOERROR$' "$right"
+require_after right.dnsq-answer 'dnsq @192.0.2.53 dnsq.test' '^dnsq\.test\.    60    IN    A    192\.0\.2\.80$' "$right"
+require_after right.dnsq-aaaa 'dnsq --short @192.0.2.53 dnsq.test AAAA' '^2001:db8::80$' "$right"
+require_after right.dnsq-mx 'dnsq @192.0.2.53 mail.test MX' '^mail\.test\.    60    IN    MX    10 dnsq\.test\.$' "$right"
+require_after right.dnsq-txt 'dnsq --short @192.0.2.53 text.test TXT' '^"hello from netpeer"$' "$right"
+require_after right.dnsq-txt-escaped 'dnsq --short @192.0.2.53 text.test TXT' '^"bell\\007"$' "$right"
+require_after right.dnsq-soa 'dnsq --short @192.0.2.53 test SOA' '^ns\.test\. hostmaster\.test\. 1 3600 600 86400 30$' "$right"
+require_after right.dnsq-nxdomain 'dnsq --raw @192.0.2.53 gone.test' '^;; rcode: NXDOMAIN$' "$right"
+require_after right.dnsq-authority 'dnsq --raw @192.0.2.53 gone.test' '^test\.    60    IN    SOA    ns\.test\. ' "$right"
+forbid_after right.dnsq-nxdomain-exit 'dnsq --raw @192.0.2.53 gone.test' '^exit status:' "$right"
+require_after right.dnsq-tcp 'dnsq --tcp @192.0.2.53 dnsq.test' '^;; transport: TCP$' "$right"
+require_after right.dnsq-tcp-answer 'dnsq --tcp @192.0.2.53 dnsq.test' '^dnsq\.test\.    60    IN    A    192\.0\.2\.80$' "$right"
+forbid_after right.dnsq-tcp-only 'dnsq --tcp @192.0.2.53 dnsq.test' 'truncated' "$right"
+require_after right.dnsq-fallback 'dnsq @192.0.2.53 dnsq-fallback.test' '^;; UDP response truncated; retrying over TCP$' "$right"
+require_after right.dnsq-fallback-tcp 'dnsq @192.0.2.53 dnsq-fallback.test' '^;; transport: TCP$' "$right"
+require_after right.dnsq-fallback-answer 'dnsq @192.0.2.53 dnsq-fallback.test' '^dnsq-fallback\.test\.    60    IN    A    192\.0\.2\.81$' "$right"
+size=$(window "$right" 'dnsq @192.0.2.53 dnsq-fallback.test' | sed -n 's/^;; 1 answer, \([0-9]*\) bytes, .*/\1/p')
+[ -n "$size" ] && [ "$size" -gt 4096 ] || fail right.dnsq-fallback-large "a TCP answer over 4096 bytes, saw '$size'" "$right"
+checks=$((checks + 1))
+require_after right.dnsq-udp-only 'dnsq --udp @192.0.2.53 dnsq-fallback.test' '^dnsq: udp: response truncated' "$right"
+require_after right.dnsq-udp-only-exit 'dnsq --udp @192.0.2.53 dnsq-fallback.test' '^exit status: 1$' "$right"
+forbid_after right.dnsq-udp-only-tcp 'dnsq --udp @192.0.2.53 dnsq-fallback.test' 'retrying over TCP' "$right"
+# The peer saw the three paths from the right guest: UDP for dnsq.test, TCP
+# alone for --tcp, and for the fallback name two datagrams (default and
+# --udp) but one TCP query.
+peer_count() { grep -c "^$1 192\.0\.2\.11:" "$queries" || true; }
+[ "$(peer_count 'query dnsq\.test 1')" = 1 ] || fail peer.dnsq-udp 'one UDP query for dnsq.test A' "$queries"
+[ "$(peer_count 'dns-tcp-query dnsq\.test 1')" = 1 ] || fail peer.dnsq-tcp 'one TCP query for dnsq.test A' "$queries"
+[ "$(peer_count 'query dnsq-fallback\.test 1')" = 2 ] || fail peer.dnsq-fallback-udp 'two UDP queries for dnsq-fallback.test' "$queries"
+[ "$(peer_count 'dns-tcp-query dnsq-fallback\.test 1')" = 1 ] || fail peer.dnsq-fallback-tcp 'one TCP query for dnsq-fallback.test' "$queries"
+checks=$((checks + 4))
 require_after left.dns-deferred 'resolve slow.test' '^slow\.test: 192\.0\.2\.13 (dns, ttl 60 s)$' "$left"
 require peer.slow '^slow slow\.test 1s$' "$queries"
 [ "$(queried slow.test)" = 1 ] || fail left.dns-deferred-once "one query for slow.test, answered while its receive waited" "$queries"

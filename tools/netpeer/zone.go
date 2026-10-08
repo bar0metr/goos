@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -35,10 +36,13 @@ var directives = map[string]entryKind{
 }
 
 type zoneEntry struct {
-	kind   entryKind
-	ttl    uint32
-	addrs  []ipv4
-	target string
+	kind  entryKind
+	ttl   uint32
+	addrs []ipv4
+	// records holds the name's AAAA, NS, MX, TXT and PTR records; only a
+	// kindA entry has them, beside or instead of addresses.
+	records []record
+	target  string
 	// slow delays every answer for the name by slowAnswer.
 	slow bool
 }
@@ -68,6 +72,10 @@ func inZone(name string) bool {
 //
 //	name TTL A 1.2.3.4
 //	name TTL SLOW 1.2.3.4
+//	name TTL AAAA 2001:db8::1
+//	name TTL NS|PTR target
+//	name TTL MX preference target
+//	name TTL TXT text with spaces and \DDD escapes
 //	name TTL CNAME target
 //	name TTL TCP 1.2.3.4 [5.6.7.8 ...]
 //	name NXDOMAIN|NODATA|SERVFAIL|TRUNCATE|DROP|TCPRESET
@@ -76,8 +84,8 @@ func inZone(name string) bool {
 // addresses padded past 4096 bytes, and a TCPRESET name gets part of an
 // answer and a reset.
 //
-// A name may have several A lines but no other line beside them. Text after
-// '#' is a comment.
+// A name may have several A, AAAA, NS, MX, TXT and PTR lines but no other
+// line beside them. Text after '#' is a comment.
 func parseZone(r io.Reader) (*zone, error) {
 	z := &zone{entries: map[string]*zoneEntry{}}
 	scanner := bufio.NewScanner(r)
@@ -119,8 +127,8 @@ func (z *zone) add(fields []string) error {
 		z.entries[name] = &zoneEntry{kind: kind}
 		return nil
 	}
-	if len(fields) < 4 || len(fields) > 4 && strings.ToUpper(fields[2]) != "TCP" {
-		return fmt.Errorf("want 'name TTL A|CNAME value' or 'name DIRECTIVE'")
+	if len(fields) < 4 || len(fields) > 4 && !strings.EqualFold(fields[2], "TCP") && !strings.EqualFold(fields[2], "TXT") && !strings.EqualFold(fields[2], "MX") {
+		return fmt.Errorf("want 'name TTL TYPE value' or 'name DIRECTIVE'")
 	}
 	ttl, err := strconv.ParseUint(fields[1], 10, 32)
 	if err != nil {
@@ -155,6 +163,20 @@ func (z *zone) add(fields []string) error {
 		}
 		existing.addrs = append(existing.addrs, addr)
 		return nil
+	case "AAAA", "NS", "PTR", "MX", "TXT":
+		rr, err := dataRecord(name, kind, uint32(ttl), fields[3:])
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			z.entries[name] = &zoneEntry{kind: kindA, ttl: uint32(ttl), records: []record{rr}}
+			return nil
+		}
+		if existing.kind != kindA || existing.slow {
+			return fmt.Errorf("name %s already defined", name)
+		}
+		existing.records = append(existing.records, rr)
+		return nil
 	case "CNAME":
 		if existing != nil {
 			return fmt.Errorf("name %s already defined", name)
@@ -167,4 +189,68 @@ func (z *zone) add(fields []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown record type %q", fields[2])
+}
+
+// dataRecord reads the value of an AAAA, NS, PTR, MX or TXT line.
+func dataRecord(name, kind string, ttl uint32, values []string) (record, error) {
+	rr := record{name: name, ttl: ttl}
+	switch kind {
+	case "AAAA":
+		addr := net.ParseIP(values[0])
+		if addr == nil || addr.To4() != nil || strings.Contains(values[0], ".") {
+			return record{}, fmt.Errorf("invalid IPv6 address %q", values[0])
+		}
+		rr.rtype = typeAAAA
+		copy(rr.addr6[:], addr.To16())
+	case "NS", "PTR":
+		rr.rtype, rr.target = typeNS, normalizeName(values[0])
+		if kind == "PTR" {
+			rr.rtype = typePTR
+		}
+	case "MX":
+		if len(values) != 2 {
+			return record{}, fmt.Errorf("want 'name TTL MX preference target'")
+		}
+		preference, err := strconv.ParseUint(values[0], 10, 16)
+		if err != nil {
+			return record{}, fmt.Errorf("invalid MX preference %q", values[0])
+		}
+		rr.rtype, rr.preference, rr.target = typeMX, uint16(preference), normalizeName(values[1])
+	case "TXT":
+		text, err := unescape(strings.Join(values, " "))
+		if err != nil {
+			return record{}, err
+		}
+		rr.rtype, rr.text = typeTXT, text
+	}
+	if (rr.rtype == typeNS || rr.rtype == typePTR || rr.rtype == typeMX) && rr.target == "" {
+		return record{}, fmt.Errorf("empty %s target", kind)
+	}
+	return rr, nil
+}
+
+// unescape turns \DDD into the byte it names, so a zone can hold control
+// bytes in a TXT string. The result is one character-string of at most 255
+// bytes.
+func unescape(text string) (string, error) {
+	var out []byte
+	for index := 0; index < len(text); index++ {
+		if text[index] != '\\' {
+			out = append(out, text[index])
+			continue
+		}
+		if index+4 > len(text) {
+			return "", fmt.Errorf("short escape in %q", text)
+		}
+		value, err := strconv.ParseUint(text[index+1:index+4], 10, 8)
+		if err != nil {
+			return "", fmt.Errorf("invalid escape in %q", text)
+		}
+		out = append(out, byte(value))
+		index += 3
+	}
+	if len(out) > 255 {
+		return "", fmt.Errorf("TXT string longer than 255 bytes")
+	}
+	return string(out), nil
 }

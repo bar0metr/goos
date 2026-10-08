@@ -35,6 +35,14 @@ big.test TRUNCATE
 silent.test DROP
 loop1.test 60 CNAME loop2.test
 loop2.test 60 CNAME loop1.test
+data.test 60 A 192.0.2.90
+data.test 60 AAAA 2001:db8::90
+data.test 60 MX 10 Mail.Test.
+data.test 60 MX 20 backup.test
+data.test 60 NS ns.test
+data.test 60 TXT hello  world
+data.test 60 TXT bell\007 end
+ptr.test 60 PTR data.test
 `
 
 func testHost(t *testing.T, log io.Writer) *host {
@@ -310,6 +318,14 @@ func TestZoneParsing(t *testing.T) {
 		"host.test 60 A 1.2.3.4\nhost.test 60 CNAME x.test",
 		"host.test NODATA\nhost.test NXDOMAIN",
 		"host.test 60 A",
+		"host.test 60 AAAA 192.0.2.1",
+		"host.test 60 AAAA ::ffff:192.0.2.1",
+		"host.test 60 MX ten mail.test",
+		"host.test 60 MX 10 mail.test extra",
+		"host.test 60 TXT bad\\07",
+		"host.test 60 TXT bad\\999",
+		"host.test 60 CNAME x.test\nhost.test 60 TXT y",
+		"host.test 60 SLOW 1.2.3.4\nhost.test 60 TXT y",
 	} {
 		if _, err := parseZone(strings.NewReader(bad)); err == nil {
 			t.Errorf("zone %q accepted", bad)
@@ -508,6 +524,55 @@ func TestDNSAnswers(t *testing.T) {
 	}
 	if _, answered := ask(t, z, true, "silent.test", typeA, true); answered {
 		t.Fatal("DROP answered with -no-edns")
+	}
+}
+
+// Records beside or instead of addresses answer their own type only.
+func TestDNSDataRecords(t *testing.T) {
+	z, err := parseZone(strings.NewReader(testZone))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := func(name string, qtype uint16) []byte {
+		q, ok := parseQuery(dnsQueryBytes(1, name, qtype, false))
+		if !ok {
+			t.Fatal("query")
+		}
+		return answer(q, z, false)
+	}
+	for _, c := range []struct {
+		qtype uint16
+		want  []string
+	}{
+		{typeA, []string{"\xc0\x00\x02\x5a"}},
+		{typeAAAA, []string{"\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x90"}},
+		{typeMX, []string{"\x00\x0a\x04mail", "\x00\x14\x06backup"}},
+		{typeNS, []string{"\x02ns"}},
+		{typeTXT, []string{"\x0bhello world", "\x09bell\x07 end"}},
+	} {
+		r, _ := ask(t, z, false, "data.test", c.qtype, false)
+		if len(r.answers) != len(c.want) || len(r.authority) != 0 {
+			t.Fatalf("type %d: %+v", c.qtype, r)
+		}
+		body := string(raw("data.test", c.qtype))
+		for _, want := range c.want {
+			if !strings.Contains(body, want) {
+				t.Fatalf("type %d: no %q in % x", c.qtype, want, body)
+			}
+		}
+	}
+	r, _ := ask(t, z, false, "ptr.test", typePTR, false)
+	if len(r.answers) != 1 || !strings.Contains(string(raw("ptr.test", typePTR)), "\x04data") {
+		t.Fatalf("PTR %+v", r)
+	}
+	for _, query := range []struct {
+		name  string
+		qtype uint16
+	}{{"data.test", typeSOA}, {"data.test", typeCNAME}, {"ptr.test", typeA}} {
+		r, _ = ask(t, z, false, query.name, query.qtype, false)
+		if r.flags&0xf != 0 || len(r.answers) != 0 || len(r.authority) != 1 || r.authority[0] != soaWant {
+			t.Fatalf("NODATA %v %+v", query, r)
+		}
 	}
 }
 
