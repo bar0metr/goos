@@ -335,11 +335,11 @@ func (stack *Stack) handlePayload(entry *tcpEndpoint, segment tcpSegment, now ui
 	}
 }
 
-// notePeerFIN records the sequence number of the peer's FIN when it lies in
-// the receive window. The first FIN fixes the end of the stream; a later FIN
-// at another position is ignored. Held bytes past the FIN are discarded.
+// notePeerFIN records a FIN only when its own sequence number lies in the
+// current receive window. Payload clipping does not decide FIN acceptability.
+// The first accepted FIN fixes the stream end. Held bytes past it are discarded.
 func (stack *Stack) notePeerFIN(entry *tcpEndpoint, at, window uint32) {
-	if entry.peerFIN || seqLT(at, entry.rcvNxt) || seqGT(at, entry.rcvNxt+window) {
+	if entry.peerFIN || window == 0 || !seqGE(at, entry.rcvNxt) || !seqLT(at, entry.rcvNxt+window) {
 		return
 	}
 	entry.peerFIN, entry.peerFINAt = true, at

@@ -53,7 +53,10 @@ bounded set of later segments, trims duplicates and overlaps, and ACKs the
 highest contiguous sequence. The first accepted FIN fixes the end of the
 stream at its sequence number, even when it arrives out of order. Bytes at or
 after that number are discarded, and nothing enters the receive stream after
-the FIN is consumed.
+the FIN is consumed. FIN consumes sequence space. Its sequence number must lie
+inside the current receive window before it can fix the stream end. A FIN at
+the right-exclusive window edge is rejected even when payload from the same
+segment fits inside the window.
 
 The retransmission timer uses SRTT, RTTVAR, Karn sampling, exponential backoff
 and configured minimum and maximum values. A synchronized connection that

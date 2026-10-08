@@ -891,6 +891,105 @@ func TestTCPFINFailsWithNeighbor(t *testing.T) {
 
 func receivedStream(entry *tcpEndpoint) string { return string(entry.receive[:entry.recvLen]) }
 
+func TestTCPFINAtReceiveWindowRightEdge(t *testing.T) {
+	for _, start := range []uint32{100, 0xfffffffe} {
+		h := readyWithPeer(t)
+		h.stack.tuning.TCP.ReceiveBuffer = 4
+		id, entry := establishedWithPeer(t, h, 50100)
+		entry.rcvNxt = start
+		end := start + 4
+		h.tcpFromPeer(entry, tcpSegment{sequence: start, acknowledgment: entry.sndNxt,
+			flags: tcpFlagACK | tcpFlagFIN, payload: []byte("abcd")})
+		if entry.rcvNxt != end || receivedStream(entry) != "abcd" || entry.peerFIN || entry.finReceived || entry.state != TCPEstablished {
+			t.Fatalf("start=%d: rcvNxt=%d data=%q peerFIN=%v fin=%v state=%d",
+				start, entry.rcvNxt, receivedStream(entry), entry.peerFIN, entry.finReceived, entry.state)
+		}
+		if sent := h.tcpSent(); len(sent) != 1 || sent[0].acknowledgment != end {
+			t.Fatalf("start=%d: ACKs %+v", start, sent)
+		}
+		var buffer [4]byte
+		if n, result := h.stack.TCPRead(0, id, buffer[:], h.now); n != 4 || result != ResultOK || string(buffer[:]) != "abcd" {
+			t.Fatalf("start=%d: read %d %d %q", start, n, result, buffer[:])
+		}
+		if n, result := h.stack.TCPRead(0, id, buffer[:], h.now); n != 0 || result != ResultBusy {
+			t.Fatalf("start=%d: premature EOF %d %d", start, n, result)
+		}
+		h.tcpSent()
+		h.tcpFromPeer(entry, tcpSegment{sequence: end, acknowledgment: entry.sndNxt, flags: tcpFlagACK | tcpFlagFIN})
+		if !entry.peerFIN || entry.peerFINAt != end || !entry.finReceived || entry.rcvNxt != end+1 || entry.state != TCPCloseWait {
+			t.Fatalf("start=%d: FIN at=%d known=%v received=%v rcvNxt=%d state=%d",
+				start, entry.peerFINAt, entry.peerFIN, entry.finReceived, entry.rcvNxt, entry.state)
+		}
+		if n, result := h.stack.TCPRead(0, id, buffer[:], h.now); n != 0 || result != ResultEOF {
+			t.Fatalf("start=%d: EOF %d %d", start, n, result)
+		}
+		h.tcpFromPeer(entry, tcpSegment{sequence: end, acknowledgment: entry.sndNxt, flags: tcpFlagACK | tcpFlagFIN})
+		if entry.rcvNxt != end+1 {
+			t.Fatalf("start=%d: duplicate FIN advanced to %d", start, entry.rcvNxt)
+		}
+	}
+}
+
+func TestTCPFINInsideReceiveWindow(t *testing.T) {
+	h := readyWithPeer(t)
+	h.stack.tuning.TCP.ReceiveBuffer = 5
+	id, entry := establishedWithPeer(t, h, 50101)
+	entry.rcvNxt = 100
+	h.tcpFromPeer(entry, tcpSegment{sequence: 100, acknowledgment: entry.sndNxt,
+		flags: tcpFlagACK | tcpFlagFIN, payload: []byte("abcd")})
+	if !entry.peerFIN || entry.peerFINAt != 104 || !entry.finReceived || entry.rcvNxt != 105 || entry.state != TCPCloseWait {
+		t.Fatalf("FIN at=%d known=%v received=%v rcvNxt=%d state=%d",
+			entry.peerFINAt, entry.peerFIN, entry.finReceived, entry.rcvNxt, entry.state)
+	}
+	var buffer [4]byte
+	if n, result := h.stack.TCPRead(0, id, buffer[:], h.now); n != 4 || result != ResultOK || string(buffer[:]) != "abcd" {
+		t.Fatalf("read %d %d %q", n, result, buffer[:])
+	}
+	if n, result := h.stack.TCPRead(0, id, buffer[:], h.now); n != 0 || result != ResultEOF {
+		t.Fatalf("EOF %d %d", n, result)
+	}
+}
+
+func TestTCPFINBeyondClippedPayload(t *testing.T) {
+	h := readyWithPeer(t)
+	h.stack.tuning.TCP.ReceiveBuffer = 4
+	_, entry := establishedWithPeer(t, h, 50102)
+	entry.rcvNxt = 100
+	h.tcpFromPeer(entry, tcpSegment{sequence: 100, acknowledgment: entry.sndNxt,
+		flags: tcpFlagACK | tcpFlagFIN, payload: []byte("abcdef")})
+	if entry.rcvNxt != 104 || receivedStream(entry) != "abcd" || entry.peerFIN || entry.finReceived {
+		t.Fatalf("rcvNxt=%d data=%q peerFIN=%v fin=%v", entry.rcvNxt, receivedStream(entry), entry.peerFIN, entry.finReceived)
+	}
+	for index := range entry.reorder {
+		if entry.reorder[index].used {
+			t.Fatalf("out-of-window bytes held in slot %d", index)
+		}
+	}
+	if sent := h.tcpSent(); len(sent) != 1 || sent[0].acknowledgment != 104 {
+		t.Fatalf("ACKs %+v", sent)
+	}
+}
+
+func TestTCPFINWithZeroReceiveWindow(t *testing.T) {
+	h := readyWithPeer(t)
+	h.stack.tuning.TCP.ReceiveBuffer = 4
+	_, entry := establishedWithPeer(t, h, 50103)
+	entry.rcvNxt = 100
+	entry.recvLen = 4
+	copy(entry.receive[:], "abcd")
+	fin := tcpSegment{sequence: 100, acknowledgment: entry.sndNxt, flags: tcpFlagACK | tcpFlagFIN}
+	h.tcpFromPeer(entry, fin)
+	if entry.rcvNxt != 100 || entry.peerFIN || entry.finReceived || entry.state != TCPEstablished {
+		t.Fatalf("zero window: rcvNxt=%d peerFIN=%v fin=%v state=%d", entry.rcvNxt, entry.peerFIN, entry.finReceived, entry.state)
+	}
+	if sent := h.tcpSent(); len(sent) != 1 || sent[0].acknowledgment != 100 {
+		t.Fatalf("ACKs %+v", sent)
+	}
+	if !h.stack.tcpSegmentAcceptable(entry, tcpSegment{sequence: 100, flags: tcpFlagACK}) {
+		t.Fatal("zero-window exact ACK rejected")
+	}
+}
+
 func TestTCPNoDataAfterFIN(t *testing.T) {
 	stack := Stack{tuning: DefaultTuning()}
 	entry := tcpEndpoint{state: TCPEstablished, rcvNxt: 100, sndNxt: 50}
