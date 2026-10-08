@@ -68,8 +68,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
     one framed query and one answer larger than a GTCP1 slot, then from the
     cache with no query at all; a name whose TCP answer the peer resets must
     give `temporary failure`, `resolve status` must count two fallbacks, one
-    answer and one failure, and the TCP endpoint line of `net status` must
-    match the one before. Every query the guest sent
+    answer and one failure, and with `system.net.tcp.time-wait-ms` at 1000
+    for these lookups the TCP endpoint line of `net status` must match the
+    one before. Every query the guest sent
     must have left from its own port in the ephemeral range, and the
     40-second lease must have been renewed. Last on that guest,
     `system.net.udp.max-payload` set to 1300 must apply on `net reload`,
@@ -107,9 +108,10 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   across Reads in every way, take partial Writes, fail on early EOF, a bad
   prefix, `Reset`, `Timeout` and the other transport results, settle the
   slots of replies that arrive after a cancel, keep two fallbacks at most,
-  and fuzz the read pieces. Two of them run the fallback over a real stack
+  and fuzz the read pieces. Three of them run the fallback over a real stack
   with `tcpserve` and `udpserve` on both ends: one answer split across the
-  prefix and two RX slots, then a cache hit, and one answer cut short. The network gate remains the
+  prefix and two RX slots, then a cache hit; one answer cut short; and 24
+  fallbacks in a row, each leaving the resolver's side in TIME_WAIT. The network gate remains the
   test of the services themselves.
 
   The config exchange unit tests cover the timeout, late reply, then next

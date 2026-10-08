@@ -182,7 +182,15 @@ func (stack *Stack) TCPOpen(owner int) (TCPEndpointID, Result) {
 		}
 	}
 	if free < 0 || total >= int(stack.tuning.TCP.MaxEndpoints) || mine >= int(stack.tuning.TCP.SessionEndpoints) {
-		return 0, ResultBusy
+		// A connection the owner closed first waits out TIME_WAIT on the
+		// owner's count. Rather than refuse the owner for up to time-wait-ms,
+		// reuse the oldest such entry it left; another owner's entries stay.
+		reused := stack.oldestTimeWait(owner)
+		if reused < 0 || reused >= len(stack.tcp) {
+			return 0, ResultBusy
+		}
+		stack.releaseTCP(&stack.tcp[reused])
+		free = reused
 	}
 	stack.tcpGeneration++
 	if stack.tcpGeneration == tcpGenerations {
@@ -428,6 +436,22 @@ func (stack *Stack) TCPState(owner int, id TCPEndpointID) (TCPState, TCPTuple, R
 		return TCPFree, TCPTuple{}, ResultInvalidArgument
 	}
 	return entry.state, tcpTuple(entry), entry.lastResult
+}
+
+// oldestTimeWait returns the index of the owner's closed TIME_WAIT entry
+// that expires first, or -1.
+func (stack *Stack) oldestTimeWait(owner int) int {
+	oldest := -1
+	for index := range stack.tcp[:] {
+		entry := &stack.tcp[index]
+		if entry.state != TCPTimeWait || !entry.orphan || int(entry.owner) != owner {
+			continue
+		}
+		if oldest < 0 || entry.deadline < stack.tcp[oldest].deadline {
+			oldest = index
+		}
+	}
+	return oldest
 }
 
 func (stack *Stack) releaseTCP(entry *tcpEndpoint) {

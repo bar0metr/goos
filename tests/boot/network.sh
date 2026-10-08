@@ -422,25 +422,30 @@ peer_command 'edns on'
 # the query's RecvFrom waits in netd and resolved takes the answer from it.
 type_line 3 'resolve slow.test'
 sleep 1
+# UDP limits reload with the rest of system.net.*: the DHCP values refused
+# above are put back first, so the candidate fails or applies on UDP alone.
+type_line 3 'config set system.net.dhcp.max-retry-ms 64000'
+type_line 3 'config set system.net.udp.max-payload 1300'
+# TIME_WAIT shrinks to a second for the DNS fallbacks below, so whichever
+# side closes first, the connections are gone when their count is compared.
+type_line 3 'config set system.net.tcp.time-wait-ms 1000'
+type_line 3 'net reload  '
+type_line 3 'udp self -s 1301 127.0.0.1 9200'
+type_line 3 'udp self -s 1300 127.0.0.1 9201'
 # DNS over TCP: the peer answers these names with TC=1 over UDP. The full
 # answer over TCP is larger than one GTCP1 slot, and the second lookup comes
 # from the cache. The reset name's TCP answer is cut short by a reset.
+sleep 2
 type_line 3 'net status   '
 type_line 3 'resolve tcp-fallback.test'
 wait_command 'resolve tcp-fallback.test' 12 "$left"
 type_line 3 'resolve tcp-fallback.test '
 type_line 3 'resolve tcp-fallback-reset.test'
 wait_command 'resolve tcp-fallback-reset.test' 12 "$left"
-sleep 2
+sleep 3
 type_line 3 'resolve status '
 type_line 3 'net status    '
-# UDP limits reload with the rest of system.net.*: the DHCP values refused
-# above are put back first, so the candidate fails or applies on UDP alone.
-type_line 3 'config set system.net.dhcp.max-retry-ms 64000'
-type_line 3 'config set system.net.udp.max-payload 1300'
-type_line 3 'net reload  '
-type_line 3 'udp self -s 1301 127.0.0.1 9200'
-type_line 3 'udp self -s 1300 127.0.0.1 9201'
+type_line 3 'config set system.net.tcp.time-wait-ms 60000'
 type_line 3 'config set system.net.udp.ephemeral-port-min 60000'
 type_line 3 'config set system.net.udp.ephemeral-port-max 50000'
 type_line 3 'net reload   '

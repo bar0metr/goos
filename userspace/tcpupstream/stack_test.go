@@ -491,3 +491,42 @@ func TestFallbackCutShortOverRealStack(t *testing.T) {
 	}
 	w.settled()
 }
+
+// The resolver closes each fallback connection as soon as it has the answer,
+// before the server does, so each leaves a TIME_WAIT behind on the
+// resolver's session. Many fallbacks in a row must not run the session out
+// of endpoints.
+func TestManyFallbacksOverRealStack(t *testing.T) {
+	w := newWorld(t)
+	for round := range 3 * network.MaxTCPEndpointsPerSession {
+		text := "n" + string(rune('a'+round)) + ".test"
+		if _, done := w.lookup(0, text); done {
+			t.Fatalf("round %d answered at once", round)
+		}
+		w.pump()
+		query, port := w.receiveUDP()
+		w.sendUDP(port, header(query, 0x8380))
+		w.pump()
+		accepted := w.tcpCall(tcpapi.Request{Opcode: tcpapi.OpAccept, Endpoint: w.listener})
+		if accepted.Result != tcpapi.ResultOK {
+			t.Fatalf("round %d accept %+v", round, accepted)
+		}
+		w.readTCP(accepted.Endpoint, 2+len(query))
+		w.writeTCP(accepted.Endpoint, framedMessage(big(query, [4]byte{10, 0, 3, byte(round)})))
+		w.pump()
+		_, answer, ok := w.resolver.Completion()
+		if !ok || answer.Result != dns.ResultOK || answer.Addresses[0] != [4]byte{10, 0, 3, byte(round)} {
+			t.Fatalf("round %d completion %+v %v", round, answer, ok)
+		}
+		w.tcpCall(tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: accepted.Endpoint})
+		w.pump()
+	}
+	if stats := w.resolver.Stats(); stats.TCPAnswers != 3*network.MaxTCPEndpointsPerSession || stats.TCPFailures != 0 {
+		t.Fatalf("stats %+v", stats)
+	}
+	w.settled()
+}
+
+func framedMessage(message []byte) []byte {
+	return append(binary.BigEndian.AppendUint16(nil, uint16(len(message))), message...)
+}

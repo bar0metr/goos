@@ -80,7 +80,14 @@ causes a rate-limited challenge ACK.
 leaves the stack to finish the close. The stack frees the endpoint when
 LAST-ACK receives its final ACK, when TIME_WAIT ends, when FIN-WAIT-2 has
 waited for the TIME_WAIT interval, or when the FIN reaches the retransmission
-limit. Until then it counts against the owner's endpoint limit. A passive
+limit. Until then it counts against the owner's endpoint limit. An `Open`
+that finds the owner at its limit, or the table full, reuses the owner's
+closed TIME_WAIT entry that expires first; it never takes another owner's
+entry or one the owner still holds. Without that, a client that closes
+first, such as the resolver after each DNS fallback, would be refused for up
+to `time-wait-ms` after eight connections. The new connection gets a fresh
+random ephemeral port, so the four-tuple the old TIME_WAIT guarded is not
+reused by the same choice. A passive
 child that no application has accepted is freed as soon as it ends, by RST,
 timeout, reconfiguration or the close of its listener, and leaves the
 listener's backlog at once.
