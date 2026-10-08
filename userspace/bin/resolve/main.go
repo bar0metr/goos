@@ -132,6 +132,8 @@ func status() {
 	counter("upstream", "misses", reply.Misses, "queries", reply.Queries, "timeouts", reply.Timeouts)
 	counter("dropped", "malformed", reply.Malformed, "mismatched", reply.Mismatched, "truncated", reply.Truncated)
 	counter("errors", "server", reply.ServerFailures, "", 0, "", 0)
+	counter("tcp", "fallbacks", reply.TCPFallbacks, "answers", reply.TCPAnswers, "", 0)
+	counter("tcp-errors", "failures", reply.TCPFailures, "timeouts", reply.TCPTimeouts, "", 0)
 	field("generation", appendDecimal(text[:0], reply.Generation))
 	utility.Mark("RESOLVE_STATUS_OK\n")
 }

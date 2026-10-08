@@ -5,11 +5,12 @@ package main
 // The resolver service (ADR 0194). PID 1 runs it from the installed system in
 // normal mode, next to the network service, with a read-only view of
 // system.dns.* and of the hosts table. It reaches DNS servers over a UDP
-// session and learns the DHCP lease's servers over a network status session,
-// both opened from the network service like any program's (ADR 0195). PID 1
-// opens a new pair whenever either service starts, so a restart of one never
-// leaves the other holding dead sessions. Commands that resolve names get a
-// private session each, as they do with the network service.
+// session, repeats truncated answers over a TCP session, and learns the DHCP
+// lease's servers over a network status session, all opened from the network
+// service like any program's (ADR 0195, 0196). PID 1 opens a new set whenever
+// either service starts, so a restart of one never leaves the other holding
+// dead sessions. Commands that resolve names get a private session each, as
+// they do with the network service.
 
 import (
 	"goos/internal/capability"
@@ -79,8 +80,9 @@ func renewResolverGrants(spec *supervisor.LaunchSpec) bool {
 }
 
 // bindResolverNetwork opens a UDP session and a status session from the
-// network service and hands both to the resolver. PID 1 keeps nothing of
-// them.
+// network service and hands both to the resolver, then a TCP session under
+// the same generation. PID 1 keeps nothing of them. Without the TCP session
+// the resolver still answers over UDP; only truncated answers fail.
 func bindResolverNetwork() {
 	if netControl == 0 || resolverControl == 0 || resolverNetworkGeneration+1 == 0 {
 		return
@@ -118,6 +120,35 @@ func bindResolverNetwork() {
 		return
 	}
 	syslog.Info("resolver network sessions bound", syslog.Uint("generation", resolverNetworkGeneration))
+	bindResolverTCP()
+}
+
+// bindResolverTCP hands the resolver a TCP session for DNS fallback under
+// the network generation just bound.
+func bindResolverTCP() {
+	tcp, ok := openTCPSession()
+	if !ok {
+		syslog.Error("resolver TCP session unavailable")
+		return
+	}
+	correlation++
+	var message ipc.Message
+	request := netapi.ControlRequest{Opcode: netapi.ControlSetTCP, Generation: resolverNetworkGeneration}
+	if !netapi.EncodeControlRequest(&request, tcp[:], correlation, &message) || !sendMessage(uint64(resolverControl), message) {
+		for _, id := range tcp {
+			sys.HandleClose(id)
+		}
+		syslog.Error("resolver did not take its TCP session")
+		return
+	}
+	reply, status := receive(uint64(resolverControl), vfsSessionDeadline)
+	var decoded netapi.ControlReply
+	if status != ipc.StatusOK || !netapi.DecodeControlReply(&reply, correlation, netapi.ControlSetTCP, &decoded) ||
+		decoded.Result != netapi.ControlOK {
+		syslog.Warn("resolver refused its TCP session")
+		return
+	}
+	mark("RESOLVED_TCP_BOUND_OK\n")
 }
 
 // openResolverSession asks the resolver to accept a session of class and

@@ -9,6 +9,7 @@ const (
 	typeA     = 1
 	typeCNAME = 5
 	typeSOA   = 6
+	typeTXT   = 16
 	typeOPT   = 41
 
 	rcodeNoError  = 0
@@ -28,6 +29,12 @@ const (
 	soaMinimum  = 30
 	maxChain    = 8
 	maxRecords  = 64
+
+	// A TCP name's answer over TCP carries padRecords TXT records of
+	// padLength bytes each in the additional section, so the message is
+	// about 6000 bytes: more than one 4096-byte guest receive slot.
+	padRecords = 22
+	padLength  = 255
 )
 
 type dnsQuery struct {
@@ -148,6 +155,7 @@ type record struct {
 	ttl    uint32
 	addr   ipv4
 	target string
+	text   string
 }
 
 type resolution struct {
@@ -157,14 +165,17 @@ type resolution struct {
 	drop      bool
 	answers   []record
 	authority []record
+	// padName names the TXT padding records; empty means no padding.
+	padName string
 }
 
 func soaRecord() record { return record{name: zoneSuffix, rtype: typeSOA, ttl: soaTTL} }
 
 // resolve answers name and qtype from the zone. CNAMEs inside the zone are
 // followed for every qtype except CNAME, and the chain goes in the answer
-// section ahead of what the last name yields.
-func (z *zone) resolve(name string, qtype uint16) resolution {
+// section ahead of what the last name yields. TCP and TCPRESET names are
+// truncated over UDP; over TCP they get the padded answer.
+func (z *zone) resolve(name string, qtype uint16, overTCP bool) resolution {
 	if !inZone(name) {
 		return resolution{rcode: rcodeRefused}
 	}
@@ -200,6 +211,18 @@ func (z *zone) resolve(name string, qtype uint16) resolution {
 			return resolution{rcode: rcodeServFail, aa: true}
 		case kindTRUNCATE:
 			return resolution{aa: true, tc: true}
+		case kindTCP, kindTCPRESET:
+			if !overTCP {
+				return resolution{aa: true, tc: true}
+			}
+			r.padName = current
+			if qtype != typeA || entry.kind == kindTCPRESET {
+				r.authority = append(r.authority, soaRecord())
+				return r
+			}
+			for _, addr := range entry.addrs {
+				r.answers = append(r.answers, record{name: current, rtype: typeA, ttl: entry.ttl, addr: addr})
+			}
 		case kindDROP:
 			return resolution{drop: true}
 		case kindA:
@@ -225,12 +248,16 @@ func (z *zone) resolve(name string, qtype uint16) resolution {
 	}
 }
 
-// answer builds the response to a query, or nil when the query must go
+// answer builds the response to a UDP query, or nil when the query must go
 // unanswered.
 func answer(q dnsQuery, z *zone, noEDNS bool) []byte {
+	return buildAnswer(q, z, noEDNS, false)
+}
+
+func buildAnswer(q dnsQuery, z *zone, noEDNS, overTCP bool) []byte {
 	var r resolution
 	withOPT := q.hasOPT
-	if r = z.resolve(q.name, q.qtype); r.drop {
+	if r = z.resolve(q.name, q.qtype, overTCP); r.drop {
 		return nil
 	}
 	if q.hasOPT && noEDNS {
@@ -250,9 +277,16 @@ func answer(q dnsQuery, z *zone, noEDNS bool) []byte {
 	b.u16(1)
 	b.u16(uint16(len(r.answers)))
 	b.u16(uint16(len(r.authority)))
-	additional := uint16(0)
+	var padding []record
+	if r.padName != "" {
+		text := strings.Repeat("padding.", padLength/8+1)[:padLength]
+		for range padRecords {
+			padding = append(padding, record{name: r.padName, rtype: typeTXT, text: text})
+		}
+	}
+	additional := uint16(len(padding))
 	if withOPT {
-		additional = 1
+		additional++
 	}
 	b.u16(additional)
 	b.name(q.labels)
@@ -262,6 +296,9 @@ func answer(q dnsQuery, z *zone, noEDNS bool) []byte {
 		b.record(rr)
 	}
 	for _, rr := range r.authority {
+		b.record(rr)
+	}
+	for _, rr := range padding {
 		b.record(rr)
 	}
 	if withOPT {
@@ -319,6 +356,9 @@ func (b *dnsBuilder) record(rr record) {
 		b.buf = append(b.buf, rr.addr[:]...)
 	case typeCNAME:
 		b.name(splitName(rr.target))
+	case typeTXT:
+		b.buf = append(b.buf, byte(len(rr.text)))
+		b.buf = append(b.buf, rr.text...)
 	case typeSOA:
 		b.name([]string{"ns", zoneSuffix})
 		b.name([]string{"hostmaster", zoneSuffix})

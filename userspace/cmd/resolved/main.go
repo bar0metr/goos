@@ -5,7 +5,8 @@
 // localhost and names under it itself, asks the configuration service's hosts
 // table next, and only then its cache and the recursive DNS servers named by
 // the DHCP lease and by system.dns.server1..4. It reaches those servers over
-// the same UDP sessions any program uses (ADR 0195), and learns the lease's
+// the same UDP sessions any program uses (ADR 0195), repeats a truncated
+// answer's query over a TCP session (ADR 0196), and learns the lease's
 // servers over a network status session; it holds no device.
 package main
 
@@ -133,6 +134,8 @@ func serve() {
 				serviceControl()
 			case -3:
 				serviceStatus()
+			case -4:
+				serviceTCP()
 			default:
 				serviceSession(owner)
 			}
@@ -150,6 +153,9 @@ func buildInterests() int {
 	if link.channel != 0 {
 		add(link.channel, -1)
 		add(link.status, -3)
+	}
+	if stream.channel != 0 {
+		add(stream.channel, -4)
 	}
 	add(controlHandle, -2)
 	for index := range sessions {
@@ -222,6 +228,8 @@ func serviceControl() {
 			answerControl(control.Opcode, addSession(message.Handles[0], control.Rights), 0, correlation)
 		case netapi.ControlSetNetwork:
 			answerControl(control.Opcode, setNetwork(control.Generation), control.Generation, correlation)
+		case netapi.ControlSetTCP:
+			answerControl(control.Opcode, setTCP(control.Generation), control.Generation, correlation)
 		default:
 			closeAttached()
 			answerControl(control.Opcode, netapi.ControlInvalidArgument, 0, correlation)
@@ -434,6 +442,8 @@ func status() {
 	answer.Misses, answer.Queries, answer.Timeouts = stats.Misses, stats.Queries, stats.Timeouts
 	answer.Malformed, answer.Mismatched = stats.Malformed, stats.Mismatched
 	answer.Truncated, answer.ServerFailures = stats.Truncated, stats.ServerFailures
+	answer.TCPFallbacks, answer.TCPAnswers = stats.TCPFallbacks, stats.TCPAnswers
+	answer.TCPFailures, answer.TCPTimeouts = stats.TCPFailures, stats.TCPTimeouts
 }
 
 // --- configuration ----------------------------------------------------------

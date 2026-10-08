@@ -2,11 +2,15 @@
 
 package main
 
-// The resolver's way to its DNS servers (ADR 0195). PID 1 gives this service
-// a UDP session and a network status session with ControlSetNetwork, the
-// same sessions any program gets, whenever this service or the network
-// service starts. userspace/upstream runs the queries over the UDP session;
-// this file owns the handles and the pools and carries its messages.
+// The resolver's way to its DNS servers (ADR 0195, 0196). PID 1 gives this
+// service a UDP session and a network status session with ControlSetNetwork,
+// then a TCP session with ControlSetTCP under the same generation, the same
+// sessions any program gets, whenever this service or the network service
+// starts. userspace/upstream runs the queries over the UDP session and
+// userspace/tcpupstream the fallbacks for truncated answers over the TCP
+// session; this file owns the handles and the pools and carries their
+// messages. A fault on the TCP session drops that session alone: the
+// fallbacks on it fail and plain UDP queries go on.
 //
 // The network session carries the DHCP lease's DNS servers: one Servers
 // request waits in the network service until the list changes.
@@ -18,6 +22,8 @@ import (
 	syslog "goos/userspace/log"
 	"goos/userspace/netapi"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/tcpapi"
+	"goos/userspace/tcpupstream"
 	"goos/userspace/udpapi"
 	"goos/userspace/upstream"
 )
@@ -41,6 +47,18 @@ type networkLink struct {
 	serverGeneration uint64
 }
 
+// tcpLink is the TCP session for DNS fallback, bound to the network
+// generation it came with.
+type tcpLink struct {
+	channel  handle.ID
+	txHandle handle.ID
+	rxHandle handle.ID
+	txBase   uint64
+	txSize   uint64
+	rxBase   uint64
+	rxSize   uint64
+}
+
 // udpSender sends the client's requests on the UDP session.
 type udpSender struct{}
 
@@ -48,9 +66,19 @@ func (udpSender) Send(request *udpapi.Request, correlation uint64) bool {
 	return udpapi.EncodeRequest(request, correlation, &reply) && sendOn(link.channel, &reply)
 }
 
+// tcpSender sends the fallback client's requests on the TCP session.
+type tcpSender struct{}
+
+func (tcpSender) Send(request *tcpapi.Request, correlation uint64) bool {
+	return tcpapi.EncodeRequest(request, correlation, &reply) && sendOn(stream.channel, &reply)
+}
+
 var (
 	link        networkLink
+	stream      tcpLink
 	client      upstream.Client
+	fallback    tcpupstream.Client
+	tcpReply    tcpapi.Reply
 	correlation uint64
 	udpReply    udpapi.Reply
 	netRequest  netapi.Request
@@ -108,9 +136,63 @@ func setNetwork(generation uint64) netapi.ControlResult {
 	return netapi.ControlOK
 }
 
-// closeNetwork drops both sessions. The DHCP servers belonged to the lease
+// setTCP installs the TCP session that belongs to the current network
+// generation. One for any other generation is refused.
+func setTCP(generation uint64) netapi.ControlResult {
+	channel, tx, rx := message.Handles[0], message.Handles[1], message.Handles[2]
+	refuse := func(result netapi.ControlResult) netapi.ControlResult {
+		for _, id := range [...]handle.ID{channel, tx, rx} {
+			sys.HandleClose(id)
+		}
+		return result
+	}
+	const rw = capability.Read | capability.Write | capability.Wait
+	if link.channel == 0 || generation != link.generation || !handleIs(channel, handle.TypeChannel, rw) ||
+		!handleIs(tx, handle.TypeMemory, capability.Read|capability.Write) || !handleIs(rx, handle.TypeMemory, capability.Read) {
+		return refuse(netapi.ControlInvalidArgument)
+	}
+	const txPool, rxPool = tcpapi.TXSlots * tcpapi.SlotSize, tcpapi.RXSlots * tcpapi.SlotSize
+	txBase, txSize, txStatus := sys.MemoryMapAnywhere(tx, true)
+	if txStatus != kcall.StatusOK || txSize < txPool {
+		if txStatus == kcall.StatusOK {
+			sys.VMUnmap(txBase, txSize)
+		}
+		return refuse(netapi.ControlInvalidArgument)
+	}
+	rxBase, rxSize, rxStatus := sys.MemoryMapAnywhere(rx, false)
+	if rxStatus != kcall.StatusOK || rxSize < rxPool {
+		sys.VMUnmap(txBase, txSize)
+		if rxStatus == kcall.StatusOK {
+			sys.VMUnmap(rxBase, rxSize)
+		}
+		return refuse(netapi.ControlInvalidArgument)
+	}
+	closeTCP()
+	stream = tcpLink{channel: channel, txHandle: tx, rxHandle: rx, txBase: txBase, txSize: txSize, rxBase: rxBase, rxSize: rxSize}
+	fallback.Bind(sys.Window(txBase, txPool), sys.Window(rxBase, rxPool))
+	syslog.Info("TCP session bound", syslog.Uint("generation", generation))
+	return netapi.ControlOK
+}
+
+// closeTCP drops the TCP session. Fallbacks on it fail, so their lookups
+// move on to the next server; UDP queries are not touched.
+func closeTCP() {
+	if stream.channel == 0 {
+		return
+	}
+	for _, id := range [...]handle.ID{stream.channel, stream.txHandle, stream.rxHandle} {
+		sys.HandleClose(id)
+	}
+	sys.VMUnmap(stream.txBase, stream.txSize)
+	sys.VMUnmap(stream.rxBase, stream.rxSize)
+	stream = tcpLink{}
+	fallback.Unbind(&resolver, clockNanos())
+}
+
+// closeNetwork drops every session. The DHCP servers belonged to the lease
 // the old network session reported, so they go too.
 func closeNetwork() {
+	closeTCP()
 	if link.channel == 0 {
 		return
 	}
@@ -183,11 +265,42 @@ func serviceUDP() {
 	}
 }
 
-// sendQueries starts every query the resolver has ready.
+func serviceTCP() {
+	for stream.channel != 0 {
+		status := receiveOn(stream.channel)
+		if status == kcall.StatusNotFound {
+			return
+		}
+		if status == kcall.StatusPeerDied {
+			syslog.Warn("TCP session gone; waiting for a new one")
+			closeTCP()
+			return
+		}
+		if status != kcall.StatusOK {
+			closeAttached()
+			syslog.Error("TCP reply invalid")
+			closeTCP()
+			return
+		}
+		answered, valid := tcpapi.DecodeReply(&message, &tcpReply)
+		if !valid || !fallback.Answer(&resolver, &tcpReply, answered, clockNanos(), tcpSender{}) {
+			syslog.Error("TCP session failed")
+			closeTCP()
+			return
+		}
+	}
+}
+
+// sendQueries starts every query and every TCP fallback the resolver has
+// ready. Without a TCP session a fallback fails at once.
 func sendQueries(now uint64) {
 	if !client.SendQueries(&resolver, now, udpSender{}) {
 		syslog.Error("UDP session unreachable")
 		closeNetwork()
+	}
+	if !fallback.Start(&resolver, now, tcpSender{}) {
+		syslog.Error("TCP session unreachable")
+		closeTCP()
 	}
 }
 
@@ -196,5 +309,9 @@ func releaseFinished() {
 	if !client.ReleaseFinished(&resolver, udpSender{}) {
 		syslog.Error("UDP session unreachable")
 		closeNetwork()
+	}
+	if !fallback.ReleaseFinished(&resolver, tcpSender{}) {
+		syslog.Error("TCP session unreachable")
+		closeTCP()
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 const (
 	tcpEchoPort = 7
+	tcpDNSPort  = 53
 	tcpFIN      = 0x01
 	tcpSYN      = 0x02
 	tcpRST      = 0x04
@@ -100,25 +101,35 @@ func buildTCP(src, dst ipv4, srcPort, dstPort uint16, seq, ack uint32, flags byt
 type tcpKey struct {
 	address ipv4
 	port    uint16
+	local   uint16
 }
 type tcpConn struct {
 	client               ipv4
 	clientMAC            mac
 	clientPort           uint16
+	localPort            uint16
+	mss                  uint16
 	serverSeq, clientSeq uint32
 	established          bool
 	closing              bool
 	window               uint16
 	reopenAfter          time.Duration
 	openAt               time.Time
+	dns                  *dnsStream
 }
 
 func (h *host) tcpFrame(conn *tcpConn, flags byte, payload []byte) []byte {
-	tcp := buildTCP(h.ip, conn.client, tcpEchoPort, conn.clientPort, conn.serverSeq, conn.clientSeq, flags, conn.window, payload)
+	frame := h.tcpFrameAt(conn, conn.serverSeq, flags, payload)
 	if flags&tcpSYN != 0 || flags&tcpFIN != 0 {
 		conn.serverSeq++
 	}
 	conn.serverSeq += uint32(len(payload))
+	return frame
+}
+
+// tcpFrameAt builds a segment at seq without moving the send sequence.
+func (h *host) tcpFrameAt(conn *tcpConn, seq uint32, flags byte, payload []byte) []byte {
+	tcp := buildTCP(h.ip, conn.client, conn.localPort, conn.clientPort, seq, conn.clientSeq, flags, conn.window, payload)
 	return etherFrame(conn.clientMAC, h.mac, etherTypeIPv4, buildIPv4(h.ip, conn.client, 6, h.ipID(), tcp))
 }
 
@@ -127,7 +138,7 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 	if !ok || packet.dst != h.ip {
 		return nil
 	}
-	key := tcpKey{packet.src, segment.srcPort}
+	key := tcpKey{packet.src, segment.srcPort, segment.dstPort}
 	h.mu.Lock()
 	if h.tcp == nil {
 		h.tcp = map[tcpKey]*tcpConn{}
@@ -139,7 +150,7 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 		return nil
 	}
 	if conn == nil {
-		if segment.flags&tcpSYN == 0 || segment.dstPort != tcpEchoPort {
+		if segment.flags&tcpSYN == 0 || segment.dstPort != tcpEchoPort && segment.dstPort != tcpDNSPort {
 			h.mu.Unlock()
 			ack := segment.seq + uint32(len(segment.payload))
 			if segment.flags&tcpSYN != 0 {
@@ -162,8 +173,12 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 			h.tcpZeroWindow = 0
 		}
 		conn = &tcpConn{client: packet.src, clientMAC: src, clientPort: segment.srcPort,
+			localPort: segment.dstPort, mss: segment.mss,
 			serverSeq: 0x40000000 + h.nextID.Add(1)*4096, clientSeq: segment.seq + 1,
 			window: window, reopenAfter: reopenAfter}
+		if conn.localPort == tcpDNSPort {
+			conn.dns = &dnsStream{window: segment.window}
+		}
 		h.tcp[key] = conn
 		if h.tcpDropSYN {
 			h.tcpDropSYN = false
@@ -175,7 +190,11 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 		delay := h.tcpDelaySYNACK
 		h.tcpDelaySYNACK = 0
 		h.mu.Unlock()
-		h.log.printf("tcp-syn %s:%d mss=%d", packet.src, segment.srcPort, segment.mss)
+		if conn.dns != nil {
+			h.log.printf("dns-tcp-accept %s:%d", packet.src, segment.srcPort)
+		} else {
+			h.log.printf("tcp-syn %s:%d mss=%d", packet.src, segment.srcPort, segment.mss)
+		}
 		if delay != 0 && h.later != nil {
 			h.later(delay, [][]byte{frame})
 			return nil
@@ -184,8 +203,7 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 	}
 	if !conn.established {
 		if segment.flags&tcpSYN != 0 && segment.seq+1 == conn.clientSeq {
-			tcp := buildTCP(h.ip, conn.client, tcpEchoPort, conn.clientPort, conn.serverSeq-1, conn.clientSeq, tcpSYN|tcpACK, conn.window, nil)
-			frame := etherFrame(conn.clientMAC, h.mac, etherTypeIPv4, buildIPv4(h.ip, conn.client, 6, h.ipID(), tcp))
+			frame := h.tcpFrameAt(conn, conn.serverSeq-1, tcpSYN|tcpACK, nil)
 			h.mu.Unlock()
 			return [][]byte{frame}
 		}
@@ -193,7 +211,7 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 			conn.established = true
 			if conn.reopenAfter != 0 && h.later != nil {
 				conn.openAt = time.Now().Add(conn.reopenAfter)
-				tcp := buildTCP(h.ip, conn.client, tcpEchoPort, conn.clientPort, conn.serverSeq, conn.clientSeq, tcpACK, 16384, nil)
+				tcp := buildTCP(h.ip, conn.client, conn.localPort, conn.clientPort, conn.serverSeq, conn.clientSeq, tcpACK, 16384, nil)
 				update := etherFrame(conn.clientMAC, h.mac, etherTypeIPv4, buildIPv4(h.ip, conn.client, 6, h.ipID(), tcp))
 				h.later(conn.reopenAfter, [][]byte{update})
 				conn.reopenAfter = 0
@@ -201,6 +219,11 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 		}
 		h.mu.Unlock()
 		return nil
+	}
+	if conn.dns != nil {
+		frames := h.handleDNSTCP(key, conn, segment)
+		h.mu.Unlock()
+		return frames
 	}
 	if conn.closing && len(segment.payload) == 0 && segment.flags&tcpFIN == 0 {
 		if segment.flags&tcpACK != 0 && segment.ack == conn.serverSeq {

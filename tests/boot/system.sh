@@ -313,7 +313,9 @@ count_at_least restart.disk-commands '^GoOS .* x86_64$' 4 "$log"
 require_after restart.protected-after-fat32 'echo x > /system/motd' 'read-only filesystem' "$log"
 require_after restart.protected-after-vfs 'rm /persist/system/motd' 'read-only filesystem\|permission denied' "$log"
 require restart.storage-lost STORAGE_LOSS_INJECTED "$log"
-require restart.recovery '^\[MODE\] recovery: stage=runtime' "$log"
+# PID 1 reports the mode change while the shell is at its prompt, so the line
+# may follow the prompt on the console.
+require restart.recovery '^\(goos> \)\{0,1\}\[MODE\] recovery: stage=runtime' "$log"
 require restart.recovery-sessions RECOVERY_SESSIONS_OK "$log"
 require_after restart.recovery-prompt 'echo after-storage' '^after-storage$' "$log"
 require_after restart.fat32-failed 'echo recovery-listing; services' '^fat32  *failed' "$log"

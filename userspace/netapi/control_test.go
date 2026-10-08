@@ -20,6 +20,7 @@ func controlSamples() []controlSample {
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsResolveStatus}, []handle.ID{14}},
 		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsUDP}, []handle.ID{30, 31, 32}},
 		{ControlRequest{Opcode: ControlSetNetwork, Generation: 2}, []handle.ID{40, 41, 42, 43}},
+		{ControlRequest{Opcode: ControlSetTCP, Generation: 2}, []handle.ID{44, 45, 46}},
 	}
 }
 
@@ -48,7 +49,10 @@ func TestControlRequestRoundTrip(t *testing.T) {
 func TestControlRequestInvalid(t *testing.T) {
 	invalid := []controlSample{
 		{ControlRequest{}, nil},
-		{ControlRequest{Opcode: ControlSetNetwork + 1, Generation: 1}, []handle.ID{1}},
+		{ControlRequest{Opcode: ControlSetTCP + 1, Generation: 1}, []handle.ID{1}},
+		{ControlRequest{Opcode: ControlSetTCP}, []handle.ID{1, 2, 3}},
+		{ControlRequest{Opcode: ControlSetTCP, Generation: 1}, []handle.ID{1, 2, 3, 4}},
+		{ControlRequest{Opcode: ControlSetTCP, Generation: 1, Rights: RightsTCP}, []handle.ID{1, 2, 3}},
 		{ControlRequest{Opcode: ControlAddSession}, []handle.ID{1}},
 		{ControlRequest{Opcode: ControlAddSession, Rights: RightsUDP}, []handle.ID{1}},
 		{ControlRequest{Opcode: ControlAddUDPSession, Rights: RightsPingStatus}, []handle.ID{1, 2, 3}},
@@ -102,7 +106,7 @@ func TestControlRequestRejects(t *testing.T) {
 		}},
 		{"handle count overflow", func(m *ipc.Message) { m.HandleCount = 200 }},
 		{"zero handle", func(m *ipc.Message) { m.Handles[0] = 0 }},
-		{"opcode", func(m *ipc.Message) { m.Payload[0] = byte(ControlSetNetwork + 1) }},
+		{"opcode", func(m *ipc.Message) { m.Payload[0] = byte(ControlSetTCP + 1) }},
 		{"rights", func(m *ipc.Message) { m.Payload[1] = byte(RightsUDP + 1) }},
 		{"generation", func(m *ipc.Message) {
 			if m.Payload[0] == byte(ControlAddSession) || m.Payload[0] == byte(ControlAddUDPSession) {
@@ -154,7 +158,7 @@ func TestControlReply(t *testing.T) {
 			}
 		}
 	}
-	bad := []ControlReply{{}, {Opcode: ControlSetNetwork + 1}, {Opcode: ControlAddSession, Result: lastControlResult + 1}}
+	bad := []ControlReply{{}, {Opcode: ControlSetTCP + 1}, {Opcode: ControlAddSession, Result: lastControlResult + 1}}
 	for _, reply := range bad {
 		var wire ipc.Message
 		if EncodeControlReply(&reply, 1, &wire) {

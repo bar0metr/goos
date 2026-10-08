@@ -49,6 +49,13 @@ func listen(socket string, h *host) (*server, error) {
 			}
 		})
 	}
+	h.after = func(delay time.Duration, fn func() [][]byte) {
+		time.AfterFunc(delay, func() {
+			for _, frame := range fn() {
+				s.send(frame, nil)
+			}
+		})
+	}
 	return s, nil
 }
 
@@ -155,8 +162,11 @@ func prepareControl(path string) error {
 	return nil
 }
 
-// control reads commands from path. A FIFO is reopened after each EOF, so
-// every 'echo cmd > fifo' is read. A regular file is followed as it grows.
+// control reads commands from path. A regular file is followed as it grows.
+// A FIFO stays open for reading and writing: holding a write end of its own,
+// the peer never sees EOF between two 'echo cmd > fifo' writers, and a writer
+// never meets a pipe whose reader is closing it, which fails the write with
+// EPIPE.
 func (s *server) control(path string) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -164,15 +174,14 @@ func (s *server) control(path string) {
 		return
 	}
 	if info.Mode()&os.ModeNamedPipe != 0 {
-		for {
-			file, err := os.Open(path)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "netpeer:", err)
-				return
-			}
-			s.readCommands(file)
-			file.Close()
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "netpeer:", err)
+			return
 		}
+		defer file.Close()
+		s.readCommands(file)
+		return
 	}
 	file, err := os.Open(path)
 	if err != nil {

@@ -210,11 +210,14 @@ and on every restart (ADR 0194):
 | resolver control, server end | - | resolved `control` | R W Wait | yes |
 | configuration session, `system.dns.` with `Read` and `HostsRead` | - | resolved `config` | R W Wait | yes |
 
-The control channel carries `GNETCTL1` version 2. Whenever either service
+The control channel carries `GNETCTL1` version 4. Whenever either service
 starts, PID 1 opens a UDP session and a `RightsResolveStatus` network
 session from `netd`, as it does for a command, and moves the resolver's
 ends in one `SetNetwork` request with a growing generation (ADR 0195). It
-also opens command sessions over the resolver's control channel:
+then opens a TCP session through `ControlAddTCPSession` and moves the
+resolver's ends in a `SetTCP` request under the same generation, for DNS
+fallback after a truncated answer (ADR 0194, ADR 0196). It also opens
+command sessions over the resolver's control channel:
 
 | Object | PID 1 keeps | Moved to `netd` | Moved to `resolved` | Consumed |
 | --- | --- | --- | --- | --- |
@@ -222,13 +225,18 @@ also opens command sessions over the resolver's control channel:
 | UDP TX pool, 4 pages | - | R | R W | yes |
 | UDP RX pool, 8 pages | - | R W | R | yes |
 | status session, one end each | - | R W Wait | R W Wait | yes |
+| TCP session channel, one end each | - | R W Wait | R W Wait, in `SetTCP` | yes |
+| TCP TX pool, 4 pages | - | R | R W | yes |
+| TCP RX pool, 8 pages | - | R W | R | yes |
 | command session, service end | - | - | R W Wait, in `AddSession` | yes |
 | command session, client end | - | - | the command's `resolve`, R W Wait | yes |
 
 `resolved` checks through `HandleInfo` that each handle in `SetNetwork`
-carries exactly the rights above and refuses a generation no higher than
-the one it holds. Its UDP session gives it no more than a command's: the
-same endpoint and buffer limits, and any destination port. The status
+and `SetTCP` carries exactly the rights above. It refuses a `SetNetwork`
+generation no higher than the one it holds, and a `SetTCP` for any
+generation but the current one. Its UDP and TCP sessions give it no more
+than a command's: the same endpoint and buffer limits, and any destination
+port. It does not receive `GrantTCP` or network administration rights. The status
 session may read the status and the lease's DNS servers and nothing else.
 The resolver holds no device, no VFS session and no configuration write
 right.

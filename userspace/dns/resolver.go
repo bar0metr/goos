@@ -15,6 +15,11 @@ const (
 	txSend
 	// txWaiting has one datagram outstanding.
 	txWaiting
+	// txStream got TC=1 for its datagram and waits for the transport to take
+	// the same query over TCP with NextStream.
+	txStream
+	// txStreamWaiting has the query out over TCP.
+	txStreamWaiting
 )
 
 // outcome is how a server's last transmission for a transaction ended.
@@ -23,7 +28,6 @@ type outcome uint8
 const (
 	outcomeNone outcome = iota
 	outcomeTimeout
-	outcomeTruncated
 	outcomeFailed
 )
 
@@ -42,15 +46,20 @@ type transaction struct {
 	servers     [MaxServers][4]byte
 	serverCount int
 	// sent counts normal attempts for the name at chain[links]. transmissions
-	// counts every datagram across the complete resolution.
+	// counts every datagram across the complete resolution, and streams
+	// every query repeated over TCP.
 	sent          [MaxServers]uint8
 	transmissions [MaxServers]uint8
+	streams       [MaxServers]uint8
 	outcomes      [MaxServers]outcome
 	// classic marks servers that rejected EDNS(0) for this transaction.
 	classic [MaxServers]bool
 	server  int
 	id      uint16
 	edns    bool
+	// serial numbers the exchanges of the transaction, so a transport can
+	// tell its own from a later one that reused the transaction slot.
+	serial uint32
 	// wait ends the outstanding transmission and deadline the whole
 	// resolution; wait never lies past deadline.
 	wait     uint64
@@ -73,11 +82,13 @@ type client struct {
 	answer      Answer
 }
 
-// Outgoing describes the datagram NextQuery wrote.
+// Outgoing describes the query NextQuery or NextStream wrote. Serial
+// names the exchange in StreamWaiting, ReceiveStream and StreamFailed.
 type Outgoing struct {
 	Transaction int
 	Server      [4]byte
 	Length      int
+	Serial      uint32
 }
 
 // Stats is the cache occupancy and the counters, which saturate.
@@ -87,11 +98,16 @@ type Stats struct {
 	PositiveHits, NegativeHits, FailureHits, Misses uint64
 	// Queries counts datagrams handed out by NextQuery, Timeouts the
 	// transmissions that got no answer in time.
-	Queries, Timeouts                uint64
+	Queries, Timeouts uint64
+	// Truncated counts matching answers with TC=1, over UDP and over TCP.
 	Malformed, Mismatched, Truncated uint64
 	// ServerFailures counts SERVFAIL, REFUSED, other error codes and send
 	// failures.
 	ServerFailures uint64
+	// TCPFallbacks counts queries repeated over TCP, TCPAnswers the valid
+	// answers that came back, TCPFailures the exchanges that broke and
+	// TCPTimeouts those cut off by the resolver's timers.
+	TCPFallbacks, TCPAnswers, TCPFailures, TCPTimeouts uint64
 }
 
 // Resolver is the whole resolver state. It holds no pointers and every table
@@ -105,13 +121,22 @@ type Stats struct {
 //	min(QueryTimeout, max(500 ms, QueryTimeout*2^k / servers))
 //
 // for each, cut short by the deadline. A server stops being usable after
-// SERVFAIL, REFUSED, another error code, TC=1, a malformed answer or a send
+// SERVFAIL, REFUSED, another error code, a malformed answer or a send
 // failure; a timeout keeps it for the next round. A server that answers
 // FORMERR without OPT to a query with OPT is asked once more at once without
 // EDNS(0); that retry does not use up a logical attempt. No server receives
 // more than maxTransmissions datagrams during the resolution. The hard limit
 // includes EDNS fallback and queries for CNAME targets. A CNAME whose target
 // needs its own query starts the logical rounds again under the same deadline.
+//
+// TCP fallback. A UDP answer with TC=1 that matches the outstanding query
+// sends the same query, with the same ID and the same OPT record or lack of
+// one, to the same server over TCP. The fallback belongs to the attempt that
+// drew TC=1 and uses up no logical attempt of its own. It waits at most
+// QueryTimeout, cut short by the deadline, and no server receives more than
+// maxStreams of them during the resolution. A valid answer over TCP is used
+// like one over UDP. Anything else, TC=1 and FORMERR included, makes the
+// server unusable, except a timeout, which keeps it for the next round.
 type Resolver struct {
 	random      uint64
 	policy      Policy
@@ -125,6 +150,9 @@ type Resolver struct {
 	positiveHits, negativeHits, failureHits, misses uint64
 	queries, timeouts, malformed, mismatched        uint64
 	truncated, serverFailures                       uint64
+	streamCursor                                    int
+	fallbacks, streamAnswers, streamFailures        uint64
+	streamTimeouts                                  uint64
 
 	clients      [MaxClients]client
 	transactions [MaxTransactions]transaction
@@ -152,6 +180,8 @@ func (r *Resolver) Init(seed uint64, policy Policy) {
 	r.positiveHits, r.negativeHits, r.failureHits, r.misses = 0, 0, 0, 0
 	r.queries, r.timeouts, r.malformed, r.mismatched = 0, 0, 0, 0
 	r.truncated, r.serverFailures = 0, 0
+	r.streamCursor = 0
+	r.fallbacks, r.streamAnswers, r.streamFailures, r.streamTimeouts = 0, 0, 0, 0
 	for index := range r.clients[:] {
 		r.clients[index] = client{}
 	}
@@ -311,6 +341,7 @@ func (r *Resolver) start(name *hostname.Name, now uint64) int {
 		tx.servers[index] = r.servers[index].Address
 		tx.classic[index] = false
 		tx.transmissions[index] = 0
+		tx.streams[index] = 0
 	}
 	tx.waiters = 0
 	tx.deadline = addTime(now, r.policy.QueryTimeout*uint64(tx.attempts))
@@ -367,8 +398,24 @@ func (r *Resolver) transmit(tx *transaction, server int, counted bool, now uint6
 		id = ^id
 	}
 	tx.id = id
+	tx.serial++
 	tx.phase = txSend
 	return true
+}
+
+// fallBack schedules the query that drew TC=1 again over TCP, to the same
+// server with the same ID and form. It does not use up a logical attempt.
+func (r *Resolver) fallBack(tx *transaction, now uint64) {
+	if tx.streams[tx.server] >= maxStreams {
+		r.moveOn(tx, outcomeFailed, now)
+		return
+	}
+	tx.wait = addTime(now, r.policy.QueryTimeout)
+	if tx.wait > tx.deadline {
+		tx.wait = tx.deadline
+	}
+	tx.serial++
+	tx.phase = txStream
 }
 
 // moveOn records how the current server's transmission ended and schedules
@@ -391,28 +438,14 @@ func (r *Resolver) moveOn(tx *transaction, result outcome, now uint64) {
 }
 
 // failureResult sums up the servers asked: Timeout when every one timed out,
-// Truncated when every one truncated, TemporaryFailure for anything else.
+// over UDP or over TCP, and TemporaryFailure for anything else.
 func (r *Resolver) failureResult(tx *transaction) Result {
-	timedOut, truncated, asked := 0, 0, 0
 	for index := 0; index < tx.serverCount; index++ {
-		if tx.sent[index] == 0 {
-			continue
-		}
-		asked++
-		switch tx.outcomes[index] {
-		case outcomeTimeout:
-			timedOut++
-		case outcomeTruncated:
-			truncated++
+		if tx.sent[index] != 0 && tx.outcomes[index] != outcomeTimeout {
+			return ResultTemporaryFailure
 		}
 	}
-	switch {
-	case asked == timedOut:
-		return ResultTimeout
-	case asked == truncated:
-		return ResultTruncated
-	}
-	return ResultTemporaryFailure
+	return ResultTimeout
 }
 
 // NextQuery writes the next datagram to send into dst and reports which
@@ -434,9 +467,87 @@ func (r *Resolver) NextQuery(dst []byte) (Outgoing, bool) {
 		tx.transmissions[tx.server]++
 		increment(&r.queries)
 		length := encodeQuery(dst, tx.id, &tx.chain[tx.links], tx.edns)
-		return Outgoing{Transaction: number, Server: tx.servers[tx.server], Length: length}, true
+		return Outgoing{Transaction: number, Server: tx.servers[tx.server], Length: length, Serial: tx.serial}, true
 	}
 	return Outgoing{}, false
+}
+
+// NextStream writes the next query to repeat over TCP into dst, without the
+// two-byte length prefix, and reports which transaction and server it is
+// for. It is the query that drew TC=1, byte for byte. A dst shorter than
+// MaxQuery leaves it queued. A transport with no room for another TCP
+// exchange simply does not call NextStream: the transaction keeps waiting,
+// at most until its wait ends.
+func (r *Resolver) NextStream(dst []byte) (Outgoing, bool) {
+	if len(dst) < MaxQuery {
+		return Outgoing{}, false
+	}
+	for step := 0; step < MaxTransactions; step++ {
+		number := (r.streamCursor + step) % MaxTransactions
+		tx := &r.transactions[number]
+		if tx.phase != txStream {
+			continue
+		}
+		r.streamCursor = (number + 1) % MaxTransactions
+		tx.phase = txStreamWaiting
+		tx.streams[tx.server]++
+		increment(&r.fallbacks)
+		length := encodeQuery(dst, tx.id, &tx.chain[tx.links], tx.edns)
+		return Outgoing{Transaction: number, Server: tx.servers[tx.server], Length: length, Serial: tx.serial}, true
+	}
+	return Outgoing{}, false
+}
+
+// StreamWaiting reports whether transaction still waits for the TCP
+// exchange serial. Once it does not, the transport closes the connection.
+func (r *Resolver) StreamWaiting(transaction int, serial uint32) bool {
+	return transaction >= 0 && transaction < MaxTransactions && r.transactions[transaction].phase == txStreamWaiting &&
+		r.transactions[transaction].serial == serial
+}
+
+// StreamFailed reports that the TCP exchange serial ended without a whole
+// answer. timedOut marks a TCP timeout, which keeps the server for the next
+// round; anything else makes it unusable.
+func (r *Resolver) StreamFailed(transaction int, serial uint32, timedOut bool, now uint64) {
+	if !r.StreamWaiting(transaction, serial) {
+		return
+	}
+	tx := &r.transactions[transaction]
+	if timedOut {
+		increment(&r.timeouts)
+		increment(&r.streamTimeouts)
+		r.moveOn(tx, outcomeTimeout, now)
+		return
+	}
+	increment(&r.streamFailures)
+	r.moveOn(tx, outcomeFailed, now)
+}
+
+// ReceiveStream takes the one DNS message the TCP exchange serial carried,
+// length prefix removed. It is checked like a datagram, but there is no
+// waiting for a better one: a message that does not answer the query, or
+// carries TC=1, ends the exchange and makes the server unusable.
+func (r *Resolver) ReceiveStream(transaction int, serial uint32, payload []byte, now uint64) {
+	if !r.StreamWaiting(transaction, serial) {
+		return
+	}
+	tx := &r.transactions[transaction]
+	var message response
+	result := parseResponse(payload, MaxStreamMessage, tx.id, &tx.chain[tx.links], &r.owner, &message)
+	switch {
+	case result == parseMismatched:
+		increment(&r.mismatched)
+	case result == parseMalformed:
+		increment(&r.malformed)
+	case message.truncated:
+		increment(&r.truncated)
+	default:
+		increment(&r.streamAnswers)
+		r.use(tx, payload, &message, true, now)
+		return
+	}
+	increment(&r.streamFailures)
+	r.moveOn(tx, outcomeFailed, now)
 }
 
 // Waiting reports whether transaction waits for an answer to the last query
@@ -460,7 +571,9 @@ func (r *Resolver) SendFailed(transaction int, now uint64) {
 // and port. The server must be the one asked and the message must answer the
 // outstanding query; otherwise it counts as Mismatched and the query keeps
 // waiting. A malformed answer counts as Malformed and makes the server
-// unusable. Nothing from a rejected message reaches the cache.
+// unusable. A matching answer with TC=1 is not used: the same query goes to
+// the same server over TCP. Nothing from a rejected or truncated message
+// reaches the cache.
 func (r *Resolver) Receive(transaction int, server [4]byte, payload []byte, now uint64) {
 	if transaction < 0 || transaction >= MaxTransactions {
 		increment(&r.mismatched)
@@ -472,7 +585,7 @@ func (r *Resolver) Receive(transaction int, server [4]byte, payload []byte, now 
 		return
 	}
 	var message response
-	switch parseResponse(payload, tx.id, &tx.chain[tx.links], &r.owner, &message) {
+	switch parseResponse(payload, DatagramSize, tx.id, &tx.chain[tx.links], &r.owner, &message) {
 	case parseMismatched:
 		increment(&r.mismatched)
 		return
@@ -483,14 +596,21 @@ func (r *Resolver) Receive(transaction int, server [4]byte, payload []byte, now 
 	}
 	if message.truncated {
 		increment(&r.truncated)
-		r.moveOn(tx, outcomeTruncated, now)
+		r.fallBack(tx, now)
 		return
 	}
+	r.use(tx, payload, &message, false, now)
+}
+
+// use acts on a validated answer by its rcode. The retry without EDNS(0)
+// applies to datagrams only: over TCP the query keeps the form that drew
+// TC=1, and FORMERR fails the server.
+func (r *Resolver) use(tx *transaction, payload []byte, message *response, stream bool, now uint64) {
 	switch message.rcode {
 	case rcodeNoError, rcodeNXDomain:
-		r.interpret(tx, payload, &message, now)
+		r.interpret(tx, payload, message, now)
 	case rcodeFormErr:
-		if tx.edns && !message.hasOPT {
+		if !stream && tx.edns && !message.hasOPT {
 			tx.classic[tx.server] = true
 			if r.transmit(tx, tx.server, false, now) {
 				return
@@ -734,6 +854,9 @@ func (r *Resolver) Advance(now uint64) {
 		tx := &r.transactions[index]
 		if tx.phase != txFree && tx.wait <= now {
 			increment(&r.timeouts)
+			if tx.phase == txStream || tx.phase == txStreamWaiting {
+				increment(&r.streamTimeouts)
+			}
 			r.moveOn(tx, outcomeTimeout, now)
 		}
 	}
@@ -784,6 +907,10 @@ func (r *Resolver) Stats() Stats {
 		Mismatched:     r.mismatched,
 		Truncated:      r.truncated,
 		ServerFailures: r.serverFailures,
+		TCPFallbacks:   r.fallbacks,
+		TCPAnswers:     r.streamAnswers,
+		TCPFailures:    r.streamFailures,
+		TCPTimeouts:    r.streamTimeouts,
 	}
 	for index := range r.cache[:] {
 		switch r.cache[index].kind {

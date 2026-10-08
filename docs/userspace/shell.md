@@ -231,13 +231,15 @@ right.test: 192.0.2.11 (dns, ttl 60 s)
 `resolve status` prints the upstream servers, each marked `dhcp` or
 `config`, the cache's use against its limit and its positive, negative and
 failure entries, hit and miss counts, upstream queries and timeouts, replies
-dropped as malformed, mismatched or truncated, and the generation of the
+dropped as malformed, mismatched or truncated, server errors, TCP fallbacks
+started and answered, TCP failures and timeouts, and the generation of the
 DHCP server list. `resolve flush` empties the cache, not the hosts table.
 `resolve reload` applies the `system.dns.*` settings; see
 [configuration](configuration.md#resolver). Only the exact words `status`,
 `flush` and `reload` are subcommands: a host by one of those names is
 `status.` and so on. A name under `.local` is refused, as GoOS has no
-multicast DNS, and a truncated answer fails, as it has no DNS over TCP.
+multicast DNS. An answer the server truncates over UDP is fetched again
+over TCP from the same server.
 
 `udp` sends and receives IPv4 UDP datagrams with nothing but its UDP
 session:

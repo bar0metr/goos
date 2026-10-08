@@ -249,6 +249,8 @@ alias.test 60 CNAME right.test
 gone.test NXDOMAIN
 fallback.test 60 A 192.0.2.12
 slow.test 60 SLOW 192.0.2.13
+tcp-fallback.test 60 TCP 192.0.2.14
+tcp-fallback-reset.test TCPRESET
 ZONE
 go build -o "$peer" ./tools/netpeer
 "$peer" -socket "$socket" -control "$control" -zone "$work/zone" -log "$queries" \
@@ -424,9 +426,26 @@ sleep 1
 # above are put back first, so the candidate fails or applies on UDP alone.
 type_line 3 'config set system.net.dhcp.max-retry-ms 64000'
 type_line 3 'config set system.net.udp.max-payload 1300'
+# TIME_WAIT shrinks to a second for the DNS fallbacks below, so whichever
+# side closes first, the connections are gone when their count is compared.
+type_line 3 'config set system.net.tcp.time-wait-ms 1000'
 type_line 3 'net reload  '
 type_line 3 'udp self -s 1301 127.0.0.1 9200'
 type_line 3 'udp self -s 1300 127.0.0.1 9201'
+# DNS over TCP: the peer answers these names with TC=1 over UDP. The full
+# answer over TCP is larger than one GTCP1 slot, and the second lookup comes
+# from the cache. The reset name's TCP answer is cut short by a reset.
+sleep 2
+type_line 3 'net status   '
+type_line 3 'resolve tcp-fallback.test'
+wait_command 'resolve tcp-fallback.test' 12 "$left"
+type_line 3 'resolve tcp-fallback.test '
+type_line 3 'resolve tcp-fallback-reset.test'
+wait_command 'resolve tcp-fallback-reset.test' 12 "$left"
+sleep 3
+type_line 3 'resolve status '
+type_line 3 'net status    '
+type_line 3 'config set system.net.tcp.time-wait-ms 60000'
 type_line 3 'config set system.net.udp.ephemeral-port-min 60000'
 type_line 3 'config set system.net.udp.ephemeral-port-max 50000'
 type_line 3 'net reload   '
@@ -535,6 +554,24 @@ require_after left.tcp-status 'net status  ' '^tcp:$' "$left"
 require_after left.tcp-limits 'net status  ' '^  limits: ports 49152-65535 backlog 8 buffers 16384/16384$' "$left"
 require_after left.dns-fallback 'resolve fallback.test' '^fallback\.test: 192\.0\.2\.12 (dns, ttl 60 s)$' "$left"
 [ "$(queried fallback.test)" = 2 ] || fail left.edns-fallback "two queries for fallback.test, one with EDNS and one without" "$queries"
+checks=$((checks + 1))
+require left.resolver-tcp '^RESOLVED_TCP_BOUND_OK$' "$left"
+require_after left.dns-tcp 'resolve tcp-fallback.test' '^tcp-fallback\.test: 192\.0\.2\.14 (dns, ttl 60 s)$' "$left"
+require_after left.dns-tcp-cached 'resolve tcp-fallback.test ' '^tcp-fallback\.test: 192\.0\.2\.14 (cache, ttl ' "$left"
+for marker in 'query tcp-fallback\.test 1 ' 'dns-tcp-query tcp-fallback\.test 1 ' 'dns-tcp-answer tcp-fallback\.test '; do
+	[ "$(grep -c "^$marker" "$queries" || true)" = 1 ] || fail left.dns-tcp-once "one '$marker' line, the cached lookup asking nothing" "$queries"
+	checks=$((checks + 1))
+done
+[ "$(grep -c '^dns-tcp-accept 192\.0\.2\.10:' "$queries" || true)" = 2 ] || fail left.dns-tcp-connections 'one TCP connection per fallback' "$queries"
+checks=$((checks + 1))
+require_after left.dns-tcp-reset 'resolve tcp-fallback-reset.test' 'temporary failure' "$left"
+require peer.dns-tcp-reset '^dns-tcp-reset tcp-fallback-reset\.test ' "$queries"
+require_after left.dns-tcp-counters 'resolve status ' '^tcp: fallbacks 2 answers 1$' "$left"
+require_after left.dns-tcp-errors 'resolve status ' '^tcp-errors: failures 1 timeouts 0$' "$left"
+# The fallback connections are gone once the lookups end.
+before=$(window "$left" 'net status   ' | grep '^  endpoints: [0-9]*/32 listeners')
+after=$(window "$left" 'net status    ' | grep '^  endpoints: [0-9]*/32 listeners')
+[ -n "$before" ] && [ "$before" = "$after" ] || fail left.dns-tcp-endpoints "TCP endpoints after the fallbacks as before, '$before' then '$after'" "$left"
 checks=$((checks + 1))
 require_after left.dns-deferred 'resolve slow.test' '^slow\.test: 192\.0\.2\.13 (dns, ttl 60 s)$' "$left"
 require peer.slow '^slow slow\.test 1s$' "$queries"

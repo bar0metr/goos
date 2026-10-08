@@ -164,7 +164,9 @@ transaction ID and question, and the endpoint closes once its transaction
 stops waiting, so a late answer finds no endpoint. Each retransmission opens
 a new endpoint on a new port. The per-server transmission budget, the
 absolute deadline, EDNS fallback and the cache work as ADR 0194 describes;
-DNS keeps its own 1232-byte limit.
+DNS keeps its own 1232-byte limit. An answer with TC=1 closes the UDP
+endpoint and sends the same query over a TCP session that PID 1 hands over
+with `ControlSetTCP` right after this pair (ADR 0196).
 
 The DHCP lease's servers reach the resolver as a `GNETAPI` `Servers`
 request: it carries the generation the resolver has, and `netd` holds it

@@ -80,7 +80,28 @@ causes a rate-limited challenge ACK.
 leaves the stack to finish the close. The stack frees the endpoint when
 LAST-ACK receives its final ACK, when TIME_WAIT ends, when FIN-WAIT-2 has
 waited for the TIME_WAIT interval, or when the FIN reaches the retransmission
-limit. Until then it counts against the owner's endpoint limit. A passive
+limit. Until then it counts against the owner's endpoint limit.
+
+A client that closes first, such as the resolver after each DNS fallback,
+leaves a TIME_WAIT behind each time and would be refused for up to
+`time-wait-ms` after eight connections. An `Open` that finds the owner at
+its limit, or the table full, therefore recycles the slot of the owner's
+closed TIME_WAIT entry that expires first. It never takes another owner's
+entry or one the owner still holds, and the new endpoint gets a new
+generation, so the old ID stays invalid. The old connection's four-tuple,
+its sequence numbers and its deadline move into a tombstone first.
+Until that deadline no connection may use the four-tuple: ephemeral port
+selection skips it and `Connect` with an explicit port refuses it with
+`AddressInUse`. A segment for it is handled as TIME_WAIT handles one: a
+retransmitted FIN is acknowledged again and restarts the interval, and
+anything else, a new SYN or a reset included, is dropped without a reply or
+a TCB. The table holds 64 tombstones, eight per session, so one owner can
+never take another's share. An owner whose share is full gets `Busy` from
+`Open` until a tombstone or a TIME_WAIT expires; protection is never
+dropped to make room. Ending a session keeps its TIME_WAIT connections
+until they expire, and a later session in the same place may recycle them.
+Reconfiguration drops the tombstones of non-loopback addresses along with
+the connections. A passive
 child that no application has accepted is freed as soon as it ends, by RST,
 timeout, reconfiguration or the close of its listener, and leaves the
 listener's backlog at once.
@@ -117,6 +138,16 @@ PID 1 creates TCP sessions only for a command whose manifest requests
 roles. TCP authority is separate from ping, network administration, name
 resolution and UDP.
 
+`resolved` is the first service that uses `GTCP1`. PID 1 opens it a TCP
+session through the same `ControlAddTCPSession` path and hands it over with
+`ControlSetTCP`, under the generation of the UDP and status sessions it sent
+just before (`GNETCTL` version 4). A message carries at most four handles,
+and `ControlSetNetwork` already uses four. The resolver repeats a query
+whose UDP answer came back with TC=1 over that session: one connection to
+port 53 per fallback, one length-prefixed query and one reply (ADR 0194).
+It holds no device and no `GrantTCP`; a fault on the TCP session drops that
+session alone, and UDP lookups go on.
+
 ### Configuration and status
 
 The `system.net.tcp.*` block controls the ephemeral range, global and
@@ -151,9 +182,9 @@ no-NIC paths.
 
 Authorized native programs can act as bounded IPv4 TCP clients and servers.
 The `tcp` command is a protocol client and diagnostic, not a privileged stack
-shortcut. Future DNS fallback and Linux socket adapters can use GTCP1 and the
-same TCB model.
+shortcut. The resolver's DNS fallback runs over GTCP1, and future Linux
+socket adapters can use it and the same TCB model.
 
-IPv6, Linux socket syscalls, DNS-over-TCP migration, TLS, HTTP, SACK, window
+IPv6, Linux socket syscalls, persistent DNS-over-TCP connections, TLS, HTTP, SACK, window
 scaling, timestamps, ECN, Fast Open, keepalive and port reuse remain outside
 this decision.

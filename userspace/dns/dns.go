@@ -19,8 +19,15 @@ const (
 	// MaxClients bounds the client lookups waiting at one time.
 	MaxClients = 16
 	// MaxTransactions bounds concurrent upstream resolutions. Each has at
-	// most one datagram outstanding.
+	// most one datagram or one TCP exchange outstanding.
 	MaxTransactions = 4
+	// MaxStreamMessage is the largest DNS message taken over TCP: everything
+	// the two-byte length prefix can describe.
+	MaxStreamMessage = 65535
+	// MinMessage is the DNS header, the shortest message accepted.
+	MinMessage = headerSize
+	// MaxQuery is the longest query the resolver writes.
+	MaxQuery = maxQuerySize
 	// MaxWaiters bounds the clients attached to one transaction.
 	MaxWaiters    = 8
 	MaxCNAMEChain = 8
@@ -37,6 +44,10 @@ const (
 	// maxTransmissions bounds all datagrams sent to one server during one
 	// resolution, including EDNS fallback and CNAME target queries.
 	maxTransmissions = 3
+	// maxStreams bounds the queries repeated over TCP to one server during
+	// one resolution. Two let the queried name and one CNAME target each
+	// fall back once.
+	maxStreams = 2
 )
 
 // Result values are wire values of the resolver client protocol; keep order.
@@ -53,8 +64,9 @@ const (
 	// ResultTemporaryFailure covers SERVFAIL, REFUSED, unusable answers and
 	// send failures from every server, and broken CNAME chains.
 	ResultTemporaryFailure
-	// ResultTruncated means every server that answered set TC=1. There is no
-	// TCP fallback.
+	// ResultTruncated is kept for the wire. The resolver no longer reports
+	// it: a truncated UDP answer is repeated over TCP, and a fallback that
+	// fails counts as a failure or a timeout of that server.
 	ResultTruncated
 	ResultInvalidName
 	// ResultUnsupportedNameScope is .local, which needs multicast DNS.

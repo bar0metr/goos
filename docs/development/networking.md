@@ -15,7 +15,9 @@ numeric address, it describes the first milestone, not the current system.
 ADR 0196 adds generic IPv4 TCP, GTCP1 sessions, the `tcp` command and TCP
 status. Its parser, TCBs, stream buffers, reassembly, retransmission,
 congestion control, close states and TIME_WAIT remain in `userspace/network`.
-IPv6, Linux socket calls and DNS-over-TCP migration remain out of scope.
+The resolver now repeats a truncated UDP answer over a GTCP1 session
+(ADR 0194, ADR 0196). IPv6, Linux socket calls and persistent DNS-over-TCP
+connections remain out of scope.
 
 Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete

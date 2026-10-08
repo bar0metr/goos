@@ -290,18 +290,19 @@ func recordTTL(ttl uint32) uint32 {
 	return ttl
 }
 
-// parseResponse validates a whole message against the outstanding query
-// before anything in it is used. The ID and question are checked first, so
-// a stray datagram is a mismatch, not a reason to drop the server. A
-// truncated message is reported without reading its records, which may be
-// cut short. Bytes after the counted records are ignored: some servers pad
-// replies and nothing there is read.
+// parseResponse validates a whole message of at most limit bytes against
+// the outstanding query before anything in it is used. The ID and question
+// are checked first, so a stray datagram is a mismatch, not a reason to drop
+// the server. A truncated message is reported without reading its records,
+// which may be cut short, but only once its question matched: TC=1 alone
+// never starts a TCP fallback. Bytes after the counted records are ignored:
+// some servers pad replies and nothing there is read.
 //
 // One concession: a FORMERR without a question section is accepted when the
 // ID matches, since servers that reject EDNS(0) often send exactly that.
-func parseResponse(message []byte, id uint16, question *wireName, scratch *wireName, out *response) parseResult {
+func parseResponse(message []byte, limit int, id uint16, question *wireName, scratch *wireName, out *response) parseResult {
 	*out = response{}
-	if len(message) < headerSize || len(message) > DatagramSize {
+	if len(message) < headerSize || len(message) > limit {
 		return parseMalformed
 	}
 	if binary.BigEndian.Uint16(message[0:2]) != id {
@@ -319,6 +320,9 @@ func parseResponse(message []byte, id uint16, question *wireName, scratch *wireN
 	position := headerSize
 	switch {
 	case questions == 0 && out.rcode == rcodeFormErr:
+		if flags&flagTC != 0 {
+			return parseMalformed
+		}
 	case questions != 1:
 		return parseMismatched
 	default:

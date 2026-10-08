@@ -329,3 +329,47 @@ func (h *harness) notCached(text string) {
 }
 
 func addr(last byte) [4]byte { return [4]byte{10, 1, 1, last} }
+
+// stream takes the next query to repeat over TCP and decodes it.
+func (h *harness) stream() query {
+	h.t.Helper()
+	out, ok := h.r.NextStream(h.buf[:])
+	if !ok {
+		h.t.Fatal("no query to repeat over TCP")
+	}
+	return decodeQuery(h.t, out, h.buf[:out.Length])
+}
+
+func (h *harness) noStream() {
+	h.t.Helper()
+	if out, ok := h.r.NextStream(h.buf[:]); ok {
+		h.t.Fatalf("unexpected TCP query %+v", out)
+	}
+}
+
+// answerStream completes m with the query's ID and question and delivers it
+// as the message of a TCP exchange.
+func (h *harness) answerStream(q query, m reply) {
+	h.t.Helper()
+	m.id = q.id
+	if m.question == "" {
+		m.question = q.name
+	}
+	h.r.ReceiveStream(q.Transaction, q.Serial, m.bytes(), h.now)
+	h.checkDeadline()
+}
+
+// truncate answers a datagram with a matching TC=1 reply.
+func (h *harness) truncate(q query) {
+	h.t.Helper()
+	h.answer(q, reply{flags: flagTC, opt: q.opt})
+}
+
+// cachedFailure checks that text answers from the failure cache with result.
+func (h *harness) cachedFailure(text string, result Result) {
+	h.t.Helper()
+	answer, done := h.lookup(MaxClients-1, text)
+	if !done || answer.Result != result || answer.Source != SourceCache {
+		h.t.Fatalf("%s: %+v, want cached %d", text, answer, result)
+	}
+}
