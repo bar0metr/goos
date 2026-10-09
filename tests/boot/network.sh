@@ -257,6 +257,7 @@ mail.test 60 MX 10 dnsq.test
 text.test 60 TXT hello from netpeer
 text.test 60 TXT bell\007
 dnsq-fallback.test 60 TCP 192.0.2.81
+http.test 60 A 192.0.2.53
 ZONE
 go build -o "$peer" ./tools/netpeer
 "$peer" -socket "$socket" -control "$control" -zone "$work/zone" -log "$queries" \
@@ -492,9 +493,33 @@ type_line 4 'net reload'
 sleep 8
 type_line 4 'net status  '
 type_line 4 'ping -c 1 127.0.0.1'
+for command in 'fetch http://http.test/hello' 'fetch -I http://http.test/hello' \
+	'fetch http://192.0.2.53:8080/hello' 'fetch -d a=b http://http.test/post' \
+	'fetch -H "X-Test: goos" http://http.test/headers' 'fetch http://http.test/chunked' \
+	'fetch -L http://http.test/redirect' 'fetch -o /home/user/fetched.txt http://http.test/hello'; do
+	type_line 3 "$command"
+	# HTTP bodies need not end with LF, so the shell marker can share a line.
+	elapsed=0
+	while ! window "$left" "$command" | grep -q 'SHELL_EXEC_OK'; do
+		[ "$elapsed" -lt 12 ] || fail timeout "'$command' completion within 12s" "$left"
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+done
+type_line 3 'cat /home/user/fetched.txt'
+type_line 3 'stat -b /home/user/fetched.txt'
 peer_command quit
 stop 3 "$left"
 stop 4 "$right"
+require_after fetch.get 'fetch http://http.test/hello' '^helloSHELL_EXEC_OK$' "$left"
+require_after fetch.head 'fetch -I http://http.test/hello' '^HTTP/1.1 200 OK' "$left"
+require_after fetch.numeric 'fetch http://192.0.2.53:8080/hello' '^helloSHELL_EXEC_OK$' "$left"
+require_after fetch.post 'fetch -d a=b http://http.test/post' '^a=bSHELL_EXEC_OK$' "$left"
+require_after fetch.header 'fetch -H "X-Test: goos" http://http.test/headers' '^goosSHELL_EXEC_OK$' "$left"
+require_after fetch.chunked 'fetch http://http.test/chunked' '^helloSHELL_EXEC_OK$' "$left"
+require_after fetch.redirect 'fetch -L http://http.test/redirect' '^helloSHELL_EXEC_OK$' "$left"
+require_after fetch.file 'cat /home/user/fetched.txt' '^helloCAT_PROCESS_OK$' "$left"
+require_after fetch.stat 'stat -b /home/user/fetched.txt' '^file 5 bytes$' "$left"
 for sequence in 1 2 3 4; do
 	require_after "left.reply.$sequence" 'ping -c 4 192.0.2.11' "^40 bytes from 192\\.0\\.2\\.11: seq=$sequence " "$left"
 	require_after "right.reply.$sequence" 'ping -c 4 192.0.2.10' "^40 bytes from 192\\.0\\.2\\.10: seq=$sequence " "$right"

@@ -1,5 +1,11 @@
 # GoOS networking specification: native IPv4 and ICMP
 
+The native `fetch` command uses the existing GRESOLV1 and GTCP1 sessions.
+`userspace/httpwire` bounds response headers to 16 KiB and streams
+Content-Length, chunked and EOF-delimited bodies. `userspace/fetch` limits
+redirects to five and permits only HTTP URLs. The command holds one endpoint
+per hop and releases each received TCP slot after copying its bytes.
+
 Status: implemented by [ADR 0190](../adr/0190-network-device-authority.md) and
 [ADR 0191](../adr/0191-network-service.md). This document records the
 requirements the implementation was built from; the ADRs and

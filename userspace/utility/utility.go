@@ -490,6 +490,9 @@ func Write(value []byte) {
 	writeHandle(stdoutHandle, value)
 }
 
+// WriteError sends already escaped diagnostic bytes to standard error.
+func WriteError(value []byte) { writeErrorBytes(value) }
+
 func write(message string) {
 	writeHandle(stdoutHandle, sys.Bytes(message))
 }

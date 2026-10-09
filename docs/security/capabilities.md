@@ -1,5 +1,10 @@
 # Capabilities: security view
 
+The `fetch` manifest asks for `GrantResolve`, `GrantTCP` and `GrantVFS`.
+PID 1 provides private sessions; `fetch` cannot read raw packets or alter
+resolver and network settings. `-o` and `-O` use the command's VFS grant.
+Response headers have fixed size limits and cannot change these grants.
+
 The data structures and transfer rules are described in
 [docs/architecture/capabilities.md](../architecture/capabilities.md). This
 document states the security properties and who holds what.

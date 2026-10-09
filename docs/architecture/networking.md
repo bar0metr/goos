@@ -1,5 +1,11 @@
 # Networking
 
+`/system/bin/fetch` is a native HTTP/1.1 client. It asks `resolved` for IPv4
+addresses through GRESOLV1, then uses GTCP1 to connect to `netd`. Its response
+parser lives in `userspace/httpwire`; URL and redirect policy live in
+`userspace/fetch`. An optional VFS session receives file output. The network
+services do not interpret HTTP.
+
 GoOS has two IPv4 interfaces: `lo`, which always exists and owns
 `127.0.0.0/8`, and `net0` on one legacy virtio-net function. The kernel
 discovers the function, routes its interrupt and bounds the driver's
