@@ -701,3 +701,10 @@ handshake and reads, retransmission, refusal, reset, FIN and EOF, guest listen,
 loopback, own-address and no-NIC loopback checks. It also verifies TCP status
 and atomic tuning reload. Do not add a separate boot for a TCP case that fits
 an existing guest.
+# HTTP client validation
+
+Host tests in `userspace/httpwire` and `userspace/fetch` exercise split reads,
+framing, URL validation, request encoding and redirects. `make test-network`
+uses the deterministic HTTP listener in `tools/netpeer` on ports 80 and 8080.
+The private-segment guest checks GET, HEAD, POST, custom headers, chunks,
+redirects and VFS output with `cat` and `stat`.

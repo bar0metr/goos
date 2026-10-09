@@ -1,5 +1,14 @@
 # Native shell
 
+`fetch [OPTIONS] URL` transfers an HTTP/1.1 response. It accepts `http://`
+hostnames and IPv4 addresses, with an optional port, path and query. `-I`
+requests headers only; `-i` includes response headers; `-d DATA` sends a POST;
+`-H 'Name: value'` adds a request header; `-L` follows up to five redirects.
+`-o FILE` writes to a chosen file, and `-O` uses the final URL's filename.
+`-v` writes request and response diagnostics to standard error. HTTP status
+codes, including 404 and 500, remain response data. A failed transfer can leave
+a partial output file. TLS and HTTPS are unavailable.
+
 PID 1 launches the shell as a normal supervised native image after the
 terminal service: `/system/services/shell` from the installed system in
 normal mode, `/bootstrap/shell` from the boot archive in recovery (ADR 0175). The shell holds no console capability (ADR 0089): what is

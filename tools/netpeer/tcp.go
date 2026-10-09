@@ -7,14 +7,16 @@ import (
 )
 
 const (
-	tcpEchoPort = 7
-	tcpDNSPort  = 53
-	tcpFIN      = 0x01
-	tcpSYN      = 0x02
-	tcpRST      = 0x04
-	tcpPSH      = 0x08
-	tcpACK      = 0x10
-	tcpPeerMSS  = 1200
+	tcpEchoPort    = 7
+	tcpDNSPort     = 53
+	tcpHTTPPort    = 80
+	tcpHTTPAltPort = 8080
+	tcpFIN         = 0x01
+	tcpSYN         = 0x02
+	tcpRST         = 0x04
+	tcpPSH         = 0x08
+	tcpACK         = 0x10
+	tcpPeerMSS     = 1200
 )
 
 type tcpSegment struct {
@@ -116,6 +118,7 @@ type tcpConn struct {
 	reopenAfter          time.Duration
 	openAt               time.Time
 	dns                  *dnsStream
+	http                 *httpStream
 }
 
 func (h *host) tcpFrame(conn *tcpConn, flags byte, payload []byte) []byte {
@@ -150,7 +153,7 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 		return nil
 	}
 	if conn == nil {
-		if segment.flags&tcpSYN == 0 || segment.dstPort != tcpEchoPort && segment.dstPort != tcpDNSPort {
+		if segment.flags&tcpSYN == 0 || segment.dstPort != tcpEchoPort && segment.dstPort != tcpDNSPort && segment.dstPort != tcpHTTPPort && segment.dstPort != tcpHTTPAltPort {
 			h.mu.Unlock()
 			ack := segment.seq + uint32(len(segment.payload))
 			if segment.flags&tcpSYN != 0 {
@@ -178,6 +181,8 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 			window: window, reopenAfter: reopenAfter}
 		if conn.localPort == tcpDNSPort {
 			conn.dns = &dnsStream{window: segment.window}
+		} else if conn.localPort == tcpHTTPPort || conn.localPort == tcpHTTPAltPort {
+			conn.http = &httpStream{}
 		}
 		h.tcp[key] = conn
 		if h.tcpDropSYN {
@@ -222,6 +227,11 @@ func (h *host) handleTCP(src mac, packet ipPacket) [][]byte {
 	}
 	if conn.dns != nil {
 		frames := h.handleDNSTCP(key, conn, segment)
+		h.mu.Unlock()
+		return frames
+	}
+	if conn.http != nil {
+		frames := h.handleHTTP(key, conn, segment)
 		h.mu.Unlock()
 		return frames
 	}
