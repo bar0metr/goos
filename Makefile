@@ -127,7 +127,7 @@ endif
 endif
 override SYSTEM_CA_SOURCE := $(if $(strip $(VALIDATION_CA_BUNDLE)),$(VALIDATION_CA_BUNDLE),security/ca-certificates.pem)
 TRUST_UPDATE_KEY ?= security/trust-update-key.pub
-TRUST_UPDATE_URL ?=
+TRUST_UPDATE_URL ?= https://bar0metr.github.io/current
 VALIDATION_TRUST_UPDATE_KEY ?= tools/trustfixture/testdata/public.key
 VALIDATION_TRUST_UPDATE_URL ?=
 override SYSTEM_TRUST_KEY_SOURCE := $(if $(filter 1,$(VALIDATION)),$(VALIDATION_TRUST_UPDATE_KEY),$(TRUST_UPDATE_KEY))

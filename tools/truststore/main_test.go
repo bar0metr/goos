@@ -462,3 +462,60 @@ func TestMissingRequiredFields(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyPublishedPackageReadOnly(t *testing.T) {
+	source, output := fixture(t)
+	opts := testOptions()
+	opts.SignKey = filepath.Join(filepath.Dir(output), "test.seed")
+	seed := bytes.Repeat([]byte{7}, ed25519.SeedSize)
+	if err := os.WriteFile(opts.SignKey, seed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := generate(source, output, opts, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	publicPath := filepath.Join(filepath.Dir(output), "public.key")
+	public := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	if err := os.WriteFile(publicPath, public, 0644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-verify", "-public-key", publicPath, output, metadataPath(output), signaturePath(output)}
+	before, _ := os.ReadFile(signaturePath(output))
+	var report bytes.Buffer
+	if err := run(args, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report.String(), "sequence=1 roots=1") {
+		t.Fatalf("report: %q", report.String())
+	}
+	after, _ := os.ReadFile(signaturePath(output))
+	if !bytes.Equal(before, after) {
+		t.Fatal("verification changed signature")
+	}
+	for _, bad := range [][]string{
+		{"-verify", output, metadataPath(output), signaturePath(output)},
+		{"-verify", "-check", "-public-key", publicPath, output, metadataPath(output), signaturePath(output)},
+		{"-verify", "-sequence", "2", "-public-key", publicPath, output, metadataPath(output), signaturePath(output)},
+		{"-public-key", publicPath, source, output},
+	} {
+		if run(bad, io.Discard) == nil {
+			t.Fatalf("accepted flags: %v", bad)
+		}
+	}
+	before[0] ^= 1
+	if err := os.WriteFile(signaturePath(output), before, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if run(args, io.Discard) == nil {
+		t.Fatal("altered signature accepted")
+	}
+	if err := os.WriteFile(signaturePath(output), after, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicPath, bytes.Repeat([]byte{1}, 32), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if run(args, io.Discard) == nil {
+		t.Fatal("wrong public key accepted")
+	}
+}

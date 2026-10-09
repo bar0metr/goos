@@ -39,10 +39,10 @@ Normal builds check the committed source and artifacts offline. They install:
 
 `TRUST_UPDATE_KEY` selects the raw 32-byte production public key, defaulting to
 the committed public key. `TRUST_UPDATE_URL` supplies an HTTPS base URL for the
-three package files. Its default is empty because no production publishing
-endpoint is assumed; `trust update` reports an unconfigured endpoint in that
-image. A release maintainer sets it explicitly. Clients do not accept a mutable
-endpoint or a CLI trust-verification bypass.
+three package files. Its production default is `https://bar0metr.github.io/current`,
+hosted in the `bar0metr/bar0metr.github.io` Pages repository. Maintainers can
+override it at build time; an explicitly empty value disables network update.
+Clients do not accept a mutable endpoint or a CLI trust-verification bypass.
 
 Validation selects a separate key through `VALIDATION_TRUST_UPDATE_KEY`, an
 explicit test bootstrap CA through `VALIDATION_CA_BUNDLE`, and an offline
@@ -138,3 +138,32 @@ old-or-complete-new selection and fail-closed recovery for the covered failures.
 Rollback protection relies on surviving state; it cannot detect deletion of all
 history or restoration of an older disk snapshot without protected monotonic
 storage. Bootstrap roots remain a trusted fallback by policy.
+
+## GitHub Pages production channel
+
+The first signed publication at `https://bar0metr.github.io/current` has sequence
+2026101001 and the unchanged 121-root bootstrap PEM. Its Mozilla source date stays
+2026-09-25; sequence records publication/version independently of source age.
+The Pages repository holds only public package files, provenance, an index and
+the MPL license. The private seed stays in external maintainer storage.
+
+Prepare replacements outside the Pages checkout, review root changes, verify,
+then replace all three `current/ca-certificates.{pem,json,sig}` files in one
+commit. Never publish a lower sequence or reuse one for different content.
+GitHub deployment and CDN caching are not a cross-file atomic transaction;
+mixed generations fail signature/digest verification and leave installed roots
+unchanged. Keep old signed packages in Git history for diagnosis.
+
+Verify a staged package, and verify its downloaded deployed bytes afterward:
+
+```sh
+go run ./tools/truststore -verify -public-key security/trust-update-key.pub \
+  /external/package/ca-certificates.pem \
+  /external/package/ca-certificates.json \
+  /external/package/ca-certificates.sig
+```
+
+Verification reads bounded files and uses the same package and certificate
+policy as the native loader; it does not read the signing seed or modify files.
+The public package URLs append each filename to the base URL, without redirects.
+Ordinary builds and offline tests do not download from Pages.

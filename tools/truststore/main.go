@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 
+	"goos/userspace/tlsclient"
 	"goos/userspace/truststore"
 )
 
@@ -42,6 +43,8 @@ func run(args []string, report io.Writer) error {
 	flags := flag.NewFlagSet("truststore", flag.ContinueOnError)
 	var opts options
 	checkOnly := flags.Bool("check", false, "verify source and artifacts without writing")
+	verifyOnly := flags.Bool("verify", false, "verify a signed package using a public key without writing")
+	publicKey := flags.String("public-key", "", "raw Ed25519 public key for package verification")
 	keyDir := flags.String("keygen", "", "generate signing keys in an empty external directory")
 	flags.Uint64Var(&opts.Sequence, "sequence", 0, "positive update sequence")
 	flags.StringVar(&opts.SourceDate, "source-date", "", "UTC RFC3339 Mozilla source date")
@@ -53,15 +56,24 @@ func run(args []string, report io.Writer) error {
 	}
 	maintenance := false
 	flags.Visit(func(f *flag.Flag) {
-		if f.Name != "check" && f.Name != "keygen" {
+		if f.Name != "check" && f.Name != "keygen" && f.Name != "verify" && f.Name != "public-key" {
 			maintenance = true
 		}
 	})
 	if *keyDir != "" {
-		if *checkOnly || maintenance || flags.NArg() != 0 {
+		if *checkOnly || *verifyOnly || *publicKey != "" || maintenance || flags.NArg() != 0 {
 			return errors.New("keygen cannot be combined with other actions")
 		}
 		return keygen(*keyDir)
+	}
+	if *verifyOnly {
+		if *checkOnly || maintenance || *publicKey == "" || flags.NArg() != 3 {
+			return errors.New("verify requires -public-key KEY PEM META SIG and no other action")
+		}
+		return verifyPackage(flags.Arg(0), flags.Arg(1), flags.Arg(2), *publicKey, report)
+	}
+	if *publicKey != "" {
+		return errors.New("public-key requires verify")
 	}
 	if flags.NArg() != 2 {
 		return errors.New("usage: truststore [-check | -sequence N -source-date UTC_DATE] SOURCE OUTPUT.pem")
@@ -400,4 +412,35 @@ func keygen(directory string) error {
 		}
 	}
 	return nil
+}
+
+func verifyPackage(bundlePath, metaPath, sigPath, keyPath string, report io.Writer) error {
+	bundle, err := readLimited(bundlePath, maxBundle)
+	if err != nil {
+		return err
+	}
+	meta, err := readLimited(metaPath, truststore.MaxMetadata)
+	if err != nil {
+		return err
+	}
+	sig, err := readLimited(sigPath, ed25519.SignatureSize)
+	if err != nil {
+		return err
+	}
+	public, err := readLimited(keyPath, ed25519.PublicKeySize)
+	if err != nil {
+		return err
+	}
+	pkg, err := truststore.Verify(bundle, meta, sig, public, func(data []byte) (int, error) {
+		roots, err := tlsclient.LoadRoots(data)
+		if err != nil {
+			return 0, err
+		}
+		return roots.Count(), nil
+	})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(report, "Verified trust package: sequence=%d roots=%d bundle_sha256=%s\n", pkg.Metadata.Sequence, pkg.Metadata.Certificates, pkg.Metadata.BundleSHA256)
+	return err
 }

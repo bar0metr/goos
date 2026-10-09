@@ -70,8 +70,9 @@ for future network-only clients is future work, not a trust-store service.
 
 Keep immutable bootstrap roots, `/system/security/trust-update-key.pub` and
 `/system/security/trust-update-url`. The key authorizes independently signed
-packages; the URL is a build-time system-data input. An empty URL disables
-network update until a publisher supplies an endpoint. Builds stay offline.
+packages; the URL is a build-time system-data input with production default
+`https://bar0metr.github.io/current`. An explicitly empty URL disables network
+update. Builds stay offline; publication is a separate maintenance action.
 
 Use standard Ed25519, validated natively with RFC 8032 and tamper rejection.
 Authenticate `GOOS-TRUST-V1\n`, exact canonical JSON bytes and raw SHA256(PEM).

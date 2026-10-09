@@ -282,8 +282,9 @@ edit followed by `make`.
 Normal builds check local PEM and `security/ca-certificates.json` offline. Build
 inputs `TRUST_UPDATE_KEY` (raw public-key file) and `TRUST_UPDATE_URL` install
 immutable `/system/security/trust-update-key.pub` and `trust-update-url`.
-The URL default is empty; publishing a package and setting its HTTPS base URL
-are explicit maintainer actions. Validation uses separate
+The production URL defaults to `https://bar0metr.github.io/current`; it remains
+a build-time override. Publishing signed package data is an explicit maintainer
+action, separate from building the OS. Validation uses separate
 `VALIDATION_TRUST_UPDATE_KEY` and `VALIDATION_TRUST_UPDATE_URL` inputs.
 
 `make trust-update TRUST_SOURCE=LOCAL_PEM TRUST_OUTPUT=OUTPUT.pem

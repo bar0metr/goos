@@ -797,3 +797,18 @@ stopped on an obsolete three-directory `/system` assertion; changing it to four
 matched the security directory and passed in the release boot gate. We did not
 repeat the identical full VM matrix. Optional kernel-heap monitor evidence was
 unavailable in the initial boot run; that skip is not heap-stability proof.
+
+## Production trust publication smoke
+
+On 2026-10-10 an explicit live smoke used the normal production ISO, immutable
+production update key, bootstrap public roots and QEMU user networking. Native
+`trust update` downloaded the three files from
+`https://bar0metr.github.io/current`, verified their signature and installed
+sequence 2026101001 with 121 roots. `trust status` changed from system fallback
+to updated state. Host downloads also matched the signed staged bytes exactly
+and passed `tools/truststore -verify` with the immutable production public key.
+
+This Internet-dependent smoke is a publication check, not an ordinary build or
+release gate. Offline TLS/trust-update tests retain their separate validation
+key and URL. Normal ISO checks use `net status` and command completion prompts;
+validation-only NETD/SHELL markers are absent from production images.
