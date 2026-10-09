@@ -5,8 +5,8 @@ PID 1 provides private sessions; `fetch` cannot read raw packets or alter
 resolver and network settings. `-o` and `-O` use the command's VFS grant.
 Response headers have fixed size limits and cannot change these grants.
 HTTPS uses these same grants. TLS and X.509 run inside the client, while `netd`
-and `resolved` remain transport and name services. The client reads only
-`/system/security/ca-certificates.pem` as trust input through its VFS session;
+and `resolved` remain transport and name services. The client reads signed state roots authenticated by the immutable update key,
+or `/system/security/ca-certificates.pem` as fallback through its VFS session;
 there is no trust-store service, host-root fallback, insecure CLI option or
 user-selected CA path. The read-only system namespace protects installed roots.
 A narrower root-read grant for future network-only clients is future work;
@@ -427,3 +427,15 @@ and image mapping checks (`internal/capability`, `kernel/handle`, `kernel/ipc`, 
 `kernel/shmem`, `kernel/loader`, `userspace/init`, and others). Quota charging
 and release are tested in `kernel/process`. `make test-linux-boot` runs the
 Linux proofs in the table above in a booted system.
+
+## Trust maintenance authority
+
+`trust` requests existing resolve, TCP and VFS grants. Its verifier needs no
+kernel keyring, trust service or raw network authority. `trust install` requires
+writable persistent FAT32 state; `trust update` adds HTTPS download through the
+same native transport as fetch. Only signed packages authorize CA replacement.
+
+Fetch gains no new grant and exposes no trust-install operation. Its existing
+broad `GrantVFS` can already write output files; it is not a path-scoped authority.
+A future VFS grant could separate bootstrap/key reads from `/state/security`
+writes. Signature verification protects trust even when a process corrupts state.

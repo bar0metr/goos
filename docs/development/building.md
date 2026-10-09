@@ -64,7 +64,7 @@ Mozilla/curl 2026-09-25 source, digests and MPL 2.0 license. Regenerate or check
 using only local inputs:
 
 ```sh
-go run ./tools/truststore security/ca-source.pem security/ca-certificates.pem
+go run ./tools/truststore -sequence 2026092501 -source-date 2026-09-25T03:12:01Z -source-url https://curl.se/ca/cacert.pem security/ca-source.pem security/ca-certificates.pem
 go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem
 ```
 
@@ -79,11 +79,13 @@ Changing files on the host does not update an existing installed disk.
 `make test-tls` supplies the fixture CA for the offline native HTTPS gate,
 which passed 69 assertions. It also measures production roots with the
 validation-only `trustprobe --production`; this fixed auxiliary input is not an
-alternate CA path for fetch. The validation fetch image is 1645418 bytes and
+alternate CA path for fetch. The validation fetch image is 1779661 bytes and
 its largest compiled frame is 20696 bytes (including unnegotiated ML-KEM code).
-The production fetch image is 1642530 bytes and reproduces byte-for-byte.
+The production fetch image is 1776501 bytes and reproduces byte-for-byte.
 Normal images exclude cryptoprobe and trustprobe. The stream network regression
-passed, but full `test-all` and `release-check` have not run. See
+passed, and the complete `release-check` matrix passed. The initial `test-all`
+failed an obsolete boot directory-count assertion, corrected and verified by
+the release boot gate. See
 [release measurements](../releases/0.2.6.md).
 
 ## Reproducible builds
@@ -274,3 +276,19 @@ The kernel banner, `uname`, the read-only `system.build.release` setting, and
 `make version` all take it from there, and the boot test reads the expected
 banner and `uname` line from the same file. Changing the version is that one
 edit followed by `make`.
+
+## Trust package maintenance
+
+Normal builds check local PEM and `security/ca-certificates.json` offline. Build
+inputs `TRUST_UPDATE_KEY` (raw public-key file) and `TRUST_UPDATE_URL` install
+immutable `/system/security/trust-update-key.pub` and `trust-update-url`.
+The URL default is empty; publishing a package and setting its HTTPS base URL
+are explicit maintainer actions. Validation uses separate
+`VALIDATION_TRUST_UPDATE_KEY` and `VALIDATION_TRUST_UPDATE_URL` inputs.
+
+`make trust-update TRUST_SOURCE=LOCAL_PEM TRUST_OUTPUT=OUTPUT.pem
+TRUST_SEQUENCE=VERSION TRUST_SOURCE_DATE=UTC_RFC3339` normalizes and emits
+canonical metadata. `TRUST_OLD_BUNDLE` reports root differences;
+`TRUST_SIGNING_KEY` explicitly signs with an external raw private seed. The
+ordinary build neither downloads source material nor generates signing keys.
+See [security maintenance](../../security/README.md) for complete commands.

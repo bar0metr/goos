@@ -1,4 +1,4 @@
-//go:build cryptoprobe_sha256 || cryptoprobe_sha512 || cryptoprobe_hmac || cryptoprobe_aes || cryptoprobe_cipher || cryptoprobe_ecdh || cryptoprobe_ecdsa || cryptoprobe_rsa || cryptoprobe_asn1 || cryptoprobe_pem || cryptoprobe_x509
+//go:build cryptoprobe_ed25519 || cryptoprobe_sha256 || cryptoprobe_sha512 || cryptoprobe_hmac || cryptoprobe_aes || cryptoprobe_cipher || cryptoprobe_ecdh || cryptoprobe_ecdsa || cryptoprobe_rsa || cryptoprobe_asn1 || cryptoprobe_pem || cryptoprobe_x509
 
 package cryptoprobe
 

@@ -766,3 +766,34 @@ framing, URL validation, request encoding and redirects. `make test-network`
 uses the deterministic HTTP listener in `tools/netpeer` on ports 80 and 8080.
 The private-segment guest checks GET, HEAD, POST, custom headers, chunks,
 redirects and VFS output with `cat` and `stat`.
+
+## Signed trust update gate
+
+`make test-trust-update` runs offline peers and a validation system with a
+separate update public key and bootstrap CA. The gate passed 47 assertions over
+three boots of one persistent disk: fallback status, signed download/install,
+authentication with a newly added CA, rollback/bad-signature refusal, exact
+same-sequence reinstall, persistence, corrupt-selector recovery, and corrupt
+signature rejection with bootstrap HTTPS recovery. Only public package files
+enter the guest; host TLS and signing private fixtures stay outside its tree.
+
+Host tests cover strict canonical metadata, signatures, keys, digest/count/size,
+PEM bounds, sequence reuse, partial state, selectors, install failpoints and
+capacity boundaries. Download tests reject non-200 responses, oversized fixed
+and chunked bodies, truncation and TLS failures on any component. Release checks
+compare the installed public key with production input and scan for validation
+public/private signing material and private-key PEM.
+
+The gate proves reboot persistence and fail-closed state selection, not recovery
+from arbitrary physical torn sectors. Full `test-all` and `release-check` are
+separate release gates; record their actual results before calling a release ready.
+
+On 2026-10-09 the complete `make release-check` passed after the signed trust
+extension: two clean builds produced 167 identical artifacts, the boot gate
+passed 456 checks, system boot passed 156, Linux ABI passed 126, and both stress
+runs passed 15 rounds each. TLS passed 69 assertions and signed trust update
+passed 47 assertions across three persistent boots. The initial `make test-all`
+stopped on an obsolete three-directory `/system` assertion; changing it to four
+matched the security directory and passed in the release boot gate. We did not
+repeat the identical full VM matrix. Optional kernel-heap monitor evidence was
+unavailable in the initial boot run; that skip is not heap-stability proof.

@@ -1,4 +1,4 @@
-//go:build !cryptoprobe_sha256 && !cryptoprobe_sha512 && !cryptoprobe_hmac && !cryptoprobe_aes && !cryptoprobe_cipher && !cryptoprobe_ecdh && !cryptoprobe_ecdsa && !cryptoprobe_rsa && !cryptoprobe_rand && !cryptoprobe_x509 && !cryptoprobe_asn1 && !cryptoprobe_pem && !cryptoprobe_tls
+//go:build !cryptoprobe_ed25519 && !cryptoprobe_sha256 && !cryptoprobe_sha512 && !cryptoprobe_hmac && !cryptoprobe_aes && !cryptoprobe_cipher && !cryptoprobe_ecdh && !cryptoprobe_ecdsa && !cryptoprobe_rsa && !cryptoprobe_rand && !cryptoprobe_x509 && !cryptoprobe_asn1 && !cryptoprobe_pem && !cryptoprobe_tls
 
 // Package cryptoprobe contains isolated native crypto feasibility checks.
 package cryptoprobe

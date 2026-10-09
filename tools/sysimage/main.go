@@ -19,10 +19,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"goos/userspace/trustupdate"
 	"io"
 	"io/fs"
 	"os"
@@ -42,6 +44,10 @@ func main() {
 		os.Exit(2)
 	}
 	caBundle, err := readCABundle(os.Getenv("SYSTEM_CA_BUNDLE"))
+	if err != nil {
+		fail(err)
+	}
+	updateKey, updateURL, err := readTrustInputs(os.Getenv("SYSTEM_TRUST_UPDATE_KEY"), os.Getenv("SYSTEM_TRUST_UPDATE_URL"))
 	if err != nil {
 		fail(err)
 	}
@@ -73,6 +79,8 @@ func main() {
 	}
 	write(output, "system/commands", index)
 	write(output, "system/security/ca-certificates.pem", caBundle)
+	write(output, "system/security/trust-update-key.pub", updateKey)
+	write(output, "system/security/trust-update-url", updateURL)
 	for _, fixture := range linuxfixtures.All() {
 		write(output, "system/linux/"+fixture.Name, fixture.Image)
 	}
@@ -227,4 +235,34 @@ func read(path string) []byte {
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+func readTrustInputs(keyPath, url string) ([]byte, []byte, error) {
+	if keyPath == "" {
+		return nil, nil, errors.New("SYSTEM_TRUST_UPDATE_KEY must select a public update key")
+	}
+	file, err := os.Open(keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	key, readErr := io.ReadAll(io.LimitReader(file, ed25519.PublicKeySize+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, nil, readErr
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	if len(key) != ed25519.PublicKeySize || bytes.Equal(key, make([]byte, ed25519.PublicKeySize)) {
+		return nil, nil, errors.New("trust update public key must be a nonzero raw Ed25519 public key")
+	}
+	if url != "" {
+		if err := trustupdate.ValidateURL(url); err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(url)+1 > 4096 {
+		return nil, nil, errors.New("trust update URL too long")
+	}
+	return key, []byte(url + "\n"), nil
 }

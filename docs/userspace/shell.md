@@ -11,7 +11,8 @@ codes, including 404 and 500, remain response data. A failed transfer can leave
 a partial output file.
 
 HTTPS uses native TLS 1.3 and verifies server certificates against
-`/system/security/ca-certificates.pem`, including validity against REALTIME and
+signed persistent roots or the immutable `/system/security/ca-certificates.pem`
+fallback, including validity against REALTIME and
 DNS/IP SAN identity. Missing or malformed roots, unavailable time or entropy,
 and authentication failures return exit status 1. There is no `-k` or CA-file
 option. `-L` follows HTTP-to-HTTP/HTTPS and HTTPS-to-HTTPS redirects, but rejects
@@ -411,3 +412,25 @@ Linux programs; a static BusyBox `sh` runs command lines, pipelines, and
 scripts that way. The shell waits for the program it started. Ctrl-C ends that
 program and every process it forked; no signal reaches them (ADR 0170). [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md)
 lists what such a program can call.
+
+## Trust store command
+
+```text
+trust status
+trust verify FILE META SIG
+trust install FILE META SIG
+trust update
+```
+
+Status names the selected root bundle, sequence, source date and fallback reason.
+Verify authenticates the three supplied files without changing state. Install
+requires a signed package, refuses rollback and commits a verified generation on
+persistent FAT32. Equal-sequence content must match all three files exactly.
+Update downloads the package from `/system/security/trust-update-url` through
+current verified HTTPS roots, then checks its Ed25519 signature using the immutable
+public key. An empty configured URL returns an error, not an insecure download.
+
+After installation, new client processes use signed state roots. Missing or
+corrupt state reports a reason and uses bootstrap roots; trust never accepts an
+arbitrary local CA or disables certificate verification. Corrupt state stays on
+disk for diagnosis. Trust sequence is independent of the GoOS version.

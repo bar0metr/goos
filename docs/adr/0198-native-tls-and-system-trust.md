@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Native TLS and stream-network gates pass; the complete release matrix
-has not run.
+Accepted. Native TLS, signed trust updates and the complete release-check
+matrix pass.
 Builds on ADR 0196 and the [native crypto feasibility results](../development/crypto-feasibility.md).
 
 ## Context
@@ -65,6 +65,40 @@ switch as an informational response.
 TLS requires no new capability: native fetch already holds resolve, TCP and VFS
 grants. Read roots through its VFS authority. A narrower root-read authority
 for future network-only clients is future work, not a trust-store service.
+
+## Signed trust lifecycle
+
+Keep immutable bootstrap roots, `/system/security/trust-update-key.pub` and
+`/system/security/trust-update-url`. The key authorizes independently signed
+packages; the URL is a build-time system-data input. An empty URL disables
+network update until a publisher supplies an endpoint. Builds stay offline.
+
+Use standard Ed25519, validated natively with RFC 8032 and tamper rejection.
+Authenticate `GOOS-TRUST-V1\n`, exact canonical JSON bytes and raw SHA256(PEM).
+Metadata carries a trust sequence independent of GoOS 0.2.6; provenance and
+bundle identity are generated data, not constants in the tool.
+
+Write a new staging directory under `/state/security`, close and reverify all
+files, write its completion marker, then rename it into `generations/SEQUENCE`.
+Replace `active` last. Do not rewrite existing generations. FAT32 flushes
+completed changes; signed recovery and immutable fallback cover incomplete
+publication without claiming a journal or arbitrary torn-sector atomicity.
+
+Select the highest surviving published signed generation, ignoring a selector
+that points lower. Refuse incoming lower sequences or equal sequences with
+different bytes. Retain corrupt state for diagnosis. Staging does not consume
+the bounded generation listing. Serial installs stop before 64 existing published
+generations or 256 total directory entries; no automatic history deletion occurs.
+A volatile `/run/trust-update.lock` serializes installation and publication.
+An interrupted installer can leave that lock until reboot; it cannot change
+root selection or persist across boots. Disk snapshot rollback
+and deletion of all state history remain outside this software-only protection.
+
+`trust status/verify/install/update` reuse existing VFS grants and shared native
+fetch transport. Each update download retains current roots until installation
+finishes. HTTPS protects transport, but the signed trust package is authorized
+by the immutable trust-update public key. No kernel or network service verifies
+packages. The updater follows no redirects and accepts only HTTP 200 bodies.
 
 ## Alternatives
 

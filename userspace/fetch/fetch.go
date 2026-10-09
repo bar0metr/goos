@@ -377,6 +377,9 @@ type SecureNetwork interface {
 	ConnectTLS(network.IPv4, uint16, []byte) (Connection, error)
 }
 
+// ResponseValidator lets a download consumer reject final HTTP status before output.
+type ResponseValidator interface{ CheckResponse(status int) error }
+
 type Output interface {
 	httpwire.Sink
 	Close() error
@@ -603,6 +606,12 @@ func Run(o *Options, env Environment) error {
 		}
 		if o.Verbose {
 			diagnostic(env, '<', response.Header[:response.Size])
+		}
+		if policy, ok := env.(ResponseValidator); ok {
+			if err := policy.CheckResponse(response.Status); err != nil {
+				conn.Close()
+				return err
+			}
 		}
 		if o.Follow && redirect(response.Status) {
 			if hop == MaxRedirects {

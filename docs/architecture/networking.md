@@ -36,7 +36,8 @@ followed HTTPS-to-HTTP redirect fails before opening the next connection.
 Cross-origin redirects strip Authorization, Proxy-Authorization, Cookie and a
 custom Host header.
 
-The client requires explicit roots from `/system/security/ca-certificates.pem`,
+The client selects verified signed state roots or the immutable bootstrap
+`/system/security/ca-certificates.pem`,
 kernel entropy through `cryptosys.Reader`, and REALTIME through `cryptosys.Now`.
 Missing or invalid roots, unavailable entropy or realtime, and a clock rollback
 during certificate validation fail closed. It uses TLS 1.3, X25519, the standard
@@ -64,7 +65,8 @@ AES-128-GCM/SHA-256 (cipher 4865), verification failures, downgrade rejection an
 VFS output. A separate native run negotiated ChaCha20-Poly1305 (4867).
 Production-root loading used 1360864 allocated bytes with a 1363216-byte arena
 high-water mark for 121 roots; [release notes](../releases/0.2.6.md) record the
-other measurements. Full `test-all` and `release-check` have not run.
+other measurements. The complete `release-check` passed; the initial `test-all` exposed an obsolete
+boot directory-count assertion, corrected and verified by the release boot gate.
 Stock TinyGo TLS is
 a device-offload shim that reports handshake success without wire output and
 cannot secure this stream. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
@@ -454,3 +456,19 @@ the installed system and the shell running; `net status` reports `net0`
 deadline. Recovery mode runs none of the network services and carries no
 network command. See
 [init](../userspace/init.md#network-services) for the supervision rules.
+
+## Signed trust updates
+
+Native `trust` and `fetch` reuse `userspace/fetchtransport`; `trust` does not
+implement a second resolver, TCP, HTTP or TLS client. The immutable system carries
+bootstrap roots, an Ed25519 update public key and the build-configured HTTPS
+package base URL. HTTPS protects transport, but the signed trust package is
+authorized by the immutable trust-update public key.
+
+`userspace/truststore` verifies canonical metadata, the exact PEM digest and the
+Ed25519 signature before root parsing. `userspace/truststate` selects the highest
+surviving published signed generation under `/state/security/generations`.
+It rejects corrupt state and reports the immutable fallback. Each TLS adapter
+keeps its selected roots through its lifetime, including all three update
+component downloads. Installing roots changes future client processes, not a
+live TLS connection. Neither network service gains trust policy or write access.

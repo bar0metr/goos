@@ -126,6 +126,13 @@ $(error VALIDATION_CA_BUNDLE requires VALIDATION=1)
 endif
 endif
 override SYSTEM_CA_SOURCE := $(if $(strip $(VALIDATION_CA_BUNDLE)),$(VALIDATION_CA_BUNDLE),security/ca-certificates.pem)
+TRUST_UPDATE_KEY ?= security/trust-update-key.pub
+TRUST_UPDATE_URL ?=
+VALIDATION_TRUST_UPDATE_KEY ?= tools/trustfixture/testdata/public.key
+VALIDATION_TRUST_UPDATE_URL ?=
+override SYSTEM_TRUST_KEY_SOURCE := $(if $(filter 1,$(VALIDATION)),$(VALIDATION_TRUST_UPDATE_KEY),$(TRUST_UPDATE_KEY))
+override SYSTEM_TRUST_URL := $(if $(filter 1,$(VALIDATION)),$(VALIDATION_TRUST_UPDATE_URL),$(TRUST_UPDATE_URL))
+
 
 BUILD_TAGS := goos_hz$(HZ)
 ifeq ($(DIAG),1)
@@ -212,12 +219,12 @@ $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
 .SECONDEXPANSION:
-$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe)),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
 
 TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tinygo/runtime/*.txt) tools/build-tls.sh
-$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
 
@@ -330,7 +337,7 @@ initramfs: userspace
 # LINUX_APPS_DIR copies a host directory into /apps.
 system-tree: userspace
 	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
-	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
@@ -412,6 +419,7 @@ test-all:
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
+	$(MAKE) test-trust-update
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -434,6 +442,7 @@ release-check:
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
+	$(MAKE) test-trust-update
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -456,7 +465,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -536,7 +545,7 @@ test-crypto:
 
 .PHONY: trust-store test-tls
 trust-store:
-	@$(BUILD_ENV) go run ./tools/truststore security/ca-source.pem security/ca-certificates.pem
+	@$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem
 
 test-tls:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem
@@ -965,3 +974,21 @@ help:
 	  '  test-pve-linux  run the static Linux programs on Proxmox' \
 	  '  test-pve-7zip LINUX_EXTRA=path  run a static 7zzs on Proxmox and report refused calls' \
 	  '  pve-run         boot on Proxmox and keep the VM for debugging'
+
+# Explicit maintenance only: local input and optional external signing key.
+TRUST_SOURCE ?= security/ca-source.pem
+TRUST_OUTPUT ?= security/ca-certificates.pem
+TRUST_SEQUENCE ?=
+TRUST_SOURCE_DATE ?=
+TRUST_SOURCE_URL ?=
+TRUST_SIGNING_KEY ?=
+TRUST_OLD_BUNDLE ?=
+.PHONY: trust-update
+trust-update:
+	@test -n '$(TRUST_SEQUENCE)' -a -n '$(TRUST_SOURCE_DATE)' || { echo 'trust-update requires TRUST_SEQUENCE and TRUST_SOURCE_DATE' >&2; exit 2; }
+	$(BUILD_ENV) go run ./tools/truststore -sequence '$(TRUST_SEQUENCE)' -source-date '$(TRUST_SOURCE_DATE)' $(if $(strip $(TRUST_SOURCE_URL)),-source-url '$(TRUST_SOURCE_URL)') $(if $(strip $(TRUST_OLD_BUNDLE)),-old '$(TRUST_OLD_BUNDLE)') $(if $(strip $(TRUST_SIGNING_KEY)),-sign-key '$(TRUST_SIGNING_KEY)') '$(TRUST_SOURCE)' '$(TRUST_OUTPUT)'
+
+.PHONY: test-trust-update
+test-trust-update:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem VALIDATION_TRUST_UPDATE_URL=https://tls.test/update
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/trust-update.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system

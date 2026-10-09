@@ -19,7 +19,7 @@ var manifest = commands.Manifest{
 }
 
 //export userspaceMain
-func userspaceMain() { utility.Run(manifest, run) }
+func userspaceMain() { initCryptoPackages(); utility.Run(manifest, run) }
 func main()          {}
 
 func run(startup.Data) {

@@ -1,6 +1,6 @@
 //go:build goos_userspace
 
-package main
+package fetchtransport
 
 import (
 	"goos/internal/validation"
@@ -12,16 +12,14 @@ import (
 	"goos/userspace/utility"
 )
 
-var systemRoots *tlsclient.Roots
-
-func (a adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fetch.Connection, error) {
-	if systemRoots == nil {
+func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fetch.Connection, error) {
+	if a.roots == nil {
 		before := arena.Current()
 		roots, err := tlsclient.LoadSystemRoots(&bulk)
 		if err != nil {
 			return nil, err
 		}
-		systemRoots = roots
+		a.roots = roots
 		if validation.Enabled {
 			utility.PrintText("TLSROOT_RESOURCE roots=")
 			utility.PrintUint(uint64(roots.Count()))
@@ -39,7 +37,7 @@ func (a adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fet
 	socket := raw.(*socket)
 	before := arena.Current()
 	client, err := tlsclient.Open(socket, tlsclient.Config{
-		Host: string(host), Roots: systemRoots,
+		Host: string(host), Roots: a.roots,
 		Random: cryptosys.Reader{}, Now: cryptosys.Now,
 		SetDeadline: socket.SetDeadline,
 	})

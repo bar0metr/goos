@@ -68,6 +68,11 @@ else
 		[ ! -e "$system/system/bin/$probe" ] || complain "validation command $probe is in the normal system tree"
 	done
 	cmp -s security/ca-certificates.pem "$system/system/security/ca-certificates.pem" || complain 'normal system trust differs from the pinned production bundle'
+	if ! go run ./tools/trustscan "$system" security/trust-update-key.pub tools/trustfixture/testdata/public.key tools/trustfixture/testdata/signing-seed-testonly.raw; then
+		complain 'production update key or signing-material exclusion failed'
+	fi
+	[ -f "$system/system/security/trust-update-url" ] || complain 'immutable trust update URL configuration is missing'
+	[ -f "$system/system/bin/trust" ] || complain 'native trust command is missing'
 	for key in tools/tlsfixture/testdata/*key-testonly.pem; do
 		pattern=$(awk 'length($0) > 40 && $0 !~ /-----/ { print; exit }' "$key")
 		[ -n "$pattern" ] || { complain "test key scan has no pattern for $key"; continue; }

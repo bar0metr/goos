@@ -214,3 +214,18 @@ existing shared mappings outside the bump-heap counter.
 Full PEM loading fits the native quota and stack model, so the release keeps PEM
 instead of adding a binary root format. These observations describe these
 fixtures; they are not proofs of worst-case memory or stack behavior.
+
+## Ed25519 trust-package verification
+
+The signed trust extension ran RFC 8032 section 7.1 in native GoOS through the
+same pinned runtime compatibility roots. Standard `crypto/ed25519` accepted the
+known signature and rejected altered signature/message and wrong-key cases.
+The probe allocated 10,432 bytes, reached 11,728 bytes of heap high-water and had
+a 2,008-byte largest compiled frame. The observed TCG duration was 27,401,645 ns.
+
+Reproduce the isolated build with `tools/build-tls.sh`, package
+`./userspace/bin/cryptoprobe` and tags
+`goos_hz100 goos_validation cryptoprobe_ed25519`; run its native image through
+the existing crypto boot harness. The probe calls package initializers after
+arena setup. Verification uses maintained standard Ed25519, not a replacement
+primitive. Host signing tooling never supplies its private seed to GoOS.

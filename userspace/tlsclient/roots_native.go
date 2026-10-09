@@ -5,19 +5,48 @@ package tlsclient
 import (
 	"errors"
 	"goos/internal/validation"
-	"goos/kernel/ramfs"
-	"goos/kernel/vfs"
-	"goos/userspace/tcpapi"
+	"goos/userspace/nativefiles"
+	"goos/userspace/truststate"
 	"goos/userspace/utility"
+	"strconv"
 )
 
-// LoadSystemRoots reads only the immutable system trust-store path.
+// LoadSystemRoots prefers authenticated persistent roots and reports fallback.
 func LoadSystemRoots(bulk *utility.Bulk) (*Roots, error) {
-	return loadNativeRoots(RootPath, bulk)
+	roots, selected, err := LoadSelectedRoots(bulk)
+	if selected.Package != nil {
+		utility.WriteError([]byte("trust: using signed state roots sequence=" + strconv.FormatUint(selected.Package.Metadata.Sequence, 10) + "\n"))
+	} else {
+		utility.WriteError([]byte("trust: " + selected.Reason + ", using system fallback roots\n"))
+	}
+	return roots, err
 }
 
-// LoadProductionProbeRoots measures the committed bundle in a validation image.
-// Fetch does not call this path or use it as a fallback.
+// LoadSelectedRoots never authorizes writable state without the immutable key.
+func LoadSelectedRoots(bulk *utility.Bulk) (*Roots, truststate.Selection, error) {
+	files := &nativefiles.Files{Bulk: bulk}
+	key, keyErr := files.Read(truststate.KeyPath, 32)
+	var roots *Roots
+	store := truststate.Store{Files: files, Key: key, Validate: func(data []byte) (int, error) {
+		parsed, err := LoadRoots(data)
+		if err != nil {
+			return 0, err
+		}
+		roots = parsed
+		return parsed.Count(), nil
+	}}
+	selected := store.Select()
+	if keyErr == nil && selected.Package != nil {
+		return roots, selected, nil
+	}
+	if keyErr != nil {
+		selected.Package = nil
+		selected.Reason = "trust update key unavailable"
+	}
+	fallback, err := loadNativeRoots(RootPath, bulk)
+	return fallback, selected, err
+}
+
 func LoadProductionProbeRoots(bulk *utility.Bulk) (*Roots, error) {
 	if !validation.Enabled {
 		return nil, errors.New("production bundle probe requires a validation image")
@@ -26,45 +55,10 @@ func LoadProductionProbeRoots(bulk *utility.Bulk) (*Roots, error) {
 }
 
 func loadNativeRoots(name string, bulk *utility.Bulk) (*Roots, error) {
-	path := []byte(name)
-	kind, size, status := utility.Stat(path)
-	if status != vfs.StatusOK || kind != ramfs.KindFile || size == 0 || size > MaxBundle {
-		return nil, errors.New("system trust store unavailable or oversized")
-	}
-	if len(bulk.Memory) == 0 {
-		var ok bool
-		*bulk, ok = utility.NewBulk(tcpapi.SlotSize)
-		if !ok {
-			return nil, errors.New("trust store buffer unavailable")
-		}
-	}
-	reply, status := utility.Request(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
-	if status != vfs.StatusOK {
-		return nil, errors.New("system trust store unavailable")
-	}
-	file := reply.Handle
-	data := make([]byte, int(size))
-	var readErr error
-	for offset := 0; offset < len(data); {
-		count := len(data) - offset
-		if count > len(bulk.Memory) {
-			count = len(bulk.Memory)
-		}
-		reply, received := bulk.ReadFile(file, count)
-		if !received || reply.Status != vfs.StatusOK || reply.Size == 0 || reply.Size > uint64(count) {
-			readErr = errors.New("system trust store read failed")
-			break
-		}
-		n := int(reply.Size)
-		copy(data[offset:offset+n], bulk.Memory[:n])
-		offset += n
-	}
-	_, closeStatus := utility.Request(vfs.Request{Operation: vfs.OperationClose, Handle: file})
-	if readErr != nil {
-		return nil, readErr
-	}
-	if closeStatus != vfs.StatusOK {
-		return nil, errors.New("system trust store close failed")
+	files := &nativefiles.Files{Bulk: bulk}
+	data, err := files.Read(name, MaxBundle)
+	if err != nil {
+		return nil, err
 	}
 	return LoadRoots(data)
 }

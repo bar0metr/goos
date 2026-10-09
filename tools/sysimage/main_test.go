@@ -161,7 +161,7 @@ func TestSystemCAInstallAndFailBeforeDeletion(t *testing.T) {
 	encoded, _ := json.Marshal(args)
 	invoke := func(input string) ([]byte, error) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestSysimageMainProcess$")
-		cmd.Env = append(os.Environ(), "SYSIMAGE_TEST_PROCESS=1", "SYSIMAGE_TEST_ARGS="+string(encoded), "SYSTEM_CA_BUNDLE="+input, "LINUX_APPS_DIR=", "LINUX_EXTRA=")
+		cmd.Env = append(os.Environ(), "SYSIMAGE_TEST_PROCESS=1", "SYSIMAGE_TEST_ARGS="+string(encoded), "SYSTEM_CA_BUNDLE="+input, "SYSTEM_TRUST_UPDATE_KEY=../../security/trust-update-key.pub", "SYSTEM_TRUST_UPDATE_URL=https://updates.example.test/trust", "LINUX_APPS_DIR=", "LINUX_EXTRA=")
 		return cmd.CombinedOutput()
 	}
 	if log, err := invoke(fixture); err != nil {
@@ -183,6 +183,34 @@ func TestSystemCAInstallAndFailBeforeDeletion(t *testing.T) {
 		got, err := os.ReadFile(installed)
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatal("CA validation failure removed existing output")
+		}
+	}
+}
+
+func TestTrustUpdateInputs(t *testing.T) {
+	keyPath := "../../security/trust-update-key.pub"
+	key, url, err := readTrustInputs(keyPath, "https://updates.example.test/trust")
+	if err != nil || len(key) != 32 || string(url) != "https://updates.example.test/trust\n" {
+		t.Fatalf("inputs: key=%d url=%q err=%v", len(key), url, err)
+	}
+	for _, bad := range []string{"http://updates.example.test/trust", "https://host/path?x=1", "https://host/path\n"} {
+		if _, _, err := readTrustInputs(keyPath, bad); err == nil {
+			t.Fatalf("accepted URL %q", bad)
+		}
+	}
+	if _, _, err := readTrustInputs("", ""); err == nil {
+		t.Fatal("missing key accepted")
+	}
+	if _, _, err := readTrustInputs(keyPath, ""); err != nil {
+		t.Fatal("empty disabled endpoint rejected", err)
+	}
+	path := filepath.Join(t.TempDir(), "key")
+	for _, data := range [][]byte{nil, make([]byte, 32), make([]byte, 33), []byte("not a public key")} {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readTrustInputs(path, ""); err == nil {
+			t.Fatal("invalid key accepted")
 		}
 	}
 }

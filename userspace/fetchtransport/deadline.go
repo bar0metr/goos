@@ -1,6 +1,6 @@
 //go:build goos_userspace
 
-package main
+package fetchtransport
 
 import (
 	"errors"
