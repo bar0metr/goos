@@ -34,7 +34,7 @@ func (a adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fet
 	}
 	raw, err := a.Connect(address, port)
 	if err != nil {
-		return nil, err
+		return nil, &fetch.TCPConnectError{Err: err}
 	}
 	socket := raw.(*socket)
 	before := arena.Current()

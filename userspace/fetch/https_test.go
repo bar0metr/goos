@@ -19,6 +19,7 @@ type secureEnv struct {
 	tlsCalls      []tlsCall
 	plainConnects int
 	tlsErr        error
+	tlsErrors     []error
 }
 
 func (e *secureEnv) Connect(address network.IPv4, port uint16) (Connection, error) {
@@ -28,6 +29,9 @@ func (e *secureEnv) Connect(address network.IPv4, port uint16) (Connection, erro
 
 func (e *secureEnv) ConnectTLS(address network.IPv4, port uint16, host []byte) (Connection, error) {
 	e.tlsCalls = append(e.tlsCalls, tlsCall{address: address, port: port, host: string(host)})
+	if len(e.tlsErrors) >= len(e.tlsCalls) && e.tlsErrors[len(e.tlsCalls)-1] != nil {
+		return nil, e.tlsErrors[len(e.tlsCalls)-1]
+	}
 	if e.tlsErr != nil {
 		return nil, e.tlsErr
 	}
@@ -157,4 +161,71 @@ func TestHTTPSUnavailableOrFailedBeforeRequest(t *testing.T) {
 			t.Fatalf("unexpected TLS failure side effects: %+v", env)
 		}
 	})
+}
+
+func TestHTTPSAddressFallbackOnlyForTCPConnectFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{"connect timeout", &TCPConnectError{Err: errors.New("connect timeout")}, true},
+		{"connection refused", &TCPConnectError{Err: errors.New("connection refused")}, true},
+		{"host unreachable", &TCPConnectError{Err: errors.New("host unreachable")}, true},
+		{"wrong certificate", errors.New("hostname does not match certificate"), false},
+		{"expired certificate", errors.New("certificate expired"), false},
+		{"bad signature", errors.New("signature verification failure"), false},
+		{"TLS protocol", errors.New("TLS malformed record"), false},
+		{"trust store", errors.New("system trust store unavailable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var options Options
+			if err := Parse([][]byte{[]byte("-o"), []byte("saved"), []byte("https://tls.test/hello")}, &options); err != nil {
+				t.Fatal(err)
+			}
+			env := &secureEnv{mockEnv: &mockEnv{failFirst: true, conns: []*mockConn{{read: []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")}}}, tlsErrors: []error{tc.err, nil}}
+			err := Run(&options, env)
+			if tc.retry {
+				if err != nil || len(env.tlsCalls) != 2 || env.connected != 1 || env.file.String() != "ok" {
+					t.Fatalf("fallback: err=%v calls=%d connected=%d output=%q", err, len(env.tlsCalls), env.connected, env.file.String())
+				}
+			} else if err != tc.err || len(env.tlsCalls) != 1 || env.connected != 0 || env.path != nil || env.stdout.Len() != 0 || len(env.conns[0].written) != 0 {
+				t.Fatalf("terminal failure: err=%v calls=%d connected=%d path=%q", err, len(env.tlsCalls), env.connected, env.path)
+			}
+		})
+	}
+}
+
+func TestSwitchingProtocolsIsTerminal(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) {
+			var options Options
+			if err := Parse([][]byte{[]byte("-o"), []byte("saved"), []byte(scheme + "://tls.test/hello")}, &options); err != nil {
+				t.Fatal(err)
+			}
+			conn := &mockConn{read: []byte("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")}
+			env := &secureEnv{mockEnv: &mockEnv{conns: []*mockConn{conn}}}
+			if err := Run(&options, env); err != ErrProtocolSwitch {
+				t.Fatalf("Run error = %v", err)
+			}
+			if !conn.closed || env.path != nil || env.stdout.Len() != 0 || env.file.Len() != 0 {
+				t.Fatalf("unsupported upgrade side effects: closed=%v path=%q", conn.closed, env.path)
+			}
+		})
+	}
+}
+
+func TestInformationalResponsesStillReachFinalResponse(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) {
+			var options Options
+			if err := Parse([][]byte{[]byte(scheme + "://tls.test/hello")}, &options); err != nil {
+				t.Fatal(err)
+			}
+			env := &secureEnv{mockEnv: &mockEnv{conns: []*mockConn{{read: []byte("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")}}}}
+			if err := Run(&options, env); err != nil || env.stdout.String() != "ok" || !env.conns[0].closed {
+				t.Fatalf("final response: err=%v output=%q", err, env.stdout.String())
+			}
+		})
+	}
 }

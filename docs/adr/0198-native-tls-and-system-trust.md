@@ -58,6 +58,9 @@ HTTPS-to-HTTP redirects before connecting to the next hop. Do not expose an
 insecure CLI option or a user-selected root path. On a different scheme/host/port
 origin, do not forward Authorization, Proxy-Authorization, Cookie or a custom
 Host header.
+Retry another resolved IP only after a TCP connection failure. Once TCP connects,
+any TLS failure ends the request. Reject HTTP 101 instead of treating a protocol
+switch as an informational response.
 
 TLS requires no new capability: native fetch already holds resolve, TCP and VFS
 grants. Read roots through its VFS authority. A narrower root-read authority

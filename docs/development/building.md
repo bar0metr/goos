@@ -79,9 +79,9 @@ Changing files on the host does not update an existing installed disk.
 `make test-tls` supplies the fixture CA for the offline native HTTPS gate,
 which passed 69 assertions. It also measures production roots with the
 validation-only `trustprobe --production`; this fixed auxiliary input is not an
-alternate CA path for fetch. The validation fetch image is 1645218 bytes and
+alternate CA path for fetch. The validation fetch image is 1645418 bytes and
 its largest compiled frame is 20696 bytes (including unnegotiated ML-KEM code).
-The production fetch image is 1642210 bytes and reproduces byte-for-byte.
+The production fetch image is 1642530 bytes and reproduces byte-for-byte.
 Normal images exclude cryptoprobe and trustprobe. The stream network regression
 passed, but full `test-all` and `release-check` have not run. See
 [release measurements](../releases/0.2.6.md).

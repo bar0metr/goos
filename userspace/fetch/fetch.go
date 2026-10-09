@@ -16,6 +16,7 @@ var ErrUsage = errors.New("invalid fetch arguments")
 var ErrURL = errors.New("invalid HTTP or HTTPS URL")
 var ErrTLSUnavailable = errors.New("authenticated TLS transport unavailable")
 var ErrDowngrade = errors.New("refusing HTTPS to HTTP redirect")
+var ErrProtocolSwitch = errors.New("HTTP protocol switching unsupported")
 var ErrRedirect = errors.New("invalid HTTP redirect")
 var ErrRequest = errors.New("HTTP request too large")
 
@@ -363,7 +364,15 @@ type Network interface {
 	Connect(network.IPv4, uint16) (Connection, error)
 }
 
+// TCPConnectError marks a failed TCP connection, before any TLS handshake.
+// Only this error permits HTTPS fallback to another resolved address.
+type TCPConnectError struct{ Err error }
+
+func (e *TCPConnectError) Error() string { return e.Err.Error() }
+func (e *TCPConnectError) Unwrap() error { return e.Err }
+
 // SecureNetwork returns a stream only after authenticating the requested host.
+// It wraps TCP connection failures in TCPConnectError; other errors are terminal.
 type SecureNetwork interface {
 	ConnectTLS(network.IPv4, uint16, []byte) (Connection, error)
 }
@@ -518,6 +527,12 @@ func Run(o *Options, env Environment) error {
 					diagnostic(env, '*', []byte("TLS 1.3 handshake"))
 				}
 				conn, err = secure.ConnectTLS(addresses[i], current.Port, current.HostBytes())
+				if err != nil {
+					var connectErr *TCPConnectError
+					if !errors.As(err, &connectErr) {
+						return err
+					}
+				}
 			} else {
 				conn, err = env.Connect(addresses[i], current.Port)
 			}
@@ -575,6 +590,9 @@ func Run(o *Options, env Environment) error {
 		var response httpwire.Response
 		for {
 			err = reader.Headers(&response)
+			if err == nil && response.Status == 101 {
+				err = ErrProtocolSwitch
+			}
 			if err != nil || response.Status >= 200 {
 				break
 			}
