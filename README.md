@@ -76,7 +76,9 @@ with DHCP or static settings and answers and sends ICMP echo; `ping` and
 `net status` use it from the shell. A loopback interface, a hosts table and a
 DNS stub resolver let `ping` and `resolve` take host names. Native programs
 granted a UDP or TCP session use IPv4 datagrams or bounded byte streams, as
-the `udp` and `tcp` commands do. There is no IPv6 or Linux socket interface.
+the `udp` and `tcp` commands do. `dnsq` queries a DNS server directly, and
+`fetch` transfers HTTP/1.1 responses through the resolver and TCP sessions.
+There is no IPv6 or Linux socket interface.
 
 The kernel supports preemptive SMP on up to 64 processors, per-process address
 spaces, typed capability-checked handles, IPC, shared memory, fine-grained
@@ -132,7 +134,7 @@ and [testing](docs/development/testing.md) for the full set of targets.
 - [Networking](docs/architecture/networking.md)
 - [Linux x86_64 compatibility](docs/architecture/linux-x86_64-abi.md)
 - [ADRs](docs/adr/)
-- [Release notes](docs/releases/)
+- [GoOS 0.2.5 release notes](docs/releases/0.2.5.md)
 - [Development and testing](docs/development/)
 
 Current priorities and future milestones are tracked in the

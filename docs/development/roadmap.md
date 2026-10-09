@@ -565,7 +565,8 @@ Done after 0.2.4, under ADR 0190 and ADR 0191, as the
   replacements and exact resource counts, two guests on a private stream
   backend, and a boot without a NIC.
 
-DNS, TCP, UDP sockets, IPv6 and Linux network calls are not part of it.
+That initial milestone did not include DNS, TCP, generic UDP, IPv6 or Linux
+network calls.
 `test-network` runs in `test-all` and the release gate.
 
 ### Network tuning, loopback and name resolution
@@ -628,9 +629,17 @@ Done after generic UDP, under ADR 0196:
 - host parser, transport and service tests plus the expanded offline network
   gate.
 
-Still unsupported: IPv4 fragmentation, multicast and broadcast sends,
-DNS over TCP (a truncated answer fails), multicast DNS and `.local` names,
-IPv6 and AAAA records, DNSSEC, encrypted DNS, and the Linux socket calls.
+### GoOS 0.2.5: native IPv4 networking
+
+GoOS 0.2.5 ([release notes](../releases/0.2.5.md)) adds the native networking
+path from a userspace virtio-net driver through IPv4, UDP, TCP and DNS to the
+`fetch` HTTP/1.1 client. `resolved` retries truncated DNS answers over TCP;
+`dnsq` queries servers directly and can display AAAA records. The offline
+network gate checks the transports, resolver and HTTP client.
+
+IPv4 fragmentation, multicast DNS, DNSSEC, encrypted DNS, IPv6 transport and
+Linux socket calls remain unsupported. `dnsq` can display AAAA records, but
+GoOS cannot use them for IPv6 connections.
 
 ### Next: a Linux terminal
 
