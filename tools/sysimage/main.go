@@ -8,18 +8,21 @@
 //	system/commands    the command index
 //	system/motd        the message of the day
 //	system/release     the installation record
-//	apps/              applications, empty
+//	apps/              applications from LINUX_APPS_DIR, if set
 //	home/user/bin/     the user's commands, empty
 //	state/             service state, empty
 //
-// The tree is written from the build's own outputs and nothing else, so the
-// same build always yields the same tree.
+// The tree also includes files supplied through LINUX_EXTRA and
+// LINUX_APPS_DIR when those variables are set.
 package main
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"goos/tools/internal/commandset"
 	linuxfixtures "goos/userspace/linux"
@@ -34,6 +37,12 @@ func main() {
 		os.Exit(2)
 	}
 	output := os.Args[9]
+	appsSource := os.Getenv("LINUX_APPS_DIR")
+	if appsSource != "" {
+		if err := checkAppsSource(appsSource, output); err != nil {
+			fail(err)
+		}
+	}
 	if err := os.RemoveAll(output); err != nil {
 		fail(err)
 	}
@@ -65,9 +74,83 @@ func main() {
 			write(output, "system/linux/"+filepath.Base(extra), read(extra))
 		}
 	}
+	if appsSource != "" {
+		if err := copyApps(appsSource, filepath.Join(output, "apps")); err != nil {
+			fail(err)
+		}
+	}
 	write(output, "system/motd", []byte("Welcome to GoOS\n"))
 	record := release.Current()
 	write(output, "system/release", release.Encode(&record))
+}
+
+func checkAppsSource(source, output string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("LINUX_APPS_DIR: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("LINUX_APPS_DIR %q is not a directory", source)
+	}
+	source, err = filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	output, err = filepath.Abs(output)
+	if err != nil {
+		return err
+	}
+	for _, pair := range [][2]string{{source, output}, {output, source}} {
+		relative, err := filepath.Rel(pair[0], pair[1])
+		if err != nil {
+			return err
+		}
+		if relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("LINUX_APPS_DIR %q overlaps output %q", source, output)
+		}
+	}
+	return nil
+}
+
+func copyApps(source, target string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == source {
+			return nil
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		if entry.IsDir() {
+			return os.Mkdir(destination, 0o755)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("LINUX_APPS_DIR %q: not a regular file or directory", path)
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		inputErr := input.Close()
+		closeErr := output.Close()
+		if copyErr != nil {
+			return fmt.Errorf("copy %q: %w", path, copyErr)
+		}
+		if inputErr != nil {
+			return inputErr
+		}
+		return closeErr
+	})
 }
 
 func write(root, path string, data []byte) {

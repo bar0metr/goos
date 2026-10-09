@@ -88,6 +88,41 @@ CPU cores and one thread per core; it is unrelated to `make -j` build
 parallelism. `make run-debug` adds `-s -S`: QEMU waits for a debugger on TCP
 port 1234 before executing the first instruction.
 
+### Testing Linux applications from a host directory
+
+`LINUX_APPS_DIR` copies the contents of a host directory into `/apps` on a
+newly built FAT32 disk. Subdirectories and file bytes are preserved. The
+directory must be outside the generated system tree; symlinks and special
+files are rejected. Run a static x86_64 ELF by its full path, for example
+`/apps/tools/probe`. The Linux default `PATH` is `/system/linux`, so a program
+in `/apps` is not found by its bare name.
+
+Use a separate disposable disk for each build mode:
+
+```sh
+make test-disk TEST_DISK=build/linux-apps-clean.img LINUX_APPS_DIR="$PWD/linux-tools" DIAG=0
+make run DISK=build/linux-apps-clean.img DIAG=0
+
+make test-disk TEST_DISK=build/linux-apps-diag.img LINUX_APPS_DIR="$PWD/linux-tools" DIAG=1
+make run DISK=build/linux-apps-diag.img DIAG=1
+```
+
+`DIAG=0` is the normal build. `DIAG=1` enables the guest's `diag` command and
+kernel diagnostic counters and events; run `diag` in the guest and inspect
+the serial output for refused Linux syscalls, faults and VFS failures. It does
+not add a source debugger to the Linux program. For a paused QEMU GDB session,
+use `make run-debug DISK=build/linux-apps-diag.img DIAG=1` instead of the
+second `make run`; see [debugging.md](debugging.md#debugger).
+
+`test-disk` replaces only the named disposable disk. Run it again after
+changing files in `LINUX_APPS_DIR`; `make run` keeps an existing disk as it is.
+The default `build/goos-disk.img` is unaffected. `LINUX_EXTRA` has a different
+purpose: it takes one file path, or several paths separated by the host's
+`PATH` separator, and installs them under the read-only `/system/linux`.
+Both variables also work with [Proxmox runs](proxmox-lab.md#runs).
+The [application catalog](linux-application-compatibility.md) records tested
+static Linux programs and their limits.
+
 `make test-console-gui` performs the non-interactive counterpart: it keeps the
 VGA device but uses `-display none`, captures a QEMU monitor screendump, and
 checks a validation-only framebuffer marker pixel-for-pixel.

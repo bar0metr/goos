@@ -140,7 +140,7 @@ An installed volume also holds the system (ADR 0175):
 | Volume directory | Published at | Contents |
 | --- | --- | --- |
 | `system` | `/system` | `bin/`, `services/`, `linux/`, `commands`, `motd`, `release` |
-| `apps` | `/apps` | applications; empty as installed |
+| `apps` | `/apps` | applications; initially empty unless `LINUX_APPS_DIR` is set when the disk is built |
 | `home` | `/home` | user files, including `home/user/bin` for the user's commands |
 | `state` | `/state` | service state and configuration |
 

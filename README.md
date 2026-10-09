@@ -133,6 +133,7 @@ and [testing](docs/development/testing.md) for the full set of targets.
 - [SMP design](docs/kernel/smp.md)
 - [Networking](docs/architecture/networking.md)
 - [Linux x86_64 compatibility](docs/architecture/linux-x86_64-abi.md)
+- [Static Linux application compatibility](docs/development/linux-application-compatibility.md)
 - [ADRs](docs/adr/)
 - [GoOS 0.2.5 release notes](docs/releases/0.2.5.md)
 - [Development and testing](docs/development/)

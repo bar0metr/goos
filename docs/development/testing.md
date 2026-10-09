@@ -217,7 +217,9 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   non-interactive `sh` that runs programs, pipelines, redirections, a script,
   and a background job; it reports on further applets without requiring them.
   With `DIAG=1` it also prints the kernel's record of refused calls. The
-  repository carries no BusyBox.
+  repository carries no BusyBox. See the
+  [static application catalog](linux-application-compatibility.md) for the
+  tested operations and limits.
 - `make test-linux-bench` times four Linux calls beside native `bench` cases
   into `build/reports/linux-abi-<variant>.md`. `QEMU_ACCEL=kvm` on an x86_64
   host times the guest on the host CPU; the default is `tcg`.

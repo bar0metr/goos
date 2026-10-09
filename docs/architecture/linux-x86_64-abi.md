@@ -4,7 +4,8 @@ This document is the Linux compatibility contract of the current source: what
 a static Linux x86_64 program can call, what each call does, and where the
 answer differs from Linux. Release-specific contracts remain in
 `docs/releases`. [linux-compat.md](linux-compat.md) describes how the layer is
-built.
+built. The [application catalog](../development/linux-application-compatibility.md)
+records scoped results for external static binaries.
 
 ## Entry contract
 

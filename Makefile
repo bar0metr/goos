@@ -311,10 +311,10 @@ initramfs: userspace
 	@$(BUILD_ENV) go run ./tools/initramfs $(INITRAMFS_FLAGS) -force-recovery $(INITRAMFS_INPUTS) $(RECOVERY_INITRAMFS)
 
 # The installed system as a directory tree and as a volume image. Both are
-# made from this build's outputs alone, in name order, so the same build
-# gives the same bytes. LINUX_EXTRA adds Linux programs under /system/linux.
+# written in name order. LINUX_EXTRA adds files under /system/linux;
+# LINUX_APPS_DIR copies a host directory into /apps.
 system-tree: userspace
-	@$(BUILD_ENV) LINUX_EXTRA=$(LINUX_EXTRA) go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
@@ -738,6 +738,9 @@ test-linux-all: test-linux-elf test-linux-abi test-linux-boot
 # LINUX_EXTRA places further Linux programs under /system/linux of the
 # installed system; several paths are separated as in PATH.
 LINUX_EXTRA ?=
+# Copy this host directory's contents, including subdirectories, into /apps
+# on a newly installed disk. Existing DISK images are never updated by run.
+LINUX_APPS_DIR ?=
 # test-linux-shell is the same run: BusyBox sh starts programs, pipelines,
 # redirections, and a script.
 test-linux-shell: test-linux-busybox
@@ -873,13 +876,15 @@ help:
 	  '  system-image    build the ISO and an installed system volume image' \
 	  '  disk            install the system on a new DISK (default build/goos-disk.img); refuses an existing one' \
 	  '  disk-overwrite  install the system on DISK, replacing what is there' \
+	  '  LINUX_APPS_DIR=dir  copy the directory contents into /apps on a new disk' \
+	  '  LINUX_EXTRA=file   copy Linux executable file(s) into /system/linux' \
 	  '  test-system-boot boot an installed disk and the recovery cases in QEMU' \
 	  '  run-gui         boot with QEMU graphical display and serial on this terminal' \
 	  '  QEMU_DISPLAY=x  GUI backend for run-gui (default cocoa; gtk/sdl on other hosts)' \
 	  '  run-debug       boot paused with GDB server on tcp/1234' \
 	  '  test-console-gui validate framebuffer pixels and PS/2 input headlessly' \
 	  '  HZ=100|250|1000 timer rate for any build target (default 100)' \
-	  '  DIAG=1          diagnostic build: kernel trace and diag dump' \
+	  '  DIAG=0|1        normal build (default) or diagnostic build with diag dump' \
 	  '  OPT=2|1|s|z     TinyGo optimisation level (default 2, fastest; z smallest)' \
 	  '  MEMORY=512M     guest RAM for run and the QEMU tests, e.g. MEMORY=4G' \
 	  '  SMP=1           guest vCPUs for run/run-gui/run-debug, as cores in one socket' \

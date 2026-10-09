@@ -154,12 +154,30 @@ make test-hardware      # smoke, lscpu, and linux
 Each target rebuilds the lab inputs with `make pve-artifacts`: the ISO of the
 current configuration and a new installed disk at `build/pve/input`. The
 developer's `build/goos-disk.img` is never used. `HZ`, `DIAG`, `OPT`,
-`VALIDATION`, and `LINUX_EXTRA` apply as for any other target. Extra flags for
-`pvelab run` go in `PVE_FLAGS`:
+`VALIDATION`, `LINUX_EXTRA`, and `LINUX_APPS_DIR` apply as for any other target.
+Extra flags for `pvelab run` go in `PVE_FLAGS`:
 
 ```sh
 make test-pve-smoke PVE_FLAGS='--cpu x86-64-v2-AES --memory 2048 --require-clean'
 ```
+
+To test a directory of static Linux applications, use `pve-run`. It copies
+the host directory into `/apps` on a new lab disk and keeps the VM for manual
+use:
+
+```sh
+make pve-run LINUX_APPS_DIR="$PWD/linux-tools" DIAG=0
+make pve-run LINUX_APPS_DIR="$PWD/linux-tools" DIAG=1
+```
+
+The first command uses the normal build. The second enables `diag` in the
+guest and records serial diagnostics under `build/pve/runs/<run-id>/`. Run an
+application by its full path, such as `/apps/tools/probe`, then run `diag` to
+inspect refused syscalls and other kernel diagnostics. `pve-run` rebuilds the
+lab disk on each invocation, so changes in the host directory are included.
+It does not alter `build/goos-disk.img`. The copied directory and QEMU
+commands are described in
+[building.md](building.md#testing-linux-applications-from-a-host-directory).
 
 The tool can also be run directly:
 
