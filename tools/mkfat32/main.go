@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -84,7 +85,7 @@ func volume(device fileDevice) (sliceDevice, error) {
 }
 
 func main() {
-	size := flag.Uint64("size", 512, "volume size in MiB")
+	sizeFlag := flag.String("size", "512", "volume size in MiB, or auto for tree contents plus 5% free space")
 	sector := flag.Uint("sector-size", 512, "logical sector size in bytes (512, 1024, 2048 or 4096)")
 	perCluster := flag.Uint("cluster-sectors", 8, "sectors per cluster (power of two, 1-128)")
 	fats := flag.Uint("fats", 2, "number of FAT copies (1 or 2)")
@@ -108,7 +109,7 @@ func main() {
 	tree := flag.String("tree", "", "copy the host directory `DIR` onto the volume root, empty directories included, in name order")
 	fresh := flag.Bool("new", false, "refuse an IMAGE that already exists rather than reuse or reformat it")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-new] [-size MiB] [-table none|mbr|gpt] [-sector-size N] [-cluster-sectors N] [-fats N] [-tree DIR] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
+		fmt.Fprintln(os.Stderr, "usage: mkfat32 [-new] [-size MiB|auto] [-table none|mbr|gpt] [-sector-size N] [-cluster-sectors N] [-fats N] [-tree DIR] [-put HOSTFILE:PATH]... [-get PATH:HOSTFILE]... IMAGE")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -123,15 +124,35 @@ func main() {
 			fail(fmt.Errorf("%s already exists; refusing to overwrite it", path))
 		}
 	}
-	if !valid(path) {
-		create(path, *size, *scheme, *sector, *perCluster, *fats)
-	}
 	if *tree != "" {
 		entries, err := treeEntries(*tree)
 		if err != nil {
 			fail(err)
 		}
 		puts = append(entries, puts...)
+	}
+	newImage := !valid(path)
+	var size uint64
+	if *sizeFlag == "auto" {
+		if !newImage {
+			fail(fmt.Errorf("%s already exists; -size auto does not resize it", path))
+		}
+		var err error
+		size, err = autoSizeMiB(puts, *sector, *perCluster, *fats, *scheme)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Printf("disk size: %d MiB (at least 5%% free after installation)\n", size)
+	} else {
+		var err error
+		size, err = strconv.ParseUint(*sizeFlag, 10, 64)
+		if err != nil || size == 0 {
+			flag.Usage()
+			os.Exit(2)
+		}
+	}
+	if newImage {
+		create(path, size, *scheme, *sector, *perCluster, *fats)
 	}
 	if len(puts) != 0 || len(gets) != 0 {
 		transfer(path, puts, gets)

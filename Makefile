@@ -318,19 +318,19 @@ system-tree: userspace
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(SYSTEM_IMAGE)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(SYSTEM_IMAGE)
 	@printf 'built %s and %s (GoOS %s)\n' '$(ISO)' '$(SYSTEM_IMAGE)' '$(VERSION)'
 
 # disk installs the system on a new DISK and refuses one that exists;
 # disk-overwrite replaces it, data and all. run and run-gui make DISK only
 # when it is missing, and never change one that is there.
 disk: system-tree
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(DISK)
 	@printf 'installed GoOS %s on %s\n' '$(VERSION)' '$(DISK)'
 
 disk-overwrite: system-tree
 	@rm -f $(DISK)
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(DISK)
 	@printf 'installed GoOS %s on %s, replacing what was there\n' '$(VERSION)' '$(DISK)'
 
 run-disk:
@@ -340,7 +340,7 @@ run-disk:
 test-disk: system-tree
 	@test -n '$(TEST_DISK)' || { echo 'TEST_DISK is required' >&2; exit 2; }
 	@rm -f $(TEST_DISK)
-	@$(BUILD_ENV) go run ./tools/mkfat32 -new -tree $(SYSTEM_TREE) $(TEST_DISK)
+	@$(BUILD_ENV) go run ./tools/mkfat32 -new -size auto -tree $(SYSTEM_TREE) $(TEST_DISK)
 
 # tools/mkiso writes both images from their inputs alone, with fixed names,
 # serial number, and SOURCE_DATE_EPOCH timestamps, so a clean rebuild is
@@ -876,6 +876,7 @@ help:
 	  '  system-image    build the ISO and an installed system volume image' \
 	  '  disk            install the system on a new DISK (default build/goos-disk.img); refuses an existing one' \
 	  '  disk-overwrite  install the system on DISK, replacing what is there' \
+	  '  disk size       automatic from system tree, minimum 512 MiB plus 5% free data clusters' \
 	  '  LINUX_APPS_DIR=dir  copy the directory contents into /apps on a new disk' \
 	  '  LINUX_EXTRA=file   copy Linux executable file(s) into /system/linux' \
 	  '  test-system-boot boot an installed disk and the recovery cases in QEMU' \

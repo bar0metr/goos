@@ -75,6 +75,9 @@ exist and never changes when it does (ADR 0175). After a rebuild the disk
 still holds the system it was installed with; a disk of another release boots
 into recovery. `make disk` installs the system on a new `DISK` and refuses one
 that exists; `make disk-overwrite` replaces it, user data and all.
+The installer sizes a new FAT32 disk from the files in the system tree,
+including `LINUX_APPS_DIR`: at least 512 MiB, with at least 5% more data
+clusters than installation needs. `make run` does not resize an existing disk.
 `make system-image` builds the ISO and a volume image of the installed system,
 `$(OUT_DIR)/system.img`. `make run RECOVERY=1` boots an ISO whose archive asks
 PID 1 for recovery mode, to inspect or check the disk. `make run-gui` uses the same OVMF, ISO, persistent disk,
@@ -116,6 +119,9 @@ second `make run`; see [debugging.md](debugging.md#debugger).
 
 `test-disk` replaces only the named disposable disk. Run it again after
 changing files in `LINUX_APPS_DIR`; `make run` keeps an existing disk as it is.
+The same command handles directories larger than 512 MiB; `mkfat32 -size auto`
+prints the selected disk size before formatting. FAT32 still limits each
+individual file to less than 4 GiB.
 The default `build/goos-disk.img` is unaffected. `LINUX_EXTRA` has a different
 purpose: it takes one file path, or several paths separated by the host's
 `PATH` separator, and installs them under the read-only `/system/linux`.

@@ -29,8 +29,8 @@ pvelab run
 
 The REST API creates, configures, starts, and destroys the VM. SSH does the
 two things the API cannot do well: importing a raw disk image and connecting
-to the serial socket. The disk travels compressed because a fresh 512 MiB
-test disk is almost all zeros and compresses to a few MiB.
+to the serial socket. The disk travels compressed. With the default system
+tree it is 512 MiB and mostly zeroes; `LINUX_APPS_DIR` can make it larger.
 
 The VM matches local QEMU (`make run`) where Proxmox allows: q35, OVMF,
 virtio-blk, COM1. Proxmox's own `virtio0` is a transitional virtio-blk device
