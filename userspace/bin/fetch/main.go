@@ -12,6 +12,7 @@ import (
 	"goos/userspace/hostname"
 	"goos/userspace/network"
 	"goos/userspace/resolvapi"
+	"goos/userspace/runtime/arena"
 	"goos/userspace/shell"
 	"goos/userspace/startup"
 	"goos/userspace/tcpapi"
@@ -34,8 +35,11 @@ var pathBuffer [shell.MaxPath]byte
 var bulk utility.Bulk
 
 //export userspaceMain
-func userspaceMain() { utility.Run(manifest, run) }
-func main()          {}
+func userspaceMain() {
+	arena.InitPackages()
+	utility.Run(manifest, run)
+}
+func main() {}
 
 func run(data startup.Data) {
 	for i := 0; i < data.ArgCount(); i++ {
@@ -93,10 +97,11 @@ func (adapter) Connect(address network.IPv4, port uint16) (fetch.Connection, err
 		closeEndpoint(endpoint)
 		return nil, err
 	}
-	return socket{endpoint: endpoint}, nil
+	return &socket{endpoint: endpoint}, nil
 }
-func call() error {
-	if !utility.TCPCall(&tx, 35*clock.TicksPerSecond, &rx) {
+func call() error { return callWithin(35 * clock.TicksPerSecond) }
+func callWithin(timeout uint64) error {
+	if !utility.TCPCall(&tx, timeout, &rx) {
 		return errors.New("TCP timeout")
 	}
 	if rx.Result != tcpapi.ResultOK {
@@ -109,17 +114,33 @@ func closeEndpoint(endpoint uint32) {
 	utility.TCPCall(&tx, 35*clock.TicksPerSecond, &rx)
 }
 
-type socket struct{ endpoint uint32 }
+type socket struct {
+	endpoint uint32
+	deadline uint64
+	closed   bool
+}
 
-func (s socket) Close() { closeEndpoint(s.endpoint) }
-func (s socket) Write(p []byte) (int, error) {
+func (s *socket) Close() {
+	if !s.closed {
+		s.closed = true
+		closeEndpoint(s.endpoint)
+	}
+}
+func (s *socket) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	timeout, err := s.timeout()
+	if err != nil {
+		return 0, err
+	}
 	n := len(p)
 	if n > tcpapi.SlotSize {
 		n = tcpapi.SlotSize
 	}
 	copy(utility.TCPPayload(), p[:n])
 	tx = tcpapi.Request{Opcode: tcpapi.OpWrite, Endpoint: s.endpoint, Length: uint16(n)}
-	if err := call(); err != nil {
+	if err := callWithin(timeout); err != nil {
 		return 0, err
 	}
 	if rx.Length == 0 || int(rx.Length) > n {
@@ -127,13 +148,20 @@ func (s socket) Write(p []byte) (int, error) {
 	}
 	return int(rx.Length), nil
 }
-func (s socket) Read(p []byte) (int, error) {
+func (s *socket) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	timeout, err := s.timeout()
+	if err != nil {
+		return 0, err
+	}
 	n := len(p)
 	if n > tcpapi.SlotSize {
 		n = tcpapi.SlotSize
 	}
 	tx = tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: s.endpoint, Length: uint16(n)}
-	if !utility.TCPCall(&tx, 35*clock.TicksPerSecond, &rx) {
+	if !utility.TCPCall(&tx, timeout, &rx) {
 		return 0, errors.New("TCP timeout")
 	}
 	if rx.Result == tcpapi.ResultEOF {

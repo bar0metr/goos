@@ -5,6 +5,7 @@
 //	system/services/   the shell, configuration, log, and network services
 //	                   and the network driver
 //	system/linux/      the static Linux programs
+//	system/security/   the pinned certificate-authority bundle
 //	system/commands    the command index
 //	system/motd        the message of the day
 //	system/release     the installation record
@@ -17,6 +18,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -36,6 +41,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
+	caBundle, err := readCABundle(os.Getenv("SYSTEM_CA_BUNDLE"))
+	if err != nil {
+		fail(err)
+	}
 	output := os.Args[9]
 	appsSource := os.Getenv("LINUX_APPS_DIR")
 	if appsSource != "" {
@@ -46,7 +55,7 @@ func main() {
 	if err := os.RemoveAll(output); err != nil {
 		fail(err)
 	}
-	for _, directory := range []string{"system/bin", "system/services", "system/linux", "apps", "home/user/bin", "state"} {
+	for _, directory := range []string{"system/bin", "system/services", "system/linux", "system/security", "apps", "home/user/bin", "state"} {
 		if err := os.MkdirAll(filepath.Join(output, directory), 0o755); err != nil {
 			fail(err)
 		}
@@ -63,6 +72,7 @@ func main() {
 		write(output, "system/bin/"+name, read(filepath.Join(commandDirectory, name)))
 	}
 	write(output, "system/commands", index)
+	write(output, "system/security/ca-certificates.pem", caBundle)
 	for _, fixture := range linuxfixtures.All() {
 		write(output, "system/linux/"+fixture.Name, fixture.Image)
 	}
@@ -82,6 +92,53 @@ func main() {
 	write(output, "system/motd", []byte("Welcome to GoOS\n"))
 	record := release.Current()
 	write(output, "system/release", release.Encode(&record))
+}
+
+func readCABundle(path string) ([]byte, error) {
+	if path == "" {
+		return nil, errors.New("SYSTEM_CA_BUNDLE must select a certificate bundle")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("SYSTEM_CA_BUNDLE: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, (512<<10)+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(data) == 0 || len(data) > 512<<10 {
+		return nil, errors.New("SYSTEM_CA_BUNDLE size outside 1..512KiB")
+	}
+	canonical := make([]byte, 0, len(data))
+	remaining := data
+	count := 0
+	for len(remaining) != 0 {
+		if !bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----\n")) || count == 256 {
+			return nil, errors.New("SYSTEM_CA_BUNDLE must contain 1..256 canonical certificate blocks")
+		}
+		block, rest := pem.Decode(remaining)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 || len(block.Bytes) == 0 || len(block.Bytes) > 32<<10 {
+			return nil, errors.New("SYSTEM_CA_BUNDLE has invalid PEM or oversized DER")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("SYSTEM_CA_BUNDLE certificate %d: %w", count+1, err)
+		}
+		if !cert.BasicConstraintsValid || !cert.IsCA || cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageCertSign == 0 || len(cert.DNSNames) > 64 {
+			return nil, errors.New("SYSTEM_CA_BUNDLE certificate violates CA signing or DNS bounds")
+		}
+		canonical = append(canonical, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block.Bytes})...)
+		remaining = rest
+		count++
+	}
+	if count == 0 || !bytes.Equal(canonical, data) {
+		return nil, errors.New("SYSTEM_CA_BUNDLE is not canonical certificate-only PEM")
+	}
+	return data, nil
 }
 
 func checkAppsSource(source, output string) error {

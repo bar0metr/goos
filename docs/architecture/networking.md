@@ -1,10 +1,10 @@
 # Networking
 
-`/system/bin/fetch` is a native HTTP/1.1 client. It asks `resolved` for IPv4
-addresses through GRESOLV1, then uses GTCP1 to connect to `netd`. Its response
-parser lives in `userspace/httpwire`; URL and redirect policy live in
+`/system/bin/fetch` is a native HTTP/1.1 client for HTTP and HTTPS. It asks
+`resolved` for IPv4 addresses through GRESOLV1, then uses GTCP1 to connect to
+`netd`. Its response parser lives in `userspace/httpwire`; URL and redirect policy live in
 `userspace/fetch`. An optional VFS session receives file output. The network
-services do not interpret HTTP.
+services do not interpret HTTP, TLS or X.509.
 
 GoOS has two IPv4 interfaces: `lo`, which always exists and owns
 `127.0.0.0/8`, and `net0` on one legacy virtio-net function. The kernel
@@ -24,6 +24,51 @@ program PID 1 grants a UDP session (ADR 0195) or TCP session (ADR 0196). Not imp
 fragmentation and reassembly, multicast and broadcast sends, ICMP errors to
 UDP senders (no Port Unreachable for an unbound port), persistent DNS over TCP, multicast DNS, IPv6 transport, DNSSEC, and the
 Linux socket calls. `dnsq` shows AAAA records; nothing sends IPv6.
+
+## HTTPS
+
+`userspace/tlsclient` wraps a connected GTCP1 byte stream in the pinned Go
+1.25.5 software `crypto/tls` and `crypto/x509` implementations, compiled with
+TinyGo 0.42.0 (ADR 0198). It performs no DNS lookup or transport dial itself.
+`fetch` uses the same request, HTTP framing and VFS output code for both schemes;
+HTTPS defaults to port 443. HTTP redirects may target HTTP or HTTPS, while a
+followed HTTPS-to-HTTP redirect fails before opening the next connection.
+Cross-origin redirects strip Authorization, Proxy-Authorization, Cookie and a
+custom Host header.
+
+The client requires explicit roots from `/system/security/ca-certificates.pem`,
+kernel entropy through `cryptosys.Reader`, and REALTIME through `cryptosys.Now`.
+Missing or invalid roots, unavailable entropy or realtime, and a clock rollback
+during certificate validation fail closed. It uses TLS 1.3, X25519, the standard
+TLS 1.3 suites, and HTTP/1.1 ALPN. Numeric IPv4 names require IP SAN and omit SNI;
+DNS names supply SNI. Standard X.509 checks enforce signatures, chain and CA/path
+constraints, usages, validity and SAN identity, including unknown-critical-extension
+rejection and no Common Name fallback.
+
+The native compatibility tools prepare temporary toolchain roots without
+modifying installed Go, TinyGo or the kernel runtime. The overlay rejects QUIC
+and cancelable contexts without a scheduler, bridges randomness to the kernel,
+and disables the weak certificate cache. Native TLS consumers call
+`arena.InitPackages` after heap setup to run the pinned runtime's `initAll`;
+other native entry points remain unchanged. It limits peer lists to eight
+certificates before slice allocation, each DER to 32 KiB, DNS SAN entries to 64,
+and candidate chain depth to eight; the standard verifier retains its
+100-signature-check budget. The existing TLS 1.3 certificate-message buffer can
+still reach 256 KiB before the per-certificate checks. One monotonic 35-second
+deadline covers the whole handshake; later TCP operations each have a 35-second
+bound.
+
+Native primitive and explicit-root X.509 probes pass. The offline native
+`test-tls` gate passed 69 assertions, including authenticated TLS 1.3 with
+AES-128-GCM/SHA-256 (cipher 4865), verification failures, downgrade rejection and
+VFS output. A separate native run negotiated ChaCha20-Poly1305 (4867).
+Production-root loading used 1360864 allocated bytes with a 1363216-byte arena
+high-water mark for 121 roots; [release notes](../releases/0.2.6.md) record the
+other measurements. Full `test-all` and `release-check` have not run.
+Stock TinyGo TLS is
+a device-offload shim that reports handshake success without wire output and
+cannot secure this stream. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
+and [the evidence report](../development/crypto-feasibility.md).
 
 ## Processes
 

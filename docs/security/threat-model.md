@@ -283,7 +283,28 @@ Anything on the link can send the guest arbitrary frames.
 - A DHCP server on the link decides which DNS servers the guest asks, and a
   server it asks can answer with any address. A cached answer lasts at most
   `system.dns.cache.max-ttl-sec`.
-- There is no encryption, authentication or filtering on the link.
+- HTTPS adds server authentication and encrypted application data within the
+  native client process. A forged DNS or ARP answer can redirect or deny the
+  connection, but the selected verifier still requires the requested DNS/IP SAN
+  and a chain to explicit system roots. Plain HTTP and link protocols retain
+  their existing unauthenticated behavior.
+- A hostile TLS peer controls records and certificates. Native bounds limit
+  peer lists to eight, DER to 32 KiB, DNS SAN entries to 64 and candidate depth
+  to eight, with the standard 100-signature-attempt budget. One 35-second
+  monotonic deadline covers authentication; per-operation transport deadlines
+  bound later I/O. The standard TLS 1.3 certificate buffer can reach 256 KiB.
+- Trust depends on the pinned Mozilla-derived bundle, build inputs and initial
+  firmware REALTIME. Missing or malformed roots, invalid time and rollback
+  during validation fail closed. Public-CA compromise, a false initial firmware
+  clock and out-of-band Mozilla/Firefox trust constraints remain external trust
+  risks. The client does not fetch AIA intermediates or perform CRL, OCSP or CT
+  checks. Its CLI offers neither `-k` nor a mutable CA path. A followed HTTPS
+  downgrade fails before connecting; cross-origin redirects strip credentials,
+  cookies and a custom Host header. The native HTTPS gate passed 69 assertions,
+  including bad CertificateVerify, Finished and record-MAC failures. Certificate
+  and handshake rejection produced zero HTTP requests. Full `test-all` and
+  `release-check` have not run; [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
+  records the implementation and evidence.
 
 ### Malformed storage image
 

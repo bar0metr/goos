@@ -448,4 +448,15 @@ goos_exit:
     ud2
 .size goos_exit, .-goos_exit
 
+// TinyGo 0.42.0 amd64 defer-frame ABI: saved SP, then continuation PC.
+// The compiler restores callee-saved values at that continuation.
+.section .text.tinygo_longjmp,"ax",@progbits
+.global tinygo_longjmp
+.type tinygo_longjmp,@function
+tinygo_longjmp:
+    movq 0(%rdi), %rsp
+    movq 8(%rdi), %rax
+    jmpq *%rax
+.size tinygo_longjmp, .-tinygo_longjmp
+
 .section .note.GNU-stack,"",@progbits

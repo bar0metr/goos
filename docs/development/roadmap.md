@@ -641,9 +641,28 @@ IPv4 fragmentation, multicast DNS, DNSSEC, encrypted DNS, IPv6 transport and
 Linux socket calls remain unsupported. `dnsq` can display AAAA records, but
 GoOS cannot use them for IPv6 connections.
 
+### GoOS 0.2.6: native HTTPS
+
+The implementation uses pinned Go software TLS/X.509 inside native `fetch`,
+over its existing resolver, TCP and VFS grants (ADR 0198). Native primitives,
+explicit-root X.509 verification and the 69-assertion authenticated HTTPS gate
+pass. Production-root loading and fixture handshake/redirect measurements are
+recorded in the [release notes](../releases/0.2.6.md). The stream network
+regression also passed. Full `test-all` and `release-check` have not run, and
+normal production image size remains unmeasured.
+
+Production roots are an offline pinned Mozilla/curl PEM artifact under
+`/system/security/ca-certificates.pem`. The client uses kernel entropy,
+REALTIME validity and monotonic deadlines, refuses HTTPS downgrades, and
+bounds certificate lists, DER, SAN entries and chain search. `test-tls` is the
+selected offline interoperability gate for `test-all` and `release-check`.
+IPv6, encrypted DNS, revocation checks, HTTP/2, QUIC and a narrower VFS root-read
+authority remain separate work. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
+and [native evidence](crypto-feasibility.md).
+
 ### Next: a Linux terminal
 
-The next release is to give Linux programs a terminal: a terminal descriptor,
+A later release will give Linux programs a terminal: a terminal descriptor,
 `isatty`, `TIOCGWINSZ`, a termios subset, sessions and process groups, a
 foreground group, terminal-generated `SIGINT`, `SIGTSTP`, and `SIGCONT`, and an
 interactive BusyBox `sh`. Signals aimed at one thread, rather than at its

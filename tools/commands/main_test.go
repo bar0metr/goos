@@ -130,3 +130,24 @@ var manifest = commands.Manifest{Usage: "ping IPv4", Summary: "echo", MinArgs: 1
 		t.Fatalf("net %+v ping %+v", net, ping)
 	}
 }
+
+func TestBuildExcludesValidationCommands(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"fetch", "cryptoprobe", "trustprobe"} {
+		writeCommand(t, root, name, `package main
+var manifest = commands.Manifest{Usage: "`+name+`", Summary: "test"}`)
+	}
+	for _, validation := range []bool{false, true} {
+		index, err := buildSelected(root, validation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"fetch", "cryptoprobe", "trustprobe"} {
+			_, found := commands.Lookup(index, []byte(name))
+			want := validation || name == "fetch"
+			if found != want {
+				t.Fatalf("validation=%v name=%s found=%v want=%v", validation, name, found, want)
+			}
+		}
+	}
+}

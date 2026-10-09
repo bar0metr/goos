@@ -240,6 +240,27 @@ or from other processes:
   lookup. Endpoint, backlog, stream and reorder storage are fixed, and stale
   endpoint IDs carry the wrong generation (ADR 0196).
 
+- Native HTTPS adds TLS records, handshake messages and X.509 DER parsing to
+  the `fetch` process, not to the kernel, driver, `netd` or `resolved`. The pinned
+  Go software implementations run over the command's private GTCP1 stream.
+  Explicit roots come through its VFS grant from the read-only system namespace.
+  The root loader rejects malformed or empty data and bounds the bundle to
+  512 KiB, 256 roots and 32 KiB DER per root; it never loads host OS roots or
+  trust data from mutable application/user/state paths.
+- TLS peer certificate lists stop at eight entries before allocating their
+  slices, each DER is at most 32 KiB, and candidate chain depth stops at eight.
+  The cache adapter rejects more than 64 DNS SAN entries after bounded DER
+  parsing. The standard verifier allows at most 100 signature
+  attempts. TLS 1.3 still permits a 256 KiB certificate-message buffer before
+  these checks. Authentication uses kernel entropy, explicit REALTIME and a
+  whole-handshake monotonic deadline. Missing platform inputs and clock rollback
+  fail closed. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md) and
+  [native evidence](../development/crypto-feasibility.md). The native HTTPS
+  gate passed 69 assertions, including certificate, CertificateVerify, Finished
+  and record-MAC rejection. Certificate and handshake failures reached no HTTP
+  request. Production-root loading allocated 1360864 bytes; the arena high-water
+  mark was 1363216 bytes. Full release gates have not run.
+
 ### Resource limits
 
 Global fixed arrays bound the system; launch profiles bound each process's

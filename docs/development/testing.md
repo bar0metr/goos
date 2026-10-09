@@ -4,6 +4,22 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 
 ## Targets
 
+- `make crypto-check` builds the isolated native crypto feasibility probes.
+- `make test-crypto` runs the successfully built probes in one disposable guest,
+  including after an independent compile failure. `CRYPTO_COMPAT=1` selects the
+  native runtime compatibility overlay. These development targets currently
+  return failure for TinyGo's device-offloaded TLS shim; they do not constitute
+  an HTTPS release gate. See [native crypto feasibility](crypto-feasibility.md).
+- `make test-tls` is the offline native HTTPS gate selected for `test-all` and
+  `release-check`. It builds with `VALIDATION=1` and the explicit fixture CA,
+  then runs `tests/boot/tls.sh` against host standard-Go TLS peers. It passed
+  69 native assertions and measured production-root loading. The gate covers
+  default port 443, numeric IPv4 SAN, GET,
+  HEAD, relative redirects, downgrade rejection and VFS file output, plus
+  wrong identity, unknown roots, invalid validity periods/signatures, critical
+  extensions, plaintext, malformed TLS, bad CertificateVerify/Finished and
+  corrupted record MACs. Peers fragment I/O to 137 bytes;
+  fixture keys are public test data and never production trust.
 - `make test-unit` runs all host-side Go tests.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
@@ -291,6 +307,46 @@ shows up as slower persistent writes (ADR 0096).
 Use `make test` during the normal edit loop. Use `make test-all` before delivery
 of changes that affect the kernel, native userspace, startup protocols, storage,
 shell composition, or boot behavior.
+
+## TLS evidence and local trust checks
+
+Host `userspace/tlsclient` tests cover authenticated transfers and certificate,
+record and handshake failures. `tools/tlspeer` adds `tamper` (encrypted application
+record corruption) and `badverify` (CertificateVerify signature corruption)
+fixtures. `tools/tlsfault` changes one Finished byte in a temporary host standard
+library copy before the real TLS stack encrypts its record; it does not replace
+the server stack. Host results do not establish native interoperability.
+The native crypto gate confirms the selected primitives and explicit-root
+X.509 verification; stock TinyGo TLS still fails its no-wire shim check.
+The native HTTPS gate has now passed 69 assertions with authenticated transfers,
+certificate/handshake/record failures and production-root loading. The earlier
+ClientHello probe alone proved only wire output. The stream network regression
+also passed (`make test-network NETWORK_SCENARIOS=stream`). Full `test-all` and
+`release-check` have not run.
+[The feasibility report](crypto-feasibility.md) keeps measured native results;
+[ADR 0198](../adr/0198-native-tls-and-system-trust.md) describes the chosen path.
+
+The HTTPS boot gate takes `ISO OVMF_CODE SYSTEM_TREE`. It requires the fixture
+root in the supplied tree, creates a fresh report directory under
+`/Volumes/Data/tmp/`, and uses one disposable guest with ephemeral host peers.
+It checks shell exit status and X.509/record diagnostics, verifies zero HTTP
+requests for rejected peers and the downgrade sink, and captures validation
+resource markers. Validation-only `trustprobe --production` measures the pinned
+full bundle from a fixed auxiliary file; native fetch retains its single system
+CA path. The guest must power off within 30 seconds. Neither this gate
+nor ordinary builds download trust data or contact an Internet server.
+
+Before packaging production roots, check the committed artifact without writes:
+
+```sh
+go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem
+```
+
+Host generator and system-image tests reject modified or malformed roots,
+metadata mismatches and missing explicit inputs, prove deterministic generation,
+and check that failed input validation leaves an existing output tree intact.
+Validation root overrides require both `VALIDATION=1` and an explicit
+`VALIDATION_CA_BUNDLE`; production builds use the pinned bundle.
 
 ## Proxmox hardware lab
 

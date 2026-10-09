@@ -4,6 +4,16 @@ The `fetch` manifest asks for `GrantResolve`, `GrantTCP` and `GrantVFS`.
 PID 1 provides private sessions; `fetch` cannot read raw packets or alter
 resolver and network settings. `-o` and `-O` use the command's VFS grant.
 Response headers have fixed size limits and cannot change these grants.
+HTTPS uses these same grants. TLS and X.509 run inside the client, while `netd`
+and `resolved` remain transport and name services. The client reads only
+`/system/security/ca-certificates.pem` as trust input through its VFS session;
+there is no trust-store service, host-root fallback, insecure CLI option or
+user-selected CA path. The read-only system namespace protects installed roots.
+A narrower root-read grant for future network-only clients is future work;
+the current VFS grant also supports `-o` and `-O` output (ADR 0198).
+Cross-origin redirects strip Authorization, Proxy-Authorization, Cookie and a
+custom Host header. Validation-only `trustprobe --production` reads a fixed
+auxiliary production bundle for measurements; `fetch` has no alternate CA path.
 
 The data structures and transfer rules are described in
 [docs/architecture/capabilities.md](../architecture/capabilities.md). This

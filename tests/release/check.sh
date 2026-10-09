@@ -57,6 +57,26 @@ if grep -R -n 'goos_debug_write' userspace kernel >/dev/null 2>&1; then
 	complain 'the retired DebugWrite stub is still present'
 fi
 
+if ! go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem; then
+	complain 'production trust artifact does not match the pinned Mozilla source'
+fi
+system=$variant/system
+if [ ! -d "$system" ]; then
+	complain 'normal installed system tree is missing'
+else
+	for probe in cryptoprobe trustprobe; do
+		[ ! -e "$system/system/bin/$probe" ] || complain "validation command $probe is in the normal system tree"
+	done
+	cmp -s security/ca-certificates.pem "$system/system/security/ca-certificates.pem" || complain 'normal system trust differs from the pinned production bundle'
+	for key in tools/tlsfixture/testdata/*key-testonly.pem; do
+		pattern=$(awk 'length($0) > 40 && $0 !~ /-----/ { print; exit }' "$key")
+		[ -n "$pattern" ] || { complain "test key scan has no pattern for $key"; continue; }
+		if grep -R -F -q -- "$pattern" "$system"; then
+			complain 'test-only private key material is present in the normal system tree'
+		fi
+	done
+fi
+
 stray=$(git ls-files --others --exclude-standard; git ls-files --others --ignored --exclude-standard | grep -v '^build/' || true)
 # Finder's .DS_Store files are host metadata. The root .env is the documented,
 # ignored secret store for the optional Proxmox lab. Neither is build output.

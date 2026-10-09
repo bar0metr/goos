@@ -1,0 +1,47 @@
+//go:build uefi
+
+// Native userspace backend for the pinned TinyGo runtime. tools/cryptocompat
+// installs this file in a separate toolchain root for native TLS consumers.
+package runtime
+
+import _ "unsafe"
+
+const zeroSizeAllocPtr uintptr = 16
+
+var heapStart, heapEnd, stackTop uintptr
+
+//go:linkname initNativePackages goos_runtime_init_packages
+func initNativePackages() { initAll() }
+
+//go:linkname goosNativeTicks goos_runtime_ticks
+func goosNativeTicks() int64
+
+//go:linkname goosNativeNow goos_runtime_now
+func goosNativeNow() (sec int64, nsec int32, mono int64)
+
+//go:linkname goosNativePutchar goos_runtime_putchar
+func goosNativePutchar(byte)
+
+//go:linkname goosNativeExit goos_runtime_exit
+func goosNativeExit(int)
+
+func ticks() timeUnit                         { return timeUnit(goosNativeTicks()) }
+func ticksToNanoseconds(value timeUnit) int64 { return int64(value) }
+func nanosecondsToTicks(value int64) timeUnit { return timeUnit(value) }
+func putchar(value byte)                      { goosNativePutchar(value) }
+func exit(code int)                           { goosNativeExit(code) }
+func abort()                                  { goosNativeExit(1) }
+
+// The native entry initializes the GoOS arena; no firmware heap exists here.
+func preinit()            {}
+func growHeap() bool      { return false }
+func buffered() int       { return 0 }
+func getchar() byte       { return 0 }
+func waitForEvents()      { goosNativeExit(1) }
+func sleepTicks(timeUnit) { goosNativeExit(1) }
+
+//go:linkname procPin sync/atomic.runtime_procPin
+func procPin() {}
+
+//go:linkname procUnpin sync/atomic.runtime_procUnpin
+func procUnpin() {}

@@ -21,7 +21,8 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-COMMANDS := $(sort $(notdir $(wildcard userspace/bin/*)))
+VALIDATION_COMMANDS := cryptoprobe trustprobe
+COMMANDS = $(filter-out $(if $(filter 0,$(VALIDATION)),$(VALIDATION_COMMANDS)),$(sort $(notdir $(wildcard userspace/bin/*))))
 COMMAND_DIR = $(OUT_DIR)/userspace/bin
 COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
 COMMAND_IMAGES = $(addprefix $(COMMAND_DIR)/,$(COMMANDS))
@@ -118,6 +119,14 @@ VALIDATION ?= 0
 ifeq ($(filter $(VALIDATION),0 1),)
 $(error VALIDATION must be 0 or 1)
 endif
+VALIDATION_CA_BUNDLE ?=
+ifneq ($(strip $(VALIDATION_CA_BUNDLE)),)
+ifneq ($(VALIDATION),1)
+$(error VALIDATION_CA_BUNDLE requires VALIDATION=1)
+endif
+endif
+override SYSTEM_CA_SOURCE := $(if $(strip $(VALIDATION_CA_BUNDLE)),$(VALIDATION_CA_BUNDLE),security/ca-certificates.pem)
+
 BUILD_TAGS := goos_hz$(HZ)
 ifeq ($(DIAG),1)
 BUILD_TAGS += goos_diag
@@ -203,9 +212,14 @@ $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
 .SECONDEXPANSION:
-$(COMMAND_ELFS): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe)),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
+
+TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tinygo/runtime/*.txt) tools/build-tls.sh
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(COMMAND_ELF_DIR)
+	$(BUILD_ENV) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
 
 $(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@mkdir -p $(COMMAND_DIR)
@@ -216,7 +230,8 @@ $(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/m
 # file, only the listing, and the index must drop it.
 $(COMMAND_INDEX): userspace/bin $(wildcard userspace/bin/*/*.go) tools/commands/main.go userspace/commands/commands.go
 	@mkdir -p $(dir $@)
-	$(BUILD_ENV) go run ./tools/commands userspace/bin $@
+	@$(if $(filter 0,$(VALIDATION)),rm -f $(addprefix $(COMMAND_DIR)/,$(VALIDATION_COMMANDS)),true)
+	$(BUILD_ENV) GOOS_VALIDATION=$(VALIDATION) go run ./tools/commands userspace/bin $@
 
 $(BLOCK_ELF): $(call go_deps,./userspace/cmd/block) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(OUT_DIR)/userspace
@@ -314,7 +329,8 @@ initramfs: userspace
 # written in name order. LINUX_EXTRA adds files under /system/linux;
 # LINUX_APPS_DIR copies a host directory into /apps.
 system-tree: userspace
-	@$(BUILD_ENV) LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
@@ -395,6 +411,7 @@ test-all:
 	$(MAKE) test-smp
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
+	$(MAKE) test-tls
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -416,6 +433,7 @@ release-check:
 	$(MAKE) test-smp
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
+	$(MAKE) test-tls
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
 	$(MAKE) test-stress STRESS_RUNS=2
@@ -438,7 +456,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -499,6 +517,30 @@ test-system-boot:
 test-network:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/network.sh $(ISO) $(OVMF_CODE)
+
+# Crypto feasibility reports stay outside the checkout. A failed dependency
+# does not prevent native execution of the independently built probes.
+CRYPTO_WORK ?=
+CRYPTO_COMPAT ?= 0
+.PHONY: crypto-check test-crypto
+crypto-check:
+	@work='$(CRYPTO_WORK)'; [ -n "$$work" ] || work=$$(mktemp -d /Volumes/Data/tmp/goos-crypto.XXXXXX); \
+	$(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) sh tools/crypto-check.sh "$$work"
+
+test-crypto:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@work='$(CRYPTO_WORK)'; [ -n "$$work" ] || work=$$(mktemp -d /Volumes/Data/tmp/goos-crypto.XXXXXX); \
+	status=0; $(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) sh tools/crypto-check.sh "$$work" || status=1; \
+	MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/crypto.sh "$$work" $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system || status=1; \
+	exit $$status
+
+.PHONY: trust-store test-tls
+trust-store:
+	@$(BUILD_ENV) go run ./tools/truststore security/ca-source.pem security/ca-certificates.pem
+
+test-tls:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/tls.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1

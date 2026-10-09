@@ -273,6 +273,14 @@ func adjustment(text, mnemonic string, operands []string) step {
 // reached by a jump only - the deeper one is kept, which can only overstate a
 // frame. Jump-table targets are analysed at the depth of the indirect jump.
 func analyzeFunction(fn function) (int64, []string) {
+	// TinyGo's continuation restores an ancestor frame's saved SP without
+	// allocating or accessing memory through the restored stack pointer.
+	if fn.name == "tinygo_longjmp" && len(fn.instructions) == 3 &&
+		fn.instructions[0].text == "MOVQ 0(DI), SP" &&
+		fn.instructions[1].text == "MOVQ 0x8(DI), AX" &&
+		fn.instructions[2].text == "JMP AX" {
+		return 0, nil
+	}
 	count := len(fn.instructions)
 	steps := make([]step, count)
 	index := make(map[uint64]int, count)

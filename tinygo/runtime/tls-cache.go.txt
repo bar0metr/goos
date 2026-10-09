@@ -1,0 +1,25 @@
+// GoOS does not retain certificate objects across native request arenas.
+package tls
+
+import (
+	"crypto/x509"
+	"errors"
+)
+
+type weakCertCache struct{}
+
+func (*weakCertCache) newCert(der []byte) (*x509.Certificate, error) {
+	if len(der) == 0 || len(der) > 32768 {
+		return nil, errors.New("tls: certificate DER exceeds native bounds")
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	if len(cert.DNSNames) > 64 {
+		return nil, errors.New("tls: certificate DNS SAN count exceeds native bounds")
+	}
+	return cert, nil
+}
+
+var globalCertCache weakCertCache
