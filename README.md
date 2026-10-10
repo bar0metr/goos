@@ -135,7 +135,7 @@ and [testing](docs/development/testing.md) for the full set of targets.
 - [Linux x86_64 compatibility](docs/architecture/linux-x86_64-abi.md)
 - [Static Linux application compatibility](docs/development/linux-application-compatibility.md)
 - [ADRs](docs/adr/)
-- [GoOS 0.2.5 release notes](docs/releases/0.2.5.md)
+- [GoOS release notes](docs/releases/)
 - [Development and testing](docs/development/)
 
 Current priorities and future milestones are tracked in the
