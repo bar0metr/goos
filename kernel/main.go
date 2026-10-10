@@ -609,7 +609,7 @@ func bootContinue() {
 	systemImageHandle, systemImageInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(imageObject, capability.Read|capability.Execute|capability.Transfer))
 	// Reading the log is its own capability, so PID 1 can give it to the log
 	// service and the shell without giving them the console's input.
-	logDeviceHandle, logDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LogObject, capability.Read|capability.Transfer))
+	logDeviceHandle, logDeviceInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LogObject, capability.Read|capability.Write|capability.Transfer))
 	// PID 1 creates sealed executable headers and binds them to VFS sources
 	// (ADR 0121). The right stays with PID 1.
 	loaderHandle, loaderInstalled := initProcess.Handles().Insert(handle.TypeDevice, capability.New(device.LoaderObject, capability.Write))

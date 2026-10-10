@@ -64,7 +64,7 @@ func TestNextRejectsMalformedLines(t *testing.T) {
 		"ls\t1\t0\t1\tls\tlist\t",          // no newline
 		"ls\t1\t0\t1\tls\tlist\n",          // missing field
 		"ls\t1\t0\t1\tls\tlist\t\textra\n", // extra field
-		"ls\t1024\t0\t1\tls\tlist\t\n",     // grant out of range
+		"ls\t2048\t0\t1\tls\tlist\t\n",     // grant out of range
 		"ls\t1\t2\t1\tls\tlist\t\n",        // max below min
 		"ls\t1\t-1\t1\tls\tlist\t\n",       // negative
 		"ls\t1\t0\t1000\tls\tlist\t\n",     // over bound
@@ -89,7 +89,7 @@ func TestLookupDoesNotAllocate(t *testing.T) {
 }
 
 func TestNetworkGrantBits(t *testing.T) {
-	if GrantNetworkPing != 0x10 || GrantNetworkAdmin != 0x20 || GrantUDP != 0x100 || GrantTCP != 0x200 || IndexFormat != 5 {
+	if GrantNetworkPing != 0x10 || GrantNetworkAdmin != 0x20 || GrantUDP != 0x100 || GrantTCP != 0x200 || GrantRemote != 0x400 || IndexFormat != 6 {
 		t.Fatalf("grant bits %#x %#x %#x %#x format %d", GrantNetworkPing, GrantNetworkAdmin, GrantUDP, GrantTCP, IndexFormat)
 	}
 	index, ok := Append(nil, "ping", Manifest{Usage: "ping IPv4", Summary: "x", MinArgs: 1, MaxArgs: 5, Grants: GrantNetworkPing})
@@ -105,7 +105,7 @@ func TestNetworkGrantBits(t *testing.T) {
 	if ping.Grants != GrantNetworkPing || net.Grants != GrantNetworkAdmin {
 		t.Fatalf("grants %#x %#x", ping.Grants, net.Grants)
 	}
-	if _, _, ok := Next([]byte("x\t1024\t0\t0\tx\tx\t\n"), 0); ok {
+	if _, _, ok := Next([]byte("x\t2048\t0\t0\tx\tx\t\n"), 0); ok {
 		t.Fatal("unknown grant bit decoded")
 	}
 }

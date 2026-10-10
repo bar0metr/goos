@@ -20,6 +20,29 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   extensions, plaintext, malformed TLS, bad CertificateVerify/Finished and
   corrupted record MACs. Peers fragment I/O to 137 bytes;
   fixture keys are public test data and never production trust.
+- `make test-remote` builds a validation ISO and installed tree, then runs
+  `tests/boot/remote.sh` with two sequential boots of one disposable disk.
+  Install OpenSSH, Python 3 and QEMU on the host. The harness creates test
+  Ed25519 login keys outside the checkout and installs only the authorized
+  public key into the guest. It checks disabled startup, minimal SSH algorithm
+  negotiation, public-key login and wrong-key/password refusal, separate stdout
+  and stderr, Ctrl-C/Ctrl-D, raw viewer geometry at 80x24 and at 100x30 on the
+  next launch after window-change, four concurrent sessions and fifth-login
+  refusal, two pending native handshakes with an authenticated shell responsive,
+  disconnect reaping, lower-limit reload with existing sessions preserved,
+  reload rollback, port replacement, persisted configuration and host identity,
+  and refusal to read the server private key through the login VFS scope.
+  A host Go probe uses the pinned `golang.org/x/crypto/ssh` dependency to check
+  explicit refusal of exec, SFTP, environment, agent/X11 forwarding, TCP
+  forwarding and a second session channel. The harness pins `known_hosts` to
+  the fingerprint from the serial admin status; it keeps strict host-key checks
+  enabled across both boots. Logs and `checks.tsv` remain under
+  `/Volumes/Data/tmp/goos-remote-test.*`. A missing reply or observation fails
+  the test. This target does not test live resize of a running raw application
+  or replace the host protocol parser and policy tests.
+  Both SSH services build through `tools/build-ssh.sh`, which copies the pinned
+  Go/TinyGo crypto sources and `golang.org/x/crypto` into private trees and
+  records source hashes. See [the SSH overlay](../../tools/sshcompat/README.md).
 - `make test-unit` runs all host-side Go tests.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and

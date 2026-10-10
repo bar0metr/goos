@@ -132,6 +132,7 @@ and [testing](docs/development/testing.md) for the full set of targets.
 - [Roadmap](docs/development/roadmap.md)
 - [SMP design](docs/kernel/smp.md)
 - [Networking](docs/architecture/networking.md)
+- [Native SSH access](docs/development/remote-access.md)
 - [Linux x86_64 compatibility](docs/architecture/linux-x86_64-abi.md)
 - [Static Linux application compatibility](docs/development/linux-application-compatibility.md)
 - [ADRs](docs/adr/)

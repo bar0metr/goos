@@ -7,8 +7,8 @@ import (
 
 const (
 	ControlProtocolID = uint64(0x4756465343544c31)
-	// Version 7 adds publishing and withdrawing the installed system.
-	ControlVersion      = uint16(7)
+	// Version 8 adds protected scopes and explicit session authority.
+	ControlVersion      = uint16(8)
 	operationAddSession = byte(1)
 	operationSync       = byte(2)
 	// operationSetFilesystem hands the service the client end of a channel to
@@ -23,8 +23,9 @@ const (
 	// operationPublish mounts the installed system and applications of the
 	// persistent volume at /system and /apps; operationWithdraw removes them
 	// again (ADR 0175).
-	operationPublish  = byte(6)
-	operationWithdraw = byte(7)
+	operationPublish      = byte(6)
+	operationWithdraw     = byte(7)
+	operationInstallScope = byte(8)
 )
 
 // SessionNotice hands a client of a restarted VFS the client end of a new

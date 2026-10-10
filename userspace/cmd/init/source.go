@@ -31,7 +31,7 @@ type serviceSource struct {
 }
 
 // serviceSources has room for every service that runs from the volume.
-var serviceSources [4]serviceSource
+var serviceSources [8]serviceSource
 
 // readyExecutable is a source read ahead for the launch about to happen. It
 // is taken by openExecutable for the path it was read from, and closed by
@@ -172,7 +172,7 @@ func earliestFill() (uint64, bool) {
 			earliest, pending = fill.deadline, true
 		}
 	}
-	return earliest, pending
+	return remoteFillDeadline(earliest, pending)
 }
 
 // expireServiceFills gives up on service and child reads the VFS has not

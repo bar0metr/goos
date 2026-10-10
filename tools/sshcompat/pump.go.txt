@@ -1,0 +1,281 @@
+// Copyright 2026 GoOS contributors. BSD-style license as upstream ssh.
+package ssh
+
+import (
+ "bytes"
+ "encoding/binary"
+ "errors"
+ "io"
+ "net"
+)
+
+const PumpMaxPacket = 32 * 1024
+const pumpWindow = 64 * 1024
+const pumpData = 16 * 1024
+var ErrPumpState = errors.New("ssh: invalid pump state")
+var ErrPumpPacket = errors.New("ssh: packet exceeds pump bounds")
+
+// PumpMemory scopes allocations into a reusable packet arena and alternating
+// key generations. EnterKey is nested within the caller's packet scope.
+// Previous keys remain live until both directions have switched at NEWKEYS.
+type PumpMemory interface { EnterKey(newGeneration bool); LeaveKey() }
+type PumpConfig struct {
+ Server *ServerConfig
+ Memory PumpMemory
+}
+type PumpEventKind uint8
+const (
+ PumpNeedInput PumpEventKind = iota
+ PumpProgress
+ PumpData
+ PumpPTY
+ PumpShell
+ PumpResize
+ PumpEOF
+ PumpClose
+ PumpRekey
+)
+type PumpEvent struct { Kind PumpEventKind; Data []byte; Term [64]byte; TermLen uint8; Rows, Columns uint32 }
+
+// Pump is a single-task server. Handshake may block under caller deadlines;
+// established Feed/Poll never read the underlying connection. Data is borrowed
+// until the next Poll. Write returns zero when flow control or KEX stops output.
+type Pump struct {
+ conn net.Conn
+ config *ServerConfig
+ memory PumpMemory
+ transport *transport
+ handshake *handshakeTransport
+ user string
+ ready, closed, channel, pty, shell, eof, sentClose, closePending bool
+ peer, peerWindow, peerPacket, localWindow uint32
+ frame []byte
+ control []byte
+ controlUsed int
+ pendingWindow uint32
+ used int
+ magics *handshakeMagics
+ clientInit *kexInitMsg
+ phase uint8 // 0 normal, 1 awaiting peer KEXINIT, 2 guessed packet, 3 ECDH, 4 NEWKEYS
+ readBytes, writeBytes uint64
+ readPackets, writePackets uint32
+ session [32]byte
+}
+func NewPump(conn net.Conn,cfg PumpConfig)(*Pump,error){
+ if conn==nil || cfg.Server==nil || cfg.Server.Rand==nil || len(cfg.Server.hostKeys)!=1 || cfg.Server.hostKeys[0].PublicKey().Type()!=KeyAlgoED25519 {return nil,ErrPumpState}
+ c:=*cfg.Server
+ c.Config.SetDefaults()
+ c.KeyExchanges=[]string{KeyExchangeCurve25519}
+ c.Ciphers=[]string{CipherAES128GCM}
+ c.MACs=[]string{HMACSHA256}
+ c.PublicKeyAuthAlgorithms=[]string{KeyAlgoED25519}
+ if c.MaxAuthTries<1 || c.MaxAuthTries>10 || c.NoClientAuth || c.PublicKeyCallback==nil || c.PasswordCallback!=nil || c.KeyboardInteractiveCallback!=nil || c.GSSAPIWithMICConfig!=nil {return nil,ErrPumpState}
+ p:=&Pump{conn:conn,config:&c,memory:cfg.Memory,frame:make([]byte,PumpMaxPacket+20),control:make([]byte,PumpMaxPacket)}
+ return p,nil
+}
+// The initial upstream auth loop runs synchronously, without a mux or read loop.
+type pumpAuthTransport struct { p *Pump }
+func (a pumpAuthTransport) readPacket()([]byte,error){
+ for { b,err:=a.p.transport.readPacket();if err!=nil{return nil,err};switch b[0]{case msgIgnore,msgDebug:continue;case msgKexInit:return nil,errors.New("ssh: rekey during initial authentication is not supported");case msgUserAuthRequest:user,_,ok:=parseString(b[1:]);if !ok || len(user)==0 || len(user)>64{return nil,ErrPumpPacket}};return b,nil }
+}
+func (a pumpAuthTransport) writePacket(b []byte)error{return a.p.transport.writePacket(b)}
+func (a pumpAuthTransport) Close()error{return a.p.conn.Close()}
+func (a pumpAuthTransport) getSessionID()[]byte{return a.p.handshake.sessionID}
+func (a pumpAuthTransport) getAlgorithms()NegotiatedAlgorithms{return *a.p.handshake.algorithms}
+func (a pumpAuthTransport) waitSession()error{return nil}
+func (p *Pump) Handshake()error{
+ if p.ready || p.closed{return ErrPumpState}
+ serverVersion:=[]byte("SSH-2.0-GoOS")
+ clientVersion,err:=exchangeVersions(p.conn,serverVersion);if err!=nil{return p.fail(err)}
+ if !bytes.HasPrefix(clientVersion,[]byte("SSH-2.0-")){return p.fail(ErrPumpState)}
+ for _,ch:=range clientVersion{if ch<32 || ch>126{return p.fail(ErrPumpState)}}
+ p.transport=newTransport(p.conn,p.config.Rand,false)
+ p.transport.reader.goosBudget=true
+ p.handshake=&handshakeTransport{conn:p.transport,config:&p.config.Config,clientVersion:clientVersion,serverVersion:serverVersion,hostKeys:p.config.hostKeys,publicKeyAuthAlgorithms:p.config.PublicKeyAuthAlgorithms}
+ if err=p.handshake.sendKexInit();err!=nil{return p.fail(err)}
+ packet,err:=p.transport.readPacket();if err!=nil{return p.fail(err)}
+ if err=goosCheckKEX(packet);err!=nil{return p.fail(err)}
+ // The bounded initial exchange uses the unchanged upstream synchronous core.
+ if err=p.handshake.enterKeyExchange(packet);err!=nil{return p.fail(err)}
+ p.handshake.sentInitMsg=nil;p.handshake.sentInitPacket=nil
+ auth:=pumpAuthTransport{p}
+ packet,err=auth.readPacket();if err!=nil{return p.fail(err)}
+ var service serviceRequestMsg
+ if err=Unmarshal(packet,&service);err!=nil || service.Service!=serviceUserAuth{return p.fail(ErrPumpState)}
+ if err=auth.writePacket(Marshal(&serviceAcceptMsg{Service:serviceUserAuth}));err!=nil{return p.fail(err)}
+ c:=&connection{transport:auth,sshConn:sshConn{conn:p.conn,clientVersion:clientVersion,serverVersion:serverVersion,sessionID:p.handshake.sessionID}}
+ if _,err=c.serverAuthenticate(p.config);err!=nil{return p.fail(err)}
+ p.user=c.user
+ copy(p.session[:],p.handshake.sessionID);p.handshake.sessionID=p.session[:]
+ // Preserve any ciphertext read ahead during authentication before detaching.
+ n:=p.transport.bufReader.Buffered()
+ if n>len(p.frame){return p.fail(ErrPumpPacket)}
+ if n>0 {b,err:=p.transport.bufReader.Peek(n);if err!=nil{return p.fail(err)};copy(p.frame,b);p.used=n}
+ p.transport.goosBorrow=true;p.transport.reader.goosBorrow=true;p.transport.reader.goosBudget=false
+ p.ready=true
+ return nil
+}
+func (p *Pump) User()string{return p.user}
+func (p *Pump) KeyExchangePending()bool{return p.phase!=0}
+func (p *Pump) Feed(input []byte)(int,error){
+ if !p.ready || p.closed{return 0,ErrPumpState}
+ n:=copy(p.frame[p.used:],input);p.used+=n
+ if _,err:=p.frameSize();err!=nil{return n,p.fail(err)}
+ return n,nil
+}
+func (p *Pump) frameSize()(int,error){
+ if p.used<4{return 4,nil}
+ n:=binary.BigEndian.Uint32(p.frame[:4])
+ if n<16 || n>PumpMaxPacket || n%16!=0{return 0,ErrPumpPacket}
+ return int(n)+4+16,nil // Fixed AES128-GCM clear length and authentication tag.
+}
+func (p *Pump) NeedInput()int{n,err:=p.frameSize();if err!=nil{return 0};if n<=p.used{return 0};return n-p.used}
+func (p *Pump) enterKey(new bool){if p.memory!=nil{p.memory.EnterKey(new)}}
+func (p *Pump) leaveKey(){if p.memory!=nil{p.memory.LeaveKey()}}
+func (p *Pump) startKey(peer []byte)error{
+ p.enterKey(true);defer p.leaveKey()
+ if err:=p.handshake.sendKexInit();err!=nil{return err}
+ if peer==nil {p.phase=1;return nil}
+ return p.negotiate(peer)
+}
+func goosCheckKEX(packet []byte) error {
+ if len(packet)<17 || packet[0]!=msgKexInit{return ErrPumpPacket}
+ rest:=packet[17:]
+ for i:=0;i<10;i++ {list,tail,ok:=parseString(rest);if !ok || len(list)>4096{return ErrPumpPacket};if len(list)>0 && bytes.Count(list,[]byte{','})>=32{return ErrPumpPacket};rest=tail}
+ if len(rest)!=5{return ErrPumpPacket};return nil
+}
+func (p *Pump) negotiate(peer []byte)error{
+ if err:=goosCheckKEX(peer);err!=nil{return err}
+ // Keep the KEX transcript stable beyond the borrowed decrypt buffer.
+ stable:=append([]byte(nil),peer...)
+ magics,drop,err:=p.handshake.goosNegotiate(stable);if err!=nil{return err}
+ ci:=&kexInitMsg{};if err=Unmarshal(stable,ci);err!=nil{return err}
+ if len(ci.KexAlgos)>32 || len(ci.ServerHostKeyAlgos)>32{return ErrPumpPacket}
+ p.magics=magics;p.clientInit=ci;p.phase=3;if drop{p.phase=2};return nil
+}
+func (p *Pump) Poll()(PumpEvent,error){
+ if !p.ready || p.closed{return PumpEvent{},ErrPumpState}
+ size,err:=p.frameSize();if err!=nil{return PumpEvent{},p.fail(err)}
+ if p.used<size{return PumpEvent{Kind:PumpNeedInput},nil}
+ // The decoder sees exactly one complete frame. No partial cipher state is
+ // ever retried and bufio cannot read ciphertext belonging to the next frame.
+ p.transport.bufReader.Reset(bytes.NewReader(p.frame[:size]))
+ var packet []byte
+ if p.phase==3 {
+  p.enterKey(false)
+  err=p.handshake.goosExchange(p.magics,p.clientInit)
+  p.leaveKey()
+  if err==nil{p.phase=4}
+ }else {packet,err=p.transport.readPacket()}
+ copy(p.frame,p.frame[size:p.used]);p.used-=size
+ if err!=nil{return PumpEvent{},p.fail(err)}
+ if packet==nil{return PumpEvent{Kind:PumpProgress},nil}
+ p.readBytes+=uint64(len(packet));p.readPackets++
+ if p.phase==2 {p.phase=3;return PumpEvent{Kind:PumpProgress},nil}
+ if p.phase==4 {
+  if packet[0]!=msgNewKeys{return PumpEvent{},p.fail(ErrPumpState)}
+  p.phase=0;p.magics=nil;p.clientInit=nil;p.handshake.sentInitMsg=nil;p.handshake.sentInitPacket=nil
+  p.readBytes=0;p.writeBytes=0;p.readPackets=0;p.writePackets=0
+  if err=p.flushControl();err!=nil{return PumpEvent{},p.fail(err)}
+  if p.closePending{p.closePending=false;p.closed=true;return PumpEvent{Kind:PumpClose},nil}
+  return PumpEvent{Kind:PumpRekey},nil
+ }
+ if packet[0]==msgKexInit {
+  if p.phase==0{err=p.startKey(packet)}else if p.phase==1{p.enterKey(false);err=p.negotiate(packet);p.leaveKey()}else{err=ErrPumpState}
+  if err!=nil{return PumpEvent{},p.fail(err)};return PumpEvent{Kind:PumpProgress},nil
+ }
+ if packet[0]==msgNewKeys{return PumpEvent{},p.fail(ErrPumpState)}
+ event,err:=p.application(packet)
+ if err!=nil{return PumpEvent{},p.fail(err)}
+ if p.phase==0 && (p.readBytes>=p.threshold() || p.writeBytes>=p.threshold() || p.readPackets>=packetRekeyThreshold || p.writePackets>=packetRekeyThreshold){if err=p.startKey(nil);err!=nil{return PumpEvent{},p.fail(err)}}
+ return event,nil
+}
+func (p *Pump) threshold()uint64{if p.config.RekeyThreshold>0{return p.config.RekeyThreshold};return 1<<30}
+func (p *Pump) send(b []byte)error{
+ if len(b)>PumpMaxPacket-32{return ErrPumpPacket}
+ if p.phase!=0 {
+  if len(b)+4>len(p.control)-p.controlUsed{return ErrPumpPacket}
+  binary.BigEndian.PutUint32(p.control[p.controlUsed:],uint32(len(b)));p.controlUsed+=4
+  p.controlUsed+=copy(p.control[p.controlUsed:],b);return nil
+ }
+ if err:=p.transport.writePacket(b);err!=nil{return err};p.writeBytes+=uint64(len(b));p.writePackets++;return nil
+}
+func (p *Pump) flushControl()error {
+ for offset:=0;offset<p.controlUsed;{n:=int(binary.BigEndian.Uint32(p.control[offset:]));offset+=4;if err:=p.send(p.control[offset:offset+n]);err!=nil{return err};offset+=n}
+ p.controlUsed=0;p.localWindow+=p.pendingWindow;p.pendingWindow=0;return nil
+}
+func (p *Pump) application(packet []byte)(PumpEvent,error){
+ progress:=PumpEvent{Kind:PumpProgress}
+ if p.sentClose && packet[0]!=msgChannelClose{return progress,nil}
+ switch packet[0] {
+ case msgIgnore,msgDebug:return progress,nil
+ case msgPing:
+  var m pingMsg;if err:=Unmarshal(packet,&m);err!=nil{return progress,err}
+  if len(m.Data)>pumpData{return progress,ErrPumpPacket}
+  return progress,p.send(Marshal(&pongMsg{Data:m.Data}))
+ case msgGlobalRequest:
+  var m globalRequestMsg;if err:=Unmarshal(packet,&m);err!=nil{return progress,err}
+  if m.WantReply{return progress,p.send([]byte{msgRequestFailure})};return progress,nil
+ case msgChannelOpen:
+  var m channelOpenMsg;if err:=Unmarshal(packet,&m);err!=nil{return progress,err}
+  if p.channel || m.ChanType!="session" || len(m.TypeSpecificData)!=0 || m.MaxPacketSize<1024 || m.MaxPacketSize>1<<24 || m.PeersWindow>1<<24 {
+   return progress,p.send(Marshal(&channelOpenFailureMsg{PeersID:m.PeersID,Reason:Prohibited,Message:"only one session channel"}))
+  }
+  p.channel=true;p.peer=m.PeersID;p.peerWindow=m.PeersWindow;p.peerPacket=m.MaxPacketSize;p.localWindow=pumpWindow
+  return progress,p.send(Marshal(&channelOpenConfirmMsg{PeersID:p.peer,MyID:0,MyWindow:pumpWindow,MaxPacketSize:pumpData}))
+ case msgChannelRequest:
+  var m channelRequestMsg;if err:=Unmarshal(packet,&m);err!=nil{return progress,err};if !p.channel || m.PeersID!=0{return progress,ErrPumpState}
+  accepted:=false;event:=progress
+  switch m.Request {
+  case "pty-req":
+   if !p.pty && !p.shell {term,rest,ok:=parseString(m.RequestSpecificData);if ok && len(term)>0 && len(term)<=64 && len(rest)>=16 {
+    cols:=binary.BigEndian.Uint32(rest);rows:=binary.BigEndian.Uint32(rest[4:]);modes,tail,ok:=parseString(rest[16:]);
+    if ok && len(tail)==0 && len(modes)<=1024 && pumpTerm(term) && pumpGeometry(rows,cols) && pumpModes(modes){p.pty=true;accepted=true;event=PumpEvent{Kind:PumpPTY,TermLen:uint8(len(term)),Rows:rows,Columns:cols};copy(event.Term[:],term)}
+   }}
+  case "shell":if p.pty && !p.shell && len(m.RequestSpecificData)==0 {p.shell=true;accepted=true;event.Kind=PumpShell}
+  case "window-change":if p.pty && len(m.RequestSpecificData)==16 {cols:=binary.BigEndian.Uint32(m.RequestSpecificData);rows:=binary.BigEndian.Uint32(m.RequestSpecificData[4:]);if pumpGeometry(rows,cols){accepted=true;event=PumpEvent{Kind:PumpResize,Rows:rows,Columns:cols}}}
+  }
+  if m.WantReply{kind:=byte(msgChannelFailure);if accepted{kind=msgChannelSuccess};b:=[5]byte{kind};binary.BigEndian.PutUint32(b[1:],p.peer);if err:=p.send(b[:]);err!=nil{return progress,err}}
+  return event,nil
+ case msgChannelData:
+  if len(packet)<9 || binary.BigEndian.Uint32(packet[1:5])!=0 || !p.shell || p.eof{return progress,ErrPumpState}
+  n:=binary.BigEndian.Uint32(packet[5:9]);if n>pumpData || n>p.localWindow || int(n)!=len(packet)-9{return progress,ErrPumpPacket}
+  p.localWindow-=n
+  // Data is consumed by the caller before the next Poll. Replenish only the
+  // bounded amount delivered, never queue unbounded plaintext internally.
+  if n>0 {b:=[9]byte{msgChannelWindowAdjust};binary.BigEndian.PutUint32(b[1:5],p.peer);binary.BigEndian.PutUint32(b[5:],n);if err:=p.send(b[:]);err!=nil{return progress,err};if p.phase==0{p.localWindow+=n}else{p.pendingWindow+=n}}
+  return PumpEvent{Kind:PumpData,Data:packet[9:]},nil
+ case msgChannelWindowAdjust:
+  if len(packet)!=9 || binary.BigEndian.Uint32(packet[1:5])!=0 || !p.channel{return progress,ErrPumpState};n:=binary.BigEndian.Uint32(packet[5:]);if n>1<<24 || p.peerWindow>(1<<24)-n{return progress,ErrPumpPacket};p.peerWindow+=n;return progress,nil
+ case msgChannelEOF:
+  if len(packet)!=5 || binary.BigEndian.Uint32(packet[1:])!=0 || !p.channel || p.eof{return progress,ErrPumpState};p.eof=true;return PumpEvent{Kind:PumpEOF},nil
+ case msgChannelClose:
+  if len(packet)!=5 || binary.BigEndian.Uint32(packet[1:])!=0 || !p.channel{return progress,ErrPumpState}
+  if !p.sentClose{b:=[5]byte{msgChannelClose};binary.BigEndian.PutUint32(b[1:],p.peer);if err:=p.send(b[:]);err!=nil{return progress,err};p.sentClose=true}
+  if p.phase!=0{p.closePending=true;return progress,nil}
+  p.closed=true;return PumpEvent{Kind:PumpClose},nil
+ default:return progress,ErrPumpState
+ }
+}
+func pumpGeometry(rows,cols uint32)bool{return rows>=1 && rows<=1000 && cols>=1 && cols<=1000}
+func pumpTerm(term []byte)bool{for _,b:=range term{if b<32 || b>126{return false}};return true}
+func pumpModes(b []byte)bool{for len(b)>0{op:=b[0];b=b[1:];if op==0{return len(b)==0};if op>=160{return true};if len(b)<4{return false};b=b[4:]};return false}
+func (p *Pump) Write(data []byte)(int,error){
+ if p.closePending{return 0,nil}
+ if !p.ready || p.closed || p.sentClose || !p.shell{return 0,ErrPumpState};if p.phase!=0 || p.peerWindow==0{return 0,nil}
+ n:=len(data);if n>pumpData{n=pumpData};if uint32(n)>p.peerPacket{n=int(p.peerPacket)};if uint32(n)>p.peerWindow{n=int(p.peerWindow)};if n==0{return 0,nil}
+ b:=make([]byte,9+n);b[0]=msgChannelData;binary.BigEndian.PutUint32(b[1:5],p.peer);binary.BigEndian.PutUint32(b[5:9],uint32(n));copy(b[9:],data[:n])
+ if err:=p.send(b);err!=nil{return 0,p.fail(err)};p.peerWindow-=uint32(n)
+ if p.writeBytes>=p.threshold() || p.writePackets>=packetRekeyThreshold {if err:=p.startKey(nil);err!=nil{return n,p.fail(err)}}
+ return n,nil
+}
+func (p *Pump) Exit(status uint32)error{
+ if !p.channel || p.closed || p.sentClose || p.phase!=0{return ErrPumpState}
+ value:=[4]byte{};binary.BigEndian.PutUint32(value[:],status)
+ if err:=p.send(Marshal(&channelRequestMsg{PeersID:p.peer,Request:"exit-status",WantReply:false,RequestSpecificData:value[:]}));err!=nil{return p.fail(err)}
+ for _,kind:=range []byte{msgChannelEOF,msgChannelClose}{b:=[5]byte{kind};binary.BigEndian.PutUint32(b[1:],p.peer);if err:=p.send(b[:]);err!=nil{return p.fail(err)}}
+ p.sentClose=true;return nil
+}
+func (p *Pump) Close()error{p.closed=true;return p.conn.Close()}
+func (p *Pump) fail(err error)error{p.closed=true;_ = p.conn.Close();return err}
+var _ io.ReadWriteCloser = (net.Conn)(nil)

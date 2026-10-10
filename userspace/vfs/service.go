@@ -329,7 +329,20 @@ func (service *Service) WriteFile(owner vfs.Owner, file vfs.Handle, data []byte)
 }
 
 // CloseSession closes the files a session left open when it went.
-func (service *Service) CloseSession(owner vfs.Owner) int { return service.namespace.CloseOwner(owner) }
+func (service *Service) CloseSession(owner vfs.Owner) int {
+	closed := service.namespace.CloseOwner(owner)
+	service.namespace.ForgetAuthority(owner)
+	return closed
+}
+
+// InstallScope and SetAuthority are PID 1 controls, not session operations.
+func (service *Service) InstallScope(slot uint8, path []byte, subtree bool, denied vfs.Rights) vfs.Status {
+	return service.namespace.InstallScope(slot, path, subtree, denied)
+}
+
+func (service *Service) SetAuthority(owner vfs.Owner, authority vfs.Authority) vfs.Status {
+	return service.namespace.SetAuthority(owner, authority)
+}
 
 // Dispatch serves one request from the session owner. File handles are the
 // session's own: another session's handle is not found.
@@ -339,6 +352,10 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	// request, so a client can say what is wrong (ADR 0110).
 	if tooLong(request.Path) || tooLong(request.Target) {
 		reply.Status = vfs.StatusNameTooLong
+		return reply
+	}
+	if status := service.authorize(owner, request); status != vfs.StatusOK {
+		reply.Status = status
 		return reply
 	}
 	switch request.Operation {
@@ -361,7 +378,7 @@ func (service *Service) Dispatch(owner vfs.Owner, request vfs.Request) vfs.Reply
 	case vfs.OperationCreate, vfs.OperationMkdir:
 		reply.Status = service.namespace.Create(request.Path, request.Operation == vfs.OperationMkdir)
 	case vfs.OperationReadDir:
-		entry, cursor, status := service.namespace.ReadDir(request.Path, int(request.Offset))
+		entry, cursor, status := service.namespace.ReadDirFor(owner, request.Path, int(request.Offset))
 		reply.Status, reply.Cursor = status, uint32(cursor)
 		if status == vfs.StatusOK {
 			reply.Kind, reply.Size, reply.Name = entry.Stat.Kind, entry.Stat.Size, entry.Name[:entry.Size]
@@ -437,4 +454,45 @@ func tooLong(path []byte) bool {
 		}
 	}
 	return false
+}
+
+func (service *Service) authorize(owner vfs.Owner, request vfs.Request) vfs.Status {
+	rights := vfs.Rights(0)
+	moving := false
+	switch request.Operation {
+	case vfs.OperationOpen:
+		rights = request.Rights
+	case vfs.OperationReadDir, vfs.OperationStat:
+		if len(request.Path) == 0 {
+			return vfs.StatusOK
+		}
+		rights = vfs.Read
+	case vfs.OperationMkdir:
+		return service.namespace.AuthorizeDirectory(owner, request.Path, false)
+	case vfs.OperationCreate, vfs.OperationTruncate:
+		rights = vfs.Write
+	case vfs.OperationSetMetadata:
+		if len(request.Path) == 0 {
+			return vfs.StatusOK
+		}
+		rights = vfs.Write
+	case vfs.OperationUnlink, vfs.OperationRename, vfs.OperationReplace:
+		rights, moving = vfs.Write, true
+	default:
+		return vfs.StatusOK
+	}
+	if status := service.namespace.AuthorizePath(owner, request.Path, rights, moving); status != vfs.StatusOK {
+		return status
+	}
+	if request.Operation == vfs.OperationRename || request.Operation == vfs.OperationReplace {
+		stat, status := service.namespace.Stat(request.Path)
+		if status != vfs.StatusOK {
+			return status
+		}
+		if stat.Kind == ramfs.KindDirectory {
+			return service.namespace.AuthorizeDirectory(owner, request.Target, true)
+		}
+		return service.namespace.AuthorizePath(owner, request.Target, vfs.Write, true)
+	}
+	return vfs.StatusOK
 }

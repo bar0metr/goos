@@ -5,6 +5,7 @@ GoOS is licensed under the GNU General Public License, version 3 only.
 The SPDX identifier is GPL-3.0-only. See LICENSE for the complete terms.
 
 Third-party components retain their own copyright and license notices. See
-docs/third-party-font.md for the embedded Spleen font subset.
+docs/third-party-font.md for the embedded Spleen font subset and
+docs/third-party-ssh.md for the native SSH backend's BSD license notice.
 The static Linux programs under userspace/linux/prebuilt, except hello, link
 musl; see userspace/linux/README.md and userspace/linux/COPYRIGHT.musl.

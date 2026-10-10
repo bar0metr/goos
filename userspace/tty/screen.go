@@ -22,7 +22,8 @@ type Screen struct {
 	rows        int
 	column      int
 	startColumn int
-	buffer      [MaxPrompt + MaxLine + 16]byte
+	// At width one a hidden line can occupy MaxPrompt+MaxLine rows.
+	buffer [10*(MaxPrompt+MaxLine) + 64]byte
 }
 
 const DefaultColumns = 80
@@ -37,10 +38,10 @@ func (screen *Screen) SetColumns(columns int) {
 
 // SetGeometry supplies the visible terminal dimensions.
 func (screen *Screen) SetGeometry(columns, rows int) {
-	if columns < 16 {
+	if columns < 1 {
 		columns = DefaultColumns
 	}
-	if rows < 2 {
+	if rows < 1 {
 		rows = DefaultRows
 	}
 	screen.columns = columns
@@ -48,14 +49,14 @@ func (screen *Screen) SetGeometry(columns, rows int) {
 }
 
 func (screen *Screen) width() int {
-	if screen.columns < 16 {
+	if screen.columns < 1 {
 		return DefaultColumns
 	}
 	return screen.columns
 }
 
 func (screen *Screen) height() int {
-	if screen.rows < 2 {
+	if screen.rows < 1 {
 		return DefaultRows
 	}
 	return screen.rows

@@ -1,0 +1,155 @@
+package ssh
+
+import (
+ "bytes"
+ "bufio"
+ "crypto/ed25519"
+ "crypto/rand"
+ "encoding/binary"
+ "io"
+ "net"
+ "testing"
+ "time"
+)
+func testPump(t *testing.T,limits ...int)(*Pump,*Client,net.Conn){
+ maxFailures:=5;if len(limits)>0{maxFailures=limits[0]}
+ t.Helper();_,host,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)};pub,user,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
+ signer,_:=NewSignerFromKey(host);us,_:=NewSignerFromKey(user)
+ config:=&ServerConfig{Config:Config{Rand:rand.Reader},MaxAuthTries:maxFailures,PublicKeyCallback:func(c ConnMetadata,key PublicKey)(*Permissions,error){if c.User()!="user" || !bytes.Equal(key.Marshal(),mustPublic(t,pub).Marshal()){return nil,ErrNoAuth};return nil,nil}}
+ config.AddHostKey(signer)
+ server,client,err:=netPipe();if err!=nil{t.Fatal(err)};_ = server.SetDeadline(time.Now().Add(5*time.Second));_ = client.SetDeadline(time.Now().Add(5*time.Second))
+ p,err:=NewPump(server,PumpConfig{Server:config});if err!=nil{t.Fatal(err)}
+ done:=make(chan error,1);go func(){done<-p.Handshake()}()
+ c,ch,req,err:=NewClientConn(client,"pipe",&ClientConfig{User:"user",Auth:[]AuthMethod{PublicKeys(us)},HostKeyCallback:FixedHostKey(signer.PublicKey()),Config:Config{Ciphers:[]string{CipherAES128GCM},KeyExchanges:[]string{KeyExchangeCurve25519}}})
+ if err!=nil{t.Fatal(err)};if err=<-done;err!=nil{t.Fatal(err)}
+ t.Cleanup(func(){p.Close();c.Close()})
+ return p,NewClient(c,ch,req),server
+}
+func mustPublic(t *testing.T,key ed25519.PublicKey)PublicKey{k,err:=NewPublicKey(key);if err!=nil{t.Fatal(err)};return k}
+func drive(t *testing.T,p *Pump,conn net.Conn)PumpEvent{
+ t.Helper();for i:=0;i<20;i++{e,err:=p.Poll();if err!=nil{t.Fatal(err)};if e.Kind!=PumpNeedInput && e.Kind!=PumpProgress{return e};if e.Kind==PumpNeedInput{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};if _,err=p.Feed(b[:n]);err!=nil{t.Fatal(err)}}};t.Fatal("no event");return PumpEvent{}
+}
+func TestGoOSPumpOneFailedAuthBudgetAllowsValidKey(t *testing.T){p,_,_:=testPump(t,1);if p.User()!="user"{t.Fatal("valid key rejected with one failed-auth allowance")}}
+func TestGoOSPumpOneFailedAuthBudgetRejectsBadKey(t *testing.T){
+ _,host,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)};_,user,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)};hs,_:=NewSignerFromKey(host);us,_:=NewSignerFromKey(user);queries:=0
+ config:=&ServerConfig{Config:Config{Rand:rand.Reader},MaxAuthTries:1,PublicKeyCallback:func(ConnMetadata,PublicKey)(*Permissions,error){queries++;return nil,ErrNoAuth}};config.AddHostKey(hs)
+ server,client,err:=netPipe();if err!=nil{t.Fatal(err)};defer server.Close();defer client.Close();server.SetDeadline(time.Now().Add(5*time.Second));client.SetDeadline(time.Now().Add(5*time.Second));p,err:=NewPump(server,PumpConfig{Server:config});if err!=nil{t.Fatal(err)};done:=make(chan error,1);go func(){done<-p.Handshake()}()
+ _,_,_,err=NewClientConn(client,"pipe",&ClientConfig{User:"user",Auth:[]AuthMethod{PublicKeys(us)},HostKeyCallback:FixedHostKey(hs.PublicKey())});client.Close();if err==nil{t.Fatal("bad key authenticated")};if err=<-done;err==nil || queries!=1{t.Fatalf("failed-auth budget: queries=%d error=%v",queries,err)}
+}
+func TestGoOSPumpPrintableTERM(t *testing.T){
+ if !pumpTerm([]byte(" x term~ ")){t.Fatal("printable spaces rejected")}
+ for _,term:=range [][]byte{[]byte("x\tterm"),[]byte("x\nterm"),[]byte{31},[]byte{127}}{if pumpTerm(term){t.Fatalf("non-printable TERM accepted: %q",term)}}
+ p,c,conn:=testPump(t);done:=make(chan error,1);go func(){session,err:=c.NewSession();if err==nil{err=session.RequestPty("x term",24,80,TerminalModes{})};done<-err}();event:=drive(t,p,conn);if err:=<-done;err!=nil{t.Fatal(err)};if event.Kind!=PumpPTY || string(event.Term[:event.TermLen])!="x term"{t.Fatalf("TERM with spaces: %+v",event)}
+}
+func TestGoOSPumpInteractive(t *testing.T){
+ p,c,conn:=testPump(t);result:=make(chan error,1)
+ go func(){s,err:=c.NewSession();if err==nil{err=s.RequestPty("xterm",24,80,TerminalModes{ECHO:1})};if err==nil{err=s.Shell()};result<-err}()
+ e:=drive(t,p,conn);if e.Kind!=PumpPTY || e.Rows!=24 || e.Columns!=80{t.Fatalf("pty: %+v",e)}
+ e=drive(t,p,conn);if e.Kind!=PumpShell{t.Fatalf("shell: %+v",e)};if err:=<-result;err!=nil{t.Fatal(err)}
+ if p.user!="user"{t.Fatal(p.user)}
+ // Poll on no input must return immediately, even with a partial frame.
+ if _,err:=p.Feed([]byte{0});err!=nil{t.Fatal(err)}
+ start:=time.Now();e,err:=p.Poll();if err!=nil || e.Kind!=PumpNeedInput || time.Since(start)>time.Second{t.Fatalf("partial frame: %+v %v",e,err)}
+}
+func TestGoOSPumpRejectOversizedFrame(t *testing.T){p,_,_:=testPump(t);header:=[4]byte{};binary.BigEndian.PutUint32(header[:],PumpMaxPacket+16);if _,err:=p.Feed(header[:]);err==nil{t.Fatal("oversized packet accepted")}}
+func TestGoOSPumpDataAndExit(t *testing.T){
+ p,c,conn:=testPump(t);done:=make(chan error,1);var session *Session;var stdin io.WriteCloser;var stdout io.Reader
+ go func(){var err error;session,err=c.NewSession();if err==nil{stdin,err=session.StdinPipe()};if err==nil{stdout,err=session.StdoutPipe()};if err==nil{err=session.RequestPty("xterm",24,80,TerminalModes{})};if err==nil{err=session.Shell()};done<-err}()
+ if drive(t,p,conn).Kind!=PumpPTY || drive(t,p,conn).Kind!=PumpShell{t.Fatal("session events")};if err:=<-done;err!=nil{t.Fatal(err)}
+ go func(){_,err:=stdin.Write([]byte{3,'h','i'});done<-err}()
+ e:=drive(t,p,conn);if e.Kind!=PumpData || !bytes.Equal(e.Data,[]byte{3,'h','i'}){t.Fatalf("data: %+v",e)};if err:=<-done;err!=nil{t.Fatal(err)}
+ if n,err:=p.Write([]byte("hello"));n!=5 || err!=nil{t.Fatalf("Write = %d %v",n,err)}
+ out:=make([]byte,5);if _,err:=io.ReadFull(stdout,out);err!=nil || string(out)!="hello"{t.Fatalf("output %q %v",out,err)}
+ go func(){done<-session.Wait()}()
+ if err:=p.Exit(7);err!=nil{t.Fatal(err)}
+ if _,err:=p.Write([]byte("after-close"));err==nil{t.Fatal("write after outgoing close accepted")}
+ if err:=p.Exit(7);err==nil{t.Fatal("duplicate exit accepted")}
+ err:=<-done;status,ok:=err.(*ExitError);if !ok || status.ExitStatus()!=7{t.Fatalf("exit status: %v",err)}
+}
+func TestGoOSPumpRekey(t *testing.T){
+ p,c,conn:=testPump(t)
+ h:=c.Conn.(*connection).transport.(*handshakeTransport)
+ for i:=0;i<12;i++ {
+  h.requestKeyExchange()
+  e:=drive(t,p,conn);if e.Kind!=PumpRekey{t.Fatalf("rekey %d: %+v",i,e)}
+  if p.phase!=0 || p.handshake.sentInitMsg!=nil || p.magics!=nil{t.Fatal("rekey transcript retained")}
+  if p.handshake.algorithms.KeyExchange!=KeyExchangeCurve25519 || p.handshake.algorithms.Read.Cipher!=CipherAES128GCM{t.Fatal("mandatory algorithms changed")}
+ }
+}
+func TestGoOSPumpServerRekey(t *testing.T){
+ p,_,conn:=testPump(t)
+ if err:=p.startKey(nil);err!=nil{t.Fatal(err)}
+ if e:=drive(t,p,conn);e.Kind!=PumpRekey{t.Fatalf("server rekey: %+v",e)}
+}
+func TestGoOSPumpKEXNamesBound(t *testing.T){
+ msg:=kexInitMsg{KexAlgos:make([]string,33)};for i:=range msg.KexAlgos{msg.KexAlgos[i]="x"}
+ if err:=goosCheckKEX(Marshal(&msg));err==nil{t.Fatal("33 KEX names accepted")}
+}
+func TestGoOSPumpServerRekeyDefersInflightRequest(t *testing.T){
+ p,c,conn:=testPump(t);done:=make(chan error,1)
+ go func(){ok,_,err:=c.SendRequest("keepalive@openssh.com",true,nil);if ok && err==nil{err=ErrPumpState};done<-err}()
+ // Stage the request already sent by the peer, then send our KEXINIT first.
+ for p.NeedInput()>0{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};if _,err=p.Feed(b[:n]);err!=nil{t.Fatal(err)}}
+ if err:=p.startKey(nil);err!=nil{t.Fatal(err)}
+ e,err:=p.Poll();if err!=nil || e.Kind!=PumpProgress || p.controlUsed==0{t.Fatalf("deferred request: %+v %v",e,err)}
+ if e=drive(t,p,conn);e.Kind!=PumpRekey{t.Fatalf("rekey: %+v",e)}
+ if err=<-done;err!=nil{t.Fatal(err)};if p.controlUsed!=0{t.Fatal("control queue not drained")}
+}
+func TestGoOSPumpCloseDuringRekey(t *testing.T){
+ p,c,conn:=testPump(t);done:=make(chan error,1);var session *Session
+ go func(){var err error;session,err=c.NewSession();done<-err}()
+ for !p.channel{e,err:=p.Poll();if err!=nil{t.Fatal(err)};if e.Kind==PumpNeedInput{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};p.Feed(b[:n])}}
+ if err:=<-done;err!=nil{t.Fatal(err)};if err:=session.Close();err!=nil{t.Fatal(err)}
+ for p.NeedInput()>0{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};if _,err=p.Feed(b[:n]);err!=nil{t.Fatal(err)}}
+ if err:=p.startKey(nil);err!=nil{t.Fatal(err)};e,err:=p.Poll();if err!=nil || e.Kind!=PumpProgress || p.closed || !p.closePending{t.Fatalf("pending close: %+v %v",e,err)}
+ if n,err:=p.Write([]byte("pending"));n!=0 || err!=nil{t.Fatalf("pending close write: %d %v",n,err)}
+ if e=drive(t,p,conn);e.Kind!=PumpClose || !p.closed || p.controlUsed!=0 || p.closePending{t.Fatalf("closed after rekey: %+v",e)}
+}
+func TestGoOSPumpDeferredWindowCredit(t *testing.T){
+ out:=bytes.Buffer{};p:=&Pump{phase:1,channel:true,shell:true,localWindow:pumpWindow,control:make([]byte,PumpMaxPacket),transport:&transport{bufWriter:bufio.NewWriter(&out),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+ packet:=make([]byte,109);packet[0]=msgChannelData;binary.BigEndian.PutUint32(packet[5:9],100)
+ e,err:=p.application(packet);if err!=nil || e.Kind!=PumpData{t.Fatal(err)}
+ if out.Len()!=0 || p.localWindow!=pumpWindow-100 || p.pendingWindow!=100{t.Fatal("credit sent during KEX")}
+ p.phase=0;if err=p.flushControl();err!=nil{t.Fatal(err)};if p.localWindow!=pumpWindow || p.pendingWindow!=0 || out.Len()==0{t.Fatal("credit flush failed")}
+}
+func TestGoOSPumpPreAuthNoiseBudget(t *testing.T){
+ for _,size:=range []int{1,32700}{
+  wire:=bytes.Buffer{};cipher:=&streamPacketCipher{cipher:noneCipher{}};packet:=make([]byte,size);packet[0]=msgIgnore
+  for i:=0;i<65;i++{if err:=cipher.writeCipherPacket(uint32(i),&wire,rand.Reader,packet);err!=nil{t.Fatal(err)}}
+  reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}},goosBudget:true};input:=bufio.NewReader(&wire)
+  seen:=0;for{_,err:=reader.readPacket(input,false);if err!=nil{break};seen++}
+  if size==1 && seen!=64{t.Fatalf("noise packet bound: %d",seen)};if size>1 && seen!=4{t.Fatalf("noise byte bound: %d",seen)}
+ }
+}
+func TestGoOSPumpGCMReusableBuffers(t *testing.T){
+ w,err:=newGCMCipher(make([]byte,16),make([]byte,12),nil,DirectionAlgorithms{});if err!=nil{t.Fatal(err)};r,err:=newGCMCipher(make([]byte,16),make([]byte,12),nil,DirectionAlgorithms{});if err!=nil{t.Fatal(err)}
+ wc,rc:=w.(*gcmCipher),r.(*gcmCipher);wp,rp:=&wc.buf[:cap(wc.buf)][0],&rc.buf[:cap(rc.buf)][0];wire:=bytes.Buffer{};packet:=bytes.Repeat([]byte{42},pumpData)
+ for i:=0;i<1000;i++{wire.Reset();if err=w.writeCipherPacket(uint32(i),&wire,rand.Reader,packet);err!=nil{t.Fatal(err)};plain,err:=r.readCipherPacket(uint32(i),&wire);if err!=nil || !bytes.Equal(plain,packet){t.Fatalf("roundtrip %d: %v",i,err)};if &wc.buf[:cap(wc.buf)][0]!=wp || &rc.buf[:cap(rc.buf)][0]!=rp{t.Fatal("cipher buffer grew")}}
+}
+func TestGoOSPumpRejectsUnsupportedRequests(t *testing.T){
+ for _,request:=range []string{"exec","subsystem","auth-agent-req@openssh.com","x11-req","env","signal","shell"}{
+  wire:=bytes.Buffer{};p:=&Pump{channel:true,peer:7,transport:&transport{bufWriter:bufio.NewWriter(&wire),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+  e,err:=p.application(Marshal(&channelRequestMsg{PeersID:0,Request:request,WantReply:true}));if err!=nil || e.Kind!=PumpProgress{t.Fatalf("%s accepted: %+v %v",request,e,err)}
+  reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};reply,err:=reader.readPacket(bufio.NewReader(&wire),false);if err!=nil || len(reply)!=5 || reply[0]!=msgChannelFailure || binary.BigEndian.Uint32(reply[1:])!=7{t.Fatalf("%s reply: %x %v",request,reply,err)}
+ }
+}
+func TestGoOSPumpZeroDataAndWindowBounds(t *testing.T){
+ p:=&Pump{channel:true,shell:true,localWindow:pumpWindow,peerWindow:1<<24}
+ packet:=[9]byte{msgChannelData};e,err:=p.application(packet[:]);if err!=nil || e.Kind!=PumpData || len(e.Data)!=0{t.Fatalf("zero data: %+v %v",e,err)}
+ packet[0]=msgChannelWindowAdjust;binary.BigEndian.PutUint32(packet[5:],1);if _,err=p.application(packet[:]);err==nil{t.Fatal("oversized peer credit accepted")}
+ if pumpGeometry(0,80) || pumpGeometry(24,0) || pumpGeometry(1001,80){t.Fatal("invalid geometry accepted")}
+}
+func TestGoOSPumpOpenSSHPing(t *testing.T){
+ for _,size:=range []int{0,64,pumpData}{
+  wire:=bytes.Buffer{};p:=&Pump{transport:&transport{bufWriter:bufio.NewWriter(&wire),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+  data:=string(bytes.Repeat([]byte{'p'},size));e,err:=p.application(Marshal(&pingMsg{Data:data}));if err!=nil || e.Kind!=PumpProgress{t.Fatalf("ping %d: %+v %v",size,e,err)}
+  reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};packet,err:=reader.readPacket(bufio.NewReader(&wire),false);if err!=nil{t.Fatal(err)};var pong pongMsg;if err=Unmarshal(packet,&pong);err!=nil || pong.Data!=data{t.Fatalf("pong %d: %v",size,err)}
+ }
+ for _,packet:=range [][]byte{{msgPing},{msgPing,0,0,0,1},{msgPing,0,0,0,0,1},Marshal(&pingMsg{Data:string(bytes.Repeat([]byte{'p'},pumpData+1))})}{p:=&Pump{};if _,err:=p.application(packet);err==nil{t.Fatal("malformed or oversized ping accepted")}}
+}
+func TestGoOSPumpPingDuringRekey(t *testing.T){
+ wire:=bytes.Buffer{};p:=&Pump{phase:1,control:make([]byte,PumpMaxPacket),transport:&transport{bufWriter:bufio.NewWriter(&wire),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+ e,err:=p.application(Marshal(&pingMsg{Data:"opaque"}));if err!=nil || e.Kind!=PumpProgress || wire.Len()!=0 || p.controlUsed==0{t.Fatalf("deferred ping: %+v %v",e,err)}
+ p.phase=0;if err=p.flushControl();err!=nil{t.Fatal(err)};reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};packet,err:=reader.readPacket(bufio.NewReader(&wire),false);if err!=nil{t.Fatal(err)};var pong pongMsg;if err=Unmarshal(packet,&pong);err!=nil || pong.Data!="opaque" || p.controlUsed!=0{t.Fatal("deferred pong missing",err)}
+}
+func TestGoOSPumpExecRejected(t *testing.T){p,c,conn:=testPump(t);done:=make(chan error,1);go func(){s,err:=c.NewSession();if err==nil{err=s.Start("id")};done<-err}();for handled:=0;handled<2;{e,err:=p.Poll();if err!=nil{t.Fatal(err)};if e.Kind==PumpNeedInput{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};if _,err=p.Feed(b[:n]);err!=nil{t.Fatal(err)}}else{handled++}};select{case err:=<-done:if err==nil{t.Fatal("exec accepted")};case <-time.After(time.Second):t.Fatal("request reply missing")}}

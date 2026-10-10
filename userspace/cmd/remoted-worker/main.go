@@ -1,0 +1,402 @@
+//go:build goos_userspace
+
+// Command remoted-worker owns one SSH connection and one terminal engine.
+package main
+
+import (
+	"crypto/ed25519"
+	"goos/kernel/clock"
+	"goos/kernel/handle"
+	"goos/kernel/ipc"
+	"goos/kernel/kcall"
+	syslog "goos/userspace/log"
+	"goos/userspace/remoteapi"
+	"goos/userspace/remoteservice"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
+	"goos/userspace/sshserver"
+	"goos/userspace/startup"
+	"goos/userspace/tty"
+)
+
+var control, terminal, stdout handle.ID
+var token, sequence uint64
+var server *sshserver.Server
+var engine *tty.Engine
+var output remoteservice.Queue
+var policy remoteapi.WorkerPolicy
+var conn remoteservice.RelayConn
+var input [sshserver.MaxCiphertext]byte
+var scratch [256]byte
+var geometry remoteapi.Geometry
+var terminalGone, ending bool
+var handshaken, peerClosed bool
+var endDeadline uint64
+var exitCode uint32
+var exitKnown bool
+
+//export userspaceMain
+func userspaceMain() {
+	arena.Init()
+	arena.OnExhausted(func() { sys.Exit(1) })
+	arena.InitPackages()
+	data, ok := startup.Read()
+	if !ok {
+		sys.Exit(1)
+	}
+	logHandle, ok := data.Handle("log")
+	if !ok {
+		sys.Exit(1)
+	}
+	syslog.Init(logHandle, "remoted-worker")
+	control, ok = data.Handle("control")
+	if !ok {
+		sys.Exit(1)
+	}
+	conn.Input, ok = data.Handle("input")
+	if !ok {
+		sys.Exit(1)
+	}
+	conn.Output, ok = data.Handle("output")
+	if !ok {
+		sys.Exit(1)
+	}
+	memory, ok := data.Handle("policy")
+	if !ok {
+		sys.Exit(1)
+	}
+	base, size, status := sys.MemoryMapAnywhere(memory, false)
+	if status != kcall.StatusOK || size != remoteapi.PolicyPageSize || !remoteapi.DecodePolicy(sys.Window(base, size), &policy) {
+		sys.Exit(1)
+	}
+	conn.TimeoutTicks = uint64(policy.HandshakeTimeoutMS)*clock.TicksPerSecond/1000 + 1
+	keys := make([]ed25519.PublicKey, int(policy.KeyCount))
+	for i := range keys {
+		keys[i] = policy.Keys[i][:]
+	}
+	var err error
+	server, err = sshserver.New(&conn, sshserver.Config{HostKey: ed25519.NewKeyFromSeed(policy.Seed[:]), Username: "user", AuthorizedKeys: keys, MaxAuthAttempts: int(policy.MaxAuthAttempts)})
+	if err != nil {
+		finish(1)
+	}
+	conn.HandshakeDeadline(conn.TimeoutTicks)
+	if server.Handshake() != nil || server.User() != "user" {
+		syslog.Warn("remote SSH authentication or handshake failed")
+		finish(1)
+	}
+	conn.ClearDeadline()
+	handshaken = true
+	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate})
+	if !ok {
+		syslog.Warn("remote session admission refused")
+		finish(1)
+	}
+	token = authenticated.Session
+	syslog.Info("remote authentication accepted", syslog.Str("user", "user"), syslog.Uint("session", token))
+	engine = tty.NewEngine(func(bytes []byte) bool { return output.Put(bytes) }, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
+	geometry, _ = remoteapi.MakeGeometry(80, 24, []byte("xterm"))
+	lastActivity := remoteservice.Now()
+	transient := arena.Current()
+	for {
+		arena.Reset(transient)
+		activity := false
+		var notice ipc.Message
+		noticeStatus := remoteservice.Receive(control, 0, &notice)
+		if noticeStatus == kcall.StatusOK {
+			if !terminalEnd(&notice) {
+				remoteservice.CloseHandles(&notice)
+				finish(1)
+			}
+			activity = true
+		} else if noticeStatus != kcall.StatusNotFound {
+			finish(1)
+		}
+		if !drainOutput() {
+			finish(1)
+		}
+		for budget := 0; budget < 8; budget++ {
+			event, err := server.Poll()
+			if err != nil {
+				syslog.Warn("remote SSH protocol violation")
+				finish(1)
+			}
+			if event.Kind == sshserver.NeedInput {
+				break
+			}
+			activity = true
+			switch event.Kind {
+			case sshserver.PTY, sshserver.Resize:
+				next, valid := geometryForEvent(geometry, event)
+				if !valid {
+					finish(1)
+				}
+				geometry = next
+				if terminal != 0 {
+					if !engine.SetRemoteGeometry(int(next.Columns), int(next.Rows), next.Term[:next.TermSize]) {
+						finish(1)
+					}
+					if _, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationGeometry, Session: token, Geometry: next}); !ok {
+						finish(1)
+					}
+				}
+			case sshserver.Shell:
+				if terminal != 0 {
+					finish(1)
+				}
+				opened, attachments, ok := call(remoteapi.Request{Operation: remoteapi.OperationOpen, Geometry: geometry})
+				if !ok || opened.Session != token {
+					syslog.Warn("remote shell open failed", syslog.Uint("result", uint64(opened.Result)), syslog.Uint("session", token))
+					finish(1)
+				}
+				terminal, stdout = attachments[0], attachments[1]
+				syslog.Info("remote terminal opened", syslog.Uint("session", token), syslog.Uint("columns", uint64(geometry.Columns)), syslog.Uint("rows", uint64(geometry.Rows)))
+				if !engine.SetRemoteGeometry(int(geometry.Columns), int(geometry.Rows), geometry.Term[:geometry.TermSize]) {
+					finish(1)
+				}
+			case sshserver.Data:
+				if ending || terminalGone {
+					break
+				}
+				if terminal == 0 {
+					finish(1)
+				}
+				for _, value := range event.Data {
+					engine.Feed(value)
+				}
+				engine.FlushInput()
+			case sshserver.EOF:
+				if terminal != 0 && !terminalGone {
+					engine.Feed(4)
+					engine.FlushInput()
+				}
+			case sshserver.Close:
+				peerClosed = true
+				finish(0)
+			}
+			if engine.Failed() || !drainOutput() {
+				finish(1)
+			}
+		}
+		need := server.NeedInput()
+		if need > 0 {
+			n, status := sys.StreamRead(conn.Input, input[:min(need, len(input), int(kcall.MaxStreamIO))])
+			if status == kcall.StatusOK && n > 0 {
+				used, err := server.Feed(input[:n])
+				if err != nil || used != n {
+					finish(1)
+				}
+				activity = true
+			} else if status != kcall.StatusResourceExhausted && status != kcall.StatusOK {
+				finish(0)
+			}
+		}
+		if terminal != 0 && !terminalGone {
+			var message ipc.Message
+			status := remoteservice.Receive(terminal, 0, &message)
+			if status == kcall.StatusOK {
+				if message.HandleCount != 0 {
+					remoteservice.CloseHandles(&message)
+					finish(1)
+				}
+				engine.Request(&message)
+				activity = true
+			} else if status == kcall.StatusPeerDied {
+				terminalGone = true
+				if endDeadline == 0 {
+					endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
+				}
+			} else if status != kcall.StatusNotFound {
+				finish(1)
+			}
+		}
+		if stdout != 0 {
+			if output.Free() >= 1024 {
+				n, status := sys.StreamRead(stdout, scratch[:])
+				if n > 0 {
+					engine.Output(scratch[:n])
+					activity = true
+				}
+				if status == kcall.StatusPeerDied {
+					sys.HandleClose(stdout)
+					stdout = 0
+					ending = true
+					if endDeadline == 0 {
+						endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
+					}
+				}
+				if status != kcall.StatusOK && status != kcall.StatusResourceExhausted && status != kcall.StatusPeerDied {
+					finish(1)
+				}
+			}
+		}
+		if engine.Failed() {
+			finish(1)
+		}
+		now := remoteservice.Now()
+		if ending && exitKnown && output.Len() == 0 && !server.KeyExchangePending() {
+			finish(exitCode)
+		}
+		if endDeadline != 0 && now >= endDeadline {
+			if exitKnown {
+				finish(exitCode)
+			} else {
+				finish(1)
+			}
+		}
+		if activity {
+			lastActivity = now
+		} else {
+			if policy.IdleTimeoutSeconds != 0 && now-lastActivity >= uint64(policy.IdleTimeoutSeconds)*clock.TicksPerSecond {
+				syslog.Info("remote idle timeout", syslog.Uint("session", token))
+				finish(0)
+			}
+			wait := uint64(clock.TicksPerSecond)
+			if policy.IdleTimeoutSeconds != 0 {
+				deadline := lastActivity + uint64(policy.IdleTimeoutSeconds)*clock.TicksPerSecond
+				wait = min(wait, deadline-now)
+			}
+			var interests [kcall.WaitAnyMaxObjects]sys.Interest
+			interests[0] = sys.Interest{Handle: control, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			count := 1
+			if need > 0 {
+				interests[count] = sys.Interest{Handle: conn.Input, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				count++
+			}
+			if terminal != 0 && !terminalGone {
+				interests[count] = sys.Interest{Handle: terminal, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				count++
+			}
+			if stdout != 0 && output.Free() >= 1024 {
+				interests[count] = sys.Interest{Handle: stdout, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				count++
+			}
+			if count == 0 {
+				finish(1)
+			}
+			_, status := sys.WaitAny(&interests, count, max(wait, 1))
+			if status != kcall.StatusOK && status != kcall.StatusTimeout {
+				finish(1)
+			}
+		}
+	}
+}
+func call(request remoteapi.Request) (remoteapi.Reply, [2]handle.ID, bool) {
+	var message ipc.Message
+	var reply remoteapi.Reply
+	var attachments [2]handle.ID
+	sequence++
+	if !remoteapi.EncodeRequest(&request, sequence, &message) || !remoteservice.Send(control, &message) {
+		return reply, attachments, false
+	}
+	deadline := remoteservice.Now() + 5*clock.TicksPerSecond
+	for remoteservice.Now() < deadline {
+		if remoteservice.Receive(control, deadline-remoteservice.Now(), &message) != kcall.StatusOK {
+			return reply, attachments, false
+		}
+		if terminalEnd(&message) {
+			continue
+		}
+		if !remoteapi.DecodeReply(&message, sequence, request.Operation, &reply) {
+			remoteservice.CloseHandles(&message)
+			return reply, attachments, false
+		}
+		copy(attachments[:], message.Handles[:message.HandleCount])
+		return reply, attachments, reply.Result == remoteapi.ResultOK
+	}
+	return reply, attachments, false
+}
+func terminalEnd(message *ipc.Message) bool {
+	session, code, ok := remoteapi.DecodeTerminalEndNotice(message)
+	if !ok || session != token || token == 0 {
+		return false
+	}
+	exitKnown = true
+	exitCode = uint32(code)
+	if code > 0xffffffff {
+		exitCode = 1
+	}
+	if endDeadline == 0 {
+		endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
+	}
+	return true
+}
+func drainOutput() bool {
+	for output.Len() > 0 {
+		bytes := output.Peek(sshserver.MaxData)
+		n, err := server.Write(bytes)
+		if err != nil || n < 0 || n > len(bytes) {
+			return false
+		}
+		if n == 0 {
+			return true
+		}
+		output.Drop(n)
+	}
+	return true
+}
+func finish(status uint32) {
+	syslog.Info("remote session closing", syslog.Uint("session", token), syslog.Uint("status", uint64(status)))
+	if server != nil {
+		if handshaken {
+			deadline := remoteservice.Now() + 5*clock.TicksPerSecond
+			if endDeadline != 0 {
+				deadline = min(deadline, endDeadline)
+			}
+			now := remoteservice.Now()
+			if now < deadline {
+				conn.HandshakeDeadline(deadline - now)
+				if server.Exit(status) == nil && !peerClosed {
+					awaitPeerClose(deadline)
+				}
+			}
+		}
+		server.Close()
+	}
+	if engine != nil {
+		engine.CloseSession()
+	}
+	conn.Close()
+	// PID 1 may terminate this worker as soon as Close is delivered.
+	if token != 0 {
+		call(remoteapi.Request{Operation: remoteapi.OperationClose, Session: token})
+		token = 0
+	}
+	sys.Exit(uint64(status))
+}
+func awaitPeerClose(deadline uint64) {
+	for remoteservice.Now() < deadline {
+		event, err := server.Poll()
+		if err != nil || event.Kind == sshserver.Close {
+			return
+		}
+		if event.Kind != sshserver.NeedInput {
+			continue
+		}
+		need := server.NeedInput()
+		if need < 1 || need > len(input) {
+			return
+		}
+		n, status := sys.StreamRead(conn.Input, input[:min(need, int(kcall.MaxStreamIO))])
+		if status == kcall.StatusOK && n > 0 {
+			used, err := server.Feed(input[:n])
+			if err != nil || used != n {
+				return
+			}
+			continue
+		}
+		if status != kcall.StatusResourceExhausted {
+			return
+		}
+		now := remoteservice.Now()
+		if now >= deadline {
+			return
+		}
+		var interests [kcall.WaitAnyMaxObjects]sys.Interest
+		interests[0] = sys.Interest{Handle: conn.Input, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		_, status = sys.WaitAny(&interests, 1, deadline-now)
+		if status != kcall.StatusOK {
+			return
+		}
+	}
+}
+func main() {}

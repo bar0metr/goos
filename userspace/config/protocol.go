@@ -10,7 +10,7 @@ import (
 // a malformed message is rejected at the boundary rather than interpreted.
 const (
 	ProtocolID      = uint64(0x47434631)
-	ProtocolVersion = uint16(1)
+	ProtocolVersion = uint16(2)
 	requestHeader   = 32
 	replyHeader     = 32
 )
@@ -21,6 +21,7 @@ const (
 	OperationGet Operation = iota + 1
 	OperationSet
 	OperationList
+	OperationRevision
 )
 
 type Request struct {
@@ -40,16 +41,19 @@ type Reply struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if request.Operation < OperationGet || request.Operation > OperationList || correlation == 0 {
+	if request.Operation < OperationGet || request.Operation > OperationRevision || correlation == 0 {
 		return ipc.Message{}, false
 	}
 	if len(request.Key) > MaxKey || int(request.Value.Size) > MaxText {
 		return ipc.Message{}, false
 	}
-	if request.Operation != OperationList && !validKey(request.Key) {
+	if request.Operation != OperationList && request.Operation != OperationRevision && !validKey(request.Key) {
 		return ipc.Message{}, false
 	}
 	if request.Operation == OperationSet && !request.Value.valid() {
+		return ipc.Message{}, false
+	}
+	if request.Operation == OperationRevision && !validRevisionRequest(&request) {
 		return ipc.Message{}, false
 	}
 	payload := requestHeader + len(request.Key) + int(request.Value.Size)
@@ -70,7 +74,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 
 func DecodeRequest(message ipc.Message) (Request, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != ProtocolVersion || message.Kind != ipc.KindRequest ||
-		message.Correlation == 0 || message.PayloadSize < requestHeader {
+		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < requestHeader {
 		return Request{}, false
 	}
 	keySize, valueSize := int(message.Payload[1]), int(message.Payload[3])
@@ -80,11 +84,11 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		return Request{}, false
 	}
 	operation := Operation(message.Payload[0])
-	if operation < OperationGet || operation > OperationList {
+	if operation < OperationGet || operation > OperationRevision {
 		return Request{}, false
 	}
 	key := message.Payload[requestHeader : requestHeader+keySize]
-	if operation != OperationList && !validKey(key) {
+	if operation != OperationList && operation != OperationRevision && !validKey(key) {
 		return Request{}, false
 	}
 	request := Request{
@@ -97,12 +101,18 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 	if operation == OperationSet && !request.Value.valid() {
 		return Request{}, false
 	}
+	if operation == OperationRevision && !validRevisionRequest(&request) {
+		return Request{}, false
+	}
 	return request, true
 }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
-	if reply.Operation < OperationGet || reply.Operation > OperationList || correlation == 0 ||
+	if reply.Operation < OperationGet || reply.Operation > OperationRevision || correlation == 0 ||
 		len(reply.Key) > MaxKey || int(reply.Value.Size) > MaxText {
+		return ipc.Message{}, false
+	}
+	if reply.Operation == OperationRevision && !validRevisionReply(&reply) {
 		return ipc.Message{}, false
 	}
 	payload := replyHeader + len(reply.Key) + int(reply.Value.Size)
@@ -127,7 +137,7 @@ func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
 
 func DecodeReply(message ipc.Message) (Reply, bool) {
 	if message.ProtocolID != ProtocolID || message.Version != ProtocolVersion || message.Kind != ipc.KindReply ||
-		message.Correlation == 0 || message.PayloadSize < replyHeader {
+		message.Correlation == 0 || message.HandleCount != 0 || message.PayloadSize < replyHeader {
 		return Reply{}, false
 	}
 	keySize, valueSize := int(message.Payload[2]), int(message.Payload[4])
@@ -137,7 +147,7 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 		return Reply{}, false
 	}
 	operation := Operation(message.Payload[0])
-	if operation < OperationGet || operation > OperationList || Status(message.Payload[1]) > StatusReadOnly {
+	if operation < OperationGet || operation > OperationRevision || Status(message.Payload[1]) > StatusReadOnly {
 		return Reply{}, false
 	}
 	reply := Reply{
@@ -149,6 +159,9 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 		Cursor:    binary.LittleEndian.Uint32(message.Payload[16:]),
 	}
 	copy(reply.Value.Text[:], message.Payload[replyHeader+keySize:replyHeader+keySize+valueSize])
+	if operation == OperationRevision && !validRevisionReply(&reply) {
+		return Reply{}, false
+	}
 	return reply, true
 }
 
@@ -164,6 +177,16 @@ func (store *Store) Serve(scope Scope, rights Rights, request Request) Reply {
 		}
 	case OperationSet:
 		reply.Status = store.Set(scope, rights, request.Key, request.Value)
+	case OperationRevision:
+		if !validRevisionRequest(&request) {
+			reply.Status = StatusInvalidArgument
+			break
+		}
+		revision, status := store.Revision(scope, rights)
+		reply.Status = status
+		if status == StatusOK {
+			reply.Value = Uint(revision)
+		}
 	case OperationList:
 		key, value, readOnly, cursor, status := store.At(scope, rights, int(request.Cursor))
 		reply.Key, reply.Value, reply.ReadOnly, reply.Cursor, reply.Status = key, value, readOnly, uint32(cursor), status

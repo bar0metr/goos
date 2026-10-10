@@ -274,6 +274,7 @@ func expireFills() bool {
 		job.nextStage++
 		advancePreparation(job)
 	}
+	expireRemoteFills(now)
 	return expireServiceFills(now)
 }
 

@@ -223,14 +223,14 @@ func executeExternal(line []byte, background bool) {
 		write("exec: too many background jobs\n")
 		return
 	}
+	if !refreshGeometry() {
+		write("exec: terminal geometry unavailable\n")
+		return
+	}
 	correlation++
 	// Each stage is written to the slot as soon as it is parsed, so the
 	// tokenizer's storage serves every stage in turn.
-	environment := [][]byte{pathVariable}
-	if columnsSize != 0 && linesSize != 0 {
-		environment = append(environment, columnsVariable[:columnsSize], linesVariable[:linesSize])
-	}
-	builder := execproto.NewBuilder(execSlot(int(slot)), cwd[:cwdSize], environment, background)
+	builder := execproto.NewBuilder(execSlot(int(slot)), cwd[:cwdSize], terminalEnvironment(), background)
 	stageOffset := 0
 	if len(redirects.Input) != 0 {
 		target, parsed := shellcmd.ParseInvocation(redirects.Input, &argumentStorage)

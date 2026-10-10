@@ -42,9 +42,12 @@ const (
 	GrantUDP
 	// GrantTCP asks for a TCP session and its stream pools.
 	GrantTCP
+	// GrantRemote asks for remoted status and configuration reload, not a
+	// worker-launch channel, TCP session, or host-key filesystem access.
+	GrantRemote
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
-		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP
+		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -80,8 +83,8 @@ const (
 	MaxArgs = 99
 	// IndexFormat names the line format below and the meaning of its grant
 	// bits. An installed system records it, so a system built for another
-	// format is refused (ADR 0175). Format 5 adds the TCP grant.
-	IndexFormat = 5
+	// format is refused (ADR 0175). Format 6 adds remote administration.
+	IndexFormat = 6
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.
@@ -243,7 +246,7 @@ func validOptionalText(text []byte, limit int) bool {
 }
 
 func decimal(text []byte, limit uint64) (uint64, bool) {
-	if len(text) == 0 || len(text) > 3 {
+	if len(text) == 0 || len(text) > 5 {
 		return 0, false
 	}
 	value := uint64(0)

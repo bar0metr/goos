@@ -407,8 +407,8 @@ func networkService(name string) bool {
 // the volume like the session services but are not needed to keep the
 // system out of recovery.
 func networkServiceNames() []string {
-	names := make([]string, 0, 3)
-	for _, name := range [...]string{netServiceName, netDriverName, resolverName} {
+	names := make([]string, 0, 4)
+	for _, name := range [...]string{netServiceName, netDriverName, resolverName, remoteServiceName} {
 		if _, found := manager.Snapshot(name); found {
 			names = append(names, name)
 		}

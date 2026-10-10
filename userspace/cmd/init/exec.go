@@ -26,6 +26,10 @@ func pollExec(session *terminalSession) {
 		return
 	}
 	if status == ipc.StatusPeerDied {
+		if worker := remoteSession(session); worker != nil {
+			beginRemoteShellClose(worker, 0)
+			return
+		}
 		// The shell is gone; its exit event ends the session, and its
 		// replacement brings a new channel.
 		sys.HandleClose(handle.ID(session.execServer))
@@ -62,6 +66,10 @@ func pollExec(session *terminalSession) {
 		sendExecReply(session, message.Correlation, 0, uint64(supervisor.LaunchInvalidImage), 0, 0)
 		return
 	}
+	if !remoteJobAllowed(session, &request) {
+		sendExecReply(session, message.Correlation, 0, uint64(supervisor.LaunchResourceExhausted), 0, 0)
+		return
+	}
 	job.session = session
 	job.active, job.orphaned, job.slot, job.correlation, job.request = true, false, slot, message.Correlation, request
 	beginJob(job)
@@ -89,9 +97,14 @@ func startPipeline(job *execJob) {
 // still owned by a running job or every record is busy.
 func freeJob(session *terminalSession, slot uint8) *execJob {
 	var free *execJob
+	remote := remoteSession(session) != nil
 	for index := range execJobs {
 		if execJobs[index].active && execJobs[index].session == session && execJobs[index].slot == slot {
 			return nil
+		}
+		localSlot := index < execproto.Slots*len(sessions)
+		if localSlot == remote {
+			continue
 		}
 		if !execJobs[index].active && free == nil {
 			free = &execJobs[index]
@@ -130,6 +143,10 @@ func finishJob(job *execJob) {
 // handleControl answers the shell's requests that launch nothing.
 func handleControl(message ipc.Message) {
 	operation, argument, ok := execproto.DecodeControl(message)
+	if remoteSession(replying) != nil && (operation == execproto.ControlFault || operation == execproto.ControlDiagnostics) {
+		sendControlStatus(execproto.ControlInvalid, message.Correlation)
+		return
+	}
 	switch {
 	case !ok:
 		sendControlStatus(execproto.ControlInvalid, message.Correlation)

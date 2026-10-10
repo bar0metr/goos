@@ -85,6 +85,7 @@ func chooseMode() {
 		boot.Recover(supervisor.StageStorage, "/persist", "no usable volume")
 	default:
 		if stage, path, reason := checkInstalledSystem(); stage != supervisor.StageNone {
+			stopRemoteService()
 			boot.Recover(stage, path, reason)
 		} else if status := requestSystem(true); status != vfs.StatusOK {
 			requestSystem(false)
@@ -275,6 +276,7 @@ func storageExited(name string) {
 		filesystemPending = true
 	}
 	// A read in flight from the storage that went cannot be answered.
+	stopRemoteService()
 	cancelServiceSources()
 	if !systemReady {
 		return
@@ -325,7 +327,7 @@ func sessionServiceNames() []string {
 
 // diskService reports whether a service runs from the volume in normal mode.
 func diskService(name string) bool {
-	if name == "config" || name == "log" {
+	if name == "config" || name == "log" || name == remoteServiceName {
 		return true
 	}
 	for index := range sessions {
@@ -366,6 +368,8 @@ func enterRecovery(stage supervisor.Stage, path, reason string) {
 		return
 	}
 	systemReady = false
+	manager.Hold(remoteServiceName)
+	stopRemoteService()
 	cancelServiceSources()
 	announceMode()
 	if status := requestSystem(false); status != vfs.StatusOK {

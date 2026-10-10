@@ -13,7 +13,8 @@ import (
 
 const (
 	ProtocolID = uint64(0x4754545932303031)
-	Version    = uint16(3)
+	// Version 4 adds authoritative geometry and TERM to geometry replies.
+	Version = uint16(4)
 	// MaxLine is the longest line a client receives: a native path and then
 	// some (ADR 0109). A line longer than one message is delivered in parts.
 	MaxLine = 4096
@@ -68,7 +69,7 @@ const (
 	ResultLine Result = iota + 1
 	ResultInterrupt
 	ResultEndOfInput
-	// ResultAccepted answers a redraw.
+	// ResultAccepted acknowledges redraw and mode changes.
 	ResultAccepted
 	// ResultRefused answers a malformed request, or a read while one is
 	// already outstanding.
@@ -78,18 +79,41 @@ const (
 	ResultPart
 	// ResultRaw carries 1 to MaxPart bytes typed in raw mode.
 	ResultRaw
-	// ResultGeometry carries the terminal's columns and rows, each as a
-	// little-endian uint16, and a flags byte: GeometryDisplay when they are
-	// the size of a display of fixed size, the framebuffer, rather than the
-	// fallback of a serial-only console, whose far end has a size of its own.
+	// ResultGeometry carries uint16 columns and rows, independent display
+	// and authoritative flags, then a byte length and printable TERM bytes.
 	ResultGeometry
 )
 
-// GeometrySize is the length of a ResultGeometry payload.
-const GeometrySize = 5
+// GeometrySize is the fixed header length of a ResultGeometry payload;
+// up to MaxTerm printable TERM bytes follow it.
+const GeometrySize = 6
+const MaxTerm = 64
+const MaxRemoteDimension = 1000
 
-// GeometryDisplay marks a geometry that is a fixed display's.
+// GeometryDisplay identifies a fixed display, not whether dimensions are known.
 const GeometryDisplay = byte(1)
+
+// GeometryAuthoritative means children can use the dimensions without probing.
+const GeometryAuthoritative = byte(2)
+
+// Geometry describes a terminal without granting access to its transport.
+// Term aliases the input when decoded; owners must copy it before reuse.
+type Geometry struct {
+	Columns       int
+	Rows          int
+	Display       bool
+	Authoritative bool
+	Term          []byte
+}
+
+func (geometry Geometry) Valid() bool {
+	return geometry.Columns > 0 && geometry.Columns <= 0xffff && geometry.Rows > 0 && geometry.Rows <= 0xffff &&
+		len(geometry.Term) <= MaxTerm && printable(geometry.Term)
+}
+
+func (geometry Geometry) ValidRemote() bool {
+	return geometry.Valid() && geometry.Columns <= MaxRemoteDimension && geometry.Rows <= MaxRemoteDimension
+}
 
 // Request encodes a client request carrying a prompt.
 func Request(operation Operation, prompt []byte, correlation uint64) (ipc.Message, bool) {
@@ -132,15 +156,15 @@ func CarriesText(result Result) bool {
 	return result == ResultLine || result == ResultPart || result == ResultRaw
 }
 
-// validPayload reports whether a result may carry line: text results carry at
-// most MaxPart bytes, the part and raw ones at least one, a geometry exactly
-// GeometrySize, and the rest nothing.
+// validPayload bounds text results and validates typed geometry; other
+// results carry no payload.
 func validPayload(result Result, line []byte) bool {
 	switch {
 	case result < ResultLine || result > ResultGeometry:
 		return false
 	case result == ResultGeometry:
-		return len(line) == GeometrySize
+		_, ok := DecodeGeometryState(line)
+		return ok
 	case !CarriesText(result):
 		return len(line) == 0
 	case result == ResultPart || result == ResultRaw:
@@ -149,29 +173,54 @@ func validPayload(result Result, line []byte) bool {
 	return len(line) <= MaxPart
 }
 
-// GeometryReply encodes the answer to OperationGeometry.
+// GeometryReply encodes local geometry. Fixed displays are authoritative;
+// serial fallback dimensions are not.
 func GeometryReply(columns, rows int, display bool, correlation uint64) (ipc.Message, bool) {
-	if columns <= 0 || rows <= 0 || columns > 0xffff || rows > 0xffff {
+	return GeometryStateReply(Geometry{Columns: columns, Rows: rows, Display: display, Authoritative: display}, correlation)
+}
+
+// GeometryStateReply encodes dimensions, independent flags, and bounded TERM.
+func GeometryStateReply(geometry Geometry, correlation uint64) (ipc.Message, bool) {
+	if !geometry.Valid() {
 		return ipc.Message{}, false
 	}
-	payload := [GeometrySize]byte{byte(columns), byte(columns >> 8), byte(rows), byte(rows >> 8)}
-	if display {
-		payload[4] = GeometryDisplay
+	var payload [GeometrySize + MaxTerm]byte
+	payload[0], payload[1] = byte(geometry.Columns), byte(geometry.Columns>>8)
+	payload[2], payload[3] = byte(geometry.Rows), byte(geometry.Rows>>8)
+	if geometry.Display {
+		payload[4] |= GeometryDisplay
 	}
-	return Reply(ResultGeometry, payload[:], correlation)
+	if geometry.Authoritative {
+		payload[4] |= GeometryAuthoritative
+	}
+	payload[5] = byte(len(geometry.Term))
+	copy(payload[GeometrySize:], geometry.Term)
+	return Reply(ResultGeometry, payload[:GeometrySize+len(geometry.Term)], correlation)
 }
 
-// DecodeGeometry reads a ResultGeometry payload.
+// DecodeGeometryState reads a version 4 geometry payload.
+func DecodeGeometryState(payload []byte) (Geometry, bool) {
+	if len(payload) < GeometrySize || len(payload) > GeometrySize+MaxTerm ||
+		payload[4]&^(GeometryDisplay|GeometryAuthoritative) != 0 || int(payload[5]) != len(payload)-GeometrySize {
+		return Geometry{}, false
+	}
+	geometry := Geometry{
+		Columns:       int(payload[0]) | int(payload[1])<<8,
+		Rows:          int(payload[2]) | int(payload[3])<<8,
+		Display:       payload[4]&GeometryDisplay != 0,
+		Authoritative: payload[4]&GeometryAuthoritative != 0,
+		Term:          payload[GeometrySize:],
+	}
+	return geometry, geometry.Valid()
+}
+
+// DecodeGeometry returns the dimensions and fixed-display flag.
 func DecodeGeometry(payload []byte) (columns, rows int, display bool, ok bool) {
-	if len(payload) != GeometrySize || payload[4]&^GeometryDisplay != 0 {
-		return 0, 0, false, false
-	}
-	columns, rows = int(payload[0])|int(payload[1])<<8, int(payload[2])|int(payload[3])<<8
-	return columns, rows, payload[4] == GeometryDisplay, columns != 0 && rows != 0
+	geometry, ok := DecodeGeometryState(payload)
+	return geometry.Columns, geometry.Rows, geometry.Display, ok
 }
 
-// Reply encodes the answer to a request. Only ResultLine and ResultPart carry
-// data, at most MaxPart bytes of it.
+// Reply encodes a validated result and its bounded payload.
 func Reply(result Result, line []byte, correlation uint64) (ipc.Message, bool) {
 	if correlation == 0 || !validPayload(result, line) {
 		return ipc.Message{}, false

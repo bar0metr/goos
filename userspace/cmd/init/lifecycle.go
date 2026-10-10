@@ -12,6 +12,23 @@ import (
 	"goos/userspace/runtime/sys"
 )
 
+// drainRemoteLifecycle preserves notices while synchronous remote cleanup
+// runs. The buffer covers the kernel task bound; no service exit is discarded.
+func drainRemoteLifecycle() {
+	for lifecycleCount < uint8(len(lifecyclePending)) {
+		message, status := receive(lifecycleHandle, 0)
+		if status == ipc.StatusNotFound || status == ipc.StatusTimeout {
+			return
+		}
+		if status != ipc.StatusOK {
+			fatal("INIT_REMOTE_LIFECYCLE_FAILED\n")
+		}
+		tail := (int(lifecycleHead) + int(lifecycleCount)) % len(lifecyclePending)
+		lifecyclePending[tail] = message
+		lifecycleCount++
+	}
+}
+
 func receiveLifecycle(timeout uint64) (ipc.Message, ipc.Status) {
 	if lifecycleCount != 0 {
 		message := lifecyclePending[lifecycleHead]

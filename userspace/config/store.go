@@ -139,13 +139,15 @@ type entry struct {
 	value    Value
 	readOnly bool
 	used     bool
+	revision uint64
 }
 
 // Store holds the declared keys. A key is declared with its type before it can
 // be set, so a write is checked against a schema rather than against whatever
 // happened to be there.
 type Store struct {
-	entries [MaxEntries]entry
+	entries  [MaxEntries]entry
+	revision uint64
 }
 
 // Declare adds a key with its type and initial value. A read-only key is one
@@ -158,6 +160,12 @@ func (store *Store) Declare(key string, value Value, readOnly bool) Status {
 		return StatusInvalidArgument
 	}
 	if slot := store.find(name); slot != nil {
+		if slot.value == value && slot.readOnly == readOnly {
+			return StatusOK
+		}
+		if status := store.advanceRevision(slot); status != StatusOK {
+			return status
+		}
 		slot.value, slot.readOnly = value, readOnly
 		return StatusOK
 	}
@@ -165,6 +173,9 @@ func (store *Store) Declare(key string, value Value, readOnly bool) Status {
 		slot := &store.entries[index]
 		if slot.used {
 			continue
+		}
+		if status := store.advanceRevision(slot); status != StatusOK {
+			return status
 		}
 		slot.size = uint8(copy(slot.key[:], name))
 		slot.value, slot.readOnly, slot.used = value, readOnly, true
@@ -215,6 +226,12 @@ func (store *Store) Set(scope Scope, rights Rights, key []byte, value Value) Sta
 	}
 	if slot.value.Kind != value.Kind {
 		return StatusTypeMismatch
+	}
+	if slot.value == value {
+		return StatusOK
+	}
+	if status := store.advanceRevision(slot); status != StatusOK {
+		return status
 	}
 	slot.value = value
 	return StatusOK

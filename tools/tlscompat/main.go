@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"goos/tools/internal/compatroot"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -113,8 +114,8 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !strings.HasPrefix(real, "/Volumes/Data/tmp/") {
-			return errors.New("prepared and output roots must be real directories under /Volumes/Data/tmp")
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !compatroot.Allowed(real) {
+			return errors.New("prepared and output roots must be real directories under /Volumes/Data/tmp or GoOS build output")
 		}
 	}
 	return prepare(args[0], args[1], args[2], args[3], args[4], pins{Conn: connPin, Cache: cachePin, Rand: randPin, Messages: messagesPin, Verify: verifyPin, Defaults: defaultsPin})

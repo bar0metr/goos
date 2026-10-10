@@ -154,6 +154,7 @@ type openFile struct {
 	executable bool
 	// protected marks a file opened below the protected directory.
 	protected bool
+	scopes    uint8
 }
 
 type cacheEntry struct {
@@ -186,7 +187,10 @@ type Namespace struct {
 	// reserved are mount points nothing may be created at or below while
 	// they are not mounted, so a client cannot build a directory in the
 	// volatile root that a path meant for a mount would reach instead.
-	reserved [maxReserved]reservedPath
+	reserved    [maxReserved]reservedPath
+	scopes      [MaxScopes]scope
+	authorities [MaxAuthorities]ownerAuthority
+	scopeNames  [2][ramfs.MaxName]byte
 }
 
 const maxReserved = 4
@@ -344,6 +348,11 @@ func (namespace *Namespace) UnmountBackend(backend Backend) Status {
 	if !found {
 		return StatusNotFound
 	}
+	for index := range namespace.scopes {
+		if namespace.scopes[index].backend == backend {
+			return StatusBusy
+		}
+	}
 	if namespace.guard == backend {
 		namespace.guard, namespace.guarded = nil, 0
 	}
@@ -461,6 +470,10 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 	}
 	identity := node
 	backend := namespace.mounts[mountIndex].backend
+	scopes, permission := namespace.nodeScopes(backend, node)
+	if permission != StatusOK || !namespace.permits(owner, scopes, rights) {
+		return 0, StatusPermissionDenied
+	}
 	if objects, ok := backend.(ObjectBackend); ok {
 		node, backendStatus = objects.AcquireObject(node)
 		if backendStatus != ramfs.StatusOK || node == 0 {
@@ -475,7 +488,7 @@ func (namespace *Namespace) Open(owner Owner, path []byte, rights Rights) (Handl
 		entry.generation = 1
 	}
 	entry.node, entry.mount, entry.rights, entry.owner, entry.used = node, mountIndex, rights, owner, true
-	entry.identity, entry.protected = identity, protected
+	entry.identity, entry.protected, entry.scopes = identity, protected, scopes
 	return encodeHandle(free, entry.generation), StatusOK
 }
 
@@ -725,6 +738,9 @@ func (namespace *Namespace) StatOpen(owner Owner, handle Handle) (ramfs.Stat, St
 	if status != StatusOK {
 		return ramfs.Stat{}, status
 	}
+	if !namespace.permits(owner, entry.scopes, Read) {
+		return ramfs.Stat{}, StatusPermissionDenied
+	}
 	stat, backendStatus := namespace.mounts[entry.mount].backend.Stat(entry.node)
 	if backendStatus == ramfs.StatusOK {
 		stat.MountID = uint64(namespace.mountID(int(entry.mount)))
@@ -914,6 +930,9 @@ func (namespace *Namespace) SetMetadataOpen(owner Owner, handle Handle, change r
 	if status != StatusOK {
 		return status
 	}
+	if !namespace.permits(owner, entry.scopes, Write) {
+		return StatusPermissionDenied
+	}
 	return namespace.setMetadata(entry.mount, entry.node, entry.protected, change)
 }
 
@@ -999,9 +1018,11 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 		return StatusUnsupported
 	}
 	status = mapStatus(namespace.mounts[sourceMount].backend.RenameName(node, parent, name))
+	namespace.invalidate()
 	if status == StatusOK {
-		namespace.invalidate()
 		namespace.follow(sourceMount, node, target)
+	} else {
+		namespace.scopeMutationFailed(namespace.mounts[sourceMount].backend)
 	}
 	return status
 }
@@ -1011,6 +1032,7 @@ func (namespace *Namespace) Rename(path []byte, target []byte) Status {
 // stat of the path reports when the entry moves; an open file has to change
 // with it, or a stat by handle and a stat by path would stop agreeing.
 func (namespace *Namespace) follow(mountIndex uint8, previous ramfs.NodeID, target []byte) {
+	namespace.followScopes(mountIndex, previous, target)
 	held := false
 	for index := range namespace.files {
 		entry := &namespace.files[index]
@@ -1090,6 +1112,8 @@ func (namespace *Namespace) Replace(path []byte, target []byte) Status {
 	namespace.invalidate()
 	if status == StatusOK {
 		namespace.follow(sourceMount, node, target)
+	} else {
+		namespace.scopeMutationFailed(backend)
 	}
 	return status
 }
@@ -1167,7 +1191,7 @@ func (namespace *Namespace) file(owner Owner, handle Handle, required Rights) (*
 	if !entry.used || entry.generation != generation || owner == 0 || entry.owner != owner {
 		return nil, StatusNotFound
 	}
-	if required != 0 && entry.rights&required != required {
+	if required != 0 && (entry.rights&required != required || !namespace.permits(owner, entry.scopes, required)) {
 		return nil, StatusPermissionDenied
 	}
 	return entry, StatusOK
