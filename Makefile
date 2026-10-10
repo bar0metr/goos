@@ -439,6 +439,7 @@ test-all:
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
+	$(MAKE) test-remote
 	$(MAKE) test-trust-update
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -462,6 +463,7 @@ release-check:
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
+	$(MAKE) test-remote
 	$(MAKE) test-trust-update
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui

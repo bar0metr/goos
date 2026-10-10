@@ -3,8 +3,9 @@
 ## Status
 
 Accepted. Host tests, SSH compatibility tests, native builds, and the headless
-OpenSSH integration gate pass. The gate checks 65 assertions across a primary
-boot and a reboot of the same persistent disk.
+OpenSSH integration gate pass. On 2026-10-10 the updated gate passed 76 assertions
+across a primary boot and a persistent reboot, including degraded recovery,
+configured login and real post-reload rekey through the controller signer.
 
 Builds on ADR 0196 and ADR 0198.
 
@@ -30,11 +31,13 @@ launching a foreground job and passes COLUMNS, LINES, and TERM.
 
 PID 1 launches a fixed worker executable for each admitted connection. The
 controller retains GTCP1 listener and endpoint authority. Each worker receives
-bounded ciphertext streams, an immutable policy page, and its own typed PID 1
-control channel. PID 1 creates both relay streams, grants the worker its input
-reader and output writer, and returns the opposite ends to the controller through
-GWORKER1 version 2. IPC moves remove Transfer rights, so PID 1 cannot regrant
-stream ends supplied by the controller. Workers receive no arbitrary
+bounded ciphertext streams, a public-only immutable policy page, a dedicated
+host-signing endpoint, and its own typed PID 1 control channel. PID 1 creates both
+relay streams and the signer channel pair. It grants the worker its input reader,
+output writer and non-transferable signer endpoint, then returns the opposite
+ends through GWORKER1 version 3. The controller signer endpoint is the third
+attachment. IPC moves remove Transfer rights, so PID 1 cannot regrant stream ends
+supplied by the controller. Workers receive no arbitrary
 process-launch interface or host-key filesystem authority.
 
 After public-key authentication, the worker reserves authenticated capacity
@@ -77,6 +80,42 @@ Prepare authorized keys, verified identity, scoped VFS authority, and a new
 listener before committing. Reuse an unchanged listener. Existing connections
 retain their policy generation; failed candidates leave the running policy
 and listener intact.
+
+Keep host private keys in a controller-owned identity pool of MaxWorkers + 2
+slots. Workers sharing a host identity reference one slot; no per-worker private
+key copies enter PID 1 or worker policy pages. Existing connections retain that
+identity through rekey after reload. New connections use the committed current
+identity. Zero retired keys after the last worker reference and release failed
+staging candidates without changing current/worker references.
+
+The pinned upstream Curve25519 path computes SHA-256 H and forwards H unchanged
+through signAndMarshal and algorithmSignerWrapper to ssh.Signer.Sign. The dedicated
+GHSIGN1 protocol carries these 32 input bytes and a 64-byte ordinary Ed25519
+signature. A recording-signer test covers actual initial KEX and rekey. No extra
+hash or Ed25519ph enters the adapter. Reverify this contract when changing the
+upstream dependency or KEX policy. Validate generation, strict request sequence,
+exact framing and no attachments; verify replies against the worker public key.
+Bound each RPC to five seconds and the remaining initial handshake deadline.
+Protocol or timeout failures revoke that worker's signer without local fallback.
+A compromised worker still has a chosen-32-byte signing oracle for its identity;
+framing does not prove transcript provenance.
+
+Remove Go 1.25 weak-key memoization from the private SSH toolchain. The upstream
+fips140cache retains expanded keys across request-arena resets, which conflicts
+with the controller lifetime model. A source-hash-pinned stateless adapter invokes
+the upstream constructor on each Get; it changes no signing algorithm. Record
+source, overlay and patched hashes in ssh-keycache.json. Detach copied file links
+before writing and reject linked directories or installed-toolchain outputs.
+The initial native runs exposed a post-scan KEX/service failure. After the cache
+adaptation, host compatibility tests, native builds and the 76-assertion two-boot
+gate pass, including forced OpenSSH rekey.
+
+Add system.remote.user as a bounded ASCII SSH login label, default user. Keep
+it independent of user.name and authorized-key/home paths. Failed initial policy
+or identity leaves remoted running with listener closed, settings invalid and a
+bounded public rejection reason. PID 1 grants a zero-file-authority bootstrap
+session while protecting valid configured host paths. Explicit reload can recover
+without restart; failed replacement preserves an existing valid commit.
 
 Persist a per-installation 32-byte Ed25519 seed. Generate it with
 `cryptosys.Reader` only when identity files are absent. Stage seed/public files,

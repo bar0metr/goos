@@ -61,7 +61,6 @@ func copyRemotePolicy(source handle.ID) (handle.ID, uint8, bool) {
 	copy(page, sys.Window(base, size))
 	valid := remoteapi.DecodePolicy(page, &remotePolicyScratch)
 	limit := remotePolicyScratch.MaxSessions
-	clear(remotePolicyScratch.Seed[:])
 	for index := range remotePolicyScratch.Keys {
 		clear(remotePolicyScratch.Keys[index][:])
 	}
@@ -130,7 +129,6 @@ func protectRemoteStorage() bool {
 	if remoteScopesInstalled {
 		return true
 	}
-	restoring := remoteScopeCount != 0
 	files, reason := openRemoteAuthorityExisting()
 	if reason != "" {
 		return false
@@ -160,18 +158,19 @@ func protectRemoteStorage() bool {
 			return false
 		}
 	}
-	// Storage recovery can precede configd's replacement. Restore the known
-	// private scopes without depending on a dead configuration endpoint.
-	if restoring {
-		remoteScopesInstalled = true
-		return true
-	}
-	host, keys, ok := remotePaths()
+	// Preserve valid configured host paths even when another setting is invalid.
+	// Candidate-specific read/write authority remains confined to WorkerAuthority.
+	settings, ok := openConfigSession("system.remote.", configproto.Read)
 	if !ok {
 		return false
 	}
-	remoteScopesInstalled = ensureRemotePolicyScopes(host, keys)
-	return remoteScopesInstalled
+	host, valid := remoteConfigPath(settings, "system.remote.host-key")
+	closeOpen(settings)
+	if valid && remoteapi.ValidHostPath([]byte(host)) && !protectConfiguredRemoteHost(files, host) {
+		return false
+	}
+	remoteScopesInstalled = true
+	return true
 }
 
 func ensureRemoteParents(files handle.ID, path string) bool {
@@ -288,18 +287,10 @@ func openRemoteAuthority() (handle.ID, string) {
 	if !protectRemoteStorage() {
 		return 0, "REMOTE_STORAGE_PROTECTION_FAILED"
 	}
-	host, keys, ok := remotePaths()
-	if !ok || !ensureRemotePolicyScopes(host, keys) {
-		return 0, "REMOTE_STORAGE_PROTECTION_FAILED"
-	}
-	return openRemoteConfinedAuthority()
+	return openRemoteAuthoritySession(vfs.Authority{Confined: true})
 }
 
 func openRemoteAuthorityExisting() (handle.ID, string) {
-	var pair [2]uint64
-	if !createChannel(&pair) {
-		return 0, "REMOTE_AUTHORITY_CHANNEL_FAILED"
-	}
 	authority := vfs.Authority{Confined: false}
 	for index := 0; index < remoteScopeCount; index++ {
 		if !remoteScopes[index].installed {
@@ -313,26 +304,10 @@ func openRemoteAuthorityExisting() (handle.ID, string) {
 	}
 	// During scope setup PID 1 also creates parent directories outside the
 	// confined service's authority. The session handed to remoted is confined.
-	correlation++
-	request, ok := vfs.AddSessionWithAuthorityRequest(handle.ID(pair[1]), authority, correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
-		closePair(pair)
-		return 0, "REMOTE_AUTHORITY_SEND_FAILED"
-	}
-	message, status := receive(vfsControlHandle, vfsSessionDeadline)
-	result, ok := vfs.DecodeAddSessionReply(message)
-	if status != ipc.StatusOK || !ok || result != vfs.StatusOK || message.Correlation != correlation {
-		closeOpen(handle.ID(pair[0]))
-		return 0, "REMOTE_AUTHORITY_REFUSED"
-	}
-	return handle.ID(pair[0]), ""
+	return openRemoteAuthoritySession(authority)
 }
 
 func openRemoteConfinedAuthority() (handle.ID, string) {
-	var pair [2]uint64
-	if !createChannel(&pair) {
-		return 0, "REMOTE_AUTHORITY_CHANNEL_FAILED"
-	}
 	authority := vfs.Authority{Confined: true}
 	for index := 0; index < remoteScopeCount; index++ {
 		if !remoteScopes[index].installed {
@@ -344,19 +319,7 @@ func openRemoteConfinedAuthority() (handle.ID, string) {
 			authority.Grants[index] = vfs.Read
 		}
 	}
-	correlation++
-	request, ok := vfs.AddSessionWithAuthorityRequest(handle.ID(pair[1]), authority, correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
-		closePair(pair)
-		return 0, "REMOTE_AUTHORITY_SEND_FAILED"
-	}
-	message, status := receive(vfsControlHandle, vfsSessionDeadline)
-	result, ok := vfs.DecodeAddSessionReply(message)
-	if status != ipc.StatusOK || !ok || result != vfs.StatusOK || message.Correlation != correlation {
-		closeOpen(handle.ID(pair[0]))
-		return 0, "REMOTE_AUTHORITY_REFUSED"
-	}
-	return handle.ID(pair[0]), ""
+	return openRemoteAuthoritySession(authority)
 }
 
 func remoteAuthority(request *remoteapi.WorkerRequest, requestCorrelation uint64) {
@@ -386,4 +349,58 @@ func remoteAuthority(request *remoteapi.WorkerRequest, requestCorrelation uint64
 		closeOpen(files)
 		closeOpen(settings)
 	}
+}
+
+func openRemoteAuthoritySession(authority vfs.Authority) (handle.ID, string) {
+	var pair [2]uint64
+	if !createChannel(&pair) {
+		return 0, "REMOTE_AUTHORITY_CHANNEL_FAILED"
+	}
+	correlation++
+	request, ok := vfs.AddSessionWithAuthorityRequest(handle.ID(pair[1]), authority, correlation)
+	if !ok || !sendMessage(vfsControlHandle, request) {
+		closePair(pair)
+		return 0, "REMOTE_AUTHORITY_SEND_FAILED"
+	}
+	message, status := receive(vfsControlHandle, vfsSessionDeadline)
+	result, ok := vfs.DecodeAddSessionReply(message)
+	if status != ipc.StatusOK || !ok || result != vfs.StatusOK || message.Correlation != correlation {
+		closeOpen(handle.ID(pair[0]))
+		return 0, "REMOTE_AUTHORITY_REFUSED"
+	}
+	return handle.ID(pair[0]), ""
+}
+
+func protectConfiguredRemoteHost(files handle.ID, host string) bool {
+	if len(host) > len(remotePrivateDirectory) && host[:len(remotePrivateDirectory)] == remotePrivateDirectory && host[len(remotePrivateDirectory)] == '/' {
+		return true
+	}
+	paths := []string{host, host + ".new", host + ".pub", host + ".pub.new"}
+	missing := 0
+	for _, path := range paths {
+		found := false
+		for i := 0; i < remoteScopeCount; i++ {
+			if !remoteScopes[i].subtree && equalBytes(remoteScopes[i].path[:remoteScopes[i].size], path) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing++
+		}
+	}
+	if remoteScopeCount+missing > len(remoteScopes) || !ensureRemoteParents(files, host) {
+		return false
+	}
+	for _, path := range paths {
+		if !rememberRemoteScope(path, false, vfs.Read|vfs.Write) {
+			return false
+		}
+	}
+	for i := 0; i < remoteScopeCount; i++ {
+		if !installRemoteScope(i) {
+			return false
+		}
+	}
+	return true
 }

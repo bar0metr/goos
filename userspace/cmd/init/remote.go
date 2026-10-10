@@ -252,6 +252,13 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 	}
 	worker.control = handle.ID(pair[0])
 	defer closeOpen(handle.ID(pair[1]))
+	var signer [2]uint64
+	if !createChannel(&signer) {
+		failRemoteOpen(worker, remoteapi.ResultUnavailable)
+		return
+	}
+	defer closeOpen(handle.ID(signer[0]))
+	defer closeOpen(handle.ID(signer[1]))
 	var input, output [2]uint64
 	if !createStream(&input) {
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -270,6 +277,7 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 		{Name: "input", Handle: worker.input, Type: handle.TypeStream, Rights: capability.Read | capability.Wait, Consume: true},
 		{Name: "output", Handle: worker.output, Type: handle.TypeStream, Rights: capability.Write | capability.Wait, Consume: true},
 		{Name: "policy", Handle: worker.policy, Type: handle.TypeMemory, Rights: capability.Read, Consume: true},
+		{Name: "signer", Handle: handle.ID(signer[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
 	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false)
@@ -281,7 +289,7 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 	worker.process, worker.pid = event.ProcessHandle, event.Process
 	worker.input, worker.output, worker.policy = 0, 0, 0
 	var reply ipc.Message
-	if !remoteapi.EncodeWorkerLaunchReply(&remoteapi.WorkerReply{Operation: remoteapi.WorkerLaunch, Worker: worker.id, Result: remoteapi.ResultOK}, []handle.ID{handle.ID(input[1]), handle.ID(output[0])}, worker.requestCorrelation, &reply) || !sendMessage(uint64(remoteControl), reply) {
+	if !remoteapi.EncodeWorkerLaunchReply(&remoteapi.WorkerReply{Operation: remoteapi.WorkerLaunch, Worker: worker.id, Result: remoteapi.ResultOK}, []handle.ID{handle.ID(input[1]), handle.ID(output[0]), handle.ID(signer[0])}, worker.requestCorrelation, &reply) || !sendMessage(uint64(remoteControl), reply) {
 		closeRemoteWorker(worker)
 	}
 	worker.requestCorrelation = 0

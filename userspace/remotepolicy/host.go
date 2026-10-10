@@ -48,13 +48,18 @@ func (store *HostStore) Load(path string) (key *HostKey, retErr error) {
 	if err := store.Files.Lock(); err != nil {
 		return nil, err
 	}
+	var private ed25519.PrivateKey
 	defer func() {
 		if err := store.Files.Unlock(); err != nil {
 			key = nil
 			retErr = errors.Join(retErr, err)
 		}
+		if retErr != nil {
+			clear(private)
+		}
 	}()
 	seed, err := store.Files.Read(path, ed25519.SeedSize)
+	defer func() { clear(seed) }()
 	staged := false
 	if errors.Is(err, ErrNotFound) {
 		staged = true
@@ -78,6 +83,7 @@ func (store *HostStore) Load(path string) (key *HostKey, retErr error) {
 			if generationErr != nil {
 				return nil, generationErr
 			}
+			defer clear(private)
 			seed = private.Seed()
 			if err := store.makeParents(path); err != nil {
 				return nil, err
@@ -97,7 +103,7 @@ func (store *HostStore) Load(path string) (key *HostKey, retErr error) {
 	if len(seed) != ed25519.SeedSize {
 		return nil, errors.New("corrupt host key seed")
 	}
-	private := ed25519.NewKeyFromSeed(seed)
+	private = ed25519.NewKeyFromSeed(seed)
 	public := append(ed25519.PublicKey(nil), private[ed25519.SeedSize:]...)
 	line, err := PublicLine(public)
 	if err != nil {
@@ -168,6 +174,7 @@ func (store *HostStore) Load(path string) (key *HostKey, retErr error) {
 
 func (store *HostStore) verify(path string, expected []byte) error {
 	actual, err := store.Files.Read(path, len(expected))
+	defer clear(actual)
 	if err != nil {
 		return err
 	}

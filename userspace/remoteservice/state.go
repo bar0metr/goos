@@ -2,7 +2,6 @@
 package remoteservice
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"goos/userspace/config"
@@ -57,13 +56,35 @@ type Snapshot struct {
 	Listener    uint32
 }
 
-type State struct{ Current *Snapshot }
+type State struct {
+	Current    *Snapshot
+	reason     [256]byte
+	reasonSize uint16
+}
+
+func (s *State) Reject(reason string) {
+	if s.Current != nil {
+		return
+	}
+	clear(s.reason[:])
+	s.reasonSize = 0
+	for _, c := range []byte(reason) {
+		if int(s.reasonSize) == len(s.reason) {
+			break
+		}
+		if c < 0x20 || c > 0x7e {
+			c = '?'
+		}
+		s.reason[s.reasonSize] = c
+		s.reasonSize++
+	}
+}
 
 // CoherentLoad detects changes across two complete reads. It is a bounded
 // consistency check, not a transaction: callers with revisions should guard
 // the reads with that revision as well.
 func CoherentLoad(get remotepolicy.Getter) (remotepolicy.Policy, error) {
-	values := make(map[string]config.Value, 13)
+	values := make(map[string]config.Value, 14)
 	first, err := remotepolicy.Load(func(key string) (config.Value, config.Status) {
 		v, s := get(key)
 		if s == config.StatusOK {
@@ -90,7 +111,7 @@ func CoherentLoad(get remotepolicy.Getter) (remotepolicy.Policy, error) {
 // Prepare validates keys and constructs a new generation before touching a
 // listener. Empty authorized_keys is valid only while disabled.
 func (s *State) Prepare(policy remotepolicy.Policy, host *remotepolicy.HostKey, keys []ed25519.PublicKey) (*Snapshot, error) {
-	if host == nil || len(host.Private) != ed25519.PrivateKeySize || len(keys) > remoteapi.MaxKeys || policy.Enabled && len(keys) == 0 {
+	if host == nil || len(host.Public) != ed25519.PublicKeySize || !remoteapi.ValidUsername([]byte(policy.User)) || len(keys) > remoteapi.MaxKeys || policy.Enabled && len(keys) == 0 {
 		return nil, errors.New("remote keys unavailable")
 	}
 	generation := uint64(1)
@@ -101,7 +122,8 @@ func (s *State) Prepare(policy remotepolicy.Policy, host *remotepolicy.HostKey, 
 		}
 	}
 	next := &Snapshot{Policy: policy, Fingerprint: host.Fingerprint, Worker: remoteapi.WorkerPolicy{Generation: generation, MaxSessions: policy.MaxSessions, MaxAuthAttempts: policy.MaxAuthAttempts, HandshakeTimeoutMS: policy.HandshakeTimeoutMS, IdleTimeoutSeconds: policy.IdleTimeoutSec, KeyCount: uint8(len(keys))}}
-	copy(next.Worker.Seed[:], host.Private.Seed())
+	copy(next.Worker.HostPublicKey[:], host.Public)
+	next.Worker.UserLen = uint8(copy(next.Worker.Username[:], policy.User))
 	for i, key := range keys {
 		if len(key) != ed25519.PublicKeySize {
 			return nil, errors.New("invalid authorized key")
@@ -124,11 +146,13 @@ func (s *State) Commit(next *Snapshot) bool {
 		return false
 	}
 	s.Current = next
+	clear(s.reason[:])
+	s.reasonSize = 0
 	return true
 }
 func (s *State) Status(pending, authenticated int) []byte {
 	if s.Current == nil {
-		return []byte("service=unavailable listener=closed\n")
+		return []byte("service=running listener=closed settings=invalid reason=" + string(s.reason[:s.reasonSize]) + "\n")
 	}
 	current := s.Current
 	p := current.Policy
@@ -141,10 +165,10 @@ func (s *State) Status(pending, authenticated int) []byte {
 	text += " bind=" + strconv.Itoa(int(p.ListenAddress[0])) + "." + strconv.Itoa(int(p.ListenAddress[1])) + "." + strconv.Itoa(int(p.ListenAddress[2])) + "." + strconv.Itoa(int(p.ListenAddress[3])) + ":" + strconv.Itoa(int(p.Port))
 	text += " sessions=" + strconv.Itoa(authenticated) + " pending=" + strconv.Itoa(pending) + " fingerprint=" + current.Fingerprint
 	text += " max-sessions=" + strconv.Itoa(int(p.MaxSessions)) + " settings=configured"
-	text += " authorized-keys=" + p.AuthorizedKeys + " key-count=" + strconv.Itoa(int(current.Worker.KeyCount))
+	text += " user=" + p.User + " authorized-keys=" + p.AuthorizedKeys + " key-count=" + strconv.Itoa(int(current.Worker.KeyCount))
 	text += " kex=" + remotepolicy.KEXAlgorithm + " cipher=" + remotepolicy.CipherAlgorithm + " host-key=" + remotepolicy.KeyAlgorithm + " user-key=" + remotepolicy.KeyAlgorithm + " source=system.remote generation=" + strconv.FormatUint(current.Worker.Generation, 10) + "\n"
 	return []byte(text)
 }
-func SeedEqual(a, b *Snapshot) bool {
-	return a != nil && b != nil && bytes.Equal(a.Worker.Seed[:], b.Worker.Seed[:])
+func IdentityEqual(a, b *Snapshot) bool {
+	return a != nil && b != nil && a.Worker.HostPublicKey == b.Worker.HostPublicKey
 }

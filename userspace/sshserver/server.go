@@ -6,6 +6,7 @@ package sshserver
 import (
 	"crypto/ed25519"
 	"errors"
+	"goos/userspace/remoteapi"
 	"io"
 	"net"
 )
@@ -18,7 +19,8 @@ var ErrConfig = errors.New("sshserver: invalid configuration")
 var ErrCompatibilityBuild = errors.New("sshserver: build requires generated SSH compatibility module")
 
 type Config struct {
-	HostKey         ed25519.PrivateKey
+	HostPublicKey   ed25519.PublicKey
+	SignHost        func([]byte) ([]byte, error)
 	Username        string
 	AuthorizedKeys  []ed25519.PublicKey
 	Banner          string
@@ -63,7 +65,7 @@ type backend interface {
 type Server struct{ backend backend }
 
 func New(conn net.Conn, cfg Config) (*Server, error) {
-	if conn == nil || cfg.Username != "user" || len(cfg.HostKey) != ed25519.PrivateKeySize || len(cfg.AuthorizedKeys) == 0 || len(cfg.AuthorizedKeys) > 64 || len(cfg.Banner) > 1024 || cfg.MaxAuthAttempts < 1 || cfg.MaxAuthAttempts > 10 {
+	if conn == nil || !remoteapi.ValidUsername([]byte(cfg.Username)) || len(cfg.HostPublicKey) != ed25519.PublicKeySize || cfg.SignHost == nil || len(cfg.AuthorizedKeys) == 0 || len(cfg.AuthorizedKeys) > 64 || len(cfg.Banner) > 1024 || cfg.MaxAuthAttempts < 1 || cfg.MaxAuthAttempts > 10 {
 		return nil, ErrConfig
 	}
 	for _, key := range cfg.AuthorizedKeys {

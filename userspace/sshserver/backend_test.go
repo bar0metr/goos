@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,7 +28,7 @@ func sessionConfig(t *testing.T) (Config, ssh.Signer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, host, err := ed25519.GenerateKey(rand.Reader)
+	hostPublic, host, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func sessionConfig(t *testing.T) (Config, ssh.Signer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{HostKey: host, Username: "user", AuthorizedKeys: []ed25519.PublicKey{pub}, MaxAuthAttempts: 5}, signer
+	return Config{HostPublicKey: hostPublic, SignHost: func(data []byte) ([]byte, error) { return ed25519.Sign(host, data), nil }, Username: "user", AuthorizedKeys: []ed25519.PublicKey{pub}, MaxAuthAttempts: 5}, signer
 }
 func socketPair(t *testing.T) (net.Conn, net.Conn) {
 	t.Helper()
@@ -301,5 +302,37 @@ func TestOpenSSHInteractive(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "OPENSSH_SHELL_OK") {
 		t.Fatalf("OpenSSH output: %q", output.String())
+	}
+}
+
+func TestHostSignerExactInputAndFailure(t *testing.T) {
+	public, private, _ := ed25519.GenerateKey(rand.Reader)
+	key, _ := ssh.NewPublicKey(public)
+	input := bytes.Repeat([]byte{0x5a}, 32)
+	var observed []byte
+	signer := hostSigner{public: key, key: public, sign: func(data []byte) ([]byte, error) {
+		observed = append([]byte(nil), data...)
+		return ed25519.Sign(private, data), nil
+	}}
+	sig, err := signer.Sign(nil, input)
+	if err != nil || !bytes.Equal(observed, input) || !ed25519.Verify(public, input, sig.Blob) {
+		t.Fatal("altered signing input", err)
+	}
+	if _, err = signer.Sign(nil, input[:31]); err != errInvalidHostSignature {
+		t.Fatal("input bound", err)
+	}
+	failure := errors.New("signer unavailable")
+	signer.sign = func([]byte) ([]byte, error) { return nil, failure }
+	if _, err = signer.Sign(nil, input); err != failure {
+		t.Fatal("failure swallowed", err)
+	}
+	signer.sign = func([]byte) ([]byte, error) { return make([]byte, 63), nil }
+	if _, err = signer.Sign(nil, input); err != errInvalidHostSignature {
+		t.Fatal("signature bound", err)
+	}
+	_, other, _ := ed25519.GenerateKey(rand.Reader)
+	signer.sign = func(data []byte) ([]byte, error) { return ed25519.Sign(other, data), nil }
+	if _, err = signer.Sign(nil, input); err != errInvalidHostSignature {
+		t.Fatal("wrong identity", err)
 	}
 }

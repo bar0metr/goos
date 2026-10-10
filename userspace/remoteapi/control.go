@@ -7,7 +7,7 @@ import (
 )
 
 const WorkerProtocolID = uint64(0x47574f524b455231) // GWORKER1
-const WorkerVersion = uint16(2)
+const WorkerVersion = uint16(3)
 
 type WorkerOperation uint8
 
@@ -107,14 +107,11 @@ func DecodeWorkerReply(in *ipc.Message, correlation uint64, operation WorkerOper
 	if reply.Operation != operation || !EncodeWorkerReply(&reply, correlation, &canonical) {
 		return false
 	}
-	count := 0
-	if (reply.Operation == WorkerAuthority || reply.Operation == WorkerLaunch) && reply.Result == ResultOK {
-		count = 2
-	}
+	count := workerReplyHandleCount(&reply)
 	if int(in.HandleCount) != count {
 		return false
 	}
-	if count != 0 && (in.Handles[0] == 0 || in.Handles[1] == 0 || in.Handles[0] == in.Handles[1]) {
+	if !validWorkerReplyHandles(in.Handles[:count]) {
 		return false
 	}
 	*out = reply
@@ -158,17 +155,40 @@ func encodeWorkerGrantReply(reply *WorkerReply, attachments []handle.ID, correla
 	if !EncodeWorkerReply(reply, correlation, out) {
 		return false
 	}
-	count := 0
-	if reply.Result == ResultOK {
-		count = 2
-	}
+	count := workerReplyHandleCount(reply)
 	if len(attachments) != count {
 		return false
 	}
-	if count != 0 && (attachments[0] == 0 || attachments[1] == 0 || attachments[0] == attachments[1]) {
+	if !validWorkerReplyHandles(attachments) {
 		return false
 	}
 	out.HandleCount = uint8(count)
 	copy(out.Handles[:], attachments)
+	return true
+}
+
+func workerReplyHandleCount(reply *WorkerReply) int {
+	if reply.Result != ResultOK {
+		return 0
+	}
+	switch reply.Operation {
+	case WorkerLaunch:
+		return 3
+	case WorkerAuthority:
+		return 2
+	}
+	return 0
+}
+func validWorkerReplyHandles(attachments []handle.ID) bool {
+	for i, id := range attachments {
+		if id == 0 {
+			return false
+		}
+		for _, old := range attachments[:i] {
+			if id == old {
+				return false
+			}
+		}
+	}
 	return true
 }

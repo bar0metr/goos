@@ -27,7 +27,9 @@ ssh -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS
 ```
 
 Check the host fingerprint against `remote status` before trusting a new host.
-The login name is `user`. Password and keyboard-interactive authentication are
+The default login name is `user`; `system.remote.user` selects the SSH login
+label. It does not select an account or home directory. Password and
+keyboard-interactive authentication are
 unavailable. GoOS accepts one interactive PTY shell per connection; it rejects
 `exec`, SFTP/SCP, forwarding, agent, and X11 requests.
 
@@ -54,6 +56,7 @@ following keys through the normal typed `config` service, then use `remote reloa
 | `enabled` | bool | `false` | bool |
 | `listen-address` | text | `0.0.0.0` | canonical IPv4 |
 | `port` | uint | `22` | 1..65535 |
+| `user` | text | `user` | 1..32 ASCII letters, digits, `_`, `-` |
 | `authorized-keys` | text | `/home/user/.ssh/authorized_keys` | canonical absolute path, at most 64 bytes |
 | `host-key` | text | `/state/security/ssh/ssh_host_ed25519_key` | canonical path beneath `/state/`, at most 64 bytes |
 | `max-sessions` | uint | `4` | 1..4 |
@@ -73,7 +76,15 @@ legacy SHA-1, CBC, RSA/SHA-1, DSA, and RC4 paths remain unavailable.
 Reload validates the complete candidate, loads its keys, and prepares any
 replacement listener before commit. A failed reload keeps the running policy.
 Changing only policy reuses the listener. Established connections retain their
-admission policy snapshot. Disabling the listener stops new admissions.
+admission policy and host identity. Disabling the listener stops new admissions.
+The authorized-key path is independent of the login label; changing `user` does
+not rewrite `authorized-keys` or change shell/VFS authority.
+
+If startup cannot commit a valid candidate, PID 1 keeps `remoted` running with a
+confined bootstrap VFS session and no listener. `remote status` reports
+`service=running listener=closed settings=invalid reason=...`. Fix the settings
+and run `remote reload` to recover without restarting the service. A rejected
+replacement after a valid commit keeps the previous listener and policy.
 
 GCF1 scoped revisions bracket candidate reads, including concurrent changes that
 restore a previous value. Path changes also need free VFS scope capacity. Eight
@@ -102,6 +113,26 @@ do not delete it merely to suppress an unexplained host-key warning.
 `remote status` exposes only the standard SHA256 public-key fingerprint. A reboot
 using the same persistent disk must keep that fingerprint.
 
+`remoted` owns private keys in a fixed identity pool. Connections with the same
+host identity share one slot. Each worker holds a dedicated signing endpoint and
+a public-only policy page. PID 1 creates the channel pair and grants the worker
+endpoint without Transfer authority; the shell receives neither endpoint.
+
+The pinned Curve25519 KEX computes `H = SHA256(exchange transcript)` and forwards
+those 32 bytes unchanged to `ssh.Signer.Sign`, on initial exchange and rekey.
+The controller signs H with ordinary Ed25519 and returns a 64-byte signature.
+The worker verifies it against its admission public key. A signing timeout,
+protocol violation or failed signature closes that signing route without a
+private-key fallback. The five-second RPC bound also respects the remaining
+initial-handshake deadline.
+
+Existing connections retain their admission identity after a host-key reload.
+The controller keeps a retired key until its last worker releases the slot, then
+zeros it. Eight slots cover six worker-held identities, the current identity and
+a staging candidate; failed candidates leave the active identity unchanged.
+A compromised worker can request signatures on chosen 32-byte inputs. Framing
+and capability checks do not establish SSH transcript provenance.
+
 ## Terminal and lifecycle
 
 Local consoles and SSH workers use `tty.Engine` for edited lines, raw input,
@@ -128,7 +159,8 @@ reused slots.
 ## Security boundaries and limits
 
 - The controller holds one GTCP1 session. Workers receive only their bounded
-  ciphertext relays and immutable policy page, not listener authority.
+  ciphertext relays, public-only immutable policy and their signing endpoint,
+  not a host seed/private key or listener authority.
 - PID 1 admits at most two pending handshakes and four authenticated sessions.
   Runtime session limits can lower the authenticated cap.
 - Authorized-key files have a 64 KiB bound, 64-key cap, and 4096-byte line bound.
@@ -153,15 +185,25 @@ The final gate uses one primary VM boot with a real OpenSSH client, then one
 reboot on the same disk. It must prove authentication/rejection, local and remote
 terminal behavior, raw mode, geometry, stored resize, session cleanup/capacity,
 reload rollback, unsupported requests, and persistent private-key isolation.
-On 2026-10-10, `make test-remote VALIDATION=1` passed 65 assertions across both
-boots. The headless Q35/TCG run verified the mandatory algorithms, public-key
-login and refusal, terminal output and diagnostics, Ctrl-C/Ctrl-D, raw viewer
-geometry, stored resize, four authenticated sessions, two pending handshakes,
-forbidden requests, disconnect cleanup, reload rollback, and persistent identity.
-The rebooted remote shell received permission denied when it tried to read the
-host private key. Framebuffer pixel rendering and forced worker crashes are not
-part of this headless gate; terminal isolation and worker-failure cleanup have
-host-test coverage.
+On 2026-10-10, `make test-remote VALIDATION=1` passed 76 assertions across both
+boots. The headless Q35/TCG run verified degraded-start recovery, corrupt identity
+retention, a custom SSH login label with an independent authorized-key path, and
+forced OpenSSH rekey after reload. It also checked the mandatory algorithms,
+public-key login and refusal, terminal output and diagnostics, Ctrl-C/Ctrl-D,
+raw viewer geometry, stored resize, four authenticated sessions, two pending
+handshakes, forbidden requests, disconnect cleanup, reload rollback and persistent
+identity. The rebooted remote shell received permission denied when it tried to
+read the configured host private key. Framebuffer pixel rendering and forced
+worker crashes are not part of this headless gate; terminal isolation and
+worker-failure cleanup have host-test coverage.
+
+The initial hardening runs exposed a post-scan KEX failure: Go 1.25 weak key caches
+retained allocations across controller request-arena resets. The private SSH
+toolchain now uses a source-pinned stateless key-cache adapter. Its host tests,
+native rebuild and updated two-boot gate pass. The adapter invokes upstream key
+constructors without retaining expanded keys; it changes no cryptographic
+algorithm. Both `test-all` and `release-check` invoke `test-remote`; development
+uses focused host checks before one two-boot run.
 
 See [ADR 0199](../adr/0199-native-remote-terminal-sessions.md) for ownership and
 compatibility decisions.

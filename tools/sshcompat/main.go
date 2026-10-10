@@ -36,6 +36,9 @@ func main() {
 	}
 }
 func run(args []string) error {
+	if len(args) == 4 && args[0] == "--native-key-cache" {
+		return nativeKeyCache(args[1], args[2], args[3])
+	}
 	if len(args) != 3 {
 		return errors.New("usage: sshcompat SOURCE_XCRYPTO EMPTY_OUTPUT_ROOT ADAPTER_DIRECTORY")
 	}

@@ -22,11 +22,13 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   fixture keys are public test data and never production trust.
 - `make test-remote` builds a validation ISO and installed tree, then runs
   `tests/boot/remote.sh` with two sequential boots of one disposable disk.
-  Install OpenSSH, Python 3 and QEMU on the host. The harness creates test
+  Both `test-all` and `release-check` invoke this target once. Install OpenSSH,
+  Python 3 and QEMU on the host. The harness creates test
   Ed25519 login keys outside the checkout and installs only the authorized
-  public key into the guest. It checks disabled startup, minimal SSH algorithm
-  negotiation, public-key login and wrong-key/password refusal, separate stdout
-  and stderr, Ctrl-C/Ctrl-D, raw viewer geometry at 80x24 and at 100x30 on the
+  public key into the guest. It checks invalid-startup recovery and corrupt identity retention, custom SSH
+  login with an independent authorized-key path, real rekey after reload, minimal SSH algorithm
+  negotiation, public-key login and wrong-key/wrong-user/password refusal, stdout
+  and stderr on the shared PTY, Ctrl-C/Ctrl-D, raw viewer geometry at 80x24 and at 100x30 on the
   next launch after window-change, four concurrent sessions and fifth-login
   refusal, two pending native handshakes with an authenticated shell responsive,
   disconnect reaping, lower-limit reload with existing sessions preserved,

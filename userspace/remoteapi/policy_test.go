@@ -6,7 +6,8 @@ func testPolicy() WorkerPolicy {
 	var policy WorkerPolicy
 	policy.Generation, policy.MaxSessions, policy.MaxAuthAttempts = 1, 4, 3
 	policy.HandshakeTimeoutMS, policy.KeyCount = 15000, 2
-	policy.Seed[0], policy.Keys[0][0], policy.Keys[1][0] = 7, 11, 12
+	policy.HostPublicKey[0], policy.Keys[0][0], policy.Keys[1][0] = 7, 11, 12
+	policy.UserLen = uint8(copy(policy.Username[:], "user"))
 	return policy
 }
 
@@ -37,12 +38,16 @@ func TestWorkerPolicyRejectsMalformedWithoutChangingOutput(t *testing.T) {
 		func(b []byte) { b[8] = 65 },
 		func(b []byte) { b[9] = 5 },
 		func(b []byte) { b[10] = 0 },
-		func(b []byte) { b[11] = 1 },
+		func(b []byte) { b[11] = 33 },
 		func(b []byte) { clear(b[12:16]) },
 		func(b []byte) { b[19] = 1 },
 		func(b []byte) { b[20] = 1 },
 		func(b []byte) { clear(b[24:32]) },
 		func(b []byte) { b[len(b)-1] = 1 },
+		func(b []byte) { clear(b[32:64]) },
+		func(b []byte) { b[64] = 0 },
+		func(b []byte) { b[95] = 1 },
+		func(b []byte) { b[96] = 1 },
 	} {
 		bad := page
 		change(bad[:])

@@ -69,7 +69,7 @@ func TestCommitPreservesOldWorkerSnapshot(t *testing.T) {
 	if !state.Commit(second) {
 		t.Fatal("enabled commit")
 	}
-	if first.Policy.Enabled || first.Worker.Generation != 1 || second.Worker.Generation != 2 || !SeedEqual(first, second) {
+	if first.Policy.Enabled || first.Worker.Generation != 1 || second.Worker.Generation != 2 || !IdentityEqual(first, second) {
 		t.Fatal("snapshot changed")
 	}
 	if !strings.Contains(string(state.Status(2, 4)), "sessions=4 pending=2") || strings.Contains(string(state.Status(2, 4)), string(host.Private.Seed())) {
@@ -99,7 +99,7 @@ func TestCoherentLoadRejectsChangingConfiguration(t *testing.T) {
 	calls := 0
 	_, err := CoherentLoad(func(key string) (config.Value, config.Status) {
 		calls++
-		if calls == 14 {
+		if calls == 15 {
 			return config.Bool(true), config.StatusOK
 		}
 		return store.Get(config.Scope{}, config.Read, []byte(key))

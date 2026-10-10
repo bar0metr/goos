@@ -31,6 +31,7 @@ const budget = 5 * clock.TicksPerSecond
 var control, configChannel, vfsChannel, tcpChannel handle.ID
 var dispatch tcpdispatch.Session
 var state remoteservice.State
+var identities remoteservice.Identities
 var configClient config.Client
 var files nativefiles.Files
 var bulk utility.Bulk
@@ -45,11 +46,16 @@ var pumpingRPC bool
 var durableSnapshot remoteservice.Snapshot
 var durableHostPath, durableKeysPath [64]byte
 var durableFingerprint [64]byte
+var durableUsername [remoteapi.MaxUsername]byte
 var durableKEX = []string{remotepolicy.KEXAlgorithm}
 var durableCipher = []string{remotepolicy.CipherAlgorithm}
 var durableKeyAlgorithm = []string{remotepolicy.KeyAlgorithm}
 
 type worker struct {
+	signer                                                handle.ID
+	generation, signSequence                              uint64
+	identity                                              int
+	identityHeld                                          bool
 	endpoint                                              uint32
 	token                                                 uint64
 	input, output                                         handle.ID
@@ -139,7 +145,7 @@ func userspaceMain() {
 	transient := arena.Current()
 	if err := reload(); err != nil {
 		syslog.Error("remote startup rejected", syslog.Str("reason", err.Error()))
-		sys.Exit(1)
+		state.Reject(err.Error())
 	}
 	syslog.Info("remote service ready")
 	for {
@@ -147,6 +153,7 @@ func userspaceMain() {
 		serviceControl()
 		serviceTCP()
 		serviceAdmins()
+		serviceSigners()
 		advance()
 		var interests [kcall.WaitAnyMaxObjects]sys.Interest
 		count := 0
@@ -166,6 +173,7 @@ func userspaceMain() {
 			if w.close != 0 {
 				continue
 			}
+			add(w.signer, kcall.WaitReadable)
 			if !w.outputEOF && w.toTCP.Free() >= 256 {
 				add(w.output, kcall.WaitReadable)
 			}
@@ -175,6 +183,7 @@ func userspaceMain() {
 		}
 		_, status := sys.WaitAny(&interests, count, clock.TicksPerSecond)
 		if status != kcall.StatusOK && status != kcall.StatusTimeout {
+			syslog.Error("remote wait failed", syslog.Uint("status", uint64(status)), syslog.Uint("interests", uint64(count)))
 			sys.Exit(1)
 		}
 	}
@@ -193,6 +202,7 @@ func (configTransport) Receive(ticks uint64, out *ipc.Message) kcall.Status {
 	defer func() { pumpingRPC = previous }()
 	for remoteservice.Now() < deadline {
 		serviceTCP()
+		serviceSigners()
 		advance()
 		serviceControl()
 		status := remoteservice.Receive(channel, 0, out)
@@ -272,6 +282,7 @@ func reload() error {
 	if err != nil {
 		return err
 	}
+	defer clear(host.Private)
 	keyData, err := files.Read(policy.AuthorizedKeys, remotepolicy.MaxAuthorizedKeysBytes)
 	if errors.Is(err, remotepolicy.ErrNotFound) && !policy.Enabled {
 		keyData = nil
@@ -292,6 +303,11 @@ func reload() error {
 	if err != nil {
 		return err
 	}
+	identity, ok := identities.Reserve(host.Private)
+	if !ok {
+		return errors.New("remote identity capacity exhausted")
+	}
+	defer identities.Discard(identity)
 	old := state.Current
 	replacement := uint32(0)
 	if policy.Enabled {
@@ -328,11 +344,15 @@ func reload() error {
 		}
 		return errors.New("remote policy commit failed")
 	}
+	if !identities.Commit(identity) {
+		sys.Exit(1)
+	}
 	oldListener := uint32(0)
 	if old != nil {
 		oldListener = old.Listener
 	}
 	durableSnapshot = *next
+	durableSnapshot.Policy.User = sys.String(durableUsername[:copy(durableUsername[:], []byte(next.Policy.User))])
 	durableSnapshot.Policy.HostKey = sys.String(durableHostPath[:copy(durableHostPath[:], []byte(next.Policy.HostKey))])
 	durableSnapshot.Policy.AuthorizedKeys = sys.String(durableKeysPath[:copy(durableKeysPath[:], []byte(next.Policy.AuthorizedKeys))])
 	durableSnapshot.Fingerprint = sys.String(durableFingerprint[:copy(durableFingerprint[:], []byte(next.Fingerprint))])
@@ -360,6 +380,7 @@ func serviceControl() {
 			return
 		}
 		if status != kcall.StatusOK {
+			syslog.Error("remote control receive failed", syslog.Uint("status", uint64(status)))
 			sys.Exit(1)
 		}
 		notice(&message)
@@ -400,6 +421,7 @@ func workerCall(request *remoteapi.WorkerRequest, handles []handle.ID, out *ipc.
 	deadline := remoteservice.Now() + budget
 	for remoteservice.Now() < deadline {
 		serviceTCP()
+		serviceSigners()
 		advance()
 		status := remoteservice.Receive(control, 0, out)
 		if status == kcall.StatusNotFound {
@@ -463,6 +485,7 @@ func tcpCall(request tcpapi.Request) (tcpapi.Reply, bool) {
 	deadline := remoteservice.Now() + budget
 	for remoteservice.Now() < deadline {
 		serviceTCP()
+		serviceSigners()
 		advance()
 		if dispatch.Take(correlation, readBuffer[:], &reply) {
 			dispatch.Flush()
@@ -510,6 +533,7 @@ func serviceAdmins() {
 		text := state.Status(pending, authenticated)
 		if op == remoteapi.AdminReload {
 			if err := reload(); err != nil {
+				state.Reject(err.Error())
 				result = remoteapi.AdminUnavailable
 				syslog.Warn("remote reload rejected", syslog.Str("reason", err.Error()))
 				text = []byte(err.Error() + "\n")
@@ -710,13 +734,21 @@ func launchWorker(endpoint uint32) {
 	}
 	var reply remoteapi.WorkerReply
 	remoteapi.DecodeWorkerReply(&answer, answer.Correlation, request.Operation, &reply)
-	workers[index] = worker{endpoint: endpoint, token: reply.Worker, input: answer.Handles[0], output: answer.Handles[1]}
+	identity, ok := identities.Current()
+	if !ok || !identities.Retain(identity) {
+		syslog.Error("remote identity reference failed")
+		remoteservice.CloseHandles(&answer)
+		closeEndpoint(endpoint)
+		sys.Exit(1)
+	}
+	workers[index] = worker{endpoint: endpoint, token: reply.Worker, input: answer.Handles[0], output: answer.Handles[1], signer: answer.Handles[2], identity: identity, identityHeld: true, generation: state.Current.Worker.Generation}
 	syslog.Info("remote connection admitted", syslog.Uint("worker", reply.Worker))
 }
 func closeWorker(w *worker) {
 	if w.close != 0 || w.endpoint == 0 {
 		return
 	}
+	revokeSigner(w)
 	syslog.Info("remote connection closing", syslog.Uint("worker", w.token))
 	sys.HandleClose(w.input)
 	sys.HandleClose(w.output)
@@ -726,13 +758,62 @@ func closeWorker(w *worker) {
 		var message ipc.Message
 		sequence++
 		if !remoteapi.EncodeWorkerRequest(&request, nil, sequence, &message) || !remoteservice.Send(control, &message) {
+			syslog.Error("remote worker close request failed")
 			sys.Exit(1)
 		}
 		w.token = 0
 	}
 	w.close, _ = dispatch.Start(tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: w.endpoint}, nil)
 	if w.close == 0 {
+		syslog.Error("remote endpoint close failed")
 		sys.Exit(1)
 	}
 }
+func revokeSigner(w *worker) {
+	if w.signer != 0 {
+		sys.HandleClose(w.signer)
+		w.signer = 0
+	}
+	if w.identityHeld {
+		identities.Release(w.identity)
+		w.identityHeld = false
+	}
+}
+
+func serviceSigners() {
+	for i := range workers {
+		w := &workers[i]
+		if w.signer == 0 || w.close != 0 {
+			continue
+		}
+		var message ipc.Message
+		status := remoteservice.Receive(w.signer, 0, &message)
+		if status == kcall.StatusPeerDied {
+			revokeSigner(w)
+			continue
+		}
+		if status == kcall.StatusNotFound {
+			continue
+		}
+		var request remoteapi.SignRequest
+		if status != kcall.StatusOK || !remoteapi.DecodeSignRequest(&message, &request) || request.Generation != w.generation || w.signSequence == ^uint64(0) || message.Correlation != w.signSequence+1 {
+			remoteservice.CloseHandles(&message)
+			closeWorker(w)
+			continue
+		}
+		signature, ok := identities.Sign(w.identity, request.Data[:])
+		var reply ipc.Message
+		answer := remoteapi.SignReply{Generation: w.generation, Result: remoteapi.ResultOK, Signature: signature}
+		if !ok || !remoteapi.EncodeSignReply(&answer, message.Correlation, &reply) || !remoteservice.Send(w.signer, &reply) {
+			closeWorker(w)
+		} else {
+			w.signSequence++
+		}
+		clear(request.Data[:])
+		clear(signature[:])
+		clear(message.Payload[:])
+		clear(reply.Payload[:])
+	}
+}
+
 func main() {}

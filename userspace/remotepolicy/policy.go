@@ -11,6 +11,7 @@ import (
 const (
 	Prefix          = "system.remote."
 	MaxPath         = 64
+	MaxUser         = 32
 	KEXAlgorithm    = "curve25519-sha256"
 	KeyAlgorithm    = "ssh-ed25519"
 	CipherAlgorithm = "aes128-gcm@openssh.com"
@@ -22,6 +23,7 @@ type Policy struct {
 	Enabled            bool
 	ListenAddress      [4]byte
 	Port               uint16
+	User               string
 	AuthorizedKeys     string
 	HostKey            string
 	MaxSessions        uint8
@@ -44,11 +46,12 @@ func text(value string) config.Value {
 	return result
 }
 
-func defaults() [13]declaration {
-	return [13]declaration{
+func defaults() [14]declaration {
+	return [14]declaration{
 		{"enabled", config.Bool(false)},
 		{"listen-address", text("0.0.0.0")},
 		{"port", config.Uint(22)},
+		{"user", text("user")},
 		{"authorized-keys", text("/home/user/.ssh/authorized_keys")},
 		{"host-key", text("/state/security/ssh/ssh_host_ed25519_key")},
 		{"max-sessions", config.Uint(4)},
@@ -78,7 +81,7 @@ func Load(get Getter) (Policy, error) {
 	if get == nil {
 		return Policy{}, errors.New("remote configuration unavailable")
 	}
-	var values [13]config.Value
+	var values [14]config.Value
 	for index, item := range defaults() {
 		value, status := get(Prefix + item.name)
 		if status != config.StatusOK || value.Kind != item.value.Kind || !validValue(value) {
@@ -91,16 +94,19 @@ func Load(get Getter) (Policy, error) {
 	if err != nil || !address.Is4() || address.String() != addressText {
 		return Policy{}, errors.New("invalid remote listen address")
 	}
-	if !bounded(values[2].Uint, 1, 65535) || !bounded(values[5].Uint, 1, 4) ||
-		!bounded(values[6].Uint, 1, 10) || !bounded(values[7].Uint, 1000, 120000) ||
-		!bounded(values[8].Uint, 0, 86400) {
+	if !bounded(values[2].Uint, 1, 65535) || !bounded(values[6].Uint, 1, 4) ||
+		!bounded(values[7].Uint, 1, 10) || !bounded(values[8].Uint, 1000, 120000) ||
+		!bounded(values[9].Uint, 0, 86400) {
 		return Policy{}, errors.New("remote numeric setting outside bounds")
 	}
 	policy := Policy{
 		Enabled: values[0].Uint == 1, ListenAddress: address.As4(), Port: uint16(values[2].Uint),
-		AuthorizedKeys: string(values[3].Bytes()), HostKey: string(values[4].Bytes()),
-		MaxSessions: uint8(values[5].Uint), MaxAuthAttempts: uint8(values[6].Uint),
-		HandshakeTimeoutMS: uint32(values[7].Uint), IdleTimeoutSec: uint32(values[8].Uint),
+		User: string(values[3].Bytes()), AuthorizedKeys: string(values[4].Bytes()), HostKey: string(values[5].Bytes()),
+		MaxSessions: uint8(values[6].Uint), MaxAuthAttempts: uint8(values[7].Uint),
+		HandshakeTimeoutMS: uint32(values[8].Uint), IdleTimeoutSec: uint32(values[9].Uint),
+	}
+	if !ValidUser(policy.User) {
+		return Policy{}, errors.New("invalid remote user")
 	}
 	if !ValidPath(policy.AuthorizedKeys) || !ValidPath(policy.HostKey) || !strings.HasPrefix(policy.HostKey, "/state/") || policy.AuthorizedKeys == policy.HostKey ||
 		policy.AuthorizedKeys == policy.HostKey+".pub" || policy.AuthorizedKeys == policy.HostKey+".new" || policy.AuthorizedKeys == policy.HostKey+".pub.new" {
@@ -110,8 +116,8 @@ func Load(get Getter) (Policy, error) {
 		index     int
 		supported string
 		target    *[]string
-	}{{9, KEXAlgorithm, &policy.KEX}, {10, CipherAlgorithm, &policy.Ciphers},
-		{11, KeyAlgorithm, &policy.HostKeyAlgorithms}, {12, KeyAlgorithm, &policy.UserKeyAlgorithms}} {
+	}{{10, KEXAlgorithm, &policy.KEX}, {11, CipherAlgorithm, &policy.Ciphers},
+		{12, KeyAlgorithm, &policy.HostKeyAlgorithms}, {13, KeyAlgorithm, &policy.UserKeyAlgorithms}} {
 		algorithms, err := ParseAlgorithms(string(values[item.index].Bytes()), item.supported)
 		if err != nil {
 			return Policy{}, err
@@ -142,6 +148,19 @@ func validValue(value config.Value) bool {
 }
 
 func bounded(value, low, high uint64) bool { return value >= low && value <= high }
+
+// ValidUser accepts the SSH login label only; it is not an account or home selector.
+func ValidUser(user string) bool {
+	if len(user) == 0 || len(user) > MaxUser {
+		return false
+	}
+	for _, c := range []byte(user) {
+		if !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
 
 // ValidPath accepts a canonical absolute file path, not a directory or an alias.
 func ValidPath(path string) bool {

@@ -24,12 +24,12 @@ import (
 )
 func die(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
 func main() {
- if len(os.Args)!=6 { die(fmt.Errorf("usage: requests ADDRESS KEY KNOWN_HOSTS HOST_ALIAS MODE")) }
- mode:=os.Args[5]
+ if len(os.Args)!=7 { die(fmt.Errorf("usage: requests ADDRESS KEY KNOWN_HOSTS HOST_ALIAS USER MODE")) }
+ mode:=os.Args[6]
  key,err:=os.ReadFile(os.Args[2]); if err!=nil {die(err)}
  signer,err:=ssh.ParsePrivateKey(key); if err!=nil {die(err)}
  verify,err:=knownhosts.New(os.Args[3]); if err!=nil {die(err)}
- cfg:=&ssh.ClientConfig{User:"user", Auth:[]ssh.AuthMethod{ssh.PublicKeys(signer)}, Timeout:10*time.Second,
+ cfg:=&ssh.ClientConfig{User:os.Args[5], Auth:[]ssh.AuthMethod{ssh.PublicKeys(signer)}, Timeout:10*time.Second,
   Config:ssh.Config{KeyExchanges:[]string{"curve25519-sha256"}, Ciphers:[]string{"aes128-gcm@openssh.com"}},
   HostKeyAlgorithms:[]string{"ssh-ed25519"}, HostKeyCallback:func(_ string,a net.Addr,k ssh.PublicKey)error{return verify(net.JoinHostPort(os.Args[4],"22"),a,k)}}
  dial:=func()*ssh.Client{c,e:=ssh.Dial("tcp",os.Args[1],cfg);if e!=nil{die(e)};return c}
@@ -106,6 +106,11 @@ guest = None
 serial = None
 boot_number = 0
 PROMPT = rb"(?:^|\n)goos> $"
+REMOTE_USER = "remote-admin"
+AUTHORIZED_KEYS_PATH = "/home/user/remote-keys/authorized_keys"
+CORRUPT_HOST_KEY_PATH = "/state/security/ssh/corrupt_host_ed25519_key"
+RECOVERED_HOST_KEY_PATH = "/state/security/ssh/recovered_host_ed25519_key"
+REKEY_OUTPUT_PATH = "/home/user/remote-rekey.txt"
 
 
 def fail(name, detail):
@@ -168,9 +173,23 @@ for name in ("login", "wrong"):
     result = run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"goos-{name}-test", "-f", work / name])
     require(f"fixture.{name}", result.returncode == 0, "disposable host-only Ed25519 identity")
 shutil.copytree(source, work / "tree")
-authorized = work / "tree/home/user/.ssh"
+authorized = work / "tree" / str(Path(AUTHORIZED_KEYS_PATH).parent).lstrip("/")
 authorized.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(work / "login.pub", authorized / "authorized_keys")
+corrupt = work / "tree" / CORRUPT_HOST_KEY_PATH.lstrip("/")
+corrupt.parent.mkdir(parents=True, exist_ok=True)
+corrupt.write_bytes(b"CORRUPT_ALT_HOST_KEY\n")
+(work / "tree" / REKEY_OUTPUT_PATH.lstrip("/")).write_bytes(b"R" * 2048 + b"\n")
+persisted_config = work / "tree/state/config"
+previous = persisted_config.read_bytes() if persisted_config.exists() else b""
+if previous and not previous.endswith(b"\n"):
+    previous += b"\n"
+persisted_config.write_bytes(previous + (
+    "system.remote.enabled bool true\n"
+    "system.remote.port uint 0\n"
+    f"system.remote.user text {REMOTE_USER}\n"
+    f"system.remote.authorized-keys text {AUTHORIZED_KEYS_PATH}\n"
+    f"system.remote.host-key text {CORRUPT_HOST_KEY_PATH}\n").encode())
 # Wide, recognizable text proves both initial and resized viewer geometry.
 (work / "tree/home/user/remote-view.txt").write_text("G" * 110 + "\nREMOTE_VIEW_BODY\n")
 require("image.no-private-key", not (work / "tree/state/security/ssh/ssh_host_ed25519_key").exists(),
@@ -287,7 +306,7 @@ def pin_identity(port, fingerprint, initial=False):
     counts()
 
 
-def ssh_args(port, name, key="login", extra=()):
+def ssh_args(port, name, key="login", extra=(), user=REMOTE_USER):
     return ["ssh", "-F", "/dev/null", "-vv", "-E", str(work / f"{name}.debug.log"),
             "-p", str(port), "-i", str(work / key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
             "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ConnectionAttempts=1",
@@ -295,11 +314,11 @@ def ssh_args(port, name, key="login", extra=()):
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", "HostKeyAlias=goos-remote-test",
             "-o", "KexAlgorithms=curve25519-sha256", "-o", "Ciphers=aes128-gcm@openssh.com",
             "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519",
-            "-o", "SendEnv=-*", *extra, "user@127.0.0.1"]
+            "-o", "SendEnv=-*", *extra, f"{user}@127.0.0.1"]
 
 
 class Terminal:
-    def __init__(self, port, name):
+    def __init__(self, port, name, extra=()):
         self.name, self.rows, self.columns = name, 24, 80
         self.stdout = bytearray()
         self.path = work / f"{name}.stdout.log"
@@ -309,7 +328,7 @@ class Terminal:
         self.master, slave = pty.openpty()
         tty.setraw(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.columns, 0, 0))
-        self.process = subprocess.Popen(ssh_args(port, name, extra=("-tt",)), stdin=slave,
+        self.process = subprocess.Popen(ssh_args(port, name, extra=("-tt", *extra)), stdin=slave,
                                         stdout=slave, stderr=self.error, start_new_session=True,
                                         env={**os.environ, "TERM": "xterm"})
         os.close(slave)
@@ -362,8 +381,8 @@ class Terminal:
         self.pump()
 
 
-def rejected_login(name, port, key="wrong", extra=()):
-    result = run(ssh_args(port, name, key, extra), 15)
+def rejected_login(name, port, key="wrong", extra=(), user=REMOTE_USER):
+    result = run(ssh_args(port, name, key, extra, user=user), 15)
     debug = (work / f"{name}.debug.log").read_bytes()
     (work / f"{name}.stderr.log").write_bytes(result.stderr)
     require(name, result.returncode != 0 and b"Authentications that can continue: publickey" in debug and
@@ -385,11 +404,30 @@ def poweroff():
 
 try:
     boot()
-    initial = status(enabled="false", listener="closed", sessions=0, pending=0,
-                     source="system.remote", **{"key-count": 1})
+    invalid = status(listener="closed", settings="invalid")
+    require("bootstrap.invalid-status", invalid.get("reason") is not None,
+            "invalid startup retains running admin service and rejection reason")
+    require("bootstrap.invalid-no-accepts", not scan(ports[0]) and not scan(ports[1]),
+            "invalid startup exposes no SSH host key")
+    config("port", "22")
+    rejected = console("remote reload")
+    require("bootstrap.corrupt-host-key-refused", b"exit status: 2" in rejected,
+            "repairing policy does not overwrite corrupt host identity")
+    status(listener="closed", settings="invalid")
+    require("bootstrap.corrupt-no-accepts", not scan(ports[0]), "corrupt identity keeps listener closed")
+    config("host-key", RECOVERED_HOST_KEY_PATH)
+    reload_ok()
+    initial = status(enabled="true", listener="listening", settings="configured", user=REMOTE_USER,
+                     sessions=0, pending=0, source="system.remote", **{"key-count": 1, "authorized-keys": AUTHORIZED_KEYS_PATH})
     identity = initial.get("fingerprint", "")
-    require("default.disabled", identity.startswith("SHA256:") and not scan(ports[0]),
-            "disabled startup has a persistent identity but no SSH listener")
+    require("bootstrap.recovered-identity", identity.startswith("SHA256:"),
+            "explicit alternate identity recovers without restarting service")
+    config("host-key", CORRUPT_HOST_KEY_PATH)
+    retained = console("remote reload")
+    require("bootstrap.corrupt-host-key-retained", b"exit status: 2" in retained and
+            status(listener="listening").get("fingerprint") == identity,
+            "corrupt original identity still rejects reload; applied identity remains active")
+    config("host-key", RECOVERED_HOST_KEY_PATH)
     config("max-sessions", "4")
     config("handshake-timeout-ms", "60000")
     config("enabled", "true")
@@ -399,6 +437,8 @@ try:
     rejected_login("auth.wrong-key", ports[0])
     rejected_login("auth.password-unavailable", ports[0], "login",
                    ("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=0"))
+
+    rejected_login("auth.wrong-user", ports[0], "login", user="user")
 
     session = Terminal(ports[0], "primary-shell")
     session.wait(PROMPT)
@@ -452,8 +492,28 @@ try:
     counts()
     require("terminal.ctrl-d-cleanup", session.process.returncode == 0, "EOF disconnect cleanly exited and reaped authenticated session")
 
+    rekey = Terminal(ports[0], "reload-rekey", extra=("-o", "RekeyLimit=1K"))
+    rekey.wait(PROMPT)
+    rekey_pid = rekey.process.pid
+    config("idle-timeout-sec", "60")
+    reload_ok()
+    rekey_debug = work / "reload-rekey.debug.log"
+    rekey_offset = rekey_debug.stat().st_size
+    body = rekey.command(f"cat {REKEY_OUTPUT_PATH}")
+    require("reload.rekey-controlled-output", re.search(rb"(?:^|\n)R{2048}\r?\n", body) is not None,
+            "bounded post-reload output crosses client rekey threshold")
+    wait_until(lambda: b"SSH2_MSG_NEWKEYS received" in rekey_debug.read_bytes()[rekey_offset:],
+               "OpenSSH completes post-reload rekey", 30)
+    require("reload.rekey-openssh", True, "client records completed post-reload key exchange")
+    require("reload.rekey-same-connection", rekey.process.pid == rekey_pid and rekey.process.poll() is None and
+            b"REKEY_AFTER_RELOAD_OK" in rekey.command("echo REKEY_AFTER_RELOAD_OK"),
+            "fresh command completes after rekey on the original SSH connection")
+    rekey.send(b"\x04")
+    wait_until(lambda: rekey.process.poll() is not None, "rekey shell EOF disconnect")
+    counts()
+
     for name in ("exec", "subsystem", "env", "auth-agent-req@openssh.com", "x11-req", "second-session", "direct-tcpip", "tcpip-forward"):
-        result = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", name], 20)
+        result = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, name], 20)
         (work / f"forbidden-{name}.log").write_bytes(result.stdout + result.stderr)
         require(f"forbidden.{name}", result.returncode == 0 and f"REJECT {name}\n".encode() in result.stdout,
                 "explicit negative SSH reply/channel-open failure")
@@ -559,7 +619,7 @@ try:
     poweroff()
 
     boot()
-    persisted = status(enabled="true", listener="listening", bind="0.0.0.0:2222", sessions=0, pending=0)
+    persisted = status(enabled="true", listener="listening", bind="0.0.0.0:2222", user=REMOTE_USER, sessions=0, pending=0, **{"authorized-keys": AUTHORIZED_KEYS_PATH})
     require("reboot.config-and-identity", persisted.get("fingerprint") == identity,
             "enabled state, alternate port and serial identity survive the same disk's reboot")
     stored = console("config get system.remote.max-sessions", rb"CONFIG_GET_OK")
@@ -571,11 +631,11 @@ try:
     require("reboot.login", b"REBOOT_LOGIN_OK" in rebooted.command("echo REBOOT_LOGIN_OK"),
             "OpenSSH strict pinned-host-key login after reboot")
     start = len(rebooted.stdout)
-    rebooted.command("cat /state/security/ssh/ssh_host_ed25519_key")
+    rebooted.command(f"cat {RECOVERED_HOST_KEY_PATH}")
     rebooted.wait(rb"exit status: [1-9][0-9]*\r?\n", start)
     body = bytes(rebooted.stdout[start:])
     require("login.private-key-denied", b"CAT_PROCESS_OK" not in body and
-            re.search(rb"(?:^|\n)cat: /state/security/ssh/ssh_host_ed25519_key: permission denied\r?\n", body) is not None,
+            re.search(rb"(?:^|\n)cat: " + re.escape(RECOVERED_HOST_KEY_PATH.encode()) + rb": permission denied\r?\n", body) is not None,
             "read of the fingerprint-proven persistent private key failed at the login VFS scope")
     rebooted.send(b"\x04")
     wait_until(lambda: rebooted.process.poll() is not None, "reboot shell EOF disconnect")

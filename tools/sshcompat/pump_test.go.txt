@@ -12,9 +12,14 @@ import (
  "time"
 )
 func testPump(t *testing.T,limits ...int)(*Pump,*Client,net.Conn){
+ t.Helper();_,host,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
+ signer,_:=NewSignerFromKey(host)
+ return testPumpUsingSigner(t,signer,limits...)
+}
+func testPumpUsingSigner(t *testing.T,signer Signer,limits ...int)(*Pump,*Client,net.Conn){
  maxFailures:=5;if len(limits)>0{maxFailures=limits[0]}
- t.Helper();_,host,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)};pub,user,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
- signer,_:=NewSignerFromKey(host);us,_:=NewSignerFromKey(user)
+ t.Helper();pub,user,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
+ us,_:=NewSignerFromKey(user)
  config:=&ServerConfig{Config:Config{Rand:rand.Reader},MaxAuthTries:maxFailures,PublicKeyCallback:func(c ConnMetadata,key PublicKey)(*Permissions,error){if c.User()!="user" || !bytes.Equal(key.Marshal(),mustPublic(t,pub).Marshal()){return nil,ErrNoAuth};return nil,nil}}
  config.AddHostKey(signer)
  server,client,err:=netPipe();if err!=nil{t.Fatal(err)};_ = server.SetDeadline(time.Now().Add(5*time.Second));_ = client.SetDeadline(time.Now().Add(5*time.Second))
@@ -153,3 +158,31 @@ func TestGoOSPumpPingDuringRekey(t *testing.T){
  p.phase=0;if err=p.flushControl();err!=nil{t.Fatal(err)};reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};packet,err:=reader.readPacket(bufio.NewReader(&wire),false);if err!=nil{t.Fatal(err)};var pong pongMsg;if err=Unmarshal(packet,&pong);err!=nil || pong.Data!="opaque" || p.controlUsed!=0{t.Fatal("deferred pong missing",err)}
 }
 func TestGoOSPumpExecRejected(t *testing.T){p,c,conn:=testPump(t);done:=make(chan error,1);go func(){s,err:=c.NewSession();if err==nil{err=s.Start("id")};done<-err}();for handled:=0;handled<2;{e,err:=p.Poll();if err!=nil{t.Fatal(err)};if e.Kind==PumpNeedInput{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};if _,err=p.Feed(b[:n]);err!=nil{t.Fatal(err)}}else{handled++}};select{case err:=<-done:if err==nil{t.Fatal("exec accepted")};case <-time.After(time.Second):t.Fatal("request reply missing")}}
+
+// Record the actual upstream host-sign input on initial KEX and rekey.
+type recordingHostSigner struct {
+ key PublicKey
+ private ed25519.PrivateKey
+ inputs [][]byte
+ signatures [][]byte
+}
+func (s *recordingHostSigner) PublicKey() PublicKey {return s.key}
+func (s *recordingHostSigner) Sign(_ io.Reader,data []byte)(*Signature,error){
+ signature:=ed25519.Sign(s.private,data)
+ s.inputs=append(s.inputs,append([]byte(nil),data...))
+ s.signatures=append(s.signatures,signature)
+ return &Signature{Format:KeyAlgoED25519,Blob:signature},nil
+}
+func TestGoOSHostSignerActualInitialAndRekeyInput(t *testing.T){
+ public,private,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
+ signer:=&recordingHostSigner{key:mustPublic(t,public),private:private}
+ p,c,conn:=testPumpUsingSigner(t,signer)
+ if len(signer.inputs)!=1 {t.Fatal("initial signatures",len(signer.inputs))}
+ c.Conn.(*connection).transport.(*handshakeTransport).requestKeyExchange()
+ if event:=drive(t,p,conn);event.Kind!=PumpRekey {t.Fatal("rekey event",event)}
+ if len(signer.inputs)!=2 {t.Fatal("rekey signatures",len(signer.inputs))}
+ for i,input:=range signer.inputs {
+  if len(input)!=32 || len(signer.signatures[i])!=ed25519.SignatureSize || !ed25519.Verify(public,input,signer.signatures[i]) {t.Fatal("actual KEX signing contract",i,len(input))}
+ }
+ if bytes.Equal(signer.inputs[0],signer.inputs[1]) {t.Fatal("rekey reused initial exchange hash")}
+}

@@ -19,7 +19,8 @@ import (
 	"goos/userspace/tty"
 )
 
-var control, terminal, stdout handle.ID
+var control, terminal, stdout, signerChannel handle.ID
+var signingClient *hostSigner
 var token, sequence uint64
 var server *sshserver.Server
 var engine *tty.Engine
@@ -53,6 +54,10 @@ func userspaceMain() {
 	if !ok {
 		sys.Exit(1)
 	}
+	signerChannel, ok = data.Handle("signer")
+	if !ok {
+		sys.Exit(1)
+	}
 	conn.Input, ok = data.Handle("input")
 	if !ok {
 		sys.Exit(1)
@@ -74,17 +79,32 @@ func userspaceMain() {
 	for i := range keys {
 		keys[i] = policy.Keys[i][:]
 	}
+	signingClient, ok = newHostSigner(ed25519.PublicKey(policy.HostPublicKey[:]), policy.Generation, signerTransport{
+		send: func(message *ipc.Message) bool { return remoteservice.Send(signerChannel, message) },
+		receive: func(ticks uint64, message *ipc.Message) kcall.Status {
+			return remoteservice.Receive(signerChannel, ticks, message)
+		},
+		closeHandles: remoteservice.CloseHandles,
+		close:        closeHostSigner,
+		now:          remoteservice.Now,
+	})
+	if !ok {
+		sys.Exit(1)
+	}
+	username := string(policy.Username[:policy.UserLen])
 	var err error
-	server, err = sshserver.New(&conn, sshserver.Config{HostKey: ed25519.NewKeyFromSeed(policy.Seed[:]), Username: "user", AuthorizedKeys: keys, MaxAuthAttempts: int(policy.MaxAuthAttempts)})
+	server, err = sshserver.New(&conn, sshserver.Config{HostPublicKey: ed25519.PublicKey(policy.HostPublicKey[:]), SignHost: signingClient.Sign, Username: username, AuthorizedKeys: keys, MaxAuthAttempts: int(policy.MaxAuthAttempts)})
 	if err != nil {
 		finish(1)
 	}
+	signingClient.deadline = remoteservice.Now() + conn.TimeoutTicks
 	conn.HandshakeDeadline(conn.TimeoutTicks)
-	if server.Handshake() != nil || server.User() != "user" {
+	if server.Handshake() != nil || server.User() != username {
 		syslog.Warn("remote SSH authentication or handshake failed")
 		finish(1)
 	}
 	conn.ClearDeadline()
+	signingClient.deadline = 0
 	handshaken = true
 	authenticated, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationAuthenticate})
 	if !ok {
@@ -92,7 +112,7 @@ func userspaceMain() {
 		finish(1)
 	}
 	token = authenticated.Session
-	syslog.Info("remote authentication accepted", syslog.Str("user", "user"), syslog.Uint("session", token))
+	syslog.Info("remote authentication accepted", syslog.Str("user", username), syslog.Uint("session", token))
 	engine = tty.NewEngine(func(bytes []byte) bool { return output.Put(bytes) }, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
 	geometry, _ = remoteapi.MakeGeometry(80, 24, []byte("xterm"))
 	lastActivity := remoteservice.Now()
@@ -355,6 +375,7 @@ func finish(status uint32) {
 	if engine != nil {
 		engine.CloseSession()
 	}
+	closeHostSigner()
 	conn.Close()
 	// PID 1 may terminate this worker as soon as Close is delivered.
 	if token != 0 {
@@ -400,3 +421,10 @@ func awaitPeerClose(deadline uint64) {
 	}
 }
 func main() {}
+
+func closeHostSigner() {
+	if signerChannel != 0 {
+		sys.HandleClose(signerChannel)
+		signerChannel = 0
+	}
+}

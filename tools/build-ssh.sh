@@ -12,6 +12,7 @@ mkdir "$work/tinygo" "$work/go" "$work/crypto"
 go run ./tools/cryptocompat "$source_tinygo" "$work/tinygo" tinygo/runtime/native.go.txt
 go run ./tools/tlscompat "$source_go" "$work/tinygo" "$work/go" tinygo/runtime/sysrand.go.txt tinygo/runtime/tls-cache.go.txt
 go run ./tools/sshcompat "$source_crypto" "$work/crypto" tools/sshcompat
+go run ./tools/sshcompat --native-key-cache "$source_go" "$work/go" tools/sshcompat/keycache.go.txt
 cp go.mod "$work/go.mod"
 cp go.sum "$work/go.sum"
 go mod edit -modfile="$work/go.mod" -replace="golang.org/x/crypto=$work/crypto"

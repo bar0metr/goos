@@ -41,7 +41,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Policy{
-		Port: 22, AuthorizedKeys: "/home/user/.ssh/authorized_keys", HostKey: "/state/security/ssh/ssh_host_ed25519_key",
+		Port: 22, User: "user", AuthorizedKeys: "/home/user/.ssh/authorized_keys", HostKey: "/state/security/ssh/ssh_host_ed25519_key",
 		MaxSessions: 4, MaxAuthAttempts: 3, HandshakeTimeoutMS: 15000,
 		KEX: []string{KEXAlgorithm}, Ciphers: []string{CipherAlgorithm},
 		HostKeyAlgorithms: []string{KeyAlgorithm}, UserKeyAlgorithms: []string{KeyAlgorithm},
@@ -152,6 +152,28 @@ func TestAlgorithmLists(t *testing.T) {
 			if _, err := ParseAlgorithms(malformed, supported); err == nil {
 				t.Errorf("invalid list %q accepted", malformed)
 			}
+		}
+	}
+}
+
+func TestRemoteLoginLabelAndIndependentKeyPath(t *testing.T) {
+	for _, user := range []string{"u", "Admin_0-9", strings.Repeat("a", MaxUser)} {
+		values := defaultValues(t)
+		values[Prefix+"user"] = text(user)
+		values[Prefix+"authorized-keys"] = text("/home/user/.ssh/custom_keys")
+		policy, err := Load(getter(values))
+		if err != nil || policy.User != user || policy.AuthorizedKeys != "/home/user/.ssh/custom_keys" {
+			t.Fatal(policy, err)
+		}
+	}
+	for _, user := range []string{"", strings.Repeat("a", MaxUser+1), "user.name", "user/name", "user name", "user!", "юзер", "user\n"} {
+		values := defaultValues(t)
+		values[Prefix+"user"] = text(user)
+		if ValidUser(user) {
+			t.Fatal("invalid user", user)
+		}
+		if _, err := Load(getter(values)); err == nil {
+			t.Fatal("invalid candidate", user)
 		}
 	}
 }

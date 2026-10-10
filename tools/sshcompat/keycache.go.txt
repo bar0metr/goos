@@ -1,0 +1,8 @@
+// GoOS request arenas cannot retain weak-cache allocations between requests.
+package fips140cache
+
+type Cache[K, V any] struct{}
+
+func (*Cache[K, V]) Get(_ *K, create func() (*V, error), _ func(*V) bool) (*V, error) {
+	return create()
+}

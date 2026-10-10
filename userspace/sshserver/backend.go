@@ -5,8 +5,11 @@ package sshserver
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
 	"golang.org/x/crypto/ssh"
+	"io"
 	"net"
 )
 
@@ -29,11 +32,38 @@ func (b *pumpBackend) stable(err error) error {
 	b.failure.size = copy(b.failure.message[:], err.Error())
 	return &b.failure
 }
-func newBackend(conn net.Conn, cfg Config) (backend, error) {
-	signer, err := ssh.NewSignerFromKey(cfg.HostKey)
+
+var errInvalidHostSignature = errors.New("sshserver: invalid host signature")
+
+type hostSigner struct {
+	public ssh.PublicKey
+	key    ed25519.PublicKey
+	sign   func([]byte) ([]byte, error)
+}
+
+func (s hostSigner) PublicKey() ssh.PublicKey { return s.public }
+func (s hostSigner) Sign(_ io.Reader, data []byte) (*ssh.Signature, error) {
+	// The pinned curve25519-sha256 KEX supplies H without another hash.
+	if len(data) != sha256.Size {
+		return nil, errInvalidHostSignature
+	}
+	signature, err := s.sign(data)
 	if err != nil {
 		return nil, err
 	}
+	if len(signature) != ed25519.SignatureSize || !ed25519.Verify(s.key, data, signature) {
+		return nil, errInvalidHostSignature
+	}
+	return &ssh.Signature{Format: ssh.KeyAlgoED25519, Blob: signature}, nil
+}
+
+func newBackend(conn net.Conn, cfg Config) (backend, error) {
+	hostPublic := append(ed25519.PublicKey(nil), cfg.HostPublicKey...)
+	public, err := ssh.NewPublicKey(hostPublic)
+	if err != nil {
+		return nil, err
+	}
+	signer := hostSigner{public: public, key: hostPublic, sign: cfg.SignHost}
 	keys := make([][]byte, len(cfg.AuthorizedKeys))
 	for i, key := range cfg.AuthorizedKeys {
 		public, err := ssh.NewPublicKey(ed25519.PublicKey(key))
