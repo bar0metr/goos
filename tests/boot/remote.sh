@@ -418,7 +418,8 @@ try:
     config("host-key", RECOVERED_HOST_KEY_PATH)
     reload_ok()
     initial = status(enabled="true", listener="listening", settings="configured", user=REMOTE_USER,
-                     sessions=0, pending=0, source="system.remote", **{"key-count": 1, "authorized-keys": AUTHORIZED_KEYS_PATH})
+                     sessions=0, source="system.remote", **{"key-count": 1, "authorized-keys": AUTHORIZED_KEYS_PATH})
+    counts()  # A prior key scan can reach the newly opened listener after reload.
     identity = initial.get("fingerprint", "")
     require("bootstrap.recovered-identity", identity.startswith("SHA256:"),
             "explicit alternate identity recovers without restarting service")
@@ -443,6 +444,8 @@ try:
     session = Terminal(ports[0], "primary-shell")
     session.wait(PROMPT)
     require("auth.good-key", session.process.poll() is None, "OpenSSH public-key login opens native shell")
+    require("terminal.prompt-column-zero", b"\r\ngoos> " in session.stdout,
+            "cooked prompt starts at column zero after CRLF")
     debug = (work / "primary-shell.debug.log").read_bytes()
     for name, pattern in (("kex", b"kex: algorithm: curve25519-sha256"),
                           ("host-key", b"kex: host key algorithm: ssh-ed25519"),
@@ -451,9 +454,18 @@ try:
     body = session.command("echo REMOTE_STDOUT_OK")
     require("shell.stdout", re.search(rb"(?:^|\n)REMOTE_STDOUT_OK\r?\n", body) is not None,
             "native command output, not command echo")
+    require("terminal.stdout-column-zero", b"\r\nREMOTE_STDOUT_OK\r\n" in body and b"\r\ngoos> " in body,
+            "cooked command output and following prompt start at column zero")
     error = session.command("cat /home/user/remote-missing-file")
     require("shell.stderr", re.search(rb"(?:^|\n)cat: /home/user/remote-missing-file: no such file or directory\r?\n", error) is not None,
             "native stderr reaches the shared PTY stream, like local terminal jobs")
+    require("terminal.stderr-column-zero", b"\r\ncat: /home/user/remote-missing-file: no such file or directory\r\n" in error,
+            "cooked diagnostics start at column zero")
+    log_output = session.command("log")
+    records = list(re.finditer(rb"\[20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z\]", log_output))
+    require("terminal.log-column-zero", len(records) > 0 and all(
+            record.start() >= 2 and log_output[record.start()-2:record.start()] == b"\r\n"
+            for record in records), "system log records start at column zero")
     start = len(session.stdout)
     session.send(b"sleep 60\n")
     session.wait(rb"sleep 60", start)
