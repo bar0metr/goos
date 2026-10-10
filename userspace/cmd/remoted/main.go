@@ -790,6 +790,7 @@ func serviceSigners() {
 		status := remoteservice.Receive(w.signer, 0, &message)
 		if status == kcall.StatusPeerDied {
 			revokeSigner(w)
+			closeWorker(w)
 			continue
 		}
 		if status == kcall.StatusNotFound {
