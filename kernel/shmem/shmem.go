@@ -25,6 +25,9 @@ const (
 	// MaxObjectsPerProcess bounds the objects one process pays for, so one
 	// process cannot take the whole table from the others.
 	MaxObjectsPerProcess = 16
+	// MaxObjectsPerSupervisor includes private exec and policy pages for
+	// four remote shells and two pending SSH workers alongside local services.
+	MaxObjectsPerSupervisor = 32
 
 	identityNamespace = uint64(1 << 63)
 	identityLimit     = identityNamespace - 1
@@ -57,11 +60,17 @@ type Zero func(physical uint64) bool
 // permanent kernel object. It starts with no reference; the first grant
 // takes one.
 func (table *Table) Create(frames pagelist.Frames, view pagelist.View, zero Zero, pages uint32, payer uint64) (*Object, bool) {
+	return table.CreateWithLimit(frames, view, zero, pages, payer, MaxObjectsPerProcess)
+}
+
+// CreateWithLimit applies the kernel-selected payer budget. Userspace cannot
+// select this limit through MemoryCreate.
+func (table *Table) CreateWithLimit(frames pagelist.Frames, view pagelist.View, zero Zero, pages uint32, payer uint64, limit int) (*Object, bool) {
 	guard.Check()
-	if table == nil || frames == nil || pages == 0 || uint64(pages) > MaxPages || table.nextID == identityLimit {
+	if table == nil || frames == nil || pages == 0 || uint64(pages) > MaxPages || table.nextID == identityLimit || limit < 1 || limit > MaxObjectsPerSupervisor {
 		return nil, false
 	}
-	if payer != 0 && table.CountFor(payer) >= MaxObjectsPerProcess {
+	if payer != 0 && table.CountFor(payer) >= limit {
 		return nil, false
 	}
 	slot := -1

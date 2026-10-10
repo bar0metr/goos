@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"goos/tools/internal/compatroot"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,8 +64,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(filepath.Join(parent, filepath.Base(output)), "/Volumes/Data/tmp/") {
-		return errors.New("output must be under /Volumes/Data/tmp")
+	if !compatroot.Allowed(filepath.Join(parent, filepath.Base(output))) {
+		return errors.New("output must be under /Volumes/Data/tmp or the GoOS build directory")
 	}
 	if err := emptyOutput(output); err != nil {
 		return err

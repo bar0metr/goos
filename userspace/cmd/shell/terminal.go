@@ -14,7 +14,9 @@ import (
 	"goos/userspace/config"
 	execproto "goos/userspace/exec"
 	"goos/userspace/runtime/sys"
+	shellcmd "goos/userspace/shell"
 	terminal "goos/userspace/tty"
+	userwait "goos/userspace/wait"
 )
 
 // showPrompt asks for the next line with the shell's prompt. A read left
@@ -48,17 +50,14 @@ func requestLine(prompt []byte) {
 	reading = correlation
 }
 
-// The size of the framebuffer console, as the service reports it, reaches
-// every command as COLUMNS and LINES: a full-screen program lays itself out
-// within it without holding any console capability (ADR 0124). A serial-only
-// console has no size of its own to report; the terminal at its far end is
-// asked by the program itself.
+// Authoritative dimensions and TERM reach children without granting console
+// access. A remote PTY is authoritative but is not a fixed display. Serial
+// fallback dimensions remain non-authoritative, so programs may probe them.
 var (
-	columnsVariable [16]byte
-	columnsSize     int
-	linesVariable   [16]byte
-	linesSize       int
-	geometryRequest uint64
+	childTerminalEnvironment shellcmd.TerminalEnvironment
+	geometryRequest          uint64
+	queuedTerminal           ipc.Message
+	queuedTerminalValid      bool
 )
 
 // requestGeometry asks the terminal service for its size; the answer is taken
@@ -79,30 +78,74 @@ func requestGeometry() {
 	geometryRequest = correlation
 }
 
-func storeGeometry(payload []byte) {
-	columns, rows, display, ok := terminal.DecodeGeometry(payload)
-	if !ok || !display {
-		columnsSize, linesSize = 0, 0
-		return
-	}
-	columnsSize = len(appendVariable(columnsVariable[:0], "COLUMNS=", uint64(columns)))
-	linesSize = len(appendVariable(linesVariable[:0], "LINES=", uint64(rows)))
-}
+func storeGeometry(payload []byte) { childTerminalEnvironment.Store(payload) }
 
-func appendVariable(target []byte, name string, value uint64) []byte {
-	target = append(target, name...)
-	var digits [20]byte
-	position := len(digits)
-	for {
-		position--
-		digits[position] = byte(value%10) + '0'
-		value /= 10
-		if value == 0 {
-			break
+// refreshGeometry takes a new snapshot before building a job's environment.
+// An outstanding read's reply is kept intact for takeLine; refreshing geometry
+// must not consume typed-ahead input between commands in a sequence.
+func refreshGeometry() bool {
+	if ttyHandle == 0 {
+		return false
+	}
+	requestGeometry()
+	if ttyHandle == 0 {
+		return false
+	}
+	start, status := sys.ClockRead()
+	if status != kcall.StatusOK {
+		return false
+	}
+	for geometryRequest != 0 && ttyHandle != 0 {
+		now, clockStatus := sys.ClockRead()
+		if clockStatus != kcall.StatusOK || now-start >= outputDeadline {
+			return false
+		}
+		status := sys.IPCReceive(ttyHandle, ttyWire[:])
+		if status == ipc.StatusNotFound {
+			var interests [userwait.MaxObjects]userwait.Interest
+			interests[0] = userwait.Interest{Handle: ttyHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+			if _, waitStatus := userwait.Any(&interests, 1, outputDeadline-(now-start)); waitStatus != kcall.StatusOK {
+				return false
+			}
+			continue
+		}
+		if status != 0 {
+			terminalLost()
+			return false
+		}
+		message, valid := decodeTerminalWire()
+		if !valid {
+			continue
+		}
+		result, text, valid := terminal.DecodeReply(&message)
+		if !valid {
+			continue
+		}
+		if result == terminal.ResultGeometry && message.Correlation == geometryRequest {
+			storeGeometry(text)
+			geometryRequest = 0
+			return true
+		}
+		if reading != 0 && message.Correlation == reading {
+			if queuedTerminalValid {
+				return false
+			}
+			queuedTerminal, queuedTerminalValid = message, true
 		}
 	}
-	return append(target, digits[position:]...)
+	return false
 }
+
+func decodeTerminalWire() (ipc.Message, bool) {
+	payloadSize := int(ttyWire[24]) | int(ttyWire[25])<<8
+	size := ipc.WireHeaderSize + payloadSize + int(ttyWire[26])*8
+	if size > len(ttyWire) {
+		return ipc.Message{}, false
+	}
+	return ipc.Decode(ttyWire[:size])
+}
+
+func terminalEnvironment() [][]byte { return childTerminalEnvironment.Entries(pathVariable) }
 
 // Raw terminal mode for a full-screen foreground command (ADR 0124). The
 // shell holds the only session with the terminal service, so it is the one
@@ -178,7 +221,9 @@ func terminalLost() {
 		sys.HandleClose(ttyHandle)
 		ttyHandle = 0
 	}
-	reading, typedSize = 0, 0
+	reading, typedSize, geometryRequest = 0, 0, 0
+	childTerminalEnvironment.Reset()
+	queuedTerminalValid = false
 }
 
 // installTerminal takes a new session from PID 1: the terminal service was
@@ -188,6 +233,8 @@ func installTerminal(session handle.ID) {
 		sys.HandleClose(ttyHandle)
 	}
 	ttyHandle, reading, typedSize = session, 0, 0
+	childTerminalEnvironment.Reset()
+	queuedTerminalValid = false
 	mark("SHELL_TERMINAL_REPLACED_OK\n")
 	requestGeometry()
 	// A restarted service starts in line mode; a full-screen job still
@@ -233,26 +280,28 @@ func sendTerminal(message ipc.Message) bool {
 // The returned text aliases a buffer the next call reuses.
 func takeLine() (terminal.Result, []byte, bool) {
 	for ttyHandle != 0 {
-		status := sys.IPCReceive(ttyHandle, ttyWire[:])
-		if status == ipc.StatusNotFound {
-			return 0, nil, false
-		}
-		if status != 0 {
-			terminalLost()
-			return 0, nil, false
-		}
-		payloadSize := int(ttyWire[24]) | int(ttyWire[25])<<8
-		size := ipc.WireHeaderSize + payloadSize + int(ttyWire[26])*8
-		if size > len(ttyWire) {
-			continue
-		}
-		message, valid := ipc.Decode(ttyWire[:size])
-		if !valid {
-			continue
+		var message ipc.Message
+		if queuedTerminalValid {
+			message, queuedTerminalValid = queuedTerminal, false
+		} else {
+			status := sys.IPCReceive(ttyHandle, ttyWire[:])
+			if status == ipc.StatusNotFound {
+				return 0, nil, false
+			}
+			if status != 0 {
+				terminalLost()
+				return 0, nil, false
+			}
+			decoded, valid := decodeTerminalWire()
+			if !valid {
+				continue
+			}
+			message = decoded
 		}
 		result, text, valid := terminal.DecodeReply(&message)
 		if valid && result == terminal.ResultGeometry && message.Correlation == geometryRequest {
 			storeGeometry(text)
+			geometryRequest = 0
 			continue
 		}
 		if !valid || reading == 0 || message.Correlation != reading {
@@ -281,7 +330,7 @@ func takeLine() (terminal.Result, []byte, bool) {
 			reading = correlation
 			continue
 		}
-		size = typedSize
+		size := typedSize
 		typedSize = 0
 		return result, typedStorage[:size], true
 	}

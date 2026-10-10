@@ -65,15 +65,15 @@ func renewVFSChannels(spec *supervisor.LaunchSpec) bool {
 	return true
 }
 
-// vfsRestarted runs once a restarted VFS is running. The first session's
-// shell gets its session now, since its commands need the namespace at once;
-// the other shells and the config and log services get theirs when the
-// filesystem service is back.
+// vfsRestarted defers user sessions until the filesystem is attached and
+// the private host-key scopes have been restored.
 func vfsRestarted() {
-	if !offerFiles(sessions[0].execServer, shellFiles) {
-		syslog.Warn("shell not given a filesystem session")
-	}
+	closeOpen(shellFiles)
 	shellFiles = 0
+	remoteScopesInstalled = false
+	for index := range remoteScopes {
+		remoteScopes[index].installed = false
+	}
 	vfsClientsPending = true
 	syslog.Info("vfs restarted")
 	mark("VFS_RESTARTED_OK\n")
@@ -85,7 +85,13 @@ func renewVFSClients() {
 	if !vfsClientsPending {
 		return
 	}
+	if boot.Mode() == supervisor.ModeNormal && !protectRemoteStorage() {
+		fatal("INIT_REMOTE_STORAGE_PROTECTION_FAILED\n")
+	}
 	vfsClientsPending = false
+	if session, reason := openVFSSession(); reason == "" {
+		offerFiles(sessions[0].execServer, session)
+	}
 	for _, channel := range append(otherShells(), uint64(configControlHandle), uint64(logControl)) {
 		if channel == 0 {
 			continue

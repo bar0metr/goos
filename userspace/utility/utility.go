@@ -43,6 +43,10 @@ var (
 	errorBuffer [shell.MaxPath + 256]byte
 )
 
+// BindVFS selects a service's already-granted filesystem endpoint. The caller
+// must finish outstanding filesystem requests before replacing it.
+func BindVFS(channel handle.ID) { vfsHandle = uint64(channel) }
+
 // Run starts the command described by manifest and calls main with its startup
 // data. A command that returns from main exits with status 0.
 //

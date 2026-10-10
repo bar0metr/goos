@@ -133,10 +133,10 @@ func TestRawAndGeometryReplies(t *testing.T) {
 	if _, _, display, valid := DecodeGeometry(data); !valid || display {
 		t.Fatal("serial geometry claimed a display")
 	}
-	if _, _, _, valid := DecodeGeometry([]byte{80, 0, 25, 0, 2}); valid {
+	if _, _, _, valid := DecodeGeometry([]byte{80, 0, 25, 0, 4, 0}); valid {
 		t.Fatal("unknown geometry flag accepted")
 	}
-	for _, payload := range [][]byte{nil, {1, 0, 2}, {1, 0, 2, 0}, {1, 0, 2, 0, 0, 0}} {
+	for _, payload := range [][]byte{nil, {1, 0, 2}, {1, 0, 2, 0}, {1, 0, 2, 0, 0, 1}} {
 		if _, ok := Reply(ResultGeometry, payload, 9); ok {
 			t.Fatalf("geometry payload %v accepted", payload)
 		}

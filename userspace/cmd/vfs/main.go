@@ -378,16 +378,44 @@ func pollControl() bool {
 		send(uint64(controlHandle), reply)
 		return true
 	}
-	server, ok := vfs.DecodeAddSession(message)
-	result := vfs.StatusResourceExhausted
+	if scope, ok := vfs.DecodeInstallScope(&message); ok {
+		result := vfs.StatusInvalidArgument
+		if !scope.Attached {
+			result = service.InstallScope(scope.Slot, scope.Path, scope.Subtree, scope.Denied)
+		} else {
+			base, size, status := sys.MemoryMapAnywhere(message.Handles[0], false)
+			if status == kcall.StatusOK {
+				if size <= maxPathObject && scope.TakePath(sys.Window(base, size), &pathCopy) {
+					result = service.InstallScope(scope.Slot, scope.Path, scope.Subtree, scope.Denied)
+				}
+				sys.VMUnmap(base, size)
+			}
+			closeAttached(message.Handles[:message.HandleCount])
+		}
+		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
+		if !encoded {
+			fatal("VFS_CONTROL_REPLY_FAILED\n")
+		}
+		send(uint64(controlHandle), reply)
+		return true
+	}
+	server, authority, ok := vfs.DecodeAddSessionAuthority(message)
+	result := vfs.StatusInvalidArgument
 	if ok {
+		result = vfs.StatusResourceExhausted
 		for index := range sessions {
 			if sessions[index] == 0 {
-				sessions[index], result = uint64(server), vfs.StatusOK
-				liveSessions++
+				result = service.SetAuthority(sessionOwner(index), authority)
+				if result == vfs.StatusOK {
+					sessions[index] = uint64(server)
+					liveSessions++
+				}
 				break
 			}
 		}
+	}
+	if result != vfs.StatusOK && message.HandleCount <= ipc.MaxAttachedHandles {
+		closeAttached(message.Handles[:message.HandleCount])
 	}
 	reply, encoded := vfs.AddSessionReply(result, message.Correlation)
 	if !encoded {

@@ -13,6 +13,7 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
+	"goos/userspace/remoteapi"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	userwait "goos/userspace/wait"
@@ -116,14 +117,18 @@ var (
 	nextStagingSlot      uint8
 	// execJobs holds every shell's jobs; each shell numbers its own slots
 	// of its own exec page (ADR 0064).
-	execJobs         [execproto.Slots * len(sessions)]execJob
-	lifecyclePending [16]ipc.Message
+	execJobs         [execproto.Slots*len(sessions) + supervisor.RemoteJobs]execJob
+	lifecyclePending [64]ipc.Message
 	lifecycleHead    uint8
 	lifecycleCount   uint8
 	streamPair       [2]uint64
 	streamDescriptor [3]uint64
 	streamReadback   [256]byte
 )
+
+// Each job waits on at most a stage and its launcher; each worker waits
+// on its control and either an image fill or its shell exec endpoint.
+var _ [userwait.MaxObjects - (1 + len(sessions) + 2*len(execJobs) + len(serviceSources) + 2*remoteapi.MaxWorkers + 1)]byte
 
 //export userspaceMain
 func userspaceMain() {
@@ -163,6 +168,12 @@ func userspaceMain() {
 		startServices(0)
 	}
 	for {
+		// Ready traffic must not postpone graceful disconnect deadlines. Run
+		// cleanup before taking a snapshot of the handles this iteration waits on.
+		if supervisionComplete {
+			now, _ := sys.ClockRead()
+			expireRemoteFills(now)
+		}
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -170,6 +181,10 @@ func userspaceMain() {
 		var execBits [len(sessions)]int
 		var sources [len(serviceSources)]int
 		firstJob, firstFill, firstLaunch, firstSource := 1, 1, 1, 1
+		var remoteOwners [remoteapi.MaxWorkers*3 + 1]int
+		var remoteKinds [remoteapi.MaxWorkers*3 + 1]uint8
+		var remoteTokens [remoteapi.MaxWorkers*3 + 1]uint64
+		firstRemote := 1
 		if supervisionComplete {
 			// While a shell is gone there is no exec channel to wait on; its
 			// replacement brings a new one.
@@ -214,6 +229,10 @@ func userspaceMain() {
 				}
 			}
 		}
+		firstRemote = count
+		if supervisionComplete {
+			count = remoteInterests(&interests, count, &remoteOwners, &remoteKinds, &remoteTokens)
+		}
 		readyMask := uint64(1)
 		if lifecycleCount == 0 {
 			// A scheduled restart is a deadline rather than an event. While one
@@ -234,11 +253,11 @@ func userspaceMain() {
 					manager.StartReady(supervisionTicks+supervisor.RestartBackoff, launchService)
 					checkExhaustion()
 				}
-				if restarting {
-					supervisionTicks += supervisor.RestartBackoff
-					manager.StartReady(supervisionTicks, launchService)
-					checkExhaustion()
-				}
+				// Other timers may wake first. Account for their elapsed ticks so
+				// retrying a broker notice cannot postpone service backoff.
+				supervisionTicks += timeout
+				manager.StartReady(supervisionTicks, launchService)
+				checkExhaustion()
 				continue
 			}
 			if status != kcall.StatusOK {
@@ -262,10 +281,15 @@ func userspaceMain() {
 			}
 		}
 		sourced := false
-		for bit := firstSource; bit < count; bit++ {
+		for bit := firstSource; bit < firstRemote; bit++ {
 			if readyMask&(1<<bit) != 0 {
 				completeServiceFill(&serviceSources[sources[bit-firstSource]])
 				sourced = true
+			}
+		}
+		for bit := firstRemote; bit < count; bit++ {
+			if readyMask&(1<<bit) != 0 {
+				pollRemoteInterest(remoteOwners[bit-firstRemote], remoteKinds[bit-firstRemote], remoteTokens[bit-firstRemote])
 			}
 		}
 		if sourced {
@@ -288,6 +312,10 @@ func userspaceMain() {
 		if !valid || event.Operation != supervisor.LifecycleProcessExited {
 			continue
 		}
+		if remoteExited(event.Process, event.Code) {
+			continue
+		}
+		remoteDependencyExited(event.Process)
 		supervisionTicks += supervisor.RestartBackoff
 		checkerDone := event.Process == filesystemChecker
 		if checkerDone {

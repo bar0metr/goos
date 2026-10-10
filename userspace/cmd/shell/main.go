@@ -156,6 +156,10 @@ func userspaceMain() {
 				awaitInput()
 				continue
 			}
+			session, _ := startupData.Env("GOOS_SESSION")
+			if shellcmd.SessionEndsOnEOF(session, result) {
+				sys.Exit(0)
+			}
 			if result == terminal.ResultLine {
 				mark("SHELL_TERMINAL_LINE_OK\n")
 				size := copy(lineStorage[:], text)
@@ -163,7 +167,7 @@ func userspaceMain() {
 				arena.Reset(arenaBase)
 			}
 			// Ctrl-C at the prompt was echoed by the terminal service and
-			// discards the line; end of input there is ignored.
+			// discards the line. Local sessions ignore end of input.
 			break
 		}
 	}

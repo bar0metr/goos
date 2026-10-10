@@ -143,6 +143,10 @@ func startServices(ticks uint64) {
 		// The network reads its settings, so it starts after the
 		// configuration service; nothing before the shell waits for it.
 		startNetwork(ticks)
+		if !protectRemoteStorage() {
+			fatal("INIT_REMOTE_STORAGE_PROTECTION_FAILED\n")
+		}
+		startRemote(ticks)
 	}
 	for index := range sessions {
 		if sessions[index].active {

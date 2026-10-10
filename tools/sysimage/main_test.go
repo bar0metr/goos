@@ -136,7 +136,7 @@ func TestSysimageMainProcess(t *testing.T) {
 func TestSystemCAInstallAndFailBeforeDeletion(t *testing.T) {
 	root := t.TempDir()
 	var args []string
-	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved"} {
+	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker"} {
 		path := filepath.Join(root, name)
 		if err := os.WriteFile(path, []byte(name), 0644); err != nil {
 			t.Fatal(err)
@@ -166,6 +166,15 @@ func TestSystemCAInstallAndFailBeforeDeletion(t *testing.T) {
 	}
 	if log, err := invoke(fixture); err != nil {
 		t.Fatalf("sysimage: %v\n%s", err, log)
+	}
+	for _, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker"} {
+		got, err := os.ReadFile(filepath.Join(output, "system/services", name))
+		if err != nil || string(got) != name {
+			t.Fatalf("installed service %s: data=%q err=%v", name, got, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(output, "state/security/ssh/ssh_host_ed25519_key")); !os.IsNotExist(err) {
+		t.Fatalf("image contains a host identity: %v", err)
 	}
 	installed := filepath.Join(output, "system/security/ca-certificates.pem")
 	got, err := os.ReadFile(installed)

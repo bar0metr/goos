@@ -87,6 +87,11 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 		syslog.Error("service executable not found", syslog.Str("service", bytesString(spec.Name[:spec.NameSize])), syslog.Uint("status", uint64(located)))
 		return 0, false
 	}
+	remoteListener := bytesString(spec.Name[:spec.NameSize]) == remoteServiceName
+	if remoteListener && !prepareRemoteGrants(&spec) {
+		closeExecutable(executable)
+		return 0, false
+	}
 	slot, staging := stagingSlot()
 	// A service started again in this boot is told so. What it left behind,
 	// such as the end of the log file, is then its own work to pick up
@@ -129,6 +134,9 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	startupData, ok := writer.Finish()
 	if !ok {
 		closeExecutable(executable)
+		if remoteListener {
+			abortRemoteGrants(&spec)
+		}
 		return 0, false
 	}
 	event, launched := requestLaunch(executable, processName, spec.Capabilities[:spec.CapabilityCount], spec.Profile, slot, uint32(len(startupData)))
@@ -143,7 +151,7 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 	// events, not handles.
 	session, tty, interactive := sessionOfService(name)
 	keep := validation.Enabled && (name == driverName && driverProcessHandle == 0 || interactive || name == filesystemName || name == "vfs" || name == "block") ||
-		diskService(name) || networkService(name)
+		diskService(name) || networkService(name) || remoteListener
 	if keep && launched == supervisor.LaunchOK {
 		switch {
 		case interactive && tty:
@@ -162,12 +170,17 @@ func launchPrepared(spec supervisor.LaunchSpec) (uint64, bool) {
 			configProcessHandle = keepProcess(configProcessHandle, event.ProcessHandle)
 		case "log":
 			logProcessHandle = keepProcess(logProcessHandle, event.ProcessHandle)
+		case remoteServiceName:
+			remoteProcess = keepProcess(remoteProcess, event.ProcessHandle)
 		case "block":
 			blockProcessHandle = keepProcess(blockProcessHandle, event.ProcessHandle)
 		}
 	}
 	if networkService(name) && launched == supervisor.LaunchOK {
 		networkLaunched(name, event.ProcessHandle)
+	}
+	if remoteListener && launched != supervisor.LaunchOK {
+		abortRemoteGrants(&spec)
 	}
 	if launched != supervisor.LaunchOK || !keep && sys.HandleClose(event.ProcessHandle) != 0 {
 		if !supervisionComplete {

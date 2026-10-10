@@ -36,10 +36,12 @@ import (
 	"goos/userspace/release"
 )
 
-const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET RESOLVED COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
+const usage = "usage: sysimage SHELL CONFIG LOG NETD VIRTIO_NET RESOLVED REMOTED REMOTED_WORKER COMMAND_DIR COMMAND_INDEX OUTPUT_DIR"
+
+var services = []string{"shell", "config", "log", "netd", "virtio-net", "resolved", "remoted", "remoted-worker"}
 
 func main() {
-	if len(os.Args) != 10 {
+	if len(os.Args) != len(services)+4 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -51,7 +53,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	output := os.Args[9]
+	output := os.Args[len(services)+3]
 	appsSource := os.Getenv("LINUX_APPS_DIR")
 	if appsSource != "" {
 		if err := checkAppsSource(appsSource, output); err != nil {
@@ -66,10 +68,10 @@ func main() {
 			fail(err)
 		}
 	}
-	for index, name := range []string{"shell", "config", "log", "netd", "virtio-net", "resolved"} {
+	for index, name := range services {
 		write(output, "system/services/"+name, read(os.Args[1+index]))
 	}
-	commandDirectory, index := os.Args[7], read(os.Args[8])
+	commandDirectory, index := os.Args[len(services)+1], read(os.Args[len(services)+2])
 	names, err := commandset.Names(commandDirectory, index)
 	if err != nil {
 		fail(err)

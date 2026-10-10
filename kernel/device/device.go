@@ -5,9 +5,8 @@ package device
 const (
 	ConsoleObject       = uint64(1)
 	SystemControlObject = uint64(2)
-	// LogObject authorizes reading the kernel log ring. It is separate from the
-	// console so that the right to read the log is not the right to read what
-	// is typed, which belongs to the terminal service alone (ADR 0082).
+	// LogObject separates log read/write authority from console input/output.
+	// PID 1 can grant producers Write without exposing the log ring or a console.
 	LogObject = uint64(3)
 	// LoaderObject authorizes creating executable objects, which a launch can
 	// name instead of an extent of the system image (ADR 0097). Only PID 1
@@ -45,6 +44,9 @@ const InertIRQObject = uint64(0x100)
 func IsConsole(object uint64) bool {
 	return object == ConsoleObject || IsTerminalConsole(object)
 }
+
+// CanWriteLog accepts dedicated log producers and existing console writers.
+func CanWriteLog(object uint64) bool { return object == LogObject || IsConsole(object) }
 
 // IsTerminalConsole reports whether object is a console with input of its own.
 func IsTerminalConsole(object uint64) bool {

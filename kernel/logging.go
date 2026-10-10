@@ -7,7 +7,7 @@ import (
 	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	kernelconsole "goos/kernel/console"
-	"goos/kernel/device"
+	devicepkg "goos/kernel/device"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/klog"
@@ -76,7 +76,7 @@ func (handler nativeCallHandler) logAuthority(id uint64) bool {
 		return false
 	}
 	authority, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, capability.Read)
-	return allowed && authority.Object() == device.LogObject
+	return allowed && authority.Object() == devicepkg.LogObject
 }
 
 // consoleAuthority resolves the caller's console device capability, which
@@ -87,13 +87,17 @@ func (handler nativeCallHandler) consoleAuthority(id uint64, rights capability.R
 		return nil, false
 	}
 	authority, allowed := owner.Handles().Lookup(handle.ID(id), handle.TypeDevice, rights)
-	return owner, allowed && device.IsConsole(authority.Object())
+	return owner, allowed && devicepkg.IsConsole(authority.Object())
 }
 
 func (handler nativeCallHandler) LogWrite(device uint64, address uint64, length uint64) kcall.Status {
 	local := thisCPU()
-	owner, allowed := handler.consoleAuthority(device, capability.Write)
-	if !allowed {
+	owner, found := handler.self()
+	if !found {
+		return kcall.StatusPermissionDenied
+	}
+	authority, allowed := owner.Handles().Lookup(handle.ID(device), handle.TypeDevice, capability.Write)
+	if !allowed || !devicepkg.CanWriteLog(authority.Object()) {
 		return kcall.StatusPermissionDenied
 	}
 	if length == 0 || length > kcall.MaxLogRecord || !vm.CopyIn(handler.root, address, local.logWire[:length]) {

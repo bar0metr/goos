@@ -44,8 +44,10 @@ type terminalSession struct {
 	execServer uint64
 	execClient handle.ID
 	// page is the area shared with the shell that carries its exec requests.
-	pageHandle handle.ID
-	page       []byte
+	pageHandle         handle.ID
+	page               []byte
+	pageBase, pageSize uint64
+	shellPID           uint64
 	// ttyStarted and shellStarted mark the first launches, which use the
 	// endpoints created at boot; every later launch renews them.
 	ttyStarted, shellStarted bool

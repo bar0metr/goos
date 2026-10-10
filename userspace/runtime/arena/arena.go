@@ -67,7 +67,14 @@ func Current() Mark { return Mark(next) }
 // Reset discards every allocation made since mark was taken. Nothing that was
 // allocated after it may be used again.
 func Reset(mark Mark) {
+	if !validReset(position(), uintptr(mark)) {
+		panic("arena: reset mark is outside active allocation range")
+	}
 	next = uintptr(mark)
+	// Fixed regions share pages with live slabs. Never discard their pages.
+	if scopedRegions.depth != 0 {
+		return
+	}
 	if high > next && high-next > trimThreshold {
 		from := (next + pageSize - 1) &^ (pageSize - 1)
 		to := (high + pageSize - 1) &^ (pageSize - 1)

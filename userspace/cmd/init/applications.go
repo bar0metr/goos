@@ -105,6 +105,11 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		grantsRequested = granted
 	}
 	useVFS := linuxProcess || grantable && grantsRequested&commands.GrantVFS != 0
+	remoteAdmin := handle.ID(0)
+	if grantable && grantsRequested&commands.GrantRemote != 0 {
+		remoteAdmin = openRemoteAdmin()
+	}
+	useRemote := remoteAdmin != 0
 	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
 	useLaunch := grantable && launch != nil && grantsRequested&commands.GrantLaunch != 0 && streams.Input.Type == handle.TypeStream
 	// A command asks for one network role; one asking for both gets the
@@ -144,6 +149,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
 		syslog.Warn("volume check refused in normal mode")
+		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
@@ -156,6 +162,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		checkBlock, reason = openCheckBlock()
 		if reason != "" {
 			syslog.Error(reason)
+			closeOpen(remoteAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -168,6 +175,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if reason != "" {
 			syslog.Error("APP_VFS_SESSION_FAILED")
 			syslog.Error(reason)
+			closeOpen(remoteAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -184,6 +192,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	var launchPair [2]uint64
 	if useLaunch {
 		if !createChannel(&launchPair) {
+			closeOpen(remoteAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
 			closeUDP(udpSession)
@@ -199,6 +208,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	slot, staging := stagingSlot()
 	handles := 3
+	if useRemote {
+		handles++
+	}
 	if useVFS {
 		handles++
 	}
@@ -249,6 +261,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	writer.Handle([]byte("in"), 0)
 	writer.Handle([]byte("stdout"), 0)
 	writer.Handle([]byte("stderr"), 0)
+	if useRemote {
+		writer.Handle([]byte("remote"), 0)
+	}
 	if useVFS {
 		writer.Handle([]byte("vfs"), 0)
 	}
@@ -279,6 +294,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
+		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
@@ -295,6 +311,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		streamGrant("in", streams.Input, capability.Read),
 		streamGrant("stdout", streams.Output, capability.Write),
 		streamGrant("stderr", streams.Error, capability.Write),
+	}
+	if useRemote {
+		grants = append(grants, supervisor.Capability{Name: "remote", Handle: remoteAdmin, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
 	if useVFS {
 		grants = append(grants, supervisor.Capability{Name: "vfs", Handle: handle.ID(pair[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
@@ -339,6 +358,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
 		}
 		closePair(launchPair)
+		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)

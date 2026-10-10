@@ -49,6 +49,10 @@ VIRTIO_NET_IMAGE = $(OUT_DIR)/userspace/virtio-net
 VIRTIO_NET_ELF = $(OUT_DIR)/userspace/virtio-net.elf
 RESOLVED_IMAGE = $(OUT_DIR)/userspace/resolved
 RESOLVED_ELF = $(OUT_DIR)/userspace/resolved.elf
+REMOTED_IMAGE = $(OUT_DIR)/userspace/remoted
+REMOTED_ELF = $(OUT_DIR)/userspace/remoted.elf
+REMOTED_WORKER_IMAGE = $(OUT_DIR)/userspace/remoted-worker
+REMOTED_WORKER_ELF = $(OUT_DIR)/userspace/remoted-worker.elf
 # tools/stackframes bounds every stack frame by the unmapped guard below the
 # stack (ADR 0088). It runs on every userspace ELF before elf2native turns it
 # into an image, and on the kernel right after it is linked.
@@ -188,7 +192,7 @@ $(KERNEL): $(shell find kernel internal -type f) $(filter-out $(CURDIR)/kernel/%
 	@$(STACKFRAMES) $@ || { rm -f $@; exit 1; }
 	@nm -n $@ > $(KERNEL_DIR)/goos.sym 2>/dev/null || true
 
-userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE)
+userspace: $(INIT_IMAGE) $(SERVICE_IMAGE) $(VFS_IMAGE) $(SHELL_IMAGE) $(COMMAND_IMAGES) $(COMMAND_INDEX) $(BLOCK_IMAGE) $(VIRTIO_BLOCK_IMAGE) $(LOG_IMAGE) $(CONFIG_IMAGE) $(TTY_IMAGE) $(FAT32_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE)
 
 $(INIT_RUNTIME): userspace/runtime/amd64.S
 	@mkdir -p $(dir $@)
@@ -223,7 +227,7 @@ $(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe t
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
 
-TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tinygo/runtime/*.txt) tools/build-tls.sh
+TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go tinygo/runtime/*.txt) tools/build-tls.sh
 $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
@@ -312,6 +316,22 @@ $(VIRTIO_NET_IMAGE): $(VIRTIO_NET_ELF) tools/elf2native/main.go kernel/loader/na
 	@$(STACKFRAMES) $(VIRTIO_NET_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VIRTIO_NET_ELF) $@
 
+# Both SSH services use the private crypto/SSH source tree. No installed
+# toolchain or module-cache sources are modified by this build.
+SSH_COMPAT_SOURCES := $(TLS_COMPAT_SOURCES) $(wildcard tools/sshcompat/*.go tools/sshcompat/*.txt userspace/sshserver/*.go userspace/runtime/arena/*.go) tools/build-ssh.sh go.mod go.sum
+
+$(REMOTED_ELF): $(call go_deps,./userspace/cmd/remoted) $(SSH_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(dir $@)
+	$(BUILD_ENV) sh tools/build-ssh.sh $@ ./userspace/cmd/remoted '$(BUILD_TAGS)' $(OPT)
+
+$(REMOTED_WORKER_ELF): $(call go_deps,./userspace/cmd/remoted-worker) $(SSH_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(dir $@)
+	$(BUILD_ENV) sh tools/build-ssh.sh $@ ./userspace/cmd/remoted-worker '$(BUILD_TAGS)' $(OPT)
+
+$(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE): %: %.elf tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
+	@$(STACKFRAMES) $<
+	$(BUILD_ENV) go run ./tools/elf2native $< $@
+
 $(SERVICE_IMAGE): tools/service-image/main.go kernel/loader/native.go kernel/loader/native_encode.go kernel/mm/vm/permissions.go
 	@mkdir -p $(OUT_DIR)/userspace
 	$(BUILD_ENV) go run ./tools/service-image $@
@@ -337,7 +357,7 @@ initramfs: userspace
 # LINUX_APPS_DIR copies a host directory into /apps.
 system-tree: userspace
 	@$(if $(strip $(VALIDATION_CA_BUNDLE)),true,$(BUILD_ENV) go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem)
-	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
+	@$(BUILD_ENV) SYSTEM_CA_BUNDLE='$(SYSTEM_CA_SOURCE)' SYSTEM_TRUST_UPDATE_KEY='$(SYSTEM_TRUST_KEY_SOURCE)' SYSTEM_TRUST_UPDATE_URL='$(SYSTEM_TRUST_URL)' LINUX_EXTRA='$(LINUX_EXTRA)' LINUX_APPS_DIR='$(LINUX_APPS_DIR)' go run ./tools/sysimage $(SHELL_IMAGE) $(CONFIG_IMAGE) $(LOG_IMAGE) $(NETD_IMAGE) $(VIRTIO_NET_IMAGE) $(RESOLVED_IMAGE) $(REMOTED_IMAGE) $(REMOTED_WORKER_IMAGE) $(COMMAND_DIR) $(COMMAND_INDEX) $(SYSTEM_TREE)
 
 system-image: iso system-tree
 	@rm -f $(SYSTEM_IMAGE)
@@ -419,6 +439,7 @@ test-all:
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
+	$(MAKE) test-remote
 	$(MAKE) test-trust-update
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -442,6 +463,7 @@ release-check:
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
+	$(MAKE) test-remote
 	$(MAKE) test-trust-update
 	$(MAKE) test-linux-boot
 	$(MAKE) test-console-gui
@@ -465,7 +487,7 @@ test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
 
 test-security:
-	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan
+	$(BUILD_ENV) go test ./internal/capability ./kernel/device ./kernel/executable ./kernel/handle ./kernel/initramfs ./kernel/ipc ./kernel/kcall ./kernel/loader ./kernel/mm/vm ./kernel/pci ./kernel/process ./kernel/ramfs ./kernel/shmem ./kernel/stream ./kernel/tty ./kernel/vfs ./userspace/block ./userspace/exec ./userspace/fat32 ./userspace/fsproto ./userspace/init ./userspace/netapi ./userspace/netdev ./userspace/network ./userspace/partition ./userspace/runtime/sys ./userspace/shell ./userspace/startup ./userspace/dns ./userspace/dnsq ./userspace/dnstcp ./userspace/dnswire ./userspace/tcpupstream ./userspace/udpapi ./userspace/udpserve ./userspace/upstream ./userspace/vfs ./tools/stackframes ./userspace/cryptosys ./userspace/tlsclient ./userspace/fetch ./tools/truststore ./tools/sysimage ./tools/cryptocompat ./tools/tlscompat ./tools/tlsfixture ./tools/tlspeer ./userspace/truststore ./userspace/truststate ./userspace/trustupdate ./tools/trustfixture ./tools/trustpeer ./tools/trustscan ./userspace/remoteapi ./userspace/remotepolicy ./userspace/remoteservice ./userspace/sshserver ./userspace/runtimearena ./userspace/tcpdispatch ./tools/sshcompat
 
 # The storage stress test (ADR 0102): the model-based FAT32 workload at a
 # larger scale than the default suite, and the host FAT checker over volumes
@@ -550,6 +572,13 @@ trust-store:
 test-tls:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/tls.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system
+
+.PHONY: test-remote
+# The SSH gate uses exactly two sequential boots of one disposable disk.
+# The script consumes the completed build; it never rebuilds native images.
+test-remote:
+	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
+	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/remote.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system
 
 test-console-gui:
 	@$(MAKE) --no-print-directory iso VALIDATION=1

@@ -93,7 +93,11 @@ func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcal
 	if !owner.Charge(process.ResourcePages, charge) {
 		return kcall.StatusResourceExhausted
 	}
-	object, created := sharedObjects.Create(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, uint32(pages), uint64(owner.ID()))
+	objectLimit := shmem.MaxObjectsPerProcess
+	if owner == bootInitProcess {
+		objectLimit = shmem.MaxObjectsPerSupervisor
+	}
+	object, created := sharedObjects.CreateWithLimit(&pageAllocator, vm.PhysicalPage, zeroPhysicalPage, uint32(pages), uint64(owner.ID()), objectLimit)
 	if !created {
 		owner.Release(process.ResourcePages, charge)
 		return kcall.StatusResourceExhausted
