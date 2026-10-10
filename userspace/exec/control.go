@@ -33,9 +33,7 @@ const (
 	// ControlDiagnostics asks PID 1 to have the kernel dump its state to the
 	// console. Only a diagnostic build answers it with ControlOK.
 	ControlDiagnostics
-	// ControlFault asks PID 1 to kill one interactive service, named by the
-	// argument, so that its restart is exercised. Only the validation build
-	// carries it out.
+	// ControlFault asks PID 1 to inject a named validation fault.
 	ControlFault
 	// ControlPowerOff asks PID 1 to flush storage and switch the machine off
 	// (ADR 0092).
@@ -69,6 +67,8 @@ const (
 	// FaultNetDriver kills the network driver, which PID 1 restarts with a
 	// new device binding (ADR 0191).
 	FaultNetDriver
+	// FaultRemoteSigner closes one SSH worker's signer endpoint.
+	FaultRemoteSigner
 )
 
 // ControlStatus answers a reboot request that could not be carried out; a
@@ -133,7 +133,7 @@ func validControl(operation ControlOperation, argument uint8) bool {
 	case ControlKill:
 		return argument < Slots
 	case ControlFault:
-		return argument >= FaultTerminal && argument <= FaultNetDriver
+		return argument >= FaultTerminal && argument <= FaultRemoteSigner
 	default:
 		return false
 	}
