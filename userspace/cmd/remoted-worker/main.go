@@ -26,6 +26,7 @@ var token, sequence uint64
 var server *sshserver.Server
 var engine *tty.Engine
 var output remoteservice.Queue
+var newlines ptyNewlines
 var policy remoteapi.WorkerPolicy
 var conn remoteservice.RelayConn
 var input [sshserver.MaxCiphertext]byte
@@ -114,7 +115,9 @@ func userspaceMain() {
 	}
 	token = authenticated.Session
 	syslog.Info("remote authentication accepted", syslog.Str("user", username), syslog.Uint("session", token))
-	engine = tty.NewEngine(func(bytes []byte) bool { return output.Put(bytes) }, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
+	engine = tty.NewEngine(func(bytes []byte) bool {
+		return newlines.Write(&output, bytes, engine != nil && engine.Raw())
+	}, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
 	geometry, _ = remoteapi.MakeGeometry(80, 24, []byte("xterm"))
 	lastActivity := remoteservice.Now()
 	transient := arena.Current()
