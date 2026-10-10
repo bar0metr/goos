@@ -4,6 +4,22 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 
 ## Targets
 
+- `make crypto-check` builds the isolated native crypto feasibility probes.
+- `make test-crypto` runs the successfully built probes in one disposable guest,
+  including after an independent compile failure. `CRYPTO_COMPAT=1` selects the
+  native runtime compatibility overlay. These development targets currently
+  return failure for TinyGo's device-offloaded TLS shim; they do not constitute
+  an HTTPS release gate. See [native crypto feasibility](crypto-feasibility.md).
+- `make test-tls` is the offline native HTTPS gate selected for `test-all` and
+  `release-check`. It builds with `VALIDATION=1` and the explicit fixture CA,
+  then runs `tests/boot/tls.sh` against host standard-Go TLS peers. It passed
+  69 native assertions and measured production-root loading. The gate covers
+  default port 443, numeric IPv4 SAN, GET,
+  HEAD, relative redirects, downgrade rejection and VFS file output, plus
+  wrong identity, unknown roots, invalid validity periods/signatures, critical
+  extensions, plaintext, malformed TLS, bad CertificateVerify/Finished and
+  corrupted record MACs. Peers fragment I/O to 137 bytes;
+  fixture keys are public test data and never production trust.
 - `make test-unit` runs all host-side Go tests.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
@@ -291,6 +307,46 @@ shows up as slower persistent writes (ADR 0096).
 Use `make test` during the normal edit loop. Use `make test-all` before delivery
 of changes that affect the kernel, native userspace, startup protocols, storage,
 shell composition, or boot behavior.
+
+## TLS evidence and local trust checks
+
+Host `userspace/tlsclient` tests cover authenticated transfers and certificate,
+record and handshake failures. `tools/tlspeer` adds `tamper` (encrypted application
+record corruption) and `badverify` (CertificateVerify signature corruption)
+fixtures. `tools/tlsfault` changes one Finished byte in a temporary host standard
+library copy before the real TLS stack encrypts its record; it does not replace
+the server stack. Host results do not establish native interoperability.
+The native crypto gate confirms the selected primitives and explicit-root
+X.509 verification; stock TinyGo TLS still fails its no-wire shim check.
+The native HTTPS gate has now passed 69 assertions with authenticated transfers,
+certificate/handshake/record failures and production-root loading. The earlier
+ClientHello probe alone proved only wire output. The stream network regression
+also passed (`make test-network NETWORK_SCENARIOS=stream`). Full `test-all` and
+`release-check` have not run.
+[The feasibility report](crypto-feasibility.md) keeps measured native results;
+[ADR 0198](../adr/0198-native-tls-and-system-trust.md) describes the chosen path.
+
+The HTTPS boot gate takes `ISO OVMF_CODE SYSTEM_TREE`. It requires the fixture
+root in the supplied tree, creates a fresh report directory under
+`/Volumes/Data/tmp/`, and uses one disposable guest with ephemeral host peers.
+It checks shell exit status and X.509/record diagnostics, verifies zero HTTP
+requests for rejected peers and the downgrade sink, and captures validation
+resource markers. Validation-only `trustprobe --production` measures the pinned
+full bundle from a fixed auxiliary file; native fetch retains its single system
+CA path. The guest must power off within 30 seconds. Neither this gate
+nor ordinary builds download trust data or contact an Internet server.
+
+Before packaging production roots, check the committed artifact without writes:
+
+```sh
+go run ./tools/truststore -check security/ca-source.pem security/ca-certificates.pem
+```
+
+Host generator and system-image tests reject modified or malformed roots,
+metadata mismatches and missing explicit inputs, prove deterministic generation,
+and check that failed input validation leaves an existing output tree intact.
+Validation root overrides require both `VALIDATION=1` and an explicit
+`VALIDATION_CA_BUNDLE`; production builds use the pinned bundle.
 
 ## Proxmox hardware lab
 
@@ -710,3 +766,49 @@ framing, URL validation, request encoding and redirects. `make test-network`
 uses the deterministic HTTP listener in `tools/netpeer` on ports 80 and 8080.
 The private-segment guest checks GET, HEAD, POST, custom headers, chunks,
 redirects and VFS output with `cat` and `stat`.
+
+## Signed trust update gate
+
+`make test-trust-update` runs offline peers and a validation system with a
+separate update public key and bootstrap CA. The gate passed 47 assertions over
+three boots of one persistent disk: fallback status, signed download/install,
+authentication with a newly added CA, rollback/bad-signature refusal, exact
+same-sequence reinstall, persistence, corrupt-selector recovery, and corrupt
+signature rejection with bootstrap HTTPS recovery. Only public package files
+enter the guest; host TLS and signing private fixtures stay outside its tree.
+
+Host tests cover strict canonical metadata, signatures, keys, digest/count/size,
+PEM bounds, sequence reuse, partial state, selectors, install failpoints and
+capacity boundaries. Download tests reject non-200 responses, oversized fixed
+and chunked bodies, truncation and TLS failures on any component. Release checks
+compare the installed public key with production input and scan for validation
+public/private signing material and private-key PEM.
+
+The gate proves reboot persistence and fail-closed state selection, not recovery
+from arbitrary physical torn sectors. Full `test-all` and `release-check` are
+separate release gates; record their actual results before calling a release ready.
+
+On 2026-10-09 the complete `make release-check` passed after the signed trust
+extension: two clean builds produced 167 identical artifacts, the boot gate
+passed 456 checks, system boot passed 156, Linux ABI passed 126, and both stress
+runs passed 15 rounds each. TLS passed 69 assertions and signed trust update
+passed 47 assertions across three persistent boots. The initial `make test-all`
+stopped on an obsolete three-directory `/system` assertion; changing it to four
+matched the security directory and passed in the release boot gate. We did not
+repeat the identical full VM matrix. Optional kernel-heap monitor evidence was
+unavailable in the initial boot run; that skip is not heap-stability proof.
+
+## Production trust publication smoke
+
+On 2026-10-10 an explicit live smoke used the normal production ISO, immutable
+production update key, bootstrap public roots and QEMU user networking. Native
+`trust update` downloaded the three files from
+`https://bar0metr.github.io/current`, verified their signature and installed
+sequence 2026101001 with 121 roots. `trust status` changed from system fallback
+to updated state. Host downloads also matched the signed staged bytes exactly
+and passed `tools/truststore -verify` with the immutable production public key.
+
+This Internet-dependent smoke is a publication check, not an ordinary build or
+release gate. Offline TLS/trust-update tests retain their separate validation
+key and URL. Normal ISO checks use `net status` and command completion prompts;
+validation-only NETD/SHELL markers are absent from production images.

@@ -1,13 +1,36 @@
 # Native shell
 
-`fetch [OPTIONS] URL` transfers an HTTP/1.1 response. It accepts `http://`
-hostnames and IPv4 addresses, with an optional port, path and query. `-I`
+`fetch [OPTIONS] URL` transfers an HTTP/1.1 response. It accepts `http://` and
+`https://` hostnames and IPv4 addresses, with an optional port, path and query.
+The default ports are 80 and 443. `-I`
 requests headers only; `-i` includes response headers; `-d DATA` sends a POST;
 `-H 'Name: value'` adds a request header; `-L` follows up to five redirects.
 `-o FILE` writes to a chosen file, and `-O` uses the final URL's filename.
 `-v` writes request and response diagnostics to standard error. HTTP status
 codes, including 404 and 500, remain response data. A failed transfer can leave
-a partial output file. TLS and HTTPS are unavailable.
+a partial output file.
+
+HTTPS uses native TLS 1.3 and verifies server certificates against
+signed persistent roots or the immutable `/system/security/ca-certificates.pem`
+fallback, including validity against REALTIME and
+DNS/IP SAN identity. Missing or malformed roots, unavailable time or entropy,
+and authentication failures return exit status 1. There is no `-k` or CA-file
+option. `-L` follows HTTP-to-HTTP/HTTPS and HTTPS-to-HTTPS redirects, but rejects
+HTTPS-to-HTTP before connecting. Cross-origin redirects strip Authorization,
+Proxy-Authorization, Cookie and a custom Host header. Numeric IPv4 URLs require
+IP SAN and send no SNI. The request/body/file-output options above apply to both
+schemes.
+
+```text
+goos> fetch https://example.org/
+goos> fetch -I https://example.org/
+goos> fetch -L -o /home/user/page.html https://example.org/start
+```
+
+These are syntax examples, not Internet-dependent release tests. The offline
+native HTTPS gate passed 69 assertions, including authenticated transfers and
+certificate/record rejection. Full release gates have not run; see
+[ADR 0198](../adr/0198-native-tls-and-system-trust.md).
 
 PID 1 launches the shell as a normal supervised native image after the
 terminal service: `/system/services/shell` from the installed system in
@@ -389,3 +412,25 @@ Linux programs; a static BusyBox `sh` runs command lines, pipelines, and
 scripts that way. The shell waits for the program it started. Ctrl-C ends that
 program and every process it forked; no signal reaches them (ADR 0170). [linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md)
 lists what such a program can call.
+
+## Trust store command
+
+```text
+trust status
+trust verify FILE META SIG
+trust install FILE META SIG
+trust update
+```
+
+Status names the selected root bundle, sequence, source date and fallback reason.
+Verify authenticates the three supplied files without changing state. Install
+requires a signed package, refuses rollback and commits a verified generation on
+persistent FAT32. Equal-sequence content must match all three files exactly.
+Update downloads the package from `/system/security/trust-update-url` through
+current verified HTTPS roots, then checks its Ed25519 signature using the immutable
+public key. An empty configured URL returns an error, not an insecure download.
+
+After installation, new client processes use signed state roots. Missing or
+corrupt state reports a reason and uses bootstrap roots; trust never accepts an
+arbitrary local CA or disables certificate verification. Corrupt state stays on
+disk for diagnosis. Trust sequence is independent of the GoOS version.

@@ -954,7 +954,7 @@ forbid_regex shell.stdin-not-a-command '^bounded: command not found$' 'typed inp
 require_regex shell.cwd '^/system$' '/system on its own line' "$log" 'cd "/system"'
 require_regex stat.file-kib '^file [0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes)$' 'a file size in KiB by default' "$log" 'goos> stat /system/bin/ls'
 require_regex stat.directory-size '^directory [1-9][0-9]*\.[0-9][0-9] KiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 0 directories$' 'a directory sized by its contents' "$log" 'goos> stat /system/bin'
-require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 3 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
+require_regex stat.directory-mib '^directory [0-9]*\.[0-9][0-9] MiB ([1-9][0-9]* bytes), [1-9][0-9]* files, 4 directories$' 'stat -m counts nested directories in MiB' "$log" 'goos> stat -m /system'
 require_regex stat.bytes '^file 16 bytes$' 'stat -b prints exact bytes' "$log" 'goos> stat -b /system/motd'
 require_regex stat.bad-flag '^usage: stat \[-b|-k|-m|-g\] PATH$' 'an unknown unit flag is a usage error' "$log" 'goos> stat -x /system'
 require_window mount.system '^/bootstrap  *image  *ro$' 'boot archive in mount output' "$log" 'goos> mount' 'goos> df'

@@ -32,7 +32,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: commands SOURCE_DIR OUTPUT")
 		os.Exit(2)
 	}
-	index, err := build(os.Args[1])
+	index, err := buildSelected(os.Args[1], os.Getenv("GOOS_VALIDATION") == "1")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "commands:", err)
 		os.Exit(1)
@@ -45,7 +45,9 @@ func main() {
 
 // build returns the index for every command under root, in name order so the
 // image is reproducible.
-func build(root string) ([]byte, error) {
+func build(root string) ([]byte, error) { return buildSelected(root, true) }
+
+func buildSelected(root string, validation bool) ([]byte, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -53,6 +55,9 @@ func build(root string) ([]byte, error) {
 	var names []string
 	for _, entry := range entries {
 		if entry.IsDir() {
+			if !validation && (entry.Name() == "cryptoprobe" || entry.Name() == "trustprobe") {
+				continue
+			}
 			names = append(names, entry.Name())
 		}
 	}

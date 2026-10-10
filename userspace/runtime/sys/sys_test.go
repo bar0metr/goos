@@ -9,6 +9,79 @@ import (
 	"unsafe"
 )
 
+func TestRandomReadChunks(t *testing.T) {
+	for _, size := range []int{0, 1, 8, 63, 64, 65, 257} {
+		buffer := make([]byte, size)
+		calls, filled := 0, 0
+		read := func(pointer unsafe.Pointer, count uintptr) uint64 {
+			calls++
+			if pointer == nil || count == 0 || count > uintptr(kcall.MaxRandomRead) {
+				t.Fatalf("invalid random request: %p, %d", pointer, count)
+			}
+			data := unsafe.Slice((*byte)(pointer), int(count))
+			for i := range data {
+				data[i] = byte(filled + i + 1)
+			}
+			filled += int(count)
+			return uint64(kcall.StatusOK)
+		}
+		if result := fillRandom(buffer, read); result != kcall.StatusOK {
+			t.Fatalf("size %d: status %d", size, result)
+		}
+		if filled != size || calls != (size+63)/64 {
+			t.Fatalf("size %d: filled %d in %d calls", size, filled, calls)
+		}
+		for i, value := range buffer {
+			if value != byte(i+1) {
+				t.Fatalf("size %d: byte %d = %d", size, i, value)
+			}
+		}
+	}
+}
+
+func TestRandomReadFailureClearsAllBytes(t *testing.T) {
+	for _, failAt := range []int{1, 2, 3} {
+		buffer := make([]byte, 129)
+		for i := range buffer {
+			buffer[i] = 0xff
+		}
+		calls := 0
+		read := func(pointer unsafe.Pointer, count uintptr) uint64 {
+			calls++
+			data := unsafe.Slice((*byte)(pointer), int(count))
+			for i := range data {
+				data[i] = 0xaa
+			}
+			if calls == failAt {
+				return uint64(kcall.StatusUnsupported)
+			}
+			return uint64(kcall.StatusOK)
+		}
+		if result := fillRandom(buffer, read); result != kcall.StatusUnsupported || calls != failAt {
+			t.Fatalf("fail at %d: status %d, calls %d", failAt, result, calls)
+		}
+		for _, value := range buffer {
+			if value != 0 {
+				t.Fatal("failure retained random or caller bytes")
+			}
+		}
+	}
+}
+
+func TestRandomReadDoesNotAllocate(t *testing.T) {
+	var buffer [129]byte
+	read := func(unsafe.Pointer, uintptr) uint64 { return uint64(kcall.StatusOK) }
+	if allocations := testing.AllocsPerRun(100, func() { fillRandom(buffer[:], read) }); allocations != 0 {
+		t.Fatalf("allocations = %v", allocations)
+	}
+	if RandomRead(nil) != kcall.StatusOK {
+		t.Fatal("empty read failed")
+	}
+	if RandomRead(buffer[:]) != kcall.StatusUnsupported {
+		t.Fatal("host read did not propagate Unsupported")
+	}
+}
+
 func TestStringAndBytesShareStorage(t *testing.T) {
 	data := []byte("shared")
 	text := String(data)

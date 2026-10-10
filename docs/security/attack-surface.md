@@ -240,6 +240,28 @@ or from other processes:
   lookup. Endpoint, backlog, stream and reorder storage are fixed, and stale
   endpoint IDs carry the wrong generation (ADR 0196).
 
+- Native HTTPS adds TLS records, handshake messages and X.509 DER parsing to
+  the `fetch` process, not to the kernel, driver, `netd` or `resolved`. The pinned
+  Go software implementations run over the command's private GTCP1 stream.
+  Explicit roots come through its VFS grant from signed state or the read-only
+  bootstrap system namespace.
+  The root loader rejects malformed or empty data and bounds the bundle to
+  512 KiB, 256 roots and 32 KiB DER per root; it never loads host OS roots or
+  unsigned trust data from mutable application/user paths.
+- TLS peer certificate lists stop at eight entries before allocating their
+  slices, each DER is at most 32 KiB, and candidate chain depth stops at eight.
+  The cache adapter rejects more than 64 DNS SAN entries after bounded DER
+  parsing. The standard verifier allows at most 100 signature
+  attempts. TLS 1.3 still permits a 256 KiB certificate-message buffer before
+  these checks. Authentication uses kernel entropy, explicit REALTIME and a
+  whole-handshake monotonic deadline. Missing platform inputs and clock rollback
+  fail closed. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md) and
+  [native evidence](../development/crypto-feasibility.md). The native HTTPS
+  gate passed 69 assertions, including certificate, CertificateVerify, Finished
+  and record-MAC rejection. Certificate and handshake failures reached no HTTP
+  request. Production-root loading allocated 1360864 bytes; the arena high-water
+  mark was 1363216 bytes. The complete release-check matrix passed.
+
 ### Resource limits
 
 Global fixed arrays bound the system; launch profiles bound each process's
@@ -301,3 +323,18 @@ A new operation needs: a number appended to `kcall.Operation`, size checks in
 `kcall.Dispatch` or a dedicated dispatcher, a handler that looks up handles
 before touching user memory, bounded buffers, a deadline if it blocks, a row
 in this table, host tests, and an ADR.
+
+## Trust update input
+
+The native client treats writable trust state as untrusted. It accepts raw
+32-byte Ed25519 public keys only from the immutable system, raw 64-byte signatures,
+canonical JSON up to 16 KiB and PEM up to 512 KiB. Metadata binds sequence,
+provenance, digest, byte count and root count. Certificate limits remain 256 roots
+and 32 KiB DER per certificate. No signature or digest failure reaches CA parsing.
+
+The update downloader requires HTTPS and HTTP 200, follows no redirects, and
+bounds all three bodies. The endpoint comes from immutable build configuration;
+metadata `source_url` cannot redirect it. State enumeration stops at 256 directory
+entries. Serial installations refuse 64 existing published generations or a full
+enumeration before staging; incomplete staging stays outside the generation list.
+The package verifier, installer and fallback remain userspace code.

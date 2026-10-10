@@ -116,6 +116,26 @@ func TestFrameAcceptsNegativeImmediates(t *testing.T) {
 	}
 }
 
+func TestTinyGoContinuationAcceptsOnlyPinnedSequence(t *testing.T) {
+	body := []string{"MOVQ 0(DI), SP", "MOVQ 0x8(DI), AX", "JMP AX"}
+	frame, problems := analyzeListing(t, listing("tinygo_longjmp", 0x1000, body...))
+	if frame != 0 || len(problems) != 0 {
+		t.Fatalf("continuation = %d, %v", frame, problems)
+	}
+	for _, name := range []string{"other_longjmp", "tinygo_longjmp"} {
+		changed := append([]string(nil), body...)
+		if name == "tinygo_longjmp" {
+			changed[1] = "MOVQ 0x10(DI), AX"
+		}
+		if _, problems := analyzeListing(t, listing(name, 0x1000, changed...)); len(problems) == 0 {
+			t.Fatal("accepted an unrecognized dynamic stack restoration")
+		}
+	}
+	if _, problems := analyzeListing(t, listing("tinygo_longjmp", 0x1000, append(body, "PUSHQ AX")...)); len(problems) == 0 {
+		t.Fatal("accepted added continuation instructions")
+	}
+}
+
 func TestFrameOfStartRealignment(t *testing.T) {
 	frame, problems := analyzeListing(t, listing("_start", 0x40002000,
 		"ANDQ $-0x10, SP",

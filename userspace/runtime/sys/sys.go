@@ -336,10 +336,32 @@ func IRQWait(irq handle.ID) kcall.Status { return status(irqWait(uint64(irq))) }
 // returns NotFound when there is none. It never blocks.
 func IRQTake(irq handle.ID) kcall.Status { return status(irqTake(uint64(irq))) }
 
+// RandomRead fills dst from the kernel generator. Failure clears the entire
+// buffer, including bytes from earlier chunks.
+func RandomRead(dst []byte) kcall.Status {
+	return fillRandom(dst, randomRead)
+}
+
+func fillRandom(dst []byte, read func(unsafe.Pointer, uintptr) uint64) kcall.Status {
+	for offset := 0; offset < len(dst); {
+		count := len(dst) - offset
+		if count > int(kcall.MaxRandomRead) {
+			count = int(kcall.MaxRandomRead)
+		}
+		result := status(read(address(dst[offset:offset+count]), uintptr(count)))
+		if result != kcall.StatusOK {
+			clear(dst)
+			return result
+		}
+		offset += count
+	}
+	return kcall.StatusOK
+}
+
 // RandomUint64 reads eight bytes from the kernel's generator.
 func RandomUint64() (uint64, kcall.Status) {
 	valueWire = 0
-	result := status(randomRead(unsafe.Pointer(&valueWire), 8))
+	result := RandomRead(unsafe.Slice((*byte)(unsafe.Pointer(&valueWire)), 8))
 	return valueWire, result
 }
 

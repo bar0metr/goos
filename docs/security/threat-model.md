@@ -283,7 +283,29 @@ Anything on the link can send the guest arbitrary frames.
 - A DHCP server on the link decides which DNS servers the guest asks, and a
   server it asks can answer with any address. A cached answer lasts at most
   `system.dns.cache.max-ttl-sec`.
-- There is no encryption, authentication or filtering on the link.
+- HTTPS adds server authentication and encrypted application data within the
+  native client process. A forged DNS or ARP answer can redirect or deny the
+  connection, but the selected verifier still requires the requested DNS/IP SAN
+  and a chain to explicit system roots. Plain HTTP and link protocols retain
+  their existing unauthenticated behavior.
+- A hostile TLS peer controls records and certificates. Native bounds limit
+  peer lists to eight, DER to 32 KiB, DNS SAN entries to 64 and candidate depth
+  to eight, with the standard 100-signature-attempt budget. One 35-second
+  monotonic deadline covers authentication; per-operation transport deadlines
+  bound later I/O. The standard TLS 1.3 certificate buffer can reach 256 KiB.
+- Trust depends on the immutable bootstrap bundle, update public key, signed
+  state, build inputs and initial
+  firmware REALTIME. Missing or malformed roots, invalid time and rollback
+  during validation fail closed. Public-CA compromise, a false initial firmware
+  clock and out-of-band Mozilla/Firefox trust constraints remain external trust
+  risks. The client does not fetch AIA intermediates or perform CRL, OCSP or CT
+  checks. Its CLI offers neither `-k` nor a mutable CA path. A followed HTTPS
+  downgrade fails before connecting; cross-origin redirects strip credentials,
+  cookies and a custom Host header. The native HTTPS gate passed 69 assertions,
+  including bad CertificateVerify, Finished and record-MAC failures. Certificate
+  and handshake rejection produced zero HTTP requests. The complete
+  `release-check` passed; [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
+  records the implementation and evidence.
 
 ### Malformed storage image
 
@@ -416,3 +438,30 @@ controls the system ([boot-chain.md](boot-chain.md)).
   unguarded goroutine stack TinyGo allocated for `main`. A kernel stack
   overflow ends the machine with a double-fault report rather than being
   recovered from.
+
+## Signed CA state
+
+HTTPS protects transport, but the signed trust package is authorized by the
+immutable trust-update public key. Possession of a currently trusted server
+certificate cannot authorize new roots. Missing files, invalid metadata,
+signatures, digests or certificates select the immutable system fallback and
+report the reason; they cannot disable certificate verification.
+
+Install compares the incoming sequence with the highest surviving published
+state generation. Equal sequences allow only byte-identical reinstallation.
+The selector cannot authorize an older surviving generation. Corrupt highest
+state uses bootstrap roots rather than silently selecting an older update.
+The installer keeps old generations and corrupted state for diagnosis.
+
+This protects normal installations and surviving state, not deletion of all
+history or host-side restoration of an old disk snapshot. There is no protected
+monotonic counter. The immutable bootstrap bundle remains trusted even when it
+predates state updates. A compromised update signing key or immutable system
+image can replace trust; administrators must protect and back up the external
+private signing seed. The normal build never reads that seed.
+
+FAT32 completes successful writes and replacements with device flushes, but it
+has no general journal and cannot promise recovery from arbitrary torn sectors
+or a device that lies about flush. The installer publishes a complete verified
+generation before replacing the selector; recovery verifies signed contents,
+and otherwise uses bootstrap roots without blocking the shell.

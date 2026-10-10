@@ -1,4 +1,4 @@
-// Package fetch implements bounded HTTP requests and redirect policy.
+// Package fetch implements bounded HTTP requests and secure redirect policy.
 package fetch
 
 import (
@@ -13,7 +13,10 @@ const MaxRequestHeaders = 16
 const MaxRedirects = 5
 
 var ErrUsage = errors.New("invalid fetch arguments")
-var ErrURL = errors.New("invalid HTTP URL")
+var ErrURL = errors.New("invalid HTTP or HTTPS URL")
+var ErrTLSUnavailable = errors.New("authenticated TLS transport unavailable")
+var ErrDowngrade = errors.New("refusing HTTPS to HTTP redirect")
+var ErrProtocolSwitch = errors.New("HTTP protocol switching unsupported")
 var ErrRedirect = errors.New("invalid HTTP redirect")
 var ErrRequest = errors.New("HTTP request too large")
 
@@ -23,6 +26,7 @@ type URL struct {
 	Port       uint16
 	Target     [MaxURL]byte
 	TargetSize int
+	Secure     bool
 	Numeric    bool
 	Address    network.IPv4
 }
@@ -32,7 +36,15 @@ func (u *URL) TargetBytes() []byte { return u.Target[:u.TargetSize] }
 
 func ParseURL(raw []byte, out *URL) error {
 	*out = URL{}
-	if len(raw) < 8 || len(raw) > MaxURL || string(raw[:7]) != "http://" {
+	if len(raw) < 8 || len(raw) > MaxURL {
+		return ErrURL
+	}
+	prefix := 7
+	if string(raw[:7]) == "http://" {
+		out.Port = 80
+	} else if len(raw) >= 9 && string(raw[:8]) == "https://" {
+		out.Secure, out.Port, prefix = true, 443, 8
+	} else {
 		return ErrURL
 	}
 	for _, c := range raw {
@@ -40,7 +52,7 @@ func ParseURL(raw []byte, out *URL) error {
 			return ErrURL
 		}
 	}
-	part := raw[7:]
+	part := raw[prefix:]
 	authorityEnd := 0
 	for authorityEnd < len(part) && part[authorityEnd] != '/' && part[authorityEnd] != '?' && part[authorityEnd] != '#' {
 		authorityEnd++
@@ -85,7 +97,6 @@ func ParseURL(raw []byte, out *URL) error {
 		copy(out.Host[:], name.Bytes())
 		out.HostSize = int(name.Size)
 	}
-	out.Port = 80
 	if colon != len(authority) {
 		port := authority[colon+1:]
 		if len(port) == 0 || len(port) > 5 {
@@ -284,6 +295,10 @@ func custom(o *Options, name string) bool {
 }
 
 func EncodeRequest(dst []byte, u *URL, o *Options, method string) ([]byte, error) {
+	return encodeRequest(dst, u, o, method, true)
+}
+
+func encodeRequest(dst []byte, u *URL, o *Options, method string, sameOrigin bool) ([]byte, error) {
 	dst = dst[:0]
 	put := func(p []byte) bool {
 		if len(dst)+len(p) > cap(dst) {
@@ -295,10 +310,10 @@ func EncodeRequest(dst []byte, u *URL, o *Options, method string) ([]byte, error
 	if !put([]byte(method)) || !put([]byte(" ")) || !put(u.TargetBytes()) || !put([]byte(" HTTP/1.1\r\n")) {
 		return nil, ErrRequest
 	}
-	if !custom(o, "host") {
+	if !sameOrigin || !custom(o, "host") {
 		var host [hostname.MaxText + 6]byte
 		value := append(host[:0], u.HostBytes()...)
-		if u.Port != 80 {
+		if !u.Secure && u.Port != 80 || u.Secure && u.Port != 443 {
 			value = append(value, ':')
 			value = decimal(value, uint64(u.Port))
 		}
@@ -326,6 +341,9 @@ func EncodeRequest(dst []byte, u *URL, o *Options, method string) ([]byte, error
 	}
 	for i := 0; i < o.HeaderCount; i++ {
 		h := &o.Headers[i]
+		if !sameOrigin && (equals(h.NameBytes(), "authorization") || equals(h.NameBytes(), "proxy-authorization") || equals(h.NameBytes(), "cookie") || equals(h.NameBytes(), "host")) {
+			continue
+		}
 		if !put(h.NameBytes()) || !put([]byte(": ")) || !put(h.ValueBytes()) || !put([]byte("\r\n")) {
 			return nil, ErrRequest
 		}
@@ -345,6 +363,23 @@ type Network interface {
 	Resolve([]byte, *[8]network.IPv4) (int, error)
 	Connect(network.IPv4, uint16) (Connection, error)
 }
+
+// TCPConnectError marks a failed TCP connection, before any TLS handshake.
+// Only this error permits HTTPS fallback to another resolved address.
+type TCPConnectError struct{ Err error }
+
+func (e *TCPConnectError) Error() string { return e.Err.Error() }
+func (e *TCPConnectError) Unwrap() error { return e.Err }
+
+// SecureNetwork returns a stream only after authenticating the requested host.
+// It wraps TCP connection failures in TCPConnectError; other errors are terminal.
+type SecureNetwork interface {
+	ConnectTLS(network.IPv4, uint16, []byte) (Connection, error)
+}
+
+// ResponseValidator lets a download consumer reject final HTTP status before output.
+type ResponseValidator interface{ CheckResponse(status int) error }
+
 type Output interface {
 	httpwire.Sink
 	Close() error
@@ -446,6 +481,7 @@ func Run(o *Options, env Environment) error {
 	if err := ParseURL(o.URL, &current); err != nil {
 		return err
 	}
+	originalHost, originalPort, originalSecure := string(current.HostBytes()), current.Port, current.Secure
 	method := "GET"
 	if o.Head {
 		method = "HEAD"
@@ -485,8 +521,31 @@ func Run(o *Options, env Environment) error {
 				value = decimal(value, uint64(current.Port))
 				diagnostic(env, '*', value)
 			}
-			conn, err = env.Connect(addresses[i], current.Port)
+			if current.Secure {
+				secure, ok := env.(SecureNetwork)
+				if !ok {
+					return ErrTLSUnavailable
+				}
+				if o.Verbose {
+					diagnostic(env, '*', []byte("TLS 1.3 handshake"))
+				}
+				conn, err = secure.ConnectTLS(addresses[i], current.Port, current.HostBytes())
+				if err != nil {
+					var connectErr *TCPConnectError
+					if !errors.As(err, &connectErr) {
+						return err
+					}
+				}
+			} else {
+				conn, err = env.Connect(addresses[i], current.Port)
+			}
 			if err == nil {
+				if current.Secure && o.Verbose {
+					var line [300]byte
+					value := append(line[:0], "certificate verified for "...)
+					value = append(value, current.HostBytes()...)
+					diagnostic(env, '*', value)
+				}
 				break
 			}
 		}
@@ -494,7 +553,8 @@ func Run(o *Options, env Environment) error {
 			return err
 		}
 		var request [16 << 10]byte
-		encoded, err := EncodeRequest(request[:0], &current, o, method)
+		sameOrigin := string(current.HostBytes()) == originalHost && current.Port == originalPort && current.Secure == originalSecure
+		encoded, err := encodeRequest(request[:0], &current, o, method, sameOrigin)
 		if err != nil {
 			conn.Close()
 			return err
@@ -533,6 +593,9 @@ func Run(o *Options, env Environment) error {
 		var response httpwire.Response
 		for {
 			err = reader.Headers(&response)
+			if err == nil && response.Status == 101 {
+				err = ErrProtocolSwitch
+			}
 			if err != nil || response.Status >= 200 {
 				break
 			}
@@ -544,6 +607,12 @@ func Run(o *Options, env Environment) error {
 		if o.Verbose {
 			diagnostic(env, '<', response.Header[:response.Size])
 		}
+		if policy, ok := env.(ResponseValidator); ok {
+			if err := policy.CheckResponse(response.Status); err != nil {
+				conn.Close()
+				return err
+			}
+		}
 		if o.Follow && redirect(response.Status) {
 			if hop == MaxRedirects {
 				conn.Close()
@@ -554,6 +623,9 @@ func Run(o *Options, env Environment) error {
 			conn.Close()
 			if err != nil {
 				return err
+			}
+			if current.Secure && !next.Secure {
+				return ErrDowngrade
 			}
 			current = next
 			if response.Status == 303 || (response.Status == 301 || response.Status == 302) && method == "POST" {

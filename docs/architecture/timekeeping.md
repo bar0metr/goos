@@ -28,3 +28,17 @@ timezone configuration exists; there is no DST or timezone database.
 
 Structured logs use `REALTIME` and render UTC calendar timestamps. Monotonic
 time remains the source for ordering inside the kernel and for latency.
+
+TLS certificate validity uses REALTIME through `cryptosys.Now` (ADR 0198).
+The native client rejects unavailable, invalid or backward-moving readings
+within a handshake; it does not substitute uptime or a fixed fixture date.
+Firmware-provided UTC remains part of the trust boundary. A hostile firmware or
+hypervisor can supply a false initial calendar time.
+
+GTCP1 TLS deadlines use MONOTONIC: 35 seconds for the whole handshake, followed
+by 35 seconds per transport operation. Calendar changes cannot extend these
+waits. The userspace-only pinned runtime overlay supplies both clock hooks to
+standard library code; it does not change the kernel's UEFI runtime. Native TLS
+consumers initialize standard packages after heap setup. The offline native
+HTTPS gate passed its expired, future and other authentication failures;
+calendar trust still depends on firmware's initial reading.

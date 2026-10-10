@@ -9,7 +9,7 @@ import (
 
 func TestURLAndHeader(t *testing.T) {
 	var u URL
-	for _, raw := range []string{"https://host/", "http://a@host/", "http://[::1]/", "http://host:0/", "http://bad..host/", "http://1.2.3.999/", "http://host/\r\nX: y"} {
+	for _, raw := range []string{"ftp://host/", "http://a@host/", "http://[::1]/", "http://host:0/", "http://bad..host/", "http://1.2.3.999/", "http://host/\r\nX: y"} {
 		if ParseURL([]byte(raw), &u) == nil {
 			t.Errorf("accepted %q", raw)
 		}
@@ -147,7 +147,7 @@ func TestRedirectLimitAndHeaders(t *testing.T) {
 		}
 	}
 	var invalid Options
-	for _, args := range [][][]byte{{[]byte("-I"), []byte("-d"), []byte("x"), []byte("http://h/")}, {[]byte("-o"), []byte("x"), []byte("-O"), []byte("http://h/")}, {[]byte("https://h/")}} {
+	for _, args := range [][][]byte{{[]byte("-I"), []byte("-d"), []byte("x"), []byte("http://h/")}, {[]byte("-o"), []byte("x"), []byte("-O"), []byte("http://h/")}, {[]byte("ftp://h/")}} {
 		if Parse(args, &invalid) == nil {
 			t.Fatalf("accepted %q", args)
 		}

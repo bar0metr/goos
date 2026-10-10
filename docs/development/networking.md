@@ -3,7 +3,9 @@
 The native `fetch` command uses the existing GRESOLV1 and GTCP1 sessions.
 `userspace/httpwire` bounds response headers to 16 KiB and streams
 Content-Length, chunked and EOF-delimited bodies. `userspace/fetch` limits
-redirects to five and permits only HTTP URLs. The command holds one endpoint
+redirects to five and accepts HTTP and HTTPS URLs. HTTPS wraps the connected
+stream in `userspace/tlsclient` using the pinned software Go TLS/X.509 stack;
+followed HTTPS downgrades fail before connecting. The command holds one endpoint
 per hop and releases each received TCP slot after copying its bytes.
 
 Status: implemented by [ADR 0190](../adr/0190-network-device-authority.md) and
@@ -25,7 +27,19 @@ The resolver now repeats a truncated UDP answer over a GTCP1 session
 (ADR 0194, ADR 0196). IPv6, Linux socket calls and persistent DNS-over-TCP
 connections remain out of scope.
 
-Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
+ADR 0198 selects native TLS 1.3 above GTCP1, with explicit system roots,
+kernel entropy and REALTIME. TLS and X.509 remain application parsers; network
+services gain no new parser or capability. The local compatibility tools pin
+Go 1.25.5/TinyGo 0.42.0 sources, reject scheduler-dependent paths, and bound
+certificate lists, DER, SANs and chain search. Native crypto and X.509 probes
+pass. `make test-tls` passed 69 native assertions, including authenticated fetch,
+peer rejection and production-bundle loading. `make test-network
+NETWORK_SCENARIOS=stream` also passed; full `test-all` and `release-check` have
+not run. See
+[the evidence report](crypto-feasibility.md) and
+[ADR 0198](../adr/0198-native-tls-and-system-trust.md).
+
+Baseline: `main` at `18f659e`Baseline: `main` at `18f659e` (2026-10-06). Implementation must reconcile this
 specification with the source at the time of the change. The milestone is complete
 only when an installed GoOS system sends ICMP echo requests from its own `ping`
 command, receives replies over its own network driver and stack, and answers

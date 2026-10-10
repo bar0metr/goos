@@ -1,0 +1,16 @@
+// GoOS entropy adapter for the pinned Go crypto/internal/sysrand package.
+package sysrand
+
+import _ "unsafe"
+
+//go:linkname nativeRandom goos_runtime_random
+func nativeRandom([]byte)
+
+func Read(dst []byte) { nativeRandom(dst) }
+
+// The standard Linux source still declares read; its fallback uses the same
+// native source rather than opening /dev/urandom.
+func urandomRead(dst []byte) error {
+	nativeRandom(dst)
+	return nil
+}
