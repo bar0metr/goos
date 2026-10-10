@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -123,7 +124,9 @@ func userspaceMain() {
 		var notice ipc.Message
 		noticeStatus := remoteservice.Receive(control, 0, &notice)
 		if noticeStatus == kcall.StatusOK {
-			if !terminalEnd(&notice) {
+			if validation.Enabled && remoteapi.DecodeSignerFaultNotice(&notice) {
+				closeHostSigner()
+			} else if !terminalEnd(&notice) {
 				remoteservice.CloseHandles(&notice)
 				finish(1)
 			}

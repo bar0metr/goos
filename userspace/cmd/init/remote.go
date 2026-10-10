@@ -4,6 +4,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
@@ -542,6 +543,24 @@ func closeRemoteWorker(worker *remoteWorker) {
 	remoteRegistry.FinishClose(worker.id, worker.owner)
 	*worker = remoteWorker{}
 	notifyRemoteCounts()
+}
+
+func injectRemoteSignerFault() bool {
+	if !validation.Enabled {
+		return false
+	}
+	for index := range remoteWorkers {
+		worker := &remoteWorkers[index]
+		if worker.id == 0 || worker.process == 0 || worker.control == 0 || worker.session.shellProcess == 0 {
+			continue
+		}
+		if !sendMessage(uint64(worker.control), remoteapi.SignerFaultNotice()) {
+			return false
+		}
+		mark("REMOTE_SIGNER_FAULT_INJECTED\n")
+		return true
+	}
+	return false
 }
 
 func closeRemoteWorkers() {

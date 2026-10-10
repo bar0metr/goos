@@ -18,10 +18,7 @@ import (
 	"strconv"
 )
 
-// injectFault asks PID 1 to kill the terminal service, this shell, or the
-// filesystem service. It exists only in the validation build, where the boot
-// test uses it to show that each restarts on its own while the rest keeps
-// working (ADR 0089, 0096).
+// injectFault asks PID 1 to run a validation-only fault.
 func injectFault(target []byte) {
 	service := execproto.FaultTerminal
 	if argumentIs(target, "shell") {
@@ -44,8 +41,10 @@ func injectFault(target []byte) {
 		service = execproto.FaultStorage
 	} else if argumentIs(target, "net-driver") {
 		service = execproto.FaultNetDriver
+	} else if argumentIs(target, "remote-signer") {
+		service = execproto.FaultRemoteSigner
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver or kernel-stack\n")
+		write("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, remote-signer or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)

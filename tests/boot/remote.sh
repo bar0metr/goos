@@ -591,6 +591,37 @@ try:
     replacement.kill()
     counts()
 
+    victim = Terminal(ports[0], "signer-fault-victim")
+    victim.wait(PROMPT)
+    survivor = Terminal(ports[0], "signer-fault-survivor", extra=("-o", "RekeyLimit=1K"))
+    survivor.wait(PROMPT)
+    counts(sessions=2)
+    fault = console("fault remote-signer", rb"REMOTE_SIGNER_FAULT_INJECTED")
+    require("signer-fault.injected", b"fault: refused" not in fault,
+            "PID 1 delivered a signer-only fault to the first authenticated worker")
+    wait_until(lambda: victim.process.poll() is not None, "signer fault closes the selected SSH connection")
+    require("signer-fault.victim-disconnected", victim.process.returncode != 0,
+            "selected SSH connection closed after its signer endpoint died")
+    counts(sessions=1)
+    debug = work / "signer-fault-survivor.debug.log"
+    offset = debug.stat().st_size
+    body = survivor.command(f"cat {REKEY_OUTPUT_PATH}")
+    require("signer-fault.survivor-output", re.search(rb"(?:^|\n)R{2048}\r?\n", body) is not None,
+            "second SSH connection remains usable after the fault")
+    wait_until(lambda: b"SSH2_MSG_NEWKEYS received" in debug.read_bytes()[offset:],
+               "surviving SSH connection completes rekey after signer fault")
+    require("signer-fault.survivor-rekey", survivor.process.poll() is None and
+            b"SURVIVOR_OK" in survivor.command("echo SURVIVOR_OK"),
+            "surviving worker retains its host identity reference")
+    admitted = Terminal(ports[0], "signer-fault-replacement")
+    admitted.wait(PROMPT)
+    counts(sessions=2)
+    require("signer-fault.capacity-reclaimed", b"ADMITTED_OK" in admitted.command("echo ADMITTED_OK"),
+            "closed worker releases its admission slot")
+    survivor.kill()
+    admitted.kill()
+    counts()
+
     config("port", "2222")
     reload_ok()
     before = status(listener="listening", bind="0.0.0.0:2222")
