@@ -165,6 +165,12 @@ func waitTraceObject(entries []kernelwait.Entry) uint64 {
 
 func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, task uint64) (kcall.Status, bool) {
 	local := thisCPU()
+	cursorMode := count&kcall.WaitAnyCursorFlag != 0
+	count &^= kcall.WaitAnyCursorFlag
+	interestSize := kcall.WaitAnyInterestSize
+	if cursorMode {
+		interestSize = kcall.WaitAnyCursorInterestSize
+	}
 	if task >= sched.MaxTasks || count > kernelwait.MaxObjects ||
 		!vm.ValidateUserRange(resultAddress, kcall.WaitAnyResultSize) {
 		return kcall.StatusInvalidArgument, false
@@ -189,7 +195,7 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		}
 		return kcall.StatusPermissionDenied, false
 	}
-	wireSize := count * kcall.WaitAnyInterestSize
+	wireSize := count * interestSize
 	if count != 0 && (!vm.ValidateUserRange(interestsAddress, wireSize) ||
 		!vm.CopyIn(handler.root, interestsAddress, local.waitAnyWire[:int(wireSize)])) {
 		return kcall.StatusInvalidArgument, false
@@ -199,16 +205,24 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 	}
 	timeout := decodeUint64(local.waitAnyResultWire[0:8])
 	for index := 0; index < int(count); index++ {
-		offset := index * int(kcall.WaitAnyInterestSize)
+		offset := index * int(interestSize)
 		handleID := handle.ID(decodeUint64(local.waitAnyWire[offset : offset+8]))
 		events := kcall.WaitEvent(decodeUint64(local.waitAnyWire[offset+8 : offset+16]))
 		entry, status, reason := resolveWaitAny(owner, handleID, events)
 		if status != kcall.StatusOK {
 			trace(diag.WaitDenied, owner.ID(), uint64(taskID), uint64(handleID), uint64(reason))
 			if diag.Enabled {
-				traceDeniedInterests(handler.root, interestsAddress, count)
+				traceDeniedInterests(handler.root, interestsAddress, count, interestSize)
 			}
 			return status, false
+		}
+		if entry.Key.Kind == kernelwait.KindLog {
+			if !cursorMode {
+				return kcall.StatusUnsupported, false
+			}
+			entry.Cursor = decodeUint64(local.waitAnyWire[offset+16 : offset+24])
+		} else if cursorMode && decodeUint64(local.waitAnyWire[offset+16:offset+24]) != 0 {
+			return kcall.StatusInvalidArgument, false
 		}
 		local.waitAnyEntries[index] = entry
 	}
@@ -297,6 +311,12 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 		}
 		return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindStream, Object: object, Side: side}, Events: waitEvents(events)}, kcall.StatusOK, 0
 	case handle.TypeDevice:
+		if authority.Object() == device.LogObject {
+			if events != kcall.WaitReadable || !authority.Allows(capability.Read) {
+				return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyRights
+			}
+			return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindLog, Object: device.LogObject}, Events: kernelwait.Readable}, kcall.StatusOK, 0
+		}
 		// Only the terminal consoles are waitable. Read authority is what a
 		// reader already needs to take a byte, so waiting for one needs no more.
 		if _, terminal := consoleInput(authority.Object()); !terminal {
@@ -387,6 +407,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 			ready = amd64.InputPending(input)
 		case kernelwait.KindIRQ:
 			ready = amd64.NetIRQPending()
+		case kernelwait.KindLog:
+			ready = logfmt.SequenceBefore(entry.Cursor, systemLog.Total())
 		}
 		if ready {
 			mask |= 1 << index
@@ -525,4 +547,18 @@ func expireWaitDeadlines() {
 	}
 	wakeConsoleWaiters()
 	wakeIRQWaiters()
+	if logNotification.Take() {
+		wakeLogWaiters(systemLog.Total())
+	}
+}
+
+// wakeLogWaiters runs in the kernel loop, outside native/lifecycle lock sets.
+// Appenders only mark the pending bit after releasing the ring lock. Do not log.
+func wakeLogWaiters(total uint64) {
+	local := thisCPU()
+	count := waitAnyTable.PublishLog(device.LogObject, total, local.waitAnyCompletions[:])
+	for index := 0; index < count && index < len(local.waitAnyCompletions); index++ {
+		amd64.WakeTaskID(uint64(local.waitAnyCompletions[index].Task))
+		local.waitAnyCompletions[index] = kernelwait.Completion{}
+	}
 }

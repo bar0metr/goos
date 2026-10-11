@@ -7,14 +7,15 @@
 package tty
 
 import (
+	"encoding/binary"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 )
 
 const (
 	ProtocolID = uint64(0x4754545932303031)
-	// Version 4 adds authoritative geometry and TERM to geometry replies.
-	Version = uint16(4)
+	// Version 5 adds sequence-tagged geometry notifications.
+	Version = uint16(5)
 	// MaxLine is the longest line a client receives: a native path and then
 	// some (ADR 0109). A line longer than one message is delivered in parts.
 	MaxLine = 4096
@@ -86,7 +87,7 @@ const (
 
 // GeometrySize is the fixed header length of a ResultGeometry payload;
 // up to MaxTerm printable TERM bytes follow it.
-const GeometrySize = 6
+const GeometrySize = 14
 const MaxTerm = 64
 const MaxRemoteDimension = 1000
 
@@ -99,6 +100,7 @@ const GeometryAuthoritative = byte(2)
 // Geometry describes a terminal without granting access to its transport.
 // Term aliases the input when decoded; owners must copy it before reuse.
 type Geometry struct {
+	Sequence      uint64
 	Columns       int
 	Rows          int
 	Display       bool
@@ -194,17 +196,19 @@ func GeometryStateReply(geometry Geometry, correlation uint64) (ipc.Message, boo
 		payload[4] |= GeometryAuthoritative
 	}
 	payload[5] = byte(len(geometry.Term))
+	binary.LittleEndian.PutUint64(payload[6:14], geometry.Sequence)
 	copy(payload[GeometrySize:], geometry.Term)
 	return Reply(ResultGeometry, payload[:GeometrySize+len(geometry.Term)], correlation)
 }
 
-// DecodeGeometryState reads a version 4 geometry payload.
+// DecodeGeometryState reads a version 5 geometry payload.
 func DecodeGeometryState(payload []byte) (Geometry, bool) {
 	if len(payload) < GeometrySize || len(payload) > GeometrySize+MaxTerm ||
 		payload[4]&^(GeometryDisplay|GeometryAuthoritative) != 0 || int(payload[5]) != len(payload)-GeometrySize {
 		return Geometry{}, false
 	}
 	geometry := Geometry{
+		Sequence:      binary.LittleEndian.Uint64(payload[6:14]),
 		Columns:       int(payload[0]) | int(payload[1])<<8,
 		Rows:          int(payload[2]) | int(payload[3])<<8,
 		Display:       payload[4]&GeometryDisplay != 0,

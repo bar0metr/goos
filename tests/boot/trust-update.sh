@@ -7,7 +7,7 @@ tree=${3:?validation system tree required}
 [ "$#" = 3 ] || exit 2
 read -r _hz _diag validation _opt _variant <build/config/build
 [ "$validation" = 1 ] || { echo 'trust-update: VALIDATION=1 required' >&2; exit 2; }
-work=$(mktemp -d /Volumes/Data/tmp/goos-trust-update.XXXXXX)
+work=$(go run ./tools/scratch goos-trust-update.)
 printf 'trust-update report: %s\n' "$work"
 mkdir "$work/fixtures"
 go run ./tools/trustfixture "$work/fixtures"
@@ -35,7 +35,7 @@ pass() { printf '%s\tpass\n' "$1" >>"$report"; checks=$((checks+1)); }
 wait_for() {
  elapsed=0
  while [ "$elapsed" -lt "$2" ]; do
-  grep -q -- "$1" "$3" 2>/dev/null && return 0
+  tr -d '\r' <"$3" 2>/dev/null | grep -q -- "$1" && return 0
   kill -0 "$4" 2>/dev/null || break
   sleep 1; elapsed=$((elapsed+1))
  done
@@ -72,7 +72,7 @@ boot() {
  wait_for 'NETD_READY 10\.0\.2\.' 30 "$log" "$guest_pid"
  sleep 4
 }
-window() { awk -v start="$command_start" -v command="$1" 'NR <= start {next} seen && index($0,"goos> ")==1 {exit} seen {print} !seen && ($0=="goos> " command || $0==command) {seen=1}' "$log"; }
+window() { awk -v start="$command_start" -v command="$1" '{ sub(/\r$/, "") } NR <= start {next} seen && index($0,"goos> ")==1 {exit} seen {print} !seen && ($0=="goos> " command || $0==command) {seen=1}' "$log"; }
 run_command() {
  command=$1
  command_start=$(wc -l <"$log")

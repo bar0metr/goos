@@ -105,6 +105,8 @@ type cpuScratch struct {
 	logFields       [logfmt.MaxFields]byte
 	logGrant        [logfmt.MaxFields]byte
 	logCopy         klog.Copy
+	logReadCopies   [klog.Capacity]klog.Copy
+	logReadWire     [kcall.LogReadSize]byte
 	kernelCallData  [kcall.MaxConsoleWrite]byte
 	ipcWireData     [ipc.WireMaxSize]byte
 	dispatchHandler nativeCallHandler
@@ -133,7 +135,8 @@ type cpuScratch struct {
 	streamWakeResults     [ipc.MaxWaiters]ipc.WaitResult
 	waitAnyCompletions    [sched.MaxTasks]kernelwait.Completion
 	waitAnyEntries        [kernelwait.MaxObjects]kernelwait.Entry
-	waitAnyWire           [kernelwait.MaxObjects * int(kcall.WaitAnyInterestSize)]byte
+	waitAnyView           kernelwait.View
+	waitAnyWire           [kernelwait.MaxObjects * int(kcall.WaitAnyCursorInterestSize)]byte
 	memoryWire            [8]byte
 	vmDescriptor          [kcall.VMDescriptorSize]byte
 	vmRecord              [kcall.VMRecordSize]byte

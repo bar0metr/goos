@@ -8,7 +8,7 @@ for tool in python3 ssh ssh-keygen ssh-keyscan qemu-system-x86_64 go; do
 done
 read -r _hz _diag validation _opt _variant <build/config/build
 [ "$validation" = 1 ] || { echo 'remote: VALIDATION=1 build required' >&2; exit 2; }
-work=$(mktemp -d /Volumes/Data/tmp/goos-remote-test.XXXXXX)
+work=$(go run ./tools/scratch goos-remote-test.)
 printf 'remote report: %s\n' "$work"
 # This host-only probe asks for forbidden SSH messages with want-reply=true.
 # OpenSSH remains the interoperability, authentication and terminal client.
@@ -18,6 +18,7 @@ import (
  "fmt"
  "net"
  "os"
+ "strings"
  "time"
  "golang.org/x/crypto/ssh"
  "golang.org/x/crypto/ssh/knownhosts"
@@ -35,7 +36,8 @@ func main() {
  dial:=func()*ssh.Client{c,e:=ssh.Dial("tcp",os.Args[1],cfg);if e!=nil{die(e)};return c}
  // Each rejected request gets a new connection: refusal may close its channel.
  for _,test:=range []struct{name string;data []byte}{
-  {"exec",ssh.Marshal(struct{Command string}{"echo FORBIDDEN_EXEC"})},
+  {"exec-malformed",[]byte{0,0,0,5,'x'}},
+  {"exec-oversized",ssh.Marshal(struct{Command string}{strings.Repeat("x",4097)})},
   {"subsystem",ssh.Marshal(struct{Name string}{"sftp"})},
   {"env",ssh.Marshal(struct{Name,Value string}{"LD_PRELOAD","forbidden"})},
   {"auth-agent-req@openssh.com",nil},
@@ -43,9 +45,22 @@ func main() {
  } {
   if mode!=test.name {continue}
   c:=dial();ch,requests,e:=c.OpenChannel("session",nil);if e!=nil{die(e)};go ssh.DiscardRequests(requests)
-  accepted,e:=ch.SendRequest(test.name,true,test.data)
+  request:=test.name;if strings.HasPrefix(request,"exec-"){request="exec"}
+  accepted,e:=ch.SendRequest(request,true,test.data)
   if e!=nil||accepted {die(fmt.Errorf("%s: require explicit failure reply, accepted=%v error=%v",test.name,accepted,e))}
   fmt.Printf("REJECT %s\n",test.name);ch.Close();c.Close();return
+ }
+ if mode=="pty-exec" || mode=="second-exec" || mode=="exec-shell" || mode=="exec-pty" {
+  c:=dial();ch,requests,e:=c.OpenChannel("session",nil);if e!=nil{die(e)};go ssh.DiscardRequests(requests)
+  request:="exec";payload:=ssh.Marshal(struct{Command string}{"sleep 60"})
+  if mode=="pty-exec" {request="pty-req";payload=ssh.Marshal(struct{Term string;Columns,Rows,Width,Height uint32;Modes string}{"xterm",80,24,0,0,"\x00"})}
+  accepted,e:=ch.SendRequest(request,true,payload);if e!=nil||!accepted{die(fmt.Errorf("initial %s refused: %v",request,e))}
+  request="exec";payload=ssh.Marshal(struct{Command string}{"uname"})
+  if mode=="exec-shell" {request="shell";payload=nil}
+  if mode=="exec-pty" {request="pty-req";payload=ssh.Marshal(struct{Term string;Columns,Rows,Width,Height uint32;Modes string}{"xterm",80,24,0,0,"\x00"})}
+  accepted,e=ch.SendRequest(request,true,payload)
+  if e!=nil||accepted{die(fmt.Errorf("%s: require failure reply accepted=%v error=%v",mode,accepted,e))}
+  fmt.Printf("REJECT %s\n",mode);ch.Close();c.Close();return
  }
  if mode=="second-session" {
  c:=dial()
@@ -94,7 +109,8 @@ for path in (iso, firmware, source):
 for name in ("remoted", "remoted-worker", "shell"):
     if not (source / "system/services" / name).is_file():
         raise SystemExit(f"remote: missing service {name}")
-for name in ("remote", "gview", "sleep", "cat", "echo", "ps"):
+for name in ("remote", "gview", "gfm", "sleep", "cat", "echo", "ps", "head", "tail",
+             "grep", "wc", "find", "hexdump", "hostname", "date"):
     if not (source / "system/bin" / name).is_file():
         raise SystemExit(f"remote: missing command {name}")
 report = (work / "checks.tsv").open("w", buffering=1)
@@ -105,7 +121,7 @@ terminals = []
 guest = None
 serial = None
 boot_number = 0
-PROMPT = rb"(?:^|\n)goos> $"
+PROMPT = rb"(?:^|\n)(?:\x1b\[[0-9;?]*[A-Za-z])*goos> $"
 REMOTE_USER = "remote-admin"
 AUTHORIZED_KEYS_PATH = "/home/user/remote-keys/authorized_keys"
 CORRUPT_HOST_KEY_PATH = "/state/security/ssh/corrupt_host_ed25519_key"
@@ -142,9 +158,9 @@ def require(name, condition, detail):
     checks += 1
 
 
-def run(args, timeout=30, env=None):
+def run(args, timeout=30, env=None, input_data=None):
     return subprocess.run(list(map(str, args)), stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=timeout, env=env)
+                          stderr=subprocess.PIPE, timeout=timeout, env=env, input=input_data)
 
 
 def wait_until(predicate, detail, timeout=30):
@@ -169,7 +185,7 @@ for sock in sockets:
 ports = [sock.getsockname()[1] for sock in sockets]
 for sock in sockets:
     sock.close()
-for name in ("login", "wrong"):
+for name in ("login", "wrong", "second"):
     result = run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"goos-{name}-test", "-f", work / name])
     require(f"fixture.{name}", result.returncode == 0, "disposable host-only Ed25519 identity")
 shutil.copytree(source, work / "tree")
@@ -191,7 +207,9 @@ persisted_config.write_bytes(previous + (
     f"system.remote.authorized-keys text {AUTHORIZED_KEYS_PATH}\n"
     f"system.remote.host-key text {CORRUPT_HOST_KEY_PATH}\n").encode())
 # Wide, recognizable text proves both initial and resized viewer geometry.
-(work / "tree/home/user/remote-view.txt").write_text("G" * 110 + "\nREMOTE_VIEW_BODY\n")
+(work / "tree/home/user/remote-view.txt").write_text("G" * 150 + "\nREMOTE_VIEW_BODY\n")
+(work / "tree/home/user/admin-lines.txt").write_bytes(b"one\ntwo\nthree\n")
+(work / "tree/home/user/admin-bytes.bin").write_bytes(b"\x00\x01ABC\xff")
 require("image.no-private-key", not (work / "tree/state/security/ssh/ssh_host_ed25519_key").exists(),
         "the image does not supply a server identity")
 result = run(["go", "run", "./tools/mkfat32", "-new", "-tree", work / "tree", work / "disk.img"], timeout=120)
@@ -315,6 +333,23 @@ def ssh_args(port, name, key="login", extra=(), user=REMOTE_USER):
             "-o", "KexAlgorithms=curve25519-sha256", "-o", "Ciphers=aes128-gcm@openssh.com",
             "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519",
             "-o", "SendEnv=-*", *extra, f"{user}@127.0.0.1"]
+
+
+def ssh_exec(port, name, command, key="login", input_data=None, expected=0, sessions=0):
+    result = run([*ssh_args(port, name, key, extra=("-T",)), command], 30, input_data=input_data)
+    (work / f"{name}.stdout.log").write_bytes(result.stdout)
+    (work / f"{name}.stderr.log").write_bytes(result.stderr)
+    require(name + ".status", result.returncode == expected,
+            f"native exit status {expected}, received {result.returncode}; stderr={result.stderr!r}")
+    require(name + ".no-terminal", b"goos> " not in result.stdout and b"\r" not in result.stdout,
+            "one-shot command has no prompt or PTY newline conversion")
+    counts(sessions=sessions)
+    return result
+
+
+def log_records(data):
+    return re.findall(rb"^\[[^\r\n]+Z\] (DEBUG|INFO |WARN |ERROR) ([^\[\r\n]+)\[[0-9]+\]: ([^\r\n]*)\r?$",
+                      data, re.MULTILINE)
 
 
 class Terminal:
@@ -441,6 +476,94 @@ try:
 
     rejected_login("auth.wrong-user", ports[0], "login", user="user")
 
+    result = ssh_exec(ports[0], "exec.uname", "uname")
+    require("exec.uname-output", b"GoOS" in result.stdout, "native uname runs without a PTY")
+    result = ssh_exec(ports[0], "exec.sequence", "echo one; echo two")
+    require("exec.sequence-output", result.stdout == b"one\ntwo\n", "native sequence stdout is byte-exact")
+    result = ssh_exec(ports[0], "exec.stderr", "cat /home/user/remote-missing-file", expected=2)
+    require("exec.stderr-separated", not result.stdout and b"no such file or directory" in result.stderr,
+            "native error reaches SSH extended stderr with command status")
+    result = ssh_exec(ports[0], "exec.config", "config get system.net.mode")
+    require("exec.config-output", result.stdout.strip() == b"dhcp", "builtin config keeps its normal authority")
+    result = ssh_exec(ports[0], "exec.pipeline", "echo PIPE_OK | grep PIPE_OK")
+    require("exec.pipeline-output", result.stdout == b"PIPE_OK\n", "native pipeline executes without terminal grants")
+    result = ssh_exec(ports[0], "exec.stdin", "grep needle", input_data=b"other\nneedle\nlast\n")
+    require("exec.stdin-output", result.stdout == b"needle\n", "SSH stdin and EOF reach the native stream reader")
+    result = ssh_exec(ports[0], "exec.binary-stdin", "wc -c", input_data=b"\x00\xffA\r\nB")
+    require("exec.binary-stdin-count", result.stdout.strip() == b"6", "non-PTY input preserves binary bytes")
+    ssh_exec(ports[0], "exec.syntax", "echo 'unterminated", expected=2)
+    result = ssh_exec(ports[0], "exec.background", "echo MUST_NOT_RUN; sleep 1 &", expected=2)
+    require("exec.background-no-side-effects", not result.stdout,
+            "whole one-shot command rejects background syntax before executing its sequence")
+    result = ssh_exec(ports[0], "exec.literal-ampersand", "echo 'a&b'")
+    require("exec.literal-ampersand-output", result.stdout == b"a&b\n", "quoted ampersand is argument data")
+
+    for command, wanted in (("head -n 1 /home/user/admin-lines.txt", b"one\n"),
+                            ("tail -n 1 /home/user/admin-lines.txt", b"three\n"),
+                            ("grep -i TWO /home/user/admin-lines.txt", b"two\n"),
+                            ("wc -l /home/user/admin-lines.txt", b"3")):
+        name = command.split()[0]
+        result = ssh_exec(ports[0], "admin." + name, command)
+        require("admin." + name + ".output", result.stdout.strip() == wanted.strip(), "bounded native file command")
+    result = ssh_exec(ports[0], "admin.find", "find /home/user -name admin-lines.txt")
+    require("admin.find-output", b"/home/user/admin-lines.txt\n" in result.stdout, "bounded traversal matches exact basename")
+    result = ssh_exec(ports[0], "admin.hexdump", "hexdump /home/user/admin-bytes.bin")
+    require("admin.hexdump-output", b"00 01 41 42 43 ff" in result.stdout and b"ABC" in result.stdout,
+            "fixed binary hex and printable ASCII rows")
+    ssh_exec(ports[0], "admin.hostname-set", "hostname remote-test")
+    result = ssh_exec(ports[0], "admin.hostname-get", "hostname")
+    require("admin.hostname-output", result.stdout.strip() == b"remote-test", "typed hostname durable mutation")
+    result = ssh_exec(ports[0], "admin.date", "date")
+    require("admin.date-output", re.fullmatch(rb"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\n", result.stdout) is not None,
+            "realtime UTC has an unambiguous format")
+
+    second_public = (work / "second.pub").read_text().strip()
+    fingerprint_result = run(["ssh-keygen", "-l", "-E", "sha256", "-f", work / "second.pub"])
+    require("keys.fixture-fingerprint", fingerprint_result.returncode == 0, "standard Ed25519 public fingerprint")
+    second_fingerprint = fingerprint_result.stdout.split()[1].decode()
+    ssh_exec(ports[0], "keys.add", f'remote key add "{second_public}"')
+    result = ssh_exec(ports[0], "keys.list", "remote keys")
+    require("keys.list-added", second_fingerprint.encode() in result.stdout and b"goos-second-test" in result.stdout,
+            "stable fingerprint and preserved optional comment")
+    result = ssh_exec(ports[0], "keys.authenticate-added", "uname", key="second")
+    require("keys.add-effective", b"GoOS" in result.stdout, "successful add reloads policy without reboot")
+    ssh_exec(ports[0], "keys.duplicate", f'remote key add "{second_public}"', expected=2)
+    before_keys = status()
+    ssh_exec(ports[0], "keys.bad-add", 'remote key add "ssh-ed25519 invalid"', expected=2)
+    require("keys.bad-add-retains-policy", status().get("generation") == before_keys.get("generation"),
+            "bad key leaves previous effective generation active")
+    ssh_exec(ports[0], "keys.remove", f"remote key remove {second_fingerprint}")
+    rejected_login("keys.removed-authentication", ports[0], key="second")
+    config("port", "0")
+    before_keys = status()
+    ssh_exec(ports[0], "keys.failed-reload", f'remote key add "{second_public}"', expected=2)
+    require("keys.failed-reload-retains-policy", status().get("generation") == before_keys.get("generation"),
+            "rejected key reload preserves the previous active set")
+    config("port", "22")
+    reload_ok()
+    result = ssh_exec(ports[0], "keys.failed-reload-rollback", "remote keys")
+    require("keys.failed-reload-retains-file", second_fingerprint.encode() not in result.stdout,
+            "failed reload does not leave the candidate authorized on disk")
+    rejected_login("keys.failed-reload-authentication", ports[0], key="second")
+
+    result = ssh_exec(ports[0], "log.newest", "log -n 5")
+    require("log.newest-count", len(log_records(result.stdout)) == 5, "newest five retained records")
+    result = ssh_exec(ports[0], "log.level", "log -n 20 --level warn")
+    records = log_records(result.stdout)
+    require("log.level-filter", bool(records) and all(level == b"WARN " for level, _, _ in records),
+            "exact structured warn filtering")
+    result = ssh_exec(ports[0], "log.combined", "log -n 2 --level info --component remoted")
+    records = log_records(result.stdout)
+    require("log.combined-filter", len(records) == 2 and all(level == b"INFO " and component == b"remoted"
+            for level, component, _ in records), "newest-N after exact level and component filtering")
+    result = ssh_exec(ports[0], "log.newest-order",
+                      "log --level info --component remoted; echo LOG_SPLIT; log -n 2 --level info --component remoted")
+    parts = result.stdout.split(b"LOG_SPLIT\n")
+    require("log.snapshot-separator", len(parts) == 2, "two filtered reads within one SSH execution")
+    all_records, newest_records = map(log_records, parts)
+    require("log.newest-identity-and-order", len(all_records) >= 2 and newest_records == all_records[-2:],
+            "newest matching records retain their chronological identity and order without intervening admissions")
+
     session = Terminal(ports[0], "primary-shell")
     session.wait(PROMPT)
     require("auth.good-key", session.process.poll() is None, "OpenSSH public-key login opens native shell")
@@ -467,6 +590,33 @@ try:
             record.start() >= 2 and log_output[record.start()-2:record.start()] == b"\r\n"
             for record in records), "system log records start at column zero")
     start = len(session.stdout)
+    session.send(b"log -n 0 -f --component remoted\n")
+    session.wait(rb"log -n 0 -f --component remoted", start)
+    time.sleep(0.5)
+    session.pump()
+    idle_start = len(session.stdout)
+    time.sleep(0.5)
+    session.pump()
+    require("log.follow-idle", len(session.stdout) == idle_start and session.process.poll() is None,
+            "follower stays quiet with no new matching record")
+    trigger_time = time.monotonic()
+    ssh_exec(ports[0], "log.follow-trigger", "remote reload", sessions=1)
+    session.wait(rb"remoted\[[0-9]+\]: remote listener active", idle_start, 10)
+    require("log.follow-wake", time.monotonic() - trigger_time < 10,
+            "second SSH session wakes the event-driven follower")
+    session.pump()
+    second_event_start = len(session.stdout)
+    ssh_exec(ports[0], "log.follow-second-trigger", "remote reload", sessions=1)
+    session.wait(rb"remoted\[[0-9]+\]: remote listener active", second_event_start, 10)
+    session.pump()
+    require("log.follow-continues", re.search(PROMPT, session.stdout[start:]) is None,
+            "follower stays active through a second append instead of returning after its first event")
+    cancel_start = len(session.stdout)
+    session.send(b"\x03")
+    session.wait(PROMPT, cancel_start)
+    require("log.follow-interrupt", b"FOLLOW_STOPPED_OK" in session.command("echo FOLLOW_STOPPED_OK"),
+            "Ctrl-C stops the builtin and restores the remote prompt")
+    start = len(session.stdout)
     session.send(b"sleep 60\n")
     session.wait(rb"sleep 60", start)
     interrupted = wait_until(running_sleep, "remote foreground sleep process appears")
@@ -483,18 +633,21 @@ try:
     session.wait(rb"\x1b\[24;1H", start)
     session.wait(rb"(?<!G)G{80}(?!G)", start)
     require("terminal.raw-initial-geometry", True, "viewer status on row24 and 80-column body from actual 80x24 PTY")
+    viewer_pids = {pid for pid, name in inventory().items() if name.rsplit("/", 1)[-1] == "gview"}
+    require("terminal.raw-viewer-process", len(viewer_pids) == 1, "one running foreground viewer")
+    start = len(session.stdout)
+    session.resize(120, 40)
+    session.wait(rb"\x1b\[40;1H", start)
+    session.wait(rb"(?<!G)G{120}(?!G)", start)
+    require("terminal.raw-live-window-change", viewer_pids <= inventory().keys(),
+            "same running viewer redraws at 120x40 without input or restart")
     start = len(session.stdout)
     session.resize(100, 30)
-    # Geometry changes are stored for the next foreground launch; this gate
-    # does not require a new process-wide resize signal for a running app.
-    session.send(b"\x1b[21~")  # F10, an unambiguous raw-mode quit event.
-    session.wait(PROMPT, start)
-    start = len(session.stdout)
-    session.send(b"gview /home/user/remote-view.txt\n")
     session.wait(rb"\x1b\[30;1H", start)
     session.wait(rb"(?<!G)G{100}(?!G)", start)
-    require("terminal.raw-window-change", True, "next viewer launch uses SSH window-change row30 and 100-column body")
-    session.send(b"\x1b[21~")
+    require("terminal.raw-newest-window-change", viewer_pids <= inventory().keys(),
+            "same viewer applies the newest sequence at 100x30")
+    session.send(b"\x1b[21~")  # F10 quits the raw application.
     session.wait(PROMPT, start)
     require("terminal.raw-exit", b"RAW_EXIT_OK" in session.command("echo RAW_EXIT_OK"),
             "raw viewer returned control to its own shell")
@@ -503,6 +656,35 @@ try:
     wait_until(lambda: session.process.poll() is not None, "Ctrl-D disconnects shell")
     counts()
     require("terminal.ctrl-d-cleanup", session.process.returncode == 0, "EOF disconnect cleanly exited and reaped authenticated session")
+
+    local_start = serial_log.stat().st_size
+    serial.write(b"log -n 0 -f --component remoted\n")
+    serial.flush()
+    time.sleep(0.5)
+    local_idle = serial_log.stat().st_size
+    time.sleep(0.5)
+    require("log.local-follow-idle", serial_log.stat().st_size == local_idle,
+            "local follower emits nothing while idle")
+    result = run([*ssh_args(ports[0], "log.local-trigger", extra=("-T",)), "remote reload"], 30)
+    (work / "log.local-trigger.stderr.log").write_bytes(result.stderr)
+    require("log.local-trigger", result.returncode == 0, "second SSH session appends a structured remoted event")
+    wait_until(lambda: re.search(rb"remoted\[[0-9]+\]: remote listener active", serial_log.read_bytes()[local_idle:]),
+               "local follower wakes for SSH-generated event", 10)
+    second_event_start = serial_log.stat().st_size
+    result = run([*ssh_args(ports[0], "log.local-second-trigger", extra=("-T",)), "remote reload"], 30)
+    (work / "log.local-second-trigger.stderr.log").write_bytes(result.stderr)
+    require("log.local-second-trigger", result.returncode == 0, "second append for the same local follower")
+    wait_until(lambda: re.search(rb"remoted\[[0-9]+\]: remote listener active", serial_log.read_bytes()[second_event_start:]),
+               "local follower stays active through its second event", 10)
+    require("log.local-follow-continues", re.search(PROMPT, serial_log.read_bytes()[local_start:]) is None,
+            "local follower has not returned before cancellation")
+    local_cancel_start = serial_log.stat().st_size
+    serial.write(b"\x03")
+    serial.flush()
+    wait_until(lambda: re.search(PROMPT, serial_log.read_bytes()[local_cancel_start:]), "local follow Ctrl-C returns prompt", 10)
+    require("log.local-follow-interrupt", b"LOCAL_FOLLOW_STOPPED_OK" in console("echo LOCAL_FOLLOW_STOPPED_OK"),
+            "local shell stays usable after cancelling follow")
+    counts()
 
     rekey = Terminal(ports[0], "reload-rekey", extra=("-o", "RekeyLimit=1K"))
     rekey.wait(PROMPT)
@@ -524,7 +706,8 @@ try:
     wait_until(lambda: rekey.process.poll() is not None, "rekey shell EOF disconnect")
     counts()
 
-    for name in ("exec", "subsystem", "env", "auth-agent-req@openssh.com", "x11-req", "second-session", "direct-tcpip", "tcpip-forward"):
+    for name in ("exec-malformed", "exec-oversized", "pty-exec", "second-exec", "exec-shell", "exec-pty",
+                 "subsystem", "env", "auth-agent-req@openssh.com", "x11-req", "second-session", "direct-tcpip", "tcpip-forward"):
         result = run([work / "requests", f"127.0.0.1:{ports[0]}", work / "login", known, "goos-remote-test", REMOTE_USER, name], 20)
         (work / f"forbidden-{name}.log").write_bytes(result.stdout + result.stderr)
         require(f"forbidden.{name}", result.returncode == 0 and f"REJECT {name}\n".encode() in result.stdout,
@@ -699,6 +882,12 @@ try:
     require("reboot.config-session-limit", re.search(rb"(?:^|\n)2\r?\n", stored) is not None,
             "configured session limit persisted in the configuration store")
     pin_identity(ports[1], identity)
+    result = ssh_exec(ports[1], "reboot.hostname", "hostname")
+    require("reboot.hostname-persisted", result.stdout.strip() == b"remote-test", "durable hostname survives disk reboot")
+    result = ssh_exec(ports[1], "reboot.keys", "remote keys")
+    require("reboot.key-removal-persisted", second_fingerprint.encode() not in result.stdout,
+            "removed key remains absent after reboot")
+    rejected_login("reboot.removed-key-refused", ports[1], key="second")
     rebooted = Terminal(ports[1], "reboot-shell")
     rebooted.wait(PROMPT)
     require("reboot.login", b"REBOOT_LOGIN_OK" in rebooted.command("echo REBOOT_LOGIN_OK"),

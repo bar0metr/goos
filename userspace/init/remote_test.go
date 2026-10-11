@@ -106,6 +106,7 @@ func TestRemoteOpenResizeAndFailureCleanup(t *testing.T) {
 	}
 	registry.CommitOpen(id, 1)
 	geometry.Columns, geometry.Rows = 120, 40
+	geometry.Sequence++
 	if result := registry.Resize(id, 1, geometry); result != remoteapi.ResultOK {
 		t.Fatal(result)
 	}

@@ -34,8 +34,9 @@ const (
  PumpEOF
  PumpClose
  PumpRekey
+ PumpExec
 )
-type PumpEvent struct { Kind PumpEventKind; Data []byte; Term [64]byte; TermLen uint8; Rows, Columns uint32 }
+type PumpEvent struct { Kind PumpEventKind; Data []byte; Command []byte; Term [64]byte; TermLen uint8; Rows, Columns uint32 }
 
 // Pump is a single-task server. Handshake may block under caller deadlines;
 // established Feed/Poll never read the underlying connection. Data is borrowed
@@ -47,12 +48,13 @@ type Pump struct {
  transport *transport
  handshake *handshakeTransport
  user string
- ready, closed, channel, pty, shell, eof, sentClose, closePending bool
+ ready, closed, channel, pty, started, exec, eof, sentClose, closePending bool
  peer, peerWindow, peerPacket, localWindow uint32
  frame []byte
  control []byte
  controlUsed int
  pendingWindow uint32
+ unconsumedInput uint32
  used int
  magics *handshakeMagics
  clientInit *kexInitMsg
@@ -228,22 +230,25 @@ func (p *Pump) application(packet []byte)(PumpEvent,error){
   accepted:=false;event:=progress
   switch m.Request {
   case "pty-req":
-   if !p.pty && !p.shell {term,rest,ok:=parseString(m.RequestSpecificData);if ok && len(term)>0 && len(term)<=64 && len(rest)>=16 {
+   if !p.pty && !p.started {term,rest,ok:=parseString(m.RequestSpecificData);if ok && len(term)>0 && len(term)<=64 && len(rest)>=16 {
     cols:=binary.BigEndian.Uint32(rest);rows:=binary.BigEndian.Uint32(rest[4:]);modes,tail,ok:=parseString(rest[16:]);
     if ok && len(tail)==0 && len(modes)<=1024 && pumpTerm(term) && pumpGeometry(rows,cols) && pumpModes(modes){p.pty=true;accepted=true;event=PumpEvent{Kind:PumpPTY,TermLen:uint8(len(term)),Rows:rows,Columns:cols};copy(event.Term[:],term)}
    }}
-  case "shell":if p.pty && !p.shell && len(m.RequestSpecificData)==0 {p.shell=true;accepted=true;event.Kind=PumpShell}
+  case "shell":if p.pty && !p.started && len(m.RequestSpecificData)==0 {p.started=true;accepted=true;event.Kind=PumpShell}
+  case "exec":
+   if !p.pty && !p.started {command,tail,ok:=parseString(m.RequestSpecificData);if ok && len(tail)==0 && len(command)>0 && len(command)<=4096 && bytes.IndexByte(command,0)<0 {p.started=true;p.exec=true;accepted=true;event=PumpEvent{Kind:PumpExec,Command:command}}}
   case "window-change":if p.pty && len(m.RequestSpecificData)==16 {cols:=binary.BigEndian.Uint32(m.RequestSpecificData);rows:=binary.BigEndian.Uint32(m.RequestSpecificData[4:]);if pumpGeometry(rows,cols){accepted=true;event=PumpEvent{Kind:PumpResize,Rows:rows,Columns:cols}}}
   }
   if m.WantReply{kind:=byte(msgChannelFailure);if accepted{kind=msgChannelSuccess};b:=[5]byte{kind};binary.BigEndian.PutUint32(b[1:],p.peer);if err:=p.send(b[:]);err!=nil{return progress,err}}
   return event,nil
  case msgChannelData:
-  if len(packet)<9 || binary.BigEndian.Uint32(packet[1:5])!=0 || !p.shell || p.eof{return progress,ErrPumpState}
+  if len(packet)<9 || binary.BigEndian.Uint32(packet[1:5])!=0 || !p.started || p.eof{return progress,ErrPumpState}
   n:=binary.BigEndian.Uint32(packet[5:9]);if n>pumpData || n>p.localWindow || int(n)!=len(packet)-9{return progress,ErrPumpPacket}
   p.localWindow-=n
   // Data is consumed by the caller before the next Poll. Replenish only the
   // bounded amount delivered, never queue unbounded plaintext internally.
-  if n>0 {b:=[9]byte{msgChannelWindowAdjust};binary.BigEndian.PutUint32(b[1:5],p.peer);binary.BigEndian.PutUint32(b[5:],n);if err:=p.send(b[:]);err!=nil{return progress,err};if p.phase==0{p.localWindow+=n}else{p.pendingWindow+=n}}
+  if p.exec {p.unconsumedInput+=n}
+  if n>0 && !p.exec {b:=[9]byte{msgChannelWindowAdjust};binary.BigEndian.PutUint32(b[1:5],p.peer);binary.BigEndian.PutUint32(b[5:],n);if err:=p.send(b[:]);err!=nil{return progress,err};if p.phase==0{p.localWindow+=n}else{p.pendingWindow+=n}}
   return PumpEvent{Kind:PumpData,Data:packet[9:]},nil
  case msgChannelWindowAdjust:
   if len(packet)!=9 || binary.BigEndian.Uint32(packet[1:5])!=0 || !p.channel{return progress,ErrPumpState};n:=binary.BigEndian.Uint32(packet[5:]);if n>1<<24 || p.peerWindow>(1<<24)-n{return progress,ErrPumpPacket};p.peerWindow+=n;return progress,nil
@@ -260,11 +265,24 @@ func (p *Pump) application(packet []byte)(PumpEvent,error){
 func pumpGeometry(rows,cols uint32)bool{return rows>=1 && rows<=1000 && cols>=1 && cols<=1000}
 func pumpTerm(term []byte)bool{for _,b:=range term{if b<32 || b>126{return false}};return true}
 func pumpModes(b []byte)bool{for len(b)>0{op:=b[0];b=b[1:];if op==0{return len(b)==0};if op>=160{return true};if len(b)<4{return false};b=b[4:]};return false}
-func (p *Pump) Write(data []byte)(int,error){
+// ConsumeInput returns exec receive-window credit only after native stdin
+// accepted or deliberately discarded those bytes. It shares KEX deferral with
+// interactive credit; unconsumed plaintext never exceeds the advertised window.
+func (p *Pump) ConsumeInput(n uint32)error {
+ if !p.ready || p.closed || !p.exec || n>p.unconsumedInput {return ErrPumpState}
+ if n==0{return nil}
+ b:=[9]byte{msgChannelWindowAdjust};binary.BigEndian.PutUint32(b[1:5],p.peer);binary.BigEndian.PutUint32(b[5:],n)
+ if err:=p.send(b[:]);err!=nil{return p.fail(err)}
+ p.unconsumedInput-=n;if p.phase==0{p.localWindow+=n}else{p.pendingWindow+=n};return nil
+}
+func (p *Pump) Write(data []byte)(int,error){return p.writeData(data,false)}
+func (p *Pump) WriteStderr(data []byte)(int,error){return p.writeData(data,true)}
+func (p *Pump) writeData(data []byte,extended bool)(int,error){
  if p.closePending{return 0,nil}
- if !p.ready || p.closed || p.sentClose || !p.shell{return 0,ErrPumpState};if p.phase!=0 || p.peerWindow==0{return 0,nil}
+ if !p.ready || p.closed || p.sentClose || !p.started{return 0,ErrPumpState};if p.phase!=0 || p.peerWindow==0{return 0,nil}
  n:=len(data);if n>pumpData{n=pumpData};if uint32(n)>p.peerPacket{n=int(p.peerPacket)};if uint32(n)>p.peerWindow{n=int(p.peerWindow)};if n==0{return 0,nil}
- b:=make([]byte,9+n);b[0]=msgChannelData;binary.BigEndian.PutUint32(b[1:5],p.peer);binary.BigEndian.PutUint32(b[5:9],uint32(n));copy(b[9:],data[:n])
+ header:=9;if extended{header=13}
+ b:=make([]byte,header+n);b[0]=msgChannelData;binary.BigEndian.PutUint32(b[1:5],p.peer);if extended{b[0]=msgChannelExtendedData;binary.BigEndian.PutUint32(b[5:9],1)};binary.BigEndian.PutUint32(b[header-4:header],uint32(n));copy(b[header:],data[:n])
  if err:=p.send(b);err!=nil{return 0,p.fail(err)};p.peerWindow-=uint32(n)
  if p.writeBytes>=p.threshold() || p.writePackets>=packetRekeyThreshold {if err:=p.startKey(nil);err!=nil{return n,p.fail(err)}}
  return n,nil

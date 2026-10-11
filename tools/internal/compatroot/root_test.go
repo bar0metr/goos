@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"goos/internal/testscratch"
 )
 
 func TestBuildRootsStayWithinGoOSOutput(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := filepath.EvalSymlinks(testscratch.TempDir(t, "goos-compatroot-"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,16 +36,26 @@ func TestBuildRootsStayWithinGoOSOutput(t *testing.T) {
 }
 
 func TestBuildSymlinkRejected(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := filepath.EvalSymlinks(testscratch.TempDir(t, "goos-compatroot-"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(root, "go.mod"), []byte("module goos\n"), 0644)
-	outside := t.TempDir()
+	outside := testscratch.TempDir(t, "goos-compatroot-")
 	if err := os.Symlink(outside, filepath.Join(root, "build")); err != nil {
 		t.Fatal(err)
 	}
 	if allowedBuild(filepath.Join(root, "build", "stage"), root) || allowedBuild(filepath.Join(outside, "stage"), root) {
 		t.Fatal("redirected build root accepted")
+	}
+}
+
+func TestAllowedFromPackageDirectory(t *testing.T) {
+	output := testscratch.TempDir(t, "goos-compatroot-cwd-")
+	if !Allowed(output) {
+		t.Fatal("repository build child rejected from package cwd")
+	}
+	if Allowed(filepath.Join(output, "..", "..", "..", "outside-build")) {
+		t.Fatal("outside build accepted from package cwd")
 	}
 }

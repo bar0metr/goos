@@ -150,6 +150,13 @@ func (*Files) Replace(source, target string) error {
 	return nil
 }
 
+func (*Files) Remove(path string) error {
+	if status := utility.Unlink([]byte(path)); status != vfs.StatusOK {
+		return statusError(status)
+	}
+	return nil
+}
+
 type listing struct {
 	names    []string
 	limit    int

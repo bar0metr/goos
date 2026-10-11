@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"sync"
 	"time"
@@ -44,27 +45,46 @@ type streamConsole struct {
 	pos     int
 	arrived chan struct{} // closed and replaced whenever bytes arrive
 	ended   error
+	fatal   error // evidence write/bound errors are never hidden by buffered markers
 	log     io.Writer
 	// why describes the end of the transport, such as ssh's error output.
-	why func() string
+	why      func() string
+	maxBytes int
+	pumpDone chan struct{}
 }
 
 func newStreamConsole(out io.Reader, in io.WriteCloser, log io.Writer, closeFn func() error) *streamConsole {
-	c := &streamConsole{in: in, close: closeFn, arrived: make(chan struct{}), log: log}
+	return newBoundedStreamConsole(out, in, log, closeFn, 0)
+}
+
+func newBoundedStreamConsole(out io.Reader, in io.WriteCloser, log io.Writer, closeFn func() error, limit int) *streamConsole {
+	c := &streamConsole{in: in, close: closeFn, arrived: make(chan struct{}), log: log, maxBytes: limit, pumpDone: make(chan struct{})}
 	go c.pump(out)
 	return c
 }
 
 func (c *streamConsole) pump(out io.Reader) {
+	defer close(c.pumpDone)
 	chunk := make([]byte, 4096)
 	for {
 		n, err := out.Read(chunk)
 		c.mu.Lock()
 		if n > 0 {
 			if c.log != nil {
-				c.log.Write(chunk[:n])
+				if written, logErr := c.log.Write(chunk[:n]); logErr != nil {
+					err = fmt.Errorf("writing console evidence: %w", logErr)
+					c.fatal = err
+				} else if written != n {
+					err = io.ErrShortWrite
+					c.fatal = err
+				}
 			}
-			c.buf = append(c.buf, chunk[:n]...)
+			if c.maxBytes > 0 && n > c.maxBytes-len(c.buf) {
+				err = errors.New("console output exceeds evidence bound")
+				c.fatal = err
+			} else {
+				c.buf = append(c.buf, chunk[:n]...)
+			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -89,6 +109,11 @@ func (c *streamConsole) ReadUntil(ctx context.Context, needle []byte) ([]byte, e
 func (c *streamConsole) ReadUntilAny(ctx context.Context, needles ...[]byte) (int, []byte, error) {
 	for {
 		c.mu.Lock()
+		if c.fatal != nil {
+			err := c.fatal
+			c.mu.Unlock()
+			return -1, nil, err
+		}
 		pending := c.buf[c.pos:]
 		best, bestEnd := -1, -1
 		for i, needle := range needles {
@@ -146,12 +171,19 @@ func (c *streamConsole) Write(b []byte) error {
 // WriteLine sends a command line. GoOS's serial input takes \n as Enter.
 func (c *streamConsole) WriteLine(s string) error { return c.Write([]byte(s + "\n")) }
 
+func (c *streamConsole) evidenceError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fatal
+}
+
 func (c *streamConsole) Close() error {
 	c.in.Close()
+	var err error
 	if c.close != nil {
-		return c.close()
+		err = c.close()
 	}
-	return nil
+	return errors.Join(err, c.evidenceError())
 }
 
 // AttachSerial connects to the VM's serial0 socket through SSH and socat.
@@ -166,46 +198,68 @@ func AttachSerial(ssh SSH, vmid int, logPath string) (Console, error) {
 	// Close ends it.
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := ssh.Command(ctx, shellJoin(argv...))
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	stderr := &lockedBuffer{}
-	cmd.Stderr = stderr
 	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	return startSerialConsole(cmd, cancel, log)
+}
+
+// Own the stdout pipe. Cmd.Wait must not close its reader while the pump
+// still writes earlier chunks to evidence.
+func startSerialConsole(cmd *exec.Cmd, cancel context.CancelFunc, log io.WriteCloser) (Console, error) {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		cancel()
 		log.Close()
-		return nil, fmt.Errorf("starting ssh: %w", err)
+		return nil, err
 	}
+	stdout, writer, err := os.Pipe()
+	if err != nil {
+		cancel()
+		stdin.Close()
+		log.Close()
+		return nil, err
+	}
+	cmd.Stdout = writer
+	cmd.WaitDelay = 2 * time.Second
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		cancel()
+		stdin.Close()
+		stdout.Close()
+		writer.Close()
+		log.Close()
+		return nil, fmt.Errorf("starting serial transport: %w", err)
+	}
+	writer.Close() // only the child retains the write end
 	var once sync.Once
+	var closeErr error
+	var c *streamConsole
 	closeFn := func() error {
-		var err error
 		once.Do(func() {
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
 			select {
-			case <-done:
+			case <-c.pumpDone:
 			case <-time.After(5 * time.Second):
 				cancel()
-				<-done
+				select {
+				case <-c.pumpDone:
+				case <-time.After(5 * time.Second):
+					closeErr = errors.New("serial evidence drain timed out")
+					stdout.Close()
+				}
 			}
 			cancel()
-			log.Close()
+			// Our reader stays open until the pump drains or the gate records
+			// a drain failure; Wait owns no stdout descriptor to close.
+			cmd.Wait()
+			closeErr = errors.Join(closeErr, stdout.Close(), log.Close())
 		})
-		return err
+		return closeErr
 	}
-	c := newStreamConsole(stdout, stdin, log, closeFn)
+	c = newStreamConsole(stdout, stdin, log, closeFn)
 	c.why = func() string { return lastLines(stderr.String(), 4) }
 	return c, nil
 }

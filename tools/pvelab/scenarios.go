@@ -169,7 +169,14 @@ type Session struct {
 	WorkloadTimeout time.Duration
 	// PowerState reports the VM's state as Proxmox sees it.
 	PowerState func(context.Context) (string, error)
-	logf       func(string, ...any)
+	// Remote administration reuses the owned VM, disk, and append-only serial log.
+	ReconnectSerial func(context.Context) error
+	StartRetained   func(context.Context) error
+	EvidenceDir     string
+	HostRunner      commandRunner
+	HostPTYRunner   commandRunner
+	OpenTerminal    terminalFactory
+	logf            func(string, ...any)
 }
 
 type Scenario interface {
@@ -178,12 +185,13 @@ type Scenario interface {
 }
 
 var scenarios = map[string]Scenario{
-	"smoke":   smokeScenario{},
-	"lscpu":   lscpuScenario{},
-	"smp":     smpScenario{},
-	"linux":   linuxScenario{},
-	"7zip":    sevenZipScenario{},
-	"network": networkScenario{},
+	"smoke":        smokeScenario{},
+	"lscpu":        lscpuScenario{},
+	"smp":          smpScenario{},
+	"linux":        linuxScenario{},
+	"7zip":         sevenZipScenario{},
+	"network":      networkScenario{},
+	"remote-admin": remoteAdminScenario{},
 }
 
 func scenarioNames() string {

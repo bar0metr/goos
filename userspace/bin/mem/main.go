@@ -14,7 +14,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "mem [-p]",
-	Summary: "show physical memory use, or with -p pages in use",
+	Summary: "physical memory use (-p: pages)",
 	MaxArgs: 1,
 }
 

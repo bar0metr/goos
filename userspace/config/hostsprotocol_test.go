@@ -250,11 +250,11 @@ func TestSessionRightsIncludeHosts(t *testing.T) {
 			t.Fatalf("decode %b = %b %v", rights, decoded, ok)
 		}
 	}
-	if _, ok := AddSessionRequest(handle.ID(4), scope, HostsWrite<<1, 1); ok {
+	if _, ok := AddSessionRequest(handle.ID(4), scope, DurableWrite<<1, 1); ok {
 		t.Fatal("unknown right encoded")
 	}
 	message, _ := AddSessionRequest(handle.ID(4), scope, Read, 1)
-	message.Payload[1] = byte(Read | HostsWrite<<1)
+	message.Payload[1] = byte(Read | DurableWrite<<1)
 	if _, _, _, ok := DecodeAddSession(message); ok {
 		t.Fatal("unknown right decoded")
 	}

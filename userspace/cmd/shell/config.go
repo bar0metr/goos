@@ -16,7 +16,7 @@ import (
 // external utility would need one of its own.
 func runConfig(invocation shellcmd.Invocation) {
 	if configHandle == 0 {
-		write("config: service unavailable\n")
+		writeError("config: service unavailable\n")
 		return
 	}
 	switch {
@@ -27,7 +27,8 @@ func runConfig(invocation shellcmd.Invocation) {
 	case invocation.Count == 4 && argumentIs(invocation.Arguments[1], "set"):
 		setConfig(invocation.Arguments[2], invocation.Arguments[3])
 	default:
-		write("usage: config [list] | config get KEY | config set KEY VALUE\n")
+		commandStatus = shellcmd.StatusUsage
+		writeError("usage: config [list] | config get KEY | config set KEY VALUE\n")
 	}
 }
 
@@ -35,7 +36,7 @@ func listConfig() {
 	for cursor := uint32(0); ; {
 		reply, ok := callConfig(config.Request{Operation: config.OperationList, Cursor: cursor})
 		if !ok {
-			write("config: service unavailable\n")
+			writeError("config: service unavailable\n")
 			return
 		}
 		if reply.Status == config.StatusNotFound {
@@ -60,7 +61,7 @@ func listConfig() {
 func getConfig(key []byte) {
 	reply, ok := callConfig(config.Request{Operation: config.OperationGet, Key: key})
 	if !ok {
-		write("config: service unavailable\n")
+		writeError("config: service unavailable\n")
 		return
 	}
 	if reply.Status != config.StatusOK {
@@ -77,7 +78,7 @@ func getConfig(key []byte) {
 func setConfig(key []byte, text []byte) {
 	current, ok := callConfig(config.Request{Operation: config.OperationGet, Key: key})
 	if !ok {
-		write("config: service unavailable\n")
+		writeError("config: service unavailable\n")
 		return
 	}
 	if current.Status != config.StatusOK {
@@ -86,12 +87,12 @@ func setConfig(key []byte, text []byte) {
 	}
 	value, parsed := parseConfigValue(current.Value.Kind, text)
 	if !parsed {
-		write("config: value does not match the declared type\n")
+		writeError("config: value does not match the declared type\n")
 		return
 	}
 	reply, ok := callConfig(config.Request{Operation: config.OperationSet, Key: key, Value: value})
 	if !ok {
-		write("config: service unavailable\n")
+		writeError("config: service unavailable\n")
 		return
 	}
 	if reply.Status != config.StatusOK {
@@ -147,15 +148,15 @@ func writeConfigValue(value config.Value) {
 func writeConfigStatus(status config.Status) {
 	switch status {
 	case config.StatusNotFound:
-		write("config: no such setting\n")
+		writeError("config: no such setting\n")
 	case config.StatusReadOnly:
-		write("config: setting is read-only\n")
+		writeError("config: setting is read-only\n")
 	case config.StatusTypeMismatch:
-		write("config: value does not match the declared type\n")
+		writeError("config: value does not match the declared type\n")
 	case config.StatusPermissionDenied:
-		write("config: not permitted in this session\n")
+		writeError("config: not permitted in this session\n")
 	default:
-		write("config: request refused\n")
+		writeError("config: request refused\n")
 	}
 }
 

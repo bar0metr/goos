@@ -12,7 +12,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "uname",
-	Summary: "print the system name, release and machine",
+	Summary: "system name/release/machine",
 }
 
 //export userspaceMain

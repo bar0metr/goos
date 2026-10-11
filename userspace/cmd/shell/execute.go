@@ -13,25 +13,35 @@ import (
 	shellcmd "goos/userspace/shell"
 )
 
-func execute(line []byte) {
+func execute(line []byte) uint64 {
+	commandStatus = 0
+	if oneShot {
+		if _, _, valid := shellcmd.ParseOneShot(line, &argumentStorage); !valid {
+			commandStatus = shellcmd.StatusUsage
+			writeError("exec: invalid one-shot command\n")
+			return commandStatus
+		}
+	}
 	if command, background := shellcmd.SplitBackground(line); background {
 		executeBackground(command)
-		return
+		return commandStatus
 	}
 	if command, timed := shellcmd.SplitTime(line); timed {
 		executeTimed(command)
-		return
+		return commandStatus
 	}
 	commands, count, valid := shellcmd.ParseSequence(line, &argumentStorage)
 	if !valid {
-		write("exec: invalid command sequence\n")
-		return
+		commandStatus = shellcmd.StatusUsage
+		writeError("exec: invalid command sequence\n")
+		return commandStatus
 	}
 	for index := 0; index < count; index++ {
 		executeCommand(commands[index])
 		// Sequence slices borrow the static line buffer, not the arena.
 		arena.Reset(arenaBase)
 	}
+	return commandStatus
 }
 
 // executeBackground starts one pipeline without waiting for it. Builtins and
@@ -39,14 +49,14 @@ func execute(line []byte) {
 func executeBackground(line []byte) {
 	commands, count, valid := shellcmd.ParseSequence(line, &argumentStorage)
 	if !valid || count != 1 || len(commands[0]) == 0 {
-		write("exec: & applies to one command or pipeline\n")
+		writeError("exec: & applies to one command or pipeline\n")
 		return
 	}
 	redirects, _ := shellcmd.SplitRedirections(line)
 	stages, _, _ := shellcmd.SplitPipeline(redirects.Command)
 	invocation, parsed := shellcmd.ParseInvocation(stages[0], &argumentStorage)
 	if !parsed || invocation.Count == 0 || shellcmd.IsBuiltin(invocation.Arguments[0]) {
-		write("exec: builtins cannot run in the background\n")
+		writeError("exec: builtins cannot run in the background\n")
 		return
 	}
 	executeExternal(line, true)
@@ -56,18 +66,19 @@ func executeBackground(line []byte) {
 // reports the elapsed wall-clock time, including every launch it caused.
 func executeTimed(line []byte) {
 	if len(line) == 0 {
-		write("time: expected a command\n")
+		commandStatus = shellcmd.StatusUsage
+		writeError("time: expected a command\n")
 		return
 	}
 	start, status := sys.ClockReadNanos()
 	if status != kcall.StatusOK {
-		write("time: clock unavailable\n")
+		writeError("time: clock unavailable\n")
 		return
 	}
 	execute(line)
 	end, status := sys.ClockReadNanos()
 	if status != kcall.StatusOK {
-		write("time: clock unavailable\n")
+		writeError("time: clock unavailable\n")
 		return
 	}
 	write("time: ")
@@ -76,6 +87,7 @@ func executeTimed(line []byte) {
 }
 
 func executeCommand(line []byte) {
+	commandStatus = 0
 	redirects, _ := shellcmd.SplitRedirections(line)
 	stages, count, _ := shellcmd.SplitPipeline(redirects.Command)
 	invocation, _ := shellcmd.ParseInvocation(stages[0], &argumentStorage)
@@ -96,16 +108,17 @@ func executeCommand(line []byte) {
 		return
 	}
 	if !info.Accepts(arguments) {
-		write("usage: ")
-		write(info.Usage)
-		write("\n")
+		commandStatus = shellcmd.StatusUsage
+		writeError("usage: ")
+		writeError(info.Usage)
+		writeError("\n")
 		return
 	}
 	switch info.Name {
 	case "help":
 		printHelp(invocation)
 	case "log":
-		printLog()
+		commandStatus = printLog(invocation)
 	case "config":
 		runConfig(invocation)
 	case "hosts":
@@ -123,7 +136,7 @@ func executeCommand(line []byte) {
 	case "exit":
 		session, _ := startupData.Env("GOOS_SESSION")
 		if !shellcmd.RemoteSession(session) {
-			write("exit: not a remote session\n")
+			writeError("exit: not a remote session\n")
 			break
 		}
 		flushOutput()
@@ -138,7 +151,7 @@ func executeCommand(line []byte) {
 		// service can write, so PID 1 asks the kernel for it.
 		reply, ok := controlExchange(execproto.ControlDiagnostics, 0)
 		if status, valid := execproto.DecodeControlStatus(reply); !ok || !valid || status != execproto.ControlOK {
-			write("diag: unavailable in this build\n")
+			writeError("diag: unavailable in this build\n")
 		}
 	case "time":
 		command, _ := shellcmd.SplitTime(line)

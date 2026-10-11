@@ -11,7 +11,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "pwd",
-	Summary: "print the working directory",
+	Summary: "working directory",
 }
 
 //export userspaceMain

@@ -7,7 +7,7 @@ import (
 )
 
 func TestGeometryProtocolIndependentFlagsAndTerm(t *testing.T) {
-	if Version != 4 {
+	if Version != 5 {
 		t.Fatal("geometry payload changed without a version bump")
 	}
 	for _, display := range []bool{false, true} {
@@ -23,26 +23,31 @@ func TestGeometryProtocolIndependentFlagsAndTerm(t *testing.T) {
 				decoded.Display != display || decoded.Authoritative != authoritative || !bytes.Equal(decoded.Term, geometry.Term) {
 				t.Fatalf("decoded geometry %+v valid=%v", decoded, valid)
 			}
-			message.Version = 3
+			message.Version = 4
 			if _, _, ok := DecodeReply(&message); ok {
-				t.Fatal("v3 geometry decoded as v4")
+				t.Fatal("v4 geometry decoded as v5")
 			}
 		}
 	}
 }
 
 func TestGeometryRejectsMalformedPayloads(t *testing.T) {
-	valid := []byte{80, 0, 25, 0, GeometryAuthoritative, 1, 'x'}
+	valid := []byte{80, 0, 25, 0, GeometryAuthoritative, 1, 1, 0, 0, 0, 0, 0, 0, 0, 'x'}
+	mutate := func(offset int, value byte) []byte {
+		payload := append([]byte(nil), valid...)
+		payload[offset] = value
+		return payload
+	}
 	for name, payload := range map[string][]byte{
-		"v3":             {80, 0, 25, 0, GeometryDisplay},
-		"unknown flags":  {80, 0, 25, 0, 4, 0},
-		"zero columns":   {0, 0, 25, 0, 0, 0},
-		"zero rows":      {80, 0, 0, 0, 0, 0},
-		"short term":     {80, 0, 25, 0, 0, 2, 'x'},
-		"trailing bytes": {80, 0, 25, 0, 0, 0, 'x'},
-		"escape term":    {80, 0, 25, 0, 0, 1, 0x1b},
-		"non-ascii term": {80, 0, 25, 0, 0, 1, 0xff},
-		"oversized term": append([]byte{80, 0, 25, 0, 0, MaxTerm + 1}, bytes.Repeat([]byte{'x'}, MaxTerm+1)...),
+		"v4":             {80, 0, 25, 0, GeometryAuthoritative, 1, 'x'},
+		"unknown flags":  mutate(4, 4),
+		"zero columns":   mutate(0, 0),
+		"zero rows":      mutate(2, 0),
+		"short term":     mutate(5, 2),
+		"trailing bytes": append(append([]byte(nil), valid...), 'x'),
+		"escape term":    mutate(GeometrySize, 0x1b),
+		"non-ascii term": mutate(GeometrySize, 0xff),
+		"oversized term": append(append([]byte(nil), valid[:5]...), append([]byte{MaxTerm + 1, 1, 0, 0, 0, 0, 0, 0, 0}, bytes.Repeat([]byte{'x'}, MaxTerm+1)...)...),
 	} {
 		if _, ok := DecodeGeometryState(payload); ok {
 			t.Fatalf("%s decoded", name)

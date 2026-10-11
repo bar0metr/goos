@@ -78,3 +78,32 @@ func TestWorkerHasOnlyPublicHostIdentity(t *testing.T) {
 		t.Fatal("public signing capability contract missing")
 	}
 }
+
+func TestWorkerRemembersEOFBeforeExecutionMode(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remembered := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		branch, ok := node.(*ast.CaseClause)
+		if !ok || len(branch.List) != 1 {
+			return true
+		}
+		kind, ok := branch.List[0].(*ast.SelectorExpr)
+		if !ok || kind.Sel.Name != "EOF" || len(branch.Body) == 0 {
+			return true
+		}
+		assignment, ok := branch.Body[0].(*ast.AssignStmt)
+		if !ok || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 {
+			return true
+		}
+		name, named := assignment.Lhs[0].(*ast.Ident)
+		value, literal := assignment.Rhs[0].(*ast.Ident)
+		remembered = named && literal && name.Name == "inputEOF" && value.Name == "true"
+		return true
+	})
+	if !remembered {
+		t.Fatal("EOF before exec can leave native stdin open")
+	}
+}

@@ -12,7 +12,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage: "trustprobe [--production]", Summary: "measure native system trust loading",
+	Usage: "trustprobe [--production]", Summary: "native trust loading",
 	MaxArgs: 1, Grants: commands.GrantVFS,
 }
 

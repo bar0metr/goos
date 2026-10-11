@@ -53,6 +53,9 @@ func AddSessionRequest(server handle.ID, scope Scope, rights Rights, correlation
 	message.Payload[0] = operationAddSession
 	message.Payload[1] = byte(rights)
 	message.Payload[2] = scope.size
+	if scope.exact {
+		message.Payload[2] |= 0x80
+	}
 	copy(message.Payload[3:], scope.prefix[:scope.size])
 	return message, true
 }
@@ -64,16 +67,22 @@ func DecodeAddSession(message ipc.Message) (handle.ID, Scope, Rights, bool) {
 		return 0, Scope{}, 0, false
 	}
 	rights := Rights(message.Payload[1])
-	size := int(message.Payload[2])
+	exact := message.Payload[2]&0x80 != 0
+	size := int(message.Payload[2] & 0x7f)
 	if rights == 0 || rights&^allRights != 0 || size > MaxKey || 3+size != int(message.PayloadSize) {
 		return 0, Scope{}, 0, false
 	}
 	var scope Scope
+	if exact && size == 0 {
+		return 0, Scope{}, 0, false
+	}
 	if size != 0 {
-		if !validScope(string(message.Payload[3 : 3+size])) {
+		key := message.Payload[3 : 3+size]
+		if exact && !validKey(key) || !exact && !validScope(string(key)) {
 			return 0, Scope{}, 0, false
 		}
 		scope.size = uint8(copy(scope.prefix[:], message.Payload[3:3+size]))
+		scope.exact = exact
 	}
 	return message.Handles[0], scope, rights, true
 }

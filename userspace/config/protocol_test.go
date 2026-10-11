@@ -60,7 +60,7 @@ func TestReplyRoundTripAndReservedFields(t *testing.T) {
 		t.Fatal("out-of-range read-only flag accepted")
 	}
 	corrupt = message
-	corrupt.Payload[1] = byte(StatusReadOnly) + 1
+	corrupt.Payload[1] = byte(StatusPersistUnknown) + 1
 	if _, ok := DecodeReply(corrupt); ok {
 		t.Fatal("unknown status accepted")
 	}

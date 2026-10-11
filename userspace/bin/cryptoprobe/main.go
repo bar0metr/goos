@@ -15,7 +15,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage: "cryptoprobe", Summary: "check native crypto compatibility",
+	Usage: "cryptoprobe", Summary: "native crypto check",
 }
 
 //export userspaceMain

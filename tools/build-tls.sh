@@ -5,7 +5,7 @@ output=${1:?output image ELF required}
 package=${2:?package required}
 tags=${3:?build tags required}
 opt=${4:-2}
-work=$(mktemp -d /Volumes/Data/tmp/goos-tls-build.XXXXXX)
+work=$(go run ./tools/scratch goos-tls-build.)
 source_go=$(go env GOROOT)
 source_tinygo=$(tinygo env TINYGOROOT)
 mkdir "$work/tinygo" "$work/go"

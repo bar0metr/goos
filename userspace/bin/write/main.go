@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "write [--append] FILE [TEXT...]",
-	Summary: "write TEXT, or standard input, to FILE",
+	Summary: "write TEXT or stdin to FILE",
 	MinArgs: 1,
 	MaxArgs: commands.Unbounded,
 	Grants:  commands.GrantVFS,

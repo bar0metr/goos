@@ -38,17 +38,19 @@ Torito entry.
 `make crypto-check` builds isolated native crypto probes under the pinned tools.
 `make test-crypto` runs the successfully built probes in a disposable validation
 guest. `CRYPTO_COMPAT=1` selects the opt-in native runtime overlay; it does not
-modify the installed toolchain or the kernel runtime. Reports and the temporary
-toolchain root stay under `/Volumes/Data/tmp/`. See
-[native crypto feasibility](crypto-feasibility.md) for package classifications,
-measurements and the stock TinyGo no-op TLS result. The selected native HTTPS
-path instead compiles the pinned Go software TLS implementation.
+modify the installed toolchain or the kernel runtime. Reports and temporary
+crypto work trees belong under `build/tmp/`. Scratch allocators create a nested
+module boundary there so repository-wide Go tests skip copied toolchains.
+See [native crypto feasibility](crypto-feasibility.md)
+for package classifications, measurements and the stock TinyGo no-op TLS result.
+The selected native HTTPS path instead compiles the pinned Go software TLS
+implementation.
 
 ## Native HTTPS and system roots
 
 Native `fetch` uses Go 1.25.5 software TLS/X.509 under TinyGo 0.42.0.
 `tools/cryptocompat` and `tools/tlscompat` prepare local copy-on-write toolchain
-roots under `/Volumes/Data/tmp/`, checking pinned source hashes and recording
+roots under `build/tmp/`, checking pinned source hashes and recording
 adapter/output manifests. They do not download or modify installed tools, and
 only the userspace client uses this runtime. The compatibility layer supplies
 kernel entropy and native clocks, rejects cancelable contexts/QUIC, disables

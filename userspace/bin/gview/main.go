@@ -18,7 +18,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "gview FILE",
-	Summary: "view a text file with bounded memory",
+	Summary: "bounded text viewer",
 	MinArgs: 1,
 	MaxArgs: 1,
 	Grants:  commands.GrantVFS | commands.GrantTerminal,
@@ -30,6 +30,7 @@ var (
 	parser        terminal.Parser
 	outputStorage [4096]byte
 	inputStorage  [256]byte
+	peerGeometry  bool
 )
 
 //export userspaceMain
@@ -51,18 +52,23 @@ func run(data startup.Data) {
 		utility.Fail(nil, "no memory for file window")
 	}
 
-	columns, rows, display := utility.TerminalSize(data)
+	geometry, geometryValid := utility.TerminalGeometry(data)
+	columns, rows, display := geometry.Columns, geometry.Rows, geometryValid && geometry.Display
+	peerGeometry = geometryValid && geometry.Authoritative && !geometry.Display
 	reader := fileReader{handle: opened.Handle, bulk: &bulk}
 	if status := app.Init(reader, path, stat.Size, columns, rows, display); status != vfs.StatusOK {
 		utility.Request(vfs.Request{Operation: vfs.OperationClose, Handle: opened.Handle})
 		utility.Fail(path, "cannot read file")
+	}
+	if peerGeometry {
+		app.Handle(terminal.Event{Key: terminal.KeyPosition, Column: columns, Row: rows})
 	}
 	output := terminal.NewOutput(outputStorage[:], utility.Write)
 	mark := utility.HeapMark()
 	for !app.Quit() {
 		app.Render(&output)
 		utility.HeapReset(mark)
-		if app.SizeWanted() {
+		if app.SizeWanted() && !peerGeometry {
 			requestSize(&output)
 		}
 		if !readKeys(&output) {
@@ -108,10 +114,20 @@ const idleTicks = clock.TicksPerSecond
 
 func readKeys(output *terminal.Output) bool {
 	for {
-		status, count := utility.ReadInputWithin(inputStorage[:], idleTicks)
+		deadline := uint64(idleTicks)
+		if peerGeometry {
+			deadline = kcall.WaitAnyInfiniteTimeout
+		}
+		status, count, geometry, resized := utility.ReadTerminalWithin(inputStorage[:], deadline)
+		if resized {
+			app.Handle(terminal.Event{Key: terminal.KeyPosition, Column: geometry.Columns, Row: geometry.Rows})
+			if count == 0 {
+				return true
+			}
+		}
 		if count == 0 {
 			if status == uint64(kcall.StatusResourceExhausted) {
-				if app.FollowsTerminal() {
+				if app.FollowsTerminal() && !peerGeometry {
 					requestSize(output)
 				}
 				continue
@@ -122,7 +138,7 @@ func readKeys(output *terminal.Output) bool {
 			return false
 		}
 		for _, value := range inputStorage[:count] {
-			if event, ok := parser.Feed(value); ok {
+			if event, ok := parser.Feed(value); ok && (!peerGeometry || event.Key != terminal.KeyPosition) {
 				app.Handle(event)
 			}
 		}

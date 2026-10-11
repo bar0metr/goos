@@ -80,6 +80,7 @@ func TestCloseRacesSendAndReceive(t *testing.T) {
 		var closes atomic.Int32
 		start := make(chan struct{})
 		midway := make(chan struct{})
+		var midwayOnce sync.Once
 		var group sync.WaitGroup
 		group.Add(4)
 		go func() {
@@ -87,7 +88,7 @@ func TestCloseRacesSendAndReceive(t *testing.T) {
 			<-start
 			for sequence := uint64(1); ; sequence++ {
 				if sequence == 40 {
-					close(midway)
+					midwayOnce.Do(func() { close(midway) })
 				}
 				channel, live := registry.Acquire(id)
 				if !live {
@@ -102,7 +103,7 @@ func TestCloseRacesSendAndReceive(t *testing.T) {
 					sequence--
 				default:
 					if sequence < 40 {
-						close(midway)
+						midwayOnce.Do(func() { close(midway) })
 					}
 					return
 				}

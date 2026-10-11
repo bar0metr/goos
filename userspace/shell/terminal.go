@@ -6,23 +6,40 @@ import "goos/userspace/tty"
 // Serial fallback dimensions are omitted; authoritative remote dimensions do
 // not require GeometryDisplay. Entries borrow this storage until Store.
 type TerminalEnvironment struct {
-	columns     [16]byte
-	columnsSize int
-	lines       [16]byte
-	linesSize   int
-	term        [len("TERM=") + tty.MaxTerm]byte
-	termSize    int
+	snapshot          tty.Snapshot
+	sequence          [48]byte
+	sequenceSize      int
+	display           [32]byte
+	displaySize       int
+	authoritative     [40]byte
+	authoritativeSize int
+	columns           [16]byte
+	columnsSize       int
+	lines             [16]byte
+	linesSize         int
+	term              [len("TERM=") + tty.MaxTerm]byte
+	termSize          int
 }
 
 func (environment *TerminalEnvironment) Store(payload []byte) bool {
-	environment.columnsSize, environment.linesSize, environment.termSize = 0, 0, 0
 	geometry, ok := tty.DecodeGeometryState(payload)
-	if !ok {
+	if !ok || !environment.snapshot.Apply(geometry) {
 		return false
 	}
+	environment.columnsSize, environment.linesSize, environment.termSize = 0, 0, 0
+	environment.sequenceSize, environment.displaySize, environment.authoritativeSize = 0, 0, 0
 	if geometry.Authoritative {
-		environment.columnsSize = len(appendTerminalVariable(environment.columns[:0], "COLUMNS=", geometry.Columns))
-		environment.linesSize = len(appendTerminalVariable(environment.lines[:0], "LINES=", geometry.Rows))
+		environment.columnsSize = len(appendTerminalVariable(environment.columns[:0], "COLUMNS=", uint64(geometry.Columns)))
+		environment.linesSize = len(appendTerminalVariable(environment.lines[:0], "LINES=", uint64(geometry.Rows)))
+	}
+	if geometry.Authoritative {
+		environment.sequenceSize = len(appendTerminalVariable(environment.sequence[:0], tty.SequenceVariable+"=", geometry.Sequence))
+		display := uint64(0)
+		if geometry.Display {
+			display = 1
+		}
+		environment.displaySize = len(appendTerminalVariable(environment.display[:0], tty.DisplayVariable+"=", display))
+		environment.authoritativeSize = len(appendTerminalVariable(environment.authoritative[:0], tty.AuthoritativeVariable+"=", 1))
 	}
 	if len(geometry.Term) != 0 {
 		environment.termSize = copy(environment.term[:], "TERM=")
@@ -32,23 +49,29 @@ func (environment *TerminalEnvironment) Store(payload []byte) bool {
 }
 
 func (environment *TerminalEnvironment) Reset() {
-	environment.columnsSize, environment.linesSize, environment.termSize = 0, 0, 0
+	*environment = TerminalEnvironment{}
 }
 
 func (environment *TerminalEnvironment) Entries(path []byte) [][]byte {
-	entries := [][]byte{path}
+	entries := [][]byte{}
+	if len(path) != 0 {
+		entries = append(entries, path)
+	}
 	if environment.columnsSize != 0 && environment.linesSize != 0 {
 		entries = append(entries, environment.columns[:environment.columnsSize], environment.lines[:environment.linesSize])
 	}
 	if environment.termSize != 0 {
 		entries = append(entries, environment.term[:environment.termSize])
 	}
+	if environment.sequenceSize != 0 {
+		entries = append(entries, environment.sequence[:environment.sequenceSize], environment.display[:environment.displaySize], environment.authoritative[:environment.authoritativeSize])
+	}
 	return entries
 }
 
-func appendTerminalVariable(target []byte, name string, value int) []byte {
+func appendTerminalVariable(target []byte, name string, value uint64) []byte {
 	target = append(target, name...)
-	var digits [5]byte
+	var digits [20]byte
 	position := len(digits)
 	for {
 		position--

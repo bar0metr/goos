@@ -34,6 +34,9 @@ const (
 	StatusTypeMismatch
 	StatusResourceExhausted
 	StatusReadOnly
+	StatusPersistFailed
+	// StatusPersistUnknown retains a tentative value after ambiguous replacement.
+	StatusPersistUnknown
 )
 
 // Rights are what a session may do within its scope. They are separate from the
@@ -49,8 +52,10 @@ const (
 	// limited by a scope.
 	HostsRead
 	HostsWrite
+	// DurableWrite permits the acknowledged hostname mutation, not Set.
+	DurableWrite
 
-	allRights = Read | Write | HostsRead | HostsWrite
+	allRights = Read | Write | HostsRead | HostsWrite | DurableWrite
 )
 
 // Scope is the namespace prefix a session is confined to. An empty scope sees
@@ -59,6 +64,7 @@ const (
 type Scope struct {
 	prefix [MaxKey]byte
 	size   uint8
+	exact  bool
 }
 
 func MakeScope(prefix string) (Scope, bool) {
@@ -73,7 +79,21 @@ func MakeScope(prefix string) (Scope, bool) {
 	return scope, true
 }
 
+// MakeExactScope confines a session to one key, excluding descendants.
+func MakeExactScope(key string) (Scope, bool) {
+	if !validKey([]byte(key)) {
+		return Scope{}, false
+	}
+	var scope Scope
+	scope.size = uint8(copy(scope.prefix[:], key))
+	scope.exact = true
+	return scope, true
+}
+
 func (scope Scope) covers(key []byte) bool {
+	if scope.exact {
+		return equal(scope.prefix[:scope.size], key)
+	}
 	if scope.size == 0 {
 		return true
 	}
@@ -156,7 +176,7 @@ type Store struct {
 // is how a seed is applied over defaults.
 func (store *Store) Declare(key string, value Value, readOnly bool) Status {
 	name := []byte(key)
-	if !validKey(name) || !value.valid() {
+	if !validKey(name) || !value.valid() || !validSetting(name, value) {
 		return StatusInvalidArgument
 	}
 	if slot := store.find(name); slot != nil {
@@ -211,7 +231,7 @@ func (store *Store) Set(scope Scope, rights Rights, key []byte, value Value) Sta
 	if rights&Write == 0 {
 		return StatusPermissionDenied
 	}
-	if !validKey(key) || !value.valid() {
+	if !validKey(key) || !value.valid() || !validSetting(key, value) {
 		return StatusInvalidArgument
 	}
 	if !scope.covers(key) {

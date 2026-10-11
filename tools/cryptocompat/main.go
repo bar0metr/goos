@@ -64,8 +64,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !compatroot.Allowed(filepath.Join(parent, filepath.Base(output))) {
-		return errors.New("output must be under /Volumes/Data/tmp or the GoOS build directory")
+	if parent != filepath.Dir(output) || !compatroot.Allowed(output) {
+		return errors.New("output must be under the GoOS build directory")
 	}
 	if err := emptyOutput(output); err != nil {
 		return err

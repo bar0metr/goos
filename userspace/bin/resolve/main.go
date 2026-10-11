@@ -17,7 +17,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "resolve NAME|status|flush|reload",
-	Summary: "resolve a host name to IPv4 addresses, or show, flush or reload the resolver",
+	Summary: "resolve/status/flush/reload DNS",
 	MinArgs: 1,
 	MaxArgs: 1,
 	Grants:  commands.GrantResolveAdmin,

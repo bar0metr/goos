@@ -58,8 +58,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !compatroot.Allowed(real) || len(entries) != 0 {
-		return errors.New("output must be a real empty directory under /Volumes/Data/tmp or GoOS build output")
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || real != output || !compatroot.Allowed(real) || len(entries) != 0 {
+		return errors.New("output must be a real empty directory under the GoOS build directory")
 	}
 	sources := map[string]string{}
 	err = filepath.WalkDir(args[0], func(path string, e os.DirEntry, err error) error {

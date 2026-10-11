@@ -96,9 +96,25 @@ func userspaceMain() {
 	if !found {
 		fatal("SHELL_OUTPUT_MISSING\n")
 	}
-	ttyHandle, found = startupData.Handle("tty")
-	if !found {
-		fatal("SHELL_TERMINAL_MISSING\n")
+	command, mode, validMode := shellcmd.OneShotCommand(startupData)
+	oneShot = mode
+	if !validMode {
+		fatal("SHELL_ARGUMENTS_INVALID\n")
+	}
+	if oneShot {
+		inputHandle, found = startupData.Handle("stdin")
+		if !found {
+			fatal("SHELL_INPUT_MISSING\n")
+		}
+		errorHandle, found = startupData.Handle("stderr")
+		if !found {
+			fatal("SHELL_ERROR_MISSING\n")
+		}
+	} else {
+		ttyHandle, found = startupData.Handle("tty")
+		if !found {
+			fatal("SHELL_TERMINAL_MISSING\n")
+		}
 	}
 	logHandle, found = startupData.Handle("log")
 	if !found {
@@ -133,6 +149,10 @@ func userspaceMain() {
 		fatal("SHELL_VFS_CONNECT_FAILED\n")
 	}
 	arena.Reset(arenaBase)
+	if oneShot {
+		runOneShot(command)
+		return
+	}
 	mark("SHELL_PROCESS_OK\nSHELL_VFS_CONNECTED_OK\n")
 	if validation.Enabled {
 		checkOutputIsWriteOnly()
@@ -194,7 +214,7 @@ var (
 )
 
 func mark(message string) {
-	if validation.Enabled {
+	if validation.Enabled && !oneShot {
 		write(message)
 	}
 }
@@ -214,7 +234,9 @@ const outputDeadline = 2 * clock.TicksPerSecond
 // fatal reports and exits, so the supervisor starts a replacement rather than
 // leaving a shell that neither works nor ends.
 func fatal(message string) {
-	if outputHandle != 0 {
+	if oneShot && errorHandle != 0 {
+		writeError(message)
+	} else if outputHandle != 0 {
 		write(message)
 		flushOutput()
 	}

@@ -163,7 +163,9 @@ func addSession() {
 		vfsHandle = files
 		syslog.Info("filesystem session renewed")
 		mark("CONFIG_SESSION_RENEWED_OK\n")
-		if persistFailed {
+		if durablePending {
+			persistDurable(&store)
+		} else if persistFailed {
 			persist()
 		}
 		if hostsPersistFailed {
@@ -249,7 +251,11 @@ func serve(current *session) {
 	request, valid := config.DecodeRequest(requestMsg)
 	reply := config.Reply{Operation: request.Operation, Status: config.StatusInvalidArgument}
 	if valid {
-		reply = store.Serve(current.scope, current.rights, request)
+		if request.Operation == config.OperationSetDurable {
+			reply = store.ServeDurable(current.scope, current.rights, request, persistDurable)
+		} else {
+			reply = store.Serve(current.scope, current.rights, request)
+		}
 	}
 	if valid && request.Operation == config.OperationSet && reply.Status == config.StatusOK {
 		persist()
@@ -407,8 +413,11 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		}
 		payloadSize := int(vfsWire[24]) | int(vfsWire[25])<<8
 		received, valid := ipc.Decode(vfsWire[:ipc.WireHeaderSize+payloadSize+int(vfsWire[26])*8])
-		if !valid || received.Correlation != correlation {
+		if !valid || received.Correlation == 0 || received.Correlation > correlation {
 			return vfs.Reply{}, false
+		}
+		if received.Correlation < correlation {
+			continue
 		}
 		reply, valid := vfs.DecodeReply(received)
 		return reply, valid && reply.Operation == request.Operation

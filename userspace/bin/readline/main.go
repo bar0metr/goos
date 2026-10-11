@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "readline",
-	Summary: "copy one line of standard input to standard output",
+	Summary: "copy one stdin line",
 }
 
 //export userspaceMain

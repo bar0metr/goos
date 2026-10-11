@@ -17,7 +17,7 @@ cmp -s "$tree/system/security/ca-certificates.pem" tools/tlsfixture/testdata/roo
 }
 [ -f "$tree/system/bin/fetch" ] || { echo 'tls: fetch image missing' >&2; exit 2; }
 nc=$(command -v nc) || { echo 'tls: nc required for guestfwd' >&2; exit 2; }
-work=$(mktemp -d /Volumes/Data/tmp/goos-tls-test-XXXXXX)
+work=$(go run ./tools/scratch goos-tls-test-)
 log=$work/guest.log
 report=$work/checks.tsv
 printf 'check\tresult\tdetail\n' >"$report"
@@ -58,7 +58,7 @@ pass() {
 wait_for() { # pattern seconds file pid
 	elapsed=0
 	while [ "$elapsed" -lt "$2" ]; do
-		grep -q -- "$1" "$3" 2>/dev/null && return 0
+		tr -d '\r' <"$3" 2>/dev/null | grep -q -- "$1" && return 0
 		kill -0 "$4" 2>/dev/null || break
 		sleep 1
 		elapsed=$((elapsed + 1))
@@ -66,7 +66,7 @@ wait_for() { # pattern seconds file pid
 	fail timeout "$1 within ${2}s" "$3"
 }
 window() { # command
-	awk -v command="$1" 'seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }' "$log"
+	awk -v command="$1" '{ sub(/\r$/, "") } seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }' "$log"
 }
 run_command() {
 	printf '%s\n' "$1" >&3

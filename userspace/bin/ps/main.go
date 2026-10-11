@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "ps",
-	Summary: "list processes with their memory and CPU use",
+	Summary: "process resource use",
 }
 
 //export userspaceMain

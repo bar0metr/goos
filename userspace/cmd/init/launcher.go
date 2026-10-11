@@ -25,10 +25,13 @@ import (
 
 // launcher is what PID 1 keeps for a job that may launch a child.
 type launcher struct {
+	resize resizeDelivery
 	// server is PID 1's end of the caller's launch channel.
 	server handle.ID
 	// input is PID 1's copy of the caller's standard input.
 	input handle.ID
+	// Exec stdin belongs to its session; only private job input is owned here.
+	inputBorrowed bool
 	// child is the running child, and correlation the request it answers.
 	child       handle.ID
 	correlation uint64
@@ -75,6 +78,8 @@ func pollLauncher(job *execJob) {
 	if launch.child != 0 {
 		code := waitApplicationExit(launch.child)
 		launch.child = 0
+		closeResize(&launch.resize)
+		restoreParentResize(job)
 		replyLaunch(launch, execproto.LaunchReply{ExitCode: code}, launch.correlation)
 		return
 	}
@@ -152,9 +157,20 @@ func startChild(job *execJob, request execproto.Request, command []byte) supervi
 	launch := &job.launcher
 	terminal := supervisor.Endpoint{ID: handle.ID(job.session.output[1]), Type: handle.TypeStream, Shared: true}
 	streams := supervisor.Streams{Input: supervisor.Endpoint{ID: launch.input, Type: handle.TypeStream, Shared: true}, Output: terminal, Error: terminal}
+	if job.session.execMode {
+		streams.Error = supervisor.Endpoint{ID: handle.ID(job.session.errorOutput[1]), Type: handle.TypeStream, Shared: true}
+	}
 	stage := request.Stages[0]
 	var launched supervisor.LaunchStatus
+	if job.resizeParent && !job.resizeReleased && job.session.resizeOwner.Handoff(uint64(job.slot)+1) {
+		closeResize(&job.resize)
+		launchingResize, launchingResizeSession = &launch.resize, job.session
+	}
 	_, launch.child, launched = launchApplication(stage.Path, command, request.CWD, stage.Arguments, request.Environment, streams, nil)
+	launchingResize, launchingResizeSession = nil, nil
+	if launched != supervisor.LaunchOK {
+		restoreParentResize(job)
+	}
 	discardReady()
 	if launched == supervisor.LaunchOK {
 		syslog.Info("application launched", syslog.Str("command", bytesString(command)))
@@ -239,6 +255,7 @@ func stopChild(launch *launcher) {
 // running is stopped and reaped first, so it cannot outlive the job and read
 // input the shell no longer feeds it raw.
 func closeLauncher(launch *launcher) {
+	closeResize(&launch.resize)
 	if launch.fill.session != 0 {
 		dropFill(&launch.fill)
 	}
@@ -252,7 +269,7 @@ func closeLauncher(launch *launcher) {
 	if launch.server != 0 {
 		sys.HandleClose(launch.server)
 	}
-	if launch.input != 0 {
+	if launch.input != 0 && !launch.inputBorrowed {
 		sys.HandleClose(launch.input)
 	}
 	*launch = launcher{}

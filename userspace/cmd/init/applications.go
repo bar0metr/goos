@@ -12,6 +12,7 @@ import (
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	"goos/userspace/commands"
+	configproto "goos/userspace/config"
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
@@ -19,7 +20,9 @@ import (
 	"goos/userspace/partition"
 	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
+	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
+	"goos/userspace/tty"
 )
 
 // openVFSSession asks VFS for a new session and returns the client endpoint the
@@ -110,6 +113,14 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		remoteAdmin = openRemoteAdmin()
 	}
 	useRemote := remoteAdmin != 0
+	var hostnameConfig handle.ID
+	if grantsRequested&commands.GrantHostname != 0 {
+		scope, valid := configproto.MakeExactScope(configproto.HostnameKey)
+		if valid {
+			hostnameConfig, _ = openScopedConfigSession(scope, configproto.Read|configproto.DurableWrite)
+		}
+	}
+	useHostname := hostnameConfig != 0
 	useBlockCheck := grantable && grantsRequested&commands.GrantBlockCheck != 0
 	useLaunch := grantable && launch != nil && grantsRequested&commands.GrantLaunch != 0 && streams.Input.Type == handle.TypeStream
 	// A command asks for one network role; one asking for both gets the
@@ -149,6 +160,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		// The running system starts its programs from the volume, so the
 		// volume is never taken from it for a check (ADR 0175).
 		syslog.Warn("volume check refused in normal mode")
+		closeOpen(hostnameConfig)
 		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
@@ -162,6 +174,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		checkBlock, reason = openCheckBlock()
 		if reason != "" {
 			syslog.Error(reason)
+			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
@@ -175,6 +188,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		if reason != "" {
 			syslog.Error("APP_VFS_SESSION_FAILED")
 			syslog.Error(reason)
+			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
@@ -190,8 +204,10 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	// A launcher's input is granted as a copy, so PID 1 keeps the reader
 	// to give its children.
 	var launchPair [2]uint64
+	inputBorrowed := streams.Input.Shared
 	if useLaunch {
 		if !createChannel(&launchPair) {
+			closeOpen(hostnameConfig)
 			closeOpen(remoteAdmin)
 			closeOpen(netSession)
 			closeOpen(resolveSession)
@@ -206,8 +222,40 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		}
 		streams.Input.Shared = true
 	}
+	useResize := launchingResize != nil && !linuxProcess && grantable && grantsRequested&commands.GrantTerminal != 0
+	var resizePair [2]uint64
+	var terminalEnvironment shellcmd.TerminalEnvironment
+	var terminalEntries [][]byte
+	if useResize {
+		if !createStream(&resizePair) {
+			closePair(launchPair)
+			closeOpen(hostnameConfig)
+			closeOpen(remoteAdmin)
+			closeOpen(netSession)
+			closeOpen(resolveSession)
+			closeUDP(udpSession)
+			closeUDP(tcpSession)
+			sys.HandleClose(handle.ID(pair[0]))
+			sys.HandleClose(checkBlock)
+			if useBlockCheck {
+				manager.CancelStop(filesystemName)
+			}
+			return 0, 0, supervisor.LaunchResourceExhausted
+		}
+		if geometry, valid := launchingResizeSession.geometry.Current(); valid {
+			message, _ := tty.GeometryStateReply(geometry, 1)
+			terminalEnvironment.Store(message.Payload[1:message.PayloadSize])
+			terminalEntries = terminalEnvironment.Entries(nil)
+		}
+	}
 	slot, staging := stagingSlot()
 	handles := 3
+	if useHostname {
+		handles++
+	}
+	if useResize {
+		handles++
+	}
 	if useRemote {
 		handles++
 	}
@@ -236,6 +284,16 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	// native one: its execve refuses native images.
 	addLinuxPath := linuxProcess && execproto.LinuxPathMissing(environment)
 	entries := environment.Count()
+	if useResize {
+		for offset, index := 0, 0; index < environment.Count(); index++ {
+			var variable []byte
+			variable, offset = environment.Next(offset)
+			if tty.GeometryVariable(variable) {
+				entries--
+			}
+		}
+		entries += len(terminalEntries)
+	}
 	if addLinuxPath {
 		entries++
 	}
@@ -250,9 +308,15 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	for offset, index := 0, 0; index < environment.Count(); index++ {
 		var variable []byte
 		variable, offset = environment.Next(offset)
+		if useResize && tty.GeometryVariable(variable) {
+			continue
+		}
 		if linuxProcess {
 			variable = execproto.LinuxEnvironmentEntry(variable)
 		}
+		writer.Entry(variable)
+	}
+	for _, variable := range terminalEntries {
 		writer.Entry(variable)
 	}
 	if addLinuxPath {
@@ -261,6 +325,12 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	writer.Handle([]byte("in"), 0)
 	writer.Handle([]byte("stdout"), 0)
 	writer.Handle([]byte("stderr"), 0)
+	if useHostname {
+		writer.Handle([]byte("config"), 0)
+	}
+	if useResize {
+		writer.Handle([]byte(tty.ResizeRole), 0)
+	}
 	if useRemote {
 		writer.Handle([]byte("remote"), 0)
 	}
@@ -294,12 +364,14 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	startupData, ok := writer.Finish()
 	if !ok {
 		syslog.Warn("APP_STARTUP_ENCODE_FAILED")
+		closeOpen(hostnameConfig)
 		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
 		closeUDP(udpSession)
 		closeUDP(tcpSession)
 		closePair(launchPair)
+		closePair(resizePair)
 		sys.HandleClose(handle.ID(pair[0]))
 		sys.HandleClose(checkBlock)
 		if useBlockCheck {
@@ -311,6 +383,12 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		streamGrant("in", streams.Input, capability.Read),
 		streamGrant("stdout", streams.Output, capability.Write),
 		streamGrant("stderr", streams.Error, capability.Write),
+	}
+	if useHostname {
+		grants = append(grants, supervisor.Capability{Name: "config", Handle: hostnameConfig, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
+	if useResize {
+		grants = append(grants, supervisor.Capability{Name: tty.ResizeRole, Handle: handle.ID(resizePair[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait})
 	}
 	if useRemote {
 		grants = append(grants, supervisor.Capability{Name: "remote", Handle: remoteAdmin, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
@@ -358,6 +436,8 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 			syslog.Error("APP_LAUNCH_REQUEST_FAILED")
 		}
 		closePair(launchPair)
+		closeOpen(hostnameConfig)
+		closePair(resizePair)
 		closeOpen(remoteAdmin)
 		closeOpen(netSession)
 		closeOpen(resolveSession)
@@ -370,11 +450,16 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 		}
 		return 0, 0, launched
 	}
+	if useResize {
+		launchingResize.pair = resizePair
+		sendResize(launchingResize, &launchingResizeSession.geometry)
+	}
 	if useBlockCheck {
 		filesystemChecker = event.Process
 	}
 	if useLaunch {
 		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID
+		launch.inputBorrowed = inputBorrowed
 	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchOK
 }

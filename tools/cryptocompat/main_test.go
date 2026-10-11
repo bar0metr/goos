@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"goos/internal/repobuild"
+	"goos/internal/testscratch"
 )
 
 func writeFixture(t *testing.T, path, content string) {
@@ -21,7 +24,7 @@ func writeFixture(t *testing.T, path, content string) {
 
 func setup(t *testing.T) (source, output, backend string, pins sourcePins) {
 	t.Helper()
-	root := t.TempDir()
+	root := testscratch.TempDir(t, "goos-cryptocompat-")
 	source = filepath.Join(root, "source")
 	output = filepath.Join(root, "output")
 	backend = filepath.Join(root, "backend.go")
@@ -166,7 +169,31 @@ func TestCLIArgumentAndLocationValidation(t *testing.T) {
 	if err := run(nil); err == nil {
 		t.Fatal("missing arguments accepted")
 	}
-	if err := run([]string{"source", t.TempDir(), "backend"}); err == nil || !strings.Contains(err.Error(), "/Volumes/Data/tmp") {
+	root, err := repobuild.FindRoot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"source", filepath.Join(root, "not-build-output"), "backend"}); err == nil || !strings.Contains(err.Error(), "GoOS build directory") {
 		t.Fatalf("outside output accepted or unclear diagnostic: %v", err)
+	}
+}
+
+func TestRunRejectsLinkedOutputAncestor(t *testing.T) {
+	root := testscratch.TempDir(t, "goos-linked-output-")
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(real, "output"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(link, "output")
+	if err := run([]string{"unused-source", output, "unused-adapter"}); err == nil || !strings.Contains(err.Error(), "GoOS build directory") {
+		t.Fatalf("linked output ancestor accepted: %v", err)
+	}
+	entries, err := os.ReadDir(real)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("linked target changed: %v: %v", entries, err)
 	}
 }

@@ -28,11 +28,23 @@ build fails. `test-crypto` also executes the successful builds, even when other
 packages fail to compile. The TLS availability probe returns failure until we
 verify a real software handshake; construction alone cannot pass.
 
-Reports go into a new directory under `/Volumes/Data/tmp/`. Set `CRYPTO_WORK`
-to a fresh directory there to keep the path predictable. The report contains
+With the default `CRYPTO_COMPAT=0`, ASN.1 and X.509 builds fail on unsupported
+UEFI runtime symbols. The runtime overlay supplies the native hooks for those
+probes. Stock TinyGo TLS still fails the availability probe in either mode, so
+`test-crypto` returns nonzero for that known limitation. Use `make test-tls` to
+check the selected authenticated software TLS client.
+
+Reports go into a new directory under `build/tmp/`. Set `CRYPTO_WORK` to a
+fresh directory there to keep the path predictable. The report contains
 `toolchain.txt`, `build.tsv`, `native.tsv`, per-package build logs, ELF/native
 images and `native.log`. Reusing a directory with an existing disposable tree
 or compatibility root fails rather than mixing results.
+
+`CRYPTO_WORK` controls only the disposable probe-report tree. Prepared
+compatibility roots must be real empty directories under the GoOS `build/` tree;
+the preparation tools reject a nonempty or symlink output target. This keeps
+copy-on-write toolchains inside project-controlled build output rather than a
+machine-specific scratch location.
 
 The command `/system/bin/cryptoprobe` checks kernel randomness and clocks.
 The VM harness adds separately built `crypto-PACKAGE` commands to its disposable
@@ -63,9 +75,9 @@ The X.509 probe uses one self-signed test CA, explicit roots and a fixed fixture
 time. It rejects an unknown root, an expired certificate and a changed signature.
 This result does not cover ordinary leaf chains, SAN policy, production bundle
 loading or attacker-controlled chain-search bounds. Those need integration gates.
-We did not add ChaCha20-Poly1305: the current module has no external crypto
-dependency. A software TLS integration may reuse a suitable pinned implementation
-rather than introduce a primitive here.
+These primitive probes do not cover ChaCha20-Poly1305. The software TLS
+integration reuses the pinned implementation rather than adding a primitive
+here.
 
 ## Native runtime compatibility
 

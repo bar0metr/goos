@@ -6,12 +6,21 @@ uses native terminal sessions, configuration, and capability grants.
 
 ## Setup
 
-Create `/home/user/.ssh` and install your Ed25519 public key in
-`/home/user/.ssh/authorized_keys`. Copy the public key, not the private key.
-The file accepts `ssh-ed25519 BASE64 [comment]`, blank lines, and `#` comments.
-GoOS rejects options, certificates, unsupported key types, and malformed files.
+From the trusted local console, add your Ed25519 public key:
 
-The default listener is disabled. After installing the key:
+```text
+remote key add "ssh-ed25519 AAAA... laptop"
+remote keys
+```
+
+Use the complete public-key line, not private-key material. The default
+configured file is `/home/user/.ssh/authorized_keys`; key add supports a missing
+file. Images may also supply public keys there before boot. The file accepts
+Ed25519 lines, blank lines and `#` comments. GoOS rejects options, certificates,
+unsupported key types and malformed files. After scope installation, ordinary
+filesystem sessions cannot write the authorized-key file; use `remote key`.
+
+The default listener is disabled. After adding the key:
 
 ```text
 config set system.remote.enabled true
@@ -30,8 +39,9 @@ Check the host fingerprint against `remote status` before trusting a new host.
 The default login name is `user`; `system.remote.user` selects the SSH login
 label. It does not select an account or home directory. Password and
 keyboard-interactive authentication are
-unavailable. GoOS accepts one interactive PTY shell per connection; it rejects
-`exec`, SFTP/SCP, forwarding, agent, and X11 requests.
+unavailable. GoOS accepts one interactive PTY shell or one non-PTY command
+execution per connection. SFTP/SCP, forwarding, agent, and X11 requests remain
+unavailable.
 
 To test the minimum algorithm set:
 
@@ -43,8 +53,63 @@ ssh -o KexAlgorithms=curve25519-sha256 \
     -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS
 ```
 
-Automation should use its own `UserKnownHostsFile` and verify host identity.
-Do not disable host-key checking globally.
+For automation, obtain the host fingerprint through trusted serial
+`remote status`. Compare it with the public key obtained by `ssh-keyscan`, then
+pin that exact key in a dedicated `UserKnownHostsFile`. Use
+`StrictHostKeyChecking=yes`; a scan alone does not establish host identity.
+
+## Command execution
+
+Run native GoOS commands without allocating a PTY:
+
+```sh
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS uname
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'net status'
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'config get system.net.mode'
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'echo one; echo two'
+printf 'needle\nother\n' | ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'grep needle'
+```
+
+The one-shot shell uses the native parser: a command line has a 4096-byte bound,
+up to eight sequence commands, and up to four pipeline stages including
+redirection helpers. Supported native pipelines and redirections work without
+`/bin/sh -c`, variable expansion, or a POSIX shell. Background `&` rejects the
+whole command before execution; quoted or escaped ampersands remain argument
+data. A PTY request followed by exec also fails, so use `-T`, not `-t`.
+
+The worker connects SSH stdin, stdout and stderr to separate native streams.
+Input EOF closes stdin. GoOS sends the native command status after draining both
+output streams, then closes the channel. Sequences return the last command's
+status; pipelines retain GoOS's first-nonzero-stage status. One-shot startup has
+no terminal handle, prompt, banner, echo or terminal newline conversion. It
+receives the same command authorities as an interactive shell.
+
+## Authorized keys
+
+Use the native administration command after configuring the authorized-key path:
+
+```text
+remote keys
+remote key add "ssh-ed25519 AAAA... laptop"
+remote key remove SHA256:...
+```
+
+`remote keys` lists canonical public-key fingerprints and optional comments in
+file order. Add accepts one Ed25519 public-key line and rejects duplicate keys.
+Remove requires the full fingerprint and exactly one match; unknown or ambiguous
+fingerprints fail. Removing the final key leaves a deny-all list. Existing
+connections remain open; new authentication uses the committed set.
+
+Successful mutations replace the configured authorized-key file and reload the
+policy without reboot. The editor preserves valid entries and comments within
+the existing file, key-count and line bounds. Parse, write and reload failures
+keep the previous effective policy; rollback must not overwrite an unrelated
+concurrent file change. Atomic file replacement does not promise a journal or
+filesystem-plus-runtime crash atomicity.
+
+PID 1 confines key administration to the configured public-key file and its
+transactional staging siblings. The command receives no host private-key
+access. Host identity protection and worker signing grants remain unchanged.
 
 ## Configuration
 
@@ -136,25 +201,84 @@ and capability checks do not establish SSH transcript provenance.
 ## Terminal and lifecycle
 
 Local consoles and SSH workers use `tty.Engine` for edited lines, raw input,
-Ctrl-C/Ctrl-D/Ctrl-U, and prompt-safe output. GTTY version 4 carries dimensions
-and TERM. SSH `pty-req` requires dimensions in 1..1000 and printable TERM at most
-64 bytes. `window-change` updates stored dimensions. The shell uses the latest
-COLUMNS, LINES, and TERM before the next foreground launch.
+Ctrl-C/Ctrl-D/Ctrl-U, and prompt-safe output. SSH `pty-req` requires dimensions
+in 1..1000 and printable TERM at most 64 bytes. Sequence-ordered GTTY geometry
+notifications deliver `window-change` to the current foreground raw application.
+A running `gview`, `gfm` or `edit` redraws without restart. Background jobs receive
+no resize authority; each application retains its screen-buffer size bounds.
 
-Native terminal jobs share one PTY output stream for stdout and stderr. A command
-can redirect stderr through the normal shell pipeline; an interactive SSH client
-receives unredirected diagnostics on the same terminal as ordinary output.
+Foreground startup supplies geometry at sequence N. The shell and child apply
+only newer sequences, including a resize that races with launch or a nested
+foreground handoff. An old startup snapshot cannot overwrite a newer event.
+Cooked input uses the newest geometry after the raw application exits. Local
+framebuffer and serial terminal size handling retain their existing behavior.
 
-Live resize delivery to an already-running application remains follow-up work;
-no general signal subsystem enters this feature. Disconnect in raw mode ends
-that session and its foreground job without changing another terminal's mode.
+Interactive terminal jobs share one PTY output stream for stdout and stderr.
+A command can redirect stderr through the native shell pipeline; unredirected
+diagnostics appear on the same terminal as ordinary output. Non-PTY exec uses
+separate SSH stdout and stderr instead.
 
-PID 1 creates remote shell resources only after authentication and PTY/shell
-acceptance. The shell receives no TCP endpoint, SSH keys, console handle, or
+Use `exit` or Ctrl-D to end an interactive SSH shell. `reboot` and `poweroff`
+request the normal storage flush and machine lifecycle. PID 1 and the worker
+drain output and close SSH before the machine resets or powers off. Ctrl-C stops
+a foreground command or log follower and returns to the shell.
+
+PID 1 creates shell resources after authentication and accepted shell/exec
+requests. The shell receives no TCP endpoint, SSH keys, console handle, or
 worker-launch channel. On disconnect, shell exit, worker failure, or protocol
-failure, PID 1 stops/reaps the session's jobs and releases its pages, endpoints,
-streams, and broker sessions. Generation-tagged IDs reject late messages from
-reused slots.
+failure, PID 1 stops/reaps the session's jobs and releases pages, endpoints,
+streams and broker sessions. Generation-tagged IDs reject late messages from
+reused slots. Disconnect in raw mode leaves other terminals unchanged.
+
+## Native administration tools
+
+Each tool runs as a separate native image with a capability manifest, bounded
+working memory, `--help`, stderr diagnostics and a nonzero failure status.
+
+| Command | Supported form |
+| --- | --- |
+| `head` | `head [-n N] FILE`, default 10 lines |
+| `tail` | `tail [-n N] FILE`, default 10 lines, no follow flag |
+| `grep` | `grep [-i] PATTERN [FILE]`, plain substring, stdin when omitted |
+| `wc` | `wc [-l\|-w\|-c] [FILE]`, stdin when omitted |
+| `find` | `find PATH [-name NAME]`, exact basename match, bounded traversal |
+| `hexdump` | `hexdump FILE`, offset, hex and printable ASCII rows |
+| `hostname` | `hostname [NAME]`, typed persistent `system.hostname` |
+| `date` | `date [-u]`, current realtime UTC |
+
+Hostname is a single ASCII label of 1..63 letters, digits or hyphens, with no
+leading or trailing hyphen. Its default is `goos`; it controls display only.
+`hostname NAME` uses a scoped acknowledged durable config mutation and reports
+success after saving. If the service loses the replacement acknowledgement, the
+command reports an uncertain persistence outcome instead of success. Repeat
+the same value to confirm it. Existing `config set` semantics remain unchanged.
+
+These tools expose native operations rather than GNU-compatible option surfaces.
+Use `--help` for input and traversal bounds. No regex engine, find expression
+language or timezone database enters this command set.
+
+## System log
+
+The shell's `log` builtin reads the bounded structured kernel log ring:
+
+```text
+log
+log -n 20
+log --level warn
+log --component remoted
+log -n 50 --level error
+log -f --component remoted
+```
+
+Levels `debug`, `info`, `warn` and `error` match exactly. Component names also
+match exactly. `-n N` selects the newest N matching retained records and prints
+them in chronological order. The ring retains at most 64 records.
+
+Follow prints its selected backlog, then blocks on cursor-aware log readiness
+in the same wait as terminal cancellation. New records wake readers without
+polling; readers keep independent cursors. Ring overwrite produces a gap notice
+and resumes at the oldest retained sequence. Ctrl-C stops follow and restores
+the local or remote shell prompt.
 
 ## Security boundaries and limits
 
@@ -168,8 +292,8 @@ reused slots.
   deadline bounds prevent a peer from allocating unbounded state.
 - Object-aware VFS scopes protect private identity through aliases, renamed
   ancestors, retained handles, ordinary reads, and executable/bulk reads.
-- `remote` commands get status/reload authority only. They do not receive private
-  key access or a worker-launch channel.
+- `remote` commands get bounded status/reload/key-management authority. They
+  receive no private-key access or worker-launch channel.
 - Logs record lifecycle, public fingerprints, and rejection reasons. They do not
   record terminal input, decrypted payloads, or private/session keys.
 
@@ -181,12 +305,60 @@ and prepares private Go/TinyGo roots under build output; it does not edit instal
 toolchains. Reusable packet and key-generation regions bound native allocation
 across traffic and rekey.
 
-The final gate uses one primary VM boot with a real OpenSSH client, then one
-reboot on the same disk. It must prove authentication/rejection, local and remote
-terminal behavior, raw mode, geometry, stored resize, session cleanup/capacity,
-reload rollback, unsupported requests, and persistent private-key isolation.
-On 2026-10-10, `make test-remote VALIDATION=1` passed 76 assertions across both
-boots. The headless Q35/TCG run verified degraded-start recovery, corrupt identity
+The QEMU gate uses one primary boot with a real OpenSSH client and one reboot
+on the same disk. It checks command stdout/stderr/status, stdin EOF, exec
+rejection cases, live resize of the same process, key add/remove authentication,
+log filtering/follow, local cancellation, session cleanup/capacity and graceful
+remote poweroff. Reboot checks cover hostname, key changes and private-key
+isolation. Run `go test ./...`, `make test-race` and focused race tests for changed
+host-testable packages before `make test-remote VALIDATION=1`, `make test-network`
+and `make test-console-gui`.
+
+Run the final release-candidate check on the exact clean candidate SHA:
+
+```sh
+make pve-run VALIDATION=0 PVE_FLAGS='--scenario remote-admin --require-clean'
+```
+
+Without the scenario override, `pve-run` selects smoke. Use disposable Ed25519
+client keys and pin the host public key against trusted serial `remote status`.
+Automated SSH calls require `StrictHostKeyChecking=yes`, including reconnects
+and expected authentication failures. Retain the VM for manual validation and
+save the report, serial log, candidate SHA and artifact hashes. Check reboot
+and poweroff on that same VM; record its final power state.
+
+If a tooling failure stops a kept run, reuse its owned VM instead of provisioning
+another one:
+
+```sh
+go run ./tools/pvelab resume --run SOURCE_RUN_ID --require-clean \
+  --source-evidence-sha256 TRUSTED_SHA256
+```
+
+The expected digest must come from the source evidence captured in trusted
+external storage, not from the current run directory. The SHA-256 bundle order
+is `state.json`, `artifacts.json`, `vm-config.json`, `report.json`. Each entry
+contains its filename byte length, filename, content byte length and raw content;
+both lengths are unsigned 64-bit big-endian values. Resume verifies that binding
+before parsing metadata, then uses the verified byte snapshots. It runs
+the original scenario and writes a separate report. Before VM actions it checks
+the original ownership marker, exact VM configuration, local artifact hashes and
+unchanged native build inputs. Only documentation, lab tooling and test-only
+changes may differ from the source candidate. It does not rebuild or upload
+images, and it leaves the source run's evidence unchanged.
+
+The extended `make test-remote VALIDATION=1` run on 2026-10-11 passed 210
+assertions across two persistent boots. It verified non-PTY exec, separate output
+streams and status, bounded administration commands, durable hostname recovery,
+key mutations and new-admission authentication, structured log selection and
+local/SSH follow cancellation, and two live resizes of the same viewer process.
+The same development tree passed the network regression (207 checks) and
+console-GUI checks for console, keyboard, filesystem information, file manager,
+interrupt, viewer and nested launch. The final exact-candidate Proxmox report
+is retained separately with the candidate SHA and artifact hashes.
+
+The earlier `make test-remote VALIDATION=1` run on 2026-10-10 passed 76 assertions
+across both boots. The headless Q35/TCG run verified degraded-start recovery, corrupt identity
 retention, a custom SSH login label with an independent authorized-key path, and
 forced OpenSSH rekey after reload. It also checked the mandatory algorithms,
 public-key login and refusal, terminal output and diagnostics, Ctrl-C/Ctrl-D,

@@ -19,7 +19,7 @@ trap 'exit 130' HUP INT TERM
 wait_for() {
 	elapsed=0
 	while [ "$elapsed" -lt "$2" ]; do
-		grep -q -- "$1" "$log" 2>/dev/null && return 0
+		tr -d '\r' <"$log" 2>/dev/null | grep -q -- "$1" && return 0
 		kill -0 "$pid" 2>/dev/null || break
 		sleep 1
 		elapsed=$((elapsed+1))
@@ -29,7 +29,7 @@ wait_for() {
 	return 1
 }
 window() {
-	awk -v command="$1" 'seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }' "$log"
+	awk -v command="$1" '{ sub(/\r$/, "") } seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }' "$log"
 }
 
 [ ! -e "$work/tree" ] || { echo 'crypto: disposable tree already exists' >&2; exit 2; }

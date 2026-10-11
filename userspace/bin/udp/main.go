@@ -26,7 +26,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "udp send|listen|self [OPTIONS] ...",
-	Summary: "send and receive UDP datagrams",
+	Summary: "UDP datagrams",
 	Options: "send [-s SIZE] [-r] [-W MS] ADDRESS PORT [TEXT]; listen [-c COUNT] [-W MS] [-b ADDRESS] PORT...; self [-s SIZE] ADDRESS PORT [TEXT]; -W waits 100-60000 ms (default 3000), -c 1-64 (default 1), up to 4 PORTs",
 	MinArgs: 2,
 	MaxArgs: 12,

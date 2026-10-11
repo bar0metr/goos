@@ -45,9 +45,11 @@ const (
 	// GrantRemote asks for remoted status and configuration reload, not a
 	// worker-launch channel, TCP session, or host-key filesystem access.
 	GrantRemote
+	// GrantHostname grants one exact-key durable hostname session.
+	GrantHostname
 
 	knownGrants = GrantVFS | GrantBlockCheck | GrantTerminal | GrantLaunch | GrantNetworkPing | GrantNetworkAdmin |
-		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote
+		GrantResolve | GrantResolveAdmin | GrantUDP | GrantTCP | GrantRemote | GrantHostname
 )
 
 // Unbounded is the MaxArgs of a command that takes any number of arguments.
@@ -83,8 +85,8 @@ const (
 	MaxArgs = 99
 	// IndexFormat names the line format below and the meaning of its grant
 	// bits. An installed system records it, so a system built for another
-	// format is refused (ADR 0175). Format 6 adds remote administration.
-	IndexFormat = 6
+	// format is refused (ADR 0175). Format 7 adds the exact-key hostname grant.
+	IndexFormat = 7
 )
 
 // Entry is one decoded index line. Its byte slices alias the index.

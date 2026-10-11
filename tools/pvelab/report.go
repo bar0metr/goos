@@ -109,6 +109,19 @@ type Workload struct {
 	Faults    []string `json:"faults,omitempty"`
 }
 
+// ResumeInfo ties fresh scenario evidence to the immutable retained run.
+// Source hashes name the boot artifacts; CandidateGitSHA names only the host
+// tooling candidate that drove the resumed scenario.
+type ResumeInfo struct {
+	ID                   string `json:"id"`
+	SourceRunID          string `json:"source_run_id"`
+	SourceGitSHA         string `json:"source_git_sha"`
+	SourceISOSHA256      string `json:"source_iso_sha256"`
+	SourceDiskSHA256     string `json:"source_disk_sha256"`
+	SourceEvidenceSHA256 string `json:"source_evidence_sha256"`
+	CandidateGitSHA      string `json:"candidate_git_sha"`
+}
+
 type Report struct {
 	Tool       string    `json:"tool"`
 	RunID      string    `json:"run_id"`
@@ -123,6 +136,7 @@ type Report struct {
 		ISOSHA256  string `json:"iso_sha256"`
 		DiskSHA256 string `json:"disk_sha256"`
 	} `json:"artifacts"`
+	Resume *ResumeInfo `json:"resume,omitempty"`
 
 	Scenario string   `json:"scenario"`
 	Result   string   `json:"result"`
@@ -130,8 +144,14 @@ type Report struct {
 	Error    string   `json:"error,omitempty"`
 	Checks   []string `json:"checks,omitempty"`
 
-	Workload *Workload  `json:"workload,omitempty"`
-	Linux    *DiagLinux `json:"linux,omitempty"`
+	Workload *Workload          `json:"workload,omitempty"`
+	Linux    *DiagLinux         `json:"linux,omitempty"`
+	Remote   *RemoteAdminReport `json:"remote_admin,omitempty"`
+	// Make/go run may wrap this status. The outer caller records its own
+	// status separately; pvelab cannot observe the process that invoked it.
+	ToolExitStatus  int    `json:"tool_exit_status"`
+	OuterExitStatus *int   `json:"outer_exit_status"`
+	ExitStatusNote  string `json:"exit_status_note,omitempty"`
 
 	Kept    bool   `json:"kept"`
 	Cleanup string `json:"cleanup"`

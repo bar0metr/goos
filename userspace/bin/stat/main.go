@@ -15,7 +15,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "stat [-b|-k|-m|-g] PATH",
-	Summary: "show a path's type and size; a directory counts its contents (KiB by default)",
+	Summary: "type/size; directory totals in KiB",
 	MinArgs: 1,
 	MaxArgs: 2,
 	Grants:  commands.GrantVFS,

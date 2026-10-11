@@ -186,6 +186,8 @@ func renewShellSession(terminal *terminalSession, spec *supervisor.LaunchSpec) b
 // channel's other end is gone, so it is closed and not waited on until a new
 // shell brings a new one.
 func endShellSession(session *terminalSession) {
+	releaseSessionResize(session)
+	session.geometry.Reset()
 	stopped := false
 	for index := range execJobs {
 		job := &execJobs[index]

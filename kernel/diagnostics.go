@@ -36,11 +36,11 @@ func traceWaitKey(kind diag.Kind, pid process.ID, task sched.TaskID, key kernelw
 // traceDeniedInterests reports where a rejected interest array lives and who
 // else can reach that physical page, so memory aliasing can be told apart from
 // a genuinely stale handle.
-func traceDeniedInterests(root, address, count uint64) {
+func traceDeniedInterests(root, address, count, interestSize uint64) {
 	local := thisCPU()
 	out := diagWriter{console: kernelconsole.New()}
 	out.text("DIAG denied wire=")
-	for index := uint64(0); index < count*kcall.WaitAnyInterestSize && index < uint64(len(local.waitAnyWire)); index += 8 {
+	for index := uint64(0); index < count*interestSize && index < uint64(len(local.waitAnyWire)); index += 8 {
 		out.console.WriteHex(decodeUint64(local.waitAnyWire[index : index+8]))
 		out.text(",")
 	}
@@ -300,8 +300,8 @@ func dumpDiagnostics(requester process.ID) {
 		held.drop()
 	}
 	for slot := 0; slot < sched.MaxTasks; slot++ {
-		view, found := waitAnyTable.At(slot)
-		if !found {
+		view := &thisCPU().waitAnyView
+		if !waitAnyTable.Inspect(slot, view) {
 			continue
 		}
 		out.text("DIAG waitany")

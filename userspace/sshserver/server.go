@@ -40,6 +40,7 @@ const (
 	EOF
 	Close
 	Rekey
+	Exec
 )
 
 // Data is borrowed until the next Poll. Term is inline so events never retain
@@ -47,6 +48,7 @@ const (
 type Event struct {
 	Kind          EventKind
 	Data          []byte
+	Command       []byte
 	Term          [64]byte
 	TermLen       uint8
 	Rows, Columns uint32
@@ -56,6 +58,8 @@ type backend interface {
 	Feed([]byte) (int, error)
 	Poll() (Event, error)
 	Write([]byte) (int, error)
+	WriteStderr([]byte) (int, error)
+	ConsumeInput(uint32) error
 	Exit(uint32) error
 	Close() error
 	User() string
@@ -65,7 +69,7 @@ type backend interface {
 type Server struct{ backend backend }
 
 func New(conn net.Conn, cfg Config) (*Server, error) {
-	if conn == nil || !remoteapi.ValidUsername([]byte(cfg.Username)) || len(cfg.HostPublicKey) != ed25519.PublicKeySize || cfg.SignHost == nil || len(cfg.AuthorizedKeys) == 0 || len(cfg.AuthorizedKeys) > 64 || len(cfg.Banner) > 1024 || cfg.MaxAuthAttempts < 1 || cfg.MaxAuthAttempts > 10 {
+	if conn == nil || !remoteapi.ValidUsername([]byte(cfg.Username)) || len(cfg.HostPublicKey) != ed25519.PublicKeySize || cfg.SignHost == nil || len(cfg.AuthorizedKeys) > 64 || len(cfg.Banner) > 1024 || cfg.MaxAuthAttempts < 1 || cfg.MaxAuthAttempts > 10 {
 		return nil, ErrConfig
 	}
 	for _, key := range cfg.AuthorizedKeys {
@@ -79,12 +83,14 @@ func New(conn net.Conn, cfg Config) (*Server, error) {
 	}
 	return &Server{backend: b}, nil
 }
-func (s *Server) Handshake() error            { return s.backend.Handshake() }
-func (s *Server) Feed(b []byte) (int, error)  { return s.backend.Feed(b) }
-func (s *Server) Poll() (Event, error)        { return s.backend.Poll() }
-func (s *Server) Write(b []byte) (int, error) { return s.backend.Write(b) }
-func (s *Server) Exit(status uint32) error    { return s.backend.Exit(status) }
-func (s *Server) Close() error                { return s.backend.Close() }
-func (s *Server) User() string                { return s.backend.User() }
-func (s *Server) NeedInput() int              { return s.backend.NeedInput() }
-func (s *Server) KeyExchangePending() bool    { return s.backend.KeyExchangePending() }
+func (s *Server) Handshake() error                  { return s.backend.Handshake() }
+func (s *Server) Feed(b []byte) (int, error)        { return s.backend.Feed(b) }
+func (s *Server) Poll() (Event, error)              { return s.backend.Poll() }
+func (s *Server) Write(b []byte) (int, error)       { return s.backend.Write(b) }
+func (s *Server) ConsumeInput(n uint32) error       { return s.backend.ConsumeInput(n) }
+func (s *Server) WriteStderr(b []byte) (int, error) { return s.backend.WriteStderr(b) }
+func (s *Server) Exit(status uint32) error          { return s.backend.Exit(status) }
+func (s *Server) Close() error                      { return s.backend.Close() }
+func (s *Server) User() string                      { return s.backend.User() }
+func (s *Server) NeedInput() int                    { return s.backend.NeedInput() }
+func (s *Server) KeyExchangePending() bool          { return s.backend.KeyExchangePending() }

@@ -101,7 +101,8 @@ func run(args []string) error {
 	if len(args) != 5 {
 		return errors.New("usage: tlscompat SOURCE_GOROOT PREPARED_TINYGOROOT EMPTY_OUTPUT_GOROOT SYSRAND_ADAPTER TLS_CACHE_ADAPTER")
 	}
-	for _, path := range []string{args[1], args[2]} {
+	args = append([]string(nil), args...)
+	for index, path := range args[1:3] {
 		abs, err := filepath.Abs(path)
 		if err != nil {
 			return err
@@ -114,9 +115,10 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !compatroot.Allowed(real) {
-			return errors.New("prepared and output roots must be real directories under /Volumes/Data/tmp or GoOS build output")
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || real != abs || !compatroot.Allowed(real) {
+			return errors.New("prepared and output roots must be real directories under the GoOS build directory")
 		}
+		args[index+1] = real
 	}
 	return prepare(args[0], args[1], args[2], args[3], args[4], pins{Conn: connPin, Cache: cachePin, Rand: randPin, Messages: messagesPin, Verify: verifyPin, Defaults: defaultsPin})
 }

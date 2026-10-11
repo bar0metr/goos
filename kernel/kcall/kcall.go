@@ -63,7 +63,7 @@ const (
 	OperationVMDiscard
 	OperationVMQuery
 	// OperationMemoryCreate creates a shared-memory object and
-	// OperationHandleDuplicate a narrower copy of a memory handle (ADR 0107).
+	// OperationHandleDuplicate a narrower copy of a memory or stream handle (ADR 0107).
 	OperationMemoryCreate
 	OperationHandleDuplicate
 	OperationClockNow
@@ -90,6 +90,8 @@ const (
 	OperationRandomRead
 	// OperationPowerOffReady checks ACPI S5 support with system authority.
 	OperationPowerOffReady
+	// OperationLogReadSequence copies an absolute-sequence structured snapshot.
+	OperationLogReadSequence
 )
 
 // MaxRandomRead bounds one RandomRead.
@@ -160,6 +162,7 @@ type Handler interface {
 	ClockReadNanos(address uint64, length uint64) Status
 	LogWrite(device uint64, address uint64, length uint64) Status
 	LogRead(device uint64, index uint64, address uint64) Status
+	LogReadSequence(device uint64, cursor uint64, address uint64) Status
 	HandleInfo(slot uint64, address uint64) Status
 	ProcessInfo(index uint64, address uint64) Status
 	SystemReset(device uint64) Status
@@ -275,6 +278,8 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.LogWrite(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationLogReadSequence:
+		return Result{Status: handler.LogReadSequence(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationLogRead:
 		return Result{Status: handler.LogRead(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationHandleInfo:
@@ -502,10 +507,13 @@ const MaxStartupSize = 64 << 10
 // object. Userspace performs the typed receive/read/wait operation after the
 // returned ready mask identifies the objects whose state changed.
 const (
-	WaitAnyMaxObjects      = 64
-	WaitAnyInterestSize    = uint64(16)
-	WaitAnyResultSize      = uint64(16)
-	WaitAnyInfiniteTimeout = ^uint64(0)
+	WaitAnyMaxObjects   = 64
+	WaitAnyInterestSize = uint64(16)
+	// The high count bit opts into interests with an absolute log cursor.
+	WaitAnyCursorFlag         = uint64(1) << 63
+	WaitAnyCursorInterestSize = uint64(24)
+	WaitAnyResultSize         = uint64(16)
+	WaitAnyInfiniteTimeout    = ^uint64(0)
 )
 
 type WaitEvent uint64
@@ -516,4 +524,14 @@ const (
 	WaitCompleted
 	WaitPeerClosed
 	WaitInterrupt
+)
+
+// LogReadSequence returns a fixed snapshot: oldest, total, first (uint64),
+// count (uint32), gap flag (uint32), then count length-prefixed full records.
+// Gap marks First advanced to Oldest using wrapping sequence comparison.
+const (
+	LogReadMax        = 64
+	LogReadHeader     = 32
+	LogReadRecordSize = 208
+	LogReadSize       = LogReadHeader + LogReadMax*LogReadRecordSize
 )

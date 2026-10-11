@@ -12,7 +12,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "mv SOURCE TARGET",
-	Summary: "rename or move a file or directory",
+	Summary: "move file/directory",
 	MinArgs: 2,
 	MaxArgs: 2,
 	Grants:  commands.GrantVFS,

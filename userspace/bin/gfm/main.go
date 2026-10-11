@@ -34,6 +34,7 @@ var (
 	parser        terminal.Parser
 	outputStorage [4096]byte
 	inputStorage  [256]byte
+	peerGeometry  bool
 )
 
 //export userspaceMain
@@ -46,9 +47,14 @@ func run(data startup.Data) {
 	if bulk, ok = utility.NewBulk(utility.BulkSize); !ok {
 		utility.Fail(nil, "no memory for copying")
 	}
-	columns, rows, display := utility.TerminalSize(data)
+	geometry, geometryValid := utility.TerminalGeometry(data)
+	columns, rows, display := geometry.Columns, geometry.Rows, geometryValid && geometry.Display
+	peerGeometry = geometryValid && geometry.Authoritative && !geometry.Display
 	output := terminal.NewOutput(outputStorage[:], utility.Write)
 	app.Init(files{}, data.CWD(), columns, rows, display)
+	if peerGeometry {
+		app.Handle(terminal.Event{Key: terminal.KeyPosition, Column: columns, Row: rows})
+	}
 	app.SetPrograms(programs{data: data})
 	if now, status := sys.ClockNow(timekeeping.Realtime); status == kcall.StatusOK {
 		year, _, _, _, _, _ := timekeeping.CivilUTC(now.Seconds)
@@ -60,7 +66,7 @@ func run(data startup.Data) {
 	for !app.Quit() {
 		app.Render(&output)
 		utility.HeapReset(mark)
-		if app.SizeWanted() {
+		if app.SizeWanted() && !peerGeometry {
 			requestSize(&output)
 		}
 		if !readKeys(&output) {
@@ -83,10 +89,20 @@ const idleTicks = clock.TicksPerSecond
 // of input, which means the shell has gone.
 func readKeys(output *terminal.Output) bool {
 	for {
-		status, count := utility.ReadInputWithin(inputStorage[:], idleTicks)
+		deadline := uint64(idleTicks)
+		if peerGeometry {
+			deadline = kcall.WaitAnyInfiniteTimeout
+		}
+		status, count, geometry, resized := utility.ReadTerminalWithin(inputStorage[:], deadline)
+		if resized {
+			app.Handle(terminal.Event{Key: terminal.KeyPosition, Column: geometry.Columns, Row: geometry.Rows})
+			if count == 0 {
+				return true
+			}
+		}
 		if count == 0 {
 			if status == uint64(kcall.StatusResourceExhausted) {
-				if app.FollowsTerminal() {
+				if app.FollowsTerminal() && !peerGeometry {
 					requestSize(output)
 				}
 				continue
@@ -97,7 +113,7 @@ func readKeys(output *terminal.Output) bool {
 			return false
 		}
 		for _, value := range inputStorage[:count] {
-			if event, ok := parser.Feed(value); ok {
+			if event, ok := parser.Feed(value); ok && (!peerGeometry || event.Key != terminal.KeyPosition) {
 				app.Handle(event)
 			}
 		}

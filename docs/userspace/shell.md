@@ -48,15 +48,20 @@ its prompt. Editing, echo and the control keys belong to the terminal service
 words in it is bounded only by its length (ADR 0109). Runtime allocation
 remains confined to the fixed userspace arena.
 
-The built-ins are `help`, `clear`, `cd`, `services`, `handles`, `caps`,
-`config`, `hosts`, `log`, `jobs`, `kill`, `reboot`, `diag`, and `time`. Every command,
-builtin or executable, is documented in one table in `userspace/shell`: `help`
-lists them with a summary, `help NAME` and `NAME --help` print the synopsis, and
-a command given the wrong number of arguments prints `usage: ...` instead of
-running (ADR 0079). `services` and `reboot` are requests to PID 1
-over the control protocol on the exec channel. `handles` and `caps` list the
-shell's own handle table, raw and under its startup names. `log` prints the
-system log (ADRs 0059 and 0061). `config` and `hosts` use the shell's
+The 16 shell built-ins are `help`, `clear`, `cd`, `services`, `handles`,
+`caps`, `config`, `hosts`, `log`, `jobs`, `kill`, `reboot`, `poweroff`, `exit`,
+`diag`, and `time`. They are a static shell table. `help` prints that table and
+the currently installed command index; `help NAME` first recognizes a builtin
+and otherwise looks up the executable's build-time manifest. `NAME --help`
+prints the same synopsis for either kind. The dynamic executable index is
+`/system/commands` in normal mode and `/bootstrap/commands` in recovery, so it
+tracks the commands that the selected system tree actually contains rather than
+a second handwritten shell list. A command given the wrong number of arguments
+prints `usage: ...` instead of running (ADR 0079).
+
+`services`, `reboot`, and `poweroff` are requests to PID 1 over the control
+protocol on the exec channel. `handles` and `caps` list the shell's own handle
+table, raw and under its startup names. `config` and `hosts` use the shell's
 configuration session: `hosts` lists the hosts table, and `hosts get NAME`,
 `hosts set IPV4 NAME` and `hosts remove NAME` read and change one record
 ([configuration](configuration.md#hosts)). `diag`, in a `goos_diag` build, asks PID 1 to
@@ -148,11 +153,21 @@ cannot run in the background. A foreground command has no reply time limit
 `kill %N` (or `kill N`) stops one; the job is then reported as `[N] killed`.
 Ctrl-C stops the foreground command and prints `^C`, and at the prompt it
 clears the line being typed (ADR 0067). A line typed while a command runs is
-that command's input; Ctrl-D ends it. Typing ahead of a command that does not
-read keeps the text for the next prompt (ADR 0082).
+that command's input; Ctrl-D ends that input. At an idle prompt, `exit` and
+Ctrl-D end only an SSH remote shell session. The local serial and framebuffer
+shells refuse `exit` and ignore prompt EOF, so their supervisory shell remains
+available. Typing ahead of a command that does not read keeps the text for the
+next prompt (ADR 0082).
 
-The shell is `restart: always` and restarts independently of the terminal
-service (ADR 0089). When the terminal service dies, the shell keeps running —
+For `reboot` or `poweroff`, PID 1 synchronizes storage first. A local request
+then performs the machine operation normally. For a request from an SSH shell,
+PID 1 returns acceptance, the shell flushes its SSH-bound output and exits, and
+the remote worker drains and closes the SSH transport before the machine action.
+PID 1 allows that close a bounded three-second grace period; it proceeds when
+the worker releases the connection or that period expires.
+
+The local supervised shell is `restart: always` and restarts independently of
+the terminal service (ADR 0089). When the terminal service dies, the shell keeps running —
 its jobs, its working directory, its output, which waits in the terminal's
 stream — and takes the new terminal's session from PID 1 as a notice on its exec
 channel, then asks for its next line through it. When the shell itself dies, its
@@ -177,6 +192,95 @@ it` — and exits with status 2. A command PID 1 cannot start is reported by the
 name of the stage that failed, `NAME: command not found`, even inside a pipeline
 (ADR 0079). `uptime` prints `up H:MM:SS` and `mem` prints total, used and free
 memory in binary units.
+
+## Log
+
+`log [-f] [-n N] [--level debug|info|warn|error] [--component NAME]` reads the
+64-record system ring. Options may be ordered freely but may occur only once.
+`--level` and `--component` are exact structured-field filters, not text
+searches; a component name is 1 through 16 ASCII letters, digits, hyphens,
+underscores, or dots. `-n N` is a decimal count, clamped to the ring capacity.
+Without `-n`, `log` selects all retained matching records. It selects the newest
+matches from one snapshot, then emits those selected records in chronological
+order.
+
+```text
+goos> log --component remoted --level warn -n 20
+goos> log --component remoted -f
+goos> log --component remoted
+```
+
+`log` is a builtin and cannot be a pipeline stage. Use an external command such
+as `cat /state/system.log | grep remoted` when text-pipeline processing is what
+you need. With `-f`, the initial snapshot follows the same selection rule and
+subsequent matching records arrive from an independent log cursor. The shell blocks on the log cursor and
+terminal input together; it does not poll. If the cursor falls behind the ring,
+it reports the number of overwritten records and resumes at the oldest retained
+record. Following requires an interactive terminal, and Ctrl-C stops it with
+status 130.
+
+## Native administration commands
+
+These native executables are in the dynamic command index, so `help NAME` and
+`NAME --help` expose the installed manifest. Except where stated otherwise,
+usage, input, traversal, and I/O failures exit with status 2.
+
+- `head [-n N] FILE` writes the first `N` logical lines; `N` is a decimal
+  `uint64`, defaulting to 10. It scans at most 64 MiB. `head -n 3 /state/system.log`
+  is a bounded file read; it has no follow mode.
+- `tail [-n N] FILE` writes the last `N` logical lines, with the same decimal
+  count, default, and 64 MiB limit **per pass**. It first counts lines and then
+  rescans the file. A size or line-count change between passes is detected and
+  reported, but same-size edits can appear in the output: this is not an atomic
+  snapshot. `tail -n 20 /state/system.log` has no `-f` form.
+- `grep [-i] PATTERN [FILE]` prints literal matching lines. Without `FILE` it
+  reads standard input; `-i` folds ASCII case only. Patterns are at most 256
+  bytes, retained lines at most 8192 bytes, and input at most 64 MiB. It exits
+  0 on one or more matches, 1 on no match, and 2 on usage or input failure.
+  `echo needle | grep match` is valid and returns 1; `cat /state/system.log |
+  grep remoted` searches external file content.
+- `wc [-l|-w|-c] [FILE]` reads `FILE` or standard input and reports LF line,
+  ASCII-whitespace-delimited word, and byte counts in that order by default.
+  One option chooses one count. Input is limited to 64 MiB. For example,
+  `wc -l /state/system.log` prints just the LF-line count.
+- `find PATH [-name NAME]` writes the starting path and descendants. `-name`
+  is an exact basename match, not a glob; `NAME` must not contain slash or NUL.
+  Traversal is limited to depth 16, 4096 nodes, 4096-byte paths, and 1024-byte
+  names. `find /notes` walks that tree.
+- `hexdump FILE` writes fixed GoOS rows of 16 bytes with offset, hexadecimal,
+  and ASCII fields. It reads at most 64 MiB: `hexdump /state/system.log`.
+- `hostname [NAME]` prints the durable typed `system.hostname` setting, or
+  persists `NAME`. A name is an ASCII label of 1 through 63 letters, digits, or
+  hyphens, with no leading or trailing hyphen; the default is `goos`. Run
+  `hostname` to read it.
+- `date [-u]` prints the realtime clock as a fixed UTC
+  `YYYY-MM-DDTHH:MM:SSZ` timestamp. GoOS has no timezone database; `date -u`
+  is the accepted explicit UTC form. Years outside 0000 through 9999 fail.
+
+## Non-PTY SSH command execution
+
+Set up keys, the listener, and host-key verification through
+[Native SSH access](../development/remote-access.md); this section describes
+execution only. Use `-T` to request a command without a PTY:
+
+```sh
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS uname
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'net status'
+ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'echo one; echo two'
+printf 'needle\nother\n' | ssh -T -i ~/.ssh/id_ed25519 user@GOOS_ADDRESS 'grep needle'
+```
+
+The request uses the same native parser as an interactive shell, not `/bin/sh -c`.
+Its 4096-byte command line, sequences, pipelines, redirections, quoting, and
+escaping therefore have the same limits and meanings. Quoted literals are
+allowed. An unquoted, unescaped background `&` rejects the complete request
+before any command runs; a quoted or escaped `&` is data. A PTY request combined
+with exec is also rejected.
+
+SSH stdin, stdout, and stderr remain separate native streams. Input EOF closes
+only stdin. GoOS drains stdout and stderr, sends the native exit status, and
+then closes the SSH command channel. The one-shot command has no prompt,
+banner, echo, or terminal newline conversion.
 
 ## Network commands
 

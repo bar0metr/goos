@@ -2,6 +2,7 @@
 package wait
 
 import (
+	"goos/internal/logfmt"
 	"goos/kernel/deadline"
 	"goos/kernel/lock"
 	"goos/kernel/sched"
@@ -22,6 +23,7 @@ const (
 	// sides, so a reader waits on it the way it waits on anything else instead
 	// of polling the device.
 	KindConsole
+	KindLog
 )
 
 type Event uint8
@@ -45,6 +47,7 @@ type Key struct {
 type Entry struct {
 	Key    Key
 	Events Event
+	Cursor uint64 // next absolute record sequence, only for KindLog
 }
 
 type Completion struct {
@@ -139,12 +142,12 @@ func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint6
 	return true
 }
 
-func (table *Table) publishHeld(key Key, event Event, output []Completion) int {
+func (table *Table) publishHeld(key Key, event Event, total uint64, output []Completion) int {
 	if !validKey(key) || event == 0 || event&^allEvents != 0 {
 		return 0
 	}
 	completed := 0
-	for slot := range table.operations {
+	for slot := range table.operations[:] {
 		op := &table.operations[slot]
 		if (!op.active && !op.complete) || op.timedOut {
 			continue
@@ -153,7 +156,7 @@ func (table *Table) publishHeld(key Key, event Event, output []Completion) int {
 		for index := 0; index < int(op.count); index++ {
 			entry := op.entries[index]
 			ready := entry.Events & event
-			if entry.Key == key && ready != 0 {
+			if entry.Key == key && ready != 0 && (key.Kind != KindLog || logfmt.SequenceBefore(entry.Cursor, total)) {
 				op.readyEvents[index] |= ready
 				matched = true
 			}
@@ -201,7 +204,7 @@ func (table *Table) cancelHeld(task sched.TaskID) bool {
 	if op.active {
 		table.deactivate(op)
 	}
-	*op = operation{}
+	resetOperation(op)
 	return true
 }
 
@@ -215,7 +218,7 @@ func (table *Table) takeHeld(task sched.TaskID) (Completion, bool) {
 		return Completion{}, false
 	}
 	result := completion(op)
-	*op = operation{}
+	resetOperation(op)
 	return result, true
 }
 
@@ -263,11 +266,12 @@ func (table *Table) countHeld() int { return table.active }
 func (table *Table) registrationCountHeld() int { return table.registered }
 
 func validEntry(entry Entry) bool {
-	return validKey(entry.Key) && entry.Events != 0 && entry.Events&^allEvents == 0
+	return validKey(entry.Key) && entry.Events != 0 && entry.Events&^allEvents == 0 &&
+		(entry.Key.Kind == KindLog && entry.Events == Readable || entry.Key.Kind != KindLog && entry.Cursor == 0)
 }
 
 func validKey(key Key) bool {
-	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindConsole {
+	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindLog {
 		return false
 	}
 	if (key.Kind == KindChannel || key.Kind == KindStream) && key.Side > 1 {
@@ -287,7 +291,7 @@ func (table *Table) Begin(task sched.TaskID, entries []Entry, deadline uint64) b
 
 func (table *Table) Publish(key Key, event Event, output []Completion) int {
 	table.take()
-	result := table.publishHeld(key, event, output)
+	result := table.publishHeld(key, event, 0, output)
 	table.lock.Unlock()
 	return result
 }
@@ -335,4 +339,41 @@ func (table *Table) RegistrationCount() int {
 	result := table.registrationCountHeld()
 	table.lock.Unlock()
 	return result
+}
+
+// PublishLog wakes only readers behind total. Call it after releasing the ring
+// lock; the wait table never nests the log lock inside its own lock.
+func (table *Table) PublishLog(object, total uint64, output []Completion) int {
+	table.take()
+	result := table.publishHeld(Key{Kind: KindLog, Object: object}, Readable, total, output)
+	table.lock.Unlock()
+	return result
+}
+
+// resetOperation clears in place rather than materializing a large literal.
+func resetOperation(op *operation) {
+	op.task, op.deadline, op.count = 0, 0, 0
+	op.active, op.complete, op.timedOut = false, false, false
+	clear(op.entries[:])
+	clear(op.readyEvents[:])
+}
+
+// Inspect copies diagnostics into caller-owned storage, avoiding a large
+// returned value/literal in the freestanding kernel. At remains compatible.
+func (table *Table) Inspect(slot int, target *View) bool {
+	if target == nil || slot < 0 || slot >= len(table.operations) {
+		return false
+	}
+	table.take()
+	op := &table.operations[slot]
+	if !op.active && !op.complete {
+		table.lock.Unlock()
+		return false
+	}
+	target.Task, target.Deadline, target.Count = op.task, op.deadline, int(op.count)
+	target.Active, target.Complete, target.TimedOut = op.active, op.complete, op.timedOut
+	copy(target.Entries[:], op.entries[:])
+	copy(target.Ready[:], op.readyEvents[:])
+	table.lock.Unlock()
+	return true
 }

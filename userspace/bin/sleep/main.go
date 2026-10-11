@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "sleep SECONDS",
-	Summary: "wait for SECONDS (up to three decimals)",
+	Summary: "wait SECONDS (3 decimal places)",
 	MinArgs: 1,
 	MaxArgs: 1,
 }
