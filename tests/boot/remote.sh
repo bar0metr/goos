@@ -8,7 +8,7 @@ for tool in python3 ssh ssh-keygen ssh-keyscan qemu-system-x86_64 go; do
 done
 read -r _hz _diag validation _opt _variant <build/config/build
 [ "$validation" = 1 ] || { echo 'remote: VALIDATION=1 build required' >&2; exit 2; }
-work=$(mktemp -d /Volumes/Data/tmp/goos-remote-test.XXXXXX)
+work=$(go run ./tools/scratch goos-remote-test.)
 printf 'remote report: %s\n' "$work"
 # This host-only probe asks for forbidden SSH messages with want-reply=true.
 # OpenSSH remains the interoperability, authentication and terminal client.

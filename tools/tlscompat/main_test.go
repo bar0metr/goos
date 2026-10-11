@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"goos/internal/testscratch"
 )
 
 func write(t *testing.T, path string, data []byte) {
@@ -27,7 +29,7 @@ type fixture struct {
 
 func setup(t *testing.T) fixture {
 	t.Helper()
-	root := t.TempDir()
+	root := testscratch.TempDir(t, "goos-tlscompat-")
 	f := fixture{source: filepath.Join(root, "go"), tinygo: filepath.Join(root, "tinygo"), output: filepath.Join(root, "output"), rand: filepath.Join(root, "random.go"), cache: filepath.Join(root, "cache.go")}
 	conn := []byte("// Copyright fixture\n\npackage tls\n" + cancellationBlock)
 	cache := []byte("// Copyright fixture\n\npackage tls\n")
@@ -252,5 +254,25 @@ func TestCandidateDepthGuard(t *testing.T) {
 		if _, err := patchVerify(bad); err == nil {
 			t.Fatal("invalid or repatched verify source accepted")
 		}
+	}
+}
+
+func TestRunRejectsLinkedOutputAncestor(t *testing.T) {
+	root := testscratch.TempDir(t, "goos-linked-output-")
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(real, "output"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(link, "output")
+	if err := run([]string{"unused-source", output, output, "unused-rand", "unused-cache"}); err == nil || !strings.Contains(err.Error(), "GoOS build directory") {
+		t.Fatalf("linked output ancestor accepted: %v", err)
+	}
+	entries, err := os.ReadDir(real)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("linked target changed: %v: %v", entries, err)
 	}
 }

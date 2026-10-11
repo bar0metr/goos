@@ -1,8 +1,7 @@
 #!/bin/sh
 # Build the pinned scheduler-free SSH backend in private toolchain roots.
 set -eu
-mkdir -p build/sshcompat
-work=$(mktemp -d "$PWD/build/sshcompat/toolchain.XXXXXX")
+work=$(go run ./tools/scratch goos-ssh-build.)
 source_go=$(go env GOROOT)
 source_tinygo=$(tinygo env TINYGOROOT)
 # go mod download verifies the zip against go.sum and the Go checksum database.

@@ -7,14 +7,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"goos/internal/testscratch"
 )
 
 func TestNativeKeyCachePrivateRootAndStatelessLifetime(t *testing.T) {
-	root, err := os.MkdirTemp("/Volumes/Data/tmp", "goos-keycache-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(root)
+	root := testscratch.TempDir(t, "goos-keycache-test-")
 	output := filepath.Join(root, "go")
 	directory := filepath.Join(output, filepath.Dir(keyCachePath))
 	if err := os.MkdirAll(directory, 0755); err != nil {
@@ -86,11 +84,7 @@ func TestLifetime(t *testing.T){
 
 func keyCacheFixture(t *testing.T) (string, string, []byte) {
 	t.Helper()
-	directory, err := os.MkdirTemp("/Volumes/Data/tmp", "goos-keycache-security-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(directory) })
+	directory := testscratch.TempDir(t, "goos-keycache-security-")
 	output := filepath.Join(directory, "go")
 	if err := os.MkdirAll(filepath.Join(output, filepath.Dir(keyCachePath)), 0755); err != nil {
 		t.Fatal(err)

@@ -227,7 +227,7 @@ $(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe t
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
 
-TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go tinygo/runtime/*.txt) tools/build-tls.sh
+TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tools/scratch/*.go tinygo/runtime/*.txt) tools/build-tls.sh
 $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) sh tools/build-tls.sh $@ ./userspace/bin/$* '$(BUILD_TAGS)' $(OPT)
@@ -549,18 +549,22 @@ test-network:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) tests/boot/network.sh $(ISO) $(OVMF_CODE)
 
-# Crypto feasibility reports stay outside the checkout. A failed dependency
+# Crypto feasibility reports stay in ignored build scratch output. A failed dependency
 # does not prevent native execution of the independently built probes.
 CRYPTO_WORK ?=
 CRYPTO_COMPAT ?= 0
 .PHONY: crypto-check test-crypto
 crypto-check:
-	@work='$(CRYPTO_WORK)'; [ -n "$$work" ] || work=$$(mktemp -d /Volumes/Data/tmp/goos-crypto.XXXXXX); \
+	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
+		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
+	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
 	$(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) sh tools/crypto-check.sh "$$work"
 
 test-crypto:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1
-	@work='$(CRYPTO_WORK)'; [ -n "$$work" ] || work=$$(mktemp -d /Volumes/Data/tmp/goos-crypto.XXXXXX); \
+	@set -eu; work='$(CRYPTO_WORK)'; if [ -z "$$work" ]; then \
+		work=$$($(BUILD_ENV) go run ./tools/scratch goos-crypto.); \
+	fi; mkdir -p "$$work"; work=$$(cd "$$work" && pwd -P); \
 	status=0; $(BUILD_ENV) BUILD_TAGS='$(BUILD_TAGS) goos_validation' OPT=$(OPT) CRYPTO_COMPAT=$(CRYPTO_COMPAT) sh tools/crypto-check.sh "$$work" || status=1; \
 	MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/crypto.sh "$$work" $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system || status=1; \
 	exit $$status

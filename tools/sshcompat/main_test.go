@@ -8,7 +8,10 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"goos/internal/testscratch"
 )
 
 func TestReplacementFailsClosed(t *testing.T) {
@@ -46,17 +49,13 @@ func TestPinnedGenerationReproducible(t *testing.T) {
 	if source == "" {
 		t.Skip("set SSHCOMPAT_TEST_SOURCE to checksum-verified v0.53.0 module")
 	}
-	base, err := os.MkdirTemp("/Volumes/Data/tmp", "goos-sshcompat-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(base)
+	base := testscratch.TempDir(t, "goos-sshcompat-test-")
 	outputs := []string{filepath.Join(base, "one"), filepath.Join(base, "two")}
 	for _, output := range outputs {
-		if err = os.Mkdir(output, 0700); err != nil {
+		if err := os.Mkdir(output, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err = run([]string{source, output, "."}); err != nil {
+		if err := run([]string{source, output, "."}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -86,20 +85,36 @@ func TestPinnedGenerationReproducible(t *testing.T) {
 	}
 }
 func TestMismatchLeavesOutputEmpty(t *testing.T) {
-	base, err := os.MkdirTemp("/Volumes/Data/tmp", "goos-sshcompat-reject-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(base)
+	base := testscratch.TempDir(t, "goos-sshcompat-reject-")
 	source := filepath.Join(base, "source")
 	output := filepath.Join(base, "output")
 	os.Mkdir(source, 0700)
 	os.Mkdir(output, 0700)
-	if err = run([]string{source, output, "."}); err == nil {
+	if err := run([]string{source, output, "."}); err == nil {
 		t.Fatal("unverified source accepted")
 	}
 	entries, err := os.ReadDir(output)
 	if err != nil || len(entries) != 0 {
 		t.Fatal("failed generation changed output")
+	}
+}
+
+func TestRunRejectsLinkedOutputAncestor(t *testing.T) {
+	root := testscratch.TempDir(t, "goos-linked-output-")
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(real, "output"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(link, "output")
+	if err := run([]string{"unused-source", output, "unused-adapters"}); err == nil || !strings.Contains(err.Error(), "GoOS build directory") {
+		t.Fatalf("linked output ancestor accepted: %v", err)
+	}
+	entries, err := os.ReadDir(real)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("linked target changed: %v: %v", entries, err)
 	}
 }

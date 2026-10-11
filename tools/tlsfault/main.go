@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"goos/tools/internal/compatroot"
 )
 
 const goVersion = "go1.25.5"
@@ -55,7 +57,7 @@ func prepare(source, output, wantSource string) error {
 	if err != nil {
 		return err
 	}
-	output, err = realTmpDir(output)
+	output, err = realBuildDir(output)
 	if err != nil {
 		return err
 	}
@@ -144,13 +146,13 @@ func realSourceDir(path string) (string, error) {
 	return real, nil
 }
 
-func realTmpDir(path string) (string, error) {
+func realBuildDir(path string) (string, error) {
 	real, err := realSourceDir(path)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(real, "/Volumes/Data/tmp/") {
-		return "", errors.New("output GOROOT must be a real directory under /Volumes/Data/tmp")
+	if !compatroot.Allowed(real) {
+		return "", errors.New("output GOROOT must be a real directory under the GoOS build directory")
 	}
 	return real, nil
 }

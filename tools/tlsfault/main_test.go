@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"goos/internal/testscratch"
 )
 
 func write(t *testing.T, path, data string) {
@@ -21,11 +23,7 @@ func write(t *testing.T, path, data string) {
 
 func fixture(t *testing.T) (source, output, original string) {
 	t.Helper()
-	root, err := os.MkdirTemp("/Volumes/Data/tmp", "tlsfault-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(root) })
+	root := testscratch.TempDir(t, "tlsfault-test-")
 	source, output = filepath.Join(root, "source"), filepath.Join(root, "output")
 	if err := os.MkdirAll(source, 0o755); err != nil {
 		t.Fatal(err)

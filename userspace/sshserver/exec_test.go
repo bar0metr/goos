@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"goos/internal/testscratch"
 )
 
 func TestOpenSSHExecBinaryStreamsAndStatus(t *testing.T) {
@@ -31,11 +33,7 @@ func TestOpenSSHExecBinaryStreamsAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("/Volumes/Data/tmp", "goos-ssh-exec-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := testscratch.TempDir(t, "goos-ssh-exec-")
 	keyPath := filepath.Join(dir, "identity")
 	if err = os.WriteFile(keyPath, pem.EncodeToMemory(block), 0600); err != nil {
 		t.Fatal(err)
