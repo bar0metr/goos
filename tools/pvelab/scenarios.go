@@ -174,6 +174,7 @@ type Session struct {
 	StartRetained   func(context.Context) error
 	EvidenceDir     string
 	HostRunner      commandRunner
+	HostPTYRunner   commandRunner
 	OpenTerminal    terminalFactory
 	logf            func(string, ...any)
 }

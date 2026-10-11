@@ -60,7 +60,33 @@ func (b *limitedOutput) result() (string, error) {
 }
 
 func runHostCommand(ctx context.Context, name string, args ...string) (commandResult, error) {
+	return runHostCommandInput(ctx, name, nil, nil, args...)
+}
+
+func runHostPTYCommand(ctx context.Context, name string, args ...string) (commandResult, error) {
+	master, slave, err := openHostPTY()
+	if err != nil {
+		return commandResult{Status: -1}, err
+	}
+	defer master.Close()
+	defer slave.Close()
+	if err := rawHostPTY(slave); err != nil {
+		return commandResult{Status: -1}, err
+	}
+	if err := unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: 24, Col: 80}); err != nil {
+		return commandResult{Status: -1}, err
+	}
+	return runHostCommandInput(ctx, name, slave, append(os.Environ(), "TERM=xterm"), args...)
+}
+
+func runHostCommandInput(ctx context.Context, name string, input *os.File, environment []string, args ...string) (commandResult, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if input != nil {
+		cmd.Stdin = input
+	}
+	if environment != nil {
+		cmd.Env = environment
+	}
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr limitedOutput
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

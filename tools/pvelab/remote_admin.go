@@ -288,7 +288,11 @@ func (remoteAdminScenario) Run(ctx context.Context, s *Session) (result Result, 
 	if err := check("exec-pty-rejected", func() (string, error) {
 		requestCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 		defer stop()
-		out, err := client.run(requestCtx, "ssh", client.args(true, "uname")...)
+		runner := s.HostPTYRunner
+		if runner == nil {
+			runner = runHostPTYCommand
+		}
+		out, err := runner(requestCtx, "ssh", client.args(true, "uname")...)
 		r.SSH = append(r.SSH, RemoteExec{Check: "exec-pty-rejected", Command: "PTY + exec uname", commandResult: out})
 		if err != nil {
 			return string(jsonIndent(out)), fail(ClassInfra, "exec-pty-rejected", err)

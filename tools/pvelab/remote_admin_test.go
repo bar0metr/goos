@@ -288,7 +288,7 @@ func newScenarioMock(t *testing.T) *scenarioMock {
 	m.terminal = &mockTerminal{scriptConsole: &scriptConsole{pending: []byte(shellPrompt)}}
 	m.s = &Session{
 		Guest: &Guest{con: con, logf: func(string, ...any) {}}, Report: &Report{RunID: "20261011T120000Z-01234567", VM: VMInfo{NetBridge: "vmbr0"}},
-		EvidenceDir: dir, KeepRunning: true, HostRunner: m.run,
+		EvidenceDir: dir, KeepRunning: true, HostRunner: m.run, HostPTYRunner: m.run,
 		PowerState: func(context.Context) (string, error) {
 			m.events = append(m.events, "state:"+m.power)
 			return m.power, nil
