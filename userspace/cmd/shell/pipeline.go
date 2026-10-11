@@ -135,12 +135,12 @@ func commandPath(word []byte, target *[execproto.MaxPath]byte) ([]byte, bool) {
 func writeSink(builder *execproto.Builder, encodedTarget []byte, appendMode bool, index int) bool {
 	target, parsed := shellcmd.ParseInvocation(encodedTarget, &argumentStorage)
 	if !parsed || target.Count != 1 {
-		write("exec: invalid redirection\n")
+		writeError("exec: invalid redirection\n")
 		return false
 	}
 	writePath, ok := searchCommand([]byte("write"), &executableBuffers[index])
 	if !ok {
-		write("exec: invalid redirection\n")
+		writeError("exec: invalid redirection\n")
 		return false
 	}
 	arguments := [][]byte{[]byte("write"), target.Arguments[0]}
@@ -202,41 +202,46 @@ func writeStream(stream handle.ID, data []byte, deadline uint64) bool {
 }
 
 func executeExternal(line []byte, background bool) {
+	commandStatus = shellcmd.StatusUsage
 	rawJob = false
 	redirects, validRedirect := shellcmd.SplitRedirections(line)
 	if !validRedirect {
-		write("exec: invalid redirection\n")
+		writeError("exec: invalid redirection\n")
 		return
 	}
 	stages, count, split := shellcmd.SplitPipeline(redirects.Command)
 	if !split {
-		write("exec: invalid pipeline\n")
+		writeError("exec: invalid pipeline\n")
 		return
 	}
 	redirectCount := redirects.Stages()
 	if count+redirectCount > execproto.MaxStages {
-		write("exec: invalid redirection\n")
+		writeError("exec: invalid redirection\n")
 		return
 	}
 	slot, ok := freeSlot(background)
 	if !ok {
-		write("exec: too many background jobs\n")
+		writeError("exec: too many background jobs\n")
 		return
 	}
-	if !refreshGeometry() {
-		write("exec: terminal geometry unavailable\n")
+	if !oneShot && !refreshGeometry() {
+		writeError("exec: terminal geometry unavailable\n")
 		return
 	}
 	correlation++
 	// Each stage is written to the slot as soon as it is parsed, so the
 	// tokenizer's storage serves every stage in turn.
-	builder := execproto.NewBuilder(execSlot(int(slot)), cwd[:cwdSize], terminalEnvironment(), background)
+	environment := [][]byte{pathVariable}
+	if !oneShot {
+		environment = terminalEnvironment()
+	}
+	builder := execproto.NewBuilder(execSlot(int(slot)), cwd[:cwdSize], environment, background)
 	stageOffset := 0
 	if len(redirects.Input) != 0 {
 		target, parsed := shellcmd.ParseInvocation(redirects.Input, &argumentStorage)
 		readPath, ok := searchCommand([]byte("cat"), &executableBuffers[0])
 		if !parsed || target.Count != 1 || !ok {
-			write("exec: invalid redirection\n")
+			writeError("exec: invalid redirection\n")
 			return
 		}
 		builder.Stage(readPath, [][]byte{[]byte("cat"), target.Arguments[0]})
@@ -246,18 +251,18 @@ func executeExternal(line []byte, background bool) {
 		requestIndex := index + stageOffset
 		invocation, parsed := shellcmd.ParseInvocation(stages[index], &argumentStorage)
 		if !parsed {
-			write("exec: invalid arguments\n")
+			writeError("exec: invalid arguments\n")
 			return
 		}
 		executable, ok := commandPath(invocation.Arguments[0], &executableBuffers[requestIndex])
 		if !ok {
-			writeBytes(invocation.Arguments[0])
-			write(": not a command name or a program path\n")
+			writeErrorBytes(invocation.Arguments[0])
+			writeError(": not a command name or a program path\n")
 			return
 		}
 		builder.Stage(executable, invocation.Arguments)
 		if count == 1 && !background && stageOffset == 0 && redirectCount == 0 {
-			rawJob = wantsRawTerminal(executable)
+			rawJob = !oneShot && wantsRawTerminal(executable)
 		}
 	}
 	nextIndex := stageOffset + count
@@ -277,14 +282,15 @@ func executeExternal(line []byte, background bool) {
 	}
 	data, ok := builder.Finish(errorSource)
 	if !ok {
-		write("exec: command too large\n")
+		writeError("exec: command too large\n")
 		return
 	}
 	request, ok := execproto.EncodeSubmit(slot, len(data), correlation)
 	if !ok {
-		write("exec: invalid request\n")
+		writeError("exec: invalid request\n")
 		return
 	}
+	flushOutput()
 	if !sendExec(request) {
 		return
 	}
@@ -296,6 +302,7 @@ func executeExternal(line []byte, background bool) {
 		write("] started\n")
 		return
 	}
+	commandStatus = shellcmd.StatusFailure
 	message, received := awaitReply(correlation, int(slot))
 	endRawJob()
 	jobs[slot].active = false
@@ -304,16 +311,24 @@ func executeExternal(line []byte, background bool) {
 		return
 	}
 	if !validReply {
-		write("exec: corrupt reply\n")
+		writeError("exec: corrupt reply\n")
 		return
 	}
 	if reply.LaunchStatus != 0 {
+		commandStatus = shellcmd.StatusCannotExecute
+		if supervisor.LaunchStatus(reply.LaunchStatus) == supervisor.LaunchNotFound {
+			commandStatus = shellcmd.StatusNotFound
+		}
 		writeLaunchFailure(int(slot), reply)
 		return
 	}
+	commandStatus = reply.ExitCode
+	if reply.ExitCode == kcall.ExitKilled {
+		commandStatus = shellcmd.StatusInterrupted
+	}
 	if reply.ExitCode == kcall.ExitKilled {
 		mark("SHELL_KILL_OK\n")
-	} else if reply.ExitCode != 0 {
+	} else if reply.ExitCode != 0 && !oneShot {
 		write("exit status: ")
 		writeUint(reply.ExitCode)
 		write("\n")
@@ -344,27 +359,28 @@ func writeLaunchFailure(slot int, reply execproto.Reply) {
 		}
 	}
 	if len(name) != 0 && status.NamesExecutable() {
-		writeBytes(name)
-		write(": ")
+		writeErrorBytes(name)
+		writeError(": ")
 	} else if len(name) != 0 {
-		write("exec: cannot start ")
-		writeBytes(name)
-		write(": ")
+		writeError("exec: cannot start ")
+		writeErrorBytes(name)
+		writeError(": ")
 	} else {
-		write("exec: cannot start: ")
+		writeError("exec: cannot start: ")
 	}
-	write(status.Reason())
-	write("\n")
+	writeError(status.Reason())
+	writeError("\n")
 }
 
 func sendExec(request ipc.Message) bool {
 	size, ok := ipc.Encode(request, wire[:])
 	if !ok {
-		write("exec: encode failed\n")
+		writeError("exec: encode failed\n")
 		return false
 	}
 	if status := sys.IPCSend(execHandle, wire[:size]); status != 0 {
-		write("exec: service unavailable\n")
+		commandStatus = shellcmd.StatusFailure
+		writeError("exec: service unavailable\n")
 		return false
 	}
 	return true

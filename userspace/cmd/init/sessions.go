@@ -36,6 +36,9 @@ type terminalSession struct {
 	// the reader survives the service, so output written while it restarts
 	// waits in the stream.
 	output [2]uint64
+	// Exec sessions have native stdin and an independent stderr stream, no GTTY.
+	input, errorOutput [2]uint64
+	execMode           bool
 	// ttyControl is PID 1's end of the terminal service's control channel,
 	// over which a restarted shell's session is handed to a running terminal.
 	ttyControl handle.ID

@@ -44,12 +44,12 @@ func injectFault(target []byte) {
 	} else if argumentIs(target, "remote-signer") {
 		service = execproto.FaultRemoteSigner
 	} else if !argumentIs(target, "tty") {
-		write("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, remote-signer or kernel-stack\n")
+		writeError("fault: tty, shell, fat32, vfs, config, log, block, driver, storage, net-driver, remote-signer or kernel-stack\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlFault, service)
 	if status, valid := execproto.DecodeControlStatus(reply); !ok || !valid || status != execproto.ControlOK {
-		write("fault: refused\n")
+		writeError("fault: refused\n")
 	}
 }
 
@@ -69,9 +69,9 @@ func printHelp(invocation shellcmd.Invocation) {
 				return
 			}
 		}
-		write("help: no such command: ")
-		writeBytes(name)
-		write("\n")
+		writeError("help: no such command: ")
+		writeErrorBytes(name)
+		writeError("\n")
 		return
 	}
 	write("Shell builtins:\n")
@@ -147,7 +147,7 @@ func printServices() {
 		reply, ok := controlExchange(execproto.ControlServices, uint8(start))
 		count, valid := execproto.DecodeServices(reply, &serviceEntries)
 		if !ok || !valid {
-			write("services: no reply\n")
+			writeError("services: no reply\n")
 			return
 		}
 		if start == 0 {
@@ -179,14 +179,14 @@ func shutDown(operation execproto.ControlOperation, name string) {
 		return
 	}
 	if !ok || reply.PayloadSize != 1 || int(reply.Payload[0]) >= len(controlStatus) || reply.Payload[0] == 0 {
-		write(name)
-		write(": no reply\n")
+		writeError(name)
+		writeError(": no reply\n")
 		return
 	}
-	write(name)
-	write(": ")
-	write(controlStatus[reply.Payload[0]])
-	write("\n")
+	writeError(name)
+	writeError(": ")
+	writeError(controlStatus[reply.Payload[0]])
+	writeError("\n")
 }
 
 // printHandles lists the shell's own handle table. With names it shows each
@@ -277,10 +277,10 @@ func argumentIs(argument []byte, expected string) bool {
 }
 
 // printLog prints the retained system log, oldest record first.
-func printLog() {
+func printLog(_ shellcmd.Invocation) uint64 {
 	for index := uint64(0); ; index++ {
 		if sys.LogRead(logHandle, index, &logLine) != kcall.StatusOK {
-			return
+			return 0
 		}
 		size := 0
 		for size < len(logLine) && logLine[size] != 0 {
@@ -325,11 +325,11 @@ func executeCd(argument []byte) {
 }
 
 func writeCdError(path []byte, reason string) {
-	write("cd: ")
-	writeBytes(path)
-	write(": ")
-	write(reason)
-	write("\n")
+	writeError("cd: ")
+	writeErrorBytes(path)
+	writeError(": ")
+	writeError(reason)
+	writeError("\n")
 }
 
 // parseUint reads a bounded decimal job number.

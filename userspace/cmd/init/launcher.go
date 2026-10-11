@@ -29,6 +29,8 @@ type launcher struct {
 	server handle.ID
 	// input is PID 1's copy of the caller's standard input.
 	input handle.ID
+	// Exec stdin belongs to its session; only private job input is owned here.
+	inputBorrowed bool
 	// child is the running child, and correlation the request it answers.
 	child       handle.ID
 	correlation uint64
@@ -152,6 +154,9 @@ func startChild(job *execJob, request execproto.Request, command []byte) supervi
 	launch := &job.launcher
 	terminal := supervisor.Endpoint{ID: handle.ID(job.session.output[1]), Type: handle.TypeStream, Shared: true}
 	streams := supervisor.Streams{Input: supervisor.Endpoint{ID: launch.input, Type: handle.TypeStream, Shared: true}, Output: terminal, Error: terminal}
+	if job.session.execMode {
+		streams.Error = supervisor.Endpoint{ID: handle.ID(job.session.errorOutput[1]), Type: handle.TypeStream, Shared: true}
+	}
 	stage := request.Stages[0]
 	var launched supervisor.LaunchStatus
 	_, launch.child, launched = launchApplication(stage.Path, command, request.CWD, stage.Arguments, request.Environment, streams, nil)
@@ -252,7 +257,7 @@ func closeLauncher(launch *launcher) {
 	if launch.server != 0 {
 		sys.HandleClose(launch.server)
 	}
-	if launch.input != 0 {
+	if launch.input != 0 && !launch.inputBorrowed {
 		sys.HandleClose(launch.input)
 	}
 	*launch = launcher{}

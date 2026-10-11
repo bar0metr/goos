@@ -111,7 +111,7 @@ func TestGoOSPumpCloseDuringRekey(t *testing.T){
  if e=drive(t,p,conn);e.Kind!=PumpClose || !p.closed || p.controlUsed!=0 || p.closePending{t.Fatalf("closed after rekey: %+v",e)}
 }
 func TestGoOSPumpDeferredWindowCredit(t *testing.T){
- out:=bytes.Buffer{};p:=&Pump{phase:1,channel:true,shell:true,localWindow:pumpWindow,control:make([]byte,PumpMaxPacket),transport:&transport{bufWriter:bufio.NewWriter(&out),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+ out:=bytes.Buffer{};p:=&Pump{phase:1,channel:true,started:true,localWindow:pumpWindow,control:make([]byte,PumpMaxPacket),transport:&transport{bufWriter:bufio.NewWriter(&out),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
  packet:=make([]byte,109);packet[0]=msgChannelData;binary.BigEndian.PutUint32(packet[5:9],100)
  e,err:=p.application(packet);if err!=nil || e.Kind!=PumpData{t.Fatal(err)}
  if out.Len()!=0 || p.localWindow!=pumpWindow-100 || p.pendingWindow!=100{t.Fatal("credit sent during KEX")}
@@ -139,7 +139,7 @@ func TestGoOSPumpRejectsUnsupportedRequests(t *testing.T){
  }
 }
 func TestGoOSPumpZeroDataAndWindowBounds(t *testing.T){
- p:=&Pump{channel:true,shell:true,localWindow:pumpWindow,peerWindow:1<<24}
+ p:=&Pump{channel:true,started:true,localWindow:pumpWindow,peerWindow:1<<24}
  packet:=[9]byte{msgChannelData};e,err:=p.application(packet[:]);if err!=nil || e.Kind!=PumpData || len(e.Data)!=0{t.Fatalf("zero data: %+v %v",e,err)}
  packet[0]=msgChannelWindowAdjust;binary.BigEndian.PutUint32(packet[5:],1);if _,err=p.application(packet[:]);err==nil{t.Fatal("oversized peer credit accepted")}
  if pumpGeometry(0,80) || pumpGeometry(24,0) || pumpGeometry(1001,80){t.Fatal("invalid geometry accepted")}
@@ -157,7 +157,61 @@ func TestGoOSPumpPingDuringRekey(t *testing.T){
  e,err:=p.application(Marshal(&pingMsg{Data:"opaque"}));if err!=nil || e.Kind!=PumpProgress || wire.Len()!=0 || p.controlUsed==0{t.Fatalf("deferred ping: %+v %v",e,err)}
  p.phase=0;if err=p.flushControl();err!=nil{t.Fatal(err)};reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};packet,err:=reader.readPacket(bufio.NewReader(&wire),false);if err!=nil{t.Fatal(err)};var pong pongMsg;if err=Unmarshal(packet,&pong);err!=nil || pong.Data!="opaque" || p.controlUsed!=0{t.Fatal("deferred pong missing",err)}
 }
-func TestGoOSPumpExecRejected(t *testing.T){p,c,conn:=testPump(t);done:=make(chan error,1);go func(){s,err:=c.NewSession();if err==nil{err=s.Start("id")};done<-err}();for handled:=0;handled<2;{e,err:=p.Poll();if err!=nil{t.Fatal(err)};if e.Kind==PumpNeedInput{b:=make([]byte,p.NeedInput());n,err:=conn.Read(b);if err!=nil{t.Fatal(err)};if _,err=p.Feed(b[:n]);err!=nil{t.Fatal(err)}}else{handled++}};select{case err:=<-done:if err==nil{t.Fatal("exec accepted")};case <-time.After(time.Second):t.Fatal("request reply missing")}}
+func TestGoOSPumpExecStreamsHalfCloseAndStatus(t *testing.T){
+ p,c,conn:=testPump(t);done:=make(chan error,1);var session *Session;var stdout,stderr io.Reader;var stdin io.WriteCloser
+ go func(){var err error;session,err=c.NewSession();if err==nil{stdout,err=session.StdoutPipe()};if err==nil{stderr,err=session.StderrPipe()};if err==nil{stdin,err=session.StdinPipe()};if err==nil{err=session.Start("echo native; wc -c")};done<-err}()
+ e:=drive(t,p,conn);if e.Kind!=PumpExec || string(e.Command)!="echo native; wc -c"{t.Fatalf("exec event: %+v",e)};if err:=<-done;err!=nil{t.Fatal(err)}
+ input:=[]byte{0,1,255,'\n','\r',3,4};go func(){_,err:=stdin.Write(input);if err==nil{err=stdin.Close()};done<-err}()
+ e=drive(t,p,conn);if e.Kind!=PumpData || !bytes.Equal(e.Data,input){t.Fatal("stdin",e)}
+ if p.localWindow!=pumpWindow-uint32(len(input)){t.Fatal("exec stdin credited before consumption")}
+ if err:=p.ConsumeInput(uint32(len(input)));err!=nil{t.Fatal(err)}
+ e=drive(t,p,conn);if e.Kind!=PumpEOF || p.closed{t.Fatal("EOF closed session",e)};if err:=<-done;err!=nil{t.Fatal(err)}
+ out:=[]byte{0,255,'o','\n'};failure:=[]byte{'e',0,255,'\n'}
+ if n,err:=p.Write(out);err!=nil || n!=len(out){t.Fatalf("stdout %d %v",n,err)}
+ if n,err:=p.WriteStderr(failure);err!=nil || n!=len(failure){t.Fatalf("stderr %d %v",n,err)}
+ got:=make([]byte,len(out));if _,err:=io.ReadFull(stdout,got);err!=nil || !bytes.Equal(got,out){t.Fatal("stdout bytes",got,err)}
+ got=make([]byte,len(failure));if _,err:=io.ReadFull(stderr,got);err!=nil || !bytes.Equal(got,failure){t.Fatal("stderr bytes",got,err)}
+ go func(){done<-session.Wait()}();if err:=p.Exit(23);err!=nil{t.Fatal(err)}
+ err:=<-done;status,ok:=err.(*ExitError);if !ok || status.ExitStatus()!=23{t.Fatalf("exit status: %v",err)}
+}
+
+func TestGoOSPumpExecRequestRejections(t *testing.T){
+ valid:=Marshal(&struct{Command string}{"echo ok"})
+ pty:=Marshal(&struct{Term string;Cols,Rows,X,Y uint32;Modes string}{"xterm",80,24,0,0,string([]byte{0})})
+ for _,test:=range []struct{name,request string;payload []byte;pty,started bool}{
+ {"malformed","exec",[]byte{0,0,0,5,'x'},false,false},
+ {"missing","exec",nil,false,false},
+ {"empty","exec",Marshal(&struct{Command string}{""}),false,false},
+ {"trailing","exec",append(append([]byte(nil),valid...),0),false,false},
+ {"oversized","exec",Marshal(&struct{Command string}{string(bytes.Repeat([]byte{'x'},4097))}),false,false},
+ {"nul","exec",Marshal(&struct{Command string}{"echo\x00oops"}),false,false},
+ {"pty then exec","exec",valid,true,false},
+ {"duplicate exec","exec",valid,false,true},
+ {"postexec shell","shell",nil,false,true},
+ {"postexec pty","pty-req",pty,false,true},
+ }{t.Run(test.name,func(t *testing.T){
+ wire:=bytes.Buffer{};p:=&Pump{channel:true,peer:7,pty:test.pty,started:test.started,transport:&transport{bufWriter:bufio.NewWriter(&wire),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+ event,err:=p.application(Marshal(&channelRequestMsg{PeersID:0,Request:test.request,WantReply:true,RequestSpecificData:test.payload}));if err!=nil || event.Kind!=PumpProgress{t.Fatalf("accepted: %+v %v",event,err)}
+ reader:=connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}};reply,err:=reader.readPacket(bufio.NewReader(&wire),false);if err!=nil || len(reply)!=5 || reply[0]!=msgChannelFailure{t.Fatalf("failure reply %x %v",reply,err)}
+ })}
+}
+
+func TestGoOSPumpExecSharedWindow(t *testing.T){
+ wire:=bytes.Buffer{};p:=&Pump{config:&ServerConfig{},ready:true,channel:true,started:true,exec:true,peerWindow:3,peerPacket:pumpData,transport:&transport{bufWriter:bufio.NewWriter(&wire),rand:rand.Reader,writer:connectionState{packetCipher:&streamPacketCipher{cipher:noneCipher{}}}}}
+ if n,err:=p.Write([]byte("out"));n!=3 || err!=nil{t.Fatal(n,err)}
+ if n,err:=p.WriteStderr([]byte("error"));n!=0 || err!=nil{t.Fatal("stderr exceeded shared window",n,err)}
+ if err:=p.ConsumeInput(1);err==nil{t.Fatal("unreceived input credited")}
+}
+
+
+func TestGoOSPumpEOFBeforeExec(t *testing.T){
+ p,c,conn:=testPump(t);done:=make(chan error,1);var session *Session
+ go func(){var err error;session,err=c.NewSession();if err==nil{var stdin io.WriteCloser;stdin,err=session.StdinPipe();if err==nil{err=stdin.Close()}};if err==nil{err=session.Start("wc -c")};done<-err}()
+ if event:=drive(t,p,conn);event.Kind!=PumpEOF {t.Fatal("initial EOF missing",event)}
+ if event:=drive(t,p,conn);event.Kind!=PumpExec || string(event.Command)!="wc -c" || !p.eof {t.Fatal("exec after EOF failed",event)}
+ if err:=<-done;err!=nil {t.Fatal(err)}
+ go func(){done<-session.Wait()}();if err:=p.Exit(0);err!=nil{t.Fatal(err)};if err:=<-done;err!=nil{t.Fatal(err)}
+}
 
 // Record the actual upstream host-sign input on initial KEX and rekey.
 type recordingHostSigner struct {

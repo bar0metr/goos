@@ -78,7 +78,14 @@ func pollExec(session *terminalSession) {
 // startPipeline starts a job whose programs are ready.
 func startPipeline(job *execJob) {
 	launchingJob = job
-	job.job = supervisor.StartPipeline(job.request, handle.ID(job.session.output[1]), nativePipelineRunner{})
+	if job.session.execMode {
+		shared := func(id uint64) supervisor.Endpoint {
+			return supervisor.Endpoint{ID: handle.ID(id), Type: handle.TypeStream, Shared: true}
+		}
+		job.job = supervisor.StartPipelineStreams(job.request, supervisor.Streams{Input: shared(job.session.input[0]), Output: shared(job.session.output[1]), Error: shared(job.session.errorOutput[1])}, nativePipelineRunner{})
+	} else {
+		job.job = supervisor.StartPipeline(job.request, handle.ID(job.session.output[1]), nativePipelineRunner{})
+	}
 	launchingJob = nil
 	releasePrepared(job)
 	// A foreground job's input is fed by the shell, which receives the writing

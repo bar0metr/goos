@@ -42,18 +42,18 @@ func killJob(argument []byte) {
 	}
 	number, ok := parseUint(argument)
 	if !ok || number == 0 || number > uint64(len(jobs)) {
-		write("kill: invalid job\n")
+		writeError("kill: invalid job\n")
 		return
 	}
 	slot := number - 1
 	if !jobs[slot].active || !jobs[slot].background {
-		write("kill: no such job\n")
+		writeError("kill: no such job\n")
 		return
 	}
 	reply, ok := controlExchange(execproto.ControlKill, uint8(slot))
 	status, valid := execproto.DecodeControlStatus(reply)
 	if !ok || !valid || status != execproto.ControlOK {
-		write("kill: job could not be stopped\n")
+		writeError("kill: job could not be stopped\n")
 		return
 	}
 	mark("SHELL_KILL_OK\n")
@@ -93,7 +93,7 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			closeInput(&input)
 			return stashed, true
 		}
-		if foreground >= 0 {
+		if foreground >= 0 && !oneShot {
 			if reading == 0 {
 				requestLine(nil)
 			}
@@ -121,13 +121,13 @@ func awaitReply(correlation uint64, foreground int) (ipc.Message, bool) {
 			continue
 		}
 		if status != 0 {
-			write("exec: service unavailable\n")
+			writeError("exec: service unavailable\n")
 			closeInput(&input)
 			return ipc.Message{}, false
 		}
 		message, valid := decodeWire()
 		if !valid {
-			write("exec: corrupt reply\n")
+			writeError("exec: corrupt reply\n")
 			closeInput(&input)
 			return ipc.Message{}, false
 		}

@@ -36,12 +36,16 @@ type remoteWorker struct {
 	fill                  pendingFill
 	opening               bool
 	requestCorrelation    uint64
+	mode                  remoteapi.ExecutionMode
+	command               []byte
+	commandSize           int
 	grace                 supervisor.RemoteGrace
 }
 
 var (
 	remoteRegistry       supervisor.RemoteRegistry
 	remoteWorkers        [remoteapi.MaxWorkers]remoteWorker
+	remoteCommands       [remoteapi.MaxWorkers][remoteapi.MaxCommand]byte
 	remoteOwner          uint64
 	remoteControl        handle.ID
 	remoteProcess        handle.ID
@@ -281,7 +285,7 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 		{Name: "signer", Handle: handle.ID(signer[1]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Write},
 	}
-	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false)
+	event, result := launchRemoteExecutable(executable, "remoted-worker", grants, false, nil)
 	if result != supervisor.LaunchOK {
 		closeOpen(handle.ID(pair[1]))
 		failRemoteOpen(worker, remoteapi.ResultUnavailable)
@@ -297,16 +301,24 @@ func launchRemoteWorker(worker *remoteWorker, executable supervisor.Executable) 
 	notifyRemoteCounts()
 }
 
-func launchRemoteExecutable(executable supervisor.Executable, name string, grants []supervisor.Capability, shell bool) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
+func launchRemoteExecutable(executable supervisor.Executable, name string, grants []supervisor.Capability, shell bool, command []byte) (supervisor.LifecycleEvent, supervisor.LaunchStatus) {
 	slot, staging := stagingSlot()
 	variables := 0
 	if shell {
 		variables = 2
 	}
-	writer := startup.NewWriter(staging, 1, variables, len(grants))
+	arguments := 1
+	if len(command) != 0 {
+		arguments = 3
+	}
+	writer := startup.NewWriter(staging, arguments, variables, len(grants))
 	writer.Command([]byte(name))
 	writer.CWD([]byte("/"))
 	writer.Argument([]byte(name))
+	if len(command) != 0 {
+		writer.Argument([]byte("-c"))
+		writer.Argument(command)
+	}
 	if shell {
 		writer.Variable([]byte("PATH"), []byte(supervisor.SearchPath(boot.Mode())))
 		writer.Variable([]byte("GOOS_SESSION"), []byte("remote"))
@@ -337,6 +349,7 @@ func pollRemoteWorker(worker *remoteWorker) {
 		closeRemoteWorker(worker)
 		return
 	}
+	defer closeMessageHandles(&message)
 	result := remoteapi.ResultInvalidArgument
 	switch request.Operation {
 	case remoteapi.OperationAuthenticate:
@@ -345,12 +358,23 @@ func pollRemoteWorker(worker *remoteWorker) {
 			notifyRemoteCounts()
 		}
 	case remoteapi.OperationOpen:
+		result = remoteRegistry.CheckOpen(worker.id, worker.owner, request.Mode, request.Geometry)
+		if result != remoteapi.ResultOK {
+			break
+		}
 		if remoteTasks()+1 > supervisor.RemoteTaskLimit {
 			result = remoteapi.ResultLimit
 			break
 		}
-		result = remoteRegistry.BeginOpen(worker.id, worker.owner, request.Geometry)
+		if request.Mode == remoteapi.ModeExec && !copyRemoteCommand(worker, &request) {
+			closeMessageHandles(&message)
+			result = remoteapi.ResultInvalidArgument
+			break
+		}
+		closeMessageHandles(&message)
+		result = remoteRegistry.BeginOpenMode(worker.id, worker.owner, request.Mode, request.Geometry)
 		if result == remoteapi.ResultOK {
+			worker.mode = request.Mode
 			worker.opening = true
 			worker.requestCorrelation = message.Correlation
 			if !beginRemoteImage(worker, []byte(supervisor.ServicePath("shell", boot.Mode()))) {
@@ -380,13 +404,18 @@ func pollRemoteWorker(worker *remoteWorker) {
 
 func replyRemote(worker *remoteWorker, operation remoteapi.Operation, result remoteapi.Result, attachments []handle.ID, requestCorrelation uint64) bool {
 	var reply ipc.Message
-	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: worker.id}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
+	mode := remoteapi.ModeTerminal
+	if operation == remoteapi.OperationOpen {
+		mode = worker.mode
+	}
+	return remoteapi.EncodeReply(&remoteapi.Reply{Operation: operation, Result: result, Session: worker.id, Mode: mode}, attachments, requestCorrelation, &reply) && sendMessage(uint64(worker.control), reply)
 }
 
 func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	session := &worker.session
+	session.execMode = worker.mode == remoteapi.ModeExec
 	var tty, exec [2]uint64
-	if !createStream(&session.output) || !createChannel(&tty) || !createChannel(&exec) {
+	if !createStream(&session.output) || !createChannel(&exec) || worker.mode == remoteapi.ModeTerminal && !createChannel(&tty) || worker.mode == remoteapi.ModeExec && (!createStream(&session.input) || !createStream(&session.errorOutput)) {
 		syslog.Warn("remote shell channel allocation failed", syslog.Uint("session", worker.id))
 		closePair(tty)
 		closePair(exec)
@@ -426,15 +455,19 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	grants := []supervisor.Capability{
 		{Name: "stdout", Handle: handle.ID(session.output[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait},
 		{Name: "log", Handle: logDeviceHandle, Type: handle.TypeDevice, Rights: capability.Read},
-		{Name: "tty", Handle: handle.ID(tty[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "vfs", Handle: files, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "exec", Handle: session.execClient, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true},
 		{Name: "execpage", Handle: page, Type: handle.TypeMemory, Rights: capability.Read | capability.Write},
 	}
+	if session.execMode {
+		grants = append(grants, supervisor.Capability{Name: "stdin", Handle: handle.ID(session.input[0]), Type: handle.TypeStream, Rights: capability.Read | capability.Wait}, supervisor.Capability{Name: "stderr", Handle: handle.ID(session.errorOutput[1]), Type: handle.TypeStream, Rights: capability.Write | capability.Wait})
+	} else {
+		grants = append(grants, supervisor.Capability{Name: "tty", Handle: handle.ID(tty[0]), Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
+	}
 	if settings != 0 {
 		grants = append(grants, supervisor.Capability{Name: "config", Handle: settings, Type: handle.TypeChannel, Rights: capability.Read | capability.Write | capability.Wait, Consume: true})
 	}
-	event, result := launchRemoteExecutable(executable, "shell", grants, true)
+	event, result := launchRemoteExecutable(executable, "shell", grants, true, worker.command[:worker.commandSize])
 	if result != supervisor.LaunchOK {
 		syslog.Warn("remote shell launch failed", syslog.Uint("status", uint64(result)), syslog.Uint("session", worker.id))
 		closeOpen(files)
@@ -446,12 +479,22 @@ func launchRemoteShell(worker *remoteWorker, executable supervisor.Executable) {
 	session.shellProcess, session.shellPID = event.ProcessHandle, event.Process
 	session.execClient = 0
 	session.active = true
-	if remoteRegistry.CommitOpen(worker.id, worker.owner) != remoteapi.ResultOK || !replyRemote(worker, remoteapi.OperationOpen, remoteapi.ResultOK, []handle.ID{worker.tty, handle.ID(session.output[0])}, worker.requestCorrelation) {
+	attachments := []handle.ID{worker.tty, handle.ID(session.output[0])}
+	if session.execMode {
+		attachments = []handle.ID{handle.ID(session.input[1]), handle.ID(session.output[0]), handle.ID(session.errorOutput[0])}
+	}
+	if remoteRegistry.CommitOpen(worker.id, worker.owner) != remoteapi.ResultOK || !replyRemote(worker, remoteapi.OperationOpen, remoteapi.ResultOK, attachments, worker.requestCorrelation) {
 		closeRemoteWorker(worker)
 		return
 	}
 	worker.tty = 0
 	session.output[0] = 0
+	if session.execMode {
+		session.input[1] = 0
+		session.errorOutput[0] = 0
+	}
+	clear(worker.command[:])
+	worker.commandSize = 0
 	worker.opening = false
 	worker.requestCorrelation = 0
 }
@@ -514,7 +557,7 @@ func releaseRemoteShell(worker *remoteWorker) uint64 {
 		code = remoteWait(session.shellProcess)
 	}
 	resources := supervisor.RemoteResources{Mapping: session.pageBase, MappingSize: session.pageSize,
-		Handles: [10]handle.ID{handle.ID(session.execServer), session.execClient, handle.ID(session.output[0]), handle.ID(session.output[1]), worker.tty, session.pageHandle}}
+		Handles: [10]handle.ID{handle.ID(session.execServer), session.execClient, handle.ID(session.output[0]), handle.ID(session.output[1]), worker.tty, session.pageHandle, handle.ID(session.input[0]), handle.ID(session.input[1]), handle.ID(session.errorOutput[0]), handle.ID(session.errorOutput[1])}}
 	if !resources.Release(nativeRemoteReleaser{}) {
 		fatal("INIT_REMOTE_RELEASE_FAILED\n")
 	}
@@ -541,6 +584,7 @@ func closeRemoteWorker(worker *remoteWorker) {
 		fatal("INIT_REMOTE_RELEASE_FAILED\n")
 	}
 	remoteRegistry.FinishClose(worker.id, worker.owner)
+	clear(worker.command)
 	*worker = remoteWorker{}
 	notifyRemoteCounts()
 }
@@ -861,4 +905,33 @@ func sendRemoteTerminalEnd(worker *remoteWorker) {
 	}
 	now, _ := sys.ClockRead()
 	worker.grace.Retry = now + 1
+}
+
+// Copy the command before unmapping or exposing it to shell startup. The
+// worker cannot smuggle a program name, grants, or mutable startup references.
+func copyRemoteCommand(worker *remoteWorker, request *remoteapi.Request) bool {
+	// Keep 4KiB buffers outside worker literals and resets on the native heap.
+	for index := range remoteWorkers {
+		if &remoteWorkers[index] == worker {
+			worker.command = remoteCommands[index][:]
+			break
+		}
+	}
+	base, size, status := sys.MemoryMapAnywhere(request.Command, false)
+	if status != kcall.StatusOK {
+		return false
+	}
+	defer sys.VMUnmap(base, size)
+	if size != 4096 || request.CommandSize == 0 || int(request.CommandSize) > len(worker.command) {
+		return false
+	}
+	command := sys.Window(base, uint64(request.CommandSize))
+	worker.commandSize = copy(worker.command[:], command)
+	for _, value := range worker.command[:worker.commandSize] {
+		if value == 0 {
+			worker.commandSize = 0
+			return false
+		}
+	}
+	return true
 }
