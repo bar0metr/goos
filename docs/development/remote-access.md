@@ -332,8 +332,10 @@ assertions across two persistent boots. It verified non-PTY exec, separate outpu
 streams and status, bounded administration commands, durable hostname recovery,
 key mutations and new-admission authentication, structured log selection and
 local/SSH follow cancellation, and two live resizes of the same viewer process.
-The network/console-GUI regressions and exact-candidate Proxmox run are separate
-gates; this result does not establish their outcome.
+The same development tree passed the network regression (207 checks) and
+console-GUI checks for console, keyboard, filesystem information, file manager,
+interrupt, viewer and nested launch. The final exact-candidate Proxmox report
+is retained separately with the candidate SHA and artifact hashes.
 
 The earlier `make test-remote VALIDATION=1` run on 2026-10-10 passed 76 assertions
 across both boots. The headless Q35/TCG run verified degraded-start recovery, corrupt identity

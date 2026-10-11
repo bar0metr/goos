@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed. Implementation and release validation are in progress.
+Accepted. Host and QEMU validation results are recorded in the remote-access
+guide and release notes. Exact-candidate Proxmox evidence is retained separately.
 
 ## Context
 

@@ -213,7 +213,7 @@ for command in 'ping -c 4 -W 1000 10.0.2.2' 'ping -c 4 -W 1000 10.0.2.2 ' 'ping 
 done
 require user.fault NET_DRIVER_FAULT_INJECTED "$log"
 require user.unbound NETD_DRIVER_UNBOUND "$log"
-[ "$(grep -c '^VIRTIO_NET_DRIVER_OK$' "$log")" -ge 3 ] || fail user.replaced 'three VIRTIO_NET_DRIVER_OK lines, one per driver' "$log"
+[ "$(serial_lines "$log" | grep -c '^VIRTIO_NET_DRIVER_OK$')" -ge 3 ] || fail user.replaced 'three VIRTIO_NET_DRIVER_OK lines, one per driver' "$log"
 checks=$((checks + 1))
 require_after user.file 'cat /home/user/net.txt' '^kept$' "$log"
 require user.storage VIRTIO_BLK_DRIVER_OK "$log"
