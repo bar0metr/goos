@@ -660,7 +660,7 @@ IPv6, encrypted DNS, revocation checks, HTTP/2, QUIC and a narrower VFS root-rea
 authority remain separate work. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
 and [native evidence](crypto-feasibility.md).
 
-### GoOS 0.2.6: native remote administration
+### GoOS 0.2.7: native remote administration
 
 Keep SSH on the existing native shell, stream and terminal paths. Interactive
 PTY sessions support `exit`, graceful remote reboot/poweroff, and sequence-ordered
