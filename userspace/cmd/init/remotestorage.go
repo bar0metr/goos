@@ -19,14 +19,6 @@ const (
 	remoteDefaultKeys      = "/home/user/.ssh/authorized_keys"
 )
 
-type remoteScope struct {
-	path      [96]byte
-	size      uint8
-	subtree   bool
-	denied    vfs.Rights
-	installed bool
-}
-
 var (
 	remoteScopes          [vfs.MaxScopes]remoteScope
 	remoteScopeCount      int
@@ -271,7 +263,7 @@ func ensureRemotePolicyScopes(host, keys string) bool {
 			}
 		}
 	}
-	if !rememberRemoteScope(keys, false, 0) {
+	if !rememberRemoteScope(keys, false, vfs.Write) {
 		return false
 	}
 	_ = before
@@ -291,34 +283,14 @@ func openRemoteAuthority() (handle.ID, string) {
 }
 
 func openRemoteAuthorityExisting() (handle.ID, string) {
-	authority := vfs.Authority{Confined: false}
-	for index := 0; index < remoteScopeCount; index++ {
-		if !remoteScopes[index].installed {
-			continue
-		}
-		if remoteScopes[index].denied != 0 {
-			authority.Grants[index] = vfs.Read | vfs.Write
-		} else {
-			authority.Grants[index] = vfs.Read
-		}
-	}
+	authority := remoteControllerAuthority(remoteScopes[:remoteScopeCount], false)
 	// During scope setup PID 1 also creates parent directories outside the
 	// confined service's authority. The session handed to remoted is confined.
 	return openRemoteAuthoritySession(authority)
 }
 
 func openRemoteConfinedAuthority() (handle.ID, string) {
-	authority := vfs.Authority{Confined: true}
-	for index := 0; index < remoteScopeCount; index++ {
-		if !remoteScopes[index].installed {
-			continue
-		}
-		if remoteScopes[index].denied != 0 {
-			authority.Grants[index] = vfs.Read | vfs.Write
-		} else {
-			authority.Grants[index] = vfs.Read
-		}
-	}
+	authority := remoteControllerAuthority(remoteScopes[:remoteScopeCount], true)
 	return openRemoteAuthoritySession(authority)
 }
 

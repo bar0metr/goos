@@ -82,15 +82,15 @@ func TestCommitPreservesOldWorkerSnapshot(t *testing.T) {
 		t.Fatal("stale generation")
 	}
 }
-func TestEnabledEmptyKeysRejected(t *testing.T) {
+func TestEnabledEmptyKeysDenyAll(t *testing.T) {
 	policy, host, _ := fixture(t)
 	var state State
 	if _, err := state.Prepare(policy, host, nil); err != nil {
 		t.Fatal("disabled empty allowlist", err)
 	}
 	policy.Enabled = true
-	if _, err := state.Prepare(policy, host, nil); err == nil {
-		t.Fatal("enabled empty allowlist")
+	if next, err := state.Prepare(policy, host, nil); err != nil || next.Worker.KeyCount != 0 {
+		t.Fatal("enabled deny-all allowlist", err)
 	}
 }
 func TestCoherentLoadRejectsChangingConfiguration(t *testing.T) {

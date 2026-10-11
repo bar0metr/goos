@@ -7,9 +7,9 @@ import (
 )
 
 const AdminProtocolID = uint64(0x475241444d494e31) // GRADMIN1
-const AdminVersion = uint16(2)
+const AdminVersion = uint16(3)
 const MaxStatus = ipc.MaxPayload - 16
-const MaxStatusParts = 4
+const MaxStatusParts = 32
 
 type AdminOperation uint8
 
@@ -18,6 +18,9 @@ const (
 	AdminReload
 	AdminAddSession
 	AdminCounts
+	AdminKeys
+	AdminKeyAdd
+	AdminKeyRemove
 )
 
 type AdminResult uint8
@@ -29,7 +32,7 @@ const (
 )
 
 func EncodeAdminRequest(op AdminOperation, corr uint64, out *ipc.Message) bool {
-	if corr == 0 || op < AdminStatus || op > AdminReload {
+	if corr == 0 || op != AdminStatus && op != AdminReload && op != AdminKeys {
 		return false
 	}
 	*out = ipc.Message{ProtocolID: AdminProtocolID, Version: AdminVersion, Kind: ipc.KindRequest, Correlation: corr, PayloadSize: 8}
@@ -41,13 +44,13 @@ func DecodeAdminRequest(in *ipc.Message) (AdminOperation, bool) {
 		return 0, false
 	}
 	op := AdminOperation(in.Payload[0])
-	return op, op >= AdminStatus && op <= AdminReload
+	return op, op == AdminStatus || op == AdminReload || op == AdminKeys
 }
 func EncodeAdminReply(op AdminOperation, result AdminResult, text []byte, corr uint64, out *ipc.Message) bool {
 	return EncodeAdminPart(op, result, text, false, corr, out)
 }
 func EncodeAdminPart(op AdminOperation, result AdminResult, text []byte, more bool, corr uint64, out *ipc.Message) bool {
-	if op < AdminStatus || op > AdminReload || result > AdminUnavailable || len(text) > MaxStatus || corr == 0 {
+	if !validPublicAdmin(op) || result > AdminUnavailable || len(text) > MaxStatus || corr == 0 {
 		return false
 	}
 	*out = ipc.Message{ProtocolID: AdminProtocolID, Version: AdminVersion, Kind: ipc.KindReply, Correlation: corr, PayloadSize: uint16(16 + len(text))}
