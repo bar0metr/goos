@@ -238,7 +238,7 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		kcall.OperationStartupRead, kcall.OperationRandomRead:
 		return callCopy
 	case kcall.OperationConsoleWrite, kcall.OperationConsoleRead, kcall.OperationConsoleInterrupt, kcall.OperationConsoleInfo,
-		kcall.OperationPortRead, kcall.OperationPortWrite, kcall.OperationLogWrite, kcall.OperationLogRead, kcall.OperationLogBounds,
+		kcall.OperationPortRead, kcall.OperationPortWrite, kcall.OperationLogWrite, kcall.OperationLogRead, kcall.OperationLogBounds, kcall.OperationLogReadSequence,
 		kcall.OperationSystemReset, kcall.OperationSystemPowerOff, kcall.OperationPowerOffReady, kcall.OperationValidationFault, kcall.OperationClockSet,
 		kcall.OperationIRQWait, kcall.OperationIRQTake:
 		return callDevice

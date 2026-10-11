@@ -28,6 +28,7 @@ type Ring struct {
 	lock    lock.Spin
 	entries [Capacity]entry
 	next    int
+	used    int
 	total   uint64
 }
 
@@ -35,13 +36,40 @@ type Ring struct {
 // the ring's lock is released.
 type Copy struct{ entry entry }
 
+// Record borrows its fields from the copy until the copy is reused.
+func (target *Copy) Record() logfmt.Record {
+	slot := &target.entry
+	return logfmt.Record{Time: slot.time, Process: slot.process, Level: slot.level,
+		Component: slot.component[:slot.componentSize], Message: slot.message[:slot.messageSize], Fields: slot.fields[:slot.fieldsSize]}
+}
+
+// Read snapshots records starting at an absolute next-record cursor. First
+// advances to Oldest if records were overwritten. Bounds and copies come from
+// the same lock acquisition; appends cannot shift the snapshot's indices.
+func (ring *Ring) Read(cursor uint64, target []Copy) (oldest, total, first uint64, count int) {
+	ring.take()
+	length := ring.length()
+	oldest, total = ring.total-uint64(length), ring.total
+	first = cursor
+	if logfmt.SequenceBefore(first, oldest) {
+		first = oldest
+	}
+	for count < len(target) && count < Capacity && logfmt.SequenceBefore(first, total) && uint64(count) < total-first {
+		index := int(first-oldest) + count
+		target[count].entry = ring.entries[(ring.next-length+index+Capacity)%Capacity]
+		count++
+	}
+	ring.lock.Unlock()
+	return
+}
+
 func (ring *Ring) take() {
 	ring.lock.SetLevel(lock.LevelLog)
 	ring.lock.Lock()
 }
 
 // Append copies a validated record, overwriting the oldest when full.
-func (ring *Ring) Append(record logfmt.Record) {
+func (ring *Ring) Append(record logfmt.Record) uint64 {
 	ring.take()
 	slot := &ring.entries[ring.next]
 	slot.time, slot.process, slot.level = record.Time, record.Process, record.Level
@@ -49,8 +77,13 @@ func (ring *Ring) Append(record logfmt.Record) {
 	slot.messageSize = uint8(copy(slot.message[:], record.Message))
 	slot.fieldsSize = uint8(copy(slot.fields[:], record.Fields))
 	ring.next = (ring.next + 1) % Capacity
+	if ring.used < Capacity {
+		ring.used++
+	}
 	ring.total++
+	total := ring.total
 	ring.lock.Unlock()
+	return total
 }
 
 func (ring *Ring) Len() int {
@@ -61,10 +94,7 @@ func (ring *Ring) Len() int {
 }
 
 func (ring *Ring) length() int {
-	if ring.total < Capacity {
-		return int(ring.total)
-	}
-	return Capacity
+	return ring.used
 }
 
 func (ring *Ring) Total() uint64 {

@@ -276,20 +276,6 @@ func argumentIs(argument []byte, expected string) bool {
 	return true
 }
 
-// printLog prints the retained system log, oldest record first.
-func printLog(_ shellcmd.Invocation) uint64 {
-	for index := uint64(0); ; index++ {
-		if sys.LogRead(logHandle, index, &logLine) != kcall.StatusOK {
-			return 0
-		}
-		size := 0
-		for size < len(logLine) && logLine[size] != 0 {
-			size++
-		}
-		writeBytes(logLine[:size])
-	}
-}
-
 func resolve(argument []byte, defaultCurrent bool) ([]byte, bool) {
 	if len(argument) == 0 {
 		if defaultCurrent {

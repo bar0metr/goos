@@ -135,3 +135,5 @@ func memoryCreate(pages uint64, address unsafe.Pointer) uint64 { return unsuppor
 func handleDuplicate(handle uint64, rights uint64, address unsafe.Pointer) uint64 {
 	return unsupported
 }
+
+func logReadSequence(device uint64, cursor uint64, address unsafe.Pointer) uint64 { return unsupported }

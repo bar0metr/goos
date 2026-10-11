@@ -468,3 +468,12 @@ tinygo_longjmp:
 .size tinygo_longjmp, .-tinygo_longjmp
 
 .section .note.GNU-stack,"",@progbits
+
+.section .text.goos_log_read_sequence,"ax",@progbits
+.global goos_log_read_sequence
+.type goos_log_read_sequence,@function
+goos_log_read_sequence:
+    movl $58, %eax
+    int $0x80
+    ret
+.size goos_log_read_sequence, .-goos_log_read_sequence
