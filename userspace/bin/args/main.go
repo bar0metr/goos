@@ -11,7 +11,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "args [ARGUMENT...]",
-	Summary: "print its arguments and PATH (startup ABI check)",
+	Summary: "print arguments and PATH",
 	MaxArgs: commands.Unbounded,
 }
 

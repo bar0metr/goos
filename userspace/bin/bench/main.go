@@ -16,7 +16,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "bench vfs N | bench read|meta PATH N | bench io PATH SIZE | bench stream|send|recv N SIZE",
-	Summary: "measure VFS requests, file reads and bulk I/O, metadata, or stream transfers",
+	Summary: "measure native I/O",
 	MinArgs: 2,
 	MaxArgs: 3,
 	Grants:  commands.GrantVFS,

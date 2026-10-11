@@ -11,7 +11,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "echo [TEXT...]",
-	Summary: "print its arguments",
+	Summary: "print arguments",
 	MaxArgs: commands.Unbounded,
 }
 

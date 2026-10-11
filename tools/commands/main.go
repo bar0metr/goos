@@ -212,6 +212,8 @@ func grantValue(expression ast.Expr) (commands.Grant, error) {
 		return commands.GrantUDP, nil
 	case isSelector(expression, "commands", "GrantTCP"):
 		return commands.GrantTCP, nil
+	case isSelector(expression, "commands", "GrantHostname"):
+		return commands.GrantHostname, nil
 	case isSelector(expression, "commands", "GrantRemote"):
 		return commands.GrantRemote, nil
 	default:

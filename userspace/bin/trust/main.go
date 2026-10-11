@@ -26,7 +26,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "trust status | verify FILE META SIG | install FILE META SIG | update",
-	Summary: "verify and install signed system trust updates",
+	Summary: "signed trust verify/install/update",
 	MinArgs: 1, MaxArgs: 4,
 	Grants: commands.GrantResolve | commands.GrantTCP | commands.GrantVFS,
 }

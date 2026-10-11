@@ -12,7 +12,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "rm PATH...",
-	Summary: "remove files or empty directories",
+	Summary: "remove file/empty directory",
 	MinArgs: 1,
 	MaxArgs: commands.Unbounded,
 	Grants:  commands.GrantVFS,

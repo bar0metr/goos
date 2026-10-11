@@ -16,7 +16,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "net status|reload",
-	Summary: "show the network interface or apply system.net.* settings",
+	Summary: "network status/reload",
 	MinArgs: 1,
 	MaxArgs: 1,
 	Grants:  commands.GrantNetworkAdmin,

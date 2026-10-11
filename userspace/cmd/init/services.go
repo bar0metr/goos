@@ -352,11 +352,16 @@ func startConfigService(ticks uint64) handle.ID {
 // that will use it. PID 1 chooses both: a client receives an endpoint that is
 // already limited and cannot ask for more.
 func openConfigSession(scope string, rights configproto.Rights) (handle.ID, bool) {
-	if configControlHandle == 0 {
-		return 0, false
-	}
 	confined, ok := configproto.MakeScope(scope)
 	if !ok {
+		return 0, false
+	}
+	return openScopedConfigSession(confined, rights)
+}
+
+// openScopedConfigSession accepts only a scope constructed by PID 1.
+func openScopedConfigSession(confined configproto.Scope, rights configproto.Rights) (handle.ID, bool) {
+	if configControlHandle == 0 {
 		return 0, false
 	}
 	var pair [2]uint64

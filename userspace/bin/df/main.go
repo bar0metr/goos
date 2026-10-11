@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "df",
-	Summary: "show mounted filesystem capacity",
+	Summary: "filesystem capacity",
 	Grants:  commands.GrantVFS,
 }
 

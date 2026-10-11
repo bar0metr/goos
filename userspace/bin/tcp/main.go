@@ -13,7 +13,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage: "tcp connect|listen|self [OPTIONS] ...", Summary: "open TCP streams",
+	Usage: "tcp connect|listen|self [OPTIONS] ...", Summary: "TCP streams",
 	Options: "connect [-W MS] [-s SIZE] ADDRESS PORT [TEXT]; listen [-W MS] [-c COUNT] [-b ADDRESS] PORT; self [-s SIZE] ADDRESS PORT [TEXT]",
 	MinArgs: 2, MaxArgs: 10, Grants: commands.GrantTCP,
 }

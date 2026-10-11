@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "uptime",
-	Summary: "show how long the system has been running",
+	Summary: "time since boot",
 }
 
 //export userspaceMain

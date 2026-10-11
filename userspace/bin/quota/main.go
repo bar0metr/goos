@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "quota",
-	Summary: "show each process's share of kernel resources",
+	Summary: "process kernel quotas",
 }
 
 //export userspaceMain

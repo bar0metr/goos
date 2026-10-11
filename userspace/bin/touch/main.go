@@ -12,7 +12,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "touch FILE...",
-	Summary: "create empty files that do not exist",
+	Summary: "create missing files",
 	MinArgs: 1,
 	MaxArgs: commands.Unbounded,
 	Grants:  commands.GrantVFS,

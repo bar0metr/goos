@@ -13,7 +13,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "ls [PATH]",
-	Summary: "list a directory (default: the working directory)",
+	Summary: "list directory, default CWD",
 	MaxArgs: 1,
 	Grants:  commands.GrantVFS,
 }

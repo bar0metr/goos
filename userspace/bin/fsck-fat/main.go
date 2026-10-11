@@ -18,7 +18,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "fsck-fat (--check|--repair) auto",
-	Summary: "check or explicitly repair an unmounted FAT32 volume",
+	Summary: "check/repair unmounted FAT32",
 	MinArgs: 2,
 	MaxArgs: 2,
 	Grants:  commands.GrantBlockCheck,

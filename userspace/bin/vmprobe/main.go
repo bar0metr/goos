@@ -20,7 +20,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "vmprobe [read-only|guard|unmapped|quota]",
-	Summary: "check native virtual memory, or commit a fault it must contain",
+	Summary: "native memory/fault checks",
 	MaxArgs: 1,
 }
 

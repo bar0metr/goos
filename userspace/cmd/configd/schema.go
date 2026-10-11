@@ -23,6 +23,7 @@ func declareSchema(target *config.Store) config.Status {
 		{"system.build.name", name, true},
 		{"system.build.release", release, true},
 		{"system.build.machine", machine, true},
+		{"system.hostname", mustText("goos"), false},
 		{"system.log.persist", config.Bool(true), false},
 		// The network service's settings (ADR 0191) and timer policy (ADR 0192).
 		// The service validates them as a whole when it loads them; the store

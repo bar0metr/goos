@@ -22,7 +22,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "edit FILE",
-	Summary: "edit a text file of up to 1 MiB",
+	Summary: "edit text, max 1 MiB",
 	MinArgs: 1,
 	MaxArgs: 1,
 	Grants:  commands.GrantVFS | commands.GrantTerminal,

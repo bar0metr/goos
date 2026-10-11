@@ -21,7 +21,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "dnsq @SERVER [OPTIONS] NAME [TYPE]",
-	Summary: "query a DNS server directly",
+	Summary: "direct DNS query",
 	Options: "-t/--tcp -u/--udp --no-edns --timeout MS --short --raw",
 	MinArgs: 2,
 	MaxArgs: commands.Unbounded,

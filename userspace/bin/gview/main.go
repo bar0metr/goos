@@ -18,7 +18,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "gview FILE",
-	Summary: "view a text file with bounded memory",
+	Summary: "bounded text viewer",
 	MinArgs: 1,
 	MaxArgs: 1,
 	Grants:  commands.GrantVFS | commands.GrantTerminal,

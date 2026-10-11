@@ -13,7 +13,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage: "fetch [OPTIONS] URL", Summary: "transfer an HTTP response",
+	Usage: "fetch [OPTIONS] URL", Summary: "HTTP transfer",
 	Options: "-I -i -v -H HEADER -d DATA -o FILE -O -L",
 	MinArgs: 1, MaxArgs: 99,
 	Grants: commands.GrantResolve | commands.GrantTCP | commands.GrantVFS,

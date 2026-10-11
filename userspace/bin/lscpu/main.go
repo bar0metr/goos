@@ -13,7 +13,7 @@ import (
 	"goos/userspace/utility"
 )
 
-var manifest = commands.Manifest{Usage: "lscpu [OPTION]...", Summary: "display CPU architecture information", Options: "-h, --help; -V, --version; -B, --bytes; -J, --json; -e, --extended[=LIST]; -p, --parse[=LIST]; -C, --caches[=LIST]; -H, --list-columns; -a, --all; -b, --online; -c, --offline; -r, --raw; -x, --hex; -y, --physical; --output-all", MaxArgs: commands.Unbounded}
+var manifest = commands.Manifest{Usage: "lscpu [OPTION]...", Summary: "CPU architecture", Options: "-h, --help; -V, --version; -B, --bytes; -J, --json; -e, --extended[=LIST]; -p, --parse[=LIST]; -C, --caches[=LIST]; -H, --list-columns; -a, --all; -b, --online; -c, --offline; -r, --raw; -x, --hex; -y, --physical; --output-all", MaxArgs: commands.Unbounded}
 var outputBuffer [32 << 10]byte
 
 //export userspaceMain

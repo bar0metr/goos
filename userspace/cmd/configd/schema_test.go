@@ -65,8 +65,8 @@ func TestSchemaCapacityAndPublishedBuild(t *testing.T) {
 	if status := store.Set(scope, config.Read|config.Write, []byte("system.build.name"), mustText("changed")); status != config.StatusReadOnly {
 		t.Fatal("build setting writable")
 	}
-	// Existing 54 declarations plus the 14 remote settings leave room for more.
-	for index := 0; index < config.MaxEntries-68; index++ {
+	// Existing 55 declarations plus the 14 remote settings leave room for more.
+	for index := 0; index < config.MaxEntries-69; index++ {
 		key := []byte{'s', 'p', 'a', 'r', 'e', '.', byte('a' + index/26), byte('a' + index%26)}
 		if status := store.Declare(string(key), config.Bool(false), false); status != config.StatusOK {
 			t.Fatalf("spare %d: %v", index, status)

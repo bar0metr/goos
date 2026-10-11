@@ -22,6 +22,8 @@ const (
 	OperationSet
 	OperationList
 	OperationRevision
+	// OperationSetDurable acknowledges persistence before publishing hostname.
+	OperationSetDurable
 )
 
 type Request struct {
@@ -41,7 +43,7 @@ type Reply struct {
 }
 
 func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
-	if request.Operation < OperationGet || request.Operation > OperationRevision || correlation == 0 {
+	if request.Operation < OperationGet || request.Operation > OperationSetDurable || correlation == 0 {
 		return ipc.Message{}, false
 	}
 	if len(request.Key) > MaxKey || int(request.Value.Size) > MaxText {
@@ -50,7 +52,7 @@ func EncodeRequest(request Request, correlation uint64) (ipc.Message, bool) {
 	if request.Operation != OperationList && request.Operation != OperationRevision && !validKey(request.Key) {
 		return ipc.Message{}, false
 	}
-	if request.Operation == OperationSet && !request.Value.valid() {
+	if (request.Operation == OperationSet || request.Operation == OperationSetDurable) && !request.Value.valid() {
 		return ipc.Message{}, false
 	}
 	if request.Operation == OperationRevision && !validRevisionRequest(&request) {
@@ -84,7 +86,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		return Request{}, false
 	}
 	operation := Operation(message.Payload[0])
-	if operation < OperationGet || operation > OperationRevision {
+	if operation < OperationGet || operation > OperationSetDurable {
 		return Request{}, false
 	}
 	key := message.Payload[requestHeader : requestHeader+keySize]
@@ -98,7 +100,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 		Cursor:    binary.LittleEndian.Uint32(message.Payload[16:]),
 	}
 	copy(request.Value.Text[:], message.Payload[requestHeader+keySize:requestHeader+keySize+valueSize])
-	if operation == OperationSet && !request.Value.valid() {
+	if (operation == OperationSet || operation == OperationSetDurable) && !request.Value.valid() {
 		return Request{}, false
 	}
 	if operation == OperationRevision && !validRevisionRequest(&request) {
@@ -108,7 +110,7 @@ func DecodeRequest(message ipc.Message) (Request, bool) {
 }
 
 func EncodeReply(reply Reply, correlation uint64) (ipc.Message, bool) {
-	if reply.Operation < OperationGet || reply.Operation > OperationRevision || correlation == 0 ||
+	if reply.Operation < OperationGet || reply.Operation > OperationSetDurable || correlation == 0 ||
 		len(reply.Key) > MaxKey || int(reply.Value.Size) > MaxText {
 		return ipc.Message{}, false
 	}
@@ -147,7 +149,7 @@ func DecodeReply(message ipc.Message) (Reply, bool) {
 		return Reply{}, false
 	}
 	operation := Operation(message.Payload[0])
-	if operation < OperationGet || operation > OperationRevision || Status(message.Payload[1]) > StatusReadOnly {
+	if operation < OperationGet || operation > OperationSetDurable || Status(message.Payload[1]) > StatusPersistUnknown {
 		return Reply{}, false
 	}
 	reply := Reply{

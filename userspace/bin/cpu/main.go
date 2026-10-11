@@ -14,7 +14,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "cpu [-r]",
-	Summary: "show per-processor load and scheduler counters",
+	Summary: "processor load and counters",
 	Options: "-r, --raw: print the counters instead of busy and idle shares",
 	MaxArgs: 1,
 }

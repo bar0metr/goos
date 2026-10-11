@@ -18,7 +18,7 @@ import (
 
 var manifest = commands.Manifest{
 	Usage:   "ping [-c COUNT] [-W TIMEOUT_MS] HOST",
-	Summary: "send ICMP echo requests to an IPv4 address or host name",
+	Summary: "ICMP echo",
 	Options: "-c COUNT requests, 1-16 (default 4); -W TIMEOUT_MS per reply, 100-5000 (default 1000)",
 	MinArgs: 1,
 	MaxArgs: 5,
