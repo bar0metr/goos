@@ -71,8 +71,8 @@ const (
 	FaultRemoteSigner
 )
 
-// ControlStatus answers a reboot request that could not be carried out; a
-// successful reboot is never answered.
+// ControlStatus answers control requests. Remote shutdown returns Accepted
+// after storage sync, before PID 1 waits for the requesting session to close.
 type ControlStatus uint8
 
 const (
@@ -84,6 +84,7 @@ const (
 	// ControlUnsupported answers a power-off the machine cannot perform, for
 	// want of the ACPI tables that say how.
 	ControlUnsupported
+	ControlAccepted
 )
 
 type ServiceEntry struct {
@@ -183,10 +184,10 @@ func DecodeServices(message ipc.Message, target *[MaxServiceEntries]ServiceEntry
 	return count, true
 }
 
-// EncodeControlStatus answers a control request. A reboot that succeeds is
-// never answered, because the machine resets first.
+// EncodeControlStatus answers control requests, including accepted remote
+// shutdowns. Local shutdown success still has no reply.
 func EncodeControlStatus(status ControlStatus, correlation uint64) (ipc.Message, bool) {
-	if correlation == 0 || status > ControlNotFound {
+	if correlation == 0 || status > ControlAccepted {
 		return ipc.Message{}, false
 	}
 	message := ipc.Message{ProtocolID: ControlProtocolID, Version: ControlVersion, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: 1}
@@ -204,5 +205,5 @@ func DecodeControlStatus(message ipc.Message) (ControlStatus, bool) {
 		return 0, false
 	}
 	status := ControlStatus(message.Payload[0])
-	return status, status <= ControlNotFound
+	return status, status <= ControlAccepted
 }

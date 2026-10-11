@@ -99,3 +99,16 @@ func TestServicesListingStartIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestShutdownStatusRoundTrip(t *testing.T) {
+	for _, status := range []ControlStatus{ControlSyncFailed, ControlResetFailed, ControlUnsupported, ControlAccepted} {
+		message, ok := EncodeControlStatus(status, 9)
+		decoded, valid := DecodeControlStatus(message)
+		if !ok || !valid || decoded != status {
+			t.Fatalf("status %d did not round trip", status)
+		}
+	}
+	if _, ok := EncodeControlStatus(ControlAccepted+1, 9); ok {
+		t.Fatal("unknown status encoded")
+	}
+}

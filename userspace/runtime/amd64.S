@@ -344,6 +344,14 @@ goos_system_power_off:
     ret
 .size goos_system_power_off, .-goos_system_power_off
 
+.global goos_power_off_ready
+.type goos_power_off_ready,@function
+goos_power_off_ready:
+    movl $57, %eax
+    int $0x80
+    ret
+.size goos_power_off_ready, .-goos_power_off_ready
+
 .global goos_executable_create
 .type goos_executable_create,@function
 goos_executable_create:

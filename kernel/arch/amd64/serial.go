@@ -40,9 +40,6 @@ func (COM1) TryReadByte() (byte, bool) {
 
 func (serial COM1) WriteString(value string) {
 	for index := 0; index < len(value); index++ {
-		if value[index] == '\n' {
-			serial.WriteByte('\r')
-		}
 		serial.WriteByte(value[index])
 	}
 }

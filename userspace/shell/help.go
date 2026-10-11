@@ -30,6 +30,7 @@ var Commands = [...]CommandInfo{
 	{Name: "diag", Usage: "diag", Summary: "dump kernel diagnostics (diagnostic builds only)"},
 	{Name: "reboot", Usage: "reboot", Summary: "flush storage and restart the machine"},
 	{Name: "poweroff", Usage: "poweroff", Summary: "flush storage and switch the machine off"},
+	{Name: "exit", Usage: "exit", Summary: "close a remote shell session"},
 }
 
 // LookupCommand finds a builtin by name.

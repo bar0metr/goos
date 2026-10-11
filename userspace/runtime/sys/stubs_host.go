@@ -106,6 +106,8 @@ func validationFault(device uint64) uint64 { return unsupported }
 
 func systemPowerOff(device uint64) uint64 { return unsupported }
 
+func powerOffReady(device uint64) uint64 { return unsupported }
+
 func executableCreate(loader uint64, size uint64, address unsafe.Pointer) uint64 {
 	return unsupported
 }

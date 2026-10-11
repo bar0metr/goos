@@ -144,6 +144,9 @@ func validationFault(device uint64) uint64
 //go:linkname systemPowerOff goos_system_power_off
 func systemPowerOff(device uint64) uint64
 
+//go:linkname powerOffReady goos_power_off_ready
+func powerOffReady(device uint64) uint64
+
 //go:linkname executableCreate goos_executable_create
 func executableCreate(loader uint64, size uint64, address unsafe.Pointer) uint64
 

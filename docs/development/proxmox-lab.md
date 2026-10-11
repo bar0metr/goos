@@ -229,6 +229,10 @@ make pve-run
 
 `qm terminal` exits with Ctrl-O.
 
+For a serial newline check on the retained VM, run `net status`, `log`, and
+`services` inside `qm terminal`. Each line must start at column zero. A line
+that starts farther right after the previous line indicates a bare LF on COM1.
+
 ## Cleanup after an interrupted run
 
 Ctrl-C and `SIGTERM` stop the scenario and run the normal cleanup. If the

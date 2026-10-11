@@ -182,6 +182,11 @@ func (handler *testHandler) SystemPowerOff(device uint64) Status {
 	return StatusPermissionDenied
 }
 
+func (handler *testHandler) PowerOffReady(device uint64) Status {
+	handler.channel = device
+	return StatusPermissionDenied
+}
+
 func (handler *testHandler) ExecutableCreate(device uint64, size uint64, address uint64) Status {
 	handler.channel, handler.length, handler.address = device, size, address
 	return StatusOK
@@ -528,6 +533,16 @@ func TestDispatchSystemPowerOff(t *testing.T) {
 	}
 }
 
+func TestDispatchPowerOffReady(t *testing.T) {
+	if OperationPowerOffReady != 57 {
+		t.Fatalf("operation %d", OperationPowerOffReady)
+	}
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationPowerOffReady, Arg0: 18}, handler); result.Status != StatusPermissionDenied || handler.channel != 18 {
+		t.Fatalf("power-off readiness %+v %+v", result, handler)
+	}
+}
+
 func TestDispatchExecutableCalls(t *testing.T) {
 	if OperationExecutableCreate != 37 || OperationExecutableWrite != 38 {
 		t.Fatalf("operations %d %d", OperationExecutableCreate, OperationExecutableWrite)
@@ -568,7 +583,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationRandomRead + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationPowerOffReady + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}

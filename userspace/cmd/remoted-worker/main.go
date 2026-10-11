@@ -216,7 +216,11 @@ func userspaceMain() {
 				finish(0)
 			}
 		}
-		if terminal != 0 && !terminalGone {
+		// The shell can send its next prompt before its preceding stdout bytes
+		// reach this worker. Keep a bounded batch ahead of terminal requests.
+		stdoutPending, stdoutActivity := serviceStdout()
+		activity = activity || stdoutActivity
+		if terminal != 0 && !terminalGone && !stdoutPending {
 			var message ipc.Message
 			status := remoteservice.Receive(terminal, 0, &message)
 			if status == kcall.StatusOK {
@@ -233,26 +237,6 @@ func userspaceMain() {
 				}
 			} else if status != kcall.StatusNotFound {
 				finish(1)
-			}
-		}
-		if stdout != 0 {
-			if output.Free() >= 1024 {
-				n, status := sys.StreamRead(stdout, scratch[:])
-				if n > 0 {
-					engine.Output(scratch[:n])
-					activity = true
-				}
-				if status == kcall.StatusPeerDied {
-					sys.HandleClose(stdout)
-					stdout = 0
-					ending = true
-					if endDeadline == 0 {
-						endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
-					}
-				}
-				if status != kcall.StatusOK && status != kcall.StatusResourceExhausted && status != kcall.StatusPeerDied {
-					finish(1)
-				}
 			}
 		}
 		if engine.Failed() {
@@ -306,6 +290,33 @@ func userspaceMain() {
 		}
 	}
 }
+
+const stdoutBatch = 8
+
+// serviceStdout returns true while stdout may still precede a prompt. The
+// caller continues SSH input and control processing between batches.
+func serviceStdout() (pending, activity bool) {
+	if stdout == 0 {
+		return false, false
+	}
+	pending, activity, closed, ok := drainStdoutBatch(readWorkerStdout, consumeWorkerStdout, workerOutputFree, scratch[:], stdoutBatch)
+	if !ok {
+		finish(1)
+	}
+	if closed {
+		sys.HandleClose(stdout)
+		stdout = 0
+		ending = true
+		if endDeadline == 0 {
+			endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
+		}
+	}
+	return pending, activity
+}
+
+func readWorkerStdout(buffer []byte) (int, kcall.Status) { return sys.StreamRead(stdout, buffer) }
+func consumeWorkerStdout(buffer []byte)                  { engine.Output(buffer) }
+func workerOutputFree() int                             { return output.Free() }
 func call(request remoteapi.Request) (remoteapi.Reply, [2]handle.ID, bool) {
 	var message ipc.Message
 	var reply remoteapi.Reply
