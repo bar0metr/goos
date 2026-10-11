@@ -86,8 +86,8 @@ func MemoryCreate(pages uint64) (handle.ID, kcall.Status) {
 	return handle.ID(valueWire), kcall.StatusOK
 }
 
-// HandleDuplicate returns a second handle to the object a memory handle
-// names, with rights that must be a subset of the original's.
+// HandleDuplicate derives a memory object or stream endpoint with a subset
+// of its rights. The caller retains its original handle.
 func HandleDuplicate(id handle.ID, rights capability.Rights) (handle.ID, kcall.Status) {
 	valueWire = 0
 	if result := status(handleDuplicate(uint64(id), uint64(rights), unsafe.Pointer(&valueWire))); result != kcall.StatusOK {

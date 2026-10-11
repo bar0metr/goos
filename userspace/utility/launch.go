@@ -11,6 +11,7 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/tty"
 )
 
 // launchHandle is the command's launch channel, when its manifest asked for
@@ -88,6 +89,12 @@ func Launch(command []byte, argv [][]byte, cwd []byte, environment [][]byte) (su
 		}
 		payloadSize := int(wire[24]) | int(wire[25])<<8
 		received, valid := ipc.Decode(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8])
+		if valid {
+			if endpoint, ok := tty.DecodeResizeEndpointNotice(&received); ok {
+				replaceResize(endpoint)
+				continue
+			}
+		}
 		if !valid || received.Correlation != correlation {
 			continue
 		}

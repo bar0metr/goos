@@ -78,7 +78,39 @@ func requestGeometry() {
 	geometryRequest = correlation
 }
 
-func storeGeometry(payload []byte) { childTerminalEnvironment.Store(payload) }
+func storeGeometry(payload []byte) {
+	if !childTerminalEnvironment.Store(payload) {
+		return
+	}
+	geometry, valid := terminal.DecodeGeometryState(payload)
+	if valid {
+		if notice, ok := terminal.GeometryNotice(geometry); ok {
+			sendResizeState(notice)
+		}
+	}
+}
+
+var execWire [ipc.WireMaxSize]byte
+
+func sendResizeState(notice ipc.Message) {
+	size, ok := ipc.Encode(notice, execWire[:])
+	if ok {
+		sys.IPCSend(execHandle, execWire[:size])
+	}
+}
+
+func takeGeometryNotice(message *ipc.Message) bool {
+	geometry, valid := terminal.DecodeGeometryNotice(message)
+	if !valid {
+		return false
+	}
+	reply, _ := terminal.GeometryStateReply(geometry, 1)
+	storeGeometry(reply.Payload[1:reply.PayloadSize])
+	if !sendTerminal(terminal.GeometryAcknowledgement(geometry.Sequence)) {
+		terminalLost()
+	}
+	return true
+}
 
 // refreshGeometry takes a new snapshot before building a job's environment.
 // An outstanding read's reply is kept intact for takeLine; refreshing geometry
@@ -115,6 +147,9 @@ func refreshGeometry() bool {
 		}
 		message, valid := decodeTerminalWire()
 		if !valid {
+			continue
+		}
+		if takeGeometryNotice(&message) {
 			continue
 		}
 		result, text, valid := terminal.DecodeReply(&message)
@@ -182,6 +217,7 @@ func endRawJob() {
 	rawJob = false
 	if rawActive {
 		rawActive = false
+		sendResizeState(terminal.RawReleaseNotice())
 		setTerminalMode(terminal.OperationLineMode)
 		mark("SHELL_TERMINAL_RESTORED_OK\n")
 	}
@@ -297,6 +333,9 @@ func takeLine() (terminal.Result, []byte, bool) {
 				continue
 			}
 			message = decoded
+		}
+		if takeGeometryNotice(&message) {
+			continue
 		}
 		result, text, valid := terminal.DecodeReply(&message)
 		if valid && result == terminal.ResultGeometry && message.Correlation == geometryRequest {

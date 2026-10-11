@@ -63,7 +63,7 @@ const (
 	OperationVMDiscard
 	OperationVMQuery
 	// OperationMemoryCreate creates a shared-memory object and
-	// OperationHandleDuplicate a narrower copy of a memory handle (ADR 0107).
+	// OperationHandleDuplicate a narrower copy of a memory or stream handle (ADR 0107).
 	OperationMemoryCreate
 	OperationHandleDuplicate
 	OperationClockNow

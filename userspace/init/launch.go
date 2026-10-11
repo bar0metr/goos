@@ -33,3 +33,8 @@ func ChildLaunch(request execproto.Request, lookup func(path []byte) (commands.G
 func LaunchesChildren(request execproto.Request, granted commands.Grant) bool {
 	return request.Count == 1 && request.ErrorSource == 0 && !request.Background && granted&commands.GrantLaunch != 0
 }
+
+// ResizesTerminal grants resize only to one trusted raw foreground stage.
+func ResizesTerminal(request execproto.Request, granted commands.Grant) bool {
+	return request.Count == 1 && request.ErrorSource == 0 && !request.Background && granted&commands.GrantTerminal != 0
+}

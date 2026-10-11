@@ -12,7 +12,9 @@ package main
 import (
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	supervisor "goos/userspace/init"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/tty"
 )
 
 // serialConsoleHandle and graphicalConsoleHandle are the two terminal
@@ -27,6 +29,8 @@ const (
 // terminalSession is one console's terminal service and shell and what PID 1
 // keeps for them.
 type terminalSession struct {
+	geometry    tty.Snapshot
+	resizeOwner supervisor.ResizeOwner
 	// tty and shell are the services' names.
 	tty, shell string
 	// console is the terminal console the terminal service reads and writes.

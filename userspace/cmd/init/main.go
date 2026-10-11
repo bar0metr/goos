@@ -99,7 +99,10 @@ type execJob struct {
 	prepared  [execproto.MaxStages]prepared
 	fill      pendingFill
 	// launcher serves the job's launch channel, when its command has one.
-	launcher launcher
+	launcher       launcher
+	resize         resizeDelivery
+	resizeReleased bool
+	resizeParent   bool
 }
 
 // launchingJob is the job whose pipeline is starting, whose prepared

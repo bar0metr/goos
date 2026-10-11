@@ -117,10 +117,8 @@ func (handler nativeCallHandler) MemoryCreate(pages uint64, address uint64) kcal
 	return kcall.StatusOK
 }
 
-// HandleDuplicate installs a second handle to the object a memory handle
-// names, with rights that are a subset of the original's, and writes it to
-// address. A process uses it to pass on narrower authority — write access to
-// a buffer, for one request — and keep its own.
+// HandleDuplicate derives a memory object or stream endpoint with a subset
+// of its rights. The caller retains its original handle.
 func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, address uint64) kcall.Status {
 	local := thisCPU()
 	owner, found := handler.self()
@@ -131,7 +129,7 @@ func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, addre
 	if !described {
 		return kcall.StatusNotFound
 	}
-	if typeID != handle.TypeMemory {
+	if typeID != handle.TypeMemory && typeID != handle.TypeStream {
 		return kcall.StatusUnsupported
 	}
 	derived, allowed := original.Derive(capability.Rights(rights))
@@ -141,6 +139,20 @@ func (handler nativeCallHandler) HandleDuplicate(id uint64, rights uint64, addre
 	clear(local.memoryWire[:])
 	if !vm.CopyOut(handler.root, address, local.memoryWire[:]) {
 		return kcall.StatusInvalidArgument
+	}
+	if typeID == handle.TypeStream {
+		duplicate, status := streamRegistry.DuplicateHandle(owner.Handles(), handle.ID(id), capability.Rights(rights))
+		if status != kcall.StatusOK {
+			return status
+		}
+		putUint64(local.memoryWire[:], uint64(duplicate))
+		if !vm.CopyOut(handler.root, address, local.memoryWire[:]) {
+			if closure, closed := streamRegistry.CloseHandle(owner.Handles(), duplicate); closed {
+				finishStreamClosure(closure)
+			}
+			return kcall.StatusInvalidArgument
+		}
+		return kcall.StatusOK
 	}
 	duplicate, inserted := owner.Handles().Insert(handle.TypeMemory, derived)
 	if !inserted {

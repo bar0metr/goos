@@ -7,32 +7,39 @@ import "goos/kernel/ipc"
 // sticky, so a frontend can close a blocked or disconnected session.
 // Calls must be serialized by the frontend.
 type Engine struct {
-	line            Discipline
-	screen          Screen
-	raw             bool
-	rawInput        RawInput
-	rawBuffer       [MaxPart]byte
-	reading         uint64
-	sent            int
-	prompt          [MaxPrompt]byte
-	promptSize      int
-	interruptQueued bool
-	endQueued       bool
-	geometry        Geometry
-	term            [MaxTerm]byte
-	write           func([]byte) bool
-	send            func(ipc.Message) bool
-	failed          bool
+	line                Discipline
+	screen              Screen
+	raw                 bool
+	rawInput            RawInput
+	rawBuffer           [MaxPart]byte
+	reading             uint64
+	sent                int
+	prompt              [MaxPrompt]byte
+	promptSize          int
+	interruptQueued     bool
+	endQueued           bool
+	geometry            Geometry
+	geometrySubscribed  bool
+	geometryPending     bool
+	geometryOutstanding uint64
+	term                [MaxTerm]byte
+	write               func([]byte) bool
+	send                func(ipc.Message) bool
+	failed              bool
 }
 
 func NewEngine(write func([]byte) bool, send func(ipc.Message) bool) *Engine {
 	engine := &Engine{write: write, send: send}
 	engine.SetGeometry(Geometry{Columns: DefaultColumns, Rows: DefaultRows})
+	engine.geometry.Sequence = 0
 	return engine
 }
 
 func (engine *Engine) Failed() bool { return engine.failed }
 func (engine *Engine) Raw() bool    { return engine.raw }
+
+// CurrentGeometry borrows the copied TERM until the next engine update.
+func (engine *Engine) CurrentGeometry() Geometry { return engine.geometry }
 
 // SetGeometry installs trusted frontend geometry. Term is copied, not retained.
 // Display and Authoritative are independent: remote PTYs are authoritative
@@ -42,11 +49,18 @@ func (engine *Engine) SetGeometry(geometry Geometry) bool {
 		return false
 	}
 	engine.emit(engine.screen.Hide())
+	if engine.geometry.Sequence == ^uint64(0) {
+		return false
+	}
+	geometry.Sequence = engine.geometry.Sequence + 1
 	engine.geometry = geometry
 	engine.geometry.Term = engine.term[:copy(engine.term[:], geometry.Term)]
 	engine.screen.SetGeometry(geometry.Columns, geometry.Rows)
 	if !engine.raw {
 		engine.showLine()
+	}
+	if engine.geometrySubscribed {
+		engine.geometryPending = true
 	}
 	return !engine.failed
 }
@@ -55,6 +69,22 @@ func (engine *Engine) SetGeometry(geometry Geometry) bool {
 func (engine *Engine) SetRemoteGeometry(columns, rows int, term []byte) bool {
 	geometry := Geometry{Columns: columns, Rows: rows, Authoritative: true, Term: term}
 	return geometry.ValidRemote() && engine.SetGeometry(geometry)
+}
+
+// FlushGeometry attempts one nonblocking notification. Backpressure retains
+// only the newest snapshot and does not fail or delay terminal input.
+func (engine *Engine) FlushGeometry() {
+	if !engine.geometryPending || engine.geometryOutstanding != 0 || engine.failed {
+		return
+	}
+	if notice, ok := GeometryNotice(engine.geometry); ok && engine.send != nil && engine.send(notice) {
+		engine.geometryPending = false
+		engine.geometryOutstanding = engine.geometry.Sequence
+	}
+}
+
+func (engine *Engine) GeometryPending() bool {
+	return engine.geometryPending && engine.geometryOutstanding == 0
 }
 
 // Feed accepts transport bytes. Ctrl-C takes the same path as an out-of-band
@@ -115,6 +145,12 @@ func (engine *Engine) Request(message *ipc.Message) {
 	if engine.failed {
 		return
 	}
+	if sequence, valid := DecodeGeometryAcknowledgement(message); valid {
+		if sequence == engine.geometryOutstanding {
+			engine.geometryOutstanding = 0
+		}
+		return
+	}
 	operation, text, valid := DecodeRequest(message)
 	if !valid {
 		if message.Kind == ipc.KindRequest && message.Correlation != 0 {
@@ -141,6 +177,8 @@ func (engine *Engine) Request(message *ipc.Message) {
 		engine.leaveRaw()
 		engine.respond(ResultAccepted, nil, message.Correlation)
 	case OperationGeometry:
+		engine.geometrySubscribed = true
+		engine.geometryPending = false
 		reply, ok := GeometryStateReply(engine.geometry, message.Correlation)
 		if ok {
 			engine.sendMessage(reply)
@@ -152,6 +190,7 @@ func (engine *Engine) Request(message *ipc.Message) {
 // line so a local shell restart does not discard typed-ahead input.
 func (engine *Engine) CloseSession() {
 	engine.reading, engine.sent = 0, 0
+	engine.geometrySubscribed, engine.geometryPending, engine.geometryOutstanding = false, false, 0
 	engine.leaveRaw()
 }
 
