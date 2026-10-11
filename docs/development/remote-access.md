@@ -327,6 +327,26 @@ and expected authentication failures. Retain the VM for manual validation and
 save the report, serial log, candidate SHA and artifact hashes. Check reboot
 and poweroff on that same VM; record its final power state.
 
+If a tooling failure stops a kept run, reuse its owned VM instead of provisioning
+another one:
+
+```sh
+go run ./tools/pvelab resume --run SOURCE_RUN_ID --require-clean \
+  --source-evidence-sha256 TRUSTED_SHA256
+```
+
+The expected digest must come from the source evidence captured in trusted
+external storage, not from the current run directory. The SHA-256 bundle order
+is `state.json`, `artifacts.json`, `vm-config.json`, `report.json`. Each entry
+contains its filename byte length, filename, content byte length and raw content;
+both lengths are unsigned 64-bit big-endian values. Resume verifies that binding
+before parsing metadata, then uses the verified byte snapshots. It runs
+the original scenario and writes a separate report. Before VM actions it checks
+the original ownership marker, exact VM configuration, local artifact hashes and
+unchanged native build inputs. Only documentation, lab tooling and test-only
+changes may differ from the source candidate. It does not rebuild or upload
+images, and it leaves the source run's evidence unchanged.
+
 The extended `make test-remote VALIDATION=1` run on 2026-10-11 passed 210
 assertions across two persistent boots. It verified non-PTY exec, separate output
 streams and status, bounded administration commands, durable hostname recovery,

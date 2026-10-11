@@ -131,6 +131,19 @@ func TestRemoteParsers(t *testing.T) {
 	}
 }
 
+func TestRemoteStatusFieldsAcceptsReloadOutputOnly(t *testing.T) {
+	// `remote reload` emits its own status. The serial setup command must not
+	// append `remote status`, because this parser intentionally rejects two
+	// complete status lines rather than silently choosing one.
+	reload := "CONFIG_SET_OK\nservice=running listener=listening settings=configured enabled=true user=admin fingerprint=SHA256:test bind=0.0.0.0:22\n"
+	if _, err := remoteStatusFields(reload); err != nil {
+		t.Fatalf("reload output rejected: %v", err)
+	}
+	if _, err := remoteStatusFields(reload + "service=running listener=listening settings=configured enabled=true user=admin fingerprint=SHA256:test bind=0.0.0.0:22\n"); err == nil {
+		t.Fatal("duplicate remote status lines accepted")
+	}
+}
+
 func TestRemoteAssertionsFailClosed(t *testing.T) {
 	g := &Guest{logf: func(string, ...any) {}}
 	for _, failure := range []struct {
@@ -336,6 +349,8 @@ func (m *scenarioMock) serialReply(command string) string {
 		return "state: ready\nlink: up\naddress: 10.0.0.42/24"
 	case strings.HasPrefix(command, "remote key add "):
 		return m.add(command)
+	case command == "config set system.remote.enabled true; remote reload":
+		return "CONFIG_SET_OK\nservice=running enabled=true listener=listening settings=configured bind=0.0.0.0:22 user=user fingerprint=" + m.fingerprint + fmt.Sprintf(" generation=%d", m.generation)
 	case strings.Contains(command, "remote status"):
 		prefix := "GoOS\n"
 		if strings.Contains(command, "net status") {

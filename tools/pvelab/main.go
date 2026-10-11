@@ -6,6 +6,7 @@
 //
 //	pvelab doctor
 //	pvelab run --scenario smoke|linux|7zip [--keep] [--cores N] ...
+//	pvelab resume --run RUN_ID
 //	pvelab destroy --run RUN_ID
 //	pvelab cleanup --stale 6h [--yes]
 package main
@@ -27,6 +28,7 @@ const usage = `usage: pvelab <command> [flags]
 commands:
   doctor    check configuration, credentials, privileges, storage, and SSH
   run       boot a disposable VM and run a scenario
+  resume    rerun the saved scenario on a kept VM after verifying its source
   destroy   remove the resources of a run from its saved state
   cleanup   remove the resources of uncleaned runs older than --stale
 
@@ -63,11 +65,11 @@ func mainCode(args []string, stdout, stderr io.Writer) int {
 	com.register(fs)
 
 	var (
-		scenario, iso, disk, cpu, runID string
-		sockets, cores, memory          int
-		timeout, workloadTimeout, stale time.Duration
-		keep, requirePass, requireClean bool
-		yes                             bool
+		scenario, iso, disk, cpu, runID, sourceEvidenceSHA256 string
+		sockets, cores, memory                                int
+		timeout, workloadTimeout, stale                       time.Duration
+		keep, requirePass, requireClean                       bool
+		yes                                                   bool
 	)
 	switch command {
 	case "doctor":
@@ -85,6 +87,10 @@ func mainCode(args []string, stdout, stderr io.Writer) int {
 		fs.DurationVar(&workloadTimeout, "workload-timeout", 60*time.Second, "time a diagnostic workload may run")
 		fs.BoolVar(&keep, "keep", false, "keep the VM and its ISO for debugging (PVE_KEEP_VM)")
 		fs.BoolVar(&requirePass, "require-pass", false, "fail a diagnostic workload that does not complete")
+		fs.BoolVar(&requireClean, "require-clean", false, "refuse a working tree with uncommitted changes")
+	case "resume":
+		fs.StringVar(&runID, "run", "", "kept source run ID to resume")
+		fs.StringVar(&sourceEvidenceSHA256, "source-evidence-sha256", "", "trusted SHA-256 of retained source evidence")
 		fs.BoolVar(&requireClean, "require-clean", false, "refuse a working tree with uncommitted changes")
 	case "destroy":
 		fs.StringVar(&runID, "run", "", "run ID to destroy")
@@ -185,6 +191,20 @@ func mainCode(args []string, stdout, stderr io.Writer) int {
 			Scenario: scenario, ISO: iso, Disk: disk,
 			RequirePass: requirePass, RequireClean: requireClean, WorkloadTimeout: workloadTimeout,
 		})
+	case "resume":
+		if runID == "" {
+			fmt.Fprintln(stderr, "pvelab resume: --run RUN_ID is required")
+			return ExitConfig
+		}
+		if !requireClean {
+			fmt.Fprintln(stderr, "pvelab resume: --require-clean is required")
+			return ExitConfig
+		}
+		if !validSHA256(sourceEvidenceSHA256) {
+			fmt.Fprintln(stderr, "pvelab resume: --source-evidence-sha256 SHA256 is required")
+			return ExitConfig
+		}
+		return lab.Resume(ctx, runID, sourceEvidenceSHA256)
 	case "destroy":
 		if runID == "" {
 			fmt.Fprintln(stderr, "pvelab destroy: --run RUN_ID is required")

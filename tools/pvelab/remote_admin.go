@@ -181,7 +181,7 @@ func (remoteAdminScenario) Run(ctx context.Context, s *Session) (result Result, 
 	}
 	var status map[string]string
 	if err := check("serial-remote-ready", func() (string, error) {
-		out, err := s.Guest.Run(ctx, "config set system.remote.enabled true; remote reload; remote status", commandTimeout)
+		out, err := s.Guest.Run(ctx, "config set system.remote.enabled true; remote reload", commandTimeout)
 		if err != nil {
 			return out, err
 		}
@@ -551,8 +551,16 @@ func validateRemoteEvidence(dir string, report *Report, names []string) error {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return err
 	}
-	if state.RunID != report.RunID || state.GitSHA != report.Git.SHA || state.VMID != report.Proxmox.VMID || state.Node != report.Proxmox.Node {
-		return errors.New("state evidence does not match candidate/run/VM/node")
+	sourceSHA := report.Git.SHA
+	if resume := report.Resume; resume != nil {
+		if resume.SourceRunID != report.RunID || resume.SourceGitSHA == "" || !validSHA256(resume.SourceEvidenceSHA256) || resume.CandidateGitSHA != report.Git.SHA ||
+			resume.SourceISOSHA256 != report.Artifacts.ISOSHA256 || resume.SourceDiskSHA256 != report.Artifacts.DiskSHA256 {
+			return errors.New("resume provenance does not match candidate or source artifacts")
+		}
+		sourceSHA = resume.SourceGitSHA
+	}
+	if state.RunID != report.RunID || state.GitSHA != sourceSHA || state.VMID != report.Proxmox.VMID || state.Node != report.Proxmox.Node {
+		return errors.New("state evidence does not match source run, VM, or node")
 	}
 	var artifacts Artifacts
 	data, err = os.ReadFile(filepath.Join(dir, "artifacts.json"))
