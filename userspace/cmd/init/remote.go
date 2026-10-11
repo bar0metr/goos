@@ -77,6 +77,7 @@ func startRemote(ticks uint64) {
 // Each listener launch receives new brokers and a control endpoint. Only the
 // listener has this endpoint; workers get independently created channels.
 func prepareRemoteGrants(spec *supervisor.LaunchSpec) bool {
+	resetRemoteKeyGuard()
 	closeRemoteWorkers()
 	closeOpen(remoteControl)
 	remoteControl = 0
@@ -136,6 +137,9 @@ func pollRemoteListener() {
 		closeRemoteWorkers()
 		closeOpen(remoteControl)
 		remoteControl = 0
+		return
+	}
+	if remoteKeyControl(&message) {
 		return
 	}
 	var request remoteapi.WorkerRequest

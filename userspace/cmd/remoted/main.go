@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"goos/internal/capability"
@@ -234,10 +235,23 @@ func revision(deadline uint64) (uint64, error) {
 	return value.Value.Uint, nil
 }
 func reload() error {
+	if remoteUpdateBusy {
+		return errors.New("remote update busy")
+	}
+	remoteUpdateBusy = true
+	defer func() { remoteUpdateBusy = false }()
+	return reloadCandidate(nil, 0, "", &files)
+}
+func reloadCandidate(expected []byte, expectedRevision uint64, expectedPath string, keyReader interface {
+	Read(string, int) ([]byte, error)
+}) error {
 	deadline := remoteservice.Now() + budget
 	before, err := revision(deadline)
 	if err != nil {
 		return err
+	}
+	if expectedRevision != 0 && before != expectedRevision {
+		return errors.New("remote configuration ownership changed")
 	}
 	policy, err := remotepolicy.Load(func(key string) (config.Value, config.Status) {
 		var message ipc.Message
@@ -257,17 +271,25 @@ func reload() error {
 	if err != nil || after != before {
 		return errors.New("remote configuration changed during reload")
 	}
-	var authority ipc.Message
-	request := remoteapi.WorkerRequest{Operation: remoteapi.WorkerAuthority, HostPath: []byte(policy.HostKey), AuthorizedKeys: []byte(policy.AuthorizedKeys)}
-	if !workerCall(&request, nil, &authority) {
-		return errors.New("remote file authority unavailable")
-	}
-	newVFS, newConfig := authority.Handles[0], authority.Handles[1]
 	oldVFS, oldConfig := vfsChannel, configChannel
-	vfsChannel, configChannel = newVFS, newConfig
-	utility.BindVFS(newVFS)
+	var newVFS, newConfig handle.ID
+	authorityChanged := false
+	if expectedRevision == 0 {
+		var authority ipc.Message
+		request := remoteapi.WorkerRequest{Operation: remoteapi.WorkerAuthority, HostPath: []byte(policy.HostKey), AuthorizedKeys: []byte(policy.AuthorizedKeys)}
+		if !workerCall(&request, nil, &authority) {
+			return errors.New("remote file authority unavailable")
+		}
+		newVFS, newConfig = authority.Handles[0], authority.Handles[1]
+		vfsChannel, configChannel = newVFS, newConfig
+		utility.BindVFS(newVFS)
+		authorityChanged = true
+	}
 	committed := false
 	defer func() {
+		if !authorityChanged {
+			return
+		}
 		if committed {
 			sys.HandleClose(oldVFS)
 			sys.HandleClose(oldConfig)
@@ -278,18 +300,26 @@ func reload() error {
 			sys.HandleClose(newConfig)
 		}
 	}()
-	host, err := (&remotepolicy.HostStore{Files: &hostAdapter}).Load(policy.HostKey)
+	var host *remotepolicy.HostKey
+	if expectedRevision != 0 {
+		host, err = keyReloadHost(policy)
+	} else {
+		host, err = (&remotepolicy.HostStore{Files: &hostAdapter}).Load(policy.HostKey)
+	}
 	if err != nil {
 		return err
 	}
 	defer clear(host.Private)
-	keyData, err := files.Read(policy.AuthorizedKeys, remotepolicy.MaxAuthorizedKeysBytes)
+	keyData, err := keyReader.Read(policy.AuthorizedKeys, remotepolicy.MaxAuthorizedKeysBytes)
 	if errors.Is(err, remotepolicy.ErrNotFound) && !policy.Enabled {
 		keyData = nil
 		err = nil
 	}
 	if err != nil {
 		return err
+	}
+	if expectedRevision != 0 && (policy.AuthorizedKeys != expectedPath || !bytes.Equal(keyData, expected)) {
+		return errors.New("authorized key candidate ownership changed")
 	}
 	parsed, err := remotepolicy.ParseAuthorizedKeys(keyData)
 	if err != nil {
@@ -303,7 +333,10 @@ func reload() error {
 	if err != nil {
 		return err
 	}
-	identity, ok := identities.Reserve(host.Private)
+	identity, ok := identities.Current()
+	if expectedRevision == 0 {
+		identity, ok = identities.Reserve(host.Private)
+	}
 	if !ok {
 		return errors.New("remote identity capacity exhausted")
 	}
@@ -337,6 +370,16 @@ func reload() error {
 			closeEndpoint(replacement)
 		}
 		return errors.New("remote configuration changed before commit")
+	}
+	if expectedRevision != 0 {
+		persisted, check := keyReader.Read(expectedPath, remotepolicy.MaxAuthorizedKeysBytes)
+		checkedRevision, revisionErr := revision(remoteservice.Now() + budget)
+		if check != nil || revisionErr != nil || checkedRevision != before || !bytes.Equal(persisted, expected) {
+			if replacement != 0 {
+				closeEndpoint(replacement)
+			}
+			return errors.New("authorized key candidate changed before commit")
+		}
 	}
 	if !state.Commit(next) {
 		if replacement != 0 {
@@ -387,9 +430,13 @@ func serviceControl() {
 	}
 }
 func notice(message *ipc.Message) {
+	if reconcileKeyReply(message) {
+		return
+	}
 	if channel, ok := remoteapi.DecodeAdminNotice(message); ok {
 		for i := range admins {
 			if admins[i] == 0 {
+				adminKeyRequests[i].Reset()
 				admins[i] = channel
 				return
 			}
@@ -442,6 +489,9 @@ func workerCall(request *remoteapi.WorkerRequest, handles []handle.ID, out *ipc.
 			continue
 		}
 		if out.Correlation != correlation {
+			if reconcileKeyReply(out) {
+				continue
+			}
 			var closed remoteapi.WorkerReply
 			if remoteapi.DecodeWorkerReply(out, out.Correlation, remoteapi.WorkerClose, &closed) {
 				continue
@@ -523,7 +573,19 @@ func serviceAdmins() {
 			continue
 		}
 		op, ok := remoteapi.DecodeAdminRequest(&message)
+		var argument []byte
+		requestCorrelation := message.Correlation
 		if !ok {
+			var complete bool
+			op, argument, requestCorrelation, complete, ok = adminKeyRequests[i].Accept(&message)
+			if ok && !complete {
+				continue
+			}
+		} else if adminKeyRequests[i].Pending() {
+			ok = false
+		}
+		if !ok {
+			adminKeyRequests[i].Reset()
 			remoteservice.CloseHandles(&message)
 			sys.HandleClose(channel)
 			admins[i] = 0
@@ -531,7 +593,9 @@ func serviceAdmins() {
 		}
 		result := remoteapi.AdminOK
 		text := state.Status(pending, authenticated)
-		if op == remoteapi.AdminReload {
+		if op == remoteapi.AdminKeys || op == remoteapi.AdminKeyAdd || op == remoteapi.AdminKeyRemove {
+			result, text = keyAdmin(op, argument)
+		} else if op == remoteapi.AdminReload {
 			if err := reload(); err != nil {
 				state.Reject(err.Error())
 				result = remoteapi.AdminUnavailable
@@ -541,7 +605,8 @@ func serviceAdmins() {
 				text = state.Status(pending, authenticated)
 			}
 		}
-		if !sendAdminText(channel, op, result, text, message.Correlation) {
+		adminKeyRequests[i].Reset()
+		if !sendAdminText(channel, op, result, text, requestCorrelation) {
 			sys.HandleClose(channel)
 			admins[i] = 0
 		}
@@ -551,11 +616,12 @@ func sendAdminText(channel handle.ID, op remoteapi.AdminOperation, result remote
 	if len(text) > remoteapi.MaxStatus*remoteapi.MaxStatusParts {
 		return false
 	}
+	deadline := remoteservice.Now() + budget
 	for part := 0; part < remoteapi.MaxStatusParts; part++ {
 		n := min(len(text), remoteapi.MaxStatus)
 		var reply ipc.Message
 		more := len(text) > n
-		if !remoteapi.EncodeAdminPart(op, result, text[:n], more, correlation, &reply) || !remoteservice.Send(channel, &reply) {
+		if !remoteapi.EncodeAdminPart(op, result, text[:n], more, correlation, &reply) || !sendAdminWithin(channel, &reply, deadline) {
 			return false
 		}
 		text = text[n:]

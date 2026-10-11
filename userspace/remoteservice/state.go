@@ -109,9 +109,9 @@ func CoherentLoad(get remotepolicy.Getter) (remotepolicy.Policy, error) {
 }
 
 // Prepare validates keys and constructs a new generation before touching a
-// listener. Empty authorized_keys is valid only while disabled.
+// listener. Empty authorized_keys is a valid deny-all policy.
 func (s *State) Prepare(policy remotepolicy.Policy, host *remotepolicy.HostKey, keys []ed25519.PublicKey) (*Snapshot, error) {
-	if host == nil || len(host.Public) != ed25519.PublicKeySize || !remoteapi.ValidUsername([]byte(policy.User)) || len(keys) > remoteapi.MaxKeys || policy.Enabled && len(keys) == 0 {
+	if host == nil || len(host.Public) != ed25519.PublicKeySize || !remoteapi.ValidUsername([]byte(policy.User)) || len(keys) > remoteapi.MaxKeys {
 		return nil, errors.New("remote keys unavailable")
 	}
 	generation := uint64(1)
@@ -169,6 +169,18 @@ func (s *State) Status(pending, authenticated int) []byte {
 	text += " kex=" + remotepolicy.KEXAlgorithm + " cipher=" + remotepolicy.CipherAlgorithm + " host-key=" + remotepolicy.KeyAlgorithm + " user-key=" + remotepolicy.KeyAlgorithm + " source=system.remote generation=" + strconv.FormatUint(current.Worker.Generation, 10) + "\n"
 	return []byte(text)
 }
+
+// RetainedHost returns only the verified public identity for a key-only reload.
+// Configured host-path changes require an explicit full reload first. It never
+// reads host files, exposes private bytes, or creates a replacement identity.
+func (s *State) RetainedHost(path string) (*remotepolicy.HostKey, error) {
+	if s.Current == nil || s.Current.Policy.HostKey != path {
+		return nil, errors.New("host identity not current; use remote reload first")
+	}
+	public := append(ed25519.PublicKey(nil), s.Current.Worker.HostPublicKey[:]...)
+	return &remotepolicy.HostKey{Public: public, Fingerprint: s.Current.Fingerprint}, nil
+}
+
 func IdentityEqual(a, b *Snapshot) bool {
 	return a != nil && b != nil && a.Worker.HostPublicKey == b.Worker.HostPublicKey
 }
