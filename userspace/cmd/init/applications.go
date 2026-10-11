@@ -322,15 +322,15 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if addLinuxPath {
 		writer.Entry(execproto.LinuxPathVariable())
 	}
+	writer.Handle([]byte("in"), 0)
+	writer.Handle([]byte("stdout"), 0)
+	writer.Handle([]byte("stderr"), 0)
 	if useHostname {
 		writer.Handle([]byte("config"), 0)
 	}
 	if useResize {
 		writer.Handle([]byte(tty.ResizeRole), 0)
 	}
-	writer.Handle([]byte("in"), 0)
-	writer.Handle([]byte("stdout"), 0)
-	writer.Handle([]byte("stderr"), 0)
 	if useRemote {
 		writer.Handle([]byte("remote"), 0)
 	}
