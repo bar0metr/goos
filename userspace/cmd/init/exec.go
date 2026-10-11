@@ -14,6 +14,7 @@ import (
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/tty"
 	userwait "goos/userspace/wait"
 )
 
@@ -45,6 +46,17 @@ func pollExec(session *terminalSession) {
 	if !ok {
 		fatal("INIT_EXEC_CORRUPT\n")
 	}
+	if geometry, valid := tty.DecodeGeometryNotice(&message); valid {
+		// Remote geometry is owned by the validated worker, not its shell.
+		if remoteSession(session) == nil {
+			updateSessionGeometry(session, geometry)
+		}
+		return
+	}
+	if tty.IsRawReleaseNotice(&message) {
+		releaseSessionResize(session)
+		return
+	}
 	if execproto.IsControl(message) {
 		handleControl(message)
 		return
@@ -71,6 +83,7 @@ func pollExec(session *terminalSession) {
 		return
 	}
 	job.session = session
+	job.resizeReleased, job.resizeParent = false, false
 	job.active, job.orphaned, job.slot, job.correlation, job.request = true, false, slot, message.Correlation, request
 	beginJob(job)
 }
@@ -127,6 +140,8 @@ func finishJob(job *execJob) {
 		return
 	}
 	pid, launchStatus, exitCode := job.job.Result()
+	job.session.resizeOwner.Release(uint64(job.slot) + 1)
+	closeResize(&job.resize)
 	closeLauncher(&job.launcher)
 	job.active = false
 	if job.orphaned {
@@ -309,7 +324,19 @@ func (nativePipelineRunner) Launch(stage execproto.Stage, cwd []byte, environmen
 			launch = &job.launcher
 		}
 	}
-	return launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams, launch)
+	if job := launchingJob; job != nil && fromSearchPath {
+		granted, trusted := trustedGrants(stage.Path, execproto.OriginOf(stage.Path) == execproto.OriginArchive)
+		if trusted && supervisor.ResizesTerminal(job.request, granted) && !job.resizeReleased && resizeSessionAvailable(job.session) {
+			releaseSessionResize(job.session)
+			job.resizeReleased = false
+			job.session.resizeOwner.Start(uint64(job.slot)+1, job.request, granted)
+			launchingResize, launchingResizeSession = &job.resize, job.session
+			job.resizeParent = true
+		}
+	}
+	pid, process, status := launchApplication(stage.Path, command, cwd, stage.Arguments, environment, streams, launch)
+	launchingResize, launchingResizeSession = nil, nil
+	return pid, process, status
 }
 
 func (nativePipelineRunner) Wait(process handle.ID) uint64 { return waitApplicationExit(process) }

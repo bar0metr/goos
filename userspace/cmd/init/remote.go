@@ -351,6 +351,9 @@ func pollRemoteWorker(worker *remoteWorker) {
 		}
 		result = remoteRegistry.BeginOpen(worker.id, worker.owner, request.Geometry)
 		if result == remoteapi.ResultOK {
+			remoteGeometry(&worker.session, request.Geometry)
+		}
+		if result == remoteapi.ResultOK {
 			worker.opening = true
 			worker.requestCorrelation = message.Correlation
 			if !beginRemoteImage(worker, []byte(supervisor.ServicePath("shell", boot.Mode()))) {
@@ -364,6 +367,9 @@ func pollRemoteWorker(worker *remoteWorker) {
 			break
 		}
 		result = remoteRegistry.Resize(worker.id, worker.owner, request.Geometry)
+		if result == remoteapi.ResultOK {
+			remoteGeometry(&worker.session, request.Geometry)
+		}
 	case remoteapi.OperationClose:
 		if request.Session != worker.id {
 			result = remoteapi.ResultNotFound
@@ -469,6 +475,7 @@ func failRemoteOpen(worker *remoteWorker, result remoteapi.Result) {
 // The worker retains the reader until all queued output has been sent.
 func releaseRemoteShell(worker *remoteWorker) uint64 {
 	session := &worker.session
+	releaseSessionResize(session)
 	if session.shellProcess != 0 {
 		remoteKill(session.shellProcess)
 	}
@@ -765,6 +772,9 @@ func (nativeRemoteReleaser) Unmap(base, size uint64) bool {
 }
 
 func resetRemoteJob(job *execJob) {
+	closeResize(&job.resize)
+	closeResize(&job.launcher.resize)
+	job.resizeReleased, job.resizeParent = false, false
 	job.active, job.orphaned, job.preparing, job.cancelled = false, false, false, false
 	job.session = nil
 	job.request = execproto.Request{}

@@ -256,8 +256,10 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		return callIPC
 	case kcall.OperationStreamCreate, kcall.OperationStreamRead, kcall.OperationStreamWrite, kcall.OperationStreamWait:
 		return callStream
-	case kcall.OperationMemoryCreate, kcall.OperationHandleDuplicate:
+	case kcall.OperationMemoryCreate:
 		return callMemory
+	case kcall.OperationHandleDuplicate:
+		return callMemory | streams
 	case kcall.OperationExecutableCreate, kcall.OperationExecutableWrite, kcall.OperationExecutableSource:
 		return callExecFile
 	case kcall.OperationSystemInfo, kcall.OperationHandleInfo, kcall.OperationProcessInfo, kcall.OperationProcessWait,

@@ -9,13 +9,21 @@ import (
 
 const (
 	ProtocolID    = uint64(0x4752454d4f544531) // GREMOTE1
-	Version       = uint16(1)
+	Version       = uint16(2)
 	MaxSessions   = 4
 	MaxHandshakes = 2
 	MaxWorkers    = MaxSessions + MaxHandshakes
 	MaxTerm       = 64
-	requestSize   = 24
+	MaxCommand    = 4096
+	requestSize   = 32
 	replySize     = 24
+)
+
+type ExecutionMode uint8
+
+const (
+	ModeTerminal ExecutionMode = iota
+	ModeExec
 )
 
 type Operation uint8
@@ -41,6 +49,7 @@ const (
 
 // Geometry comes from a validated SSH pty-req or window-change.
 type Geometry struct {
+	Sequence uint64
 	Columns  uint16
 	Rows     uint16
 	Term     [MaxTerm]byte
@@ -53,12 +62,13 @@ func MakeGeometry(columns, rows uint32, term []byte) (Geometry, bool) {
 		return geometry, false
 	}
 	geometry.Columns, geometry.Rows = uint16(columns), uint16(rows)
+	geometry.Sequence = 1
 	geometry.TermSize = uint8(copy(geometry.Term[:], term))
 	return geometry, geometry.Valid()
 }
 
 func (geometry *Geometry) Valid() bool {
-	if geometry.Columns < 1 || geometry.Columns > 1000 || geometry.Rows < 1 || geometry.Rows > 1000 || geometry.TermSize == 0 || int(geometry.TermSize) > len(geometry.Term) {
+	if geometry.Sequence == 0 || geometry.Columns < 1 || geometry.Columns > 1000 || geometry.Rows < 1 || geometry.Rows > 1000 || geometry.TermSize == 0 || int(geometry.TermSize) > len(geometry.Term) {
 		return false
 	}
 	for _, value := range geometry.Term[:geometry.TermSize] {
@@ -71,17 +81,26 @@ func (geometry *Geometry) Valid() bool {
 
 // Request carries no executable, launch grants, or network endpoint.
 type Request struct {
-	Operation Operation
-	Session   uint64
-	Geometry  Geometry
+	Operation   Operation
+	Session     uint64
+	Geometry    Geometry
+	Mode        ExecutionMode
+	CommandSize uint16
+	Command     handle.ID
 }
 
 func validRequest(request *Request) bool {
+	if request.Mode > ModeExec || (request.Operation != OperationOpen && (request.Mode != ModeTerminal || request.CommandSize != 0 || request.Command != 0)) {
+		return false
+	}
 	switch request.Operation {
 	case OperationAuthenticate:
 		return request.Session == 0 && request.Geometry == (Geometry{})
 	case OperationOpen:
-		return request.Session == 0 && request.Geometry.Valid()
+		if request.Mode == ModeExec {
+			return request.Session == 0 && request.Geometry == (Geometry{}) && request.Command != 0 && request.CommandSize > 0 && int(request.CommandSize) <= MaxCommand
+		}
+		return request.Session == 0 && request.Geometry.Valid() && request.Command == 0 && request.CommandSize == 0
 	case OperationClose:
 		return request.Session != 0 && request.Geometry == (Geometry{})
 	case OperationGeometry:
@@ -97,49 +116,71 @@ func EncodeRequest(request *Request, correlation uint64, out *ipc.Message) bool 
 	*out = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: requestSize + uint16(request.Geometry.TermSize)}
 	out.Payload[0] = byte(request.Operation)
 	out.Payload[1] = request.Geometry.TermSize
+	out.Payload[2] = byte(request.Mode)
+	binary.LittleEndian.PutUint16(out.Payload[4:6], request.CommandSize)
+	if request.Mode == ModeExec {
+		out.HandleCount = 1
+		out.Handles[0] = request.Command
+	}
 	binary.LittleEndian.PutUint64(out.Payload[8:16], request.Session)
 	binary.LittleEndian.PutUint16(out.Payload[16:18], request.Geometry.Columns)
 	binary.LittleEndian.PutUint16(out.Payload[18:20], request.Geometry.Rows)
+	binary.LittleEndian.PutUint64(out.Payload[24:32], request.Geometry.Sequence)
 	copy(out.Payload[requestSize:], request.Geometry.Term[:request.Geometry.TermSize])
 	return true
 }
 
 func DecodeRequest(in *ipc.Message, out *Request) bool {
-	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindRequest || in.Correlation == 0 || in.HandleCount != 0 || in.PayloadSize < requestSize || in.PayloadSize > requestSize+MaxTerm {
+	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindRequest || in.Correlation == 0 || in.HandleCount > 1 || in.PayloadSize < requestSize || in.PayloadSize > requestSize+MaxTerm {
 		return false
 	}
 	var request Request
 	request.Operation = Operation(in.Payload[0])
 	request.Geometry.TermSize = in.Payload[1]
-	if int(request.Geometry.TermSize) > MaxTerm || in.PayloadSize != requestSize+uint16(request.Geometry.TermSize) || !zero(in.Payload[2:8]) || !zero(in.Payload[20:requestSize]) {
+	request.Mode = ExecutionMode(in.Payload[2])
+	request.CommandSize = binary.LittleEndian.Uint16(in.Payload[4:6])
+	if in.HandleCount == 1 {
+		request.Command = in.Handles[0]
+	}
+	if int(request.Geometry.TermSize) > MaxTerm || in.PayloadSize != requestSize+uint16(request.Geometry.TermSize) || in.Payload[3] != 0 || !zero(in.Payload[6:8]) || !zero(in.Payload[20:24]) {
 		return false
 	}
 	request.Session = binary.LittleEndian.Uint64(in.Payload[8:16])
 	request.Geometry.Columns = binary.LittleEndian.Uint16(in.Payload[16:18])
 	request.Geometry.Rows = binary.LittleEndian.Uint16(in.Payload[18:20])
+	request.Geometry.Sequence = binary.LittleEndian.Uint64(in.Payload[24:32])
 	copy(request.Geometry.Term[:], in.Payload[requestSize:in.PayloadSize])
-	if !validRequest(&request) {
+	if !validRequest(&request) || (request.Mode == ModeExec) != (in.HandleCount == 1) {
 		return false
 	}
 	*out = request
 	return true
 }
 
-// A successful Open transfers the GTTY server endpoint and stdout reader.
+// Open transfers GTTY and stdout for a terminal, or stdin writer, stdout
+// reader and stderr reader for exec. Exec carries a bounded command object;
+// neither mode permits selecting an executable or launch authority.
 type Reply struct {
 	Operation Operation
 	Result    Result
 	Session   uint64
+	Mode      ExecutionMode
 }
 
 func replyHandles(reply *Reply) int {
 	if reply.Operation == OperationOpen && reply.Result == ResultOK {
+		if reply.Mode == ModeExec {
+			return 3
+		}
 		return 2
 	}
 	return 0
 }
 
 func validReply(reply *Reply) bool {
+	if reply.Mode > ModeExec || reply.Operation != OperationOpen && reply.Mode != ModeTerminal {
+		return false
+	}
 	if reply.Operation < OperationOpen || reply.Operation > OperationAuthenticate || reply.Result > ResultPermissionDenied {
 		return false
 	}
@@ -162,22 +203,28 @@ func EncodeReply(reply *Reply, attachments []handle.ID, correlation uint64, out 
 	}
 	*out = ipc.Message{ProtocolID: ProtocolID, Version: Version, Kind: ipc.KindReply, Correlation: correlation, PayloadSize: replySize, HandleCount: uint8(len(attachments))}
 	out.Payload[0], out.Payload[1] = byte(reply.Operation), byte(reply.Result)
+	out.Payload[2] = byte(reply.Mode)
 	binary.LittleEndian.PutUint64(out.Payload[8:16], reply.Session)
 	copy(out.Handles[:], attachments)
 	return true
 }
 
 func DecodeReply(in *ipc.Message, correlation uint64, operation Operation, out *Reply) bool {
-	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindReply || correlation == 0 || in.Correlation != correlation || in.PayloadSize != replySize || !zero(in.Payload[2:8]) || !zero(in.Payload[16:replySize]) {
+	if in.ProtocolID != ProtocolID || in.Version != Version || in.Kind != ipc.KindReply || correlation == 0 || in.Correlation != correlation || in.PayloadSize != replySize || !zero(in.Payload[3:8]) || !zero(in.Payload[16:replySize]) {
 		return false
 	}
-	reply := Reply{Operation: Operation(in.Payload[0]), Result: Result(in.Payload[1]), Session: binary.LittleEndian.Uint64(in.Payload[8:16])}
+	reply := Reply{Operation: Operation(in.Payload[0]), Result: Result(in.Payload[1]), Mode: ExecutionMode(in.Payload[2]), Session: binary.LittleEndian.Uint64(in.Payload[8:16])}
 	if reply.Operation != operation || !validReply(&reply) || int(in.HandleCount) != replyHandles(&reply) {
 		return false
 	}
 	for index := 0; index < int(in.HandleCount); index++ {
-		if in.Handles[index] == 0 || index != 0 && in.Handles[index] == in.Handles[0] {
+		if in.Handles[index] == 0 {
 			return false
+		}
+		for previous := 0; previous < index; previous++ {
+			if in.Handles[index] == in.Handles[previous] {
+				return false
+			}
 		}
 	}
 	*out = reply

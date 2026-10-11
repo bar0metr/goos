@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"goos/kernel/vfs"
 	"goos/userspace/terminal"
+	"goos/userspace/tty"
 	"testing"
 )
 
@@ -186,5 +187,34 @@ func TestChangedFramesAllocateNothing(t *testing.T) {
 	})
 	if allocations != 0 || written == 0 {
 		t.Fatalf("allocations=%v written=%d", allocations, written)
+	}
+}
+
+func TestLiveResizeKeepsSameViewerAndBoundedStorage(t *testing.T) {
+	reader := &memoryReader{data: []byte("first\nsecond\nthird\n")}
+	var app App
+	if app.Init(reader, []byte("/file"), uint64(len(reader.data)), 80, 24, false) != vfs.StatusOK {
+		t.Fatal("init")
+	}
+	var snapshot tty.Snapshot
+	for _, geometry := range []tty.Geometry{
+		{Sequence: 1, Columns: 80, Rows: 24}, {Sequence: 2, Columns: 120, Rows: 40},
+		{Sequence: 4, Columns: 1000, Rows: 1000}, {Sequence: 3, Columns: 90, Rows: 30},
+	} {
+		if snapshot.Apply(geometry) {
+			app.Handle(terminal.Event{Key: terminal.KeyPosition, Column: geometry.Columns, Row: geometry.Rows})
+		}
+	}
+	if app.columns != MaxColumns || app.rows != MaxRows || app.reader != reader || app.Quit() {
+		t.Fatal("resize replaced viewer or lost clamps")
+	}
+	var outputStorage [4096]byte
+	output := terminal.NewOutput(outputStorage[:], func([]byte) {})
+	app.Render(&output)
+	var local App
+	local.Init(reader, []byte("/file"), uint64(len(reader.data)), 106, 33, true)
+	local.Handle(terminal.Event{Key: terminal.KeyPosition, Column: 120, Row: 40})
+	if local.columns != min(106, MaxColumns) || local.rows != min(33, MaxRows) {
+		t.Fatal("framebuffer accepted peer resize")
 	}
 }

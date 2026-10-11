@@ -1,6 +1,10 @@
 package stream
 
-import "goos/kernel/handle"
+import (
+	"goos/internal/capability"
+	"goos/kernel/handle"
+	"goos/kernel/kcall"
+)
 
 // The functions here are the whole of the kernel's handle accounting for
 // stream endpoints (ADR 0089). The invariant they keep is that an end's count
@@ -55,4 +59,32 @@ func (registry *Registry) CloseHandle(table *handle.Table, id handle.ID) (Closur
 		return Closure{}, false
 	}
 	return closure, true
+}
+
+// DuplicateHandle derives a stream endpoint and counts its retained reference.
+func (registry *Registry) DuplicateHandle(table *handle.Table, id handle.ID, rights capability.Rights) (handle.ID, kcall.Status) {
+	guard.Check()
+	typeID, original, found := table.Describe(id)
+	if !found {
+		return 0, kcall.StatusNotFound
+	}
+	if typeID != handle.TypeStream {
+		return 0, kcall.StatusUnsupported
+	}
+	derived, allowed := original.Derive(rights)
+	if rights == 0 || !allowed {
+		return 0, kcall.StatusPermissionDenied
+	}
+	if !registry.CanRetain(original.Object(), 1) {
+		return 0, kcall.StatusResourceExhausted
+	}
+	duplicate, inserted := table.Insert(typeID, derived)
+	if !inserted {
+		return 0, kcall.StatusResourceExhausted
+	}
+	if !registry.Placed(typeID, derived.Object()) {
+		table.Close(duplicate)
+		return 0, kcall.StatusResourceExhausted
+	}
+	return duplicate, kcall.StatusOK
 }

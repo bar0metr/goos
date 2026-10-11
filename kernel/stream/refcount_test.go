@@ -6,6 +6,7 @@ import (
 	"goos/internal/capability"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/kcall"
 	"goos/kernel/process"
 )
 
@@ -271,5 +272,108 @@ func TestSmallWritesAreAtomic(t *testing.T) {
 	stream.Read(make([]byte, AtomicWrite))
 	if status := stream.WriteStatus(); status != StatusOK {
 		t.Fatalf("readiness with room for an atomic write = %v", status)
+	}
+}
+
+func TestDuplicateStreamEndpointKeepsNarrowRightsAndReferences(t *testing.T) {
+	var registry Registry
+	var table handle.Table
+	id, reader, writer := created(t, &registry, &table)
+	duplicate, status := registry.DuplicateHandle(&table, reader, capability.Read|capability.Wait|capability.Transfer)
+	if status != kcall.StatusOK {
+		t.Fatalf("duplicate status %d", status)
+	}
+	readers, writers := references(t, &registry, id)
+	if readers != 2 || writers != 1 {
+		t.Fatal("duplicate not retained")
+	}
+	if _, status := registry.DuplicateHandle(&table, reader, capability.Write); status != kcall.StatusPermissionDenied {
+		t.Fatal("reader gained writer authority")
+	}
+	if _, found := table.Lookup(duplicate, handle.TypeStream, capability.Write); found {
+		t.Fatal("duplicate can write")
+	}
+	if _, closed := registry.CloseHandle(&table, reader); !closed {
+		t.Fatal("creator reader close")
+	}
+	stream, _ := registry.Lookup(id)
+	if !stream.readerOpen {
+		t.Fatal("shared reader closed with creator")
+	}
+	registry.CloseHandle(&table, writer)
+	closure, closed := registry.CloseHandle(&table, duplicate)
+	if !closed || !closure.Closed {
+		t.Fatal("last duplicate not closed")
+	}
+	if _, released := registry.Release(id); !released {
+		t.Fatal("stream allocation leaked")
+	}
+}
+
+func TestResizeStreamRepeatedReapAndDisconnectReturnHandleBudget(t *testing.T) {
+	var registry Registry
+	var parent, child handle.Table
+	parentBudget, childBudget := parent.Available(), child.Available()
+	for iteration := 0; iteration < 128; iteration++ {
+		id, reader, writer := created(t, &registry, &parent)
+		receiver := copyHandle(t, &registry, &parent, &child, reader, capability.Read|capability.Wait)
+		if iteration%2 == 0 {
+			registry.CloseHandle(&child, receiver)
+			registry.CloseHandle(&parent, reader)
+			registry.CloseHandle(&parent, writer)
+		} else {
+			registry.CloseHandle(&parent, writer)
+			registry.CloseHandle(&parent, reader)
+			registry.CloseHandle(&child, receiver)
+		}
+		if _, released := registry.Release(id); !released {
+			t.Fatalf("stream leaked iteration%d", iteration)
+		}
+		if parent.Available() != parentBudget || child.Available() != childBudget {
+			t.Fatalf("handle budget leaked iteration%d", iteration)
+		}
+	}
+}
+
+func TestRestoredResizeReceiverTransfersAsReadWaitAndReleases(t *testing.T) {
+	var registry Registry
+	var supervisor, parent handle.Table
+	id, reader, writer := created(t, &registry, &supervisor)
+	copy, status := registry.DuplicateHandle(&supervisor, reader, capability.Read|capability.Wait|capability.Transfer)
+	if status != kcall.StatusOK {
+		t.Fatal("duplicate")
+	}
+	typeID, cap, found := supervisor.Describe(copy)
+	if !found {
+		t.Fatal("duplicate absent")
+	}
+	channel := ipc.NewChannel()
+	message := ipc.Message{ProtocolID: 1, Version: 1, Kind: ipc.KindNotification}
+	transfers := []ipc.Transfer{{Handle: copy, Type: typeID, Rights: cap.Rights() &^ capability.Transfer}}
+	if channel.Send(0, message, &supervisor, &parent, transfers) != ipc.StatusOK {
+		t.Fatal("restore transfer")
+	}
+	if !registry.Placed(typeID, cap.Object()) {
+		t.Fatal("recipient reference")
+	}
+	registry.CloseHandle(&supervisor, copy)
+	received, receiveStatus := channel.Receive(1)
+	if receiveStatus != ipc.StatusOK {
+		t.Fatal("restore notice")
+	}
+	receiver := received.Handles[0]
+	if _, valid := parent.Lookup(receiver, handle.TypeStream, capability.Read|capability.Wait); !valid {
+		t.Fatal("receive rights missing")
+	}
+	for _, forbidden := range []capability.Rights{capability.Write, capability.Transfer} {
+		if _, valid := parent.Lookup(receiver, handle.TypeStream, forbidden); valid {
+			t.Fatal("restored receiver has extra authority")
+		}
+	}
+	registry.CloseHandle(&supervisor, writer)
+	registry.CloseHandle(&supervisor, reader)
+	registry.CloseHandle(&parent, receiver)
+	if _, released := registry.Release(id); !released {
+		t.Fatal("restored receiver leaked allocation")
 	}
 }

@@ -158,15 +158,19 @@ func userspaceMain() {
 				}
 				geometry = next
 				if terminal != 0 {
-					if !engine.SetRemoteGeometry(int(next.Columns), int(next.Rows), next.Term[:next.TermSize]) {
+					if !installGeometry(engine, &next) {
 						finish(1)
 					}
+					geometry = next
 					if _, _, ok := call(remoteapi.Request{Operation: remoteapi.OperationGeometry, Session: token, Geometry: next}); !ok {
 						finish(1)
 					}
 				}
 			case sshserver.Shell:
 				if terminal != 0 {
+					finish(1)
+				}
+				if !installGeometry(engine, &geometry) {
 					finish(1)
 				}
 				opened, attachments, ok := call(remoteapi.Request{Operation: remoteapi.OperationOpen, Geometry: geometry})
@@ -176,9 +180,6 @@ func userspaceMain() {
 				}
 				terminal, stdout = attachments[0], attachments[1]
 				syslog.Info("remote terminal opened", syslog.Uint("session", token), syslog.Uint("columns", uint64(geometry.Columns)), syslog.Uint("rows", uint64(geometry.Rows)))
-				if !engine.SetRemoteGeometry(int(geometry.Columns), int(geometry.Rows), geometry.Term[:geometry.TermSize]) {
-					finish(1)
-				}
 			case sshserver.Data:
 				if ending || terminalGone {
 					break
@@ -202,6 +203,9 @@ func userspaceMain() {
 			if engine.Failed() || !drainOutput() {
 				finish(1)
 			}
+		}
+		if terminal != 0 && !terminalGone {
+			engine.FlushGeometry()
 		}
 		need := server.NeedInput()
 		if need > 0 {
@@ -274,6 +278,9 @@ func userspaceMain() {
 			}
 			if terminal != 0 && !terminalGone {
 				interests[count] = sys.Interest{Handle: terminal, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				if engine.GeometryPending() {
+					interests[count].Events |= kcall.WaitWritable
+				}
 				count++
 			}
 			if stdout != 0 && output.Free() >= 1024 {
@@ -316,7 +323,7 @@ func serviceStdout() (pending, activity bool) {
 
 func readWorkerStdout(buffer []byte) (int, kcall.Status) { return sys.StreamRead(stdout, buffer) }
 func consumeWorkerStdout(buffer []byte)                  { engine.Output(buffer) }
-func workerOutputFree() int                             { return output.Free() }
+func workerOutputFree() int                              { return output.Free() }
 func call(request remoteapi.Request) (remoteapi.Reply, [2]handle.ID, bool) {
 	var message ipc.Message
 	var reply remoteapi.Reply
@@ -409,6 +416,9 @@ func awaitPeerClose(deadline uint64) {
 		}
 		if event.Kind != sshserver.NeedInput {
 			continue
+		}
+		if terminal != 0 && !terminalGone {
+			engine.FlushGeometry()
 		}
 		need := server.NeedInput()
 		if need < 1 || need > len(input) {

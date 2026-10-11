@@ -67,6 +67,7 @@ func Run(manifest commands.Manifest, main func(startup.Data)) {
 	vfsEndpoint, vfsFound := data.Handle("vfs")
 	stdinHandle, stdoutHandle, stderrHandle, vfsHandle = uint64(stdin), uint64(stdout), uint64(stderr), uint64(vfsEndpoint)
 	launchHandle, _ = data.Handle("launch")
+	bindResize(data)
 	networkHandle, _ = data.Handle("net")
 	resolverHandle, _ = data.Handle("resolve")
 	commandName, current = data.Command(), manifest
