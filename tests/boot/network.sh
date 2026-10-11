@@ -48,10 +48,14 @@ fail() {
 	exit 1
 }
 
+serial_lines() { # log; preserve raw evidence, normalize terminal CRLF for checks
+	awk '{ sub(/\r$/, ""); print }' "$1"
+}
+
 wait_for() { # pattern timeout log
 	elapsed=0
 	while [ "$elapsed" -lt "$2" ]; do
-		grep -q -- "$1" "$3" 2>/dev/null && return 0
+		serial_lines "$3" 2>/dev/null | grep -q -- "$1" && return 0
 		sleep 1
 		elapsed=$((elapsed + 1))
 	done
@@ -62,7 +66,7 @@ wait_for() { # pattern timeout log
 # it typed and before the next prompt. A command typed twice is told apart
 # by its trailing marker comment-free twin, so each typed line is unique.
 window() { # log command
-	awk -v command="$2" 'seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }' "$1"
+	serial_lines "$1" | awk -v command="$2" 'seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }'
 }
 
 require_after() { # name command pattern log
@@ -94,7 +98,7 @@ forbid_after() { # name command pattern log
 }
 
 require() { # name pattern log
-	grep -q -- "$2" "$3" || fail "$1" "$2" "$3"
+	serial_lines "$3" | grep -q -- "$2" || fail "$1" "$2" "$3"
 	checks=$((checks + 1))
 }
 

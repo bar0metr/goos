@@ -327,6 +327,14 @@ and expected authentication failures. Retain the VM for manual validation and
 save the report, serial log, candidate SHA and artifact hashes. Check reboot
 and poweroff on that same VM; record its final power state.
 
+The extended `make test-remote VALIDATION=1` run on 2026-10-11 passed 210
+assertions across two persistent boots. It verified non-PTY exec, separate output
+streams and status, bounded administration commands, durable hostname recovery,
+key mutations and new-admission authentication, structured log selection and
+local/SSH follow cancellation, and two live resizes of the same viewer process.
+The network/console-GUI regressions and exact-candidate Proxmox run are separate
+gates; this result does not establish their outcome.
+
 The earlier `make test-remote VALIDATION=1` run on 2026-10-10 passed 76 assertions
 across both boots. The headless Q35/TCG run verified degraded-start recovery, corrupt identity
 retention, a custom SSH login label with an independent authorized-key path, and
