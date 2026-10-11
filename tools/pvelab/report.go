@@ -130,8 +130,14 @@ type Report struct {
 	Error    string   `json:"error,omitempty"`
 	Checks   []string `json:"checks,omitempty"`
 
-	Workload *Workload  `json:"workload,omitempty"`
-	Linux    *DiagLinux `json:"linux,omitempty"`
+	Workload *Workload          `json:"workload,omitempty"`
+	Linux    *DiagLinux         `json:"linux,omitempty"`
+	Remote   *RemoteAdminReport `json:"remote_admin,omitempty"`
+	// Make/go run may wrap this status. The outer caller records its own
+	// status separately; pvelab cannot observe the process that invoked it.
+	ToolExitStatus  int    `json:"tool_exit_status"`
+	OuterExitStatus *int   `json:"outer_exit_status"`
+	ExitStatusNote  string `json:"exit_status_note,omitempty"`
 
 	Kept    bool   `json:"kept"`
 	Cleanup string `json:"cleanup"`

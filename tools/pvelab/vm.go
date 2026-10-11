@@ -392,12 +392,16 @@ type RunOptions struct {
 // cleaned or, with --keep, reported for later destroy.
 func (l *Lab) Run(ctx context.Context, opts RunOptions) int {
 	scenario := scenarios[opts.Scenario]
+	if opts.Scenario == "remote-admin" && l.cfg.NetBridge == "" {
+		l.log.Infof("error: remote-admin requires a reachable bridge; set PVE_NET_BRIDGE (for example vmbr0) before provisioning")
+		return ExitConfig
+	}
 	git, err := ReadGit(l.cfg.RepoRoot)
 	if err != nil {
 		l.log.Infof("error: git: %v", err)
 		return ExitConfig
 	}
-	if opts.RequireClean && git.Dirty {
+	if (opts.RequireClean || opts.Scenario == "remote-admin") && git.Dirty {
 		l.log.Infof("error: the working tree has uncommitted changes and --require-clean is set")
 		return ExitConfig
 	}
@@ -474,8 +478,11 @@ func (l *Lab) Run(ctx context.Context, opts RunOptions) int {
 	} else {
 		report.Result = string(result)
 	}
+	report.ToolExitStatus = code
+	report.ExitStatusNote = "tool_exit_status is pvelab's inner status; record the outer Make/go run status separately"
 	if err := report.Write(st.Dir()); err != nil {
 		l.log.Infof("error: writing report: %v", err)
+		code = ExitInfra
 	}
 	if st.Kept {
 		l.printKept(st)
@@ -485,7 +492,7 @@ func (l *Lab) Run(ctx context.Context, opts RunOptions) int {
 	return code
 }
 
-func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOptions, scenario Scenario) (Result, error) {
+func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOptions, scenario Scenario) (result Result, runErr error) {
 	version, err := l.api.Version(ctx)
 	if err != nil {
 		return "", fail(ClassInfra, "api", err)
@@ -501,7 +508,9 @@ func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOp
 	}
 	report.Artifacts.ISOSHA256 = artifacts.ISO.SHA256
 	report.Artifacts.DiskSHA256 = artifacts.Disk.SHA256
-	writeRunFile(st.Dir(), "artifacts.json", artifacts)
+	if err := writeRunFile(st.Dir(), "artifacts.json", artifacts); err != nil {
+		return "", fail(ClassInfra, "artifact-evidence", err)
+	}
 	if err := st.Advance(PhaseArtifactsReady); err != nil {
 		return "", fail(ClassInfra, "state", err)
 	}
@@ -525,8 +534,12 @@ func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOp
 	if err != nil {
 		return "", err
 	}
-	writeRunFile(st.Dir(), "vm-config.json", vmConfig)
-	writeRunFile(st.Dir(), "host-info.json", l.HostInfo(ctx, version.Version))
+	if err := writeRunFile(st.Dir(), "vm-config.json", vmConfig); err != nil {
+		return "", fail(ClassInfra, "vm-evidence", err)
+	}
+	if err := writeRunFile(st.Dir(), "host-info.json", l.HostInfo(ctx, version.Version)); err != nil {
+		return "", fail(ClassInfra, "host-evidence", err)
+	}
 
 	// The console connects before the VM starts and waits for its socket,
 	// so the serial log has the whole boot.
@@ -534,7 +547,12 @@ func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOp
 	if err != nil {
 		return "", fail(ClassInfra, "console", err)
 	}
-	defer console.Close()
+	defer func() {
+		if err := console.Close(); err != nil {
+			runErr = errors.Join(runErr, fail(ClassInfra, "serial-evidence", err))
+			result = ""
+		}
+	}()
 	if err := l.StartVM(ctx, st); err != nil {
 		return "", err
 	}
@@ -558,9 +576,68 @@ func (l *Lab) execute(ctx context.Context, st *State, report *Report, opts RunOp
 			s, err := l.api.VMStatus(ctx, st.VMID)
 			return s.Status, err
 		},
+		EvidenceDir: st.Dir(), HostRunner: runHostCommand, OpenTerminal: openGuestTerminal,
+		ReconnectSerial: func(ctx context.Context) error {
+			if err := console.Close(); err != nil {
+				return err
+			}
+			var err error
+			next, err := AttachSerial(l.ssh, st.VMID, filepath.Join(st.Dir(), "serial.log"))
+			if err != nil {
+				return err
+			}
+			console = next
+			guest.con = console
+			// Reboot may keep QEMU's serial socket alive. Probe the new transport
+			// rather than requiring boot bytes that arrived before reattachment.
+			if err := console.WriteLine(""); err != nil {
+				return err
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, l.cfg.Timeout)
+			defer cancel()
+			which, _, err := console.ReadUntilAny(probeCtx, []byte("\n"+shellPrompt), []byte(kernelPanic))
+			if err == nil && which == 1 {
+				return failf(ClassBoot, "serial-reconnect", "kernel panic after reconnect")
+			}
+			return err
+		},
+		StartRetained: func(ctx context.Context) error {
+			vm, err := l.api.ClusterVM(ctx, st.VMID)
+			if err != nil {
+				return err
+			}
+			if vm == nil {
+				return errNotOwned
+			}
+			config, err := l.api.VMConfig(ctx, st.VMID)
+			if err != nil {
+				return err
+			}
+			if problems := ownershipProblems(st, config, vm.Pool); len(problems) > 0 {
+				return fmt.Errorf("%w: %s", errNotOwned, strings.Join(problems, "; "))
+			}
+			for _, drive := range []string{"virtio0", "ide2", "efidisk0"} {
+				if volumeID(config[drive]) != volumeID(vmConfig[drive]) {
+					return fmt.Errorf("%w: retained %s changed", errNotOwned, drive)
+				}
+			}
+			if err := console.Close(); err != nil {
+				return err
+			}
+			next, err := AttachSerial(l.ssh, st.VMID, filepath.Join(st.Dir(), "serial.log"))
+			if err != nil {
+				return err
+			}
+			console = next
+			guest.con = console
+			if err := l.StartVM(ctx, st); err != nil {
+				return err
+			}
+			return guest.WaitBoot(ctx, l.cfg.Timeout)
+		},
 		logf: l.log.Debugf,
 	}
-	result, err := scenario.Run(ctx, session)
+	result, err = scenario.Run(ctx, session)
 	if ctx.Err() != nil && err != nil {
 		return "", fail(ClassInfra, "interrupted", ctx.Err())
 	}
