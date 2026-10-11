@@ -659,6 +659,37 @@ try:
     config("enabled", "true")
     reload_ok()
     status(enabled="true", listener="listening", bind="0.0.0.0:2222")
+    if os.environ.get("GOOS_REMOTE_SINGLE_BOOT") == "1":
+        serial_output = console("net status")
+        require("serial.column-zero", re.search(rb"(?<!\r)\n", serial_output) is None,
+                "COM1 writes CRLF for every output line")
+        session = Terminal(ports[1], "polish-log")
+        session.wait(PROMPT)
+        log_output = session.command("log")
+        require("terminal.log-lines", b"remote connection admitted worker=" in log_output,
+                "SSH log keeps each record intact across stdout reads")
+        session.send(b"exit\n")
+        wait_until(lambda: session.process.poll() is not None, "exit closes remote shell", 15)
+        session.pump()
+        require("terminal.exit", session.process.returncode == 0,
+                "exit sends successful SSH session termination")
+        counts()
+        session = Terminal(ports[1], "polish-poweroff")
+        session.wait(PROMPT)
+        session.send(b"poweroff\n")
+        wait_until(lambda: session.process.poll() is not None, "poweroff closes SSH", 15)
+        session.pump()
+        require("terminal.poweroff-close", session.process.returncode == 0 and
+                b"Operation timed out" not in session.error_path.read_bytes() and
+                b"Broken pipe" not in session.error_path.read_bytes(),
+                "requesting OpenSSH session closes before machine power-off")
+        code = guest.wait(timeout=30)
+        serial.close()
+        guest, serial = None, None
+        require("boot1.poweroff", code == 0, "guest powered off after SSH close")
+        require("boot-budget", boot_number == 1, "one guest boot")
+        print(f"remote: {checks} assertions passed; one boot\nremote report: {work}")
+        sys.exit(0)
     poweroff()
 
     boot()

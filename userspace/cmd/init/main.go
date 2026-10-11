@@ -173,6 +173,7 @@ func userspaceMain() {
 		if supervisionComplete {
 			now, _ := sys.ClockRead()
 			expireRemoteFills(now)
+			finishPendingShutdown()
 		}
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
@@ -246,6 +247,9 @@ func userspaceMain() {
 			}
 			if remaining, pending := fillTimeout(); pending && (!restarting || remaining < timeout) {
 				timeout, restarting = remaining, false
+			}
+			if remaining, pending := shutdownTimeout(); pending && remaining < timeout {
+				timeout = remaining
 			}
 			result, status := userwait.Any(&interests, count, timeout)
 			if status == kcall.StatusTimeout {

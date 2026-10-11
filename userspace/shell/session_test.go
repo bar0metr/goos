@@ -15,3 +15,11 @@ func TestOnlyRemoteSessionEndsOnCookedEOF(t *testing.T) {
 		}
 	}
 }
+
+func TestExitIsRemoteOnly(t *testing.T) {
+	for _, session := range []string{"", "local", "remote", "remotely"} {
+		if got := RemoteSession([]byte(session)); got != (session == "remote") {
+			t.Fatalf("session %q: remote=%t", session, got)
+		}
+	}
+}

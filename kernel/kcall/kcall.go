@@ -88,6 +88,8 @@ const (
 	// OperationRandomRead fills a buffer of at most MaxRandomRead bytes from
 	// the kernel's generator (ADR 0185). It needs no capability.
 	OperationRandomRead
+	// OperationPowerOffReady checks ACPI S5 support with system authority.
+	OperationPowerOffReady
 )
 
 // MaxRandomRead bounds one RandomRead.
@@ -176,6 +178,7 @@ type Handler interface {
 	RandomRead(address uint64, length uint64) Status
 	ValidationFault(device uint64) Status
 	SystemPowerOff(device uint64) Status
+	PowerOffReady(device uint64) Status
 	ExecutableCreate(device uint64, size uint64, address uint64) Status
 	ExecutableWrite(executable uint64, address uint64, length uint64) Status
 	ExecutableSource(device uint64, session uint64, descriptor uint64) Status
@@ -317,6 +320,8 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ValidationFault(request.Arg0)}
 	case OperationSystemPowerOff:
 		return Result{Status: handler.SystemPowerOff(request.Arg0)}
+	case OperationPowerOffReady:
+		return Result{Status: handler.PowerOffReady(request.Arg0)}
 	case OperationExecutableCreate:
 		return Result{Status: handler.ExecutableCreate(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationExecutableWrite:

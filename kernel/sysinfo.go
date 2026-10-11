@@ -114,6 +114,18 @@ var (
 // needs the system-control capability, which only PID 1 holds, and does not
 // return when it works. Without the ACPI tables it answers Unsupported.
 func (handler nativeCallHandler) SystemPowerOff(device uint64) kcall.Status {
+	if status := handler.PowerOffReady(device); status != kcall.StatusOK {
+		return status
+	}
+	owner, _ := handler.self()
+	kernelLogUint(logfmt.Info, "system power off", "pid", uint64(owner.ID()))
+	amd64.PortWrite(systemPowerOff.Port, 2, uint32(systemPowerOff.Value))
+	// The write takes effect at once; a machine still running has ignored it.
+	return kcall.StatusIOError
+}
+
+// PowerOffReady checks authority and ACPI S5 support without acting on it.
+func (handler nativeCallHandler) PowerOffReady(device uint64) kcall.Status {
 	owner, found := handler.self()
 	if !found {
 		return kcall.StatusPermissionDenied
@@ -125,10 +137,7 @@ func (handler nativeCallHandler) SystemPowerOff(device uint64) kcall.Status {
 	if !systemPowerOffFound {
 		return kcall.StatusUnsupported
 	}
-	kernelLogUint(logfmt.Info, "system power off", "pid", uint64(owner.ID()))
-	amd64.PortWrite(systemPowerOff.Port, 2, uint32(systemPowerOff.Value))
-	// The write takes effect at once; a machine still running has ignored it.
-	return kcall.StatusIOError
+	return kcall.StatusOK
 }
 
 const deviceSystemControl = device.SystemControlObject

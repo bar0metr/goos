@@ -170,9 +170,14 @@ func printServices() {
 	}
 }
 
-// shutDown asks PID 1 to reboot or power off. Only a failure is answered.
+// shutDown asks PID 1 to reboot or power off. Remote success closes the shell.
 func shutDown(operation execproto.ControlOperation, name string) {
 	reply, ok := controlExchange(operation, 0)
+	if status, valid := execproto.DecodeControlStatus(reply); ok && valid && status == execproto.ControlAccepted {
+		flushOutput()
+		sys.Exit(0)
+		return
+	}
 	if !ok || reply.PayloadSize != 1 || int(reply.Payload[0]) >= len(controlStatus) || reply.Payload[0] == 0 {
 		write(name)
 		write(": no reply\n")

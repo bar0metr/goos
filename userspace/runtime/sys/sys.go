@@ -372,6 +372,9 @@ func SystemReset(device handle.ID) kcall.Status { return status(systemReset(uint
 // capability.
 func SystemPowerOff(device handle.ID) kcall.Status { return status(systemPowerOff(uint64(device))) }
 
+// PowerOffReady checks whether the machine has an ACPI power-off method.
+func PowerOffReady(device handle.ID) kcall.Status { return status(powerOffReady(uint64(device))) }
+
 // ValidationFault overflows the caller's kernel stack on purpose; only the
 // validation build accepts it.
 func ValidationFault(device handle.ID) kcall.Status { return status(validationFault(uint64(device))) }

@@ -189,7 +189,7 @@ var (
 	handleTypes    = [...]string{"invalid", "process", "task", "memory", "channel", "device", "irq", "stream"}
 	rightNames     = [...]string{"read", "write", "execute", "transfer", "wait"}
 	serviceStates  = [...]string{"registered", "blocked", "starting", "running", "stopped", "failed"}
-	controlStatus  = [...]string{"", "storage sync failed", "refused by the machine", "request rejected", "not found", "not supported on this machine"}
+	controlStatus  = [...]string{"", "storage sync failed", "refused by the machine", "request rejected", "not found", "not supported on this machine", "accepted"}
 	serviceEntries [execproto.MaxServiceEntries]execproto.ServiceEntry
 )
 

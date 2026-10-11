@@ -13,6 +13,7 @@ import (
 
 var (
 	serial       = amd64.NewCOM1()
+	serialLines  serialNewlines
 	graphical    framebuffer.Terminal
 	graphicsLive bool
 )
@@ -57,12 +58,29 @@ func flushLine(line *pendingLine) {
 }
 
 func emit(value []byte) {
-	for _, item := range value {
-		serial.WriteByte(item)
-	}
+	serialBytes(value)
 	if graphicsLive {
 		graphical.Write(value)
 		graphical.RefreshValidationMarker()
+	}
+}
+
+func serialByte(item byte) {
+	if serialLines.insertCR(item) {
+		serial.WriteByte('\r')
+	}
+	serial.WriteByte(item)
+}
+
+func serialBytes(value []byte) {
+	for _, item := range value {
+		serialByte(item)
+	}
+}
+
+func serialString(value string) {
+	for index := 0; index < len(value); index++ {
+		serialByte(value[index])
 	}
 }
 
@@ -130,12 +148,12 @@ func Panic(message string) {
 		}
 	}
 	for _, item := range line.data[:line.length] {
-		serial.WriteByte(item)
+		serialByte(item)
 	}
 	line.length = 0
-	serial.WriteString("PANIC: ")
-	serial.WriteString(message)
-	serial.WriteString("\n")
+	serialString("PANIC: ")
+	serialString(message)
+	serialString("\n")
 	if graphicsLive {
 		graphical.WriteString("PANIC: ")
 		graphical.WriteString(message)
@@ -151,9 +169,7 @@ func Panic(message string) {
 func WriteSerial(value []byte) {
 	flags := amd64.DisableInterrupts()
 	outputLock.Lock()
-	for _, item := range value {
-		serial.WriteByte(item)
-	}
+	serialBytes(value)
 	outputLock.Unlock()
 	amd64.RestoreInterrupts(flags)
 }

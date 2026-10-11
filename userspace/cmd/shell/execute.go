@@ -120,6 +120,15 @@ func executeCommand(line []byte) {
 		shutDown(execproto.ControlReboot, "reboot")
 	case "poweroff":
 		shutDown(execproto.ControlPowerOff, "poweroff")
+	case "exit":
+		session, _ := startupData.Env("GOOS_SESSION")
+		if !shellcmd.RemoteSession(session) {
+			write("exit: not a remote session\n")
+			break
+		}
+		flushOutput()
+		sys.Exit(0)
+		return
 	case "handles":
 		printHandles(false)
 	case "caps":
