@@ -660,6 +660,32 @@ IPv6, encrypted DNS, revocation checks, HTTP/2, QUIC and a narrower VFS root-rea
 authority remain separate work. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
 and [native evidence](crypto-feasibility.md).
 
+### GoOS 0.2.6: native remote administration
+
+Keep SSH on the existing native shell, stream and terminal paths. Interactive
+PTY sessions support `exit`, graceful remote reboot/poweroff, and sequence-ordered
+live resize of the current raw foreground application. Non-PTY exec uses the
+native parser, separate stdin/stdout/stderr and actual command status; PTY exec
+and one-shot background jobs remain outside the supported surface.
+
+Eight manifest-backed images provide `head`, `tail`, `grep`, `wc`, `find`,
+`hexdump`, `hostname` and UTC `date`. Hostname uses a narrow acknowledged durable
+config operation; existing `config set` semantics do not change. The shell log
+builtin adds exact structured filters, newest-N selection and cursor-aware
+blocking follow with Ctrl-C and independent readers.
+
+`remote keys`, `remote key add` and fingerprint-based removal manage the bounded
+Ed25519 authorized-key file and reload policy. PID 1 confines management to the
+configured public-key file and transactional siblings; shell and child host-key
+protection remains intact.
+
+Acceptance requires focused host/race tests, the extended two-boot remote gate,
+network and console-GUI regression gates, then one kept Proxmox VM on the exact
+candidate SHA. Pin host identity from trusted serial status and retain reports,
+serial output and artifact hashes. See [remote access](remote-access.md).
+SFTP/SCP, forwarding, POSIX shells/PTYS, IPv6, dynamic linking and Linux networking
+syscalls remain outside this work.
+
 ### Next: a Linux terminal
 
 A later release will give Linux programs a terminal: a terminal descriptor,
