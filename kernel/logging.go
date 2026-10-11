@@ -22,7 +22,8 @@ const consoleThreshold = logfmt.Warn
 // The kernel leaks every heap allocation, so its own log path uses fixed
 // buffers and never converts a string to a slice.
 var (
-	systemLog klog.Ring
+	systemLog       klog.Ring
+	logNotification klog.Notification
 
 	kernelName = []byte("kernel")
 )
@@ -33,6 +34,7 @@ func logRecord(record logfmt.Record) {
 		record.Time = value
 	}
 	systemLog.Append(record)
+	logNotification.Notify()
 	if record.Level >= consoleThreshold {
 		size := logfmt.Format(record, local.logText[:])
 		console := kernelconsole.New()
@@ -157,4 +159,36 @@ func kernelLogGrant(message string, name string) {
 	size := copy(local.logGrant[:], name)
 	fields, _ := logfmt.AppendField(local.logFields[:0], "grant", local.logGrant[:size])
 	kernelLog(logfmt.Warn, message, fields)
+}
+
+// LogReadSequence releases the ring lock before encoding or copying to userspace.
+func (handler nativeCallHandler) LogReadSequence(device, cursor, address uint64) kcall.Status {
+	local := thisCPU()
+	if !handler.logAuthority(device) {
+		return kcall.StatusPermissionDenied
+	}
+	if !vm.ValidateUserRange(address, kcall.LogReadSize) {
+		return kcall.StatusInvalidArgument
+	}
+	oldest, total, first, count := systemLog.Read(cursor, local.logReadCopies[:])
+	clear(local.logReadWire[:])
+	putUint64(local.logReadWire[0:8], oldest)
+	putUint64(local.logReadWire[8:16], total)
+	putUint64(local.logReadWire[16:24], first)
+	local.logReadWire[24] = byte(count)
+	if logfmt.SequenceBefore(cursor, oldest) {
+		local.logReadWire[28] = 1
+	}
+	for index := 0; index < count; index++ {
+		offset := kcall.LogReadHeader + index*kcall.LogReadRecordSize
+		size, valid := logfmt.EncodeRecord(local.logReadCopies[index].Record(), local.logReadWire[offset+2:offset+kcall.LogReadRecordSize])
+		if !valid {
+			return kcall.StatusCorruptData
+		}
+		local.logReadWire[offset], local.logReadWire[offset+1] = byte(size), byte(size>>8)
+	}
+	if !vm.CopyOut(handler.root, address, local.logReadWire[:]) {
+		return kcall.StatusInvalidArgument
+	}
+	return kcall.StatusOK
 }

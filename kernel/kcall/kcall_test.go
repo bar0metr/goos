@@ -583,7 +583,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationPowerOffReady + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationLogReadSequence + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -661,5 +661,24 @@ func TestVMCallsValidateFlags(t *testing.T) {
 		if result := Dispatch(Request{Operation: operation, Arg0: 0x2000, Arg1: 0x3000}, handler); result.Status != StatusOK || handler.address != 0x2000 {
 			t.Fatalf("operation %d: %+v", operation, result)
 		}
+	}
+}
+
+func (handler *testHandler) LogReadSequence(device, cursor, address uint64) Status {
+	handler.channel, handler.length, handler.address = device, cursor, address
+	return StatusOK
+}
+
+func TestLogSequenceDispatchKeepsOldOperations(t *testing.T) {
+	handler := &testHandler{}
+	if OperationLogReadSequence != 58 || OperationLogRead != 26 || OperationLogBounds != 33 {
+		t.Fatal("log operation ABI changed")
+	}
+	result := Dispatch(Request{Operation: OperationLogReadSequence, Arg0: 9, Arg1: 12345, Arg2: 0x3000}, handler)
+	if result.Status != StatusOK || handler.channel != 9 || handler.length != 12345 || handler.address != 0x3000 {
+		t.Fatalf("sequence dispatch %+v %+v", result, handler)
+	}
+	if LogReadMax != 64 || LogReadHeader != 32 || LogReadRecordSize != 208 || LogReadSize != 13344 {
+		t.Fatal("structured snapshot wire layout changed")
 	}
 }
