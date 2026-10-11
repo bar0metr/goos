@@ -21,7 +21,7 @@ var hostsMessage ipc.Message
 // through the shell's own configuration session.
 func runHosts(invocation shellcmd.Invocation) {
 	if configHandle == 0 {
-		write("hosts: service unavailable\n")
+		writeError("hosts: service unavailable\n")
 		return
 	}
 	switch {
@@ -34,7 +34,8 @@ func runHosts(invocation shellcmd.Invocation) {
 	case invocation.Count == 3 && argumentIs(invocation.Arguments[1], "remove"):
 		removeHost(invocation.Arguments[2])
 	default:
-		write("usage: hosts | hosts get NAME | hosts set IPV4 NAME | hosts remove NAME\n")
+		commandStatus = shellcmd.StatusUsage
+		writeError("usage: hosts | hosts get NAME | hosts set IPV4 NAME | hosts remove NAME\n")
 	}
 }
 
@@ -42,7 +43,7 @@ func listHosts() {
 	for cursor := uint8(0); ; {
 		reply, ok := callHosts(config.HostsRequest{Operation: config.HostsList, Cursor: cursor})
 		if !ok {
-			write("hosts: service unavailable\n")
+			writeError("hosts: service unavailable\n")
 			return
 		}
 		if reply.Status == config.StatusNotFound {
@@ -64,7 +65,7 @@ func getHost(text []byte) {
 	}
 	reply, ok := callHosts(config.HostsRequest{Operation: config.HostsGet, Name: name.Bytes()})
 	if !ok {
-		write("hosts: service unavailable\n")
+		writeError("hosts: service unavailable\n")
 		return
 	}
 	if reply.Status != config.StatusOK {
@@ -77,7 +78,7 @@ func getHost(text []byte) {
 func setHost(addressText []byte, text []byte) {
 	address, parsed := network.ParseIPv4(addressText)
 	if !parsed || !config.ValidHostAddress(address) {
-		write("hosts: invalid IPv4 address\n")
+		writeError("hosts: invalid IPv4 address\n")
 		return
 	}
 	name, ok := hostArgument(text)
@@ -98,7 +99,7 @@ func removeHost(text []byte) {
 func changeHost(request config.HostsRequest, marker string) {
 	reply, ok := callHosts(request)
 	if !ok {
-		write("hosts: service unavailable\n")
+		writeError("hosts: service unavailable\n")
 		return
 	}
 	if reply.Status != config.StatusOK {
@@ -113,7 +114,7 @@ func changeHost(request config.HostsRequest, marker string) {
 func hostArgument(text []byte) (hostname.Name, bool) {
 	name, ok := hostname.Parse(text)
 	if !ok || name.Size > config.MaxHostName {
-		write("hosts: invalid host name\n")
+		writeError("hosts: invalid host name\n")
 		return hostname.Name{}, false
 	}
 	return name, true
@@ -130,17 +131,17 @@ func writeHost(address [4]byte, name []byte) {
 func writeHostsStatus(status config.Status) {
 	switch status {
 	case config.StatusNotFound:
-		write("hosts: no such host\n")
+		writeError("hosts: no such host\n")
 	case config.StatusReadOnly:
-		write("hosts: localhost is reserved\n")
+		writeError("hosts: localhost is reserved\n")
 	case config.StatusResourceExhausted:
-		write("hosts: table full\n")
+		writeError("hosts: table full\n")
 	case config.StatusPermissionDenied:
-		write("hosts: not permitted in this session\n")
+		writeError("hosts: not permitted in this session\n")
 	case config.StatusInvalidArgument:
-		write("hosts: invalid host name or address\n")
+		writeError("hosts: invalid host name or address\n")
 	default:
-		write("hosts: request refused\n")
+		writeError("hosts: request refused\n")
 	}
 }
 

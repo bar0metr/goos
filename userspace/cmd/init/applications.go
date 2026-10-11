@@ -190,6 +190,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	// A launcher's input is granted as a copy, so PID 1 keeps the reader
 	// to give its children.
 	var launchPair [2]uint64
+	inputBorrowed := streams.Input.Shared
 	if useLaunch {
 		if !createChannel(&launchPair) {
 			closeOpen(remoteAdmin)
@@ -375,6 +376,7 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	}
 	if useLaunch {
 		launch.server, launch.input = handle.ID(launchPair[0]), streams.Input.ID
+		launch.inputBorrowed = inputBorrowed
 	}
 	return event.Process, event.ProcessHandle, supervisor.LaunchOK
 }

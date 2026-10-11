@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"golang.org/x/crypto/ssh"
+	"goos/userspace/remoteapi"
 	"io"
 	"net"
 )
@@ -17,6 +18,7 @@ type pumpBackend struct {
 	pump    *ssh.Pump
 	memory  pumpMemory
 	data    []byte
+	command [remoteapi.MaxCommand]byte
 	failure stableError
 }
 type stableError struct {
@@ -112,12 +114,24 @@ func (b *pumpBackend) Poll() (Event, error) {
 	}
 	// Ciphertext, strings and crypto objects never escape the transient region.
 	n := copy(b.data, e.Data)
-	return Event{Kind: EventKind(e.Kind), Data: b.data[:n], Term: e.Term, TermLen: e.TermLen, Rows: e.Rows, Columns: e.Columns}, nil
+	commandSize := copy(b.command[:], e.Command)
+	return Event{Kind: EventKind(e.Kind), Data: b.data[:n], Command: b.command[:commandSize], Term: e.Term, TermLen: e.TermLen, Rows: e.Rows, Columns: e.Columns}, nil
 }
 func (b *pumpBackend) Write(data []byte) (int, error) {
 	scope := b.memory.packet()
 	defer scope.leave()
 	n, err := b.pump.Write(data)
+	return n, b.stable(err)
+}
+func (b *pumpBackend) ConsumeInput(n uint32) error {
+	scope := b.memory.packet()
+	defer scope.leave()
+	return b.stable(b.pump.ConsumeInput(n))
+}
+func (b *pumpBackend) WriteStderr(data []byte) (int, error) {
+	scope := b.memory.packet()
+	defer scope.leave()
+	n, err := b.pump.WriteStderr(data)
 	return n, b.stable(err)
 }
 func (b *pumpBackend) Exit(status uint32) error {

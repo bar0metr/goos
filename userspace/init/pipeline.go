@@ -76,8 +76,16 @@ func RunPipeline(request execproto.Request, terminal handle.ID, runner PipelineR
 // On failure it closes all retained endpoints, so the stages already started
 // observe EOF or closure; the job still reaps them before it reports.
 func StartPipeline(request execproto.Request, terminal handle.ID, runner PipelineRunner) Job {
+	shared := Endpoint{ID: terminal, Type: handle.TypeStream, Shared: true}
+	return StartPipelineStreams(request, Streams{Output: shared, Error: shared}, runner)
+}
+
+// StartPipelineStreams retains caller-owned standard streams across a pipeline.
+// A supplied shared input reader bypasses terminal line forwarding; no Started
+// writer is needed. Missing input preserves the interactive stdin contract.
+func StartPipelineStreams(request execproto.Request, standard Streams, runner PipelineRunner) Job {
 	var job Job
-	if runner == nil || terminal == 0 || request.Count == 0 || request.Count > execproto.MaxStages || request.ErrorSource != 0 && (request.Count < 2 || request.ErrorSource >= request.Count) {
+	if runner == nil || standard.Output.ID == 0 || standard.Error.ID == 0 || !standard.Output.Shared || !standard.Error.Shared || standard.Input.ID != 0 && !standard.Input.Shared || request.Count == 0 || request.Count > execproto.MaxStages || request.ErrorSource != 0 && (request.Count < 2 || request.ErrorSource >= request.Count) {
 		job.status = LaunchInvalidImage
 		return job
 	}
@@ -105,7 +113,7 @@ func StartPipeline(request execproto.Request, terminal handle.ID, runner Pipelin
 			status = LaunchResourceExhausted
 		}
 	}
-	if status == LaunchOK {
+	if status == LaunchOK && standard.Input.ID == 0 {
 		var writer handle.ID
 		var ok bool
 		inputReader, writer, ok = runner.CreateStream()
@@ -121,8 +129,7 @@ func StartPipeline(request execproto.Request, terminal handle.ID, runner Pipelin
 	}
 	if status == LaunchOK {
 		for index := int(request.Count) - 1; index >= 0; index-- {
-			shared := Endpoint{ID: terminal, Type: handle.TypeStream, Shared: true}
-			streams := Streams{Input: shared, Output: shared, Error: shared}
+			streams := standard
 			if index >= chain {
 				streams.Input = Endpoint{ID: errorReader, Type: handle.TypeStream}
 			} else {

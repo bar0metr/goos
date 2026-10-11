@@ -387,7 +387,9 @@ func writeBytes(value []byte) {
 func flushOutput() {
 	pending := outputLine[:outputSize]
 	outputSize = 0
-	writeStream(outputHandle, pending, outputDeadline)
+	if !writeStream(outputHandle, pending, outputDeadline) && oneShot {
+		commandStatus = shellcmd.StatusFailure
+	}
 }
 
 // checkOutputIsWriteOnly proves, in the validation build, that the shell's

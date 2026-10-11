@@ -20,6 +20,7 @@ type RemoteRecord struct {
 	Policy        uint64
 	State         RemoteState
 	Authenticated bool
+	Mode          remoteapi.ExecutionMode
 	Geometry      remoteapi.Geometry
 }
 
@@ -87,14 +88,29 @@ func (registry *RemoteRegistry) Authenticate(id, owner uint64, limit int) remote
 
 // BeginOpen reserves the slot before PID 1 allocates shell resources.
 func (registry *RemoteRegistry) BeginOpen(id, owner uint64, geometry remoteapi.Geometry) remoteapi.Result {
+	return registry.BeginOpenMode(id, owner, remoteapi.ModeTerminal, geometry)
+}
+
+// CheckOpen validates ownership and session state before the caller stores a
+// command snapshot. A rejected duplicate must not alter a pending launch.
+func (registry *RemoteRegistry) CheckOpen(id, owner uint64, mode remoteapi.ExecutionMode, geometry remoteapi.Geometry) remoteapi.Result {
 	record, result := registry.owned(id, owner)
 	if result != remoteapi.ResultOK {
 		return result
 	}
-	if record.State != RemoteAuthenticated || !geometry.Valid() {
+	if record.State != RemoteAuthenticated || mode > remoteapi.ModeExec || mode == remoteapi.ModeTerminal && !geometry.Valid() || mode == remoteapi.ModeExec && geometry != (remoteapi.Geometry{}) {
 		return remoteapi.ResultInvalidArgument
 	}
+	return remoteapi.ResultOK
+}
+
+func (registry *RemoteRegistry) BeginOpenMode(id, owner uint64, mode remoteapi.ExecutionMode, geometry remoteapi.Geometry) remoteapi.Result {
+	if result := registry.CheckOpen(id, owner, mode, geometry); result != remoteapi.ResultOK {
+		return result
+	}
+	record, _ := registry.owned(id, owner)
 	record.Geometry = geometry
+	record.Mode = mode
 	record.State = RemoteOpening
 	return remoteapi.ResultOK
 }
@@ -116,8 +132,11 @@ func (registry *RemoteRegistry) Resize(id, owner uint64, geometry remoteapi.Geom
 	if result != remoteapi.ResultOK {
 		return result
 	}
-	if record.State != RemoteOpen || !geometry.Valid() {
+	if record.State != RemoteOpen || record.Mode != remoteapi.ModeTerminal || !geometry.Valid() {
 		return remoteapi.ResultInvalidArgument
+	}
+	if geometry.Sequence <= record.Geometry.Sequence {
+		return remoteapi.ResultOK
 	}
 	record.Geometry = geometry
 	return remoteapi.ResultOK

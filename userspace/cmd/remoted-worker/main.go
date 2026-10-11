@@ -20,12 +20,14 @@ import (
 	"goos/userspace/tty"
 )
 
-var control, terminal, stdout, signerChannel handle.ID
+var control, terminal, stdout, stderr, stdin, signerChannel handle.ID
 var signingClient *hostSigner
 var token, sequence uint64
 var server *sshserver.Server
 var engine *tty.Engine
-var output remoteservice.Queue
+var output, errorOutput remoteservice.Queue
+var pendingInput inputQueue
+var execMode, inputEOF, nextError bool
 var newlines ptyNewlines
 var policy remoteapi.WorkerPolicy
 var conn remoteservice.RelayConn
@@ -140,6 +142,7 @@ func userspaceMain() {
 		if !drainOutput() {
 			finish(1)
 		}
+		activity = serviceStdin() || activity
 		for budget := 0; budget < 8; budget++ {
 			event, err := server.Poll()
 			if err != nil {
@@ -156,6 +159,12 @@ func userspaceMain() {
 				if !valid {
 					finish(1)
 				}
+				if event.Kind == sshserver.Resize && terminal != 0 {
+					if geometry.Sequence == ^uint64(0) {
+						finish(1)
+					}
+					next.Sequence = geometry.Sequence + 1
+				}
 				geometry = next
 				if terminal != 0 {
 					if !engine.SetRemoteGeometry(int(next.Columns), int(next.Rows), next.Term[:next.TermSize]) {
@@ -166,7 +175,7 @@ func userspaceMain() {
 					}
 				}
 			case sshserver.Shell:
-				if terminal != 0 {
+				if terminal != 0 || execMode {
 					finish(1)
 				}
 				opened, attachments, ok := call(remoteapi.Request{Operation: remoteapi.OperationOpen, Geometry: geometry})
@@ -179,8 +188,26 @@ func userspaceMain() {
 				if !engine.SetRemoteGeometry(int(geometry.Columns), int(geometry.Rows), geometry.Term[:geometry.TermSize]) {
 					finish(1)
 				}
+			case sshserver.Exec:
+				if terminal != 0 || execMode || len(event.Command) == 0 || len(event.Command) > remoteapi.MaxCommand {
+					finish(1)
+				}
+				execMode = true
+				if !openExec(event.Command) {
+					finish(1)
+				}
 			case sshserver.Data:
 				if ending || terminalGone {
+					break
+				}
+				if execMode {
+					if stdin == 0 {
+						if server.ConsumeInput(uint32(len(event.Data))) != nil {
+							finish(1)
+						}
+					} else if !pendingInput.put(event.Data) {
+						finish(1)
+					}
 					break
 				}
 				if terminal == 0 {
@@ -191,6 +218,10 @@ func userspaceMain() {
 				}
 				engine.FlushInput()
 			case sshserver.EOF:
+				inputEOF = true
+				if execMode {
+					break
+				}
 				if terminal != 0 && !terminalGone {
 					engine.Feed(4)
 					engine.FlushInput()
@@ -220,6 +251,10 @@ func userspaceMain() {
 		// reach this worker. Keep a bounded batch ahead of terminal requests.
 		stdoutPending, stdoutActivity := serviceStdout()
 		activity = activity || stdoutActivity
+		if execMode {
+			activity = serviceStderr() || activity
+			activity = serviceStdin() || activity
+		}
 		if terminal != 0 && !terminalGone && !stdoutPending {
 			var message ipc.Message
 			status := remoteservice.Receive(terminal, 0, &message)
@@ -243,7 +278,7 @@ func userspaceMain() {
 			finish(1)
 		}
 		now := remoteservice.Now()
-		if ending && exitKnown && output.Len() == 0 && !server.KeyExchangePending() {
+		if ending && outputReadyToExit(exitKnown, stdout, stderr, output.Len(), errorOutput.Len(), server.KeyExchangePending()) {
 			finish(exitCode)
 		}
 		if endDeadline != 0 && now >= endDeadline {
@@ -280,6 +315,14 @@ func userspaceMain() {
 				interests[count] = sys.Interest{Handle: stdout, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 				count++
 			}
+			if stderr != 0 && errorOutput.Free() >= 1024 {
+				interests[count] = sys.Interest{Handle: stderr, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+				count++
+			}
+			if stdin != 0 && pendingInput.size > 0 {
+				interests[count] = sys.Interest{Handle: stdin, Events: kcall.WaitWritable | kcall.WaitPeerClosed}
+				count++
+			}
 			if count == 0 {
 				finish(1)
 			}
@@ -306,7 +349,7 @@ func serviceStdout() (pending, activity bool) {
 	if closed {
 		sys.HandleClose(stdout)
 		stdout = 0
-		ending = true
+		ending = !execMode || stderr == 0
 		if endDeadline == 0 {
 			endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
 		}
@@ -315,12 +358,20 @@ func serviceStdout() (pending, activity bool) {
 }
 
 func readWorkerStdout(buffer []byte) (int, kcall.Status) { return sys.StreamRead(stdout, buffer) }
-func consumeWorkerStdout(buffer []byte)                  { engine.Output(buffer) }
-func workerOutputFree() int                             { return output.Free() }
-func call(request remoteapi.Request) (remoteapi.Reply, [2]handle.ID, bool) {
+func consumeWorkerStdout(buffer []byte) {
+	if execMode {
+		if !output.Put(buffer) {
+			finish(1)
+		}
+	} else {
+		engine.Output(buffer)
+	}
+}
+func workerOutputFree() int { return output.Free() }
+func call(request remoteapi.Request) (remoteapi.Reply, [3]handle.ID, bool) {
 	var message ipc.Message
 	var reply remoteapi.Reply
-	var attachments [2]handle.ID
+	var attachments [3]handle.ID
 	sequence++
 	if !remoteapi.EncodeRequest(&request, sequence, &message) || !remoteservice.Send(control, &message) {
 		return reply, attachments, false
@@ -348,28 +399,19 @@ func terminalEnd(message *ipc.Message) bool {
 		return false
 	}
 	exitKnown = true
-	exitCode = uint32(code)
-	if code > 0xffffffff {
-		exitCode = 1
-	}
+	exitCode = sshExitCode(code)
 	if endDeadline == 0 {
 		endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
 	}
 	return true
 }
 func drainOutput() bool {
-	for output.Len() > 0 {
-		bytes := output.Peek(sshserver.MaxData)
-		n, err := server.Write(bytes)
-		if err != nil || n < 0 || n > len(bytes) {
-			return false
+	return drainOutputPair(&output, &errorOutput, &nextError, func(data []byte, extended bool) (int, error) {
+		if extended {
+			return server.WriteStderr(data)
 		}
-		if n == 0 {
-			return true
-		}
-		output.Drop(n)
-	}
-	return true
+		return server.Write(data)
+	}, 8)
 }
 func finish(status uint32) {
 	syslog.Info("remote session closing", syslog.Uint("session", token), syslog.Uint("status", uint64(status)))
@@ -444,4 +486,95 @@ func closeHostSigner() {
 		sys.HandleClose(signerChannel)
 		signerChannel = 0
 	}
+}
+
+// The request transfers a copy of this memory handle. PID 1 takes a bounded
+// snapshot before launching the fixed shell image and supplies only streams.
+func openExec(command []byte) bool {
+	memory, status := sys.MemoryCreate(1)
+	if status != kcall.StatusOK {
+		return false
+	}
+	defer sys.HandleClose(memory)
+	base, size, status := sys.MemoryMapAnywhere(memory, true)
+	if status != kcall.StatusOK {
+		return false
+	}
+	if size != 4096 {
+		sys.VMUnmap(base, size)
+		return false
+	}
+	copy(sys.Window(base, size), command)
+	if sys.VMUnmap(base, size) != kcall.StatusOK {
+		return false
+	}
+	opened, attachments, ok := call(remoteapi.Request{Operation: remoteapi.OperationOpen, Mode: remoteapi.ModeExec, Command: memory, CommandSize: uint16(len(command))})
+	if !ok || opened.Session != token || opened.Mode != remoteapi.ModeExec {
+		return false
+	}
+	stdin, stdout, stderr = attachments[0], attachments[1], attachments[2]
+	return true
+}
+
+func serviceStdin() bool {
+	if !execMode || stdin == 0 {
+		return false
+	}
+	activity := false
+	for budget := 0; budget < 8 && pendingInput.size > 0; budget++ {
+		data := pendingInput.peek()
+		count, status := sys.StreamWrite(stdin, data)
+		if count < 0 || count > len(data) {
+			finish(1)
+		}
+		if status == kcall.StatusPeerDied {
+			sys.HandleClose(stdin)
+			stdin = 0
+			if server.ConsumeInput(uint32(pendingInput.size)) != nil {
+				finish(1)
+			}
+			pendingInput.drop(pendingInput.size)
+			return true
+		}
+		if status != kcall.StatusOK && status != kcall.StatusResourceExhausted {
+			finish(1)
+		}
+		if count == 0 {
+			break
+		}
+		pendingInput.drop(count)
+		if server.ConsumeInput(uint32(count)) != nil {
+			finish(1)
+		}
+		activity = true
+	}
+	if inputEOF && pendingInput.size == 0 {
+		sys.HandleClose(stdin)
+		stdin = 0
+		activity = true
+	}
+	return activity
+}
+
+func serviceStderr() bool {
+	if stderr == 0 {
+		return false
+	}
+	_, activity, closed, ok := drainStdoutBatch(func(buffer []byte) (int, kcall.Status) { return sys.StreamRead(stderr, buffer) }, func(buffer []byte) {
+		if !errorOutput.Put(buffer) {
+			finish(1)
+		}
+	}, func() int { return errorOutput.Free() }, scratch[:], stdoutBatch)
+	if !ok {
+		finish(1)
+	}
+	if closed {
+		sys.HandleClose(stderr)
+		stderr = 0
+		ending = stdout == 0
+		if endDeadline == 0 {
+			endDeadline = remoteservice.Now() + 5*clock.TicksPerSecond
+		}
+	}
+	return activity
 }
