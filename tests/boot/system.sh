@@ -43,20 +43,24 @@ fail() {
 	exit 1
 }
 
+# The guest serial console emits CRLF. Match text lines without the CR while
+# keeping the captured log unchanged for diagnostics.
+log_lines() { tr -d '\r' 2>/dev/null <"$1"; }
+
 require() { # name pattern log
-	grep -q -- "$2" "$3" || fail "$1" "$2" "$3"
+	log_lines "$3" | grep -q -- "$2" || fail "$1" "$2" "$3"
 	checks=$((checks + 1))
 }
 
 forbid() { # name pattern log
-	if grep -q -- "$2" "$3"; then
+	if log_lines "$3" | grep -q -- "$2"; then
 		fail "$1" "no line matching $2" "$3"
 	fi
 	checks=$((checks + 1))
 }
 
 count_at_least() { # name pattern count log
-	observed=$(grep -c -- "$2" "$4" || true)
+	observed=$(log_lines "$4" | grep -c -- "$2" || true)
 	[ "$observed" -ge "$3" ] || fail "$1" "at least $3 lines matching $2, saw $observed" "$4"
 	checks=$((checks + 1))
 }
@@ -65,7 +69,7 @@ count_at_least() { # name pattern count log
 # it typed, at the prompt or, when service output split the prompt from it,
 # alone, and before the next prompt.
 window() { # log command
-	awk -v command="$2" 'seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }' "$1"
+	log_lines "$1" | awk -v command="$2" 'seen && index($0, "goos> ") == 1 { exit } seen { print } !seen && ($0 == "goos> " command || $0 == command) { seen = 1 }'
 }
 
 require_after() { # name command pattern log
@@ -83,17 +87,28 @@ forbid_after() { # name command pattern log
 wait_for() { # pattern timeout log
 	elapsed=0
 	while [ "$elapsed" -lt "$2" ]; do
-		grep -q -- "$1" "$3" 2>/dev/null && return 0
+		log_lines "$3" | grep -q -- "$1" && return 0
 		sleep 1
 		elapsed=$((elapsed + 1))
 	done
 	fail "timeout" "$1 within $2s" "$3"
 }
 
+wait_for_soon() { # marker log
+	attempts=0
+	while [ "$attempts" -lt 100 ]; do
+		log_lines "$2" | grep -F -q -- "$1" && return 0
+		sleep 0.05
+		attempts=$((attempts + 1))
+	done
+	fail timeout "$1 within 5s" "$2"
+}
+
 # boot starts QEMU on iso with disk (or none), waits for a prompt, types the
 # lines of the script on stdin, and asks the machine to power off. A line
-# "@sleep N" waits N seconds; "@keys TEXT" sends TEXT, escapes expanded, with
-# no newline. Every other line is a command.
+# "@sleep N" waits N seconds; "@wait MARKER" waits for a guest marker;
+# "@send COMMAND" sends without a fixed delay; "@keys TEXT" sends TEXT,
+# escapes expanded, with no newline. Every other line is a command.
 #
 # The machine must then switch itself off: QEMU has to exit, with status 0,
 # within 30 seconds, or the test fails. With shutdown=refused the storage
@@ -121,6 +136,8 @@ boot() { # iso disk log
 	while IFS= read -r line; do
 		case $line in
 		'@sleep '*) sleep "${line#@sleep }" ;;
+		'@wait '*) wait_for_soon "${line#@wait }" "$log" ;;
+		'@send '*) printf '%s\n' "${line#@send }" >&3 ;;
 		'@keys '*) printf '%b' "${line#@keys }" >&3; sleep 1 ;;
 		*) printf '%s\n' "$line" >&3; sleep 1.5 ;;
 		esac
@@ -141,7 +158,7 @@ boot() { # iso disk log
 		kill -0 "$qpid" 2>/dev/null && fail shutdown.timeout 'QEMU exited within 30 seconds of poweroff' "$log"
 		if wait "$qpid"; then qemu_status=0; else qemu_status=$?; fi
 		[ "$qemu_status" -eq 0 ] || fail shutdown.status "QEMU exit status 0 after poweroff, not $qemu_status" "$log"
-		grep -q '^Powering off\.\.\.$' "$log" || fail shutdown.message 'Powering off...' "$log"
+		log_lines "$log" | grep -q '^Powering off\.\.\.$' || fail shutdown.message 'Powering off...' "$log"
 		checks=$((checks + 3))
 	fi
 	qpid=
@@ -269,8 +286,10 @@ boot "$iso" "$work/installed.img" "$log" <<'EOF'
 cat /home/user/data.txt
 myuname
 /bootstrap/bin/touch /tmp/.validation-slow-source
-fault config
-services; /bootstrap/bin/rm /tmp/.validation-slow-source
+@send fault config
+@wait SERVICE_SOURCE_PENDING config
+@wait VFS_EXEC_SOURCE_WITHHELD
+@send services; /bootstrap/bin/rm /tmp/.validation-slow-source
 @sleep 6
 services
 fault fat32
@@ -300,6 +319,7 @@ require_after restart.user-command-file myuname FILE_EXEC_OK "$log"
 # listing, which shows the service waiting, and starts it once the read is
 # answered or abandoned (ADR 0175).
 require restart.source-pending 'SERVICE_SOURCE_PENDING config' "$log"
+require restart.source-withheld VFS_EXEC_SOURCE_WITHHELD "$log"
 require_after restart.pid1-serving 'services; /bootstrap/bin/rm /tmp/.validation-slow-source' '^config  *blocked' "$log"
 require restart.config-back CONFIG_RESTARTED_OK "$log"
 awk '/SERVICE_SOURCE_PENDING config/ { pending = NR } /^config  *blocked/ && pending { listed = NR } /CONFIG_RESTARTED_OK/ && listed { done = 1 } END { exit !done }' "$log" ||

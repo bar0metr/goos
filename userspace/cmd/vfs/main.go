@@ -486,6 +486,9 @@ func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	if validation.Enabled {
 		noteExecCrashOpen(owner, request, answer)
 		if withhold(owner, request, reply) {
+			if request.Operation == vfs.OperationPrepareExecutable {
+				mark("VFS_EXEC_SOURCE_WITHHELD\n")
+			}
 			return
 		}
 	}
@@ -506,7 +509,7 @@ const stallPath = "/tmp/.validation-vfs-stall"
 const slowSourcePath = "/tmp/.validation-slow-source"
 
 func slowSources() bool {
-	return service.Dispatch(0, vfs.Request{Operation: vfs.OperationStat, Path: []byte(slowSourcePath)}).Status == vfs.StatusOK
+	return service.Dispatch(sessionOwner(0), vfs.Request{Operation: vfs.OperationStat, Path: []byte(slowSourcePath)}).Status == vfs.StatusOK
 }
 
 // execCrashPath is a name the validation build dies for. A session that
