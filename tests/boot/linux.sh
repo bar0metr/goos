@@ -78,7 +78,7 @@ interrupt() {
 	next=$(($(prompts) + 1))
 	printf '%s\n' "$command" >&3
 	elapsed=0
-	until tail -n "+$((start + 1))" "$log" | grep -q "$2"; do
+	until tail -n "+$((start + 1))" "$log" | tr -d '\r' | grep -q "$2"; do
 		[ "$elapsed" -lt 400 ] || fail "$command never printed: $2"
 		sleep 0.05
 		elapsed=$((elapsed + 1))
