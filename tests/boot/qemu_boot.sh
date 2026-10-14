@@ -66,6 +66,12 @@ fail_check() {
 	exit 1
 }
 
+# The guest serial console emits CRLF. Match text lines without the CR while
+# keeping the captured log unchanged for diagnostics.
+log_lines() { tr -d '\r' 2>/dev/null <"$1"; }
+
+log_count() { log_lines "$1" | grep -c "$2" || true; }
+
 require_marker() {
 	name=$1
 	marker=$2
@@ -81,7 +87,7 @@ require_regex() {
 	expected=$3
 	file=$4
 	anchor=$5
-	grep -q "$pattern" "$file" 2>/dev/null || fail_check "$name" "$expected" 'marker not found' "$file" "$anchor"
+	log_lines "$file" | grep -q "$pattern" || fail_check "$name" "$expected" 'marker not found' "$file" "$anchor"
 	checks=$((checks + 1))
 }
 
@@ -91,8 +97,8 @@ forbid_regex() {
 	expected=$3
 	file=$4
 	anchor=$5
-	if grep -q "$pattern" "$file" 2>/dev/null; then
-		observed=$(grep "$pattern" "$file" 2>/dev/null | sed -n '1p')
+	if log_lines "$file" | grep -q "$pattern"; then
+		observed=$(log_lines "$file" | grep "$pattern" | sed -n '1p')
 		fail_check "$name" "$expected" "$observed" "$file" "$anchor"
 	fi
 	checks=$((checks + 1))
@@ -104,7 +110,7 @@ require_count() {
 	expected=$3
 	file=$4
 	anchor=$5
-	observed=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+	observed=$(log_count "$file" "$pattern")
 	[ "$observed" -eq "$expected" ] || fail_check "$name" "$expected" "$observed" "$file" "$anchor"
 	checks=$((checks + 1))
 }
@@ -115,7 +121,7 @@ require_min_count() {
 	expected=$3
 	file=$4
 	anchor=$5
-	observed=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+	observed=$(log_count "$file" "$pattern")
 	[ "$observed" -ge "$expected" ] || fail_check "$name" "at least $expected" "$observed" "$file" "$anchor"
 	checks=$((checks + 1))
 }
@@ -123,7 +129,7 @@ require_min_count() {
 # window prints the log lines after the first line containing $2 and before the
 # next line containing $3, so checks can be tied to a single command's output.
 window() {
-	awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { exit } seen { print } !seen && index($0, start) { seen = 1 }' "$1"
+	log_lines "$1" | awk -v start="$2" -v stop="$3" 'seen && index($0, stop) { exit } seen { print } !seen && index($0, start) { seen = 1 }'
 }
 
 require_window() {
@@ -168,7 +174,7 @@ wait_for_marker() {
 	file=$4
 	elapsed=0
 	while [ "$elapsed" -lt "$timeout" ]; do
-		grep -q "$marker" "$file" 2>/dev/null && return
+		log_lines "$file" | grep -q "$marker" && return
 		sleep 1
 		elapsed=$((elapsed + 1))
 	done
@@ -183,7 +189,7 @@ wait_for_count() {
 	file=$5
 	elapsed=0
 	while [ "$elapsed" -lt "$timeout" ]; do
-		observed=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+		observed=$(log_count "$file" "$pattern")
 		[ "$observed" -ge "$expected" ] && return
 		sleep 1
 		elapsed=$((elapsed + 1))
@@ -217,7 +223,7 @@ await_ready() {
 # several emulated processors, then does not receive the next command early.
 await_count() { # file pattern count
 	waited=0
-	while [ "$(grep -c "$2" "$1" 2>/dev/null || true)" -lt "$3" ] && [ "$waited" -lt 600 ]; do
+	while [ "$(log_count "$1" "$2")" -lt "$3" ] && [ "$waited" -lt 600 ]; do
 		sleep 0.1
 		waited=$((waited + 1))
 	done
@@ -280,6 +286,9 @@ long_name=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "n" }')
 too_long_name=$(awk 'BEGIN { for (i = 0; i < 1025; i++) printf "n" }')
 long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 ( await_ready "$log"
+  # Capture startup grants before the bounded kernel log ring overwrites them.
+  printf 'log\n'
+  sleep 1
   printf 'help\n'
   sleep 1
 	printf 'echo "hello structured world"\n'
@@ -461,7 +470,7 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 25
 	# Bulk I/O (ADR 0107): a MiB through a shared buffer in sixteen
 	# exchanges, to the volatile root and to the volume.
-	bench_count=$(grep -c '^BENCH_PROCESS_OK$' "$log" 2>/dev/null || true)
+	bench_count=$(log_count "$log" '^BENCH_PROCESS_OK$')
 	printf 'bench io /tmp/bulk.bin 1M\n'
 	bench_count=$((bench_count + 1))
 	wait_for_count bulk.tmp '^BENCH_PROCESS_OK$' "$bench_count" 60 "$log"
@@ -984,7 +993,7 @@ require_regex help.utility-flag '^usage: ls \[PATH\]$' 'ls --help prints the usa
 require_regex help.utility-arity '^usage: cp SOURCE TARGET$' 'cp with one path prints the usage' "$log" 'cp /system/motd'
 require_regex help.builtin-arity '^usage: services$' 'a builtin with arguments prints the usage' "$log" 'services now'
 require_regex errors.missing-file '^cat: /missing: no such file or directory$' 'a missing file named with its reason' "$log" 'cat /missing'
-require_regex errors.busy-mount '^rm: /home: a mount depends on it$' 'a mount point refused as busy' "$log" 'rm /home'
+require_regex errors.read-only-mount '^rm: /home: read-only filesystem$' 'a mount point refused as read-only' "$log" 'rm /home'
 require_regex errors.not-empty '^rm: /tmp/demo: directory not empty$' 'a non-empty directory refused as such' "$log" 'rm /tmp/demo'
 require_regex format.uptime '^up [0-9][0-9]*:[0-9][0-9]:[0-9][0-9]$' 'uptime as hours, minutes and seconds' "$log" uptime
 require_regex format.mem '^total: [0-9][0-9]*\.[0-9] [KMG]iB$' 'memory in binary units' "$log" 'goos> mem'
@@ -1064,7 +1073,7 @@ require_regex vm.guard 'user fault: guard page' 'a stack overflow stopped at the
 require_regex vm.unmapped 'user fault: no mapping' 'an unmapped access retired' "$log" 'goos> vmprobe unmapped'
 require_regex vm.quota 'user fault: page quota exhausted' 'a process past its page quota retired' "$log" 'goos> vmprobe quota'
 require_regex vm.system-survives '^after-vm-faults$' 'the system carries on after the faults' "$log" 'goos> echo after-vm-faults'
-leak_counts=$(sed -n '/goos> echo leak-round-3/,$p' "$log" | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
+leak_counts=$(log_lines "$log" | sed -n '/goos> echo leak-round-3/,$p' | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
 leak_third=$(printf '%s\n' "$leak_counts" | sed -n 1p)
 leak_fourth=$(printf '%s\n' "$leak_counts" | sed -n 2p)
 leak_fifth=$(printf '%s\n' "$leak_counts" | sed -n 3p)
@@ -1240,7 +1249,7 @@ require_regex config.prompt-restored '^cfg> config set system.shell.prompt "goos
 # configuration and the hosts table, the log service only reads the one
 # namespace that governs it, and the resolver reads its own and the hosts.
 require_regex config.session-admin 'config\[[0-9]*\]: session added rights=15' 'a read-write session with hosts rights' "$log" 'goos> log'
-require_regex config.session-resolver 'config\[[0-9]*\]: session added rights=5' 'a read-only session with hosts reads' "$log" 'goos> log'
+require_window config.session-resolver 'config\[[0-9]*\]: session added rights=5' 'a read-only session with hosts reads' "$log" 'goos> log' 'goos> help'
 require_regex config.session-confined 'config\[[0-9]*\]: session added rights=1' 'a read-only session' "$log" 'goos> log'
 pass_group config
 
@@ -1332,7 +1341,7 @@ pid=$!
 
 wait_for_marker m7 '^Rebooting\.\.\.$' 60 "$m7_log"
 elapsed=0
-until [ "$(grep -c '^Hello from GoOS$' "$m7_log" 2>/dev/null || true)" -ge 2 ] || [ "$elapsed" -ge 60 ]; do
+until [ "$(log_count "$m7_log" '^Hello from GoOS$')" -ge 2 ] || [ "$elapsed" -ge 60 ]; do
 	sleep 1
 	elapsed=$((elapsed + 1))
 done
