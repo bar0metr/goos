@@ -14,9 +14,12 @@ build=build
 work=$build/reproducible
 first=$work/first
 second=$work/second
-# Outputs the reproducibility check leaves alone: its own tree, the
-# interactive disk, and logs and reports of other targets.
+# Outputs preserved across clean_build(): its own tree, the interactive disk,
+# and logs and reports of other targets.
 keep='reproducible goos-disk.img virtio-blk.img boot-test-virtio-blk.img latency-virtio-blk.img logs reports'
+# Ephemeral build state removed before each build and excluded from snapshots.
+# build/tmp holds randomly named TLS/SSH/crypto compatibility roots.
+exclude_collect='cache tmp'
 
 clean_build() {
 	[ -d "$build" ] || return 0
@@ -30,12 +33,12 @@ clean_build() {
 	done
 }
 
-# collect copies the build outputs, without the caches, into $1.
+# collect copies build artifacts into $1.
 collect() {
 	mkdir -p "$1"
 	for entry in "$build"/*; do
 		name=${entry#"$build"/}
-		case " $keep cache " in
+		case " $keep $exclude_collect " in
 		*" $name "*) ;;
 		*) cp -R "$entry" "$1/" ;;
 		esac
@@ -57,6 +60,8 @@ rm -rf "$work"
 mkdir -p "$work"
 build_once first "$first"
 build_once second "$second"
+# Leave the build tree without scratch roots for subsequent release checks.
+rm -rf "$build/tmp"
 
 (cd "$first" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) >"$work/first.files"
 (cd "$second" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) >"$work/second.files"
