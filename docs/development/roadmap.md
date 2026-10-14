@@ -1,714 +1,357 @@
-# Roadmap
+# GoOS Roadmap
 
-This roadmap records implementation priority from the current repository state.
+This roadmap records the current implementation state and the next major development priorities.
+
+GoOS is no longer at the stage where adding kernel mechanisms is automatically the most useful work. The current system already has a substantial native userspace, persistent storage, SMP, Linux static-binary compatibility, native IPv4 networking, HTTPS, and native SSH remote administration. The next milestones should therefore focus on making those environments more complete without weakening capability boundaries or turning the native ABI into POSIX by accident.
 
 ## Current baseline
 
-The following foundation is already implemented:
+The following foundation is implemented.
 
-- UEFI boot and `ExitBootServices`;
-- physical and virtual memory management with NX/W^X foundations;
-- GDT/IDT, timer interrupts, guarded stacks, and preemptive scheduling on
-  every processor;
-- Process/Task separation and per-process address spaces;
+### Kernel and execution
+
+- x86_64 UEFI boot and `ExitBootServices`;
+- physical and virtual memory management with per-process address spaces;
+- NX/W^X foundations, guarded stacks, lazy anonymous and executable pages;
+- GDT/IDT, calibrated monotonic/realtime clocks and interrupt-driven timers;
+- preemptive SMP on up to 64 processors;
+- per-CPU run queues, migration, remote rescheduling and TLB shootdown;
+- fine-grained kernel locking rather than one global kernel lock;
+- Process/Task separation;
 - generation-safe typed handles and capability enforcement;
-- ring-3 native processes and a versioned native image format;
-- versioned typed IPC, bounded queues, request/reply, handle passing, waits,
-  deadlines, peer-death handling, and shared-memory objects;
-- bounded readiness-only multi-object waits for channels, streams, and processes;
-- a userspace terminal service that owns the console's input and relays all
-  shell and command output, restartable independently of the shell;
-- RAMFS and namespace-scoped VFS services;
-- PID 1, bounded supervision, restart policy, lifecycle events, and
-  capability-bounded process spawning;
+- bounded process/task/page/channel/stream quotas;
+- native ring-3 processes and a versioned native image/startup ABI;
+- shared memory and capability-protected IPC;
+- bounded request/reply, handle passing, deadlines and peer-death handling;
+- event-driven multi-object waits;
+- cursor-aware log waits while preserving the existing `WaitAny` ABI;
+- process kill, completion records and resource reclamation;
+- CPU affinity and per-CPU runtime statistics.
+
+### Native userspace and services
+
+- PID 1 supervision, restart policy and capability-bounded process spawning;
+- separate userspace terminal, VFS, FAT32, configuration, logging, networking and device services;
+- RAMFS plus namespace-scoped VFS mounts;
+- immutable installed `/system`, bootstrap/recovery `/bootstrap`, persistent `/home` and mutable `/state`;
+- userspace virtio-blk and virtio-net drivers;
+- persistent FAT32 storage with interoperable metadata, VFAT long names, MBR/GPT slices, checking/repair, stable open-file identity and restart recovery;
+- versioned typed configuration and persistent system log;
+- independent restart of storage/network/terminal-facing services where supported;
+- capability-scoped VFS authorities for sensitive paths and administration operations.
+
+### Native shell and applications
+
 - interactive native shell;
-- bounded `/system/bin` lookup, with the boot image itself mounted read-only at
-  `/system` so the executables it resolves are the ones a listing shows;
-- isolated native `pwd`, `ls`, and `cat` processes;
-- capability-protected process handles, wait, completion records, and process
-  resource reclamation;
-- the versioned native startup ABI (`GST4` since ADR 0109) and named startup handles without
-  application dependence on numeric handle slots.
-
-The project has therefore reached the point where additional kernel mechanisms
-are no longer the main route to a more useful system.
-
-## Priority 1 — Complete the native application environment
-
-Before expanding Linux compatibility, make native GoOS applications a stable
-execution environment.
-
-Completed in ADR 0031:
-
-- define and document a versioned native process startup ABI;
-- remove application dependence on globally assumed numeric handle IDs;
-- pass named startup handles explicitly with bounded rights.
-
-Completed in ADR 0032:
-
-- stabilize structured `argv`, working-directory inheritance, exit status,
-  and bounded startup/environment data;
-- expand `/system/bin` with `echo`, `mkdir`, `touch`, `rm`, `cp`, `mv`, `stat`,
-  `ps`, `mem`, `uptime`, `uname`, and `sleep`.
-
-Maintained invariants:
-
-5. Keep executable lookup bounded and policy-controlled. This is implemented
-   for `/system/bin` and remains an invariant for later launch paths.
-7. Keep `cd` as a shell builtin because it mutates shell-local state. This is
-   implemented.
-8. Keep each external command as an isolated userspace process with a minimal
-   capability manifest. This is implemented and remains an invariant.
-
-Priority 1 is complete. Full pipelines and job control are not prerequisites
-for persistent storage.
-
-## Priority 2 — Persistent storage
-
-Persistent storage is the next major system milestone.
-
-Implement the path as separate capability-isolated layers:
-
-```text
-application
-    |
-   VFS
-    |
-filesystem service
-    |
-block service
-    |
-virtio-blk driver
-    |
-virtio device
-```
-
-Required work:
-
-1. Add a userspace `virtio-blk` driver.
-2. Expose only the required device/MMIO/IRQ/DMA authority to that driver.
-3. Define a bounded, versioned block-device IPC protocol.
-4. Add a block/storage service rather than teaching VFS about virtio.
-5. Add a simple persistent filesystem service. FAT32 is the preferred first
-   target because images are easy to inspect and populate from the host.
-6. Mount persistent storage through the existing VFS namespace model.
-7. Keep initramfs as bootstrap/recovery storage rather than the permanent root
-   of all mutable state.
-8. Add a reboot persistence test.
-
-Acceptance:
-
-```text
-goos> mkdir /home/demo
-goos> write /home/demo/message.txt "persistent"
-goos> cat /home/demo/message.txt
-persistent
-goos> reboot
-...
-goos> cat /home/demo/message.txt
-persistent
-```
-
-The second `cat` must read data written before reboot. This runs verbatim: ADR
-0071 mounts the volume's `home` and `state` directories at `/home` and `/state`
-beside the whole-volume `/persist`, and the boot test performs the sequence
-through `/home` inside one VM.
-
-Current progress: ADRs 0033 through 0036 implement the bounded `GBLK001`
-protocol, capability-scoped PCI/IRQ/DMA driver authority, the userspace
-virtio-blk data path, and a bounded FAT32 backend mounted at `/persist`,
-`/home` and `/state`. QEMU
-validates file creation and readback through VFS and verifies the bytes in the
-persistent raw image. The boot gate then starts a fresh VM on the same image and
-reads the file without rewriting it. Items 1 through 8 are complete for the
-initial bounded single-device design. Priority 2 hardening beyond the
-deliberately constrained FAT32 subset remains incremental work rather than a
-blocker for Priority 3.
-
-## Priority 3 — Shell composition
-
-After persistent storage works, finish the shell composition primitives:
-
-- quoting and argument parsing;
-- explicit stdin/stdout/stderr startup handles;
-- I/O redirection;
-- pipes implemented with native capability-protected stream/channel objects;
-- exit-code propagation;
-- sequential command execution.
-
-Do not introduce POSIX file descriptors into the native ABI merely to make the
-shell familiar. POSIX fd semantics belong to the Linux compatibility layer.
-
-Current progress: ADRs 0037 and 0038 give every external utility distinct named
-standard streams: read-only input role `in` plus write-only `stdout` and `stderr`.
-Non-zero-exit diagnostics use `stderr`; all three streams currently target the
-serial console. ADR 0039 adds bounded `readline` as the first utility that
-consumes the explicit input role. ADR 0040 adds independent capability-protected
-byte streams with directional endpoints, bounded buffering, backpressure, and
-EOF after writer close. ADR 0041 adds scheduler-backed stream readiness and a
-real two-process `producer | consumer` shell pipeline with stream endpoints
-substituted into the child startup roles. ADR 0042 adds bounded sequential
-execution with `;`, whole-line syntax validation, and completion before advancing
-to the next command. ADR 0043 extends pipelines to four concurrent stages with
-versioned bounded requests, downstream-first launch, and partial-failure cleanup.
-ADR 0044 adds bounded stdout file redirection with `>` by composing the existing
-stream abstraction with an isolated `write` utility and a fresh VFS session.
-ADR 0045 extends that consumer with bounded `>>` append mode by seeking through
-the existing VFS protocol. ADR 0046 adds bounded `<` input redirection by
-prepending the existing `cat` utility as a VFS-backed pipeline producer. ADR 0047
-adds bounded `2>` and `2>>` redirection with a stderr sink outside the stdout
-chain, carried by exec protocol version 5, and fixes the task-slot reuse race it
-exposed in the kernel.
-
-Priority 3 is complete. Stream merging (`2>&1`) and job control are deliberately
-out of scope and do not block Priority 4.
-
-ADR 0048 fixes a freeze on persistent-storage reads whose root cause was the
-freestanding arena allocators handing out uncleared memory, and adds resident
-sectors, answered protocol rejections, and bounded storage deadlines. Measured
-command latency is now dominated by process launch (about half a second) rather
-than by storage. ADR 0049 names the timer rate and every deadline in one place
-and records the measurements: at 1 kHz storage commands are three to five times
-faster, while process launch is unchanged and therefore not timer-bound. ADR 0050 fixes the
-liveness defects that experiment exposed: teardown now wakes waiters and closes
-handles before any cleanup that can fail, completion records no longer depend on
-a bounded queue, undeliverable lifecycle messages are retried instead of
-dropped, every wait registers before re-checking its condition, and deadline
-expiry is driven by the kernel loop. ADR 0051 adds bounded event-driven
-multi-object readiness waits and migrates PID 1 lifecycle/exec handling, VFS
-control/session handling, and block service/filesystem handling away from
-polling.
-
-ADR 0052 selects the timer rate at build time (`HZ=100|250|1000`) and adds a
-diagnostic build with a kernel event trace and state dump. ADR 0053 moves kernel
-housekeeping into the exclusion domain native calls run in. ADR 0054 adds a
-calibrated nanosecond clock, the shell `time` builtin, `bench`, and
-`make test-latency`. ADR 0055 reschedules on the return from the native call or
-IRQ that woke a task, and lets kernel tasks sleep instead of halting through
-their round-robin turn. ADR 0056 fixes the defect behind the 1 kHz failures:
-SSE state was not part of the task context, so preemption corrupted XMM
-registers. ADR 0057 records the launch-path analysis and the latency baseline.
-Commands now take 4–9 ms at 100 Hz instead of 160–330 ms, a persistent write
-21 ms instead of 1.9 s, and a VFS round trip 0.15 ms instead of 40 ms, with
-latency nearly independent of the tick rate. `make test-stress` passes 16 of 16
-guests at 100, 250, and 1000 Hz.
-
-The default rate remains 100 Hz because nothing now depends on a faster one.
-Stack, heap, BSS, and anonymous pages already arrive on first touch through
-the common region fault path (ADR 0104). A deadline index lets the
-housekeeping tick look only at the waits that are due (ADR 0189). Remaining
-performance items are TinyGo utility startup cost and waking housekeeping
-only when a deadline or lifecycle work is due.
-
-## Priority 4 — Separate normal boot from validation boot
-
-The production boot path should become progressively quieter and should not be
-the permanent home of integration self-tests.
-
-Keep automated checks, fault injection, isolation validation, and `*_OK`
-markers in dedicated test/validation configurations where practical. Normal
-`make run` should converge on a real system boot:
-
-```text
-GoOS ...
-Memory: ...
-Scheduler initialized
-Starting PID 1
-Starting services...
-goos>
-```
-
-Boot and integration tests remain mandatory; only their placement changes.
-
-The 0.1.5 framebuffer work keeps `make run` headless for serial automation and
-adds `make run-gui` for manual graphical-console validation. Both targets boot
-the same ISO and persistent disk and retain COM1 output. The preferred GOP mode
-is 1280x800 with bounded fallbacks. IRQ-driven PS/2 input now joins COM1 in the
-existing console queue; scan-code decoding, US layout translation, arrow CSI
-sequences, and the shared Ctrl-C path do not change the userspace TTY ABI. The
-GUI target explicitly selects a configurable display backend while automated
-and ordinary runs remain headless. Automated framebuffer validation uses a
-QEMU monitor screendump and exact validation-only checkerboard pixels, without
-OCR or a host window. The same headless harness injects editing keys and
-`echo graphical-keyboard-ok` through QEMU's PS/2 path; COM1 remains a file
-sink, and exact shell output proves end-to-end keyboard delivery.
-The TTY now reads capability-checked console geometry, falls back to 80x25 on
-serial-only boots, and erases and restores every row of wrapped edited input
-when asynchronous output arrives.
-The graphical console uses Spleen 12x24 cells, yielding approximately 106x33
-cells at the preferred 1280x800 GOP mode and making manual QEMU output readable
-without reducing framebuffer resolution.
-Framebuffer, GOP, and PS/2 regression coverage now includes hostile GOP
-metadata, framebuffer guard words, the complete required key translation set,
-and an in-guest assertion that process page tables do not inherit the kernel
-framebuffer mapping.
-
-Current progress: ADR 0058 splits the build into a normal and a validation
-variant. A normal build boots quietly to a banner, `Starting services...`, one
-`[ OK ]` line per service, and the prompt. `VALIDATION=1` keeps the kernel
-self-tests, the scheduling demonstration, the isolation and fault-injection
-processes, PID 1's supervision scenario, and every `*_OK` marker; `make
-test-boot` always uses it, while the stress and latency harnesses run the
-normal build.
-
-The 0.1.0 shell and logging gaps are closed as well:
-
-- ADR 0059 adds a structured system log: a kernel ring fed by the kernel and
-  the services, with warnings echoed to the console and `log` in the shell.
-- ADR 0061 adds `services`, `handles`, `caps`, `reboot`, and `ps` with
-  type and state columns, built on public kernel operations and a PID 1
-  control protocol.
-- `reboot` syncs storage and resets through a capability held only by
-  PID 1, and the boot test now runs the M7 write/reboot/read acceptance
-  inside one VM.
-
-ADR 0066 gives FAT32 long names, so `/persist` no longer restricts files to
-the 8.3 form.
-
-ADR 0067 adds `ProcessKill`, so the shell can stop a background job with
-`kill` and the foreground command with Ctrl-C, and ADR 0068 makes `sleep` take
-seconds and block instead of spinning.
-
-ADRs 0069 through 0071 close the gap between the namespace and the system it
-describes. A mount is now listed in its parent directory, so `ls /` names every
-mount instead of only the entries one backend happens to own, and a directory
-another mount points at cannot be removed, under its own name or under an alias.
-`/system` is the boot archive mounted read-only through a capability only the
-filesystem service holds, so `ls /system/bin` lists the executables the launch
-path actually resolves and every write to them is refused with "read-only
-filesystem"; the specification's acceptance criterion for the native application
-environment therefore holds. `/home` and `/state` name user data and mutable
-system state on the persistent volume, which is what the immutable-system-image
-split needs and what the persistent-storage acceptance criterion is written
-against.
-
-ADR 0062 moves startup data through shared memory, so `write PATH "TEXT"`
-from the spec fits and the M7 test uses it. ADR 0063 adds `MemoryMap`, so a
-process can map a shared page it holds a capability for, and ADR 0064 uses one
-for the exec protocol: PID 1 now runs up to four requests as jobs instead of
-blocking on each command, and the shell can start a job with `&`.
-
-ADR 0072 adds per-process resource quotas. Channels, streams, tasks and pages
-are charged to the process that causes them to exist, so a process that creates
-streams until it is refused leaves slots for everyone else instead of taking the
-whole registry and breaking every later pipeline. CPU is accounted per process,
-`ps` reports memory and CPU, and `quota` prints each process's share. That
-accounting also exposed a defect it does not fix: the shell busy-polls the
-serial console while waiting for input and is charged most of the ticks in a
-session.
-
-ADR 0073 adds the persistent log service. A supervised userspace process drains
-the bounded kernel ring onto `/state`, so a session's records outlive its reset:
-`cat /state/system.log` reads this boot and `cat /state/system.log.1` the one
-before it. The ring stays the ordering point every component writes to; the
-service is a consumer of it, holding only the console capability that authorises
-reading it and a VFS session for its own file.
-
-ADR 0074 adds the typed configuration service, which was the last of the 0.1.0
-gaps. Keys are declared with a type, a write is checked against the declaration,
-a session's scope and rights decide what it may see and change, and the writable
-settings persist at `/state/config` in a form a person can read and edit. The
-shell's `config` builtin lists, reads and writes them.
-
-The 0.1.0 feature set of spec §56 is therefore complete. What remains before the
-release is consolidation rather than new subsystems.
-
-ADR 0075 closes the first of those: the console is interrupt-driven, its input
-is a waitable object, and the shell blocks instead of retrying the read. It is
-charged two timer ticks over a twenty-second session instead of 7,174. Fixing it
-also uncovered and fixed a latent defect in the IOAPIC accessors, which were
-ordinary Go memory operations the optimiser was free to reorder or discard.
-
-ADR 0076 closes the second: the shell reads its prompt and the log service reads
-the setting that governs it, and sessions are now created through a control
-endpoint with per-client scopes and rights — the shell administers
-configuration, the log service only reads the one namespace that governs it.
-
-ADR 0077 closes the third: the geometry an image declares is checked against the
-device before any offset is derived from it, and a volume the filesystem refuses
-no longer takes the system with it. The machine boots to a prompt with the
-persistent mounts absent, which is the state the volume can be inspected from.
-
-ADR 0078 closes the last: the storage driver restarts, PID 1 gives its
-replacement a fresh channel and tells the block service, and a dead peer no
-longer kills the service its other clients depend on. The validation build kills
-the driver on every boot so the path is exercised rather than assumed. It also
-fixed a wider supervisor defect — a scheduled restart was only acted on when the
-next event happened to arrive — and a log service that created its file only at
-startup.
-
-Consolidation is done. The 0.1.0 release remains a matter of judging the
-existing surface rather than adding to it.
-
-ADR 0079 is the first such judgement: every command has help and a synopsis
-from one table, a malformed invocation is answered with its usage, diagnostics
-name the command, the path and the reason, a launch failure names the stage
-that failed, and `uptime` and `mem` report time and memory in the units a
-person reads.
-
-ADR 0080 makes every command its own image under `userspace/bin`, described by
-a manifest in its source; the build generates the command index PID 1 grants
-from and the shell lists, so adding a command is adding a directory.
-
-ADR 0081 maps the read-only pages of a system image from one shared copy instead
-of copying them into every process. Under TCG a launch no longer retranslates
-code it has run before: `uname` takes 1.5 ms instead of 3.8 ms and a
-three-stage pipeline 3.0 ms instead of 10.2 ms.
-
-ADR 0084 compiles the kernel's RAMFS and VFS self-tests only into the
-validation build, so the normal kernel links no filesystem code, and drops the
-toolchain line from the boot banner.
-
-ADR 0082 gives the console's input to a userspace terminal service, and ADR 0089
-removes the two limitations it recorded. Stream endpoints are reference counted
-in the kernel, so one writing end can be shared, and the shell's and every
-command's output goes through the terminal service, which redraws the line being
-typed around it; the shell and the commands hold no console capability. The
-terminal service and the shell restart independently: whichever dies is
-relaunched on a fresh session and the survivor is handed the other end, and a
-dead shell's jobs are stopped with it. Building it found that a foreground
-command had never received what was typed while it ran; that is fixed and
-tested. Each printed line now costs a relay through the terminal, about ten
-percent on a one-line command under emulation.
-
-ADR 0088 widens the gap below every user stack to 64 KiB and the kernel stacks'
-guard to two pages, and the build now fails if any function's stack frame could
-step over them: TinyGo emits no stack probes for userspace, and the kernel's
-probe routine is an empty stub. ADR 0091 gives the boot task, the last kernel
-stack without a guard, a guarded stack of its own, and delivers double faults on
-a separate stack, so a kernel stack overflow is reported with the guard address
-it hit rather than resetting the machine; the boot test overflows one on purpose.
-ADR 0090 makes TinyGo's `-opt=2` the default
-build level, measured a fifth to a third faster on IPC, VFS and command paths
-than the size-optimised `-opt=z`; building at that level found that the system
-image window had stayed at two MiB after the boot archive bound grew to four
-(ADR 0087 addendum). The release version is written once, in
-`internal/version/version.go`.
-
-ADR 0092 adds `poweroff`, which flushes storage and switches the machine off
-through ACPI S5; the kernel reads the firmware's ACPI tables once at boot as
-untrusted input.
-
-GoOS 0.1.0 is released (docs/releases/0.1.0.md).
-
-GoOS 0.1.1 (docs/releases/0.1.1.md) is an architectural cleanup that removes
-0.1.0 shortcuts before Linux compatibility depends on them: the kernel launches
-extents of the system image instead of resolving paths (ADR 0093), the
-identity-authorized `DebugWrite` is retired (ADR 0094), userspace `unsafe` is
-confined to `userspace/runtime` (ADR 0095), FAT32 runs as its own service
-(ADR 0096), the kernel, PID 1 and shell sources are split by responsibility,
-and `make release-check` gates a release.
-
-GoOS 0.1.2 (docs/releases/0.1.2.md) prepares storage for Linux
-compatibility. Programs anywhere outside `/system` run from executable
-objects PID 1 fills from the file (ADR 0097), so a Linux ELF program on the
-persistent volume will have a way to be launched. File data between the VFS
-and FAT32 moves through a shared-memory file cache (ADR 0098), and the VFS,
-the configuration and log services and the block service restart on failure
-with their clients handed new sessions (ADR 0099, 0100, 0101).
-
-GoOS 0.1.3 (docs/releases/0.1.3.md) removes the scalability limits Linux
-compatibility would otherwise inherit: FAT32 as a complete filesystem
-(ADR 0102), physical memory beyond the first GiB (ADR 0103), native
-virtual-memory regions and demand-zero memory (ADR 0104), page-backed RAMFS
-(ADR 0105), lazily loaded executables (ADR 0106), shared-memory bulk I/O
-(ADR 0107), non-blocking program preparation in PID 1 (ADR 0108), a
-variable-length startup object (ADR 0109), one name and path contract
-(ADR 0110), bounded dynamic kernel registries (ADR 0111), interoperable FAT32
-metadata (ADR 0112), and independent monotonic and realtime clocks initialized
-from UEFI (ADR 0113).
-
-GoOS 0.1.4 (docs/releases/0.1.4.md) completes the native storage and execution
-base for Linux compatibility. It adds foreign FAT32 geometry and metadata,
-raw/MBR/GPT block slices, dynamic mounts, native FAT checking and repair,
-stable open-file identity, high-half kernel entry trampolines, file-backed
-executable pages, and bounded launch resource profiles (ADR 0112 through
-0122).
-
-GoOS 0.1.5 (docs/releases/0.1.5.md) adds the UEFI GOP framebuffer console,
-Spleen 12x24 text rendering, unified interrupt-driven PS/2 and serial input,
-geometry-aware wrapped-line redraw, a manual graphical QEMU target, and
-headless pixel and keyboard validation while retaining COM1 as the primary
-diagnostic and fallback path.
-
-GoOS 0.1.6 (docs/releases/0.1.6.md) adds `gfm`, a two-pane file manager, as
-the first full-screen program, and the terminal support under it: F1-F12 and
-navigation key sequences through an eight-byte decoder with whole-sequence
-enqueue, multi-parameter CSI with cursor addressing and 16-colour SGR in the
-framebuffer terminal, scoped raw terminal mode that the shell grants to
-manifests declaring `GrantTerminal` and ends with the job (ADR 0124), separate
-COM1 and framebuffer consoles with a terminal service and shell each
-(ADR 0125), and the reusable `userspace/terminal` package. A viewer, an editor, recursive copy and
-cross-filesystem move are left for later releases.
-
-GoOS 0.1.7 extends native filesystem metadata (ADR 0126) and capacity discovery
-(ADR 0127). FAT32, RAMFS and the immutable image return typed metadata through
-version 10 of both filesystem protocols: explicit UTC timestamps, stable
-attributes, checked 64-bit capacity, read-only state and a non-authorizing,
-generation-safe VFS mount ID. VFS provides bounded mount enumeration, while the
-read-only `df` and `mount` commands expose it without device authority.
-The bounded `userspace/tui` layer now provides caller-owned screens, checked
-geometry, dirty rows, dialogs and text/list viewports (ADR 0128). Native `gview`
-uses a fixed read window for large-file navigation, clips long lines and
-sanitizes file controls before terminal rendering. Version 11 of both protocols
-adds whole-file `Replace` (ADR 0129), through which the new gap-buffer editor
-`edit` saves without truncating the original (ADR 0131). `gfm` starts `gview`
-and `edit` through a launch channel PID 1 grants by manifest, with the child's
-own grants and the caller's input (ADR 0130), and shows modification times and
-free space. GoOS 0.1.7 is released (docs/releases/0.1.7.md). GoOS 0.2.0
-follows it with Linux ABI compatibility and GoOS 0.2.1 with Linux process
-composition (Priority 5).
-
-Known gaps left by ADR 0089: the system services that start before the terminal
-still write the console directly, as does the kernel's warning echo, so either
-can land in a line being typed; and what was typed but not finished is lost if
-the terminal service dies. ADR 0123 removes the one-row redraw limitation.
-
-## Priority 5 — Linux ABI compatibility
-
-GoOS 0.2.0 ([docs/releases/0.2.0.md](../releases/0.2.0.md)) is the first
-Linux ABI release. Unmodified, statically linked Linux x86_64 programs run as
-GoOS processes through a kernel-resident ABI adapter backed by the
-process-scoped capabilities and the VFS service.
-
-What it contains:
-
-- immutable `Native`/`LinuxX8664` process identity and a dedicated
-  `SYSCALL` entry that the native gate and the Linux gate each refuse to the
-  other;
-- a bounded static ELF64 loader for `ET_EXEC` and static PIE images with lazy
-  file-backed pages, and a System V initial stack that exposes no native
-  startup object;
-- a PID 1 launch policy of three streams and one VFS session, enforced again
-  by the kernel;
-- a syscall layer with its own number and errno namespaces, continuations for
-  calls that block, a 64-entry descriptor table, anonymous memory, FS-base
-  TLS, and files, directories, status, and naming through the VFS session;
-- identity, clocks, sleep, limits, and signal state answered from kernel
-  state, and random bytes from the CPU's generator;
-- `/dev/null` and `/dev/zero`, positioned I/O, and `statx`;
-- six pinned fixtures, a conformance probe that prints the same lines on
-  Linux and on GoOS, a strict reference run on a real Linux kernel, a Linux
-  boot gate, and a BusyBox harness.
-
-[linux-x86_64-abi.md](../architecture/linux-x86_64-abi.md) is the contract,
-with every call, each difference from Linux, and the release limits.
-
-### Process composition
-
-GoOS 0.2.1 ([docs/releases/0.2.1.md](../releases/0.2.1.md)) lets one Linux
-program run another:
-
-- a bounded family registry with zombie records, reparenting, and process
-  budgets that keep native slots free;
-- per-process descriptor tables over shared open-file descriptions and one
-  serialized VFS context per family;
-- in-place `execve`, private-snapshot `fork`, `vfork`, and the process forms
-  of `clone`;
-- `wait4`, `pipe`, and `pipe2` with atomic `PIPE_BUF` writes;
-- signal delivery on an `rt_sigframe`, `kill` on the caller's tree,
-  interrupted calls with `SA_RESTART`, `rt_sigsuspend`, and `pause`;
-- `poll` and `ppoll` on native readiness;
-- a non-interactive BusyBox `sh` gate.
-
-### The installed system
-
-GoOS 0.2.2 ([docs/releases/0.2.2.md](../releases/0.2.2.md)) runs the system
-from disk:
-
-- a small boot archive at `/bootstrap` with the storage services, the shell,
-  and the recovery commands;
-- the installed system on the FAT32 volume, checked by PID 1 and published at
-  `/system`, protected by the VFS on its directory's node under every name;
-- executable origin by path, file-backed service launch, and grants only from
-  the index of a command's own origin;
-- normal and recovery modes, restart of the storage stack under a running
-  system, and recovery when it does not come back;
-- `make run` on a disk that is never overwritten implicitly.
-
-### GoOS 0.2.3: static glibc and threads
-
-GoOS 0.2.3 ([docs/releases/0.2.3.md](../releases/0.2.3.md)) adds static glibc
-programs (ADR 0176) and Linux threads: thread-form `clone`, per-thread TLS,
-TIDs, signal masks, and sleeping `futex` waits (ADR 0177). Open files survive a
-FAT32 service restart (ADR 0178). 7-Zip runs with its own thread count.
-
-### GoOS 0.2.4: symmetric multiprocessing
-
-GoOS 0.2.4 ([docs/releases/0.2.4.md](../releases/0.2.4.md)) adds symmetric
-multiprocessing and the concurrency work required to use it in practice. All
-supported processors run Tasks with per-CPU run queues, local timers,
-migration, remote rescheduling, and TLB shootdown. The old kernel-wide lock is
-replaced by explicit fine-grained locking, with handle tables, Linux families,
-and channels split by object after profiling. Task affinity is available
-through the native API and Linux `sched_setaffinity`, the `cpu` command exposes
-per-CPU runtime state, and housekeeping uses a bounded deadline index. SMP and
-7-Zip are validated under QEMU and KVM/Proxmox.
+- quoting and escaping;
+- bounded command sequences with `;`;
+- native pipelines;
+- stdin/stdout/stderr as typed streams;
+- `<`, `>`, `>>`, `2>` and `2>>` redirection;
+- background jobs and `jobs`/`kill`;
+- foreground Ctrl-C and Ctrl-D;
+- PATH-based executable lookup;
+- manifest-backed native commands under `/system/bin`;
+- local serial and framebuffer terminals;
+- full-screen native `gfm`, `gview` and `edit`;
+- dynamic foreground terminal geometry for running native TUI applications;
+- shell/admin commands including `head`, `tail`, `grep`, `wc`, `find`, `hexdump`, `hostname` and `date`;
+- structured `log` filtering and event-driven `log -f`.
 
 ### Native networking
 
-Done after 0.2.4, under ADR 0190 and ADR 0191, as the
-[networking specification](networking.md) set out:
+- userspace virtio-net;
+- Ethernet II, ARP, IPv4 and ICMP;
+- DHCP and static IPv4 configuration;
+- RFC 5227-style address-conflict handling;
+- loopback and own-address delivery;
+- hosts table;
+- native DNS resolver with cache;
+- DNS-over-TCP fallback for truncated replies;
+- generic native UDP sessions;
+- generic native TCP sessions;
+- `ping`, `net`, `resolve`, `dnsq`, `udp` and `tcp`;
+- native HTTP/1.1 `fetch`;
+- native TLS 1.3 and X.509 verification;
+- persistent system trust store and signed trust-store updates;
+- HTTPS redirects, explicit root verification and hostname/IP SAN checks.
 
-- discovery of one legacy virtio-net function with a probed and validated
-  I/O BAR, a dedicated interrupt vector, an IRQ interest in `WaitAny` and
-  `IRQTake`, and a DMA domain per device whose teardown resets only its own
-  device;
-- a userspace driver and a network service, `netd`, with frames carried in
-  two shared pools and only slot numbers in `GNETDRV1` messages;
-- Ethernet II, ARP, IPv4, ICMP echo, and a DHCP client with renew, rebind
-  and conflict detection, or a static address from the configuration
-  service;
-- `ping` and `net status|reload` over private sessions granted by the
-  command index, format 3;
-- `make test-network`: DHCP and ping on QEMU user networking with two driver
-  replacements and exact resource counts, two guests on a private stream
-  backend, and a boot without a NIC.
+### Native remote administration
 
-That initial milestone did not include DNS, TCP, generic UDP, IPv6 or Linux
-network calls.
-`test-network` runs in `test-all` and the release gate.
+- native SSH service `remoted`;
+- Ed25519 public-key authentication;
+- persistent Ed25519 host identity;
+- isolated host signing: workers receive signing endpoints rather than host private keys;
+- worker revocation when the signer peer dies;
+- interactive SSH PTY shell;
+- remote `exit`;
+- graceful remote `reboot` and `poweroff`;
+- non-PTY SSH command execution using the native shell parser;
+- separate stdin/stdout/stderr and propagated SSH exit status;
+- PTY `window-change` and live resize for `gfm`, `gview` and `edit`;
+- `remote status` / `remote reload`;
+- transactional `remote keys`, `remote key add` and `remote key remove`;
+- authorized-key changes without exposing host private-key authority;
+- dedicated QEMU and Proxmox/KVM remote-administration validation.
 
-### Network tuning, loopback and name resolution
+### Linux compatibility
 
-Done after the native networking work, under ADR 0192, ADR 0193 and
-ADR 0194:
+GoOS runs unmodified statically linked Linux x86_64 ELF programs through a separate compatibility layer.
 
-- `system.net.*` settings for TTL, ARP, address-conflict, echo-rate and DHCP
-  timing, applied by `net reload` without a reboot;
-- address-conflict detection after RFC 5227: probes and announcements with
-  random delays, defence of a live address, giving it up on a second
-  conflict, and a rate limit after repeated conflicts;
-- a native `RandomRead` call that gives `netd` and the resolver unpredictable
-  ports, transaction IDs and delays;
-- a loopback interface, `lo`, with `127.0.0.0/8`, present with or without a
-  NIC; loopback-addressed frames from the link are dropped;
-- a hosts table of up to 64 records in `/state/hosts`, served by the
-  configuration service over `GHST1` and edited with the shell's `hosts`
-  builtin, with `localhost` fixed at `127.0.0.1`;
-- `resolved`, a stub resolver with a cache, reached by commands over
-  `GRESOLV1` and reaching DNS servers only through `netd`, with servers
-  from DHCP option 6 and `system.dns.server1..4`;
-- `resolve NAME|status|flush|reload` and `ping NAME`;
-- `make test-network` checks loopback without a NIC, conflict handling, the
-  hosts table, and DNS against a host-side DHCP and DNS peer on a private
-  segment.
+Implemented support includes:
 
-### Generic IPv4 UDP
+- static `ET_EXEC` and static PIE;
+- musl and static glibc applications;
+- Linux process families;
+- `fork`, `vfork`, `execve` and supported `clone` forms;
+- Linux threads and TLS;
+- pipes;
+- signals and signal frames;
+- futex waits;
+- polling;
+- descriptor tables and shared open-file descriptions;
+- anonymous memory;
+- file and directory access through VFS;
+- clocks, sleep, limits and identity calls;
+- static BusyBox non-interactive shell workloads;
+- multithreaded applications such as 7-Zip.
 
-Done after name resolution, under ADR 0195:
+Linux compatibility remains intentionally separate from the native ABI.
 
-- UDP endpoints in the stack with bind, connect, send and receive, an
-  ephemeral port range, a shared receive buffer pool with a per-session
-  share, and loopback and own-address delivery that needs no NIC;
-- `GUDP1` sessions that PID 1 opens from `netd` for commands granted
-  `GrantUDP`, each one channel and a TX and an RX pool;
-- the resolver as an ordinary UDP client, with a fresh endpoint and port for
-  every query, and the lease's DNS servers over a `GNETAPI` `Servers`
-  request;
-- `system.net.udp.*` limits, applied by `net reload` with the rest of
-  `system.net.*`, and UDP counters and limits in `net status`;
-- the `udp send|listen|self` command;
-- `make test-network` checks UDP against an echo service and injected
-  datagrams on the private segment, the payload limits, checksum drops, a
-  limit reload and loopback UDP without a NIC.
+---
 
-### Generic IPv4 TCP
+# Completed release milestones
 
-Done after generic UDP, under ADR 0196:
+## 0.1.x — Native foundation
 
-- fixed TCP endpoint and TCB state in `userspace/network`, including active
-  and passive open, byte streams, retransmission, flow and congestion control,
-  bounded reassembly, FIN, RST and TIME_WAIT;
-- `GTCP1` sessions opened by PID 1 for `GrantTCP`, with checked TX and RX pool
-  ownership and deferred Accept, Connect, Read and Write;
-- loopback and own-address delivery through the TCP state machine, including
-  operation without a NIC;
-- `system.net.tcp.*`, TCP status counters and the `tcp connect|listen|self`
-  command;
-- host parser, transport and service tests plus the expanded offline network
-  gate.
+### 0.1.0
 
-### GoOS 0.2.5: native IPv4 networking
+Established the first coherent native system: native process model and shell, typed IPC and capability handles, initial VFS/RAMFS, persistent FAT32 path, supervision, configuration/logging, process controls and the native command model.
 
-GoOS 0.2.5 ([release notes](../releases/0.2.5.md)) adds the native networking
-path from a userspace virtio-net driver through IPv4, UDP, TCP and DNS to the
-`fetch` HTTP/1.1 client. `resolved` retries truncated DNS answers over TCP;
-`dnsq` queries servers directly and can display AAAA records. The offline
-network gate checks the transports, resolver and HTTP client.
+### 0.1.1
 
-IPv4 fragmentation, multicast DNS, DNSSEC, encrypted DNS, IPv6 transport and
-Linux socket calls remain unsupported. `dnsq` can display AAAA records, but
-GoOS cannot use them for IPv6 connections.
+Architectural cleanup: removed early kernel/path shortcuts, removed `DebugWrite`, confined userspace `unsafe`, separated FAT32 into its own service, split kernel/PID 1/shell responsibilities and introduced `make release-check`.
 
-### GoOS 0.2.6: native HTTPS
+### 0.1.2
 
-The implementation uses pinned Go software TLS/X.509 inside native `fetch`,
-over its existing resolver, TCP and VFS grants (ADR 0198). Native primitives,
-explicit-root X.509 verification and the 69-assertion authenticated HTTPS gate
-pass. Production-root loading and fixture handshake/redirect measurements are
-recorded in the [release notes](../releases/0.2.6.md). The stream network
-regression also passed. Full `test-all` and `release-check` have not run, and
-normal production image size remains unmeasured.
+Prepared storage and execution for Linux compatibility with executable objects outside `/system`, a shared-memory file cache and service restart/reconnect paths.
 
-Production roots are an offline pinned Mozilla/curl PEM artifact under
-`/system/security/ca-certificates.pem`. The client uses kernel entropy,
-REALTIME validity and monotonic deadlines, refuses HTTPS downgrades, and
-bounds certificate lists, DER, SAN entries and chain search. `test-tls` is the
-selected offline interoperability gate for `test-all` and `release-check`.
-IPv6, encrypted DNS, revocation checks, HTTP/2, QUIC and a narrower VFS root-read
-authority remain separate work. See [ADR 0198](../adr/0198-native-tls-and-system-trust.md)
-and [native evidence](crypto-feasibility.md).
+### 0.1.3
 
-### GoOS 0.2.7: native remote administration
+Removed storage/execution scalability limits: more complete FAT32, memory above 1 GiB, native VM regions and demand-zero, page-backed RAMFS, lazy executable loading, shared-memory bulk I/O, bounded dynamic registries, interoperable FAT32 metadata and monotonic/realtime clocks.
 
-Keep SSH on the existing native shell, stream and terminal paths. Interactive
-PTY sessions support `exit`, graceful remote reboot/poweroff, and sequence-ordered
-live resize of the current raw foreground application. Non-PTY exec uses the
-native parser, separate stdin/stdout/stderr and actual command status; PTY exec
-and one-shot background jobs remain outside the supported surface.
+### 0.1.4
 
-Eight manifest-backed images provide `head`, `tail`, `grep`, `wc`, `find`,
-`hexdump`, `hostname` and UTC `date`. Hostname uses a narrow acknowledged durable
-config operation; existing `config set` semantics do not change. The shell log
-builtin adds exact structured filters, newest-N selection and cursor-aware
-blocking follow with Ctrl-C and independent readers.
+Completed the native storage/execution base with foreign FAT32 geometry, raw/MBR/GPT slices, dynamic mounts, FAT checking and repair, stable open-file identity, high-half entry trampolines, lazy file-backed executable pages and bounded launch profiles.
 
-`remote keys`, `remote key add` and fingerprint-based removal manage the bounded
-Ed25519 authorized-key file and reload policy. PID 1 confines management to the
-configured public-key file and transactional siblings; shell and child host-key
-protection remains intact.
+### 0.1.5
 
-Acceptance requires focused host/race tests, the extended two-boot remote gate,
-network and console-GUI regression gates, then one kept Proxmox VM on the exact
-candidate SHA. Pin host identity from trusted serial status and retain reports,
-serial output and artifact hashes. See [remote access](remote-access.md).
-SFTP/SCP, forwarding, POSIX shells/PTYS, IPv6, dynamic linking and Linux networking
-syscalls remain outside this work.
+Added the UEFI GOP framebuffer console, Spleen text rendering, PS/2 keyboard input, shared serial/framebuffer input, geometry-aware redraw, `make run-gui` and headless framebuffer/keyboard validation.
 
-### Next: a Linux terminal
+### 0.1.6
 
-A later release will give Linux programs a terminal: a terminal descriptor,
-`isatty`, `TIOCGWINSZ`, a termios subset, sessions and process groups, a
-foreground group, terminal-generated `SIGINT`, `SIGTSTP`, and `SIGCONT`, and an
-interactive BusyBox `sh`. Signals aimed at one thread, rather than at its
-process, remain.
+Added `gfm`, expanded keyboard sequences, CSI/SGR terminal support, scoped raw terminal mode and reusable terminal/TUI layers.
 
-Later: interactive programs such as `nano`, and `utimensat`, which needs the
-VFS to set a file's times. A random source for CPUs without RDRAND and a
-randomized load base are independent steps. Dynamic linking stays separate
-work.
+### 0.1.7
 
-Linux syscalls translate into native GoOS primitives and userspace services.
-They must not create a privileged bypass around VFS, IPC, handles, or
-capabilities.
+Expanded filesystem metadata and native TUI applications with capacity/mount discovery, typed timestamps/attributes, `df`, `mount`, `gview`, `edit`, nested TUI launch and safer whole-file replacement.
 
-## Priority 6 — In-system compilation experiment
+## 0.2.x — Compatibility, SMP, networking and remote administration
 
-A compiler running inside GoOS is a long-term proof that the system is a usable
-computing environment rather than only a bootable image.
+### 0.2.0 — Linux ABI
 
-Do not start with TinyGo itself. First target a small compiler that can:
+Introduced the static Linux x86_64 compatibility layer: Linux ELF loading, Linux syscall entry, descriptor tables, files/directories/memory/clocks/randomness, initial signals/polling and conformance against a real Linux kernel.
+
+### 0.2.1 — Linux process composition
+
+Added process families, `fork`, `vfork`, `execve`, supported `clone`, `wait4`, pipes, signal delivery, `poll`/`ppoll` and non-interactive BusyBox `sh`.
+
+### 0.2.2 — Installed system and recovery
+
+Moved the normal system onto persistent disk with `/bootstrap`, installed `/system`, executable-origin tracking, normal/recovery modes, storage-stack restart recovery and non-destructive `make run`.
+
+### 0.2.3 — Static glibc and threads
+
+Added static glibc compatibility, Linux threads, per-thread TLS/TIDs, futex waits, open-file survival through FAT32 service restart and multithreaded 7-Zip workloads.
+
+### 0.2.4 — Symmetric multiprocessing
+
+Added SMP across all supported processors, per-CPU queues/timers, migration, TLB shootdown, fine-grained kernel locking, affinity, per-CPU accounting and KVM/Proxmox SMP validation.
+
+### 0.2.5 — Native IPv4 networking
+
+Added the native network path from userspace virtio-net through IPv4, UDP, TCP and DNS to the HTTP/1.1 `fetch` client. DHCP/static addressing, loopback, hosts, DNS cache/TCP fallback and generic UDP/TCP sessions are included.
+
+IPv6 and Linux socket syscalls remain outside the native networking design.
+
+### 0.2.6 — Native HTTPS and trust updates
+
+Added native HTTPS to `fetch` using pinned Go software TLS/X.509 compiled through the TinyGo compatibility path.
+
+Implemented TLS 1.3, X25519, standard TLS 1.3 AEAD suites, X.509 chain validation, DNS/IP SAN identity, native entropy/realtime validation, pinned Mozilla/curl trust roots, persistent signed trust-store updates and offline authenticated TLS regression gates.
+
+Stock TinyGo TLS remains unsuitable as the selected byte-stream TLS implementation; GoOS uses the pinned/adapted software stack instead.
+
+### 0.2.7 — Native remote administration
+
+GoOS 0.2.7 adds a native administration plane rather than bolting OpenSSH or a POSIX shell onto the system.
+
+Implemented:
+
+- native SSH interactive PTY sessions;
+- non-PTY SSH exec using the GoOS shell parser;
+- isolated host-key signing;
+- persistent host identity;
+- signer peer-death revocation;
+- authorized-key administration;
+- graceful remote reboot/poweroff;
+- remote `exit`;
+- proper CRLF behavior on OpenSSH/serial host terminals;
+- bounded stdout ordering before prompts;
+- live resize of running native TUI programs;
+- structured `log -f`;
+- native admin utilities;
+- persistent hostname;
+- dedicated exact-SHA Proxmox/KVM remote-admin validation;
+- repository-local portable build/test scratch space under `build/tmp`.
+
+The remote shell still intentionally excludes SFTP/SCP, SSH forwarding, agent/X11 forwarding, POSIX shell semantics and Linux PTYs.
+
+See [remote access](remote-access.md), [ADR 0199](../adr/0199-native-remote-terminal-sessions.md), and [ADR 0200](../adr/0200-native-administration-contracts.md).
+
+---
+
+# Next priorities
+
+## Priority 1 — Linux terminal support
+
+The next major compatibility milestone is to give Linux programs a real terminal.
+
+This should not be implemented as a broad `/dev/pts` clone first. Build the smallest coherent Linux terminal contract on top of the existing native terminal/session model.
+
+Required work:
+
+1. Add a Linux terminal-backed descriptor type.
+2. Implement `isatty` behavior.
+3. Add `TIOCGWINSZ` and terminal geometry propagation.
+4. Add the minimal termios subset needed by real interactive programs.
+5. Add Linux sessions and process groups.
+6. Track one foreground process group per terminal.
+7. Generate terminal signals: `SIGINT`, `SIGTSTP`, `SIGCONT`.
+8. Connect Linux foreground job lifetime to the existing native terminal/session lifecycle.
+9. Add an interactive BusyBox `sh` gate.
+
+Acceptance target:
+
+```text
+goos> /system/linux/busybox sh
+/ # echo hello
+hello
+/ # stty
+...
+```
+
+Interactive shell editing, Ctrl-C and terminal resize must work without granting Linux processes native terminal or console authority directly.
+
+### After the first Linux terminal
+
+Once the terminal contract is stable:
+
+- run `nano`;
+- add missing terminal ioctls only when a real application requires them;
+- add `utimensat` so editors can preserve/update file timestamps correctly;
+- consider additional static CLI/TUI applications as compatibility probes.
+
+Do not turn this milestone into full Linux TTY subsystem emulation unless an actual application demonstrates the need.
+
+## Priority 2 — Linux runtime completeness
+
+After interactive Linux programs work, improve the static Linux environment where concrete programs expose gaps.
+
+Likely work:
+
+- thread-directed signal cases not yet represented cleanly;
+- missing file metadata/time syscalls such as `utimensat`;
+- remaining practical ioctls required by common CLI programs;
+- stronger `/proc`-like introspection only if an application needs it;
+- better diagnostics for unsupported syscalls;
+- compatibility tests based on real programs rather than syscall-count goals.
+
+The rule remains:
+
+> Add Linux ABI surface because a useful program requires it, not because Linux has the syscall.
+
+## Priority 3 — Entropy and load randomization
+
+Two security/portability items are independent of the terminal milestone and can be done separately.
+
+### CPU-independent random source
+
+Add a native entropy source path that also works when RDRAND is unavailable, while preserving fail-closed behavior for cryptographic consumers.
+
+### Randomized executable load base
+
+Add bounded randomized base selection for compatible executable mappings.
+
+This is not a full ASLR project. Do not expand it into complete Linux/macOS-style address-space randomization before the simpler mechanism is measured and validated.
+
+## Priority 4 — Native shell/application polish
+
+The native environment is already usable. Future improvements should remain small and capability-oriented.
+
+Candidates:
+
+- `which`;
+- stream merge such as `2>&1`, if it can be expressed cleanly in the existing typed-stream model;
+- additional small native utilities where they materially improve administration;
+- better command discovery/help presentation;
+- TUI usability improvements;
+- optional history/editing improvements that remain bounded.
+
+Avoid importing POSIX shell semantics wholesale.
+
+## Priority 5 — Networking beyond the current native IPv4 stack
+
+The current network stack is sufficient for HTTP/HTTPS, DNS and SSH administration.
+
+Future networking work should be driven by real use cases.
+
+Possible later milestones:
+
+- IPv6;
+- multicast/mDNS;
+- stronger TCP compatibility/performance;
+- additional application protocols;
+- Linux socket syscalls backed by the native network services.
+
+Linux networking must remain an adapter over native services rather than a privileged parallel network stack.
+
+Encrypted DNS, HTTP/2, HTTP/3 and QUIC are not immediate priorities.
+
+## Priority 6 — Dynamic Linux linking
+
+Dynamic ELF support remains separate from the static Linux ABI.
+
+Do not begin with broad glibc compatibility. First define:
+
+- ELF interpreter handling;
+- shared-object mappings;
+- relocation model;
+- loader trust and path policy;
+- bounded mapping/accounting rules;
+- interaction with executable origin and capability grants.
+
+A minimal musl dynamic binary is a better first target than a general desktop Linux loader.
+
+This milestone should come after the static interactive environment is strong enough to justify it.
+
+## Priority 7 — In-system compilation experiment
+
+A compiler running inside GoOS remains a long-term proof that the system is a usable computing environment rather than only a bootable image.
+
+Do not start with TinyGo itself.
+
+First target a small compiler that can do:
 
 ```text
 goos> cc hello.c -o hello
@@ -716,23 +359,64 @@ goos> ./hello
 Hello GoOS
 ```
 
-Only after that milestone should a larger Go/TinyGo toolchain be evaluated.
+Only after that should a larger Go/TinyGo toolchain be evaluated.
 
-## Explicit non-priorities
+The compiler experiment is not a reason to weaken filesystem, executable-origin or capability boundaries.
 
-Do not move these ahead of the native application and storage milestones unless
-a concrete blocker requires them:
+---
+
+# Ongoing engineering priorities
+
+## Correctness and isolation
+
+Prefer explicit capabilities, typed IPC, narrow grants, fail-closed validation, generation-safe identities, bounded memory/protocol state, peer-death handling and deterministic cleanup.
+
+Do not introduce global ambient authority merely for compatibility convenience.
+
+## Measured performance
+
+Continue measuring before redesigning.
+
+Current important areas include:
+
+- native/TinyGo process launch overhead;
+- housekeeping wakeup only when deadlines/lifecycle work exists;
+- TCP throughput/latency under real KVM;
+- TUI/terminal redraw efficiency;
+- Linux syscall/descriptor overhead under practical workloads.
+
+Avoid scheduler rewrites without evidence.
+
+## Release reproducibility
+
+Every release candidate should retain:
+
+- exact candidate SHA;
+- toolchain versions;
+- reproducible-build checks;
+- host/unit/race gates;
+- VM regression gates;
+- hardware/KVM evidence where the release changes hardware-sensitive code;
+- release notes that describe actual results rather than planned tests.
+
+Build/test scratch data belongs under ignored repository-local `build/` paths and must not depend on one developer's machine layout.
+
+---
+
+# Explicit non-priorities
+
+Do not move these ahead of the milestones above unless a concrete blocker requires them:
 
 - full ASLR;
-- IOMMU implementation beyond keeping DMA APIs IOMMU-ready;
-- networking beyond IPv4, ICMP echo, UDP, TCP, loopback and the DNS stub
-  resolver on one virtio-net interface;
+- broad POSIX conversion of the native ABI;
+- full Linux TTY emulation before the minimal interactive contract is proven;
+- IOMMU work beyond keeping DMA APIs ready for it;
 - USB;
-- GUI;
+- desktop GUI;
 - ext4;
-- glibc;
-- broad Linux ABI coverage;
+- broad dynamic-linker compatibility;
+- broad Linux ABI coverage for its own sake;
+- HTTP/2, HTTP/3 or QUIC without an application need;
 - scheduler redesign without measured need.
 
-Correctness, isolation, capability boundaries, and measurable performance remain
-higher priority than feature count.
+Correctness, isolation, capability boundaries, useful real programs and measured performance remain higher priority than feature count.
