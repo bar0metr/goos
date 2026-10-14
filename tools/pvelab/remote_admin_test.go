@@ -243,7 +243,7 @@ func (m *mockTerminal) Write(data []byte) error {
 		return nil
 	}
 	if string(data) == "\x1b[21~" {
-		m.pending = append(m.pending, []byte("\n"+shellPrompt)...)
+		m.pending = append(m.pending, []byte("\x1b[0m\x1b[?25h\x1b[2J\x1b[H"+shellPrompt)...)
 		return nil
 	}
 	return errors.New("unexpected terminal input")

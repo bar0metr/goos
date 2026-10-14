@@ -772,7 +772,7 @@ func observeLiveResize(ctx context.Context, g *Guest, terminal remoteTerminal, r
 	if err := terminal.Write([]byte("\x1b[21~")); err != nil {
 		return strings.Join(evidence, "\n"), err
 	}
-	if err := remoteWait(ctx, terminal, "\n"+shellPrompt); err != nil {
+	if err := remoteWait(ctx, terminal, shellPrompt); err != nil {
 		return strings.Join(evidence, "\n"), err
 	}
 	return strings.Join(evidence, "\n"), nil
