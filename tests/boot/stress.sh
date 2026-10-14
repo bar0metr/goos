@@ -88,8 +88,8 @@ while [ "$round" -lt "$rounds" ]; do
 	run "mkdir /tmp/r$round"
 	run "touch /tmp/r$round/f; stat /tmp/r$round/f; rm /tmp/r$round/f"
 	run "uname; pwd; echo seq-$round"
-	grep -q "^stress-$round\$" "$log" || fail "persistent read-back of round $round"
-	grep -q "^pipe-$round\$" "$log" || fail "pipeline output of round $round"
+	tr -d '\r' <"$log" | grep -q "^stress-$round\$" || fail "persistent read-back of round $round"
+	tr -d '\r' <"$log" | grep -q "^pipe-$round\$" || fail "pipeline output of round $round"
 	round=$((round + 1))
 done
 run "echo stress-complete"
