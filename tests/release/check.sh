@@ -82,7 +82,8 @@ else
 	done
 fi
 
-stray=$(git ls-files --others --exclude-standard; git ls-files --others --ignored --exclude-standard | grep -v '^build/' || true)
+# Keep non-ASCII paths unquoted so the build/ prefix check sees their real names.
+stray=$(git -c core.quotepath=false ls-files --others --exclude-standard; git -c core.quotepath=false ls-files --others --ignored --exclude-standard | grep -v '^build/' || true)
 # Finder's .DS_Store files are host metadata. The root .env is the documented,
 # ignored secret store for the optional Proxmox lab. Neither is build output.
 stray=$(printf '%s\n' "$stray" | grep -v -e '^$' -e '^\.env$' -e '\(^\|/\)\.DS_Store$' || true)
