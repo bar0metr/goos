@@ -413,9 +413,9 @@ func (remoteAdminScenario) Run(ctx context.Context, s *Session) (result Result, 
 	if err != nil {
 		return "", err
 	}
-	privatePath = strings.TrimSpace(strings.Split(privatePath, "\n")[0])
-	if !strings.HasPrefix(privatePath, "/state/") || strings.ContainsAny(privatePath, "\r\n\x00") {
-		return "", failf(ClassScenario, "host-private-key-denied", "invalid configured private path %q", privatePath)
+	privatePath = configuredHostKeyPath(privatePath)
+	if privatePath == "" {
+		return "", failf(ClassScenario, "host-private-key-denied", "expected one configured private path under /state/")
 	}
 	if err := execute("host-private-key-denied", client, "cat "+shellQuote(privatePath), func(out commandResult) bool {
 		return out.Status > 0 && out.Status < 255 && strings.Contains(strings.ToLower(out.Stderr), "permission denied") && strings.TrimSpace(out.Stdout) == ""
@@ -672,6 +672,21 @@ func validRemoteUser(user string) bool {
 		}
 	}
 	return true
+}
+
+func configuredHostKeyPath(out string) string {
+	var found string
+	for _, line := range strings.Split(out, "\n") {
+		path := strings.TrimSpace(line)
+		if !strings.HasPrefix(path, "/state/") {
+			continue
+		}
+		if found != "" || strings.ContainsAny(path, "\r\n\x00") {
+			return ""
+		}
+		found = path
+	}
+	return found
 }
 
 func waitFollowGeneration(ctx context.Context, terminal Console, generation uint64) (bool, string, error) {

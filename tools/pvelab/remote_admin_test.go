@@ -144,6 +144,22 @@ func TestRemoteStatusFieldsAcceptsReloadOutputOnly(t *testing.T) {
 	}
 }
 
+func TestConfiguredHostKeyPathWithInterleavedLog(t *testing.T) {
+	const path = "/state/security/ssh/ssh_host_ed25519_key"
+	const warning = "[2026-10-14T21:18:22.833245Z] WARN  remoted-worker[78]: remote SSH authentication or handshake failed"
+	interleaved := cleanOutput("config get system.remote.host-key", "goos> "+warning+"\r\nconfig get system.remote.host-key\r\n"+path+"\r\n"+shellPrompt)
+	for _, out := range []string{path, interleaved} {
+		if got := configuredHostKeyPath(out); got != path {
+			t.Fatalf("configuredHostKeyPath(%q) = %q", out, got)
+		}
+	}
+	for _, out := range []string{"", warning, path + "\n" + path, "/tmp/ssh_host_ed25519_key", path + "\x00"} {
+		if got := configuredHostKeyPath(out); got != "" {
+			t.Fatalf("accepted invalid host key path %q", out)
+		}
+	}
+}
+
 func TestRemoteAssertionsFailClosed(t *testing.T) {
 	g := &Guest{logf: func(string, ...any) {}}
 	for _, failure := range []struct {
