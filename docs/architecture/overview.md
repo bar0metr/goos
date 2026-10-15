@@ -2,7 +2,12 @@
 
 GoOS follows a pragmatic microkernel/hybrid design. The privileged kernel will
 own CPU state, address spaces, scheduling, interrupts, timers, IPC primitives,
-handles, and capability enforcement. Filesystems, TTY, storage, networking,
+handles, capability enforcement, and a dedicated Linux x86_64 ABI
+translation subsystem. Linux applications enter through a separate SYSCALL
+gate; their supported syscalls are translated in the kernel into native
+mechanisms and, where needed, capability-scoped requests to userspace services.
+The compatibility subsystem is separate from the native ABI, not a separate
+ring-3 service (ADR 0134). Filesystems, TTY, storage, networking,
 configuration, logging policy, and complex drivers belong in isolated
 userspace services.
 
