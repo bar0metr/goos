@@ -23,7 +23,7 @@ support; macOS, the value of coherent design and predictable interfaces. I
 also wanted to leave behind the constraints decades of compatibility put on
 both. Native GoOS does not inherit Unix conventions by default: `fork`, UID 0,
 universal `ioctl`, a global root, and "everything is a file" are not part of
-its foundation. Linux programs run through a separate compatibility layer.
+its foundation. Linux programs use a dedicated compatibility subsystem inside the kernel.
 
 GoOS remains a personal research project, so it can reject conventions that
 do not fit its design. Major decisions still come with a rationale, an ADR,
@@ -31,27 +31,29 @@ tests, and documented consequences.
 
 ## Architecture
 
-GoOS is a pragmatic microkernel/hybrid:
+GoOS uses a pragmatic microkernel/hybrid design. The diagram below shows\nthe privilege boundary, not a mandatory call sequence:
 
 ```text
-Native applications             Linux ELF applications
-          |                               |
-          |                    Linux compatibility layer
-          +---------------+---------------+
+  Native applications          Static Linux ELF applications
+          |                              |
+   native int 0x80                  Linux SYSCALL
+          |                              |
++---------v------------------------------v----------+
+|                     KERNEL                       |
+|   Native call dispatch    Linux ABI translation  |
+|            \                 /                    |
+|       Process authority / capabilities / handles |
+|       VM / scheduling / interrupts / timers       |
+|                   IPC primitives                  |
++-------------------------|------------------------+
+                          | typed IPC
++-------------------------|------------------------+
+|                     USERSPACE                    |
+|                   service processes              |
+|            VFS / network / device drivers        |
++--------------------------------------------------+
                           |
-                 capabilities + handles
-                          |
-                       typed IPC
-                          |
-        +-----------------+-----------------+
-        |                 |                 |
-       VFS             network          drivers
-        |                 |                 |
-        +-----------------+-----------------+
-                          |
-                   minimal kernel
-                          |
-                   UEFI / x86_64
+                    x86_64 hardware
 ```
 
 The kernel keeps the mechanisms that need full privilege: CPU state,
@@ -85,7 +87,7 @@ spaces, typed capability-checked handles, IPC, shared memory, fine-grained
 kernel concurrency, CPU affinity, and per-CPU runtime statistics.
 
 GoOS also runs unmodified statically linked Linux x86_64 ELF programs through
-a separate compatibility layer. Static musl and glibc programs, Linux threads,
+the kernel-resident Linux ABI compatibility subsystem. Static musl and glibc\nprograms, Linux threads,
 `fork`/`execve`, pipes, signals, futexes, polling, and multithreaded workloads
 such as 7-Zip work without making the native ABI POSIX.
 
