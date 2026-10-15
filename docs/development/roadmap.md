@@ -96,7 +96,7 @@ The following foundation is implemented.
 
 ### Linux compatibility
 
-GoOS runs unmodified statically linked Linux x86_64 ELF programs through a separate compatibility layer.
+GoOS runs unmodified statically linked Linux x86_64 ELF programs through a\ndedicated kernel-resident ABI translation subsystem, separate from the native\nABI but not from the kernel.
 
 Implemented support includes:
 
