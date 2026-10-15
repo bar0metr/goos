@@ -31,7 +31,8 @@ tests, and documented consequences.
 
 ## Architecture
 
-GoOS uses a pragmatic microkernel/hybrid design. The diagram below shows\nthe privilege boundary, not a mandatory call sequence:
+GoOS uses a pragmatic microkernel/hybrid design. The diagram below shows
+the privilege boundary, not a mandatory call sequence:
 
 ```text
   Native applications          Static Linux ELF applications
@@ -58,9 +59,12 @@ GoOS uses a pragmatic microkernel/hybrid design. The diagram below shows\nthe pr
 
 The kernel keeps the mechanisms that need full privilege: CPU state,
 interrupts, memory, scheduling, processes, IPC, handles, capabilities, and
-timers. Filesystems, the terminal, configuration, logging, networking, and
-complex drivers run as isolated userspace services that hold only the
-authority they were given.
+timers. Linux x86_64 syscall translation also lives inside the kernel: the
+Linux SYSCALL entry is distinct from native int 0x80, and translated operations
+use kernel primitives or capability-scoped IPC with userspace services as
+needed. Filesystems, the terminal, configuration, logging, networking, and
+complex drivers run as isolated userspace services with only their granted
+authority. UEFI is used during boot, not a runtime layer below the kernel.
 
 The central principle:
 
