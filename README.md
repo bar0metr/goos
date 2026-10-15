@@ -40,10 +40,10 @@ the privilege boundary, not a mandatory call sequence:
    native int 0x80                  Linux SYSCALL
           |                              |
 +---------v------------------------------v----------+
-|                     KERNEL                       |
-|   Native call dispatch    Linux ABI translation  |
+|                     KERNEL                        |
+|   Native call dispatch    Linux ABI translation   |
 |            \                 /                    |
-|       Process authority / capabilities / handles |
+|       Process authority / capabilities / handles  |
 |       VM / scheduling / interrupts / timers       |
 |                   IPC primitives                  |
 +-------------------------|------------------------+
