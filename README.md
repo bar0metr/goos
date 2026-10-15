@@ -46,7 +46,7 @@ the privilege boundary, not a mandatory call sequence:
 |       Process authority / capabilities / handles  |
 |       VM / scheduling / interrupts / timers       |
 |                   IPC primitives                  |
-+-------------------------|------------------------+
++-------------------------|-------------------------+
                           | typed IPC
 +-------------------------|------------------------+
 |                     USERSPACE                    |
