@@ -67,6 +67,18 @@ func Init() {
 	ready = true
 }
 
+// InitService is Init for a long-running service. It also collects two
+// throwaway allocations once, so the allocator and collector code is in memory
+// before the service depends on storage. A program started from a file loads
+// each code page on first use (ADR 0121); a page first needed while the
+// storage services restart would fault the service.
+func InitService() {
+	Init()
+	native.allocObject(64, false)
+	native.allocObject(2*pageBytes, true)
+	Collect()
+}
+
 func reserve(length uint64) uint64 {
 	length = (length + uint64(pageBytes) - 1) &^ (uint64(pageBytes) - 1)
 	base, status := sys.VMReserve(length, kcall.VMRead|kcall.VMWrite)

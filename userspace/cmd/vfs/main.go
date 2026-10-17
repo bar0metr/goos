@@ -193,7 +193,7 @@ func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.P
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
 	startupData, validStartup := startup.Read()
 	var found bool

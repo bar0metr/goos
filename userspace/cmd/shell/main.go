@@ -84,7 +84,7 @@ type job struct {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("SHELL_OUT_OF_MEMORY\n") })
 	var validStartup, found bool
 	startupData, validStartup = startup.Read()

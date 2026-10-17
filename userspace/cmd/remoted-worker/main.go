@@ -43,7 +43,7 @@ var exitKnown bool
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { sys.Exit(1) })
 	arena.InitPackages()
 	data, ok := startup.Read()

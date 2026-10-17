@@ -176,7 +176,7 @@ func realtime() (int64, bool) {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("FAT32_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {

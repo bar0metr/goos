@@ -134,7 +134,7 @@ var _ [userwait.MaxObjects - (1 + len(sessions) + 2*len(execJobs) + len(serviceS
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("INIT_OUT_OF_MEMORY\n") })
 	syslog.Init(serviceDeviceHandle, "init")
 	if !mapSystemImage() {

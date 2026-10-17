@@ -235,7 +235,7 @@ func boolValue(value bool) uint64 {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("BLOCK_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {

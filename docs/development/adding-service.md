@@ -30,7 +30,8 @@ the protocol header). See `userspace/block/protocol.go`.
   never through stubs of its own; `make lint` refuses `unsafe`, `//go:linkname`,
   and `//go:extern` outside `userspace/runtime` (ADR 0095);
 - links the allocator by importing `userspace/runtime/arena`, calls
-  `arena.Init()` first thing in `userspaceMain`, and registers its
+  `arena.InitService()` first thing in `userspaceMain` (commands use
+  `arena.Init()` through `utility.Run`), and registers its
   out-of-memory report with `arena.OnExhausted`. The heap is collected
   (ADR 0201): allocate with ordinary Go and drop what you no longer need.
 

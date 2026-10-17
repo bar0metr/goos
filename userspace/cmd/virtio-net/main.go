@@ -121,7 +121,7 @@ func portOut(offset uint16, width uint8, value uint32) bool {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("VIRTIO_NET_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
