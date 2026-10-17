@@ -87,7 +87,7 @@ until [ "$(prompts)" -ge 1 ]; do
 done
 
 run memreclaim
-for marker in STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_GRAPH ZERO_REUSE BOUNDARY FREE REGION PAGES 1000_CYCLES AUTO_GC; do
+for marker in LAYOUT STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_GRAPH ZERO_REUSE BOUNDARY FREE REGION PAGES 1000_CYCLES AUTO_GC; do
 	require "^MEMRECLAIM_${marker}_OK\$" "memreclaim $marker"
 done
 require '^MEMRECLAIM_OK$' 'memreclaim did not finish'

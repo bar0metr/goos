@@ -107,9 +107,12 @@ func Collect() {
 	collecting = true
 	started := nativeTicks()
 	native.beginMark()
+	native.phase = PhaseGlobals
 	markGlobals()
+	native.phase = PhaseRegions
 	markRegions()
 	markStack()
+	native.phase = PhaseNone
 	native.finishMark()
 	native.sweep()
 	native.releaseFree()
@@ -152,8 +155,20 @@ func releaseMarkStack() {
 //go:linkname initHeap runtime.initHeap
 func initHeap() { Init() }
 
+// pointerFree reports whether a TinyGo 0.42 layout says an object holds no
+// pointers. The compiler passes the layout gc.precise reads
+// (runtime/gc_precise.go, internal/gclayout): an odd value carries the
+// pointer bitmap inline above sizeFieldBits+1 = 7 bits, and an all-zero
+// bitmap means no word is a pointer. Any other value, including the nil the
+// runtime passes for maps, channels, and C allocations, is scanned.
+// memreclaim checks this contract on every validation boot.
+func pointerFree(layout unsafe.Pointer) bool {
+	value := uintptr(layout)
+	return value&1 != 0 && value>>7 == 0
+}
+
 //go:linkname alloc runtime.alloc
-func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
+func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	if scopedRegions.depth != 0 {
 		return regionAlloc(size)
 	}
@@ -166,10 +181,11 @@ func alloc(size uintptr, _ unsafe.Pointer) unsafe.Pointer {
 	if native.liveBytes >= native.nextCollection && !collecting {
 		Collect()
 	}
-	address := native.alloc(size)
+	noPointers := pointerFree(layout)
+	address := native.allocObject(size, noPointers)
 	if address == 0 && !collecting {
 		Collect()
-		address = native.alloc(size)
+		address = native.allocObject(size, noPointers)
 	}
 	if address == 0 {
 		fail()
@@ -243,6 +259,23 @@ func FreeBytes(data []byte) {
 	if cap(data) != 0 {
 		free(unsafe.Pointer(unsafe.SliceData(data)))
 	}
+}
+
+// PointerFree reports whether the collector treats the allocation a value lies
+// in as holding no pointers. Validation programs use it to check the layout
+// contract with the compiler.
+func PointerFree[T any](value *T) bool {
+	if !ready {
+		return false
+	}
+	page, slot, _, ok := native.find(uintptr(unsafe.Pointer(value)))
+	if !ok {
+		return false
+	}
+	if slot == noPage {
+		return native.meta[page].pointerFree
+	}
+	return native.meta[page].noscan[slot/64]&(1<<(slot%64)) != 0
 }
 
 // InHeap reports whether a value lies in the collected heap rather than a

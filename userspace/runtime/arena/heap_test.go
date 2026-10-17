@@ -369,6 +369,35 @@ func TestCollectKeepsReachableAndSweepsTheRest(t *testing.T) {
 	}
 }
 
+func TestPointerFreeObjectsAreKeptButNotRead(t *testing.T) {
+	th := newTestHeap(t, 64, 16)
+	small := th.allocObject(64, true)
+	large := th.allocObject(3*pageBytes, true)
+	target := th.mustAlloc(t, 32)
+	// Pointer-looking words in pointer-free objects keep nothing alive.
+	*wordAt(small) = target
+	*wordAt(large + pageBytes) = target
+	th.collect(roots{small, large + 5})
+	if _, _, _, ok := th.find(target); ok {
+		t.Fatal("a pointer-free object kept its referent alive")
+	}
+	if _, _, start, ok := th.find(small); !ok || start != small {
+		t.Fatal("a rooted pointer-free slot was swept")
+	}
+	if _, _, start, ok := th.find(large); !ok || start != large {
+		t.Fatal("a rooted pointer-free run was swept")
+	}
+	// A slot reused by a scanned object is scanned again.
+	th.free(small)
+	scanned := th.mustAlloc(t, 64)
+	target = th.mustAlloc(t, 32)
+	*wordAt(scanned) = target
+	th.collect(roots{scanned, large})
+	if _, _, _, ok := th.find(target); !ok || scanned != small {
+		t.Fatal("a reused slot stayed pointer-free")
+	}
+}
+
 func TestCollectReclaimsCycles(t *testing.T) {
 	th := newTestHeap(t, 64, 16)
 	a, b, c := th.mustAlloc(t, 32), th.mustAlloc(t, 600), th.mustAlloc(t, 3*pageBytes)

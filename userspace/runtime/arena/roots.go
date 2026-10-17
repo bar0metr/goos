@@ -47,7 +47,65 @@ func markStack() {
 	if stackTop == 0 || sp > stackTop {
 		panic("arena: stack top unknown")
 	}
+	native.phase = PhaseRegisters
 	native.markRange(uintptr(unsafe.Pointer(&registers[0])), uintptr(unsafe.Pointer(&registers[0]))+unsafe.Sizeof(registers))
+	native.phase = PhaseStack
 	native.markRange(sp, stackTop)
 	registers = [6]uintptr{}
+}
+
+// Token returns an allocation's address with every bit inverted, so holding
+// it does not keep the allocation alive.
+func Token[T any](value *T) uint64 { return ^uint64(uintptr(unsafe.Pointer(value))) }
+
+// Phases of a collection, as Watched reports them.
+const (
+	PhaseNone = iota
+	PhaseGlobals
+	PhaseRegions
+	PhaseRegisters
+	PhaseStack
+)
+
+// Watch records, during the following collections, the first word that
+// marks the allocation a token names. It is not inlined: the lookup would
+// otherwise leave the allocation's address in the caller's frame.
+//
+//go:noinline
+func Watch(token uint64) {
+	native.watch, native.watchAt, native.watchPhase = 0, 0, PhaseNone
+	if _, _, start, ok := native.find(uintptr(^token)); ok {
+		native.watch = start
+	}
+}
+
+// Watched reports the root phase and the address of the word that marked the
+// watched allocation, and for a word on the stack the nearest words below and
+// above it that look like return addresses, which name its frame.
+func Watched() (phase int, at, below, above uintptr) {
+	phase, at = int(native.watchPhase), native.watchAt
+	if phase == PhaseStack && at != 0 {
+		below, above = codeWord(at, 0, -1), codeWord(at, stackTop, 1)
+	}
+	return phase, at, below, above
+}
+
+// codeWord returns the first word from address towards limit that lies in
+// the program's code, between the image base and its globals.
+func codeWord(address, limit uintptr, direction int) uintptr {
+	code := uintptr(unsafe.Pointer(&globalsStart))
+	for steps := 0; steps < 4096 && address != limit; steps++ {
+		if direction < 0 {
+			address -= wordBytes
+		} else {
+			address += wordBytes
+		}
+		if address == limit {
+			break
+		}
+		if value := *(*uintptr)(pointerAt(address)); value >= 0x40002000 && value < code {
+			return value
+		}
+	}
+	return 0
 }

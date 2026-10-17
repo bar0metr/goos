@@ -66,14 +66,19 @@ type pageMeta struct {
 	flags  uint8
 	marked bool
 	used   uint16
-	_      uint16
-	head   uint32
-	count  uint32
+	// pointerFree marks a run allocation that holds no pointers: marking
+	// keeps it alive without reading it.
+	pointerFree bool
+	_           uint8
+	head        uint32
+	count       uint32
 	// next and prev link a slab into its class list, or a free run into its
 	// size list.
 	next, prev uint32
 	alloc      [slotWords]uint64
 	mark       [slotWords]uint64
+	// noscan marks the slots that hold no pointers.
+	noscan [slotWords]uint64
 }
 
 // heap is the allocator and collector state of one reservation.
@@ -108,6 +113,14 @@ type heap struct {
 	nextCollection         uint64
 	// collectedMallocs is mallocs when the last collection ended.
 	collectedMallocs uint64
+
+	// watch is an allocation whose first mark is recorded: the word that
+	// marked it in watchAt and the root phase in watchPhase. scanning and
+	// phase track where marking is. Validation programs use them to explain
+	// why an object outlived a collection; the collector never scans the
+	// heap state, so watching keeps nothing alive.
+	watch, watchAt, scanning uintptr
+	watchPhase, phase        uint8
 }
 
 // Stats is the state of a heap. Bytes count whole slots and runs, not the
@@ -189,22 +202,26 @@ func sizeClass(size uintptr) int {
 
 func slotsPerPage(class uint8) uint32 { return uint32(pageBytes / classSizes[class]) }
 
-// alloc returns size zeroed bytes, or zero when the heap has no room. size
-// must not be zero.
-func (h *heap) alloc(size uintptr) uintptr {
+// alloc returns size zeroed bytes that the collector scans, or zero when the
+// heap has no room. size must not be zero.
+func (h *heap) alloc(size uintptr) uintptr { return h.allocObject(size, false) }
+
+// allocObject is alloc for an object that may be pointer-free: the collector
+// keeps such an object alive without reading its words.
+func (h *heap) allocObject(size uintptr, pointerFree bool) uintptr {
 	if size == 0 {
 		panic("arena: zero-size heap allocation")
 	}
 	if size <= maxSmallSize {
-		return h.allocSmall(uint8(sizeClass(size)))
+		return h.allocSmall(uint8(sizeClass(size)), pointerFree)
 	}
 	if size > uintptr(h.capacity)<<pageShift {
 		return 0
 	}
-	return h.allocLarge(uint32((size + pageBytes - 1) >> pageShift))
+	return h.allocLarge(uint32((size+pageBytes-1)>>pageShift), pointerFree)
 }
 
-func (h *heap) allocSmall(class uint8) uintptr {
+func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 	page := h.partial[class]
 	if page == noPage {
 		page = h.takePages(1)
@@ -232,6 +249,11 @@ func (h *heap) allocSmall(class uint8) uintptr {
 		panic("arena: listed slab has no free slot")
 	}
 	m.alloc[slot/64] |= 1 << (slot % 64)
+	if pointerFree {
+		m.noscan[slot/64] |= 1 << (slot % 64)
+	} else {
+		m.noscan[slot/64] &^= 1 << (slot % 64)
+	}
 	m.used++
 	if uint32(m.used) == slots {
 		h.removePartial(page)
@@ -246,13 +268,14 @@ func (h *heap) allocSmall(class uint8) uintptr {
 	return address
 }
 
-func (h *heap) allocLarge(count uint32) uintptr {
+func (h *heap) allocLarge(count uint32, pointerFree bool) uintptr {
 	page := h.takePages(count)
 	if page == noPage {
 		return 0
 	}
 	head := &h.meta[page]
 	head.kind, head.count, head.marked, head.head = pageRun, count, false, page
+	head.pointerFree = pointerFree
 	for index := page; index < page+count; index++ {
 		m := &h.meta[index]
 		if index != page {

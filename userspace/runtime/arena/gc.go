@@ -36,6 +36,7 @@ func (h *heap) scanWords(start, end uintptr) {
 		// allocation the heap handed out; both are mapped and readable.
 		value := *(*uintptr)(pointerAt(address))
 		if h.contains(value) {
+			h.scanning = address
 			h.markValue(value)
 		}
 	}
@@ -47,17 +48,27 @@ func (h *heap) markValue(value uintptr) {
 		return
 	}
 	m := &h.meta[page]
+	pointerFree := false
 	if slot == noPage {
 		if m.marked {
 			return
 		}
-		m.marked = true
+		m.marked, pointerFree = true, m.pointerFree
 	} else {
 		bit := uint64(1) << (slot % 64)
 		if m.mark[slot/64]&bit != 0 {
 			return
 		}
 		m.mark[slot/64] |= bit
+		pointerFree = m.noscan[slot/64]&bit != 0
+	}
+	if start == h.watch && h.watchAt == 0 {
+		h.watchAt, h.watchPhase = h.scanning, h.phase
+	}
+	if pointerFree {
+		// Nothing in it can keep anything alive, and reading it would
+		// make the kernel supply pages the program never touched.
+		return
 	}
 	if h.workTop == len(h.work) {
 		h.overflow = true
@@ -90,7 +101,7 @@ func (h *heap) finishMark() {
 			m := &h.meta[page]
 			switch m.kind {
 			case pageRun:
-				if m.marked {
+				if m.marked && !m.pointerFree {
 					start := h.pageAddress(page)
 					h.scanWords(start, start+uintptr(m.count)<<pageShift)
 					h.drain()
@@ -100,7 +111,7 @@ func (h *heap) finishMark() {
 			case pageSlab:
 				size := classSizes[m.class]
 				for word := 0; word < slotWords; word++ {
-					for marked := m.mark[word]; marked != 0; marked &= marked - 1 {
+					for marked := m.mark[word] &^ m.noscan[word]; marked != 0; marked &= marked - 1 {
 						slot := uintptr(word*64 + bits.TrailingZeros64(marked))
 						start := h.pageAddress(page) + slot*size
 						h.scanWords(start, start+size)

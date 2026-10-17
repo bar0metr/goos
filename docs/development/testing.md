@@ -57,7 +57,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test-memory` checks the reclaimable native heap (ADR 0201). It runs
   the allocator and collector model tests on the host, once normally and once
   under the race detector, then boots one validation guest with
-  `tests/boot/memory.sh`. In the guest `memreclaim` checks stack, global,
+  `tests/boot/memory.sh`. In the guest `memreclaim` checks the compiler's
+pointer-free layouts, stack, global,
   interior, and region roots, cyclic, deep, and wide garbage, zeroed reuse,
   boundary sizes, explicit free, page return, 1000 explicit and 3000 automatic
   collection rounds; `memreclaim double-free` must stop only its own process;

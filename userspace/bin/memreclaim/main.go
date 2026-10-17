@@ -27,6 +27,7 @@ var manifest = commands.Manifest{
 	Usage:   "memreclaim [service COUNT|double-free|oom]",
 	Summary: "heap reclamation checks",
 	MaxArgs: 2,
+	Grants:  commands.GrantVFS,
 }
 
 //export userspaceMain
@@ -50,6 +51,7 @@ func run(data startup.Data) {
 		}
 		return
 	}
+	checkLayoutContract()
 	checkStackRoot()
 	checkGlobalRoot()
 	checkInteriorPointers()
@@ -186,6 +188,25 @@ func newPage(seed uint64) *page {
 	return p
 }
 
+//go:noinline
+func pointerSlice() []*block { return make([]*block, 600) }
+
+//go:noinline
+func newHolder() *holder { return &holder{} }
+
+// checkLayoutContract checks the layouts the compiler passes: byte buffers
+// are allocated pointer-free, so the collector never reads them, and
+// anything that holds a pointer is scanned.
+func checkLayoutContract() {
+	small, large := allocate(64), allocate(5000)
+	pointers := pointerSlice()
+	expect(arena.PointerFree(&small[0]) && arena.PointerFree(&large[0]), "byte buffers are pointer-free")
+	value := newHolder()
+	expect(arena.InHeap(&pointers[0]) && arena.InHeap(value), "pointer values come from the heap")
+	expect(!arena.PointerFree(&pointers[0]) && !arena.PointerFree(value), "pointer values are scanned")
+	marker("MEMRECLAIM_LAYOUT_OK")
+}
+
 // checkStackRoot keeps two objects only in this frame across a collection
 // and then hands their sizes out again: a swept object would be overwritten.
 //
@@ -213,17 +234,37 @@ func storeGlobal() {
 	globalPages = pages
 }
 
+// The checks that expect an object to be collected read it only in helpers
+// like this one. A helper's frame is below the stack pointer once it returns,
+// so no copy of the pointer is left where the collector scans.
+//
+//go:noinline
+func globalHolds() bool {
+	for index := range globalPages {
+		if !globalPages[index].holds(uint64(index) << 20) {
+			return false
+		}
+	}
+	return true
+}
+
+//go:noinline
+func globalToken() uint64 { return arena.Token(globalPages) }
+
 func checkGlobalRoot() {
 	storeGlobal()
 	collect()
 	churn(8, 256<<10)
 	collect()
-	for index := range globalPages {
-		expect(globalPages[index].holds(uint64(index)<<20), "global root")
-	}
+	expect(globalHolds(), "global root")
 	held := live()
+	arena.Watch(globalToken())
 	globalPages = nil
 	collect()
+	if held < live()+256<<10 {
+		phase, at, below, above := arena.Watched()
+		report("MEMRECLAIM_DEBUG phase=", uint64(phase), " at=", uint64(at), " below=", uint64(below), " above=", uint64(above))
+	}
 	expect(held >= live()+256<<10, "a cleared global releases its object")
 	marker("MEMRECLAIM_GLOBAL_ROOT_OK")
 }
@@ -278,11 +319,14 @@ func makeCycle() {
 	cycle = a
 }
 
+//go:noinline
+func cycleSurvives() bool { return cycle.next.next.next == cycle }
+
 func checkCycle() {
 	makeCycle()
 	collect()
 	held := live()
-	expect(cycle.next.next.next == cycle, "rooted cycle survives")
+	expect(cycleSurvives(), "rooted cycle survives")
 	cycle = nil
 	collect()
 	expect(held >= live()+3*64<<10, "unreachable cycle collected")
@@ -318,21 +362,36 @@ func buildGraphs() {
 	}
 }
 
+//go:noinline
+func deepHolds() bool {
+	count, expected := 0, uint64(deepLength-1)
+	for node := deep; node != nil; node = node.next {
+		if node.value != expected {
+			return false
+		}
+		expected--
+		count++
+	}
+	return count == deepLength
+}
+
+//go:noinline
+func wideHolds() bool {
+	for index, node := range wide {
+		if node.value != uint64(index)*7 {
+			return false
+		}
+	}
+	return len(wide) == wideCount
+}
+
 func checkDeepAndWideGraphs() {
 	before := live()
 	buildGraphs()
 	collect()
 	churn(2000, 16)
-	count, expected := 0, uint64(deepLength-1)
-	for node := deep; node != nil; node = node.next {
-		expect(node.value == expected, "deep graph")
-		expected--
-		count++
-	}
-	expect(count == deepLength, "deep graph length")
-	for index, node := range wide {
-		expect(node.value == uint64(index)*7, "wide graph")
-	}
+	expect(deepHolds(), "deep graph")
+	expect(wideHolds(), "wide graph")
 	deep, wide = nil, nil
 	collect()
 	expect(live() <= before+64<<10, "deep and wide graphs collected")
@@ -448,12 +507,15 @@ func holdFromRegion(region *arena.Region) {
 	scope.Leave()
 }
 
+//go:noinline
+func regionTargetHolds() bool { return regionHolder.target.holds(0x77) }
+
 func checkRegions() {
 	region := arena.NewRegion(64 << 10)
 	holdFromRegion(region)
 	collect()
 	churn(64, 4096)
-	expect(regionHolder.target.holds(0x77), "a region value keeps its heap object")
+	expect(regionTargetHolds(), "a region value keeps its heap object")
 	held := live()
 	regionHolder = nil
 	region.Clear()

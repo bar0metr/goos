@@ -183,7 +183,8 @@ fault-probe images may still carry their own stack segment, with the same
 Allocations up to 2 KiB share slab pages of one size class; larger ones take
 runs of whole pages. Page metadata lives in its own reservation, outside the
 pages it describes. A per-process, stop-the-world, non-moving, conservative
-mark and sweep finds roots in the globals the linker script brackets, the
+mark and sweep, which keeps objects the compiler marks pointer-free without
+reading them, finds roots in the globals the linker script brackets, the
 stack from the collector's frame up to the stack top `_start` records, the
 callee-saved registers, and the used part of every region. It runs on
 `runtime.GC`, when live bytes reach `max(2 × live, live + 1 MiB)` of the last

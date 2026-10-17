@@ -35,9 +35,9 @@ unchanged.
 ones take a run of whole pages. Pages no allocation holds form free runs,
 merged with free neighbours and kept in seventeen lists by length.
 
-Every page has an 88-byte record in a second reservation: its kind, its slot
-bitmap and mark bitmap for a slab, its length or owning first page for a run,
-and list links. Payload pages hold only allocation bytes, so the allocator can
+Every page has a 120-byte record in a second reservation: its kind, its slot,
+mark, and pointer-free bitmaps for a slab, its length, owning first page, and
+pointer-free flag for a run, and list links. Payload pages hold only allocation bytes, so the allocator can
 discard a free page without losing its bookkeeping, and the collector resolves
 any address to its allocation without trusting the bytes beside it. Metadata
 pages are touched only up to the highest page the heap has handed out.
@@ -81,10 +81,25 @@ first.
 
 A word that only looks like a pointer keeps garbage alive. That is the
 trade-off of a conservative scan and the reason it is safe: nothing reachable
-is swept. The `layout` argument TinyGo passes to `runtime.alloc` is ignored.
-Its encoding is internal to the pinned TinyGo, and nothing here depends on it.
-Precise scanning of pointer-free objects can use it later, behind a
-toolchain-contract test.
+is swept.
+
+The collector reads one piece of type information: whether an allocation can
+hold a pointer at all. TinyGo passes `runtime.alloc` the layout its precise
+collector reads (`runtime/gc_precise.go`, `internal/gclayout`). An odd value
+with no bit set above bit 6 is an inline bitmap with no pointer word. The
+allocator records such an object as pointer-free, and marking keeps it alive
+without reading it. Byte buffers and strings take this path. Everything else,
+including the nil layout the runtime passes for maps, channels, and C
+`malloc`, is scanned word by word.
+
+Skipping those objects matters beyond speed. Reading a page the program never
+touched makes the kernel supply and charge it, so a conservative scan of a
+large, mostly unused buffer would commit all of it. The first validation run
+showed this: a process holding untouched 1 MiB buffers ran out of page quota
+during a collection. The encoding is internal to the pinned TinyGo, so
+`memreclaim` checks it on every validation boot: byte buffers must come out
+pointer-free, and a slice of pointers and a struct with a pointer must not.
+Precise scanning of the remaining objects can use the same layouts later.
 
 ### Root discovery
 
@@ -159,7 +174,10 @@ position and discards the region's pages once it had used more than 64 KiB.
 | `NumGC` | completed collections |
 
 `arena.HeapStats` returns the same state with committed and peak figures, and
-`arena.Pauses` the last and longest collection time.
+`arena.Pauses` the last and longest collection time. `arena.Watch` names an
+allocation by an inverted address, which keeps nothing alive, and
+`arena.Watched` reports the root phase and word that first marked it in later
+collections. `memreclaim` prints them if its dropped global object survives.
 
 `runtime.SetFinalizer` records nothing, and no finalizer ever runs.
 
