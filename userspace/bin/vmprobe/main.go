@@ -106,16 +106,21 @@ func check(ok bool, what string) {
 func checkDemandZero() {
 	const size = uint64(64 << 20)
 	// A program started from a file has its code copied in as it first runs
-	// (ADR 0106); one round of the calls measured below brings theirs in
-	// first, so the measurement counts only what the reservation costs.
-	sys.VMUnmap(reserve(size, kcall.VMRead|kcall.VMWrite), size)
+	// (ADR 0106); one round of the measurement brings its code in first, so
+	// the second counts only what the reservation costs.
+	warm, _, _ := measureReserve(size)
+	sys.VMUnmap(warm, size)
 	sys.VMQuery(0)
-	pagesUsed()
-	before := pagesUsed()
-	base := reserve(size, kcall.VMRead|kcall.VMWrite)
-	reserved := pagesUsed()
+	base, before, reserved := measureReserve(size)
 	region, status := sys.VMQuery(base)
 	check(status == kcall.StatusOK && region.Base == base && region.Length == size && region.Backing == 1 && !region.Pinned, "anonymous region reserved")
+	if reserved != before {
+		utility.PrintText("vm: pages before ")
+		utility.PrintUint(before)
+		utility.PrintText(" after ")
+		utility.PrintUint(reserved)
+		utility.EndLine()
+	}
 	check(reserved == before, "reservation costs no pages")
 	memory := sys.Window(base, size)
 	for offset := uint64(0); offset < size; offset += 1 << 20 {
@@ -200,6 +205,15 @@ func checkPinned() {
 }
 
 func checkHeapBSSStack() {
+	// The BSS comes first: a collection reads every global, which would
+	// bring in the BSS pages and blur the heap page counts below.
+	for index := 0; index < len(bss); index += int(page) {
+		if bss[index] != 0 {
+			check(false, "large BSS starts zero")
+		}
+		bss[index] = 1
+	}
+	check(bss[len(bss)-int(page)] == 1, "large BSS starts zero and is writable")
 	before := pagesUsed()
 	grown := touchLargeObject()
 	stats := arena.HeapStats()
@@ -208,14 +222,18 @@ func checkHeapBSSStack() {
 	after := pagesUsed()
 	collected := arena.HeapStats()
 	check(collected.Collections > stats.Collections && collected.Live+8<<20 <= stats.Live, "a dropped heap object is collected")
-	check(after+2048-64 <= grown && collected.Released >= stats.Released+8<<20, "collected heap pages go back to the kernel")
-	for index := 0; index < len(bss); index += int(page) {
-		if bss[index] != 0 {
-			check(false, "large BSS starts zero")
-		}
-		bss[index] = 1
+	if after+2048-64 > grown || collected.Released < stats.Released+8<<20 {
+		utility.PrintText("vm: pages grown ")
+		utility.PrintUint(grown)
+		utility.PrintText(" after ")
+		utility.PrintUint(after)
+		utility.PrintText(" released ")
+		utility.PrintUint(stats.Released)
+		utility.PrintText(" then ")
+		utility.PrintUint(collected.Released)
+		utility.EndLine()
 	}
-	check(bss[len(bss)-int(page)] == 1, "large BSS starts zero and is writable")
+	check(after+2048-64 <= grown && collected.Released >= stats.Released+8<<20, "collected heap pages go back to the kernel")
 	check(recurse(32) == 32, "a 512 KiB stack fits the default reservation")
 }
 
@@ -262,6 +280,18 @@ func faultReadOnly() {
 
 // pagesUsed is the page count this process is charged. The one process the
 // kernel reports as running is the caller.
+// measureReserve reserves size bytes and returns the address and the pages
+// charged before and after. It is one function, never inlined, so a warm-up
+// call runs exactly the code the measured call does.
+//
+//go:noinline
+func measureReserve(size uint64) (base, before, after uint64) {
+	before = pagesUsed()
+	base = reserve(size, kcall.VMRead|kcall.VMWrite)
+	after = pagesUsed()
+	return base, before, after
+}
+
 // processRecord is a global so that measuring allocates nothing: a heap
 // allocation between two readings could take a fresh page.
 var processRecord [kcall.ProcessInfoSize]byte

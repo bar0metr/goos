@@ -206,6 +206,9 @@ the bound. `Current`, `Reset`, `Mark`, and `Touched` are gone.
   pages the kernel refused to discard, the slab cache, metadata up to the heap's
   high-water mark, and page tables.
 - False retention is possible and bounded by what the stray words point to.
+- The collector reads every mutable global, so a program's whole `.data` and
+  `.bss` is resident after its first collection, including BSS pages the
+  program never touched. Native services have 140 to 200 KiB of globals.
 - `make test-memory` gates the heap: host tests of the model, including a
   randomized run against a reference model, and one guest that runs
   `memreclaim` and a long VFS run. It is part of `test-all` and
