@@ -67,12 +67,14 @@ func Init() {
 	ready = true
 }
 
-// InitService is Init for a long-running service. It also collects two
-// throwaway allocations once, so the allocator and collector code is in memory
-// before the service depends on storage. A program started from a file loads
-// each code page on first use (ADR 0121); a page first needed while the
-// storage services restart would fault the service.
+// InitService is Init for a long-running service. A program started from a
+// file loads each image page on first use (ADR 0121), through the VFS, FAT32,
+// and block services; a page first needed while those services restart faults
+// the program. A service outlives such restarts, so InitService reads in its
+// whole image, code, constants, and globals, and collects two throwaway
+// allocations once so the collector has run before anything depends on it.
 func InitService() {
+	loadImage()
 	Init()
 	native.allocObject(64, false)
 	native.allocObject(2*pageBytes, true)

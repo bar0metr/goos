@@ -147,12 +147,17 @@ across rounds; the total may move within eight pages but must not rise every
 round. Seven measured rounds kept the kernel at 1099 pages and the total
 within one page.
 
-A service starts with `arena.InitService`, which collects two throwaway
-allocations once. A program started from a file loads each code page the
-first time it runs it (ADR 0121), through the VFS, FAT32, and block services.
-The boot test restarts those services on purpose, and a log service whose
-first collection fell in that window faulted on the collector's code. Warming
-the collector at start keeps that code resident before storage can go away.
+A service starts with `arena.InitService`. A program started from a file loads
+each image page the first time it touches it (ADR 0121), through the VFS,
+FAT32, and block services, and the boot test restarts those services on
+purpose. A service that first runs a page of code inside that window faults.
+With the collector the pages a service touches changed: first a log service
+faulted on the collector's own code, then netd on a send path the new layout
+put on a fresh page. The boot logs before this change show the same kind of
+fault in another process during network tests. `InitService` therefore reads
+one byte of every page of the service's image, code, constants, and globals,
+and runs one collection over two throwaway allocations. Commands stay lazy:
+they start often and rarely outlive a storage restart.
 
 ### Regions
 

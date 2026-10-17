@@ -17,6 +17,9 @@ _goos_stack_reserve = 0x100000;
 SECTIONS
 {
   . = 0x40002000;
+  /* _goos_image_start is the first byte a service reads in when it makes
+     its whole image resident. */
+  _goos_image_start = .;
   .text : ALIGN(0x1000) {
     KEEP(*(.text.entry))
     *(.text .text.*)
