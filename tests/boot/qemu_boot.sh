@@ -1176,7 +1176,14 @@ shell_starts=$(vfs_window | grep -c 'SERVICE_FROM_DISK_OK shell$' || true)
 if vfs_window | grep -q 'SHELL_VFS_RENEWED_OK$'; then
 	[ "$shell_starts" -eq 0 ] || fail_check vfs-restart.shell-kept 'no shell start when the shell kept its session' "$shell_starts" "$log" 'VFS_FAULT_INJECTED'
 	vfs_window | grep -q '^\[[0-9]\] running  sleep 25$' || fail_check vfs-restart.jobs-kept 'the shell kept its job across the restart' 'job not listed' "$log" 'VFS_FAULT_INJECTED'
-	vfs_window | grep -q 'session lost: EIO$' || fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'no EIO' "$log" 'VFS_FAULT_INJECTED'
+	# The Linux job's source died with the VFS too. It either finds its
+	# session dead or ends on a page it had not read yet (ADR 0121); it must
+	# never be handed a live session.
+	if vfs_window | grep -q 'session kept:'; then
+		fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'session kept' "$log" 'VFS_FAULT_INJECTED'
+	elif ! vfs_window | grep -q 'session lost: EIO$' && ! vfs_window | grep -q '\[[0-9]\] exit status: 9223372036854775822$'; then
+		fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'neither EIO nor a page fault' "$log" 'VFS_FAULT_INJECTED'
+	fi
 else
 	[ "$shell_starts" -eq 1 ] || fail_check vfs-restart.shell-started 'one shell start from the volume' "$shell_starts" "$log" 'VFS_FAULT_INJECTED'
 	vfs_window | grep -q 'SESSION_JOBS_STOPPED_OK$' || fail_check vfs-restart.jobs-ended 'the jobs of the ended shell stopped with it' 'marker not found' "$log" 'VFS_FAULT_INJECTED'
