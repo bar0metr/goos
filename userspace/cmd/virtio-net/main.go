@@ -19,6 +19,7 @@ import (
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 )
 
 // Legacy virtio header registers and the network device's configuration.
@@ -293,12 +294,11 @@ func postReceive(buffer uint16) bool {
 }
 
 func serve() {
-	start := arena.Current()
 	for {
-		arena.Reset(start)
 		interests[0] = sys.Interest{Handle: serviceHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
 		interests[1] = sys.Interest{Handle: irqHandle, Events: kcall.WaitReadable}
-		ready, status := sys.WaitAny(&interests, 2, waitTimeout)
+		result, status := userwait.Any(&interests, 2, waitTimeout)
+		ready := result.ReadyMask
 		if status == kcall.StatusTimeout {
 			continue
 		}

@@ -39,15 +39,12 @@ func run(data startup.Data) {
 	output, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Write, Path: target})
 	utility.Check(output, received, target, true)
 	// The data moves through a shared buffer, 64 KiB per exchange, rather
-	// than inline in the messages (ADR 0107). Each exchange allocates from
-	// an arena that never frees, so it is rewound per chunk.
+	// than inline in the messages (ADR 0107).
 	buffer, ok := utility.NewBulk(utility.BulkSize)
 	if !ok {
 		utility.Fail(nil, "no memory for the copy")
 	}
-	mark := utility.HeapMark()
 	for {
-		utility.HeapReset(mark)
 		chunk, ok := buffer.ReadFile(input.Handle, utility.BulkSize)
 		utility.Check(chunk, ok, source, false)
 		if chunk.Size == 0 {

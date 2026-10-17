@@ -26,16 +26,16 @@ func run(startup.Data) {
 	utility.PrintText("CRYPTO_BEGIN ")
 	utility.PrintText(cryptoprobe.Name)
 	utility.EndLine()
-	before := arena.Current()
+	before := arena.HeapStats().TotalAlloc
 	start, clockStatus := sys.ClockNow(timekeeping.Monotonic)
 	err := cryptoprobe.Run()
 	end, endStatus := sys.ClockNow(timekeeping.Monotonic)
 	utility.PrintText("CRYPTO_RESOURCE ")
 	utility.PrintText(cryptoprobe.Name)
 	utility.PrintText(" allocated=")
-	utility.PrintUint(uint64(arena.Current() - before))
+	utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 	utility.PrintText(" heap_high=")
-	utility.PrintUint(arena.Touched())
+	utility.PrintUint(arena.HeapStats().PeakCommitted)
 	if clockStatus == kcall.StatusOK && endStatus == kcall.StatusOK {
 		duration := (end.Seconds-start.Seconds)*1000000000 + int64(end.Nanoseconds) - int64(start.Nanoseconds)
 		if duration >= 0 {

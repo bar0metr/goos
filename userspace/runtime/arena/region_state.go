@@ -40,6 +40,3 @@ func leaveRegion(current allocatorPosition, scope regionScope, stack *regionStac
 	stack.depth--
 	return scope.saved
 }
-func validReset(current allocatorPosition, mark uintptr) bool {
-	return mark >= current.start && mark <= current.next
-}

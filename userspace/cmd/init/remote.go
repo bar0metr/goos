@@ -14,7 +14,6 @@ import (
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/remoteapi"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
 	userwait "goos/userspace/wait"
@@ -132,7 +131,6 @@ func abortRemoteGrants(spec *supervisor.LaunchSpec) {
 }
 
 func pollRemoteListener() {
-	arena.Reset(arenaBase)
 	message, status := receiveNow(remoteControl)
 	if status == ipc.StatusNotFound || status == ipc.StatusTimeout {
 		return
@@ -235,7 +233,6 @@ func beginRemoteImage(worker *remoteWorker, path []byte) bool {
 }
 
 func completeRemoteFill(worker *remoteWorker) {
-	arena.Reset(arenaBase)
 	pending := worker.fill
 	worker.fill = pendingFill{}
 	message, status := receiveNow(pending.session)
@@ -338,7 +335,6 @@ func launchRemoteExecutable(executable supervisor.Executable, name string, grant
 }
 
 func pollRemoteWorker(worker *remoteWorker) {
-	arena.Reset(arenaBase)
 	message, status := receiveNow(worker.control)
 	if status == ipc.StatusNotFound || status == ipc.StatusTimeout {
 		return

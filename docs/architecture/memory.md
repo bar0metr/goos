@@ -175,10 +175,25 @@ reserves the stack below `0x00007fffff000000` — 1 MiB by default, as much as
 the image header asks up to 64 MiB — above 64 KiB of guard, the gap
 `tools/stackframes` bounds every frame by (ADR 0088), and supplies the top page
 at launch and the rest as the stack grows. The userspace runtime reserves a
-256 MiB heap at start; only the pages it touches count, and a service's
-per-request reset returns what it touched above its mark once that exceeds
-256 KiB. Self-test and fault-probe images may still carry their own stack
-segment, with the same 64 KiB gap below it.
+256 MiB heap at start; only the pages it touches count. Self-test and
+fault-probe images may still carry their own stack segment, with the same
+64 KiB gap below it.
+
+**Userspace heap.** Native programs reclaim ordinary Go objects (ADR 0201).
+Allocations up to 2 KiB share slab pages of one size class; larger ones take
+runs of whole pages. Page metadata lives in its own reservation, outside the
+pages it describes. A per-process, stop-the-world, non-moving, conservative
+mark and sweep finds roots in the globals the linker script brackets, the
+stack from the collector's frame up to the stack top `_start` records, the
+callee-saved registers, and the used part of every region. It runs on
+`runtime.GC`, when live bytes reach `max(2 × live, live + 1 MiB)` of the last
+collection, when an allocation does not fit, and when a service has waited
+100 ms with nothing to do; `arena.OnExhausted` runs only after a collection
+and a retry fail. Free pages go back with `VMDiscard`.
+`arena.Region` serves scratch with one lifetime from its own reservation, and
+no collection runs while one is entered. The kernel keeps the separate
+discipline of ADR 0065: a leaking boot-time heap and no allocation on repeating
+paths.
 
 ## Shared image pages
 

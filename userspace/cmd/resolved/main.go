@@ -26,6 +26,7 @@ import (
 	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
+	userwait "goos/userspace/wait"
 )
 
 const (
@@ -100,9 +101,7 @@ func userspaceMain() {
 }
 
 func serve() {
-	start := arena.Current()
 	for {
-		arena.Reset(start)
 		now := clockNanos()
 		resolver.Advance(now)
 		sendQueries(now)
@@ -116,7 +115,8 @@ func serve() {
 				timeout = max(min((deadline-now+nanosPerTick-1)/nanosPerTick, uint64(idleWait)), 1)
 			}
 		}
-		ready, status := sys.WaitAny(&interests, count, timeout)
+		result, status := userwait.Any(&interests, count, timeout)
+		ready := result.ReadyMask
 		if status == kcall.StatusTimeout {
 			continue
 		}

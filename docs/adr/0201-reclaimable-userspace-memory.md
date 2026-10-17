@@ -1,0 +1,194 @@
+# ADR 0201: Reclaimable userspace memory
+
+## Status
+
+Accepted.
+
+## Context
+
+Native userspace ran on a bump allocator. `runtime.alloc` moved a pointer
+forward through a 256 MiB reservation, and `runtime.free`, `runtime.GC`, and
+`runtime.ReadMemStats` did nothing. Services kept memory bounded with
+`arena.Current` and `arena.Reset`: take a mark once long-lived state existed,
+rewind to it before each request. A request that stored anything into
+long-lived state, such as a map that grew, left a pointer into memory the next
+request overwrote. Commands rewound inside their own loops for the same reason.
+A program with no natural request boundary leaked.
+
+The kernel follows a different rule, and keeps it. ADR 0065 holds: the kernel
+links TinyGo's leaking heap, allocates only during boot and in approved
+self-tests, and its repeating paths allocate nothing. A collector in the kernel
+would have to stop interrupt handlers and processors and would add pauses to
+every path ADR 0065 keeps allocation-free.
+
+## Decision
+
+Native userspace gets a heap that reuses memory, a collector for ordinary Go
+objects, and regions for scratch with an obvious lifetime. The kernel is
+unchanged.
+
+### Allocator
+
+`userspace/runtime/arena` keeps the 256 MiB reservation and splits it into
+4 KiB pages. Allocations up to 2048 bytes share slab pages of one size class:
+16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, or 2048 bytes. Larger
+ones take a run of whole pages. Pages no allocation holds form free runs,
+merged with free neighbours and kept in seventeen lists by length.
+
+Every page has an 88-byte record in a second reservation: its kind, its slot
+bitmap and mark bitmap for a slab, its length or owning first page for a run,
+and list links. Payload pages hold only allocation bytes, so the allocator can
+discard a free page without losing its bookkeeping, and the collector resolves
+any address to its allocation without trusting the bytes beside it. Metadata
+pages are touched only up to the highest page the heap has handed out.
+
+Allocation picks the first slab of the class with a free slot, or takes a page.
+It never scans the heap. A page records whether it may hold old bytes; the
+allocator clears a slot or run on such a page before handing it out, and skips
+clearing pages the kernel supplied zeroed.
+
+`runtime.free` releases the allocation at that exact address. A pointer inside
+the heap that does not start a live allocation, including a second free, stops
+the process: the metadata can no longer be trusted. The emptied slab of a class
+stays cached when it is the class's only partial slab, so a loop that frees and
+allocates again does not take and return a page each time.
+
+### Collector
+
+The collector is a per-process, stop-the-world, non-moving, conservative mark
+and sweep. A native program has one thread (`scheduler: none`), so stopping the
+world means the allocating call does the work. The kernel and other processes
+keep running.
+
+Roots are the mutable globals, the stack, the callee-saved registers, and the
+used part of every region. Marking reads every aligned word of a root or a
+marked allocation. A word inside the handed-out part of the heap marks the
+allocation containing it, at its start or anywhere inside, so interior pointers
+keep their allocation. Other words are ignored: the collector never follows a
+value into kernel memory, shared memory, or another reservation.
+
+Marked allocations go on a mark stack of 64 Ki entries in its own reservation.
+When the stack is full, a newly marked allocation stays marked but unqueued and
+the collector notes an overflow; after the stack drains it rescans every marked
+allocation until a pass completes without overflow. A list a million nodes deep
+needs one stack entry at a time and no recursion.
+
+Sweep frees every unmarked allocation, clears the marks, and returns emptied
+slab pages to the free runs. Every free page that may hold old bytes then goes
+back to the kernel with `VMDiscard`, which keeps the reservation. Page tables
+stay until the process exits. The mark stack also gives back pages beyond its
+first.
+
+A word that only looks like a pointer keeps garbage alive. That is the
+trade-off of a conservative scan and the reason it is safe: nothing reachable
+is swept. The `layout` argument TinyGo passes to `runtime.alloc` is ignored.
+Its encoding is internal to the pinned TinyGo, and nothing here depends on it.
+Precise scanning of pointer-free objects can use it later, behind a
+toolchain-contract test.
+
+### Root discovery
+
+TinyGo 0.42's `gc.custom` contract says a custom collector must call
+`runtime.markStack`, but the pinned toolchain builds that function only for
+the conservative, precise, and Boehm collectors and for WebAssembly. For
+`gc.custom` on amd64 it does not exist, and `tinygo_scanCurrentStack` is not in
+this target's objects. GoOS therefore finds its roots itself and uses no
+TinyGo internals:
+
+- `_start` stores the stack pointer it calls the program with in
+  `goos_stack_top`, the upper end of every frame.
+- `goos_gc_registers` stores `rbx`, `rbp`, and `r12` to `r15` and returns its
+  caller's stack pointer. The collector scans those six words and every word
+  from that stack pointer to the top.
+- `userspace/runtime/amd64.ld` brackets `.data` and `.bss` with
+  `_goos_gc_globals_start` and `_goos_gc_globals_end`. Both sections land in
+  one output section, so the range covers every mutable global and no code or
+  read-only data. The collector skips its own heap state inside that range;
+  the heap base it holds would otherwise keep the first allocation alive.
+
+TinyGo calls `runtime.markRoots` only from its own stack scanners, which this
+target does not build. The hook marks a range if a collection is running.
+
+### Collection policy
+
+`runtime.GC` collects synchronously: sweep and discard are done when it
+returns. An allocation collects first when live bytes reached the threshold
+the last collection set, `max(2 × live, live + 1 MiB)`. An allocation that does
+not fit collects and retries, and only a failed retry calls `arena.OnExhausted`.
+Nothing runs in the background.
+
+A service that waits is idle. `userspace/wait.Any` with a timeout longer than
+100 ms first waits 100 ms; if nothing became ready and the caller allocated
+since its last collection, it collects and waits out the rest. The shell, PID 1,
+VFS, configd, block, tty, FAT32, netd, resolved, and virtio-net all wait
+there, so each holds about its live heap while idle instead of whatever
+garbage it reached before the next threshold. Two runs of the same workload
+from an idle system then leave the same pages in use, which the boot test's
+leak rounds compare.
+
+### Regions
+
+`arena.Region` stays for scratch whose lifetime is one packet, request, or key
+exchange; the SSH backend uses three. A region's memory is its own `VMReserve`,
+not part of the heap. While a region is entered, every allocation is a zeroed
+bump allocation in it and none reaches the heap. A region that runs out of room
+calls `OnExhausted`; it never spills into the heap.
+
+No collection runs while any region is entered. A region value may hold the
+only pointer to a heap object, so the collector scans the used part of every
+region, entered or not, up to its current position. Bytes past that position,
+left from a previous generation, are never scanned. `Clear` resets the
+position and discards the region's pages once it had used more than 64 KiB.
+
+### Statistics and finalizers
+
+`runtime.ReadMemStats` reports:
+
+| Field | Meaning |
+|---|---|
+| `Alloc`, `HeapAlloc` | bytes in live allocations, counted as whole slots and runs; between collections this includes unreachable ones |
+| `TotalAlloc` | cumulative bytes handed out |
+| `Mallocs`, `Frees` | cumulative allocations, and allocations freed explicitly or by a sweep |
+| `HeapObjects` | live allocations |
+| `HeapSys` | the heap reservation, 256 MiB |
+| `HeapInuse` | bytes of pages holding at least one allocation |
+| `HeapIdle` | `HeapSys` minus `HeapInuse` |
+| `HeapReleased` | cumulative bytes given back with `VMDiscard` |
+| `GCSys` | metadata in use plus the mark stack reservation |
+| `Sys` | `HeapSys` plus `GCSys` |
+| `NumGC` | completed collections |
+
+`arena.HeapStats` returns the same state with committed and peak figures, and
+`arena.Pauses` the last and longest collection time.
+
+`runtime.SetFinalizer` records nothing, and no finalizer ever runs.
+
+### Services
+
+Every `Current`/`Reset` loop now leaves request garbage to the collector:
+shell, VFS, configd, logd, block, FAT32, tty, netd, virtio-net, resolved,
+remoted, remoted-worker, PID 1, and the commands and libraries that rewound
+per chunk. Their request state is either persistent, which a rewind used to
+corrupt when it grew, or small and short-lived, which the threshold policy
+collects within a megabyte of allocation. None has a lifetime that needs a
+region for speed, and a region sized for the largest request would only move
+the bound. `Current`, `Reset`, `Mark`, and `Touched` are gone.
+
+## Consequences
+
+- A service may keep state built during a request without arranging for it to
+  outlive a rewind.
+- Allocation is slower than a pointer bump. On the development host a small
+  allocation costs about 13 ns, an allocate and free about 28 ns, and a
+  collection of 20,000 live 64-byte objects about 0.26 ms; with 2% of them live
+  it takes 7.5 µs. These are host measurements of the model, not a gate.
+- A collection pauses only the allocating process, for time proportional to
+  its globals, stack, regions, live objects, and handed-out pages.
+- A process's committed heap after a collection is its live heap, any free
+  pages the kernel refused to discard, the slab cache, metadata up to the heap's
+  high-water mark, and page tables.
+- False retention is possible and bounded by what the stray words point to.
+- `make test-memory` gates the heap: host tests of the model, including a
+  randomized run against a reference model, and one guest that runs
+  `memreclaim` and a long VFS run. It is part of `test-all` and
+  `release-check`.

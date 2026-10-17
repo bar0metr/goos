@@ -6,7 +6,6 @@ import (
 	"goos/internal/limits"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/safesave"
 )
 
@@ -24,11 +23,9 @@ var replyName [limits.NameMax]byte
 // of them. The reply's Name is only valid until the next request; it carries
 // no Data.
 func Request(request vfs.Request) (vfs.Reply, vfs.Status) {
-	mark := arena.Current()
 	reply, received := CallVFS(request)
 	reply.Name = replyName[:copy(replyName[:], reply.Name)]
 	reply.Data = nil
-	arena.Reset(mark)
 	if !received {
 		return vfs.Reply{}, vfs.StatusPeerDied
 	}
@@ -140,9 +137,7 @@ func (saveFiles) Close(file vfs.Handle) vfs.Status {
 }
 
 func (files saveFiles) Write(file vfs.Handle, data []byte) (int, vfs.Status) {
-	mark := arena.Current()
 	reply, received := files.bulk.WriteFile(file, len(data))
-	arena.Reset(mark)
 	if !received {
 		return 0, vfs.StatusPeerDied
 	}
@@ -205,9 +200,7 @@ func copyInto(input vfs.Handle, target []byte, bulk *Bulk, overwrite bool) (vfs.
 
 func transfer(input, output vfs.Handle, bulk *Bulk) (vfs.Status, CopyFailure) {
 	for {
-		mark := arena.Current()
 		chunk, received := bulk.ReadFile(input, len(bulk.Memory))
-		arena.Reset(mark)
 		if !received {
 			return vfs.StatusPeerDied, CopySource
 		}
@@ -218,7 +211,6 @@ func transfer(input, output vfs.Handle, bulk *Bulk) (vfs.Status, CopyFailure) {
 			return vfs.StatusOK, 0
 		}
 		written, received := bulk.WriteFile(output, int(chunk.Size))
-		arena.Reset(mark)
 		if !received {
 			return vfs.StatusPeerDied, CopyTarget
 		}

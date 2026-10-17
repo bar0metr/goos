@@ -26,9 +26,14 @@ SECTIONS
     *(.rodata .rodata.*)
   } :rodata
 
+  /* The collector scans every mutable global for heap pointers: everything
+     from _goos_gc_globals_start to _goos_gc_globals_end. Text and read-only
+     data never hold one. */
   .data : ALIGN(0x1000) {
+    _goos_gc_globals_start = .;
     *(.data .data.*)
     *(.bss .bss.* COMMON)
+    _goos_gc_globals_end = .;
   } :data
 
   /DISCARD/ : { *(.comment) *(.eh_frame*) *(.note*) }

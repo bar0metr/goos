@@ -140,7 +140,6 @@ var (
 	driverRequest    ipc.Message
 	driverReply      ipc.Message
 	driverDescriptor [3]uint64
-	arenaBase        arena.Mark
 	correlation      uint64
 	// transferred says the backend took the object a bulk request carried;
 	// one the service refused first is closed after the reply.
@@ -266,11 +265,9 @@ func userspaceMain() {
 	if driverLive && !describeDevice() {
 		fatal("BLOCK_DRIVER_INFO_FAILED\n")
 	}
-	arenaBase = arena.Current()
 	mark("BLOCK_SERVICE_OK\n")
 	syslog.Info("ready")
 	for {
-		arena.Reset(arenaBase)
 		// The filesystem endpoint is absent while the filesystem service is
 		// being restarted: waiting on a closed one would wake at once, forever.
 		endpoints := [...]handle.ID{controlHandle, serviceHandle, filesystemHandle}

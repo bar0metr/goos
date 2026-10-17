@@ -12,7 +12,6 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/tty"
 	userwait "goos/userspace/wait"
@@ -20,7 +19,6 @@ import (
 
 // pollExec takes one request from a session's shell.
 func pollExec(session *terminalSession) {
-	arena.Reset(arenaBase)
 	replying = session
 	status := ipc.Status(sys.IPCReceive(handle.ID(session.execServer), wire[:]))
 	if status == ipc.StatusNotFound {

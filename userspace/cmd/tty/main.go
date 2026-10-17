@@ -70,9 +70,7 @@ func userspaceMain() {
 	}
 	mirrorHandle, _ = data.Handle("mirror")
 	mark("TTY_TERMINAL_OK\n")
-	base := arena.Current()
 	for {
-		arena.Reset(base)
 		serveConsole()
 		serveOutput()
 		serveControl()

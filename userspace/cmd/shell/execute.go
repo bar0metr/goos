@@ -8,7 +8,6 @@ import (
 	"goos/internal/validation"
 	"goos/kernel/kcall"
 	execproto "goos/userspace/exec"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 )
@@ -38,8 +37,6 @@ func execute(line []byte) uint64 {
 	}
 	for index := 0; index < count; index++ {
 		executeCommand(commands[index])
-		// Sequence slices borrow the static line buffer, not the arena.
-		arena.Reset(arenaBase)
 	}
 	return commandStatus
 }

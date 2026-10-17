@@ -6,7 +6,6 @@ import (
 	"goos/internal/limits"
 	"goos/kernel/vfs"
 	"goos/userspace/config"
-	"goos/userspace/runtime/arena"
 )
 
 var durableBuffer [vfs.MaxProtocolData]byte
@@ -27,11 +26,9 @@ func persistDurable(candidate *config.Store) config.Status {
 
 type configFiles struct{}
 
-// request releases only the exchange's allocation; no reply data is retained.
+// request keeps no reply data beyond the reply it returns.
 func (configFiles) request(request vfs.Request) vfs.Reply {
-	mark := arena.Current()
 	reply, received := callVFS(request)
-	arena.Reset(mark)
 	if !received {
 		return vfs.Reply{Status: vfs.StatusPeerDied}
 	}

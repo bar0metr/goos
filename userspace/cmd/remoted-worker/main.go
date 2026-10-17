@@ -122,9 +122,7 @@ func userspaceMain() {
 	}, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
 	geometry, _ = remoteapi.MakeGeometry(80, 24, []byte("xterm"))
 	lastActivity := remoteservice.Now()
-	transient := arena.Current()
 	for {
-		arena.Reset(transient)
 		activity := false
 		var notice ipc.Message
 		noticeStatus := remoteservice.Receive(control, 0, &notice)

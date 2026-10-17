@@ -263,12 +263,6 @@ func ProcessInfo(index uint64, record *[kcall.ProcessInfoSize]byte) bool {
 	return sys.ProcessInfo(index, record) == kcall.StatusOK
 }
 
-// HeapMark and HeapReset let a command that repeats an operation discard what
-// each repetition allocated; the arena never frees on its own.
-func HeapMark() arena.Mark { return arena.Current() }
-
-func HeapReset(mark arena.Mark) { arena.Reset(mark) }
-
 // Equal compares bytes with a string without converting either.
 func Equal(value []byte, expected string) bool { return equal(value, expected) }
 

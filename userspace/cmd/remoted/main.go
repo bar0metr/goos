@@ -143,14 +143,12 @@ func userspaceMain() {
 	}
 	files.Bulk = &bulk
 	hostAdapter.Files = &files
-	transient := arena.Current()
 	if err := reload(); err != nil {
 		syslog.Error("remote startup rejected", syslog.Str("reason", err.Error()))
 		state.Reject(err.Error())
 	}
 	syslog.Info("remote service ready")
 	for {
-		arena.Reset(transient)
 		serviceControl()
 		serviceTCP()
 		serviceAdmins()

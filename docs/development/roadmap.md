@@ -223,7 +223,30 @@ See [remote access](remote-access.md), [ADR 0199](../adr/0199-native-remote-term
 
 # Next priorities
 
-## Priority 1 — Linux terminal support
+The order is 0.2.8 memory reclamation, then the Linux terminal and
+interactive BusyBox, then Linux runtime and ABI work driven by real
+applications.
+
+## Priority 1 — 0.2.8 reclaimable native userspace memory
+
+Native userspace allocated from a bump allocator and never freed an ordinary
+Go object; services rewound it once per request. 0.2.8 replaces it with a
+reclaiming heap (ADR 0201):
+
+- size-classed slabs and page runs with metadata outside the payload pages;
+- a real `runtime.free`, `runtime.GC`, and `runtime.ReadMemStats`;
+- a per-process, stop-the-world, non-moving, conservative mark and sweep with
+  roots found by GoOS itself: linker-bracketed globals, the stack, the
+  callee-saved registers, and region memory;
+- free pages returned with `VMDiscard`;
+- `arena.Region` kept for scoped scratch, backed outside the heap;
+- every `Current`/`Reset` loop moved to collected allocation;
+- `make test-memory`: host model tests and an in-guest `memreclaim` and VFS
+  endurance gate, in `test-all` and `release-check`.
+
+The kernel keeps the ADR 0065 discipline and gains no collector.
+
+## Priority 2 — Linux terminal support
 
 The next major compatibility milestone is to give Linux programs a real terminal.
 
@@ -264,7 +287,7 @@ Once the terminal contract is stable:
 
 Do not turn this milestone into full Linux TTY subsystem emulation unless an actual application demonstrates the need.
 
-## Priority 2 — Linux runtime completeness
+## Priority 3 — Linux runtime completeness
 
 After interactive Linux programs work, improve the static Linux environment where concrete programs expose gaps.
 
@@ -281,7 +304,7 @@ The rule remains:
 
 > Add Linux ABI surface because a useful program requires it, not because Linux has the syscall.
 
-## Priority 3 — Entropy and load randomization
+## Priority 4 — Entropy and load randomization
 
 Two security/portability items are independent of the terminal milestone and can be done separately.
 
@@ -295,7 +318,7 @@ Add bounded randomized base selection for compatible executable mappings.
 
 This is not a full ASLR project. Do not expand it into complete Linux/macOS-style address-space randomization before the simpler mechanism is measured and validated.
 
-## Priority 4 — Native shell/application polish
+## Priority 5 — Native shell/application polish
 
 The native environment is already usable. Future improvements should remain small and capability-oriented.
 
@@ -310,7 +333,7 @@ Candidates:
 
 Avoid importing POSIX shell semantics wholesale.
 
-## Priority 5 — Networking beyond the current native IPv4 stack
+## Priority 6 — Networking beyond the current native IPv4 stack
 
 The current network stack is sufficient for HTTP/HTTPS, DNS and SSH administration.
 
@@ -328,7 +351,7 @@ Linux networking must remain an adapter over native services rather than a privi
 
 Encrypted DNS, HTTP/2, HTTP/3 and QUIC are not immediate priorities.
 
-## Priority 6 — Dynamic Linux linking
+## Priority 7 — Dynamic Linux linking
 
 Dynamic ELF support remains separate from the static Linux ABI.
 
@@ -345,7 +368,7 @@ A minimal musl dynamic binary is a better first target than a general desktop Li
 
 This milestone should come after the static interactive environment is strong enough to justify it.
 
-## Priority 7 — In-system compilation experiment
+## Priority 8 — In-system compilation experiment
 
 A compiler running inside GoOS remains a long-term proof that the system is a usable computing environment rather than only a bootable image.
 

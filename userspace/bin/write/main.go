@@ -71,11 +71,7 @@ func run(data startup.Data) {
 		utility.Mark("WRITE_PROCESS_OK\n")
 		return
 	}
-	// Each request allocates from an arena that never frees, so rewind it per
-	// chunk; otherwise a stream of a few KiB exhausts it.
-	mark := utility.HeapMark()
 	for {
-		utility.HeapReset(mark)
 		status, size := utility.ReadInput(buffer[:])
 		if utility.Retry(status) {
 			continue

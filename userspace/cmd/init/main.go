@@ -114,7 +114,6 @@ var (
 	wire                 [ipc.WireMaxSize]byte
 	supervisionTicks     uint64
 	correlation          uint64
-	arenaBase            arena.Mark
 	supervisionComplete  bool
 	processWaitAnnounced bool
 	nextStagingSlot      uint8
@@ -142,12 +141,9 @@ func userspaceMain() {
 		fatal("INIT_IMAGE_MAP_FAILED\n")
 	}
 	if validation.Enabled {
-		// Each probed launch allocates its request and reply, and nothing the
-		// probe keeps points into the arena, so what it used is given back
-		// rather than taken from every later request (ADR 0097).
-		probeBase := arena.Current()
+		// Each probed launch allocates its request and reply. The probe keeps
+		// none of them, so the collector reclaims them (ADR 0097).
 		probed := probeLaunchAuthority()
-		arena.Reset(probeBase)
 		if !probed {
 			fatal("LAUNCH_AUTHORITY_FAILED\n")
 		}

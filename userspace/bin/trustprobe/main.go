@@ -25,7 +25,7 @@ func main() {}
 
 func run(data startup.Data) {
 	var bulk utility.Bulk
-	before := arena.Current()
+	before := arena.HeapStats().TotalAlloc
 	start := utility.ClockNanos()
 	var roots *tlsclient.Roots
 	var err error
@@ -46,9 +46,9 @@ func run(data startup.Data) {
 	utility.PrintText(" der_bytes=")
 	utility.PrintUint(uint64(roots.DERBytes()))
 	utility.PrintText(" allocated=")
-	utility.PrintUint(uint64(arena.Current() - before))
+	utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 	utility.PrintText(" heap_high=")
-	utility.PrintUint(arena.Touched())
+	utility.PrintUint(arena.HeapStats().PeakCommitted)
 	utility.PrintText(" elapsed_ns=")
 	utility.PrintUint(utility.ClockNanos() - start)
 	utility.EndLine()

@@ -66,10 +66,8 @@ func run(data startup.Data) {
 	output := terminal.NewOutput(outputStorage[:], utility.Write)
 	// Everything the editor keeps is static, so what one key allocated is
 	// discarded before the next.
-	mark := utility.HeapMark()
 	for !app.Quit() {
 		app.Render(&output)
-		utility.HeapReset(mark)
 		if app.SizeWanted() && !peerGeometry {
 			requestSize(&output)
 		}
@@ -123,9 +121,7 @@ func (reader fileReader) Read(target []byte) (int, vfs.Status) {
 	if len(target) > len(bulk.Memory) {
 		return 0, vfs.StatusInvalidArgument
 	}
-	mark := utility.HeapMark()
 	reply, received := bulk.ReadFile(reader.handle, len(target))
-	utility.HeapReset(mark)
 	if !received {
 		return 0, vfs.StatusPeerDied
 	}

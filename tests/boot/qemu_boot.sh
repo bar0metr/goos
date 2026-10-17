@@ -1065,7 +1065,7 @@ require_window bulk.tmp-read '^io read, 1048576 bytes, 16 exchanges' 'volatile b
 require_window bulk.home-write '^io write, 1048576 bytes, 16 exchanges' 'FAT32 bulk write completed' "$log" 'goos> bench io /home/bulk.bin 1M' 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 require_window bulk.home-read '^io read, 1048576 bytes, 16 exchanges' 'FAT32 bulk read completed' "$log" 'goos> bench io /home/bulk.bin 1M' 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 require_regex bulk.copy '^file 3[01][0-9][0-9]\.[0-9]* KiB (3[0-9]\{6\} bytes)' 'a 3 MiB copy from the volume' "$log" 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
-for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
+for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'a dropped heap object is collected' 'collected heap pages go back to the kernel' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
 	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
 done
 require_regex vm.read-only 'user fault: access not permitted' 'a write to a read-only page retired' "$log" 'goos> vmprobe read-only'

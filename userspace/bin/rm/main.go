@@ -24,9 +24,7 @@ func userspaceMain() { utility.Run(manifest, run) }
 func main() {}
 
 func run(data startup.Data) {
-	mark := utility.HeapMark()
 	for index := 1; index <= data.ArgCount(); index++ {
-		utility.HeapReset(mark)
 		path := utility.Path(data, index)
 		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: path})
 		utility.Check(reply, received, path, true)
