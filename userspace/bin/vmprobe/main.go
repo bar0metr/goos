@@ -262,9 +262,13 @@ func faultReadOnly() {
 
 // pagesUsed is the page count this process is charged. The one process the
 // kernel reports as running is the caller.
+// processRecord is a global so that measuring allocates nothing: a heap
+// allocation between two readings could take a fresh page.
+var processRecord [kcall.ProcessInfoSize]byte
+
 func pagesUsed() uint64 {
-	var record [kcall.ProcessInfoSize]byte
-	for index := uint64(0); utility.ProcessInfo(index, &record); index++ {
+	record := &processRecord
+	for index := uint64(0); utility.ProcessInfo(index, record); index++ {
 		if record[8] == kcall.ProcessRunning {
 			used := record[kcall.ProcessInfoUsedOffset+4*kcall.ProcessPages:]
 			return uint64(used[0]) | uint64(used[1])<<8 | uint64(used[2])<<16 | uint64(used[3])<<24

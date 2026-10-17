@@ -533,9 +533,12 @@ func pagesUsed() uint64 {
 	return processPages(func(record []byte) bool { return record[8] == kcall.ProcessRunning })
 }
 
+// processRecord is a global so that measuring allocates nothing.
+var processRecord [kcall.ProcessInfoSize]byte
+
 func processPages(match func(record []byte) bool) uint64 {
-	var record [kcall.ProcessInfoSize]byte
-	for index := uint64(0); utility.ProcessInfo(index, &record); index++ {
+	record := &processRecord
+	for index := uint64(0); utility.ProcessInfo(index, record); index++ {
 		if match(record[:]) {
 			return uint64(binary.LittleEndian.Uint32(record[kcall.ProcessInfoUsedOffset+kcall.ProcessPages*4:]))
 		}
