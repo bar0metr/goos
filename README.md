@@ -90,8 +90,15 @@ The kernel supports preemptive SMP on up to 64 processors, per-process address
 spaces, typed capability-checked handles, IPC, shared memory, fine-grained
 kernel concurrency, CPU affinity, and per-CPU runtime statistics.
 
+Native userspace programs are Go compiled with TinyGo on a GoOS-owned heap
+that reclaims memory (ADR 0201). Each process traces and sweeps its
+unreachable Go objects, reuses their storage, and returns free heap pages to
+the kernel. Interrupt handlers allocate nothing, and the kernel keeps its own
+bounded allocation discipline (ADR 0065).
+
 GoOS also runs unmodified statically linked Linux x86_64 ELF programs through
-the kernel-resident Linux ABI compatibility subsystem. Static musl and glibc\nprograms, Linux threads,
+the kernel-resident Linux ABI compatibility subsystem. Static musl and glibc
+programs, Linux threads,
 `fork`/`execve`, pipes, signals, futexes, polling, and multithreaded workloads
 such as 7-Zip work without making the native ABI POSIX.
 

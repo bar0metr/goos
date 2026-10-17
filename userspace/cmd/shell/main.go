@@ -54,7 +54,6 @@ var (
 	// waiting for another answer from PID 1, such as the one to a kill.
 	stashed           ipc.Message
 	stashedValid      bool
-	arenaBase         arena.Mark
 	wire              [ipc.WireMaxSize]byte
 	correlation       uint64
 	startupData       startup.Data
@@ -85,7 +84,7 @@ type job struct {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("SHELL_OUT_OF_MEMORY\n") })
 	var validStartup, found bool
 	startupData, validStartup = startup.Read()
@@ -143,12 +142,10 @@ func userspaceMain() {
 		fatal("SHELL_EXEC_PAGE_FAILED\n")
 	}
 	execPage = page
-	arenaBase = arena.Current()
 	root, ok := callVFS(vfs.Request{Operation: vfs.OperationStat, Path: cwd[:cwdSize]})
 	if !ok || root.Status != vfs.StatusOK || root.Kind != ramfs.KindDirectory {
 		fatal("SHELL_VFS_CONNECT_FAILED\n")
 	}
-	arena.Reset(arenaBase)
 	if oneShot {
 		runOneShot(command)
 		return
@@ -184,7 +181,6 @@ func userspaceMain() {
 				mark("SHELL_TERMINAL_LINE_OK\n")
 				size := copy(lineStorage[:], text)
 				execute(lineStorage[:size])
-				arena.Reset(arenaBase)
 			}
 			// Ctrl-C at the prompt was echoed by the terminal service and
 			// discards the line. Local sessions ignore end of input.

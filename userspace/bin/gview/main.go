@@ -64,10 +64,8 @@ func run(data startup.Data) {
 		app.Handle(terminal.Event{Key: terminal.KeyPosition, Column: columns, Row: rows})
 	}
 	output := terminal.NewOutput(outputStorage[:], utility.Write)
-	mark := utility.HeapMark()
 	for !app.Quit() {
 		app.Render(&output)
-		utility.HeapReset(mark)
 		if app.SizeWanted() && !peerGeometry {
 			requestSize(&output)
 		}
@@ -93,9 +91,7 @@ func (reader fileReader) ReadAt(offset uint64, target []byte) (int, vfs.Status) 
 	if _, status := utility.Request(vfs.Request{Operation: vfs.OperationSeek, Handle: reader.handle, Offset: offset}); status != vfs.StatusOK {
 		return 0, status
 	}
-	mark := utility.HeapMark()
 	reply, received := reader.bulk.ReadFile(reader.handle, len(target))
-	utility.HeapReset(mark)
 	if !received {
 		return 0, vfs.StatusPeerDied
 	}

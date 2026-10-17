@@ -94,7 +94,7 @@ func (q *Queue) Init(memory []byte, physical uint64, size uint16) bool {
 		return false
 	}
 	// Reset fields in place: TinyGo puts a composite literal of this size on
-	// the heap, and this heap never frees.
+	// the heap, and initialization should not allocate.
 	q.memory, q.size, q.available, q.used = memory[:total], size, available, used
 	for index := range q.memory {
 		q.memory[index] = 0

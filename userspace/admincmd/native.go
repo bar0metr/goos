@@ -18,14 +18,11 @@ func OpenFile(path []byte) NativeFile {
 }
 
 func (file NativeFile) Read(buffer []byte) (int, Status) {
-	mark := utility.HeapMark()
 	reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationRead, Handle: file.handle, Size: uint32(min(len(buffer), vfs.MaxReplyData))})
 	if !received || reply.Status != vfs.StatusOK || len(reply.Data) > len(buffer) {
-		utility.HeapReset(mark)
 		return 0, InputError
 	}
 	n := copy(buffer, reply.Data)
-	utility.HeapReset(mark)
 	if n == 0 {
 		return 0, EOF
 	}

@@ -34,11 +34,7 @@ func run(data startup.Data) {
 func show(path []byte) {
 	opened, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
 	utility.Check(opened, received, path, false)
-	// Each request allocates from an arena that never frees, so rewind it per
-	// chunk; otherwise a file of a few KiB exhausts it.
-	mark := utility.HeapMark()
 	for {
-		utility.HeapReset(mark)
 		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationRead, Handle: opened.Handle, Size: vfs.MaxReplyData})
 		utility.Check(reply, received, path, false)
 		if len(reply.Data) == 0 {

@@ -24,6 +24,7 @@ import (
 	"goos/userspace/tcpapi"
 	"goos/userspace/tcpdispatch"
 	"goos/userspace/utility"
+	userwait "goos/userspace/wait"
 	"strings"
 )
 
@@ -89,7 +90,7 @@ var hostAdapter hostFiles
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { sys.Exit(1) })
 	arena.InitPackages()
 	data, ok := startup.Read()
@@ -143,14 +144,12 @@ func userspaceMain() {
 	}
 	files.Bulk = &bulk
 	hostAdapter.Files = &files
-	transient := arena.Current()
 	if err := reload(); err != nil {
 		syslog.Error("remote startup rejected", syslog.Str("reason", err.Error()))
 		state.Reject(err.Error())
 	}
 	syslog.Info("remote service ready")
 	for {
-		arena.Reset(transient)
 		serviceControl()
 		serviceTCP()
 		serviceAdmins()
@@ -182,7 +181,7 @@ func userspaceMain() {
 				add(w.input, kcall.WaitWritable)
 			}
 		}
-		_, status := sys.WaitAny(&interests, count, clock.TicksPerSecond)
+		_, status := userwait.Any(&interests, count, clock.TicksPerSecond)
 		if status != kcall.StatusOK && status != kcall.StatusTimeout {
 			syslog.Error("remote wait failed", syslog.Uint("status", uint64(status)), syslog.Uint("interests", uint64(count)))
 			sys.Exit(1)

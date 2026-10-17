@@ -30,10 +30,10 @@ the protocol header). See `userspace/block/protocol.go`.
   never through stubs of its own; `make lint` refuses `unsafe`, `//go:linkname`,
   and `//go:extern` outside `userspace/runtime` (ADR 0095);
 - links the allocator by importing `userspace/runtime/arena`, calls
-  `arena.Init()` first thing in `userspaceMain`, and registers its
-  out-of-memory report with `arena.OnExhausted`. A service loop takes
-  `arena.Current()` once its long-lived state exists and `arena.Reset`s to it
-  before each request.
+  `arena.InitService()` first thing in `userspaceMain` (commands use
+  `arena.Init()` through `utility.Run`), and registers its
+  out-of-memory report with `arena.OnExhausted`. The heap is collected
+  (ADR 0201): allocate with ordinary Go and drop what you no longer need.
 
 ## 3. Startup and named handles
 
@@ -56,9 +56,7 @@ Wait on all endpoints with one readiness-only `WaitAny`, then receive from each
 ready endpoint:
 
 ```go
-arenaBase := arena.Current()
 for {
-    arena.Reset(arenaBase) // request-bounded allocation
     var interests [userwait.MaxObjects]userwait.Interest
     for index, endpoint := range endpoints {
         interests[index] = userwait.Interest{Handle: endpoint, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -78,7 +76,21 @@ for {
 Rules:
 
 - `WaitAny` never consumes data; always follow it with the typed receive.
-- Reset the arena once per request so memory use stays bounded.
+- Pick where each kind of memory lives:
+  - State that lives across requests, and request data whose size varies, are
+    ordinary Go values. The collector frees them once nothing points to them.
+  - Scratch with one obvious lifetime, such as a packet or a key exchange, can
+    use an `arena.Region` sized from the largest case you measured, with
+    headroom. `Enter` it around that work, `Leave` before waiting for the next
+    request, and `Clear` it once nothing points into it. A region that fills
+    stops the process; it never spills into the heap.
+  - Data held as whole pages, such as file contents, comes from a
+    `pages.Pool`. Keep Go pointers out of pool pages: the collector does not
+    scan them. The same holds for shared-memory windows and device memory.
+    Store indexes or handles there; a heap object reachable only from such
+    memory is freed.
+  - A region lives until `Release`. Create one per repeating lifetime and
+    `Clear` it between uses, not one per request.
 - Reply to every request you can attribute, including malformed ones, with an
   error status. Silence strands the caller (ADR 0048).
 - Treat `PeerDied` on a client endpoint as that client being gone: close the

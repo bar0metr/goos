@@ -32,7 +32,6 @@ var (
 	initialSessionHandle handle.ID
 	controlHandle        handle.ID
 	wire                 [ipc.WireMaxSize]byte
-	arenaBase            arena.Mark
 	sessions             [maxSessions]uint64
 	correlation          uint64
 	waitInterests        *[userwait.MaxObjects]userwait.Interest
@@ -194,7 +193,7 @@ func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.P
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
 	startupData, validStartup := startup.Read()
 	var found bool
@@ -224,8 +223,8 @@ func userspaceMain() {
 	}
 	sessions[0] = uint64(initialSessionHandle)
 	liveSessions = 1
-	// The volatile root keeps its files in pages that outlive the per-request
-	// arena and go back to the kernel when a file shrinks or goes (ADR 0105).
+	// The volatile root keeps its files in whole pages outside the heap, which
+	// go back to the kernel when a file shrinks or goes (ADR 0105).
 	if !ramfsPages.Init(ramfsReserve) || !service.ConfigureRAMFS(ramfsStore{}, ramfs.Limits{Nodes: ramfsNodes, Pages: ramfsPageLimit}) {
 		fatal("VFS_RAMFS_UNAVAILABLE\n")
 	}
@@ -248,12 +247,10 @@ func userspaceMain() {
 	// The persistent volume is not mounted here: it is served by the FAT32
 	// service, which PID 1 starts after this one and hands over through the
 	// control endpoint (ADR 0096).
-	arenaBase = arena.Current()
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
 	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", vfsservice.BootstrapPath))
 	for {
-		arena.Reset(arenaBase)
 		var interests [userwait.MaxObjects]userwait.Interest
 		var sessionIndexes [maxSessions]int
 		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
@@ -432,6 +429,7 @@ func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 func serve(owner vfs.Owner, session uint64, message ipc.Message) {
 	if validation.Enabled {
 		releaseWithheld(owner, session, true)
+		reportMemory()
 	}
 	request, ok := vfs.DecodeRequest(message)
 	// A bulk operation, and a request whose paths or listed name travel in

@@ -44,21 +44,14 @@ func TestRegionsEnforceLIFOAndNoReentry(t *testing.T) {
 	}
 	expectPanic(t, func() { leaveRegion(pa, sa, &stack) })
 }
-func TestResetMarkBounds(t *testing.T) {
-	p := allocatorPosition{start: 100, next: 200, end: 300}
-	for _, mark := range []uintptr{99, 201, 300} {
-		if validReset(p, mark) {
-			t.Fatalf("accepted mark %d", mark)
-		}
-	}
-	for _, mark := range []uintptr{100, 150, 200} {
-		if !validReset(p, mark) {
-			t.Fatalf("rejected mark %d", mark)
-		}
-	}
-}
 func TestRegionRejectsMalformedCursor(t *testing.T) {
 	stack := regionStack{}
 	r := regionPosition{position: allocatorPosition{start: 100, next: 301, end: 300}}
 	expectPanic(t, func() { enterRegion(allocatorPosition{}, &r, &stack) })
+}
+
+func TestReleasedRegionCannotBeEntered(t *testing.T) {
+	stack := regionStack{}
+	released := regionPosition{}
+	expectPanic(t, func() { enterRegion(allocatorPosition{}, &released, &stack) })
 }

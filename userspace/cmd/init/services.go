@@ -14,7 +14,6 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 )
 
@@ -158,7 +157,6 @@ func startServices(ticks uint64) {
 	// recovered from, not that one crashing during boot is survivable.
 	injectDriverFault()
 	supervisionComplete = true
-	arenaBase = arena.Current()
 }
 
 // startSession starts a console's terminal service and then its shell.

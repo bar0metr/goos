@@ -17,6 +17,9 @@ _goos_stack_reserve = 0x100000;
 SECTIONS
 {
   . = 0x40002000;
+  /* _goos_image_start is the first byte a service reads in when it makes
+     its whole image resident. */
+  _goos_image_start = .;
   .text : ALIGN(0x1000) {
     KEEP(*(.text.entry))
     *(.text .text.*)
@@ -26,9 +29,14 @@ SECTIONS
     *(.rodata .rodata.*)
   } :rodata
 
+  /* The collector scans every mutable global for heap pointers: everything
+     from _goos_gc_globals_start to _goos_gc_globals_end. Text and read-only
+     data never hold one. */
   .data : ALIGN(0x1000) {
+    _goos_gc_globals_start = .;
     *(.data .data.*)
     *(.bss .bss.* COMMON)
+    _goos_gc_globals_end = .;
   } :data
 
   /DISCARD/ : { *(.comment) *(.eh_frame*) *(.note*) }

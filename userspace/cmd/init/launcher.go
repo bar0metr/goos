@@ -18,7 +18,6 @@ import (
 	execproto "goos/userspace/exec"
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/runtime/sys"
 	userwait "goos/userspace/wait"
 )
@@ -86,7 +85,6 @@ func pollLauncher(job *execJob) {
 	if launch.server == 0 {
 		return
 	}
-	arena.Reset(arenaBase)
 	status := ipc.Status(sys.IPCReceive(launch.server, wire[:]))
 	if status == ipc.StatusNotFound {
 		return

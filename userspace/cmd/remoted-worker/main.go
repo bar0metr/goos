@@ -18,6 +18,7 @@ import (
 	"goos/userspace/sshserver"
 	"goos/userspace/startup"
 	"goos/userspace/tty"
+	userwait "goos/userspace/wait"
 )
 
 var control, terminal, stdout, stderr, stdin, signerChannel handle.ID
@@ -42,7 +43,7 @@ var exitKnown bool
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { sys.Exit(1) })
 	arena.InitPackages()
 	data, ok := startup.Read()
@@ -122,9 +123,7 @@ func userspaceMain() {
 	}, func(message ipc.Message) bool { return remoteservice.Send(terminal, &message) })
 	geometry, _ = remoteapi.MakeGeometry(80, 24, []byte("xterm"))
 	lastActivity := remoteservice.Now()
-	transient := arena.Current()
 	for {
-		arena.Reset(transient)
 		activity := false
 		var notice ipc.Message
 		noticeStatus := remoteservice.Receive(control, 0, &notice)
@@ -326,7 +325,7 @@ func userspaceMain() {
 			if count == 0 {
 				finish(1)
 			}
-			_, status := sys.WaitAny(&interests, count, max(wait, 1))
+			_, status := userwait.Any(&interests, count, max(wait, 1))
 			if status != kcall.StatusOK && status != kcall.StatusTimeout {
 				finish(1)
 			}

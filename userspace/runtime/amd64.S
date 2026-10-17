@@ -3,9 +3,36 @@
 .type _start,@function
 _start:
     andq $-16, %rsp
+    movq %rsp, goos_stack_top(%rip)
     call userspaceMain
     ud2
 .size _start, .-_start
+
+// goos_gc_registers(buffer *[6]uintptr) uintptr stores the callee-saved
+// registers in buffer and returns the stack pointer its caller resumes with.
+// The collector scans both: a pointer the compiler keeps only in a register
+// of a frame up the stack is then still found.
+.section .text.goos_gc_registers,"ax",@progbits
+.global goos_gc_registers
+.type goos_gc_registers,@function
+goos_gc_registers:
+    movq %rbx, 0(%rdi)
+    movq %rbp, 8(%rdi)
+    movq %r12, 16(%rdi)
+    movq %r13, 24(%rdi)
+    movq %r14, 32(%rdi)
+    movq %r15, 40(%rdi)
+    leaq 8(%rsp), %rax
+    ret
+.size goos_gc_registers, .-goos_gc_registers
+
+// goos_stack_top is the stack pointer _start called the program with: the
+// upper end of every frame the collector scans.
+.section .bss.goos_stack_top,"aw",@nobits
+.balign 8
+.global goos_stack_top
+goos_stack_top:
+    .zero 8
 
 .section .text.kcall,"ax",@progbits
 .global goos_ipc_send

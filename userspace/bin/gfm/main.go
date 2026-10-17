@@ -62,10 +62,8 @@ func run(data startup.Data) {
 	}
 	// Everything the manager keeps is static, so what one key allocated is
 	// discarded before the next: it can run for as long as it is used.
-	mark := utility.HeapMark()
 	for !app.Quit() {
 		app.Render(&output)
-		utility.HeapReset(mark)
 		if app.SizeWanted() && !peerGeometry {
 			requestSize(&output)
 		}

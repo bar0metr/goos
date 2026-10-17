@@ -34,19 +34,18 @@ func userspaceMain() { utility.Run(manifest, run) }
 func main() {}
 
 // run times repeated operations from inside one process, so the result
-// excludes process launch and shell overhead. Replies are discarded, so the
-// arena is rewound after each operation.
+// excludes process launch and shell overhead. Replies are discarded and left
+// to the collector.
 func run(data startup.Data) {
 	mode, _ := data.Arg(1)
 	switch {
 	case utility.Equal(mode, "vfs"):
 		count := argument(data, 2)
 		root := []byte("/")
-		mark, start := utility.HeapMark(), utility.ClockNanos()
+		start := utility.ClockNanos()
 		for index := uint64(0); index < count; index++ {
 			reply, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationStat, Path: root})
 			utility.Check(reply, ok, root, false)
-			utility.HeapReset(mark)
 		}
 		report("vfs", count, utility.ClockNanos()-start)
 	case utility.Equal(mode, "read"):
@@ -61,13 +60,12 @@ func run(data startup.Data) {
 	case utility.Equal(mode, "meta"):
 		path := utility.Path(data, 2)
 		count := argument(data, 3)
-		mark, start := utility.HeapMark(), utility.ClockNanos()
+		start := utility.ClockNanos()
 		for index := uint64(0); index < count; index++ {
 			created, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
 			utility.Check(created, ok, path, true)
 			removed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: path})
 			utility.Check(removed, ok, path, true)
-			utility.HeapReset(mark)
 		}
 		report("meta", count, utility.ClockNanos()-start)
 	case utility.Equal(mode, "io"):
@@ -191,7 +189,6 @@ func bulkIO(path []byte, size uint64) {
 	if !ok {
 		utility.Fail(nil, "no memory for the buffer")
 	}
-	mark := utility.HeapMark()
 	created, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationCreate, Path: path})
 	if created.Status == vfs.StatusAlreadyExists {
 		created.Status = vfs.StatusOK
@@ -203,7 +200,6 @@ func bulkIO(path []byte, size uint64) {
 	utility.Check(file, ok, path, true)
 	exchanges, start := uint64(0), utility.ClockNanos()
 	for done := uint64(0); done < size; {
-		utility.HeapReset(mark)
 		chunk := min(size-done, uint64(len(buffer.Memory)))
 		for index := uint64(0); index < chunk; index++ {
 			buffer.Memory[index] = byte((done + index) * 7)
@@ -218,7 +214,6 @@ func bulkIO(path []byte, size uint64) {
 	utility.Check(seek, ok, path, false)
 	exchanges, start = 0, utility.ClockNanos()
 	for done := uint64(0); done < size; {
-		utility.HeapReset(mark)
 		read, ok := buffer.ReadFile(file.Handle, len(buffer.Memory))
 		utility.Check(read, ok, path, false)
 		exchanges++
@@ -233,7 +228,6 @@ func bulkIO(path []byte, size uint64) {
 		done += read.Size
 	}
 	reportIO("read", size, exchanges, utility.ClockNanos()-start)
-	utility.HeapReset(mark)
 	closed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: file.Handle})
 	utility.Check(closed, ok, path, false)
 	start = utility.ClockNanos()
@@ -284,15 +278,12 @@ func size(data startup.Data, index int) uint64 {
 	return count * multiplier
 }
 
-// readFile opens, reads to EOF, and closes path, and returns its size. Replies
-// are discarded, so the arena is rewound after each request.
+// readFile opens, reads to EOF, and closes path, and returns its size.
 func readFile(path []byte) int {
-	mark := utility.HeapMark()
 	opened, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationOpen, Rights: vfs.Read, Path: path})
 	utility.Check(opened, ok, path, false)
 	handle, size := opened.Handle, 0
 	for {
-		utility.HeapReset(mark)
 		reply, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationRead, Handle: handle, Size: vfs.MaxReplyData})
 		utility.Check(reply, ok, path, false)
 		if len(reply.Data) == 0 {
@@ -300,10 +291,8 @@ func readFile(path []byte) int {
 		}
 		size += len(reply.Data)
 	}
-	utility.HeapReset(mark)
 	closed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationClose, Handle: handle})
 	utility.Check(closed, ok, path, false)
-	utility.HeapReset(mark)
 	return size
 }
 

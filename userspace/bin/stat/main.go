@@ -140,12 +140,9 @@ func appendPadded(target []byte, value uint64, width int) []byte {
 func walk(path []byte, length int) {
 	depth := 0
 	levelCursor[0], levelLength[0] = 0, uint16(length)
-	// The walk keeps its state in package arrays, so the arena each exchange
-	// allocates from is rewound per entry; a large tree would otherwise
-	// exhaust it.
-	mark := utility.HeapMark()
+	// The walk keeps its state in package arrays; each exchange's reply is
+	// garbage once its entry is counted.
 	for depth >= 0 {
-		utility.HeapReset(mark)
 		current := walkPath[:levelLength[depth]]
 		reply, received := utility.CallVFS(vfs.Request{Operation: vfs.OperationReadDir, Path: current, Offset: uint64(levelCursor[depth])})
 		if received && reply.Status == vfs.StatusNotFound {

@@ -176,7 +176,7 @@ func realtime() (int64, bool) {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("FAT32_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
@@ -224,9 +224,7 @@ func userspaceMain() {
 	} else {
 		syslog.Error("volume refused", syslog.Str("reason", "image rejected or device unavailable"))
 	}
-	base := arena.Current()
 	for {
-		arena.Reset(base)
 		// The block endpoint is watched as well as the VFS one. A block
 		// service that restarts takes this channel with it, and an idle
 		// service would otherwise find out only on the next request, which

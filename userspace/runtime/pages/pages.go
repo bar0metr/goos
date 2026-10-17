@@ -6,6 +6,10 @@
 // memory to the kernel at once with VMDiscard and reads as zeros when it is
 // taken again.
 //
+// The collector does not scan pool pages (ADR 0201). A Go pointer stored only
+// in a page keeps nothing alive, so pages hold plain data and numeric
+// references, as the RAMFS node table does, never pointers to heap objects.
+//
 // The pool is two reservations of anonymous memory: the pages themselves and a
 // stack of the numbers of pages given back. Both cost only what is touched,
 // and both are bounded by the page quota of the process.

@@ -54,6 +54,24 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
+- `make test-memory` checks the reclaimable native heap (ADR 0201). It runs
+  the allocator and collector model tests on the host, once normally and once
+  under the race detector, then boots one validation guest with
+  `tests/boot/memory.sh`. In the guest `memreclaim` checks the compiler's
+pointer-free layouts, stack, global,
+  interior, and region roots, cyclic, deep, and wide garbage, zeroed reuse,
+  boundary sizes, explicit free, page return, 1000 explicit and 3000 automatic
+  collection rounds; `memreclaim double-free` must stop only its own process;
+  `memreclaim oom` must collect, retry, and only then report exhaustion; and
+  `memreclaim service 3000` drives 9000 VFS requests while the VFS service
+  reports its heap and pages every 1024 requests, which must stay in the band
+  the early reports set. `SERVICE_REQUESTS` changes the count. A leak run then
+repeats a mixed workload (file copy, VFS streaming, a pipeline, a Linux
+program) for `LEAK_ROUNDS` rounds, 20 by default, counting pages after every
+service has collected: the kernel's pages must not move from round 3 on, and
+process pages in the second half may not exceed the first half's highest by
+more than 4. The summary is
+  `build/reports/memory.txt`. `test-all` and `release-check` run it.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-network` builds the validation ISO and system tree and runs
@@ -319,7 +337,7 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make release-check` is the release gate. It runs `test-reproducible`
   first — which cleans `build/` and builds twice, so a clean build is part of
   the gate — then lint, docs, `make test`, `test-storage-stress`, the ISO, `tests/release/check.sh`,
-  `test-boot`, and a two-guest `test-stress`, and the release checks once more
+  `test-memory`, `test-boot`, and a two-guest `test-stress`, and the release checks once more
   at the end. The release checks require notes for the version in
   `internal/version/version.go`, a kernel that reports it, no validation marker
   or fault-injection report in any normal image, no retired `DebugWrite` stub,

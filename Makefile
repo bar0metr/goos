@@ -21,7 +21,7 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-VALIDATION_COMMANDS := cryptoprobe trustprobe
+VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim
 COMMANDS = $(filter-out $(if $(filter 0,$(VALIDATION)),$(VALIDATION_COMMANDS)),$(sort $(notdir $(wildcard userspace/bin/*))))
 COMMAND_DIR = $(OUT_DIR)/userspace/bin
 COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
@@ -172,7 +172,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -433,6 +433,7 @@ test-all:
 	$(MAKE) test
 	$(MAKE) lint
 	$(MAKE) docs
+	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
@@ -457,6 +458,7 @@ release-check:
 	$(MAKE) test-storage-stress
 	$(MAKE) iso
 	@tests/release/check.sh $(OUT_DIR) $(ISO)
+	$(MAKE) test-memory
 	$(MAKE) test-boot
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
@@ -482,6 +484,7 @@ test-unit:
 test-race:
 	$(BUILD_ENV) go test -race -run 'Race|Ways|Busy|Holder|TwoProcesses|ConcurrentFileIO' ./kernel/handle ./kernel/ipc ./kernel/compat/linux
 	$(BUILD_ENV) go test -race ./kernel/deadline ./kernel/sched ./kernel/wait ./kernel/process
+	$(BUILD_ENV) go test -race -short ./userspace/runtime/arena
 
 test-integration: kernel
 	@tests/integration/kernel_artifact.sh $(KERNEL)
@@ -513,6 +516,16 @@ test-boot:
 	@$(MAKE) --no-print-directory recovery-iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/boot-test-virtio-blk.img
 	@MEMORY=$(MEMORY) tests/boot/qemu_boot.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/boot-test-virtio-blk.img
+
+# The reclaimable native heap (ADR 0201): the allocator and collector model on
+# the host, then one guest that runs memreclaim, a double free, heap
+# exhaustion, and a long VFS run. The report is build/reports/memory.txt.
+test-memory:
+	$(BUILD_ENV) go test -count=1 ./userspace/runtime/arena
+	$(BUILD_ENV) go test -race -count=1 -short ./userspace/runtime/arena
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/memory-test.img
+	@MEMORY=$(MEMORY) tests/boot/memory.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/memory-test.img
 
 test-lscpu: iso
 	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/lscpu-test.img
@@ -988,6 +1001,7 @@ help:
 	  '  test-all        run the complete validation gate, including QEMU' \
 	  '  test-security   run capability, handle, and VM security tests' \
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
+	  '  test-memory     check the reclaimable native heap on the host and in QEMU' \
 	  '  test-smp        boot four processors and prove they run tasks at once' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \

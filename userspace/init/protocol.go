@@ -190,7 +190,7 @@ func LaunchRequestWithStartup(service uint64, executable Executable, name string
 	}
 	message := ipc.Message{ProtocolID: LifecycleProtocolID, Version: LifecycleVersion, Kind: ipc.KindRequest, Correlation: correlation, PayloadSize: uint16(launchHeaderSize + len(name) + len(capabilities)*launchGrantSize)}
 	// Manifest references are payload data, never IPC handle attachments. Set
-	// these fields explicitly when the freestanding arena reuses message storage.
+	// these fields explicitly so reused message storage carries no stale handles.
 	message.HandleCount = 0
 	for index := range message.Handles {
 		message.Handles[index] = 0

@@ -70,7 +70,6 @@ var (
 	descriptor  [3]uint64
 	logLine     [kcall.LogText]byte
 	lostLine    [64]byte
-	arenaBase   arena.Mark
 	correlation uint64
 	// cursor is the sequence number of the next record to persist.
 	cursor uint64
@@ -81,7 +80,7 @@ var (
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("LOG_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
@@ -108,7 +107,6 @@ func userspaceMain() {
 	if !openLog(restarted) {
 		fatal("LOG_RING_UNAVAILABLE\n")
 	}
-	arenaBase = arena.Current()
 	mark("LOG_SERVICE_OK\n")
 	syslog.Info("persisting", syslog.Str("path", logPath))
 	for {
@@ -208,7 +206,6 @@ func lastLine(data []byte) []byte {
 // pass reached them; the count is written into the file rather than skipped, so
 // a gap in the persisted log is visible as a gap.
 func drain() {
-	arena.Reset(arenaBase)
 	takeSession()
 	oldest, total, status := sys.LogBounds(logHandle)
 	if status != kcall.StatusOK {
@@ -250,11 +247,8 @@ func drain() {
 		}
 	}
 	for cursor < total {
-		// One record at a time out of a fresh arena. A drain can persist the
-		// whole ring, and the request messages of sixty-four records at once
-		// would not fit the bump allocator this runtime has. The open handle is
-		// a value, so it survives the reset.
-		arena.Reset(arenaBase)
+		// One record at a time. A drain can persist the whole ring; each
+		// record's request becomes garbage once it is written.
 		if sys.LogRead(logHandle, cursor-oldest, &logLine) != kcall.StatusOK {
 			break
 		}
@@ -272,7 +266,6 @@ func drain() {
 		cursor++
 	}
 	closeFile(file)
-	arena.Reset(arenaBase)
 	reported = false
 	if offset >= rotationBound() {
 		rotate()

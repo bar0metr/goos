@@ -14,7 +14,7 @@ import (
 
 func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fetch.Connection, error) {
 	if a.roots == nil {
-		before := arena.Current()
+		before := arena.HeapStats().TotalAlloc
 		roots, err := tlsclient.LoadSystemRoots(&bulk)
 		if err != nil {
 			return nil, err
@@ -26,7 +26,7 @@ func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fe
 			utility.PrintText(" der_bytes=")
 			utility.PrintUint(uint64(roots.DERBytes()))
 			utility.PrintText(" allocated=")
-			utility.PrintUint(uint64(arena.Current() - before))
+			utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 			utility.EndLine()
 		}
 	}
@@ -35,7 +35,7 @@ func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fe
 		return nil, &fetch.TCPConnectError{Err: err}
 	}
 	socket := raw.(*socket)
-	before := arena.Current()
+	before := arena.HeapStats().TotalAlloc
 	client, err := tlsclient.Open(socket, tlsclient.Config{
 		Host: string(host), Roots: a.roots,
 		Random: cryptosys.Reader{}, Now: cryptosys.Now,
@@ -43,9 +43,9 @@ func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fe
 	})
 	if validation.Enabled {
 		utility.PrintText("TLS_HANDSHAKE_RESOURCE allocated=")
-		utility.PrintUint(uint64(arena.Current() - before))
+		utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 		utility.PrintText(" heap_high=")
-		utility.PrintUint(arena.Touched())
+		utility.PrintUint(arena.HeapStats().PeakHeld)
 		if err == nil {
 			utility.PrintText(" cipher=")
 			utility.PrintUint(uint64(client.CipherSuite()))

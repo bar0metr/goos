@@ -39,7 +39,7 @@ const outputBatch = 16
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("TTY_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
@@ -70,9 +70,7 @@ func userspaceMain() {
 	}
 	mirrorHandle, _ = data.Handle("mirror")
 	mark("TTY_TERMINAL_OK\n")
-	base := arena.Current()
 	for {
-		arena.Reset(base)
 		serveConsole()
 		serveOutput()
 		serveControl()

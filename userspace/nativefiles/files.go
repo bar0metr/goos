@@ -7,7 +7,6 @@ import (
 	"errors"
 	"goos/kernel/ramfs"
 	"goos/kernel/vfs"
-	"goos/userspace/runtime/arena"
 	"goos/userspace/truststate"
 	"goos/userspace/utility"
 	"strconv"
@@ -59,9 +58,7 @@ func (f *Files) Read(path string, limit int) ([]byte, error) {
 		if count > len(f.Bulk.Memory) {
 			count = len(f.Bulk.Memory)
 		}
-		mark := arena.Current()
 		reply, received := f.Bulk.ReadFile(file, count)
-		arena.Reset(mark)
 		if !received || reply.Status != vfs.StatusOK || reply.Size == 0 || reply.Size > uint64(count) {
 			err = errors.New("trust file read failed")
 			break
@@ -105,9 +102,7 @@ func (f *Files) Create(path string, data []byte) error {
 			n = len(f.Bulk.Memory)
 		}
 		copy(f.Bulk.Memory, data[:n])
-		mark := arena.Current()
 		reply, received := f.Bulk.WriteFile(file, n)
-		arena.Reset(mark)
 		if !received || reply.Status != vfs.StatusOK || reply.Size != uint64(n) {
 			err = errors.New("trust file write failed")
 			break

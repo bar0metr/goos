@@ -1065,7 +1065,7 @@ require_window bulk.tmp-read '^io read, 1048576 bytes, 16 exchanges' 'volatile b
 require_window bulk.home-write '^io write, 1048576 bytes, 16 exchanges' 'FAT32 bulk write completed' "$log" 'goos> bench io /home/bulk.bin 1M' 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 require_window bulk.home-read '^io read, 1048576 bytes, 16 exchanges' 'FAT32 bulk read completed' "$log" 'goos> bench io /home/bulk.bin 1M' 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
 require_regex bulk.copy '^file 3[01][0-9][0-9]\.[0-9]* KiB (3[0-9]\{6\} bytes)' 'a 3 MiB copy from the volume' "$log" 'goos> cp /home/tools/bigprobe /tmp/bigprobe'
-for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
+for check in 'demand-zero pages' 'unmap returns the pages' 'discard reads as zero again' 'writable executable memory refused' 'overlapping fixed reservation refused' 'image unmap refused' 'stack guard below the reservation' 'heap grows past its old 128 KiB' 'a dropped heap object is collected' 'collected heap pages go back to the kernel' 'large BSS starts zero and is writable' 'a 512 KiB stack fits the default reservation'; do
 	require_regex "vm.$check" "^vm: $check\$" "$check" "$log" 'goos> vmprobe'
 done
 require_regex vm.read-only 'user fault: access not permitted' 'a write to a read-only page retired' "$log" 'goos> vmprobe read-only'
@@ -1073,14 +1073,32 @@ require_regex vm.guard 'user fault: guard page' 'a stack overflow stopped at the
 require_regex vm.unmapped 'user fault: no mapping' 'an unmapped access retired' "$log" 'goos> vmprobe unmapped'
 require_regex vm.quota 'user fault: page quota exhausted' 'a process past its page quota retired' "$log" 'goos> vmprobe quota'
 require_regex vm.system-survives '^after-vm-faults$' 'the system carries on after the faults' "$log" 'goos> echo after-vm-faults'
-leak_counts=$(log_lines "$log" | sed -n '/goos> echo leak-round-3/,$p' | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
+# Every native process collects its heap when idle (ADR 0201), so the pages
+# processes hold can move by a page or two between identical rounds as slabs
+# fill at different points. The pages the kernel holds for itself must not
+# move at all: a leaked channel, stream, executable object, or startup object
+# shows up there. The total may vary within a small band but must not grow
+# round after round.
+leak_window=$(log_lines "$log" | sed -n '/goos> echo leak-round-3/,$p')
+leak_counts=$(printf '%s\n' "$leak_window" | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
+kernel_counts=$(printf '%s\n' "$leak_window" | grep -a '^pages in the kernel: ' | sed -n '1,3s/^pages in the kernel: //p')
 leak_third=$(printf '%s\n' "$leak_counts" | sed -n 1p)
 leak_fourth=$(printf '%s\n' "$leak_counts" | sed -n 2p)
 leak_fifth=$(printf '%s\n' "$leak_counts" | sed -n 3p)
-if [ -n "$leak_third" ] && [ "$leak_third" = "$leak_fourth" ] && [ "$leak_third" = "$leak_fifth" ]; then
+kernel_third=$(printf '%s\n' "$kernel_counts" | sed -n 1p)
+kernel_fourth=$(printf '%s\n' "$kernel_counts" | sed -n 2p)
+kernel_fifth=$(printf '%s\n' "$kernel_counts" | sed -n 3p)
+if [ -n "$kernel_third" ] && [ "$kernel_third" = "$kernel_fourth" ] && [ "$kernel_third" = "$kernel_fifth" ]; then
 	checks=$((checks + 1))
 else
-	fail_check leaks.steady-state 'the same pages in use after rounds 3, 4, and 5' "${leak_third:-none}, ${leak_fourth:-none}, ${leak_fifth:-none}" "$log" 'goos> echo leak-round-3'
+	fail_check leaks.kernel-steady-state 'the same kernel pages in use after rounds 3, 4, and 5' "${kernel_third:-none}, ${kernel_fourth:-none}, ${kernel_fifth:-none}" "$log" 'goos> echo leak-round-3'
+fi
+if [ -n "$leak_third" ] && [ -n "$leak_fourth" ] && [ -n "$leak_fifth" ] &&
+	! { [ "$leak_third" -lt "$leak_fourth" ] && [ "$leak_fourth" -lt "$leak_fifth" ]; } &&
+	[ $(( $(printf '%s\n' "$leak_counts" | sort -n | tail -n 1) - $(printf '%s\n' "$leak_counts" | sort -n | head -n 1) )) -le 8 ]; then
+	checks=$((checks + 1))
+else
+	fail_check leaks.steady-state 'total pages after rounds 3, 4, and 5 within 8 of each other and not rising every round' "${leak_third:-none}, ${leak_fourth:-none}, ${leak_fifth:-none}" "$log" 'goos> echo leak-round-3'
 fi
 count_window leaks.rounds '^pages used: ' 5 "$log" 'goos> echo leak-round-1' 'goos> cat /missing'
 pass_group vm
@@ -1158,7 +1176,14 @@ shell_starts=$(vfs_window | grep -c 'SERVICE_FROM_DISK_OK shell$' || true)
 if vfs_window | grep -q 'SHELL_VFS_RENEWED_OK$'; then
 	[ "$shell_starts" -eq 0 ] || fail_check vfs-restart.shell-kept 'no shell start when the shell kept its session' "$shell_starts" "$log" 'VFS_FAULT_INJECTED'
 	vfs_window | grep -q '^\[[0-9]\] running  sleep 25$' || fail_check vfs-restart.jobs-kept 'the shell kept its job across the restart' 'job not listed' "$log" 'VFS_FAULT_INJECTED'
-	vfs_window | grep -q 'session lost: EIO$' || fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'no EIO' "$log" 'VFS_FAULT_INJECTED'
+	# The Linux job's source died with the VFS too. It either finds its
+	# session dead or ends on a page it had not read yet (ADR 0121); it must
+	# never be handed a live session.
+	if vfs_window | grep -q 'session kept:'; then
+		fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'session kept' "$log" 'VFS_FAULT_INJECTED'
+	elif ! vfs_window | grep -q 'session lost: EIO$' && ! vfs_window | grep -q '\[[0-9]\] exit status: 9223372036854775822$'; then
+		fail_check vfs-restart.linux-session-dead 'a Linux process keeps a dead session after the VFS restarts' 'neither EIO nor a page fault' "$log" 'VFS_FAULT_INJECTED'
+	fi
 else
 	[ "$shell_starts" -eq 1 ] || fail_check vfs-restart.shell-started 'one shell start from the volume' "$shell_starts" "$log" 'VFS_FAULT_INJECTED'
 	vfs_window | grep -q 'SESSION_JOBS_STOPPED_OK$' || fail_check vfs-restart.jobs-ended 'the jobs of the ended shell stopped with it' 'marker not found' "$log" 'VFS_FAULT_INJECTED'

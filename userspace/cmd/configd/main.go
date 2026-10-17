@@ -61,7 +61,6 @@ var (
 	descriptor    [3]uint64
 	exportBuffer  [exportSize]byte
 	requestMsg    ipc.Message
-	arenaBase     arena.Mark
 	correlation   uint64
 	persistFailed bool
 	hosts         config.Hosts
@@ -80,7 +79,7 @@ type session struct {
 
 //export userspaceMain
 func userspaceMain() {
-	arena.Init()
+	arena.InitService()
 	arena.OnExhausted(func() { fatal("CONFIG_OUT_OF_MEMORY\n") })
 	data, ok := startup.Read()
 	if !ok {
@@ -112,11 +111,9 @@ func userspaceMain() {
 	// configuration.
 	restore()
 	restoreHosts()
-	arenaBase = arena.Current()
 	mark("CONFIG_SERVICE_OK\n")
 	syslog.Info("ready", syslog.Str("path", configPath))
 	for {
-		arena.Reset(arenaBase)
 		var interests [userwait.MaxObjects]userwait.Interest
 		var indexes [maxSessions]int
 		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}

@@ -3,12 +3,14 @@
 // Command vmprobe exercises the native virtual-memory calls from inside the
 // running system (ADR 0104). Without an argument it checks demand-zero
 // memory, protection, discard, unmap, the W^X and address rules, pinned
-// regions, heap growth, a large BSS, and a deep stack, printing one line per
-// check. With an argument it commits one of the faults a process must not
+// regions, heap growth and collection, a large BSS, and a deep stack,
+// printing one line per check. With an argument it commits one of the faults a process must not
 // survive — and the rest of the system must — and never returns.
 package main
 
 import (
+	"runtime"
+
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
 	"goos/userspace/commands"
@@ -104,16 +106,21 @@ func check(ok bool, what string) {
 func checkDemandZero() {
 	const size = uint64(64 << 20)
 	// A program started from a file has its code copied in as it first runs
-	// (ADR 0106); one round of the calls measured below brings theirs in
-	// first, so the measurement counts only what the reservation costs.
-	sys.VMUnmap(reserve(size, kcall.VMRead|kcall.VMWrite), size)
+	// (ADR 0106); one round of the measurement brings its code in first, so
+	// the second counts only what the reservation costs.
+	warm, _, _ := measureReserve(size)
+	sys.VMUnmap(warm, size)
 	sys.VMQuery(0)
-	pagesUsed()
-	before := pagesUsed()
-	base := reserve(size, kcall.VMRead|kcall.VMWrite)
-	reserved := pagesUsed()
+	base, before, reserved := measureReserve(size)
 	region, status := sys.VMQuery(base)
 	check(status == kcall.StatusOK && region.Base == base && region.Length == size && region.Backing == 1 && !region.Pinned, "anonymous region reserved")
+	if reserved != before {
+		utility.PrintText("vm: pages before ")
+		utility.PrintUint(before)
+		utility.PrintText(" after ")
+		utility.PrintUint(reserved)
+		utility.EndLine()
+	}
 	check(reserved == before, "reservation costs no pages")
 	memory := sys.Window(base, size)
 	for offset := uint64(0); offset < size; offset += 1 << 20 {
@@ -198,13 +205,8 @@ func checkPinned() {
 }
 
 func checkHeapBSSStack() {
-	mark := arena.Current()
-	large := make([]byte, 8<<20)
-	for index := 0; index < len(large); index += int(page) {
-		large[index] = byte(index)
-	}
-	check(arena.Touched() >= 8<<20 && large[len(large)-int(page)] == byte(len(large)-int(page)), "heap grows past its old 128 KiB")
-	arena.Reset(mark)
+	// The BSS comes first: a collection reads every global, which would
+	// bring in the BSS pages and blur the heap page counts below.
 	for index := 0; index < len(bss); index += int(page) {
 		if bss[index] != 0 {
 			check(false, "large BSS starts zero")
@@ -212,7 +214,42 @@ func checkHeapBSSStack() {
 		bss[index] = 1
 	}
 	check(bss[len(bss)-int(page)] == 1, "large BSS starts zero and is writable")
+	before := pagesUsed()
+	grown := touchLargeObject()
+	stats := arena.HeapStats()
+	check(grown >= before+2048 && stats.Live >= 8<<20, "heap grows past its old 128 KiB")
+	runtime.GC()
+	after := pagesUsed()
+	collected := arena.HeapStats()
+	check(collected.Collections > stats.Collections && collected.Live+8<<20 <= stats.Live, "a dropped heap object is collected")
+	if after+2048-64 > grown || collected.Released < stats.Released+8<<20 {
+		utility.PrintText("vm: pages grown ")
+		utility.PrintUint(grown)
+		utility.PrintText(" after ")
+		utility.PrintUint(after)
+		utility.PrintText(" released ")
+		utility.PrintUint(stats.Released)
+		utility.PrintText(" then ")
+		utility.PrintUint(collected.Released)
+		utility.EndLine()
+	}
+	check(after+2048-64 <= grown && collected.Released >= stats.Released+8<<20, "collected heap pages go back to the kernel")
 	check(recurse(32) == 32, "a 512 KiB stack fits the default reservation")
+}
+
+// touchLargeObject allocates an 8 MiB object, touches every page, and returns
+// the pages charged while it is live. The object is garbage once it returns.
+//
+//go:noinline
+func touchLargeObject() uint64 {
+	large := make([]byte, 8<<20)
+	for index := 0; index < len(large); index += int(page) {
+		large[index] = byte(index)
+	}
+	if large[len(large)-int(page)] != byte(len(large)-int(page)) {
+		check(false, "heap object holds its bytes")
+	}
+	return pagesUsed()
 }
 
 // recurse uses a 16 KiB frame per level, touching all of it, so a depth of 32
@@ -243,9 +280,25 @@ func faultReadOnly() {
 
 // pagesUsed is the page count this process is charged. The one process the
 // kernel reports as running is the caller.
+// measureReserve reserves size bytes and returns the address and the pages
+// charged before and after. It is one function, never inlined, so a warm-up
+// call runs exactly the code the measured call does.
+//
+//go:noinline
+func measureReserve(size uint64) (base, before, after uint64) {
+	before = pagesUsed()
+	base = reserve(size, kcall.VMRead|kcall.VMWrite)
+	after = pagesUsed()
+	return base, before, after
+}
+
+// processRecord is a global so that measuring allocates nothing: a heap
+// allocation between two readings could take a fresh page.
+var processRecord [kcall.ProcessInfoSize]byte
+
 func pagesUsed() uint64 {
-	var record [kcall.ProcessInfoSize]byte
-	for index := uint64(0); utility.ProcessInfo(index, &record); index++ {
+	record := &processRecord
+	for index := uint64(0); utility.ProcessInfo(index, record); index++ {
 		if record[8] == kcall.ProcessRunning {
 			used := record[kcall.ProcessInfoUsedOffset+4*kcall.ProcessPages:]
 			return uint64(used[0]) | uint64(used[1])<<8 | uint64(used[2])<<16 | uint64(used[3])<<24
