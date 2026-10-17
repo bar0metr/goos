@@ -18,6 +18,7 @@ import (
 	"goos/userspace/sshserver"
 	"goos/userspace/startup"
 	"goos/userspace/tty"
+	userwait "goos/userspace/wait"
 )
 
 var control, terminal, stdout, stderr, stdin, signerChannel handle.ID
@@ -324,7 +325,7 @@ func userspaceMain() {
 			if count == 0 {
 				finish(1)
 			}
-			_, status := sys.WaitAny(&interests, count, max(wait, 1))
+			_, status := userwait.Any(&interests, count, max(wait, 1))
 			if status != kcall.StatusOK && status != kcall.StatusTimeout {
 				finish(1)
 			}

@@ -135,11 +135,17 @@ Nothing runs in the background.
 A service that waits is idle. `userspace/wait.Any` with a timeout longer than
 100 ms first waits 100 ms; if nothing became ready and the caller allocated
 since its last collection, it collects and waits out the rest. The shell, PID 1,
-VFS, configd, block, tty, FAT32, netd, resolved, and virtio-net all wait
-there, so each holds about its live heap while idle instead of whatever
-garbage it reached before the next threshold. Two runs of the same workload
-from an idle system then leave the same pages in use, which the boot test's
-leak rounds compare.
+VFS, configd, block, tty, FAT32, netd, resolved, virtio-net, remoted, and
+remoted-worker all wait there, so each holds about its live heap while idle
+instead of whatever garbage it reached before the next threshold.
+
+The boot test's leak rounds used to require identical page counts after
+repeated workloads. Idle heaps still move by a page or two as slabs fill at
+different points, so `mem -p` now also reports the pages processes hold and
+the pages the kernel holds for itself. The kernel's count must stay identical
+across rounds; the total may move within eight pages but must not rise every
+round. Seven measured rounds kept the kernel at 1099 pages and the total
+within one page.
 
 ### Regions
 

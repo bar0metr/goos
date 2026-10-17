@@ -32,8 +32,18 @@ func run(data startup.Data) {
 		if !utility.Equal(flag, "-p") {
 			utility.Usage()
 		}
+		used := binary.LittleEndian.Uint64(info[16:24]) - binary.LittleEndian.Uint64(info[24:32])
 		utility.PrintText("pages used: ")
-		utility.PrintUint(binary.LittleEndian.Uint64(info[16:24]) - binary.LittleEndian.Uint64(info[24:32]))
+		utility.PrintUint(used)
+		utility.EndLine()
+		// Processes' pages move with their collected heaps; what the
+		// kernel holds for itself does not (ADR 0201).
+		processes := processPages()
+		utility.PrintText("pages in processes: ")
+		utility.PrintUint(processes)
+		utility.EndLine()
+		utility.PrintText("pages in the kernel: ")
+		utility.PrintUint(used - min(used, processes))
 		utility.EndLine()
 		return
 	}
@@ -45,6 +55,18 @@ func run(data startup.Data) {
 	line("used:  ", total-free)
 	line("free:  ", free)
 	utility.Mark("MEM_PROCESS_OK\n")
+}
+
+// processRecord is a global so that counting allocates nothing.
+var processRecord [kcall.ProcessInfoSize]byte
+
+// processPages is the sum of the pages the kernel charges every process.
+func processPages() uint64 {
+	total := uint64(0)
+	for index := uint64(0); utility.ProcessInfo(index, &processRecord); index++ {
+		total += uint64(binary.LittleEndian.Uint32(processRecord[kcall.ProcessInfoUsedOffset+kcall.ProcessPages*4:]))
+	}
+	return total
 }
 
 func line(label string, bytes uint64) {

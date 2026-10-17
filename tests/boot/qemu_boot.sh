@@ -1073,14 +1073,32 @@ require_regex vm.guard 'user fault: guard page' 'a stack overflow stopped at the
 require_regex vm.unmapped 'user fault: no mapping' 'an unmapped access retired' "$log" 'goos> vmprobe unmapped'
 require_regex vm.quota 'user fault: page quota exhausted' 'a process past its page quota retired' "$log" 'goos> vmprobe quota'
 require_regex vm.system-survives '^after-vm-faults$' 'the system carries on after the faults' "$log" 'goos> echo after-vm-faults'
-leak_counts=$(log_lines "$log" | sed -n '/goos> echo leak-round-3/,$p' | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
+# Every native process collects its heap when idle (ADR 0201), so the pages
+# processes hold can move by a page or two between identical rounds as slabs
+# fill at different points. The pages the kernel holds for itself must not
+# move at all: a leaked channel, stream, executable object, or startup object
+# shows up there. The total may vary within a small band but must not grow
+# round after round.
+leak_window=$(log_lines "$log" | sed -n '/goos> echo leak-round-3/,$p')
+leak_counts=$(printf '%s\n' "$leak_window" | grep -a '^pages used: ' | sed -n '1,3s/^pages used: //p')
+kernel_counts=$(printf '%s\n' "$leak_window" | grep -a '^pages in the kernel: ' | sed -n '1,3s/^pages in the kernel: //p')
 leak_third=$(printf '%s\n' "$leak_counts" | sed -n 1p)
 leak_fourth=$(printf '%s\n' "$leak_counts" | sed -n 2p)
 leak_fifth=$(printf '%s\n' "$leak_counts" | sed -n 3p)
-if [ -n "$leak_third" ] && [ "$leak_third" = "$leak_fourth" ] && [ "$leak_third" = "$leak_fifth" ]; then
+kernel_third=$(printf '%s\n' "$kernel_counts" | sed -n 1p)
+kernel_fourth=$(printf '%s\n' "$kernel_counts" | sed -n 2p)
+kernel_fifth=$(printf '%s\n' "$kernel_counts" | sed -n 3p)
+if [ -n "$kernel_third" ] && [ "$kernel_third" = "$kernel_fourth" ] && [ "$kernel_third" = "$kernel_fifth" ]; then
 	checks=$((checks + 1))
 else
-	fail_check leaks.steady-state 'the same pages in use after rounds 3, 4, and 5' "${leak_third:-none}, ${leak_fourth:-none}, ${leak_fifth:-none}" "$log" 'goos> echo leak-round-3'
+	fail_check leaks.kernel-steady-state 'the same kernel pages in use after rounds 3, 4, and 5' "${kernel_third:-none}, ${kernel_fourth:-none}, ${kernel_fifth:-none}" "$log" 'goos> echo leak-round-3'
+fi
+if [ -n "$leak_third" ] && [ -n "$leak_fourth" ] && [ -n "$leak_fifth" ] &&
+	! { [ "$leak_third" -lt "$leak_fourth" ] && [ "$leak_fourth" -lt "$leak_fifth" ]; } &&
+	[ $(( $(printf '%s\n' "$leak_counts" | sort -n | tail -n 1) - $(printf '%s\n' "$leak_counts" | sort -n | head -n 1) )) -le 8 ]; then
+	checks=$((checks + 1))
+else
+	fail_check leaks.steady-state 'total pages after rounds 3, 4, and 5 within 8 of each other and not rising every round' "${leak_third:-none}, ${leak_fourth:-none}, ${leak_fifth:-none}" "$log" 'goos> echo leak-round-3'
 fi
 count_window leaks.rounds '^pages used: ' 5 "$log" 'goos> echo leak-round-1' 'goos> cat /missing'
 pass_group vm

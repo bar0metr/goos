@@ -24,6 +24,7 @@ import (
 	"goos/userspace/tcpapi"
 	"goos/userspace/tcpdispatch"
 	"goos/userspace/utility"
+	userwait "goos/userspace/wait"
 	"strings"
 )
 
@@ -180,7 +181,7 @@ func userspaceMain() {
 				add(w.input, kcall.WaitWritable)
 			}
 		}
-		_, status := sys.WaitAny(&interests, count, clock.TicksPerSecond)
+		_, status := userwait.Any(&interests, count, clock.TicksPerSecond)
 		if status != kcall.StatusOK && status != kcall.StatusTimeout {
 			syslog.Error("remote wait failed", syslog.Uint("status", uint64(status)), syslog.Uint("interests", uint64(count)))
 			sys.Exit(1)
