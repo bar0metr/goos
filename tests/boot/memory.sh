@@ -70,7 +70,7 @@ field() {
 	grep "$2" "$work/output" | tail -n 1 | tr ' ' '\n' | sed -n "s/^$1=//p"
 }
 
-qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi -smp 2 \
+qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi -smp 1 \
 	-drive "if=pflash,format=raw,readonly=on,file=$firmware" \
 	-drive "if=none,id=goosdisk,format=raw,file=$disk" \
 	-device virtio-blk-pci,drive=goosdisk,disable-modern=on \
