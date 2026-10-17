@@ -49,3 +49,9 @@ func TestRegionRejectsMalformedCursor(t *testing.T) {
 	r := regionPosition{position: allocatorPosition{start: 100, next: 301, end: 300}}
 	expectPanic(t, func() { enterRegion(allocatorPosition{}, &r, &stack) })
 }
+
+func TestReleasedRegionCannotBeEntered(t *testing.T) {
+	stack := regionStack{}
+	released := regionPosition{}
+	expectPanic(t, func() { enterRegion(allocatorPosition{}, &released, &stack) })
+}

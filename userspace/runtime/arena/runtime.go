@@ -12,6 +12,14 @@
 // last one, when an allocation does not fit, or when the program calls
 // runtime.GC. Pages it frees go back to the kernel.
 //
+// The collector's roots are the program's globals, its stack and registers,
+// and the used part of every region. Nothing else is scanned: not page-pool
+// pages, shared-memory windows, device or DMA memory, or any other
+// reservation. A pointer to a heap object stored only there does not keep the
+// object alive, and the object is freed under it. Store indexes or handles in
+// such memory, never Go pointers; there is no way to register another root
+// range.
+//
 // Finalizers are not supported: runtime.SetFinalizer records nothing and no
 // finalizer ever runs.
 package arena
@@ -290,6 +298,14 @@ func PointerFree[T any](value *T) bool {
 		return native.meta[page].pointerFree
 	}
 	return native.meta[page].noscan[slot/64]&(1<<(slot%64)) != 0
+}
+
+// PointerFreeString is PointerFree for the bytes of a string.
+func PointerFreeString(text string) bool {
+	if len(text) == 0 {
+		return false
+	}
+	return PointerFree(unsafe.StringData(text))
 }
 
 // InHeap reports whether a value lies in the collected heap rather than a

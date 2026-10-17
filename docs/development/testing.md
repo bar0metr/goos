@@ -65,7 +65,12 @@ pointer-free layouts, stack, global,
   `memreclaim oom` must collect, retry, and only then report exhaustion; and
   `memreclaim service 3000` drives 9000 VFS requests while the VFS service
   reports its heap and pages every 1024 requests, which must stay in the band
-  the early reports set. `SERVICE_REQUESTS` changes the count. The summary is
+  the early reports set. `SERVICE_REQUESTS` changes the count. A leak run then
+repeats a mixed workload (file copy, VFS streaming, a pipeline, a Linux
+program) for `LEAK_ROUNDS` rounds, 20 by default, counting pages after every
+service has collected: the kernel's pages must not move from round 3 on, and
+process pages in the second half may not exceed the first half's highest by
+more than 4. The summary is
   `build/reports/memory.txt`. `test-all` and `release-check` run it.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).

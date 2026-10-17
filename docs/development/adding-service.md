@@ -86,7 +86,11 @@ Rules:
     stops the process; it never spills into the heap.
   - Data held as whole pages, such as file contents, comes from a
     `pages.Pool`. Keep Go pointers out of pool pages: the collector does not
-    scan them.
+    scan them. The same holds for shared-memory windows and device memory.
+    Store indexes or handles there; a heap object reachable only from such
+    memory is freed.
+  - A region lives until `Release`. Create one per repeating lifetime and
+    `Clear` it between uses, not one per request.
 - Reply to every request you can attribute, including malformed ones, with an
   error status. Silence strands the caller (ADR 0048).
 - Treat `PeerDied` on a client endpoint as that client being gone: close the

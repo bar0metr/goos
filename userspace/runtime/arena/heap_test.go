@@ -479,7 +479,7 @@ func TestReleasedPagesReadZeroAndRefusalKeepsThemDirty(t *testing.T) {
 		}
 	}
 	stats := th.stats()
-	if stats.Committed != 16<<pageShift || stats.InUse != 16<<pageShift || stats.Idle != stats.Reserved-stats.InUse {
+	if stats.Held != 16<<pageShift || stats.InUse != 16<<pageShift || stats.Idle != stats.Reserved-stats.InUse {
 		t.Fatalf("stats %+v", stats)
 	}
 }

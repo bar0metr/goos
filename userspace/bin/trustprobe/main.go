@@ -48,7 +48,7 @@ func run(data startup.Data) {
 	utility.PrintText(" allocated=")
 	utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 	utility.PrintText(" heap_high=")
-	utility.PrintUint(arena.HeapStats().PeakCommitted)
+	utility.PrintUint(arena.HeapStats().PeakHeld)
 	utility.PrintText(" elapsed_ns=")
 	utility.PrintUint(utility.ClockNanos() - start)
 	utility.EndLine()

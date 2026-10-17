@@ -45,7 +45,7 @@ func (a *Adapter) ConnectTLS(address network.IPv4, port uint16, host []byte) (fe
 		utility.PrintText("TLS_HANDSHAKE_RESOURCE allocated=")
 		utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 		utility.PrintText(" heap_high=")
-		utility.PrintUint(arena.HeapStats().PeakCommitted)
+		utility.PrintUint(arena.HeapStats().PeakHeld)
 		if err == nil {
 			utility.PrintText(" cipher=")
 			utility.PrintUint(uint64(client.CipherSuite()))

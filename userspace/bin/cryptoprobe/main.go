@@ -35,7 +35,7 @@ func run(startup.Data) {
 	utility.PrintText(" allocated=")
 	utility.PrintUint(arena.HeapStats().TotalAlloc - before)
 	utility.PrintText(" heap_high=")
-	utility.PrintUint(arena.HeapStats().PeakCommitted)
+	utility.PrintUint(arena.HeapStats().PeakHeld)
 	if clockStatus == kcall.StatusOK && endStatus == kcall.StatusOK {
 		duration := (end.Seconds-start.Seconds)*1000000000 + int64(end.Nanoseconds) - int64(start.Nanoseconds)
 		if duration >= 0 {

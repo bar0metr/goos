@@ -52,6 +52,7 @@ func run(data startup.Data) {
 		return
 	}
 	checkLayoutContract()
+	checkContainersKeepTargets()
 	checkStackRoot()
 	checkGlobalRoot()
 	checkInteriorPointers()
@@ -65,8 +66,8 @@ func run(data startup.Data) {
 	checkCycles()
 	stats := arena.HeapStats()
 	last, longest := arena.Pauses()
-	report("MEMRECLAIM_STATS reserved=", stats.Reserved, " live=", stats.Live, " objects=", stats.Objects, " committed=", stats.Committed)
-	report("MEMRECLAIM_STATS peak_live=", stats.PeakLive, " peak_committed=", stats.PeakCommitted, " mallocs=", stats.Mallocs, " frees=", stats.Frees)
+	report("MEMRECLAIM_STATS reserved=", stats.Reserved, " live=", stats.Live, " objects=", stats.Objects, " held=", stats.Held)
+	report("MEMRECLAIM_STATS peak_live=", stats.PeakLive, " peak_held=", stats.PeakHeld, " mallocs=", stats.Mallocs, " frees=", stats.Frees)
 	report("MEMRECLAIM_STATS collections=", uint64(stats.Collections), "", 0, "", 0, "", 0)
 	report("MEMRECLAIM_PAUSE last_ns=", last, " longest_ns=", longest, "", 0, "", 0)
 	marker("MEMRECLAIM_OK")
@@ -194,17 +195,119 @@ func pointerSlice() []*block { return make([]*block, 600) }
 //go:noinline
 func newHolder() *holder { return &holder{} }
 
-// checkLayoutContract checks the layouts the compiler passes: byte buffers
-// are allocated pointer-free, so the collector never reads them, and
-// anything that holds a pointer is scanned.
+// checkLayoutContract checks the layouts the compiler passes. Byte buffers
+// and string bytes are allocated pointer-free, so the collector never reads
+// them; anything that can hold a pointer, wherever the pointer sits, is
+// scanned. A false "pointer-free" would free live objects, so the check covers
+// the shapes that place a pointer away from the start of an object.
 func checkLayoutContract() {
 	small, large := allocate(64), allocate(5000)
-	pointers := pointerSlice()
 	expect(arena.PointerFree(&small[0]) && arena.PointerFree(&large[0]), "byte buffers are pointer-free")
+	expect(arena.PointerFreeString(runtimeString()), "string bytes are pointer-free")
+	pointers := pointerSlice()
 	value := newHolder()
 	expect(arena.InHeap(&pointers[0]) && arena.InHeap(value), "pointer values come from the heap")
 	expect(!arena.PointerFree(&pointers[0]) && !arena.PointerFree(value), "pointer values are scanned")
+	shapes := newShapes()
+	expect(!arena.PointerFree(shapes.offset) && !arena.PointerFree(shapes.nested) && !arena.PointerFree(shapes.array) &&
+		!arena.PointerFree(shapes.tail) && !arena.PointerFree(shapes.iface) && !arena.PointerFree(&shapes.strings[0]),
+		"pointers at any offset are scanned")
 	marker("MEMRECLAIM_LAYOUT_OK")
+}
+
+//go:noinline
+func runtimeString() string { return string(allocate(40)) + "-built" }
+
+type offsetHolder struct {
+	a, b, c, d, e uint64
+	p             *page
+}
+
+type innerHolder struct {
+	x uint64
+	p *page
+}
+
+type nestedHolder struct {
+	n  [3]uint64
+	in innerHolder
+}
+
+// tailHolder is larger than a slab slot, so it is a page run with its only
+// pointer at the end.
+type tailHolder struct {
+	pad [600]uint64
+	p   *page
+}
+
+type ifaceHolder struct {
+	pad uint64
+	v   any
+}
+
+// shapes holds one target object through each kind of container. Each target
+// is reachable only through its container.
+type shapes struct {
+	offset   *offsetHolder
+	nested   *nestedHolder
+	array    *[8]*page
+	tail     *tailHolder
+	iface    *ifaceHolder
+	strings  []string
+	mapValue map[int]*page
+	mapKey   map[*page]int
+	channel  chan *page
+	closure  func() *page
+}
+
+var heldShapes *shapes
+
+//go:noinline
+func newShapes() *shapes {
+	s := &shapes{
+		offset: &offsetHolder{p: newPage(101)}, nested: &nestedHolder{in: innerHolder{p: newPage(102)}},
+		array: new([8]*page), tail: &tailHolder{p: newPage(104)}, iface: &ifaceHolder{v: newPage(105)},
+		strings: []string{runtimeString(), runtimeString()}, mapValue: map[int]*page{}, mapKey: map[*page]int{},
+		channel: make(chan *page, 4),
+	}
+	s.array[5] = newPage(103)
+	s.mapValue[7] = newPage(106)
+	s.mapKey[newPage(107)] = 1
+	s.channel <- newPage(108)
+	captured := newPage(109)
+	s.closure = func() *page { return captured }
+	return s
+}
+
+//go:noinline
+func storeShapes() { heldShapes = newShapes() }
+
+//go:noinline
+func shapesHold() bool {
+	s := heldShapes
+	iface, _ := s.iface.v.(*page)
+	keyed := false
+	for key := range s.mapKey {
+		keyed = key.holds(107)
+	}
+	sent := <-s.channel
+	s.channel <- sent
+	return s.offset.p.holds(101) && s.nested.in.p.holds(102) && s.array[5].holds(103) && s.tail.p.holds(104) &&
+		iface != nil && iface.holds(105) && s.mapValue[7].holds(106) && keyed && sent.holds(108) &&
+		s.closure().holds(109) && len(s.strings[0]) == 46
+}
+
+// checkContainersKeepTargets keeps each target only inside one container
+// across collections that reuse every freed page.
+func checkContainersKeepTargets() {
+	storeShapes()
+	for round := 0; round < 3; round++ {
+		collect()
+		churn(64, 4096, 4800)
+	}
+	expect(shapesHold(), "objects reachable through offsets, nesting, arrays, interfaces, maps, channels, and closures survive")
+	heldShapes = nil
+	marker("MEMRECLAIM_CONTAINERS_OK")
 }
 
 // checkStackRoot keeps two objects only in this frame across a collection
@@ -507,6 +610,25 @@ func holdFromRegion(region *arena.Region) {
 	scope.Leave()
 }
 
+// releasedRegionReturnsPages touches 256 KiB of a fresh region and requires
+// Release to give all of it back.
+//
+//go:noinline
+func releasedRegionReturnsPages() bool {
+	before := pagesUsed()
+	region := arena.NewRegion(256 << 10)
+	scope := region.Enter()
+	for index := 0; index < 60; index++ {
+		data := allocate(4000)
+		data[0] = 1
+	}
+	scope.Leave()
+	touched := pagesUsed()
+	region.Release()
+	after := pagesUsed()
+	return touched >= before+58 && after <= before+2
+}
+
 //go:noinline
 func regionTargetHolds() bool { return regionHolder.target.holds(0x77) }
 
@@ -525,6 +647,8 @@ func checkRegions() {
 	fresh := allocate(8000)
 	scope.Leave()
 	expect(zeroed(fresh), "reused region memory reads as zero")
+	region.Release()
+	expect(releasedRegionReturnsPages(), "a released region returns its pages")
 	marker("MEMRECLAIM_REGION_OK")
 }
 
@@ -619,18 +743,18 @@ func checkCycles() {
 		}
 	}
 	stats, pages := arena.HeapStats(), pagesUsed()
-	report("MEMRECLAIM_CYCLES live=", stats.Live, " objects=", stats.Objects, " committed=", stats.Committed, " pages=", pages)
+	report("MEMRECLAIM_CYCLES live=", stats.Live, " objects=", stats.Objects, " held=", stats.Held, " pages=", pages)
 	expect(stats.Objects <= settled.Objects+16 && stats.Live <= settled.Live+64<<10, "live heap settles")
-	expect(stats.Metadata == settled.Metadata && pages <= settledPages+16, "committed memory settles")
+	expect(stats.Metadata == settled.Metadata && pages <= settledPages+16, "held memory settles")
 	marker("MEMRECLAIM_1000_CYCLES_OK")
 	automatic := stats.Collections
 	for round := 0; round < 3000; round++ {
 		graph(round)
 	}
 	stats, pages = arena.HeapStats(), pagesUsed()
-	report("MEMRECLAIM_AUTO collections=", uint64(stats.Collections-automatic), " committed=", stats.Committed, " pages=", pages, "", 0)
+	report("MEMRECLAIM_AUTO collections=", uint64(stats.Collections-automatic), " held=", stats.Held, " pages=", pages, "", 0)
 	expect(stats.Collections-automatic >= 20, "allocation starts collections")
-	expect(stats.Committed <= settled.Committed+4<<20 && pages <= settledPages+1024+16, "automatic collection bounds the heap")
+	expect(stats.Held <= settled.Held+4<<20 && pages <= settledPages+1024+16, "automatic collection bounds the heap")
 	marker("MEMRECLAIM_AUTO_GC_OK")
 }
 

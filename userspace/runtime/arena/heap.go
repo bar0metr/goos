@@ -107,7 +107,7 @@ type heap struct {
 	totalAlloc, mallocs    uint64
 	frees, released        uint64
 	inUsePages, dirtyFree  uint64
-	peakCommitted          uint64
+	peakHeld               uint64
 	peakLive               uint64
 	collections            uint32
 	nextCollection         uint64
@@ -141,9 +141,13 @@ type Stats struct {
 	InUse uint64
 	// Idle is the bytes of the reservation not in use.
 	Idle uint64
-	// Committed is InUse plus free pages not yet given back to the kernel,
-	// and PeakCommitted the most it has been.
-	Committed, PeakCommitted uint64
+	// Held is InUse plus free pages not yet given back to the kernel, and
+	// PeakHeld the most it has been. It is an upper bound on the heap's
+	// resident pages, not a count of them: a page handed to an allocation may
+	// never have been touched, and the kernel supplies it only when it is.
+	// What a process really costs is the page count the kernel charges it
+	// (ProcessInfo).
+	Held, PeakHeld uint64
 	// Released is the cumulative bytes given back with a discard.
 	Released uint64
 	// Metadata is the bytes of page metadata in use, which the heap keeps
@@ -178,7 +182,7 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	h.work, h.workTop, h.workHigh, h.overflow, h.discard = work, 0, 0, false, discard
 	h.liveBytes, h.liveObjects, h.totalAlloc, h.mallocs = 0, 0, 0, 0
 	h.frees, h.released, h.inUsePages, h.dirtyFree = 0, 0, 0, 0
-	h.peakCommitted, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
+	h.peakHeld, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
 	for index := range h.partial {
 		h.partial[index] = noPage
 	}
@@ -335,8 +339,8 @@ func (h *heap) takePages(count uint32) uint32 {
 		}
 	}
 	h.inUsePages += uint64(count)
-	if committed := (h.inUsePages + h.dirtyFree) << pageShift; committed > h.peakCommitted {
-		h.peakCommitted = committed
+	if held := (h.inUsePages + h.dirtyFree) << pageShift; held > h.peakHeld {
+		h.peakHeld = held
 	}
 	return page
 }
@@ -572,7 +576,7 @@ func (h *heap) stats() Stats {
 	return Stats{
 		Reserved: reserved, Live: h.liveBytes, Objects: h.liveObjects, PeakLive: h.peakLive,
 		TotalAlloc: h.totalAlloc, Mallocs: h.mallocs, Frees: h.frees,
-		InUse: inUse, Idle: reserved - inUse, Committed: inUse + h.dirtyFree<<pageShift, PeakCommitted: h.peakCommitted,
+		InUse: inUse, Idle: reserved - inUse, Held: inUse + h.dirtyFree<<pageShift, PeakHeld: h.peakHeld,
 		Released: h.released, Metadata: uint64(metaBytes(h.frontier)),
 		Collections: h.collections, NextCollection: h.nextCollection,
 	}

@@ -23,9 +23,15 @@ import (
 // region. Enter may nest other regions, but never the same region twice.
 // Leave is LIFO. A region that runs out of room stops the process through
 // OnExhausted: it never spills into the heap.
+//
+// A region lives until Release. Create one per lifetime that repeats, such as
+// one per connection or one for packet scratch, and Clear it between uses;
+// creating a region per request without releasing it keeps every reservation
+// and every region record for the life of the process.
 type Region struct {
-	state regionPosition
-	link  *Region
+	state    regionPosition
+	link     *Region
+	released bool
 }
 
 // Scope is one entry into a region, left with Leave.
@@ -77,6 +83,9 @@ func (r *Region) Clear() {
 	if r.state.active {
 		panic("arena: cannot clear active region")
 	}
+	if r.released {
+		panic("arena: region used after release")
+	}
 	position := &r.state.position
 	if position.high-position.start > regionTrim {
 		end := (position.high + pageBytes - 1) &^ (pageBytes - 1)
@@ -85,6 +94,35 @@ func (r *Region) Clear() {
 		}
 	}
 	position.next = position.start
+}
+
+// Release gives the region's memory back for good: it unmaps the reservation
+// and takes the region out of the collector's roots. Nothing may point into the
+// region afterwards, and the region must not be entered, cleared, or released
+// again.
+func (r *Region) Release() {
+	if r.state.active {
+		panic("arena: cannot release active region")
+	}
+	if r.released {
+		panic("arena: region released twice")
+	}
+	link := &regions
+	for *link != nil && *link != r {
+		link = &(*link).link
+	}
+	if *link == nil {
+		panic("arena: released region is not registered")
+	}
+	*link = r.link
+	r.link = nil
+	position := r.state.position
+	if sys.VMUnmap(uint64(position.start), uint64(position.end-position.start)) != kcall.StatusOK {
+		panic("arena: region unmap failed")
+	}
+	// A zero position makes enterRegion refuse the region.
+	r.state.position = allocatorPosition{}
+	r.released = true
 }
 
 // Used is the bytes allocated in the region since it was last cleared.

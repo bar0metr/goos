@@ -1,8 +1,9 @@
 #!/bin/sh
 # Boots one guest and checks the reclaimable native heap (ADR 0201): the
 # memreclaim checks, a double free and heap exhaustion that must stop only
-# their own process, and a VFS service that must hold its memory steady over
-# thousands of requests. Writes build/reports/memory.txt.
+# their own process, a VFS service that must hold its memory steady over
+# thousands of requests, and a long leak run of mixed workloads. Writes
+# build/reports/memory.txt.
 set -eu
 
 iso=${1:?ISO path required}
@@ -87,7 +88,7 @@ until [ "$(prompts)" -ge 1 ]; do
 done
 
 run memreclaim
-for marker in LAYOUT STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_GRAPH ZERO_REUSE BOUNDARY FREE REGION PAGES 1000_CYCLES AUTO_GC; do
+for marker in LAYOUT CONTAINERS STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_GRAPH ZERO_REUSE BOUNDARY FREE REGION PAGES 1000_CYCLES AUTO_GC; do
 	require "^MEMRECLAIM_${marker}_OK\$" "memreclaim $marker"
 done
 require '^MEMRECLAIM_OK$' 'memreclaim did not finish'
@@ -131,13 +132,54 @@ last_live=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^live=//p')
 [ "$last_live" -le $((band_live + 1048576)) ] || fail "VFS live heap grew from $band_live to $last_live"
 service=$(grep '^MEMRECLAIM_SERVICE ' "$work/output" | tail -n 1)
 
+# A long leak run (ADR 0201). The boot test's leak rounds allow a small band
+# for process heaps; this run looks for a slow leak behind that band. Each
+# round copies a large file, streams through the VFS, lists a directory into a
+# file, runs a pipeline and a Linux program, then waits two seconds, far past
+# the 100 ms after which every idle service collects its heap, and counts
+# pages. From round 3 the kernel's pages may dip by a page or two when a
+# process of the previous command is still being torn down as mem counts, but
+# the second half may never exceed the first half's highest; the process
+# pages of the second half may not exceed the first half's highest by more
+# than 4 pages.
+rounds=${LEAK_ROUNDS:-20}
+round=1
+: >"$work/leak"
+while [ "$round" -le "$rounds" ]; do
+	run 'cp /system/bin/vmprobe /tmp/leak.bin; rm /tmp/leak.bin'
+	run 'bench io /tmp/leak.io 256K; rm /tmp/leak.io'
+	run 'ls /system/bin > /tmp/leak.ls; rm /tmp/leak.ls'
+	run 'sleep 1 | cat /system/motd | write /tmp/leak.pipe; rm /tmp/leak.pipe'
+	run '/system/linux/abi-probe random > /tmp/leak.r; rm /tmp/leak.r'
+	run 'sleep 2'
+	run 'mem -p'
+	kernel=$(sed -n 's/^pages in the kernel: //p' "$work/output")
+	processes=$(sed -n 's/^pages in processes: //p' "$work/output")
+	[ -n "$kernel" ] && [ -n "$processes" ] || fail "no page counts in round $round"
+	printf '%s %s %s\n' "$round" "$kernel" "$processes" >>"$work/leak"
+	round=$((round + 1))
+done
+half=$(( (rounds + 3) / 2 ))
+kernel_first=$(awk -v h="$half" '$1 >= 3 && $1 < h { print $2 }' "$work/leak" | sort -n | tail -n 1)
+kernel_second=$(awk -v h="$half" '$1 >= h { print $2 }' "$work/leak" | sort -n | tail -n 1)
+kernel_lowest=$(awk '$1 >= 3 { print $2 }' "$work/leak" | sort -n | head -n 1)
+[ "$kernel_second" -le "$kernel_first" ] && [ $((kernel_first - kernel_lowest)) -le 4 ] ||
+	fail "kernel pages moved: $(awk '$1 >= 3 { printf "%s ", $2 }' "$work/leak")"
+first_high=$(awk -v h="$half" '$1 >= 3 && $1 < h { print $3 }' "$work/leak" | sort -n | tail -n 1)
+second_high=$(awk -v h="$half" '$1 >= h { print $3 }' "$work/leak" | sort -n | tail -n 1)
+lowest=$(awk '$1 >= 3 { print $3 }' "$work/leak" | sort -n | head -n 1)
+[ "$second_high" -le $((first_high + 4)) ] || fail "process pages rose from $first_high to $second_high"
+[ $((second_high - lowest)) -le 16 ] || fail "process pages spread from $lowest to $second_high"
+leak_kernel=$(awk '$1 >= 3 { printf "%s ", $2 }' "$work/leak")
+leak_processes=$(awk '{ printf "%s ", $3 }' "$work/leak")
+
 run 'echo after-memory'
 require '^after-memory$' 'the system did not survive the memory checks'
 
 {
 	printf 'heap reservation bytes: %s\n' "$reserved"
 	printf 'peak live bytes: %s\n' "$peak_live"
-	printf 'peak committed pages (page test): %s\n' "$pages_peak"
+	printf 'peak pages charged by the kernel (page test): %s\n' "$pages_peak"
 	printf 'post-GC live bytes: %s\n' "$post_live"
 	printf 'pages before / after the page test: %s / %s\n' "$pages_before" "$pages_after"
 	printf 'allocations: %s\n' "$mallocs"
@@ -148,6 +190,7 @@ require '^after-memory$' 'the system did not survive the memory checks'
 	printf 'exhaustion: %s\n' "$oom"
 	printf 'VFS service: %s, %s reports, band %s pages, last %s pages, last live %s bytes, %s collections\n' \
 		"$service" "$samples" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
+	printf 'leak run: %s rounds, kernel pages %s, process pages by round: %s\n' "$rounds" "$leak_kernel" "$leak_processes"
 } >"$report"
 cat "$report"
 printf 'PASS memory\n'

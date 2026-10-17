@@ -124,6 +124,12 @@ TinyGo internals:
 TinyGo calls `runtime.markRoots` only from its own stack scanners, which this
 target does not build. The hook marks a range if a collection is running.
 
+Nothing outside those roots is scanned: page-pool pages, shared-memory
+windows, device and DMA memory, and other reservations hold no roots. A Go
+pointer stored only there keeps nothing alive. Programs keep numeric
+references in such memory; the RAMFS node table already does. No call
+registers another root range, so the rule has no exception.
+
 ### Collection policy
 
 `runtime.GC` collects synchronously: sweep and discard are done when it
@@ -145,7 +151,10 @@ different points, so `mem -p` now also reports the pages processes hold and
 the pages the kernel holds for itself. The kernel's count must stay identical
 across rounds; the total may move within eight pages but must not rise every
 round. Seven measured rounds kept the kernel at 1099 pages and the total
-within one page.
+within one page. Three rounds in a band cannot show a slow leak in a process,
+so `make test-memory` adds a twenty-round run of a mixed workload that
+compares the kernel's pages exactly and process pages between the first and
+second half.
 
 A service starts with `arena.InitService`. A program started from a file loads
 each image page the first time it touches it (ADR 0121), through the VFS,
@@ -171,7 +180,10 @@ No collection runs while any region is entered. A region value may hold the
 only pointer to a heap object, so the collector scans the used part of every
 region, entered or not, up to its current position. Bytes past that position,
 left from a previous generation, are never scanned. `Clear` resets the
-position and discards the region's pages once it had used more than 64 KiB.
+position and discards the region's pages once it had used more than 64 KiB. A
+region lives until `Release`, which unmaps its reservation and removes it from
+the roots; a program creates regions per repeating lifetime and clears them
+between uses rather than creating one per request.
 
 ### Statistics and finalizers
 
@@ -191,8 +203,17 @@ position and discards the region's pages once it had used more than 64 KiB.
 | `Sys` | `HeapSys` plus `GCSys` |
 | `NumGC` | completed collections |
 
-`arena.HeapStats` returns the same state with committed and peak figures, and
-`arena.Pauses` the last and longest collection time. `arena.Watch` names an
+`arena.HeapStats` returns the same state with held and peak figures. `Held`
+counts pages the heap has handed out or not yet discarded; a page handed to an
+allocation may never have been touched, so `Held` bounds the heap's resident
+pages from above and is not a measure of RAM. The kernel's per-process page
+count is, and `memreclaim`, `VFS_MEMORY`, and `mem -p` report that.
+`arena.PointerFree` and `arena.PointerFreeString` report how an allocation
+was recorded. `memreclaim` checks pointers at an offset, in nested structs,
+arrays, the tail of a page run, interfaces, and string slices, and keeps
+objects alive only through such containers, maps, channels, and closures
+across collections that reuse every freed page.
+`arena.Pauses` returns the last and longest collection time. `arena.Watch` names an
 allocation by an inverted address, which keeps nothing alive, and
 `arena.Watched` reports the root phase and word that first marked it in later
 collections. `memreclaim` prints them if its dropped global object survives.
