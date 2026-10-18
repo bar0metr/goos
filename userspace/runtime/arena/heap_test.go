@@ -136,6 +136,16 @@ func (th *testHeap) verify() {
 			if used != int(m.used) || (used == 0 && !listedSlabs[page]) || listedSlabs[page] != (uint32(used) < slotsPerPage(m.class)) {
 				panic("slab bookkeeping is inconsistent")
 			}
+			// Every slot below the hint word is in use.
+			for word := uint32(0); word < m.head; word++ {
+				full := ^uint64(0)
+				if rest := slotsPerPage(m.class) - word*64; rest < 64 {
+					full = 1<<rest - 1
+				}
+				if m.alloc[word] != full {
+					panic("slab free-slot hint skips a free slot")
+				}
+			}
 			objects += uint64(used)
 			bytes += uint64(used) * uint64(classSizes[m.class])
 			inUse++
@@ -281,6 +291,34 @@ func TestReusedSlotsReadZero(t *testing.T) {
 		}
 		th.verify()
 	}
+}
+
+// TestSlotHintFollowsFreesAndSweeps fills most of a 16-byte slab, whose
+// bitmap spans four words, and requires the lowest free slot to be handed out
+// next after an explicit free, after a sweep, and once its slab refills.
+func TestSlotHintFollowsFreesAndSweeps(t *testing.T) {
+	th := newTestHeap(t, 16, 16)
+	var held []uintptr
+	for index := 0; index < 200; index++ {
+		held = append(held, th.mustAlloc(t, 16))
+	}
+	th.verify()
+	th.free(held[3])
+	if again := th.mustAlloc(t, 16); again != held[3] {
+		t.Fatalf("after a free the slab handed out %#x, not the freed %#x", again, held[3])
+	}
+	// One more slot moves the hint to the last word before the sweep.
+	held = append(held, th.mustAlloc(t, 16))
+	th.collect(append(roots(nil), held[70:]...))
+	if again := th.mustAlloc(t, 16); again != held[0] {
+		t.Fatalf("after a sweep the slab handed out %#x, not its first slot %#x", again, held[0])
+	}
+	for index := 1; index < 70; index++ {
+		if again := th.mustAlloc(t, 16); again != held[index] {
+			t.Fatalf("refill handed out %#x for slot %d", again, index)
+		}
+	}
+	th.verify()
 }
 
 func TestBoundarySizesAreAlignedZeroedAndDisjoint(t *testing.T) {

@@ -62,7 +62,9 @@ const (
 // last; a run allocation records its length in its first page and its first
 // page in every other. Interior pages of a free run carry only their kind and
 // flags. A slab keeps in count the first slot from which no slot has been
-// handed out since the page last read as zeroes: those need no clearing.
+// handed out since the page last read as zeroes: those need no clearing. It
+// keeps in head the first bitmap word that may hold a free slot; every slot
+// in the words before it is in use.
 type pageMeta struct {
 	kind   pageKind
 	class  uint8
@@ -277,7 +279,7 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 		}
 		m := &h.meta[page]
 		m.kind, m.class, m.used, m.marked = pageSlab, class, 0, false
-		m.count = 0
+		m.count, m.head = 0, 0
 		if m.flags&pageDirty != 0 {
 			m.count = uint32(h.classSlots[class])
 		}
@@ -289,11 +291,14 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 	m := &h.meta[page]
 	slots := uint32(h.classSlots[class])
 	slot := noPage
-	for word := uint32(0); word < slotWords && word*64 < slots; word++ {
+	for word := m.head; word < slotWords && word*64 < slots; word++ {
 		if free := ^m.alloc[word]; free != 0 {
 			candidate := word*64 + uint32(bits.TrailingZeros64(free))
 			if candidate < slots {
 				slot = candidate
+			}
+			if word != m.head {
+				m.head = word
 			}
 			break
 		}
@@ -582,6 +587,7 @@ func (h *heap) release(page, slot uint32) uint32 {
 	slots := slotsPerPage(m.class)
 	m.alloc[slot/64] &^= 1 << (slot % 64)
 	m.mark[slot/64] &^= 1 << (slot % 64)
+	m.head = min(m.head, slot/64)
 	wasFull := uint32(m.used) == slots
 	m.used--
 	switch {

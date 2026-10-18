@@ -190,6 +190,7 @@ func (h *heap) sweepSlab(page uint32) uint32 {
 	h.liveObjects -= uint64(dead)
 	h.frees += uint64(dead)
 	wasFull := uint32(m.used) == slots
+	m.head = 0
 	for word := 0; word < slotWords; word++ {
 		m.alloc[word] &= m.mark[word]
 	}
