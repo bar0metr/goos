@@ -1,7 +1,8 @@
 #!/bin/sh
 # Boots one guest and checks the reclaimable native heap (ADR 0201): the
 # memreclaim checks, a double free and heap exhaustion that must stop only
-# their own process, a VFS service that must hold its memory steady over
+# their own process, a burst whose pages must go back once the process is
+# idle, a VFS service that must hold its memory steady over
 # thousands of requests, and a long leak run of mixed workloads. Writes
 # build/reports/memory.txt.
 set -eu
@@ -132,6 +133,12 @@ last_live=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^live=//p')
 [ "$last_live" -le $((band_live + 1048576)) ] || fail "VFS live heap grew from $band_live to $last_live"
 service=$(grep '^MEMRECLAIM_SERVICE ' "$work/output" | tail -n 1)
 
+# A short burst of garbage, then idle time: the pages the burst took must go
+# back once the process waits, and stay back while it waits on.
+run 'memreclaim burst'
+require '^MEMRECLAIM_BURST_OK$' 'idle process gives its burst pages back'
+burst=$(grep '^MEMRECLAIM_BURST ' "$work/output")
+
 # A long leak run (ADR 0201). The boot test's leak rounds allow a small band
 # for process heaps; this run looks for a slow leak behind that band. Each
 # round copies a large file, streams through the VFS, lists a directory into a
@@ -188,6 +195,7 @@ require '^after-memory$' 'the system did not survive the memory checks'
 	printf 'longest pause ns (TCG): %s\n' "$pause"
 	printf 'automatic collection: %s\n' "$auto"
 	printf 'exhaustion: %s\n' "$oom"
+	printf 'burst and idle: %s\n' "$burst"
 	printf 'VFS service: %s, %s reports, band %s pages, last %s pages, last live %s bytes, %s collections\n' \
 		"$service" "$samples" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
 	printf 'leak run: %s rounds, kernel pages %s, process pages by round: %s\n' "$rounds" "$leak_kernel" "$leak_processes"

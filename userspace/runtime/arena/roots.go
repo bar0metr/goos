@@ -23,6 +23,9 @@ var stackTop uintptr
 //go:linkname spillRegisters goos_gc_registers
 func spillRegisters(buffer *[6]uintptr) uintptr
 
+//go:linkname scrubStack goos_gc_scrub
+func scrubStack()
+
 // registers holds the callee-saved registers while a collection runs.
 var registers [6]uintptr
 

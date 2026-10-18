@@ -203,6 +203,7 @@ func (h *heap) sweepSlab(page uint32) uint32 {
 		return h.givePages(page, 1)
 	case wasFull:
 		h.pushPartial(page)
+		h.diag.fullToPartial++
 	}
 	return 0
 }

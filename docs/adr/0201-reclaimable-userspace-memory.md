@@ -198,7 +198,7 @@ between uses rather than creating one per request.
 | `HeapSys` | the heap reservation, 256 MiB |
 | `HeapInuse` | bytes of pages holding at least one allocation |
 | `HeapIdle` | `HeapSys` minus `HeapInuse` |
-| `HeapReleased` | cumulative bytes given back with `VMDiscard` |
+| `HeapReleased` | bytes of `HeapIdle` the kernel holds no page for: given back with `VMDiscard` or never touched |
 | `GCSys` | metadata in use plus the mark stack reservation |
 | `Sys` | `HeapSys` plus `GCSys` |
 | `NumGC` | completed collections |

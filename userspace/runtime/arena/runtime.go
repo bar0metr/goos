@@ -50,7 +50,7 @@ var (
 	// zeroSized is what every zero-byte allocation points to.
 	zeroSized uintptr
 	// pauses are the durations of collections in nanoseconds.
-	lastPause, maxPause uint64
+	lastPause, maxPause, totalPause uint64
 )
 
 // Init reserves the heap. A program calls it before anything allocates; the
@@ -119,6 +119,12 @@ func fail() {
 // Collect runs a collection now, unless a region is active: region scratch
 // may hold the only copy of a pointer the program is still using, so nothing
 // is collected until the outermost region is left.
+//
+// The stack below Collect is zeroed first and the work runs in collect, whose
+// frames therefore start out zero. Without that, a slot a frame reserves but
+// has not written can still hold an address an earlier, deeper call stored,
+// and the scan keeps that allocation alive: memreclaim's unreachable cycle
+// survived this way after an unrelated change moved the frames.
 func Collect() {
 	if scopedRegions.depth != 0 || !ready {
 		return
@@ -126,6 +132,12 @@ func Collect() {
 	if collecting {
 		panic("arena: collection started during a collection")
 	}
+	scrubStack()
+	collect()
+}
+
+//go:noinline
+func collect() {
 	collecting = true
 	started := nativeTicks()
 	native.beginMark()
@@ -137,10 +149,11 @@ func Collect() {
 	native.phase = PhaseNone
 	native.finishMark()
 	native.sweep()
-	native.releaseFree()
+	native.trimAfterCollection()
 	releaseMarkStack()
 	pause := uint64(nativeTicks() - started)
 	lastPause = pause
+	totalPause += pause
 	if pause > maxPause {
 		maxPause = pause
 	}
@@ -228,10 +241,7 @@ func free(pointer unsafe.Pointer) {
 	if !ready || !native.contains(address) {
 		panic("arena: free of a pointer outside the heap")
 	}
-	native.free(address)
-	if native.dirtyFree<<pageShift > collectionFloor {
-		native.releaseFree()
-	}
+	native.freeAt(address)
 }
 
 // markRoots marks what a range of words points to. TinyGo calls it only from
@@ -250,6 +260,10 @@ func gc() { Collect() }
 //go:linkname setFinalizer runtime.SetFinalizer
 func setFinalizer(interface{}, interface{}) {}
 
+// readMemStats keeps the meaning runtime.MemStats gives each field:
+// HeapReleased is what is idle and given back now, not the cumulative
+// Released, which can count one page many times.
+//
 //go:linkname readMemStats runtime.ReadMemStats
 func readMemStats(stats *runtime.MemStats) {
 	s := HeapStats()
@@ -257,7 +271,7 @@ func readMemStats(stats *runtime.MemStats) {
 		Alloc: s.Live, TotalAlloc: s.TotalAlloc, Sys: s.Reserved + s.Metadata + markStackEntries*uint64(wordBytes),
 		Mallocs: s.Mallocs, Frees: s.Frees,
 		HeapAlloc: s.Live, HeapSys: s.Reserved, HeapIdle: s.Idle, HeapInuse: s.InUse,
-		HeapReleased: s.Released, HeapObjects: s.Objects,
+		HeapReleased: s.Idle - (s.Held - s.InUse), HeapObjects: s.Objects,
 		GCSys: s.Metadata + markStackEntries*uint64(wordBytes), NumGC: s.Collections,
 	}
 }
@@ -273,6 +287,18 @@ func HeapStats() Stats {
 // Pauses returns the duration of the last collection and of the longest, in
 // nanoseconds.
 func Pauses() (last, longest uint64) { return lastPause, maxPause }
+
+// PauseTotal returns the cumulative duration of every collection in
+// nanoseconds.
+func PauseTotal() uint64 { return totalPause }
+
+// ReadDiagnostics fills d with the allocator's counters and a snapshot of its
+// metadata. It allocates nothing, so d is best a global the caller keeps.
+func ReadDiagnostics(d *Diagnostics) {
+	if ready {
+		native.diagnostics(d)
+	}
+}
 
 // FreeBytes returns the allocation a slice starts at, as runtime.free does.
 // The slice must start at the allocation's first byte and nothing may use the

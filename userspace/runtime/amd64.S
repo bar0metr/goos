@@ -26,6 +26,22 @@ goos_gc_registers:
     ret
 .size goos_gc_registers, .-goos_gc_registers
 
+// goos_gc_scrub() zeroes the 4 KiB of stack below its caller's frame. The
+// collector's frames are then built on zeroes: a slot one of them reserves
+// but has not written yet holds no address an earlier call left there, which
+// the conservative scan would take for a root.
+.section .text.goos_gc_scrub,"ax",@progbits
+.global goos_gc_scrub
+.type goos_gc_scrub,@function
+goos_gc_scrub:
+    leaq -4096(%rsp), %rdi
+    movl $512, %ecx
+    xorl %eax, %eax
+    cld
+    rep stosq
+    ret
+.size goos_gc_scrub, .-goos_gc_scrub
+
 // goos_stack_top is the stack pointer _start called the program with: the
 // upper end of every frame the collector scans.
 .section .bss.goos_stack_top,"aw",@nobits

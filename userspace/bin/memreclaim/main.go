@@ -7,24 +7,30 @@
 // collected, that reused memory reads as zero, that explicit frees are reused,
 // that collected pages go back to the kernel, and that a thousand allocation
 // cycles settle. "service COUNT" drives COUNT filesystem requests and samples
-// the VFS service's pages; "double-free" and "oom" commit a failure the
-// process must not survive. It is built only into validation images.
+// the VFS service's pages; "burst" measures the pages a short burst leaves
+// before and after the process goes idle; "workload ROUNDS" times a mixed
+// workload and prints what the allocator did for it; "double-free" and "oom"
+// commit a failure the process must not survive. Every mode that finishes
+// prints an ALLOC_PROFILE of its own heap. It is built only into validation
+// images.
 package main
 
 import (
 	"encoding/binary"
 	"runtime"
 
+	"goos/kernel/clock"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/startup"
 	"goos/userspace/utility"
+	"goos/userspace/wait"
 )
 
 var manifest = commands.Manifest{
-	Usage:   "memreclaim [service COUNT|double-free|oom]",
+	Usage:   "memreclaim [service COUNT|burst|workload ROUNDS|double-free|oom]",
 	Summary: "heap reclamation checks",
 	MaxArgs: 2,
 	Grants:  commands.GrantVFS,
@@ -42,6 +48,11 @@ func run(data startup.Data) {
 		case utility.Equal(mode, "service") && data.ArgCount() == 2:
 			count, _ := data.Arg(2)
 			checkService(parse(count))
+		case utility.Equal(mode, "burst"):
+			checkBurst()
+		case utility.Equal(mode, "workload") && data.ArgCount() == 2:
+			rounds, _ := data.Arg(2)
+			runWorkload(parse(rounds))
 		case utility.Equal(mode, "double-free"):
 			doubleFree()
 		case utility.Equal(mode, "oom"):
@@ -69,8 +80,21 @@ func run(data startup.Data) {
 	report("MEMRECLAIM_STATS reserved=", stats.Reserved, " live=", stats.Live, " objects=", stats.Objects, " held=", stats.Held)
 	report("MEMRECLAIM_STATS peak_live=", stats.PeakLive, " peak_held=", stats.PeakHeld, " mallocs=", stats.Mallocs, " frees=", stats.Frees)
 	report("MEMRECLAIM_STATS collections=", uint64(stats.Collections), "", 0, "", 0, "", 0)
-	report("MEMRECLAIM_PAUSE last_ns=", last, " longest_ns=", longest, "", 0, "", 0)
+	report("MEMRECLAIM_PAUSE last_ns=", last, " longest_ns=", longest, " total_ns=", arena.PauseTotal(), "", 0)
+	printProfile("memreclaim")
 	marker("MEMRECLAIM_OK")
+}
+
+// profile and profileLine are globals so that printing the profile allocates
+// nothing.
+var (
+	profile     arena.Diagnostics
+	profileLine [160]byte
+)
+
+func printProfile(name string) {
+	arena.ReadDiagnostics(&profile)
+	profile.AppendProfile(name, profileLine[:], utility.Write)
 }
 
 // sink makes an allocation escape, so it is a heap allocation rather than a
@@ -365,8 +389,7 @@ func checkGlobalRoot() {
 	globalPages = nil
 	collect()
 	if held < live()+256<<10 {
-		phase, at, below, above := arena.Watched()
-		report("MEMRECLAIM_DEBUG phase=", uint64(phase), " at=", uint64(at), " below=", uint64(below), " above=", uint64(above))
+		explainSurvivor()
 	}
 	expect(held >= live()+256<<10, "a cleared global releases its object")
 	marker("MEMRECLAIM_GLOBAL_ROOT_OK")
@@ -425,13 +448,27 @@ func makeCycle() {
 //go:noinline
 func cycleSurvives() bool { return cycle.next.next.next == cycle }
 
+//go:noinline
+func cycleToken() uint64 { return arena.Token(cycle) }
+
+// explainSurvivor prints where the collector found the word that kept the
+// watched allocation, when a check finds an object that should be gone.
+func explainSurvivor() {
+	phase, at, below, above := arena.Watched()
+	report("MEMRECLAIM_DEBUG phase=", uint64(phase), " at=", uint64(at), " below=", uint64(below), " above=", uint64(above))
+}
+
 func checkCycle() {
 	makeCycle()
 	collect()
 	held := live()
 	expect(cycleSurvives(), "rooted cycle survives")
+	arena.Watch(cycleToken())
 	cycle = nil
 	collect()
+	if held < live()+3*64<<10 {
+		explainSurvivor()
+	}
 	expect(held >= live()+3*64<<10, "unreachable cycle collected")
 	marker("MEMRECLAIM_CYCLE_OK")
 }
@@ -791,7 +828,69 @@ func checkService(count uint64) {
 		}
 	}
 	expect(first != 0 && highest <= first+32, "service memory stays in its band")
+	printProfile("service")
 	marker("MEMRECLAIM_SERVICE_OK")
+}
+
+// idleTicks is long enough for wait.Sleep to treat the process as idle.
+const idleTicks = clock.TicksPerSecond / 2
+
+// burstGarbage allocates a burst of mixed objects and drops them all.
+//
+//go:noinline
+func burstGarbage() {
+	for round := 0; round < 40; round++ {
+		graph(round)
+		for index := 0; index < 8; index++ {
+			data := allocate(16 << 10)
+			for offset := 0; offset < len(data); offset += 4096 {
+				data[offset] = 1
+			}
+		}
+	}
+}
+
+// checkBurst measures the pages a short burst of garbage leaves before and
+// after the process goes idle. An idle wait must bring them back to where
+// they started, and a second idle wait with nothing allocated in between must
+// not leave more.
+func checkBurst() {
+	collect()
+	before := pagesUsed()
+	burstGarbage()
+	peak := pagesUsed()
+	wait.Sleep(idleTicks)
+	idle := pagesUsed()
+	wait.Sleep(idleTicks)
+	quiet := pagesUsed()
+	report("MEMRECLAIM_BURST before=", before, " peak=", peak, " idle=", idle, " quiet=", quiet)
+	expect(peak > before+64, "the burst touched pages")
+	expect(idle <= before+8 && quiet <= idle, "an idle process gives its free pages back")
+	printProfile("burst")
+	marker("MEMRECLAIM_BURST_OK")
+}
+
+// runWorkload times rounds of the mixed graph workload with collection left
+// to the allocation policy, then reports what the allocator did for it.
+// Times are guest clock nanoseconds and under QEMU TCG measure the emulator
+// as much as the allocator.
+func runWorkload(rounds uint64) {
+	expect(rounds >= 1, "workload round count")
+	collect()
+	start, startPages := utility.ClockNanos(), pagesUsed()
+	highest := startPages
+	for round := uint64(0); round < rounds; round++ {
+		graph(int(round))
+		if round%64 == 0 {
+			highest = max(highest, pagesUsed())
+		}
+	}
+	elapsed := utility.ClockNanos() - start
+	stats := arena.HeapStats()
+	report("MEMRECLAIM_WORKLOAD rounds=", rounds, " ns=", elapsed, " collections=", uint64(stats.Collections), " pause_ns=", arena.PauseTotal())
+	report("MEMRECLAIM_WORKLOAD_PAGES start=", startPages, " highest=", highest, " end=", pagesUsed(), " peak_held=", stats.PeakHeld)
+	printProfile("workload")
+	marker("MEMRECLAIM_WORKLOAD_OK")
 }
 
 func parse(text []byte) uint64 {

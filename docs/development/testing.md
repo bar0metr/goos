@@ -62,7 +62,9 @@ pointer-free layouts, stack, global,
   interior, and region roots, cyclic, deep, and wide garbage, zeroed reuse,
   boundary sizes, explicit free, page return, 1000 explicit and 3000 automatic
   collection rounds; `memreclaim double-free` must stop only its own process;
-  `memreclaim oom` must collect, retry, and only then report exhaustion; and
+  `memreclaim oom` must collect, retry, and only then report exhaustion;
+  `memreclaim burst` must give the pages of a burst of garbage back once it
+  waits idle, and keep them back through a second wait; and
   `memreclaim service 3000` drives 9000 VFS requests while the VFS service
   reports its heap and pages every 1024 requests, which must stay in the band
   the early reports set. `SERVICE_REQUESTS` changes the count. A leak run then
@@ -778,6 +780,51 @@ the guest; ADR 0085 records why. The guest TSC advances in steps of about 1 µs
 under TCG on an arm64 host, so single intervals are quantised to that step.
 Other QEMU guests running on the same host change the results by tens of
 percent; rerun on a quiet host before comparing builds.
+
+### Native allocator measurements
+
+Changes to `userspace/runtime/arena` are compared against a baseline revision
+with three targets that run nothing else. None is a gate.
+
+```sh
+make bench-allocator                      # host only, a few minutes
+make bench-allocator ALLOCATOR_VARIANTS='dense=16,32,48,64,96,128,192,256,400,512,816,1024,2048'
+make bench-allocator-guest LABEL=baseline # one validation guest
+make allocator-report                     # build/reports/allocator-optimization.md
+```
+
+`bench-allocator` runs the host benchmarks of the heap
+(`userspace/runtime/arena/bench_test.go` and the older ones in
+`heap_test.go`) for the working tree, for `ALLOCATOR_BASELINE`, and for each
+size-class table in `ALLOCATOR_VARIANTS`. `tools/allocreport` builds the
+other trees with `go test -overlay`, so no file changes and every tree runs the
+working tree's `bench_test.go`. It alternates the trees for
+`ALLOCATOR_RUNS` rounds (default 5) of `ALLOCATOR_BENCHTIME` (default 1s)
+each and keeps every sample in `build/reports/allocator-bench.json`.
+`ALLOCATOR_BENCH` narrows the benchmarks with a `-bench` pattern. Besides
+ns/op the benchmarks report the pages the heap held at its peak and at the
+end and the discards per thousand operations, since a faster allocator that
+holds more pages is not plainly better.
+
+`bench-allocator-guest` boots one validation guest with
+`tests/boot/allocator.sh`: memreclaim's checks, a VFS request run, a burst
+followed by idle time, a timed mixed workload (`memreclaim workload`), and
+rounds of shell work whose every command must succeed, with `mem -p` after
+each round. memreclaim and the VFS service print their allocator profile
+(`arena.ReadDiagnostics`): a histogram of small request sizes in 16-byte
+steps, where pages came from, pages recommitted after a discard, bytes cleared
+on reuse, discards, slab and free-run state, and metadata pages. The profile
+is written to `build/reports/allocator-guest-$LABEL.txt`. Boot the baseline
+build with `LABEL=baseline`; the report puts it first and compares every
+other label with it.
+
+`allocator-report` renders whatever exists: medians with the spread
+(max - min) / median and the change against the baseline for every metric,
+the guest figures side by side, and each process's request histogram fitted
+to candidate size-class tables. A change smaller than the spread is noise.
+Host numbers come from the host Go compiler, not TinyGo, and guest times
+from QEMU TCG; neither compares with the other, and guest runs compare only
+on the same host with no other guest running.
 
 ## Adding a boot assertion
 

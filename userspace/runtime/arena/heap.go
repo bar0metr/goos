@@ -121,6 +121,8 @@ type heap struct {
 	// heap state, so watching keeps nothing alive.
 	watch, watchAt, scanning uintptr
 	watchPhase, phase        uint8
+
+	diag counters
 }
 
 // Stats is the state of a heap. Bytes count whole slots and runs, not the
@@ -183,6 +185,8 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	h.liveBytes, h.liveObjects, h.totalAlloc, h.mallocs = 0, 0, 0, 0
 	h.frees, h.released, h.inUsePages, h.dirtyFree = 0, 0, 0, 0
 	h.peakHeld, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
+	// The counters are numbers only, cleared in place for the same reason.
+	clearMemory(uintptr(unsafe.Pointer(&h.diag)), unsafe.Sizeof(h.diag))
 	for index := range h.partial {
 		h.partial[index] = noPage
 	}
@@ -217,12 +221,19 @@ func (h *heap) allocObject(size uintptr, pointerFree bool) uintptr {
 		panic("arena: zero-size heap allocation")
 	}
 	if size <= maxSmallSize {
+		bucket := (size - 1) >> 4
+		h.diag.sizeCounts[bucket]++
+		h.diag.sizeBytes[bucket] += uint64(size)
 		return h.allocSmall(uint8(sizeClass(size)), pointerFree)
 	}
 	if size > uintptr(h.capacity)<<pageShift {
 		return 0
 	}
-	return h.allocLarge(uint32((size+pageBytes-1)>>pageShift), pointerFree)
+	count := uint32((size + pageBytes - 1) >> pageShift)
+	h.diag.largeAllocs++
+	h.diag.largeRequested += uint64(size)
+	h.diag.largePages += uint64(count)
+	return h.allocLarge(count, pointerFree)
 }
 
 func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
@@ -236,6 +247,7 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 		m.kind, m.class, m.used, m.marked = pageSlab, class, 0, false
 		m.alloc, m.mark = [slotWords]uint64{}, [slotWords]uint64{}
 		h.pushPartial(page)
+		h.diag.newSlabs++
 	}
 	m := &h.meta[page]
 	slots := slotsPerPage(class)
@@ -261,11 +273,13 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 	m.used++
 	if uint32(m.used) == slots {
 		h.removePartial(page)
+		h.diag.partialToFull++
 	}
 	size := classSizes[class]
 	address := h.pageAddress(page) + uintptr(slot)*size
 	if m.flags&pageDirty != 0 {
 		clearMemory(address, size)
+		h.diag.clearedBytes += uint64(size)
 	}
 	m.flags |= pageDirty
 	h.counted(size)
@@ -287,6 +301,7 @@ func (h *heap) allocLarge(count uint32, pointerFree bool) uintptr {
 		}
 		if m.flags&pageDirty != 0 {
 			clearMemory(h.pageAddress(index), pageBytes)
+			h.diag.clearedBytes += uint64(pageBytes)
 		}
 		m.flags |= pageDirty
 	}
@@ -309,8 +324,10 @@ func (h *heap) counted(size uintptr) {
 // room.
 func (h *heap) takePages(count uint32) uint32 {
 	page := noPage
+	h.diag.runSearches++
 	for bucket := runBucket(count); bucket < runBuckets && page == noPage; bucket++ {
 		for candidate := h.runs[bucket]; candidate != noPage; candidate = h.meta[candidate].next {
+			h.diag.runCandidates++
 			if h.meta[candidate].count >= count {
 				page = candidate
 				break
@@ -326,8 +343,12 @@ func (h *heap) takePages(count uint32) uint32 {
 		for index := page; index < page+count; index++ {
 			if h.meta[index].flags&pageDirty != 0 {
 				h.dirtyFree--
+			} else {
+				// Below the frontier a clean free page was discarded.
+				h.diag.pagesRecommitted++
 			}
 		}
+		h.diag.pagesFromRuns += uint64(count)
 	} else {
 		if uint64(h.frontier)+uint64(count) > uint64(h.capacity) {
 			return noPage
@@ -337,6 +358,7 @@ func (h *heap) takePages(count uint32) uint32 {
 		for index := page; index < page+count; index++ {
 			h.meta[index] = pageMeta{next: noPage, prev: noPage}
 		}
+		h.diag.pagesFromFresh += uint64(count)
 	}
 	h.inUsePages += uint64(count)
 	if held := (h.inUsePages + h.dirtyFree) << pageShift; held > h.peakHeld {
@@ -534,9 +556,23 @@ func (h *heap) release(page, slot uint32) uint32 {
 		return h.givePages(page, 1)
 	case wasFull:
 		h.pushPartial(page)
+		h.diag.fullToPartial++
 	}
 	return 0
 }
+
+// freeAt is runtime.free's work: it frees the allocation at address and
+// gives the free pages back once more than collectionFloor bytes of them
+// wait.
+func (h *heap) freeAt(address uintptr) {
+	h.free(address)
+	if h.dirtyFree<<pageShift > collectionFloor {
+		h.releaseFree()
+	}
+}
+
+// trimAfterCollection gives back what a collection freed.
+func (h *heap) trimAfterCollection() { h.releaseFree() }
 
 // releaseFree gives every dirty free page back to the kernel.
 func (h *heap) releaseFree() {
@@ -560,12 +596,16 @@ func (h *heap) releaseRun(page, count uint32) {
 		for index < page+count && h.meta[index].flags&pageDirty != 0 {
 			index++
 		}
+		h.diag.discardCalls++
 		if h.discard(h.pageAddress(first), uintptr(index-first)<<pageShift) {
 			for clean := first; clean < index; clean++ {
 				h.meta[clean].flags &^= pageDirty
 			}
 			h.dirtyFree -= uint64(index - first)
 			h.released += uint64(index-first) << pageShift
+			h.diag.discarded += uint64(index - first)
+		} else {
+			h.diag.discardFailures++
 		}
 	}
 }
@@ -584,8 +624,8 @@ func (h *heap) stats() Stats {
 
 // clearMemory zeroes length bytes at address.
 func clearMemory(address, length uintptr) {
-	// SAFETY: callers pass a range inside a heap page they own: a slot or the
-	// pages of a run that no live allocation holds yet.
+	// SAFETY: callers pass a range they own: a slot or the pages of a run
+	// that no live allocation holds yet, or the heap's own counters.
 	clear(unsafe.Slice((*byte)(pointerAt(address)), length))
 }
 
