@@ -90,6 +90,9 @@ func TestReadGuest(t *testing.T) {
 		"ALLOC_PROFILE vfs large=5 large_bytes=30000 new_slabs=8",
 		"ALLOC_PROFILE vfs sizes 1:12:360",
 		"ALLOCATOR_ROUND round=1 kernel=1099 processes=2000",
+		"MEMRECLAIM_WORKLOAD retained=32 rounds=10 ns=500 collections=2",
+		"MEMRECLAIM_WORKLOAD retained=0 rounds=10 ns=900 collections=2",
+		"MEMRECLAIM_WORKLOAD retained=32 rounds=10 ns=450 collections=2",
 		"VFS_MEMORY requests=4096 live=1000 objects=10 collections=3 pages=150",
 	}, "\n")
 	path := filepath.Join(t.TempDir(), "guest.txt")
@@ -110,9 +113,12 @@ func TestReadGuest(t *testing.T) {
 	if len(g.Rounds) != 1 || g.Rounds[0].Processes != 2000 || g.VFS["pages"] != 150 {
 		t.Fatalf("rounds %v vfs %v", g.Rounds, g.VFS)
 	}
+	if g.Lines["MEMRECLAIM_WORKLOAD"]["ns"] != 500 || g.Lines["MEMRECLAIM_WORKLOAD/0"]["ns"] != 900 || g.Lines["MEMRECLAIM_WORKLOAD/32"]["ns"] != 450 || len(g.Retained) != 2 {
+		t.Fatalf("workload lines %v retained %v", g.Lines, g.Retained)
+	}
 	r := &report{tables: candidateTables, guests: []*Guest{g, g}}
 	out := r.render()
-	for _, want := range []string{"burst: pages after idle | 101 | 101 | +0.0% |", "| vfs | dense |", "| 1 | 1099 | 2000 |"} {
+	for _, want := range []string{"burst: pages after idle | 101 | 101 | +0.0% |", "| vfs | dense |", "| 1 | 1099 | 2000 |", "| 0 | 900 | 2 |"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("report lacks %q:\n%s", want, out)
 		}

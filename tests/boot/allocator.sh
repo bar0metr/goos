@@ -97,6 +97,11 @@ check memreclaim '^MEMRECLAIM_OK$'
 check "memreclaim service $requests" '^MEMRECLAIM_SERVICE_OK$'
 check 'memreclaim burst' '^MEMRECLAIM_BURST_OK$'
 check "memreclaim workload $workload" '^MEMRECLAIM_WORKLOAD_OK$'
+# The same workload with set numbers of free pages retained after each
+# collection, each in a fresh process.
+for retained in 0 16 64 256; do
+	check "memreclaim workload $workload $retained" '^MEMRECLAIM_WORKLOAD_OK$'
+done
 
 # Shell work. Every command must succeed: bench prints its result line, and
 # a failing utility reports "command: reason" or the shell an exit status.

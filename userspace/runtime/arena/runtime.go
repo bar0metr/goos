@@ -109,6 +109,10 @@ func discard(address, length uintptr) bool {
 func OnExhausted(report func()) { exhausted = report }
 
 func fail() {
+	if ready && !collecting {
+		// Whatever reports the failure gets every free page back first.
+		native.trim()
+	}
 	if exhausted != nil {
 		exhausted()
 	}
@@ -161,16 +165,36 @@ func collect() {
 }
 
 // IdlePending reports whether anything was allocated since the last
-// collection.
-func IdlePending() bool { return ready && native.mallocs != native.collectedMallocs }
+// collection, or free pages wait to go back to the kernel.
+func IdlePending() bool {
+	return ready && (native.mallocs != native.collectedMallocs || native.dirtyFree != 0)
+}
 
-// CollectIdle collects if anything was allocated since the last collection. A
-// service calls it when it has nothing to do, so its pages drop to its live
-// heap while it waits rather than at the next threshold.
+// CollectIdle collects if anything was allocated since the last collection,
+// then gives every free page back, retained ones included. A service calls
+// it when it has nothing to do, so its pages drop to its live heap while it
+// waits rather than at the next threshold.
 func CollectIdle() {
-	if IdlePending() {
+	if !ready {
+		return
+	}
+	if native.mallocs != native.collectedMallocs {
 		Collect()
 	}
+	if !collecting {
+		native.trim()
+	}
+}
+
+// SetRetained sets how many free pages a collection or an explicit free
+// leaves for the allocations after it instead of giving them back, up to
+// 256. Zero gives every page back at once. An idle wait and a failed
+// allocation give back the retained pages too.
+func SetRetained(pages uint32) {
+	if !ready {
+		Init()
+	}
+	native.setRetained(pages)
 }
 
 // releaseMarkStack gives back the mark stack pages a wide graph touched,
@@ -220,6 +244,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	address := native.allocObject(size, noPointers)
 	if address == 0 && !collecting {
 		Collect()
+		native.trim()
 		address = native.allocObject(size, noPointers)
 	}
 	if address == 0 {

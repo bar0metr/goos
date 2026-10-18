@@ -8,8 +8,9 @@ import (
 
 // The benchmarks in this file measure the allocator on workloads shaped like
 // the system's. They use only what every revision of the heap since ADR 0201
-// has, plus freeAt and trimAfterCollection, so tools/allocreport can run the
-// same file against an earlier revision and compare (docs/development/testing.md).
+// has, plus freeAt, trimAfterCollection, and setRetained, so tools/allocreport
+// can run the same file against an earlier revision, giving it those three as
+// they behaved there, and compare (docs/development/testing.md).
 //
 // Each one reports, besides ns/op, the pages the heap held at its peak
 // (peak-pages), the pages it held at the end (held-pages), and the discards
@@ -181,8 +182,19 @@ var representativeSizes = []struct {
 // BenchmarkRepresentative draws sizes from the measured mix with mixed
 // lifetimes: most objects die young, some live through several collections,
 // a few are freed explicitly.
-func BenchmarkRepresentative(b *testing.B) {
+func BenchmarkRepresentative(b *testing.B) { benchmarkRepresentative(b, 0) }
+
+// BenchmarkRetention is the representative mix with free pages retained
+// after each collection: fewer discards against more pages held.
+func BenchmarkRetention(b *testing.B) {
+	for _, retain := range []uint32{0, 16, 64, 256} {
+		b.Run("retain="+strconv.Itoa(int(retain)), func(b *testing.B) { benchmarkRepresentative(b, retain) })
+	}
+}
+
+func benchmarkRepresentative(b *testing.B, retain uint32) {
 	bh := newBenchHeap(b, 1<<15)
+	bh.setRetained(retain)
 	bh.rootSet = make(roots, 1024+16)
 	kept, freed := bh.rootSet[:1024], bh.rootSet[1024:]
 	random := rand.New(rand.NewSource(7))

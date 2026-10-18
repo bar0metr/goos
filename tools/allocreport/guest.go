@@ -21,6 +21,17 @@ type Guest struct {
 	Rounds []Round
 	// VFS is the last VFS_MEMORY report.
 	VFS map[string]uint64
+	// Retained lists the retentions the workload ran with, in order.
+	Retained []uint64
+}
+
+func contains(values []uint64, value uint64) bool {
+	for _, v := range values {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
 
 // Round is one ALLOCATOR_ROUND line.
@@ -77,11 +88,27 @@ func readGuest(path string) (*Guest, error) {
 				g.Lines[name] = map[string]uint64{"value": parsed}
 				continue
 			}
-			if g.Lines[words[0]] == nil {
-				g.Lines[words[0]] = map[string]uint64{}
+			// A workload line names the retention it ran with; the
+			// default run, the first, is also kept under its plain name.
+			fields := pairs(words[1:])
+			keys := []string{words[0]}
+			if retained, ok := fields["retained"]; ok {
+				name := fmt.Sprintf("%s/%d", words[0], retained)
+				if g.Lines[words[0]] != nil {
+					keys = nil
+				}
+				keys = append(keys, name)
+				if !contains(g.Retained, retained) {
+					g.Retained = append(g.Retained, retained)
+				}
 			}
-			for key, value := range pairs(words[1:]) {
-				g.Lines[words[0]][key] = value
+			for _, key := range keys {
+				if g.Lines[key] == nil {
+					g.Lines[key] = map[string]uint64{}
+				}
+				for field, value := range fields {
+					g.Lines[key][field] = value
+				}
 			}
 		case words[0] == "ALLOC_PROFILE" && len(words) >= 3:
 			name := words[1]

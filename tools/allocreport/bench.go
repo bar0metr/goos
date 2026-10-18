@@ -47,19 +47,20 @@ type Tree struct {
 	Samples map[string]map[string][]float64 `json:"samples"`
 }
 
-// shim gives a revision older than the benchmarks the two policy hooks they
-// call, with the behaviour that revision's runtime.go had.
-const shim = `package arena
-
-func (h *heap) freeAt(address uintptr) {
+// shims give a revision older than the benchmarks the policy hooks they
+// call, with the behaviour that revision's runtime.go had: it gave every
+// free page back and retained none.
+var shims = []struct{ signature, body string }{
+	{"func (h *heap) freeAt(", `func (h *heap) freeAt(address uintptr) {
 	h.free(address)
 	if h.dirtyFree<<pageShift > collectionFloor {
 		h.releaseFree()
 	}
 }
-
-func (h *heap) trimAfterCollection() { h.releaseFree() }
-`
+`},
+	{"func (h *heap) trimAfterCollection(", "func (h *heap) trimAfterCollection() { h.releaseFree() }\n"},
+	{"func (h *heap) setRetained(", "func (h *heap) setRetained(uint32) {}\n"},
+}
 
 func benchCommand(args []string) error {
 	flags := flag.NewFlagSet("bench", flag.ExitOnError)
@@ -184,12 +185,18 @@ func revisionOverlay(name, revision, scratch string) (string, error) {
 		}
 		replace[absolute(path)] = target
 		old[filepath.Base(path)] = true
-		if filepath.Base(path) == "heap.go" && !strings.Contains(string(content), "func (h *heap) freeAt(") {
+		if filepath.Base(path) == "heap.go" {
+			shim := "package arena\n"
+			for _, s := range shims {
+				if !strings.Contains(string(content), s.signature) {
+					shim += "\n" + s.body
+				}
+			}
 			shimPath := filepath.Join(scratch, name, "shim_test.go")
 			if err := os.WriteFile(shimPath, []byte(shim), 0o644); err != nil {
 				return "", err
 			}
-			replace[absolute(filepath.Join(arenaDir, "zz_baseline_shim_test.go"))] = shimPath
+			replace[absolute(filepath.Join(arenaDir, "zz_revision_shim_test.go"))] = shimPath
 		}
 	}
 	current, err := filepath.Glob(filepath.Join(arenaDir, "*.go"))

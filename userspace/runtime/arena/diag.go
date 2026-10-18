@@ -53,6 +53,9 @@ type Diagnostics struct {
 	DiscardCalls, DiscardFailures, DiscardedPages uint64
 	// Trims counts idle and pressure trims that gave back retained pages.
 	Trims uint64
+	// Retained is how many free pages a collection or an explicit free
+	// leaves undiscarded.
+	Retained uint32
 
 	// Frontier is the first page never handed out.
 	Frontier uint32
@@ -90,7 +93,7 @@ func (h *heap) diagnostics(d *Diagnostics) {
 	d.PartialToFull, d.FullToPartial = c.partialToFull, c.fullToPartial
 	d.RunSearches, d.RunCandidates = c.runSearches, c.runCandidates
 	d.DiscardCalls, d.DiscardFailures, d.DiscardedPages = c.discardCalls, c.discardFailures, c.discarded
-	d.Trims = c.trims
+	d.Trims, d.Retained = c.trims, h.retain
 	d.Frontier = h.frontier
 	d.MetadataPages = uint64((metaBytes(h.frontier) + pageBytes - 1) >> pageShift)
 	d.PartialSlabs, d.FullSlabs, d.FreeSlots = [classCount]uint32{}, [classCount]uint32{}, [classCount]uint32{}
@@ -160,6 +163,7 @@ func (d *Diagnostics) AppendProfile(name string, line []byte, emit func([]byte))
 	w.pair("discard_failures", d.DiscardFailures)
 	w.pair("discarded", d.DiscardedPages)
 	w.pair("trims", d.Trims)
+	w.pair("retained", uint64(d.Retained))
 	w.pair("frontier", uint64(d.Frontier))
 	w.pair("meta_pages", d.MetadataPages)
 	w.pair("slab_chunks", uint64(d.SlabMetadataChunks))

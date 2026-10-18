@@ -217,6 +217,14 @@ func (r *report) renderGuests() {
 			return value, ok
 		}
 	}
+	either := func(first, second func(g *Guest) (uint64, bool)) func(g *Guest) (uint64, bool) {
+		return func(g *Guest) (uint64, bool) {
+			if value, ok := first(g); ok {
+				return value, ok
+			}
+			return second(g)
+		}
+	}
 	profile := func(name, key string) func(g *Guest) (uint64, bool) {
 		return func(g *Guest) (uint64, bool) {
 			if p := g.Profiles[name]; p != nil {
@@ -241,12 +249,12 @@ func (r *report) renderGuests() {
 		{"workload: rounds", line("MEMRECLAIM_WORKLOAD", "rounds")},
 		{"workload: ns", line("MEMRECLAIM_WORKLOAD", "ns")},
 		{"workload: collections", line("MEMRECLAIM_WORKLOAD", "collections")},
-		{"workload: collection ns", line("MEMRECLAIM_WORKLOAD", "pause_ns")},
+		{"workload: collection ns", either(line("MEMRECLAIM_WORKLOAD_GC", "pause_ns"), line("MEMRECLAIM_WORKLOAD", "pause_ns"))},
 		{"workload: highest pages", line("MEMRECLAIM_WORKLOAD_PAGES", "highest")},
 		{"workload: pages at the end", line("MEMRECLAIM_WORKLOAD_PAGES", "end")},
-		{"workload: discards", profile("workload", "discards")},
-		{"workload: pages recommitted", profile("workload", "recommitted")},
-		{"workload: bytes cleared on reuse", profile("workload", "cleared")},
+		{"workload: discards", either(line("MEMRECLAIM_WORKLOAD_POLICY", "discards"), profile("workload", "discards"))},
+		{"workload: pages recommitted", either(line("MEMRECLAIM_WORKLOAD_POLICY", "recommitted"), profile("workload", "recommitted"))},
+		{"workload: bytes cleared on reuse", either(line("MEMRECLAIM_WORKLOAD_POLICY", "cleared"), profile("workload", "cleared"))},
 		{"VFS: pages at the last report", func(g *Guest) (uint64, bool) { v, ok := g.VFS["pages"]; return v, ok }},
 		{"VFS: live bytes at the last report", func(g *Guest) (uint64, bool) { v, ok := g.VFS["live"]; return v, ok }},
 		{"VFS: requests at the last report", func(g *Guest) (uint64, bool) { v, ok := g.VFS["requests"]; return v, ok }},
@@ -315,8 +323,51 @@ func (r *report) renderGuests() {
 		r.printf("\n")
 	}
 	r.printf("\n")
+	r.renderRetention()
 	for _, g := range r.guests {
 		r.renderProfiles(g)
+	}
+}
+
+// renderRetention lists the workload runs with set retentions.
+func (r *report) renderRetention() {
+	columns := []struct{ title, line, key string }{
+		{"ns", "MEMRECLAIM_WORKLOAD", "ns"},
+		{"collections", "MEMRECLAIM_WORKLOAD", "collections"},
+		{"collection ns", "MEMRECLAIM_WORKLOAD_GC", "pause_ns"},
+		{"discards", "MEMRECLAIM_WORKLOAD_POLICY", "discards"},
+		{"pages recommitted", "MEMRECLAIM_WORKLOAD_POLICY", "recommitted"},
+		{"bytes cleared", "MEMRECLAIM_WORKLOAD_POLICY", "cleared"},
+		{"highest pages", "MEMRECLAIM_WORKLOAD_PAGES", "highest"},
+		{"pages at the end", "MEMRECLAIM_WORKLOAD_PAGES", "end"},
+	}
+	for _, g := range r.guests {
+		if len(g.Retained) == 0 {
+			continue
+		}
+		r.printf("### Workload by retained pages: %s\n\n", g.Label)
+		r.printf("`memreclaim workload` in a fresh process for each retention; the first row is the default.\n\n| Retained |")
+		for _, c := range columns {
+			r.printf(" %s |", c.title)
+		}
+		r.printf("\n|---:|")
+		for range columns {
+			r.printf("---:|")
+		}
+		r.printf("\n")
+		for _, retained := range g.Retained {
+			r.printf("| %d |", retained)
+			for _, c := range columns {
+				value, ok := g.Lines[fmt.Sprintf("%s/%d", c.line, retained)][c.key]
+				if ok {
+					r.printf(" %d |", value)
+				} else {
+					r.printf(" - |")
+				}
+			}
+			r.printf("\n")
+		}
+		r.printf("\n")
 	}
 }
 

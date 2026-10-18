@@ -8,8 +8,9 @@
 // that collected pages go back to the kernel, and that a thousand allocation
 // cycles settle. "service COUNT" drives COUNT filesystem requests and samples
 // the VFS service's pages; "burst" measures the pages a short burst leaves
-// before and after the process goes idle; "workload ROUNDS" times a mixed
-// workload and prints what the allocator did for it; "double-free" and "oom"
+// before and after the process goes idle; "workload ROUNDS [RETAINED]" times
+// a mixed workload, with RETAINED free pages kept after each collection, and
+// prints what the allocator did for it; "double-free" and "oom"
 // commit a failure the process must not survive. Every mode that finishes
 // prints an ALLOC_PROFILE of its own heap. It is built only into validation
 // images.
@@ -30,9 +31,9 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "memreclaim [service COUNT|burst|workload ROUNDS|double-free|oom]",
+	Usage:   "memreclaim [service COUNT|burst|workload ROUNDS [RETAINED]|double-free|oom]",
 	Summary: "heap reclamation checks",
-	MaxArgs: 2,
+	MaxArgs: 3,
 	Grants:  commands.GrantVFS,
 }
 
@@ -50,8 +51,12 @@ func run(data startup.Data) {
 			checkService(parse(count))
 		case utility.Equal(mode, "burst"):
 			checkBurst()
-		case utility.Equal(mode, "workload") && data.ArgCount() == 2:
+		case utility.Equal(mode, "workload") && data.ArgCount() >= 2:
 			rounds, _ := data.Arg(2)
+			if data.ArgCount() == 3 {
+				retained, _ := data.Arg(3)
+				arena.SetRetained(uint32(min(parse(retained), 1<<20)))
+			}
 			runWorkload(parse(rounds))
 		case utility.Equal(mode, "double-free"):
 			doubleFree()
@@ -898,8 +903,12 @@ func runWorkload(rounds uint64) {
 	}
 	elapsed := utility.ClockNanos() - start
 	stats := arena.HeapStats()
-	report("MEMRECLAIM_WORKLOAD rounds=", rounds, " ns=", elapsed, " collections=", uint64(stats.Collections), " pause_ns=", arena.PauseTotal())
-	report("MEMRECLAIM_WORKLOAD_PAGES start=", startPages, " highest=", highest, " end=", pagesUsed(), " peak_held=", stats.PeakHeld)
+	arena.ReadDiagnostics(&profile)
+	retained := uint64(profile.Retained)
+	report("MEMRECLAIM_WORKLOAD retained=", retained, " rounds=", rounds, " ns=", elapsed, " collections=", uint64(stats.Collections))
+	report("MEMRECLAIM_WORKLOAD_PAGES retained=", retained, " start=", startPages, " highest=", highest, " end=", pagesUsed())
+	report("MEMRECLAIM_WORKLOAD_POLICY retained=", retained, " discards=", profile.DiscardCalls, " recommitted=", profile.PagesRecommitted, " cleared=", profile.ClearedBytes)
+	report("MEMRECLAIM_WORKLOAD_GC retained=", retained, " pause_ns=", arena.PauseTotal(), " peak_held=", stats.PeakHeld, "", 0)
 	printProfile("workload")
 	marker("MEMRECLAIM_WORKLOAD_OK")
 }

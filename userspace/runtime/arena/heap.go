@@ -114,6 +114,10 @@ type heap struct {
 	// discard returns a page-aligned range to the kernel, which supplies it
 	// zeroed when it is next touched. It reports whether that happened.
 	discard func(address, length uintptr) bool
+	// retain is how many dirty free pages a collection or an explicit free
+	// leaves undiscarded, so the allocations after it reuse them rather than
+	// have the kernel supply them again. trim gives every one back.
+	retain uint32
 
 	liveBytes, liveObjects uint64
 	totalAlloc, mallocs    uint64
@@ -194,6 +198,7 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	// on the heap, and the native heap does not exist yet.
 	h.base, h.capacity, h.frontier, h.meta = base, pages, 0, meta[:pages]
 	h.work, h.workTop, h.workHigh, h.overflow, h.discard = work, 0, 0, false, discard
+	h.retain = 0
 	h.liveBytes, h.liveObjects, h.totalAlloc, h.mallocs = 0, 0, 0, 0
 	h.frees, h.released, h.inUsePages, h.dirtyFree = 0, 0, 0, 0
 	h.peakHeld, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
@@ -591,18 +596,35 @@ func (h *heap) release(page, slot uint32) uint32 {
 	return 0
 }
 
-// freeAt is runtime.free's work: it frees the allocation at address and
-// gives the free pages back once more than collectionFloor bytes of them
-// wait.
+// maxRetained bounds the pages a heap may be told to retain: what an
+// explicit free lets wait before it gives pages back.
+const maxRetained = uint32(collectionFloor >> pageShift)
+
+// freeAt is runtime.free's work: it frees the allocation at address and,
+// once more than collectionFloor bytes of free pages wait, gives back all but
+// the retained ones.
 func (h *heap) freeAt(address uintptr) {
 	h.free(address)
 	if h.dirtyFree<<pageShift > collectionFloor {
-		h.releaseFree()
+		h.releaseDown(uint64(h.retain))
 	}
 }
 
-// trimAfterCollection gives back what a collection freed.
-func (h *heap) trimAfterCollection() { h.releaseFree() }
+// setRetained sets how many free pages trimAfterCollection and freeAt leave.
+func (h *heap) setRetained(pages uint32) { h.retain = min(pages, maxRetained) }
+
+// trimAfterCollection gives back what a collection freed, except the
+// retained pages.
+func (h *heap) trimAfterCollection() { h.releaseDown(uint64(h.retain)) }
+
+// trim gives back every free page: an idle process, or one that ran out of
+// room, keeps none.
+func (h *heap) trim() {
+	if h.dirtyFree != 0 {
+		h.diag.trims++
+		h.releaseFree()
+	}
+}
 
 // releaseFree gives every dirty free page back to the kernel.
 func (h *heap) releaseFree() {
@@ -616,6 +638,46 @@ func (h *heap) releaseFree() {
 	}
 }
 
+// releaseDown gives back dirty free pages until at most keep are left. It
+// takes them from the longest runs first and from the end of a run, so what
+// stays is in the short runs a slab or a small run is taken from.
+func (h *heap) releaseDown(keep uint64) {
+	if keep == 0 {
+		h.releaseFree()
+		return
+	}
+	for bucket := runBuckets - 1; bucket >= 0 && h.dirtyFree > keep; bucket-- {
+		for page := h.runs[bucket]; page != noPage && h.dirtyFree > keep; page = h.meta[page].next {
+			if !h.releaseTail(page, h.meta[page].count, keep) {
+				// The kernel refused; the pages stay dirty and the
+				// next trim tries again.
+				return
+			}
+		}
+	}
+}
+
+// releaseTail discards the dirty pages of a free run from its end until at
+// most keep dirty free pages are left. It reports false when a discard was
+// refused.
+func (h *heap) releaseTail(page, count uint32, keep uint64) bool {
+	end := page + count
+	for end > page && h.dirtyFree > keep {
+		if h.meta[end-1].flags&pageDirty == 0 {
+			end--
+			continue
+		}
+		last := end
+		for end > page && h.meta[end-1].flags&pageDirty != 0 && uint64(last-end) < h.dirtyFree-keep {
+			end--
+		}
+		if !h.discardPages(end, last) {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *heap) releaseRun(page, count uint32) {
 	for index := page; index < page+count; {
 		if h.meta[index].flags&pageDirty == 0 {
@@ -626,18 +688,26 @@ func (h *heap) releaseRun(page, count uint32) {
 		for index < page+count && h.meta[index].flags&pageDirty != 0 {
 			index++
 		}
-		h.diag.discardCalls++
-		if h.discard(h.pageAddress(first), uintptr(index-first)<<pageShift) {
-			for clean := first; clean < index; clean++ {
-				h.meta[clean].flags &^= pageDirty
-			}
-			h.dirtyFree -= uint64(index - first)
-			h.released += uint64(index-first) << pageShift
-			h.diag.discarded += uint64(index - first)
-		} else {
-			h.diag.discardFailures++
-		}
+		h.discardPages(first, index)
 	}
+}
+
+// discardPages gives the dirty free pages [first, last) back to the kernel
+// and reports whether it took them. Pages it refused stay dirty, so they are
+// cleared before reuse.
+func (h *heap) discardPages(first, last uint32) bool {
+	h.diag.discardCalls++
+	if !h.discard(h.pageAddress(first), uintptr(last-first)<<pageShift) {
+		h.diag.discardFailures++
+		return false
+	}
+	for clean := first; clean < last; clean++ {
+		h.meta[clean].flags &^= pageDirty
+	}
+	h.dirtyFree -= uint64(last - first)
+	h.released += uint64(last-first) << pageShift
+	h.diag.discarded += uint64(last - first)
+	return true
 }
 
 func (h *heap) stats() Stats {
