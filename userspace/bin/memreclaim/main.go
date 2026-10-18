@@ -864,7 +864,11 @@ func checkCycles() {
 }
 
 // checkService drives count filesystem requests through the VFS service and
-// samples the pages it holds ten times.
+// samples the pages it holds ten times, each time after the service has been
+// idle long enough to collect and give its free pages back. A sample taken
+// while requests run lands somewhere in a collection cycle, in which the
+// service's pages swing by up to 200 as garbage grows to the next threshold,
+// so only idle samples can show whether its memory stays in a band.
 func checkService(count uint64) {
 	expect(count >= 100, "service request count")
 	path, directory := []byte("/tmp/memreclaim"), []byte("/system/bin")
@@ -883,12 +887,14 @@ func checkService(count uint64) {
 		removed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: path})
 		utility.Check(removed, ok, path, true)
 		if (done+1)%(count/10) == 0 {
+			busy := vfsPages()
+			wait.Sleep(idleTicks)
 			pages := vfsPages()
-			report("MEMRECLAIM_SERVICE requests=", (done+1)*3, " vfs_pages=", pages, "", 0, "", 0)
+			report("MEMRECLAIM_SERVICE requests=", (done+1)*3, " vfs_pages=", pages, " busy_pages=", busy, "", 0)
 			switch sample := (done + 1) / (count / 10); {
 			case sample <= 2:
 				// The first samples set the band: caches fill and the
-				// heap reaches its first collection threshold.
+				// service settles.
 				first = max(first, pages)
 			default:
 				highest = max(highest, pages)

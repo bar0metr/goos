@@ -123,13 +123,16 @@ samples=$(wc -l <"$work/vfs")
 [ "$samples" -ge 4 ] || fail "only $samples VFS memory reports"
 vfs_collections=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^collections=//p')
 [ "$vfs_collections" -gt 0 ] || fail 'the VFS service never collected'
-# The band is set by the reports after the first two; later ones may not
-# exceed it by more than 32 pages or by more than 1 MiB of live heap.
+# The live band is set by the reports after the first two; later ones may
+# not exceed it by more than 1 MiB of live heap. The service reports while
+# requests run, somewhere in a collection cycle in which its pages swing by
+# up to 200, so its pages are banded on memreclaim's idle samples above
+# (MEMRECLAIM_SERVICE_OK) and only listed here.
 band_pages=$(sed -n '2,3p' "$work/vfs" | tr ' ' '\n' | sed -n 's/^pages=//p' | sort -n | tail -n 1)
 band_live=$(sed -n '2,3p' "$work/vfs" | tr ' ' '\n' | sed -n 's/^live=//p' | sort -n | tail -n 1)
 last_pages=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^pages=//p')
 last_live=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^live=//p')
-[ "$last_pages" -le $((band_pages + 32)) ] || fail "VFS pages grew from $band_pages to $last_pages"
+busy_pages=$(tr ' ' '\n' <"$work/vfs" | sed -n 's/^pages=//p' | sort -n | sed -n '1p;$p' | tr '\n' ' ')
 [ "$last_live" -le $((band_live + 1048576)) ] || fail "VFS live heap grew from $band_live to $last_live"
 service=$(grep '^MEMRECLAIM_SERVICE ' "$work/output" | tail -n 1)
 
@@ -196,8 +199,8 @@ require '^after-memory$' 'the system did not survive the memory checks'
 	printf 'automatic collection: %s\n' "$auto"
 	printf 'exhaustion: %s\n' "$oom"
 	printf 'burst and idle: %s\n' "$burst"
-	printf 'VFS service: %s, %s reports, band %s pages, last %s pages, last live %s bytes, %s collections\n' \
-		"$service" "$samples" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
+	printf 'VFS service: %s, %s reports, pages while busy from %s(lowest highest), early %s, last %s pages, last live %s bytes, %s collections\n' \
+		"$service" "$samples" "$busy_pages" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
 	printf 'leak run: %s rounds, kernel pages %s, process pages by round: %s\n' "$rounds" "$leak_kernel" "$leak_processes"
 } >"$report"
 cat "$report"

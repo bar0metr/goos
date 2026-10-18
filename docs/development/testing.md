@@ -66,9 +66,13 @@ pointer-free layouts, stack, global,
   `memreclaim oom` must collect, retry, and only then report exhaustion;
   `memreclaim burst` must give the pages of a burst of garbage back once it
   waits idle, and keep them back through a second wait; and
-  `memreclaim service 3000` drives 9000 VFS requests while the VFS service
-  reports its heap and pages every 1024 requests, which must stay in the band
-  the early reports set. `SERVICE_REQUESTS` changes the count. A leak run then
+  `memreclaim service 3000` drives 9000 VFS requests and samples the VFS
+  service's pages ten times, each after the service has been idle long enough
+  to collect and give its free pages back; later samples must stay within 32
+  pages of the first two. The service reports its heap and pages every 1024
+  requests as well, and its live heap must stay within 1 MiB of the band the
+  early reports set. Pages it reports while requests run swing by up to 200
+  within a collection cycle, so the report lists them without banding them. `SERVICE_REQUESTS` changes the count. A leak run then
 repeats a mixed workload (file copy, VFS streaming, a pipeline, a Linux
 program) for `LEAK_ROUNDS` rounds, 20 by default, counting pages after every
 service has collected: the kernel's pages must not move from round 3 on, and
