@@ -31,7 +31,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "memreclaim [service COUNT|burst|workload ROUNDS [RETAINED]|double-free|oom]",
+	Usage:   "memreclaim [service N|burst|workload N [R]|double-free|oom]",
 	Summary: "heap reclamation checks",
 	MaxArgs: 3,
 	Grants:  commands.GrantVFS,
