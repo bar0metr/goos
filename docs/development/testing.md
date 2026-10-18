@@ -789,7 +789,7 @@ percent; rerun on a quiet host before comparing builds.
 ### Native allocator measurements
 
 Changes to `userspace/runtime/arena` are compared against a baseline revision
-with three targets that run nothing else. None is a gate.
+with three targets that run nothing else (ADR 0202). None is a gate.
 
 ```sh
 make bench-allocator                      # host only, a few minutes

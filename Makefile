@@ -534,7 +534,8 @@ test-memory:
 # each, with no guest. bench-allocator-guest boots
 # one validation guest that only records allocator profiles and page counts,
 # under the label LABEL. allocator-report renders whatever of both exists as
-# build/reports/allocator-optimization.md.
+# build/reports/allocator-optimization.md, and the baseline alone as
+# build/reports/allocator-baseline.md.
 ALLOCATOR_BASELINE ?= 80402ada809bf5eb605755f3e58ca9b9bf6e886d
 ALLOCATOR_RUNS ?= 5
 ALLOCATOR_BENCHTIME ?= 1s
@@ -561,7 +562,11 @@ allocator-report:
 		$(if $(wildcard $(BUILD_DIR)/reports/allocator-bench.json),-bench $(BUILD_DIR)/reports/allocator-bench.json) \
 		$(foreach g,$(sort $(wildcard $(BUILD_DIR)/reports/allocator-guest-baseline.txt)) $(filter-out %-baseline.txt,$(sort $(wildcard $(BUILD_DIR)/reports/allocator-guest-*.txt))),-guest $(g)) \
 		-out $(BUILD_DIR)/reports/allocator-optimization.md
-	@echo $(BUILD_DIR)/reports/allocator-optimization.md
+	$(BUILD_ENV) go run ./tools/allocreport report -title 'Native allocator baseline' -trees baseline \
+		$(if $(wildcard $(BUILD_DIR)/reports/allocator-bench.json),-bench $(BUILD_DIR)/reports/allocator-bench.json) \
+		$(if $(wildcard $(BUILD_DIR)/reports/allocator-guest-baseline.txt),-guest $(BUILD_DIR)/reports/allocator-guest-baseline.txt) \
+		-out $(BUILD_DIR)/reports/allocator-baseline.md
+	@echo $(BUILD_DIR)/reports/allocator-optimization.md $(BUILD_DIR)/reports/allocator-baseline.md
 
 test-lscpu: iso
 	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/lscpu-test.img

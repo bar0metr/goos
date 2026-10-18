@@ -16,6 +16,7 @@ func reportCommand(args []string) error {
 	benchPath := flags.String("bench", "", "results from allocreport bench")
 	title := flags.String("title", "Native allocator report", "report title")
 	out := flags.String("out", "", "output Markdown")
+	only := flags.String("trees", "", "comma-separated benchmark trees to keep; all when empty")
 	var guests, tables listFlag
 	flags.Var(&guests, "guest", "a guest profile from tests/boot/allocator.sh")
 	flags.Var(&tables, "table", "NAME=SIZES: another size-class table to compare")
@@ -43,6 +44,22 @@ func reportCommand(args []string) error {
 		r.bench = new(Results)
 		if err := json.Unmarshal(data, r.bench); err != nil {
 			return fmt.Errorf("%s: %w", *benchPath, err)
+		}
+		if *only != "" {
+			keep := map[string]bool{}
+			for _, name := range strings.Split(*only, ",") {
+				keep[name] = true
+			}
+			trees := r.bench.Trees[:0]
+			for _, tree := range r.bench.Trees {
+				if keep[tree.Name] {
+					trees = append(trees, tree)
+				}
+			}
+			if len(trees) == 0 {
+				return fmt.Errorf("no tree named in %q", *only)
+			}
+			r.bench.Trees = trees
 		}
 	}
 	for _, path := range guests {
