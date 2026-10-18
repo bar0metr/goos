@@ -16,9 +16,8 @@ func TestDiagnosticsCountWhatTheAllocatorDid(t *testing.T) {
 	if d.SizeCounts[1] != 2 || d.SizeBytes[1] != 49 || d.LargeAllocs != 1 || d.LargeRequested != 3*uint64(pageBytes)+1 || d.LargePages != 4 {
 		t.Fatalf("request histogram %v %v large %d %d %d", d.SizeCounts[:3], d.SizeBytes[:3], d.LargeAllocs, d.LargeRequested, d.LargePages)
 	}
-	// The second slot is cleared although the page came zeroed: the dirty
-	// mark is per page.
-	if d.NewSlabs != 1 || d.PagesFromFresh != 5 || d.PagesFromRuns != 0 || d.ClearedBytes != 32 {
+	// Slots of a slab on a zeroed page are not cleared.
+	if d.NewSlabs != 1 || d.PagesFromFresh != 5 || d.PagesFromRuns != 0 || d.ClearedBytes != 0 {
 		t.Fatalf("sources: slabs %d runs %d fresh %d cleared %d", d.NewSlabs, d.PagesFromRuns, d.PagesFromFresh, d.ClearedBytes)
 	}
 	if d.PartialSlabs[sizeClass(32)] != 1 || d.FreeSlots[sizeClass(32)] != slotsPerPage(uint8(sizeClass(32)))-2 || d.RunPages != 4 {
@@ -31,7 +30,7 @@ func TestDiagnosticsCountWhatTheAllocatorDid(t *testing.T) {
 	th.free(run)
 	th.mustAlloc(t, 2*pageBytes)
 	th.diagnostics(&d)
-	if d.PagesFromRuns != 2 || d.PagesRecommitted != 0 || d.ClearedBytes != 32+2*uint64(pageBytes) || d.FreeRuns != 1 || d.DirtyFreePages != 2 {
+	if d.PagesFromRuns != 2 || d.PagesRecommitted != 0 || d.ClearedBytes != 2*uint64(pageBytes) || d.FreeRuns != 1 || d.DirtyFreePages != 2 {
 		t.Fatalf("reuse: %+v", d)
 	}
 

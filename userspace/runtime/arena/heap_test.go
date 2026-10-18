@@ -189,6 +189,100 @@ func TestSizeClassesCoverEverySmallSize(t *testing.T) {
 	}
 }
 
+func TestClassTablesMatchTheSearch(t *testing.T) {
+	th := newTestHeap(t, 16, 16)
+	for size := uintptr(1); size <= maxSmallSize; size++ {
+		if int(th.classOf[(size+15)>>4]) != sizeClass(size) {
+			t.Fatalf("size %d: table class %d, search %d", size, th.classOf[(size+15)>>4], sizeClass(size))
+		}
+	}
+	for class := range classSizes {
+		if uint32(th.classSlots[class]) != slotsPerPage(uint8(class)) {
+			t.Fatalf("class %d slots", class)
+		}
+		size := uint64(classSizes[class])
+		for offset := uint64(0); offset < uint64(pageBytes); offset++ {
+			if offset*uint64(th.classMagic[class])>>32 != offset/size {
+				t.Fatalf("class %d: offset %d divides wrong", class, offset)
+			}
+		}
+	}
+}
+
+// TestEverySlotOfEveryClassResolves allocates every slot of a slab of every
+// class and resolves its first byte, its last, and the byte after it.
+func TestEverySlotOfEveryClassResolves(t *testing.T) {
+	th := newTestHeap(t, 256, 16)
+	for class, size := range classSizes {
+		slots := slotsPerPage(uint8(class))
+		for slot := uint32(0); slot < slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for _, probe := range []uintptr{address, address + size/2, address + size - 1} {
+				page, found, start, ok := th.find(probe)
+				if !ok || start != address || found == noPage || th.extent(page, found) != size {
+					t.Fatalf("class %d slot %d: %#x resolved to %#x %v", size, slot, probe, start, ok)
+				}
+			}
+		}
+		// The page tail past the last slot belongs to no allocation.
+		last := th.base + uintptr(th.frontier-1)<<pageShift + uintptr(slots)*size
+		if last&(pageBytes-1) != 0 {
+			if _, _, _, ok := th.find(last); ok {
+				t.Fatalf("class %d: the page tail resolved", size)
+			}
+		}
+	}
+	th.verify()
+}
+
+// TestReusedSlotsReadZero writes every byte of a slab's slots, frees some by
+// hand and the rest by a collection, and requires every slot handed out
+// again, and every slot of a fresh slab on a reused page, to read zero.
+func TestReusedSlotsReadZero(t *testing.T) {
+	for class, size := range classSizes {
+		th := newTestHeap(t, 16, 16)
+		slots := slotsPerPage(uint8(class))
+		var held []uintptr
+		for slot := uint32(0); slot < slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for index := range bytesAt(address, size) {
+				bytesAt(address, size)[index] = 0xc3
+			}
+			held = append(held, address)
+		}
+		th.free(held[0])
+		th.free(held[slots-1])
+		th.collect(roots{held[1]})
+		// Every slot but held[1] is free again, and its page dirty.
+		for slot := uint32(1); slot < slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for index, value := range bytesAt(address, size) {
+				if value != 0 {
+					t.Fatalf("class %d: reused slot byte %d is %#x", size, index, value)
+				}
+			}
+		}
+		// A slab set up on a dirty page the kernel refused to discard
+		// clears every slot it hands out.
+		th.refuse = true
+		big := th.mustAlloc(t, 4*pageBytes)
+		for index := range bytesAt(big, 4*pageBytes) {
+			bytesAt(big, 4*pageBytes)[index] = 0x5a
+		}
+		th.free(big)
+		th.collect(nil)
+		for slot := uint32(0); slot < 2*slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for index, value := range bytesAt(address, size) {
+				if value != 0 {
+					t.Fatalf("class %d: slot %d on a dirty page byte %d is %#x", size, slot, index, value)
+				}
+			}
+		}
+		th.verify()
+	}
+}
+
 func TestBoundarySizesAreAlignedZeroedAndDisjoint(t *testing.T) {
 	th := newTestHeap(t, 1024, 64)
 	page := uintptr(pageBytes)

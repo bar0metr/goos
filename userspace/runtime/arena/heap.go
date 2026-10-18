@@ -59,7 +59,8 @@ const (
 // A free run records its length in its first page and its first page in its
 // last; a run allocation records its length in its first page and its first
 // page in every other. Interior pages of a free run carry only their kind and
-// flags.
+// flags. A slab keeps in count the first slot from which no slot has been
+// handed out since the page last read as zeroes: those need no clearing.
 type pageMeta struct {
 	kind   pageKind
 	class  uint8
@@ -91,6 +92,17 @@ type heap struct {
 	meta     []pageMeta
 	partial  [classCount]uint32
 	runs     [runBuckets]uint32
+
+	// classOf maps a small size, rounded up to 16 bytes and divided by 16,
+	// to its class, and classSlots is each class's slots per slab. They
+	// replace a search of classSizes and a division on every allocation.
+	classOf    [sizeBuckets + 1]uint8
+	classSlots [classCount]uint16
+	// classMagic is 2^32 / size rounded up: an offset inside a page times
+	// it, shifted right by 32, is the offset divided by the slot size. The
+	// product is exact for every offset below 2^32 / maxSmallSize, far past
+	// a page. find runs for every word marking reads.
+	classMagic [classCount]uint32
 
 	// work is the mark stack. When it fills, marked objects stop being
 	// queued, overflow is set, and finishMark rescans the heap.
@@ -190,6 +202,17 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	for index := range h.partial {
 		h.partial[index] = noPage
 	}
+	class := 0
+	for steps := range h.classOf {
+		for uintptr(steps)<<4 > classSizes[class] {
+			class++
+		}
+		h.classOf[steps] = uint8(class)
+	}
+	for class := range h.classSlots {
+		h.classSlots[class] = uint16(slotsPerPage(uint8(class)))
+		h.classMagic[class] = uint32((1<<32 + uint64(classSizes[class]) - 1) / uint64(classSizes[class]))
+	}
 	for index := range h.runs {
 		h.runs[index] = noPage
 	}
@@ -224,7 +247,7 @@ func (h *heap) allocObject(size uintptr, pointerFree bool) uintptr {
 		bucket := (size - 1) >> 4
 		h.diag.sizeCounts[bucket]++
 		h.diag.sizeBytes[bucket] += uint64(size)
-		return h.allocSmall(uint8(sizeClass(size)), pointerFree)
+		return h.allocSmall(h.classOf[(size+15)>>4], pointerFree)
 	}
 	if size > uintptr(h.capacity)<<pageShift {
 		return 0
@@ -245,12 +268,16 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 		}
 		m := &h.meta[page]
 		m.kind, m.class, m.used, m.marked = pageSlab, class, 0, false
+		m.count = 0
+		if m.flags&pageDirty != 0 {
+			m.count = uint32(h.classSlots[class])
+		}
 		m.alloc, m.mark = [slotWords]uint64{}, [slotWords]uint64{}
 		h.pushPartial(page)
 		h.diag.newSlabs++
 	}
 	m := &h.meta[page]
-	slots := slotsPerPage(class)
+	slots := uint32(h.classSlots[class])
 	slot := noPage
 	for word := uint32(0); word < slotWords && word*64 < slots; word++ {
 		if free := ^m.alloc[word]; free != 0 {
@@ -277,9 +304,13 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 	}
 	size := classSizes[class]
 	address := h.pageAddress(page) + uintptr(slot)*size
-	if m.flags&pageDirty != 0 {
+	if slot < m.count {
 		clearMemory(address, size)
 		h.diag.clearedBytes += uint64(size)
+	} else {
+		// Slots are taken lowest first, so every slot below this one is
+		// in use, and every slot above it is still untouched.
+		m.count = slot + 1
 	}
 	m.flags |= pageDirty
 	h.counted(size)
@@ -487,12 +518,11 @@ func (h *heap) find(address uintptr) (page, slot uint32, start uintptr, ok bool)
 	m := &h.meta[page]
 	switch m.kind {
 	case pageSlab:
-		size := classSizes[m.class]
-		slot = uint32((address - h.pageAddress(page)) / size)
-		if slot >= slotsPerPage(m.class) || m.alloc[slot/64]&(1<<(slot%64)) == 0 {
+		slot = uint32(uint64(address&(pageBytes-1)) * uint64(h.classMagic[m.class]) >> 32)
+		if slot >= uint32(h.classSlots[m.class]) || m.alloc[slot/64]&(1<<(slot%64)) == 0 {
 			return 0, 0, 0, false
 		}
-		return page, slot, h.pageAddress(page) + uintptr(slot)*size, true
+		return page, slot, h.pageAddress(page) + uintptr(slot)*classSizes[m.class], true
 	case pageRunTail:
 		head := m.head
 		if head >= page || h.meta[head].kind != pageRun || head+h.meta[head].count <= page {
