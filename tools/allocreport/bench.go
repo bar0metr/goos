@@ -40,8 +40,9 @@ type Revisions struct {
 
 // Tree is one configuration of the allocator and its samples.
 type Tree struct {
-	Name    string `json:"name"`
-	Classes string `json:"classes,omitempty"`
+	Name     string `json:"name"`
+	Revision string `json:"revision,omitempty"`
+	Classes  string `json:"classes,omitempty"`
 	// Samples maps a benchmark to its metrics, each a sample per run.
 	Samples map[string]map[string][]float64 `json:"samples"`
 }
@@ -67,8 +68,9 @@ func benchCommand(args []string) error {
 	benchTime := flags.String("benchtime", "1s", "go test -benchtime")
 	pattern := flags.String("bench", ".", "go test -bench")
 	out := flags.String("out", "", "output JSON")
-	var variants listFlag
+	var variants, revisions listFlag
 	flags.Var(&variants, "variant", "NAME=SIZES: a size-class table applied to the working tree")
+	flags.Var(&revisions, "revision", "NAME=REV: another revision to compare")
 	flags.Parse(args)
 	if *baseline == "" || *out == "" || *count < 1 {
 		usage()
@@ -84,11 +86,22 @@ func benchCommand(args []string) error {
 		overlay string
 	}
 	var setups []setup
-	base, err := baselineOverlay(*baseline, scratch)
+	base, err := revisionOverlay("baseline", *baseline, scratch)
 	if err != nil {
 		return err
 	}
 	setups = append(setups, setup{Tree{Name: "baseline"}, base})
+	for _, revision := range revisions {
+		name, rev, ok := strings.Cut(revision, "=")
+		if !ok {
+			return fmt.Errorf("revision %q is not NAME=REV", revision)
+		}
+		overlay, err := revisionOverlay(name, rev, scratch)
+		if err != nil {
+			return err
+		}
+		setups = append(setups, setup{Tree{Name: name, Revision: gitOutput("rev-parse", rev)}, overlay})
+	}
 	setups = append(setups, setup{Tree{Name: "current"}, ""})
 	for _, variant := range variants {
 		name, sizes, ok := strings.Cut(variant, "=")
@@ -144,10 +157,10 @@ func gitOutput(args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// baselineOverlay maps every Go file of the arena package to its content at
+// revisionOverlay maps every Go file of the arena package to its content at
 // revision, removing files the revision does not have, and keeps the working
 // tree's bench_test.go.
-func baselineOverlay(revision, scratch string) (string, error) {
+func revisionOverlay(name, revision, scratch string) (string, error) {
 	listing, err := exec.Command("git", "ls-tree", "--name-only", revision, arenaDir+"/").Output()
 	if err != nil {
 		return "", fmt.Errorf("listing %s at %s: %w", arenaDir, revision, err)
@@ -162,7 +175,7 @@ func baselineOverlay(revision, scratch string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		target := filepath.Join(scratch, "baseline", filepath.Base(path))
+		target := filepath.Join(scratch, name, filepath.Base(path))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return "", err
 		}
@@ -172,7 +185,7 @@ func baselineOverlay(revision, scratch string) (string, error) {
 		replace[absolute(path)] = target
 		old[filepath.Base(path)] = true
 		if filepath.Base(path) == "heap.go" && !strings.Contains(string(content), "func (h *heap) freeAt(") {
-			shimPath := filepath.Join(scratch, "baseline", "shim_test.go")
+			shimPath := filepath.Join(scratch, name, "shim_test.go")
 			if err := os.WriteFile(shimPath, []byte(shim), 0o644); err != nil {
 				return "", err
 			}
@@ -188,7 +201,7 @@ func baselineOverlay(revision, scratch string) (string, error) {
 			replace[absolute(path)] = ""
 		}
 	}
-	return writeOverlay(replace, filepath.Join(scratch, "baseline.json"))
+	return writeOverlay(replace, filepath.Join(scratch, name+".json"))
 }
 
 var classLine = regexp.MustCompile(`(?m)^var classSizes = \[\.\.\.\]uintptr\{[0-9, ]*\}$`)

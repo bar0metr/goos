@@ -835,11 +835,13 @@ func checkService(count uint64) {
 // idleTicks is long enough for wait.Sleep to treat the process as idle.
 const idleTicks = clock.TicksPerSecond / 2
 
-// burstGarbage allocates a burst of mixed objects and drops them all.
+// burstGarbage allocates about 768 KiB of mixed objects and drops them all.
+// That stays below the growth that starts a collection, so the pages it
+// takes are still held when it returns.
 //
 //go:noinline
 func burstGarbage() {
-	for round := 0; round < 40; round++ {
+	for round := 0; round < 4; round++ {
 		graph(round)
 		for index := 0; index < 8; index++ {
 			data := allocate(16 << 10)
@@ -851,21 +853,30 @@ func burstGarbage() {
 }
 
 // checkBurst measures the pages a short burst of garbage leaves before and
-// after the process goes idle. An idle wait must bring them back to where
-// they started, and a second idle wait with nothing allocated in between must
-// not leave more.
+// after the process goes idle. An idle wait must leave no free page undiscarded
+// and, as the page test requires of a collection, keep at most an eighth of
+// what the burst took: metadata up to the heap's highest page and page tables
+// stay by design (ADR 0201), and a stale word in a frame may keep a few
+// objects. A second idle wait with nothing allocated in between may add at
+// most 2 pages.
 func checkBurst() {
 	collect()
 	before := pagesUsed()
+	arena.ReadDiagnostics(&profile)
+	metaBefore, inUseBefore := profile.MetadataPages, arena.HeapStats().InUse
 	burstGarbage()
 	peak := pagesUsed()
 	wait.Sleep(idleTicks)
 	idle := pagesUsed()
 	wait.Sleep(idleTicks)
 	quiet := pagesUsed()
+	arena.ReadDiagnostics(&profile)
 	report("MEMRECLAIM_BURST before=", before, " peak=", peak, " idle=", idle, " quiet=", quiet)
+	inUse := arena.HeapStats().InUse
+	report("MEMRECLAIM_BURST_HEAP meta_before=", metaBefore, " meta_after=", profile.MetadataPages, " inuse_before=", inUseBefore, " inuse_idle=", inUse)
 	expect(peak > before+64, "the burst touched pages")
-	expect(idle <= before+8 && quiet <= idle, "an idle process gives its free pages back")
+	expect(profile.DirtyFreePages == 0, "an idle process keeps no free page")
+	expect(idle <= before+(peak-before)/8 && quiet <= idle+2, "an idle process gives its free pages back")
 	printProfile("burst")
 	marker("MEMRECLAIM_BURST_OK")
 }

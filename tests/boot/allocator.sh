@@ -71,7 +71,8 @@ run() {
 check() {
 	run "$1"
 	grep -q "$2" "$work/output" || fail "$1: no $2"
-	cat "$work/output" >>"$work/all"
+	# The VFS lines are taken from the whole log at the end.
+	grep -v '^VFS_MEMORY \|^ALLOC_PROFILE vfs ' "$work/output" >>"$work/all" || true
 }
 
 qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi -smp 1 \
@@ -82,6 +83,7 @@ qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi -smp 1 \
 pid=$!
 exec 3>"$fifo"
 : >"$work/all"
+: >"$work/rounds"
 
 elapsed=0
 until [ "$(prompts)" -ge 1 ]; do
@@ -118,7 +120,7 @@ while [ "$round" -le "$rounds" ]; do
 	kernel=$(sed -n 's/^pages in the kernel: //p' "$work/output")
 	processes=$(sed -n 's/^pages in processes: //p' "$work/output")
 	[ -n "$kernel" ] && [ -n "$processes" ] || fail "no page counts in round $round"
-	printf 'ALLOCATOR_ROUND round=%s kernel=%s processes=%s\n' "$round" "$kernel" "$processes" >>"$work/all"
+	printf 'ALLOCATOR_ROUND round=%s kernel=%s processes=%s\n' "$round" "$kernel" "$processes" | tee -a "$work/rounds"
 	round=$((round + 1))
 done
 # The VFS reports its profile every 4096 requests; the shell rounds above
@@ -128,6 +130,7 @@ grep -h '^VFS_MEMORY \|^ALLOC_PROFILE vfs ' "$log" | tr -d '\r' >>"$work/all"
 
 {
 	printf 'ALLOCATOR_RUN label=%s revision=%s memory=%s\n' "$label" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" "$memory"
-	grep '^ALLOC_PROFILE \|^MEMRECLAIM_\|^ALLOCATOR_ROUND \|^VFS_MEMORY ' "$work/all"
+	grep '^ALLOC_PROFILE \|^MEMRECLAIM_\|^VFS_MEMORY ' "$work/all"
+	cat "$work/rounds"
 } >"$report"
 printf 'PASS allocator profile: %s\n' "$report"

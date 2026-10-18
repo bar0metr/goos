@@ -529,8 +529,9 @@ test-memory:
 
 # Allocator measurements (docs/development/testing.md). None is a gate and
 # none runs another test. bench-allocator times the host benchmarks of the
-# heap against ALLOCATOR_BASELINE and each ALLOCATOR_VARIANTS size-class
-# table, ALLOCATOR_RUNS runs each, with no guest. bench-allocator-guest boots
+# heap against ALLOCATOR_BASELINE, each ALLOCATOR_REVISIONS NAME=REV, and
+# each ALLOCATOR_VARIANTS NAME=SIZES size-class table, ALLOCATOR_RUNS runs
+# each, with no guest. bench-allocator-guest boots
 # one validation guest that only records allocator profiles and page counts,
 # under the label LABEL. allocator-report renders whatever of both exists as
 # build/reports/allocator-optimization.md.
@@ -539,12 +540,13 @@ ALLOCATOR_RUNS ?= 5
 ALLOCATOR_BENCHTIME ?= 1s
 ALLOCATOR_BENCH ?= .
 ALLOCATOR_VARIANTS ?=
+ALLOCATOR_REVISIONS ?=
 LABEL ?= current
 
 bench-allocator:
 	@mkdir -p $(BUILD_DIR)/reports
 	$(BUILD_ENV) go run ./tools/allocreport bench -baseline $(ALLOCATOR_BASELINE) -count $(ALLOCATOR_RUNS) \
-		-benchtime $(ALLOCATOR_BENCHTIME) -bench '$(ALLOCATOR_BENCH)' $(foreach v,$(ALLOCATOR_VARIANTS),-variant $(v)) \
+		-benchtime $(ALLOCATOR_BENCHTIME) -bench '$(ALLOCATOR_BENCH)' $(foreach v,$(ALLOCATOR_VARIANTS),-variant $(v)) $(foreach r,$(ALLOCATOR_REVISIONS),-revision $(r)) \
 		-out $(BUILD_DIR)/reports/allocator-bench.json
 	@$(MAKE) --no-print-directory allocator-report
 

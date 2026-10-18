@@ -170,8 +170,11 @@ func (r *report) renderBench() {
 		r.printf("\n")
 	}
 	for _, tree := range res.Trees {
+		if tree.Revision != "" {
+			r.printf("Tree `%s` is revision `%s`.\n\n", tree.Name, tree.Revision)
+		}
 		if tree.Classes != "" {
-			r.printf("Tree `%s` uses the classes %s.\n\n", tree.Name, tree.Classes)
+			r.printf("Tree `%s` is the working tree with the classes %s.\n\n", tree.Name, tree.Classes)
 		}
 	}
 }
