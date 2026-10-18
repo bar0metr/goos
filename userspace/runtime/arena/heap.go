@@ -603,10 +603,13 @@ func (h *heap) release(page, slot uint32) uint32 {
 
 // maxRetained bounds the pages a heap may be told to retain: what an
 // explicit free lets wait before it gives pages back. defaultRetained is what
-// a heap retains unless told otherwise.
+// a heap retains unless told otherwise: nothing. A guest workload ran slower
+// the more it retained (ADR 0202): a retained page must be cleared before
+// reuse, while a discarded one comes back zeroed and untouched slots on it
+// need no clearing.
 const (
 	maxRetained     = uint32(collectionFloor >> pageShift)
-	defaultRetained = uint32(64)
+	defaultRetained = uint32(0)
 )
 
 // freeAt is runtime.free's work: it frees the allocation at address and,
