@@ -60,7 +60,8 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   `tests/boot/memory.sh`. In the guest `memreclaim` checks the compiler's
 pointer-free layouts, stack, global,
   interior, and region roots, cyclic, deep, and wide garbage, zeroed reuse,
-  boundary sizes, explicit free, page return, 1000 explicit and 3000 automatic
+  boundary sizes, pointer slices of every class size held from their start or
+  only from inside across collections, explicit free, page return, 1000 explicit and 3000 automatic
   collection rounds; `memreclaim double-free` must stop only its own process;
   `memreclaim oom` must collect, retry, and only then report exhaustion;
   `memreclaim burst` must give the pages of a burst of garbage back once it

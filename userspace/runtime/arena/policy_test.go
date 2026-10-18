@@ -26,6 +26,7 @@ func fillGarbage(t *testing.T, th *testHeap, count int) []uintptr {
 
 func TestNoRetentionGivesEveryPageBack(t *testing.T) {
 	th := newTestHeap(t, 512, 64)
+	th.setRetained(0)
 	fillGarbage(t, th, 100)
 	th.beginMark()
 	th.finishMark()

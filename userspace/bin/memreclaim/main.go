@@ -76,6 +76,7 @@ func run(data startup.Data) {
 	checkDeepAndWideGraphs()
 	checkZeroOnReuse()
 	checkBoundarySizes()
+	checkClassReuse()
 	checkExplicitFree()
 	checkRegions()
 	checkPageReturn()
@@ -607,6 +608,68 @@ func checkBoundarySizes() {
 		}
 	}
 	marker("MEMRECLAIM_BOUNDARY_OK")
+}
+
+// classProbes are the slot sizes of the heap's classes. checkClassReuse
+// allocates pointer slices of each size and of a word less and more.
+var classProbes = [...]int{16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1360, 2048}
+
+// classHeld keeps the slices: the first element of even ones, so the
+// allocation is held from its start, and the last element of odd ones, so
+// only an interior pointer holds it.
+var classHeld [3 * len(classProbes)]**block
+
+//go:noinline
+func buildClassObjects(round int) {
+	for index, size := range classProbes {
+		for offset, words := range [...]int{size/8 - 1, size / 8, size/8 + 1} {
+			slot := 3*index + offset
+			pointers := make([]*block, max(words, 1))
+			for element := range pointers {
+				pointers[element] = newBlock(uint64(round<<24 | slot<<12 | element))
+			}
+			if slot%2 == 0 {
+				classHeld[slot] = &pointers[0]
+			} else {
+				classHeld[slot] = &pointers[len(pointers)-1]
+			}
+		}
+	}
+}
+
+//go:noinline
+func classObjectsHold(round int) bool {
+	for index, size := range classProbes {
+		for offset, words := range [...]int{size/8 - 1, size / 8, size/8 + 1} {
+			slot := 3*index + offset
+			element := 0
+			if slot%2 != 0 {
+				element = max(words, 1) - 1
+			}
+			if !(*classHeld[slot]).holds(uint64(round<<24 | slot<<12 | element)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkClassReuse keeps pointer slices of every class size, held from their
+// start or only from inside, across three collections with churn of every
+// class between them, three rounds over.
+func checkClassReuse() {
+	for round := 0; round < 3; round++ {
+		buildClassObjects(round)
+		for pass := 0; pass < 3; pass++ {
+			collect()
+			for _, size := range classProbes {
+				churn(16, size-8, size, size+8)
+			}
+		}
+		expect(classObjectsHold(round), "objects of every class keep their pointers and bytes")
+	}
+	classHeld = [len(classHeld)]**block{}
+	marker("MEMRECLAIM_CLASSES_OK")
 }
 
 func checkExplicitFree() {

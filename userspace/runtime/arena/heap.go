@@ -32,8 +32,10 @@ const (
 )
 
 // classSizes are the slot sizes of the slab classes, multiples of 16 so every
-// slot is 16-byte aligned.
-var classSizes = [...]uintptr{16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048}
+// slot is 16-byte aligned. 1360 is the largest size three slots of which fit
+// a page; without it everything from 1025 to 2048 bytes took half a page, and
+// the VFS service makes most of its requests in that range.
+var classSizes = [...]uintptr{16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1360, 2048}
 
 const classCount = len(classSizes)
 
@@ -198,7 +200,7 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	// on the heap, and the native heap does not exist yet.
 	h.base, h.capacity, h.frontier, h.meta = base, pages, 0, meta[:pages]
 	h.work, h.workTop, h.workHigh, h.overflow, h.discard = work, 0, 0, false, discard
-	h.retain = 0
+	h.retain = defaultRetained
 	h.liveBytes, h.liveObjects, h.totalAlloc, h.mallocs = 0, 0, 0, 0
 	h.frees, h.released, h.inUsePages, h.dirtyFree = 0, 0, 0, 0
 	h.peakHeld, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
@@ -600,8 +602,12 @@ func (h *heap) release(page, slot uint32) uint32 {
 }
 
 // maxRetained bounds the pages a heap may be told to retain: what an
-// explicit free lets wait before it gives pages back.
-const maxRetained = uint32(collectionFloor >> pageShift)
+// explicit free lets wait before it gives pages back. defaultRetained is what
+// a heap retains unless told otherwise.
+const (
+	maxRetained     = uint32(collectionFloor >> pageShift)
+	defaultRetained = uint32(64)
+)
 
 // freeAt is runtime.free's work: it frees the allocation at address and,
 // once more than collectionFloor bytes of free pages wait, gives back all but
