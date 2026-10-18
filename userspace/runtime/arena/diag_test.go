@@ -20,6 +20,9 @@ func TestDiagnosticsCountWhatTheAllocatorDid(t *testing.T) {
 	if d.NewSlabs != 1 || d.PagesFromFresh != 5 || d.PagesFromRuns != 0 || d.ClearedBytes != 0 {
 		t.Fatalf("sources: slabs %d runs %d fresh %d cleared %d", d.NewSlabs, d.PagesFromRuns, d.PagesFromFresh, d.ClearedBytes)
 	}
+	if d.SlabMetadataChunks != 1 || d.SlabChunksTouched != 1 {
+		t.Fatalf("slab chunks %d touched %d", d.SlabMetadataChunks, d.SlabChunksTouched)
+	}
 	if d.PartialSlabs[sizeClass(32)] != 1 || d.FreeSlots[sizeClass(32)] != slotsPerPage(uint8(sizeClass(32)))-2 || d.RunPages != 4 {
 		t.Fatalf("snapshot: %+v", d)
 	}

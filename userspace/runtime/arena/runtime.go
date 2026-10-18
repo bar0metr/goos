@@ -36,6 +36,7 @@ const (
 	// address space only; the page quota is what bounds the memory used.
 	HeapReserve = uint64(256 << 20)
 	heapPages   = uint32(HeapReserve >> pageShift)
+	_           = uint(heapPagesMax - heapPages)
 	// markStackEntries bounds the collector's mark stack. A graph wider
 	// than this still collects: the overflow path rescans the heap.
 	markStackEntries = 64 << 10

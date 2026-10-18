@@ -375,7 +375,7 @@ func (r *report) renderProfiles(g *Guest) {
 	r.printf("### Allocator profiles: %s\n\n", g.Label)
 	r.printf("Counters are cumulative for each process; frontier, metadata, slab, and free-run figures are a snapshot at the report.\n\n")
 	keys := []string{"large", "large_pages", "new_slabs", "from_runs", "from_fresh", "recommitted", "cleared", "to_full", "to_partial",
-		"searches", "candidates", "discards", "discard_failures", "discarded", "trims", "frontier", "meta_pages", "slab_chunks",
+		"searches", "candidates", "discards", "discard_failures", "discarded", "trims", "frontier", "meta_pages", "slab_chunks", "slab_chunks_touched",
 		"free_runs", "free_pages", "longest_free", "dirty_free", "run_pages"}
 	r.printf("| Counter |")
 	for _, name := range g.Order {

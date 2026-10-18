@@ -249,9 +249,11 @@ func (h *heap) allocObject(size uintptr, pointerFree bool) uintptr {
 		panic("arena: zero-size heap allocation")
 	}
 	if size <= maxSmallSize {
-		bucket := (size - 1) >> 4
-		h.diag.sizeCounts[bucket]++
-		h.diag.sizeBytes[bucket] += uint64(size)
+		if sizeProfile {
+			bucket := (size - 1) >> 4
+			h.diag.sizeCounts[bucket]++
+			h.diag.sizeBytes[bucket] += uint64(size)
+		}
 		return h.allocSmall(h.classOf[(size+15)>>4], pointerFree)
 	}
 	if size > uintptr(h.capacity)<<pageShift {
@@ -280,6 +282,7 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 		m.alloc, m.mark = [slotWords]uint64{}, [slotWords]uint64{}
 		h.pushPartial(page)
 		h.diag.newSlabs++
+		h.diag.noteSlab(page)
 	}
 	m := &h.meta[page]
 	slots := uint32(h.classSlots[class])

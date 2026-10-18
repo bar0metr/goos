@@ -1,5 +1,7 @@
 package arena
 
+import "math/bits"
+
 // sizeBuckets is the number of 16-byte steps up to maxSmallSize. Every class
 // size is a multiple of 16, so the histogram resolves exactly which class a
 // request takes under any table of such sizes.
@@ -17,6 +19,24 @@ type counters struct {
 	runSearches, runCandidates               uint64
 	discardCalls, discardFailures, discarded uint64
 	trims                                    uint64
+	// slabChunks marks every page of slab bitmaps a slab would have touched
+	// so far had the bitmaps their own array indexed by page.
+	slabChunks [slabChunkWords]uint64
+}
+
+// slabsPerChunk is how many slabs' bitmaps fill a page, and slabChunkWords
+// the bitmap of such pages for the largest heap.
+const (
+	slabsPerChunk  = uint32(pageBytes / slabBitmapBytes)
+	slabChunkWords = (heapPagesMax/slabsPerChunk + 64) / 64
+	heapPagesMax   = uint32(1 << 16)
+)
+
+// noteSlab records the bitmap page the slab at page would touch.
+func (c *counters) noteSlab(page uint32) {
+	if chunk := page / slabsPerChunk; chunk/64 < uint32(len(c.slabChunks)) {
+		c.slabChunks[chunk/64] |= 1 << (chunk % 64)
+	}
 }
 
 // Diagnostics is what the allocator counted since the heap was set up and a
@@ -25,6 +45,7 @@ type counters struct {
 type Diagnostics struct {
 	// SizeCounts and SizeBytes histogram small requests: entry i counts
 	// requests of 16*i+1 to 16*(i+1) bytes and the bytes they asked for.
+	// Only validation images and host builds keep them (sizeProfile).
 	SizeCounts, SizeBytes [sizeBuckets]uint64
 	// LargeAllocs counts page-run allocations, LargeRequested the bytes they
 	// asked for, and LargePages the pages they were given.
@@ -73,8 +94,10 @@ type Diagnostics struct {
 	RunPages uint32
 	// SlabMetadataChunks is how many pages of 96-byte slab bitmaps the
 	// slabs alive now would touch if bitmaps were kept in their own array
-	// indexed by page. It sizes the alternative metadata layout.
-	SlabMetadataChunks uint32
+	// indexed by page, and SlabChunksTouched how many every slab so far
+	// would have touched: such pages, once touched, stay charged. They size
+	// that alternative layout.
+	SlabMetadataChunks, SlabChunksTouched uint32
 }
 
 // slabBitmapBytes is the size of the three slot bitmaps of a slab.
@@ -98,8 +121,11 @@ func (h *heap) diagnostics(d *Diagnostics) {
 	d.MetadataPages = uint64((metaBytes(h.frontier) + pageBytes - 1) >> pageShift)
 	d.PartialSlabs, d.FullSlabs, d.FreeSlots = [classCount]uint32{}, [classCount]uint32{}, [classCount]uint32{}
 	d.FreeRuns, d.FreeRunPages, d.LongestFreeRun, d.DirtyFreePages, d.RunPages = 0, 0, 0, 0, 0
-	d.SlabMetadataChunks = 0
-	perChunk := uint32(pageBytes / slabBitmapBytes)
+	d.SlabMetadataChunks, d.SlabChunksTouched = 0, 0
+	for _, word := range c.slabChunks {
+		d.SlabChunksTouched += uint32(bits.OnesCount64(word))
+	}
+	perChunk := slabsPerChunk
 	lastChunk := noPage
 	for page := uint32(0); page < h.frontier; {
 		m := &h.meta[page]
@@ -167,6 +193,7 @@ func (d *Diagnostics) AppendProfile(name string, line []byte, emit func([]byte))
 	w.pair("frontier", uint64(d.Frontier))
 	w.pair("meta_pages", d.MetadataPages)
 	w.pair("slab_chunks", uint64(d.SlabMetadataChunks))
+	w.pair("slab_chunks_touched", uint64(d.SlabChunksTouched))
 	w.pair("free_runs", uint64(d.FreeRuns))
 	w.pair("free_pages", uint64(d.FreeRunPages))
 	w.pair("longest_free", uint64(d.LongestFreeRun))

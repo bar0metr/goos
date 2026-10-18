@@ -50,7 +50,15 @@ func TestTablesFit(t *testing.T) {
 		// 10 requests of 2033..2048 bytes.
 		127: {10, 20480},
 	}
-	current, dense := candidateTables[0], candidateTables[1]
+	var current, dense Table
+	for _, table := range candidateTables {
+		switch table.Name {
+		case "current":
+			current = table
+		case "dense":
+			dense = table
+		}
+	}
 	if current.classOf(400) != 512 || dense.classOf(400) != 400 || dense.classOf(401) != 512 {
 		t.Fatal("classOf")
 	}
