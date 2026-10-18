@@ -69,7 +69,7 @@ func (bh *benchHeap) report(b *testing.B) {
 // BenchmarkBoundary keeps 512 objects of one size live, replacing the oldest
 // each operation: sizes at and just past a class boundary.
 func BenchmarkBoundary(b *testing.B) {
-	for _, size := range []uintptr{16, 17, 256, 257, 384, 385, 512, 513, 768, 769, 1024, 1025, 1360, 1361, 2048, 2049} {
+	for _, size := range []uintptr{16, 17, 256, 257, 336, 337, 384, 385, 400, 401, 512, 513, 768, 769, 816, 817, 1024, 1025, 1360, 1361, 2048, 2049} {
 		b.Run("size="+strconv.Itoa(int(size)), func(b *testing.B) {
 			bh := newBenchHeap(b, 1<<14)
 			bh.rootSet = make(roots, 512)
@@ -167,44 +167,32 @@ func BenchmarkFreeReallocate(b *testing.B) {
 	bh.report(b)
 }
 
-// representativeSizes is the distribution of small request sizes measured
-// in the guest (build/reports/allocator-guest-*.txt): each entry is a size
-// and its weight per thousand requests. Large requests are a separate share.
+// representativeSizes is the mix of request sizes the VFS service made in
+// the guest (build/reports/allocator-guest-baseline.txt, 509264 requests):
+// each entry is a size and its share per thousand requests. The service made
+// one page-run request in that time, so the mix has none.
 var representativeSizes = []struct {
 	size   uintptr
 	weight int
 }{
-	{8, 120}, {16, 180}, {24, 90}, {32, 120}, {48, 90}, {64, 80}, {96, 60}, {128, 50},
-	{200, 40}, {300, 40}, {500, 30}, {700, 25}, {1000, 20}, {1500, 15}, {2000, 10},
+	{14, 21}, {22, 1}, {328, 293}, {504, 48}, {1024, 48}, {1026, 325}, {1048, 20}, {1104, 145}, {1120, 87}, {1152, 13},
 }
 
-// representativeLarge is the share of requests per thousand that are page
-// runs, and their sizes.
-var (
-	representativeLargeShare = 30
-	representativeLarge      = []uintptr{4096, 8192, 16384, 65536}
-)
-
-// BenchmarkRepresentative draws sizes from the measured distribution with
-// mixed lifetimes: most objects die young, some live through several
-// collections, a few are freed explicitly.
+// BenchmarkRepresentative draws sizes from the measured mix with mixed
+// lifetimes: most objects die young, some live through several collections,
+// a few are freed explicitly.
 func BenchmarkRepresentative(b *testing.B) {
 	bh := newBenchHeap(b, 1<<15)
 	bh.rootSet = make(roots, 1024+16)
 	kept, freed := bh.rootSet[:1024], bh.rootSet[1024:]
 	random := rand.New(rand.NewSource(7))
-	total := representativeLargeShare
+	total := 0
 	for _, entry := range representativeSizes {
 		total += entry.weight
 	}
 	draws := make([]uintptr, 4096)
 	for index := range draws {
 		pick := random.Intn(total)
-		if pick < representativeLargeShare {
-			draws[index] = representativeLarge[random.Intn(len(representativeLarge))]
-			continue
-		}
-		pick -= representativeLargeShare
 		for _, entry := range representativeSizes {
 			if pick < entry.weight {
 				draws[index] = entry.size
