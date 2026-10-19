@@ -1126,7 +1126,7 @@ func dropBuffers(first int) {
 func checkQuota() {
 	arena.SetRetained(256)
 	limit := pageLimit()
-	quotaBuffers = make([][]byte, 0, 1024)
+	quotaBuffers = make([][]byte, 0, 8192)
 	touchBuffers(64)
 	dropBuffers(16)
 	collect()
@@ -1135,15 +1135,24 @@ func checkQuota() {
 	report("MEMRECLAIM_QUOTA limit=", limit, " pages=", pagesUsed(), " retained=", retained, "", 0)
 	expect(limit != 0 && retained == 256, "a collection retains the pages it may")
 
-	// The retained pages serve the next 256 pages of buffers, cleared.
+	// Slab objects allocated until the retained pages are used up read as
+	// zero: the heap clears every retained page it hands out. The trims keep
+	// the retained pages in short runs, where slabs come from, so small
+	// objects use them; a 64 KiB buffer needs a run of 16 pages.
 	first := len(quotaBuffers)
-	for index := 0; index < 16; index++ {
-		data := allocate(64 << 10)
-		expect(zeroed(data), "a retained page is cleared before reuse")
+	for index := 0; index < 4096; index++ {
+		data := allocate(2000)
+		expect(zeroed(data), "a reused page reads as zero")
 		quotaBuffers = append(quotaBuffers, data)
+		arena.ReadDiagnostics(&profile)
+		if profile.DirtyFreePages == 0 {
+			break
+		}
 	}
-	arena.ReadDiagnostics(&profile)
-	expect(profile.PagesRecommitted == recommitted && profile.ClearedBytes >= cleared+16*(64<<10), "allocations reuse the retained pages")
+	report("MEMRECLAIM_QUOTA_REUSE objects=", uint64(len(quotaBuffers)-first), " cleared=", profile.ClearedBytes-cleared, " recommitted=", profile.PagesRecommitted-recommitted, "", 0)
+	// A slot is cleared when it is handed out, two to a page; the slab on
+	// the last retained page has handed out one of its two.
+	expect(profile.DirtyFreePages == 0 && profile.ClearedBytes+2048 >= cleared+retained*4096, "allocations reuse the retained pages, cleared")
 	dropBuffers(first)
 
 	// An idle wait gives back the retained pages without a new allocation.
