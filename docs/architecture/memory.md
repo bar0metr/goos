@@ -179,9 +179,10 @@ at launch and the rest as the stack grows. The userspace runtime reserves a
 fault-probe images may still carry their own stack segment, with the same
 64 KiB gap below it.
 
-**Userspace heap.** Native programs reclaim ordinary Go objects (ADR 0201).
-Allocations up to 2 KiB share slab pages of one size class; larger ones take
-runs of whole pages. Page metadata lives in its own reservation, outside the
+**Userspace heap.** Native programs reclaim ordinary Go objects (ADR 0201,
+ADR 0202). Allocations up to 2 KiB share slab pages of one of fourteen size
+classes, from 16 to 2048 bytes with 1360 between 1024 and 2048; larger ones
+take runs of whole pages. Page metadata lives in its own reservation, outside the
 pages it describes. A per-process, stop-the-world, non-moving, conservative
 mark and sweep, which keeps objects the compiler marks pointer-free without
 reading them, finds roots in the globals the linker script brackets, the
@@ -190,7 +191,13 @@ callee-saved registers, and the used part of every region. It runs on
 `runtime.GC`, when live bytes reach `max(2 × live, live + 1 MiB)` of the last
 collection, when an allocation does not fit, and when a service has waited
 100 ms with nothing to do; `arena.OnExhausted` runs only after a collection
-and a retry fail. Free pages go back with `VMDiscard`.
+and a retry fail. The collector first zeroes up to 4 KiB of stack below itself,
+never past the bottom of the stack, so its own frames hold no stale address. Free pages go back with `VMDiscard`
+after each collection. `arena.SetRetained` can keep up to 256 of them for the
+allocations that follow, and an idle wait or a failed allocation gives those
+back too; by default none is kept, which a guest workload measured fastest.
+`arena.ReadDiagnostics` reports what the allocator counted, and
+`make allocator-report` puts host and guest measurements side by side.
 `arena.Region` serves scratch with one lifetime from its own reservation, and
 no collection runs while one is entered. The kernel keeps the separate
 discipline of ADR 0065: a leaking boot-time heap and no allocation on repeating

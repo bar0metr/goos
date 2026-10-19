@@ -7,26 +7,35 @@
 // collected, that reused memory reads as zero, that explicit frees are reused,
 // that collected pages go back to the kernel, and that a thousand allocation
 // cycles settle. "service COUNT" drives COUNT filesystem requests and samples
-// the VFS service's pages; "double-free" and "oom" commit a failure the
-// process must not survive. It is built only into validation images.
+// the VFS service's pages; "burst" measures the pages a short burst leaves
+// before and after the process goes idle; "workload ROUNDS [RETAINED]" times
+// a mixed workload, with RETAINED free pages kept after each collection, and
+// prints what the allocator did for it; "double-free" and "oom"
+// commit a failure the process must not survive; "quota" checks retained
+// pages and then grows the live heap past the page quota, which the kernel
+// must stop. Every mode that finishes
+// prints an ALLOC_PROFILE of its own heap. It is built only into validation
+// images.
 package main
 
 import (
 	"encoding/binary"
 	"runtime"
 
+	"goos/kernel/clock"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	"goos/userspace/commands"
 	"goos/userspace/runtime/arena"
 	"goos/userspace/startup"
 	"goos/userspace/utility"
+	"goos/userspace/wait"
 )
 
 var manifest = commands.Manifest{
-	Usage:   "memreclaim [service COUNT|double-free|oom]",
+	Usage:   "memreclaim [service N|burst|workload N [R]|quota|double-free|oom]",
 	Summary: "heap reclamation checks",
-	MaxArgs: 2,
+	MaxArgs: 3,
 	Grants:  commands.GrantVFS,
 }
 
@@ -42,6 +51,17 @@ func run(data startup.Data) {
 		case utility.Equal(mode, "service") && data.ArgCount() == 2:
 			count, _ := data.Arg(2)
 			checkService(parse(count))
+		case utility.Equal(mode, "burst"):
+			checkBurst()
+		case utility.Equal(mode, "workload") && data.ArgCount() >= 2:
+			rounds, _ := data.Arg(2)
+			if data.ArgCount() == 3 {
+				retained, _ := data.Arg(3)
+				arena.SetRetained(uint32(min(parse(retained), 1<<20)))
+			}
+			runWorkload(parse(rounds))
+		case utility.Equal(mode, "quota"):
+			checkQuota()
 		case utility.Equal(mode, "double-free"):
 			doubleFree()
 		case utility.Equal(mode, "oom"):
@@ -58,8 +78,10 @@ func run(data startup.Data) {
 	checkInteriorPointers()
 	checkCycle()
 	checkDeepAndWideGraphs()
+	checkStackScrub()
 	checkZeroOnReuse()
 	checkBoundarySizes()
+	checkClassReuse()
 	checkExplicitFree()
 	checkRegions()
 	checkPageReturn()
@@ -69,8 +91,21 @@ func run(data startup.Data) {
 	report("MEMRECLAIM_STATS reserved=", stats.Reserved, " live=", stats.Live, " objects=", stats.Objects, " held=", stats.Held)
 	report("MEMRECLAIM_STATS peak_live=", stats.PeakLive, " peak_held=", stats.PeakHeld, " mallocs=", stats.Mallocs, " frees=", stats.Frees)
 	report("MEMRECLAIM_STATS collections=", uint64(stats.Collections), "", 0, "", 0, "", 0)
-	report("MEMRECLAIM_PAUSE last_ns=", last, " longest_ns=", longest, "", 0, "", 0)
+	report("MEMRECLAIM_PAUSE last_ns=", last, " longest_ns=", longest, " total_ns=", arena.PauseTotal(), "", 0)
+	printProfile("memreclaim")
 	marker("MEMRECLAIM_OK")
+}
+
+// profile and profileLine are globals so that printing the profile allocates
+// nothing.
+var (
+	profile     arena.Diagnostics
+	profileLine [160]byte
+)
+
+func printProfile(name string) {
+	arena.ReadDiagnostics(&profile)
+	profile.AppendProfile(name, profileLine[:], utility.Write)
 }
 
 // sink makes an allocation escape, so it is a heap allocation rather than a
@@ -365,8 +400,7 @@ func checkGlobalRoot() {
 	globalPages = nil
 	collect()
 	if held < live()+256<<10 {
-		phase, at, below, above := arena.Watched()
-		report("MEMRECLAIM_DEBUG phase=", uint64(phase), " at=", uint64(at), " below=", uint64(below), " above=", uint64(above))
+		explainSurvivor()
 	}
 	expect(held >= live()+256<<10, "a cleared global releases its object")
 	marker("MEMRECLAIM_GLOBAL_ROOT_OK")
@@ -425,15 +459,110 @@ func makeCycle() {
 //go:noinline
 func cycleSurvives() bool { return cycle.next.next.next == cycle }
 
+//go:noinline
+func cycleToken() uint64 { return arena.Token(cycle) }
+
+// explainSurvivor prints where the collector found the word that kept the
+// watched allocation, when a check finds an object that should be gone.
+func explainSurvivor() {
+	phase, at, below, above := arena.Watched()
+	report("MEMRECLAIM_DEBUG phase=", uint64(phase), " at=", uint64(at), " below=", uint64(below), " above=", uint64(above))
+}
+
 func checkCycle() {
 	makeCycle()
 	collect()
 	held := live()
 	expect(cycleSurvives(), "rooted cycle survives")
+	arena.Watch(cycleToken())
 	cycle = nil
 	collect()
+	if held < live()+3*64<<10 {
+		explainSurvivor()
+	}
 	expect(held >= live()+3*64<<10, "unreachable cycle collected")
 	marker("MEMRECLAIM_CYCLE_OK")
+}
+
+// scrubRooms are the stack room below a frame at which checkStackScrub
+// collects. The last is less than the 4 KiB the collector zeroes below
+// itself, so the zeroing must stop at the bottom of the stack: past it lies
+// the guard, and a write there would stop the process.
+var scrubRooms = [...]uintptr{16 << 10, 8 << 10, 3 << 10}
+
+var (
+	scrubNext    int
+	scrubDeepest int
+	scrubRoom    uintptr
+)
+
+// deepCollect recurses to the bottom of the stack with one live object per
+// frame, held only in the frame or a register, and collects on the way down
+// at each of scrubRooms. It reports whether every frame's object kept its
+// value.
+//
+//go:noinline
+func deepCollect(depth int) bool {
+	held := newBlock(uint64(depth))
+	room := arena.StackRoom()
+	if scrubNext < len(scrubRooms) && room <= scrubRooms[scrubNext] {
+		scrubNext++
+		scrubDeepest, scrubRoom = depth, room
+		for pass := 0; pass < 2; pass++ {
+			collect()
+			churn(8, 64, 4096, 70000)
+		}
+	}
+	ok := true
+	if scrubNext < len(scrubRooms) {
+		ok = deepCollect(depth + 1)
+	}
+	return ok && held.holds(uint64(depth))
+}
+
+// deepGarbage allocates 256 KiB in a frame depth calls down and drops it, so
+// the only copy of its address lies in stack below the caller. The addition
+// after the call keeps the recursion from becoming a loop in one frame.
+//
+//go:noinline
+func deepGarbage(depth int) int {
+	if depth > 0 {
+		return deepGarbage(depth-1) + 1
+	}
+	scratch := allocate(256 << 10)
+	scratch[0] = 1
+	return 0
+}
+
+// checkStackScrub collects with frames down to 3 KiB above the bottom of the
+// stack and requires every frame's object to survive, then drops an object
+// whose address only dead frames held and requires a collection from above
+// them to free it: the collector's own frames, built over those, must not
+// keep it, at 48 depths from 6 to 100 frames down. The frames that call the
+// collector are not zeroed, and a stale word in them is the false retention
+// a conservative scan accepts; where such a word lands depends on how the
+// compiler laid the frames out. One depth in ten may be kept that way.
+func checkStackScrub() {
+	scrubNext = 0
+	expect(arena.StackRoom() > 64<<10, "the stack has room to recurse")
+	expect(deepCollect(0), "objects held by frames down to the bottom of the stack survive")
+	expect(scrubNext == len(scrubRooms), "the recursion reached the bottom of the stack")
+	report("MEMRECLAIM_STACK_SCRUB depth=", uint64(scrubDeepest), " room=", uint64(scrubRoom), "", 0, "", 0)
+	kept, tried := uint64(0), uint64(0)
+	for depth := 6; depth <= 100; depth += 2 {
+		collect()
+		expect(deepGarbage(depth) == depth, "dead-frame recursion")
+		held := live()
+		collect()
+		tried++
+		if held < live()+256<<10 {
+			kept++
+			report("MEMRECLAIM_STACK_KEPT depth=", uint64(depth), "", 0, "", 0, "", 0)
+		}
+	}
+	report("MEMRECLAIM_STACK_STALE tried=", tried, " kept=", kept, "", 0, "", 0)
+	expect(kept*10 <= tried, "objects only dead frames held are collected")
+	marker("MEMRECLAIM_STACK_SCRUB_OK")
 }
 
 type link struct {
@@ -565,6 +694,68 @@ func checkBoundarySizes() {
 		}
 	}
 	marker("MEMRECLAIM_BOUNDARY_OK")
+}
+
+// classProbes are the slot sizes of the heap's classes. checkClassReuse
+// allocates pointer slices of each size and of a word less and more.
+var classProbes = [...]int{16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1360, 2048}
+
+// classHeld keeps the slices: the first element of even ones, so the
+// allocation is held from its start, and the last element of odd ones, so
+// only an interior pointer holds it.
+var classHeld [3 * len(classProbes)]**block
+
+//go:noinline
+func buildClassObjects(round int) {
+	for index, size := range classProbes {
+		for offset, words := range [...]int{size/8 - 1, size / 8, size/8 + 1} {
+			slot := 3*index + offset
+			pointers := make([]*block, max(words, 1))
+			for element := range pointers {
+				pointers[element] = newBlock(uint64(round<<24 | slot<<12 | element))
+			}
+			if slot%2 == 0 {
+				classHeld[slot] = &pointers[0]
+			} else {
+				classHeld[slot] = &pointers[len(pointers)-1]
+			}
+		}
+	}
+}
+
+//go:noinline
+func classObjectsHold(round int) bool {
+	for index, size := range classProbes {
+		for offset, words := range [...]int{size/8 - 1, size / 8, size/8 + 1} {
+			slot := 3*index + offset
+			element := 0
+			if slot%2 != 0 {
+				element = max(words, 1) - 1
+			}
+			if !(*classHeld[slot]).holds(uint64(round<<24 | slot<<12 | element)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkClassReuse keeps pointer slices of every class size, held from their
+// start or only from inside, across three collections with churn of every
+// class between them, three rounds over.
+func checkClassReuse() {
+	for round := 0; round < 3; round++ {
+		buildClassObjects(round)
+		for pass := 0; pass < 3; pass++ {
+			collect()
+			for _, size := range classProbes {
+				churn(16, size-8, size, size+8)
+			}
+		}
+		expect(classObjectsHold(round), "objects of every class keep their pointers and bytes")
+	}
+	classHeld = [len(classHeld)]**block{}
+	marker("MEMRECLAIM_CLASSES_OK")
 }
 
 func checkExplicitFree() {
@@ -759,7 +950,11 @@ func checkCycles() {
 }
 
 // checkService drives count filesystem requests through the VFS service and
-// samples the pages it holds ten times.
+// samples the pages it holds ten times, each time after the service has been
+// idle long enough to collect and give its free pages back. A sample taken
+// while requests run lands somewhere in a collection cycle, in which the
+// service's pages swing by up to 200 as garbage grows to the next threshold,
+// so only idle samples can show whether its memory stays in a band.
 func checkService(count uint64) {
 	expect(count >= 100, "service request count")
 	path, directory := []byte("/tmp/memreclaim"), []byte("/system/bin")
@@ -778,12 +973,14 @@ func checkService(count uint64) {
 		removed, ok := utility.CallVFS(vfs.Request{Operation: vfs.OperationUnlink, Path: path})
 		utility.Check(removed, ok, path, true)
 		if (done+1)%(count/10) == 0 {
+			busy := vfsPages()
+			wait.Sleep(idleTicks)
 			pages := vfsPages()
-			report("MEMRECLAIM_SERVICE requests=", (done+1)*3, " vfs_pages=", pages, "", 0, "", 0)
+			report("MEMRECLAIM_SERVICE requests=", (done+1)*3, " vfs_pages=", pages, " busy_pages=", busy, "", 0)
 			switch sample := (done + 1) / (count / 10); {
 			case sample <= 2:
 				// The first samples set the band: caches fill and the
-				// heap reaches its first collection threshold.
+				// service settles.
 				first = max(first, pages)
 			default:
 				highest = max(highest, pages)
@@ -791,7 +988,84 @@ func checkService(count uint64) {
 		}
 	}
 	expect(first != 0 && highest <= first+32, "service memory stays in its band")
+	printProfile("service")
 	marker("MEMRECLAIM_SERVICE_OK")
+}
+
+// idleTicks is long enough for wait.Sleep to treat the process as idle.
+const idleTicks = clock.TicksPerSecond / 2
+
+// burstGarbage allocates about 768 KiB of mixed objects and drops them all.
+// That stays below the growth that starts a collection, so the pages it
+// takes are still held when it returns.
+//
+//go:noinline
+func burstGarbage() {
+	for round := 0; round < 4; round++ {
+		graph(round)
+		for index := 0; index < 8; index++ {
+			data := allocate(16 << 10)
+			for offset := 0; offset < len(data); offset += 4096 {
+				data[offset] = 1
+			}
+		}
+	}
+}
+
+// checkBurst measures the pages a short burst of garbage leaves before and
+// after the process goes idle. An idle wait must leave no free page undiscarded
+// and, as the page test requires of a collection, keep at most an eighth of
+// what the burst took: metadata up to the heap's highest page and page tables
+// stay by design (ADR 0201), and a stale word in a frame may keep a few
+// objects. A second idle wait with nothing allocated in between may add at
+// most 2 pages.
+func checkBurst() {
+	collect()
+	before := pagesUsed()
+	arena.ReadDiagnostics(&profile)
+	metaBefore, inUseBefore := profile.MetadataPages, arena.HeapStats().InUse
+	burstGarbage()
+	peak := pagesUsed()
+	wait.Sleep(idleTicks)
+	idle := pagesUsed()
+	wait.Sleep(idleTicks)
+	quiet := pagesUsed()
+	arena.ReadDiagnostics(&profile)
+	report("MEMRECLAIM_BURST before=", before, " peak=", peak, " idle=", idle, " quiet=", quiet)
+	inUse := arena.HeapStats().InUse
+	report("MEMRECLAIM_BURST_HEAP meta_before=", metaBefore, " meta_after=", profile.MetadataPages, " inuse_before=", inUseBefore, " inuse_idle=", inUse)
+	expect(peak > before+64, "the burst touched pages")
+	expect(profile.DirtyFreePages == 0, "an idle process keeps no free page")
+	expect(idle <= before+(peak-before)/8 && quiet <= idle+2, "an idle process gives its free pages back")
+	printProfile("burst")
+	marker("MEMRECLAIM_BURST_OK")
+}
+
+// runWorkload times rounds of the mixed graph workload with collection left
+// to the allocation policy, then reports what the allocator did for it.
+// Times are guest clock nanoseconds and under QEMU TCG measure the emulator
+// as much as the allocator.
+func runWorkload(rounds uint64) {
+	expect(rounds >= 1, "workload round count")
+	collect()
+	start, startPages := utility.ClockNanos(), pagesUsed()
+	highest := startPages
+	for round := uint64(0); round < rounds; round++ {
+		graph(int(round))
+		if round%64 == 0 {
+			highest = max(highest, pagesUsed())
+		}
+	}
+	elapsed := utility.ClockNanos() - start
+	stats := arena.HeapStats()
+	arena.ReadDiagnostics(&profile)
+	retained := uint64(profile.Retained)
+	report("MEMRECLAIM_WORKLOAD retained=", retained, " rounds=", rounds, " ns=", elapsed, " collections=", uint64(stats.Collections))
+	report("MEMRECLAIM_WORKLOAD_PAGES retained=", retained, " start=", startPages, " highest=", highest, " end=", pagesUsed())
+	report("MEMRECLAIM_WORKLOAD_POLICY retained=", retained, " discards=", profile.DiscardCalls, " recommitted=", profile.PagesRecommitted, " cleared=", profile.ClearedBytes)
+	report("MEMRECLAIM_WORKLOAD_GC retained=", retained, " pause_ns=", arena.PauseTotal(), " peak_held=", stats.PeakHeld, "", 0)
+	printProfile("workload")
+	marker("MEMRECLAIM_WORKLOAD_OK")
 }
 
 func parse(text []byte) uint64 {
@@ -803,6 +1077,101 @@ func parse(text []byte) uint64 {
 		value = value*10 + uint64(digit-'0')
 	}
 	return value
+}
+
+// pageLimit is the page quota of this process, found the way pagesUsed finds
+// its count: as the process ProcessInfo reports running, which holds only
+// while one processor runs processes, as in the memory gate's guest.
+func pageLimit() uint64 {
+	record := &processRecord
+	for index := uint64(0); utility.ProcessInfo(index, record); index++ {
+		if record[8] == kcall.ProcessRunning {
+			return uint64(binary.LittleEndian.Uint32(record[kcall.ProcessInfoLimitsOffset+kcall.ProcessPages*4:]))
+		}
+	}
+	return 0
+}
+
+// quotaBuffers holds the 64 KiB buffers checkQuota keeps alive.
+var quotaBuffers [][]byte
+
+//go:noinline
+func touchBuffers(count int) {
+	for index := 0; index < count; index++ {
+		data := allocate(64 << 10)
+		for offset := range data {
+			data[offset] = 0x5c
+		}
+		quotaBuffers = append(quotaBuffers, data)
+	}
+}
+
+// dropBuffers lets go of the buffers from index first on.
+//
+//go:noinline
+func dropBuffers(first int) {
+	for index := first; index < len(quotaBuffers); index++ {
+		quotaBuffers[index] = nil
+	}
+	quotaBuffers = quotaBuffers[:first]
+}
+
+// checkQuota retains 256 free pages and checks what retention promises:
+// reuse of the retained pages, cleared, without the kernel supplying them
+// again, and an idle wait that gives them all back. Then it keeps 64 KiB
+// buffers alive until the process is past its page quota. Retention does
+// not change that ending: the kernel stops the process when it touches a
+// page past the quota, after the allocator has returned, and no trim can run
+// then. The memory gate requires that fault and nothing after it.
+func checkQuota() {
+	arena.SetRetained(256)
+	limit := pageLimit()
+	quotaBuffers = make([][]byte, 0, 8192)
+	touchBuffers(64)
+	dropBuffers(16)
+	collect()
+	arena.ReadDiagnostics(&profile)
+	retained, recommitted, cleared := uint64(profile.DirtyFreePages), profile.PagesRecommitted, profile.ClearedBytes
+	report("MEMRECLAIM_QUOTA limit=", limit, " pages=", pagesUsed(), " retained=", retained, "", 0)
+	expect(limit != 0 && retained == 256, "a collection retains the pages it may")
+
+	// Slab objects allocated until the retained pages are used up read as
+	// zero: the heap clears every retained page it hands out. The trims keep
+	// the retained pages in short runs, where slabs come from, so small
+	// objects use them; a 64 KiB buffer needs a run of 16 pages.
+	first := len(quotaBuffers)
+	for index := 0; index < 4096; index++ {
+		data := allocate(2000)
+		expect(zeroed(data), "a reused page reads as zero")
+		quotaBuffers = append(quotaBuffers, data)
+		arena.ReadDiagnostics(&profile)
+		if profile.DirtyFreePages == 0 {
+			break
+		}
+	}
+	report("MEMRECLAIM_QUOTA_REUSE objects=", uint64(len(quotaBuffers)-first), " cleared=", profile.ClearedBytes-cleared, " recommitted=", profile.PagesRecommitted-recommitted, "", 0)
+	// A slot is cleared when it is handed out, two to a page; the slab on
+	// the last retained page has handed out one of its two.
+	expect(profile.DirtyFreePages == 0 && profile.ClearedBytes+2048 >= cleared+retained*4096, "allocations reuse the retained pages, cleared")
+	dropBuffers(first)
+
+	// An idle wait gives back the retained pages without a new allocation.
+	collect()
+	busy := pagesUsed()
+	wait.Sleep(idleTicks)
+	idle := pagesUsed()
+	arena.ReadDiagnostics(&profile)
+	report("MEMRECLAIM_QUOTA_IDLE busy=", busy, " idle=", idle, " retained=", uint64(profile.DirtyFreePages), " trims=", profile.Trims)
+	expect(profile.DirtyFreePages == 0 && profile.Trims != 0 && idle+240 <= busy, "an idle wait gives the retained pages back")
+	marker("MEMRECLAIM_QUOTA_RETAIN_OK")
+
+	// Past the quota the kernel stops the process.
+	marker("MEMRECLAIM_QUOTA_ATTEMPT")
+	for len(quotaBuffers) < cap(quotaBuffers) {
+		touchBuffers(1)
+	}
+	marker("MEMRECLAIM_QUOTA_MISSED")
+	utility.Exit(1)
 }
 
 // doubleFree frees one allocation twice. The heap must stop the process.

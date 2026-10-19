@@ -54,24 +54,44 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
-- `make test-memory` checks the reclaimable native heap (ADR 0201). It runs
+- `make test-memory` checks the reclaimable native heap (ADR 0201, ADR 0202).
+  It runs the host test of the leak-round checks (`tests/boot/leak_round_test.sh`),
   the allocator and collector model tests on the host, once normally and once
   under the race detector, then boots one validation guest with
   `tests/boot/memory.sh`. In the guest `memreclaim` checks the compiler's
-pointer-free layouts, stack, global,
-  interior, and region roots, cyclic, deep, and wide garbage, zeroed reuse,
-  boundary sizes, explicit free, page return, 1000 explicit and 3000 automatic
-  collection rounds; `memreclaim double-free` must stop only its own process;
-  `memreclaim oom` must collect, retry, and only then report exhaustion; and
-  `memreclaim service 3000` drives 9000 VFS requests while the VFS service
-  reports its heap and pages every 1024 requests, which must stay in the band
-  the early reports set. `SERVICE_REQUESTS` changes the count. A leak run then
-repeats a mixed workload (file copy, VFS streaming, a pipeline, a Linux
-program) for `LEAK_ROUNDS` rounds, 20 by default, counting pages after every
-service has collected: the kernel's pages must not move from round 3 on, and
-process pages in the second half may not exceed the first half's highest by
-more than 4. The summary is
-  `build/reports/memory.txt`. `test-all` and `release-check` run it.
+  pointer-free layouts, stack, global, interior, and region roots, cyclic,
+  deep, and wide garbage, collections with its frames 16, 8, and 3 KiB above
+  the bottom of the stack and an object only dead frames held, zeroed reuse,
+  boundary sizes, pointer slices of every class size held from their start or
+  only from inside across collections, explicit free, page return, and 1000
+  explicit and 3000 automatic collection rounds. `memreclaim double-free`
+  must stop only its own process; `memreclaim oom` must collect, retry, and
+  only then report exhaustion; `memreclaim quota` must reuse 256 retained
+  pages cleared, give them back at idle time, and then be stopped by the
+  kernel past its page quota; `memreclaim burst` must give the pages of a
+  burst of garbage back once it waits idle, and keep them back through a
+  second wait; and `memreclaim service 3000` drives 9000 VFS requests and
+  samples the VFS service's pages ten times, each after the service has been
+  idle long enough to collect and give its free pages back; later samples
+  must stay within 32 pages of the first two. The service reports its heap
+  and pages every 1024 requests as well, and its live heap must stay within
+  1 MiB of the band the early reports set. Pages it reports while requests
+  run swing by up to 200 within a collection cycle, so the report lists them
+  without banding them. `SERVICE_REQUESTS` changes the count.
+
+  A leak run then repeats a mixed workload for `LEAK_ROUNDS` rounds, 20 by
+  default: a file copy, VFS streaming, a directory listed into a file, a
+  pipeline, and a Linux program, each on its own line and each checked by
+  what it made, with every file it made removed and checked gone
+  (`tests/boot/leak_round.sh`). A failed step stops the run before its round
+  counts. After each round and two idle seconds `mem -p` counts pages. From
+  round 3, the kernel's highest count in the second half may not exceed its
+  highest in the first, and no count from round 3 on may lie more than 4
+  pages below the first half's highest: a process of the previous command
+  can still be torn down while `mem -p` reads. Process pages in the second half may not exceed
+  the first half's highest by more than 4, nor spread over more than 16. The
+  summary is `build/reports/memory.txt`. `test-all` and `release-check` run
+  it.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-network` builds the validation ISO and system tree and runs
@@ -778,6 +798,57 @@ the guest; ADR 0085 records why. The guest TSC advances in steps of about 1 µs
 under TCG on an arm64 host, so single intervals are quantised to that step.
 Other QEMU guests running on the same host change the results by tens of
 percent; rerun on a quiet host before comparing builds.
+
+### Native allocator measurements
+
+Changes to `userspace/runtime/arena` are compared against a baseline revision
+with three targets that run nothing else (ADR 0202). None is a gate.
+
+```sh
+make bench-allocator                      # host only, a few minutes
+make bench-allocator ALLOCATOR_VARIANTS='dense=16,32,48,64,96,128,192,256,400,512,816,1024,2048'
+make bench-allocator-guest LABEL=baseline # one validation guest
+make allocator-report                     # build/reports/allocator-optimization.md
+```
+
+`bench-allocator` runs the host benchmarks of the heap
+(`userspace/runtime/arena/bench_test.go` and the older ones in
+`heap_test.go`) for the working tree, for `ALLOCATOR_BASELINE`, and for each
+size-class table in `ALLOCATOR_VARIANTS`. `tools/allocreport` builds the
+other trees with `go test -overlay`, so no file changes and every tree runs the
+working tree's `bench_test.go`. It alternates the trees for
+`ALLOCATOR_RUNS` rounds (default 5) of `ALLOCATOR_BENCHTIME` (default 1s)
+each and keeps every sample in `build/reports/allocator-bench.json`.
+`ALLOCATOR_BENCH` narrows the benchmarks with a `-bench` pattern. Besides
+ns/op the benchmarks report the pages the heap held at its peak and at the
+end and the discards per thousand operations, since a faster allocator that
+holds more pages is not plainly better.
+
+`bench-allocator-guest` boots one validation guest with
+`tests/boot/allocator.sh`: memreclaim's checks, a VFS request run, a burst
+followed by idle time, a timed mixed workload (`memreclaim workload`), and
+rounds of shell work whose every command must succeed, with `mem -p` after
+each round. memreclaim and the VFS service print their allocator profile
+(`arena.ReadDiagnostics`): a histogram of small request sizes in 16-byte
+steps, where pages came from, pages recommitted after a discard, bytes cleared
+on reuse, discards, slab and free-run state, and metadata pages. The profile
+is written to `build/reports/allocator-guest-$LABEL.txt`. The VFS service
+prints its profile every 16384 requests, so after the shell rounds the
+script drives just enough VFS requests to reach the next profile, up to
+three times, and fails rather than write a report without one. A profile
+ends with a line that counts the lines before it; `allocreport count` takes
+only profiles whose every line and counter arrived, and the report notes
+the ones the console lost and uses the last complete one. Boot the baseline
+build with `LABEL=baseline`; the report puts it first and compares every
+other label with it.
+
+`allocator-report` renders whatever exists: medians with the spread
+(max - min) / median and the change against the baseline for every metric,
+the guest figures side by side, and each process's request histogram fitted
+to candidate size-class tables. A change smaller than the spread is noise.
+Host numbers come from the host Go compiler, not TinyGo, and guest times
+from QEMU TCG; neither compares with the other, and guest runs compare only
+on the same host with no other guest running.
 
 ## Adding a boot assertion
 

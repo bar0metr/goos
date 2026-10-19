@@ -172,7 +172,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -521,11 +521,53 @@ test-boot:
 # the host, then one guest that runs memreclaim, a double free, heap
 # exhaustion, and a long VFS run. The report is build/reports/memory.txt.
 test-memory:
+	@tests/boot/leak_round_test.sh
 	$(BUILD_ENV) go test -count=1 ./userspace/runtime/arena
 	$(BUILD_ENV) go test -race -count=1 -short ./userspace/runtime/arena
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/memory-test.img
 	@MEMORY=$(MEMORY) tests/boot/memory.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/memory-test.img
+
+# Allocator measurements (docs/development/testing.md). None is a gate and
+# none runs another test. bench-allocator times the host benchmarks of the
+# heap against ALLOCATOR_BASELINE, each ALLOCATOR_REVISIONS NAME=REV, and
+# each ALLOCATOR_VARIANTS NAME=SIZES size-class table, ALLOCATOR_RUNS runs
+# each, with no guest. bench-allocator-guest boots
+# one validation guest that only records allocator profiles and page counts,
+# under the label LABEL. allocator-report renders whatever of both exists as
+# build/reports/allocator-optimization.md, and the baseline alone as
+# build/reports/allocator-baseline.md.
+ALLOCATOR_BASELINE ?= 80402ada809bf5eb605755f3e58ca9b9bf6e886d
+ALLOCATOR_RUNS ?= 5
+ALLOCATOR_BENCHTIME ?= 1s
+ALLOCATOR_BENCH ?= .
+ALLOCATOR_VARIANTS ?=
+ALLOCATOR_REVISIONS ?=
+LABEL ?= current
+
+bench-allocator:
+	@mkdir -p $(BUILD_DIR)/reports
+	$(BUILD_ENV) go run ./tools/allocreport bench -baseline $(ALLOCATOR_BASELINE) -count $(ALLOCATOR_RUNS) \
+		-benchtime $(ALLOCATOR_BENCHTIME) -bench '$(ALLOCATOR_BENCH)' $(foreach v,$(ALLOCATOR_VARIANTS),-variant $(v)) $(foreach r,$(ALLOCATOR_REVISIONS),-revision $(r)) \
+		-out $(BUILD_DIR)/reports/allocator-bench.json
+	@$(MAKE) --no-print-directory allocator-report
+
+bench-allocator-guest:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/allocator-test.img
+	@LABEL=$(LABEL) MEMORY=$(MEMORY) tests/boot/allocator.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/allocator-test.img
+
+allocator-report:
+	@mkdir -p $(BUILD_DIR)/reports
+	$(BUILD_ENV) go run ./tools/allocreport report \
+		$(if $(wildcard $(BUILD_DIR)/reports/allocator-bench.json),-bench $(BUILD_DIR)/reports/allocator-bench.json) \
+		$(foreach g,$(sort $(wildcard $(BUILD_DIR)/reports/allocator-guest-baseline.txt)) $(filter-out %-baseline.txt,$(sort $(wildcard $(BUILD_DIR)/reports/allocator-guest-*.txt))),-guest $(g)) \
+		-out $(BUILD_DIR)/reports/allocator-optimization.md
+	$(BUILD_ENV) go run ./tools/allocreport report -title 'Native allocator baseline' -trees baseline \
+		$(if $(wildcard $(BUILD_DIR)/reports/allocator-bench.json),-bench $(BUILD_DIR)/reports/allocator-bench.json) \
+		$(if $(wildcard $(BUILD_DIR)/reports/allocator-guest-baseline.txt),-guest $(BUILD_DIR)/reports/allocator-guest-baseline.txt) \
+		-out $(BUILD_DIR)/reports/allocator-baseline.md
+	@echo $(BUILD_DIR)/reports/allocator-optimization.md $(BUILD_DIR)/reports/allocator-baseline.md
 
 test-lscpu: iso
 	@$(MAKE) --no-print-directory test-disk TEST_DISK=$(BUILD_DIR)/lscpu-test.img

@@ -136,6 +136,16 @@ func (th *testHeap) verify() {
 			if used != int(m.used) || (used == 0 && !listedSlabs[page]) || listedSlabs[page] != (uint32(used) < slotsPerPage(m.class)) {
 				panic("slab bookkeeping is inconsistent")
 			}
+			// Every slot below the hint word is in use.
+			for word := uint32(0); word < m.head; word++ {
+				full := ^uint64(0)
+				if rest := slotsPerPage(m.class) - word*64; rest < 64 {
+					full = 1<<rest - 1
+				}
+				if m.alloc[word] != full {
+					panic("slab free-slot hint skips a free slot")
+				}
+			}
 			objects += uint64(used)
 			bytes += uint64(used) * uint64(classSizes[m.class])
 			inUse++
@@ -187,6 +197,122 @@ func TestSizeClassesCoverEverySmallSize(t *testing.T) {
 	if slotsPerPage(0) != 256 || 256 > slotWords*64 {
 		t.Fatal("bitmap does not cover the smallest class")
 	}
+}
+
+func TestClassTablesMatchTheSearch(t *testing.T) {
+	th := newTestHeap(t, 16, 16)
+	for size := uintptr(1); size <= maxSmallSize; size++ {
+		if int(th.classOf[(size+15)>>4]) != sizeClass(size) {
+			t.Fatalf("size %d: table class %d, search %d", size, th.classOf[(size+15)>>4], sizeClass(size))
+		}
+	}
+	for class := range classSizes {
+		if uint32(th.classSlots[class]) != slotsPerPage(uint8(class)) {
+			t.Fatalf("class %d slots", class)
+		}
+	}
+}
+
+// TestEverySlotOfEveryClassResolves allocates every slot of a slab of every
+// class and resolves its first byte, its last, and the byte after it.
+func TestEverySlotOfEveryClassResolves(t *testing.T) {
+	th := newTestHeap(t, 256, 16)
+	for class, size := range classSizes {
+		slots := slotsPerPage(uint8(class))
+		for slot := uint32(0); slot < slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for _, probe := range []uintptr{address, address + size/2, address + size - 1} {
+				page, found, start, ok := th.find(probe)
+				if !ok || start != address || found == noPage || th.extent(page, found) != size {
+					t.Fatalf("class %d slot %d: %#x resolved to %#x %v", size, slot, probe, start, ok)
+				}
+			}
+		}
+		// The page tail past the last slot belongs to no allocation.
+		last := th.base + uintptr(th.frontier-1)<<pageShift + uintptr(slots)*size
+		if last&(pageBytes-1) != 0 {
+			if _, _, _, ok := th.find(last); ok {
+				t.Fatalf("class %d: the page tail resolved", size)
+			}
+		}
+	}
+	th.verify()
+}
+
+// TestReusedSlotsReadZero writes every byte of a slab's slots, frees some by
+// hand and the rest by a collection, and requires every slot handed out
+// again, and every slot of a fresh slab on a reused page, to read zero.
+func TestReusedSlotsReadZero(t *testing.T) {
+	for class, size := range classSizes {
+		th := newTestHeap(t, 16, 16)
+		slots := slotsPerPage(uint8(class))
+		var held []uintptr
+		for slot := uint32(0); slot < slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for index := range bytesAt(address, size) {
+				bytesAt(address, size)[index] = 0xc3
+			}
+			held = append(held, address)
+		}
+		th.free(held[0])
+		th.free(held[slots-1])
+		th.collect(roots{held[1]})
+		// Every slot but held[1] is free again, and its page dirty.
+		for slot := uint32(1); slot < slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for index, value := range bytesAt(address, size) {
+				if value != 0 {
+					t.Fatalf("class %d: reused slot byte %d is %#x", size, index, value)
+				}
+			}
+		}
+		// A slab set up on a dirty page the kernel refused to discard
+		// clears every slot it hands out.
+		th.refuse = true
+		big := th.mustAlloc(t, 4*pageBytes)
+		for index := range bytesAt(big, 4*pageBytes) {
+			bytesAt(big, 4*pageBytes)[index] = 0x5a
+		}
+		th.free(big)
+		th.collect(nil)
+		for slot := uint32(0); slot < 2*slots; slot++ {
+			address := th.mustAlloc(t, size)
+			for index, value := range bytesAt(address, size) {
+				if value != 0 {
+					t.Fatalf("class %d: slot %d on a dirty page byte %d is %#x", size, slot, index, value)
+				}
+			}
+		}
+		th.verify()
+	}
+}
+
+// TestSlotHintFollowsFreesAndSweeps fills most of a 16-byte slab, whose
+// bitmap spans four words, and requires the lowest free slot to be handed out
+// next after an explicit free, after a sweep, and once its slab refills.
+func TestSlotHintFollowsFreesAndSweeps(t *testing.T) {
+	th := newTestHeap(t, 16, 16)
+	var held []uintptr
+	for index := 0; index < 200; index++ {
+		held = append(held, th.mustAlloc(t, 16))
+	}
+	th.verify()
+	th.free(held[3])
+	if again := th.mustAlloc(t, 16); again != held[3] {
+		t.Fatalf("after a free the slab handed out %#x, not the freed %#x", again, held[3])
+	}
+	// One more slot moves the hint to the last word before the sweep.
+	held = append(held, th.mustAlloc(t, 16))
+	th.collect(append(roots(nil), held[70:]...))
+	if again := th.mustAlloc(t, 16); again != held[0] {
+		t.Fatalf("after a sweep the slab handed out %#x, not its first slot %#x", again, held[0])
+	}
+	for index := 1; index < 70; index++ {
+		if again := th.mustAlloc(t, 16); again != held[index] {
+			t.Fatalf("refill handed out %#x for slot %d", again, index)
+		}
+	}
+	th.verify()
 }
 
 func TestBoundarySizesAreAlignedZeroedAndDisjoint(t *testing.T) {

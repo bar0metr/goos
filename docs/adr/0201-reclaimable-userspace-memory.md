@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. ADR 0202 adds the 1360-byte class, a stack scrub before each
+collection bounded by the bottom of the stack, free-page retention (off by default), and trims of free pages at
+idle time and before out-of-memory.
 
 ## Context
 
@@ -198,7 +200,7 @@ between uses rather than creating one per request.
 | `HeapSys` | the heap reservation, 256 MiB |
 | `HeapInuse` | bytes of pages holding at least one allocation |
 | `HeapIdle` | `HeapSys` minus `HeapInuse` |
-| `HeapReleased` | cumulative bytes given back with `VMDiscard` |
+| `HeapReleased` | bytes of `HeapIdle` the kernel holds no page for: given back with `VMDiscard` or never touched |
 | `GCSys` | metadata in use plus the mark stack reservation |
 | `Sys` | `HeapSys` plus `GCSys` |
 | `NumGC` | completed collections |

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Boots one guest and checks the reclaimable native heap (ADR 0201): the
-# memreclaim checks, a double free and heap exhaustion that must stop only
-# their own process, a VFS service that must hold its memory steady over
+# memreclaim checks, a double free, heap exhaustion, and a heap past its page
+# quota that must stop only their own process, a burst whose pages must go back once the process is
+# idle, a VFS service that must hold its memory steady over
 # thousands of requests, and a long leak run of mixed workloads. Writes
 # build/reports/memory.txt.
 set -eu
@@ -41,6 +42,8 @@ fail() {
 }
 
 prompts() { grep -c '^goos> ' "$log" 2>/dev/null || true; }
+
+. "$(dirname "$0")/leak_round.sh"
 
 await_prompt() {
 	want=$1
@@ -88,10 +91,11 @@ until [ "$(prompts)" -ge 1 ]; do
 done
 
 run memreclaim
-for marker in LAYOUT CONTAINERS STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_GRAPH ZERO_REUSE BOUNDARY FREE REGION PAGES 1000_CYCLES AUTO_GC; do
+for marker in LAYOUT CONTAINERS STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_GRAPH STACK_SCRUB ZERO_REUSE BOUNDARY CLASSES FREE REGION PAGES 1000_CYCLES AUTO_GC; do
 	require "^MEMRECLAIM_${marker}_OK\$" "memreclaim $marker"
 done
 require '^MEMRECLAIM_OK$' 'memreclaim did not finish'
+stale=$(grep '^MEMRECLAIM_STACK_STALE ' "$work/output")
 reserved=$(field reserved '^MEMRECLAIM_STATS reserved=')
 post_live=$(field live '^MEMRECLAIM_STATS reserved=')
 peak_live=$(field peak_live '^MEMRECLAIM_STATS peak_live=')
@@ -114,6 +118,16 @@ run 'memreclaim oom'
 require '^MEMRECLAIM_OOM_OK$' 'out-of-memory path'
 oom=$(grep '^MEMRECLAIM_OOM ' "$work/output")
 
+# Retained free pages (ADR 0202): reuse clears them without the kernel
+# supplying them again, an idle wait gives them back, and a live heap grown
+# past the page quota is stopped by the kernel, which no trim can prevent.
+run 'memreclaim quota'
+require '^MEMRECLAIM_QUOTA_RETAIN_OK$' 'retained pages are reused cleared and given back at idle'
+require '^MEMRECLAIM_QUOTA_ATTEMPT$' 'quota exhaustion not attempted'
+require 'user fault: page quota exhausted' 'the kernel did not stop the process past its quota'
+grep -q '^MEMRECLAIM_QUOTA_MISSED$' "$work/output" && fail 'a heap past the page quota went on'
+quota=$(grep '^MEMRECLAIM_QUOTA_IDLE ' "$work/output")
+
 # The VFS service under a long run of requests.
 run "memreclaim service $requests"
 require '^MEMRECLAIM_SERVICE_OK$' 'VFS memory band'
@@ -122,22 +136,33 @@ samples=$(wc -l <"$work/vfs")
 [ "$samples" -ge 4 ] || fail "only $samples VFS memory reports"
 vfs_collections=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^collections=//p')
 [ "$vfs_collections" -gt 0 ] || fail 'the VFS service never collected'
-# The band is set by the reports after the first two; later ones may not
-# exceed it by more than 32 pages or by more than 1 MiB of live heap.
+# The live band is set by the reports after the first two; later ones may
+# not exceed it by more than 1 MiB of live heap. The service reports while
+# requests run, somewhere in a collection cycle in which its pages swing by
+# up to 200, so its pages are banded on memreclaim's idle samples above
+# (MEMRECLAIM_SERVICE_OK) and only listed here.
 band_pages=$(sed -n '2,3p' "$work/vfs" | tr ' ' '\n' | sed -n 's/^pages=//p' | sort -n | tail -n 1)
 band_live=$(sed -n '2,3p' "$work/vfs" | tr ' ' '\n' | sed -n 's/^live=//p' | sort -n | tail -n 1)
 last_pages=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^pages=//p')
 last_live=$(tail -n 1 "$work/vfs" | tr ' ' '\n' | sed -n 's/^live=//p')
-[ "$last_pages" -le $((band_pages + 32)) ] || fail "VFS pages grew from $band_pages to $last_pages"
+busy_pages=$(tr ' ' '\n' <"$work/vfs" | sed -n 's/^pages=//p' | sort -n | sed -n '1p;$p' | tr '\n' ' ')
 [ "$last_live" -le $((band_live + 1048576)) ] || fail "VFS live heap grew from $band_live to $last_live"
 service=$(grep '^MEMRECLAIM_SERVICE ' "$work/output" | tail -n 1)
+
+# A short burst of garbage, then idle time: the pages the burst took must go
+# back once the process waits, and stay back while it waits on.
+run 'memreclaim burst'
+require '^MEMRECLAIM_BURST_OK$' 'idle process gives its burst pages back'
+burst=$(grep '^MEMRECLAIM_BURST ' "$work/output")
 
 # A long leak run (ADR 0201). The boot test's leak rounds allow a small band
 # for process heaps; this run looks for a slow leak behind that band. Each
 # round copies a large file, streams through the VFS, lists a directory into a
-# file, runs a pipeline and a Linux program, then waits two seconds, far past
-# the 100 ms after which every idle service collects its heap, and counts
-# pages. From round 3 the kernel's pages may dip by a page or two when a
+# file, runs a pipeline and a Linux program, and checks that each did its work
+# and that its files were removed (tests/boot/leak_round.sh), then waits two
+# seconds, far past the 100 ms after which every idle service collects its
+# heap, and counts pages. A step that failed stops the run before its round's
+# pages are taken. From round 3 the kernel's pages may dip by a page or two when a
 # process of the previous command is still being torn down as mem counts, but
 # the second half may never exceed the first half's highest; the process
 # pages of the second half may not exceed the first half's highest by more
@@ -145,12 +170,9 @@ service=$(grep '^MEMRECLAIM_SERVICE ' "$work/output" | tail -n 1)
 rounds=${LEAK_ROUNDS:-20}
 round=1
 : >"$work/leak"
+leak_prepare
 while [ "$round" -le "$rounds" ]; do
-	run 'cp /system/bin/vmprobe /tmp/leak.bin; rm /tmp/leak.bin'
-	run 'bench io /tmp/leak.io 256K; rm /tmp/leak.io'
-	run 'ls /system/bin > /tmp/leak.ls; rm /tmp/leak.ls'
-	run 'sleep 1 | cat /system/motd | write /tmp/leak.pipe; rm /tmp/leak.pipe'
-	run '/system/linux/abi-probe random > /tmp/leak.r; rm /tmp/leak.r'
+	leak_round "$round"
 	run 'sleep 2'
 	run 'mem -p'
 	kernel=$(sed -n 's/^pages in the kernel: //p' "$work/output")
@@ -188,8 +210,11 @@ require '^after-memory$' 'the system did not survive the memory checks'
 	printf 'longest pause ns (TCG): %s\n' "$pause"
 	printf 'automatic collection: %s\n' "$auto"
 	printf 'exhaustion: %s\n' "$oom"
-	printf 'VFS service: %s, %s reports, band %s pages, last %s pages, last live %s bytes, %s collections\n' \
-		"$service" "$samples" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
+	printf 'retained pages and the page quota: %s\n' "$quota"
+	printf 'burst and idle: %s\n' "$burst"
+	printf 'objects only dead frames held, kept (layout-dependent, at most one in ten): %s\n' "$stale"
+	printf 'VFS service: %s, %s reports, pages while busy from %s(lowest highest), early %s, last %s pages, last live %s bytes, %s collections\n' \
+		"$service" "$samples" "$busy_pages" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
 	printf 'leak run: %s rounds, kernel pages %s, process pages by round: %s\n' "$rounds" "$leak_kernel" "$leak_processes"
 } >"$report"
 cat "$report"

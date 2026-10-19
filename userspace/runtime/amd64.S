@@ -26,6 +26,48 @@ goos_gc_registers:
     ret
 .size goos_gc_registers, .-goos_gc_registers
 
+// goos_gc_scrub(limit uintptr) zeroes the stack below its caller's frame:
+// the 4 KiB under its own return address, or from limit up when limit is
+// higher. The caller passes the lowest address of the stack reservation, so
+// no write leaves the stack; the bytes zeroed lie below every live frame and
+// below the return address, and only rax, rcx, rdi, and the direction flag,
+// all caller-saved, change. The collector's frames are then built on zeroes:
+// a slot one of them reserves but has not written yet holds no address an
+// earlier call left there, which the conservative scan would take for a
+// root. tools/stackframes knows this function as the one that writes below
+// the red zone, and checks its bound (ADR 0202).
+.section .text.goos_gc_scrub,"ax",@progbits
+.global goos_gc_scrub
+.type goos_gc_scrub,@function
+goos_gc_scrub:
+    leaq -4096(%rsp), %rax
+    cmpq %rdi, %rax
+    cmovbq %rdi, %rax
+    movq %rsp, %rcx
+    subq %rax, %rcx
+    jbe 1f
+    shrq $3, %rcx
+    movq %rax, %rdi
+    xorl %eax, %eax
+    cld
+    rep stosq
+1:
+    ret
+.size goos_gc_scrub, .-goos_gc_scrub
+
+// goos_stack_reserve() uintptr returns _goos_stack_reserve, the stack the
+// program asks the kernel for (ADR 0104). The value is an immediate in the
+// code: a Go reference to the absolute symbol put a word holding it after the
+// globals, and the nonzero tail kept elf2native from dropping the zeros
+// before it, so every image stored its whole zero data.
+.section .text.goos_stack_reserve,"ax",@progbits
+.global goos_stack_reserve
+.type goos_stack_reserve,@function
+goos_stack_reserve:
+    movl $_goos_stack_reserve, %eax
+    ret
+.size goos_stack_reserve, .-goos_stack_reserve
+
 // goos_stack_top is the stack pointer _start called the program with: the
 // upper end of every frame the collector scans.
 .section .bss.goos_stack_top,"aw",@nobits

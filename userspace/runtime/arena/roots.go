@@ -23,6 +23,41 @@ var stackTop uintptr
 //go:linkname spillRegisters goos_gc_registers
 func spillRegisters(buffer *[6]uintptr) uintptr
 
+//go:linkname scrubStack goos_gc_scrub
+func scrubStack(limit uintptr)
+
+// stackReserve returns _goos_stack_reserve, the stack a program asks the
+// kernel for, an absolute symbol the linker script sets and elf2native
+// records (ADR 0104).
+//
+//go:linkname stackReserve goos_stack_reserve
+func stackReserve() uintptr
+
+// stackBase is the lowest address of the stack. The kernel reserves the
+// stack as the stackReserve bytes that end at the page _start was entered
+// in, with an unmapped guard below (kernel/loader setUpStack).
+func stackBase() uintptr {
+	reserve := stackReserve()
+	if stackTop == 0 || reserve == 0 || reserve&(pageBytes-1) != 0 || reserve > stackTop {
+		panic("arena: stack bounds unknown")
+	}
+	return (stackTop - reserve + pageBytes - 1) &^ (pageBytes - 1)
+}
+
+// probeRegisters receives the registers StackRoom spills to find the stack
+// pointer; it is cleared at once, since globals are roots.
+var probeRegisters [6]uintptr
+
+// StackRoom returns how many bytes of stack lie below its caller's frame.
+// Validation programs use it to run code near the bottom of the stack.
+//
+//go:noinline
+func StackRoom() uintptr {
+	sp := spillRegisters(&probeRegisters)
+	probeRegisters = [6]uintptr{}
+	return sp - stackBase()
+}
+
 // registers holds the callee-saved registers while a collection runs.
 var registers [6]uintptr
 

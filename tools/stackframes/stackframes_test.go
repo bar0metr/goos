@@ -211,6 +211,44 @@ func TestRedZoneBound(t *testing.T) {
 	}
 }
 
+// TestUnsignedDisplacementsBelowSP covers how go tool objdump prints a
+// large negative displacement: -4096 reads as 0xfffff000.
+func TestUnsignedDisplacementsBelowSP(t *testing.T) {
+	for _, text := range []string{"LEAQ 0xfffff000(SP), DI", "MOVQ AX, 0xffffff78(SP)"} {
+		if _, problems := analyzeListing(t, listing("leaf", 0x1000, text, "RET")); len(problems) != 1 {
+			t.Fatalf("%q below the red zone accepted: %v", text, problems)
+		}
+	}
+	if _, problems := analyzeListing(t, listing("leaf", 0x1000, "MOVQ AX, 0xffffff80(SP)", "RET")); len(problems) != 0 {
+		t.Fatalf("red zone store written unsigned rejected: %v", problems)
+	}
+}
+
+// TestStackScrubAcceptsOnlyPinnedSequence checks the one function allowed to
+// write below the red zone: goos_gc_scrub exactly as reviewed.
+func TestStackScrubAcceptsOnlyPinnedSequence(t *testing.T) {
+	body := append([]string(nil), scrubInstructions...)
+	body[5] = "JBE 0x102c"
+	if frame, problems := analyzeListing(t, listing("goos_gc_scrub", 0x1000, body...)); frame != 0 || len(problems) != 0 {
+		t.Fatalf("scrub = %d, %v", frame, problems)
+	}
+	for _, change := range []struct {
+		name  string
+		index int
+		text  string
+	}{
+		{"goos_gc_scrub", 0, "LEAQ 0xffffe000(SP), AX"},
+		{"goos_gc_scrub", 2, "MOVQ DI, AX"},
+		{"other_scrub", 0, body[0]},
+	} {
+		changed := append([]string(nil), body...)
+		changed[change.index] = change.text
+		if _, problems := analyzeListing(t, listing(change.name, 0x1000, changed...)); len(problems) == 0 {
+			t.Fatalf("%s with %q accepted", change.name, change.text)
+		}
+	}
+}
+
 func TestUnboundedDepthIsRejected(t *testing.T) {
 	_, problems := analyzeListing(t, listing("f", 0x1000,
 		"PUSHQ AX",   // 0x1000
