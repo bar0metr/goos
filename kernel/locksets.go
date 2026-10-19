@@ -272,6 +272,18 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 	case kcall.OperationDiagnostics:
 		// The dump takes the locks of each part as it prints it.
 		return 0
+	case kcall.OperationThreadYield:
+		return 0
+	case kcall.OperationThreadExit, kcall.OperationThreadResume:
+		// They change the thread group, which the registry's write lock
+		// guards (ADR 0203).
+		return registryWrite
+	case kcall.OperationThreadJoin, kcall.OperationThreadSelf, kcall.OperationThreadSuspend:
+		// A suspension takes the registry for writing so that no thread is
+		// created while it holds the others.
+		return registryWrite | spaceRead
+	case kcall.OperationThreadCreate:
+		return registryWrite | spaceWrite
 	}
 	// An operation not named above sees everything.
 	return callEvery

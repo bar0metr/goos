@@ -526,6 +526,14 @@ func TaskAffinity(task sched.TaskID) (uint64, bool) {
 	return mask, ok && mask != 0
 }
 
+// TaskLive reports whether a task's identity still names a live task.
+func TaskLive(task sched.TaskID) bool {
+	flags := lockScheduler()
+	_, ok := runState.Alive(task)
+	unlockScheduler(flags)
+	return ok
+}
+
 // TaskOffProcessor reports whether a task is on no processor: never started,
 // dead and switched away from, or waiting in a run queue.
 func TaskOffProcessor(task sched.TaskID) bool {

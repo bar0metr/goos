@@ -22,6 +22,7 @@ import (
 	"goos/kernel/lock"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
+	"goos/kernel/nativethread"
 	"goos/kernel/process"
 	"goos/kernel/sched"
 	"goos/kernel/stream"
@@ -86,6 +87,14 @@ type cpuScratch struct {
 	linuxTime           [8]byte
 	linuxSysinfo        [linuxcompat.SysinfoSize]byte
 	linuxTIDWire        [4]byte
+	// The native thread calls' wires (ADR 0203): a thread's ID and slot, a
+	// joined thread's code, one held thread's snapshot, and the threads a
+	// suspension holds.
+	threadInfoWire     [kcall.ThreadInfoSize]byte
+	threadCodeWire     [8]byte
+	threadSnapshot     amd64.UserSnapshot
+	threadSnapshotWire [kcall.ThreadSnapshotSize]byte
+	threadTasks        [nativethread.Slots]sched.TaskID
 	// siblingTasks lists the other tasks of a process a call stops or ends.
 	siblingTasks [sched.MaxTasks]sched.TaskID
 	// linuxVFSMessage holds the request being sent, then the reply being read.
