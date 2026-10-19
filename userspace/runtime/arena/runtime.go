@@ -112,7 +112,9 @@ func OnExhausted(report func()) { exhausted = report }
 func fail() {
 	if ready && !collecting {
 		// Whatever reports the failure gets every free page back first.
+		lockHeap()
 		native.trim()
+		unlockHeap()
 	}
 	if exhausted != nil {
 		exhausted()
@@ -131,12 +133,21 @@ func fail() {
 // has not written can still hold an address an earlier, deeper call stored,
 // and the scan keeps that allocation alive: memreclaim's unreachable cycle
 // survived this way after an unrelated change moved the frames.
+//
+// With several threads, the caller holds the others off their processors
+// for the collection (collectThreaded, ADR 0203); a thread inside a region
+// still never collects, and another thread's region is scanned up to its
+// position.
 func Collect() {
-	if scopedRegions.depth != 0 || !ready {
+	if !ready || self().regions.depth != 0 {
 		return
 	}
 	if collecting {
 		panic("arena: collection started during a collection")
+	}
+	if threaded.Load() {
+		collectThreaded(selfSlot())
+		return
 	}
 	scrubStack(stackBase())
 	collect()
@@ -151,6 +162,7 @@ func collect() {
 	markGlobals()
 	native.phase = PhaseRegions
 	markRegions()
+	markThreads()
 	markStack()
 	native.phase = PhaseNone
 	native.finishMark()
@@ -169,7 +181,13 @@ func collect() {
 // IdlePending reports whether anything was allocated since the last
 // collection, or free pages wait to go back to the kernel.
 func IdlePending() bool {
-	return ready && (native.mallocs != native.collectedMallocs || native.dirtyFree != 0)
+	if !ready {
+		return false
+	}
+	lockHeap()
+	pending := native.mallocs != native.collectedMallocs || native.dirtyFree != 0
+	unlockHeap()
+	return pending
 }
 
 // CollectIdle collects if anything was allocated since the last collection,
@@ -180,11 +198,16 @@ func CollectIdle() {
 	if !ready {
 		return
 	}
-	if native.mallocs != native.collectedMallocs {
+	lockHeap()
+	allocated := native.mallocs != native.collectedMallocs
+	unlockHeap()
+	if allocated {
 		Collect()
 	}
 	if !collecting {
+		lockHeap()
 		native.trim()
+		unlockHeap()
 	}
 }
 
@@ -199,7 +222,9 @@ func SetRetained(pages uint32) {
 	if !ready {
 		Init()
 	}
+	lockHeap()
 	native.setRetained(pages)
+	unlockHeap()
 }
 
 // releaseMarkStack gives back the mark stack pages a wide graph touched,
@@ -233,14 +258,18 @@ func pointerFree(layout unsafe.Pointer) bool {
 
 //go:linkname alloc runtime.alloc
 func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
-	if scopedRegions.depth != 0 {
-		return regionAlloc(size)
+	t := self()
+	if t.regions.depth != 0 {
+		return regionAlloc(t, size)
 	}
 	if size == 0 {
 		return unsafe.Pointer(&zeroSized)
 	}
 	if !ready {
 		Init()
+	}
+	if threaded.Load() {
+		return pointerAt(allocThreaded(t, size, pointerFree(layout)))
 	}
 	if native.liveBytes >= native.nextCollection && !collecting {
 		Collect()
@@ -258,6 +287,31 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	return pointerAt(address)
 }
 
+// allocThreaded is alloc once threads exist. A collection never starts
+// while the heap lock is held: the lock is let go, the collection runs, and
+// the allocation starts again.
+func allocThreaded(t *threadState, size uintptr, noPointers bool) uintptr {
+	heapLock.lock()
+	if native.liveBytes >= native.nextCollection && !collecting {
+		heapLock.unlock()
+		Collect()
+		heapLock.lock()
+	}
+	address := native.allocObject(size, noPointers)
+	if address == 0 && !collecting {
+		heapLock.unlock()
+		Collect()
+		heapLock.lock()
+		native.trim()
+		address = native.allocObject(size, noPointers)
+	}
+	heapLock.unlock()
+	if address == 0 {
+		fail()
+	}
+	return address
+}
+
 // free returns an allocation at once. Freeing a pointer the heap did not hand
 // out, or one already freed, stops the process: the metadata can no longer be
 // trusted. Region memory is reclaimed only by clearing its region.
@@ -265,13 +319,20 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 //go:linkname free runtime.free
 func free(pointer unsafe.Pointer) {
 	address := uintptr(pointer)
-	if pointer == nil || pointer == unsafe.Pointer(&zeroSized) || inRegion(address) {
+	if pointer == nil || pointer == unsafe.Pointer(&zeroSized) {
+		return
+	}
+	lockHeap()
+	if inRegion(address) {
+		unlockHeap()
 		return
 	}
 	if !ready || !native.contains(address) {
+		unlockHeap()
 		panic("arena: free of a pointer outside the heap")
 	}
 	native.freeAt(address)
+	unlockHeap()
 }
 
 // markRoots marks what a range of words points to. TinyGo calls it only from
@@ -311,7 +372,10 @@ func HeapStats() Stats {
 	if !ready {
 		return Stats{Reserved: HeapReserve}
 	}
-	return native.stats()
+	lockHeap()
+	stats := native.stats()
+	unlockHeap()
+	return stats
 }
 
 // Pauses returns the duration of the last collection and of the longest, in
@@ -326,7 +390,9 @@ func PauseTotal() uint64 { return totalPause }
 // metadata. It allocates nothing, so d is best a global the caller keeps.
 func ReadDiagnostics(d *Diagnostics) {
 	if ready {
+		lockHeap()
 		native.diagnostics(d)
+		unlockHeap()
 	}
 }
 
@@ -346,14 +412,16 @@ func PointerFree[T any](value *T) bool {
 	if !ready {
 		return false
 	}
+	lockHeap()
 	page, slot, _, ok := native.find(uintptr(unsafe.Pointer(value)))
-	if !ok {
-		return false
+	result := false
+	if ok && slot == noPage {
+		result = native.meta[page].pointerFree
+	} else if ok {
+		result = native.meta[page].noscan[slot/64]&(1<<(slot%64)) != 0
 	}
-	if slot == noPage {
-		return native.meta[page].pointerFree
-	}
-	return native.meta[page].noscan[slot/64]&(1<<(slot%64)) != 0
+	unlockHeap()
+	return result
 }
 
 // PointerFreeString is PointerFree for the bytes of a string.
@@ -367,5 +435,11 @@ func PointerFreeString(text string) bool {
 // InHeap reports whether a value lies in the collected heap rather than a
 // region, a global, or the stack.
 func InHeap[T any](value *T) bool {
-	return ready && native.contains(uintptr(unsafe.Pointer(value)))
+	if !ready {
+		return false
+	}
+	lockHeap()
+	inside := native.contains(uintptr(unsafe.Pointer(value)))
+	unlockHeap()
+	return inside
 }
