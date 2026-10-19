@@ -60,6 +60,11 @@ var (
 	// lastRendezvous and maxRendezvous are how long holding the other
 	// threads took, in nanoseconds.
 	lastRendezvous, maxRendezvous, totalRendezvous uint64
+	// peakThreads is the most threads that were live at once.
+	peakThreads uint32
+	// threadCaches turns the owned slabs on; with it off every small
+	// allocation takes the heap lock (UseThreadCaches).
+	threadCaches = true
 )
 
 // self returns the calling thread's state.
@@ -92,6 +97,15 @@ func EnableThreads() {
 	threaded.Store(true)
 }
 
+// UseThreadCaches turns thread-owned slabs on or off. It takes effect only
+// before the second thread starts; benchmarks use it to compare the heap
+// lock alone with the owned slabs.
+func UseThreadCaches(on bool) {
+	if !threaded.Load() {
+		threadCaches = on
+	}
+}
+
 // Threaded reports whether the process has started a second thread.
 func Threaded() bool { return threaded.Load() }
 
@@ -103,9 +117,16 @@ func ThreadStarted(slot int) {
 	t := &threads[slot]
 	lockHeap()
 	t.regions, t.cursor, t.innermost = regionStack{}, allocatorPosition{}, nil
-	t.cache.reset()
-	t.counts = threadCounts{}
+	native.returnCache(&t.cache, &t.counts)
+	native.foldCounts(&t.counts)
 	t.live = true
+	live := uint32(0)
+	for index := range threads {
+		if threads[index].live {
+			live++
+		}
+	}
+	peakThreads = max(peakThreads, live)
 	unlockHeap()
 }
 
@@ -117,7 +138,7 @@ func ThreadExiting() {
 		panic("arena: thread ended inside a region")
 	}
 	lockHeap()
-	native.returnCache(&t.cache)
+	native.returnCache(&t.cache, &t.counts)
 	native.foldCounts(&t.counts)
 	t.live = false
 	unlockHeap()
@@ -185,6 +206,16 @@ func collectThreaded(slot int) {
 	heapLock.lock()
 	gcFlag.Store(1)
 	if suspendOthers() {
+		// From here an allocation would wait for the heap lock this
+		// thread holds; alloc stops the process instead.
+		collecting = true
+		// Every other thread is held outside the fast path: their slabs
+		// and counts come back, and the mark bitmaps hold marks again.
+		for index := range threads {
+			native.returnCache(&threads[index].cache, &threads[index].counts)
+			native.foldCounts(&threads[index].counts)
+		}
+		native.foldStrayFrees()
 		base, _ := threadStack(slot)
 		scrubStack(base)
 		collect()
@@ -290,4 +321,141 @@ func markThreads() {
 		}
 		native.markRange(from, top)
 	}
+}
+
+// allocCached is a small allocation once threads exist. It takes a slot
+// from the thread's own slab without a lock; when the slab is full, or a
+// collection is starting, it takes the heap lock and refills.
+//
+// The fast path announces itself in t.fast before it reads gcFlag, and
+// clears the announcement after the bitmap write. The collector raises
+// gcFlag before it holds the threads and reads the announcements after, so
+// a held thread either finished its write or is seen inside and let go to
+// finish (suspendOthers).
+func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
+	class := native.classOf[(size+15)>>4]
+	if sizeProfile {
+		bucket := (size - 1) >> 4
+		t.counts.sizeCounts[bucket]++
+		t.counts.sizeBytes[bucket] += uint64(size)
+	}
+	t.fast.Store(1)
+	if gcFlag.Load() == 0 {
+		if address := native.cacheAlloc(&t.cache, &t.counts, class, noPointers); address != 0 {
+			t.fast.Store(0)
+			return address
+		}
+	}
+	t.fast.Store(0)
+	owner := uint32(selfSlot() + 1)
+	heapLock.lock()
+	native.foldCounts(&t.counts)
+	if native.liveBytes >= native.nextCollection && !collecting {
+		heapLock.unlock()
+		Collect()
+		heapLock.lock()
+	}
+	address := uintptr(0)
+	if native.refill(&t.cache, &t.counts, class, owner) {
+		address = native.cacheAlloc(&t.cache, &t.counts, class, noPointers)
+	}
+	if address == 0 && !collecting {
+		heapLock.unlock()
+		Collect()
+		heapLock.lock()
+		native.trim()
+		if native.refill(&t.cache, &t.counts, class, owner) {
+			address = native.cacheAlloc(&t.cache, &t.counts, class, noPointers)
+		}
+	}
+	heapLock.unlock()
+	if address == 0 {
+		fail()
+	}
+	return address
+}
+
+// freeThreaded is free once threads exist. A slot of a slab some thread
+// owns is freed without the heap lock: into the slab by its owner, into its
+// remote-free bits by anyone else. Everything else takes the lock.
+func freeThreaded(t *threadState, address uintptr) {
+	if threadCaches && ready && native.contains(address) {
+		t.fast.Store(1)
+		if gcFlag.Load() == 0 && freeOwned(t, address) {
+			t.fast.Store(0)
+			return
+		}
+		t.fast.Store(0)
+	}
+	heapLock.lock()
+	if inRegion(address) {
+		heapLock.unlock()
+		return
+	}
+	if !ready || !native.contains(address) {
+		heapLock.unlock()
+		panic("arena: free of a pointer outside the heap")
+	}
+	// The owner may have changed since the try above; under the lock
+	// only an owned slab's owner still changes it without the lock.
+	if !freeOwned(t, address) {
+		native.freeAt(address)
+	}
+	heapLock.unlock()
+}
+
+// freeOwned frees address if it is a slot of an owned slab, and reports
+// whether it was.
+func freeOwned(t *threadState, address uintptr) bool {
+	page, slot, owner, ok := native.ownedSlot(address)
+	if owner == 0 {
+		return false
+	}
+	if ok && owner == uint32(selfSlot()+1) {
+		ok = native.cacheFree(&t.counts, page, slot)
+	} else if ok {
+		ok = native.remoteFree(&t.counts, page, slot)
+	}
+	if !ok {
+		t.fast.Store(0)
+		panic("arena: double free or free of a non-allocation")
+	}
+	return true
+}
+
+// pendingCounts adds what threads counted and have not folded to s. The
+// other threads' counts are read while they change, so the result is
+// approximate until a collection folds them. The caller holds the heap
+// lock.
+func pendingCounts(s *Stats) {
+	for index := range threads {
+		n := &threads[index].counts
+		s.Live += n.allocBytes - n.freeBytes
+		s.Objects += n.allocs - n.frees
+		s.TotalAlloc += n.allocBytes
+		s.Mallocs += n.allocs
+		s.Frees += n.frees
+	}
+}
+
+// threadDiagnostics fills the thread part of d. The caller holds the heap
+// lock.
+func threadDiagnostics(d *Diagnostics) {
+	d.ThreadsLive, d.ThreadsPeak = 0, peakThreads
+	for index := range threads {
+		if threads[index].live {
+			d.ThreadsLive++
+		}
+		n := &threads[index].counts
+		d.LocalAllocs += n.allocs
+		d.LocalFrees += n.localFrees
+		d.RemoteFrees += n.remoteFrees
+		d.Refills += n.refills
+		d.Drained += n.drained
+	}
+	d.HeapLocks, d.HeapContended = heapLock.acquired.Load(), heapLock.contended.Load()
+	d.GCLocks, d.GCContended = gcLock.acquired.Load(), gcLock.contended.Load()
+	d.Suspensions, d.SuspendFailures = suspensions.Load(), suspendFailures.Load()
+	d.RendezvousLast, d.RendezvousMax, d.RendezvousTotal = lastRendezvous, maxRendezvous, totalRendezvous
+	d.PauseLast, d.PauseMax, d.PauseTotal = lastPause, maxPause, totalPause
 }

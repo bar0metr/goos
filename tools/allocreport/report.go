@@ -399,6 +399,14 @@ func (r *report) renderProfiles(g *Guest) {
 	keys := []string{"large", "large_pages", "new_slabs", "from_runs", "from_fresh", "recommitted", "cleared", "to_full", "to_partial",
 		"searches", "candidates", "discards", "discard_failures", "discarded", "trims", "frontier", "meta_pages", "slab_chunks", "slab_chunks_touched",
 		"free_runs", "free_pages", "longest_free", "dirty_free", "run_pages"}
+	for _, name := range g.Order {
+		if g.Profiles[name].Version() >= 2 {
+			for _, key := range threadKeys {
+				keys = append(keys, "thread_"+key)
+			}
+			break
+		}
+	}
 	r.printf("| Counter |")
 	for _, name := range g.Order {
 		r.printf(" %s |", name)

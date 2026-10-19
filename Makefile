@@ -172,7 +172,7 @@ OUT_DIR := $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)$(if $(fi
 
 FORCE:
 
-.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
+.PHONY: FORCE all kernel userspace initramfs iso recovery-iso system-tree system-image disk disk-overwrite run-disk test-disk test-system-boot test-network run run-gui run-debug release-check test test-all test-unit test-race test-integration test-security test-boot test-memory bench-allocator bench-allocator-guest allocator-report test-lscpu test-smp test-native-threads test-thread-gc test-thread-allocator bench-thread-allocator test-console-gui test-stress test-storage-stress test-fat32 test-fat32-stress test-partitions test-latency test-microbench test-performance test-reproducible lint fmt docs clean distclean toolchain-check version help linux-fixtures test-linux-reference test-linux-elf test-linux-abi test-linux-boot test-linux-musl test-linux-vfs test-linux-security test-linux-all test-linux-busybox test-linux-7zip profile-locks test-linux-bench test-linux-kernel-reference test-linux-process test-linux-exec test-linux-fork test-linux-pipe test-linux-signals test-linux-poll test-linux-shell test-linux-process-reference pve-doctor pve-artifacts test-pve-smoke test-pve-lscpu test-pve-smp test-pve-threads test-pve-linux test-pve-network test-pve-7zip pve-run test-pvelab test-hardware
 
 all: iso
 
@@ -437,6 +437,9 @@ test-all:
 	$(MAKE) test-boot
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
+	$(MAKE) test-native-threads
+	$(MAKE) test-thread-gc
+	$(MAKE) test-thread-allocator
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -462,6 +465,9 @@ release-check:
 	$(MAKE) test-boot
 	$(MAKE) test-lscpu
 	$(MAKE) test-smp
+	$(MAKE) test-native-threads
+	$(MAKE) test-thread-gc
+	$(MAKE) test-thread-allocator
 	$(MAKE) test-system-boot
 	$(MAKE) test-network
 	$(MAKE) test-tls
@@ -588,6 +594,38 @@ test-smp:
 			MEMORY=$(MEMORY) SMP=$$cpus CPUS=$$cpus tests/boot/smp.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/smp-test.img || exit 1; \
 		done; \
 	fi
+
+# Native threads (ADR 0203), one validation guest with four processors each:
+# test-native-threads checks threads, joins, exit codes, the task quota, and
+# faults; test-thread-gc the roots of every thread and collections they ask
+# for at once; test-thread-allocator the thread-owned slabs, with their host
+# model and race tests. bench-thread-allocator only measures: allocation with
+# the heap lock alone and with owned slabs on 1, 2, 4, and 8 threads, on
+# eight processors, into build/reports/thread-allocator.md.
+THREAD_SMP ?= 4
+BENCH_SMP ?= 8
+
+test-native-threads:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/threads-test.img
+	@SUITE=native SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
+
+test-thread-gc:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/threads-test.img
+	@SUITE=gc SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
+
+test-thread-allocator:
+	$(BUILD_ENV) go test -count=1 -run 'Owned|Stray' ./userspace/runtime/arena
+	$(BUILD_ENV) go test -race -count=1 -run 'Owned|Stray' ./userspace/runtime/arena
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/threads-test.img
+	@SUITE=allocator SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
+
+bench-thread-allocator:
+	@$(MAKE) --no-print-directory iso VALIDATION=1
+	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/threads-test.img
+	@SUITE=bench SMP=$(BENCH_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
 
 # The installed system and recovery boot (ADR 0175): a normal boot from an
 # installed disk, a reboot of it with storage faults, forced recovery, and
@@ -967,6 +1005,14 @@ test-pve-smp: pve-artifacts
 	@$(PVELAB) run --scenario lscpu --cpu host --sockets 2 --cores 2 $(PVE_RUN_FLAGS)
 	@$(PVELAB) run --scenario smp --cpu host --sockets 1 --cores 4 $(PVE_RUN_FLAGS)
 
+# Native threads under KVM on eight processors (ADR 0203): the thread checks,
+# then the allocator timed with the heap lock alone and with thread-owned
+# slabs, into thread-allocator.md in the run's directory. threadprobe is in
+# validation images only.
+test-pve-threads:
+	@$(MAKE) --no-print-directory pve-artifacts VALIDATION=1
+	@$(PVELAB) run --scenario threads --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
+
 test-pve-linux: pve-artifacts
 	@$(PVELAB) run --scenario linux $(PVE_RUN_FLAGS)
 
@@ -1045,6 +1091,10 @@ help:
 	  '  test-boot       boot QEMU headlessly and check serial markers' \
 	  '  test-memory     check the reclaimable native heap on the host and in QEMU' \
 	  '  test-smp        boot four processors and prove they run tasks at once' \
+	  '  test-native-threads  native threads: parallel run, joins, quota, faults' \
+	  '  test-thread-gc  the roots of every thread survive a stop-the-world collection' \
+	  '  test-thread-allocator  thread-owned slabs: host model, race, and guest checks' \
+	  '  bench-thread-allocator  heap lock against owned slabs on 1, 2, 4, 8 threads' \
 	  '  test-stress     run parallel QEMU command stress (STRESS_RUNS, STRESS_ROUNDS)' \
 	  '  test-storage-stress run the FAT32 model, failure, and fsck workload at scale' \
 	  '  test-fat32         run the FAT32 format tests, host FAT tools included' \
@@ -1060,6 +1110,7 @@ help:
 	  '  pve-doctor      check the Proxmox lab settings in .env (docs/development/proxmox-lab.md)' \
 	  '  test-pve-smoke  boot a fresh disk on Proxmox under KVM' \
 	  '  test-pve-lscpu validate 2-socket, 4-vCPU topology; test-pve-smp is an alias' \
+	  '  test-pve-threads run native thread checks and the thread allocator benchmark on Proxmox' \
 	  '  test-pve-linux  run the static Linux programs on Proxmox' \
 	  '  test-pve-7zip LINUX_EXTRA=path  run a static 7zzs on Proxmox and report refused calls' \
 	  '  pve-run         boot on Proxmox and keep the VM for debugging'

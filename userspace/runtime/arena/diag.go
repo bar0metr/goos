@@ -19,6 +19,11 @@ type counters struct {
 	runSearches, runCandidates               uint64
 	discardCalls, discardFailures, discarded uint64
 	trims                                    uint64
+	// What threads counted (cache.go): allocations from owned slabs, frees
+	// into them by the owner and by other threads, refills, remote frees
+	// folded, and slabs given back.
+	localAllocs, localFrees, remoteFrees uint64
+	refills, drained, returnedSlabs      uint64
 	// slabChunks marks every page of slab bitmaps a slab would have touched
 	// so far had the bitmaps their own array indexed by page.
 	slabChunks [slabChunkWords]uint64
@@ -98,7 +103,35 @@ type Diagnostics struct {
 	// would have touched: such pages, once touched, stay charged. They size
 	// that alternative layout.
 	SlabMetadataChunks, SlabChunksTouched uint32
+
+	// The rest is what the runtime counted for threads (ADR 0203).
+	// ThreadsLive is the threads alive now and ThreadsPeak the most at
+	// once.
+	ThreadsLive, ThreadsPeak uint32
+	// LocalAllocs counts allocations from a thread's own slabs, LocalFrees
+	// frees by the owner into them, and RemoteFrees frees by another
+	// thread. Refills counts slow paths that gave a thread a slab, Drained
+	// the remote frees folded in, and ReturnedSlabs the slabs threads gave
+	// back at a collection or their exit.
+	LocalAllocs, LocalFrees, RemoteFrees, Refills, Drained, ReturnedSlabs uint64
+	// HeapLocks and GCLocks count acquisitions of the heap and collection
+	// locks, and HeapContended and GCContended the ones that had to wait.
+	HeapLocks, HeapContended, GCLocks, GCContended uint64
+	// Suspensions counts the times every other thread was held for a
+	// collection and SuspendFailures the collections given up because they
+	// could not be.
+	Suspensions, SuspendFailures uint64
+	// RendezvousLast, RendezvousMax, and RendezvousTotal are how long
+	// holding the other threads took, and PauseLast, PauseMax, and
+	// PauseTotal how long collections took, in nanoseconds.
+	RendezvousLast, RendezvousMax, RendezvousTotal uint64
+	PauseLast, PauseMax, PauseTotal                uint64
 }
+
+// ProfileVersion is the version of the ALLOC_PROFILE format AppendProfile
+// writes. Version 2 added the version field and the threads line; a report
+// without the field is version 1.
+const ProfileVersion = 2
 
 // slabBitmapBytes is the size of the three slot bitmaps of a slab.
 const slabBitmapBytes = 3 * slotWords * 8
@@ -122,6 +155,8 @@ func (h *heap) diagnostics(d *Diagnostics) {
 	d.PartialSlabs, d.FullSlabs, d.FreeSlots = [classCount]uint32{}, [classCount]uint32{}, [classCount]uint32{}
 	d.FreeRuns, d.FreeRunPages, d.LongestFreeRun, d.DirtyFreePages, d.RunPages = 0, 0, 0, 0, 0
 	d.SlabMetadataChunks, d.SlabChunksTouched = 0, 0
+	d.LocalAllocs, d.LocalFrees, d.RemoteFrees = c.localAllocs, c.localFrees, c.remoteFrees
+	d.Refills, d.Drained, d.ReturnedSlabs = c.refills, c.drained, c.returnedSlabs
 	for _, word := range c.slabChunks {
 		d.SlabChunksTouched += uint32(bits.OnesCount64(word))
 	}
@@ -163,7 +198,7 @@ func (h *heap) diagnostics(d *Diagnostics) {
 
 // AppendProfile writes d as lines of the form
 //
-//	ALLOC_PROFILE name key=value ...
+//	ALLOC_PROFILE name version=2 key=value ...
 //
 // and ends with "ALLOC_PROFILE name end lines=N", N the number of lines
 // before it.
@@ -176,6 +211,7 @@ func (h *heap) diagnostics(d *Diagnostics) {
 func (d *Diagnostics) AppendProfile(name string, line []byte, emit func([]byte)) {
 	w := profileWriter{line: line, name: name, emit: emit}
 	w.start()
+	w.pair("version", ProfileVersion)
 	w.pair("large", d.LargeAllocs)
 	w.pair("large_bytes", d.LargeRequested)
 	w.pair("large_pages", d.LargePages)
@@ -219,6 +255,29 @@ func (d *Diagnostics) AppendProfile(name string, line []byte, emit func([]byte))
 			w.fields(3, uint64(bucket), d.SizeCounts[bucket], d.SizeBytes[bucket], 0)
 		}
 	}
+	w.flush()
+	w.start()
+	w.text("threads")
+	w.pair("live", uint64(d.ThreadsLive))
+	w.pair("peak", uint64(d.ThreadsPeak))
+	w.pair("local_allocs", d.LocalAllocs)
+	w.pair("local_frees", d.LocalFrees)
+	w.pair("remote_frees", d.RemoteFrees)
+	w.pair("refills", d.Refills)
+	w.pair("drained", d.Drained)
+	w.pair("returned", d.ReturnedSlabs)
+	w.pair("heap_locks", d.HeapLocks)
+	w.pair("heap_contended", d.HeapContended)
+	w.pair("gc_locks", d.GCLocks)
+	w.pair("gc_contended", d.GCContended)
+	w.pair("suspensions", d.Suspensions)
+	w.pair("suspend_failures", d.SuspendFailures)
+	w.pair("rendezvous_last", d.RendezvousLast)
+	w.pair("rendezvous_max", d.RendezvousMax)
+	w.pair("rendezvous_total", d.RendezvousTotal)
+	w.pair("pause_last", d.PauseLast)
+	w.pair("pause_max", d.PauseMax)
+	w.pair("pause_total", d.PauseTotal)
 	w.flush()
 	// The last line counts the ones before it, so a reader can tell a
 	// profile whose lines all arrived from one that lost some.

@@ -154,7 +154,9 @@ func readGuestProfiles(path string, strict bool) (*Guest, error) {
 				continue
 			}
 			p := pending[name]
-			if strings.HasPrefix(words[2], "large=") {
+			// A report opens with its version, or, before version 2,
+			// with its first counter.
+			if strings.HasPrefix(words[2], "version=") || strings.HasPrefix(words[2], "large=") {
 				if p != nil {
 					unended = append(unended, report{name, p})
 				}
@@ -220,11 +222,35 @@ var profileKeys = []string{
 	"longest_free", "dirty_free", "run_pages",
 }
 
+// threadKeys are the counters of the threads line, which version 2 added.
+// They are kept in Fields with a "thread_" prefix.
+var threadKeys = []string{
+	"live", "peak", "local_allocs", "local_frees", "remote_frees", "refills", "drained", "returned",
+	"heap_locks", "heap_contended", "gc_locks", "gc_contended", "suspensions", "suspend_failures",
+	"rendezvous_last", "rendezvous_max", "rendezvous_total", "pause_last", "pause_max", "pause_total",
+}
+
+// Version is the profile format version; a report without the field is
+// version 1.
+func (p *Profile) Version() uint64 {
+	if version, ok := p.Fields["version"]; ok {
+		return version
+	}
+	return 1
+}
+
 // missing names the first counter a profile lacks, or is empty.
 func (p *Profile) missing() string {
 	for _, key := range profileKeys {
 		if _, ok := p.Fields[key]; !ok {
 			return key
+		}
+	}
+	if p.Version() >= 2 {
+		for _, key := range threadKeys {
+			if _, ok := p.Fields["thread_"+key]; !ok {
+				return "thread_" + key
+			}
 		}
 	}
 	return ""
@@ -247,6 +273,10 @@ func (p *Profile) add(words []string) error {
 				return err
 			}
 			p.Slabs[int(values[0])] = [3]uint64{values[1], values[2], values[3]}
+		}
+	case "threads":
+		for key, value := range pairs(words[1:]) {
+			p.Fields["thread_"+key] = value
 		}
 	default:
 		for key, value := range pairs(words) {

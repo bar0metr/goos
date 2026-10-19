@@ -185,7 +185,11 @@ func IdlePending() bool {
 		return false
 	}
 	lockHeap()
-	pending := native.mallocs != native.collectedMallocs || native.dirtyFree != 0
+	stats := Stats{Mallocs: native.mallocs}
+	if threaded.Load() {
+		pendingCounts(&stats)
+	}
+	pending := stats.Mallocs != native.collectedMallocs || native.dirtyFree != 0
 	unlockHeap()
 	return pending
 }
@@ -199,7 +203,11 @@ func CollectIdle() {
 		return
 	}
 	lockHeap()
-	allocated := native.mallocs != native.collectedMallocs
+	stats := Stats{Mallocs: native.mallocs}
+	if threaded.Load() {
+		pendingCounts(&stats)
+	}
+	allocated := stats.Mallocs != native.collectedMallocs
 	unlockHeap()
 	if allocated {
 		Collect()
@@ -269,6 +277,12 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		Init()
 	}
 	if threaded.Load() {
+		if collecting {
+			panic("arena: allocation during a collection")
+		}
+		if size <= maxSmallSize && threadCaches {
+			return pointerAt(allocCached(t, size, pointerFree(layout)))
+		}
 		return pointerAt(allocThreaded(t, size, pointerFree(layout)))
 	}
 	if native.liveBytes >= native.nextCollection && !collecting {
@@ -322,7 +336,10 @@ func free(pointer unsafe.Pointer) {
 	if pointer == nil || pointer == unsafe.Pointer(&zeroSized) {
 		return
 	}
-	lockHeap()
+	if threaded.Load() {
+		freeThreaded(self(), address)
+		return
+	}
 	if inRegion(address) {
 		unlockHeap()
 		return
@@ -374,6 +391,9 @@ func HeapStats() Stats {
 	}
 	lockHeap()
 	stats := native.stats()
+	if threaded.Load() {
+		pendingCounts(&stats)
+	}
 	unlockHeap()
 	return stats
 }
@@ -392,6 +412,7 @@ func ReadDiagnostics(d *Diagnostics) {
 	if ready {
 		lockHeap()
 		native.diagnostics(d)
+		threadDiagnostics(d)
 		unlockHeap()
 	}
 }

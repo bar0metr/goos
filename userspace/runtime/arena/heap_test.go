@@ -132,6 +132,9 @@ func (th *testHeap) verify() {
 				if m.mark[word] != 0 {
 					panic("mark bit left after a collection")
 				}
+				if m.owner != 0 {
+					panic("a slab is still owned")
+				}
 			}
 			if used != int(m.used) || (used == 0 && !listedSlabs[page]) || listedSlabs[page] != (uint32(used) < slotsPerPage(m.class)) {
 				panic("slab bookkeeping is inconsistent")

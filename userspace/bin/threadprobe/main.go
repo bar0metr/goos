@@ -8,7 +8,9 @@
 // roots of threads that run, wait in a call, or allocate in a region while
 // another collects; "storm N ROUNDS" has N threads ask for collections at
 // once; "fault" and "overflow" end a worker with a fault, which ends the
-// process. Only the main thread prints. It is built only into validation
+// process; "bench N OPS lock|cache" times N threads that allocate, with the
+// heap lock alone or with thread-owned slabs, and prints the allocator
+// profile. Only the main thread prints. It is built only into validation
 // images.
 package main
 
@@ -27,9 +29,9 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke N|lifecycle|gc N ROUNDS|roots|storm N ROUNDS|fault|overflow",
+	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|storm N R|fault|overflow|bench N OPS lock|cache",
 	Summary: "native thread checks",
-	MaxArgs: 3,
+	MaxArgs: 4,
 }
 
 //export userspaceMain
@@ -41,6 +43,13 @@ func run(data startup.Data) {
 	if data.ArgCount() < 1 {
 		utility.Usage()
 	}
+	// Running out of heap is reported, never waited out.
+	arena.OnExhausted(func() {
+		stats := arena.HeapStats()
+		report("THREADPROBE_EXHAUSTED live=", stats.Live, " held=", stats.Held, " collections=", uint64(stats.Collections), "", 0)
+		printProfile()
+		utility.Exit(4)
+	})
 	mode, _ := data.Arg(1)
 	switch {
 	case utility.Equal(mode, "smoke") && data.ArgCount() == 2:
@@ -58,6 +67,14 @@ func run(data startup.Data) {
 		count, _ := data.Arg(2)
 		rounds, _ := data.Arg(3)
 		storm(int(parse(count)), int(parse(rounds)))
+	case utility.Equal(mode, "bench") && data.ArgCount() == 4:
+		count, _ := data.Arg(2)
+		ops, _ := data.Arg(3)
+		kind, _ := data.Arg(4)
+		if !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") {
+			utility.Usage()
+		}
+		bench(int(parse(count)), int(parse(ops)), utility.Equal(kind, "cache"))
 	case utility.Equal(mode, "fault"):
 		crash(faultWorker)
 	case utility.Equal(mode, "overflow"):
@@ -581,4 +598,80 @@ func crash(worker func(uintptr)) {
 	marker("THREADPROBE_CRASH_STARTED")
 	thread.Join(id)
 	marker("THREADPROBE_CRASH_SURVIVED")
+}
+
+// Allocation benchmark. Every thread, the main one included, allocates a
+// mix of small sizes and keeps the last 64 alive.
+var (
+	benchOps   int
+	benchReady atomic.Uint32
+	benchGo    atomic.Bool
+	benchSums  [thread.Slots]atomic.Uint64
+	benchSizes = [...]int{16, 24, 48, 64, 100, 200, 400, 1000}
+)
+
+//go:noinline
+func benchLoop(index int) {
+	var ring [64][]byte
+	for op := 0; op < benchOps; op++ {
+		buffer := make([]byte, benchSizes[(op+index)%len(benchSizes)])
+		buffer[0] = byte(op)
+		ring[op%len(ring)] = buffer
+	}
+	benchSums[index].Store(uint64(ring[0][0]))
+}
+
+func benchWorker(argument uintptr) {
+	benchReady.Add(1)
+	for !benchGo.Load() {
+		thread.Yield()
+	}
+	benchLoop(int(argument))
+}
+
+func bench(count int, ops int, caches bool) {
+	expect(count >= 1 && count <= thread.Slots && ops >= 1, "arguments")
+	benchOps = ops
+	arena.UseThreadCaches(caches)
+	var ids [maxWorkers]thread.ID
+	for index := 0; index < count-1; index++ {
+		id, status := thread.Start(benchWorker, uintptr(index+1))
+		expect(status == kcall.StatusOK, "thread start")
+		ids[index] = id
+	}
+	for int(benchReady.Load()) < count-1 {
+		thread.Yield()
+	}
+	before := arena.HeapStats()
+	start := utility.ClockNanos()
+	benchGo.Store(true)
+	benchLoop(0)
+	for index := 0; index < count-1; index++ {
+		_, status := thread.Join(ids[index])
+		expect(status == kcall.StatusOK, "join")
+	}
+	elapsed := utility.ClockNanos() - start
+	after := arena.HeapStats()
+	total := uint64(count) * uint64(ops)
+	utility.PrintText("THREADPROBE_BENCH mode=")
+	if caches {
+		utility.PrintText("cache")
+	} else {
+		utility.PrintText("lock")
+	}
+	report(" threads=", uint64(count), " ops=", total, " ns=", elapsed, " collections=", uint64(after.Collections-before.Collections))
+	printProfile()
+	marker("THREADPROBE_BENCH_OK")
+}
+
+// profile and profileLine are globals so that printing the profile
+// allocates nothing.
+var (
+	profile     arena.Diagnostics
+	profileLine [160]byte
+)
+
+func printProfile() {
+	arena.ReadDiagnostics(&profile)
+	profile.AppendProfile("threadprobe", profileLine[:], utility.Write)
 }
