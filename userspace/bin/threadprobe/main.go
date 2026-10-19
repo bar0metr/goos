@@ -4,11 +4,16 @@
 // (ADR 0203). "smoke N" runs N threads that compute without allocating and
 // shows they ran on several processors at once; "lifecycle" checks thread
 // IDs, joins, exit codes, and the task quota; "gc N ROUNDS" has N threads
-// allocate, share, and drop objects across collections. Only the main thread
-// prints. It is built only into validation images.
+// allocate, share, and drop objects across collections; "roots" checks the
+// roots of threads that run, wait in a call, or allocate in a region while
+// another collects; "storm N ROUNDS" has N threads ask for collections at
+// once; "fault" and "overflow" end a worker with a fault, which ends the
+// process. Only the main thread prints. It is built only into validation
+// images.
 package main
 
 import (
+	"math/bits"
 	"runtime"
 	"sync/atomic"
 
@@ -22,7 +27,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke N|lifecycle|gc N ROUNDS",
+	Usage:   "threadprobe smoke N|lifecycle|gc N ROUNDS|roots|storm N ROUNDS|fault|overflow",
 	Summary: "native thread checks",
 	MaxArgs: 3,
 }
@@ -47,6 +52,16 @@ func run(data startup.Data) {
 		count, _ := data.Arg(2)
 		rounds, _ := data.Arg(3)
 		collect(int(parse(count)), int(parse(rounds)))
+	case utility.Equal(mode, "roots"):
+		roots()
+	case utility.Equal(mode, "storm") && data.ArgCount() == 3:
+		count, _ := data.Arg(2)
+		rounds, _ := data.Arg(3)
+		storm(int(parse(count)), int(parse(rounds)))
+	case utility.Equal(mode, "fault"):
+		crash(faultWorker)
+	case utility.Equal(mode, "overflow"):
+		crash(overflowWorker)
 	default:
 		utility.Usage()
 	}
@@ -107,9 +122,11 @@ var (
 	cpuWires [thread.Slots][kcall.CPURuntimeSize]byte
 )
 
-// running counts the processors that run a thread of this process now.
+// running counts the threads of this process that one pass over the
+// processors finds running. A thread that moves between processors during
+// the pass is counted once.
 func running(slot int) uint64 {
-	count := uint64(0)
+	seen := uint32(0)
 	for cpu := uint64(0); cpu < 64; cpu++ {
 		if sys.CPURuntime(cpu, &cpuWires[slot]) != kcall.StatusOK {
 			break
@@ -120,12 +137,12 @@ func running(slot int) uint64 {
 		}
 		for index := range ourTasks {
 			if value := ourTasks[index].Load(); value != 0 && value == state.Current {
-				count++
+				seen |= 1 << index
 				break
 			}
 		}
 	}
-	return count
+	return uint64(bits.OnesCount32(seen))
 }
 
 // cpuWorker computes until stop, without allocating, and samples which
@@ -363,4 +380,205 @@ func collect(count int, rounds int) {
 	expect(gcFailures.Load() == 0, "lists held only by their threads survived every collection")
 	expect(after.Collections > before.Collections, "collections ran")
 	marker("THREADPROBE_GC_OK")
+}
+
+// Root checks. Each worker holds lists no global names while the main thread
+// collects: one computes in a loop that makes no call, one waits in a
+// sleeping call, and one keeps its lists in objects of a region it is inside.
+const (
+	rootLists  = 24
+	rootLength = 40
+)
+
+var (
+	rootsHeld   atomic.Uint32
+	rootsStop   atomic.Bool
+	rootsResult [3]atomic.Uint32
+	// handed passes each worker its lists; the worker clears its entry
+	// before it reports that it holds them.
+	handed [3]atomic.Pointer[[rootLists]*node]
+)
+
+func rootSeed(worker, list int) uint64 { return uint64(worker+1)<<40 | uint64(list)<<16 }
+
+//go:noinline
+func takeLists(worker int) *[rootLists]*node {
+	lists := handed[worker].Load()
+	handed[worker].Store(nil)
+	return lists
+}
+
+//go:noinline
+func checkLists(worker int, lists *[rootLists]*node) uint32 {
+	good := uint32(0)
+	for index, head := range lists {
+		if listHolds(head, rootSeed(worker, index), rootLength) {
+			good++
+		}
+	}
+	return good
+}
+
+// spinWorker holds its lists while it loops on an atomic load.
+func spinWorker(uintptr) {
+	lists := takeLists(0)
+	rootsHeld.Add(1)
+	spins := uint64(0)
+	for !rootsStop.Load() {
+		spins++
+	}
+	crashSink.Store(spins)
+	rootsResult[0].Store(checkLists(0, lists))
+}
+
+// sleepWorker holds its lists while it waits in the kernel.
+func sleepWorker(uintptr) {
+	lists := takeLists(1)
+	rootsHeld.Add(1)
+	for !rootsStop.Load() {
+		utility.Sleep(1)
+	}
+	rootsResult[1].Store(checkLists(1, lists))
+}
+
+// holder is allocated in a region; it is the only record of its list.
+type holder struct {
+	list *node
+}
+
+// regionWorker moves its lists into holders it allocates inside a region,
+// so the region's objects past its recorded position hold them.
+func regionWorker(uintptr) {
+	lists := takeLists(2)
+	region := arena.NewRegion(64 << 10)
+	scope := region.Enter()
+	var holders [rootLists]*holder
+	for index := range lists {
+		holders[index] = &holder{list: lists[index]}
+		lists[index] = nil
+	}
+	rootsHeld.Add(1)
+	for !rootsStop.Load() {
+		thread.Yield()
+	}
+	good := uint32(0)
+	for index, h := range holders {
+		if listHolds(h.list, rootSeed(2, index), rootLength) {
+			good++
+		}
+	}
+	scope.Leave()
+	region.Release()
+	rootsResult[2].Store(good)
+}
+
+func roots() {
+	workers := [...]func(uintptr){spinWorker, sleepWorker, regionWorker}
+	var ids [len(workers)]thread.ID
+	for worker := range workers {
+		lists := new([rootLists]*node)
+		for index := range lists {
+			lists[index] = buildList(rootSeed(worker, index), rootLength)
+		}
+		handed[worker].Store(lists)
+		id, status := thread.Start(workers[worker], 0)
+		expect(status == kcall.StatusOK, "thread start")
+		ids[worker] = id
+	}
+	for rootsHeld.Load() < uint32(len(workers)) {
+		thread.Yield()
+	}
+	before := arena.HeapStats()
+	for round := 0; round < 12; round++ {
+		for garbage := 0; garbage < 40; garbage++ {
+			buildList(uint64(round), 64)
+		}
+		runtime.GC()
+	}
+	after := arena.HeapStats()
+	rootsStop.Store(true)
+	for worker := range workers {
+		_, status := thread.Join(ids[worker])
+		expect(status == kcall.StatusOK, "join")
+	}
+	report("THREADPROBE_ROOTS running=", uint64(rootsResult[0].Load()), " sleeping=", uint64(rootsResult[1].Load()),
+		" region=", uint64(rootsResult[2].Load()), " collections=", uint64(after.Collections-before.Collections))
+	expect(rootsResult[0].Load() == rootLists, "a running thread's lists survived")
+	expect(rootsResult[1].Load() == rootLists, "a sleeping thread's lists survived")
+	expect(rootsResult[2].Load() == rootLists, "a region's objects kept their lists")
+	marker("THREADPROBE_ROOTS_OK")
+}
+
+// stormWorker asks for a collection every round while it allocates.
+func stormWorker(argument uintptr) {
+	index := int(argument)
+	for round := 0; round < gcRounds; round++ {
+		seed := uint64(index)<<32 | uint64(round)<<8 | 3
+		mine := buildList(seed, 50)
+		runtime.GC()
+		if !listHolds(mine, seed, 50) {
+			gcFailures.Add(1)
+		}
+		gcChecks.Add(1)
+	}
+}
+
+func storm(count int, rounds int) {
+	expect(count >= 2 && count <= maxWorkers && rounds >= 1, "arguments")
+	gcRounds = rounds
+	before := arena.HeapStats()
+	var ids [maxWorkers]thread.ID
+	for index := 0; index < count; index++ {
+		id, status := thread.Start(stormWorker, uintptr(index))
+		expect(status == kcall.StatusOK, "thread start")
+		ids[index] = id
+	}
+	for index := 0; index < count; index++ {
+		_, status := thread.Join(ids[index])
+		expect(status == kcall.StatusOK, "join")
+	}
+	after := arena.HeapStats()
+	collections := uint64(after.Collections - before.Collections)
+	requests := uint64(count * rounds)
+	report("THREADPROBE_STORM threads=", uint64(count), " requests=", requests, " collections=", collections, " failures=", gcFailures.Load())
+	expect(gcFailures.Load() == 0, "objects survived concurrent collection requests")
+	expect(collections >= 1 && collections <= requests, "collection requests were served")
+	marker("THREADPROBE_STORM_OK")
+}
+
+var crashSink atomic.Uint64
+
+// faultWorker writes to a page it unmapped.
+func faultWorker(uintptr) {
+	base, status := sys.VMReserve(4096, kcall.VMRead|kcall.VMWrite)
+	if status == kcall.StatusOK && sys.VMUnmap(base, 4096) == kcall.StatusOK {
+		sys.Window(base, 4096)[0] = 1
+	}
+}
+
+// overflowWorker recurses past its stack into the guard below it.
+func overflowWorker(uintptr) {
+	crashSink.Store(uint64(recurse(1 << 20)))
+}
+
+//go:noinline
+func recurse(depth int) int {
+	var frame [16 << 10]byte
+	for index := 0; index < len(frame); index += 4096 {
+		frame[index] = byte(depth)
+	}
+	if depth <= 1 {
+		return int(frame[0])
+	}
+	return recurse(depth-1) + int(frame[len(frame)-4096]) - depth + 1
+}
+
+// crash starts a worker that faults. The fault ends the whole process, so
+// the main thread never prints the marker after its join.
+func crash(worker func(uintptr)) {
+	id, status := thread.Start(worker, 0)
+	expect(status == kcall.StatusOK, "thread start")
+	marker("THREADPROBE_CRASH_STARTED")
+	thread.Join(id)
+	marker("THREADPROBE_CRASH_SURVIVED")
 }

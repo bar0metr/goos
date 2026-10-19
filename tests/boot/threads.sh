@@ -2,8 +2,9 @@
 # Boots one validation guest with several processors and checks native
 # threads (ADR 0203): threads of one process run on several processors at
 # once, IDs, joins, exit codes and the task quota behave, threads allocate
-# and collect on one heap without losing an object, and a fault in a thread
-# ends only its process. Writes build/reports/threads.txt.
+# and collect on one heap without losing an object, the roots of threads
+# that run, sleep, or allocate in a region survive another's collection,
+# and a fault in a thread ends only its process. Writes build/reports/threads.txt.
 set -eu
 
 iso=${1:?ISO path required}
@@ -105,6 +106,29 @@ for count in 1 3 7; do
 	require '^THREADPROBE_GC_OK$' "collection with $count threads"
 	grep '^THREADPROBE_GC ' "$work/output" >>"$work/summary"
 done
+
+run 'threadprobe roots'
+require '^THREADPROBE_ROOTS_OK$' 'roots of running, sleeping, and region-allocating threads'
+grep '^THREADPROBE_ROOTS ' "$work/output" >>"$work/summary"
+
+for count in 2 7; do
+	run "threadprobe storm $count 20"
+	require '^THREADPROBE_STORM_OK$' "collection requests from $count threads at once"
+	grep '^THREADPROBE_STORM ' "$work/output" >>"$work/summary"
+done
+
+# A fault in a worker ends its whole process and nothing else.
+for mode in fault:'user fault: no mapping' overflow:'user fault: guard page'; do
+	run "threadprobe ${mode%%:*}"
+	require '^THREADPROBE_CRASH_STARTED$' "${mode%%:*} worker started"
+	require "${mode#*:}" "a worker's ${mode%%:*} was reported"
+	! grep -q '^THREADPROBE_CRASH_SURVIVED$' "$work/output" || fail "the process outlived its worker's ${mode%%:*}"
+	printf '%s: process ended\n' "${mode%%:*}" >>"$work/summary"
+done
+
+# The ended processes left their slots and stacks: threads start again.
+run 'threadprobe lifecycle'
+require '^THREADPROBE_LIFECYCLE_OK$' 'thread lifecycle after the faults'
 
 run 'echo after-threads'
 require '^after-threads$' 'the system carries on after the thread checks'
