@@ -391,6 +391,11 @@ func (r *report) renderRetention() {
 func (r *report) renderProfiles(g *Guest) {
 	r.printf("### Allocator profiles: %s\n\n", g.Label)
 	r.printf("Counters are cumulative for each process; frontier, metadata, slab, and free-run figures are a snapshot at the report.\n\n")
+	for _, name := range g.Order {
+		if g.Incomplete[name] != 0 {
+			r.printf("`%s` left %d incomplete profiles, which lost a line on the console; the table uses its last complete one.\n\n", name, g.Incomplete[name])
+		}
+	}
 	keys := []string{"large", "large_pages", "new_slabs", "from_runs", "from_fresh", "recommitted", "cleared", "to_full", "to_partial",
 		"searches", "candidates", "discards", "discard_failures", "discarded", "trims", "frontier", "meta_pages", "slab_chunks", "slab_chunks_touched",
 		"free_runs", "free_pages", "longest_free", "dirty_free", "run_pages"}

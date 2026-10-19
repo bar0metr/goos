@@ -41,7 +41,8 @@ allocation, so only validation images and host builds keep it.
 snapshot of slabs per class, free slots, free runs, dirty free pages, and
 metadata pages. `Diagnostics.AppendProfile` writes it as `ALLOC_PROFILE`
 lines of at most the caller's buffer, so a console that relays whole writes
-keeps each line intact. memreclaim prints its profile, and the VFS service
+keeps each line intact, and ends it with a line that counts the others, so a
+reader can drop a profile that lost one. memreclaim prints its profile, and the VFS service
 prints one every 16384 requests in validation builds: once every 4096 the
 four lines doubled what the service writes to the console, and a line that
 landed as the shell printed its prompt hid a command from the boot test.

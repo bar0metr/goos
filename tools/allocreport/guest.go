@@ -23,6 +23,9 @@ type Guest struct {
 	VFS map[string]uint64
 	// Retained lists the retentions the workload ran with, in order.
 	Retained []uint64
+	// Complete and Incomplete count, per process, the profiles whose every
+	// line arrived and the ones that lost a line or a counter.
+	Complete, Incomplete map[string]int
 }
 
 func contains(values []uint64, value uint64) bool {
@@ -39,6 +42,8 @@ type Round struct{ Round, Kernel, Processes uint64 }
 
 // Profile is one process's allocator profile.
 type Profile struct {
+	// lines counts the lines read for it, to check against its end line.
+	lines  int
 	Fields map[string]uint64
 	// Sizes maps a 16-byte bucket to its request count and bytes.
 	Sizes map[int][2]uint64
@@ -46,20 +51,36 @@ type Profile struct {
 	Slabs map[int][3]uint64
 }
 
-func readGuest(path string) (*Guest, error) {
+// readGuest reads a guest report or log. Profiles that lost a line are
+// dropped; a file with no end line at all predates them, and its profiles
+// count as they stand.
+func readGuest(path string) (*Guest, error) { return readGuestProfiles(path, false) }
+
+// readGuestProfiles is readGuest; strict requires every profile to end.
+func readGuestProfiles(path string, strict bool) (*Guest, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	g := &Guest{Profiles: map[string]*Profile{}, Lines: map[string]map[string]uint64{}}
+	g := &Guest{Profiles: map[string]*Profile{}, Lines: map[string]map[string]uint64{}, Complete: map[string]int{}, Incomplete: map[string]int{}}
 	// A profile spans several lines; one starting with the counters begins
-	// a new report of that process.
-	current := map[string]*Profile{}
+	// a new report of that process, and an end line closes it.
+	pending := map[string]*Profile{}
+	ended := false
+	// unended counts reports a new one started before they ended. In a file
+	// that predates end lines every report is such, and none is lost.
+	unended := map[string]int{}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for number := 1; scanner.Scan(); number++ {
-		words := strings.Fields(scanner.Text())
+		text := strings.TrimRight(scanner.Text(), "\r")
+		// A line a service printed as the shell showed its prompt
+		// follows "goos> ".
+		if index := strings.Index(text, "ALLOC_PROFILE "); index > 0 {
+			text = text[index:]
+		}
+		words := strings.Fields(text)
 		if len(words) == 0 {
 			continue
 		}
@@ -112,21 +133,89 @@ func readGuest(path string) (*Guest, error) {
 			}
 		case words[0] == "ALLOC_PROFILE" && len(words) >= 3:
 			name := words[1]
-			p := current[name]
-			if strings.HasPrefix(words[2], "large=") || p == nil {
-				p = &Profile{Fields: map[string]uint64{}, Sizes: map[int][2]uint64{}, Slabs: map[int][3]uint64{}}
-				current[name] = p
-				if g.Profiles[name] == nil {
-					g.Order = append(g.Order, name)
+			if words[2] == "end" {
+				ended = true
+				p := pending[name]
+				delete(pending, name)
+				lines, ok := pairs(words[3:])["lines"]
+				if p != nil && ok && uint64(p.lines) == lines && p.missing() == "" {
+					g.keep(name, p)
+				} else {
+					g.Incomplete[name]++
 				}
-				g.Profiles[name] = p
+				continue
 			}
+			p := pending[name]
+			if strings.HasPrefix(words[2], "large=") {
+				if p != nil {
+					unended[name]++
+					if !ended && !strict {
+						g.keep(name, p)
+					}
+				}
+				p = newProfile()
+				pending[name] = p
+			}
+			if p == nil {
+				// The first line of this report was lost; the end
+				// line will count it incomplete.
+				continue
+			}
+			p.lines++
 			if err := p.add(words[2:]); err != nil {
 				return nil, fmt.Errorf("%s:%d: %w", path, number, err)
 			}
 		}
 	}
+	// A file written before profiles had an end line has none; there every
+	// report counts as it stands.
+	for name, p := range pending {
+		if ended || strict {
+			g.Incomplete[name]++
+		} else {
+			g.keep(name, p)
+		}
+	}
+	if ended || strict {
+		for name, count := range unended {
+			g.Incomplete[name] += count
+		}
+	} else {
+		g.Incomplete = map[string]int{}
+	}
 	return g, scanner.Err()
+}
+
+func newProfile() *Profile {
+	return &Profile{Fields: map[string]uint64{}, Sizes: map[int][2]uint64{}, Slabs: map[int][3]uint64{}}
+}
+
+// keep records a complete report as the latest of its process.
+func (g *Guest) keep(name string, p *Profile) {
+	if g.Profiles[name] == nil {
+		g.Order = append(g.Order, name)
+	}
+	g.Profiles[name] = p
+	g.Complete[name]++
+}
+
+// profileKeys are the counters every complete profile carries
+// (arena.Diagnostics.AppendProfile).
+var profileKeys = []string{
+	"large", "large_bytes", "large_pages", "new_slabs", "from_runs", "from_fresh", "recommitted", "cleared",
+	"to_full", "to_partial", "searches", "candidates", "discards", "discard_failures", "discarded", "trims",
+	"retained", "frontier", "meta_pages", "slab_chunks", "slab_chunks_touched", "free_runs", "free_pages",
+	"longest_free", "dirty_free", "run_pages",
+}
+
+// missing names the first counter a profile lacks, or is empty.
+func (p *Profile) missing() string {
+	for _, key := range profileKeys {
+		if _, ok := p.Fields[key]; !ok {
+			return key
+		}
+	}
+	return ""
 }
 
 func (p *Profile) add(words []string) error {

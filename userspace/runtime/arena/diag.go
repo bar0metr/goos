@@ -165,6 +165,9 @@ func (h *heap) diagnostics(d *Diagnostics) {
 //
 //	ALLOC_PROFILE name key=value ...
 //
+// and ends with "ALLOC_PROFILE name end lines=N", N the number of lines
+// before it.
+//
 // one at a time into line, each ending in a newline, and hands each to emit.
 // A line never exceeds len(line), so a console that relays whole writes keeps
 // every line intact.
@@ -217,6 +220,13 @@ func (d *Diagnostics) AppendProfile(name string, line []byte, emit func([]byte))
 		}
 	}
 	w.flush()
+	// The last line counts the ones before it, so a reader can tell a
+	// profile whose lines all arrived from one that lost some.
+	lines := uint64(w.lines)
+	w.start()
+	w.text("end")
+	w.pair("lines", lines)
+	w.flush()
 }
 
 // profileWriter assembles profile lines in a caller's buffer.
@@ -229,6 +239,8 @@ type profileWriter struct {
 	name       string
 	emit       func([]byte)
 	label      string
+	// lines counts the lines sent.
+	lines int
 }
 
 func (w *profileWriter) start() {
@@ -304,6 +316,7 @@ func (w *profileWriter) flush() {
 	if w.size > w.head {
 		w.line[w.size] = '\n'
 		w.emit(w.line[:w.size+1])
+		w.lines++
 	}
 	w.size = w.head
 }

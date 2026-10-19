@@ -835,7 +835,10 @@ on reuse, discards, slab and free-run state, and metadata pages. The profile
 is written to `build/reports/allocator-guest-$LABEL.txt`. The VFS service
 prints its profile every 16384 requests, so after the shell rounds the
 script drives just enough VFS requests to reach the next profile, up to
-three times, and fails rather than write a report without one. Boot the baseline
+three times, and fails rather than write a report without one. A profile
+ends with a line that counts the lines before it; `allocreport count` takes
+only profiles whose every line and counter arrived, and the report notes
+the ones the console lost and uses the last complete one. Boot the baseline
 build with `LABEL=baseline`; the report puts it first and compares every
 other label with it.
 

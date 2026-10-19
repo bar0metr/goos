@@ -83,6 +83,7 @@ qemu-system-x86_64 -machine q35 -m "$memory" -accel tcg,thread=multi -smp 1 \
 pid=$!
 exec 3>"$fifo"
 : >"$work/all"
+go build -o "$work/allocreport" ./tools/allocreport || fail 'cannot build tools/allocreport'
 : >"$work/rounds"
 
 elapsed=0
@@ -123,10 +124,12 @@ done
 # decides whether one followed them. If none did, drive just enough requests
 # to pass the next multiple of 16384, from the last count it reported, which
 # trails its true count. memreclaim service makes three requests per count.
-# A line printed as the shell shows its prompt follows "goos> ", so neither
-# pattern is anchored.
+# Only a complete profile counts: tools/allocreport count checks that every
+# line its end line announces arrived and that every counter is there, so a
+# profile that lost a line to the console is not taken. A line printed as the
+# shell shows its prompt follows "goos> ", so no pattern is anchored.
 vfs_period=16384
-vfs_profiles() { tr -d '\r' <"$log" | grep -c 'ALLOC_PROFILE vfs large=' || true; }
+vfs_profiles() { "$work/allocreport" count -sizes -name vfs "$log"; }
 profiles_before=$(vfs_profiles)
 attempt=1
 while [ "$(vfs_profiles)" -le "$profiles_before" ]; do
@@ -146,5 +149,5 @@ tr -d '\r' <"$log" | grep -o 'VFS_MEMORY .*\|ALLOC_PROFILE vfs .*' >>"$work/all"
 	grep '^ALLOC_PROFILE \|^MEMRECLAIM_\|^VFS_MEMORY ' "$work/all"
 	cat "$work/rounds"
 } >"$report"
-grep -q '^ALLOC_PROFILE vfs large=' "$report" || fail "no VFS allocator profile in $report"
+[ "$("$work/allocreport" count -sizes -name vfs "$report")" -ge 1 ] || fail "no complete VFS allocator profile in $report"
 printf 'PASS allocator profile: %s\n' "$report"

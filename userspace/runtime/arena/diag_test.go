@@ -133,6 +133,10 @@ func TestProfileLinesFitAndParse(t *testing.T) {
 			t.Fatalf("bucket %d: %d listed, %d counted", bucket, counts[bucket], count)
 		}
 	}
+	last := profileLines[len(profileLines)-1]
+	if last != "ALLOC_PROFILE vfs end lines="+strconv.Itoa(len(profileLines)-1)+"\n" {
+		t.Fatalf("profile ends with %q after %d lines", last, len(profileLines)-1)
+	}
 	for _, key := range []string{"large", "new_slabs", "recommitted", "discards", "meta_pages", "dirty_free", "trims"} {
 		if !fields[key] {
 			t.Fatalf("no %s in %q", key, profileLines)

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"goos/userspace/runtime/arena"
 )
 
 func TestParseBenchLine(t *testing.T) {
@@ -130,5 +132,92 @@ func TestReadGuest(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("report lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// profileText renders a real profile for process name, as the guest prints
+// it, with the lines from the writer.
+func profileText(t *testing.T, name string) []string {
+	t.Helper()
+	var d arena.Diagnostics
+	d.SizeCounts[0], d.SizeBytes[0] = 10, 120
+	d.SizeCounts[64], d.SizeBytes[64] = 3, 3090
+	d.PartialSlabs[0], d.FreeSlots[0] = 1, 200
+	d.Frontier, d.MetadataPages = 40, 2
+	var lines []string
+	var buffer [160]byte
+	d.AppendProfile(name, buffer[:], func(line []byte) { lines = append(lines, strings.TrimSuffix(string(line), "\n")) })
+	return lines
+}
+
+func TestProfileCompleteness(t *testing.T) {
+	good := profileText(t, "vfs")
+	if len(good) < 4 || !strings.Contains(good[len(good)-1], " end lines=") {
+		t.Fatalf("profile lines %q", good)
+	}
+	var sizesLine, slabsLine int
+	for index, line := range good {
+		switch {
+		case strings.HasPrefix(line, "ALLOC_PROFILE vfs sizes"):
+			sizesLine = index
+		case strings.HasPrefix(line, "ALLOC_PROFILE vfs slabs"):
+			slabsLine = index
+		}
+	}
+	drop := func(lines []string, index int) []string {
+		return append(append([]string(nil), lines[:index]...), lines[index+1:]...)
+	}
+	noCounter := append([]string(nil), good...)
+	noCounter[0] = strings.Replace(noCounter[0], " new_slabs=0", "", 1)
+	cases := []struct {
+		name              string
+		lines             []string
+		complete, partial int
+		sizes             bool
+	}{
+		{"complete", good, 1, 0, true},
+		{"after the prompt", append([]string{"goos> " + good[0] + "\r"}, good[1:]...), 1, 0, true},
+		{"lost sizes", drop(good, sizesLine), 0, 1, false},
+		{"lost slabs", drop(good, slabsLine), 0, 1, false},
+		{"lost first line", good[1:], 0, 1, false},
+		{"never ended", good[:len(good)-1], 0, 1, false},
+		{"lost counter", noCounter, 0, 1, false},
+		{"a good one after a broken one", append(drop(good, sizesLine), good...), 1, 1, true},
+	}
+	for _, c := range cases {
+		path := filepath.Join(t.TempDir(), "log")
+		if err := os.WriteFile(path, []byte(strings.Join(c.lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		g, err := readGuestProfiles(path, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g.Complete["vfs"] != c.complete || g.Incomplete["vfs"] != c.partial {
+			t.Fatalf("%s: complete %d incomplete %d, want %d %d", c.name, g.Complete["vfs"], g.Incomplete["vfs"], c.complete, c.partial)
+		}
+		if hasSizes := g.Profiles["vfs"] != nil && len(g.Profiles["vfs"].Sizes) != 0; hasSizes != c.sizes {
+			t.Fatalf("%s: sizes %v, want %v", c.name, hasSizes, c.sizes)
+		}
+	}
+}
+
+// TestLegacyProfilesHaveNoEnd reads a file written before profiles had an end
+// line: every report counts, the last one is kept, and none is incomplete.
+func TestLegacyProfilesHaveNoEnd(t *testing.T) {
+	text := "ALLOC_PROFILE vfs large=1\nALLOC_PROFILE vfs sizes 1:5:80\nALLOC_PROFILE vfs large=2\nALLOC_PROFILE vfs sizes 1:9:144\n"
+	path := filepath.Join(t.TempDir(), "old")
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := readGuest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Incomplete["vfs"] != 0 || g.Complete["vfs"] != 2 || g.Profiles["vfs"].Fields["large"] != 2 || g.Profiles["vfs"].Sizes[1] != [2]uint64{9, 144} {
+		t.Fatalf("complete %d incomplete %d profile %+v", g.Complete["vfs"], g.Incomplete["vfs"], g.Profiles["vfs"])
+	}
+	if strict, err := readGuestProfiles(path, true); err != nil || strict.Complete["vfs"] != 0 {
+		t.Fatalf("strict reading kept %d unended profiles", strict.Complete["vfs"])
 	}
 }
