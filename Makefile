@@ -521,6 +521,7 @@ test-boot:
 # the host, then one guest that runs memreclaim, a double free, heap
 # exhaustion, and a long VFS run. The report is build/reports/memory.txt.
 test-memory:
+	@tests/boot/leak_round_test.sh
 	$(BUILD_ENV) go test -count=1 ./userspace/runtime/arena
 	$(BUILD_ENV) go test -race -count=1 -short ./userspace/runtime/arena
 	@$(MAKE) --no-print-directory iso VALIDATION=1

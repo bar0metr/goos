@@ -103,23 +103,12 @@ for retained in 0 16 64 256; do
 	check "memreclaim workload $workload $retained" '^MEMRECLAIM_WORKLOAD_OK$'
 done
 
-# Shell work. Every command must succeed: bench prints its result line, and
-# a failing utility reports "command: reason" or the shell an exit status.
-failed='^[a-z][a-z0-9_.-]*: \|exit status\|command not found'
-quiet() {
-	run "$1"
-	! grep -q "$failed" "$work/output" || fail "$1: $(grep "$failed" "$work/output" | head -n 3)"
-}
+# Shell work, every step checked (tests/boot/leak_round.sh).
+. "$(dirname "$0")/leak_round.sh"
+leak_prepare
 round=1
 while [ "$round" -le "$rounds" ]; do
-	quiet 'cp /system/bin/vmprobe /tmp/alloc.bin'
-	quiet 'rm /tmp/alloc.bin'
-	check 'bench io /tmp/alloc.io 256K' '^io '
-	quiet 'rm /tmp/alloc.io'
-	quiet 'ls /system/bin > /tmp/alloc.ls'
-	quiet 'rm /tmp/alloc.ls'
-	quiet '/system/linux/abi-probe random > /tmp/alloc.r'
-	quiet 'rm /tmp/alloc.r'
+	leak_round "$round"
 	run 'sleep 2'
 	run 'mem -p'
 	kernel=$(sed -n 's/^pages in the kernel: //p' "$work/output")
