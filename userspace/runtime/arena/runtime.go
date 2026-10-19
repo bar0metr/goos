@@ -125,8 +125,9 @@ func fail() {
 // may hold the only copy of a pointer the program is still using, so nothing
 // is collected until the outermost region is left.
 //
-// The stack below Collect is zeroed first and the work runs in collect, whose
-// frames therefore start out zero. Without that, a slot a frame reserves but
+// The stack below Collect, at most 4 KiB of it and none past the bottom of
+// the stack, is zeroed first and the work runs in collect, whose frames
+// therefore start out zero. Without that, a slot a frame reserves but
 // has not written can still hold an address an earlier, deeper call stored,
 // and the scan keeps that allocation alive: memreclaim's unreachable cycle
 // survived this way after an unrelated change moved the frames.
@@ -137,7 +138,7 @@ func Collect() {
 	if collecting {
 		panic("arena: collection started during a collection")
 	}
-	scrubStack()
+	scrubStack(stackBase())
 	collect()
 }
 
@@ -189,8 +190,11 @@ func CollectIdle() {
 
 // SetRetained sets how many free pages a collection or an explicit free
 // leaves for the allocations after it instead of giving them back, up to
-// 256. Zero gives every page back at once. An idle wait and a failed
-// allocation give back the retained pages too.
+// 256. Zero, the default, gives every page back at once. An idle wait and a
+// failed allocation give back the retained pages too. Retained pages stay
+// charged to the process's page quota, and nothing gives them back when a
+// page touched past the quota stops the process: the kernel charges a page
+// at that touch, after the allocator has returned (ADR 0202).
 func SetRetained(pages uint32) {
 	if !ready {
 		Init()

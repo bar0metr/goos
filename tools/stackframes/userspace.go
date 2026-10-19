@@ -121,11 +121,23 @@ type step struct {
 	problem string
 }
 
-var belowStackPointer = regexp.MustCompile(`(-0x[0-9a-f]+)\(SP\)`)
+var belowStackPointer = regexp.MustCompile(`(-?0x[0-9a-f]+)\(SP\)`)
 
 // stackPointerOffset matches a memory operand that is SP plus a constant and
 // nothing else.
 var stackPointerOffset = regexp.MustCompile(`^(-?0x[0-9a-f]+|-?[0-9]+)\(SP\)$`)
+
+// displacement parses the constant of an SP-relative operand. go tool
+// objdump prints a large negative 32-bit displacement unsigned, so -4096 reads
+// as 0xfffff000; such a value is the sign-extended displacement the
+// instruction uses.
+func displacement(text string) (int64, error) {
+	value, err := strconv.ParseInt(text, 0, 64)
+	if err == nil && value >= 1<<31 && value < 1<<32 {
+		value -= 1 << 32
+	}
+	return value, err
+}
 
 func decode(text string) step {
 	mnemonic, rest, _ := strings.Cut(text, " ")
@@ -138,7 +150,7 @@ func decode(text string) step {
 	}
 	for _, operand := range operands {
 		if match := belowStackPointer.FindStringSubmatch(operand); match != nil {
-			if offset, err := strconv.ParseInt(match[1], 0, 64); err != nil || offset < -redZoneSize {
+			if offset, err := displacement(match[1]); err != nil || offset < -redZoneSize {
 				return step{problem: fmt.Sprintf("%q reaches below the %d-byte red zone", text, redZoneSize)}
 			}
 		}
@@ -237,7 +249,7 @@ func adjustment(text, mnemonic string, operands []string) step {
 	dynamic := step{problem: fmt.Sprintf("%q changes SP by an amount only known at run time", text)}
 	if mnemonic == "LEAQ" && len(operands) == 2 {
 		if match := stackPointerOffset.FindStringSubmatch(operands[0]); match != nil {
-			value, err := strconv.ParseInt(match[1], 0, 64)
+			value, err := displacement(match[1])
 			if err == nil {
 				return step{delta: -value}
 			}
@@ -266,6 +278,38 @@ func adjustment(text, mnemonic string, operands []string) step {
 	return dynamic
 }
 
+// scrubInstructions is goos_gc_scrub in userspace/runtime/amd64.S as go tool
+// objdump prints it, branch target aside.
+var scrubInstructions = []string{
+	"LEAQ 0xfffff000(SP), AX",
+	"CMPQ AX, DI",
+	"CMOVB DI, AX",
+	"MOVQ SP, CX",
+	"SUBQ AX, CX",
+	"JBE",
+	"SHRQ $0x3, CX",
+	"MOVQ AX, DI",
+	"XORL AX, AX",
+	"CLD",
+	"REP; STOSQ AX, ES:0(DI)",
+	"RET",
+}
+
+// sameInstructions reports whether a function is exactly want; a want entry
+// that is a bare mnemonic matches that mnemonic with any operand.
+func sameInstructions(instructions []instruction, want []string) bool {
+	if len(instructions) != len(want) {
+		return false
+	}
+	for index, instruction := range instructions {
+		mnemonic, _, _ := strings.Cut(instruction.text, " ")
+		if instruction.text != want[index] && !(mnemonic == want[index] && !strings.Contains(want[index], " ")) {
+			return false
+		}
+	}
+	return true
+}
+
 // analyzeFunction returns the deepest the stack pointer gets below its value
 // at the function's entry, following control flow so that code after an
 // early return is still counted at the depth it runs at. Where two paths meet
@@ -279,6 +323,14 @@ func analyzeFunction(fn function) (int64, []string) {
 		fn.instructions[0].text == "MOVQ 0(DI), SP" &&
 		fn.instructions[1].text == "MOVQ 0x8(DI), AX" &&
 		fn.instructions[2].text == "JMP AX" {
+		return 0, nil
+	}
+	// The collector's stack scrub zeroes from max(SP - 4096, DI) up to SP
+	// through DI, where DI is the stack base the runtime passes: at most
+	// 4096 bytes below the return address, inside the guard if the base
+	// were wrong, and none below the stack (ADR 0202). Any other
+	// instruction sequence is analysed, and rejected, like any function.
+	if fn.name == "goos_gc_scrub" && sameInstructions(fn.instructions, scrubInstructions) {
 		return 0, nil
 	}
 	count := len(fn.instructions)
