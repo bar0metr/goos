@@ -54,31 +54,44 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
-- `make test-memory` checks the reclaimable native heap (ADR 0201). It runs
+- `make test-memory` checks the reclaimable native heap (ADR 0201, ADR 0202).
+  It runs the host test of the leak-round checks (`tests/boot/leak_round_test.sh`),
   the allocator and collector model tests on the host, once normally and once
   under the race detector, then boots one validation guest with
   `tests/boot/memory.sh`. In the guest `memreclaim` checks the compiler's
-pointer-free layouts, stack, global,
-  interior, and region roots, cyclic, deep, and wide garbage, zeroed reuse,
+  pointer-free layouts, stack, global, interior, and region roots, cyclic,
+  deep, and wide garbage, collections with its frames 16, 8, and 3 KiB above
+  the bottom of the stack and an object only dead frames held, zeroed reuse,
   boundary sizes, pointer slices of every class size held from their start or
-  only from inside across collections, explicit free, page return, 1000 explicit and 3000 automatic
-  collection rounds; `memreclaim double-free` must stop only its own process;
-  `memreclaim oom` must collect, retry, and only then report exhaustion;
-  `memreclaim burst` must give the pages of a burst of garbage back once it
-  waits idle, and keep them back through a second wait; and
-  `memreclaim service 3000` drives 9000 VFS requests and samples the VFS
-  service's pages ten times, each after the service has been idle long enough
-  to collect and give its free pages back; later samples must stay within 32
-  pages of the first two. The service reports its heap and pages every 1024
-  requests as well, and its live heap must stay within 1 MiB of the band the
-  early reports set. Pages it reports while requests run swing by up to 200
-  within a collection cycle, so the report lists them without banding them. `SERVICE_REQUESTS` changes the count. A leak run then
-repeats a mixed workload (file copy, VFS streaming, a pipeline, a Linux
-program) for `LEAK_ROUNDS` rounds, 20 by default, counting pages after every
-service has collected: the kernel's pages must not move from round 3 on, and
-process pages in the second half may not exceed the first half's highest by
-more than 4. The summary is
-  `build/reports/memory.txt`. `test-all` and `release-check` run it.
+  only from inside across collections, explicit free, page return, and 1000
+  explicit and 3000 automatic collection rounds. `memreclaim double-free`
+  must stop only its own process; `memreclaim oom` must collect, retry, and
+  only then report exhaustion; `memreclaim quota` must reuse 256 retained
+  pages cleared, give them back at idle time, and then be stopped by the
+  kernel past its page quota; `memreclaim burst` must give the pages of a
+  burst of garbage back once it waits idle, and keep them back through a
+  second wait; and `memreclaim service 3000` drives 9000 VFS requests and
+  samples the VFS service's pages ten times, each after the service has been
+  idle long enough to collect and give its free pages back; later samples
+  must stay within 32 pages of the first two. The service reports its heap
+  and pages every 1024 requests as well, and its live heap must stay within
+  1 MiB of the band the early reports set. Pages it reports while requests
+  run swing by up to 200 within a collection cycle, so the report lists them
+  without banding them. `SERVICE_REQUESTS` changes the count.
+
+  A leak run then repeats a mixed workload for `LEAK_ROUNDS` rounds, 20 by
+  default: a file copy, VFS streaming, a directory listed into a file, a
+  pipeline, and a Linux program, each on its own line and each checked by
+  what it made, with every file it made removed and checked gone
+  (`tests/boot/leak_round.sh`). A failed step stops the run before its round
+  counts. After each round and two idle seconds `mem -p` counts pages. From
+  round 3, the kernel's highest count in the second half may not exceed its
+  highest in the first, and no count from round 3 on may lie more than 4
+  pages below the first half's highest: a process of the previous command
+  can still be torn down while `mem -p` reads. Process pages in the second half may not exceed
+  the first half's highest by more than 4, nor spread over more than 16. The
+  summary is `build/reports/memory.txt`. `test-all` and `release-check` run
+  it.
 - `make test-system-boot` runs the installed-system and recovery proofs
   (ADR 0175); see [the system boot test](#system-boot-test).
 - `make test-network` builds the validation ISO and system tree and runs

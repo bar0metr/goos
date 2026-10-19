@@ -65,11 +65,45 @@ an address that an earlier, deeper call (`alloc`, `find`, `Watch`) left at the
 same stack depth. The new code only moved the frames; main had the same
 exposure.
 
-`Collect` now calls `goos_gc_scrub`, which zeroes the 4 KiB of stack below
+`Collect` now calls `goos_gc_scrub`, which zeroes up to 4 KiB of stack below
 its frame, and runs the collection in a separate function whose frames start
 out zero. Frames of the collector's callers can still hold stale words; that
 is the conservative scan's known false retention. The scrub touches at most
 one more stack page per process.
+
+The scrub writes below the stack pointer, which no compiled frame does, so
+its bound is argued here:
+
+- Every image `tools/elf2native` builds leaves its stack to the kernel and
+  names its size in `_goos_stack_reserve`, an absolute symbol the linker
+  script sets to 1 MiB; elf2native refuses an image without it, and the
+  loader accepts a page multiple up to 64 MiB. `kernel/loader` reserves the
+  stack as the reserve bytes that end at `UserStackTop` and leaves a 64 KiB
+  guard below them. `_start` records its entry stack pointer, inside the top
+  page, in `goos_stack_top`.
+- `stackBase` in `userspace/runtime/arena` rounds `goos_stack_top` minus the
+  reserve up to a page, which is exactly the lowest stack address, and
+  `Collect` passes it. The scrub zeroes `[max(SP - 4096, base), SP)`, where SP
+  is the address of its own return address: nothing below the stack, nothing
+  at or above the return address.
+- Below the caller's stack pointer nothing is live. TinyGo stores Go values
+  in the red zone only in functions that make no call, and `Collect` calls.
+  The scrub changes rax, rcx, rdi, and the direction flag, all caller-saved,
+  and leaves the flag clear as the System V convention requires.
+- Were the base wrong, the writes would still stay within 4096 bytes below
+  the stack pointer, less than the guard, so the first one past the stack
+  would fault in the guard: the argument `tools/stackframes` makes for every
+  frame.
+
+`tools/stackframes` had not seen the scrub at all. `go tool objdump` prints
+the displacement -4096 unsigned, as `0xfffff000(SP)`, which the red-zone rule
+did not parse, and the stores go through DI. The tool now reads such
+displacements as the signed values the instruction uses, and admits
+`goos_gc_scrub` only as the exact instruction sequence reviewed here; the
+first, unbounded version is rejected. memreclaim's stack check collects with
+its frames 16, 8, and 3 KiB above the bottom of the stack. At 3 KiB the
+unbounded version would have written a KiB into the guard and stopped the
+process.
 
 ### Size classes
 
@@ -146,12 +180,35 @@ The heap can now keep a bounded number of dirty free pages after a collection
 or an explicit free for the allocations that follow, instead of giving every
 one back. `arena.SetRetained` sets the bound, at most 256 pages. The trims
 give the longest runs back first and a run from its end, so what stays is in
-the short runs a slab is taken from. An idle wait gives back every free page,
-retained or not, even with nothing allocated since the last collection:
-`arena.IdlePending` also reports free pages that wait. A failed allocation
-gives them back before its retry, and so does the path that reports
-exhaustion. A refused discard leaves its pages dirty, so they are cleared
-before reuse, and a later trim tries again.
+the short runs a slab is taken from.
+
+What the policy guarantees:
+
+- After a collection, and after an explicit free that finds more than 1 MiB
+  of free pages, at most the retained number of dirty free pages stay
+  undiscarded, plus any the kernel refused to discard.
+- An idle wait, `wait.Any` with nothing ready for 100 ms, gives back every
+  free page, retained or not, even with nothing allocated since the last
+  collection: `arena.IdlePending` also reports free pages that wait.
+- An allocation that does not fit collects, gives back every free page, and
+  retries; the path that reports exhaustion gives them back first too.
+- A refused discard leaves its pages dirty, so they are cleared before
+  reuse, and a later trim tries again. Every allocation reads as zero,
+  whichever path its memory took.
+
+What it does not guarantee: anything at the page quota. The kernel charges a
+page when it is first touched, after the allocator has returned the memory,
+and stops the process at the touch that would pass the quota; no trim runs
+then. Retained pages stay charged while kept, so they take up to the retained
+number of pages of headroom. A process could watch its headroom only by
+reading its own `ProcessInfo` record, which reports each process's pages and
+page limit; but the call indexes processes, has no entry for the caller, and
+the record in state running is the caller only while one processor runs
+processes. Under SMP another process can be running at the same moment. No
+quota-aware retention is built on that, and `SetRetained` stays an opt-in
+tuning call, zero by default. `memreclaim quota` checks reuse and the idle
+trim at 256 retained pages and then grows a live heap past the quota, which
+the kernel must stop without disturbing anything else.
 
 Retention defaults to zero, which is ADR 0201's behaviour. The guest workload
 ran slower the more it retained:
@@ -165,9 +222,7 @@ ran slower the more it retained:
 
 A retained page holds old bytes and must be cleared before it is reused. A
 discarded page comes back zeroed, and the untouched-slot record above skips
-clearing its slots. A process cannot find its own page quota without a new
-kernel call, since `ProcessInfo` has no entry for the caller, so retention
-also could not back off before the quota; at zero it never has to.
+clearing its slots.
 
 ### Memory gate
 
@@ -182,6 +237,17 @@ pages. `tests/boot/memory.sh` lists the pages from the service's own reports
 and bands only their live heap. `memreclaim burst` and a check of pointer
 slices of every class size were added.
 
+The leak run used to put several commands on one `;` line and take the next
+prompt as success. The GoOS shell has no `&&` and runs every command of such
+a line, so a failed copy or a missing Linux program still produced a prompt
+and a page sample. `tests/boot/leak_round.sh` now runs each step on its own
+line, rejects any diagnostic a stage prints, checks what the step made (a
+copy's size with `stat -b`, the benchmark's result lines and file, a listed
+name, the bytes a pipeline wrote, the Linux program's output), and requires
+each file gone after its removal, all before the round's pages count. A host
+test feeds it canned output with a fault injected into each step in turn. The
+leak criterion itself is unchanged.
+
 ## Consequences
 
 - An allocator change comes with numbers: `make bench-allocator` for the
@@ -190,9 +256,19 @@ slices of every class size were added.
 - Programs allocate faster and the VFS service collects less often. After
   idle time the processes of the shell rounds hold 3275 to 3276 pages
   against 3300.
-- The kernel's pages in those rounds read 1071 or 1072 against 1069, steady
-  from round to round. The kernel did not change; the difference has not been
-  traced.
+- Unresolved: the kernel's pages in those rounds read 1071 or 1072 against
+  1069, steady from round to round, and 1073 to 1075 in a later 20-round
+  run. The kernel did not change and the cause has not been reproduced.
+  `mem -p` sums records it reads one at a time while the last command's
+  processes may still be torn down, so a page can land on either side of the
+  count; the memory gate accepts a dip for that reason and fails only a rise
+  in the second half.
+- `make test-memory` passed on the measured tree with 3276 to 3279 process
+  pages and 1073 to 1075 kernel pages over 20 rounds, the VFS service at 105
+  pages in every idle sample, and a burst of 33, 197, and 50 pages before, at
+  its peak, and after idle time. These are an observed baseline, not
+  thresholds: the gate checks trends and bands, and the counts move with
+  images and workloads.
 - The command index is at 4086 of its 4096 bytes after memreclaim's usage
   line grew; the next command or usage change must make room.
 - Validation images carry the request histogram; other images do not.

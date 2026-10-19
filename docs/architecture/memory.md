@@ -191,8 +191,8 @@ callee-saved registers, and the used part of every region. It runs on
 `runtime.GC`, when live bytes reach `max(2 × live, live + 1 MiB)` of the last
 collection, when an allocation does not fit, and when a service has waited
 100 ms with nothing to do; `arena.OnExhausted` runs only after a collection
-and a retry fail. The collector zeroes 4 KiB of stack below itself first, so
-its own frames hold no stale address. Free pages go back with `VMDiscard`
+and a retry fail. The collector first zeroes up to 4 KiB of stack below itself,
+never past the bottom of the stack, so its own frames hold no stale address. Free pages go back with `VMDiscard`
 after each collection. `arena.SetRetained` can keep up to 256 of them for the
 allocations that follow, and an idle wait or a failed allocation gives those
 back too; by default none is kept, which a guest workload measured fastest.

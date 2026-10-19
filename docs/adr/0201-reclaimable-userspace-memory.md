@@ -3,7 +3,7 @@
 ## Status
 
 Accepted. ADR 0202 adds the 1360-byte class, a stack scrub before each
-collection, free-page retention (off by default), and trims of free pages at
+collection bounded by the bottom of the stack, free-page retention (off by default), and trims of free pages at
 idle time and before out-of-memory.
 
 ## Context
