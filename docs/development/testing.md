@@ -832,7 +832,10 @@ each round. memreclaim and the VFS service print their allocator profile
 (`arena.ReadDiagnostics`): a histogram of small request sizes in 16-byte
 steps, where pages came from, pages recommitted after a discard, bytes cleared
 on reuse, discards, slab and free-run state, and metadata pages. The profile
-is written to `build/reports/allocator-guest-$LABEL.txt`. Boot the baseline
+is written to `build/reports/allocator-guest-$LABEL.txt`. The VFS service
+prints its profile every 16384 requests, so after the shell rounds the
+script drives just enough VFS requests to reach the next profile, up to
+three times, and fails rather than write a report without one. Boot the baseline
 build with `LABEL=baseline`; the report puts it first and compares every
 other label with it.
 

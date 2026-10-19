@@ -95,6 +95,7 @@ for marker in LAYOUT CONTAINERS STACK_ROOT GLOBAL_ROOT INTERIOR_ROOT CYCLE DEEP_
 	require "^MEMRECLAIM_${marker}_OK\$" "memreclaim $marker"
 done
 require '^MEMRECLAIM_OK$' 'memreclaim did not finish'
+stale=$(grep '^MEMRECLAIM_STACK_STALE ' "$work/output")
 reserved=$(field reserved '^MEMRECLAIM_STATS reserved=')
 post_live=$(field live '^MEMRECLAIM_STATS reserved=')
 peak_live=$(field peak_live '^MEMRECLAIM_STATS peak_live=')
@@ -211,6 +212,7 @@ require '^after-memory$' 'the system did not survive the memory checks'
 	printf 'exhaustion: %s\n' "$oom"
 	printf 'retained pages and the page quota: %s\n' "$quota"
 	printf 'burst and idle: %s\n' "$burst"
+	printf 'objects only dead frames held, kept (layout-dependent, at most one in ten): %s\n' "$stale"
 	printf 'VFS service: %s, %s reports, pages while busy from %s(lowest highest), early %s, last %s pages, last live %s bytes, %s collections\n' \
 		"$service" "$samples" "$busy_pages" "$band_pages" "$last_pages" "$last_live" "$vfs_collections"
 	printf 'leak run: %s rounds, kernel pages %s, process pages by round: %s\n' "$rounds" "$leak_kernel" "$leak_processes"

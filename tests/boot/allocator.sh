@@ -117,14 +117,34 @@ while [ "$round" -le "$rounds" ]; do
 	printf 'ALLOCATOR_ROUND round=%s kernel=%s processes=%s\n' "$round" "$kernel" "$processes" | tee -a "$work/rounds"
 	round=$((round + 1))
 done
-# The VFS reports its profile every 16384 requests; the shell rounds above
-# add to its count, and this run makes sure one more report follows them.
-check "memreclaim service 1500" '^MEMRECLAIM_SERVICE_OK$'
-grep -h '^VFS_MEMORY \|^ALLOC_PROFILE vfs ' "$log" | tr -d '\r' >>"$work/all"
+# The report needs a VFS allocator profile taken after the shell rounds. The
+# service prints one every 16384 requests and its request count every 1024
+# (userspace/cmd/vfs/memory.go), so how many requests the runs above made
+# decides whether one followed them. If none did, drive just enough requests
+# to pass the next multiple of 16384, from the last count it reported, which
+# trails its true count. memreclaim service makes three requests per count.
+# A line printed as the shell shows its prompt follows "goos> ", so neither
+# pattern is anchored.
+vfs_period=16384
+vfs_profiles() { tr -d '\r' <"$log" | grep -c 'ALLOC_PROFILE vfs large=' || true; }
+profiles_before=$(vfs_profiles)
+attempt=1
+while [ "$(vfs_profiles)" -le "$profiles_before" ]; do
+	[ "$attempt" -le 3 ] || fail "no VFS allocator profile after the shell rounds in $((attempt - 1)) extra runs"
+	served=$(tr -d '\r' <"$log" | sed -n 's/.*VFS_MEMORY requests=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+	[ -n "$served" ] || fail 'the VFS service reported no request count'
+	needed=$(((served / vfs_period + 1) * vfs_period - served))
+	count=$((needed / 3 + 2))
+	[ "$count" -ge 100 ] || count=100
+	check "memreclaim service $count" '^MEMRECLAIM_SERVICE_OK$'
+	attempt=$((attempt + 1))
+done
+tr -d '\r' <"$log" | grep -o 'VFS_MEMORY .*\|ALLOC_PROFILE vfs .*' >>"$work/all"
 
 {
 	printf 'ALLOCATOR_RUN label=%s revision=%s memory=%s\n' "$label" "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" "$memory"
 	grep '^ALLOC_PROFILE \|^MEMRECLAIM_\|^VFS_MEMORY ' "$work/all"
 	cat "$work/rounds"
 } >"$report"
+grep -q '^ALLOC_PROFILE vfs large=' "$report" || fail "no VFS allocator profile in $report"
 printf 'PASS allocator profile: %s\n' "$report"
