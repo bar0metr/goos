@@ -101,8 +101,10 @@ Rejected:
 
 - A table indexed by the size in 16-byte steps replaces the search of the
   class sizes, and a table of slots per class replaces a division.
-- `find` divides an offset in a page by the slot size with a multiply by
-  `ceil(2^32 / size)` and a shift, exact for every offset below 2^21.
+- `find` divides the 32-bit offset in its page by the slot size, which on
+  amd64 is the cheaper division, and rejects a slot that ends past the page;
+  it used to divide the 64-bit offset and divide again for the slots per
+  page.
 - A slab records the first slot not handed out since its page last read as
   zeroes. Slots from there on are not cleared: a slab on a page the kernel
   just supplied used to clear every slot it handed out after the first,
@@ -111,16 +113,23 @@ Rejected:
   lowers it, a sweep resets it, and the test invariant checks that every slot
   before it is in use.
 
-On the host a small allocation got 26% to 28% faster, the short-lived-garbage
-benchmark 37% faster (18% from the tables and the clearing, 18% from the
-hint), and allocation at the class boundaries 10% to 13% faster. Collection
-times stayed within 1%. The hint costs one-word classes about 2%. In the guest
-the mixed workload ran in 538 ms against 1108 ms and cleared 2.6 MB on reuse
-against 73 MB.
+On the host a small allocation got 30% faster, the short-lived-garbage
+benchmark 33% faster (18% from the tables and the clearing, 18% of the rest
+from the hint), allocation at the class boundaries 8% to 11% faster, and the
+mixed, long-and-short-lived, and free-and-reallocate benchmarks 5% to 7%
+faster. Collection times stayed within 1.3% of main. The hint costs one-word
+classes about 2%. In the guest the mixed workload ran in 527 ms against
+1108 ms, cleared 2.6 MB on reuse against 73 MB, and its longest collection
+took 24% less time.
 
-Not adopted: a separate cache of free slots. The bitmap is the one record of
-which slots are in use, the hint already skips full words, and a cache would
-need invalidation on every free, sweep, and reuse.
+Not adopted:
+
+- A multiply by `ceil(2^32 / size)` and a shift in place of the division in
+  `find`. The lookup benchmark ran 12% slower than main with it and 2% faster
+  without it; collections did not change either way.
+- A separate cache of free slots. The bitmap is the one record of which slots
+  are in use, the hint already skips full words, and a cache would need
+  invalidation on every free, sweep, and reuse.
 
 ### Metadata
 
@@ -180,10 +189,10 @@ slices of every class size were added.
   host, `make bench-allocator-guest LABEL=...` for one guest, and
   `make allocator-report` for both.
 - Programs allocate faster and the VFS service collects less often. After
-  idle time the processes of the leak rounds hold 3275 to 3279 pages against
-  3300.
-- The kernel's pages in those rounds read 1070 to 1072 against 1069, steady
-  from round to round. The kernel did not change; the difference has not been
+  idle time the processes of the shell rounds hold 3276 to 3278 pages
+  against 3300.
+- The kernel's pages in those rounds read 1071 against 1069, steady from
+  round to round. The kernel did not change; the difference has not been
   traced.
 - The command index is at 4086 of its 4096 bytes after memreclaim's usage
   line grew; the next command or usage change must make room.

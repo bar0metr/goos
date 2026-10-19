@@ -102,11 +102,6 @@ type heap struct {
 	// replace a search of classSizes and a division on every allocation.
 	classOf    [sizeBuckets + 1]uint8
 	classSlots [classCount]uint16
-	// classMagic is 2^32 / size rounded up: an offset inside a page times
-	// it, shifted right by 32, is the offset divided by the slot size. The
-	// product is exact for every offset below 2^32 / maxSmallSize, far past
-	// a page. find runs for every word marking reads.
-	classMagic [classCount]uint32
 
 	// work is the mark stack. When it fills, marked objects stop being
 	// queued, overflow is set, and finishMark rescans the heap.
@@ -220,7 +215,6 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	}
 	for class := range h.classSlots {
 		h.classSlots[class] = uint16(slotsPerPage(uint8(class)))
-		h.classMagic[class] = uint32((1<<32 + uint64(classSizes[class]) - 1) / uint64(classSizes[class]))
 	}
 	for index := range h.runs {
 		h.runs[index] = noPage
@@ -533,11 +527,16 @@ func (h *heap) find(address uintptr) (page, slot uint32, start uintptr, ok bool)
 	m := &h.meta[page]
 	switch m.kind {
 	case pageSlab:
-		slot = uint32(uint64(address&(pageBytes-1)) * uint64(h.classMagic[m.class]) >> 32)
-		if slot >= uint32(h.classSlots[m.class]) || m.alloc[slot/64]&(1<<(slot%64)) == 0 {
+		// The offset fits 32 bits, and a 32-bit division is the cheaper
+		// one on amd64. A slot that ends past the page is the page's
+		// unused tail.
+		size := uint32(classSizes[m.class])
+		slot = uint32(address&(pageBytes-1)) / size
+		offset := slot * size
+		if offset+size > uint32(pageBytes) || m.alloc[slot/64]&(1<<(slot%64)) == 0 {
 			return 0, 0, 0, false
 		}
-		return page, slot, h.pageAddress(page) + uintptr(slot)*classSizes[m.class], true
+		return page, slot, h.pageAddress(page) + uintptr(offset), true
 	case pageRunTail:
 		head := m.head
 		if head >= page || h.meta[head].kind != pageRun || head+h.meta[head].count <= page {

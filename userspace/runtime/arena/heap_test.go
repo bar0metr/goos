@@ -210,12 +210,6 @@ func TestClassTablesMatchTheSearch(t *testing.T) {
 		if uint32(th.classSlots[class]) != slotsPerPage(uint8(class)) {
 			t.Fatalf("class %d slots", class)
 		}
-		size := uint64(classSizes[class])
-		for offset := uint64(0); offset < uint64(pageBytes); offset++ {
-			if offset*uint64(th.classMagic[class])>>32 != offset/size {
-				t.Fatalf("class %d: offset %d divides wrong", class, offset)
-			}
-		}
 	}
 }
 
