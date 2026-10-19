@@ -103,7 +103,10 @@ displacements as the signed values the instruction uses, and admits
 first, unbounded version is rejected. memreclaim's stack check collects with
 its frames 16, 8, and 3 KiB above the bottom of the stack. At 3 KiB the
 unbounded version would have written a KiB into the guard and stopped the
-process.
+process. The check then drops objects that only dead frames 12 to 100 frames
+below it held and requires each collected. Six frames down the object stayed:
+that address lay in the frames that call the collector, which the scrub
+leaves alone.
 
 ### Size classes
 

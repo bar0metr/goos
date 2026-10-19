@@ -521,32 +521,36 @@ func deepCollect(depth int) bool {
 }
 
 // deepGarbage allocates 256 KiB in a frame depth calls down and drops it, so
-// the only copy of its address lies in stack below the caller.
+// the only copy of its address lies in stack below the caller. The addition
+// after the call keeps the recursion from becoming a loop in one frame.
 //
 //go:noinline
-func deepGarbage(depth int) {
+func deepGarbage(depth int) int {
 	if depth > 0 {
-		deepGarbage(depth - 1)
-		return
+		return deepGarbage(depth-1) + 1
 	}
 	scratch := allocate(256 << 10)
 	scratch[0] = 1
+	return 0
 }
 
 // checkStackScrub collects with frames down to 3 KiB above the bottom of the
 // stack and requires every frame's object to survive, then drops an object
 // whose address only dead frames held and requires a collection from above
 // them to free it: the collector's own frames, built over those, must not
-// keep it.
+// keep it. The depths start a few frames down, past the frames that call the
+// collector: those are not zeroed, and a stale word in them is the false
+// retention a conservative scan accepts. Six 16-byte frames down the object
+// was kept that way; from eight on every depth to 100 was collected.
 func checkStackScrub() {
 	scrubNext = 0
 	expect(arena.StackRoom() > 64<<10, "the stack has room to recurse")
 	expect(deepCollect(0), "objects held by frames down to the bottom of the stack survive")
 	expect(scrubNext == len(scrubRooms), "the recursion reached the bottom of the stack")
 	report("MEMRECLAIM_STACK_SCRUB depth=", uint64(scrubDeepest), " room=", uint64(scrubRoom), "", 0, "", 0)
-	for round := 0; round < 4; round++ {
+	for depth := 12; depth <= 100; depth += 2 {
 		collect()
-		deepGarbage(64 + round*200)
+		expect(deepGarbage(depth) == depth, "dead-frame recursion")
 		held := live()
 		collect()
 		expect(held >= live()+256<<10, "an object only dead frames held is collected")
