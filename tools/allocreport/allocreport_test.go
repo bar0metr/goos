@@ -137,10 +137,14 @@ func TestReadGuest(t *testing.T) {
 
 // profileText renders a real profile for process name, as the guest prints
 // it, with the lines from the writer.
-func profileText(t *testing.T, name string) []string {
+func profileText(t *testing.T, name string) []string { return profileWith(t, name, 10) }
+
+// profileWith is profileText with count requests in the first size bucket,
+// which tells one report from another.
+func profileWith(t *testing.T, name string, count uint64) []string {
 	t.Helper()
 	var d arena.Diagnostics
-	d.SizeCounts[0], d.SizeBytes[0] = 10, 120
+	d.SizeCounts[0], d.SizeBytes[0] = count, 12*count
 	d.SizeCounts[64], d.SizeBytes[64] = 3, 3090
 	d.PartialSlabs[0], d.FreeSlots[0] = 1, 200
 	d.Frontier, d.MetadataPages = 40, 2
@@ -219,5 +223,49 @@ func TestLegacyProfilesHaveNoEnd(t *testing.T) {
 	}
 	if strict, err := readGuestProfiles(path, true); err != nil || strict.Complete["vfs"] != 0 {
 		t.Fatalf("strict reading kept %d unended profiles", strict.Complete["vfs"])
+	}
+}
+
+// TestProfileThatLostItsEndBeforeAnother covers a first report that lost its
+// end line, followed by another: the first must not count, whatever the
+// second is, in either reading.
+func TestProfileThatLostItsEndBeforeAnother(t *testing.T) {
+	first, second := profileWith(t, "vfs", 10), profileWith(t, "vfs", 20)
+	unended := first[:len(first)-1]
+	var damaged []string
+	for _, line := range second {
+		if !strings.HasPrefix(line, "ALLOC_PROFILE vfs sizes") {
+			damaged = append(damaged, line)
+		}
+	}
+	for _, c := range []struct {
+		name             string
+		lines            []string
+		complete, broken int
+		bucket           uint64
+	}{
+		{"then a complete one", append(append([]string(nil), unended...), second...), 1, 1, 20},
+		{"then a damaged one", append(append([]string(nil), unended...), damaged...), 0, 2, 0},
+	} {
+		path := filepath.Join(t.TempDir(), "log")
+		if err := os.WriteFile(path, []byte(strings.Join(c.lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, strict := range []bool{false, true} {
+			g, err := readGuestProfiles(path, strict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if g.Complete["vfs"] != c.complete || g.Incomplete["vfs"] != c.broken {
+				t.Fatalf("%s, strict %v: complete %d incomplete %d, want %d %d", c.name, strict, g.Complete["vfs"], g.Incomplete["vfs"], c.complete, c.broken)
+			}
+			p := g.Profiles["vfs"]
+			switch {
+			case c.complete == 0 && p != nil:
+				t.Fatalf("%s, strict %v: the report uses an incomplete profile", c.name, strict)
+			case c.complete != 0 && (p == nil || p.Sizes[0][0] != c.bucket):
+				t.Fatalf("%s, strict %v: the report uses %+v", c.name, strict, p)
+			}
+		}
 	}
 }

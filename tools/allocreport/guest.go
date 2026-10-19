@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -68,9 +69,16 @@ func readGuestProfiles(path string, strict bool) (*Guest, error) {
 	// a new report of that process, and an end line closes it.
 	pending := map[string]*Profile{}
 	ended := false
-	// unended counts reports a new one started before they ended. In a file
-	// that predates end lines every report is such, and none is lost.
-	unended := map[string]int{}
+	// unended holds, in order, the reports a new one started before they
+	// ended and those still open at the end of the file. Whether they count
+	// is decided once the whole file is read: a file that predates end lines
+	// has none, and every report in it stands; in any other file an unended
+	// report lost its end.
+	type report struct {
+		name    string
+		profile *Profile
+	}
+	var unended []report
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for number := 1; scanner.Scan(); number++ {
@@ -148,10 +156,7 @@ func readGuestProfiles(path string, strict bool) (*Guest, error) {
 			p := pending[name]
 			if strings.HasPrefix(words[2], "large=") {
 				if p != nil {
-					unended[name]++
-					if !ended && !strict {
-						g.keep(name, p)
-					}
+					unended = append(unended, report{name, p})
 				}
 				p = newProfile()
 				pending[name] = p
@@ -169,21 +174,28 @@ func readGuestProfiles(path string, strict bool) (*Guest, error) {
 	}
 	// A file written before profiles had an end line has none; there every
 	// report counts as it stands.
-	for name, p := range pending {
-		if ended || strict {
-			g.Incomplete[name]++
-		} else {
-			g.keep(name, p)
-		}
+	for _, name := range g.pendingOrder(pending) {
+		unended = append(unended, report{name, pending[name]})
 	}
-	if ended || strict {
-		for name, count := range unended {
-			g.Incomplete[name] += count
+	for _, r := range unended {
+		if ended || strict {
+			g.Incomplete[r.name]++
+		} else {
+			g.keep(r.name, r.profile)
 		}
-	} else {
-		g.Incomplete = map[string]int{}
 	}
 	return g, scanner.Err()
+}
+
+// pendingOrder lists the processes with an open report sorted by name, so a
+// file is read the same way every time.
+func (g *Guest) pendingOrder(pending map[string]*Profile) []string {
+	var names []string
+	for name := range pending {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func newProfile() *Profile {
