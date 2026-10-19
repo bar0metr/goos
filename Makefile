@@ -21,7 +21,7 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim
+VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe
 COMMANDS = $(filter-out $(if $(filter 0,$(VALIDATION)),$(VALIDATION_COMMANDS)),$(sort $(notdir $(wildcard userspace/bin/*))))
 COMMAND_DIR = $(OUT_DIR)/userspace/bin
 COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf

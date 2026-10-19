@@ -3,6 +3,7 @@
 package main
 
 import (
+	"goos/internal/logfmt"
 	"goos/kernel/arch/amd64"
 	linuxcompat "goos/kernel/compat/linux"
 	"goos/kernel/handle"
@@ -47,9 +48,12 @@ func checkThreadCreationRollback() {
 			continue
 		}
 		stack, size := amd64.InjectedTaskStack()
-		if stack == 0 || pageAllocator.Statistics().FreePages != freePages || amd64.FreeTaskSlots() != freeSlots ||
+		pagesNow, slotsNow := pageAllocator.Statistics().FreePages, amd64.FreeTaskSlots()
+		if stack == 0 || pagesNow != freePages || slotsNow != freeSlots ||
 			owner.Available(process.ResourceTasks) != availableTasks || linuxcompat.ThreadRecords(selfTestRootLinux) != 0 ||
 			!threadStackReleased(stack, size) {
+			kernelLogUints(logfmt.Error, "thread rollback", "pages_before", freePages, "pages_after", pagesNow)
+			kernelLogUints(logfmt.Error, "thread rollback", "slots_before", uint64(freeSlots), "slots_after", uint64(slotsNow))
 			panicSerial("failed thread creation leaked resources")
 		}
 	}

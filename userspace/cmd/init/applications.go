@@ -427,7 +427,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if !linuxProcess && grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
 	}
-	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe")) {
+	// threadprobe runs up to eight threads, the large profile's task quota
+	// (ADR 0203).
+	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe")) {
 		profile = supervisor.ProfileLarge
 	}
 	event, launched := requestLaunch(executable, processName, grants, profile, slot, uint32(len(startupData)))

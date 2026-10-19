@@ -1,0 +1,366 @@
+//go:build goos_userspace
+
+// Command threadprobe checks native threads from inside the running system
+// (ADR 0203). "smoke N" runs N threads that compute without allocating and
+// shows they ran on several processors at once; "lifecycle" checks thread
+// IDs, joins, exit codes, and the task quota; "gc N ROUNDS" has N threads
+// allocate, share, and drop objects across collections. Only the main thread
+// prints. It is built only into validation images.
+package main
+
+import (
+	"runtime"
+	"sync/atomic"
+
+	"goos/kernel/kcall"
+	"goos/userspace/commands"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
+	"goos/userspace/runtime/thread"
+	"goos/userspace/startup"
+	"goos/userspace/utility"
+)
+
+var manifest = commands.Manifest{
+	Usage:   "threadprobe smoke N|lifecycle|gc N ROUNDS",
+	Summary: "native thread checks",
+	MaxArgs: 3,
+}
+
+//export userspaceMain
+func userspaceMain() { utility.Run(manifest, run) }
+
+func main() {}
+
+func run(data startup.Data) {
+	if data.ArgCount() < 1 {
+		utility.Usage()
+	}
+	mode, _ := data.Arg(1)
+	switch {
+	case utility.Equal(mode, "smoke") && data.ArgCount() == 2:
+		count, _ := data.Arg(2)
+		smoke(int(parse(count)))
+	case utility.Equal(mode, "lifecycle"):
+		lifecycle()
+	case utility.Equal(mode, "gc") && data.ArgCount() == 3:
+		count, _ := data.Arg(2)
+		rounds, _ := data.Arg(3)
+		collect(int(parse(count)), int(parse(rounds)))
+	default:
+		utility.Usage()
+	}
+}
+
+func expect(ok bool, what string) {
+	if !ok {
+		utility.PrintText("threadprobe: ")
+		utility.PrintText(what)
+		utility.PrintText(" failed")
+		utility.EndLine()
+		utility.Exit(1)
+	}
+}
+
+func marker(text string) {
+	utility.PrintText(text)
+	utility.EndLine()
+}
+
+func report(first string, a uint64, second string, b uint64, third string, c uint64, fourth string, d uint64) {
+	utility.PrintText(first)
+	utility.PrintUint(a)
+	for _, pair := range [...]struct {
+		label string
+		value uint64
+	}{{second, b}, {third, c}, {fourth, d}} {
+		if pair.label != "" {
+			utility.PrintText(pair.label)
+			utility.PrintUint(pair.value)
+		}
+	}
+	utility.EndLine()
+}
+
+func parse(text []byte) uint64 {
+	value := uint64(0)
+	for _, digit := range text {
+		if digit < '0' || digit > '9' || value > 1<<20 {
+			utility.Usage()
+		}
+		value = value*10 + uint64(digit-'0')
+	}
+	return value
+}
+
+// maxWorkers is the most threads a mode starts besides the main one.
+const maxWorkers = thread.Slots - 1
+
+// Shared state of a smoke run. Workers write only their own entry.
+var (
+	stop      atomic.Bool
+	ourTasks  [thread.Slots]atomic.Uint64
+	smokeRuns [maxWorkers]struct {
+		iterations, peak, checksum atomic.Uint64
+		_                          [40]byte
+	}
+	cpuWires [thread.Slots][kcall.CPURuntimeSize]byte
+)
+
+// running counts the processors that run a thread of this process now.
+func running(slot int) uint64 {
+	count := uint64(0)
+	for cpu := uint64(0); cpu < 64; cpu++ {
+		if sys.CPURuntime(cpu, &cpuWires[slot]) != kcall.StatusOK {
+			break
+		}
+		state, ok := kcall.DecodeCPURuntime(cpuWires[slot][:])
+		if !ok || !state.Online || state.Current == 0 {
+			continue
+		}
+		for index := range ourTasks {
+			if value := ourTasks[index].Load(); value != 0 && value == state.Current {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+// cpuWorker computes until stop, without allocating, and samples which
+// processors run this process's threads.
+func cpuWorker(argument uintptr) {
+	index := int(argument)
+	slot := thread.Slot()
+	state := uint64(index)*0x9e3779b97f4a7c15 | 1
+	iterations := uint64(0)
+	for !stop.Load() {
+		for step := 0; step < 4096; step++ {
+			state ^= state << 13
+			state ^= state >> 7
+			state ^= state << 17
+		}
+		iterations++
+		if iterations%8 == 0 {
+			if seen := running(slot); seen > smokeRuns[index].peak.Load() {
+				smokeRuns[index].peak.Store(seen)
+			}
+		}
+	}
+	smokeRuns[index].iterations.Store(iterations)
+	smokeRuns[index].checksum.Store(state)
+}
+
+func smoke(count int) {
+	expect(count >= 1 && count <= maxWorkers, "thread count")
+	ourTasks[0].Store(uint64(thread.Self()))
+	var ids [maxWorkers]thread.ID
+	for index := 0; index < count; index++ {
+		id, status := thread.Start(cpuWorker, uintptr(index))
+		expect(status == kcall.StatusOK, "thread start")
+		ids[index] = id
+		ourTasks[index+1].Store(uint64(id))
+	}
+	mainPeak := uint64(0)
+	for round := 0; round < 40; round++ {
+		utility.Sleep(5)
+		if seen := running(0); seen > mainPeak {
+			mainPeak = seen
+		}
+	}
+	stop.Store(true)
+	peak, total := mainPeak, uint64(0)
+	for index := 0; index < count; index++ {
+		code, status := thread.Join(ids[index])
+		expect(status == kcall.StatusOK && code == 0, "join")
+		peak = max(peak, smokeRuns[index].peak.Load())
+		total += smokeRuns[index].iterations.Load()
+		expect(smokeRuns[index].iterations.Load() > 0, "every thread ran")
+	}
+	processors := uint64(0)
+	for cpu := uint64(0); cpu < 64; cpu++ {
+		if sys.CPURuntime(cpu, &cpuWires[0]) != kcall.StatusOK {
+			break
+		}
+		if state, ok := kcall.DecodeCPURuntime(cpuWires[0][:]); ok && state.Online {
+			processors++
+		}
+	}
+	report("THREADPROBE_SMOKE threads=", uint64(count), " processors=", processors, " parallel_peak=", peak, " iterations=", total)
+	if processors >= 2 && count >= 2 {
+		expect(peak >= 2, "threads of one process ran on two processors at once")
+	}
+	marker("THREADPROBE_SMOKE_OK")
+}
+
+// Lifecycle checks.
+var (
+	exitWith  atomic.Uint64
+	joinSelf  atomic.Uint64
+	selfIDs   [thread.Slots]atomic.Uint64
+	released  atomic.Bool
+	startedOK atomic.Uint32
+)
+
+func exitWorker(argument uintptr) {
+	selfIDs[thread.Slot()].Store(uint64(thread.Self()))
+	thread.Exit(uint64(argument))
+}
+
+func selfJoinWorker(uintptr) {
+	_, status := thread.Join(thread.Self())
+	joinSelf.Store(uint64(status))
+}
+
+func holdWorker(uintptr) {
+	startedOK.Add(1)
+	for !released.Load() {
+		thread.Yield()
+	}
+}
+
+func lifecycle() {
+	mainID := thread.Self()
+	expect(mainID != 0 && thread.Slot() == 0, "the main thread has an ID and slot 0")
+
+	id, status := thread.Start(exitWorker, 5)
+	expect(status == kcall.StatusOK, "start")
+	code, status := thread.Join(id)
+	expect(status == kcall.StatusOK && code == 5, "a thread's exit code reaches its joiner")
+	_, status = thread.Join(id)
+	expect(status == kcall.StatusNotFound, "a thread joins once")
+	_, status = thread.Join(thread.ID(12345))
+	expect(status == kcall.StatusNotFound, "an unknown ID is refused")
+
+	id, status = thread.Start(selfJoinWorker, 0)
+	expect(status == kcall.StatusOK, "start")
+	code, status = thread.Join(id)
+	expect(status == kcall.StatusOK && code == 0 && joinSelf.Load() == uint64(kcall.StatusInvalidArgument), "a thread cannot join itself")
+
+	// Start until the task quota refuses; every thread waits to be let go.
+	var ids [maxWorkers]thread.ID
+	started := 0
+	for started < maxWorkers {
+		id, status := thread.Start(holdWorker, 0)
+		if status != kcall.StatusOK {
+			expect(status == kcall.StatusResourceExhausted, "the quota refuses with ResourceExhausted")
+			break
+		}
+		ids[started] = id
+		started++
+	}
+	expect(started >= 1, "at least one thread starts")
+	for int(startedOK.Load()) < started {
+		thread.Yield()
+	}
+	_, done, status := thread.Done(ids[0])
+	expect(status == kcall.StatusOK && !done, "a running thread is not done")
+	released.Store(true)
+	for index := 0; index < started; index++ {
+		_, status := thread.Join(ids[index])
+		expect(status == kcall.StatusOK, "join")
+	}
+	// A slot freed by a join takes the next thread, under a new ID.
+	again, status := thread.Start(exitWorker, 1)
+	expect(status == kcall.StatusOK, "a freed slot is used again")
+	_, status = thread.Join(again)
+	expect(status == kcall.StatusOK && again != ids[0] && again != id, "a new thread gets a new ID")
+	report("THREADPROBE_LIFECYCLE quota_threads=", uint64(started), "", 0, "", 0, "", 0)
+	marker("THREADPROBE_LIFECYCLE_OK")
+}
+
+// Collection checks.
+type node struct {
+	next  *node
+	value uint64
+	data  []byte
+}
+
+var (
+	gcRounds   int
+	gcFailures atomic.Uint64
+	gcChecks   atomic.Uint64
+	shared     [maxWorkers]atomic.Pointer[node]
+)
+
+//go:noinline
+func buildList(seed uint64, length int) *node {
+	var head *node
+	for index := 0; index < length; index++ {
+		head = &node{next: head, value: seed + uint64(index), data: make([]byte, 16+index%200)}
+		head.data[0] = byte(seed)
+	}
+	return head
+}
+
+//go:noinline
+func listHolds(head *node, seed uint64, length int) bool {
+	count := 0
+	expected := seed + uint64(length) - 1
+	for n := head; n != nil; n = n.next {
+		if n.value != expected || n.data[0] != byte(seed) {
+			return false
+		}
+		expected--
+		count++
+	}
+	return count == length
+}
+
+// gcWorker builds lists only it holds, hands one to the next worker, checks
+// the one it was handed, and drops the rest, collecting now and then.
+func gcWorker(argument uintptr) {
+	index := int(argument)
+	for round := 0; round < gcRounds; round++ {
+		seed := uint64(index)<<32 | uint64(round)<<8
+		mine := buildList(seed, 300)
+		shared[index].Store(buildList(seed|1, 100))
+		for garbage := 0; garbage < 8; garbage++ {
+			buildList(seed|2, 200)
+		}
+		if round%4 == index%4 {
+			runtime.GC()
+		}
+		if !listHolds(mine, seed, 300) {
+			gcFailures.Add(1)
+		}
+		if other := shared[(index+1)%len(shared)].Load(); other != nil {
+			gcChecks.Add(1)
+		}
+		runtime.KeepAlive(mine)
+	}
+}
+
+func collect(count int, rounds int) {
+	expect(count >= 1 && count <= maxWorkers && rounds >= 1, "arguments")
+	gcRounds = rounds
+	before := arena.HeapStats()
+	var ids [maxWorkers]thread.ID
+	for index := 0; index < count; index++ {
+		id, status := thread.Start(gcWorker, uintptr(index))
+		expect(status == kcall.StatusOK, "thread start")
+		ids[index] = id
+	}
+	mine := buildList(7, 500)
+	for round := 0; round < rounds; round++ {
+		buildList(9, 300)
+		if round%3 == 0 {
+			runtime.GC()
+		}
+	}
+	for index := 0; index < count; index++ {
+		_, status := thread.Join(ids[index])
+		expect(status == kcall.StatusOK, "join")
+	}
+	expect(listHolds(mine, 7, 500), "the main thread's list survived")
+	for index := range shared {
+		shared[index].Store(nil)
+	}
+	runtime.GC()
+	after := arena.HeapStats()
+	report("THREADPROBE_GC threads=", uint64(count), " collections=", uint64(after.Collections-before.Collections), " failures=", gcFailures.Load(), " live=", after.Live)
+	expect(gcFailures.Load() == 0, "lists held only by their threads survived every collection")
+	expect(after.Collections > before.Collections, "collections ran")
+	marker("THREADPROBE_GC_OK")
+}

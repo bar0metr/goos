@@ -74,8 +74,9 @@ const (
 	// BootstrapIndexPath where the boot archive's recovery index is.
 	IndexPath          = "/system/commands"
 	BootstrapIndexPath = "/bootstrap/commands"
-	// MaxIndex bounds the index a reader has to hold.
-	MaxIndex = 4096
+	// MaxIndex bounds the index a reader has to hold. PID 1 and the shell
+	// each keep one such buffer; 4096 bytes no longer held every command.
+	MaxIndex = 8192
 	// MaxName, MaxUsage, MaxSummary and MaxOptions bound one entry's fields.
 	MaxName    = 32
 	MaxUsage   = 96
