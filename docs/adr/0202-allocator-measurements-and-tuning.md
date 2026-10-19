@@ -116,8 +116,8 @@ Rejected:
 On the host a small allocation got 30% faster, the short-lived-garbage
 benchmark 33% faster (18% from the tables and the clearing, 18% of the rest
 from the hint), allocation at the class boundaries 8% to 11% faster, and the
-mixed, long-and-short-lived, and free-and-reallocate benchmarks 5% to 7%
-faster. Collection times stayed within 1.3% of main. The hint costs one-word
+mixed, long-and-short-lived, and free-and-reallocate benchmarks 2% to 4%
+faster. Collection times stayed within 3% of main. The hint costs one-word
 classes about 2%. In the guest the mixed workload ran in 527 ms against
 1108 ms, cleared 2.6 MB on reuse against 73 MB, and its longest collection
 took 24% less time.
