@@ -348,7 +348,7 @@ func TestThreadBenchTable(t *testing.T) {
 	lock := sample
 	lock.ns = 400000000
 	table := benchTable(map[benchKey][]benchSample{{2, "lock"}: {lock}, {2, "cache"}: {sample}}, 8)
-	if !strings.Contains(table, "| 2 | 400.0 | 200.0 | 1.00 | 2.00 | 2.00x | 9 | 40 | 3000 | 900 |") {
+	if !strings.Contains(table, "| 2 | 400.0 | 200.0 | 1.00 | 2.00 | 2.00x | 9 | 40 | 3000 | 900 | - |") {
 		t.Fatalf("table:\n%s", table)
 	}
 }

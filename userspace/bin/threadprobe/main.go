@@ -8,9 +8,9 @@
 // roots of threads that run, wait in a call, or allocate in a region while
 // another collects; "storm N ROUNDS" has N threads ask for collections at
 // once; "fault" and "overflow" end a worker with a fault, which ends the
-// process; "bench N OPS lock|cache" times N threads that allocate, with the
-// heap lock alone or with thread-owned slabs, and prints the allocator
-// profile. Only the main thread prints. It is built only into validation
+// process; "bench N OPS MODE" times N threads that allocate, with the heap
+// lock alone (lock), with thread-owned slabs (cache), or with owned slabs
+// and 256 free pages retained (retain), and prints the allocator profile. Only the main thread prints. It is built only into validation
 // images.
 package main
 
@@ -29,7 +29,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|storm N R|fault|overflow|bench N OPS lock|cache",
+	Usage:   "threadprobe smoke N|lifecycle|gc N R|roots|storm N R|fault|overflow|bench N OPS MODE",
 	Summary: "native thread checks",
 	MaxArgs: 4,
 }
@@ -71,10 +71,13 @@ func run(data startup.Data) {
 		count, _ := data.Arg(2)
 		ops, _ := data.Arg(3)
 		kind, _ := data.Arg(4)
-		if !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") {
+		if !utility.Equal(kind, "lock") && !utility.Equal(kind, "cache") && !utility.Equal(kind, "retain") {
 			utility.Usage()
 		}
-		bench(int(parse(count)), int(parse(ops)), utility.Equal(kind, "cache"))
+		if utility.Equal(kind, "retain") {
+			arena.SetRetained(256)
+		}
+		bench(int(parse(count)), int(parse(ops)), !utility.Equal(kind, "lock"), kind)
 	case utility.Equal(mode, "fault"):
 		crash(faultWorker)
 	case utility.Equal(mode, "overflow"):
@@ -629,7 +632,7 @@ func benchWorker(argument uintptr) {
 	benchLoop(int(argument))
 }
 
-func bench(count int, ops int, caches bool) {
+func bench(count int, ops int, caches bool, mode []byte) {
 	expect(count >= 1 && count <= thread.Slots && ops >= 1, "arguments")
 	benchOps = ops
 	arena.UseThreadCaches(caches)
@@ -654,10 +657,10 @@ func bench(count int, ops int, caches bool) {
 	after := arena.HeapStats()
 	total := uint64(count) * uint64(ops)
 	utility.PrintText("THREADPROBE_BENCH mode=")
-	if caches {
-		utility.PrintText("cache")
-	} else {
-		utility.PrintText("lock")
+	for _, name := range [...]string{"lock", "cache", "retain"} {
+		if utility.Equal(mode, name) {
+			utility.PrintText(name)
+		}
 	}
 	report(" threads=", uint64(count), " ops=", total, " ns=", elapsed, " collections=", uint64(after.Collections-before.Collections))
 	printProfile()

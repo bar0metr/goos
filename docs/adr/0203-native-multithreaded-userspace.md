@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted as the design the implementation follows. Sections marked as
-measured are filled in from the runs they name.
+Accepted and implemented. The measurements are from the runs the
+Measurements section names.
 
 ## Context
 
@@ -154,15 +154,19 @@ stop-the-world. With one thread it runs as before. With several:
    FPU area into the snapshot. A task whose context is anything else, or that
    does not leave its processor within the bound, fails the call: the kernel
    releases everything it held and the collection does not run.
-5. The runtime checks every snapshot's fast-path flag. A thread interrupted
-   inside the allocation fast path is released alone, and the suspension is
-   taken again once its flag clears; it finishes the one operation and then
-   sees the GC flag. Three rounds that keep finding such a thread fail the
-   collection.
-6. Marking scans the globals, the collector's own stack and registers, each
-   snapshot's registers and its stack from 128 bytes below its RSP (the red
-   zone) to its stack top, the thread descriptors, and the used part of every
-   region. Sweep and trim run as before.
+5. The runtime checks every snapshot's fast-path flag. When a thread was
+   stopped inside the allocation or free fast path, the runtime releases
+   every held thread, yields, and suspends again: the thread finishes the one
+   operation and then sees the GC flag. Four rounds that keep finding such a
+   thread fail the collection.
+6. The collector takes every thread's owned slabs back and folds their
+   counts and the remote frees left in slabs no thread owns (Allocator).
+   Marking then scans the globals, the collector's own stack and registers,
+   each snapshot's registers and its stack from 128 bytes below its RSP (the
+   red zone) to its stack top, and the used part of every region, up to the
+   live cursor of a thread inside it. Sweep and trim run as before. An
+   allocation from here to the end of the collection stops the process: it
+   would wait for the heap lock the collector holds.
 7. The runtime clears the snapshots, calls `ThreadResume`, lowers the GC flag,
    and releases the heap and GC locks.
 
@@ -201,32 +205,99 @@ operation or a system call.
 
 ### Allocator
 
-The correctness step puts the heap behind the heap lock: every allocation,
-free, collection, statistic, and diagnostic takes it.
+A process that never starts a thread takes no lock and runs the allocator of
+ADR 0202 unchanged. Once a second thread exists, every heap operation either
+takes the heap lock or runs on a slab the calling thread owns.
 
-The finished allocator gives each thread bounded slabs of its own. Each
-thread descriptor holds, per size class, one owned slab. An owned slab's page
-record names its owner slot; only the owner allocates from it, without the
-heap lock, by setting a bit in the slab's bitmap. The owner announces the
-fast path in its descriptor before it reads the GC flag and clears the
-announcement after the bitmap write, both with sequentially consistent
-atomics, so the collector, which raises the flag before it suspends and reads
-the announcements after, sees either the finished write or the announcement.
+Each thread owns at most one slab per size class. A slab's page record names
+its owner as slot plus one, read and written with atomics; ownership changes
+only under the heap lock. The owner allocates from its slab and frees into it
+without any lock. The fast path stores the thread's fast-path flag, reads the
+GC flag, takes the slot, and clears the flag, all with sequentially
+consistent atomics, so the collector, which raises the GC flag before it
+suspends and reads the flags after, sees either the finished bitmap write or
+the flag. When the slab is full the thread takes the heap lock, folds its
+counts into the heap's, folds the slab's remote frees, and keeps the slab if
+that freed a slot; otherwise it gives the full slab up and takes the first
+listed slab of the class, or a new one.
 
-A free of a slot in a slab another thread owns sets the slot's bit in the
-slab's remote-free bitmap with an atomic OR. The owner folds that bitmap into
-its allocation bitmap when its slab runs out, and every collection folds it
-first. The bitmap is the queue: it is bounded by the slab, needs no memory,
-and a second free of one slot finds its bit already set, which is a double
-free. Large runs stay under the heap lock.
+The record's mark bitmap holds remote frees. A collection clears every mark
+bit when it sweeps, so between collections the bitmap is free; there a thread
+that frees a slot of a slab another thread owns sets the slot's bit with a
+compare-and-swap. The bit already set is a double free. The owner folds the
+bits when its slab runs out, and the collection folds them before it marks.
+A page record grew from 120 to 128 bytes for the owner field; remote frees
+take no memory.
 
-A collection takes every owned slab back: it folds remote frees, sweeps,
-clears each owner field, and empties each descriptor's cache, so no cache
+A freeing thread reads the owner without the lock, so its bit can land after
+the owner gave the slab up. The slab then keeps the bit until the next owner
+or the next collection folds it. A lost or late bit is never unsafe: the slot
+stays allocated, and a collection frees it once nothing points to it.
+
+A collection takes every owned slab back: it folds remote frees, clears each
+owner, lists or frees each slab, and folds each thread's counts, so no cache
 outlives the epoch that might discard its pages. A thread's exit returns its
-slabs under the heap lock before `ThreadExit`. With one owned slab per class
-and thread, a thread holds at most 14 pages it does not use, 56 KiB; eight
-threads hold at most 448 KiB, which an idle collection gives back with the
-rest. Statistics count per thread and are summed under the heap lock.
+slabs and counts under the heap lock before `ThreadExit`. A thread holds at
+most 14 pages it does not use, 56 KiB; eight threads hold at most 448 KiB.
+Large runs stay under the heap lock. Statistics read between collections add
+the counts threads have not folded yet, read while they change.
+
+`arena.UseThreadCaches(false)`, called before the second thread starts,
+turns owned slabs off, so the benchmark can compare them with the heap lock
+alone.
+
+### Diagnostics
+
+`ALLOC_PROFILE` is at version 2: the first line opens with `version=2`, and a
+`threads` line follows the size histogram with `live`, `peak`,
+`local_allocs`, `local_frees`, `remote_frees`, `refills`, `drained`,
+`returned`, `heap_locks`, `heap_contended`, `gc_locks`, `gc_contended`,
+`suspensions`, `suspend_failures`, `rendezvous_last`, `rendezvous_max`,
+`rendezvous_total`, `pause_last`, `pause_max`, and `pause_total`, times in
+nanoseconds. `tools/allocreport` reads both versions: a report without the
+field is version 1, and a version 2 report without every thread counter is
+incomplete.
+
+### Testing
+
+`threadprobe`, built into validation images, runs every guest check:
+
+| Target | What it runs |
+|---|---|
+| `test-native-threads` | `smoke` (threads of one process on several processors at once), `lifecycle` (IDs, joins, exit codes, the task quota, slot reuse), `fault` and `overflow` (a worker's fault or stack overflow into its guard ends the process, after which threads start again) |
+| `test-thread-gc` | `gc` (threads share and drop lists across collections), `roots` (lists held only by a thread that loops without calls, one that sleeps in a call, and one inside a region), `storm` (every thread asks for collections at once) |
+| `test-thread-allocator` | the host model and race tests of `cache.go`, then `bench` with the heap lock and with owned slabs, checking the profile's counters, and `gc` and `storm` over owned slabs |
+| `bench-thread-allocator` | the benchmark only, on 1, 2, 4, and 8 threads, under TCG |
+| `test-pve-threads` | the checks and the benchmark under KVM on eight processors |
+
+The three test targets boot four processors and are part of `test-all` and
+`release-check`.
+
+### Measurements
+
+`make test-pve-threads`, run `20261019T201556Z-51b3ff70` at `865a235` plus the
+benchmark's retained mode: one VM with eight processors under KVM, `cpu=host`.
+Every thread check passed; `smoke 7` saw eight threads of the process on
+eight processors at once. Each thread allocates 200000 objects of 16 to 1000
+bytes and keeps the last 64; the times are medians of five runs.
+
+| Threads | Heap lock ms | Owned slabs ms | Speedup | Collections | Lock waits (heap lock) | Refills (owned slabs) | Longest pause us | Owned slabs, 256 pages retained, ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 31.0 | 31.9 | 0.97x | 49 | 0 | 0 | 164 | 37.6 |
+| 2 | 222.5 | 100.9 | 2.21x | 98 | 37698 | 26725 | 122 | 110.0 |
+| 4 | 611.3 | 361.3 | 1.69x | 196 | 308323 | 55319 | 159 | 263.9 |
+| 8 | 1745.8 | 816.7 | 2.14x | 388 | 521799 | 118464 | 410 | 652.5 |
+
+With one thread both modes run the single-thread allocator. From two
+threads on, owned slabs halve the time of the heap lock alone. Total
+throughput still falls as threads are added: every thread allocates from one
+heap whose collection threshold the threads reach together, so collections
+grow with the work, and each stops every thread. A refill takes the heap lock
+once per 13 allocations on this mix, mostly for the large classes, whose
+slabs hold 4 to 8 slots. Retaining 256 free pages cut the eight-thread time
+by a fifth: part of the cost is pages discarded after each collection and
+faulted in again. Under TCG (`make bench-thread-allocator`) the same run
+shows a speedup of 1.25x at four and eight threads.
 
 ## Consequences
 
@@ -240,3 +311,7 @@ rest. Statistics count per thread and are summed under the heap lock.
   are started with `thread.Start` and joined with `thread.Join`.
 - A collection pauses every thread of the process. Suspension cost grows with
   the number of threads; the pauses are reported.
+- Only `sys` keeps its scratch per thread. `utility` and the other packages
+  with package-level buffers (`utility`'s message wire and path buffers,
+  `pages`) are not safe from two threads at once: a threaded program prints
+  and calls services from one thread.

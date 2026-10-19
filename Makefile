@@ -719,7 +719,8 @@ test-performance: test-microbench
 
 lint:
 	$(BUILD_ENV) go vet ./...
-	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+	@unformatted=$$(find . -path ./build -prune -o -name '*.go' -print | xargs gofmt -l); \
+		test -z "$$unformatted" || { echo "$$unformatted"; exit 1; }
 	@tests/lint/unsafe_boundary.sh --self-test >/dev/null
 	@tests/lint/unsafe_boundary.sh
 	@tests/lint/no_kernel_lock.sh --self-test >/dev/null

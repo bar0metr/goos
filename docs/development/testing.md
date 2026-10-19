@@ -54,6 +54,19 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
 - `make test` runs the three fast targets above and does not start QEMU.
 - `make test-boot` builds the validation ISO (`VALIDATION=1`, ADR 0058) and
   runs the two-phase QEMU boot and reboot persistence test.
+- `make test-native-threads`, `make test-thread-gc`, and
+  `make test-thread-allocator` check native threads (ADR 0203), each in one
+  validation guest with four processors (`THREAD_SMP`) driven by
+  `tests/boot/threads.sh` and `threadprobe`. The first checks that one
+  process's threads run on several processors at once, IDs, joins, exit
+  codes, the task quota, and that a worker's fault or stack overflow ends its
+  process and nothing else. The second checks that lists held only by a
+  thread that loops without calls, one that sleeps in a call, and one inside
+  a region survive another thread's collections, and that collection requests
+  from every thread at once are served without a loss. The third runs the host
+  model and race tests of the thread-owned slabs, then allocation with the
+  heap lock alone and with owned slabs, checked against the allocator
+  profile's thread counters. Each writes `build/reports/threads-SUITE.txt`.
 - `make test-memory` checks the reclaimable native heap (ADR 0201, ADR 0202).
   It runs the host test of the leak-round checks (`tests/boot/leak_round_test.sh`),
   the allocator and collector model tests on the host, once normally and once
@@ -798,6 +811,18 @@ the guest; ADR 0085 records why. The guest TSC advances in steps of about 1 µs
 under TCG on an arm64 host, so single intervals are quantised to that step.
 Other QEMU guests running on the same host change the results by tens of
 percent; rerun on a quiet host before comparing builds.
+
+### Thread allocator measurements
+
+`make bench-thread-allocator` boots one validation guest with eight
+processors (`BENCH_SMP`) and times `threadprobe bench` with the heap lock
+alone and with thread-owned slabs on 1, 2, 4, and 8 threads, `BENCH_RUNS`
+runs (default 3) of `BENCH_OPS` allocations per thread (default 50000). It
+writes the medians to `build/reports/thread-allocator.md`. TCG serializes
+much of what it emulates, so its figures show where time goes, not how a
+processor scales; `make test-pve-threads` runs the thread checks and the same
+benchmark, with a third mode that retains 256 free pages, under KVM on
+Proxmox and leaves `thread-allocator.md` in the run's directory.
 
 ### Native allocator measurements
 

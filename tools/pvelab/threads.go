@@ -35,6 +35,10 @@ const (
 
 var threadBenchCounts = []int{1, 2, 4, 8}
 
+// threadBenchModes are the heap lock alone, thread-owned slabs, and owned
+// slabs with 256 free pages retained across collections.
+var threadBenchModes = []string{"lock", "cache", "retain"}
+
 func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	g := s.Guest
 	for _, check := range threadChecks {
@@ -53,7 +57,7 @@ func (threadsScenario) Run(ctx context.Context, s *Session) (Result, error) {
 	var raw strings.Builder
 	samples := map[benchKey][]benchSample{}
 	for _, threads := range threadBenchCounts {
-		for _, mode := range []string{"lock", "cache"} {
+		for _, mode := range threadBenchModes {
 			for run := 0; run < threadBenchRuns; run++ {
 				command := fmt.Sprintf("threadprobe bench %d %d %s", threads, threadBenchOps, mode)
 				out, err := g.Run(ctx, command, 5*time.Minute)
@@ -131,18 +135,22 @@ func benchTable(samples map[benchKey][]benchSample, cpus int) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Thread allocator benchmark\n\n%d processors under KVM, %d allocations per thread, median of %d runs.\n\n", cpus, threadBenchOps, threadBenchRuns)
-	b.WriteString("| Threads | Heap lock ms | Owned slabs ms | Heap lock Mallocs/s | Owned slabs Mallocs/s | Speedup | Collections | Contended (lock) | Refills (slabs) | Longest pause us (slabs) |\n")
-	b.WriteString("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	b.WriteString("| Threads | Heap lock ms | Owned slabs ms | Heap lock Mallocs/s | Owned slabs Mallocs/s | Speedup | Collections | Contended (lock) | Refills (slabs) | Longest pause us (slabs) | Retained ms |\n")
+	b.WriteString("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, threads := range threadBenchCounts {
 		lockRuns, cacheRuns := samples[benchKey{threads, "lock"}], samples[benchKey{threads, "cache"}]
 		if len(lockRuns) == 0 || len(cacheRuns) == 0 {
 			continue
 		}
 		lock, cache := median(lockRuns), median(cacheRuns)
+		retained := "-"
+		if runs := samples[benchKey{threads, "retain"}]; len(runs) != 0 {
+			retained = fmt.Sprintf("%.1f", float64(median(runs).ns)/1e6)
+		}
 		total := float64(threads * threadBenchOps)
-		fmt.Fprintf(&b, "| %d | %.1f | %.1f | %.2f | %.2f | %.2fx | %d | %d | %d | %.0f |\n", threads,
+		fmt.Fprintf(&b, "| %d | %.1f | %.1f | %.2f | %.2f | %.2fx | %d | %d | %d | %.0f | %s |\n", threads,
 			float64(lock.ns)/1e6, float64(cache.ns)/1e6, total/float64(lock.ns)*1e3, total/float64(cache.ns)*1e3,
-			float64(lock.ns)/float64(cache.ns), cache.collections, lock.contended, cache.refills, float64(cache.pauseMax)/1e3)
+			float64(lock.ns)/float64(cache.ns), cache.collections, lock.contended, cache.refills, float64(cache.pauseMax)/1e3, retained)
 	}
 	return b.String()
 }

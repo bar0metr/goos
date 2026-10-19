@@ -203,6 +203,17 @@ no collection runs while one is entered. The kernel keeps the separate
 discipline of ADR 0065: a leaking boot-time heap and no allocation on repeating
 paths.
 
+**Threads.** A native process may run up to 16 threads (ADR 0203). The kernel
+makes each thread's 512 KiB stack, pinned above its own 64 KiB guard, in a
+fixed slot below the main stack, and the runtime finds the current thread from
+the stack pointer. Once a second thread exists, heap operations take the heap
+lock or run on the slabs the calling thread owns, one per size class, without
+a lock; a thread that frees into another's slab records the free in that
+slab's idle mark bitmap. A collection holds every other thread off its
+processor with `ThreadSuspend`, takes back every owned slab, and adds each
+held thread's saved registers and stack to the roots, as well as the part of
+another thread's region it has used so far.
+
 ## Shared image pages
 
 The read-only segments of images from the system image — code and constants —
