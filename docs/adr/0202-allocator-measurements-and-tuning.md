@@ -272,7 +272,9 @@ leak criterion itself is unchanged.
   pages in every idle sample, and a burst of 33, 197, and 50 pages before, at
   its peak, and after idle time. These are an observed baseline, not
   thresholds: the gate checks trends and bands, and the counts move with
-  images and workloads.
+  images and workloads. With the stack check, which runs memreclaim's whole
+  1 MiB stack once, memreclaim's own counts start about 255 pages higher:
+  stack pages stay with the process.
 - The command index is at 4086 of its 4096 bytes after memreclaim's usage
   line grew; the next command or usage change must make room.
 - Validation images carry the request histogram; other images do not.
