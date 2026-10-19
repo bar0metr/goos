@@ -118,9 +118,8 @@ benchmark 33% faster (18% from the tables and the clearing, 18% of the rest
 from the hint), allocation at the class boundaries 8% to 11% faster, and the
 mixed, long-and-short-lived, and free-and-reallocate benchmarks 2% to 4%
 faster. Collection times stayed within 3% of main. The hint costs one-word
-classes about 2%. In the guest the mixed workload ran in 527 ms against
-1108 ms, cleared 2.6 MB on reuse against 73 MB, and its longest collection
-took 24% less time.
+classes about 2%. In the guest the mixed workload ran in 570 ms against
+1108 ms and cleared 2.6 MB on reuse against 73 MB.
 
 Not adopted:
 
@@ -159,10 +158,10 @@ ran slower the more it retained:
 
 | Retained pages | Time | Bytes cleared on reuse | Pages at the end |
 |---:|---:|---:|---:|
-| 0 | 538 ms | 2.6 MB | 115 |
-| 16 | 598 ms | 15 MB | 125 |
-| 64 | 769 ms | 55 MB | 163 |
-| 256 | 976 ms | 205 MB | 317 |
+| 0 | 573 ms | 2.6 MB | 115 |
+| 16 | 638 ms | 15 MB | 125 |
+| 64 | 819 ms | 55 MB | 163 |
+| 256 | 1024 ms | 205 MB | 317 |
 
 A retained page holds old bytes and must be cleared before it is reused. A
 discarded page comes back zeroed, and the untouched-slot record above skips
@@ -189,10 +188,10 @@ slices of every class size were added.
   host, `make bench-allocator-guest LABEL=...` for one guest, and
   `make allocator-report` for both.
 - Programs allocate faster and the VFS service collects less often. After
-  idle time the processes of the shell rounds hold 3276 to 3278 pages
+  idle time the processes of the shell rounds hold 3275 to 3276 pages
   against 3300.
-- The kernel's pages in those rounds read 1071 against 1069, steady from
-  round to round. The kernel did not change; the difference has not been
+- The kernel's pages in those rounds read 1071 or 1072 against 1069, steady
+  from round to round. The kernel did not change; the difference has not been
   traced.
 - The command index is at 4086 of its 4096 bytes after memreclaim's usage
   line grew; the next command or usage change must make room.
