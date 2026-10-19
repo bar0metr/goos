@@ -11,7 +11,9 @@
 // before and after the process goes idle; "workload ROUNDS [RETAINED]" times
 // a mixed workload, with RETAINED free pages kept after each collection, and
 // prints what the allocator did for it; "double-free" and "oom"
-// commit a failure the process must not survive. Every mode that finishes
+// commit a failure the process must not survive; "quota" checks retained
+// pages and then grows the live heap past the page quota, which the kernel
+// must stop. Every mode that finishes
 // prints an ALLOC_PROFILE of its own heap. It is built only into validation
 // images.
 package main
@@ -31,7 +33,7 @@ import (
 )
 
 var manifest = commands.Manifest{
-	Usage:   "memreclaim [service N|burst|workload N [R]|double-free|oom]",
+	Usage:   "memreclaim [service N|burst|workload N [R]|quota|double-free|oom]",
 	Summary: "heap reclamation checks",
 	MaxArgs: 3,
 	Grants:  commands.GrantVFS,
@@ -58,6 +60,8 @@ func run(data startup.Data) {
 				arena.SetRetained(uint32(min(parse(retained), 1<<20)))
 			}
 			runWorkload(parse(rounds))
+		case utility.Equal(mode, "quota"):
+			checkQuota()
 		case utility.Equal(mode, "double-free"):
 			doubleFree()
 		case utility.Equal(mode, "oom"):
@@ -74,6 +78,7 @@ func run(data startup.Data) {
 	checkInteriorPointers()
 	checkCycle()
 	checkDeepAndWideGraphs()
+	checkStackScrub()
 	checkZeroOnReuse()
 	checkBoundarySizes()
 	checkClassReuse()
@@ -477,6 +482,76 @@ func checkCycle() {
 	}
 	expect(held >= live()+3*64<<10, "unreachable cycle collected")
 	marker("MEMRECLAIM_CYCLE_OK")
+}
+
+// scrubRooms are the stack room below a frame at which checkStackScrub
+// collects. The last is less than the 4 KiB the collector zeroes below
+// itself, so the zeroing must stop at the bottom of the stack: past it lies
+// the guard, and a write there would stop the process.
+var scrubRooms = [...]uintptr{16 << 10, 8 << 10, 3 << 10}
+
+var (
+	scrubNext    int
+	scrubDeepest int
+	scrubRoom    uintptr
+)
+
+// deepCollect recurses to the bottom of the stack with one live object per
+// frame, held only in the frame or a register, and collects on the way down
+// at each of scrubRooms. It reports whether every frame's object kept its
+// value.
+//
+//go:noinline
+func deepCollect(depth int) bool {
+	held := newBlock(uint64(depth))
+	room := arena.StackRoom()
+	if scrubNext < len(scrubRooms) && room <= scrubRooms[scrubNext] {
+		scrubNext++
+		scrubDeepest, scrubRoom = depth, room
+		for pass := 0; pass < 2; pass++ {
+			collect()
+			churn(8, 64, 4096, 70000)
+		}
+	}
+	ok := true
+	if scrubNext < len(scrubRooms) {
+		ok = deepCollect(depth + 1)
+	}
+	return ok && held.holds(uint64(depth))
+}
+
+// deepGarbage allocates 256 KiB in a frame depth calls down and drops it, so
+// the only copy of its address lies in stack below the caller.
+//
+//go:noinline
+func deepGarbage(depth int) {
+	if depth > 0 {
+		deepGarbage(depth - 1)
+		return
+	}
+	scratch := allocate(256 << 10)
+	scratch[0] = 1
+}
+
+// checkStackScrub collects with frames down to 3 KiB above the bottom of the
+// stack and requires every frame's object to survive, then drops an object
+// whose address only dead frames held and requires a collection from above
+// them to free it: the collector's own frames, built over those, must not
+// keep it.
+func checkStackScrub() {
+	scrubNext = 0
+	expect(arena.StackRoom() > 64<<10, "the stack has room to recurse")
+	expect(deepCollect(0), "objects held by frames down to the bottom of the stack survive")
+	expect(scrubNext == len(scrubRooms), "the recursion reached the bottom of the stack")
+	report("MEMRECLAIM_STACK_SCRUB depth=", uint64(scrubDeepest), " room=", uint64(scrubRoom), "", 0, "", 0)
+	for round := 0; round < 4; round++ {
+		collect()
+		deepGarbage(64 + round*200)
+		held := live()
+		collect()
+		expect(held >= live()+256<<10, "an object only dead frames held is collected")
+	}
+	marker("MEMRECLAIM_STACK_SCRUB_OK")
 }
 
 type link struct {
@@ -991,6 +1066,92 @@ func parse(text []byte) uint64 {
 		value = value*10 + uint64(digit-'0')
 	}
 	return value
+}
+
+// pageLimit is the page quota of this process, found the way pagesUsed finds
+// its count: as the process ProcessInfo reports running, which holds only
+// while one processor runs processes, as in the memory gate's guest.
+func pageLimit() uint64 {
+	record := &processRecord
+	for index := uint64(0); utility.ProcessInfo(index, record); index++ {
+		if record[8] == kcall.ProcessRunning {
+			return uint64(binary.LittleEndian.Uint32(record[kcall.ProcessInfoLimitsOffset+kcall.ProcessPages*4:]))
+		}
+	}
+	return 0
+}
+
+// quotaBuffers holds the 64 KiB buffers checkQuota keeps alive.
+var quotaBuffers [][]byte
+
+//go:noinline
+func touchBuffers(count int) {
+	for index := 0; index < count; index++ {
+		data := allocate(64 << 10)
+		for offset := range data {
+			data[offset] = 0x5c
+		}
+		quotaBuffers = append(quotaBuffers, data)
+	}
+}
+
+// dropBuffers lets go of the buffers from index first on.
+//
+//go:noinline
+func dropBuffers(first int) {
+	for index := first; index < len(quotaBuffers); index++ {
+		quotaBuffers[index] = nil
+	}
+	quotaBuffers = quotaBuffers[:first]
+}
+
+// checkQuota retains 256 free pages and checks what retention promises:
+// reuse of the retained pages, cleared, without the kernel supplying them
+// again, and an idle wait that gives them all back. Then it keeps 64 KiB
+// buffers alive until the process is past its page quota. Retention does
+// not change that ending: the kernel stops the process when it touches a
+// page past the quota, after the allocator has returned, and no trim can run
+// then. The memory gate requires that fault and nothing after it.
+func checkQuota() {
+	arena.SetRetained(256)
+	limit := pageLimit()
+	quotaBuffers = make([][]byte, 0, 1024)
+	touchBuffers(64)
+	dropBuffers(16)
+	collect()
+	arena.ReadDiagnostics(&profile)
+	retained, recommitted, cleared := uint64(profile.DirtyFreePages), profile.PagesRecommitted, profile.ClearedBytes
+	report("MEMRECLAIM_QUOTA limit=", limit, " pages=", pagesUsed(), " retained=", retained, "", 0)
+	expect(limit != 0 && retained == 256, "a collection retains the pages it may")
+
+	// The retained pages serve the next 256 pages of buffers, cleared.
+	first := len(quotaBuffers)
+	for index := 0; index < 16; index++ {
+		data := allocate(64 << 10)
+		expect(zeroed(data), "a retained page is cleared before reuse")
+		quotaBuffers = append(quotaBuffers, data)
+	}
+	arena.ReadDiagnostics(&profile)
+	expect(profile.PagesRecommitted == recommitted && profile.ClearedBytes >= cleared+16*(64<<10), "allocations reuse the retained pages")
+	dropBuffers(first)
+
+	// An idle wait gives back the retained pages without a new allocation.
+	collect()
+	busy := pagesUsed()
+	wait.Sleep(idleTicks)
+	idle := pagesUsed()
+	arena.ReadDiagnostics(&profile)
+	report("MEMRECLAIM_QUOTA_IDLE busy=", busy, " idle=", idle, " retained=", uint64(profile.DirtyFreePages), " trims=", profile.Trims)
+	expect(profile.DirtyFreePages == 0 && profile.Trims != 0 && idle+240 <= busy, "an idle wait gives the retained pages back")
+	marker("MEMRECLAIM_QUOTA_RETAIN_OK")
+
+	// Past the quota the kernel stops the process.
+	marker("MEMRECLAIM_QUOTA_ATTEMPT")
+	for len(quotaBuffers) < cap(quotaBuffers) {
+		touchBuffers(1)
+	}
+	marker("MEMRECLAIM_QUOTA_MISSED")
+	utility.Exit(1)
 }
 
 // doubleFree frees one allocation twice. The heap must stop the process.
