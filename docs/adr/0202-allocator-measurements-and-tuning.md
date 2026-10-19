@@ -42,7 +42,9 @@ snapshot of slabs per class, free slots, free runs, dirty free pages, and
 metadata pages. `Diagnostics.AppendProfile` writes it as `ALLOC_PROFILE`
 lines of at most the caller's buffer, so a console that relays whole writes
 keeps each line intact. memreclaim prints its profile, and the VFS service
-prints one every 4096 requests in validation builds.
+prints one every 16384 requests in validation builds: once every 4096 the
+four lines doubled what the service writes to the console, and a line that
+landed as the shell printed its prompt hid a command from the boot test.
 
 `runtime.ReadMemStats` now reports `HeapReleased` as what it means in Go: idle
 bytes the kernel holds no page for. It used to report the cumulative

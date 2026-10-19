@@ -117,7 +117,7 @@ while [ "$round" -le "$rounds" ]; do
 	printf 'ALLOCATOR_ROUND round=%s kernel=%s processes=%s\n' "$round" "$kernel" "$processes" | tee -a "$work/rounds"
 	round=$((round + 1))
 done
-# The VFS reports its profile every 4096 requests; the shell rounds above
+# The VFS reports its profile every 16384 requests; the shell rounds above
 # add to its count, and this run makes sure one more report follows them.
 check "memreclaim service 1500" '^MEMRECLAIM_SERVICE_OK$'
 grep -h '^VFS_MEMORY \|^ALLOC_PROFILE vfs ' "$log" | tr -d '\r' >>"$work/all"
