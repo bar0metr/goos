@@ -9,11 +9,6 @@ import (
 
 // Native virtual memory (ADR 0104).
 
-var (
-	vmDescriptor [2]uint64
-	vmRecord     [kcall.VMRecordSize]byte
-)
-
 // Region describes one region of the caller's address space.
 type Region struct {
 	Base       uint64
@@ -27,18 +22,20 @@ type Region struct {
 // given protection at an address the kernel chooses, and returns the address.
 // Nothing is allocated until a page is touched.
 func VMReserve(length uint64, protection uint64) (uint64, kcall.Status) {
-	vmDescriptor[0], vmDescriptor[1] = 0, length
-	result := status(vmMap(unsafe.Pointer(&vmDescriptor[0]), protection, 0))
+	w := current()
+	w.vmDescriptor[0], w.vmDescriptor[1] = 0, length
+	result := status(vmMap(unsafe.Pointer(&w.vmDescriptor[0]), protection, 0))
 	if result != kcall.StatusOK {
 		return 0, result
 	}
-	return vmDescriptor[0], kcall.StatusOK
+	return w.vmDescriptor[0], kcall.StatusOK
 }
 
 // VMReserveAt is VMReserve at a fixed address, which must be free.
 func VMReserveAt(address uint64, length uint64, protection uint64) kcall.Status {
-	vmDescriptor[0], vmDescriptor[1] = address, length
-	return status(vmMap(unsafe.Pointer(&vmDescriptor[0]), protection, kcall.VMMapFixed))
+	w := current()
+	w.vmDescriptor[0], w.vmDescriptor[1] = address, length
+	return status(vmMap(unsafe.Pointer(&w.vmDescriptor[0]), protection, kcall.VMMapFixed))
 }
 
 // VMUnmap removes a range of the caller's mappings.
@@ -55,13 +52,14 @@ func VMDiscard(address uint64, length uint64) kcall.Status { return status(vmDis
 
 // VMQuery describes the region containing address.
 func VMQuery(address uint64) (Region, kcall.Status) {
-	vmRecord = [kcall.VMRecordSize]byte{}
-	result := status(vmQuery(address, unsafe.Pointer(&vmRecord[0])))
+	w := current()
+	w.vmRecord = [kcall.VMRecordSize]byte{}
+	result := status(vmQuery(address, unsafe.Pointer(&w.vmRecord[0])))
 	if result != kcall.StatusOK {
 		return Region{}, result
 	}
-	return Region{Base: le64(vmRecord[0:8]), Length: le64(vmRecord[8:16]), Protection: uint64(vmRecord[16]),
-		Backing: vmRecord[17], Pinned: vmRecord[18]&1 != 0}, kcall.StatusOK
+	return Region{Base: le64(w.vmRecord[0:8]), Length: le64(w.vmRecord[8:16]), Protection: uint64(w.vmRecord[16]),
+		Backing: w.vmRecord[17], Pinned: w.vmRecord[18]&1 != 0}, kcall.StatusOK
 }
 
 // Window returns the memory of a range the caller reserved, as a slice.
@@ -79,19 +77,21 @@ func le64(data []byte) uint64 {
 // to the caller, and returns a handle with Read, Write, and Transfer
 // (ADR 0107).
 func MemoryCreate(pages uint64) (handle.ID, kcall.Status) {
-	valueWire = 0
-	if result := status(memoryCreate(pages, unsafe.Pointer(&valueWire))); result != kcall.StatusOK {
+	w := current()
+	w.valueWire = 0
+	if result := status(memoryCreate(pages, unsafe.Pointer(&w.valueWire))); result != kcall.StatusOK {
 		return 0, result
 	}
-	return handle.ID(valueWire), kcall.StatusOK
+	return handle.ID(w.valueWire), kcall.StatusOK
 }
 
 // HandleDuplicate derives a memory object or stream endpoint with a subset
 // of its rights. The caller retains its original handle.
 func HandleDuplicate(id handle.ID, rights capability.Rights) (handle.ID, kcall.Status) {
-	valueWire = 0
-	if result := status(handleDuplicate(uint64(id), uint64(rights), unsafe.Pointer(&valueWire))); result != kcall.StatusOK {
+	w := current()
+	w.valueWire = 0
+	if result := status(handleDuplicate(uint64(id), uint64(rights), unsafe.Pointer(&w.valueWire))); result != kcall.StatusOK {
 		return 0, result
 	}
-	return handle.ID(valueWire), kcall.StatusOK
+	return handle.ID(w.valueWire), kcall.StatusOK
 }

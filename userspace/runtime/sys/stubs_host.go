@@ -15,6 +15,24 @@ const unsupported = uint64(kcall.StatusUnsupported)
 
 func processExit(code uint64) {}
 
+func threadCreate(entry uintptr, argument uintptr, info unsafe.Pointer) uint64 { return unsupported }
+
+func threadExit(code uint64) {}
+
+func threadJoin(thread uint64, flags uint64, code unsafe.Pointer) uint64 { return unsupported }
+
+func threadSelf(info unsafe.Pointer) uint64 { return unsupported }
+
+func threadYield() uint64 { return unsupported }
+
+func threadSuspend(snapshots unsafe.Pointer, capacity uint64, count unsafe.Pointer) uint64 {
+	return unsupported
+}
+
+func threadResume() uint64 { return unsupported }
+
+func threadEntryAddress() uintptr { return 0 }
+
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
 
 func ipcReceive(channel uint64, address unsafe.Pointer, size uintptr) uint64 { return unsupported }
