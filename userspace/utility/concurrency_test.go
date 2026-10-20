@@ -279,3 +279,43 @@ func TestAppendFailureTruncatesAndKeepsNewline(t *testing.T) {
 		t.Fatalf("appendUsage = %q", got)
 	}
 }
+
+func TestFatalOutputDoesNotWaitForHeldLock(t *testing.T) {
+	var mu sync.Mutex
+	var written []byte
+	var targets []uint64
+	o := output[chunkSink]{io: chunkSink{&mu, &written, &targets}}
+	o.mu.Lock() // OOM/fatal entered by the output lock's own holder
+	if o.tryRecord(2, []byte("fatal\n"), o.io.write) {
+		t.Fatal("fatal output took an already-held lock")
+	}
+	o.mu.Unlock()
+	if !o.tryRecord(2, []byte("fatal\n"), o.io.write) || string(written) != "fatal\n" {
+		t.Fatalf("uncontended fatal diagnostic = %q", written)
+	}
+}
+
+func TestEmptyLineStorageWritesWithoutLooping(t *testing.T) {
+	for _, storage := range [][]byte{nil, {}, make([]byte, 0, 8), make([]byte, 1), make([]byte, 4)} {
+		var written []byte
+		write := func(value []byte) { written = append(written, value...) }
+		size := appendLine(storage, 0, []byte("hello"), write)
+		size = appendLine(storage, size, []byte("\n"), write)
+		write(storage[:size]) // Line.End's final flush
+		if string(written) != "hello\n" {
+			t.Fatalf("storage length %d: %q", len(storage), written)
+		}
+	}
+}
+
+func TestFatalOutputDropsRecordWhenWriterCannotProgress(t *testing.T) {
+	var o output[chunkSink]
+	calls := 0
+	if o.tryRecord(2, []byte("fatal\n"), func(uint64, []byte) int { calls++; return 0 }) || calls != 1 {
+		t.Fatalf("fatal write retried without progress: %d calls", calls)
+	}
+	if !o.mu.TryLock() {
+		t.Fatal("failed fatal record retained lock")
+	}
+	o.mu.Unlock()
+}

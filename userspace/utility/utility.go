@@ -6,8 +6,9 @@
 // arguments, and provides the output, diagnostic and filesystem helpers the
 // commands have in common.
 //
-// The output, diagnostic and service-call functions may be used from any
-// goroutine or thread of the command. The current output line (Print through
+// After Run initializes startup state, output and synchronous service calls
+// serialize callers; failed transactions disable their endpoint. These functions
+// may be used from any goroutine or thread of the command. The current output line (Print through
 // EndLine), the buffers Path, Target and Resolve return, and the TCP and UDP
 // sessions belong to one goroutine at a time. The full contract is in
 // docs/development/native-concurrency-audit.md.
@@ -53,9 +54,9 @@ var (
 	commandName []byte
 )
 
-// failure is taken by the goroutine that ends the command with a diagnostic
-// and never released: the process exits with it held, and another goroutine
-// that fails meanwhile waits for that exit. The holder owns errorBuffer,
+// failure is tried by a goroutine ending the command with a diagnostic and
+// never released. A concurrent/recursive failure exits without a diagnostic
+// rather than waiting for a possibly held lock. The holder owns errorBuffer,
 // which holds a message naming a path of up to PathMax bytes and is too
 // large for a goroutine stack.
 var (
@@ -142,23 +143,24 @@ func Exit(code uint64) { finish(code, "") }
 
 // Usage ends a malformed invocation with the command's synopsis.
 func Usage() {
-	failure.Lock()
-	writeErrorBytes(appendUsage(errorBuffer[:], current.Usage))
+	if failure.TryLock() {
+		standard.tryRecord(standard.errorTarget(), appendUsage(errorBuffer[:], current.Usage), fatalWrite)
+	}
 	finish(2, "")
 }
 
 // Fail ends the command with "command: path: reason", or "command: reason"
 // when path is nil, and status 2. The line is one record, so it cannot
-// interleave with other output of the process. When two goroutines fail at
-// once, the first one's message and status win.
+// interleave with other output of the process. If output or the diagnostic
+// buffer is busy, exit without a diagnostic; racing exit statuses are unspecified.
 func Fail(path []byte, reason string) { FailStatus(2, path, reason) }
 
 // FailStatus is Fail with another exit status.
 func FailStatus(code uint64, path []byte, reason string) {
-	failure.Lock()
-	// The path may have come from a directory listing: its controls are
-	// shown, not sent.
-	writeErrorBytes(appendFailure(errorBuffer[:], commandName, path, reason))
+	if failure.TryLock() {
+		// A concurrent or recursive fatal path must still be able to exit.
+		standard.tryRecord(standard.errorTarget(), appendFailure(errorBuffer[:], commandName, path, reason), fatalWrite)
+	}
 	finish(code, "")
 }
 
@@ -382,20 +384,18 @@ func (nativePaths) Prepare(request *vfs.Request) (handle.ID, bool) { return path
 func (nativePaths) Name(size int) []byte                           { return pathpage.Name(size) }
 func (nativePaths) Abandon()                                       { pathpage.Abandon() }
 
-// finish writes message, closes the filesystem session and exits. It takes
-// no session lock: it may run while the calling goroutine holds one, from an
-// allocation that ran out of memory.
+// finish best-effort writes message and exits without waiting for a held
+// lock: OOM may happen while this goroutine owns output or a session.
 func finish(code uint64, message string) {
 	if message != "" {
+		target := standard.errorTarget()
 		if code == 0 {
-			write(message)
-		} else {
-			writeError(message)
+			target = standard.stdout
 		}
+		standard.tryRecord(target, sys.Bytes(message), fatalWrite)
 	}
-	if channel := files.bound(); channel != 0 {
-		sys.HandleClose(channel)
-	}
+	// Exit tears down process handles. Do not acquire any session/failure lock
+	// or explicitly close a borrowed endpoint which another owner may use.
 	sys.Exit(code)
 	for {
 	}
@@ -411,20 +411,13 @@ type Line struct {
 	size   int
 }
 
-// NewLine returns a Line that assembles in storage.
+// NewLine returns a Line that assembles in storage. Empty storage writes
+// each append directly as a separate record.
 func NewLine(storage []byte) Line { return Line{buffer: storage} }
 
 // Print appends value.
 func (line *Line) Print(value []byte) {
-	for len(value) != 0 {
-		if line.size == len(line.buffer) {
-			standard.writeRecord(standard.stdout, line.buffer[:line.size])
-			line.size = 0
-		}
-		copied := copy(line.buffer[line.size:], value)
-		line.size += copied
-		value = value[copied:]
-	}
+	line.size = appendLine(line.buffer, line.size, value, Write)
 }
 
 // PrintText appends value.
@@ -559,6 +552,26 @@ func (nativeStream) write(target uint64, value []byte) int {
 		}
 		return written
 	}
+}
+
+// fatalWrite is one best-effort native write, with no StreamWait or retries.
+// A full/broken stream loses the remaining diagnostic but cannot prevent Exit.
+func fatalWrite(target uint64, value []byte) int {
+	size := len(value)
+	if size > int(kcall.MaxStreamIO) {
+		size = int(kcall.MaxStreamIO)
+	}
+	written, status := sys.StreamWrite(handle.ID(target), value[:size])
+	if status == kcall.StatusPermissionDenied {
+		if sys.ConsoleWrite(handle.ID(target), value) == kcall.StatusOK {
+			return len(value)
+		}
+		return 0
+	}
+	if status != kcall.StatusOK || written < 0 || written > size {
+		return 0
+	}
+	return written
 }
 
 // nativeIPC sends and receives service messages with the kernel.

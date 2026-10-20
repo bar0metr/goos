@@ -2,9 +2,12 @@
 
 A native program may run several OS threads (ADR 0203) and, when built with
 the `goos_goroutines` tag, many goroutines scheduled over them. This document
-states, for every library under `userspace/`, which of its exported calls may
-be made from two goroutines or threads at once, and, for every package-level
-variable, who owns it and what keeps it consistent.
+records intended ownership and concurrency contracts under `userspace/`.
+It is an inventory, not a completed library audit. The current hardening and
+host failure tests cover utility transactions and path-page reuse; other
+package classifications below remain provisional until their call graphs,
+callbacks, shared mappings and failure paths have been checked. A complete
+variable inventory is not proof of concurrent safety.
 
 The machine-readable part is
 [`native-concurrency-audit.tsv`](native-concurrency-audit.tsv): one row per
@@ -54,7 +57,8 @@ Contract, the `contract` column:
 
 API classes, used per package below:
 
-- Concurrent-safe: any goroutine or thread may call it at any time.
+- Concurrent-safe: concurrent callers are supported after initialization,
+  subject to the stated ownership, lifetime and failure preconditions.
 - Independent instances safe: distinct values may be used at once from
   different goroutines; one value belongs to one goroutine at a time.
 - Single-owner: one goroutine uses it, normally the one running `main`; the
@@ -81,6 +85,8 @@ API classes, used per package below:
 4. Output: one logical record (an output line, a diagnostic, a log event) is
    assembled in one buffer and written whole. Records from different
    goroutines never interleave inside a record; their order is not defined.
+   Fatal/OOM output is best-effort: a busy lock or stream can drop a record
+   or its unwritten suffix rather than prevent exit.
 5. Input: each byte of an input stream reaches at most one reader. An API
    that reads lines or keystrokes needs a single reader and says so.
 
@@ -115,7 +121,8 @@ helpers `AppendUint`, `BenchCount`, `BenchChunk`, `AppendBenchResult`,
 
 Independent instances safe: `Line` (`NewLine`), `Bulk` (`NewBulk`,
 `ReadFile`, `WriteFile`), `CopyFile` and `SaveFile` with different Bulks,
-`Stream`.
+`Stream`. A used Bulk must not be copied. Its Memory and any aliases remain
+caller-owned; do not replace or resize the Memory slice.
 
 Single-owner:
 
@@ -130,23 +137,57 @@ Single-owner:
   `TCPPayload`, `TCPReceived`, `TCPRelease` and their UDP counterparts. A
   session writes through TX slot 0 and takes whichever reply arrives next, so
   two goroutines driving it would overwrite each other's payload and take
-  each other's replies. The calls lock the session, so misuse cannot corrupt
-  memory, only the protocol.
+  each other's replies. Locks cover codec storage, not the shared TX/RX
+  slices returned to callers; concurrent misuse can race shared memory.
+  A timeout or invalid reply disables sends/waits, but does not revoke pool
+  slices already returned. Pool ownership and reopening remain unaudited.
 - `ReadTerminalWithin`: the terminal has one reader.
 
 Input contract: `ReadInput` is one native stream read per call, so goroutines
 reading standard input at once each get different bytes and no byte twice.
 Which goroutine gets which bytes is not defined.
 
+Transaction contract:
+
+- Synchronous utility calls hold one session from send through protocol
+  validation. A failed wait, exhausted VFS retry budget, invalid reply or
+  failed send quarantines that endpoint ID. No later caller sends or drains
+  late replies on it. Local validation/allocation failure before a send does
+  not by itself abandon an exchange. Correlations never reset on rebind.
+- BindVFS waits for the current exchange and borrows the supplied endpoint;
+  switching or failure never closes it. Healthy endpoints may be restored,
+  as remoted's transient authority bindings require. Quarantined IDs cannot
+  be restored. Recovery needs a genuinely fresh channel, not an alias of the
+  failed channel. There is no automatic service reconnection, and no public
+  cancellation API. An owner abandoning a sent exchange must quarantine both
+  the endpoint and every shared object exposed by that exchange.
+- BindVFS is not an authority scope for a multi-call operation. Callers must
+  externally sequence rebind with ReadDir, CopyFile, SaveFile or any operation
+  that requires a stable endpoint. File handles from an old VFS session are
+  not valid on a freshly bound one.
+- An abandoned path page is unmapped locally and its local handle closed;
+  the next request creates a different object. Bulk uses private Memory plus
+  shared staging, with one copy per transfer and an extra buffer. Failed
+  transfers retire staging without exposing a late server write/read to the
+  caller's Memory. A valid reply is the cooperative server's completion
+  fence; a malicious server retaining mappings after success is not covered.
+- Retiring a local mapping or endpoint does not revoke a peer's mappings or
+  cancel a filesystem mutation. A peer retaining them may retain quota until
+  it releases them or exits. Quarantined borrowed endpoints remain the
+  original owner's responsibility. The failed-ID list grows with failures.
+- VFS Name/Data are caller-owned on success, including attached names. Reply
+  handles not accepted by the protocol are closed. Host transport tests do
+  not establish kernel/native runtime correctness or OOM behavior in a VM.
+
 | ID | Symbol | Owner | Blocks / allocates / calls back | Synchronization and visibility | Why | Cancellation, peer death, partial I/O, timeout, exit | Test |
 |---|---|---|---|---|---|---|---|
 | CA-0722 | `standard` | process | Blocks while a stream is full; no allocation; no callback | `output.mu` covers both standard streams; `writeRecord` holds it for the whole record. The handles are written by `Run` before `main` | One record may need several 256-byte stream writes; the lock keeps them together. Standard output and error usually reach one terminal, so one lock covers both | A full stream is waited on for 5 s at a time, still holding the lock; a stream that stays full or fails ends the process with status 2. A partial write continues from the byte the kernel took. No cancellation | `TestOutputRecordsDoNotInterleave`, `TestErrorTargetFallsBackToStdout` |
-| CA-0711, CA-0716 | `currentLine`, `lineBuffer` | goroutine | Writes through `standard` when the line ends or the buffer fills | Owned by the goroutine running `main` | The API is "the current line"; one line has one author | A line longer than 4096 bytes goes out a buffer at a time, each buffer one record | none: single-owner, documented |
-| CA-0712, CA-0713 | `errorBuffer`, `failure` | goroutine, process | `Fail` never returns | The failing goroutine takes `failure` and never releases it; it owns `errorBuffer` until the process exits | A 4 KiB diagnostic buffer does not fit a 4 KiB goroutine stack; the first failure's message and status win | A second goroutine that fails waits on `failure` until the exit kills it. `finish` takes no session lock, so a failure while a session is held does not deadlock | `TestAppendFailureConcurrent`, `TestAppendFailureTruncatesAndKeepsNewline` |
-| CA-0714 | `files` | session | Blocks on the VFS reply; allocates only to copy a name longer than a reply carries; no callback | `session.mu` from request to reply, then the path page as well (`pathpage.Hold`). The channel is an atomic word | The VFS answers one request of a session at a time; two in flight would take each other's replies | Each wait is 2 s, at most 4 times, then the call fails. A dead VFS fails the call. A reply that arrives after its caller gave up is read by the next caller, which sees the wrong correlation and fails that request. `finish` closes the channel without the lock | `TestSessionExchangesDoNotCross` |
-| CA-0715 | `launcher` | session | Blocks until the child exits; creates the launch memory once | `session.mu` from request to the child's exit; the launch memory and path buffer belong to the holder | PID 1 answers when the child ends, and the child shares this command's standard input, so launches are serial | Waits 10 s at a time without limit while the channel lives. A dead channel answers `LaunchProcessFailed`. A resize notice that arrives meanwhile replaces the resize endpoint (`resize` lock, taken inside) | `TestSessionExchangesDoNotCross` |
-| CA-0717, CA-0721 | `networkSession`, `resolverSession` | session | Blocks on the reply; no allocation | `session.mu` from request to reply | One request outstanding per session | Bounded by the request's timeout plus 2 s (network) or 95 s (resolver); a dead service or a reply out of protocol fails the call | `TestSessionExchangesDoNotCross` |
-| CA-0726, CA-0729 | `tcpSession`, `udpSession` | session | `TCPCall`, `TCPWait`, `UDPCall`, `UDPWait` block on a reply | `session.mu` around each send and each wait | Memory safety; the protocol itself is single-owner (see above) | Replies to other requests are dropped and their RX slots released; a dead service fails the call | `TestSessionExchangesDoNotCross` |
+| CA-0711, CA-0716 | `currentLine`, `lineBuffer` | goroutine | Writes through `standard` when the line ends or the buffer fills | Owned by the goroutine running `main` | The API is "the current line"; one line has one author | A line longer than 4096 bytes goes out a buffer at a time, each buffer one record; a Line with empty storage writes each append directly | none: single-owner, documented |
+| CA-0712, CA-0713 | `errorBuffer`, `failure` | goroutine, process | Fatal output never waits for a lock or stream | TryLock gives one writer the diagnostic buffer; output uses TryLock and nonwaiting native writes | Recursive OOM must be able to exit while any utility lock is held | Busy locks drop the diagnostic; a full stream drops the remaining bytes. Racing exits have unspecified status. Native exit itself is not host-tested | `TestFatalOutputDoesNotWaitForHeldLock`, `TestFatalOutputDropsRecordWhenWriterCannotProgress` |
+| CA-0714 | `files` | session | Bounded reply waits; reply copies and quarantine IDs can allocate | Session lock covers exchange and rebind, then path-page lock; availability is atomic | One request outstanding; response storage belongs to caller | Four 2 s waits; timeout, peer death and malformed replies quarantine the borrowed endpoint and retire exposed path memory; no automatic reconnect | `TestVFSAbandonedExchangeQuarantinesEndpoint`, `TestVFSRebindWaitsForWholeExchange`, `TestVFSReplyBuffersBelongToCaller`, `TestVFSConcurrentAttachedNamesStayWithCaller` |
+| CA-0715 | `launcher` | session | Blocks until the child exits; creates the launch memory once | `session.mu` from request to the child's exit; the launch memory and path buffer belong to the holder | PID 1 answers when the child ends, and the child shares this command's standard input, so launches are serial | Waits 10 s at a time without limit while the channel lives. A dead channel or invalid reply disables the endpoint and answers `LaunchProcessFailed`; launch memory is never reused on that failed endpoint. A resize notice that arrives meanwhile replaces the resize endpoint (`resize` lock, taken inside) | `TestSessionExchangesDoNotCross` |
+| CA-0717, CA-0721 | `networkSession`, `resolverSession` | session | Blocks on the reply; quarantine may allocate | `session.mu` from request to reply | One request outstanding per session | Bounded by the request's timeout plus 2 s (network) or 95 s (resolver); timeout, a dead service or an invalid reply fails the call and disables the endpoint | `TestSessionExchangesDoNotCross` |
+| CA-0726, CA-0729 | `tcpSession`, `udpSession` | session | `TCPCall`, `TCPWait`, `UDPCall`, `UDPWait` block on a reply | `session.mu` around each send and each wait | Codec storage only; mapped pools and protocol are single-owner (see above) | Replies to other requests are dropped and their RX slots released; timeout, a dead service or invalid protocol disables the endpoint; previously exposed pool slices remain mapped | `TestSplitProtocolRejectionQuarantinesAndReleasesHandles` |
 | CA-0725, CA-0727, CA-0728, CA-0730 | `tcpRX`, `tcpTX`, `udpRX`, `udpTX` | session | No | Set once by `OpenTCP` or `OpenUDP` | Mapped pools of the session | Live until exit | none: set before use, single-owner session |
 | CA-0720 | `resize` | process | No; never held across a wait | `resize.mu` covers the endpoint, the snapshot and the frame buffer | `Launch` replaces the endpoint while the reader drains it | A failed read drops the endpoint. `ReadTerminalWithin` copies the endpoint into its wait list under the lock and waits without it | none: single reader, documented |
 | CA-0719, CA-0724 | `pathBuffer`, `targetBuffer` | goroutine | No | Owned by the goroutine running `main` | The slices `Path`, `Target` and `Resolve` return point into them | None | none: single-owner, documented |
@@ -154,16 +195,22 @@ Which goroutine gets which bytes is not defined.
 
 ## `pathpage`
 
-One shared-memory page per process carries paths too long for a VFS message
-and names too long for a reply. `Hold` and `Release` are Concurrent-safe and
-take the page for one request; `Prepare` and `Name` require the page held.
-`utility.CallVFS`, the shell and PID 1 hold it from `Prepare` until the reply
-and any name are read.
+One two-page object per process carries long paths and returned names.
+Hold/Release serialize access. Prepare, Name and Abandon require Hold.
+After a successful send, either validate the reply and copy Name, or Abandon
+before Release. The old server may still write its retained mapping, so
+merely releasing a lock or rejecting a late correlation is insufficient.
+
+Utility uses this rule together with endpoint quarantine. Shell and PID 1
+also retire abandoned path objects, but their separate IPC helpers have not
+been given utility's endpoint quarantine/handle-rejection policy: late replies
+may still fail subsequent calls, and unexpected reply handles are not fully
+reconciled there. Their service loops and VFS service are outside this
+hardening's concurrency claim.
 
 | ID | Symbol | Owner | Blocks / allocates / calls back | Synchronization and visibility | Why | Cancellation, peer death, partial I/O, timeout, exit | Test |
 |---|---|---|---|---|---|---|---|
-| CA-0654 | `page` | process | Held across the VFS wait of its holder | `lock.Mutex` | The page is the serialized resource: the VFS reads the paths and writes the name while the request is in flight | A holder whose VFS call times out releases the page. The VFS handles a session's requests in order, so a late write for an abandoned request lands before the next request's own | none: userspace only |
-| CA-0652, CA-0653 | `memory`, `object` | process | Creates the object once | Written once by `ensure` under `page`; read under `page` | Lazy creation | Live until exit | none: userspace only |
+| CA-0654 | `page` (includes object and memory) | process | Held across VFS wait; creates mapping lazily and after abandonment | `page.mu` covers preparation, completion, copying and retirement | Late server access must address a retired object, never the next request's page | Abandon removes local mapping/handle; peer mappings are not revoked. Failure to unmap may leak a mapping, but it is never reused by the library | `TestAbandonIsolatesLateServerWrites`, utility VFS failure tests |
 
 ## `runtime/pages`
 
@@ -219,7 +266,7 @@ service loop calls them. The fix is a caller-owned buffer.
 
 `runtime/sys`, `runtime/arena`, `runtime/tls` and `runtime/thread` are the
 runtime and are maintained with ADR 0203 and its successors; their rows are
-listed so the audit stays complete.
+listed for inventory coverage, not re-audited by the utility changes.
 
 - `runtime/sys`: `scratch` (CA-0695) is per-M scratch: the descriptors one
   wrapper call fills and passes to the kernel. A wrapper uses its thread's
@@ -238,9 +285,10 @@ listed so the audit stays complete.
 
 ## Other libraries
 
-These packages have no mutable package-level variables. Their rows in the
-TSV, where they have any, are immutable tables, error values and constant
-addresses.
+The classifications below are the original inventory's intended contracts,
+not verified conclusions of this hardening. No mutable package-level state
+is insufficient evidence: per-object aliases, callbacks and teardown still
+need review. No full audit of these packages has been completed here.
 
 | Package | Class of the exported API | Notes |
 |---|---|---|

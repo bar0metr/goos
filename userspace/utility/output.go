@@ -41,6 +41,46 @@ func (o *output[W]) writeRecord(target uint64, record []byte) {
 	o.mu.Unlock()
 }
 
+// tryRecord is the fatal/OOM path: never wait for a lock which this goroutine
+// (or one waiting on it) may already hold. Losing a diagnostic is preferable to
+// preventing process exit. The supplied writer must not wait and returns zero
+// when it cannot make progress; a partial diagnostic is then discarded.
+func (o *output[W]) tryRecord(target uint64, record []byte, write func(uint64, []byte) int) bool {
+	if !o.mu.TryLock() {
+		return false
+	}
+	defer o.mu.Unlock()
+	for len(record) != 0 {
+		size := write(target, record)
+		if size <= 0 || size > len(record) {
+			return false
+		}
+		record = record[size:]
+	}
+	return true
+}
+
+// appendLine is shared by Line.Print and host tests. Empty storage is an
+// unbuffered line: every append is a record, rather than an infinite copy loop.
+func appendLine(storage []byte, size int, value []byte, write func([]byte)) int {
+	if len(storage) == 0 {
+		if len(value) != 0 {
+			write(value)
+		}
+		return 0
+	}
+	for len(value) != 0 {
+		if size == len(storage) {
+			write(storage[:size])
+			size = 0
+		}
+		copied := copy(storage[size:], value)
+		size += copied
+		value = value[copied:]
+	}
+	return size
+}
+
 // errorTarget is standard error, or standard output when there is none.
 func (o *output[W]) errorTarget() uint64 {
 	if o.stderr == 0 {
