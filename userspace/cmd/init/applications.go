@@ -7,6 +7,7 @@ package main
 
 import (
 	"goos/internal/capability"
+	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/vfs"
@@ -427,9 +428,9 @@ func launchExecutable(executable supervisor.Executable, processName string, loca
 	if !linuxProcess && grantable && equalBytes(command, "quota") {
 		profile = supervisor.ProfileTiny
 	}
-	// threadprobe runs up to eight threads, the large profile's task quota
-	// (ADR 0203).
-	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe")) {
+	// The concurrency probes exercise eight native tasks, the large
+	// profile's task quota (ADR 0203, ADR 0204).
+	if !linuxProcess && grantable && (equalBytes(command, "fsck-fat") || equalBytes(command, "vmprobe") || equalBytes(command, "threadprobe") || validation.Enabled && equalBytes(command, "goprobe")) {
 		profile = supervisor.ProfileLarge
 	}
 	event, launched := requestLaunch(executable, processName, grants, profile, slot, uint32(len(startupData)))
