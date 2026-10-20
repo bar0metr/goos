@@ -47,6 +47,11 @@ GoOS keeps fast host validation separate from the complete QEMU gate.
   into private trees and records source hashes. See [the SSH
   overlay](../../tools/sshcompat/README.md).
 - `make test-unit` runs all host-side Go tests.
+- `make test-concurrency-audit` checks that every package-level variable under
+  `userspace/` has a row in the
+  [native concurrency audit](native-concurrency-audit.md);
+  `make test-userspace-libs` runs the userspace libraries' concurrency tests,
+  2, 4 and 8 goroutines each, under the race detector.
 - `make test-integration` builds and validates the UEFI kernel artifact.
 - `make test-security` runs the capability, handle, IPC, VM, filesystem, and
   userspace security-focused host tests explicitly, and those of the

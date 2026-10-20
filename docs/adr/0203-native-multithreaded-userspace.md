@@ -322,7 +322,7 @@ shows a speedup of 1.25x at four and eight threads.
   are started with `thread.Start` and joined with `thread.Join`.
 - A collection pauses every thread of the process. Suspension cost grows with
   the number of threads; the pauses are reported.
-- Only `sys` keeps its scratch per thread. `utility` and the other packages
-  with package-level buffers (`utility`'s message wire and path buffers,
-  `pages`) are not safe from two threads at once: a threaded program prints
-  and calls services from one thread.
+- Only `sys` keeps its scratch per thread. The other libraries keep their
+  state in sessions, caller buffers or objects with their own
+  `runtime/lock` mutex; which of their calls may run from two threads at once
+  is listed in docs/development/native-concurrency-audit.md.
