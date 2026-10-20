@@ -80,8 +80,14 @@ type pageMeta struct {
 	// next and prev link a slab into its class list, or a free run into its
 	// size list.
 	next, prev uint32
-	alloc      [slotWords]uint64
-	mark       [slotWords]uint64
+	// owner is the slot plus one of the thread that owns the slab, or zero
+	// (cache.go). Threads read it without the heap lock, with atomics.
+	owner uint32
+	alloc [slotWords]uint64
+	// mark holds the collector's marks during a collection. Between
+	// collections it is clear, except in a slab a thread owns, where it
+	// holds the slots other threads freed (cache.go).
+	mark [slotWords]uint64
 	// noscan marks the slots that hold no pointers.
 	noscan [slotWords]uint64
 }
@@ -138,6 +144,8 @@ type heap struct {
 	watchPhase, phase        uint8
 
 	diag counters
+	// stray counts the remote frees foldStrayFrees folds.
+	stray threadCounts
 }
 
 // Stats is the state of a heap. Bytes count whole slots and runs, not the
@@ -203,6 +211,7 @@ func (h *heap) init(base uintptr, pages uint32, meta []pageMeta, work []uintptr,
 	h.peakHeld, h.peakLive, h.collections, h.collectedMallocs = 0, 0, 0, 0
 	// The counters are numbers only, cleared in place for the same reason.
 	clearMemory(uintptr(unsafe.Pointer(&h.diag)), unsafe.Sizeof(h.diag))
+	clearMemory(uintptr(unsafe.Pointer(&h.stray)), unsafe.Sizeof(h.stray))
 	for index := range h.partial {
 		h.partial[index] = noPage
 	}
@@ -267,21 +276,14 @@ func (h *heap) allocObject(size uintptr, pointerFree bool) uintptr {
 func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 	page := h.partial[class]
 	if page == noPage {
-		page = h.takePages(1)
+		page = h.newSlab(class)
 		if page == noPage {
 			return 0
 		}
-		m := &h.meta[page]
-		m.kind, m.class, m.used, m.marked = pageSlab, class, 0, false
-		m.count, m.head = 0, 0
-		if m.flags&pageDirty != 0 {
-			m.count = uint32(h.classSlots[class])
-		}
-		m.alloc, m.mark = [slotWords]uint64{}, [slotWords]uint64{}
 		h.pushPartial(page)
-		h.diag.newSlabs++
-		h.diag.noteSlab(page)
 	}
+	// The search is takeSlot's, written out: calling takeSlot here cost
+	// 5% of a small allocation in the host benchmarks.
 	m := &h.meta[page]
 	slots := uint32(h.classSlots[class])
 	slot := noPage
@@ -317,13 +319,73 @@ func (h *heap) allocSmall(class uint8, pointerFree bool) uintptr {
 		clearMemory(address, size)
 		h.diag.clearedBytes += uint64(size)
 	} else {
-		// Slots are taken lowest first, so every slot below this one is
-		// in use, and every slot above it is still untouched.
 		m.count = slot + 1
 	}
 	m.flags |= pageDirty
 	h.counted(size)
 	return address
+}
+
+// newSlab sets up a page as an empty slab of class, on no list, or returns
+// noPage when the heap has no room.
+func (h *heap) newSlab(class uint8) uint32 {
+	page := h.takePages(1)
+	if page == noPage {
+		return noPage
+	}
+	m := &h.meta[page]
+	m.kind, m.class, m.used, m.marked = pageSlab, class, 0, false
+	m.count, m.head = 0, 0
+	if m.flags&pageDirty != 0 {
+		m.count = uint32(h.classSlots[class])
+	}
+	m.alloc, m.mark = [slotWords]uint64{}, [slotWords]uint64{}
+	h.diag.newSlabs++
+	h.diag.noteSlab(page)
+	return page
+}
+
+// takeSlot hands out the lowest free slot of the slab at page, which must
+// have one, zeroed. It returns the slot's address and the bytes it cleared.
+func (h *heap) takeSlot(page uint32, pointerFree bool) (uintptr, uintptr) {
+	m := &h.meta[page]
+	slots := uint32(h.classSlots[m.class])
+	slot := noPage
+	for word := m.head; word < slotWords && word*64 < slots; word++ {
+		if free := ^m.alloc[word]; free != 0 {
+			candidate := word*64 + uint32(bits.TrailingZeros64(free))
+			if candidate < slots {
+				slot = candidate
+			}
+			if word != m.head {
+				m.head = word
+			}
+			break
+		}
+	}
+	if slot == noPage {
+		panic("arena: listed slab has no free slot")
+	}
+	m.alloc[slot/64] |= 1 << (slot % 64)
+	if pointerFree {
+		m.noscan[slot/64] |= 1 << (slot % 64)
+	} else {
+		m.noscan[slot/64] &^= 1 << (slot % 64)
+	}
+	m.used++
+	size := classSizes[m.class]
+	address := h.pageAddress(page) + uintptr(slot)*size
+	cleared := uintptr(0)
+	if slot < m.count {
+		clearMemory(address, size)
+		cleared = size
+	} else {
+		// Slots are taken lowest first, so every slot below this one is
+		// in use, and every slot above it is still untouched.
+		m.count = slot + 1
+	}
+	m.flags |= pageDirty
+	return address, cleared
 }
 
 func (h *heap) allocLarge(count uint32, pointerFree bool) uintptr {
@@ -585,7 +647,9 @@ func (h *heap) release(page, slot uint32) uint32 {
 	}
 	slots := slotsPerPage(m.class)
 	m.alloc[slot/64] &^= 1 << (slot % 64)
-	m.mark[slot/64] &^= 1 << (slot % 64)
+	// A thread that read a stale owner may set a bit of this word at
+	// any time (cache.go).
+	clearBit(&m.mark[slot/64], 1<<(slot%64))
 	m.head = min(m.head, slot/64)
 	wasFull := uint32(m.used) == slots
 	m.used--

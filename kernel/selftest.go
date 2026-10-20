@@ -475,7 +475,6 @@ func runKernelSelfTests(pageTable uint64) {
 }
 
 func startSelfTestTasks() {
-	checkThreadCreationRollback()
 	userTaskID, userTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootA, selfTestLoadedA.Entry, selfTestLoadedA.StackTop)
 	faultTaskID, faultTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootB, selfTestLoadedB.Entry, selfTestLoadedB.StackTop)
 	linuxTaskID, linuxTaskAdded := amd64.AddUserTask(&pageAllocator, selfTestRootLinux, selfTestLinuxEntry, selfTestLinuxStack)

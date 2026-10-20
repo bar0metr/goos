@@ -333,3 +333,22 @@ func TestNetworkOutputParsing(t *testing.T) {
 		t.Fatalf("virtio-net service %q %d %v", state, restarts, ok)
 	}
 }
+
+func TestThreadBenchTable(t *testing.T) {
+	out := "THREADPROBE_BENCH mode=cache threads=2 ops=400000 ns=200000000 collections=9\n" +
+		"ALLOC_PROFILE threadprobe threads live=1 peak=2 local_allocs=400000 refills=3000 heap_locks=3100\n" +
+		"ALLOC_PROFILE threadprobe threads heap_contended=40 pause_max=900000\n"
+	sample, ok := parseBench(out)
+	if !ok || sample.ns != 200000000 || sample.refills != 3000 || sample.contended != 40 || sample.pauseMax != 900000 || sample.collections != 9 {
+		t.Fatalf("parsed %+v %v", sample, ok)
+	}
+	if _, ok := parseBench("THREADPROBE_BENCH_OK\n"); ok {
+		t.Fatal("a run without a timing line parsed")
+	}
+	lock := sample
+	lock.ns = 400000000
+	table := benchTable(map[benchKey][]benchSample{{2, "lock"}: {lock}, {2, "cache"}: {sample}}, 8)
+	if !strings.Contains(table, "| 2 | 400.0 | 200.0 | 1.00 | 2.00 | 2.00x | 9 | 40 | 3000 | 900 | - |") {
+		t.Fatalf("table:\n%s", table)
+	}
+}

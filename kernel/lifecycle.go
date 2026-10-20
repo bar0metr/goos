@@ -17,6 +17,7 @@ import (
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
+	"goos/kernel/nativethread"
 	"goos/kernel/process"
 	"goos/kernel/sched"
 	supervisor "goos/userspace/init"
@@ -107,10 +108,18 @@ func deliverTaskExit(task uint64) *process.Process {
 	owner, _ := processRegistry.ByTask(taskID)
 	// A task exec ended ran in an address space exec has destroyed.
 	execEnded := isExecEnded(taskID)
+	var ending nativethread.Ending
+	nativeThread := false
+	if owner != nil && owner.ABI() == process.ABINative {
+		ending, nativeThread, code = nativeThreadEnding(owner, taskID, code)
+	}
 	event, report := processRegistry.ReportTaskExit(taskID, code)
 	liveRoot := uint64(0)
 	if report == process.ExitTaskRemoved && owner != nil && !execEnded {
 		liveRoot = owner.AddressSpace().Root
+	}
+	if report == process.ExitTaskRemoved && nativeThread {
+		nativeThreadEnded(owner, taskID, ending)
 	}
 	if report == process.ExitTaskRemoved && owner != nil && owner.ABI() == process.ABILinuxX8664 {
 		endLinuxThread(taskID, owner, code)

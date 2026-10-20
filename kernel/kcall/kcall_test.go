@@ -252,6 +252,41 @@ func (handler *testHandler) ClockSet(authority uint64, address uint64, length ui
 	return StatusPermissionDenied
 }
 
+func (handler *testHandler) ThreadCreate(entry uint64, argument uint64, address uint64) Status {
+	handler.channel, handler.length, handler.address = entry, argument, address
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadExit(code uint64) Status {
+	handler.exitCode = code
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadJoin(thread uint64, flags uint64, address uint64) (Status, bool) {
+	handler.channel, handler.length, handler.address = thread, flags, address
+	return StatusOK, flags == 0
+}
+
+func (handler *testHandler) ThreadSelf(address uint64) Status {
+	handler.address = address
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadYield() Status {
+	handler.called = true
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadSuspend(address uint64, capacity uint64, count uint64) Status {
+	handler.address, handler.length, handler.channel = address, capacity, count
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadResume() Status {
+	handler.called = true
+	return StatusOK
+}
+
 func (handler *testHandler) Exit(code uint64) Status {
 	handler.exitCode = code
 	return StatusOK
@@ -583,7 +618,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationLogReadSequence + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationThreadResume + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -680,5 +715,66 @@ func TestLogSequenceDispatchKeepsOldOperations(t *testing.T) {
 	}
 	if LogReadMax != 64 || LogReadHeader != 32 || LogReadRecordSize != 208 || LogReadSize != 13344 {
 		t.Fatal("structured snapshot wire layout changed")
+	}
+}
+
+// TestThreadOperationsAreAppended pins the thread call numbers after every
+// earlier one, so no existing number moved (ADR 0203).
+func TestThreadOperationsAreAppended(t *testing.T) {
+	if OperationThreadCreate != 59 || OperationThreadResume != 65 {
+		t.Fatalf("thread operations %d..%d", OperationThreadCreate, OperationThreadResume)
+	}
+}
+
+func TestDispatchThreadCalls(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationThreadCreate, Arg0: 0x40002000, Arg1: 7, Arg2: 0x5000}, handler); result.Status != StatusOK || result.Action != ActionReturn ||
+		handler.channel != 0x40002000 || handler.length != 7 || handler.address != 0x5000 {
+		t.Fatalf("create %+v %+v", result, handler)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadExit, Arg0: 3}, handler); result.Action != ActionExit || handler.exitCode != 3 {
+		t.Fatalf("exit %+v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadJoin, Arg0: 9, Arg2: 0x6000}, handler); result.Action != ActionBlock {
+		t.Fatalf("a waiting join %+v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadJoin, Arg0: 9, Arg1: JoinPoll, Arg2: 0x6000}, handler); result.Action != ActionReturn {
+		t.Fatalf("a polling join %+v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadJoin, Arg0: 9, Arg1: 2}, handler); result.Status != StatusInvalidArgument {
+		t.Fatalf("unknown join flags %+v", result)
+	}
+	for _, capacity := range []uint64{0, MaxThreadSnapshots + 1} {
+		if result := Dispatch(Request{Operation: OperationThreadSuspend, Arg0: 0x7000, Arg1: capacity}, handler); result.Status != StatusInvalidArgument {
+			t.Fatalf("suspend capacity %d: %+v", capacity, result)
+		}
+	}
+	if result := Dispatch(Request{Operation: OperationThreadSuspend, Arg0: 0x7000, Arg1: MaxThreadSnapshots, Arg2: 0x8000}, handler); result.Status != StatusOK || handler.length != MaxThreadSnapshots {
+		t.Fatalf("suspend %+v", result)
+	}
+}
+
+func TestThreadStackLayout(t *testing.T) {
+	if ThreadAreaTop%4096 != 0 || ThreadStride%4096 != 0 || ThreadSnapshotSize%8 != 0 {
+		t.Fatal("thread layout is not page or word aligned")
+	}
+	for slot := uint64(1); slot < ThreadSlots; slot++ {
+		top := ThreadStackTop(slot)
+		base := top - ThreadStackSize
+		for _, address := range []uint64{top - 1, base, base + 4096} {
+			if ThreadSlotOf(address) != slot {
+				t.Fatalf("slot %d: %#x maps to %d", slot, address, ThreadSlotOf(address))
+			}
+		}
+		// The guard below a stack belongs to its slot's stride.
+		if guard := base - 1; ThreadSlotOf(guard) != slot {
+			t.Fatalf("slot %d: its guard maps to %d", slot, ThreadSlotOf(guard))
+		}
+	}
+	if ThreadSlotOf(ThreadAreaTop) != 0 || ThreadSlotOf(0x00007ffffefff000) != 0 {
+		t.Fatal("the main stack is not slot 0")
+	}
+	if ThreadSlotOf(ThreadStackTop(ThreadSlots-1)-ThreadStride-1) != ThreadSlots || ThreadSlotOf(0x1000) != ThreadSlots {
+		t.Fatal("an address below the thread area maps to a slot")
 	}
 }

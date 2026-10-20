@@ -673,6 +673,11 @@ func bootContinue() {
 	if pagesUsed := initPagesBefore - pageAllocator.Statistics().FreePages; pagesUsed != 0 && !initProcess.Charge(process.ResourcePages, uint32(pagesUsed)) {
 		panicSerial("PID 1 exceeded its page quota")
 	}
+	if validation.Enabled {
+		// The check counts free pages, so it runs before PID 1 can run
+		// on another processor and allocate.
+		checkThreadCreationRollback()
+	}
 	initTaskID, initTaskAdded := amd64.AddUserTask(&pageAllocator, rootInit, loadedInit.Entry, loadedInit.StackTop)
 	if !initTaskAdded || !processRegistry.BindTask(1, sched.TaskID(initTaskID)) || !amd64.StartTask(sched.TaskID(initTaskID)) {
 		panicSerial("PID 1 task scheduling failed")

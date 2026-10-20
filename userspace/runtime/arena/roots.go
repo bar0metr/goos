@@ -55,7 +55,8 @@ var probeRegisters [6]uintptr
 func StackRoom() uintptr {
 	sp := spillRegisters(&probeRegisters)
 	probeRegisters = [6]uintptr{}
-	return sp - stackBase()
+	base, _ := threadStack(selfSlot())
+	return sp - base
 }
 
 // registers holds the callee-saved registers while a collection runs.
@@ -76,16 +77,17 @@ func markGlobals() {
 }
 
 // markStack scans the registers and every frame from the collector's caller
-// up to the top of the stack.
+// up to the top of the collecting thread's stack.
 func markStack() {
 	sp := spillRegisters(&registers)
-	if stackTop == 0 || sp > stackTop {
+	_, top := threadStack(selfSlot())
+	if top == 0 || sp > top {
 		panic("arena: stack top unknown")
 	}
 	native.phase = PhaseRegisters
 	native.markRange(uintptr(unsafe.Pointer(&registers[0])), uintptr(unsafe.Pointer(&registers[0]))+unsafe.Sizeof(registers))
 	native.phase = PhaseStack
-	native.markRange(sp, stackTop)
+	native.markRange(sp, top)
 	registers = [6]uintptr{}
 }
 

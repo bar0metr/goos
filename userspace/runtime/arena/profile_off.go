@@ -4,3 +4,5 @@ package arena
 
 // sizeProfile turns off the request-size histogram outside validation images.
 const sizeProfile = false
+
+const threadSizeBuckets = 0

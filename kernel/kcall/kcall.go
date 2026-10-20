@@ -92,6 +92,70 @@ const (
 	OperationPowerOffReady
 	// OperationLogReadSequence copies an absolute-sequence structured snapshot.
 	OperationLogReadSequence
+	// The native thread calls (ADR 0203). ThreadCreate starts a thread in the
+	// caller's process, ThreadExit ends the calling thread, ThreadJoin waits
+	// for one to end, ThreadSelf names the caller, and ThreadYield gives up
+	// the processor. ThreadSuspend and ThreadResume are the collector's: they
+	// hold every other thread of the caller's process off its processor and
+	// let them go again.
+	OperationThreadCreate
+	OperationThreadExit
+	OperationThreadJoin
+	OperationThreadSelf
+	OperationThreadYield
+	OperationThreadSuspend
+	OperationThreadResume
+)
+
+// Native thread layout (ADR 0203). A process has ThreadSlots thread slots.
+// Slot 0 is the main task on its own stack; slot k from 1 owns a stack of
+// ThreadStackSize bytes ending at ThreadStackTop(k), above a ThreadGuardSize
+// guard. ThreadAreaTop lies 65 MiB below the top of the main stack, past the
+// largest main stack an image may ask for and its guard.
+const (
+	ThreadSlots     = 16
+	ThreadStackSize = uint64(512 << 10)
+	ThreadGuardSize = uint64(64 << 10)
+	ThreadStride    = ThreadStackSize + ThreadGuardSize
+	ThreadAreaTop   = uint64(0x00007fffff000000) - uint64(65<<20)
+	// ThreadInfoSize is a thread's ID then its slot.
+	ThreadInfoSize = uint64(16)
+	// JoinPoll makes ThreadJoin answer Timeout rather than wait.
+	JoinPoll = uint64(1)
+)
+
+// ThreadStackTop returns the stack top of thread slot k, 1 to ThreadSlots-1.
+func ThreadStackTop(slot uint64) uint64 { return ThreadAreaTop - (slot-1)*ThreadStride }
+
+// ThreadSlotOf returns the thread slot whose stack holds address, 0 for an
+// address above the thread area, and ThreadSlots for one below it.
+func ThreadSlotOf(address uint64) uint64 {
+	if address >= ThreadAreaTop {
+		return 0
+	}
+	slot := (ThreadAreaTop-1-address)/ThreadStride + 1
+	if slot >= ThreadSlots {
+		return ThreadSlots
+	}
+	return slot
+}
+
+// A ThreadSuspend snapshot is ThreadSnapshotSize bytes per held thread:
+//
+//	[0:8]     thread ID
+//	[8:16]    slot
+//	[16:24]   RSP
+//	[24:32]   RIP
+//	[32:152]  RAX, RBX, RCX, RDX, RSI, RDI, RBP, R8 to R15
+//	[152:408] XMM0 to XMM15
+//	[408:416] reserved, zero
+const (
+	ThreadSnapshotSize      = uint64(416)
+	ThreadSnapshotRegisters = uint64(32)
+	ThreadSnapshotVectors   = uint64(152)
+	// MaxThreadSnapshots bounds one ThreadSuspend: every slot but the
+	// caller's.
+	MaxThreadSnapshots = uint64(ThreadSlots - 1)
 )
 
 // MaxRandomRead bounds one RandomRead.
@@ -194,6 +258,15 @@ type Handler interface {
 	HandleDuplicate(handle uint64, rights uint64, address uint64) Status
 	ClockNow(clock uint64, address uint64, length uint64) Status
 	ClockSet(authority uint64, address uint64, length uint64) Status
+	ThreadCreate(entry uint64, argument uint64, address uint64) Status
+	ThreadExit(code uint64) Status
+	// ThreadJoin reports whether the caller must block until the thread
+	// ends; the call then runs again.
+	ThreadJoin(thread uint64, flags uint64, address uint64) (Status, bool)
+	ThreadSelf(address uint64) Status
+	ThreadYield() Status
+	ThreadSuspend(address uint64, capacity uint64, count uint64) Status
+	ThreadResume() Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -371,6 +444,30 @@ func Dispatch(request Request, handler Handler) Result {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.MemoryMap(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationThreadCreate:
+		return Result{Status: handler.ThreadCreate(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationThreadExit:
+		return Result{Status: handler.ThreadExit(request.Arg0), Action: ActionExit}
+	case OperationThreadJoin:
+		if request.Arg1&^JoinPoll != 0 {
+			return Result{Status: StatusInvalidArgument}
+		}
+		status, blocked := handler.ThreadJoin(request.Arg0, request.Arg1, request.Arg2)
+		if blocked {
+			return Result{Status: status, Action: ActionBlock}
+		}
+		return Result{Status: status}
+	case OperationThreadSelf:
+		return Result{Status: handler.ThreadSelf(request.Arg0)}
+	case OperationThreadYield:
+		return Result{Status: handler.ThreadYield()}
+	case OperationThreadSuspend:
+		if request.Arg1 == 0 || request.Arg1 > MaxThreadSnapshots {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ThreadSuspend(request.Arg0, request.Arg1, request.Arg2)}
+	case OperationThreadResume:
+		return Result{Status: handler.ThreadResume()}
 	default:
 		return Result{Status: StatusUnsupported}
 	}

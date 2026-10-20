@@ -12,6 +12,30 @@ import "unsafe"
 //go:linkname processExit goos_exit
 func processExit(code uint64)
 
+//go:linkname threadCreate goos_thread_create
+func threadCreate(entry uintptr, argument uintptr, info unsafe.Pointer) uint64
+
+//go:linkname threadExit goos_thread_exit
+func threadExit(code uint64)
+
+//go:linkname threadJoin goos_thread_join
+func threadJoin(thread uint64, flags uint64, code unsafe.Pointer) uint64
+
+//go:linkname threadSelf goos_thread_self
+func threadSelf(info unsafe.Pointer) uint64
+
+//go:linkname threadYield goos_thread_yield
+func threadYield() uint64
+
+//go:linkname threadSuspend goos_thread_suspend
+func threadSuspend(snapshots unsafe.Pointer, capacity uint64, count unsafe.Pointer) uint64
+
+//go:linkname threadResume goos_thread_resume
+func threadResume() uint64
+
+//go:linkname threadEntryAddress goos_thread_entry_address
+func threadEntryAddress() uintptr
+
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 

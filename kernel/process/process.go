@@ -5,6 +5,7 @@ import (
 	"goos/kernel/lock"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
+	"goos/kernel/nativethread"
 	"goos/kernel/sched"
 )
 
@@ -55,6 +56,9 @@ type Process struct {
 	cpuTicks   uint64
 	name       [16]byte
 	nameSize   uint8
+	// threads is the thread group of a native process (ADR 0203). The
+	// registry's write lock guards it.
+	threads nativethread.Group
 }
 
 // Init prepares a process slot in place; see stream.Stream.Reset. Returning a
@@ -155,6 +159,9 @@ func (process *Process) Space() *lock.RW { return &process.space }
 
 // Regions is the process's region map.
 func (process *Process) Regions() *region.Map { return &process.regions }
+
+// Threads is the process's native thread group.
+func (process *Process) Threads() *nativethread.Group { return &process.threads }
 
 func (process *Process) AddTask(id sched.TaskID) bool {
 	guard.CheckWriter()

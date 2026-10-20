@@ -525,6 +525,96 @@ goos_exit:
     ud2
 .size goos_exit, .-goos_exit
 
+// The native thread calls (ADR 0203), operations 59 to 65.
+.global goos_thread_create
+.type goos_thread_create,@function
+goos_thread_create:
+    movl $59, %eax
+    int $0x80
+    ret
+.size goos_thread_create, .-goos_thread_create
+
+.global goos_thread_exit
+.type goos_thread_exit,@function
+goos_thread_exit:
+    movl $60, %eax
+    int $0x80
+    ud2
+.size goos_thread_exit, .-goos_thread_exit
+
+.global goos_thread_join
+.type goos_thread_join,@function
+goos_thread_join:
+    movl $61, %eax
+    int $0x80
+    ret
+.size goos_thread_join, .-goos_thread_join
+
+.global goos_thread_self
+.type goos_thread_self,@function
+goos_thread_self:
+    movl $62, %eax
+    int $0x80
+    ret
+.size goos_thread_self, .-goos_thread_self
+
+.global goos_thread_yield
+.type goos_thread_yield,@function
+goos_thread_yield:
+    movl $63, %eax
+    int $0x80
+    ret
+.size goos_thread_yield, .-goos_thread_yield
+
+.global goos_thread_suspend
+.type goos_thread_suspend,@function
+goos_thread_suspend:
+    movl $64, %eax
+    int $0x80
+    ret
+.size goos_thread_suspend, .-goos_thread_suspend
+
+.global goos_thread_resume
+.type goos_thread_resume,@function
+goos_thread_resume:
+    movl $65, %eax
+    int $0x80
+    ret
+.size goos_thread_resume, .-goos_thread_resume
+
+// goos_thread_entry is where the kernel starts a thread ThreadCreate made:
+// at its stack top, 16-byte aligned, with the runtime's argument in rdi and
+// the thread's slot in rsi. It calls goos_thread_main, which runs the
+// thread's function and ends the thread; a program that links no thread
+// support leaves the symbol undefined and never creates a thread.
+.weak goos_thread_main
+.global goos_thread_entry
+.type goos_thread_entry,@function
+goos_thread_entry:
+    andq $-16, %rsp
+    xorl %ebp, %ebp
+    call goos_thread_main
+    ud2
+.size goos_thread_entry, .-goos_thread_entry
+
+// goos_thread_entry_address() uintptr returns where goos_thread_entry lies,
+// from the code, so no data word holds it.
+.global goos_thread_entry_address
+.type goos_thread_entry_address,@function
+goos_thread_entry_address:
+    leaq goos_thread_entry(%rip), %rax
+    ret
+.size goos_thread_entry_address, .-goos_thread_entry_address
+
+// goos_stack_pointer() uintptr returns its caller's stack pointer, which
+// names the caller's thread (userspace/runtime/tls).
+.global goos_stack_pointer
+.type goos_stack_pointer,@function
+goos_stack_pointer:
+    leaq 8(%rsp), %rax
+    ret
+.size goos_stack_pointer, .-goos_stack_pointer
+
 // TinyGo 0.42.0 amd64 defer-frame ABI: saved SP, then continuation PC.
 // The compiler restores callee-saved values at that continuation.
 .section .text.tinygo_longjmp,"ax",@progbits

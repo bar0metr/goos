@@ -192,6 +192,7 @@ var scenarios = map[string]Scenario{
 	"7zip":         sevenZipScenario{},
 	"network":      networkScenario{},
 	"remote-admin": remoteAdminScenario{},
+	"threads":      threadsScenario{},
 }
 
 func scenarioNames() string {

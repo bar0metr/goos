@@ -85,11 +85,12 @@ type CursorInterest struct {
 }
 
 func WaitAnyCursor(interests *[kcall.WaitAnyMaxObjects]CursorInterest, count int, timeout uint64) (uint64, kcall.Status) {
+	w := current()
 	if interests == nil || count < 0 || count > kcall.WaitAnyMaxObjects {
 		return 0, kcall.StatusInvalidArgument
 	}
-	waitWire[0], waitWire[1] = timeout, 0
+	w.waitWire[0], w.waitWire[1] = timeout, 0
 	touch(unsafe.Slice((*byte)(unsafe.Pointer(&interests[0])), count*int(kcall.WaitAnyCursorInterestSize)))
-	result := status(waitAny(unsafe.Pointer(&interests[0]), uintptr(uint64(count)|kcall.WaitAnyCursorFlag), unsafe.Pointer(&waitWire[0])))
-	return waitWire[1], result
+	result := status(waitAny(unsafe.Pointer(&interests[0]), uintptr(uint64(count)|kcall.WaitAnyCursorFlag), unsafe.Pointer(&w.waitWire[0])))
+	return w.waitWire[1], result
 }

@@ -11,14 +11,15 @@ import (
 // ImageMap maps the read-only boot system image at its fixed window and
 // returns it. The image capability authorizes the mapping (ADR 0070).
 func ImageMap(device handle.ID) ([]byte, kcall.Status) {
-	imageWire[0], imageWire[1] = 0, 0
-	if result := status(imageMap(uint64(device), vm.UserImageAddress, unsafe.Pointer(&imageWire[0]))); result != kcall.StatusOK {
+	w := current()
+	w.imageWire[0], w.imageWire[1] = 0, 0
+	if result := status(imageMap(uint64(device), vm.UserImageAddress, unsafe.Pointer(&w.imageWire[0]))); result != kcall.StatusOK {
 		return nil, result
 	}
-	if imageWire[0] != vm.UserImageAddress || imageWire[1] == 0 || imageWire[1] > vm.UserImageLimit-vm.UserImageAddress {
+	if w.imageWire[0] != vm.UserImageAddress || w.imageWire[1] == 0 || w.imageWire[1] > vm.UserImageLimit-vm.UserImageAddress {
 		return nil, kcall.StatusInvalidArgument
 	}
-	return window(imageWire[0], imageWire[1]), kcall.StatusOK
+	return window(w.imageWire[0], w.imageWire[1]), kcall.StatusOK
 }
 
 // MemoryMap maps the shared-memory object the handle names at address, which
@@ -43,15 +44,16 @@ func MemoryMap(memory handle.ID, address uint64, size uint64, writable bool) ([]
 // kernel chooses and returns the address and the object's size, which the
 // region the mapping made records.
 func MemoryMapAnywhere(memory handle.ID, writable bool) (uint64, uint64, kcall.Status) {
+	w := current()
 	flags := kcall.MemoryMapAnywhere
 	if writable {
 		flags |= kcall.MemoryMapWritable
 	}
-	valueWire = 0
-	if result := status(memoryMap(uint64(memory), uint64(uintptr(unsafe.Pointer(&valueWire))), flags)); result != kcall.StatusOK {
+	w.valueWire = 0
+	if result := status(memoryMap(uint64(memory), uint64(uintptr(unsafe.Pointer(&w.valueWire))), flags)); result != kcall.StatusOK {
 		return 0, 0, result
 	}
-	base := valueWire
+	base := w.valueWire
 	region, result := VMQuery(base)
 	if result != kcall.StatusOK || region.Base != base {
 		VMUnmap(base, vmPage)
@@ -74,14 +76,15 @@ type DMARegion struct {
 // InvalidArgument if the kernel reported a region other than the one asked
 // for.
 func DMAAllocate(device handle.ID, virtual uint64, size uint64) (DMARegion, kcall.Status) {
-	dmaWire[0], dmaWire[1], dmaWire[2] = 0, 0, size
-	if result := status(dmaAllocate(uint64(device), virtual, unsafe.Pointer(&dmaWire[0]))); result != kcall.StatusOK {
+	w := current()
+	w.dmaWire[0], w.dmaWire[1], w.dmaWire[2] = 0, 0, size
+	if result := status(dmaAllocate(uint64(device), virtual, unsafe.Pointer(&w.dmaWire[0]))); result != kcall.StatusOK {
 		return DMARegion{}, result
 	}
-	if dmaWire[0] == 0 || dmaWire[1] != virtual || dmaWire[2] != size {
+	if w.dmaWire[0] == 0 || w.dmaWire[1] != virtual || w.dmaWire[2] != size {
 		return DMARegion{}, kcall.StatusInvalidArgument
 	}
-	return DMARegion{Physical: dmaWire[0], Memory: window(virtual, size)}, kcall.StatusOK
+	return DMARegion{Physical: w.dmaWire[0], Memory: window(virtual, size)}, kcall.StatusOK
 }
 
 // String views bytes as a string without copying them, for code that must not
@@ -117,12 +120,13 @@ func MappedAtStart(address uint64, size uint64) []byte { return window(address, 
 // loader capability authorizes it; the handle it returns fills the object with
 // ExecutableWrite and names it in a launch once full (ADR 0097).
 func ExecutableCreate(loader handle.ID, size uint64) (handle.ID, kcall.Status) {
-	valueWire = 0
-	result := status(executableCreate(uint64(loader), size, unsafe.Pointer(&valueWire)))
+	w := current()
+	w.valueWire = 0
+	result := status(executableCreate(uint64(loader), size, unsafe.Pointer(&w.valueWire)))
 	if result != kcall.StatusOK {
 		return 0, result
 	}
-	return handle.ID(valueWire), kcall.StatusOK
+	return handle.ID(w.valueWire), kcall.StatusOK
 }
 
 // ExecutableWrite appends data, at most kcall.MaxExecutableWrite bytes, to an

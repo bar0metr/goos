@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -159,20 +160,31 @@ func TestProfileCompleteness(t *testing.T) {
 	if len(good) < 4 || !strings.Contains(good[len(good)-1], " end lines=") {
 		t.Fatalf("profile lines %q", good)
 	}
-	var sizesLine, slabsLine int
+	var sizesLine, slabsLine, threadsLine int
 	for index, line := range good {
 		switch {
 		case strings.HasPrefix(line, "ALLOC_PROFILE vfs sizes"):
 			sizesLine = index
 		case strings.HasPrefix(line, "ALLOC_PROFILE vfs slabs"):
 			slabsLine = index
+		case strings.HasPrefix(line, "ALLOC_PROFILE vfs threads"):
+			threadsLine = index
 		}
+	}
+	if !strings.HasPrefix(good[0], "ALLOC_PROFILE vfs version=2 large=") || threadsLine == 0 {
+		t.Fatalf("profile lines %q", good)
 	}
 	drop := func(lines []string, index int) []string {
 		return append(append([]string(nil), lines[:index]...), lines[index+1:]...)
 	}
 	noCounter := append([]string(nil), good...)
 	noCounter[0] = strings.Replace(noCounter[0], " new_slabs=0", "", 1)
+	// A version 1 report has no version field and no threads line, and
+	// its end line counts one line fewer.
+	versionOne := drop(good, threadsLine)
+	versionOne[0] = strings.Replace(versionOne[0], " version=2", "", 1)
+	last := len(versionOne) - 1
+	versionOne[last] = strings.Replace(versionOne[last], fmt.Sprintf("lines=%d", len(good)-1), fmt.Sprintf("lines=%d", len(versionOne)-1), 1)
 	cases := []struct {
 		name              string
 		lines             []string
@@ -186,6 +198,8 @@ func TestProfileCompleteness(t *testing.T) {
 		{"lost first line", good[1:], 0, 1, false},
 		{"never ended", good[:len(good)-1], 0, 1, false},
 		{"lost counter", noCounter, 0, 1, false},
+		{"lost threads", drop(good, threadsLine), 0, 1, false},
+		{"version 1", versionOne, 1, 0, true},
 		{"a good one after a broken one", append(drop(good, sizesLine), good...), 1, 1, true},
 	}
 	for _, c := range cases {
