@@ -1,6 +1,11 @@
 //go:build goos_userspace
 
 // Package fetchtransport binds the native resolver, TCP, TLS and VFS adapters.
+//
+// An Adapter drives the command's one TCP session (utility.OpenTCP), which
+// belongs to one goroutine at a time, so an Adapter and the connections and
+// outputs it returns belong to one goroutine too. Its request and reply, its
+// path buffer and its file buffer live in the Adapter, not in the package.
 package fetchtransport
 
 import (
@@ -19,11 +24,6 @@ import (
 	"io"
 )
 
-var tx tcpapi.Request
-var rx tcpapi.Reply
-var pathBuffer [shell.MaxPath]byte
-var bulk utility.Bulk
-
 func New(data startup.Data) (*Adapter, error) {
 	if !utility.OpenTCP(data) {
 		return nil, errors.New("TCP session not granted")
@@ -34,6 +34,10 @@ func New(data startup.Data) (*Adapter, error) {
 type Adapter struct {
 	CWD   []byte
 	roots *tlsclient.Roots
+	tx    tcpapi.Request
+	rx    tcpapi.Reply
+	path  [shell.MaxPath]byte
+	bulk  utility.Bulk
 }
 
 func (*Adapter) Resolve(host []byte, addresses *[8]network.IPv4) (int, error) {
@@ -57,35 +61,36 @@ func (*Adapter) Resolve(host []byte, addresses *[8]network.IPv4) (int, error) {
 
 func hostnameName(host []byte) (hostname.Name, bool) { return hostname.Parse(host) }
 
-func (*Adapter) Connect(address network.IPv4, port uint16) (fetch.Connection, error) {
-	tx = tcpapi.Request{Opcode: tcpapi.OpOpen}
-	if err := call(); err != nil {
+func (a *Adapter) Connect(address network.IPv4, port uint16) (fetch.Connection, error) {
+	a.tx = tcpapi.Request{Opcode: tcpapi.OpOpen}
+	if err := a.call(); err != nil {
 		return nil, err
 	}
-	endpoint := rx.Endpoint
-	tx = tcpapi.Request{Opcode: tcpapi.OpConnect, Endpoint: endpoint, Address: address, Port: port}
-	if err := call(); err != nil {
-		closeEndpoint(endpoint)
+	endpoint := a.rx.Endpoint
+	a.tx = tcpapi.Request{Opcode: tcpapi.OpConnect, Endpoint: endpoint, Address: address, Port: port}
+	if err := a.call(); err != nil {
+		a.closeEndpoint(endpoint)
 		return nil, err
 	}
-	return &socket{endpoint: endpoint}, nil
+	return &socket{adapter: a, endpoint: endpoint}, nil
 }
-func call() error { return callWithin(35 * clock.TicksPerSecond) }
-func callWithin(timeout uint64) error {
-	if !utility.TCPCall(&tx, timeout, &rx) {
+func (a *Adapter) call() error { return a.callWithin(35 * clock.TicksPerSecond) }
+func (a *Adapter) callWithin(timeout uint64) error {
+	if !utility.TCPCall(&a.tx, timeout, &a.rx) {
 		return errors.New("TCP timeout")
 	}
-	if rx.Result != tcpapi.ResultOK {
-		return errors.New(rx.Result.Text())
+	if a.rx.Result != tcpapi.ResultOK {
+		return errors.New(a.rx.Result.Text())
 	}
 	return nil
 }
-func closeEndpoint(endpoint uint32) {
-	tx = tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: endpoint}
-	utility.TCPCall(&tx, 35*clock.TicksPerSecond, &rx)
+func (a *Adapter) closeEndpoint(endpoint uint32) {
+	a.tx = tcpapi.Request{Opcode: tcpapi.OpClose, Endpoint: endpoint}
+	utility.TCPCall(&a.tx, 35*clock.TicksPerSecond, &a.rx)
 }
 
 type socket struct {
+	adapter  *Adapter
 	endpoint uint32
 	deadline uint64
 	closed   bool
@@ -94,7 +99,7 @@ type socket struct {
 func (s *socket) Close() {
 	if !s.closed {
 		s.closed = true
-		closeEndpoint(s.endpoint)
+		s.adapter.closeEndpoint(s.endpoint)
 	}
 }
 func (s *socket) Write(p []byte) (int, error) {
@@ -109,15 +114,16 @@ func (s *socket) Write(p []byte) (int, error) {
 	if n > tcpapi.SlotSize {
 		n = tcpapi.SlotSize
 	}
+	a := s.adapter
 	copy(utility.TCPPayload(), p[:n])
-	tx = tcpapi.Request{Opcode: tcpapi.OpWrite, Endpoint: s.endpoint, Length: uint16(n)}
-	if err := callWithin(timeout); err != nil {
+	a.tx = tcpapi.Request{Opcode: tcpapi.OpWrite, Endpoint: s.endpoint, Length: uint16(n)}
+	if err := a.callWithin(timeout); err != nil {
 		return 0, err
 	}
-	if rx.Length == 0 || int(rx.Length) > n {
+	if a.rx.Length == 0 || int(a.rx.Length) > n {
 		return 0, errors.New("short TCP write")
 	}
-	return int(rx.Length), nil
+	return int(a.rx.Length), nil
 }
 func (s *socket) Read(p []byte) (int, error) {
 	if len(p) == 0 {
@@ -131,25 +137,27 @@ func (s *socket) Read(p []byte) (int, error) {
 	if n > tcpapi.SlotSize {
 		n = tcpapi.SlotSize
 	}
-	tx = tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: s.endpoint, Length: uint16(n)}
-	if !utility.TCPCall(&tx, timeout, &rx) {
+	a := s.adapter
+	a.tx = tcpapi.Request{Opcode: tcpapi.OpRead, Endpoint: s.endpoint, Length: uint16(n)}
+	if !utility.TCPCall(&a.tx, timeout, &a.rx) {
 		return 0, errors.New("TCP timeout")
 	}
-	if rx.Result == tcpapi.ResultEOF {
+	if a.rx.Result == tcpapi.ResultEOF {
 		return 0, io.EOF
 	}
-	if rx.Result != tcpapi.ResultOK {
-		return 0, errors.New(rx.Result.Text())
+	if a.rx.Result != tcpapi.ResultOK {
+		return 0, errors.New(a.rx.Result.Text())
 	}
-	data := utility.TCPReceived(&rx)
+	data := utility.TCPReceived(&a.rx)
 	count := copy(p, data)
-	utility.TCPRelease(rx.Slot)
+	utility.TCPRelease(a.rx.Slot)
 	return count, nil
 }
 
 type output struct {
-	file  vfs.Handle
-	owned bool
+	adapter *Adapter
+	file    vfs.Handle
+	owned   bool
 }
 
 func (output) Close() error { return nil }
@@ -158,6 +166,7 @@ func (o output) Write(p []byte) error {
 		utility.Write(p)
 		return nil
 	}
+	bulk := &o.adapter.bulk
 	for len(p) > 0 {
 		n := len(p)
 		if n > len(bulk.Memory) {
@@ -172,7 +181,9 @@ func (o output) Write(p []byte) error {
 	}
 	return nil
 }
-func (o fileOutput) Write(p []byte) error { return output{file: o.file, owned: true}.Write(p) }
+func (o fileOutput) Write(p []byte) error {
+	return output{adapter: o.adapter, file: o.file, owned: true}.Write(p)
+}
 func (o fileOutput) Close() error {
 	_, status := utility.Request(vfs.Request{Operation: vfs.OperationClose, Handle: o.file})
 	if status != vfs.StatusOK {
@@ -181,17 +192,20 @@ func (o fileOutput) Close() error {
 	return nil
 }
 
-type fileOutput struct{ file vfs.Handle }
+type fileOutput struct {
+	adapter *Adapter
+	file    vfs.Handle
+}
 
-func (*Adapter) Stdout() fetch.Output { return output{} }
+func (a *Adapter) Stdout() fetch.Output { return output{adapter: a} }
 func (a *Adapter) Open(name []byte) (fetch.Output, error) {
-	path, ok := shell.ResolvePath(a.CWD, name, &pathBuffer)
+	path, ok := shell.ResolvePath(a.CWD, name, &a.path)
 	if !ok {
 		return nil, errors.New("invalid file path")
 	}
-	if len(bulk.Memory) == 0 {
+	if len(a.bulk.Memory) == 0 {
 		var ok bool
-		bulk, ok = utility.NewBulk(tcpapi.SlotSize)
+		a.bulk, ok = utility.NewBulk(tcpapi.SlotSize)
 		if !ok {
 			return nil, errors.New("file buffer unavailable")
 		}
@@ -208,6 +222,6 @@ func (a *Adapter) Open(name []byte) (fetch.Output, error) {
 	if status != vfs.StatusOK {
 		return nil, errors.New("file open failed")
 	}
-	return fileOutput{file: reply.Handle}, nil
+	return fileOutput{adapter: a, file: reply.Handle}, nil
 }
 func (*Adapter) Diagnostic(p []byte) { utility.WriteError(p) }
