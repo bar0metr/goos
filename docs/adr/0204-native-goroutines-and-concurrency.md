@@ -7,6 +7,17 @@ Experimental implementation on `feature/native-userspace-concurrency`, based on
 Do not enable this runtime in production services until the collector, native
 I/O adapters, failure tests, and KVM validation pass together.
 
+## Decision
+
+Use a pinned TinyGo overlay for native M:N goroutines while preserving the
+kernel's scheduler and custom allocator. Keep G stacks distinct from native
+M stacks, identify each M through FS, and integrate G roots into the existing
+stop-the-world collection. Runtime pins protect M-owned state; scheduler-aware
+wait adapters release a G's execution permit while it waits. The VFS owner
+orders namespace and control operations and sends bounded read plans to
+workers. Production acceptance requires joint native failure, GC and KVM
+evidence; the experimental branch status remains unchanged until then.
+
 ## Toolchain findings
 
 The build uses TinyGo 0.42.0 with LLVM 22.1.4 and Go 1.25.5. The native
