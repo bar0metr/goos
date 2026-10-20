@@ -185,11 +185,7 @@ func IdlePending() bool {
 		return false
 	}
 	lockHeap()
-	stats := Stats{Mallocs: native.mallocs}
-	if threaded.Load() {
-		pendingCounts(&stats)
-	}
-	pending := stats.Mallocs != native.collectedMallocs || native.dirtyFree != 0
+	pending := native.mallocs != native.collectedMallocs || native.dirtyFree != 0 || threaded.Load() && anyUnfolded()
 	unlockHeap()
 	return pending
 }
@@ -203,11 +199,7 @@ func CollectIdle() {
 		return
 	}
 	lockHeap()
-	stats := Stats{Mallocs: native.mallocs}
-	if threaded.Load() {
-		pendingCounts(&stats)
-	}
-	allocated := stats.Mallocs != native.collectedMallocs
+	allocated := native.mallocs != native.collectedMallocs || threaded.Load() && anyUnfolded()
 	unlockHeap()
 	if allocated {
 		Collect()
@@ -384,27 +376,37 @@ func readMemStats(stats *runtime.MemStats) {
 	}
 }
 
-// HeapStats returns the state of the heap.
+// HeapStats returns the state of the heap. With several threads it counts
+// what every thread has folded: each folds at every refill of its own slabs,
+// at its exit, and at every collection, so between collections a thread's
+// last allocations from its slabs may be missing.
 func HeapStats() Stats {
 	if !ready {
 		return Stats{Reserved: HeapReserve}
 	}
 	lockHeap()
 	stats := native.stats()
-	if threaded.Load() {
-		pendingCounts(&stats)
-	}
 	unlockHeap()
 	return stats
 }
 
 // Pauses returns the duration of the last collection and of the longest, in
 // nanoseconds.
-func Pauses() (last, longest uint64) { return lastPause, maxPause }
+func Pauses() (last, longest uint64) {
+	lockHeap()
+	last, longest = lastPause, maxPause
+	unlockHeap()
+	return last, longest
+}
 
 // PauseTotal returns the cumulative duration of every collection in
 // nanoseconds.
-func PauseTotal() uint64 { return totalPause }
+func PauseTotal() uint64 {
+	lockHeap()
+	total := totalPause
+	unlockHeap()
+	return total
+}
 
 // ReadDiagnostics fills d with the allocator's counters and a snapshot of its
 // metadata. It allocates nothing, so d is best a global the caller keeps.

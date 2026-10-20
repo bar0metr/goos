@@ -40,6 +40,8 @@ type wires struct {
 	vmRecord        [kcall.VMRecordSize]byte
 	threadWire      [2]uint64
 	countWire       uint64
+	// touched keeps the reads touch makes from being optimized away.
+	touched byte
 }
 
 var scratch [tls.Slots]wires
@@ -79,11 +81,9 @@ func touch(data []byte) {
 	for offset := (pageSize - start%pageSize) % pageSize; offset < uintptr(len(data)); offset += pageSize {
 		sum ^= data[offset]
 	}
-	touched ^= sum
+	w := current()
+	w.touched ^= sum
 }
-
-// touched keeps the reads touch makes from being optimized away.
-var touched byte
 
 const pageSize = 4096
 

@@ -31,8 +31,13 @@ type threadState struct {
 	fast atomic.Uint32
 	// cache is the thread's own slabs (cache.go).
 	cache threadCache
-	// counts is what the thread counted on its own.
-	counts threadCounts
+	// counts is what the thread counted on its own. Only the thread
+	// changes it, inside the fast path or under the heap lock; it reaches
+	// the heap's counters only through foldThread, and nothing else reads
+	// it. unfolded is set while counts holds anything foldThread has not
+	// folded.
+	counts   threadCounts
+	unfolded atomic.Uint32
 }
 
 var (
@@ -118,7 +123,7 @@ func ThreadStarted(slot int) {
 	lockHeap()
 	t.regions, t.cursor, t.innermost = regionStack{}, allocatorPosition{}, nil
 	native.returnCache(&t.cache, &t.counts)
-	native.foldCounts(&t.counts)
+	foldThread(t)
 	t.live = true
 	live := uint32(0)
 	for index := range threads {
@@ -139,7 +144,7 @@ func ThreadExiting() {
 	}
 	lockHeap()
 	native.returnCache(&t.cache, &t.counts)
-	native.foldCounts(&t.counts)
+	foldThread(t)
 	t.live = false
 	unlockHeap()
 }
@@ -213,7 +218,7 @@ func collectThreaded(slot int) {
 		// and counts come back, and the mark bitmaps hold marks again.
 		for index := range threads {
 			native.returnCache(&threads[index].cache, &threads[index].counts)
-			native.foldCounts(&threads[index].counts)
+			foldThread(&threads[index])
 		}
 		native.foldStrayFrees()
 		base, _ := threadStack(slot)
@@ -334,12 +339,16 @@ func markThreads() {
 // finish (suspendOthers).
 func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 	class := native.classOf[(size+15)>>4]
+	noteUnfolded(t)
+	// The counts change only inside the announced window or under the
+	// heap lock: a collection folds and clears them while the thread is
+	// held, and must not find an update half done.
+	t.fast.Store(1)
 	if sizeProfile {
 		bucket := (size - 1) >> 4
 		t.counts.sizeCounts[bucket]++
 		t.counts.sizeBytes[bucket] += uint64(size)
 	}
-	t.fast.Store(1)
 	if gcFlag.Load() == 0 {
 		if address := native.cacheAlloc(&t.cache, &t.counts, class, noPointers); address != 0 {
 			t.fast.Store(0)
@@ -349,7 +358,7 @@ func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 	t.fast.Store(0)
 	owner := uint32(selfSlot() + 1)
 	heapLock.lock()
-	native.foldCounts(&t.counts)
+	foldThread(t)
 	if native.liveBytes >= native.nextCollection && !collecting {
 		heapLock.unlock()
 		Collect()
@@ -368,6 +377,8 @@ func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 			address = native.cacheAlloc(&t.cache, &t.counts, class, noPointers)
 		}
 	}
+	// The allocation after the fold counted again.
+	noteUnfolded(t)
 	heapLock.unlock()
 	if address == 0 {
 		fail()
@@ -375,11 +386,41 @@ func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 	return address
 }
 
+// noteUnfolded marks that t's counts hold something to fold. Only t calls
+// it; the store happens once per fold.
+func noteUnfolded(t *threadState) {
+	if t.unfolded.Load() == 0 {
+		t.unfolded.Store(1)
+	}
+}
+
+// foldThread publishes t's counts into the heap's. The caller holds the heap
+// lock and is t's thread, or t's thread is held or has ended.
+func foldThread(t *threadState) {
+	native.foldCounts(&t.counts)
+	t.unfolded.Store(0)
+}
+
+// anyUnfolded reports whether some thread counted what it has not folded:
+// allocations or frees since its last refill.
+func anyUnfolded() bool {
+	for index := range threads {
+		if threads[index].unfolded.Load() != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // freeThreaded is free once threads exist. A slot of a slab some thread
 // owns is freed without the heap lock: into the slab by its owner, into its
 // remote-free bits by anyone else. Everything else takes the lock.
 func freeThreaded(t *threadState, address uintptr) {
-	if threadCaches && ready && native.contains(address) {
+	// The reservation's bounds never change, unlike the frontier the heap
+	// lock guards; a page past the frontier has no owner and takes the
+	// locked path, which checks it.
+	if threadCaches && ready && address >= native.base && address-native.base < uintptr(native.capacity)<<pageShift {
+		noteUnfolded(t)
 		t.fast.Store(1)
 		if gcFlag.Load() == 0 && freeOwned(t, address) {
 			t.fast.Store(0)
@@ -398,6 +439,7 @@ func freeThreaded(t *threadState, address uintptr) {
 	}
 	// The owner may have changed since the try above; under the lock
 	// only an owned slab's owner still changes it without the lock.
+	noteUnfolded(t)
 	if !freeOwned(t, address) {
 		native.freeAt(address)
 	}
@@ -423,35 +465,14 @@ func freeOwned(t *threadState, address uintptr) bool {
 	return true
 }
 
-// pendingCounts adds what threads counted and have not folded to s. The
-// other threads' counts are read while they change, so the result is
-// approximate until a collection folds them. The caller holds the heap
-// lock.
-func pendingCounts(s *Stats) {
-	for index := range threads {
-		n := &threads[index].counts
-		s.Live += n.allocBytes - n.freeBytes
-		s.Objects += n.allocs - n.frees
-		s.TotalAlloc += n.allocBytes
-		s.Mallocs += n.allocs
-		s.Frees += n.frees
-	}
-}
-
 // threadDiagnostics fills the thread part of d. The caller holds the heap
-// lock.
+// lock. The thread counters in d are the folded ones (foldThread).
 func threadDiagnostics(d *Diagnostics) {
 	d.ThreadsLive, d.ThreadsPeak = 0, peakThreads
 	for index := range threads {
 		if threads[index].live {
 			d.ThreadsLive++
 		}
-		n := &threads[index].counts
-		d.LocalAllocs += n.allocs
-		d.LocalFrees += n.localFrees
-		d.RemoteFrees += n.remoteFrees
-		d.Refills += n.refills
-		d.Drained += n.drained
 	}
 	d.HeapLocks, d.HeapContended = heapLock.acquired.Load(), heapLock.contended.Load()
 	d.GCLocks, d.GCContended = gcLock.acquired.Load(), gcLock.contended.Load()

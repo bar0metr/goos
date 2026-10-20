@@ -239,8 +239,15 @@ owner, lists or frees each slab, and folds each thread's counts, so no cache
 outlives the epoch that might discard its pages. A thread's exit returns its
 slabs and counts under the heap lock before `ThreadExit`. A thread holds at
 most 14 pages it does not use, 56 KiB; eight threads hold at most 448 KiB.
-Large runs stay under the heap lock. Statistics read between collections add
-the counts threads have not folded yet, read while they change.
+Large runs stay under the heap lock.
+
+A thread's counts are its own. It changes them only inside the fast-path
+window or under the heap lock, and they reach the heap's counters only when
+it folds them under the heap lock: at every refill, at its exit, and when a
+collection holds it. Statistics and diagnostics read only folded counts, so
+between collections they can miss a thread's allocations since its last
+refill. A thread sets an atomic flag when it has counts to fold, and an idle
+collection reads the flags to tell whether anything was allocated.
 
 `arena.UseThreadCaches(false)`, called before the second thread starts,
 turns owned slabs off, so the benchmark can compare them with the heap lock
