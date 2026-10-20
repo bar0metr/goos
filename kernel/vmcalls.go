@@ -176,7 +176,7 @@ func demandRegion(owner *process.Process, root uint64, page uint64, write bool, 
 	if !ok {
 		return region.Region{}, faultInvalid
 	}
-	if entry.Backing == region.Guard {
+	if entry.GuardedAt(page) {
 		return region.Region{}, faultGuard
 	}
 	need := region.Read
@@ -302,7 +302,14 @@ func (handler nativeCallHandler) VMMap(descriptor uint64, protection uint64, fla
 		}
 		address = base
 	}
-	switch regions.Insert(region.Region{Base: address, Length: length, Protection: region.Protection(protection), Backing: region.Anonymous}) {
+	regionFlags := region.Flags(0)
+	if flags&kcall.VMMapStacks != 0 {
+		if length%region.StackStride != 0 || protection != kcall.VMRead|kcall.VMWrite {
+			return kcall.StatusInvalidArgument
+		}
+		regionFlags = region.StackBatch
+	}
+	switch regions.Insert(region.Region{Base: address, Length: length, Protection: region.Protection(protection), Backing: region.Anonymous, Flags: regionFlags}) {
 	case region.OK:
 	case region.Overlap:
 		return kcall.StatusAlreadyExists
@@ -399,6 +406,12 @@ func (handler nativeCallHandler) VMProtect(address uint64, length uint64, protec
 	}
 	if status := regionStatus(regions.Protect(address, length, requested)); status != kcall.StatusOK {
 		return status
+	}
+	if requested == 0 {
+		if !vm.RevokeUserRange(handler.root, address, length) {
+			return kcall.StatusInvalidArgument
+		}
+		return kcall.StatusOK
 	}
 	if !vm.ProtectUserRange(handler.root, address, length, regionPermissions(requested)) {
 		return kcall.StatusInvalidArgument

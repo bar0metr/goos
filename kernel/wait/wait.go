@@ -24,6 +24,10 @@ const (
 	// of polling the device.
 	KindConsole
 	KindLog
+	// KindThread is a native thread's wake flag (ADR 0204). Its object is
+	// the thread's task ID, so a wake never reaches a later thread in the
+	// same slot.
+	KindThread
 )
 
 type Event uint8

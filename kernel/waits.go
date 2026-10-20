@@ -208,7 +208,14 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		offset := index * int(interestSize)
 		handleID := handle.ID(decodeUint64(local.waitAnyWire[offset : offset+8]))
 		events := kcall.WaitEvent(decodeUint64(local.waitAnyWire[offset+8 : offset+16]))
-		entry, status, reason := resolveWaitAny(owner, handleID, events)
+		var entry kernelwait.Entry
+		var status kcall.Status
+		var reason diag.Deny
+		if uint64(handleID) == kcall.WaitAnyThread {
+			entry, status, reason = threadWaitEntry(taskID, events)
+		} else {
+			entry, status, reason = resolveWaitAny(owner, handleID, events)
+		}
 		if status != kcall.StatusOK {
 			trace(diag.WaitDenied, owner.ID(), uint64(taskID), uint64(handleID), uint64(reason))
 			if diag.Enabled {
@@ -360,6 +367,15 @@ func resolveWaitAny(owner *process.Process, id handle.ID, events kcall.WaitEvent
 	}
 }
 
+// threadWaitEntry is an interest in the calling thread's wake flag
+// (ADR 0204). The thread needs no handle for its own flag.
+func threadWaitEntry(task sched.TaskID, events kcall.WaitEvent) (kernelwait.Entry, kcall.Status, diag.Deny) {
+	if events != kcall.WaitReadable {
+		return kernelwait.Entry{}, kcall.StatusPermissionDenied, diag.DenyEvents
+	}
+	return kernelwait.Entry{Key: kernelwait.Key{Kind: kernelwait.KindThread, Object: uint64(task)}, Events: kernelwait.Readable}, kcall.StatusOK, 0
+}
+
 func waitEvents(events kcall.WaitEvent) kernelwait.Event {
 	var result kernelwait.Event
 	if events&kcall.WaitReadable != 0 {
@@ -409,6 +425,8 @@ func readyWaitAny(entries []kernelwait.Entry) uint64 {
 			ready = amd64.NetIRQPending()
 		case kernelwait.KindLog:
 			ready = logfmt.SequenceBefore(entry.Cursor, systemLog.Total())
+		case kernelwait.KindThread:
+			ready = threadWakeSet(entry.Key.Object)
 		}
 		if ready {
 			mask |= 1 << index

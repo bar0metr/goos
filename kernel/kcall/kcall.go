@@ -105,6 +105,19 @@ const (
 	OperationThreadYield
 	OperationThreadSuspend
 	OperationThreadResume
+	// ThreadSetBase sets the calling thread's FS base, which the native
+	// runtime points at the thread's control block. ThreadPreempt registers
+	// the runtime's preemption entry for the calling thread, and
+	// ThreadPreemptTake hands that entry the instruction pointer it
+	// interrupted (ADR 0204).
+	OperationThreadSetBase
+	OperationThreadPreempt
+	OperationThreadPreemptTake
+	// ThreadWake sets the wake flag of a thread of the caller's process,
+	// which a WaitAny interest on WaitAnyThread reports, and
+	// ThreadWakeTake clears the caller's own (ADR 0204).
+	OperationThreadWake
+	OperationThreadWakeTake
 )
 
 // Native thread layout (ADR 0203). A process has ThreadSlots thread slots.
@@ -122,6 +135,13 @@ const (
 	ThreadInfoSize = uint64(16)
 	// JoinPoll makes ThreadJoin answer Timeout rather than wait.
 	JoinPoll = uint64(1)
+	// MaxPreemptTicks bounds the interval ThreadPreempt takes, in ticks of
+	// the processor's preemption timer.
+	MaxPreemptTicks = uint64(1000)
+	// PreemptRedZone is how far below the interrupted stack pointer a
+	// preemption entry starts: the 128 bytes a leaf function may use below
+	// its stack pointer stay untouched.
+	PreemptRedZone = uint64(128)
 )
 
 // ThreadStackTop returns the stack top of thread slot k, 1 to ThreadSlots-1.
@@ -267,6 +287,11 @@ type Handler interface {
 	ThreadYield() Status
 	ThreadSuspend(address uint64, capacity uint64, count uint64) Status
 	ThreadResume() Status
+	ThreadSetBase(base uint64) Status
+	ThreadPreempt(entry uint64, ticks uint64) Status
+	ThreadPreemptTake(address uint64) Status
+	ThreadWake(thread uint64) Status
+	ThreadWakeTake() Status
 }
 
 // Dispatch validates the architecture-independent native call contract before
@@ -410,7 +435,8 @@ func Dispatch(request Request, handler Handler) Result {
 	case OperationExecutableSource:
 		return Result{Status: handler.ExecutableSource(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationVMMap:
-		if request.Arg1&^VMProtectionMask != 0 || request.Arg2&^VMMapFixed != 0 {
+		if request.Arg1&^VMProtectionMask != 0 || request.Arg2&^(VMMapFixed|VMMapStacks) != 0 ||
+			request.Arg2&VMMapStacks != 0 && request.Arg1 != VMRead|VMWrite {
 			return Result{Status: StatusInvalidArgument}
 		}
 		return Result{Status: handler.VMMap(request.Arg0, request.Arg1, request.Arg2)}
@@ -468,6 +494,19 @@ func Dispatch(request Request, handler Handler) Result {
 		return Result{Status: handler.ThreadSuspend(request.Arg0, request.Arg1, request.Arg2)}
 	case OperationThreadResume:
 		return Result{Status: handler.ThreadResume()}
+	case OperationThreadSetBase:
+		return Result{Status: handler.ThreadSetBase(request.Arg0)}
+	case OperationThreadPreempt:
+		if request.Arg1 > MaxPreemptTicks || (request.Arg0 == 0) != (request.Arg1 == 0) {
+			return Result{Status: StatusInvalidArgument}
+		}
+		return Result{Status: handler.ThreadPreempt(request.Arg0, request.Arg1)}
+	case OperationThreadPreemptTake:
+		return Result{Status: handler.ThreadPreemptTake(request.Arg0)}
+	case OperationThreadWake:
+		return Result{Status: handler.ThreadWake(request.Arg0)}
+	case OperationThreadWakeTake:
+		return Result{Status: handler.ThreadWakeTake()}
 	default:
 		return Result{Status: StatusUnsupported}
 	}
@@ -574,6 +613,9 @@ const (
 	VMExecute        = uint64(4)
 	VMProtectionMask = VMRead | VMWrite | VMExecute
 	VMMapFixed       = uint64(1)
+	// VMMapStacks reserves repeated 64 KiB guards and 256 KiB stacks in
+	// one anonymous region. Its length must be a multiple of 320 KiB.
+	VMMapStacks      = uint64(2)
 	VMDescriptorSize = uint64(16)
 )
 
@@ -611,6 +653,9 @@ const (
 	WaitAnyCursorInterestSize = uint64(24)
 	WaitAnyResultSize         = uint64(16)
 	WaitAnyInfiniteTimeout    = ^uint64(0)
+	// WaitAnyThread is the handle of an interest in the calling thread's
+	// own wake flag, with WaitReadable; it names no handle-table entry.
+	WaitAnyThread = ^uint64(0)
 )
 
 type WaitEvent uint64

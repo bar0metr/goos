@@ -282,6 +282,31 @@ func (handler *testHandler) ThreadSuspend(address uint64, capacity uint64, count
 	return StatusOK
 }
 
+func (handler *testHandler) ThreadSetBase(base uint64) Status {
+	handler.address = base
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadPreempt(entry uint64, ticks uint64) Status {
+	handler.channel, handler.length = entry, ticks
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadPreemptTake(address uint64) Status {
+	handler.address = address
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadWake(thread uint64) Status {
+	handler.channel = thread
+	return StatusOK
+}
+
+func (handler *testHandler) ThreadWakeTake() Status {
+	handler.called = true
+	return StatusNotFound
+}
+
 func (handler *testHandler) ThreadResume() Status {
 	handler.called = true
 	return StatusOK
@@ -618,7 +643,7 @@ func TestDispatchExecutableCalls(t *testing.T) {
 			t.Fatalf("random read of %d bytes reached the handler", length)
 		}
 	}
-	if result := Dispatch(Request{Operation: OperationThreadResume + 1}, &testHandler{}); result.Status != StatusUnsupported {
+	if result := Dispatch(Request{Operation: OperationThreadWakeTake + 1}, &testHandler{}); result.Status != StatusUnsupported {
 		t.Fatalf("unknown operation accepted: %+v", result)
 	}
 	handler := &testHandler{}
@@ -751,6 +776,46 @@ func TestDispatchThreadCalls(t *testing.T) {
 	}
 	if result := Dispatch(Request{Operation: OperationThreadSuspend, Arg0: 0x7000, Arg1: MaxThreadSnapshots, Arg2: 0x8000}, handler); result.Status != StatusOK || handler.length != MaxThreadSnapshots {
 		t.Fatalf("suspend %+v", result)
+	}
+}
+
+// TestPreemptionOperationsAreAppended pins the numbers of the calls the
+// goroutine runtime added after the thread calls.
+func TestPreemptionOperationsAreAppended(t *testing.T) {
+	if OperationThreadSetBase != 66 || OperationThreadPreempt != 67 || OperationThreadPreemptTake != 68 ||
+		OperationThreadWake != 69 || OperationThreadWakeTake != 70 {
+		t.Fatalf("goroutine operations %d..%d", OperationThreadSetBase, OperationThreadWakeTake)
+	}
+}
+
+func TestDispatchPreemptionCalls(t *testing.T) {
+	handler := &testHandler{}
+	if result := Dispatch(Request{Operation: OperationThreadSetBase, Arg0: 0x7000}, handler); result.Status != StatusOK || handler.address != 0x7000 {
+		t.Fatalf("set base %+v %#x", result, handler.address)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadPreempt, Arg0: 0x40002000, Arg1: 2}, handler); result.Status != StatusOK || handler.channel != 0x40002000 || handler.length != 2 {
+		t.Fatalf("preempt %+v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadPreempt}, handler); result.Status != StatusOK {
+		t.Fatalf("preempt off %+v", result)
+	}
+	for _, bad := range []Request{
+		{Operation: OperationThreadPreempt, Arg0: 0x40002000},
+		{Operation: OperationThreadPreempt, Arg1: 2},
+		{Operation: OperationThreadPreempt, Arg0: 0x40002000, Arg1: MaxPreemptTicks + 1},
+	} {
+		if result := Dispatch(bad, &testHandler{}); result.Status != StatusInvalidArgument {
+			t.Fatalf("preempt %+v accepted: %+v", bad, result)
+		}
+	}
+	if result := Dispatch(Request{Operation: OperationThreadPreemptTake, Arg0: 0x8000}, handler); result.Status != StatusOK || handler.address != 0x8000 {
+		t.Fatalf("take %+v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadWake, Arg0: 0x200000003}, handler); result.Status != StatusOK || handler.channel != 0x200000003 {
+		t.Fatalf("wake %+v", result)
+	}
+	if result := Dispatch(Request{Operation: OperationThreadWakeTake}, handler); result.Status != StatusNotFound || !handler.called {
+		t.Fatalf("wake take %+v", result)
 	}
 }
 

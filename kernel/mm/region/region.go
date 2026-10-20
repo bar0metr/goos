@@ -80,7 +80,22 @@ const (
 	// FromObject says an image region's source is an executable object
 	// rather than an extent of the system image (ADR 0106).
 	FromObject
+	// StackBatch reserves repeated fixed stacks and their lower guards in
+	// one region (ADR 0204). Only whole-region removal is allowed.
+	StackBatch
 )
+
+const (
+	StackBytes      = uint64(256 << 10)
+	StackGuardBytes = uint64(64 << 10)
+	StackStride     = StackBytes + StackGuardBytes
+)
+
+// GuardedAt reports whether address lies in a guard of this region.
+func (r Region) GuardedAt(address uint64) bool {
+	return r.Contains(address) && (r.Backing == Guard ||
+		r.Flags&StackBatch != 0 && (address-r.Base)%StackStride < StackGuardBytes)
+}
 
 // Region is one contiguous range of a process's address space.
 type Region struct {
@@ -236,6 +251,10 @@ func (m *Map) Insert(region Region) Status {
 		region.Backing == Guard && region.Protection != 0 {
 		return InvalidArgument
 	}
+	if region.Flags&StackBatch != 0 && (region.Backing != Anonymous ||
+		region.Protection != Read|Write || region.Length%StackStride != 0) {
+		return InvalidArgument
+	}
 	if !m.Free(region.Base, region.Length) {
 		return Overlap
 	}
@@ -355,6 +374,9 @@ func (m *Map) Remove(base, length uint64, allowPinned bool) Status {
 		if !allowPinned && region.Flags&Pinned != 0 {
 			return PermissionDenied
 		}
+		if region.Flags&StackBatch != 0 && (base > region.Base || end < region.End()) {
+			return PermissionDenied
+		}
 		if region.Base < base && region.End() > end {
 			splits++
 		}
@@ -417,7 +439,7 @@ func (m *Map) protect(base, length uint64, protection Protection, restrict bool)
 	splits := 0
 	for index := first; index < m.count && m.regions[index].Base < end; index++ {
 		region := m.regions[index]
-		if region.Backing == Guard && protection != 0 {
+		if region.Flags&StackBatch != 0 || region.Backing == Guard && protection != 0 {
 			return PermissionDenied
 		}
 		if restrict && protection&^region.Protection != 0 {

@@ -274,6 +274,12 @@ func nativeCallLocks(operation kcall.Operation) lockSet {
 		return 0
 	case kcall.OperationThreadYield:
 		return 0
+	case kcall.OperationThreadSetBase, kcall.OperationThreadPreempt, kcall.OperationThreadPreemptTake,
+		kcall.OperationThreadWake, kcall.OperationThreadWakeTake:
+		// They find the caller in its thread group, which adopts the main
+		// task on first use, and change the caller's own saved state under
+		// the scheduler lock.
+		return registryWrite | spaceRead
 	case kcall.OperationThreadExit, kcall.OperationThreadResume:
 		// They change the thread group, which the registry's write lock
 		// guards (ADR 0203).

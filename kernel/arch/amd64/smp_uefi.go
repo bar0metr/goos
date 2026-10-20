@@ -159,13 +159,17 @@ func unlockScheduler(flags uint64) {
 func schedSwitch(action uint64) uint64 {
 	cpu := CPUIndex()
 	schedulerLock.Lock()
-	if action == switchTick {
+	tick := action == switchTick
+	if tick {
 		if cpu == sched.Housekeeping {
 			runState.Tick()
 		}
 		action = switchPreempt
 	}
 	previous := runState.Current(cpu)
+	if tick && previous != sched.Idle {
+		notePreemptTick(uint64(previous))
+	}
 	if runState.Killed(cpu) && previous != sched.Idle {
 		taskExitCodes[previous] = killCodes[previous]
 	}
