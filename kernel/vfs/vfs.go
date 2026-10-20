@@ -146,6 +146,7 @@ type openFile struct {
 	// agree on. A rename moves it with the name.
 	identity   ramfs.NodeID
 	offset     uint64
+	readToken  uint64
 	generation uint32
 	owner      Owner
 	mount      uint8
@@ -170,6 +171,8 @@ type Namespace struct {
 	mounts [MaxMounts]mount
 	files  [MaxOpenFiles]openFile
 	cache  [MaxCache]cacheEntry
+	// nextRead identifies a cursor reservation until its owner finishes it.
+	nextRead uint64
 	// Canonical paths live here because a local [MaxPath]byte escapes into the
 	// helpers below and the kernel's leaking heap never frees it. Resolve owns
 	// resolved; the operations that canonicalize a path before calling Resolve
@@ -588,15 +591,12 @@ func (entry *openFile) release() {
 }
 
 func (namespace *Namespace) Read(owner Owner, handle Handle, target []byte) (int, Status) {
-	entry, status := namespace.file(owner, handle, Read)
+	plan, status := namespace.BeginRead(owner, handle)
 	if status != StatusOK {
 		return 0, status
 	}
-	count, backendStatus := namespace.mounts[entry.mount].backend.Read(entry.node, entry.offset, target)
-	if backendStatus == ramfs.StatusOK {
-		entry.offset += uint64(count)
-	}
-	return count, mapStatus(backendStatus)
+	count, status := plan.Read(target)
+	return count, namespace.FinishRead(plan, count, status)
 }
 
 // ReadAt reads an open file without changing its position. Executable page
