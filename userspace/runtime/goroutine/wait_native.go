@@ -1,0 +1,102 @@
+//go:build goos_userspace && goos_goroutines
+
+package goroutine
+
+import (
+	"goos/kernel/handle"
+	"goos/kernel/kcall"
+	"goos/userspace/runtime/arena"
+	"goos/userspace/runtime/sys"
+	"goos/userspace/runtime/tls"
+)
+
+var (
+	nativeWaitHandler    sys.WaitHandler    = schedulerWait
+	nativeReceiveHandler sys.ReceiveHandler = schedulerReceive
+)
+
+func installWaitHooks() {
+	sys.InstallWaitHandler(&nativeWaitHandler)
+	sys.InstallReceiveHandler(&nativeReceiveHandler)
+}
+
+func canParkNativeWait() bool {
+	pin()
+	defer unpin()
+	m := currentM()
+	if m == nil || m.curG == nil || arena.InRegion() {
+		return false
+	}
+	if tls.Current().Pins != 1 {
+		fatal("goroutine: blocking native wait while pinned")
+	}
+	return true
+}
+
+// schedulerWait runs before sys.WaitAny takes its M-local scratch pin. The
+// poller uses kernel waits on scheduler stacks and zero-time polls directly.
+func schedulerWait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, timeout uint64) (uint64, kcall.Status, bool) {
+	if count > MaxWaiters {
+		return 0, kcall.StatusOK, false
+	}
+	for index := 0; index < count; index++ {
+		if uint64(interests[index].Handle) == kcall.WaitAnyThread {
+			return 0, kcall.StatusOK, false
+		}
+	}
+	if !canParkNativeWait() {
+		return 0, kcall.StatusOK, false
+	}
+	// Probe with the kernel before registering: it validates capabilities
+	// and event masks, and reports immediately ready interests unchanged.
+	mask, status := sys.WaitAny(interests, count, 0)
+	if status != kcall.StatusTimeout {
+		return mask, status, true
+	}
+	if count == 0 && timeout == kcall.WaitAnyInfiniteTimeout {
+		return 0, kcall.StatusInvalidArgument, true
+	}
+	deadline, valid := deadlineFromTicks(nanotime(), timeout)
+	if !valid {
+		return 0, kcall.StatusInvalidArgument, true
+	}
+	mask, status = Wait(interests, count, deadline, nil)
+	return mask, status, true
+}
+
+// schedulerReceive keeps one absolute deadline across readiness races. It
+// consumes with IPCReceive; only readiness waiting parks, without retaining
+// sys's per-M descriptor or an M-local pointer across the switch.
+func schedulerReceive(channel handle.ID, buffer []byte, timeout uint64) (kcall.Status, bool) {
+	if !canParkNativeWait() {
+		return kcall.StatusOK, false
+	}
+	status := sys.IPCReceive(channel, buffer)
+	if status != kcall.StatusNotFound {
+		return status, true
+	}
+	// IPCWaitReceive has a finite tick timeout, unlike WaitAny's sentinel.
+	deadline, valid := deadlineFromTicks(nanotime(), timeout)
+	if !valid || timeout == kcall.WaitAnyInfiniteTimeout {
+		return kcall.StatusResourceExhausted, true
+	}
+	var interests [kcall.WaitAnyMaxObjects]sys.Interest
+	interests[0] = sys.Interest{Handle: channel, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+	for {
+		// Validate the native capability/event contract before registering.
+		_, status = sys.WaitAny(&interests, 1, 0)
+		if status != kcall.StatusOK && status != kcall.StatusTimeout {
+			return status, true
+		}
+		if _, status = Wait(&interests, 1, deadline, nil); status != kcall.StatusOK {
+			return status, true
+		}
+		status = sys.IPCReceive(channel, buffer)
+		if status != kcall.StatusNotFound {
+			return status, true
+		}
+		if nanotime() >= deadline {
+			return kcall.StatusTimeout, true
+		}
+	}
+}
