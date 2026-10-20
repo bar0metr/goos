@@ -1188,3 +1188,16 @@ bench-goroutines: goroutine-test-images
 test-pve-goroutines:
 	@$(MAKE) --no-print-directory -j8 pve-artifacts VALIDATION=1
 	@$(PVELAB) run --scenario goroutines --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)
+
+# Native concurrency contracts (docs/development/native-concurrency-audit.md).
+# test-concurrency-audit checks that every package-level variable under
+# userspace/ has an audit row; test-userspace-libs runs the libraries'
+# concurrency tests with the race detector.
+USERSPACE_LIB_PACKAGES := ./userspace/runtime/lock ./userspace/runtime/pages ./userspace/utility ./userspace/log ./userspace/startup ./userspace/fsproto ./userspace/terminal
+.PHONY: test-concurrency-audit test-userspace-libs
+test-concurrency-audit:
+	$(BUILD_ENV) go test -count=1 ./tools/concurrencyaudit
+	$(BUILD_ENV) go run ./tools/concurrencyaudit
+
+test-userspace-libs:
+	$(BUILD_ENV) go test -race -count=1 $(USERSPACE_LIB_PACKAGES)
