@@ -555,6 +555,8 @@ const ClockTimeSize = uint64(16)
 const (
 	HandleInfoSize  = uint64(16)
 	ProcessInfoSize = uint64(80)
+	// ProcessInfoSelf selects the caller without enumerating other processes.
+	ProcessInfoSelf = ^uint64(0)
 	MaxProcessName  = 16
 	// ProcessResources is the number of counters in each of the held and limit
 	// arrays of a ProcessInfo record.
