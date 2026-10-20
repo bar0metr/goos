@@ -21,7 +21,10 @@ VFS_ELF = $(OUT_DIR)/userspace/vfs.elf
 # shell read is generated from the manifests the commands declare (ADR 0080).
 # The boot archive carries the recovery subset tools/initramfs names
 # (ADR 0175).
-VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe
+VALIDATION_COMMANDS := cryptoprobe trustprobe memreclaim threadprobe goprobe
+# Commands built with the goroutine runtime (ADR 0204): the TinyGo root
+# tools/goroutineroot prepares and the goroutine target.
+GOROUTINE_COMMANDS := goprobe
 COMMANDS = $(filter-out $(if $(filter 0,$(VALIDATION)),$(VALIDATION_COMMANDS)),$(sort $(notdir $(wildcard userspace/bin/*))))
 COMMAND_DIR = $(OUT_DIR)/userspace/bin
 COMMAND_ELF_DIR = $(OUT_DIR)/userspace/bin-elf
@@ -30,7 +33,7 @@ COMMAND_ELFS = $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(COMMANDS)))
 COMMAND_INDEX = $(OUT_DIR)/userspace/commands
 # Every command is rebuilt when any package a command imports changes; the
 # commands share nearly all of them.
-COMMAND_LIBRARY = $(call go_deps,./userspace/bin/...)
+COMMAND_LIBRARY = $(call go_deps,$(addprefix ./userspace/bin/,$(filter-out $(GOROUTINE_COMMANDS),$(COMMANDS))))
 BLOCK_IMAGE = $(OUT_DIR)/userspace/block
 BLOCK_ELF = $(OUT_DIR)/userspace/block.elf
 VIRTIO_BLOCK_IMAGE = $(OUT_DIR)/userspace/virtio-blk
@@ -151,7 +154,7 @@ TINYGO_TAGS := -tags "$(BUILD_TAGS)"
 # editing any of them rebuilds the program. If go list fails the target is
 # forced, and TinyGo reports the error.
 USERSPACE_TAGS := uefi baremetal linux amd64 tinygo goos_userspace $(BUILD_TAGS)
-go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
+go_deps = $(shell $(BUILD_ENV) GOOS=linux GOARCH=amd64 go list -tags "$(USERSPACE_TAGS) $(2)" -deps -f '{{if not .Standard}}{{$$d := .Dir}}{{range .GoFiles}}{{$$d}}/{{.}} {{end}}{{range .SFiles}}{{$$d}}/{{.}} {{end}}{{end}}' $(1) 2>/dev/null || echo FORCE)
 # OPT is TinyGo's optimisation level for the kernel and every userspace image.
 # TinyGo accepts 0, 1, 2, s, and z; 2 is its highest speed level (there is no 3).
 # 2 is the default, measured faster than z (the smallest) in ADR 0090.
@@ -214,18 +217,34 @@ $(SHELL_IMAGE): $(SHELL_ELF) tools/elf2native/main.go kernel/loader/native.go ke
 	@$(STACKFRAMES) $(SHELL_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(SHELL_ELF) $@
 
-$(VFS_ELF): $(call go_deps,./userspace/cmd/vfs) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
-	@mkdir -p $(OUT_DIR)/userspace
-	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/cmd/vfs
-
 $(VFS_IMAGE): $(VFS_ELF) tools/elf2native/main.go kernel/loader/native.go kernel/loader/native_encode.go $(STACKFRAMES_SOURCES)
 	@$(STACKFRAMES) $(VFS_ELF)
 	$(BUILD_ENV) go run ./tools/elf2native $(VFS_ELF) $@
 
 .SECONDEXPANSION:
-$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
+$(filter-out $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust $(GOROUTINE_COMMANDS))),$(COMMAND_ELFS)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
 	@mkdir -p $(COMMAND_ELF_DIR)
 	$(BUILD_ENV) tinygo build $(TINYGO_TAGS) -target=tinygo/targets/goos-userspace-amd64.json -opt=$(OPT) -no-debug -o $@ ./userspace/bin/$*
+
+GOROUTINE_ROOT := $(BUILD_DIR)/toolchains/goroutines
+GOROUTINE_ROOT_STAMP := $(GOROUTINE_ROOT)/goroutineroot.json
+GOROUTINE_TARGET := tinygo/targets/goos-userspace-goroutines-amd64.json
+GOROUTINE_ROOT_SOURCES := $(wildcard tools/goroutineroot/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tinygo/goroutines/*.txt) tinygo/runtime/native.go.txt
+# The root is a copy-on-write mirror of the installed TinyGo with the
+# scheduler files replaced; it is made again whenever an input changes.
+$(GOROUTINE_ROOT_STAMP): $(GOROUTINE_ROOT_SOURCES)
+	rm -rf $(GOROUTINE_ROOT)
+	mkdir -p $(GOROUTINE_ROOT)
+	$(BUILD_ENV) go run ./tools/goroutineroot "$$(tinygo env TINYGOROOT)" $(GOROUTINE_ROOT) tinygo/goroutines
+GOROUTINE_BUILD = $(BUILD_ENV) TINYGOROOT=$(abspath $(GOROUTINE_ROOT)) tinygo build $(TINYGO_TAGS) -target=$(GOROUTINE_TARGET) -opt=$(OPT) -no-debug
+
+$(VFS_ELF): $(call go_deps,./userspace/cmd/vfs,goos_goroutines) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(OUT_DIR)/userspace
+	$(GOROUTINE_BUILD) -o $@ ./userspace/cmd/vfs
+
+$(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,$(GOROUTINE_COMMANDS))): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(wildcard userspace/runtime/goroutine/*.go) $(GOROUTINE_ROOT_STAMP) $(GOROUTINE_TARGET) userspace/runtime/amd64.ld $(INIT_RUNTIME)
+	@mkdir -p $(COMMAND_ELF_DIR)
+	$(GOROUTINE_BUILD) -o $@ ./userspace/bin/$*
 
 TLS_COMPAT_SOURCES := $(wildcard tools/cryptocompat/*.go tools/tlscompat/*.go tools/internal/compatroot/*.go internal/repobuild/*.go tools/scratch/*.go tinygo/runtime/*.txt) tools/build-tls.sh
 $(addsuffix .elf,$(addprefix $(COMMAND_ELF_DIR)/,fetch trustprobe trust)): $(COMMAND_ELF_DIR)/%.elf: $$(wildcard userspace/bin/$$*/*.go) $(COMMAND_LIBRARY) $(TLS_COMPAT_SOURCES) tinygo/targets/goos-userspace-amd64.json userspace/runtime/amd64.ld $(INIT_RUNTIME)
@@ -236,6 +255,9 @@ $(COMMAND_IMAGES): $(COMMAND_DIR)/%: $(COMMAND_ELF_DIR)/%.elf tools/elf2native/m
 	@mkdir -p $(COMMAND_DIR)
 	@$(STACKFRAMES) $<
 	$(BUILD_ENV) go run ./tools/elf2native $< $@
+
+.PHONY: command-index
+command-index: $(COMMAND_INDEX)
 
 # The directory itself is a prerequisite: removing a command changes no source
 # file, only the listing, and the index must drop it.
@@ -1133,3 +1155,36 @@ trust-update:
 test-trust-update:
 	@$(MAKE) --no-print-directory iso system-tree VALIDATION=1 VALIDATION_CA_BUNDLE=tools/tlsfixture/testdata/root-cert.pem VALIDATION_TRUST_UPDATE_URL=https://tls.test/update
 	@MEMORY=$(MEMORY) SMP=$(or $(SMP),1) sh tests/boot/trust-update.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/variants/hz$(HZ)$(if $(filter 1,$(DIAG)),-diag)-validation-opt$(OPT)/system
+
+.PHONY: test-goroutine-compiler
+# Compile the real fixture and inspect its linked transport and LLVM lowering.
+test-goroutine-compiler: $(GOROUTINE_ROOT_STAMP) $(INIT_RUNTIME)
+	$(BUILD_ENV) go test ./tools/goroutineroot ./tools/stackframes
+	@mkdir -p $(OUT_DIR)/goroutine-compiler
+	$(GOROUTINE_BUILD) -o $(OUT_DIR)/goroutine-compiler/fixture.elf ./userspace/bin/goprobe
+	$(GOROUTINE_BUILD) -o $(OUT_DIR)/goroutine-compiler/fixture.ll ./userspace/bin/goprobe
+	@$(STACKFRAMES) $(OUT_DIR)/goroutine-compiler/fixture.elf
+	sh tests/boot/goroutine_compiler.sh $(OUT_DIR)/goroutine-compiler/fixture.elf $(OUT_DIR)/goroutine-compiler/fixture.ll $(OUT_DIR)/goroutine-compiler/evidence
+
+GOROUTINE_SMP ?= 4
+.PHONY: goroutine-test-images test-goroutines test-goroutine-gc test-goroutine-io bench-goroutines test-pve-goroutines
+goroutine-test-images:
+	@$(MAKE) --no-print-directory command-index VALIDATION=1
+	@$(MAKE) --no-print-directory -j8 iso VALIDATION=1
+	@$(MAKE) --no-print-directory -j8 test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/goroutines-test.img
+
+test-goroutines: goroutine-test-images
+	@SUITE=runtime SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-goroutine-gc: goroutine-test-images
+	@SUITE=gc SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-goroutine-io: goroutine-test-images
+	@SUITE=io SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+bench-goroutines: goroutine-test-images
+	@SUITE=bench SMP=$(GOROUTINE_SMP) MEMORY=$(MEMORY) tests/boot/goroutines.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/goroutines-test.img
+
+test-pve-goroutines:
+	@$(MAKE) --no-print-directory -j8 pve-artifacts VALIDATION=1
+	@$(PVELAB) run --scenario goroutines --cpu host --sockets 1 --cores 8 $(PVE_RUN_FLAGS)

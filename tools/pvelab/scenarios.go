@@ -193,6 +193,7 @@ var scenarios = map[string]Scenario{
 	"network":      networkScenario{},
 	"remote-admin": remoteAdminScenario{},
 	"threads":      threadsScenario{},
+	"goroutines":   goroutinesScenario{},
 }
 
 func scenarioNames() string {
