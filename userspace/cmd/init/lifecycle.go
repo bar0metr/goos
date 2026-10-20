@@ -10,6 +10,7 @@ import (
 	supervisor "goos/userspace/init"
 	syslog "goos/userspace/log"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/utility"
 )
 
 // drainRemoteLifecycle preserves notices while synchronous remote cleanup
@@ -63,6 +64,7 @@ func receiveLaunchResult(expectedCorrelation uint64) (supervisor.LifecycleEvent,
 }
 
 func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
+	clear(wire[:])
 	for {
 		status := sys.IPCWaitReceive(handle.ID(channel), wire[:], timeout)
 		if status == ipc.StatusTimeout {
@@ -73,13 +75,8 @@ func receive(channel uint64, timeout uint64) (ipc.Message, ipc.Status) {
 		}
 		break
 	}
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
-	if size < ipc.WireHeaderSize || size > len(wire) {
-		return ipc.Message{}, ipc.StatusInvalidArgument
-	}
-	message, ok := ipc.Decode(wire[:size])
-	if !ok {
+	var message ipc.Message
+	if !utility.DecodeIPC(wire[:], &message) {
 		return ipc.Message{}, ipc.StatusInvalidArgument
 	}
 	return message, ipc.StatusOK

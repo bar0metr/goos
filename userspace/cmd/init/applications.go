@@ -10,6 +10,7 @@ import (
 	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	"goos/userspace/commands"
@@ -19,11 +20,11 @@ import (
 	syslog "goos/userspace/log"
 	"goos/userspace/netapi"
 	"goos/userspace/partition"
-	"goos/userspace/pathpage"
 	"goos/userspace/runtime/sys"
 	shellcmd "goos/userspace/shell"
 	"goos/userspace/startup"
 	"goos/userspace/tty"
+	"goos/userspace/utility"
 )
 
 // openVFSSession asks VFS for a new session and returns the client endpoint the
@@ -40,19 +41,22 @@ func openVFSSession() (handle.ID, string) {
 	}
 	correlation++
 	control, ok := vfs.AddSessionRequest(handle.ID(pair[1]), correlation)
-	if !ok || !sendMessage(vfsControlHandle, control) {
+	if !ok {
 		closePair(pair)
 		return 0, "APP_VFS_REQUEST_FAILED"
 	}
-	controlReply, status := receive(vfsControlHandle, vfsSessionDeadline)
-	vfsStatus, valid := vfs.DecodeAddSessionReply(controlReply)
-	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
+	vfsStatus, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &control, vfsSessionDeadline)
+	if !sent {
+		closePair(pair)
+		return 0, "APP_VFS_REQUEST_FAILED"
+	}
+	if status != ipc.StatusOK || vfsStatus != vfs.StatusOK {
 		sys.HandleClose(handle.ID(pair[0]))
+		if status == kcall.StatusCorruptData {
+			return 0, "APP_VFS_REPLY_INVALID"
+		}
 		if status != ipc.StatusOK {
 			return 0, "APP_VFS_RECEIVE_STATUS"
-		}
-		if !valid {
-			return 0, "APP_VFS_REPLY_INVALID"
 		}
 		return 0, "APP_VFS_RESOURCE_EXHAUSTED"
 	}
@@ -490,13 +494,12 @@ func openCheckBlock() (handle.ID, string) {
 	}
 	correlation++
 	request, ok := vfs.UnmountRequest(correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
+	if !ok {
 		manager.CancelStop(filesystemName)
 		return 0, "APP_FSCK_UNMOUNT_SEND_FAILED"
 	}
-	reply, received := receive(vfsControlHandle, vfsSessionDeadline)
-	status, valid := vfs.DecodeAddSessionReply(reply)
-	if received != ipc.StatusOK || !valid || status != vfs.StatusOK {
+	status, received, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if received != ipc.StatusOK || status != vfs.StatusOK {
 		manager.CancelStop(filesystemName)
 		return 0, "APP_FSCK_UNMOUNT_REFUSED"
 	}
@@ -552,48 +555,16 @@ func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
 	return callSessionAttached(session, request, 0, vfsSessionDeadline)
 }
 
+var filesystemRequests utility.VFSRequests
+
 // callSessionAttached is callSession with a handle moved to the VFS with the
 // request and a deadline of the caller's choosing.
 func callSessionAttached(session handle.ID, request vfs.Request, attached handle.ID, deadline uint64) (vfs.Reply, bool) {
-	// A program path too long for a message goes in the path page (ADR 0110).
-	pathpage.Hold()
-	defer pathpage.Release()
-	if attached == 0 {
-		var ok bool
-		if attached, ok = pathpage.Prepare(&request); !ok {
-			return vfs.Reply{}, false
-		}
-	}
 	correlation++
-	message, ok := vfs.EncodeRequest(request, correlation)
-	if !ok {
-		if attached != 0 {
-			sys.HandleClose(attached)
-		}
-		return vfs.Reply{}, false
+	if correlation == 0 {
+		correlation++
 	}
-	if attached != 0 {
-		message.HandleCount, message.Handles[0] = 1, attached
-	}
-	if !sendMessage(uint64(session), message) {
-		if attached != 0 {
-			sys.HandleClose(attached)
-		}
-		return vfs.Reply{}, false
-	}
-	completed := false
-	defer func() {
-		if !completed {
-			pathpage.Abandon()
-		}
-	}()
-	reply, status := receive(uint64(session), deadline)
-	if status != ipc.StatusOK || reply.Correlation != correlation {
-		return vfs.Reply{}, false
-	}
-	decoded, ok := vfs.DecodeReply(reply)
-	completed = ok && decoded.Operation == request.Operation
-	return decoded, completed
+	return filesystemRequests.Call(session, request, attached, correlation, deadline)
 }
 
 // streamGrant grants one standard-stream endpoint. A pipeline's own streams are

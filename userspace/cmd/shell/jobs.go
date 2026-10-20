@@ -14,6 +14,7 @@ import (
 	execproto "goos/userspace/exec"
 	"goos/userspace/runtime/sys"
 	terminal "goos/userspace/tty"
+	"goos/userspace/utility"
 )
 
 func printJobs() {
@@ -238,10 +239,7 @@ func reportJob(message ipc.Message) bool {
 }
 
 func decodeWire() (ipc.Message, bool) {
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	size := ipc.WireHeaderSize + payloadSize + int(wire[26])*8
-	if size > len(wire) {
-		return ipc.Message{}, false
-	}
-	return ipc.Decode(wire[:size])
+	var message ipc.Message
+	ok := utility.DecodeIPC(wire[:], &message)
+	return message, ok
 }

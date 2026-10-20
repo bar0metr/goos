@@ -223,12 +223,11 @@ func requestSystem(publish bool) vfs.Status {
 	if publish {
 		request, ok = vfs.PublishRequest(correlation)
 	}
-	if !ok || !sendMessage(vfsControlHandle, request) {
+	if !ok {
 		return vfs.StatusBackendError
 	}
-	reply, status := receive(vfsControlHandle, vfsSessionDeadline)
-	result, valid := vfs.DecodeAddSessionReply(reply)
-	if status != ipc.StatusOK || !valid {
+	result, status, _ := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, vfsSessionDeadline)
+	if status != ipc.StatusOK {
 		return vfs.StatusBackendError
 	}
 	return result

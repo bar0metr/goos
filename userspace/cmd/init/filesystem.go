@@ -97,16 +97,18 @@ func attachFilesystem() {
 	filesystemAttached = false
 	correlation++
 	request, ok := vfs.SetFilesystemRequest(client, correlation)
-	if !ok || !sendMessage(vfsControlHandle, request) {
+	if !ok {
 		sys.HandleClose(client)
 		syslog.Error("filesystem service not handed to the vfs")
 		return
 	}
-	// Launching the service is not mounting the volume: the wait for the
-	// VFS's answer is what says whether storage is there.
-	reply, status := receive(vfsControlHandle, attachDeadline)
-	vfsStatus, valid := vfs.DecodeAddSessionReply(reply)
-	if status != ipc.StatusOK || !valid || vfsStatus != vfs.StatusOK {
+	// Sent distinguishes an untransferred client handle from one VFS owns,
+	// including a mount whose completion reply never reached PID 1.
+	vfsStatus, status, sent := filesystemRequests.Control(handle.ID(vfsControlHandle), &request, attachDeadline)
+	if !sent {
+		sys.HandleClose(client)
+	}
+	if status != ipc.StatusOK || vfsStatus != vfs.StatusOK {
 		syslog.Warn("persistent volume unavailable")
 		return
 	}

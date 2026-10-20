@@ -27,6 +27,7 @@ type scriptedService struct {
 	closed     []handle.ID
 	entered    chan handle.ID
 	resume     chan struct{}
+	waits      []uint64
 }
 
 func newScript() *scriptedService {
@@ -48,7 +49,7 @@ func (s scriptedIPC) send(channel handle.ID, wire []byte) kcall.Status {
 	return kcall.StatusOK
 }
 
-func (s scriptedIPC) waitReceive(channel handle.ID, wire []byte, _ uint64) kcall.Status {
+func (s scriptedIPC) waitReceive(channel handle.ID, wire []byte, ticks uint64) kcall.Status {
 	service := s.service
 	if service.entered != nil {
 		service.entered <- channel
@@ -56,6 +57,7 @@ func (s scriptedIPC) waitReceive(channel handle.ID, wire []byte, _ uint64) kcall
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	service.waits = append(service.waits, ticks)
 	if service.status != kcall.StatusOK {
 		return service.status
 	}

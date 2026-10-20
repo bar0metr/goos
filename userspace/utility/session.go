@@ -1,7 +1,6 @@
 package utility
 
 import (
-	"encoding/binary"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -43,6 +42,10 @@ type session[T transport] struct {
 func (s *session[T]) bind(channel handle.ID) {
 	s.hold()
 	defer s.end()
+	s.bindHeld(channel)
+}
+
+func (s *session[T]) bindHeld(channel handle.ID) {
 	for _, unavailable := range s.quarantined {
 		if unavailable == channel {
 			s.channel.Store(0)
@@ -111,22 +114,8 @@ func (s *session[T]) receive(ticks uint64) (kcall.Status, bool) {
 		}
 		return status, false
 	}
-	size := ipc.WireHeaderSize + (int(s.wire[24]) | int(s.wire[25])<<8) + int(s.wire[26])*8
-	valid := size <= len(s.wire) && ipc.DecodeInto(s.wire[:size], &s.incoming)
+	valid := decodeIPC(s.wire[:], &s.incoming, s.io.close)
 	if !valid {
-		// Even a protocol-invalid delivery may own transferred handles. The
-		// kernel supplies the wire framing; inspect only bounded handle slots.
-		payload, count := int(s.wire[24])|int(s.wire[25])<<8, int(s.wire[26])
-		offset := ipc.WireHeaderSize + payload
-		if count <= ipc.MaxAttachedHandles && offset+count*8 <= len(s.wire) {
-			for index := 0; index < count; index++ {
-				id := handle.ID(binary.LittleEndian.Uint64(s.wire[offset+index*8:]))
-				if id != 0 {
-					s.io.close(id)
-				}
-			}
-		}
-		s.incoming = ipc.Message{}
 		s.abandon()
 	}
 	return kcall.StatusOK, valid
@@ -198,6 +187,12 @@ func (s *vfsSession[T, P]) callAttached(request vfs.Request, attached handle.ID,
 // path page. Any failure after send quarantines the endpoint and detaches the
 // page; closing an endpoint would not revoke the server's memory mappings.
 func (s *vfsSession[T, P]) exchange(request vfs.Request, attached handle.ID, ticks uint64, attempts int) (vfs.Reply, bool) {
+	return s.exchangeDeadline(request, attached, ticks, attempts, 0, nil)
+}
+
+// exchangeDeadline uses an absolute budget when now is supplied. Neither a
+// spurious/late reply nor repeated waits can restart that budget.
+func (s *vfsSession[T, P]) exchangeDeadline(request vfs.Request, attached handle.ID, ticks uint64, attempts int, deadline uint64, now func() (uint64, kcall.Status)) (vfs.Reply, bool) {
 	usesPage := attached == 0
 	if s.bound() == 0 {
 		if attached != 0 {
@@ -217,13 +212,19 @@ func (s *vfsSession[T, P]) exchange(request vfs.Request, attached handle.ID, tic
 	if ok && attached != 0 {
 		s.outgoing.HandleCount, s.outgoing.Handles[0] = 1, attached
 	}
-	if !ok || !s.send(&s.outgoing) {
+	if !ok || now != nil && remaining(deadline, now) == 0 || !s.send(&s.outgoing) {
 		if attached != 0 {
 			s.io.close(attached)
 		}
 		return vfs.Reply{}, false
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
+		if now != nil {
+			ticks = remaining(deadline, now)
+			if ticks == 0 {
+				break
+			}
+		}
 		status, valid := s.receive(ticks)
 		if status == kcall.StatusTimeout {
 			continue

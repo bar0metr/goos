@@ -139,8 +139,7 @@ func cancelServiceSources() {
 			continue
 		}
 		if slot.fill.session != 0 {
-			sys.HandleClose(slot.fill.object)
-			sys.HandleClose(slot.fill.session)
+			dropFill(&slot.fill)
 		}
 		if slot.ready {
 			closeExecutable(slot.executable)
@@ -201,9 +200,10 @@ func expireServiceFills(now uint64) bool {
 	return expired
 }
 
-// dropFill abandons a fill: closing the session tells the VFS, and the object
-// goes with it.
+// dropFill abandons a fill without reusing its object or channel. Peer
+// mappings may outlive these local handles until VFS releases them.
 func dropFill(fill *pendingFill) {
+	filesystemRequests.Reject(fill.session, nil)
 	sys.HandleClose(fill.object)
 	sys.HandleClose(fill.session)
 	*fill = pendingFill{}

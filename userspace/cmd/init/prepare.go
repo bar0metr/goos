@@ -166,6 +166,7 @@ func beginSource(path []byte) (pendingFill, supervisor.LaunchStatus) {
 	}
 	sys.HandleClose(fill)
 	sys.HandleClose(object)
+	filesystemRequests.Reject(session, nil)
 	closeFile(session, opened.Handle)
 	return pendingFill{}, supervisor.LaunchResourceExhausted
 }
@@ -174,11 +175,8 @@ func beginSource(path []byte) (pendingFill, supervisor.LaunchStatus) {
 // source, which then owns the session and its open file. On failure
 // everything the fill held is closed.
 func finishSource(pending pendingFill, message ipc.Message, status ipc.Status) (supervisor.Executable, supervisor.LaunchStatus) {
-	var reply vfs.Reply
-	valid := false
-	if status == ipc.StatusOK && message.Correlation == pending.correlation {
-		reply, valid = vfs.DecodeReply(message)
-	}
+	request := vfs.Request{Operation: vfs.OperationPrepareExecutable, Size: uint32(min(pending.size, uint64(vm.PageSize)))}
+	reply, valid := filesystemRequests.Complete(pending.session, request, pending.correlation, &message, status)
 	result := supervisor.LaunchProcessFailed
 	switch {
 	case valid && reply.Operation == vfs.OperationPrepareExecutable && reply.Status == vfs.StatusOK && reply.Size == min(pending.size, uint64(vm.PageSize)):
@@ -195,8 +193,8 @@ func finishSource(pending pendingFill, message ipc.Message, status ipc.Status) (
 		syslog.Warn("executable read failed", syslog.Uint("read", reply.Size), syslog.Uint("size", pending.size))
 		sys.HandleClose(pending.object)
 	}
-	if status == ipc.StatusPeerDied {
-		// The VFS is gone; so is the file it had open.
+	if !valid {
+		// No Close request may follow an unresolved exchange on this channel.
 		sys.HandleClose(pending.session)
 	} else {
 		closeFile(pending.session, pending.file)
@@ -212,14 +210,15 @@ func prepareSource(path []byte) (supervisor.Executable, supervisor.LaunchStatus)
 	if status != supervisor.LaunchOK {
 		return supervisor.Executable{}, status
 	}
-	now, _ := sys.ClockRead()
-	wait := uint64(1)
-	if pending.deadline > now {
-		wait = pending.deadline - now
+	now, clockStatus := sys.ClockRead()
+	if clockStatus != kcall.StatusOK || now >= pending.deadline {
+		dropFill(&pending)
+		return supervisor.Executable{}, supervisor.LaunchProcessFailed
 	}
-	message, received := receive(uint64(pending.session), wait)
+	message, received := receive(uint64(pending.session), pending.deadline-now)
 	if received == ipc.StatusTimeout {
 		syslog.Warn("executable read timed out", syslog.Uint("size", pending.size))
+		filesystemRequests.Reject(pending.session, nil)
 		sys.HandleClose(pending.object)
 		sys.HandleClose(pending.session)
 		return supervisor.Executable{}, supervisor.LaunchProcessFailed
@@ -254,8 +253,8 @@ func fillTimeout() (uint64, bool) {
 	return earliest - now, true
 }
 
-// expireFills gives up on fills the VFS has not answered in time. Closing the
-// session tells the VFS the request is abandoned; the object goes with it.
+// expireFills gives up on unanswered fills. Local handles are retired;
+// closing a channel does not revoke mappings the VFS may still retain.
 // It reports whether a service's read ended, so the caller starts it again.
 func expireFills() bool {
 	now, _ := sys.ClockRead()
@@ -267,6 +266,7 @@ func expireFills() bool {
 		pending := job.fill
 		job.fill = pendingFill{}
 		syslog.Warn("executable read timed out", syslog.Uint("size", pending.size))
+		filesystemRequests.Reject(pending.session, nil)
 		sys.HandleClose(pending.object)
 		sys.HandleClose(pending.session)
 		entry := &job.prepared[job.nextStage]

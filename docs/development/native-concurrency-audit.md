@@ -156,8 +156,10 @@ helpers `AppendUint`, `BenchCount`, `BenchChunk`, `AppendBenchResult`,
 
 Independent instances safe: `Line` (`NewLine`), `Bulk` (`NewBulk`,
 `ReadFile`, `WriteFile`), `CopyFile` and `SaveFile` with different Bulks,
-`Stream`. A used Bulk must not be copied. Its Memory and any aliases remain
-caller-owned; do not replace or resize the Memory slice.
+`Stream`. `VFSRequests` serves one owner's endpoint set; owners sequence
+asynchronous sends and handoffs themselves. A used Bulk must not be copied.
+Its Memory and any aliases remain caller-owned; do not replace or resize the
+Memory slice.
 
 Single-owner:
 
@@ -236,16 +238,46 @@ After a successful send, either validate the reply and copy Name, or Abandon
 before Release. The old server may still write its retained mapping, so
 merely releasing a lock or rejecting a late correlation is insufficient.
 
-Utility uses this rule together with endpoint quarantine. Shell and PID 1
-also retire abandoned path objects, but their separate IPC helpers have not
-been given utility's endpoint quarantine/handle-rejection policy: late replies
-may still fail subsequent calls, and unexpected reply handles are not fully
-reconciled there. Their service loops and VFS service are outside this
-hardening's concurrency claim.
+Utility, shell and PID 1 use the same transaction implementation and
+endpoint quarantine. Shell and PID 1 keep a `VFSRequests` object; their
+service-loop correlation sequence covers synchronous and asynchronous VFS
+requests. Call uses an absolute budget, including page preparation, and does
+not restart a timeout while discarding replies. A wrong correlation, including
+a future reply, fails closed. Shell retains the failed handle until PID 1
+hands it a fresh session over its existing exec channel. It does not request
+new authority or reconnect on its own.
+
+PID 1's seven VFS control exchanges also match correlation and reject reply
+handles. Their result separates `sent` from `completed`: after an unsent
+request the caller closes its attachments; after a successful send VFS owns
+them, even if its reply never arrives. This applies to AddSession authority,
+mount/unmount, scope installation, publication and sync. A valid VFS error
+status completes an exchange and does not quarantine its endpoint. Work
+that might already have finished but withheld its reply supplies no observed
+completion fence, so timeout still quarantines the endpoint.
+
+Async executable preparation validates the operation, correlation, handle
+count and expected header size before adopting the source. Invalid replies
+close their handles and quarantine the channel before cleanup, so cleanup
+does not send Close into an unresolved exchange. Cancellation/expiry closes
+the owner's unique object and endpoint; it does not revoke a retained peer
+mapping or reuse that object.
+
+Recovery needs existing supervisor policy: a real VFS restart renews PID 1's
+control channel and sends clients new sessions. A timeout alone does not
+trigger a restart. If VFS stays alive but withholds a reply, that endpoint
+remains unavailable until a genuine restart/handoff. No replacement-grant or
+automatic reconnect protocol was added. Other supervisor/exec/config/network
+control protocols and the VFS service itself remain outside this review.
+
+Tests exercise these shared transaction methods with deterministic clocks
+and transports; host source checks verify that shell/PID 1 route their VFS
+calls through them. Native builds validate those adapters, not VM execution.
 
 | ID | Symbol | Owner | Blocks / allocates / calls back | Synchronization and visibility | Why | Cancellation, peer death, partial I/O, timeout, exit | Test |
 |---|---|---|---|---|---|---|---|
 | CA-0654 | `page` (includes object and memory) | process | Held across VFS wait; creates mapping lazily and after abandonment | `page.mu` covers preparation, completion, copying and retirement | Late server access must address a retired object, never the next request's page | Abandon removes local mapping/handle; peer mappings are not revoked. Failure to unmap may leak a mapping, but it is never reused by the library | `TestAbandonIsolatesLateServerWrites`, utility VFS failure tests |
+| CA-0800, CA-0801 | init/shell `filesystemRequests` | process | Bounded VFS waits, failed-ID storage may allocate | Per-owner session lock serializes transactions and quarantined IDs; handoffs stay in the owner's service loop | Data, control and async completions share failure ownership | A live VFS that withholds a completion needs a genuine supervisor restart/handoff; late reply handles stay unaccepted on the quarantined queue until its owner closes it | `TestOwnedVFSAbsoluteDeadlineBeforeAndAfterSend`, `TestVFSControlOwnershipAndCorrelations`, `TestOwnedAsyncCompletionVsMalformedReply` |
 
 ## `runtime/pages`
 
