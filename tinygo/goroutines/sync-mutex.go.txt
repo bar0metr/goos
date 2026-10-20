@@ -1,0 +1,128 @@
+//go:build goos_goroutines
+
+package sync
+
+import "internal/task"
+
+type Mutex = task.Mutex
+
+//go:linkname runtimeFatal runtime.runtimeFatal
+func runtimeFatal(msg string)
+
+// RWMutex admits readers together and gives a waiting writer the next turn
+// after active readers leave. Queued readers do not count as active: doing
+// so would prevent the last active reader from waking the writer.
+type RWMutex struct {
+	mu task.PMutex
+	writerLock Mutex
+	readers uint32
+	writer bool
+	waitingWriter *task.Task
+	readerQueue task.Queue
+	queuedReaders uint32
+}
+
+func (rw *RWMutex) Lock() {
+	rw.writerLock.Lock()
+	rw.mu.Lock()
+	if rw.readers == 0 {
+		rw.writer = true
+		rw.mu.Unlock()
+		return
+	}
+	rw.waitingWriter = task.Current()
+	rw.mu.Unlock()
+	task.Pause()
+}
+
+func (rw *RWMutex) Unlock() {
+	rw.mu.Lock()
+	if !rw.writer {
+		rw.mu.Unlock()
+		runtimeFatal("sync: Unlock of unlocked RWMutex")
+		return
+	}
+	rw.writer = false
+	// Transfer reader ownership before waking them. A following writer
+	// must wait for these readers, including those not dispatched yet.
+	rw.readers += rw.queuedReaders
+	rw.queuedReaders = 0
+	queue := rw.readerQueue
+	rw.readerQueue = task.Queue{}
+	rw.mu.Unlock()
+	for t := queue.Pop(); t != nil; t = queue.Pop() {
+		scheduleTask(t)
+	}
+	rw.writerLock.Unlock()
+}
+
+func (rw *RWMutex) RLock() {
+	rw.mu.Lock()
+	if !rw.writer && rw.waitingWriter == nil {
+		rw.readers++
+		rw.mu.Unlock()
+		return
+	}
+	rw.readerQueue.Push(task.Current())
+	rw.queuedReaders++
+	rw.mu.Unlock()
+	task.Pause()
+}
+
+func (rw *RWMutex) RUnlock() {
+	rw.mu.Lock()
+	if rw.readers == 0 {
+		rw.mu.Unlock()
+		runtimeFatal("sync: RUnlock of unlocked RWMutex")
+		return
+	}
+	rw.readers--
+	var wake *task.Task
+	if rw.readers == 0 && rw.waitingWriter != nil {
+		wake = rw.waitingWriter
+		rw.waitingWriter = nil
+		rw.writer = true
+	}
+	rw.mu.Unlock()
+	if wake != nil {
+		scheduleTask(wake)
+	}
+}
+
+func (rw *RWMutex) TryLock() bool {
+	if !rw.writerLock.TryLock() {
+		return false
+	}
+	rw.mu.Lock()
+	if rw.readers == 0 && !rw.writer {
+		rw.writer = true
+		rw.mu.Unlock()
+		return true
+	}
+	rw.mu.Unlock()
+	rw.writerLock.Unlock()
+	return false
+}
+
+func (rw *RWMutex) TryRLock() bool {
+	rw.mu.Lock()
+	if rw.writer || rw.waitingWriter != nil {
+		rw.mu.Unlock()
+		return false
+	}
+	rw.readers++
+	rw.mu.Unlock()
+	return true
+}
+
+type Locker interface {
+	Lock()
+	Unlock()
+}
+
+func (rw *RWMutex) RLocker() Locker { return (*rlocker)(rw) }
+
+type rlocker RWMutex
+
+func (r *rlocker) Lock() { (*RWMutex)(r).RLock() }
+func (r *rlocker) Unlock() { (*RWMutex)(r).RUnlock() }

@@ -1,0 +1,24 @@
+//go:build scheduler.cores
+
+// GoOS native goroutines (ADR 0204): replaces TinyGo's
+// internal/task/task_exit.go in the goroutine toolchain root. The GoOS
+// runtime counts live goroutines and reports a deadlock itself.
+
+package task
+
+// Exit ends the current goroutine because runtime.Goexit was called.
+func Exit() { exit(true) }
+
+func exit(goexit bool) {
+	goosExit(goexit)
+	runtimeFatal("unreachable")
+}
+
+//go:linkname goosExit goos_g_exit
+func goosExit(goexit bool)
+
+// tinygo_task_exit is where TinyGo's own start trampoline would go; the
+// GoOS trampoline calls goos_g_exit directly.
+//
+//export tinygo_task_exit
+func taskExit() { exit(false) }

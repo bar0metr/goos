@@ -1,0 +1,77 @@
+//go:build scheduler.cores
+
+// GoOS native goroutines (ADR 0204): replaces TinyGo's
+// internal/task/futex-cores.go in the goroutine toolchain root. Each futex
+// has its own short lock, so waits on unrelated mutexes, wait groups, and
+// channels never contend.
+
+package task
+
+// A Futex lets a goroutine wait until another wakes it, keyed on the futex.
+// Wait checks the value under the futex's lock, so a Wake that follows a
+// change of the value is never lost.
+type Futex struct {
+	Uint32
+
+	lock    uint32
+	waiters *Task
+}
+
+// Wait parks the goroutine while the futex holds cmp. It returns true when
+// a Wake or WakeAll woke it, false when the value had already changed. A
+// thread that runs no goroutine, such as a scheduler stack, cannot park: it
+// gives up its processor and reports false, and the caller checks again.
+func (f *Futex) Wait(cmp uint32) (awoken bool) {
+	t := Current()
+	if t == nil {
+		goosThreadYield()
+		return false
+	}
+	goosLock(&f.lock)
+	if f.Uint32.Load() != cmp {
+		goosUnlock(&f.lock)
+		return false
+	}
+	t.Next = f.waiters
+	f.waiters = t
+	goosUnlock(&f.lock)
+	Pause()
+	return true
+}
+
+// Wake wakes one waiter.
+func (f *Futex) Wake() {
+	goosLock(&f.lock)
+	t := f.waiters
+	if t != nil {
+		f.waiters = t.Next
+		t.Next = nil
+	}
+	goosUnlock(&f.lock)
+	if t != nil {
+		scheduleTask(t)
+	}
+}
+
+// WakeAll wakes every waiter.
+func (f *Futex) WakeAll() {
+	goosLock(&f.lock)
+	t := f.waiters
+	f.waiters = nil
+	goosUnlock(&f.lock)
+	for t != nil {
+		next := t.Next
+		t.Next = nil
+		scheduleTask(t)
+		t = next
+	}
+}
+
+//go:linkname goosLock goos_g_lock
+func goosLock(lock *uint32)
+
+//go:linkname goosUnlock goos_g_unlock
+func goosUnlock(lock *uint32)
+
+//go:linkname goosThreadYield goos_g_thread_yield
+func goosThreadYield()
