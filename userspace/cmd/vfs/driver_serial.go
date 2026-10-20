@@ -3,7 +3,6 @@
 package main
 
 import (
-	"goos/internal/validation"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
 	"goos/kernel/kcall"
@@ -67,13 +66,7 @@ func runService() {
 			if receiveStatus == ipc.StatusPeerDied {
 				// The files the session left open close with it, before its
 				// slot, and with it its owner number, can be reused.
-				service.CloseSession(sessionOwner(index))
-				if validation.Enabled {
-					releaseWithheld(sessionOwner(index), session, false)
-				}
-				sys.HandleClose(handle.ID(session))
-				sessions[index] = 0
-				liveSessions--
+				closeSession(index)
 				continue
 			}
 			if receiveStatus != ipc.StatusOK {

@@ -29,6 +29,7 @@ var (
 	controlHandle        handle.ID
 	wire                 [ipc.WireMaxSize]byte
 	sessions             [maxSessions]uint64
+	sessionGenerations   [maxSessions]uint64
 	waitInterests        *[userwait.MaxObjects]userwait.Interest
 	waitCount            int
 	liveSessions         int
@@ -114,6 +115,7 @@ func userspaceMain() {
 		fatal("VFS_CACHE_MISSING\n")
 	}
 	sessions[0] = uint64(initialSessionHandle)
+	sessionGenerations[0] = 1
 	liveSessions = 1
 	// The volatile root keeps its files in whole pages outside the heap, which
 	// go back to the kernel when a file shrinks or goes (ADR 0105).
@@ -238,9 +240,14 @@ func processControl(message ipc.Message) bool {
 		result = vfs.StatusResourceExhausted
 		for index := range sessions {
 			if sessions[index] == 0 {
+				generation, valid := nextSessionGeneration(sessionGenerations[index])
+				if !valid {
+					continue
+				}
 				result = service.SetAuthority(sessionOwner(index), authority)
 				if result == vfs.StatusOK {
 					sessions[index] = uint64(server)
+					sessionGenerations[index] = generation
 					liveSessions++
 				}
 				break
@@ -256,6 +263,20 @@ func processControl(message ipc.Message) bool {
 	}
 	send(uint64(controlHandle), reply)
 	return true
+}
+
+// closeSession runs only after the owner's requests have retired. Kernel
+// channel receive reports PeerDied after queued messages (and attachments)
+// drain, so closing here does not abandon received handles in the IPC queue.
+func closeSession(index int) {
+	service.CloseSession(sessionOwner(index))
+	if validation.Enabled {
+		releaseWithheld(sessionOwner(index), sessions[index], false)
+		execCrashHandles[index] = 0
+	}
+	sys.HandleClose(handle.ID(sessions[index]))
+	sessions[index] = 0
+	liveSessions--
 }
 
 // sessionOwner names the session in slot index as the owner of the files it
@@ -469,10 +490,6 @@ func closeAttached(attached []handle.ID) {
 	}
 }
 
-// maxBulkObject bounds the memory object a client may attach: the VFS maps
-// the whole object, and its page tables are the VFS's to pay for.
-const maxBulkObject = uint64(64 << 20)
-
 // fillBuffer is where a program's bytes pass on their way into the
 // executable object a launcher attached.
 var fillBuffer [128 << 10]byte
@@ -519,8 +536,8 @@ func serveBulk(owner vfs.Owner, request vfs.Request, object handle.ID) vfs.Reply
 		reply.Status = vfs.StatusPermissionDenied
 		return reply
 	}
-	end := request.Offset + uint64(request.Size)
-	if size > maxBulkObject || end < request.Offset || end > size {
+	end, valid := bulkReadWindow(size, request.Offset, request.Size)
+	if !valid {
 		reply.Status = vfs.StatusInvalidArgument
 		sys.VMUnmap(base, size)
 		return reply
