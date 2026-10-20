@@ -46,6 +46,9 @@ func Launch(command []byte, argv [][]byte, cwd []byte, environment [][]byte) (su
 	}
 	correlation := launcher.begin()
 	defer launcher.end()
+	if launcher.bound() == 0 {
+		return supervisor.LaunchProcessFailed, 0
+	}
 	if launcher.memory == nil {
 		object, status := sys.MemoryCreate((execproto.MaxLaunchObject + 4095) / 4096)
 		if status != kcall.StatusOK {
@@ -86,17 +89,19 @@ func Launch(command []byte, argv [][]byte, cwd []byte, environment [][]byte) (su
 			return supervisor.LaunchProcessFailed, 0
 		}
 		if !valid {
-			continue
+			return supervisor.LaunchProcessFailed, 0
 		}
 		if endpoint, ok := tty.DecodeResizeEndpointNotice(&launcher.incoming); ok {
 			replaceResize(endpoint)
 			continue
 		}
 		if launcher.incoming.Correlation != correlation {
-			continue
+			launcher.reject()
+			return supervisor.LaunchProcessFailed, 0
 		}
 		reply, valid := execproto.DecodeLaunchReply(launcher.incoming)
 		if !valid {
+			launcher.reject()
 			return supervisor.LaunchProcessFailed, 0
 		}
 		return supervisor.LaunchStatus(reply.LaunchStatus), reply.ExitCode

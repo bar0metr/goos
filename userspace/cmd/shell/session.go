@@ -37,6 +37,12 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		}
 		return vfs.Reply{}, false
 	}
+	completed := false
+	defer func() {
+		if !completed {
+			pathpage.Abandon()
+		}
+	}()
 	for {
 		status := sys.IPCWaitReceive(vfsHandle, wire[:], 100000)
 		if status == ipc.StatusTimeout {
@@ -58,6 +64,7 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		if !valid || reply.Operation != request.Operation {
 			return vfs.Reply{}, false
 		}
+		completed = true
 		return reply, true
 	}
 }

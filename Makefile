@@ -1193,7 +1193,7 @@ test-pve-goroutines:
 # test-concurrency-audit checks that every package-level variable under
 # userspace/ has an audit row; test-userspace-libs runs the libraries'
 # concurrency tests with the race detector.
-USERSPACE_LIB_PACKAGES := ./userspace/runtime/lock ./userspace/runtime/pages ./userspace/utility ./userspace/log ./userspace/startup ./userspace/fsproto ./userspace/terminal
+USERSPACE_LIB_PACKAGES := ./userspace/runtime/lock ./userspace/runtime/pages ./userspace/utility ./userspace/pathpage ./userspace/log ./userspace/startup ./userspace/fsproto ./userspace/terminal
 .PHONY: test-concurrency-audit test-userspace-libs
 test-concurrency-audit:
 	$(BUILD_ENV) go test -count=1 ./tools/concurrencyaudit

@@ -34,6 +34,9 @@ func CallNetwork(request netapi.Request) (netapi.Reply, bool) {
 	}
 	correlation := networkSession.begin()
 	defer networkSession.end()
+	if networkSession.bound() == 0 {
+		return reply, false
+	}
 	if !netapi.EncodeRequest(&request, correlation, &networkSession.outgoing) || !networkSession.send(&networkSession.outgoing) {
 		return reply, false
 	}
@@ -42,7 +45,11 @@ func CallNetwork(request netapi.Request) (netapi.Reply, bool) {
 		return reply, false
 	}
 	valid := netapi.DecodeReply(&networkSession.incoming, correlation, request.Opcode, &reply)
-	return reply, valid
+	if !valid {
+		networkSession.reject()
+		return netapi.Reply{}, false
+	}
+	return reply, true
 }
 
 // Sleep waits ticks without watching anything.

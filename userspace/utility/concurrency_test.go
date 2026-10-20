@@ -27,6 +27,8 @@ type echoService struct {
 
 type echoIPC struct{ service *echoService }
 
+func (echoIPC) close(handle.ID) {}
+
 func (e echoIPC) send(channel handle.ID, wire []byte) kcall.Status {
 	request, ok := ipc.Decode(wire)
 	if !ok {
@@ -128,6 +130,8 @@ func TestSessionReceiveRejectsOversizedHeader(t *testing.T) {
 
 // oversizedIPC delivers a header that claims more payload than a wire holds.
 type oversizedIPC struct{}
+
+func (oversizedIPC) close(handle.ID) {}
 
 func (oversizedIPC) send(handle.ID, []byte) kcall.Status { return kcall.StatusOK }
 

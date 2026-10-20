@@ -88,10 +88,7 @@ func UDPStart(request *udpapi.Request) (uint64, bool) {
 func UDPWait(ticks uint64, reply *udpapi.Reply) (uint64, bool) {
 	udpSession.hold()
 	defer udpSession.end()
-	if !udpSession.received(ticks) {
-		return 0, false
-	}
-	return udpapi.DecodeReply(&udpSession.incoming, reply)
+	return receiveProtocol(&udpSession, ticks, reply, udpapi.DecodeReply)
 }
 
 // UDPPayload is TX slot 0, where a command writes what it sends.

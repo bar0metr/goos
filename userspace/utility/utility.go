@@ -43,7 +43,7 @@ var stdinHandle uint64
 var standard output[nativeStream]
 
 // files is the command's filesystem session.
-var files session[nativeIPC]
+var files vfsSession[nativeIPC, nativePaths]
 
 // current is the running command's manifest, and commandName the name it was
 // started under; usage errors and diagnostics are written from them. Run
@@ -64,12 +64,12 @@ var (
 )
 
 // BindVFS selects a service's already-granted filesystem endpoint. A request
-// in flight on the old endpoint finishes first.
-func BindVFS(channel handle.ID) {
-	files.hold()
-	files.bind(channel)
-	files.end()
-}
+// in flight on the old endpoint finishes first. The endpoint is borrowed and
+// is not closed on rebind or failure. A quarantined ID cannot be rebound;
+// recovery requires a different, fresh endpoint, not another handle alias of
+// the same channel. Bind and dependent multi-call operations require external
+// sequencing if they must stay on one authority.
+func BindVFS(channel handle.ID) { files.bind(channel) }
 
 // Run starts the command described by manifest and calls main with its startup
 // data. A command that returns from main exits with status 0.
@@ -366,69 +366,21 @@ const (
 // Concurrent callers take turns: the session has one request outstanding,
 // and the session and the path page stay held until the reply is in.
 func CallVFS(request vfs.Request) (vfs.Reply, bool) {
-	files.hold()
-	pathpage.Hold()
-	reply, ok := callVFS(request, 0)
-	if ok && (request.Operation == vfs.OperationReadDir || request.Operation == vfs.OperationReadMount) && reply.Status == vfs.StatusNameTooLong {
-		request.NameReturn = true
-		reply, ok = callVFS(request, 0)
-	}
-	if ok && reply.AttachedName != 0 {
-		// Only names longer than a reply carries come this way.
-		reply.Name = append([]byte(nil), pathpage.Name(int(reply.AttachedName))...)
-	}
-	pathpage.Release()
-	files.end()
-	return reply, ok
+	return files.call(request, vfsReplyDeadline, vfsReplyAttempts)
 }
 
-// attachedVFS is CallVFS with a handle attached, for the bulk operations;
-// the handle moves to the VFS with the request.
+// attachedVFS transfers a bulk staging handle, never caller-visible memory.
 func attachedVFS(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
-	files.hold()
-	reply, ok := callVFS(request, attached)
-	files.end()
-	return reply, ok
+	return files.callAttached(request, attached, vfsReplyDeadline, vfsReplyAttempts)
 }
 
-// callVFS makes one exchange on the filesystem session, which the caller
-// holds; when attached is zero the caller holds the path page too.
-func callVFS(request vfs.Request, attached handle.ID) (vfs.Reply, bool) {
-	if attached == 0 {
-		var ok bool
-		if attached, ok = pathpage.Prepare(&request); !ok {
-			return vfs.Reply{}, false
-		}
-	}
-	correlation := files.next()
-	var ok bool
-	files.outgoing, ok = vfs.EncodeRequest(request, correlation)
-	if ok && attached != 0 {
-		files.outgoing.HandleCount, files.outgoing.Handles[0] = 1, attached
-	}
-	if !ok || !files.send(&files.outgoing) {
-		if attached != 0 {
-			sys.HandleClose(attached)
-		}
-		return vfs.Reply{}, false
-	}
-	// Bound the wait: a service that never answers must surface an error rather
-	// than freeze the utility, and with it the shell, indefinitely.
-	for attempt := 0; attempt < vfsReplyAttempts; attempt++ {
-		status, valid := files.receive(vfsReplyDeadline)
-		if status == kcall.StatusTimeout {
-			continue
-		}
-		if status != kcall.StatusOK || !valid || files.incoming.Correlation != correlation {
-			return vfs.Reply{}, false
-		}
-		// DecodeReply works on a copy, so the reply's name does not alias the
-		// session's message.
-		reply, valid := vfs.DecodeReply(files.incoming)
-		return reply, valid && reply.Operation == request.Operation
-	}
-	return vfs.Reply{}, false
-}
+type nativePaths struct{}
+
+func (nativePaths) Hold()                                          { pathpage.Hold() }
+func (nativePaths) Release()                                       { pathpage.Release() }
+func (nativePaths) Prepare(request *vfs.Request) (handle.ID, bool) { return pathpage.Prepare(request) }
+func (nativePaths) Name(size int) []byte                           { return pathpage.Name(size) }
+func (nativePaths) Abandon()                                       { pathpage.Abandon() }
 
 // finish writes message, closes the filesystem session and exits. It takes
 // no session lock: it may run while the calling goroutine holds one, from an
@@ -619,3 +571,5 @@ func (nativeIPC) send(channel handle.ID, wire []byte) kcall.Status {
 func (nativeIPC) waitReceive(channel handle.ID, wire []byte, ticks uint64) kcall.Status {
 	return sys.IPCWaitReceive(channel, wire, ticks)
 }
+
+func (nativeIPC) close(id handle.ID) { sys.HandleClose(id) }

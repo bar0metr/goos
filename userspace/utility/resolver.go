@@ -28,13 +28,21 @@ func CallResolver(request *resolvapi.Request, reply *resolvapi.Reply) bool {
 	}
 	correlation := resolverSession.begin()
 	defer resolverSession.end()
+	if resolverSession.bound() == 0 {
+		return false
+	}
 	if !resolvapi.EncodeRequest(request, correlation, &resolverSession.outgoing) || !resolverSession.send(&resolverSession.outgoing) {
 		return false
 	}
 	if !resolverSession.received(resolverWait) {
 		return false
 	}
-	return resolvapi.DecodeReply(&resolverSession.incoming, correlation, request.Opcode, reply)
+	if !resolvapi.DecodeReply(&resolverSession.incoming, correlation, request.Opcode, reply) {
+		resolverSession.reject()
+		*reply = resolvapi.Reply{}
+		return false
+	}
+	return true
 }
 
 // Lookup is how a command turns its argument into an address: strict dotted

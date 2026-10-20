@@ -12,9 +12,10 @@ import (
 
 // The command's TCP session. Like the UDP session it writes through TX slot
 // 0 and takes whatever reply arrives next, so it belongs to one goroutine at
-// a time: the calls lock the session for memory safety, but two goroutines
-// driving it at once would take each other's replies and overwrite each
-// other's payload. tcpTX and tcpRX are set once by OpenTCP.
+// a time. The lock protects codec storage, not the TX/RX slices exposed to
+// callers: concurrent use can race payload memory and take another caller's
+// reply. A failed wait disables the endpoint but does not revoke old slices.
+// tcpTX and tcpRX are set once by OpenTCP, before any use.
 var (
 	tcpSession   session[nativeIPC]
 	tcpTX, tcpRX []byte
@@ -77,10 +78,7 @@ func TCPStart(request *tcpapi.Request) (uint64, bool) {
 func TCPWait(ticks uint64, reply *tcpapi.Reply) (uint64, bool) {
 	tcpSession.hold()
 	defer tcpSession.end()
-	if !tcpSession.received(ticks) {
-		return 0, false
-	}
-	return tcpapi.DecodeReply(&tcpSession.incoming, reply)
+	return receiveProtocol(&tcpSession, ticks, reply, tcpapi.DecodeReply)
 }
 
 func TCPPayload() []byte { return tcpTX[:tcpapi.SlotSize] }

@@ -654,9 +654,7 @@ CA-0648	goos/userspace/network	zeroIPv4	process	immutable	none
 CA-0649	goos/userspace/partition	TypeBasicData	process	immutable	none
 CA-0650	goos/userspace/partition	TypeEFISystem	process	immutable	none
 CA-0651	goos/userspace/partition	guidOrder	process	immutable	none
-CA-0652	goos/userspace/pathpage	memory	process	lock	none
-CA-0653	goos/userspace/pathpage	object	process	lock	none
-CA-0654	goos/userspace/pathpage	page	process	lock	none
+CA-0654	goos/userspace/pathpage	page	process	lock	TestAbandonIsolatesLateServerWrites
 CA-0655	goos/userspace/release	fieldNames	process	immutable	none
 CA-0656	goos/userspace/remotepolicy	ErrNotFound	process	immutable	none
 CA-0657	goos/userspace/remoteservice	CloseHandles	process	immutable	none
@@ -716,7 +714,7 @@ CA-0710	goos/userspace/utility	current	process	immutable	none
 CA-0711	goos/userspace/utility	currentLine	goroutine	owned	none
 CA-0712	goos/userspace/utility	errorBuffer	goroutine	lock	TestAppendFailureConcurrent
 CA-0713	goos/userspace/utility	failure	process	lock	none
-CA-0714	goos/userspace/utility	files	session	lock	TestSessionExchangesDoNotCross
+CA-0714	goos/userspace/utility	files	session	lock	TestVFSAbandonedExchangeQuarantinesEndpoint
 CA-0715	goos/userspace/utility	launcher	session	lock	TestSessionExchangesDoNotCross
 CA-0716	goos/userspace/utility	lineBuffer	goroutine	owned	none
 CA-0717	goos/userspace/utility	networkSession	session	lock	TestSessionExchangesDoNotCross

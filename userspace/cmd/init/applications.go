@@ -581,12 +581,19 @@ func callSessionAttached(session handle.ID, request vfs.Request, attached handle
 		}
 		return vfs.Reply{}, false
 	}
+	completed := false
+	defer func() {
+		if !completed {
+			pathpage.Abandon()
+		}
+	}()
 	reply, status := receive(uint64(session), deadline)
 	if status != ipc.StatusOK || reply.Correlation != correlation {
 		return vfs.Reply{}, false
 	}
 	decoded, ok := vfs.DecodeReply(reply)
-	return decoded, ok && decoded.Operation == request.Operation
+	completed = ok && decoded.Operation == request.Operation
+	return decoded, completed
 }
 
 // streamGrant grants one standard-stream endpoint. A pipeline's own streams are
