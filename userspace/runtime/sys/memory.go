@@ -5,6 +5,7 @@ import (
 	"goos/kernel/kcall"
 	"goos/kernel/mm/vm"
 	"goos/kernel/vfs"
+	"goos/userspace/runtime/tls"
 	"unsafe"
 )
 
@@ -12,6 +13,7 @@ import (
 // returns it. The image capability authorizes the mapping (ADR 0070).
 func ImageMap(device handle.ID) ([]byte, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.imageWire[0], w.imageWire[1] = 0, 0
 	if result := status(imageMap(uint64(device), vm.UserImageAddress, unsafe.Pointer(&w.imageWire[0]))); result != kcall.StatusOK {
 		return nil, result
@@ -45,6 +47,7 @@ func MemoryMap(memory handle.ID, address uint64, size uint64, writable bool) ([]
 // region the mapping made records.
 func MemoryMapAnywhere(memory handle.ID, writable bool) (uint64, uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	flags := kcall.MemoryMapAnywhere
 	if writable {
 		flags |= kcall.MemoryMapWritable
@@ -77,6 +80,7 @@ type DMARegion struct {
 // for.
 func DMAAllocate(device handle.ID, virtual uint64, size uint64) (DMARegion, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.dmaWire[0], w.dmaWire[1], w.dmaWire[2] = 0, 0, size
 	if result := status(dmaAllocate(uint64(device), virtual, unsafe.Pointer(&w.dmaWire[0]))); result != kcall.StatusOK {
 		return DMARegion{}, result
@@ -121,6 +125,7 @@ func MappedAtStart(address uint64, size uint64) []byte { return window(address, 
 // ExecutableWrite and names it in a launch once full (ADR 0097).
 func ExecutableCreate(loader handle.ID, size uint64) (handle.ID, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	result := status(executableCreate(uint64(loader), size, unsafe.Pointer(&w.valueWire)))
 	if result != kcall.StatusOK {

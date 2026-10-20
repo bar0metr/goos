@@ -5,8 +5,9 @@
 //
 // A thread runs a plain function with one uintptr argument. The function
 // value is kept in a package table, which the collector scans, until the
-// thread has read it. TinyGo goroutines, go statements, channels between
-// threads, and the sync package are not supported: share state through
+// thread has read it. A program built with the goroutine runtime (ADR 0204)
+// runs the function as a goroutine pinned to its thread, so it may use
+// channels and the sync package; any other program shares state through
 // atomics and the locks the runtime provides.
 //
 // The process ends when its last thread ends, or at once when any thread
@@ -67,6 +68,23 @@ func take(index int) (func(uintptr), uintptr) {
 	starting.unlock()
 	return entry.fn, entry.argument
 }
+
+// Hooks let the goroutine runtime take part in a thread's life (ADR 0204).
+type Hooks struct {
+	// Starting runs in Start before the thread is created.
+	Starting func()
+	// Run runs the thread's function on the new thread in place of a plain
+	// call.
+	Run func(fn func(uintptr), argument uintptr, slot int)
+	// Exiting runs in Exit before the thread ends.
+	Exiting func()
+}
+
+var hooks Hooks
+
+// SetHooks installs the goroutine runtime's hooks. It is called before the
+// first thread starts.
+func SetHooks(h Hooks) { hooks = h }
 
 // Status is a thread call's outcome.
 type Status = kcall.Status

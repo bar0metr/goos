@@ -295,6 +295,39 @@ var scrubInstructions = []string{
 	"RET",
 }
 
+// swapInstructions is goos_g_swap, the goroutine runtime's stack switch
+// (ADR 0204): six pushes on the stack it leaves, then the stack it loads,
+// which another goroutine or scheduler stack prepared.
+var swapInstructions = []string{
+	"PUSHQ R15", "PUSHQ R14", "PUSHQ R13", "PUSHQ R12", "PUSHQ BP", "PUSHQ BX",
+	"MOVQ SP, 0(SI)", "MOVQ DI, SP",
+	"POPQ BX", "POPQ BP", "POPQ R12", "POPQ R13", "POPQ R14", "POPQ R15",
+	"RET",
+}
+
+// swapFrame is what goos_g_swap pushes before it leaves the stack.
+const swapFrame = 6 * 8
+
+// preemptInstructions is goos_preempt_entry (ADR 0204). The kernel enters
+// it 128 bytes below the interrupted stack pointer; it pushes the return
+// slot, the flags, and fifteen registers, keeps that depth in BX, and below
+// it an aligned 512-byte FXSAVE area and the call into the runtime.
+var preemptInstructions = []string{
+	"PUSHL $0x0", "PUSHFQ",
+	"PUSHQ AX", "PUSHQ BX", "PUSHQ CX", "PUSHQ DX", "PUSHQ SI", "PUSHQ DI", "PUSHQ BP",
+	"PUSHQ R8", "PUSHQ R9", "PUSHQ R10", "PUSHQ R11", "PUSHQ R12", "PUSHQ R13", "PUSHQ R14", "PUSHQ R15",
+	"MOVQ SP, BX", "LEAQ 0x80(SP), DI", "MOVL $0x44, AX", "INT $0x80", "TESTQ AX, AX", "JNE",
+	"SUBQ $0x200, SP", "ANDQ $-0x10, SP", "FXSAVE64 0(SP)", "CLD", "CALL",
+	"FXRSTOR64 0(SP)", "MOVQ BX, SP",
+	"POPQ R15", "POPQ R14", "POPQ R13", "POPQ R12", "POPQ R11", "POPQ R10", "POPQ R9", "POPQ R8",
+	"POPQ BP", "POPQ DI", "POPQ SI", "POPQ DX", "POPQ CX", "POPQ BX", "POPQ AX", "POPFQ",
+	"RET $0x80", "UD2",
+}
+
+// preemptFrame is the red zone, seventeen pushed words, the FXSAVE area and
+// its alignment, and the return address of the call.
+const preemptFrame = 128 + 17*8 + 512 + 8 + 8
+
 // sameInstructions reports whether a function is exactly want; a want entry
 // that is a bare mnemonic matches that mnemonic with any operand.
 func sameInstructions(instructions []instruction, want []string) bool {
@@ -332,6 +365,15 @@ func analyzeFunction(fn function) (int64, []string) {
 	// instruction sequence is analysed, and rejected, like any function.
 	if fn.name == "goos_gc_scrub" && sameInstructions(fn.instructions, scrubInstructions) {
 		return 0, nil
+	}
+	// The goroutine runtime's stack switch and preemption entry move SP to
+	// a stack the runtime made or restore the one they saved; the depth
+	// each reaches on the stack it starts on is fixed (ADR 0204).
+	if fn.name == "goos_g_swap" && sameInstructions(fn.instructions, swapInstructions) {
+		return swapFrame, nil
+	}
+	if fn.name == "goos_preempt_entry" && sameInstructions(fn.instructions, preemptInstructions) {
+		return preemptFrame, nil
 	}
 	count := len(fn.instructions)
 	steps := make([]step, count)

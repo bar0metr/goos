@@ -6,7 +6,8 @@
 //
 // The wrappers do not allocate. Descriptors the kernel reads live in package
 // scratch variables, one set per thread slot (ADR 0203): a thread runs one
-// call at a time, so no two calls in flight share a descriptor.
+// call at a time, so no two calls in flight share a descriptor. A wrapper
+// keeps its goroutine pinned to the thread while it uses them (ADR 0204).
 //
 // Every unsafe conversion in this package passes the kernel the address of Go
 // memory that stays reachable for the whole call; the kernel copies through
@@ -22,8 +23,9 @@ import (
 	"unsafe"
 )
 
-// Scratch descriptors: each thread has its own, found from its stack
-// pointer (ADR 0203), so two threads in calls at once never share one.
+// Scratch descriptors: each thread has its own, found from its control
+// block (ADR 0203, ADR 0204), so two threads in calls at once never share
+// one.
 type wires struct {
 	pairWire        [2]uint64
 	transferWire    [3]uint64
@@ -46,8 +48,11 @@ type wires struct {
 
 var scratch [tls.Slots]wires
 
-// current returns the calling thread's descriptors.
-func current() *wires { return &scratch[tls.Slot()] }
+// current returns the calling thread's descriptors and pins the caller to
+// the thread: a goroutine preempted between filling a descriptor and the
+// call could otherwise resume on another thread while a goroutine on this
+// one reuses the descriptor (ADR 0204). Every caller unpins when it returns.
+func current() *wires { return &scratch[tls.Pin()] }
 
 type ConsoleInfo struct {
 	Columns uint32
@@ -82,6 +87,7 @@ func touch(data []byte) {
 		sum ^= data[offset]
 	}
 	w := current()
+	defer tls.Unpin()
 	w.touched ^= sum
 }
 
@@ -104,6 +110,7 @@ func ConsoleWriteString(device handle.ID, text string) kcall.Status {
 // pending.
 func ConsoleRead(device handle.ID) (byte, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.consoleByteBox[0] = 0
 	result := status(consoleRead(uint64(device), unsafe.Pointer(&w.consoleByteBox[0]), 1))
 	return w.consoleByteBox[0], result
@@ -117,6 +124,7 @@ func ConsoleInterrupt(device handle.ID) kcall.Status {
 // ConsoleInformation returns terminal geometry and availability flags.
 func ConsoleInformation(device handle.ID) (ConsoleInfo, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	clear(w.consoleInfoWire[:])
 	w.consoleInfoWire = [kcall.ConsoleInfoSize]byte{}
 	result := status(consoleInfo(uint64(device), unsafe.Pointer(&w.consoleInfoWire[0]), uintptr(len(w.consoleInfoWire))))
@@ -142,6 +150,7 @@ func LogRead(device handle.ID, index uint64, target *[kcall.LogText]byte) kcall.
 // past the newest.
 func LogBounds(device handle.ID) (uint64, uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.boundsWire[0], w.boundsWire[1] = 0, 0
 	result := status(logBounds(uint64(device), unsafe.Pointer(&w.boundsWire[0])))
 	return w.boundsWire[0], w.boundsWire[1], result
@@ -175,7 +184,15 @@ func IPCReceive(channel handle.ID, buffer []byte) kcall.Status {
 // IPCWaitReceive takes one message into buffer, waiting up to timeout ticks
 // for it.
 func IPCWaitReceive(channel handle.ID, buffer []byte, timeout uint64) kcall.Status {
+	if timeout != 0 {
+		if handler := receiveHandler.Load(); handler != nil {
+			if status, handled := (*handler)(channel, buffer, timeout); handled {
+				return status
+			}
+		}
+	}
 	w := current()
+	defer tls.Unpin()
 	w.receiveWire[0], w.receiveWire[1], w.receiveWire[2] = uint64(uintptr(address(buffer))), uint64(len(buffer)), timeout
 	return status(ipcWaitReceive(uint64(channel), unsafe.Pointer(&w.receiveWire[0]), uintptr(len(w.receiveWire)*8)))
 }
@@ -183,6 +200,7 @@ func IPCWaitReceive(channel handle.ID, buffer []byte, timeout uint64) kcall.Stat
 // ChannelCreate creates a channel and returns its two endpoints.
 func ChannelCreate() (handle.ID, handle.ID, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.pairWire[0], w.pairWire[1] = 0, 0
 	result := status(channelCreate(unsafe.Pointer(&w.pairWire[0]), uintptr(len(w.pairWire)*8)))
 	return handle.ID(w.pairWire[0]), handle.ID(w.pairWire[1]), result
@@ -191,6 +209,7 @@ func ChannelCreate() (handle.ID, handle.ID, kcall.Status) {
 // StreamCreate creates a byte stream and returns its reading and writing ends.
 func StreamCreate() (handle.ID, handle.ID, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.pairWire[0], w.pairWire[1] = 0, 0
 	result := status(streamCreate(unsafe.Pointer(&w.pairWire[0]), uintptr(len(w.pairWire)*8)))
 	return handle.ID(w.pairWire[0]), handle.ID(w.pairWire[1]), result
@@ -200,6 +219,7 @@ func StreamCreate() (handle.ID, handle.ID, kcall.Status) {
 // reports how many arrived.
 func StreamRead(stream handle.ID, target []byte) (int, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.transferWire[0], w.transferWire[1], w.transferWire[2] = uint64(uintptr(address(target))), uint64(len(target)), 0
 	result := status(streamRead(uint64(stream), unsafe.Pointer(&w.transferWire[0]), uintptr(len(w.transferWire)*8)))
 	return int(w.transferWire[2]), result
@@ -209,6 +229,7 @@ func StreamRead(stream handle.ID, target []byte) (int, kcall.Status) {
 // how much that was.
 func StreamWrite(stream handle.ID, data []byte) (int, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.transferWire[0], w.transferWire[1], w.transferWire[2] = uint64(uintptr(address(data))), uint64(len(data)), 0
 	result := status(streamWrite(uint64(stream), unsafe.Pointer(&w.transferWire[0]), uintptr(len(w.transferWire)*8)))
 	return int(w.transferWire[2]), result
@@ -232,6 +253,7 @@ func HandleInfo(slot uint64, target *[kcall.HandleInfoSize]byte) kcall.Status {
 // exit code.
 func ProcessWait(process handle.ID, timeout uint64) (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	result := status(processWait(uint64(process), unsafe.Pointer(&w.valueWire), timeout))
 	return w.valueWire, result
@@ -299,6 +321,7 @@ func TaskAffinity(process handle.ID, mask uint64) (uint64, kcall.Status) {
 // ClockRead reads the monotonic timer in ticks.
 func ClockRead() (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	result := status(clockRead(unsafe.Pointer(&w.valueWire), 8))
 	return w.valueWire, result
@@ -307,6 +330,7 @@ func ClockRead() (uint64, kcall.Status) {
 // ClockReadNanos reads the monotonic clock in nanoseconds.
 func ClockReadNanos() (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	result := status(clockReadNanos(unsafe.Pointer(&w.valueWire), 8))
 	return w.valueWire, result
@@ -315,6 +339,7 @@ func ClockReadNanos() (uint64, kcall.Status) {
 // ClockNow reads a fixed-width native MONOTONIC or REALTIME timestamp.
 func ClockNow(clock timekeeping.Clock) (timekeeping.Time, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	clear(w.timeWire[:])
 	w.timeWire = [kcall.ClockTimeSize]byte{}
 	result := status(clockNow(uint64(clock), unsafe.Pointer(&w.timeWire[0]), uintptr(len(w.timeWire))))
@@ -329,6 +354,7 @@ func ClockNow(clock timekeeping.Clock) (timekeeping.Time, kcall.Status) {
 // an authorized caller.
 func ClockSet(authority handle.ID, value timekeeping.Time) kcall.Status {
 	w := current()
+	defer tls.Unpin()
 	clear(w.timeWire[:])
 	seconds := uint64(value.Seconds)
 	for index := 0; index < 8; index++ {
@@ -344,6 +370,7 @@ func ClockSet(authority handle.ID, value timekeeping.Time) kcall.Status {
 // the port offset in its low 16 bits and the access width in the next eight.
 func PortRead(device handle.ID, specification uint64) (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	result := status(portRead(uint64(device), specification, unsafe.Pointer(&w.valueWire)))
 	return w.valueWire, result
@@ -386,6 +413,7 @@ func fillRandom(dst []byte, read func(unsafe.Pointer, uintptr) uint64) kcall.Sta
 // RandomUint64 reads eight bytes from the kernel's generator.
 func RandomUint64() (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	w.valueWire = 0
 	result := RandomRead(unsafe.Slice((*byte)(unsafe.Pointer(&w.valueWire)), 8))
 	return w.valueWire, result
@@ -415,10 +443,18 @@ type Interest struct {
 // WaitAny blocks until one of the first count interests is ready or timeout
 // ticks elapse, and returns the mask of ready interests.
 func WaitAny(interests *[kcall.WaitAnyMaxObjects]Interest, count int, timeout uint64) (uint64, kcall.Status) {
-	w := current()
 	if interests == nil || count < 0 || count > kcall.WaitAnyMaxObjects {
 		return 0, kcall.StatusInvalidArgument
 	}
+	if timeout != 0 {
+		if handler := waitHandler.Load(); handler != nil {
+			if mask, status, handled := (*handler)(interests, count, timeout); handled {
+				return mask, status
+			}
+		}
+	}
+	w := current()
+	defer tls.Unpin()
 	w.waitWire[0], w.waitWire[1] = timeout, 0
 	touch(unsafe.Slice((*byte)(unsafe.Pointer(&interests[0])), count*16))
 	// SAFETY: Interest is two 8-byte fields with no padding, which is the

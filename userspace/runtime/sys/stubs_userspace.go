@@ -36,6 +36,21 @@ func threadResume() uint64
 //go:linkname threadEntryAddress goos_thread_entry_address
 func threadEntryAddress() uintptr
 
+//go:linkname workerEntryAddress goos_worker_entry_address
+func workerEntryAddress() uintptr
+
+//go:linkname threadSetBase goos_thread_set_base
+func threadSetBase(base uintptr) uint64
+
+//go:linkname threadPreempt goos_thread_preempt
+func threadPreempt(entry uintptr, ticks uint64) uint64
+
+//go:linkname threadWake goos_thread_wake
+func threadWake(thread uint64) uint64
+
+//go:linkname threadWakeTake goos_thread_wake_take
+func threadWakeTake() uint64
+
 //go:linkname ipcSend goos_ipc_send
 func ipcSend(channel uint64, address unsafe.Pointer, size uintptr) uint64
 

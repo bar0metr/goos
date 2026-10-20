@@ -5,6 +5,7 @@ import (
 	"goos/internal/logfmt"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
+	"goos/userspace/runtime/tls"
 	"unsafe"
 )
 
@@ -86,6 +87,7 @@ type CursorInterest struct {
 
 func WaitAnyCursor(interests *[kcall.WaitAnyMaxObjects]CursorInterest, count int, timeout uint64) (uint64, kcall.Status) {
 	w := current()
+	defer tls.Unpin()
 	if interests == nil || count < 0 || count > kcall.WaitAnyMaxObjects {
 		return 0, kcall.StatusInvalidArgument
 	}
