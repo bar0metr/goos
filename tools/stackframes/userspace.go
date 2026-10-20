@@ -328,6 +328,18 @@ var preemptInstructions = []string{
 // its alignment, and the return address of the call.
 const preemptFrame = 128 + 17*8 + 512 + 8 + 8
 
+// preemptCallPinned also checks the operand of the sequence's only call.
+// Legacy scheduler:none images resolve the unused weak hook to zero;
+// goroutine images must call the reviewed preemption runtime entry.
+func preemptCallPinned(instructions []instruction) bool {
+	for _, ins := range instructions {
+		if strings.HasPrefix(ins.text, "CALL ") {
+			return ins.text == "CALL goos_g_preempt(SB)" || ins.text == "CALL 0x0"
+		}
+	}
+	return false
+}
+
 // sameInstructions reports whether a function is exactly want; a want entry
 // that is a bare mnemonic matches that mnemonic with any operand.
 func sameInstructions(instructions []instruction, want []string) bool {
@@ -372,7 +384,7 @@ func analyzeFunction(fn function) (int64, []string) {
 	if fn.name == "goos_g_swap" && sameInstructions(fn.instructions, swapInstructions) {
 		return swapFrame, nil
 	}
-	if fn.name == "goos_preempt_entry" && sameInstructions(fn.instructions, preemptInstructions) {
+	if fn.name == "goos_preempt_entry" && sameInstructions(fn.instructions, preemptInstructions) && preemptCallPinned(fn.instructions) {
 		return preemptFrame, nil
 	}
 	count := len(fn.instructions)
