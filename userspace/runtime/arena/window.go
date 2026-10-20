@@ -20,6 +20,9 @@ var gcFlag atomic.Uint32
 type threadAlloc struct {
 	// fast is set while the thread is inside a window.
 	fast atomic.Uint32
+	// regionChanging covers cursor/innermost publication in Enter and Leave.
+	// Migration pins do not prevent a collector from holding this thread.
+	regionChanging atomic.Uint32
 	// cache is the thread's own slabs (cache.go).
 	cache threadCache
 	// counts is what the thread counted on its own. Only the thread
@@ -38,6 +41,15 @@ func (a *threadAlloc) pause() {
 	if windowTesting && windowPause != nil {
 		windowPause(a)
 	}
+}
+
+func (a *threadAlloc) beginRegionChange() { a.regionChanging.Store(1) }
+func (a *threadAlloc) endRegionChange()   { a.regionChanging.Store(0) }
+
+// inWindow is read only after the collector has held the owning thread.
+// Neither its allocator nor its region cursor may be partially published.
+func (a *threadAlloc) inWindow() bool {
+	return a.fast.Load() != 0 || a.regionChanging.Load() != 0
 }
 
 // noteUnfolded marks that a's counts hold something to fold. The store

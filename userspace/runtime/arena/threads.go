@@ -156,6 +156,10 @@ type spinLock struct {
 }
 
 func (l *spinLock) lock() {
+	// The holder stays on its thread until it lets go: a goroutine
+	// switched away while it held the heap lock would stop every other
+	// goroutine of its thread that allocates (ADR 0204).
+	tls.Pin()
 	if l.held.CompareAndSwap(0, 1) {
 		l.acquired.Add(1)
 		return
@@ -170,7 +174,10 @@ func (l *spinLock) lock() {
 	l.acquired.Add(1)
 }
 
-func (l *spinLock) unlock() { l.held.Store(0) }
+func (l *spinLock) unlock() {
+	l.held.Store(0)
+	tls.Unpin()
+}
 
 // lockHeap takes the heap lock once threads exist.
 func lockHeap() {
@@ -209,15 +216,25 @@ func collectThreaded(slot int) {
 			threads[index].fold(&native)
 		}
 		native.foldStrayFrees()
-		base, _ := threadStack(slot)
-		scrubStack(base)
-		collect()
+		// A stack pointer in no known stack means the roots are not all
+		// known: nothing is marked or swept (ADR 0204).
+		planned := planStacks(slot, stackPointer())
+		if planned {
+			base, _ := currentStack()
+			scrubStack(base)
+			collect()
+		}
+		collecting = false
 		clear(snapshots[:snapshotCount*int(kcall.ThreadSnapshotSize)])
 		snapshotCount = 0
 		if sys.ThreadResume() != kcall.StatusOK {
 			panic("arena: held threads could not be released")
 		}
-		gcEpoch.Add(1)
+		if planned {
+			gcEpoch.Add(1)
+		} else {
+			suspendFailures.Add(1)
+		}
 	} else {
 		suspendFailures.Add(1)
 	}
@@ -231,9 +248,9 @@ func collectThreaded(slot int) {
 const suspendAttempts = 4
 
 // suspendOthers holds every other thread and records their snapshots. A
-// thread caught inside the allocation fast path is let go to finish it,
-// and the hold is taken again: the raised gcFlag keeps it from starting
-// another.
+// thread caught inside an allocation or region-transition window is let
+// go to finish it before another hold. The raised gcFlag keeps allocation
+// fast paths out; region transitions may require another bounded retry.
 func suspendOthers() bool {
 	started := nativeTicks()
 	for attempt := 0; attempt < suspendAttempts; attempt++ {
@@ -265,12 +282,12 @@ func noteRendezvous(elapsed uint64) {
 	}
 }
 
-// anyInFastPath reports whether a held thread was stopped inside the
-// allocation fast path.
+// anyInFastPath reports whether a held thread has unpublished allocator
+// or region state.
 func anyInFastPath(count int) bool {
 	for index := 0; index < count; index++ {
 		slot := int(snapshotWord(index, 1))
-		if slot >= 0 && slot < tls.Slots && threads[slot].fast.Load() != 0 {
+		if slot >= 0 && slot < tls.Slots && threads[slot].inWindow() {
 			return true
 		}
 	}
@@ -298,6 +315,10 @@ func markThreads() {
 		native.markRange(start, start+uintptr(kcall.ThreadSnapshotSize-kcall.ThreadSnapshotRegisters-8))
 	}
 	native.phase = PhaseStack
+	if stackRoots.Mark != nil {
+		stackRoots.Mark(markStackRange)
+		return
+	}
 	for index := 0; index < snapshotCount; index++ {
 		slot := int(snapshotWord(index, 1))
 		sp := uintptr(snapshotWord(index, 2))

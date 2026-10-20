@@ -27,6 +27,7 @@ package arena
 import (
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/sys"
+	"goos/userspace/runtime/tls"
 	"runtime"
 	"unsafe"
 )
@@ -139,6 +140,12 @@ func fail() {
 // still never collects, and another thread's region is scanned up to its
 // position.
 func Collect() {
+	tls.Pin()
+	collectPinned()
+	tls.Unpin()
+}
+
+func collectPinned() {
 	if !ready || self().regions.depth != 0 {
 		return
 	}
@@ -149,7 +156,12 @@ func Collect() {
 		collectThreaded(selfSlot())
 		return
 	}
-	scrubStack(stackBase())
+	if !planStacks(selfSlot(), stackPointer()) {
+		suspendFailures.Add(1)
+		return
+	}
+	base, _ := currentStack()
+	scrubStack(base)
 	collect()
 }
 
@@ -256,8 +268,19 @@ func pointerFree(layout unsafe.Pointer) bool {
 	return value&1 != 0 && value>>7 == 0
 }
 
+// alloc keeps the calling goroutine on its thread for the whole
+// allocation: the thread's caches, region cursor, and counts are the
+// thread's, not the goroutine's (ADR 0204).
+//
 //go:linkname alloc runtime.alloc
 func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
+	tls.Pin()
+	pointer := allocPinned(size, layout)
+	tls.Unpin()
+	return pointer
+}
+
+func allocPinned(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	t := self()
 	if t.regions.depth != 0 {
 		return regionAlloc(t, size)
@@ -324,6 +347,12 @@ func allocThreaded(t *threadState, size uintptr, noPointers bool) uintptr {
 //
 //go:linkname free runtime.free
 func free(pointer unsafe.Pointer) {
+	tls.Pin()
+	freePinned(pointer)
+	tls.Unpin()
+}
+
+func freePinned(pointer unsafe.Pointer) {
 	address := uintptr(pointer)
 	if pointer == nil || pointer == unsafe.Pointer(&zeroSized) {
 		return

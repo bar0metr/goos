@@ -26,6 +26,9 @@ func spillRegisters(buffer *[6]uintptr) uintptr
 //go:linkname scrubStack goos_gc_scrub
 func scrubStack(limit uintptr)
 
+//go:linkname stackPointer goos_stack_pointer
+func stackPointer() uintptr
+
 // stackReserve returns _goos_stack_reserve, the stack a program asks the
 // kernel for, an absolute symbol the linker script sets and elf2native
 // records (ADR 0104).
@@ -55,7 +58,7 @@ var probeRegisters [6]uintptr
 func StackRoom() uintptr {
 	sp := spillRegisters(&probeRegisters)
 	probeRegisters = [6]uintptr{}
-	base, _ := threadStack(selfSlot())
+	base, _ := currentStack()
 	return sp - base
 }
 
@@ -80,7 +83,7 @@ func markGlobals() {
 // up to the top of the collecting thread's stack.
 func markStack() {
 	sp := spillRegisters(&registers)
-	_, top := threadStack(selfSlot())
+	_, top := currentStack()
 	if top == 0 || sp > top {
 		panic("arena: stack top unknown")
 	}
