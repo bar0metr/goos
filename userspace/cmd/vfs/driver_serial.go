@@ -19,6 +19,7 @@ func initRuntime() { arena.InitService() }
 
 func runService() {
 	for {
+		applyFilesystemOffline()
 		var interests [userwait.MaxObjects]userwait.Interest
 		var sessionIndexes [maxSessions]int
 		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}

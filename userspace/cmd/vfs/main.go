@@ -29,114 +29,10 @@ var (
 	controlHandle        handle.ID
 	wire                 [ipc.WireMaxSize]byte
 	sessions             [maxSessions]uint64
-	correlation          uint64
 	waitInterests        *[userwait.MaxObjects]userwait.Interest
 	waitCount            int
 	liveSessions         int
 )
-
-// filesystem is the channel to the persistent filesystem service, or zero
-// while there is none (ADR 0096). PID 1 hands it over when that service starts
-// and again after every restart.
-var (
-	filesystem        handle.ID
-	filesystemWire    [ipc.WireMaxSize]byte
-	filesystemRequest ipc.Message
-	filesystemReply   ipc.Message
-	// filesystemName holds a name a reply carried in the file cache.
-	filesystemName [ramfs.MaxName]byte
-	// fileCache is the file cache mapping, once PID 1 has handed it over.
-	fileCache []byte
-)
-
-// filesystemTransport carries backend calls to the filesystem service. Each
-// exchange is bounded by the protocol deadline; a service that has died is
-// forgotten at once, so later calls fail without waiting.
-type filesystemTransport struct{}
-
-func (filesystemTransport) Exchange(request fsproto.Request) (fsproto.Reply, ramfs.Status) {
-	if filesystem == 0 {
-		return fsproto.Reply{}, ramfs.StatusPeerDied
-	}
-	correlation++
-	if !fsproto.EncodeRequest(request, correlation, &filesystemRequest, fileCache) {
-		return fsproto.Reply{}, ramfs.StatusIOError
-	}
-	size, ok := ipc.EncodeFrom(&filesystemRequest, filesystemWire[:])
-	if !ok {
-		return fsproto.Reply{}, ramfs.StatusIOError
-	}
-	status := sys.IPCSend(filesystem, filesystemWire[:size])
-	// A reply to an earlier request that timed out may still be queued; it is
-	// discarded rather than taken for this one's.
-	for status == kcall.StatusOK {
-		status = sys.IPCWaitReceive(filesystem, filesystemWire[:], fsproto.RequestDeadline)
-		if status != kcall.StatusOK {
-			break
-		}
-		if !ipc.DecodeInto(filesystemWire[:wireSize(filesystemWire[:])], &filesystemReply) {
-			return fsproto.Reply{}, ramfs.StatusIOError
-		}
-		if filesystemReply.Correlation < correlation {
-			continue
-		}
-		reply, valid := fsproto.DecodeReply(&filesystemReply, fileCache, &filesystemName)
-		if !valid || filesystemReply.Correlation != correlation {
-			return fsproto.Reply{}, ramfs.StatusIOError
-		}
-		return reply, ramfs.StatusOK
-	}
-	switch status {
-	case kcall.StatusPeerDied:
-		dropFilesystem()
-		return fsproto.Reply{}, ramfs.StatusPeerDied
-	case kcall.StatusTimeout:
-		return fsproto.Reply{}, ramfs.StatusTimeout
-	}
-	return fsproto.Reply{}, ramfs.StatusIOError
-}
-
-// dropFilesystem forgets a filesystem service that has gone. Its mounts answer
-// with I/O errors until PID 1 hands over a restarted one.
-func dropFilesystem() {
-	sys.HandleClose(filesystem)
-	filesystem = 0
-	service.DetachFilesystem()
-	syslog.Warn("filesystem service gone")
-}
-
-// attachFilesystem installs the channel to a filesystem service that has just
-// started. The first attach mounts its volume; a later one checks that the
-// restarted service serves the volume the mounts already name.
-func attachFilesystem(client handle.ID) vfs.Status {
-	if filesystem != 0 {
-		sys.HandleClose(filesystem)
-	}
-	filesystem = client
-	first := !service.PersistentMounted()
-	if service.AttachFilesystem(filesystemTransport{}) {
-		if service.SystemProtected() {
-			mark("SYSTEM_PROTECTED_OK\n")
-		}
-		if first {
-			mark("FAT32_MOUNT_OK\n")
-			syslog.Info("mounted", syslog.Str("fs", "fat32"), syslog.Str("path", "/persist"))
-		} else {
-			mark("FAT32_REATTACHED_OK\n")
-			syslog.Info("filesystem service reattached", syslog.Str("path", "/persist"))
-		}
-		return vfs.StatusOK
-	}
-	// A volume that cannot be mounted is not a reason for the system to stop.
-	// The root filesystem and the system image are up, so the machine comes to
-	// a prompt with no persistent storage rather than to nothing at all, which
-	// is the state from which the volume can be inspected (ADR 0077).
-	if first {
-		syslog.Error("persistent volume not mounted", syslog.Str("reason", "image rejected or device unavailable"))
-		write("[WARN] no persistent storage\n")
-	}
-	return vfs.StatusBackendError
-}
 
 // wireSize is the length of the message at the start of data, from its header.
 func wireSize(data []byte) int {
@@ -305,6 +201,7 @@ func processControl(message ipc.Message) bool {
 		if result == vfs.StatusOK {
 			sys.HandleClose(filesystem)
 			filesystem = 0
+			filesystemState.endpoint = 0
 			syslog.Info("unmounted", syslog.Str("path", "/persist"))
 		}
 		reply, encoded := vfs.AddSessionReply(result, message.Correlation)
@@ -511,6 +408,12 @@ func releaseWithheld(owner vfs.Owner, session uint64, deliver bool) {
 // consumes the slot while handling this reply's send.
 func serveExecutable(owner vfs.Owner, request vfs.Request) vfs.Reply {
 	reply := vfs.Reply{Operation: request.Operation}
+	if filesystemState.availability.quarantined.Load() {
+		// The executable transport shares the old filesystem's cache object.
+		// Do not overwrite a slot an unanswered request may still consume.
+		reply.Status = vfs.StatusBackendError
+		return reply
+	}
 	if request.Size == 0 || request.Size > fsproto.PageSize || request.Offset+uint64(request.Size) < request.Offset {
 		reply.Status = vfs.StatusInvalidArgument
 		return reply
