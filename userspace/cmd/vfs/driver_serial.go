@@ -53,13 +53,9 @@ func runService() {
 				fatal("VFS_WAIT_FAILED\n")
 			}
 		}
-		if result.ReadyMask&1 != 0 {
+		dispatchSerialBatch(result.ReadyMask, count, applyFilesystemOffline, func() {
 			pollControl()
-		}
-		for interest := 1; interest < count; interest++ {
-			if result.ReadyMask&(1<<interest) == 0 {
-				continue
-			}
+		}, func(interest int) {
 			index := sessionIndexes[interest-1]
 			session := sessions[index]
 			message, receiveStatus := receiveNow(session)
@@ -67,12 +63,12 @@ func runService() {
 				// The files the session left open close with it, before its
 				// slot, and with it its owner number, can be reused.
 				closeSession(index)
-				continue
+				return
 			}
 			if receiveStatus != ipc.StatusOK {
 				fatal("VFS_RECEIVE_FAILED\n")
 			}
 			serve(sessionOwner(index), session, message)
-		}
+		})
 	}
 }
