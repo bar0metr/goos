@@ -616,8 +616,8 @@ test-thread-gc:
 	@SUITE=gc SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img
 
 test-thread-allocator:
-	$(BUILD_ENV) go test -count=1 -run 'Owned|Stray' ./userspace/runtime/arena
-	$(BUILD_ENV) go test -race -count=1 -run 'Owned|Stray' ./userspace/runtime/arena
+	$(BUILD_ENV) go test -count=1 -run 'Owned|Stray|Window' ./userspace/runtime/arena
+	$(BUILD_ENV) go test -race -count=1 -run 'Owned|Stray|Window' ./userspace/runtime/arena
 	@$(MAKE) --no-print-directory iso VALIDATION=1
 	@$(MAKE) --no-print-directory test-disk VALIDATION=1 TEST_DISK=$(BUILD_DIR)/threads-test.img
 	@SUITE=allocator SMP=$(THREAD_SMP) MEMORY=$(MEMORY) tests/boot/threads.sh $(ISO) $(OVMF_CODE) $(BUILD_DIR)/threads-test.img

@@ -242,8 +242,12 @@ most 14 pages it does not use, 56 KiB; eight threads hold at most 448 KiB.
 Large runs stay under the heap lock.
 
 A thread's counts are its own. It changes them only inside the fast-path
-window or under the heap lock, and they reach the heap's counters only when
-it folds them under the heap lock: at every refill, at its exit, and when a
+window, from storing its fast flag to clearing it, or under the heap lock;
+the unfolded flag below is set inside the window too, so a thread held just
+before its window finds the flag still set after it. A host test holds a
+thread at every point of the window and on both its edges
+(`TestWindowHoldAtEveryPoint`). The counts reach the heap's counters only
+when the thread folds them under the heap lock: at every refill, at its exit, and when a
 collection holds it. Statistics and diagnostics read only folded counts, so
 between collections they can miss a thread's allocations since its last
 refill. A thread sets an atomic flag when it has counts to fold, and an idle

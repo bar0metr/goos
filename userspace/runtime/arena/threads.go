@@ -27,17 +27,8 @@ type threadState struct {
 	cursor    allocatorPosition
 	innermost *Region
 	live      bool
-	// fast is set while the thread is inside the allocation fast path.
-	fast atomic.Uint32
-	// cache is the thread's own slabs (cache.go).
-	cache threadCache
-	// counts is what the thread counted on its own. Only the thread
-	// changes it, inside the fast path or under the heap lock; it reaches
-	// the heap's counters only through foldThread, and nothing else reads
-	// it. unfolded is set while counts holds anything foldThread has not
-	// folded.
-	counts   threadCounts
-	unfolded atomic.Uint32
+	// threadAlloc is the fast path's state (window.go).
+	threadAlloc
 }
 
 var (
@@ -49,10 +40,7 @@ var (
 	// gcLock comes first.
 	heapLock spinLock
 	gcLock   spinLock
-	// gcFlag is raised while a collection begins and runs: a thread that
-	// sees it does not start a fast-path allocation. gcEpoch counts
-	// completed collections.
-	gcFlag  atomic.Uint32
+	// gcEpoch counts completed collections; gcFlag is in window.go.
 	gcEpoch atomic.Uint64
 	// snapshots receives the held threads' state for the collection that
 	// runs; it is a global, so marking scans it, and it is cleared after.
@@ -123,7 +111,7 @@ func ThreadStarted(slot int) {
 	lockHeap()
 	t.regions, t.cursor, t.innermost = regionStack{}, allocatorPosition{}, nil
 	native.returnCache(&t.cache, &t.counts)
-	foldThread(t)
+	t.fold(&native)
 	t.live = true
 	live := uint32(0)
 	for index := range threads {
@@ -144,7 +132,7 @@ func ThreadExiting() {
 	}
 	lockHeap()
 	native.returnCache(&t.cache, &t.counts)
-	foldThread(t)
+	t.fold(&native)
 	t.live = false
 	unlockHeap()
 }
@@ -218,7 +206,7 @@ func collectThreaded(slot int) {
 		// and counts come back, and the mark bitmaps hold marks again.
 		for index := range threads {
 			native.returnCache(&threads[index].cache, &threads[index].counts)
-			foldThread(&threads[index])
+			threads[index].fold(&native)
 		}
 		native.foldStrayFrees()
 		base, _ := threadStack(slot)
@@ -330,35 +318,16 @@ func markThreads() {
 
 // allocCached is a small allocation once threads exist. It takes a slot
 // from the thread's own slab without a lock; when the slab is full, or a
-// collection is starting, it takes the heap lock and refills.
-//
-// The fast path announces itself in t.fast before it reads gcFlag, and
-// clears the announcement after the bitmap write. The collector raises
-// gcFlag before it holds the threads and reads the announcements after, so
-// a held thread either finished its write or is seen inside and let go to
-// finish (suspendOthers).
+// collection is starting, it takes the heap lock and refills. The window
+// the fast path runs in is in window.go.
 func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 	class := native.classOf[(size+15)>>4]
-	noteUnfolded(t)
-	// The counts change only inside the announced window or under the
-	// heap lock: a collection folds and clears them while the thread is
-	// held, and must not find an update half done.
-	t.fast.Store(1)
-	if sizeProfile {
-		bucket := (size - 1) >> 4
-		t.counts.sizeCounts[bucket]++
-		t.counts.sizeBytes[bucket] += uint64(size)
+	if address := t.allocFast(&native, class, size, noPointers); address != 0 {
+		return address
 	}
-	if gcFlag.Load() == 0 {
-		if address := native.cacheAlloc(&t.cache, &t.counts, class, noPointers); address != 0 {
-			t.fast.Store(0)
-			return address
-		}
-	}
-	t.fast.Store(0)
 	owner := uint32(selfSlot() + 1)
 	heapLock.lock()
-	foldThread(t)
+	t.fold(&native)
 	if native.liveBytes >= native.nextCollection && !collecting {
 		heapLock.unlock()
 		Collect()
@@ -377,28 +346,13 @@ func allocCached(t *threadState, size uintptr, noPointers bool) uintptr {
 			address = native.cacheAlloc(&t.cache, &t.counts, class, noPointers)
 		}
 	}
-	// The allocation after the fold counted again.
-	noteUnfolded(t)
+	// The allocation after the fold counted again, under the lock.
+	t.noteUnfolded()
 	heapLock.unlock()
 	if address == 0 {
 		fail()
 	}
 	return address
-}
-
-// noteUnfolded marks that t's counts hold something to fold. Only t calls
-// it; the store happens once per fold.
-func noteUnfolded(t *threadState) {
-	if t.unfolded.Load() == 0 {
-		t.unfolded.Store(1)
-	}
-}
-
-// foldThread publishes t's counts into the heap's. The caller holds the heap
-// lock and is t's thread, or t's thread is held or has ended.
-func foldThread(t *threadState) {
-	native.foldCounts(&t.counts)
-	t.unfolded.Store(0)
 }
 
 // anyUnfolded reports whether some thread counted what it has not folded:
@@ -416,17 +370,13 @@ func anyUnfolded() bool {
 // owns is freed without the heap lock: into the slab by its owner, into its
 // remote-free bits by anyone else. Everything else takes the lock.
 func freeThreaded(t *threadState, address uintptr) {
+	owner := uint32(selfSlot() + 1)
 	// The reservation's bounds never change, unlike the frontier the heap
 	// lock guards; a page past the frontier has no owner and takes the
 	// locked path, which checks it.
-	if threadCaches && ready && address >= native.base && address-native.base < uintptr(native.capacity)<<pageShift {
-		noteUnfolded(t)
-		t.fast.Store(1)
-		if gcFlag.Load() == 0 && freeOwned(t, address) {
-			t.fast.Store(0)
-			return
-		}
-		t.fast.Store(0)
+	if threadCaches && ready && address >= native.base && address-native.base < uintptr(native.capacity)<<pageShift &&
+		t.freeFast(&native, address, owner) {
+		return
 	}
 	heapLock.lock()
 	if inRegion(address) {
@@ -439,30 +389,11 @@ func freeThreaded(t *threadState, address uintptr) {
 	}
 	// The owner may have changed since the try above; under the lock
 	// only an owned slab's owner still changes it without the lock.
-	noteUnfolded(t)
-	if !freeOwned(t, address) {
+	t.noteUnfolded()
+	if !t.freeOwned(&native, address, owner) {
 		native.freeAt(address)
 	}
 	heapLock.unlock()
-}
-
-// freeOwned frees address if it is a slot of an owned slab, and reports
-// whether it was.
-func freeOwned(t *threadState, address uintptr) bool {
-	page, slot, owner, ok := native.ownedSlot(address)
-	if owner == 0 {
-		return false
-	}
-	if ok && owner == uint32(selfSlot()+1) {
-		ok = native.cacheFree(&t.counts, page, slot)
-	} else if ok {
-		ok = native.remoteFree(&t.counts, page, slot)
-	}
-	if !ok {
-		t.fast.Store(0)
-		panic("arena: double free or free of a non-allocation")
-	}
-	return true
 }
 
 // threadDiagnostics fills the thread part of d. The caller holds the heap

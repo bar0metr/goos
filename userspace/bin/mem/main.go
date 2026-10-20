@@ -34,7 +34,7 @@ func run(data startup.Data) {
 		}
 		// Processes' pages move with their collected heaps; what the
 		// kernel holds for itself does not (ADR 0201).
-		used, processes := stablePages(&info)
+		used, processes, stable := stablePages(&info)
 		utility.PrintText("pages used: ")
 		utility.PrintUint(used)
 		utility.EndLine()
@@ -43,6 +43,14 @@ func run(data startup.Data) {
 		utility.EndLine()
 		utility.PrintText("pages in the kernel: ")
 		utility.PrintUint(used - min(used, processes))
+		utility.EndLine()
+		// A test compares the counts only when they settled; an unsettled
+		// sample says nothing about a leak.
+		if stable {
+			utility.PrintText("pages stable: yes")
+		} else {
+			utility.PrintText("pages stable: no")
+		}
 		utility.EndLine()
 		return
 	}
@@ -57,20 +65,22 @@ func run(data startup.Data) {
 }
 
 // stablePages samples the pages in use and the pages processes are charged
-// until two samples in a row agree, at most eight times. The two counts come
-// from separate calls, one per process for the second, and a service that
-// collects or touches a page between them would move one without the other;
-// nothing is printed while sampling, since the output itself wakes services.
-func stablePages(info *[kcall.SystemInfoSize]byte) (used, processes uint64) {
+// until two samples in a row agree, at most eight times, and reports whether
+// they did. The two counts come from separate calls, one per process for the
+// second, and a service that collects or touches a page between them would
+// move one without the other; nothing is printed while sampling, since the
+// output itself wakes services. Agreeing samples are not one atomic reading,
+// but a count that moved between them is not taken for a settled one.
+func stablePages(info *[kcall.SystemInfoSize]byte) (used, processes uint64, stable bool) {
 	used, processes = usedPages(info), processPages()
 	for attempt := 0; attempt < 8; attempt++ {
 		nextUsed, nextProcesses := usedPages(info), processPages()
 		if nextUsed == used && nextProcesses == processes && usedPages(info) == used {
-			break
+			return used, processes, true
 		}
 		used, processes = nextUsed, nextProcesses
 	}
-	return used, processes
+	return used, processes, false
 }
 
 func usedPages(info *[kcall.SystemInfoSize]byte) uint64 {

@@ -174,7 +174,15 @@ leak_prepare
 while [ "$round" -le "$rounds" ]; do
 	leak_round "$round"
 	run 'sleep 2'
+	# An unsettled sample is taken again, and three in a row fail as such,
+	# never as a leak.
+	tries=0
 	run 'mem -p'
+	while grep -q '^pages stable: no' "$work/output"; do
+		tries=$((tries + 1))
+		[ "$tries" -lt 3 ] || fail "page counts did not settle in round $round"
+		run 'mem -p'
+	done
 	kernel=$(sed -n 's/^pages in the kernel: //p' "$work/output")
 	processes=$(sed -n 's/^pages in processes: //p' "$work/output")
 	[ -n "$kernel" ] && [ -n "$processes" ] || fail "no page counts in round $round"

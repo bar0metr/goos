@@ -1088,7 +1088,13 @@ leak_fifth=$(printf '%s\n' "$leak_counts" | sed -n 3p)
 kernel_third=$(printf '%s\n' "$kernel_counts" | sed -n 1p)
 kernel_fourth=$(printf '%s\n' "$kernel_counts" | sed -n 2p)
 kernel_fifth=$(printf '%s\n' "$kernel_counts" | sed -n 3p)
-if [ -n "$kernel_third" ] && [ "$kernel_third" = "$kernel_fourth" ] && [ "$kernel_third" = "$kernel_fifth" ]; then
+# mem -p says whether its counts settled. The rounds are fed in advance, so
+# an unsettled one cannot be taken again; it fails as itself, not as a leak.
+unsettled=$(printf '%s\n' "$leak_window" | grep -a '^pages stable: ' | sed -n '1,3p' | grep -c 'no$' || true)
+stability=$(printf '%s\n' "$leak_window" | grep -a -c '^pages stable: ' || true)
+if [ "$stability" -lt 3 ] || [ "$unsettled" -ne 0 ]; then
+	fail_check leaks.snapshot-stable 'mem -p settled after rounds 3, 4, and 5' "$unsettled of the first 3 unsettled, $stability reported" "$log" 'goos> echo leak-round-3'
+elif [ -n "$kernel_third" ] && [ "$kernel_third" = "$kernel_fourth" ] && [ "$kernel_third" = "$kernel_fifth" ]; then
 	checks=$((checks + 1))
 else
 	fail_check leaks.kernel-steady-state 'the same kernel pages in use after rounds 3, 4, and 5' "${kernel_third:-none}, ${kernel_fourth:-none}, ${kernel_fifth:-none}" "$log" 'goos> echo leak-round-3'
