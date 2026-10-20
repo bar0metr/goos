@@ -275,7 +275,7 @@ func validEntry(entry Entry) bool {
 }
 
 func validKey(key Key) bool {
-	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindLog {
+	if key.Object == 0 || key.Kind < KindChannel || key.Kind > KindThread {
 		return false
 	}
 	if (key.Kind == KindChannel || key.Kind == KindStream) && key.Side > 1 {
