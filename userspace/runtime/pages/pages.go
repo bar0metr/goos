@@ -81,7 +81,7 @@ func (pool *Pool) Allocate() (uint32, bool) {
 func (pool *Pool) Page(ref uint32) *[PageSize]byte {
 	// SAFETY: ref names a page inside the reservation Init made, which stays
 	// mapped for the life of the process; Allocate is the only source of refs.
-	return (*[PageSize]byte)(unsafe.Pointer(uintptr(pool.base + (uint64(ref)-1)*PageSize)))
+	return (*[PageSize]byte)(pointerAt(pool.base + (uint64(ref)-1)*PageSize))
 }
 
 // Free gives a page back. Its memory goes back to the kernel now.
@@ -103,10 +103,18 @@ func (pool *Pool) Used() uint64 {
 	return pool.next - 1 - pool.depth
 }
 
+// pointerAt turns an address inside the pool's reservations into a pointer.
+// It reuses the word's bits rather than converting, since an address computed
+// from a reservation base is not derived from a Go pointer (as in arena).
+func pointerAt(address uint64) unsafe.Pointer {
+	word := uintptr(address)
+	return *(*unsafe.Pointer)(unsafe.Pointer(&word))
+}
+
 func (pool *Pool) slot(index uint64) *[1]uint32 {
 	// SAFETY: the stack reservation holds four bytes per page of the pool, and
 	// its depth never exceeds the pages handed out.
-	return (*[1]uint32)(unsafe.Pointer(uintptr(pool.free + index*4)))
+	return (*[1]uint32)(pointerAt(pool.free + index*4))
 }
 
 // Permanent returns zeroed memory for a value of type T that is never given
@@ -126,5 +134,5 @@ func Permanent[T any](pool *Pool) *T {
 	// SAFETY: the pages [first, first+count) were never handed out, lie inside
 	// the reservation, are zero as fresh anonymous memory, and are never
 	// given back, so the value owns them for the life of the process.
-	return (*T)(unsafe.Pointer(uintptr(pool.base + (first-1)*PageSize)))
+	return (*T)(pointerAt(pool.base + (first-1)*PageSize))
 }
