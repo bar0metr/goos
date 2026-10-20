@@ -11,13 +11,15 @@ import (
 )
 
 var (
-	nativeWaitHandler    sys.WaitHandler    = schedulerWait
-	nativeReceiveHandler sys.ReceiveHandler = schedulerReceive
+	nativeWaitHandler        sys.WaitHandler        = schedulerWait
+	nativeReceiveHandler     sys.ReceiveHandler     = schedulerReceive
+	nativeProcessWaitHandler sys.ProcessWaitHandler = schedulerProcessWait
 )
 
 func installWaitHooks() {
 	sys.InstallWaitHandler(&nativeWaitHandler)
 	sys.InstallReceiveHandler(&nativeReceiveHandler)
+	sys.InstallProcessWaitHandler(&nativeProcessWaitHandler)
 }
 
 func canParkNativeWait() bool {
@@ -62,6 +64,30 @@ func schedulerWait(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, 
 	}
 	mask, status = Wait(interests, count, deadline, nil)
 	return mask, status, true
+}
+
+// schedulerProcessWait has the same scheduler-stack, nil-M, region and pin
+// policy as the existing native adapters. No sys scratch is pinned here.
+func schedulerProcessWait(process handle.ID, timeout uint64) (uint64, kcall.Status, bool) {
+	if !canParkNativeWait() {
+		return 0, kcall.StatusOK, false
+	}
+	code, status := waitForProcess(process, timeout, processWaitOps{
+		probe: sys.ProcessWait,
+		now:   nanotime,
+		wait:  waitProcessReady,
+	})
+	return code, status, true
+}
+
+func waitProcessReady(interests *[kcall.WaitAnyMaxObjects]sys.Interest, count int, deadline int64) (uint64, kcall.Status) {
+	// Validate against the kernel before registration; readiness itself does
+	// not consume the process exit. The poller rechecks after registration.
+	mask, status := sys.WaitAny(interests, count, 0)
+	if status != kcall.StatusTimeout {
+		return mask, status
+	}
+	return Wait(interests, count, deadline, nil)
 }
 
 // schedulerReceive keeps one absolute deadline across readiness races. It

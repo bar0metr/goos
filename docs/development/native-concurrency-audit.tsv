@@ -755,3 +755,5 @@ CA-0756	goos/userspace/runtime/tls	blocks	thread	runtime	TestBlockLayout
 CA-0757	goos/userspace/runtime/tls	hostBlock	process	runtime	none
 CA-0800	goos/userspace/cmd/init	filesystemRequests	process	lock	TestOwnedVFSAbsoluteDeadlineBeforeAndAfterSend
 CA-0801	goos/userspace/cmd/shell	filesystemRequests	process	lock	TestOwnedVFSCompletedWorkWithheldReplyStillQuarantines
+CA-0900	goos/userspace/runtime/sys	processWaitHandler	process	atomic	TestProcessWaitHandlerDispatchAndPolling
+CA-0901	goos/userspace/runtime/goroutine	nativeProcessWaitHandler	process	immutable	none

@@ -8,6 +8,40 @@ import (
 	"goos/kernel/kcall"
 )
 
+func TestProcessWaitHandlerDispatchAndPolling(t *testing.T) {
+	defer InstallProcessWaitHandler(nil)
+	wantCode, wantStatus := ProcessWait(7, 0)
+	calls := 0
+	handler := ProcessWaitHandler(func(process handle.ID, timeout uint64) (uint64, kcall.Status, bool) {
+		calls++
+		if process != 7 || timeout != 17 {
+			t.Fatalf("process handler(%d, %d)", process, timeout)
+		}
+		// The adapter must be able to make its raw zero-time probe without
+		// re-entering itself or holding the wrapper's scratch descriptor.
+		if code, status := ProcessWait(process, 0); code != wantCode || status != wantStatus {
+			t.Fatalf("raw probe = %d, %v; want %d, %v", code, status, wantCode, wantStatus)
+		}
+		return 42, kcall.StatusOK, true
+	})
+	InstallProcessWaitHandler(&handler)
+	if code, status := ProcessWait(7, 17); code != 42 || status != kcall.StatusOK || calls != 1 {
+		t.Fatalf("process wait = %d, %v; calls=%d", code, status, calls)
+	}
+	if code, status := ProcessWait(7, 0); code != wantCode || status != wantStatus || calls != 1 {
+		t.Fatalf("poll = %d, %v; calls=%d", code, status, calls)
+	}
+	InstallProcessWaitHandler(nil)
+	wantCode, wantStatus = ProcessWait(7, 17)
+	handler = func(handle.ID, uint64) (uint64, kcall.Status, bool) {
+		return 99, kcall.StatusOK, false
+	}
+	InstallProcessWaitHandler(&handler)
+	if code, status := ProcessWait(7, 17); code != wantCode || status != wantStatus {
+		t.Fatalf("declined process wait = %d, %v; want native %d, %v", code, status, wantCode, wantStatus)
+	}
+}
+
 func TestReceiveHandlerDispatchAndPolling(t *testing.T) {
 	defer InstallReceiveHandler(nil)
 	var buffer [ipc.WireMaxSize]byte

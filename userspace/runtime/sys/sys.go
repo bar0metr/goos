@@ -250,8 +250,17 @@ func HandleInfo(slot uint64, target *[kcall.HandleInfoSize]byte) kcall.Status {
 }
 
 // ProcessWait waits up to timeout ticks for a process to exit and returns its
-// exit code.
+// exit code. It requires capability.Wait. Zero timeout probes without parking;
+// all nonzero timeouts are finite, including WaitAnyInfiniteTimeout. A pending
+// wait whose timeout cannot be represented returns ResourceExhausted.
 func ProcessWait(process handle.ID, timeout uint64) (uint64, kcall.Status) {
+	if timeout != 0 {
+		if handler := processWaitHandler.Load(); handler != nil {
+			if code, status, handled := (*handler)(process, timeout); handled {
+				return code, status
+			}
+		}
+	}
 	w := current()
 	defer tls.Unpin()
 	w.valueWire = 0

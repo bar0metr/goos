@@ -27,3 +27,14 @@ var receiveHandler atomic.Pointer[ReceiveHandler]
 
 // InstallReceiveHandler publishes the runtime's IPC adapter before user code.
 func InstallReceiveHandler(handler *ReceiveHandler) { receiveHandler.Store(handler) }
+
+// ProcessWaitHandler parks a process waiter through the scheduler. It runs
+// before ProcessWait pins its native scratch and follows WaitHandler's native
+// fallback contract. Zero-time probes bypass it.
+type ProcessWaitHandler func(process handle.ID, timeout uint64) (code uint64, status kcall.Status, handled bool)
+
+var processWaitHandler atomic.Pointer[ProcessWaitHandler]
+
+// InstallProcessWaitHandler publishes an immutable runtime-owned handler,
+// or nil to use native process waits.
+func InstallProcessWaitHandler(handler *ProcessWaitHandler) { processWaitHandler.Store(handler) }
