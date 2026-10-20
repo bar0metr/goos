@@ -91,7 +91,10 @@ func TestWindowHoldAtEveryPoint(t *testing.T) {
 		}},
 	}
 	for _, c := range cases {
-		for point := 1; point <= 6; point++ {
+		points := 0
+		// Point zero counts the hooks without requesting a hold. The
+		// remaining runs must hit each hook found by that pass.
+		for point := 0; point == 0 || point <= points; point++ {
 			th := newTestHeap(t, 32, 64)
 			var lock sync.Mutex
 			a, other := &threadAlloc{}, &threadAlloc{}
@@ -104,6 +107,14 @@ func TestWindowHoldAtEveryPoint(t *testing.T) {
 			windowPause = collector.pause
 			c.run(th, a, other, target)
 			windowPause = nil
+			if point == 0 {
+				points = collector.seen
+				if points == 0 {
+					t.Fatalf("%s: no window hooks executed", c.name)
+				}
+			} else if collector.seen != points || collector.held == 0 && !collector.pending {
+				t.Fatalf("%s: point %d was not held (hooks=%d, want %d)", c.name, point, collector.seen, points)
+			}
 			// The collector holds the thread just after it ran too.
 			checkPublished(t, c.name, point, a)
 			checkPublished(t, c.name, point, other)
