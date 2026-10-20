@@ -7,6 +7,11 @@
 // path and a target of PathMax bytes each, and keeps it mapped. Each request
 // that uses it attaches a new handle to it, with only the rights the VFS
 // needs; the VFS copies the paths out before it looks at them.
+//
+// The page is one per process, so one request uses it at a time. A caller
+// holds it with Hold from before Prepare until it has the reply and has
+// copied out any Name, then calls Release. The lock is held across the wait
+// for the VFS's reply: the page is the serialized resource.
 package pathpage
 
 import (
@@ -15,20 +20,31 @@ import (
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
+	"goos/userspace/runtime/lock"
 	"goos/userspace/runtime/sys"
 )
 
 const pages = 2 * limits.PathMax / 4096
 
+// page is held by the request using the page. object and memory are set
+// once, by the first Prepare that needs them, under page.
 var (
+	page   lock.Mutex
 	object handle.ID
 	memory []byte
 )
+
+// Hold takes the page for one request.
+func Hold() { page.Lock() }
+
+// Release gives the page back.
+func Release() { page.Unlock() }
 
 // Prepare readies request to be sent. When its paths fit the message and it
 // asks for no name, there is nothing to attach and the handle is zero.
 // Otherwise the paths are written to the page, the request is marked, and the
 // handle returned is to be attached; it moves to the VFS with the request.
+// The caller holds the page.
 func Prepare(request *vfs.Request) (handle.ID, bool) {
 	inline := vfs.FitsInline(*request)
 	if inline && !request.NameReturn {
@@ -54,6 +70,7 @@ func Prepare(request *vfs.Request) (handle.ID, bool) {
 }
 
 // Name returns the listed name the VFS wrote to the page, size bytes long.
+// It aliases the page: the caller, still holding the page, copies it out.
 func Name(size int) []byte {
 	if size > len(memory) {
 		return nil

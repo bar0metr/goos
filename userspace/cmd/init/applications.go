@@ -556,6 +556,8 @@ func callSession(session handle.ID, request vfs.Request) (vfs.Reply, bool) {
 // request and a deadline of the caller's choosing.
 func callSessionAttached(session handle.ID, request vfs.Request, attached handle.ID, deadline uint64) (vfs.Reply, bool) {
 	// A program path too long for a message goes in the path page (ADR 0110).
+	pathpage.Hold()
+	defer pathpage.Release()
 	if attached == 0 {
 		var ok bool
 		if attached, ok = pathpage.Prepare(&request); !ok {

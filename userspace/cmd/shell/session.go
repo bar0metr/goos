@@ -17,6 +17,8 @@ func callVFS(request vfs.Request) (vfs.Reply, bool) {
 		correlation++
 	}
 	// A path too long for a message goes in the path page (ADR 0110).
+	pathpage.Hold()
+	defer pathpage.Release()
 	attached, ok := pathpage.Prepare(&request)
 	if !ok {
 		return vfs.Reply{}, false

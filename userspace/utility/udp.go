@@ -4,8 +4,6 @@ package utility
 
 import (
 	"goos/kernel/clock"
-	"goos/kernel/handle"
-	"goos/kernel/ipc"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/startup"
@@ -15,13 +13,13 @@ import (
 // A command's UDP session (GUDP1, ADR 0195), when its manifest asked for
 // GrantUDP and PID 1 granted it. The calls here are synchronous: each sends
 // one request and waits for its reply, so a command has at most one request
-// outstanding and uses TX slot 0 only.
+// outstanding and uses TX slot 0 only. The session belongs to one goroutine
+// at a time, as the TCP session does. udpTX and udpRX are set once by
+// OpenUDP.
 var (
-	udpHandle   handle.ID
-	udpTX       []byte
-	udpRX       []byte
-	udpMessage  ipc.Message
-	udpIncoming ipc.Message
+	udpSession session[nativeIPC]
+	udpTX      []byte
+	udpRX      []byte
 )
 
 // udpWait bounds every reply except a RecvFrom's, which the caller bounds.
@@ -42,7 +40,8 @@ func OpenUDP(data startup.Data) bool {
 	if txStatus != kcall.StatusOK || rxStatus != kcall.StatusOK || txSize < txPool || rxSize < rxPool {
 		return false
 	}
-	udpHandle, udpTX, udpRX = channel, sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)
+	udpTX, udpRX = sys.Window(txBase, txPool), sys.Window(rxBase, rxPool)
+	udpSession.bind(channel)
 	return true
 }
 
@@ -74,14 +73,12 @@ func UDPCall(request *udpapi.Request, ticks uint64, reply *udpapi.Reply) bool {
 
 // UDPStart sends a request without waiting and returns its correlation.
 func UDPStart(request *udpapi.Request) (uint64, bool) {
-	if udpHandle == 0 {
+	if udpSession.bound() == 0 {
 		return 0, false
 	}
-	correlation++
-	if correlation == 0 {
-		correlation++
-	}
-	if !udpapi.EncodeRequest(request, correlation, &udpMessage) || !udpSend() {
+	correlation := udpSession.begin()
+	defer udpSession.end()
+	if !udpapi.EncodeRequest(request, correlation, &udpSession.outgoing) || !udpSession.send(&udpSession.outgoing) {
 		return 0, false
 	}
 	return correlation, true
@@ -89,19 +86,12 @@ func UDPStart(request *udpapi.Request) (uint64, bool) {
 
 // UDPWait takes the next reply within ticks and returns its correlation.
 func UDPWait(ticks uint64, reply *udpapi.Reply) (uint64, bool) {
-	if sys.IPCWaitReceive(udpHandle, wire[:], ticks) != kcall.StatusOK {
+	udpSession.hold()
+	defer udpSession.end()
+	if !udpSession.received(ticks) {
 		return 0, false
 	}
-	payloadSize := int(wire[24]) | int(wire[25])<<8
-	if !ipc.DecodeInto(wire[:ipc.WireHeaderSize+payloadSize+int(wire[26])*8], &udpIncoming) {
-		return 0, false
-	}
-	return udpapi.DecodeReply(&udpIncoming, reply)
-}
-
-func udpSend() bool {
-	size, ok := ipc.EncodeFrom(&udpMessage, wire[:])
-	return ok && sys.IPCSend(udpHandle, wire[:size]) == kcall.StatusOK
+	return udpapi.DecodeReply(&udpSession.incoming, reply)
 }
 
 // UDPPayload is TX slot 0, where a command writes what it sends.
@@ -116,7 +106,9 @@ func UDPReceived(reply *udpapi.Reply) []byte {
 // UDPRelease hands an RX slot back.
 func UDPRelease(slot uint8) {
 	release := udpapi.Request{Opcode: udpapi.OpRelease, Slot: slot}
-	if udpapi.EncodeRequest(&release, 0, &udpMessage) {
-		udpSend()
+	udpSession.hold()
+	if udpapi.EncodeRequest(&release, 0, &udpSession.outgoing) {
+		udpSession.send(&udpSession.outgoing)
 	}
+	udpSession.end()
 }

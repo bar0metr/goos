@@ -4,6 +4,7 @@ package utility
 
 import (
 	"goos/internal/capability"
+	"goos/internal/limits"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/vfs"
@@ -19,9 +20,16 @@ const BulkSize = 64 << 10
 // from. The command keeps its handle and its mapping; each request attaches a
 // copy of the handle carrying only the rights the VFS needs to map it, which the VFS
 // closes when it answers.
+//
+// A Bulk belongs to one goroutine at a time: its memory is the data of the
+// transfer in progress. Goroutines that move files at once each use their
+// own Bulk; the transfers themselves take turns on the filesystem session.
 type Bulk struct {
 	object handle.ID
 	Memory []byte
+	// temporary holds the temporary path of a SaveFile through this Bulk,
+	// allocated at its first save.
+	temporary *[limits.PathMax]byte
 }
 
 // NewBulk creates and maps a bulk buffer of size bytes, rounded up to pages.
@@ -58,6 +66,6 @@ func (bulk *Bulk) transfer(operation vfs.Operation, file vfs.Handle, count int, 
 	if status != kcall.StatusOK {
 		return vfs.Reply{}, false
 	}
-	// callVFS closes the copy if it never reaches the VFS.
-	return callVFS(vfs.Request{Operation: operation, Handle: file, Size: uint32(count)}, duplicate)
+	// attachedVFS closes the copy if it never reaches the VFS.
+	return attachedVFS(vfs.Request{Operation: operation, Handle: file, Size: uint32(count)}, duplicate)
 }
