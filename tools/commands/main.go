@@ -47,6 +47,15 @@ func main() {
 // image is reproducible.
 func build(root string) ([]byte, error) { return buildSelected(root, true) }
 
+func validationCommand(name string) bool {
+	switch name {
+	case "cryptoprobe", "trustprobe", "memreclaim", "threadprobe", "goprobe":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildSelected(root string, validation bool) ([]byte, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -55,7 +64,7 @@ func buildSelected(root string, validation bool) ([]byte, error) {
 	var names []string
 	for _, entry := range entries {
 		if entry.IsDir() {
-			if !validation && (entry.Name() == "cryptoprobe" || entry.Name() == "trustprobe") {
+			if !validation && validationCommand(entry.Name()) {
 				continue
 			}
 			names = append(names, entry.Name())
