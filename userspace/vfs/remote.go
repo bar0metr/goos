@@ -314,6 +314,13 @@ func (remote *Remote) Write(id ramfs.NodeID, offset uint64, data []byte) (int, r
 	if !remote.pages.Ready() {
 		return 0, ramfs.StatusIOError
 	}
+	if remote.transport == nil && len(data) != 0 {
+		// An unanswered request may still consume shared cache bytes. The
+		// owner detaches before allowing another mutation; fail before a
+		// scratch/cached slot is overwritten, not only in call below.
+		remote.forgetAll()
+		return 0, ramfs.StatusPeerDied
+	}
 	total := 0
 	for total < len(data) {
 		position := offset + uint64(total)

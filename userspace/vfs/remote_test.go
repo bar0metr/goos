@@ -224,3 +224,26 @@ func TestRenamedOpenFileSurvivesRestart(t *testing.T) {
 		t.Fatalf("read after rename and restart = %d, %q", read.Status, read.Data)
 	}
 }
+
+// Detach is also the owner-side fence for an unanswered transport. The old
+// filesystem may still consume the shared scratch slot: even a write that
+// returns PeerDied must not copy new bytes there before discovering detach.
+func TestDetachedRemoteWriteDoesNotReuseSharedCache(t *testing.T) {
+	service := startedService(t, testFAT32Device())
+	writePersistent(t, service, "/home/detached", "before")
+	opened := service.Dispatch(1, vfs.Request{Operation: vfs.OperationOpen, Path: []byte("/home/detached"), Rights: vfs.Write})
+	if opened.Status != vfs.StatusOK {
+		t.Fatal(opened.Status)
+	}
+	service.DetachFilesystem()
+	before := append([]byte(nil), testCache...)
+	reply := service.Dispatch(1, vfs.Request{Operation: vfs.OperationWrite, Handle: opened.Handle, Data: []byte("changed")})
+	if reply.Status != vfs.StatusPeerDied || reply.Size != 0 {
+		t.Fatalf("detached write = %+v", reply)
+	}
+	for index, value := range before {
+		if testCache[index] != value {
+			t.Fatalf("detached write changed shared-cache byte %d", index)
+		}
+	}
+}

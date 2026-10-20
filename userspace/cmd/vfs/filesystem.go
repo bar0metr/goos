@@ -114,7 +114,7 @@ func applyFilesystemOffline() {
 	}
 	service.DetachFilesystem()
 	if filesystemState.availability.quarantined.Load() {
-		syslog.Warn("filesystem cache quarantined; VFS restart required")
+		syslog.Warn("filesystem cache quarantined; online recovery unavailable")
 	} else {
 		syslog.Warn("filesystem service gone")
 	}
