@@ -111,18 +111,8 @@ func (set *Table) take() {
 
 func (table *Table) beginHeld(task sched.TaskID, entries []Entry, deadline uint64) bool {
 	slot, _, valid := task.Parts()
-	if !valid || len(entries) > MaxObjects || len(entries) == 0 && deadline == 0 {
+	if !valid || !ValidEntries(entries) || len(entries) == 0 && deadline == 0 {
 		return false
-	}
-	for index, entry := range entries {
-		if !validEntry(entry) {
-			return false
-		}
-		for previous := 0; previous < index; previous++ {
-			if entries[previous].Key == entry.Key {
-				return false
-			}
-		}
 	}
 
 	op := &table.operations[slot]
@@ -268,6 +258,26 @@ func (table *Table) atHeld(slot int) (View, bool) {
 func (table *Table) countHeld() int { return table.active }
 
 func (table *Table) registrationCountHeld() int { return table.registered }
+
+// ValidEntries checks the resolved object keys before either polling or
+// registering a wait. Different handles to one object are duplicate keys.
+// Empty entries are valid; the caller separately validates the deadline.
+func ValidEntries(entries []Entry) bool {
+	if len(entries) > MaxObjects {
+		return false
+	}
+	for index, entry := range entries {
+		if !validEntry(entry) {
+			return false
+		}
+		for previous := 0; previous < index; previous++ {
+			if entries[previous].Key == entry.Key {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 func validEntry(entry Entry) bool {
 	return validKey(entry.Key) && entry.Events != 0 && entry.Events&^allEvents == 0 &&

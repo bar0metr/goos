@@ -234,6 +234,9 @@ func waitAny(handler nativeCallHandler, interestsAddress, count, resultAddress, 
 		local.waitAnyEntries[index] = entry
 	}
 	entries := local.waitAnyEntries[:int(count)]
+	if !kernelwait.ValidEntries(entries) {
+		return kcall.StatusResourceExhausted, false
+	}
 	if mask := readyWaitAny(entries); mask != 0 {
 		trace(diag.WaitReady, owner.ID(), uint64(taskID), entries[0].Key.Object, uint64(mask))
 		return writeWaitAnyMask(handler.root, resultAddress, mask), false
