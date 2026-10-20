@@ -52,8 +52,9 @@ Contract, the `contract` column:
   object the variable belongs to.
 - `owned`: one owner at a time, and the API that exposes it says so.
 - `per-thread`: per-M scratch of `userspace/runtime/sys`.
-- `runtime`: allocator and collector state with its own protocol
-  (ADR 0201, 0203).
+- `runtime`: state that combines lifecycle, pinning, locks, atomics and
+  collector rendezvous protocols (ADR 0201, 0203, 0204). This label does not
+  certify arbitrary concurrent calls to the package's exported functions.
 
 API classes, used per package below:
 
@@ -66,6 +67,36 @@ API classes, used per package below:
 - Unusable concurrently (temporary): not safe from two goroutines and not yet
   fixed; listed with the reason.
 
+## Runtime and service ownership boundaries
+
+The G and M tables combine per-owner fields with shared CAS transitions and
+queues. Host queue, state and stack-slot tests exercise those components; they
+do not execute native context switches or prove the full table lifecycle.
+The poll registration lock protects registrations, while the poller CAS gives
+one M ownership of the snapshot until delivery finishes. Collector plans and
+held-thread scratch belong to the active collector under its rendezvous
+protocol. A `goprobe` reference in the table names a native fixture, not a
+claim that all compiler, failure and KVM acceptance checks have passed.
+
+`arena.SetStackRoots` and `thread.SetHooks` are runtime startup operations,
+not concurrent setters. Callers must install them before application workers
+start; the APIs do not enforce that ordering. `tls.Of` exposes mutable M state
+for runtime use, not goroutine-local storage. M-local pointers require a pin
+when migration is possible. The host-only `tls.hostBlock` is a singleton stub;
+host tests do not establish native TLS isolation.
+
+The syscall handler slots use atomic pointer publication. Each published
+function-value holder must stay immutable until no caller can still read it.
+The goroutine runtime's two handler holders satisfy that condition; atomic
+publication does not permit a caller to mutate a holder in place.
+
+The VFS driver owns admission, namespace state, replies and session generations.
+Workers receive read plans and request-owned targets through channels. One
+persistent lane owns the filesystem transport for a whole backend read; serial
+barriers wait for preceding retirement before using that state. Driver helper
+tests cover policy and bookkeeping. Native IPC overlap, failure fences and
+resource cleanup still need integration evidence.
+
 ## Rules for libraries
 
 1. Prefer, in order: buffers on the caller's stack that do not escape;
@@ -76,12 +107,16 @@ API classes, used per package below:
    an object that is itself the serialized resource, and then its
    documentation says so. The service sessions and the standard output
    streams below are such objects.
-3. A hot path does not allocate. TinyGo puts a local larger than 256 bytes
-   on the heap (`tinygo build -print-allocs` lists them), so a per-call
-   buffer of that size becomes a per-object buffer or a locked pool. Buffers
-   passed to `sys` wrappers are copied through `sys`'s own descriptors.
-   The userspace target's default stack is 4 KiB, which rules out large
-   stack buffers too.
+3. Keep hot-path scratch in a request, object or bounded pool when stack
+   storage would escape. TinyGo may heap-allocate locals and composite
+   literals; inspect `tinygo build -print-allocs` and linked frames rather
+   than inferring storage from Go syntax. The main native stack reserves
+   1 MiB; kernel-created threads reserve 512 KiB each. The runtime uses
+   separate 64 KiB scheduler stacks for adopted main/pinned threads and
+   reserves at least 256 KiB for a started G. The compiler target's default
+   64 KiB request is not the native stack reservation. Stacks have fixed
+   virtual bounds and demand-committed pages, without copying or relocation.
+   Syscall descriptors remain per-M and pinned across their use.
 4. Output: one logical record (an output line, a diagnostic, a log event) is
    assembled in one buffer and written whole. Records from different
    goroutines never interleave inside a record; their order is not defined.
@@ -225,9 +260,9 @@ it back. The package has no package-level variables. Tests:
 
 `Info`, `Warn`, `Error`, `Str`, `Bytes` and `Uint` are Concurrent-safe once
 `Init` has run; `Init` is Single-owner and runs before a second thread or
-goroutine starts. An event is encoded in buffers on the caller's stack (181
-and 96 bytes, under TinyGo's 256-byte stack limit) and handed to the kernel
-in one `LogWrite`, so events are whole and may reorder. A failed write
+goroutine starts. Each caller encodes an event in its own 181-byte and
+96-byte buffers and hands it to the kernel in one `LogWrite`, so events
+are whole and may reorder. A failed write
 returns false; nothing is retried.
 
 | ID | Symbol | Owner | Blocks / allocates / calls back | Synchronization and visibility | Why | Cancellation, peer death, partial I/O, timeout, exit | Test |
@@ -269,10 +304,12 @@ runtime and are maintained with ADR 0203 and its successors; their rows are
 listed for inventory coverage, not re-audited by the utility changes.
 
 - `runtime/sys`: `scratch` (CA-0695) is per-M scratch: the descriptors one
-  wrapper call fills and passes to the kernel. A wrapper uses its thread's
-  slot only within one call, with preemption disabled during it, so no other
-  goroutine runs on that thread meanwhile. It is the only per-thread scratch
-  in userspace. Every `sys` wrapper is Concurrent-safe.
+  wrapper call fills and passes to the kernel. A wrapper pins its G while
+  it uses M-local descriptors; kernel task preemption remains possible.
+  Ordinary I/O wrappers require caller-owned buffers and kernel-managed
+  handle lifetimes. Runtime controls such as `ThreadSetBase`, preemption
+  registration and suspend/resume are runtime-owned operations, not a promise
+  that applications may invoke them concurrently with the scheduler or GC.
 - `runtime/arena`: CA-0661 to CA-0694. The heap lock, the collector lock and
   the collector's atomics follow the protocol of ADR 0201 and 0203; the
   remaining rows are collector bookkeeping written under those locks or with
@@ -281,7 +318,10 @@ listed for inventory coverage, not re-audited by the utility changes.
 - `runtime/thread`: `starting` (CA-0696) is a spin lock over `starts`
   (CA-0697), the table of threads being started. `Start`, `Join`, `Self`,
   `Slot` and `Yield` are Concurrent-safe.
-- `runtime/tls` has no package-level variables.
+- `runtime/tls`: `blocks` (CA-0756) is the native per-M TCB table;
+  `hostBlock` (CA-0757) is a host-only singleton stub. `TestBlockLayout`
+  checks the wire layout, not native thread isolation. The runtime ownership
+  boundaries above apply to mutable TCB access.
 
 ## Other libraries
 

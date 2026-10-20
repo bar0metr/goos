@@ -30,16 +30,23 @@ continuation PC. A goroutine must keep its own Task across migration so
 recover finds that goroutine's defer chain.
 
 `tools/goroutineroot` checks source SHA-256 pins and constructs a separate
-TinyGo root. It replaces the scheduling and task transport files, retains
-TinyGo's channel/select and sync implementations, and patches the timer,
-GOMAXPROCS, and task-count adapters. It does not write the installed toolchain.
+TinyGo root. It replaces the scheduling and task transport files and the
+sync mutex implementation, patches channel panic cleanup, and connects timers,
+GOMAXPROCS, and task counts to GoOS. It does not write the installed toolchain.
 The output metadata lists input and output hashes. The goroutine target uses
 `goos_goroutines`; existing native programs retain their old target.
 
 A compiler probe exposed a recovery bug in the pinned channel implementation:
 `trySend` panics on a closed channel while holding its lock. The overlay adds
-an unlocked panic path for a direct send. Recovery from a closed send inside
-select still needs a separate implementation and test before acceptance.
+unlocked panic paths for direct sends and immediate select sends. A select
+whose send wakes after close panics after removing its other queued operations
+and releasing the locks. The native fixture tests recovery followed by another
+select, including a sender observed parked before close.
+
+The pinned RWMutex also counted queued readers as active readers. A writer
+could wait forever after the last active reader left. The replacement tracks
+active and queued readers separately and wakes a waiting writer only when the
+active count reaches zero.
 
 ## Thread identity and stacks
 
@@ -60,10 +67,10 @@ Each G has a fixed 256 KiB stack and a 64 KiB guard below it. Scheduler stacks
 reserve 64 KiB. The allocator charges physical pages on demand, as for other
 anonymous mappings. The first implementation allocated two VM regions per G;
 100 sleeping Gs exhausted the process's 128-entry region table. Stack batches
-will instead use one anonymous region with a fixed guard/stack stride. Native
-VM mapping validates that format; demand faults reject guard offsets before
-allocating a page. Partial unmaps and protection changes must not split a
-batch or remove its guards. The runtime discards a finished stack's physical
+use one anonymous region with a fixed guard/stack stride. Native VM mapping
+validates that format; demand faults reject guard offsets before allocating a
+page. The kernel rejects partial unmaps and protection changes that could split
+a batch or remove its guards. The runtime discards a finished stack's physical
 pages and reuses its slot. Batch reservations count in runtime diagnostics.
 
 `goos_g_swap` preserves the six System V callee-saved integer registers and
@@ -93,9 +100,15 @@ fairness guarantee. TCG smoke overlap alone does not prove that guarantee.
 
 ## Waiting and timers
 
-Channel and sync waits park Gs through the task adapter. The GoOS timer heap
-holds sleep and native wait deadlines. TinyGo retains its time.Timer list,
-which the scheduler services on scheduler stacks.
+Channel and sync waits park Gs through the task adapter. A running or runnable
+G can hold one pending wake credit. Preemption and dispatch preserve it; the
+next park consumes it. Without that credit, preemption between waiter
+publication and Pause could lose a wake. Host tests cover wake before
+preemption, while runnable, after dispatch, and after park, plus concurrent
+CAS transitions and a second park that must block.
+
+The GoOS timer heap holds sleep and native wait deadlines. TinyGo retains its
+time.Timer list, which the scheduler services on scheduler stacks.
 
 Native channel creation requires PID 1, so scheduler workers cannot allocate
 IPC channels to wake themselves. `ThreadWake` sets a generation-safe flag for
@@ -105,9 +118,17 @@ operations confer no handle or capability authority.
 
 An idle worker may become the event poller and wait for registered handles,
 its wake flag, and the next deadline. One-task processes must use that same
-worker rather than reserve a helper task. Legacy native calls remain
-M-blocking unless a scheduler-aware adapter intercepts them. Wiring these
-adapters into the service libraries remains unfinished.
+worker rather than reserve a helper task. The syscall layer exposes runtime
+hooks before acquiring M-local scratch. Ordinary WaitAny and IPCWaitReceive
+can park the calling G through these hooks; IPC receive retries share one
+absolute deadline. Zero-time probes and scheduler-stack waits use the kernel.
+Regions, 64-interest waits, and WaitAnyThread retain native M-blocking behavior.
+The G poller bounds registered interests to 63, reserving the remaining kernel
+interest for its own thread wake. A G with an additional runtime pin cannot
+park through these adapters.
+
+ProcessWait, ThreadJoin, cursor-log waits, and IRQWait still use their native
+blocking paths. The complete service-library wait audit remains unfinished.
 
 ## Collector integration
 
@@ -117,6 +138,13 @@ RSP to a registered M or G stack, adds saved parked G stacks and dormant M
 stacks, and refuses an incomplete plan before marking or sweeping. The plan
 must not acquire locks a suspended thread could own or allocate from the heap.
 Thread-owned slabs remain M-owned; migration changes which cache a G uses.
+Region Enter and Leave hold both a migration pin and a separate collector
+window until cursor, innermost identity and ownership agree. A pin alone did
+not protect against a kernel hold between those stores. The collector resumes
+threads caught in either an allocator or a region-transition window and
+retries within its rendezvous bound. Kernel snapshots include XMM words;
+conservative scanning must retain that coverage because LLVM can keep pointer
+aggregates only in vector registers during a copy.
 
 The current hooks are experimental. Tests must still cover transitions during
 creation and completion, pending channel values, saved register roots, timer
@@ -125,13 +153,29 @@ mutex test does not establish collector correctness.
 
 ## Service integration and acceptance
 
-The current VFS ingress loop owns namespace mutations, open-file cursors,
-filesystem transport scratch, and reply correlation. Its Dispatch method uses
-shared read scratch; persistent reads share one backend exchange and cache.
-Workers cannot call that method concurrently without separating those owners.
-The read-side pool therefore remains disabled. Its design must isolate useful
-read-only work, retain an ordering barrier for mutations and control requests,
-and preserve per-request authority and reply identity.
+The VFS build now selects the goroutine target. Its ingress owner admits at
+most eight requests to two read workers. It plans canonical reads on the owner,
+executes RAMFS/image backend work without a process-wide lock, commits cursors
+on completion, and retires each request after reply and mapping cleanup.
+Mutations, session close, namespace operations and control requests pass through
+ordered barriers. Each session has at most one admitted request; generations
+prevent delivery to a reused owner slot. A stream bridges Go-channel completion
+hints into the owner's native readiness wait. The goroutine driver caps sessions
+at 60 to leave room for control, completion, the persistent lane and the runtime
+poller's own wake interest.
+
+Persistent reads serialize the whole Remote operation, including cache use.
+Workers publish transport failure; the owner detaches at a drained boundary.
+An unanswered accepted exchange quarantines the shared cache. The VFS refuses
+reattach and executable-slot writes against that cache; local reads continue.
+Automatic recovery needs a supervisor fence proving the old writer has exited
+or a coordinated fresh cache generation. Closing an endpoint alone is not that
+fence. This recovery protocol and native service acceptance remain unfinished.
+
+Host tests demonstrate actual RAMFS read overlap and check ordering, retirement
+and the serial batch's quarantine fence. The service compiles with the native
+goroutine target and passes frame checks. Joint VM and KVM validation must
+still exercise the driver, runtime and hardened clients together.
 
 The final branch must include the userspace API audit, compiler evidence,
 complete runtime and collector tests, scheduler-aware I/O, the real service

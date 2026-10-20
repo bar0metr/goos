@@ -532,14 +532,9 @@ CA-0526	goos/userspace/cmd/tty	sessionHandle	process	owned	none
 CA-0527	goos/userspace/cmd/tty	wire	process	owned	none
 CA-0528	goos/userspace/cmd/vfs	consoleHandle	process	owned	none
 CA-0529	goos/userspace/cmd/vfs	controlHandle	process	owned	none
-CA-0530	goos/userspace/cmd/vfs	correlation	process	owned	none
 CA-0531	goos/userspace/cmd/vfs	execCrashHandles	process	owned	none
 CA-0532	goos/userspace/cmd/vfs	fileCache	process	owned	none
 CA-0533	goos/userspace/cmd/vfs	filesystem	process	owned	none
-CA-0534	goos/userspace/cmd/vfs	filesystemName	process	owned	none
-CA-0535	goos/userspace/cmd/vfs	filesystemReply	process	owned	none
-CA-0536	goos/userspace/cmd/vfs	filesystemRequest	process	owned	none
-CA-0537	goos/userspace/cmd/vfs	filesystemWire	process	owned	none
 CA-0538	goos/userspace/cmd/vfs	fillBuffer	process	owned	none
 CA-0539	goos/userspace/cmd/vfs	initialSessionHandle	process	owned	none
 CA-0540	goos/userspace/cmd/vfs	liveSessions	process	owned	none
@@ -732,3 +727,29 @@ CA-0728	goos/userspace/utility	udpRX	session	immutable	none
 CA-0729	goos/userspace/utility	udpSession	session	lock	TestSessionExchangesDoNotCross
 CA-0730	goos/userspace/utility	udpTX	session	immutable	none
 CA-0731	goos/userspace/vfs	persistentMounts	process	immutable	none
+CA-0732	goos/userspace/bin/goprobe	manifest	process	immutable	none
+CA-0733	goos/userspace/bin/goprobe	nativeWake	process	atomic	goprobe threads
+CA-0734	goos/userspace/bin/goprobe	threadInputs	process	immutable	goprobe threads
+CA-0735	goos/userspace/bin/goprobe	threadResults	process	immutable	goprobe threads
+CA-0736	goos/userspace/bin/goprobe	wakeMessage	process	immutable	goprobe io
+CA-0737	goos/userspace/cmd/vfs	filesystemState	session	runtime	TestFilesystemFailureQuarantinesUnansweredSharedMemory
+CA-0738	goos/userspace/cmd/vfs	readDriver	process	owned	TestDriverRequestsKeepAttachmentsAndMappingsUntilRelease
+CA-0739	goos/userspace/cmd/vfs	sessionGenerations	process	owned	TestSessionGenerationAndWaitBudget
+CA-0740	goos/userspace/runtime/arena	held	process	runtime	goprobe gc
+CA-0741	goos/userspace/runtime/arena	heldCount	process	runtime	goprobe gc
+CA-0742	goos/userspace/runtime/arena	planFailures	process	runtime	none
+CA-0743	goos/userspace/runtime/arena	stackRoots	process	runtime	goprobe gc
+CA-0744	goos/userspace/runtime/goroutine	gs	process	runtime	TestReadyRacesParkWithExactlyOneEnqueue
+CA-0745	goos/userspace/runtime/goroutine	ms	process	runtime	TestRunQueueConcurrentStealers
+CA-0746	goos/userspace/runtime/goroutine	nativeReceiveHandler	process	immutable	goprobe io
+CA-0747	goos/userspace/runtime/goroutine	nativeWaitHandler	process	immutable	goprobe io
+CA-0748	goos/userspace/runtime/goroutine	plan	process	runtime	goprobe gc
+CA-0749	goos/userspace/runtime/goroutine	poll	process	runtime	TestWaitIdentityRejectsDelayedCompletion
+CA-0750	goos/userspace/runtime/goroutine	sched	process	runtime	TestReadyRacesRescheduleAndDispatch
+CA-0751	goos/userspace/runtime/goroutine	stacks	process	runtime	TestStackBatchExhaustionAndReuse
+CA-0752	goos/userspace/runtime/goroutine	wakeInterest	process	immutable	none
+CA-0753	goos/userspace/runtime/sys	receiveHandler	process	atomic	TestReceiveHandlerDispatchAndPolling
+CA-0754	goos/userspace/runtime/sys	waitHandler	process	atomic	TestWaitHandlerDispatch
+CA-0755	goos/userspace/runtime/thread	hooks	process	runtime	none
+CA-0756	goos/userspace/runtime/tls	blocks	thread	runtime	TestBlockLayout
+CA-0757	goos/userspace/runtime/tls	hostBlock	process	runtime	none

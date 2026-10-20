@@ -58,6 +58,6 @@ func run(root, auditPath string, list bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "concurrencyaudit: %d problem(s); see docs/development/native-concurrency-audit.md\n", len(problems))
 		return 1
 	}
-	fmt.Fprintf(stdout, "concurrencyaudit: %d package-level variables, all audited\n", len(vars))
+	fmt.Fprintf(stdout, "concurrencyaudit: %d package-level variables, all have inventory rows\n", len(vars))
 	return 0
 }
