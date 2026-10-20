@@ -22,10 +22,6 @@ import (
 	userwait "goos/userspace/wait"
 )
 
-// maxSessions bounds the clients served at once: one WaitAny names the
-// control channel and every session (ADR 0111).
-const maxSessions = userwait.MaxObjects - 1
-
 var (
 	service              vfsservice.Service
 	consoleHandle        handle.ID
@@ -193,7 +189,7 @@ func (ramfsStore) Chunk() *ramfs.NodeChunk                      { return pages.P
 
 //export userspaceMain
 func userspaceMain() {
-	arena.InitService()
+	initRuntime()
 	arena.OnExhausted(func() { fatal("VFS_OUT_OF_MEMORY\n") })
 	startupData, validStartup := startup.Read()
 	var found bool
@@ -250,69 +246,7 @@ func userspaceMain() {
 	mark("VFS_SERVICE_OK\n")
 	mark("SYSTEM_IMAGE_MOUNT_OK\n")
 	syslog.Info("mounted", syslog.Str("fs", "image"), syslog.Str("path", vfsservice.BootstrapPath))
-	for {
-		var interests [userwait.MaxObjects]userwait.Interest
-		var sessionIndexes [maxSessions]int
-		interests[0] = userwait.Interest{Handle: controlHandle, Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-		count := 1
-		for index, session := range sessions {
-			if session != 0 {
-				interests[count] = userwait.Interest{Handle: handle.ID(session), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
-				sessionIndexes[count-1] = index
-				count++
-			}
-		}
-		waitInterests, waitCount = &interests, count
-		if count-1 != liveSessions {
-			write("VFS_SESSIONS_CORRUPT\n")
-			if sys.DiagnosticsTrace(consoleHandle, sessions[:]) == kcall.StatusOK {
-				writeSessions()
-			}
-			sys.Exit(exitFailed)
-		}
-		result, status := userwait.Any(&interests, count, kcall.WaitAnyInfiniteTimeout)
-		if status != kcall.StatusOK {
-			switch status {
-			case kcall.StatusPermissionDenied:
-				fatal("VFS_WAIT_PERMISSION_DENIED\n")
-			case kcall.StatusNotFound:
-				fatal("VFS_WAIT_NOT_FOUND\n")
-			case kcall.StatusResourceExhausted:
-				fatal("VFS_WAIT_RESOURCE_EXHAUSTED\n")
-			case kcall.StatusPeerDied:
-				fatal("VFS_WAIT_PEER_DIED\n")
-			default:
-				fatal("VFS_WAIT_FAILED\n")
-			}
-		}
-		if result.ReadyMask&1 != 0 {
-			pollControl()
-		}
-		for interest := 1; interest < count; interest++ {
-			if result.ReadyMask&(1<<interest) == 0 {
-				continue
-			}
-			index := sessionIndexes[interest-1]
-			session := sessions[index]
-			message, receiveStatus := receiveNow(session)
-			if receiveStatus == ipc.StatusPeerDied {
-				// The files the session left open close with it, before its
-				// slot, and with it its owner number, can be reused.
-				service.CloseSession(sessionOwner(index))
-				if validation.Enabled {
-					releaseWithheld(sessionOwner(index), session, false)
-				}
-				sys.HandleClose(handle.ID(session))
-				sessions[index] = 0
-				liveSessions--
-				continue
-			}
-			if receiveStatus != ipc.StatusOK {
-				fatal("VFS_RECEIVE_FAILED\n")
-			}
-			serve(sessionOwner(index), session, message)
-		}
-	}
+	runService()
 }
 
 func pollControl() bool {
@@ -323,6 +257,11 @@ func pollControl() bool {
 	if status != ipc.StatusOK {
 		fatal("VFS_CONTROL_FAILED\n")
 	}
+	return processControl(message)
+}
+
+// processControl runs only on the namespace owner after earlier work drains.
+func processControl(message ipc.Message) bool {
 	if client, ok := vfs.DecodeSetFilesystem(message); ok {
 		reply, encoded := vfs.AddSessionReply(attachFilesystem(client), message.Correlation)
 		if !encoded {
@@ -426,11 +365,15 @@ func pollControl() bool {
 // opens.
 func sessionOwner(index int) vfs.Owner { return vfs.Owner(index + 1) }
 
-func serve(owner vfs.Owner, session uint64, message ipc.Message) {
+func beginServing(owner vfs.Owner, session uint64) {
 	if validation.Enabled {
 		releaseWithheld(owner, session, true)
 		reportMemory()
 	}
+}
+
+func serve(owner vfs.Owner, session uint64, message ipc.Message) {
+	beginServing(owner, session)
 	request, ok := vfs.DecodeRequest(message)
 	// A bulk operation, and a request whose paths or listed name travel in
 	// memory, carry exactly one handle, and nothing else carries any.
