@@ -104,7 +104,7 @@ func nativeRecoveryCheck(ctx context.Context, g *Guest) error {
 }
 
 func nativeRecoveryMarkers(before, after string) error {
-	for _, marker := range []string{"FAT32_STALLED", "FAT32_STALL_REPLACING", "FILE_CACHE_RECOVERED_OK", "FAT32_RESTARTED_OK"} {
+	for _, marker := range []string{"FAT32_STALLED", "VFS_CONTROL_REPLACED_OK", "FAT32_STALL_REPLACING", "FILE_CACHE_RECOVERED_OK", "FAT32_RESTARTED_OK"} {
 		if strings.Count(after, marker) != strings.Count(before, marker)+1 {
 			return fmt.Errorf("expected one new %s marker", marker)
 		}
