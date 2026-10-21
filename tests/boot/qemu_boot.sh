@@ -666,6 +666,14 @@ long_directory=$(awk 'BEGIN { for (i = 0; i < 200; i++) printf "d" }')
 	sleep 1
 	printf 'cat /home/demo/message.txt; echo after-fat32-restart\n'
 	sleep 2
+	# A FAT32 service that stalls keeps the file cache mapped. The VFS waits
+	# out its six-second deadline, quarantines the cache and asks PID 1 for a
+	# replacement; PID 1 ends the service, and only its reported exit lets the
+	# replacement share the cache.
+	printf 'cd /persist/.validation-fat32-stall\n'
+	sleep 10
+	printf 'cat /home/demo/message.txt; echo after-fat32-stall\n'
+	sleep 2
 	# The default CPU has no RDRAND. getrandom and AT_RANDOM still work, from
 	# the kernel's jitter-seeded generator: static glibc reads AT_RANDOM
 	# before main and faults without it (ADR 0185).
@@ -901,6 +909,11 @@ forbid_regex storage.fsck-not-run '^FSCK_FAT_CHECK_OK$' 'no check against the li
 require_window storage.fsck-busy-mounted '^persistent$' 'the volume still mounted after the refusal' "$log" 'goos> cat /home/demo/message.txt; echo after-fsck-busy' 'after-fsck-busy'
 require_regex storage.fat32-rest-of-namespace '^after-fat32-fault$' 'the shell and /tmp working after the fault' "$log" 'fault fat32'
 require_window storage.fat32-volume-served-again '^persistent$' 'the volume read through the restarted service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-restart' 'after-fat32-restart'
+require_marker storage.fat32-stalled FAT32_STALLED "$log" 'validation-fat32-stall'
+require_marker storage.fat32-stall-replacing FAT32_STALL_REPLACING "$log" 'validation-fat32-stall'
+require_marker storage.fat32-cache-recovered FILE_CACHE_RECOVERED_OK "$log" 'validation-fat32-stall'
+forbid_regex storage.fat32-recovery-bounded 'FILE_CACHE_RECOVERY_LIMIT' 'one stall within the recovery bound' "$log" 'validation-fat32-stall'
+require_window storage.fat32-volume-after-stall '^persistent$' 'the volume read through the replacement of a stalled service' "$log" 'goos> cat /home/demo/message.txt; echo after-fat32-stall' 'after-fat32-stall'
 # File data moves between the VFS and the FAT32 service through the file cache
 # they share, not through messages (ADR 0098).
 require_marker storage.file-cache FILE_CACHE_OK "$log"

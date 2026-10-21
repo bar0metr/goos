@@ -277,6 +277,9 @@ func serve() {
 		}
 		reply = fsproto.Reply{Operation: operation, Status: ramfs.StatusInvalidArgument}
 	} else {
+		if validation.Enabled && string(request.Name) == stallName {
+			stall()
+		}
 		reply = fsproto.Serve(&volume, request, cache, &listedName)
 	}
 	if !fsproto.EncodeReply(reply, requestMessage.Correlation, &replyMessage, cache) {
@@ -288,6 +291,28 @@ func serve() {
 	}
 	if sys.IPCSend(vfsHandle, wire[:size]) != kcall.StatusOK {
 		syslog.Warn("reply undeliverable")
+	}
+}
+
+// stallName is a name the validation build never answers a request for. The
+// service stops as a stalled one would: alive, with the file cache mapped, and
+// deaf to its endpoints, so only PID 1 ending it lets the VFS use the cache
+// again. A test uses it to watch that replacement. The normal build has no
+// such name.
+const stallName = ".validation-fat32-stall"
+
+// stall waits for a message on a channel whose other end this process keeps
+// and never writes.
+func stall() {
+	mark("FAT32_STALLED\n")
+	reader, _, status := sys.ChannelCreate()
+	if status != kcall.StatusOK {
+		fatal("FAT32_STALL_FAILED\n")
+	}
+	var interests [userwait.MaxObjects]userwait.Interest
+	interests[0] = userwait.Interest{Handle: reader, Events: kcall.WaitReadable}
+	for {
+		userwait.Any(&interests, 1, kcall.WaitAnyInfiniteTimeout)
 	}
 }
 
