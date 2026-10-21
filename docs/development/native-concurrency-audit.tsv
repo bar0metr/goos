@@ -530,7 +530,7 @@ CA-0524	goos/userspace/cmd/tty	rawReported	process	owned	none
 CA-0525	goos/userspace/cmd/tty	sessionClosed	process	owned	none
 CA-0526	goos/userspace/cmd/tty	sessionHandle	process	owned	none
 CA-0527	goos/userspace/cmd/tty	wire	process	owned	none
-CA-0528	goos/userspace/cmd/vfs	consoleHandle	process	owned	none
+CA-0528	goos/userspace/cmd/vfs	consoleHandle	process	immutable	none
 CA-0529	goos/userspace/cmd/vfs	controlHandle	process	owned	none
 CA-0531	goos/userspace/cmd/vfs	execCrashHandles	process	owned	none
 CA-0532	goos/userspace/cmd/vfs	fileCache	process	owned	none
@@ -543,7 +543,7 @@ CA-0542	goos/userspace/cmd/vfs	profile	process	owned	none
 CA-0543	goos/userspace/cmd/vfs	profileLine	process	owned	none
 CA-0544	goos/userspace/cmd/vfs	ramfsPages	process	owned	none
 CA-0545	goos/userspace/cmd/vfs	requestsServed	process	owned	none
-CA-0546	goos/userspace/cmd/vfs	service	process	owned	none
+CA-0546	goos/userspace/cmd/vfs	service	process	runtime	test-vfs-goroutine-acceptance
 CA-0547	goos/userspace/cmd/vfs	sessions	process	owned	none
 CA-0548	goos/userspace/cmd/vfs	targetCopy	process	owned	none
 CA-0549	goos/userspace/cmd/vfs	waitCount	process	owned	none

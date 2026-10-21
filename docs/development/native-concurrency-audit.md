@@ -156,7 +156,9 @@ helpers `AppendUint`, `BenchCount`, `BenchChunk`, `AppendBenchResult`,
 
 Independent instances safe: `Line` (`NewLine`), `Bulk` (`NewBulk`,
 `ReadFile`, `WriteFile`), `CopyFile` and `SaveFile` with different Bulks,
-`Stream`. `VFSRequests` serves one owner's endpoint set; owners sequence
+`Stream`. Saves to one target also share its temporary pathname: only the
+save that creates that path owns it. An existing temporary file must not be
+deleted by a competing save. `VFSRequests` serves one owner's endpoint set; owners sequence
 asynchronous sends and handoffs themselves. A used Bulk must not be copied.
 Its Memory and any aliases remain caller-owned; do not replace or resize the
 Memory slice.
@@ -360,10 +362,15 @@ listed for inventory coverage, not re-audited by the utility changes.
 
 ## Other libraries
 
-The classifications below are the original inventory's intended contracts,
-not verified conclusions of this hardening. No mutable package-level state
-is insufficient evidence: per-object aliases, callbacks and teardown still
-need review. No full audit of these packages has been completed here.
+The caller audit covers the 63 library packages listed below, including
+transitive dependencies, borrowed buffers, callbacks and teardown. Its
+baseline is `97c0d25`; subsequent fixes remove shared exec scratch, tighten
+the read-pool probe and preserve temporary-file ownership. Package-local
+state alone does not establish safety. Independent objects must also own
+their writable buffers, transports, backing stores and sinks independently.
+Runtime classifications describe a protocol, not permission to call every
+runtime export from arbitrary goroutines. This audit does not replace the
+native collector and scheduler tests.
 
 | Package | Class of the exported API | Notes |
 |---|---|---|
@@ -372,24 +379,37 @@ need review. No full audit of these packages has been completed here.
 | `terminal` | Independent instances safe | `Output` batches into caller storage and hands a whole batch to its sink; `Parser` keeps per-instance state. Test: `TestIndependentOutputsAndParsers`. |
 | `nativefiles` | Independent instances safe | A `Files` owns its `Bulk`; requests go through `utility`. |
 | `tlsclient` | Independent instances safe | A client per connection; `Roots` is immutable once loaded. `LoadSystemRoots` uses the caller's Bulk. |
-| `remoteapi` | Concurrent-safe | `Receive`, `Send`, `SendWithin` and `CloseHandles` use a wire buffer per call. |
+| `remoteapi` | Concurrent-safe codecs; Independent instances safe buffers | `Receive`, `Send`, `SendWithin` and `CloseHandles` use a wire buffer per call. `KeyRequestBuffer` belongs to one owner; consume its borrowed result before the next `Accept` or `Reset`. The endpoint owner dispatches correlations. |
 | `remoteservice` | Independent instances safe | `Receive`, `Send` and `CloseHandles` (CA-0657 to CA-0659) are function values tests replace before anything runs; a `RelayConn` belongs to one worker. |
-| `cryptosys`, `cryptoprobe` | Concurrent-safe | Random and clock reads are single native calls. |
+| `cryptosys`, `cryptoprobe` | Concurrent-safe with separate output buffers | Random and clock reads use the native syscall layer. Rand and TLS probes keep a reader per invocation and do not replace `crypto/rand.Reader`; TLS passes that reader in `tls.Config.Rand`. |
 | `admincmd` | Single-owner | Command bodies built on `utility`'s current line and `Path`. |
-| `shell` | Concurrent-safe | Parsing and formatting over caller buffers; `Commands` (CA-0698) is an immutable table. |
+| `shell` | Concurrent-safe codecs; Independent instances safe state | Parsing and formatting use caller buffers; `Commands` (CA-0698) is an immutable table. `TerminalEnvironment` has one owner; `Entries` aliases its storage until `Store` or `Reset`. `RunLog` requires exclusive hooks and scratch. |
 | `editor`, `filemanager`, `viewer`, `tui`, `fsdisplay` | Independent instances safe | Screen state per instance; output through a `terminal.Output`. `tui.DefaultTheme` (CA-0707) is immutable by convention. |
 | `network`, `netdev`, `netapi`, `tcpapi`, `udpapi`, `tcpdispatch`, `tcpserve`, `udpserve`, `tcpupstream`, `upstream` | Independent instances safe | Codecs are Concurrent-safe; stacks, pools and dispatch tables are objects run by one service loop. |
 | `dns`, `dnswire`, `dnsq`, `dnstcp`, `resolvapi`, `hostname` | Independent instances safe | The resolver cache is a `dns` object owned by the resolver service's loop; codecs are Concurrent-safe. |
-| `vfs`, `block`, `fat32`, `partition`, `safesave` | Independent instances safe | Volume, mount and save state per object, run by one service loop or one save. In `vfs`, the acceptance fixture's `validationReads` (CA-0760) keeps its arms for the owner only; the worker gate uses atomics and channels that `initOnce` publishes before the first plan reaches a worker. |
+| `vfs`, `block`, `fat32`, `partition` | Independent instances safe with separate backends | Volume and mount state belong to an owner; VFS workers use captured read plans and obey the persistent lane and barriers. The fixture's `validationReads` (CA-0760) has owner-only arms; worker gates use published atomics and channels. |
+| `safesave` | One owner per temporary pathname | Separate workspaces do not isolate saves to the same target. A competing save refuses an existing temporary file; it must not delete or publish another save's data. |
 | `config`, `release`, `commands`, `truststate`, `truststore`, `trustupdate`, `remotepolicy`, `httpwire`, `fetch`, `sshserver`, `tty`, `init`, `linux` | Concurrent-safe codecs and policy, or Independent instances safe objects | Package-level variables are immutable tables and error values. |
 
 ## Programs
 
-The rows for `userspace/cmd/*` and `userspace/bin/*` (CA-0001 to CA-0599)
-are state of one program. Every program except `threadprobe` runs one thread
-and one loop; its variables are `owned` by that loop or `immutable`, and no
-library reaches them. A program that starts threads or goroutines must turn
-its rows into one of the other contracts first, as `threadprobe` does:
+The program rows describe their callers' ownership. VFS and goprobe select
+the goroutine target; threadprobe starts native threads. The other shipped
+programs use one service loop and do not start workers through `go` or
+`thread.Start`. The SSH backend uses a synchronous pump; its region scopes
+must not park or migrate. Linking a library into goprobe does not mean its
+stateful APIs run on workers.
+
+VFS separates namespace/admission/commit ownership from worker access to
+published read plans. The persistent lane owns a whole Remote operation;
+mutations and lifecycle changes drain it. The completion bridge reads the
+console handle set at startup, so that handle is immutable rather than
+owner-only. Fixture state is process-wide, not independent per Service.
+Goprobe workers use request-local records through `utility.Write`, not the
+main goroutine's `Print` or `Path` scratch.
+
+A program that adds workers must review both its globals and the objects its
+workers borrow, as threadprobe does:
 
 - `threadprobe` (CA-0120 to CA-0145): the counters, flags and handed-over
   pointers its worker threads share are `sync/atomic` values; `cpuWires`
