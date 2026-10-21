@@ -204,12 +204,25 @@ An unanswered accepted exchange quarantines the shared cache. The VFS refuses
 reattach and executable-slot writes against that cache; local reads continue.
 Automatic recovery needs a supervisor fence proving the old writer has exited
 or a coordinated fresh cache generation. Closing an endpoint alone is not that
-fence. This recovery protocol and native service acceptance remain unfinished.
+fence. This recovery protocol remains unfinished.
 
 Host tests demonstrate actual RAMFS read overlap and check ordering, retirement
-and the serial batch's quarantine fence. The service compiles with the native
-goroutine target and passes frame checks. Joint VM and KVM validation must
-still exercise the driver, runtime and hardened clients together.
+and the serial batch's quarantine fence. `make test-vfs-goroutine-acceptance`
+builds a separate validation image whose PID 1 drives the real VFS through six
+sessions before the first prompt. It checks that a RAMFS and an image read
+occupy both workers at once, that local reads complete while a held persistent
+read runs, that a write and a sync wait behind that read, that a client which
+dies with a ReadInto pending leaves no mapping, and that 4,096 further reads
+leave the VFS heap on a plateau. The VFS reports its events to PID 1 as
+control notifications, since the kernel accepts a reply only for a pending
+request. Ordinary validation images leave the fixture out.
+
+Building the fixture found a separate gap. The standard native target keeps
+TinyGo's UEFI `putchar`, which dereferences the absent firmware table, so a
+runtime panic in such a program recurses through its own panic report until
+the stack guard stops the process. The process still dies, but without the
+panic text. Validation kernels now log the code addresses found just above a
+stack guard fault, which names a recursion's functions.
 
 The final branch must include the userspace API audit, compiler evidence,
 complete runtime and collector tests, scheduler-aware I/O, the real service
