@@ -5,6 +5,7 @@ package arena
 import (
 	"sync/atomic"
 
+	"goos/internal/validation"
 	"goos/kernel/kcall"
 	"goos/userspace/runtime/sys"
 	"goos/userspace/runtime/tls"
@@ -99,6 +100,9 @@ func (r *Region) Enter() Scope {
 	}
 	current, scope := enterRegion(t.cursor, &r.state, &t.regions)
 	t.cursor = current
+	if validation.Enabled {
+		holdTransition(t)
+	}
 	outer := t.innermost
 	t.innermost = r
 	return Scope{state: scope, outer: outer}
@@ -113,6 +117,9 @@ func (s Scope) Leave() {
 	defer t.endRegionChange()
 	region := t.innermost
 	t.cursor = leaveRegion(t.cursor, s.state, &t.regions)
+	if validation.Enabled {
+		holdTransition(t)
+	}
 	t.innermost = s.outer
 	if region != nil {
 		region.enteredBy.Store(0)

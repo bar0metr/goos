@@ -46,11 +46,29 @@ func (a *threadAlloc) pause() {
 func (a *threadAlloc) beginRegionChange() { a.regionChanging.Store(1) }
 func (a *threadAlloc) endRegionChange()   { a.regionChanging.Store(0) }
 
-// inWindow is read only after the collector has held the owning thread.
-// Neither its allocator nor its region cursor may be partially published.
-func (a *threadAlloc) inWindow() bool {
-	return a.fast.Load() != 0 || a.regionChanging.Load() != 0
+// The windows a held thread can be inside, as window reports them.
+const (
+	windowNone = iota
+	windowAlloc
+	windowRegion
+)
+
+// window is read only after the collector has held the owning thread. It
+// names the window the thread is inside: a region transition, which can
+// enclose an allocator window, before the allocator's own.
+func (a *threadAlloc) window() int {
+	if a.regionChanging.Load() != 0 {
+		return windowRegion
+	}
+	if a.fast.Load() != 0 {
+		return windowAlloc
+	}
+	return windowNone
 }
+
+// inWindow reports whether the thread's allocator state or region cursor
+// may be partially published.
+func (a *threadAlloc) inWindow() bool { return a.window() != windowNone }
 
 // noteUnfolded marks that a's counts hold something to fold. The store
 // happens once per fold.

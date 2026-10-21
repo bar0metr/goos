@@ -77,3 +77,26 @@ func TestRegionChangeWindowSurvivesAllocatorAndUnwinds(t *testing.T) {
 		t.Fatal("unwinding left the region transition active")
 	}
 }
+
+func TestWindowNamesRegionTransitionsBeforeAllocatorWindows(t *testing.T) {
+	var owner threadAlloc
+	if got := owner.window(); got != windowNone {
+		t.Fatalf("idle thread reported window %d", got)
+	}
+	owner.fast.Store(1)
+	if got := owner.window(); got != windowAlloc {
+		t.Fatalf("allocator window reported as %d", got)
+	}
+	owner.beginRegionChange()
+	if got := owner.window(); got != windowRegion {
+		t.Fatalf("allocator window inside a region transition reported as %d", got)
+	}
+	owner.fast.Store(0)
+	if got := owner.window(); got != windowRegion {
+		t.Fatalf("region transition reported as %d", got)
+	}
+	owner.endRegionChange()
+	if got := owner.window(); got != windowNone || owner.inWindow() {
+		t.Fatalf("closed windows reported as %d", got)
+	}
+}

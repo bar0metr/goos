@@ -50,6 +50,11 @@ var (
 	// threads could not all be held.
 	suspendFailures atomic.Uint64
 	suspensions     atomic.Uint64
+	// allocWindowRetries and regionWindowRetries count holds let go
+	// because a held thread was inside an allocator window or a region
+	// transition.
+	allocWindowRetries  atomic.Uint64
+	regionWindowRetries atomic.Uint64
 	// lastRendezvous and maxRendezvous are how long holding the other
 	// threads took, in nanoseconds.
 	lastRendezvous, maxRendezvous, totalRendezvous uint64
@@ -256,11 +261,16 @@ func suspendOthers() bool {
 	for attempt := 0; attempt < suspendAttempts; attempt++ {
 		count, status := sys.ThreadSuspend(snapshots[:])
 		if status == kcall.StatusOK {
-			if !anyInFastPath(count) {
+			switch heldWindow(count) {
+			case windowNone:
 				snapshotCount = count
 				suspensions.Add(1)
 				noteRendezvous(uint64(nativeTicks() - started))
 				return true
+			case windowRegion:
+				regionWindowRetries.Add(1)
+			default:
+				allocWindowRetries.Add(1)
 			}
 			clear(snapshots[:count*int(kcall.ThreadSnapshotSize)])
 			if sys.ThreadResume() != kcall.StatusOK {
@@ -282,16 +292,18 @@ func noteRendezvous(elapsed uint64) {
 	}
 }
 
-// anyInFastPath reports whether a held thread has unpublished allocator
-// or region state.
-func anyInFastPath(count int) bool {
+// heldWindow reports the window a held thread has unpublished allocator or
+// region state in: windowRegion when any is inside a region transition,
+// otherwise windowAlloc when any is inside an allocator window.
+func heldWindow(count int) int {
+	found := windowNone
 	for index := 0; index < count; index++ {
 		slot := int(snapshotWord(index, 1))
-		if slot >= 0 && slot < tls.Slots && threads[slot].inWindow() {
-			return true
+		if slot >= 0 && slot < tls.Slots {
+			found = max(found, threads[slot].window())
 		}
 	}
-	return false
+	return found
 }
 
 // snapshotWord reads word of snapshot index.
@@ -429,6 +441,7 @@ func threadDiagnostics(d *Diagnostics) {
 	d.HeapLocks, d.HeapContended = heapLock.acquired.Load(), heapLock.contended.Load()
 	d.GCLocks, d.GCContended = gcLock.acquired.Load(), gcLock.contended.Load()
 	d.Suspensions, d.SuspendFailures = suspensions.Load(), suspendFailures.Load()
+	d.AllocWindowRetries, d.RegionWindowRetries = allocWindowRetries.Load(), regionWindowRetries.Load()
 	d.RendezvousLast, d.RendezvousMax, d.RendezvousTotal = lastRendezvous, maxRendezvous, totalRendezvous
 	d.PauseLast, d.PauseMax, d.PauseTotal = lastPause, maxPause, totalPause
 }

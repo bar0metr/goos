@@ -764,3 +764,7 @@ CA-0970	goos/userspace/cmd/init	cacheFence	process	owned	TestFilesystemFenceRequ
 CA-0971	goos/userspace/cmd/init	vfsRecovery	process	owned	TestIndependentRecoveryAfterBusyControlTimeout
 CA-0972	goos/userspace/cmd/init	vfsRecoveryRequests	process	lock	TestIndependentRecoveryAfterBusyControlTimeout
 CA-0973	goos/userspace/cmd/vfs	recoveryHandle	process	owned	TestControlHandoffDiscardsUnreadAttachmentsWithoutReplay
+CA-0990	goos/userspace/runtime/arena	allocWindowRetries	process	atomic	runtime/arena tests
+CA-0991	goos/userspace/runtime/arena	regionWindowRetries	process	atomic	TestWindowNamesRegionTransitionsBeforeAllocatorWindows
+CA-0992	goos/userspace/runtime/arena	holdSlot	process	atomic	threadprobe region-window
+CA-0993	goos/userspace/runtime/arena	holding	process	atomic	threadprobe region-window
