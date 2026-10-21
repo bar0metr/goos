@@ -100,12 +100,6 @@ func netIRQObject() (uint64, bool) {
 	return device.IRQObject(virtioNetLine)
 }
 
-// isNetIRQ reports whether an IRQ capability names the routed network line.
-func isNetIRQ(object uint64) bool {
-	expected, ok := netIRQObject()
-	return ok && object == expected
-}
-
 // installNetHandles gives PID 1 the network function's ports, line and DMA
 // domain at the fixed slots after the console handles. Without a function the
 // slots hold inert objects with no Transfer right, which is how PID 1 tells
