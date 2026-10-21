@@ -766,7 +766,7 @@ func TestDispatchThreadCalls(t *testing.T) {
 	if result := Dispatch(Request{Operation: OperationThreadJoin, Arg0: 9, Arg1: JoinPoll, Arg2: 0x6000}, handler); result.Action != ActionReturn {
 		t.Fatalf("a polling join %+v", result)
 	}
-	if result := Dispatch(Request{Operation: OperationThreadJoin, Arg0: 9, Arg1: 2}, handler); result.Status != StatusInvalidArgument {
+	if result := Dispatch(Request{Operation: OperationThreadJoin, Arg0: 9, Arg1: JoinClaim | JoinPoll}, handler); result.Status != StatusInvalidArgument {
 		t.Fatalf("unknown join flags %+v", result)
 	}
 	for _, capacity := range []uint64{0, MaxThreadSnapshots + 1} {

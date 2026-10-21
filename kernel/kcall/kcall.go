@@ -135,6 +135,17 @@ const (
 	ThreadInfoSize = uint64(16)
 	// JoinPoll makes ThreadJoin answer Timeout rather than wait.
 	JoinPoll = uint64(1)
+	// JoinClaim reserves a join for a goroutine and writes a nonzero token
+	// to the 8-byte result word, without blocking or collecting the code.
+	// JoinCollect polls a claimed join: the word supplies its token on input
+	// and receives the code on success. JoinRelease drops the claim using
+	// the token in the word. The token belongs to the process and target
+	// thread generation, not to the calling native thread, so a goroutine
+	// can migrate between claim, collect and release. These modes exclude
+	// legacy joins and each other, including after the target ends.
+	JoinClaim   = uint64(2)
+	JoinCollect = uint64(4)
+	JoinRelease = uint64(8)
 	// MaxPreemptTicks bounds the interval ThreadPreempt takes, in ticks of
 	// the processor's preemption timer.
 	MaxPreemptTicks = uint64(1000)
@@ -475,7 +486,7 @@ func Dispatch(request Request, handler Handler) Result {
 	case OperationThreadExit:
 		return Result{Status: handler.ThreadExit(request.Arg0), Action: ActionExit}
 	case OperationThreadJoin:
-		if request.Arg1&^JoinPoll != 0 {
+		if !ValidJoinFlags(request.Arg1) {
 			return Result{Status: StatusInvalidArgument}
 		}
 		status, blocked := handler.ThreadJoin(request.Arg0, request.Arg1, request.Arg2)
@@ -702,3 +713,13 @@ const (
 	LogReadRecordSize = 208
 	LogReadSize       = LogReadHeader + LogReadMax*LogReadRecordSize
 )
+
+// ValidJoinFlags admits one ThreadJoin mode. Claim, collect and release are
+// nonblocking modes; none may combine with the legacy poll bit.
+func ValidJoinFlags(flags uint64) bool {
+	switch flags {
+	case 0, JoinPoll, JoinClaim, JoinCollect, JoinRelease:
+		return true
+	}
+	return false
+}

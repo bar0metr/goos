@@ -27,3 +27,12 @@ func TestThreadEndInterestNamesNoHandleOrTask(t *testing.T) {
 		}
 	}
 }
+
+func TestJoinFlagsAreSeparateModes(t *testing.T) {
+	for flags := uint64(0); flags < 32; flags++ {
+		want := flags == 0 || flags == JoinPoll || flags == JoinClaim || flags == JoinCollect || flags == JoinRelease
+		if ValidJoinFlags(flags) != want {
+			t.Fatalf("join flags %d valid=%v want=%v", flags, ValidJoinFlags(flags), want)
+		}
+	}
+}

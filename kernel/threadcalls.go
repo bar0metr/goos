@@ -135,7 +135,39 @@ func (handler nativeCallHandler) ThreadJoin(thread uint64, flags uint64, address
 	if !vm.ValidateUserRange(address, 8) || !vm.CanCopyOut(handler.root, address, 8) {
 		return kcall.StatusInvalidArgument, false
 	}
-	code, status := group.Join(caller, sched.TaskID(thread), flags&kcall.JoinPoll == 0)
+	if !kcall.ValidJoinFlags(flags) {
+		return kcall.StatusInvalidArgument, false
+	}
+	target := sched.TaskID(thread)
+	var code uint64
+	var status nativethread.JoinStatus
+	switch flags {
+	case kcall.JoinClaim:
+		code, status = group.ClaimJoin(caller, target)
+		if status == nativethread.Waiting {
+			// The output range was validated before reserving the join.
+			binary.LittleEndian.PutUint64(local.threadCodeWire[:], code)
+			if !vm.CopyOut(handler.root, address, local.threadCodeWire[:]) {
+				group.ReleaseJoin(target, code)
+				return kcall.StatusInvalidArgument, false
+			}
+			return kcall.StatusOK, false
+		}
+	case kcall.JoinCollect, kcall.JoinRelease:
+		if !vm.CopyIn(handler.root, address, local.threadCodeWire[:]) {
+			return kcall.StatusInvalidArgument, false
+		}
+		token := binary.LittleEndian.Uint64(local.threadCodeWire[:])
+		if flags == kcall.JoinRelease {
+			if !group.ReleaseJoin(target, token) {
+				return kcall.StatusNotFound, false
+			}
+			return kcall.StatusOK, false
+		}
+		code, status = group.CollectJoin(target, token)
+	default:
+		code, status = group.Join(caller, target, flags == 0)
+	}
 	switch status {
 	case nativethread.Joined:
 		binary.LittleEndian.PutUint64(local.threadCodeWire[:], code)
@@ -144,7 +176,7 @@ func (handler nativeCallHandler) ThreadJoin(thread uint64, flags uint64, address
 		}
 		return kcall.StatusOK, false
 	case nativethread.Waiting:
-		if flags&kcall.JoinPoll != 0 {
+		if flags != 0 {
 			return kcall.StatusTimeout, false
 		}
 		return kcall.StatusOK, true
@@ -152,6 +184,8 @@ func (handler nativeCallHandler) ThreadJoin(thread uint64, flags uint64, address
 		return kcall.StatusAlreadyExists, false
 	case nativethread.Self:
 		return kcall.StatusInvalidArgument, false
+	case nativethread.Exhausted:
+		return kcall.StatusResourceExhausted, false
 	}
 	return kcall.StatusNotFound, false
 }
