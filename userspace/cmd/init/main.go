@@ -129,7 +129,8 @@ var (
 )
 
 // Each job waits on at most a stage and its launcher; each worker waits
-// on its control and either an image fill or its shell exec endpoint.
+// on its control and either an image fill or its shell exec endpoint. The
+// VFS control endpoint takes a slot only when one is left over.
 var _ [userwait.MaxObjects - (1 + len(sessions) + 2*len(execJobs) + len(serviceSources) + 2*remoteapi.MaxWorkers + 1)]byte
 
 //export userspaceMain
@@ -177,6 +178,8 @@ func userspaceMain() {
 		var interests [userwait.MaxObjects]userwait.Interest
 		count := 1
 		interests[0] = userwait.Interest{Handle: handle.ID(lifecycleHandle), Events: kcall.WaitReadable | kcall.WaitPeerClosed}
+		// The VFS asks for a filesystem replacement on its control endpoint.
+		controlUsable := pollFilesystemNotices()
 		var jobs, fills, launches [len(execJobs)]int
 		var execBits [len(sessions)]int
 		var sources [len(serviceSources)]int
@@ -233,6 +236,16 @@ func userspaceMain() {
 		if supervisionComplete {
 			count = remoteInterests(&interests, count, &remoteOwners, &remoteKinds, &remoteTokens)
 		}
+		remoteEnd := count
+		// Readable only: a VFS that has gone is seen through its exit. When
+		// every slot is taken, the wait is bounded instead.
+		controlUnwatched := false
+		if controlUsable && count < len(interests) {
+			interests[count] = userwait.Interest{Handle: handle.ID(vfsControlHandle), Events: kcall.WaitReadable}
+			count++
+		} else {
+			controlUnwatched = controlUsable
+		}
 		readyMask := uint64(1)
 		if lifecycleCount == 0 {
 			// A scheduled restart is a deadline rather than an event. While one
@@ -249,6 +262,9 @@ func userspaceMain() {
 			}
 			if remaining, pending := shutdownTimeout(); pending && remaining < timeout {
 				timeout = remaining
+			}
+			if controlUnwatched && filesystemNoticeInterval < timeout {
+				timeout = filesystemNoticeInterval
 			}
 			result, status := userwait.Any(&interests, count, timeout)
 			if status == kcall.StatusTimeout {
@@ -290,7 +306,7 @@ func userspaceMain() {
 				sourced = true
 			}
 		}
-		for bit := firstRemote; bit < count; bit++ {
+		for bit := firstRemote; bit < remoteEnd; bit++ {
 			if readyMask&(1<<bit) != 0 {
 				pollRemoteInterest(remoteOwners[bit-firstRemote], remoteKinds[bit-firstRemote], remoteTokens[bit-firstRemote])
 			}
@@ -315,6 +331,7 @@ func userspaceMain() {
 		if !valid || event.Operation != supervisor.LifecycleProcessExited {
 			continue
 		}
+		cacheFence.exited(event.Process)
 		if remoteExited(event.Process, event.Code) {
 			continue
 		}

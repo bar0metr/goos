@@ -7,6 +7,7 @@ import (
 	"goos/kernel/clock"
 	"goos/kernel/handle"
 	"goos/kernel/ipc"
+	"goos/kernel/kcall"
 	"goos/kernel/vfs"
 	blockproto "goos/userspace/block"
 	supervisor "goos/userspace/init"
@@ -28,6 +29,10 @@ const filesystemName = "fat32"
 // mounting takes a few exchanges.
 const attachDeadline = 20 * clock.TicksPerSecond
 
+// filesystemNoticeInterval bounds how long a replacement notice waits while
+// every wait slot of the main loop is taken by other work.
+const filesystemNoticeInterval = clock.TicksPerSecond
+
 var (
 	// filesystemClient is the VFS end of the channel to the filesystem service
 	// about to be launched, handed over once it runs.
@@ -35,9 +40,13 @@ var (
 	// filesystemStarted marks the first launch, which uses the block service's
 	// boot channel; every later launch renews both channels.
 	filesystemStarted bool
-	// filesystemProcessHandle is kept only by the validation build, to inject
-	// the fault that proves a crashed filesystem service is replaced.
+	// filesystemProcessHandle names the running filesystem service. PID 1
+	// ends it when the VFS reports it stalled with the file cache mapped;
+	// the validation build also kills it to prove a crash is recovered from.
 	filesystemProcessHandle handle.ID
+	// cacheFence decides whether an attach may state that no earlier
+	// filesystem service can still write the file cache.
+	cacheFence filesystemFence
 	// filesystemChecker is the one application temporarily holding the
 	// exclusive filesystem block slice.
 	filesystemChecker uint64
@@ -90,13 +99,14 @@ func renewFilesystemChannels(spec *supervisor.LaunchSpec) bool {
 
 // attachFilesystem hands the VFS its end of the channel to the filesystem
 // service that has just started, and waits for the VFS to mount its volume, so
-// the services started next find /state in place.
-func attachFilesystem() {
+// the services started next find /state in place. fenced states that every
+// earlier instance has exited; the VFS needs it to end a cache quarantine.
+func attachFilesystem(fenced bool) {
 	client := filesystemClient
 	filesystemClient = 0
 	filesystemAttached = false
 	correlation++
-	request, ok := vfs.SetFilesystemRequest(client, correlation)
+	request, ok := vfs.SetFilesystemRequest(vfs.FilesystemAttach{Client: client, Generation: cacheFence.attaching(), Fenced: fenced}, correlation)
 	if !ok {
 		sys.HandleClose(client)
 		syslog.Error("filesystem service not handed to the vfs")
@@ -116,6 +126,39 @@ func attachFilesystem() {
 	if filesystemStarted {
 		syslog.Info("filesystem service reattached")
 		mark("FAT32_RESTARTED_OK\n")
+	}
+}
+
+// pollFilesystemNotices takes the replacement notices the VFS sent on its
+// control endpoint, and reports whether that endpoint may be waited on.
+func pollFilesystemNotices() bool {
+	usable := filesystemRequests.PollControl(handle.ID(vfsControlHandle))
+	if generation, lost := filesystemRequests.FilesystemLost(); lost {
+		replaceFilesystem(generation)
+	}
+	return usable
+}
+
+// replaceFilesystem acts on the VFS's notice that the filesystem service of
+// an attachment left an exchange unanswered and may still write the file
+// cache. The service is ended rather than asked to stop: it may be stalled.
+// The main loop sees its exit before the supervisor starts it again, so the
+// replacement's attach can state the fence.
+func replaceFilesystem(generation uint64) {
+	switch cacheFence.lost(generation) {
+	case filesystemLostStop:
+		syslog.Warn("filesystem service stalled; replacing it")
+		mark("FAT32_STALL_REPLACING\n")
+		if filesystemProcessHandle == 0 || sys.ProcessKill(filesystemProcessHandle) != kcall.StatusOK {
+			// Its exit may already be on its way. If it is not, no fenced
+			// attach follows and the cache stays quarantined.
+			syslog.Warn("filesystem service not stopped")
+		}
+	case filesystemLostAwait:
+		syslog.Warn("filesystem service gone with the file cache quarantined")
+	case filesystemLostExhausted:
+		syslog.Error("filesystem cache stays quarantined", syslog.Str("reason", "recovery limit reached"))
+		mark("FILE_CACHE_RECOVERY_LIMIT\n")
 	}
 }
 
