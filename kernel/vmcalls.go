@@ -6,16 +6,19 @@ package main
 // calls that reserve, release, reprotect, discard, and describe regions.
 
 import (
+	"encoding/binary"
 	"sync/atomic"
 
 	"goos/internal/capability"
 	"goos/internal/logfmt"
+	"goos/internal/validation"
 	"goos/kernel/arch/amd64"
 	bootuefi "goos/kernel/boot/uefi"
 	"goos/kernel/executable"
 	"goos/kernel/handle"
 	"goos/kernel/kcall"
 	"goos/kernel/loader"
+	"goos/kernel/lock"
 	"goos/kernel/mm/region"
 	"goos/kernel/mm/vm"
 	"goos/kernel/process"
@@ -106,7 +109,34 @@ func resolveUserFaultEntry(root uint64, address uint64, errorCode uint64, rip ui
 		kind = faultInvalid
 	}
 	kernelLogUints(logfmt.Warn, userFaultReason(kind), "address", address, "rip", rip)
+	if validation.Enabled && kind == faultGuard {
+		reportGuardStack(root, address, space, stop)
+	}
 	return 0
+}
+
+// reportGuardStack logs the words just above a stack guard fault that look
+// like addresses in a native image's code. A runaway recursion leaves its
+// return addresses there, which names the function that recursed.
+func reportGuardStack(root, address uint64, space *lock.RW, stop *uint64) {
+	local := thisCPU()
+	if !space.RLockUnless(stop) {
+		return
+	}
+	copied := vm.CopyIn(root, address+8, local.guardStack[:])
+	space.RUnlock()
+	if !copied {
+		return
+	}
+	reported := 0
+	for offset := 0; offset+8 <= len(local.guardStack) && reported < 12; offset += 8 {
+		word := binary.LittleEndian.Uint64(local.guardStack[offset:])
+		if word < 0x40000000 || word >= 0x41000000 {
+			continue
+		}
+		kernelLogUints(logfmt.Warn, "guard stack word", "offset", uint64(offset+8), "value", word)
+		reported++
+	}
 }
 
 func userFaultReason(kind uint64) string {

@@ -163,6 +163,9 @@ type cpuScratch struct {
 	// the native operation, 'l' and the Linux number, or zero.
 	callKind   byte
 	callNumber uint64
+	// guardStack holds the user words a validation build reports after a
+	// stack guard fault.
+	guardStack [512]byte
 	// linuxReleased collects descriptions the Linux tables let go of, for
 	// release once the tables are no longer held.
 	linuxReleased linuxcompat.Released
