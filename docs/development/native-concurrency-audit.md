@@ -94,8 +94,10 @@ The VFS driver owns admission, namespace state, replies and session generations.
 Workers receive read plans and request-owned targets through channels. One
 persistent lane owns the filesystem transport for a whole backend read; serial
 barriers wait for preceding retirement before using that state. Driver helper
-tests cover policy and bookkeeping. Native IPC overlap, failure fences and
-resource cleanup still need integration evidence.
+tests cover policy and bookkeeping. A quarantined cache is reattached only
+behind PID 1's exit fence; both drivers apply offline state and attach at the
+same owner barriers. Native IPC overlap, failure fences and resource cleanup
+still need integration evidence.
 
 ## Rules for libraries
 
@@ -250,7 +252,12 @@ hands it a fresh session over its existing exec channel. It does not request
 new authority or reconnect on its own.
 
 PID 1's seven VFS control exchanges also match correlation and reject reply
-handles. Their result separates `sent` from `completed`: after an unsent
+handles. A filesystem replacement notice the VFS sent before the awaited
+reply is kept for PID 1 and does not fail the exchange; any other
+notification still does, and a notice does not extend the budget. Between
+exchanges PID 1 drains the endpoint without waiting through the same object,
+keeping notices and discarding stray messages, and never reads a quarantined
+endpoint. Their result separates `sent` from `completed`: after an unsent
 request the caller closes its attachments; after a successful send VFS owns
 them, even if its reply never arrives. This applies to AddSession authority,
 mount/unmount, scope installation, publication and sync. A valid VFS error
@@ -269,7 +276,9 @@ Recovery needs existing supervisor policy: a real VFS restart renews PID 1's
 control channel and sends clients new sessions. A timeout alone does not
 trigger a restart. If VFS stays alive but withholds a reply, that endpoint
 remains unavailable until a genuine restart/handoff. No replacement-grant or
-automatic reconnect protocol was added. Other supervisor/exec/config/network
+automatic reconnect protocol was added for these endpoints. The VFS's own
+filesystem service is different: after a quarantine PID 1 replaces it behind
+an exit fence (ADR 0204), and the VFS refuses any attach without that fence. Other supervisor/exec/config/network
 control protocols and the VFS service itself remain outside this review.
 
 Tests exercise these shared transaction methods with deterministic clocks

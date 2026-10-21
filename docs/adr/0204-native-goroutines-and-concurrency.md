@@ -200,11 +200,26 @@ poller's own wake interest.
 
 Persistent reads serialize the whole Remote operation, including cache use.
 Workers publish transport failure; the owner detaches at a drained boundary.
-An unanswered accepted exchange quarantines the shared cache. The VFS refuses
-reattach and executable-slot writes against that cache; local reads continue.
-Automatic recovery needs a supervisor fence proving the old writer has exited
-or a coordinated fresh cache generation. Closing an endpoint alone is not that
-fence. This recovery protocol remains unfinished.
+An unanswered accepted exchange quarantines the shared cache. The VFS detaches
+the filesystem service, refuses executable-slot writes against that cache and
+sends PID 1 a control notification naming the attachment generation; local
+reads continue. Closing an endpoint does not stop a stalled service that still
+maps the cache, so PID 1 kills that instance and waits for the kernel to report
+its exit. The kernel reports it after the last task of the process has ended.
+The supervisor restarts the service only after that exit, and PID 1 then sends
+SetFilesystem with a new generation and a fence flag stating that every earlier
+instance has exited. While the cache is quarantined the VFS accepts only a
+fenced attach; open files are reacquired as after any restart, and the
+page index starts empty, so nothing the old writer left in the cache is served.
+A notice for a superseded generation is ignored. PID 1 makes at most
+`supervisor.MaxRestarts` such replacements per boot, because each follows a
+six-second request deadline and the supervisor's restart window alone would
+not stop a service that stalls every time. Past that bound no attach is
+fenced and the cache stays quarantined until the VFS itself is replaced.
+
+The cache object is not replaced. The kernel copies executable pages from the
+last slot of the boot cache object, so a fresh cache generation would need the
+kernel to follow it. The exit fence makes reuse safe without one.
 
 Host tests demonstrate actual RAMFS read overlap and check ordering, retirement
 and the serial batch's quarantine fence. `make test-vfs-goroutine-acceptance`
