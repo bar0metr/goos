@@ -326,6 +326,16 @@ func currentSlot() int {
 	return int(slot)
 }
 
+// ProcessorActivity reads, without a lock, the task slot processor cpu runs
+// and whether that task is inside a system call or fault. A stuck-lock
+// report uses it: the lock the reporter waits for may be the scheduler's.
+func ProcessorActivity(cpu int) (slot uint64, inKernel bool) {
+	if cpu < 0 || cpu >= MaxCPUs {
+		return 0, false
+	}
+	return atomic.LoadUint64(&cpuData[cpu][cpuCurrent]), atomic.LoadUint64(&cpuData[cpu][cpuKernelRoot]) != 0
+}
+
 // CurrentTask returns the task the calling processor runs, or zero.
 func CurrentTask() sched.TaskID {
 	slot := currentSlot()

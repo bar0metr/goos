@@ -147,6 +147,15 @@ var (
 	heldCount [MaxCPUs][levelCount]uint8
 )
 
+// HeldLevelsOf returns the levels processor cpu holds locks of, as
+// HeldLevels does for the caller, for a stuck-lock report.
+func HeldLevelsOf(cpu int) uint32 {
+	if cpu < 0 || cpu >= MaxCPUs {
+		return 0
+	}
+	return held[cpu].Load()
+}
+
 // Stats is the contention of one level since boot.
 type Stats struct {
 	// Acquired counts every acquisition.

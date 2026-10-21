@@ -256,6 +256,53 @@ func reportStuckLock(level lock.Level, holder uint32) {
 	}
 	console.WriteString("\n")
 	if validation.Enabled {
+		reportProcessorLocks()
 		panicSerial("lock watchdog: a spin outlasted the watchdog")
+	}
+}
+
+// reportProcessorLocks prints, for each started processor, the task slot it
+// runs, whether that task is in the kernel, its last call, and the lock
+// levels it holds. A reader of an RW lock records no owner, so this is how a
+// report names the processors that keep a writer waiting. The fields are
+// read without locks while the processors run on.
+func reportProcessorLocks() {
+	console := kernelconsole.New()
+	for cpu, local := range cpuScratches {
+		if local == nil {
+			continue
+		}
+		slot, inKernel := amd64.ProcessorActivity(cpu)
+		console.WriteString("LOCK_CPU cpu=")
+		console.WriteUint(uint64(cpu))
+		console.WriteString(" slot=")
+		console.WriteUint(slot)
+		console.WriteString(" kernel=")
+		if inKernel {
+			console.WriteString("1")
+		} else {
+			console.WriteString("0")
+		}
+		if local.callKind != 0 {
+			console.WriteString(" call=")
+			console.WriteByte(local.callKind)
+			console.WriteUint(local.callNumber)
+		}
+		console.WriteString(" held=")
+		levels := lock.HeldLevelsOf(cpu)
+		if levels == 0 {
+			console.WriteString("none")
+		}
+		for level, first := lock.Level(1), true; int(level) < lock.Levels; level++ {
+			if levels&(uint32(1)<<level) == 0 {
+				continue
+			}
+			if !first {
+				console.WriteString(",")
+			}
+			console.WriteString(level.String())
+			first = false
+		}
+		console.WriteString("\n")
 	}
 }
